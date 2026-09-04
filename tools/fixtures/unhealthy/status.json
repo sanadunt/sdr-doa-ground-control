@@ -1,0 +1,27 @@
+{
+  "daq_num_dropped_frames": 0,
+  "daq_ok": false,
+  "daq_status": {
+    "adc_overdrive": false,
+    "bandwidth_hz": 2400000,
+    "buffer_size_ms": 1.0,
+    "data_frame_index": 42,
+    "decimated_bandwidth_hz": 2400000,
+    "frame_sync": false,
+    "iq_sync": false,
+    "noise_source_enabled": false,
+    "sample_delay_sync": false,
+    "sampling_frequency_hz": 2400000
+  },
+  "gps_status": "Disabled",
+  "hardware_id": "fixture-hw",
+  "host_os_architecture": "aarch64",
+  "host_os_type": "Linux",
+  "host_os_version": "fixture",
+  "software_git_short_hash": "fixture",
+  "software_version": "fixture",
+  "station_id": "FIXTURE",
+  "timestamp_ms": 1000000,
+  "unit_id": 0,
+  "uptime_ms": 1234
+}

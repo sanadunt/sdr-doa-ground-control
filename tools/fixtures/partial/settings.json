@@ -1,0 +1,17 @@
+{
+  "active_vfos": 1,
+  "ant_arrangement": "UCA",
+  "ant_spacing_meters": 0.21,
+  "center_freq": 415.7882,
+  "data_interface": "shmem",
+  "doa_decorrelation_method": "Off",
+  "doa_method": "MUSIC",
+  "en_doa": true,
+  "en_remote_control": false,
+  "fixture_secret_token": "[FIXTURE_REDACTED]",
+  "gps_fixed_heading": true,
+  "location_source": "Static",
+  "output_vfo": 0,
+  "uniform_gain": 15.7,
+  "vfo_mode": "Standard"
+}

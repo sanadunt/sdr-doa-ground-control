@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.DS_Store
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.crt
+*.log
+dist/
+build/
+.venv/
+venv/
+
+# Local Ground Console/edge state and uploaded branding
+.config/
+.sdr-doa-edge/
+secrets/
+branding.json
+console.json

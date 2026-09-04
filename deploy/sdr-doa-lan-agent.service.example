@@ -1,0 +1,31 @@
+[Unit]
+# EXAMPLE ONLY: do not enable until broker auth/ACL/TLS and independent review
+# pass. This unit intentionally has no --enable-config and disables DoA.
+Description=SDR-DoA LAN Edge Agent (health/state/config-reported only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=doasdr
+WorkingDirectory=/home/doasdr/doasdr
+ExecStart=/usr/bin/python3 /home/doasdr/doasdr/sdr_doa_lan_agent.py \
+  --base-url http://127.0.0.1:8081 \
+  --clock-source local \
+  --mqtt-host 192.168.100.173 \
+  --mqtt-port 18885 \
+  --publish \
+  --health-interval 1 \
+  --doa-rate 0 \
+  --state-interval 30 \
+  --poll-interval 0.1
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/home/doasdr/doasdr/.sdr-doa-edge
+
+[Install]
+WantedBy=multi-user.target
