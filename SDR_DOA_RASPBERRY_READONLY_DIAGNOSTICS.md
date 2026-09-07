@@ -39,39 +39,83 @@ isi penuh settings.json
 connection string
 ```
 
-Jika suatu output berisi nilai sensitif, ganti nilainya dengan `[REDACTED]` sebelum dibagikan.
+Jika suatu output berisi nilai sensitif, ganti nilainya dengan `[REDACTED]` sebelum dibagikan. Ini termasuk username, hostname, alamat IP, path yang memuat username, serial USB, `hardware_id`, `station_id`, MAC address, dan identifier station/node lainnya. Untuk membandingkan device antar-sample, gunakan label lokal non-reversibel; jangan membagikan nilai asli atau salt pembentuk label.
 
 ## 2. Masuk ke Raspberry
 
-Hostname yang digunakan pada pemeriksaan sebelumnya:
+Isi target hanya di shell lokal. Nilai ini sengaja tidak ditulis di dokumen dan tidak boleh dimasukkan ke laporan:
 
 ```bash
-ssh -o ConnectTimeout=8 -o ConnectionAttempts=1 doasdr@doasdr.local
+read -r -p 'SSH user (local only): ' SDR_DOA_SSH_USER
+read -r -p 'SSH host or mDNS name (local only): ' SDR_DOA_HOST
+read -r -p 'Raspberry LAN address (local only): ' SDR_DOA_LAN_ADDR
+export SDR_DOA_SSH_USER SDR_DOA_HOST SDR_DOA_LAN_ADDR
+```
+
+Masuk melalui hostname/mDNS:
+
+```bash
+ssh -o ConnectTimeout=8 -o ConnectionAttempts=1 \
+  "${SDR_DOA_SSH_USER}@${SDR_DOA_HOST}"
 ```
 
 Fallback menggunakan alamat LAN:
 
 ```bash
-ssh -o ConnectTimeout=8 -o ConnectionAttempts=1 doasdr@192.168.100.100
+ssh -o ConnectTimeout=8 -o ConnectionAttempts=1 \
+  "${SDR_DOA_SSH_USER}@${SDR_DOA_LAN_ADDR}"
 ```
 
 Password SSH atau sudo hanya dimasukkan langsung pada Terminal. Jangan menaruh password di command line atau mengirimkannya melalui chat.
 
 Semua command berikut dijalankan di Raspberry, kecuali bagian yang diberi keterangan **dari Ground**.
 
+Setelah berhasil masuk ke Raspberry, isi path dan target pemeriksaan hanya pada shell remote. Jangan menyalin nilainya ke laporan:
+
+```bash
+read -r -p 'Data Out share path (local only): ' SDR_DOA_SHARE
+read -r -p 'DAQ firmware path (local only): ' SDR_DOA_FIRMWARE
+read -r -p 'DAQ log directory (local only): ' SDR_DOA_LOG_DIR
+read -r -p 'DAQ control directory (local only): ' SDR_DOA_CONTROL_DIR
+read -r -p 'Read-only settings.json path (local only): ' SDR_DOA_SETTINGS_PATH
+read -r -p 'Node hostname/address for local-only DNS check: ' SDR_DOA_NODE_TARGET
+read -r -p 'Node LAN address for local-only route check: ' SDR_DOA_NODE_ADDR
+export SDR_DOA_SHARE SDR_DOA_FIRMWARE SDR_DOA_LOG_DIR
+export SDR_DOA_CONTROL_DIR SDR_DOA_SETTINGS_PATH
+export SDR_DOA_NODE_TARGET SDR_DOA_NODE_ADDR
+```
+
+Pastikan semua variabel terisi sebelum menjalankan blok berikut:
+
+```bash
+: "${SDR_DOA_SHARE:?Set the private Data Out share path first}"
+: "${SDR_DOA_FIRMWARE:?Set the private DAQ firmware path first}"
+: "${SDR_DOA_LOG_DIR:?Set the private DAQ log directory first}"
+: "${SDR_DOA_CONTROL_DIR:?Set the private DAQ control directory first}"
+: "${SDR_DOA_SETTINGS_PATH:?Set the private settings.json path first}"
+: "${SDR_DOA_NODE_TARGET:?Set the private node hostname/address first}"
+: "${SDR_DOA_NODE_ADDR:?Set the private node LAN address first}"
+```
+
 ## 3. Identitas dan kesehatan dasar board
 
 ```bash
-date -Is
-hostname
-id -un
-uname -a
+export SDR_DOA_ID_SALT="${SDR_DOA_ID_SALT:-$(python3 -c 'import secrets; print(secrets.token_hex(16))')}"
+printf 'observed_at: '; date -Is
+printf 'node_label: label-'
+printf '%s:%s' "$SDR_DOA_ID_SALT" "$(hostname)" | sha256sum | cut -c1-16
+printf 'user_label: label-'
+printf '%s:%s' "$SDR_DOA_ID_SALT" "$(id -un)" | sha256sum | cut -c1-16
+printf '\n'
+uname -srm
 cat /etc/os-release
 uptime
 free -h
 df -hT
 lsblk -o NAME,MODEL,SIZE,TYPE,FSTYPE,MOUNTPOINTS
 ```
+
+`node_label` dan `user_label` hanya untuk korelasi lokal pada sesi ini. Jangan membagikan nilai asli, `SDR_DOA_ID_SALT`, atau output mentah yang dapat mengungkapkannya.
 
 Model board, arsitektur, temperatur, dan throttling:
 
@@ -123,34 +167,43 @@ Konfigurasi yang diharapkan pada node ini adalah lima RTL2838. Namun jumlah lima
 Detail setiap RTL-SDR dari sysfs:
 
 ```bash
+usb_index=0
+
 for d in /sys/bus/usb/devices/*; do
     [ -f "$d/idVendor" ] || continue
     [ "$(cat "$d/idVendor" 2>/dev/null)" = "0bda" ] || continue
     [ "$(cat "$d/idProduct" 2>/dev/null)" = "2838" ] || continue
 
-    printf '\n=== %s ===\n' "$d"
+    usb_index=$((usb_index + 1))
+    printf '\n=== rtl-sdr-%02d ===\n' "$usb_index"
     for f in idVendor idProduct manufacturer product serial busnum devnum speed authorized; do
         if [ -r "$d/$f" ]; then
-            printf '%-14s: %s\n' "$f" "$(tr -d '\0' < "$d/$f")"
+            if [ "$f" = serial ]; then
+                printf '%-14s: [REDACTED]\n' "$f"
+            else
+                printf '%-14s: %s\n' "$f" "$(tr -d '\0' < "$d/$f")"
+            fi
         fi
     done
     printf 'driver         : '
-    readlink -f "$d/driver" 2>/dev/null || true
+    readlink -f "$d/driver" 2>/dev/null | xargs -r basename || true
 done
 ```
+
+Serial hanya ditampilkan sebagai label non-reversibel untuk korelasi lokal. Jangan membagikan serial asli, `usb_label_salt`, path sysfs lengkap, atau output mentah dari blok ini.
 
 Yang perlu dibandingkan antar-pengujian:
 
 ```text
 jumlah device
-serial dongle
-bus/path USB
+label serial non-reversibel
+kelas topology USB (tanpa path mentah)
 speed
 authorized
 perubahan topology
 ```
 
-Pada pemeriksaan sebelumnya, serial yang terlihat adalah `1000` sampai `1004`. Gunakan hasil aktual dari node sebagai sumber kebenaran, bukan daftar di dokumen ini.
+Gunakan hasil aktual dari node sebagai sumber kebenaran; dokumen ini tidak memuat contoh serial atau identifier perangkat tertentu.
 
 ## 5. Riwayat disconnect, reset, dan error USB
 
@@ -294,8 +347,8 @@ for pid in $(pgrep -f 'rtl_daq.out|rebuffer.out|decimate.out|delay_sync.py|hw_co
     [ -r "/proc/$pid/status" ] || continue
     printf '\n=== PID %s ===\n' "$pid"
     grep -E '^(Name|State|PPid|Threads):' "/proc/$pid/status"
-    printf 'cwd: '
-    readlink -f "/proc/$pid/cwd"
+    printf 'cwd_basename: '
+    readlink -f "/proc/$pid/cwd" 2>/dev/null | xargs -r basename || true
 done
 ```
 
@@ -350,8 +403,8 @@ Port yang perlu diamati:
 ip -br link
 ip -br addr
 ip route
-getent hosts doasdr.local
-getent hosts doasdr
+getent hosts "$SDR_DOA_NODE_TARGET"
+getent hosts "$SDR_DOA_NODE_ADDR"
 ```
 
 Tes endpoint dari Raspberry sendiri:
@@ -378,8 +431,12 @@ done
 Dari Ground, endpoint LAN dapat dibaca dengan:
 
 ```bash
+# Run this block in a Ground shell, not inside the Raspberry SSH session.
+read -r -p 'Raspberry LAN address (Ground shell only): ' SDR_DOA_GROUND_ADDR
+export SDR_DOA_GROUND_ADDR
+
 curl -fsS --max-time 5 \
-  http://192.168.100.100:8081/status.json
+  "http://${SDR_DOA_GROUND_ADDR}:8081/status.json"
 ```
 
 Semua request dalam bagian ini adalah GET/read-only.
@@ -389,9 +446,10 @@ Semua request dalam bagian ini adalah GET/read-only.
 ```bash
 python3 - <<'PY'
 import json
+import os
 from pathlib import Path
 
-p = Path('/home/doasdr/doasdr/krakensdr_doa/_share/status.json')
+p = Path(os.environ['SDR_DOA_SHARE']) / 'status.json'
 data = json.loads(p.read_text())
 daq_status = data.get('daq_status')
 if not isinstance(daq_status, dict):
@@ -402,7 +460,6 @@ for key in (
     'daq_ok',
     'daq_status',
     'daq_num_dropped_frames',
-    'hardware_id',
     'software_version',
     'software_git_short_hash',
     'gps_status',
@@ -418,6 +475,10 @@ for key in (
     'sampling_frequency_hz',
 ):
     print(f'daq_status.{key}: {daq_status.get(key)}')
+
+for key in ('hardware_id', 'station_id'):
+    if key in data:
+        print(f'{key}: [PRESENT; VALUE REDACTED]')
 PY
 ```
 
@@ -447,7 +508,7 @@ frame index berhenti
 ## 12. Ukuran, mtime, dan isi ringkas output
 
 ```bash
-SHARE=/home/doasdr/doasdr/krakensdr_doa/_share
+SHARE="$SDR_DOA_SHARE"
 
 stat -c '%y size=%s %n' \
   "$SHARE/status.json" \
@@ -464,10 +525,11 @@ Parsing ringkas CSV/XML:
 
 ```bash
 python3 - <<'PY'
+import os
 import re
 from pathlib import Path
 
-share = Path('/home/doasdr/doasdr/krakensdr_doa/_share')
+share = Path(os.environ['SDR_DOA_SHARE'])
 csv_text = (share / 'DOA_value.html').read_text(errors='replace').strip()
 xml_text = (share / 'doa.xml').read_text(errors='replace')
 
@@ -499,11 +561,12 @@ Command ini hanya membaca file lokal yang sudah dibuat oleh Kraken:
 ```bash
 python3 - <<'PY'
 import json
+import os
 import re
 import time
 from pathlib import Path
 
-share = Path('/home/doasdr/doasdr/krakensdr_doa/_share')
+share = Path(os.environ['SDR_DOA_SHARE'])
 status_path = share / 'status.json'
 csv_path = share / 'DOA_value.html'
 xml_path = share / 'doa.xml'
@@ -586,16 +649,16 @@ sudo journalctl -k --since "2 hours ago" \
 Metadata file log DAQ:
 
 ```bash
-cd /home/doasdr/doasdr/heimdall_daq_fw/Firmware/_logs
+cd "$SDR_DOA_LOG_DIR"
 find . -maxdepth 1 -type f \
-  -printf '%TY-%Tm-%Td %TH:%TM:%TS size=%s %p\n' \
+  -printf '%TY-%Tm-%Td %TH:%TM:%TS size=%s %f\n' \
   | sort
 ```
 
 Ringkasan error:
 
 ```bash
-cd /home/doasdr/doasdr/heimdall_daq_fw/Firmware/_logs
+cd "$SDR_DOA_LOG_DIR"
 
 for f in *.log; do
     [ -f "$f" ] || continue
@@ -638,16 +701,16 @@ find /dev/shm -maxdepth 1 -type f \
   -printf '%M %u:%g size=%s %TY-%Tm-%Td %TH:%TM:%TS %p\n' \
   | sort
 
-find /home/doasdr/doasdr/heimdall_daq_fw/Firmware/_data_control \
+find "$SDR_DOA_CONTROL_DIR" \
   -maxdepth 1 \
-  -printf '%M %u:%g size=%s %TY-%Tm-%Td %TH:%TM:%TS %p\n' \
+  -printf '%M %u:%g size=%s %TY-%Tm-%Td %TH:%TM:%TS %f\n' \
   | sort
 ```
 
 ## 15. Pemeriksaan konfigurasi tanpa menulis
 
 ```bash
-cd /home/doasdr/doasdr/heimdall_daq_fw/Firmware
+cd "$SDR_DOA_FIRMWARE"
 
 grep -nE 'out_data_iface_type|shmem|eth|5000|5001|sample|buffer' \
   daq_chain_config.ini
@@ -658,9 +721,10 @@ Baca field settings yang relevan saja:
 ```bash
 python3 - <<'PY'
 import json
+import os
 from pathlib import Path
 
-p = Path('/home/doasdr/doasdr/krakensdr_doa/_share/settings.json')
+p = Path(os.environ['SDR_DOA_SETTINGS_PATH'])
 data = json.loads(p.read_text())
 
 for key in (
@@ -674,9 +738,11 @@ for key in (
     'active_vfos',
     'output_vfo',
     'en_doa',
-    'station_id',
 ):
     print(f'{key}={data.get(key)!r}')
+
+if 'station_id' in data:
+    print('station_id=[PRESENT; VALUE REDACTED]')
 PY
 ```
 
@@ -687,16 +753,20 @@ Jangan membagikan seluruh `settings.json`.
 Dari Mac/Ground, cek koneksi dan endpoint tanpa POST:
 
 ```bash
-ping -c 4 -W 2 192.168.100.100
+# Run this block in a Ground shell, not inside the Raspberry SSH session.
+read -r -p 'Raspberry LAN address (Ground shell only): ' SDR_DOA_GROUND_ADDR
+export SDR_DOA_GROUND_ADDR
+
+ping -c 4 -W 2 "$SDR_DOA_GROUND_ADDR"
 
 curl -fsS --max-time 5 \
-  http://192.168.100.100:8081/status.json
+  "http://${SDR_DOA_GROUND_ADDR}:8081/status.json"
 
 for path in /DOA_value.html /doa.xml; do
     printf '\n=== %s ===\n' "$path"
     curl -sS --max-time 5 \
       -w '\nHTTP=%{http_code} BYTES=%{size_download}\n' \
-      "http://192.168.100.100:8081$path" \
+      "http://${SDR_DOA_GROUND_ADDR}:8081$path" \
       | sed -n '1,4p'
 done
 ```
