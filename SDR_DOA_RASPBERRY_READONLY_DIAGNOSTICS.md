@@ -46,7 +46,7 @@ Jika suatu output berisi nilai sensitif, ganti nilainya dengan `[REDACTED]` sebe
 Hostname yang digunakan pada pemeriksaan sebelumnya:
 
 ```bash
-ssh -o ConnectTimeout=8 -o ConnectionAttempts=1 doasdr.local
+ssh -o ConnectTimeout=8 -o ConnectionAttempts=1 doasdr@doasdr.local
 ```
 
 Fallback menggunakan alamat LAN:
@@ -393,6 +393,9 @@ from pathlib import Path
 
 p = Path('/home/doasdr/doasdr/krakensdr_doa/_share/status.json')
 data = json.loads(p.read_text())
+daq_status = data.get('daq_status')
+if not isinstance(daq_status, dict):
+    daq_status = {}
 
 for key in (
     'timestamp_ms',
@@ -405,6 +408,16 @@ for key in (
     'gps_status',
 ):
     print(f'{key}: {data.get(key)}')
+
+for key in (
+    'data_frame_index',
+    'frame_sync',
+    'sample_delay_sync',
+    'iq_sync',
+    'adc_overdrive',
+    'sampling_frequency_hz',
+):
+    print(f'daq_status.{key}: {daq_status.get(key)}')
 PY
 ```
 
@@ -499,24 +512,39 @@ def xml_field(text, name):
     match = re.search(rf'<{name}>(.*?)</{name}>', text)
     return match.group(1) if match else None
 
+def mtime_ns(path):
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
+
 for sample in range(1, 4):
     status = json.loads(status_path.read_text())
     csv_text = csv_path.read_text(errors='replace').strip()
     xml_text = xml_path.read_text(errors='replace')
     parts = [x.strip() for x in csv_text.split(',')] if csv_text else []
+    daq_status = status.get('daq_status')
+    if not isinstance(daq_status, dict):
+        daq_status = {}
 
     print({
         'sample': sample,
         'status_timestamp_ms': status.get('timestamp_ms'),
         'daq_ok': status.get('daq_ok'),
-        'daq_status': status.get('daq_status'),
+        'data_frame_index': daq_status.get('data_frame_index'),
+        'frame_sync': daq_status.get('frame_sync'),
+        'sample_delay_sync': daq_status.get('sample_delay_sync'),
+        'iq_sync': daq_status.get('iq_sync'),
         'dropped_frames': status.get('daq_num_dropped_frames'),
+        'status_mtime_ns': mtime_ns(status_path),
         'csv_bytes': len(csv_text.encode()),
         'csv_timestamp_ms': parts[0] if len(parts) > 0 else None,
         'csv_doa_deg': parts[1] if len(parts) > 1 else None,
         'csv_angular_bins': len(parts[17:]) if len(parts) >= 17 else 0,
+        'csv_mtime_ns': mtime_ns(csv_path),
         'xml_time': xml_field(xml_text, 'TIME'),
         'xml_doa_deg': xml_field(xml_text, 'DOA'),
+        'xml_mtime_ns': mtime_ns(xml_path),
     })
 
     if sample < 3:
@@ -720,7 +748,9 @@ CSV/XML size dan timestamp
 error group
 ```
 
-## 19. Prosedur operasional sementara
+## 19. Prosedur operasional sementara — di luar scope read-only
+
+Bagian ini **bukan prosedur read-only**. Menghubungkan perangkat secara fisik dan menjalankan service dapat mengubah runtime. Lakukan hanya dalam maintenance window dengan persetujuan operator yang terpisah. Jangan mengeksekusi langkah-langkah ini hanya karena panduan ini sedang digunakan untuk diagnosis read-only.
 
 Sebelum supervisor otomatis tersedia:
 
