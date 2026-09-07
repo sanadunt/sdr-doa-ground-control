@@ -15,6 +15,8 @@ systemctl restart/stop/start sdr-doa.service
 systemctl restart/stop/start t900-ppp.service
 daq_stop.sh
 sdr_doa_start.sh
+sdr_doa_stop.sh
+project-specific stop/kill wrappers
 kill, pkill, killall
 usbreset
 uhubctl
@@ -43,28 +45,7 @@ Jika suatu output berisi nilai sensitif, ganti nilainya dengan `[REDACTED]` sebe
 
 ## 2. Masuk ke Raspberry
 
-Isi target hanya di shell lokal. Nilai ini sengaja tidak ditulis di dokumen dan tidak boleh dimasukkan ke laporan:
-
-```bash
-read -r -p 'SSH user (local only): ' SDR_DOA_SSH_USER
-read -r -p 'SSH host or mDNS name (local only): ' SDR_DOA_HOST
-read -r -p 'Raspberry LAN address (local only): ' SDR_DOA_LAN_ADDR
-export SDR_DOA_SSH_USER SDR_DOA_HOST SDR_DOA_LAN_ADDR
-```
-
-Masuk melalui hostname/mDNS:
-
-```bash
-ssh -o ConnectTimeout=8 -o ConnectionAttempts=1 \
-  "${SDR_DOA_SSH_USER}@${SDR_DOA_HOST}"
-```
-
-Fallback menggunakan alamat LAN:
-
-```bash
-ssh -o ConnectTimeout=8 -o ConnectionAttempts=1 \
-  "${SDR_DOA_SSH_USER}@${SDR_DOA_LAN_ADDR}"
-```
+Akses SSH terkontrol adalah prasyarat operator, bukan langkah diagnostik yang dijalankan oleh panduan ini. Dokumen ini sengaja tidak menyertakan command untuk membuka shell interaktif atau maintenance shell. Gunakan metode akses yang sudah disetujui; setelah sesi read-only tersedia, jalankan blok diagnostik berikut di Raspberry.
 
 Password SSH atau sudo hanya dimasukkan langsung pada Terminal. Jangan menaruh password di command line atau mengirimkannya melalui chat.
 
@@ -190,13 +171,13 @@ for d in /sys/bus/usb/devices/*; do
 done
 ```
 
-Serial hanya ditampilkan sebagai label non-reversibel untuk korelasi lokal. Jangan membagikan serial asli, `usb_label_salt`, path sysfs lengkap, atau output mentah dari blok ini.
+Serial selalu ditampilkan sebagai `[REDACTED]` dan tidak digunakan untuk korelasi antar-pengujian. Jangan membagikan serial asli, path sysfs lengkap, atau output mentah dari blok ini.
 
 Yang perlu dibandingkan antar-pengujian:
 
 ```text
 jumlah device
-label serial non-reversibel
+status serial: [REDACTED] (tanpa nilai mentah)
 kelas topology USB (tanpa path mentah)
 speed
 authorized
@@ -439,7 +420,7 @@ curl -fsS --max-time 5 \
   "http://${SDR_DOA_GROUND_ADDR}:8081/status.json"
 ```
 
-Semua request dalam bagian ini adalah GET/read-only.
+Semua request dalam bagian ini adalah GET/HEAD/read-only.
 
 ## 11. Status DAQ aktual
 
@@ -795,7 +776,7 @@ Untuk satu laporan diagnosis, kumpulkan hasil ringkas berikut:
 ```text
 1. lsusb -t
 2. lsusb -d 0bda:2838
-3. detail sysfs serial/path/speed/authorized
+3. detail sysfs ringkas: serial=[REDACTED], topology class/path disingkat, speed/authorized
 4. systemctl show sdr-doa.service ...
 5. status.json yang sudah diringkas
 6. polling tiga sample
@@ -809,8 +790,10 @@ Laporan sebaiknya mencatat:
 
 ```text
 waktu dan timezone
-hostname
-jumlah USB dan serial
+hostname atau label node: [REDACTED] / non-reversible label
+jumlah USB
+serial: [REDACTED] saja; jangan nilai mentah
+sysfs path: redacted atau topology class saja; jangan path mentah
 daq_ok
 daq_status
 frame index
