@@ -757,7 +757,8 @@ Dari Mac/Ground, cek koneksi dan endpoint tanpa POST:
 read -r -p 'Raspberry LAN address (Ground shell only): ' SDR_DOA_GROUND_ADDR
 export SDR_DOA_GROUND_ADDR
 
-ping -c 4 -W 2 "$SDR_DOA_GROUND_ADDR"
+# macOS: -W is milliseconds; use 2000 for a 2-second reply wait.
+ping -c 4 -W 2000 "$SDR_DOA_GROUND_ADDR"
 
 curl -fsS --max-time 5 \
   "http://${SDR_DOA_GROUND_ADDR}:8081/status.json"
