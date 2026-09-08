@@ -838,8 +838,7 @@ function drawPolar(values, angle, fresh, figType='Polar', compassOffset=0) {
     ctx.fillStyle=subtle;
     ctx.font='9px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
     const precision=span<5?1:0;
-    const radialLabelX=maxR+8;
-    [.25,.5,.75,1].forEach(f=>{ const label=`${(floor+span*f).toFixed(precision)} dB`; const radialLabelY=-maxR+(maxR*2.0*f); ctx.fillText(label,radialLabelX,radialLabelY); });
+    [.25,.5,.75,1].forEach(f=>{ const label=`${(floor+span*f).toFixed(precision)} dB`; const radialLabelY=-maxR+(maxR*2.0*f); const labelWidth=ctx.measureText(label).width; const rightEdge=Math.max(0,cssSize/2-4); const radialLabelX=Math.min(maxR+8,rightEdge-labelWidth); ctx.fillText(label,radialLabelX,radialLabelY); });
     const point=(value,index)=>{
       const radians=toRadians(toDisplayAngle(index)), radius=maxR*yFor(value);
       return [Math.cos(radians)*radius,Math.sin(radians)*radius];
