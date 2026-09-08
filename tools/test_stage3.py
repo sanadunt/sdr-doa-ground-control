@@ -190,6 +190,10 @@ def test_ground_console_http_smoke_and_target_allowlist() -> None:
             assert 'id="doa-compass"' not in html
             # Mission-control shell and safe OSM readiness state.
             assert 'class="nav-rail"' in html
+            assert 'id="logo-open-settings"' not in html
+            assert "logo-open-settings" not in html
+            assert "Branding saved and verified from Ground Console local storage." in html
+            assert "const verify=await fetch('/api/branding'" in html
             assert 'data-nav="overview"' in html
             assert 'data-nav="live-doa"' in html
             assert 'data-nav="tracks-targets"' in html
