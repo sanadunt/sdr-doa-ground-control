@@ -10,7 +10,8 @@ It is safe-by-default:
 * settings control is disabled unless ``--enable-config`` is explicit;
 * config changes use an allowlist, revision, expiry, atomic write, read-back,
   and an ACK;
-* the agent never forwards raw settings, raw logs, or the angular array.
+* the agent never forwards raw settings, raw logs, or the angular array;
+  angular plot data is local-console observability only.
 
 The MQTT transport uses ``sdr_doa_mqtt_stdlib`` so the Raspberry does not need
 an extra Python package. The LAN deployment should still use a broker with
@@ -670,6 +671,7 @@ class AgentRuntime:
             "config_enabled": self.config_enabled,
             "raw_settings_omitted": True,
             "raw_angular_values_omitted": True,
+            "angular_plot_local_only": True,
         }
 
     def run_once(self) -> Dict[str, Any]:

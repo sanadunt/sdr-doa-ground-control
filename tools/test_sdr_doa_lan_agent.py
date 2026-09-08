@@ -75,6 +75,7 @@ def test_no_raw_settings_or_angular_values_in_agent_result() -> None:
     assert "secret_token" not in serialized
     assert "do-not-return" not in serialized
     assert "angular_values" not in serialized
+    assert "angular_power_db" not in serialized
     assert result == "run_once"
 
 

@@ -168,6 +168,26 @@ def test_ground_console_http_smoke_and_target_allowlist() -> None:
             assert response.status == 200
             assert "SDR-DoA Ground Console" in html
             assert "control dry-run" in html
+            assert 'id="doa-polar"' in html
+            assert "function drawPolar" in html
+            assert 'class="app-chrome"' in html
+            assert "--bg: #070b1c" in html
+            assert "--accent: #2de2e6" in html
+            assert 'id="delivery-state"' in html
+            assert "refreshSequence" in html
+            assert "AbortController" in html
+            assert "setPolarUnavailable" in html
+            assert "state.polar.figType,state.polar.compassOffset" in html
+            assert "native shifted dB" in html
+            assert "canonical source angle · θ₀" in html
+            assert "plot peak / display angle" in html
+            assert "Canonical source angle (θ₀) is separate" in html
+            assert "Plotted 360-bin peak display angle" in html
+            assert "const directions=[['N',0],['E',90],['S',180],['W',270]]" in html
+            assert "const diagonalDegrees=new Set([45,135,225,315])" in html
+            assert "aria-describedby=\"polar-legend compass-detail\"" in html
+            assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in html
+            assert 'id="doa-compass"' not in html
 
         capabilities = get_json(base + "/api/capabilities")
         assert capabilities["read_only"] is True

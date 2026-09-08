@@ -31,6 +31,11 @@ DEFAULT_STATUS_MAX_AGE_MS = 10_000
 DEFAULT_DOA_MAX_AGE_MS = 5_000
 DEFAULT_MAX_FUTURE_SKEW_MS = 5_000
 ANGLE_CONSISTENCY_TOLERANCE_DEG = 1.0
+ANGULAR_PEAK_ANGLE_TOLERANCE_DEG = 3.0
+# CSV and XML are separate files updated by the node. A bounded read sequence
+# can observe adjacent records with different node timestamps; exact equality
+# would incorrectly quarantine a healthy live pair.
+NATIVE_TIMESTAMP_TOLERANCE_MS = 2_000
 DEFAULT_ALLOWED_DATA_HOSTS = frozenset({
     "doasdr.local",
     "192.168.100.100",
@@ -85,6 +90,8 @@ SAFE_SETTINGS_FIELDS = (
     "active_vfos",
     "output_vfo",
     "vfo_mode",
+    "doa_fig_type",
+    "compass_offset",
     "location_source",
     "gps_fixed_heading",
     "en_remote_control",
@@ -199,8 +206,13 @@ def _age_assessment(
         "reference_ms": reference_ms,
         "reference_kind": reference_kind,
         "freshness_known": freshness_known,
-        "age_ms": age_ms if freshness_known else None,
-        "fresh": (0 <= age_ms <= max_age_ms) if freshness_known else None,
+        "age_ms": max(0, age_ms) if freshness_known else None,
+        "raw_age_ms": age_ms if freshness_known else None,
+        # A later file read can legitimately observe a newer node record than
+        # the status sample read first. Treat a bounded future delta as fresh;
+        # only an excessive future timestamp is rejected. Expose effective age
+        # as non-negative while retaining raw_age_ms for diagnostics.
+        "fresh": (-max_future_skew_ms <= age_ms <= max_age_ms) if freshness_known else None,
         "future_skew": (age_ms < -max_future_skew_ms) if freshness_known else None,
         "max_age_ms": max_age_ms,
     }
@@ -459,7 +471,15 @@ def parse_csv_doa(
     row = _parse_csv_row(resource)
     timestamp_ms = _finite_int(row[0], "csv.timestamp_ms")
     angular_values = [_finite_float(value, f"csv.angular_power[{index}]") for index, value in enumerate(row[17:])]
+    # ``DOA_plot_util`` in the node has already converted the estimator to dB
+    # and the CSV writer shifts that dB vector by its minimum before writing it.
+    # Preserve those values for the local plot. Applying abs()/log10() here
+    # would reinterpret dB as linear power and visibly flatten/distort peaks.
+    # A signed value is still a valid fixture/input: a peak is the greatest
+    # signed dB value (closest to zero), never the greatest magnitude.
     peak_index = max(range(len(angular_values)), key=angular_values.__getitem__)
+    angular_peak_value = angular_values[peak_index]
+    angular_power_db = list(angular_values)
     return {
         "available": True,
         "source_format": "csv",
@@ -489,8 +509,16 @@ def parse_csv_doa(
         "reserved_fields": row[13:17],
         "angular_bins": len(angular_values),
         "angular_peak_index": peak_index,
-        "angular_peak_value": angular_values[peak_index],
-        "angular_values_omitted": True,
+        "angular_peak_value": angular_peak_value,
+        # Keep peak metadata on the same signed scale as the preserved vector.
+        "angular_peak_db": angular_peak_value,
+        "angular_power_db": angular_power_db,
+        "angular_power_min_db": min(angular_values),
+        "angular_power_max_db": max(angular_values),
+        "angular_power_unit": "dB_relative_to_source_floor",
+        "angular_power_transform": "preserved_source_shifted_db",
+        "angular_power_shifted": True,
+        "angular_values_local_only": True,
     }
 
 
@@ -711,17 +739,27 @@ def _circular_angle_distance(first: float, second: float) -> float:
 
 
 def assess_native_conflict(candidates: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
-    """Report same-timestamp disagreement without selecting an authority."""
+    """Compare adjacent native views without requiring byte-identical timestamps.
+
+    CSV and XML are independent files rewritten by the node. A sequential GET
+    can therefore observe two neighboring processing frames. They remain
+    comparable when their node timestamps are within the bounded pair window;
+    a same-timestamp pair is still treated as the strongest correlation case.
+    """
     csv_candidate = candidates.get("csv", {})
     xml_candidate = candidates.get("xml", {})
-    comparable = (
-        bool(csv_candidate.get("available"))
-        and bool(xml_candidate.get("available"))
-        and csv_candidate.get("timestamp_ms") == xml_candidate.get("timestamp_ms")
-    )
+    available = bool(csv_candidate.get("available")) and bool(xml_candidate.get("available"))
+    csv_timestamp = csv_candidate.get("timestamp_ms")
+    xml_timestamp = xml_candidate.get("timestamp_ms")
+    timestamp_delta_ms: Optional[int] = None
+    if available and isinstance(csv_timestamp, int) and isinstance(xml_timestamp, int):
+        timestamp_delta_ms = abs(csv_timestamp - xml_timestamp)
+    comparable = bool(available and timestamp_delta_ms is not None and timestamp_delta_ms <= NATIVE_TIMESTAMP_TOLERANCE_MS)
     result: Dict[str, Any] = {
         "comparable": comparable,
-        "same_timestamp": comparable,
+        "same_timestamp": bool(comparable and timestamp_delta_ms == 0),
+        "timestamp_delta_ms": timestamp_delta_ms,
+        "timestamp_tolerance_ms": NATIVE_TIMESTAMP_TOLERANCE_MS,
         "conflict": False,
         "tolerance_deg": ANGLE_CONSISTENCY_TOLERANCE_DEG,
     }
@@ -963,6 +1001,7 @@ def collect(
             "mqtt_publish": False,
             "raw_settings_omitted": True,
             "raw_angular_values_omitted": True,
+            "angular_plot_local_only": True,
         },
         "observed_at_ms": observed_at_ms,
         "resources": {path: resource.metadata() for path, resource in resources.items()},

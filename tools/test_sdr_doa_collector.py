@@ -96,6 +96,19 @@ def test_valid_parsing_but_authority_blocked():
     result = fake_collection(make_status(), make_csv(), make_xml())
     assert result["status"]["daq_health"] == "PASS"
     assert result["doa_candidates"]["csv"]["angular_bins"] == 360
+    csv_candidate = result["doa_candidates"]["csv"]
+    assert len(csv_candidate["angular_power_db"]) == 360
+    assert csv_candidate["angular_power_db"][0] == -20.0
+    assert csv_candidate["angular_power_db"][10] == 5.0
+    assert csv_candidate["angular_peak_index"] == 10
+    assert csv_candidate["angular_peak_value"] == 5.0
+    assert csv_candidate["angular_peak_db"] == 5.0
+    assert csv_candidate["angular_power_min_db"] == -20.0
+    assert csv_candidate["angular_power_max_db"] == 5.0
+    assert result["doa_candidates"]["csv"]["angular_power_unit"] == "dB_relative_to_source_floor"
+    assert csv_candidate["angular_power_transform"] == "preserved_source_shifted_db"
+    assert csv_candidate["angular_power_shifted"] is True
+    assert result["doa_candidates"]["csv"]["angular_values_local_only"] is True
     assert result["publication_gate"]["state"] == "BLOCKED"
     assert "DOA_AUTHORITY_NOT_SELECTED" in result["publication_gate"]["reasons"]
     assert result["settings"]["raw_fields_omitted"] is True
@@ -107,6 +120,31 @@ def test_unhealthy_daq_blocks():
     assert result["status"]["daq_health"] == "FAIL"
     assert result["publication_gate"]["checks"]["daq_healthy"] is False
     assert result["overall_state"] == "DEGRADED"
+
+
+def test_adjacent_native_views_within_bounded_timestamp_window_are_comparable():
+    result = fake_collection(
+        make_status(100_000),
+        make_csv(101_700),
+        make_xml(102_500),
+    )
+    consistency = result["native_consistency"]
+    assert consistency["comparable"] is True
+    assert consistency["same_timestamp"] is False
+    assert consistency["timestamp_delta_ms"] == 800
+    assert consistency["conflict"] is False
+
+
+def test_native_views_outside_timestamp_window_are_not_comparable():
+    result = fake_collection(
+        make_status(100_000),
+        make_csv(100_000),
+        make_xml(102_500),
+    )
+    consistency = result["native_consistency"]
+    assert consistency["comparable"] is False
+    assert consistency["timestamp_delta_ms"] == 2_500
+    assert consistency["conflict"] is False
 
 
 def test_upstream_confidence_and_power_semantics_stay_explicit():

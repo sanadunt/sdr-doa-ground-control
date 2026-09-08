@@ -70,7 +70,9 @@ Collector:
 - selalu menahan publication jika canonical angle belum dikonfigurasi;
 - menghilangkan raw settings dari hasil keluaran;
 - hanya mempertahankan safe settings subset;
-- menghilangkan raw angular array dari hasil keluaran;
+- menghilangkan raw angular array dari payload edge/MQTT; Ground Console boleh
+  memakai vektor CSV dB shifted yang dipertahankan apa adanya untuk plot polar
+  lokal saja;
 - tidak memiliki MQTT client;
 - tidak memiliki jalur write, POST, SSH command, atau settings update.
 

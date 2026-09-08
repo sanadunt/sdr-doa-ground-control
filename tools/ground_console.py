@@ -423,84 +423,105 @@ HTML = r"""<!doctype html>
 <style>
 :root {
   color-scheme: dark;
-  --bg: #141a13;
-  --surface: #1c2519;
-  --surface-2: #253220;
-  --surface-3: #303f29;
-  --line: #46563d;
-  --line-soft: rgba(130, 151, 107, .22);
-  --text: #eef1e7;
-  --muted: #aeb9a2;
-  --subtle: #7f8d76;
-  --army: #78965d;
-  --army-bright: #a9c183;
-  --khaki: #cbbd92;
-  --good: #a8c978;
-  --warn: #d6b56a;
-  --bad: #df8070;
-  --shadow: 0 10px 28px rgba(0, 0, 0, .22);
+  --bg: #070b1c;
+  --surface: #0d1330;
+  --surface-2: #121a3d;
+  --surface-3: #192451;
+  --line: #293867;
+  --line-soft: rgba(99, 130, 207, .22);
+  --text: #edf4ff;
+  --muted: #a7b7da;
+  --subtle: #7081ad;
+  --accent: #2de2e6;
+  --accent-bright: #75f6f1;
+  --blue: #4e82ff;
+  --indigo: #8876ff;
+  --good: #4fe0b0;
+  --warn: #f0c36a;
+  --bad: #ff7189;
+  --shadow: 0 14px 34px rgba(0, 0, 0, .30);
 }
 * { box-sizing: border-box; }
-html { background: var(--bg); }
-body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+html { min-width: 320px; background: var(--bg); }
+body { margin: 0; min-width: 320px; background: radial-gradient(circle at 12% -10%, rgba(78,130,255,.16), transparent 34rem), radial-gradient(circle at 92% 18%, rgba(136,118,255,.10), transparent 30rem), var(--bg); color: var(--text); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 button, input, select { font: inherit; }
-button { border: 1px solid transparent; border-radius: 6px; padding: 9px 13px; background: var(--army); color: #11170f; font-weight: 700; cursor: pointer; }
-button:hover { background: var(--army-bright); }
+button { border: 1px solid transparent; border-radius: 7px; padding: 9px 13px; background: linear-gradient(135deg, var(--blue), var(--indigo)); color: #f7fbff; font-weight: 700; cursor: pointer; box-shadow: 0 4px 14px rgba(78,130,255,.22); }
+button:hover { background: linear-gradient(135deg, #6b9aff, #9a8bff); }
 button:disabled { opacity: .55; cursor: wait; }
-button.ghost { background: transparent; color: var(--text); border-color: var(--line); }
-button.ghost:hover { background: var(--surface-2); }
-button.danger { background: transparent; border-color: rgba(223,128,112,.55); color: var(--bad); }
-button.danger:hover { background: rgba(223,128,112,.12); }
-input, select { width: 100%; background: #11170f; color: var(--text); border: 1px solid var(--line); border-radius: 5px; padding: 9px 10px; outline: none; }
-input:focus, select:focus { border-color: var(--army-bright); box-shadow: 0 0 0 2px rgba(169,193,131,.16); }
-main { width: min(1400px, calc(100% - 36px)); margin: 0 auto; padding: 22px 0 28px; }
-.topbar { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+button.ghost { background: rgba(18,26,61,.72); color: var(--text); border-color: var(--line); box-shadow: none; }
+button.ghost:hover { background: var(--surface-3); border-color: var(--blue); }
+button.danger { background: transparent; border-color: rgba(255,113,137,.55); color: var(--bad); box-shadow: none; }
+button.danger:hover { background: rgba(255,113,137,.12); }
+input, select { width: 100%; background: #080d23; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 9px 10px; outline: none; }
+input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(45,226,230,.16); }
+main { width: min(1440px, calc(100% - 36px)); margin: 0 auto; padding: 0 0 28px; }
+.app-chrome { position: sticky; top: 0; z-index: 10; margin: 0 -18px; padding: 0 18px; background: rgba(7,11,28,.90); border-bottom: 1px solid var(--line-soft); box-shadow: 0 12px 28px rgba(4,7,20,.30); backdrop-filter: blur(16px); }
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 18px 0 14px; border-bottom: 1px solid var(--line-soft); }
 .brand-block { display: flex; align-items: center; gap: 13px; min-width: 0; }
-.logo-button { position: relative; flex: 0 0 78px; width: 78px; height: 56px; padding: 0; overflow: hidden; border: 1px dashed var(--army); background: var(--surface-2); color: var(--army-bright); letter-spacing: 1.4px; font-size: 10px; }
+.logo-button { position: relative; flex: 0 0 78px; width: 78px; height: 56px; padding: 0; overflow: hidden; border: 1px dashed var(--accent); background: var(--surface-2); color: var(--accent-bright); letter-spacing: 1.4px; font-size: 10px; }
 .logo-button { cursor: default; pointer-events: none; }
 .logo-button img { display: block; width: 100%; height: 100%; object-fit: contain; background: var(--surface-2); }
 .logo-placeholder { display: grid; place-items: center; width: 100%; height: 100%; text-align: center; padding: 5px; }
 .compass-wrap { display:grid; place-items:center; padding:8px 0 0; }
-.compass-wrap svg { width:min(100%,320px); color:var(--army-bright); overflow:visible; }
-.compass-label { fill:var(--muted); font-size:13px; font-weight:800; }
-.compass-angle { fill:var(--foreground); font-size:28px; font-weight:800; }
-.compass-status { fill:var(--army-bright); font-size:10px; font-weight:800; letter-spacing:1px; }
-.needle { fill:var(--army-bright); opacity:.9; }
-.needle-hub { fill:var(--foreground); stroke:var(--army-bright); stroke-width:3; }
+.polar-frame { position:relative; width:min(100%, 600px); min-width:0; aspect-ratio:1; margin-inline:auto; }
+.polar-frame canvas { display:block; width:100%; height:100%; }
+.polar-overlay { position:absolute; inset:0; display:grid; place-items:center; pointer-events:none; }
+.polar-center { display:grid; gap:3px; place-items:center; width:min(220px, calc(100% - 34px)); max-width:calc(100% - 24px); margin-top:0; padding:11px 13px; border:1px solid rgba(45,226,230,.20); border-radius:12px; background:rgba(7,11,28,.84); box-shadow:0 0 24px rgba(7,11,28,.24); text-align:center; }
+.compass-label { fill:var(--muted); font-size:12px; font-weight:800; }
+.compass-angle-label { color:var(--subtle); font-size:9px; font-weight:800; letter-spacing:.85px; line-height:1.25; text-transform:uppercase; }
+.compass-angle { color:var(--text); font-size:27px; font-weight:800; letter-spacing:-.4px; line-height:1.05; }
+.compass-status { color:var(--accent-bright); font-size:10px; font-weight:800; letter-spacing:1px; }
+.compass-status.unavailable { color:var(--bad); }
+.polar-legend { display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:7px 15px; max-width:600px; margin:7px auto 0; color:var(--muted); font-size:11px; line-height:1.3; }
+.legend-item { display:inline-flex; min-width:0; align-items:center; gap:6px; }
+.legend-swatch { display:inline-block; flex:0 0 auto; width:22px; height:3px; border-radius:99px; background:var(--accent); box-shadow:0 0 8px rgba(45,226,230,.55); }
+.legend-swatch.peak { width:10px; height:10px; border:2px solid var(--blue); border-radius:50%; box-shadow:none; }
+.legend-token { display:inline-grid; place-items:center; min-width:24px; height:18px; padding:0 4px; border:1px solid rgba(136,118,255,.7); border-radius:4px; color:var(--accent-bright); font-size:10px; font-weight:800; }
+.polar-meta { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:8px 12px; margin-top:10px; color:var(--subtle); font-size:11px; }
+.polar-meta > span { display:grid; min-width:0; gap:2px; }
+.polar-meta-label { color:var(--subtle); line-height:1.25; }
+.polar-meta strong { color:var(--text); font-weight:700; }
 .brand-copy { min-width: 0; }
-.eyebrow { margin: 0 0 5px; color: var(--army-bright); font-size: 10px; font-weight: 800; letter-spacing: 1.4px; text-transform: uppercase; }
+.eyebrow { margin: 0 0 5px; color: var(--accent); font-size: 10px; font-weight: 800; letter-spacing: 1.4px; text-transform: uppercase; }
 h1 { margin: 0; max-width: 650px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: clamp(21px, 3vw, 30px); letter-spacing: -.3px; }
 h2 { margin: 0; font-size: 16px; letter-spacing: -.1px; }
 .subline { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
 .top-actions, .button-row, .chip-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .top-actions { justify-content: flex-end; }
 .chip { display: inline-flex; align-items: center; min-height: 27px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .8px; text-transform: uppercase; }
-.chip.safe { color: var(--good); border-color: rgba(168,201,120,.55); }
-.source-strip { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 0 17px; border-bottom: 1px solid var(--line-soft); }
+.chip.safe { color: var(--good); border-color: rgba(79,224,176,.55); background: rgba(79,224,176,.06); }
+.source-strip { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 11px 0 13px; }
 .source-value { display: block; overflow: hidden; color: var(--text); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
-.status-line { margin: 3px 0 0; color: var(--subtle); font-size: 11px; }
+.status-line { display:flex; align-items:center; gap:7px; margin: 3px 0 0; color: var(--subtle); font-size: 11px; }
+.status-dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--subtle); box-shadow:0 0 0 3px rgba(112,129,173,.12); }
+.status-dot.good { background:var(--good); box-shadow:0 0 0 3px rgba(79,224,176,.14); }
+.status-dot.bad { background:var(--bad); box-shadow:0 0 0 3px rgba(255,113,137,.14); }
 .dashboard-head { display: flex; align-items: end; justify-content: space-between; gap: 15px; padding: 20px 0 13px; }
 .dashboard-head p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
-.metrics { display: grid; grid-template-columns: 1.25fr repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
-.metric { min-height: 112px; padding: 14px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); box-shadow: var(--shadow); }
-.metric.primary { background: var(--surface-2); border-color: var(--army); }
+.metrics { display: grid; grid-template-columns: 1.35fr repeat(5, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+.metric { min-height: 112px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: linear-gradient(145deg, rgba(18,26,61,.94), rgba(13,19,48,.96)); box-shadow: var(--shadow); }
+.metric.primary { background: linear-gradient(145deg, rgba(24,42,91,.98), rgba(18,26,61,.98)); border-color: rgba(78,130,255,.72); }
+.metric.delivery { border-color: rgba(45,226,230,.42); }
 .metric-label { color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; }
 .metric-value { margin-top: 12px; font-size: 25px; font-weight: 800; letter-spacing: -.4px; }
 .metric-value.good { color: var(--good); } .metric-value.warn { color: var(--warn); } .metric-value.bad { color: var(--bad); }
 .metric-note { margin-top: 4px; min-height: 18px; color: var(--subtle); font-size: 11px; }
-.layout { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(330px, .8fr); gap: 14px; }
+.layout { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(300px, .75fr); gap: 14px; align-items: start; }
 .stack { min-width: 0; }
-.panel { margin-bottom: 14px; padding: 16px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); box-shadow: var(--shadow); }
+.panel { margin-bottom: 14px; padding: 16px; border: 1px solid var(--line); border-radius: 9px; background: linear-gradient(145deg, rgba(13,19,48,.98), rgba(10,15,37,.98)); box-shadow: var(--shadow); }
+.compass-panel { border-color: rgba(45,226,230,.34); background: radial-gradient(circle at 50% 43%, rgba(45,226,230,.055), transparent 48%), linear-gradient(145deg, rgba(18,26,61,.98), rgba(10,15,37,.98)); }
 .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 13px; }
-.panel-head small { color: var(--subtle); font-size: 11px; }
-.gate-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; border-left: 3px solid var(--bad); background: rgba(223,128,112,.08); }
-.gate-banner.good { border-left-color: var(--good); background: rgba(168,201,120,.08); }
+.panel-head > div { min-width: 0; }
+.panel-head h2 { color: var(--text); }
+.panel-head small { max-width: 52%; color: var(--subtle); font-size: 11px; text-align: right; }
+.gate-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; border: 1px solid rgba(255,113,137,.20); border-left: 3px solid var(--bad); background: rgba(255,113,137,.08); }
+.gate-banner.good { border-color: rgba(79,224,176,.20); border-left-color: var(--good); background: rgba(79,224,176,.08); }
 .gate-title { font-weight: 800; }
 .gate-copy { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
 .gate-list { display: grid; gap: 7px; margin: 14px 0 0; padding: 0; list-style: none; }
 .gate-list li { display: flex; gap: 8px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--line-soft); color: var(--muted); font-size: 12px; }
 .gate-list li:last-child { border-bottom: 0; }
-.gate-list li::before { content: "!"; display: inline-grid; flex: 0 0 18px; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: rgba(214,181,106,.18); color: var(--warn); font-weight: 800; }
+.gate-list li::before { content: "!"; display: inline-grid; flex: 0 0 18px; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: rgba(240,195,106,.18); color: var(--warn); font-weight: 800; }
 .table { width: 100%; border-collapse: collapse; }
 .table th, .table td { padding: 9px 0; border-bottom: 1px solid var(--line-soft); text-align: left; vertical-align: top; }
 .table th { width: 34%; color: var(--muted); font-size: 11px; font-weight: 500; }
@@ -510,22 +531,22 @@ h2 { margin: 0; font-size: 16px; letter-spacing: -.1px; }
 .source-table { margin-top: 4px; }
 .source-table th:first-child { width: 23%; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.note { margin: 0; padding: 10px 11px; border: 1px solid var(--line); background: rgba(203,189,146,.06); color: var(--muted); font-size: 12px; }
-.note strong { color: var(--khaki); }
+.note { margin: 0; padding: 10px 11px; border: 1px solid var(--line); background: rgba(78,130,255,.055); color: var(--muted); font-size: 12px; }
+.note strong { color: var(--accent-bright); }
 details { margin-top: 12px; border-top: 1px solid var(--line-soft); padding-top: 10px; }
 summary { color: var(--muted); cursor: pointer; font-size: 11px; }
-pre { max-height: 300px; overflow: auto; margin: 10px 0 0; padding: 11px; border: 1px solid var(--line); border-radius: 5px; background: #10150e; color: #c9d5ba; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+pre { max-height: 300px; overflow: auto; margin: 10px 0 0; padding: 11px; border: 1px solid var(--line); border-radius: 6px; background: #080d23; color: #c5d4f5; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
 .footer { padding-top: 3px; color: var(--subtle); font-size: 11px; }
 .modal { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 18px; }
 .modal[hidden] { display: none; }
-.modal-backdrop { position: absolute; inset: 0; background: rgba(5,8,5,.78); }
-.modal-card { position: relative; z-index: 1; width: min(760px, 100%); max-height: min(760px, calc(100vh - 36px)); overflow: auto; border: 1px solid var(--army); border-radius: 8px; background: var(--surface); box-shadow: 0 24px 70px rgba(0,0,0,.45); }
+.modal-backdrop { position: absolute; inset: 0; background: rgba(3,6,18,.82); }
+.modal-card { position: relative; z-index: 1; width: min(760px, 100%); max-height: min(760px, calc(100vh - 36px)); overflow: auto; border: 1px solid var(--blue); border-radius: 9px; background: var(--surface); box-shadow: 0 24px 70px rgba(0,0,0,.58); }
 .modal-head { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 17px 18px; border-bottom: 1px solid var(--line); }
 .modal-head p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
 .modal-body { padding: 18px; }
 .tabs { display: flex; gap: 5px; margin-bottom: 17px; border-bottom: 1px solid var(--line); }
 .tab { margin-bottom: -1px; border-radius: 5px 5px 0 0; background: transparent; color: var(--muted); border-color: transparent transparent var(--line) transparent; }
-.tab.active { color: var(--text); border-color: var(--army) var(--army) var(--surface); background: var(--surface-2); }
+.tab.active { color: var(--text); border-color: var(--blue) var(--blue) var(--surface); background: var(--surface-2); }
 .tab-panel[hidden] { display: none; }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .field { display: grid; gap: 5px; }
@@ -537,15 +558,18 @@ pre { max-height: 300px; overflow: auto; margin: 10px 0 0; padding: 11px; border
 .admin-box + .admin-box { margin-top: 12px; }
 .admin-status { min-height: 18px; margin: 9px 0 0; color: var(--muted); font-size: 12px; }
 .admin-status.good { color: var(--good); } .admin-status.bad { color: var(--bad); }
-.logo-preview { display: grid; place-items: center; width: 120px; height: 78px; margin-top: 8px; border: 1px dashed var(--army); background: var(--surface); color: var(--subtle); font-size: 10px; letter-spacing: 1px; }
+.logo-preview { display: grid; place-items: center; width: 120px; height: 78px; margin-top: 8px; border: 1px dashed var(--accent); background: var(--surface); color: var(--subtle); font-size: 10px; letter-spacing: 1px; }
 .logo-preview img { max-width: 100%; max-height: 100%; object-fit: contain; }
 @media (max-width: 1120px) { .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); } .metric.primary { grid-column: span 3; } }
-@media (max-width: 820px) { main { width: min(100% - 24px, 700px); padding-top: 14px; } .topbar, .source-strip, .dashboard-head { align-items: stretch; flex-direction: column; } .top-actions { justify-content: flex-start; } .layout { grid-template-columns: 1fr; } .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } .metric.primary { grid-column: span 2; } }
-@media (max-width: 520px) { .metrics, .form-grid { grid-template-columns: 1fr; } .metric.primary, .field.full { grid-column: auto; } .panel { padding: 13px; } .modal { padding: 8px; } .modal-card { max-height: calc(100vh - 16px); } }
+@media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+@media (max-width: 820px) { main { width: min(100% - 24px, 700px); } .app-chrome { margin-inline:0; padding-inline:0; } .topbar, .source-strip, .dashboard-head { align-items: stretch; flex-direction: column; } .top-actions { justify-content: flex-start; } .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } .metric.primary { grid-column: span 2; } }
+@media (max-width: 520px) { h1 { white-space: normal; } .metrics, .form-grid { grid-template-columns: 1fr; } .metric.primary, .field.full { grid-column: auto; } .panel { padding: 13px; } .panel-head { align-items: flex-start; flex-direction: column; } .panel-head small { max-width: 100%; text-align: left; } .polar-frame { width: 100%; } .polar-center { width:min(210px, calc(100% - 30px)); padding:10px 11px; } .polar-legend { justify-content:flex-start; gap:8px 14px; } .polar-meta { grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px 12px; } .button-row { width:100%; } .button-row button { flex:1 1 0; min-width:0; } .top-actions { width:100%; } .gate-banner { align-items:flex-start; flex-direction:column; } .gate-banner .chip { align-self:flex-start; } .modal { padding:8px; } .modal-card { max-height: calc(100vh - 16px); } }
+@media (max-width: 380px) { main { width:calc(100% - 16px); } .panel { padding:11px; } .polar-legend { font-size:10px; } }
 </style>
 </head>
 <body>
 <main>
+  <div class="app-chrome">
   <header class="topbar">
     <div class="brand-block">
       <div id="logo-open-settings" class="logo-button" title="Logo aplikasi" aria-label="Logo aplikasi">
@@ -560,7 +584,7 @@ pre { max-height: 300px; overflow: auto; margin: 10px 0 0; padding: 11px; border
     </div>
     <div class="top-actions">
       <span class="chip safe">read-only</span>
-      <span class="chip">MQTT monitor</span>
+      <span class="chip">loopback · GET</span>
       <button id="settings-open" class="ghost" type="button">Pengaturan</button>
     </div>
   </header>
@@ -569,13 +593,14 @@ pre { max-height: 300px; overflow: auto; margin: 10px 0 0; padding: 11px; border
     <div>
       <p class="eyebrow">SUMBER DATA</p>
       <strong id="source-url" class="source-value">__BASE_URL__</strong>
-      <p id="message" class="status-line">Menunggu pembacaan pertama…</p>
+      <p id="message" class="status-line"><span id="status-dot" class="status-dot" aria-hidden="true"></span><span>Menunggu pembacaan pertama…</span></p>
     </div>
     <div class="button-row">
       <button id="refresh" type="button">Refresh</button>
       <button id="auto-refresh" class="ghost" type="button">Auto: off</button>
     </div>
   </section>
+  </div>
 
   <section class="dashboard-head">
     <div>
@@ -590,6 +615,7 @@ pre { max-height: 300px; overflow: auto; margin: 10px 0 0; padding: 11px; border
     <article class="metric primary"><div class="metric-label">Status keseluruhan</div><div id="overall" class="metric-value">—</div><div id="overall-detail" class="metric-note">menunggu snapshot</div></article>
     <article class="metric"><div class="metric-label">Kesehatan DAQ</div><div id="daq" class="metric-value">—</div><div id="daq-detail" class="metric-note">sync flags</div></article>
     <article class="metric"><div class="metric-label">Usia DoA</div><div id="doa-age" class="metric-value">—</div><div id="doa-detail" class="metric-note">CSV / XML</div></article>
+    <article class="metric delivery"><div class="metric-label">Delivery gate</div><div id="delivery-state" class="metric-value">BLOCKED</div><div id="delivery-detail" class="metric-note">publish ditahan</div></article>
     <article class="metric"><div class="metric-label">Frame terbuang</div><div id="drops" class="metric-value">—</div><div id="drops-detail" class="metric-note">counter status</div></article>
     <article class="metric"><div class="metric-label">MQTT monitor</div><div id="mqtt-connection" class="metric-value">OFF</div><div id="mqtt-detail" class="metric-note">subscriber-only</div></article>
   </section>
@@ -597,17 +623,13 @@ pre { max-height: 300px; overflow: auto; margin: 10px 0 0; padding: 11px; border
   <section class="layout">
     <div class="stack">
       <article class="panel compass-panel">
-        <div class="panel-head"><h2>Kompas DoA</h2><small id="compass-source">data Raspberry · display-only</small></div>
+        <div class="panel-head"><div><h2>DoA estimation · polar</h2><small>gaya KrakenSDR · 360-bin display axis · 0–359°</small></div><small id="compass-source">Data Out · display-only</small></div>
         <div class="compass-wrap">
-          <svg id="doa-compass" viewBox="0 0 320 320" role="img" aria-label="Kompas DoA">
-            <circle cx="160" cy="160" r="136" fill="none" stroke="currentColor" stroke-width="2" opacity=".35"/>
-            <circle cx="160" cy="160" r="104" fill="none" stroke="currentColor" stroke-width="1" opacity=".2"/>
-            <text x="160" y="25" text-anchor="middle" class="compass-label">N</text><text x="295" y="165" text-anchor="middle" class="compass-label">E</text><text x="160" y="307" text-anchor="middle" class="compass-label">S</text><text x="25" y="165" text-anchor="middle" class="compass-label">W</text>
-            <g id="compass-needle" hidden><path d="M160 45 L174 160 L160 275 L146 160 Z" class="needle"/><circle cx="160" cy="160" r="8" class="needle-hub"/></g>
-            <text id="compass-angle" x="160" y="151" text-anchor="middle" class="compass-angle">—°</text><text id="compass-status" x="160" y="176" text-anchor="middle" class="compass-status">menunggu data</text>
-          </svg>
+          <div class="polar-frame"><canvas id="doa-polar" role="img" aria-describedby="polar-legend compass-detail" aria-label="Polar DoA estimation"></canvas><div class="polar-overlay"><div class="polar-center"><div class="compass-angle-label">canonical source angle · θ₀</div><div id="compass-angle" class="compass-angle">—°</div><div id="compass-display-angle" class="compass-angle-label">plot peak · display —°</div><div id="compass-status" class="compass-status">menunggu data</div></div></div></div>
         </div>
-        <p id="compass-detail" class="note">Kompas menampilkan canonical angle yang sudah dinormalisasi dari Data Out Raspberry.</p>
+        <div id="polar-legend" class="polar-legend" aria-label="Legend polar"><span class="legend-item"><span class="legend-swatch" aria-hidden="true"></span><span>360-bin vector · native shifted dB · display axis</span></span><span class="legend-item"><span class="legend-swatch peak" aria-hidden="true"></span><span>plot peak / display angle</span></span><span class="legend-item"><span class="legend-token" aria-hidden="true">θ₀</span><span>canonical source angle</span></span></div>
+        <div class="polar-meta"><span><span class="polar-meta-label">Plot peak · display</span><strong id="polar-peak">—</strong></span><span><span class="polar-meta-label">Canonical source · θ₀</span><strong id="polar-canonical">—</strong></span><span><span class="polar-meta-label">Peak value · native</span><strong id="polar-peak-db">—</strong></span><span><span class="polar-meta-label">Vector bins</span><strong id="polar-bins">—</strong></span></div>
+        <p id="compass-detail" class="note">Canonical source angle (θ₀) is separate from the plotted 360-bin display peak. Both are observability-only; no authority or publication decision is inferred.</p>
       </article>
       <article class="panel">
         <div class="panel-head"><h2>Gate publikasi DoA</h2><small id="gate-count">—</small></div>
@@ -638,7 +660,7 @@ pre { max-height: 300px; overflow: auto; margin: 10px 0 0; padding: 11px; border
       <article class="panel">
         <div class="panel-head"><h2>Settings efektif</h2><small>safe subset</small></div>
         <table class="table"><tbody id="settings-rows"></tbody></table>
-        <p class="help">Raw settings, credentials, log, dan angular array tidak ditampilkan atau dikirim console.</p>
+        <p class="help">Raw settings, credentials, log tidak ditampilkan atau dikirim console. Vektor dB shifted hanya dipakai lokal untuk observability polar dan tidak diteruskan ke MQTT atau LAN agent.</p>
       </article>
 
       <article class="panel">
@@ -700,7 +722,7 @@ pre { max-height: 300px; overflow: auto; margin: 10px 0 0; padding: 11px; border
 const initialConfig = __CONSOLE_CONFIG_JSON__;
 const $ = (id) => document.getElementById(id);
 if (initialConfig && initialConfig.refresh_seconds !== undefined) $('refresh-interval').value = String(initialConfig.refresh_seconds);
-const state = { dataUrl: $('data-url').value, autoTimer: null, branding: null, pendingLogo: null };
+const state = { dataUrl: $('data-url').value, autoTimer: null, branding: null, pendingLogo: null, refreshSequence: 0, mqttSequence: 0, refreshController: null, polar: { values: null, angle: null, fresh: false, figType: 'Polar', compassOffset: 0 } };
 function esc(value) { return String(value ?? '—').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;'); }
 function kind(value) { const s=String(value||'').toUpperCase(); return s==='LIVE'||s==='PASS'||s==='READY'?'good':(s==='DEGRADED'||s==='STALE'||s==='BLOCKED'||s==='FAIL'?'bad':'warn'); }
 function pill(value) { const cls=kind(value); return `<span class="chip ${cls==='good'?'safe':''}">${esc(value)}</span>`; }
@@ -723,6 +745,7 @@ function reasonLabel(reason) { return ({
   STATUS_UNAVAILABLE_OR_INVALID:'Status node tidak tersedia atau tidak valid'
 }[reason]||reason); }
 function setStatus(id, text, cls='') { $(id).textContent=text; $(id).className=`admin-status ${cls}`; }
+function setReadStatus(text, cls='') { const message=$('message'); const label=message?.querySelector('span:last-child'); if(label) label.textContent=text; else message.textContent=text; $('status-dot').className=`status-dot ${cls}`; }
 function renderBranding(data) {
   state.branding=data||{app_name:'SDR-DoA Ground Console',logo_data_url:''};
   $('app-name').textContent=state.branding.app_name;
@@ -746,14 +769,131 @@ function renderMqtt(data) {
   ]);
   $('mqtt-last').textContent=JSON.stringify(data.last_by_kind||{},null,2);
 }
+function polarSettings(figType, compassOffset) {
+  const requested=String(figType||'Polar').trim();
+  const safeType=requested.toLowerCase()==='compass'?'Compass':'Polar';
+  const numeric=Number(compassOffset);
+  return { figType:safeType, compassOffset:Number.isFinite(numeric)?numeric:0 };
+}
+function normalizeDegrees(deg) { return ((Number(deg)%360)+360)%360; }
+function drawPolar(values, angle, fresh, figType='Polar', compassOffset=0) {
+  const canvas=$('doa-polar');
+  const frame=canvas?.closest('.polar-frame')||canvas?.parentElement;
+  if(!canvas||!frame) return;
+  const cssSize=Math.max(1,Math.floor(frame.getBoundingClientRect().width||frame.clientWidth||520));
+  const dpr=Math.min(window.devicePixelRatio||1,2);
+  const size=Math.max(1,Math.floor(cssSize*dpr));
+  if(canvas.width!==size||canvas.height!==size){ canvas.width=size; canvas.height=size; }
+  const ctx=canvas.getContext('2d');
+  if(!ctx) return;
+  ctx.setTransform(size/cssSize,0,0,size/cssSize,0,0);
+  ctx.clearRect(0,0,cssSize,cssSize);
+  const styles=getComputedStyle(document.documentElement);
+  const line=styles.getPropertyValue('--line').trim()||'#293867';
+  const muted=styles.getPropertyValue('--muted').trim()||'#a7b7da';
+  const subtle=styles.getPropertyValue('--subtle').trim()||'#7081ad';
+  const accent=styles.getPropertyValue('--accent').trim()||'#2de2e6';
+  const blue=styles.getPropertyValue('--blue').trim()||'#4e82ff';
+  const cx=cssSize/2, cy=cssSize/2, maxR=cssSize*.365;
+  const settings=polarSettings(figType,compassOffset);
+  const toDisplayAngle=deg=>normalizeDegrees(settings.figType==='Compass'?360-deg+settings.compassOffset:deg);
+  const toRadians=deg=>(deg-90)*Math.PI/180;
+  ctx.save();
+  ctx.translate(cx,cy);
+  ctx.lineWidth=1;
+  ctx.strokeStyle=line;
+  ctx.globalAlpha=.92;
+  [.25,.5,.75,1].forEach(f=>{ ctx.beginPath(); ctx.arc(0,0,maxR*f,0,Math.PI*2); ctx.stroke(); });
+  for(let deg=0;deg<360;deg+=45){
+    const radians=toRadians(deg);
+    ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(Math.cos(radians)*maxR,Math.sin(radians)*maxR); ctx.stroke();
+  }
+  ctx.globalAlpha=1;
+  ctx.fillStyle=muted;
+  ctx.font='700 10px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+  ctx.textAlign='center';
+  ctx.textBaseline='middle';
+  const perimeterInset=Math.max(9,cssSize*.035);
+  const cardinalRadius=Math.min(maxR+Math.min(23,Math.max(15,cssSize*.06)),cssSize/2-perimeterInset);
+  const degreeRadius=Math.min(maxR+Math.min(18,Math.max(12,cssSize*.045)),cssSize/2-perimeterInset);
+  const directions=[['N',0],['E',90],['S',180],['W',270]];
+  directions.forEach(([label,deg])=>{
+    const radians=toRadians(deg);
+    ctx.fillText(label,Math.cos(radians)*cardinalRadius,Math.sin(radians)*cardinalRadius);
+  });
+  ctx.fillStyle=subtle;
+  ctx.font='10px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+  const diagonalDegrees=new Set([45,135,225,315]);
+  for(let deg=0;deg<360;deg+=45){
+    const radians=toRadians(deg);
+    ctx.beginPath(); ctx.moveTo(Math.cos(radians)*maxR,Math.sin(radians)*maxR); ctx.lineTo(Math.cos(radians)*(maxR+6),Math.sin(radians)*(maxR+6)); ctx.stroke();
+    if(diagonalDegrees.has(deg)) ctx.fillText(`${deg}°`,Math.cos(radians)*degreeRadius,Math.sin(radians)*degreeRadius);
+  }
+  const finite=Array.isArray(values)&&values.length===360?values.map(Number):null;
+  const validData=Boolean(fresh&&finite&&finite.every(Number.isFinite));
+  if(validData){
+    const floor=Math.min(...finite), peakValue=Math.max(...finite), span=peakValue-floor;
+    const yFor=value=>span>0?Math.max(0,Math.min(1,(value-floor)/span)):1;
+    ctx.textAlign='left';
+    ctx.fillStyle=subtle;
+    ctx.font='9px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+    const precision=span<5?1:0;
+    [.25,.5,.75,1].forEach(f=>{ const label=`${(floor+span*f).toFixed(precision)} dB`; const radius=maxR*f; ctx.fillText(label,radius+7,2); });
+    const point=(value,index)=>{
+      const radians=toRadians(toDisplayAngle(index)), radius=maxR*yFor(value);
+      return [Math.cos(radians)*radius,Math.sin(radians)*radius];
+    };
+    const drawCurve=()=>{
+      finite.forEach((value,index)=>{ const [x,y]=point(value,index); index?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+      const [x0,y0]=point(finite[0],0); ctx.lineTo(x0,y0);
+    };
+    ctx.beginPath(); drawCurve(); ctx.closePath(); ctx.fillStyle='rgba(45,226,230,.14)'; ctx.fill();
+    ctx.beginPath(); drawCurve(); ctx.closePath(); ctx.strokeStyle=accent; ctx.lineWidth=2; ctx.shadowColor='rgba(45,226,230,.48)'; ctx.shadowBlur=8; ctx.stroke();
+    const peakIndex=finite.indexOf(peakValue);
+    if(peakIndex>=0){
+      const displayPeak=toDisplayAngle(peakIndex), [px,py]=point(finite[peakIndex],peakIndex);
+      ctx.shadowBlur=0; ctx.fillStyle=accent; ctx.beginPath(); ctx.arc(px,py,3.5,0,Math.PI*2); ctx.fill();
+      ctx.strokeStyle=blue; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(px,py); ctx.lineTo(Math.cos(toRadians(displayPeak))* (maxR+12),Math.sin(toRadians(displayPeak))*(maxR+12)); ctx.stroke();
+      ctx.fillStyle=accent; ctx.font='700 9px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif'; ctx.textAlign='center'; ctx.fillText(`PLOT ${displayPeak.toFixed(0)}°`,px,py < -maxR*.45 ? py+15 : py-11);
+    }
+  }
+  ctx.restore();
+}
+function setPolarUnavailable(reason='polar unavailable', settings=polarSettings(state.polar?.figType,state.polar?.compassOffset)) {
+  state.polar={values:null,angle:null,fresh:false,figType:settings.figType,compassOffset:settings.compassOffset};
+  drawPolar(null,null,false,settings.figType,settings.compassOffset);
+  $('polar-peak').textContent='—'; $('polar-canonical').textContent='—'; $('polar-peak-db').textContent='—'; $('polar-bins').textContent='—';
+  $('compass-angle').textContent='—°'; $('compass-display-angle').textContent='plot peak · display —°'; $('compass-status').textContent='POLAR UNAVAILABLE'; $('compass-status').className='compass-status unavailable'; $('compass-source').textContent='Data Out · unavailable'; $('compass-detail').textContent=reason; $('doa-polar').setAttribute('aria-label',`Polar DoA unavailable. ${reason}`);
+}
+function renderPolar(snapshot,csv,dataAvailable) {
+  const fields=snapshot.settings?.fields||{}; const requestedType=Object.prototype.hasOwnProperty.call(fields,'doa_fig_type')?fields.doa_fig_type:state.polar?.figType; const requestedOffset=Object.prototype.hasOwnProperty.call(fields,'compass_offset')?fields.compass_offset:state.polar?.compassOffset;
+  const settings=polarSettings(requestedType,requestedOffset);
+  const angle=Number(csv.canonical_angle_deg);
+  const values=Array.isArray(csv.angular_power_db)?csv.angular_power_db:null;
+  const fresh=Boolean(dataAvailable&&csv.freshness?.fresh===true&&values?.length===360&&values.every(value=>Number.isFinite(Number(value))));
+  state.polar={values,angle:Number.isFinite(angle)?angle:null,fresh,figType:settings.figType,compassOffset:settings.compassOffset};
+  if(!fresh||!Number.isFinite(angle)){ setPolarUnavailable('Kurva dihapus: data DoA stale, konflik, atau tidak lengkap.',settings); return; }
+  drawPolar(values,angle,true,settings.figType,settings.compassOffset);
+  const peakIndex=Number(csv.angular_peak_index);
+  const peakReady=Number.isInteger(peakIndex)&&peakIndex>=0&&peakIndex<values.length;
+  const displayAngle=settings.figType==='Compass'&&peakReady?normalizeDegrees(360-peakIndex+settings.compassOffset):(peakReady?peakIndex:null);
+  const peakLabel=displayAngle===null?'—':`${displayAngle.toFixed(0)}° · bin ${peakIndex}`;
+  const canonicalLabel=`${angle.toFixed(1)}° · θ₀`;
+  $('polar-peak').textContent=peakLabel;
+  $('polar-canonical').textContent=canonicalLabel;
+  $('polar-peak-db').textContent=Number.isFinite(Number(csv.angular_peak_db))?`${Number(csv.angular_peak_db).toFixed(1)} dB`:'—';
+  $('polar-bins').textContent=String(values.length);
+  $('compass-angle').textContent=`${angle.toFixed(1)}°`; $('compass-display-angle').textContent=`plot peak · display ${displayAngle===null?'—':displayAngle.toFixed(0)+'°'} · bin ${peakReady?peakIndex:'—'}`; $('compass-status').textContent='DATA TERSEDIA'; $('compass-status').className='compass-status'; $('compass-source').textContent=`Data Out · ${settings.figType} display axis · ${formatAge(csv.freshness)}`; $('compass-detail').textContent=`Canonical source ${angle.toFixed(1)}° (θ₀) versus plotted display peak ${displayAngle===null?'—':displayAngle.toFixed(0)+'°'} (bin ${peakReady?peakIndex:'—'}). Keduanya dipertahankan sebagai metadata terpisah · display-only.`; $('doa-polar').setAttribute('aria-label',`Polar DoA. Canonical source angle ${angle.toFixed(1)} degrees. Plotted 360-bin peak display angle ${displayAngle===null?'unavailable':displayAngle.toFixed(0)+' degrees, bin '+peakIndex}. Display-only.`);
+}
 function render(snapshot) {
   const gate=snapshot.publication_gate||{}; const status=snapshot.status||{}; const safe=status.safe||{}; const csv=(snapshot.doa_candidates||{}).csv||{}; const xml=(snapshot.doa_candidates||{}).xml||{};
   const overall=snapshot.overall_state||'UNKNOWN'; $('overall').textContent=overall; $('overall').className=`metric-value ${kind(overall)}`; $('overall-detail').textContent=`DAQ ${status.daq_health||'—'} · native DoA ${csv.native_metrics_state||'—'} · delivery ${gate.state||'—'}`; $('gate-count').textContent=`${(gate.reasons||[]).length} gate`; $('last-read-chip').textContent=`dibaca ${new Date().toLocaleTimeString()}`;
   const daq=status.daq_health||'UNKNOWN'; const daqTop=safe.daq_status||{}; const syncFlags=[daqTop.frame_sync,daqTop.sample_delay_sync,daqTop.iq_sync]; const syncPassed=syncFlags.filter(value=>value===true).length; $('daq').textContent=daq; $('daq').className=`metric-value ${kind(daq)}`; $('daq-detail').textContent=`frame #${daqTop.data_frame_index??'—'} · sync ${syncPassed}/3`;
-  const ages=[csv.freshness,xml.freshness].filter(Boolean).map(x=>x.age_ms).filter(x=>typeof x==='number'); const maxAge=ages.length?Math.max(...ages):null; $('doa-age').textContent=maxAge===null?'—':`${(Number(maxAge)/1000).toFixed(1)} s`; $('doa-age').className=`metric-value ${maxAge!==null&&maxAge<=5000?'good':'bad'}`; $('doa-detail').textContent=`canonical CSV ${formatNumber(csv.canonical_angle_deg,1)}° = XML ${formatNumber(xml.canonical_angle_deg,1)}°`;
+  const consistency=snapshot.native_consistency||{}; const authority=snapshot.authority||{};
+  const freshnessItems=[csv.freshness,xml.freshness].filter(Boolean); const ages=freshnessItems.map(x=>x.age_ms); const validAges=ages.length===2&&ages.every(x=>typeof x==='number'&&Number.isFinite(x)&&x>=0); const maxAge=validAges?Math.max(...ages):null; const freshnessOk=validAges&&freshnessItems.every(x=>x.fresh===true); $('doa-age').textContent=maxAge===null?'—':`${(Number(maxAge)/1000).toFixed(1)} s`; $('doa-age').className=`metric-value ${freshnessOk&&maxAge<=5000?'good':'bad'}`; const relation=consistency.conflict===true?'CONFLICT':(consistency.comparable===true?(typeof consistency.circular_distance_deg==='number'&&consistency.circular_distance_deg<=3?'equal':'different'):'not comparable'); $('doa-detail').textContent=`canonical CSV ${formatNumber(csv.canonical_angle_deg,1)}° / XML ${formatNumber(xml.canonical_angle_deg,1)}° · ${relation}`;
   const drops=safe.daq_num_dropped_frames; $('drops').textContent=drops===undefined?'—':drops; $('drops').className=`metric-value ${drops===0?'good':'warn'}`; $('drops-detail').textContent='counter status.json';
-  const consistency=snapshot.native_consistency||{}; const authority=snapshot.authority||{}; const dataAvailable=Boolean(csv.available&&xml.available&&csv.freshness?.fresh&&xml.freshness?.fresh&&consistency.comparable===true&&consistency.conflict!==true); const gateState=gate.state||'BLOCKED'; $('gate-title').textContent=gateState; $('gate-pill').innerHTML=pill(gateState); $('gate-banner').className=`gate-banner ${gateState==='READY'?'good':''}`; $('gate-copy').textContent=gateState==='READY'?'Delivery siap.':(dataAvailable?'Data DoA tersedia untuk observasi; delivery publish masih ditahan oleh gate.':'Data DoA belum cukup fresh/konsisten untuk ditampilkan sebagai usable.');
-  const angle=Number(csv.canonical_angle_deg); const compass=$('compass-needle'); if(dataAvailable&&Number.isFinite(angle)){ compass.hidden=false; compass.setAttribute('transform',`rotate(${angle} 160 160)`); $('compass-angle').textContent=`${formatNumber(angle,1)}°`; $('compass-status').textContent='DATA TERSEDIA'; $('compass-source').textContent=`Raspberry · CSV/XML konsisten · ${formatAge(csv.freshness)}`; $('compass-detail').textContent=`Raw CSV ${formatNumber(csv.doa_raw_deg,1)}° → canonical ${formatNumber(angle,1)}° · display-only`; } else { compass.hidden=true; $('compass-angle').textContent='—°'; $('compass-status').textContent='menunggu data valid'; $('compass-source').textContent='data Raspberry · display-only'; }
+  const dataAvailable=Boolean(csv.available&&xml.available&&csv.freshness?.fresh&&xml.freshness?.fresh&&consistency.comparable===true&&consistency.conflict!==true); const gateState=String(gate.state||'BLOCKED').toUpperCase(); $('delivery-state').textContent=gateState; $('delivery-state').className=`metric-value ${kind(gateState)}`; $('delivery-detail').textContent=gateState==='READY'?'delivery siap':'publish ditahan'; $('gate-title').textContent=gateState; $('gate-pill').innerHTML=pill(gateState); $('gate-banner').className=`gate-banner ${gateState==='READY'?'good':''}`; $('gate-copy').textContent=gateState==='READY'?'Delivery siap.':(dataAvailable?'Data DoA tersedia untuk observasi; delivery publish masih ditahan oleh gate.':'Data DoA belum cukup fresh/konsisten untuk ditampilkan sebagai usable.');
+  renderPolar(snapshot,csv,dataAvailable);
   const reasons=gate.reasons||[]; $('gate-reasons').innerHTML=reasons.length?reasons.map(reason=>`<li><span>${esc(reasonLabel(reason))}</span><small class="mono">${esc(reason)}</small></li>`).join(''):'<li>Tidak ada alasan gate.</li>'; $('gate-debug').textContent=JSON.stringify({state:gateState,checks:gate.checks||{},reasons},null,2);
   const sourceRow=(label,candidate)=>[
     [label, candidate.available?pill('parsed'):pill('unavailable')],
@@ -780,10 +920,29 @@ function render(snapshot) {
     ['DAQ',pill(daq)],['daq_ok',boolLabel(safe.daq_ok)],['Frame index',esc(daqStatus.data_frame_index)],['Frame sync',boolLabel(daqStatus.frame_sync)],['Sample-delay sync',boolLabel(daqStatus.sample_delay_sync)],['IQ sync',boolLabel(daqStatus.iq_sync)],['ADC overdrive',boolLabel(daqStatus.adc_overdrive)],['Dropped frames',esc(safe.daq_num_dropped_frames)],['Sampling',esc(daqStatus.sampling_frequency_hz?`${daqStatus.sampling_frequency_hz} Hz`:'—')],['Station',esc(safe.station_id)],['Software',esc(safe.software_version)],['Source hash',esc(safe.software_git_short_hash)],['GPS',esc(safe.gps_status)]
   ]);
   const settings=snapshot.settings||{}; const sf=settings.fields||{}; $('settings-rows').innerHTML=Object.keys(sf).sort().map(key=>[key,safeValue(sf[key])]).map(([key,value])=>`<tr><th>${esc(key)}</th><td>${value}</td></tr>`).join('')||'<tr><td colspan="2">Tidak tersedia</td></tr>';
-  $('source-url').textContent=snapshot.collector?.base_url||state.dataUrl; $('message').textContent=`Snapshot berhasil dibaca · ${new Date().toLocaleTimeString()}`;
+  $('source-url').textContent=snapshot.collector?.base_url||state.dataUrl; setReadStatus(`Snapshot berhasil dibaca · ${new Date().toLocaleTimeString()}`,'good');
 }
-async function refreshMqtt() { try { const r=await fetch('/api/mqtt',{cache:'no-store'}); renderMqtt(await r.json()); } catch(e) { renderMqtt({enabled:true,connection:'error',host:'?',port:'?',received:0,valid:0,invalid:0,total_bytes:0,last_latency_ms:null,last_age_ms:null,last_topic:null,last_by_kind:{error:'monitor tidak tersedia'}}); } }
-async function refresh() { const button=$('refresh'); button.disabled=true; $('message').textContent='Membaca Data Out…'; try { const url='/api/snapshot?base_url='+encodeURIComponent(state.dataUrl); const response=await fetch(url,{cache:'no-store'}); const data=await response.json(); if(!response.ok) throw new Error(data.error||'snapshot gagal'); render(data); } catch(error) { $('message').textContent='Read error: '+error.message; } finally { button.disabled=false; } refreshMqtt(); }
+async function refreshMqtt() { const sequence=++state.mqttSequence; try { const r=await fetch('/api/mqtt',{cache:'no-store'}); const payload=await r.json(); if(sequence!==state.mqttSequence) return; renderMqtt(payload); } catch(e) { if(sequence!==state.mqttSequence) return; renderMqtt({enabled:true,connection:'error',host:'?',port:'?',received:0,valid:0,invalid:0,total_bytes:0,last_latency_ms:null,last_age_ms:null,last_topic:null,last_by_kind:{error:'monitor tidak tersedia'}}); } }
+async function refresh() {
+  const sequence=++state.refreshSequence;
+  if(state.refreshController) state.refreshController.abort();
+  const controller=typeof AbortController==='function'?new AbortController():null;
+  state.refreshController=controller;
+  const button=$('refresh'); button.disabled=true; setReadStatus('Membaca Data Out…');
+  try {
+    const url='/api/snapshot?base_url='+encodeURIComponent(state.dataUrl); const options={cache:'no-store'}; if(controller) options.signal=controller.signal;
+    const response=await fetch(url,options); const data=await response.json();
+    if(sequence!==state.refreshSequence) return;
+    if(!response.ok) throw new Error(data.error||'snapshot gagal');
+    render(data);
+  } catch(error) {
+    if(sequence!==state.refreshSequence||error?.name==='AbortError') return;
+    const message=error?.message||'snapshot gagal'; setPolarUnavailable(`Kurva dihapus setelah refresh gagal: ${message}`); setReadStatus('Read error: '+message,'bad');
+  } finally {
+    if(sequence===state.refreshSequence){ button.disabled=false; if(state.refreshController===controller) state.refreshController=null; }
+  }
+  if(sequence===state.refreshSequence) refreshMqtt();
+}
 function setAuto(seconds) { if(state.autoTimer){ clearInterval(state.autoTimer); state.autoTimer=null; } const interval=Number(seconds||0); $('refresh-interval').value=String(interval); if(interval>0){ refresh(); state.autoTimer=setInterval(refresh,interval*1000); $('auto-refresh').textContent=`Auto: ${interval}s`; } else { $('auto-refresh').textContent='Auto: off'; } }
 function openSettings(tab='connection') { $('settings-modal').hidden=false; selectTab(tab); }
 function closeSettings() { $('settings-modal').hidden=true; }
@@ -796,6 +955,7 @@ function readLogo(file) { if(!file) return; if(file.size>256*1024){ setStatus('b
 function resetLogo() { state.pendingLogo=''; $('brand-logo').value=''; $('brand-preview').hidden=true; $('preview-placeholder').hidden=false; setStatus('brand-status','Logo akan dihapus setelah disimpan.',''); }
 async function saveBranding() { const appName=$('brand-name').value.trim(); const logo=state.pendingLogo===null?(state.branding?.logo_data_url||''):state.pendingLogo; try { const r=await fetch('/api/admin/branding',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({app_name:appName,logo_data_url:logo})}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'branding gagal disimpan'); state.pendingLogo=null; renderBranding(data); setStatus('brand-status','Branding tersimpan di Ground Console lokal.','good'); } catch(e) { setStatus('brand-status',e.message,'bad'); } }
 $('refresh').addEventListener('click',refresh); $('auto-refresh').addEventListener('click',()=>setAuto(state.autoTimer?0:5)); $('settings-open').addEventListener('click',()=>openSettings('connection')); $('settings-close').addEventListener('click',closeSettings); document.querySelector('[data-close-settings]').addEventListener('click',closeSettings); document.querySelectorAll('.tab').forEach(button=>button.addEventListener('click',()=>selectTab(button.dataset.tab))); $('apply-connection').addEventListener('click',applyConnection); $('monitor-connect').addEventListener('click',connectMqtt); $('admin-login').addEventListener('click',adminLogin); $('admin-logout').addEventListener('click',adminLogout); $('brand-logo').addEventListener('change',event=>readLogo(event.target.files[0])); $('brand-reset-logo').addEventListener('click',resetLogo); $('brand-save').addEventListener('click',saveBranding); $('refresh-interval').addEventListener('change',event=>setAuto(event.target.value)); document.addEventListener('keydown',event=>{if(event.key==='Escape')closeSettings();});
+window.addEventListener('resize',()=>drawPolar(state.polar.values,state.polar.angle,state.polar.fresh,state.polar.figType,state.polar.compassOffset),{passive:true});
 loadBranding();
 if (initialConfig && initialConfig.refresh_seconds > 0) setAuto(initialConfig.refresh_seconds); else refresh();
 </script>
