@@ -188,6 +188,47 @@ def test_ground_console_http_smoke_and_target_allowlist() -> None:
             assert "aria-describedby=\"polar-legend compass-detail\"" in html
             assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in html
             assert 'id="doa-compass"' not in html
+            # Mission-control shell and safe OSM readiness state.
+            assert 'class="nav-rail"' in html
+            assert 'data-nav="overview"' in html
+            assert 'data-nav="live-doa"' in html
+            assert 'data-nav="tracks-targets"' in html
+            assert 'data-nav="spectrum"' in html
+            assert 'data-nav="events"' in html
+            assert 'data-nav="system-health"' in html
+            assert 'data-nav="configuration"' in html
+            assert 'id="map-panel"' in html
+            assert 'data-map-state="waiting"' in html
+            assert "MAP NOT CONFIGURED" in html
+            assert "WAITING FOR COORDINATES" in html
+            assert 'id="map-state-badge"' in html
+            assert "UNAVAILABLE · NO POSITION FIX" in html
+            assert "REAL COORDINATES · NO MARKER" in html
+            assert "© OpenStreetMap contributors" in html
+            assert "function renderMap" in html
+            assert "if(latitude===0&&longitude===0) return null" in html
+            assert "gpsDisabled" in html
+            assert "freshnessReady" in html
+            assert "coordinateConflict" in html
+            assert "WAITING FOR CONSISTENT COORDINATES" in html
+            assert "No fresh, valid, mutually consistent latitude / longitude fields" in html
+            assert "GPS is disabled; 0/0 is treated as unset" in html
+            assert "no synthetic marker" in html
+            assert ".inspector-column .table-wrap .data-table { width: 100%; min-width: 0;" in html
+            assert ".inspector-column .table-wrap { overflow-x: visible; }" in html
+            assert "minmax(286px, 300px)" in html
+            assert "minmax(276px, 288px)" in html
+            assert 'class="detail-side-stack"' in html
+            assert "minmax(0, 1.45fr) minmax(270px, .85fr)" in html
+            assert "--subtle: #7890bb" in html
+            assert 'id="tracks-targets"' in html
+            assert 'id="event-log"' in html
+            assert 'id="health-grid"' in html
+            assert 'class="inspector-column"' in html
+            assert "@media (max-width: 700px)" in html
+            assert ".spatial-grid { grid-template-columns: 1fr; }" in html
+            assert "tile.openstreetmap.org" not in html
+            assert "L.map(" not in html
 
         capabilities = get_json(base + "/api/capabilities")
         assert capabilities["read_only"] is True
