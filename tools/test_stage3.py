@@ -194,6 +194,11 @@ def test_ground_console_http_smoke_and_target_allowlist() -> None:
             assert "logo-open-settings" not in html
             assert "Branding saved and verified from Ground Console local storage." in html
             assert "const verify=await fetch('/api/branding'" in html
+            assert "function setSnapshotUnavailable" in html
+            assert "Previous signal rows cleared." in html
+            assert "Previous native views cleared." in html
+            assert "Previous node health cleared." in html
+            assert "Previous map coordinates cleared after read failure." in html
             assert 'data-nav="overview"' in html
             assert 'data-nav="live-doa"' in html
             assert 'data-nav="tracks-targets"' in html
