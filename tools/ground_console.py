@@ -42,6 +42,54 @@ from urllib.parse import parse_qs, urlsplit
 
 from sdr_doa_collector import CollectorError, DEFAULT_ALLOWED_DATA_HOSTS, collect
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _read_dotenv(path: Path = DEFAULT_ENV_PATH) -> Dict[str, str]:
+    """Read a small, dependency-free dotenv subset without logging values.
+
+    Existing process environment variables always remain authoritative; this
+    helper only supplies local fallback values for variables that are absent.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return {}
+
+    values: Dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, separator, raw_value = line.partition("=")
+        key = key.strip()
+        if not separator or not _ENV_KEY_RE.fullmatch(key):
+            continue
+        value = raw_value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def _admin_password_from_sources(
+    environ: Optional[Dict[str, str]] = None,
+    dotenv_values: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
+    """Resolve admin password with process environment precedence."""
+    source = os.environ if environ is None else environ
+    if "SDR_DOA_ADMIN_PASSWORD" in source:
+        return source["SDR_DOA_ADMIN_PASSWORD"] or None
+    fallback = dotenv_values if dotenv_values is not None else _read_dotenv()
+    return fallback.get("SDR_DOA_ADMIN_PASSWORD") or None
+
+
 # HTTP Data Out is the local-LAN path. PPP is reserved for MQTT transport;
 # keeping this set identical to the collector prevents a UI-only route from
 # advertising a target that the actual GET collector will reject.
@@ -53,10 +101,11 @@ DEFAULT_APP_NAME = "SDR-DoA Ground Console"
 DEFAULT_BRANDING_PATH = Path.home() / ".config" / "sdr-doa-ground-console" / "branding.json"
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "sdr-doa-ground-console" / "console.json"
 # Admin authentication is opt-in; never ship a fallback credential.
-ADMIN_PASSWORD = os.environ.get("SDR_DOA_ADMIN_PASSWORD", "")
+# Process environment wins; a repository-root .env is only a local fallback.
+ADMIN_PASSWORD = _admin_password_from_sources()
 if not ADMIN_PASSWORD:
     # Branding remains readable, but admin login is disabled until the operator
-    # supplies the local-only password through the environment.
+    # supplies the local-only password through the environment or .env fallback.
     ADMIN_PASSWORD = None
 ADMIN_SESSION_COOKIE = "sdr_doa_admin"
 ADMIN_SESSION_TTL_SECONDS = 30 * 60

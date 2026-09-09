@@ -71,6 +71,25 @@ def get_json(url: str) -> Dict[str, Any]:
         return json.loads(response.read().decode("utf-8"))
 
 
+def test_dotenv_admin_password_precedence_and_parser() -> None:
+    env_file = Path(tempfile.mkdtemp(prefix="sdr-doa-dotenv-test-")) / ".env"
+    env_file.write_text(
+        "# comment\nexport SDR_DOA_ADMIN_PASSWORD='from-dotenv'\nIGNORED LINE\n",
+        encoding="utf-8",
+    )
+    parsed = ground_console._read_dotenv(env_file)
+    assert parsed["SDR_DOA_ADMIN_PASSWORD"] == "from-dotenv"
+    assert ground_console._admin_password_from_sources({}, parsed) == "from-dotenv"
+    assert ground_console._admin_password_from_sources(
+        {"SDR_DOA_ADMIN_PASSWORD": "from-environment"}, parsed
+    ) == "from-environment"
+    assert ground_console._admin_password_from_sources(
+        {"SDR_DOA_ADMIN_PASSWORD": ""}, parsed
+    ) is None
+    env_file.unlink()
+    env_file.parent.rmdir()
+
+
 def test_valid_fixture_is_parsed_and_gated() -> None:
     result = disk_collection("valid")
     assert result["status"]["daq_health"] == "PASS"
