@@ -12,6 +12,8 @@ __pycache__/
 *.log
 dist/
 build/
+node_modules/
+*.tsbuildinfo
 .venv/
 venv/
 

@@ -1,0 +1,421 @@
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import type { ReactElement } from 'react';
+import { gsap } from 'gsap';
+import { connectMqtt, getBranding, getConsoleConfig, getMqtt, getSnapshot } from './api';
+import type { Branding, CompassConfig, ConsoleConfig, GpsConfig, MqttSnapshot, TelemetrySnapshot } from './types';
+import { DEFAULT_COMPASS_CONFIG } from './lib/polar';
+import { DEFAULT_GPS_CONFIG } from './lib/map';
+import { DEFAULT_CONSOLE_CONFIG, deriveDataState } from './lib/telemetry';
+import { ConfigurationPage } from './pages/ConfigurationPage';
+import { DoADiagnosticsPage } from './pages/DoADiagnosticsPage';
+import { MessageMonitorPage } from './pages/MessageMonitorPage';
+import { OverviewPage } from './pages/OverviewPage';
+import { SystemHealthPage } from './pages/SystemHealthPage';
+import { ConsoleShell } from './components/Shell';
+import type { RouteName } from './components/Shell';
+import { useRoute } from './components/Shell';
+
+const DEFAULT_BRANDING: Branding = { app_name: 'SDR-DoA', logo_data_url: '' };
+const DEFAULT_LOCAL_EXPIRY_MS = 5_000;
+
+type FreshnessRecord = Record<string, unknown>;
+
+type RefreshOptions = {
+  syncMqtt?: boolean;
+  allowBeforeConfig?: boolean;
+};
+
+function monotonicNow(): number {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function finiteNonNegative(value: unknown): number | null {
+  const number = finiteNumber(value);
+  return number !== null && number >= 0 ? number : null;
+}
+
+function asFreshnessRecord(value: unknown): FreshnessRecord | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as FreshnessRecord : null;
+}
+
+function freshnessRemaining(value: unknown): number | undefined {
+  const freshness = asFreshnessRecord(value);
+  if (!freshness || !Object.prototype.hasOwnProperty.call(freshness, 'max_age_ms')) return undefined;
+  // The collector marks the Ground/node clock as unknown when the renderer's
+  // reference is intentionally unverified. That does not make a parsed DoA
+  // record stale; candidate-local windows below still bound residence time.
+  if (freshness.freshness_known === false) return undefined;
+  if (freshness.fresh === false || (freshness.future_skew === true && freshness.fresh !== true)) return -1;
+  const maxAge = finiteNonNegative(freshness.max_age_ms);
+  const age = finiteNonNegative(freshness.age_ms);
+  if (maxAge === null || age === null) return -1;
+  return maxAge - age;
+}
+
+/**
+ * Keep the last renderer evidence bounded by the time still left in the
+ * collector's freshness window. The server age is already non-zero by the
+ * time a response arrives, so the full max_age must never be restarted.
+ */
+export function localSnapshotFresh(
+  snapshot: TelemetrySnapshot | null,
+  receivedAtMonotonic: number | null,
+  now = monotonicNow(),
+): boolean {
+  if (!snapshot || receivedAtMonotonic === null || !Number.isFinite(receivedAtMonotonic)) return false;
+  const elapsed = now - receivedAtMonotonic;
+  if (!Number.isFinite(elapsed) || elapsed < 0 || snapshot.status?.available !== true) return false;
+
+  const freshnessValues: unknown[] = [snapshot.status?.freshness];
+  for (const candidate of Object.values(snapshot.doa_candidates ?? {})) {
+    freshnessValues.push(candidate?.freshness);
+  }
+
+  const remainingWindows: number[] = [];
+  for (const freshness of freshnessValues) {
+    const remaining = freshnessRemaining(freshness);
+    if (remaining === undefined) continue;
+    if (remaining < 0) return false;
+    remainingWindows.push(remaining);
+  }
+
+  const expiry = remainingWindows.length ? Math.min(...remainingWindows) : DEFAULT_LOCAL_EXPIRY_MS;
+  return elapsed <= expiry;
+}
+
+function isAbortError(error: unknown): boolean {
+  if (error && typeof error === 'object' && 'name' in error) {
+    return String((error as { name?: unknown }).name) === 'AbortError';
+  }
+  return false;
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+function useReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(false);
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
+    const query = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const update = () => setReduced(query.matches);
+    update();
+
+    if (typeof query.addEventListener === 'function') {
+      query.addEventListener('change', update);
+      return () => query.removeEventListener('change', update);
+    }
+    query.addListener?.(update);
+    return () => query.removeListener?.(update);
+  }, []);
+  return reduced;
+}
+
+function PageForRoute({
+  route,
+  snapshot,
+  localFresh,
+  mqtt,
+  config,
+  branding,
+  gpsConfig,
+  compassConfig,
+  onGpsConfigChanged,
+  onCompassConfigChanged,
+  onConfigSaved,
+  onBrandingChanged,
+  onMqttChanged,
+  onRefreshMqtt,
+  onReconnectMqtt,
+}: {
+  route: RouteName;
+  snapshot: TelemetrySnapshot | null;
+  localFresh: boolean;
+  mqtt: MqttSnapshot | null;
+  config: ConsoleConfig;
+  branding: Branding;
+  gpsConfig: GpsConfig;
+  compassConfig: CompassConfig;
+  onGpsConfigChanged: (next: GpsConfig) => void;
+  onCompassConfigChanged: (next: CompassConfig) => void;
+  onConfigSaved: (next: ConsoleConfig) => Promise<void>;
+  onBrandingChanged: (next: Branding) => void;
+  onMqttChanged: (next: MqttSnapshot) => void;
+  onRefreshMqtt: () => Promise<void>;
+  onReconnectMqtt: (host: string, port: number) => Promise<void>;
+}): ReactElement {
+  switch (route) {
+    case 'system-health': return <SystemHealthPage snapshot={snapshot} mqtt={mqtt} localSnapshotFresh={localFresh} />;
+    case 'doa-diagnostics': return <DoADiagnosticsPage snapshot={snapshot} localSnapshotFresh={localFresh} />;
+    case 'configuration': return <ConfigurationPage config={config} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={onGpsConfigChanged} onCompassConfigChanged={onCompassConfigChanged} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} />;
+    case 'message-monitor': return <MessageMonitorPage mqtt={mqtt} config={config} onMqttChanged={onMqttChanged} onRefreshMqtt={onRefreshMqtt} onReconnectMqtt={onReconnectMqtt} />;
+    case 'overview':
+    default: return <OverviewPage snapshot={snapshot} localSnapshotFresh={localFresh} gpsConfig={gpsConfig} compassConfig={compassConfig} />;
+  }
+}
+
+export default function App(): ReactElement {
+  const [route, navigate] = useRoute();
+  const [config, setConfig] = useState<ConsoleConfig>(DEFAULT_CONSOLE_CONFIG);
+  const [branding, setBranding] = useState<Branding>(DEFAULT_BRANDING);
+  const [snapshot, setSnapshot] = useState<TelemetrySnapshot | null>(null);
+  const [mqtt, setMqtt] = useState<MqttSnapshot | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [readError, setReadError] = useState<string | null>(null);
+  const [lastReadAt, setLastReadAt] = useState<Date | null>(null);
+  const [receivedAtMonotonic, setReceivedAtMonotonic] = useState<number | null>(null);
+  const [expiryTick, setExpiryTick] = useState(0);
+  const [gpsConfig, setGpsConfig] = useState<GpsConfig>(DEFAULT_GPS_CONFIG);
+  const [compassConfig, setCompassConfig] = useState<CompassConfig>(DEFAULT_COMPASS_CONFIG);
+  const reducedMotion = useReducedMotion();
+
+  const mountedRef = useRef(false);
+  const configRef = useRef<ConsoleConfig>(config);
+  const configReadyRef = useRef(false);
+  const configSequence = useRef(0);
+  const configController = useRef<AbortController | null>(null);
+  const brandingController = useRef<AbortController | null>(null);
+  const refreshSequence = useRef(0);
+  const mqttSequence = useRef(0);
+  const refreshController = useRef<AbortController | null>(null);
+  const mqttController = useRef<AbortController | null>(null);
+  const contentRef = useRef<HTMLElement | null>(null);
+
+  // Keep the default argument of refresh independent of render closures while
+  // still making a newly verified config available immediately to a callback.
+  configRef.current = config;
+
+  const refreshMqtt = useCallback(async (): Promise<void> => {
+    if (!mountedRef.current) return;
+    const sequence = ++mqttSequence.current;
+    mqttController.current?.abort();
+    const controller = new AbortController();
+    mqttController.current = controller;
+
+    try {
+      const next = await getMqtt(controller.signal);
+      if (!mountedRef.current || sequence !== mqttSequence.current) return;
+      setMqtt(next);
+    } catch (error: unknown) {
+      if (!mountedRef.current || sequence !== mqttSequence.current || isAbortError(error)) return;
+      // Never leave a previously healthy snapshot looking current after a
+      // failed monitor read. The initiating page surfaces the error text; the
+      // shell sees an explicitly cleared MQTT state.
+      setMqtt(null);
+      throw error;
+    } finally {
+      if (mqttController.current === controller) mqttController.current = null;
+    }
+  }, []);
+
+  const reconnectMqtt = useCallback(async (host: string, port: number): Promise<void> => {
+    if (!mountedRef.current) return;
+    const sequence = ++mqttSequence.current;
+    mqttController.current?.abort();
+    const controller = new AbortController();
+    mqttController.current = controller;
+    setMqtt(null);
+
+    try {
+      const next = await connectMqtt(host, port, controller.signal);
+      if (!mountedRef.current || sequence !== mqttSequence.current) return;
+      setMqtt(next);
+    } catch (error: unknown) {
+      if (!mountedRef.current || sequence !== mqttSequence.current || isAbortError(error)) return;
+      setMqtt(null);
+      throw error;
+    } finally {
+      if (mqttController.current === controller) mqttController.current = null;
+    }
+  }, []);
+
+  const applyMqtt = useCallback((next: MqttSnapshot): void => {
+    if (!mountedRef.current) return;
+    ++mqttSequence.current;
+    mqttController.current?.abort();
+    mqttController.current = null;
+    setMqtt(next);
+  }, []);
+
+  const refresh = useCallback(async (baseUrl?: string, options: RefreshOptions = {}): Promise<void> => {
+    if (!mountedRef.current) return;
+    if (!configReadyRef.current && options.allowBeforeConfig !== true) {
+      setReadError('Local console configuration unavailable; Data Out read was not attempted.');
+      return;
+    }
+
+    const targetBaseUrl = baseUrl ?? configRef.current.base_url;
+    if (!targetBaseUrl) {
+      setReadError('No Data Out base URL is configured.');
+      return;
+    }
+
+    const sequence = ++refreshSequence.current;
+    refreshController.current?.abort();
+    const controller = new AbortController();
+    refreshController.current = controller;
+    setLoading(true);
+    setReadError(null);
+
+    try {
+      const next = await getSnapshot(targetBaseUrl, controller.signal);
+      if (!mountedRef.current || sequence !== refreshSequence.current) return;
+      const receivedAt = monotonicNow();
+      setSnapshot(next);
+      setReceivedAtMonotonic(receivedAt);
+      setLastReadAt(new Date());
+      setReadError(null);
+      if (options.syncMqtt !== false) void refreshMqtt().catch(() => undefined);
+    } catch (error: unknown) {
+      if (!mountedRef.current || sequence !== refreshSequence.current || isAbortError(error)) return;
+      // Keep the previous evidence in place, but currentLocalFresh remains false
+      // while this error is displayed so stale data cannot look live.
+      setReadError(errorMessage(error, 'Data Out snapshot failed.'));
+    } finally {
+      if (refreshController.current === controller) {
+        refreshController.current = null;
+        if (mountedRef.current && sequence === refreshSequence.current) setLoading(false);
+      }
+    }
+  }, [refreshMqtt]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    const initialConfigSequence = ++configSequence.current;
+    const initialConfigController = new AbortController();
+    const initialBrandingController = new AbortController();
+    configController.current = initialConfigController;
+    brandingController.current = initialBrandingController;
+
+    getBranding(initialBrandingController.signal).then((next) => {
+      if (mountedRef.current) setBranding(next);
+    }).catch((error: unknown) => {
+      if (!mountedRef.current || isAbortError(error)) return;
+      // The default branding is safe and remains visible when the local
+      // branding endpoint is unavailable.
+    });
+
+    getConsoleConfig(initialConfigController.signal).then((next) => {
+      if (!mountedRef.current || initialConfigSequence !== configSequence.current) return;
+      configRef.current = next;
+      configReadyRef.current = true;
+      setConfig(next);
+      // MQTT configuration can change independently of Data Out availability;
+      // start its guarded read immediately and do not duplicate it on snapshot.
+      void refreshMqtt().catch(() => undefined);
+      void refresh(next.base_url, { syncMqtt: false });
+    }).catch((error: unknown) => {
+      if (!mountedRef.current || initialConfigSequence !== configSequence.current || isAbortError(error)) return;
+      configReadyRef.current = false;
+      setLoading(false);
+      // Do not substitute DEFAULT_CONSOLE_CONFIG.base_url here. A failed local
+      // config read must never trigger an unverified remote Data Out request.
+      setReadError('Local console configuration unavailable; Data Out read was not attempted.');
+    });
+
+    // Initial MQTT read starts only after local configuration resolves.
+
+    return () => {
+      mountedRef.current = false;
+      ++configSequence.current;
+      ++refreshSequence.current;
+      ++mqttSequence.current;
+      configController.current?.abort();
+      brandingController.current?.abort();
+      refreshController.current?.abort();
+      mqttController.current?.abort();
+      configController.current = null;
+      brandingController.current = null;
+      refreshController.current = null;
+      mqttController.current = null;
+    };
+  }, [refresh, refreshMqtt]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setExpiryTick((value) => value + 1), 500);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!configReadyRef.current || !Number.isFinite(config.refresh_seconds) || config.refresh_seconds <= 0) return undefined;
+    const timer = window.setInterval(() => {
+      if (configReadyRef.current) void refresh();
+    }, config.refresh_seconds * 1000);
+    return () => window.clearInterval(timer);
+  }, [config.refresh_seconds, refresh]);
+
+  useLayoutEffect(() => {
+    const content = contentRef.current;
+    if (!content) return undefined;
+
+    const heading = content.querySelector<HTMLElement>('h1');
+    if (heading) {
+      heading.tabIndex = -1;
+      try {
+        heading.focus({ preventScroll: true });
+      } catch {
+        heading.focus();
+      }
+    }
+
+    if (reducedMotion) return undefined;
+    const animationContext = gsap.context(() => {
+      gsap.fromTo(
+        content,
+        { opacity: 0.35, y: 8 },
+        { opacity: 1, y: 0, duration: 0.28, ease: 'power2.out', clearProps: 'opacity,transform' },
+      );
+    }, content);
+    return () => animationContext.revert();
+  }, [route, reducedMotion]);
+
+  const onConfigSaved = useCallback(async (next: ConsoleConfig): Promise<void> => {
+    if (!mountedRef.current) return;
+    ++configSequence.current;
+    configController.current?.abort();
+    configController.current = null;
+    configRef.current = next;
+    configReadyRef.current = true;
+    setConfig(next);
+    setReadError(null);
+    // A config save can replace the local subscriber. Read its state under the
+    // same guard before the snapshot request is allowed to update the shell.
+    void refreshMqtt().catch(() => undefined);
+    await refresh(next.base_url, { syncMqtt: false, allowBeforeConfig: true });
+  }, [refresh, refreshMqtt]);
+
+  const onBrandingChanged = useCallback((next: Branding): void => {
+    if (mountedRef.current) setBranding(next);
+  }, []);
+
+  const currentLocalFresh = expiryTick >= 0
+    && !loading
+    && readError === null
+    && localSnapshotFresh(snapshot, receivedAtMonotonic);
+
+  return (
+    <ConsoleShell
+      route={route}
+      onNavigate={navigate}
+      branding={branding}
+      snapshot={snapshot}
+      localSnapshotFresh={currentLocalFresh}
+      loading={loading}
+      readError={readError}
+      lastReadAt={lastReadAt}
+      mqttConnection={mqtt?.connection}
+      onRefresh={() => void refresh()}
+    >
+      <section ref={contentRef} className="route-content" key={route}>
+        <PageForRoute route={route} snapshot={snapshot} localFresh={currentLocalFresh} mqtt={mqtt} config={config} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={setGpsConfig} onCompassConfigChanged={setCompassConfig} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} onMqttChanged={applyMqtt} onRefreshMqtt={refreshMqtt} onReconnectMqtt={reconnectMqtt} />
+      </section>
+    </ConsoleShell>
+  );
+}
+
+export { deriveDataState };

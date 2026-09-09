@@ -1389,8 +1389,40 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def _is_admin(self) -> bool:
         return self.console_server.is_admin_token(self._admin_token())
 
+    def _send_frontend(self, request_path: str) -> None:
+        """Serve only built UI assets, never source, dotfiles or symlinks."""
+        root = self.console_server.frontend_dir
+        relative = "index.html" if request_path == "/" else request_path.lstrip("/")
+        parts = relative.split("/")
+        mime = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png", ".svg": "image/svg+xml", ".woff2": "font/woff2", ".ico": "image/x-icon"}
+        if root is None or any(not part or part.startswith(".") for part in parts) or "%" in relative or "\\" in relative:
+            self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            return
+        path = root.joinpath(*parts)
+        if any(root.joinpath(*parts[:i]).is_symlink() for i in range(1, len(parts) + 1)) or path.suffix not in mime or (relative != "index.html" and not relative.startswith("assets/")):
+            self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            return
+        try:
+            path.resolve().relative_to(root.resolve())
+            body = path.read_bytes()
+        except (OSError, ValueError):
+            self._send_json({"error": "Frontend build unavailable. Run npm ci and npm run build in frontend, or use --legacy-ui."}, HTTPStatus.NOT_FOUND)
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", mime[path.suffix])
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
+        self.send_header("Cache-Control", "no-store" if path.suffix == ".html" else "public, max-age=3600")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://tile.openstreetmap.org; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
+        if self.console_server.frontend_dir is not None and not parsed.path.startswith("/api/"):
+            self._send_frontend(parsed.path)
+            return
         if parsed.path == "/":
             branding = self.console_server.get_branding()
             config = self.console_server.get_config()
@@ -1554,7 +1586,9 @@ class GroundConsoleServer(ThreadingHTTPServer):
         branding_path: Optional[str] = None,
         config_path: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
+        frontend_dir: Optional[Path] = None,
     ):
+        self.frontend_dir = Path(frontend_dir).resolve() if frontend_dir is not None else None
         if not _is_loopback_bind(address[0]):
             raise ValueError("Ground Console must bind to loopback; admin branding is local-only")
         if not _is_allowed_base_url(base_url):
@@ -1677,6 +1711,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Local read-only SDR-DoA Ground Console")
     parser.add_argument("--base-url", default="http://doasdr.local:8081", help="SDR-DoA Data Out base URL")
+    parser.add_argument("--legacy-ui", action="store_true", help="use the previous embedded UI instead of the frontend build")
     parser.add_argument("--bind", default=DEFAULT_BIND, help="local bind address")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="local console port")
     parser.add_argument("--mqtt-host", default="", help="optional local MQTT monitor host; subscriber-only")
@@ -1711,6 +1746,7 @@ def main() -> int:
         args.branding_path,
         str(config_path),
         config,
+        frontend_dir=None if args.legacy_ui else PROJECT_ROOT / "frontend" / "dist",
     )
     print(f"Ground Console: http://{args.bind}:{args.port}/", flush=True)
     print(f"Read-only Data Out: {config['base_url']}", flush=True)
