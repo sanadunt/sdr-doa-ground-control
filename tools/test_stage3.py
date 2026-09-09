@@ -171,8 +171,9 @@ def test_ground_console_http_smoke_and_target_allowlist() -> None:
             assert 'id="doa-polar"' in html
             assert "function drawPolar" in html
             assert 'class="app-chrome"' in html
-            assert "--bg: #070b1c" in html
-            assert "--accent: #2de2e6" in html
+            assert "--bg: #07140d" in html
+            assert "--accent: #39d98a" in html
+            assert "--good: #55e38c" in html
             assert 'id="delivery-state"' in html
             assert "refreshSequence" in html
             assert "AbortController" in html
@@ -229,7 +230,7 @@ def test_ground_console_http_smoke_and_target_allowlist() -> None:
             assert "minmax(276px, 288px)" in html
             assert 'class="detail-side-stack"' in html
             assert "minmax(0, 1.45fr) minmax(270px, .85fr)" in html
-            assert "--subtle: #7890bb" in html
+            assert "--subtle: #7fae89" in html
             assert 'id="tracks-targets"' in html
             assert 'id="event-log"' in html
             assert 'id="health-grid"' in html
