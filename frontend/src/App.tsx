@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { gsap } from 'gsap';
 import { connectMqtt, getBranding, getConsoleConfig, getMqtt, getSnapshot } from './api';
@@ -14,6 +14,8 @@ import { SystemHealthPage } from './pages/SystemHealthPage';
 import { ConsoleShell } from './components/Shell';
 import type { RouteName } from './components/Shell';
 import { useRoute } from './components/Shell';
+import { SimulationPage } from './pages/SimulationPage';
+import { DEFAULT_SIMULATION, simulationSnapshot, randomizeSimulationSettings } from './lib/simulation';
 
 const DEFAULT_BRANDING: Branding = { app_name: 'SDR-DoA', logo_data_url: '' };
 const DEFAULT_LOCAL_EXPIRY_MS = 5_000;
@@ -173,6 +175,18 @@ export default function App(): ReactElement {
   const [gpsConfig, setGpsConfig] = useState<GpsConfig>(DEFAULT_GPS_CONFIG);
   const [compassConfig, setCompassConfig] = useState<CompassConfig>(DEFAULT_COMPASS_CONFIG);
   const reducedMotion = useReducedMotion();
+  const [simulationEnabled, setSimulationEnabled] = useState(false);
+  const [simulationAutomatic, setSimulationAutomatic] = useState(false);
+  const [simulationSettings, setSimulationSettings] = useState(DEFAULT_SIMULATION);
+  const syntheticSnapshot = useMemo(() => simulationSnapshot(simulationSettings), [simulationSettings]);
+  const randomizeSimulation = useCallback(() => {
+    setSimulationSettings(randomizeSimulationSettings);
+  }, []);
+  useEffect(() => {
+    if (!simulationEnabled || !simulationAutomatic) return;
+    const timer = window.setInterval(randomizeSimulation, 1000);
+    return () => window.clearInterval(timer);
+  }, [simulationEnabled, simulationAutomatic, randomizeSimulation]);
 
   const mountedRef = useRef(false);
   const configRef = useRef<ConsoleConfig>(config);
@@ -366,9 +380,9 @@ export default function App(): ReactElement {
     if (reducedMotion) return undefined;
     const animationContext = gsap.context(() => {
       gsap.fromTo(
-        content,
-        { opacity: 0.35, y: 8 },
-        { opacity: 1, y: 0, duration: 0.28, ease: 'power2.out', clearProps: 'opacity,transform' },
+        content.querySelectorAll('.section-heading, .overview-intro, .panel'),
+        { opacity: 0.6, y: 10 },
+        { opacity: 1, y: 0, duration: 0.32, stagger: 0.035, ease: 'power2.out', clearProps: 'opacity,transform' },
       );
     }, content);
     return () => animationContext.revert();
@@ -411,8 +425,11 @@ export default function App(): ReactElement {
       mqttConnection={mqtt?.connection}
       onRefresh={() => void refresh()}
     >
+      {simulationEnabled ? <div className="simulation-banner" role="status"><strong>SIMULASI AKTIF — bukan data perangkat.</strong><span>Overview memakai data sintetis. Status header, health, diagnostics, dan MQTT tetap sumber nyata.</span><button className="secondary-button" type="button" onClick={() => { setSimulationEnabled(false); setSimulationAutomatic(false); }}>Matikan simulasi</button></div> : null}
       <section ref={contentRef} className="route-content" key={route}>
-        <PageForRoute route={route} snapshot={snapshot} localFresh={currentLocalFresh} mqtt={mqtt} config={config} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={setGpsConfig} onCompassConfigChanged={setCompassConfig} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} onMqttChanged={applyMqtt} onRefreshMqtt={refreshMqtt} onReconnectMqtt={reconnectMqtt} />
+        {route === 'simulation' ? <SimulationPage enabled={simulationEnabled} automatic={simulationAutomatic} settings={simulationSettings} onEnabled={enabled => { setSimulationEnabled(enabled); if (!enabled) setSimulationAutomatic(false); }} onAutomatic={setSimulationAutomatic} onSettings={setSimulationSettings} onRandomize={randomizeSimulation} onOverview={() => navigate('overview')} />
+          : route === 'overview' && simulationEnabled ? <OverviewPage snapshot={syntheticSnapshot} localSnapshotFresh={true} gpsConfig={gpsConfig} compassConfig={compassConfig} simulation={simulationSettings} />
+          : <PageForRoute route={route} snapshot={snapshot} localFresh={currentLocalFresh} mqtt={mqtt} config={config} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={setGpsConfig} onCompassConfigChanged={setCompassConfig} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} onMqttChanged={applyMqtt} onRefreshMqtt={refreshMqtt} onReconnectMqtt={reconnectMqtt} />}
       </section>
     </ConsoleShell>
   );

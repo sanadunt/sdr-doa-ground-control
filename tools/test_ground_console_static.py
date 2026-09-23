@@ -321,6 +321,9 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         )
         csp = result.headers.get("content-security-policy", "")
         self.assertTrue(csp, "built root must send a Content-Security-Policy header")
+        self.assertIn("connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org", csp)
+        self.assertIn("https://tile.openstreetmap.de", csp)
+        self.assertIn("https://tile.openstreetmap.org", csp)
         script_directives = []
         for raw_directive in csp.split(";"):
             directive = raw_directive.strip().lower()

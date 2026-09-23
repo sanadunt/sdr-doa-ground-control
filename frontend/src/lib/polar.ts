@@ -301,14 +301,14 @@ export function drawPolarCanvas(
     context.beginPath();
     drawCurve();
     context.closePath();
-    context.fillStyle = 'rgba(53,216,196,.14)';
+    context.fillStyle = cssVar('--plot-fill', 'rgba(229,180,91,.12)');
     context.fill();
     context.beginPath();
     drawCurve();
     context.closePath();
     context.strokeStyle = accent;
     context.lineWidth = 2;
-    context.shadowColor = 'rgba(53,216,196,.48)';
+    context.shadowColor = 'transparent';
     context.shadowBlur = 8;
     context.stroke();
 

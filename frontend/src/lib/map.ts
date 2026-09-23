@@ -1,6 +1,11 @@
 import type { Candidate, GpsConfig, GpsResolution, ManualGpsOverride, MapCoordinate, TelemetrySnapshot } from '../types';
 
 export const DEFAULT_OSM_TILE_TEMPLATE = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+// Public OSM-derived tile endpoint used first because some networks reject the
+// main tile.openstreetmap.org host even when the browser has normal HTTPS access.
+// Both endpoints are free; neither requires an API key.
+export const FALLBACK_OSM_TILE_TEMPLATE = 'https://tile.openstreetmap.de/{z}/{x}/{y}.png';
+export const OSM_TILE_TEMPLATES = [FALLBACK_OSM_TILE_TEMPLATE, DEFAULT_OSM_TILE_TEMPLATE] as const;
 export const DEFAULT_FALLBACK_COORDINATE = Object.freeze({ latitude: -6.932468839245536, longitude: 107.66069405900005 });
 export const DEFAULT_GPS_CONFIG: GpsConfig = {
   source: 'DATA_OUT',

@@ -11,11 +11,13 @@ export function OverviewPage({
   localSnapshotFresh,
   gpsConfig,
   compassConfig,
+  simulation,
 }: {
   snapshot: TelemetrySnapshot | null;
   localSnapshotFresh: boolean;
   gpsConfig: GpsConfig;
   compassConfig: CompassConfig;
+  simulation?: import('../lib/simulation').SimulationSettings;
 }): JSX.Element {
   const gpsResolution = resolveGpsSource(localSnapshotFresh ? snapshot : null, gpsConfig);
   const compassResolution = resolveCompassSource(localSnapshotFresh ? snapshot : null, { figType: compassConfig.manualFigType, compassOffset: compassConfig.manualCompassOffset }, compassConfig);
@@ -26,9 +28,9 @@ export function OverviewPage({
     <div className="page page-overview">
       <div className="overview-intro">
         <div>
-          <div className="panel-eyebrow">LOCAL OBSERVATION</div>
-          <h1>Signal field</h1>
-          <p>Native CSV and XML stay separate until comparable.</p>
+          <div className="panel-eyebrow">Observation workspace</div>
+          <h1>Direction finding</h1>
+          <p>Station reference and native angular response. Observation is not delivery readiness.</p>
         </div>
         <div className="overview-facts" aria-label="Overview data facts">
           <span>CSV {csv.available === true ? 'PRESENT' : '—'}</span>
@@ -37,11 +39,15 @@ export function OverviewPage({
         </div>
       </div>
       <div className="overview-spatial">
-        <TacticalMap coordinate={gpsResolution.coordinate} />
+        <TacticalMap
+          coordinate={simulation ? { latitude: simulation.latitude, longitude: simulation.longitude, source: 'SIMULATION' } : gpsResolution.coordinate}
+          snapshot={snapshot}
+          localSnapshotFresh={localSnapshotFresh}
+        />
         <PolarPanel
           snapshot={snapshot}
           localSnapshotFresh={localSnapshotFresh}
-          compassSettings={compassResolution.settings}
+          compassSettings={simulation ? { figType: 'Polar', compassOffset: 0 } : compassResolution.settings}
         />
       </div>
     </div>

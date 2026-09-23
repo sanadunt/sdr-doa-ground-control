@@ -152,7 +152,7 @@ export type CompassSourceMode = 'DATA_OUT' | 'MANUAL' | 'FALLBACK';
 export interface MapCoordinate {
   latitude: number;
   longitude: number;
-  source: 'CSV' | 'XML' | 'DATA_OUT' | 'MANUAL' | 'FALLBACK';
+  source: 'CSV' | 'XML' | 'DATA_OUT' | 'MANUAL' | 'FALLBACK' | 'SIMULATION';
 }
 
 export interface PolarSettings {
