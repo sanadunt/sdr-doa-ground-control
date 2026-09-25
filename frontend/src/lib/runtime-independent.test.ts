@@ -61,7 +61,7 @@ describe('renderer runtime freshness', () => {
 describe('branding response safety', () => {
   it('returns renderer-safe defaults for malformed or remote logo values', () => {
     expect(normalizeBranding({ app_name: '<unsafe>', logo_data_url: 'https://example.invalid/logo.png' })).toEqual({
-      app_name: 'SDR-DoA',
+      app_name: 'SDR-DoA Ground Console',
       logo_data_url: '',
     });
     expect(normalizeBranding({ app_name: ' Ground Console ', logo_data_url: '' })).toEqual({

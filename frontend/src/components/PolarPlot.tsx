@@ -23,6 +23,7 @@ export function PolarPlot({ values, settings, simulation }: { values: number[] |
   const renderQueue = useRef<Promise<unknown>>(Promise.resolve());
   const dataRevision = useRef(0);
   const layoutKey = useRef('');
+  const [compact, setCompact] = useState(false);
   const [controls, setControls] = useState({ head: 0, min: -60, max: 0, manual: false, revision: 0 });
   const [draft, setDraft] = useState({ head: '0', min: '-60', max: '0' });
   const [error, setError] = useState('');
@@ -50,10 +51,11 @@ export function PolarPlot({ values, settings, simulation }: { values: number[] |
       const css = getComputedStyle(document.documentElement);
       const color = (key: string) => css.getPropertyValue(key).trim();
       const samples = values?.length === 360 && values.every(Number.isFinite) ? [...values, values[0]] : [];
-      const ticks = Array.from({ length: 6 }, (_, i) => (high - low) * i / 5);
+      const tickCount = compact ? 2 : 6;
+      const ticks = Array.from({ length: tickCount }, (_, i) => (high - low) * i / (tickCount - 1));
       const angles = Array.from({ length: 12 }, (_, i) => i * 30);
       const cardinal: Record<number, string> = { 0: 'N', 90: 'E', 180: 'S', 270: 'W' };
-      const revision = `${polarUiRevision(settings, simulation)}:${controls.revision}`;
+      const revision = `${polarUiRevision(settings, simulation)}:${controls.revision}:${compact}`;
       const key = `${revision}:${low}:${high}:${theme}`;
       // Data-only updates must not replay the layout or Plotly's interaction
       // defaults. Restyle updates the curve while preserving rotated/zoomed axes.
@@ -77,7 +79,10 @@ export function PolarPlot({ values, settings, simulation }: { values: number[] |
         paper_bgcolor: color('--surface'), font: { color: color('--text'), size: 13 }, showlegend: false,
         polar: { bgcolor: color('--surface'), uirevision: revision,
           angularaxis: { rotation: 90 + controls.head, direction: 'clockwise', tickmode: 'array', tickvals: angles,
-            ticktext: angles.map(a => `${settings.figType === 'Compass' && cardinal[a] ? cardinal[a] + ' ' : ''}${a}°`), gridcolor: color('--line') },
+            ticktext: angles.map(a => {
+              if (settings.figType !== 'Compass' || !cardinal[a]) return `${a}°`;
+              return compact ? cardinal[a] : `${cardinal[a]} ${a}°`;
+            }), gridcolor: color('--line') },
           radialaxis: { range: [0, high - low], tickmode: 'array', tickvals: ticks,
             ticktext: ticks.map(v => `${Number((v + low).toFixed(1))} dB`), angle: 45, gridcolor: color('--line') },
         },
@@ -91,25 +96,36 @@ export function PolarPlot({ values, settings, simulation }: { values: number[] |
       }).catch(() => { if (!disposed) node.textContent = 'Plotly failed to load. Reload to retry.'; });
     };
     update();
-    const observer = new ResizeObserver(() => { if (plot && !disposed) void plot.Plots.resize(node); });
+    const observer = new ResizeObserver(() => {
+      const nextCompact = node.clientWidth < 420;
+      setCompact(current => current === nextCompact ? current : nextCompact);
+      if (plot && !disposed) void plot.Plots.resize(node);
+    });
     observer.observe(node);
     return () => { disposed = true; observer.disconnect(); };
-  }, [values, settings.figType, settings.compassOffset, simulation, low, high, controls, theme]);
-  return <><form className="plot-controls" onSubmit={event => {
-    event.preventDefault();
-    const head = Number(draft.head), min = Number(draft.min), max = Number(draft.max);
-    if (Object.values(draft).some(v => !v.trim()) || !validPlotRange(head, min, max)) { setError('Head Up harus 0–<360° dan dB minimum harus lebih kecil dari maksimum.'); return; }
-    setError(''); setControls(current => ({ head, min, max, manual: true, revision: current.revision + 1 }));
-  }}>
-    <label className="form-field"><span>Head Up (°)</span><input required type="number" min="0" max="359.999" step="any" value={draft.head} onChange={e => setDraft({ ...draft, head: e.target.value })} /></label>
-    <label className="form-field"><span>Min dB</span><input required type="number" step="any" value={draft.min} onChange={e => setDraft({ ...draft, min: e.target.value })} /></label>
-    <label className="form-field"><span>Max dB</span><input required type="number" step="any" value={draft.max} onChange={e => setDraft({ ...draft, max: e.target.value })} /></label>
-    <button className="primary-button" type="submit">Apply view</button>
-    <button className="secondary-button" type="button" onClick={() => {
-      setControls(current => ({ head: 0, min: -60, max: 0, manual: false, revision: current.revision + 1 }));
-      const [min, max] = radialDomain(values, simulation);
-      setDraft({ head: '0', min: String(min), max: String(max) }); setError('');
-    }}>Default</button>
-  </form>{error ? <p role="alert">{error}</p> : null}<div ref={host} className="plotly-polar" role="img" aria-label={`${simulation ? 'Simulation' : 'Data Out'} ${settings.figType} angular response`} />
-    <div className="polar-axis-caption">{settings.figType} · Head Up preset {controls.head}° (drag can override) · source offset {settings.compassOffset}°<br />{controls.manual ? 'Manual scale' : simulation ? 'Fixed simulation scale' : 'Auto scale'}: {low}…{high} dB · source-shifted, not dBm. Values below minimum sit at center; above maximum are clipped. Hover retains original dB. Compass reference is not verified heading.</div></>;
+  }, [values, settings.figType, settings.compassOffset, simulation, low, high, controls, theme, compact]);
+  return <>
+    <div ref={host} className="plotly-polar" role="img" aria-label={`${simulation ? 'Simulation' : 'Data Out'} ${settings.figType} angular response`} />
+    <div className="polar-axis-caption">{settings.figType} · Head Up {controls.head}° · source offset {settings.compassOffset}° · {controls.manual ? 'Manual' : simulation ? 'Fixed simulation' : 'Auto'} scale {low} to {high} dB (source-shifted, not dBm); compass heading unverified.</div>
+    <details className="plot-settings">
+      <summary>Graph settings</summary>
+      <form className="plot-controls" onSubmit={event => {
+        event.preventDefault();
+        const head = Number(draft.head), min = Number(draft.min), max = Number(draft.max);
+        if (Object.values(draft).some(v => !v.trim()) || !validPlotRange(head, min, max)) { setError('Head Up harus 0–<360° dan dB minimum harus lebih kecil dari maksimum.'); return; }
+        setError(''); setControls(current => ({ head, min, max, manual: true, revision: current.revision + 1 }));
+      }}>
+        <label className="form-field"><span>Head Up (°)</span><input required type="number" min="0" max="359.999" step="any" value={draft.head} onChange={e => setDraft({ ...draft, head: e.target.value })} /></label>
+        <label className="form-field"><span>Min dB</span><input required type="number" step="any" value={draft.min} onChange={e => setDraft({ ...draft, min: e.target.value })} /></label>
+        <label className="form-field"><span>Max dB</span><input required type="number" step="any" value={draft.max} onChange={e => setDraft({ ...draft, max: e.target.value })} /></label>
+        <button className="primary-button" type="submit">Apply view</button>
+        <button className="secondary-button" type="button" onClick={() => {
+          setControls(current => ({ head: 0, min: -60, max: 0, manual: false, revision: current.revision + 1 }));
+          const [min, max] = radialDomain(values, simulation);
+          setDraft({ head: '0', min: String(min), max: String(max) }); setError('');
+        }}>Default</button>
+      </form>
+      {error ? <p className="plot-control-error" role="alert">{error}</p> : null}
+    </details>
+  </>;
 }

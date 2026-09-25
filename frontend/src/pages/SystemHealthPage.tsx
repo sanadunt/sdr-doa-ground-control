@@ -32,7 +32,7 @@ export function SystemHealthPage({ snapshot, mqtt, localSnapshotFresh }: { snaps
   const xml = candidate(snapshot, 'xml');
   const nodeRows: Array<[string, unknown, string]> = [
     ['Data Out status', status?.available === true ? 'AVAILABLE' : 'UNAVAILABLE', 'GET-only collector response'],
-    ['DAQ health', status?.daq_health ?? (statusValue(status, 'daq_ok') === true ? 'PASS' : '—'), 'Input and frame path'],
+    ['DAQ health', status?.daq_health ?? (statusValue(status, 'daq_ok') === true ? 'PASS' : 'N/A'), 'Input and frame path'],
     ['GPS status', statusValue(status, 'gps_status') ?? 'UNKNOWN', 'Position gate input'],
     ['Frame index', daq.data_frame_index, 'Native status field'],
     ['Dropped frames', dropped, 'Native status field'],
@@ -47,10 +47,10 @@ export function SystemHealthPage({ snapshot, mqtt, localSnapshotFresh }: { snaps
       <div className="health-summary-grid">
         <Panel className="health-summary-panel" eyebrow="SUMMARY" title="System Summary">
           <div className="health-summary-main"><StatusBadge label={dataState} tone={toneFor(dataState)} /><strong>{overall}</strong><span>{snapshot ? 'Last Data Out response classified locally.' : 'No Data Out response has been read.'}</span></div>
-          <div className="metric-grid three"><Metric label="DAQ" value={status?.daq_health ?? '—'} detail={dropped === null ? 'drops —' : `${dropped} dropped frames`} tone={toneFor(status?.daq_health)} /><Metric label="Sync" value={sync} detail="required flags passing" tone={sync === '3 / 3' ? 'good' : 'warn'} /><Metric label="MQTT" value={connection} detail={mqtt?.read_only === false ? 'unexpected write capability' : 'subscriber-only'} tone={mqtt?.connection === 'connected' ? 'good' : 'warn'} /></div>
+          <div className="metric-grid three"><Metric label="DAQ" value={status?.daq_health ?? 'N/A'} detail={dropped === null ? 'drops N/A' : `${dropped} dropped frames`} tone={toneFor(status?.daq_health)} /><Metric label="Sync" value={sync} detail="required flags passing" tone={sync === '3 / 3' ? 'good' : 'warn'} /><Metric label="MQTT" value={connection} detail={mqtt?.read_only === false ? 'unexpected write capability' : 'subscriber-only'} tone={mqtt?.connection === 'connected' ? 'good' : 'warn'} /></div>
         </Panel>
         <Panel className="inspector-panel" eyebrow="INSPECTOR" title="Node Inspector">
-          <div className="key-value-list">{nodeRows.map(([label, value, detail]) => <KeyValue key={label} label={label} value={typeof value === 'number' ? formatNumber(value, 0) : String(value ?? '—')} detail={detail} />)}</div>
+          <div className="key-value-list">{nodeRows.map(([label, value, detail]) => <KeyValue key={label} label={label} value={typeof value === 'number' ? formatNumber(value, 0) : String(value ?? 'N/A')} detail={detail} />)}</div>
         </Panel>
       </div>
       <Panel className="subsystems-panel" eyebrow="SUBSYSTEMS" title="Subsystem status">

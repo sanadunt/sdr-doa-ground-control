@@ -317,3 +317,35 @@ tooltip interaktif, dan pengujian hardware belum dilakukan; tooltip belum tersed
 - Cocokkan peak grafik, metadata, dan ray map simulasi pada konvensi yang sama.
 - Pemeriksaan kali ini memakai preview lokal dan data sintetis, bukan hardware.
   Tidak ada klaim validasi RF atau bahwa temuan visual sudah diperbaiki.
+
+## Refresh responsif dan visual instrumen
+
+Status per 2026-09-25: implementasi dan QA lokal selesai. Penerimaan operasional masih menunggu tinjauan pada monitor Ground Station serta pemeriksaan hardware dan telemetry live.
+
+### Perubahan yang diperiksa
+
+- Navigasi, shell, Overview, konfigurasi, monitor, health, diagnostics, dan simulasi direflow untuk ukuran sempit; aturan breakpoint responsif dipusatkan di `console-design.css`.
+- Semua route tetap tanpa overflow horizontal dokumen pada lebar 320, 390, 768, 980, 1200, 1366, dan 1920 CSS px. Overview juga diperiksa pada 640, 620, dan 619 px.
+- Pada 320 px, enam route tidak memiliki tombol, input, select, atau link interaktif berukuran di bawah 44 × 44 px. Checkbox dikecualikan dari ukuran input karena target kliknya label pembungkus.
+- Polar plot menampilkan dua label radial saat lebar plot di bawah 420 px dan enam label pada layar lebar. Label kompas ringkas menjadi N/E/S/W pada ukuran sempit; resize kembali mengubah jumlah label tanpa menghilangkan kontrol plot.
+- Pengaturan overlay dapat dibuka dan ditutup dengan keyboard; fokus kembali ke tombol pembuka. Kontrol zoom map yang menerima fokus keyboard mempunyai outline yang terlihat.
+- Kontrol Head Up dan rentang dB menerapkan preset manual lalu kembali ke skala default. Mode plot diperbesar dapat dibuka dan dipulihkan.
+- Tema terang dan gelap diperiksa. Rasio token teks terhadap latar berada pada 5,07:1 atau lebih; warna batas komponen terhadap permukaan berada pada 3,15:1 atau lebih. Accent dan warna status yang diukur terhadap surface berada pada 6,17:1 atau lebih.
+- Preferensi reduced motion menghasilkan transition dan animation 0 detik serta `scroll-behavior: auto`.
+- Simulasi ON/OFF diperiksa pada Overview; banner tetap menandai data sintetis, sementara status header dan halaman lain tetap memakai sumber live.
+
+### Bukti verifikasi lokal
+
+- Screenshot diperiksa pada 320 × 820, 1366 × 768, dan 1920 × 1080 dalam browser lokal.
+- `npm run check`: lulus.
+- `npm test`: 5 file dan 72 tes lulus.
+- `npm run build`: lulus.
+- `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_ground_console_static`: 5 tes lulus.
+- Browser mencatat nol entri console JavaScript. Permintaan tile OpenStreetMap beberapa kali berakhir `ERR_ABORTED` saat viewport diganti berulang; kegagalan itu terkait pemuatan tile selama resize, bukan error runtime UI.
+- Kontras diperiksa dari token warna terhitung. Lebar 640 px dipakai sebagai padanan viewport CSS untuk zoom 200% dari 1280 px; native browser zoom tidak dijalankan.
+
+### Batas validasi
+
+- Data Out lokal tidak tersedia dan tidak diminta selama pemeriksaan; tidak ada validasi terhadap Raspberry, RF, Ground Station fisik, atau MQTT live.
+- Penerimaan operasional memerlukan tinjauan visual operator pada monitor Ground Station dan validasi hardware/telemetry terpisah.
+- Build tetap memberi peringatan ukuran chunk: aplikasi 1.398 kB dan chunk Plotly 4.775 kB sebelum gzip. Plotly tetap terpisah sebagai chunk lazy; optimasi bundel bukan bagian dari perubahan ini.

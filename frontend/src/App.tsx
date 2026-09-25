@@ -17,7 +17,7 @@ import { useRoute } from './components/Shell';
 import { SimulationPage } from './pages/SimulationPage';
 import { DEFAULT_SIMULATION, simulationSnapshot, randomizeSimulationSettings } from './lib/simulation';
 
-const DEFAULT_BRANDING: Branding = { app_name: 'SDR-DoA', logo_data_url: '' };
+const DEFAULT_BRANDING: Branding = { app_name: 'SDR-DoA Ground Console', logo_data_url: '' };
 const DEFAULT_LOCAL_EXPIRY_MS = 5_000;
 
 type FreshnessRecord = Record<string, unknown>;
@@ -169,7 +169,6 @@ export default function App(): ReactElement {
   const [mqtt, setMqtt] = useState<MqttSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [readError, setReadError] = useState<string | null>(null);
-  const [lastReadAt, setLastReadAt] = useState<Date | null>(null);
   const [receivedAtMonotonic, setReceivedAtMonotonic] = useState<number | null>(null);
   const [expiryTick, setExpiryTick] = useState(0);
   const [gpsConfig, setGpsConfig] = useState<GpsConfig>(DEFAULT_GPS_CONFIG);
@@ -182,6 +181,9 @@ export default function App(): ReactElement {
   const randomizeSimulation = useCallback(() => {
     setSimulationSettings(randomizeSimulationSettings);
   }, []);
+  useEffect(() => {
+    document.title = branding.app_name;
+  }, [branding.app_name]);
   useEffect(() => {
     if (!simulationEnabled || !simulationAutomatic) return;
     const timer = window.setInterval(randomizeSimulation, 1000);
@@ -282,7 +284,6 @@ export default function App(): ReactElement {
       const receivedAt = monotonicNow();
       setSnapshot(next);
       setReceivedAtMonotonic(receivedAt);
-      setLastReadAt(new Date());
       setReadError(null);
       if (options.syncMqtt !== false) void refreshMqtt().catch(() => undefined);
     } catch (error: unknown) {
@@ -367,20 +368,20 @@ export default function App(): ReactElement {
     const content = contentRef.current;
     if (!content) return undefined;
 
-    const heading = content.querySelector<HTMLElement>('h1');
-    if (heading) {
-      heading.tabIndex = -1;
+    const routeTarget = content.querySelector<HTMLElement>('h1:not(.visually-hidden), [data-route-focus]');
+    if (routeTarget) {
+      if (routeTarget.tagName === 'H1') routeTarget.tabIndex = -1;
       try {
-        heading.focus({ preventScroll: true });
+        routeTarget.focus({ preventScroll: true });
       } catch {
-        heading.focus();
+        routeTarget.focus();
       }
     }
 
     if (reducedMotion) return undefined;
     const animationContext = gsap.context(() => {
       gsap.fromTo(
-        content.querySelectorAll('.section-heading, .overview-intro, .panel'),
+        content.querySelectorAll('.section-heading, .panel'),
         { opacity: 0.6, y: 10 },
         { opacity: 1, y: 0, duration: 0.32, stagger: 0.035, ease: 'power2.out', clearProps: 'opacity,transform' },
       );
@@ -421,11 +422,10 @@ export default function App(): ReactElement {
       localSnapshotFresh={currentLocalFresh}
       loading={loading}
       readError={readError}
-      lastReadAt={lastReadAt}
       mqttConnection={mqtt?.connection}
+      simulationEnabled={simulationEnabled}
       onRefresh={() => void refresh()}
     >
-      {simulationEnabled ? <div className="simulation-banner" role="status"><strong>SIMULASI AKTIF — bukan data perangkat.</strong><span>Overview memakai data sintetis. Status header, health, diagnostics, dan MQTT tetap sumber nyata.</span><button className="secondary-button" type="button" onClick={() => { setSimulationEnabled(false); setSimulationAutomatic(false); }}>Matikan simulasi</button></div> : null}
       <section ref={contentRef} className="route-content" key={route}>
         {route === 'simulation' ? <SimulationPage enabled={simulationEnabled} automatic={simulationAutomatic} settings={simulationSettings} onEnabled={enabled => { setSimulationEnabled(enabled); if (!enabled) setSimulationAutomatic(false); }} onAutomatic={setSimulationAutomatic} onSettings={setSimulationSettings} onRandomize={randomizeSimulation} onOverview={() => navigate('overview')} />
           : route === 'overview' && simulationEnabled ? <OverviewPage snapshot={syntheticSnapshot} localSnapshotFresh={true} gpsConfig={gpsConfig} compassConfig={compassConfig} simulation={simulationSettings} />

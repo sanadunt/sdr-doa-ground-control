@@ -236,10 +236,16 @@ export function ConfigurationPage({
   };
 
   return (
-    <div className="page">
+    <div className="page configuration-page">
       <SectionHeading eyebrow="LOCAL CONTROL / CONFIG" title="Configuration" detail="This workspace changes only Ground Console local state. Remote settings, service control, and MQTT publish remain unavailable." />
+      <nav className="config-index" aria-label="Configuration sections">
+        <button type="button" aria-controls="connection-settings" onClick={() => document.getElementById('connection-settings')?.scrollIntoView({ block: 'start' })}>Connection</button>
+        <button type="button" aria-controls="branding-settings" onClick={() => document.getElementById('branding-settings')?.scrollIntoView({ block: 'start' })}>Branding</button>
+        <button type="button" aria-controls="dry-run-settings" onClick={() => document.getElementById('dry-run-settings')?.scrollIntoView({ block: 'start' })}>Dry-run preview</button>
+        <button type="button" aria-controls="navigation-settings" onClick={() => document.getElementById('navigation-settings')?.scrollIntoView({ block: 'start' })}>GPS + Compass</button>
+      </nav>
       <div className="config-grid">
-        <Panel className="connection-panel" eyebrow="LOCAL SETTINGS" title="Connection and refresh">
+        <Panel className="connection-panel" eyebrow="LOCAL SETTINGS" title={<span id="connection-settings" className="config-index-target">Connection and refresh</span>}>
           <div className="form-grid">
             <Field label="Data Out base URL" value={connection.base_url} onChange={(value) => setConnection({ ...connection, base_url: value })} help="Validated by the existing local allowlist." />
             <Field label="MQTT monitor host" value={connection.mqtt_host} onChange={(value) => setConnection({ ...connection, mqtt_host: value })} help="Optional loopback subscriber; blank keeps it OFF." />
@@ -249,11 +255,12 @@ export function ConfigurationPage({
           <div className="form-actions"><button className="primary-button" type="button" disabled={busy} onClick={applyConnection}>Save local connection</button><span className={`form-status status-text-${connectionStatus.tone}`}>{connectionStatus.text}</span></div>
           <div className="dry-run-notice"><strong>.env</strong> is read by Python at startup only; the browser does not read or expose its values. Restart the local Python console after changing it.</div>
         </Panel>
-        <Panel className="admin-panel" eyebrow="LOCAL ADMIN" title="Branding workspace" action={<StatusBadge label={adminAuthenticated ? 'AUTHENTICATED' : 'LOCKED'} tone={adminAuthenticated ? 'good' : 'warn'} />}>
+        <Panel className="admin-panel" eyebrow="LOCAL ADMIN" title={<span id="branding-settings" className="config-index-target">Branding workspace</span>} action={<StatusBadge label={adminAuthenticated ? 'AUTHENTICATED' : 'LOCKED'} tone={adminAuthenticated ? 'good' : 'warn'} />}>
+          <p>Saved app name also controls this browser tab title.</p>
           {!adminAuthenticated ? <div className="admin-login-form"><p>Admin authentication unlocks local app name and PNG branding only.</p><Field label="Admin password" type="password" value={password} onChange={setPassword} help="Password is submitted to the local console and never displayed." /><button className="primary-button" type="button" disabled={busy || !password} onClick={signIn}>Unlock local branding</button></div> : <div className="branding-workspace"><div className="branding-preview">{selectedLogo ? <img src={selectedLogo} alt="Local branding preview" /> : <span>NO LOGO</span>}</div><Field label="App name" value={brandName} onChange={setBrandName} /><label className="form-field"><span>PNG logo</span><input type="file" accept="image/png" onChange={(event) => chooseLogo(event.target.files?.[0])} /><small>Maximum 256 KiB. Browser-local staging until save.</small></label><div className="form-actions"><button className="primary-button" type="button" disabled={busy} onClick={persistBranding}>Save and verify</button><button className="secondary-button" type="button" disabled={busy} onClick={() => { setPendingLogo(''); setBrandStatus({ tone: 'neutral', text: 'Logo removal staged; save to persist it.' }); }}>Reset logo</button><button className="text-button" type="button" disabled={busy} onClick={signOut}>Close admin session</button></div></div>}
           <div className={`form-status status-text-${adminStatus.tone}`}>{adminStatus.text}</div><div className={`form-status status-text-${brandStatus.tone}`}>{brandStatus.text}</div>
         </Panel>
-        <Panel className="dry-run-panel" eyebrow="DRY-RUN / NO TRANSPORT" title="Configuration patch preview" action={<StatusBadge label="PREVIEW ONLY" tone="neutral" />}>
+        <Panel className="dry-run-panel" eyebrow="DRY-RUN / NO TRANSPORT" title={<span id="dry-run-settings" className="config-index-target">Configuration patch preview</span>} action={<StatusBadge label="PREVIEW ONLY" tone="neutral" />}>
           <div className="dry-run-notice">The allowlist and ranges are enforced by Python. This form creates a validation preview only; it does not publish, POST remotely, write Raspberry files, or restart services.</div>
           <div className="form-grid dry-run-fields">{DRY_RUN_FIELDS.map((field) => <Field key={field.key} label={field.label} type="number" value={dryRunValues[field.key] ?? ''} min={field.min} max={field.max} step={field.step} onChange={(value) => setDryRunValues({ ...dryRunValues, [field.key]: value })} />)}</div>
           <Field label="Base config revision (optional)" type="number" value={baseRevision} min={0} step={1} onChange={setBaseRevision} help="Must be a non-negative integer when supplied." />
@@ -261,7 +268,7 @@ export function ConfigurationPage({
           {dryRunResult ? <pre className="result-box" aria-label="Dry-run result">{JSON.stringify(dryRunResult, null, 2)}</pre> : null}
         </Panel>
       </div>
-      <Panel className="manual-test-panel" eyebrow="NAVIGATION / DISPLAY SOURCE" title="GPS + Compass configuration" action={<StatusBadge label="LOCAL CONFIG" tone="neutral" />}>
+      <Panel className="manual-test-panel" eyebrow="NAVIGATION / DISPLAY SOURCE" title={<span id="navigation-settings" className="config-index-target">GPS + Compass configuration</span>} action={<StatusBadge label="LOCAL CONFIG" tone="neutral" />}>
         <div className="manual-test-notice">
           Pilih sumber data tanpa mengubah Raspberry atau MQTT. Default source adalah Data Out; bila data GPS/Compass belum valid, console memakai fallback lokal yang ditampilkan eksplisit.
         </div>

@@ -25,7 +25,7 @@ export function numberOrNull(value: unknown): number | null {
 
 export function formatNumber(value: unknown, digits = 1): string {
   const number = numberOrNull(value);
-  return number === null ? '—' : number.toFixed(digits);
+  return number === null ? 'N/A' : number.toFixed(digits);
 }
 
 export function formatAge(freshness: Freshness | null | undefined): string {
@@ -85,7 +85,7 @@ export function toneFor(value: unknown): Tone {
 }
 
 export function boolLabel(value: unknown): string {
-  return value === true ? 'yes' : value === false ? 'no' : '—';
+  return value === true ? 'yes' : value === false ? 'no' : 'N/A';
 }
 
 export const GATE_REASON_LABELS: Record<string, string> = {
@@ -110,7 +110,7 @@ export function reasonLabel(reason: string): string {
   return GATE_REASON_LABELS[reason] ?? reason;
 }
 
-export function safeJson(value: unknown, fallback = '—'): string {
+export function safeJson(value: unknown, fallback = 'N/A'): string {
   if (value === undefined || value === null) return fallback;
   try {
     return JSON.stringify(value, null, 2);
@@ -120,11 +120,11 @@ export function safeJson(value: unknown, fallback = '—'): string {
 }
 
 export function redactIdentifier(value: unknown): string {
-  return value === undefined || value === null || String(value).trim() === '' ? '—' : '[REDACTED]';
+  return value === undefined || value === null || String(value).trim() === '' ? 'N/A' : '[REDACTED]';
 }
 
 export function displaySourceTimestamp(freshness: Freshness | null | undefined): string {
-  if (!freshness || typeof freshness.timestamp_ms !== 'number') return '—';
+  if (!freshness || typeof freshness.timestamp_ms !== 'number') return 'N/A';
   return new Date(freshness.timestamp_ms).toISOString();
 }
 

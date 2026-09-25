@@ -9,7 +9,7 @@ import { OSM_TILE_TEMPLATES } from '../lib/map';
 import { DEFAULT_DOA_OVERLAY_SETTINGS, bearingFeature, guideFeatures, heatFeatures, lobeFeature, type DoaOverlaySettings } from '../lib/doaGeometry';
 import { loadOverlaySettings, saveOverlaySettings, validateOverlaySettings } from '../lib/mapOverlaySettings';
 import { candidate, numberOrNull } from '../lib/telemetry';
-import { EmptyState, Icon, Panel, StatusBadge } from './ui';
+import { EmptyState, Icon, Panel } from './ui';
 
 type OverlayFeatureCollection = FeatureCollection<Point | LineString | Polygon>;
 type MapState = 'initializing' | 'ready' | 'unavailable' | 'error';
@@ -43,7 +43,7 @@ function paletteColor(palette: DoaOverlaySettings['heatPalette'], weight: number
   return stops[palette][Math.min(4, Math.floor(Math.max(0, Math.min(0.999, weight)) * 5))];
 }
 
-function OverlayControls({ settings, onChange, onReset }: { settings: DoaOverlaySettings; onChange: (next: DoaOverlaySettings) => void; onReset: () => void }): JSX.Element {
+function OverlayControls({ settings, onChange, onReset, onClose }: { settings: DoaOverlaySettings; onChange: (next: DoaOverlaySettings) => void; onReset: () => void; onClose: () => void }): JSX.Element {
   const update = (key: keyof DoaOverlaySettings, value: boolean | number | string) => onChange({ ...settings, [key]: value });
   const preset = (name: 'kraken' | 'focused' | 'wide') => {
     const values = name === 'focused'
@@ -53,7 +53,8 @@ function OverlayControls({ settings, onChange, onReset }: { settings: DoaOverlay
         : { ...DEFAULT_DOA_OVERLAY_SETTINGS };
     onChange({ ...settings, ...values });
   };
-  return <div className="map-overlay-controls" aria-label="DoA map overlay controls">
+  return <div id="doa-overlay-controls" className="map-overlay-controls" role="region" aria-label="DoA map overlay controls">
+    <div className="overlay-control-header"><h3>Overlay settings</h3><button className="text-button" type="button" aria-label="Close overlay settings" onClick={onClose}>Close</button></div>
     <div className="overlay-control-grid">
       <label><input type="checkbox" checked={settings.lobeVisible} onChange={(event) => update('lobeVisible', event.target.checked)} /> Lobe</label>
       <label><input type="checkbox" checked={settings.bearingVisible} onChange={(event) => update('bearingVisible', event.target.checked)} /> Bearing</label>
@@ -90,6 +91,7 @@ export function TacticalMap({ coordinate, snapshot, localSnapshotFresh }: { coor
   const coordinateRef = useRef(coordinate);
   const [mapState, setMapState] = useState<MapState>('initializing');
   const [controlsOpen, setControlsOpen] = useState(false);
+  const overlayToggleRef = useRef<HTMLButtonElement>(null);
   const [settings, setSettings] = useState<DoaOverlaySettings>(() => loadOverlaySettings());
   coordinateRef.current = coordinate;
   const csv = candidate(snapshot ?? null, 'csv');
@@ -165,7 +167,7 @@ export function TacticalMap({ coordinate, snapshot, localSnapshotFresh }: { coor
         stationMarkerRef.current.getElement().setAttribute('aria-label', stationLabel);
         stationMarkerRef.current.getElement().setAttribute('title', 'Station details');
         stationPopupRef.current?.setLngLat([coordinate.longitude, coordinate.latitude]).setHTML(
-          `<div class="station-popup-content"><strong>Station reference</strong><dl><dt>Source</dt><dd>${coordinate.source}</dd><dt>Position</dt><dd>${coordinate.latitude.toFixed(6)}°, ${coordinate.longitude.toFixed(6)}°</dd><dt>DoA bearing</dt><dd>${bearing === null ? 'Unavailable' : `${bearing.toFixed(1)}°`}</dd><dt>Vector</dt><dd>${values ? '360 bins' : 'Unavailable'}</dd></dl><small>Direction helper only — not a target location.</small></div>`,
+          `<div class="station-popup-content"><dl><dt>Source</dt><dd>${coordinate.source}</dd><dt>Position</dt><dd>${coordinate.latitude.toFixed(6)}°, ${coordinate.longitude.toFixed(6)}°</dd><dt>DoA bearing</dt><dd>${bearing === null ? 'Unavailable' : `${bearing.toFixed(1)}°`}</dd><dt>Vector</dt><dd>${values ? '360 bins' : 'Unavailable'}</dd></dl><small>Direction helper only, not a target location.</small></div>`,
         );
         stationMarkerRef.current.setLngLat([coordinate.longitude, coordinate.latitude]);
       } else {
@@ -286,21 +288,28 @@ export function TacticalMap({ coordinate, snapshot, localSnapshotFresh }: { coor
     setSettings(valid);
     saveOverlaySettings(valid);
   };
+  const closeControls = () => {
+    setControlsOpen(false);
+    overlayToggleRef.current?.focus();
+  };
 
   const resetView = () => { const current = coordinateRef.current; if (current && mapRef.current) { centeredCoordinateRef.current = `${current.latitude.toFixed(7)},${current.longitude.toFixed(7)}`; mapRef.current.easeTo({ center: [current.longitude, current.latitude], zoom: DEFAULT_ZOOM, bearing: 0, pitch: 0, padding: { top: 0, right: 0, bottom: STATION_VIEW_OFFSET[1] * 2, left: 0 }, duration: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 350 }); } };
-  const sourceLabel = coordinate?.source === 'SIMULATION' ? 'SIMULATION' : coordinate?.source ?? 'NO POSITION';
   const dataLabel = values ? `360 bins · ${bearing === null ? 'bearing unavailable' : `${bearing.toFixed(0)}° reference`}` : 'No fresh 360-bin vector';
-  return <Panel className="map-panel" eyebrow="01 / Station reference" title="Direction overlay" action={<div className="map-panel-actions"><StatusBadge label={sourceLabel} tone={coordinate?.source === 'SIMULATION' ? 'warn' : 'neutral'} /><button className="secondary-button map-settings-button" type="button" onClick={() => setControlsOpen((open) => !open)} aria-expanded={controlsOpen}>Overlay settings</button></div>}>
-    <div className="map-frame" role="application" aria-label="Interactive MapLibre map. Pan, zoom, and rotate the map without changing DoA data.">
-      <div className="map-leaflet-host maplibre-host" ref={hostRef} />
-      <canvas ref={overlayCanvasRef} className="doa-overlay-canvas" aria-hidden="true" />
-      <span className="map-attribution" aria-label="Map attribution">© OpenStreetMap contributors</span>
-      {controlsOpen ? <OverlayControls settings={settings} onChange={updateSettings} onReset={() => updateSettings(DEFAULT_DOA_OVERLAY_SETTINGS)} /> : null}
-      {coordinate ? <div className="map-coordinate" aria-label="Station coordinates"><span>{coordinate.source === 'SIMULATION' ? 'SIMULATION · NOT LIVE GPS' : coordinate.source === 'FALLBACK' ? 'REFERENCE ONLY · NOT LIVE GPS' : coordinate.source === 'MANUAL' ? 'MANUAL POSITION · NOT LIVE GPS' : 'STATION POSITION'}</span><strong>{coordinate.latitude.toFixed(6)}°, {coordinate.longitude.toFixed(6)}°</strong><small>{dataLabel}</small></div> : null}
-      <div className={`map-overlay-legend palette-${settings.heatPalette}`} role="note"><span><i className="legend-swatch legend-bearing" /> Bearing</span><span><i className="legend-swatch legend-lobe" /> Lobe</span><span><i className="legend-swatch legend-heat" /> Heat · {derived.heat.features.length} samples</span><small>Direction helper · bukan lokasi target</small></div>
-      {mapState === 'unavailable' || !coordinate ? <div className="map-empty-wrap"><EmptyState label="MAP UNAVAILABLE" detail="A valid station coordinate is not available; geographic overlay is held." tone="warn" /></div> : null}
-      {mapState === 'error' ? <div className="map-empty-wrap"><EmptyState label="BASEMAP UNAVAILABLE" detail="MapLibre or the OSM tile layer did not load. Overlay data is not treated as a target location." tone="warn" /></div> : null}
-      {coordinate ? <button className="map-reset-button" type="button" onClick={resetView} aria-label="Center map on station position"><Icon name="refresh" /> Center</button> : null}
+  return <Panel className="map-panel" action={<div className="map-panel-actions"><button ref={overlayToggleRef} className="secondary-button map-settings-button" type="button" onClick={() => setControlsOpen((open) => !open)} aria-expanded={controlsOpen} aria-controls={controlsOpen ? 'doa-overlay-controls' : undefined}>Overlay settings</button></div>}>
+    <div className={`map-workspace${controlsOpen ? ' map-workspace-settings-open' : ''}`}>
+      {controlsOpen ? <OverlayControls settings={settings} onChange={updateSettings} onReset={() => updateSettings(DEFAULT_DOA_OVERLAY_SETTINGS)} onClose={closeControls} /> : null}
+      <div className="map-frame" role="application" aria-label="Interactive DoA map. Pan, zoom, and rotate without changing DoA data." tabIndex={-1} data-route-focus>
+        <div className="maplibre-host" ref={hostRef} />
+        <canvas ref={overlayCanvasRef} className="doa-overlay-canvas" aria-hidden="true" />
+        <span className="map-attribution" aria-label="Map attribution">© OpenStreetMap contributors</span>
+        {mapState === 'unavailable' || !coordinate ? <div className="map-empty-wrap"><EmptyState label="MAP UNAVAILABLE" detail="A valid station coordinate is not available; geographic overlay is held." tone="warn" /></div> : null}
+        {mapState === 'error' ? <div className="map-empty-wrap"><EmptyState label="BASEMAP UNAVAILABLE" detail="MapLibre or the OSM tile layer did not load. Overlay data is not treated as a target location." tone="warn" /></div> : null}
+        {coordinate ? <button className="map-reset-button" type="button" onClick={resetView} aria-label="Center map on station position"><Icon name="refresh" /> Center</button> : null}
+      </div>
+      <div className="map-bottom-overlay">
+        {coordinate ? <div className="map-coordinate" aria-label="Station coordinates"><span>{coordinate.source === 'SIMULATION' ? 'SIMULATION · NOT LIVE GPS' : coordinate.source === 'FALLBACK' ? 'REFERENCE ONLY · NOT LIVE GPS' : coordinate.source === 'MANUAL' ? 'MANUAL POSITION · NOT LIVE GPS' : 'STATION POSITION'}</span><strong>{coordinate.latitude.toFixed(6)}°, {coordinate.longitude.toFixed(6)}°</strong><small>{dataLabel}</small></div> : null}
+        <div className={`map-overlay-legend palette-${settings.heatPalette}`} role="note"><span><i className="legend-swatch legend-bearing" /> Bearing</span><span><i className="legend-swatch legend-lobe" /> Lobe</span><span><i className="legend-swatch legend-heat" /> Heat · {derived.heat.features.length} samples</span><small>Direction helper · bukan lokasi target</small></div>
+      </div>
     </div>
   </Panel>;
 }

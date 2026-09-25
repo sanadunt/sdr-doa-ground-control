@@ -1,5 +1,5 @@
 import type { JSX } from 'react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Branding, TelemetrySnapshot, Tone } from '../types';
 import { deriveDataState, toneFor } from '../lib/telemetry';
 import { polarDataReady } from '../lib/telemetry';
@@ -40,14 +40,6 @@ export function useRoute(): [RouteName, (route: RouteName) => void] {
   }];
 }
 
-function Clock(): JSX.Element {
-  const [now, setNow] = useState(() => new Date());
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(new Date()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
-  return <time className="header-clock" dateTime={now.toISOString()}>{now.toISOString().replace('T', ' · ').replace(/\.\d{3}Z$/, 'Z')}</time>;
-}
 
 function brandInitials(name: string): string {
   const initials = name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join('');
@@ -62,8 +54,8 @@ export function ConsoleShell({
   localSnapshotFresh,
   loading,
   readError,
-  lastReadAt,
   mqttConnection,
+  simulationEnabled,
   onRefresh,
   children,
 }: {
@@ -74,8 +66,8 @@ export function ConsoleShell({
   localSnapshotFresh: boolean;
   loading: boolean;
   readError: string | null;
-  lastReadAt: Date | null;
   mqttConnection?: string;
+  simulationEnabled: boolean;
   onRefresh: () => void;
   children: React.ReactNode;
 }): JSX.Element {
@@ -83,6 +75,39 @@ export function ConsoleShell({
   const dataTone: Tone = readError ? 'bad' : toneFor(dataState);
   const doaState = localSnapshotFresh && polarDataReady(snapshot) ? 'AVAILABLE' : 'UNAVAILABLE';
   const gate = String(snapshot?.publication_gate?.state ?? 'BLOCKED').toUpperCase();
+  const snapshotState = readError ? 'ERROR' : localSnapshotFresh ? 'CURRENT' : snapshot ? 'STALE' : loading ? 'LOADING' : 'WAITING';
+  const snapshotTone: Tone = readError ? 'bad' : localSnapshotFresh ? 'good' : snapshot ? 'warn' : loading ? 'neutral' : 'warn';
+  const mqttState = (mqttConnection ?? 'OFF').toUpperCase();
+  const mqttTone: Tone = mqttState === 'CONNECTED' ? 'good' : mqttState === 'OFF' || mqttState === 'DISABLED' ? 'neutral' : 'warn';
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuToggleRef = useRef<HTMLButtonElement>(null);
+  const navRef = useRef<HTMLElement>(null);
+  const toggleMenu = () => {
+    const opening = !menuOpen;
+    setMenuOpen(opening);
+    if (opening) window.requestAnimationFrame(() => navRef.current?.querySelector<HTMLButtonElement>('.nav-item')?.focus());
+  };
+  const closeMenu = () => {
+    setMenuOpen(false);
+    window.requestAnimationFrame(() => menuToggleRef.current?.focus());
+  };
+  const navigateFromMenu = (next: RouteName) => {
+    const sameRoute = next === route;
+    onNavigate(next);
+    setMenuOpen(false);
+    if (sameRoute) window.requestAnimationFrame(() => menuToggleRef.current?.focus());
+  };
+  useEffect(() => {
+    if (!menuOpen) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMenuOpen(false);
+        window.requestAnimationFrame(() => menuToggleRef.current?.focus());
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [menuOpen]);
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     try { return localStorage.getItem('sdr-console-theme') === 'light' ? 'light' : 'dark'; }
     catch { return 'dark'; }
@@ -93,9 +118,9 @@ export function ConsoleShell({
     window.dispatchEvent(new Event('console-theme-change'));
   }, [theme]);
   return (
-    <div className="console-shell">
+    <div className={`console-shell${menuOpen ? ' menu-open' : ''}${route === 'overview' ? ' is-overview' : ''}`}>
       <a className="skip-link" href="#console-content">Skip to workspace</a>
-      <aside className="sidebar">
+      <aside id="console-navigation" className="sidebar" hidden={!menuOpen}>
         <div className="brand-lockup">
           {branding.logo_data_url ? <img className="brand-logo" src={branding.logo_data_url} alt="" /> : <span className="brand-mark">{brandInitials(branding.app_name)}</span>}
           <div>
@@ -103,16 +128,16 @@ export function ConsoleShell({
             <div className="brand-caption">Ground station</div>
           </div>
         </div>
+        <button className="secondary-button sidebar-close" type="button" onClick={closeMenu}>Close menu</button>
         <div className="sidebar-rule" />
-        <nav aria-label="Primary navigation" className="primary-nav">
-          <div className="nav-caption">Workspace</div>
+        <nav ref={navRef} aria-label="Primary navigation" className="primary-nav">
           {ROUTES.map((item) => (
             <button
               className={`nav-item ${route === item.id ? 'nav-active' : ''}`}
               key={item.id}
               type="button"
               aria-current={route === item.id ? 'page' : undefined}
-              onClick={() => onNavigate(item.id)}
+              onClick={() => navigateFromMenu(item.id)}
             >
               <Icon name={item.icon} />
               <span>{item.label}</span>
@@ -127,15 +152,20 @@ export function ConsoleShell({
       </aside>
       <div className="console-main">
         <header className="topbar">
-          <div className="topbar-title">
-            <span className="topbar-kicker">Ground console / Workspace</span>
-            <strong>{ROUTES.find((item) => item.id === route)?.label}</strong>
-          </div>
-          <div className="topbar-statuses" aria-label="Runtime status">
+          <button ref={menuToggleRef} className="menu-toggle secondary-button" type="button" onClick={toggleMenu} aria-controls="console-navigation" aria-expanded={menuOpen}>{menuOpen ? 'Hide menu' : 'Menu'}</button>
+          <div className="topbar-statuses" role="group" aria-label="Runtime status">
             <StatusBadge label={`DATA · ${readError ? 'ERROR' : dataState}`} tone={dataTone} />
             <StatusBadge label={`DOA · ${doaState}`} tone={doaState === 'AVAILABLE' ? 'good' : 'warn'} />
             <StatusBadge label={`DELIVERY · ${gate}`} tone={gate === 'READY' ? 'good' : 'warn'} />
-            <Clock />
+            <span className={`status-badge status-${snapshotTone}`} role="status" aria-live="polite" aria-label={readError ? `Snapshot error: ${readError}` : `Snapshot ${snapshotState}`} title={readError ?? `Snapshot ${snapshotState}`}>
+              <i aria-hidden="true" />SNAPSHOT · {snapshotState}
+            </span>
+            <span className={`status-badge status-${mqttTone}`} aria-label={`MQTT ${mqttState}, subscriber-only monitor`} title="Subscriber-only monitor">
+              <i aria-hidden="true" />MQTT · {mqttState}
+            </span>
+            <StatusBadge label={simulationEnabled ? 'SIMULATION · ON' : 'SIMULATION · OFF'} tone={simulationEnabled ? 'warn' : 'neutral'} />
+          </div>
+          <div className="topbar-tools">
             <button className="theme-button secondary-button" type="button" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}>
               {theme === 'dark' ? 'Light mode' : 'Dark mode'}
             </button>
@@ -144,13 +174,7 @@ export function ConsoleShell({
             </button>
           </div>
         </header>
-        <div className="read-strip" role="status">
-          <span className={`read-pulse ${loading ? 'pulse-loading' : dataTone}`} />
-          <span>{loading ? 'Reading Data Out…' : readError ? `Read failed · ${readError}` : !snapshot ? 'Waiting for first snapshot' : localSnapshotFresh ? 'Local snapshot current' : 'Local snapshot expired'}</span>
-          <span className="read-strip-source">{lastReadAt ? `last read ${lastReadAt.toISOString().replace('T', ' · ').replace(/\.\d{3}Z$/, 'Z')}` : 'no snapshot read yet'}</span>
-          {mqttConnection ? <span className="read-strip-source">MQTT {mqttConnection.toUpperCase()} · SUBSCRIBER ONLY</span> : null}
-        </div>
-        <main id="console-content" tabIndex={-1} className={`page-content ${route === 'overview' ? 'page-content-overview' : ''}`}>{children}</main>
+        <main id="console-content" tabIndex={-1} aria-label={route === 'overview' ? 'Overview map and polar plot' : undefined} className={`page-content ${route === 'overview' ? 'page-content-overview' : ''}`}>{children}</main>
         <footer className="console-footer">
           <span>Ground Console · Local observation</span>
           <span>No remote writes · Angular vectors remain local</span>

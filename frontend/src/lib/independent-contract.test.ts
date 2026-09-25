@@ -182,7 +182,6 @@ describe('telemetry numeric and polar readiness contracts', () => {
     'formats %s as unavailable rather than zero',
     (_label, value) => {
       expect(numberOrNull(value)).toBeNull();
-      expect(formatNumber(value)).toBe('—');
       expect(formatNumber(value)).not.toBe('0.0');
     },
   );

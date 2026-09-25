@@ -58,7 +58,7 @@ export function SectionHeading({ eyebrow, title, detail }: { eyebrow: string; ti
 export function EmptyState({ label, detail, tone = 'neutral' }: { label: string; detail: string; tone?: Tone }): JSX.Element {
   return (
     <div className={`empty-state empty-${tone}`} role="status">
-      <span className="empty-state-mark" aria-hidden="true">—</span>
+      <span className="empty-state-mark" aria-hidden="true">·</span>
       <strong>{label}</strong>
       <span>{detail}</span>
     </div>

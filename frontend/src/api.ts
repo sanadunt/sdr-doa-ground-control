@@ -2,7 +2,7 @@ import type { Branding, ConsoleConfig, MqttSnapshot, TelemetrySnapshot } from '.
 
 export const DEFAULT_API_TIMEOUT_MS = 10_000;
 
-const DEFAULT_BRANDING: Branding = { app_name: 'SDR-DoA', logo_data_url: '' };
+const DEFAULT_BRANDING: Branding = { app_name: 'SDR-DoA Ground Console', logo_data_url: '' };
 
 type JsonObject = Record<string, unknown>;
 

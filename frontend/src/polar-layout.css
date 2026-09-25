@@ -1,31 +1,14 @@
 /* Plotly resizes to the available panel width. */
-.plotly-polar { width: 100%; height: clamp(380px, 40vw, 680px); }
-.plot-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; padding: 12px; border-bottom: 1px solid var(--line-soft); }
+.plot-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; padding: 12px; }
 .plot-controls .form-field { flex: 1 1 85px; min-width: 75px; }
 .plot-controls input { min-width: 0; }
-.page-content-overview { padding-top: 16px; }
-.page-content-overview .overview-intro { gap: 8px; }
-.page-content-overview .overview-intro h1 { font-size: 25px; margin: 2px 0; }
-.page-content-overview .overview-intro p { font-size: 12px; }
-.page-content-overview .page-overview { gap: 14px; }
-.page-content-overview .overview-spatial { grid-template-columns: minmax(0,1fr) minmax(0,1fr); }
-.page-content-overview .polar-frame { display: block; height: auto; min-height: 0; flex: none; margin: 0; padding: 4px 8px 12px; }
-.polar-plot { display: block; width: 100%; max-width: 760px; height: auto; margin: 0 auto; overflow: visible; }
-.polar-ring { fill: none; stroke: var(--line); stroke-width: 1; }
-.polar-spoke { stroke: var(--line-soft); stroke-width: 1; }
-.polar-angle, .polar-db { fill: var(--text); text-anchor: middle; dominant-baseline: middle; font: 16px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
-.polar-db { font-size: 14px; paint-order: stroke; stroke: var(--surface); stroke-width: 5px; stroke-linejoin: round; }
-.polar-response { fill: var(--plot-fill); stroke: var(--accent); stroke-width: 2.5; stroke-linejoin: round; }
 .polar-axis-caption { color: var(--muted); font-size: 12px; line-height: 1.6; text-align: center; padding: 0 12px; }
-.page-content-overview .polar-empty { position: static; margin: 10px; }
+.polar-status { align-self: flex-start; flex: none; padding: 4px 12px 0; }
+.plot-settings { flex: 0 0 auto; border-top: 1px solid var(--line-soft); }
+.plot-settings > summary { min-height: 44px; padding: 12px; color: var(--muted); cursor: pointer; font-size: 12px; font-weight: 600; }
+.plot-settings > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.plot-settings[open] > summary { border-bottom: 1px solid var(--line-soft); }
+.plot-settings:not([open]) > :not(summary) { display: none; }
+.plot-controls { border: 0; }
+.plot-settings [role="alert"] { margin: 0; padding: 0 12px 12px; color: var(--red); font-size: 12px; }
 .polar-panel.polar-expanded { grid-column: 1 / -1; grid-row: 1; }
-.page-content-overview .panel-header { padding: 12px 16px; }
-@media (max-width: 980px) {
-  .page-content-overview .overview-spatial { grid-template-columns: minmax(0,1fr); }
-  .page-content-overview .polar-panel { grid-row: 1; }
-}
-@media (max-width: 620px) {
-  .polar-angle { font-size: 22px; }
-  .polar-db { font-size: 20px; }
-  .page-content-overview .polar-frame { padding-inline: 0; }
-}

@@ -343,10 +343,10 @@ export function polarMetadata(view: PolarView): {
   bins: string;
 } {
   return {
-    peak: view.displayPeak === null || view.peakIndex === null ? '—' : `${view.displayPeak.toFixed(0)}° · bin ${view.peakIndex}`,
-    canonical: view.canonicalAngle === null ? '—' : `${view.canonicalAngle.toFixed(1)}° · θ₀`,
-    peakDb: view.peakValue === null ? '—' : `${view.peakValue.toFixed(1)} dB`,
-    bins: view.fresh ? '360' : '—',
+    peak: view.displayPeak === null || view.peakIndex === null ? 'N/A' : `${view.displayPeak.toFixed(0)}° · bin ${view.peakIndex}`,
+    canonical: view.canonicalAngle === null ? 'N/A' : `${view.canonicalAngle.toFixed(1)}° · θ₀`,
+    peakDb: view.peakValue === null ? 'N/A' : `${view.peakValue.toFixed(1)} dB`,
+    bins: view.fresh ? '360' : 'N/A',
   };
 }
 
@@ -358,9 +358,9 @@ export function polarSourceLabel(snapshot: TelemetrySnapshot | null | undefined,
 }
 
 export function canonicalLabel(view: PolarView): string {
-  return view.canonicalAngle === null ? '—°' : `${view.canonicalAngle.toFixed(1)}°`;
+  return view.canonicalAngle === null ? 'N/A°' : `${view.canonicalAngle.toFixed(1)}°`;
 }
 
 export function displayLabel(view: PolarView): string {
-  return view.displayPeak === null ? 'plot peak · display —°' : `plot peak · display ${view.displayPeak.toFixed(0)}° · bin ${view.peakIndex ?? '—'}`;
+  return view.displayPeak === null ? 'plot peak · display N/A°' : `plot peak · display ${view.displayPeak.toFixed(0)}° · bin ${view.peakIndex ?? 'N/A'}`;
 }
