@@ -1,6 +1,9 @@
 """Black-box lifecycle and transport contract tests for the RDF Node v2 monitor."""
 from __future__ import annotations
 
+import pathlib
+import subprocess
+import threading
 import builtins
 import importlib
 import ssl
@@ -70,14 +73,17 @@ def fake_paho() -> tuple[types.ModuleType, type]:
 
         def subscribe(self, topic: object, qos: object = 0, options: object = None,
                       properties: object = None) -> tuple[int, int]:
+            if options is not None and qos != 0:
+                raise ValueError("Subscribe options and qos parameters cannot be combined")
+            effective_qos = getattr(options, "qos", qos)
             self._record("subscribe", topic, qos, options, properties)
             self.mid += 1
             if isinstance(topic, str):
-                self.subscriptions.append((topic, qos, options))
+                self.subscriptions.append((topic, effective_qos, options))
             else:
-                for entry in topic:  # Paho accepts a list of (filter, qos) pairs.
+                for entry in topic:
                     if isinstance(entry, tuple):
-                        self.subscriptions.append((entry[0], entry[1], options))
+                        self.subscriptions.append((entry[0], getattr(entry[1], "qos", entry[1]), options))
             return 0, self.mid
 
         def publish(self, *args: object, **kwargs: object) -> None:
@@ -158,6 +164,20 @@ except ModuleNotFoundError as exc:
     monitor_module = None
     Monitor = None
 
+
+class ScriptModeImportTests(unittest.TestCase):
+    def test_monitor_imports_with_only_its_script_directory_on_sys_path(self) -> None:
+        tools_dir = pathlib.Path(__file__).resolve().parent
+        repository_root = str(tools_dir.parent)
+        code = (
+            f"import sys; sys.path = [{str(tools_dir)!r}] + "
+            f"[path for path in sys.path if path not in ('', {repository_root!r})]; "
+            "import rdf_node_mqtt_monitor; "
+            "assert rdf_node_mqtt_monitor.RdfNodeMqttMonitor"
+        )
+        result = subprocess.run([sys.executable, "-c", code], cwd="/",
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 class MissingMonitorTests(unittest.TestCase):
     def test_monitor_implementation_is_available(self) -> None:
@@ -350,6 +370,65 @@ class RdfNodeMqttMonitorTests(unittest.TestCase):
         self.assertIn("disconnect", names)
         self.assertIn("loop_stop", names)
         self.assertEqual(self.client.publish_calls, [])
+
+    def test_old_client_subacks_cannot_ready_restarted_monitor(self) -> None:
+        old_client = self.start_monitor()
+        start_connected(self.monitor, old_client)
+        self.monitor.stop()
+        new_client = self.start_monitor()
+        start_connected(self.monitor, new_client)
+        self.assertNotEqual(self.snapshot()["connection"], "ready")
+        acknowledge_subscriptions(old_client)
+        self.assertNotEqual(self.snapshot()["connection"], "ready")
+        acknowledge_subscriptions(new_client)
+        self.assertEqual(self.snapshot()["connection"], "ready")
+
+    def test_restart_waits_until_previous_loop_stops(self) -> None:
+        old_client = self.start_monitor()
+        entered_loop_stop = threading.Event()
+        release_loop_stop = threading.Event()
+        original_loop_stop = old_client.loop_stop
+
+        def blocked_loop_stop() -> None:
+            entered_loop_stop.set()
+            if not release_loop_stop.wait(2):
+                raise TimeoutError("test did not release old MQTT loop")
+            original_loop_stop()
+
+        old_client.loop_stop = blocked_loop_stop
+        errors: list[BaseException] = []
+        start_attempted = threading.Event()
+        start_finished = threading.Event()
+
+        def restart() -> None:
+            start_attempted.set()
+            try:
+                self.monitor.start()
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                start_finished.set()
+
+        stop_thread = threading.Thread(target=self.monitor.stop)
+        start_thread = threading.Thread(target=restart)
+        stop_thread.start()
+        start_thread_started = False
+        try:
+            self.assertTrue(entered_loop_stop.wait(1))
+            start_thread.start()
+            start_thread_started = True
+            self.assertTrue(start_attempted.wait(1))
+            self.assertFalse(start_finished.wait(0.1))
+        finally:
+            release_loop_stop.set()
+            stop_thread.join(2)
+            if start_thread_started:
+                start_thread.join(2)
+        self.assertFalse(stop_thread.is_alive())
+        if start_thread_started:
+            self.assertFalse(start_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(self.Client.instances), 2)
 
     def test_invalid_non_loopback_host_is_rejected(self) -> None:
         with self.assertRaises(ValueError):

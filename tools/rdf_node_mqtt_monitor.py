@@ -7,7 +7,10 @@ import threading
 import time
 from typing import Any
 
-from tools.rdf_node_mqtt_v2 import RDF_NODE_V2_SUFFIXES, RdfNodeV2Telemetry
+if __package__:
+    from .rdf_node_mqtt_v2 import RDF_NODE_V2_SUFFIXES, RdfNodeV2Telemetry
+else:
+    from rdf_node_mqtt_v2 import RDF_NODE_V2_SUFFIXES, RdfNodeV2Telemetry
 
 
 def _now_ms() -> int:
@@ -51,6 +54,7 @@ class RdfNodeMqttMonitor:
         self.ca_file = ca_file
         self._store = RdfNodeV2Telemetry(node_id)
         self._lock = threading.RLock()
+        self._lifecycle_lock = threading.Lock()
         self._client: Any = None
         self._mqtt: Any = None
         self._connection = "disabled"
@@ -63,6 +67,10 @@ class RdfNodeMqttMonitor:
 
 
     def start(self) -> None:
+        with self._lifecycle_lock:
+            self._start()
+
+    def _start(self) -> None:
         with self._lock:
             if self._enabled:
                 return
@@ -133,6 +141,10 @@ class RdfNodeMqttMonitor:
 
 
     def stop(self) -> None:
+        with self._lifecycle_lock:
+            self._stop()
+
+    def _stop(self) -> None:
         with self._lock:
             client = self._client
             self._stopping = True
@@ -174,7 +186,7 @@ class RdfNodeMqttMonitor:
     def _on_connect(self, _client: Any, _userdata: Any, _flags: Any,
                     reason_code: Any, _properties: Any = None) -> None:
         with self._lock:
-            if self._stopping or not self._enabled:
+            if _client is not self._client or self._stopping or not self._enabled:
                 return
             if _reason_failed(reason_code):
                 self._set_error_locked("CONNECT_REFUSED")
@@ -188,7 +200,7 @@ class RdfNodeMqttMonitor:
                     qos=1, noLocal=False, retainAsPublished=True, retainHandling=0,
                 )
                 for topic in self._filters:
-                    rc, mid = self._client.subscribe(topic, qos=1, options=options)
+                    rc, mid = self._client.subscribe(topic, options=options)
                     if rc != getattr(self._mqtt, "MQTT_ERR_SUCCESS", 0):
                         self._set_error_locked("SUBSCRIBE_ERROR")
                         self._pending_subacks.clear()
@@ -201,13 +213,13 @@ class RdfNodeMqttMonitor:
 
     def _on_connect_fail(self, _client: Any, _userdata: Any = None) -> None:
         with self._lock:
-            if self._enabled and not self._stopping:
+            if _client is self._client and self._enabled and not self._stopping:
                 self._set_error_locked("CONNECTION_ERROR")
 
 
     def _on_disconnect(self, _client: Any, _userdata: Any, *args: Any) -> None:
         with self._lock:
-            if self._enabled and not self._stopping:
+            if _client is self._client and self._enabled and not self._stopping:
                 self._connection = "disconnected"
                 self._last_error = "DISCONNECTED"
                 self._pending_subacks.clear()
@@ -217,7 +229,8 @@ class RdfNodeMqttMonitor:
     def _on_subscribe(self, _client: Any, _userdata: Any, mid: int,
                       reason_codes: Any, _properties: Any = None) -> None:
         with self._lock:
-            if not self._enabled or self._stopping or self._connection == "error":
+            if (_client is not self._client or not self._enabled or self._stopping
+                    or self._connection == "error"):
                 return
             topic = self._pending_subacks.pop(mid, None)
             if topic is None:
@@ -241,6 +254,8 @@ class RdfNodeMqttMonitor:
 
     def _on_message(self, _client: Any, _userdata: Any, message: Any) -> None:
         with self._lock:
+            if _client is not self._client or not self._enabled or self._stopping:
+                return
             topic = getattr(message, "topic", None)
             if topic not in self._filters:
                 return
