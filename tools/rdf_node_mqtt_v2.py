@@ -6,6 +6,7 @@ import math
 import re
 import struct
 import uuid
+import copy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -81,6 +82,8 @@ class RdfNodeV2Telemetry:
         self._session: tuple[str, str | None, str | None] | None = None
         self._revision: int | None = None
         self._revision_known = False
+        self._state_revision: int | None = None
+        self._state_revision_known = False
         self._assemblies: dict[tuple[int, int], _Assembly] = {}
         self._angular_last_q: int | None = None
 
@@ -115,7 +118,13 @@ class RdfNodeV2Telemetry:
         value = data.get(key)
         if nullable and value is None:
             return None
-        if type(value) not in (int, float) or not math.isfinite(value) or not low <= value <= high:
+        if type(value) is int:
+            if not low <= value <= high:
+                raise ValueError("INVALID_FIELD")
+        elif type(value) is float:
+            if not math.isfinite(value) or not low <= value <= high:
+                raise ValueError("INVALID_FIELD")
+        else:
             raise ValueError("INVALID_FIELD")
         return value
 
@@ -144,7 +153,10 @@ class RdfNodeV2Telemetry:
             raise ValueError("INVALID_VERSION")
         if not isinstance(data.get("sid"), str) or not _SID_RE.fullmatch(data["sid"]):
             raise ValueError("INVALID_IDENTITY")
-        if suffix == "capabilities":
+        if suffix == "availability" and data.get("online") is False:
+            if "t" in data:
+                self._integer(data, "t", 1)
+        elif suffix == "capabilities":
             if "t" in data:
                 self._integer(data, "t", 1)
         else:
@@ -176,7 +188,7 @@ class RdfNodeV2Telemetry:
             if data.get("usb") is not None:
                 self._integer(data, "usb", 0, 255)
             sync = data.get("sync")
-            if sync is not None and (not isinstance(sync, list) or len(sync) != 3 or any(x is not None and type(x) is not bool for x in sync)):
+            if "sync" not in data or not isinstance(sync, list) or len(sync) != 3 or any(x is not None and type(x) is not bool for x in sync):
                 raise ValueError("INVALID_FIELD")
             for key in ("cpu", "mem", "disk_free"):
                 self._number(data, key, 0, 100, True)
@@ -221,10 +233,19 @@ class RdfNodeV2Telemetry:
             effective = data["effective"]
             if any(key not in _SAFE_EFFECTIVE_FIELDS for key in effective):
                 raise ValueError("INVALID_FIELD")
-            for item in effective.values():
-                if item is not None and type(item) not in (str, bool, int, float):
+            integer_fields = {"center_frequency_hz", "vfo0_frequency_hz", "vfo0_bandwidth_hz", "active_vfos", "output_vfo"}
+            float_fields = {"gain_db", "vfo0_squelch_db"}
+            string_fields = {"ant_arrangement", "doa_method"}
+            for key, item in effective.items():
+                if item is None:
+                    continue
+                if key in integer_fields and type(item) is not int:
                     raise ValueError("INVALID_FIELD")
-                if isinstance(item, str) and len(item) > 128:
+                if key in float_fields and (type(item) not in (int, float) or (type(item) is float and not math.isfinite(item))):
+                    raise ValueError("INVALID_FIELD")
+                if key in string_fields and (not isinstance(item, str) or len(item) > 128):
+                    raise ValueError("INVALID_FIELD")
+                if key == "en_doa" and type(item) is not bool:
                     raise ValueError("INVALID_FIELD")
         elif suffix == "availability":
             if type(data.get("online")) is not bool:
@@ -264,6 +285,7 @@ class RdfNodeV2Telemetry:
                 self._session = (sid, boot, instance)
             elif old[0] != sid or (old[1] is not None and old[1] != boot) or (old[2] is not None and old[2] != instance):
                 self._clear_session_telemetry(reset_sequences=True)
+                self._state_revision, self._state_revision_known = None, False
                 self._session = (sid, boot, instance)
             else:
                 self._session = (sid, old[1] or boot, old[2] or instance)
@@ -382,7 +404,8 @@ class RdfNodeV2Telemetry:
             sid_text = f"{value['sid']:08x}"
             health = self._topics["telemetry/health"]["payload"]
             session_ok = self._session is None or self._session[0] == sid_text
-            revision_ok = not self._revision_known or value["revision"] == self._revision
+            revision_ok = ((not self._revision_known or value["revision"] == self._revision) and
+                           (not self._state_revision_known or value["revision"] == self._state_revision))
             if not session_ok or not revision_ok:
                 store("INCONSISTENT", value, "IDENTITY_MISMATCH")
                 return
@@ -420,8 +443,20 @@ class RdfNodeV2Telemetry:
                     (self._revision_known and revision != self._revision)):
                 self._clear_session_telemetry()
             self._revision, self._revision_known = revision, True
-        elif suffix == "state" and self._revision_known and value.get("cfg") != self._revision:
-            self._clear_session_telemetry()
+        elif suffix == "state":
+            revision = value["cfg"]
+            if self._state_revision_known and revision != self._state_revision:
+                self._clear_session_telemetry()
+            elif not self._state_revision_known:
+                cached = (self._topics["telemetry/health"]["payload"],
+                          self._topics["telemetry/doa"]["payload"],
+                          self._topics["telemetry/angular"]["payload"])
+                revisions = (cached[0].get("rev") if isinstance(cached[0], dict) else None,
+                             cached[1].get("rev") if isinstance(cached[1], dict) else None,
+                             cached[2].get("revision") if isinstance(cached[2], dict) else None)
+                if any(old is not None and old != revision for old in revisions):
+                    self._clear_session_telemetry()
+            self._state_revision, self._state_revision_known = revision, True
         if suffix in ("telemetry/health", "telemetry/doa"):
             sequence = value["q"]
             previous = self._seq.get(suffix)
@@ -447,6 +482,8 @@ class RdfNodeV2Telemetry:
                 store("INCONSISTENT", value, "HEALTH_MISMATCH")
             elif self._revision_known and self._revision != value["rev"]:
                 store("INCONSISTENT", value, "REVISION_MISMATCH")
+            elif self._state_revision_known and self._state_revision != value["rev"]:
+                store("INCONSISTENT", value, "REVISION_MISMATCH")
             else:
                 store("FRESH", value)
         elif suffix == "telemetry/health/detail":
@@ -459,13 +496,20 @@ class RdfNodeV2Telemetry:
     def snapshot(self, now_ms: int) -> dict[str, object]:
         if type(now_ms) is not int or now_ms < 0:
             raise ValueError("invalid snapshot time")
-        topics = {suffix: dict(entry) for suffix, entry in self._topics.items()}
-        for suffix in ("telemetry/health", "telemetry/doa", "telemetry/angular"):
+        topics = {suffix: copy.deepcopy(entry) for suffix, entry in self._topics.items()}
+        max_ages = {
+            "telemetry/health": 8000,
+            "telemetry/doa": 5000,
+            "telemetry/angular": 10000,
+            "telemetry/health/detail": 15000,
+            "ack/config": 30000,
+            "ack/operation": 30000,
+        }
+        for suffix, max_age in max_ages.items():
             entry = topics[suffix]
             received = entry["received_at_ms"]
             if entry["status"] != "FRESH" or received is None:
                 continue
-            max_age = 8000 if suffix == "telemetry/health" else 5000 if suffix == "telemetry/doa" else 10000
             data = entry["payload"]
             source = data.get("t", data.get("timestamp_ms")) if isinstance(data, dict) else None
             if (now_ms < received or now_ms - received > max_age or not isinstance(source, int) or
@@ -485,7 +529,8 @@ class RdfNodeV2Telemetry:
             revision = data["rev"] if suffix == "telemetry/doa" else data["revision"]
             if (health.get("daq") != 1 or health.get("sid", "").lower() != sid or
                     health.get("rev") != revision or
-                    (self._revision_known and self._revision != revision)):
+                    (self._revision_known and self._revision != revision) or
+                    (self._state_revision_known and self._state_revision != revision)):
                 entry["status"], entry["error"] = "INCONSISTENT", "HEALTH_MISMATCH"
         return {"node_id": self.node_id, "received": self._received, "valid": self._valid,
                 "invalid": self._invalid, "last_received_at_ms": self._last_received,

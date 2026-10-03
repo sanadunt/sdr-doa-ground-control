@@ -128,6 +128,9 @@ class RdfNodeV2TelemetryTests(unittest.TestCase):
             ("telemetry/health", payload(obj("telemetry/health", daq=3))),
             ("telemetry/health/detail", payload(obj("telemetry/health/detail", cpu=101))),
             ("telemetry/health", payload(obj("telemetry/health")).replace(b'"temp":61.4', b'"temp":1e999')),
+            ("telemetry/doa", payload(obj("telemetry/doa")).replace(b'"f":433920000', b'"f":' + b"9" * 500)),
+            ("telemetry/health/detail", payload({**obj("telemetry/health/detail"), "sync": None})),
+            ("telemetry/health/detail", payload({key: value for key, value in obj("telemetry/health/detail").items() if key != "sync"})),
             ("ack/config", payload(obj("ack/config", id=""))),
         ]
         for suffix, raw in bad_values:
@@ -147,6 +150,31 @@ class RdfNodeV2TelemetryTests(unittest.TestCase):
             self.assertEqual(len(raw), length)
             put(store, "telemetry/health", raw)
             self.assertEqual(observation(store.snapshot(NOW), "telemetry/health")["status"], expected)
+
+    def test_availability_last_will_without_timestamp_is_context(self) -> None:
+        offline = {"v": 2, "sid": SID, "online": False, "reason": "CONNECTION_LOST"}
+        put(self.store, "availability", offline, qos=1, retained=True)
+        entry = observation(self.store.snapshot(NOW), "availability")
+        self.assertEqual(entry["status"], "CONTEXT")
+        self.assertEqual(entry["payload"], offline)
+
+        store = RdfNodeV2Telemetry(NODE)
+        online_without_timestamp = {"v": 2, "sid": SID, "online": True}
+        put(store, "availability", online_without_timestamp, qos=1, retained=True)
+        entry = observation(store.snapshot(NOW), "availability")
+        self.assertEqual(entry["status"], "INVALID")
+        self.assertIsNone(entry["payload"])
+
+    def test_documented_health_detail_and_ack_expiry_boundaries(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        put(store, "telemetry/health/detail", obj("telemetry/health/detail"), expiry=15)
+        self.assertEqual(observation(store.snapshot(NOW + 15000), "telemetry/health/detail")["status"], "FRESH")
+        self.assertEqual(observation(store.snapshot(NOW + 15001), "telemetry/health/detail")["status"], "STALE")
+        for suffix in ("ack/config", "ack/operation"):
+            store = RdfNodeV2Telemetry(NODE)
+            put(store, suffix, obj(suffix), qos=1, expiry=30)
+            self.assertEqual(observation(store.snapshot(NOW + 30000), suffix)["status"], "FRESH")
+            self.assertEqual(observation(store.snapshot(NOW + 30001), suffix)["status"], "STALE")
 
     def test_topic_node_and_suffix_are_exact(self) -> None:
         for node in ("", "two/segments", "..", "bad+node", "bad#node"):
@@ -324,6 +352,50 @@ class RdfNodeV2TelemetryTests(unittest.TestCase):
             normalized = entry["payload"]
             self.assertNotIn("private_token", normalized["effective"])
             self.assertNotIn("fixture-private-token-value", repr(normalized))
+
+    def test_state_config_revision_change_without_report_invalidates_cached_data(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        put(store, "state", obj("state", cfg=7), qos=1, retained=True)
+        put(store, "telemetry/health", obj("telemetry/health", rev=7))
+        put(store, "telemetry/doa", obj("telemetry/doa", rev=7))
+        frame = angular_frame(q=1, revision=7)
+        for chunk in chunks(frame, (384, 384)):
+            put(store, "telemetry/angular", chunk)
+        initial = store.snapshot(NOW)
+        for suffix in ("telemetry/health", "telemetry/doa", "telemetry/angular"):
+            self.assertEqual(observation(initial, suffix)["status"], "FRESH")
+        put(store, "state", obj("state", cfg=8), qos=1, retained=True)
+        snapshot = store.snapshot(NOW)
+        for suffix in ("telemetry/health", "telemetry/doa", "telemetry/angular"):
+            with self.subTest(suffix=suffix):
+                self.assertNotEqual(observation(snapshot, suffix)["status"], "FRESH")
+
+    def test_snapshots_do_not_share_nested_payload_mutations(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        put(store, "ack/operation", obj("ack/operation", result={"operation": "restart", "status": "APPLYING"}), qos=1)
+        first = observation(store.snapshot(NOW), "ack/operation")
+        first["payload"]["result"]["operation"] = "mutated"
+        first["payload"]["result"]["challenge"] = "injected-secret"
+        later = observation(store.snapshot(NOW), "ack/operation")["payload"]
+        self.assertEqual(later["result"]["operation"], "restart")
+        self.assertNotIn("challenge", later["result"])
+        self.assertNotIn("injected-secret", repr(later))
+
+    def test_config_report_rejects_wrong_effective_field_types(self) -> None:
+        wrong_types = (
+            ("center_frequency_hz", True),
+            ("gain_db", "20.7"),
+            ("en_doa", 1),
+        )
+        for field, value in wrong_types:
+            store = RdfNodeV2Telemetry(NODE)
+            report = obj("config/reported")
+            report["effective"][field] = value
+            put(store, "config/reported", report, qos=1, retained=True)
+            entry = observation(store.snapshot(NOW), "config/reported")
+            with self.subTest(field=field):
+                self.assertEqual(entry["status"], "INVALID")
+                self.assertIsNone(entry["payload"])
 
     def test_latest_only_state_and_health_detail_is_not_gate(self) -> None:
         for cpu in range(1, 20):
