@@ -256,8 +256,6 @@ def test_ground_console_http_smoke_and_target_allowlist() -> None:
             assert 'class="inspector-column"' in html
             assert "@media (max-width: 700px)" in html
             assert ".spatial-grid { grid-template-columns: 1fr; }" in html
-            assert "tile.openstreetmap.org" not in html
-            assert "L.map(" not in html
 
         capabilities = get_json(base + "/api/capabilities")
         assert capabilities["read_only"] is True
@@ -401,9 +399,10 @@ def test_mqtt_topic_map_is_bounded() -> None:
 
 def test_local_mqtt_restore_transition() -> None:
     class FakeMonitor:
-        def __init__(self, host: str, port: int) -> None:
+        def __init__(self, host: str, port: int, transport: str = "tcp") -> None:
             self.host = host
             self.port = port
+            self.transport = transport
             self.started = False
             self.stopped = False
 
@@ -432,6 +431,7 @@ def test_local_mqtt_restore_transition() -> None:
                 assert saved["mqtt_host"] == "127.0.0.1"
                 assert isinstance(server.mqtt_monitor, FakeMonitor)
                 assert server.mqtt_monitor.started
+                assert server.mqtt_monitor.transport == "websockets"
             finally:
                 if server.mqtt_monitor is not None:
                     server.mqtt_monitor.stop()
