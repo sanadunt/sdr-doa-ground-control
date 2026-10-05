@@ -191,7 +191,7 @@ Host Data Out harus lolos allowlist collector dan port harus `8081`. Collector t
 
 ## MQTT staging, opsional
 
-MQTT tidak diperlukan untuk Overview atau simulasi. Profil MQTT v1 default menghubungkan monitor subscriber-only ke `10.90.0.1:9001` melalui WebSocket path `/mqtt`; `paho-mqtt==2.1.0` harus terpasang untuk menjalankan monitor. Nilai yang sudah tersimpan tetap dipakai; field yang belum ada mengikuti default baru.
+MQTT tidak diperlukan untuk Overview atau simulasi. Ground Console memakai satu koneksi subscriber-only ke broker yang dikonfigurasi; koneksi itu membaca topic v1 dan RDF Node v2 sekaligus. `paho-mqtt` diperlukan untuk monitor MQTT; synthetic publisher juga memerlukan broker lokal.
 
 Host broker menerima literal IPv4/IPv6 apa pun atau `localhost`; nama DNS ditolak. Masukkan IPv6 tanpa kurung siku. Ground Console membuka koneksi keluar ke broker, tetapi HTTP Ground Console tetap bind ke loopback. MQTT v1 tidak memakai TLS, sehingga payload melintas tanpa enkripsi; gunakan hanya broker dan jaringan tepercaya.
 
@@ -203,15 +203,13 @@ tools/mqtt_stage4.conf
 
 Broker staging tersebut menggunakan MQTT/TCP di `127.0.0.1:18884`, bukan WebSocket default. Pada konfigurasi baru, jalankan Ground Console dengan transport TCP dan file konfigurasi staging terpisah:
 
-```sh
-.venv/bin/python tools/ground_console.py \
-  --mqtt-host 127.0.0.1 \
-  --mqtt-port 18884 \
-  --mqtt-transport tcp \
-  --config-path /tmp/ground-console-mqtt-stage.json \
-  --bind 127.0.0.1 \
-  --port 8787
-```
+Koneksi MQTT Ground Console default memakai `10.90.0.1:9001`, WebSocket, path `/mqtt`. Nilai tersimpan tetap dipakai; field yang belum ada memakai default tersebut. Host menerima literal IPv4/IPv6 apa pun atau `localhost`, bukan nama DNS; masukkan IPv6 tanpa kurung siku. Ground melakukan koneksi keluar ke alamat ini. Ground Console sendiri tetap bind loopback.
+
+Monitor memakai MQTTv5 dan satu konfigurasi broker bersama: host, port, transport, dan WebSocket path berlaku untuk kedua keluarga topic. Filter v1 adalah `sdr/v1/uav-01/#`; RDF Node v2 memakai prefix `sdr/v2/uav-01/` dan sepuluh suffix: `telemetry/doa`, `telemetry/health`, `telemetry/health/detail`, `telemetry/angular`, `state`, `capabilities`, `config/reported`, `availability`, `ack/config`, dan `ack/operation`. Status `READY` menunggu SUBACK berhasil untuk seluruh filter bersama. Parser dan snapshot v1/v2 tetap terpisah agar validasi satu schema tidak mengubah statistik schema lain.
+
+MQTT tidak mengonfigurasi TLS untuk TCP maupun WebSocket, sehingga payload melintas tanpa enkripsi. Gunakan hanya broker dan jaringan tepercaya; jangan kirim payload rahasia melalui koneksi ini.
+
+Konfigurasi lama `rdf_node_mqtt` tidak digunakan atau dimigrasikan; field itu hilang saat konfigurasi disimpan berikutnya. Atur endpoint kedua keluarga topic melalui **Configuration → Connection**.
 
 Synthetic publisher:
 
@@ -231,7 +229,16 @@ Di Windows, ganti prefix Python menjadi `.\.venv\Scripts\python.exe`:
 .\.venv\Scripts\python.exe tools\synthetic_mqtt_publisher.py --host 127.0.0.1 --port 18884 --duration 5 --doa-rate 2 --nav-rate 1 --health-rate 1
 ```
 
-Broker, PPP/T900, dan MQTT production tidak disiapkan oleh quickstart ini.
+### RDF Node v2 telemetry
+
+Pastikan `paho-mqtt==2.1.0` terpasang di virtual environment yang sama dengan Ground Console; instruksi pemasangan ada di bagian atas halaman ini. Jika dependency tidak tersedia, status monitor melaporkan error tanpa mematikan Ground Console.
+
+Subscriber hanya membaca sepuluh filter v2 di atas. Ground tidak publish, tidak mengirim command, dan tidak mengubah setting Edge. Endpoint browser v2 hanya `GET /api/mqtt/rdf-node`; panel v1 dan v2 menampilkan snapshot schema masing-masing dari satu koneksi broker.
+
+Di **Message monitor**, `READY` berarti seluruh SUBACK untuk filter bersama berhasil, bukan DAQ sehat. Status availability adalah petunjuk koneksi Control, bukan health. DoA dan Angular hanya ditandai current bila freshness, DAQ, sesi, dan revision lolos gate. Untuk menerima Angular live, atur `require_ground_receipt_for_bulk=false` secara terpisah pada Edge. MQTT v2 tidak mengubah HTTP Data Out, publication gate, atau simulasi Overview.
+
+Broker TLS, PPP/T900, dan MQTT production tidak disiapkan oleh quickstart ini. Contoh payload dan fixture lokal bukan bukti kompatibilitas perangkat atau acceptance hardware.
+
 
 ## Validasi setelah install
 

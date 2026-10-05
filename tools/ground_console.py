@@ -162,6 +162,20 @@ def _is_allowed_mqtt_host(value: str) -> bool:
         return False
 
 
+def _load_rdf_node_v2_telemetry_class() -> Any:
+    if __package__:
+        from .rdf_node_mqtt_v2 import RdfNodeV2Telemetry
+    else:
+        from rdf_node_mqtt_v2 import RdfNodeV2Telemetry
+    return RdfNodeV2Telemetry
+
+
+def _empty_rdf_node_mqtt_snapshot() -> Dict[str, Any]:
+    snapshot = _load_rdf_node_v2_telemetry_class()("uav-01").snapshot(int(time.time() * 1000))
+    snapshot.update({"enabled": False, "connection": "disabled", "last_error": None})
+    return snapshot
+
+
 def _load_mqtt_monitor_class() -> Any:
     """Load paho only when MQTT monitoring is actually requested."""
     try:
@@ -1493,6 +1507,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._send_json({"enabled": False, "read_only": True, "publish_enabled": False})
             else:
                 self._send_json(self.console_server.mqtt_monitor.snapshot())
+            return
+        if parsed.path == "/api/mqtt/rdf-node":
+            monitor = self.console_server.mqtt_monitor
+            if monitor is None:
+                self._send_json(_empty_rdf_node_mqtt_snapshot())
+            else:
+                self._send_json(monitor.rdf_node_snapshot())
             return
         self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 

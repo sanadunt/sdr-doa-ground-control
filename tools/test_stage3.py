@@ -389,8 +389,11 @@ def test_mqtt_topic_map_is_bounded() -> None:
             self.payload = b"x"
 
     monitor = MqttMonitor("127.0.0.1", 1883)
+    client = object()
+    monitor._client = client
+    monitor._started = True
     for index in range(300):
-        monitor._on_message(None, None, Message(f"sdr/v1/uav-01/unknown/{index}"))
+        monitor._on_message(client, None, Message(f"sdr/v1/uav-01/unknown/{index}"))
     counts = monitor.snapshot()["topic_counts"]
     assert len(counts) <= 128
     assert counts.get("__other__", 0) > 0
