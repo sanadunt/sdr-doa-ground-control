@@ -10,8 +10,8 @@ import type {
 
 export const DEFAULT_CONSOLE_CONFIG = {
   base_url: 'http://doasdr.local:8081',
-  mqtt_host: '',
-  mqtt_port: 1883,
+  mqtt_host: '10.90.0.1',
+  mqtt_port: 9001,
   refresh_seconds: 0,
 };
 

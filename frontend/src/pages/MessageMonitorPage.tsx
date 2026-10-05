@@ -56,7 +56,7 @@ export function MessageMonitorPage({
 
   const reconnect = async () => {
     if (!config.mqtt_host) {
-      setMessage('Set a loopback MQTT host in Configuration first.');
+      setMessage('Set an MQTT broker IP address or localhost in Configuration first.');
       return;
     }
     const sequence = ++requestSequence.current;

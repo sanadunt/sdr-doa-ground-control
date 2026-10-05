@@ -4,7 +4,7 @@
 The console is intentionally safe at this stage:
 
 * it performs bounded read-only GETs through ``sdr_doa_collector``;
-* an optional MQTT monitor subscribes only when ``--mqtt-host`` is supplied;
+* an optional MQTT monitor subscribes read-only to its configured broker;
 * it exposes no MQTT publish path and no route that writes to the Raspberry;
 * the settings form only validates and renders a dry-run config patch;
 * local admin settings only change this console's branding.
@@ -152,11 +152,12 @@ def _is_allowed_base_url(value: str) -> bool:
 def _is_allowed_mqtt_host(value: str) -> bool:
     if not isinstance(value, str):
         return False
-    hostname = value.strip().lower().rstrip(".")
-    if hostname in {"localhost", "127.0.0.1", "::1"}:
+    host = value.strip()
+    if host.lower().rstrip(".") == "localhost":
         return True
     try:
-        return ipaddress.ip_address(hostname).is_loopback
+        ipaddress.ip_address(host)
+        return True
     except ValueError:
         return False
 
@@ -172,8 +173,8 @@ def _load_mqtt_monitor_class() -> Any:
     return monitor_class
 
 
-def _new_mqtt_monitor(host: str, port: int) -> Any:
-    return _load_mqtt_monitor_class()(host, port)
+def _new_mqtt_monitor(host: str, port: int, transport: str = "tcp") -> Any:
+    return _load_mqtt_monitor_class()(host, port, transport=transport)
 
 
 def _safe_config_json(config: Dict[str, Any]) -> str:
@@ -190,15 +191,18 @@ def _safe_config_json(config: Dict[str, Any]) -> str:
 
 def _default_console_config(
     base_url: str = "http://doasdr.local:8081",
-    mqtt_host: str = "",
-    mqtt_port: int = 1883,
+    mqtt_host: str = "10.90.0.1",
+    mqtt_port: int = 9001,
     refresh_seconds: int = 0,
+    *,
+    mqtt_transport: str = "websockets",
 ) -> Dict[str, Any]:
     return {
         "version": CONSOLE_CONFIG_VERSION,
         "base_url": base_url,
         "mqtt_host": mqtt_host,
         "mqtt_port": int(mqtt_port),
+        "mqtt_transport": mqtt_transport,
         "refresh_seconds": int(refresh_seconds),
     }
 
@@ -214,20 +218,23 @@ def _validate_console_config(payload: Any, fallback: Optional[Dict[str, Any]] = 
     if mqtt_host is None:
         mqtt_host = ""
     if not isinstance(mqtt_host, str) or (mqtt_host and not _is_allowed_mqtt_host(mqtt_host)):
-        raise ValueError("mqtt_host must be empty or a localhost/loopback address")
+        raise ValueError("mqtt_host must be empty, localhost, or a valid IPv4/IPv6 address")
     try:
         mqtt_port = int(payload.get("mqtt_port", defaults["mqtt_port"]))
     except (TypeError, ValueError) as exc:
         raise ValueError("mqtt_port must be numeric") from exc
     if not (1 <= mqtt_port <= 65535):
         raise ValueError("mqtt_port must be between 1 and 65535")
+    mqtt_transport = payload.get("mqtt_transport", defaults.get("mqtt_transport", "websockets"))
+    if not isinstance(mqtt_transport, str) or mqtt_transport not in {"tcp", "websockets"}:
+        raise ValueError("mqtt_transport must be tcp or websockets")
     try:
         refresh_seconds = int(payload.get("refresh_seconds", defaults["refresh_seconds"]))
     except (TypeError, ValueError) as exc:
         raise ValueError("refresh_seconds must be numeric") from exc
     if refresh_seconds not in ALLOWED_REFRESH_INTERVALS:
         raise ValueError("refresh_seconds is not an allowed interval")
-    return _default_console_config(base_url.rstrip("/"), mqtt_host.strip(), mqtt_port, refresh_seconds)
+    return _default_console_config(base_url.rstrip("/"), mqtt_host.strip(), mqtt_port, refresh_seconds, mqtt_transport=mqtt_transport)
 
 
 def _load_console_config(path: Path, fallback: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1076,7 +1083,7 @@ pre { max-height: 260px; overflow: auto; margin: 8px 0 0; padding: 9px; border: 
       <nav class="tabs" aria-label="Settings tabs"><button class="tab active" data-tab="connection" type="button">Data & connection</button><button class="tab" data-tab="branding" type="button">Admin & branding</button></nav>
       <section id="tab-connection" class="tab-panel">
         <p class="note" style="margin:0 0 13px"><strong>Staging-safe:</strong> changes only alter the Ground Console read source and local monitor. Nothing is written to the Raspberry.</p>
-        <div class="form-grid"><div class="field full"><label for="data-url">Data Out URL</label><input id="data-url" value="__BASE_URL__" spellcheck="false"><p class="help">HTTP GET only to the approved SDR-DoA host allowlist. MQTT remains subscriber-only.</p></div><div class="field"><label for="mqtt-host">MQTT monitor host</label><input id="mqtt-host" value="__MQTT_HOST__" placeholder="127.0.0.1" spellcheck="false"></div><div class="field"><label for="mqtt-port">MQTT port</label><input id="mqtt-port" type="number" value="__MQTT_PORT__" min="1" max="65535"></div><div class="field"><label for="refresh-interval">Auto-refresh</label><select id="refresh-interval"><option value="0">Off</option><option value="5">Every 5 seconds</option><option value="10">Every 10 seconds</option><option value="30">Every 30 seconds</option></select></div></div>
+        <div class="form-grid"><div class="field full"><label for="data-url">Data Out URL</label><input id="data-url" value="__BASE_URL__" spellcheck="false"><p class="help">HTTP GET only to the approved SDR-DoA host allowlist. MQTT remains subscriber-only.</p></div><div class="field"><label for="mqtt-host">MQTT monitor host</label><input id="mqtt-host" value="__MQTT_HOST__" placeholder="10.90.0.1" spellcheck="false"></div><div class="field"><label for="mqtt-port">MQTT port</label><input id="mqtt-port" type="number" value="__MQTT_PORT__" min="1" max="65535"></div><div class="field"><label for="refresh-interval">Auto-refresh</label><select id="refresh-interval"><option value="0">Off</option><option value="5">Every 5 seconds</option><option value="10">Every 10 seconds</option><option value="30">Every 30 seconds</option></select></div></div>
         <div class="form-actions"><button id="apply-connection" class="primary-button" type="button">Apply & refresh</button><button id="monitor-connect" class="ghost" type="button">Connect MQTT monitor</button></div><p id="connection-status" class="admin-status"></p>
       </section>
       <section id="tab-branding" class="tab-panel" hidden>
@@ -1240,8 +1247,8 @@ function setAuto(seconds) { if(state.autoTimer){ clearInterval(state.autoTimer);
 function openSettings(tab='connection') { $('settings-modal').hidden=false; selectTab(tab); }
 function closeSettings() { $('settings-modal').hidden=true; }
 function selectTab(name) { document.querySelectorAll('.tab').forEach(button=>button.classList.toggle('active',button.dataset.tab===name)); document.querySelectorAll('.tab-panel').forEach(panel=>panel.hidden=panel.id!==`tab-${name}`); }
-async function applyConnection() { const url=$('data-url').value.trim(); const mqttHost=$('mqtt-host').value.trim(); const mqttPort=Number($('mqtt-port').value||1883); const refreshSeconds=Number($('refresh-interval').value||0); if(!url){ setStatus('connection-status','URL is empty.','bad'); return; } try { const r=await fetch('/api/console-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_url:url,mqtt_host:mqttHost,mqtt_port:mqttPort,refresh_seconds:refreshSeconds})}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'configuration rejected'); state.dataUrl=data.base_url; $('source-url').textContent=data.base_url; setAuto(data.refresh_seconds); setStatus('connection-status','Configuration saved locally in Ground Console.','good'); await refresh(); } catch(e) { setStatus('connection-status',e.message,'bad'); } }
-async function connectMqtt() { const host=$('mqtt-host').value.trim(); const port=Number($('mqtt-port').value||1883); if(!host){ setStatus('connection-status','Enter a loopback MQTT host first.','bad'); return; } try { const r=await fetch(`/api/mqtt/connect?host=${encodeURIComponent(host)}&port=${encodeURIComponent(port)}`,{method:'POST'}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'MQTT monitor failed'); renderMqtt(data); setStatus('connection-status','MQTT monitor connected as subscriber-only.','good'); setTimeout(refreshMqtt,700); } catch(e) { setStatus('connection-status',e.message,'bad'); } }
+async function applyConnection() { const url=$('data-url').value.trim(); const mqttHost=$('mqtt-host').value.trim(); const mqttPort=Number($('mqtt-port').value||9001); const refreshSeconds=Number($('refresh-interval').value||0); if(!url){ setStatus('connection-status','URL is empty.','bad'); return; } try { const r=await fetch('/api/console-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_url:url,mqtt_host:mqttHost,mqtt_port:mqttPort,refresh_seconds:refreshSeconds})}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'configuration rejected'); state.dataUrl=data.base_url; $('source-url').textContent=data.base_url; setAuto(data.refresh_seconds); setStatus('connection-status','Configuration saved locally in Ground Console.','good'); await refresh(); } catch(e) { setStatus('connection-status',e.message,'bad'); } }
+async function connectMqtt() { const host=$('mqtt-host').value.trim(); const port=Number($('mqtt-port').value||9001); if(!host){ setStatus('connection-status','Enter an MQTT broker IP address or localhost first.','bad'); return; } try { const r=await fetch(`/api/mqtt/connect?host=${encodeURIComponent(host)}&port=${encodeURIComponent(port)}`,{method:'POST'}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'MQTT monitor failed'); renderMqtt(data); setStatus('connection-status','MQTT monitor connected as subscriber-only.','good'); setTimeout(refreshMqtt,700); } catch(e) { setStatus('connection-status',e.message,'bad'); } }
 async function adminLogin() { const password=$('admin-password').value; try { const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password})}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'login failed'); $('admin-login-box').hidden=true; $('admin-workspace').hidden=false; $('admin-password').value=''; setStatus('brand-status','Admin active.','good'); renderBranding(state.branding); } catch(e) { setStatus('admin-login-status',e.message,'bad'); } }
 async function adminLogout() { await fetch('/api/admin/logout',{method:'POST'}); $('admin-login-box').hidden=false; $('admin-workspace').hidden=true; setStatus('admin-login-status','Admin session closed.',''); }
 function readLogo(file) { if(!file) return; if(file.size>256*1024){ setStatus('brand-status','Logo exceeds 256 KiB.','bad'); $('brand-logo').value=''; return; } const reader=new FileReader(); reader.onload=()=>{ state.pendingLogo=String(reader.result||''); $('brand-preview').src=state.pendingLogo; $('brand-preview').hidden=false; $('preview-placeholder').hidden=true; }; reader.onerror=()=>setStatus('brand-status','Logo could not be read.','bad'); reader.readAsDataURL(file); }
@@ -1548,12 +1555,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query, keep_blank_values=False)
             host = query.get("host", [""])[0].strip()
             try:
-                port = int(query.get("port", ["1883"])[0])
+                port = int(query.get("port", ["9001"])[0])
             except ValueError:
                 self._send_json({"error": "MQTT port must be numeric", "read_only": True}, HTTPStatus.BAD_REQUEST)
                 return
             if not host or not (1 <= port <= 65535) or not _is_allowed_mqtt_host(host):
-                self._send_json({"error": "MQTT monitor allows localhost/loopback only", "read_only": True}, HTTPStatus.BAD_REQUEST)
+                self._send_json({"error": "MQTT monitor host must be localhost or a valid IPv4/IPv6 address", "read_only": True}, HTTPStatus.BAD_REQUEST)
                 return
             try:
                 self.console_server.enable_mqtt_monitor(host, port)
@@ -1594,7 +1601,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
         if not _is_allowed_base_url(base_url):
             raise ValueError("base_url is outside the local SDR-DoA allowlist")
         self.config_path = Path(config_path).expanduser() if config_path else DEFAULT_CONFIG_PATH
-        fallback = _default_console_config(base_url.rstrip("/"), "", 1883, 0)
+        fallback = _default_console_config(base_url.rstrip("/"), refresh_seconds=0)
         self._config = _validate_console_config(config, fallback) if config is not None else _load_console_config(self.config_path, fallback)
         self._config_lock = threading.RLock()
         self.mqtt_monitor = mqtt_monitor
@@ -1627,18 +1634,28 @@ class GroundConsoleServer(ThreadingHTTPServer):
         """Persist local console config and reconcile its local MQTT monitor."""
         with self._config_lock:
             normalized = _validate_console_config(config, self._config)
-            old_host = str(self._config.get("mqtt_host", ""))
-            old_port = int(self._config.get("mqtt_port", 1883))
+            old_connection = (
+                str(self._config.get("mqtt_host", "")),
+                int(self._config.get("mqtt_port", 9001)),
+                str(self._config.get("mqtt_transport", "websockets")),
+            )
             new_host = str(normalized["mqtt_host"])
-            new_port = int(normalized["mqtt_port"])
+            new_connection = (
+                new_host,
+                int(normalized["mqtt_port"]),
+                str(normalized["mqtt_transport"]),
+            )
             monitor_changed = (
-                (old_host, old_port) != (new_host, new_port)
+                old_connection != new_connection
                 or bool(new_host) != (self.mqtt_monitor is not None)
             )
             replacement = None
             if monitor_changed and new_host:
-                monitor_class = _load_mqtt_monitor_class()
-                replacement = monitor_class(new_host, new_port)
+                replacement = _new_mqtt_monitor(
+                    new_host,
+                    int(normalized["mqtt_port"]),
+                    str(normalized["mqtt_transport"]),
+                )
                 replacement.start()
             previous = self.mqtt_monitor
             try:
@@ -1714,8 +1731,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--legacy-ui", action="store_true", help="use the previous embedded UI instead of the frontend build")
     parser.add_argument("--bind", default=DEFAULT_BIND, help="local bind address")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="local console port")
-    parser.add_argument("--mqtt-host", default="", help="optional local MQTT monitor host; subscriber-only")
-    parser.add_argument("--mqtt-port", type=int, default=1883, help="optional local MQTT monitor port")
+    parser.add_argument("--mqtt-host", default="10.90.0.1", help="MQTT broker IPv4/IPv6 address or localhost; subscriber-only")
+    parser.add_argument("--mqtt-port", type=int, default=9001, help="MQTT broker port")
+    parser.add_argument(
+        "--mqtt-transport",
+        choices=("tcp", "websockets"),
+        default="websockets",
+        help="MQTT transport for the subscriber-only monitor",
+    )
     parser.add_argument("--branding-path", default=str(DEFAULT_BRANDING_PATH), help="local branding JSON path")
     parser.add_argument("--config-path", default=str(DEFAULT_CONFIG_PATH), help="local console connection config path")
     return parser
@@ -1728,15 +1751,15 @@ def main() -> int:
     if not _is_loopback_bind(args.bind):
         raise SystemExit("--bind must be localhost or a loopback address; admin branding is local-only")
     if args.mqtt_host and not _is_allowed_mqtt_host(args.mqtt_host):
-        raise SystemExit("--mqtt-host must be localhost or a loopback address")
+        raise SystemExit("--mqtt-host must be empty, localhost, or a valid IPv4/IPv6 address")
     if not (1 <= args.mqtt_port <= 65535):
         raise SystemExit("--mqtt-port must be between 1 and 65535")
     if not _is_allowed_base_url(args.base_url):
         raise SystemExit("--base-url is outside the local SDR-DoA allowlist")
     config_path = Path(args.config_path).expanduser()
-    fallback_config = _default_console_config(args.base_url, args.mqtt_host, args.mqtt_port, 0)
+    fallback_config = _default_console_config(args.base_url, args.mqtt_host, args.mqtt_port, 0, mqtt_transport=args.mqtt_transport)
     config = _load_console_config(config_path, fallback_config)
-    monitor = _new_mqtt_monitor(config["mqtt_host"], config["mqtt_port"]) if config["mqtt_host"] else None
+    monitor = _new_mqtt_monitor(config["mqtt_host"], config["mqtt_port"], config["mqtt_transport"]) if config["mqtt_host"] else None
     if monitor is not None:
         monitor.start()
     server = GroundConsoleServer(

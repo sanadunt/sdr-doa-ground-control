@@ -191,7 +191,9 @@ Host Data Out harus lolos allowlist collector dan port harus `8081`. Collector t
 
 ## MQTT staging, opsional
 
-MQTT tidak diperlukan untuk menjalankan Overview atau simulasi. Untuk monitor synthetic, diperlukan broker lokal dan `paho-mqtt`.
+MQTT tidak diperlukan untuk Overview atau simulasi. Profil MQTT v1 default menghubungkan monitor subscriber-only ke `10.90.0.1:9001` melalui WebSocket path `/mqtt`; `paho-mqtt==2.1.0` harus terpasang untuk menjalankan monitor. Nilai yang sudah tersimpan tetap dipakai; field yang belum ada mengikuti default baru.
+
+Host broker menerima literal IPv4/IPv6 apa pun atau `localhost`; nama DNS ditolak. Masukkan IPv6 tanpa kurung siku. Ground Console membuka koneksi keluar ke broker, tetapi HTTP Ground Console tetap bind ke loopback. MQTT v1 tidak memakai TLS, sehingga payload melintas tanpa enkripsi; gunakan hanya broker dan jaringan tepercaya.
 
 Konfigurasi staging yang tersedia:
 
@@ -199,12 +201,14 @@ Konfigurasi staging yang tersedia:
 tools/mqtt_stage4.conf
 ```
 
-Konfigurasi tersebut ditujukan untuk broker loopback pada `127.0.0.1:18884`, bukan deployment production. Setelah broker berjalan, Ground Console dapat dijalankan dengan:
+Broker staging tersebut menggunakan MQTT/TCP di `127.0.0.1:18884`, bukan WebSocket default. Pada konfigurasi baru, jalankan Ground Console dengan transport TCP dan file konfigurasi staging terpisah:
 
 ```sh
 .venv/bin/python tools/ground_console.py \
   --mqtt-host 127.0.0.1 \
   --mqtt-port 18884 \
+  --mqtt-transport tcp \
+  --config-path /tmp/ground-console-mqtt-stage.json \
   --bind 127.0.0.1 \
   --port 8787
 ```

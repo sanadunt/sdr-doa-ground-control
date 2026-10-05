@@ -9,6 +9,7 @@ import {
   resolveStationCoordinate,
 } from './map';
 import {
+  DEFAULT_CONSOLE_CONFIG,
   completeVector,
   formatNumber,
   nativeViewsReady,
@@ -284,5 +285,14 @@ describe('polar compass transforms', () => {
     expect(view.peakIndex).toBe(90);
     expect(view.peakValue).toBe(5);
     expect(view.displayPeak).toBe(280);
+  });
+});
+
+describe('default Ground Console MQTT profile', () => {
+  it('uses the Ground broker IP and port', () => {
+    expect(DEFAULT_CONSOLE_CONFIG).toMatchObject({
+      mqtt_host: '10.90.0.1',
+      mqtt_port: 9001,
+    });
   });
 });

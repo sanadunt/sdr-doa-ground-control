@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Display-only MQTT monitor for the staged Ground Console.
+"""Display-only MQTT monitor for the Ground Console.
 
-The monitor subscribes to a bounded topic root and never publishes, sends a
-command, or writes a Raspberry resource. It is intended for local synthetic
-MQTT inspection before a real edge agent is enabled.
+The monitor subscribes to a bounded topic root and never publishes, sends
+commands, or writes a Raspberry resource.
 """
 
 from __future__ import annotations
@@ -53,7 +52,15 @@ def _kind_for_topic(topic: str) -> Optional[str]:
 class MqttMonitor:
     """Thread-safe, subscribe-only MQTT metrics collector."""
 
-    def __init__(self, host: str, port: int, root: str = contract.TOPIC_ROOT) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        root: str = contract.TOPIC_ROOT,
+        *,
+        transport: str = "tcp",
+        ws_path: str = "/mqtt",
+    ) -> None:
         self.host = host
         self.port = int(port)
         self.root = root.rstrip("/")
@@ -61,7 +68,10 @@ class MqttMonitor:
         self._client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id="ground-console-monitor",
+            transport=transport,
         )
+        if transport == "websockets":
+            self._client.ws_set_options(path=ws_path)
         self._client.on_connect = self._on_connect
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message = self._on_message

@@ -293,6 +293,62 @@ def _decode_json(test: unittest.TestCase, result: HTTPResult, label: str) -> Any
 class GroundConsoleStaticRegressionTests(unittest.TestCase):
     """Regression coverage for static files, API precedence, and bind safety."""
 
+    def test_v1_mqtt_defaults_to_ground_ip_websocket(self) -> None:
+        config = ground_console._default_console_config()
+        self.assertEqual(
+            (config["mqtt_host"], config["mqtt_port"], config["mqtt_transport"]),
+            ("10.90.0.1", 9001, "websockets"),
+        )
+        args = ground_console._build_parser().parse_args([])
+        self.assertEqual(
+            (args.mqtt_host, args.mqtt_port, args.mqtt_transport),
+            ("10.90.0.1", 9001, "websockets"),
+        )
+        tcp_args = ground_console._build_parser().parse_args(["--mqtt-transport", "tcp"])
+        self.assertEqual(tcp_args.mqtt_transport, "tcp")
+
+    def test_server_uses_mqtt_defaults_without_saved_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch.object(
+                ground_console,
+                "DEFAULT_DATA_DIR",
+                Path(temporary) / "receiver-data",
+                create=True,
+            ):
+                server = ground_console.GroundConsoleServer(
+                    ("127.0.0.1", 0),
+                    BASE_URL,
+                    config_path=str(Path(temporary) / "console.json"),
+                )
+                try:
+                    config = server.get_config()
+                finally:
+                    server.server_close()
+        self.assertEqual(
+            (config["mqtt_host"], config["mqtt_port"], config["mqtt_transport"]),
+            ("10.90.0.1", 9001, "websockets"),
+        )
+
+    def test_v1_mqtt_accepts_any_ip_literal_and_rejects_dns(self) -> None:
+        config = ground_console._default_console_config()
+        for host in (
+            "10.90.0.1",
+            "192.168.1.50",
+            "8.8.8.8",
+            "127.0.0.1",
+            "2001:4860:4860::8888",
+            "2001:db8::1",
+            "::1",
+            "localhost",
+        ):
+            with self.subTest(host=host):
+                validated = ground_console._validate_console_config({**config, "mqtt_host": host})
+                self.assertEqual(validated["mqtt_host"], host)
+        for host in ("broker.example", "999.0.0.1", "[2001:db8::1]"):
+            with self.subTest(host=host):
+                with self.assertRaises(ValueError):
+                    ground_console._validate_console_config({**config, "mqtt_host": host})
+
     def _require_static_build(self) -> Path:
         index = _static_index()
         if index is None:
