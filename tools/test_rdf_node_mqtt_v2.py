@@ -22,10 +22,11 @@ INSTANCE = "8a5bb269-73fd-4cbb-9c6b-a3327f679221"
 
 def obj(suffix: str, **fields: object) -> dict[str, object]:
     common: dict[str, object] = {"v": 2, "sid": SID}
-    if suffix != "capabilities":
+    if suffix not in ("capabilities", "telemetry/diagnostic/doa"):
         common["t"] = NOW
     specific: dict[str, dict[str, object]] = {
         "telemetry/doa": {"q": 1, "f": 433920000, "a": 137.4, "c": 8.27, "p": -54.2, "rev": 7, "ok": 1},
+        "telemetry/diagnostic/doa": {"q": 19, "source": "doa.xml", "source_timestamp_ms": NOW, "observed_timestamp_ms": NOW, "raw_doa_deg": 200.0, "frequency_mhz": 137.0, "trust": "UNVERIFIED", "validation_reasons": ["DIAGNOSTIC_UNVERIFIED", "EMPTY_CSV"]},
         "telemetry/health": {"q": 1, "run": 1, "daq": 1, "drop": 12, "age": 280, "temp": 61.4, "clk": 1, "rev": 7},
         "telemetry/health/detail": {"usb": 2, "sync": [True, True, True], "cpu": 22.1, "mem": 41.7, "disk_free": 83.2, "throt": False, "uv": False, "tx": 12.34, "rx": 8.21, "adrop": 0, "parse": 0},
         "state": {"boot": BOOT, "instance": INSTANCE, "run": "RUNNING", "daq": True, "cfg": 7, "profile": "balanced", "clock": "SYNCED"},
@@ -64,12 +65,13 @@ def angular_frame(*, encoding: int = 1, flags: int = 31, sid: int = 0x7A8B9C0D, 
     return header + samples
 
 
-def chunks(frame: bytes, sizes: tuple[int, ...], *, q: int | None = None) -> list[bytes]:
+def chunks(frame: bytes, sizes: tuple[int, ...], *, q: int | None = None, sid: int | None = None) -> list[bytes]:
+    frame_sid = struct.unpack_from("<I", frame, 8)[0] if sid is None else sid
     frame_q = struct.unpack_from("<I", frame, 12)[0] if q is None else q
     result, pos = [], 0
     for index, size in enumerate(sizes):
         body = frame[pos:pos + size]
-        result.append(struct.pack("<IIBBH", 0x7A8B9C0D, frame_q, index, len(sizes), len(frame)) + body)
+        result.append(struct.pack("<IIBBH", frame_sid, frame_q, index, len(sizes), len(frame)) + body)
         pos += len(body)
     return result
 
@@ -84,11 +86,12 @@ class RdfNodeV2TelemetryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.store = RdfNodeV2Telemetry(NODE)
 
-    def test_suffix_allowlist_and_all_json_envelopes(self) -> None:
-        expected = ("telemetry/doa", "telemetry/health", "telemetry/health/detail", "telemetry/angular", "state", "capabilities", "config/reported", "availability", "ack/config", "ack/operation")
+    def test_topic_allowlist_includes_exact_twelve_edge_to_ground_suffixes(self) -> None:
+        expected = ("telemetry/doa", "telemetry/diagnostic/doa", "telemetry/diagnostic/angular", "telemetry/health", "telemetry/health/detail", "telemetry/angular", "state", "capabilities", "config/reported", "availability", "ack/config", "ack/operation")
         self.assertEqual(RDF_NODE_V2_SUFFIXES, expected)
         policy = {
             "telemetry/doa": (0, False),
+            "telemetry/diagnostic/doa": (0, False),
             "telemetry/health": (0, False),
             "telemetry/health/detail": (0, False),
             "state": (1, True),
@@ -99,7 +102,7 @@ class RdfNodeV2TelemetryTests(unittest.TestCase):
             "ack/operation": (1, False),
         }
         for suffix in expected:
-            if suffix == "telemetry/angular":
+            if suffix in ("telemetry/angular", "telemetry/diagnostic/angular"):
                 continue
             with self.subTest(suffix=suffix):
                 store = RdfNodeV2Telemetry(NODE)
@@ -116,7 +119,7 @@ class RdfNodeV2TelemetryTests(unittest.TestCase):
                 self.assertEqual(entry["qos"], qos)
                 self.assertEqual(entry["retained"], retained)
                 self.assertIsNone(entry["error"])
-                self.assertEqual(len(store.snapshot(NOW)["topics"]), 10)
+                self.assertEqual(len(store.snapshot(NOW)["topics"]), 12)
 
     def test_json_rejects_malformed_nonfinite_and_out_of_range(self) -> None:
         bad_values = [
@@ -142,6 +145,136 @@ class RdfNodeV2TelemetryTests(unittest.TestCase):
                 self.assertIsNotNone(entry["error"])
                 self.assertIsNone(entry["payload"])
 
+    def test_invalid_schema_retains_safe_candidate_without_promoting_payload(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        put(
+            store,
+            "telemetry/doa",
+            obj("telemetry/doa", a="bad-angle", password="hidden", unknown={"api_key": "hidden"}),
+        )
+
+        entry = observation(store.snapshot(NOW), "telemetry/doa")
+
+        self.assertEqual(entry["status"], "INVALID")
+        self.assertEqual(entry["error"], "INVALID_FIELD")
+        self.assertIsNone(entry["payload"])
+        self.assertEqual(entry["candidate_payload"], {
+            "v": 2, "sid": SID, "q": 1, "t": NOW, "f": 433920000,
+            "a": "bad-angle", "c": 8.27, "p": -54.2, "rev": 7, "ok": 1,
+        })
+        self.assertEqual(entry["received_at_ms"], NOW)
+
+    def test_broker_policy_invalidity_keeps_safe_candidate_visible(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        put(store, "telemetry/health", obj("telemetry/health"), qos=1)
+
+        entry = observation(store.snapshot(NOW), "telemetry/health")
+
+        self.assertEqual(entry["status"], "INVALID")
+        self.assertEqual(entry["error"], "BROKER_POLICY")
+        self.assertIsNone(entry["payload"])
+        self.assertEqual(entry["candidate_payload"]["run"], 1)
+        self.assertEqual(entry["candidate_payload"]["t"], NOW)
+
+    def test_invalid_ack_candidate_redacts_nested_credential_fields(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        put(
+            store,
+            "ack/operation",
+            obj(
+                "ack/operation",
+                status=17,
+                result={
+                    "operation": "restart",
+                    "status": "APPLYING",
+                    "challenge": "hidden",
+                    "token": "hidden",
+                    "password": "hidden",
+                    "unlisted": "hidden",
+                },
+            ),
+            qos=1,
+        )
+
+        entry = observation(store.snapshot(NOW), "ack/operation")
+
+        self.assertEqual(entry["status"], "INVALID")
+        self.assertIsNone(entry["payload"])
+        self.assertEqual(entry["candidate_payload"]["result"], {
+            "operation": "restart",
+            "status": "APPLYING",
+        })
+
+    def test_invalid_ack_candidate_preserves_documented_proof_fields(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        put(
+            store,
+            "ack/config",
+            obj(
+                "ack/config",
+                status=17,
+                result={
+                    "revision": 8,
+                    "proof": {
+                        "center_frequency_hz": "FRESH_DAQ_RF_CENTER",
+                        "vfo0_frequency_hz": "FRESH_DOA_FREQUENCY",
+                        "challenge": "single-use-challenge-42",
+                        "password": "hidden-password",
+                        "unlisted": "hidden",
+                    },
+                },
+            ),
+            qos=1,
+        )
+
+        entry = observation(store.snapshot(NOW), "ack/config")
+
+        self.assertEqual(entry["status"], "INVALID")
+        self.assertIsNone(entry["payload"])
+        self.assertEqual(entry["candidate_payload"]["result"]["proof"], {
+            "center_frequency_hz": "FRESH_DAQ_RF_CENTER",
+            "vfo0_frequency_hz": "FRESH_DOA_FREQUENCY",
+        })
+        self.assertNotIn("single-use-challenge-42", repr(entry))
+        self.assertNotIn("hidden-password", repr(entry))
+
+    def test_valid_ack_payload_preserves_documented_proof_fields(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        put(
+            store,
+            "ack/config",
+            obj(
+                "ack/config",
+                result={
+                    "revision": 8,
+                    "proof": {
+                        "center_frequency_hz": "FRESH_DAQ_RF_CENTER",
+                        "vfo0_frequency_hz": "FRESH_DOA_FREQUENCY",
+                    },
+                    "persisted": True,
+                },
+            ),
+            qos=1,
+        )
+
+        entry = observation(store.snapshot(NOW), "ack/config")
+
+        self.assertEqual(entry["status"], "FRESH")
+        self.assertEqual(entry["payload"]["result"]["proof"], {
+            "center_frequency_hz": "FRESH_DAQ_RF_CENTER",
+            "vfo0_frequency_hz": "FRESH_DOA_FREQUENCY",
+        })
+
+    def test_invalid_ack_candidate_omits_unstructured_result_values(self) -> None:
+        for result in ("single-use-challenge-42", ["single-use-challenge-42"]):
+            with self.subTest(result_type=type(result).__name__):
+                store = RdfNodeV2Telemetry(NODE)
+                put(store, "ack/operation", obj("ack/operation", result=result), qos=1)
+
+                entry = observation(store.snapshot(NOW), "ack/operation")
+
+                self.assertEqual(entry["status"], "INVALID")
+                self.assertNotIn("single-use-challenge-42", repr(entry))
     def test_json_size_boundary_is_exact(self) -> None:
         for length, expected in ((16384, "FRESH"), (16385, "INVALID")):
             store = RdfNodeV2Telemetry(NODE)
@@ -316,6 +449,36 @@ class RdfNodeV2TelemetryTests(unittest.TestCase):
             put(store, "telemetry/angular", chunk)
         self.assertEqual(observation(store.snapshot(NOW), "telemetry/angular")["status"], "FRESH")
 
+    def test_health_revision_must_match_known_config_and_state_revision(self) -> None:
+        for source, fields in (("state", {"cfg": 8}), ("config/reported", {"rev": 8})):
+            store = RdfNodeV2Telemetry(NODE)
+            put(store, source, obj(source, **fields), qos=1, retained=True)
+            put(store, "telemetry/health", obj("telemetry/health", rev=7))
+            mismatched = observation(store.snapshot(NOW), "telemetry/health")
+            with self.subTest(source=source):
+                self.assertEqual(mismatched["status"], "INCONSISTENT")
+                self.assertEqual(mismatched["error"], "REVISION_MISMATCH")
+            put(store, "telemetry/health", obj("telemetry/health", q=2, rev=8))
+            self.assertEqual(observation(store.snapshot(NOW), "telemetry/health")["status"], "FRESH")
+
+    def test_config_revision_report_invalidates_previously_cached_health(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        put(store, "telemetry/health", obj("telemetry/health", rev=7))
+        self.assertEqual(observation(store.snapshot(NOW), "telemetry/health")["status"], "FRESH")
+
+        put(store, "config/reported", obj("config/reported", rev=8), qos=1, retained=True)
+        self.assertNotEqual(observation(store.snapshot(NOW), "telemetry/health")["status"], "FRESH")
+        put(store, "telemetry/health", obj("telemetry/health", q=2, rev=8))
+        self.assertEqual(observation(store.snapshot(NOW), "telemetry/health")["status"], "FRESH")
+
+    def test_unknown_config_report_revision_does_not_override_known_state_revision(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        put(store, "state", obj("state", cfg=7), qos=1, retained=True)
+        put(store, "config/reported", obj("config/reported", rev=None), qos=1, retained=True)
+        put(store, "telemetry/health", obj("telemetry/health", rev=7))
+        self.assertEqual(observation(store.snapshot(NOW), "telemetry/health")["status"], "FRESH")
+
+
     def test_ack_payload_redacts_challenge_and_unknown_credential_fields(self) -> None:
         store = RdfNodeV2Telemetry(NODE)
         raw = obj(
@@ -326,6 +489,7 @@ class RdfNodeV2TelemetryTests(unittest.TestCase):
                 "challenge": "single-use-challenge-42",
                 "broker_credential": "fixture-password-value",
             },
+            error={"error": "REBOOT_BLOCKED"},
         )
         put(store, "ack/operation", raw, qos=1)
         entry = observation(store.snapshot(NOW), "ack/operation")
@@ -333,11 +497,40 @@ class RdfNodeV2TelemetryTests(unittest.TestCase):
         normalized = entry["payload"]
         self.assertEqual(normalized["result"]["operation"], "restart")
         self.assertEqual(normalized["result"]["status"], "APPLYING")
+        self.assertEqual(normalized["error"]["error"], "REBOOT_BLOCKED")
         self.assertNotIn("challenge", normalized["result"])
         self.assertNotIn("broker_credential", normalized["result"])
         rendered = repr(normalized)
         self.assertNotIn("single-use-challenge-42", rendered)
         self.assertNotIn("fixture-password-value", rendered)
+
+    def test_ack_result_and_error_reject_unstructured_values(self) -> None:
+        for suffix in ("ack/config", "ack/operation"):
+            for field in ("result", "error"):
+                for value in ("single-use-challenge-42", ["single-use-challenge-42"]):
+                    store = RdfNodeV2Telemetry(NODE)
+                    put(store, suffix, obj(suffix, **{field: value}), qos=1)
+                    entry = observation(store.snapshot(NOW), suffix)
+                    with self.subTest(suffix=suffix, field=field, value_type=type(value).__name__):
+                        self.assertEqual(entry["status"], "INVALID")
+                        self.assertIsNone(entry["payload"])
+                        self.assertNotIn("single-use-challenge-42", repr(entry))
+
+    def test_ack_rejects_unsafe_numbers_and_challenge_like_error_codes(self) -> None:
+        cases = (
+            ("ack/config", "result", {"valid_seconds": 10 ** 400}),
+            ("ack/operation", "error", {"error": "single-use-challenge-42"}),
+            ("ack/operation", "result", {"code": "single-use-challenge-42"}),
+        )
+        for suffix, field, value in cases:
+            store = RdfNodeV2Telemetry(NODE)
+            put(store, suffix, obj(suffix, **{field: value}), qos=1)
+            entry = observation(store.snapshot(NOW), suffix)
+            with self.subTest(suffix=suffix, field=field):
+                self.assertEqual(entry["status"], "INVALID")
+                self.assertIsNone(entry["payload"])
+                self.assertNotIn("single-use-challenge-42", repr(entry))
+
 
     def test_config_report_does_not_expose_unknown_effective_key(self) -> None:
         store = RdfNodeV2Telemetry(NODE)
@@ -397,6 +590,18 @@ class RdfNodeV2TelemetryTests(unittest.TestCase):
                 self.assertEqual(entry["status"], "INVALID")
                 self.assertIsNone(entry["payload"])
 
+    def test_config_report_rejects_javascript_unsafe_integer_values(self) -> None:
+        for field, value in (("gain_db", 10 ** 400), ("center_frequency_hz", 1 << 53)):
+            store = RdfNodeV2Telemetry(NODE)
+            report = obj("config/reported")
+            report["effective"][field] = value
+            put(store, "config/reported", report, qos=1, retained=True)
+            entry = observation(store.snapshot(NOW), "config/reported")
+            with self.subTest(field=field):
+                self.assertEqual(entry["status"], "INVALID")
+                self.assertIsNone(entry["payload"])
+
+
     def test_latest_only_state_and_health_detail_is_not_gate(self) -> None:
         for cpu in range(1, 20):
             put(self.store, "telemetry/health/detail", obj("telemetry/health/detail", cpu=cpu))
@@ -406,6 +611,18 @@ class RdfNodeV2TelemetryTests(unittest.TestCase):
         put(self.store, "telemetry/health/detail", obj("telemetry/health/detail"))
         put(self.store, "telemetry/doa", obj("telemetry/doa"))
         self.assertNotEqual(observation(self.store.snapshot(NOW), "telemetry/doa")["status"], "FRESH")
+
+    def test_health_detail_is_cleared_when_session_changes(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        put(store, "state", obj("state"), qos=1, retained=True)
+        put(store, "telemetry/health/detail", obj("telemetry/health/detail"))
+        self.assertEqual(observation(store.snapshot(NOW), "telemetry/health/detail")["status"], "FRESH")
+
+        put(store, "state", obj("state", sid="01020304"), qos=1, retained=True)
+        detail = observation(store.snapshot(NOW), "telemetry/health/detail")
+        self.assertEqual(detail["status"], "UNAVAILABLE")
+        self.assertIsNone(detail["payload"])
+
 
     def test_angular_u8_single_chunk_420_boundary_and_decode(self) -> None:
         put(self.store, "telemetry/health", obj("telemetry/health"))
@@ -485,6 +702,251 @@ class RdfNodeV2TelemetryTests(unittest.TestCase):
             for chunk in chunks(frame, (384, 384)):
                 put(store, "telemetry/angular", chunk)
             self.assertNotEqual(observation(store.snapshot(NOW), "telemetry/angular")["status"], "FRESH")
+
+    def test_angular_requires_known_non_null_matching_revision(self) -> None:
+        for health_revision, frame_revision in ((None, 0xffffffff), (7, 0xffffffff), (None, 7)):
+            store = RdfNodeV2Telemetry(NODE)
+            put(store, "telemetry/health", obj("telemetry/health", rev=health_revision))
+            for chunk in chunks(angular_frame(revision=frame_revision), (384, 384)):
+                put(store, "telemetry/angular", chunk)
+            entry = observation(store.snapshot(NOW), "telemetry/angular")
+            with self.subTest(health_revision=health_revision, frame_revision=frame_revision):
+                self.assertEqual(entry["status"], "INCONSISTENT")
+                self.assertEqual(entry["error"], "REVISION_MISMATCH")
+    def test_angular_rejects_javascript_unsafe_timestamps(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        put(store, "telemetry/health", obj("telemetry/health"))
+        frame = angular_frame(timestamp=1 << 53)
+        for chunk in chunks(frame, (384, 384)):
+            put(store, "telemetry/angular", chunk)
+        entry = observation(store.snapshot(NOW), "telemetry/angular")
+        self.assertEqual(entry["status"], "INVALID")
+        self.assertIsNone(entry["payload"])
+
+
+
+    def test_diagnostic_doa_validates_selected_fields_and_broker_policy(self) -> None:
+        invalid_fields = (
+            ("v", 3), ("sid", "bad"), ("q", -1), ("q", 1 << 32),
+            ("source", "doa.csv"), ("source_timestamp_ms", 0),
+            ("source_timestamp_ms", 1 << 53), ("observed_timestamp_ms", True),
+            ("observed_timestamp_ms", 1 << 53), ("raw_doa_deg", True),
+            ("raw_doa_deg", float("nan")), ("raw_doa_deg", 1 << 53),
+            ("frequency_mhz", False), ("frequency_mhz", float("inf")),
+            ("trust", "VERIFIED"), ("validation_reasons", []),
+            ("validation_reasons", ["lowercase"]), ("validation_reasons", ["R" * 65]),
+            ("validation_reasons", ["VALID"] * 33),
+        )
+        for field, value in invalid_fields:
+            with self.subTest(field=field, value=str(value)[:20]):
+                store = RdfNodeV2Telemetry(NODE)
+                put(store, "telemetry/diagnostic/doa", obj("telemetry/diagnostic/doa", **{field: value}))
+                entry = observation(store.snapshot(NOW), "telemetry/diagnostic/doa")
+                self.assertEqual(entry["status"], "INVALID")
+                self.assertIsNone(entry["payload"])
+
+        for qos, retained in ((1, False), (0, True)):
+            with self.subTest(qos=qos, retained=retained):
+                store = RdfNodeV2Telemetry(NODE)
+                put(store, "telemetry/diagnostic/doa", obj("telemetry/diagnostic/doa"),
+                    qos=qos, retained=retained)
+                self.assertEqual(
+                    observation(store.snapshot(NOW), "telemetry/diagnostic/doa")["status"],
+                    "INVALID",
+                )
+
+        store = RdfNodeV2Telemetry(NODE)
+        put(store, "telemetry/diagnostic/doa", b" " * 16385)
+        oversized = observation(store.snapshot(NOW), "telemetry/diagnostic/doa")
+        self.assertEqual(oversized["status"], "INVALID")
+        self.assertEqual(oversized["error"], "PAYLOAD_TOO_LARGE")
+
+    def test_diagnostic_doa_freshness_uses_receive_and_source_age_boundaries(self) -> None:
+        for delta, expected_status in ((3000, "FRESH"), (3001, "STALE")):
+            store = RdfNodeV2Telemetry(NODE)
+            put(store, "telemetry/diagnostic/doa",
+                obj("telemetry/diagnostic/doa", source_timestamp_ms=NOW),
+                at=NOW)
+            self.assertEqual(
+                observation(store.snapshot(NOW + delta), "telemetry/diagnostic/doa")["status"],
+                expected_status,
+            )
+
+        for delta, expected_status in ((5000, "FRESH"), (5001, "STALE")):
+            store = RdfNodeV2Telemetry(NODE)
+            put(store, "telemetry/diagnostic/doa",
+                obj("telemetry/diagnostic/doa", source_timestamp_ms=NOW),
+                at=NOW + delta)
+            self.assertEqual(
+                observation(store.snapshot(NOW + delta), "telemetry/diagnostic/doa")["status"],
+                expected_status,
+            )
+
+        for received_at_ms, source_timestamp_ms in ((NOW, NOW + 1), (NOW + 1, NOW)):
+            store = RdfNodeV2Telemetry(NODE)
+            put(store, "telemetry/diagnostic/doa",
+                obj("telemetry/diagnostic/doa", source_timestamp_ms=source_timestamp_ms),
+                at=received_at_ms)
+            self.assertEqual(
+                observation(store.snapshot(NOW), "telemetry/diagnostic/doa")["status"],
+                "STALE",
+            )
+
+    def test_diagnostic_doa_does_not_seed_live_session_or_sequence(self) -> None:
+        put(self.store, "telemetry/diagnostic/doa",
+            obj("telemetry/diagnostic/doa", sid="01020304", q=0xffffffff))
+        put(self.store, "telemetry/health", obj("telemetry/health", q=1))
+        put(self.store, "telemetry/doa", obj("telemetry/doa", q=1))
+
+        self.assertEqual(
+            observation(self.store.snapshot(NOW), "telemetry/doa")["status"],
+            "FRESH",
+        )
+
+    def test_diagnostic_angular_accepts_flag_subsets_and_derives_missing_evidence(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        frame = angular_frame(flags=3, q=44)
+        for chunk in chunks(frame, (384, 384)):
+            put(store, "telemetry/diagnostic/angular", chunk)
+        entry = observation(store.snapshot(NOW), "telemetry/diagnostic/angular")
+        self.assertEqual(entry["status"], "FRESH")
+        candidate = entry["payload"]
+        self.assertEqual(candidate["trust"], "UNVERIFIED")
+        self.assertEqual(candidate["source_timestamp_ms"], NOW)
+        self.assertEqual(candidate["flags"], 3)
+        self.assertEqual(len(candidate["values"]), 360)
+        self.assertEqual(candidate["validation_reasons"], [
+            "DIAGNOSTIC_UNVERIFIED",
+            "DAQ_UNVERIFIED",
+            "ANGLE_CONVENTION_UNVERIFIED",
+            "CONFIG_ATTRIBUTION_UNVERIFIED",
+        ])
+
+        complete = RdfNodeV2Telemetry(NODE)
+        for chunk in chunks(angular_frame(flags=31, q=45), (384, 384)):
+            put(complete, "telemetry/diagnostic/angular", chunk)
+        self.assertEqual(
+            observation(complete.snapshot(NOW), "telemetry/diagnostic/angular")["payload"]["validation_reasons"],
+            ["DIAGNOSTIC_UNVERIFIED"],
+        )
+
+        missing_clock = RdfNodeV2Telemetry(NODE)
+        for chunk in chunks(angular_frame(flags=1, q=46), (384, 384)):
+            put(missing_clock, "telemetry/diagnostic/angular", chunk)
+        stale = observation(missing_clock.snapshot(NOW), "telemetry/diagnostic/angular")
+        self.assertEqual(stale["status"], "STALE")
+        self.assertIn("CLOCK_FRESHNESS_UNVERIFIED", stale["payload"]["validation_reasons"])
+
+        for delta, expected_status in ((3000, "FRESH"), (3001, "STALE")):
+            store = RdfNodeV2Telemetry(NODE)
+            frame = angular_frame(flags=31, q=50 + delta, timestamp=NOW)
+            for chunk in chunks(frame, (384, 384)):
+                put(store, "telemetry/diagnostic/angular", chunk, at=NOW)
+            self.assertEqual(
+                observation(store.snapshot(NOW + delta), "telemetry/diagnostic/angular")["status"],
+                expected_status,
+            )
+
+        for delta, expected_status in ((10000, "FRESH"), (10001, "STALE")):
+            store = RdfNodeV2Telemetry(NODE)
+            frame = angular_frame(flags=31, q=60 + delta, timestamp=NOW - delta)
+            for chunk in chunks(frame, (384, 384)):
+                put(store, "telemetry/diagnostic/angular", chunk, at=NOW)
+            self.assertEqual(
+                observation(store.snapshot(NOW), "telemetry/diagnostic/angular")["status"],
+                expected_status,
+            )
+
+        future = RdfNodeV2Telemetry(NODE)
+        for chunk in chunks(angular_frame(flags=31, q=99, timestamp=NOW + 1), (384, 384)):
+            put(future, "telemetry/diagnostic/angular", chunk)
+        self.assertEqual(
+            observation(future.snapshot(NOW), "telemetry/diagnostic/angular")["status"],
+            "STALE",
+        )
+
+    def test_diagnostic_angular_rejects_reserved_flags_and_header_mismatch(self) -> None:
+        invalid_chunks = (
+            chunks(angular_frame(flags=32, q=70), (384, 384)),
+            chunks(angular_frame(q=71), (384, 384), q=72),
+            chunks(angular_frame(q=73), (384, 384), sid=0x01020304),
+            chunks(angular_frame(samples=struct.pack("<h", -32768) + struct.pack("<359h", *([1] * 359))),
+                   (384, 384)),
+        )
+        for pair in invalid_chunks:
+            with self.subTest(first_chunk=pair[0][:16]):
+                store = RdfNodeV2Telemetry(NODE)
+                for chunk in pair:
+                    put(store, "telemetry/diagnostic/angular", chunk)
+                entry = observation(store.snapshot(NOW), "telemetry/diagnostic/angular")
+                self.assertEqual(entry["status"], "INVALID")
+                self.assertIsNone(entry["payload"])
+
+        duplicate = RdfNodeV2Telemetry(NODE)
+        pair = chunks(angular_frame(q=74), (384, 384))
+        put(duplicate, "telemetry/diagnostic/angular", pair[0])
+        put(duplicate, "telemetry/diagnostic/angular", pair[0])
+        self.assertEqual(
+            observation(duplicate.snapshot(NOW), "telemetry/diagnostic/angular")["status"],
+            "INVALID",
+        )
+
+        oversized = RdfNodeV2Telemetry(NODE)
+        put(oversized, "telemetry/diagnostic/angular", chunks(angular_frame(q=75), (384, 384))[0] + b"x" * 25)
+        self.assertEqual(
+            observation(oversized.snapshot(NOW), "telemetry/diagnostic/angular")["status"],
+            "INVALID",
+        )
+
+    def test_diagnostic_angular_assembly_obeys_global_bound_and_deadline(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        live = chunks(angular_frame(q=80), (384, 384))
+        diag_2 = chunks(angular_frame(q=81), (384, 384))
+        diag_3 = chunks(angular_frame(q=82), (384, 384))
+        put(store, "telemetry/angular", live[0], at=NOW)
+        put(store, "telemetry/diagnostic/angular", diag_2[0], at=NOW + 1)
+        put(store, "telemetry/diagnostic/angular", diag_3[0], at=NOW + 2)
+        for chunk in diag_2[1:]:
+            put(store, "telemetry/diagnostic/angular", chunk, at=NOW + 3)
+        self.assertNotEqual(
+            observation(store.snapshot(NOW + 3), "telemetry/angular")["status"],
+            "FRESH",
+        )
+        self.assertEqual(
+            observation(store.snapshot(NOW + 3), "telemetry/diagnostic/angular")["payload"]["q"],
+            81,
+        )
+
+        expired = RdfNodeV2Telemetry(NODE)
+        pair = chunks(angular_frame(q=83), (384, 384))
+        put(expired, "telemetry/diagnostic/angular", pair[0], at=NOW)
+        put(expired, "telemetry/diagnostic/angular", pair[1], at=NOW + 3001)
+        self.assertNotEqual(
+            observation(expired.snapshot(NOW + 3001), "telemetry/diagnostic/angular")["status"],
+            "FRESH",
+        )
+
+    def test_diagnostic_and_live_angular_assemblies_do_not_collide(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        put(store, "telemetry/health", obj("telemetry/health", q=45))
+        frame = angular_frame(q=45)
+        pair = chunks(frame, (384, 384))
+        put(store, "telemetry/angular", pair[0])
+        put(store, "telemetry/diagnostic/angular", pair[1])
+        self.assertNotEqual(observation(store.snapshot(NOW), "telemetry/angular")["status"], "FRESH")
+        self.assertNotEqual(
+            observation(store.snapshot(NOW), "telemetry/diagnostic/angular")["status"],
+            "FRESH",
+        )
+
+        put(store, "telemetry/diagnostic/angular", pair[0])
+        self.assertEqual(
+            observation(store.snapshot(NOW), "telemetry/diagnostic/angular")["status"],
+            "FRESH",
+        )
+        self.assertNotEqual(observation(store.snapshot(NOW), "telemetry/angular")["status"], "FRESH")
+        put(store, "telemetry/angular", pair[1])
+        self.assertEqual(observation(store.snapshot(NOW), "telemetry/angular")["status"], "FRESH")
 
 
 if __name__ == "__main__":

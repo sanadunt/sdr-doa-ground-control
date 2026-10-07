@@ -41,6 +41,9 @@ export function ConfigurationPage({
   onBrandingChanged: (branding: Branding) => void;
 }): JSX.Element {
   const [connection, setConnection] = useState<ConsoleConfig>({ ...DEFAULT_CONSOLE_CONFIG, ...config });
+  const [brokerPassword, setBrokerPassword] = useState('');
+  const [clearBrokerPassword, setClearBrokerPassword] = useState(false);
+  const [showBrokerPassword, setShowBrokerPassword] = useState(false);
   const [gpsSource, setGpsSource] = useState<GpsConfig['source']>(gpsConfig.source);
   const [manualLatitude, setManualLatitude] = useState(String(gpsConfig.manualLatitude));
   const [manualLongitude, setManualLongitude] = useState(String(gpsConfig.manualLongitude));
@@ -143,10 +146,15 @@ export function ConfigurationPage({
         ...connection,
         mqtt_port: Number(connection.mqtt_port),
         refresh_seconds: Number(connection.refresh_seconds),
+      }, {
+        ...(brokerPassword !== '' ? { mqttPassword: brokerPassword } : {}),
+        ...(clearBrokerPassword ? { clearMqttPassword: true } : {}),
       });
-      await onConfigSaved(normalized);
       setConnection(normalized);
-      setConnectionStatus({ tone: 'good', text: 'Saved locally and applied to the local read path.' });
+      setBrokerPassword('');
+      setClearBrokerPassword(false);
+      await onConfigSaved(normalized);
+      setConnectionStatus({ tone: 'good', text: 'Saved.' });
     } catch (error: unknown) {
       setConnectionStatus({ tone: 'bad', text: error instanceof Error ? error.message : 'Connection settings were rejected.' });
     } finally {
@@ -249,8 +257,73 @@ export function ConfigurationPage({
           <div className="form-grid">
             <Field label="Data Out base URL" value={connection.base_url} onChange={(value) => setConnection({ ...connection, base_url: value })} help="Validated by the existing local allowlist." />
             <Field label="MQTT monitor host" value={connection.mqtt_host} onChange={(value) => setConnection({ ...connection, mqtt_host: value })} help="Optional loopback subscriber; blank keeps it OFF." />
+            <Field label="RDF Node v2 ID" value={connection.rdf_node_id} onChange={(value) => setConnection({ ...connection, rdf_node_id: value })} />
             <Field label="MQTT port" type="number" value={connection.mqtt_port} min={1} max={65535} onChange={(value) => setConnection({ ...connection, mqtt_port: Number(value) })} />
             <label className="form-field"><span>Refresh interval</span><select value={connection.refresh_seconds} onChange={(event) => setConnection({ ...connection, refresh_seconds: Number(event.target.value) })}><option value={0}>Manual only</option><option value={5}>Every 5 seconds</option><option value={10}>Every 10 seconds</option><option value={30}>Every 30 seconds</option></select><small>Every read has a finite request deadline.</small></label>
+            <label className="form-field">
+              <span>MQTT transport</span>
+              <select value={connection.mqtt_transport} onChange={(event) => setConnection({ ...connection, mqtt_transport: event.target.value as ConsoleConfig['mqtt_transport'] })}>
+                <option value="tcp">TCP</option>
+                <option value="websockets">WebSocket</option>
+              </select>
+            </label>
+            <label className="form-field">
+              <span>WebSocket path</span>
+              <input
+                type="text"
+                value={connection.mqtt_ws_path}
+                disabled={connection.mqtt_transport !== 'websockets'}
+                onChange={(event) => setConnection({ ...connection, mqtt_ws_path: event.target.value })}
+              />
+            </label>
+            <label className="form-field">
+              <span>MQTT username</span>
+              <input
+                type="text"
+                autoComplete="username"
+                value={connection.mqtt_username}
+                onChange={(event) => setConnection({ ...connection, mqtt_username: event.target.value })}
+              />
+            </label>
+            <label className="form-field">
+              <span>MQTT broker password</span>
+              <input
+                type={showBrokerPassword ? 'text' : 'password'}
+                autoComplete="new-password"
+                value={brokerPassword}
+                onChange={(event) => {
+                  setBrokerPassword(event.target.value);
+                  setClearBrokerPassword(false);
+                }}
+              />
+            </label>
+            <div className="form-field">
+              <button
+                className="text-button"
+                type="button"
+                aria-pressed={showBrokerPassword}
+                onClick={() => setShowBrokerPassword(!showBrokerPassword)}
+              >
+                {showBrokerPassword ? 'Hide password' : 'Show password'}
+              </button>
+            </div>
+            {connection.mqtt_password_set ? (
+              <div className="form-field">
+                <span>Saved password</span>
+                <button
+                  className="text-button"
+                  type="button"
+                  disabled={busy}
+                  aria-pressed={clearBrokerPassword}
+                  onClick={() => {
+                    setBrokerPassword('');
+                    setClearBrokerPassword(!clearBrokerPassword);
+                  }}
+                >
+                  {clearBrokerPassword ? 'Keep saved password' : 'Clear saved password on save'}
+                </button>
+              </div>
+            ) : null}
           </div>
           <div className="form-actions"><button className="primary-button" type="button" disabled={busy} onClick={applyConnection}>Save local connection</button><span className={`form-status status-text-${connectionStatus.tone}`}>{connectionStatus.text}</span></div>
           <div className="dry-run-notice"><strong>.env</strong> is read by Python at startup only; the browser does not read or expose its values. Restart the local Python console after changing it.</div>

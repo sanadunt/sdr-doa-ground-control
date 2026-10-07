@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
-import type { ConsoleConfig, MqttSnapshot } from '../types';
+import type { ConsoleConfig, MqttSnapshot, RdfNodeMqttSnapshot } from '../types';
 import { connectMqtt, getMqtt } from '../api';
 import { formatNumber, safeJson, safeMqttEntries, toneFor } from '../lib/telemetry';
 import { KeyValue, Metric, Panel, SectionHeading, StatusBadge } from '../components/ui';
+import { RdfNodeMqttPanel } from '../components/RdfNodeMqttPanel';
 
 type MessageMonitorPageProps = {
   mqtt: MqttSnapshot | null;
@@ -12,6 +13,9 @@ type MessageMonitorPageProps = {
   /** Parent-owned actions give App a request-start token and abort controller. */
   onRefreshMqtt?: () => Promise<void>;
   onReconnectMqtt?: (host: string, port: number) => Promise<void>;
+  rdfNodeMqtt: RdfNodeMqttSnapshot | null;
+  rdfNodeMqttError: string | null;
+  onRefreshRdfNodeMqtt: () => Promise<void>;
 };
 
 export function MessageMonitorPage({
@@ -20,6 +24,9 @@ export function MessageMonitorPage({
   onMqttChanged,
   onRefreshMqtt,
   onReconnectMqtt,
+  rdfNodeMqtt,
+  rdfNodeMqttError,
+  onRefreshRdfNodeMqtt,
 }: MessageMonitorPageProps): ReactElement {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -96,6 +103,11 @@ export function MessageMonitorPage({
           <pre className="result-box monitor-json">{safeJson(safeMqttEntries(mqtt?.last_by_kind), 'No decoded records.')}</pre>
         </Panel>
       </div>
+      <RdfNodeMqttPanel
+        snapshot={rdfNodeMqtt}
+        error={rdfNodeMqttError}
+        onRefresh={onRefreshRdfNodeMqtt}
+      />
     </div>
   );
 }

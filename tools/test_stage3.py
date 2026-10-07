@@ -373,6 +373,36 @@ def test_branding_validation_and_console_config_reload() -> None:
     print("PASS branding validation and console config reload")
 
 
+def test_mqtt_transport_and_credentials_are_validated() -> None:
+    defaults = ground_console._default_console_config()
+    websocket = ground_console._validate_console_config(
+        {
+            "mqtt_transport": "websockets",
+            "mqtt_ws_path": "/rdf-doa",
+            "mqtt_username": "admin",
+            "mqtt_password": "broker-secret",
+        },
+        defaults,
+    )
+    assert websocket["mqtt_transport"] == "websockets"
+    assert websocket["mqtt_ws_path"] == "/rdf-doa"
+    assert websocket["mqtt_username"] == "admin"
+    assert websocket["mqtt_password"] == "broker-secret"
+
+    for invalid in (
+        {"mqtt_transport": "udp"},
+        {"mqtt_transport": []},
+        {"mqtt_ws_path": "rdf-doa"},
+        {"mqtt_password": "broker-secret"},
+    ):
+        try:
+            ground_console._validate_console_config(invalid, defaults)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid MQTT config was accepted: {invalid!r}")
+
+
 def test_mqtt_topic_map_is_bounded() -> None:
     try:
         from sdr_doa_mqtt_monitor import MqttMonitor
@@ -402,10 +432,10 @@ def test_mqtt_topic_map_is_bounded() -> None:
 
 def test_local_mqtt_restore_transition() -> None:
     class FakeMonitor:
-        def __init__(self, host: str, port: int, transport: str = "tcp") -> None:
+        def __init__(self, host: str, port: int, **_options: Any) -> None:
             self.host = host
             self.port = port
-            self.transport = transport
+            self.options = _options
             self.started = False
             self.stopped = False
 
@@ -434,7 +464,7 @@ def test_local_mqtt_restore_transition() -> None:
                 assert saved["mqtt_host"] == "127.0.0.1"
                 assert isinstance(server.mqtt_monitor, FakeMonitor)
                 assert server.mqtt_monitor.started
-                assert server.mqtt_monitor.transport == "websockets"
+                assert server.mqtt_monitor.options["transport"] == "websockets"
             finally:
                 if server.mqtt_monitor is not None:
                     server.mqtt_monitor.stop()

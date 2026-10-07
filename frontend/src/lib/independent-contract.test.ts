@@ -289,10 +289,12 @@ describe('polar compass transforms', () => {
 });
 
 describe('default Ground Console MQTT profile', () => {
-  it('uses the Ground broker IP and port', () => {
+  it('defaults to the Ground broker WebSocket settings', () => {
     expect(DEFAULT_CONSOLE_CONFIG).toMatchObject({
       mqtt_host: '10.90.0.1',
       mqtt_port: 9001,
+      mqtt_transport: 'websockets',
+      mqtt_ws_path: '/mqtt',
     });
   });
 });

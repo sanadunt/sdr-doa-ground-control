@@ -97,10 +97,11 @@ class MqttMonitor:
         self._started = False
         self._stopping = False
         self._connection = "disabled"
+        self._rdf_connection = "disabled"
         self._last_error: Optional[str] = None
         self._rdf_last_error: Optional[str] = None
         self._pending_subacks: Dict[int, tuple[str, ...]] = {}
-        self._subscriptions_ready = False
+        self._rdf_subscriptions_ready = False
         self._received = 0
         self._valid = 0
         self._invalid = 0
@@ -119,10 +120,11 @@ class MqttMonitor:
                 self._started = True
                 self._stopping = False
                 self._connection = "connecting"
+                self._rdf_connection = "connecting"
                 self._last_error = None
                 self._rdf_last_error = None
                 self._pending_subacks.clear()
-                self._subscriptions_ready = False
+                self._rdf_subscriptions_ready = False
             client: Any = None
             try:
                 client = mqtt.Client(
@@ -169,10 +171,11 @@ class MqttMonitor:
                 self._stopping = True
                 self._started = False
                 self._connection = "stopped"
+                self._rdf_connection = "stopped"
                 self._last_error = None
                 self._rdf_last_error = None
                 self._pending_subacks.clear()
-                self._subscriptions_ready = False
+                self._rdf_subscriptions_ready = False
                 self._client = None
             if client is None:
                 return
@@ -187,9 +190,10 @@ class MqttMonitor:
 
     def _set_error_locked(self, code: str, detail: Optional[str] = None) -> None:
         self._connection = "error"
+        self._rdf_connection = "error"
         self._last_error = detail or code
         self._rdf_last_error = code
-        self._subscriptions_ready = False
+        self._rdf_subscriptions_ready = False
         self._pending_subacks.clear()
 
     def _on_connect(
@@ -207,10 +211,11 @@ class MqttMonitor:
                 self._set_error_locked("CONNECT_REFUSED", f"MQTT connect refused: {reason_code}")
                 return
             self._connection = "connecting"
+            self._rdf_connection = "connecting"
             self._last_error = None
             self._rdf_last_error = None
             self._pending_subacks.clear()
-            self._subscriptions_ready = False
+            self._rdf_subscriptions_ready = False
             try:
                 options = self._mqtt.SubscribeOptions(
                     qos=1,
@@ -236,10 +241,11 @@ class MqttMonitor:
         with self._lock:
             if client is self._client and self._started and not self._stopping:
                 self._connection = "disconnected"
+                self._rdf_connection = "disconnected"
                 self._last_error = "DISCONNECTED"
                 self._rdf_last_error = "DISCONNECTED"
                 self._pending_subacks.clear()
-                self._subscriptions_ready = False
+                self._rdf_subscriptions_ready = False
 
     def _on_subscribe(
         self,
@@ -263,14 +269,15 @@ class MqttMonitor:
             if len(codes) != len(filters):
                 self._set_error_locked("SUBACK_INVALID")
                 return
-            if any(_subscription_failed(code) for code in codes):
-                self._set_error_locked("SUBSCRIPTION_DENIED")
-                return
+            # The v1 wildcard is first; all remaining filters are exact v2 topics.
+            v1_failed = _subscription_failed(codes[0])
+            rdf_failed = any(_subscription_failed(code) for code in codes[1:])
             if not self._pending_subacks:
-                self._connection = "connected"
-                self._last_error = None
-                self._rdf_last_error = None
-                self._subscriptions_ready = True
+                self._connection = "error" if v1_failed else "connected"
+                self._last_error = "SUBSCRIPTION_DENIED" if v1_failed else None
+                self._rdf_connection = "error" if rdf_failed else "connected"
+                self._rdf_last_error = "SUBSCRIPTION_DENIED" if rdf_failed else None
+                self._rdf_subscriptions_ready = not rdf_failed
 
     def _on_message(self, client: Any, _userdata: Any, message: Any) -> None:
         topic = str(getattr(message, "topic", ""))
@@ -387,11 +394,11 @@ class MqttMonitor:
         with self._lock:
             if not self._started:
                 connection = "disabled"
-            elif self._connection == "connected" and self._subscriptions_ready:
+            elif self._rdf_connection == "connected" and self._rdf_subscriptions_ready:
                 connection = "ready"
-            elif self._connection == "disconnected":
+            elif self._rdf_connection == "disconnected":
                 connection = "disconnected"
-            elif self._connection == "error":
+            elif self._rdf_connection == "error":
                 connection = "error"
             else:
                 connection = "connecting"

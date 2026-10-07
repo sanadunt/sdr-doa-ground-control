@@ -186,6 +186,29 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self.acknowledge()
         self.assertEqual(self.monitor.rdf_node_snapshot()["connection"], "ready")
 
+    def test_custom_node_id_changes_only_the_v2_subscription_namespace(self) -> None:
+        paho, client_type = fake_paho()
+        module = load_monitor(paho)
+        monitor = module.MqttMonitor("127.0.0.1", 1883, node_id="node_02")
+        monitor.start()
+        client = client_type.instances[-1]
+        client.on_connect(
+            client, None, {}, types.SimpleNamespace(value=0, is_failure=False), None,
+        )
+
+        subscribed = {topic for topic, _options in client.subscriptions}
+        expected = {f"sdr/v2/node_02/{suffix}" for suffix in RDF_NODE_V2_SUFFIXES}
+        expected.add(f"{contract.TOPIC_ROOT}/#")
+        self.assertEqual(len(RDF_NODE_V2_SUFFIXES), 12)
+        self.assertEqual(subscribed, expected)
+        self.assertEqual(
+            {topic for topic in subscribed if topic.startswith("sdr/v2/")},
+            {f"sdr/v2/node_02/{suffix}" for suffix in RDF_NODE_V2_SUFFIXES},
+        )
+        self.assertIn("sdr/v1/uav-01/#", subscribed)
+        self.assertEqual(client.publish_calls, [])
+
+
     def test_v1_and_v2_messages_use_only_their_schema_specific_snapshots(self) -> None:
         self.client = self._start()
         self.client.on_connect(self.client, None, {}, types.SimpleNamespace(value=0, is_failure=False), None)
@@ -271,6 +294,44 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self.assertEqual(snapshot["connection"], "error")
         self.assertEqual(snapshot["last_error"], "SUBSCRIPTION_DENIED")
 
+    def test_diagnostic_suback_denial_does_not_fail_v1_monitor(self) -> None:
+        self.client = self._start()
+        self.client.on_connect(
+            self.client, None, {}, types.SimpleNamespace(value=0, is_failure=False), None,
+        )
+        codes = successful_codes(len(self.client.subscriptions))
+        denied = types.SimpleNamespace(value=0x87, is_failure=True)
+        diagnostic_topic = f"sdr/v2/{NODE}/telemetry/diagnostic/doa"
+        denied_index = next(
+            index for index, (topic, _options) in enumerate(self.client.subscriptions)
+            if topic == diagnostic_topic
+        )
+        codes[denied_index] = denied
+        self.acknowledge(codes)
+
+        v1_snapshot = self.monitor.snapshot()
+        v2_snapshot = self.monitor.rdf_node_snapshot()
+        self.assertEqual(v1_snapshot["connection"], "connected")
+        self.assertIsNone(v1_snapshot["last_error"])
+        self.assertEqual(v2_snapshot["connection"], "error")
+        self.assertEqual(v2_snapshot["last_error"], "SUBSCRIPTION_DENIED")
+
+
+    def test_v1_suback_denial_does_not_fail_v2_monitor(self) -> None:
+        self.client = self._start()
+        self.client.on_connect(
+            self.client, None, {}, types.SimpleNamespace(value=0, is_failure=False), None,
+        )
+        codes = successful_codes(len(self.client.subscriptions))
+        codes[0] = types.SimpleNamespace(value=0x87, is_failure=True)
+        self.acknowledge(codes)
+
+        v1_snapshot = self.monitor.snapshot()
+        v2_snapshot = self.monitor.rdf_node_snapshot()
+        self.assertEqual(v1_snapshot["connection"], "error")
+        self.assertEqual(v1_snapshot["last_error"], "SUBSCRIPTION_DENIED")
+        self.assertEqual(v2_snapshot["connection"], "ready")
+        self.assertIsNone(v2_snapshot["last_error"])
 
 if __name__ == "__main__":
     unittest.main()

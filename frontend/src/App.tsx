@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { gsap } from 'gsap';
-import { connectMqtt, getBranding, getConsoleConfig, getMqtt, getSnapshot } from './api';
-import type { Branding, CompassConfig, ConsoleConfig, GpsConfig, MqttSnapshot, TelemetrySnapshot } from './types';
+import { connectMqtt, getBranding, getConsoleConfig, getMqtt, getRdfNodeMqtt, getSnapshot, getSystemHealth } from './api';
+import type { Branding, CompassConfig, ConsoleConfig, GpsConfig, MqttSnapshot, RdfNodeMqttSnapshot, SystemHealthSnapshot, TelemetrySnapshot } from './types';
 import { DEFAULT_COMPASS_CONFIG } from './lib/polar';
 import { DEFAULT_GPS_CONFIG } from './lib/map';
 import { DEFAULT_CONSOLE_CONFIG, deriveDataState } from './lib/telemetry';
@@ -19,6 +19,9 @@ import { DEFAULT_SIMULATION, simulationSnapshot, randomizeSimulationSettings } f
 
 const DEFAULT_BRANDING: Branding = { app_name: 'SDR-DoA Ground Console', logo_data_url: '' };
 const DEFAULT_LOCAL_EXPIRY_MS = 5_000;
+const SYSTEM_HEALTH_POLL_INTERVAL_MS = 5_000;
+
+const RDF_NODE_MQTT_POLL_INTERVAL_MS = 1_000;
 
 type FreshnessRecord = Record<string, unknown>;
 
@@ -123,6 +126,10 @@ function PageForRoute({
   snapshot,
   localFresh,
   mqtt,
+  rdfNodeMqtt,
+  systemHealth,
+  systemHealthError,
+  rdfNodeMqttError,
   config,
   branding,
   gpsConfig,
@@ -134,11 +141,16 @@ function PageForRoute({
   onMqttChanged,
   onRefreshMqtt,
   onReconnectMqtt,
+  onRefreshRdfNodeMqtt,
 }: {
   route: RouteName;
   snapshot: TelemetrySnapshot | null;
   localFresh: boolean;
   mqtt: MqttSnapshot | null;
+  rdfNodeMqtt: RdfNodeMqttSnapshot | null;
+  systemHealth: SystemHealthSnapshot | null;
+  systemHealthError: string | null;
+  rdfNodeMqttError: string | null;
   config: ConsoleConfig;
   branding: Branding;
   gpsConfig: GpsConfig;
@@ -150,12 +162,31 @@ function PageForRoute({
   onMqttChanged: (next: MqttSnapshot) => void;
   onRefreshMqtt: () => Promise<void>;
   onReconnectMqtt: (host: string, port: number) => Promise<void>;
+  onRefreshRdfNodeMqtt: () => Promise<void>;
 }): ReactElement {
   switch (route) {
-    case 'system-health': return <SystemHealthPage snapshot={snapshot} mqtt={mqtt} localSnapshotFresh={localFresh} />;
+    case 'system-health': return (
+      <SystemHealthPage
+        rdfNodeMqtt={rdfNodeMqtt}
+        rdfNodeMqttError={rdfNodeMqttError}
+        systemHealth={systemHealth}
+        systemHealthError={systemHealthError}
+      />
+    );
     case 'doa-diagnostics': return <DoADiagnosticsPage snapshot={snapshot} localSnapshotFresh={localFresh} />;
     case 'configuration': return <ConfigurationPage config={config} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={onGpsConfigChanged} onCompassConfigChanged={onCompassConfigChanged} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} />;
-    case 'message-monitor': return <MessageMonitorPage mqtt={mqtt} config={config} onMqttChanged={onMqttChanged} onRefreshMqtt={onRefreshMqtt} onReconnectMqtt={onReconnectMqtt} />;
+    case 'message-monitor': return (
+      <MessageMonitorPage
+        mqtt={mqtt}
+        config={config}
+        onMqttChanged={onMqttChanged}
+        onRefreshMqtt={onRefreshMqtt}
+        onReconnectMqtt={onReconnectMqtt}
+        rdfNodeMqtt={rdfNodeMqtt}
+        rdfNodeMqttError={rdfNodeMqttError}
+        onRefreshRdfNodeMqtt={onRefreshRdfNodeMqtt}
+      />
+    );
     case 'overview':
     default: return <OverviewPage snapshot={snapshot} localSnapshotFresh={localFresh} gpsConfig={gpsConfig} compassConfig={compassConfig} />;
   }
@@ -166,7 +197,12 @@ export default function App(): ReactElement {
   const [config, setConfig] = useState<ConsoleConfig>(DEFAULT_CONSOLE_CONFIG);
   const [branding, setBranding] = useState<Branding>(DEFAULT_BRANDING);
   const [snapshot, setSnapshot] = useState<TelemetrySnapshot | null>(null);
+  const [systemHealth, setSystemHealth] = useState<SystemHealthSnapshot | null>(null);
+  const [systemHealthError, setSystemHealthError] = useState<string | null>(null);
   const [mqtt, setMqtt] = useState<MqttSnapshot | null>(null);
+
+  const [rdfNodeMqtt, setRdfNodeMqtt] = useState<RdfNodeMqttSnapshot | null>(null);
+  const [rdfNodeMqttError, setRdfNodeMqttError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [readError, setReadError] = useState<string | null>(null);
   const [receivedAtMonotonic, setReceivedAtMonotonic] = useState<number | null>(null);
@@ -200,6 +236,9 @@ export default function App(): ReactElement {
   const mqttSequence = useRef(0);
   const refreshController = useRef<AbortController | null>(null);
   const mqttController = useRef<AbortController | null>(null);
+  const rdfNodeMqttSequence = useRef(0);
+  const rdfNodeMqttController = useRef<AbortController | null>(null);
+  const rdfNodeMqttRequest = useRef<Promise<void> | null>(null);
   const contentRef = useRef<HTMLElement | null>(null);
 
   // Keep the default argument of refresh independent of render closures while
@@ -227,6 +266,31 @@ export default function App(): ReactElement {
     } finally {
       if (mqttController.current === controller) mqttController.current = null;
     }
+  }, []);
+
+  const refreshRdfNodeMqtt = useCallback((): Promise<void> => {
+    if (!mountedRef.current) return Promise.resolve();
+    if (rdfNodeMqttRequest.current) return rdfNodeMqttRequest.current;
+
+    const sequence = ++rdfNodeMqttSequence.current;
+    const controller = new AbortController();
+    rdfNodeMqttController.current = controller;
+    const request = getRdfNodeMqtt(controller.signal).then((next) => {
+      if (!mountedRef.current || sequence !== rdfNodeMqttSequence.current) return;
+      setRdfNodeMqtt(next);
+      setRdfNodeMqttError(null);
+    }).catch((error: unknown) => {
+      if (!mountedRef.current || sequence !== rdfNodeMqttSequence.current || isAbortError(error)) return;
+      setRdfNodeMqtt(null);
+      const message = errorMessage(error, 'RDF Node MQTT request failed.');
+      setRdfNodeMqttError(message);
+      throw error;
+    }).finally(() => {
+      if (rdfNodeMqttController.current === controller) rdfNodeMqttController.current = null;
+      if (rdfNodeMqttRequest.current === request) rdfNodeMqttRequest.current = null;
+    });
+    rdfNodeMqttRequest.current = request;
+    return request;
   }, []);
 
   const reconnectMqtt = useCallback(async (host: string, port: number): Promise<void> => {
@@ -344,12 +408,99 @@ export default function App(): ReactElement {
       brandingController.current?.abort();
       refreshController.current?.abort();
       mqttController.current?.abort();
+      ++rdfNodeMqttSequence.current;
+      rdfNodeMqttController.current?.abort();
+      rdfNodeMqttController.current = null;
+      rdfNodeMqttRequest.current = null;
       configController.current = null;
       brandingController.current = null;
       refreshController.current = null;
       mqttController.current = null;
     };
   }, [refresh, refreshMqtt]);
+  useEffect(() => {
+    if (route !== 'system-health') {
+      setSystemHealth(null);
+      setSystemHealthError(null);
+      return undefined;
+    }
+
+    let active = true;
+    let timer: number | undefined;
+    let controller: AbortController | null = null;
+    setSystemHealth(null);
+    setSystemHealthError(null);
+
+    const poll = async (): Promise<void> => {
+      const requestController = new AbortController();
+      controller = requestController;
+      try {
+        const next = await getSystemHealth(requestController.signal);
+        if (!active) return;
+        setSystemHealth(next);
+        setSystemHealthError(null);
+      } catch (error: unknown) {
+        if (!active || isAbortError(error)) return;
+        setSystemHealth(null);
+        setSystemHealthError(errorMessage(error, 'System Health request failed.'));
+      } finally {
+        if (controller === requestController) controller = null;
+        if (active) {
+          timer = window.setTimeout(() => {
+            timer = undefined;
+            void poll();
+          }, SYSTEM_HEALTH_POLL_INTERVAL_MS);
+        }
+      }
+    };
+
+    void poll();
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+      controller?.abort();
+    };
+  }, [route]);
+
+  useEffect(() => {
+    if (route !== 'system-health' && route !== 'message-monitor') {
+      setRdfNodeMqtt(null);
+      setRdfNodeMqttError(null);
+      return undefined;
+    }
+
+    let active = true;
+    let timer: number | undefined;
+    setRdfNodeMqtt(null);
+    setRdfNodeMqttError(null);
+
+    const poll = async (): Promise<void> => {
+      try {
+        await refreshRdfNodeMqtt();
+      } catch {
+        // The error state is owned by refreshRdfNodeMqtt.
+      }
+      if (!active) return;
+      timer = window.setTimeout(() => {
+        timer = undefined;
+        void poll();
+      }, RDF_NODE_MQTT_POLL_INTERVAL_MS);
+    };
+
+    void poll();
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+      ++rdfNodeMqttSequence.current;
+      rdfNodeMqttController.current?.abort();
+      rdfNodeMqttController.current = null;
+      rdfNodeMqttRequest.current = null;
+      if (mountedRef.current) {
+        setRdfNodeMqtt(null);
+        setRdfNodeMqttError(null);
+      }
+    };
+  }, [route, refreshRdfNodeMqtt]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setExpiryTick((value) => value + 1), 500);
@@ -429,7 +580,29 @@ export default function App(): ReactElement {
       <section ref={contentRef} className="route-content" key={route}>
         {route === 'simulation' ? <SimulationPage enabled={simulationEnabled} automatic={simulationAutomatic} settings={simulationSettings} onEnabled={enabled => { setSimulationEnabled(enabled); if (!enabled) setSimulationAutomatic(false); }} onAutomatic={setSimulationAutomatic} onSettings={setSimulationSettings} onRandomize={randomizeSimulation} onOverview={() => navigate('overview')} />
           : route === 'overview' && simulationEnabled ? <OverviewPage snapshot={syntheticSnapshot} localSnapshotFresh={true} gpsConfig={gpsConfig} compassConfig={compassConfig} simulation={simulationSettings} />
-          : <PageForRoute route={route} snapshot={snapshot} localFresh={currentLocalFresh} mqtt={mqtt} config={config} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={setGpsConfig} onCompassConfigChanged={setCompassConfig} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} onMqttChanged={applyMqtt} onRefreshMqtt={refreshMqtt} onReconnectMqtt={reconnectMqtt} />}
+          : <PageForRoute
+              route={route}
+              snapshot={snapshot}
+              localFresh={currentLocalFresh}
+              mqtt={mqtt}
+              rdfNodeMqtt={rdfNodeMqtt}
+              rdfNodeMqttError={rdfNodeMqttError}
+              systemHealth={systemHealth}
+              systemHealthError={systemHealthError}
+              config={config}
+              branding={branding}
+              gpsConfig={gpsConfig}
+              compassConfig={compassConfig}
+              onGpsConfigChanged={setGpsConfig}
+              onCompassConfigChanged={setCompassConfig}
+              onConfigSaved={onConfigSaved}
+              onBrandingChanged={onBrandingChanged}
+              onMqttChanged={applyMqtt}
+              onRefreshMqtt={refreshMqtt}
+              onReconnectMqtt={reconnectMqtt}
+              onRefreshRdfNodeMqtt={refreshRdfNodeMqtt}
+            />
+          }
       </section>
     </ConsoleShell>
   );

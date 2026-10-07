@@ -24,6 +24,7 @@ import base64
 import hmac
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
@@ -41,10 +42,13 @@ from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from sdr_doa_collector import CollectorError, DEFAULT_ALLOWED_DATA_HOSTS, collect
+from system_health_monitor import SystemHealthMonitor
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_RDF_NODE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
 
 
 def _read_dotenv(path: Path = DEFAULT_ENV_PATH) -> Dict[str, str]:
@@ -170,10 +174,122 @@ def _load_rdf_node_v2_telemetry_class() -> Any:
     return RdfNodeV2Telemetry
 
 
-def _empty_rdf_node_mqtt_snapshot() -> Dict[str, Any]:
-    snapshot = _load_rdf_node_v2_telemetry_class()("uav-01").snapshot(int(time.time() * 1000))
+def _empty_rdf_node_mqtt_snapshot(node_id: str = "uav-01") -> Dict[str, Any]:
+    snapshot = _load_rdf_node_v2_telemetry_class()(node_id).snapshot(int(time.time() * 1000))
     snapshot.update({"enabled": False, "connection": "disabled", "last_error": None})
     return snapshot
+
+
+def _diagnostic_angular_latest(snapshot: Dict[str, Any], now_ms: int) -> Dict[str, Any]:
+    if type(now_ms) is not int or now_ms < 0:
+        raise ValueError("invalid diagnostic snapshot time")
+
+    response: Dict[str, Any] = {
+        "enabled": snapshot.get("enabled") is True,
+        "connection": snapshot.get("connection"),
+        "node_id": snapshot.get("node_id") if isinstance(snapshot.get("node_id"), str) else None,
+        "status": "UNAVAILABLE",
+        "stale": False,
+        "trust": None,
+        "encoding": None,
+        "source_timestamp_ms": None,
+        "source_age_ms": None,
+        "received_age_ms": None,
+        "flags": None,
+        "validation_reasons": [],
+        "values": None,
+        "error": None,
+    }
+
+    def safe_error(value: Any) -> str:
+        return value if isinstance(value, str) and re.fullmatch(r"[A-Z_]{1,32}", value) else "INVALID_PAYLOAD"
+
+    topics = snapshot.get("topics")
+    entry = topics.get("telemetry/diagnostic/angular") if isinstance(topics, dict) else None
+    if not isinstance(entry, dict):
+        return response
+    entry_status = entry.get("status")
+    if entry_status == "INVALID":
+        response["status"] = "INVALID"
+        response["error"] = safe_error(entry.get("error"))
+        return response
+    if entry_status == "UNAVAILABLE":
+        return response
+    candidate = entry.get("payload")
+    if not isinstance(candidate, dict):
+        return response
+
+    encoding = candidate.get("encoding")
+    source_timestamp_ms = candidate.get("source_timestamp_ms")
+    flags = candidate.get("flags")
+    reasons = candidate.get("validation_reasons")
+    values = candidate.get("values")
+    if (
+        encoding not in ("q16", "u8")
+        or type(source_timestamp_ms) is not int
+        or not 0 < source_timestamp_ms <= 9_007_199_254_740_991
+        or type(flags) is not int
+        or not 0 <= flags <= 0x1f
+        or candidate.get("trust") != "UNVERIFIED"
+        or not isinstance(reasons, list)
+        or len(reasons) > 32
+        or any(not isinstance(reason, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", reason) for reason in reasons)
+        or "DIAGNOSTIC_UNVERIFIED" not in reasons
+        or not isinstance(values, list)
+        or len(values) != 360
+        or any(
+            type(value) not in (int, float)
+            or abs(value) > 9_007_199_254_740_991
+            or (type(value) is float and not math.isfinite(value))
+            for value in values
+        )
+    ):
+        response["status"] = "INVALID"
+        response["error"] = "INVALID_CANDIDATE"
+        return response
+
+    received_at_ms = entry.get("received_at_ms")
+    source_age_ms = now_ms - source_timestamp_ms if now_ms >= source_timestamp_ms else None
+    received_age_ms = (
+        now_ms - received_at_ms
+        if type(received_at_ms) is int and received_at_ms >= 0 and now_ms >= received_at_ms
+        else None
+    )
+    response.update({
+        "trust": "UNVERIFIED",
+        "encoding": encoding,
+        "source_timestamp_ms": source_timestamp_ms,
+        "source_age_ms": source_age_ms,
+        "received_age_ms": received_age_ms,
+        "flags": flags,
+        "validation_reasons": list(reasons),
+        "values": list(values),
+    })
+    fresh = (
+        entry_status == "FRESH"
+        and response["enabled"]
+        and response["connection"] == "ready"
+        and source_age_ms is not None
+        and source_age_ms <= 10000
+        and received_age_ms is not None
+        and received_age_ms <= 3000
+        and (flags & 2) != 0
+    )
+    if fresh:
+        response["status"] = "FRESH"
+        return response
+
+    response["status"] = "STALE"
+    response["stale"] = True
+    if not response["enabled"] or response["connection"] != "ready":
+        response["error"] = "CONNECTION_NOT_READY"
+    elif source_age_ms is None or source_age_ms > 10000 or received_age_ms is None or received_age_ms > 3000:
+        response["error"] = "SOURCE_STALE"
+    elif (flags & 2) == 0:
+        response["error"] = "CLOCK_FRESHNESS_UNVERIFIED"
+    else:
+        response["error"] = safe_error(entry.get("error")) if entry.get("error") else "SOURCE_STALE"
+    return response
 
 
 def _load_mqtt_monitor_class() -> Any:
@@ -187,8 +303,24 @@ def _load_mqtt_monitor_class() -> Any:
     return monitor_class
 
 
-def _new_mqtt_monitor(host: str, port: int, transport: str = "tcp") -> Any:
-    return _load_mqtt_monitor_class()(host, port, transport=transport)
+def _new_mqtt_monitor(
+    host: str,
+    port: int,
+    transport: str = "tcp",
+    ws_path: str = "/mqtt",
+    username: str = "",
+    password: str = "",
+    node_id: str = "uav-01",
+) -> Any:
+    return _load_mqtt_monitor_class()(
+        host,
+        port,
+        transport=transport,
+        ws_path=ws_path,
+        username=username,
+        password=password,
+        node_id=node_id,
+    )
 
 
 def _safe_config_json(config: Dict[str, Any]) -> str:
@@ -210,6 +342,10 @@ def _default_console_config(
     refresh_seconds: int = 0,
     *,
     mqtt_transport: str = "websockets",
+    mqtt_ws_path: str = "/mqtt",
+    mqtt_username: str = "",
+    mqtt_password: str = "",
+    rdf_node_id: str = "uav-01",
 ) -> Dict[str, Any]:
     return {
         "version": CONSOLE_CONFIG_VERSION,
@@ -217,6 +353,10 @@ def _default_console_config(
         "mqtt_host": mqtt_host,
         "mqtt_port": int(mqtt_port),
         "mqtt_transport": mqtt_transport,
+        "mqtt_ws_path": mqtt_ws_path,
+        "mqtt_username": mqtt_username,
+        "mqtt_password": mqtt_password,
+        "rdf_node_id": rdf_node_id,
         "refresh_seconds": int(refresh_seconds),
     }
 
@@ -228,6 +368,10 @@ def _validate_console_config(payload: Any, fallback: Optional[Dict[str, Any]] = 
     base_url = payload.get("base_url", defaults["base_url"])
     if not _is_allowed_base_url(base_url):
         raise ValueError("base_url is outside the local SDR-DoA allowlist")
+    rdf_node_id = payload.get("rdf_node_id", defaults.get("rdf_node_id", "uav-01"))
+    if (not isinstance(rdf_node_id, str) or not _RDF_NODE_ID_RE.fullmatch(rdf_node_id) or
+            rdf_node_id in (".", "..")):
+        raise ValueError("rdf_node_id must be one topic segment matching [A-Za-z0-9_-]{1,64}")
     mqtt_host = payload.get("mqtt_host", defaults["mqtt_host"])
     if mqtt_host is None:
         mqtt_host = ""
@@ -239,16 +383,62 @@ def _validate_console_config(payload: Any, fallback: Optional[Dict[str, Any]] = 
         raise ValueError("mqtt_port must be numeric") from exc
     if not (1 <= mqtt_port <= 65535):
         raise ValueError("mqtt_port must be between 1 and 65535")
-    mqtt_transport = payload.get("mqtt_transport", defaults.get("mqtt_transport", "websockets"))
+    mqtt_transport = payload.get("mqtt_transport", defaults.get("mqtt_transport", "tcp"))
     if not isinstance(mqtt_transport, str) or mqtt_transport not in {"tcp", "websockets"}:
         raise ValueError("mqtt_transport must be tcp or websockets")
+    mqtt_ws_path = payload.get("mqtt_ws_path", defaults.get("mqtt_ws_path", "/mqtt"))
+    if (
+        not isinstance(mqtt_ws_path, str)
+        or not mqtt_ws_path.startswith("/")
+        or len(mqtt_ws_path) > 2048
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in mqtt_ws_path)
+    ):
+        raise ValueError("mqtt_ws_path must be an absolute path of at most 2048 characters")
+    mqtt_username = payload.get("mqtt_username", defaults.get("mqtt_username", ""))
+    if (
+        not isinstance(mqtt_username, str)
+        or len(mqtt_username.encode("utf-8")) > 1024
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in mqtt_username)
+    ):
+        raise ValueError("mqtt_username must be a string of at most 1024 UTF-8 bytes")
+    clear_mqtt_password = payload.get("clear_mqtt_password", False)
+    if not isinstance(clear_mqtt_password, bool):
+        raise ValueError("clear_mqtt_password must be a boolean")
+    if clear_mqtt_password and "mqtt_password" in payload:
+        raise ValueError("mqtt_password and clear_mqtt_password cannot be used together")
+    mqtt_password = "" if clear_mqtt_password else payload.get(
+        "mqtt_password",
+        defaults.get("mqtt_password", ""),
+    )
+    if not isinstance(mqtt_password, str) or len(mqtt_password.encode("utf-8")) > 4096:
+        raise ValueError("mqtt_password must be a string of at most 4096 UTF-8 bytes")
+    if mqtt_password and not mqtt_username:
+        raise ValueError("mqtt_username is required when mqtt_password is set")
     try:
         refresh_seconds = int(payload.get("refresh_seconds", defaults["refresh_seconds"]))
     except (TypeError, ValueError) as exc:
         raise ValueError("refresh_seconds must be numeric") from exc
     if refresh_seconds not in ALLOWED_REFRESH_INTERVALS:
         raise ValueError("refresh_seconds is not an allowed interval")
-    return _default_console_config(base_url.rstrip("/"), mqtt_host.strip(), mqtt_port, refresh_seconds, mqtt_transport=mqtt_transport)
+    return {
+        **_default_console_config(
+            base_url.rstrip("/"),
+            mqtt_host.strip(),
+            mqtt_port,
+            refresh_seconds,
+            mqtt_transport=mqtt_transport,
+            mqtt_ws_path=mqtt_ws_path,
+            mqtt_username=mqtt_username,
+            mqtt_password=mqtt_password,
+            rdf_node_id=rdf_node_id,
+        ),
+    }
+
+
+def _public_console_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    public = {key: value for key, value in config.items() if key != "mqtt_password"}
+    public["mqtt_password_set"] = bool(config.get("mqtt_password"))
+    return public
 
 
 def _load_console_config(path: Path, fallback: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1468,6 +1658,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/admin/status":
             self._send_json({"authenticated": self._is_admin()})
             return
+        if parsed.path == "/api/system-health":
+            self._send_json(self.console_server.system_health_monitor.snapshot())
+            return
         if parsed.path == "/api/snapshot":
             query = parse_qs(parsed.query, keep_blank_values=False)
             base_url = query.get("base_url", [self.console_server.base_url])[0]
@@ -1511,9 +1704,22 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/mqtt/rdf-node":
             monitor = self.console_server.mqtt_monitor
             if monitor is None:
-                self._send_json(_empty_rdf_node_mqtt_snapshot())
+                self._send_json(_empty_rdf_node_mqtt_snapshot(
+                    self.console_server.get_config()["rdf_node_id"],
+                ))
             else:
                 self._send_json(monitor.rdf_node_snapshot())
+            return
+        if parsed.path == "/api/v2/angular/diagnostic/latest":
+            monitor = self.console_server.mqtt_monitor
+            snapshot = (
+                monitor.rdf_node_snapshot()
+                if monitor is not None
+                else _empty_rdf_node_mqtt_snapshot(
+                    self.console_server.get_config()["rdf_node_id"],
+                )
+            )
+            self._send_json(_diagnostic_angular_latest(snapshot, int(time.time() * 1000)))
             return
         self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -1576,7 +1782,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query, keep_blank_values=False)
             host = query.get("host", [""])[0].strip()
             try:
-                port = int(query.get("port", ["9001"])[0])
+                port = int(query.get("port", ["1883"])[0])
             except ValueError:
                 self._send_json({"error": "MQTT port must be numeric", "read_only": True}, HTTPStatus.BAD_REQUEST)
                 return
@@ -1615,6 +1821,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
         config_path: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
         frontend_dir: Optional[Path] = None,
+        system_health_monitor: Optional[Any] = None,
     ):
         self.frontend_dir = Path(frontend_dir).resolve() if frontend_dir is not None else None
         if not _is_loopback_bind(address[0]):
@@ -1626,6 +1833,11 @@ class GroundConsoleServer(ThreadingHTTPServer):
         self._config = _validate_console_config(config, fallback) if config is not None else _load_console_config(self.config_path, fallback)
         self._config_lock = threading.RLock()
         self.mqtt_monitor = mqtt_monitor
+        self.system_health_monitor = (
+            system_health_monitor
+            if system_health_monitor is not None
+            else SystemHealthMonitor()
+        )
         if mqtt_monitor is not None:
             self._config["mqtt_host"] = str(getattr(mqtt_monitor, "host", ""))
             self._config["mqtt_port"] = int(getattr(mqtt_monitor, "port", 1883))
@@ -1636,11 +1848,16 @@ class GroundConsoleServer(ThreadingHTTPServer):
         self._admin_sessions: Dict[str, float] = {}
         super().__init__(address, ConsoleHandler)
 
+
     @property
     def base_url(self) -> str:
         return str(self._config["base_url"])
 
     def get_config(self) -> Dict[str, Any]:
+        with self._config_lock:
+            return _public_console_config(self._config)
+
+    def _get_stored_config(self) -> Dict[str, Any]:
         with self._config_lock:
             return dict(self._config)
 
@@ -1649,25 +1866,38 @@ class GroundConsoleServer(ThreadingHTTPServer):
             normalized = _validate_console_config(config, self._config)
             _save_console_config(self.config_path, normalized)
             self._config = normalized
-            return dict(self._config)
+            return _public_console_config(self._config)
 
     def apply_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """Persist local console config and reconcile its local MQTT monitor."""
         with self._config_lock:
             normalized = _validate_console_config(config, self._config)
-            old_connection = (
-                str(self._config.get("mqtt_host", "")),
-                int(self._config.get("mqtt_port", 9001)),
-                str(self._config.get("mqtt_transport", "websockets")),
+            old_host = str(self._config.get("mqtt_host", ""))
+            old_connection = tuple(
+                self._config[key]
+                for key in (
+                    "mqtt_port",
+                    "mqtt_transport",
+                    "mqtt_ws_path",
+                    "mqtt_username",
+                    "mqtt_password",
+                    "rdf_node_id",
+                )
             )
             new_host = str(normalized["mqtt_host"])
-            new_connection = (
-                new_host,
-                int(normalized["mqtt_port"]),
-                str(normalized["mqtt_transport"]),
+            new_connection = tuple(
+                normalized[key]
+                for key in (
+                    "mqtt_port",
+                    "mqtt_transport",
+                    "mqtt_ws_path",
+                    "mqtt_username",
+                    "mqtt_password",
+                    "rdf_node_id",
+                )
             )
             monitor_changed = (
-                old_connection != new_connection
+                (old_host, old_connection) != (new_host, new_connection)
                 or bool(new_host) != (self.mqtt_monitor is not None)
             )
             replacement = None
@@ -1676,6 +1906,10 @@ class GroundConsoleServer(ThreadingHTTPServer):
                     new_host,
                     int(normalized["mqtt_port"]),
                     str(normalized["mqtt_transport"]),
+                    str(normalized["mqtt_ws_path"]),
+                    str(normalized["mqtt_username"]),
+                    str(normalized["mqtt_password"]),
+                    node_id=str(normalized["rdf_node_id"]),
                 )
                 replacement.start()
             previous = self.mqtt_monitor
@@ -1690,7 +1924,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
                     previous.stop()
                 self.mqtt_monitor = replacement
             self._config = normalized
-            return dict(self._config)
+            return _public_console_config(self._config)
 
     def get_branding(self) -> Dict[str, str]:
         with self._branding_lock:
@@ -1740,7 +1974,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
     def enable_mqtt_monitor(self, host: str, port: int) -> None:
         # Use the same validated/reconciled path as the Settings form.
         self.apply_config({
-            **self.get_config(),
+            **self._get_stored_config(),
             "mqtt_host": host,
             "mqtt_port": port,
         })
@@ -1753,7 +1987,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bind", default=DEFAULT_BIND, help="local bind address")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="local console port")
     parser.add_argument("--mqtt-host", default="10.90.0.1", help="MQTT broker IPv4/IPv6 address or localhost; subscriber-only")
-    parser.add_argument("--mqtt-port", type=int, default=9001, help="MQTT broker port")
+    parser.add_argument("--mqtt-port", type=int, default=9001, help="local MQTT monitor port")
     parser.add_argument(
         "--mqtt-transport",
         choices=("tcp", "websockets"),
@@ -1778,9 +2012,27 @@ def main() -> int:
     if not _is_allowed_base_url(args.base_url):
         raise SystemExit("--base-url is outside the local SDR-DoA allowlist")
     config_path = Path(args.config_path).expanduser()
-    fallback_config = _default_console_config(args.base_url, args.mqtt_host, args.mqtt_port, 0, mqtt_transport=args.mqtt_transport)
+    fallback_config = _default_console_config(
+        args.base_url,
+        args.mqtt_host,
+        args.mqtt_port,
+        0,
+        mqtt_transport=args.mqtt_transport,
+    )
     config = _load_console_config(config_path, fallback_config)
-    monitor = _new_mqtt_monitor(config["mqtt_host"], config["mqtt_port"], config["mqtt_transport"]) if config["mqtt_host"] else None
+    monitor = (
+        _new_mqtt_monitor(
+            config["mqtt_host"],
+            config["mqtt_port"],
+            config["mqtt_transport"],
+            config["mqtt_ws_path"],
+            config["mqtt_username"],
+            config["mqtt_password"],
+            node_id=config["rdf_node_id"],
+        )
+        if config["mqtt_host"]
+        else None
+    )
     if monitor is not None:
         monitor.start()
     server = GroundConsoleServer(

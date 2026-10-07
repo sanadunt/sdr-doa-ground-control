@@ -64,8 +64,17 @@ class HTTPResult:
 class ConsoleHTTPHarness:
     """Run one console instance with only temporary local state."""
 
-    def __init__(self, bind_host: str = "127.0.0.1") -> None:
+    def __init__(
+        self,
+        bind_host: str = "127.0.0.1",
+        system_health_monitor: Optional[Any] = None,
+        mqtt_monitor: Optional[Any] = None,
+        legacy_rdf_node_mqtt_config: Optional[Mapping[str, Any]] = None,
+    ) -> None:
         self.bind_host = bind_host
+        self.system_health_monitor = system_health_monitor
+        self.mqtt_monitor = mqtt_monitor
+        self.legacy_rdf_node_mqtt_config = dict(legacy_rdf_node_mqtt_config or {})
         self._temporary: Optional[tempfile.TemporaryDirectory[str]] = None
         self.server: Any = None
         self.thread: Optional[threading.Thread] = None
@@ -87,6 +96,8 @@ class ConsoleHTTPHarness:
             "mqtt_port": 1883,
             "refresh_seconds": 0,
         }
+        if self.legacy_rdf_node_mqtt_config:
+            config["rdf_node_mqtt"] = self.legacy_rdf_node_mqtt_config
         config_path.write_text(json.dumps(config), encoding="utf-8")
 
         self.server = _new_server(
@@ -94,6 +105,9 @@ class ConsoleHTTPHarness:
             branding_path=branding_path,
             config_path=config_path,
             config=config,
+            receiver_data_dir=root / "receiver-data",
+            mqtt_monitor=self.mqtt_monitor,
+            system_health_monitor=self.system_health_monitor,
         )
 
         def serve() -> None:
@@ -168,6 +182,9 @@ def _new_server(
     branding_path: Path,
     config_path: Path,
     config: Mapping[str, Any],
+    receiver_data_dir: Path,
+    mqtt_monitor: Optional[Any] = None,
+    system_health_monitor: Optional[Any] = None,
 ) -> Any:
     """Construct the current server while adapting to an in-flight static API.
 
@@ -181,7 +198,9 @@ def _new_server(
     parameters = inspect.signature(server_type).parameters
     static_value = str(STATIC_ROOT)
     values: Dict[str, Any] = {
-        "mqtt_monitor": None,
+        "mqtt_monitor": mqtt_monitor,
+        "receiver_data_dir": str(receiver_data_dir),
+        "system_health_monitor": system_health_monitor,
         "branding_path": str(branding_path),
         "branding_file": str(branding_path),
         "config_path": str(config_path),
@@ -289,6 +308,44 @@ def _decode_json(test: unittest.TestCase, result: HTTPResult, label: str) -> Any
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise AssertionError(f"{label} did not return valid JSON") from exc
 
+def diagnostic_candidate_snapshot(
+    now_ms: int,
+    *,
+    enabled: bool = True,
+    connection: str = "ready",
+    status: str = "FRESH",
+    received_at_ms: Optional[int] = None,
+    source_timestamp_ms: Optional[int] = None,
+    flags: int = 31,
+    error: Optional[str] = None,
+) -> Dict[str, Any]:
+    received = now_ms if received_at_ms is None else received_at_ms
+    source = now_ms if source_timestamp_ms is None else source_timestamp_ms
+    reasons = ["DIAGNOSTIC_UNVERIFIED"]
+    if (flags & 2) == 0:
+        reasons.append("CLOCK_FRESHNESS_UNVERIFIED")
+    return {
+        "enabled": enabled,
+        "connection": connection,
+        "node_id": "node_02",
+        "topics": {
+            "telemetry/diagnostic/angular": {
+                "status": status,
+                "received_at_ms": received,
+                "payload": {
+                    "encoding": "q16",
+                    "source_timestamp_ms": source,
+                    "flags": flags,
+                    "trust": "UNVERIFIED",
+                    "validation_reasons": reasons,
+                    "values": list(range(360)),
+                },
+                "error": error,
+            },
+        },
+    }
+
+
 
 class GroundConsoleStaticRegressionTests(unittest.TestCase):
     """Regression coverage for static files, API precedence, and bind safety."""
@@ -296,14 +353,16 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
     def test_v1_mqtt_defaults_to_ground_ip_websocket(self) -> None:
         config = ground_console._default_console_config()
         self.assertEqual(
-            (config["mqtt_host"], config["mqtt_port"], config["mqtt_transport"]),
-            ("10.90.0.1", 9001, "websockets"),
+            (
+                config["mqtt_host"],
+                config["mqtt_port"],
+                config["mqtt_transport"],
+                config["mqtt_ws_path"],
+            ),
+            ("10.90.0.1", 9001, "websockets", "/mqtt"),
         )
         args = ground_console._build_parser().parse_args([])
-        self.assertEqual(
-            (args.mqtt_host, args.mqtt_port, args.mqtt_transport),
-            ("10.90.0.1", 9001, "websockets"),
-        )
+        self.assertEqual((args.mqtt_host, args.mqtt_port, args.mqtt_transport), ("10.90.0.1", 9001, "websockets"))
         tcp_args = ground_console._build_parser().parse_args(["--mqtt-transport", "tcp"])
         self.assertEqual(tcp_args.mqtt_transport, "tcp")
 
@@ -331,23 +390,108 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
 
     def test_v1_mqtt_accepts_any_ip_literal_and_rejects_dns(self) -> None:
         config = ground_console._default_console_config()
-        for host in (
-            "10.90.0.1",
-            "192.168.1.50",
-            "8.8.8.8",
-            "127.0.0.1",
-            "2001:4860:4860::8888",
-            "2001:db8::1",
-            "::1",
-            "localhost",
-        ):
+        for host in ("192.168.4.10", "8.8.8.8", "2001:4860:4860::8888", "localhost", "127.0.0.1", "::1"):
             with self.subTest(host=host):
                 validated = ground_console._validate_console_config({**config, "mqtt_host": host})
                 self.assertEqual(validated["mqtt_host"], host)
-        for host in ("broker.example", "999.0.0.1", "[2001:db8::1]"):
+        for host in ("broker.example.com", "192.0.2.999", "2001:db8::not-an-address"):
             with self.subTest(host=host):
                 with self.assertRaises(ValueError):
                     ground_console._validate_console_config({**config, "mqtt_host": host})
+
+    def test_rdf_node_id_defaults_old_config_and_validation(self) -> None:
+        defaults = ground_console._default_console_config()
+        self.assertEqual(defaults["rdf_node_id"], "uav-01")
+        old_config = {key: value for key, value in defaults.items() if key != "rdf_node_id"}
+        self.assertEqual(
+            ground_console._validate_console_config(old_config)["rdf_node_id"],
+            "uav-01",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            old_path = Path(temporary) / "console.json"
+            old_path.write_text(json.dumps(old_config), encoding="utf-8")
+            self.assertEqual(
+                ground_console._load_console_config(old_path)["rdf_node_id"],
+                "uav-01",
+            )
+
+        for node_id in ("node_2", "node-2", "A" * 64):
+            with self.subTest(node_id=node_id):
+                self.assertEqual(
+                    ground_console._validate_console_config(
+                        {**defaults, "rdf_node_id": node_id},
+                    )["rdf_node_id"],
+                    node_id,
+                )
+        for node_id in (".", "..", "", "node.part", "node/part", "x" * 65, None, 7, "naïve"):
+            with self.subTest(node_id=node_id):
+                with self.assertRaises(ValueError):
+                    ground_console._validate_console_config(
+                        {**defaults, "rdf_node_id": node_id},
+                    )
+
+
+    def test_invalid_rdf_node_id_is_rejected_before_monitor_creation(self) -> None:
+        headers = {"Content-Type": "application/json"}
+        with ConsoleHTTPHarness() as console:
+            with mock.patch.object(ground_console, "_new_mqtt_monitor") as create_monitor:
+                result = console.request(
+                    "POST",
+                    "/api/console-config",
+                    json.dumps({
+                        "mqtt_host": "127.0.0.1",
+                        "rdf_node_id": "invalid.node",
+                    }).encode("utf-8"),
+                    headers,
+                )
+
+        self.assertEqual(result.status, 400)
+        create_monitor.assert_not_called()
+
+    def test_rdf_node_id_change_replaces_the_shared_monitor(self) -> None:
+        class FakeMonitor:
+            def __init__(self, node_id: str) -> None:
+                self.host = "127.0.0.1"
+                self.port = 1883
+                self.node_id = node_id
+                self.started = False
+                self.stopped = False
+
+            def start(self) -> None:
+                self.started = True
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        old_monitor = FakeMonitor("uav-01")
+        replacements: List[FakeMonitor] = []
+
+        def create_monitor(*_args: Any, **kwargs: Any) -> FakeMonitor:
+            monitor = FakeMonitor(kwargs["node_id"])
+            replacements.append(monitor)
+            return monitor
+
+        with ConsoleHTTPHarness(mqtt_monitor=old_monitor) as console:
+            with mock.patch.object(
+                ground_console,
+                "_new_mqtt_monitor",
+                side_effect=create_monitor,
+            ) as monitor_factory:
+                current = console.server._get_stored_config()
+                readback = console.server.apply_config({
+                    **current,
+                    "rdf_node_id": "node_02",
+                })
+                monitor_after_update = console.server.mqtt_monitor
+
+        monitor_factory.assert_called_once()
+        self.assertEqual(monitor_factory.call_args.kwargs["node_id"], "node_02")
+        self.assertEqual(len(replacements), 1)
+        self.assertTrue(old_monitor.stopped)
+        self.assertTrue(replacements[0].started)
+        self.assertIs(monitor_after_update, replacements[0])
+        self.assertEqual(readback["rdf_node_id"], "node_02")
+
 
     def _require_static_build(self) -> Path:
         index = _static_index()
@@ -447,6 +591,41 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
                 )
                 self.assertNotEqual(result.status, int(HTTPStatus.OK), path)
 
+    def test_system_health_get_returns_fixed_contract(self) -> None:
+        expected = {
+            "checked_at_ms": 1750000000000,
+            "usb_telemetry": "PRESENT",
+            "ppp_interface": "UP",
+            "raspberry_peer": "NO_REPLY",
+        }
+
+        class FixedHealthMonitor:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def snapshot(self) -> Dict[str, Any]:
+                self.calls += 1
+                return dict(expected)
+
+        monitor = FixedHealthMonitor()
+        with mock.patch.object(ground_console, "collect") as collect_mock:
+            with ConsoleHTTPHarness(system_health_monitor=monitor) as console:
+                result = console.request("GET", "/api/system-health")
+                parameterized_result = console.request(
+                    "GET",
+                    "/api/system-health?target=192.0.2.99&interface=eth0",
+                )
+
+        self.assertEqual(result.status, 200)
+        self.assertEqual(parameterized_result.status, 200)
+        self.assertEqual(_decode_json(self, result, "system health"), expected)
+        self.assertEqual(
+            _decode_json(self, parameterized_result, "parameterized system health"),
+            expected,
+        )
+        self.assertEqual(monitor.calls, 2)
+        collect_mock.assert_not_called()
+
     def test_existing_api_routes_remain_json_and_precede_static_files(self) -> None:
         fixture_snapshot = {
             "fixture": True,
@@ -502,6 +681,10 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         self.assertEqual(config["base_url"], BASE_URL)
         self.assertEqual(config["mqtt_host"], "")
         self.assertEqual(config["mqtt_port"], 1883)
+        self.assertEqual(config["mqtt_transport"], "websockets")
+        self.assertEqual(config["mqtt_ws_path"], "/mqtt")
+        self.assertEqual(config["mqtt_username"], "")
+        self.assertFalse(config["mqtt_password_set"])
         self.assertEqual(config["refresh_seconds"], 0)
 
         self.assertEqual(mqtt_result.status, 200)
@@ -517,6 +700,364 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         self.assertEqual(missing_result.status, 404)
         self.assertEqual(_decode_json(self, missing_result, "missing API"), {"error": "not found"})
 
+
+    def test_rdf_node_disabled_get_has_stable_unavailable_topics(self) -> None:
+        suffixes = (
+            "telemetry/doa",
+            "telemetry/diagnostic/doa",
+            "telemetry/diagnostic/angular",
+            "telemetry/health",
+            "telemetry/health/detail",
+            "telemetry/angular",
+            "state",
+            "capabilities",
+            "config/reported",
+            "availability",
+            "ack/config",
+            "ack/operation",
+        )
+        with ConsoleHTTPHarness() as console:
+            result = console.request("GET", "/api/mqtt/rdf-node")
+
+        self.assertEqual(result.status, 200)
+        snapshot = _decode_json(self, result, "disabled RDF Node MQTT snapshot")
+        self.assertEqual(
+            set(snapshot),
+            {
+                "enabled",
+                "connection",
+                "node_id",
+                "last_error",
+                "received",
+                "valid",
+                "invalid",
+                "last_received_at_ms",
+                "topic_counts",
+                "topics",
+            },
+        )
+        self.assertFalse(snapshot["enabled"])
+        self.assertEqual(snapshot["connection"], "disabled")
+        self.assertEqual(snapshot["node_id"], "uav-01")
+        self.assertEqual(set(snapshot["topics"]), set(suffixes))
+        self.assertEqual(set(snapshot["topic_counts"]), set(suffixes))
+        self.assertEqual(snapshot["topic_counts"], dict.fromkeys(suffixes, 0))
+        for topic in snapshot["topics"].values():
+            self.assertEqual(
+                set(topic),
+                {"status", "received_at_ms", "qos", "retained", "payload", "candidate_payload", "error"},
+            )
+            self.assertEqual(topic["status"], "UNAVAILABLE")
+            self.assertIsNone(topic["candidate_payload"])
+
+    def test_rdf_node_id_round_trips_to_disabled_snapshots_and_diagnostic_endpoint(self) -> None:
+        headers = {"Content-Type": "application/json"}
+        with ConsoleHTTPHarness() as console:
+            old_config_result = console.request("GET", "/api/console-config")
+            old_snapshot_result = console.request("GET", "/api/mqtt/rdf-node")
+            saved = console.request(
+                "POST",
+                "/api/console-config",
+                json.dumps({"rdf_node_id": "node_02"}).encode("utf-8"),
+                headers,
+            )
+            readback = console.request("GET", "/api/console-config")
+            snapshot_result = console.request("GET", "/api/mqtt/rdf-node")
+            diagnostic_result = console.request(
+                "GET",
+                "/api/v2/angular/diagnostic/latest",
+            )
+
+        self.assertEqual(old_config_result.status, 200)
+        old_config = _decode_json(self, old_config_result, "old config defaults")
+        self.assertEqual(old_config["rdf_node_id"], "uav-01")
+        self.assertEqual(
+            _decode_json(self, old_snapshot_result, "old disabled snapshot")["node_id"],
+            "uav-01",
+        )
+        self.assertEqual(saved.status, 200)
+        self.assertEqual(
+            _decode_json(self, readback, "custom node ID readback")["rdf_node_id"],
+            "node_02",
+        )
+        self.assertEqual(
+            _decode_json(self, snapshot_result, "custom disabled snapshot")["node_id"],
+            "node_02",
+        )
+        diagnostic = _decode_json(self, diagnostic_result, "disabled diagnostic endpoint")
+        self.assertEqual(diagnostic["node_id"], "node_02")
+        self.assertEqual(diagnostic["status"], "UNAVAILABLE")
+        self.assertFalse(diagnostic["stale"])
+
+    def test_diagnostic_angular_latest_unavailable_and_invalid_shapes(self) -> None:
+        now_ms = 1_800_000_000_000
+        unavailable = {
+            "enabled": False,
+            "connection": "disabled",
+            "node_id": "node_02",
+            "topics": {
+                "telemetry/diagnostic/angular": {
+                    "status": "UNAVAILABLE",
+                    "received_at_ms": None,
+                    "payload": None,
+                    "error": None,
+                },
+            },
+        }
+        result = ground_console._diagnostic_angular_latest(unavailable, now_ms)
+        self.assertEqual(
+            set(result),
+            {
+                "enabled", "connection", "node_id", "status", "stale", "trust",
+                "encoding", "source_timestamp_ms", "source_age_ms", "received_age_ms",
+                "flags", "validation_reasons", "values", "error",
+            },
+        )
+        self.assertEqual(result["status"], "UNAVAILABLE")
+        self.assertFalse(result["stale"])
+        self.assertEqual(result["node_id"], "node_02")
+        self.assertIsNone(result["trust"])
+        self.assertIsNone(result["values"])
+        self.assertEqual(result["validation_reasons"], [])
+        self.assertIsNone(result["error"])
+
+        invalid = diagnostic_candidate_snapshot(
+            now_ms,
+            status="INVALID",
+            error="INVALID_FRAME",
+        )
+        invalid["topics"]["telemetry/diagnostic/angular"]["payload"] = None
+        invalid["topics"]["telemetry/diagnostic/angular"]["error"] = "raw payload detail"
+        rejected = ground_console._diagnostic_angular_latest(invalid, now_ms)
+        self.assertEqual(rejected["status"], "INVALID")
+        self.assertFalse(rejected["stale"])
+        self.assertIsNone(rejected["values"])
+        self.assertEqual(rejected["error"], "INVALID_PAYLOAD")
+
+    def test_diagnostic_angular_latest_enforces_age_boundaries_and_retains_stale_values(self) -> None:
+        now_ms = 1_800_000_000_000
+        cases = (
+            (3000, 10000, "FRESH"),
+            (3001, 5000, "STALE"),
+            (0, 10001, "STALE"),
+        )
+        for received_age_ms, source_age_ms, expected in cases:
+            with self.subTest(received_age_ms=received_age_ms, source_age_ms=source_age_ms):
+                snapshot = diagnostic_candidate_snapshot(
+                    now_ms,
+                    received_at_ms=now_ms - received_age_ms,
+                    source_timestamp_ms=now_ms - source_age_ms,
+                )
+                result = ground_console._diagnostic_angular_latest(snapshot, now_ms)
+                self.assertEqual(result["status"], expected)
+                self.assertEqual(result["stale"], expected == "STALE")
+                self.assertEqual(result["received_age_ms"], received_age_ms)
+                self.assertEqual(result["source_age_ms"], source_age_ms)
+                self.assertEqual(result["values"], list(range(360)))
+
+    def test_diagnostic_angular_latest_requires_clock_and_ready_connection(self) -> None:
+        now_ms = 1_800_000_000_000
+        missing_clock = diagnostic_candidate_snapshot(now_ms, flags=1)
+        clock_result = ground_console._diagnostic_angular_latest(missing_clock, now_ms)
+        self.assertEqual(clock_result["status"], "STALE")
+        self.assertTrue(clock_result["stale"])
+        self.assertIn("CLOCK_FRESHNESS_UNVERIFIED", clock_result["validation_reasons"])
+        self.assertEqual(clock_result["values"], list(range(360)))
+
+        for enabled, connection in ((True, "disconnected"), (False, "disabled")):
+            with self.subTest(enabled=enabled, connection=connection):
+                snapshot = diagnostic_candidate_snapshot(
+                    now_ms,
+                    enabled=enabled,
+                    connection=connection,
+                )
+                result = ground_console._diagnostic_angular_latest(snapshot, now_ms)
+                self.assertEqual(result["status"], "STALE")
+                self.assertTrue(result["stale"])
+                self.assertEqual(result["values"], list(range(360)))
+
+    def test_diagnostic_angular_latest_future_times_have_null_ages(self) -> None:
+        now_ms = 1_800_000_000_000
+        future_source = diagnostic_candidate_snapshot(
+            now_ms,
+            source_timestamp_ms=now_ms + 1,
+        )
+        source_result = ground_console._diagnostic_angular_latest(future_source, now_ms)
+        self.assertEqual(source_result["status"], "STALE")
+        self.assertIsNone(source_result["source_age_ms"])
+        self.assertEqual(source_result["received_age_ms"], 0)
+        self.assertEqual(source_result["values"], list(range(360)))
+
+        future_receive = diagnostic_candidate_snapshot(
+            now_ms,
+            received_at_ms=now_ms + 1,
+            source_timestamp_ms=now_ms,
+        )
+        receive_result = ground_console._diagnostic_angular_latest(future_receive, now_ms)
+        self.assertEqual(receive_result["status"], "STALE")
+        self.assertIsNone(receive_result["received_age_ms"])
+        self.assertEqual(receive_result["source_age_ms"], 0)
+
+    def test_diagnostic_angular_latest_http_route_uses_the_shared_monitor(self) -> None:
+        now_ms = int(time.time() * 1000)
+        snapshot = diagnostic_candidate_snapshot(now_ms)
+
+        class SharedMonitor:
+            host = "127.0.0.1"
+            port = 1883
+            rdf_node_calls = 0
+
+            def snapshot(self) -> Dict[str, Any]:
+                raise AssertionError("endpoint must not create or read a second monitor")
+
+            def rdf_node_snapshot(self) -> Dict[str, Any]:
+                self.rdf_node_calls += 1
+                return snapshot
+
+        monitor = SharedMonitor()
+        with ConsoleHTTPHarness(mqtt_monitor=monitor) as console:
+            result = console.request("GET", "/api/v2/angular/diagnostic/latest")
+
+        self.assertEqual(result.status, 200)
+        response = _decode_json(self, result, "diagnostic Angular endpoint")
+        self.assertEqual(response["status"], "FRESH")
+        self.assertEqual(response["node_id"], "node_02")
+        self.assertEqual(len(response["values"]), 360)
+        self.assertEqual(monitor.rdf_node_calls, 1)
+
+
+
+    def test_rdf_node_snapshot_uses_the_shared_v1_v2_monitor(self) -> None:
+        v1_snapshot = {"connection": "connected", "read_only": True}
+        v2_snapshot = {
+            "enabled": True,
+            "connection": "ready",
+            "node_id": "uav-01",
+            "last_error": None,
+            "received": 1,
+            "valid": 1,
+            "invalid": 0,
+            "last_received_at_ms": 1_790_668_800_000,
+            "topic_counts": {"availability": 1},
+            "topics": {"availability": {"status": "CONTEXT"}},
+        }
+
+        class SharedMonitor:
+            host = "10.90.0.1"
+            port = 9001
+
+            def snapshot(self) -> Dict[str, Any]:
+                return v1_snapshot
+
+            def rdf_node_snapshot(self) -> Dict[str, Any]:
+                return v2_snapshot
+
+        with ConsoleHTTPHarness(mqtt_monitor=SharedMonitor()) as console:
+            v1_result = console.request("GET", "/api/mqtt")
+            v2_result = console.request("GET", "/api/mqtt/rdf-node")
+
+        self.assertEqual(_decode_json(self, v1_result, "shared v1 monitor snapshot"), v1_snapshot)
+        self.assertEqual(_decode_json(self, v2_result, "shared v2 monitor snapshot"), v2_snapshot)
+
+    def test_legacy_rdf_node_profile_is_ignored_and_dropped_on_save(self) -> None:
+        profile = {
+            "enabled": True,
+            "host": "127.0.0.1",
+            "port": 8883,
+            "node_id": "uav-01",
+            "username": "old-viewer",
+            "password": "old-viewer-password",
+            "ca_file": "/tmp/old-viewer-ca.pem",
+        }
+        headers = {"Content-Type": "application/json"}
+        with ConsoleHTTPHarness(legacy_rdf_node_mqtt_config=profile) as console:
+            update_result = console.request(
+                "POST",
+                "/api/console-config",
+                json.dumps({"refresh_seconds": 5}).encode("utf-8"),
+                headers,
+            )
+            config_result = console.request("GET", "/api/console-config")
+            snapshot_result = console.request("GET", "/api/mqtt/rdf-node")
+            saved_config = json.loads(
+                Path(console.server.config_path).read_text(encoding="utf-8"),
+            )
+
+        public_config = _decode_json(self, config_result, "shared MQTT console config")
+        snapshot = _decode_json(self, snapshot_result, "shared RDF Node v2 snapshot")
+        self.assertEqual(update_result.status, 200)
+        self.assertNotIn("rdf_node_mqtt", public_config)
+        self.assertNotIn("rdf_node_mqtt", saved_config)
+        self.assertNotIn(profile["password"], config_result.body.decode("utf-8"))
+        self.assertFalse(snapshot["enabled"])
+        self.assertEqual(snapshot["connection"], "disabled")
+        self.assertEqual(snapshot["node_id"], "uav-01")
+
+    def test_diagnostic_and_rdf_node_posts_are_not_publish_routes(self) -> None:
+        paths = (
+            "/api/mqtt/rdf-node",
+            "/api/v2/angular/diagnostic/latest",
+        )
+        with ConsoleHTTPHarness() as console:
+            results = [console.request("POST", path, b"{}") for path in paths]
+
+        self.assertEqual([result.status for result in results], [404, 404])
+
+    def test_mqtt_broker_password_is_private_and_only_cleared_explicitly(self) -> None:
+        secret = "test-broker-password"
+        json_headers = {"Content-Type": "application/json"}
+        with ConsoleHTTPHarness() as console:
+            saved = console.request(
+                "POST",
+                "/api/console-config",
+                json.dumps({
+                    "mqtt_host": "",
+                    "mqtt_transport": "websockets",
+                    "mqtt_ws_path": "/rdf-doa",
+                    "mqtt_username": "admin",
+                    "mqtt_password": secret,
+                }).encode("utf-8"),
+                json_headers,
+            )
+            readback = console.request("GET", "/api/console-config")
+            config_path = Path(console.server.config_path)
+            persisted = json.loads(config_path.read_text(encoding="utf-8"))
+            mode = config_path.stat().st_mode & 0o777
+
+            unrelated_update = console.request(
+                "POST",
+                "/api/console-config",
+                json.dumps({"refresh_seconds": 5}).encode("utf-8"),
+                json_headers,
+            )
+            preserved = console.request("GET", "/api/console-config")
+            cleared = console.request(
+                "POST",
+                "/api/console-config",
+                json.dumps({"clear_mqtt_password": True}).encode("utf-8"),
+                json_headers,
+            )
+            after_clear = console.request("GET", "/api/console-config")
+            cleared_password = json.loads(config_path.read_text(encoding="utf-8"))["mqtt_password"]
+
+        self.assertEqual(saved.status, 200)
+        self.assertEqual(readback.status, 200)
+        saved_config = _decode_json(self, saved, "saved MQTT config")
+        public_config = _decode_json(self, readback, "MQTT config readback")
+        self.assertEqual(saved_config["mqtt_transport"], "websockets")
+        self.assertEqual(public_config["mqtt_ws_path"], "/rdf-doa")
+        self.assertTrue(public_config["mqtt_password_set"])
+        self.assertNotIn("mqtt_password", saved_config)
+        self.assertNotIn("mqtt_password", public_config)
+        self.assertNotIn(secret, saved.body.decode("utf-8"))
+        self.assertNotIn(secret, readback.body.decode("utf-8"))
+        self.assertEqual(persisted["mqtt_password"], secret)
+        self.assertEqual(mode, 0o600)
+        self.assertEqual(unrelated_update.status, 200)
+        self.assertTrue(_decode_json(self, preserved, "preserved MQTT config")["mqtt_password_set"])
+        self.assertEqual(cleared.status, 200)
+        self.assertFalse(_decode_json(self, after_clear, "cleared MQTT config")["mqtt_password_set"])
+        self.assertEqual(cleared_password, "")
     def test_non_loopback_bind_is_refused(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ground-console-bind-test-") as temporary:
             root = Path(temporary)

@@ -12,7 +12,12 @@ export const DEFAULT_CONSOLE_CONFIG = {
   base_url: 'http://doasdr.local:8081',
   mqtt_host: '10.90.0.1',
   mqtt_port: 9001,
+  mqtt_transport: 'websockets' as const,
+  mqtt_ws_path: '/mqtt',
+  mqtt_username: '',
+  mqtt_password_set: false,
   refresh_seconds: 0,
+  rdf_node_id: 'uav-01',
 };
 
 export function candidate(snapshot: TelemetrySnapshot | null | undefined, name: 'csv' | 'xml'): Candidate {
