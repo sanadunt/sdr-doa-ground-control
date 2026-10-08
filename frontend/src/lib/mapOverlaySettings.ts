@@ -18,6 +18,8 @@ export function validateOverlaySettings(input: Partial<DoaOverlaySettings>): Doa
     bearingVisible: Boolean(merged.bearingVisible),
     heatmapVisible: Boolean(merged.heatmapVisible),
     guidesVisible: Boolean(merged.guidesVisible),
+    ringsVisible: Boolean(merged.ringsVisible),
+    heatStyle: merged.heatStyle === 'density' ? 'density' : 'beam',
     maxDistanceM: number(merged.maxDistanceM, 1000, 100, 20000),
     lobeDistanceM: number(merged.lobeDistanceM, 1000, 100, 20000),
     lobeOpacity: number(merged.lobeOpacity, .18, 0, .6),

@@ -3,6 +3,8 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
+  // MapLibre starts its worker as an ES module worker.
+  worker: { format: 'es' },
   build: {
     rollupOptions: {
       output: {
