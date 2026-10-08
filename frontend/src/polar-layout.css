@@ -1,14 +1,18 @@
 /* Plotly resizes to the available panel width. */
-.plot-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; padding: 12px; }
+.plot-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; padding: 12px; border: 0; }
 .plot-controls .form-field { flex: 1 1 85px; min-width: 75px; }
 .plot-controls input { min-width: 0; }
-.polar-axis-caption { color: var(--muted); font-size: 12px; line-height: 1.6; text-align: center; padding: 0 12px; }
-.polar-status { align-self: flex-start; flex: none; padding: 4px 12px 0; }
-.plot-settings { flex: 0 0 auto; border-top: 1px solid var(--line-soft); }
-.plot-settings > summary { min-height: 44px; padding: 12px; color: var(--muted); cursor: pointer; font-size: 12px; font-weight: 600; }
+.plot-settings { flex: 0 0 auto; margin: 0 -8px; border-top: 1px solid var(--line-soft); }
+.plot-settings > summary { min-height: 40px; padding: 10px 12px; color: var(--muted); cursor: pointer; font-size: 12px; font-weight: 600; }
+.plot-settings > summary:hover { color: var(--text); }
 .plot-settings > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .plot-settings[open] > summary { border-bottom: 1px solid var(--line-soft); }
 .plot-settings:not([open]) > :not(summary) { display: none; }
-.plot-controls { border: 0; }
 .plot-settings [role="alert"] { margin: 0; padding: 0 12px 12px; color: var(--red); font-size: 12px; }
-.polar-panel.polar-expanded { grid-column: 1 / -1; grid-row: 1; }
+@media (max-width: 639px) {
+  .plot-controls { gap: 6px; padding: 8px; }
+  .plot-controls .form-field { flex: 1 1 70px; min-width: 0; gap: 2px; }
+  .plot-controls .form-field > span { font-size: 11px; }
+  .plot-controls input { min-height: 44px; padding: 6px; font-size: 13px; }
+  .plot-controls button { flex: 1 1 auto; min-height: 44px; }
+}

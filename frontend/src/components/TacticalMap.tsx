@@ -9,7 +9,9 @@ import { OSM_TILE_TEMPLATES } from '../lib/map';
 import { DEFAULT_DOA_OVERLAY_SETTINGS, bearingFeature, guideFeatures, heatFeatures, lobeFeature, type DoaOverlaySettings } from '../lib/doaGeometry';
 import { loadOverlaySettings, saveOverlaySettings, validateOverlaySettings } from '../lib/mapOverlaySettings';
 import { candidate, numberOrNull } from '../lib/telemetry';
-import { EmptyState, Icon, Panel } from './ui';
+import { useI18n } from '../lib/i18n';
+import { coordinateSourceKey } from './DoaReadout';
+import { EmptyState, Icon } from './ui';
 
 type OverlayFeatureCollection = FeatureCollection<Point | LineString | Polygon>;
 type MapState = 'initializing' | 'ready' | 'unavailable' | 'error';
@@ -44,6 +46,7 @@ function paletteColor(palette: DoaOverlaySettings['heatPalette'], weight: number
 }
 
 function OverlayControls({ settings, onChange, onReset, onClose }: { settings: DoaOverlaySettings; onChange: (next: DoaOverlaySettings) => void; onReset: () => void; onClose: () => void }): JSX.Element {
+  const { t } = useI18n();
   const update = (key: keyof DoaOverlaySettings, value: boolean | number | string) => onChange({ ...settings, [key]: value });
   const preset = (name: 'kraken' | 'focused' | 'wide') => {
     const values = name === 'focused'
@@ -53,35 +56,36 @@ function OverlayControls({ settings, onChange, onReset, onClose }: { settings: D
         : { ...DEFAULT_DOA_OVERLAY_SETTINGS };
     onChange({ ...settings, ...values });
   };
-  return <div id="doa-overlay-controls" className="map-overlay-controls" role="region" aria-label="DoA map overlay controls">
-    <div className="overlay-control-header"><h3>Overlay settings</h3><button className="text-button" type="button" aria-label="Close overlay settings" onClick={onClose}>Close</button></div>
+  return <div id="doa-overlay-controls" className="map-overlay-controls" role="region" aria-label={t('overlay.region')}>
+    <div className="overlay-control-header"><h3>{t('overlay.title')}</h3><button className="text-button" type="button" aria-label={t('overlay.closeAria')} onClick={onClose}>{t('overlay.close')}</button></div>
     <div className="overlay-control-grid">
-      <label><input type="checkbox" checked={settings.lobeVisible} onChange={(event) => update('lobeVisible', event.target.checked)} /> Lobe</label>
-      <label><input type="checkbox" checked={settings.bearingVisible} onChange={(event) => update('bearingVisible', event.target.checked)} /> Bearing</label>
-      <label><input type="checkbox" checked={settings.heatmapVisible} onChange={(event) => update('heatmapVisible', event.target.checked)} /> Heatmap</label>
-      <label><input type="checkbox" checked={settings.guidesVisible} onChange={(event) => update('guidesVisible', event.target.checked)} /> Guides</label>
+      <label><input type="checkbox" checked={settings.lobeVisible} onChange={(event) => update('lobeVisible', event.target.checked)} /> {t('overlay.lobe')}</label>
+      <label><input type="checkbox" checked={settings.bearingVisible} onChange={(event) => update('bearingVisible', event.target.checked)} /> {t('overlay.bearing')}</label>
+      <label><input type="checkbox" checked={settings.heatmapVisible} onChange={(event) => update('heatmapVisible', event.target.checked)} /> {t('overlay.heatmap')}</label>
+      <label><input type="checkbox" checked={settings.guidesVisible} onChange={(event) => update('guidesVisible', event.target.checked)} /> {t('overlay.guides')}</label>
     </div>
     <div className="overlay-control-fields">
-      <label>Projection distance (m)<input type="number" min="100" max="20000" step="100" value={settings.maxDistanceM} onChange={(event) => update('maxDistanceM', Math.max(100, Math.min(20000, settingNumber(event.target.value, settings.maxDistanceM))))} /></label>
-      <label>Lobe radius (m)<input type="number" min="100" max="20000" step="100" value={settings.lobeDistanceM} onChange={(event) => update('lobeDistanceM', Math.max(100, Math.min(20000, settingNumber(event.target.value, settings.lobeDistanceM))))} /></label>
-      <label>Minimum dB<input type="number" min="-160" max="20" step="1" value={settings.minDb} onChange={(event) => update('minDb', settingNumber(event.target.value, settings.minDb))} /></label>
-      <label>Maximum dB<input type="number" min="-160" max="20" step="1" value={settings.maxDb} onChange={(event) => update('maxDb', settingNumber(event.target.value, settings.maxDb))} /></label>
-      <label>Visual contrast<input type="number" min="0.25" max="4" step="0.25" value={settings.contrast} onChange={(event) => update('contrast', Math.max(.25, Math.min(4, settingNumber(event.target.value, settings.contrast))))} /></label>
-      <label>Noise threshold (dB)<input type="number" min="-160" max="20" step="1" value={settings.thresholdDb} onChange={(event) => update('thresholdDb', settingNumber(event.target.value, settings.thresholdDb))} /></label>
-      <label>Radial samples<input type="number" min="2" max="32" step="1" value={settings.radialSamples} onChange={(event) => update('radialSamples', settingNumber(event.target.value, settings.radialSamples))} /><small>Density along each bearing</small></label>
-      <label>Distance falloff<input type="range" min="0" max="1" step="0.05" value={settings.distanceFalloff} onChange={(event) => update('distanceFalloff', Number(event.target.value))} /><output>{Math.round(settings.distanceFalloff * 100)}%</output></label>
-      <label>Visual intensity<input type="range" min="0.25" max="3" step="0.05" value={settings.heatIntensity} onChange={(event) => update('heatIntensity', Number(event.target.value))} /><output>{settings.heatIntensity.toFixed(2)}×</output></label>
-      <label>Heat opacity<input type="range" min="0" max="1" step="0.05" value={settings.heatOpacity} onChange={(event) => update('heatOpacity', Number(event.target.value))} /><output>{Math.round(settings.heatOpacity * 100)}%</output></label>
-      <label>Heat blur<input type="range" min="4" max="80" step="1" value={settings.heatBlur} onChange={(event) => update('heatBlur', Number(event.target.value))} /><output>{settings.heatBlur}px</output></label>
-      <label>Heat gradient<select value={settings.heatPalette} onChange={(event) => update('heatPalette', event.target.value as DoaOverlaySettings['heatPalette'])}><option value="kraken">Kraken direction</option><option value="thermal">Thermal</option><option value="viridis">Viridis</option><option value="monochrome">Monochrome</option></select></label>
+      <label>{t('overlay.projection')}<input type="number" min="100" max="20000" step="100" value={settings.maxDistanceM} onChange={(event) => update('maxDistanceM', Math.max(100, Math.min(20000, settingNumber(event.target.value, settings.maxDistanceM))))} /></label>
+      <label>{t('overlay.lobeRadius')}<input type="number" min="100" max="20000" step="100" value={settings.lobeDistanceM} onChange={(event) => update('lobeDistanceM', Math.max(100, Math.min(20000, settingNumber(event.target.value, settings.lobeDistanceM))))} /></label>
+      <label>{t('overlay.minDb')}<input type="number" min="-160" max="20" step="1" value={settings.minDb} onChange={(event) => update('minDb', settingNumber(event.target.value, settings.minDb))} /></label>
+      <label>{t('overlay.maxDb')}<input type="number" min="-160" max="20" step="1" value={settings.maxDb} onChange={(event) => update('maxDb', settingNumber(event.target.value, settings.maxDb))} /></label>
+      <label>{t('overlay.contrast')}<input type="number" min="0.25" max="4" step="0.25" value={settings.contrast} onChange={(event) => update('contrast', Math.max(.25, Math.min(4, settingNumber(event.target.value, settings.contrast))))} /></label>
+      <label>{t('overlay.threshold')}<input type="number" min="-160" max="20" step="1" value={settings.thresholdDb} onChange={(event) => update('thresholdDb', settingNumber(event.target.value, settings.thresholdDb))} /></label>
+      <label>{t('overlay.samples')}<input type="number" min="2" max="32" step="1" value={settings.radialSamples} onChange={(event) => update('radialSamples', settingNumber(event.target.value, settings.radialSamples))} /><small>{t('overlay.samplesHelp')}</small></label>
+      <label>{t('overlay.falloff')}<input type="range" min="0" max="1" step="0.05" value={settings.distanceFalloff} onChange={(event) => update('distanceFalloff', Number(event.target.value))} /><output>{Math.round(settings.distanceFalloff * 100)}%</output></label>
+      <label>{t('overlay.intensity')}<input type="range" min="0.25" max="3" step="0.05" value={settings.heatIntensity} onChange={(event) => update('heatIntensity', Number(event.target.value))} /><output>{settings.heatIntensity.toFixed(2)}×</output></label>
+      <label>{t('overlay.opacity')}<input type="range" min="0" max="1" step="0.05" value={settings.heatOpacity} onChange={(event) => update('heatOpacity', Number(event.target.value))} /><output>{Math.round(settings.heatOpacity * 100)}%</output></label>
+      <label>{t('overlay.blur')}<input type="range" min="4" max="80" step="1" value={settings.heatBlur} onChange={(event) => update('heatBlur', Number(event.target.value))} /><output>{settings.heatBlur}px</output></label>
+      <label>{t('overlay.gradient')}<select value={settings.heatPalette} onChange={(event) => update('heatPalette', event.target.value as DoaOverlaySettings['heatPalette'])}><option value="kraken">{t('overlay.paletteKraken')}</option><option value="thermal">{t('overlay.paletteThermal')}</option><option value="viridis">{t('overlay.paletteViridis')}</option><option value="monochrome">{t('overlay.paletteMono')}</option></select></label>
     </div>
-    <label className="overlay-guide-field">Guide interval<select value={settings.guideInterval} onChange={(event) => update('guideInterval', Number(event.target.value) as DoaOverlaySettings['guideInterval'])}><option value="15">15°</option><option value="30">30°</option><option value="45">45°</option><option value="90">90°</option></select></label>
-    <div className="overlay-presets"><span>Quick preset</span><button className="text-button" type="button" onClick={() => preset('kraken')}>Kraken</button><button className="text-button" type="button" onClick={() => preset('focused')}>Focused</button><button className="text-button" type="button" onClick={() => preset('wide')}>Wide</button></div>
-    <div className="overlay-control-actions"><button className="text-button" type="button" onClick={onReset}>Reset overlay settings</button><span>Projection and falloff are visual helpers, not target range.</span></div>
+    <label className="overlay-guide-field">{t('overlay.guideInterval')}<select value={settings.guideInterval} onChange={(event) => update('guideInterval', Number(event.target.value) as DoaOverlaySettings['guideInterval'])}><option value="15">15°</option><option value="30">30°</option><option value="45">45°</option><option value="90">90°</option></select></label>
+    <div className="overlay-presets"><span>{t('overlay.presets')}</span><button className="text-button" type="button" onClick={() => preset('kraken')}>{t('overlay.presetKraken')}</button><button className="text-button" type="button" onClick={() => preset('focused')}>{t('overlay.presetFocused')}</button><button className="text-button" type="button" onClick={() => preset('wide')}>{t('overlay.presetWide')}</button></div>
+    <div className="overlay-control-actions"><button className="text-button" type="button" onClick={onReset}>{t('overlay.reset')}</button><span>{t('overlay.note')}</span></div>
   </div>;
 }
 
 export function TacticalMap({ coordinate, snapshot, localSnapshotFresh }: { coordinate: MapCoordinate | null; snapshot?: TelemetrySnapshot | null; localSnapshotFresh?: boolean }): JSX.Element {
+  const { t } = useI18n();
   const hostRef = useRef<HTMLDivElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -163,11 +167,12 @@ export function TacticalMap({ coordinate, snapshot, localSnapshotFresh }: { coor
             .setPopup(popup)
             .addTo(map);
         }
-        const stationLabel = `Station at ${coordinate.latitude.toFixed(6)}, ${coordinate.longitude.toFixed(6)}. Activate for details.`;
+        const stationLabel = t('map.stationAria', { lat: coordinate.latitude.toFixed(6), lon: coordinate.longitude.toFixed(6) });
         stationMarkerRef.current.getElement().setAttribute('aria-label', stationLabel);
-        stationMarkerRef.current.getElement().setAttribute('title', 'Station details');
+        stationMarkerRef.current.getElement().setAttribute('title', t('map.stationTitle'));
+        // Popup text comes only from the static dictionary, internal enums, and formatted numbers.
         stationPopupRef.current?.setLngLat([coordinate.longitude, coordinate.latitude]).setHTML(
-          `<div class="station-popup-content"><dl><dt>Source</dt><dd>${coordinate.source}</dd><dt>Position</dt><dd>${coordinate.latitude.toFixed(6)}°, ${coordinate.longitude.toFixed(6)}°</dd><dt>DoA bearing</dt><dd>${bearing === null ? 'Unavailable' : `${bearing.toFixed(1)}°`}</dd><dt>Vector</dt><dd>${values ? '360 bins' : 'Unavailable'}</dd></dl><small>Direction helper only, not a target location.</small></div>`,
+          `<div class="station-popup-content"><dl><dt>${t('map.popupSource')}</dt><dd>${coordinate.source}</dd><dt>${t('map.popupPosition')}</dt><dd>${coordinate.latitude.toFixed(6)}°, ${coordinate.longitude.toFixed(6)}°</dd><dt>${t('map.popupBearing')}</dt><dd>${bearing === null ? t('map.popupUnavailable') : `${bearing.toFixed(1)}°`}</dd><dt>${t('map.popupVector')}</dt><dd>${values ? t('map.popupBins') : t('map.popupUnavailable')}</dd></dl><small>${t('map.popupNote')}</small></div>`,
         );
         stationMarkerRef.current.setLngLat([coordinate.longitude, coordinate.latitude]);
       } else {
@@ -198,7 +203,7 @@ export function TacticalMap({ coordinate, snapshot, localSnapshotFresh }: { coor
     if (!map.loaded()) map.once('load', applyOverlay);
     map.once('idle', applyOverlay);
     return () => { map.off('load', applyOverlay); map.off('idle', applyOverlay); };
-  }, [coordinate, derived, settings, mapState, bearing, values]);
+  }, [coordinate, derived, settings, mapState, bearing, values, t]);
 
   // MapLibre remains the geographic renderer. This canvas is a deliberate
   // presentation fallback for DoA overlays: it follows MapLibre's projection,
@@ -294,22 +299,25 @@ export function TacticalMap({ coordinate, snapshot, localSnapshotFresh }: { coor
   };
 
   const resetView = () => { const current = coordinateRef.current; if (current && mapRef.current) { centeredCoordinateRef.current = `${current.latitude.toFixed(7)},${current.longitude.toFixed(7)}`; mapRef.current.easeTo({ center: [current.longitude, current.latitude], zoom: DEFAULT_ZOOM, bearing: 0, pitch: 0, padding: { top: 0, right: 0, bottom: STATION_VIEW_OFFSET[1] * 2, left: 0 }, duration: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 350 }); } };
-  const dataLabel = values ? `360 bins · ${bearing === null ? 'bearing unavailable' : `${bearing.toFixed(0)}° reference`}` : 'No fresh 360-bin vector';
-  return <Panel className="map-panel" action={<div className="map-panel-actions"><button ref={overlayToggleRef} className="secondary-button map-settings-button" type="button" onClick={() => setControlsOpen((open) => !open)} aria-expanded={controlsOpen} aria-controls={controlsOpen ? 'doa-overlay-controls' : undefined}>Overlay settings</button></div>}>
+  const dataLabel = values ? t('map.vectorReady', { bearing: bearing === null ? t('map.bearingUnavailable') : t('map.bearingReference', { deg: bearing.toFixed(0) }) }) : t('map.noVector');
+  return <section className="panel map-panel">
     <div className={`map-workspace${controlsOpen ? ' map-workspace-settings-open' : ''}`}>
       {controlsOpen ? <OverlayControls settings={settings} onChange={updateSettings} onReset={() => updateSettings(DEFAULT_DOA_OVERLAY_SETTINGS)} onClose={closeControls} /> : null}
-      <div className="map-frame" role="application" aria-label="Interactive DoA map. Pan, zoom, and rotate without changing DoA data." tabIndex={-1} data-route-focus>
+      <div className="map-frame" role="application" aria-label={t('map.appAria')} tabIndex={-1} data-route-focus>
         <div className="maplibre-host" ref={hostRef} />
         <canvas ref={overlayCanvasRef} className="doa-overlay-canvas" aria-hidden="true" />
-        <span className="map-attribution" aria-label="Map attribution">© OpenStreetMap contributors</span>
-        {mapState === 'unavailable' || !coordinate ? <div className="map-empty-wrap"><EmptyState label="MAP UNAVAILABLE" detail="A valid station coordinate is not available; geographic overlay is held." tone="warn" /></div> : null}
-        {mapState === 'error' ? <div className="map-empty-wrap"><EmptyState label="BASEMAP UNAVAILABLE" detail="MapLibre or the OSM tile layer did not load. Overlay data is not treated as a target location." tone="warn" /></div> : null}
-        {coordinate ? <button className="map-reset-button" type="button" onClick={resetView} aria-label="Center map on station position"><Icon name="refresh" /> Center</button> : null}
+        <div className="map-toolbar">
+          <button ref={overlayToggleRef} className="toolbar-button map-settings-button" type="button" onClick={() => setControlsOpen((open) => !open)} aria-expanded={controlsOpen} aria-controls={controlsOpen ? 'doa-overlay-controls' : undefined}><Icon name="layers" /><span>{t('map.layers')}</span></button>
+          {coordinate ? <button className="toolbar-button map-reset-button" type="button" onClick={resetView} aria-label={t('map.centerAria')} title={t('map.centerAria')}><Icon name="crosshair" /><span>{t('map.center')}</span></button> : null}
+        </div>
+        <span className="map-attribution" aria-label={t('map.attributionAria')}>© OpenStreetMap contributors</span>
+        {mapState === 'unavailable' || !coordinate ? <div className="map-empty-wrap"><EmptyState label={t('map.unavailable')} detail={t('map.unavailableDetail')} tone="warn" /></div> : null}
+        {mapState === 'error' ? <div className="map-empty-wrap"><EmptyState label={t('map.basemapUnavailable')} detail={t('map.basemapUnavailableDetail')} tone="warn" /></div> : null}
       </div>
       <div className="map-bottom-overlay">
-        {coordinate ? <div className="map-coordinate" aria-label="Station coordinates"><span>{coordinate.source === 'SIMULATION' ? 'SIMULATION · NOT LIVE GPS' : coordinate.source === 'FALLBACK' ? 'REFERENCE ONLY · NOT LIVE GPS' : coordinate.source === 'MANUAL' ? 'MANUAL POSITION · NOT LIVE GPS' : 'STATION POSITION'}</span><strong>{coordinate.latitude.toFixed(6)}°, {coordinate.longitude.toFixed(6)}°</strong><small>{dataLabel}</small></div> : null}
-        <div className={`map-overlay-legend palette-${settings.heatPalette}`} role="note"><span><i className="legend-swatch legend-bearing" /> Bearing</span><span><i className="legend-swatch legend-lobe" /> Lobe</span><span><i className="legend-swatch legend-heat" /> Heat · {derived.heat.features.length} samples</span><small>Direction helper · bukan lokasi target</small></div>
+        <div className={`map-overlay-legend palette-${settings.heatPalette}`} role="note"><span><i className="legend-swatch legend-bearing" /> {t('map.legendBearing')}</span><span><i className="legend-swatch legend-lobe" /> {t('map.legendLobe')}</span><span><i className="legend-swatch legend-heat" /> {t('map.legendHeat', { count: derived.heat.features.length })}</span><small>{t('map.legendNote')}</small></div>
+        {coordinate ? <div className="map-coordinate" aria-label={t('map.coordinatesAria')}><span>{t(coordinateSourceKey(coordinate.source))}</span><strong>{coordinate.latitude.toFixed(6)}°, {coordinate.longitude.toFixed(6)}°</strong><small>{dataLabel}</small></div> : null}
       </div>
     </div>
-  </Panel>;
+  </section>;
 }
