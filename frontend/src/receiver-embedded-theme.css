@@ -1,35 +1,35 @@
 :root[data-theme='light'] {
   color-scheme: light;
-  --bg-dark: #eceeec;
-  --bg-panel: #fafbf9;
-  --bg-header: #f0f2ef;
-  --text-main: #202824;
-  --text-muted: #47564c;
-  --accent: #2f6386;
-  --accent-hover: #244e6b;
-  --border: #c7d0c9;
-  --btn-bg: #e2e6e1;
-  --btn-hover: #d3dbd4;
-  --bg-lighter: #f0f2ef;
-  --primary-color: #2f6386;
-  scrollbar-color: #aeb9b0 #eceeec;
+  --bg-dark: #eef1f5;
+  --bg-panel: #ffffff;
+  --bg-header: #f3f5f8;
+  --text-main: #16202a;
+  --text-muted: #3d4b59;
+  --accent: #0a6f80;
+  --accent-hover: #075866;
+  --border: #d5dce4;
+  --btn-bg: #f3f5f8;
+  --btn-hover: #e4e9ef;
+  --bg-lighter: #f3f5f8;
+  --primary-color: #0a6f80;
+  scrollbar-color: #b8c2cc #eef1f5;
 }
 
 :root[data-theme='light'] * {
-  scrollbar-color: #aeb9b0 #eceeec;
+  scrollbar-color: #b8c2cc #eef1f5;
 }
 
 :root[data-theme='light'] *::-webkit-scrollbar-track,
 :root[data-theme='light'] *::-webkit-scrollbar-corner {
-  background: #eceeec;
+  background: #eef1f5;
 }
 
 :root[data-theme='light'] *::-webkit-scrollbar-thumb {
-  background-color: #aeb9b0;
+  background-color: #b8c2cc;
 }
 
 :root[data-theme='light'] *::-webkit-scrollbar-thumb:hover {
-  background-color: #87958a;
+  background-color: #8592a0;
 }
 
 :root[data-theme='light'] body,
@@ -72,9 +72,9 @@
 }
 
 :root[data-theme='light'] .receiver-view-tab.active {
-  background: rgba(47, 99, 134, 0.12);
+  background: rgba(10, 111, 128, 0.12);
   border-color: var(--accent);
-  color: #244e6b;
+  color: #075866;
 }
 
 :root[data-theme='light'] .listener-return-bar,
@@ -198,7 +198,7 @@
 :root[data-theme='light'] .bookmark-item:hover,
 :root[data-theme='light'] .activity-row:hover,
 :root[data-theme='light'] .bookmark-dialog-body .bookmark-row {
-  background-color: rgba(32, 40, 36, 0.04);
+  background-color: rgba(22, 32, 42, 0.04);
 }
 
 :root[data-theme='light'] .pocsag-type-alpha {
@@ -208,7 +208,7 @@
 
 :root[data-theme='light'] .pocsag-type-numeric {
   background: #e5edf7;
-  color: #244e6b;
+  color: #075866;
 }
 
 :root[data-theme='light'] .pocsag-type-tone {
@@ -218,12 +218,12 @@
 
 :root[data-theme='light'] .sweep-waterfall-marker-label,
 :root[data-theme='light'] .sweep-hover-readout {
-  background: rgba(250, 251, 249, 0.96);
+  background: rgba(255, 255, 255, 0.96);
   color: var(--text-main);
 }
 
 :root[data-theme='light'] ::selection {
-  background: rgba(47, 99, 134, 0.2);
+  background: rgba(10, 111, 128, 0.2);
   color: var(--text-main);
 }
 :root[data-theme='light'] .sweep-header {
@@ -264,9 +264,9 @@
 }
 
 :root[data-theme='light'] .sweep-visualization-tabs button.active {
-  background: rgba(47, 99, 134, 0.12);
+  background: rgba(10, 111, 128, 0.12);
   border-color: var(--accent);
-  color: #244e6b;
+  color: #075866;
 }
 :root[data-theme='light'] .bookmark-toolbar {
   background: var(--bg-header);
@@ -315,9 +315,9 @@
 }
 
 :root[data-theme='light'] .listener-workspace button.active:not(.btn-primary) {
-  background: rgba(47, 99, 134, 0.12);
+  background: rgba(10, 111, 128, 0.12);
   border-color: var(--accent);
-  color: #244e6b;
+  color: #075866;
 }
 :root[data-theme='light'] .top-controls .top-audio-record-button.recording {
   border-color: #b7414d;
@@ -333,4 +333,281 @@
 :root[data-theme='light'] .receiver-records-workspace .records-list-header > span,
 :root[data-theme='light'] .receiver-records-workspace .audio-record-segment {
   color: var(--text-muted);
+}
+
+/* Spectrum toolbar, marker readout, and marker colours ------------------- */
+:root {
+  --rx-mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  /* Same order as MARKER_COLORS_* in app/marker-readout.ts. */
+  --marker-0: #f472b6;
+  --marker-1: #38bdf8;
+  --marker-2: #a3e635;
+  --marker-3: #fbbf24;
+  --marker-4: #c084fc;
+  --marker-5: #2dd4bf;
+  --marker-6: #fb923c;
+  --marker-7: #e2e8f0;
+}
+
+:root[data-theme='light'] {
+  --marker-0: #be185d;
+  --marker-1: #0369a1;
+  --marker-2: #4d7c0f;
+  --marker-3: #a16207;
+  --marker-4: #7e22ce;
+  --marker-5: #0f766e;
+  --marker-6: #c2410c;
+  --marker-7: #334155;
+}
+
+.marker-tone-0 { --marker-color: var(--marker-0); }
+.marker-tone-1 { --marker-color: var(--marker-1); }
+.marker-tone-2 { --marker-color: var(--marker-2); }
+.marker-tone-3 { --marker-color: var(--marker-3); }
+.marker-tone-4 { --marker-color: var(--marker-4); }
+.marker-tone-5 { --marker-color: var(--marker-5); }
+.marker-tone-6 { --marker-color: var(--marker-6); }
+.marker-tone-7 { --marker-color: var(--marker-7); }
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.sweep-actions {
+  align-items: center;
+  gap: 8px 14px;
+}
+
+.sweep-action-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.sweep-action-group + .sweep-action-group,
+.sweep-visualization-tabs + .sweep-action-group {
+  padding-left: 14px;
+  border-left: 1px solid var(--border, #333);
+}
+
+/* Session files sit at the far end; the gap already separates them, and a
+   divider would dangle at the start of the row when they wrap. */
+.sweep-actions .sweep-file-group {
+  margin-left: auto;
+  padding-left: 0;
+  border-left: 0;
+}
+
+.sweep-actions .sweep-action-group .btn {
+  min-width: 0;
+}
+
+.sweep-actions .btn-icon-text {
+  width: 34px;
+  padding-inline: 0;
+  font-family: var(--rx-mono);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.sweep-action-label {
+  color: var(--text-muted, #888);
+  font-family: var(--rx-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sweep-spectrum:focus-visible {
+  outline: 2px solid var(--accent, #3a86ff);
+  outline-offset: -2px;
+}
+
+.sweep-chart-hint {
+  margin: 6px 18px 0;
+  color: var(--text-muted, #888);
+  font-family: var(--rx-mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.marker-readout {
+  margin: 10px 18px 0;
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+  background: var(--bg-panel, #1e1e1e);
+}
+
+.marker-readout-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border, #333);
+}
+
+.marker-readout-heading h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.marker-readout-heading span {
+  color: var(--text-muted, #888);
+  font-size: 11px;
+}
+
+.marker-readout-scroll {
+  max-height: 220px;
+  overflow: auto;
+}
+
+.marker-readout-scroll:focus-visible {
+  outline: 2px solid var(--accent, #3a86ff);
+  outline-offset: -2px;
+}
+
+.marker-readout-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.marker-readout-table th {
+  position: sticky;
+  top: 0;
+  padding: 6px 10px;
+  background: var(--bg-panel, #1e1e1e);
+  color: var(--text-muted, #888);
+  font-family: var(--rx-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.marker-readout-table td {
+  padding: 6px 10px;
+  border-top: 1px solid var(--border, #333);
+  white-space: nowrap;
+}
+
+.marker-readout-table tbody tr {
+  cursor: pointer;
+}
+
+.marker-readout-table tbody tr:hover {
+  background: rgba(127, 140, 160, 0.08);
+}
+
+.marker-readout-table tbody tr.selected {
+  background: rgba(127, 140, 160, 0.14);
+  box-shadow: inset 3px 0 0 var(--accent, #3a86ff);
+}
+
+.marker-readout-number {
+  font-family: var(--rx-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.marker-readout-muted {
+  color: var(--text-muted, #888);
+}
+
+.marker-readout-label {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.marker-readout-actions {
+  text-align: right;
+}
+
+.marker-readout-actions .btn {
+  min-width: 0;
+  margin-left: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.marker-chip {
+  display: inline-flex;
+  align-items: center;
+  min-width: 30px;
+  padding: 1px 6px;
+  border: 1px solid var(--marker-color, #ff75a0);
+  border-radius: 3px;
+  color: var(--marker-color, #ff75a0);
+  font-family: var(--rx-mono);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.marker-ref-badge {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--accent, #3a86ff);
+  color: #fff;
+  font-family: var(--rx-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.marker-row .marker-chip {
+  align-self: end;
+  margin-bottom: 6px;
+}
+
+.marker-row.selected {
+  box-shadow: inset 3px 0 0 var(--accent, #3a86ff);
+}
+
+.sweep-candidate-actions {
+  display: flex;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+/* Upstream gives these pale text for a dark panel only. */
+:root[data-theme='light'] .sweep-listen-button {
+  border-color: var(--accent);
+  background: rgba(10, 111, 128, 0.08);
+  color: var(--accent);
+}
+
+.sweep-waterfall-marker-pin::before,
+.sweep-waterfall-marker-pin::after,
+.sweep-waterfall-marker-line::after {
+  background: var(--marker-color, #ff75a0);
+}
+
+@media (max-width: 760px) {
+  .sweep-action-group + .sweep-action-group,
+  .sweep-visualization-tabs + .sweep-action-group {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .sweep-actions .sweep-file-group {
+    margin-left: 0;
+  }
+
+  .marker-readout,
+  .sweep-chart-hint {
+    margin-inline: 10px;
+  }
 }

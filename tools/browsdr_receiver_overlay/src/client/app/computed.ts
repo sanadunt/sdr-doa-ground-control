@@ -4,9 +4,13 @@ import type { SweepCandidate } from '../worker/sweep-types';
 import { groupAdjacentCandidates, type SweepCandidateBand } from './candidate-bands';
 import type { ReceiverMarker } from './receiver-records-api';
 import { sweepMarkerPositionRatio } from './sweep-marker-renderer';
+import { markerName } from './marker-readout';
 
 interface VisibleWaterfallMarker {
 	marker: ReceiverMarker;
+	name: string;
+	/** Index into the eight marker colours, matching the spectrum chart. */
+	tone: number;
 	label: string;
 	frequencyText: string;
 	positionPercent: number;
@@ -155,7 +159,9 @@ export const computedProperties = {
 			if (ratio === null) continue;
 			visible.push({
 				marker,
-				label: marker.label.trim() || `M${index + 1}`,
+				name: markerName(index),
+				tone: index % 8,
+				label: marker.label.trim() || markerName(index),
 				frequencyText: `${(marker.frequencyHz / 1_000_000).toFixed(6)} MHz`,
 				positionPercent: ratio * 100,
 				pinTopPx: 0,

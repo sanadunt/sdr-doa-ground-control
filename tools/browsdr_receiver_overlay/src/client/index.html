@@ -36,7 +36,7 @@
 <body>
 	<div id="app" v-cloak>
 		<!-- Top Bar -->
-		<div class="top-bar">
+		<div class="top-bar" v-show="activeWorkspace === 'listener'">
 			<button class="icon-btn sidebar-toggle" v-show="activeWorkspace === 'listener'" @click="toggleSidebar" title="Menu">
 				<svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
 			</button>
@@ -610,21 +610,31 @@
 						</select>
 					</label>
 					<div class="sweep-actions">
-						<button class="btn btn-secondary" v-if="!connected && remoteMode === 'none'" @click="connect" :disabled="sweep.active || sweep.starting || sweep.stopping">Connect Device</button>
-						<button class="btn btn-secondary" v-else-if="connected && remoteMode === 'none'" @click="disconnect" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Disconnect</button>
-						<button class="btn btn-primary" @click="startSweep" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting || remoteMode !== 'none' || (sweep.source !== 'simulated' && !connected)">Start scan</button>
-						<button class="btn btn-danger" @click="stopSweep(true)" v-if="sweep.active || sweep.starting || sweep.stopping" :disabled="sweep.stopping">{{ sweep.stopping ? (sweep.stopPhase === 'rf' ? 'Stopping RF…' : sweep.stopPhase === 'archive' ? 'Saving archive…' : 'Finishing…') : 'Stop' }}</button>
+						<div class="sweep-action-group" role="group" aria-label="Scan control">
+							<button class="btn btn-secondary" v-if="!connected && remoteMode === 'none'" @click="connect" :disabled="sweep.active || sweep.starting || sweep.stopping">Connect Device</button>
+							<button class="btn btn-secondary" v-else-if="connected && remoteMode === 'none'" @click="disconnect" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Disconnect</button>
+							<button class="btn btn-primary" v-if="!(sweep.active || sweep.starting || sweep.stopping)" @click="startSweep" :disabled="sweep.listening || sweep.listenStarting || remoteMode !== 'none' || (sweep.source !== 'simulated' && !connected)">Start scan</button>
+							<button class="btn btn-danger" v-else @click="stopSweep(true)" :disabled="sweep.stopping">{{ sweep.stopping ? (sweep.stopPhase === 'rf' ? 'Stopping RF…' : sweep.stopPhase === 'archive' ? 'Saving archive…' : 'Finishing…') : 'Stop scan' }}</button>
+						</div>
 						<div class="sweep-visualization-tabs" role="tablist" aria-label="Sweep visualization">
 							<button :class="{ active: sweep.visualization === 'spectrum' }" role="tab" :aria-selected="sweep.visualization === 'spectrum'" @click="setSweepVisualization('spectrum')">Spectrum</button>
 							<button :class="{ active: sweep.visualization === 'waterfall' }" role="tab" :aria-selected="sweep.visualization === 'waterfall'" @click="setSweepVisualization('waterfall')">Waterfall · {{ sweep.waterfallRows }}/256</button>
 						</div>
-						<button class="btn btn-secondary" @click="$refs.sweepSessionFile.click()" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Open session</button>
-						<button class="btn btn-secondary" @click="saveSweepSession" :disabled="!sweep.hasResults">Save JSON</button>
-						<button class="btn btn-secondary" @click="exportSweepCandidates" :disabled="!sweep.hasResults">Export CSV</button>
-						<button class="btn btn-secondary" @click="clearSweepData" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Clear</button>
-						<button class="btn btn-secondary" @click="zoomSweepSpectrum(0.5)" :disabled="!sweep.hasResults" aria-label="Zoom in" title="Zoom in">Zoom +</button>
-						<button class="btn btn-secondary" @click="zoomSweepSpectrum(2)" :disabled="!sweep.hasResults" aria-label="Zoom out" title="Zoom out">Zoom −</button>
-						<button class="btn btn-secondary" @click="resetSweepViewport" :disabled="!sweep.hasResults">Reset zoom</button>
+						<div class="sweep-action-group" role="group" aria-label="Zoom">
+							<span class="sweep-action-label">Zoom</span>
+							<button class="btn btn-secondary btn-icon-text" @click="zoomSweepSpectrum(2)" :disabled="!sweep.hasResults" aria-label="Zoom out" title="Zoom out">−</button>
+							<button class="btn btn-secondary btn-icon-text" @click="zoomSweepSpectrum(0.5)" :disabled="!sweep.hasResults" aria-label="Zoom in" title="Zoom in">+</button>
+							<button class="btn btn-secondary" @click="resetSweepViewport" :disabled="!sweep.hasResults" title="Show the full scan range">Fit</button>
+						</div>
+						<div class="sweep-action-group" role="group" aria-label="Markers">
+							<button class="btn btn-secondary" @click="addPeakMarker" :disabled="!sweep.hasResults" title="Place a marker on the strongest signal in the visible range">Marker to peak</button>
+						</div>
+						<div class="sweep-action-group sweep-file-group" role="group" aria-label="Session files">
+							<button class="btn btn-secondary" @click="$refs.sweepSessionFile.click()" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Open session</button>
+							<button class="btn btn-secondary" @click="saveSweepSession" :disabled="!sweep.hasResults">Save JSON</button>
+							<button class="btn btn-secondary" @click="exportSweepCandidates" :disabled="!sweep.hasResults">Export CSV</button>
+							<button class="btn btn-secondary" @click="clearSweepData" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Clear</button>
+						</div>
 					</div>
 					<input ref="sweepSessionFile" class="sweep-file-input" type="file" accept=".json,application/json" @change="openSweepSession">
 				</div>
@@ -644,11 +654,9 @@
 				</div>
 
 				<div class="sweep-spectrum-wrap">
-					<div class="sweep-hover-readout" v-if="sweep.visualization === 'spectrum' && sweep.hoverFrequencyHz !== null">
-						{{ (sweep.hoverFrequencyHz / 1000000).toFixed(6) }} MHz
-						<span v-if="sweep.hoverPowerDb !== null">{{ sweep.hoverPowerDb.toFixed(1) }} dBFS-like</span>
-					</div>
-					<canvas ref="sweepSpectrum" v-show="sweep.visualization === 'spectrum'" class="sweep-spectrum"
+					<canvas ref="sweepSpectrum" v-show="sweep.visualization === 'spectrum'" class="sweep-spectrum" tabindex="0"
+						aria-label="Spectrum chart. Click to add or select a marker; with a marker selected, arrow keys move it and Delete removes it."
+						@keydown="sweepCanvasKeydown"
 						@pointerdown="sweepCanvasPointerDown"
 						@pointermove="sweepCanvasPointerMove"
 						@pointerup="sweepCanvasPointerUp"
@@ -661,12 +669,12 @@
 							<div class="sweep-waterfall-marker-track">
 								<span v-for="marker in visibleWaterfallMarkers" :key="marker.marker.id"
 									class="sweep-waterfall-marker-pin"
-									:class="{ 'sweep-waterfall-marker-pin--right': marker.tooltipAlignRight }"
+									:class="['marker-tone-' + marker.tone, { 'sweep-waterfall-marker-pin--right': marker.tooltipAlignRight }]"
 									:style="{ left: `${marker.positionPercent}%`, top: `${marker.pinTopPx}px`, '--marker-connector-height': `${marker.connectorHeightPx}px` }"
-									role="img" tabindex="0" :aria-label="`${marker.label}, ${marker.frequencyText}`">
+									role="img" tabindex="0" :aria-label="`${marker.name} ${marker.label}, ${marker.frequencyText}`">
 									<span class="sweep-waterfall-marker-flag" aria-hidden="true"></span>
 									<span class="sweep-waterfall-marker-tooltip" role="tooltip" aria-hidden="true">
-										<span>{{ marker.label }}</span>
+										<span>{{ marker.name }} · {{ marker.label }}</span>
 										<span class="sweep-waterfall-marker-frequency">{{ marker.frequencyText }}</span>
 									</span>
 								</span>
@@ -681,12 +689,40 @@
 								@pointerleave="sweepCanvasPointerLeave"></canvas>
 							<div class="sweep-waterfall-marker-stems" v-if="visibleWaterfallMarkers.length" aria-hidden="true">
 								<span v-for="marker in visibleWaterfallMarkers" :key="marker.marker.id"
-									class="sweep-waterfall-marker-line"
+									class="sweep-waterfall-marker-line" :class="'marker-tone-' + marker.tone"
 									:style="{ left: `${marker.positionPercent}%` }"></span>
 							</div>
 						</div>
 					</div>
 				</div>
+				<p class="sweep-chart-hint" v-show="sweep.visualization === 'spectrum'">Click: add or select marker · Drag: pan · Wheel: zoom · ←/→: move selected marker (Shift ×10) · Delete: remove · Esc: deselect</p>
+				<section class="marker-readout" v-if="records.markers.length" aria-labelledby="marker-readout-title">
+					<div class="marker-readout-heading">
+						<h3 id="marker-readout-title">Markers</h3>
+						<span>Live level follows the {{ sweep.view === 'max' ? 'max hold' : sweep.view }} trace · Δ against the REF marker</span>
+					</div>
+					<div class="marker-readout-scroll" role="region" aria-label="Marker readout" tabindex="0">
+						<table class="marker-readout-table">
+							<thead><tr><th scope="col">Marker</th><th scope="col">Label</th><th scope="col">Frequency</th><th scope="col">Live level</th><th scope="col">Level when placed</th><th scope="col">Δ frequency</th><th scope="col">Δ level</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+							<tbody>
+								<tr v-for="row in sweepMarkerRows()" :key="row.id" :class="{ selected: row.id === records.selectedMarkerId }" @click="selectReceiverMarker(row.id)">
+									<td><span class="marker-chip" :class="'marker-tone-' + (row.index % 8)">{{ row.name }}</span><span class="marker-ref-badge" v-if="row.isReference">REF</span></td>
+									<td class="marker-readout-label">{{ row.label }}</td>
+									<td class="marker-readout-number">{{ formatMarkerFrequency(row.frequencyHz) }}</td>
+									<td class="marker-readout-number">{{ row.liveDb === null ? '—' : row.liveDb.toFixed(1) + ' dBFS' }}</td>
+									<td class="marker-readout-number marker-readout-muted">{{ row.savedDb === null ? 'not measured' : row.savedDb.toFixed(1) + ' dBFS' }}</td>
+									<td class="marker-readout-number">{{ row.deltaHz === null ? '—' : formatDeltaFrequency(row.deltaHz) }}</td>
+									<td class="marker-readout-number">{{ row.deltaDb === null ? '—' : formatDeltaDb(row.deltaDb) }}</td>
+									<td class="marker-readout-actions">
+										<button class="btn btn-secondary" type="button" @click.stop="centerOnReceiverMarker(row.id)">Center</button>
+										<button class="btn btn-secondary" type="button" @click.stop="setReferenceMarker(row.id)" :disabled="row.isReference">Set REF</button>
+										<button class="btn btn-secondary" type="button" @click.stop="removeReceiverMarker(row.id)" :aria-label="`Delete ${row.name}`">Delete</button>
+									</td>
+								</tr>
+							</tbody>
+						</table>
+					</div>
+				</section>
 				<div class="sweep-history-layout">
 					<section class="sweep-history-table" aria-label="Peak history">
 				<div class="sweep-table-heading">
@@ -716,7 +752,7 @@
 				</div>
 				<div class="sweep-candidates">
 					<table>
-						<thead><tr><th>Peak center</th><th>Peak frequency range</th><th>Occupied bandwidth</th><th>Best peak</th><th>Noise</th><th>SNR</th><th>First seen</th><th>Last seen</th><th>Hits</th><th>Listen</th></tr></thead>
+						<thead><tr><th>Peak center</th><th>Peak frequency range</th><th>Occupied bandwidth</th><th>Best peak</th><th>Noise</th><th>SNR</th><th>First seen</th><th>Last seen</th><th>Hits</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
 						<tbody>
 							<tr v-for="candidate in sortedSweepCandidates" :key="candidate.id"
 								:class="{ selected: sweep.selectedCandidate && sweep.selectedCandidate.id === candidate.id }"
@@ -730,7 +766,7 @@
 								<td>{{ new Date(candidate.firstSeen).toLocaleTimeString() }}</td>
 								<td>{{ new Date(candidate.lastSeen).toLocaleTimeString() }}</td>
 								<td>{{ candidate.hits }}</td>
-								<td><button class="sweep-listen-button" @click.stop="listenToSweepCandidate(candidate)" :disabled="!connected || remoteMode !== 'none' || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Listen</button></td>
+								<td class="sweep-candidate-actions"><button class="sweep-listen-button" type="button" @click.stop="markSweepCandidate(candidate)" title="Add a marker at this peak">Mark</button><button class="sweep-listen-button" @click.stop="listenToSweepCandidate(candidate)" :disabled="!connected || remoteMode !== 'none' || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Listen</button></td>
 							</tr>
 						</tbody>
 					</table>
@@ -779,7 +815,8 @@
 							<button class="btn btn-secondary" type="button" @click="exportMarkerSetCsv" :disabled="!records.markers.length">Markers CSV</button>
 						</div>
 						<div class="marker-list" v-if="records.markers.length">
-							<div class="marker-row" v-for="marker in records.markers" :key="marker.id">
+							<div class="marker-row" v-for="(marker, index) in records.markers" :key="marker.id" :class="{ selected: marker.id === records.selectedMarkerId }">
+								<span class="marker-chip" :class="'marker-tone-' + (index % 8)">M{{ index + 1 }}</span>
 								<label>Frequency MHz
 									<input type="number" v-model="records.markerFrequencyDrafts[marker.id]" min="0" step="any" aria-label="Marker frequency MHz" @change="updateReceiverMarker(marker.id)">
 								</label>
@@ -787,7 +824,7 @@
 									<input type="text" v-model="marker.label" maxlength="80" placeholder="Label" aria-label="Marker label" @change="updateReceiverMarker(marker.id)">
 								</label>
 								<span class="marker-power">{{ marker.powerDb === null ? 'Power not measured' : `${marker.powerDb.toFixed(1)} dBFS` }}</span>
-								<button class="btn btn-secondary" type="button" @click="removeReceiverMarker(marker.id)">Delete marker</button>
+								<button class="btn btn-secondary" type="button" @click="removeReceiverMarker(marker.id)">Delete</button>
 							</div>
 						</div>
 						<div class="records-empty" v-else>No markers in this set yet.</div>

@@ -10,6 +10,8 @@ import type { SweepCandidate, SweepConfig, SweepProgress, SweepSource, SweepSpec
 import { groupAdjacentCandidates, type SweepCandidateBand } from './candidate-bands';
 import { receiverRecordsApi } from './receiver-records-api';
 import type { ReceiverMarker, ReceiverTraceRecord } from './receiver-records-api';
+import { buildMarkerReadout, formatDeltaDb, formatDeltaFrequency, formatMarkerFrequency, nearestMarkerWithin, peakInRange, traceLevelAt, traceValues } from './marker-readout';
+import type { MarkerReadoutRow } from './marker-readout';
 
 interface ListenRestore {
 	centerFreq: number;
@@ -269,13 +271,25 @@ async function loadAllCandidates(app: AppInstance): Promise<SweepCandidate[]> {
 	}
 	return candidates;
 }
+// A click within this many pixels of an existing marker selects it instead of adding another.
+const MARKER_PICK_TOLERANCE_PX = 8;
+const MARKER_SAVE_DELAY_MS = 400;
+const markerSaveTimers = new WeakMap<object, number>();
+
 async function addSweepMarkerAt(app: AppInstance, canvas: HTMLCanvasElement, clientX: number, clientY: number): Promise<void> {
 	const rect = canvas.getBoundingClientRect();
 	const x = clientX - rect.left;
 	const y = clientY - rect.top;
 	if (x < 54 || x > rect.width - 12 || y < 14 || y > rect.height - 28) return;
 	const ratio = (x - 54) / Math.max(1, rect.width - 66);
-	const frequencyHz = app.sweep.viewportStartHz + ratio * (app.sweep.viewportEndHz - app.sweep.viewportStartHz);
+	const viewSpan = app.sweep.viewportEndHz - app.sweep.viewportStartHz;
+	const frequencyHz = app.sweep.viewportStartHz + ratio * viewSpan;
+	const toleranceHz = viewSpan / Math.max(1, rect.width - 66) * MARKER_PICK_TOLERANCE_PX;
+	const existing = nearestMarkerWithin(app.records.markers as ReceiverMarker[], frequencyHz, toleranceHz);
+	if (existing) {
+		app.selectReceiverMarker(existing.id);
+		return;
+	}
 	const frame = runtimeFor(app).frame;
 	let powerDb: number | null = null;
 	if (frame && frequencyHz >= frame.startHz && frequencyHz < frame.endHz) {
@@ -889,6 +903,98 @@ export const sweepMethods = {
 		this.showMsg(`${markers.length} marker${markers.length === 1 ? '' : 's'} exported as CSV.`);
 	},
 
+	sweepMarkerRows(this: AppInstance): MarkerReadoutRow[] {
+		return buildMarkerReadout(this.records.markers as ReceiverMarker[], runtimeFor(this).frame, this.sweep.view, this.records.referenceMarkerId);
+	},
+
+	formatMarkerFrequency,
+	formatDeltaFrequency,
+	formatDeltaDb,
+
+	selectReceiverMarker(this: AppInstance, markerId: string | null) {
+		this.records.selectedMarkerId = markerId;
+		this.drawSweepSpectrum();
+	},
+
+	setReferenceMarker(this: AppInstance, markerId: string) {
+		this.records.referenceMarkerId = markerId;
+	},
+
+	centerOnReceiverMarker(this: AppInstance, markerId: string) {
+		const marker = (this.records.markers as ReceiverMarker[]).find(item => item.id === markerId);
+		if (!marker) return;
+		const totalStart = Number(this.sweep.startMHz) * 1_000_000;
+		const totalEnd = Number(this.sweep.endMHz) * 1_000_000;
+		const span = Math.min(this.sweep.viewportEndHz - this.sweep.viewportStartHz, totalEnd - totalStart);
+		const start = clamp(marker.frequencyHz - span / 2, totalStart, totalEnd - span);
+		this.sweep.viewportStartHz = start;
+		this.sweep.viewportEndHz = start + span;
+		this.records.selectedMarkerId = markerId;
+		this.drawSweepSpectrum();
+	},
+
+	async addPeakMarker(this: AppInstance) {
+		const frame = runtimeFor(this).frame;
+		if (!frame) {
+			this.showMsg('No spectrum yet. Start a scan or open a session first.');
+			return;
+		}
+		const peak = peakInRange(traceValues(frame, this.sweep.view), frame.startHz, frame.endHz, this.sweep.viewportStartHz, this.sweep.viewportEndHz);
+		if (!peak) {
+			this.showMsg('No measured power in the visible range.');
+			return;
+		}
+		const existing = nearestMarkerWithin(this.records.markers as ReceiverMarker[], peak.frequencyHz, frame.resolutionHz);
+		if (existing) {
+			this.selectReceiverMarker(existing.id);
+			return;
+		}
+		await this.addReceiverMarker(peak.frequencyHz, peak.powerDb, 'Peak');
+	},
+
+	async markSweepCandidate(this: AppInstance, candidate: SweepCandidateBand) {
+		const toleranceHz = Math.max(runtimeFor(this).frame?.resolutionHz ?? 0, 1_000);
+		const existing = nearestMarkerWithin(this.records.markers as ReceiverMarker[], candidate.peakFrequencyHz, toleranceHz);
+		if (existing) {
+			this.selectReceiverMarker(existing.id);
+			return;
+		}
+		await this.addReceiverMarker(candidate.peakFrequencyHz, candidate.peakDb);
+	},
+
+	/** Arrow keys move the selected marker by one bin (Shift: ten), Delete removes it, Escape deselects. */
+	sweepCanvasKeydown(this: AppInstance, event: KeyboardEvent) {
+		const marker = (this.records.markers as ReceiverMarker[]).find(item => item.id === this.records.selectedMarkerId);
+		if (event.key === 'Escape' && marker) {
+			event.preventDefault();
+			this.selectReceiverMarker(null);
+			return;
+		}
+		if ((event.key === 'Delete' || event.key === 'Backspace') && marker) {
+			event.preventDefault();
+			void this.removeReceiverMarker(marker.id);
+			return;
+		}
+		if ((event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') || !marker) return;
+		event.preventDefault();
+		const frame = runtimeFor(this).frame;
+		const viewSpan = this.sweep.viewportEndHz - this.sweep.viewportStartHz;
+		const stepHz = frame ? (frame.endHz - frame.startHz) / traceValues(frame, this.sweep.view).length : viewSpan / 500;
+		const direction = event.key === 'ArrowLeft' ? -1 : 1;
+		const frequencyHz = Math.max(1, marker.frequencyHz + direction * stepHz * (event.shiftKey ? 10 : 1));
+		marker.frequencyHz = frequencyHz;
+		marker.powerDb = frame ? traceLevelAt(traceValues(frame, this.sweep.view), frame.startHz, frame.endHz, frequencyHz) : null;
+		this.records.markerFrequencyDrafts[marker.id] = String(frequencyHz / 1_000_000);
+		this.drawSweepSpectrum();
+		// Persist once the operator stops nudging instead of once per key press.
+		const pending = markerSaveTimers.get(this);
+		if (pending !== undefined) window.clearTimeout(pending);
+		markerSaveTimers.set(this, window.setTimeout(() => {
+			markerSaveTimers.delete(this);
+			void this.updateReceiverMarker(marker.id);
+		}, MARKER_SAVE_DELAY_MS));
+	},
+
 
 	async openSweepSession(this: AppInstance, event: Event) {
 		const input = event.target as HTMLInputElement;
@@ -1224,6 +1330,7 @@ export const sweepMethods = {
 				minDb: this.sweep.displayMinDb,
 				maxDb: this.sweep.displayMaxDb,
 				markers: this.records.markers,
+				selectedMarkerId: this.records.selectedMarkerId,
 			};
 			drawSweepCanvas(canvas, runtime.frame, options);
 		});

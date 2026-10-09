@@ -52,6 +52,8 @@ export function createAppData() {
 			selectedMarkerSetId: '',
 			markerSetName: '',
 			markers: [] as ReceiverMarker[],
+			selectedMarkerId: null as string | null,
+			referenceMarkerId: null as string | null,
 			markerFrequencyDrafts: {} as Record<string, string>,
 			manualMarkerFrequencyMHz: '',
 			manualMarkerLabel: '',

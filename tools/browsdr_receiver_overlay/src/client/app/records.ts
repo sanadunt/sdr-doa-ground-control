@@ -105,6 +105,8 @@ export const recordsMethods = {
 		this.records.markerSetName = selected?.name || '';
 		this.records.markers = selected ? selected.markers.map((marker: ReceiverMarker) => ({ ...marker })) : [];
 		this.records.markerFrequencyDrafts = markerFrequencyDrafts(this.records.markers);
+		this.records.selectedMarkerId = null;
+		this.records.referenceMarkerId = null;
 		this.drawSweepSpectrum();
 		this.candidateFilterChanged();
 	},
@@ -114,6 +116,8 @@ export const recordsMethods = {
 		this.records.markerSetName = '';
 		this.records.markers = [];
 		this.records.markerFrequencyDrafts = {};
+		this.records.selectedMarkerId = null;
+		this.records.referenceMarkerId = null;
 		this.records.markedOnly = false;
 		this.drawSweepSpectrum();
 		this.candidateFilterChanged();
@@ -132,6 +136,7 @@ export const recordsMethods = {
 		};
 		this.records.markers.push(marker);
 		this.records.markerFrequencyDrafts[marker.id] = String(frequencyHz / 1_000_000);
+		this.records.selectedMarkerId = marker.id;
 		this.records.error = '';
 		this.drawSweepSpectrum();
 		if (this.records.selectedMarkerSetId) await this.saveMarkerSet();
@@ -211,6 +216,8 @@ export const recordsMethods = {
 		const drafts = { ...this.records.markerFrequencyDrafts };
 		delete drafts[markerId];
 		this.records.markerFrequencyDrafts = drafts;
+		if (this.records.selectedMarkerId === markerId) this.records.selectedMarkerId = null;
+		if (this.records.referenceMarkerId === markerId) this.records.referenceMarkerId = null;
 		this.drawSweepSpectrum();
 		if (this.records.selectedMarkerSetId) await this.saveMarkerSet();
 		else this.candidateFilterChanged();
