@@ -44,6 +44,7 @@ from sdr_doa_collector import CollectorError, DEFAULT_ALLOWED_DATA_HOSTS, collec
 from receiver_record_store import DEFAULT_DATA_DIR, ReceiverRecordStore
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+BROWSDR_SOURCE_ARCHIVE = "freq-spectrum-source.tar.gz"
 DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -1688,31 +1689,111 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         return self.console_server.is_admin_token(self._admin_token())
 
     def _send_frontend(self, request_path: str) -> None:
-        """Serve only built UI assets, never source, dotfiles or symlinks."""
+        """Serve only allowlisted built UI assets, never source, dotfiles or symlinks."""
         root = self.console_server.frontend_dir
-        relative = "index.html" if request_path == "/" else request_path.lstrip("/")
+        receiver_prefix = "/receiver"
+        is_receiver = request_path == receiver_prefix or request_path.startswith(receiver_prefix + "/")
+        if is_receiver:
+            if request_path in {receiver_prefix, receiver_prefix + "/"}:
+                relative = "receiver/index.html"
+            else:
+                relative = "receiver/" + request_path[len(receiver_prefix + "/"):]
+        else:
+            relative = "index.html" if request_path == "/" else request_path.lstrip("/")
         parts = relative.split("/")
-        mime = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png", ".svg": "image/svg+xml", ".woff2": "font/woff2", ".ico": "image/x-icon"}
-        if root is None or any(not part or part.startswith(".") for part in parts) or "%" in relative or "\\" in relative:
+        ground_console_mime = {
+            ".html": "text/html; charset=utf-8",
+            ".js": "text/javascript; charset=utf-8",
+            ".css": "text/css",
+            ".png": "image/png",
+            ".svg": "image/svg+xml",
+            ".woff2": "font/woff2",
+            ".ico": "image/x-icon",
+        }
+        receiver_mime = {
+            ".html": "text/html; charset=utf-8",
+            ".js": "text/javascript; charset=utf-8",
+            ".mjs": "text/javascript; charset=utf-8",
+            ".css": "text/css",
+            ".json": "application/json",
+            ".map": "application/json",
+            ".webmanifest": "application/manifest+json",
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+            ".svg": "image/svg+xml",
+            ".woff": "font/woff",
+            ".woff2": "font/woff2",
+            ".ttf": "font/ttf",
+            ".otf": "font/otf",
+            ".ico": "image/x-icon",
+            ".wasm": "application/wasm",
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+            ".ogg": "audio/ogg",
+            ".txt": "text/plain; charset=utf-8",
+            ".gz": "application/gzip",
+        }
+        mime = receiver_mime if is_receiver else ground_console_mime
+        allowed_root_path = (
+            relative.startswith("receiver/")
+            if is_receiver
+            else relative == "index.html" or relative.startswith("assets/")
+        )
+        suffix = Path(relative).suffix.lower() if is_receiver else Path(relative).suffix
+        if (
+            root is None
+            or not allowed_root_path
+            or any(not part or part.startswith(".") for part in parts)
+            or "%" in relative
+            or "\\" in relative
+            or suffix not in mime
+        ):
             self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
             return
         path = root.joinpath(*parts)
-        if any(root.joinpath(*parts[:i]).is_symlink() for i in range(1, len(parts) + 1)) or path.suffix not in mime or (relative != "index.html" and not relative.startswith("assets/")):
+        if any(root.joinpath(*parts[:index]).is_symlink() for index in range(1, len(parts) + 1)):
             self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
             return
         try:
             path.resolve().relative_to(root.resolve())
             body = path.read_bytes()
         except (OSError, ValueError):
-            self._send_json({"error": "Frontend build unavailable. Run npm ci and npm run build in frontend, or use --legacy-ui."}, HTTPStatus.NOT_FOUND)
+            self._send_json(
+                {"error": "Frontend build unavailable. Run npm ci and npm run build in frontend, or use --legacy-ui."},
+                HTTPStatus.NOT_FOUND,
+            )
             return
+
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", mime[path.suffix])
+        self.send_header("Content-Type", mime[suffix])
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
-        self.send_header("Cache-Control", "no-store" if path.suffix == ".html" else "public, max-age=3600")
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://tile.openstreetmap.de https://tile.openstreetmap.org; connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+        self.send_header("Cache-Control", "no-store" if suffix == ".html" else "public, max-age=3600")
+        if is_receiver:
+            content_security_policy = (
+                "default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; "
+                "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+                "font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; "
+                "media-src 'self' blob: data:; worker-src 'self' blob:; "
+                "connect-src 'self' https://cdn.jsdelivr.net https://huggingface.co https://*.huggingface.co "
+                "https://hf.co https://*.hf.co; object-src 'none'; "
+                "base-uri 'self'; frame-ancestors 'self'; form-action 'self'"
+            )
+            self.send_header("Permissions-Policy", "usb=(self), autoplay=(self)")
+            if relative == f"receiver/{BROWSDR_SOURCE_ARCHIVE}":
+                self.send_header("Content-Disposition", f'attachment; filename="{BROWSDR_SOURCE_ARCHIVE}"')
+        else:
+            content_security_policy = (
+                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data: https://tile.openstreetmap.de https://tile.openstreetmap.org; "
+                "connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org; "
+                "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+            )
+        self.send_header("Content-Security-Policy", content_security_policy)
         self.end_headers()
         self.wfile.write(body)
 

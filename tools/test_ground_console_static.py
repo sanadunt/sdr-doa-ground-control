@@ -10,12 +10,14 @@ whole file vacuously green.
 from __future__ import annotations
 
 import http.client
+import io
 import inspect
 import json
 import os
 import re
 import sys
 import tempfile
+import tarfile
 import threading
 import unittest
 from contextlib import ExitStack
@@ -64,8 +66,13 @@ class HTTPResult:
 class ConsoleHTTPHarness:
     """Run one console instance with only temporary local state."""
 
-    def __init__(self, bind_host: str = "127.0.0.1") -> None:
+    def __init__(
+        self,
+        bind_host: str = "127.0.0.1",
+        frontend_dir: Optional[Path] = None,
+    ) -> None:
         self.bind_host = bind_host
+        self.frontend_dir = frontend_dir
         self._temporary: Optional[tempfile.TemporaryDirectory[str]] = None
         self.receiver_data_dir: Optional[Path] = None
         self.server: Any = None
@@ -96,6 +103,7 @@ class ConsoleHTTPHarness:
             branding_path=branding_path,
             config_path=config_path,
             config=config,
+            frontend_dir=self.frontend_dir,
             receiver_data_dir=self.receiver_data_dir,
         )
 
@@ -172,12 +180,13 @@ def _new_server(
     config_path: Path,
     config: Mapping[str, Any],
     receiver_data_dir: Optional[Path] = None,
+    frontend_dir: Optional[Path] = None,
 ) -> Any:
     """Construct the current server with temporary local state."""
 
     server_type = _server_class()
     parameters = inspect.signature(server_type).parameters
-    static_value = str(STATIC_ROOT)
+    static_value = str(frontend_dir if frontend_dir is not None else STATIC_ROOT)
     values: Dict[str, Any] = {
         "mqtt_monitor": None,
         "branding_path": str(branding_path),
@@ -251,8 +260,46 @@ def _asset_references(index: Path) -> List[Tuple[str, Path]]:
             seen.add(request_path)
     return references
 
+def _receiver_asset_references(index: Path) -> List[Tuple[str, Path]]:
+    """Return same-origin Receiver assets linked by the built index."""
+
+    document = index.read_text(encoding="utf-8")
+    references: List[Tuple[str, Path]] = []
+    seen: set[str] = set()
+    pattern = re.compile(r"(?:src|href)\s*=\s*([\"'])(.*?)\1", re.IGNORECASE)
+    receiver_root = (STATIC_ROOT / "receiver").resolve()
+    for match in pattern.finditer(document):
+        raw_reference = match.group(2)
+        parsed = urlsplit(raw_reference)
+        if not parsed.path.startswith("/receiver/"):
+            continue
+        relative = unquote(parsed.path[len("/receiver/"):])
+        parts = relative.split("/")
+        if any(not part or part.startswith(".") for part in parts):
+            raise AssertionError(f"Receiver build contains an unsafe asset reference: {raw_reference!r}")
+        expected = (STATIC_ROOT / "receiver").joinpath(*parts).resolve()
+        try:
+            expected.relative_to(receiver_root)
+        except ValueError as exc:
+            raise AssertionError(f"Receiver asset escapes its static root: {raw_reference!r}") from exc
+        if not expected.is_file():
+            raise AssertionError(f"Receiver index references missing asset: {raw_reference!r}")
+        request_path = parsed.path
+        if parsed.query:
+            request_path += "?" + parsed.query
+        if request_path not in seen:
+            references.append((request_path, expected))
+            seen.add(request_path)
+    return references
+
 
 _EXPECTED_MIMES: Dict[str, frozenset[str]] = {
+    ".webmanifest": frozenset({"application/manifest+json"}),
+    ".mp3": frozenset({"audio/mpeg"}),
+    ".wav": frozenset({"audio/wav"}),
+    ".ogg": frozenset({"audio/ogg"}),
+    ".txt": frozenset({"text/plain"}),
+    ".gz": frozenset({"application/gzip"}),
     ".js": frozenset({"text/javascript", "application/javascript"}),
     ".mjs": frozenset({"text/javascript", "application/javascript"}),
     ".css": frozenset({"text/css"}),
@@ -940,6 +987,180 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         parsed = ground_console._build_parser().parse_args(["--data-dir", "/tmp/receiver-data"])
         self.assertEqual(parsed.data_dir, "/tmp/receiver-data")
 
+
+    def test_receiver_is_same_origin_scoped_and_serves_source(self) -> None:
+        receiver_index = STATIC_ROOT / "receiver" / "index.html"
+        if not receiver_index.is_file():
+            self.skipTest("embedded BrowSDR receiver is absent; build it before static-serving checks")
+
+        receiver_root = receiver_index.parent
+        receiver_manifest = receiver_root / "manifest.webmanifest"
+        receiver_source = receiver_root / ground_console.BROWSDR_SOURCE_ARCHIVE
+        self.assertTrue(receiver_manifest.is_file())
+        self.assertTrue(receiver_source.is_file())
+
+        with ConsoleHTTPHarness() as console:
+            root_result = console.request("GET", "/receiver/")
+            short_result = console.request("GET", "/receiver")
+            manifest_result = console.request("GET", "/receiver/manifest.webmanifest")
+            source_result = console.request("GET", f"/receiver/{ground_console.BROWSDR_SOURCE_ARCHIVE}")
+            wasm_module_result = console.request("GET", "/receiver/hackrf-web/pkg/hackrf_web.js")
+            wasm_binary_result = console.request("GET", "/receiver/hackrf-web/pkg/hackrf_web_bg.wasm")
+            silence_result = console.request("GET", "/receiver/30-seconds-of-silence.mp3")
+            references = _receiver_asset_references(receiver_index)
+            for request_path, expected_file in references:
+                expected_mimes = _EXPECTED_MIMES.get(expected_file.suffix.lower())
+                self.assertIsNotNone(
+                    expected_mimes,
+                    f"add an explicit MIME expectation for Receiver asset {expected_file.name!r}",
+                )
+                if expected_mimes is None:
+                    raise AssertionError(f"no MIME expectation for Receiver asset {expected_file.name!r}")
+                asset_result = console.request("GET", request_path)
+                self.assertEqual(asset_result.status, 200, request_path)
+                self.assertIn(_content_type(asset_result), expected_mimes, request_path)
+
+        self.assertEqual(root_result.status, 200)
+        self.assertEqual(short_result.status, 200)
+        self.assertEqual(_content_type(root_result), "text/html")
+        self.assertEqual(root_result.headers.get("x-content-type-options"), "nosniff")
+        self.assertEqual(root_result.headers.get("permissions-policy"), "usb=(self), autoplay=(self)")
+        receiver_csp = root_result.headers.get("content-security-policy", "")
+        self.assertIn("frame-ancestors 'self'", receiver_csp)
+        self.assertIn("script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' https://cdn.jsdelivr.net", receiver_csp)
+        self.assertIn("connect-src 'self' https://cdn.jsdelivr.net", receiver_csp)
+        self.assertIn("https://*.huggingface.co", receiver_csp)
+        self.assertIn("https://*.hf.co", receiver_csp)
+        self.assertNotIn("peerjs.com", receiver_csp)
+        self.assertTrue(references, "Receiver index must link to same-origin built assets")
+        self.assertEqual(manifest_result.status, 200)
+        self.assertEqual(_content_type(manifest_result), "application/manifest+json")
+        manifest = json.loads(manifest_result.body.decode("utf-8"))
+        self.assertEqual(manifest.get("start_url"), "/receiver/")
+        self.assertEqual(manifest.get("scope"), "/receiver/")
+        self.assertEqual(wasm_module_result.status, 200)
+        self.assertEqual(_content_type(wasm_module_result), "text/javascript")
+        self.assertEqual(wasm_binary_result.status, 200)
+        self.assertEqual(_content_type(wasm_binary_result), "application/wasm")
+        self.assertEqual(silence_result.status, 200)
+        self.assertEqual(_content_type(silence_result), "audio/mpeg")
+        self.assertEqual(source_result.status, 200)
+        self.assertEqual(_content_type(source_result), "application/gzip")
+        self.assertEqual(
+            source_result.headers.get("content-disposition"),
+            f'attachment; filename="{ground_console.BROWSDR_SOURCE_ARCHIVE}"',
+        )
+        with tarfile.open(fileobj=io.BytesIO(source_result.body), mode="r:gz") as archive:
+            source_names = set(archive.getnames())
+        self.assertIn("BrowSDR/LICENSE", source_names)
+        self.assertIn("BrowSDR/src/client/index.html", source_names)
+
+    def test_receiver_static_boundary_blocks_traversal_and_unknown_extensions(self) -> None:
+        receiver_index = STATIC_ROOT / "receiver" / "index.html"
+        if not receiver_index.is_file():
+            self.skipTest("embedded BrowSDR receiver is absent; build it before static-serving checks")
+        blocked_paths = (
+            "/receiver/../.env",
+            "/receiver/%2e%2e/.env",
+            "/receiver/%2e%2e/index.html",
+            "/receiver/.env",
+            "/receiver%2f..%2f.env",
+            "/receiver/not-in-build.unknown-extension",
+        )
+        with ConsoleHTTPHarness() as console:
+            for path in blocked_paths:
+                result = console.request("GET", path)
+                with self.subTest(path=path):
+                    self.assertEqual(result.status, 404, path)
+    def test_receiver_fixture_static_serving_uses_receiver_policy(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="receiver-static-fixture-") as temporary:
+            root = Path(temporary)
+            (root / "assets").mkdir()
+            receiver_assets = root / "receiver" / "assets"
+            receiver_assets.mkdir(parents=True)
+            ground_html = b"<!doctype html><main>ground fixture</main>"
+            receiver_html = (
+                b'<!doctype html><script type="module" '
+                b'src="/receiver/assets/receiver.mjs"></script>'
+            )
+            receiver_module = b"export const receiverFixture = true;"
+            source_archive = b"receiver source archive"
+            (root / "index.html").write_bytes(ground_html)
+            (root / "assets" / "console.js").write_bytes(b"window.consoleFixture = true;")
+            (root / "assets" / "receiver.mjs").write_bytes(receiver_module)
+            (root / "receiver" / "index.html").write_bytes(receiver_html)
+            (receiver_assets / "receiver.mjs").write_bytes(receiver_module)
+            (root / "receiver" / "freq-spectrum-source.tar.gz").write_bytes(source_archive)
+
+            with ConsoleHTTPHarness(frontend_dir=root) as console:
+                ground = console.request("GET", "/")
+                receiver = console.request("GET", "/receiver")
+                receiver_slash = console.request("GET", "/receiver/")
+                asset = console.request("GET", "/receiver/assets/receiver.mjs")
+                root_mjs = console.request("GET", "/assets/receiver.mjs")
+                archive = console.request("GET", "/receiver/freq-spectrum-source.tar.gz")
+
+        self.assertEqual(ground.status, 200)
+        self.assertEqual(ground.body, ground_html)
+        self.assertEqual(
+            ground.headers.get("content-security-policy"),
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: https://tile.openstreetmap.de https://tile.openstreetmap.org; "
+            "connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org; "
+            "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+        )
+        self.assertNotIn("permissions-policy", ground.headers)
+        self.assertEqual(receiver.status, 200)
+        self.assertEqual(receiver.body, receiver_html)
+        self.assertEqual(receiver_slash.status, 200)
+        self.assertEqual(receiver_slash.body, receiver_html)
+        self.assertEqual(receiver.headers.get("content-type"), "text/html; charset=utf-8")
+        self.assertEqual(receiver.headers.get("permissions-policy"), "usb=(self), autoplay=(self)")
+        receiver_csp = receiver.headers.get("content-security-policy", "")
+        self.assertIn("script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' https://cdn.jsdelivr.net", receiver_csp)
+        self.assertIn("connect-src 'self' https://cdn.jsdelivr.net", receiver_csp)
+        self.assertEqual(asset.status, 200)
+        self.assertEqual(root_mjs.status, 404)
+        self.assertEqual(asset.headers.get("content-type"), "text/javascript; charset=utf-8")
+        self.assertEqual(asset.body, receiver_module)
+        self.assertEqual(archive.status, 200)
+        self.assertEqual(archive.headers.get("content-type"), "application/gzip")
+        self.assertEqual(archive.headers.get("content-disposition"), 'attachment; filename="freq-spectrum-source.tar.gz"')
+        self.assertEqual(archive.body, source_archive)
+
+    def test_receiver_fixture_static_boundary_rejects_escape_paths(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="receiver-static-boundary-") as temporary:
+            root = Path(temporary)
+            (root / "index.html").write_text("<!doctype html>ground", encoding="utf-8")
+            (root / "assets").mkdir()
+            (root / "assets" / "ground.js").write_text("window.ground = true;", encoding="utf-8")
+            receiver_root = root / "receiver"
+            receiver_assets = receiver_root / "assets"
+            receiver_assets.mkdir(parents=True)
+            (receiver_root / "index.html").write_text("<!doctype html>receiver", encoding="utf-8")
+            (receiver_assets / "valid.mjs").write_text("export default true;", encoding="utf-8")
+            (receiver_assets / ".hidden.mjs").write_text("export default false;", encoding="utf-8")
+            outside = root / "outside.mjs"
+            outside.write_text("export default 'outside';", encoding="utf-8")
+            (receiver_assets / "linked.mjs").symlink_to(outside)
+
+            with ConsoleHTTPHarness(frontend_dir=root) as console:
+                valid = console.request("GET", "/receiver/assets/valid.mjs")
+                blocked_paths = (
+                    "/receiver/../assets/ground.js",
+                    "/receiver/%2e%2e/.env",
+                    "/receiver/assets%2f..%2fground.js",
+                    "/receiver/.private/index.html",
+                    "/receiver/assets/.hidden.mjs",
+                    "/receiver/assets/linked.mjs",
+                    "/receiver/assets/not-supported.bin",
+                )
+                blocked = [(path, console.request("GET", path)) for path in blocked_paths]
+
+        self.assertEqual(valid.status, 200)
+        for path, result in blocked:
+            with self.subTest(path=path):
+                self.assertEqual(result.status, 404, path)
     def test_non_loopback_bind_is_refused(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ground-console-bind-test-") as temporary:
             root = Path(temporary)

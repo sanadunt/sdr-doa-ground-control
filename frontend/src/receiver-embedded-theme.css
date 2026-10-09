@@ -1,0 +1,336 @@
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg-dark: #eceeec;
+  --bg-panel: #fafbf9;
+  --bg-header: #f0f2ef;
+  --text-main: #202824;
+  --text-muted: #47564c;
+  --accent: #2f6386;
+  --accent-hover: #244e6b;
+  --border: #c7d0c9;
+  --btn-bg: #e2e6e1;
+  --btn-hover: #d3dbd4;
+  --bg-lighter: #f0f2ef;
+  --primary-color: #2f6386;
+  scrollbar-color: #aeb9b0 #eceeec;
+}
+
+:root[data-theme='light'] * {
+  scrollbar-color: #aeb9b0 #eceeec;
+}
+
+:root[data-theme='light'] *::-webkit-scrollbar-track,
+:root[data-theme='light'] *::-webkit-scrollbar-corner {
+  background: #eceeec;
+}
+
+:root[data-theme='light'] *::-webkit-scrollbar-thumb {
+  background-color: #aeb9b0;
+}
+
+:root[data-theme='light'] *::-webkit-scrollbar-thumb:hover {
+  background-color: #87958a;
+}
+
+:root[data-theme='light'] body,
+:root[data-theme='light'] #app,
+:root[data-theme='light'] .top-bar,
+:root[data-theme='light'] .sidebar,
+:root[data-theme='light'] .panel,
+:root[data-theme='light'] .main-layout,
+:root[data-theme='light'] .receiver-workspaces,
+:root[data-theme='light'] .receiver-workspace-content,
+:root[data-theme='light'] .sweep-panel,
+:root[data-theme='light'] .listener-workspace,
+:root[data-theme='light'] .records-workspace,
+:root[data-theme='light'] .activity-panel,
+:root[data-theme='light'] .transcript-panel,
+:root[data-theme='light'] .pocsag-panel {
+  color: var(--text-main);
+}
+
+:root[data-theme='light'] .brand,
+:root[data-theme='light'] .remote-text,
+:root[data-theme='light'] .vfo-freq-input,
+:root[data-theme='light'] .vfo-unit,
+:root[data-theme='light'] .transcript-text,
+:root[data-theme='light'] .pocsag-text,
+:root[data-theme='light'] .records-table,
+:root[data-theme='light'] .sweep-candidates {
+  color: var(--text-main);
+}
+
+:root[data-theme='light'] .receiver-view-tabs {
+  background: var(--bg-dark);
+  border-color: var(--border);
+}
+
+:root[data-theme='light'] .receiver-view-tab {
+  background: var(--btn-bg);
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+
+:root[data-theme='light'] .receiver-view-tab.active {
+  background: rgba(47, 99, 134, 0.12);
+  border-color: var(--accent);
+  color: #244e6b;
+}
+
+:root[data-theme='light'] .listener-return-bar,
+:root[data-theme='light'] .panel-header,
+:root[data-theme='light'] .transcript-header,
+:root[data-theme='light'] .pocsag-header,
+:root[data-theme='light'] .activity-header,
+:root[data-theme='light'] .records-header,
+:root[data-theme='light'] .sweep-candidates th,
+:root[data-theme='light'] .records-table th {
+  background: var(--bg-header);
+  border-color: var(--border);
+  color: var(--text-main);
+}
+
+:root[data-theme='light'] .panel-header-collapsible:hover,
+:root[data-theme='light'] .bookmark-cat-header:hover,
+:root[data-theme='light'] .bm-io-btn:hover {
+  color: var(--text-main);
+}
+
+:root[data-theme='light'] .sweep-panel,
+:root[data-theme='light'] .workspace,
+:root[data-theme='light'] .records-table-scroll,
+:root[data-theme='light'] .records-settings,
+:root[data-theme='light'] .records-settings-row,
+:root[data-theme='light'] .records-settings-group {
+  background: var(--bg-panel);
+}
+
+:root[data-theme='light'] .sweep-display-range,
+:root[data-theme='light'] .vfo-display,
+:root[data-theme='light'] .spin-group,
+:root[data-theme='light'] .transcript-select,
+:root[data-theme='light'] .bm-io-btn,
+:root[data-theme='light'] .bookmark-cat-header,
+:root[data-theme='light'] .bookmark-dialog,
+:root[data-theme='light'] .bookmark-dialog-body,
+:root[data-theme='light'] .bookmark-dialog-footer,
+:root[data-theme='light'] .sweep-file-input,
+:root[data-theme='light'] .sweep-hover-readout,
+:root[data-theme='light'] .sweep-waterfall-marker-label {
+  background-color: var(--bg-panel);
+  border-color: var(--border);
+  color: var(--text-main);
+}
+
+:root[data-theme='light'] .sweep-display-range > label,
+:root[data-theme='light'] .tick,
+:root[data-theme='light'] .dsp-stats-overlay,
+:root[data-theme='light'] .active-audio-overlay,
+:root[data-theme='light'] .bookmark-cat-header,
+:root[data-theme='light'] .records-table td,
+:root[data-theme='light'] .sweep-candidates td {
+  color: var(--text-muted);
+}
+
+:root[data-theme='light'] input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='file']),
+:root[data-theme='light'] select,
+:root[data-theme='light'] textarea {
+  color-scheme: light;
+  background-color: var(--bg-panel);
+  border-color: var(--border);
+  color: var(--text-main);
+}
+
+:root[data-theme='light'] input[type='checkbox'],
+:root[data-theme='light'] input[type='radio'] {
+  color-scheme: light;
+  background-color: var(--bg-panel);
+  border-color: var(--border);
+  accent-color: var(--accent);
+}
+
+:root[data-theme='light'] input[type='range'] {
+  accent-color: var(--accent);
+}
+
+:root[data-theme='light'] .sweep-display-range > label,
+:root[data-theme='light'] .records-settings label {
+  color: var(--text-muted);
+}
+
+:root[data-theme='light'] .hover-tick,
+:root[data-theme='light'] .dsp-stats-overlay,
+:root[data-theme='light'] .active-audio-chips,
+:root[data-theme='light'] .snackbar {
+  background: var(--bg-header);
+  border-color: var(--border);
+  color: var(--text-main);
+}
+
+:root[data-theme='light'] .vfo-display .vfo-freq-input,
+:root[data-theme='light'] .bookmark-dialog label,
+:root[data-theme='light'] .records-table td,
+:root[data-theme='light'] .sweep-candidates td {
+  color: var(--text-main);
+}
+
+:root[data-theme='light'] .vfo-remove-btn,
+:root[data-theme='light'] .bookmark-delete {
+  color: #a23531;
+  border-color: #a23531;
+}
+
+:root[data-theme='light'] .custom-checkbox .checkmark,
+:root[data-theme='light'] .mode-radio .mode-btn::before {
+  background-color: var(--btn-bg);
+  border-color: var(--border);
+}
+
+:root[data-theme='light'] .activity-header {
+  background: var(--bg-header);
+}
+
+:root[data-theme='light'] .activity-title,
+:root[data-theme='light'] .activity-row .act-rank {
+  color: var(--text-muted);
+}
+
+:root[data-theme='light'] .bookmark-item:hover,
+:root[data-theme='light'] .activity-row:hover,
+:root[data-theme='light'] .bookmark-dialog-body .bookmark-row {
+  background-color: rgba(32, 40, 36, 0.04);
+}
+
+:root[data-theme='light'] .pocsag-type-alpha {
+  background: #e4f0e4;
+  color: #205c29;
+}
+
+:root[data-theme='light'] .pocsag-type-numeric {
+  background: #e5edf7;
+  color: #244e6b;
+}
+
+:root[data-theme='light'] .pocsag-type-tone {
+  background: #f0e7f5;
+  color: #6a3f7a;
+}
+
+:root[data-theme='light'] .sweep-waterfall-marker-label,
+:root[data-theme='light'] .sweep-hover-readout {
+  background: rgba(250, 251, 249, 0.96);
+  color: var(--text-main);
+}
+
+:root[data-theme='light'] ::selection {
+  background: rgba(47, 99, 134, 0.2);
+  color: var(--text-main);
+}
+:root[data-theme='light'] .sweep-header {
+  background: var(--bg-header);
+  border-color: var(--border);
+  color: var(--text-main);
+}
+
+:root[data-theme='light'] .marker-settings {
+  background: var(--bg-panel);
+  border-color: var(--border);
+  color: var(--text-main);
+}
+
+:root[data-theme='light'] .marker-settings h3 {
+  color: var(--text-main);
+}
+
+:root[data-theme='light'] label {
+  color: var(--text-muted);
+}
+
+:root[data-theme='light'] .sweep-header .sweep-device-state,
+:root[data-theme='light'] .sweep-header .sweep-state,
+:root[data-theme='light'] .sweep-status,
+:root[data-theme='light'] .sweep-table-tools {
+  color: var(--text-muted);
+}
+
+:root[data-theme='light'] .sweep-visualization-tabs button {
+  background-color: var(--btn-bg);
+  border-color: var(--border);
+  color: var(--text-main);
+}
+
+:root[data-theme='light'] .sweep-visualization-tabs button:not(.active):hover {
+  background-color: var(--btn-hover);
+}
+
+:root[data-theme='light'] .sweep-visualization-tabs button.active {
+  background: rgba(47, 99, 134, 0.12);
+  border-color: var(--accent);
+  color: #244e6b;
+}
+:root[data-theme='light'] .bookmark-toolbar {
+  background: var(--bg-header);
+  border-color: var(--border);
+  color: var(--text-main);
+}
+
+:root[data-theme='light'] .receiver-records-workspace h2,
+:root[data-theme='light'] .receiver-records-workspace h3 {
+  color: var(--text-main);
+}
+
+:root[data-theme='light'] .receiver-records-workspace p,
+:root[data-theme='light'] .receiver-records-workspace .record-meta {
+  color: var(--text-muted);
+}
+
+:root[data-theme='light'] .receiver-records-workspace,
+:root[data-theme='light'] .receiver-records-workspace .records-kind {
+  background: var(--bg-panel);
+  border-color: var(--border);
+  color: var(--text-main);
+}
+
+:root[data-theme='light'] .receiver-records-workspace .records-list-header {
+  background: var(--bg-header);
+  border-color: var(--border);
+}
+
+:root[data-theme='light'] .record-status-stopped {
+  background: var(--btn-bg);
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+
+:root[data-theme='light'] .listener-workspace .input-group {
+  background: var(--bg-panel);
+  border-color: var(--border);
+  color: var(--text-main);
+}
+
+:root[data-theme='light'] .listener-workspace button:not(.btn-primary):not(.btn-danger):not(.danger) {
+  background-color: var(--btn-bg);
+  border-color: var(--border);
+  color: var(--text-main);
+}
+
+:root[data-theme='light'] .listener-workspace button.active:not(.btn-primary) {
+  background: rgba(47, 99, 134, 0.12);
+  border-color: var(--accent);
+  color: #244e6b;
+}
+:root[data-theme='light'] .top-controls .top-audio-record-button.recording {
+  border-color: #b7414d;
+  background: #fde7e9;
+  color: #7b2631;
+}
+
+:root[data-theme='light'] input::placeholder,
+:root[data-theme='light'] textarea::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
+}
+:root[data-theme='light'] .receiver-records-workspace .records-list-header > span,
+:root[data-theme='light'] .receiver-records-workspace .audio-record-segment {
+  color: var(--text-muted);
+}

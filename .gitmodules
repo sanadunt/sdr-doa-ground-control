@@ -1,0 +1,3 @@
+[submodule "vendor/BrowSDR"]
+	path = vendor/BrowSDR
+	url = https://github.com/sanadunt/BrowSDR.git

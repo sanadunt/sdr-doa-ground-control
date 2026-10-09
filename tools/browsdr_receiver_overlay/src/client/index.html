@@ -1,0 +1,1371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+	<meta name="theme-color" content="#0f0f1a" />
+	<title>BrowSDR - Web-Based SDR Receiver</title>
+
+	<!-- Primary Meta Tags -->
+	<meta name="title" content="BrowSDR - Web-Based SDR Receiver" />
+	<meta name="description" content="Local browser-based SDR receiver for spectrum scans, VFO listening, and recordings." />
+	<meta name="keywords" content="BrowSDR, WebSDR, SDR, Software Defined Radio, WebUSB, Browser SDR, Radio" />
+
+	<!-- Open Graph / Facebook -->
+	<meta property="og:type" content="website" />
+	<meta property="og:url" content="https://browsdr.jlynx.net/" />
+	<meta property="og:title" content="BrowSDR - Web-Based SDR Receiver" />
+	<meta property="og:description" content="Local browser-based SDR receiver for spectrum scans, VFO listening, and recordings." />
+	<meta property="og:image" content="https://browsdr.jlynx.net/icon-1280.png" />
+
+	<!-- Twitter -->
+	<meta property="twitter:card" content="summary_large_image" />
+	<meta property="twitter:url" content="https://browsdr.jlynx.net/" />
+	<meta property="twitter:title" content="BrowSDR - Web-Based SDR Receiver" />
+	<meta property="twitter:description" content="Local browser-based SDR receiver for spectrum scans, VFO listening, and recordings." />
+	<meta property="twitter:image" content="https://browsdr.jlynx.net/icon-1280.png" />
+
+	<!-- Verification -->
+	<meta name="google-site-verification" content="pbY_hHA-M-i4ta42Acf0ecHrd_Sy59vW5-j1ExQPFyI" />
+
+	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Roboto+Mono&display=swap" rel="stylesheet">
+	<link rel="stylesheet" href="style.css">
+	<script src="lib/peerjs.min.js"></script>
+	<script src="app/main.ts" type="module"></script>
+</head>
+<body>
+	<div id="app" v-cloak>
+		<!-- Top Bar -->
+		<div class="top-bar">
+			<button class="icon-btn sidebar-toggle" v-show="activeWorkspace === 'listener'" @click="toggleSidebar" title="Menu">
+				<svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
+			</button>
+			<div class="brand" v-show="activeWorkspace === 'listener'">BrowSDR</div>
+			<a href="https://github.com/jLynx/BrowSDR" target="_blank" rel="noopener noreferrer" class="icon-btn github-link" title="View on GitHub">
+				<svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.82-.26.82-.58l-.01-2.05c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.8 1.3 3.49 1 .1-.78.42-1.3.76-1.6-2.67-.31-5.47-1.34-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6.02 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.62-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .32.21.7.82.58A12 12 0 0 0 12 .3"/></svg>
+			</a>
+			<div class="vfo-displays" v-show="activeWorkspace === 'listener'">
+				<div class="vfo-display"
+					v-for="(vfo, i) in vfos" :key="'vfo-disp-' + i"
+					:class="{ 'vfo-active': activeVfoIndex === i, 'vfo-squelch-open': vfo.squelchEnabled && vfoSquelchOpen[i], 'vfo-audio-off': !vfo.enabled, 'vfo-oob': !isFreqInBandwidth(vfo.freq) }"
+					@click="activeVfoIndex = i"
+					:style="Object.assign(
+						(activeVfoIndex === i || (vfo.squelchEnabled && vfoSquelchOpen[i])) ? { borderColor: vfoColor(i) } : {},
+						vfo.squelchEnabled && vfoSquelchOpen[i] ? { '--sq-color': vfoColor(i) } : {}
+					)"
+					:title="'Click to tune VFO ' + (i + 1)">
+					<span class="vfo-label" :style="{ background: vfoColor(i) }">{{ i + 1 }}</span>
+					<input class="vfo-freq-input" type="text"
+						v-model="vfo.displayFreq"
+						@blur="applyVfoFreq($event, i)"
+						@keyup.enter="applyVfoFreq($event, i)"
+						@focus="focusVfoFreq(i)">
+					<div class="vfo-unit">MHz</div>
+					<span class="vfo-rx-badge" v-if="vfo.squelchEnabled && vfoSquelchOpen[i]" :style="{ background: vfoColor(i) }" title="Squelch open – receiving">RX</span>
+					<span class="vfo-oob-badge" v-if="!isFreqInBandwidth(vfo.freq)" title="Outside bandwidth – no audio">OOB</span>
+					<span class="vfo-mute-badge" v-if="!vfo.enabled" title="Audio disabled"><svg viewBox="0 0 24 24" width="12" height="12"><path fill="currentColor" d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg></span>
+					<span class="vfo-bookmark-label" v-if="vfoBookmarkLabel(i)" :title="vfoBookmarkLabel(i)">{{ vfoBookmarkLabel(i) }}</span>
+				</div>
+			</div>
+			<div class="top-controls" v-show="activeWorkspace === 'listener'">
+				<button class="icon-btn" @click="view.locked = !view.locked" :class="{ active: view.locked }" title="Lock Tuning & Zooming">
+					<svg v-if="!view.locked" viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M12 17c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm6-9h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM8.9 6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2H8.9V6zM18 20H6V10h12v10z"/></svg>
+					<svg v-else viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6-5c1.66 0 3 1.34 3 3v2H9V6c0-1.66 1.34-3 3-3zm0 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>
+				</button>
+				<button class="icon-btn receiver-toggle" @click="togglePlay" :class="{ active: running }"
+					:disabled="!connected || sweep.active || sweep.starting || sweep.stopping"
+					:title="running ? 'Pause Receiver' : 'Resume Receiver'"
+					:aria-label="running ? 'Pause Receiver' : 'Resume Receiver'" :aria-pressed="running">
+					<svg v-if="!running" viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+					<svg v-else viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+					<span class="receiver-toggle-label">{{ running ? 'Pause' : 'Resume' }}</span>
+				</button>
+				<button class="icon-btn" @click="showStats = !showStats" :class="{ active: showStats }" title="DSP Stats">
+					<svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"/></svg>
+				</button>
+				<button class="icon-btn" @click="toggleTranscriptPanel" :class="{ active: whisper.panelOpen }" title="Live Transcription (Whisper AI)">
+					<svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M12 15c1.66 0 3-1.34 3-3V6c0-1.66-1.34-3-3-3S9 4.34 9 6v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V6zm6 6c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-2.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+				</button>
+				<button class="icon-btn" @click="togglePocsagPanel" :class="{ active: pocsag.panelOpen }" title="POCSAG Pager Decoder">
+					<svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-3 12H7v-2h10v2zm0-3H7V9h10v2zm0-3H7V6h10v2z"/></svg>
+				</button>
+				<button class="icon-btn" @click="showActivity = !showActivity" :class="{ active: showActivity }" title="Frequency Activity Tracker">
+					<svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M3.5 18.49l6-6.01 4 4L22 6.92l-1.41-1.41-7.09 7.97-4-4L2 16.99l1.5 1.5z"/></svg>
+				</button>
+			</div>
+		</div>
+
+		<div class="receiver-workspaces">
+			<nav class="receiver-view-tabs" role="tablist" aria-label="Receiver workspace" aria-orientation="vertical" @keydown="onWorkspaceTabsKeydown">
+				<button id="tab-spectrum" class="receiver-view-tab" :class="{ active: activeWorkspace === 'spectrum' }" role="tab" aria-controls="spectrum-workspace" :aria-selected="activeWorkspace === 'spectrum'" :tabindex="activeWorkspace === 'spectrum' ? 0 : -1" :disabled="sweep.starting || sweep.stopping || sweep.listenStarting" @click="selectWorkspace('spectrum')">Spectrum</button>
+				<button id="tab-listener" class="receiver-view-tab" :class="{ active: activeWorkspace === 'listener' }" role="tab" aria-controls="listener-workspace" :aria-selected="activeWorkspace === 'listener'" :tabindex="activeWorkspace === 'listener' ? 0 : -1" :disabled="sweep.starting || sweep.stopping || sweep.listenStarting" @click="selectWorkspace('listener')">Listener</button>
+				<button id="tab-records" class="receiver-view-tab" :class="{ active: activeWorkspace === 'records' }" role="tab" aria-controls="records-workspace" :aria-selected="activeWorkspace === 'records'" :tabindex="activeWorkspace === 'records' ? 0 : -1" :disabled="sweep.starting || sweep.stopping || sweep.listenStarting" @click="selectWorkspace('records')">Records</button>
+			</nav>
+			<div class="receiver-workspace-content">
+				<div id="listener-workspace" class="listener-workspace" v-show="activeWorkspace === 'listener'" role="tabpanel" aria-labelledby="tab-listener">
+					<header class="listener-workspace-header">
+						<div>
+							<h2>Listener</h2>
+							<p>{{ connected ? (info.boardName || 'Receiver connected') : 'No receiver connected' }} · Multi-VFO listening</p>
+						</div>
+						<button class="btn audio-record-button" :class="{ recording: audioRecording.armed }" @click="toggleVfoAudioRecording" :disabled="!running || audioRecording.starting || audioRecording.stopping || sweep.active || sweep.starting || sweep.stopping" :aria-pressed="audioRecording.armed">
+							{{ audioRecording.starting ? 'Starting audio…' : audioRecording.stopping ? 'Finalizing audio…' : audioRecording.armed ? 'Stop VFO audio' : 'Record VFO audio' }}
+						</button>
+					</header>
+					<div class="audio-recording-status" v-if="audioRecording.armed || audioRecording.error" role="status">
+						<span v-if="audioRecording.armed">Recording enabled VFOs separately; each retune starts a new audio file.</span>
+						<span v-if="audioRecording.error" class="audio-recording-error">{{ audioRecording.error }}</span>
+					</div>
+					<div class="listener-return-bar" v-if="sweep.listening || sweep.listenStarting">
+						<span>{{ sweep.listenStarting ? 'Tuning to' : 'Listening to' }} {{ (sweep.listenFrequencyHz / 1000000).toFixed(6) }} MHz</span>
+						<button class="btn btn-secondary" @click="returnToSpectrum" :disabled="sweep.listenStarting">Stop listening and start new scan</button>
+					</div>
+		<div class="main-layout">
+			<!-- Sidebar backdrop (mobile) -->
+			<div class="sidebar-backdrop" v-if="sidebarOpen" @click="closeSidebar"></div>
+			<!-- Sidebar -->
+			<div class="sidebar" :class="{ 'sidebar-open': sidebarOpen }">
+				<div class="sidebar-scroll">
+				<div class="panel">
+					<div class="panel-header panel-header-collapsible" @click="togglePanel('source')">
+						<span>Source</span>
+						<svg class="panel-chevron" :class="{ 'panel-chevron-collapsed': collapsedPanels['source'] }" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
+					</div>
+					<div class="panel-body" v-show="!collapsedPanels['source']">
+						<div class="remote-status" v-if="remoteMode !== 'none'" :class="'remote-' + remoteMode">
+							<span class="remote-badge">{{ remoteMode.toUpperCase() }}</span>
+							<span class="remote-text">{{ remoteStatus }}</span>
+						</div>
+						<div class="form-row" style="flex-direction: column; gap: 8px;">
+							<template v-if="!connected && remoteMode !== 'client'">
+								<button class="btn btn-primary" style="width: 100%;" @click="connect">Connect Device</button>
+								<button class="btn btn-secondary" style="width: 100%;" @click="showRemoteConnectDialog = true">Connect Remote</button>
+								<button class="btn btn-secondary" style="width: 100%;" v-if="isLocal" @click="connectMock">Connect Mock SDR</button>
+							</template>
+							<button class="btn" style="width: 100%;" v-else @click="disconnect">{{ remoteMode === 'client' ? 'Disconnect Remote' : 'Disconnect' }}</button>
+						</div>
+						<div class="form-row info-row" v-if="connected && remoteMode !== 'client'">
+							<small>{{ info.boardName }}</small>
+						</div>
+						<div class="form-row" v-if="connected && remoteMode === 'none'">
+							<button class="btn btn-secondary" style="width: 100%;" @click="startRemoteHost" :disabled="!isOnline" :title="!isOnline ? 'Not available offline' : 'Share remote access via WebRTC'">Share Remote Access</button>
+						</div>
+						<div class="form-row remote-host-info" v-if="remoteMode === 'host'">
+							<small>Share this link:</small>
+							<div class="share-link-box">
+								<a :href="remoteLink" target="_blank" class="remote-share-link">{{ remoteLink }}</a>
+								<button class="btn-copy" @click="copyRemoteLink" :title="copyLinkTooltip">
+									<svg v-if="!copyLinkSuccess" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+									<svg v-else xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+								</button>
+								<button class="btn-copy" @click="regenerateShareCode" title="Generate new share code">
+									<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+								</button>
+							</div>
+							<button class="btn btn-secondary btn-full" @click="showRemoteClientsDialog = true">
+								Manage Clients
+								<span v-if="remoteClients.length" class="client-count-badge">{{ remoteClients.length }}</span>
+							</button>
+						</div>
+					</div>
+				</div>
+
+				<div class="panel" :class="{ disabled: !connected }">
+					<div class="panel-header panel-header-collapsible" @click="togglePanel('radio')">
+						<span>Radio</span>
+						<svg class="panel-chevron" :class="{ 'panel-chevron-collapsed': collapsedPanels['radio'] }" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
+					</div>
+					<div class="panel-body" v-show="!collapsedPanels['radio']">
+						<div class="form-row">
+							<label>Center</label>
+							<div class="input-group">
+								<input type="number" v-model.number="radio.centerFreq" step="0.1" title="Center Frequency (MHz)" :disabled="remoteMode === 'client' && locks.centerFreq">
+								<span>MHz</span>
+							</div>
+							<div class="lock-btn" v-if="remoteMode === 'host' || (remoteMode === 'client' && locks.centerFreq)" @click="remoteMode === 'host' && (locks.centerFreq = !locks.centerFreq)" :class="{ locked: locks.centerFreq, host: remoteMode === 'host' }" :title="remoteMode === 'host' ? 'Toggle Lock' : 'Locked by Host'">
+								<svg v-if="locks.centerFreq" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>
+								<svg v-else viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm5.1-9H7.9V6c0-2.26 1.84-4.1 4.1-4.1s4.1 1.84 4.1 4.1v2z" opacity="0.3"/></svg>
+							</div>
+						</div>
+						<div class="form-row">
+							<label>Freq Shift</label>
+							<div class="input-group">
+								<input type="number" v-model.number="radio.frequencyShift" step="0.001" title="Displayed frequency = SDR frequency + shift. Use -125 MHz for a typical 125 MHz upconverter." :disabled="remoteMode === 'client'">
+								<span>MHz</span>
+							</div>
+						</div>
+						<div class="form-row">
+							<label class="checkbox" style="flex:1" title="Removes frame DC from spectrum and scan FFTs; a real signal exactly at center may be reduced.">
+								<input type="checkbox" v-model="radio.iqCorrection" :disabled="remoteMode === 'client'">
+								IQ Correction (DC offset)
+							</label>
+						</div>
+						<div class="form-row">
+							<label>Sample Rate</label>
+							<select v-model.number="radio.sampleRate" :disabled="remoteMode === 'client' && locks.sampleRate">
+								<template v-if="deviceCapabilities">
+									<option v-for="rate in deviceCapabilities.sampleRates" :key="rate" :value="rate">{{ rate >= 1000000 ? (rate / 1000000) + ' MSPS' : (rate / 1000) + ' kSPS' }}</option>
+								</template>
+								<template v-else>
+									<option value="2000000">2 MSPS</option>
+									<option value="4000000">4 MSPS</option>
+									<option value="8000000">8 MSPS</option>
+									<option value="10000000">10 MSPS</option>
+									<option value="16000000">16 MSPS</option>
+									<option value="20000000">20 MSPS</option>
+								</template>
+							</select>
+							<div class="lock-btn" v-if="remoteMode === 'host' || (remoteMode === 'client' && locks.sampleRate)" @click="remoteMode === 'host' && (locks.sampleRate = !locks.sampleRate)" :class="{ locked: locks.sampleRate, host: remoteMode === 'host' }" :title="remoteMode === 'host' ? 'Toggle Lock' : 'Locked by Host'">
+								<svg v-if="locks.sampleRate" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>
+								<svg v-else viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm5.1-9H7.9V6c0-2.26 1.84-4.1 4.1-4.1s4.1 1.84 4.1 4.1v2z" opacity="0.3"/></svg>
+							</div>
+						</div>
+						<!-- Dynamic gain controls based on connected device -->
+						<template v-if="deviceCapabilities">
+							<div class="form-row" v-for="gc in deviceCapabilities.gainControls" :key="gc.name">
+								<template v-if="gc.type === 'slider'">
+									<label>{{ gc.name }} Gain</label>
+									<div class="slider-group">
+										<input type="range" v-model.number="gains[gc.name]" :min="gc.min" :max="gc.max" :step="gc.step" :disabled="remoteMode === 'client' && locks[gc.name]">
+										<span class="val">{{ gc.options ? (gc.options[gains[gc.name]] / 10).toFixed(1) : gains[gc.name] }} dB</span>
+									</div>
+								</template>
+								<template v-else>
+									<label class="checkbox" style="flex:1" :style="{ opacity: (remoteMode === 'client' && locks[gc.name]) ? 0.5 : 1 }">
+										<input type="checkbox" :checked="!!gains[gc.name]" @change="gains[gc.name] = $event.target.checked ? 1 : 0" :disabled="remoteMode === 'client' && locks[gc.name]"> {{ gc.name }}
+									</label>
+								</template>
+								<div class="lock-btn" v-if="remoteMode === 'host' || (remoteMode === 'client' && locks[gc.name])" @click="remoteMode === 'host' && (locks[gc.name] = !locks[gc.name])" :class="{ locked: locks[gc.name], host: remoteMode === 'host' }" :title="remoteMode === 'host' ? 'Toggle Lock' : 'Locked by Host'">
+									<svg v-if="locks[gc.name]" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>
+									<svg v-else viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm5.1-9H7.9V6c0-2.26 1.84-4.1 4.1-4.1s4.1 1.84 4.1 4.1v2z" opacity="0.3"/></svg>
+								</div>
+							</div>
+						</template>
+					</div>
+				</div>
+
+				<div class="panel" v-for="(vfo, i) in vfos" :key="'vfo-panel-' + i" :class="{ disabled: !connected, 'panel-oob': !isFreqInBandwidth(vfo.freq) }">
+					<div class="panel-header panel-header-collapsible" style="display: flex; justify-content: space-between; align-items: center;" @click="togglePanel('vfo-' + i)">
+						<div style="display: flex; align-items: center; gap: 6px;">
+							<span class="vfo-dot" :style="{ background: vfoColor(i) }"></span>
+							VFO {{ i + 1 }}
+							<span v-if="!isFreqInBandwidth(vfo.freq)" class="vfo-oob-badge" style="font-size:8px;padding:1px 3px">OOB</span>
+							<svg class="panel-chevron" :class="{ 'panel-chevron-collapsed': collapsedPanels['vfo-' + i] }" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
+						</div>
+						<div style="display: flex; align-items: center; gap: 4px;" @click.stop>
+							<button v-if="vfos.length > 1" class="vfo-remove-btn" @click="removeVfo(i)" title="Remove VFO">&times;</button>
+							<button class="vfo-mute-btn" :class="{ muted: !vfo.enabled || !isFreqInBandwidth(vfo.freq) }" @click="vfo.enabled = !vfo.enabled; toggleVfoCheckbox(i)" :disabled="!running || !isFreqInBandwidth(vfo.freq)" :title="!isFreqInBandwidth(vfo.freq) ? 'Outside bandwidth' : vfo.enabled ? 'Mute VFO' : 'Unmute VFO'">
+								<svg v-if="vfo.enabled && isFreqInBandwidth(vfo.freq)" viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+								<svg v-else viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>
+							</button>
+						</div>
+					</div>
+					<div class="panel-body panel-condensed" v-show="!collapsedPanels['vfo-' + i]">
+						<div class="mode-grid">
+							<label class="mode-radio" v-for="m in ['nfm','am','usb','lsb','wfm','dsb','cw','raw']" :key="m">
+								<input type="radio" :value="m" v-model="vfo.mode" :name="'mode-' + i" @change="applyModeDefaults(i)">
+								<span class="mode-btn">{{ m.toUpperCase() }}</span>
+							</label>
+						</div>
+
+						<div class="form-row">
+							<label style="flex: 0 0 90px;">Bandwidth</label>
+							<div class="spin-group">
+								<input type="number" v-model.number="vfo.bandwidth" step="1000" :disabled="vfo.mode === 'raw'">
+								<button @click="vfo.bandwidth -= 1000" :disabled="vfo.mode === 'raw'">-</button>
+								<button @click="vfo.bandwidth += 1000" :disabled="vfo.mode === 'raw'">+</button>
+							</div>
+						</div>
+
+						<div class="form-row">
+							<label style="flex: 0 0 90px;">Snap Interval</label>
+							<div class="spin-group">
+								<input type="number" v-model.number="vfo.snapInterval" step="1000">
+								<button @click="vfo.snapInterval -= 1000">-</button>
+								<button @click="vfo.snapInterval += 1000">+</button>
+							</div>
+						</div>
+
+						<div class="form-row" v-if="vfo.mode === 'wfm' || vfo.mode === 'nfm'">
+							<label style="flex: 0 0 90px;">De-emphasis</label>
+							<select v-model="vfo.deEmphasis" style="width: 130px; margin-left: auto;">
+								<option value="none">None</option>
+								<option value="22us">22us</option>
+								<option value="50us">50us</option>
+								<option value="75us">75us</option>
+							</select>
+						</div>
+
+						<div class="form-row squelch-row">
+							<label class="custom-checkbox">
+								<input type="checkbox" v-model="vfo.squelchEnabled">
+								<span class="checkmark"></span>
+								Squelch
+							</label>
+							<div class="slider-group compact-slider" style="margin-left: 8px;">
+								<input type="range" v-model.number="vfo.squelchLevel" min="-100" max="0" step="0.1" :disabled="!vfo.squelchEnabled">
+								<span class="val">{{ vfo.squelchLevel.toFixed(3) }}dB</span>
+							</div>
+							<button class="btn-auto-squelch" @click="autoSquelch(i)" :disabled="!running || autoSquelchActive[i]" title="Sample noise floor and set squelch level automatically">Auto</button>
+						</div>
+
+						<div class="form-row full-checkbox-row" v-if="vfo.mode === 'nfm' || vfo.mode === 'wfm'">
+							<label class="custom-checkbox">
+								<input type="checkbox" v-model="vfo.noiseReduction">
+								<span class="checkmark"></span>
+								IF Noise Reduction
+							</label>
+						</div>
+
+						<div class="form-row full-checkbox-row" v-if="vfo.mode === 'wfm'">
+							<label class="custom-checkbox">
+								<input type="checkbox" v-model="vfo.stereo">
+								<span class="checkmark"></span>
+								Stereo
+							</label>
+						</div>
+
+						<div class="form-row full-checkbox-row" v-if="vfo.mode === 'nfm' || vfo.mode === 'wfm'">
+							<label class="custom-checkbox">
+								<input type="checkbox" v-model="vfo.lowPass">
+								<span class="checkmark"></span>
+								Low Pass
+							</label>
+						</div>
+
+						<div class="form-row full-checkbox-row" v-if="vfo.mode === 'wfm'">
+							<label class="custom-checkbox">
+								<input type="checkbox" v-model="vfo.rds">
+								<span class="checkmark"></span>
+								Decode RDS
+							</label>
+						</div>
+
+						<div class="form-row full-checkbox-row" v-if="vfo.mode === 'nfm'">
+							<label class="custom-checkbox">
+								<input type="checkbox" v-model="vfo.pocsag" @change="updateBackendVfoParams(i)">
+								<span class="checkmark"></span>
+								Decode POCSAG
+							</label>
+						</div>
+
+						<div class="form-row" v-if="vfo.mode === 'wfm' && vfo.rds" style="align-items: center;">
+							<label style="flex: 0 0 120px; opacity: 0.7;">Advanced RDS Info</label>
+							<select v-model="vfo.rdsRegion" style="width: 130px; margin-left: auto;">
+								<option value="eu">Europe</option>
+								<option value="na">North America</option>
+							</select>
+						</div>
+
+						<div class="form-row">
+							<label>Volume</label>
+							<div class="slider-group">
+								<input type="range" v-model.number="vfo.volume" min="0" max="100" step="1">
+								<span class="val">{{ vfo.volume }}%</span>
+							</div>
+						</div>
+					</div>
+				</div>
+
+				<!-- Add VFO button -->
+				<div class="panel" :class="{ disabled: !connected }">
+					<div class="panel-body" style="padding: 8px 12px;">
+						<button class="btn btn-primary" @click="addVfo">+ Add VFO</button>
+					</div>
+				</div>
+
+				<!-- Bookmarks panel -->
+				<div class="panel">
+					<div class="panel-header bookmark-panel-header panel-header-collapsible" @click="togglePanel('bookmarks')">
+						<span>Bookmarks</span>
+						<svg class="panel-chevron" :class="{ 'panel-chevron-collapsed': collapsedPanels['bookmarks'] }" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
+					</div>
+					<div class="bookmark-toolbar" v-show="!collapsedPanels['bookmarks']">
+						<button class="btn bookmark-save-btn bm-type-freq" @click="openSaveBookmark('individual')" title="Save active VFO frequency as an individual bookmark">+ Freq</button>
+						<button class="btn bookmark-save-btn bm-type-group" @click="openSaveBookmark('group')" title="Save center frequency and all VFOs as a group bookmark">+ Group</button>
+						<button class="btn bm-io-btn" @click="exportBookmarks" title="Export bookmarks as JSON">
+							<svg viewBox="0 0 24 24" width="13" height="13"><path fill="currentColor" d="M19 9h-4V3H9v6H5l7 7 7-7zm-14 9v2h14v-2H5z"/></svg>
+							Export
+						</button>
+						<button class="btn bm-io-btn" @click="$refs.bookmarkImportInput.click()" title="Import bookmarks from JSON">
+							<svg viewBox="0 0 24 24" width="13" height="13"><path fill="currentColor" d="M5 15v4h14v-4h2v6H3v-6h2zm8-10.17L16.17 8l1.41-1.41L12 1 6.42 6.59 7.83 8 11 4.83V15h2V4.83z"/></svg>
+							Import
+						</button>
+						<input ref="bookmarkImportInput" type="file" accept=".json,application/json" style="display:none" @change="importBookmarks">
+						<div class="bm-filter-row">
+							<svg viewBox="0 0 24 24" width="13" height="13" style="flex-shrink:0;color:var(--text-muted)"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+							<input type="text" v-model="bookmarkSearch" class="bm-search-input" placeholder="Search bookmarks…" autocomplete="off">
+							<button v-if="bookmarkSearch" class="bm-search-clear" @click="bookmarkSearch = ''" title="Clear search">&times;</button>
+						</div>
+					</div>
+					<div class="panel-body" style="padding: 4px 0; min-height: 36px;" v-show="!collapsedPanels['bookmarks']">
+						<div v-if="bookmarks.length === 0" class="bookmark-empty">No bookmarks saved.</div>
+						<div v-else-if="bookmarkGroupsByCategory.categories.length === 0 && bookmarkGroupsByCategory.flatGroups.length === 0" class="bookmark-empty">No bookmarks match your search.</div>
+						<!-- Individual Freq bookmarks, grouped by category -->
+						<template v-for="group in bookmarkGroupsByCategory.categories" :key="group.collKey">
+							<div class="bookmark-group-header bookmark-cat-header" @click="toggleBookmarkCategory(group.collKey)">
+								<span class="bookmark-cat-label">{{ group.label }}</span>
+								<span class="bookmark-cat-count">{{ group.items.length }}</span>
+								<svg class="panel-chevron" :class="{ 'panel-chevron-collapsed': collapsedPanels[group.collKey] }" viewBox="0 0 24 24" width="12" height="12"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
+							</div>
+							<div v-show="!collapsedPanels[group.collKey]">
+								<div v-for="entry in group.items" :key="entry.bm.id" class="bookmark-item">
+									<div class="bookmark-info">
+										<span class="bookmark-name" :title="entry.bm.name">{{ entry.bm.name }}</span>
+										<div style="display:flex;align-items:center;gap:5px;margin-top:2px;flex-wrap:wrap">
+											<span class="bm-badge bm-badge-freq">FREQ</span>
+											<span class="bookmark-meta">{{ entry.bm.freq }} MHz &bull; {{ (entry.bm.mode || '').toUpperCase() }}</span>
+										</div>
+									</div>
+									<div class="bookmark-actions">
+										<button class="bookmark-btn bookmark-jump" @click="jumpToBookmark(entry.i)" title="Jump to this bookmark">
+											<svg viewBox="0 0 24 24" width="13" height="13"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+										</button>
+										<button class="bookmark-btn bookmark-edit" @click="openEditBookmark(entry.i)" title="Edit bookmark">
+											<svg viewBox="0 0 24 24" width="12" height="12"><path fill="currentColor" d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+										</button>
+										<button class="bookmark-btn bookmark-delete" @click="deleteBookmark(entry.i)" title="Delete bookmark">&times;</button>
+									</div>
+								</div>
+							</div>
+						</template>
+						<!-- Group bookmarks, flat list -->
+						<template v-if="bookmarkGroupsByCategory.flatGroups.length > 0">
+							<div class="bookmark-group-header bm-group-header-group">Groups</div>
+							<div v-for="entry in bookmarkGroupsByCategory.flatGroups" :key="entry.bm.id" class="bookmark-item">
+								<div class="bookmark-info">
+									<span class="bookmark-name" :title="entry.bm.name">{{ entry.bm.name }}</span>
+									<div style="display:flex;align-items:center;gap:5px;margin-top:2px;flex-wrap:wrap">
+										<span class="bm-badge bm-badge-group">GROUP</span>
+										<span v-if="entry.bm.category" class="bm-cat-badge" :class="'bm-cat-' + entry.bm.category">{{ categoryLabel(entry.bm.category) }}</span>
+										<span class="bookmark-meta">{{ entry.bm.centerFreq }} MHz &bull; {{ (entry.bm.vfos || []).length }} VFO{{ (entry.bm.vfos || []).length !== 1 ? 's' : '' }}</span>
+									</div>
+								</div>
+								<div class="bookmark-actions">
+									<button class="bookmark-btn bookmark-jump" @click="jumpToBookmark(entry.i)" title="Jump to this bookmark">
+										<svg viewBox="0 0 24 24" width="13" height="13"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+									</button>
+									<button class="bookmark-btn bookmark-edit" @click="openEditBookmark(entry.i)" title="Edit bookmark">
+										<svg viewBox="0 0 24 24" width="12" height="12"><path fill="currentColor" d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+									</button>
+									<button class="bookmark-btn bookmark-delete" @click="deleteBookmark(entry.i)" title="Delete bookmark">&times;</button>
+								</div>
+							</div>
+						</template>
+					</div>
+				</div>
+				</div>
+			</div>
+
+			<!-- Canvas Area -->
+			<div class="workspace">
+				<div class="fft-container" ref="fftContainer">
+					<canvas id="fft" ref="fft"></canvas>
+					<!-- Canvas Overlay lines -->
+					<div class="freq-axis">
+						<div class="tick" style="left: 0%">{{ labelFreq(0) }}</div>
+						<div class="tick" style="left: 25%">{{ labelFreq(0.25) }}</div>
+						<div class="tick" style="left: 50%">{{ labelFreq(0.5) }}</div>
+						<div class="tick" style="left: 75%">{{ labelFreq(0.75) }}</div>
+						<div class="tick" style="right: 0px">{{ labelFreq(1) }}</div>
+					</div>
+					<div class="hover-tick" ref="hoverTick" style="display: none">{{ hoverFreqText }}</div>
+					<!-- DSP Performance Stats Overlay -->
+					<div v-if="showStats && dspStats" class="dsp-stats-overlay">
+						<div style="display: flex; justify-content: space-between;">
+							<b>DSP Stats</b>
+							<span style="color: #0f0;">{{ fps }} FPS</span>
+						</div>
+						<div>USB: {{ dspStats.usbFps }} cb/s | Chunk: {{ dspStats.chunkSize }} B</div>
+						<div>DSP: {{ dspStats.dspAvgMs }}ms avg / {{ dspStats.dspMaxMs }}ms max</div>
+						<div>Audio: {{ dspStats.audioFps }} calls/s | {{ dspStats.audioRate }} samp/s</div>
+						<div>Msgs: {{ dspStats.msgRate }} /s | Input: {{ (dspStats.inputRate/1e6).toFixed(2) }} MSa/s</div>
+						<div>Dropped: {{ dspStats.dropped }}</div>
+					</div>
+				</div>
+				<!-- Active Audio VFOs Overlay -->
+				<div class="active-audio-overlay" v-if="activeAudioVfos.length > 0">
+					<div class="active-audio-title">Active Audio</div>
+					<div class="active-audio-chips">
+						<div v-for="item in activeAudioVfos" :key="'active-vfo-' + item.index"
+							class="active-audio-chip"
+							:style="{ borderColor: vfoColor(item.index), '--chip-color': vfoColor(item.index) }"
+							@click="focusActivityVfo(item.index)"
+							:title="'Switch to VFO ' + (item.index + 1)">
+							<span class="vfo-dot" :style="{ background: vfoColor(item.index) }"></span>
+							<span class="vfo-num">{{ item.index + 1 }}</span>
+							<span class="vfo-freq">{{ item.vfo.freq.toFixed(3) }}</span>
+						</div>
+					</div>
+				</div>
+				<div class="waterfall-container">
+					<canvas id="waterfall" ref="waterfall"></canvas>
+				</div>
+			</div>
+		</div>
+				</div>
+
+		<!-- Wide Spectrum workspace -->
+		<section id="spectrum-workspace" class="sweep-panel" v-show="activeWorkspace === 'spectrum'" role="tabpanel" aria-labelledby="tab-spectrum" aria-label="Wide Spectrum">
+				<header class="sweep-header">
+					<div>
+						<h2>Wide Spectrum Scan</h2>
+						<p>RX only · Bias-T forced OFF · relative dBFS-like power, not calibrated dBm</p>
+					</div>
+					<div class="sweep-header-actions">
+						<span class="sweep-device-state" :class="{ connected }">{{ connected ? 'DEVICE CONNECTED' : 'NO DEVICE' }}</span>
+						<span class="sweep-state" :class="{ scanning: sweep.active }">{{ sweep.active ? 'SCANNING' : sweep.starting ? 'STARTING' : sweep.stopping ? 'STOPPING' : sweep.listenStarting ? 'TUNING' : sweep.listening ? 'LISTENING' : sweep.offlineSessionName ? 'OFFLINE' : 'STOPPED' }}</span>
+					</div>
+				</header>
+
+				<div class="sweep-controls">
+					<label>Source
+						<select v-model="sweep.source" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
+							<option value="simulated">Simulation</option>
+							<option value="native" v-if="deviceCapabilities && deviceCapabilities.supportsNativeSweep">HackRF native</option>
+							<option value="manual" v-if="deviceCapabilities && deviceCapabilities.supportsManualSweep">HackRF manual</option>
+						</select>
+					</label>
+					<label>Start
+						<div class="sweep-input-unit">
+							<input type="number" v-model.number="sweep.startMHz" min="1" max="7250" step="0.1" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
+							<span>MHz</span>
+						</div>
+					</label>
+					<label>End
+						<div class="sweep-input-unit">
+							<input type="number" v-model.number="sweep.endMHz" min="1" max="7250" step="0.1" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
+							<span>MHz</span>
+						</div>
+					</label>
+					<label>Resolution
+						<select v-model.number="sweep.fftSize" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
+							<option :value="4096">4.88 kHz · 4096 FFT</option>
+							<option :value="8192">2.44 kHz · 8192 FFT</option>
+						</select>
+					</label>
+					<label>LNA gain
+						<select v-model.number="sweep.lnaGain" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
+							<option v-for="gain in [0, 8, 16, 24, 32, 40]" :key="gain" :value="gain">{{ gain }} dB</option>
+						</select>
+					</label>
+					<label>VGA gain
+						<select v-model.number="sweep.vgaGain" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
+							<option v-for="gain in [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62]" :key="gain" :value="gain">{{ gain }} dB</option>
+						</select>
+					</label>
+					<label class="sweep-amp-control"><input type="checkbox" v-model="sweep.ampEnabled" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults"> RF amp (+14 dB)</label>
+					<label class="sweep-amp-control" title="Applied to hardware FFT captures; signals exactly at the tuned center may be reduced."><input type="checkbox" v-model="radio.iqCorrection" :disabled="remoteMode !== 'none' || sweep.active || sweep.starting || sweep.stopping || sweep.hasResults"> IQ Correction (DC)</label>
+					<label>Detection SNR
+						<div class="sweep-input-unit">
+							<input type="number" v-model.number="sweep.minSnrDb" min="1" max="60" step="1" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
+							<span>dB</span>
+						</div>
+					</label>
+					<label>Average
+						<div class="sweep-input-unit">
+							<input type="number" v-model.number="sweep.averageAlpha" min="0.01" max="1" step="0.01" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
+							<span>α</span>
+						</div>
+					</label>
+					<label>Trace
+						<select v-model="sweep.view" @change="drawSweepSpectrum">
+							<option value="current">Current</option>
+							<option value="average">Average</option>
+							<option value="max">Max hold</option>
+						</select>
+					</label>
+					<label>Sort signals
+						<select v-model="sweep.sortBy" @change="candidateFilterChanged">
+							<option value="snr">SNR</option>
+							<option value="frequency">Frequency</option>
+							<option value="peak">Peak power</option>
+							<option value="hits">Hit count</option>
+							<option value="lastSeen">Last seen</option>
+						</select>
+					</label>
+					<label>Graph minimum
+						<div class="sweep-input-unit">
+							<input type="number" v-model.number="sweep.displayMinDb" min="-160" :max="sweep.displayMaxDb - 5" step="5" @change="updateSweepDisplayRange('min')">
+							<span>dBFS</span>
+						</div>
+					</label>
+					<label>Graph maximum
+						<div class="sweep-input-unit">
+							<input type="number" v-model.number="sweep.displayMaxDb" :min="sweep.displayMinDb + 5" max="0" step="5" @change="updateSweepDisplayRange('max')">
+							<span>dBFS</span>
+						</div>
+					</label>
+					<label>Listen mode
+						<select v-model="sweep.listenMode" :disabled="sweep.listening || sweep.listenStarting">
+							<option value="">Use active VFO mode</option>
+							<option value="wfm">WFM</option>
+							<option value="nfm">NFM</option>
+							<option value="am">AM</option>
+							<option value="usb">USB</option>
+							<option value="lsb">LSB</option>
+							<option value="dsb">DSB</option>
+							<option value="cw">CW</option>
+							<option value="raw">Raw IQ</option>
+						</select>
+					</label>
+					<div class="sweep-actions">
+						<button class="btn btn-secondary" v-if="!connected && remoteMode === 'none'" @click="connect" :disabled="sweep.active || sweep.starting || sweep.stopping">Connect Device</button>
+						<button class="btn btn-secondary" v-else-if="connected && remoteMode === 'none'" @click="disconnect" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Disconnect</button>
+						<button class="btn btn-primary" @click="startSweep" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting || remoteMode !== 'none' || (sweep.source !== 'simulated' && !connected)">Start scan</button>
+						<button class="btn btn-danger" @click="stopSweep(true)" v-if="sweep.active || sweep.starting || sweep.stopping" :disabled="sweep.stopping">{{ sweep.stopping ? (sweep.stopPhase === 'rf' ? 'Stopping RF…' : sweep.stopPhase === 'archive' ? 'Saving archive…' : 'Finishing…') : 'Stop' }}</button>
+						<div class="sweep-visualization-tabs" role="tablist" aria-label="Sweep visualization">
+							<button :class="{ active: sweep.visualization === 'spectrum' }" role="tab" :aria-selected="sweep.visualization === 'spectrum'" @click="setSweepVisualization('spectrum')">Spectrum</button>
+							<button :class="{ active: sweep.visualization === 'waterfall' }" role="tab" :aria-selected="sweep.visualization === 'waterfall'" @click="setSweepVisualization('waterfall')">Waterfall · {{ sweep.waterfallRows }}/256</button>
+						</div>
+						<button class="btn btn-secondary" @click="$refs.sweepSessionFile.click()" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Open session</button>
+						<button class="btn btn-secondary" @click="saveSweepSession" :disabled="!sweep.hasResults">Save JSON</button>
+						<button class="btn btn-secondary" @click="exportSweepCandidates" :disabled="!sweep.hasResults">Export CSV</button>
+						<button class="btn btn-secondary" @click="clearSweepData" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Clear</button>
+						<button class="btn btn-secondary" @click="zoomSweepSpectrum(0.5)" :disabled="!sweep.hasResults" aria-label="Zoom in" title="Zoom in">Zoom +</button>
+						<button class="btn btn-secondary" @click="zoomSweepSpectrum(2)" :disabled="!sweep.hasResults" aria-label="Zoom out" title="Zoom out">Zoom −</button>
+						<button class="btn btn-secondary" @click="resetSweepViewport" :disabled="!sweep.hasResults">Reset zoom</button>
+					</div>
+					<input ref="sweepSessionFile" class="sweep-file-input" type="file" accept=".json,application/json" @change="openSweepSession">
+				</div>
+				<div class="sweep-visualization-status">
+					<span v-if="sweep.offlineSessionName">Offline session · {{ sweep.offlineSessionName }}</span>
+					<span v-if="sweep.listening">Listening · {{ (sweep.listenFrequencyHz / 1000000).toFixed(6) }} MHz</span>
+				</div>
+
+				<div class="sweep-error" v-if="records.error" role="alert">{{ records.error }}</div>
+				<div class="sweep-error" v-if="sweep.error">{{ sweep.error }}</div>
+				<div class="sweep-status">
+					<span>{{ sweep.progress.sweepCount }} sweeps · {{ sweep.progress.sweepsPerSecond.toFixed(2) }} sweeps/s</span>
+					<span>RF {{ sweep.progress.currentFrequencyHz ? (sweep.progress.currentFrequencyHz / 1000000).toFixed(3) + ' MHz' : 'n/a' }}</span>
+					<span>{{ (sweep.progress.bytesPerSecond / 1024).toFixed(1) }} KiB/s</span>
+					<span>{{ sortedSweepCandidates.length }} peak groups shown / {{ sweep.candidateHistoryTotal }} candidate records in history</span>
+					<span v-if="sweep.progress.discardedBytes">Discarded {{ sweep.progress.discardedBytes }} bytes</span>
+				</div>
+
+				<div class="sweep-spectrum-wrap">
+					<div class="sweep-hover-readout" v-if="sweep.visualization === 'spectrum' && sweep.hoverFrequencyHz !== null">
+						{{ (sweep.hoverFrequencyHz / 1000000).toFixed(6) }} MHz
+						<span v-if="sweep.hoverPowerDb !== null">{{ sweep.hoverPowerDb.toFixed(1) }} dBFS-like</span>
+					</div>
+					<canvas ref="sweepSpectrum" v-show="sweep.visualization === 'spectrum'" class="sweep-spectrum"
+						@pointerdown="sweepCanvasPointerDown"
+						@pointermove="sweepCanvasPointerMove"
+						@pointerup="sweepCanvasPointerUp"
+						@pointercancel="sweepCanvasPointerUp"
+						@pointerleave="sweepCanvasPointerLeave"
+						@wheel.prevent="sweepCanvasWheel"></canvas>
+					<div class="sweep-waterfall-layout" v-show="sweep.visualization === 'waterfall'" @wheel.prevent="sweepCanvasWheel">
+						<div class="sweep-waterfall-marker-rail" v-if="records.markers.length" role="group" aria-label="Waterfall markers">
+							<span class="sweep-waterfall-marker-empty" v-if="!visibleWaterfallMarkers.length">No markers in visible range</span>
+							<div class="sweep-waterfall-marker-track">
+								<span v-for="marker in visibleWaterfallMarkers" :key="marker.marker.id"
+									class="sweep-waterfall-marker-pin"
+									:class="{ 'sweep-waterfall-marker-pin--right': marker.tooltipAlignRight }"
+									:style="{ left: `${marker.positionPercent}%`, top: `${marker.pinTopPx}px`, '--marker-connector-height': `${marker.connectorHeightPx}px` }"
+									role="img" tabindex="0" :aria-label="`${marker.label}, ${marker.frequencyText}`">
+									<span class="sweep-waterfall-marker-flag" aria-hidden="true"></span>
+									<span class="sweep-waterfall-marker-tooltip" role="tooltip" aria-hidden="true">
+										<span>{{ marker.label }}</span>
+										<span class="sweep-waterfall-marker-frequency">{{ marker.frequencyText }}</span>
+									</span>
+								</span>
+							</div>
+						</div>
+						<div class="sweep-waterfall-chart">
+							<canvas ref="sweepWaterfall" class="sweep-spectrum"
+								@pointerdown="sweepCanvasPointerDown"
+								@pointermove="sweepCanvasPointerMove"
+								@pointerup="sweepCanvasPointerUp"
+								@pointercancel="sweepCanvasPointerUp"
+								@pointerleave="sweepCanvasPointerLeave"></canvas>
+							<div class="sweep-waterfall-marker-stems" v-if="visibleWaterfallMarkers.length" aria-hidden="true">
+								<span v-for="marker in visibleWaterfallMarkers" :key="marker.marker.id"
+									class="sweep-waterfall-marker-line"
+									:style="{ left: `${marker.positionPercent}%` }"></span>
+							</div>
+						</div>
+					</div>
+				</div>
+				<div class="sweep-history-layout">
+					<section class="sweep-history-table" aria-label="Peak history">
+				<div class="sweep-table-heading">
+					<h3>Peak history by frequency</h3>
+					<span>Listen stops the scan. Use “Stop listening and start new scan” to replace these results.</span>
+				</div>
+				<div class="sweep-table-tools">
+					<label>Minimum peak
+						<select :value="[-160, -100, -90, -80, -70, -60].includes(Number(sweep.minimumPeakDb)) ? String(sweep.minimumPeakDb) : 'custom'" @change="setMinimumPeakPreset">
+							<option value="-160">All (−160 dBFS)</option>
+							<option value="-100">−100 dBFS</option>
+							<option value="-90">−90 dBFS</option>
+							<option value="-80">−80 dBFS</option>
+							<option value="-70">−70 dBFS</option>
+							<option value="-60">−60 dBFS</option>
+							<option value="custom">Custom</option>
+						</select>
+					</label>
+					<label class="sweep-custom-threshold">Exact dBFS
+						<input type="number" :value="sweep.minimumPeakDb" min="-160" max="0" step="any" @change="setMinimumPeakCustom">
+					</label>
+					<label class="checkbox">
+						<input type="checkbox" v-model="records.markedOnly" @change="candidateFilterChanged">
+						Marked only
+					</label>
+					<span>{{ sweepCandidateRangeStart }}–{{ sweepCandidateRangeEnd }} of {{ sweepCandidateFilteredTotal }} peak groups matching · {{ sweep.candidateHistoryTotal }} candidate records total</span>
+				</div>
+				<div class="sweep-candidates">
+					<table>
+						<thead><tr><th>Peak center</th><th>Peak frequency range</th><th>Occupied bandwidth</th><th>Best peak</th><th>Noise</th><th>SNR</th><th>First seen</th><th>Last seen</th><th>Hits</th><th>Listen</th></tr></thead>
+						<tbody>
+							<tr v-for="candidate in sortedSweepCandidates" :key="candidate.id"
+								:class="{ selected: sweep.selectedCandidate && sweep.selectedCandidate.id === candidate.id }"
+								@click="selectSweepCandidate(candidate)">
+								<td>{{ (candidate.peakRangeCenterHz / 1000000).toFixed(6) }} MHz</td>
+								<td>{{ (candidate.peakRangeStartHz / 1000000).toFixed(6) }}–{{ (candidate.peakRangeEndHz / 1000000).toFixed(6) }} MHz</td>
+								<td>{{ candidate.bandwidthHz >= 1000000 ? (candidate.bandwidthHz / 1000000).toFixed(3) + ' MHz' : (candidate.bandwidthHz / 1000).toFixed(1) + ' kHz' }}</td>
+								<td>{{ candidate.peakDb.toFixed(1) }} dBFS</td>
+								<td>{{ candidate.noiseFloorDb.toFixed(1) }} dB</td>
+								<td>{{ candidate.snrDb.toFixed(1) }} dB</td>
+								<td>{{ new Date(candidate.firstSeen).toLocaleTimeString() }}</td>
+								<td>{{ new Date(candidate.lastSeen).toLocaleTimeString() }}</td>
+								<td>{{ candidate.hits }}</td>
+								<td><button class="sweep-listen-button" @click.stop="listenToSweepCandidate(candidate)" :disabled="!connected || remoteMode !== 'none' || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Listen</button></td>
+							</tr>
+						</tbody>
+					</table>
+					<div class="sweep-empty" v-if="!sweep.candidateTotal && !(records.markedOnly && !records.markers.length)">No signals detected yet. The simulator includes narrowband, wideband, and intermittent examples.</div>
+					<div class="sweep-empty" v-else-if="records.markedOnly && !records.markers.length">Marked only is active, but the selected marker set has no markers.</div>
+					<div class="sweep-empty" v-else-if="!sortedSweepCandidates.length">No candidates match the current peak-power and marker filters.</div>
+					<div class="sweep-pagination" v-if="sweepCandidateFilteredTotal > sweep.candidatePageSize">
+						<button class="btn btn-secondary" @click="setCandidatePage(sweep.candidatePage - 1)" :disabled="sweep.candidatePage === 0">Previous</button>
+						<label>Rows
+							<select :value="sweep.candidatePageSize" @change="setCandidatePageSize">
+								<option :value="25">25</option><option :value="50">50</option><option :value="100">100</option><option :value="250">250</option>
+							</select>
+						</label>
+						<span>Page {{ sweep.candidatePage + 1 }} of {{ sweepCandidatePageCount }}</span>
+						<button class="btn btn-secondary" @click="setCandidatePage(sweep.candidatePage + 1)" :disabled="sweep.candidatePage + 1 >= sweepCandidatePageCount">Next</button>
+					</div>
+				</div>
+					</section>
+					<section class="marker-settings" aria-label="Spectrum marker set editor">
+						<div class="marker-settings-heading">
+							<h3>Spectrum markers</h3>
+						</div>
+						<label class="marker-saved-set">Saved set
+							<select v-model="records.selectedMarkerSetId" @change="selectMarkerSet">
+								<option value="">Unsaved markers</option>
+								<option v-for="set in records.markerSets" :key="set.id" :value="set.id">{{ set.name }}</option>
+							</select>
+						</label>
+						<div class="marker-set-actions">
+							<input type="text" v-model="records.markerSetName" maxlength="120" placeholder="Marker set name" aria-label="Marker set name">
+							<button class="btn btn-secondary" type="button" @click="newMarkerSet">New</button>
+							<button class="btn btn-primary" type="button" @click="saveMarkerSet">Save set</button>
+							<button class="btn btn-secondary" type="button" @click="deleteMarkerSet" :disabled="!records.selectedMarkerSetId">Delete set</button>
+						</div>
+						<form class="marker-manual-entry" @submit.prevent="addManualReceiverMarker">
+							<label>Frequency (MHz)
+								<input type="number" v-model="records.manualMarkerFrequencyMHz" min="0" step="any" required aria-label="Manual marker frequency MHz">
+							</label>
+							<label>Label
+								<input type="text" v-model="records.manualMarkerLabel" maxlength="80" placeholder="Optional label" aria-label="Manual marker label">
+							</label>
+							<button class="btn btn-secondary" type="submit">Add marker</button>
+						</form>
+						<div class="marker-export-actions">
+							<button class="btn btn-secondary" type="button" @click="exportMarkerSetJson" :disabled="!records.markers.length">Markers JSON</button>
+							<button class="btn btn-secondary" type="button" @click="exportMarkerSetCsv" :disabled="!records.markers.length">Markers CSV</button>
+						</div>
+						<div class="marker-list" v-if="records.markers.length">
+							<div class="marker-row" v-for="marker in records.markers" :key="marker.id">
+								<label>Frequency MHz
+									<input type="number" v-model="records.markerFrequencyDrafts[marker.id]" min="0" step="any" aria-label="Marker frequency MHz" @change="updateReceiverMarker(marker.id)">
+								</label>
+								<label>Label
+									<input type="text" v-model="marker.label" maxlength="80" placeholder="Label" aria-label="Marker label" @change="updateReceiverMarker(marker.id)">
+								</label>
+								<span class="marker-power">{{ marker.powerDb === null ? 'Power not measured' : `${marker.powerDb.toFixed(1)} dBFS` }}</span>
+								<button class="btn btn-secondary" type="button" @click="removeReceiverMarker(marker.id)">Delete marker</button>
+							</div>
+						</div>
+						<div class="records-empty" v-else>No markers in this set yet.</div>
+					</section>
+				</div>
+			</section>
+			<section id="records-workspace" class="receiver-records-workspace" v-show="activeWorkspace === 'records'" role="tabpanel" aria-labelledby="tab-records">
+				<header class="records-header">
+					<div>
+						<h2>Receiver Records</h2>
+						<p>Local spectrum and per-VFO audio files; stored on this Ground Console only.</p>
+					</div>
+					<button class="btn btn-secondary" @click="loadReceiverRecords" :disabled="records.loading">{{ records.loading ? 'Refreshing…' : 'Refresh' }}</button>
+				</header>
+				<div class="records-settings">
+					<label class="checkbox"><input type="checkbox" v-model="records.autoSpectrumRecording" @change="updateAutoSpectrumRecording" :disabled="sweep.active || sweep.starting || sweep.stopping"> Automatically archive each spectrum scan</label>
+					<p>Off by default. Applies when a new scan starts; archived scans include grouped candidates and one compact average trace per completed sweep.</p>
+				</div>
+				<div class="records-error" v-if="records.error" role="alert">{{ records.error }}</div>
+				<div class="records-error" v-if="audioRecording.error && records.error !== audioRecording.error" role="alert">Audio recording: {{ audioRecording.error }}</div>
+				<section class="records-kind" aria-labelledby="records-spectrum-title">
+					<div class="records-list-header">
+						<h3 id="records-spectrum-title">Spectrum scans</h3>
+						<span>{{ records.scanTotal }} scan{{ records.scanTotal === 1 ? '' : 's' }}</span>
+					</div>
+					<div class="records-table-scroll" role="region" aria-label="Spectrum scan records" tabindex="0" v-if="records.scanItems.length">
+						<table class="records-table">
+							<thead>
+								<tr>
+									<th scope="col">Started</th>
+									<th scope="col">Source</th>
+									<th scope="col">Frequency range</th>
+									<th scope="col">Status</th>
+									<th scope="col">Candidates</th>
+									<th scope="col">Archived sweeps</th>
+									<th scope="col">Actions</th>
+								</tr>
+							</thead>
+							<tbody>
+								<tr v-for="record in records.scanItems" :key="record.id">
+									<td><time :datetime="record.created_at">{{ new Date(record.created_at).toLocaleString() }}</time></td>
+									<td>{{ record.source }}</td>
+									<td>{{ record.start_hz === null || record.end_hz === null ? 'Unknown' : (record.start_hz / 1000000).toFixed(3) + ' - ' + (record.end_hz / 1000000).toFixed(3) + ' MHz' }}</td>
+									<td><span class="record-status" :class="'record-status-' + record.status">{{ record.status }}</span></td>
+									<td>{{ record.candidate_count }}</td>
+									<td>{{ record.trace_count }}</td>
+									<td>
+										<div class="record-actions">
+											<button class="btn btn-primary" @click="openReceiverRecord(record)">Open scan</button>
+											<button class="btn btn-secondary" @click="deleteReceiverRecord(record)">Delete</button>
+										</div>
+									</td>
+								</tr>
+							</tbody>
+						</table>
+					</div>
+					<div class="records-empty" v-else>{{ records.loading ? 'Loading spectrum scans…' : 'No saved spectrum scans.' }}</div>
+					<div class="records-pagination" v-if="records.scanTotal > records.pageSize">
+						<button class="btn btn-secondary" @click="changeReceiverRecordPage('scan', records.scanPage - 1)" :disabled="records.scanPage === 0 || records.loading">Previous</button>
+						<span>Page {{ records.scanPage + 1 }} of {{ Math.max(1, Math.ceil(records.scanTotal / records.pageSize)) }}</span>
+						<button class="btn btn-secondary" @click="changeReceiverRecordPage('scan', records.scanPage + 1)" :disabled="(records.scanPage + 1) * records.pageSize >= records.scanTotal || records.loading">Next</button>
+					</div>
+				</section>
+				<section class="records-kind" aria-labelledby="records-audio-title">
+					<div class="records-list-header">
+						<h3 id="records-audio-title">VFO Audio</h3>
+						<span>{{ records.audioTotal }} session{{ records.audioTotal === 1 ? '' : 's' }}</span>
+					</div>
+					<div class="records-table-scroll" role="region" aria-label="VFO audio session records" tabindex="0" v-if="records.audioItems.length">
+						<table class="records-table records-audio-table">
+							<thead>
+								<tr>
+									<th scope="col">Started</th>
+									<th scope="col">Audio segments</th>
+									<th scope="col">Actions</th>
+								</tr>
+							</thead>
+							<tbody>
+								<tr v-for="record in records.audioItems" :key="record.id">
+									<td>
+										<time :datetime="record.created_at">{{ new Date(record.created_at).toLocaleString() }}</time>
+										<span class="record-meta">{{ record.segments.length }} segment{{ record.segments.length === 1 ? '' : 's' }} · {{ record.completed_at ? 'finalized' : 'in progress' }}</span>
+									</td>
+									<td>
+										<div class="records-audio-segments" v-if="record.segments.length">
+											<div class="audio-record-segment" v-for="segment in record.segments" :key="segment.id">
+												<div>VFO {{ segment.vfo_index + 1 }} · {{ (segment.frequency_hz / 1000000).toFixed(6) }} MHz · {{ segment.mode.toUpperCase() }} · {{ segment.bandwidth_hz }} Hz · {{ segment.duration_seconds === null ? 'recording' : segment.duration_seconds.toFixed(1) + ' s' }}</div>
+												<audio v-if="segment.status === 'complete' && segment.bytes > 0" controls preload="none" :src="audioRecordUrl(segment.id)">Audio playback is not supported by this browser.</audio>
+												<span v-else-if="segment.status === 'failed'" class="records-error" role="alert">Recording failed: {{ segment.error || 'Audio was not saved.' }}</span>
+												<span v-else class="records-empty">No audio data in this segment.</span>
+											</div>
+										</div>
+										<span class="records-empty" v-else>No audio segments were saved for this session.</span>
+									</td>
+									<td><button class="btn btn-secondary" @click="deleteReceiverRecord(record)">Delete session</button></td>
+								</tr>
+							</tbody>
+						</table>
+					</div>
+					<div class="records-empty" v-else>{{ records.loading ? 'Loading VFO Audio sessions…' : 'No saved VFO Audio sessions.' }}</div>
+					<div class="records-pagination" v-if="records.audioTotal > records.pageSize">
+						<button class="btn btn-secondary" @click="changeReceiverRecordPage('audio-session', records.audioPage - 1)" :disabled="records.audioPage === 0 || records.loading">Previous</button>
+						<span>Page {{ records.audioPage + 1 }} of {{ Math.max(1, Math.ceil(records.audioTotal / records.pageSize)) }}</span>
+						<button class="btn btn-secondary" @click="changeReceiverRecordPage('audio-session', records.audioPage + 1)" :disabled="(records.audioPage + 1) * records.pageSize >= records.audioTotal || records.loading">Next</button>
+					</div>
+				</section>
+			</section>
+			</div>
+		</div>
+
+		<!-- Mobile VFO Bottom Strip -->
+		<div class="vfo-bottom-strip" v-show="activeWorkspace === 'listener'">
+			<div class="vfo-bottom-tab"
+				v-for="(vfo, i) in vfos" :key="'vfo-mob-' + i"
+				:class="{ 'vfo-active': activeVfoIndex === i, 'vfo-squelch-open': vfo.squelchEnabled && vfoSquelchOpen[i], 'vfo-audio-off': !vfo.enabled, 'vfo-oob': !isFreqInBandwidth(vfo.freq) }"
+				@click="activeVfoIndex = i"
+				:style="Object.assign(
+					(activeVfoIndex === i || (vfo.squelchEnabled && vfoSquelchOpen[i])) ? { borderColor: vfoColor(i) } : {},
+					vfo.squelchEnabled && vfoSquelchOpen[i] ? { '--sq-color': vfoColor(i) } : {}
+				)">
+				<span class="vfo-label" :style="{ background: vfoColor(i) }">{{ i + 1 }}</span>
+				<input class="vfo-bottom-freq" type="text"
+					v-model="vfo.displayFreq"
+					@blur="applyVfoFreq($event, i)"
+					@keyup.enter="applyVfoFreq($event, i)"
+					@focus="focusVfoFreq(i)"
+					@click.stop>
+				<span class="vfo-rx-badge" v-if="vfo.squelchEnabled && vfoSquelchOpen[i]" :style="{ background: vfoColor(i) }">RX</span>
+				<span class="vfo-oob-badge" v-if="!isFreqInBandwidth(vfo.freq)" title="Outside bandwidth">OOB</span>
+				<span class="vfo-mute-badge" v-if="!vfo.enabled"><svg viewBox="0 0 24 24" width="10" height="10"><path fill="currentColor" d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg></span>
+			</div>
+		</div>
+
+		<!-- Transcript Panel -->
+		<div class="transcript-panel" v-if="activeWorkspace === 'listener' && whisper.panelOpen">
+			<div class="transcript-header">
+				<div class="transcript-title">
+					<svg viewBox="0 0 24 24" width="16" height="16" style="vertical-align: middle; margin-right: 4px;"><path fill="currentColor" d="M12 15c1.66 0 3-1.34 3-3V6c0-1.66-1.34-3-3-3S9 4.34 9 6v6c0 1.66 1.34 3 3 3z"/></svg>
+					Live Transcription
+					<span class="transcript-badge recording" v-if="whisper.recording">
+						● REC {{ whisper.recordDuration.toFixed(1) }}s
+					</span>
+					<span class="transcript-badge transcribing" v-else-if="whisper.transcribing">
+						Transcribing{{ whisper.pendingChunks > 1 ? ` (${whisper.pendingChunks} queued)` : '…' }}
+					</span>
+					<span class="transcript-badge" v-else-if="whisper.status === 'ready' && whisper.active">Listening</span>
+					<span class="transcript-badge" v-else-if="whisper.status === 'ready'">Ready</span>
+					<span class="transcript-badge loading" v-else-if="whisper.status === 'loading'">
+						<template v-if="whisper.loadPhase === 'initializing'">Initializing…</template>
+						<template v-else>
+							Downloading {{ whisper.loadProgress }}%
+							<span v-if="whisper.loadFile" class="transcript-load-file">· {{ whisper.loadFile }}<span v-if="whisper.loadFilesTotal > 1"> ({{ whisper.loadFilesDone + 1 }}/{{ whisper.loadFilesTotal }})</span></span>
+						</template>
+					</span>
+					<span class="transcript-badge error" v-else-if="whisper.status === 'error'">Error</span>
+					<span class="transcript-badge" v-else>Idle</span>
+				</div>
+				<div class="transcript-controls">
+					<select v-model="whisper.model" :disabled="whisper.active" class="transcript-select" title="Whisper model">
+						<optgroup label="English-only (faster)">
+							<option value="onnx-community/whisper-tiny.en">Tiny.en (~40 MB)</option>
+							<option value="onnx-community/whisper-base.en">Base.en (~75 MB)</option>
+							<option value="onnx-community/whisper-small.en">Small.en (~250 MB) ★ Recommended</option>
+							<option value="onnx-community/whisper-medium.en">Medium.en (~500 MB)</option>
+						</optgroup>
+						<optgroup label="Multilingual (better for non-US accents)">
+							<option value="onnx-community/whisper-tiny">Tiny multilingual (~40 MB)</option>
+							<option value="onnx-community/whisper-base">Base multilingual (~75 MB)</option>
+							<option value="onnx-community/whisper-small">Small multilingual (~250 MB) ★ Best for NZ/AU</option>
+							<option value="onnx-community/whisper-large-v3-turbo">Large-v3-turbo (~800 MB) ★ Highest quality</option>
+						</optgroup>
+					</select>
+					<select v-model.number="whisper.chunkSeconds" :disabled="whisper.active" class="transcript-select" title="Chunk length (seconds)">
+						<option :value="3">3 s</option>
+						<option :value="5">5 s</option>
+						<option :value="10">10 s</option>
+						<option :value="15">15 s</option>
+					</select>
+					<button class="btn transcript-btn" :class="{ 'btn-primary': !whisper.active, 'btn-stop': whisper.active }" @click="toggleWhisper" :disabled="!running">
+						{{ whisper.active ? 'Stop' : 'Start' }}
+					</button>
+					<button class="btn transcript-btn" @click="clearTranscript" title="Clear log">Clear</button>
+					<button class="btn transcript-btn" @click="exportTranscript" title="Export as text" :disabled="whisper.log.length === 0">Export</button>
+				</div>
+			</div>
+			<div class="transcript-body" ref="transcriptBody">
+				<div v-if="whisper.log.length === 0" class="transcript-empty">
+					No transcriptions yet. Start Whisper and tune to a voice transmission.
+				</div>
+				<div v-for="(entry, i) in whisper.log" :key="i" class="transcript-entry"
+					:style="entry.vfoIndex != null ? { borderLeftColor: vfoColor(entry.vfoIndex) } : {}">
+					<span class="transcript-vfo-dot" v-if="entry.vfoIndex != null" :style="{ background: vfoColor(entry.vfoIndex) }" :title="'VFO ' + (entry.vfoIndex + 1)"></span>
+					<span class="transcript-time">{{ entry.time }}</span>
+					<span class="transcript-freq" :style="entry.vfoIndex != null ? { color: vfoColor(entry.vfoIndex) } : {}">{{ entry.freq }}</span>
+					<span class="transcript-duration" v-if="entry.duration">({{ entry.duration }})</span>
+					<span class="transcript-duration" v-if="entry.transcribeTime" title="Transcription inference time">⏱ {{ entry.transcribeTime }}</span>
+					<span class="transcript-text">{{ entry.text }}</span>
+				</div>
+			</div>
+		</div>
+
+		<!-- POCSAG Panel -->
+		<div class="pocsag-panel" v-if="activeWorkspace === 'listener' && pocsag.panelOpen">
+			<div class="pocsag-header">
+				<div class="pocsag-title">
+					<svg viewBox="0 0 24 24" width="16" height="16" style="vertical-align:middle;margin-right:4px"><path fill="currentColor" d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-3 12H7v-2h10v2zm0-3H7V9h10v2zm0-3H7V6h10v2z"/></svg>
+					POCSAG Decoder
+					<span class="pocsag-count" v-if="pocsag.log.length">{{ pocsag.log.length }} msg{{ pocsag.log.length !== 1 ? 's' : '' }}</span>
+				</div>
+				<div class="pocsag-controls">
+					<button class="btn transcript-btn" @click="clearPocsag" title="Clear log">Clear</button>
+					<button class="btn transcript-btn" @click="exportPocsag" title="Export as text" :disabled="pocsag.log.length === 0">Export</button>
+				</div>
+			</div>
+			<div class="pocsag-body" ref="pocsagBody">
+				<div v-if="pocsag.log.length === 0" class="pocsag-empty">
+					No messages yet. Enable "Decode POCSAG" on an NFM VFO and tune to a paging frequency.
+				</div>
+				<div v-for="(entry, i) in pocsag.log" :key="i" class="pocsag-entry"
+					:style="entry.vfoIndex != null ? { borderLeftColor: vfoColor(entry.vfoIndex) } : {}">
+					<span class="pocsag-vfo-dot" v-if="entry.vfoIndex != null" :style="{ background: vfoColor(entry.vfoIndex) }" :title="'VFO ' + (entry.vfoIndex + 1)"></span>
+					<span class="pocsag-time">{{ entry.time }}</span>
+					<span class="pocsag-freq" :style="entry.vfoIndex != null ? { color: vfoColor(entry.vfoIndex) } : {}">{{ entry.freq }}</span>
+					<span class="pocsag-capcode" title="Capcode (pager address)">CAP:{{ entry.capcode }}</span>
+					<span class="pocsag-type" :class="'pocsag-type-' + entry.type">{{ entry.type.toUpperCase() }}</span>
+					<span class="pocsag-baud" v-if="entry.baud">{{ entry.baud }}Bd</span>
+					<span class="pocsag-text" v-if="entry.text">{{ entry.text }}</span>
+					<span class="pocsag-text pocsag-tone" v-else>(tone only)</span>
+				</div>
+			</div>
+		</div>
+
+		<!-- Frequency Activity Panel -->
+		<div class="activity-panel" v-if="activeWorkspace === 'listener' && showActivity">
+			<div class="activity-header">
+				<div class="activity-title">
+					<svg viewBox="0 0 24 24" width="15" height="15" style="vertical-align:middle;margin-right:4px"><path fill="currentColor" d="M3.5 18.49l6-6.01 4 4L22 6.92l-1.41-1.41-7.09 7.97-4-4L2 16.99l1.5 1.5z"/></svg>
+					Frequency Activity
+					<span class="activity-count" v-if="sortedVfoActivity.some(a => a.totalMs > 0 || a.isLive)">
+						{{ sortedVfoActivity.filter(a => a.totalMs > 0 || a.isLive).length }} active
+					</span>
+				</div>
+				<div class="activity-controls">
+					<button class="btn transcript-btn" @click="resetActivityStats" title="Reset all statistics">Reset</button>
+				</div>
+			</div>
+			<div class="activity-body">
+				<div v-if="sortedVfoActivity.length === 0" class="activity-empty">
+					Enable squelch on VFOs to track their activity here.
+				</div>
+				<div v-else-if="!sortedVfoActivity.some(a => a.totalMs > 0 || a.isLive)" class="activity-empty">
+					Listening… activity will appear here when squelch opens.
+				</div>
+				<div v-else class="activity-list">
+					<div
+						v-for="(item, rank) in sortedVfoActivity"
+						:key="'act-' + item.index"
+						class="activity-row"
+						:class="{ 'activity-row-live': item.isLive, 'activity-row-zero': !item.isLive && item.totalMs === 0 }"
+						:style="{ '--act-color': vfoColor(item.index) }"
+							@click="focusActivityVfo(item.index)"
+							:title="'Click to focus VFO ' + (item.index + 1)">
+						<div class="act-bar-fill" :style="{ width: item.pct + '%' }"></div>
+						<span class="act-rank">#{{ rank + 1 }}</span>
+						<span class="act-dot" :style="{ background: vfoColor(item.index) }"></span>
+						<span class="act-vfo">VFO {{ item.index + 1 }}</span>
+						<span class="act-freq">{{ item.vfo.freq.toFixed(4) }} MHz</span>
+						<span class="act-label" v-if="vfoBookmarkLabel(item.index)">{{ vfoBookmarkLabel(item.index) }}</span>
+						<span class="act-spacer"></span>
+						<span class="act-live-badge" v-if="item.isLive">●&nbsp;LIVE</span>
+						<span class="act-count" :title="item.count + ' transmissions'">{{ item.count }}×</span>
+						<span class="act-duration">{{ formatActivityDuration(item.totalMs) }}</span>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<!-- Bookmark import mode dialog -->
+		<div v-if="bookmarkImportModal.show" class="bookmark-overlay" @click.self="bookmarkImportModal.show = false">
+			<div class="bookmark-dialog bm-import-dialog">
+				<div class="bookmark-dialog-title">Import Bookmarks</div>
+				<div class="bookmark-dialog-body bm-import-body">
+					<p class="bm-import-desc">How would you like to import?</p>
+					<div class="bm-import-choices">
+						<button class="btn bm-import-choice" @click="confirmImport('merge')">
+							<svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M17 12h-5v5h5v-5zM16 1v2H8V1H6v2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2h-1V1h-2zm3 18H5V8h14v11z"/></svg>
+							<span class="bm-import-choice-label">Merge</span>
+							<span class="bm-import-choice-desc">Add new bookmarks, keep existing</span>
+						</button>
+						<button class="btn bm-import-choice bm-import-replace" @click="confirmImport('replace')">
+							<svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+							<span class="bm-import-choice-label">Replace</span>
+							<span class="bm-import-choice-desc">Delete all existing, import fresh</span>
+						</button>
+					</div>
+				</div>
+				<div class="bookmark-dialog-footer">
+					<button class="btn" @click="bookmarkImportModal.show = false">Cancel</button>
+				</div>
+			</div>
+		</div>
+
+		<!-- Bookmark save dialog -->
+		<div v-if="bookmarkModal.show" class="bookmark-overlay" @click.self="bookmarkModal.show = false">
+			<div class="bookmark-dialog">
+				<div class="bookmark-dialog-title">
+					Save
+					<span class="bm-badge" :class="bookmarkModal.type === 'individual' ? 'bm-badge-freq' : 'bm-badge-group'">{{ bookmarkModal.type === 'individual' ? 'FREQ' : 'GROUP' }}</span>
+					Bookmark
+				</div>
+				<div class="bookmark-dialog-body">
+					<input type="text" v-model="bookmarkModal.name" placeholder="Bookmark name"
+						@keyup.enter="confirmBookmark" @keyup.esc="bookmarkModal.show = false"
+						ref="bookmarkNameInput" class="bookmark-dialog-input">
+					<div class="bm-edit-row">
+						<label class="bm-edit-label">Category</label>
+						<select v-model="bookmarkModal.category" class="bm-edit-select">
+							<option v-for="cat in bookmarkCategories" :key="cat.value" :value="cat.value">{{ cat.label }}</option>
+						</select>
+					</div>
+					<!-- Individual preview -->
+					<template v-if="bookmarkModal.type === 'individual'">
+						<div class="bookmark-dialog-info">
+							Freq: <b>{{ (vfos[activeVfoIndex] || vfos[0]).freq }} MHz</b> &bull;
+							Mode: <b>{{ ((vfos[activeVfoIndex] || vfos[0]).mode || '').toUpperCase() }}</b>
+						</div>
+					</template>
+					<!-- Group preview -->
+					<template v-else>
+						<div class="bookmark-dialog-info">
+							Center: <b>{{ radio.centerFreq }} MHz</b> &bull;
+							{{ vfos.length }} VFO{{ vfos.length !== 1 ? 's' : '' }} &bull;
+							{{ (radio.sampleRate / 1e6).toFixed(0) }} MSPS
+						</div>
+						<div class="bookmark-vfo-preview">
+							<div v-for="(v, vi) in vfos" :key="vi" class="bookmark-vfo-chip" :style="{ borderColor: vfoColor(vi) }">
+								<span class="bookmark-vfo-dot" :style="{ background: vfoColor(vi) }"></span>
+								{{ v.freq.toFixed(3) }} MHz &nbsp;<span style="opacity:0.6">{{ v.mode.toUpperCase() }}</span>
+							</div>
+						</div>
+					</template>
+				</div>
+				<div class="bookmark-dialog-footer">
+					<button class="btn" @click="bookmarkModal.show = false">Cancel</button>
+					<button class="btn btn-primary" @click="confirmBookmark" :disabled="!bookmarkModal.name.trim()">Save</button>
+				</div>
+			</div>
+		</div>
+
+		<!-- Bookmark edit dialog -->
+		<div v-if="bookmarkEdit.show" class="bookmark-overlay" @click.self="bookmarkEdit.show = false">
+			<div class="bookmark-dialog bookmark-edit-dialog">
+				<div class="bookmark-dialog-title">
+					Edit
+					<span class="bm-badge" :class="bookmarkEdit.type === 'individual' ? 'bm-badge-freq' : 'bm-badge-group'">{{ bookmarkEdit.type === 'individual' ? 'FREQ' : 'GROUP' }}</span>
+					Bookmark
+				</div>
+				<div class="bookmark-dialog-body">
+					<div class="bm-edit-row">
+						<label class="bm-edit-label">Name</label>
+						<input type="text" v-model="bookmarkEdit.name" class="bookmark-dialog-input" @keyup.esc="bookmarkEdit.show = false" placeholder="Bookmark name">
+					</div>
+					<div class="bm-edit-row">
+						<label class="bm-edit-label">Category</label>
+						<select v-model="bookmarkEdit.category" class="bm-edit-select">
+							<option v-for="cat in bookmarkCategories" :key="cat.value" :value="cat.value">{{ cat.label }}</option>
+						</select>
+					</div>
+
+					<!-- Individual fields -->
+					<template v-if="bookmarkEdit.type === 'individual'">
+						<div class="bm-edit-row">
+							<label class="bm-edit-label">Frequency</label>
+							<div class="input-group">
+								<input type="number" v-model.number="bookmarkEdit.freq" step="0.001" class="bm-edit-input">
+								<span>MHz</span>
+							</div>
+						</div>
+						<div class="bm-edit-row">
+							<label class="bm-edit-label">Mode</label>
+							<div class="mode-grid bm-mode-grid">
+								<label class="mode-radio" v-for="m in ['nfm','am','usb','lsb','wfm','dsb','cw','raw']" :key="m">
+									<input type="radio" :value="m" v-model="bookmarkEdit.mode" name="bm-edit-mode">
+									<span class="mode-btn">{{ m.toUpperCase() }}</span>
+								</label>
+							</div>
+						</div>
+						<div class="bm-edit-row">
+							<label class="bm-edit-label">Bandwidth</label>
+							<input type="number" v-model.number="bookmarkEdit.bandwidth" step="1000" class="bm-edit-input">
+						</div>
+						<div class="bm-edit-row" v-if="bookmarkEdit.mode === 'wfm' || bookmarkEdit.mode === 'nfm'">
+							<label class="bm-edit-label">De-emphasis</label>
+							<select v-model="bookmarkEdit.deEmphasis" class="bm-edit-select">
+								<option value="none">None</option>
+								<option value="22us">22us</option>
+								<option value="50us">50us</option>
+								<option value="75us">75us</option>
+							</select>
+						</div>
+						<div class="bm-edit-row">
+							<label class="bm-edit-label">Squelch</label>
+							<label class="custom-checkbox" style="margin-right:8px">
+								<input type="checkbox" v-model="bookmarkEdit.squelchEnabled"><span class="checkmark"></span>
+							</label>
+							<input type="number" v-model.number="bookmarkEdit.squelchLevel" step="0.1" min="-100" max="0" :disabled="!bookmarkEdit.squelchEnabled" class="bm-edit-input" style="width:70px">
+							<span style="opacity:0.5;font-size:11px;margin-left:4px">dB</span>
+						</div>
+						<div class="bm-edit-row">
+							<label class="bm-edit-label">Volume</label>
+							<input type="range" v-model.number="bookmarkEdit.volume" min="0" max="100" step="1" style="flex:1">
+							<span style="width:32px;text-align:right;font-size:12px">{{ bookmarkEdit.volume }}%</span>
+						</div>
+					</template>
+
+					<!-- Group fields -->
+					<template v-else>
+						<div class="bm-edit-row">
+							<label class="bm-edit-label">Center Freq</label>
+							<div class="input-group">
+								<input type="number" v-model.number="bookmarkEdit.centerFreq" step="0.1" class="bm-edit-input">
+								<span>MHz</span>
+							</div>
+						</div>
+						<div class="bm-edit-row">
+							<label class="bm-edit-label">Sample Rate</label>
+							<select v-model.number="bookmarkEdit.sampleRate" class="bm-edit-select">
+								<template v-if="deviceCapabilities">
+									<option v-for="rate in deviceCapabilities.sampleRates" :key="rate" :value="rate">{{ rate >= 1000000 ? (rate / 1000000) + ' MSPS' : (rate / 1000) + ' kSPS' }}</option>
+								</template>
+								<template v-else>
+									<option value="2000000">2 MSPS</option>
+									<option value="4000000">4 MSPS</option>
+									<option value="8000000">8 MSPS</option>
+									<option value="10000000">10 MSPS</option>
+									<option value="16000000">16 MSPS</option>
+									<option value="20000000">20 MSPS</option>
+								</template>
+							</select>
+						</div>
+						<div class="bm-edit-section-label">VFOs in group</div>
+						<div class="bm-vfo-list">
+							<div v-for="(v, vi) in bookmarkEdit.vfos" :key="vi" class="bm-vfo-edit-row">
+								<span class="bookmark-vfo-dot" :style="{ background: vfoColor(vi) }"></span>
+								<input type="number" v-model.number="v.freq" step="0.001" class="bm-edit-input" style="width:90px" placeholder="MHz">
+								<span style="opacity:0.5;font-size:11px">MHz</span>
+								<select v-model="v.mode" class="bm-edit-select" style="width:60px">
+									<option v-for="m in ['nfm','am','usb','lsb','wfm','dsb','cw','raw']" :key="m" :value="m">{{ m.toUpperCase() }}</option>
+								</select>
+								<button class="bookmark-btn bookmark-delete" style="flex-shrink:0" @click="bookmarkEdit.vfos.splice(vi,1)" :disabled="bookmarkEdit.vfos.length <= 1" title="Remove VFO">&times;</button>
+							</div>
+						</div>
+						<button class="btn" style="margin-top:6px;font-size:11px;padding:2px 8px" @click="addVfoToEditGroup">+ Add VFO</button>
+					</template>
+				</div>
+				<div class="bookmark-dialog-footer">
+					<button class="btn" @click="bookmarkEdit.show = false">Cancel</button>
+					<button class="btn btn-primary" @click="confirmEditBookmark" :disabled="!bookmarkEdit.name.trim()">Save Changes</button>
+				</div>
+			</div>
+		</div>
+
+		<!-- Remote clients management dialog -->
+		<div v-if="showRemoteClientsDialog" class="bookmark-overlay" @click.self="showRemoteClientsDialog = false">
+			<div class="bookmark-dialog remote-clients-dialog">
+				<div class="bookmark-dialog-title">Connected Clients</div>
+				<div class="bookmark-dialog-body">
+					<div v-if="remoteClients.length === 0" class="remote-clients-empty">
+						No clients connected
+					</div>
+					<div v-else class="remote-client-list">
+						<div v-for="client in remoteClients" :key="client.id" class="remote-client-item">
+							<div class="remote-client-info">
+								<div class="remote-client-id">{{ client.id.substring(0, 12) }}</div>
+								<div class="remote-client-meta">
+									<span v-if="client.country" class="remote-client-country">{{ client.country }}</span>
+									<span v-if="client.firstFreq !== null" class="remote-client-freq">{{ formatFreq(client.firstFreq) }} MHz</span>
+									<span class="remote-client-vfos">{{ client.vfoCount }} VFO{{ client.vfoCount !== 1 ? 's' : '' }}</span>
+									<span v-if="client.isRelay" class="remote-client-relay">RELAY</span>
+								</div>
+								<div class="remote-client-duration">Connected {{ remoteClientDuration(client.connectedAt) }}</div>
+							</div>
+							<button class="btn btn-kick" @click="kickRemoteClient(client.id)">Kick</button>
+						</div>
+					</div>
+				</div>
+				<div class="bookmark-dialog-footer">
+					<button class="btn" @click="showRemoteClientsDialog = false">Close</button>
+				</div>
+			</div>
+		</div>
+
+		<!-- Device picker dialog -->
+		<div v-if="devicePicker.show" class="bookmark-overlay" @click.self="devicePicker.show = false">
+			<div class="bookmark-dialog device-picker-dialog">
+				<div class="bookmark-dialog-title">Select SDR Device</div>
+				<div class="bookmark-dialog-body" style="padding: 0;">
+					<div class="device-picker-list">
+						<div v-for="(entry, i) in devicePicker.devices" :key="i"
+							class="device-picker-item" @click="connectToDevice(entry.device)">
+							<div class="device-picker-name">{{ entry.driverName }}</div>
+							<div class="device-picker-meta">{{ entry.productName || 'USB ' + entry.device.vendorId.toString(16) + ':' + entry.device.productId.toString(16) }}</div>
+						</div>
+					</div>
+				</div>
+				<div class="bookmark-dialog-footer" style="display: flex; gap: 8px;">
+					<button class="btn btn-primary" style="flex: 1;" @click="pairNewDevice">Pair New Device</button>
+					<button class="btn" @click="devicePicker.show = false">Cancel</button>
+				</div>
+			</div>
+		</div>
+
+		<!-- Audio unlock overlay (shown when auto-connecting via URL, browser requires a user gesture) -->
+		<div class="audio-unlock-overlay" v-if="audioUnlockPendingId" @click="unlockAndConnect">
+			<div class="audio-unlock-box">
+				<svg viewBox="0 0 24 24" width="48" height="48"><path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+				<div class="audio-unlock-title">Click to Enable Audio</div>
+				<div class="audio-unlock-sub">Connecting in background&hellip;</div>
+			</div>
+		</div>
+
+		<!-- Remote connect dialog -->
+		<div v-if="showRemoteConnectDialog" class="bookmark-overlay" @click.self="showRemoteConnectDialog = false">
+			<div class="bookmark-dialog">
+				<div class="bookmark-dialog-title">Connect to Remote SDR</div>
+				<div class="bookmark-dialog-body">
+					<div class="bm-edit-row" style="margin-bottom: 16px;">
+						<input type="text" v-model="remoteConnectId" class="bookmark-dialog-input" @keyup.enter="connectToRemoteId(remoteConnectId)" @keyup.esc="showRemoteConnectDialog = false" placeholder="Enter remote share code or link">
+					</div>
+					<div v-if="recentRemoteIds.length > 0" class="recent-remotes">
+						<div class="bm-edit-section-label" style="margin-bottom: 8px;">Recent Connections</div>
+						<div class="recent-remotes-list" style="display: flex; flex-direction: column; gap: 6px;">
+							<div v-for="id in recentRemoteIds" :key="id" class="recent-remote-item" @click="connectToRemoteId(id)">
+								<span class="recent-remote-id" :title="id">{{ id }}</span>
+								<button class="bookmark-btn bookmark-delete" style="flex-shrink: 0;" @click.stop="removeRecentRemoteId(id)" title="Remove">&times;</button>
+							</div>
+						</div>
+					</div>
+				</div>
+				<div class="bookmark-dialog-footer">
+					<button class="btn" @click="showRemoteConnectDialog = false">Cancel</button>
+					<button class="btn btn-primary" @click="connectToRemoteId(remoteConnectId)" :disabled="!remoteConnectId.trim()">Connect</button>
+				</div>
+			</div>
+		</div>
+
+
+		<!-- VFO conflict resolution dialog -->
+		<div v-if="vfoConflictDialog.show" class="bookmark-overlay">
+			<div class="bookmark-dialog">
+				<div class="bookmark-dialog-title">VFO Outside Bandwidth</div>
+				<div class="bookmark-dialog-body">
+					<p style="margin:0 0 12px">The requested frequency does not fit within the current bandwidth with all existing VFOs.</p>
+
+					<div v-if="vfoConflictDialog.optionA" style="margin-bottom:8px">
+						<button class="btn btn-primary" style="width:100%;text-align:left;white-space:normal"
+							@click="resolveVfoConflict('a')">
+							Re-center to {{ formatFreq(vfoConflictDialog.optionA.centerFreq) }} MHz
+							<br><small>{{ vfoConflictDialog.optionA.description }}</small>
+						</button>
+					</div>
+
+					<div v-if="vfoConflictDialog.optionB" style="margin-bottom:8px">
+						<button class="btn" style="width:100%;text-align:left;white-space:normal"
+							@click="resolveVfoConflict('b')">
+							Re-center to {{ formatFreq(vfoConflictDialog.optionB.centerFreq) }} MHz
+							<br><small>Only includes VFO {{ vfoConflictDialog.vfoIndex + 1 }}; VFO{{ vfoConflictDialog.optionB.excludedVfos.length > 1 ? 's' : '' }} {{ vfoConflictDialog.optionB.excludedVfos.map(i => i + 1).join(', ') }} will be outside bandwidth</small>
+						</button>
+					</div>
+				</div>
+				<div class="bookmark-dialog-footer">
+					<button class="btn" @click="resolveVfoConflict('cancel')">Cancel</button>
+				</div>
+			</div>
+		</div>
+
+		<!-- Dialogs -->
+		<div class="snackbar" :class="{ show: snackbar.show }">{{ snackbar.message }}</div>
+	</div>
+</body>
+</html>
