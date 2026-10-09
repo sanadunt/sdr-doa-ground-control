@@ -23,7 +23,7 @@ python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 ```
 
-`paho-mqtt` hanya diperlukan untuk MQTT monitor, synthetic publisher, atau test MQTT. Install jika fitur tersebut diperlukan:
+Perintah Ground Console default di bawah mengaktifkan monitor MQTT (`10.90.0.1:9001`), sehingga `paho-mqtt` harus diinstal sebelum server dijalankan meskipun broker belum tersedia. Untuk menjalankan tanpa monitor di instalasi baru, gunakan `--mqtt-host ''`; konfigurasi koneksi yang sudah tersimpan tetap mengalahkan nilai CLI.
 
 ```sh
 .venv/bin/python -m pip install 'paho-mqtt==2.1.0'
@@ -99,7 +99,7 @@ py -3 -m venv .venv
 .venv\Scripts\python.exe -m pip install --upgrade pip
 ```
 
-Install dependency MQTT hanya jika diperlukan:
+Perintah Ground Console default di bawah mengaktifkan monitor MQTT (`10.90.0.1:9001`), sehingga `paho-mqtt` harus diinstal sebelum server dijalankan meskipun broker belum tersedia:
 
 PowerShell:
 
