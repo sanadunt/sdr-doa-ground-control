@@ -11,10 +11,13 @@ export function PolarPanel({
   snapshot,
   localSnapshotFresh,
   compassSettings,
+  onHide,
 }: {
   snapshot: TelemetrySnapshot | null;
   localSnapshotFresh: boolean;
   compassSettings: PolarSettings;
+  /** Shown as a Hide button when the panel floats over the map. */
+  onHide?: () => void;
 }): JSX.Element {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
@@ -36,9 +39,12 @@ export function PolarPanel({
           <StatusBadge label={availabilityLabel} tone={availabilityTone} />
           <span className="polar-status-detail">{statusDetail}</span>
         </div>
-        <button type="button" className="toolbar-button polar-expand-button" aria-pressed={expanded} onClick={() => setExpanded(!expanded)}>
-          <Icon name={expanded ? 'collapse' : 'expand'} /><span>{expanded ? t('polar.restore') : t('polar.expand')}</span>
-        </button>
+        <div className="polar-actions">
+          <button type="button" className="toolbar-button polar-expand-button" aria-pressed={expanded} onClick={() => setExpanded(!expanded)}>
+            <Icon name={expanded ? 'collapse' : 'expand'} /><span>{expanded ? t('polar.restore') : t('polar.expand')}</span>
+          </button>
+          {onHide ? <button type="button" className="toolbar-button polar-hide-button" onClick={onHide} aria-label={t('dashboard.hidePolar')} title={t('dashboard.hidePolar')}><Icon name="close" /></button> : null}
+        </div>
       </div>
       <div className="polar-frame">
         <PolarPlot values={available ? view.values : null} settings={compassSettings} simulation={Boolean(snapshot?.simulation)} />

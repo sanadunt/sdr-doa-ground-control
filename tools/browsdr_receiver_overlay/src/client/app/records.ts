@@ -11,6 +11,25 @@ function nextRecordRequestId(app: object): number {
 	return next;
 }
 
+// Marker-set saves run one at a time. A save requested while one is in flight
+// is folded into a single follow-up save, and the follow-up also runs when the
+// markers changed while the request was out. Responses never replace the local
+// marker list, so an older reply cannot drop a marker added after it was sent.
+const markerSaveStates = new WeakMap<object, { running: Promise<void> | null; again: boolean }>();
+
+function markerSaveStateFor(app: object): { running: Promise<void> | null; again: boolean } {
+	let state = markerSaveStates.get(app);
+	if (!state) {
+		state = { running: null, again: false };
+		markerSaveStates.set(app, state);
+	}
+	return state;
+}
+
+function markerSignature(markers: ReceiverMarker[]): string {
+	return JSON.stringify(markers.map(marker => [marker.id, marker.frequencyHz, marker.powerDb, marker.label]));
+}
+
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
@@ -182,7 +201,24 @@ export const recordsMethods = {
 		else this.candidateFilterChanged();
 	},
 
-	async saveMarkerSet(this: AppInstance) {
+	saveMarkerSet(this: AppInstance): Promise<void> {
+		const state = markerSaveStateFor(this);
+		if (state.running) {
+			state.again = true;
+			return state.running;
+		}
+		state.running = (async () => {
+			do {
+				state.again = false;
+				await this.saveMarkerSetOnce();
+			} while (state.again);
+		})().finally(() => {
+			state.running = null;
+		});
+		return state.running;
+	},
+
+	async saveMarkerSetOnce(this: AppInstance) {
 		const name = String(this.records.markerSetName || '').trim();
 		if (!name) {
 			this.records.error = 'Enter a name before saving this marker set.';
@@ -194,19 +230,18 @@ export const recordsMethods = {
 			this.records.error = 'Marker frequencies must be positive and finite; measured powers must be finite.';
 			return;
 		}
+		const sent = (this.records.markers as ReceiverMarker[]).map(marker => ({ ...marker }));
 		try {
 			const saved = await receiverRecordsApi.saveMarkerSet({
 				id: this.records.selectedMarkerSetId,
 				name,
-				markers: (this.records.markers as ReceiverMarker[]).map(marker => ({ ...marker })),
+				markers: sent,
 			});
 			const index = this.records.markerSets.findIndex((set: { id: string }) => set.id === saved.id);
 			if (index < 0) this.records.markerSets.push(saved);
 			else this.records.markerSets[index] = saved;
 			this.records.selectedMarkerSetId = saved.id;
-			this.records.markerSetName = saved.name;
-			this.records.markers = saved.markers.map(marker => ({ ...marker }));
-			this.records.markerFrequencyDrafts = markerFrequencyDrafts(this.records.markers);
+			if (markerSignature(this.records.markers) !== markerSignature(sent)) markerSaveStateFor(this).again = true;
 			this.records.error = '';
 			this.candidateFilterChanged();
 		} catch (error) {

@@ -1,14 +1,19 @@
+import gc
 import json
+import os
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
+import warnings
+from contextlib import closing
 from pathlib import Path
 
 TOOLS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS_DIR))
 
-from receiver_record_store import ReceiverRecordStore
+from receiver_record_store import ABANDONED_AUDIO_IDLE_SECONDS, ReceiverRecordStore
 
 
 class ReceiverRecordStoreTests(unittest.TestCase):
@@ -125,7 +130,7 @@ class ReceiverRecordStoreTests(unittest.TestCase):
                     "bandwidthHz": 20_000, "peakDb": -30, "snrDb": 60, "hits": 1,
                 },
             ]
-            with sqlite3.connect(Path(legacy_dir) / "receiver.sqlite3") as db:
+            with closing(sqlite3.connect(Path(legacy_dir) / "receiver.sqlite3")) as db, db:
                 db.executescript("""
                     CREATE TABLE scans (
                         id TEXT PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT,
@@ -361,6 +366,123 @@ class ReceiverRecordStoreTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             self.store.get_segment_audio(segment["id"])
 
+
+    SEGMENT = {
+        "vfo_index": 0, "frequency_hz": 145_500_000, "mode": "NFM", "bandwidth_hz": 12_500,
+        "codec": "audio/webm;codecs=opus", "started_at": "2026-10-09T01:00:00Z",
+    }
+
+    def test_operations_close_their_database_connections(self):
+        gc.collect()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            scan = self.store.create_scan("receiver", {}, True)
+            self.store.upsert_candidates(scan["id"], [{"id": 1, "peakFrequencyHz": 100.0, "peakDb": -40.0}])
+            self.store.get_candidates(scan["id"], marked_only=True, marker_frequencies=[100.0])
+            self.store.save_markers({"name": "A", "markers": []})
+            self.store.list_records()
+            gc.collect()
+        leaks = [warning for warning in caught if issubclass(warning.category, ResourceWarning) and "unclosed database" in str(warning.message)]
+        self.assertEqual(leaks, [])
+
+    def test_database_uses_write_ahead_logging(self):
+        db = sqlite3.connect(Path(self.temp.name) / "receiver.sqlite3")
+        try:
+            self.assertEqual(db.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+        finally:
+            db.close()
+
+    def test_marker_set_rename_onto_existing_name_is_rejected_cleanly(self):
+        first = self.store.save_markers({"name": "Uplink", "markers": []})
+        second = self.store.save_markers({"name": "Downlink", "markers": []})
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            self.store.save_markers({"id": second["id"], "name": "Uplink", "markers": []})
+        renamed = self.store.save_markers({"id": second["id"], "name": "Downlink 2", "markers": []})
+        self.assertEqual(renamed["id"], second["id"])
+        self.assertEqual({item["name"] for item in self.store.get_markers()}, {"Uplink", "Downlink 2"})
+        self.assertEqual(self.store.get_markers(first["id"])["name"], "Uplink")
+        with self.assertRaisesRegex(ValueError, "label"):
+            self.store.save_markers({"name": "Bad", "markers": [{"frequency_hz": 1.0, "power_db": None, "label": {"x": 1}}]})
+        with self.assertRaisesRegex(ValueError, "label"):
+            self.store.save_markers({"name": "Long", "markers": [{"frequency_hz": 1.0, "power_db": None, "label": "x" * 81}]})
+
+    def test_interrupted_recording_is_recovered_on_restart(self):
+        session = self.store.create_audio_session()
+        segment = self.store.create_audio_segment(session["id"], self.SEGMENT)
+        self.store.append_segment_audio(segment["id"], b"a" * 300)
+        part = Path(self.temp.name) / "tmp" / f"{segment['id']}.part"
+        with part.open("ab") as target:
+            target.write(b"unacknowledged tail")
+        self.assertEqual(self.store.list_records(record_type="audio-session")["total"], 0)
+
+        restarted = ReceiverRecordStore(self.temp.name)
+        records = restarted.list_records(record_type="audio-session")
+        self.assertEqual(records["total"], 1)
+        recovered = records["items"][0]["segments"][0]
+        self.assertEqual(recovered["status"], "complete")
+        self.assertTrue(recovered["recovered"])
+        self.assertEqual(recovered["bytes"], 300)
+        path, _ = restarted.get_segment_audio(segment["id"])
+        self.assertEqual(path.read_bytes(), b"a" * 300)
+        self.assertEqual(os.listdir(Path(self.temp.name) / "tmp"), [])
+
+    def test_interrupted_segment_without_audio_is_marked_failed(self):
+        session = self.store.create_audio_session()
+        segment = self.store.create_audio_segment(session["id"], self.SEGMENT)
+        restarted = ReceiverRecordStore(self.temp.name)
+        recovered = restarted.list_records(record_type="audio-session")["items"][0]["segments"][0]
+        self.assertEqual(recovered["status"], "failed")
+        with self.assertRaises(KeyError):
+            restarted.get_segment_audio(segment["id"])
+
+    def test_empty_abandoned_session_is_removed_on_restart(self):
+        self.store.create_audio_session()
+        restarted = ReceiverRecordStore(self.temp.name)
+        self.assertEqual(restarted.list_records(record_type="audio-session")["total"], 0)
+        db = sqlite3.connect(Path(self.temp.name) / "receiver.sqlite3")
+        try:
+            self.assertEqual(db.execute("SELECT count(*) FROM audio_sessions").fetchone()[0], 0)
+        finally:
+            db.close()
+
+    def test_idle_recording_is_recovered_when_next_recording_starts(self):
+        stale = self.store.create_audio_session()
+        stale_segment = self.store.create_audio_segment(stale["id"], self.SEGMENT)
+        self.store.append_segment_audio(stale_segment["id"], b"s" * 10)
+        active = self.store.create_audio_session()
+        active_segment = self.store.create_audio_segment(active["id"], self.SEGMENT)
+        self.store.append_segment_audio(active_segment["id"], b"n" * 10)
+        old = time.time() - ABANDONED_AUDIO_IDLE_SECONDS - 60
+        os.utime(Path(self.temp.name) / "tmp" / f"{stale_segment['id']}.part", (old, old))
+        db = sqlite3.connect(Path(self.temp.name) / "receiver.sqlite3")
+        try:
+            with db:
+                db.execute("UPDATE audio_sessions SET started_at='2026-01-01T00:00:00+00:00' WHERE id=?", (stale["id"],))
+        finally:
+            db.close()
+
+        self.store.create_audio_session()
+        listed = {item["id"] for item in self.store.list_records(record_type="audio-session")["items"]}
+        self.assertEqual(listed, {stale["id"]})
+        # The recorder that is still writing keeps its open segment.
+        self.assertEqual(self.store.append_segment_audio(active_segment["id"], b"m")["segment_bytes"], 11)
+
+    def test_interrupted_archive_scan_becomes_a_stopped_record(self):
+        self.store.update_settings({"auto_spectrum_recording": True})
+        scan = self.store.create_scan("receiver", {"start_hz": 1, "end_hz": 2}, True)
+        self.store.add_trace(scan["id"], 1, bytes(2048))
+        restarted = ReceiverRecordStore(self.temp.name)
+        records = restarted.list_records(record_type="scan")["items"]
+        self.assertEqual([item["id"] for item in records], [scan["id"]])
+        self.assertEqual(records[0]["status"], "stopped")
+        self.assertEqual(records[0]["trace_count"], 1)
+
+    def test_new_scan_keeps_an_abandoned_archive_scan(self):
+        abandoned = self.store.create_scan("receiver", {}, True)
+        self.store.create_scan("receiver", {}, True)
+        records = self.store.list_records(record_type="scan")["items"]
+        self.assertEqual([item["id"] for item in records], [abandoned["id"]])
+        self.assertEqual(self.store.finish_scan(abandoned["id"], "complete")["status"], "complete")
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,5 @@
 import type { JSX } from 'react';
-import { Suspense, lazy, memo, useMemo } from 'react';
+import { Suspense, lazy, memo, useCallback, useMemo, useState } from 'react';
 import type { CompassConfig, GpsConfig, MapCoordinate, PolarSettings, TelemetrySnapshot } from '../types';
 import type { SimulationSettings } from '../lib/simulation';
 import { resolveGpsSource } from '../lib/map';
@@ -11,6 +11,12 @@ import { PolarPanel } from '../components/PolarPanel';
 // MapLibre is the largest dependency in the app; load it beside the shell
 // instead of blocking the first paint on it.
 const TacticalMap = lazy(() => import('../components/TacticalMap').then((module) => ({ default: module.TacticalMap })));
+
+const POLAR_OVERLAY_KEY = 'sdr-console-polar-overlay';
+
+function loadPolarOverlayVisible(): boolean {
+  try { return window.localStorage.getItem(POLAR_OVERLAY_KEY) !== 'hidden'; } catch { return true; }
+}
 
 function MapPlaceholder(): JSX.Element {
   const { t } = useI18n();
@@ -50,16 +56,30 @@ function OverviewPageView({
   const figType = simulation ? 'Polar' : compassSettings.figType;
   const compassOffset = simulation ? 0 : compassSettings.compassOffset;
   const settings = useMemo<PolarSettings>(() => ({ figType, compassOffset }), [figType, compassOffset]);
+  const [polarVisible, setPolarVisible] = useState(loadPolarOverlayVisible);
+  const togglePolar = useCallback(() => {
+    setPolarVisible((visible) => {
+      try { window.localStorage.setItem(POLAR_OVERLAY_KEY, visible ? 'hidden' : 'shown'); } catch { /* optional */ }
+      return !visible;
+    });
+  }, []);
 
   return (
     <div className="page page-overview" aria-label={t('route.overview')}>
       <h1 className="visually-hidden">{t('route.overview')}</h1>
       <DoaReadout snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} coordinate={coordinate} settings={settings} />
-      <div className="overview-spatial">
+      {/* The map fills the Dashboard; the DoA polar graph floats over it and can be hidden. */}
+      <div className="overview-spatial overview-fullmap">
         <Suspense fallback={<MapPlaceholder />}>
-          <TacticalMap coordinate={coordinate} snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} />
+          <TacticalMap
+            coordinate={coordinate}
+            snapshot={snapshot}
+            localSnapshotFresh={localSnapshotFresh}
+            overlay={<PolarPanel snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} compassSettings={settings} onHide={togglePolar} />}
+            overlayVisible={polarVisible}
+            onToggleOverlay={togglePolar}
+          />
         </Suspense>
-        <PolarPanel snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} compassSettings={settings} />
       </div>
     </div>
   );

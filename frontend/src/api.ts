@@ -1,4 +1,5 @@
 import type { Branding, ConsoleConfig, MqttSnapshot, TelemetrySnapshot } from './types';
+import { normalizeTileSets, type TileSet } from './lib/basemaps';
 
 export const DEFAULT_API_TIMEOUT_MS = 10_000;
 
@@ -212,6 +213,15 @@ export async function getBranding(signal?: AbortSignal): Promise<Branding> {
     credentials: 'same-origin',
   }, signal);
   return normalizeBranding(body);
+}
+
+/** Local raster MBTiles files available as offline basemaps. */
+export async function getTileSets(signal?: AbortSignal): Promise<TileSet[]> {
+  const body = await requestJson<unknown>('/api/tiles', {
+    cache: 'no-store',
+    credentials: 'same-origin',
+  }, signal);
+  return normalizeTileSets(body);
 }
 
 export async function getAdminStatus(signal?: AbortSignal): Promise<{ authenticated: boolean }> {

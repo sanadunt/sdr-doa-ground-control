@@ -8,9 +8,10 @@ import re
 import sqlite3
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 TRACE_BYTES = 2048
@@ -19,6 +20,11 @@ MAX_AUDIO_CHUNK_BYTES = 1024 * 1024
 MAX_AUDIO_SEGMENT_BYTES = 256 * 1024 * 1024
 MAX_AUDIO_SESSION_BYTES = 1024 * 1024 * 1024
 DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "sdr-doa-ground-console"
+# An unfinished audio session with no file activity for this long is treated as
+# abandoned (browser closed or crashed) when the next recording starts.
+ABANDONED_AUDIO_IDLE_SECONDS = 120
+MAX_MARKER_SET_NAME = 120
+MAX_MARKER_LABEL = 80
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 
@@ -79,6 +85,8 @@ class ReceiverRecordStore:
         self.db_path = self.data_dir / "receiver.sqlite3"
         self._lock = threading.RLock()
         self._initialize()
+        self._recover_interrupted_scans()
+        self._recover_abandoned_audio(idle_seconds=None)
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.db_path, timeout=10)
@@ -86,8 +94,26 @@ class ReceiverRecordStore:
         db.execute("PRAGMA foreign_keys=ON")
         return db
 
+    @contextmanager
+    def _db(self) -> Iterator[sqlite3.Connection]:
+        # sqlite3's own context manager only commits or rolls back; it never
+        # closes, so every request used to leave a connection behind.
+        db = self._connect()
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
+
     def _initialize(self) -> None:
-        with self._lock, self._connect() as db:
+        with self._lock:
+            # WAL lets readers continue while audio chunks and traces are written.
+            db = self._connect()
+            try:
+                db.execute("PRAGMA journal_mode=WAL")
+            finally:
+                db.close()
+        with self._lock, self._db() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS scans (
@@ -182,11 +208,122 @@ class ReceiverRecordStore:
                 CREATE INDEX IF NOT EXISTS candidates_last_seen_order ON candidates(scan_id,last_seen DESC,candidate_id);
                 CREATE INDEX IF NOT EXISTS frames_scan_sweep_order ON frames(scan_id,sweep);
             """)
+    def _finish_interrupted_scan(self, db: sqlite3.Connection, scan_id: str, metadata: Dict[str, Any], stamp: str) -> None:
+        metadata.update({"status": "stopped", "interrupted": True})
+        db.execute("UPDATE scans SET finished_at=?,metadata=? WHERE id=?", (stamp, _json(metadata), scan_id))
+        db.execute(
+            "INSERT INTO records(id,scan_id,created_at,metadata) VALUES(?,?,?,?) "
+            "ON CONFLICT(scan_id) DO UPDATE SET metadata=excluded.metadata",
+            (scan_id, scan_id, stamp, _json(metadata)),
+        )
+
+    def _recover_interrupted_scans(self) -> None:
+        """Archive scans left running by a crash or closed tab become stopped records.
+
+        Without this they never reach Records, yet their traces stay on disk.
+        """
+        stamp = _now()
+        with self._lock, self._db() as db:
+            for row in db.execute("SELECT id,metadata FROM scans WHERE finished_at IS NULL").fetchall():
+                metadata = json.loads(row["metadata"])
+                if metadata.get("archive"):
+                    self._finish_interrupted_scan(db, row["id"], metadata, stamp)
+
+    def _recover_abandoned_audio(self, idle_seconds: Optional[float]) -> int:
+        """Finalize unfinished audio sessions so their audio shows up in Records.
+
+        With ``idle_seconds`` None every unfinished session is recovered (used at
+        startup, when no recorder can still be attached). Otherwise only sessions
+        whose files have been idle that long are touched. Returns the number of
+        sessions finalized or removed.
+        """
+        now = datetime.now(timezone.utc)
+        recovered = 0
+        with self._lock:
+            with self._db() as db:
+                sessions = db.execute("SELECT id,started_at FROM audio_sessions WHERE finished_at IS NULL").fetchall()
+                segments_by_session = {
+                    row["id"]: db.execute(
+                        "SELECT id,started_at,finished_at,byte_count,temp_name,file_name,metadata "
+                        "FROM audio_segments WHERE session_id=? ORDER BY started_at",
+                        (row["id"],),
+                    ).fetchall()
+                    for row in sessions
+                }
+            for session in sessions:
+                segments = segments_by_session[session["id"]]
+                open_segments = [segment for segment in segments if segment["finished_at"] is None]
+                last_activity = _parse_audio_timestamp(session["started_at"]) or now
+                for segment in open_segments:
+                    part = self.temp_dir / f"{segment['id']}.part"
+                    if segment["temp_name"] == part.name and part.is_file():
+                        modified = datetime.fromtimestamp(part.stat().st_mtime, timezone.utc)
+                        last_activity = max(last_activity, modified)
+                if idle_seconds is not None and (now - last_activity).total_seconds() < idle_seconds:
+                    continue
+                for segment in open_segments:
+                    self._recover_audio_segment(segment)
+                with self._db() as db:
+                    remaining = db.execute(
+                        "SELECT count(*), COALESCE(SUM(byte_count),0) FROM audio_segments WHERE session_id=?",
+                        (session["id"],),
+                    ).fetchone()
+                    if remaining[0] == 0:
+                        db.execute("DELETE FROM audio_sessions WHERE id=?", (session["id"],))
+                    else:
+                        db.execute(
+                            "UPDATE audio_sessions SET finished_at=?,byte_count=? WHERE id=?",
+                            (now.isoformat(), remaining[1], session["id"]),
+                        )
+                recovered += 1
+        return recovered
+
+    def _recover_audio_segment(self, segment: sqlite3.Row) -> None:
+        segment_id = segment["id"]
+        metadata = json.loads(segment["metadata"])
+        part = self.temp_dir / f"{segment_id}.part"
+        usable = segment["temp_name"] == part.name and part.is_file() and part.stat().st_size > 0
+        if usable:
+            size = part.stat().st_size
+            byte_count = int(segment["byte_count"])
+            # A crash between the file append and the metadata update leaves an
+            # unacknowledged tail; drop it so file and metadata agree again.
+            if byte_count and size > byte_count:
+                with part.open("r+b") as target:
+                    target.truncate(byte_count)
+                size = byte_count
+            ended = datetime.fromtimestamp(part.stat().st_mtime, timezone.utc)
+            started = _parse_audio_timestamp(metadata.get("started_at")) or _parse_audio_timestamp(segment["started_at"])
+            duration = max(0.0, (ended - started).total_seconds()) if started else 0.0
+            metadata.update({"ended_at": ended.isoformat(), "duration_seconds": round(duration, 3), "status": "complete", "recovered": True})
+            final_name = f"{segment_id}.webm"
+            os.replace(part, self.audio_dir / final_name)
+            with self._db() as db:
+                db.execute(
+                    "UPDATE audio_segments SET finished_at=?,byte_count=?,file_name=?,metadata=? WHERE id=?",
+                    (ended.isoformat(), size, final_name, _json(metadata), segment_id),
+                )
+            return
+        stamp = _now()
+        metadata.update({
+            "ended_at": stamp,
+            "duration_seconds": 0,
+            "status": "failed",
+            "error": "Recording was interrupted before any audio was saved.",
+        })
+        with self._db() as db:
+            db.execute(
+                "UPDATE audio_segments SET finished_at=?,byte_count=0,file_name=NULL,metadata=? WHERE id=?",
+                (stamp, _json(metadata), segment_id),
+            )
+        if segment["temp_name"] == part.name:
+            part.unlink(missing_ok=True)
+
     def _exists(self, db: sqlite3.Connection, table: str, ident: str) -> bool:
         return db.execute(f"SELECT 1 FROM {table} WHERE id=?", (ident,)).fetchone() is not None
 
     def get_settings(self) -> Dict[str, Any]:
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             row = db.execute("SELECT value FROM settings WHERE key='auto_spectrum_recording'").fetchone()
         return {"auto_spectrum_recording": json.loads(row["value"]) if row else False}
 
@@ -196,7 +333,7 @@ class ReceiverRecordStore:
         value = values.get("auto_spectrum_recording", self.get_settings()["auto_spectrum_recording"])
         if not isinstance(value, bool):
             raise ValueError("auto_spectrum_recording must be boolean")
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             db.execute("INSERT INTO settings(key,value) VALUES('auto_spectrum_recording',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (_json(value),))
         return self.get_settings()
 
@@ -205,11 +342,16 @@ class ReceiverRecordStore:
             raise ValueError("invalid scan metadata")
         ident, stamp = str(uuid.uuid4()), _now()
         metadata = {"source": source, "config": config, "archive": archive}
-        with self._lock, self._connect() as db:
-            previous = db.execute("SELECT id,metadata FROM scans").fetchall()
+        with self._lock, self._db() as db:
+            previous = db.execute("SELECT id,finished_at,metadata FROM scans").fetchall()
             for row in previous:
-                if not json.loads(row["metadata"]).get("archive", False):
+                previous_metadata = json.loads(row["metadata"])
+                if not previous_metadata.get("archive", False):
                     db.execute("DELETE FROM scans WHERE id=?", (row["id"],))
+                elif row["finished_at"] is None:
+                    # A new scan means an earlier archive scan was abandoned
+                    # without finish; keep it as a stopped record.
+                    self._finish_interrupted_scan(db, row["id"], previous_metadata, stamp)
             db.execute("INSERT INTO scans(id,started_at,metadata) VALUES(?,?,?)", (ident, stamp, _json(metadata)))
         return {"id": ident, "created_at": stamp, "archive": archive}
 
@@ -244,7 +386,7 @@ class ReceiverRecordStore:
                 scan_id, str(candidate["id"]), _json(candidate), frequency, peak_frequency,
                 low, high, peak, snr, hits, last_seen,
             ))
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             self._require_scan(db, scan_id)
             db.executemany("""INSERT INTO candidates(scan_id,candidate_id,payload,frequency,peak_hz,low_hz,high_hz,peak,snr,hits,last_seen)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(scan_id,candidate_id) DO UPDATE SET
@@ -281,7 +423,7 @@ class ReceiverRecordStore:
         if minimum_peak_db is not None:
             where.append("peak>=?")
             params.append(minimum_peak_db)
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             self._require_scan(db, scan_id)
             marked_frequencies: List[float] = []
             if marked_only or marker_id:
@@ -392,7 +534,7 @@ class ReceiverRecordStore:
             raise ValueError("sweep must be a nonnegative integer")
         if not isinstance(payload, bytes) or len(payload) != TRACE_BYTES:
             raise ValueError("trace must contain exactly 2048 bytes")
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             self._require_scan(db, scan_id)
             settings_enabled = json.loads(db.execute("SELECT value FROM settings WHERE key='auto_spectrum_recording'").fetchone()[0])
             metadata = json.loads(db.execute("SELECT metadata FROM scans WHERE id=?", (scan_id,)).fetchone()[0])
@@ -406,7 +548,7 @@ class ReceiverRecordStore:
         if status not in {"complete", "stopped", "failed"}:
             raise ValueError("invalid scan status")
         stamp = _now()
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             self._require_scan(db, scan_id)
             metadata = json.loads(db.execute("SELECT metadata FROM scans WHERE id=?", (scan_id,)).fetchone()["metadata"])
             metadata["status"] = status
@@ -420,7 +562,7 @@ class ReceiverRecordStore:
         if not isinstance(frequency_hz, (int, float)) or isinstance(frequency_hz, bool) or not math.isfinite(frequency_hz):
             raise ValueError("near_frequency_hz must be a finite number")
         _, limit = _page(0, limit)
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             self._require_scan(db, scan_id)
             row = db.execute("""SELECT payload, MAX(low_hz-?, ?-high_hz, 0) AS interval_distance
                 FROM candidates WHERE scan_id=? AND high_hz>=?-50000 AND low_hz<=?+50000
@@ -430,7 +572,7 @@ class ReceiverRecordStore:
 
     def scan_info(self, scan_id: str) -> Dict[str, Any]:
         scan_id = _id(scan_id)
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             row = db.execute("SELECT started_at,finished_at,metadata FROM scans WHERE id=?", (scan_id,)).fetchone()
             if row is None:
                 raise KeyError("scan not found")
@@ -449,7 +591,7 @@ class ReceiverRecordStore:
         offset, limit = _page(offset, limit)
         if order not in {"asc", "desc"}:
             raise ValueError("order must be asc or desc")
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             self._require_scan(db, scan_id)
             total = db.execute("SELECT count(*) FROM frames WHERE scan_id=?", (scan_id,)).fetchone()[0]
             rows = db.execute(f"SELECT sweep,captured_at FROM frames WHERE scan_id=? ORDER BY sweep {order.upper()} LIMIT ? OFFSET ?", (scan_id, limit, offset)).fetchall()
@@ -460,7 +602,7 @@ class ReceiverRecordStore:
         scan_id = _id(scan_id)
         if isinstance(sweep, bool) or not isinstance(sweep, int) or sweep < 0:
             raise ValueError("sweep must be a nonnegative integer")
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             row = db.execute("SELECT payload FROM frames WHERE scan_id=? AND sweep=?", (scan_id, sweep)).fetchone()
         if row is None:
             raise KeyError("trace not found")
@@ -473,7 +615,7 @@ class ReceiverRecordStore:
         offset, limit = _page(offset, limit, maximum=200)
         if record_type not in (None, "scan", "audio-session"):
             raise ValueError("record type must be scan or audio-session")
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             if record_type == "scan":
                 total = db.execute("SELECT count(*) FROM records").fetchone()[0]
             elif record_type == "audio-session":
@@ -630,7 +772,7 @@ class ReceiverRecordStore:
         if not has_filter:
             return self.list_records(offset, limit, "audio-session")
 
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             rows = db.execute(
                 """SELECT a.id AS session_id,a.started_at AS session_started_at,a.finished_at AS session_finished_at,
                     g.id AS segment_id,g.started_at AS segment_started_at,g.finished_at AS segment_finished_at,
@@ -717,7 +859,7 @@ class ReceiverRecordStore:
 
     def audio_record_facets(self, time_zone: str) -> Dict[str, Any]:
         zone = _audio_time_zone(time_zone)
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             rows = db.execute(
                 """SELECT g.started_at AS segment_started_at,g.metadata AS segment_metadata
                 FROM audio_sessions a JOIN audio_segments g ON g.session_id=a.id
@@ -778,7 +920,7 @@ class ReceiverRecordStore:
     def delete_audio_segment(self, segment_id: str) -> bool:
         ident = _id(segment_id)
         with self._lock:
-            with self._connect() as db:
+            with self._db() as db:
                 row = db.execute(
                     """SELECT g.session_id,g.finished_at,g.byte_count,g.temp_name,g.file_name
                     FROM audio_segments g JOIN audio_sessions a ON a.id=g.session_id WHERE g.id=?""",
@@ -803,7 +945,7 @@ class ReceiverRecordStore:
 
     def delete_record(self, record_id: str) -> bool:
         ident = _id(record_id)
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             scan = db.execute("SELECT scan_id FROM records WHERE id=?", (ident,)).fetchone()
             if scan is not None:
                 db.execute("DELETE FROM records WHERE id=?", (ident,))
@@ -826,8 +968,9 @@ class ReceiverRecordStore:
     def create_audio_session(self, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if metadata is not None and not isinstance(metadata, dict):
             raise ValueError("audio session metadata must be an object")
+        self._recover_abandoned_audio(idle_seconds=ABANDONED_AUDIO_IDLE_SECONDS)
         ident, stamp = str(uuid.uuid4()), _now()
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             db.execute("INSERT INTO audio_sessions(id,started_at,temp_name,metadata) VALUES(?,?,?,?)", (ident, stamp, "", _json(metadata or {})))
         return {"id": ident, "started_at": stamp}
 
@@ -846,7 +989,7 @@ class ReceiverRecordStore:
         temp_name = f"{ident}.part"
         temp_path = self.temp_dir / temp_name
         with self._lock:
-            with self._connect() as db:
+            with self._db() as db:
                 row = db.execute("SELECT finished_at FROM audio_sessions WHERE id=?", (session_id,)).fetchone()
                 if row is None:
                     raise KeyError("audio session not found")
@@ -855,7 +998,7 @@ class ReceiverRecordStore:
             fd = os.open(temp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             os.close(fd)
             try:
-                with self._connect() as db:
+                with self._db() as db:
                     db.execute("INSERT INTO audio_segments(id,session_id,started_at,temp_name,metadata) VALUES(?,?,?,?,?)", (ident, session_id, stamp, temp_name, _json(metadata)))
             except Exception:
                 temp_path.unlink(missing_ok=True)
@@ -867,7 +1010,7 @@ class ReceiverRecordStore:
         if not isinstance(payload, bytes) or not payload or len(payload) > MAX_AUDIO_CHUNK_BYTES:
             raise ValueError("audio chunk must be between 1 byte and 1 MiB")
         with self._lock:
-            with self._connect() as db:
+            with self._db() as db:
                 row = db.execute("""SELECT a.id AS session_id,a.byte_count AS session_bytes,a.finished_at AS session_finished,
                     g.byte_count AS segment_bytes,g.finished_at AS segment_finished,g.temp_name
                     FROM audio_segments g JOIN audio_sessions a ON a.id=g.session_id WHERE g.id=?""", (segment_id,)).fetchone()
@@ -890,7 +1033,7 @@ class ReceiverRecordStore:
                     target.write(payload)
                     target.flush()
                     os.fsync(target.fileno())
-                with self._connect() as db:
+                with self._db() as db:
                     db.execute("UPDATE audio_sessions SET byte_count=byte_count+? WHERE id=?", (len(payload), row["session_id"]))
                     db.execute("UPDATE audio_segments SET byte_count=byte_count+? WHERE id=?", (len(payload), segment_id))
             except Exception:
@@ -903,7 +1046,7 @@ class ReceiverRecordStore:
 
     def finish_audio_session(self, session_id: str) -> Dict[str, Any]:
         session_id = _id(session_id)
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             row = db.execute("SELECT byte_count,finished_at FROM audio_sessions WHERE id=?", (session_id,)).fetchone()
             if row is None:
                 raise KeyError("audio session not found")
@@ -928,7 +1071,7 @@ class ReceiverRecordStore:
         if status not in {"complete", "failed"} or not isinstance(error, str) or len(error) > 2048:
             raise ValueError("invalid segment recording status")
         with self._lock:
-            with self._connect() as db:
+            with self._db() as db:
                 row = db.execute("""SELECT g.session_id,g.started_at,g.finished_at,g.byte_count,g.temp_name,g.file_name,
                     a.finished_at AS session_finished,g.metadata FROM audio_segments g
                     JOIN audio_sessions a ON a.id=g.session_id WHERE g.id=?""", (segment_id,)).fetchone()
@@ -952,7 +1095,7 @@ class ReceiverRecordStore:
                     "status": "failed",
                     "error": error or "Audio segment recording failed.",
                 })
-                with self._connect() as db:
+                with self._db() as db:
                     db.execute("UPDATE audio_segments SET finished_at=?,file_name=NULL,metadata=? WHERE id=?",
                                (ended_at, _json(metadata), segment_id))
                 temp_path.unlink(missing_ok=True)
@@ -964,7 +1107,7 @@ class ReceiverRecordStore:
             metadata.pop("error", None)
             os.replace(temp_path, final_path)
             try:
-                with self._connect() as db:
+                with self._db() as db:
                     db.execute("UPDATE audio_segments SET finished_at=?,file_name=?,metadata=? WHERE id=?",
                                (ended_at, final_name, _json(metadata), segment_id))
             except Exception:
@@ -974,7 +1117,7 @@ class ReceiverRecordStore:
 
     def get_segment_audio(self, segment_id: str) -> Tuple[Path, str]:
         segment_id = _id(segment_id)
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             row = db.execute("SELECT file_name,metadata FROM audio_segments WHERE id=? AND finished_at IS NOT NULL", (segment_id,)).fetchone()
         if row is None:
             raise KeyError("audio segment not found")
@@ -990,7 +1133,7 @@ class ReceiverRecordStore:
         return path, "audio/webm"
 
     def get_markers(self, marker_id: Optional[str] = None) -> Any:
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             if marker_id is not None:
                 ident = _id(marker_id)
                 rows = db.execute("SELECT id,name,payload FROM markers WHERE id=?", (ident,)).fetchall()
@@ -1002,6 +1145,8 @@ class ReceiverRecordStore:
     def save_markers(self, payload: Dict[str, Any], marker_id: Optional[str] = None) -> Dict[str, Any]:
         if not isinstance(payload, dict) or not isinstance(payload.get("name"), str) or not payload["name"].strip():
             raise ValueError("marker set requires a name")
+        if len(payload["name"].strip()) > MAX_MARKER_SET_NAME:
+            raise ValueError(f"marker set name must be {MAX_MARKER_SET_NAME} characters or fewer")
         markers = payload.get("markers")
         if not isinstance(markers, list) or len(markers) > 10000:
             raise ValueError("markers must be a bounded array")
@@ -1014,13 +1159,22 @@ class ReceiverRecordStore:
                 raise ValueError("marker frequency_hz must be a positive finite number")
             if power is not None and not _finite_number(power):
                 raise ValueError("marker power_db must be a finite number or null")
-            normalized.append({"id": marker.get("id") or str(uuid.uuid4()), "frequency_hz": frequency, "power_db": power, "label": marker.get("label", "")})
+            label, marker_ident = marker.get("label", ""), marker.get("id")
+            if label is None:
+                label = ""
+            if not isinstance(label, str) or len(label) > MAX_MARKER_LABEL:
+                raise ValueError(f"marker label must be text of {MAX_MARKER_LABEL} characters or fewer")
+            if marker_ident is not None and (not isinstance(marker_ident, str) or not 0 < len(marker_ident) <= 128):
+                raise ValueError("marker id must be a short string")
+            normalized.append({"id": marker_ident or str(uuid.uuid4()), "frequency_hz": frequency, "power_db": power, "label": label})
         ident = _id(payload["id"]) if payload.get("id") is not None else (str(uuid.uuid4()) if marker_id is None else _id(marker_id))
         name, stamp = payload["name"].strip(), _now()
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             existing = db.execute("SELECT id FROM markers WHERE name=?", (name,)).fetchone()
             if existing is not None and payload.get("id") is None and marker_id is None:
                 ident = existing["id"]
+            elif existing is not None and existing["id"] != ident:
+                raise ValueError(f'a marker set named "{name}" already exists; choose another name')
             db.execute("""INSERT INTO markers(id,name,updated_at,payload) VALUES(?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET name=excluded.name,updated_at=excluded.updated_at,payload=excluded.payload""",
                 (ident, name, stamp, _json({"markers": normalized})))
@@ -1028,7 +1182,7 @@ class ReceiverRecordStore:
 
     def delete_markers(self, marker_id: str) -> bool:
         ident = _id(marker_id)
-        with self._lock, self._connect() as db:
+        with self._lock, self._db() as db:
             return db.execute("DELETE FROM markers WHERE id=?", (ident,)).rowcount > 0
 
     def close(self) -> None:

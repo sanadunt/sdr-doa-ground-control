@@ -194,6 +194,19 @@ Ground Console tetap dapat digunakan untuk memeriksa UI tanpa Raspberry atau Dat
 
 Mode simulasi hanya mengganti data Dashboard. Health, diagnostics, MQTT, dan publication gate tetap menggunakan sumber nyata atau tetap `BLOCKED`.
 
+## Peta dasar dan peta offline (MBTiles)
+
+Dashboard menampilkan peta penuh. Grafik DoA mengambang di atas peta dan bisa disembunyikan atau ditampilkan lagi lewat tombol `Grafik DoA` di toolbar peta (pilihan ini diingat browser).
+
+Tombol peta dasar di toolbar memberi pilihan:
+
+- **OSM Normal**, **OSM Terang**, **OSM Gelap**: tile OpenStreetMap standar. Versi terang dan gelap hanya diwarnai ulang di browser, tanpa penyedia tambahan.
+- **OSM HOT**: gaya Humanitarian OpenStreetMap Team dari server OpenStreetMap France.
+- **Satelit (Esri)**: Esri World Imagery. Periksa syarat penggunaan Esri sebelum dipakai secara operasional.
+- **Luring (MBTiles)**: file `.mbtiles` raster (PNG, JPEG, atau WebP) dari komputer Ground Console sendiri, tanpa internet.
+
+Untuk peta offline, salin file `.mbtiles` ke folder `tiles` di dalam direktori data Ground Console. Defaultnya `~/.local/share/sdr-doa-ground-console/tiles`, atau `<--data-dir>/tiles` bila `--data-dir` dipakai. Folder dibuat otomatis dan lokasinya dicetak saat console start. File di lokasi lain bisa ditambahkan dengan `--mbtiles PATH` (boleh diulang). Buka lagi menu peta dasar setelah menyalin file agar daftar diperbarui. MBTiles vektor (`pbf`) tidak didukung karena butuh style dan font yang tidak dibawa console.
+
 ## Menghubungkan Data Out live
 
 Ground Console default memakai:
@@ -330,7 +343,7 @@ Ini tidak selalu berarti frontend rusak. Periksa DNS atau koneksi ke `doasdr.loc
 
 ### Basemap OSM tidak tampil
 
-MapLibre membutuhkan koneksi HTTPS ke tile OSM dan CSP yang sesuai. Kegagalan tile tidak otomatis berarti geometry overlay atau polar plot gagal.
+MapLibre membutuhkan koneksi HTTPS ke host tile dan CSP yang sesuai (`BASEMAP_TILE_HOSTS` di `tools/ground_console.py`). Kegagalan tile tidak otomatis berarti geometry overlay atau polar plot gagal. Tanpa internet, pilih peta dasar `Luring (MBTiles)`.
 
 ### Keamanan lokal
 

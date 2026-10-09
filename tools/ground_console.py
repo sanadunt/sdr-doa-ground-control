@@ -27,6 +27,7 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import tempfile
 import threading
 import time
@@ -42,6 +43,19 @@ from urllib.parse import parse_qs, urlsplit
 
 from sdr_doa_collector import CollectorError, DEFAULT_ALLOWED_DATA_HOSTS, collect
 from receiver_record_store import DEFAULT_DATA_DIR, ReceiverRecordStore
+from mbtiles_store import MbtilesCatalog
+
+# Online basemap tile hosts the React map may load (OSM, OSM Germany mirror,
+# Humanitarian OSM via OSM France, Esri World Imagery). Keep in sync with
+# frontend/src/lib/basemaps.ts.
+BASEMAP_TILE_HOSTS = " ".join((
+    "https://tile.openstreetmap.de",
+    "https://tile.openstreetmap.org",
+    "https://a.tile.openstreetmap.fr",
+    "https://b.tile.openstreetmap.fr",
+    "https://c.tile.openstreetmap.fr",
+    "https://server.arcgisonline.com",
+))
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BROWSDR_SOURCE_ARCHIVE = "freq-spectrum-source.tar.gz"
@@ -1503,8 +1517,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         )
 
     def _receiver_error(self, exc: Exception) -> None:
+        if isinstance(exc, sqlite3.Error):
+            # Report storage faults (locked, full disk, corrupt file) as JSON
+            # instead of letting them drop the connection without a response.
+            print(f"[ground-console] receiver database error: {type(exc).__name__}: {exc}", flush=True)
+            status = HTTPStatus.SERVICE_UNAVAILABLE if isinstance(exc, sqlite3.OperationalError) else HTTPStatus.INTERNAL_SERVER_ERROR
+            self._send_json({"error": f"Receiver database error: {exc}"}, status)
+            return
         status = HTTPStatus.NOT_FOUND if isinstance(exc, KeyError) else HTTPStatus.BAD_REQUEST
-        self._send_json({"error": str(exc)}, status)
+        # str(KeyError("x")) is "'x'"; send the message without the quotes.
+        message = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+        self._send_json({"error": str(message)}, status)
 
     def _receiver_get(self, parsed: Any) -> bool:
         path = parsed.path
@@ -1613,8 +1636,41 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 else:
                     return False
             return True
-        except (ValueError, KeyError, OSError) as exc:
+        except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
             self._receiver_error(exc)
+            return True
+
+    def _tiles_get(self, parsed: Any) -> bool:
+        catalog = self.console_server.mbtiles
+        parts = parsed.path.strip("/").split("/")
+        try:
+            if parts == ["api", "tiles"]:
+                self._send_json({"items": catalog.list()})
+                return True
+            if len(parts) != 6 or not all(part.isdigit() and len(part) <= 9 for part in parts[3:]):
+                return False
+            z, x, y = (int(part) for part in parts[3:])
+            tile = catalog.tile(parts[2], z, x, y)
+            if tile is None:
+                # Outside the stored area: an empty 204 lets MapLibre show nothing there.
+                self.send_response(HTTPStatus.NO_CONTENT)
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                return True
+            data, content_type = tile
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(data)
+            return True
+        except KeyError as exc:
+            self._send_json({"error": str(exc.args[0] if exc.args else exc)}, HTTPStatus.NOT_FOUND)
+            return True
+        except (ValueError, sqlite3.Error, OSError) as exc:
+            self._send_json({"error": f"Offline tiles unavailable: {exc}"}, HTTPStatus.BAD_REQUEST)
             return True
 
     def _receiver_post(self, parsed: Any) -> bool:
@@ -1685,7 +1741,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 else:
                     return False
             return True
-        except (ValueError, KeyError, OSError) as exc:
+        except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
             self._receiver_error(exc)
             return True
 
@@ -1705,7 +1761,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 raise KeyError("record not found")
             self._send_json({"deleted": True})
             return True
-        except (ValueError, KeyError, OSError) as exc:
+        except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
             self._receiver_error(exc)
             return True
 
@@ -1822,8 +1878,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         else:
             content_security_policy = (
                 "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-                "img-src 'self' data: https://tile.openstreetmap.de https://tile.openstreetmap.org; "
-                "connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org; "
+                f"img-src 'self' data: {BASEMAP_TILE_HOSTS}; "
+                f"connect-src 'self' {BASEMAP_TILE_HOSTS}; "
                 "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
             )
         self.send_header("Content-Security-Policy", content_security_policy)
@@ -1833,6 +1889,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
         if parsed.path.startswith("/api/receiver/") and self._receiver_get(parsed):
+            return
+        if (parsed.path == "/api/tiles" or parsed.path.startswith("/api/tiles/")) and self._tiles_get(parsed):
             return
         if self.console_server.frontend_dir is not None and not parsed.path.startswith("/api/"):
             self._send_frontend(parsed.path)
@@ -2024,6 +2082,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
         config: Optional[Dict[str, Any]] = None,
         frontend_dir: Optional[Path] = None,
         receiver_data_dir: Optional[Path] = None,
+        mbtiles_files: Optional[list] = None,
     ):
         self.frontend_dir = Path(frontend_dir).resolve() if frontend_dir is not None else None
         if not _is_loopback_bind(address[0]):
@@ -2046,6 +2105,10 @@ class GroundConsoleServer(ThreadingHTTPServer):
         self.receiver_store = ReceiverRecordStore(
             receiver_data_dir if receiver_data_dir is not None else DEFAULT_DATA_DIR
         )
+        # Offline basemaps: *.mbtiles in <data dir>/tiles plus explicit --mbtiles files.
+        self.tiles_dir = self.receiver_store.data_dir / "tiles"
+        self.tiles_dir.mkdir(exist_ok=True)
+        self.mbtiles = MbtilesCatalog([self.tiles_dir], [Path(path) for path in (mbtiles_files or [])])
         super().__init__(address, ConsoleHandler)
 
     def server_close(self) -> None:
@@ -2181,6 +2244,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--branding-path", default=str(DEFAULT_BRANDING_PATH), help="local branding JSON path")
     parser.add_argument("--config-path", default=str(DEFAULT_CONFIG_PATH), help="local console connection config path")
     parser.add_argument("--data-dir", default=str(DEFAULT_DATA_DIR), help="local Receiver records and audio directory")
+    parser.add_argument("--mbtiles", action="append", default=[], metavar="PATH", help="extra raster .mbtiles file for the offline basemap (repeatable); files in <data-dir>/tiles are found automatically")
     return parser
 
 
@@ -2211,9 +2275,11 @@ def main() -> int:
         config,
         frontend_dir=None if args.legacy_ui else PROJECT_ROOT / "frontend" / "dist",
         receiver_data_dir=Path(args.data_dir).expanduser(),
+        mbtiles_files=[Path(path).expanduser() for path in args.mbtiles],
     )
     print(f"Ground Console: http://{args.bind}:{args.port}/", flush=True)
     print(f"Read-only Data Out: {config['base_url']}", flush=True)
+    print(f"Offline basemaps (*.mbtiles): {server.tiles_dir}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

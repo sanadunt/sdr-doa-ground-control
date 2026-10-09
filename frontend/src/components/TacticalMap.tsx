@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import type { JSX } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { JSX, ReactNode } from 'react';
 import * as maplibregl from 'maplibre-gl';
 import type { Map as MapLibreMap, GeoJSONSource, MapMouseEvent } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import type { Feature, FeatureCollection, LineString, Point, Polygon } from 'geojson';
 import type { MapCoordinate, TelemetrySnapshot } from '../types';
-import { OSM_TILE_TEMPLATES } from '../lib/map';
+import { getTileSets } from '../api';
+import { loadBasemapChoice, resolveBasemap, saveBasemapChoice, type BasemapId, type BasemapSpec, type TileSet } from '../lib/basemaps';
 import {
   DEFAULT_DOA_OVERLAY_SETTINGS,
   bearingAndDistance,
@@ -30,6 +31,7 @@ import { candidate, numberOrNull } from '../lib/telemetry';
 import { useI18n } from '../lib/i18n';
 import type { MessageKey } from '../lib/i18n';
 import { coordinateSourceKey } from './DoaReadout';
+import { BasemapMenu } from './BasemapMenu';
 import { OverlayControls } from './OverlayControls';
 import { OverlayLegend } from './OverlayLegend';
 import { EmptyState, Icon } from './ui';
@@ -50,6 +52,12 @@ const SOURCE_IDS = ['doa-station', 'doa-beam', 'doa-heat', 'doa-rings', 'doa-gui
 type SourceId = typeof SOURCE_IDS[number];
 const EMPTY: OverlayFeatureCollection = { type: 'FeatureCollection', features: [] };
 const CARDINALS: ReadonlyArray<[MessageKey, number]> = [['map.cardinalN', 0], ['map.cardinalE', 90], ['map.cardinalS', 180], ['map.cardinalW', 270]];
+// Basemaps where the default dark reference lines (rings, guides) would vanish.
+const DARK_BASEMAPS = new Set<string>(['osm-dark', 'esri-imagery']);
+
+function basemapSourceSpec(spec: BasemapSpec): maplibregl.RasterSourceSpecification {
+  return { type: 'raster', tiles: spec.tiles, tileSize: 256, minzoom: spec.minzoom, maxzoom: spec.maxzoom, attribution: spec.attribution, ...(spec.bounds ? { bounds: spec.bounds } : {}) };
+}
 
 interface OverlayGeometry {
   data: Record<SourceId, OverlayFeatureCollection>;
@@ -80,8 +88,38 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
   return debounced;
 }
 
-export function TacticalMap({ coordinate, snapshot, localSnapshotFresh }: { coordinate: MapCoordinate | null; snapshot?: TelemetrySnapshot | null; localSnapshotFresh?: boolean }): JSX.Element {
+export function TacticalMap({
+  coordinate,
+  snapshot,
+  localSnapshotFresh,
+  overlay,
+  overlayVisible = false,
+  onToggleOverlay,
+}: {
+  coordinate: MapCoordinate | null;
+  snapshot?: TelemetrySnapshot | null;
+  localSnapshotFresh?: boolean;
+  /** Floating panel drawn over the map (the DoA polar graph on the Dashboard). */
+  overlay?: ReactNode;
+  overlayVisible?: boolean;
+  onToggleOverlay?: () => void;
+}): JSX.Element {
   const { t } = useI18n();
+  const [basemapId, setBasemapId] = useState<BasemapId>(() => loadBasemapChoice());
+  const [tileSets, setTileSets] = useState<TileSet[]>([]);
+  const appliedBasemapRef = useRef<string>('');
+  const tileSetRequestRef = useRef<AbortController | null>(null);
+  const refreshTileSets = useCallback(() => {
+    tileSetRequestRef.current?.abort();
+    const controller = new AbortController();
+    tileSetRequestRef.current = controller;
+    getTileSets(controller.signal).then((items) => { if (!controller.signal.aborted) setTileSets(items); }).catch(() => { /* offline basemaps are optional */ });
+  }, []);
+  useEffect(() => {
+    refreshTileSets();
+    return () => tileSetRequestRef.current?.abort();
+  }, [refreshTileSets]);
+  const basemap = useMemo(() => resolveBasemap(basemapId, tileSets, window.location.origin), [basemapId, tileSets]);
   const hostRef = useRef<HTMLDivElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -131,8 +169,12 @@ export function TacticalMap({ coordinate, snapshot, localSnapshotFresh }: { coor
     const host = hostRef.current;
     if (!host) return undefined;
     let disposed = false;
-    const map = new maplibregl.Map({ container: host, center: coordinate ? [coordinate.longitude, coordinate.latitude] : [0, 0], zoom: coordinate ? DEFAULT_ZOOM : 2, minZoom: 1, maxZoom: 19, attributionControl: false, style: { version: 8, sources: { osm: { type: 'raster', tiles: [...OSM_TILE_TEMPLATES], tileSize: 256, attribution: '© OpenStreetMap contributors' }, ...Object.fromEntries(SOURCE_IDS.map((id) => [id, { type: 'geojson', data: EMPTY }])) }, layers: [
-      { id: 'osm', type: 'raster', source: 'osm' },
+    // The first style uses the stored online choice; an MBTiles choice switches in
+    // once the tile-set list has loaded.
+    const initialBasemap = resolveBasemap(basemapId, [], window.location.origin);
+    appliedBasemapRef.current = JSON.stringify(initialBasemap);
+    const map = new maplibregl.Map({ container: host, center: coordinate ? [coordinate.longitude, coordinate.latitude] : [0, 0], zoom: coordinate ? DEFAULT_ZOOM : 2, minZoom: 1, maxZoom: 19, attributionControl: false, style: { version: 8, sources: { basemap: basemapSourceSpec(initialBasemap), ...Object.fromEntries(SOURCE_IDS.map((id) => [id, { type: 'geojson', data: EMPTY }])) }, layers: [
+      { id: 'basemap', type: 'raster', source: 'basemap', paint: initialBasemap.paint },
       { id: 'doa-beam', type: 'fill', source: 'doa-beam', paint: { 'fill-antialias': false, 'fill-color': beamColorExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatPalette), 'fill-opacity': beamOpacityExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatOpacity, DEFAULT_DOA_OVERLAY_SETTINGS.heatIntensity) } },
       { id: 'doa-heat', type: 'heatmap', source: 'doa-heat', maxzoom: 20, paint: { 'heatmap-weight': ['coalesce', ['get', 'densityWeight'], ['get', 'weight'], 0], 'heatmap-intensity': 1, 'heatmap-radius': heatmapRadiusExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatBlur), 'heatmap-opacity': .72, 'heatmap-color': heatmapColorExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatPalette) } },
       { id: 'doa-rings', type: 'line', source: 'doa-rings', paint: { 'line-color': '#1f2d3a', 'line-opacity': .55, 'line-width': 1.2, 'line-dasharray': [4, 3] } },
@@ -153,14 +195,14 @@ export function TacticalMap({ coordinate, snapshot, localSnapshotFresh }: { coor
       // template is retried. Only initialization/style errors block the map.
       const sourceId = String((event as unknown as { sourceId?: string }).sourceId ?? '');
       const message = String(event.error?.message ?? '').toLowerCase();
-      const isRasterTileIssue = sourceId === 'osm' || message.includes('tile') || message.includes('raster');
+      const isRasterTileIssue = sourceId === 'basemap' || message.includes('tile') || message.includes('raster');
       if (!disposed && !isRasterTileIssue) setMapState('error');
     };
     // 'load' waits for every source, including raster tiles, so it may never fire
     // when OSM is unreachable. The overlay only needs the parsed style and its
     // GeoJSON sources, which 'styledata' reports as soon as they exist.
     const onStyleData = () => { if (map.getSource('doa-station')) { map.off('styledata', onStyleData); onLoad(); } };
-    map.on('styledata', onStyleData); map.on('error', onError); map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'top-right');
+    map.on('styledata', onStyleData); map.on('error', onError); map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'bottom-right');
     return () => { disposed = true; map.off('styledata', onStyleData); map.off('error', onError); stationPopupRef.current?.remove(); stationPopupRef.current = null; stationMarkerRef.current?.remove(); stationMarkerRef.current = null; appliedDataRef.current = {}; map.remove(); mapRef.current = null; };
     // The map instance lives for the component lifetime; data arrives through setData.
   }, []);
@@ -173,6 +215,30 @@ export function TacticalMap({ coordinate, snapshot, localSnapshotFresh }: { coor
     observer.observe(host);
     return () => observer.disconnect();
   }, [mapState]);
+
+  // Basemap switch: swap the raster source and layer underneath the overlay.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady) return;
+    const key = JSON.stringify(basemap);
+    if (appliedBasemapRef.current !== key) {
+      if (map.getLayer('basemap')) map.removeLayer('basemap');
+      if (map.getSource('basemap')) map.removeSource('basemap');
+      map.addSource('basemap', basemapSourceSpec(basemap));
+      map.addLayer({ id: 'basemap', type: 'raster', source: 'basemap', paint: basemap.paint }, 'doa-beam');
+      appliedBasemapRef.current = key;
+    }
+    const onDark = DARK_BASEMAPS.has(basemap.id);
+    map.setPaintProperty('doa-rings', 'line-color', onDark ? '#e8eef3' : '#1f2d3a');
+    map.setPaintProperty('doa-rings', 'line-opacity', onDark ? .7 : .55);
+    map.setPaintProperty('doa-guides', 'line-color', onDark ? '#d5dee6' : '#34495c');
+    map.setPaintProperty('doa-guides', 'line-opacity', onDark ? .55 : .4);
+  }, [styleReady, basemap]);
+
+  const chooseBasemap = (id: BasemapId) => {
+    setBasemapId(id);
+    saveBasemapChoice(id);
+  };
 
   // Push only the sources whose collections changed since the last update.
   useEffect(() => {
@@ -389,10 +455,13 @@ export function TacticalMap({ coordinate, snapshot, localSnapshotFresh }: { coor
         <canvas ref={overlayCanvasRef} className="doa-overlay-canvas" aria-hidden="true" hidden={!glFailed} />
         <div className="map-toolbar">
           <button ref={overlayToggleRef} className="toolbar-button map-settings-button" type="button" onClick={() => setControlsOpen((open) => !open)} aria-expanded={controlsOpen} aria-controls={controlsOpen ? 'doa-overlay-controls' : undefined}><Icon name="layers" /><span>{t('map.layers')}</span></button>
+          <BasemapMenu value={basemap.id} tileSets={tileSets} onChange={chooseBasemap} onOpen={refreshTileSets} />
           {coordinate ? <button className="toolbar-button map-reset-button" type="button" onClick={resetView} aria-label={t('map.centerAria')} title={t('map.centerAria')}><Icon name="crosshair" /><span>{t('map.center')}</span></button> : null}
+          {onToggleOverlay ? <button className="toolbar-button map-polar-toggle" type="button" onClick={onToggleOverlay} aria-pressed={overlayVisible} aria-controls={overlayVisible ? 'dashboard-polar-overlay' : undefined}><Icon name="polar" /><span>{overlayVisible ? t('dashboard.hidePolar') : t('dashboard.showPolar')}</span></button> : null}
         </div>
+        {overlay && overlayVisible ? <div id="dashboard-polar-overlay" className="map-polar-overlay">{overlay}</div> : null}
         {coordinate && !values ? <div className="map-data-chip" role="status">{t('map.overlayCleared')}</div> : null}
-        <span className="map-attribution" aria-label={t('map.attributionAria')}>© OpenStreetMap contributors</span>
+        <span className="map-attribution" aria-label={t('map.attributionAria')}>{basemap.attribution}</span>
         {mapState === 'unavailable' || !coordinate ? <div className="map-empty-wrap"><EmptyState label={t('map.unavailable')} detail={t('map.unavailableDetail')} tone="warn" /></div> : null}
         {mapState === 'error' ? <div className="map-empty-wrap"><EmptyState label={t('map.basemapUnavailable')} detail={t('map.basemapUnavailableDetail')} tone="warn" /></div> : null}
       </div>

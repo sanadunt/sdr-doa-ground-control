@@ -15,12 +15,13 @@ import inspect
 import json
 import os
 import re
+import sqlite3
 import sys
 import tempfile
 import tarfile
 import threading
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
@@ -638,6 +639,16 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
             self.assertEqual([item["id"] for item in marker_sets["items"]], [marker["id"]])
             self.assertEqual(marker_sets["items"][0]["markers"][0]["label"], "beacon")
 
+            # Renaming another set onto an existing name is a readable 400, not a dropped connection.
+            other = _decode_json(self, post_json(console, "/api/receiver/marker-sets", {"name": "Other", "markers": []}), "second marker set")
+            conflict = post_json(console, "/api/receiver/marker-sets", {"id": other["id"], "name": "Local markers", "markers": []})
+            self.assertEqual(conflict.status, 400)
+            self.assertIn("already exists", _decode_json(self, conflict, "marker name conflict")["error"])
+            missing = console.request("DELETE", "/api/receiver/marker-sets/00000000-0000-4000-8000-000000000000")
+            self.assertEqual(missing.status, 404)
+            self.assertEqual(_decode_json(self, missing, "missing marker set")["error"], "record not found")
+            self.assertEqual(console.request("DELETE", f"/api/receiver/marker-sets/{other['id']}").status, 200)
+
             scan = _decode_json(
                 self,
                 post_json(console, "/api/receiver/scans", {
@@ -1016,6 +1027,32 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
             self.assertEqual(invalid_timezone.status, 400)
             self.assertEqual(set(_decode_json(self, invalid_timezone, "invalid time zone")), {"error"})
 
+    def test_offline_tiles_route_lists_and_serves_mbtiles(self) -> None:
+        png = b"\x89PNG\r\n\x1a\n" + b"\0" * 8
+        with ConsoleHTTPHarness() as console:
+            assert console.receiver_data_dir is not None
+            tiles_dir = console.receiver_data_dir / "tiles"
+            self.assertTrue(tiles_dir.is_dir(), "the tiles folder is created on start")
+            with closing(sqlite3.connect(tiles_dir / "local.mbtiles")) as db, db:
+                db.execute("CREATE TABLE metadata (name TEXT, value TEXT)")
+                db.execute("CREATE TABLE tiles (zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, tile_data BLOB)")
+                db.execute("INSERT INTO metadata VALUES ('format','png'), ('name','Local area')")
+                db.execute("INSERT INTO tiles VALUES (1, 0, 1, ?)", (png,))
+            listing = _decode_json(self, console.request("GET", "/api/tiles"), "tile sets")
+            self.assertEqual([item["id"] for item in listing["items"]], ["local"])
+            tile = console.request("GET", "/api/tiles/local/1/0/0")
+            self.assertEqual(tile.status, 200)
+            self.assertEqual(tile.body, png)
+            self.assertEqual(tile.headers.get("content-type"), "image/png")
+            self.assertEqual(console.request("GET", "/api/tiles/local/1/1/1").status, 204)
+            self.assertEqual(console.request("GET", "/api/tiles/missing/1/0/0").status, 404)
+            self.assertEqual(console.request("GET", "/api/tiles/local/1/5/0").status, 400)
+            self.assertEqual(console.request("GET", "/api/tiles/..%2Flocal/1/0/0").status, 400)
+
+    def test_mbtiles_cli_option_is_repeatable(self) -> None:
+        parsed = ground_console._build_parser().parse_args(["--mbtiles", "/maps/a.mbtiles", "--mbtiles", "/maps/b.mbtiles"])
+        self.assertEqual(parsed.mbtiles, ["/maps/a.mbtiles", "/maps/b.mbtiles"])
+
     def test_receiver_data_dir_cli_option(self) -> None:
         parsed = ground_console._build_parser().parse_args(["--data-dir", "/tmp/receiver-data"])
         self.assertEqual(parsed.data_dir, "/tmp/receiver-data")
@@ -1147,8 +1184,8 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         self.assertEqual(
             ground.headers.get("content-security-policy"),
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data: https://tile.openstreetmap.de https://tile.openstreetmap.org; "
-            "connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org; "
+            "img-src 'self' data: https://tile.openstreetmap.de https://tile.openstreetmap.org https://a.tile.openstreetmap.fr https://b.tile.openstreetmap.fr https://c.tile.openstreetmap.fr https://server.arcgisonline.com; "
+            "connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org https://a.tile.openstreetmap.fr https://b.tile.openstreetmap.fr https://c.tile.openstreetmap.fr https://server.arcgisonline.com; "
             "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
         )
         self.assertNotIn("permissions-policy", ground.headers)

@@ -50,7 +50,7 @@ The `.venv` is not committed. Create it locally (Python stdlib is enough for mos
 ## Known failure modes
 
 - `ModuleNotFoundError: No module named 'paho'`: local config has `mqtt_host`, so the console loads the monitor. Install `paho-mqtt==2.1.0` into `.venv`.
-- Basemap missing: MapLibre is only the renderer. Check CSP `connect-src`/`img-src` in `ground_console.py` against the tile host in `lib/map.ts`, then network/proxy. A tile failure does not mean the overlay failed.
+- Basemap missing: MapLibre is only the renderer. Check `BASEMAP_TILE_HOSTS` (the CSP `connect-src`/`img-src` in `ground_console.py`) against the tile hosts in `lib/basemaps.ts`, then network/proxy. Offline, choose an MBTiles basemap (`<data dir>/tiles/*.mbtiles`). A tile failure does not mean the overlay failed.
 - Overlay in the DOM but invisible: check coordinate validity and camera, a fresh 360-length `angular_power_db`, non-empty geometry, visibility/opacity/paint, canvas fallback stacking and transform, map resize, and stale `localStorage` overlay settings.
 - Plot or map resets on data update: data updates must go through the restyle/set-data path. Do not resend layout/camera. Keep user state (zoom, rotation, head-up, manual range) separate from the data revision.
 
