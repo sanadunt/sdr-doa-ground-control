@@ -20,6 +20,13 @@ describe('i18n dictionaries', () => {
     }
   });
 
+  it('labels the Receiver route and its purpose in both languages', () => {
+    expect(translate('en', 'route.receiver' as keyof typeof DICTIONARIES.en)).toBe('Receiver');
+    expect(translate('id', 'route.receiver' as keyof typeof DICTIONARIES.en)).toBe('Receiver');
+    expect(translate('en', 'route.receiver.hint' as keyof typeof DICTIONARIES.en)).toBe('Local spectrum and recordings');
+    expect(translate('id', 'route.receiver.hint' as keyof typeof DICTIONARIES.en)).toBe('Spektrum dan rekaman lokal');
+  });
+
   it('interpolates named values and leaves unknown placeholders intact', () => {
     expect(translate('en', 'shell.lastRead', { age: '3 s' })).toBe('Last read 3 s');
     expect(translate('id', 'shell.lastRead', { age: '3 dtk' })).toBe('Dibaca 3 dtk lalu');

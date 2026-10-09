@@ -20,6 +20,7 @@ const DoADiagnosticsPage = lazy(() => import('./pages/DoADiagnosticsPage').then(
 const MessageMonitorPage = lazy(() => import('./pages/MessageMonitorPage').then((module) => ({ default: module.MessageMonitorPage })));
 const SystemHealthPage = lazy(() => import('./pages/SystemHealthPage').then((module) => ({ default: module.SystemHealthPage })));
 const SimulationPage = lazy(() => import('./pages/SimulationPage').then((module) => ({ default: module.SimulationPage })));
+const ReceiverPage = lazy(() => import('./pages/ReceiverPage').then((module) => ({ default: module.ReceiverPage })));
 
 function prefetchRoutes(): void {
   void import('./pages/ConfigurationPage');
@@ -27,6 +28,7 @@ function prefetchRoutes(): void {
   void import('./pages/MessageMonitorPage');
   void import('./pages/SystemHealthPage');
   void import('./pages/SimulationPage');
+  void import('./pages/ReceiverPage');
 }
 
 const DEFAULT_BRANDING: Branding = { app_name: 'SDR-DoA Ground Console', logo_data_url: '' };
@@ -150,6 +152,7 @@ function PageForRoute({
     case 'doa-diagnostics': return <DoADiagnosticsPage snapshot={snapshot} localSnapshotFresh={localFresh} />;
     case 'configuration': return <ConfigurationPage config={config} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={onGpsConfigChanged} onCompassConfigChanged={onCompassConfigChanged} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} />;
     case 'message-monitor': return <MessageMonitorPage mqtt={mqtt} config={config} onMqttChanged={onMqttChanged} onRefreshMqtt={onRefreshMqtt} onReconnectMqtt={onReconnectMqtt} />;
+    case 'receiver': return <ReceiverPage />;
     case 'overview':
     default: return <OverviewPage snapshot={snapshot} localSnapshotFresh={localFresh} gpsConfig={gpsConfig} compassConfig={compassConfig} />;
   }

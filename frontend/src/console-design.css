@@ -178,6 +178,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .toolbar-button:hover, .toolbar-button[aria-expanded='true'], .toolbar-button[aria-pressed='true'] { border-color: var(--accent); color: var(--accent); }
 @media (pointer: coarse) { .toolbar-button { min-height: 44px; } }
 
+/* Receiver keeps the console controls visible while its own workspace scrolls. */
+.console-shell.is-receiver .console-main { height: 100dvh; min-height: 0; overflow: hidden; }
+.console-shell.is-receiver .topbar { flex: none; }
+.console-shell.is-receiver .console-footer { display: none; }
+.console-shell.is-receiver .page-content-receiver { display: flex; max-width: none; padding: 8px; }
+.page-content-receiver > .route-content { display: flex; flex: 1 1 auto; min-height: 0; }
+.page-receiver { flex: 1 1 auto; min-width: 0; gap: 0; }
+.receiver-frame { display: block; flex: 1 1 auto; width: 100%; min-height: 0; border: 1px solid var(--line-soft); background: var(--surface); }
+.receiver-frame:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
 /* Overview ---------------------------------------------------------------- */
 .page-content-overview { display: flex; flex: 0 1 auto; flex-direction: column; height: calc(100dvh - var(--topbar-h)); max-height: none; overflow: hidden; padding: 10px 12px 12px; }
 .page-content-overview > .route-content { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }

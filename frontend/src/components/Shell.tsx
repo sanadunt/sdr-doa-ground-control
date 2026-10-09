@@ -8,7 +8,7 @@ import type { MessageKey } from '../lib/i18n';
 import { Icon } from './ui';
 import type { IconName } from './ui';
 
-export type RouteName = 'overview' | 'system-health' | 'doa-diagnostics' | 'configuration' | 'message-monitor' | 'simulation';
+export type RouteName = 'overview' | 'system-health' | 'doa-diagnostics' | 'configuration' | 'message-monitor' | 'simulation' | 'receiver';
 
 export const ROUTES: Array<{ id: RouteName; icon: IconName }> = [
   { id: 'overview', icon: 'overview' },
@@ -17,6 +17,7 @@ export const ROUTES: Array<{ id: RouteName; icon: IconName }> = [
   { id: 'configuration', icon: 'configuration' },
   { id: 'message-monitor', icon: 'monitor' },
   { id: 'simulation', icon: 'polar' },
+  { id: 'receiver', icon: 'receiver' },
 ];
 
 const RAIL_STORAGE_KEY = 'sdr-console-rail';
@@ -198,6 +199,7 @@ export function ConsoleShell({
   const shellClass = [
     'console-shell',
     route === 'overview' ? 'is-overview' : '',
+    route === 'receiver' ? 'is-receiver' : '',
     desktop && railCollapsed ? 'rail-collapsed' : '',
     drawerOpen ? 'menu-open' : '',
   ].filter(Boolean).join(' ');
@@ -280,7 +282,7 @@ export function ConsoleShell({
             </button>
           </div>
         </header>
-        <main id="console-content" tabIndex={-1} aria-label={route === 'overview' ? routeLabel : undefined} className={`page-content ${route === 'overview' ? 'page-content-overview' : ''}`}>{children}</main>
+        <main id="console-content" tabIndex={-1} aria-label={route === 'overview' ? routeLabel : undefined} className={`page-content ${route === 'overview' ? 'page-content-overview' : route === 'receiver' ? 'page-content-receiver' : ''}`}>{children}</main>
         <footer className="console-footer">
           <span>{t('shell.footerLeft')}</span>
           <span>{t('shell.footerRight')}</span>

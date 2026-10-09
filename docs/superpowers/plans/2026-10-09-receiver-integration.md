@@ -142,7 +142,7 @@ git commit -m "feat: build and serve embedded Receiver"
 ```
 
 ### Task 4: Add the Receiver menu and page
-**Status:** Deferred by the user. This implementation stage focuses on the pinned Receiver service/build integration; do not add shell navigation, an iframe page, or GUI theme propagation yet.
+**Status:** Completed at the user's request after the service/build integration; the Receiver menu, iframe page, and theme propagation are verified in the built UI.
 
 
 **Files:**
@@ -161,24 +161,24 @@ git commit -m "feat: build and serve embedded Receiver"
 - `ReceiverPage(): JSX.Element` renders the same-origin `/receiver/` iframe and synchronizes the theme through `console-theme-change`.
 - `App.tsx` lazy-loads/prefetches `ReceiverPage` and renders it for route `receiver`.
 
-- [ ] **Step 1: Add failing translation and shell-render tests.** In `i18n.test.ts`, assert the English and Indonesian Receiver label/hint are available and non-empty. In `Shell.test.tsx`, render `ConsoleShell` with route `receiver` and assert the navigation shows Receiver as the current page with `aria-keyshortcuts="7"`.
-- [ ] **Step 2: Run the focused frontend tests and confirm they fail because the route/messages are absent.**
+- [x] **Step 1: Add failing translation and shell-render tests.** In `i18n.test.ts`, assert the English and Indonesian Receiver label/hint are available and non-empty. In `Shell.test.tsx`, render `ConsoleShell` with route `receiver` and assert the navigation shows Receiver as the current page with `aria-keyshortcuts="7"`.
+- [x] **Step 2: Run the focused frontend tests and confirm they fail because the route/messages are absent.**
 
 Run: `npm test -- src/components/Shell.test.tsx src/lib/i18n.test.ts` (from `frontend/`)
 
 Expected: the route is missing from navigation and the Receiver translation contract fails.
 
-- [ ] **Step 3: Add the route and localized navigation contract.** Add the route to the end of `ROUTES`, English/Indonesian label and hint keys, and update shortcut help from 1–6 to 1–7. Add the receiver icon.
-- [ ] **Step 4: Wire the lazy page, route switch, and route-specific shell/page classes.** Preserve existing Overview behavior and focus handling.
-- [ ] **Step 5: Create `ReceiverPage.tsx` with the same-origin iframe, `allow="usb; autoplay"`, eager loading, and safe same-origin theme synchronization/cleanup.**
-- [ ] **Step 6: Add Receiver full-height responsive CSS in `console-design.css`; keep the Ground Console top bar and navigation visible.**
-- [ ] **Step 7: Run focused tests, then frontend checks, full tests, and build.**
+- [x] **Step 3: Add the route and localized navigation contract.** Add the route to the end of `ROUTES`, English/Indonesian label and hint keys, and update shortcut help from 1–6 to 1–7. Add the receiver icon.
+- [x] **Step 4: Wire the lazy page, route switch, and route-specific shell/page classes.** Preserve existing Overview behavior and focus handling.
+- [x] **Step 5: Create `ReceiverPage.tsx` with the same-origin iframe, `allow="usb; autoplay"`, eager loading, and safe same-origin theme synchronization/cleanup.**
+- [x] **Step 6: Add Receiver full-height responsive CSS in `console-design.css`; keep the Ground Console top bar and navigation visible.**
+- [x] **Step 7: Run focused tests, then frontend checks, full tests, and build.**
 
 Run from `frontend/`: `npm test -- src/components/Shell.test.tsx src/lib/i18n.test.ts`, then `npm run check && npm test && npm run build`.
 
 Expected: focused route/locale tests pass; all existing frontend checks/tests pass; Vite emits the Receiver page chunk and shell assets.
 
-- [ ] **Step 8: Commit the frontend route and page.**
+- [x] **Step 8: Commit the frontend route and page.**
 
 ```bash
 git add frontend/src/components/Shell.tsx frontend/src/components/ui.tsx frontend/src/App.tsx frontend/src/lib/i18n.ts frontend/src/lib/i18n.test.ts frontend/src/console-design.css frontend/src/pages/ReceiverPage.tsx frontend/src/components/Shell.test.tsx
