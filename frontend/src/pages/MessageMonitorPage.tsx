@@ -95,7 +95,9 @@ export function MessageMonitorPage({
         </Panel>
         <Panel className="monitor-detail-panel" eyebrow={t('monitor.detailEyebrow')} title={t('monitor.detailTitle')}>
           <div className="key-value-list"><KeyValue label={t('monitor.connection')} value={connection} detail={mqtt?.last_error ?? t('monitor.noError')} /><KeyValue label={t('monitor.lastAge')} value={mqtt?.last_age_ms == null ? 'N/A' : `${formatNumber(mqtt.last_age_ms, 0)} ms`} detail={t('monitor.lastAgeDetail')} /><KeyValue label={t('monitor.topic')} value={mqtt?.last_topic ? '[REDACTED]' : 'N/A'} detail={t('monitor.topicDetail')} /><KeyValue label={t('monitor.publish')} value={mqtt?.publish_enabled === false ? 'DISABLED' : mqtt ? t('monitor.notAsserted') : 'N/A'} detail={t('monitor.publishDetail')} /></div>
-          <pre className="result-box monitor-json">{safeJson(safeMqttEntries(mqtt?.last_by_kind), t('monitor.noRecords'))}</pre>
+          {Object.keys(mqtt?.last_by_kind ?? {}).length
+            ? <pre className="result-box monitor-json">{safeJson(safeMqttEntries(mqtt?.last_by_kind), t('monitor.noRecords'))}</pre>
+            : <p className="monitor-json-empty">{t('monitor.noRecords')}</p>}
         </Panel>
       </div>
     </div>

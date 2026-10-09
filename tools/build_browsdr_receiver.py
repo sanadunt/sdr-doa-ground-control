@@ -167,12 +167,6 @@ def _apply_embedded_changes(source: Path) -> None:
     )
     _replace_once(
         html,
-        "\t\t\t\t\t\t<p>RX only · Bias-T forced OFF · relative dBFS-like power, not calibrated dBm</p>\n",
-        "",
-        "wide scan caption",
-    )
-    _replace_once(
-        html,
         '\t<script src="lib/peerjs.min.js"></script>\n',
         "",
         "PeerJS script tag",
@@ -523,7 +517,7 @@ def _apply_embedded_changes(source: Path) -> None:
         "\t\t\t\t\t\t<h3 id=\"records-audio-title\">VFO Audio</h3>\n"
         "\t\t\t\t\t\t<span>{{ records.audioTotal }} session{{ records.audioTotal === 1 ? '' : 's' }}</span>\n"
         "\t\t\t\t\t</div>\n"
-        "\t\t\t\t\t<div class=\"records-audio-filters\" role=\"group\" aria-label=\"Filter VFO audio recordings\">\n"
+        "\t\t\t\t\t<div class=\"records-audio-filters\" v-if=\"records.audioTotal > 0 || hasAudioRecordFilters()\" role=\"group\" aria-label=\"Filter VFO audio recordings\">\n"
         "\t\t\t\t\t\t<details class=\"audio-date-picker\" :open=\"records.audioCalendarOpen\" @toggle=\"toggleAudioCalendar\" @keydown.esc.prevent=\"closeAudioCalendar\">\n"
         "\t\t\t\t\t\t\t<summary><span>Date recorded (local)</span><strong>{{ records.audioDateFilter ? formatAudioDate(records.audioDateFilter) : 'Any date' }}</strong></summary>\n"
         "\t\t\t\t\t\t\t<div class=\"audio-calendar\">\n"
@@ -679,61 +673,6 @@ def _apply_embedded_changes(source: Path) -> None:
         "\t\t\tawait this.pauseReceiverForSweep();\n\t\t\tif (runtime.stopRequested) {",
         "awaited Receiver pause before starting sweep",
     )
-    _replace_count(
-        html,
-        "sweep.active || sweep.starting || sweep.stopping || sweep.hasResults",
-        "sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting",
-        10,
-        "editable stopped sweep acquisition settings",
-    )
-    _replace_once(
-        html,
-        "\t\t\t\t\t<label>Graph minimum\n"
-        "\t\t\t\t\t\t<div class=\"sweep-input-unit\">\n"
-        "\t\t\t\t\t\t\t<input type=\"number\" v-model.number=\"sweep.displayMinDb\" min=\"-160\" :max=\"sweep.displayMaxDb - 5\" step=\"5\" @change=\"updateSweepDisplayRange('min')\">\n"
-        "\t\t\t\t\t\t\t<span>dBFS</span>\n"
-        "\t\t\t\t\t\t</div>\n"
-        "\t\t\t\t\t</label>\n"
-        "\t\t\t\t\t<label>Graph maximum\n"
-        "\t\t\t\t\t\t<div class=\"sweep-input-unit\">\n"
-        "\t\t\t\t\t\t\t<input type=\"number\" v-model.number=\"sweep.displayMaxDb\" :min=\"sweep.displayMinDb + 5\" max=\"0\" step=\"5\" @change=\"updateSweepDisplayRange('max')\">\n"
-        "\t\t\t\t\t\t\t<span>dBFS</span>\n"
-        "\t\t\t\t\t\t</div>\n"
-        "\t\t\t\t\t</label>\n",
-        "\t\t\t\t\t<div class=\"sweep-display-range\" role=\"group\" aria-label=\"Spectrum display limits\">\n"
-        "\t\t\t\t\t\t<label>Min.\n"
-        "\t\t\t\t\t\t\t<div class=\"sweep-input-unit\">\n"
-        "\t\t\t\t\t\t\t\t<input type=\"number\" v-model.number=\"sweep.displayMinDb\" min=\"-160\" :max=\"sweep.displayMaxDb - 5\" step=\"5\" aria-label=\"Graph minimum dBFS\" @input=\"previewSweepDisplayRange('min', $event)\" @change=\"updateSweepDisplayRange('min')\">\n"
-        "\t\t\t\t\t\t\t\t<span>dBFS</span>\n"
-        "\t\t\t\t\t\t\t</div>\n"
-        "\t\t\t\t\t\t</label>\n"
-        "\t\t\t\t\t\t<label>Max.\n"
-        "\t\t\t\t\t\t\t<div class=\"sweep-input-unit\">\n"
-        "\t\t\t\t\t\t\t\t<input type=\"number\" v-model.number=\"sweep.displayMaxDb\" :min=\"sweep.displayMinDb + 5\" max=\"60\" step=\"5\" aria-label=\"Graph maximum dBFS\" @input=\"previewSweepDisplayRange('max', $event)\" @change=\"updateSweepDisplayRange('max')\">\n"
-        "\t\t\t\t\t\t\t\t<span>dBFS</span>\n"
-        "\t\t\t\t\t\t\t</div>\n"
-        "\t\t\t\t\t\t</label>\n"
-        "\t\t\t\t\t</div>\n",
-        "display-only graph range controls",
-    )
-    html_content = html.read_text(encoding="utf-8")
-    range_start = "\t\t\t\t\t<div class=\"sweep-display-range\""
-    trace_start = "\t\t\t\t\t<label>Trace\n"
-    listen_start = "\t\t\t\t\t<label>Listen mode\n"
-    listen_end = "\t\t\t\t\t</label>\n"
-    if any(html_content.count(marker) != 1 for marker in (range_start, trace_start, listen_start)):
-        raise RuntimeError("expected one graph-range, trace, and listen-mode control to reorder")
-    range_index = html_content.index(range_start)
-    trace_index = html_content.index(trace_start)
-    listen_index = html_content.index(listen_start)
-    if not trace_index < range_index < listen_index:
-        raise RuntimeError("graph range/listen controls are not in the expected source order")
-    block_end = html_content.index(listen_end, listen_index) + len(listen_end)
-    range_and_listen = html_content[range_index:block_end]
-    html_content = html_content[:range_index] + html_content[block_end:]
-    trace_index = html_content.index(trace_start)
-    html_content = html_content[:trace_index] + range_and_listen + html_content[trace_index:]
-    html.write_text(html_content, encoding="utf-8")
     style = source / "src/client/style.css"
     _replace_once(
         style,

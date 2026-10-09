@@ -6,6 +6,7 @@ const {
   buildMarkerReadout,
   formatDeltaDb,
   formatDeltaFrequency,
+  frequencyDraftMHz,
   markerColor,
   nearestMarkerWithin,
   peakInRange,
@@ -84,6 +85,11 @@ test('formatting keeps sign and unit explicit', () => {
   assert.equal(formatDeltaFrequency(0), '±0 Hz');
   assert.equal(formatDeltaDb(-10), '−10.0 dB');
   assert.equal(formatDeltaDb(3.25), '+3.3 dB');
+});
+
+test('frequency drafts are MHz text at 1 Hz resolution', () => {
+  assert.equal(frequencyDraftMHz(261_873_779.296875), '261.873779');
+  assert.equal(frequencyDraftMHz(100_000_000), '100.000000');
 });
 
 test('marker colours cycle through eight hues per theme', () => {

@@ -59,7 +59,7 @@ git submodule update --init --recursive
 .venv/bin/python tools/build_browsdr_receiver.py
 ```
 
-Jalankan builder Receiver setelah `npm run build`; output Receiver berada di `frontend/dist/receiver`. Setelah Ground Console aktif, pilih menu **Receiver** (atau buka `http://127.0.0.1:8787/#/receiver`). Receiver juga tetap dapat dibuka langsung di `http://127.0.0.1:8787/receiver/`.
+Jalankan builder Receiver setelah `npm run build`; output Receiver berada di `frontend/dist/receiver`. Setelah Ground Console aktif, pilih menu **Monobs**, tepat di bawah Dashboard (atau buka `http://127.0.0.1:8787/#/receiver`). Receiver juga tetap dapat dibuka langsung di `http://127.0.0.1:8787/receiver/`.
 
 Sesudah memperbarui Receiver, muat ulang halaman Receiver agar worker dan WASM dari build yang sama dipakai. Jika browser masih memuat bundle lama, bersihkan service worker/cache untuk origin Ground Console yang sedang digunakan (misalnya `localhost:8787`, bukan `127.0.0.1:8787`) lalu buka ulang halaman; origin yang berbeda juga memerlukan izin WebUSB tersendiri.
 
@@ -153,7 +153,7 @@ git submodule update --init --recursive
 .\.venv\Scripts\python.exe tools\build_browsdr_receiver.py
 ```
 
-Jalankan builder Receiver setelah `npm run build`; output Receiver berada di `frontend\dist\receiver`. Setelah Ground Console aktif, pilih menu **Receiver** (atau buka `http://127.0.0.1:8787/#/receiver`). Receiver juga tetap dapat dibuka langsung di `http://127.0.0.1:8787/receiver/`.
+Jalankan builder Receiver setelah `npm run build`; output Receiver berada di `frontend\dist\receiver`. Setelah Ground Console aktif, pilih menu **Monobs**, tepat di bawah Dashboard (atau buka `http://127.0.0.1:8787/#/receiver`). Receiver juga tetap dapat dibuka langsung di `http://127.0.0.1:8787/receiver/`.
 
 Sesudah memperbarui Receiver, muat ulang halaman Receiver agar worker dan WASM dari build yang sama dipakai. Jika browser masih memuat bundle lama, bersihkan service worker/cache untuk origin Ground Console yang sedang digunakan (misalnya `localhost:8787`, bukan `127.0.0.1:8787`) lalu buka ulang halaman; origin yang berbeda juga memerlukan izin WebUSB tersendiri.
 
@@ -189,10 +189,10 @@ Ground Console tetap dapat digunakan untuk memeriksa UI tanpa Raspberry atau Dat
 2. Aktifkan `SIMULATION`.
 3. Atur latitude, longitude, sudut DoA, dan lebar lobe.
 4. Klik `Terapkan skenario`.
-5. Buka `Overview`.
+5. Buka `Dashboard`.
 6. Periksa map direction helper dan kurva polar synthetic.
 
-Mode simulasi hanya mengganti data Overview. Health, diagnostics, MQTT, dan publication gate tetap menggunakan sumber nyata atau tetap `BLOCKED`.
+Mode simulasi hanya mengganti data Dashboard. Health, diagnostics, MQTT, dan publication gate tetap menggunakan sumber nyata atau tetap `BLOCKED`.
 
 ## Menghubungkan Data Out live
 
@@ -221,7 +221,7 @@ Host Data Out harus lolos allowlist collector dan port harus `8081`. Collector t
 
 ## MQTT staging, opsional
 
-MQTT tidak diperlukan untuk Overview atau simulasi. Ground Console memakai satu koneksi subscriber-only ke broker yang dikonfigurasi; koneksi itu membaca topic v1 dan RDF Node v2 sekaligus. `paho-mqtt` diperlukan untuk monitor MQTT; synthetic publisher juga memerlukan broker lokal.
+MQTT tidak diperlukan untuk Dashboard atau simulasi. Ground Console memakai satu koneksi subscriber-only ke broker yang dikonfigurasi; koneksi itu membaca topic v1 dan RDF Node v2 sekaligus. `paho-mqtt` diperlukan untuk monitor MQTT; synthetic publisher juga memerlukan broker lokal.
 
 Host broker menerima literal IPv4/IPv6 apa pun atau `localhost`; nama DNS ditolak. Masukkan IPv6 tanpa kurung siku. Ground Console membuka koneksi keluar ke broker, tetapi HTTP Ground Console tetap bind ke loopback. MQTT v1 tidak memakai TLS, sehingga payload melintas tanpa enkripsi; gunakan hanya broker dan jaringan tepercaya.
 
@@ -265,7 +265,7 @@ Pastikan `paho-mqtt==2.1.0` terpasang di virtual environment yang sama dengan Gr
 
 Subscriber hanya membaca sepuluh filter v2 di atas. Ground tidak publish, tidak mengirim command, dan tidak mengubah setting Edge. Endpoint browser v2 hanya `GET /api/mqtt/rdf-node`; panel v1 dan v2 menampilkan snapshot schema masing-masing dari satu koneksi broker.
 
-Di **Message monitor**, `READY` berarti seluruh SUBACK untuk filter bersama berhasil, bukan DAQ sehat. Status availability adalah petunjuk koneksi Control, bukan health. DoA dan Angular hanya ditandai current bila freshness, DAQ, sesi, dan revision lolos gate. Untuk menerima Angular live, atur `require_ground_receipt_for_bulk=false` secara terpisah pada Edge. MQTT v2 tidak mengubah HTTP Data Out, publication gate, atau simulasi Overview.
+Di **Message monitor**, `READY` berarti seluruh SUBACK untuk filter bersama berhasil, bukan DAQ sehat. Status availability adalah petunjuk koneksi Control, bukan health. DoA dan Angular hanya ditandai current bila freshness, DAQ, sesi, dan revision lolos gate. Untuk menerima Angular live, atur `require_ground_receipt_for_bulk=false` secara terpisah pada Edge. MQTT v2 tidak mengubah HTTP Data Out, publication gate, atau simulasi Dashboard.
 
 Broker TLS, PPP/T900, dan MQTT production tidak disiapkan oleh quickstart ini. Contoh payload dan fixture lokal bukan bukti kompatibilitas perangkat atau acceptance hardware.
 

@@ -20,11 +20,13 @@ describe('i18n dictionaries', () => {
     }
   });
 
-  it('labels the Receiver route and its purpose in both languages', () => {
-    expect(translate('en', 'route.receiver' as keyof typeof DICTIONARIES.en)).toBe('Receiver');
-    expect(translate('id', 'route.receiver' as keyof typeof DICTIONARIES.en)).toBe('Receiver');
-    expect(translate('en', 'route.receiver.hint' as keyof typeof DICTIONARIES.en)).toBe('Local spectrum and recordings');
-    expect(translate('id', 'route.receiver.hint' as keyof typeof DICTIONARIES.en)).toBe('Spektrum dan rekaman lokal');
+  it('labels the Monobs and Dashboard routes in both languages', () => {
+    expect(translate('en', 'route.receiver' as keyof typeof DICTIONARIES.en)).toBe('Monobs');
+    expect(translate('id', 'route.receiver' as keyof typeof DICTIONARIES.en)).toBe('Monobs');
+    expect(translate('en', 'route.receiver.hint' as keyof typeof DICTIONARIES.en)).toBe('Spectrum monitoring and recordings');
+    expect(translate('id', 'route.receiver.hint' as keyof typeof DICTIONARIES.en)).toBe('Monitoring spektrum dan rekaman');
+    expect(translate('en', 'route.overview')).toBe('Dashboard');
+    expect(translate('id', 'route.overview')).toBe('Dashboard');
   });
 
   it('interpolates named values and leaves unknown placeholders intact', () => {

@@ -113,6 +113,11 @@ export function assignLabelLanes(items: Array<{ x: number; width: number }>, lan
 	return lanes;
 }
 
+/** Editable MHz text for a marker frequency, at 1 Hz resolution. */
+export function frequencyDraftMHz(frequencyHz: number): string {
+	return (frequencyHz / 1_000_000).toFixed(6);
+}
+
 export function formatMarkerFrequency(frequencyHz: number): string {
 	return `${(frequencyHz / 1_000_000).toFixed(6)} MHz`;
 }

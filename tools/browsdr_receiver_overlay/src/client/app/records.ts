@@ -1,6 +1,7 @@
 import type { AppInstance } from './types';
 import { receiverRecordsApi } from './receiver-records-api';
 import type { ReceiverAudioSessionRecord, ReceiverMarker, ReceiverRecord, ReceiverScanRecord } from './receiver-records-api';
+import { frequencyDraftMHz } from './marker-readout';
 
 const recordRequestIds = new WeakMap<object, number>();
 
@@ -21,7 +22,7 @@ function newMarkerId(): string {
 }
 
 function markerFrequencyDrafts(markers: ReceiverMarker[]): Record<string, string> {
-	return Object.fromEntries(markers.map(marker => [marker.id, String(marker.frequencyHz / 1_000_000)]));
+	return Object.fromEntries(markers.map(marker => [marker.id, frequencyDraftMHz(marker.frequencyHz)]));
 }
 
 export const recordsMethods = {
@@ -135,7 +136,7 @@ export const recordsMethods = {
 			label: String(label).trim().slice(0, 80) || `Marker ${this.records.markers.length + 1}`,
 		};
 		this.records.markers.push(marker);
-		this.records.markerFrequencyDrafts[marker.id] = String(frequencyHz / 1_000_000);
+		this.records.markerFrequencyDrafts[marker.id] = frequencyDraftMHz(frequencyHz);
 		this.records.selectedMarkerId = marker.id;
 		this.records.error = '';
 		this.drawSweepSpectrum();
@@ -166,13 +167,15 @@ export const recordsMethods = {
 		const frequencyMHz = Number(rawFrequencyMHz);
 		const frequencyHz = frequencyMHz * 1_000_000;
 		if (!rawFrequencyMHz || !Number.isFinite(frequencyMHz) || frequencyMHz <= 0 || !Number.isFinite(frequencyHz)) {
-			this.records.markerFrequencyDrafts[markerId] = String(marker.frequencyHz / 1_000_000);
+			this.records.markerFrequencyDrafts[markerId] = frequencyDraftMHz(marker.frequencyHz);
 			this.records.error = 'Marker frequency must be a positive finite value in MHz.';
 			return;
 		}
-		marker.frequencyHz = frequencyHz;
+		// A label edit also lands here; leave the stored frequency alone unless the
+		// MHz text itself changed, so rounding to the 1 Hz draft never moves a marker.
+		if (rawFrequencyMHz !== frequencyDraftMHz(marker.frequencyHz)) marker.frequencyHz = frequencyHz;
 		marker.label = String(marker.label || '').slice(0, 80);
-		this.records.markerFrequencyDrafts[markerId] = String(frequencyHz / 1_000_000);
+		this.records.markerFrequencyDrafts[markerId] = frequencyDraftMHz(marker.frequencyHz);
 		this.records.error = '';
 		this.drawSweepSpectrum();
 		if (this.records.selectedMarkerSetId) await this.saveMarkerSet();

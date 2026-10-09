@@ -498,3 +498,47 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 .overlay-group { min-width: 0; margin: 0 0 12px; padding: 0; border: 0; }
 .overlay-group > legend { margin-bottom: 8px; padding: 0; color: var(--subtle); font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; }
 .overlay-control-fields label.is-inactive { opacity: .55; }
+
+/* Page intro. The shell header already carries the page name, so the intro is
+   one line: eyebrow plus the page note. */
+.section-heading { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; }
+.section-heading p { max-width: none; font-size: 12.5px; }
+.stale-evidence-banner { margin: 0; }
+
+/* System health: summary and subsystems share the left column so the node
+   inspector no longer leaves an empty block beside the summary. */
+@media (min-width: 1024px) {
+  .health-summary-grid { grid-template-columns: minmax(300px, .9fr) minmax(0, 1.25fr); align-items: start; }
+}
+.health-column { display: flex; min-width: 0; flex-direction: column; gap: 20px; }
+.health-summary-main { padding: 4px 22px 16px; }
+.health-summary-main strong { font-size: 32px; }
+.subsystem-card { grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 10px 0; }
+.subsystem-text { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.subsystem-text > span { color: var(--text); font-size: 12.5px; font-weight: 500; }
+.subsystem-text > strong { color: var(--subtle); font-size: 11.5px; font-weight: 400; }
+
+/* DoA diagnostics: one line per gate check and log entry. */
+.gate-row { min-height: 36px; }
+.operator-log li { padding: 9px 0; }
+.operator-log li div { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
+.operator-log strong { flex: 0 0 100px; }
+
+/* Configuration: short numeric fields fit three per row on wide screens. */
+@media (min-width: 1200px) {
+  .dry-run-fields { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+/* Message monitor: plain empty text instead of an empty JSON object. */
+.monitor-json-empty { margin: 12px 22px 20px; padding: 14px; border: 1px dashed var(--line-soft); border-radius: 6px; color: var(--subtle); font-size: 12px; }
+
+/* Simulation: control and scenario side by side when there is room. */
+.simulation-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (min-width: 1200px) {
+  .simulation-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}
+
+@media (max-width: 760px) {
+  .subsystem-card { grid-template-columns: minmax(0, 1fr) auto; }
+  .operator-log strong { flex-basis: 100%; }
+}

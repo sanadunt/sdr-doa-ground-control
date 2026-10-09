@@ -10,7 +10,7 @@ import type { SweepCandidate, SweepConfig, SweepProgress, SweepSource, SweepSpec
 import { groupAdjacentCandidates, type SweepCandidateBand } from './candidate-bands';
 import { receiverRecordsApi } from './receiver-records-api';
 import type { ReceiverMarker, ReceiverTraceRecord } from './receiver-records-api';
-import { buildMarkerReadout, formatDeltaDb, formatDeltaFrequency, formatMarkerFrequency, nearestMarkerWithin, peakInRange, traceLevelAt, traceValues } from './marker-readout';
+import { buildMarkerReadout, formatDeltaDb, formatDeltaFrequency, formatMarkerFrequency, frequencyDraftMHz, nearestMarkerWithin, peakInRange, traceLevelAt, traceValues } from './marker-readout';
 import type { MarkerReadoutRow } from './marker-readout';
 
 interface ListenRestore {
@@ -447,8 +447,8 @@ export const sweepMethods = {
 		const tabs = ['spectrum', 'listener', 'records'] as const;
 		const currentIndex = tabs.indexOf(this.activeWorkspace);
 		let nextIndex = currentIndex;
-		if (event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % tabs.length;
-		else if (event.key === 'ArrowUp') nextIndex = (currentIndex + tabs.length - 1) % tabs.length;
+		if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % tabs.length;
+		else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (currentIndex + tabs.length - 1) % tabs.length;
 		else if (event.key === 'Home') nextIndex = 0;
 		else if (event.key === 'End') nextIndex = tabs.length - 1;
 		else return;
@@ -984,7 +984,7 @@ export const sweepMethods = {
 		const frequencyHz = Math.max(1, marker.frequencyHz + direction * stepHz * (event.shiftKey ? 10 : 1));
 		marker.frequencyHz = frequencyHz;
 		marker.powerDb = frame ? traceLevelAt(traceValues(frame, this.sweep.view), frame.startHz, frame.endHz, frequencyHz) : null;
-		this.records.markerFrequencyDrafts[marker.id] = String(frequencyHz / 1_000_000);
+		this.records.markerFrequencyDrafts[marker.id] = frequencyDraftMHz(frequencyHz);
 		this.drawSweepSpectrum();
 		// Persist once the operator stops nudging instead of once per key press.
 		const pending = markerSaveTimers.get(this);

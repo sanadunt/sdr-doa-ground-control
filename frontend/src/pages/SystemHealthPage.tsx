@@ -15,8 +15,8 @@ function statusValue(status: TelemetrySnapshot['status'], key: string): unknown 
 function Subsystem({ name, state, detail }: { name: string; state: string; detail: string }): JSX.Element {
   return (
     <article className="subsystem-card">
-      <div className="subsystem-top"><span>{name}</span><StatusBadge label={state} tone={toneFor(state)} /></div>
-      <strong>{detail}</strong>
+      <div className="subsystem-text"><span>{name}</span><strong>{detail}</strong></div>
+      <StatusBadge label={state} tone={toneFor(state)} />
     </article>
   );
 }
@@ -47,23 +47,25 @@ export function SystemHealthPage({ snapshot, mqtt, localSnapshotFresh }: { snaps
       <SectionHeading eyebrow={t('health.eyebrow')} title={t('health.title')} detail={t('health.detail')} />
       {snapshot && !localSnapshotFresh ? <div className="dry-run-notice stale-evidence-banner" role="status"><strong>{t('common.staleEvidence')}</strong> {t('health.stale')}</div> : null}
       <div className="health-summary-grid">
-        <Panel className="health-summary-panel" eyebrow={t('health.summaryEyebrow')} title={t('health.summaryTitle')}>
-          <div className="health-summary-main"><StatusBadge label={dataState} tone={toneFor(dataState)} /><strong>{overall}</strong><span>{snapshot ? t('health.classified') : t('health.noResponse')}</span></div>
-          <div className="metric-grid three"><Metric label="DAQ" value={status?.daq_health ?? 'N/A'} detail={dropped === null ? t('health.dropsNa') : t('health.drops', { count: dropped })} tone={toneFor(status?.daq_health)} /><Metric label={t('health.sync')} value={sync} detail={t('health.syncDetail')} tone={sync === '3 / 3' ? 'good' : 'warn'} /><Metric label="MQTT" value={connection} detail={mqtt?.read_only === false ? t('health.unexpectedWrite') : t('health.subscriberOnly')} tone={mqtt?.connection === 'connected' ? 'good' : 'warn'} /></div>
-        </Panel>
+        <div className="health-column">
+          <Panel className="health-summary-panel" eyebrow={t('health.summaryEyebrow')} title={t('health.summaryTitle')}>
+            <div className="health-summary-main"><StatusBadge label={dataState} tone={toneFor(dataState)} /><strong>{overall}</strong><span>{snapshot ? t('health.classified') : t('health.noResponse')}</span></div>
+            <div className="metric-grid three"><Metric label="DAQ" value={status?.daq_health ?? 'N/A'} detail={dropped === null ? t('health.dropsNa') : t('health.drops', { count: dropped })} tone={toneFor(status?.daq_health)} /><Metric label={t('health.sync')} value={sync} detail={t('health.syncDetail')} tone={sync === '3 / 3' ? 'good' : 'warn'} /><Metric label="MQTT" value={connection} detail={mqtt?.read_only === false ? t('health.unexpectedWrite') : t('health.subscriberOnly')} tone={mqtt?.connection === 'connected' ? 'good' : 'warn'} /></div>
+          </Panel>
+          <Panel className="subsystems-panel" eyebrow={t('health.subsystemsEyebrow')} title={t('health.subsystemsTitle')}>
+            <div className="subsystem-grid">
+              <Subsystem name="Data Out / HTTP" state={status?.available === true && localSnapshotFresh ? 'AVAILABLE' : status?.available === false ? 'UNAVAILABLE' : 'STALE'} detail={t('health.sub.http')} />
+              <Subsystem name={t('health.sub.daq')} state={String(status?.daq_health ?? 'UNKNOWN')} detail={dropped === null ? t('health.sub.dropsUnavailable') : t('health.drops', { count: formatNumber(dropped, 0) })} />
+              <Subsystem name={t('health.sub.doa')} state={snapshot?.native_consistency?.conflict ? 'CONFLICT' : csv.available === true && xml.available === true ? 'PRESENT' : 'INCOMPLETE'} detail={t('health.sub.doaDetail')} />
+              <Subsystem name={t('health.sub.clock')} state="UNVERIFIED" detail={t('health.sub.clockDetail')} />
+              <Subsystem name={t('health.sub.mqtt')} state={connection} detail={mqtt?.publish_enabled === false ? t('health.sub.publishDisabled') : t('health.sub.noMonitor')} />
+            </div>
+          </Panel>
+        </div>
         <Panel className="inspector-panel" eyebrow={t('health.inspectorEyebrow')} title={t('health.inspectorTitle')}>
           <div className="key-value-list">{nodeRows.map(([label, value, detail]) => <KeyValue key={label} label={label} value={typeof value === 'number' ? formatNumber(value, 0) : String(value ?? 'N/A')} detail={detail} />)}</div>
         </Panel>
       </div>
-      <Panel className="subsystems-panel" eyebrow={t('health.subsystemsEyebrow')} title={t('health.subsystemsTitle')}>
-        <div className="subsystem-grid">
-          <Subsystem name="Data Out / HTTP" state={status?.available === true && localSnapshotFresh ? 'AVAILABLE' : status?.available === false ? 'UNAVAILABLE' : 'STALE'} detail={t('health.sub.http')} />
-          <Subsystem name={t('health.sub.daq')} state={String(status?.daq_health ?? 'UNKNOWN')} detail={dropped === null ? t('health.sub.dropsUnavailable') : t('health.drops', { count: formatNumber(dropped, 0) })} />
-          <Subsystem name={t('health.sub.doa')} state={snapshot?.native_consistency?.conflict ? 'CONFLICT' : csv.available === true && xml.available === true ? 'PRESENT' : 'INCOMPLETE'} detail={t('health.sub.doaDetail')} />
-          <Subsystem name={t('health.sub.clock')} state="UNVERIFIED" detail={t('health.sub.clockDetail')} />
-          <Subsystem name={t('health.sub.mqtt')} state={connection} detail={mqtt?.publish_enabled === false ? t('health.sub.publishDisabled') : t('health.sub.noMonitor')} />
-        </div>
-      </Panel>
     </div>
   );
 }

@@ -12,12 +12,12 @@ export type RouteName = 'overview' | 'system-health' | 'doa-diagnostics' | 'conf
 
 export const ROUTES: Array<{ id: RouteName; icon: IconName }> = [
   { id: 'overview', icon: 'overview' },
+  { id: 'receiver', icon: 'receiver' },
   { id: 'system-health', icon: 'health' },
   { id: 'doa-diagnostics', icon: 'diagnostics' },
   { id: 'configuration', icon: 'configuration' },
   { id: 'message-monitor', icon: 'monitor' },
   { id: 'simulation', icon: 'polar' },
-  { id: 'receiver', icon: 'receiver' },
 ];
 
 const RAIL_STORAGE_KEY = 'sdr-console-rail';
@@ -31,6 +31,7 @@ function routeFromHash(): RouteName {
   if (value === 'diagnostics') return 'doa-diagnostics';
   if (value === 'settings') return 'configuration';
   if (value === 'mqtt') return 'message-monitor';
+  if (value === 'monobs') return 'receiver';
   return 'overview';
 }
 

@@ -35,6 +35,11 @@
 </head>
 <body>
 	<div id="app" v-cloak>
+		<nav class="receiver-view-tabs" role="tablist" aria-label="Receiver workspace" aria-orientation="horizontal" @keydown="onWorkspaceTabsKeydown">
+			<button id="tab-spectrum" class="receiver-view-tab" :class="{ active: activeWorkspace === 'spectrum' }" role="tab" aria-controls="spectrum-workspace" :aria-selected="activeWorkspace === 'spectrum'" :tabindex="activeWorkspace === 'spectrum' ? 0 : -1" :disabled="sweep.starting || sweep.stopping || sweep.listenStarting" @click="selectWorkspace('spectrum')">Spectrum</button>
+			<button id="tab-listener" class="receiver-view-tab" :class="{ active: activeWorkspace === 'listener' }" role="tab" aria-controls="listener-workspace" :aria-selected="activeWorkspace === 'listener'" :tabindex="activeWorkspace === 'listener' ? 0 : -1" :disabled="sweep.starting || sweep.stopping || sweep.listenStarting" @click="selectWorkspace('listener')">Listener</button>
+			<button id="tab-records" class="receiver-view-tab" :class="{ active: activeWorkspace === 'records' }" role="tab" aria-controls="records-workspace" :aria-selected="activeWorkspace === 'records'" :tabindex="activeWorkspace === 'records' ? 0 : -1" :disabled="sweep.starting || sweep.stopping || sweep.listenStarting" @click="selectWorkspace('records')">Records</button>
+		</nav>
 		<!-- Top Bar -->
 		<div class="top-bar" v-show="activeWorkspace === 'listener'">
 			<button class="icon-btn sidebar-toggle" v-show="activeWorkspace === 'listener'" @click="toggleSidebar" title="Menu">
@@ -96,11 +101,6 @@
 		</div>
 
 		<div class="receiver-workspaces">
-			<nav class="receiver-view-tabs" role="tablist" aria-label="Receiver workspace" aria-orientation="vertical" @keydown="onWorkspaceTabsKeydown">
-				<button id="tab-spectrum" class="receiver-view-tab" :class="{ active: activeWorkspace === 'spectrum' }" role="tab" aria-controls="spectrum-workspace" :aria-selected="activeWorkspace === 'spectrum'" :tabindex="activeWorkspace === 'spectrum' ? 0 : -1" :disabled="sweep.starting || sweep.stopping || sweep.listenStarting" @click="selectWorkspace('spectrum')">Spectrum</button>
-				<button id="tab-listener" class="receiver-view-tab" :class="{ active: activeWorkspace === 'listener' }" role="tab" aria-controls="listener-workspace" :aria-selected="activeWorkspace === 'listener'" :tabindex="activeWorkspace === 'listener' ? 0 : -1" :disabled="sweep.starting || sweep.stopping || sweep.listenStarting" @click="selectWorkspace('listener')">Listener</button>
-				<button id="tab-records" class="receiver-view-tab" :class="{ active: activeWorkspace === 'records' }" role="tab" aria-controls="records-workspace" :aria-selected="activeWorkspace === 'records'" :tabindex="activeWorkspace === 'records' ? 0 : -1" :disabled="sweep.starting || sweep.stopping || sweep.listenStarting" @click="selectWorkspace('records')">Records</button>
-			</nav>
 			<div class="receiver-workspace-content">
 				<div id="listener-workspace" class="listener-workspace" v-show="activeWorkspace === 'listener'" role="tabpanel" aria-labelledby="tab-listener">
 					<header class="listener-workspace-header">
@@ -459,6 +459,7 @@
 
 			<!-- Canvas Area -->
 			<div class="workspace">
+				<p class="listener-empty" v-if="!connected">Radio is off. Use <strong>Connect Device</strong> under Source to start listening.</p>
 				<div class="fft-container" ref="fftContainer">
 					<canvas id="fft" ref="fft"></canvas>
 					<!-- Canvas Overlay lines -->
@@ -508,9 +509,14 @@
 		<!-- Wide Spectrum workspace -->
 		<section id="spectrum-workspace" class="sweep-panel" v-show="activeWorkspace === 'spectrum'" role="tabpanel" aria-labelledby="tab-spectrum" aria-label="Wide Spectrum">
 				<header class="sweep-header">
-					<div>
+					<div class="sweep-header-title">
 						<h2>Wide Spectrum Scan</h2>
-						<p>RX only · Bias-T forced OFF · relative dBFS-like power, not calibrated dBm</p>
+						<p class="sweep-header-status">
+							<span>{{ sweep.progress.sweepCount }} sweeps · {{ sweep.progress.sweepsPerSecond.toFixed(2) }}/s</span>
+							<span>RF {{ sweep.progress.currentFrequencyHz ? (sweep.progress.currentFrequencyHz / 1000000).toFixed(3) + ' MHz' : 'n/a' }}</span>
+							<span>{{ (sweep.progress.bytesPerSecond / 1024).toFixed(1) }} KiB/s</span>
+							<span v-if="sweep.progress.discardedBytes">Discarded {{ sweep.progress.discardedBytes }} bytes</span>
+						</p>
 					</div>
 					<div class="sweep-header-actions">
 						<span class="sweep-device-state" :class="{ connected }">{{ connected ? 'DEVICE CONNECTED' : 'NO DEVICE' }}</span>
@@ -518,124 +524,124 @@
 					</div>
 				</header>
 
-				<div class="sweep-controls">
-					<label>Source
-						<select v-model="sweep.source" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
+				<div class="sweep-scan-bar">
+					<label class="sweep-field">Source
+						<select v-model="sweep.source" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">
 							<option value="simulated">Simulation</option>
 							<option value="native" v-if="deviceCapabilities && deviceCapabilities.supportsNativeSweep">HackRF native</option>
 							<option value="manual" v-if="deviceCapabilities && deviceCapabilities.supportsManualSweep">HackRF manual</option>
 						</select>
 					</label>
-					<label>Start
-						<div class="sweep-input-unit">
-							<input type="number" v-model.number="sweep.startMHz" min="1" max="7250" step="0.1" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
-							<span>MHz</span>
+					<div class="sweep-field sweep-range-field" role="group" aria-labelledby="sweep-range-label">
+						<span id="sweep-range-label">Range (MHz)</span>
+						<div class="sweep-range-inputs">
+							<input type="number" v-model.number="sweep.startMHz" min="1" max="7250" step="0.1" aria-label="Start frequency MHz" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">
+							<span aria-hidden="true">–</span>
+							<input type="number" v-model.number="sweep.endMHz" min="1" max="7250" step="0.1" aria-label="End frequency MHz" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">
 						</div>
-					</label>
-					<label>End
-						<div class="sweep-input-unit">
-							<input type="number" v-model.number="sweep.endMHz" min="1" max="7250" step="0.1" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
-							<span>MHz</span>
-						</div>
-					</label>
-					<label>Resolution
-						<select v-model.number="sweep.fftSize" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
+					</div>
+					<label class="sweep-field">Resolution
+						<select v-model.number="sweep.fftSize" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">
 							<option :value="4096">4.88 kHz · 4096 FFT</option>
 							<option :value="8192">2.44 kHz · 8192 FFT</option>
 						</select>
 					</label>
-					<label>LNA gain
-						<select v-model.number="sweep.lnaGain" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
-							<option v-for="gain in [0, 8, 16, 24, 32, 40]" :key="gain" :value="gain">{{ gain }} dB</option>
-						</select>
-					</label>
-					<label>VGA gain
-						<select v-model.number="sweep.vgaGain" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
-							<option v-for="gain in [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62]" :key="gain" :value="gain">{{ gain }} dB</option>
-						</select>
-					</label>
-					<label class="sweep-amp-control"><input type="checkbox" v-model="sweep.ampEnabled" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults"> RF amp (+14 dB)</label>
-					<label class="sweep-amp-control" title="Applied to hardware FFT captures; signals exactly at the tuned center may be reduced."><input type="checkbox" v-model="radio.iqCorrection" :disabled="remoteMode !== 'none' || sweep.active || sweep.starting || sweep.stopping || sweep.hasResults"> IQ Correction (DC)</label>
-					<label>Detection SNR
-						<div class="sweep-input-unit">
-							<input type="number" v-model.number="sweep.minSnrDb" min="1" max="60" step="1" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
-							<span>dB</span>
-						</div>
-					</label>
-					<label>Average
-						<div class="sweep-input-unit">
-							<input type="number" v-model.number="sweep.averageAlpha" min="0.01" max="1" step="0.01" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
-							<span>α</span>
-						</div>
-					</label>
-					<label>Trace
+					<div class="sweep-scan-actions" role="group" aria-label="Scan control">
+						<button class="btn btn-secondary" v-if="!connected && remoteMode === 'none'" @click="connect" :disabled="sweep.active || sweep.starting || sweep.stopping">Connect Device</button>
+						<button class="btn btn-secondary" v-else-if="connected && remoteMode === 'none'" @click="disconnect" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Disconnect</button>
+						<button class="btn btn-primary" v-if="!(sweep.active || sweep.starting || sweep.stopping)" @click="startSweep" :disabled="sweep.listening || sweep.listenStarting || remoteMode !== 'none' || (sweep.source !== 'simulated' && !connected)">Start scan</button>
+						<button class="btn btn-danger" v-else @click="stopSweep(true)" :disabled="sweep.stopping">{{ sweep.stopping ? (sweep.stopPhase === 'rf' ? 'Stopping RF…' : sweep.stopPhase === 'archive' ? 'Saving archive…' : 'Finishing…') : 'Stop scan' }}</button>
+					</div>
+				</div>
+				<details class="sweep-settings">
+					<summary>
+						<span class="sweep-settings-title">Scan settings</span>
+						<span class="sweep-settings-summary">LNA {{ sweep.lnaGain }} dB · VGA {{ sweep.vgaGain }} dB · RF amp {{ sweep.ampEnabled ? 'on' : 'off' }} · IQ {{ radio.iqCorrection ? 'on' : 'off' }} · SNR ≥ {{ sweep.minSnrDb }} dB · α {{ sweep.averageAlpha }}</span>
+					</summary>
+					<div class="sweep-settings-grid">
+						<fieldset>
+							<legend>Gain</legend>
+							<label class="sweep-field">LNA gain
+								<select v-model.number="sweep.lnaGain" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">
+									<option v-for="gain in [0, 8, 16, 24, 32, 40]" :key="gain" :value="gain">{{ gain }} dB</option>
+								</select>
+							</label>
+							<label class="sweep-field">VGA gain
+								<select v-model.number="sweep.vgaGain" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">
+									<option v-for="gain in [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62]" :key="gain" :value="gain">{{ gain }} dB</option>
+								</select>
+							</label>
+							<label class="sweep-check"><input type="checkbox" v-model="sweep.ampEnabled" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting"> RF amp (+14 dB)</label>
+							<label class="sweep-check" title="Applied to hardware FFT captures; signals exactly at the tuned center may be reduced."><input type="checkbox" v-model="radio.iqCorrection" :disabled="remoteMode !== 'none' || sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting"> IQ correction (DC)</label>
+						</fieldset>
+						<fieldset>
+							<legend>Detection</legend>
+							<label class="sweep-field">Minimum SNR
+								<div class="sweep-input-unit">
+									<input type="number" v-model.number="sweep.minSnrDb" min="1" max="60" step="1" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">
+									<span>dB</span>
+								</div>
+							</label>
+							<label class="sweep-field">Averaging
+								<div class="sweep-input-unit">
+									<input type="number" v-model.number="sweep.averageAlpha" min="0.01" max="1" step="0.01" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">
+									<span>α</span>
+								</div>
+							</label>
+						</fieldset>
+						<fieldset>
+							<legend>Listen</legend>
+							<label class="sweep-field">Demodulation
+								<select v-model="sweep.listenMode" :disabled="sweep.listening || sweep.listenStarting">
+									<option value="">Use active VFO mode</option>
+									<option value="wfm">WFM</option>
+									<option value="nfm">NFM</option>
+									<option value="am">AM</option>
+									<option value="usb">USB</option>
+									<option value="lsb">LSB</option>
+									<option value="dsb">DSB</option>
+									<option value="cw">CW</option>
+									<option value="raw">Raw IQ</option>
+								</select>
+							</label>
+						</fieldset>
+					</div>
+				</details>
+
+				<div class="sweep-chart-toolbar">
+					<div class="sweep-visualization-tabs" role="tablist" aria-label="Sweep visualization">
+						<button :class="{ active: sweep.visualization === 'spectrum' }" role="tab" :aria-selected="sweep.visualization === 'spectrum'" @click="setSweepVisualization('spectrum')">Spectrum</button>
+						<button :class="{ active: sweep.visualization === 'waterfall' }" role="tab" :aria-selected="sweep.visualization === 'waterfall'" @click="setSweepVisualization('waterfall')">Waterfall · {{ sweep.waterfallRows }}/256</button>
+					</div>
+					<label class="sweep-inline-field">Trace
 						<select v-model="sweep.view" @change="drawSweepSpectrum">
 							<option value="current">Current</option>
 							<option value="average">Average</option>
 							<option value="max">Max hold</option>
 						</select>
 					</label>
-					<label>Sort signals
-						<select v-model="sweep.sortBy" @change="candidateFilterChanged">
-							<option value="snr">SNR</option>
-							<option value="frequency">Frequency</option>
-							<option value="peak">Peak power</option>
-							<option value="hits">Hit count</option>
-							<option value="lastSeen">Last seen</option>
-						</select>
-					</label>
-					<label>Graph minimum
-						<div class="sweep-input-unit">
-							<input type="number" v-model.number="sweep.displayMinDb" min="-160" :max="sweep.displayMaxDb - 5" step="5" @change="updateSweepDisplayRange('min')">
-							<span>dBFS</span>
-						</div>
-					</label>
-					<label>Graph maximum
-						<div class="sweep-input-unit">
-							<input type="number" v-model.number="sweep.displayMaxDb" :min="sweep.displayMinDb + 5" max="0" step="5" @change="updateSweepDisplayRange('max')">
-							<span>dBFS</span>
-						</div>
-					</label>
-					<label>Listen mode
-						<select v-model="sweep.listenMode" :disabled="sweep.listening || sweep.listenStarting">
-							<option value="">Use active VFO mode</option>
-							<option value="wfm">WFM</option>
-							<option value="nfm">NFM</option>
-							<option value="am">AM</option>
-							<option value="usb">USB</option>
-							<option value="lsb">LSB</option>
-							<option value="dsb">DSB</option>
-							<option value="cw">CW</option>
-							<option value="raw">Raw IQ</option>
-						</select>
-					</label>
-					<div class="sweep-actions">
-						<div class="sweep-action-group" role="group" aria-label="Scan control">
-							<button class="btn btn-secondary" v-if="!connected && remoteMode === 'none'" @click="connect" :disabled="sweep.active || sweep.starting || sweep.stopping">Connect Device</button>
-							<button class="btn btn-secondary" v-else-if="connected && remoteMode === 'none'" @click="disconnect" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Disconnect</button>
-							<button class="btn btn-primary" v-if="!(sweep.active || sweep.starting || sweep.stopping)" @click="startSweep" :disabled="sweep.listening || sweep.listenStarting || remoteMode !== 'none' || (sweep.source !== 'simulated' && !connected)">Start scan</button>
-							<button class="btn btn-danger" v-else @click="stopSweep(true)" :disabled="sweep.stopping">{{ sweep.stopping ? (sweep.stopPhase === 'rf' ? 'Stopping RF…' : sweep.stopPhase === 'archive' ? 'Saving archive…' : 'Finishing…') : 'Stop scan' }}</button>
-						</div>
-						<div class="sweep-visualization-tabs" role="tablist" aria-label="Sweep visualization">
-							<button :class="{ active: sweep.visualization === 'spectrum' }" role="tab" :aria-selected="sweep.visualization === 'spectrum'" @click="setSweepVisualization('spectrum')">Spectrum</button>
-							<button :class="{ active: sweep.visualization === 'waterfall' }" role="tab" :aria-selected="sweep.visualization === 'waterfall'" @click="setSweepVisualization('waterfall')">Waterfall · {{ sweep.waterfallRows }}/256</button>
-						</div>
-						<div class="sweep-action-group" role="group" aria-label="Zoom">
-							<span class="sweep-action-label">Zoom</span>
-							<button class="btn btn-secondary btn-icon-text" @click="zoomSweepSpectrum(2)" :disabled="!sweep.hasResults" aria-label="Zoom out" title="Zoom out">−</button>
-							<button class="btn btn-secondary btn-icon-text" @click="zoomSweepSpectrum(0.5)" :disabled="!sweep.hasResults" aria-label="Zoom in" title="Zoom in">+</button>
-							<button class="btn btn-secondary" @click="resetSweepViewport" :disabled="!sweep.hasResults" title="Show the full scan range">Fit</button>
-						</div>
-						<div class="sweep-action-group" role="group" aria-label="Markers">
-							<button class="btn btn-secondary" @click="addPeakMarker" :disabled="!sweep.hasResults" title="Place a marker on the strongest signal in the visible range">Marker to peak</button>
-						</div>
-						<div class="sweep-action-group sweep-file-group" role="group" aria-label="Session files">
-							<button class="btn btn-secondary" @click="$refs.sweepSessionFile.click()" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Open session</button>
-							<button class="btn btn-secondary" @click="saveSweepSession" :disabled="!sweep.hasResults">Save JSON</button>
-							<button class="btn btn-secondary" @click="exportSweepCandidates" :disabled="!sweep.hasResults">Export CSV</button>
-							<button class="btn btn-secondary" @click="clearSweepData" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Clear</button>
-						</div>
+					<div class="sweep-inline-field sweep-scale-field" role="group" aria-label="Spectrum display limits">
+						<span>Scale</span>
+						<input type="number" v-model.number="sweep.displayMinDb" min="-160" :max="sweep.displayMaxDb - 5" step="5" aria-label="Graph minimum dBFS" @input="previewSweepDisplayRange('min', $event)" @change="updateSweepDisplayRange('min')">
+						<span aria-hidden="true">to</span>
+						<input type="number" v-model.number="sweep.displayMaxDb" :min="sweep.displayMinDb + 5" max="60" step="5" aria-label="Graph maximum dBFS" @input="previewSweepDisplayRange('max', $event)" @change="updateSweepDisplayRange('max')">
+						<span>dBFS</span>
 					</div>
+					<div class="sweep-toolbar-group" role="group" aria-label="Zoom">
+						<button class="btn btn-secondary btn-icon-text" @click="zoomSweepSpectrum(2)" :disabled="!sweep.hasResults" aria-label="Zoom out" title="Zoom out">−</button>
+						<button class="btn btn-secondary btn-icon-text" @click="zoomSweepSpectrum(0.5)" :disabled="!sweep.hasResults" aria-label="Zoom in" title="Zoom in">+</button>
+						<button class="btn btn-secondary" @click="resetSweepViewport" :disabled="!sweep.hasResults" title="Show the full scan range">Fit</button>
+					</div>
+					<button class="btn btn-secondary" @click="addPeakMarker" :disabled="!sweep.hasResults" title="Place a marker on the strongest signal in the visible range">Marker to peak</button>
+					<details class="sweep-menu sweep-session-menu" @focusout="$event.currentTarget.contains($event.relatedTarget) || ($event.currentTarget.open = false)" @keydown.esc="$event.currentTarget.open = false">
+						<summary class="btn btn-secondary">Session</summary>
+						<div class="sweep-menu-items">
+							<button class="btn btn-secondary" type="button" @click="$event.target.closest('details').open = false; $refs.sweepSessionFile.click()" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Open session…</button>
+							<button class="btn btn-secondary" type="button" @click="$event.target.closest('details').open = false; saveSweepSession()" :disabled="!sweep.hasResults">Save session (JSON)</button>
+							<button class="btn btn-secondary" type="button" @click="$event.target.closest('details').open = false; exportSweepCandidates()" :disabled="!sweep.hasResults">Export peaks (CSV)</button>
+							<button class="btn btn-secondary sweep-menu-danger" type="button" @click="$event.target.closest('details').open = false; clearSweepData()" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Clear results</button>
+						</div>
+					</details>
 					<input ref="sweepSessionFile" class="sweep-file-input" type="file" accept=".json,application/json" @change="openSweepSession">
 				</div>
 				<div class="sweep-visualization-status">
@@ -645,15 +651,9 @@
 
 				<div class="sweep-error" v-if="records.error" role="alert">{{ records.error }}</div>
 				<div class="sweep-error" v-if="sweep.error">{{ sweep.error }}</div>
-				<div class="sweep-status">
-					<span>{{ sweep.progress.sweepCount }} sweeps · {{ sweep.progress.sweepsPerSecond.toFixed(2) }} sweeps/s</span>
-					<span>RF {{ sweep.progress.currentFrequencyHz ? (sweep.progress.currentFrequencyHz / 1000000).toFixed(3) + ' MHz' : 'n/a' }}</span>
-					<span>{{ (sweep.progress.bytesPerSecond / 1024).toFixed(1) }} KiB/s</span>
-					<span>{{ sortedSweepCandidates.length }} peak groups shown / {{ sweep.candidateHistoryTotal }} candidate records in history</span>
-					<span v-if="sweep.progress.discardedBytes">Discarded {{ sweep.progress.discardedBytes }} bytes</span>
-				</div>
 
 				<div class="sweep-spectrum-wrap">
+					<p class="sweep-chart-empty" v-if="!sweep.hasResults && !sweep.active && !sweep.starting">No scan data yet. Set the range, then press <strong>Start scan</strong>.</p>
 					<canvas ref="sweepSpectrum" v-show="sweep.visualization === 'spectrum'" class="sweep-spectrum" tabindex="0"
 						aria-label="Spectrum chart. Click to add or select a marker; with a marker selected, arrow keys move it and Delete removes it."
 						@keydown="sweepCanvasKeydown"
@@ -696,19 +696,38 @@
 					</div>
 				</div>
 				<p class="sweep-chart-hint" v-show="sweep.visualization === 'spectrum'">Click: add or select marker · Drag: pan · Wheel: zoom · ←/→: move selected marker (Shift ×10) · Delete: remove · Esc: deselect</p>
-				<section class="marker-readout" v-if="records.markers.length" aria-labelledby="marker-readout-title">
+				<section class="marker-readout" aria-labelledby="marker-readout-title">
 					<div class="marker-readout-heading">
-						<h3 id="marker-readout-title">Markers</h3>
-						<span>Live level follows the {{ sweep.view === 'max' ? 'max hold' : sweep.view }} trace · Δ against the REF marker</span>
+						<div class="marker-readout-title">
+							<h3 id="marker-readout-title">Markers</h3>
+							<span v-if="records.markers.length">Live level follows the {{ sweep.view === 'max' ? 'max hold' : sweep.view }} trace · Δ against the REF marker</span>
+						</div>
+						<div class="marker-set-bar" role="group" aria-label="Marker set">
+							<select v-model="records.selectedMarkerSetId" @change="selectMarkerSet" aria-label="Saved marker set">
+								<option value="">Unsaved markers</option>
+								<option v-for="set in records.markerSets" :key="set.id" :value="set.id">{{ set.name }}</option>
+							</select>
+							<input type="text" v-model="records.markerSetName" maxlength="120" placeholder="Set name" aria-label="Marker set name">
+							<button class="btn btn-primary" type="button" @click="saveMarkerSet">Save set</button>
+							<details class="sweep-menu" @focusout="$event.currentTarget.contains($event.relatedTarget) || ($event.currentTarget.open = false)" @keydown.esc="$event.currentTarget.open = false">
+								<summary class="btn btn-secondary" aria-label="More marker set actions">More</summary>
+								<div class="sweep-menu-items">
+									<button class="btn btn-secondary" type="button" @click="$event.target.closest('details').open = false; newMarkerSet()">New empty set</button>
+									<button class="btn btn-secondary" type="button" @click="$event.target.closest('details').open = false; exportMarkerSetJson()" :disabled="!records.markers.length">Export markers (JSON)</button>
+									<button class="btn btn-secondary" type="button" @click="$event.target.closest('details').open = false; exportMarkerSetCsv()" :disabled="!records.markers.length">Export markers (CSV)</button>
+									<button class="btn btn-secondary sweep-menu-danger" type="button" @click="$event.target.closest('details').open = false; deleteMarkerSet()" :disabled="!records.selectedMarkerSetId">Delete saved set</button>
+								</div>
+							</details>
+						</div>
 					</div>
-					<div class="marker-readout-scroll" role="region" aria-label="Marker readout" tabindex="0">
+					<div class="marker-readout-scroll" role="region" aria-label="Marker readout" tabindex="0" v-if="records.markers.length">
 						<table class="marker-readout-table">
-							<thead><tr><th scope="col">Marker</th><th scope="col">Label</th><th scope="col">Frequency</th><th scope="col">Live level</th><th scope="col">Level when placed</th><th scope="col">Δ frequency</th><th scope="col">Δ level</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+							<thead><tr><th scope="col">Marker</th><th scope="col">Label</th><th scope="col">Frequency (MHz)</th><th scope="col">Live level</th><th scope="col">Level when placed</th><th scope="col">Δ frequency</th><th scope="col">Δ level</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
 							<tbody>
-								<tr v-for="row in sweepMarkerRows()" :key="row.id" :class="{ selected: row.id === records.selectedMarkerId }" @click="selectReceiverMarker(row.id)">
+								<tr v-for="(row, index) in sweepMarkerRows()" :key="row.id" :class="{ selected: row.id === records.selectedMarkerId }" @click="selectReceiverMarker(row.id)">
 									<td><span class="marker-chip" :class="'marker-tone-' + (row.index % 8)">{{ row.name }}</span><span class="marker-ref-badge" v-if="row.isReference">REF</span></td>
-									<td class="marker-readout-label">{{ row.label }}</td>
-									<td class="marker-readout-number">{{ formatMarkerFrequency(row.frequencyHz) }}</td>
+									<td class="marker-readout-label"><input type="text" v-model="records.markers[index].label" maxlength="80" placeholder="Label" :aria-label="`${row.name} label`" @click.stop @change="updateReceiverMarker(row.id)"></td>
+									<td class="marker-readout-number"><input type="number" v-model="records.markerFrequencyDrafts[row.id]" min="0" step="any" :aria-label="`${row.name} frequency MHz`" @click.stop @change="updateReceiverMarker(row.id)"></td>
 									<td class="marker-readout-number">{{ row.liveDb === null ? '—' : row.liveDb.toFixed(1) + ' dBFS' }}</td>
 									<td class="marker-readout-number marker-readout-muted">{{ row.savedDb === null ? 'not measured' : row.savedDb.toFixed(1) + ' dBFS' }}</td>
 									<td class="marker-readout-number">{{ row.deltaHz === null ? '—' : formatDeltaFrequency(row.deltaHz) }}</td>
@@ -722,34 +741,50 @@
 							</tbody>
 						</table>
 					</div>
+					<p class="marker-readout-empty" v-else>No markers yet. Click the spectrum, press <strong>Marker to peak</strong>, use <strong>Mark</strong> on a peak below, or add one by frequency.</p>
+					<form class="marker-add-row" @submit.prevent="addManualReceiverMarker">
+						<span>Add by frequency</span>
+						<input type="number" v-model="records.manualMarkerFrequencyMHz" min="0" step="any" required placeholder="MHz" aria-label="New marker frequency MHz">
+						<input type="text" v-model="records.manualMarkerLabel" maxlength="80" placeholder="Label (optional)" aria-label="New marker label">
+						<button class="btn btn-secondary" type="submit">Add marker</button>
+					</form>
 				</section>
-				<div class="sweep-history-layout">
-					<section class="sweep-history-table" aria-label="Peak history">
-				<div class="sweep-table-heading">
-					<h3>Peak history by frequency</h3>
-					<span>Listen stops the scan. Use “Stop listening and start new scan” to replace these results.</span>
-				</div>
-				<div class="sweep-table-tools">
-					<label>Minimum peak
-						<select :value="[-160, -100, -90, -80, -70, -60].includes(Number(sweep.minimumPeakDb)) ? String(sweep.minimumPeakDb) : 'custom'" @change="setMinimumPeakPreset">
-							<option value="-160">All (−160 dBFS)</option>
-							<option value="-100">−100 dBFS</option>
-							<option value="-90">−90 dBFS</option>
-							<option value="-80">−80 dBFS</option>
-							<option value="-70">−70 dBFS</option>
-							<option value="-60">−60 dBFS</option>
-							<option value="custom">Custom</option>
-						</select>
-					</label>
-					<label class="sweep-custom-threshold">Exact dBFS
-						<input type="number" :value="sweep.minimumPeakDb" min="-160" max="0" step="any" @change="setMinimumPeakCustom">
-					</label>
-					<label class="checkbox">
-						<input type="checkbox" v-model="records.markedOnly" @change="candidateFilterChanged">
-						Marked only
-					</label>
-					<span>{{ sweepCandidateRangeStart }}–{{ sweepCandidateRangeEnd }} of {{ sweepCandidateFilteredTotal }} peak groups matching · {{ sweep.candidateHistoryTotal }} candidate records total</span>
-				</div>
+
+				<section class="sweep-history-table" aria-labelledby="sweep-history-title">
+					<div class="sweep-table-heading">
+						<h3 id="sweep-history-title">Peak history</h3>
+						<span>{{ sweepCandidateRangeStart }}–{{ sweepCandidateRangeEnd }} of {{ sweepCandidateFilteredTotal }} peak groups · {{ sweep.candidateHistoryTotal }} records</span>
+					</div>
+					<div class="sweep-table-tools">
+						<label>Minimum peak
+							<select :value="[-160, -100, -90, -80, -70, -60].includes(Number(sweep.minimumPeakDb)) ? String(sweep.minimumPeakDb) : 'custom'" @change="setMinimumPeakPreset">
+								<option value="-160">All (−160 dBFS)</option>
+								<option value="-100">−100 dBFS</option>
+								<option value="-90">−90 dBFS</option>
+								<option value="-80">−80 dBFS</option>
+								<option value="-70">−70 dBFS</option>
+								<option value="-60">−60 dBFS</option>
+								<option value="custom">Custom</option>
+							</select>
+						</label>
+						<label class="sweep-custom-threshold">Exact dBFS
+							<input type="number" :value="sweep.minimumPeakDb" min="-160" max="0" step="any" @change="setMinimumPeakCustom">
+						</label>
+						<label>Sort by
+							<select v-model="sweep.sortBy" @change="candidateFilterChanged">
+								<option value="snr">SNR</option>
+								<option value="frequency">Frequency</option>
+								<option value="peak">Peak power</option>
+								<option value="hits">Hit count</option>
+								<option value="lastSeen">Last seen</option>
+							</select>
+						</label>
+						<label class="checkbox">
+							<input type="checkbox" v-model="records.markedOnly" @change="candidateFilterChanged">
+							Marked only
+						</label>
+						<span class="sweep-table-note">Listen stops the scan.</span>
+					</div>
 				<div class="sweep-candidates">
 					<table>
 						<thead><tr><th>Peak center</th><th>Peak frequency range</th><th>Occupied bandwidth</th><th>Best peak</th><th>Noise</th><th>SNR</th><th>First seen</th><th>Last seen</th><th>Hits</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
@@ -784,52 +819,7 @@
 						<button class="btn btn-secondary" @click="setCandidatePage(sweep.candidatePage + 1)" :disabled="sweep.candidatePage + 1 >= sweepCandidatePageCount">Next</button>
 					</div>
 				</div>
-					</section>
-					<section class="marker-settings" aria-label="Spectrum marker set editor">
-						<div class="marker-settings-heading">
-							<h3>Spectrum markers</h3>
-						</div>
-						<label class="marker-saved-set">Saved set
-							<select v-model="records.selectedMarkerSetId" @change="selectMarkerSet">
-								<option value="">Unsaved markers</option>
-								<option v-for="set in records.markerSets" :key="set.id" :value="set.id">{{ set.name }}</option>
-							</select>
-						</label>
-						<div class="marker-set-actions">
-							<input type="text" v-model="records.markerSetName" maxlength="120" placeholder="Marker set name" aria-label="Marker set name">
-							<button class="btn btn-secondary" type="button" @click="newMarkerSet">New</button>
-							<button class="btn btn-primary" type="button" @click="saveMarkerSet">Save set</button>
-							<button class="btn btn-secondary" type="button" @click="deleteMarkerSet" :disabled="!records.selectedMarkerSetId">Delete set</button>
-						</div>
-						<form class="marker-manual-entry" @submit.prevent="addManualReceiverMarker">
-							<label>Frequency (MHz)
-								<input type="number" v-model="records.manualMarkerFrequencyMHz" min="0" step="any" required aria-label="Manual marker frequency MHz">
-							</label>
-							<label>Label
-								<input type="text" v-model="records.manualMarkerLabel" maxlength="80" placeholder="Optional label" aria-label="Manual marker label">
-							</label>
-							<button class="btn btn-secondary" type="submit">Add marker</button>
-						</form>
-						<div class="marker-export-actions">
-							<button class="btn btn-secondary" type="button" @click="exportMarkerSetJson" :disabled="!records.markers.length">Markers JSON</button>
-							<button class="btn btn-secondary" type="button" @click="exportMarkerSetCsv" :disabled="!records.markers.length">Markers CSV</button>
-						</div>
-						<div class="marker-list" v-if="records.markers.length">
-							<div class="marker-row" v-for="(marker, index) in records.markers" :key="marker.id" :class="{ selected: marker.id === records.selectedMarkerId }">
-								<span class="marker-chip" :class="'marker-tone-' + (index % 8)">M{{ index + 1 }}</span>
-								<label>Frequency MHz
-									<input type="number" v-model="records.markerFrequencyDrafts[marker.id]" min="0" step="any" aria-label="Marker frequency MHz" @change="updateReceiverMarker(marker.id)">
-								</label>
-								<label>Label
-									<input type="text" v-model="marker.label" maxlength="80" placeholder="Label" aria-label="Marker label" @change="updateReceiverMarker(marker.id)">
-								</label>
-								<span class="marker-power">{{ marker.powerDb === null ? 'Power not measured' : `${marker.powerDb.toFixed(1)} dBFS` }}</span>
-								<button class="btn btn-secondary" type="button" @click="removeReceiverMarker(marker.id)">Delete</button>
-							</div>
-						</div>
-						<div class="records-empty" v-else>No markers in this set yet.</div>
-					</section>
-				</div>
+				</section>
 			</section>
 			<section id="records-workspace" class="receiver-records-workspace" v-show="activeWorkspace === 'records'" role="tabpanel" aria-labelledby="tab-records">
 				<header class="records-header">

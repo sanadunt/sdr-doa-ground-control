@@ -318,7 +318,7 @@ export function ConfigurationPage({
           </div>
         </div>
       </Panel>
-      <div className="config-guard-row"><Metric label={t('config.remoteWrites')} value={t('config.disabled')} detail={t('config.remoteWritesDetail')} tone="good" /><Metric label={t('config.mqttPublish')} value={t('config.disabled')} detail={t('config.mqttPublishDetail')} tone="good" /><Metric label={t('config.secrets')} value={t('config.secretsValue')} detail={t('config.secretsDetail')} tone="good" /><KeyValue label={t('config.adminSession')} value={adminAuthenticated ? t('config.adminSessionActive') : t('config.adminSessionClosed')} detail={t('config.cookieDetail')} /></div>
+      <div className="config-guard-row"><Metric label={t('config.remoteWrites')} value={t('config.disabled')} detail={t('config.remoteWritesDetail')} tone="good" /><Metric label={t('config.mqttPublish')} value={t('config.disabled')} detail={t('config.mqttPublishDetail')} tone="good" /><Metric label={t('config.secrets')} value={t('config.secretsValue')} detail={t('config.secretsDetail')} tone="good" /><Metric label={t('config.adminSession')} value={adminAuthenticated ? t('config.adminSessionActive') : t('config.adminSessionClosed')} detail={t('config.cookieDetail')} tone={adminAuthenticated ? 'warn' : 'good'} /></div>
     </div>
   );
 }

@@ -48,8 +48,10 @@ export function Panel({
 export function SectionHeading({ eyebrow, title, detail }: { eyebrow: string; title: string; detail?: string }): JSX.Element {
   return (
     <div className="section-heading">
+      {/* The shell header already shows the page name, so the h1 stays for
+          screen readers and route focus only. */}
+      <h1 className="visually-hidden" data-route-focus tabIndex={-1}>{title}</h1>
       <div className="panel-eyebrow">{eyebrow}</div>
-      <h1>{title}</h1>
       {detail ? <p>{detail}</p> : null}
     </div>
   );
