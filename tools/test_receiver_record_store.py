@@ -294,6 +294,41 @@ class ReceiverRecordStoreTests(unittest.TestCase):
             with self.assertRaises(KeyError):
                 self.store.get_segment_audio(segment["id"])
 
+    def test_completed_audio_segment_is_immutable_after_failed_finalize_retry(self):
+        session = self.store.create_audio_session()
+        segment = self.store.create_audio_segment(session["id"], {
+            "vfo_index": 0,
+            "frequency_hz": 144_000_000,
+            "mode": "NFM",
+            "bandwidth_hz": 12_500,
+            "codec": "audio/webm;codecs=opus",
+            "started_at": "2026-09-29T00:00:00Z",
+        })
+        audio = b"completed WebM stream"
+        self.store.append_segment_audio(segment["id"], audio)
+        completed = self.store.finish_segment(segment["id"], {
+            "ended_at": "2026-09-29T00:00:02Z",
+            "duration_seconds": 2,
+            "status": "complete",
+        })
+        retry = self.store.finish_segment(segment["id"], {
+            "ended_at": "2026-09-29T00:00:03Z",
+            "duration_seconds": 3,
+            "status": "failed",
+            "error": "first response was lost",
+        })
+        self.assertEqual(completed["status"], "complete")
+        self.assertEqual(retry, completed)
+        self.store.finish_audio_session(session["id"])
+        path, mime_type = self.store.get_segment_audio(segment["id"])
+        self.assertEqual(mime_type, "audio/webm")
+        self.assertEqual(path.read_bytes(), audio)
+        record = self.store.list_records()["items"][0]
+        finalized = record["segments"][0]
+        self.assertEqual(finalized["status"], "complete")
+        self.assertEqual(finalized["ended_at"], "2026-09-29T00:00:02Z")
+        self.assertEqual(finalized["duration_seconds"], 2)
+
     def test_invalid_ids_and_payload_bounds_are_rejected(self):
         with self.assertRaises(ValueError):
             self.store.get_candidates("../not-a-uuid")

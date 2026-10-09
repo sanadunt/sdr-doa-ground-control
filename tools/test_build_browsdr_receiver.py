@@ -58,5 +58,35 @@ class ReceiverBuildSourceTests(unittest.TestCase):
                     builder._assert_pinned_source(source)
 
 
+    def test_embedded_build_rejects_unscoped_receiver_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            build = Path(temporary)
+            assets = build / "assets"
+            assets.mkdir()
+            (build / "index.html").write_text(
+                '<script type="module" src="/receiver/assets/index.js"></script>',
+                encoding="utf-8",
+            )
+            (build / "manifest.webmanifest").write_text(
+                '{"start_url":"/receiver/","scope":"/receiver/"}',
+                encoding="utf-8",
+            )
+            wasm = build / "hackrf-web/pkg"
+            wasm.mkdir(parents=True)
+            (wasm / "hackrf_web.js").write_text("export {};", encoding="utf-8")
+            (wasm / "hackrf_web_bg.wasm").write_bytes(b"wasm")
+            bundle = assets / "index.js"
+
+            for asset_url in (
+                "/30-seconds-of-silence.mp3",
+                "/icon-96.png",
+                "/icon-192.png",
+                "/icon-512.png",
+            ):
+                with self.subTest(asset_url=asset_url):
+                    bundle.write_text(f"const asset = {asset_url!r};", encoding="utf-8")
+                    with self.assertRaisesRegex(RuntimeError, "root-scoped asset path"):
+                        builder._verify_embedded_build(build)
+
 if __name__ == "__main__":
     unittest.main()

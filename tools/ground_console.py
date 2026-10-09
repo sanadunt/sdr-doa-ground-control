@@ -1469,6 +1469,39 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return {}
         return self._read_json(4096)
 
+    def _receiver_mutation_origin_is_valid(self) -> bool:
+        origin_header = self.headers.get("Origin")
+        host_header = self.headers.get("Host")
+        if not origin_header or not host_header:
+            return False
+        try:
+            origin = urlsplit(origin_header)
+            target = urlsplit(f"http://{host_header}")
+            origin_port = origin.port or 80
+            target_port = target.port or 80
+        except ValueError:
+            return False
+        origin_host = (origin.hostname or "").lower().rstrip(".")
+        target_host = (target.hostname or "").lower().rstrip(".")
+        expected_port = self.console_server.server_address[1]
+        return (
+            origin.scheme == "http"
+            and origin.username is None
+            and origin.password is None
+            and not origin.path
+            and not origin.query
+            and not origin.fragment
+            and target.username is None
+            and target.password is None
+            and not target.path
+            and not target.query
+            and not target.fragment
+            and origin_host == target_host
+            and _is_loopback_bind(origin_host)
+            and origin_port == expected_port
+            and target_port == expected_port
+        )
+
     def _receiver_error(self, exc: Exception) -> None:
         status = HTTPStatus.NOT_FOUND if isinstance(exc, KeyError) else HTTPStatus.BAD_REQUEST
         self._send_json({"error": str(exc)}, status)
@@ -1879,6 +1912,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
+        if parsed.path.startswith("/api/receiver/") and not self._receiver_mutation_origin_is_valid():
+            self._send_json({"error": "Receiver mutation requires a same-origin loopback request"}, HTTPStatus.FORBIDDEN)
+            return
         if parsed.path.startswith("/api/receiver/") and self._receiver_post(parsed):
             return
         if parsed.path == "/api/console-config":
@@ -1967,6 +2003,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
+        if parsed.path.startswith("/api/receiver/") and not self._receiver_mutation_origin_is_valid():
+            self._send_json({"error": "Receiver mutation requires a same-origin loopback request"}, HTTPStatus.FORBIDDEN)
+            return
         if parsed.path.startswith("/api/receiver/") and self._receiver_delete(parsed):
             return
         self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)

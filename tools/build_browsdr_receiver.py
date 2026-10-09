@@ -1465,8 +1465,34 @@ def _apply_embedded_changes(source: Path) -> None:
     _replace_once(
         source / "src/client/app/ui-helpers.ts",
         "fetch('/30-seconds-of-silence.mp3')",
-        "fetch('30-seconds-of-silence.mp3')",
-        "sub-app relative audio asset path",
+        "fetch('/receiver/30-seconds-of-silence.mp3')",
+        "Receiver-scoped MediaSource audio asset path",
+    )
+    _replace_once(
+        source / "src/client/app/ui-helpers.ts",
+        "el.src = '/30-seconds-of-silence.mp3';",
+        "el.src = '/receiver/30-seconds-of-silence.mp3';",
+        "Receiver-scoped fallback audio asset path",
+    )
+
+    connection = source / "src/client/app/connection.ts"
+    _replace_once(
+        connection,
+        "{ src: '/icon-96.png'",
+        "{ src: '/receiver/icon-96.png'",
+        "Receiver-scoped 96px media artwork",
+    )
+    _replace_once(
+        connection,
+        "{ src: '/icon-192.png'",
+        "{ src: '/receiver/icon-192.png'",
+        "Receiver-scoped 192px media artwork",
+    )
+    _replace_once(
+        connection,
+        "{ src: '/icon-512.png'",
+        "{ src: '/receiver/icon-512.png'",
+        "Receiver-scoped 512px media artwork",
     )
 
     _replace_once(
@@ -1730,6 +1756,14 @@ def _verify_embedded_build(build_dir: Path) -> None:
         "Connect Remote",
         "/api/turn",
         '"/hackrf-web/pkg/hackrf_web.js"',
+        "'/30-seconds-of-silence.mp3'",
+        '"/30-seconds-of-silence.mp3"',
+        "'/icon-96.png'",
+        '"/icon-96.png"',
+        "'/icon-192.png'",
+        '"/icon-192.png"',
+        "'/icon-512.png'",
+        '"/icon-512.png"',
     )
     remaining = [item for item in forbidden if item in bundle_text]
     if remaining:

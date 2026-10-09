@@ -934,17 +934,11 @@ class ReceiverRecordStore:
                     JOIN audio_sessions a ON a.id=g.session_id WHERE g.id=?""", (segment_id,)).fetchone()
             if row is None:
                 raise KeyError("audio segment not found")
-            if row["session_finished"]:
-                raise ValueError("audio session is finished")
             if row["finished_at"]:
                 metadata = json.loads(row["metadata"])
-                if status == "failed":
-                    metadata.update({"status": "failed", "error": error or "Audio segment recording failed."})
-                    with self._connect() as db:
-                        db.execute("UPDATE audio_segments SET file_name=NULL,metadata=? WHERE id=?", (_json(metadata), segment_id))
-                    if row["file_name"] == f"{segment_id}.webm":
-                        (self.audio_dir / row["file_name"]).unlink(missing_ok=True)
                 return {"id": segment_id, "ended_at": row["finished_at"], "duration_seconds": metadata.get("duration_seconds", duration), "status": metadata.get("status", "complete")}
+            if row["session_finished"]:
+                raise ValueError("audio session is finished")
             if row["temp_name"] != f"{segment_id}.part":
                 raise OSError("audio temporary file metadata is invalid")
             temp_path = self.temp_dir / row["temp_name"]

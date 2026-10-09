@@ -65,6 +65,8 @@ Jalankan builder Receiver setelah `npm run build`; output Receiver berada di `fr
 http://127.0.0.1:8787/receiver/
 ```
 
+Mutasi `/api/receiver/*` memerlukan header `Origin` same-origin yang cocok dengan host dan port loopback; tanpa header itu atau dari origin lain, server mengembalikan HTTP 403.
+
 ### 3. Jalankan Ground Console
 
 ```sh
@@ -158,6 +160,8 @@ Jalankan builder Receiver setelah `npm run build`; output Receiver berada di `fr
 ```text
 http://127.0.0.1:8787/receiver/
 ```
+
+Mutasi `/api/receiver/*` memerlukan header `Origin` same-origin yang cocok dengan host dan port loopback; tanpa header itu atau dari origin lain, server mengembalikan HTTP 403.
 
 ### 3. Jalankan Ground Console
 

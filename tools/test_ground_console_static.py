@@ -139,6 +139,8 @@ class ConsoleHTTPHarness:
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=4)
         try:
             request_headers = {"Connection": "close"}
+            if method.upper() in {"POST", "DELETE"}:
+                request_headers["Origin"] = f"http://127.0.0.1:{self.port}"
             if headers:
                 request_headers.update(headers)
             connection.request(method, path, body=body, headers=request_headers)
@@ -559,6 +561,37 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
 
         self.assertEqual(missing_result.status, 404)
         self.assertEqual(_decode_json(self, missing_result, "missing API"), {"error": "not found"})
+
+    def test_receiver_mutations_require_same_loopback_origin(self) -> None:
+        with ConsoleHTTPHarness() as console:
+            rejected_create = console.request(
+                "POST",
+                "/api/receiver/audio-sessions",
+                headers={"Origin": "https://attacker.invalid"},
+            )
+            self.assertEqual(rejected_create.status, 403)
+            self.assertEqual(console.server.receiver_store.list_records()["total"], 0)
+
+            rejected_missing_origin = console.request(
+                "POST",
+                "/api/receiver/audio-sessions",
+                headers={"Origin": ""},
+            )
+            self.assertEqual(rejected_missing_origin.status, 403)
+            self.assertEqual(console.server.receiver_store.list_records()["total"], 0)
+
+            marker = console.server.receiver_store.save_markers({
+                "name": "Protected marker",
+                "markers": [{"frequency_hz": 1_070_000, "power_db": None}],
+            })
+            rejected_delete = console.request(
+                "DELETE",
+                f"/api/receiver/marker-sets/{marker['id']}",
+                headers={"Origin": "https://attacker.invalid"},
+            )
+            self.assertEqual(rejected_delete.status, 403)
+            marker_sets = _decode_json(self, console.request("GET", "/api/receiver/marker-sets"), "protected marker set")
+            self.assertEqual([item["id"] for item in marker_sets["items"]], [marker["id"]])
 
     def test_receiver_records_routes_page_markers_and_delete_archives(self) -> None:
         json_headers = {"Content-Type": "application/json"}
@@ -1007,6 +1040,10 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
             wasm_module_result = console.request("GET", "/receiver/hackrf-web/pkg/hackrf_web.js")
             wasm_binary_result = console.request("GET", "/receiver/hackrf-web/pkg/hackrf_web_bg.wasm")
             silence_result = console.request("GET", "/receiver/30-seconds-of-silence.mp3")
+            icon_results = {
+                size: console.request("GET", f"/receiver/icon-{size}.png")
+                for size in (96, 192, 512)
+            }
             references = _receiver_asset_references(receiver_index)
             for request_path, expected_file in references:
                 expected_mimes = _EXPECTED_MIMES.get(expected_file.suffix.lower())
@@ -1044,6 +1081,11 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         self.assertEqual(_content_type(wasm_binary_result), "application/wasm")
         self.assertEqual(silence_result.status, 200)
         self.assertEqual(_content_type(silence_result), "audio/mpeg")
+        for size, result in icon_results.items():
+            with self.subTest(icon_size=size):
+                self.assertEqual(result.status, 200)
+                self.assertEqual(_content_type(result), "image/png")
+                self.assertEqual(result.body, (receiver_root / f"icon-{size}.png").read_bytes())
         self.assertEqual(source_result.status, 200)
         self.assertEqual(_content_type(source_result), "application/gzip")
         self.assertEqual(
