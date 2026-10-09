@@ -8,7 +8,7 @@ Install terlebih dahulu:
 
 - Git.
 - Node.js LTS. Dokumentasi project merekomendasikan Node 22.12 atau lebih baru dalam lini Node 22. Vite saat ini membutuhkan Node `^20.19.0` atau `>=22.12.0`.
-- Python 3.x. Repository belum mem-pin versi Python dan sebagian besar tools memakai standard library.
+- Python 3.x untuk Ground Console; Python 3.9+ jika memakai Receiver karena filter waktu audio menggunakan `zoneinfo`.
 - Akses jaringan ke tile OpenStreetMap jika ingin basemap peta tampil.
 - Mosquitto lokal hanya jika ingin menguji MQTT staging.
 
@@ -49,6 +49,21 @@ cd ..
 ```
 
 Build menghasilkan `frontend/dist`. Folder ini adalah output generated, bukan tempat mengedit source.
+
+### Receiver embedded (opsional)
+
+Untuk clone baru, sertakan submodule dengan opsi `--recurse-submodules` pada `git clone`. Untuk checkout yang sudah ada, jalankan dari root repository:
+
+```sh
+git submodule update --init --recursive
+.venv/bin/python tools/build_browsdr_receiver.py
+```
+
+Jalankan builder Receiver setelah `npm run build`; output Receiver berada di `frontend/dist/receiver`. Menu GUI Receiver belum ditambahkan pada tahap ini, jadi buka URL lokal secara langsung setelah Ground Console aktif:
+
+```text
+http://127.0.0.1:8787/receiver/
+```
 
 ### 3. Jalankan Ground Console
 
@@ -128,6 +143,21 @@ cd ..
 ```
 
 Build menghasilkan `frontend\dist`.
+
+### Receiver embedded (opsional)
+
+Untuk clone baru, sertakan submodule dengan opsi `--recurse-submodules` pada `git clone`. Untuk checkout yang sudah ada, jalankan dari root repository:
+
+```powershell
+git submodule update --init --recursive
+.\.venv\Scripts\python.exe tools\build_browsdr_receiver.py
+```
+
+Jalankan builder Receiver setelah `npm run build`; output Receiver berada di `frontend\dist\receiver`. Menu GUI Receiver belum ditambahkan pada tahap ini, jadi buka URL lokal secara langsung setelah Ground Console aktif:
+
+```text
+http://127.0.0.1:8787/receiver/
+```
 
 ### 3. Jalankan Ground Console
 

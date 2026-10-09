@@ -142,6 +142,8 @@ git commit -m "feat: build and serve embedded Receiver"
 ```
 
 ### Task 4: Add the Receiver menu and page
+**Status:** Deferred by the user. This implementation stage focuses on the pinned Receiver service/build integration; do not add shell navigation, an iframe page, or GUI theme propagation yet.
+
 
 **Files:**
 - Modify: `frontend/src/components/Shell.tsx`
@@ -183,32 +185,32 @@ git add frontend/src/components/Shell.tsx frontend/src/components/ui.tsx fronten
 git commit -m "feat: add Receiver navigation and page"
 ```
 
-### Task 5: Document setup and verify the complete Receiver path
+### Task 5: Document setup and verify the direct Receiver service path
 
 **Files:**
 - Modify: `QUICKSTART.md`
 
-- [ ] **Step 1: Document submodule initialization and Receiver build.** Explain `git clone --recurse-submodules` (or `git submodule update --init --recursive` for an existing clone), Python 3.9+, Node.js 22 or later, and `.venv/bin/python tools/build_browsdr_receiver.py`; keep `frontend/dist` documented as generated output.
-- [ ] **Step 2: Run focused backend tests and build checks.**
+- [x] **Step 1: Document submodule initialization and Receiver build.** Explain `git clone --recurse-submodules` (or `git submodule update --init --recursive` for an existing clone), Python 3.9+, Node.js 22 or later, and `.venv/bin/python tools/build_browsdr_receiver.py`; keep `frontend/dist` documented as generated output.
+- [x] **Step 2: Run focused backend tests and build checks.**
 
 Run from repo root:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_receiver_record_store
+cd frontend && npm run check && npm test && npm run build && cd ..
 .venv/bin/python tools/build_browsdr_receiver.py
-PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_ground_console_static
-cd frontend && npm run check && npm test && npm run build
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_build_browsdr_receiver tools.test_ground_console_static
 ```
 
 Expected: all focused Python tests and frontend checks/tests pass; the embedded Receiver build and frontend build both produce their required output.
 
-- [ ] **Step 3: Start Ground Console on loopback with temporary branding/config/Receiver data paths and MQTT disabled.** Do not connect a hardware receiver or trigger scan/record operations during this smoke.
-- [ ] **Step 4: In a real browser, select the Receiver menu and verify `#/receiver`, active menu, navigate away then press `7` from the parent shell to select Receiver, iframe title and `/receiver/` load, representative asset and `/api/receiver/settings`/`marker-sets` requests, and theme propagation. Confirm no console errors from app code; report missing hardware separately.
-- [ ] **Step 5: Re-run `npm run check`, `npm test`, `npm run build`, the two Python Receiver/static tests, and the Browser smoke after any fixes.**
-- [ ] **Step 6: Commit the setup documentation.**
+- [x] **Step 3: Start Ground Console on loopback with temporary branding/config/Receiver data paths and MQTT disabled.** Do not connect a hardware receiver or trigger scan/record operations during this smoke.
+- [x] **Step 4: In a real browser, navigate directly to `http://127.0.0.1:8787/receiver/` (GUI navigation is deferred).** Verify the embedded Receiver loads, same-origin assets are served, representative GET `/api/receiver/settings` and `/api/receiver/marker-sets` requests succeed, and no app errors appear in the console. Do not connect hardware or trigger scans or recordings.
+- [x] **Step 5: Re-run frontend checks/tests/build, then the embedded Receiver builder and Python Receiver/static tests, followed by the direct-route browser smoke after any fixes.**
+- [x] **Step 6: Commit the setup documentation.**
 
 ```bash
-git add QUICKSTART.md
+git add QUICKSTART.md docs/superpowers/plans/2026-10-09-receiver-integration.md
 git commit -m "docs: document embedded Receiver setup"
 ```
 
