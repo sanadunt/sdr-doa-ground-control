@@ -41,11 +41,64 @@ from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from sdr_doa_collector import CollectorError, DEFAULT_ALLOWED_DATA_HOSTS, collect
+from receiver_record_store import DEFAULT_DATA_DIR, ReceiverRecordStore
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+
+def _query_int(query: Dict[str, list], key: str, default: Optional[int]) -> Optional[int]:
+    if key not in query:
+        return default
+    try:
+        parsed = int(query[key][0])
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"{key} must be an integer") from exc
+    if parsed < 0:
+        raise ValueError(f"{key} must be nonnegative")
+    return parsed
+
+
+def _query_float(query: Dict[str, list], key: str) -> Optional[float]:
+    if key not in query:
+        return None
+    try:
+        value = float(query[key][0])
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"{key} must be numeric") from exc
+    if not (-float("inf") < value < float("inf")):
+        raise ValueError(f"{key} must be finite")
+    return value
+
+
+def _query_bool(query: Dict[str, list], key: str, default: bool) -> bool:
+    if key not in query:
+        return default
+    value = query[key][0].lower()
+    if value not in {"true", "false"}:
+        raise ValueError(f"{key} must be true or false")
+    return value == "true"
+
+
+def _parse_audio_byte_range(header: str, size: int) -> Optional[Tuple[int, int]]:
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", header.strip(), re.IGNORECASE)
+    if match is None or size <= 0:
+        return None
+    start_text, end_text = match.groups()
+    try:
+        if not start_text:
+            suffix_length = int(end_text)
+            if suffix_length <= 0:
+                return None
+            return max(0, size - suffix_length), size - 1
+        start = int(start_text)
+        end = int(end_text) if end_text else size - 1
+    except (ValueError, OverflowError):
+        return None
+    if start >= size or end < start:
+        return None
+    return start, min(end, size - 1)
 
 def _read_dotenv(path: Path = DEFAULT_ENV_PATH) -> Dict[str, str]:
     """Read a small, dependency-free dotenv subset without logging values.
@@ -1398,6 +1451,230 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("request body is not valid JSON") from exc
 
+    def _read_binary(self, max_bytes: int) -> bytes:
+        try:
+            length = int(self.headers.get("Content-Length", "-1"))
+        except ValueError as exc:
+            raise ValueError("request body length is invalid") from exc
+        if length < 1 or length > max_bytes:
+            raise ValueError(f"request body must be between 1 and {max_bytes} bytes")
+        payload = self.rfile.read(length)
+        if len(payload) != length:
+            raise ValueError("request body is incomplete")
+        return payload
+
+    def _read_optional_json(self) -> Any:
+        if self.headers.get("Content-Length", "0") in {"", "0"}:
+            return {}
+        return self._read_json(4096)
+
+    def _receiver_error(self, exc: Exception) -> None:
+        status = HTTPStatus.NOT_FOUND if isinstance(exc, KeyError) else HTTPStatus.BAD_REQUEST
+        self._send_json({"error": str(exc)}, status)
+
+    def _receiver_get(self, parsed: Any) -> bool:
+        path = parsed.path
+        store = self.console_server.receiver_store
+        query = parse_qs(parsed.query, keep_blank_values=False)
+        try:
+            if path == "/api/receiver/settings":
+                self._send_json(store.get_settings())
+            elif path == "/api/receiver/audio-facets":
+                self._send_json(store.audio_record_facets(query.get("time_zone", [None])[0]))
+            elif path == "/api/receiver/records":
+                offset = _query_int(query, "offset", 0)
+                limit = _query_int(query, "limit", 100)
+                record_type = query.get("type", [None])[0]
+                if record_type == "audio-session":
+                    audio_filter_keys = (
+                        "started_after",
+                        "started_before",
+                        "time_from",
+                        "time_to",
+                        "time_zone",
+                        "min_frequency_hz",
+                        "max_frequency_hz",
+                        "vfo_index",
+                        "mode",
+                        "bandwidth_hz",
+                    )
+                    audio_filters = {key: query[key][0] for key in audio_filter_keys if key in query}
+                    result = store.list_audio_records(offset, limit, audio_filters)
+                else:
+                    result = store.list_records(offset, limit, record_type)
+                self._send_json(result)
+            elif path == "/api/receiver/marker-sets":
+                self._send_json({"items": store.get_markers()})
+            else:
+                parts = path.strip("/").split("/")
+                if len(parts) == 4 and parts[:3] == ["api", "receiver", "scans"]:
+                    self._send_json(store.scan_info(parts[3]))
+                elif len(parts) == 5 and parts[:3] == ["api", "receiver", "scans"] and parts[4] == "candidates":
+                    params = {
+                        "offset": _query_int(query, "offset", 0),
+                        "limit": _query_int(query, "limit", 100),
+                        "sort": query.get("sort", ["frequency"])[0],
+                        "minimum_peak_db": _query_float(query, "minimum_peak_db"),
+                        "marked_only": _query_bool(query, "marked_only", False),
+                        "marker_set_id": query.get("marker_set_id", [None])[0],
+                        "group_adjacent": _query_bool(query, "group_adjacent", False),
+                    }
+                    nearby = _query_float(query, "near_frequency_hz")
+                    if nearby is not None:
+                        result = store.nearest_candidate(parts[3], nearby, params["limit"], params["marker_set_id"])
+                    else:
+                        result = store.get_candidates(parts[3], **params)
+                    self._send_json(result)
+                elif len(parts) == 5 and parts[:3] == ["api", "receiver", "scans"] and parts[4] == "traces":
+                    self._send_json(store.list_traces(
+                        parts[3],
+                        _query_int(query, "offset", 0),
+                        _query_int(query, "limit", 100),
+                        query.get("order", ["asc"])[0],
+                    ))
+                elif len(parts) == 5 and parts[:3] == ["api", "receiver", "scans"] and parts[4] == "trace":
+                    sweep = _query_int(query, "sweep", None)
+                    if sweep is None:
+                        raise ValueError("sweep query parameter is required")
+                    data = store.get_trace(parts[3], sweep)
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(data)
+                elif len(parts) == 5 and parts[:3] == ["api", "receiver", "audio-segments"] and parts[4] == "audio":
+                    audio_path, content_type = store.get_segment_audio(parts[3])
+                    size = audio_path.stat().st_size
+                    range_header = self.headers.get("Range")
+                    byte_range = _parse_audio_byte_range(range_header, size) if range_header else None
+                    if range_header and byte_range is None:
+                        self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                        self.send_header("Content-Range", f"bytes */{size}")
+                        self.send_header("Accept-Ranges", "bytes")
+                        self.send_header("Content-Length", "0")
+                        self.send_header("Cache-Control", "no-store")
+                        self.end_headers()
+                        return True
+                    start, end = byte_range if byte_range is not None else (0, size - 1)
+                    content_length = max(0, end - start + 1)
+                    self.send_response(HTTPStatus.PARTIAL_CONTENT if byte_range is not None else HTTPStatus.OK)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(content_length))
+                    self.send_header("Accept-Ranges", "bytes")
+                    if byte_range is not None:
+                        self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.end_headers()
+                    with audio_path.open("rb") as source:
+                        source.seek(start)
+                        remaining = content_length
+                        while remaining:
+                            chunk = source.read(min(64 * 1024, remaining))
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                            remaining -= len(chunk)
+                else:
+                    return False
+            return True
+        except (ValueError, KeyError, OSError) as exc:
+            self._receiver_error(exc)
+            return True
+
+    def _receiver_post(self, parsed: Any) -> bool:
+        path = parsed.path
+        store = self.console_server.receiver_store
+        try:
+            if path == "/api/receiver/settings":
+                payload = self._read_json(4096)
+                self._send_json(store.update_settings(payload))
+            elif path == "/api/receiver/scans":
+                payload = self._read_json(64 * 1024)
+                if not isinstance(payload, dict) or not {"source", "config", "archive"}.issubset(payload):
+                    raise ValueError("scan body requires source, config, and archive")
+                result = store.create_scan(payload["source"], payload["config"], payload["archive"])
+                self._send_json(result, HTTPStatus.CREATED)
+            elif path == "/api/receiver/marker-sets":
+                payload = self._read_json(256 * 1024)
+                self._send_json(store.save_markers(payload), HTTPStatus.CREATED)
+            else:
+                parts = path.strip("/").split("/")
+                if len(parts) == 6 and parts[:3] == ["api", "receiver", "scans"] and parts[4:] == ["candidates", "query"]:
+                    payload = self._read_json(2 * 1024 * 1024)
+                    if not isinstance(payload, dict):
+                        raise ValueError("candidate query must be a JSON object")
+                    self._send_json(store.get_candidates(
+                        parts[3],
+                        offset=payload.get("offset", 0),
+                        limit=payload.get("limit", 100),
+                        sort=payload.get("sort", "frequency"),
+                        minimum_peak_db=payload.get("minimum_peak_db"),
+                        marked_only=payload.get("marked_only", False),
+                        marker_set_id=payload.get("marker_set_id"),
+                        marker_frequencies=payload.get("marker_frequencies"),
+                        group_adjacent=payload.get("group_adjacent", False),
+                    ))
+                elif len(parts) == 5 and parts[:3] == ["api", "receiver", "scans"] and parts[4] == "candidates":
+                    payload = self._read_json(2 * 1024 * 1024)
+                    if not isinstance(payload, dict) or not isinstance(payload.get("candidates"), list):
+                        raise ValueError("candidates must be an array")
+                    self._send_json({"upserted": store.upsert_candidates(parts[3], payload["candidates"])})
+                elif len(parts) == 5 and parts[:3] == ["api", "receiver", "scans"] and parts[4] == "trace":
+                    sweep = _query_int(parse_qs(parsed.query), "sweep", None)
+                    if sweep is None:
+                        raise ValueError("sweep query parameter is required")
+                    raw = self._read_binary(2048)
+                    frame_id = store.add_trace(parts[3], sweep, raw)
+                    self._send_json({"stored": frame_id is not None, "id": frame_id})
+                elif len(parts) == 5 and parts[:3] == ["api", "receiver", "scans"] and parts[4] == "finish":
+                    payload = self._read_json(4096)
+                    if not isinstance(payload, dict):
+                        raise ValueError("request must be a JSON object")
+                    self._send_json(store.finish_scan(parts[3], payload.get("status")))
+                elif path == "/api/receiver/audio-sessions":
+                    self._read_optional_json()
+                    self._send_json({"id": store.create_audio_session()["id"]}, HTTPStatus.CREATED)
+                elif len(parts) == 5 and parts[:3] == ["api", "receiver", "audio-sessions"] and parts[4] == "segments":
+                    payload = self._read_json(16 * 1024)
+                    self._send_json({"id": store.create_audio_segment(parts[3], payload)["id"]}, HTTPStatus.CREATED)
+                elif len(parts) == 5 and parts[:3] == ["api", "receiver", "audio-sessions"] and parts[4] == "finish":
+                    self._read_optional_json()
+                    self._send_json(store.finish_audio_session(parts[3]))
+                elif len(parts) == 5 and parts[:3] == ["api", "receiver", "audio-segments"] and parts[4] == "chunk":
+                    raw = self._read_binary(1024 * 1024)
+                    self._send_json(store.append_segment_audio(parts[3], raw))
+                elif len(parts) == 5 and parts[:3] == ["api", "receiver", "audio-segments"] and parts[4] == "finish":
+                    payload = self._read_json(4096)
+                    self._send_json(store.finish_segment(parts[3], payload))
+                else:
+                    return False
+            return True
+        except (ValueError, KeyError, OSError) as exc:
+            self._receiver_error(exc)
+            return True
+
+    def _receiver_delete(self, parsed: Any) -> bool:
+        parts = parsed.path.strip("/").split("/")
+        store = self.console_server.receiver_store
+        try:
+            if len(parts) == 4 and parts[:3] == ["api", "receiver", "records"]:
+                deleted = store.delete_record(parts[3])
+            elif len(parts) == 4 and parts[:3] == ["api", "receiver", "audio-segments"]:
+                deleted = store.delete_audio_segment(parts[3])
+            elif len(parts) == 4 and parts[:3] == ["api", "receiver", "marker-sets"]:
+                deleted = store.delete_markers(parts[3])
+            else:
+                return False
+            if not deleted:
+                raise KeyError("record not found")
+            self._send_json({"deleted": True})
+            return True
+        except (ValueError, KeyError, OSError) as exc:
+            self._receiver_error(exc)
+            return True
+
     def _admin_token(self) -> str:
         cookie = SimpleCookie()
         try:
@@ -1441,6 +1718,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
+        if parsed.path.startswith("/api/receiver/") and self._receiver_get(parsed):
+            return
         if self.console_server.frontend_dir is not None and not parsed.path.startswith("/api/"):
             self._send_frontend(parsed.path)
             return
@@ -1519,6 +1798,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
+        if parsed.path.startswith("/api/receiver/") and self._receiver_post(parsed):
+            return
         if parsed.path == "/api/console-config":
             try:
                 payload = self._read_json(16 * 1024)
@@ -1603,6 +1884,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             )
 
 
+    def do_DELETE(self) -> None:  # noqa: N802
+        parsed = urlsplit(self.path)
+        if parsed.path.startswith("/api/receiver/") and self._receiver_delete(parsed):
+            return
+        self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+
 class GroundConsoleServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -1615,6 +1903,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
         config_path: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
         frontend_dir: Optional[Path] = None,
+        receiver_data_dir: Optional[Path] = None,
     ):
         self.frontend_dir = Path(frontend_dir).resolve() if frontend_dir is not None else None
         if not _is_loopback_bind(address[0]):
@@ -1634,7 +1923,16 @@ class GroundConsoleServer(ThreadingHTTPServer):
         self._branding = _load_branding(self.branding_path)
         self._session_lock = threading.RLock()
         self._admin_sessions: Dict[str, float] = {}
+        self.receiver_store = ReceiverRecordStore(
+            receiver_data_dir if receiver_data_dir is not None else DEFAULT_DATA_DIR
+        )
         super().__init__(address, ConsoleHandler)
+
+    def server_close(self) -> None:
+        try:
+            self.receiver_store.close()
+        finally:
+            super().server_close()
 
     @property
     def base_url(self) -> str:
@@ -1762,6 +2060,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--branding-path", default=str(DEFAULT_BRANDING_PATH), help="local branding JSON path")
     parser.add_argument("--config-path", default=str(DEFAULT_CONFIG_PATH), help="local console connection config path")
+    parser.add_argument("--data-dir", default=str(DEFAULT_DATA_DIR), help="local Receiver records and audio directory")
     return parser
 
 
@@ -1791,6 +2090,7 @@ def main() -> int:
         str(config_path),
         config,
         frontend_dir=None if args.legacy_ui else PROJECT_ROOT / "frontend" / "dist",
+        receiver_data_dir=Path(args.data_dir).expanduser(),
     )
     print(f"Ground Console: http://{args.bind}:{args.port}/", flush=True)
     print(f"Read-only Data Out: {config['base_url']}", flush=True)
