@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { PolarSettings } from '../types';
 import { displayAngleForBin } from '../lib/polar';
+import { useI18n } from '../lib/i18n';
 
 export function radialDomain(values: number[] | null, simulation = false): [number, number] {
   if (simulation || !values?.length) return [-60, 0];
@@ -18,6 +19,9 @@ export function validPlotRange(head: number, min: number, max: number): boolean 
 }
 
 export function PolarPlot({ values, settings, simulation }: { values: number[] | null; settings: PolarSettings; simulation: boolean }) {
+  const { t } = useI18n();
+  const loadFailedText = useRef('');
+  loadFailedText.current = t('polar.loadFailed');
   const host = useRef<HTMLDivElement>(null);
   const library = useRef<typeof import('plotly.js') | null>(null);
   const renderQueue = useRef<Promise<unknown>>(Promise.resolve());
@@ -74,7 +78,7 @@ export function PolarPlot({ values, settings, simulation }: { values: number[] |
         r: samples.map(v => Math.max(0, v - low)), theta: samples.map((_, i) => displayAngleForBin(i % 360, settings)),
         customdata: samples.map((v, i) => [i % 360, v]),
         hovertemplate: 'Display %{theta:.1f}°<br>Bin %{customdata[0]}<br>%{customdata[1]:.2f} dB<extra></extra>',
-        fill: 'toself', fillcolor: color('--plot-fill'), line: { color: color('--accent'), width: 2 },
+        fill: 'toself', fillcolor: color('--plot-fill'), line: { color: color('--signal'), width: 2 },
       }], { autosize: true, datarevision: ++dataRevision.current, uirevision: revision, margin: { t: 48, b: 48, l: 48, r: 48 },
         paper_bgcolor: color('--surface'), font: { color: color('--text'), size: 13 }, showlegend: false,
         polar: { bgcolor: color('--surface'), uirevision: revision,
@@ -93,7 +97,7 @@ export function PolarPlot({ values, settings, simulation }: { values: number[] |
     const update = () => {
       renderQueue.current = renderQueue.current.catch(() => undefined).then(() => {
         if (!disposed) return render();
-      }).catch(() => { if (!disposed) node.textContent = 'Plotly failed to load. Reload to retry.'; });
+      }).catch(() => { if (!disposed) node.textContent = loadFailedText.current; });
     };
     update();
     const observer = new ResizeObserver(() => {
@@ -104,26 +108,34 @@ export function PolarPlot({ values, settings, simulation }: { values: number[] |
     observer.observe(node);
     return () => { disposed = true; observer.disconnect(); };
   }, [values, settings.figType, settings.compassOffset, simulation, low, high, controls, theme, compact]);
+  const caption = t('polar.caption', {
+    fig: settings.figType,
+    head: controls.head,
+    offset: settings.compassOffset,
+    mode: controls.manual ? t('polar.modeManual') : simulation ? t('polar.modeSimulation') : t('polar.modeAuto'),
+    low,
+    high,
+  }) + t('polar.captionCompass');
   return <>
-    <div ref={host} className="plotly-polar" role="img" aria-label={`${simulation ? 'Simulation' : 'Data Out'} ${settings.figType} angular response`} />
-    <div className="polar-axis-caption">{settings.figType} · Head Up {controls.head}° · source offset {settings.compassOffset}° · {controls.manual ? 'Manual' : simulation ? 'Fixed simulation' : 'Auto'} scale {low} to {high} dB (source-shifted, not dBm); compass heading unverified.</div>
+    <div ref={host} className="plotly-polar" role="img" aria-label={t('polar.plotAria', { source: simulation ? t('polar.sourceSimulation') : t('polar.sourceLive'), fig: settings.figType })} />
+    <div className="polar-axis-caption">{caption}</div>
     <details className="plot-settings">
-      <summary>Graph settings</summary>
+      <summary>{t('polar.settings')}</summary>
       <form className="plot-controls" onSubmit={event => {
         event.preventDefault();
         const head = Number(draft.head), min = Number(draft.min), max = Number(draft.max);
-        if (Object.values(draft).some(v => !v.trim()) || !validPlotRange(head, min, max)) { setError('Head Up harus 0–<360° dan dB minimum harus lebih kecil dari maksimum.'); return; }
+        if (Object.values(draft).some(v => !v.trim()) || !validPlotRange(head, min, max)) { setError(t('polar.rangeError')); return; }
         setError(''); setControls(current => ({ head, min, max, manual: true, revision: current.revision + 1 }));
       }}>
-        <label className="form-field"><span>Head Up (°)</span><input required type="number" min="0" max="359.999" step="any" value={draft.head} onChange={e => setDraft({ ...draft, head: e.target.value })} /></label>
-        <label className="form-field"><span>Min dB</span><input required type="number" step="any" value={draft.min} onChange={e => setDraft({ ...draft, min: e.target.value })} /></label>
-        <label className="form-field"><span>Max dB</span><input required type="number" step="any" value={draft.max} onChange={e => setDraft({ ...draft, max: e.target.value })} /></label>
-        <button className="primary-button" type="submit">Apply view</button>
+        <label className="form-field"><span>{t('polar.headUp')}</span><input required type="number" min="0" max="359.999" step="any" value={draft.head} onChange={e => setDraft({ ...draft, head: e.target.value })} /></label>
+        <label className="form-field"><span>{t('polar.minDb')}</span><input required type="number" step="any" value={draft.min} onChange={e => setDraft({ ...draft, min: e.target.value })} /></label>
+        <label className="form-field"><span>{t('polar.maxDb')}</span><input required type="number" step="any" value={draft.max} onChange={e => setDraft({ ...draft, max: e.target.value })} /></label>
+        <button className="primary-button" type="submit">{t('polar.apply')}</button>
         <button className="secondary-button" type="button" onClick={() => {
           setControls(current => ({ head: 0, min: -60, max: 0, manual: false, revision: current.revision + 1 }));
           const [min, max] = radialDomain(values, simulation);
           setDraft({ head: '0', min: String(min), max: String(max) }); setError('');
-        }}>Default</button>
+        }}>{t('polar.default')}</button>
       </form>
       {error ? <p className="plot-control-error" role="alert">{error}</p> : null}
     </details>

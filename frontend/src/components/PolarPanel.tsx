@@ -1,10 +1,11 @@
 import type { JSX } from 'react';
-import { useRef, useState } from 'react';
+import { useState } from 'react';
 import type { PolarSettings, TelemetrySnapshot } from '../types';
 import { polarDataReady } from '../lib/telemetry';
 import { polarView } from '../lib/polar';
+import { useI18n } from '../lib/i18n';
 import { PolarPlot } from './PolarPlot';
-import { Panel, StatusBadge } from './ui';
+import { Icon, StatusBadge } from './ui';
 
 export function PolarPanel({
   snapshot,
@@ -15,32 +16,33 @@ export function PolarPanel({
   localSnapshotFresh: boolean;
   compassSettings: PolarSettings;
 }): JSX.Element {
+  const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
-  const previousSettings = useRef<PolarSettings>({ figType: 'Polar', compassOffset: 0 });
-  const liveView = polarView(snapshot, previousSettings.current, localSnapshotFresh, null, compassSettings);
-  const view = { ...liveView, settings: compassSettings };
-  previousSettings.current = compassSettings;
+  const view = polarView(snapshot, compassSettings, localSnapshotFresh, null, compassSettings);
   const available = view.fresh && polarDataReady(snapshot) && localSnapshotFresh;
   const availabilityLabel = available ? 'AVAILABLE' : !snapshot ? 'WAITING' : !localSnapshotFresh ? 'STALE' : 'NOT READY';
   const availabilityTone = available ? 'good' : availabilityLabel === 'WAITING' ? 'neutral' : 'warn';
   const statusDetail = available
-    ? view.reason
+    ? t('polar.available')
     : !snapshot
-      ? 'Waiting for the first Data Out snapshot.'
+      ? t('polar.waiting')
       : !localSnapshotFresh
-        ? 'Local snapshot expired; curve cleared until the next bounded read.'
-        : view.reason;
+        ? t('polar.expired')
+        : t('polar.cleared');
   return (
-    <Panel
-      className={`polar-panel ${expanded ? 'polar-expanded' : ''}`}
-      action={<button type="button" className="secondary-button" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? 'Restore graph' : 'Enlarge graph'}</button>}
-    >
-      <div className="polar-frame">
-        <div className="polar-status" role="status" aria-live="polite" aria-label={`Polar plot status: ${availabilityLabel}. ${statusDetail}`} title={statusDetail}>
+    <section className={`panel polar-panel ${expanded ? 'polar-expanded' : ''}`}>
+      <div className="panel-toolbar">
+        <div className="polar-status" role="status" aria-live="polite" aria-label={t('polar.statusAria', { state: availabilityLabel, detail: statusDetail })} title={statusDetail}>
           <StatusBadge label={availabilityLabel} tone={availabilityTone} />
+          <span className="polar-status-detail">{statusDetail}</span>
         </div>
-        <PolarPlot values={available ? view.values : null} settings={view.settings} simulation={Boolean(snapshot?.simulation)} />
+        <button type="button" className="toolbar-button polar-expand-button" aria-pressed={expanded} onClick={() => setExpanded(!expanded)}>
+          <Icon name={expanded ? 'collapse' : 'expand'} /><span>{expanded ? t('polar.restore') : t('polar.expand')}</span>
+        </button>
       </div>
-    </Panel>
+      <div className="polar-frame">
+        <PolarPlot values={available ? view.values : null} settings={compassSettings} simulation={Boolean(snapshot?.simulation)} />
+      </div>
+    </section>
   );
 }

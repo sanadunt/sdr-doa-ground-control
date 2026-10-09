@@ -1,21 +1,33 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
-import { gsap } from 'gsap';
 import { connectMqtt, getBranding, getConsoleConfig, getMqtt, getSnapshot } from './api';
 import type { Branding, CompassConfig, ConsoleConfig, GpsConfig, MqttSnapshot, TelemetrySnapshot } from './types';
 import { DEFAULT_COMPASS_CONFIG } from './lib/polar';
 import { DEFAULT_GPS_CONFIG } from './lib/map';
 import { DEFAULT_CONSOLE_CONFIG, deriveDataState } from './lib/telemetry';
-import { ConfigurationPage } from './pages/ConfigurationPage';
-import { DoADiagnosticsPage } from './pages/DoADiagnosticsPage';
-import { MessageMonitorPage } from './pages/MessageMonitorPage';
+import { I18nContext, initialLang, storeLang, translate } from './lib/i18n';
+import type { I18nValue, Lang } from './lib/i18n';
 import { OverviewPage } from './pages/OverviewPage';
-import { SystemHealthPage } from './pages/SystemHealthPage';
 import { ConsoleShell } from './components/Shell';
 import type { RouteName } from './components/Shell';
 import { useRoute } from './components/Shell';
-import { SimulationPage } from './pages/SimulationPage';
 import { DEFAULT_SIMULATION, simulationSnapshot, randomizeSimulationSettings } from './lib/simulation';
+
+// Overview is the landing route and stays in the entry chunk. The other pages
+// load on first visit so the initial bundle only carries what the operator sees.
+const ConfigurationPage = lazy(() => import('./pages/ConfigurationPage').then((module) => ({ default: module.ConfigurationPage })));
+const DoADiagnosticsPage = lazy(() => import('./pages/DoADiagnosticsPage').then((module) => ({ default: module.DoADiagnosticsPage })));
+const MessageMonitorPage = lazy(() => import('./pages/MessageMonitorPage').then((module) => ({ default: module.MessageMonitorPage })));
+const SystemHealthPage = lazy(() => import('./pages/SystemHealthPage').then((module) => ({ default: module.SystemHealthPage })));
+const SimulationPage = lazy(() => import('./pages/SimulationPage').then((module) => ({ default: module.SimulationPage })));
+
+function prefetchRoutes(): void {
+  void import('./pages/ConfigurationPage');
+  void import('./pages/DoADiagnosticsPage');
+  void import('./pages/MessageMonitorPage');
+  void import('./pages/SystemHealthPage');
+  void import('./pages/SimulationPage');
+}
 
 const DEFAULT_BRANDING: Branding = { app_name: 'SDR-DoA Ground Console', logo_data_url: '' };
 const DEFAULT_LOCAL_EXPIRY_MS = 5_000;
@@ -100,24 +112,6 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
-function useReducedMotion(): boolean {
-  const [reduced, setReduced] = useState(false);
-  useEffect(() => {
-    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
-    const query = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const update = () => setReduced(query.matches);
-    update();
-
-    if (typeof query.addEventListener === 'function') {
-      query.addEventListener('change', update);
-      return () => query.removeEventListener('change', update);
-    }
-    query.addListener?.(update);
-    return () => query.removeListener?.(update);
-  }, []);
-  return reduced;
-}
-
 function PageForRoute({
   route,
   snapshot,
@@ -173,13 +167,26 @@ export default function App(): ReactElement {
   const [expiryTick, setExpiryTick] = useState(0);
   const [gpsConfig, setGpsConfig] = useState<GpsConfig>(DEFAULT_GPS_CONFIG);
   const [compassConfig, setCompassConfig] = useState<CompassConfig>(DEFAULT_COMPASS_CONFIG);
-  const reducedMotion = useReducedMotion();
+  const [lang, setLangState] = useState<Lang>(initialLang);
+  const i18n = useMemo<I18nValue>(() => ({
+    lang,
+    setLang: (next) => { setLangState(next); storeLang(next); },
+    t: (key, vars) => translate(lang, key, vars),
+  }), [lang]);
+  useEffect(() => {
+    document.documentElement.lang = lang;
+  }, [lang]);
   const [simulationEnabled, setSimulationEnabled] = useState(false);
   const [simulationAutomatic, setSimulationAutomatic] = useState(false);
   const [simulationSettings, setSimulationSettings] = useState(DEFAULT_SIMULATION);
   const syntheticSnapshot = useMemo(() => simulationSnapshot(simulationSettings), [simulationSettings]);
   const randomizeSimulation = useCallback(() => {
     setSimulationSettings(randomizeSimulationSettings);
+  }, []);
+  useEffect(() => {
+    // Warm the page chunks once the landing view has painted.
+    const timer = window.setTimeout(prefetchRoutes, 1200);
+    return () => window.clearTimeout(timer);
   }, []);
   useEffect(() => {
     document.title = branding.app_name;
@@ -368,26 +375,28 @@ export default function App(): ReactElement {
     const content = contentRef.current;
     if (!content) return undefined;
 
-    const routeTarget = content.querySelector<HTMLElement>('h1:not(.visually-hidden), [data-route-focus]');
-    if (routeTarget) {
+    // Lazy routes render their heading after the chunk arrives, so wait for the
+    // focus target instead of assuming it exists in this layout pass.
+    const focusTarget = (): boolean => {
+      const routeTarget = content.querySelector<HTMLElement>('h1:not(.visually-hidden), [data-route-focus]');
+      if (!routeTarget) return false;
       if (routeTarget.tagName === 'H1') routeTarget.tabIndex = -1;
       try {
         routeTarget.focus({ preventScroll: true });
       } catch {
         routeTarget.focus();
       }
-    }
-
-    if (reducedMotion) return undefined;
-    const animationContext = gsap.context(() => {
-      gsap.fromTo(
-        content.querySelectorAll('.section-heading, .panel'),
-        { opacity: 0.6, y: 10 },
-        { opacity: 1, y: 0, duration: 0.32, stagger: 0.035, ease: 'power2.out', clearProps: 'opacity,transform' },
-      );
-    }, content);
-    return () => animationContext.revert();
-  }, [route, reducedMotion]);
+      return true;
+    };
+    if (focusTarget() || typeof MutationObserver !== 'function') return undefined;
+    const focusedBefore = document.activeElement;
+    const observer = new MutationObserver(() => {
+      // Never pull focus back if the operator already moved it while loading.
+      if (document.activeElement !== focusedBefore || focusTarget()) observer.disconnect();
+    });
+    observer.observe(content, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [route]);
 
   const onConfigSaved = useCallback(async (next: ConsoleConfig): Promise<void> => {
     if (!mountedRef.current) return;
@@ -413,25 +422,32 @@ export default function App(): ReactElement {
     && readError === null
     && localSnapshotFresh(snapshot, receivedAtMonotonic);
 
+  const lastReadAgeMs = receivedAtMonotonic === null ? null : Math.max(0, monotonicNow() - receivedAtMonotonic);
+
   return (
-    <ConsoleShell
-      route={route}
-      onNavigate={navigate}
-      branding={branding}
-      snapshot={snapshot}
-      localSnapshotFresh={currentLocalFresh}
-      loading={loading}
-      readError={readError}
-      mqttConnection={mqtt?.connection}
-      simulationEnabled={simulationEnabled}
-      onRefresh={() => void refresh()}
-    >
-      <section ref={contentRef} className="route-content" key={route}>
-        {route === 'simulation' ? <SimulationPage enabled={simulationEnabled} automatic={simulationAutomatic} settings={simulationSettings} onEnabled={enabled => { setSimulationEnabled(enabled); if (!enabled) setSimulationAutomatic(false); }} onAutomatic={setSimulationAutomatic} onSettings={setSimulationSettings} onRandomize={randomizeSimulation} onOverview={() => navigate('overview')} />
-          : route === 'overview' && simulationEnabled ? <OverviewPage snapshot={syntheticSnapshot} localSnapshotFresh={true} gpsConfig={gpsConfig} compassConfig={compassConfig} simulation={simulationSettings} />
-          : <PageForRoute route={route} snapshot={snapshot} localFresh={currentLocalFresh} mqtt={mqtt} config={config} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={setGpsConfig} onCompassConfigChanged={setCompassConfig} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} onMqttChanged={applyMqtt} onRefreshMqtt={refreshMqtt} onReconnectMqtt={reconnectMqtt} />}
-      </section>
-    </ConsoleShell>
+    <I18nContext.Provider value={i18n}>
+      <ConsoleShell
+        route={route}
+        onNavigate={navigate}
+        branding={branding}
+        snapshot={snapshot}
+        localSnapshotFresh={currentLocalFresh}
+        loading={loading}
+        readError={readError}
+        lastReadAgeMs={lastReadAgeMs}
+        mqttConnection={mqtt?.connection}
+        simulationEnabled={simulationEnabled}
+        onRefresh={() => void refresh()}
+      >
+        <section ref={contentRef} className="route-content" key={route}>
+          <Suspense fallback={<div className="route-loading" role="status" aria-live="polite"><span aria-hidden="true" /></div>}>
+            {route === 'simulation' ? <SimulationPage enabled={simulationEnabled} automatic={simulationAutomatic} settings={simulationSettings} onEnabled={enabled => { setSimulationEnabled(enabled); if (!enabled) setSimulationAutomatic(false); }} onAutomatic={setSimulationAutomatic} onSettings={setSimulationSettings} onRandomize={randomizeSimulation} onOverview={() => navigate('overview')} />
+              : route === 'overview' && simulationEnabled ? <OverviewPage snapshot={syntheticSnapshot} localSnapshotFresh={true} gpsConfig={gpsConfig} compassConfig={compassConfig} simulation={simulationSettings} />
+              : <PageForRoute route={route} snapshot={snapshot} localFresh={currentLocalFresh} mqtt={mqtt} config={config} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={setGpsConfig} onCompassConfigChanged={setCompassConfig} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} onMqttChanged={applyMqtt} onRefreshMqtt={refreshMqtt} onReconnectMqtt={reconnectMqtt} />}
+          </Suspense>
+        </section>
+      </ConsoleShell>
+    </I18nContext.Provider>
   );
 }
 
