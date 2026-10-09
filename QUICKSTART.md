@@ -61,6 +61,8 @@ git submodule update --init --recursive
 
 Jalankan builder Receiver setelah `npm run build`; output Receiver berada di `frontend/dist/receiver`. Setelah Ground Console aktif, pilih menu **Receiver** (atau buka `http://127.0.0.1:8787/#/receiver`). Receiver juga tetap dapat dibuka langsung di `http://127.0.0.1:8787/receiver/`.
 
+Sesudah memperbarui Receiver, muat ulang halaman Receiver agar worker dan WASM dari build yang sama dipakai. Jika browser masih memuat bundle lama, bersihkan service worker/cache untuk origin Ground Console yang sedang digunakan (misalnya `localhost:8787`, bukan `127.0.0.1:8787`) lalu buka ulang halaman; origin yang berbeda juga memerlukan izin WebUSB tersendiri.
+
 Mutasi `/api/receiver/*` memerlukan header `Origin` same-origin yang cocok dengan host dan port loopback; tanpa header itu atau dari origin lain, server mengembalikan HTTP 403.
 
 ### 3. Jalankan Ground Console
@@ -152,6 +154,8 @@ git submodule update --init --recursive
 ```
 
 Jalankan builder Receiver setelah `npm run build`; output Receiver berada di `frontend\dist\receiver`. Setelah Ground Console aktif, pilih menu **Receiver** (atau buka `http://127.0.0.1:8787/#/receiver`). Receiver juga tetap dapat dibuka langsung di `http://127.0.0.1:8787/receiver/`.
+
+Sesudah memperbarui Receiver, muat ulang halaman Receiver agar worker dan WASM dari build yang sama dipakai. Jika browser masih memuat bundle lama, bersihkan service worker/cache untuk origin Ground Console yang sedang digunakan (misalnya `localhost:8787`, bukan `127.0.0.1:8787`) lalu buka ulang halaman; origin yang berbeda juga memerlukan izin WebUSB tersendiri.
 
 Mutasi `/api/receiver/*` memerlukan header `Origin` same-origin yang cocok dengan host dan port loopback; tanpa header itu atau dari origin lain, server mengembalikan HTTP 403.
 

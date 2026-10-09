@@ -20,6 +20,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSI
 
 import * as Comlink from 'comlink';
 import { FFT } from './wasm-init';
+import { processSpectrumFft } from './iq-spectrum';
 import { RationalResampler } from './dsp-pipeline';
 import { POCSAGDecoder } from './pocsag';
 import type { RxStreamOpts, VfoParams, VfoState, PerfCounters } from './types';
@@ -64,8 +65,8 @@ export async function startRxStream(
 			spectrumWindow[i] = spectrumWindowFunc(i / fftSize);
 		}
 		const spectrumFft = new FFT(fftSize, spectrumWindow);
-		spectrumFft.set_iq_correction(iqCorrection);
-		backend._setSpectrumIqCorrection = enabled => spectrumFft.set_iq_correction(enabled);
+		let spectrumIqCorrection = iqCorrection;
+		backend._setSpectrumIqCorrection = enabled => { spectrumIqCorrection = enabled; };
 		spectrumFft.set_smoothing_speed(0.6);
 		const spectrumOutput = new Float32Array(fftSize);
 
@@ -650,9 +651,8 @@ export async function startRxStream(
 						iqBufferPos = 0;
 						spectrumThrottle++;
 						if (spectrumThrottle % fftSkipFrames === 0) {
-							// Revert back to copy-based FFT for the spectrum waterfall
-							// because `iqBuffer` batches data across USB chunk boundaries.
-							spectrumFft.fft(iqBuffer, spectrumOutput);
+							// The spectrum buffer is refilled before the next FFT.
+							processSpectrumFft(spectrumFft, iqBuffer, spectrumOutput, spectrumIqCorrection);
 
 							// Double buffer the output since Comlink.transfer neuters the buffer on this side.
 							let specCopy = useFlip ? specFlip : specFlop;

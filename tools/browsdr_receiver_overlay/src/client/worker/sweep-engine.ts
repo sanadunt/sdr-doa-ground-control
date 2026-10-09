@@ -1,4 +1,5 @@
 import { FFT } from './wasm-init';
+import { processSpectrumFft } from './iq-spectrum';
 import { SweepBlockParser } from './sweep-parser';
 import { SweepAccumulator } from './sweep-processing';
 import {
@@ -57,7 +58,6 @@ abstract class SpectrumSweepEngine implements SweepEngine {
 			}
 			this.fft = new FFT(config.fftSize, window);
 			this.fft.set_smoothing_speed(1);
-			this.fft.set_iq_correction(config.iqCorrection);
 			this.iqInput = new Int8Array(config.fftSize * 2);
 			this.fftOutput = new Float32Array(config.fftSize);
 		}
@@ -233,7 +233,7 @@ export class NativeHackRFSweepEngine extends SpectrumSweepEngine {
 			this.iqInput.set(source, this.collectedSamples * 2);
 			this.collectedSamples += availableSamples;
 			if (this.collectedSamples >= this.config.fftSize) {
-				this.fft.fft(this.iqInput, this.fftOutput);
+				processSpectrumFft(this.fft, this.iqInput, this.fftOutput, this.config.iqCorrection);
 				this.accumulator.addNativeFft(frequencyHz, this.fftOutput);
 				this.groupProcessed = true;
 			}
@@ -350,7 +350,7 @@ export class ManualSweepEngine extends SpectrumSweepEngine {
 			this.iqInput.set(source.subarray(0, bytesCopied), capturedSamples * 2);
 			capturedSamples += bytesCopied >>> 1;
 			if (capturedSamples >= this.config.fftSize) {
-				this.fft.fft(this.iqInput, this.fftOutput);
+				processSpectrumFft(this.fft, this.iqInput, this.fftOutput, this.config.iqCorrection);
 				this.accumulator.addManualFft(centerHz, this.fftOutput);
 				finish(true);
 			}
