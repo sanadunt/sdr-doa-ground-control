@@ -15,14 +15,29 @@ The full repository guide (architecture, data flow, conventions, commands, QA ex
 cd frontend && npx vitest run src/lib/doaGeometry.test.ts
 cd frontend && npx vitest run -t "partial test name"
 
-# Python unittest-based files (test_ground_console_static, test_rdf_node_mqtt_v2, test_sdr_doa_mqtt_monitor)
+# Python unittest-based files (test_ground_console_static, test_rdf_node_mqtt_v2, test_sdr_doa_mqtt_monitor,
+# test_receiver_record_store, test_build_browsdr_receiver)
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_ground_console_static.GroundConsoleStaticRegressionTests.<test_method>
 
 # Python standalone assert scripts (all other tools/test_*.py): run the whole file,
 # or call one test_* function directly
 python3 tools/test_sdr_doa_collector.py
 python3 -c "import sys; sys.path.insert(0, 'tools'); import test_sdr_doa_collector as t; t.test_<name>()"
+
+# Node test for the Receiver IQ spectrum overlay (needs the vendor/BrowSDR submodule;
+# imports .ts directly, so it relies on Node 22's built-in type stripping)
+node --test tools/test_receiver_iq_spectrum.mjs
 ```
+
+## Receiver (embedded BrowSDR)
+
+The seventh route (`#/receiver`, `ReceiverPage.tsx`) is not covered in `AGENTS.md`. It iframes a separately built BrowSDR sub-app served same-origin at `/receiver/`. The keyboard shortcuts therefore go 1–7, not 1–6.
+
+- Source is the `vendor/BrowSDR` git submodule, pinned by `BROWSDR_REVISION` in `tools/build_browsdr_receiver.py`. Fetch it with `git submodule update --init --recursive`.
+- Do not edit `vendor/BrowSDR`. Local changes live in `tools/browsdr_receiver_overlay/src/` and are applied at build time: the builder copies the submodule to a temp dir, overlays those files, patches anchors with `_replace_once` (it fails if an anchor is missing or appears more than once), runs `npm ci` and `npm run build --base=/receiver/`, and writes `frontend/dist/receiver`. If you bump the pin, also bump `BROWSDR_OVERLAY_BASE_REVISION` and re-check every anchor.
+- Build order: `cd frontend && npm run build`, then `.venv/bin/python tools/build_browsdr_receiver.py` (the Vite build rewrites `frontend/dist`).
+- Backend: `/api/receiver/*` in `ground_console.py` is backed by `tools/receiver_record_store.py`, a SQLite and audio file store under `--data-dir` (default `~/.local/share/sdr-doa-ground-console`). POST and DELETE require a same-origin loopback `Origin` header, otherwise 403. `/receiver` responses get their own MIME allowlist, a WebUSB/autoplay policy, and a static root kept separate from the main app's.
+- The Receiver audio time filter uses `zoneinfo`, so it needs Python 3.9+.
 
 The standalone scripts collect every module-level `test_*` function in their `__main__` block, so `unittest discover` skips them. Run them by name when you touch their modules.
 
@@ -33,6 +48,7 @@ From `initialize.md`, the expected sequence before calling work done:
 ```sh
 cd frontend && npm test && npm run check && npm run build
 cd .. && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest discover -s tools -p 'test_*.py'
+node --test tools/test_receiver_iq_spectrum.mjs   # when Receiver code changed
 git diff --check
 ```
 
