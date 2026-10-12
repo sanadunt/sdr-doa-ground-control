@@ -28,7 +28,7 @@
 	<!-- Verification -->
 	<meta name="google-site-verification" content="pbY_hHA-M-i4ta42Acf0ecHrd_Sy59vW5-j1ExQPFyI" />
 
-	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Roboto+Mono&display=swap" rel="stylesheet">
+	<script src="/receiver/receiver-boot.js"></script>
 	<link rel="stylesheet" href="style.css">
 	<script src="lib/peerjs.min.js"></script>
 	<script src="app/main.ts" type="module"></script>
@@ -36,7 +36,7 @@
 <body>
 	<div id="app" v-cloak>
 		<!-- Top Bar -->
-		<div class="top-bar">
+		<div class="top-bar" v-show="activeWorkspace === 'listener'">
 			<button class="icon-btn sidebar-toggle" v-show="activeWorkspace === 'listener'" @click="toggleSidebar" title="Menu">
 				<svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
 			</button>
@@ -96,10 +96,10 @@
 		</div>
 
 		<div class="receiver-workspaces">
-			<nav class="receiver-view-tabs" role="tablist" aria-label="Receiver workspace" aria-orientation="vertical" @keydown="onWorkspaceTabsKeydown">
-				<button id="tab-spectrum" class="receiver-view-tab" :class="{ active: activeWorkspace === 'spectrum' }" role="tab" aria-controls="spectrum-workspace" :aria-selected="activeWorkspace === 'spectrum'" :tabindex="activeWorkspace === 'spectrum' ? 0 : -1" :disabled="sweep.starting || sweep.stopping || sweep.listenStarting" @click="selectWorkspace('spectrum')">Spectrum</button>
-				<button id="tab-listener" class="receiver-view-tab" :class="{ active: activeWorkspace === 'listener' }" role="tab" aria-controls="listener-workspace" :aria-selected="activeWorkspace === 'listener'" :tabindex="activeWorkspace === 'listener' ? 0 : -1" :disabled="sweep.starting || sweep.stopping || sweep.listenStarting" @click="selectWorkspace('listener')">Listener</button>
-				<button id="tab-records" class="receiver-view-tab" :class="{ active: activeWorkspace === 'records' }" role="tab" aria-controls="records-workspace" :aria-selected="activeWorkspace === 'records'" :tabindex="activeWorkspace === 'records' ? 0 : -1" :disabled="sweep.starting || sweep.stopping || sweep.listenStarting" @click="selectWorkspace('records')">Records</button>
+			<nav class="receiver-view-tabs" role="tablist" :aria-label="t('Receiver workspace')" aria-orientation="vertical" @keydown="onWorkspaceTabsKeydown">
+				<button id="tab-spectrum" class="receiver-view-tab" :class="{ active: activeWorkspace === 'spectrum' }" role="tab" aria-controls="spectrum-workspace" :aria-selected="activeWorkspace === 'spectrum'" :tabindex="activeWorkspace === 'spectrum' ? 0 : -1" :disabled="sweep.starting || sweep.stopping || sweep.listenStarting" @click="requestWorkspace('spectrum')">{{ t('Spectrum') }}</button>
+				<button id="tab-listener" class="receiver-view-tab" :class="{ active: activeWorkspace === 'listener' }" role="tab" aria-controls="listener-workspace" :aria-selected="activeWorkspace === 'listener'" :tabindex="activeWorkspace === 'listener' ? 0 : -1" :disabled="sweep.starting || sweep.stopping || sweep.listenStarting" @click="selectWorkspace('listener')" :aria-label="audioRecording.armed ? t('Listener, recording VFO audio') : null">{{ t('Listener') }}<span class="workspace-rec-indicator" v-if="audioRecording.armed" aria-hidden="true" title="VFO audio is being recorded">REC</span></button>
+				<button id="tab-records" class="receiver-view-tab" :class="{ active: activeWorkspace === 'records' }" role="tab" aria-controls="records-workspace" :aria-selected="activeWorkspace === 'records'" :tabindex="activeWorkspace === 'records' ? 0 : -1" :disabled="sweep.starting || sweep.stopping || sweep.listenStarting" @click="selectWorkspace('records')">{{ t('Records') }}</button>
 			</nav>
 			<div class="receiver-workspace-content">
 				<div id="listener-workspace" class="listener-workspace" v-show="activeWorkspace === 'listener'" role="tabpanel" aria-labelledby="tab-listener">
@@ -112,13 +112,14 @@
 							{{ audioRecording.starting ? 'Starting audio…' : audioRecording.stopping ? 'Finalizing audio…' : audioRecording.armed ? 'Stop VFO audio' : 'Record VFO audio' }}
 						</button>
 					</header>
-					<div class="audio-recording-status" v-if="audioRecording.armed || audioRecording.error" role="status">
-						<span v-if="audioRecording.armed">Recording enabled VFOs separately; each retune starts a new audio file.</span>
+					<div class="audio-recording-status" v-if="audioRecording.armed || audioRecording.error || audioRecording.notice" role="status">
+						<span v-if="audioRecording.armed">{{ t('Recording enabled VFOs separately; each retune starts a new audio file.') }}</span>
+						<span v-if="audioRecording.notice" class="audio-recording-notice">{{ audioRecording.notice }}</span>
 						<span v-if="audioRecording.error" class="audio-recording-error">{{ audioRecording.error }}</span>
 					</div>
 					<div class="listener-return-bar" v-if="sweep.listening || sweep.listenStarting">
-						<span>{{ sweep.listenStarting ? 'Tuning to' : 'Listening to' }} {{ (sweep.listenFrequencyHz / 1000000).toFixed(6) }} MHz</span>
-						<button class="btn btn-secondary" @click="returnToSpectrum" :disabled="sweep.listenStarting">Stop listening and start new scan</button>
+						<span>{{ t(sweep.listenStarting ? 'Tuning to' : 'Listening to') }} {{ (sweep.listenFrequencyHz / 1000000).toFixed(6) }} MHz</span>
+						<button class="btn btn-secondary" @click="returnToSpectrum" :disabled="sweep.listenStarting">{{ t('Stop listening and start new scan') }}</button>
 					</div>
 		<div class="main-layout">
 			<!-- Sidebar backdrop (mobile) -->
@@ -138,11 +139,11 @@
 						</div>
 						<div class="form-row" style="flex-direction: column; gap: 8px;">
 							<template v-if="!connected && remoteMode !== 'client'">
-								<button class="btn btn-primary" style="width: 100%;" @click="connect">Connect Device</button>
+								<button class="btn btn-primary" style="width: 100%;" @click="connect">{{ t('Connect Device') }}</button>
 								<button class="btn btn-secondary" style="width: 100%;" @click="showRemoteConnectDialog = true">Connect Remote</button>
-								<button class="btn btn-secondary" style="width: 100%;" v-if="isLocal" @click="connectMock">Connect Mock SDR</button>
+								<button class="btn btn-secondary" style="width: 100%;" v-if="mockSdrEnabled" @click="connectMock">{{ t('Connect Mock SDR') }}</button>
 							</template>
-							<button class="btn" style="width: 100%;" v-else @click="disconnect">{{ remoteMode === 'client' ? 'Disconnect Remote' : 'Disconnect' }}</button>
+							<button class="btn" style="width: 100%;" v-else @click="disconnect">{{ remoteMode === 'client' ? 'Disconnect Remote' : t('Disconnect') }}</button>
 						</div>
 						<div class="form-row info-row" v-if="connected && remoteMode !== 'client'">
 							<small>{{ info.boardName }}</small>
@@ -509,60 +510,61 @@
 		<section id="spectrum-workspace" class="sweep-panel" v-show="activeWorkspace === 'spectrum'" role="tabpanel" aria-labelledby="tab-spectrum" aria-label="Wide Spectrum">
 				<header class="sweep-header">
 					<div>
-						<h2>Wide Spectrum Scan</h2>
+						<h2>{{ t('Wide Spectrum Scan') }}</h2>
 						<p>RX only · Bias-T forced OFF · relative dBFS-like power, not calibrated dBm</p>
 					</div>
 					<div class="sweep-header-actions">
-						<span class="sweep-device-state" :class="{ connected }">{{ connected ? 'DEVICE CONNECTED' : 'NO DEVICE' }}</span>
+						<span class="sweep-simulation-badge" v-if="sweep.source === 'simulated'" role="status" title="Simulation source: peaks are synthetic, not received RF.">SIMULATION</span>
+						<span class="sweep-device-state" :class="{ connected, mock: connected && mockDevice }">{{ connected ? (mockDevice ? 'MOCK DEVICE' : 'DEVICE CONNECTED') : 'NO DEVICE' }}</span>
 						<span class="sweep-state" :class="{ scanning: sweep.active }">{{ sweep.active ? 'SCANNING' : sweep.starting ? 'STARTING' : sweep.stopping ? 'STOPPING' : sweep.listenStarting ? 'TUNING' : sweep.listening ? 'LISTENING' : sweep.offlineSessionName ? 'OFFLINE' : 'STOPPED' }}</span>
 					</div>
 				</header>
 
 				<div class="sweep-controls">
-					<label>Source
+					<label>{{ t('Source') }}
 						<select v-model="sweep.source" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
-							<option value="simulated">Simulation</option>
+							<option value="simulated">{{ t('Simulation (synthetic peaks)') }}</option>
 							<option value="native" v-if="deviceCapabilities && deviceCapabilities.supportsNativeSweep">HackRF native</option>
 							<option value="manual" v-if="deviceCapabilities && deviceCapabilities.supportsManualSweep">HackRF manual</option>
 						</select>
 					</label>
-					<label>Start
+					<label>{{ t('Start') }}
 						<div class="sweep-input-unit">
 							<input type="number" v-model.number="sweep.startMHz" min="1" max="7250" step="0.1" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
 							<span>MHz</span>
 						</div>
 					</label>
-					<label>End
+					<label>{{ t('End') }}
 						<div class="sweep-input-unit">
 							<input type="number" v-model.number="sweep.endMHz" min="1" max="7250" step="0.1" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
 							<span>MHz</span>
 						</div>
 					</label>
-					<label>Resolution
+					<label>{{ t('Resolution') }}
 						<select v-model.number="sweep.fftSize" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
 							<option :value="4096">4.88 kHz · 4096 FFT</option>
 							<option :value="8192">2.44 kHz · 8192 FFT</option>
 						</select>
 					</label>
-					<label>LNA gain
+					<label>{{ t('LNA gain') }}
 						<select v-model.number="sweep.lnaGain" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
 							<option v-for="gain in [0, 8, 16, 24, 32, 40]" :key="gain" :value="gain">{{ gain }} dB</option>
 						</select>
 					</label>
-					<label>VGA gain
+					<label>{{ t('VGA gain') }}
 						<select v-model.number="sweep.vgaGain" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
 							<option v-for="gain in [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62]" :key="gain" :value="gain">{{ gain }} dB</option>
 						</select>
 					</label>
-					<label class="sweep-amp-control"><input type="checkbox" v-model="sweep.ampEnabled" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults"> RF amp (+14 dB)</label>
-					<label class="sweep-amp-control" title="Applied to hardware FFT captures; signals exactly at the tuned center may be reduced."><input type="checkbox" v-model="radio.iqCorrection" :disabled="remoteMode !== 'none' || sweep.active || sweep.starting || sweep.stopping || sweep.hasResults"> IQ Correction (DC)</label>
-					<label>Detection SNR
+					<label class="sweep-amp-control"><input type="checkbox" v-model="sweep.ampEnabled" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults"> {{ t('RF amp (+14 dB)') }}</label>
+					<label class="sweep-amp-control" title="Applied to hardware FFT captures; signals exactly at the tuned center may be reduced."><input type="checkbox" v-model="radio.iqCorrection" :disabled="remoteMode !== 'none' || sweep.active || sweep.starting || sweep.stopping || sweep.hasResults"> {{ t('IQ Correction (DC)') }}</label>
+					<label>{{ t('Detection SNR') }}
 						<div class="sweep-input-unit">
 							<input type="number" v-model.number="sweep.minSnrDb" min="1" max="60" step="1" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
 							<span>dB</span>
 						</div>
 					</label>
-					<label>Average
+					<label>{{ t('Average') }}
 						<div class="sweep-input-unit">
 							<input type="number" v-model.number="sweep.averageAlpha" min="0.01" max="1" step="0.01" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
 							<span>α</span>
@@ -570,18 +572,18 @@
 					</label>
 					<label>Trace
 						<select v-model="sweep.view" @change="drawSweepSpectrum">
-							<option value="current">Current</option>
-							<option value="average">Average</option>
+							<option value="current">{{ t('Current') }}</option>
+							<option value="average">{{ t('Average') }}</option>
 							<option value="max">Max hold</option>
 						</select>
 					</label>
-					<label>Sort signals
+					<label>{{ t('Sort signals') }}
 						<select v-model="sweep.sortBy" @change="candidateFilterChanged">
 							<option value="snr">SNR</option>
-							<option value="frequency">Frequency</option>
-							<option value="peak">Peak power</option>
-							<option value="hits">Hit count</option>
-							<option value="lastSeen">Last seen</option>
+							<option value="frequency">{{ t('Frequency') }}</option>
+							<option value="peak">{{ t('Peak power') }}</option>
+							<option value="hits">{{ t('Hit count') }}</option>
+							<option value="lastSeen">{{ t('Last seen') }}</option>
 						</select>
 					</label>
 					<label>Graph minimum
@@ -598,7 +600,7 @@
 					</label>
 					<label>Listen mode
 						<select v-model="sweep.listenMode" :disabled="sweep.listening || sweep.listenStarting">
-							<option value="">Use active VFO mode</option>
+							<option value="">{{ t('Use active VFO mode') }}</option>
 							<option value="wfm">WFM</option>
 							<option value="nfm">NFM</option>
 							<option value="am">AM</option>
@@ -610,18 +612,18 @@
 						</select>
 					</label>
 					<div class="sweep-actions">
-						<button class="btn btn-secondary" v-if="!connected && remoteMode === 'none'" @click="connect" :disabled="sweep.active || sweep.starting || sweep.stopping">Connect Device</button>
-						<button class="btn btn-secondary" v-else-if="connected && remoteMode === 'none'" @click="disconnect" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Disconnect</button>
-						<button class="btn btn-primary" @click="startSweep" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting || remoteMode !== 'none' || (sweep.source !== 'simulated' && !connected)">Start scan</button>
-						<button class="btn btn-danger" @click="stopSweep(true)" v-if="sweep.active || sweep.starting || sweep.stopping" :disabled="sweep.stopping">{{ sweep.stopping ? (sweep.stopPhase === 'rf' ? 'Stopping RF…' : sweep.stopPhase === 'archive' ? 'Saving archive…' : 'Finishing…') : 'Stop' }}</button>
+						<button class="btn btn-secondary" v-if="!connected && remoteMode === 'none'" @click="connect" :disabled="sweep.active || sweep.starting || sweep.stopping">{{ t('Connect Device') }}</button>
+						<button class="btn btn-secondary" v-else-if="connected && remoteMode === 'none'" @click="disconnect" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">{{ t('Disconnect') }}</button>
+						<button class="btn btn-primary" @click="startSweep" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting || remoteMode !== 'none' || (sweep.source !== 'simulated' && !connected)">{{ t('Start scan') }}</button>
+						<button class="btn btn-danger" @click="stopSweep(true)" v-if="sweep.active || sweep.starting || sweep.stopping" :disabled="sweep.stopping">{{ t(sweep.stopping ? (sweep.stopPhase === 'rf' ? 'Stopping RF…' : sweep.stopPhase === 'archive' ? 'Saving archive…' : 'Finishing…') : 'Stop') }}</button>
 						<div class="sweep-visualization-tabs" role="tablist" aria-label="Sweep visualization">
-							<button :class="{ active: sweep.visualization === 'spectrum' }" role="tab" :aria-selected="sweep.visualization === 'spectrum'" @click="setSweepVisualization('spectrum')">Spectrum</button>
+							<button :class="{ active: sweep.visualization === 'spectrum' }" role="tab" :aria-selected="sweep.visualization === 'spectrum'" @click="setSweepVisualization('spectrum')">{{ t('Spectrum') }}</button>
 							<button :class="{ active: sweep.visualization === 'waterfall' }" role="tab" :aria-selected="sweep.visualization === 'waterfall'" @click="setSweepVisualization('waterfall')">Waterfall · {{ sweep.waterfallRows }}/256</button>
 						</div>
-						<button class="btn btn-secondary" @click="$refs.sweepSessionFile.click()" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Open session</button>
-						<button class="btn btn-secondary" @click="saveSweepSession" :disabled="!sweep.hasResults">Save JSON</button>
-						<button class="btn btn-secondary" @click="exportSweepCandidates" :disabled="!sweep.hasResults">Export CSV</button>
-						<button class="btn btn-secondary" @click="clearSweepData" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Clear</button>
+						<button class="btn btn-secondary" @click="$refs.sweepSessionFile.click()" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">{{ t('Open session') }}</button>
+						<button class="btn btn-secondary" @click="saveSweepSession" :disabled="!sweep.hasResults">{{ t('Save JSON') }}</button>
+						<button class="btn btn-secondary" @click="exportSweepCandidates" :disabled="!sweep.hasResults">{{ t('Export CSV') }}</button>
+						<button class="btn btn-secondary" @click="clearSweepData" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">{{ t('Clear') }}</button>
 						<button class="btn btn-secondary" @click="zoomSweepSpectrum(0.5)" :disabled="!sweep.hasResults" aria-label="Zoom in" title="Zoom in">Zoom +</button>
 						<button class="btn btn-secondary" @click="zoomSweepSpectrum(2)" :disabled="!sweep.hasResults" aria-label="Zoom out" title="Zoom out">Zoom −</button>
 						<button class="btn btn-secondary" @click="resetSweepViewport" :disabled="!sweep.hasResults">Reset zoom</button>
@@ -633,17 +635,18 @@
 					<span v-if="sweep.listening">Listening · {{ (sweep.listenFrequencyHz / 1000000).toFixed(6) }} MHz</span>
 				</div>
 
-				<div class="sweep-error" v-if="records.error" role="alert">{{ records.error }}</div>
-				<div class="sweep-error" v-if="sweep.error">{{ sweep.error }}</div>
+				<div class="sweep-error" v-if="records.error" role="alert"><span>{{ records.error }}</span><button type="button" class="sweep-error-dismiss" :aria-label="t('Dismiss message')" :title="t('Dismiss message')" @click="records.error = ''">×</button></div>
+				<div class="sweep-error" v-if="sweep.error"><span>{{ sweep.error }}</span><button type="button" class="sweep-error-dismiss" :aria-label="t('Dismiss message')" :title="t('Dismiss message')" @click="sweep.error = ''">×</button></div>
 				<div class="sweep-status">
-					<span>{{ sweep.progress.sweepCount }} sweeps · {{ sweep.progress.sweepsPerSecond.toFixed(2) }} sweeps/s</span>
+					<span>{{ sweep.progress.sweepCount }} {{ t('sweeps') }} · {{ sweep.progress.sweepsPerSecond.toFixed(2) }} {{ t('sweeps') }}/s</span>
 					<span>RF {{ sweep.progress.currentFrequencyHz ? (sweep.progress.currentFrequencyHz / 1000000).toFixed(3) + ' MHz' : 'n/a' }}</span>
 					<span>{{ (sweep.progress.bytesPerSecond / 1024).toFixed(1) }} KiB/s</span>
-					<span>{{ sortedSweepCandidates.length }} peak groups shown / {{ sweep.candidateHistoryTotal }} candidate records in history</span>
+					<span>{{ sortedSweepCandidates.length }} {{ t('peak groups shown') }} / {{ sweep.candidateHistoryTotal }} {{ t('candidate records in history') }}</span>
 					<span v-if="sweep.progress.discardedBytes">Discarded {{ sweep.progress.discardedBytes }} bytes</span>
 				</div>
 
 				<div class="sweep-spectrum-wrap">
+					<div class="sweep-simulation-watermark" v-if="sweep.source === 'simulated' && (sweep.active || sweep.starting || sweep.hasResults)" aria-hidden="true">SIMULATION · synthetic peaks</div>
 					<div class="sweep-hover-readout" v-if="sweep.visualization === 'spectrum' && sweep.hoverFrequencyHz !== null">
 						{{ (sweep.hoverFrequencyHz / 1000000).toFixed(6) }} MHz
 						<span v-if="sweep.hoverPowerDb !== null">{{ sweep.hoverPowerDb.toFixed(1) }} dBFS-like</span>
@@ -690,33 +693,34 @@
 				<div class="sweep-history-layout">
 					<section class="sweep-history-table" aria-label="Peak history">
 				<div class="sweep-table-heading">
-					<h3>Peak history by frequency</h3>
-					<span>Listen stops the scan. Use “Stop listening and start new scan” to replace these results.</span>
+					<h3>{{ t('Peak history by frequency') }}</h3>
+					<span>{{ t('Listen stops the scan. Use “Stop listening and start new scan” to replace these results.') }}</span>
 				</div>
 				<div class="sweep-table-tools">
-					<label>Minimum peak
-						<select :value="[-160, -100, -90, -80, -70, -60].includes(Number(sweep.minimumPeakDb)) ? String(sweep.minimumPeakDb) : 'custom'" @change="setMinimumPeakPreset">
-							<option value="-160">All (−160 dBFS)</option>
-							<option value="-100">−100 dBFS</option>
-							<option value="-90">−90 dBFS</option>
-							<option value="-80">−80 dBFS</option>
-							<option value="-70">−70 dBFS</option>
-							<option value="-60">−60 dBFS</option>
-							<option value="custom">Custom</option>
+					<label>{{ t('Minimum peak') }}
+						<select :value="[-160, -50, -40, -30, -20, -10, 0].includes(Number(sweep.minimumPeakDb)) ? String(sweep.minimumPeakDb) : 'custom'" @change="setMinimumPeakPreset" title="Best peak level on this scan's relative dBFS-like scale; receiver noise usually sits between about −50 and −25.">
+							<option value="-160">{{ t('All peaks') }}</option>
+							<option value="-50">≥ −50 dBFS</option>
+							<option value="-40">≥ −40 dBFS</option>
+							<option value="-30">≥ −30 dBFS</option>
+							<option value="-20">≥ −20 dBFS</option>
+							<option value="-10">≥ −10 dBFS</option>
+							<option value="0">≥ 0 dBFS</option>
+							<option value="custom">{{ t('Custom') }}</option>
 						</select>
 					</label>
-					<label class="sweep-custom-threshold">Exact dBFS
+					<label class="sweep-custom-threshold">{{ t('Exact dBFS') }}
 						<input type="number" :value="sweep.minimumPeakDb" min="-160" max="0" step="any" @change="setMinimumPeakCustom">
 					</label>
 					<label class="checkbox">
 						<input type="checkbox" v-model="records.markedOnly" @change="candidateFilterChanged">
-						Marked only
+						{{ t('Marked only') }}
 					</label>
-					<span>{{ sweepCandidateRangeStart }}–{{ sweepCandidateRangeEnd }} of {{ sweepCandidateFilteredTotal }} peak groups matching · {{ sweep.candidateHistoryTotal }} candidate records total</span>
+					<span>{{ sweepCandidateRangeStart }}–{{ sweepCandidateRangeEnd }} {{ t('of') }} {{ sweepCandidateFilteredTotal }} {{ t('peak groups matching') }} · {{ sweep.candidateHistoryTotal }} {{ t('candidate records total') }}</span>
 				</div>
 				<div class="sweep-candidates">
 					<table>
-						<thead><tr><th>Peak center</th><th>Peak frequency range</th><th>Occupied bandwidth</th><th>Best peak</th><th>Noise</th><th>SNR</th><th>First seen</th><th>Last seen</th><th>Hits</th><th>Listen</th></tr></thead>
+						<thead><tr><th>{{ t('Peak center') }}</th><th>{{ t('Peak frequency range') }}</th><th>{{ t('Occupied bandwidth') }}</th><th>{{ t('Best peak') }}</th><th>{{ t('Noise') }}</th><th>SNR</th><th>{{ t('First seen') }}</th><th>{{ t('Last seen') }}</th><th>{{ t('Hits') }}</th><th>{{ t('Listen') }}</th></tr></thead>
 						<tbody>
 							<tr v-for="candidate in sortedSweepCandidates" :key="candidate.id"
 								:class="{ selected: sweep.selectedCandidate && sweep.selectedCandidate.id === candidate.id }"
@@ -730,7 +734,7 @@
 								<td>{{ new Date(candidate.firstSeen).toLocaleTimeString() }}</td>
 								<td>{{ new Date(candidate.lastSeen).toLocaleTimeString() }}</td>
 								<td>{{ candidate.hits }}</td>
-								<td><button class="sweep-listen-button" @click.stop="listenToSweepCandidate(candidate)" :disabled="!connected || remoteMode !== 'none' || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">Listen</button></td>
+								<td><button class="sweep-listen-button" @click.stop="listenToSweepCandidate(candidate)" :disabled="!connected || remoteMode !== 'none' || sweep.starting || sweep.stopping || sweep.listening || sweep.listenStarting">{{ t('Listen') }}</button></td>
 							</tr>
 						</tbody>
 					</table>
@@ -738,92 +742,92 @@
 					<div class="sweep-empty" v-else-if="records.markedOnly && !records.markers.length">Marked only is active, but the selected marker set has no markers.</div>
 					<div class="sweep-empty" v-else-if="!sortedSweepCandidates.length">No candidates match the current peak-power and marker filters.</div>
 					<div class="sweep-pagination" v-if="sweepCandidateFilteredTotal > sweep.candidatePageSize">
-						<button class="btn btn-secondary" @click="setCandidatePage(sweep.candidatePage - 1)" :disabled="sweep.candidatePage === 0">Previous</button>
-						<label>Rows
+						<button class="btn btn-secondary" @click="setCandidatePage(sweep.candidatePage - 1)" :disabled="sweep.candidatePage === 0">{{ t('Previous') }}</button>
+						<label>{{ t('Rows') }}
 							<select :value="sweep.candidatePageSize" @change="setCandidatePageSize">
 								<option :value="25">25</option><option :value="50">50</option><option :value="100">100</option><option :value="250">250</option>
 							</select>
 						</label>
-						<span>Page {{ sweep.candidatePage + 1 }} of {{ sweepCandidatePageCount }}</span>
-						<button class="btn btn-secondary" @click="setCandidatePage(sweep.candidatePage + 1)" :disabled="sweep.candidatePage + 1 >= sweepCandidatePageCount">Next</button>
+						<span>{{ t('Page') }} {{ sweep.candidatePage + 1 }} {{ t('of') }} {{ sweepCandidatePageCount }}</span>
+						<button class="btn btn-secondary" @click="setCandidatePage(sweep.candidatePage + 1)" :disabled="sweep.candidatePage + 1 >= sweepCandidatePageCount">{{ t('Next') }}</button>
 					</div>
 				</div>
 					</section>
 					<section class="marker-settings" aria-label="Spectrum marker set editor">
 						<div class="marker-settings-heading">
-							<h3>Spectrum markers</h3>
+							<h3>{{ t('Spectrum markers') }}</h3>
 						</div>
-						<label class="marker-saved-set">Saved set
+						<label class="marker-saved-set">{{ t('Saved set') }}
 							<select v-model="records.selectedMarkerSetId" @change="selectMarkerSet">
 								<option value="">Unsaved markers</option>
 								<option v-for="set in records.markerSets" :key="set.id" :value="set.id">{{ set.name }}</option>
 							</select>
 						</label>
 						<div class="marker-set-actions">
-							<input type="text" v-model="records.markerSetName" maxlength="120" placeholder="Marker set name" aria-label="Marker set name">
-							<button class="btn btn-secondary" type="button" @click="newMarkerSet">New</button>
-							<button class="btn btn-primary" type="button" @click="saveMarkerSet">Save set</button>
-							<button class="btn btn-secondary" type="button" @click="deleteMarkerSet" :disabled="!records.selectedMarkerSetId">Delete set</button>
+							<input type="text" v-model="records.markerSetName" maxlength="120" :placeholder="t('Marker set name')" aria-label="Marker set name">
+							<button class="btn btn-secondary" type="button" @click="newMarkerSet">{{ t('New') }}</button>
+							<button class="btn btn-primary" type="button" @click="saveMarkerSet">{{ t('Save set') }}</button>
+							<button class="btn btn-secondary" type="button" @click="deleteMarkerSet" :disabled="!records.selectedMarkerSetId">{{ t('Delete set') }}</button>
 						</div>
 						<form class="marker-manual-entry" @submit.prevent="addManualReceiverMarker">
-							<label>Frequency (MHz)
+							<label>{{ t('Frequency (MHz)') }}
 								<input type="number" v-model="records.manualMarkerFrequencyMHz" min="0" step="any" required aria-label="Manual marker frequency MHz">
 							</label>
-							<label>Label
-								<input type="text" v-model="records.manualMarkerLabel" maxlength="80" placeholder="Optional label" aria-label="Manual marker label">
+							<label>{{ t('Label') }}
+								<input type="text" v-model="records.manualMarkerLabel" maxlength="80" :placeholder="t('Optional label')" aria-label="Manual marker label">
 							</label>
-							<button class="btn btn-secondary" type="submit">Add marker</button>
+							<button class="btn btn-secondary" type="submit">{{ t('Add marker') }}</button>
 						</form>
 						<div class="marker-export-actions">
-							<button class="btn btn-secondary" type="button" @click="exportMarkerSetJson" :disabled="!records.markers.length">Markers JSON</button>
-							<button class="btn btn-secondary" type="button" @click="exportMarkerSetCsv" :disabled="!records.markers.length">Markers CSV</button>
+							<button class="btn btn-secondary" type="button" @click="exportMarkerSetJson" :disabled="!records.markers.length">{{ t('Markers JSON') }}</button>
+							<button class="btn btn-secondary" type="button" @click="exportMarkerSetCsv" :disabled="!records.markers.length">{{ t('Markers CSV') }}</button>
 						</div>
 						<div class="marker-list" v-if="records.markers.length">
 							<div class="marker-row" v-for="marker in records.markers" :key="marker.id">
-								<label>Frequency MHz
+								<label>{{ t('Frequency MHz') }}
 									<input type="number" v-model="records.markerFrequencyDrafts[marker.id]" min="0" step="any" aria-label="Marker frequency MHz" @change="updateReceiverMarker(marker.id)">
 								</label>
-								<label>Label
+								<label>{{ t('Label') }}
 									<input type="text" v-model="marker.label" maxlength="80" placeholder="Label" aria-label="Marker label" @change="updateReceiverMarker(marker.id)">
 								</label>
 								<span class="marker-power">{{ marker.powerDb === null ? 'Power not measured' : `${marker.powerDb.toFixed(1)} dBFS` }}</span>
-								<button class="btn btn-secondary" type="button" @click="removeReceiverMarker(marker.id)">Delete marker</button>
+								<button class="btn btn-secondary" type="button" @click="removeReceiverMarker(marker.id)">{{ t('Delete marker') }}</button>
 							</div>
 						</div>
-						<div class="records-empty" v-else>No markers in this set yet.</div>
+						<div class="records-empty" v-else>{{ t('No markers in this set yet.') }}</div>
 					</section>
 				</div>
 			</section>
 			<section id="records-workspace" class="receiver-records-workspace" v-show="activeWorkspace === 'records'" role="tabpanel" aria-labelledby="tab-records">
 				<header class="records-header">
 					<div>
-						<h2>Receiver Records</h2>
-						<p>Local spectrum and per-VFO audio files; stored on this Ground Console only.</p>
+						<h2>{{ t('Receiver Records') }}</h2>
+						<p>{{ t('Local spectrum and per-VFO audio files; stored on this Ground Console only.') }}</p>
 					</div>
-					<button class="btn btn-secondary" @click="loadReceiverRecords" :disabled="records.loading">{{ records.loading ? 'Refreshing…' : 'Refresh' }}</button>
+					<button class="btn btn-secondary" @click="loadReceiverRecords" :disabled="records.loading">{{ t(records.loading ? 'Refreshing…' : 'Refresh') }}</button>
 				</header>
 				<div class="records-settings">
-					<label class="checkbox"><input type="checkbox" v-model="records.autoSpectrumRecording" @change="updateAutoSpectrumRecording" :disabled="sweep.active || sweep.starting || sweep.stopping"> Automatically archive each spectrum scan</label>
-					<p>Off by default. Applies when a new scan starts; archived scans include grouped candidates and one compact average trace per completed sweep.</p>
+					<label class="checkbox"><input type="checkbox" v-model="records.autoSpectrumRecording" @change="updateAutoSpectrumRecording" :disabled="sweep.active || sweep.starting || sweep.stopping"> {{ t('Automatically archive each spectrum scan') }}</label>
+					<p>{{ t('Off by default. Applies when a new scan starts; archived scans include grouped candidates and one compact average trace per completed sweep.') }}</p>
 				</div>
 				<div class="records-error" v-if="records.error" role="alert">{{ records.error }}</div>
-				<div class="records-error" v-if="audioRecording.error && records.error !== audioRecording.error" role="alert">Audio recording: {{ audioRecording.error }}</div>
+				<div class="records-error" v-if="audioRecording.error && records.error !== audioRecording.error" role="alert">{{ t('Audio recording') }}: {{ audioRecording.error }}</div>
 				<section class="records-kind" aria-labelledby="records-spectrum-title">
 					<div class="records-list-header">
-						<h3 id="records-spectrum-title">Spectrum scans</h3>
-						<span>{{ records.scanTotal }} scan{{ records.scanTotal === 1 ? '' : 's' }}</span>
+						<h3 id="records-spectrum-title">{{ t('Spectrum scans') }}</h3>
+						<span>{{ records.scanTotal }} {{ t(records.scanTotal === 1 ? 'scan' : 'scans') }}</span>
 					</div>
 					<div class="records-table-scroll" role="region" aria-label="Spectrum scan records" tabindex="0" v-if="records.scanItems.length">
 						<table class="records-table">
 							<thead>
 								<tr>
-									<th scope="col">Started</th>
-									<th scope="col">Source</th>
-									<th scope="col">Frequency range</th>
-									<th scope="col">Status</th>
-									<th scope="col">Candidates</th>
-									<th scope="col">Archived sweeps</th>
-									<th scope="col">Actions</th>
+									<th scope="col">{{ t('Started') }}</th>
+									<th scope="col">{{ t('Source') }}</th>
+									<th scope="col">{{ t('Frequency range') }}</th>
+									<th scope="col">{{ t('Status') }}</th>
+									<th scope="col">{{ t('Candidates') }}</th>
+									<th scope="col">{{ t('Archived sweeps') }}</th>
+									<th scope="col">{{ t('Actions') }}</th>
 								</tr>
 							</thead>
 							<tbody>
@@ -833,65 +837,116 @@
 									<td>{{ record.start_hz === null || record.end_hz === null ? 'Unknown' : (record.start_hz / 1000000).toFixed(3) + ' - ' + (record.end_hz / 1000000).toFixed(3) + ' MHz' }}</td>
 									<td><span class="record-status" :class="'record-status-' + record.status">{{ record.status }}</span></td>
 									<td>{{ record.candidate_count }}</td>
-									<td>{{ record.trace_count }}</td>
+									<td>{{ record.trace_count }}<span v-if="record.trace_upload_failures" class="audio-record-warning"> ({{ record.trace_upload_failures }} {{ t('not saved') }})</span></td>
 									<td>
 										<div class="record-actions">
-											<button class="btn btn-primary" @click="openReceiverRecord(record)">Open scan</button>
-											<button class="btn btn-secondary" @click="deleteReceiverRecord(record)">Delete</button>
+											<button class="btn btn-primary" @click="openReceiverRecord(record)">{{ t('Open scan') }}</button>
+											<button class="btn btn-secondary" @click="deleteReceiverRecord(record)">{{ t('Delete') }}</button>
 										</div>
 									</td>
 								</tr>
 							</tbody>
 						</table>
 					</div>
-					<div class="records-empty" v-else>{{ records.loading ? 'Loading spectrum scans…' : 'No saved spectrum scans.' }}</div>
+					<div class="records-empty" v-else>{{ t(records.loading ? 'Loading spectrum scans…' : 'No saved spectrum scans.') }}</div>
 					<div class="records-pagination" v-if="records.scanTotal > records.pageSize">
-						<button class="btn btn-secondary" @click="changeReceiverRecordPage('scan', records.scanPage - 1)" :disabled="records.scanPage === 0 || records.loading">Previous</button>
-						<span>Page {{ records.scanPage + 1 }} of {{ Math.max(1, Math.ceil(records.scanTotal / records.pageSize)) }}</span>
-						<button class="btn btn-secondary" @click="changeReceiverRecordPage('scan', records.scanPage + 1)" :disabled="(records.scanPage + 1) * records.pageSize >= records.scanTotal || records.loading">Next</button>
+						<button class="btn btn-secondary" @click="changeReceiverRecordPage('scan', records.scanPage - 1)" :disabled="records.scanPage === 0 || records.loading">{{ t('Previous') }}</button>
+						<span>{{ t('Page') }} {{ records.scanPage + 1 }} {{ t('of') }} {{ Math.max(1, Math.ceil(records.scanTotal / records.pageSize)) }}</span>
+						<button class="btn btn-secondary" @click="changeReceiverRecordPage('scan', records.scanPage + 1)" :disabled="(records.scanPage + 1) * records.pageSize >= records.scanTotal || records.loading">{{ t('Next') }}</button>
 					</div>
 				</section>
 				<section class="records-kind" aria-labelledby="records-audio-title">
 					<div class="records-list-header">
-						<h3 id="records-audio-title">VFO Audio</h3>
-						<span>{{ records.audioTotal }} session{{ records.audioTotal === 1 ? '' : 's' }}</span>
+						<h3 id="records-audio-title">{{ t('VFO Audio') }}</h3>
+						<span>{{ records.audioTotal }} {{ t(records.audioTotal === 1 ? 'session' : 'sessions') }}</span>
+					</div>
+					<div class="records-audio-filters" role="group" :aria-label="t('Filter VFO audio recordings')">
+						<details class="audio-date-picker" :open="records.audioCalendarOpen" @toggle="toggleAudioCalendar" @keydown.esc.prevent="closeAudioCalendar">
+							<summary><span>{{ t('Date recorded (local)') }}<small v-if="records.audioFacets?.time_zone_fallback" class="audio-record-warning" title="The console does not know this browser's time zone; the current UTC offset is used, so dates near a daylight-saving change can be off by an hour."> · UTC offset</small></span><strong>{{ records.audioDateFilter ? formatAudioDate(records.audioDateFilter) : t('Any date') }}</strong></summary>
+							<div class="audio-calendar">
+								<div class="audio-calendar-header">
+									<button type="button" class="btn btn-secondary audio-calendar-nav" aria-label="Previous month" @click="changeAudioCalendarMonth(-1)">Prev</button>
+									<strong>{{ audioCalendarMonthLabel() }}</strong>
+									<button type="button" class="btn btn-secondary audio-calendar-nav" aria-label="Next month" @click="changeAudioCalendarMonth(1)">Next</button>
+								</div>
+								<div class="audio-calendar-grid" role="grid" :aria-label="'Calendar for ' + audioCalendarMonthLabel()">
+									<div class="audio-calendar-weekdays" role="row"><span v-for="weekday in audioCalendarWeekdays()" :key="weekday" role="columnheader">{{ weekday }}</span></div>
+									<div v-for="week in audioCalendarWeeks()" :key="week[0].date" class="audio-calendar-week" role="row">
+										<div v-for="day in week" :key="day.date" class="audio-calendar-cell" role="gridcell" :aria-selected="day.date === records.audioDateFilter">
+											<button type="button" class="audio-calendar-day" :class="{ 'has-recordings': day.hasRecords, 'is-selected': day.date === records.audioDateFilter }" :disabled="!day.inMonth" :tabindex="day.date === records.audioCalendarFocusedDate ? 0 : -1" :id="'audio-calendar-date-' + day.date" :aria-label="formatAudioDate(day.date) + (day.hasRecords ? ', recordings available' : ', no recordings')" @focus="records.audioCalendarFocusedDate = day.date" @keydown="moveAudioCalendarFocus($event, day.date)" @click="selectAudioCalendarDate(day.date)">{{ day.day }}</button>
+										</div>
+									</div>
+								</div>
+								<p class="audio-calendar-help">{{ t('Highlighted dates contain recordings. Other dates remain selectable.') }}</p>
+							</div>
+						</details>
+						<fieldset class="audio-filter-fieldset">
+							<legend>{{ t('Time of day (local)') }}</legend>
+							<div class="audio-filter-pair">
+								<label for="records-audio-time-from">{{ t('From') }}<input id="records-audio-time-from" type="time" step="60" v-model="records.audioTimeFrom" @change="applyAudioRecordFilters"></label>
+								<label for="records-audio-time-to">{{ t('To') }}<input id="records-audio-time-to" type="time" step="60" v-model="records.audioTimeTo" @change="applyAudioRecordFilters"></label>
+							</div>
+						</fieldset>
+						<fieldset class="audio-filter-fieldset">
+							<legend>{{ t('Frequency (MHz)') }}</legend>
+							<div class="audio-filter-pair">
+								<label for="records-audio-frequency-min">Min<input id="records-audio-frequency-min" type="number" min="0" step="any" inputmode="decimal" :value="records.audioMinimumFrequencyMHz" @change="setAudioFrequencyFilter($event, 'min')"></label>
+								<label for="records-audio-frequency-max">{{ t('Max') }}<input id="records-audio-frequency-max" type="number" min="0" step="any" inputmode="decimal" :value="records.audioMaximumFrequencyMHz" @change="setAudioFrequencyFilter($event, 'max')"></label>
+							</div>
+						</fieldset>
+						<label class="audio-filter-select" for="records-audio-vfo">VFO
+							<select id="records-audio-vfo" v-model="records.audioVfoFilter" @change="applyAudioRecordFilters"><option value="">{{ t('All VFOs') }}</option><option v-for="vfo in records.audioFacets?.vfo_indices || []" :key="vfo" :value="String(vfo)">VFO {{ vfo + 1 }}</option></select>
+						</label>
+						<label class="audio-filter-select" for="records-audio-mode">{{ t('Mode') }}
+							<select id="records-audio-mode" v-model="records.audioModeFilter" @change="applyAudioRecordFilters"><option value="">{{ t('All modes') }}</option><option v-for="mode in records.audioFacets?.modes || []" :key="mode" :value="mode">{{ mode.toUpperCase() }}</option></select>
+						</label>
+						<label class="audio-filter-select" for="records-audio-bandwidth">Bandwidth
+							<select id="records-audio-bandwidth" v-model="records.audioBandwidthFilter" @change="applyAudioRecordFilters"><option value="">{{ t('All bandwidths') }}</option><option v-for="bandwidth in records.audioFacets?.bandwidths_hz || []" :key="bandwidth" :value="String(bandwidth)">{{ bandwidth >= 1000000 ? (bandwidth / 1000000) + ' MHz' : (bandwidth >= 1000 ? (bandwidth / 1000) + ' kHz' : bandwidth + ' Hz') }}</option></select>
+						</label>
+						<button v-if="hasAudioRecordFilters()" type="button" class="btn btn-secondary audio-clear-filters" @click="clearAudioRecordFilters">{{ t('Clear filters') }}</button>
 					</div>
 					<div class="records-table-scroll" role="region" aria-label="VFO audio session records" tabindex="0" v-if="records.audioItems.length">
 						<table class="records-table records-audio-table">
 							<thead>
 								<tr>
-									<th scope="col">Started</th>
-									<th scope="col">Audio segments</th>
-									<th scope="col">Actions</th>
+									<th scope="col">{{ t('Started') }}</th>
+									<th scope="col">{{ t('Audio segments') }}</th>
+									<th scope="col">{{ t('Actions') }}</th>
 								</tr>
 							</thead>
 							<tbody>
 								<tr v-for="record in records.audioItems" :key="record.id">
 									<td>
 										<time :datetime="record.created_at">{{ new Date(record.created_at).toLocaleString() }}</time>
-										<span class="record-meta">{{ record.segments.length }} segment{{ record.segments.length === 1 ? '' : 's' }} · {{ record.completed_at ? 'finalized' : 'in progress' }}</span>
+										<span class="record-meta">{{ record.segments.length }} {{ t(record.segments.length === 1 ? 'segment' : 'segments') }} · <span :class="{ 'record-recording': !record.completed_at }">{{ t(record.completed_at ? 'finalized' : 'recording in progress') }}</span></span>
 									</td>
 									<td>
 										<div class="records-audio-segments" v-if="record.segments.length">
 											<div class="audio-record-segment" v-for="segment in record.segments" :key="segment.id">
-												<div>VFO {{ segment.vfo_index + 1 }} · {{ (segment.frequency_hz / 1000000).toFixed(6) }} MHz · {{ segment.mode.toUpperCase() }} · {{ segment.bandwidth_hz }} Hz · {{ segment.duration_seconds === null ? 'recording' : segment.duration_seconds.toFixed(1) + ' s' }}</div>
-												<audio v-if="segment.status === 'complete' && segment.bytes > 0" controls preload="none" :src="audioRecordUrl(segment.id)">Audio playback is not supported by this browser.</audio>
-												<span v-else-if="segment.status === 'failed'" class="records-error" role="alert">Recording failed: {{ segment.error || 'Audio was not saved.' }}</span>
-												<span v-else class="records-empty">No audio data in this segment.</span>
+												<div class="audio-record-segment-details">
+													<time :datetime="segment.started_at">{{ new Date(segment.started_at).toLocaleString() }}</time>
+													<span>VFO {{ segment.vfo_index + 1 }} · {{ (segment.frequency_hz / 1000000).toFixed(6) }} MHz · {{ segment.mode.toUpperCase() }} · {{ segment.bandwidth_hz }} Hz · {{ segment.duration_seconds === null ? 'recording' : segment.duration_seconds.toFixed(1) + ' s' }}</span>
+													<span v-if="segment.status === 'partial' || segment.status === 'interrupted'" class="audio-record-warning">{{ t(segment.status === 'partial' ? 'Partly saved' : 'Interrupted') }}: {{ segment.error }}</span>
+												</div>
+												<audio v-if="(segment.status === 'complete' || segment.status === 'partial' || segment.status === 'interrupted') && segment.bytes > 0" controls preload="none" :src="audioRecordUrl(segment.id)">Audio playback is not supported by this browser.</audio>
+												<span v-else-if="segment.status === 'recording'" class="record-recording" role="status">{{ t('Recording…') }} {{ (segment.bytes / 1024).toFixed(0) }} {{ t('KiB saved') }}</span>
+												<span v-else-if="segment.status === 'failed'" class="records-error" role="alert">{{ t('Recording failed') }}: {{ segment.error || t('Audio was not saved.') }}</span>
+												<span v-else class="records-empty">{{ t('No audio data in this segment.') }}</span>
+											<button type="button" class="btn btn-secondary audio-record-delete-button" @click="deleteAudioSegment(segment)" :disabled="records.loading || records.deletingAudioSegmentId !== '' || segment.ended_at === null" :aria-label="'Delete VFO ' + (segment.vfo_index + 1) + ' recording at ' + (segment.frequency_hz / 1000000).toFixed(6) + ' MHz'">{{ t(records.deletingAudioSegmentId === segment.id ? 'Deleting…' : 'Delete recording') }}</button>
 											</div>
 										</div>
-										<span class="records-empty" v-else>No audio segments were saved for this session.</span>
+										<span class="records-empty" v-else>{{ t('No audio segments were saved for this session.') }}</span>
 									</td>
-									<td><button class="btn btn-secondary" @click="deleteReceiverRecord(record)">Delete session</button></td>
+									<td><button class="btn btn-secondary" @click="deleteReceiverRecord(record)" :disabled="records.loading || records.deletingAudioSegmentId !== '' || !record.completed_at" :title="t(record.completed_at ? 'Delete this session and its audio files' : 'Stop the recording before deleting this session')">{{ t('Delete session') }}</button></td>
 								</tr>
 							</tbody>
 						</table>
 					</div>
-					<div class="records-empty" v-else>{{ records.loading ? 'Loading VFO Audio sessions…' : 'No saved VFO Audio sessions.' }}</div>
+					<div class="records-empty" v-else>{{ t(records.loading ? 'Loading VFO Audio sessions…' : (hasAudioRecordFilters() ? 'No recordings match these filters. Adjust them or clear filters.' : 'No saved VFO Audio sessions.')) }}</div>
 					<div class="records-pagination" v-if="records.audioTotal > records.pageSize">
-						<button class="btn btn-secondary" @click="changeReceiverRecordPage('audio-session', records.audioPage - 1)" :disabled="records.audioPage === 0 || records.loading">Previous</button>
-						<span>Page {{ records.audioPage + 1 }} of {{ Math.max(1, Math.ceil(records.audioTotal / records.pageSize)) }}</span>
-						<button class="btn btn-secondary" @click="changeReceiverRecordPage('audio-session', records.audioPage + 1)" :disabled="(records.audioPage + 1) * records.pageSize >= records.audioTotal || records.loading">Next</button>
+						<button class="btn btn-secondary" @click="changeReceiverRecordPage('audio-session', records.audioPage - 1)" :disabled="records.audioPage === 0 || records.loading">{{ t('Previous') }}</button>
+						<span>{{ t('Page') }} {{ records.audioPage + 1 }} {{ t('of') }} {{ Math.max(1, Math.ceil(records.audioTotal / records.pageSize)) }}</span>
+						<button class="btn btn-secondary" @click="changeReceiverRecordPage('audio-session', records.audioPage + 1)" :disabled="(records.audioPage + 1) * records.pageSize >= records.audioTotal || records.loading">{{ t('Next') }}</button>
 					</div>
 				</section>
 			</section>

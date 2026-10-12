@@ -61,6 +61,8 @@ git submodule update --init --recursive
 
 Jalankan builder Receiver setelah `npm run build`; output Receiver berada di `frontend/dist/receiver`. Setelah Ground Console aktif, pilih menu **Receiver** (atau buka `http://127.0.0.1:8787/#/receiver`). Receiver juga tetap dapat dibuka langsung di `http://127.0.0.1:8787/receiver/`.
 
+Receiver memerlukan browser berbasis Chromium (Chrome atau Edge) karena HackRF tersambung lewat WebUSB. Firefox dan Safari tidak punya WebUSB; di sana **Connect Device** hanya menampilkan pesan bahwa WebUSB tidak tersedia. Mock SDR untuk uji tanpa hardware hanya muncul bila Receiver dibuka langsung dengan `?mock=1`, misalnya `http://127.0.0.1:8787/receiver/?mock=1`, dan statusnya tertulis MOCK.
+
 Sesudah memperbarui Receiver, muat ulang halaman Receiver agar worker dan WASM dari build yang sama dipakai. Jika browser masih memuat bundle lama, bersihkan service worker/cache untuk origin Ground Console yang sedang digunakan (misalnya `localhost:8787`, bukan `127.0.0.1:8787`) lalu buka ulang halaman; origin yang berbeda juga memerlukan izin WebUSB tersendiri.
 
 Mutasi `/api/receiver/*` memerlukan header `Origin` same-origin yang cocok dengan host dan port loopback; tanpa header itu atau dari origin lain, server mengembalikan HTTP 403.
@@ -154,6 +156,16 @@ git submodule update --init --recursive
 ```
 
 Jalankan builder Receiver setelah `npm run build`; output Receiver berada di `frontend\dist\receiver`. Setelah Ground Console aktif, pilih menu **Receiver** (atau buka `http://127.0.0.1:8787/#/receiver`). Receiver juga tetap dapat dibuka langsung di `http://127.0.0.1:8787/receiver/`.
+
+Receiver memerlukan browser berbasis Chromium (Chrome atau Edge) karena HackRF tersambung lewat WebUSB. Firefox dan Safari tidak punya WebUSB; di sana **Connect Device** hanya menampilkan pesan bahwa WebUSB tidak tersedia. Mock SDR untuk uji tanpa hardware hanya muncul bila Receiver dibuka langsung dengan `?mock=1`, misalnya `http://127.0.0.1:8787/receiver/?mock=1`, dan statusnya tertulis MOCK.
+
+Python di Windows tidak membawa database zona waktu. Pasang `tzdata` agar filter tanggal dan jam rekaman di **Records** memakai zona waktu browser lengkap dengan aturan DST:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install tzdata
+```
+
+Tanpa paket ini Records tetap terbuka, tetapi filter memakai offset UTC browser saat ini dan label tanggal menandai "UTC offset".
 
 Sesudah memperbarui Receiver, muat ulang halaman Receiver agar worker dan WASM dari build yang sama dipakai. Jika browser masih memuat bundle lama, bersihkan service worker/cache untuk origin Ground Console yang sedang digunakan (misalnya `localhost:8787`, bukan `127.0.0.1:8787`) lalu buka ulang halaman; origin yang berbeda juga memerlukan izin WebUSB tersendiri.
 

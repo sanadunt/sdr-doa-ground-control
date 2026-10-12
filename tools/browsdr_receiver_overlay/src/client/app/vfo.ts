@@ -278,7 +278,8 @@ export const vfoMethods = {
 
 	async removeVfo(this: AppInstance, index: number) {
 		if (this.vfos.length <= 1) return;
-		await this.disarmVfoAudioRecording();
+		// VFO numbers shift after a removal, so close every open file; recording itself continues.
+		await this.stopAllVfoAudioSegments();
 		this.vfos.splice(index, 1);
 		if (this.backend && this.running) {
 			if (this.remoteMode === 'client' && this._webrtc) {

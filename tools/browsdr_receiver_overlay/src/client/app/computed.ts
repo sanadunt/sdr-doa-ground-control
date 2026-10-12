@@ -44,6 +44,10 @@ export const computedProperties = {
 		const host = window.location.hostname;
 		return host === 'localhost' || host === '127.0.0.1';
 	},
+	/** The Mock SDR is a test device; it is offered only when the page is opened with ?mock=1. */
+	mockSdrEnabled(this: AppInstance) {
+		return this.isLocal && new URLSearchParams(window.location.search).get('mock') === '1';
+	},
 	activeAudioVfos(this: AppInstance) {
 		const active: Array<{ index: number; vfo: Vfo }> = [];
 		for (let i = 0; i < this.vfos.length; i++) {

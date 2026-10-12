@@ -58,20 +58,55 @@ def make_status(timestamp: int = 100_000, daq_ok: bool = True) -> bytes:
     ).encode()
 
 
-def make_csv(timestamp: int = 100_000, columns: int = 377) -> bytes:
-    row = [str(timestamp), "149.0", "1.2", "-70.0", "416588000", "UCA", "12"]
-    row.extend(["TEST", "0.0", "0.0", "0.0", "0.0", "GPS"])
+def csv_row(
+    timestamp: int = 100_000,
+    columns: int = 377,
+    raw_angle: str = "149.0",
+    peak_bin: int = 211,
+    frequency_hz: str = "416588000",
+    station: str = "TEST",
+    power_raw: str = "-70.0",
+) -> str:
+    # Upstream writes 360 - theta_0 in the CSV and puts the vector peak on the
+    # theta_0 bin, so raw 149.0 pairs with a peak at bin 211.
+    row = [str(timestamp), raw_angle, "1.2", power_raw, frequency_hz, "UCA", "12"]
+    row.extend([station, "0.0", "0.0", "0.0", "0.0", "GPS"])
     row.extend(["R"] * 4)
     row.extend(["-20.0"] * max(0, columns - len(row)))
-    row[17 + 10] = "5.0"
-    return (",".join(row) + "\n").encode()
+    if columns >= 377:
+        row[17 + peak_bin] = "5.0"
+    return ",".join(row)
 
 
-def make_xml(timestamp: int = 100_000) -> bytes:
-    return f"""<DATA><STATION_ID>TEST</STATION_ID><TIME>{timestamp}</TIME><GPS_TIME>0</GPS_TIME><FREQUENCY>416.588</FREQUENCY><LOCATION><LATITUDE>0</LATITUDE><LONGITUDE>0</LONGITUDE><HEADING>0</HEADING><SPEED>0</SPEED></LOCATION><DOA>211.0</DOA><PWR>22.2</PWR><CONF>135</CONF><LATENCY>10</LATENCY><PROCESSING_TIME>12</PROCESSING_TIME><ADC_OVERDRIVE>False</ADC_OVERDRIVE><NUM_CORRELATED_SOURCES>1</NUM_CORRELATED_SOURCES><SNR_DB>10.0</SNR_DB></DATA>""".encode()
+def make_csv(timestamp: int = 100_000, columns: int = 377, **kwargs) -> bytes:
+    return (csv_row(timestamp, columns, **kwargs) + "\n").encode()
 
 
-def fake_collection(status_body: bytes, csv_body: bytes, xml_body: bytes):
+def make_xml(
+    timestamp: int = 100_000,
+    doa: str = "211.0",
+    station: str = "<STATION_ID>TEST</STATION_ID>",
+    frequency_mhz: str = "416.588",
+    pwr: str = "22.2",
+    overdrive: str = "False",
+) -> bytes:
+    return f"""<DATA>{station}<TIME>{timestamp}</TIME><GPS_TIME>0</GPS_TIME><FREQUENCY>{frequency_mhz}</FREQUENCY><LOCATION><LATITUDE>0</LATITUDE><LONGITUDE>0</LONGITUDE><HEADING>0</HEADING><SPEED>0</SPEED></LOCATION><DOA>{doa}</DOA><PWR>{pwr}</PWR><CONF>135</CONF><LATENCY>10</LATENCY><PROCESSING_TIME>12</PROCESSING_TIME><ADC_OVERDRIVE>{overdrive}</ADC_OVERDRIVE><NUM_CORRELATED_SOURCES>1</NUM_CORRELATED_SOURCES><SNR_DB>10.0</SNR_DB></DATA>""".encode()
+
+
+class FakeClock:
+    """Deterministic Ground monotonic clock for age and progress checks."""
+
+    def __init__(self, start: float = 1_000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def fake_collection(status_body: bytes, csv_body: bytes, xml_body: bytes, **kwargs):
     bodies = {
         collector.PATH_STATUS: status_body,
         collector.PATH_SETTINGS: b'{"center_freq": 415.7, "secret_token": "do-not-return"}',
@@ -82,14 +117,16 @@ def fake_collection(status_body: bytes, csv_body: bytes, xml_body: bytes):
     def fetcher(base_url, path, timeout, max_body):
         return resource(path, bodies[path])
 
-    return collector.collect(
-        "http://fixture:8081",
-        authority="none",
-        clock_source="local",
-        status_max_age_ms=10_000,
-        doa_max_age_ms=5_000,
-        fetcher=fetcher,
-    )
+    options = {
+        "authority": "none",
+        "clock_source": "local",
+        "status_max_age_ms": 10_000,
+        "doa_max_age_ms": 5_000,
+        "fetcher": fetcher,
+        "monotonic_clock": FakeClock(),
+    }
+    options.update(kwargs)
+    return collector.collect("http://fixture:8081", **options)
 
 
 def test_valid_parsing_but_authority_blocked():
@@ -99,8 +136,9 @@ def test_valid_parsing_but_authority_blocked():
     csv_candidate = result["doa_candidates"]["csv"]
     assert len(csv_candidate["angular_power_db"]) == 360
     assert csv_candidate["angular_power_db"][0] == -20.0
-    assert csv_candidate["angular_power_db"][10] == 5.0
-    assert csv_candidate["angular_peak_index"] == 10
+    assert csv_candidate["angular_power_db"][211] == 5.0
+    assert csv_candidate["angular_peak_index"] == 211
+    assert csv_candidate["angular_peak_angle_consistent"] is True
     assert csv_candidate["angular_peak_value"] == 5.0
     assert csv_candidate["angular_peak_db"] == 5.0
     assert csv_candidate["angular_power_min_db"] == -20.0
@@ -255,6 +293,393 @@ def test_partial_read_recovers_on_bounded_retry():
     )
     assert result["status"]["available"] is True
     assert calls[collector.PATH_STATUS] == 2
+
+
+
+def _bodies(status=None, csv_body=None, xml_body=None, settings=b'{"center_freq": 415.7}'):
+    return {
+        collector.PATH_STATUS: make_status() if status is None else status,
+        collector.PATH_SETTINGS: settings,
+        collector.PATH_CSV: make_csv() if csv_body is None else csv_body,
+        collector.PATH_XML: make_xml() if xml_body is None else xml_body,
+    }
+
+
+def make_status_with(timestamp: int = 100_000, uptime: int = 10, frame: int = 10, **daq) -> bytes:
+    payload = json.loads(make_status(timestamp).decode())
+    payload["uptime_ms"] = uptime
+    payload["daq_status"]["data_frame_index"] = frame
+    payload["daq_status"].update(daq)
+    return json.dumps(payload).encode()
+
+
+def test_frozen_node_is_reported_as_stalled_and_not_fresh():
+    """AUD-02: identical node counters across reads must not stay CURRENT."""
+    tracker = collector.NodeProgressTracker()
+    clock = FakeClock()
+    frozen = _bodies(make_status_with(100_000), make_csv(100_000), make_xml(100_000))
+
+    def fetcher(base, path, timeout, max_body):
+        return resource(path, frozen[path])
+
+    def read():
+        return collector.collect(
+            "http://fixture:8081",
+            clock_source="remote_unverified",
+            fetcher=fetcher,
+            progress_tracker=tracker,
+            monotonic_clock=clock,
+        )
+
+    first = read()
+    assert first["node_progress"]["state"] == "FIRST_SAMPLE"
+    assert first["doa_candidates"]["csv"]["freshness"]["fresh"] is True
+    assert "NODE_CLOCK_STALLED" not in first["publication_gate"]["reasons"]
+
+    clock.advance(11)
+    stalled = read()
+    progress = stalled["node_progress"]
+    assert progress["state"] == "STALLED"
+    assert progress["stalled"] is True
+    assert set(progress["stalled_counters"]) == {"timestamp_ms", "uptime_ms", "data_frame_index"}
+    assert progress["unchanged_for_ms"]["timestamp_ms"] == 11_000
+    assert "NODE_CLOCK_STALLED" in stalled["publication_gate"]["reasons"]
+    assert stalled["publication_gate"]["checks"]["node_not_stalled"] is False
+    for name in ("csv", "xml"):
+        freshness = stalled["doa_candidates"][name]["freshness"]
+        assert freshness["fresh"] is False
+        assert freshness["node_stalled"] is True
+        assert freshness["age_ms"] >= 11_000
+    assert stalled["overall_state"] == "STALE"
+
+    frozen.update(_bodies(make_status_with(111_000, uptime=11_010, frame=55), make_csv(111_000), make_xml(111_000)))
+    clock.advance(1)
+    resumed = read()
+    assert resumed["node_progress"]["state"] == "ADVANCING"
+    assert resumed["doa_candidates"]["csv"]["freshness"]["fresh"] is True
+    assert "NODE_CLOCK_STALLED" not in resumed["publication_gate"]["reasons"]
+
+
+def test_unchanged_status_timestamp_ages_doa_before_stall_threshold():
+    """AUD-02/AUD-23: Ground time since the status timestamp was first seen counts."""
+    tracker = collector.NodeProgressTracker()
+    clock = FakeClock()
+    bodies = _bodies(make_status_with(100_000), make_csv(100_000), make_xml(100_000))
+
+    def read():
+        return collector.collect(
+            "http://fixture:8081",
+            fetcher=lambda base, path, timeout, max_body: resource(path, bodies[path]),
+            progress_tracker=tracker,
+            monotonic_clock=clock,
+        )
+
+    read()
+    clock.advance(6)
+    result = read()
+    freshness = result["doa_candidates"]["csv"]["freshness"]
+    assert freshness["ground_elapsed_ms"] == 6_000
+    assert freshness["age_ms"] == 6_000
+    assert freshness["fresh"] is False
+    assert result["node_progress"]["state"] == "ADVANCING"
+    assert "DOA_CANDIDATES_STALE" in result["publication_gate"]["reasons"]
+
+
+def test_collection_time_is_added_to_doa_age():
+    """AUD-23: a slow read must not reset the DoA age to the status timestamp."""
+    clock = FakeClock()
+    bodies = _bodies()
+
+    def fetcher(base, path, timeout, max_body):
+        if path == collector.PATH_XML:
+            clock.advance(4.5)
+        return resource(path, bodies[path])
+
+    result = collector.collect("http://fixture:8081", fetcher=fetcher, monotonic_clock=clock)
+    csv_freshness = result["doa_candidates"]["csv"]["freshness"]
+    assert csv_freshness["ground_elapsed_ms"] == 4_500
+    assert csv_freshness["age_ms"] == 4_500
+    assert csv_freshness["reference_ms"] == 104_500
+    assert result["collection"]["elapsed_ms"] == 4_500
+
+
+def test_adc_overdrive_snr_and_papr_are_exposed_and_gated():
+    """AUD-05: overdrive degrades the snapshot with an explicit reason."""
+    result = fake_collection(make_status_with(adc_overdrive=True), make_csv(), make_xml(overdrive="5"))
+    quality = result["signal_quality"]
+    assert quality["state"] == "OVERDRIVE"
+    assert quality["adc_overdrive"] is True
+    assert quality["adc_overdrive_sources"] == ["status", "xml"]
+    assert quality["adc_overdrive_channel_mask"] == 5
+    assert quality["snr_db"] == 10.0
+    assert abs(quality["confidence_metric_db"]["xml"] - 1.35) < 1e-9
+    assert quality["confidence_metric_db"]["csv"] == 1.2
+    assert result["status"]["daq_health"] == "PASS"
+    assert result["overall_state"] == "DEGRADED"
+    assert "ADC_OVERDRIVE" in result["publication_gate"]["reasons"]
+    assert result["publication_gate"]["checks"]["adc_not_overdriven"] is False
+
+    clean = fake_collection(make_status(), make_csv(), make_xml())
+    assert clean["signal_quality"]["state"] == "PASS"
+    assert clean["signal_quality"]["adc_overdrive"] is False
+    assert "ADC_OVERDRIVE" not in clean["publication_gate"]["reasons"]
+
+
+def test_transport_failure_is_not_retried_and_skips_the_other_reads():
+    """AUD-09: an unreachable node costs one GET, not twelve."""
+    calls = []
+
+    def fetcher(base, path, timeout, max_body):
+        calls.append(path)
+        return collector.FetchedResource(
+            path, base + path, False, None, None, b"", 1, "connection refused", error_kind="connection_refused"
+        )
+
+    result = collector.collect("http://fixture:8081", fetcher=fetcher, retry_delay_seconds=0)
+    assert calls == [collector.PATH_STATUS]
+    assert result["collection"]["status_transport_failed"] is True
+    assert result["resources"][collector.PATH_CSV]["error_kind"] == "skipped"
+    assert result["resources"][collector.PATH_STATUS]["attempts"] == 1
+    assert result["overall_state"] == "UNAVAILABLE"
+
+
+def test_total_budget_bounds_a_hanging_read():
+    """AUD-09: one stuck resource cannot hold the snapshot past its budget."""
+    import time as _time
+
+    bodies = _bodies()
+
+    def fetcher(base, path, timeout, max_body):
+        if path == collector.PATH_CSV:
+            _time.sleep(min(2.0, timeout + 0.5))
+        return resource(path, bodies[path])
+
+    started = _time.monotonic()
+    result = collector.collect("http://fixture:8081", fetcher=fetcher, total_budget_s=0.3)
+    elapsed = _time.monotonic() - started
+    assert elapsed < 1.0, elapsed
+    assert result["resources"][collector.PATH_CSV]["error_kind"] == "deadline"
+    assert result["doa_candidates"]["csv"]["available"] is False
+    assert result["collection"]["deadline_exceeded"] is True
+    assert result["collection"]["budget_ms"] == 300
+    assert "COLLECTION_DEADLINE_EXCEEDED" in result["publication_gate"]["reasons"]
+    assert "CSV_VIEW_UNAVAILABLE" in result["publication_gate"]["reasons"]
+
+
+def test_budget_must_be_positive_and_finite():
+    for budget in (0, -1, float("nan"), float("inf"), True, 10_000):
+        try:
+            collector.collect("http://fixture:8081", fetcher=lambda *a: None, total_budget_s=budget)
+        except ValueError:
+            continue
+        raise AssertionError(f"budget accepted: {budget!r}")
+
+
+def test_adjacent_frame_motion_is_not_a_conflict():
+    """AUD-18: a bearing that moved between frames is not a convention error."""
+    bodies = _bodies(make_status(), make_csv(100_000), make_xml(100_289, doa="213.0"))
+    calls = []
+
+    def fetcher(base, path, timeout, max_body):
+        calls.append(path)
+        return resource(path, bodies[path])
+
+    result = collector.collect("http://fixture:8081", fetcher=fetcher)
+    consistency = result["native_consistency"]
+    assert consistency["frame_relation"] == "ADJACENT_FRAMES"
+    assert consistency["comparable"] is True
+    assert consistency["angle_checked"] is False
+    assert consistency["conflict"] is False
+    assert consistency["circular_distance_deg"] == 2.0
+    assert consistency["pair_reads"] == 1 + collector.NATIVE_PAIR_REREADS
+    assert calls.count(collector.PATH_CSV) == 1 + collector.NATIVE_PAIR_REREADS
+    assert "NATIVE_DOA_VIEWS_CONFLICT" not in result["publication_gate"]["reasons"]
+
+
+def test_adjacent_pair_is_reread_until_same_frame():
+    """AUD-18: a re-read that lands in one frame runs the angle test."""
+    reads = {collector.PATH_CSV: 0, collector.PATH_XML: 0}
+    bodies = _bodies()
+
+    def fetcher(base, path, timeout, max_body):
+        if path in reads:
+            reads[path] += 1
+            if path == collector.PATH_XML and reads[path] == 1:
+                return resource(path, make_xml(100_250, doa="215.0"))
+        return resource(path, bodies[path])
+
+    result = collector.collect("http://fixture:8081", fetcher=fetcher)
+    consistency = result["native_consistency"]
+    assert consistency["pair_reads"] == 2
+    assert consistency["frame_relation"] == "SAME_FRAME"
+    assert consistency["angle_checked"] is True
+    assert consistency["conflict"] is False
+
+
+def test_same_frame_disagreement_is_still_a_conflict():
+    result = fake_collection(make_status(), make_csv(raw_angle="120.0", peak_bin=240), make_xml())
+    consistency = result["native_consistency"]
+    assert consistency["frame_relation"] == "SAME_FRAME"
+    assert consistency["conflict"] is True
+    assert result["overall_state"] == "CONFLICT"
+    assert "NATIVE_DOA_VIEWS_CONFLICT" in result["publication_gate"]["reasons"]
+
+
+def test_multi_vfo_csv_selects_the_row_matching_xml():
+    """AUD-22: Output VFO = ALL writes one CSV row per VFO."""
+    rows = "\n".join([
+        csv_row(frequency_hz="433920000", raw_angle="10.0", peak_bin=350),
+        csv_row(frequency_hz="416588000"),
+    ]) + "\n"
+    result = fake_collection(make_status(), rows.encode(), make_xml())
+    csv_candidate = result["doa_candidates"]["csv"]
+    assert csv_candidate["available"] is True
+    assert csv_candidate["csv_rows_total"] == 2
+    assert csv_candidate["csv_row_index"] == 1
+    assert csv_candidate["csv_row_selection"] == "matched_xml_frequency"
+    assert csv_candidate["canonical_angle_deg"] == 211.0
+    assert [row["row_index"] for row in csv_candidate["additional_vfo_rows"]] == [0]
+    assert csv_candidate["additional_vfo_rows"][0]["canonical_angle_deg"] == 350.0
+    assert "angular_power_db" not in csv_candidate["additional_vfo_rows"][0]
+    assert result["native_consistency"]["conflict"] is False
+
+    unmatched = fake_collection(make_status(), rows.encode(), make_xml(frequency_mhz="145.000"))
+    csv_unmatched = unmatched["doa_candidates"]["csv"]
+    assert csv_unmatched["available"] is False
+    assert "multi-VFO" in csv_unmatched["error"]
+    assert csv_unmatched["csv_rows_total"] == 2
+    assert "CSV_VIEW_UNAVAILABLE" in unmatched["publication_gate"]["reasons"]
+    assert unmatched["overall_state"] == "INCOMPLETE"
+
+
+def test_kerberos_xml_in_csv_view_is_explained():
+    result = fake_collection(make_status(), b"<DATA><DOA>211</DOA></DATA>", make_xml())
+    assert result["doa_candidates"]["csv"]["available"] is False
+    assert "Kerberos App" in result["doa_candidates"]["csv"]["error"]
+    assert "CSV_VIEW_UNAVAILABLE" in result["publication_gate"]["reasons"]
+
+
+def test_native_angle_outside_0_360_is_normalized_not_conflict():
+    """AUD-69: ROOT-MUSIC + array_offset can exceed 360 upstream."""
+    result = fake_collection(make_status(), make_csv(raw_angle="-10.0", peak_bin=10), make_xml(doa="370.0"))
+    assert result["doa_candidates"]["csv"]["canonical_angle_deg"] == 10.0
+    assert result["doa_candidates"]["xml"]["canonical_angle_deg"] == 10.0
+    assert result["native_consistency"]["conflict"] is False
+    assert "NATIVE_ANGLE_INVALID" not in result["publication_gate"]["reasons"]
+
+    invalid = fake_collection(make_status(), make_csv(), make_xml(doa="9999.0"))
+    consistency = invalid["native_consistency"]
+    assert consistency["conflict"] is False
+    assert consistency["angle_invalid"] is True
+    assert consistency["comparable"] is False
+    assert "NATIVE_ANGLE_INVALID" in invalid["publication_gate"]["reasons"]
+    assert "NATIVE_DOA_VIEWS_CONFLICT" not in invalid["publication_gate"]["reasons"]
+    assert invalid["doa_candidates"]["xml"]["normalization_error_detail"].startswith("candidate.doa_raw_deg")
+    assert invalid["overall_state"] == "INCOMPLETE"
+
+
+def test_xml_parse_error_and_http_status_are_kept():
+    """AUD-70: the XML view keeps its parse error; HTTP errors keep their status."""
+    result = fake_collection(make_status(), make_csv(), b"<DATA><TIME>bad</TIME></DATA>")
+    assert result["doa_candidates"]["xml"]["available"] is False
+    assert "xml.TIME" in result["doa_candidates"]["xml"]["error"]
+    assert "XML_VIEW_UNAVAILABLE" in result["publication_gate"]["reasons"]
+
+    import urllib.error
+    from unittest import mock
+
+    class Opener:
+        def __init__(self, error):
+            self.error = error
+
+        def open(self, request, timeout):
+            raise self.error
+
+    cases = [
+        (urllib.error.HTTPError("http://doasdr.local:8081/doa.xml", 404, "Not Found", None, None), "http_status", "HTTP 404", 404),
+        (urllib.error.URLError(ConnectionRefusedError(111, "refused")), "connection_refused", "connection refused", None),
+        (urllib.error.URLError(TimeoutError("timed out")), "timeout", "timed out", None),
+        (__import__("http.client").client.BadStatusLine("garbage"), "protocol", "invalid HTTP response (BadStatusLine)", None),
+    ]
+    for error, kind, message, status in cases:
+        with mock.patch.object(collector.urllib.request, "build_opener", return_value=Opener(error)):
+            fetched = collector.fetch_resource("http://doasdr.local:8081", collector.PATH_XML, 0.5)
+        assert fetched.ok is False
+        assert fetched.error_kind == kind, (fetched.error_kind, kind)
+        assert fetched.error == message, fetched.error
+        assert fetched.http_status == status
+        assert fetched.metadata()["error_kind"] == kind
+
+
+def test_station_id_is_optional_and_may_contain_commas():
+    """AUD-71: an empty XML STATION_ID or a comma in the CSV ID keeps the record."""
+    result = fake_collection(make_status(), make_csv(station="POS,1"), make_xml(station=""))
+    csv_candidate = result["doa_candidates"]["csv"]
+    xml_candidate = result["doa_candidates"]["xml"]
+    assert csv_candidate["available"] is True
+    assert csv_candidate["station_id"] == "POS,1"
+    assert csv_candidate["angular_bins"] == 360
+    assert csv_candidate["angular_peak_index"] == 211
+    assert xml_candidate["available"] is True
+    assert xml_candidate["station_id"] is None
+    empty = fake_collection(make_status(), make_csv(), make_xml(station="<STATION_ID></STATION_ID>"))
+    assert empty["doa_candidates"]["xml"]["available"] is True
+
+
+def test_power_floor_is_lossy_for_both_views():
+    """AUD-72: upstream clips XML PWR at 0.0 and CSV power at -100 dB."""
+    result = fake_collection(make_status(), make_csv(power_raw="-100.0"), make_xml(pwr="0.0"))
+    for name in ("csv", "xml"):
+        candidate = result["doa_candidates"][name]
+        assert candidate["power_mapping_lossy"] is True, name
+        assert candidate["power_native_valid"] is False, name
+        assert "POWER_FLOOR_LOSSY" in candidate["unit_reasons"], name
+    above = fake_collection(make_status(), make_csv(), make_xml(pwr="0.5"))
+    assert above["doa_candidates"]["xml"]["power_mapping_lossy"] is False
+    assert above["doa_candidates"]["csv"]["power_mapping_lossy"] is False
+
+
+def test_vector_peak_must_match_theta_0():
+    """AUD-73: a mirrored or offset vector is reported, not silently plotted."""
+    result = fake_collection(make_status(), make_csv(peak_bin=10), make_xml())
+    csv_candidate = result["doa_candidates"]["csv"]
+    assert csv_candidate["angular_peak_angle_consistent"] is False
+    assert csv_candidate["angular_peak_angle_distance_deg"] == 159.0
+    assert "ANGULAR_PEAK_ANGLE_MISMATCH" in result["publication_gate"]["reasons"]
+    assert result["publication_gate"]["checks"]["angular_peak_consistent"] is False
+    near = fake_collection(make_status(), make_csv(peak_bin=213), make_xml())
+    assert near["doa_candidates"]["csv"]["angular_peak_angle_consistent"] is True
+
+
+def test_overall_state_reports_missing_view_as_incomplete():
+    """AUD-75: a missing native view is not reported as UNVERIFIED."""
+    result = fake_collection(make_status(), make_csv(), b"")
+    assert result["overall_state"] == "INCOMPLETE"
+    assert "XML_VIEW_UNAVAILABLE" in result["publication_gate"]["reasons"]
+    healthy = fake_collection(make_status(), make_csv(), make_xml())
+    assert healthy["overall_state"] == "UNVERIFIED"
+
+
+def test_missing_status_in_remote_mode_leaves_doa_freshness_unknown():
+    """AUD-76: without status.json the Ground clock is not a node reference."""
+    result = fake_collection(b"{}", make_csv(), make_xml(), clock_source="remote_unverified")
+    freshness = result["doa_candidates"]["csv"]["freshness"]
+    assert freshness["freshness_known"] is False
+    assert freshness["age_ms"] is None
+    assert freshness["fresh"] is None
+    assert "DOA_CANDIDATES_STALE" not in result["publication_gate"]["reasons"]
+    assert "STATUS_UNAVAILABLE_OR_INVALID" in result["publication_gate"]["reasons"]
+    local = fake_collection(b"{}", make_csv(), make_xml(), clock_source="local")
+    assert local["doa_candidates"]["csv"]["freshness"]["freshness_known"] is True
+
+
+def test_cli_help_example_uses_an_allowlisted_host():
+    """AUD-78: the documented example must pass the allowlist."""
+    help_text = collector._build_parser().format_help()
+    assert "10.90.0.2" not in help_text
+    assert "192.168.100.100:8081" in help_text
+    for host in collector.DEFAULT_ALLOWED_DATA_HOSTS:
+        assert host in help_text
 
 
 if __name__ == "__main__":

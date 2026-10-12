@@ -1,17 +1,38 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { JSX } from 'react';
 import { useI18n } from '../lib/i18n';
+import type { Lang } from '../lib/i18n';
+
+function consoleTheme(): 'light' | 'dark' {
+  return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+}
+
+/** The Receiver reads theme and language from its URL before its first paint. */
+export function receiverFrameSrc(theme: 'light' | 'dark', lang: Lang): string {
+  const params = new URLSearchParams({ theme, lang });
+  return `/receiver/?${params.toString()}`;
+}
 
 export function ReceiverPage(): JSX.Element {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const frameRef = useRef<HTMLIFrameElement>(null);
+  const langRef = useRef(lang);
+  langRef.current = lang;
+  // Changing the iframe URL would reload the Receiver and stop RX, so later
+  // theme and language changes are pushed into the loaded frame instead.
+  const [src] = useState(() => receiverFrameSrc(consoleTheme(), lang));
 
-  const syncTheme = () => {
+  const syncFrame = () => {
     const frameWindow = frameRef.current?.contentWindow;
     if (!frameWindow) return;
     try {
       if (frameWindow.location.origin !== window.location.origin || !frameWindow.location.pathname.startsWith('/receiver/')) return;
-      frameWindow.document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+      const root = frameWindow.document.documentElement;
+      root.dataset.theme = consoleTheme();
+      if (root.lang !== langRef.current) {
+        root.lang = langRef.current;
+        frameWindow.dispatchEvent(new CustomEvent('console-language-change', { detail: langRef.current }));
+      }
       frameWindow.dispatchEvent(new Event('console-theme-change'));
     } catch {
       // A navigated frame may no longer be same-origin.
@@ -19,10 +40,14 @@ export function ReceiverPage(): JSX.Element {
   };
 
   useEffect(() => {
-    window.addEventListener('console-theme-change', syncTheme);
-    syncTheme();
-    return () => window.removeEventListener('console-theme-change', syncTheme);
+    window.addEventListener('console-theme-change', syncFrame);
+    syncFrame();
+    return () => window.removeEventListener('console-theme-change', syncFrame);
   }, []);
+
+  useEffect(() => {
+    syncFrame();
+  }, [lang]);
 
   return (
     <div className="page page-receiver">
@@ -30,11 +55,11 @@ export function ReceiverPage(): JSX.Element {
       <iframe
         ref={frameRef}
         className="receiver-frame"
-        src="/receiver/"
+        src={src}
         title={t('route.receiver')}
         allow="usb; autoplay"
         loading="eager"
-        onLoad={syncTheme}
+        onLoad={syncFrame}
       />
     </div>
   );

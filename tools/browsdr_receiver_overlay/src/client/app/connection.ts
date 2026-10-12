@@ -20,9 +20,82 @@ function initializeGains(
 	return gains;
 }
 
+const WEBUSB_UNAVAILABLE_MESSAGE = 'This browser has no WebUSB, so it cannot connect a HackRF. Open the console in Chrome or Edge (desktop or Android).';
+
+/** Hardware scan source for a newly connected radio; Simulation only when the radio cannot scan. */
+function hardwareSweepSource(capabilities: { supportsNativeSweep?: boolean; supportsManualSweep?: boolean } | null): 'native' | 'manual' | null {
+	if (capabilities?.supportsNativeSweep) return 'native';
+	if (capabilities?.supportsManualSweep) return 'manual';
+	return null;
+}
+
 export const connectionMethods = {
+	selectSweepSourceForConnectedDevice(this: AppInstance) {
+		if (this.sweep.active || this.sweep.starting || this.sweep.stopping) return;
+		const source = hardwareSweepSource(this.deviceCapabilities);
+		if (!source || this.sweep.source === source) return;
+		if (this.sweep.hasResults && this.sweep.source === 'simulated') {
+			// Keep the shown results labelled as the simulation they came from.
+			this.showMsg('Radio connected. The results shown are SIMULATION; choose the HackRF source or Clear before scanning.');
+			return;
+		}
+		this.sweep.source = source;
+	},
+
+	async handleUsbDeviceLost(this: AppInstance, device: USBDevice) {
+		const opened = this._usbDevice as USBDevice | null;
+		const sameDevice = opened === device || (opened !== null
+			&& opened.vendorId === device.vendorId && opened.productId === device.productId
+			&& (opened.serialNumber ?? '') === (device.serialNumber ?? ''));
+		if (!this.connected || this.mockDevice || !sameDevice) return;
+		this._usbDevice = null;
+		const wasRecording = this.audioRecording.armed;
+		try {
+			if (this.sweep.active || this.sweep.starting) await this.stopSweep(false, 'failed');
+		} catch (error) {
+			console.error('Stopping the scan after USB loss failed:', error);
+		}
+		try {
+			if (this.running) await this.togglePlay();
+		} catch (error) {
+			console.error('Stopping RX after USB loss failed:', error);
+			this.running = false;
+		}
+		try {
+			await this.backend?.close();
+		} catch (error) {
+			console.error('Closing the lost device failed:', error);
+		}
+		this.connected = false;
+		this.deviceCapabilities = null;
+		this.info.boardName = '';
+		const message = `Radio disconnected (USB unplugged or lost). RX and scanning stopped${wasRecording ? '; the recording was saved up to this point' : ''}. Reconnect the radio to continue.`;
+		this.audioRecording.notice = wasRecording ? message : this.audioRecording.notice;
+		this.sweep.error = message;
+		this.showMsg(message);
+	},
+
+	async autoConnectAuthorizedHackRF(this: AppInstance) {
+		if (!this.backend || !('usb' in navigator)) return;
+		try {
+			const authorizedDevices = await navigator.usb.getDevices();
+			const hackrfDevices = authorizedDevices.filter(device => lookupDevice(device)?.type === 'hackrf');
+			if (hackrfDevices.length !== 1) return;
+			this._initAudioCtx();
+			this.showMsg('Reconnecting to previously authorized HackRF...');
+			await this.connectToDevice(hackrfDevices[0]);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.showMsg(`HackRF auto-connect failed: ${message}`);
+		}
+	},
 	async connect(this: AppInstance) {
 		if (!this.backend) return;
+		if (!('usb' in navigator)) {
+			this.sweep.error = WEBUSB_UNAVAILABLE_MESSAGE;
+			this.showMsg(WEBUSB_UNAVAILABLE_MESSAGE);
+			return;
+		}
 		this._initAudioCtx(); // create AudioContext within user gesture
 
 		// Get already-paired USB devices and filter to recognized SDR devices
@@ -70,12 +143,16 @@ export const connectionMethods = {
 			});
 			if (ok) {
 				this.connected = true;
+				this.mockDevice = false;
+				this._usbDevice = device;
+				if (this.sweep.error === WEBUSB_UNAVAILABLE_MESSAGE || this.sweep.error.startsWith('Radio disconnected')) this.sweep.error = '';
 				const info = await this.backend.info();
 				this.info.boardName = info.name;
 
 				// Populate device capabilities for dynamic UI
 				const caps = await this.backend.getDeviceCapabilities();
 				this.deviceCapabilities = caps;
+				this.selectSweepSourceForConnectedDevice();
 				if (caps) {
 					this.gains = initializeGains(caps.gainControls, this.gains);
 
@@ -107,11 +184,14 @@ export const connectionMethods = {
 			const ok = await this.backend.open("mock");
 			if (ok) {
 				this.connected = true;
+				this.mockDevice = true;
+				this._usbDevice = null;
 				const info = await this.backend.info();
 				this.info.boardName = info.name;
 
 				const caps = await this.backend.getDeviceCapabilities();
 				this.deviceCapabilities = caps;
+				this.selectSweepSourceForConnectedDevice();
 				if (caps) {
 					this.gains = initializeGains(caps.gainControls, this.gains);
 				}
@@ -156,6 +236,8 @@ export const connectionMethods = {
 		if (this.running) await this.togglePlay();
 		await this.backend.close();
 		this.connected = false;
+		this.mockDevice = false;
+		this._usbDevice = null;
 		this.deviceCapabilities = null;
 		this.showMsg("Disconnected");
 	},
@@ -175,7 +257,15 @@ export const connectionMethods = {
 	async togglePlay(this: AppInstance, isRestart = false, sweepTransition = false) {
 		if (this.sweep.active || (this.sweep.starting && !sweepTransition)) return;
 		if (this.running) {
+			const wasRecording = this.audioRecording.armed || this.audioRecording.starting;
 			await this.disarmVfoAudioRecording();
+			if (wasRecording && !this._rxRestarting) {
+				// Opening Spectrum, Pause, or a lost radio all stop RX; say so instead of stopping silently.
+				this.audioRecording.notice = sweepTransition
+					? 'VFO audio recording stopped because the Spectrum scan needs the radio. Saved audio is in Records.'
+					: 'VFO audio recording stopped with the Receiver. Saved audio is in Records.';
+				this.showMsg(this.audioRecording.notice);
+			}
 			await this.backend.stopRx();
 			this.running = false;
 			if (this._statsTimer) { clearInterval(this._statsTimer); this._statsTimer = null; }
@@ -302,12 +392,12 @@ export const connectionMethods = {
 		await this._acquireWakeLock();
 		if ('mediaSession' in navigator) {
 			navigator.mediaSession.metadata = new MediaMetadata({
-				title: 'BrowSDR',
+				title: 'Freq. Spectrum',
 				artist: 'Receiving',
 				artwork: [
-					{ src: '/icon-96.png', sizes: '96x96', type: 'image/png' },
-					{ src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
-					{ src: '/icon-512.png', sizes: '512x512', type: 'image/png' },
+					{ src: '/receiver/icon-96.png', sizes: '96x96', type: 'image/png' },
+					{ src: '/receiver/icon-192.png', sizes: '192x192', type: 'image/png' },
+					{ src: '/receiver/icon-512.png', sizes: '512x512', type: 'image/png' },
 				],
 			});
 			navigator.mediaSession.playbackState = 'playing';

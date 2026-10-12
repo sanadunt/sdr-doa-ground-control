@@ -10,13 +10,11 @@ from __future__ import annotations
 
 import json
 import math
-import os
-import tempfile
+import re
 import threading
 import time
-from pathlib import Path
-from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
+from dataclasses import dataclass, field as dataclass_field
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 SCHEMA_VERSION = 1
 TOPIC_ROOT = "sdr/v1/uav-01"
@@ -32,6 +30,7 @@ TOPICS = {
     "config_get": f"{TOPIC_ROOT}/cmd/config/get",
     "ack_config": f"{TOPIC_ROOT}/ack/config",
     "ack_request": f"{TOPIC_ROOT}/ack/request",
+    "availability": f"{TOPIC_ROOT}/availability",
 }
 
 TELEMETRY_QOS = 0
@@ -40,6 +39,11 @@ COMMAND_QOS = 1
 MAX_PAYLOAD_BYTES = 16_384
 MAX_CONFIG_TTL_MS = 10 * 60 * 1000
 MAX_CONFIG_FUTURE_SKEW_MS = 30 * 1000
+# KrakenSDR stores "Output VFO: ALL" as -1; 0..N select one VFO.
+OUTPUT_VFO_ALL = -1
+MAX_HEALTH_REASONS = 16
+REASON_CODE_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+MAX_SOURCE_CHARS = 64
 ACK_ERROR_CODES = frozenset(
     {
         "COMMAND_EXPIRED",
@@ -143,6 +147,12 @@ def _base(ts_ms: Optional[int] = None) -> Dict[str, Any]:
     return {"v": SCHEMA_VERSION, "ts_ms": timestamp}
 
 
+def _add_source(payload: Dict[str, Any], source: Optional[str]) -> None:
+    """Mark a payload's producer; absent means the edge agent on live Data Out."""
+    if source is not None:
+        payload["source"] = source
+
+
 def build_doa(
     *,
     seq: int,
@@ -155,6 +165,7 @@ def build_doa(
     snr_db: Optional[float] = None,
     config_rev: Optional[int] = None,
     valid: bool = True,
+    source: Optional[str] = None,
 ) -> Dict[str, Any]:
     payload = _base(ts_ms)
     payload.update(
@@ -172,6 +183,7 @@ def build_doa(
         payload["snr_db"] = round(float(_number(snr_db, "snr_db")), 3)
     if config_rev is not None:
         payload["config_rev"] = int(_number(config_rev, "config_rev", integer=True))
+    _add_source(payload, source)
     validate_payload("doa", payload)
     return payload
 
@@ -222,6 +234,8 @@ def build_health(
     telemetry_drop_count: Optional[int] = None,
     settings_available: Optional[bool] = None,
     settings_valid: Optional[bool] = None,
+    reasons: Optional[Iterable[str]] = None,
+    source: Optional[str] = None,
 ) -> Dict[str, Any]:
     payload = _base(ts_ms)
     payload.update(
@@ -250,6 +264,9 @@ def build_health(
             if not isinstance(value, bool):
                 raise ContractError(f"{field} must be boolean")
             payload[field] = value
+    if reasons is not None:
+        payload["reasons"] = list(reasons)
+    _add_source(payload, source)
     validate_payload("health", payload)
     return payload
 
@@ -265,6 +282,7 @@ def build_state(
     method: str,
     active_vfos: int,
     output_vfo: int = 0,
+    source: Optional[str] = None,
 ) -> Dict[str, Any]:
     payload = _base(ts_ms)
     payload.update(
@@ -279,6 +297,7 @@ def build_state(
             "output_vfo": int(_number(output_vfo, "output_vfo", integer=True)),
         }
     )
+    _add_source(payload, source)
     validate_payload("state", payload)
     return payload
 
@@ -293,8 +312,12 @@ def build_config_reported(
     method: str,
     active_vfos: int,
     output_vfo: int = 0,
+    source: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Build the safe, redacted effective-configuration snapshot."""
+    """Build the safe, redacted effective-configuration snapshot.
+
+    ``output_vfo`` is ``OUTPUT_VFO_ALL`` (-1) when the node outputs every VFO.
+    """
     payload = _base(ts_ms)
     payload.update(
         {
@@ -307,7 +330,23 @@ def build_config_reported(
             "output_vfo": int(_number(output_vfo, "output_vfo", integer=True)),
         }
     )
+    _add_source(payload, source)
     validate_payload("config_reported", payload)
+    return payload
+
+
+def build_availability(*, ts_ms: int, online: bool, reason: Optional[str] = None) -> Dict[str, Any]:
+    """Build the retained agent availability marker.
+
+    The broker publishes the OFFLINE form as the MQTT will when the agent's
+    connection is lost, so its ``ts_ms`` is the time the session connected,
+    not the time it went offline.
+    """
+    payload = _base(ts_ms)
+    payload["online"] = bool(online)
+    if reason is not None:
+        payload["reason"] = reason
+    validate_payload("availability", payload)
     return payload
 
 
@@ -404,6 +443,7 @@ def validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
         "config_reported": ("ts_ms", "config_rev", "center_frequency_hz", "gain_db", "array", "method", "active_vfos", "output_vfo"),
         "config_patch": ("v", "id", "type", "base_config_rev", "issued_ts_ms", "expires_ts_ms", "changes"),
         "ack_config": ("ts_ms", "id", "status", "config_rev", "readback_ok", "error"),
+        "availability": ("ts_ms", "online"),
     }
     if kind not in required:
         raise ContractError(f"unknown payload kind: {kind}")
@@ -411,13 +451,14 @@ def validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
     if missing:
         raise ContractError(f"{kind} missing fields: {','.join(missing)}")
     allowed = {
-        "doa": {"v", "ts_ms", "seq", "valid", "relative_doa_deg", "confidence", "power_db", "frequency_hz", "processing_ms", "snr_db", "config_rev"},
+        "doa": {"v", "ts_ms", "seq", "valid", "relative_doa_deg", "confidence", "power_db", "frequency_hz", "processing_ms", "snr_db", "config_rev", "source"},
         "nav": {"v", "ts_ms", "seq", "lat", "lon", "source", "heading_deg", "speed_mps", "altitude_m"},
-        "health": {"v", "ts_ms", "state", "daq_ok", "dropped_frames", "gps_status", "doa_valid", "doa_age_ms", "frame_sync", "sample_delay_sync", "iq_sync", "uptime_ms", "telemetry_drop_count", "settings_available", "settings_valid"},
-        "state": {"v", "ts_ms", "config_rev", "running", "frequency_hz", "gain_db", "array", "method", "active_vfos", "output_vfo"},
-        "config_reported": {"v", "ts_ms", "config_rev", "center_frequency_hz", "gain_db", "array", "method", "active_vfos", "output_vfo"},
+        "health": {"v", "ts_ms", "state", "daq_ok", "dropped_frames", "gps_status", "doa_valid", "doa_age_ms", "frame_sync", "sample_delay_sync", "iq_sync", "uptime_ms", "telemetry_drop_count", "settings_available", "settings_valid", "reasons", "source"},
+        "state": {"v", "ts_ms", "config_rev", "running", "frequency_hz", "gain_db", "array", "method", "active_vfos", "output_vfo", "source"},
+        "config_reported": {"v", "ts_ms", "config_rev", "center_frequency_hz", "gain_db", "array", "method", "active_vfos", "output_vfo", "source"},
         "config_patch": {"v", "id", "type", "base_config_rev", "issued_ts_ms", "expires_ts_ms", "changes"},
         "ack_config": {"v", "ts_ms", "id", "status", "config_rev", "readback_ok", "error", "changed_fields"},
+        "availability": {"v", "ts_ms", "online", "reason"},
     }
     unknown = sorted(set(payload) - allowed[kind])
     if unknown:
@@ -432,12 +473,14 @@ def validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
     def require_bool(field: str) -> None:
         if not isinstance(payload[field], bool):
             raise ContractError(f"{kind}.{field} must be boolean")
-    def require_text(field: str) -> None:
+    def require_text(field: str, max_chars: int = 256) -> None:
         value = payload[field]
-        if not isinstance(value, str) or not value or len(value) > 256:
+        if not isinstance(value, str) or not value or len(value) > max_chars:
             raise ContractError(f"{kind}.{field} must be a bounded non-empty string")
     if kind != "config_patch":
         require_int("ts_ms", 0)
+    if "source" in payload and kind != "nav":
+        require_text("source", MAX_SOURCE_CHARS)
     if kind in {"doa", "nav"}:
         require_int("seq", 0)
     if kind == "doa":
@@ -476,6 +519,19 @@ def validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
                 require_bool(field)
         if "uptime_ms" in payload:
             require_int("uptime_ms", 0)
+        if "telemetry_drop_count" in payload:
+            require_int("telemetry_drop_count", 0)
+        for field in ("settings_available", "settings_valid"):
+            if field in payload:
+                require_bool(field)
+        if "reasons" in payload:
+            reasons = payload["reasons"]
+            if not isinstance(reasons, list) or len(reasons) > MAX_HEALTH_REASONS:
+                raise ContractError("health.reasons must be a bounded list")
+            if any(not isinstance(code, str) or not REASON_CODE_PATTERN.match(code) for code in reasons):
+                raise ContractError("health.reasons contains an invalid code")
+            if len(set(reasons)) != len(reasons):
+                raise ContractError("health.reasons must not repeat a code")
     elif kind in {"state", "config_reported"}:
         require_int("config_rev", 0)
         require_int("frequency_hz" if kind == "state" else "center_frequency_hz", 0)
@@ -483,7 +539,7 @@ def validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
         require_text("array")
         require_text("method")
         require_int("active_vfos", 0)
-        require_int("output_vfo", 0)
+        require_int("output_vfo", OUTPUT_VFO_ALL)
         if kind == "state":
             require_bool("running")
     elif kind == "config_patch":
@@ -536,6 +592,12 @@ def validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
                 or any(not isinstance(field, str) or field not in CONFIG_RANGES for field in fields)
             ):
                 raise ContractError("ack_config.changed_fields is invalid")
+    elif kind == "availability":
+        require_bool("online")
+        if "reason" in payload:
+            reason = payload["reason"]
+            if not isinstance(reason, str) or not REASON_CODE_PATTERN.match(reason):
+                raise ContractError("availability.reason must be a bounded code")
     compact_json(payload)
 
 
@@ -575,6 +637,7 @@ class QueueStats:
     accepted: int = 0
     replaced: int = 0
     popped: int = 0
+    replaced_by_stream: Dict[str, int] = dataclass_field(default_factory=dict)
 
 
 class LatestValueQueue:
@@ -592,6 +655,7 @@ class LatestValueQueue:
                 raise KeyError(stream)
             if stream in self._values:
                 self.stats.replaced += 1
+                self.stats.replaced_by_stream[stream] = self.stats.replaced_by_stream.get(stream, 0) + 1
             self._values[stream] = value
             self.stats.accepted += 1
 
@@ -637,6 +701,7 @@ KIND_BY_TOPIC_SUFFIX = {
     "/config/reported": "config_reported",
     "/cmd/config/patch": "config_patch",
     "/ack/config": "ack_config",
+    "/availability": "availability",
 }
 
 

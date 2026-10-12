@@ -694,10 +694,11 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
             )
             self.assertEqual(empty["total"], 0)
 
+            # Grouping is by band overlap, so this band starts inside the first one.
             adjacent = {
                 **candidate,
                 "id": 2,
-                "startHz": 1_040_000,
+                "startHz": 1_015_000,
                 "endHz": 1_060_000,
                 "centerHz": 1_050_000,
                 "peakFrequencyHz": 1_050_000,
@@ -1147,7 +1148,7 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         self.assertEqual(
             ground.headers.get("content-security-policy"),
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data: https://tile.openstreetmap.de https://tile.openstreetmap.org; "
+            "img-src 'self' data: blob: https://tile.openstreetmap.de https://tile.openstreetmap.org; "
             "connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org; "
             "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
         )

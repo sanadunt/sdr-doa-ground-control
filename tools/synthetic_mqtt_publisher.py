@@ -5,6 +5,11 @@ This tool is intentionally for local/staging tests. It publishes only to the
 explicit broker host/port supplied by the operator and does not read or write
 Raspberry resources. By default, state and reported configuration are sent
 once at startup, while DoA/navigation/health are periodic.
+
+Every payload carries ``source: "synthetic"``. State and reported
+configuration are retained, so they are cleared from the broker on exit
+unless ``--keep-retained`` is given; otherwise a monitor that connects later
+would receive the demo values as the node's current state.
 """
 
 from __future__ import annotations
@@ -23,6 +28,8 @@ import sdr_doa_mqtt as contract
 
 
 Message = Tuple[str, Dict[str, Any], int, bool]
+SYNTHETIC_SOURCE = "synthetic"
+RETAINED_KINDS = ("state", "config_reported")
 
 
 def _reason_value(reason_code: Any) -> int:
@@ -47,6 +54,7 @@ def _build_payloads(ts_ms: int, seq: int) -> Dict[str, Dict[str, Any]]:
             snr_db=14.5,
             config_rev=8,
             valid=False,
+            source=SYNTHETIC_SOURCE,
         ),
         "nav": contract.build_nav(
             seq=seq,
@@ -55,7 +63,7 @@ def _build_payloads(ts_ms: int, seq: int) -> Dict[str, Dict[str, Any]]:
             lon=107.6098,
             heading_deg=121.5,
             speed_mps=12.2,
-            source="synthetic",
+            source=SYNTHETIC_SOURCE,
         ),
         "health": contract.build_health(
             ts_ms=ts_ms,
@@ -68,6 +76,7 @@ def _build_payloads(ts_ms: int, seq: int) -> Dict[str, Dict[str, Any]]:
             frame_sync=True,
             sample_delay_sync=False,
             iq_sync=False,
+            source=SYNTHETIC_SOURCE,
         ),
         "state": contract.build_state(
             ts_ms=ts_ms,
@@ -78,6 +87,7 @@ def _build_payloads(ts_ms: int, seq: int) -> Dict[str, Dict[str, Any]]:
             array="UCA",
             method="MUSIC",
             active_vfos=1,
+            source=SYNTHETIC_SOURCE,
         ),
         "config_reported": contract.build_config_reported(
             ts_ms=ts_ms,
@@ -87,6 +97,7 @@ def _build_payloads(ts_ms: int, seq: int) -> Dict[str, Dict[str, Any]]:
             array="UCA",
             method="MUSIC",
             active_vfos=1,
+            source=SYNTHETIC_SOURCE,
         ),
     }
 
@@ -99,6 +110,7 @@ def publish(
     nav_rate_hz: float,
     health_rate_hz: float,
     repeat_state: bool = False,
+    keep_retained: bool = False,
 ) -> Dict[str, Any]:
     connected = Event()
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="stage4-repro-publisher")
@@ -110,6 +122,8 @@ def publish(
     client.on_connect = on_connect
     client.connect(host, port, keepalive=15)
     client.loop_start()
+    retained_sent = False
+    retained_cleared = False
     try:
         if not connected.wait(5):
             raise RuntimeError("synthetic publisher did not connect")
@@ -145,6 +159,7 @@ def publish(
             did_work = False
 
             if not state_sent or (repeat_state and now >= next_state):
+                retained_sent = True
                 send("state", payloads["state"], contract.STATE_QOS, True)
                 send("config_reported", payloads["config_reported"], contract.STATE_QOS, True)
                 state_sent = True
@@ -171,6 +186,8 @@ def publish(
 
         elapsed_s = max(time.monotonic() - started, 1e-9)
         total_bytes = sum(bytes_by_kind.values())
+        if not keep_retained:
+            retained_cleared = _clear_retained(client)
         return {
             "broker": {"host": host, "port": port},
             "duration_s": round(elapsed_s, 6),
@@ -183,11 +200,28 @@ def publish(
             "payload_bits": total_bytes * 8,
             "payload_rate_bits_s": round(total_bytes * 8 / elapsed_s, 3),
             "publish_rcs": sorted(set(publish_results)),
+            "retained_cleared": retained_cleared,
+            "source": SYNTHETIC_SOURCE,
             "transport": "synthetic_only",
         }
     finally:
+        if retained_sent and not keep_retained and not retained_cleared:
+            _clear_retained(client)
         client.loop_stop()
         client.disconnect()
+
+
+def _clear_retained(client: Any) -> bool:
+    """Delete the retained synthetic state/config: a zero-length retained publish."""
+    cleared = True
+    for kind in RETAINED_KINDS:
+        try:
+            info = client.publish(contract.TOPICS[kind], b"", qos=contract.STATE_QOS, retain=True)
+            info.wait_for_publish(timeout=5)
+            cleared = cleared and int(info.rc) == 0 and info.is_published()
+        except (OSError, RuntimeError, ValueError):
+            cleared = False
+    return cleared
 
 
 def main(argv: List[str] | None = None) -> int:
@@ -202,6 +236,11 @@ def main(argv: List[str] | None = None) -> int:
         "--repeat-state",
         action="store_true",
         help="also send state and reported config at 1 Hz for a stress comparison",
+    )
+    parser.add_argument(
+        "--keep-retained",
+        action="store_true",
+        help="leave the synthetic retained state/config on the broker after exit",
     )
     args = parser.parse_args(argv)
     if not (1 <= args.port <= 65535):
@@ -221,6 +260,7 @@ def main(argv: List[str] | None = None) -> int:
                     args.nav_rate,
                     args.health_rate,
                     args.repeat_state,
+                    args.keep_retained,
                 ),
                 sort_keys=True,
             )

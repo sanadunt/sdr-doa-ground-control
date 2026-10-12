@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_DOA_OVERLAY_SETTINGS, bearingAndDistance, bearingFeature, beamFeatures, destination, halfPowerWidth, heatDistanceWeight, heatFeatures, lobeFeature, niceRingStep, normalizeBearing, normalizeDb, rangeRings } from './doaGeometry';
+import { DEFAULT_DOA_OVERLAY_SETTINGS, MIN_AUTO_DB_SPAN, bearingAndDistance, bearingFeature, beamFeatures, destination, edgeFeatures, effectiveDbScale, halfPowerWidth, heatDistanceWeight, heatFeatures, lobeFeature, niceRingStep, normalizeBearing, normalizeDb, rangeRings, saturatedFraction } from './doaGeometry';
+import { displayAngleForBin, geographicBearingForBin } from './polar';
 
 describe('DoA geographic overlay geometry', () => {
   const origin = { latitude: 0, longitude: 0 };
@@ -15,7 +16,7 @@ describe('DoA geographic overlay geometry', () => {
   });
   it('creates bounded lobe, bearing and heat features', () => {
     const values = Array.from({ length: 360 }, (_, i) => i === 90 ? 0 : -60);
-    expect(lobeFeature(origin, values, DEFAULT_DOA_OVERLAY_SETTINGS).geometry.coordinates[0]).toHaveLength(362);
+    expect(lobeFeature(origin, values, DEFAULT_DOA_OVERLAY_SETTINGS).geometry.coordinates[0]).toHaveLength(361);
     expect(bearingFeature(origin, 90, DEFAULT_DOA_OVERLAY_SETTINGS).geometry.coordinates).toHaveLength(2);
     expect(heatFeatures(origin, values, DEFAULT_DOA_OVERLAY_SETTINGS).features.length).toBeGreaterThan(0);
   });
@@ -41,7 +42,8 @@ describe('beam, rings, and half-power helpers', () => {
     const beam = beamFeatures(origin, values, settings);
     expect(beam.features).toHaveLength(5 * 4);
     const first = beam.features[0];
-    expect(first.properties).toMatchObject({ bearing: 88, valueDb: 0, weight: 1 });
+    // Bin 88 is theta_0 in the counter-clockwise array frame: 272° geographic with offset 0.
+    expect(first.properties).toMatchObject({ bin: 88, bearing: 272, valueDb: 0, weight: 1 });
     const ring = first.geometry.coordinates[0];
     expect(ring[0]).toEqual(ring[ring.length - 1]);
   });
@@ -94,5 +96,112 @@ describe('density compensation', () => {
     const heat = heatFeatures(origin, values, { ...DEFAULT_DOA_OVERLAY_SETTINGS, distanceFalloff: 0 });
     const weights = heat.features.map((feature) => feature.properties?.densityWeight as number);
     expect(weights[0]).toBeLessThan(weights[weights.length - 1]);
+  });
+});
+
+describe('geographic bearing of theta_0 bins (AUD-01)', () => {
+  const origin = { latitude: -6.2, longitude: 106.8 };
+  const peaked = (center: number) => Array.from({ length: 360 }, (_, bin) => {
+    const distance = Math.abs(((bin - center + 540) % 360) - 180);
+    return -50 + 45 * Math.exp(-0.5 * (distance / 8) ** 2);
+  });
+  const angularGap = (a: number, b: number) => Math.abs(((a - b + 540) % 360) - 180);
+
+  for (const theta of [0, 90, 180, 270, 350]) {
+    for (const offset of [0, 30, -45, 90]) {
+      it(`theta_0 ${theta}° with offset ${offset}° points where the Compass polar peak points`, () => {
+        const expected = displayAngleForBin(theta, { figType: 'Compass', compassOffset: offset });
+        expect(geographicBearingForBin(theta, offset)).toBe(expected);
+        const values = peaked(theta);
+
+        const ring = lobeFeature(origin, values, DEFAULT_DOA_OVERLAY_SETTINGS, offset).geometry.coordinates[0];
+        const tip = ring.reduce((best, point) => {
+          const measured = bearingAndDistance(origin, point[0], point[1]);
+          return measured.distanceM > best.distanceM ? measured : best;
+        }, { bearingDeg: 0, distanceM: -1 });
+        expect(angularGap(tip.bearingDeg, expected)).toBeLessThan(0.5);
+
+        const beam = beamFeatures(origin, values, DEFAULT_DOA_OVERLAY_SETTINGS, offset).features;
+        const strongest = beam.reduce((best, feature) => ((feature.properties?.weight as number) > (best.properties?.weight as number) ? feature : best));
+        expect(strongest.properties?.bin).toBe(theta);
+        expect(angularGap(strongest.properties?.bearing as number, expected)).toBeLessThan(1e-9);
+
+        const heat = heatFeatures(origin, values, DEFAULT_DOA_OVERLAY_SETTINGS, offset).features;
+        const hottest = heat.reduce((best, feature) => ((feature.properties?.weight as number) > (best.properties?.weight as number) ? feature : best));
+        expect(angularGap(hottest.properties?.bearing as number, expected)).toBeLessThan(1e-9);
+
+        const edges = edgeFeatures(origin, halfPowerWidth(values), DEFAULT_DOA_OVERLAY_SETTINGS, offset).features.map((feature) => feature.properties?.bearing as number);
+        expect(edges).toHaveLength(2);
+        expect(Math.abs(angularGap(edges[0], expected) - angularGap(edges[1], expected))).toBeLessThan(1e-9);
+
+        const line = bearingFeature(origin, geographicBearingForBin(theta, offset), DEFAULT_DOA_OVERLAY_SETTINGS).geometry.coordinates[1];
+        expect(angularGap(bearingAndDistance(origin, line[0], line[1]).bearingDeg, expected)).toBeLessThan(0.01);
+      });
+    }
+  }
+});
+
+describe('lobe ring and antimeridian (AUD-87, AUD-88)', () => {
+  it('builds the lobe from perimeter points only and closes the ring', () => {
+    const origin = { latitude: -6.2, longitude: 106.8 };
+    const values = Array.from({ length: 360 }, () => 0);
+    const ring = lobeFeature(origin, values, { ...DEFAULT_DOA_OVERLAY_SETTINGS, minDb: -10, maxDb: 0 }).geometry.coordinates[0];
+    expect(ring).toHaveLength(361);
+    expect(ring[0]).toEqual(ring[360]);
+    // A full-weight lobe never passes through the station, so no spoke is drawn.
+    expect(ring.every((point) => bearingAndDistance(origin, point[0], point[1]).distanceM > 900)).toBe(true);
+  });
+
+  it('keeps longitudes continuous with a station near ±180°', () => {
+    const origin = { latitude: -17.8, longitude: 179.995 };
+    expect(destination(origin, 90, 1000)[0]).toBeGreaterThan(180);
+    const values = Array.from({ length: 360 }, (_, bin) => (bin < 180 ? 0 : -30));
+    const ring = lobeFeature(origin, values, DEFAULT_DOA_OVERLAY_SETTINGS).geometry.coordinates[0];
+    const longitudes = ring.map((point) => point[0]);
+    expect(Math.max(...longitudes) - Math.min(...longitudes)).toBeLessThan(1);
+    for (const feature of rangeRings(origin, 1000).features.features) {
+      const coordinates = feature.geometry.coordinates;
+      for (let index = 1; index < coordinates.length; index += 1) expect(Math.abs(coordinates[index][0] - coordinates[index - 1][0])).toBeLessThan(1);
+    }
+    const sectors = beamFeatures(origin, values, DEFAULT_DOA_OVERLAY_SETTINGS).features;
+    expect(sectors.every((sector) => {
+      const lons = sector.geometry.coordinates[0].map((point) => point[0]);
+      return Math.max(...lons) - Math.min(...lons) < 1;
+    })).toBe(true);
+  });
+});
+
+describe('dB scale for live and simulated vectors (AUD-07)', () => {
+  const origin = { latitude: -6.2, longitude: 106.8 };
+  // Live Data Out vectors are shifted to their own floor: 0..1.46 dB, peak at bin 350.
+  const live = Array.from({ length: 360 }, (_, bin) => {
+    const distance = Math.abs(((bin - 350 + 540) % 360) - 180);
+    return 1.46 * Math.exp(-0.5 * (distance / 20) ** 2);
+  });
+
+  it('saturates every bin with the fixed -60..0 range, which the manual scale reports', () => {
+    const manual = { ...DEFAULT_DOA_OVERLAY_SETTINGS, dbScale: 'manual' as const };
+    const scale = effectiveDbScale(live, manual);
+    expect(scale).toMatchObject({ minDb: -60, maxDb: 0, mode: 'manual' });
+    expect(saturatedFraction(live, scale.maxDb)).toBe(1);
+  });
+
+  it('derives an auto range from the vector so the lobe and beam keep their direction', () => {
+    const scale = effectiveDbScale(live, DEFAULT_DOA_OVERLAY_SETTINGS);
+    expect(scale).toMatchObject({ minDb: 0, maxDb: 1.5, thresholdDb: 0, mode: 'auto', known: true });
+    expect(effectiveDbScale(null, DEFAULT_DOA_OVERLAY_SETTINGS).known).toBe(false);
+    const draw = { ...DEFAULT_DOA_OVERLAY_SETTINGS, minDb: scale.minDb, maxDb: scale.maxDb, thresholdDb: scale.thresholdDb };
+    const radii = lobeFeature(origin, live, draw).geometry.coordinates[0].map((point) => bearingAndDistance(origin, point[0], point[1]).distanceM);
+    expect(Math.max(...radii)).toBeGreaterThan(900);
+    expect(Math.min(...radii)).toBeLessThan(50);
+    const weights = new Set(beamFeatures(origin, live, draw).features.map((feature) => feature.properties?.weight));
+    expect(weights.size).toBeGreaterThan(20);
+    expect(saturatedFraction(live, scale.maxDb)).toBe(0);
+  });
+
+  it('keeps the synthetic range for simulation and a minimum span for flat vectors', () => {
+    expect(effectiveDbScale(live, DEFAULT_DOA_OVERLAY_SETTINGS, true)).toMatchObject({ minDb: -60, maxDb: 0, mode: 'simulation' });
+    const flat = effectiveDbScale(Array.from({ length: 360 }, () => 0.2), DEFAULT_DOA_OVERLAY_SETTINGS);
+    expect(flat.maxDb - flat.minDb).toBeCloseTo(MIN_AUTO_DB_SPAN);
   });
 });

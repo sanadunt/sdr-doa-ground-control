@@ -104,7 +104,7 @@ abstract class SpectrumSweepEngine implements SweepEngine {
 		if (!this.sourceStarted) return;
 		this.accumulator.clear();
 		this.lastReportedSweep = -1;
-		this.callbacks.onCandidates([]);
+		this.callbacks.onCandidates([], []);
 		this.callbacks.onSpectrum(this.accumulator.createFrame());
 	}
 
@@ -140,7 +140,7 @@ abstract class SpectrumSweepEngine implements SweepEngine {
 			this.callbacks.onSpectrum(this.accumulator.createFrame());
 			if (sweepCount !== this.lastReportedSweep) {
 				this.lastReportedSweep = sweepCount;
-				this.callbacks.onCandidates(this.accumulator.getChangedCandidates());
+				this.callbacks.onCandidates(this.accumulator.getChangedCandidates(), this.accumulator.takeRemovedCandidateIds());
 			}
 		} catch (error) {
 			this.reportError(error);
@@ -280,9 +280,11 @@ export class ManualSweepEngine extends SpectrumSweepEngine {
 	}
 
 	private async runLoop(): Promise<void> {
-		const firstCenterHz = this.config.startHz + MANUAL_USABLE_BANDWIDTH_HZ / 2;
-		for (;;) {
+		for (let pass = 0; ; pass++) {
 			if (!this.running) return;
+			// Every other sweep moves the tuning grid by half a step, so the DC bins
+			// skipped around each tuned centre are measured by a neighbouring capture.
+			const firstCenterHz = this.config.startHz + MANUAL_USABLE_BANDWIDTH_HZ / 2 - (pass % 2 ? MANUAL_TUNE_STEP_HZ / 2 : 0);
 			this.accumulator.beginSweep();
 			let completed = true;
 			for (

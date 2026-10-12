@@ -1,11 +1,16 @@
 import { makeDefaultVfo, BOOKMARK_CATEGORIES } from './constants';
-import type { ReceiverAudioSessionRecord, ReceiverMarker, ReceiverMarkerSet, ReceiverScanRecord } from './receiver-records-api';
+import { receiverLanguage } from './i18n';
+import type { ReceiverAudioRecordFacets, ReceiverAudioSessionRecord, ReceiverMarker, ReceiverMarkerSet, ReceiverScanRecord } from './receiver-records-api';
 import type { SweepCandidate, SweepProgress, SweepSource, SweepSpectrumView } from '../worker/sweep-types';
 
 export function createAppData() {
 	return {
 		backend: null as any,
 		connected: false,
+		/** Console language for the Ground Console chrome (set before first paint by receiver-boot.js). */
+		uiLanguage: receiverLanguage(document.documentElement.lang),
+		/** True when the connected radio is the built-in Mock SDR, not hardware. */
+		mockDevice: false,
 		running: false,
 		isOnline: navigator.onLine,
 		remoteMode: 'none' as 'none' | 'host' | 'client',
@@ -47,6 +52,20 @@ export function createAppData() {
 			audioItems: [] as ReceiverAudioSessionRecord[],
 			audioTotal: 0,
 			audioPage: 0,
+			audioDateFilter: '',
+			audioTimeFrom: '',
+			audioTimeTo: '',
+			audioMinimumFrequencyMHz: '',
+			audioMaximumFrequencyMHz: '',
+			audioVfoFilter: '',
+			audioModeFilter: '',
+			audioBandwidthFilter: '',
+			audioFacets: null as ReceiverAudioRecordFacets | null,
+			audioAvailableDateLookup: {} as Record<string, boolean>,
+			audioCalendarMonth: '',
+			audioCalendarFocusedDate: '',
+			audioCalendarOpen: false,
+			deletingAudioSegmentId: '',
 			pageSize: 20,
 			markerSets: [] as ReceiverMarkerSet[],
 			selectedMarkerSetId: '',
@@ -63,6 +82,7 @@ export function createAppData() {
 			stopping: false,
 			sessionId: null as string | null,
 			error: '',
+			notice: '',
 		},
 
 		sweep: {
@@ -87,8 +107,8 @@ export function createAppData() {
 			vgaGain: 20,
 			ampEnabled: false,
 			minSnrDb: 8,
-			minimumPeakDb: -80,
-			displayMinDb: -120,
+			minimumPeakDb: -160,
+			displayMinDb: -60,
 			displayMaxDb: 0,
 			averageAlpha: 0.35,
 			view: 'average' as SweepSpectrumView,
@@ -108,6 +128,8 @@ export function createAppData() {
 			viewportEndHz: 1_000_000_000,
 			hoverFrequencyHz: null as number | null,
 			hoverPowerDb: null as number | null,
+			hoverWaterfallY: null as number | null,
+			hoverWaterfallRow: null as number | null,
 			progress: {
 				sweepCount: 0,
 				sweepsPerSecond: 0,

@@ -24,8 +24,8 @@ const recordingApi: AudioRecordingApi = {
 	finishSegment(segmentId, metadata) {
 		return receiverRecordsApi.finishAudioSegment(segmentId, metadata);
 	},
-	finishSession(sessionId) {
-		return receiverRecordsApi.finishAudioSession(sessionId);
+	finishSession(sessionId, options) {
+		return receiverRecordsApi.finishAudioSession(sessionId, options);
 	},
 };
 
@@ -48,6 +48,11 @@ function recorderFor(app: AppInstance): VfoAudioRecorder | null {
 			setRecordingError(app, `${prefix}: ${status.message || 'recording error'}`);
 			return;
 		}
+		if (status.state === 'notice') {
+			app.audioRecording.notice = status.message || '';
+			if (status.message) app.showMsg(status.message);
+			return;
+		}
 		if (status.state === 'armed') {
 			app.audioRecording.armed = true;
 			app.audioRecording.sessionId = recorder.sessionId;
@@ -62,6 +67,16 @@ function recorderFor(app: AppInstance): VfoAudioRecorder | null {
 }
 
 export const audioRecordingMethods = {
+	/** Spectrum needs the radio, so opening it ends an active recording; ask first. */
+	async requestWorkspace(this: AppInstance, workspace: 'spectrum' | 'listener' | 'records') {
+		const recording = this.audioRecording.armed || this.audioRecording.starting;
+		if (workspace === 'spectrum' && this.activeWorkspace !== 'spectrum' && recording && this.running
+			&& !window.confirm('Opening Spectrum stops the Listener radio and ends the VFO audio recording. Audio recorded so far stays in Records. Open Spectrum?')) {
+			return;
+		}
+		await this.selectWorkspace(workspace);
+	},
+
 	async toggleVfoAudioRecording(this: AppInstance) {
 		if (this.audioRecording.starting || this.audioRecording.stopping) return;
 		if (this.audioRecording.armed) {
@@ -80,6 +95,7 @@ export const audioRecordingMethods = {
 		}
 		this.audioRecording.starting = true;
 		this.audioRecording.error = '';
+		this.audioRecording.notice = '';
 		try {
 			await recorder.arm();
 			this.audioRecording.armed = recorder.isArmed;
@@ -104,15 +120,38 @@ export const audioRecordingMethods = {
 		}
 		this.audioRecording.stopping = true;
 		try {
+			// An upload problem reported while recording stays visible after Stop.
 			await recorder.disarm();
-			this.audioRecording.error = '';
 		} catch (error) {
-			setRecordingError(this, `Could not finalize audio recording: ${errorMessage(error)}`);
+			setRecordingError(this, `Could not close the audio recording on the console: ${errorMessage(error)}`);
 			this.showMsg(this.audioRecording.error);
 		} finally {
 			this.audioRecording.armed = false;
 			this.audioRecording.sessionId = null;
 			this.audioRecording.stopping = false;
+		}
+	},
+
+	/** Called on pagehide: one keepalive request keeps the audio already saved. */
+	finalizeVfoAudioRecordingForUnload(this: AppInstance) {
+		const current = recorders.get(this);
+		if (current && (current.recorder.isArmed || current.recorder.sessionId)) current.recorder.finalizeForUnload();
+	},
+
+	/** Re-arm after the Listener restarted the radio (sample rate or FFT size change). */
+	async resumeVfoAudioRecordingAfterRestart(this: AppInstance, reason: string) {
+		if (this.audioRecording.armed || this.audioRecording.starting) return;
+		if (!this.running) {
+			this.audioRecording.notice = `VFO audio recording stopped because ${reason} and the Receiver did not restart. Saved audio is in Records.`;
+			this.showMsg(this.audioRecording.notice);
+			return;
+		}
+		await this.toggleVfoAudioRecording();
+		if (this.audioRecording.armed) {
+			this.audioRecording.notice = `Recording continues in a new session because ${reason}.`;
+			this.showMsg(this.audioRecording.notice);
+		} else {
+			this.audioRecording.notice = `VFO audio recording stopped because ${reason}. Saved audio is in Records.`;
 		}
 	},
 

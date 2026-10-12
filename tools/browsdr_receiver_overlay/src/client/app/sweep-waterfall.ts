@@ -1,11 +1,66 @@
 import { convertDecibelToRGB } from '../utils';
+import { drawSweepMarkerHint } from './sweep-marker-renderer';
 import { SWEEP_DISPLAY_BINS } from '../worker/sweep-types';
 import type { SweepCandidate, SweepSpectrumFrame } from '../worker/sweep-types';
 
 export const SWEEP_WATERFALL_BINS = SWEEP_DISPLAY_BINS;
 export const SWEEP_WATERFALL_ROWS = 256;
+// Sweep FFT levels reach about +33 dB and the graph ceiling is +60 dB, so the
+// stored byte scale covers the same range instead of clipping at 0 dB.
 export const SWEEP_WATERFALL_MIN_DB = -160;
-export const SWEEP_WATERFALL_MAX_DB = 0;
+export const SWEEP_WATERFALL_MAX_DB = 60;
+// Session files and archived traces written before the wider scale used -160..0 dB.
+export const LEGACY_SWEEP_LEVEL_MAX_DB = 0;
+// First byte of an archived trace in the -160..+60 dB scale. Legacy traces never
+// start with it: their levels are at least -120 dB, so every legacy byte is >= 64.
+export const ARCHIVED_TRACE_FORMAT_TAG = 1;
+
+export function encodeSweepLevel(db: number, minDb = SWEEP_WATERFALL_MIN_DB, maxDb = SWEEP_WATERFALL_MAX_DB): number {
+	const boundedDb = Number.isFinite(db) ? Math.max(minDb, Math.min(maxDb, db)) : minDb;
+	return Math.round((boundedDb - minDb) * 255 / (maxDb - minDb));
+}
+
+export function decodeSweepLevel(level: number, minDb = SWEEP_WATERFALL_MIN_DB, maxDb = SWEEP_WATERFALL_MAX_DB): number {
+	return minDb + level * (maxDb - minDb) / 255;
+}
+
+function resampleLevels(values: ArrayLike<number>, bin: number, bins: number): number {
+	return values[Math.min(values.length - 1, Math.floor(bin * values.length / bins))];
+}
+
+export function encodeArchivedTrace(values: Float32Array): Uint8Array<ArrayBuffer> {
+	const trace = new Uint8Array(SWEEP_WATERFALL_BINS);
+	if (values.length === 0) return trace;
+	for (let bin = 1; bin < trace.length; bin++) trace[bin] = encodeSweepLevel(resampleLevels(values, bin, trace.length));
+	trace[0] = ARCHIVED_TRACE_FORMAT_TAG;
+	return trace;
+}
+
+export function decodeArchivedTrace(trace: Uint8Array): Float32Array {
+	const levels = new Float32Array(trace.length);
+	const tagged = trace.length > 1 && trace[0] === ARCHIVED_TRACE_FORMAT_TAG;
+	const maxDb = tagged ? SWEEP_WATERFALL_MAX_DB : LEGACY_SWEEP_LEVEL_MAX_DB;
+	for (let bin = 0; bin < trace.length; bin++) levels[bin] = decodeSweepLevel(trace[bin], SWEEP_WATERFALL_MIN_DB, maxDb);
+	// The format byte replaced the first bin, which repeats its neighbour.
+	if (tagged) levels[0] = levels[1];
+	return levels;
+}
+
+export function encodeWaterfallRow(levels: ArrayLike<number>): Uint8Array {
+	const row = new Uint8Array(SWEEP_WATERFALL_BINS);
+	if (levels.length === 0) return row;
+	for (let bin = 0; bin < row.length; bin++) row[bin] = encodeSweepLevel(resampleLevels(levels, bin, row.length));
+	return row;
+}
+
+export function transcodeWaterfallLevels(data: ArrayLike<number>, fromMinDb: number, fromMaxDb: number): Uint8Array {
+	const levels = Uint8Array.from(data);
+	if (fromMinDb === SWEEP_WATERFALL_MIN_DB && fromMaxDb === SWEEP_WATERFALL_MAX_DB) return levels;
+	for (let index = 0; index < levels.length; index++) {
+		levels[index] = encodeSweepLevel(decodeSweepLevel(levels[index], fromMinDb, fromMaxDb));
+	}
+	return levels;
+}
 
 export class SweepWaterfallHistory {
 	private readonly data = new Uint8Array(SWEEP_WATERFALL_BINS * SWEEP_WATERFALL_ROWS);
@@ -29,14 +84,7 @@ export class SweepWaterfallHistory {
 	appendCompletedSweep(frame: SweepSpectrumFrame): boolean {
 		if (!Number.isInteger(frame.sweepCount) || frame.sweepCount <= this.latestSweepCount || frame.sweepCount < 1
 			|| frame.average.length === 0) return false;
-		const rowOffset = this.nextRow * SWEEP_WATERFALL_BINS;
-		const values = frame.average;
-		for (let bin = 0; bin < SWEEP_WATERFALL_BINS; bin++) {
-			const sourceIndex = Math.min(values.length - 1, Math.floor(bin * values.length / SWEEP_WATERFALL_BINS));
-			const db = values[sourceIndex];
-			const boundedDb = Number.isFinite(db) ? Math.max(SWEEP_WATERFALL_MIN_DB, Math.min(SWEEP_WATERFALL_MAX_DB, db)) : SWEEP_WATERFALL_MIN_DB;
-			this.data[rowOffset + bin] = Math.round((boundedDb - SWEEP_WATERFALL_MIN_DB) * 255 / (SWEEP_WATERFALL_MAX_DB - SWEEP_WATERFALL_MIN_DB));
-		}
+		this.data.set(encodeWaterfallRow(frame.average), this.nextRow * SWEEP_WATERFALL_BINS);
 		this.nextRow = (this.nextRow + 1) % SWEEP_WATERFALL_ROWS;
 		this.count = Math.min(this.count + 1, SWEEP_WATERFALL_ROWS);
 		this.latestSweepCount = frame.sweepCount;
@@ -154,6 +202,7 @@ export class SweepWaterfallRenderer {
 		context.textBaseline = 'top';
 		context.fillStyle = '#8ea0b8';
 		context.fillText('Power (dBFS, relative)', left, 1);
+		drawSweepMarkerHint(context, left, plotWidth, context.measureText('Power (dBFS, relative)').width);
 		context.textBaseline = 'middle';
 		context.textAlign = 'right';
 		context.fillText('Older', left - 7, top + 7);
@@ -223,8 +272,7 @@ export class SweepWaterfallRenderer {
 			|| (this.renderedVersion === history.version && this.renderedMinDb === minDb && this.renderedMaxDb === maxDb)) return;
 		const colors = new Uint8Array(256 * 4);
 		for (let value = 0; value < 256; value++) {
-			const db = SWEEP_WATERFALL_MIN_DB + value * (SWEEP_WATERFALL_MAX_DB - SWEEP_WATERFALL_MIN_DB) / 255;
-			const color = convertDecibelToRGB(db, minDb, maxDb);
+			const color = convertDecibelToRGB(decodeSweepLevel(value), minDb, maxDb);
 			const offset = value * 4;
 			colors[offset] = color.r;
 			colors[offset + 1] = color.g;

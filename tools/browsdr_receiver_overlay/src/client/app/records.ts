@@ -1,6 +1,6 @@
 import type { AppInstance } from './types';
-import { receiverRecordsApi } from './receiver-records-api';
-import type { ReceiverAudioSessionRecord, ReceiverMarker, ReceiverRecord, ReceiverScanRecord } from './receiver-records-api';
+import { ReceiverRequestError, browserTimeZone, browserUtcOffsetMinutes, receiverRecordsApi } from './receiver-records-api';
+import type { ReceiverAudioSegmentRecord, ReceiverAudioSessionRecord, ReceiverMarker, ReceiverRecord, ReceiverScanRecord } from './receiver-records-api';
 
 const recordRequestIds = new WeakMap<object, number>();
 
@@ -22,6 +22,22 @@ function newMarkerId(): string {
 
 function markerFrequencyDrafts(markers: ReceiverMarker[]): Record<string, string> {
 	return Object.fromEntries(markers.map(marker => [marker.id, String(marker.frequencyHz / 1_000_000)]));
+}
+
+function localAudioDateKey(date: Date): string {
+	const year = String(date.getFullYear()).padStart(4, '0');
+	const month = String(date.getMonth() + 1).padStart(2, '0');
+	const day = String(date.getDate()).padStart(2, '0');
+	return `${year}-${month}-${day}`;
+}
+
+function localAudioMonthKey(date: Date): string {
+	return `${String(date.getFullYear()).padStart(4, '0')}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function localAudioDateFromKey(value: string): Date {
+	const [year, month, day] = value.split('-').map(Number);
+	return new Date(year, month - 1, day, 12, 0, 0, 0);
 }
 
 export const recordsMethods = {
@@ -64,24 +80,67 @@ export const recordsMethods = {
 		this.records.loading = true;
 		try {
 			const pageSize = this.records.pageSize;
-			const [scanPage, audioPage] = await Promise.all([
+			const timeZone = browserTimeZone();
+			const utcOffsetMinutes = browserUtcOffsetMinutes();
+			// Each list loads on its own: a failed facet or filter request must not hide saved records.
+			const [scanResult, audioResult, facetResult] = await Promise.allSettled([
 				receiverRecordsApi.listRecords('scan', this.records.scanPage * pageSize, pageSize),
-				receiverRecordsApi.listRecords('audio-session', this.records.audioPage * pageSize, pageSize),
+				(async () => receiverRecordsApi.listAudioRecords(
+					this.records.audioPage * pageSize,
+					pageSize,
+					{
+						date: this.records.audioDateFilter,
+						timeFrom: this.records.audioTimeFrom,
+						timeTo: this.records.audioTimeTo,
+						timeZone,
+						utcOffsetMinutes,
+						minimumFrequencyMHz: this.records.audioMinimumFrequencyMHz,
+						maximumFrequencyMHz: this.records.audioMaximumFrequencyMHz,
+						vfoIndex: this.records.audioVfoFilter,
+						mode: this.records.audioModeFilter,
+						bandwidthHz: this.records.audioBandwidthFilter,
+					},
+				))(),
+				receiverRecordsApi.getAudioRecordFacets(timeZone, utcOffsetMinutes),
 			]);
 			if (requestId !== recordRequestIds.get(this)) return;
-			this.records.scanItems = scanPage.items.filter((record): record is ReceiverScanRecord => record.type === 'scan');
-			this.records.scanTotal = scanPage.total;
-			this.records.audioItems = audioPage.items.filter((record): record is ReceiverAudioSessionRecord => record.type === 'audio-session');
-			this.records.audioTotal = audioPage.total;
-			const scanLastPage = Math.max(0, Math.ceil(scanPage.total / pageSize) - 1);
-			const audioLastPage = Math.max(0, Math.ceil(audioPage.total / pageSize) - 1);
+			const errors: string[] = [];
+			let scanLastPage = this.records.scanPage;
+			let audioLastPage = this.records.audioPage;
+			if (scanResult.status === 'fulfilled') {
+				const scanPage = scanResult.value;
+				this.records.scanItems = scanPage.items.filter((record): record is ReceiverScanRecord => record.type === 'scan');
+				this.records.scanTotal = scanPage.total;
+				scanLastPage = Math.max(0, Math.ceil(scanPage.total / pageSize) - 1);
+			} else {
+				errors.push(`spectrum scans: ${errorMessage(scanResult.reason)}`);
+			}
+			if (audioResult.status === 'fulfilled') {
+				const audioPage = audioResult.value;
+				this.records.audioItems = audioPage.items.filter((record): record is ReceiverAudioSessionRecord => record.type === 'audio-session');
+				this.records.audioTotal = audioPage.total;
+				audioLastPage = Math.max(0, Math.ceil(audioPage.total / pageSize) - 1);
+			} else {
+				errors.push(`VFO audio: ${errorMessage(audioResult.reason)}`);
+			}
+			if (facetResult.status === 'fulfilled') {
+				const audioFacets = facetResult.value;
+				this.records.audioFacets = audioFacets;
+				this.records.audioAvailableDateLookup = Object.fromEntries(audioFacets.available_dates.map(date => [date, true] as const));
+				if (!this.records.audioCalendarMonth) {
+					const latestAudioDate = audioFacets.available_dates[audioFacets.available_dates.length - 1] || localAudioDateKey(new Date());
+					this.records.audioCalendarMonth = latestAudioDate.slice(0, 7);
+				}
+			} else {
+				errors.push(`audio filter options: ${errorMessage(facetResult.reason)}`);
+			}
 			if (this.records.scanPage > scanLastPage || this.records.audioPage > audioLastPage) {
 				this.records.scanPage = Math.min(this.records.scanPage, scanLastPage);
 				this.records.audioPage = Math.min(this.records.audioPage, audioLastPage);
 				void this.loadReceiverRecords();
 				return;
 			}
-			this.records.error = '';
+			this.records.error = errors.length ? `Could not load some local Receiver records (${errors.join('; ')}).` : '';
 		} catch (error) {
 			if (requestId === recordRequestIds.get(this)) this.records.error = `Could not load local Receiver records: ${errorMessage(error)}`;
 		} finally {
@@ -98,6 +157,115 @@ export const recordsMethods = {
 			this.records.audioPage = Math.max(0, Math.min(lastPage, Math.floor(page)));
 		}
 		void this.loadReceiverRecords();
+	},
+
+	applyAudioRecordFilters(this: AppInstance) {
+		this.records.audioPage = 0;
+		this.records.audioItems = [];
+		void this.loadReceiverRecords();
+	},
+
+	hasAudioRecordFilters(this: AppInstance): boolean {
+		return Boolean(this.records.audioDateFilter || this.records.audioTimeFrom || this.records.audioTimeTo || this.records.audioMinimumFrequencyMHz || this.records.audioMaximumFrequencyMHz || this.records.audioVfoFilter || this.records.audioModeFilter || this.records.audioBandwidthFilter);
+	},
+
+	clearAudioRecordFilters(this: AppInstance) {
+		this.records.audioDateFilter = '';
+		this.records.audioTimeFrom = '';
+		this.records.audioTimeTo = '';
+		this.records.audioMinimumFrequencyMHz = '';
+		this.records.audioMaximumFrequencyMHz = '';
+		this.records.audioVfoFilter = '';
+		this.records.audioModeFilter = '';
+		this.records.audioBandwidthFilter = '';
+		this.applyAudioRecordFilters();
+	},
+
+	setAudioFrequencyFilter(this: AppInstance, event: Event, bound: 'min' | 'max') {
+		if (!(event.currentTarget instanceof HTMLInputElement)) return;
+		if (bound === 'min') this.records.audioMinimumFrequencyMHz = event.currentTarget.value;
+		else this.records.audioMaximumFrequencyMHz = event.currentTarget.value;
+		this.applyAudioRecordFilters();
+	},
+
+	audioCalendarWeekdays(this: AppInstance): string[] {
+		return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+	},
+
+	audioCalendarMonthLabel(this: AppInstance): string {
+		const [year, month] = (this.records.audioCalendarMonth || localAudioMonthKey(new Date())).split('-').map(Number);
+		return new Date(year, month - 1, 1, 12).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+	},
+
+	formatAudioDate(this: AppInstance, dateKey: string): string {
+		return localAudioDateFromKey(dateKey).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+	},
+
+	audioCalendarWeeks(this: AppInstance) {
+		const [year, month] = (this.records.audioCalendarMonth || localAudioMonthKey(new Date())).split('-').map(Number);
+		const monthStart = new Date(year, month - 1, 1, 12);
+		const firstVisibleDate = new Date(year, month - 1, 1 - monthStart.getDay(), 12);
+		return Array.from({ length: 6 }, (_, weekIndex) => Array.from({ length: 7 }, (_, dayIndex) => {
+			const date = new Date(firstVisibleDate);
+			date.setDate(firstVisibleDate.getDate() + weekIndex * 7 + dayIndex);
+			const dateKey = localAudioDateKey(date);
+			return { date: dateKey, day: date.getDate(), inMonth: date.getMonth() === monthStart.getMonth(), hasRecords: Boolean(this.records.audioAvailableDateLookup[dateKey]) };
+		}));
+	},
+
+	focusAudioCalendarDate(this: AppInstance, dateKey: string) {
+		window.requestAnimationFrame(() => document.getElementById(`audio-calendar-date-${dateKey}`)?.focus());
+	},
+
+	changeAudioCalendarMonth(this: AppInstance, offset: number) {
+		const [year, month] = (this.records.audioCalendarMonth || localAudioMonthKey(new Date())).split('-').map(Number);
+		const nextMonth = new Date(year, month - 1 + offset, 1, 12);
+		this.records.audioCalendarMonth = localAudioMonthKey(nextMonth);
+		this.records.audioCalendarFocusedDate = localAudioDateKey(nextMonth);
+		this.focusAudioCalendarDate(this.records.audioCalendarFocusedDate);
+	},
+
+	toggleAudioCalendar(this: AppInstance, event: Event) {
+		if (!(event.currentTarget instanceof HTMLDetailsElement)) return;
+		this.records.audioCalendarOpen = event.currentTarget.open;
+		if (!event.currentTarget.open) return;
+		const dates = this.records.audioFacets?.available_dates || [];
+		const focusDate = this.records.audioDateFilter || this.records.audioCalendarFocusedDate || dates[dates.length - 1] || localAudioDateKey(new Date());
+		this.records.audioCalendarMonth = focusDate.slice(0, 7);
+		this.records.audioCalendarFocusedDate = focusDate;
+		this.focusAudioCalendarDate(focusDate);
+	},
+
+	moveAudioCalendarFocus(this: AppInstance, event: KeyboardEvent, dateKey: string) {
+		const date = localAudioDateFromKey(dateKey);
+		switch (event.key) {
+			case 'ArrowLeft': date.setDate(date.getDate() - 1); break;
+			case 'ArrowRight': date.setDate(date.getDate() + 1); break;
+			case 'ArrowUp': date.setDate(date.getDate() - 7); break;
+			case 'ArrowDown': date.setDate(date.getDate() + 7); break;
+			case 'Home': date.setDate(date.getDate() - date.getDay()); break;
+			case 'End': date.setDate(date.getDate() + 6 - date.getDay()); break;
+			default: return;
+		}
+		event.preventDefault();
+		const nextDate = localAudioDateKey(date);
+		this.records.audioCalendarFocusedDate = nextDate;
+		this.records.audioCalendarMonth = nextDate.slice(0, 7);
+		this.focusAudioCalendarDate(nextDate);
+	},
+
+	selectAudioCalendarDate(this: AppInstance, dateKey: string) {
+		this.records.audioDateFilter = dateKey;
+		this.records.audioCalendarFocusedDate = dateKey;
+		this.records.audioCalendarMonth = dateKey.slice(0, 7);
+		this.records.audioCalendarOpen = false;
+		this.applyAudioRecordFilters();
+		window.requestAnimationFrame(() => document.querySelector<HTMLElement>('.audio-date-picker > summary')?.focus());
+	},
+
+	closeAudioCalendar(this: AppInstance) {
+		this.records.audioCalendarOpen = false;
+		window.requestAnimationFrame(() => document.querySelector<HTMLElement>('.audio-date-picker > summary')?.focus());
 	},
 
 	async selectMarkerSet(this: AppInstance) {
@@ -186,12 +354,23 @@ export const recordsMethods = {
 			this.records.error = 'Marker frequencies must be positive and finite; measured powers must be finite.';
 			return;
 		}
+		const markerSet = {
+			id: this.records.selectedMarkerSetId,
+			name,
+			markers: (this.records.markers as ReceiverMarker[]).map(marker => ({ ...marker })),
+		};
 		try {
-			const saved = await receiverRecordsApi.saveMarkerSet({
-				id: this.records.selectedMarkerSetId,
-				name,
-				markers: (this.records.markers as ReceiverMarker[]).map(marker => ({ ...marker })),
-			});
+			let saved;
+			try {
+				saved = await receiverRecordsApi.saveMarkerSet(markerSet);
+			} catch (error) {
+				if (!(error instanceof ReceiverRequestError) || error.status !== 409 || markerSet.id) throw error;
+				if (!window.confirm(`A marker set named "${name}" already exists. Replace its markers with the ${markerSet.markers.length} marker(s) shown here?`)) {
+					this.records.error = `Not saved: a marker set named "${name}" already exists. Choose another name or load that set.`;
+					return;
+				}
+				saved = await receiverRecordsApi.saveMarkerSet(markerSet, true);
+			}
 			const index = this.records.markerSets.findIndex((set: { id: string }) => set.id === saved.id);
 			if (index < 0) this.records.markerSets.push(saved);
 			else this.records.markerSets[index] = saved;
@@ -245,6 +424,10 @@ export const recordsMethods = {
 			this.records.error = 'Stop the active scan before deleting its record.';
 			return;
 		}
+		if (record.type === 'audio-session' && record.completed_at === null) {
+			this.records.error = 'Stop the VFO audio recording before deleting this session.';
+			return;
+		}
 		const description = record.type === 'scan' ? 'spectrum scan and its data' : 'audio session and its audio files';
 		if (!window.confirm(`Delete this ${description}? This cannot be undone.`)) return;
 		try {
@@ -261,6 +444,26 @@ export const recordsMethods = {
 			this.records.error = '';
 		} catch (error) {
 			this.records.error = `Could not delete record: ${errorMessage(error)}`;
+		}
+	},
+
+	async deleteAudioSegment(this: AppInstance, segment: ReceiverAudioSegmentRecord) {
+		if (segment.ended_at === null) {
+			this.records.error = 'Stop the active VFO recording before deleting it.';
+			return;
+		}
+		if (this.records.deletingAudioSegmentId) return;
+		const frequencyMHz = (segment.frequency_hz / 1_000_000).toFixed(6);
+		if (!window.confirm(`Delete VFO ${segment.vfo_index + 1} recording at ${frequencyMHz} MHz? This cannot be undone.`)) return;
+		this.records.deletingAudioSegmentId = segment.id;
+		this.records.error = '';
+		try {
+			await receiverRecordsApi.deleteAudioSegment(segment.id);
+			await this.loadReceiverRecords();
+		} catch (error) {
+			this.records.error = `Could not delete recording: ${errorMessage(error)}`;
+		} finally {
+			this.records.deletingAudioSegmentId = '';
 		}
 	},
 

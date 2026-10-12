@@ -6,9 +6,11 @@ import { exportSweepCandidatesCsv, parseSweepSession, serializeSweepSession } fr
 import { exportMarkerSetCsv as markerSetCsv, serializeMarkerSet } from './marker-export';
 import type { SweepSessionSnapshot } from './sweep-session';
 import { SweepWaterfallHistory, SweepWaterfallRenderer, SWEEP_WATERFALL_BINS, SWEEP_WATERFALL_ROWS } from './sweep-waterfall';
+import { decodeArchivedTrace, encodeArchivedTrace, encodeWaterfallRow } from './sweep-waterfall';
 import type { SweepCandidate, SweepConfig, SweepProgress, SweepSource, SweepSpectrumFrame } from '../worker/sweep-types';
-import { groupAdjacentCandidates, type SweepCandidateBand } from './candidate-bands';
+import { groupAdjacentCandidates, reselectCandidateBand, type SweepCandidateBand } from './candidate-bands';
 import { receiverRecordsApi } from './receiver-records-api';
+import { normalizeFrequencyShiftMhz } from '../frequency-shift';
 import type { ReceiverMarker, ReceiverTraceRecord } from './receiver-records-api';
 
 interface ListenRestore {
@@ -36,14 +38,27 @@ interface SweepRuntime {
 	stopRequested: boolean;
 	stopResume: boolean;
 	pendingCandidates: Map<number, SweepCandidate> | null;
+	pendingRemovedCandidateIds: Set<number>;
 	pendingCandidateScanId: string | null;
 	candidateMap: Map<number, SweepCandidate>;
 	candidateRequestId: number;
 	lastSavedTraceSweep: number;
 	candidatePersistQueue: Promise<void>;
+	candidatePersistPending: CandidatePersistBatch[];
+	candidatePersistDraining: boolean;
 	tracePersistQueue: Promise<void>;
 	candidateUpdateTimer: number | null;
 	listenRestore: ListenRestore | null;
+	markerPointerType: string;
+	markerPressTimer: number | null;
+	markerPressAdded: boolean;
+	lastClickMarkerId: string | null;
+	markerUndoListener: ((event: KeyboardEvent) => void) | null;
+}
+
+interface CandidatePersistBatch {
+	scanId: string;
+	candidates: Map<number, SweepCandidate>;
 }
 
 const sweepRuntime = new WeakMap<object, SweepRuntime>();
@@ -70,14 +85,22 @@ function runtimeFor(app: object): SweepRuntime {
 			stopResume: true,
 			drawFrame: null,
 			pendingCandidates: null,
+			pendingRemovedCandidateIds: new Set(),
 			pendingCandidateScanId: null,
 			candidateMap: new Map(),
 			candidateRequestId: 0,
 			lastSavedTraceSweep: 0,
 			candidatePersistQueue: Promise.resolve(),
+			candidatePersistPending: [],
+			candidatePersistDraining: false,
 			tracePersistQueue: Promise.resolve(),
 			candidateUpdateTimer: null,
 			listenRestore: null,
+			markerPointerType: '',
+			markerPressTimer: null,
+			markerPressAdded: false,
+			lastClickMarkerId: null,
+			markerUndoListener: null,
 		};
 		sweepRuntime.set(app, runtime);
 	}
@@ -147,6 +170,8 @@ function refreshLocalCandidatePage(app: AppInstance): void {
 	app.sweep.candidateTotal = filtered.length;
 	const start = app.sweep.candidatePage * pageSize;
 	app.sweep.candidates = filtered.slice(start, start + pageSize);
+	const selected = app.sweep.selectedCandidate as SweepCandidate | null;
+	app.sweep.selectedCandidate = reselectCandidateBand(selected, filtered) ?? selected;
 	app.sweep.candidatePageFromStore = true;
 	app.sweep.candidatesLoading = false;
 }
@@ -159,39 +184,60 @@ async function persistCandidateUpdates(scanId: string, updates: SweepCandidate[]
 	}
 }
 
-function applyCandidateUpdate(app: AppInstance, updates: SweepCandidate[], scanId: string | null): void {
+// Archive writes are coalesced: while one batch is being written, later updates
+// for the same scan merge into a single pending batch (latest values win), so a
+// slow archive never builds a backlog that Stop has to wait for.
+function queueCandidatePersist(app: AppInstance, scanId: string, updates: SweepCandidate[]): void {
 	const runtime = runtimeFor(app);
-	if (scanId && app.sweep.scanId !== scanId) {
-		runtime.candidatePersistQueue = runtime.candidatePersistQueue.then(async () => {
+	if (updates.length === 0) return;
+	let batch = runtime.candidatePersistPending.find(entry => entry.scanId === scanId);
+	if (!batch) {
+		batch = { scanId, candidates: new Map() };
+		runtime.candidatePersistPending.push(batch);
+	}
+	for (const candidate of updates) batch.candidates.set(candidate.id, candidate);
+	if (runtime.candidatePersistDraining) return;
+	runtime.candidatePersistDraining = true;
+	runtime.candidatePersistQueue = drainCandidatePersist(app);
+}
+
+async function drainCandidatePersist(app: AppInstance): Promise<void> {
+	const runtime = runtimeFor(app);
+	try {
+		for (let batch = runtime.candidatePersistPending.shift(); batch; batch = runtime.candidatePersistPending.shift()) {
+			const scanId = batch.scanId;
 			try {
-				await persistCandidateUpdates(scanId, updates);
+				await persistCandidateUpdates(scanId, Array.from(batch.candidates.values()));
+				const morePending = runtime.candidatePersistPending.some(entry => entry.scanId === scanId);
+				if (app.sweep.scanId === scanId && !morePending) {
+					app.sweep.candidatePageFromStore = true;
+					void app.refreshSweepCandidates();
+				}
 			} catch (error) {
 				app.records.error = `Could not persist sweep candidates: ${error instanceof Error ? error.message : String(error)}`;
+				if (app.sweep.scanId === scanId) refreshLocalCandidatePage(app);
 			}
-		});
+		}
+	} finally {
+		runtime.candidatePersistDraining = false;
+	}
+}
+
+function applyCandidateUpdate(app: AppInstance, updates: SweepCandidate[], removedIds: number[], scanId: string | null): void {
+	const runtime = runtimeFor(app);
+	if (scanId && app.sweep.scanId !== scanId) {
+		queueCandidatePersist(app, scanId, updates);
 		return;
 	}
-	const selectedId = (app.sweep.selectedCandidate as SweepCandidate | null)?.id;
+	for (const id of removedIds) runtime.candidateMap.delete(id);
 	for (const candidate of updates) runtime.candidateMap.set(candidate.id, candidate);
 	app.sweep.candidateHistoryTotal = runtime.candidateMap.size;
 	app.sweep.progress.detectedCount = runtime.candidateMap.size;
-	app.sweep.selectedCandidate = selectedId === undefined ? null : runtime.candidateMap.get(selectedId) || null;
 	if (!scanId) {
 		refreshLocalCandidatePage(app);
 		return;
 	}
-	runtime.candidatePersistQueue = runtime.candidatePersistQueue.then(async () => {
-		try {
-			await persistCandidateUpdates(scanId, updates);
-			if (app.sweep.scanId === scanId) {
-				app.sweep.candidatePageFromStore = true;
-				void app.refreshSweepCandidates();
-			}
-		} catch (error) {
-			app.records.error = `Could not persist sweep candidates: ${error instanceof Error ? error.message : String(error)}`;
-			if (app.sweep.scanId === scanId) refreshLocalCandidatePage(app);
-		}
-	});
+	queueCandidatePersist(app, scanId, updates);
 }
 
 
@@ -202,17 +248,23 @@ function flushCandidateUpdate(app: AppInstance): void {
 		runtime.candidateUpdateTimer = null;
 	}
 	const pending = runtime.pendingCandidates;
+	const removed = Array.from(runtime.pendingRemovedCandidateIds);
 	const scanId = runtime.pendingCandidateScanId;
 	runtime.pendingCandidates = null;
+	runtime.pendingRemovedCandidateIds.clear();
 	runtime.pendingCandidateScanId = null;
-	if (pending?.size) applyCandidateUpdate(app, Array.from(pending.values()), scanId);
+	if (pending?.size || removed.length) applyCandidateUpdate(app, Array.from(pending?.values() ?? []), removed, scanId);
 }
 
-function queueCandidateUpdate(app: AppInstance, candidates: SweepCandidate[], scanId: string | null): void {
+function queueCandidateUpdate(app: AppInstance, candidates: SweepCandidate[], removedIds: number[], scanId: string | null): void {
 	const runtime = runtimeFor(app);
 	if (runtime.pendingCandidateScanId !== null && runtime.pendingCandidateScanId !== scanId) flushCandidateUpdate(app);
 	runtime.pendingCandidateScanId = scanId;
 	runtime.pendingCandidates ||= new Map();
+	for (const id of removedIds) {
+		runtime.pendingCandidates.delete(id);
+		runtime.pendingRemovedCandidateIds.add(id);
+	}
 	for (const candidate of candidates) runtime.pendingCandidates.set(candidate.id, candidate);
 	if (!app.sweep.active && !app.sweep.starting && !app.sweep.stopping) {
 		flushCandidateUpdate(app);
@@ -225,18 +277,6 @@ function queueCandidateUpdate(app: AppInstance, candidates: SweepCandidate[], sc
 	}, CANDIDATE_UPDATE_INTERVAL_MS);
 }
 
-
-function compactAverageTrace(frame: SweepSpectrumFrame): Uint8Array<ArrayBuffer> {
-	const trace = new Uint8Array(2_048);
-	const values = frame.average;
-	if (values.length === 0) return trace;
-	for (let bin = 0; bin < trace.length; bin++) {
-		const sourceIndex = Math.min(values.length - 1, Math.floor(bin * values.length / trace.length));
-		const db = Number.isFinite(values[sourceIndex]) ? clamp(values[sourceIndex], -160, 0) : -160;
-		trace[bin] = Math.round((db + 160) * 255 / 160);
-	}
-	return trace;
-}
 
 async function finishRecordedScan(app: AppInstance, status: 'complete' | 'stopped' | 'failed'): Promise<void> {
 	const scanId = app.sweep.scanId as string | null;
@@ -269,11 +309,34 @@ async function loadAllCandidates(app: AppInstance): Promise<SweepCandidate[]> {
 	}
 	return candidates;
 }
+const MARKER_LONG_PRESS_MS = 550;
+
+function clearMarkerPress(runtime: SweepRuntime): void {
+	if (runtime.markerPressTimer !== null) clearTimeout(runtime.markerPressTimer);
+	runtime.markerPressTimer = null;
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+	const element = target as HTMLElement | null;
+	if (!element || typeof element.closest !== 'function') return false;
+	return element.isContentEditable || element.closest('input, textarea, select, [contenteditable="true"]') !== null;
+}
+
 async function addSweepMarkerAt(app: AppInstance, canvas: HTMLCanvasElement, clientX: number, clientY: number): Promise<void> {
+	const knownIds = new Set((app.records.markers as ReceiverMarker[]).map(marker => marker.id));
+	const added = await addSweepMarkerAtPoint(app, canvas, clientX, clientY);
+	const marker = added ? (app.records.markers as ReceiverMarker[]).find(item => !knownIds.has(item.id)) : undefined;
+	if (!marker) return;
+	runtimeFor(app).lastClickMarkerId = marker.id;
+	const undoKeys = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? '⌘Z' : 'Ctrl+Z';
+	app.showMsg(`Marker added at ${(marker.frequencyHz / 1_000_000).toFixed(6)} MHz. Press ${undoKeys} to remove it.`);
+}
+
+async function addSweepMarkerAtPoint(app: AppInstance, canvas: HTMLCanvasElement, clientX: number, clientY: number): Promise<boolean> {
 	const rect = canvas.getBoundingClientRect();
 	const x = clientX - rect.left;
 	const y = clientY - rect.top;
-	if (x < 54 || x > rect.width - 12 || y < 14 || y > rect.height - 28) return;
+	if (x < 54 || x > rect.width - 12 || y < 14 || y > rect.height - 28) return false;
 	const ratio = (x - 54) / Math.max(1, rect.width - 66);
 	const frequencyHz = app.sweep.viewportStartHz + ratio * (app.sweep.viewportEndHz - app.sweep.viewportStartHz);
 	const frame = runtimeFor(app).frame;
@@ -286,6 +349,7 @@ async function addSweepMarkerAt(app: AppInstance, canvas: HTMLCanvasElement, cli
 		}
 	}
 	await app.addReceiverMarker(frequencyHz, powerDb);
+	return true;
 }
 
 export const sweepMethods = {
@@ -297,6 +361,18 @@ export const sweepMethods = {
 			runtime.resizeObserver = new ResizeObserver(() => this.drawSweepSpectrum());
 			if (runtime.spectrumCanvas) runtime.resizeObserver.observe(runtime.spectrumCanvas);
 			if (runtime.waterfallCanvas) runtime.resizeObserver.observe(runtime.waterfallCanvas);
+		}
+		if (!runtime.markerUndoListener) {
+			runtime.markerUndoListener = (event: KeyboardEvent) => {
+				if (event.key.toLowerCase() !== 'z' || !(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey) return;
+				const markerId = runtime.lastClickMarkerId;
+				if (this.activeWorkspace !== 'spectrum' || !markerId || isEditableTarget(event.target)) return;
+				event.preventDefault();
+				runtime.lastClickMarkerId = null;
+				if (!(this.records.markers as ReceiverMarker[]).some(marker => marker.id === markerId)) return;
+				void this.removeReceiverMarker(markerId).then(() => this.showMsg('Marker removed.'));
+			};
+			window.addEventListener('keydown', runtime.markerUndoListener);
 		}
 		this.drawSweepSpectrum();
 	},
@@ -322,12 +398,8 @@ export const sweepMethods = {
 				this.sweep.candidates = page.items;
 				this.sweep.candidateTotal = page.total;
 				this.sweep.candidatePageFromStore = true;
-				const selectedId = (this.sweep.selectedCandidate as SweepCandidate | null)?.id;
-				if (selectedId !== undefined) {
-					this.sweep.selectedCandidate = page.items.find(candidate => candidate.id === selectedId)
-						|| runtime.candidateMap.get(selectedId)
-						|| null;
-				}
+				const selected = this.sweep.selectedCandidate as SweepCandidate | null;
+				this.sweep.selectedCandidate = reselectCandidateBand(selected, page.items) ?? selected;
 			} catch (error) {
 				if (requestId !== runtime.candidateRequestId) return;
 				this.records.error = `Could not load candidate history: ${error instanceof Error ? error.message : String(error)}`;
@@ -577,7 +649,7 @@ export const sweepMethods = {
 					const traceScanId = scanId;
 					if (traceScanId && frame.sweepCount > currentRuntime.lastSavedTraceSweep) {
 						currentRuntime.lastSavedTraceSweep = frame.sweepCount;
-						const trace = compactAverageTrace(frame);
+						const trace = encodeArchivedTrace(frame.average);
 						currentRuntime.tracePersistQueue = currentRuntime.tracePersistQueue.then(async () => {
 							try {
 								await receiverRecordsApi.saveTrace(traceScanId, frame.sweepCount, trace);
@@ -589,8 +661,8 @@ export const sweepMethods = {
 					if (this.sweep.visualization === 'spectrum' || addedWaterfallRow) this.drawSweepSpectrum();
 				}),
 				Comlink.proxy((progress: SweepProgress) => { this.sweep.progress = progress; }),
-				Comlink.proxy((candidates: SweepCandidate[]) => {
-					queueCandidateUpdate(this, candidates, scanId);
+				Comlink.proxy((candidates: SweepCandidate[], removedCandidateIds: number[]) => {
+					queueCandidateUpdate(this, candidates, removedCandidateIds, scanId);
 				}),
 				Comlink.proxy((error: string) => { void this.handleSweepError(error); }),
 			);
@@ -676,6 +748,7 @@ export const sweepMethods = {
 			runtime.candidateUpdateTimer = null;
 		}
 		runtime.pendingCandidates = null;
+		runtime.pendingRemovedCandidateIds.clear();
 		runtime.pendingCandidateScanId = null;
 		runtime.candidateMap.clear();
 		runtime.candidateRequestId++;
@@ -733,25 +806,24 @@ export const sweepMethods = {
 				traceBytes.push(...batch);
 			}
 			const latestTrace = traceMetadata[traceMetadata.length - 1] || null;
-			const bytes = traceBytes[traceBytes.length - 1] || null;
+			const traceLevels = traceBytes.map(trace => decodeArchivedTrace(trace));
+			const average = traceLevels[traceLevels.length - 1] || null;
 			this.clearSweepData();
 			const runtime = runtimeFor(this);
-			if (traceBytes.length > 0 && latestTrace) {
-				const archivedRows = new Uint8Array(traceBytes.length * SWEEP_WATERFALL_BINS);
-				traceBytes.forEach((trace, index) => archivedRows.set(trace, index * SWEEP_WATERFALL_BINS));
-				runtime.waterfallHistory.restore(archivedRows, traceBytes.length, latestTrace.sweep);
+			if (traceLevels.length > 0 && latestTrace) {
+				const archivedRows = new Uint8Array(traceLevels.length * SWEEP_WATERFALL_BINS);
+				traceLevels.forEach((levels, index) => archivedRows.set(encodeWaterfallRow(levels), index * SWEEP_WATERFALL_BINS));
+				runtime.waterfallHistory.restore(archivedRows, traceLevels.length, latestTrace.sweep);
 			}
 			runtime.config = details.config;
 			runtime.source = details.source === 'native' || details.source === 'manual' || details.source === 'simulated'
 				? details.source
 				: 'simulated';
-			if (bytes) {
-				const average = new Float32Array(bytes.length);
-				for (let index = 0; index < bytes.length; index++) average[index] = bytes[index] * 160 / 255 - 160;
+			if (average) {
 				runtime.frame = {
 					startHz: details.config.startHz,
 					endHz: details.config.endHz,
-					resolutionHz: (details.config.endHz - details.config.startHz) / bytes.length,
+					resolutionHz: (details.config.endHz - details.config.startHz) / average.length,
 					sweepCount: latestTrace?.sweep || 0,
 					current: average,
 					average,
@@ -786,7 +858,7 @@ export const sweepMethods = {
 				discardedBytes: 0,
 			};
 			this.sweep.waterfallRows = runtime.waterfallHistory.rowCount;
-			this.sweep.hasResults = Boolean(bytes) || details.candidate_count > 0;
+			this.sweep.hasResults = Boolean(average) || details.candidate_count > 0;
 			this.sweep.offlineSessionName = latestTrace
 				? `Archived · sweep ${latestTrace.sweep}`
 				: 'Archived · candidate history only';
@@ -910,6 +982,7 @@ export const sweepMethods = {
 				runtime.candidateUpdateTimer = null;
 			}
 			runtime.pendingCandidates = null;
+			runtime.pendingRemovedCandidateIds.clear();
 			runtime.pendingCandidateScanId = null;
 			runtime.candidateMap.clear();
 			for (const candidate of session.candidates) runtime.candidateMap.set(candidate.id, candidate);
@@ -941,15 +1014,12 @@ export const sweepMethods = {
 			this.sweep.visualization = session.display.visualization;
 			this.sweep.scanId = null;
 			this.sweep.archive = false;
-			this.sweep.candidateHistoryTotal = session.candidates.length;
-			this.sweep.candidateTotal = session.candidates.length;
 			this.sweep.candidatePage = 0;
-			this.sweep.candidatePageFromStore = false;
-			this.sweep.candidatesLoading = false;
-			this.sweep.candidates = session.candidates;
-			this.sweep.selectedCandidate = session.display.selectedCandidatePeakHz === null
+			const selectedPeakHz = session.display.selectedCandidatePeakHz;
+			this.sweep.selectedCandidate = selectedPeakHz === null
 				? null
-				: session.candidates.find(candidate => candidate.peakFrequencyHz === session.display.selectedCandidatePeakHz) || null;
+				: session.candidates.find(candidate => candidate.peakFrequencyHz === selectedPeakHz) || null;
+			refreshLocalCandidatePage(this);
 			this.sweep.progress = {
 				sweepCount: session.frame.sweepCount,
 				sweepsPerSecond: 0,
@@ -1001,7 +1071,10 @@ export const sweepMethods = {
 				}
 			}
 			if (this.running) await this.togglePlay(false, true);
-			const frequencyMHz = candidate.peakFrequencyHz / 1_000_000;
+			// The scan tunes the SDR directly; the Listener works in displayed
+			// frequency, which includes the converter shift.
+			const frequencyShiftMHz = normalizeFrequencyShiftMhz(this.radio.frequencyShift);
+			const frequencyMHz = candidate.peakFrequencyHz / 1_000_000 + frequencyShiftMHz;
 			this.radio.centerFreq = frequencyMHz;
 			currentVfo.freq = frequencyMHz;
 			currentVfo.displayFreq = this.formatFreq(frequencyMHz);
@@ -1009,7 +1082,9 @@ export const sweepMethods = {
 				currentVfo.mode = this.sweep.listenMode;
 				this.applyModeDefaults(vfoIndex);
 			}
-			this.sweep.listenFrequencyHz = candidate.peakFrequencyHz;
+			currentVfo.enabled = true;
+			this.activeVfoIndex = vfoIndex;
+			this.sweep.listenFrequencyHz = frequencyMHz * 1_000_000;
 			await this.startStream(true);
 			if (!this.running) {
 				const previous = restoreListeningState(this);
@@ -1021,7 +1096,9 @@ export const sweepMethods = {
 			this.activeWorkspace = 'listener';
 			await this.$nextTick();
 			this.resizeFftCanvas();
-			this.showMsg(`Listening at ${(candidate.peakFrequencyHz / 1_000_000).toFixed(6)} MHz.`);
+			this.showMsg(frequencyShiftMHz === 0
+				? `Listening at ${frequencyMHz.toFixed(6)} MHz.`
+				: `Listening at ${frequencyMHz.toFixed(6)} MHz (scan frequency ${(candidate.peakFrequencyHz / 1_000_000).toFixed(6)} MHz, shift ${frequencyShiftMHz} MHz).`);
 		} catch (error) {
 			const previous = restoreListeningState(this);
 			if (!this.running && previous?.resumeReceiver && this.connected && this.remoteMode === 'none') {
@@ -1112,6 +1189,21 @@ export const sweepMethods = {
 		runtime.dragStartHz = this.sweep.viewportStartHz;
 		runtime.dragEndHz = this.sweep.viewportEndHz;
 		canvas.setPointerCapture(event.pointerId);
+		// Touch readings must not add markers by accident: a tap shows the value,
+		// a long press without moving adds the marker.
+		clearMarkerPress(runtime);
+		runtime.markerPointerType = event.pointerType;
+		runtime.markerPressAdded = false;
+		if (event.pointerType === 'touch') {
+			const { clientX, clientY } = event;
+			runtime.markerPressTimer = window.setTimeout(() => {
+				runtime.markerPressTimer = null;
+				if (runtime.dragStartX === null || runtime.dragMoved) return;
+				runtime.markerPressAdded = true;
+				void addSweepMarkerAtPoint(this, canvas, clientX, clientY)
+					.then(added => { if (added) this.showMsg('Marker added.'); });
+			}, MARKER_LONG_PRESS_MS);
+		}
 	},
 
 	sweepCanvasPointerMove(this: AppInstance, event: PointerEvent) {
@@ -1121,7 +1213,10 @@ export const sweepMethods = {
 		if (runtime.dragStartX !== null) {
 			const deltaX = event.clientX - runtime.dragStartX;
 			const deltaY = event.clientY - (runtime.dragStartY ?? event.clientY);
-			if (!runtime.dragMoved && Math.hypot(deltaX, deltaY) > 5) runtime.dragMoved = true;
+			if (!runtime.dragMoved && Math.hypot(deltaX, deltaY) > 5) {
+				runtime.dragMoved = true;
+				clearMarkerPress(runtime);
+			}
 			if (runtime.dragMoved) {
 				const span = runtime.dragEndHz - runtime.dragStartHz;
 				const shift = -deltaX / Math.max(1, rect.width - 66) * span;
@@ -1154,16 +1249,26 @@ export const sweepMethods = {
 		const runtime = runtimeFor(this);
 		const canvas = event.currentTarget as HTMLCanvasElement;
 		const wasClick = runtime.dragStartX !== null && !runtime.dragMoved && event.type === 'pointerup';
+		const touch = runtime.markerPointerType === 'touch';
+		const pressAdded = runtime.markerPressAdded;
+		clearMarkerPress(runtime);
 		runtime.dragStartX = null;
 		runtime.dragStartY = null;
 		runtime.dragMoved = false;
-		if (wasClick) void addSweepMarkerAt(this, canvas, event.clientX, event.clientY);
+		runtime.markerPressAdded = false;
+		if (wasClick && touch) {
+			if (!pressAdded) this.sweepCanvasPointerMove(event);
+		} else if (wasClick) {
+			void addSweepMarkerAt(this, canvas, event.clientX, event.clientY);
+		}
 		if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
 	},
 
-	sweepCanvasPointerLeave(this: AppInstance) {
+	sweepCanvasPointerLeave(this: AppInstance, event?: PointerEvent) {
 		const runtime = runtimeFor(this);
 		if (runtime.dragStartX !== null) return;
+		// A finger leaves the canvas as it lifts; keep the tapped reading visible.
+		if (event?.pointerType === 'touch') return;
 		this.sweep.hoverFrequencyHz = null;
 		this.sweep.hoverPowerDb = null;
 		this.drawSweepSpectrum();
@@ -1238,5 +1343,8 @@ export const sweepMethods = {
 		runtime.spectrumCanvas = null;
 		runtime.waterfallCanvas = null;
 		runtime.waterfallRenderer = null;
+		clearMarkerPress(runtime);
+		if (runtime.markerUndoListener) window.removeEventListener('keydown', runtime.markerUndoListener);
+		runtime.markerUndoListener = null;
 	},
 };

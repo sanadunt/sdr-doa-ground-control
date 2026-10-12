@@ -1,7 +1,14 @@
 import {
 	SWEEP_DISPLAY_BINS,
+	SWEEP_SAMPLE_RATE_HZ,
 	validateSweepConfig,
 } from '../worker/sweep-types';
+import {
+	LEGACY_SWEEP_LEVEL_MAX_DB,
+	SWEEP_WATERFALL_MAX_DB,
+	SWEEP_WATERFALL_MIN_DB,
+	transcodeWaterfallLevels,
+} from './sweep-waterfall';
 import type {
 	SweepCandidate,
 	SweepConfig,
@@ -29,6 +36,9 @@ export interface SweepSessionWaterfall {
 	rowCount: number;
 	latestSweepCount: number;
 	data: number[];
+	/** dB at level 0 and 255; files without them used -160..0 dB. */
+	minDb?: number;
+	maxDb?: number;
 }
 
 export interface SweepSessionSnapshot {
@@ -101,12 +111,24 @@ function parseCandidate(value: unknown, config: SweepConfig, fallbackId: number)
 		|| !isFiniteNumber(maxPeakFrequencyHz)) {
 		throw new TypeError('Invalid candidate identity or peak frequency range');
 	}
+	// Older builds reported the nominal centre of the last, partial bin, which
+	// can sit up to one bin past the sweep end; pull such values onto the range.
+	const toleranceHz = SWEEP_SAMPLE_RATE_HZ / config.fftSize;
+	const ontoRange = (value: number): number => (
+		value >= config.startHz - toleranceHz && value <= config.endHz + toleranceHz
+			? Math.min(config.endHz, Math.max(config.startHz, value))
+			: value
+	);
 	const parsed = {
 		...candidate,
 		id,
-		meanPeakFrequencyHz,
-		minPeakFrequencyHz,
-		maxPeakFrequencyHz,
+		startHz: ontoRange(candidate.startHz as number),
+		endHz: ontoRange(candidate.endHz as number),
+		centerHz: ontoRange(candidate.centerHz as number),
+		peakFrequencyHz: ontoRange(peakFrequencyHz),
+		meanPeakFrequencyHz: ontoRange(meanPeakFrequencyHz),
+		minPeakFrequencyHz: ontoRange(minPeakFrequencyHz),
+		maxPeakFrequencyHz: ontoRange(maxPeakFrequencyHz),
 	} as SweepCandidate;
 	if (parsed.startHz < config.startHz || parsed.endHz > config.endHz
 		|| parsed.startHz >= parsed.endHz || parsed.centerHz < parsed.startHz
@@ -141,6 +163,7 @@ export function serializeSweepSession(snapshot: SweepSessionSnapshot): string {
 			maxHold: Array.from(snapshot.frame.maxHold),
 		},
 		display: { ...snapshot.display },
+		waterfall: { ...snapshot.waterfall, minDb: SWEEP_WATERFALL_MIN_DB, maxDb: SWEEP_WATERFALL_MAX_DB },
 	};
 	return JSON.stringify(file);
 }
@@ -189,8 +212,9 @@ export function parseSweepSession(text: string): ParsedSweepSession {
 		|| startHz !== config.startHz || endHz !== config.endHz || resolutionHz <= 0) {
 		throw new TypeError('Spectrum frame does not match its sweep configuration');
 	}
+	// Spans narrower than the display resolution have one trace point per FFT bin.
 	const parseTrace = (value: unknown): Float32Array => {
-		if (!Array.isArray(value) || value.length !== SWEEP_DISPLAY_BINS
+		if (!Array.isArray(value) || value.length < 1 || value.length > SWEEP_DISPLAY_BINS
 			|| !value.every(isFiniteNumber)) throw new TypeError('Invalid spectrum trace');
 		return Float32Array.from(value);
 	};
@@ -203,6 +227,9 @@ export function parseSweepSession(text: string): ParsedSweepSession {
 		average: parseTrace(frameFields.average),
 		maxHold: parseTrace(frameFields.maxHold),
 	};
+	if (frame.current.length !== frame.average.length || frame.maxHold.length !== frame.average.length) {
+		throw new TypeError('Invalid spectrum trace');
+	}
 
 	const rawCandidates = root.candidates;
 	if (!Array.isArray(rawCandidates)) {
@@ -242,6 +269,12 @@ export function parseSweepSession(text: string): ParsedSweepSession {
 	const rowCount = waterfallFields.rowCount;
 	const latestSweepCount = waterfallFields.latestSweepCount;
 	const data = waterfallFields.data;
+	const levelMinDb = waterfallFields.minDb === undefined ? SWEEP_WATERFALL_MIN_DB : waterfallFields.minDb;
+	const levelMaxDb = waterfallFields.maxDb === undefined ? LEGACY_SWEEP_LEVEL_MAX_DB : waterfallFields.maxDb;
+	if (!isFiniteNumber(levelMinDb) || !isFiniteNumber(levelMaxDb) || levelMinDb < -400 || levelMaxDb > 400
+		|| levelMaxDb - levelMinDb < 1) {
+		throw new TypeError('Invalid waterfall history');
+	}
 	if (!Number.isInteger(rowCount) || (rowCount as number) < 0 || (rowCount as number) > MAX_WATERFALL_ROWS
 		|| !Number.isInteger(latestSweepCount) || (latestSweepCount as number) < (rowCount as number)
 		|| (latestSweepCount as number) > frame.sweepCount
@@ -261,7 +294,9 @@ export function parseSweepSession(text: string): ParsedSweepSession {
 		waterfall: {
 			rowCount: rowCount as number,
 			latestSweepCount: latestSweepCount as number,
-			data: [...data] as number[],
+			data: Array.from(transcodeWaterfallLevels(data as number[], levelMinDb, levelMaxDb)),
+			minDb: SWEEP_WATERFALL_MIN_DB,
+			maxDb: SWEEP_WATERFALL_MAX_DB,
 		},
 	};
 }

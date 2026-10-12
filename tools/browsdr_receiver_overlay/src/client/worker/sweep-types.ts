@@ -7,6 +7,7 @@ export const SWEEP_OFFSET_HZ = 7_500_000;
 export const SWEEP_BLOCK_BYTES = 16_384;
 export const SWEEP_HEADER_BYTES = 10;
 export const SWEEP_MAX_BINS = 500_000;
+export const SWEEP_MAX_CANDIDATES = 1_000;
 export const SWEEP_CANDIDATE_PEAK_TOLERANCE_HZ = 50_000;
 export const SWEEP_DISPLAY_BINS = 2_048;
 
@@ -68,7 +69,7 @@ export interface SweepCandidate {
 export interface SweepEngineCallbacks {
 	onSpectrum(frame: SweepSpectrumFrame): void;
 	onProgress(progress: SweepProgress): void;
-	onCandidates(candidates: SweepCandidate[]): void;
+	onCandidates(candidates: SweepCandidate[], removedCandidateIds: number[]): void;
 	onError(error: string): void;
 }
 

@@ -12,17 +12,23 @@ from __future__ import annotations
 
 import argparse
 import csv
+import dataclasses
+import errno
+import http.client
 import io
 import json
 import math
+import socket
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
+from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 SCHEMA_VERSION = 1
 DEFAULT_TIMEOUT_SECONDS = 5.0
@@ -30,12 +36,35 @@ DEFAULT_MAX_BODY_BYTES = 128 * 1024
 DEFAULT_STATUS_MAX_AGE_MS = 10_000
 DEFAULT_DOA_MAX_AGE_MS = 5_000
 DEFAULT_MAX_FUTURE_SKEW_MS = 5_000
+MAX_TOTAL_BUDGET_SECONDS = 300.0
+# A worker that finishes right at the deadline still gets its result recorded.
+DEADLINE_GRACE_SECONDS = 0.1
 ANGLE_CONSISTENCY_TOLERANCE_DEG = 1.0
 ANGULAR_PEAK_ANGLE_TOLERANCE_DEG = 3.0
 # CSV and XML are separate files updated by the node. A bounded read sequence
 # can observe adjacent records with different node timestamps; exact equality
 # would incorrectly quarantine a healthy live pair.
 NATIVE_TIMESTAMP_TOLERANCE_MS = 2_000
+# Adjacent-frame pairs are re-read at most this many times to obtain a
+# same-frame pair; the angle consistency test only applies to same-frame pairs.
+NATIVE_PAIR_REREADS = 2
+# ROOT-MUSIC plus array_offset can leave the upstream angle outside [0, 360).
+NATIVE_ANGLE_MIN_DEG = -360.0
+NATIVE_ANGLE_MAX_DEG = 720.0
+CSV_HEADER_FIELDS = 17
+CSV_VECTOR_BINS = 360
+CSV_FIELDS = CSV_HEADER_FIELDS + CSV_VECTOR_BINS
+CSV_STATION_INDEX = 7
+MAX_CSV_STATION_EXTRA_FIELDS = 16
+# Output VFO = ALL writes one row per VFO that passes squelch.
+MAX_CSV_ROWS = 16
+CSV_XML_FREQUENCY_MATCH_HZ = 1_000
+# Upstream XML writes max(0, native_power_db + 100); CSV floors native power
+# at -100 dB.
+XML_POWER_CLIP_FLOOR = 0.0
+CSV_POWER_FLOOR_DB = -100.0
+NODE_PROGRESS_COUNTERS = ("timestamp_ms", "uptime_ms", "data_frame_index")
+TRANSPORT_ERROR_KINDS = frozenset({"timeout", "connection_refused", "unreachable"})
 DEFAULT_ALLOWED_DATA_HOSTS = frozenset({
     "doasdr.local",
     "192.168.100.100",
@@ -132,6 +161,9 @@ class FetchedResource:
     body: bytes
     retrieved_at_ms: int
     error: Optional[str] = None
+    error_kind: Optional[str] = None
+    elapsed_ms: Optional[int] = None
+    attempts: int = 1
 
     def metadata(self) -> Dict[str, Any]:
         result: Dict[str, Any] = {
@@ -139,6 +171,7 @@ class FetchedResource:
             "url": _redact_url(self.url),
             "ok": self.ok,
             "retrieved_at_ms": self.retrieved_at_ms,
+            "attempts": self.attempts,
         }
         if self.http_status is not None:
             result["http_status"] = self.http_status
@@ -148,11 +181,57 @@ class FetchedResource:
             result["body_bytes"] = len(self.body)
         if self.error:
             result["error"] = self.error
+        if self.error_kind:
+            result["error_kind"] = self.error_kind
+        if self.elapsed_ms is not None:
+            result["elapsed_ms"] = self.elapsed_ms
         return result
 
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _elapsed_ms(started_monotonic: float) -> int:
+    return max(0, int(round((time.monotonic() - started_monotonic) * 1000)))
+
+
+def _not_fetched(base_url: Any, path: str, error: str, error_kind: str) -> FetchedResource:
+    return FetchedResource(
+        path=path,
+        url=str(base_url).rstrip("/") + path,
+        ok=False,
+        http_status=None,
+        content_type=None,
+        body=b"",
+        retrieved_at_ms=now_ms(),
+        error=error,
+        error_kind=error_kind,
+        elapsed_ms=0,
+        attempts=0,
+    )
+
+
+def _transport_error(exc: BaseException) -> Tuple[str, str]:
+    """Map a transport exception to a bounded message and error kind."""
+    reason: Any = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, (socket.timeout, TimeoutError)):
+        return "timed out", "timeout"
+    if isinstance(reason, ConnectionRefusedError):
+        return "connection refused", "connection_refused"
+    if isinstance(reason, socket.gaierror):
+        return "host name resolution failed", "unreachable"
+    if isinstance(reason, OSError) and reason.errno in {
+        errno.EHOSTUNREACH,
+        errno.ENETUNREACH,
+        errno.EHOSTDOWN,
+        errno.ENETDOWN,
+        errno.EADDRNOTAVAIL,
+    }:
+        return "host unreachable", "unreachable"
+    if isinstance(reason, BaseException):
+        return f"network error ({type(reason).__name__})", "network"
+    return "network error", "network"
 
 
 def _finite_float(value: Any, field: str) -> float:
@@ -263,24 +342,48 @@ def fetch_resource(
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
     allowed_hosts: Optional[Set[str]] = None,
 ) -> FetchedResource:
-    """Fetch one known resource with a bounded read-only GET."""
+    """Fetch one known resource with a bounded read-only GET.
+
+    ``timeout_seconds`` bounds every socket operation and the whole request,
+    so a server that trickles bytes cannot hold the read open indefinitely.
+    """
     allowed = DEFAULT_ALLOWED_DATA_HOSTS if allowed_hosts is None else allowed_hosts
     try:
         safe_base = _validate_base_url(base_url, set(allowed))
     except ValueError as exc:
-        return FetchedResource(path, str(base_url), False, None, None, b"", now_ms(), str(exc))
+        return FetchedResource(
+            path, str(base_url), False, None, None, b"", now_ms(), str(exc), error_kind="invalid_target", elapsed_ms=0
+        )
     if path not in {PATH_STATUS, PATH_SETTINGS, PATH_CSV, PATH_XML}:
         raise ValueError("resource path is not allowlisted")
     url = safe_base + path
     retrieved_at_ms = now_ms()
+    started = time.monotonic()
+    budget = max(0.001, float(timeout_seconds))
+    request_deadline = started + budget
     request = urllib.request.Request(
         url,
         method="GET",
         headers={"Accept": "application/json, application/xml, text/plain, */*"},
     )
     opener = urllib.request.build_opener(_NoRedirectHandler)
+
+    def failure(error: str, kind: str, http_status: Optional[int] = None) -> FetchedResource:
+        return FetchedResource(
+            path=path,
+            url=url,
+            ok=False,
+            http_status=http_status,
+            content_type=None,
+            body=b"",
+            retrieved_at_ms=retrieved_at_ms,
+            error=error,
+            error_kind=kind,
+            elapsed_ms=_elapsed_ms(started),
+        )
+
     try:
-        with opener.open(request, timeout=timeout_seconds) as response:
+        with opener.open(request, timeout=budget) as response:
             status = getattr(response, "status", None) or response.getcode()
             content_type = response.headers.get("Content-Type")
             content_length = response.headers.get("Content-Length")
@@ -293,6 +396,10 @@ def fetch_resource(
             chunks: List[bytes] = []
             total = 0
             while True:
+                remaining = request_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("request time budget exhausted")
+                _limit_socket_timeout(response, remaining)
                 chunk = response.read(min(16 * 1024, max_body_bytes - total + 1))
                 if not chunk:
                     break
@@ -308,18 +415,40 @@ def fetch_resource(
                 content_type=content_type,
                 body=b"".join(chunks),
                 retrieved_at_ms=retrieved_at_ms,
+                elapsed_ms=_elapsed_ms(started),
             )
-    except (urllib.error.URLError, TimeoutError, OSError, CollectorError) as exc:
-        return FetchedResource(
-            path=path,
-            url=url,
-            ok=False,
-            http_status=None,
-            content_type=None,
-            body=b"",
-            retrieved_at_ms=retrieved_at_ms,
-            error=type(exc).__name__ if isinstance(exc, CollectorError) else "resource fetch failed",
-        )
+    except urllib.error.HTTPError as exc:
+        # HTTPError is a URLError subclass; keep the status code instead of
+        # reporting a 404 like a refused connection.
+        try:
+            code: Optional[int] = int(exc.code)
+        except (TypeError, ValueError):
+            code = None
+        try:
+            exc.close()
+        except Exception:
+            pass
+        return failure(f"HTTP {code}" if code is not None else "HTTP error", "http_status", code)
+    except CollectorError as exc:
+        message = str(exc)
+        return failure(message, "redirect" if "redirect" in message else "body_too_large")
+    except http.client.HTTPException as exc:
+        # BadStatusLine, LineTooLong and IncompleteRead are not OSError.
+        return failure(f"invalid HTTP response ({type(exc).__name__})", "protocol")
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        message, kind = _transport_error(exc)
+        return failure(message, kind)
+
+
+def _limit_socket_timeout(response: Any, remaining_seconds: float) -> None:
+    """Shrink the per-read socket timeout to the request's remaining budget."""
+    sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+    if sock is None:
+        return
+    try:
+        sock.settimeout(max(0.001, remaining_seconds))
+    except OSError:
+        pass
 
 
 def _parse_json_body(resource: FetchedResource) -> Mapping[str, Any]:
@@ -343,24 +472,45 @@ def fetch_and_parse_with_retry(
     attempts: int = 3,
     retry_delay_seconds: float = 0.05,
     fetcher: Any = fetch_resource,
+    deadline: Optional[float] = None,
 ) -> Tuple[FetchedResource, Optional[Dict[str, Any]]]:
-    """Read and parse a known resource with bounded partial-file retries."""
+    """Read and parse a known resource with bounded partial-file retries.
+
+    Only a body that arrived but did not parse (a file caught mid-rewrite) is
+    retried. Transport and HTTP failures return at once: retrying them only
+    multiplies the wait when Data Out is down or slow. ``deadline`` is a
+    ``time.monotonic()`` value that caps every attempt's timeout.
+    """
     if attempts < 1 or attempts > 5:
         raise ValueError("attempts must be between 1 and 5")
     last_resource: Optional[FetchedResource] = None
     last_error: Optional[Exception] = None
     for attempt in range(attempts):
-        resource = fetcher(base_url, path, timeout_seconds, max_body_bytes)
+        timeout = timeout_seconds
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if last_resource is None:
+                    last_resource = _not_fetched(base_url, path, "collection deadline exceeded", "deadline")
+                    last_error = CollectorError("collection deadline exceeded")
+                break
+            timeout = min(float(timeout_seconds), remaining)
+        resource = fetcher(base_url, path, timeout, max_body_bytes)
+        if isinstance(resource, FetchedResource):
+            resource = dataclasses.replace(resource, attempts=attempt + 1)
         last_resource = resource
-        if resource.ok:
-            try:
-                return resource, parser(resource)
-            except (CollectorError, ValueError, TypeError, json.JSONDecodeError) as exc:
-                last_error = exc
-        else:
+        if not resource.ok:
             last_error = CollectorError(resource.error or "resource unavailable")
+            break
+        try:
+            return resource, parser(resource)
+        except (CollectorError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            last_error = exc
         if attempt + 1 < attempts:
-            time.sleep(max(0.0, retry_delay_seconds))
+            delay = max(0.0, retry_delay_seconds)
+            if deadline is not None and time.monotonic() + delay >= deadline:
+                break
+            time.sleep(delay)
     if last_resource is None:
         raise CollectorError("resource fetch produced no result")
     if last_error is not None:
@@ -445,18 +595,46 @@ def parse_settings(resource: FetchedResource) -> Dict[str, Any]:
     }
 
 
-def _parse_csv_row(resource: FetchedResource) -> List[str]:
+def _normalize_csv_fields(row: List[str]) -> List[str]:
+    """Return the 377 upstream fields, re-joining a station ID that held commas.
+
+    The KrakenSDR UI flags a comma in the station ID as invalid but writes it
+    unescaped, which shifts every later column. The fields before the station
+    ID and the fixed block after it are unambiguous, so the station ID is the
+    span between them.
+    """
+    if len(row) == CSV_FIELDS:
+        return row
+    extra = len(row) - CSV_FIELDS
+    if 0 < extra <= MAX_CSV_STATION_EXTRA_FIELDS:
+        station_end = CSV_STATION_INDEX + 1 + extra
+        return row[:CSV_STATION_INDEX] + [",".join(row[CSV_STATION_INDEX:station_end])] + row[station_end:]
+    raise CollectorError(f"expected {CSV_FIELDS} CSV fields, found {len(row)}")
+
+
+def _parse_csv_rows(resource: FetchedResource) -> List[List[str]]:
     if not resource.ok:
         raise CollectorError(resource.error or "resource unavailable")
     try:
         text = resource.body.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise CollectorError("DoA CSV is not UTF-8") from exc
-    rows = [row for row in csv.reader(io.StringIO(text)) if row]
+    if text.lstrip().startswith("<"):
+        raise CollectorError(
+            "DOA_value.html contains XML, not the CSV view (Kerberos App data format is not supported)"
+        )
+    rows = [row for row in csv.reader(io.StringIO(text)) if any(field.strip() for field in row)]
+    if not rows:
+        raise CollectorError("expected at least one CSV row, found 0")
+    if len(rows) > MAX_CSV_ROWS:
+        raise CollectorError(f"expected at most {MAX_CSV_ROWS} CSV rows, found {len(rows)}")
+    return [_normalize_csv_fields(row) for row in rows]
+
+
+def _parse_csv_row(resource: FetchedResource) -> List[str]:
+    rows = _parse_csv_rows(resource)
     if len(rows) != 1:
         raise CollectorError(f"expected one CSV row, found {len(rows)}")
-    if len(rows[0]) != 377:
-        raise CollectorError(f"expected 377 CSV fields, found {len(rows[0])}")
     return rows[0]
 
 
@@ -469,8 +647,39 @@ def parse_csv_doa(
     freshness_known: bool = True,
 ) -> Dict[str, Any]:
     row = _parse_csv_row(resource)
+    return _csv_row_candidate(row, 0, resource, reference_ms, max_age_ms, max_future_skew_ms, reference_kind, freshness_known)
+
+
+def parse_csv_doa_rows(
+    resource: FetchedResource,
+    reference_ms: int,
+    max_age_ms: int = DEFAULT_DOA_MAX_AGE_MS,
+    max_future_skew_ms: int = DEFAULT_MAX_FUTURE_SKEW_MS,
+    reference_kind: str = "local_observed_at",
+    freshness_known: bool = True,
+) -> List[Dict[str, Any]]:
+    """Parse every CSV row (one per VFO when Output VFO = ALL)."""
+    return [
+        _csv_row_candidate(row, index, resource, reference_ms, max_age_ms, max_future_skew_ms, reference_kind, freshness_known)
+        for index, row in enumerate(_parse_csv_rows(resource))
+    ]
+
+
+def _csv_row_candidate(
+    row: List[str],
+    row_index: int,
+    resource: FetchedResource,
+    reference_ms: int,
+    max_age_ms: int,
+    max_future_skew_ms: int,
+    reference_kind: str,
+    freshness_known: bool,
+) -> Dict[str, Any]:
     timestamp_ms = _finite_int(row[0], "csv.timestamp_ms")
-    angular_values = [_finite_float(value, f"csv.angular_power[{index}]") for index, value in enumerate(row[17:])]
+    angular_values = [
+        _finite_float(value, f"csv.angular_power[{index}]")
+        for index, value in enumerate(row[CSV_HEADER_FIELDS:])
+    ]
     # ``DOA_plot_util`` in the node has already converted the estimator to dB
     # and the CSV writer shifts that dB vector by its minimum before writing it.
     # Preserve those values for the local plot. Applying abs()/log10() here
@@ -500,7 +709,8 @@ def parse_csv_doa(
         "frequency_hz": _finite_int(row[4], "csv.frequency_hz"),
         "array_type": row[5].strip(),
         "acquisition_frame_latency_ms": _finite_float(row[6], "csv.acquisition_frame_latency_ms"),
-        "station_id": row[7].strip(),
+        "station_id": row[CSV_STATION_INDEX].strip(),
+        "csv_row_index": row_index,
         "latitude": _finite_float(row[8], "csv.latitude"),
         "longitude": _finite_float(row[9], "csv.longitude"),
         "gps_heading": _finite_float(row[10], "csv.gps_heading"),
@@ -547,6 +757,9 @@ def parse_xml_doa(
         raise CollectorError(f"expected XML root DATA, found {root.tag}")
 
     timestamp_ms = _finite_int(_xml_text(root, "TIME"), "xml.TIME")
+    overdrive_text = _required_text(_xml_text(root, "ADC_OVERDRIVE"), "xml.ADC_OVERDRIVE")
+    overdrive_active, overdrive_mask = _parse_overdrive_text(overdrive_text)
+    station_id = _xml_text(root, "STATION_ID", required=False)
     return {
         "available": True,
         "source_format": "xml",
@@ -565,7 +778,9 @@ def parse_xml_doa(
         "confidence_raw_percent": _finite_float(_xml_text(root, "CONF"), "xml.CONF"),
         "power_transformed_raw": _finite_float(_xml_text(root, "PWR"), "xml.PWR"),
         "frequency_mhz": _finite_float(_xml_text(root, "FREQUENCY"), "xml.FREQUENCY"),
-        "station_id": _required_text(_xml_text(root, "STATION_ID"), "xml.STATION_ID"),
+        # The station ID is descriptive only; an empty one must not discard
+        # an otherwise valid record.
+        "station_id": station_id or None,
         "gps_time": _finite_int(_xml_text(root, "GPS_TIME"), "xml.GPS_TIME"),
         "latitude": _finite_float(_xml_text(root, "LOCATION/LATITUDE"), "xml.LOCATION/LATITUDE"),
         "longitude": _finite_float(_xml_text(root, "LOCATION/LONGITUDE"), "xml.LOCATION/LONGITUDE"),
@@ -573,10 +788,27 @@ def parse_xml_doa(
         "speed": _finite_float(_xml_text(root, "LOCATION/SPEED"), "xml.LOCATION/SPEED"),
         "acquisition_frame_latency_ms": _finite_float(_xml_text(root, "LATENCY"), "xml.LATENCY"),
         "processing_time_ms": _finite_float(_xml_text(root, "PROCESSING_TIME"), "xml.PROCESSING_TIME"),
-        "adc_overdrive": _required_text(_xml_text(root, "ADC_OVERDRIVE"), "xml.ADC_OVERDRIVE"),
+        "adc_overdrive": overdrive_text,
+        "adc_overdrive_active": overdrive_active,
+        "adc_overdrive_channel_mask": overdrive_mask,
         "correlated_sources": _finite_int(_xml_text(root, "NUM_CORRELATED_SOURCES"), "xml.NUM_CORRELATED_SOURCES"),
         "snr_db": _finite_float(_xml_text(root, "SNR_DB"), "xml.SNR_DB"),
+        "snr_unit": "dB_native_unverified",
     }
+
+
+def _parse_overdrive_text(text: str) -> Tuple[Optional[bool], Optional[int]]:
+    """Read XML ADC_OVERDRIVE as a boolean or a per-channel integer bitmask."""
+    value = text.strip()
+    if value.lower() in {"true", "false"}:
+        return value.lower() == "true", None
+    try:
+        mask = int(value, 10)
+    except ValueError:
+        return None, None
+    if mask < 0 or mask > 0xFFFF:
+        return None, None
+    return mask != 0, mask
 
 
 def _unavailable(resource: FetchedResource) -> Dict[str, Any]:
@@ -609,8 +841,13 @@ def _canonicalize_native_angle(candidate: Mapping[str, Any]) -> float:
     two native views from being silently treated as the same bearing.
     """
     raw = _finite_float(candidate.get("doa_raw_deg"), "candidate.doa_raw_deg")
-    if not 0.0 <= raw <= 360.0:
-        raise CollectorError("candidate.doa_raw_deg is outside [0, 360]")
+    # Upstream ROOT-MUSIC adds array_offset without a modulo, so a valid
+    # bearing can arrive above 360 or below 0. Only an implausible magnitude
+    # is rejected; both views are then reduced with the same modulo.
+    if not NATIVE_ANGLE_MIN_DEG <= raw <= NATIVE_ANGLE_MAX_DEG:
+        raise CollectorError(
+            f"candidate.doa_raw_deg is outside [{NATIVE_ANGLE_MIN_DEG:g}, {NATIVE_ANGLE_MAX_DEG:g}]"
+        )
     if candidate.get("angle_convention") == "csv_360_minus_theta":
         return (360.0 - raw) % 360.0
     if candidate.get("angle_convention") == "xml_raw_theta":
@@ -648,7 +885,25 @@ def normalize_doa_candidate(
         frequency_hz = _finite_int(candidate.get("frequency_hz"), "csv.frequency_hz")
         power_native_db = _finite_float(candidate.get("power_raw"), "csv.power_raw")
         frequency_valid = 0 < frequency_hz <= 6_000_000_000
-        power_native_valid = math.isfinite(power_native_db)
+        # A value at the CSV floor is clipped and does not identify the power.
+        power_mapping_lossy = power_native_db <= CSV_POWER_FLOOR_DB
+        power_native_valid = math.isfinite(power_native_db) and not power_mapping_lossy
+        peak_distance: Optional[float] = None
+        peak_consistent: Optional[bool] = None
+        peak_index = candidate.get("angular_peak_index")
+        if isinstance(peak_index, int) and not isinstance(peak_index, bool) and candidate.get("angular_bins") == CSV_VECTOR_BINS:
+            # Upstream writes the vector on the theta_0 grid, so the peak bin
+            # equals theta_0 for the same frame.
+            peak_distance = _circular_angle_distance(float(peak_index), result["canonical_angle_deg"])
+            peak_consistent = peak_distance <= ANGULAR_PEAK_ANGLE_TOLERANCE_DEG
+        result.update(
+            {
+                "angular_peak_angle_distance_deg": peak_distance,
+                "angular_peak_angle_consistent": peak_consistent,
+                "angular_peak_angle_tolerance_deg": ANGULAR_PEAK_ANGLE_TOLERANCE_DEG,
+                "power_mapping_lossy": power_mapping_lossy,
+            }
+        )
         result.update(
             {
                 "confidence": None,
@@ -676,11 +931,11 @@ def normalize_doa_candidate(
         confidence_metric_db = confidence_raw / 100.0
         confidence_metric_valid = math.isfinite(confidence_metric_db) and confidence_metric_db >= 0.0
         frequency_valid = 0.0 < frequency_mhz <= 6_000.0
-        # Upstream writes max(-100, native_power_db + 100). A transformed value
-        # at -100 is clipped and cannot be inverted precisely; values above the
-        # floor can be represented as a traceable native estimate, not yet a
+        # Upstream writes max(0, native_power_db + 100). A transformed value
+        # at the floor is clipped and cannot be inverted precisely; values above
+        # the floor can be represented as a traceable native estimate, not yet a
         # calibrated MQTT dB.
-        power_mapping_lossy = transformed_power <= -100.0
+        power_mapping_lossy = transformed_power <= XML_POWER_CLIP_FLOOR
         power_native_db = transformed_power - 100.0
         power_native_valid = math.isfinite(power_native_db) and not power_mapping_lossy
         result.update(
@@ -741,10 +996,13 @@ def _circular_angle_distance(first: float, second: float) -> float:
 def assess_native_conflict(candidates: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
     """Compare adjacent native views without requiring byte-identical timestamps.
 
-    CSV and XML are independent files rewritten by the node. A sequential GET
-    can therefore observe two neighboring processing frames. They remain
-    comparable when their node timestamps are within the bounded pair window;
-    a same-timestamp pair is still treated as the strongest correlation case.
+    CSV and XML are independent files rewritten by the node. A GET pair can
+    therefore observe two neighboring processing frames. They remain
+    comparable when their node timestamps are within the bounded pair window,
+    but the angle tolerance is meant for one frame: a bearing that moved
+    between frames is not a convention error. The angle test therefore runs
+    only on same-timestamp pairs; adjacent pairs report their distance for
+    diagnostics without a conflict verdict.
     """
     csv_candidate = candidates.get("csv", {})
     xml_candidate = candidates.get("xml", {})
@@ -755,11 +1013,22 @@ def assess_native_conflict(candidates: Mapping[str, Mapping[str, Any]]) -> Dict[
     if available and isinstance(csv_timestamp, int) and isinstance(xml_timestamp, int):
         timestamp_delta_ms = abs(csv_timestamp - xml_timestamp)
     comparable = bool(available and timestamp_delta_ms is not None and timestamp_delta_ms <= NATIVE_TIMESTAMP_TOLERANCE_MS)
+    if timestamp_delta_ms is None:
+        frame_relation = "INCOMPLETE"
+    elif timestamp_delta_ms == 0:
+        frame_relation = "SAME_FRAME"
+    elif comparable:
+        frame_relation = "ADJACENT_FRAMES"
+    else:
+        frame_relation = "OUT_OF_WINDOW"
     result: Dict[str, Any] = {
         "comparable": comparable,
         "same_timestamp": bool(comparable and timestamp_delta_ms == 0),
         "timestamp_delta_ms": timestamp_delta_ms,
         "timestamp_tolerance_ms": NATIVE_TIMESTAMP_TOLERANCE_MS,
+        "frame_relation": frame_relation,
+        "angle_checked": False,
+        "angle_invalid": False,
         "conflict": False,
         "tolerance_deg": ANGLE_CONSISTENCY_TOLERANCE_DEG,
     }
@@ -769,17 +1038,281 @@ def assess_native_conflict(candidates: Mapping[str, Mapping[str, Any]]) -> Dict[
         csv_angle = _canonicalize_native_angle(csv_candidate)
         xml_angle = _canonicalize_native_angle(xml_candidate)
     except CollectorError as exc:
-        result["error"] = str(exc)
-        result["conflict"] = True
+        # An unusable angle is invalid data, not a disagreement between views.
+        result.update({
+            "error": str(exc),
+            "angle_invalid": True,
+            "comparable": False,
+            "same_timestamp": False,
+        })
         return result
     distance = _circular_angle_distance(csv_angle, xml_angle)
     result.update({
         "csv_canonical_deg": csv_angle,
         "xml_canonical_deg": xml_angle,
         "circular_distance_deg": distance,
-        "conflict": distance > ANGLE_CONSISTENCY_TOLERANCE_DEG,
     })
+    if frame_relation == "SAME_FRAME":
+        result["angle_checked"] = True
+        result["conflict"] = distance > ANGLE_CONSISTENCY_TOLERANCE_DEG
     return result
+
+
+class NodeProgressTracker:
+    """Remember per-node counters across reads to detect a frozen DSP loop.
+
+    The node writes status.json, DOA_value.html and doa.xml from one DSP loop
+    while port 8081 is served by a separate process. When the loop stops, the
+    files freeze with mutually consistent timestamps, so comparing them with
+    each other cannot reveal it. Comparing how long a counter has stayed
+    unchanged against Ground monotonic time needs no clock synchronization.
+    """
+
+    def __init__(self, max_keys: int = 16) -> None:
+        self._lock = threading.Lock()
+        self._entries: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        self._max_keys = max(1, int(max_keys))
+
+    def observe(
+        self,
+        key: str,
+        counters: Mapping[str, int],
+        observed_monotonic: float,
+        max_stall_ms: int,
+    ) -> Tuple[Dict[str, Any], Dict[str, float]]:
+        """Record one sample; return the public assessment and change times."""
+        with self._lock:
+            entry = self._entries.pop(key, None)
+            first_sample = entry is None
+            if entry is None:
+                entry = {"values": {}, "changed_at": {}, "samples": 0}
+            regressed: List[str] = []
+            for name, value in counters.items():
+                previous = entry["values"].get(name)
+                if previous is None or value != previous:
+                    if previous is not None and value < previous:
+                        regressed.append(name)
+                    entry["values"][name] = value
+                    entry["changed_at"][name] = observed_monotonic
+            for name in [name for name in entry["values"] if name not in counters]:
+                entry["values"].pop(name, None)
+                entry["changed_at"].pop(name, None)
+            entry["samples"] = min(int(entry["samples"]) + 1, 1_000_000)
+            self._entries[key] = entry
+            while len(self._entries) > self._max_keys:
+                self._entries.popitem(last=False)
+            changed_at = dict(entry["changed_at"])
+            samples = int(entry["samples"])
+        unchanged_for_ms = {
+            name: max(0, int(round((observed_monotonic - changed) * 1000)))
+            for name, changed in changed_at.items()
+        }
+        stalled = sorted(name for name, age in unchanged_for_ms.items() if age > max_stall_ms)
+        state = "FIRST_SAMPLE" if first_sample else ("STALLED" if stalled else "ADVANCING")
+        return (
+            {
+                "state": state,
+                "stalled": bool(stalled),
+                "stalled_counters": stalled,
+                "unchanged_for_ms": unchanged_for_ms,
+                "regressed_counters": sorted(regressed),
+                "max_stall_ms": int(max_stall_ms),
+                "samples": samples,
+            },
+            changed_at,
+        )
+
+
+def _progress_counters(status: Mapping[str, Any]) -> Dict[str, int]:
+    safe = status.get("safe") if isinstance(status.get("safe"), Mapping) else {}
+    daq_status = safe.get("daq_status") if isinstance(safe.get("daq_status"), Mapping) else {}
+    sources = {"timestamp_ms": safe, "uptime_ms": safe, "data_frame_index": daq_status}
+    values = {name: sources[name].get(name) for name in NODE_PROGRESS_COUNTERS}
+    return {
+        name: value
+        for name, value in values.items()
+        if isinstance(value, int) and not isinstance(value, bool)
+    }
+
+
+def _untracked_progress(state: str, max_stall_ms: int) -> Dict[str, Any]:
+    return {
+        "state": state,
+        "stalled": False,
+        "stalled_counters": [],
+        "unchanged_for_ms": {},
+        "regressed_counters": [],
+        "max_stall_ms": int(max_stall_ms),
+        "samples": 0,
+    }
+
+
+class _Worker:
+    """Run one read in a daemon thread so a deadline can abandon it."""
+
+    def __init__(self, function: Callable[[], Any]) -> None:
+        self.done = threading.Event()
+        self.result: Any = None
+        self.error: Optional[BaseException] = None
+        self._thread = threading.Thread(target=self._run, args=(function,), name="sdr-doa-collect", daemon=True)
+
+    def _run(self, function: Callable[[], Any]) -> None:
+        try:
+            self.result = function()
+        except BaseException as exc:  # re-raised in the collecting thread
+            self.error = exc
+        finally:
+            self.done.set()
+
+    def start(self) -> None:
+        self._thread.start()
+
+
+def _run_reads(
+    reads: Mapping[str, Callable[[], Any]],
+    deadline: Optional[float],
+) -> Dict[str, Any]:
+    """Run reads concurrently; a read still running at the deadline maps to None."""
+    if deadline is None and len(reads) == 1:
+        key, function = next(iter(reads.items()))
+        return {key: function()}
+    workers = {key: _Worker(function) for key, function in reads.items()}
+    for worker in workers.values():
+        worker.start()
+    results: Dict[str, Any] = {}
+    for key, worker in workers.items():
+        if deadline is None:
+            worker.done.wait()
+        else:
+            worker.done.wait(max(0.0, deadline - time.monotonic()) + DEADLINE_GRACE_SECONDS)
+        if not worker.done.is_set():
+            results[key] = None
+            continue
+        if worker.error is not None:
+            raise worker.error
+        results[key] = worker.result
+    return results
+
+
+def _vfo_row_summary(candidate: Mapping[str, Any]) -> Dict[str, Any]:
+    try:
+        canonical: Optional[float] = _canonicalize_native_angle(candidate)
+    except CollectorError:
+        canonical = None
+    return {
+        "row_index": candidate.get("csv_row_index"),
+        "timestamp_ms": candidate.get("timestamp_ms"),
+        "frequency_hz": candidate.get("frequency_hz"),
+        "doa_raw_deg": candidate.get("doa_raw_deg"),
+        "canonical_angle_deg": canonical,
+        "confidence_raw": candidate.get("confidence_raw"),
+        "power_raw": candidate.get("power_raw"),
+    }
+
+
+def _select_csv_row(
+    parsed: Optional[Mapping[str, Any]],
+    resource: FetchedResource,
+    xml_candidate: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Pick the CSV row that belongs to the XML view's VFO.
+
+    One row is the normal case. Output VFO = ALL writes one row per VFO; the
+    row is then chosen by the XML frequency, and the others stay visible as
+    additional VFO rows instead of rejecting the whole view.
+    """
+    if not parsed or parsed.get("available") is not True:
+        candidate = _unavailable(resource)
+        candidate["error"] = (parsed or {}).get("error") or candidate.get("error") or "CSV parse failed"
+        return candidate
+    rows: List[Dict[str, Any]] = list(parsed.get("rows") or [])
+    summaries = [_vfo_row_summary(row) for row in rows]
+    if len(rows) == 1:
+        selected = dict(rows[0])
+        selection = "single_row"
+    else:
+        matches: List[Dict[str, Any]] = []
+        xml_hz: Optional[int] = None
+        if xml_candidate.get("available") is True:
+            frequency_mhz = xml_candidate.get("frequency_mhz")
+            if isinstance(frequency_mhz, (int, float)) and not isinstance(frequency_mhz, bool) and math.isfinite(frequency_mhz):
+                xml_hz = int(round(float(frequency_mhz) * 1_000_000.0))
+        if xml_hz is not None:
+            matches = [
+                row for row in rows
+                if isinstance(row.get("frequency_hz"), int)
+                and abs(int(row["frequency_hz"]) - xml_hz) <= CSV_XML_FREQUENCY_MATCH_HZ
+            ]
+        if len(matches) != 1:
+            if xml_hz is None:
+                detail = "the XML view is unavailable to select one"
+            elif not matches:
+                detail = "none matches the XML frequency"
+            else:
+                detail = "several match the XML frequency"
+            candidate = _unavailable(resource)
+            candidate["error"] = f"{len(rows)} CSV rows (multi-VFO output); {detail}"
+            candidate["csv_rows_total"] = len(rows)
+            candidate["additional_vfo_rows"] = summaries
+            return candidate
+        selected = dict(matches[0])
+        selection = "matched_xml_frequency"
+    selected["csv_rows_total"] = len(rows)
+    selected["csv_row_selection"] = selection
+    selected["additional_vfo_rows"] = [
+        summary for summary in summaries if summary["row_index"] != selected.get("csv_row_index")
+    ]
+    return selected
+
+
+def _signal_quality(status: Mapping[str, Any], candidates: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
+    """Summarize ADC overdrive, SNR and native PAPR without remapping units."""
+    active: List[str] = []
+    reported: List[str] = []
+    safe = status.get("safe") if status.get("available") is True and isinstance(status.get("safe"), Mapping) else {}
+    daq_status = safe.get("daq_status") if isinstance(safe.get("daq_status"), Mapping) else {}
+    status_flag = daq_status.get("adc_overdrive")
+    if isinstance(status_flag, bool):
+        reported.append("status")
+        if status_flag:
+            active.append("status")
+    xml_candidate = candidates.get("xml", {})
+    xml_available = xml_candidate.get("available") is True
+    channel_mask: Optional[int] = None
+    if xml_available:
+        xml_flag = xml_candidate.get("adc_overdrive_active")
+        if isinstance(xml_flag, bool):
+            reported.append("xml")
+            if xml_flag:
+                active.append("xml")
+        mask = xml_candidate.get("adc_overdrive_channel_mask")
+        channel_mask = mask if isinstance(mask, int) and not isinstance(mask, bool) else None
+    snr = xml_candidate.get("snr_db") if xml_available else None
+    snr_db = float(snr) if isinstance(snr, (int, float)) and not isinstance(snr, bool) and math.isfinite(snr) else None
+
+    def metric(name: str) -> Optional[float]:
+        candidate = candidates.get(name, {})
+        value = candidate.get("confidence_metric_db") if candidate.get("available") is True else None
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            return float(value)
+        return None
+
+    noise_source = daq_status.get("noise_source_enabled")
+    dropped = safe.get("daq_num_dropped_frames")
+    return {
+        "state": "OVERDRIVE" if active else ("PASS" if reported else "UNKNOWN"),
+        "adc_overdrive": True if active else (False if reported else None),
+        "adc_overdrive_sources": active,
+        "adc_overdrive_reported_by": reported,
+        "adc_overdrive_channel_mask": channel_mask,
+        "snr_db": snr_db,
+        "snr_source": "xml" if snr_db is not None else None,
+        "snr_unit": "dB_native_unverified",
+        "confidence_metric_db": {"csv": metric("csv"), "xml": metric("xml")},
+        "confidence_metric_unit": "dB_papr_unmapped",
+        "noise_source_enabled": noise_source if isinstance(noise_source, bool) else None,
+        "daq_num_dropped_frames": dropped if isinstance(dropped, int) and not isinstance(dropped, bool) else None,
+    }
 
 
 def collect(
@@ -796,36 +1329,117 @@ def collect(
     retry_delay_seconds: float = 0.05,
     canonical_angle_ready: bool = False,
     power_mapping_ready: bool = False,
+    *,
+    total_budget_s: Optional[float] = None,
+    progress_tracker: Optional[NodeProgressTracker] = None,
+    monotonic_clock: Callable[[], float] = time.monotonic,
 ) -> Dict[str, Any]:
+    """Read the four Data Out resources once and assess them.
+
+    ``total_budget_s`` bounds the whole collection; a read still running when
+    it expires is reported as unavailable instead of holding the caller.
+    ``progress_tracker`` remembers node counters across calls so a frozen
+    node is detected (``NODE_CLOCK_STALLED``). ``monotonic_clock`` measures
+    Ground elapsed time for ages and progress; it exists for deterministic
+    tests and does not affect the deadline.
+    """
     if authority not in {"none", "csv", "xml"}:
         raise ValueError("authority must be one of: none, csv, xml")
     if clock_source not in {"local", "remote_unverified"}:
         raise ValueError("clock_source must be one of: local, remote_unverified")
+    if total_budget_s is not None:
+        if (
+            isinstance(total_budget_s, bool)
+            or not isinstance(total_budget_s, (int, float))
+            or not math.isfinite(total_budget_s)
+            or not 0 < total_budget_s <= MAX_TOTAL_BUDGET_SECONDS
+        ):
+            raise ValueError(f"total_budget_s must be within (0, {MAX_TOTAL_BUDGET_SECONDS:g}]")
+    started_real = time.monotonic()
+    started_mono = monotonic_clock()
+    deadline = started_real + float(total_budget_s) if total_budget_s is not None else None
     observed_at_ms = now_ms()
     resources: Dict[str, FetchedResource] = {}
 
-    def read_parsed(path: str, parser: Any) -> Optional[Dict[str, Any]]:
-        resource, parsed = fetch_and_parse_with_retry(
-            base_url,
-            path,
-            parser,
-            timeout_seconds,
-            max_body_bytes,
-            attempts=parse_attempts,
-            retry_delay_seconds=retry_delay_seconds,
-            fetcher=fetcher,
-        )
-        resources[path] = resource
-        return parsed
+    def reader(path: str, parser: Any) -> Callable[[], Tuple[FetchedResource, Optional[Dict[str, Any]]]]:
+        def read() -> Tuple[FetchedResource, Optional[Dict[str, Any]]]:
+            return fetch_and_parse_with_retry(
+                base_url,
+                path,
+                parser,
+                timeout_seconds,
+                max_body_bytes,
+                attempts=parse_attempts,
+                retry_delay_seconds=retry_delay_seconds,
+                fetcher=fetcher,
+                deadline=deadline,
+            )
+        return read
 
-    status = read_parsed(PATH_STATUS, parse_status)
+    def read_all(reads: Mapping[str, Callable[[], Any]]) -> Dict[str, Tuple[FetchedResource, Optional[Dict[str, Any]]]]:
+        results = _run_reads(reads, deadline)
+        completed: Dict[str, Tuple[FetchedResource, Optional[Dict[str, Any]]]] = {}
+        for path, result in results.items():
+            if result is None:
+                resource = _not_fetched(base_url, path, "collection deadline exceeded", "deadline")
+                completed[path] = (resource, {"available": False, "error": "collection deadline exceeded"})
+            else:
+                completed[path] = result
+        return completed
+
+    # Candidates are parsed against a provisional reference; their freshness
+    # is assessed again once the whole collection has finished.
+    def parse_csv_rows_wrapper(resource: FetchedResource) -> Dict[str, Any]:
+        return {"available": True, "rows": parse_csv_doa_rows(resource, observed_at_ms, doa_max_age_ms, max_future_skew_ms)}
+
+    def parse_xml_wrapper(resource: FetchedResource) -> Dict[str, Any]:
+        return parse_xml_doa(resource, observed_at_ms, doa_max_age_ms, max_future_skew_ms)
+
+    status_started_mono = monotonic_clock()
+    status_resource, status = read_all({PATH_STATUS: reader(PATH_STATUS, parse_status)})[PATH_STATUS]
+    resources[PATH_STATUS] = status_resource
     if not status or status.get("available") is not True:
         status = {
             "available": False,
             "error": (status or {}).get("error", "status parse failed"),
         }
+    status_available = bool(status.get("available"))
+    # Every resource lives on the same host and port. When status.json could
+    # not even be reached, the other three GETs would wait out the same
+    # failure and add load to a node that is already struggling.
+    status_transport_failed = getattr(status_resource, "error_kind", None) in TRANSPORT_ERROR_KINDS
 
-    settings = read_parsed(PATH_SETTINGS, parse_settings)
+    if progress_tracker is None:
+        node_progress = _untracked_progress("UNTRACKED", status_max_age_ms)
+        status_first_seen_mono = status_started_mono
+    elif not status_available:
+        node_progress = _untracked_progress("UNAVAILABLE", status_max_age_ms)
+        status_first_seen_mono = status_started_mono
+    else:
+        node_progress, changed_at = progress_tracker.observe(
+            _redact_url(base_url),
+            _progress_counters(status),
+            status_started_mono,
+            status_max_age_ms,
+        )
+        status_first_seen_mono = changed_at.get("timestamp_ms", status_started_mono)
+    node_stalled = node_progress.get("stalled") is True
+
+    if status_transport_failed:
+        skipped = "skipped: status.json transport failure"
+        first_reads = {
+            path: (_not_fetched(base_url, path, skipped, "skipped"), {"available": False, "error": skipped})
+            for path in (PATH_SETTINGS, PATH_CSV, PATH_XML)
+        }
+    else:
+        first_reads = read_all({
+            PATH_SETTINGS: reader(PATH_SETTINGS, parse_settings),
+            PATH_CSV: reader(PATH_CSV, parse_csv_rows_wrapper),
+            PATH_XML: reader(PATH_XML, parse_xml_wrapper),
+        })
+
+    settings_resource, settings = first_reads[PATH_SETTINGS]
+    resources[PATH_SETTINGS] = settings_resource
     if not settings or settings.get("available") is not True:
         settings = {
             "available": False,
@@ -834,53 +1448,96 @@ def collect(
             "raw_fields_omitted": True,
         }
 
-    # DoA and status timestamps originate from the same Raspberry clock. This
-    # comparison remains meaningful when the collector runs on Ground, even
-    # if Ground and Raspberry wall clocks are not synchronized.
-    doa_reference_ms = observed_at_ms
-    doa_reference_kind = "local_observed_at"
-    if status.get("available"):
-        doa_reference_ms = status["safe"]["timestamp_ms"]
+    def native_pair(
+        csv_read: Tuple[FetchedResource, Optional[Dict[str, Any]]],
+        xml_read: Tuple[FetchedResource, Optional[Dict[str, Any]]],
+    ) -> Tuple[FetchedResource, Dict[str, Any], FetchedResource, Dict[str, Any]]:
+        csv_res, csv_parsed = csv_read
+        xml_res, xml_parsed = xml_read
+        if not xml_parsed or xml_parsed.get("available") is not True:
+            parse_error = (xml_parsed or {}).get("error")
+            xml_view = _unavailable(xml_res)
+            xml_view["error"] = parse_error or xml_view.get("error") or "XML parse failed"
+        else:
+            xml_view = dict(xml_parsed)
+        csv_view = _select_csv_row(csv_parsed, csv_res, xml_view)
+        return csv_res, csv_view, xml_res, xml_view
+
+    csv_resource, csv_candidate, xml_resource, xml_candidate = native_pair(first_reads[PATH_CSV], first_reads[PATH_XML])
+    pair_reads = 1
+    while pair_reads <= NATIVE_PAIR_REREADS:
+        if csv_candidate.get("available") is not True or xml_candidate.get("available") is not True:
+            break
+        csv_ts = csv_candidate.get("timestamp_ms")
+        xml_ts = xml_candidate.get("timestamp_ms")
+        if not isinstance(csv_ts, int) or not isinstance(xml_ts, int):
+            break
+        delta = abs(csv_ts - xml_ts)
+        if delta == 0 or delta > NATIVE_TIMESTAMP_TOLERANCE_MS:
+            break
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        # The pair straddles a frame boundary. A second pair read normally
+        # lands inside one frame and makes the angle test meaningful.
+        reread = read_all({
+            PATH_CSV: reader(PATH_CSV, parse_csv_rows_wrapper),
+            PATH_XML: reader(PATH_XML, parse_xml_wrapper),
+        })
+        pair_reads += 1
+        next_pair = native_pair(reread[PATH_CSV], reread[PATH_XML])
+        if next_pair[1].get("available") is not True or next_pair[3].get("available") is not True:
+            break
+        csv_resource, csv_candidate, xml_resource, xml_candidate = next_pair
+    resources[PATH_CSV] = csv_resource
+    resources[PATH_XML] = xml_resource
+
+    completed_mono = monotonic_clock()
+    completed_at_ms = now_ms()
+    elapsed_ms = max(0, int(round((completed_mono - started_mono) * 1000)))
+    deadline_exceeded = any(getattr(resource, "error_kind", None) == "deadline" for resource in resources.values())
+
+    # DoA and status timestamps originate from the same Raspberry clock, so
+    # their difference stays meaningful on Ground without clock sync. The
+    # node's "now" is at least the status timestamp plus the Ground time since
+    # that timestamp was first seen: this counts collection time and the time
+    # a frozen node has kept repeating the same status.
+    if status_available:
+        status_timestamp: Optional[int] = status["safe"]["timestamp_ms"]
+        ground_elapsed_ms = max(0, int(round((completed_mono - status_first_seen_mono) * 1000)))
+        doa_reference_ms = int(status_timestamp) + ground_elapsed_ms
         doa_reference_kind = "status_timestamp_ms"
-
-    csv_candidate = read_parsed(
-        PATH_CSV,
-        lambda resource: parse_csv_doa(
-            resource,
-            doa_reference_ms,
-            doa_max_age_ms,
-            max_future_skew_ms,
-            doa_reference_kind,
-            True,
-        ),
-    )
-    if not csv_candidate or csv_candidate.get("available") is not True:
-        parse_error = (csv_candidate or {}).get("error")
-        csv_candidate = _unavailable(resources[PATH_CSV])
-        csv_candidate["error"] = parse_error or csv_candidate.get("error") or "CSV parse failed"
-
-    xml_candidate = read_parsed(
-        PATH_XML,
-        lambda resource: parse_xml_doa(
-            resource,
-            doa_reference_ms,
-            doa_max_age_ms,
-            max_future_skew_ms,
-            doa_reference_kind,
-            True,
-        ),
-    )
-    if not xml_candidate or xml_candidate.get("available") is not True:
-        xml_candidate = _unavailable(resources[PATH_XML])
-        xml_candidate["error"] = xml_candidate.get("error") or "XML parse failed"
-
-    status_resource = resources[PATH_STATUS]
-    settings_resource = resources[PATH_SETTINGS]
-    csv_resource = resources[PATH_CSV]
-    xml_resource = resources[PATH_XML]
+        doa_freshness_known = True
+    else:
+        # Without status.json the only reference is the Ground clock, which is
+        # meaningful only when the collector runs on the node itself.
+        status_timestamp = None
+        ground_elapsed_ms = 0
+        doa_reference_ms = completed_at_ms
+        doa_reference_kind = "local_observed_at"
+        doa_freshness_known = clock_source == "local"
 
     raw_candidates = {"csv": csv_candidate, "xml": xml_candidate}
+    for candidate in raw_candidates.values():
+        timestamp = candidate.get("timestamp_ms")
+        if candidate.get("available") is not True or not isinstance(timestamp, int):
+            continue
+        freshness = _age_assessment(
+            timestamp,
+            doa_reference_ms,
+            doa_max_age_ms,
+            max_future_skew_ms,
+            doa_reference_kind,
+            doa_freshness_known,
+        )
+        freshness["ground_elapsed_ms"] = ground_elapsed_ms
+        freshness["status_timestamp_ms"] = status_timestamp
+        freshness["node_stalled"] = node_stalled
+        if node_stalled:
+            freshness["fresh"] = False
+        candidate["freshness"] = freshness
+
     native_consistency = assess_native_conflict(raw_candidates)
+    native_consistency["pair_reads"] = pair_reads
     candidates: Dict[str, Dict[str, Any]] = {}
     for name, candidate in raw_candidates.items():
         if candidate.get("available") is not True:
@@ -895,28 +1552,34 @@ def collect(
             quarantined = dict(candidate)
             quarantined["units_valid"] = False
             quarantined["normalization_error"] = type(exc).__name__
+            quarantined["normalization_error_detail"] = str(exc)
             candidates[name] = quarantined
 
-    parsed_candidates = [candidate for candidate in candidates.values() if candidate.get("available")]
+    # A quarantined view parsed but carries no usable angle, so it does not
+    # count as a valid candidate.
+    parsed_candidates = [
+        candidate
+        for candidate in candidates.values()
+        if candidate.get("available") and "normalization_error" not in candidate
+    ]
     fresh_candidates = [
         candidate
         for candidate in parsed_candidates
         if candidate.get("freshness", {}).get("fresh") is True
     ]
     selected = candidates.get(authority) if authority != "none" else None
-    selected_available = bool(selected and selected.get("available"))
+    selected_available = bool(selected and selected.get("available") and "normalization_error" not in selected)
     selected_fresh = bool(selected_available and selected.get("freshness", {}).get("fresh"))
     selected_units_valid = bool(selected_available and selected.get("units_valid") is True)
     # Angle conversion is implemented, but publication readiness must remain an
     # explicit deployment/configuration decision after controlled validation.
     canonical_angle_ready = bool(canonical_angle_ready)
 
-    status_available = bool(status.get("available"))
     status_age: Optional[Dict[str, Any]] = None
     if status_available and clock_source == "local":
-        status_timestamp = status["safe"]["timestamp_ms"]
+        status_timestamp_local = status["safe"]["timestamp_ms"]
         status_age = _age_assessment(
-            status_timestamp,
+            status_timestamp_local,
             observed_at_ms,
             status_max_age_ms,
             max_future_skew_ms,
@@ -934,11 +1597,22 @@ def collect(
         )
     status_fresh = bool(status_age and status_age["fresh"] is True)
     daq_healthy = status.get("daq_health") == "PASS"
+    signal_quality = _signal_quality(status, candidates)
+    adc_overdriven = signal_quality["adc_overdrive"] is True
+    csv_view = candidates.get("csv", {})
+    angular_peak_consistent = not (
+        csv_view.get("available") is True and csv_view.get("angular_peak_angle_consistent") is False
+    )
+    angle_invalid = native_consistency.get("angle_invalid") is True or any(
+        "normalization_error" in candidate for candidate in candidates.values()
+    )
 
     gate_checks = {
         "status_available": status_available,
         "status_fresh": status_fresh if clock_source == "local" else None,
         "daq_healthy": daq_healthy,
+        "adc_not_overdriven": not adc_overdriven,
+        "node_not_stalled": not node_stalled,
         "doa_candidate_parsed": bool(parsed_candidates),
         "doa_candidate_fresh": bool(fresh_candidates),
         "authority_selected": authority != "none" and selected_available,
@@ -947,17 +1621,22 @@ def collect(
         "canonical_angle_ready": canonical_angle_ready,
         "native_views_consistent": native_consistency.get("comparable") is False
         or native_consistency.get("conflict") is False,
+        "angular_peak_consistent": angular_peak_consistent,
     }
     publication_ready = all(value is True for value in gate_checks.values())
 
     if not status_available:
         overall_state = "UNAVAILABLE"
-    elif not daq_healthy:
+    elif not daq_healthy or adc_overdriven:
         overall_state = "DEGRADED"
     elif not parsed_candidates:
         overall_state = "INVALID"
+    elif native_consistency.get("conflict") is True:
+        overall_state = "CONFLICT"
     elif not fresh_candidates:
         overall_state = "STALE"
+    elif native_consistency.get("comparable") is not True:
+        overall_state = "INCOMPLETE"
     elif authority == "none":
         overall_state = "UNVERIFIED"
     elif not canonical_angle_ready:
@@ -968,20 +1647,35 @@ def collect(
     reasons: List[str] = []
     if not status_available:
         reasons.append("STATUS_UNAVAILABLE_OR_INVALID")
+    if deadline_exceeded:
+        reasons.append("COLLECTION_DEADLINE_EXCEEDED")
     if status_available and clock_source == "local" and not status_fresh:
         reasons.append("STATUS_STALE")
     if status_available and clock_source != "local":
         reasons.append("GROUND_CLOCK_UNVERIFIED")
+    if node_stalled:
+        reasons.append("NODE_CLOCK_STALLED")
     if status_available and not daq_healthy:
         reasons.append("DAQ_HEALTH_GATE_FAILED")
+    if adc_overdriven:
+        reasons.append("ADC_OVERDRIVE")
     if not parsed_candidates:
         reasons.append("NO_VALID_DOA_CANDIDATE")
-    elif not fresh_candidates:
+    elif not fresh_candidates and doa_freshness_known:
         reasons.append("DOA_CANDIDATES_STALE")
+    if parsed_candidates:
+        if candidates.get("csv", {}).get("available") is not True:
+            reasons.append("CSV_VIEW_UNAVAILABLE")
+        if candidates.get("xml", {}).get("available") is not True:
+            reasons.append("XML_VIEW_UNAVAILABLE")
     if not canonical_angle_ready:
         reasons.append("CANONICAL_ANGLE_NOT_CONFIGURED")
     if native_consistency.get("conflict"):
         reasons.append("NATIVE_DOA_VIEWS_CONFLICT")
+    if angle_invalid:
+        reasons.append("NATIVE_ANGLE_INVALID")
+    if not angular_peak_consistent:
+        reasons.append("ANGULAR_PEAK_ANGLE_MISMATCH")
     if authority == "none":
         reasons.append("DOA_AUTHORITY_NOT_SELECTED")
     elif not selected_available:
@@ -1004,6 +1698,14 @@ def collect(
             "angular_plot_local_only": True,
         },
         "observed_at_ms": observed_at_ms,
+        "completed_at_ms": completed_at_ms,
+        "collection": {
+            "elapsed_ms": elapsed_ms,
+            "budget_ms": int(round(float(total_budget_s) * 1000)) if total_budget_s is not None else None,
+            "deadline_exceeded": deadline_exceeded,
+            "pair_reads": pair_reads,
+            "status_transport_failed": status_transport_failed,
+        },
         "resources": {path: resource.metadata() for path, resource in resources.items()},
         "status": {
             **status,
@@ -1018,6 +1720,8 @@ def collect(
             "canonical_angle_ready": canonical_angle_ready,
         },
         "native_consistency": native_consistency,
+        "node_progress": node_progress,
+        "signal_quality": signal_quality,
         "publication_gate": {
             "state": "READY" if publication_ready else "BLOCKED",
             "checks": gate_checks,
@@ -1029,7 +1733,12 @@ def collect(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read-only SDR-DoA Data Out collector")
-    parser.add_argument("--base-url", required=True, help="Base URL, for example http://10.90.0.2:8081")
+    allowed = ", ".join(sorted(DEFAULT_ALLOWED_DATA_HOSTS))
+    parser.add_argument(
+        "--base-url",
+        required=True,
+        help=f"Data Out base URL on port 8081, for example http://192.168.100.100:8081 (allowed hosts: {allowed})",
+    )
     parser.add_argument("--authority", choices=("none", "csv", "xml"), default="none")
     parser.add_argument(
         "--clock-source",
@@ -1038,6 +1747,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Use local node clock only when this collector runs on the Raspberry.",
     )
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
+    parser.add_argument("--total-budget", type=float, default=None, help="overall collection budget in seconds")
     parser.add_argument("--max-body-bytes", type=int, default=DEFAULT_MAX_BODY_BYTES)
     parser.add_argument("--status-max-age-ms", type=int, default=DEFAULT_STATUS_MAX_AGE_MS)
     parser.add_argument("--doa-max-age-ms", type=int, default=DEFAULT_DOA_MAX_AGE_MS)
@@ -1057,6 +1767,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             status_max_age_ms=args.status_max_age_ms,
             doa_max_age_ms=args.doa_max_age_ms,
             max_future_skew_ms=args.max_future_skew_ms,
+            total_budget_s=args.total_budget,
         )
         print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))
         return 0

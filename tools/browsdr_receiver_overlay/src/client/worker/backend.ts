@@ -191,7 +191,7 @@ export class Backend {
 		config: SweepConfig,
 		spectrumCallback: (frame: SweepSpectrumFrame) => void,
 		progressCallback: (progress: SweepProgress) => void,
-		candidatesCallback: (candidates: SweepCandidate[]) => void,
+		candidatesCallback: (candidates: SweepCandidate[], removedCandidateIds: number[]) => void,
 		errorCallback: (error: string) => void,
 	): Promise<void> {
 		if (this.sweepEngine) throw new Error('A sweep is already active');
@@ -208,7 +208,7 @@ export class Backend {
 				spectrumCallback(Comlink.transfer(frame, transferList));
 			},
 			onProgress: progress => progressCallback(progress),
-			onCandidates: candidates => candidatesCallback(candidates),
+			onCandidates: (candidates, removedCandidateIds) => candidatesCallback(candidates, removedCandidateIds),
 			onError: error => errorCallback(error),
 		});
 		this.sweepEngine = engine;

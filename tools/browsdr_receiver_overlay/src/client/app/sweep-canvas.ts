@@ -1,6 +1,6 @@
 import type { SweepCandidate, SweepSpectrumFrame, SweepSpectrumView } from '../worker/sweep-types';
 import type { ReceiverMarker } from './receiver-records-api';
-import { drawSweepMarkerOverlay } from './sweep-marker-renderer';
+import { drawSweepMarkerHint, drawSweepMarkerOverlay } from './sweep-marker-renderer';
 import type { SweepMarkerPlot } from './sweep-marker-renderer';
 
 export interface SweepCanvasOptions {
@@ -72,6 +72,7 @@ export function drawSweepCanvas(canvas: HTMLCanvasElement, frame: SweepSpectrumF
 	context.textBaseline = 'top';
 	context.fillStyle = '#8ea0b8';
 	context.fillText('Power (dBFS, relative)', left, 1);
+	drawSweepMarkerHint(context, left, plotWidth, context.measureText('Power (dBFS, relative)').width);
 
 	if (options.selectedCandidate) {
 		const candidate = options.selectedCandidate;

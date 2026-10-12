@@ -17,6 +17,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BROWSDR_REVISION = "54f6cb7c0d69848461eedc46d278518be6f939d3"
 BROWSDR_OVERLAY_BASE_REVISION = "54f6cb7c0d69848461eedc46d278518be6f939d3"
 SOURCE_ARCHIVE_NAME = "freq-spectrum-source.tar.gz"
+# Earlier embedded builds registered a Workbox service worker. It cached /api/
+# replies, reloaded the iframe on install, and made Chromium cancel the keepalive
+# request that saves a recording when the Receiver page unloads. Current builds
+# register none; this script replaces the old worker, deletes its caches and
+# unregisters itself without reloading open pages.
+RETIRED_SERVICE_WORKER = """\
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (event) => {
+\tevent.waitUntil((async () => {
+\t\tconst keys = await caches.keys();
+\t\tawait Promise.all(keys.filter((key) => key.startsWith('workbox-') || key === 'api-cache').map((key) => caches.delete(key)));
+\t\tawait self.registration.unregister();
+\t})());
+});
+"""
 _COPY_IGNORES = {
     ".git",
     ".wrangler",
@@ -133,13 +148,13 @@ def _apply_embedded_changes(source: Path) -> None:
         ':class="{ recording: audioRecording.armed }" @click="toggleVfoAudioRecording" '
         ':disabled="!running || audioRecording.starting || audioRecording.stopping || sweep.active || sweep.starting || sweep.stopping" '
         ':aria-pressed="audioRecording.armed" '
-        ':aria-label="audioRecording.starting ? \'Starting audio…\' : audioRecording.stopping ? \'Finalizing audio…\' : audioRecording.armed ? \'Stop VFO audio\' : \'Record VFO audio\'" '
-        ':title="audioRecording.starting ? \'Starting audio…\' : audioRecording.stopping ? \'Finalizing audio…\' : audioRecording.armed ? \'Stop VFO audio\' : \'Record VFO audio\'">\n'
+        ':aria-label="t(audioRecording.starting ? \'Starting audio…\' : audioRecording.stopping ? \'Finalizing audio…\' : audioRecording.armed ? \'Stop VFO audio\' : \'Record VFO audio\')" '
+        ':title="t(audioRecording.starting ? \'Starting audio…\' : audioRecording.stopping ? \'Finalizing audio…\' : audioRecording.armed ? \'Stop VFO audio\' : \'Record VFO audio\')">\n'
         '\t\t\t\t\t<svg class="audio-record-icon" viewBox="0 0 16 16" aria-hidden="true">\n'
         '\t\t\t\t\t\t<circle v-if="!audioRecording.armed" cx="8" cy="8" r="5" fill="currentColor"></circle>\n'
         '\t\t\t\t\t\t<rect v-else x="4" y="4" width="8" height="8" rx="1" fill="currentColor"></rect>\n'
         '\t\t\t\t\t</svg>\n'
-        '\t\t\t\t\t<span class="audio-record-button-label">{{ audioRecording.starting ? \'Starting audio…\' : audioRecording.stopping ? \'Finalizing audio…\' : audioRecording.armed ? \'Stop VFO audio\' : \'Record VFO audio\' }}</span>\n'
+        '\t\t\t\t\t<span class="audio-record-button-label">{{ t(audioRecording.starting ? \'Starting audio…\' : audioRecording.stopping ? \'Finalizing audio…\' : audioRecording.armed ? \'Stop VFO audio\' : \'Record VFO audio\') }}</span>\n'
         '\t\t\t\t</button>\n'
     )
     _remove_block(
@@ -161,7 +176,7 @@ def _apply_embedded_changes(source: Path) -> None:
         '\t\t\t\t\t\t</div>',
         '\t\t\t\t\t\t<div class="form-row info-row radio-status-row" role="status">\n'
         '\t\t\t\t\t\t\t<span class="radio-status-dot" :class="{ \'is-on\': connected }" aria-hidden="true"></span>\n'
-        '\t\t\t\t\t\t\t<span>Radio SDR {{ connected ? \'ON\' : \'OFF\' }}</span>\n'
+        '\t\t\t\t\t\t\t<span>Radio SDR {{ connected ? (mockDevice ? \'ON · MOCK (no RF)\' : \'ON\') : \'OFF\' }}</span>\n'
         '\t\t\t\t\t\t</div>',
         "Radio SDR connection status",
     )
@@ -201,448 +216,6 @@ def _apply_embedded_changes(source: Path) -> None:
         '\t\t<!-- VFO conflict resolution dialog -->',
         "remote URL connection dialogs",
     )
-    audio_api = source / "src/client/app/receiver-records-api.ts"
-    _replace_once(
-        audio_api,
-        "export interface CreateScanInput {\n",
-        "export interface ReceiverAudioRecordFacets {\n"
-        "\tavailable_dates: string[];\n"
-        "\tvfo_indices: number[];\n"
-        "\tmodes: string[];\n"
-        "\tbandwidths_hz: number[];\n"
-        "\tmin_frequency_hz: number | null;\n"
-        "\tmax_frequency_hz: number | null;\n"
-        "}\n\n"
-        "export interface ReceiverAudioRecordFilters {\n"
-        "\tdate: string;\n"
-        "\ttimeFrom: string;\n"
-        "\ttimeTo: string;\n"
-        "\ttimeZone: string;\n"
-        "\tminimumFrequencyMHz: string;\n"
-        "\tmaximumFrequencyMHz: string;\n"
-        "\tvfoIndex: string;\n"
-        "\tmode: string;\n"
-        "\tbandwidthHz: string;\n"
-        "}\n\n"
-        "export interface CreateScanInput {\n",
-        "VFO audio filter contracts",
-    )
-    _replace_once(
-        audio_api,
-        "\tdeleteRecord(recordId: string): Promise<void> {\n",
-        "\tlistAudioRecords(offset = 0, limit = 100, filters: ReceiverAudioRecordFilters): Promise<ReceiverRecordPage> {\n"
-        "\t\tconst params = new URLSearchParams({ type: 'audio-session', offset: String(offset), limit: String(limit) });\n"
-        "\t\tif (filters.date) {\n"
-        "\t\t\tconst match = /^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(filters.date);\n"
-        "\t\t\tif (!match) throw new TypeError('Audio date must use YYYY-MM-DD.');\n"
-        "\t\t\tconst year = Number(match[1]);\n"
-        "\t\t\tconst month = Number(match[2]);\n"
-        "\t\t\tconst day = Number(match[3]);\n"
-        "\t\t\tconst start = new Date(year, month - 1, day);\n"
-        "\t\t\tif (year < 100) start.setFullYear(year);\n"
-        "\t\t\tif (start.getFullYear() !== year || start.getMonth() !== month - 1 || start.getDate() !== day) {\n"
-        "\t\t\t\tthrow new TypeError('Audio date filter is not a valid calendar date.');\n"
-        "\t\t\t}\n"
-        "\t\t\tconst end = new Date(start);\n"
-        "\t\t\tend.setDate(end.getDate() + 1);\n"
-        "\t\t\tparams.set('started_after', start.toISOString());\n"
-        "\t\t\tparams.set('started_before', end.toISOString());\n"
-        "\t\t}\n"
-        "\t\tif (filters.timeFrom) params.set('time_from', filters.timeFrom);\n"
-        "\t\tif (filters.timeTo) params.set('time_to', filters.timeTo);\n"
-        "\t\tif (filters.timeFrom || filters.timeTo) params.set('time_zone', filters.timeZone);\n"
-        "\t\tif (filters.minimumFrequencyMHz) {\n"
-        "\t\t\tconst frequencyMHz = Number(filters.minimumFrequencyMHz);\n"
-        "\t\t\tif (!Number.isFinite(frequencyMHz) || frequencyMHz < 0) throw new TypeError('Minimum frequency must be a nonnegative MHz value.');\n"
-        "\t\t\tparams.set('min_frequency_hz', String(frequencyMHz * 1_000_000));\n"
-        "\t\t}\n"
-        "\t\tif (filters.maximumFrequencyMHz) {\n"
-        "\t\t\tconst frequencyMHz = Number(filters.maximumFrequencyMHz);\n"
-        "\t\t\tif (!Number.isFinite(frequencyMHz) || frequencyMHz < 0) throw new TypeError('Maximum frequency must be a nonnegative MHz value.');\n"
-        "\t\t\tparams.set('max_frequency_hz', String(frequencyMHz * 1_000_000));\n"
-        "\t\t}\n"
-        "\t\tif (filters.vfoIndex) params.set('vfo_index', filters.vfoIndex);\n"
-        "\t\tif (filters.mode) params.set('mode', filters.mode);\n"
-        "\t\tif (filters.bandwidthHz) params.set('bandwidth_hz', filters.bandwidthHz);\n"
-        "\t\treturn request(`/records?${params.toString()}`, {}, value => {\n"
-        "\t\t\tconst page = parsePage(value, parseRecord, 'VFO audio records');\n"
-        "\t\t\tif (page.items.some(record => record.type !== 'audio-session')) {\n"
-        "\t\t\t\tthrow new TypeError('VFO audio records response included another record type.');\n"
-        "\t\t\t}\n"
-        "\t\t\treturn page;\n"
-        "\t\t});\n"
-        "\t},\n\n"
-        "\tgetAudioRecordFacets(timeZone: string): Promise<ReceiverAudioRecordFacets> {\n"
-        "\t\tconst params = new URLSearchParams({ time_zone: timeZone });\n"
-        "\t\treturn request(`/audio-facets?${params.toString()}`, {}, value => {\n"
-        "\t\t\tconst row = objectValue(value, 'VFO audio facets');\n"
-        "\t\t\tif (!Array.isArray(row.available_dates) || !Array.isArray(row.vfo_indices) || !Array.isArray(row.modes) || !Array.isArray(row.bandwidths_hz)) {\n"
-        "\t\t\t\tthrow new TypeError('VFO audio facet options must be arrays.');\n"
-        "\t\t\t}\n"
-        "\t\t\treturn {\n"
-        "\t\t\t\tavailable_dates: row.available_dates.map((entry, index) => stringValue(entry, `available_dates[${index}]`)),\n"
-        "\t\t\t\tvfo_indices: row.vfo_indices.map((entry, index) => integerValue(entry, `vfo_indices[${index}]`)),\n"
-        "\t\t\t\tmodes: row.modes.map((entry, index) => stringValue(entry, `modes[${index}]`)),\n"
-        "\t\t\t\tbandwidths_hz: row.bandwidths_hz.map((entry, index) => numberValue(entry, `bandwidths_hz[${index}]`)),\n"
-        "\t\t\t\tmin_frequency_hz: row.min_frequency_hz === null ? null : numberValue(row.min_frequency_hz, 'min_frequency_hz'),\n"
-        "\t\t\t\tmax_frequency_hz: row.max_frequency_hz === null ? null : numberValue(row.max_frequency_hz, 'max_frequency_hz'),\n"
-        "\t\t\t};\n"
-        "\t\t});\n"
-        "\t},\n\n"
-        "\tdeleteAudioSegment(segmentId: string): Promise<void> {\n"
-        "\t\treturn request(`/audio-segments/${encodeId(segmentId)}`, { method: 'DELETE' }, parseVoid);\n"
-        "\t},\n\n"
-        "\tdeleteRecord(recordId: string): Promise<void> {\n",
-        "audio record filters and segment deletion API",
-    )
-    records_state = source / "src/client/app/state.ts"
-    _replace_once(
-        records_state,
-        "import type { ReceiverAudioSessionRecord, ReceiverMarker, ReceiverMarkerSet, ReceiverScanRecord } from './receiver-records-api';\n",
-        "import type { ReceiverAudioRecordFacets, ReceiverAudioSessionRecord, ReceiverMarker, ReceiverMarkerSet, ReceiverScanRecord } from './receiver-records-api';\n",
-        "VFO audio facet state type",
-    )
-    _replace_once(
-        records_state,
-        "\t\t\taudioPage: 0,\n",
-        "\t\t\taudioPage: 0,\n"
-        "\t\t\taudioDateFilter: '',\n"
-        "\t\t\taudioTimeFrom: '',\n"
-        "\t\t\taudioTimeTo: '',\n"
-        "\t\t\taudioMinimumFrequencyMHz: '',\n"
-        "\t\t\taudioMaximumFrequencyMHz: '',\n"
-        "\t\t\taudioVfoFilter: '',\n"
-        "\t\t\taudioModeFilter: '',\n"
-        "\t\t\taudioBandwidthFilter: '',\n"
-        "\t\t\taudioFacets: null as ReceiverAudioRecordFacets | null,\n"
-        "\t\t\taudioAvailableDateLookup: {} as Record<string, boolean>,\n"
-        "\t\t\taudioCalendarMonth: '',\n"
-        "\t\t\taudioCalendarFocusedDate: '',\n"
-        "\t\t\taudioCalendarOpen: false,\n"
-        "\t\t\tdeletingAudioSegmentId: '',\n",
-        "audio record filter state",
-    )
-    records = source / "src/client/app/records.ts"
-    _replace_once(
-        records,
-        "export const recordsMethods = {\n",
-        "function localAudioDateKey(date: Date): string {\n"
-        "\tconst year = String(date.getFullYear()).padStart(4, '0');\n"
-        "\tconst month = String(date.getMonth() + 1).padStart(2, '0');\n"
-        "\tconst day = String(date.getDate()).padStart(2, '0');\n"
-        "\treturn `${year}-${month}-${day}`;\n"
-        "}\n\n"
-        "function localAudioMonthKey(date: Date): string {\n"
-        "\treturn `${String(date.getFullYear()).padStart(4, '0')}-${String(date.getMonth() + 1).padStart(2, '0')}`;\n"
-        "}\n\n"
-        "function localAudioDateFromKey(value: string): Date {\n"
-        "\tconst [year, month, day] = value.split('-').map(Number);\n"
-        "\treturn new Date(year, month - 1, day, 12, 0, 0, 0);\n"
-        "}\n\n"
-        "export const recordsMethods = {\n",
-        "local VFO calendar date helpers",
-    )
-    _replace_once(
-        records,
-        "const [scanPage, audioPage] = await Promise.all([\n",
-        "const [scanPage, audioPage, audioFacets] = await Promise.all([\n",
-        "audio record facet request result",
-    )
-    _replace_once(
-        records,
-        "\t\t\tthis.records.audioTotal = audioPage.total;\n",
-        "\t\t\tthis.records.audioTotal = audioPage.total;\n"
-        "\t\t\tthis.records.audioFacets = audioFacets;\n"
-        "\t\t\tthis.records.audioAvailableDateLookup = Object.fromEntries(audioFacets.available_dates.map(date => [date, true] as const));\n"
-        "\t\t\tif (!this.records.audioCalendarMonth) {\n"
-        "\t\t\t\tconst latestAudioDate = audioFacets.available_dates[audioFacets.available_dates.length - 1] || localAudioDateKey(new Date());\n"
-        "\t\t\t\tthis.records.audioCalendarMonth = latestAudioDate.slice(0, 7);\n"
-        "\t\t\t}\n",
-        "record facet state and initial calendar month",
-    )
-    _replace_once(
-        records,
-        "import type { ReceiverAudioSessionRecord, ReceiverMarker, ReceiverRecord, ReceiverScanRecord } from './receiver-records-api';\n",
-        "import type { ReceiverAudioSegmentRecord, ReceiverAudioSessionRecord, ReceiverMarker, ReceiverRecord, ReceiverScanRecord } from './receiver-records-api';\n",
-        "audio segment record type",
-    )
-    _replace_once(
-        records,
-        "receiverRecordsApi.listRecords('audio-session', this.records.audioPage * pageSize, pageSize),",
-        "receiverRecordsApi.listAudioRecords(\n"
-        "\t\t\t\t\tthis.records.audioPage * pageSize,\n"
-        "\t\t\t\t\tpageSize,\n"
-        "\t\t\t\t\t{\n"
-        "\t\t\t\t\t\tdate: this.records.audioDateFilter,\n"
-        "\t\t\t\t\t\ttimeFrom: this.records.audioTimeFrom,\n"
-        "\t\t\t\t\t\ttimeTo: this.records.audioTimeTo,\n"
-        "\t\t\t\t\t\ttimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',\n"
-        "\t\t\t\t\t\tminimumFrequencyMHz: this.records.audioMinimumFrequencyMHz,\n"
-        "\t\t\t\t\t\tmaximumFrequencyMHz: this.records.audioMaximumFrequencyMHz,\n"
-        "\t\t\t\t\t\tvfoIndex: this.records.audioVfoFilter,\n"
-        "\t\t\t\t\t\tmode: this.records.audioModeFilter,\n"
-        "\t\t\t\t\t\tbandwidthHz: this.records.audioBandwidthFilter,\n"
-        "\t\t\t\t\t},\n"
-        "\t\t\t\t),\n"
-        "\t\t\t\treceiverRecordsApi.getAudioRecordFacets(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'),",
-        "filtered VFO audio page and facets requests",
-    )
-    _replace_once(
-        records,
-        "\tasync selectMarkerSet(this: AppInstance) {\n",
-        "\tapplyAudioRecordFilters(this: AppInstance) {\n"
-        "\t\tthis.records.audioPage = 0;\n"
-        "\t\tthis.records.audioItems = [];\n"
-        "\t\tvoid this.loadReceiverRecords();\n"
-        "\t},\n\n"
-        "\thasAudioRecordFilters(this: AppInstance): boolean {\n"
-        "\t\treturn Boolean(this.records.audioDateFilter || this.records.audioTimeFrom || this.records.audioTimeTo || this.records.audioMinimumFrequencyMHz || this.records.audioMaximumFrequencyMHz || this.records.audioVfoFilter || this.records.audioModeFilter || this.records.audioBandwidthFilter);\n"
-        "\t},\n\n"
-        "\tclearAudioRecordFilters(this: AppInstance) {\n"
-        "\t\tthis.records.audioDateFilter = '';\n"
-        "\t\tthis.records.audioTimeFrom = '';\n"
-        "\t\tthis.records.audioTimeTo = '';\n"
-        "\t\tthis.records.audioMinimumFrequencyMHz = '';\n"
-        "\t\tthis.records.audioMaximumFrequencyMHz = '';\n"
-        "\t\tthis.records.audioVfoFilter = '';\n"
-        "\t\tthis.records.audioModeFilter = '';\n"
-        "\t\tthis.records.audioBandwidthFilter = '';\n"
-        "\t\tthis.applyAudioRecordFilters();\n"
-        "\t},\n\n"
-        "\tsetAudioFrequencyFilter(this: AppInstance, event: Event, bound: 'min' | 'max') {\n"
-        "\t\tif (!(event.currentTarget instanceof HTMLInputElement)) return;\n"
-        "\t\tif (bound === 'min') this.records.audioMinimumFrequencyMHz = event.currentTarget.value;\n"
-        "\t\telse this.records.audioMaximumFrequencyMHz = event.currentTarget.value;\n"
-        "\t\tthis.applyAudioRecordFilters();\n"
-        "\t},\n\n"
-        "\taudioCalendarWeekdays(this: AppInstance): string[] {\n"
-        "\t\treturn ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];\n"
-        "\t},\n\n"
-        "\taudioCalendarMonthLabel(this: AppInstance): string {\n"
-        "\t\tconst [year, month] = (this.records.audioCalendarMonth || localAudioMonthKey(new Date())).split('-').map(Number);\n"
-        "\t\treturn new Date(year, month - 1, 1, 12).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });\n"
-        "\t},\n\n"
-        "\tformatAudioDate(this: AppInstance, dateKey: string): string {\n"
-        "\t\treturn localAudioDateFromKey(dateKey).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });\n"
-        "\t},\n\n"
-        "\taudioCalendarWeeks(this: AppInstance) {\n"
-        "\t\tconst [year, month] = (this.records.audioCalendarMonth || localAudioMonthKey(new Date())).split('-').map(Number);\n"
-        "\t\tconst monthStart = new Date(year, month - 1, 1, 12);\n"
-        "\t\tconst firstVisibleDate = new Date(year, month - 1, 1 - monthStart.getDay(), 12);\n"
-        "\t\treturn Array.from({ length: 6 }, (_, weekIndex) => Array.from({ length: 7 }, (_, dayIndex) => {\n"
-        "\t\t\tconst date = new Date(firstVisibleDate);\n"
-        "\t\t\tdate.setDate(firstVisibleDate.getDate() + weekIndex * 7 + dayIndex);\n"
-        "\t\t\tconst dateKey = localAudioDateKey(date);\n"
-        "\t\t\treturn { date: dateKey, day: date.getDate(), inMonth: date.getMonth() === monthStart.getMonth(), hasRecords: Boolean(this.records.audioAvailableDateLookup[dateKey]) };\n"
-        "\t\t}));\n"
-        "\t},\n\n"
-        "\tfocusAudioCalendarDate(this: AppInstance, dateKey: string) {\n"
-        "\t\twindow.requestAnimationFrame(() => document.getElementById(`audio-calendar-date-${dateKey}`)?.focus());\n"
-        "\t},\n\n"
-        "\tchangeAudioCalendarMonth(this: AppInstance, offset: number) {\n"
-        "\t\tconst [year, month] = (this.records.audioCalendarMonth || localAudioMonthKey(new Date())).split('-').map(Number);\n"
-        "\t\tconst nextMonth = new Date(year, month - 1 + offset, 1, 12);\n"
-        "\t\tthis.records.audioCalendarMonth = localAudioMonthKey(nextMonth);\n"
-        "\t\tthis.records.audioCalendarFocusedDate = localAudioDateKey(nextMonth);\n"
-        "\t\tthis.focusAudioCalendarDate(this.records.audioCalendarFocusedDate);\n"
-        "\t},\n\n"
-        "\ttoggleAudioCalendar(this: AppInstance, event: Event) {\n"
-        "\t\tif (!(event.currentTarget instanceof HTMLDetailsElement)) return;\n"
-        "\t\tthis.records.audioCalendarOpen = event.currentTarget.open;\n"
-        "\t\tif (!event.currentTarget.open) return;\n"
-        "\t\tconst dates = this.records.audioFacets?.available_dates || [];\n"
-        "\t\tconst focusDate = this.records.audioDateFilter || this.records.audioCalendarFocusedDate || dates[dates.length - 1] || localAudioDateKey(new Date());\n"
-        "\t\tthis.records.audioCalendarMonth = focusDate.slice(0, 7);\n"
-        "\t\tthis.records.audioCalendarFocusedDate = focusDate;\n"
-        "\t\tthis.focusAudioCalendarDate(focusDate);\n"
-        "\t},\n\n"
-        "\tmoveAudioCalendarFocus(this: AppInstance, event: KeyboardEvent, dateKey: string) {\n"
-        "\t\tconst date = localAudioDateFromKey(dateKey);\n"
-        "\t\tswitch (event.key) {\n"
-        "\t\t\tcase 'ArrowLeft': date.setDate(date.getDate() - 1); break;\n"
-        "\t\t\tcase 'ArrowRight': date.setDate(date.getDate() + 1); break;\n"
-        "\t\t\tcase 'ArrowUp': date.setDate(date.getDate() - 7); break;\n"
-        "\t\t\tcase 'ArrowDown': date.setDate(date.getDate() + 7); break;\n"
-        "\t\t\tcase 'Home': date.setDate(date.getDate() - date.getDay()); break;\n"
-        "\t\t\tcase 'End': date.setDate(date.getDate() + 6 - date.getDay()); break;\n"
-        "\t\t\tdefault: return;\n"
-        "\t\t}\n"
-        "\t\tevent.preventDefault();\n"
-        "\t\tconst nextDate = localAudioDateKey(date);\n"
-        "\t\tthis.records.audioCalendarFocusedDate = nextDate;\n"
-        "\t\tthis.records.audioCalendarMonth = nextDate.slice(0, 7);\n"
-        "\t\tthis.focusAudioCalendarDate(nextDate);\n"
-        "\t},\n\n"
-        "\tselectAudioCalendarDate(this: AppInstance, dateKey: string) {\n"
-        "\t\tthis.records.audioDateFilter = dateKey;\n"
-        "\t\tthis.records.audioCalendarFocusedDate = dateKey;\n"
-        "\t\tthis.records.audioCalendarMonth = dateKey.slice(0, 7);\n"
-        "\t\tthis.records.audioCalendarOpen = false;\n"
-        "\t\tthis.applyAudioRecordFilters();\n"
-        "\t\twindow.requestAnimationFrame(() => document.querySelector<HTMLSummaryElement>('.audio-date-picker > summary')?.focus());\n"
-        "\t},\n\n"
-        "\tcloseAudioCalendar(this: AppInstance) {\n"
-        "\t\tthis.records.audioCalendarOpen = false;\n"
-        "\t\twindow.requestAnimationFrame(() => document.querySelector<HTMLSummaryElement>('.audio-date-picker > summary')?.focus());\n"
-        "\t},\n\n"
-        "\tasync selectMarkerSet(this: AppInstance) {\n",
-        "structured VFO filters and keyboard calendar actions",
-    )
-    _replace_once(
-        records,
-        "\taudioRecordUrl(this: AppInstance, segmentId: string): string {\n",
-        "\tasync deleteAudioSegment(this: AppInstance, segment: ReceiverAudioSegmentRecord) {\n"
-        "\t\tif (segment.ended_at === null) {\n"
-        "\t\t\tthis.records.error = 'Stop the active VFO recording before deleting it.';\n"
-        "\t\t\treturn;\n"
-        "\t\t}\n"
-        "\t\tif (this.records.deletingAudioSegmentId) return;\n"
-        "\t\tconst frequencyMHz = (segment.frequency_hz / 1_000_000).toFixed(6);\n"
-        "\t\tif (!window.confirm(`Delete VFO ${segment.vfo_index + 1} recording at ${frequencyMHz} MHz? This cannot be undone.`)) return;\n"
-        "\t\tthis.records.deletingAudioSegmentId = segment.id;\n"
-        "\t\tthis.records.error = '';\n"
-        "\t\ttry {\n"
-        "\t\t\tawait receiverRecordsApi.deleteAudioSegment(segment.id);\n"
-        "\t\t\tawait this.loadReceiverRecords();\n"
-        "\t\t} catch (error) {\n"
-        "\t\t\tthis.records.error = `Could not delete recording: ${errorMessage(error)}`;\n"
-        "\t\t} finally {\n"
-        "\t\t\tthis.records.deletingAudioSegmentId = '';\n"
-        "\t\t}\n"
-        "\t},\n\n"
-        "\taudioRecordUrl(this: AppInstance, segmentId: string): string {\n",
-        "individual VFO recording deletion action",
-    )
-    _replace_once(
-        html,
-        "\t\t\t\t\t<div class=\"records-list-header\">\n"
-        "\t\t\t\t\t\t<h3 id=\"records-audio-title\">VFO Audio</h3>\n"
-        "\t\t\t\t\t\t<span>{{ records.audioTotal }} session{{ records.audioTotal === 1 ? '' : 's' }}</span>\n"
-        "\t\t\t\t\t</div>\n",
-        "\t\t\t\t\t<div class=\"records-list-header\">\n"
-        "\t\t\t\t\t\t<h3 id=\"records-audio-title\">VFO Audio</h3>\n"
-        "\t\t\t\t\t\t<span>{{ records.audioTotal }} session{{ records.audioTotal === 1 ? '' : 's' }}</span>\n"
-        "\t\t\t\t\t</div>\n"
-        "\t\t\t\t\t<div class=\"records-audio-filters\" role=\"group\" aria-label=\"Filter VFO audio recordings\">\n"
-        "\t\t\t\t\t\t<details class=\"audio-date-picker\" :open=\"records.audioCalendarOpen\" @toggle=\"toggleAudioCalendar\" @keydown.esc.prevent=\"closeAudioCalendar\">\n"
-        "\t\t\t\t\t\t\t<summary><span>Date recorded (local)</span><strong>{{ records.audioDateFilter ? formatAudioDate(records.audioDateFilter) : 'Any date' }}</strong></summary>\n"
-        "\t\t\t\t\t\t\t<div class=\"audio-calendar\">\n"
-        "\t\t\t\t\t\t\t\t<div class=\"audio-calendar-header\">\n"
-        "\t\t\t\t\t\t\t\t\t<button type=\"button\" class=\"btn btn-secondary audio-calendar-nav\" aria-label=\"Previous month\" @click=\"changeAudioCalendarMonth(-1)\">Prev</button>\n"
-        "\t\t\t\t\t\t\t\t\t<strong>{{ audioCalendarMonthLabel() }}</strong>\n"
-        "\t\t\t\t\t\t\t\t\t<button type=\"button\" class=\"btn btn-secondary audio-calendar-nav\" aria-label=\"Next month\" @click=\"changeAudioCalendarMonth(1)\">Next</button>\n"
-        "\t\t\t\t\t\t\t\t</div>\n"
-        "\t\t\t\t\t\t\t\t<div class=\"audio-calendar-grid\" role=\"grid\" :aria-label=\"'Calendar for ' + audioCalendarMonthLabel()\">\n"
-        "\t\t\t\t\t\t\t\t\t<div class=\"audio-calendar-weekdays\" role=\"row\"><span v-for=\"weekday in audioCalendarWeekdays()\" :key=\"weekday\" role=\"columnheader\">{{ weekday }}</span></div>\n"
-        "\t\t\t\t\t\t\t\t\t<div v-for=\"week in audioCalendarWeeks()\" :key=\"week[0].date\" class=\"audio-calendar-week\" role=\"row\">\n"
-        "\t\t\t\t\t\t\t\t\t\t<div v-for=\"day in week\" :key=\"day.date\" class=\"audio-calendar-cell\" role=\"gridcell\" :aria-selected=\"day.date === records.audioDateFilter\">\n"
-        "\t\t\t\t\t\t\t\t\t\t\t<button type=\"button\" class=\"audio-calendar-day\" :class=\"{ 'has-recordings': day.hasRecords, 'is-selected': day.date === records.audioDateFilter }\" :disabled=\"!day.inMonth\" :tabindex=\"day.date === records.audioCalendarFocusedDate ? 0 : -1\" :id=\"'audio-calendar-date-' + day.date\" :aria-label=\"formatAudioDate(day.date) + (day.hasRecords ? ', recordings available' : ', no recordings')\" @focus=\"records.audioCalendarFocusedDate = day.date\" @keydown=\"moveAudioCalendarFocus($event, day.date)\" @click=\"selectAudioCalendarDate(day.date)\">{{ day.day }}</button>\n"
-        "\t\t\t\t\t\t\t\t\t\t</div>\n"
-        "\t\t\t\t\t\t\t\t\t</div>\n"
-        "\t\t\t\t\t\t\t\t</div>\n"
-        "\t\t\t\t\t\t\t\t<p class=\"audio-calendar-help\">Highlighted dates contain recordings. Other dates remain selectable.</p>\n"
-        "\t\t\t\t\t\t\t</div>\n"
-        "\t\t\t\t\t\t</details>\n"
-        "\t\t\t\t\t\t<fieldset class=\"audio-filter-fieldset\">\n"
-        "\t\t\t\t\t\t\t<legend>Time of day (local)</legend>\n"
-        "\t\t\t\t\t\t\t<div class=\"audio-filter-pair\">\n"
-        "\t\t\t\t\t\t\t\t<label for=\"records-audio-time-from\">From<input id=\"records-audio-time-from\" type=\"time\" step=\"60\" v-model=\"records.audioTimeFrom\" @change=\"applyAudioRecordFilters\"></label>\n"
-        "\t\t\t\t\t\t\t\t<label for=\"records-audio-time-to\">To<input id=\"records-audio-time-to\" type=\"time\" step=\"60\" v-model=\"records.audioTimeTo\" @change=\"applyAudioRecordFilters\"></label>\n"
-        "\t\t\t\t\t\t\t</div>\n"
-        "\t\t\t\t\t\t</fieldset>\n"
-        "\t\t\t\t\t\t<fieldset class=\"audio-filter-fieldset\">\n"
-        "\t\t\t\t\t\t\t<legend>Frequency (MHz)</legend>\n"
-        "\t\t\t\t\t\t\t<div class=\"audio-filter-pair\">\n"
-        "\t\t\t\t\t\t\t\t<label for=\"records-audio-frequency-min\">Min<input id=\"records-audio-frequency-min\" type=\"number\" min=\"0\" step=\"any\" inputmode=\"decimal\" :value=\"records.audioMinimumFrequencyMHz\" @change=\"setAudioFrequencyFilter($event, 'min')\"></label>\n"
-        "\t\t\t\t\t\t\t\t<label for=\"records-audio-frequency-max\">Max<input id=\"records-audio-frequency-max\" type=\"number\" min=\"0\" step=\"any\" inputmode=\"decimal\" :value=\"records.audioMaximumFrequencyMHz\" @change=\"setAudioFrequencyFilter($event, 'max')\"></label>\n"
-        "\t\t\t\t\t\t\t</div>\n"
-        "\t\t\t\t\t\t</fieldset>\n"
-        "\t\t\t\t\t\t<label class=\"audio-filter-select\" for=\"records-audio-vfo\">VFO\n"
-        "\t\t\t\t\t\t\t<select id=\"records-audio-vfo\" v-model=\"records.audioVfoFilter\" @change=\"applyAudioRecordFilters\"><option value=\"\">All VFOs</option><option v-for=\"vfo in records.audioFacets?.vfo_indices || []\" :key=\"vfo\" :value=\"String(vfo)\">VFO {{ vfo + 1 }}</option></select>\n"
-        "\t\t\t\t\t\t</label>\n"
-        "\t\t\t\t\t\t<label class=\"audio-filter-select\" for=\"records-audio-mode\">Mode\n"
-        "\t\t\t\t\t\t\t<select id=\"records-audio-mode\" v-model=\"records.audioModeFilter\" @change=\"applyAudioRecordFilters\"><option value=\"\">All modes</option><option v-for=\"mode in records.audioFacets?.modes || []\" :key=\"mode\" :value=\"mode\">{{ mode.toUpperCase() }}</option></select>\n"
-        "\t\t\t\t\t\t</label>\n"
-        "\t\t\t\t\t\t<label class=\"audio-filter-select\" for=\"records-audio-bandwidth\">Bandwidth\n"
-        "\t\t\t\t\t\t\t<select id=\"records-audio-bandwidth\" v-model=\"records.audioBandwidthFilter\" @change=\"applyAudioRecordFilters\"><option value=\"\">All bandwidths</option><option v-for=\"bandwidth in records.audioFacets?.bandwidths_hz || []\" :key=\"bandwidth\" :value=\"String(bandwidth)\">{{ bandwidth >= 1000000 ? (bandwidth / 1000000) + ' MHz' : (bandwidth >= 1000 ? (bandwidth / 1000) + ' kHz' : bandwidth + ' Hz') }}</option></select>\n"
-        "\t\t\t\t\t\t</label>\n"
-        "\t\t\t\t\t\t<button v-if=\"hasAudioRecordFilters()\" type=\"button\" class=\"btn btn-secondary audio-clear-filters\" @click=\"clearAudioRecordFilters\">Clear filters</button>\n"
-        "\t\t\t\t\t</div>\n",
-        "VFO audio search and date controls",
-    )
-    _replace_once(
-        html,
-        "\t\t\t\t\t\t\t\t\t\t<div>VFO {{ segment.vfo_index + 1 }} · {{ (segment.frequency_hz / 1000000).toFixed(6) }} MHz · {{ segment.mode.toUpperCase() }} · {{ segment.bandwidth_hz }} Hz · {{ segment.duration_seconds === null ? 'recording' : segment.duration_seconds.toFixed(1) + ' s' }}</div>\n",
-        "\t\t\t\t\t\t\t\t\t\t<div class=\"audio-record-segment-details\">\n"
-        "\t\t\t\t\t\t\t\t\t\t\t<time :datetime=\"segment.started_at\">{{ new Date(segment.started_at).toLocaleString() }}</time>\n"
-        "\t\t\t\t\t\t\t\t\t\t\t<span>VFO {{ segment.vfo_index + 1 }} · {{ (segment.frequency_hz / 1000000).toFixed(6) }} MHz · {{ segment.mode.toUpperCase() }} · {{ segment.bandwidth_hz }} Hz · {{ segment.duration_seconds === null ? 'recording' : segment.duration_seconds.toFixed(1) + ' s' }}</span>\n"
-        "\t\t\t\t\t\t\t\t\t\t</div>\n",
-        "VFO audio segment start time",
-    )
-    _replace_once(
-        html,
-        "<span v-else class=\"records-empty\">No audio data in this segment.</span>",
-        "<span v-else class=\"records-empty\">No audio data in this segment.</span>\n"
-        "\t\t\t\t\t\t\t\t\t\t\t<button type=\"button\" class=\"btn btn-secondary audio-record-delete-button\" "
-        "@click=\"deleteAudioSegment(segment)\" "
-        ":disabled=\"records.loading || records.deletingAudioSegmentId !== '' || segment.ended_at === null\" "
-        ":aria-label=\"'Delete VFO ' + (segment.vfo_index + 1) + ' recording at ' + (segment.frequency_hz / 1000000).toFixed(6) + ' MHz'\">"
-        "{{ records.deletingAudioSegmentId === segment.id ? 'Deleting…' : 'Delete recording' }}</button>",
-        "per-segment audio delete control",
-    )
-    _replace_once(
-        html,
-        "<td><button class=\"btn btn-secondary\" @click=\"deleteReceiverRecord(record)\">Delete session</button></td>",
-        "<td><button class=\"btn btn-secondary\" @click=\"deleteReceiverRecord(record)\" "
-        ":disabled=\"records.loading || records.deletingAudioSegmentId !== ''\">Delete session</button></td>",
-        "session delete pending state",
-    )
-    _replace_once(
-        html,
-        "{{ records.loading ? 'Loading VFO Audio sessions…' : 'No saved VFO Audio sessions.' }}",
-        "{{ records.loading ? 'Loading VFO Audio sessions…' : (hasAudioRecordFilters() ? 'No recordings match these filters. Adjust them or clear filters.' : 'No saved VFO Audio sessions.') }}",
-        "filtered audio empty state",
-    )
-
-
-    main = source / "src/client/app/main.ts"
-    _replace_once(main, "import { remoteMethods } from './remote';\n", "", "remote methods import")
-    _replace_once(main, "\t\t...remoteMethods,\n", "", "remote methods binding")
-
-    connection = source / "src/client/app/connection.ts"
-    _replace_once(
-        connection,
-        "\t\t\t\ttitle: 'BrowSDR',\n",
-        "\t\t\t\ttitle: 'Freq. Spectrum',\n",
-        "media session title",
-    )
-    _replace_once(
-        connection,
-        "export const connectionMethods = {\n",
-        "export const connectionMethods = {\n"
-        "\tasync autoConnectAuthorizedHackRF(this: AppInstance) {\n"
-        "\t\tif (!this.backend || !navigator.usb) return;\n"
-        "\t\ttry {\n"
-        "\t\t\tconst authorizedDevices = await navigator.usb.getDevices();\n"
-        "\t\t\tconst hackrfDevices = authorizedDevices.filter(device => lookupDevice(device)?.type === 'hackrf');\n"
-        "\t\t\tif (hackrfDevices.length !== 1) return;\n"
-        "\t\t\tthis._initAudioCtx();\n"
-        "\t\t\tthis.showMsg('Reconnecting to previously authorized HackRF...');\n"
-        "\t\t\tawait this.connectToDevice(hackrfDevices[0]);\n"
-        "\t\t} catch (error) {\n"
-        "\t\t\tconst message = error instanceof Error ? error.message : String(error);\n"
-        "\t\t\tthis.showMsg(`HackRF auto-connect failed: ${message}`);\n"
-        "\t\t}\n"
-        "\t},\n",
-        "previously authorized HackRF auto-reconnect",
-    )
-    _replace_once(
-        main,
-        "\t},\n\tmounted() {\n",
-        "\t\tawait this.$nextTick();\n\t\tawait this.autoConnectAuthorizedHackRF();\n\t},\n\tmounted() {\n",
-        "HackRF auto-reconnect after backend initialization",
-    )
-
     sweep = source / "src/client/app/sweep.ts"
     _replace_once(
         sweep,
@@ -1072,20 +645,6 @@ def _apply_embedded_changes(source: Path) -> None:
     _remove_block(style, "\n\t.github-link {", "\n\t}", "mobile GitHub icon styles")
     _remove_block(style, "\n.sweep-header p {", "\n}", "scan caption styles")
     _remove_block(style, "\n\t.sweep-header p {", "\n\t}", "mobile scan caption styles")
-    _replace_once(
-        source / "src/client/app/state.ts",
-        "\t\t\thoverPowerDb: null as number | null,\n",
-        "\t\t\thoverPowerDb: null as number | null,\n"
-        "\t\t\thoverWaterfallY: null as number | null,\n"
-        "\t\t\thoverWaterfallRow: null as number | null,\n",
-        "waterfall pointer state",
-    )
-    _replace_once(
-        source / "src/client/app/state.ts",
-        "\t\t\tdisplayMinDb: -120,\n",
-        "\t\t\tdisplayMinDb: -60,\n",
-        "default spectrum display minimum",
-    )
     session = source / "src/client/app/sweep-session.ts"
     _replace_once(
         session,
@@ -1475,26 +1034,6 @@ def _apply_embedded_changes(source: Path) -> None:
         "Receiver-scoped fallback audio asset path",
     )
 
-    connection = source / "src/client/app/connection.ts"
-    _replace_once(
-        connection,
-        "{ src: '/icon-96.png'",
-        "{ src: '/receiver/icon-96.png'",
-        "Receiver-scoped 96px media artwork",
-    )
-    _replace_once(
-        connection,
-        "{ src: '/icon-192.png'",
-        "{ src: '/receiver/icon-192.png'",
-        "Receiver-scoped 192px media artwork",
-    )
-    _replace_once(
-        connection,
-        "{ src: '/icon-512.png'",
-        "{ src: '/receiver/icon-512.png'",
-        "Receiver-scoped 512px media artwork",
-    )
-
     _replace_once(
         source / "src/client/dsp-worker.ts",
         '"/hackrf-web/pkg/hackrf_web.js"',
@@ -1521,6 +1060,31 @@ def _apply_embedded_changes(source: Path) -> None:
     )
 
     vite = source / "vite.config.ts"
+    _replace_once(
+        vite,
+        "\t\t\tinjectRegister: 'script',\n",
+        "\t\t\tinjectRegister: false,\n",
+        "no service worker registration",
+    )
+    _replace_once(
+        vite,
+        "\t\t\t\truntimeCaching: [\n"
+        "\t\t\t\t\t{\n"
+        "\t\t\t\t\t\t// API routes: network-first (only works online)\n"
+        "\t\t\t\t\t\turlPattern: /^.*\\/api\\/.*/i,\n"
+        "\t\t\t\t\t\thandler: 'NetworkFirst',\n"
+        "\t\t\t\t\t\toptions: {\n"
+        "\t\t\t\t\t\t\tcacheName: 'api-cache',\n"
+        "\t\t\t\t\t\t\tnetworkTimeoutSeconds: 5,\n"
+        "\t\t\t\t\t\t\texpiration: { maxEntries: 50, maxAgeSeconds: 60 * 60 },\n"
+        "\t\t\t\t\t\t},\n"
+        "\t\t\t\t\t},\n"
+        "\t\t\t\t],\n",
+        # Receiver records must come from the live console: a cached /api reply would
+        # show deleted or stale records without any error while the console is down.
+        "\t\t\t\truntimeCaching: [],\n",
+        "service worker API cache",
+    )
     _replace_count(
         vite,
         "path.resolve(__dirname, 'dist')",
@@ -1545,24 +1109,6 @@ def _apply_embedded_changes(source: Path) -> None:
         "{ src: '/icon-512.png'",
         "{ src: '/receiver/icon-512.png'",
         "scoped 512px PWA icon",
-    )
-
-    app_main = source / "src/client/app/main.ts"
-    _replace_once(
-        app_main,
-        "createApp({\n",
-        "const receiverApp = createApp({\n",
-        "retain embedded app for theme redraws",
-    )
-    _replace_once(
-        app_main,
-        "}).mount('#app');",
-        "}).mount('#app') as any;\n"
-        "window.addEventListener('console-theme-change', () => {\n"
-        "\tif (receiverApp.activeWorkspace === 'spectrum') receiverApp.drawSweepSpectrum();\n"
-        "\telse if (receiverApp.activeWorkspace === 'listener') receiverApp.resizeFftCanvas();\n"
-        "});",
-        "redraw Receiver canvases when the host theme changes",
     )
 
     sweep_canvas = source / "src/client/app/sweep-canvas.ts"
@@ -1661,6 +1207,11 @@ def _apply_embedded_changes(source: Path) -> None:
         encoding="utf-8",
     )
 
+    boot_script = source / "src/client/receiver-boot.js"
+    if not boot_script.is_file():
+        raise RuntimeError(f"expected the Receiver boot script at {boot_script}")
+    shutil.copy2(boot_script, source / "public/receiver-boot.js")
+
     peerjs = source / "public/lib/peerjs.min.js"
     if not peerjs.is_file():
         raise RuntimeError(f"expected bundled PeerJS asset at {peerjs}")
@@ -1694,7 +1245,10 @@ def _write_source_instructions(source: Path) -> None:
         "without changing the captured scan. The Spectrum workspace uses a high-contrast "
         "blue-to-red trace; both charts show a cursor crosshair, and Waterfall reports "
         "frequency, power, and history row in its hover tooltip. Public media, worker, "
-        "asset, and PWA paths are scoped to /receiver/.\n\n"
+        "asset, and PWA paths are scoped to /receiver/. The embedded page registers no "
+        "service worker (sw.js only removes the caching worker of older builds), loads no "
+        "remote fonts, takes the console theme and language from its URL before first paint, "
+        "and offers the Mock SDR only when opened with ?mock=1.\n\n"
         "Build with Node.js 22 or later: run npm ci --ignore-scripts, then npm run build -- --base=/receiver/. "
         "The Ground Console repository also includes tools/build_browsdr_receiver.py, "
         "which applies these integration changes and creates this source archive from the "
@@ -1728,6 +1282,12 @@ def _set_receiver_manifest_brand(build_dir: Path) -> None:
         json.dumps(data, separators=(",", ":"), ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+
+
+def _retire_service_worker(build_dir: Path) -> None:
+    for workbox in build_dir.glob("workbox-*.js"):
+        workbox.unlink()
+    (build_dir / "sw.js").write_text(RETIRED_SERVICE_WORKER, encoding="utf-8")
 
 
 def _verify_embedded_build(build_dir: Path) -> None:
@@ -1771,6 +1331,15 @@ def _verify_embedded_build(build_dir: Path) -> None:
             "forbidden remote-sharing code or root-scoped asset path remains in the embedded JavaScript bundle: "
             + ", ".join(remaining)
         )
+    service_worker = build_dir / "sw.js"
+    if not service_worker.is_file() or service_worker.read_text(encoding="utf-8") != RETIRED_SERVICE_WORKER:
+        raise RuntimeError("the embedded build must ship the self-removing service worker")
+    if "registerSW" in html or "serviceWorker.register" in bundle_text or list(build_dir.glob("workbox-*.js")):
+        raise RuntimeError("the embedded Receiver still registers a caching service worker")
+    if "fonts.googleapis.com" in html or "fonts.gstatic.com" in html:
+        raise RuntimeError("the embedded Receiver page still loads remote fonts")
+    if '<script src="/receiver/receiver-boot.js"></script>' not in html or not (build_dir / "receiver-boot.js").is_file():
+        raise RuntimeError("the embedded Receiver page is missing its theme boot script")
     if (build_dir / "lib/peerjs.min.js").exists():
         raise RuntimeError("PeerJS was unexpectedly copied into the embedded build")
 
@@ -1885,6 +1454,7 @@ def build_receiver(source: Path) -> Path:
             check=True,
         )
         _set_receiver_manifest_brand(build_dir)
+        _retire_service_worker(build_dir)
         _verify_embedded_build(build_dir)
         shutil.copy2(source_archive, build_dir / SOURCE_ARCHIVE_NAME)
         _install_built_receiver(build_dir, output)
