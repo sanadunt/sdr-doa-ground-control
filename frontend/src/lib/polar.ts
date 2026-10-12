@@ -127,6 +127,16 @@ export function displayAngleForBin(bin: number, settings: PolarSettings): number
   return normalizeDegrees(settings.figType === 'Compass' ? 360 - bin + settings.compassOffset : bin);
 }
 
+/**
+ * Geographic bearing (degrees clockwise from north) for an upstream theta_0
+ * array angle or angular bin. theta_0 runs counter-clockwise in the array
+ * frame, so the map always applies the Compass conversion, independent of the
+ * Polar/Compass choice for the polar plot.
+ */
+export function geographicBearingForBin(bin: number, compassOffset: number): number {
+  return normalizeDegrees(360 - bin + (Number.isFinite(compassOffset) ? compassOffset : 0));
+}
+
 export function signedPeak(values: number[]): { index: number; value: number } | null {
   if (values.length !== 360 || !values.every((value) => typeof value === 'number' && Number.isFinite(value))) return null;
   const numeric = values;

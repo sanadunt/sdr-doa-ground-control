@@ -19,6 +19,7 @@ import {
 import {
   displayAngleForBin,
   DEFAULT_COMPASS_CONFIG,
+  geographicBearingForBin,
   manualCompassOverrideFromInput,
   manualCompassSettings,
   normalizeDegrees,
@@ -269,6 +270,17 @@ describe('polar compass transforms', () => {
     expect(displayAngleForBin(90, polarSettings('Polar', 10))).toBe(90);
     expect(normalizeDegrees(-10)).toBe(350);
     expect(normalizeDegrees(730)).toBe(10);
+  });
+
+  it('maps theta_0 to a north-clockwise geographic bearing that matches the Compass display peak', () => {
+    for (const offset of [0, 30, -20]) {
+      for (const theta of [0, 90, 180, 270]) {
+        expect(geographicBearingForBin(theta, offset)).toBe(displayAngleForBin(theta, polarSettings('Compass', offset)));
+      }
+    }
+    expect(geographicBearingForBin(90, 0)).toBe(270);
+    expect(geographicBearingForBin(90, 30)).toBe(300);
+    expect(geographicBearingForBin(0, Number.NaN)).toBe(0);
   });
 
   it('applies the compass transform once to the polar view peak', () => {
