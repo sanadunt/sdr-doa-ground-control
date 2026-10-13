@@ -532,6 +532,6 @@ class RdfNodeV2Telemetry:
                     (self._revision_known and self._revision != revision) or
                     (self._state_revision_known and self._state_revision != revision)):
                 entry["status"], entry["error"] = "INCONSISTENT", "HEALTH_MISMATCH"
-        return {"node_id": self.node_id, "received": self._received, "valid": self._valid,
+        return {"node_id": self.node_id, "now_ms": now_ms, "received": self._received, "valid": self._valid,
                 "invalid": self._invalid, "last_received_at_ms": self._last_received,
                 "topic_counts": dict(self._counts), "topics": topics}

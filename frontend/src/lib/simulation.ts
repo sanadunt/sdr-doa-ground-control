@@ -33,23 +33,38 @@ export function validateSimulation(value: SimulationSettings): boolean {
     && value.angle >= 0 && value.angle < 360 && value.width >= 5 && value.width <= 60;
 }
 
-/** Renderer fixture only; never eligible for publication or remote control. */
+/**
+ * Array-frame theta_0 for a geographic bearing with compass offset 0. Data Out
+ * reports theta_0 counter-clockwise, and the console draws
+ * (360 - theta_0 + offset) mod 360 as the bearing.
+ */
+export function simulationTheta(bearing: number): number {
+  return (360 - bearing) % 360;
+}
+
+/**
+ * Renderer fixture only; never eligible for publication or remote control.
+ * The entered angle is the geographic bearing, so the snapshot carries
+ * theta_0 = 360 - angle with a Compass axis and offset 0, and the readout,
+ * polar plot and map all show the entered value.
+ */
 export function simulationSnapshot(settings: SimulationSettings): TelemetrySnapshot {
   if (!validateSimulation(settings)) throw new Error('Invalid simulation settings');
+  const theta = simulationTheta(settings.angle);
   const values = Array.from({ length: 360 }, (_, bin) => {
-    const distance = Math.abs(((bin - settings.angle + 540) % 360) - 180);
+    const distance = Math.abs(((bin - theta + 540) % 360) - 180);
     return -50 + 45 * Math.exp(-0.5 * (distance / settings.width) ** 2);
   });
   const record = {
     available: true, source_format: 'SIMULATION',
-    canonical_angle_deg: settings.angle,
+    canonical_angle_deg: theta,
     freshness: { fresh: true, age_ms: 0, reference_kind: 'synthetic-static-preview' },
   };
   return {
     simulation: true,
     overall_state: 'SIMULATION',
     status: { available: true, daq_health: 'SIMULATION' },
-    settings: { fields: { doa_fig_type: 'Polar', compass_offset: 0 } },
+    settings: { fields: { doa_fig_type: 'Compass', compass_offset: 0 } },
     doa_candidates: { csv: { ...record, angular_power_db: values }, xml: { ...record } },
     native_consistency: { comparable: true, conflict: false },
     publication_gate: { state: 'BLOCKED', checks: { real_measurement: false }, reasons: ['SIMULATION_ONLY'] },

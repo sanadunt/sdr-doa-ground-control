@@ -2,7 +2,7 @@ import type { JSX } from 'react';
 import { useState } from 'react';
 import type { PolarSettings, TelemetrySnapshot } from '../types';
 import { polarView } from '../lib/polar';
-import { doaStatus, doaStatusTextKey } from '../lib/doaStatus';
+import { doaStatusTextKey, overviewDoaStatus } from '../lib/doaStatus';
 import { useI18n } from '../lib/i18n';
 import { PolarPlot } from './PolarPlot';
 import { Icon, StatusBadge } from './ui';
@@ -21,7 +21,7 @@ export function PolarPanel({
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const view = polarView(snapshot, compassSettings, localSnapshotFresh, null, compassSettings);
-  const status = doaStatus(snapshot, localSnapshotFresh, view.fresh);
+  const status = overviewDoaStatus(snapshot, localSnapshotFresh);
   const statusDetail = t(doaStatusTextKey(status.reason));
   return (
     <section className={`panel polar-panel ${expanded ? 'polar-expanded' : ''}`}>

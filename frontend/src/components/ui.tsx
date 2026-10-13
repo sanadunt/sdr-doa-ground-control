@@ -65,9 +65,9 @@ export function EmptyState({ label, detail, tone = 'neutral' }: { label: string;
   );
 }
 
-export function KeyValue({ label, value, detail }: { label: string; value: ReactNode; detail?: ReactNode }): JSX.Element {
+export function KeyValue({ label, value, detail, tone }: { label: string; value: ReactNode; detail?: ReactNode; tone?: Tone }): JSX.Element {
   return (
-    <div className="key-value">
+    <div className={tone ? `key-value key-value-${tone}` : 'key-value'}>
       <span>{label}</span>
       <strong>{value}</strong>
       {detail ? <small>{detail}</small> : null}

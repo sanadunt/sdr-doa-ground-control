@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_SIMULATION, simulationSnapshot, validateSimulation, randomizeSimulationSettings, simulationRayEnd } from './simulation';
-import { polarView } from './polar';
+import { DEFAULT_SIMULATION, simulationSnapshot, simulationTheta, validateSimulation, randomizeSimulationSettings, simulationRayEnd } from './simulation';
+import { bearingForView, geographicBearingForBin, polarView } from './polar';
+import { overviewDoaStatus } from './doaStatus';
 
 describe('local simulation', () => {
   it('randomizes valid angles and shapes without moving the station', () => {
@@ -18,7 +19,21 @@ describe('local simulation', () => {
   it('changes the curve shape when lobe width changes', () => {
     const narrow = polarView(simulationSnapshot({ ...DEFAULT_SIMULATION, width: 5 }));
     const wide = polarView(simulationSnapshot({ ...DEFAULT_SIMULATION, width: 60 }));
-    expect(narrow.values?.[65]).toBeLessThan(wide.values?.[65] ?? 0);
+    const offPeak = (simulationTheta(DEFAULT_SIMULATION.angle) + 20) % 360;
+    expect(narrow.values?.[offPeak]).toBeLessThan(wide.values?.[offPeak] ?? 0);
+  });
+  it.each([0, 45, 90, 180, 270, 315, 359])('reads the entered bearing %s the same on the readout, polar plot and map', angle => {
+    const snapshot = simulationSnapshot({ ...DEFAULT_SIMULATION, angle });
+    const view = polarView(snapshot);
+    const theta = simulationTheta(angle);
+    expect(snapshot.settings?.fields).toEqual({ doa_fig_type: 'Compass', compass_offset: 0 });
+    expect(snapshot.doa_candidates?.csv.canonical_angle_deg).toBe(theta);
+    // Peak bin is theta_0 (upstream convention), as on a live node.
+    expect(view.peakIndex).toBe(theta);
+    expect(bearingForView(view)).toBe(angle);
+    expect(view.displayPeak).toBe(angle);
+    expect(geographicBearingForBin(theta, 0)).toBe(angle);
+    expect(overviewDoaStatus(snapshot, true).shown).toBe(true);
   });
   it.each([[0, 1, 0], [90, 0, 1], [180, -1, 0], [270, 0, -1]])('projects compass bearing %s', (bearing, north, east) => {
     const [lat, lon] = simulationRayEnd(0, 0, bearing);

@@ -1,6 +1,6 @@
 import type { Candidate, TelemetrySnapshot, Tone } from '../types';
 import type { MessageKey } from './i18n';
-import { candidate, completeVector, freshCandidate, nativeViewsReady } from './telemetry';
+import { adcOverdriven, candidate, completeVector, daqFailed, freshCandidate, nativeViewsReady, nodeStalled, parsedCandidate, polarDataReady } from './telemetry';
 
 /** Why the DoA curve and bearing are, or are not, shown. */
 export type DoaStatusReason =
@@ -32,17 +32,24 @@ function viewMissing(value: Candidate): boolean {
   return value.available !== true;
 }
 
-function nodeStalled(snapshot: TelemetrySnapshot): boolean {
-  const progress = snapshot.node_progress;
-  if (progress && typeof progress === 'object' && (progress as Record<string, unknown>).stalled === true) return true;
-  return [candidate(snapshot, 'csv'), candidate(snapshot, 'xml')]
-    .some((value) => (value.freshness as Record<string, unknown> | undefined)?.node_stalled === true);
+/**
+ * The snapshot carries a fresh, comparable, non-conflicting pair of views with
+ * a finite canonical angle and a complete 360-bin vector, and the local
+ * freshness window is still open. This is the data condition only; the DAQ and
+ * ADC checks are applied by doaStatus.
+ */
+export function doaDrawable(snapshot: TelemetrySnapshot | null | undefined, localFresh: boolean): boolean {
+  return localFresh && polarDataReady(snapshot);
 }
 
 /**
  * Status of the DoA views on Overview, derived from the snapshot itself so the
  * text names the actual cause. `drawable` is whether the renderer has a fresh,
  * complete curve for this snapshot.
+ *
+ * A live record from a DAQ that is not synchronized, or from an overdriven ADC,
+ * is not shown: the array phases are not coherent, so a drawn bearing would
+ * look meaningful when it is not.
  */
 export function doaStatus(snapshot: TelemetrySnapshot | null | undefined, localFresh: boolean, drawable: boolean): DoaStatus {
   if (!snapshot) return { code: 'WAITING', tone: 'neutral', reason: 'waiting', shown: false };
@@ -51,28 +58,31 @@ export function doaStatus(snapshot: TelemetrySnapshot | null | undefined, localF
       ? { code: 'SIMULATION', tone: 'warn', reason: 'simulation', shown: true }
       : { code: 'SIMULATION', tone: 'warn', reason: 'vectorIncomplete', shown: false };
   }
-  const shown = drawable && localFresh;
-  const daqFailed = Boolean(snapshot.status?.daq_health) && snapshot.status?.daq_health !== 'PASS';
-  const overdriven = snapshot.publication_gate?.checks?.adc_not_overdriven === false;
-  if (shown) {
-    if (daqFailed) return { code: 'DEGRADED', tone: 'warn', reason: 'daqDegraded', shown };
-    if (overdriven) return { code: 'DEGRADED', tone: 'warn', reason: 'adcOverdrive', shown };
-    return { code: 'AVAILABLE', tone: 'good', reason: 'available', shown };
-  }
   const blocked = (code: DoaStatus['code'], reason: DoaStatusReason): DoaStatus => ({ code, tone: 'warn', reason, shown: false });
   if (snapshot.native_consistency?.conflict === true) return blocked('CONFLICT', 'conflict');
   if (snapshot.status?.available !== true) return blocked('UNAVAILABLE', 'statusUnavailable');
-  if (daqFailed) return blocked('DEGRADED', 'daqDegraded');
-  if (overdriven) return blocked('DEGRADED', 'adcOverdrive');
+  if (daqFailed(snapshot)) return blocked('DEGRADED', 'daqDegraded');
+  if (adcOverdriven(snapshot)) return blocked('DEGRADED', 'adcOverdrive');
+  if (drawable && localFresh) return { code: 'AVAILABLE', tone: 'good', reason: 'available', shown: true };
   const csv = candidate(snapshot, 'csv');
   const xml = candidate(snapshot, 'xml');
   if (viewMissing(csv) || viewMissing(xml)) return blocked('INCOMPLETE', 'viewMissing');
+  if (!parsedCandidate(csv) || !parsedCandidate(xml)) return blocked('INCOMPLETE', 'angleMissing');
   if (nodeStalled(snapshot)) return blocked('STALE', 'nodeStalled');
   if (!freshCandidate(csv) || !freshCandidate(xml)) return blocked('STALE', 'sourceStale');
   if (!nativeViewsReady(snapshot)) return blocked('INCOMPLETE', 'notComparable');
   if (!completeVector(csv)) return blocked('INCOMPLETE', 'vectorIncomplete');
   if (!localFresh) return blocked('STALE', 'localExpired');
   return blocked('INCOMPLETE', 'angleMissing');
+}
+
+/**
+ * The one readiness predicate for Overview: the map overlay (doaReady), the
+ * readout bearing and the polar curve all follow `shown`, and the shell DoA
+ * chip shows `code`.
+ */
+export function overviewDoaStatus(snapshot: TelemetrySnapshot | null | undefined, localFresh: boolean): DoaStatus {
+  return doaStatus(snapshot, localFresh, doaDrawable(snapshot, localFresh));
 }
 
 const STATUS_TEXT: Record<DoaStatusReason, MessageKey> = {
@@ -134,6 +144,11 @@ function gateReasonRank(reason: string): number {
   const standing = STANDING_GATE_REASONS.indexOf(reason);
   if (standing >= 0) return 1000 + standing;
   return 500;
+}
+
+/** Ranked gate reasons without the standing ones that hold on every console read. */
+export function actionableGateReasons(reasons: readonly unknown[] | null | undefined): string[] {
+  return rankGateReasons(reasons).filter((reason) => !STANDING_GATE_REASONS.includes(reason));
 }
 
 /** Order gate reasons so the most actionable comes first; unknown reasons sit between. */

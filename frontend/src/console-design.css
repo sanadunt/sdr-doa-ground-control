@@ -101,7 +101,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .topbar-title { display: flex; flex: 0 1 auto; flex-direction: column; min-width: 0; }
 .topbar-route { overflow: hidden; font-size: 15px; font-weight: 650; letter-spacing: -.01em; text-overflow: ellipsis; white-space: nowrap; }
 .topbar-read { color: var(--subtle); font-family: var(--mono); font-size: 11px; white-space: nowrap; }
-.telemetry-strip { display: flex; flex: 1 1 auto; justify-content: center; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.telemetry-strip { display: flex; flex: 1 1 auto; justify-content: flex-start; min-width: 0; overflow-x: auto; scrollbar-width: none;
+  /* Auto margins centre the items but collapse to 0 on overflow, so the first item stays reachable.
+     The local covers hide the edge shades until the strip can scroll that way. */
+  background:
+    linear-gradient(to right, var(--bg) 45%, transparent) left center / 28px 100% no-repeat local,
+    linear-gradient(to left, var(--bg) 45%, transparent) right center / 28px 100% no-repeat local,
+    linear-gradient(to right, color-mix(in srgb, var(--accent) 40%, transparent), transparent) left center / 10px 100% no-repeat scroll,
+    linear-gradient(to left, color-mix(in srgb, var(--accent) 40%, transparent), transparent) right center / 10px 100% no-repeat scroll; }
+.telemetry-strip > :first-child { margin-left: auto; }
+.telemetry-strip > :last-child { margin-right: auto; }
 .telemetry-strip::-webkit-scrollbar { display: none; }
 .telemetry-item { display: flex; flex: none; flex-direction: column; gap: 1px; padding: 2px 12px; border-left: 1px solid var(--line-soft); white-space: nowrap; }
 .telemetry-item:first-child { border-left: 0; }
@@ -125,6 +134,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 @media (max-width: 1023px) {
   .topbar { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 6px 10px; padding: 6px 12px; }
   .telemetry-strip { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; margin: 0 -12px; padding: 2px 4px 0; border-top: 1px solid var(--line-soft); }
+  .telemetry-strip > :first-child, .telemetry-strip > :last-child { margin-inline: 0; }
   .telemetry-item { padding: 4px 10px; }
 }
 @media (pointer: coarse) {
@@ -208,7 +218,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .readout-good .readout-code { color: var(--green); }
 .readout-warn .readout-code { color: var(--amber); }
 .readout-bad .readout-code { color: var(--red); }
-.readout-detail { overflow: hidden; color: var(--muted); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.readout-detail { display: -webkit-box; overflow: hidden; color: var(--muted); font-size: 11.5px; line-height: 1.35; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .readout-warn .readout-detail, .readout-good .readout-detail { color: var(--muted); }
 .overview-spatial { display: grid; flex: 1 1 auto; grid-template-columns: minmax(0, 3fr) minmax(340px, 2fr); align-items: stretch; gap: 10px; min-height: 0; }
 .overview-spatial:has(.polar-expanded) { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); }
@@ -275,6 +285,22 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   .map-frame { flex: none; height: clamp(320px, 52vh, 560px); }
   .plotly-polar { flex: none; height: clamp(300px, 70vw, 520px); }
   .polar-expand-button { display: none; }
+}
+/* Below ~1200 px of viewport, or ~1280 px with the rail open, five cells cut
+   the station coordinate and the GPS caveat, so the row wraps to 3 + 2. */
+@media (min-width: 1024px) and (max-width: 1199px) {
+  .doa-readout { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .readout-cell { border-top: 1px solid var(--line-soft); }
+  .readout-cell:nth-child(-n+3) { border-top: 0; }
+  .readout-cell:nth-child(4) { border-left: 0; }
+  .readout-cell:nth-child(5) { grid-column: span 2; }
+}
+@media (min-width: 1200px) and (max-width: 1279px) {
+  .console-shell:not(.rail-collapsed) .doa-readout { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .console-shell:not(.rail-collapsed) .readout-cell { border-top: 1px solid var(--line-soft); }
+  .console-shell:not(.rail-collapsed) .readout-cell:nth-child(-n+3) { border-top: 0; }
+  .console-shell:not(.rail-collapsed) .readout-cell:nth-child(4) { border-left: 0; }
+  .console-shell:not(.rail-collapsed) .readout-cell:nth-child(5) { grid-column: span 2; }
 }
 @media (max-width: 639px) {
   .page-content { padding: 18px 14px 28px; }
@@ -389,6 +415,26 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .monitor-metrics { gap: 0; background: var(--surface); border: 1px solid var(--line-soft); border-radius: 6px; padding: 4px 10px; }
 .monitor-metrics .metric-card { border-top: 0; }
 .monitor-state { font-size: 12px; }
+.monitor-grid { grid-template-columns: minmax(0, 1fr); }
+.monitor-metrics .metric-detail { white-space: normal; overflow-wrap: anywhere; }
+.monitor-v2-panel { padding-bottom: 18px; }
+.monitor-v2-panel > .panel-header { margin-bottom: 12px; }
+.monitor-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.monitor-titled { display: inline-flex; max-width: 100%; }
+.monitor-code, .monitor-summary, .monitor-topic { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.monitor-code { padding: 1px 5px; border-radius: 3px; background: var(--surface-2); overflow-wrap: anywhere; }
+.monitor-topic { white-space: nowrap; color: var(--text); }
+.monitor-cell-note { display: block; margin-top: 4px; color: var(--subtle); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.monitor-muted { color: var(--subtle); }
+.monitor-panel-note { margin: 12px 20px 0; color: var(--subtle); font-size: 12px; line-height: 1.5; }
+.monitor-v2-panel > .monitor-panel-note { margin: 0 20px 10px; }
+.monitor-v2-panel > .monitor-state { margin-bottom: 12px; }
+.monitor-notice { margin-bottom: 12px; }
+.monitor-notice-bad { border-left-color: var(--red); }
+.table-wrap .monitor-kind-table { min-width: 760px; }
+.table-wrap .monitor-v2-table { min-width: 680px; }
+.monitor-kind-table td, .monitor-v2-table td { vertical-align: top; }
+.connection-panel .form-field input:disabled { cursor: not-allowed; opacity: .6; }
 table { font-size: 12px; }
 th { font-size: 11px; text-transform: none; letter-spacing: 0; }
 td { padding: 16px 10px; border-color: var(--line-soft); }
@@ -511,3 +557,45 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 .overlay-group { min-width: 0; margin: 0 0 12px; padding: 0; border: 0; }
 .overlay-group > legend { margin-bottom: 8px; padding: 0; color: var(--subtle); font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; }
 .overlay-control-fields label.is-inactive { opacity: .55; }
+
+/* Health, diagnostics and configuration detail ----------------------------- */
+.key-value-good strong { color: var(--green); }
+.key-value-warn strong { color: var(--amber); }
+.key-value-bad strong { color: var(--red); }
+.health-summary-http { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--subtle); font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; }
+.health-headline { overflow-wrap: anywhere; }
+.health-headline.headline-good { color: var(--green); }
+.health-headline.headline-warn { color: var(--amber); }
+.health-headline.headline-bad { color: var(--red); }
+/* The three summary metrics stack when the panel is too narrow for whole values. */
+.health-summary-panel { container-type: inline-size; }
+@container (max-width: 520px) {
+  .health-summary-panel .metric-grid.three { grid-template-columns: minmax(0, 1fr); }
+  .health-summary-panel .metric-detail { white-space: normal; }
+}
+.resources-panel { padding-bottom: 18px; }
+.resources-panel > .panel-header { margin-bottom: 8px; }
+.resource-table td { padding: 10px; vertical-align: top; }
+.resource-table code { color: var(--text); font-family: var(--mono); font-size: 12px; }
+.resource-result { font-family: var(--mono); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.resource-detail { overflow-wrap: anywhere; }
+.resource-empty { padding: 0 20px; }
+.collection-note { margin: 12px 20px 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.collection-note.status-text-warn { color: var(--amber); }
+.native-record-grid .key-value { padding: 10px 0; border-bottom: 1px solid var(--line-soft); background: none; }
+.native-records { grid-template-columns: minmax(0, 1fr); }
+.native-record { min-width: 0; }
+/* Check labels are sentences now; capitalizing each word also turned θ₀ into Θ₀. */
+.gate-row > strong { text-transform: none; }
+.native-record-error { margin: 0 0 10px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.native-record-error strong { margin-right: 4px; font-family: var(--mono); font-size: 11px; }
+.vfo-rows { margin-top: 12px; padding: 0; }
+.vfo-rows table { min-width: 520px; }
+.vfo-rows caption { padding-bottom: 6px; color: var(--subtle); font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-align: left; text-transform: uppercase; }
+.reason-code { margin-left: 6px; color: var(--subtle); font-family: var(--mono); font-size: 10.5px; overflow-wrap: anywhere; }
+.consistency-readout strong.status-text-good { color: var(--green); }
+.consistency-readout strong.status-text-warn { color: var(--amber); }
+.consistency-readout strong.status-text-bad { color: var(--red); }
+.form-contents { display: contents; }
+.dry-run-panel > .form-contents > .form-field { max-width: 360px; margin-left: 20px; }
+.admin-login-form .form-field input:disabled { cursor: not-allowed; opacity: .6; }

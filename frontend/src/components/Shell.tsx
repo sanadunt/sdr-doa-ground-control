@@ -1,9 +1,10 @@
 import type { JSX } from 'react';
 import { useEffect, useRef, useState } from 'react';
 import type { Branding, TelemetrySnapshot, Tone } from '../types';
-import { deriveDataState, toneFor } from '../lib/telemetry';
-import { polarDataReady } from '../lib/telemetry';
-import { LANGS, useI18n } from '../lib/i18n';
+import { candidateErrors, deriveDataState, toneFor } from '../lib/telemetry';
+import { actionableGateReasons, doaStatusTextKey, overviewDoaStatus } from '../lib/doaStatus';
+import { shortcutAction } from '../lib/shortcuts';
+import { LANGS, gateReasonLabel, useI18n } from '../lib/i18n';
 import type { MessageKey } from '../lib/i18n';
 import { Icon } from './ui';
 import type { IconName } from './ui';
@@ -22,6 +23,8 @@ export const ROUTES: Array<{ id: RouteName; icon: IconName }> = [
 
 const RAIL_STORAGE_KEY = 'sdr-console-rail';
 const DESKTOP_QUERY = '(min-width: 1024px)';
+/** A completed read counts as CURRENT for this long, whatever it contained. */
+export const SNAPSHOT_CURRENT_MS = 5_000;
 
 function routeFromHash(): RouteName {
   const value = window.location.hash.replace(/^#\/?/, '').split(/[/?]/)[0];
@@ -60,11 +63,6 @@ function useMediaQuery(query: string): boolean {
   return matches;
 }
 
-function editableTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  return target.isContentEditable || ['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName);
-}
-
 function brandInitials(name: string): string {
   const initials = name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join('');
   return initials || 'SD';
@@ -96,6 +94,7 @@ export function ConsoleShell({
   readError,
   lastReadAgeMs,
   mqttConnection,
+  mqttError = null,
   simulationEnabled,
   onRefresh,
   children,
@@ -105,24 +104,37 @@ export function ConsoleShell({
   branding: Branding;
   snapshot: TelemetrySnapshot | null;
   localSnapshotFresh: boolean;
+  /** A read is in flight and is worth telling the operator about (first read, or slow). */
   loading: boolean;
   readError: string | null;
   lastReadAgeMs: number | null;
   mqttConnection?: string;
+  /** The last /api/mqtt read failed. */
+  mqttError?: string | null;
   simulationEnabled: boolean;
   onRefresh: () => void;
   children: React.ReactNode;
 }): JSX.Element {
   const { lang, setLang, t } = useI18n();
   const desktop = useMediaQuery(DESKTOP_QUERY);
-  const dataState = localSnapshotFresh ? deriveDataState(snapshot, Boolean(readError)) : snapshot ? 'STALE' : deriveDataState(snapshot, Boolean(readError));
+  // Classify what the last read contained first; STALE only means old data.
+  const dataState = deriveDataState(snapshot, Boolean(readError), localSnapshotFresh);
   const dataTone: Tone = readError ? 'bad' : toneFor(dataState);
-  const doaState = localSnapshotFresh && polarDataReady(snapshot) ? 'AVAILABLE' : 'UNAVAILABLE';
+  const leadReason = actionableGateReasons(snapshot?.publication_gate?.reasons)[0];
+  const dataCause = dataState === 'AVAILABLE' || dataState === 'LOADING' ? []
+    : [leadReason ? `${leadReason} · ${gateReasonLabel(lang, leadReason)}` : dataState === 'STALE' ? t('polar.expired') : '', ...candidateErrors(snapshot)].filter(Boolean);
+  const dataTitle = readError ? t('shell.snapshotError', { error: readError }) : dataCause.join('\n') || undefined;
+  // The same readiness decision Overview uses for the map, readout and polar plot.
+  const doa = overviewDoaStatus(snapshot, localSnapshotFresh);
+  const doaTitle = snapshot ? t(doaStatusTextKey(doa.reason)) : undefined;
   const gate = String(snapshot?.publication_gate?.state ?? 'BLOCKED').toUpperCase();
-  const snapshotState = readError ? 'ERROR' : localSnapshotFresh ? 'CURRENT' : snapshot ? 'STALE' : loading ? 'LOADING' : 'WAITING';
-  const snapshotTone: Tone = readError ? 'bad' : localSnapshotFresh ? 'good' : snapshot ? 'warn' : loading ? 'neutral' : 'warn';
-  const mqttState = (mqttConnection ?? 'OFF').toUpperCase();
+  // Snapshot is about the read itself: a read that just completed is CURRENT even when it reports UNAVAILABLE.
+  const readCurrent = snapshot !== null && lastReadAgeMs !== null && lastReadAgeMs <= SNAPSHOT_CURRENT_MS;
+  const snapshotState = readError ? 'ERROR' : readCurrent ? 'CURRENT' : snapshot ? 'STALE' : loading ? 'LOADING' : 'WAITING';
+  const snapshotTone: Tone = readError ? 'bad' : readCurrent ? 'good' : snapshot ? 'warn' : loading ? 'neutral' : 'warn';
+  const mqttState = mqttError ? 'ERROR' : (mqttConnection ?? 'OFF').toUpperCase();
   const mqttTone: Tone = mqttState === 'CONNECTED' ? 'good' : mqttState === 'OFF' || mqttState === 'DISABLED' ? 'neutral' : 'warn';
+  const mqttTitle = mqttError ? `${t('shell.mqttTitle')} · ${t('app.mqttReadFailed', { error: mqttError })}` : t('shell.mqttTitle');
   const readLabel = loading ? t('shell.reading') : lastReadAgeMs === null ? t('shell.noRead') : t('shell.lastRead', { age: formatElapsed(lastReadAgeMs) });
 
   const [menuOpen, setMenuOpen] = useState(false);
@@ -166,21 +178,18 @@ export function ConsoleShell({
   }, [drawerOpen]);
 
   // Single-key shortcuts for page switching and refresh. They never fire while
-  // the operator types in a field or holds a modifier.
-  const shortcutRef = useRef({ onNavigate, onRefresh, loading });
-  shortcutRef.current = { onNavigate, onRefresh, loading };
+  // the operator types in a field or holds a modifier. Page switches go through
+  // navigate() so an open drawer closes. The Receiver frame forwards its keys
+  // here (ReceiverPage) as synthetic events on this window.
+  const shortcutRef = useRef({ navigate, onRefresh });
+  shortcutRef.current = { navigate, onRefresh };
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || editableTarget(event.target)) return;
-      const index = Number(event.key) - 1;
-      if (Number.isInteger(index) && index >= 0 && index < ROUTES.length) {
-        event.preventDefault();
-        shortcutRef.current.onNavigate(ROUTES[index].id);
-      } else if (event.key === 'r' || event.key === 'R') {
-        if (shortcutRef.current.loading) return;
-        event.preventDefault();
-        shortcutRef.current.onRefresh();
-      }
+      const action = shortcutAction(event, ROUTES.length);
+      if (!action) return;
+      event.preventDefault();
+      if (action.type === 'route') shortcutRef.current.navigate(ROUTES[action.index].id);
+      else shortcutRef.current.onRefresh();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
@@ -207,7 +216,17 @@ export function ConsoleShell({
 
   return (
     <div className={shellClass}>
-      <a className="skip-link" href="#console-content">{t('shell.skip')}</a>
+      <a
+        className="skip-link"
+        href="#console-content"
+        onClick={(event) => {
+          // Routes live in the hash, so following this anchor would change route.
+          event.preventDefault();
+          document.getElementById('console-content')?.focus();
+        }}
+      >
+        {t('shell.skip')}
+      </a>
       {drawerOpen ? <div className="drawer-backdrop" aria-hidden="true" onClick={closeMenu} /> : null}
       <aside id="console-navigation" className="sidebar" hidden={!desktop && !menuOpen}>
         <div className="brand-lockup">
@@ -249,7 +268,7 @@ export function ConsoleShell({
           ) : null}
         </div>
       </aside>
-      <div className="console-main">
+      <div className="console-main" inert={drawerOpen}>
         <header className="topbar">
           {!desktop ? (
             <button ref={menuToggleRef} className="icon-button menu-toggle" type="button" onClick={() => (menuOpen ? closeMenu() : openMenu())} aria-controls="console-navigation" aria-expanded={menuOpen} aria-label={menuOpen ? t('shell.closeMenu') : t('shell.menu')}>
@@ -261,11 +280,11 @@ export function ConsoleShell({
             <span className="topbar-read">{readLabel}</span>
           </div>
           <div className="telemetry-strip" role="group" aria-label={t('shell.runtimeStatus')}>
-            <TelemetryItem label={t('status.data')} value={readError ? 'ERROR' : dataState} tone={dataTone} />
-            <TelemetryItem label={t('status.doa')} value={doaState} tone={doaState === 'AVAILABLE' ? 'good' : 'warn'} />
+            <TelemetryItem label={t('status.data')} value={dataState} tone={dataTone} title={dataTitle} />
+            <TelemetryItem label={t('status.doa')} value={doa.code} tone={doa.tone} title={doaTitle} />
             <TelemetryItem label={t('status.delivery')} value={gate} tone={gate === 'READY' ? 'good' : 'warn'} />
             <TelemetryItem label={t('status.snapshot')} value={snapshotState} tone={snapshotTone} title={readError ? t('shell.snapshotError', { error: readError }) : undefined} live />
-            <TelemetryItem label={t('status.mqtt')} value={mqttState} tone={mqttTone} title={t('shell.mqttTitle')} />
+            <TelemetryItem label={t('status.mqtt')} value={mqttState} tone={mqttTone} title={mqttTitle} />
             <TelemetryItem label={t('status.sim')} value={simulationEnabled ? 'ON' : 'OFF'} tone={simulationEnabled ? 'warn' : 'neutral'} />
           </div>
           <div className="topbar-tools">
@@ -277,7 +296,7 @@ export function ConsoleShell({
             <button className="icon-button" type="button" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} aria-label={theme === 'dark' ? t('shell.themeToLight') : t('shell.themeToDark')} title={theme === 'dark' ? t('shell.themeToLight') : t('shell.themeToDark')}>
               <Icon name={theme === 'dark' ? 'sun' : 'moon'} />
             </button>
-            <button className={`icon-button refresh-button${loading ? ' is-loading' : ''}`} type="button" onClick={onRefresh} disabled={loading} aria-label={t('shell.refresh')} aria-keyshortcuts="R" title={t('shell.refreshShortcut')}>
+            <button className={`icon-button refresh-button${loading ? ' is-loading' : ''}`} type="button" onClick={onRefresh} aria-busy={loading} aria-label={t('shell.refresh')} aria-keyshortcuts="R" title={t('shell.refreshShortcut')}>
               <Icon name="refresh" />
             </button>
           </div>

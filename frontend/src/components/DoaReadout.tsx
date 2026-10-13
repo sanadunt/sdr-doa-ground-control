@@ -2,7 +2,7 @@ import type { JSX, ReactNode } from 'react';
 import type { MapCoordinate, PolarSettings, TelemetrySnapshot, Tone } from '../types';
 import { candidate, formatAge, numberOrNull } from '../lib/telemetry';
 import { bearingForView, formatDegrees, polarView } from '../lib/polar';
-import { doaStatus, doaStatusTextKey, rankGateReasons } from '../lib/doaStatus';
+import { doaStatusTextKey, overviewDoaStatus, rankGateReasons } from '../lib/doaStatus';
 import { gateReasonLabel, useI18n } from '../lib/i18n';
 import type { MessageKey } from '../lib/i18n';
 
@@ -37,6 +37,7 @@ export function DoaReadout({
   snapshot,
   localSnapshotFresh,
   coordinate,
+  positionHeld = false,
   settings,
   offsetSource,
   offsetVerified,
@@ -44,6 +45,8 @@ export function DoaReadout({
   snapshot: TelemetrySnapshot | null;
   localSnapshotFresh: boolean;
   coordinate: MapCoordinate | null;
+  /** The coordinate is the last live Data Out fix, kept through a freshness gap. */
+  positionHeld?: boolean;
   settings: PolarSettings;
   offsetSource: string;
   offsetVerified: boolean;
@@ -51,7 +54,7 @@ export function DoaReadout({
   const { lang, t } = useI18n();
   const simulation = Boolean(snapshot?.simulation);
   const view = polarView(snapshot, settings, localSnapshotFresh, null, settings);
-  const status = doaStatus(snapshot, localSnapshotFresh, view.fresh);
+  const status = overviewDoaStatus(snapshot, localSnapshotFresh);
   const statusText = t(doaStatusTextKey(status.reason));
   const bearing = status.shown ? bearingForView(view) : null;
   const csv = candidate(snapshot, 'csv');
@@ -116,9 +119,9 @@ export function DoaReadout({
       />
       <ReadoutCell
         label={t('readout.position')}
-        tone={coordinate?.source === 'DATA_OUT' ? 'good' : 'neutral'}
+        tone={positionHeld ? 'warn' : coordinate?.source === 'DATA_OUT' ? 'good' : 'neutral'}
         value={coordinate ? <span className="readout-coordinate">{coordinate.latitude.toFixed(5)}, {coordinate.longitude.toFixed(5)}</span> : <span className="readout-empty">—</span>}
-        detail={coordinate ? t(coordinateSourceKey(coordinate.source)) : t('readout.noPosition')}
+        detail={coordinate ? t(positionHeld ? 'map.sourceHeld' : coordinateSourceKey(coordinate.source)) : t('readout.noPosition')}
       />
     </section>
   );

@@ -436,6 +436,74 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self._send("doa", b"{}")
         self.assertNotIn("validity_flags", self.monitor.snapshot()["last_by_kind"]["doa"])
 
+    def test_retained_clear_is_counted_as_cleared_not_invalid(self) -> None:
+        self._connected()
+        now_ms = int(time.time() * 1000)
+        state = contract.build_state(
+            ts_ms=now_ms, config_rev=3, running=True, frequency_hz=433_920_000,
+            gain_db=10.0, array="UCA", method="MUSIC", active_vfos=1, source="synthetic",
+        )
+        self._send("state", state, retained=True, qos=1)
+        self._send("state", b"", qos=1)
+        self._send("config_reported", b"", qos=1)
+        snapshot = self.monitor.snapshot()
+        self.assertEqual(
+            (snapshot["received"], snapshot["valid"], snapshot["invalid"], snapshot["cleared"]),
+            (3, 1, 0, 2),
+        )
+        entry = snapshot["last_by_kind"]["state"]
+        self.assertIs(entry["cleared"], True)
+        self.assertIs(entry["valid"], False)
+        self.assertNotIn("payload", entry)
+        self.assertNotIn("source", entry)
+        self.assertNotIn("error", entry)
+        self.assertEqual((entry["bytes"], entry["latency_ms"], entry["source_ts_ms"]), (0, None, None))
+        self.assertEqual(snapshot["kind_counts"], {"state": 2, "config_reported": 1})
+
+    def test_source_marker_and_health_reasons_are_reported(self) -> None:
+        self._connected()
+        now_ms = int(time.time() * 1000)
+        doa = contract.build_doa(
+            seq=1, ts_ms=now_ms, relative_doa_deg=137.4, confidence=0.9, power_db=-54.2,
+            frequency_hz=433_920_000, processing_ms=12, valid=True, source="synthetic",
+        )
+        self._send("doa", doa)
+        health = contract.build_health(
+            ts_ms=now_ms, state="STALE", daq_ok=True, dropped_frames=0, gps_status="Disabled",
+            doa_valid=False, doa_age_ms=None, reasons=["STATUS_STALE", "NODE_CLOCK_STALLED"],
+        )
+        self._send("health", health)
+        last = self.monitor.snapshot()["last_by_kind"]
+        self.assertEqual(last["doa"]["source"], "synthetic")
+        self.assertNotIn("source", last["health"])
+        self.assertEqual(last["health"]["payload"]["reasons"], ["STATUS_STALE", "NODE_CLOCK_STALLED"])
+        self.assertEqual(last["health"]["payload"]["state"], "STALE")
+
+    def test_availability_is_decoded_and_its_will_time_is_not_latency(self) -> None:
+        self._connected()
+        clock = [1_700_000_000_000]
+        with patch.object(self.module, "_now_ms", lambda: clock[0]):
+            self._send("doa", self._doa(clock[0] - 30))
+            will = contract.build_availability(
+                ts_ms=clock[0] - 3_600_000, online=False, reason="CONNECTION_LOST",
+            )
+            self._send("availability", will, qos=1)
+            snapshot = self.monitor.snapshot()
+        entry = snapshot["last_by_kind"]["availability"]
+        self.assertIs(entry["valid"], True)
+        self.assertEqual(entry["payload"]["online"], False)
+        self.assertEqual(entry["payload"]["reason"], "CONNECTION_LOST")
+        self.assertIsNone(entry["latency_ms"])
+        self.assertEqual(snapshot["last_latency_ms"], 30)
+        self.assertEqual(snapshot["kind_counts"]["availability"], 1)
+        self._send("availability", b'{"v":1,"ts_ms":1}', qos=1)
+        self.assertIs(self.monitor.snapshot()["last_by_kind"]["availability"]["valid"], False)
+
+    def test_rdf_node_snapshot_reports_server_time(self) -> None:
+        clock = [1_700_000_000_000]
+        with patch.object(self.module, "_now_ms", lambda: clock[0]):
+            self.assertEqual(self.monitor.rdf_node_snapshot()["now_ms"], clock[0])
+
 
 class GroundConsoleMqttApplyTests(unittest.TestCase):
     """Monitor lifecycle through the Ground Console config and connect paths."""

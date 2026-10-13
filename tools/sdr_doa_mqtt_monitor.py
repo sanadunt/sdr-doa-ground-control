@@ -32,12 +32,14 @@ KNOWN_SUFFIXES = {
     "/config/reported": "config_reported",
     "/cmd/config/patch": "config_patch",
     "/ack/config": "ack_config",
+    "/availability": "availability",
 }
 
 MAX_TRACKED_TOPICS = 128
 OTHER_TOPICS_KEY = "__other__"
 DECODED_KINDS = frozenset({
     "doa", "nav", "health", "state", "config_reported", "config_patch", "ack_config",
+    "availability",
 })
 VALIDITY_FLAG_FIELDS = ("valid", "doa_valid", "settings_valid")
 # Brokers must accept client ids of 1-23 alphanumeric characters. The random
@@ -115,6 +117,7 @@ class MqttMonitor:
         self._received = 0
         self._valid = 0
         self._invalid = 0
+        self._cleared = 0
         self._total_bytes = 0
         self._last_received_at_ms: Optional[int] = None
         self._last_latency_ms: Optional[int] = None
@@ -340,7 +343,13 @@ class MqttMonitor:
             decoded: Optional[Dict[str, Any]] = None
             error: Optional[str] = None
             valid = True
-            if kind in DECODED_KINDS:
+            # A zero-length publish is how a publisher removes a retained
+            # value; the broker forwards it to live subscribers. It means "no
+            # current value", not a malformed message.
+            cleared = not payload_bytes
+            if cleared:
+                valid = False
+            elif kind in DECODED_KINDS:
                 try:
                     decoded = contract.decode_payload(kind, payload_bytes)
                 except (contract.ContractError, ValueError, TypeError) as exc:
@@ -354,17 +363,22 @@ class MqttMonitor:
             if type(source_ts) is not int:
                 source_ts = None
             # A retained replay's receive-minus-source time is its age, not
-            # transport latency.
+            # transport latency. The availability will carries the session's
+            # connect time, so its receive time is no latency measure either.
             latency_ms: Optional[int] = None
-            if source_ts is not None and not retained:
+            if source_ts is not None and not retained and kind != "availability":
                 latency_ms = received_at_ms - source_ts
 
             self._received += 1
-            self._valid += 1 if valid else 0
-            self._invalid += 0 if valid else 1
+            if cleared:
+                self._cleared += 1
+            elif valid:
+                self._valid += 1
+            else:
+                self._invalid += 1
             self._total_bytes += len(payload_bytes)
             self._last_received_at_ms = received_at_ms
-            if not retained:
+            if not retained and not cleared and kind != "availability":
                 self._last_latency_ms = latency_ms
             self._last_topic = topic
             self._kind_counts[kind] = self._kind_counts.get(kind, 0) + 1
@@ -385,8 +399,13 @@ class MqttMonitor:
                 "latency_ms": latency_ms,
                 "source_ts_ms": source_ts,
             }
+            if cleared:
+                entry["cleared"] = True
             if decoded is not None:
                 entry["payload"] = decoded
+                source = decoded.get("source")
+                if isinstance(source, str) and source:
+                    entry["source"] = source[:contract.MAX_SOURCE_CHARS]
                 flags = {
                     field: decoded[field]
                     for field in VALIDITY_FLAG_FIELDS
@@ -420,6 +439,7 @@ class MqttMonitor:
                 "received": self._received,
                 "valid": self._valid,
                 "invalid": self._invalid,
+                "cleared": self._cleared,
                 "total_bytes": self._total_bytes,
                 "last_received_at_ms": self._last_received_at_ms,
                 "last_age_ms": (

@@ -381,6 +381,12 @@ class RdfNodeV2TelemetryTests(unittest.TestCase):
         self.assertNotIn("challenge", later["result"])
         self.assertNotIn("injected-secret", repr(later))
 
+    def test_snapshot_reports_its_time_for_local_ageing(self) -> None:
+        put(self.store, "telemetry/health", obj("telemetry/health"))
+        snapshot = self.store.snapshot(NOW + 2500)
+        self.assertEqual(snapshot["now_ms"], NOW + 2500)
+        self.assertEqual(snapshot["now_ms"] - observation(snapshot, "telemetry/health")["received_at_ms"], 2500)
+
     def test_config_report_rejects_wrong_effective_field_types(self) -> None:
         wrong_types = (
             ("center_frequency_hz", True),
