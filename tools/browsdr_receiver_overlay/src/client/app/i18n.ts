@@ -364,6 +364,9 @@ export const RECEIVER_INDONESIAN: Readonly<Record<string, string>> = {
 	'Audio playback is not supported by this browser.': 'Browser ini tidak mendukung pemutaran audio.',
 	'Audio upload failed; the recording was kept up to the last saved chunk.': 'Unggah audio gagal; rekaman disimpan sampai potongan terakhir yang tersimpan.',
 	'Audio segment recording failed before any audio was saved.': 'Rekaman segmen audio gagal sebelum ada audio yang tersimpan.',
+	'Recording was interrupted (the Receiver page closed or the console stopped); audio was kept up to the last saved chunk.': 'Perekaman terputus (halaman Receiver ditutup atau console berhenti); audio disimpan sampai potongan terakhir yang tersimpan.',
+	'Recording ended before this segment was closed (page closed or console unreachable); audio was kept up to the last saved chunk.': 'Perekaman berakhir sebelum segmen ini ditutup (halaman ditutup atau console tidak terjangkau); audio disimpan sampai potongan terakhir yang tersimpan.',
+	'Recording was interrupted before any audio was saved.': 'Perekaman terputus sebelum ada audio yang tersimpan.',
 	'spectrum scan and its data': 'pindai spektrum ini beserta datanya',
 	'audio session and its audio files': 'sesi audio ini beserta file audionya',
 	// Messages (snackbar, banners and status lines); dynamic ones are in RECEIVER_INDONESIAN_PATTERNS
@@ -456,6 +459,7 @@ export const RECEIVER_INDONESIAN_PATTERNS: ReadonlyArray<readonly [RegExp, strin
 	[/^audio upload failed \((.*)\); the segment was saved up to the last uploaded chunk and a new segment starts\.$/s,
 		'unggah audio gagal ({1}); segmen tersimpan sampai potongan terakhir yang terunggah dan segmen baru dimulai.'],
 	[/^Could not start audio recording: (.*)$/s, 'Rekaman audio tidak bisa dimulai: {t1}'],
+	[/^Recording was interrupted and its audio could not be recovered: (.*)$/s, 'Perekaman terputus dan audionya tidak bisa dipulihkan: {1}'],
 	[/^Could not close the audio recording on the console: (.*)$/s, 'Rekaman audio tidak bisa ditutup di console: {1}'],
 	[/^Could not close VFO (\d+) audio segment: (.*)$/s, 'Segmen audio VFO {1} tidak bisa ditutup: {2}'],
 	[/^VFO audio recording stopped because (.*) and the Receiver did not restart\. Saved audio is in Records\.$/s,

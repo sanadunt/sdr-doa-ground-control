@@ -34,7 +34,9 @@ export function radialDomain(values: number[] | null, simulation = false): [numb
   const step = niceStep(Math.max(max - min, RADIAL_MIN_SPAN_DB) / 4);
   const low = clean(Math.floor(clean(min / step)) * step);
   const high = clean(Math.ceil(clean(max / step)) * step);
-  return [low, high > low ? high : clean(low + step)];
+  // Rounding alone can leave a 0.5 dB domain; the map's auto scale never goes
+  // below 1 dB, and both panels must show near-flat noise at the same strength.
+  return [low, Math.max(high, clean(low + Math.ceil(clean(RADIAL_MIN_SPAN_DB / step)) * step))];
 }
 
 /** Absolute dB tick values on the radial axis; compact plots show only the ends. */

@@ -46,10 +46,14 @@ export function refreshIntervalOptions(serverIntervals: readonly number[] | null
   return [...options].sort((a, b) => a - b);
 }
 
-/** Warning for an interval that leaves the DoA display cleared between reads. */
+/**
+ * Warning for an interval that leaves the DoA display cleared between reads.
+ * The window runs from the data's age at the read, never from 0, so an
+ * interval equal to the window already leaves a gap every cycle.
+ */
 export function refreshWarningKey(seconds: number): MessageKey | null {
   if (seconds === 0) return 'config.refreshManualWarning';
-  return seconds > DOA_FRESHNESS_WINDOW_S ? 'config.refreshSlowWarning' : null;
+  return seconds >= DOA_FRESHNESS_WINDOW_S ? 'config.refreshSlowWarning' : null;
 }
 
 function parsedNumber(input: string): number | null {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { translate } from '../lib/i18n';
 import type { MessageKey } from '../lib/i18n';
+import { MIN_AUTO_DB_SPAN } from '../lib/doaGeometry';
 import { niceStep, polarPlotConfig, polarUiRevision, radialDomain, radialTicks, validHeadUp, validPlotRange } from './PolarPlot';
 
 it('validates manual view controls', () => {
@@ -47,8 +48,18 @@ describe('polar radial scale', () => {
     expect(radialDomain([12.2, 14.9])).toEqual([12, 15]);
   });
   it('does not divide by zero for a flat vector', () => {
-    // A flat vector gets the minimum 1 dB span, one 0.5 dB step wide.
-    expect(radialDomain([-20, -20])).toEqual([-20, -19.5]);
+    expect(radialDomain([-20, -20])).toEqual([-20, -19]);
+  });
+  it('never scales a near-flat vector tighter than the map auto scale', () => {
+    expect(radialDomain([0, 0.2])).toEqual([0, 1]);
+    expect(radialDomain([0.1, 0.4])).toEqual([0, 1]);
+    expect(radialDomain([-3.3, -3.1])).toEqual([-3.5, -2.5]);
+    for (const values of [[-20, -20], [0, 0.2], [0.1, 0.4], [-3.3, -3.1], [0, 0.31, 1.46], [7.05, 7.9]]) {
+      const [low, high] = radialDomain(values);
+      expect(high - low).toBeGreaterThanOrEqual(MIN_AUTO_DB_SPAN);
+      expect(low).toBeLessThanOrEqual(Math.min(...values));
+      expect(high).toBeGreaterThanOrEqual(Math.max(...values));
+    }
   });
   it('has an explicit empty scale', () => {
     expect(radialDomain(null)).toEqual([-60, 0]);

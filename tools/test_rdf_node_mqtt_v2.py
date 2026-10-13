@@ -381,6 +381,77 @@ class RdfNodeV2TelemetryTests(unittest.TestCase):
         self.assertNotIn("challenge", later["result"])
         self.assertNotIn("injected-secret", repr(later))
 
+    def test_retained_clear_removes_the_stored_value_and_is_not_invalid(self) -> None:
+        policy = {"state": 1, "capabilities": 1, "config/reported": 1, "availability": 1}
+        for suffix in RDF_NODE_V2_SUFFIXES:
+            with self.subTest(suffix=suffix):
+                store = RdfNodeV2Telemetry(NODE)
+                if suffix == "telemetry/angular":
+                    put(store, "telemetry/health", obj("telemetry/health"))
+                    for chunk in chunks(angular_frame(), (384, 384)):
+                        put(store, suffix, chunk)
+                else:
+                    qos = policy.get(suffix, 1 if suffix.startswith("ack/") else 0)
+                    if suffix == "telemetry/doa":
+                        put(store, "telemetry/health", obj("telemetry/health"))
+                    put(store, suffix, obj(suffix), qos=qos, retained=suffix in policy)
+                before = store.snapshot(NOW)
+                self.assertIsNotNone(observation(before, suffix)["payload"])
+                # Broker policy does not apply: clearing a value retained by mistake is allowed.
+                put(store, suffix, b"", at=NOW + 10, qos=0, retained=True)
+                after = store.snapshot(NOW + 10)
+                entry = observation(after, suffix)
+                self.assertEqual(entry["status"], "UNAVAILABLE")
+                self.assertIsNone(entry["payload"])
+                self.assertEqual(entry["error"], "RETAINED_CLEARED")
+                self.assertIs(entry["cleared"], True)
+                self.assertEqual((entry["received_at_ms"], entry["retained"]), (NOW + 10, True))
+                self.assertEqual(after["cleared"], 1)
+                self.assertEqual(after["invalid"], before["invalid"])
+                self.assertEqual(after["valid"], before["valid"])
+                self.assertEqual(after["received"], before["received"] + 1)
+                self.assertEqual(after["topic_counts"][suffix], before["topic_counts"][suffix] + 1)
+
+    def test_cleared_health_and_revision_no_longer_back_dependent_telemetry(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        put(store, "telemetry/health", obj("telemetry/health"))
+        put(store, "telemetry/doa", obj("telemetry/doa"))
+        self.assertEqual(observation(store.snapshot(NOW), "telemetry/doa")["status"], "FRESH")
+        put(store, "telemetry/health", b"", retained=True)
+        doa = observation(store.snapshot(NOW), "telemetry/doa")
+        self.assertEqual((doa["status"], doa["error"]), ("STALE", "HEALTH_STALE"))
+
+        # The reported revision came only from config/reported; once cleared, it
+        # no longer overrides the revision health and DoA agree on.
+        store = RdfNodeV2Telemetry(NODE)
+        put(store, "config/reported", obj("config/reported", rev=7), qos=1, retained=True)
+        put(store, "telemetry/health", obj("telemetry/health", q=1, rev=8))
+        put(store, "telemetry/doa", obj("telemetry/doa", q=1, rev=8))
+        self.assertEqual(observation(store.snapshot(NOW), "telemetry/doa")["error"], "REVISION_MISMATCH")
+        put(store, "config/reported", b"", qos=1, retained=True)
+        put(store, "telemetry/doa", obj("telemetry/doa", q=2, rev=8))
+        self.assertEqual(observation(store.snapshot(NOW), "telemetry/doa")["status"], "FRESH")
+
+        store = RdfNodeV2Telemetry(NODE)
+        put(store, "state", obj("state", cfg=7), qos=1, retained=True)
+        put(store, "telemetry/health", obj("telemetry/health", q=1, rev=8))
+        put(store, "telemetry/doa", obj("telemetry/doa", q=1, rev=8))
+        self.assertEqual(observation(store.snapshot(NOW), "telemetry/doa")["error"], "REVISION_MISMATCH")
+        put(store, "state", b"", qos=1, retained=True)
+        put(store, "telemetry/doa", obj("telemetry/doa", q=2, rev=8))
+        self.assertEqual(observation(store.snapshot(NOW), "telemetry/doa")["status"], "FRESH")
+
+    def test_live_empty_payload_is_invalid_not_a_clear(self) -> None:
+        put(self.store, "telemetry/health", b"")
+        entry = observation(self.store.snapshot(NOW), "telemetry/health")
+        self.assertEqual((entry["status"], entry["error"]), ("INVALID", "EMPTY_PAYLOAD"))
+        self.assertNotIn("cleared", entry)
+        put(self.store, "state", b"", qos=1)
+        entry = observation(self.store.snapshot(NOW), "state")
+        self.assertEqual((entry["status"], entry["error"]), ("INVALID", "BROKER_POLICY"))
+        snapshot = self.store.snapshot(NOW)
+        self.assertEqual((snapshot["invalid"], snapshot["cleared"]), (2, 0))
+
     def test_snapshot_reports_its_time_for_local_ageing(self) -> None:
         put(self.store, "telemetry/health", obj("telemetry/health"))
         snapshot = self.store.snapshot(NOW + 2500)

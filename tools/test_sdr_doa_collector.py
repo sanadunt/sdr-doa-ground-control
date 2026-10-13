@@ -356,6 +356,7 @@ def test_frozen_node_is_reported_as_stalled_and_not_fresh():
     clock.advance(1)
     resumed = read()
     assert resumed["node_progress"]["state"] == "ADVANCING"
+    assert resumed["node_progress"]["changed_counters"] == ["data_frame_index", "timestamp_ms", "uptime_ms"]
     assert resumed["doa_candidates"]["csv"]["freshness"]["fresh"] is True
     assert "NODE_CLOCK_STALLED" not in resumed["publication_gate"]["reasons"]
 
@@ -381,8 +382,18 @@ def test_unchanged_status_timestamp_ages_doa_before_stall_threshold():
     assert freshness["ground_elapsed_ms"] == 6_000
     assert freshness["age_ms"] == 6_000
     assert freshness["fresh"] is False
-    assert result["node_progress"]["state"] == "ADVANCING"
+    progress = result["node_progress"]
+    assert progress["state"] == "UNCHANGED"
+    assert progress["stalled"] is False
+    assert progress["changed_counters"] == []
+    assert progress["unchanged_for_ms"]["timestamp_ms"] == 6_000
     assert "DOA_CANDIDATES_STALE" in result["publication_gate"]["reasons"]
+
+    bodies[collector.PATH_STATUS] = make_status_with(100_000, uptime=2_010)
+    clock.advance(1)
+    partial = read()["node_progress"]
+    assert partial["state"] == "ADVANCING"
+    assert partial["changed_counters"] == ["uptime_ms"]
 
 
 def test_collection_time_is_added_to_doa_age():
@@ -423,6 +434,41 @@ def test_adc_overdrive_snr_and_papr_are_exposed_and_gated():
     assert clean["signal_quality"]["state"] == "PASS"
     assert clean["signal_quality"]["adc_overdrive"] is False
     assert "ADC_OVERDRIVE" not in clean["publication_gate"]["reasons"]
+    assert clean["signal_quality"]["last_doa_record"] == {}
+
+
+def test_stale_xml_overdrive_flag_does_not_degrade_the_current_snapshot():
+    """doa.xml keeps its last frame between squelch hits; status.json decides overdrive."""
+    result = fake_collection(
+        make_status(160_000), make_csv(100_000), make_xml(100_000, overdrive="1"), clock_source="remote_unverified"
+    )
+    assert result["doa_candidates"]["xml"]["freshness"]["fresh"] is False
+    assert result["doa_candidates"]["xml"]["adc_overdrive_active"] is True
+    quality = result["signal_quality"]
+    assert quality["state"] == "PASS"
+    assert quality["adc_overdrive"] is False
+    assert quality["adc_overdrive_sources"] == []
+    assert quality["adc_overdrive_reported_by"] == ["status"]
+    assert quality["adc_overdrive_channel_mask"] is None
+    assert quality["snr_db"] is None and quality["snr_source"] is None
+    assert quality["confidence_metric_db"] == {"csv": None, "xml": None}
+    last = quality["last_doa_record"]
+    assert last["xml"]["adc_overdrive_active"] is True
+    assert last["xml"]["snr_db"] == 10.0
+    assert last["xml"]["age_ms"] == 60_000 and last["xml"]["fresh"] is False
+    assert last["csv"]["confidence_metric_db"] == 1.2 and "adc_overdrive_active" not in last["csv"]
+    assert result["publication_gate"]["checks"]["adc_not_overdriven"] is True
+    assert "ADC_OVERDRIVE" not in result["publication_gate"]["reasons"]
+    assert "DOA_CANDIDATES_STALE" in result["publication_gate"]["reasons"]
+    assert result["overall_state"] == "STALE"
+
+    live_status = fake_collection(
+        make_status_with(160_000, adc_overdrive=True), make_csv(100_000), make_xml(100_000),
+        clock_source="remote_unverified",
+    )
+    assert live_status["signal_quality"]["adc_overdrive_sources"] == ["status"]
+    assert live_status["overall_state"] == "DEGRADED"
+    assert "ADC_OVERDRIVE" in live_status["publication_gate"]["reasons"]
 
 
 def test_transport_failure_is_not_retried_and_skips_the_other_reads():
@@ -466,6 +512,93 @@ def test_total_budget_bounds_a_hanging_read():
     assert "CSV_VIEW_UNAVAILABLE" in result["publication_gate"]["reasons"]
 
 
+def _serve_once(handler):
+    """Serve one raw HTTP exchange on an ephemeral loopback port."""
+    import socket
+    import threading
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    server.settimeout(5)
+
+    def run():
+        try:
+            conn, _ = server.accept()
+        except OSError:
+            return
+        with conn:
+            conn.settimeout(5)
+            try:
+                conn.recv(4096)
+                handler(conn)
+            except OSError:
+                pass
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return server, thread, server.getsockname()[1]
+
+
+def _fetch_from(port, timeout_seconds):
+    from unittest import mock
+
+    with mock.patch.object(collector, "_validate_base_url", return_value=f"http://127.0.0.1:{port}"):
+        return collector.fetch_resource("http://doasdr.local:8081", collector.PATH_STATUS, timeout_seconds)
+
+
+def test_request_budget_bounds_a_trickling_body():
+    """A body sent one byte at a time cannot hold the read past timeout_seconds."""
+    import time as _time
+
+    stop = []
+
+    def trickle(conn):
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n")
+        for _ in range(60):
+            if stop:
+                return
+            conn.sendall(b" ")
+            _time.sleep(0.1)
+
+    server, thread, port = _serve_once(trickle)
+    try:
+        started = _time.monotonic()
+        fetched = _fetch_from(port, 0.5)
+        elapsed = _time.monotonic() - started
+    finally:
+        stop.append(True)
+        server.close()
+        thread.join(5)
+    assert elapsed < 1.5, elapsed
+    assert fetched.ok is False
+    assert fetched.error_kind == "timeout", fetched.error_kind
+
+    body = b'{"value": "' + b"x" * 40_000 + b'"}'
+
+    def whole(conn):
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n" % len(body))
+        for start in range(0, len(body), 7_000):
+            conn.sendall(body[start:start + 7_000])
+
+    def chunked(conn):
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n")
+        for start in range(0, len(body), 9_000):
+            part = body[start:start + 9_000]
+            conn.sendall(b"%x\r\n%s\r\n" % (len(part), part))
+        conn.sendall(b"0\r\n\r\n")
+
+    for handler in (whole, chunked):
+        server, thread, port = _serve_once(handler)
+        try:
+            fetched = _fetch_from(port, 2.0)
+        finally:
+            server.close()
+            thread.join(5)
+        assert fetched.ok is True, (handler.__name__, fetched.error)
+        assert fetched.body == body, handler.__name__
+
+
 def test_budget_must_be_positive_and_finite():
     for budget in (0, -1, float("nan"), float("inf"), True, 10_000):
         try:
@@ -494,6 +627,8 @@ def test_adjacent_frame_motion_is_not_a_conflict():
     assert consistency["pair_reads"] == 1 + collector.NATIVE_PAIR_REREADS
     assert calls.count(collector.PATH_CSV) == 1 + collector.NATIVE_PAIR_REREADS
     assert "NATIVE_DOA_VIEWS_CONFLICT" not in result["publication_gate"]["reasons"]
+    assert "NATIVE_ANGLE_UNCHECKED" in result["publication_gate"]["reasons"]
+    assert result["publication_gate"]["checks"]["native_angle_checked"] is False
 
 
 def test_adjacent_pair_is_reread_until_same_frame():
@@ -514,6 +649,81 @@ def test_adjacent_pair_is_reread_until_same_frame():
     assert consistency["frame_relation"] == "SAME_FRAME"
     assert consistency["angle_checked"] is True
     assert consistency["conflict"] is False
+
+
+def _forced_units_ready(run):
+    """Run with the selected unit contract forced ready, so READY is reachable.
+
+    Upstream confidence is never mapped to 0..1, so ``units_valid`` is always
+    false and the gate never reaches READY on real parsing.
+    """
+    original = collector.normalize_doa_candidate
+
+    def units_ready(*args, **kwargs):
+        result = original(*args, **kwargs)
+        result["units_valid"] = True
+        return result
+
+    collector.normalize_doa_candidate = units_ready
+    try:
+        return run()
+    finally:
+        collector.normalize_doa_candidate = original
+
+
+def ready_path_collection(csv_age_ms: int, xml_age_ms: int, xml_doa: str = "211.0"):
+    now = collector.now_ms()
+    bodies = _bodies(make_status(now), make_csv(now - csv_age_ms), make_xml(now - xml_age_ms, doa=xml_doa))
+    return _forced_units_ready(lambda: collector.collect(
+        "http://fixture:8081",
+        authority="csv",
+        clock_source="local",
+        canonical_angle_ready=True,
+        retry_delay_seconds=0,
+        fetcher=lambda base, path, timeout, max_body: resource(path, bodies[path]),
+    ))
+
+
+def failing_checks(result):
+    return sorted(name for name, value in result["publication_gate"]["checks"].items() if value is not True)
+
+
+def test_unchecked_native_pair_blocks_publication_but_not_display():
+    """AUD-18 follow-up: views from different frames were never angle-checked."""
+    same = ready_path_collection(300, 300)
+    assert same["native_consistency"]["angle_checked"] is True
+    assert same["publication_gate"]["state"] == "READY", same["publication_gate"]
+    assert same["publication_gate"]["checks"]["native_angle_checked"] is True
+    assert "NATIVE_ANGLE_UNCHECKED" not in same["publication_gate"]["reasons"]
+    assert same["overall_state"] == "LIVE"
+
+    adjacent = ready_path_collection(400, 150, xml_doa="213.0")
+    consistency = adjacent["native_consistency"]
+    assert (consistency["frame_relation"], consistency["angle_checked"], consistency["conflict"]) == (
+        "ADJACENT_FRAMES", False, False,
+    )
+    assert adjacent["publication_gate"]["state"] == "BLOCKED"
+    assert failing_checks(adjacent) == ["native_angle_checked"]
+    assert adjacent["publication_gate"]["reasons"] == ["NATIVE_ANGLE_UNCHECKED"]
+    # Display semantics stay as before: the data itself is LIVE.
+    assert adjacent["overall_state"] == "LIVE"
+
+    apart = ready_path_collection(2_800, 300)
+    assert apart["native_consistency"]["frame_relation"] == "OUT_OF_WINDOW"
+    assert failing_checks(apart) == ["native_angle_checked"]
+    assert "NATIVE_ANGLE_UNCHECKED" in apart["publication_gate"]["reasons"]
+    assert apart["overall_state"] == "INCOMPLETE"
+
+
+def test_angle_unchecked_is_not_reported_for_a_missing_or_invalid_view():
+    now = collector.now_ms()
+    missing = fake_collection(make_status(now), b"1,2,3\n", make_xml(now - 300))
+    assert missing["publication_gate"]["checks"]["native_angle_checked"] is True
+    assert "NATIVE_ANGLE_UNCHECKED" not in missing["publication_gate"]["reasons"]
+    invalid = fake_collection(make_status(now), make_csv(now - 300), make_xml(now - 300, doa="9999"))
+    assert "NATIVE_ANGLE_INVALID" in invalid["publication_gate"]["reasons"]
+    assert "NATIVE_ANGLE_UNCHECKED" not in invalid["publication_gate"]["reasons"]
+    assert invalid["publication_gate"]["checks"]["native_angle_checked"] is True
 
 
 def test_same_frame_disagreement_is_still_a_conflict():

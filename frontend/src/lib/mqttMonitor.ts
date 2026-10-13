@@ -1,4 +1,4 @@
-import type { ConsoleConfig, MqttEntry, MqttSnapshot, MqttTransport, RdfNodeSnapshot, RdfNodeTopic, Tone } from '../types';
+import type { ConsoleConfig, MqttEntry, MqttSnapshot, MqttTarget, MqttTransport, RdfNodeSnapshot, RdfNodeTopic, Tone } from '../types';
 
 type JsonObject = Record<string, unknown>;
 
@@ -62,6 +62,14 @@ export function mqttTransportFields(
     value.mqtt_ws_path = path;
   }
   return { ok: true, value };
+}
+
+/** The configured broker, with the saved transport and WebSocket path when the console reported them. */
+export function mqttTargetFromConfig(config: Pick<ConsoleConfig, 'mqtt_host' | 'mqtt_port' | 'mqtt_transport' | 'mqtt_ws_path'>): MqttTarget {
+  const target: MqttTarget = { host: config.mqtt_host, port: Number(config.mqtt_port) };
+  if (config.mqtt_transport !== undefined) target.transport = config.mqtt_transport;
+  if (config.mqtt_transport === 'websockets' && config.mqtt_ws_path !== undefined) target.wsPath = config.mqtt_ws_path;
+  return target;
 }
 
 const SECRET_KEY = /(pass(word)?|secret|token|api[_-]?key|private[_-]?key|credential)/iu;
@@ -364,6 +372,7 @@ function normalizeRdfTopic(suffix: string, value: unknown): RdfNodeTopic {
     qos: qos === undefined ? null : qos,
     retained: typeof record.retained === 'boolean' ? record.retained : null,
     error: typeof record.error === 'string' && RDF_ERROR.test(record.error) ? record.error : null,
+    cleared: record.cleared === true,
     payload,
   };
 }
@@ -441,7 +450,7 @@ export function rdfTopicRows(snapshot: RdfNodeSnapshot | null | undefined, nowLo
     const receivedAt = topic?.received_at_ms ?? null;
     const nowMs = snapshot?.now_ms ?? null;
     const ageMs = receivedAt !== null && nowMs !== null ? Math.max(0, nowMs - receivedAt) + elapsed : null;
-    const status = topic?.status === 'FRESH' && elapsed > RDF_LOCAL_HOLD_MS ? 'STALE' : topic?.status ?? 'UNAVAILABLE';
+    const status = topic?.cleared ? 'CLEARED' : topic?.status === 'FRESH' && elapsed > RDF_LOCAL_HOLD_MS ? 'STALE' : topic?.status ?? 'UNAVAILABLE';
     const gated = suffix === 'telemetry/doa' || suffix === 'telemetry/angular';
     const payload = topic?.payload ?? null;
     const summary: Array<[string, string]> = [];

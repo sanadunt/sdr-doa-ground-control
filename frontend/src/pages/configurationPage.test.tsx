@@ -6,11 +6,11 @@ import { DEFAULT_GPS_CONFIG } from '../lib/map';
 import { DEFAULT_COMPASS_CONFIG } from '../lib/polar';
 import { ConfigurationPage } from './ConfigurationPage';
 
-function render(lang: Lang = 'en'): string {
+function render(lang: Lang = 'en', refreshSeconds = 10): string {
   return renderToStaticMarkup(
     <I18nContext.Provider value={{ lang, setLang: () => undefined, t: (key, vars) => translate(lang, key, vars) }}>
       <ConfigurationPage
-        config={{ base_url: 'http://127.0.0.1:8081', mqtt_host: '', mqtt_port: 1883, refresh_seconds: 10 }}
+        config={{ base_url: 'http://127.0.0.1:8081', mqtt_host: '', mqtt_port: 1883, refresh_seconds: refreshSeconds }}
         branding={{ app_name: 'Ground Console', logo_data_url: '' }}
         gpsConfig={DEFAULT_GPS_CONFIG}
         compassConfig={DEFAULT_COMPASS_CONFIG}
@@ -37,7 +37,12 @@ describe('Configuration page', () => {
     const markup = render();
     expect(markup).toContain('<option value="1">Every second</option>');
     expect(markup).toContain('<option value="2">Every 2 seconds</option>');
-    expect(markup).toContain('Longer than the 5 s DoA freshness window');
+    expect(markup).toContain('so at 5 s or longer the bearing and polar curve clear between reads');
+  });
+
+  it('warns about a 5 s interval too, since the window counts from the data age', () => {
+    expect(render('en', 5)).toContain('so at 5 s or longer the bearing and polar curve clear between reads');
+    expect(render('en', 2)).toContain('5 s minus its age at the read');
   });
 
   it('labels the base config revision as required (AUD-74)', () => {

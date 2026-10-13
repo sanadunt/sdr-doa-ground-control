@@ -17,6 +17,7 @@ Config : disabled (tanpa --enable-config)
 - broker staging LAN `192.168.100.173:18885` aktif dengan `tools/mqtt_lan_stage.conf` (mosquitto 2.0 atau lebih baru): TLS, password file, dan ACL dari `deploy/mosquitto-sdr-doa-lan.acl.example`;
 - sertifikat broker memuat `IP:192.168.100.173` di subjectAltName, dan file CA-nya sudah disalin ke Raspberry (`/etc/sdr-doa-edge/sdr-doa-lan-ca.crt`);
 - password akun agent hanya ada di `/etc/sdr-doa-edge/agent.env` sebagai `SDR_DOA_MQTT_PASSWORD=...` (owner root, group doasdr, mode 0640), tidak di command line atau repository;
+- akun observer read-only `sdr-doa-observer` ada di password file broker untuk pengamatan dengan `mosquitto_sub` (lihat langkah 7). Message Monitor Ground Console tidak bisa memakai broker ini karena monitor tidak mengirim TLS, username, atau password;
 - backup/metadata source dan destination dicatat;
 - tidak ada proses agent lama dengan client ID yang sama.
 
@@ -38,7 +39,14 @@ Config : disabled (tanpa --enable-config)
    ```
 
    `--once` mencetak `published_kinds` dan `last_error`, dan exit code 1 bila tidak ada pesan yang sampai ke broker. Setelah itu jalankan tanpa `--once` dengan `--duration` terbatas.
-7. Amati health/state/config-reported dan topic `availability`, service SDR, port 8080/8081, dan file `_share`. `health.state` bernilai `ONLINE`, `STALE`, `DEGRADED`, atau `UNAVAILABLE` dengan kode di `health.reasons`; `doa_valid` tetap `false` karena DoA dinonaktifkan. Agent membaca Data Out sesuai jadwal health (sekitar 2 GET/s dengan `--health-interval 1` dan tanpa authority), dan satu koleksi dibatasi `--collect-budget`.
+7. Amati health/state/config-reported dan topic `availability` dengan `mosquitto_sub` di Ground sebagai `sdr-doa-observer`:
+
+   ```sh
+   mosquitto_sub -h 192.168.100.173 -p 18885 --cafile /etc/mosquitto/certs/sdr-doa-lan-ca.crt \
+     -u sdr-doa-observer -t 'sdr/v1/uav-01/#' -v
+   ```
+
+   Password observer ditulis di `~/.config/mosquitto_sub` (satu opsi per baris, `-P <password>`, mode 0600), jadi tidak muncul di command line. Amati juga service SDR, port 8080/8081, dan file `_share`. `health.state` bernilai `ONLINE`, `STALE`, `DEGRADED`, atau `UNAVAILABLE` dengan kode di `health.reasons`; `doa_valid` tetap `false` karena DoA dinonaktifkan. Agent membaca Data Out sesuai jadwal health (sekitar 2 GET/s dengan `--health-interval 1` dan tanpa authority), dan satu koleksi dibatasi `--collect-budget`.
 8. Hentikan proses manual dan pastikan proses/file SDR-DoA tidak berubah.
 9. Hanya setelah hasil health-only lulus, pertimbangkan unit systemd terpisah.
 

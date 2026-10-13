@@ -160,14 +160,14 @@ function delay(ms: number): Promise<void> {
 	return new Promise(resolve => window.setTimeout(resolve, ms));
 }
 
-async function withRetry<T>(operation: () => Promise<T>): Promise<T> {
+async function withRetry<T>(operation: () => Promise<T>, shouldRetry: () => boolean = () => true): Promise<T> {
 	for (let attempt = 0; ; attempt++) {
 		try {
 			return await operation();
 		} catch (error) {
 			const status = error instanceof ReceiverRequestError ? error.status : 0;
 			const retryable = status === 0 || status >= 500;
-			if (!retryable || attempt >= ARCHIVE_RETRY_DELAYS_MS.length) throw error;
+			if (!retryable || attempt >= ARCHIVE_RETRY_DELAYS_MS.length || !shouldRetry()) throw error;
 			await delay(ARCHIVE_RETRY_DELAYS_MS[attempt]);
 		}
 	}
@@ -502,17 +502,24 @@ export const receiverRecordsApi = {
 		return request(`/scans/${encodeId(scanId)}/candidates?${params.toString()}`, {}, parseCandidatePage);
 	},
 
-	async saveTrace(scanId: string, sweep: number, trace: Uint8Array<ArrayBuffer>): Promise<void> {
+	/** `shouldRetry` is asked after each failed attempt; a trace that still fails is counted for finishScan. */
+	async saveTrace(scanId: string, sweep: number, trace: Uint8Array<ArrayBuffer>, shouldRetry?: () => boolean): Promise<void> {
 		try {
 			await withRetry(() => request(`/scans/${encodeId(scanId)}/trace?sweep=${encodeURIComponent(String(sweep))}`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/octet-stream' },
 				body: trace,
-			}, parseVoid));
+			}, parseVoid), shouldRetry);
 		} catch (error) {
-			failedTraceUploads.set(scanId, (failedTraceUploads.get(scanId) ?? 0) + 1);
+			receiverRecordsApi.recordTraceUploadFailures(scanId, 1);
 			throw error;
 		}
+	},
+
+	/** Counts traces that were never saved, such as ones dropped from a full upload queue. */
+	recordTraceUploadFailures(scanId: string, count: number): void {
+		if (!Number.isInteger(count) || count <= 0) return;
+		failedTraceUploads.set(scanId, (failedTraceUploads.get(scanId) ?? 0) + count);
 	},
 
 	getScan(scanId: string): Promise<ReceiverScanDetails> {

@@ -1,13 +1,14 @@
 import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { connectMqtt, getBranding, getConsoleConfig, getMqtt, getSnapshot } from './api';
-import type { Branding, CompassConfig, ConsoleConfig, GpsConfig, MqttSnapshot, TelemetrySnapshot } from './types';
-import { DEFAULT_COMPASS_CONFIG } from './lib/polar';
-import { DEFAULT_GPS_CONFIG } from './lib/map';
+import type { Branding, CompassConfig, ConsoleConfig, GpsConfig, MqttSnapshot, MqttTarget, TelemetrySnapshot } from './types';
+import { loadCompassConfig, loadGpsConfig } from './lib/sourceConfigStorage';
 import { DEFAULT_CONSOLE_CONFIG, deriveDataState } from './lib/telemetry';
 import { I18nContext, initialLang, storeLang, translate, useI18n } from './lib/i18n';
 import type { I18nValue, Lang } from './lib/i18n';
 import { lazyWithRetry } from './lib/lazyRetry';
+import { errorNotice, noticeText } from './lib/errorNotice';
+import type { Notice } from './lib/errorNotice';
 import { OverviewPage } from './pages/OverviewPage';
 import { ConsoleShell } from './components/Shell';
 import type { RouteName } from './components/Shell';
@@ -135,6 +136,15 @@ export function displayFresh(
   return !readFailed && localSnapshotFresh(snapshot, receivedAtMonotonic, now);
 }
 
+/**
+ * A saved configuration that points at another Data Out node drops the
+ * previous node's snapshot and read error, so neither stands for the new
+ * target before its own read lands. Any other change keeps both.
+ */
+export function savedConfigChangesTarget(previous: ConsoleConfig, next: ConsoleConfig): boolean {
+  return previous.base_url !== next.base_url;
+}
+
 /** Delay before the next automatic read: one interval after the last read started, never back to back. */
 export function nextPollDelayMs(intervalMs: number, readElapsedMs: number): number {
   const elapsed = Number.isFinite(readElapsedMs) && readElapsedMs > 0 ? readElapsedMs : 0;
@@ -146,10 +156,6 @@ function isAbortError(error: unknown): boolean {
     return String((error as { name?: unknown }).name) === 'AbortError';
   }
   return false;
-}
-
-function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message ? error.message : fallback;
 }
 
 const routeLoading = <div className="route-loading" role="status" aria-live="polite"><span aria-hidden="true" /></div>;
@@ -170,6 +176,7 @@ function PageForRoute({
   snapshot,
   localFresh,
   mqtt,
+  mqttError,
   config,
   configLoaded,
   configError,
@@ -188,6 +195,7 @@ function PageForRoute({
   snapshot: TelemetrySnapshot | null;
   localFresh: boolean;
   mqtt: MqttSnapshot | null;
+  mqttError: string | null;
   config: ConsoleConfig;
   configLoaded: boolean;
   configError: string | null;
@@ -200,17 +208,17 @@ function PageForRoute({
   onBrandingChanged: (next: Branding) => void;
   onMqttChanged: (next: MqttSnapshot) => void;
   onRefreshMqtt: () => Promise<void>;
-  onReconnectMqtt: (host: string, port: number) => Promise<void>;
+  onReconnectMqtt: (target: MqttTarget) => Promise<void>;
 }): ReactElement {
   switch (route) {
-    case 'system-health': return <SystemHealthPage snapshot={snapshot} mqtt={mqtt} localSnapshotFresh={localFresh} />;
+    case 'system-health': return <SystemHealthPage snapshot={snapshot} mqtt={mqtt} mqttError={mqttError} localSnapshotFresh={localFresh} />;
     case 'doa-diagnostics': return <DoADiagnosticsPage snapshot={snapshot} localSnapshotFresh={localFresh} />;
     // Until the real configuration has been read, the form would offer the
     // built-in defaults for saving over it.
     case 'configuration': return configLoaded
       ? <ConfigurationPage config={config} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={onGpsConfigChanged} onCompassConfigChanged={onCompassConfigChanged} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} />
       : <ConfigUnavailable error={configError} />;
-    case 'message-monitor': return <MessageMonitorPage mqtt={mqtt} config={config} onMqttChanged={onMqttChanged} onRefreshMqtt={onRefreshMqtt} onReconnectMqtt={onReconnectMqtt} />;
+    case 'message-monitor': return <MessageMonitorPage mqtt={mqtt} mqttError={mqttError} config={config} onMqttChanged={onMqttChanged} onRefreshMqtt={onRefreshMqtt} onReconnectMqtt={onReconnectMqtt} />;
     case 'overview':
     default: return <OverviewPage snapshot={snapshot} localSnapshotFresh={localFresh} gpsConfig={gpsConfig} compassConfig={compassConfig} />;
   }
@@ -220,17 +228,18 @@ export default function App(): ReactElement {
   const [route, navigate] = useRoute();
   const [config, setConfig] = useState<ConsoleConfig>(DEFAULT_CONSOLE_CONFIG);
   const [configLoaded, setConfigLoaded] = useState(false);
-  const [configError, setConfigError] = useState<string | null>(null);
+  const [configError, setConfigError] = useState<Notice | null>(null);
   const [branding, setBranding] = useState<Branding>(DEFAULT_BRANDING);
   const [snapshot, setSnapshot] = useState<TelemetrySnapshot | null>(null);
   const [mqtt, setMqtt] = useState<MqttSnapshot | null>(null);
-  const [mqttError, setMqttError] = useState<string | null>(null);
+  const [mqttError, setMqttError] = useState<Notice | null>(null);
   const [readStartedAt, setReadStartedAt] = useState<number | null>(null);
-  const [readError, setReadError] = useState<string | null>(null);
+  // Errors are kept as keys or received text and translated at render time.
+  const [readError, setReadError] = useState<Notice | null>(null);
   const [receivedAtMonotonic, setReceivedAtMonotonic] = useState<number | null>(null);
   const [expiryTick, setExpiryTick] = useState(0);
-  const [gpsConfig, setGpsConfig] = useState<GpsConfig>(DEFAULT_GPS_CONFIG);
-  const [compassConfig, setCompassConfig] = useState<CompassConfig>(DEFAULT_COMPASS_CONFIG);
+  const [gpsConfig, setGpsConfig] = useState<GpsConfig>(loadGpsConfig);
+  const [compassConfig, setCompassConfig] = useState<CompassConfig>(loadCompassConfig);
   const [lang, setLangState] = useState<Lang>(initialLang);
   const i18n = useMemo<I18nValue>(() => ({
     lang,
@@ -297,17 +306,17 @@ export default function App(): ReactElement {
     } catch (error: unknown) {
       if (!mountedRef.current || sequence !== mqttSequence.current || isAbortError(error)) return;
       // Never leave a previously healthy snapshot looking current after a
-      // failed monitor read. The initiating page surfaces the error text; the
-      // shell shows ERROR.
+      // failed monitor read. The shell and the Message Monitor show ERROR
+      // with this error.
       setMqtt(null);
-      setMqttError(errorMessage(error, 'MQTT state read failed.'));
+      setMqttError(errorNotice(error, 'monitor.readFailed'));
       throw error;
     } finally {
       if (mqttController.current === controller) mqttController.current = null;
     }
   }, []);
 
-  const reconnectMqtt = useCallback(async (host: string, port: number): Promise<void> => {
+  const reconnectMqtt = useCallback(async (target: MqttTarget): Promise<void> => {
     if (!mountedRef.current) return;
     const sequence = ++mqttSequence.current;
     mqttController.current?.abort();
@@ -316,14 +325,14 @@ export default function App(): ReactElement {
     setMqtt(null);
 
     try {
-      const next = await connectMqtt(host, port, controller.signal);
+      const next = await connectMqtt(target, controller.signal);
       if (!mountedRef.current || sequence !== mqttSequence.current) return;
       setMqtt(next);
       setMqttError(null);
     } catch (error: unknown) {
       if (!mountedRef.current || sequence !== mqttSequence.current || isAbortError(error)) return;
       setMqtt(null);
-      setMqttError(errorMessage(error, 'MQTT reconnect failed.'));
+      setMqttError(errorNotice(error, 'monitor.connectFailed'));
       throw error;
     } finally {
       if (mqttController.current === controller) mqttController.current = null;
@@ -347,13 +356,13 @@ export default function App(): ReactElement {
   const refresh = useCallback((baseUrl?: string, options: RefreshOptions = {}): Promise<void> => {
     if (!mountedRef.current) return Promise.resolve();
     if (!configReadyRef.current && options.allowBeforeConfig !== true) {
-      setReadError('Local console configuration unavailable; Data Out read was not attempted.');
+      setReadError({ key: 'app.readError.configNotLoaded' });
       return Promise.resolve();
     }
 
     const targetBaseUrl = baseUrl ?? configRef.current.base_url;
     if (!targetBaseUrl) {
-      setReadError('No Data Out base URL is configured.');
+      setReadError({ key: 'app.readError.noBaseUrl' });
       return Promise.resolve();
     }
 
@@ -377,7 +386,7 @@ export default function App(): ReactElement {
         // Keep the previous evidence in place, but the display freshness stays
         // false while this error is shown so old data cannot look live. The
         // error stays until a read succeeds.
-        setReadError(errorMessage(error, 'Data Out snapshot failed.'));
+        setReadError(errorNotice(error, 'app.readError.snapshotFailed'));
       } finally {
         if (readInFlight.current?.controller === controller) {
           readInFlight.current = null;
@@ -426,8 +435,8 @@ export default function App(): ReactElement {
         configReadyRef.current = false;
         // Do not substitute DEFAULT_CONSOLE_CONFIG.base_url here. A failed local
         // config read must never trigger an unverified remote Data Out request.
-        setConfigError(errorMessage(error, 'console config read failed'));
-        setReadError('Local console configuration unavailable; Data Out read was not attempted.');
+        setConfigError(errorNotice(error, 'common.requestFailed'));
+        setReadError({ key: 'app.readError.configNotLoaded' });
         const delayMs = CONFIG_RETRY_DELAYS_MS[Math.min(attempt, CONFIG_RETRY_DELAYS_MS.length - 1)];
         attempt += 1;
         retryTimer = window.setTimeout(loadConfig, delayMs);
@@ -521,6 +530,7 @@ export default function App(): ReactElement {
 
   const onConfigSaved = useCallback(async (next: ConsoleConfig): Promise<void> => {
     if (!mountedRef.current) return;
+    const targetChanged = savedConfigChangesTarget(configRef.current, next);
     ++configSequence.current;
     configController.current?.abort();
     configController.current = null;
@@ -529,7 +539,11 @@ export default function App(): ReactElement {
     setConfig(next);
     setConfigLoaded(true);
     setConfigError(null);
-    setReadError(null);
+    if (targetChanged) {
+      setSnapshot(null);
+      setReceivedAtMonotonic(null);
+      setReadError(null);
+    }
     // A config save can replace the local subscriber. Read its state under the
     // same guard before the snapshot request is allowed to update the shell.
     void refreshMqtt().catch(() => undefined);
@@ -545,6 +559,9 @@ export default function App(): ReactElement {
     void refreshMqtt().catch(() => undefined);
   }, [refresh, refreshMqtt]);
 
+  const readErrorText = readError ? noticeText(i18n.t, readError) : null;
+  const mqttErrorText = mqttError ? noticeText(i18n.t, mqttError) : null;
+  const configErrorText = configError ? noticeText(i18n.t, configError) : null;
   const now = monotonicNow();
   const currentLocalFresh = expiryTick >= 0 && displayFresh(snapshot, receivedAtMonotonic, readError !== null, now);
   const lastReadAgeMs = receivedAtMonotonic === null ? null : Math.max(0, now - receivedAtMonotonic);
@@ -560,10 +577,10 @@ export default function App(): ReactElement {
         snapshot={snapshot}
         localSnapshotFresh={currentLocalFresh}
         loading={readingVisible}
-        readError={readError}
+        readError={readErrorText}
         lastReadAgeMs={lastReadAgeMs}
         mqttConnection={mqtt?.connection}
-        mqttError={mqttError}
+        mqttError={mqttErrorText}
         simulationEnabled={simulationEnabled}
         onRefresh={onRefresh}
       >
@@ -573,7 +590,7 @@ export default function App(): ReactElement {
               <Suspense fallback={routeLoading}>
                 {route === 'simulation' ? <SimulationPage enabled={simulationEnabled} automatic={simulationAutomatic} settings={simulationSettings} onEnabled={enabled => { setSimulationEnabled(enabled); if (!enabled) setSimulationAutomatic(false); }} onAutomatic={setSimulationAutomatic} onSettings={setSimulationSettings} onRandomize={randomizeSimulation} onOverview={() => navigate('overview')} />
                   : route === 'overview' && simulationEnabled ? <OverviewPage snapshot={syntheticSnapshot} localSnapshotFresh={true} gpsConfig={gpsConfig} compassConfig={compassConfig} simulation={simulationSettings} />
-                  : <PageForRoute route={route} snapshot={snapshot} localFresh={currentLocalFresh} mqtt={mqtt} config={config} configLoaded={configLoaded} configError={configError} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={setGpsConfig} onCompassConfigChanged={setCompassConfig} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} onMqttChanged={applyMqtt} onRefreshMqtt={refreshMqtt} onReconnectMqtt={reconnectMqtt} />}
+                  : <PageForRoute route={route} snapshot={snapshot} localFresh={currentLocalFresh} mqtt={mqtt} mqttError={mqttErrorText} config={config} configLoaded={configLoaded} configError={configErrorText} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={setGpsConfig} onCompassConfigChanged={setCompassConfig} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} onMqttChanged={applyMqtt} onRefreshMqtt={refreshMqtt} onReconnectMqtt={reconnectMqtt} />}
               </Suspense>
             </LoadErrorBoundary>
           </section>

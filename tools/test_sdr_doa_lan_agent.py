@@ -205,7 +205,7 @@ def test_frozen_node_is_stale_with_unverified_clock() -> None:
     tracker = collector.NodeProgressTracker()
     clock = [1_000.0]
     states = []
-    for advance_s, timestamp in ((0.0, 5_000_000), (1.0, 5_001_000), (11.0, 5_001_000)):
+    for advance_s, timestamp in ((0.0, 5_000_000), (1.0, 5_001_000), (2.0, 5_001_000), (11.0, 5_001_000)):
         clock[0] += advance_s
         snapshot = collect_fixture(
             "valid",
@@ -218,7 +218,9 @@ def test_frozen_node_is_stale_with_unverified_clock() -> None:
         states.append((health["state"], health["reasons"]))
     assert states[0] == ("DEGRADED", ["STATUS_FRESHNESS_UNVERIFIED"])
     assert states[1] == ("ONLINE", [])
-    assert states[2] == ("STALE", ["NODE_CLOCK_STALLED"])
+    # Unchanged counters below the stall threshold do not prove freshness.
+    assert states[2] == ("DEGRADED", ["STATUS_FRESHNESS_UNVERIFIED"])
+    assert states[3] == ("STALE", ["NODE_CLOCK_STALLED"])
 
 
 def test_valid_fixture_still_requires_authority_and_angle_gate() -> None:
@@ -227,6 +229,51 @@ def test_valid_fixture_still_requires_authority_and_angle_gate() -> None:
     assert snapshot["publication_gate"]["state"] == "BLOCKED"
     assert "doa" not in messages
     assert messages["state"]["running"] is True
+
+
+def test_adjacent_frame_pair_is_never_offered_as_valid_doa() -> None:
+    """AUD-18: CSV/XML from different frames were not angle-checked, so DoA is not valid."""
+    original = collector.normalize_doa_candidate
+
+    def units_ready(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+        # The unit contract is never ready upstream; force it so only the frame pair decides.
+        result = original(*args, **kwargs)
+        result["units_valid"] = True
+        return result
+
+    def snapshot_with_xml_offset(offset_ms: int) -> Dict[str, Any]:
+        timestamp = collector.now_ms() - 400
+        bodies = fixture_bodies("valid", timestamp)
+        bodies[collector.PATH_XML] = bodies[collector.PATH_XML].replace(
+            f"<TIME>{timestamp}</TIME>".encode(), f"<TIME>{timestamp + offset_ms}</TIME>".encode(),
+        )
+
+        def fetcher(base_url: str, path: str, timeout: float, max_body: int) -> collector.FetchedResource:
+            return collector.FetchedResource(
+                path=path, url=base_url + path, ok=True, http_status=200,
+                content_type="application/octet-stream", body=bodies[path], retrieved_at_ms=collector.now_ms(),
+            )
+
+        return collector.collect(
+            "http://fixture:8081", authority="csv", clock_source="local", canonical_angle_ready=True,
+            retry_delay_seconds=0, fetcher=fetcher,
+        )
+
+    collector.normalize_doa_candidate = units_ready
+    try:
+        same = snapshot_with_xml_offset(0)
+        adjacent = snapshot_with_xml_offset(250)
+    finally:
+        collector.normalize_doa_candidate = original
+    assert same["publication_gate"]["state"] == "READY", same["publication_gate"]
+    assert agent.build_messages(same)["health"]["doa_valid"] is True
+    assert adjacent["native_consistency"]["frame_relation"] == "ADJACENT_FRAMES"
+    assert adjacent["publication_gate"]["state"] == "BLOCKED"
+    assert adjacent["publication_gate"]["reasons"] == ["NATIVE_ANGLE_UNCHECKED"]
+    messages = agent.build_messages(adjacent)
+    assert messages["health"]["doa_valid"] is False
+    assert "doa" not in messages
+    assert messages["health"]["state"] == "ONLINE"
 
 
 def test_no_raw_settings_or_angular_values_in_agent_result() -> None:

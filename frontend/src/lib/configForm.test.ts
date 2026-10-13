@@ -30,10 +30,12 @@ describe('refresh intervals (AUD-24)', () => {
     expect(refreshIntervalOptions([0, 1, 2, 5], 10)).toEqual([0, 1, 2, 5, 10]);
   });
 
-  it('warns for manual refresh and for intervals longer than the 5 s DoA window', () => {
+  // The window counts from the data's age at the read, so 5 s already leaves a gap.
+  it('warns for manual refresh and for intervals as long as the 5 s DoA window', () => {
     expect(refreshWarningKey(0)).toBe('config.refreshManualWarning');
     expect(refreshWarningKey(1)).toBeNull();
-    expect(refreshWarningKey(5)).toBeNull();
+    expect(refreshWarningKey(2)).toBeNull();
+    expect(refreshWarningKey(5)).toBe('config.refreshSlowWarning');
     expect(refreshWarningKey(10)).toBe('config.refreshSlowWarning');
   });
 

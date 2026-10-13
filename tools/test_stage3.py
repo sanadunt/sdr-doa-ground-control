@@ -871,6 +871,51 @@ def test_legacy_ui_bounds_requests_and_expires_locally() -> None:
     assert '<option value="1">Every 1 second</option><option value="2">Every 2 seconds</option>' in html
 
 
+def test_legacy_ui_reads_cleared_mqtt_entries_and_new_gate_reasons() -> None:
+    """A retained clear (valid:false, cleared:true) is CLEARED, not INVALID, on the legacy page."""
+    html = ground_console.HTML
+    assert "function mqttContract(entry) { return entry.cleared===true?'CLEARED':(entry.valid===true?'VALID':'INVALID'); }" in html
+    assert "['Retained clears',esc(cleared)]" in html
+    assert "cleared=mqttCount(data?.cleared)" in html
+    for reason in ("NODE_CLOCK_STALLED", "ADC_OVERDRIVE", "NATIVE_ANGLE_INVALID", "NATIVE_ANGLE_UNCHECKED"):
+        assert f"  {reason}:'" in html, reason
+    assert "adjacent frames, angles not cross-checked" in html
+
+
+def test_legacy_polar_orientation_matches_the_react_renderer() -> None:
+    """Legacy Polar runs counter-clockwise; Linear keeps compass_offset on a Compass axis."""
+    node = shutil.which("node")
+    if node is None:
+        print("SKIP test_legacy_polar_orientation_matches_the_react_renderer: node not found")
+        return
+    html = ground_console.HTML
+    sources = []
+    for name in ("polarSettings", "normalizeDegrees", "polarDisplayAngle", "polarScreenAngle"):
+        start = html.index(f"function {name}(")
+        sources.append(html[start:html.index("\n", start)])
+    script = "\n".join(sources) + r"""
+const cases = [['Polar', 30], ['polar', 0], ['Compass', 30], ['Linear', 30], ['', 0], [undefined, 'x'], ['Compass', true]];
+const out = cases.map(([type, offset]) => {
+  const settings = polarSettings(type, offset);
+  return { settings, screen: polarScreenAngle(60, settings), display: polarDisplayAngle(60, settings) };
+});
+process.stdout.write(JSON.stringify(out));
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=20, check=True)
+    polar, polar_lower, compass, linear, empty, junk, boolean = json.loads(result.stdout)
+    # React screenAngleForBin/displayAngleForBin for theta_0 bin 60.
+    assert polar == {"settings": {"figType": "Polar", "compassOffset": 30, "localAxis": False}, "screen": 300, "display": 60}
+    assert polar_lower["settings"]["figType"] == "Polar" and polar_lower["screen"] == 300
+    assert compass == {"settings": {"figType": "Compass", "compassOffset": 30, "localAxis": False}, "screen": 330, "display": 330}
+    assert linear == {"settings": {"figType": "Compass", "compassOffset": 30, "localAxis": True}, "screen": 330, "display": 330}
+    assert empty["settings"] == {"figType": "Compass", "compassOffset": 0, "localAxis": True} and empty["screen"] == 300
+    assert junk["settings"]["compassOffset"] == 0 and boolean["settings"]["compassOffset"] == 0
+    assert "const point=(value,index)=>{ const radians=toRadians(polarScreenAngle(index,settings))" in html
+    assert "ctx.lineTo(Math.cos(toRadians(peakScreen))*(maxR+12)" in html
+    assert "const axisLabels=compass?directions:[['0°',0],['90°',90],['180°',180],['270°',270]]" in html
+    assert "'Data Out offset · local Compass axis'" in html
+
+
 def _png(width: int, height: int, bit_depth: int, color_type: int, interlace: int = 0, palette: bytes = b"") -> bytes:
     def chunk(kind: bytes, data: bytes) -> bytes:
         return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)

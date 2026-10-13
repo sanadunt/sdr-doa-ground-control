@@ -5,7 +5,7 @@ import { candidateErrors, deriveDataState, toneFor } from '../lib/telemetry';
 import { actionableGateReasons, doaStatusTextKey, overviewDoaStatus } from '../lib/doaStatus';
 import { shortcutAction } from '../lib/shortcuts';
 import { LANGS, gateReasonLabel, useI18n } from '../lib/i18n';
-import type { MessageKey } from '../lib/i18n';
+import type { MessageKey, Translate } from '../lib/i18n';
 import { Icon } from './ui';
 import type { IconName } from './ui';
 
@@ -68,11 +68,12 @@ function brandInitials(name: string): string {
   return initials || 'SD';
 }
 
-function formatElapsed(ms: number): string {
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  if (seconds < 60) return `${seconds} s`;
+/** Time since the last read in whole units of the UI language; whole seconds keep the label steady between ticks. */
+export function formatElapsed(t: Translate, ms: number): string {
+  const seconds = Number.isFinite(ms) ? Math.max(0, Math.floor(ms / 1000)) : 0;
+  if (seconds < 60) return t('common.durationS', { value: seconds });
   const minutes = Math.floor(seconds / 60);
-  return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h`;
+  return minutes < 60 ? t('common.durationMin', { value: minutes }) : t('common.durationH', { value: Math.floor(minutes / 60) });
 }
 
 function TelemetryItem({ label, value, tone, title, live }: { label: string; value: string; tone: Tone; title?: string; live?: boolean }): JSX.Element {
@@ -135,7 +136,7 @@ export function ConsoleShell({
   const mqttState = mqttError ? 'ERROR' : (mqttConnection ?? 'OFF').toUpperCase();
   const mqttTone: Tone = mqttState === 'CONNECTED' ? 'good' : mqttState === 'OFF' || mqttState === 'DISABLED' ? 'neutral' : 'warn';
   const mqttTitle = mqttError ? `${t('shell.mqttTitle')} · ${t('app.mqttReadFailed', { error: mqttError })}` : t('shell.mqttTitle');
-  const readLabel = loading ? t('shell.reading') : lastReadAgeMs === null ? t('shell.noRead') : t('shell.lastRead', { age: formatElapsed(lastReadAgeMs) });
+  const readLabel = loading ? t('shell.reading') : lastReadAgeMs === null ? t('shell.noRead') : t('shell.lastRead', { age: formatElapsed(t, lastReadAgeMs) });
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [railCollapsed, setRailCollapsed] = useState(() => {
@@ -290,7 +291,23 @@ export function ConsoleShell({
           <div className="topbar-tools">
             <div className="lang-switch" role="group" aria-label={t('shell.language')}>
               {LANGS.map((option) => (
-                <button key={option} type="button" aria-pressed={lang === option} onClick={() => setLang(option)} lang={option}>{option.toUpperCase()}</button>
+                <button
+                  key={option}
+                  type="button"
+                  aria-pressed={lang === option}
+                  onClick={(event) => {
+                    const button = event.currentTarget;
+                    setLang(option);
+                    // Below 360 px the active language's button is hidden; keep focus in the switch.
+                    window.requestAnimationFrame(() => {
+                      const focusLost = document.activeElement === button || !document.activeElement || document.activeElement === document.body;
+                      if (focusLost && button.getClientRects().length === 0) button.parentElement?.querySelector<HTMLButtonElement>('button[aria-pressed="false"]')?.focus();
+                    });
+                  }}
+                  lang={option}
+                >
+                  {option.toUpperCase()}
+                </button>
               ))}
             </div>
             <button className="icon-button" type="button" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} aria-label={theme === 'dark' ? t('shell.themeToLight') : t('shell.themeToDark')} title={theme === 'dark' ? t('shell.themeToLight') : t('shell.themeToDark')}>
@@ -301,6 +318,7 @@ export function ConsoleShell({
             </button>
           </div>
         </header>
+        {readError ? <div className="read-error-banner" role="alert"><i aria-hidden="true" /><span>{t('shell.snapshotError', { error: readError })}</span></div> : null}
         <main id="console-content" tabIndex={-1} aria-label={route === 'overview' ? routeLabel : undefined} className={`page-content ${route === 'overview' ? 'page-content-overview' : route === 'receiver' ? 'page-content-receiver' : ''}`}>{children}</main>
         <footer className="console-footer">
           <span>{t('shell.footerLeft')}</span>

@@ -1,6 +1,6 @@
 import type { JSX, ReactNode } from 'react';
 import type { MapCoordinate, PolarSettings, TelemetrySnapshot, Tone } from '../types';
-import { candidate, formatAge, numberOrNull } from '../lib/telemetry';
+import { candidate, numberOrNull } from '../lib/telemetry';
 import { bearingForView, formatDegrees, polarView } from '../lib/polar';
 import { doaStatusTextKey, overviewDoaStatus, rankGateReasons } from '../lib/doaStatus';
 import { gateReasonLabel, useI18n } from '../lib/i18n';
@@ -107,7 +107,7 @@ export function DoaReadout({
       <ReadoutCell
         label={t('readout.age')}
         tone={freshness === 'CURRENT' ? 'good' : freshness === 'WAITING' ? 'neutral' : 'warn'}
-        value={simulation ? <span className="readout-code">SIM</span> : ageMs !== null ? formatAge(csv.freshness) : <span className="readout-empty">—</span>}
+        value={simulation ? <span className="readout-code">SIM</span> : ageMs !== null ? t('common.durationS', { value: (ageMs / 1000).toFixed(1) }) : <span className="readout-empty">—</span>}
         detail={ageDetail}
       />
       <ReadoutCell

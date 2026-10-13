@@ -2,6 +2,21 @@
 
 Tanggal: 21 September 2026
 
+## Status saat ini (2026-10-13)
+
+Isi dokumen di bawah bagian ini adalah catatan historis per tanggal masing-masing. Bila bertentangan dengan daftar berikut, daftar ini dan kode aktif yang berlaku. Perilaku yang terlihat operator dijelaskan di `QUICKSTART.md`; audit fungsional 2026-10-12 dan status perbaikannya ada di `anti-slop/audit-006-2026-10-12-functional.md`.
+
+- **Route.** Tujuh halaman dengan urutan Overview, System Health, DoA Diagnostics, Configuration, Message Monitor, Simulasi, Receiver; shortcut `1`–`7` dan `R`. Receiver tetap ter-mount (tersembunyi) setelah kunjungan pertama.
+- **Motion.** GSAP tidak dipakai lagi. Halaman selain Overview memakai animasi CSS `route-in` 0,22 s, yang dimatikan oleh `prefers-reduced-motion`.
+- **Peta.** Renderer adalah MapLibre GL JS, bukan Leaflet. Style dianggap siap pada `styledata`, bukan `load`, karena `load` menunggu tile OSM dan tidak pernah terjadi saat offline. Tile memakai satu host pada satu waktu: `tile.openstreetmap.de` dulu, lalu `tile.openstreetmap.org` setelah 4 kegagalan berturut-turut atau host yang diam. Kedua host tidak dipakai bersamaan, karena MapLibre membagi array `tiles` per indeks tile dan tidak mencoba host lain. Bila semua host gagal, chip BASEMAP UNAVAILABLE muncul. Tanpa WebGL2, setelah context hilang, atau bila worker gagal, overlay digambar di kanvas.
+- **Arah.** Peta, readout, dan mode Compass memakai bearing geografis (360 − θ₀ + compass_offset) mod 360. Mode Polar menggambar θ₀ berlawanan jarum jam seperti KrakenSDR. Satu predikat kesiapan (`overviewDoaStatus`) mengosongkan readout, polar, dan overlay bersamaan.
+- **Simulasi.** Tidak ada banner global. Penanda `SIMULATION` ada di readout, strip status, peta, dan panel polar. Sudut simulasi adalah bearing dari utara.
+- **Urutan mobile.** Pada layar sempit peta tampil sebelum plot polar (urutan DOM), bukan sebaliknya.
+- **Plotly.** Bundle parsial (`plotly.js/lib/core` + `lib/scatterpolar`), sekitar 1,2 MB, bukan `plotly.js-dist-min` 4,7 MB. Tombol Share ke Plotly Cloud dihapus dan ekspor PNG berfungsi. Skala radial otomatis mengikuti span data, bukan kelipatan 10 dB. Head Up tidak lagi memaksa rentang manual.
+- **Overlay.** Skala dB default Auto dari vektor; −60…0 dB hanya untuk simulasi atau mode Manual.
+- **Target sentuh.** Klaim "tidak ada target di bawah 44 × 44 px pada 320 px" di bawah tidak berlaku lagi (AUD-146: tombol EN/ID, modebar Plotly, summary Graph settings). Status perbaikannya ada di audit-006.
+- **Bukti tes.** Jumlah tes dan ukuran bundle di bawah adalah angka historis, bukan bukti penerimaan saat ini.
+
 ## Lingkup
 
 Redesign presentasi kelima halaman React: Overview, System Health, DoA Diagnostics,
@@ -95,6 +110,8 @@ Console instrumen, bukan landing page atau simulasi radar.
 - Basemap menggunakan tile OSM publik tanpa API key. `tile.openstreetmap.de` diprioritaskan
   sebagai alternatif gratis ketika jaringan memblokir `tile.openstreetmap.org`; atribusi OSM
   tetap ditampilkan. Kegagalan tile individual tidak lagi mematikan renderer MapLibre/overlay.
+  (Dikoreksi 2026-10-13: versi ini memberi kedua host sekaligus, sehingga MapLibre membaginya
+  per tile tanpa retry. Lihat "Status saat ini".)
 - Kontrol Direction overlay kini memiliki mode advanced yang terhubung ke renderer: radius
   proyeksi dan radius lobe terpisah, dB min/max, noise threshold, contrast, radial samples,
   distance falloff, visual intensity, blur, opacity, guide interval, visibility layer, serta
@@ -169,6 +186,10 @@ end-to-end telah diuji ulang di browser.
 
 ## Menjalankan hasil
 
+> Catatan 2026-10-13: path `/Users/mac/...` di bawah berasal dari mesin lain. `npm run build`
+> saja kini juga menghapus `frontend/dist/receiver`; perintah build dan run yang berlaku ada
+> di `QUICKSTART.md` (`npm run build:all`).
+
 Build produksi sudah dibuat lokal. Jalankan console biasa tanpa `--legacy-ui`:
 
 ```bash
@@ -184,9 +205,10 @@ npm --prefix /Users/mac/Documents/all-code/doa-sdr-telemetry/frontend run build
 
 ### Dependency MQTT pada Mac
 
-Jika konfigurasi tersimpan memiliki `mqtt_host`, startup memerlukan `paho-mqtt`
-versi 2 karena monitor memakai `CallbackAPIVersion.VERSION2`. Python global tanpa
-package ini akan gagal dengan `ModuleNotFoundError: No module named 'paho'`.
+Monitor memakai `paho-mqtt` versi 2 (`CallbackAPIVersion.VERSION2`). Catatan 2026-10-13:
+default CLI selalu mengisi `mqtt_host` (`10.90.0.1`), dan console kini tetap start tanpa
+paket ini dengan monitor berstatus ERROR. Sebelumnya startup gagal dengan
+`ModuleNotFoundError: No module named 'paho'`.
 Setup terisolasi (tidak mengubah Python Homebrew):
 
 ```bash

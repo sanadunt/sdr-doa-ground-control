@@ -28,6 +28,29 @@ MINIMUM_PEAK_DB_RANGE = (-160.0, 60.0)
 STALE_RECORDING_SECONDS = 120
 RECOVERY_INTERVAL_SECONDS = 15
 PLAYABLE_AUDIO_STATUSES = frozenset({"complete", "partial", "interrupted"})
+# Operator text stored in an audio segment's "error". The Receiver's Indonesian text
+# matches these exact sentences (browsdr_receiver_overlay/src/client/app/i18n.ts);
+# tools/test_receiver_i18n.mjs fails when one has no translation.
+SEGMENT_INTERRUPTED_ERROR = (
+    "Recording was interrupted (the Receiver page closed or the console stopped); "
+    "audio was kept up to the last saved chunk."
+)
+SEGMENT_UNCLOSED_ERROR = (
+    "Recording ended before this segment was closed (page closed or console unreachable); "
+    "audio was kept up to the last saved chunk."
+)
+SEGMENT_INTERRUPTED_EMPTY_ERROR = "Recording was interrupted before any audio was saved."
+SEGMENT_UNRECOVERABLE_ERROR = "Recording was interrupted and its audio could not be recovered: {}"
+SEGMENT_PARTIAL_ERROR = "Audio upload failed; the recording was kept up to the last saved chunk."
+SEGMENT_FAILED_ERROR = "Audio segment recording failed before any audio was saved."
+AUDIO_SEGMENT_ERROR_MESSAGES = (
+    SEGMENT_INTERRUPTED_ERROR,
+    SEGMENT_UNCLOSED_ERROR,
+    SEGMENT_INTERRUPTED_EMPTY_ERROR,
+    SEGMENT_UNRECOVERABLE_ERROR,
+    SEGMENT_PARTIAL_ERROR,
+    SEGMENT_FAILED_ERROR,
+)
 DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "sdr-doa-ground-console"
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 _MANAGED_FILE_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:part|webm|duration)$")
@@ -585,11 +608,7 @@ class ReceiverRecordStore:
                 if activity is not None and activity > cutoff:
                     continue
                 try:
-                    recovered["audio_segments"] += self._finalize_open_segments(
-                        session["id"],
-                        "Recording was interrupted (the Receiver page closed or the console stopped); "
-                        "audio was kept up to the last saved chunk.",
-                    )
+                    recovered["audio_segments"] += self._finalize_open_segments(session["id"], SEGMENT_INTERRUPTED_ERROR)
                     with self._connect() as db:
                         db.execute(
                             "UPDATE audio_sessions SET finished_at=?,last_activity=? WHERE id=? AND finished_at IS NULL",
@@ -684,10 +703,10 @@ class ReceiverRecordStore:
             duration = (ended - started).total_seconds() if started is not None else 0.0
             try:
                 status, file_name, size, duration = self._settle_segment_file(row["id"], row["temp_name"], "interrupted", duration)
-                message = error if status != "failed" else "Recording was interrupted before any audio was saved."
+                message = error if status != "failed" else SEGMENT_INTERRUPTED_EMPTY_ERROR
             except (OSError, ValueError) as exc:
                 status, file_name, size = "failed", None, 0
-                message = f"Recording was interrupted and its audio could not be recovered: {exc}"
+                message = SEGMENT_UNRECOVERABLE_ERROR.format(exc)
             metadata.update({
                 "ended_at": ended.isoformat(),
                 "duration_seconds": duration,
@@ -1516,11 +1535,7 @@ class ReceiverRecordStore:
             if unfinished:
                 if not finalize_open_segments:
                     raise ValueError("all audio segments must be finalized before the session")
-                self._finalize_open_segments(
-                    session_id,
-                    "Recording ended before this segment was closed (page closed or console unreachable); "
-                    "audio was kept up to the last saved chunk.",
-                )
+                self._finalize_open_segments(session_id, SEGMENT_UNCLOSED_ERROR)
             stamp = _now()
             with self._connect() as db:
                 db.execute("UPDATE audio_sessions SET finished_at=?,last_activity=? WHERE id=?", (stamp, stamp, session_id))
@@ -1565,9 +1580,9 @@ class ReceiverRecordStore:
             if outcome == "complete":
                 metadata.pop("error", None)
             elif outcome == "partial":
-                metadata["error"] = error or "Audio upload failed; the recording was kept up to the last saved chunk."
+                metadata["error"] = error or SEGMENT_PARTIAL_ERROR
             else:
-                metadata["error"] = error or "Audio segment recording failed before any audio was saved."
+                metadata["error"] = error or SEGMENT_FAILED_ERROR
             try:
                 with self._connect() as db:
                     db.execute("UPDATE audio_segments SET finished_at=?,file_name=?,byte_count=?,metadata=? WHERE id=?",

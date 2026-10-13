@@ -15,6 +15,7 @@ import {
   nodeStatus,
   resourceRows,
   signalQualityView,
+  stateTone,
 } from './healthView';
 
 const PATHS = ['/status.json', '/settings.json', '/DOA_value.html', '/doa.xml'];
@@ -102,6 +103,14 @@ describe('new collector fields', () => {
     const value = snapshot({ node_progress: { state: 'STALLED', stalled: true, stalled_counters: ['timestamp_ms', 'evil'], unchanged_for_ms: { timestamp_ms: 12000, uptime_ms: 11000 }, regressed_counters: [], max_stall_ms: 10000 } });
     expect(nodeProgressView(value)).toEqual({ state: 'STALLED', stalledCounters: ['timestamp_ms'], regressedCounters: [], longestUnchangedMs: 12000, maxStallMs: 10000 });
     expect(nodeProgressView(snapshot())).toBeNull();
+  });
+
+  it('keeps UNCHANGED apart from ADVANCING and does not show it as good', () => {
+    const value = snapshot({ node_progress: { state: 'UNCHANGED', stalled: false, stalled_counters: [], changed_counters: [], unchanged_for_ms: { timestamp_ms: 4000 }, regressed_counters: [], max_stall_ms: 10000 } });
+    expect(nodeProgressView(value)?.state).toBe('UNCHANGED');
+    expect(nodeProgressView(value)?.longestUnchangedMs).toBe(4000);
+    expect(stateTone('UNCHANGED')).toBe('warn');
+    expect(stateTone('ADVANCING')).toBe('good');
   });
 
   it('reads signal quality without treating PAPR as a confidence', () => {

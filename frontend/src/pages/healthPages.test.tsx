@@ -67,6 +67,16 @@ const MALFORMED = {
   },
 } as unknown as TelemetrySnapshot;
 
+describe('System Health MQTT card', () => {
+  it('reports a failed /api/mqtt poll as ERROR instead of OFF', () => {
+    const page = text(render(<SystemHealthPage snapshot={REFUSED} mqtt={null} mqttError="Console unreachable" localSnapshotFresh={false} />));
+    expect(page).toContain('ERROR');
+    expect(page).toContain('Console unreachable');
+    const off = text(render(<SystemHealthPage snapshot={REFUSED} mqtt={null} localSnapshotFresh={false} />));
+    expect(off).toContain('OFF');
+  });
+});
+
 describe('System Health shows why Data Out failed (AUD-27, AUD-101)', () => {
   it('renders the transport error, the skipped reads and UNAVAILABLE without a stale banner', () => {
     const page = text(render(<SystemHealthPage snapshot={REFUSED} mqtt={null} localSnapshotFresh={false} />));
@@ -88,6 +98,15 @@ describe('System Health shows why Data Out failed (AUD-27, AUD-101)', () => {
     expect(page).toContain('ADC overdrive reported by xml');
     expect(page).toContain('channel mask 0b11');
     expect(page).toContain('CSV 1.20 · XML 1.35 dB');
+  });
+
+  it('does not call unchanged counters advancing', () => {
+    const unchanged = { ...MALFORMED, node_progress: { state: 'UNCHANGED', stalled: false, stalled_counters: [], changed_counters: [], unchanged_for_ms: { timestamp_ms: 4000, uptime_ms: 4000 }, regressed_counters: [], max_stall_ms: 10000, samples: 3 } } as unknown as TelemetrySnapshot;
+    const page = text(render(<SystemHealthPage snapshot={unchanged} mqtt={null} localSnapshotFresh={false} />));
+    expect(page).toContain('UNCHANGED');
+    expect(page).toContain('No counter changed since the previous read (4.0 s)');
+    expect(page).not.toContain('are advancing');
+    expect(text(render(<SystemHealthPage snapshot={unchanged} mqtt={null} localSnapshotFresh={false} />, 'id'))).toContain('Tidak ada counter yang berubah');
   });
 
   it('speaks Indonesian for error kinds and durations', () => {

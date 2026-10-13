@@ -460,7 +460,7 @@ class ReceiverRecoveryAndAudioTests(unittest.TestCase):
         self.assertIsNotNone(record["completed_at"])
         saved = record["segments"][0]
         self.assertEqual(saved["status"], "interrupted")
-        self.assertIn("interrupted", saved["error"])
+        self.assertEqual(saved["error"], receiver_record_store.SEGMENT_INTERRUPTED_ERROR)
         self.assertAlmostEqual(saved["duration_seconds"], 1.98 + 0.02, places=3)
         path, _ = self.store.get_segment_audio(segment["id"])
         self.assertEqual(saved["bytes"], path.stat().st_size)
@@ -486,6 +486,7 @@ class ReceiverRecoveryAndAudioTests(unittest.TestCase):
         self.assertEqual(scans[0]["trace_count"], 1)
         audio = next(item for item in records["items"] if item["type"] == "audio-session")
         self.assertEqual(audio["segments"][0]["status"], "failed")
+        self.assertEqual(audio["segments"][0]["error"], receiver_record_store.SEGMENT_INTERRUPTED_EMPTY_ERROR)
         self.assertEqual(audio["segments"][0]["bytes"], 0)
         self.assertFalse((self.data_dir / "tmp" / f"{empty['id']}.part").exists())
         self.assertEqual(restarted.scan_info(live_scan["id"])["status"], "running")
@@ -512,6 +513,7 @@ class ReceiverRecoveryAndAudioTests(unittest.TestCase):
         record = self.store.list_records(record_type="audio-session")["items"][0]
         self.assertIsNotNone(record["completed_at"])
         self.assertEqual(record["segments"][0]["status"], "interrupted")
+        self.assertEqual(record["segments"][0]["error"], receiver_record_store.SEGMENT_UNCLOSED_ERROR)
         self.store.get_segment_audio(segment["id"])
 
     def test_failed_upload_keeps_saved_audio_as_partial_segment(self):

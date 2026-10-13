@@ -1,7 +1,9 @@
 // Every Receiver chrome string passed to t(), and every operator message, has an Indonesian translation.
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
 const source = readFileSync(new URL('./browsdr_receiver_overlay/src/client/app/i18n.ts', import.meta.url), 'utf8');
@@ -55,6 +57,23 @@ test('literal operator messages in the overlay sources have Indonesian text', ()
 	assert.ok(messages.length > 40, `expected operator messages in the overlay, found ${messages.length}`);
 	const missing = messages.filter(message => translateReceiverMessage('id', message) === message);
 	assert.deepEqual(missing, []);
+});
+
+test('audio segment errors written by the console have Indonesian text', () => {
+	const output = execFileSync(process.env.PYTHON || 'python3', ['-c', [
+		'import json, sys',
+		`sys.path.insert(0, ${JSON.stringify(fileURLToPath(new URL('./', import.meta.url)))})`,
+		'import receiver_record_store as store',
+		'print(json.dumps(list(store.AUDIO_SEGMENT_ERROR_MESSAGES)))',
+	].join('\n')], { encoding: 'utf8', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } });
+	const messages = JSON.parse(output).map(message => message.replace('{}', '[Errno 13] Permission denied'));
+	assert.ok(messages.length >= 6, `expected the console's segment errors, found ${messages.length}`);
+	const missing = messages.filter(message => translateReceiverMessage('id', message) === message);
+	assert.deepEqual(missing, []);
+	assert.equal(
+		translateReceiverMessage('id', 'Recording was interrupted and its audio could not be recovered: [Errno 13] Permission denied'),
+		'Perekaman terputus dan audionya tidak bisa dipulihkan: [Errno 13] Permission denied',
+	);
 });
 
 test('run-time messages are translated, including known errors inside them', () => {

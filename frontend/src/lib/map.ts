@@ -167,22 +167,52 @@ export interface HeldStation {
 }
 
 /**
- * Keep the last live Data Out station position while there is no current
- * evidence (local freshness gap, failed status read), instead of jumping to
- * the configured fallback position. A fresh read with a status record that
- * still resolves to no usable fix drops the memory. An explicit FALLBACK or
- * MANUAL choice is never replaced.
+ * A fresh, readable status record says the node has no GPS fix: its
+ * gps_status is missing, disabled or not a positive fix state. A CONFLICT, a
+ * missing DoA view or a stale record does not say that.
+ */
+export function gpsReportsNoFix(snapshot: TelemetrySnapshot | null | undefined, localFresh: boolean): boolean {
+  if (!localFresh || snapshot?.status?.available !== true) return false;
+  const raw = snapshot.status.safe?.gps_status;
+  return typeof raw !== 'string' || !GPS_POSITIVE_STATES.has(raw.trim().toLowerCase());
+}
+
+/**
+ * Keep the last live Data Out station position while the current read gives
+ * no usable coordinate (local freshness gap, failed status read, CSV/XML
+ * conflict, missing view) instead of jumping to the configured fallback
+ * position. Only a read that reports no fix (gpsReportsNoFix) drops the
+ * memory. An explicit FALLBACK or MANUAL choice is never replaced.
  */
 export function holdStationCoordinate(
   lastLive: MapCoordinate | null,
   coordinate: MapCoordinate | null,
-  authoritative: boolean,
+  noFixReported: boolean,
   selectedSource: GpsSourceMode = 'DATA_OUT',
 ): HeldStation {
   if (coordinate?.source === 'DATA_OUT') return { coordinate, held: false, lastLive: coordinate };
   if (selectedSource !== 'DATA_OUT' || coordinate?.source !== 'FALLBACK') return { coordinate, held: false, lastLive };
-  if (authoritative) return { coordinate, held: false, lastLive: null };
+  if (noFixReported) return { coordinate, held: false, lastLive: null };
   return lastLive ? { coordinate: lastLive, held: true, lastLive } : { coordinate, held: false, lastLive: null };
+}
+
+/** The station position source and GPS selection the camera was last framed on. */
+export interface StationFraming {
+  source: MapCoordinate['source'];
+  selection: GpsSourceMode;
+}
+
+/**
+ * Whether a new station position reframes the camera: the first position, a
+ * new GPS source selection, simulation turning on or off, or a live/manual fix
+ * that replaces the fallback. Losing a live fix to the fallback is not a
+ * reason: the camera stays and only the marker moves.
+ */
+export function shouldReframeStation(framed: StationFraming | null, next: MapCoordinate['source'], selection: GpsSourceMode): boolean {
+  if (!framed || framed.selection !== selection) return true;
+  if (next === framed.source) return false;
+  if (next === 'SIMULATION' || framed.source === 'SIMULATION') return true;
+  return framed.source === 'FALLBACK';
 }
 
 export function coordinateFromCandidate(candidate: Candidate | undefined, source: MapCoordinate['source']): MapCoordinate | null {

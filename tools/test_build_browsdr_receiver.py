@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import io
 import shutil
 import subprocess
 import tempfile
 import unittest
+from contextlib import ExitStack, redirect_stderr
 from pathlib import Path
 from unittest import mock
 
@@ -159,6 +161,58 @@ class ReceiverBuildSourceTests(unittest.TestCase):
             hackrf = (work / "src/client/hackrf.ts").read_text(encoding="utf-8")
             self.assertIn("async startRx(callback: RxCallback, onError?: (error: unknown) => void)", hackrf)
             self.assertEqual(hackrf.count("onError?.("), 4)
+
+
+class _StopAfterFirstNpmCall(Exception):
+    pass
+
+
+class ReceiverBuildNpmTests(unittest.TestCase):
+    def test_npm_is_resolved_through_path_lookup(self) -> None:
+        windows_npm = r"C:\Program Files\nodejs\npm.CMD"
+        with mock.patch.object(builder.shutil, "which", return_value=windows_npm) as which:
+            self.assertEqual(builder._npm_command(), windows_npm)
+        which.assert_called_once_with("npm")
+
+    def test_build_runs_the_resolved_npm_executable(self) -> None:
+        windows_npm = r"C:\Program Files\nodejs\npm.CMD"
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source"
+            (source / "src/client").mkdir(parents=True)
+            for name in ("package.json", "package-lock.json", "LICENSE", "src/client/index.html"):
+                (source / name).write_text("{}\n", encoding="utf-8")
+            calls = []
+
+            def record(argv, **_kwargs):
+                calls.append(list(argv))
+                raise _StopAfterFirstNpmCall()
+
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.object(builder.shutil, "which", return_value=windows_npm))
+                for helper in (
+                    "_assert_pinned_source",
+                    "_apply_receiver_source_overlay",
+                    "_apply_embedded_changes",
+                    "_write_source_instructions",
+                    "_create_source_archive",
+                ):
+                    stack.enter_context(mock.patch.object(builder, helper))
+                stack.enter_context(mock.patch.object(builder.subprocess, "run", side_effect=record))
+                with self.assertRaises(_StopAfterFirstNpmCall):
+                    builder.build_receiver(source)
+        self.assertEqual(calls, [[windows_npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"]])
+
+    def test_missing_npm_fails_before_reading_the_source(self) -> None:
+        stderr = io.StringIO()
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(builder.shutil, "which", return_value=None))
+            pinned = stack.enter_context(mock.patch.object(builder, "_assert_pinned_source"))
+            stack.enter_context(mock.patch.object(builder.sys, "argv", ["build_browsdr_receiver.py"]))
+            stack.enter_context(redirect_stderr(stderr))
+            self.assertEqual(builder.main(), 1)
+        pinned.assert_not_called()
+        self.assertIn("npm was not found on PATH", stderr.getvalue())
+        self.assertIn("npm.cmd on Windows", stderr.getvalue())
 
 
 if __name__ == "__main__":

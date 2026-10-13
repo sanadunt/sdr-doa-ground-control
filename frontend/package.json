@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:receiver": "node scripts/build-receiver.mjs",
+    "build:all": "npm run build && npm run build:receiver",
     "preview": "vite preview --host 127.0.0.1",
     "check": "tsc -b --pretty false",
     "test": "vitest run"

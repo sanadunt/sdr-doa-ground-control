@@ -38,6 +38,8 @@ interface SweepRuntime {
 	dragEndHz: number;
 	stopRequested: boolean;
 	stopResume: boolean;
+	stopInFlight: Promise<boolean> | null;
+	radioLost: boolean;
 	pendingCandidates: Map<number, SweepCandidate> | null;
 	pendingRemovedCandidateIds: Set<number>;
 	pendingCandidateScanId: string | null;
@@ -49,6 +51,9 @@ interface SweepRuntime {
 	candidatePersistDraining: boolean;
 	candidatePersistRetry: Map<string, Map<number, SweepCandidate>>;
 	tracePersistQueue: Promise<void>;
+	tracePersistPending: PendingTrace[];
+	tracePersistDraining: boolean;
+	traceFlushScanId: string | null;
 	traceUploadFailures: number;
 	archiveBanner: ArchiveUploadBanner;
 	candidateUpdateTimer: number | null;
@@ -65,8 +70,15 @@ interface CandidatePersistBatch {
 	candidates: Map<number, SweepCandidate>;
 }
 
+interface PendingTrace {
+	scanId: string;
+	sweep: number;
+	trace: Uint8Array<ArrayBuffer>;
+}
+
 const sweepRuntime = new WeakMap<object, SweepRuntime>();
 const CANDIDATE_PERSIST_BATCH_SIZE = 500;
+const TRACE_PERSIST_MAX_PENDING = 32;
 
 function runtimeFor(app: object): SweepRuntime {
 	let runtime = sweepRuntime.get(app);
@@ -87,6 +99,8 @@ function runtimeFor(app: object): SweepRuntime {
 			dragEndHz: 0,
 			stopRequested: false,
 			stopResume: true,
+			stopInFlight: null,
+			radioLost: false,
 			drawFrame: null,
 			pendingCandidates: null,
 			pendingRemovedCandidateIds: new Set(),
@@ -99,6 +113,9 @@ function runtimeFor(app: object): SweepRuntime {
 			candidatePersistDraining: false,
 			candidatePersistRetry: new Map(),
 			tracePersistQueue: Promise.resolve(),
+			tracePersistPending: [],
+			tracePersistDraining: false,
+			traceFlushScanId: null,
 			traceUploadFailures: 0,
 			archiveBanner: new ArchiveUploadBanner(),
 			candidateUpdateTimer: null,
@@ -296,15 +313,113 @@ function queueCandidateUpdate(app: AppInstance, candidates: SweepCandidate[], re
 }
 
 
+function countUnsavedTraces(app: AppInstance, scanId: string, count: number): void {
+	if (count <= 0) return;
+	receiverRecordsApi.recordTraceUploadFailures(scanId, count);
+	runtimeFor(app).traceUploadFailures += count;
+}
+
+// One trace per sweep can arrive ten times a second. The queue is bounded (the
+// oldest waiting trace is dropped and counted as not saved), a failed upload is
+// retried only while nothing newer waits, and once the scan is stopping a failure
+// drops the rest, so Stop never waits for a backlog to time out.
+function queueTracePersist(app: AppInstance, scanId: string, sweep: number, trace: Uint8Array<ArrayBuffer>): void {
+	const runtime = runtimeFor(app);
+	runtime.tracePersistPending.push({ scanId, sweep, trace });
+	if (runtime.tracePersistPending.length > TRACE_PERSIST_MAX_PENDING) {
+		const dropped = runtime.tracePersistPending.shift();
+		if (dropped) countUnsavedTraces(app, dropped.scanId, 1);
+	}
+	if (runtime.tracePersistDraining) return;
+	runtime.tracePersistDraining = true;
+	runtime.tracePersistQueue = drainTracePersist(app);
+}
+
+async function drainTracePersist(app: AppInstance): Promise<void> {
+	const runtime = runtimeFor(app);
+	try {
+		for (let item = runtime.tracePersistPending.shift(); item; item = runtime.tracePersistPending.shift()) {
+			const { scanId, sweep, trace } = item;
+			try {
+				await receiverRecordsApi.saveTrace(scanId, sweep, trace,
+					() => runtime.tracePersistPending.length === 0 && runtime.traceFlushScanId !== scanId);
+				const banner = runtime.archiveBanner.succeeded('trace', app.records.error);
+				if (banner !== app.records.error) {
+					app.records.error = banner;
+					const lost = runtime.traceUploadFailures;
+					app.showMsg(`Scan archive is saving again; ${lost} sweep trace${lost === 1 ? ' of this scan was' : 's of this scan were'} not saved.`);
+				}
+			} catch (error) {
+				runtime.traceUploadFailures += 1;
+				if (runtime.traceFlushScanId === scanId) {
+					const remaining = runtime.tracePersistPending.filter(entry => entry.scanId !== scanId);
+					countUnsavedTraces(app, scanId, runtime.tracePersistPending.length - remaining.length);
+					runtime.tracePersistPending = remaining;
+				}
+				app.records.error = runtime.archiveBanner.failed('trace', `Could not archive sweep trace ${sweep} (${runtime.traceUploadFailures} not saved in this scan): ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+	} finally {
+		runtime.tracePersistDraining = false;
+	}
+}
+
 async function finishRecordedScan(app: AppInstance, status: 'complete' | 'stopped' | 'failed'): Promise<void> {
 	const scanId = app.sweep.scanId as string | null;
 	if (!scanId) return;
 	const runtime = runtimeFor(app);
-	queueCandidatePersist(app, scanId, []);
-	await runtime.candidatePersistQueue;
-	runtime.candidatePersistRetry.delete(scanId);
-	await runtime.tracePersistQueue;
+	runtime.traceFlushScanId = scanId;
+	try {
+		queueCandidatePersist(app, scanId, []);
+		await runtime.candidatePersistQueue;
+		runtime.candidatePersistRetry.delete(scanId);
+		await runtime.tracePersistQueue;
+	} finally {
+		if (runtime.traceFlushScanId === scanId) runtime.traceFlushScanId = null;
+	}
 	await receiverRecordsApi.finishScan(scanId, status);
+}
+
+async function stopActiveSweep(app: AppInstance, resumeReceiver: boolean, finalStatus: 'complete' | 'stopped' | 'failed'): Promise<boolean> {
+	const runtime = runtimeFor(app);
+	const shouldResume = resumeReceiver && app.sweep.returnToRx;
+	const wasActive = app.sweep.active;
+	let stopped = true;
+	let status = finalStatus;
+	app.sweep.active = false;
+	app.sweep.stopping = true;
+	app.sweep.stopPhase = 'rf';
+	try {
+		try {
+			await app.backend?.stopSweep();
+		} catch (error) {
+			// After an unplug the HackRF cannot confirm the RF stop, but the scan is over anyway.
+			if (!runtime.radioLost) throw error;
+			status = 'failed';
+		}
+		app.sweep.stopPhase = app.sweep.scanId ? 'archive' : 'finalize';
+		flushCandidateUpdate(app);
+		try {
+			await finishRecordedScan(app, status);
+		} catch (error) {
+			app.records.error = `Could not finalize scan record: ${error instanceof Error ? error.message : String(error)}`;
+		}
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		app.sweep.error = message;
+		app.showMsg(`Error stopping sweep: ${message}`);
+		stopped = false;
+	} finally {
+		app.sweep.stopping = false;
+		app.sweep.stopPhase = '';
+		app.sweep.starting = false;
+		app.sweep.active = !stopped && wasActive;
+		if (stopped) app.sweep.returnToRx = false;
+		runtime.stopRequested = false;
+		flushCandidateUpdate(app);
+	}
+	if (stopped && shouldResume && !runtime.radioLost && app.connected && app.remoteMode === 'none') await app.startStream();
+	return stopped;
 }
 
 async function loadAllCandidates(app: AppInstance): Promise<SweepCandidate[]> {
@@ -534,7 +649,7 @@ export const sweepMethods = {
 		const workspace = tabs[nextIndex];
 		const tab = (event.currentTarget as HTMLElement).querySelector<HTMLElement>(`[aria-controls="${workspace}-workspace"]`);
 		tab?.focus();
-		void this.selectWorkspace(workspace);
+		void this.requestWorkspace(workspace);
 	},
 
 	async stopSweepListening(this: AppInstance, startNewScan: boolean): Promise<boolean> {
@@ -567,7 +682,7 @@ export const sweepMethods = {
 	async returnToSpectrum(this: AppInstance) {
 		if (this.sweep.listenStarting) return;
 		if (!this.sweep.listening) {
-			await this.selectWorkspace('spectrum');
+			await this.requestWorkspace('spectrum');
 			return;
 		}
 		await this.stopSweepListening(true);
@@ -631,7 +746,6 @@ export const sweepMethods = {
 			runtime.config = config;
 			runtime.source = source;
 			runtime.lastSavedTraceSweep = 0;
-			runtime.tracePersistQueue = Promise.resolve();
 			runtime.traceUploadFailures = 0;
 			if (!this.records.settingsLoaded) await this.loadReceiverSettings();
 			this.sweep.scanId = null;
@@ -667,24 +781,9 @@ export const sweepMethods = {
 					this.sweep.progress.sweepCount = frame.sweepCount;
 					const addedWaterfallRow = currentRuntime.waterfallHistory.appendCompletedSweep(frame);
 					this.sweep.waterfallRows = currentRuntime.waterfallHistory.rowCount;
-					const traceScanId = scanId;
-					if (traceScanId && frame.sweepCount > currentRuntime.lastSavedTraceSweep) {
+					if (scanId && frame.sweepCount > currentRuntime.lastSavedTraceSweep) {
 						currentRuntime.lastSavedTraceSweep = frame.sweepCount;
-						const trace = encodeArchivedTrace(frame.average);
-						currentRuntime.tracePersistQueue = currentRuntime.tracePersistQueue.then(async () => {
-							try {
-								await receiverRecordsApi.saveTrace(traceScanId, frame.sweepCount, trace);
-								const banner = currentRuntime.archiveBanner.succeeded('trace', this.records.error);
-								if (banner !== this.records.error) {
-									this.records.error = banner;
-									const lost = currentRuntime.traceUploadFailures;
-									this.showMsg(`Scan archive is saving again; ${lost} sweep trace${lost === 1 ? ' of this scan was' : 's of this scan were'} not saved.`);
-								}
-							} catch (error) {
-								currentRuntime.traceUploadFailures += 1;
-								this.records.error = currentRuntime.archiveBanner.failed('trace', `Could not archive sweep trace ${frame.sweepCount} (${currentRuntime.traceUploadFailures} not saved in this scan): ${error instanceof Error ? error.message : String(error)}`);
-							}
-						});
+						queueTracePersist(this, scanId, frame.sweepCount, encodeArchivedTrace(frame.average));
 					}
 					if (this.sweep.visualization === 'spectrum' || addedWaterfallRow) this.drawSweepSpectrum();
 				}),
@@ -729,37 +828,25 @@ export const sweepMethods = {
 		}
 		if (!this.sweep.active && !this.sweep.starting) return !this.sweep.stopping;
 		if (this.sweep.stopping) return false;
-		const shouldResume = resumeReceiver && this.sweep.returnToRx;
-		const wasActive = this.sweep.active;
-		let stopped = true;
-		this.sweep.active = false;
-		this.sweep.stopping = true;
-		this.sweep.stopPhase = 'rf';
+		const stopping = stopActiveSweep(this, resumeReceiver, finalStatus);
+		runtime.stopInFlight = stopping;
 		try {
-			await this.backend?.stopSweep();
-			this.sweep.stopPhase = this.sweep.scanId ? 'archive' : 'finalize';
-			flushCandidateUpdate(this);
-			try {
-				await finishRecordedScan(this, finalStatus);
-			} catch (error) {
-				this.records.error = `Could not finalize scan record: ${error instanceof Error ? error.message : String(error)}`;
-			}
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			this.sweep.error = message;
-			this.showMsg(`Error stopping sweep: ${message}`);
-			stopped = false;
+			return await stopping;
 		} finally {
-			this.sweep.stopping = false;
-			this.sweep.stopPhase = '';
-			this.sweep.starting = false;
-			this.sweep.active = !stopped && wasActive;
-			if (stopped) this.sweep.returnToRx = false;
-			runtime.stopRequested = false;
-			flushCandidateUpdate(this);
+			if (runtime.stopInFlight === stopping) runtime.stopInFlight = null;
 		}
-		if (stopped && shouldResume && this.connected && this.remoteMode === 'none') await this.startStream();
-		return stopped;
+	},
+
+	/** The radio was unplugged or lost: end the scan even though its RF stop can no longer succeed. */
+	async stopSweepForLostRadio(this: AppInstance) {
+		const runtime = runtimeFor(this);
+		runtime.radioLost = true;
+		try {
+			if (runtime.stopInFlight) await runtime.stopInFlight;
+			if (this.sweep.active || this.sweep.starting) await this.stopSweep(false, 'failed');
+		} finally {
+			runtime.radioLost = false;
+		}
 	},
 
 	async handleSweepError(this: AppInstance, error: string) {

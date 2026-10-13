@@ -1,7 +1,7 @@
 import type { FormEvent, JSX } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Branding, CompassConfig, ConsoleConfig, GpsConfig, PolarSettings } from '../types';
-import { DEFAULT_API_TIMEOUT_MS, dryRunConfigPatch, getAdminStatus, getBranding, getCapabilities, loginAdmin, logoutAdmin, saveBranding, updateConsoleConfig } from '../api';
+import { dryRunConfigPatch, getAdminStatus, getBranding, getCapabilities, loginAdmin, logoutAdmin, saveBranding, updateConsoleConfig } from '../api';
 import type { ConsoleCapabilities } from '../api';
 import { DEFAULT_FALLBACK_COORDINATE, DEFAULT_GPS_CONFIG, manualGpsOverrideFromInput } from '../lib/map';
 import { DEFAULT_COMPASS_CONFIG } from '../lib/polar';
@@ -10,6 +10,7 @@ import { adminErrorKey, gpsInputErrorKey, normalizeConnectionDraft, parseBaseRev
 import { MAX_LOGO_BYTES, pngDataUrl, pngLogoErrorKey, validatePngLogo } from '../lib/pngLogo';
 import { DEFAULT_MQTT_TRANSPORT, DEFAULT_MQTT_WS_PATH, mqttTransportFields } from '../lib/mqttMonitor';
 import { MAX_COMPASS_OFFSET_DEG, saveCompassConfig, saveGpsConfig } from '../lib/sourceConfigStorage';
+import { errorNotice } from '../lib/errorNotice';
 import { useI18n } from '../lib/i18n';
 import type { MessageKey, Translate } from '../lib/i18n';
 import { KeyValue, Metric, Panel, SectionHeading, StatusBadge } from '../components/ui';
@@ -32,8 +33,7 @@ function statusText(status: Status, t: Translate): string {
 }
 
 function errorStatus(error: unknown, fallback: MessageKey): Status {
-  if (error instanceof Error && error.name === 'TimeoutError') return { tone: 'bad', key: 'app.readError.timedOut', vars: { seconds: DEFAULT_API_TIMEOUT_MS / 1000 } };
-  return error instanceof Error && error.message ? { tone: 'bad', text: error.message } : { tone: 'bad', key: fallback };
+  return { tone: 'bad', ...errorNotice(error, fallback) };
 }
 
 function adminStatusFor(error: unknown, fallback: MessageKey): Status {
@@ -123,7 +123,7 @@ export function ConfigurationPage({
       setAdminAuthenticated(result.authenticated);
       setAdminStatus({ tone: result.authenticated ? 'good' : 'neutral', key: result.authenticated ? 'config.adminActive' : 'config.adminClosed' });
     }).catch((error: unknown) => {
-      if (active) setAdminStatus(error instanceof Error && error.message ? { tone: 'warn', text: error.message } : { tone: 'warn', key: 'config.adminUnavailable' });
+      if (active) setAdminStatus({ tone: 'warn', ...errorNotice(error, 'config.adminUnavailable') });
     });
     return () => { active = false; };
   }, []);

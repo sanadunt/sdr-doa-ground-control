@@ -2,8 +2,8 @@ import type { JSX } from 'react';
 import { Suspense, memo, useMemo } from 'react';
 import type { CompassConfig, GpsConfig, MapCoordinate, PolarSettings, TelemetrySnapshot } from '../types';
 import type { SimulationSettings } from '../lib/simulation';
-import { holdStationCoordinate, resolveGpsSource } from '../lib/map';
-import { overviewDoaStatus } from '../lib/doaStatus';
+import { gpsReportsNoFix, holdStationCoordinate, resolveGpsSource } from '../lib/map';
+import { doaStatusTextKey, overviewDoaStatus } from '../lib/doaStatus';
 import { lazyWithRetry } from '../lib/lazyRetry';
 import { compassOffsetSourceLabel, polarSettings, rememberDataOutCompass, resolveCompassSource } from '../lib/polar';
 import type { DataOutCompassSettings } from '../lib/polar';
@@ -48,7 +48,7 @@ function OverviewPageView({
   const { t } = useI18n();
   const evidence = localSnapshotFresh ? snapshot : null;
   const gpsCoordinate = resolveGpsSource(evidence, gpsConfig).coordinate;
-  const station = simulation ? null : holdStationCoordinate(lastLiveStation, gpsCoordinate, localSnapshotFresh && snapshot?.status?.available === true, gpsConfig.source);
+  const station = simulation ? null : holdStationCoordinate(lastLiveStation, gpsCoordinate, gpsReportsNoFix(snapshot, localSnapshotFresh), gpsConfig.source);
   if (station) lastLiveStation = station.lastLive;
   dataOutCompassMemory = rememberDataOutCompass(dataOutCompassMemory, snapshot);
   const compass = resolveCompassSource(snapshot, { figType: compassConfig.manualFigType, compassOffset: compassConfig.manualCompassOffset }, compassConfig, dataOutCompassMemory);
@@ -78,12 +78,12 @@ function OverviewPageView({
 
   return (
     <div className="page page-overview" aria-label={t('route.overview')}>
-      <h1 className="visually-hidden">{t('route.overview')}</h1>
+      <h1 className="visually-hidden" data-route-focus tabIndex={-1}>{t('route.overview')}</h1>
       <DoaReadout snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} coordinate={readoutCoordinate} positionHeld={station?.held === true} settings={settings} offsetSource={offsetSource} offsetVerified={offsetVerified} />
       <div className="overview-spatial">
         <LoadErrorBoundary variant="map">
           <Suspense fallback={<MapPlaceholder />}>
-            <TacticalMap coordinate={coordinate} snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} compassOffset={compassOffset} orientationVerified={offsetVerified} gpsSource={gpsConfig.source} doaReady={doa.shown} />
+            <TacticalMap coordinate={coordinate} snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} compassOffset={compassOffset} orientationVerified={offsetVerified} gpsSource={gpsConfig.source} doaReady={doa.shown} doaHeldCode={doa.shown ? undefined : doa.code} doaHeldText={doa.shown ? undefined : t(doaStatusTextKey(doa.reason))} />
           </Suspense>
         </LoadErrorBoundary>
         <PolarPanel snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} compassSettings={settings} offsetSource={offsetSource} />

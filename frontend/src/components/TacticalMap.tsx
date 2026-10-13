@@ -2,11 +2,10 @@ import { Component, useEffect, useMemo, useRef, useState } from 'react';
 import type { JSX, ReactNode } from 'react';
 import * as maplibregl from 'maplibre-gl';
 import type { Map as MapLibreMap, GeoJSONSource, MapMouseEvent, MapSourceDataEvent, RasterTileSource } from 'maplibre-gl';
-import 'maplibre-gl/dist/maplibre-gl.css';
 import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import type { Feature, FeatureCollection, LineString, Point, Polygon } from 'geojson';
 import type { GpsSourceMode, MapCoordinate, TelemetrySnapshot } from '../types';
-import { OSM_TILE_TEMPLATES, basemapAfterTile, holdStationCoordinate, initialBasemapHealth, nextBasemapHost, type BasemapHealth } from '../lib/map';
+import { OSM_TILE_TEMPLATES, basemapAfterTile, gpsReportsNoFix, holdStationCoordinate, initialBasemapHealth, nextBasemapHost, shouldReframeStation, type BasemapHealth, type StationFraming } from '../lib/map';
 import {
   DEFAULT_DOA_OVERLAY_SETTINGS,
   EARTH_RADIUS_M,
@@ -70,7 +69,7 @@ interface CameraMemory {
   zoom: number;
   bearing: number;
   pitch: number;
-  framedSource: MapCoordinate['source'] | null;
+  framing: StationFraming | null;
   operatorMoved: boolean;
 }
 
@@ -154,16 +153,20 @@ export interface TacticalMapProps {
   gpsSource?: GpsSourceMode;
   /** Single gate for DoA geometry, applied on top of vector freshness. */
   doaReady?: boolean;
+  /** Untranslated DoA status code while doaReady is false, e.g. CONFLICT. */
+  doaHeldCode?: string;
+  /** Translated cause while doaReady is false; the map names it instead of a generic vector notice. */
+  doaHeldText?: string;
 }
 
-function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true }: TacticalMapProps): JSX.Element {
+function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText }: TacticalMapProps): JSX.Element {
   const { t, lang } = useI18n();
   const hostRef = useRef<HTMLDivElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const stationMarkerRef = useRef<maplibregl.Marker | null>(null);
   const stationPopupRef = useRef<maplibregl.Popup | null>(null);
-  const framedSourceRef = useRef<MapCoordinate['source'] | null>(null);
+  const framingRef = useRef<StationFraming | null>(null);
   const operatorMovedRef = useRef(false);
   const styleReadyRef = useRef(false);
   const appliedDataRef = useRef<Partial<Record<SourceId, OverlayFeatureCollection>>>({});
@@ -179,9 +182,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   settingsRef.current = settings;
 
   const fresh = localSnapshotFresh !== false;
-  // Only a fresh read with a status record can say the node has no fix.
-  const gpsAuthoritative = fresh && snapshot?.status?.available === true;
-  const station = useMemo(() => holdStationCoordinate(lastLiveStation, coordinate, gpsAuthoritative, gpsSource), [coordinate, gpsAuthoritative, gpsSource]);
+  const noFixReported = gpsReportsNoFix(snapshot, fresh);
+  const station = useMemo(() => holdStationCoordinate(lastLiveStation, coordinate, noFixReported, gpsSource), [coordinate, noFixReported, gpsSource]);
   useEffect(() => { lastLiveStation = station.lastLive; }, [station.lastLive]);
   const stationCoordinate = station.coordinate;
   const coordinateRef = useRef(stationCoordinate);
@@ -192,7 +194,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const values = doaReady && fresh && Array.isArray(csv.angular_power_db) && csv.angular_power_db.length === 360 ? csv.angular_power_db : null;
   const offset = Number.isFinite(compassOffset) ? compassOffset : 0;
   // theta_0 is the array-frame angle; only its geographic bearing is drawn or reported.
-  const theta = values ? numberOrNull(csv.canonical_angle_deg) ?? numberOrNull(csv.angular_peak_index) : null;
+  const theta = values ? numberOrNull(csv.canonical_angle_deg) : null;
   const bearing = theta === null ? null : geographicBearingForBin(theta, offset);
   // Only the scale fields matter here; depending on all of g would rebuild geometry on paint-only changes.
   const scale = useMemo(() => effectiveDbScale(values, g, simulation), [values, simulation, g.dbScale, g.minDb, g.maxDb, g.thresholdDb]);
@@ -223,7 +225,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const frameStation = (map: MapLibreMap, target: MapCoordinate, durationMs = 0) => {
     const reach = Math.max(settingsRef.current.maxDistanceM, settingsRef.current.lobeDistanceM);
     map.fitBounds(overlayBounds(target, reach), { padding: FRAMING_PADDING, maxZoom: MAX_FRAMING_ZOOM, duration: durationMs });
-    framedSourceRef.current = target.source;
+    framingRef.current = { source: target.source, selection: gpsSource };
     operatorMovedRef.current = false;
   };
   const frameStationRef = useRef(frameStation);
@@ -273,7 +275,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       return undefined;
     }
     mapRef.current = map;
-    framedSourceRef.current = memory?.framedSource ?? null;
+    framingRef.current = memory?.framing ?? null;
     operatorMovedRef.current = memory?.operatorMoved ?? false;
     setMapState('initializing');
 
@@ -351,7 +353,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       disposed = true;
       window.clearTimeout(workerWatchdog);
       window.clearInterval(basemapCheck);
-      cameraMemory = { center: map.getCenter().toArray(), zoom: map.getZoom(), bearing: map.getBearing(), pitch: map.getPitch(), framedSource: framedSourceRef.current, operatorMoved: operatorMovedRef.current };
+      cameraMemory = { center: map.getCenter().toArray(), zoom: map.getZoom(), bearing: map.getBearing(), pitch: map.getPitch(), framing: framingRef.current, operatorMoved: operatorMovedRef.current };
       map.off('styledata', onStyleData);
       map.off('error', onError);
       map.off('sourcedata', onSourceData);
@@ -400,7 +402,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       frame = window.requestAnimationFrame(() => {
         frame = 0;
         const target = coordinateRef.current;
-        if (target && framedSourceRef.current !== null && !operatorMovedRef.current) frameStationRef.current(map, target);
+        if (target && framingRef.current?.source === target.source && !operatorMovedRef.current) frameStationRef.current(map, target);
       });
     });
     observer.observe(host);
@@ -411,7 +413,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   useEffect(() => {
     const map = mapRef.current;
     const target = coordinateRef.current;
-    if (map && target && framedSourceRef.current !== null && !operatorMovedRef.current) frameStationRef.current(map, target);
+    if (map && target && framingRef.current?.source === target.source && !operatorMovedRef.current) frameStationRef.current(map, target);
   }, [g.maxDistanceM, g.lobeDistanceM]);
 
   // Push only the sources whose collections changed since the last update.
@@ -451,10 +453,10 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     map.setPaintProperty('doa-lobe-fill', 'fill-opacity', settings.lobeOpacity);
   }, [styleReady, settings.heatmapVisible, settings.heatStyle, settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.bearingVisible, settings.heatPalette, settings.heatOpacity, settings.heatIntensity, settings.heatBlur, settings.lobeOpacity]);
 
-  // Station marker, popup, and camera framing. The camera is framed on the
-  // first position and again when the position source changes (for example
-  // from the fallback to a live fix), unless the operator moved the camera and
-  // the station is still in view. Ordinary data updates never move it.
+  // Station marker, popup, and camera framing. shouldReframeStation decides
+  // when a new position frames the camera; an operator-moved camera that still
+  // shows the station is left alone. Ordinary data updates and a lost GPS fix
+  // only move the marker.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !styleReady) return;
@@ -463,12 +465,12 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       stationPopupRef.current = null;
       stationMarkerRef.current?.remove();
       stationMarkerRef.current = null;
-      framedSourceRef.current = null;
+      framingRef.current = null;
       return;
     }
-    if (framedSourceRef.current !== stationCoordinate.source) {
+    if (shouldReframeStation(framingRef.current, stationCoordinate.source, gpsSource)) {
       if (!operatorMovedRef.current || !stationInView(map, stationCoordinate)) frameStationRef.current(map, stationCoordinate);
-      framedSourceRef.current = stationCoordinate.source;
+      framingRef.current = { source: stationCoordinate.source, selection: gpsSource };
     }
     if (!stationMarkerRef.current) {
       const markerElement = document.createElement('button');
@@ -488,7 +490,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       `<div class="station-popup-content"><strong>${t('map.stationTitle')}</strong><dl><dt>${t('map.popupSource')}</dt><dd>${stationCoordinate.source}${station.held ? ' · STALE' : ''}</dd><dt>${t('map.popupPosition')}</dt><dd>${stationCoordinate.latitude.toFixed(6)}°, ${stationCoordinate.longitude.toFixed(6)}°</dd><dt>${t('map.popupBearing')}</dt><dd>${bearing === null ? unavailable : `${formatBearing(bearing, 1)}°`}</dd><dt>${t('map.popupTheta')}</dt><dd>${theta === null ? unavailable : `${formatBearing(theta, 1)}°`}</dd><dt>${t('map.popupOffset')}</dt><dd>${Number(offset.toFixed(1))}°</dd><dt>${t('map.popupHalfPower')}</dt><dd>${geometry.halfPower ? `${geometry.halfPower.widthDeg}°` : unavailable}</dd><dt>${t('map.popupVector')}</dt><dd>${values ? t('map.popupBins') : unavailable}</dd></dl><small>${t('map.popupNote')}</small></div>`,
     );
     stationMarkerRef.current.setLngLat([stationCoordinate.longitude, stationCoordinate.latitude]);
-  }, [styleReady, stationCoordinate, station.held, bearing, theta, offset, values, geometry.halfPower, t]);
+  }, [styleReady, stationCoordinate, gpsSource, station.held, bearing, theta, offset, values, geometry.halfPower, t]);
 
   // Text labels as DOM markers: the inline style has no glyph source, and the
   // CSP keeps the console from fetching remote fonts for symbol layers.
@@ -658,19 +660,22 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     map.easeTo({ bearing: 0, pitch: 0, duration: 0 });
     frameStation(map, current, reduced ? 0 : 350);
   };
-  const dataLabel = values ? t('map.vectorReady', { bearing: bearing === null ? t('map.bearingUnavailable') : t('map.bearingReference', { deg: formatBearing(bearing, 0) }) }) : t('map.noVector');
+  const held = !doaReady && doaHeldText !== undefined;
+  const dataLabel = values
+    ? t('map.vectorReady', { bearing: bearing === null ? t('map.bearingUnavailable') : t('map.bearingReference', { deg: formatBearing(bearing, 0) }) })
+    : held && doaHeldCode ? t('map.doaHeld', { code: doaHeldCode }) : t('map.noVector');
   const notices: string[] = [];
   if (mapState === 'no-webgl') notices.push(t('map.noWebgl'));
   if (mapState === 'gl-lost') notices.push(t('map.glLost'));
   if (mapState === 'worker-stalled') notices.push(t('map.workerStalled'));
   if (mapState === 'error') notices.push(t('map.rendererError'));
   if (basemapUnavailable && mapState !== 'no-webgl') notices.push(`${t('map.basemapUnavailable')} · ${t('map.basemapUnavailableDetail')}`);
-  if (stationCoordinate && !values) notices.push(t('map.overlayCleared'));
+  if (stationCoordinate && !values) notices.push(held ? t('map.overlayHeld', { reason: doaHeldText }) : t('map.overlayCleared'));
   if (values && !orientationVerified) notices.push(t('map.orientationReference', { offset: Number(offset.toFixed(1)) }));
   return <section className="panel map-panel">
     <div className={`map-workspace${controlsOpen ? ' map-workspace-settings-open' : ''}`}>
       {controlsOpen ? <OverlayControls settings={settings} scale={scale} onChange={updateSettings} onReset={() => updateSettings(DEFAULT_DOA_OVERLAY_SETTINGS)} onClose={closeControls} /> : null}
-      <div className="map-frame" role="application" aria-label={t('map.appAria')} tabIndex={-1} data-route-focus>
+      <div className="map-frame" role="application" aria-label={t('map.appAria')} tabIndex={-1}>
         <div className="maplibre-host" ref={hostRef} />
         <canvas ref={overlayCanvasRef} className="doa-overlay-canvas" aria-hidden="true" hidden={!fallbackActive} />
         <div className="map-toolbar">

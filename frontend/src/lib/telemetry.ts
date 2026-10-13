@@ -31,14 +31,6 @@ export function formatNumber(value: unknown, digits = 1): string {
   return number === null ? 'N/A' : number.toFixed(digits);
 }
 
-export function formatAge(freshness: Freshness | null | undefined): string {
-  if (!freshness) return 'clock unverified';
-  if (freshness.age_ms === null || freshness.age_ms === undefined || typeof freshness.age_ms !== 'number' || !Number.isFinite(freshness.age_ms) || freshness.age_ms < 0) {
-    return 'clock unverified';
-  }
-  return `${(freshness.age_ms / 1000).toFixed(1)} s`;
-}
-
 /**
  * A view that parsed with a usable canonical angle. A quarantined view keeps
  * available=true but carries normalization_error and no angle.
@@ -79,10 +71,27 @@ export function polarDataReady(snapshot: TelemetrySnapshot | null | undefined): 
   return nativeViewsReady(snapshot) && completeVector(csv);
 }
 
-/** The node reported a DAQ sync state other than PASS (FAIL or UNKNOWN). */
+/**
+ * DAQ sync state of a readable status record, or null when there is none to
+ * judge. A record without daq_health counts as UNKNOWN, as it does for the
+ * collector's gate: the collector always reports it.
+ */
+export function daqSyncState(snapshot: TelemetrySnapshot | null | undefined): 'PASS' | 'FAIL' | 'UNKNOWN' | null {
+  if (snapshot?.status?.available !== true) return null;
+  const health = snapshot.status.daq_health;
+  if (health === 'PASS') return 'PASS';
+  if (typeof health !== 'string' || health.trim() === '' || health === 'UNKNOWN') return 'UNKNOWN';
+  return 'FAIL';
+}
+
+/** The node reported failed DAQ synchronization. */
 export function daqFailed(snapshot: TelemetrySnapshot | null | undefined): boolean {
-  const health = snapshot?.status?.daq_health;
-  return typeof health === 'string' && health !== '' && health !== 'PASS';
+  return daqSyncState(snapshot) === 'FAIL';
+}
+
+/** The node's DAQ sync state is unknown: some sync flags or daq_health are missing. */
+export function daqUnknown(snapshot: TelemetrySnapshot | null | undefined): boolean {
+  return daqSyncState(snapshot) === 'UNKNOWN';
 }
 
 export function adcOverdriven(snapshot: TelemetrySnapshot | null | undefined): boolean {
@@ -130,7 +139,7 @@ export function deriveDataState(snapshot: TelemetrySnapshot | null | undefined, 
   if (error) return 'ERROR';
   if (!snapshot) return 'LOADING';
   if (snapshot.status?.available !== true) return 'UNAVAILABLE';
-  if (daqFailed(snapshot) || adcOverdriven(snapshot)) return 'DEGRADED';
+  if (daqSyncState(snapshot) !== 'PASS' || adcOverdriven(snapshot)) return 'DEGRADED';
   const views = [candidate(snapshot, 'csv'), candidate(snapshot, 'xml')];
   const parsed = views.filter(parsedCandidate);
   if (parsed.length === 0) return doaReadsFailed(snapshot) ? 'UNAVAILABLE' : 'INVALID';

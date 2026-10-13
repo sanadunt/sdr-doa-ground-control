@@ -76,7 +76,7 @@ class RdfNodeV2Telemetry:
         self.prefix = f"sdr/v2/{node_id}/"
         self._topics = {suffix: self._empty() for suffix in RDF_NODE_V2_SUFFIXES}
         self._counts = {suffix: 0 for suffix in RDF_NODE_V2_SUFFIXES}
-        self._received = self._valid = self._invalid = 0
+        self._received = self._valid = self._invalid = self._cleared = 0
         self._last_received: int | None = None
         self._seq: dict[str, int] = {}
         self._session: tuple[str, str | None, str | None] | None = None
@@ -276,6 +276,13 @@ class RdfNodeV2Telemetry:
             self._seq.clear()
             self._angular_last_q = None
 
+    def _forget_revision_from(self, suffix: str) -> None:
+        """Drop the revision that only this topic's cleared value established."""
+        if suffix == "config/reported":
+            self._revision, self._revision_known = None, False
+        elif suffix == "state":
+            self._state_revision, self._state_revision_known = None, False
+
     def _set_session(self, data: dict[str, Any]) -> bool:
         sid = data["sid"].lower()
         if "boot" in data:
@@ -384,9 +391,23 @@ class RdfNodeV2Telemetry:
             self._topics[suffix] = {"status": status, "received_at_ms": received_at_ms,
                                     "qos": qos, "retained": retained, "payload": value, "error": error}
 
+        if not payload and retained:
+            # A zero-length retained publish is how a publisher removes the
+            # broker's retained value: "no current value", not malformed data.
+            # The QoS/retain policy does not apply, since clearing a value
+            # retained by mistake on a telemetry topic is the point.
+            self._cleared += 1
+            self._forget_revision_from(suffix)
+            store("UNAVAILABLE", error="RETAINED_CLEARED")
+            self._topics[suffix]["cleared"] = True
+            return
         if qos != expected_qos or retained != should_retain:
             self._invalid += 1
             store("INVALID", error="BROKER_POLICY")
+            return
+        if not payload:
+            self._invalid += 1
+            store("INVALID", error="EMPTY_PAYLOAD")
             return
         if suffix == "telemetry/angular":
             value, error, pending = self._angular(payload, received_at_ms)
@@ -533,5 +554,5 @@ class RdfNodeV2Telemetry:
                     (self._state_revision_known and self._state_revision != revision)):
                 entry["status"], entry["error"] = "INCONSISTENT", "HEALTH_MISMATCH"
         return {"node_id": self.node_id, "now_ms": now_ms, "received": self._received, "valid": self._valid,
-                "invalid": self._invalid, "last_received_at_ms": self._last_received,
+                "invalid": self._invalid, "cleared": self._cleared, "last_received_at_ms": self._last_received,
                 "topic_counts": dict(self._counts), "topics": topics}

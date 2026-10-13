@@ -4,6 +4,7 @@ import {
   lastMessageAgeMs,
   mqttDetailRecords,
   mqttKindRows,
+  mqttTargetFromConfig,
   mqttTransportFields,
   normalizeMqttSnapshot,
   normalizeRdfNodeSnapshot,
@@ -11,7 +12,7 @@ import {
   rdfTopicRows,
   sanitizeMqttPayload,
 } from './mqttMonitor';
-import { normalizeConsoleConfig } from '../api';
+import { mqttConnectPath, normalizeConsoleConfig } from '../api';
 
 const NOW = 1_790_668_800_000;
 const READ_AT = 5_000_000;
@@ -201,6 +202,15 @@ describe('MQTT transport settings', () => {
     expect(() => normalizeConsoleConfig({ ...base, mqtt_transport: 'udp' })).toThrow('MQTT transport');
     expect(() => normalizeConsoleConfig({ ...base, mqtt_ws_path: 'mqtt' })).toThrow('WebSocket path');
   });
+
+  it('reconnects with the configured transport and WebSocket path', () => {
+    const base = { mqtt_host: '127.0.0.1', mqtt_port: 18884 };
+    expect(mqttConnectPath(mqttTargetFromConfig({ ...base, mqtt_transport: 'tcp', mqtt_ws_path: '/ws' }))).toBe('/api/mqtt/connect?host=127.0.0.1&port=18884&transport=tcp');
+    expect(mqttConnectPath(mqttTargetFromConfig({ ...base, mqtt_transport: 'websockets', mqtt_ws_path: '/ws' }))).toBe('/api/mqtt/connect?host=127.0.0.1&port=18884&transport=websockets&ws_path=%2Fws');
+    // A console that did not report them keeps its saved values.
+    expect(mqttConnectPath(mqttTargetFromConfig(base))).toBe('/api/mqtt/connect?host=127.0.0.1&port=18884');
+    expect(mqttConnectPath({ host: '::1', port: 9001, transport: 'websockets' })).toBe('/api/mqtt/connect?host=%3A%3A1&port=9001&transport=websockets');
+  });
 });
 
 // Shape of GET /api/mqtt/rdf-node from tools/rdf_node_mqtt_v2.py.
@@ -223,6 +233,7 @@ function rdfBody(): Record<string, unknown> {
       'telemetry/angular': { status: 'FRESH', received_at_ms: NOW - 500, qos: 0, retained: false, error: null, payload: { encoding: 'q16', raw_doa_deg: 137.4, revision: 7, values: new Array(360).fill(12.5) } },
       availability: { status: 'INVALID', received_at_ms: NOW - 900, qos: 1, retained: true, error: 'bad error text', payload: null },
       state: { ...empty, status: 'SOMETHING_NEW' },
+      capabilities: { status: 'UNAVAILABLE', received_at_ms: NOW - 800, qos: 1, retained: true, error: 'RETAINED_CLEARED', cleared: true, payload: null },
     },
   };
 }
@@ -247,6 +258,13 @@ describe('RDF Node v2 snapshot', () => {
     expect(angular.summary).toEqual([['encoding', 'q16'], ['raw_doa_deg', '137.4'], ['revision', '7']]);
     const health = rows.find((row) => row.suffix === 'telemetry/health')!;
     expect(health.summary).toContainEqual(['temp', '61.4']);
+  });
+
+  it('labels a retained clear as CLEARED instead of a missing value', () => {
+    const row = rdfTopicRows(snapshot, READ_AT).find((item) => item.suffix === 'capabilities')!;
+    expect(snapshot.topics.capabilities.cleared).toBe(true);
+    expect(row).toMatchObject({ status: 'CLEARED', error: 'RETAINED_CLEARED' });
+    expect(rdfTopicRows(snapshot, READ_AT).find((item) => item.suffix === 'state')!.status).toBe('UNAVAILABLE');
   });
 
   it('stops trusting FRESH when the reads stop', () => {

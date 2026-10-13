@@ -77,6 +77,21 @@ describe('MessageMonitorPage', () => {
     expect(markup).not.toContain('metric-grid five');
   });
 
+  it('shows a failed monitor read as ERROR, not as a monitor that is switched off', () => {
+    const error = translate('en', 'app.readError.timedOut', { seconds: 8 });
+    const failedMarkup = render(<MessageMonitorPage mqtt={null} mqttError={error} config={CONFIG} onMqttChanged={() => undefined} />);
+    const failed = text(failedMarkup);
+    expect(failed).toContain(translate('en', 'monitor.stateUnknown', { error }));
+    expect(failed).toContain(`${translate('en', 'monitor.connection')} ERROR ${error}`);
+    expect(failed).not.toContain(translate('en', 'monitor.noError'));
+    expect(failed).not.toMatch(/\bOFF\b/);
+    expect(failedMarkup).toContain('class="status-text-bad"');
+
+    const off = text(render(<MessageMonitorPage mqtt={null} config={CONFIG} onMqttChanged={() => undefined} />));
+    expect(off).toContain(`${translate('en', 'monitor.connection')} OFF ${translate('en', 'monitor.noError')}`);
+    expect(off).not.toContain('ERROR');
+  });
+
   it('renders in Indonesian', () => {
     const id = text(render(<MessageMonitorPage mqtt={SNAPSHOT} config={CONFIG} onMqttChanged={() => undefined} />, 'id'));
     expect(id).toContain('MQTT lewat TCP');

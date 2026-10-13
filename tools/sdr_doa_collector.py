@@ -344,8 +344,9 @@ def fetch_resource(
 ) -> FetchedResource:
     """Fetch one known resource with a bounded read-only GET.
 
-    ``timeout_seconds`` bounds every socket operation and the whole request,
-    so a server that trickles bytes cannot hold the read open indefinitely.
+    ``timeout_seconds`` bounds every socket operation, and the body read as a
+    whole, so a server that trickles body bytes cannot hold the read open.
+    The status line and headers are bounded per socket operation only.
     """
     allowed = DEFAULT_ALLOWED_DATA_HOSTS if allowed_hosts is None else allowed_hosts
     try:
@@ -395,12 +396,16 @@ def fetch_resource(
                     pass
             chunks: List[bytes] = []
             total = 0
+            # read() keeps calling recv() until it has n bytes, so a server
+            # sending one byte at a time never reaches the deadline check.
+            # read1() returns after one recv().
+            read_some = getattr(response, "read1", None) or response.read
             while True:
                 remaining = request_deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError("request time budget exhausted")
                 _limit_socket_timeout(response, remaining)
-                chunk = response.read(min(16 * 1024, max_body_bytes - total + 1))
+                chunk = read_some(min(16 * 1024, max_body_bytes - total + 1))
                 if not chunk:
                     break
                 total += len(chunk)
@@ -1087,11 +1092,14 @@ class NodeProgressTracker:
             if entry is None:
                 entry = {"values": {}, "changed_at": {}, "samples": 0}
             regressed: List[str] = []
+            changed: List[str] = []
             for name, value in counters.items():
                 previous = entry["values"].get(name)
                 if previous is None or value != previous:
-                    if previous is not None and value < previous:
-                        regressed.append(name)
+                    if previous is not None:
+                        changed.append(name)
+                        if value < previous:
+                            regressed.append(name)
                     entry["values"][name] = value
                     entry["changed_at"][name] = observed_monotonic
             for name in [name for name in entry["values"] if name not in counters]:
@@ -1108,12 +1116,20 @@ class NodeProgressTracker:
             for name, changed in changed_at.items()
         }
         stalled = sorted(name for name, age in unchanged_for_ms.items() if age > max_stall_ms)
-        state = "FIRST_SAMPLE" if first_sample else ("STALLED" if stalled else "ADVANCING")
+        # UNCHANGED: nothing moved since the previous read, but not for long
+        # enough to call the node stalled. It is not evidence of freshness.
+        if first_sample:
+            state = "FIRST_SAMPLE"
+        elif stalled:
+            state = "STALLED"
+        else:
+            state = "ADVANCING" if changed else "UNCHANGED"
         return (
             {
                 "state": state,
                 "stalled": bool(stalled),
                 "stalled_counters": stalled,
+                "changed_counters": sorted(changed),
                 "unchanged_for_ms": unchanged_for_ms,
                 "regressed_counters": sorted(regressed),
                 "max_stall_ms": int(max_stall_ms),
@@ -1140,6 +1156,7 @@ def _untracked_progress(state: str, max_stall_ms: int) -> Dict[str, Any]:
         "state": state,
         "stalled": False,
         "stalled_counters": [],
+        "changed_counters": [],
         "unchanged_for_ms": {},
         "regressed_counters": [],
         "max_stall_ms": int(max_stall_ms),
@@ -1265,8 +1282,20 @@ def _select_csv_row(
     return selected
 
 
+def _finite_or_none(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+        return float(value)
+    return None
+
+
 def _signal_quality(status: Mapping[str, Any], candidates: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
-    """Summarize ADC overdrive, SNR and native PAPR without remapping units."""
+    """Summarize ADC overdrive, SNR and native PAPR without remapping units.
+
+    Upstream rewrites the DoA files only when a signal passes squelch, so a
+    parsed view can hold an old frame. Only fresh views count here; a stale
+    view's values are reported under ``last_doa_record`` and never set the
+    state, so status.json alone decides overdrive between DoA records.
+    """
     active: List[str] = []
     reported: List[str] = []
     safe = status.get("safe") if status.get("available") is True and isinstance(status.get("safe"), Mapping) else {}
@@ -1276,10 +1305,32 @@ def _signal_quality(status: Mapping[str, Any], candidates: Mapping[str, Mapping[
         reported.append("status")
         if status_flag:
             active.append("status")
-    xml_candidate = candidates.get("xml", {})
-    xml_available = xml_candidate.get("available") is True
+
+    current: Dict[str, Mapping[str, Any]] = {}
+    last_doa_record: Dict[str, Dict[str, Any]] = {}
+    for name in ("csv", "xml"):
+        candidate = candidates.get(name, {})
+        if candidate.get("available") is not True:
+            continue
+        freshness = candidate.get("freshness") if isinstance(candidate.get("freshness"), Mapping) else {}
+        if freshness.get("fresh") is True:
+            current[name] = candidate
+            continue
+        record: Dict[str, Any] = {
+            "timestamp_ms": candidate.get("timestamp_ms"),
+            "age_ms": freshness.get("age_ms"),
+            "fresh": freshness.get("fresh"),
+            "confidence_metric_db": _finite_or_none(candidate.get("confidence_metric_db")),
+        }
+        if name == "xml":
+            flag = candidate.get("adc_overdrive_active")
+            record["adc_overdrive_active"] = flag if isinstance(flag, bool) else None
+            record["snr_db"] = _finite_or_none(candidate.get("snr_db"))
+        last_doa_record[name] = record
+
+    xml_candidate = current.get("xml", {})
     channel_mask: Optional[int] = None
-    if xml_available:
+    if xml_candidate:
         xml_flag = xml_candidate.get("adc_overdrive_active")
         if isinstance(xml_flag, bool):
             reported.append("xml")
@@ -1287,15 +1338,7 @@ def _signal_quality(status: Mapping[str, Any], candidates: Mapping[str, Mapping[
                 active.append("xml")
         mask = xml_candidate.get("adc_overdrive_channel_mask")
         channel_mask = mask if isinstance(mask, int) and not isinstance(mask, bool) else None
-    snr = xml_candidate.get("snr_db") if xml_available else None
-    snr_db = float(snr) if isinstance(snr, (int, float)) and not isinstance(snr, bool) and math.isfinite(snr) else None
-
-    def metric(name: str) -> Optional[float]:
-        candidate = candidates.get(name, {})
-        value = candidate.get("confidence_metric_db") if candidate.get("available") is True else None
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
-            return float(value)
-        return None
+    snr_db = _finite_or_none(xml_candidate.get("snr_db"))
 
     noise_source = daq_status.get("noise_source_enabled")
     dropped = safe.get("daq_num_dropped_frames")
@@ -1308,8 +1351,11 @@ def _signal_quality(status: Mapping[str, Any], candidates: Mapping[str, Mapping[
         "snr_db": snr_db,
         "snr_source": "xml" if snr_db is not None else None,
         "snr_unit": "dB_native_unverified",
-        "confidence_metric_db": {"csv": metric("csv"), "xml": metric("xml")},
+        "confidence_metric_db": {
+            name: _finite_or_none(current.get(name, {}).get("confidence_metric_db")) for name in ("csv", "xml")
+        },
         "confidence_metric_unit": "dB_papr_unmapped",
+        "last_doa_record": last_doa_record,
         "noise_source_enabled": noise_source if isinstance(noise_source, bool) else None,
         "daq_num_dropped_frames": dropped if isinstance(dropped, int) and not isinstance(dropped, bool) else None,
     }
@@ -1606,6 +1652,18 @@ def collect(
     angle_invalid = native_consistency.get("angle_invalid") is True or any(
         "normalization_error" in candidate for candidate in candidates.values()
     )
+    # Both views were read, but from different frames (or outside the pair
+    # window), so their angles were never cross-checked. Display may still use
+    # such a pair; publication may not rely on views that were not compared.
+    both_views_parsed = all(
+        candidates.get(view, {}).get("available") is True and "normalization_error" not in candidates.get(view, {})
+        for view in ("csv", "xml")
+    )
+    native_angle_unchecked = (
+        both_views_parsed
+        and not angle_invalid
+        and native_consistency.get("angle_checked") is not True
+    )
 
     gate_checks = {
         "status_available": status_available,
@@ -1622,8 +1680,12 @@ def collect(
         "native_views_consistent": native_consistency.get("comparable") is False
         or native_consistency.get("conflict") is False,
         "angular_peak_consistent": angular_peak_consistent,
+        "native_angle_checked": not native_angle_unchecked,
     }
     publication_ready = all(value is True for value in gate_checks.values())
+    # overall_state describes the data. An unchecked frame pair only blocks
+    # publication; it does not make healthy data DEGRADED.
+    data_ready = all(value is True for key, value in gate_checks.items() if key != "native_angle_checked")
 
     if not status_available:
         overall_state = "UNAVAILABLE"
@@ -1642,7 +1704,7 @@ def collect(
     elif not canonical_angle_ready:
         overall_state = "UNVERIFIED"
     else:
-        overall_state = "LIVE" if publication_ready else "DEGRADED"
+        overall_state = "LIVE" if data_ready else "DEGRADED"
 
     reasons: List[str] = []
     if not status_available:
@@ -1674,6 +1736,8 @@ def collect(
         reasons.append("NATIVE_DOA_VIEWS_CONFLICT")
     if angle_invalid:
         reasons.append("NATIVE_ANGLE_INVALID")
+    if native_angle_unchecked:
+        reasons.append("NATIVE_ANGLE_UNCHECKED")
     if not angular_peak_consistent:
         reasons.append("ANGULAR_PEAK_ANGLE_MISMATCH")
     if authority == "none":

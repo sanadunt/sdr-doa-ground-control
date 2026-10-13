@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
-import type { ConsoleConfig, MqttSnapshot, RdfNodeSnapshot, Tone } from '../types';
+import type { ConsoleConfig, MqttSnapshot, MqttTarget, RdfNodeSnapshot, Tone } from '../types';
 import { connectMqtt, getMqtt, getRdfNodeMqtt } from '../api';
 import { formatNumber, safeJson, toneFor } from '../lib/telemetry';
 import { formatDuration } from '../lib/healthView';
-import { healthStateTone, lastMessageAgeMs, mqttDetailRecords, mqttKindRows, rdfStatusTone, rdfTopicRows } from '../lib/mqttMonitor';
+import { errorNotice, noticeText } from '../lib/errorNotice';
+import type { Notice } from '../lib/errorNotice';
+import { healthStateTone, lastMessageAgeMs, mqttDetailRecords, mqttKindRows, mqttTargetFromConfig, rdfStatusTone, rdfTopicRows } from '../lib/mqttMonitor';
 import type { MqttKindRow, RdfTopicRow } from '../lib/mqttMonitor';
 import { gateReasonLabel, useI18n } from '../lib/i18n';
 import type { Lang, Translate } from '../lib/i18n';
@@ -18,10 +20,12 @@ const AGE_TICK_MS = 1_000;
 type MessageMonitorPageProps = {
   mqtt: MqttSnapshot | null;
   config: ConsoleConfig;
+  /** Set by the parent while its latest monitor read or reconnect has failed; `mqtt` is then null. */
+  mqttError?: string | null;
   onMqttChanged: (next: MqttSnapshot) => void;
   /** Parent-owned actions give App a request-start token and abort controller. */
   onRefreshMqtt?: () => Promise<void>;
-  onReconnectMqtt?: (host: string, port: number) => Promise<void>;
+  onReconnectMqtt?: (target: MqttTarget) => Promise<void>;
 };
 
 function Titled({ title, children }: { title?: string; children: ReactNode }): ReactElement {
@@ -111,21 +115,24 @@ function RdfRow({ row, t }: { row: RdfTopicRow; t: Translate }): ReactElement {
 export function MessageMonitorPage({
   mqtt,
   config,
+  mqttError = null,
   onMqttChanged,
   onRefreshMqtt,
   onReconnectMqtt,
 }: MessageMonitorPageProps): ReactElement {
   const { t, lang } = useI18n();
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState('');
+  // Kept as a key or as received text so a language switch re-renders it.
+  const [message, setMessage] = useState<Notice | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [rdfNode, setRdfNode] = useState<RdfNodeSnapshot | null>(null);
-  const [rdfError, setRdfError] = useState<string | null>(null);
+  const [rdfError, setRdfError] = useState<Notice | null>(null);
   const mountedRef = useRef(true);
   const requestSequence = useRef(0);
   const rdfController = useRef<AbortController | null>(null);
   const rdfSequence = useRef(0);
-  const connection = String(mqtt?.connection ?? 'OFF').toUpperCase();
+  // Without a snapshot after a failed read the monitor state is unknown, not OFF.
+  const connection = mqttError ? 'ERROR' : String(mqtt?.connection ?? 'OFF').toUpperCase();
 
   useEffect(() => {
     mountedRef.current = true;
@@ -152,7 +159,7 @@ export function MessageMonitorPage({
       setRdfError(null);
     } catch (error: unknown) {
       if (controller.signal.aborted || sequence !== rdfSequence.current) return;
-      setRdfError(error instanceof Error && error.message ? error.message : 'request failed');
+      setRdfError(errorNotice(error, 'common.requestFailed'));
     } finally {
       if (rdfController.current === controller) rdfController.current = null;
     }
@@ -172,7 +179,7 @@ export function MessageMonitorPage({
   const refresh = async () => {
     const sequence = ++requestSequence.current;
     setBusy(true);
-    setMessage('');
+    setMessage(null);
     void readRdfNode();
     try {
       if (onRefreshMqtt) {
@@ -182,11 +189,10 @@ export function MessageMonitorPage({
         if (!mountedRef.current || sequence !== requestSequence.current) return;
         onMqttChanged(next);
       }
-      if (mountedRef.current && sequence === requestSequence.current) setMessage(t('monitor.refreshed'));
+      if (mountedRef.current && sequence === requestSequence.current) setMessage({ key: 'monitor.refreshed' });
     } catch (error: unknown) {
-      if (mountedRef.current && sequence === requestSequence.current) {
-        setMessage(error instanceof Error ? error.message : t('monitor.readFailed'));
-      }
+      // A parent-owned read reports its failure through mqttError.
+      if (mountedRef.current && sequence === requestSequence.current) setMessage(onRefreshMqtt ? null : errorNotice(error, 'monitor.readFailed'));
     } finally {
       if (mountedRef.current && sequence === requestSequence.current) setBusy(false);
     }
@@ -194,26 +200,25 @@ export function MessageMonitorPage({
 
   const reconnect = async () => {
     if (!config.mqtt_host) {
-      setMessage(t('monitor.noHost'));
+      setMessage({ key: 'monitor.noHost' });
       return;
     }
     const sequence = ++requestSequence.current;
     setBusy(true);
-    setMessage('');
+    setMessage(null);
+    const target = mqttTargetFromConfig(config);
     try {
       if (onReconnectMqtt) {
-        await onReconnectMqtt(config.mqtt_host, Number(config.mqtt_port));
+        await onReconnectMqtt(target);
       } else {
-        const next = await connectMqtt(config.mqtt_host, Number(config.mqtt_port));
+        const next = await connectMqtt(target);
         if (!mountedRef.current || sequence !== requestSequence.current) return;
         onMqttChanged(next);
       }
-      if (mountedRef.current && sequence === requestSequence.current) setMessage(t('monitor.requested'));
+      if (mountedRef.current && sequence === requestSequence.current) setMessage({ key: 'monitor.requested' });
       void readRdfNode();
     } catch (error: unknown) {
-      if (mountedRef.current && sequence === requestSequence.current) {
-        setMessage(error instanceof Error ? error.message : t('monitor.connectFailed'));
-      }
+      if (mountedRef.current && sequence === requestSequence.current) setMessage(onReconnectMqtt ? null : errorNotice(error, 'monitor.connectFailed'));
     } finally {
       if (mountedRef.current && sequence === requestSequence.current) setBusy(false);
     }
@@ -230,6 +235,7 @@ export function MessageMonitorPage({
       ? t('monitor.transportWs', { path: mqtt.ws_path ?? '/mqtt' })
       : t('monitor.transportUnknown');
   const cleared = mqtt?.cleared ?? 0;
+  const statusText = mqttError ? t('monitor.stateUnknown', { error: mqttError }) : message ? noticeText(t, message) : '';
 
   const rdfRows = rdfTopicRows(rdfNode, nowMs);
   const rdfConnection = rdfError ? 'ERROR' : rdfNode ? rdfNode.connection.toUpperCase() : 'N/A';
@@ -241,7 +247,7 @@ export function MessageMonitorPage({
     <div className="page message-monitor-page">
       <SectionHeading eyebrow={t('monitor.eyebrow')} title={t('monitor.title')} detail={t('monitor.detail')} />
       <Panel className="monitor-banner" eyebrow={t('monitor.transportEyebrow')} title={t('monitor.transportTitle')} action={<div className="form-actions compact"><button className="secondary-button" type="button" disabled={busy} onClick={refresh}>{t('monitor.refresh')}</button><button className="secondary-button" type="button" disabled={busy} onClick={reconnect} title={t('monitor.reconnectHint')}>{t('monitor.reconnect')}</button></div>}>
-        <div className="monitor-state"><StatusBadge label={connection} tone={connectionTone(connection)} />{mqtt?.enabled ? <span>{transport}</span> : null}<span>{mqtt?.read_only === false || mqtt?.publish_enabled === true ? t('monitor.unexpectedWrite') : t('monitor.readOnly')}</span><span role="status">{message}</span></div>
+        <div className="monitor-state"><StatusBadge label={connection} tone={connectionTone(connection)} />{mqtt?.enabled ? <span>{transport}</span> : null}<span>{mqtt?.read_only === false || mqtt?.publish_enabled === true ? t('monitor.unexpectedWrite') : t('monitor.readOnly')}</span><span role="status" className={mqttError ? 'status-text-bad' : undefined}>{statusText}</span></div>
       </Panel>
       <div className="metric-grid monitor-metrics">
         <Metric label={t('monitor.received')} value={formatNumber(mqtt?.received, 0)} detail={cleared > 0 ? t('monitor.receivedClearedDetail', { count: cleared }) : t('monitor.receivedDetail')} tone="neutral" />
@@ -270,7 +276,7 @@ export function MessageMonitorPage({
           <div className="monitor-state">
             {rdfNode ? <span>{t('monitor.v2Counts', { received: formatNumber(rdfNode.received, 0), valid: formatNumber(rdfNode.valid, 0), invalid: formatNumber(rdfNode.invalid, 0) })}</span> : <span>{rdfError ? '' : t('monitor.v2Loading')}</span>}
             {rdfNode ? <span>{rdfLastAge === null ? t('monitor.v2NoMessage') : t('monitor.v2LastMessage', { age: formatDuration(t, rdfLastAge) })}</span> : null}
-            {rdfError ? <span className="status-text-bad">{t('monitor.v2ReadFailed', { error: rdfError })}</span> : rdfNode?.last_error ? <code className="monitor-code">{rdfNode.last_error}</code> : null}
+            {rdfError ? <span className="status-text-bad">{t('monitor.v2ReadFailed', { error: noticeText(t, rdfError) })}</span> : rdfNode?.last_error ? <code className="monitor-code">{rdfNode.last_error}</code> : null}
           </div>
           <div className="table-wrap" role="region" aria-label={t('monitor.v2Aria')} tabIndex={0}>
             <table className="monitor-v2-table">
@@ -280,7 +286,7 @@ export function MessageMonitorPage({
           </div>
         </Panel>
         <Panel className="monitor-detail-panel" eyebrow={t('monitor.detailEyebrow')} title={t('monitor.detailTitle')}>
-          <div className="key-value-list"><KeyValue label={t('monitor.connection')} value={connection} detail={mqtt?.last_error ?? t('monitor.noError')} /><KeyValue label={t('monitor.lastAge')} value={lastAge === null ? 'N/A' : formatDuration(t, lastAge)} detail={t('monitor.lastAgeDetail')} /><KeyValue label={t('monitor.topic')} value={mqtt?.last_topic ? '[REDACTED]' : 'N/A'} detail={t('monitor.topicDetail')} /><KeyValue label={t('monitor.publish')} value={mqtt?.publish_enabled === false ? 'DISABLED' : mqtt ? t('monitor.notAsserted') : 'N/A'} detail={t('monitor.publishDetail')} /></div>
+          <div className="key-value-list"><KeyValue label={t('monitor.connection')} value={connection} detail={mqttError ?? mqtt?.last_error ?? t('monitor.noError')} /><KeyValue label={t('monitor.lastAge')} value={lastAge === null ? 'N/A' : formatDuration(t, lastAge)} detail={t('monitor.lastAgeDetail')} /><KeyValue label={t('monitor.topic')} value={mqtt?.last_topic ? '[REDACTED]' : 'N/A'} detail={t('monitor.topicDetail')} /><KeyValue label={t('monitor.publish')} value={mqtt?.publish_enabled === false ? 'DISABLED' : mqtt ? t('monitor.notAsserted') : 'N/A'} detail={t('monitor.publishDetail')} /></div>
           <pre className="result-box monitor-json">{detailJson}</pre>
         </Panel>
       </div>

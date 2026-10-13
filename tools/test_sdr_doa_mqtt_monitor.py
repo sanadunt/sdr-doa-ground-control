@@ -460,6 +460,41 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self.assertEqual((entry["bytes"], entry["latency_ms"], entry["source_ts_ms"]), (0, None, None))
         self.assertEqual(snapshot["kind_counts"], {"state": 2, "config_reported": 1})
 
+    def test_empty_publish_on_a_non_retained_topic_is_invalid_not_cleared(self) -> None:
+        self._connected()
+        self._send("doa", b"")
+        self._send("health", b"")
+        self._send("ack_config", b"", qos=1)
+        self._send("availability", b"", qos=1)
+        snapshot = self.monitor.snapshot()
+        self.assertEqual(
+            (snapshot["received"], snapshot["valid"], snapshot["invalid"], snapshot["cleared"]),
+            (4, 0, 3, 1),
+        )
+        doa = snapshot["last_by_kind"]["doa"]
+        self.assertNotIn("cleared", doa)
+        self.assertIs(doa["valid"], False)
+        self.assertEqual(doa["error"], "empty payload")
+        self.assertEqual((doa["bytes"], doa["latency_ms"], doa["source_ts_ms"]), (0, None, None))
+        self.assertEqual(snapshot["last_by_kind"]["ack_config"]["error"], "empty payload")
+        self.assertIs(snapshot["last_by_kind"]["availability"]["cleared"], True)
+
+    def test_v2_retained_clear_clears_the_topic_without_counting_invalid(self) -> None:
+        self._connected()
+        topic = f"sdr/v2/{NODE}/availability"
+        online = json.dumps({"v": 2, "sid": "7a8b9c0d", "online": True, "t": int(time.time() * 1000)})
+        self.client.on_message(self.client, None, message(topic, online.encode("utf-8"), 1, True))
+        # Retain As Published keeps the publisher's retain flag on the live clear.
+        self.client.on_message(self.client, None, message(topic, b"", 1, True))
+        snapshot = self.monitor.rdf_node_snapshot()
+        self.assertEqual(
+            (snapshot["received"], snapshot["valid"], snapshot["invalid"], snapshot["cleared"]),
+            (2, 1, 0, 1),
+        )
+        entry = snapshot["topics"]["availability"]
+        self.assertEqual((entry["status"], entry["error"], entry["payload"]), ("UNAVAILABLE", "RETAINED_CLEARED", None))
+        self.assertEqual(self.monitor.snapshot()["received"], 0)
+
     def test_source_marker_and_health_reasons_are_reported(self) -> None:
         self._connected()
         now_ms = int(time.time() * 1000)

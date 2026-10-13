@@ -40,3 +40,16 @@ describe('lazy chunk retry', () => {
     expect(failedChunkUrl(new Error('Importing a module script failed.'), ORIGIN)).toBeNull();
   });
 });
+
+// Vite preloads a lazy chunk's stylesheet once. A retried import after that
+// sheet failed would resolve without it, so no lazy module may import CSS.
+const SOURCES = import.meta.glob<string>(['../**/*.{ts,tsx}', '!../**/*.test.{ts,tsx}'], { query: '?raw', import: 'default', eager: true });
+
+describe('stylesheets', () => {
+  it('load with the entry, never with a lazy chunk', () => {
+    const cssImport = /^\s*import\s+['"][^'"]+\.css(?:\?[^'"]*)?['"]/m;
+    const importers = Object.entries(SOURCES).filter(([, text]) => cssImport.test(text)).map(([path]) => path);
+    expect(importers).toEqual(['../main.tsx']);
+    expect(SOURCES['../main.tsx']).toContain("import 'maplibre-gl/dist/maplibre-gl.css';");
+  });
+});

@@ -1,6 +1,8 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { ConsoleShell } from './Shell';
+import { ConsoleShell, formatElapsed } from './Shell';
+import { I18nContext, translate } from '../lib/i18n';
+import type { Lang } from '../lib/i18n';
 import type { TelemetrySnapshot } from '../types';
 
 describe('Receiver navigation', () => {
@@ -128,5 +130,32 @@ describe('runtime status strip', () => {
     const button = markup.match(/<button[^>]*refresh-button[^>]*>/)?.[0] ?? '';
     expect(button).toContain('aria-busy="true"');
     expect(button).not.toContain('disabled');
+  });
+});
+
+describe('read error and read age (AUD-27, AUD-99)', () => {
+  const render = (lang: Lang, props: Partial<Parameters<typeof ConsoleShell>[0]>) => renderToStaticMarkup(
+    <I18nContext.Provider value={{ lang, setLang: () => undefined, t: (key, vars) => translate(lang, key, vars) }}>
+      <ConsoleShell route="system-health" onNavigate={() => undefined} branding={{ app_name: 'G', logo_data_url: '' }} snapshot={liveSnapshot()} localSnapshotFresh={false} loading={false} readError={null} lastReadAgeMs={null} simulationEnabled={false} onRefresh={() => undefined} {...props}>
+        <span />
+      </ConsoleShell>
+    </I18nContext.Provider>,
+  );
+
+  it('shows the read error as visible text, not only as a tooltip', () => {
+    const markup = render('id', { readError: 'Console tidak menjawab dalam 10 dtk.', lastReadAgeMs: 12_000 });
+    const banner = markup.match(/<div class="read-error-banner" role="alert">[\s\S]*?<\/div>/)?.[0] ?? '';
+    expect(banner).toContain('Snapshot gagal: Console tidak menjawab dalam 10 dtk.');
+    expect(render('en', { lastReadAgeMs: 100 })).not.toContain('read-error-banner');
+  });
+
+  it('formats the read age in the UI language', () => {
+    const t = (lang: Lang) => (key: Parameters<typeof translate>[1], vars?: Record<string, string | number>) => translate(lang, key, vars);
+    expect(formatElapsed(t('id'), 12_400)).toBe('12 dtk');
+    expect(formatElapsed(t('id'), 3 * 60_000 + 5_000)).toBe('3 mnt');
+    expect(formatElapsed(t('id'), 2 * 3_600_000)).toBe('2 jam');
+    expect(formatElapsed(t('en'), 2 * 3_600_000)).toBe('2 h');
+    expect(formatElapsed(t('en'), Number.NaN)).toBe('0 s');
+    expect(render('id', { lastReadAgeMs: 3 * 3_600_000 })).toContain('Dibaca 3 jam lalu');
   });
 });

@@ -6,7 +6,7 @@ const PLOTLY_MAP_CSS_STUB = '\0plotly-maplibre-css-stub';
 
 // plotly.js registers MapLibre's stylesheet for its map traces with a static
 // require, so bundling only the polar trace would still emit a second copy of
-// maplibre-gl.css. The map loads its own copy; Plotly's is replaced by nothing.
+// maplibre-gl.css. main.tsx loads the map's copy; Plotly's is replaced by nothing.
 function skipPlotlyMapCss(): Plugin {
   return {
     name: 'skip-plotly-maplibre-css',

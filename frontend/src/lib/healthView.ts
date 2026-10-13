@@ -154,7 +154,7 @@ export function collectionView(snapshot: TelemetrySnapshot | null | undefined): 
   };
 }
 
-const NODE_PROGRESS_STATES = ['ADVANCING', 'STALLED', 'FIRST_SAMPLE', 'UNAVAILABLE', 'UNTRACKED'] as const;
+const NODE_PROGRESS_STATES = ['ADVANCING', 'UNCHANGED', 'STALLED', 'FIRST_SAMPLE', 'UNAVAILABLE', 'UNTRACKED'] as const;
 const NODE_COUNTERS = ['timestamp_ms', 'uptime_ms', 'data_frame_index'] as const;
 
 export interface NodeProgressView {
@@ -355,7 +355,7 @@ export function stateTone(value: unknown): Tone {
   const normalized = String(value ?? '').toUpperCase();
   if (['VALID', 'ADVANCING', 'EQUAL', 'SAME_FRAME', 'PRESENT'].includes(normalized)) return 'good';
   if (['STALLED', 'OVERDRIVE', 'ANGLE INVALID', 'MISMATCH'].includes(normalized)) return 'bad';
-  if (['PARTIAL', 'INCOMPLETE', 'FIRST_SAMPLE', 'UNTRACKED', 'NOT CHECKED', 'NOT COMPARABLE', 'ADJACENT_FRAMES', 'OUT_OF_WINDOW', 'MISSING'].includes(normalized)) return 'warn';
+  if (['PARTIAL', 'INCOMPLETE', 'FIRST_SAMPLE', 'UNCHANGED', 'UNTRACKED', 'NOT CHECKED', 'NOT COMPARABLE', 'ADJACENT_FRAMES', 'OUT_OF_WINDOW', 'MISSING'].includes(normalized)) return 'warn';
   return toneFor(normalized);
 }
 
@@ -394,6 +394,7 @@ const GATE_CHECK_KEYS: Record<string, MessageKey> = {
   canonical_angle_ready: 'diag.check.canonical_angle_ready',
   native_views_consistent: 'diag.check.native_views_consistent',
   angular_peak_consistent: 'diag.check.angular_peak_consistent',
+  native_angle_checked: 'diag.check.native_angle_checked',
 };
 
 /** i18n key for a known publication-gate check, or null for an unknown one. */

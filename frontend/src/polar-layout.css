@@ -20,3 +20,7 @@
   .plot-controls button { flex: 1 1 auto; min-height: 44px; }
   .plot-manual-toggle { min-height: 44px; }
 }
+@media (pointer: coarse), (any-pointer: coarse), (max-width: 639px) {
+  .plot-settings > summary { min-height: 44px; padding-block: 12px; }
+  .plot-manual-toggle { min-height: 44px; }
+}

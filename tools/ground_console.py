@@ -25,6 +25,7 @@ import hmac
 import http.client
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
@@ -190,6 +191,7 @@ DEFAULT_MQTT_WS_PATH = "/mqtt"
 # The path is written into the WebSocket request line, so keep it to plain
 # unreserved path characters.
 _MQTT_WS_PATH_RE = re.compile(r"/[A-Za-z0-9._~/-]{0,127}")
+_MQTT_PORT_QUERY_RE = re.compile(r"[0-9]{1,5}")
 MQTT_DEPENDENCY_ERROR = "MQTT monitor dependency paho-mqtt is not installed"
 
 
@@ -286,6 +288,7 @@ class _UnavailableMqttMonitor:
             "received": 0,
             "valid": 0,
             "invalid": 0,
+            "cleared": 0,
             "total_bytes": 0,
             "last_received_at_ms": None,
             "last_age_ms": None,
@@ -354,6 +357,21 @@ def _default_console_config(
     }
 
 
+def _config_integer(value: Any, field: str) -> int:
+    """Return a JSON integer field without truncating or coercing it.
+
+    ``int()`` would turn 1883.9 into 1883, ``True`` into 1 and "1_883" into
+    1883, so the console would save a value the operator never entered.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value)
+    raise ValueError(f"{field} must be an integer")
+
+
 def _validate_console_config(payload: Any, fallback: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     defaults = dict(fallback or _default_console_config())
     if not isinstance(payload, dict):
@@ -366,10 +384,7 @@ def _validate_console_config(payload: Any, fallback: Optional[Dict[str, Any]] = 
         mqtt_host = ""
     if not isinstance(mqtt_host, str) or (mqtt_host and not _is_allowed_mqtt_host(mqtt_host)):
         raise ValueError("mqtt_host must be empty, localhost, or a valid IPv4/IPv6 address")
-    try:
-        mqtt_port = int(payload.get("mqtt_port", defaults["mqtt_port"]))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("mqtt_port must be numeric") from exc
+    mqtt_port = _config_integer(payload.get("mqtt_port", defaults["mqtt_port"]), "mqtt_port")
     if not (1 <= mqtt_port <= 65535):
         raise ValueError("mqtt_port must be between 1 and 65535")
     mqtt_transport = payload.get("mqtt_transport", defaults.get("mqtt_transport", "websockets"))
@@ -378,10 +393,7 @@ def _validate_console_config(payload: Any, fallback: Optional[Dict[str, Any]] = 
     mqtt_ws_path = payload.get("mqtt_ws_path", defaults.get("mqtt_ws_path", DEFAULT_MQTT_WS_PATH))
     if not _is_allowed_mqtt_ws_path(mqtt_ws_path):
         raise ValueError("mqtt_ws_path must start with / and use only letters, digits, and ._~/- (max 128)")
-    try:
-        refresh_seconds = int(payload.get("refresh_seconds", defaults["refresh_seconds"]))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("refresh_seconds must be numeric") from exc
+    refresh_seconds = _config_integer(payload.get("refresh_seconds", defaults["refresh_seconds"]), "refresh_seconds")
     if refresh_seconds not in ALLOWED_REFRESH_INTERVALS:
         raise ValueError("refresh_seconds is not an allowed interval")
     return _default_console_config(
@@ -1427,7 +1439,7 @@ pre { max-height: 260px; overflow: auto; margin: 8px 0 0; padding: 9px; border: 
 const initialConfig = __CONSOLE_CONFIG_JSON__;
 const $ = (id) => document.getElementById(id);
 if (initialConfig && initialConfig.refresh_seconds !== undefined) $('refresh-interval').value = String(initialConfig.refresh_seconds);
-const state = { dataUrl: $('data-url').value, autoTimer: null, branding: null, pendingLogo: null, refreshSequence: 0, mqttSequence: 0, refreshController: null, expiryTimer: null, snapshot: null, polar: { values: null, angle: null, fresh: false, figType: 'Polar', compassOffset: 0 } };
+const state = { dataUrl: $('data-url').value, autoTimer: null, branding: null, pendingLogo: null, refreshSequence: 0, mqttSequence: 0, refreshController: null, expiryTimer: null, snapshot: null, polar: { values: null, angle: null, fresh: false, figType: 'Compass', compassOffset: 0, localAxis: true } };
 function esc(value) { return String(value ?? '—').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;'); }
 function kind(value) { const s=String(value||'').toUpperCase(); return s==='LIVE'||s==='PASS'||s==='READY'||s==='CONNECTED'?'good':(s==='DEGRADED'||s==='STALE'||s==='BLOCKED'||s==='FAIL'||s==='ERROR'?'bad':'warn'); }
 function pill(value) { const cls=kind(value); return `<span class="chip ${cls==='good'?'safe':(cls==='bad'?'bad':'warn')}">${esc(value)}</span>`; }
@@ -1447,7 +1459,19 @@ function reasonLabel(reason) { return ({
   NATIVE_DOA_VIEWS_CONFLICT:'CSV and XML views differ after canonicalization',
   DAQ_HEALTH_GATE_FAILED:'DAQ or frame synchronization gate failed',
   DOA_CANDIDATES_STALE:'DoA output is older than the freshness window',
-  STATUS_UNAVAILABLE_OR_INVALID:'Node status is unavailable or invalid'
+  STATUS_UNAVAILABLE_OR_INVALID:'Node status is unavailable or invalid',
+  NO_VALID_DOA_CANDIDATE:'No valid DoA candidate was parsed',
+  STATUS_STALE:'Node status is older than the freshness window',
+  SELECTED_AUTHORITY_UNAVAILABLE:'Selected authority source is unavailable',
+  SELECTED_DOA_STALE:'Selected DoA source is stale',
+  NODE_CLOCK_STALLED:'Node status counters stopped advancing; Data Out files are frozen',
+  ADC_OVERDRIVE:'ADC overdrive reported; reduce receiver gain',
+  COLLECTION_DEADLINE_EXCEEDED:'Data Out read did not finish within the collection deadline',
+  CSV_VIEW_UNAVAILABLE:'CSV view (DOA_value.html) is unavailable',
+  XML_VIEW_UNAVAILABLE:'XML view (doa.xml) is unavailable',
+  NATIVE_ANGLE_INVALID:'A native DoA angle is out of range or not finite',
+  NATIVE_ANGLE_UNCHECKED:'CSV and XML came from different frames, so their angles were not cross-checked',
+  ANGULAR_PEAK_ANGLE_MISMATCH:'CSV vector peak does not match theta_0'
 }[reason]||reason); }
 function setStatus(id, text, cls='') { $(id).textContent=text; $(id).className=`admin-status ${cls}`; }
 function setReadStatus(text, cls='') { const message=$('message'); const label=message?.querySelector('span:last-child'); if(label) label.textContent=text; else message.textContent=text; $('status-dot').className=`status-dot ${cls}`; }
@@ -1462,53 +1486,69 @@ function renderBranding(data) {
 }
 async function loadBranding() { try { const r=await fetch('/api/branding',{cache:'no-store'}); if(r.ok) renderBranding(await r.json()); } catch(e) {} }
 function setHealthCard(id, value, detail, tone='') { const card=$(id)?.closest('.health-card'); if(!card) return; $(id).textContent=value; $(id).className=''; card.className=`health-card ${tone}`; const detailNode=$(id+'-detail'); if(detailNode) detailNode.textContent=detail; }
+function mqttCount(value) { return Number.isInteger(value)&&value>=0?value:0; }
+function mqttMs(value) { return Number.isFinite(value)?`${value} ms`:'—'; }
+// A zero-length publish removes a retained value: the entry has cleared:true and
+// valid:false, which means "no current value", not an invalid message.
+function mqttContract(entry) { return entry.cleared===true?'CLEARED':(entry.valid===true?'VALID':'INVALID'); }
+function contractPill(state) { return `<span class="chip ${state==='VALID'?'safe':(state==='INVALID'?'bad':'warn')}">${esc(state)}</span>`; }
+function mqttTransport(data) { return data.transport==='tcp'?'MQTT over TCP':(data.transport==='websockets'?`MQTT over WebSocket ${data.ws_path||'/mqtt'}`:'—'); }
 function renderMqtt(data) {
   const enabled=Boolean(data&&data.enabled); const connection=data?.connection||'off';
+  const valid=mqttCount(data?.valid), invalid=mqttCount(data?.invalid), cleared=mqttCount(data?.cleared);
   $('mqtt-connection').textContent=enabled?connection.toUpperCase():'OFF'; $('mqtt-connection').className=`metric-value ${kind(enabled&&connection==='connected'?'PASS':(enabled?'DEGRADED':'UNKNOWN'))}`;
-  $('mqtt-detail').textContent=enabled?`${data.host}:${data.port} · ${data.valid||0}/${data.received||0} valid`:'subscriber-only / off';
-  setHealthCard('health-mqtt', enabled?connection.toUpperCase():'OFF', enabled?'subscriber-only · '+(data.valid||0)+' valid':'subscriber-only', enabled&&connection==='connected'?'good':(enabled?'warn':''));
+  $('mqtt-detail').textContent=enabled?`${data.host}:${data.port} · ${valid} valid · ${invalid} invalid${cleared?` · ${cleared} cleared`:''}`:'subscriber-only / off';
+  setHealthCard('health-mqtt', enabled?connection.toUpperCase():'OFF', enabled?'subscriber-only · '+valid+' valid':'subscriber-only', enabled&&connection==='connected'?'good':(enabled?'warn':''));
   if(!enabled){ $('mqtt-rows').innerHTML=rows([['Mode','OFF'],['Publish',pill('disabled')]]); $('mqtt-last').textContent='MQTT monitor is not enabled.'; return; }
+  const byKind=data.last_by_kind&&typeof data.last_by_kind==='object'&&!Array.isArray(data.last_by_kind)?data.last_by_kind:{};
+  const entries=Object.entries(byKind).filter(([,entry])=>entry&&typeof entry==='object');
+  const kindRows=entries.map(([name,entry])=>[`Latest ${name}`,`${contractPill(mqttContract(entry))}${entry.retained===true?' <span class="muted">retained</span>':''} <span class="muted">${esc(Number.isFinite(entry.age_ms)?`${entry.age_ms} ms ago`:'')}</span>`]);
   $('mqtt-rows').innerHTML=rows([
-    ['Connection',pill(connection)],['Messages',esc(data.received)],['Valid / invalid',esc(`${data.valid} / ${data.invalid}`)],['Bytes',esc(data.total_bytes)],['Last latency',esc(data.last_latency_ms===null?'—':`${data.last_latency_ms} ms`)],['Last age',esc(data.last_age_ms===null?'—':`${data.last_age_ms} ms`)],['Last topic',esc(data.last_topic||'—')],['Publish',pill('false')]
-  ]); $('mqtt-last').textContent=JSON.stringify(data.last_by_kind||{},null,2);
+    ['Connection',pill(connection)],['Transport',esc(mqttTransport(data))],['Messages',esc(mqttCount(data.received))],['Valid / invalid',esc(`${valid} / ${invalid}`)],['Retained clears',esc(cleared)],['Bytes',esc(mqttCount(data.total_bytes))],['Last latency',esc(mqttMs(data.last_latency_ms))],['Last age',esc(mqttMs(data.last_age_ms))],['Last topic',esc(data.last_topic||'—')],...kindRows,['Publish',pill('false')]
+  ]);
+  const records=Object.fromEntries(Object.entries(byKind).map(([name,entry])=>[name,entry&&typeof entry==='object'&&entry.cleared===true?{kind:entry.kind,cleared:true,retained:entry.retained,received_at_ms:entry.received_at_ms,age_ms:entry.age_ms}:entry]));
+  $('mqtt-last').textContent=JSON.stringify(records,null,2);
 }
-function polarSettings(figType, compassOffset) { const requested=String(figType||'Polar').trim(); const safeType=requested.toLowerCase()==='compass'?'Compass':'Polar'; const numeric=Number(compassOffset); return { figType:safeType, compassOffset:Number.isFinite(numeric)?numeric:0 }; }
+// Mirrors frontend/src/lib/polar.ts: Polar is theta_0 counter-clockwise (KrakenSDR Polar plot); Linear has no polar axis, so its compass_offset gets a local Compass axis.
+function polarSettings(figType, compassOffset) { const requested=String(figType??'').trim().toLowerCase(); const numeric=typeof compassOffset==='number'?compassOffset:(typeof compassOffset==='string'&&compassOffset.trim()!==''?Number(compassOffset.trim()):NaN); return { figType:requested==='polar'?'Polar':'Compass', compassOffset:Number.isFinite(numeric)?numeric:0, localAxis:requested!=='polar'&&requested!=='compass' }; }
 function normalizeDegrees(deg) { return ((Number(deg)%360)+360)%360; }
-function drawPolar(values, angle, fresh, figType='Polar', compassOffset=0) {
+function polarDisplayAngle(bin, settings) { return normalizeDegrees(settings.figType==='Compass'?360-bin+settings.compassOffset:bin); }
+function polarScreenAngle(bin, settings) { return settings.figType==='Compass'?polarDisplayAngle(bin,settings):normalizeDegrees(360-bin); }
+function drawPolar(values, angle, fresh, figType='Compass', compassOffset=0) {
   const canvas=$('doa-polar'); const frame=canvas?.closest('.polar-frame')||canvas?.parentElement; if(!canvas||!frame) return;
   const cssSize=Math.max(1,Math.floor(frame.getBoundingClientRect().width||frame.clientWidth||420)); const dpr=Math.min(window.devicePixelRatio||1,2); const size=Math.max(1,Math.floor(cssSize*dpr));
   if(canvas.width!==size||canvas.height!==size){ canvas.width=size; canvas.height=size; }
   const ctx=canvas.getContext('2d'); if(!ctx) return; ctx.setTransform(size/cssSize,0,0,size/cssSize,0,0); ctx.clearRect(0,0,cssSize,cssSize);
   const styles=getComputedStyle(document.documentElement); const line=styles.getPropertyValue('--line').trim()||'#28533b'; const muted=styles.getPropertyValue('--muted').trim()||'#a8c9ad'; const subtle=styles.getPropertyValue('--subtle').trim()||'#7fae89'; const accent=styles.getPropertyValue('--accent').trim()||'#39d98a'; const blue=styles.getPropertyValue('--blue').trim()||'#65c98a';
-  const cx=cssSize/2, cy=cssSize/2, maxR=cssSize*.365; const settings=polarSettings(figType,compassOffset); const toDisplayAngle=deg=>normalizeDegrees(settings.figType==='Compass'?360-deg+settings.compassOffset:deg); const toRadians=deg=>(deg-90)*Math.PI/180;
+  const cx=cssSize/2, cy=cssSize/2, maxR=cssSize*.365; const settings=polarSettings(figType,compassOffset); const compass=settings.figType==='Compass'; const labelPosition=deg=>compass?deg:normalizeDegrees(360-deg); const toRadians=deg=>(deg-90)*Math.PI/180;
   ctx.save(); ctx.translate(cx,cy); ctx.lineWidth=1; ctx.strokeStyle=line; ctx.globalAlpha=.92; [.25,.5,.75,1].forEach(f=>{ ctx.beginPath(); ctx.arc(0,0,maxR*f,0,Math.PI*2); ctx.stroke(); });
   for(let deg=0;deg<360;deg+=45){ const radians=toRadians(deg); ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(Math.cos(radians)*maxR,Math.sin(radians)*maxR); ctx.stroke(); }
   ctx.globalAlpha=1; ctx.fillStyle=muted; ctx.font='700 10px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
-  const perimeterInset=Math.max(9,cssSize*.035); const cardinalRadius=Math.min(maxR+Math.min(23,Math.max(15,cssSize*.06)),cssSize/2-perimeterInset); const degreeRadius=Math.min(maxR+Math.min(18,Math.max(12,cssSize*.045)),cssSize/2-perimeterInset); const directions=[['N',0],['E',90],['S',180],['W',270]];
-  directions.forEach(([label,deg])=>{ const radians=toRadians(deg); ctx.fillText(label,Math.cos(radians)*cardinalRadius,Math.sin(radians)*cardinalRadius); });
+  const perimeterInset=Math.max(9,cssSize*.035); const cardinalRadius=Math.min(maxR+Math.min(23,Math.max(15,cssSize*.06)),cssSize/2-perimeterInset); const degreeRadius=Math.min(maxR+Math.min(18,Math.max(12,cssSize*.045)),cssSize/2-perimeterInset); const directions=[['N',0],['E',90],['S',180],['W',270]]; const axisLabels=compass?directions:[['0°',0],['90°',90],['180°',180],['270°',270]];
+  axisLabels.forEach(([label,deg])=>{ const radians=toRadians(labelPosition(deg)); ctx.fillText(label,Math.cos(radians)*cardinalRadius,Math.sin(radians)*cardinalRadius); });
   ctx.fillStyle=subtle; ctx.font='10px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif'; const diagonalDegrees=new Set([45,135,225,315]);
-  for(let deg=0;deg<360;deg+=45){ const radians=toRadians(deg); ctx.beginPath(); ctx.moveTo(Math.cos(radians)*maxR,Math.sin(radians)*maxR); ctx.lineTo(Math.cos(radians)*(maxR+6),Math.sin(radians)*(maxR+6)); ctx.stroke(); if(diagonalDegrees.has(deg)) ctx.fillText(`${deg}°`,Math.cos(radians)*degreeRadius,Math.sin(radians)*degreeRadius); }
+  for(let deg=0;deg<360;deg+=45){ const radians=toRadians(deg); ctx.beginPath(); ctx.moveTo(Math.cos(radians)*maxR,Math.sin(radians)*maxR); ctx.lineTo(Math.cos(radians)*(maxR+6),Math.sin(radians)*(maxR+6)); ctx.stroke(); if(diagonalDegrees.has(deg)){ const labelRadians=toRadians(labelPosition(deg)); ctx.fillText(`${deg}°`,Math.cos(labelRadians)*degreeRadius,Math.sin(labelRadians)*degreeRadius); } }
   const finite=Array.isArray(values)&&values.length===360?values.map(Number):null; const validData=Boolean(fresh&&finite&&finite.every(Number.isFinite));
   if(validData){
     const floor=Math.min(...finite), peakValue=Math.max(...finite), span=peakValue-floor; const yFor=value=>span>0?Math.max(0,Math.min(1,(value-floor)/span)):1; ctx.textAlign='left'; ctx.fillStyle=subtle; ctx.font='9px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif'; const precision=span<5?1:0;
     [.25,.5,.75,1].forEach(f=>{ const label=`${(floor+span*f).toFixed(precision)} dB`; const radialLabelY=-maxR+(maxR*2.0*f); const labelWidth=ctx.measureText(label).width; const rightEdge=Math.max(0,cssSize/2-4); const radialLabelX=Math.min(maxR+8,rightEdge-labelWidth); ctx.fillText(label,radialLabelX,radialLabelY); });
-    const point=(value,index)=>{ const radians=toRadians(toDisplayAngle(index)), radius=maxR*yFor(value); return [Math.cos(radians)*radius,Math.sin(radians)*radius]; };
+    const point=(value,index)=>{ const radians=toRadians(polarScreenAngle(index,settings)), radius=maxR*yFor(value); return [Math.cos(radians)*radius,Math.sin(radians)*radius]; };
     const drawCurve=()=>{ finite.forEach((value,index)=>{ const [x,y]=point(value,index); index?ctx.lineTo(x,y):ctx.moveTo(x,y); }); const [x0,y0]=point(finite[0],0); ctx.lineTo(x0,y0); };
     ctx.beginPath(); drawCurve(); ctx.closePath(); ctx.fillStyle='rgba(57,217,138,.14)'; ctx.fill(); ctx.beginPath(); drawCurve(); ctx.closePath(); ctx.strokeStyle=accent; ctx.lineWidth=2; ctx.shadowColor='rgba(57,217,138,.48)'; ctx.shadowBlur=8; ctx.stroke();
-    const peakIndex=finite.indexOf(peakValue); if(peakIndex>=0){ const displayPeak=toDisplayAngle(peakIndex), [px,py]=point(finite[peakIndex],peakIndex); ctx.shadowBlur=0; ctx.fillStyle=accent; ctx.beginPath(); ctx.arc(px,py,3.5,0,Math.PI*2); ctx.fill(); ctx.strokeStyle=blue; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(px,py); ctx.lineTo(Math.cos(toRadians(displayPeak))*(maxR+12),Math.sin(toRadians(displayPeak))*(maxR+12)); ctx.stroke(); ctx.fillStyle=accent; ctx.font='700 9px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif'; ctx.textAlign='center'; ctx.fillText(`PLOT ${displayPeak.toFixed(0)}°`,px,py < -maxR*.45 ? py+15 : py-11); }
+    const peakIndex=finite.indexOf(peakValue); if(peakIndex>=0){ const displayPeak=polarDisplayAngle(peakIndex,settings), peakScreen=polarScreenAngle(peakIndex,settings), [px,py]=point(finite[peakIndex],peakIndex); ctx.shadowBlur=0; ctx.fillStyle=accent; ctx.beginPath(); ctx.arc(px,py,3.5,0,Math.PI*2); ctx.fill(); ctx.strokeStyle=blue; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(px,py); ctx.lineTo(Math.cos(toRadians(peakScreen))*(maxR+12),Math.sin(toRadians(peakScreen))*(maxR+12)); ctx.stroke(); ctx.fillStyle=accent; ctx.font='700 9px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif'; ctx.textAlign='center'; ctx.fillText(`PLOT ${displayPeak.toFixed(0)}°`,px,py < -maxR*.45 ? py+15 : py-11); }
   }
   ctx.restore();
 }
-function setPolarUnavailable(reason='polar unavailable', settings=polarSettings(state.polar?.figType,state.polar?.compassOffset)) {
-  state.polar={values:null,angle:null,fresh:false,figType:settings.figType,compassOffset:settings.compassOffset}; drawPolar(null,null,false,settings.figType,settings.compassOffset);
+function setPolarUnavailable(reason='polar unavailable', settings=polarSettings(state.polar?.localAxis?null:state.polar?.figType,state.polar?.compassOffset)) {
+  state.polar={values:null,angle:null,fresh:false,figType:settings.figType,compassOffset:settings.compassOffset,localAxis:settings.localAxis}; drawPolar(null,null,false,settings.figType,settings.compassOffset);
   $('polar-peak').textContent='—'; $('polar-canonical').textContent='—'; $('polar-peak-db').textContent='—'; $('polar-bins').textContent='—'; $('compass-angle').textContent='—°'; $('compass-display-angle').textContent='plot peak · display —°'; $('compass-status').textContent='POLAR UNAVAILABLE'; $('compass-status').className='compass-status unavailable'; $('compass-source').textContent='Data Out · unavailable'; $('compass-detail').innerHTML=`<strong>Unavailable:</strong> ${esc(reason)}`; $('doa-polar').setAttribute('aria-label',`Polar DoA unavailable. ${reason}`);
   $('inspector-angle').textContent='—°'; $('inspector-display-peak').textContent='—'; $('inspector-peak-db').textContent='—'; $('inspector-bins').textContent='—'; $('inspector-freshness').textContent='—'; $('inspector-angle-note').innerHTML='waiting for<br>correlated DoA'; $('inspector-provenance').textContent='No observation selected. Plot is cleared until a fresh, complete vector is available.';
 }
 function renderPolar(snapshot,csv,dataAvailable) {
-  const fields=snapshot.settings?.fields||{}; const requestedType=Object.prototype.hasOwnProperty.call(fields,'doa_fig_type')?fields.doa_fig_type:state.polar?.figType; const requestedOffset=Object.prototype.hasOwnProperty.call(fields,'compass_offset')?fields.compass_offset:state.polar?.compassOffset; const settings=polarSettings(requestedType,requestedOffset); const angle=Number(csv.canonical_angle_deg); const values=Array.isArray(csv.angular_power_db)?csv.angular_power_db:null; const fresh=Boolean(dataAvailable&&csv.freshness?.fresh===true&&values?.length===360&&values.every(value=>Number.isFinite(Number(value))));
-  state.polar={values,angle:Number.isFinite(angle)?angle:null,fresh,figType:settings.figType,compassOffset:settings.compassOffset}; if(!fresh||!Number.isFinite(angle)){ setPolarUnavailable('Curve cleared: DoA data is stale, conflicting, or incomplete.',settings); return; }
-  drawPolar(values,angle,true,settings.figType,settings.compassOffset); const peakIndex=Number(csv.angular_peak_index); const peakReady=Number.isInteger(peakIndex)&&peakIndex>=0&&peakIndex<values.length; const displayAngle=settings.figType==='Compass'&&peakReady?normalizeDegrees(360-peakIndex+settings.compassOffset):(peakReady?peakIndex:null); const peakLabel=displayAngle===null?'—':`${displayAngle.toFixed(0)}° · bin ${peakIndex}`; const canonicalLabel=`${angle.toFixed(1)}° · θ₀`;
-  $('polar-peak').textContent=peakLabel; $('polar-canonical').textContent=canonicalLabel; $('polar-peak-db').textContent=Number.isFinite(Number(csv.angular_peak_db))?`${Number(csv.angular_peak_db).toFixed(1)} dB`:'—'; $('polar-bins').textContent=String(values.length); $('compass-angle').textContent=`${angle.toFixed(1)}°`; $('compass-display-angle').textContent=`plot peak · display ${displayAngle===null?'—':displayAngle.toFixed(0)+'°'} · bin ${peakReady?peakIndex:'—'}`; $('compass-status').textContent='DATA AVAILABLE'; $('compass-status').className='compass-status'; $('compass-source').textContent=`Data Out · ${settings.figType} display axis · ${formatAge(csv.freshness)}`; $('compass-detail').innerHTML=`<strong>Provenance:</strong> canonical source ${angle.toFixed(1)}° (θ₀) versus plotted display peak ${displayAngle===null?'—':displayAngle.toFixed(0)+'°'} (bin ${peakReady?peakIndex:'—'}). Both remain separate metadata · display-only.`; $('doa-polar').setAttribute('aria-label',`Polar DoA. Canonical source angle ${angle.toFixed(1)} degrees. Plotted 360-bin peak display angle ${displayAngle===null?'unavailable':displayAngle.toFixed(0)+' degrees, bin '+peakIndex}. Display-only.`);
+  const fields=snapshot.settings?.fields||{}; const requestedType=Object.prototype.hasOwnProperty.call(fields,'doa_fig_type')?fields.doa_fig_type:(state.polar?.localAxis?null:state.polar?.figType); const requestedOffset=Object.prototype.hasOwnProperty.call(fields,'compass_offset')?fields.compass_offset:state.polar?.compassOffset; const settings=polarSettings(requestedType,requestedOffset); const angle=Number(csv.canonical_angle_deg); const values=Array.isArray(csv.angular_power_db)?csv.angular_power_db:null; const fresh=Boolean(dataAvailable&&csv.freshness?.fresh===true&&values?.length===360&&values.every(value=>Number.isFinite(Number(value))));
+  state.polar={values,angle:Number.isFinite(angle)?angle:null,fresh,figType:settings.figType,compassOffset:settings.compassOffset,localAxis:settings.localAxis}; if(!fresh||!Number.isFinite(angle)){ setPolarUnavailable('Curve cleared: DoA data is stale, conflicting, or incomplete.',settings); return; }
+  drawPolar(values,angle,true,settings.figType,settings.compassOffset); const peakIndex=Number(csv.angular_peak_index); const peakReady=Number.isInteger(peakIndex)&&peakIndex>=0&&peakIndex<values.length; const displayAngle=peakReady?polarDisplayAngle(peakIndex,settings):null; const axisSource=settings.localAxis?'Data Out offset · local Compass axis':`Data Out · ${settings.figType} display axis`; const peakLabel=displayAngle===null?'—':`${displayAngle.toFixed(0)}° · bin ${peakIndex}`; const canonicalLabel=`${angle.toFixed(1)}° · θ₀`;
+  $('polar-peak').textContent=peakLabel; $('polar-canonical').textContent=canonicalLabel; $('polar-peak-db').textContent=Number.isFinite(Number(csv.angular_peak_db))?`${Number(csv.angular_peak_db).toFixed(1)} dB`:'—'; $('polar-bins').textContent=String(values.length); $('compass-angle').textContent=`${angle.toFixed(1)}°`; $('compass-display-angle').textContent=`plot peak · display ${displayAngle===null?'—':displayAngle.toFixed(0)+'°'} · bin ${peakReady?peakIndex:'—'}`; $('compass-status').textContent='DATA AVAILABLE'; $('compass-status').className='compass-status'; $('compass-source').textContent=`${axisSource} · ${formatAge(csv.freshness)}`; $('compass-detail').innerHTML=`<strong>Provenance:</strong> canonical source ${angle.toFixed(1)}° (θ₀) versus plotted display peak ${displayAngle===null?'—':displayAngle.toFixed(0)+'°'} (bin ${peakReady?peakIndex:'—'}). Both remain separate metadata · display-only.`; $('doa-polar').setAttribute('aria-label',`Polar DoA. Canonical source angle ${angle.toFixed(1)} degrees. Plotted 360-bin peak display angle ${displayAngle===null?'unavailable':displayAngle.toFixed(0)+' degrees, bin '+peakIndex}. Display-only.`);
   $('inspector-angle').textContent=`${angle.toFixed(1)}°`; $('inspector-display-peak').textContent=peakLabel; $('inspector-peak-db').textContent=Number.isFinite(Number(csv.angular_peak_db))?`${Number(csv.angular_peak_db).toFixed(1)} dB`:'—'; $('inspector-bins').textContent=String(values.length); $('inspector-freshness').textContent=formatAge(csv.freshness); $('inspector-angle-note').innerHTML='canonical source<br>not authority'; $('inspector-provenance').textContent=`CSV native view · ${settings.figType} display axis · source vector preserved as shifted dB.`;
 }
 function finiteCoordinate(value, lower, upper) { const number=Number(value); return Number.isFinite(number)&&number>=lower&&number<=upper; }
@@ -1559,7 +1599,7 @@ function render(snapshot) {
   const reasons=gate.reasons||[]; $('gate-count').textContent=`${reasons.length} GATES`; $('gate-reasons').innerHTML=reasons.length?reasons.map(reason=>`<li><span>${esc(reasonLabel(reason))}</span><small class="mono">${esc(reason)}</small></li>`).join(''):'<li>No active gate reasons.</li>'; $('gate-debug').textContent=JSON.stringify({state:gateState,checks:gate.checks||{},reasons},null,2);
   const candidates=[{label:'CSV',candidate:csv},{label:'XML',candidate:xml}]; $('doa-rows').innerHTML=signalRows(candidates); $('signal-contract-state').textContent=`${candidates.filter(item=>item.candidate?.available===true).length}/2 NATIVE VIEWS`;
   const sourceRow=(label,candidate)=>[['Source',`${esc(label)} · ${candidate.available?pill('PARSED'):pill('UNAVAILABLE')}`],['  raw angle',candidate.available?`${formatNumber(candidate.doa_raw_deg,1)}° <span class="muted">(${esc(candidate.angle_convention||'native')})</span>`:'—'],['  canonical angle',candidate.available?`${formatNumber(candidate.canonical_angle_deg,1)}° <span class="muted">(${esc(candidate.canonical_angle_convention||'—')})</span>`:'—'],['  freshness',candidate.available?`${formatAge(candidate.freshness)} · ${candidate.freshness?.fresh===true?'fresh':'not fresh'}`:'—'],['  PAPR native',candidate.available?`${formatNumber(candidate.confidence_metric_db,3)} dB · ${candidate.confidence_metric_valid?'valid':'invalid'}`:'—'],['  power native',candidate.available?`${formatNumber(candidate.power_native_db,2)} dB · ${candidate.power_native_valid?'valid':'invalid'}`:'—'],['  frequency',candidate.available?`${esc(candidate.frequency_hz_normalized??'—')} Hz`:'—'],['  contract mapping',candidate.available?`${esc(candidate.contract_mapping_state||'—')} · ${esc((candidate.unit_reasons||[]).join(', ')||'—')}`:'—']];
-  $('source-rows').innerHTML=rows([['Publication',pill(gateState)],['Native correlation',consistency.comparable?`${consistency.same_timestamp?'same timestamp':'adjacent timestamps'} · canonical delta ${formatNumber(consistency.circular_distance_deg,1)}°`:'not comparable'],...sourceRow('CSV',csv),...sourceRow('XML',xml),['Authority',esc(authority.selected||'none')],['Canonical angle gate',authority.canonical_angle_ready?'ready':'not approved'],['Contract confidence',authority.selected_doa?.confidence===null?'not mapped to 0–1':esc(authority.selected_doa?.confidence??'—')],['Gate note',esc((gate.reasons||[]).map(reasonLabel).join(' · ')||'—')]]);
+  $('source-rows').innerHTML=rows([['Publication',pill(gateState)],['Native correlation',consistency.comparable?`${consistency.same_timestamp?'same timestamp':'adjacent frames, angles not cross-checked'} · canonical delta ${formatNumber(consistency.circular_distance_deg,1)}°`:'not comparable'],...sourceRow('CSV',csv),...sourceRow('XML',xml),['Authority',esc(authority.selected||'none')],['Canonical angle gate',authority.canonical_angle_ready?'ready':'not approved'],['Contract confidence',authority.selected_doa?.confidence===null?'not mapped to 0–1':esc(authority.selected_doa?.confidence??'—')],['Gate note',esc((gate.reasons||[]).map(reasonLabel).join(' · ')||'—')]]);
   const daqStatus=safe.daq_status||{}; $('status-rows').innerHTML=rows([['DAQ',pill(daq)],['daq_ok',boolLabel(safe.daq_ok)],['Frame index',esc(daqStatus.data_frame_index)],['Frame sync',boolLabel(daqStatus.frame_sync)],['Sample-delay sync',boolLabel(daqStatus.sample_delay_sync)],['IQ sync',boolLabel(daqStatus.iq_sync)],['ADC overdrive',boolLabel(daqStatus.adc_overdrive)],['Dropped frames',esc(safe.daq_num_dropped_frames)],['Sampling',esc(daqStatus.sampling_frequency_hz?`${daqStatus.sampling_frequency_hz} Hz`:'—')],['Station',esc(safe.station_id)],['Software',esc(safe.software_version)],['Source hash',esc(safe.software_git_short_hash)],['GPS',esc(safe.gps_status)]]);
   const settings=snapshot.settings||{}; const sf=settings.fields||{}; $('settings-rows').innerHTML=Object.keys(sf).sort().map(key=>[key,safeValue(sf[key])]).map(([key,value])=>`<tr><th>${esc(key)}</th><td>${value}</td></tr>`).join('')||'<tr><td colspan="2">Not available</td></tr>';
   setReadStatus(`Snapshot read successfully · ${readAt.toISOString().slice(11,19)}Z`,'good');
@@ -2294,12 +2334,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/mqtt/connect":
             query = parse_qs(parsed.query, keep_blank_values=False)
             host = query.get("host", [""])[0].strip()
-            try:
-                port = int(query.get("port", ["9001"])[0])
-            except ValueError:
-                self._send_json({"error": "MQTT port must be numeric", "read_only": True}, HTTPStatus.BAD_REQUEST)
+            port_text = query.get("port", ["9001"])[0]
+            if _MQTT_PORT_QUERY_RE.fullmatch(port_text) is None or not (1 <= int(port_text) <= 65535):
+                self._send_json({"error": "MQTT port must be an integer from 1 to 65535", "read_only": True}, HTTPStatus.BAD_REQUEST)
                 return
-            if not host or not (1 <= port <= 65535) or not _is_allowed_mqtt_host(host):
+            port = int(port_text)
+            if not host or not _is_allowed_mqtt_host(host):
                 self._send_json({"error": "MQTT monitor host must be localhost or a valid IPv4/IPv6 address", "read_only": True}, HTTPStatus.BAD_REQUEST)
                 return
             transport = query.get("transport", [None])[0]

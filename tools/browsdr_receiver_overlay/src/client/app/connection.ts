@@ -70,7 +70,7 @@ export const connectionMethods = {
 		this._usbDevice = null;
 		const wasRecording = recordingWasArmed || this.audioRecording.armed;
 		try {
-			if (this.sweep.active || this.sweep.starting) await this.stopSweep(false, 'failed');
+			await this.stopSweepForLostRadio();
 		} catch (error) {
 			console.error('Stopping the scan after USB loss failed:', error);
 		}

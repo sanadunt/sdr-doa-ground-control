@@ -41,6 +41,10 @@ DECODED_KINDS = frozenset({
     "doa", "nav", "health", "state", "config_reported", "config_patch", "ack_config",
     "availability",
 })
+# Only these v1 kinds are published retained, so only here can a zero-length
+# publish be a retained clear. Elsewhere it is a malformed message.
+RETAINED_KINDS = frozenset({"state", "config_reported", "availability"})
+EMPTY_PAYLOAD_ERROR = "empty payload"
 VALIDITY_FLAG_FIELDS = ("valid", "doa_valid", "settings_valid")
 # Brokers must accept client ids of 1-23 alphanumeric characters. The random
 # suffix keeps two consoles on one broker from taking over each other's session.
@@ -345,10 +349,14 @@ class MqttMonitor:
             valid = True
             # A zero-length publish is how a publisher removes a retained
             # value; the broker forwards it to live subscribers. It means "no
-            # current value", not a malformed message.
-            cleared = not payload_bytes
+            # current value", not a malformed message. The v1 filter hides the
+            # publisher's retain flag, so the contract's retain policy decides.
+            cleared = not payload_bytes and kind in RETAINED_KINDS
             if cleared:
                 valid = False
+            elif not payload_bytes:
+                valid = False
+                error = EMPTY_PAYLOAD_ERROR
             elif kind in DECODED_KINDS:
                 try:
                     decoded = contract.decode_payload(kind, payload_bytes)

@@ -178,6 +178,7 @@ function receiverApp(device) {
 			this.audioRecording.armed = false;
 		},
 		async stopSweep() { log.push('stopSweep'); },
+		async stopSweepForLostRadio() { log.push('stopSweepForLostRadio'); },
 		showMsg(message) { log.push(['msg', message]); },
 	};
 	return { app, log };
@@ -193,7 +194,7 @@ test('a transfer error with the radio still attached stops RX and keeps the conn
 	assert.equal(app.connected, true);
 	assert.equal(app._usbDevice, device);
 	assert.ok(log.includes('stopRx') && log.includes('disarm'));
-	assert.ok(!log.includes('close'));
+	assert.ok(!log.includes('close') && !log.includes('stopSweepForLostRadio'));
 	assert.match(app.sweep.error, /^The radio stopped sending samples \(USB transfer status babble\)\. RX stopped; the recording was saved up to this point\./);
 	assert.equal(app.audioRecording.notice, app.sweep.error);
 	assert.deepEqual(log.at(-1), ['msg', app.sweep.error]);
@@ -209,6 +210,7 @@ test('a transfer error after an unplug closes the radio even without the USB dis
 	assert.equal(app.connected, false);
 	assert.equal(app._usbDevice, null);
 	assert.ok(log.includes('close'));
+	assert.ok(log.includes('stopSweepForLostRadio') && log.indexOf('stopSweepForLostRadio') < log.indexOf('close'), 'the scan is ended before the radio closes');
 	assert.match(app.sweep.error, /^Radio disconnected \(USB unplugged or lost\)\. RX and scanning stopped; the recording was saved up to this point\./);
 	assert.equal(app.audioRecording.notice, app.sweep.error);
 });

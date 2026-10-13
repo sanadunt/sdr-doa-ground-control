@@ -61,6 +61,14 @@ describe('DoA view status names the actual cause', () => {
     expect(status.shown).toBe(false);
   });
 
+  it('names an unknown DAQ sync state apart from a failed one', () => {
+    for (const status of [statusOf(snapshot({ status: { available: true, daq_health: 'UNKNOWN' } })), statusOf(snapshot({ status: { available: true } }))]) {
+      expect(status).toMatchObject({ code: 'DEGRADED', reason: 'daqUnknown', shown: false });
+    }
+    expect(doaStatusTextKey('daqUnknown')).not.toBe(doaStatusTextKey('daqDegraded'));
+    expect(DICTIONARIES.en[doaStatusTextKey('daqUnknown')]).toMatch(/unknown/);
+  });
+
   it('hides a fresh curve on ADC overdrive', () => {
     const status = statusOf(snapshot({ publication_gate: { state: 'BLOCKED', checks: { adc_not_overdriven: false }, reasons: ['ADC_OVERDRIVE'] } }));
     expect(status.code).toBe('DEGRADED');
@@ -82,7 +90,7 @@ describe('DoA view status names the actual cause', () => {
   });
 
   it('has a status text in both languages for every reason', () => {
-    const reasons: DoaStatusReason[] = ['waiting', 'simulation', 'available', 'daqDegraded', 'adcOverdrive', 'conflict', 'statusUnavailable',
+    const reasons: DoaStatusReason[] = ['waiting', 'simulation', 'available', 'daqDegraded', 'daqUnknown', 'adcOverdrive', 'conflict', 'statusUnavailable',
       'viewMissing', 'nodeStalled', 'sourceStale', 'notComparable', 'vectorIncomplete', 'localExpired', 'angleMissing'];
     for (const reason of reasons) {
       const key = doaStatusTextKey(reason);
@@ -98,6 +106,7 @@ describe('shared Overview readiness predicate', () => {
     ['healthy', snapshot(), true, true],
     ['DAQ sync failed', snapshot({ status: { available: true, daq_health: 'FAIL' } }), true, false],
     ['DAQ state unknown', snapshot({ status: { available: true, daq_health: 'UNKNOWN' } }), true, false],
+    ['DAQ state not reported', snapshot({ status: { available: true } }), true, false],
     ['ADC overdrive', snapshot({ publication_gate: { state: 'BLOCKED', checks: { adc_not_overdriven: false }, reasons: [] } }), true, false],
     ['CSV/XML conflict', snapshot({ native_consistency: { comparable: true, conflict: true } }), true, false],
     ['XML view missing', snapshot({}, candidate(), candidate({ available: false })), true, false],
@@ -122,6 +131,10 @@ describe('gate reason ranking', () => {
   it('leaves out the standing reasons when only actionable ones are wanted', () => {
     expect(actionableGateReasons(['GROUND_CLOCK_UNVERIFIED', 'DOA_AUTHORITY_NOT_SELECTED'])).toEqual([]);
     expect(actionableGateReasons(['GROUND_CLOCK_UNVERIFIED', 'NODE_CLOCK_STALLED'])).toEqual(['NODE_CLOCK_STALLED']);
+  });
+  it('ranks an unchecked adjacent-frame pair last, so the readout reason does not flip per read', () => {
+    expect(rankGateReasons(['NATIVE_ANGLE_UNCHECKED', 'GROUND_CLOCK_UNVERIFIED'])).toEqual(['GROUND_CLOCK_UNVERIFIED', 'NATIVE_ANGLE_UNCHECKED']);
+    expect(actionableGateReasons(['NATIVE_ANGLE_UNCHECKED', 'GROUND_CLOCK_UNVERIFIED'])).toEqual([]);
   });
   it('keeps unknown reasons ahead of standing ones and drops non-strings', () => {
     expect(rankGateReasons(['GROUND_CLOCK_UNVERIFIED', 'NEW_REASON', 7, ''])).toEqual(['NEW_REASON', 'GROUND_CLOCK_UNVERIFIED']);

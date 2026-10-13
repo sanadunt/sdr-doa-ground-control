@@ -1,4 +1,4 @@
-import type { Branding, ConsoleConfig, MqttSnapshot, RdfNodeSnapshot, TelemetrySnapshot } from './types';
+import type { Branding, ConsoleConfig, MqttSnapshot, MqttTarget, RdfNodeSnapshot, TelemetrySnapshot } from './types';
 import { isMqttTransport, isMqttWsPath, normalizeMqttSnapshot, normalizeRdfNodeSnapshot } from './lib/mqttMonitor';
 
 export const DEFAULT_API_TIMEOUT_MS = 10_000;
@@ -15,19 +15,31 @@ function isObject(value: unknown): value is JsonObject {
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string | null;
+  /** The message is the server's own error text, not the generic status fallback. */
+  readonly serverMessage: boolean;
 
-  constructor(message: string, status: number, code: string | null) {
+  constructor(message: string, status: number, code: string | null, serverMessage = true) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.serverMessage = serverMessage;
+  }
+}
+
+/** The console stored something other than what was sent, or its POST and GET answers disagree. */
+export class ConfigReadbackError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConfigReadbackError';
   }
 }
 
 function responseError(body: unknown, status: number): Error {
-  const detail = isObject(body) && typeof body.error === 'string' && body.error.trim() ? body.error : `request failed (${status})`;
+  const serverMessage = isObject(body) && typeof body.error === 'string' && body.error.trim() !== '';
+  const detail = serverMessage ? String(body.error) : `request failed (${status})`;
   const code = isObject(body) && typeof body.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(body.code) ? body.code : null;
-  return new ApiError(detail, status, code);
+  return new ApiError(detail, status, code, serverMessage);
 }
 
 async function readJson<T>(response: Response, signal?: AbortSignal): Promise<T> {
@@ -48,7 +60,7 @@ async function readJson<T>(response: Response, signal?: AbortSignal): Promise<T>
 }
 
 function timeoutReason(timeoutMs: number): Error {
-  const error = new Error(`request timed out after ${timeoutMs} ms`);
+  const error = Object.assign(new Error(`request timed out after ${timeoutMs} ms`), { timeoutMs });
   error.name = 'TimeoutError';
   return error;
 }
@@ -210,12 +222,12 @@ export async function updateConsoleConfig(config: ConsoleConfig, signal?: AbortS
   const readback = await getConsoleConfig(signal);
 
   if (!sameConfigValues(expected, readback)) {
-    throw new Error('console config read-back did not match the requested values');
+    throw new ConfigReadbackError('console config read-back did not match the requested values');
   }
   if (hasConfigFields(postedBody)) {
     const posted = normalizeConsoleConfig(postedBody);
     if (!sameConfigValues(posted, readback)) {
-      throw new Error('console config POST response did not match the GET read-back');
+      throw new ConfigReadbackError('console config POST response did not match the GET read-back');
     }
   }
   return readback;
@@ -291,8 +303,16 @@ export async function getRdfNodeMqtt(signal?: AbortSignal): Promise<RdfNodeSnaps
   return normalizeRdfNodeSnapshot(body, Date.now());
 }
 
-export async function connectMqtt(host: string, port: number, signal?: AbortSignal): Promise<MqttSnapshot> {
-  const body = await requestJson<unknown>(`/api/mqtt/connect?host=${encodeURIComponent(host)}&port=${encodeURIComponent(port)}`, {
+/** Query for /api/mqtt/connect. */
+export function mqttConnectPath(target: MqttTarget): string {
+  const query = new URLSearchParams({ host: target.host, port: String(target.port) });
+  if (target.transport !== undefined) query.set('transport', target.transport);
+  if (target.transport === 'websockets' && target.wsPath !== undefined) query.set('ws_path', target.wsPath);
+  return `/api/mqtt/connect?${query.toString()}`;
+}
+
+export async function connectMqtt(target: MqttTarget, signal?: AbortSignal): Promise<MqttSnapshot> {
+  const body = await requestJson<unknown>(mqttConnectPath(target), {
     method: 'POST',
     credentials: 'same-origin',
   }, signal);

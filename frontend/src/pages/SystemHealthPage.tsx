@@ -48,6 +48,10 @@ function progressDetail(t: Translate, progress: NodeProgressView | null): string
         age: progress.longestUnchangedMs === null ? 'N/A' : formatDuration(t, progress.longestUnchangedMs),
       }) + regressed;
     case 'ADVANCING': return t('health.progress.advancing') + regressed;
+    case 'UNCHANGED':
+      return t('health.progress.unchanged', {
+        age: progress.longestUnchangedMs === null ? 'N/A' : formatDuration(t, progress.longestUnchangedMs),
+      });
     case 'FIRST_SAMPLE': return t('health.progress.firstSample');
     case 'UNAVAILABLE': return t('health.progress.unavailable');
     case 'UNTRACKED': return t('health.progress.untracked');
@@ -116,7 +120,7 @@ function ResourcesPanel({ snapshot }: { snapshot: TelemetrySnapshot | null }): J
   );
 }
 
-export function SystemHealthPage({ snapshot, mqtt, localSnapshotFresh }: { snapshot: TelemetrySnapshot | null; mqtt: MqttSnapshot | null; localSnapshotFresh: boolean }): JSX.Element {
+export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapshotFresh }: { snapshot: TelemetrySnapshot | null; mqtt: MqttSnapshot | null; mqttError?: string | null; localSnapshotFresh: boolean }): JSX.Element {
   const { t } = useI18n();
   const status = snapshot?.status;
   const daq = safeRecord(statusValue(status, 'daq_status'));
@@ -128,7 +132,9 @@ export function SystemHealthPage({ snapshot, mqtt, localSnapshotFresh }: { snaps
   const progress = nodeProgressView(snapshot);
   const quality = signalQualityView(snapshot);
   const sync = `${syncCount(snapshot)} / 3`;
-  const connection = String(mqtt?.connection ?? 'OFF').toUpperCase();
+  // A failed /api/mqtt poll leaves mqtt null; that is a read error, not a monitor that is off.
+  const mqttReadFailed = !mqtt && Boolean(mqttError);
+  const connection = mqttReadFailed ? 'ERROR' : String(mqtt?.connection ?? 'OFF').toUpperCase();
   const csv = candidate(snapshot, 'csv');
   const xml = candidate(snapshot, 'xml');
   const failedSync = Array.isArray(status?.failed_sync_flags) ? status.failed_sync_flags.filter((flag): flag is string => typeof flag === 'string') : [];
@@ -174,7 +180,7 @@ export function SystemHealthPage({ snapshot, mqtt, localSnapshotFresh }: { snaps
             <strong className={`health-headline headline-${stateTone(headline)}`}>{headline}</strong>
             <span>{snapshot ? t('health.classified') : t('health.noResponse')}</span>
           </div>
-          <div className="metric-grid three"><Metric label="DAQ" value={status?.daq_health ?? 'N/A'} detail={dropped === null ? t('health.dropsNa') : t('health.drops', { count: dropped })} tone={toneFor(status?.daq_health)} /><Metric label={t('health.sync')} value={sync} detail={t('health.syncDetail')} tone={sync === '3 / 3' ? 'good' : 'warn'} /><Metric label="MQTT" value={connection} detail={mqtt?.read_only === false ? t('health.unexpectedWrite') : t('health.subscriberOnly')} tone={mqtt?.connection === 'connected' ? 'good' : 'warn'} /></div>
+          <div className="metric-grid three"><Metric label="DAQ" value={status?.daq_health ?? 'N/A'} detail={dropped === null ? t('health.dropsNa') : t('health.drops', { count: dropped })} tone={toneFor(status?.daq_health)} /><Metric label={t('health.sync')} value={sync} detail={t('health.syncDetail')} tone={sync === '3 / 3' ? 'good' : 'warn'} /><Metric label="MQTT" value={connection} detail={mqttReadFailed ? mqttError ?? '' : mqtt?.read_only === false ? t('health.unexpectedWrite') : t('health.subscriberOnly')} tone={mqttReadFailed ? 'bad' : mqtt?.connection === 'connected' ? 'good' : 'warn'} /></div>
         </Panel>
         <Panel className="inspector-panel" eyebrow={t('health.inspectorEyebrow')} title={t('health.inspectorTitle')}>
           <div className="key-value-list">{nodeRows.map((row) => <KeyValue key={row.label} label={row.label} value={row.value} detail={row.detail} tone={row.tone} />)}</div>

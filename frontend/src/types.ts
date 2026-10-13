@@ -132,6 +132,16 @@ export interface TelemetrySnapshot {
 
 export type MqttTransport = 'tcp' | 'websockets';
 
+/** Broker the local subscriber-only monitor connects to. */
+export interface MqttTarget {
+  host: string;
+  port: number;
+  /** Sent only when known; the server otherwise keeps its saved transport. */
+  transport?: MqttTransport;
+  /** Sent only with the WebSocket transport. */
+  wsPath?: string;
+}
+
 export interface ConsoleConfig {
   version?: number;
   base_url: string;
@@ -212,6 +222,8 @@ export interface RdfNodeTopic {
   qos: number | null;
   retained: boolean | null;
   error: string | null;
+  /** A zero-length retained publish removed the broker's value. */
+  cleared: boolean;
   /** Bounded, sanitized fields only; the 360-bin angular values are dropped. */
   payload: Record<string, unknown> | null;
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Candidate, TelemetrySnapshot } from '../types';
-import { DEFAULT_CONSOLE_CONFIG, REFRESH_INTERVALS_S, candidateErrors, deriveDataState, freshCandidate, nodeStalled, parsedCandidate, toneFor } from './telemetry';
+import { DEFAULT_CONSOLE_CONFIG, REFRESH_INTERVALS_S, candidateErrors, daqSyncState, deriveDataState, freshCandidate, nodeStalled, parsedCandidate, toneFor } from './telemetry';
 
 function view(overrides: Record<string, unknown> = {}): Candidate {
   return {
@@ -31,6 +31,8 @@ describe('data state classification', () => {
     ['healthy, local window over', snapshot(), false, false, 'STALE'],
     ['status.json unreadable, right after the read', snapshot({ status: { available: false } }), false, false, 'UNAVAILABLE'],
     ['DAQ sync failed', snapshot({ status: { available: true, daq_health: 'FAIL' } }), false, true, 'DEGRADED'],
+    ['DAQ sync unknown', snapshot({ status: { available: true, daq_health: 'UNKNOWN' } }), false, true, 'DEGRADED'],
+    ['status without daq_health', snapshot({ status: { available: true } }), false, true, 'DEGRADED'],
     ['ADC overdrive', snapshot({ publication_gate: { checks: { adc_not_overdriven: false } } }), false, true, 'DEGRADED'],
     ['both views malformed', snapshot({}, view({ available: false }), view({ available: false })), false, true, 'INVALID'],
     ['both views quarantined', snapshot({}, view({ canonical_angle_deg: undefined, normalization_error: 'CollectorError' }), view({ canonical_angle_deg: undefined, normalization_error: 'CollectorError' })), false, true, 'INVALID'],
@@ -42,6 +44,17 @@ describe('data state classification', () => {
     ['views not comparable', snapshot({ native_consistency: { comparable: false, conflict: false } }), false, true, 'INCOMPLETE'],
   ] as Array<[string, TelemetrySnapshot, boolean, boolean, string]>)('%s', (_label, value, error, localFresh, expected) => {
     expect(deriveDataState(value, error, localFresh)).toBe(expected);
+  });
+
+  it('reads the DAQ sync state as the collector gate does', () => {
+    expect(daqSyncState(snapshot())).toBe('PASS');
+    expect(daqSyncState(snapshot({ status: { available: true, daq_health: 'FAIL' } }))).toBe('FAIL');
+    expect(daqSyncState(snapshot({ status: { available: true, daq_health: 'UNKNOWN' } }))).toBe('UNKNOWN');
+    // The collector always reports daq_health with a readable status record.
+    expect(daqSyncState(snapshot({ status: { available: true } }))).toBe('UNKNOWN');
+    expect(daqSyncState(snapshot({ status: { available: true, daq_health: ' ' } }))).toBe('UNKNOWN');
+    expect(daqSyncState(snapshot({ status: { available: false } }))).toBeNull();
+    expect(daqSyncState(null)).toBeNull();
   });
 
   it('waits for the first snapshot', () => {

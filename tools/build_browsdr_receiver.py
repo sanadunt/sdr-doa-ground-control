@@ -1458,7 +1458,20 @@ def _apply_receiver_source_overlay(source: Path, overlay: Path) -> None:
         raise RuntimeError("Receiver source overlay contains no client files")
 
 
+def _npm_command() -> str:
+    # On Windows npm is npm.cmd. CreateProcess does not search PATHEXT, so a bare
+    # "npm" fails with WinError 2; shutil.which does search it.
+    npm = shutil.which("npm")
+    if npm is None:
+        raise RuntimeError(
+            "npm was not found on PATH; install Node.js 22.12 or later (it provides npm, "
+            "npm.cmd on Windows) and open a new terminal"
+        )
+    return npm
+
+
 def build_receiver(source: Path) -> Path:
+    npm = _npm_command()
     source = source.resolve()
     if not source.is_dir():
         raise RuntimeError(f"BrowSDR source not found at {source}; initialize the submodule first")
@@ -1485,9 +1498,9 @@ def build_receiver(source: Path) -> Path:
         build_dir = temporary_root / "build"
         environment = os.environ.copy()
         environment["BROWSDR_OUT_DIR"] = str(build_dir)
-        subprocess.run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=work_source, check=True)
+        subprocess.run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=work_source, check=True)
         subprocess.run(
-            ["npm", "run", "build", "--", "--base=/receiver/", f"--outDir={build_dir}"],
+            [npm, "run", "build", "--", "--base=/receiver/", f"--outDir={build_dir}"],
             cwd=work_source,
             env=environment,
             check=True,
