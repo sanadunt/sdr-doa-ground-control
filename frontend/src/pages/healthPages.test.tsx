@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { TelemetrySnapshot } from '../types';
 import { I18nContext, translate } from '../lib/i18n';
 import type { Lang } from '../lib/i18n';
-import { SystemHealthPage } from './SystemHealthPage';
+import { SystemHealthPage, overdriveSourceFile } from './SystemHealthPage';
 import { DoADiagnosticsPage } from './DoADiagnosticsPage';
 
 function render(element: ReactElement, lang: Lang = 'en'): string {
@@ -67,6 +67,14 @@ const MALFORMED = {
   },
 } as unknown as TelemetrySnapshot;
 
+describe('System Health ADC overdrive detail', () => {
+  it('names the Data Out files that reported the ADC state', () => {
+    expect(overdriveSourceFile('status')).toBe('status.json');
+    expect(overdriveSourceFile('xml')).toBe('doa.xml');
+    expect(overdriveSourceFile('other')).toBe('other');
+  });
+});
+
 describe('System Health MQTT card', () => {
   it('reports a failed /api/mqtt poll as ERROR instead of OFF', () => {
     const page = text(render(<SystemHealthPage snapshot={REFUSED} mqtt={null} mqttError="Console unreachable" localSnapshotFresh={false} />));
@@ -99,7 +107,7 @@ describe('System Health shows why Data Out failed (AUD-27, AUD-101)', () => {
     expect(page).toContain('xml.TIME is not numeric');
     expect(page).toContain('INVALID');
     expect(page).toContain('No change in timestamp_ms for 12.5 s');
-    expect(page).toContain('ADC overdrive reported by xml');
+    expect(page).toContain('ADC overdrive reported by doa.xml');
     expect(page).toContain('channel mask 0b11');
     expect(page).toContain('CSV 1.20 · XML 1.35 dB');
   });

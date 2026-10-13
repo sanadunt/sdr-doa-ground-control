@@ -59,9 +59,16 @@ function progressDetail(t: Translate, progress: NodeProgressView | null): string
   }
 }
 
+/** Name the Data Out file that reported the ADC state, not the collector's internal source id. */
+export function overdriveSourceFile(source: string): string {
+  if (source === 'status') return 'status.json';
+  if (source === 'xml') return 'doa.xml';
+  return source;
+}
+
 function overdriveDetail(t: Translate, quality: SignalQualityView | null): string {
   if (!quality || quality.state === 'UNKNOWN') return t('health.adc.unknown');
-  const sources = (quality.state === 'OVERDRIVE' ? quality.overdriveSources : quality.reportedBy).join(', ') || 'N/A';
+  const sources = (quality.state === 'OVERDRIVE' ? quality.overdriveSources : quality.reportedBy).map(overdriveSourceFile).join(', ') || 'N/A';
   const mask = quality.channelMask === null ? '' : ` · ${t('health.adc.mask', { mask: `0b${quality.channelMask.toString(2)}` })}`;
   return quality.state === 'OVERDRIVE' ? t('health.adc.overdrive', { sources }) + mask : t('health.adc.pass', { sources });
 }

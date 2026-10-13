@@ -77,7 +77,7 @@ function NativeRecord({ name, item, snapshot }: { name: 'csv' | 'xml'; item: Can
         <KeyValue label={t('diag.rawAngle')} value={typeof item.doa_raw_deg === 'number' ? `${formatNumber(item.doa_raw_deg)}°` : 'N/A'} detail={String(item.angle_convention ?? t('diag.native'))} />
         <KeyValue label={t('diag.canonical')} value={typeof item.canonical_angle_deg === 'number' ? `${formatNumber(item.canonical_angle_deg)}°` : 'N/A'} detail={t('diag.collectorConversion')} />
         <KeyValue label={t('diag.ageAtRead')} value={item.available === true ? formatAgeText(t, item.freshness) : 'N/A'} detail={item.freshness?.fresh === true ? t('diag.fresh') : t('diag.notFresh')} />
-        <KeyValue label={t('diag.units')} value={item.native_metrics_state ?? 'N/A'} detail={item.contract_mapping_state ?? 'N/A'} />
+        <KeyValue label={t('diag.units')} value={item.native_metrics_state ?? 'N/A'} detail={t('diag.unitsContractMapping', { state: item.contract_mapping_state ?? 'N/A' })} />
         <KeyValue label={t('diag.http')} value={httpValue} detail={httpDetail} tone={resource.ok === false ? 'bad' : undefined} />
         {rows ? (
           <KeyValue
