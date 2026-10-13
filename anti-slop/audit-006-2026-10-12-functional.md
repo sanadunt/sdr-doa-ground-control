@@ -996,7 +996,7 @@ Perbaikan dikerjakan dalam tiga gelombang di branch `claude/admiring-volta-5pijo
 | `bc5be0e` | Wave 1: jalur data, Overview, Receiver, MQTT, edge agent |
 | `f5c5449` | Wave 2: state App, halaman, Message Monitor |
 | `2cd42ce` | Wave 2: tindak lanjut Receiver |
-| wave 3 (belum di-commit) | Perubahan di working tree saat dokumen ini ditulis: integrasi frontend, perbaikan backend kecil, dokumentasi dan tooling build |
+| `7442ee5` | Wave 3: integrasi frontend, perbaikan backend kecil, dokumentasi dan tooling build, perbaikan hasil review |
 
 Status: `fixed` = temuan tertangani untuk kasus yang dilaporkan; `partial` = sebagian tertangani, sisanya dicatat di 7.2; `not_applicable` dan `deferred` tidak dipakai untuk temuan mana pun pada saat penulisan. Status mengikuti laporan per paket perbaikan dan pemeriksaan ulang kode saat dokumen ini ditulis. Status `fixed` bukan bukti uji di hardware (lihat 7.3).
 
@@ -1009,7 +1009,7 @@ Jumlah: 147 fixed, 1 partial, 0 not_applicable, 0 deferred, dari 148 temuan. 23 
 | AUD-01 | fixed | Peta, hover, popup, dan readout memakai bearing geografis (360 − θ₀ + compass_offset) mod 360 lewat `geographicBearingForBin`; θ₀ tetap tampil sebagai sudut array. | `2111c88`, `bc5be0e` |
 | AUD-02 | fixed | `NodeProgressTracker` per base URL mendeteksi timestamp, uptime, dan frame index yang tidak maju (`NODE_CLOCK_STALLED` setelah 10 s); UI menampilkan STALE dan teks node berhenti. | `bc5be0e`, `f5c5449` |
 | AUD-03 | fixed | Store menutup sesi yatim (Interrupted) saat start dan saat Records dibuka, finalisasi saat `pagehide`; iframe Receiver tetap ter-mount saat pindah halaman. | `bc5be0e`, `f5c5449` |
-| AUD-04 | fixed | Satu predikat `overviewDoaStatus()` menyembunyikan bearing, kurva polar, dan overlay saat DAQ sync tidak PASS atau ADC overdrive; status DEGRADED. Wave 3 menambah teks khusus DAQ UNKNOWN. | `f5c5449`, wave 3 (belum di-commit) |
+| AUD-04 | fixed | Satu predikat `overviewDoaStatus()` menyembunyikan bearing, kurva polar, dan overlay saat DAQ sync tidak PASS atau ADC overdrive; status DEGRADED. Wave 3 menambah teks khusus DAQ UNKNOWN. | `f5c5449`, `7442ee5` |
 | AUD-05 | fixed | ADC overdrive diparse (bool/bitmask) dan membuat snapshot DEGRADED; SNR dan PAPR native tampil di Health dan Diagnostics. Tidak ada ambang SNR/confidence (keputusan produk). | `bc5be0e`, `f5c5449` |
 | AUD-06 | fixed | Mode Polar menggambar θ₀ berlawanan jarum jam seperti upstream KrakenSDR; Compass tetap north-up searah jarum jam. | `bc5be0e` |
 | AUD-07 | fixed | Skala dB overlay default Auto dari vektor (span minimum 1 dB); Manual tetap tersedia dengan peringatan jenuh di legend. | `bc5be0e` |
@@ -1023,39 +1023,39 @@ Jumlah: 147 fixed, 1 partial, 0 not_applicable, 0 deferred, dari 148 temuan. 23 
 | AUD-15 | fixed | Sumber scan mengikuti radio yang tersambung, sumber Simulation selalu berlabel SIMULATION, pengaturan scan disimpan. | `bc5be0e` |
 | AUD-16 | fixed | Riwayat kandidat dibatasi 1000 (evict yang paling lama tidak terlihat); sinyal lemah butuh konfirmasi sekitar 6 sweep. | `bc5be0e` |
 | AUD-17 | fixed | Grouping di klien dan SQL memakai overlap band [start, end], tidak lagi rantai 100 kHz. | `bc5be0e` |
-| AUD-18 | fixed | Uji sudut 1° hanya untuk pasangan same-frame, dengan re-read paralel untuk frame bersebelahan. Wave 3: pasangan yang tidak dicek memblokir publikasi dengan `NATIVE_ANGLE_UNCHECKED`. | `bc5be0e`, wave 3 (belum di-commit) |
+| AUD-18 | fixed | Uji sudut 1° hanya untuk pasangan same-frame, dengan re-read paralel untuk frame bersebelahan. Wave 3: pasangan yang tidak dicek memblokir publikasi dengan `NATIVE_ANGLE_UNCHECKED`. | `bc5be0e`, `7442ee5` |
 | AUD-19 | fixed | Pengaturan Data Out terakhir yang valid dipakai ulang hingga 90 s dengan label "last known", lalu fallback berlabel assumed. | `bc5be0e` |
 | AUD-20 | fixed | `compass_offset` dari Data Out dipakai juga untuk plot Linear, berlabel `DATA_OUT · LOCAL AXIS`. | `bc5be0e` |
-| AUD-21 | fixed | Peta memakai `doaReady` dari predikat yang sama dengan readout dan polar; CONFLICT atau view hilang mengosongkan ketiganya. Wave 3: pemberitahuan peta menyebut penyebabnya. | `f5c5449`, wave 3 (belum di-commit) |
+| AUD-21 | fixed | Peta memakai `doaReady` dari predikat yang sama dengan readout dan polar; CONFLICT atau view hilang mengosongkan ketiganya. Wave 3: pemberitahuan peta menyebut penyebabnya. | `f5c5449`, `7442ee5` |
 | AUD-22 | fixed | CSV multi-VFO (1–16 baris) diterima dan baris dipilih lewat frekuensi XML; format "Kerberos App" mendapat error eksplisit (tidak diparse). | `bc5be0e`, `f5c5449` |
 | AUD-23 | fixed | Umur DoA menghitung waktu koleksi di Ground (`ground_elapsed_ms`). | `bc5be0e` |
 | AUD-24 | fixed | Interval 1 s dan 2 s ditambahkan, default instalasi baru 2 s; form memberi peringatan untuk Manual dan > 5 s. | `bc5be0e`, `f5c5449` |
 | AUD-25 | fixed | `deriveDataState` mengikuti urutan collector: UNAVAILABLE sebelum STALE; STALE hanya untuk data yang memang tua. | `f5c5449` |
 | AUD-26 | fixed | State INVALID dan INCOMPLETE ditambahkan, juga CONFLICT dan INCOMPLETE di `overall_state`. | `bc5be0e`, `f5c5449` |
-| AUD-27 | fixed | Tabel Pembacaan resource dan error per view tampil di Health dan Diagnostics. Wave 3: error `/api/snapshot` tampil sebagai banner, bukan hanya tooltip. | `f5c5449`, wave 3 (belum di-commit) |
+| AUD-27 | fixed | Tabel Pembacaan resource dan error per view tampil di Health dan Diagnostics. Wave 3: error `/api/snapshot` tampil sebagai banner, bukan hanya tooltip. | `f5c5449`, `7442ee5` |
 | AUD-28 | fixed | Legacy UI mendapat timeout request 8 s, expiry lokal, dan interval 1/2 s. | `bc5be0e` |
-| AUD-29 | fixed | Posisi Data Out live terakhir dipertahankan di peta dan readout ("POSISI STASIUN TERAKHIR · STALE"). Wave 3: hanya `gps_status` tanpa fix yang menjatuhkan ke posisi referensi. | `bc5be0e`, `f5c5449`, wave 3 (belum di-commit) |
+| AUD-29 | fixed | Posisi Data Out live terakhir dipertahankan di peta dan readout ("POSISI STASIUN TERAKHIR · STALE"). Wave 3: hanya `gps_status` tanpa fix yang menjatuhkan ke posisi referensi. | `bc5be0e`, `f5c5449`, `7442ee5` |
 | AUD-30 | fixed | Field angka overlay berupa draft yang berlaku saat Enter/blur; nilai tidak valid ditolak dengan pesan, tidak di-clamp. | `bc5be0e` |
 | AUD-31 | fixed | WebGL context lost dan worker macet ditangani: kanvas fallback aktif dengan pemberitahuan, pulih saat context dipulihkan. | `bc5be0e` |
-| AUD-32 | fixed | Satu host tile pada satu waktu (`.de` lalu `.org` setelah 4 kegagalan atau host diam), chip BASEMAP UNAVAILABLE; dokumen diperbarui di wave 3. | `bc5be0e`, wave 3 (belum di-commit) |
+| AUD-32 | fixed | Satu host tile pada satu waktu (`.de` lalu `.org` setelah 4 kegagalan atau host diam), chip BASEMAP UNAVAILABLE; dokumen diperbarui di wave 3. | `bc5be0e`, `7442ee5` |
 | AUD-33 | fixed | Domain radial terakhir dipertahankan saat nilai sesaat null, sehingga hanya restyle yang berjalan dan zoom/rotasi bertahan. | `bc5be0e` |
 | AUD-34 | fixed | Checkbox "Rentang dB manual" terpisah; Head Up saja mempertahankan skala auto. | `bc5be0e` |
-| AUD-35 | fixed | `radialDomain()` memakai langkah 1/2/5 × 10^k dari span data (minimum 1 dB); `SDR_DOA_8081_DATA_REFERENCE.md` diperbarui di wave 3. | `bc5be0e`, wave 3 (belum di-commit) |
+| AUD-35 | fixed | `radialDomain()` memakai langkah 1/2/5 × 10^k dari span data (minimum 1 dB); `SDR_DOA_8081_DATA_REFERENCE.md` diperbarui di wave 3. | `bc5be0e`, `7442ee5` |
 | AUD-36 | fixed | Tombol Share (`sendChartToCloud`) dihapus dan `showSendToCloud` false. | `bc5be0e` |
 | AUD-37 | fixed | CSP `img-src` memuat `blob:`; ekspor PNG diverifikasi di Playwright. | `bc5be0e` |
 | AUD-38 | fixed | Bundle Plotly parsial (core + scatterpolar), chunk sekitar 1,2 MB; freeze Overview turun dari sekitar 1,2 s ke sekitar 0,25 s (CPU 1x, sandbox). | `bc5be0e` |
-| AUD-39 | fixed | `lib/sourceConfigStorage.ts` menyimpan pilihan GPS/Compass dengan validasi; wave 3 memulihkannya saat App start. | `f5c5449`, wave 3 (belum di-commit) |
+| AUD-39 | fixed | `lib/sourceConfigStorage.ts` menyimpan pilihan GPS/Compass dengan validasi; wave 3 memulihkannya saat App start. | `f5c5449`, `7442ee5` |
 | AUD-40 | fixed | Skip link memfokuskan `#console-content` tanpa mengubah route. | `f5c5449` |
-| AUD-41 | fixed | Form menormalkan nilai sebelum read-back; wave 3: server menolak port/interval pecahan atau boolean, tidak lagi memotongnya. | `f5c5449`, wave 3 (belum di-commit) |
+| AUD-41 | fixed | Form menormalkan nilai sebelum read-back; wave 3: server menolak port/interval pecahan atau boolean, tidak lagi memotongnya. | `f5c5449`, `7442ee5` |
 | AUD-42 | fixed | Chunk di-prefetch dan dimuat lewat `lazyWithRetry`; `LoadErrorBoundary` membatasi kegagalan ke halaman atau panel peta. | `f5c5449` |
 | AUD-43 | fixed | Baris metrik Message Monitor menjadi dua kolom di ≤ 639 px. | `f5c5449` |
 | AUD-44 | fixed | `/api/mqtt` punya poll sendiri: 2 s di Monitor Pesan dan Kesehatan Sistem, 5 s di halaman lain. | `f5c5449` |
 | AUD-45 | fixed | Snapshot monitor punya `kind_counts`; kolom Count membacanya. | `bc5be0e`, `f5c5449` |
 | AUD-46 | fixed | Flag `valid`/`doa_valid`/`settings_valid` disalin ke `validity_flags` dan tampil apa adanya; regex redaksi hanya memeriksa kata terakhir key. | `bc5be0e`, `f5c5449` |
 | AUD-47 | fixed | Tiap kind punya `age_ms`/`source_ts_ms`, kolom Age berjalan lokal, badge STALE per kind. | `bc5be0e`, `f5c5449` |
-| AUD-48 | fixed | Reconnect selalu membuat client baru dan mereset penghitung; pesan UI menyebutnya. Wave 3 meneruskan transport dan path secara eksplisit. | `bc5be0e`, `f5c5449`, wave 3 (belum di-commit) |
+| AUD-48 | fixed | Reconnect selalu membuat client baru dan mereset penghitung; pesan UI menyebutnya. Wave 3 meneruskan transport dan path secara eksplisit. | `bc5be0e`, `f5c5449`, `7442ee5` |
 | AUD-49 | fixed | Client id `groundconsole` + 10 hex acak per monitor. | `bc5be0e` |
-| AUD-50 | fixed | Panel RDF Node v2 di Monitor Pesan (poll `GET /api/mqtt/rdf-node` 2 s selama halaman terbuka). Wave 3: retained clear v2 tampil UNAVAILABLE. | `f5c5449`, wave 3 (belum di-commit) |
+| AUD-50 | fixed | Panel RDF Node v2 di Monitor Pesan (poll `GET /api/mqtt/rdf-node` 2 s selama halaman terbuka). Wave 3: retained clear v2 tampil UNAVAILABLE. | `f5c5449`, `7442ee5` |
 | AUD-51 | partial | Transport (`tcp`/`websockets`) dan `mqtt_ws_path` ada di kontrak, CLI, dan form. Kredensial dan TLS sengaja belum dibuat karena POST config/connect belum punya guard Origin. | `bc5be0e`, `f5c5449` |
 | AUD-52 | fixed | Agent memakai `--collect-budget` (default 2 s, maks 10 s) di bawah keepalive/2. | `bc5be0e` |
 | AUD-53 | fixed | Koleksi mengikuti jadwal publish; CSV/XML hanya dibaca bila authority dipilih. | `bc5be0e` |
@@ -1072,8 +1072,8 @@ Jumlah: 147 fixed, 1 partial, 0 not_applicable, 0 deferred, dari 148 temuan. 23 
 | AUD-64 | fixed | Bagian pecahan offset DC dihapus dengan pembulatan ber-dither; noise floor naik sekitar 0,7–2 dB pada gain sangat rendah. | `bc5be0e` |
 | AUD-65 | fixed | Skala byte waterfall dan trace arsip −160..+60 dB; arsip lama tetap terbuka. | `bc5be0e` |
 | AUD-66 | fixed | Preset minimum peak All (default) dan −50..0 dBFS. | `bc5be0e` |
-| AUD-67 | fixed | Script `npm run build:all` (dan `build:receiver`) merangkai build console dan Receiver; tes static gagal (bukan skip) bila `dist` ada, submodule ada, tetapi `dist/receiver` hilang; semua dokumen build/verifikasi diperbarui. | wave 3 (belum di-commit) |
-| AUD-68 | fixed | Builder me-resolve npm lewat `shutil.which` (menemukan `npm.cmd` di Windows) dan memberi pesan jelas bila npm tidak ada; diuji dengan mock, tanpa host Windows. | wave 3 (belum di-commit) |
+| AUD-67 | fixed | Script `npm run build:all` (dan `build:receiver`) merangkai build console dan Receiver; tes static gagal (bukan skip) bila `dist` ada, submodule ada, tetapi `dist/receiver` hilang; semua dokumen build/verifikasi diperbarui. | `7442ee5` |
+| AUD-68 | fixed | Builder me-resolve npm lewat `shutil.which` (menemukan `npm.cmd` di Windows) dan memberi pesan jelas bila npm tidak ada; diuji dengan mock, tanpa host Windows. | `7442ee5` |
 | AUD-69 | fixed | Sudut native di [−360, 720] direduksi modulo 360 sebelum konvensi diterapkan; sudut yang tidak bisa dipakai menjadi `NATIVE_ANGLE_INVALID`. | `bc5be0e` |
 | AUD-70 | fixed | `HTTPError` ditangkap sebelum `URLError`, `http_status` terisi, error parse XML disimpan di candidate. | `bc5be0e` |
 | AUD-71 | fixed | `STATION_ID` XML opsional; koma di station ID CSV diserap ke field station. | `bc5be0e` |
@@ -1087,7 +1087,7 @@ Jumlah: 147 fixed, 1 partial, 0 not_applicable, 0 deferred, dari 148 temuan. 23 
 | AUD-79 | fixed | Tanpa paho, slot monitor berisi placeholder berstatus error; POST config tidak lagi memutus koneksi. | `bc5be0e` |
 | AUD-80 | fixed | Server menerima PNG palette, 16-bit, dan interlaced; klien memvalidasi PNG sebelum di-stage. | `bc5be0e`, `f5c5449` |
 | AUD-81 | fixed | Tanpa `SDR_DOA_ADMIN_PASSWORD` login menjawab 503 `ADMIN_DISABLED`; panel menampilkan DISABLED, error diterjemahkan. | `bc5be0e`, `f5c5449` |
-| AUD-82 | fixed | Flag CLI eksplisit mengalahkan `console.json` untuk run itu dengan pemberitahuan di log; QUICKSTART dan dokumen lain diperbarui di wave 3. | `bc5be0e`, wave 3 (belum di-commit) |
+| AUD-82 | fixed | Flag CLI eksplisit mengalahkan `console.json` untuk run itu dengan pemberitahuan di log; QUICKSTART dan dokumen lain diperbarui di wave 3. | `bc5be0e`, `7442ee5` |
 | AUD-83 | fixed | Referensi monitor ditukar di bawah lock; `stop()` dipanggil setelah lock dilepas. | `bc5be0e` |
 | AUD-84 | fixed | Field invalid di `console.json` jatuh ke default per field dengan log; file asli disalin ke `console.json.invalid.bak`. | `bc5be0e` |
 | AUD-85 | fixed | Legacy CSS punya `[hidden]{display:none!important}`. | `bc5be0e` |
@@ -1098,14 +1098,14 @@ Jumlah: 147 fixed, 1 partial, 0 not_applicable, 0 deferred, dari 148 temuan. 23 
 | AUD-90 | fixed | Kamera disimpan di module scope saat unmount dan dipulihkan saat kembali ke Overview. | `bc5be0e` |
 | AUD-91 | fixed | Popup stasiun punya baris judul sehingga tombol close tidak menutupi nilai pertama. | `bc5be0e` |
 | AUD-92 | fixed | ResizeObserver membingkai ulang overlay saat Layers/Expand/resize bila kamera belum digeser operator. | `bc5be0e` |
-| AUD-93 | fixed | `lib/doaStatus.ts` memberi kode dan teks per penyebab (conflict, status tak terbaca, view hilang, node beku, stale, expiry lokal, DAQ/ADC). Wave 3 merapikan teks polar. | `bc5be0e`, wave 3 (belum di-commit) |
+| AUD-93 | fixed | `lib/doaStatus.ts` memberi kode dan teks per penyebab (conflict, status tak terbaca, view hilang, node beku, stale, expiry lokal, DAQ/ADC). Wave 3 merapikan teks polar. | `bc5be0e`, `7442ee5` |
 | AUD-94 | fixed | Margin plot 64 px (lebar) dan 40 px (ringkas); label W 270° tidak terpotong. | `bc5be0e` |
 | AUD-95 | fixed | `formatDegrees()` membulatkan dulu lalu wrap, sehingga tidak muncul 360,0°. | `bc5be0e` |
 | AUD-96 | fixed | Caption dipisah per mode; Polar tidak menyebut offset; hovertemplate diterjemahkan. | `bc5be0e` |
 | AUD-97 | fixed | Huruf kardinal U/T/S/B di polar ID, locale Plotly dan judul kontrol MapLibre mengikuti bahasa. | `bc5be0e` |
 | AUD-98 | fixed | PolarPanel menampilkan badge SIMULATION dan teks kurva sintetis. | `bc5be0e` |
-| AUD-99 | fixed | Durasi dilokalkan (`common.duration*`), label gate-check, validasi GPS, dan error admin diterjemahkan; wave 3 menerjemahkan error App/api dan `formatElapsed`. Detail error dari browser/radio tetap Inggris. | `f5c5449`, wave 3 (belum di-commit) |
-| AUD-100 | fixed | Copy bantuan host MQTT dan Base URL (EN/ID) menyebut aturan yang sebenarnya; AGENTS.md tidak lagi menyebut host MQTT harus loopback. | wave 3 (belum di-commit) |
+| AUD-99 | fixed | Durasi dilokalkan (`common.duration*`), label gate-check, validasi GPS, dan error admin diterjemahkan; wave 3 menerjemahkan error App/api dan `formatElapsed`. Detail error dari browser/radio tetap Inggris. | `f5c5449`, `7442ee5` |
+| AUD-100 | fixed | Copy bantuan host MQTT dan Base URL (EN/ID) menyebut aturan yang sebenarnya; AGENTS.md tidak lagi menyebut host MQTT harus loopback. | `7442ee5` |
 | AUD-101 | fixed | Kartu dan badge Data Out HTTP dihitung dari `snapshot.resources` (AVAILABLE/PARTIAL/UNAVAILABLE/UNKNOWN). | `f5c5449` |
 | AUD-102 | fixed | Auto margin pada item pertama/terakhir strip; DATA tidak terpotong. Di ponsel strip tetap scroll horizontal dengan bayangan tepi. | `f5c5449` |
 | AUD-103 | fixed | Container query pada panel ringkasan Health; metrik bertumpuk di bawah 520 px lebar panel. | `f5c5449` |
@@ -1125,7 +1125,7 @@ Jumlah: 147 fixed, 1 partial, 0 not_applicable, 0 deferred, dari 148 temuan. 23 
 | AUD-117 | fixed | PINGREQ dijadwalkan dari paket keluar terakhir saja. | `bc5be0e` |
 | AUD-118 | fixed | `telemetry_drop_count` menghitung sampel health/DoA yang tergantikan sebelum terkirim (tertinggal satu sampel). | `bc5be0e` |
 | AUD-119 | fixed | Setelah reconnect, state dan config_reported dikirim ulang segera. | `bc5be0e` |
-| AUD-120 | fixed | QUICKSTART punya perintah broker staging (`mosquitto -c tools/mqtt_stage4.conf`) dan Ground Console dengan `--mqtt-transport tcp` serta `--config-path` terpisah. | wave 3 (belum di-commit) |
+| AUD-120 | fixed | QUICKSTART punya perintah broker staging (`mosquitto -c tools/mqtt_stage4.conf`) dan Ground Console dengan `--mqtt-transport tcp` serta `--config-path` terpisah. | `7442ee5` |
 | AUD-121 | fixed | Menyimpan marker set dengan nama yang sudah ada menjawab 409; UI meminta konfirmasi sebelum mengganti. | `bc5be0e` |
 | AUD-122 | fixed | Rename ke nama yang dipakai menjawab 409; error sqlite3/zlib menjadi 500 dengan pesan storage. | `bc5be0e` |
 | AUD-123 | fixed | Jendela waktu boleh melewati tengah malam (22:00–02:00). | `bc5be0e` |
@@ -1148,11 +1148,11 @@ Jumlah: 147 fixed, 1 partial, 0 not_applicable, 0 deferred, dari 148 temuan. 23 
 | AUD-140 | fixed | Records menampilkan sesi yang sedang merekam; tab Listener punya indikator REC. | `bc5be0e` |
 | AUD-141 | fixed | Top bar disembunyikan di luar Listener, tombol Refresh tidak melebar, tabel Records menjadi kartu di bawah 600 px. | `bc5be0e` |
 | AUD-142 | fixed | Connect Device memeriksa WebUSB dulu dan meminta Chrome/Edge; QUICKSTART menyebut kebutuhan Chromium. | `bc5be0e` |
-| AUD-143 | fixed | Dokumen (QUICKSTART, CLAUDE.md, AGENTS.md, initialize.md, workflow) menyatakan minimum Python 3.9 untuk console; impor `zoneinfo` tidak dibuat lazy. | wave 3 (belum di-commit) |
-| AUD-144 | fixed | Syarat paho diselaraskan (console start tanpa paho, monitor ERROR); initialize.md menyebut Receiver, `/api/receiver/*`, `/api/mqtt/rdf-node`, `--data-dir`, dan memakai path relatif. | wave 3 (belum di-commit) |
-| AUD-145 | fixed | `SDR_DOA_FRONTEND_WORKFLOW.md` ditulis ulang: `.venv` + paho atau `--mqtt-host ''`, tujuh halaman, MapLibre dan WebGL2, host tile bergantian, `npm run build:all`. | wave 3 (belum di-commit) |
-| AUD-146 | fixed | Target sentuh diperbesar untuk pointer coarse dan ≤ 639 px (tombol bahasa, modebar Plotly, summary Graph settings); diukur ulang di Playwright Chromium, belum di perangkat sentuh nyata. | wave 3 (belum di-commit) |
-| AUD-147 | fixed | `evaluasi GUI.md` punya bagian "Status saat ini" yang menandai GSAP, Leaflet, banner simulasi, event `load`, urutan mobile, dan prioritas tile sebagai superseded; AGENTS.md dan initialize.md menunjuk ke sana. | wave 3 (belum di-commit) |
+| AUD-143 | fixed | Dokumen (QUICKSTART, CLAUDE.md, AGENTS.md, initialize.md, workflow) menyatakan minimum Python 3.9 untuk console; impor `zoneinfo` tidak dibuat lazy. | `7442ee5` |
+| AUD-144 | fixed | Syarat paho diselaraskan (console start tanpa paho, monitor ERROR); initialize.md menyebut Receiver, `/api/receiver/*`, `/api/mqtt/rdf-node`, `--data-dir`, dan memakai path relatif. | `7442ee5` |
+| AUD-145 | fixed | `SDR_DOA_FRONTEND_WORKFLOW.md` ditulis ulang: `.venv` + paho atau `--mqtt-host ''`, tujuh halaman, MapLibre dan WebGL2, host tile bergantian, `npm run build:all`. | `7442ee5` |
+| AUD-146 | fixed | Target sentuh diperbesar untuk pointer coarse dan ≤ 639 px (tombol bahasa, modebar Plotly, summary Graph settings); diukur ulang di Playwright Chromium, belum di perangkat sentuh nyata. | `7442ee5` |
+| AUD-147 | fixed | `evaluasi GUI.md` punya bagian "Status saat ini" yang menandai GSAP, Leaflet, banner simulasi, event `load`, urutan mobile, dan prioritas tile sebagai superseded; AGENTS.md dan initialize.md menunjuk ke sana. | `7442ee5` |
 | AUD-148 | fixed | `test_stage3.py` memakai direktori sementara untuk config, branding, dan data Receiver; store menutup koneksi sqlite (tes regresi ResourceWarning di wave 2). | `bc5be0e`, `2cd42ce` |
 
 ### 7.2 Item partial dan sisa pekerjaan
