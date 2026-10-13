@@ -177,9 +177,10 @@ export class Backend {
 		audioCallback: (audioSamples: Float32Array) => void,
 		whisperCallback: ((vfoIndex: number, frequencyHz: number, samples: Float32Array) => void) | null = null,
 		pocsagCallback: ((vfoIndex: number, frequencyHz: number, message: unknown) => void) | null = null,
+		rxErrorCallback: ((message: string) => void) | null = null,
 	): Promise<void> {
 		if (this.sweepEngine) throw new Error('Stop the active sweep before starting Receiver mode');
-		return startRxStream(this, opts, spectrumCallback, audioCallback, whisperCallback, pocsagCallback);
+		return startRxStream(this, opts, spectrumCallback, audioCallback, whisperCallback, pocsagCallback, rxErrorCallback);
 	}
 
 	setSpectrumIqCorrection(enabled: boolean): void {

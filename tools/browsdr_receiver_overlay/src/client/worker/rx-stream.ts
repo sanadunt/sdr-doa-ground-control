@@ -36,7 +36,8 @@ export async function startRxStream(
 	spectrumCallback: any,
 	audioCallback: any,
 	whisperCallback: any,
-	pocsagCallback: any
+	pocsagCallback: any,
+	rxErrorCallback: ((message: string) => void) | null = null,
 ): Promise<void> {
 	if (_streamStarting) return;
 	_streamStarting = true;
@@ -627,6 +628,14 @@ export async function startRxStream(
 			}
 		}
 
+		// Every parallel USB transfer fails when the radio is unplugged; report the first one.
+		let rxErrorReported = false;
+		const reportRxError = (error: unknown): void => {
+			if (rxErrorReported || !rxErrorCallback) return;
+			rxErrorReported = true;
+			rxErrorCallback(error instanceof Error ? error.message : String(error));
+		};
+
 		await device.startRx((data: any) => {
 			perf.usbCallbacks++;
 
@@ -705,7 +714,7 @@ export async function startRxStream(
 			}
 
 			backend.sabPoolIndex = (backend.sabPoolIndex! + 1) % SAB_POOL_SIZE;
-		});
+		}, reportRxError);
 
 		// Reinitialize all remote client DSP workers with the new sample rate
 		// and shared IQ buffers. Without this, remote workers hold stale references

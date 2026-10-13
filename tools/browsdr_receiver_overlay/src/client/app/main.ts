@@ -16,7 +16,8 @@ import { sweepMethods } from './sweep';
 import { recordsMethods } from './records';
 import { audioRecordingMethods } from './audio-recording';
 import { receiverRecordsApi } from './receiver-records-api';
-import { i18nMethods, receiverLanguage } from './i18n';
+import { i18nMethods, receiverLanguage, translateReceiver } from './i18n';
+import { setSweepCanvasTranslator } from './sweep-marker-renderer';
 
 const Backend = Comlink.wrap<any>(new Worker(new URL('../worker/main.ts', import.meta.url), { type: 'module' }));
 
@@ -264,6 +265,7 @@ receiverApp = createApp({
 		await this.autoConnectAuthorizedHackRF();
 	},
 	mounted() {
+		setSweepCanvasTranslator(text => translateReceiver(this.uiLanguage, text));
 		mountCanvas.call(this);
 		this.initSweepCanvas();
 	},
@@ -275,6 +277,7 @@ receiverApp = createApp({
 }).mount('#app');
 window.addEventListener('console-language-change', (event: Event) => {
 	receiverApp.uiLanguage = receiverLanguage((event as CustomEvent<unknown>).detail);
+	if (receiverApp.activeWorkspace === 'spectrum') receiverApp.drawSweepSpectrum();
 });
 window.addEventListener('console-theme-change', () => {
 	if (receiverApp.activeWorkspace === 'spectrum') receiverApp.drawSweepSpectrum();

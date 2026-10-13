@@ -387,6 +387,11 @@ test('waterfall rows and archived traces keep levels above 0 dB (AUD-65)', () =>
 	const legacyLevels = waterfall.decodeArchivedTrace(legacy);
 	assert.ok(Math.abs(legacyLevels[0] + 70) < 0.5);
 	assert.equal(legacyLevels[5], 0);
+
+	// Scans that record their trace format in the scan config are decoded by it.
+	const explicit = waterfall.decodeArchivedTrace(trace, waterfall.ARCHIVED_TRACE_FORMAT_TAG);
+	assert.deepEqual(Array.from(explicit), Array.from(decoded));
+	assert.throws(() => waterfall.decodeArchivedTrace(trace, 2), /format 2 is not supported/);
 });
 
 test('session waterfall levels saved with the old 0 dB ceiling are converted on open (AUD-65)', () => {

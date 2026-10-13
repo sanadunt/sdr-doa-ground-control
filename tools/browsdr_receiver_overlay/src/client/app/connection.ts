@@ -21,6 +21,22 @@ function initializeGains(
 }
 
 const WEBUSB_UNAVAILABLE_MESSAGE = 'This browser has no WebUSB, so it cannot connect a HackRF. Open the console in Chrome or Edge (desktop or Android).';
+const RX_STREAM_FAILED_PREFIX = 'The radio stopped sending samples';
+
+function sameUsbDevice(a: USBDevice, b: USBDevice): boolean {
+	return a === b || (a.vendorId === b.vendorId && a.productId === b.productId
+		&& (a.serialNumber ?? '') === (b.serialNumber ?? ''));
+}
+
+/** False only when WebUSB no longer lists the radio; unknown counts as present. */
+async function usbDeviceIsPresent(device: USBDevice): Promise<boolean> {
+	if (!('usb' in navigator)) return true;
+	try {
+		return (await navigator.usb.getDevices()).some(candidate => sameUsbDevice(candidate, device));
+	} catch {
+		return true;
+	}
+}
 
 /** Hardware scan source for a newly connected radio; Simulation only when the radio cannot scan. */
 function hardwareSweepSource(capabilities: { supportsNativeSweep?: boolean; supportsManualSweep?: boolean } | null): 'native' | 'manual' | null {
@@ -43,13 +59,16 @@ export const connectionMethods = {
 	},
 
 	async handleUsbDeviceLost(this: AppInstance, device: USBDevice) {
+		// A failed RX transfer may already be stopping RX for the same unplug; let it finish first.
+		if (this._rxFailureHandling) await this._rxFailureHandling;
+		await this._handleRadioLost(device, false);
+	},
+
+	async _handleRadioLost(this: AppInstance, device: USBDevice, recordingWasArmed: boolean) {
 		const opened = this._usbDevice as USBDevice | null;
-		const sameDevice = opened === device || (opened !== null
-			&& opened.vendorId === device.vendorId && opened.productId === device.productId
-			&& (opened.serialNumber ?? '') === (device.serialNumber ?? ''));
-		if (!this.connected || this.mockDevice || !sameDevice) return;
+		if (!this.connected || this.mockDevice || opened === null || !sameUsbDevice(opened, device)) return;
 		this._usbDevice = null;
-		const wasRecording = this.audioRecording.armed;
+		const wasRecording = recordingWasArmed || this.audioRecording.armed;
 		try {
 			if (this.sweep.active || this.sweep.starting) await this.stopSweep(false, 'failed');
 		} catch (error) {
@@ -73,6 +92,39 @@ export const connectionMethods = {
 		this.audioRecording.notice = wasRecording ? message : this.audioRecording.notice;
 		this.sweep.error = message;
 		this.showMsg(message);
+	},
+
+	/**
+	 * The worker reports the first failed RX bulk transfer of a stream. Stop RX so the
+	 * recording is closed instead of collecting silence, then tell a lost radio apart
+	 * from one that is still attached.
+	 */
+	handleRxStreamError(this: AppInstance, streamId: number, detail: string): Promise<void> | undefined {
+		if (streamId !== this._rxStreamId || !this.running || !this.connected || this._rxFailureHandling) return undefined;
+		const handling = (async () => {
+			const device = this._usbDevice as USBDevice | null;
+			const wasRecording = Boolean(this.audioRecording.armed || this.audioRecording.starting);
+			try {
+				await this.togglePlay();
+			} catch (error) {
+				console.error('Stopping RX after a failed USB transfer failed:', error);
+				this.running = false;
+			}
+			if (device && !(await usbDeviceIsPresent(device))) {
+				await this._handleRadioLost(device, wasRecording);
+				return;
+			}
+			if (!this.connected || this._usbDevice !== device) return;
+			const message = `${RX_STREAM_FAILED_PREFIX} (${detail}). RX stopped${wasRecording ? '; the recording was saved up to this point' : ''}. Check the USB cable, then press Resume or reconnect the radio.`;
+			if (wasRecording) this.audioRecording.notice = message;
+			this.sweep.error = message;
+			this.showMsg(message);
+		})();
+		this._rxFailureHandling = handling;
+		void handling.finally(() => {
+			if (this._rxFailureHandling === handling) this._rxFailureHandling = null;
+		});
+		return handling;
 	},
 
 	async autoConnectAuthorizedHackRF(this: AppInstance) {
@@ -145,7 +197,8 @@ export const connectionMethods = {
 				this.connected = true;
 				this.mockDevice = false;
 				this._usbDevice = device;
-				if (this.sweep.error === WEBUSB_UNAVAILABLE_MESSAGE || this.sweep.error.startsWith('Radio disconnected')) this.sweep.error = '';
+				if (this.sweep.error === WEBUSB_UNAVAILABLE_MESSAGE || this.sweep.error.startsWith('Radio disconnected')
+					|| this.sweep.error.startsWith(RX_STREAM_FAILED_PREFIX)) this.sweep.error = '';
 				const info = await this.backend.info();
 				this.info.boardName = info.name;
 
@@ -257,6 +310,8 @@ export const connectionMethods = {
 	async togglePlay(this: AppInstance, isRestart = false, sweepTransition = false) {
 		if (this.sweep.active || (this.sweep.starting && !sweepTransition)) return;
 		if (this.running) {
+			// Transfer errors from the stream being stopped are expected, not a failure.
+			this._rxStreamId = (this._rxStreamId ?? 0) + 1;
 			const wasRecording = this.audioRecording.armed || this.audioRecording.starting;
 			await this.disarmVfoAudioRecording();
 			if (wasRecording && !this._rxRestarting) {
@@ -316,6 +371,7 @@ export const connectionMethods = {
 			gains: { ...this.gains },
 		};
 
+		const rxStreamId = this._rxStreamId = (this._rxStreamId ?? 0) + 1;
 		try {
 			await this.backend.startRxStream(opts,
 				Comlink.proxy((spectrumData: any) => this.drawSpectrum(spectrumData)),
@@ -324,7 +380,8 @@ export const connectionMethods = {
 					this._feedWhisperVfo(vfoIndex, freq, samples);
 					this.recordVfoAudio(vfoIndex, freq, samples);
 				}),
-				Comlink.proxy((vfoIndex: number, freq: number, msg: any) => this._onPocsagMessage(vfoIndex, freq, msg))
+				Comlink.proxy((vfoIndex: number, freq: number, msg: any) => this._onPocsagMessage(vfoIndex, freq, msg)),
+				Comlink.proxy((detail: string) => { void this.handleRxStreamError(rxStreamId, detail); }),
 			);
 		} catch (e: any) {
 			console.error('Error starting RX stream:', e);
@@ -333,6 +390,7 @@ export const connectionMethods = {
 			await this.disarmVfoAudioRecording();
 			return;
 		}
+		if (this.sweep.error.startsWith(RX_STREAM_FAILED_PREFIX)) this.sweep.error = '';
 
 		this._statsTimer = setInterval(async () => {
 			if (this.backend && this.running) {

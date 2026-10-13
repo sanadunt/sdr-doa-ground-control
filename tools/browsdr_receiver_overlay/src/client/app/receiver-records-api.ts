@@ -43,6 +43,8 @@ export interface ReceiverScanRecord {
 
 export interface ReceiverScanDetails extends ReceiverScanRecord {
 	config: SweepConfig;
+	/** Archived trace format, or null for scans archived before the Receiver recorded it. */
+	traceFormat: number | null;
 }
 
 export interface ReceiverTraceRecord {
@@ -124,6 +126,7 @@ export interface CreateScanInput {
 	source: SweepSource;
 	config: SweepConfig;
 	archive: boolean;
+	traceFormat: number;
 }
 
 export interface CandidateQuery {
@@ -385,7 +388,8 @@ function parseScanDetails(value: unknown): ReceiverScanDetails {
 		ampEnabled: config.ampEnabled === true,
 		iqCorrection: config.iqCorrection === true,
 	};
-	return { ...record, config: parsedConfig };
+	const traceFormat = config.traceFormat === undefined ? null : integerValue(config.traceFormat, 'config traceFormat');
+	return { ...record, config: parsedConfig, traceFormat };
 }
 
 async function request<T>(path: string, init: RequestInit, parse: (value: unknown) => T, timeoutMs = JSON_TIMEOUT_MS): Promise<T> {
@@ -461,7 +465,8 @@ export const receiverRecordsApi = {
 	},
 
 	createScan(input: CreateScanInput): Promise<{ id: string; created_at: string; archive: boolean }> {
-		return request('/scans', json(input), value => {
+		const { traceFormat, ...scan } = input;
+		return request('/scans', json({ ...scan, config: { ...scan.config, traceFormat } }), value => {
 			const row = objectValue(value, 'Created scan');
 			if (typeof row.archive !== 'boolean') throw new TypeError('scan archive must be a boolean.');
 			return { id: stringValue(row.id, 'scan id'), created_at: stringValue(row.created_at, 'scan created_at'), archive: row.archive };

@@ -1,3 +1,4 @@
+import gc
 import json
 import os
 import sqlite3
@@ -5,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+import warnings
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,6 +27,20 @@ class ReceiverRecordStoreTests(unittest.TestCase):
     def tearDown(self):
         self.store.close()
         self.temp.cleanup()
+
+    def test_store_operations_leave_no_unclosed_sqlite_connections(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            store = ReceiverRecordStore(Path(self.temp.name) / "warnings")
+            store.update_settings({"auto_spectrum_recording": True})
+            scan = store.create_scan("simulated", {"start_hz": 100, "end_hz": 500}, True)
+            store.upsert_candidates(scan["id"], [{"id": 1, "meanPeakFrequencyHz": 120, "maxPeakDb": -50, "hits": 1}])
+            store.get_candidates(scan["id"], offset=0, limit=10, sort="peak")
+            store.list_records(record_type="scan")
+            store.close()
+            del store
+            gc.collect()
+        self.assertEqual([str(item.message) for item in caught if issubclass(item.category, ResourceWarning)], [])
 
     def test_settings_candidate_upsert_and_sql_pagination(self):
         self.assertEqual(self.store.get_settings(), {"auto_spectrum_recording": False})

@@ -6,10 +6,11 @@ import { exportSweepCandidatesCsv, parseSweepSession, serializeSweepSession } fr
 import { exportMarkerSetCsv as markerSetCsv, serializeMarkerSet } from './marker-export';
 import type { SweepSessionSnapshot } from './sweep-session';
 import { SweepWaterfallHistory, SweepWaterfallRenderer, SWEEP_WATERFALL_BINS, SWEEP_WATERFALL_ROWS } from './sweep-waterfall';
-import { decodeArchivedTrace, encodeArchivedTrace, encodeWaterfallRow } from './sweep-waterfall';
+import { ARCHIVED_TRACE_FORMAT_TAG, decodeArchivedTrace, encodeArchivedTrace, encodeWaterfallRow } from './sweep-waterfall';
 import type { SweepCandidate, SweepConfig, SweepProgress, SweepSource, SweepSpectrumFrame } from '../worker/sweep-types';
 import { groupAdjacentCandidates, reselectCandidateBand, type SweepCandidateBand } from './candidate-bands';
 import { receiverRecordsApi } from './receiver-records-api';
+import { ArchiveUploadBanner } from './archive-upload-banner';
 import { normalizeFrequencyShiftMhz } from '../frequency-shift';
 import type { ReceiverMarker, ReceiverTraceRecord } from './receiver-records-api';
 
@@ -46,7 +47,10 @@ interface SweepRuntime {
 	candidatePersistQueue: Promise<void>;
 	candidatePersistPending: CandidatePersistBatch[];
 	candidatePersistDraining: boolean;
+	candidatePersistRetry: Map<string, Map<number, SweepCandidate>>;
 	tracePersistQueue: Promise<void>;
+	traceUploadFailures: number;
+	archiveBanner: ArchiveUploadBanner;
 	candidateUpdateTimer: number | null;
 	listenRestore: ListenRestore | null;
 	markerPointerType: string;
@@ -93,7 +97,10 @@ function runtimeFor(app: object): SweepRuntime {
 			candidatePersistQueue: Promise.resolve(),
 			candidatePersistPending: [],
 			candidatePersistDraining: false,
+			candidatePersistRetry: new Map(),
 			tracePersistQueue: Promise.resolve(),
+			traceUploadFailures: 0,
+			archiveBanner: new ArchiveUploadBanner(),
 			candidateUpdateTimer: null,
 			listenRestore: null,
 			markerPointerType: '',
@@ -189,11 +196,16 @@ async function persistCandidateUpdates(scanId: string, updates: SweepCandidate[]
 // slow archive never builds a backlog that Stop has to wait for.
 function queueCandidatePersist(app: AppInstance, scanId: string, updates: SweepCandidate[]): void {
 	const runtime = runtimeFor(app);
-	if (updates.length === 0) return;
+	const retry = runtime.candidatePersistRetry.get(scanId);
+	if (updates.length === 0 && !retry) return;
 	let batch = runtime.candidatePersistPending.find(entry => entry.scanId === scanId);
 	if (!batch) {
 		batch = { scanId, candidates: new Map() };
 		runtime.candidatePersistPending.push(batch);
+	}
+	if (retry) {
+		runtime.candidatePersistRetry.delete(scanId);
+		for (const [id, candidate] of retry) if (!batch.candidates.has(id)) batch.candidates.set(id, candidate);
 	}
 	for (const candidate of updates) batch.candidates.set(candidate.id, candidate);
 	if (runtime.candidatePersistDraining) return;
@@ -208,13 +220,19 @@ async function drainCandidatePersist(app: AppInstance): Promise<void> {
 			const scanId = batch.scanId;
 			try {
 				await persistCandidateUpdates(scanId, Array.from(batch.candidates.values()));
+				app.records.error = runtime.archiveBanner.succeeded('candidates', app.records.error);
 				const morePending = runtime.candidatePersistPending.some(entry => entry.scanId === scanId);
 				if (app.sweep.scanId === scanId && !morePending) {
 					app.sweep.candidatePageFromStore = true;
 					void app.refreshSweepCandidates();
 				}
 			} catch (error) {
-				app.records.error = `Could not persist sweep candidates: ${error instanceof Error ? error.message : String(error)}`;
+				// Send the failed candidates again with the next write for this scan.
+				const pending = runtime.candidatePersistPending.find(entry => entry.scanId === scanId);
+				const retry = pending?.candidates ?? runtime.candidatePersistRetry.get(scanId) ?? new Map<number, SweepCandidate>();
+				for (const [id, candidate] of batch.candidates) if (!pending || !retry.has(id)) retry.set(id, candidate);
+				if (!pending) runtime.candidatePersistRetry.set(scanId, retry);
+				app.records.error = runtime.archiveBanner.failed('candidates', `Could not persist sweep candidates: ${error instanceof Error ? error.message : String(error)}`);
 				if (app.sweep.scanId === scanId) refreshLocalCandidatePage(app);
 			}
 		}
@@ -282,7 +300,9 @@ async function finishRecordedScan(app: AppInstance, status: 'complete' | 'stoppe
 	const scanId = app.sweep.scanId as string | null;
 	if (!scanId) return;
 	const runtime = runtimeFor(app);
+	queueCandidatePersist(app, scanId, []);
 	await runtime.candidatePersistQueue;
+	runtime.candidatePersistRetry.delete(scanId);
 	await runtime.tracePersistQueue;
 	await receiverRecordsApi.finishScan(scanId, status);
 }
@@ -612,12 +632,13 @@ export const sweepMethods = {
 			runtime.source = source;
 			runtime.lastSavedTraceSweep = 0;
 			runtime.tracePersistQueue = Promise.resolve();
+			runtime.traceUploadFailures = 0;
 			if (!this.records.settingsLoaded) await this.loadReceiverSettings();
 			this.sweep.scanId = null;
 			this.sweep.archive = false;
 			if (this.records.autoSpectrumRecording) {
 				try {
-					const record = await receiverRecordsApi.createScan({ source, config, archive: true });
+					const record = await receiverRecordsApi.createScan({ source, config, archive: true, traceFormat: ARCHIVED_TRACE_FORMAT_TAG });
 					scanId = record.id;
 					this.sweep.scanId = scanId;
 					this.sweep.archive = record.archive;
@@ -653,8 +674,15 @@ export const sweepMethods = {
 						currentRuntime.tracePersistQueue = currentRuntime.tracePersistQueue.then(async () => {
 							try {
 								await receiverRecordsApi.saveTrace(traceScanId, frame.sweepCount, trace);
+								const banner = currentRuntime.archiveBanner.succeeded('trace', this.records.error);
+								if (banner !== this.records.error) {
+									this.records.error = banner;
+									const lost = currentRuntime.traceUploadFailures;
+									this.showMsg(`Scan archive is saving again; ${lost} sweep trace${lost === 1 ? ' of this scan was' : 's of this scan were'} not saved.`);
+								}
 							} catch (error) {
-								this.records.error = `Could not archive sweep trace ${frame.sweepCount}: ${error instanceof Error ? error.message : String(error)}`;
+								currentRuntime.traceUploadFailures += 1;
+								this.records.error = currentRuntime.archiveBanner.failed('trace', `Could not archive sweep trace ${frame.sweepCount} (${currentRuntime.traceUploadFailures} not saved in this scan): ${error instanceof Error ? error.message : String(error)}`);
 							}
 						});
 					}
@@ -806,7 +834,7 @@ export const sweepMethods = {
 				traceBytes.push(...batch);
 			}
 			const latestTrace = traceMetadata[traceMetadata.length - 1] || null;
-			const traceLevels = traceBytes.map(trace => decodeArchivedTrace(trace));
+			const traceLevels = traceBytes.map(trace => decodeArchivedTrace(trace, details.traceFormat));
 			const average = traceLevels[traceLevels.length - 1] || null;
 			this.clearSweepData();
 			const runtime = runtimeFor(this);

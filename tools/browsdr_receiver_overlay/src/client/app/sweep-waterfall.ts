@@ -1,5 +1,5 @@
 import { convertDecibelToRGB } from '../utils';
-import { drawSweepMarkerHint } from './sweep-marker-renderer';
+import { drawSweepMarkerHint, sweepCanvasText } from './sweep-marker-renderer';
 import { SWEEP_DISPLAY_BINS } from '../worker/sweep-types';
 import type { SweepCandidate, SweepSpectrumFrame } from '../worker/sweep-types';
 
@@ -36,9 +36,13 @@ export function encodeArchivedTrace(values: Float32Array): Uint8Array<ArrayBuffe
 	return trace;
 }
 
-export function decodeArchivedTrace(trace: Uint8Array): Float32Array {
+/** `format` comes from the scan record; null (older archives) detects it from the first byte. */
+export function decodeArchivedTrace(trace: Uint8Array, format: number | null = null): Float32Array {
+	if (format !== null && format !== ARCHIVED_TRACE_FORMAT_TAG) {
+		throw new Error(`Archived trace format ${format} is not supported by this Receiver.`);
+	}
 	const levels = new Float32Array(trace.length);
-	const tagged = trace.length > 1 && trace[0] === ARCHIVED_TRACE_FORMAT_TAG;
+	const tagged = format === ARCHIVED_TRACE_FORMAT_TAG || (trace.length > 1 && trace[0] === ARCHIVED_TRACE_FORMAT_TAG);
 	const maxDb = tagged ? SWEEP_WATERFALL_MAX_DB : LEGACY_SWEEP_LEVEL_MAX_DB;
 	for (let bin = 0; bin < trace.length; bin++) levels[bin] = decodeSweepLevel(trace[bin], SWEEP_WATERFALL_MIN_DB, maxDb);
 	// The format byte replaced the first bin, which repeats its neighbour.
@@ -201,12 +205,13 @@ export class SweepWaterfallRenderer {
 		context.textAlign = 'left';
 		context.textBaseline = 'top';
 		context.fillStyle = '#8ea0b8';
-		context.fillText('Power (dBFS, relative)', left, 1);
-		drawSweepMarkerHint(context, left, plotWidth, context.measureText('Power (dBFS, relative)').width);
+		const axisLabel = sweepCanvasText('Power (dBFS, relative)');
+		context.fillText(axisLabel, left, 1);
+		drawSweepMarkerHint(context, left, plotWidth, context.measureText(axisLabel).width);
 		context.textBaseline = 'middle';
 		context.textAlign = 'right';
-		context.fillText('Older', left - 7, top + 7);
-		context.fillText('Now', left - 7, top + plotHeight - 7);
+		context.fillText(sweepCanvasText('Older'), left - 7, top + 7);
+		context.fillText(sweepCanvasText('Now'), left - 7, top + plotHeight - 7);
 
 		if (frame && history.rowCount > 0 && this.sourceContext && this.imageData) {
 			this.updateSourceImage(history, options.minDb, options.maxDb);

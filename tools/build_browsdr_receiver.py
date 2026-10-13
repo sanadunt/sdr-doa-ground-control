@@ -176,7 +176,7 @@ def _apply_embedded_changes(source: Path) -> None:
         '\t\t\t\t\t\t</div>',
         '\t\t\t\t\t\t<div class="form-row info-row radio-status-row" role="status">\n'
         '\t\t\t\t\t\t\t<span class="radio-status-dot" :class="{ \'is-on\': connected }" aria-hidden="true"></span>\n'
-        '\t\t\t\t\t\t\t<span>Radio SDR {{ connected ? (mockDevice ? \'ON · MOCK (no RF)\' : \'ON\') : \'OFF\' }}</span>\n'
+        '\t\t\t\t\t\t\t<span>Radio SDR {{ connected ? (mockDevice ? \'ON · MOCK (\' + t(\'no RF\') + \')\' : \'ON\') : \'OFF\' }}</span>\n'
         '\t\t\t\t\t\t</div>',
         "Radio SDR connection status",
     )
@@ -273,16 +273,16 @@ def _apply_embedded_changes(source: Path) -> None:
         "\t\t\t\t\t\t\t<span>dBFS</span>\n"
         "\t\t\t\t\t\t</div>\n"
         "\t\t\t\t\t</label>\n",
-        "\t\t\t\t\t<div class=\"sweep-display-range\" role=\"group\" aria-label=\"Spectrum display limits\">\n"
-        "\t\t\t\t\t\t<label>Min.\n"
+        "\t\t\t\t\t<div class=\"sweep-display-range\" role=\"group\" :aria-label=\"t('Spectrum display limits')\">\n"
+        "\t\t\t\t\t\t<label>{{ t('Graph min.') }}\n"
         "\t\t\t\t\t\t\t<div class=\"sweep-input-unit\">\n"
-        "\t\t\t\t\t\t\t\t<input type=\"number\" v-model.number=\"sweep.displayMinDb\" min=\"-160\" :max=\"sweep.displayMaxDb - 5\" step=\"5\" aria-label=\"Graph minimum dBFS\" @input=\"previewSweepDisplayRange('min', $event)\" @change=\"updateSweepDisplayRange('min')\">\n"
+        "\t\t\t\t\t\t\t\t<input type=\"number\" v-model.number=\"sweep.displayMinDb\" min=\"-160\" :max=\"sweep.displayMaxDb - 5\" step=\"5\" :aria-label=\"t('Graph minimum dBFS')\" @input=\"previewSweepDisplayRange('min', $event)\" @change=\"updateSweepDisplayRange('min')\">\n"
         "\t\t\t\t\t\t\t\t<span>dBFS</span>\n"
         "\t\t\t\t\t\t\t</div>\n"
         "\t\t\t\t\t\t</label>\n"
-        "\t\t\t\t\t\t<label>Max.\n"
+        "\t\t\t\t\t\t<label>{{ t('Graph max.') }}\n"
         "\t\t\t\t\t\t\t<div class=\"sweep-input-unit\">\n"
-        "\t\t\t\t\t\t\t\t<input type=\"number\" v-model.number=\"sweep.displayMaxDb\" :min=\"sweep.displayMinDb + 5\" max=\"60\" step=\"5\" aria-label=\"Graph maximum dBFS\" @input=\"previewSweepDisplayRange('max', $event)\" @change=\"updateSweepDisplayRange('max')\">\n"
+        "\t\t\t\t\t\t\t\t<input type=\"number\" v-model.number=\"sweep.displayMaxDb\" :min=\"sweep.displayMinDb + 5\" max=\"60\" step=\"5\" :aria-label=\"t('Graph maximum dBFS')\" @input=\"previewSweepDisplayRange('max', $event)\" @change=\"updateSweepDisplayRange('max')\">\n"
         "\t\t\t\t\t\t\t\t<span>dBFS</span>\n"
         "\t\t\t\t\t\t\t</div>\n"
         "\t\t\t\t\t\t</label>\n"
@@ -291,8 +291,8 @@ def _apply_embedded_changes(source: Path) -> None:
     )
     html_content = html.read_text(encoding="utf-8")
     range_start = "\t\t\t\t\t<div class=\"sweep-display-range\""
-    trace_start = "\t\t\t\t\t<label>Trace\n"
-    listen_start = "\t\t\t\t\t<label>Listen mode\n"
+    trace_start = "\t\t\t\t\t<label>{{ t('Trace') }}\n"
+    listen_start = "\t\t\t\t\t<label>{{ t('Listen mode') }}\n"
     listen_end = "\t\t\t\t\t</label>\n"
     if any(html_content.count(marker) != 1 for marker in (range_start, trace_start, listen_start)):
         raise RuntimeError("expected one graph-range, trace, and listen-mode control to reorder")
@@ -961,8 +961,8 @@ def _apply_embedded_changes(source: Path) -> None:
         "\t\t\tcontext.strokeStyle = '#fff';\n"
         "\t\t\tcontext.stroke();\n"
         "\t\t\tconst frequencyText = `${(options.hoverFrequencyHz / 1_000_000).toFixed(6)} MHz`;\n"
-        "\t\t\tconst powerText = options.hoverPowerDb === null ? 'No stored sample' : `${options.hoverPowerDb.toFixed(1)} dBFS-like`;\n"
-        "\t\t\tconst rowText = options.hoverRow === null ? 'No history row' : `History row ${options.hoverRow + 1}/${history.rowCount}`;\n"
+        "\t\t\tconst powerText = options.hoverPowerDb === null ? sweepCanvasText('No stored sample') : `${options.hoverPowerDb.toFixed(1)} dBFS-like`;\n"
+        "\t\t\tconst rowText = options.hoverRow === null ? sweepCanvasText('No history row') : `${sweepCanvasText('History row')} ${options.hoverRow + 1}/${history.rowCount}`;\n"
         "\t\t\tcontext.font = '10px \"Roboto Mono\", monospace';\n"
         "\t\t\tconst boxWidth = Math.max(1, Math.min(plotWidth - 8, Math.ceil(Math.max(context.measureText(frequencyText).width, context.measureText(powerText).width, context.measureText(rowText).width)) + 14));\n"
         "\t\t\tconst boxHeight = 48;\n"
@@ -1216,6 +1216,45 @@ def _apply_embedded_changes(source: Path) -> None:
     if not peerjs.is_file():
         raise RuntimeError(f"expected bundled PeerJS asset at {peerjs}")
     peerjs.unlink()
+
+    _patch_rx_transfer_errors(source)
+
+
+def _patch_rx_transfer_errors(source: Path) -> None:
+    """Report HackRF RX transfer failures instead of only logging them.
+
+    Upstream's RX loop logs a failed bulk transfer and ends that loop, so an
+    unplugged radio leaves the Receiver showing RX running while no samples arrive.
+    """
+    hackrf = source / "src/client/hackrf.ts"
+    _replace_once(
+        hackrf,
+        "\tasync startRx(callback: RxCallback): Promise<void> {\n",
+        "\tasync startRx(callback: RxCallback, onError?: (error: unknown) => void): Promise<void> {\n",
+        "HackRF RX error callback parameter",
+    )
+    _replace_once(
+        hackrf,
+        "\t\t\t\t\t\tconsole.error('startRx: transfer status not ok:', result.status);\n"
+        "\t\t\t\t\t\tbreak;\n",
+        "\t\t\t\t\t\tconsole.error('startRx: transfer status not ok:', result.status);\n"
+        "\t\t\t\t\t\tonError?.(new Error(result.status === 'ok' ? 'USB transfer returned no data' : `USB transfer status ${result.status}`));\n"
+        "\t\t\t\t\t\tbreak;\n",
+        "HackRF RX transfer status error report",
+    )
+    _replace_once(
+        hackrf,
+        "\t\t\t\t\t\tconsole.error('startRx: transfer error:', msg);\n",
+        "\t\t\t\t\t\tconsole.error('startRx: transfer error:', msg);\n"
+        "\t\t\t\t\t\tonError?.(error);\n",
+        "HackRF RX transfer exception report",
+    )
+    _replace_once(
+        source / "src/client/sdr-device.ts",
+        "\tstartRx(callback: (data: ArrayBufferView) => void): Promise<void>;\n",
+        "\tstartRx(callback: (data: ArrayBufferView) => void, onError?: (error: unknown) => void): Promise<void>;\n",
+        "SDR device RX error callback",
+    )
 
 
 def _write_source_instructions(source: Path) -> None:

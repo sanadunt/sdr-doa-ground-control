@@ -1,5 +1,6 @@
 import type { AppInstance } from './types';
 import { ReceiverRequestError, browserTimeZone, browserUtcOffsetMinutes, receiverRecordsApi } from './receiver-records-api';
+import { receiverDateLocale } from './i18n';
 import type { ReceiverAudioSegmentRecord, ReceiverAudioSessionRecord, ReceiverMarker, ReceiverRecord, ReceiverScanRecord } from './receiver-records-api';
 
 const recordRequestIds = new WeakMap<object, number>();
@@ -189,16 +190,16 @@ export const recordsMethods = {
 	},
 
 	audioCalendarWeekdays(this: AppInstance): string[] {
-		return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+		return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => this.t(day));
 	},
 
 	audioCalendarMonthLabel(this: AppInstance): string {
 		const [year, month] = (this.records.audioCalendarMonth || localAudioMonthKey(new Date())).split('-').map(Number);
-		return new Date(year, month - 1, 1, 12).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+		return new Date(year, month - 1, 1, 12).toLocaleDateString(receiverDateLocale(this.uiLanguage), { month: 'long', year: 'numeric' });
 	},
 
 	formatAudioDate(this: AppInstance, dateKey: string): string {
-		return localAudioDateFromKey(dateKey).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+		return localAudioDateFromKey(dateKey).toLocaleDateString(receiverDateLocale(this.uiLanguage), { year: 'numeric', month: 'short', day: 'numeric' });
 	},
 
 	audioCalendarWeeks(this: AppInstance) {
@@ -365,7 +366,7 @@ export const recordsMethods = {
 				saved = await receiverRecordsApi.saveMarkerSet(markerSet);
 			} catch (error) {
 				if (!(error instanceof ReceiverRequestError) || error.status !== 409 || markerSet.id) throw error;
-				if (!window.confirm(`A marker set named "${name}" already exists. Replace its markers with the ${markerSet.markers.length} marker(s) shown here?`)) {
+				if (!window.confirm(this.tm(`A marker set named "${name}" already exists. Replace its markers with the ${markerSet.markers.length} marker(s) shown here?`))) {
 					this.records.error = `Not saved: a marker set named "${name}" already exists. Choose another name or load that set.`;
 					return;
 				}
@@ -397,7 +398,7 @@ export const recordsMethods = {
 
 	async deleteMarkerSet(this: AppInstance) {
 		const markerSetId = String(this.records.selectedMarkerSetId || '');
-		if (!markerSetId || !window.confirm('Delete this saved marker set? This cannot be undone.')) return;
+		if (!markerSetId || !window.confirm(this.tm('Delete this saved marker set? This cannot be undone.'))) return;
 		try {
 			await receiverRecordsApi.deleteMarkerSet(markerSetId);
 			this.records.markerSets = this.records.markerSets.filter((set: { id: string }) => set.id !== markerSetId);
@@ -429,7 +430,7 @@ export const recordsMethods = {
 			return;
 		}
 		const description = record.type === 'scan' ? 'spectrum scan and its data' : 'audio session and its audio files';
-		if (!window.confirm(`Delete this ${description}? This cannot be undone.`)) return;
+		if (!window.confirm(this.tm(`Delete this ${description}? This cannot be undone.`))) return;
 		try {
 			await receiverRecordsApi.deleteRecord(record.id);
 			if (record.type === 'scan') {
@@ -454,7 +455,7 @@ export const recordsMethods = {
 		}
 		if (this.records.deletingAudioSegmentId) return;
 		const frequencyMHz = (segment.frequency_hz / 1_000_000).toFixed(6);
-		if (!window.confirm(`Delete VFO ${segment.vfo_index + 1} recording at ${frequencyMHz} MHz? This cannot be undone.`)) return;
+		if (!window.confirm(this.tm(`Delete VFO ${segment.vfo_index + 1} recording at ${frequencyMHz} MHz? This cannot be undone.`))) return;
 		this.records.deletingAudioSegmentId = segment.id;
 		this.records.error = '';
 		try {

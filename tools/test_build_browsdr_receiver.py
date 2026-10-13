@@ -156,6 +156,9 @@ class ReceiverBuildSourceTests(unittest.TestCase):
             self.assertNotIn("api-cache", vite)
             self.assertTrue((work / "public/receiver-boot.js").is_file())
             self.assertFalse((work / "public/lib/peerjs.min.js").exists())
+            hackrf = (work / "src/client/hackrf.ts").read_text(encoding="utf-8")
+            self.assertIn("async startRx(callback: RxCallback, onError?: (error: unknown) => void)", hackrf)
+            self.assertEqual(hackrf.count("onError?.("), 4)
 
 
 if __name__ == "__main__":

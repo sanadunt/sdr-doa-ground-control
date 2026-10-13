@@ -1,9 +1,20 @@
 import type { ReceiverMarker } from './receiver-records-api';
 
+let translateCanvasText: (text: string) => string = text => text;
+
+/** Text drawn on the Spectrum and waterfall canvases follows the Receiver language. */
+export function setSweepCanvasTranslator(translate: (text: string) => string): void {
+	translateCanvasText = translate;
+}
+
+export function sweepCanvasText(text: string): string {
+	return translateCanvasText(text);
+}
+
 export function sweepMarkerHint(): string {
 	const coarsePointer = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
 		&& window.matchMedia('(pointer: coarse)').matches;
-	return coarsePointer ? 'Hold to add marker' : 'Click: add marker · drag: pan · wheel: zoom';
+	return sweepCanvasText(coarsePointer ? 'Hold to add marker' : 'Click: add marker · drag: pan · wheel: zoom');
 }
 
 export function drawSweepMarkerHint(context: CanvasRenderingContext2D, left: number, width: number, reservedWidth: number): void {

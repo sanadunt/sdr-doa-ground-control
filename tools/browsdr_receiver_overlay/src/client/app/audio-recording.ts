@@ -71,7 +71,7 @@ export const audioRecordingMethods = {
 	async requestWorkspace(this: AppInstance, workspace: 'spectrum' | 'listener' | 'records') {
 		const recording = this.audioRecording.armed || this.audioRecording.starting;
 		if (workspace === 'spectrum' && this.activeWorkspace !== 'spectrum' && recording && this.running
-			&& !window.confirm('Opening Spectrum stops the Listener radio and ends the VFO audio recording. Audio recorded so far stays in Records. Open Spectrum?')) {
+			&& !window.confirm(this.tm('Opening Spectrum stops the Listener radio and ends the VFO audio recording. Audio recorded so far stays in Records. Open Spectrum?'))) {
 			return;
 		}
 		await this.selectWorkspace(workspace);
