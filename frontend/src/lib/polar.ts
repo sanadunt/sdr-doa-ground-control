@@ -1,6 +1,7 @@
 import type { Candidate, CompassConfig, CompassResolution, ManualCompassOverride, PolarSettings, PolarView, TelemetrySnapshot } from '../types';
 import { candidate, nativeViewsReady, numberOrNull, polarDataReady } from './telemetry';
 import type { Translate } from './i18n';
+import { formatDuration } from './healthView';
 
 export function polarSettings(figType: unknown, compassOffset: unknown): PolarSettings {
   const requested = String(figType ?? 'Polar').trim().toLowerCase();
@@ -216,7 +217,7 @@ export function compassOffsetSourceLabel(resolution: CompassSourceResolution, t:
   if (!resolution.offsetVerified) return t('polar.offsetAssumed');
   const base = resolution.code === 'MANUAL' ? 'MANUAL' : resolution.code === 'DATA_OUT_LOCAL_AXIS' ? 'DATA_OUT · LOCAL AXIS' : 'DATA_OUT';
   if (resolution.lastKnownAgeMs === null) return base;
-  return t('readout.sourceLastKnown', { source: base, age: `${Math.round(resolution.lastKnownAgeMs / 1000)} s` });
+  return t('readout.sourceLastKnown', { source: base, age: formatDuration(t, resolution.lastKnownAgeMs) });
 }
 
 export function manualCompassSettings(override: ManualCompassOverride | null | undefined): PolarSettings | null {

@@ -134,9 +134,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (max-width: 1023px) {
   .topbar { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 6px 10px; padding: 6px 12px; }
-  .telemetry-strip { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; margin: 0 -12px; padding: 2px 4px 0; border-top: 1px solid var(--line-soft); }
+  /* Narrow screens wrap the chips instead of scrolling, so MQTT and SIM are never hidden off the edge. */
+  .telemetry-strip { grid-column: 1 / -1; grid-row: 2; flex-wrap: wrap; justify-content: flex-start; margin: 0 -12px; padding: 2px 4px 0; overflow: visible; border-top: 1px solid var(--line-soft); background: none; }
   .telemetry-strip > :first-child, .telemetry-strip > :last-child { margin-inline: 0; }
-  .telemetry-item { padding: 4px 10px; }
+  .telemetry-item { flex: 1 0 auto; padding: 4px 10px; }
 }
 /* Touch targets are at least 44 x 44 px on touch screens and at phone widths (AUD-146). */
 @media (pointer: coarse), (any-pointer: coarse), (max-width: 639px) {
@@ -252,10 +253,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .map-coordinate strong { overflow: hidden; color: var(--text); font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 .map-coordinate small { letter-spacing: 0; text-transform: none; }
 .map-overlay-controls { position: static; width: auto; max-height: min(64dvh, 650px); overflow: auto; margin: 0; padding: 14px; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--surface); color: var(--text); overscroll-behavior: contain; }
-.map-workspace-settings-open { display: grid; flex: 1 1 auto; grid-template-columns: minmax(280px, .8fr) minmax(0, 2fr); grid-template-rows: minmax(0, 1fr) auto; align-items: stretch; gap: 10px; min-height: 0; padding: 10px 10px 0; }
-.map-workspace-settings-open > .map-overlay-controls { grid-column: 1; grid-row: 1; }
-.map-workspace-settings-open > .map-frame { grid-column: 2; grid-row: 1; height: auto; min-height: 0; border-radius: 6px; }
-.map-workspace-settings-open > .map-bottom-overlay { grid-column: 1 / -1; margin: 0 -10px; }
+.map-stage { position: relative; display: flex; flex: 1 1 0; flex-direction: column; min-width: 0; min-height: 0; }
+/* The Layers panel floats over the map below its toolbar, so opening it
+   never resizes the map or moves the polar column. */
+.map-stage > .map-overlay-controls { position: absolute; z-index: 35; top: 58px; bottom: 10px; left: 10px; width: min(340px, calc(100% - 20px)); max-height: none; box-shadow: 0 10px 28px rgba(0, 0, 0, .28); }
+/* The floating panel covers the notices; hiding them keeps their size, so the camera is not reframed. */
+@media (min-width: 640px) { .map-workspace-settings-open .map-notices { visibility: hidden; } }
 .maplibregl-ctrl-top-right { top: 4px; right: 4px; }
 .maplibregl-ctrl-group { border-radius: 6px !important; }
 .maplibregl-ctrl button { width: 36px; height: 36px; min-width: 36px; min-height: 36px; padding: 0; }
@@ -273,14 +276,6 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .plotly-polar.js-plotly-plot .plotly .modebar-btn { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; }
 @media (pointer: coarse), (any-pointer: coarse), (max-width: 639px) { .plotly-polar.js-plotly-plot .plotly .modebar-btn { width: 44px; height: 44px; } }
 
-@media (min-width: 1024px) {
-  .console-shell.is-overview:has(.map-workspace-settings-open) .page-content-overview { height: auto; overflow: visible; }
-  .console-shell.is-overview:has(.map-workspace-settings-open) .page-overview { height: auto; }
-  .overview-spatial:has(.map-workspace-settings-open) { display: flex; flex: none; flex-direction: column; gap: 12px; }
-  .overview-spatial:has(.map-workspace-settings-open) > .panel { height: auto; }
-  .overview-spatial:has(.map-workspace-settings-open) .map-workspace-settings-open > .map-frame { flex: none; height: clamp(440px, 58vh, 620px); min-height: 360px; }
-  .overview-spatial:has(.map-workspace-settings-open) .plotly-polar { height: clamp(360px, 50vh, 560px); flex: none; }
-}
 @media (max-width: 1023px) {
   .page-content-overview { height: auto; overflow: visible; padding: 10px 12px 16px; }
   .page-overview { height: auto; }
@@ -291,6 +286,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   .readout-cell:nth-child(5) { grid-column: span 2; }
   .overview-spatial, .overview-spatial:has(.polar-expanded) { display: flex; flex: none; flex-direction: column; gap: 10px; }
   .overview-spatial > .panel { height: auto; }
+  .map-stage { flex: none; }
   .map-frame { flex: none; height: clamp(320px, 52vh, 560px); }
   .plotly-polar { flex: none; height: clamp(300px, 70vw, 520px); }
   .polar-expand-button { display: none; }
@@ -497,14 +493,8 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
   .gate-row > span:last-child { text-align:right; }
   .config-guard-row { grid-template-columns:1fr 1fr; }
   .monitor-metrics { grid-template-columns:1fr 1fr; }
-  .map-overlay-controls { width:auto; max-height:min(55dvh,460px); }
-  .map-workspace-settings-open { grid-template-columns:minmax(0,1fr); grid-template-rows:auto minmax(360px,auto) auto; gap:10px; }
-  .map-workspace-settings-open > .map-overlay-controls,
-  .map-workspace-settings-open > .map-frame,
-  .map-workspace-settings-open > .map-bottom-overlay { grid-column:1; }
-  .map-workspace-settings-open > .map-overlay-controls { grid-row:1; }
-  .map-workspace-settings-open > .map-frame { grid-row:2; }
-  .map-workspace-settings-open > .map-bottom-overlay { grid-row:3; }
+  /* A phone map is too small to float the panel over; it opens above the map instead. */
+  .map-stage > .map-overlay-controls { position: static; order: -1; width: auto; max-height: min(55dvh, 460px); margin: 8px 8px 10px; box-shadow: none; }
   .overlay-control-fields { grid-template-columns:minmax(0,1fr); }
   .map-panel-actions { width:100%; justify-content:flex-start; }
   .map-bottom-overlay { grid-template-columns:minmax(0,1fr); grid-template-areas:'legend' 'coordinate'; gap:6px; }
@@ -538,6 +528,8 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 .doa-map-label { pointer-events: none; font-family: var(--mono); line-height: 1; white-space: nowrap; user-select: none; }
 .doa-ring-label { padding: 2px 5px; border-radius: 3px; background: rgba(255, 255, 255, .82); color: #1f2d3a; font-size: 10.5px; font-weight: 600; box-shadow: 0 0 0 1px rgba(31, 45, 58, .25); }
 .doa-cardinal-label { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: rgba(17, 23, 30, .82); color: #ffffff; font-size: 11px; font-weight: 700; }
+/* The dark-theme map background is close to the label colour; an outline keeps the circle visible. */
+:root:not([data-theme='light']) .doa-cardinal-label { box-shadow: 0 0 0 1px rgba(230, 237, 243, .45); }
 .doa-bearing-label { padding: 4px 7px; border: 1px solid #e0603a; border-radius: 4px; background: #11171e; color: #ffffff; font-size: 12px; font-weight: 700; box-shadow: 0 2px 8px rgba(0, 0, 0, .35); }
 .doa-hover-popup .maplibregl-popup-content { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); box-shadow: 0 6px 18px rgba(0, 0, 0, .3); pointer-events: none; }
 .doa-hover-popup { pointer-events: none; }

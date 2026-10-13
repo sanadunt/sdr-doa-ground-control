@@ -5,7 +5,7 @@ import type { Map as MapLibreMap, GeoJSONSource, MapMouseEvent, MapSourceDataEve
 import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import type { Feature, FeatureCollection, LineString, Point, Polygon } from 'geojson';
 import type { GpsSourceMode, MapCoordinate, TelemetrySnapshot } from '../types';
-import { OSM_TILE_TEMPLATES, basemapAfterTile, gpsReportsNoFix, holdStationCoordinate, initialBasemapHealth, nextBasemapHost, shouldReframeStation, type BasemapHealth, type StationFraming } from '../lib/map';
+import { OSM_TILE_TEMPLATES, basemapAfterTile, basemapPaint, gpsReportsNoFix, holdStationCoordinate, nextBasemapHost, resumeBasemapHealth, shouldReframeStation, type BasemapHealth, type StationFraming } from '../lib/map';
 import {
   DEFAULT_DOA_OVERLAY_SETTINGS,
   EARTH_RADIUS_M,
@@ -53,7 +53,9 @@ const FALLBACK_STATES: ReadonlySet<MapState> = new Set(['no-webgl', 'gl-lost', '
 const DEFAULT_ZOOM = 14;
 const MAX_FRAMING_ZOOM = 17;
 // Keep the framed overlay clear of the in-map toolbar (top) and zoom controls (right).
+// The top grows to clear the notices under the toolbar (framingPadding).
 const FRAMING_PADDING = { top: 60, right: 56, bottom: 20, left: 20 };
+const NOTICE_CLEARANCE_PX = 8;
 const GEOMETRY_DEBOUNCE_MS = 120;
 const WORKER_WATCHDOG_MS = 10_000;
 const BASEMAP_CHECK_MS = 20_000;
@@ -79,6 +81,12 @@ interface CameraMemory {
 let cameraMemory: CameraMemory | null = null;
 let lastLiveStation: MapCoordinate | null = null;
 let preferredTileHost = 0;
+// A basemap outage seen on an earlier visit, so its notice is shown at once.
+let basemapMemory: BasemapHealth | null = null;
+
+function consoleTheme(): 'light' | 'dark' {
+  return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+}
 
 interface OverlayGeometry {
   data: Record<SourceId, OverlayFeatureCollection>;
@@ -172,7 +180,10 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const appliedDataRef = useRef<Partial<Record<SourceId, OverlayFeatureCollection>>>({});
   const [mapState, setMapState] = useState<MapState>('initializing');
   const [styleReady, setStyleReady] = useState(false);
-  const [basemapUnavailable, setBasemapUnavailable] = useState(false);
+  const [basemapUnavailable, setBasemapUnavailable] = useState(() => basemapMemory?.unavailable === true);
+  const [tilesLoaded, setTilesLoaded] = useState(false);
+  const [theme, setTheme] = useState(consoleTheme);
+  const noticesRef = useRef<HTMLDivElement>(null);
   const [controlsOpen, setControlsOpen] = useState(false);
   const overlayToggleRef = useRef<HTMLButtonElement>(null);
   const [settings, setSettings] = useState<DoaOverlaySettings>(() => loadOverlaySettings());
@@ -222,9 +233,16 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   }, [stationCoordinate, values, bearing, offset, scale, g.ringsVisible, g.guidesVisible, g.guideInterval, g.heatmapVisible, g.heatStyle, g.lobeVisible, g.bearingVisible, g.maxDistanceM, g.lobeDistanceM, g.contrast, g.radialSamples, g.distanceFalloff]);
   const bearingDrawn = geometry.data['doa-bearing'].features.length > 0;
 
+  // Frame below the notices (basemap unavailable, overlay held...) so they never cover the north label.
+  const framingPadding = (map: MapLibreMap) => {
+    const notices = noticesRef.current;
+    const below = notices && notices.offsetHeight > 0 ? notices.offsetTop + notices.offsetHeight + NOTICE_CLEARANCE_PX : 0;
+    const limit = Math.max(FRAMING_PADDING.top, map.getContainer().clientHeight * 0.45);
+    return { ...FRAMING_PADDING, top: Math.min(limit, Math.max(FRAMING_PADDING.top, below)) };
+  };
   const frameStation = (map: MapLibreMap, target: MapCoordinate, durationMs = 0) => {
     const reach = Math.max(settingsRef.current.maxDistanceM, settingsRef.current.lobeDistanceM);
-    map.fitBounds(overlayBounds(target, reach), { padding: FRAMING_PADDING, maxZoom: MAX_FRAMING_ZOOM, duration: durationMs });
+    map.fitBounds(overlayBounds(target, reach), { padding: framingPadding(map), maxZoom: MAX_FRAMING_ZOOM, duration: durationMs });
     framingRef.current = { source: target.source, selection: gpsSource };
     operatorMovedRef.current = false;
   };
@@ -237,7 +255,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     let disposed = false;
     const memory = cameraMemory;
     const start = coordinateRef.current;
-    let basemap: BasemapHealth = initialBasemapHealth(preferredTileHost % OSM_TILE_TEMPLATES.length);
+    let basemap: BasemapHealth = resumeBasemapHealth(basemapMemory, preferredTileHost, OSM_TILE_TEMPLATES.length);
+    const paint = basemapPaint(consoleTheme(), false);
     let map: MapLibreMap;
     try {
       map = new maplibregl.Map({
@@ -251,13 +270,13 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
         attributionControl: false,
         locale: mapLocale(t),
         style: { version: 8, sources: { osm: { type: 'raster', tiles: [OSM_TILE_TEMPLATES[basemap.hostIndex]], tileSize: 256, attribution: '© OpenStreetMap contributors' }, ...Object.fromEntries(SOURCE_IDS.map((id) => [id, { type: 'geojson', data: EMPTY }])) }, layers: [
-          // Neutral land colour under the tiles keeps the dark overlay lines readable when OSM does not load.
-          { id: 'basemap-background', type: 'background', paint: { 'background-color': '#dfe4dc' } },
+          // Neutral land colour under the tiles; it follows the console theme when OSM does not load.
+          { id: 'basemap-background', type: 'background', paint: { 'background-color': paint.background } },
           { id: 'osm', type: 'raster', source: 'osm' },
           { id: 'doa-beam', type: 'fill', source: 'doa-beam', paint: { 'fill-antialias': false, 'fill-color': beamColorExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatPalette), 'fill-opacity': beamOpacityExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatOpacity, DEFAULT_DOA_OVERLAY_SETTINGS.heatIntensity) } },
           { id: 'doa-heat', type: 'heatmap', source: 'doa-heat', maxzoom: 20, paint: { 'heatmap-weight': ['coalesce', ['get', 'densityWeight'], ['get', 'weight'], 0], 'heatmap-intensity': 1, 'heatmap-radius': heatmapRadiusExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatBlur), 'heatmap-opacity': .72, 'heatmap-color': heatmapColorExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatPalette) } },
-          { id: 'doa-rings', type: 'line', source: 'doa-rings', paint: { 'line-color': '#1f2d3a', 'line-opacity': .55, 'line-width': 1.2, 'line-dasharray': [4, 3] } },
-          { id: 'doa-guides', type: 'line', source: 'doa-guides', paint: { 'line-color': '#34495c', 'line-opacity': .4, 'line-width': 1, 'line-dasharray': [2, 3] } },
+          { id: 'doa-rings', type: 'line', source: 'doa-rings', paint: { 'line-color': paint.rings, 'line-opacity': .55, 'line-width': 1.2, 'line-dasharray': [4, 3] } },
+          { id: 'doa-guides', type: 'line', source: 'doa-guides', paint: { 'line-color': paint.guides, 'line-opacity': .4, 'line-width': 1, 'line-dasharray': [2, 3] } },
           { id: 'doa-lobe-fill', type: 'fill', source: 'doa-lobe', paint: { 'fill-color': '#dca861', 'fill-opacity': .18 } },
           { id: 'doa-lobe-outline', type: 'line', source: 'doa-lobe', paint: { 'line-color': '#c98a2e', 'line-opacity': .9, 'line-width': 2 } },
           { id: 'doa-edges', type: 'line', source: 'doa-edges', paint: { 'line-color': '#e0603a', 'line-opacity': .75, 'line-width': 1.5, 'line-dasharray': [1, 2] } },
@@ -282,8 +301,10 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     const applyBasemap = (next: BasemapHealth) => {
       const switched = next.hostIndex !== basemap.hostIndex;
       basemap = next;
+      basemapMemory = next;
       if (switched && map.style) (map.getSource('osm') as RasterTileSource | undefined)?.setTiles([OSM_TILE_TEMPLATES[next.hostIndex]]);
       setBasemapUnavailable(next.unavailable);
+      setTilesLoaded(next.loaded);
     };
     const onStyleData = () => {
       // Fires for the first style and again after a WebGL context restore.
@@ -389,8 +410,24 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     // t changes only with the language.
   }, [lang]);
 
-  // Resizes from the Layers panel, polar Expand or the window keep the overlay
-  // framed while the operator has not moved the camera.
+  useEffect(() => {
+    const update = () => setTheme(consoleTheme());
+    window.addEventListener('console-theme-change', update);
+    return () => window.removeEventListener('console-theme-change', update);
+  }, []);
+
+  // Background and reference lines follow the theme while no tiles are drawn.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady) return;
+    const paint = basemapPaint(theme, tilesLoaded);
+    map.setPaintProperty('basemap-background', 'background-color', paint.background);
+    map.setPaintProperty('doa-rings', 'line-color', paint.rings);
+    map.setPaintProperty('doa-guides', 'line-color', paint.guides);
+  }, [styleReady, theme, tilesLoaded]);
+
+  // Resizes from polar Expand, the window or the notices under the toolbar keep
+  // the overlay framed while the operator has not moved the camera.
   useEffect(() => {
     const host = hostRef.current;
     const map = mapRef.current;
@@ -406,6 +443,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       });
     });
     observer.observe(host);
+    if (noticesRef.current) observer.observe(noticesRef.current);
     return () => { window.cancelAnimationFrame(frame); observer.disconnect(); };
   }, [mapState]);
 
@@ -568,8 +606,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     const map = mapRef.current;
     // DOM labels need a ready style; without it the canvas writes its own.
     const drawText = !styleReady;
-    // No map, or a lost context, leaves no light basemap behind the lines.
-    const darkBackground = !map || mapState === 'gl-lost';
+    // No map, a lost context, or the dark theme without tiles leaves no light basemap behind the lines.
+    const darkBackground = !map || mapState === 'gl-lost' || (theme === 'dark' && !tilesLoaded);
     let frame = 0;
     const draw = () => {
       frame = 0;
@@ -640,7 +678,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       map?.off('resize', schedule);
       canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
     };
-  }, [fallbackActive, mapState, styleReady, stationCoordinate, geometry, bearing, settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.bearingVisible, settings.lobeOpacity, settings.maxDistanceM, settings.lobeDistanceM, t]);
+  }, [fallbackActive, mapState, theme, tilesLoaded, styleReady, stationCoordinate, geometry, bearing, settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.bearingVisible, settings.lobeOpacity, settings.maxDistanceM, settings.lobeDistanceM, t]);
 
   const updateSettings = (next: DoaOverlaySettings) => {
     const valid = validateOverlaySettings(next);
@@ -674,17 +712,19 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   if (values && !orientationVerified) notices.push(t('map.orientationReference', { offset: Number(offset.toFixed(1)) }));
   return <section className="panel map-panel">
     <div className={`map-workspace${controlsOpen ? ' map-workspace-settings-open' : ''}`}>
-      {controlsOpen ? <OverlayControls settings={settings} scale={scale} onChange={updateSettings} onReset={() => updateSettings(DEFAULT_DOA_OVERLAY_SETTINGS)} onClose={closeControls} /> : null}
-      <div className="map-frame" role="application" aria-label={t('map.appAria')} tabIndex={-1}>
-        <div className="maplibre-host" ref={hostRef} />
-        <canvas ref={overlayCanvasRef} className="doa-overlay-canvas" aria-hidden="true" hidden={!fallbackActive} />
-        <div className="map-toolbar">
-          <button ref={overlayToggleRef} className="toolbar-button map-settings-button" type="button" onClick={() => setControlsOpen((open) => !open)} aria-expanded={controlsOpen} aria-controls={controlsOpen ? 'doa-overlay-controls' : undefined}><Icon name="layers" /><span>{t('map.layers')}</span></button>
-          {stationCoordinate && mapState !== 'no-webgl' ? <button className="toolbar-button map-reset-button" type="button" onClick={resetView} aria-label={t('map.centerAria')} title={t('map.centerAria')}><Icon name="crosshair" /><span>{t('map.center')}</span></button> : null}
+      <div className="map-stage">
+        {controlsOpen ? <OverlayControls settings={settings} scale={scale} onChange={updateSettings} onReset={() => updateSettings(DEFAULT_DOA_OVERLAY_SETTINGS)} onClose={closeControls} /> : null}
+        <div className="map-frame" role="application" aria-label={t('map.appAria')} tabIndex={-1}>
+          <div className="maplibre-host" ref={hostRef} />
+          <canvas ref={overlayCanvasRef} className="doa-overlay-canvas" aria-hidden="true" hidden={!fallbackActive} />
+          <div className="map-toolbar">
+            <button ref={overlayToggleRef} className="toolbar-button map-settings-button" type="button" onClick={() => setControlsOpen((open) => !open)} aria-expanded={controlsOpen} aria-controls={controlsOpen ? 'doa-overlay-controls' : undefined}><Icon name="layers" /><span>{t('map.layers')}</span></button>
+            {stationCoordinate && mapState !== 'no-webgl' ? <button className="toolbar-button map-reset-button" type="button" onClick={resetView} aria-label={t('map.centerAria')} title={t('map.centerAria')}><Icon name="crosshair" /><span>{t('map.center')}</span></button> : null}
+          </div>
+          <div className="map-notices" ref={noticesRef}>{notices.map((notice) => <div key={notice} className="map-data-chip" role="status">{notice}</div>)}</div>
+          {mapState !== 'no-webgl' ? <span className="map-attribution" aria-label={t('map.attributionAria')}>© OpenStreetMap contributors</span> : null}
+          {!stationCoordinate ? <div className="map-empty-wrap"><EmptyState label={t('map.unavailable')} detail={t('map.unavailableDetail')} tone="warn" /></div> : null}
         </div>
-        {notices.length ? <div className="map-notices">{notices.map((notice) => <div key={notice} className="map-data-chip" role="status">{notice}</div>)}</div> : null}
-        {mapState !== 'no-webgl' ? <span className="map-attribution" aria-label={t('map.attributionAria')}>© OpenStreetMap contributors</span> : null}
-        {!stationCoordinate ? <div className="map-empty-wrap"><EmptyState label={t('map.unavailable')} detail={t('map.unavailableDetail')} tone="warn" /></div> : null}
       </div>
       <div className="map-bottom-overlay">
         <OverlayLegend settings={settings} scale={scale} saturation={saturation} ringStepM={niceRingStep(settings.maxDistanceM)} halfPower={geometry.halfPower} />

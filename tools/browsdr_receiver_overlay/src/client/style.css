@@ -2811,6 +2811,11 @@ canvas {
 	font-size: 11px;
 }
 
+/* Options longer than one grid column, such as the source or listen mode, get two columns so the chosen text is not cut off. */
+.sweep-controls > label:has(> select.sweep-select-wide) {
+	grid-column: span 2;
+}
+
 .sweep-controls select,
 .sweep-controls input[type='number'] {
 	width: 100%;
@@ -4009,9 +4014,11 @@ canvas {
 	outline: none;
 }
 
+/* Logical sides: the tab text runs top to bottom on the side rail and left to right on phones. */
 .workspace-rec-indicator {
-	margin-left: 6px;
-	padding: 1px 5px;
+	margin-inline-start: 6px;
+	padding-block: 1px;
+	padding-inline: 5px;
 	border-radius: 3px;
 	background: #b7414d;
 	color: #fff;

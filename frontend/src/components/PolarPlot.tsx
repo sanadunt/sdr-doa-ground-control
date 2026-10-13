@@ -50,6 +50,25 @@ export function radialTicks(low: number, high: number, compact = false): number[
   return ticks.length >= 2 ? ticks : [low, high];
 }
 
+/**
+ * Screen angle of the radial axis (degrees counter-clockwise from east, as
+ * Plotly expects). Angular labels sit every 30° from the top, turned by Head
+ * Up; the axis runs halfway between two of them, clear of the cardinals.
+ */
+export function radialAxisAngle(head: number): number {
+  const turned = 45 + (Number.isFinite(head) ? head : 0);
+  return ((turned % 360) + 360) % 360;
+}
+
+/**
+ * Radial tick labels without a unit: the outer label sits on the rim next to
+ * the angular labels, and the caption states the dB range. The centre is left
+ * unlabelled because the curve always meets it there.
+ */
+export function radialTickText(ticks: readonly number[], low: number): string[] {
+  return ticks.map(value => (value === low ? '' : dbLabel(value)));
+}
+
 export function polarUiRevision(settings: PolarSettings, simulation: boolean): string {
   return `${simulation ? 'simulation' : 'live'}:${settings.figType}:${settings.compassOffset}`;
 }
@@ -178,7 +197,7 @@ export function PolarPlot({ values, settings, simulation, offsetSource }: { valu
               return compact ? cardinal[a] : `${cardinal[a]} ${a}°`;
             }), gridcolor: color('--line') },
           radialaxis: { range: [0, high - low], tickmode: 'array', tickvals: ticks.map(v => v - low),
-            ticktext: ticks.map(v => `${dbLabel(v)} dB`), angle: 45, gridcolor: color('--line') },
+            ticktext: radialTickText(ticks, low), angle: radialAxisAngle(controls.head), gridcolor: color('--line') },
         },
       }, polarPlotConfig(lang, t));
       layoutKey.current = key;

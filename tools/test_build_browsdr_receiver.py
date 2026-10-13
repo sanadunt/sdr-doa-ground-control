@@ -153,6 +153,11 @@ class ReceiverBuildSourceTests(unittest.TestCase):
             html = (work / "src/client/index.html").read_text(encoding="utf-8")
             vite = (work / "vite.config.ts").read_text(encoding="utf-8")
             self.assertIn('<script src="/receiver/receiver-boot.js"></script>', html)
+            self.assertIn(
+                '<div class="brand" v-show="activeWorkspace === \'listener\'">{{ t(\'Freq. Spectrum\') }}</div>',
+                html,
+            )
+            self.assertNotIn(">BrowSDR</div>", html)
             self.assertNotIn("fonts.googleapis.com", html)
             self.assertIn("injectRegister: false", vite)
             self.assertNotIn("api-cache", vite)

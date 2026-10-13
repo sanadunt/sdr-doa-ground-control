@@ -15,13 +15,14 @@ import {
   formatDuration,
   gateCheckKey,
   humanizeKey,
+  isSecretSettingKey,
   nodeProgressView,
   peakConsistency,
   resourceRow,
   signalQualityView,
   stateTone,
 } from '../lib/healthView';
-import { KeyValue, Panel, SectionHeading, StatusBadge } from '../components/ui';
+import { CollectorError, KeyValue, Panel, SectionHeading, StatusBadge } from '../components/ui';
 
 // The collector already allowlists these fields; the cap only bounds an
 // unexpected response.
@@ -60,7 +61,7 @@ function NativeRecord({ name, item, snapshot }: { name: 'csv' | 'xml'; item: Can
     ? resource.httpStatus === null ? 'OK' : `HTTP ${resource.httpStatus}`
     : resource.ok === false ? t(errorKindKey(resource.errorKind)) : 'N/A';
   const httpDetail = resource.ok === false
-    ? resource.error ?? t('health.res.noDetail')
+    ? resource.error ? <CollectorError error={resource.error} /> : t('health.res.noDetail')
     : resource.elapsedMs === null ? t('diag.httpDetail') : formatDuration(t, resource.elapsedMs);
   const state = item.available !== true ? 'MISSING' : issue.quarantined ? 'INVALID' : 'PRESENT';
   const rows = name === 'csv' ? csvRowsView(item) : null;
@@ -70,7 +71,7 @@ function NativeRecord({ name, item, snapshot }: { name: 'csv' | 'xml'; item: Can
   return (
     <article className="native-record">
       <div className="native-record-head"><strong>{name.toUpperCase()}</strong><StatusBadge label={state} tone={stateTone(state)} /></div>
-      {issue.error ? <p className="native-record-error status-text-bad" role="note"><strong>{t('diag.recordError')}</strong> {issue.error}</p> : null}
+      {issue.error ? <p className="native-record-error status-text-bad" role="note"><strong>{t('diag.recordError')}</strong> <CollectorError error={issue.error} /></p> : null}
       {issue.quarantined ? <p className="native-record-error status-text-bad" role="note"><strong>NATIVE_ANGLE_INVALID</strong> {issue.quarantined}</p> : null}
       <div className="native-record-grid">
         <KeyValue label={t('diag.rawAngle')} value={typeof item.doa_raw_deg === 'number' ? `${formatNumber(item.doa_raw_deg)}°` : 'N/A'} detail={String(item.angle_convention ?? t('diag.native'))} />
@@ -127,7 +128,7 @@ export function DoADiagnosticsPage({ snapshot, localSnapshotFresh }: { snapshot:
   const csv = candidate(snapshot, 'csv');
   const xml = candidate(snapshot, 'xml');
   const consistency = consistencyView(snapshot?.native_consistency);
-  const fields = Object.entries(snapshot?.settings?.fields ?? {}).filter(([key]) => !/(pass|secret|token|key|credential)/i.test(key));
+  const fields = Object.entries(snapshot?.settings?.fields ?? {}).filter(([key]) => !isSecretSettingKey(key));
   const shownFields = fields.slice(0, MAX_CONFIG_FIELDS);
   const settingsError = typeof snapshot?.settings?.error === 'string' ? snapshot.settings.error : null;
   const { lang, t } = useI18n();
@@ -167,7 +168,7 @@ export function DoADiagnosticsPage({ snapshot, localSnapshotFresh }: { snapshot:
             <KeyValue label={t('diag.authority')} value={snapshot?.authority?.selected ?? 'NONE'} detail={t('diag.authorityDetail')} />
             <KeyValue label={t('diag.angleReadiness')} value={snapshot?.authority?.canonical_angle_ready === true ? 'READY' : t('diag.notConfigured')} detail={t('diag.angleDetail')} />
             <KeyValue label={t('diag.nativeViews')} value={nativeViewsReady(snapshot) && localSnapshotFresh ? 'FRESH / COMPARABLE' : 'NOT READY'} detail={t('diag.nativeDetail')} />
-            <KeyValue label={t('diag.settingsSource')} value={snapshot?.settings?.available === true ? 'REDACTED FIELDS' : 'UNAVAILABLE'} detail={settingsError ?? t('diag.settingsDetail')} tone={snapshot && snapshot.settings?.available !== true ? 'warn' : undefined} />
+            <KeyValue label={t('diag.settingsSource')} value={snapshot?.settings?.available === true ? 'REDACTED FIELDS' : 'UNAVAILABLE'} detail={settingsError ? <CollectorError error={settingsError} /> : t('diag.settingsDetail')} tone={snapshot && snapshot.settings?.available !== true ? 'warn' : undefined} />
             {shownFields.map(([key, value]) => <KeyValue key={key} label={key.replace(/_/g, ' ')} value={typeof value === 'boolean' ? (value ? 'ON' : 'OFF') : String(value)} />)}
             {fields.length > shownFields.length ? <div className="empty-inline">{t('diag.moreFields', { count: fields.length - shownFields.length })}</div> : null}
           </div>

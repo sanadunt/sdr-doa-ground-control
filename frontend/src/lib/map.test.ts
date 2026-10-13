@@ -5,11 +5,13 @@ import {
   BASEMAP_SWITCH_GRACE_MS,
   OSM_TILE_TEMPLATES,
   basemapAfterTile,
+  basemapPaint,
   gpsReportsNoFix,
   holdStationCoordinate,
   initialBasemapHealth,
   nextBasemapHost,
   resolveGpsSource,
+  resumeBasemapHealth,
   shouldReframeStation,
   type BasemapHealth,
   type StationFraming,
@@ -161,5 +163,42 @@ describe('basemap tile hosts (AUD-32, AUD-89)', () => {
     const loaded = basemapAfterTile(exhausted, true, hosts, 20_000);
     expect(loaded).toMatchObject({ hostIndex: exhausted.hostIndex, failures: 0, hostsFailed: 0, loaded: true, unavailable: false });
     expect(basemapAfterTile(loaded, true, hosts, 20_001)).toBe(loaded);
+  });
+});
+
+describe('basemap state across Overview visits', () => {
+  const hosts = OSM_TILE_TEMPLATES.length;
+  const exhausted = (): BasemapHealth => {
+    let state = initialBasemapHealth();
+    for (let index = 0; index < BASEMAP_FAILURES_PER_HOST; index += 1) state = basemapAfterTile(state, false, hosts, 0);
+    for (let index = 0; index < BASEMAP_FAILURES_PER_HOST; index += 1) state = basemapAfterTile(state, false, hosts, 10_000);
+    return state;
+  };
+
+  it('keeps a known outage, so the notice shows as soon as the map mounts again', () => {
+    const resumed = resumeBasemapHealth(exhausted(), 0, hosts);
+    expect(resumed.unavailable).toBe(true);
+    expect(resumed.hostIndex).toBe(exhausted().hostIndex);
+    // A tile that loads after the return still clears it.
+    expect(basemapAfterTile(resumed, true, hosts, 20_000).unavailable).toBe(false);
+  });
+
+  it('starts fresh on the last working host otherwise', () => {
+    expect(resumeBasemapHealth(null, 1, hosts)).toEqual(initialBasemapHealth(1));
+    expect(resumeBasemapHealth(initialBasemapHealth(0), 3, hosts)).toEqual(initialBasemapHealth(3 % hosts));
+  });
+});
+
+describe('basemap paint per theme', () => {
+  it('uses a dark neutral background in the dark theme and light lines until tiles draw', () => {
+    const light = basemapPaint('light', false);
+    const darkBare = basemapPaint('dark', false);
+    const darkTiles = basemapPaint('dark', true);
+    expect(light.background).toBe('#dfe4dc');
+    expect(darkBare.background).not.toBe(light.background);
+    expect(darkBare.rings).not.toBe(light.rings);
+    // OSM tiles are light, so dark lines come back once they draw.
+    expect(darkTiles.rings).toBe(light.rings);
+    expect(basemapPaint('light', true)).toEqual(light);
   });
 });

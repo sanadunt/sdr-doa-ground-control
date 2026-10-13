@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { TelemetrySnapshot } from '../types';
 import { DICTIONARIES, gateReasonLabel, translate } from './i18n';
 import {
+  collectorErrorText,
   consistencyView,
   csvRowsView,
   dataOutHttp,
@@ -11,6 +12,7 @@ import {
   formatDuration,
   gateCheckKey,
   healthHeadline,
+  isSecretSettingKey,
   nodeProgressView,
   nodeStatus,
   resourceRows,
@@ -169,5 +171,34 @@ describe('labels for the collector gate reasons added in wave 1', () => {
       expect(indonesian, reason).not.toBe(reason);
       expect(indonesian, reason).not.toBe(english);
     }
+  });
+});
+
+describe('settings keys that may hold a secret', () => {
+  it('matches whole segments, so compass_offset is not taken for a password', () => {
+    for (const key of ['compass_offset', 'doa_fig_type', 'center_freq', 'keyboard_layout', 'monkey_mode', 'bypass_filter']) expect(isSecretSettingKey(key), key).toBe(false);
+  });
+
+  it('hides passwords, secrets, tokens, keys and credentials in any spelling', () => {
+    for (const key of ['password', 'admin_password', 'adminPassword', 'PASS', 'db-pass', 'pwd', 'passphrase', 'secret', 'client_secret', 'token', 'access_token', 'authToken', 'key', 'api_key', 'apiKey', 'api-key', 'apikey', 'private.key', 'credential', 'credentials']) expect(isSecretSettingKey(key), key).toBe(true);
+  });
+});
+
+describe('collector error messages', () => {
+  const en = (key: Parameters<typeof translate>[1], vars?: Record<string, string | number>) => translate('en', key, vars);
+  const id = (key: Parameters<typeof translate>[1], vars?: Record<string, string | number>) => translate('id', key, vars);
+
+  it('translates the messages the collector produces and keeps the raw text', () => {
+    expect(collectorErrorText(id, 'connection refused')).toEqual({ text: 'Host Data Out menolak koneksi.', raw: 'connection refused', known: true });
+    expect(collectorErrorText(id, 'skipped: status.json transport failure').text).toBe('Dilewati: status.json tidak bisa dijangkau.');
+    expect(collectorErrorText(en, 'HTTP 404').text).toBe('Data Out answered HTTP 404.');
+    expect(collectorErrorText(id, 'body exceeds 262144 bytes').text).toBe('Respons lebih besar dari batas 262144 byte.');
+    expect(collectorErrorText(en, 'network error (OSError)').text).toBe('Network error while reading Data Out.');
+    expect(collectorErrorText(id, 'invalid JSON at /status.json').text).toBe('JSON tidak valid di /status.json.');
+    expect(collectorErrorText(en, 'collection deadline exceeded').text).toBe('Not read: the collection deadline was reached.');
+  });
+
+  it('shows an unknown message unchanged', () => {
+    expect(collectorErrorText(id, 'expected 377 CSV fields, found 3')).toEqual({ text: 'expected 377 CSV fields, found 3', raw: 'expected 377 CSV fields, found 3', known: false });
   });
 });

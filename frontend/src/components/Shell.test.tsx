@@ -159,3 +159,23 @@ describe('read error and read age (AUD-27, AUD-99)', () => {
     expect(render('id', { lastReadAgeMs: 3 * 3_600_000 })).toContain('Dibaca 3 jam lalu');
   });
 });
+
+describe('status strip tooltips', () => {
+  const render = (lang: Lang) => renderToStaticMarkup(
+    <I18nContext.Provider value={{ lang, setLang: () => undefined, t: (key, vars) => translate(lang, key, vars) }}>
+      <ConsoleShell route="overview" onNavigate={() => undefined} branding={{ app_name: 'G', logo_data_url: '' }} snapshot={liveSnapshot()} localSnapshotFresh loading={false} readError={null} lastReadAgeMs={100} simulationEnabled={false} onRefresh={() => undefined}>
+        <span />
+      </ConsoleShell>
+    </I18nContext.Provider>,
+  );
+
+  it.each(['en', 'id'] as const)('explains each of the six chips in %s', (lang) => {
+    const items = [...render(lang).matchAll(/<span class="telemetry-item[^"]*"([^>]*)>/g)].map((match) => match[1]);
+    expect(items).toHaveLength(6);
+    const help = ['status.dataHelp', 'status.doaHelp', 'status.deliveryHelp', 'status.snapshotHelp', 'status.mqttHelp', 'status.simHelp'] as const;
+    items.forEach((attributes, index) => {
+      const title = attributes.match(/title="([^"]*)"/)?.[1] ?? '';
+      expect(title.replace(/&#x27;/g, "'"), help[index]).toContain(translate(lang, help[index]));
+    });
+  });
+});

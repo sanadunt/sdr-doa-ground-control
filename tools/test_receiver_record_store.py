@@ -773,6 +773,15 @@ class ReceiverHttpTests(unittest.TestCase):
         self.assertEqual(status, 500)
         self.assertEqual(json.loads(body), {"error": "Receiver storage error: database is locked"})
 
+    def test_client_disconnect_is_not_answered_with_an_error(self):
+        # A browser that cancels an audio range read shows up as a broken pipe inside the handler.
+        logged = []
+        with mock.patch.object(self.server.receiver_store, "get_settings", side_effect=BrokenPipeError(32, "Broken pipe")), \
+                mock.patch("ground_console.ConsoleHandler.log_message", lambda _handler, fmt, *args: logged.append(fmt % args)):
+            with self.assertRaises(self.http.RemoteDisconnected):
+                self.request("GET", "/api/receiver/settings")
+        self.assertEqual([line for line in logged if " 500 " in line], [])
+
     def test_unload_request_finishes_session_with_open_segments(self):
         _, _, created = self.request("POST", "/api/receiver/audio-sessions", {})
         session_id = json.loads(created)["id"]

@@ -408,6 +408,71 @@ export function humanizeKey(key: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Settings shown on Diagnostics
+
+// Whole segments that name a secret, and longer words that do anywhere in a segment.
+const SECRET_SEGMENTS: ReadonlySet<string> = new Set(['pass', 'pwd', 'key', 'keys']);
+const SECRET_WORDS = /password|passwd|passphrase|secret|token|credential|apikey|privatekey/;
+
+/**
+ * True for a settings key that may hold a secret. Keys are split into segments
+ * on _ - . spaces and camelCase, so compass_offset is shown while password,
+ * api_key, apiKey, client_secret and access_token stay hidden.
+ */
+export function isSecretSettingKey(key: string): boolean {
+  const segments = key
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .split(/[\s_.-]+/)
+    .filter(Boolean);
+  return segments.some((segment) => SECRET_SEGMENTS.has(segment) || SECRET_WORDS.test(segment));
+}
+
+// ---------------------------------------------------------------------------
+// Collector error messages
+
+const COLLECTOR_ERRORS: ReadonlyArray<[RegExp, (match: RegExpMatchArray) => [MessageKey, Record<string, string>?]]> = [
+  [/^connection refused$/, () => ['health.error.connectionRefused']],
+  [/^timed out$/, () => ['health.error.timedOut']],
+  [/^host name resolution failed$/, () => ['health.error.dnsFailed']],
+  [/^host unreachable$/, () => ['health.error.hostUnreachable']],
+  [/^network error( \(\w+\))?$/, () => ['health.error.network']],
+  [/^HTTP (\d{3})$/, (match) => ['health.error.httpStatus', { code: match[1] }]],
+  [/^HTTP error$/, () => ['health.error.httpError']],
+  [/^HTTP redirect is not allowed$/, () => ['health.error.redirect']],
+  [/^body exceeds (\d+) bytes$/, (match) => ['health.error.bodyTooLarge', { limit: match[1] }]],
+  [/^invalid HTTP response( \(\w+\))?$/, () => ['health.error.protocol']],
+  [/^skipped: status\.json transport failure$/, () => ['health.error.skippedStatus']],
+  [/^collection deadline exceeded$/, () => ['health.error.deadline']],
+  [/^resource unavailable$/, () => ['health.error.resourceUnavailable']],
+  [/^invalid JSON at (\/[\w.]+)$/, (match) => ['health.error.invalidJson', { path: match[1] }]],
+  [/^expected JSON object at (\/[\w.]+)$/, (match) => ['health.error.jsonObject', { path: match[1] }]],
+  [/^invalid DoA XML$/, () => ['health.error.invalidXml']],
+  [/^DoA CSV is not UTF-8$/, () => ['health.error.csvEncoding']],
+  [/^(status|settings|resource) parse failed$/, () => ['health.error.parseFailed']],
+];
+
+export interface CollectorErrorText {
+  /** Text in the UI language, or the raw message when it is not a known collector message. */
+  text: string;
+  /** The collector's own message, kept for a tooltip. */
+  raw: string;
+  known: boolean;
+}
+
+/** Translate a known collector error message; an unknown one is shown as is. */
+export function collectorErrorText(t: Translate, raw: string): CollectorErrorText {
+  const message = raw.trim();
+  for (const [pattern, describe] of COLLECTOR_ERRORS) {
+    const match = message.match(pattern);
+    if (!match) continue;
+    const [key, vars] = describe(match);
+    return { text: t(key, vars), raw: message, known: true };
+  }
+  return { text: message, raw: message, known: false };
+}
+
+// ---------------------------------------------------------------------------
 // Localized durations (AUD-99)
 
 export type DurationUnit = 'ms' | 's' | 'min' | 'h';

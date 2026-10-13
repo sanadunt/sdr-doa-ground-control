@@ -79,10 +79,14 @@ describe('System Health MQTT card', () => {
 
 describe('System Health shows why Data Out failed (AUD-27, AUD-101)', () => {
   it('renders the transport error, the skipped reads and UNAVAILABLE without a stale banner', () => {
-    const page = text(render(<SystemHealthPage snapshot={REFUSED} mqtt={null} localSnapshotFresh={false} />));
-    expect(page).toContain('connection refused');
+    const markup = render(<SystemHealthPage snapshot={REFUSED} mqtt={null} localSnapshotFresh={false} />);
+    const page = text(markup);
+    expect(page).toContain('The Data Out host refused the connection.');
     expect(page).toContain('Connection refused');
-    expect(page).toContain('skipped: status.json transport failure');
+    expect(page).toContain('Skipped: status.json could not be reached.');
+    // The collector's own message stays available as the tooltip.
+    expect(markup).toContain('title="connection refused"');
+    expect(markup).toContain('title="skipped: status.json transport failure"');
     expect(page).toContain('status.json could not be reached, so the other reads were skipped.');
     expect(page).toContain('UNAVAILABLE');
     expect(page).not.toContain('STALE EVIDENCE');
@@ -109,10 +113,16 @@ describe('System Health shows why Data Out failed (AUD-27, AUD-101)', () => {
     expect(text(render(<SystemHealthPage snapshot={unchanged} mqtt={null} localSnapshotFresh={false} />, 'id'))).toContain('Tidak ada counter yang berubah');
   });
 
-  it('speaks Indonesian for error kinds and durations', () => {
-    const page = text(render(<SystemHealthPage snapshot={REFUSED} mqtt={null} localSnapshotFresh={false} />, 'id'));
+  it('speaks Indonesian for error kinds, collector messages and durations', () => {
+    const markup = render(<SystemHealthPage snapshot={REFUSED} mqtt={null} localSnapshotFresh={false} />, 'id');
+    const page = text(markup);
     expect(page).toContain('Koneksi ditolak');
     expect(page).toContain('Dilewati');
+    expect(page).toContain('Host Data Out menolak koneksi.');
+    expect(page).toContain('Dilewati: status.json tidak bisa dijangkau.');
+    expect(page).not.toContain('connection refused');
+    expect(page).not.toContain('transport failure');
+    expect(markup).toContain('title="connection refused"');
     expect(page).toContain('3 ms');
     expect(page).not.toContain('clock unverified');
   });
@@ -143,6 +153,21 @@ describe('DoA Diagnostics', () => {
     expect(page).toContain('Node tidak macet');
     expect(page).toContain('ADC overdrive dilaporkan; turunkan gain penerima');
     expect(page).not.toContain('Node Not Stalled');
+  });
+
+  it('shows compass_offset while keys that may hold a secret stay hidden', () => {
+    const fields = { ...FIELDS, compass_offset: 12.5, doa_fig_type: 'Compass', password: 'p', admin_password: 'p', api_key: 'k', apiKey: 'k', client_secret: 's', access_token: 't', credentials: 'c' };
+    const withSecrets = { ...MALFORMED, settings: { available: true, redacted: true, fields } } as unknown as TelemetrySnapshot;
+    const page = text(render(<DoADiagnosticsPage snapshot={withSecrets} localSnapshotFresh={false} />));
+    expect(page).toContain('compass offset 12.5');
+    expect(page).toContain('doa fig type Compass');
+    for (const label of ['password', 'admin password', 'api key', 'apiKey', 'client secret', 'access token', 'credentials']) expect(page, label).not.toContain(label);
+  });
+
+  it('translates a known collector message on the native record and keeps an unknown one as is', () => {
+    const page = text(render(<DoADiagnosticsPage snapshot={REFUSED} localSnapshotFresh={false} />, 'id'));
+    expect(page).toContain('Dilewati: status.json tidak bisa dijangkau.');
+    expect(text(render(<DoADiagnosticsPage snapshot={MALFORMED} localSnapshotFresh={false} />, 'id'))).toContain('expected 377 CSV fields, found 3');
   });
 
   it('shows the per-resource HTTP failure on the native record', () => {

@@ -56,6 +56,34 @@ export function basemapAfterTile(state: BasemapHealth, loaded: boolean, hostCoun
   return failures < BASEMAP_FAILURES_PER_HOST ? { ...state, failures } : nextBasemapHost(state, hostCount, nowMs);
 }
 
+/**
+ * Basemap health when the map mounts again on Overview. A known outage carries
+ * over, so its notice shows at once instead of after the next round of tile
+ * failures; otherwise the map starts fresh on the last host that worked.
+ */
+export function resumeBasemapHealth(memory: BasemapHealth | null, preferredHost: number, hostCount: number): BasemapHealth {
+  if (memory?.unavailable) return { ...memory, failures: 0, loaded: false };
+  return initialBasemapHealth(Math.max(0, Math.trunc(preferredHost)) % Math.max(1, hostCount));
+}
+
+export interface BasemapPaint {
+  /** Map background, seen wherever no tile is drawn. */
+  background: string;
+  rings: string;
+  guides: string;
+}
+
+/**
+ * Background and reference-line colours for the console theme. OSM tiles are
+ * light in both themes, so the lines stay dark once tiles are drawn; on the
+ * dark background alone they turn light to stay readable.
+ */
+export function basemapPaint(theme: 'light' | 'dark', tilesLoaded: boolean): BasemapPaint {
+  const background = theme === 'dark' ? '#1b242d' : '#dfe4dc';
+  if (theme === 'dark' && !tilesLoaded) return { background, rings: '#c3ced8', guides: '#9aabba' };
+  return { background, rings: '#1f2d3a', guides: '#34495c' };
+}
+
 export const DEFAULT_FALLBACK_COORDINATE = Object.freeze({ latitude: -6.932468839245536, longitude: 107.66069405900005 });
 export const DEFAULT_GPS_CONFIG: GpsConfig = {
   source: 'DATA_OUT',

@@ -522,7 +522,7 @@
 
 				<div class="sweep-controls">
 					<label>{{ t('Source') }}
-						<select v-model="sweep.source" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
+						<select class="sweep-select-wide" v-model="sweep.source" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
 							<option value="simulated">{{ t('Simulation (synthetic peaks)') }}</option>
 							<option value="native" v-if="deviceCapabilities && deviceCapabilities.supportsNativeSweep">{{ t('HackRF native sweep') }}</option>
 							<option value="manual" v-if="deviceCapabilities && deviceCapabilities.supportsManualSweep">{{ t('HackRF manual sweep') }}</option>
@@ -541,7 +541,7 @@
 						</div>
 					</label>
 					<label>{{ t('Resolution') }}
-						<select v-model.number="sweep.fftSize" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
+						<select class="sweep-select-wide" v-model.number="sweep.fftSize" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
 							<option :value="4096">4.88 kHz · 4096 FFT</option>
 							<option :value="8192">2.44 kHz · 8192 FFT</option>
 						</select>
@@ -571,14 +571,14 @@
 						</div>
 					</label>
 					<label>{{ t('Trace') }}
-						<select v-model="sweep.view" @change="drawSweepSpectrum">
+						<select class="sweep-select-wide" v-model="sweep.view" @change="drawSweepSpectrum">
 							<option value="current">{{ t('Current') }}</option>
 							<option value="average">{{ t('Average') }}</option>
 							<option value="max">{{ t('Max hold') }}</option>
 						</select>
 					</label>
 					<label>{{ t('Sort signals') }}
-						<select v-model="sweep.sortBy" @change="candidateFilterChanged">
+						<select class="sweep-select-wide" v-model="sweep.sortBy" @change="candidateFilterChanged">
 							<option value="snr">SNR</option>
 							<option value="frequency">{{ t('Frequency') }}</option>
 							<option value="peak">{{ t('Peak power') }}</option>
@@ -599,7 +599,7 @@
 						</div>
 					</label>
 					<label>{{ t('Listen mode') }}
-						<select v-model="sweep.listenMode" :disabled="sweep.listening || sweep.listenStarting">
+						<select class="sweep-select-wide" v-model="sweep.listenMode" :disabled="sweep.listening || sweep.listenStarting">
 							<option value="">{{ t('Use active VFO mode') }}</option>
 							<option value="wfm">WFM</option>
 							<option value="nfm">NFM</option>
@@ -833,7 +833,7 @@
 							<tbody>
 								<tr v-for="record in records.scanItems" :key="record.id">
 									<td><time :datetime="record.created_at">{{ new Date(record.created_at).toLocaleString() }}</time></td>
-									<td>{{ record.source }}</td>
+									<td>{{ scanSourceLabel(record.source) }}</td>
 									<td>{{ record.start_hz === null || record.end_hz === null ? t('Unknown') : (record.start_hz / 1000000).toFixed(3) + ' - ' + (record.end_hz / 1000000).toFixed(3) + ' MHz' }}</td>
 									<td><span class="record-status" :class="'record-status-' + record.status">{{ record.status }}</span></td>
 									<td>{{ record.candidate_count }}</td>
@@ -928,7 +928,7 @@
 													<span>VFO {{ segment.vfo_index + 1 }} · {{ (segment.frequency_hz / 1000000).toFixed(6) }} MHz · {{ segment.mode.toUpperCase() }} · {{ segment.bandwidth_hz }} Hz · {{ segment.duration_seconds === null ? t('recording') : segment.duration_seconds.toFixed(1) + ' s' }}</span>
 													<span v-if="segment.status === 'partial' || segment.status === 'interrupted'" class="audio-record-warning">{{ t(segment.status === 'partial' ? 'Partly saved' : 'Interrupted') }}: {{ tm(segment.error) }}</span>
 												</div>
-												<audio v-if="(segment.status === 'complete' || segment.status === 'partial' || segment.status === 'interrupted') && segment.bytes > 0" controls preload="none" :src="audioRecordUrl(segment.id)">{{ t('Audio playback is not supported by this browser.') }}</audio>
+												<audio v-if="(segment.status === 'complete' || segment.status === 'partial' || segment.status === 'interrupted') && segment.bytes > 0" controls preload="metadata" :src="audioRecordUrl(segment.id)">{{ t('Audio playback is not supported by this browser.') }}</audio>
 												<span v-else-if="segment.status === 'recording'" class="record-recording" role="status">{{ t('Recording…') }} {{ (segment.bytes / 1024).toFixed(0) }} {{ t('KiB saved') }}</span>
 												<span v-else-if="segment.status === 'failed'" class="records-error" role="alert">{{ t('Recording failed') }}: {{ segment.error ? tm(segment.error) : t('Audio was not saved.') }}</span>
 												<span v-else class="records-empty">{{ t('No audio data in this segment.') }}</span>

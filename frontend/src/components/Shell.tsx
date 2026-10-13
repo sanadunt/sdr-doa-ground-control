@@ -2,7 +2,7 @@ import type { JSX } from 'react';
 import { useEffect, useRef, useState } from 'react';
 import type { Branding, TelemetrySnapshot, Tone } from '../types';
 import { candidateErrors, deriveDataState, toneFor } from '../lib/telemetry';
-import { actionableGateReasons, doaStatusTextKey, overviewDoaStatus } from '../lib/doaStatus';
+import { actionableGateReasons, doaStatusTextKey, overviewDoaStatus, rankGateReasons } from '../lib/doaStatus';
 import { shortcutAction } from '../lib/shortcuts';
 import { LANGS, gateReasonLabel, useI18n } from '../lib/i18n';
 import type { MessageKey, Translate } from '../lib/i18n';
@@ -129,13 +129,16 @@ export function ConsoleShell({
   const doa = overviewDoaStatus(snapshot, localSnapshotFresh);
   const doaTitle = snapshot ? t(doaStatusTextKey(doa.reason)) : undefined;
   const gate = String(snapshot?.publication_gate?.state ?? 'BLOCKED').toUpperCase();
+  const gateReason = gate === 'READY' ? undefined : rankGateReasons(snapshot?.publication_gate?.reasons)[0];
   // Snapshot is about the read itself: a read that just completed is CURRENT even when it reports UNAVAILABLE.
   const readCurrent = snapshot !== null && lastReadAgeMs !== null && lastReadAgeMs <= SNAPSHOT_CURRENT_MS;
   const snapshotState = readError ? 'ERROR' : readCurrent ? 'CURRENT' : snapshot ? 'STALE' : loading ? 'LOADING' : 'WAITING';
   const snapshotTone: Tone = readError ? 'bad' : readCurrent ? 'good' : snapshot ? 'warn' : loading ? 'neutral' : 'warn';
   const mqttState = mqttError ? 'ERROR' : (mqttConnection ?? 'OFF').toUpperCase();
   const mqttTone: Tone = mqttState === 'CONNECTED' ? 'good' : mqttState === 'OFF' || mqttState === 'DISABLED' ? 'neutral' : 'warn';
-  const mqttTitle = mqttError ? `${t('shell.mqttTitle')} · ${t('app.mqttReadFailed', { error: mqttError })}` : t('shell.mqttTitle');
+  const mqttTitle = mqttError ? t('app.mqttReadFailed', { error: mqttError }) : undefined;
+  // Every chip explains what it reports; a current cause follows on the next line.
+  const withHelp = (help: MessageKey, detail?: string) => (detail ? `${t(help)}\n${detail}` : t(help));
   const readLabel = loading ? t('shell.reading') : lastReadAgeMs === null ? t('shell.noRead') : t('shell.lastRead', { age: formatElapsed(t, lastReadAgeMs) });
 
   const [menuOpen, setMenuOpen] = useState(false);
@@ -281,12 +284,12 @@ export function ConsoleShell({
             <span className="topbar-read">{readLabel}</span>
           </div>
           <div className="telemetry-strip" role="group" aria-label={t('shell.runtimeStatus')}>
-            <TelemetryItem label={t('status.data')} value={dataState} tone={dataTone} title={dataTitle} />
-            <TelemetryItem label={t('status.doa')} value={doa.code} tone={doa.tone} title={doaTitle} />
-            <TelemetryItem label={t('status.delivery')} value={gate} tone={gate === 'READY' ? 'good' : 'warn'} />
-            <TelemetryItem label={t('status.snapshot')} value={snapshotState} tone={snapshotTone} title={readError ? t('shell.snapshotError', { error: readError }) : undefined} live />
-            <TelemetryItem label={t('status.mqtt')} value={mqttState} tone={mqttTone} title={mqttTitle} />
-            <TelemetryItem label={t('status.sim')} value={simulationEnabled ? 'ON' : 'OFF'} tone={simulationEnabled ? 'warn' : 'neutral'} />
+            <TelemetryItem label={t('status.data')} value={dataState} tone={dataTone} title={withHelp('status.dataHelp', dataTitle)} />
+            <TelemetryItem label={t('status.doa')} value={doa.code} tone={doa.tone} title={withHelp('status.doaHelp', doaTitle)} />
+            <TelemetryItem label={t('status.delivery')} value={gate} tone={gate === 'READY' ? 'good' : 'warn'} title={withHelp('status.deliveryHelp', gateReason ? `${gateReason} · ${gateReasonLabel(lang, gateReason)}` : undefined)} />
+            <TelemetryItem label={t('status.snapshot')} value={snapshotState} tone={snapshotTone} title={withHelp('status.snapshotHelp', readError ? t('shell.snapshotError', { error: readError }) : undefined)} live />
+            <TelemetryItem label={t('status.mqtt')} value={mqttState} tone={mqttTone} title={withHelp('status.mqttHelp', mqttTitle)} />
+            <TelemetryItem label={t('status.sim')} value={simulationEnabled ? 'ON' : 'OFF'} tone={simulationEnabled ? 'warn' : 'neutral'} title={t('status.simHelp')} />
           </div>
           <div className="topbar-tools">
             <div className="lang-switch" role="group" aria-label={t('shell.language')}>

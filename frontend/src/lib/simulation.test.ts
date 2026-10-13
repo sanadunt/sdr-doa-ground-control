@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_SIMULATION, simulationSnapshot, simulationTheta, validateSimulation, randomizeSimulationSettings, simulationRayEnd } from './simulation';
+import { DEFAULT_SIMULATION, simulationHalfPowerWidth, simulationSnapshot, simulationTheta, validateSimulation, randomizeSimulationSettings, simulationRayEnd } from './simulation';
+import { halfPowerWidth } from './doaGeometry';
+import { translate } from './i18n';
 import { bearingForView, geographicBearingForBin, polarView } from './polar';
 import { overviewDoaStatus } from './doaStatus';
 
@@ -62,5 +64,24 @@ describe('local simulation', () => {
     const b = simulationSnapshot(DEFAULT_SIMULATION);
     expect(a.doa_candidates?.csv.angular_power_db).not.toBe(b.doa_candidates?.csv.angular_power_db);
     expect(DEFAULT_SIMULATION.angle).toBe(45);
+  });
+});
+
+describe('simulation lobe spread', () => {
+  it.each([5, 18, 20, 33, 60])('shows the same -3 dB width as the map legend for sigma %s', (width) => {
+    const settings = { ...DEFAULT_SIMULATION, width };
+    const legend = halfPowerWidth(simulationSnapshot(settings).doa_candidates?.csv.angular_power_db ?? []);
+    expect(simulationHalfPowerWidth(settings)).toBe(legend?.widthDeg);
+  });
+
+  it('is a Gaussian sigma, so the -3 dB width is about 0.74 of it', () => {
+    expect(simulationHalfPowerWidth({ ...DEFAULT_SIMULATION, width: 20 })).toBe(15);
+    expect(simulationHalfPowerWidth({ ...DEFAULT_SIMULATION, width: 0 })).toBeNull();
+  });
+
+  it('names the field a spread (sigma), not a width, in both languages', () => {
+    expect(translate('en', 'sim.width')).toContain('σ');
+    expect(translate('id', 'sim.width')).toContain('σ');
+    expect(translate('id', 'sim.widthHalfPower', { width: 15 })).toBe('Lebar −3 dB di legenda peta: 15°.');
   });
 });

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { translate } from '../lib/i18n';
 import type { MessageKey } from '../lib/i18n';
 import { MIN_AUTO_DB_SPAN } from '../lib/doaGeometry';
-import { niceStep, polarPlotConfig, polarUiRevision, radialDomain, radialTicks, validHeadUp, validPlotRange } from './PolarPlot';
+import { niceStep, polarPlotConfig, polarUiRevision, radialAxisAngle, radialDomain, radialTickText, radialTicks, validHeadUp, validPlotRange } from './PolarPlot';
 
 it('validates manual view controls', () => {
   expect(validPlotRange(90, -60, 0)).toBe(true);
@@ -96,5 +96,31 @@ describe('polar Plotly config', () => {
     expect(dictionary['Download plot as a PNG']).toBe(t('polar.modebarDownload'));
     expect(dictionary.Zoom).toBe(t('polar.modebarZoom'));
     expect(dictionary['Download plot as a PNG']).not.toBe('Download plot as a PNG');
+  });
+});
+
+describe('radial axis placement', () => {
+  // Angular labels sit at Plotly angle 90 + head + 30k in both Compass and Polar modes.
+  const gapToLabels = (head: number) => {
+    const angle = radialAxisAngle(head);
+    return Math.min(...Array.from({ length: 12 }, (_, k) => {
+      const label = (((90 + head + 30 * k) % 360) + 360) % 360;
+      const delta = Math.abs(angle - label) % 360;
+      return Math.min(delta, 360 - delta);
+    }));
+  };
+
+  it.each([0, 10, 40, 90, 180, 275.5, 359])('runs halfway between two angular labels at Head Up %s', (head) => {
+    expect(gapToLabels(head)).toBeCloseTo(15, 9);
+  });
+
+  it('stays clear of the cardinal labels at Head Up 0', () => {
+    for (const cardinal of [0, 90, 180, 270]) expect(Math.abs(radialAxisAngle(0) - cardinal)).toBeGreaterThanOrEqual(45);
+  });
+
+  it('labels ticks without a unit and leaves the centre unlabelled', () => {
+    expect(radialTickText([0, 5, 10, 15, 20], 0)).toEqual(['', '5', '10', '15', '20']);
+    expect(radialTickText([-60, -40, -20, 0], -60)).toEqual(['', '-40', '-20', '0']);
+    expect(radialTickText([-2.5, 0.25], -2.5)).toEqual(['', '0.25']);
   });
 });

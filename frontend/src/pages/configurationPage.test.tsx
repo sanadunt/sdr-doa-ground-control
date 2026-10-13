@@ -51,3 +51,29 @@ describe('Configuration page', () => {
     expect(render()).toContain('Required by the sdr/v1 config_patch contract');
   });
 });
+
+describe('source help follows the selected source', () => {
+  const renderWith = (lang: Lang, gps: 'DATA_OUT' | 'MANUAL' | 'FALLBACK', compass: 'DATA_OUT' | 'MANUAL' | 'FALLBACK') => renderToStaticMarkup(
+    <I18nContext.Provider value={{ lang, setLang: () => undefined, t: (key, vars) => translate(lang, key, vars) }}>
+      <ConfigurationPage
+        config={{ base_url: 'http://127.0.0.1:8081', mqtt_host: '', mqtt_port: 1883, refresh_seconds: 1 }}
+        branding={{ app_name: 'Ground Console', logo_data_url: '' }}
+        gpsConfig={{ ...DEFAULT_GPS_CONFIG, source: gps }}
+        compassConfig={{ ...DEFAULT_COMPASS_CONFIG, source: compass }}
+        onGpsConfigChanged={() => undefined}
+        onCompassConfigChanged={() => undefined}
+        onConfigSaved={async () => undefined}
+        onBrandingChanged={() => undefined}
+      />
+    </I18nContext.Provider>,
+  );
+
+  it.each(['DATA_OUT', 'MANUAL', 'FALLBACK'] as const)('describes %s in both languages', (source) => {
+    for (const lang of ['en', 'id'] as const) {
+      const markup = renderWith(lang, source, source).replace(/&#x27;/g, "'");
+      expect(markup).toContain(translate(lang, `config.compassSourceHelp.${source}`));
+      expect(markup).toContain(translate(lang, `config.gpsSourceHelp.${source}`));
+    }
+    expect(translate('id', 'config.compassSourceHelp.DATA_OUT')).toContain('Data Out');
+  });
+});

@@ -1,10 +1,12 @@
 import type { TelemetrySnapshot } from '../types';
 import { DEFAULT_FALLBACK_COORDINATE } from './map';
+import { halfPowerWidth } from './doaGeometry';
 
 export interface SimulationSettings {
   latitude: number;
   longitude: number;
   angle: number;
+  /** Gaussian standard deviation σ of the lobe in degrees; not the -3 dB width. */
   width: number;
 }
 
@@ -42,6 +44,23 @@ export function simulationTheta(bearing: number): number {
   return (360 - bearing) % 360;
 }
 
+/** Shifted-dB vector: a Gaussian with standard deviation `sigma` degrees around theta_0, -50 to -5 dB. */
+function simulationVector(theta: number, sigma: number): number[] {
+  return Array.from({ length: 360 }, (_, bin) => {
+    const distance = Math.abs(((bin - theta + 540) % 360) - 180);
+    return -50 + 45 * Math.exp(-0.5 * (distance / sigma) ** 2);
+  });
+}
+
+/**
+ * The -3 dB width the map legend reports for these settings, so the
+ * Simulation page can show the same number; null for invalid settings.
+ */
+export function simulationHalfPowerWidth(settings: SimulationSettings): number | null {
+  if (!validateSimulation(settings)) return null;
+  return halfPowerWidth(simulationVector(simulationTheta(settings.angle), settings.width))?.widthDeg ?? null;
+}
+
 /**
  * Renderer fixture only; never eligible for publication or remote control.
  * The entered angle is the geographic bearing, so the snapshot carries
@@ -51,10 +70,7 @@ export function simulationTheta(bearing: number): number {
 export function simulationSnapshot(settings: SimulationSettings): TelemetrySnapshot {
   if (!validateSimulation(settings)) throw new Error('Invalid simulation settings');
   const theta = simulationTheta(settings.angle);
-  const values = Array.from({ length: 360 }, (_, bin) => {
-    const distance = Math.abs(((bin - theta + 540) % 360) - 180);
-    return -50 + 45 * Math.exp(-0.5 * (distance / settings.width) ** 2);
-  });
+  const values = simulationVector(theta, settings.width);
   const record = {
     available: true, source_format: 'SIMULATION',
     canonical_angle_deg: theta,

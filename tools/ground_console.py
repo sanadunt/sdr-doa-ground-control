@@ -1922,6 +1922,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 else:
                     return False
             return True
+        except (BrokenPipeError, ConnectionResetError):
+            # The browser cancelled the read, as it does for an audio range it no longer
+            # needs; handle() closes the connection without logging an error response.
+            raise
         except (ValueError, KeyError, OSError, sqlite3.Error, zlib.error) as exc:
             self._receiver_error(exc)
             return True

@@ -396,7 +396,9 @@ describe('Data Out compass settings resolution', () => {
     expect(resolution.effectiveSource).toBe('DATA_OUT');
     expect(resolution.label).toBe('DATA_OUT COMPASS · LAST KNOWN');
     expect(resolution.lastKnownAgeMs).toBe(2_000);
-    expect(compassOffsetSourceLabel(resolution, (key, vars) => translate('en', key, vars))).toBe('DATA_OUT last known 2 s');
+    expect(compassOffsetSourceLabel(resolution, (key, vars) => translate('en', key, vars))).toBe('DATA_OUT last known 2.0 s');
+    // The age unit follows the UI language like every other duration.
+    expect(compassOffsetSourceLabel(resolution, (key, vars) => translate('id', key, vars))).toBe('DATA_OUT terakhir diketahui 2.0 dtk');
   });
 
   it('falls back explicitly when the remembered settings are too old or from another node', () => {

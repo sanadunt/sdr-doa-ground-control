@@ -28,6 +28,18 @@ type Tone = 'good' | 'warn' | 'bad' | 'neutral';
 // validation errors arrive as text and are shown as received.
 type Status = { tone: Tone; key: MessageKey; vars?: Record<string, string | number> } | { tone: Tone; text: string };
 
+// Help under each source select describes the source that is selected.
+const GPS_SOURCE_HELP: Record<GpsConfig['source'], MessageKey> = {
+  DATA_OUT: 'config.gpsSourceHelp.DATA_OUT',
+  MANUAL: 'config.gpsSourceHelp.MANUAL',
+  FALLBACK: 'config.gpsSourceHelp.FALLBACK',
+};
+const COMPASS_SOURCE_HELP: Record<CompassConfig['source'], MessageKey> = {
+  DATA_OUT: 'config.compassSourceHelp.DATA_OUT',
+  MANUAL: 'config.compassSourceHelp.MANUAL',
+  FALLBACK: 'config.compassSourceHelp.FALLBACK',
+};
+
 function statusText(status: Status, t: Translate): string {
   return 'key' in status ? t(status.key, status.vars) : status.text;
 }
@@ -393,7 +405,7 @@ export function ConfigurationPage({
             <div className="manual-test-block-title">{t('config.gpsTitle')}</div>
             <p>{t('config.gpsNote')} <strong>{DEFAULT_FALLBACK_COORDINATE.latitude}, {DEFAULT_FALLBACK_COORDINATE.longitude}</strong>.</p>
             <div className="form-grid manual-test-fields">
-              <label className="form-field"><span>{t('config.gpsSource')}</span><select value={gpsSource} onChange={(event) => setGpsSource(event.target.value as GpsConfig['source'])}><option value="DATA_OUT">{t('config.sourceDataOut')}</option><option value="MANUAL">{t('config.sourceManual')}</option><option value="FALLBACK">{t('config.sourceFallback')}</option></select><small>{t('config.gpsSourceHelp')}</small></label>
+              <label className="form-field"><span>{t('config.gpsSource')}</span><select value={gpsSource} onChange={(event) => setGpsSource(event.target.value as GpsConfig['source'])}><option value="DATA_OUT">{t('config.sourceDataOut')}</option><option value="MANUAL">{t('config.sourceManual')}</option><option value="FALLBACK">{t('config.sourceFallback')}</option></select><small>{t(GPS_SOURCE_HELP[gpsSource])}</small></label>
               <Field label={t('config.manualLat')} type="number" value={manualLatitude} min={-90} max={90} step={0.00001} onChange={setManualLatitude} />
               <Field label={t('config.manualLon')} type="number" value={manualLongitude} min={-180} max={180} step={0.00001} onChange={setManualLongitude} />
             </div>
@@ -407,7 +419,7 @@ export function ConfigurationPage({
             <div className="manual-test-block-title">{t('config.compassTitle')}</div>
             <p>{t('config.compassNote')}</p>
             <div className="form-grid manual-test-fields">
-              <label className="form-field"><span>{t('config.compassSource')}</span><select value={compassSource} onChange={(event) => setCompassSource(event.target.value as CompassConfig['source'])}><option value="DATA_OUT">{t('config.sourceDataOut')}</option><option value="MANUAL">{t('config.sourceManual')}</option><option value="FALLBACK">{t('config.sourceFallback')}</option></select><small>{t('config.compassSourceHelp')}</small></label>
+              <label className="form-field"><span>{t('config.compassSource')}</span><select value={compassSource} onChange={(event) => setCompassSource(event.target.value as CompassConfig['source'])}><option value="DATA_OUT">{t('config.sourceDataOut')}</option><option value="MANUAL">{t('config.sourceManual')}</option><option value="FALLBACK">{t('config.sourceFallback')}</option></select><small>{t(COMPASS_SOURCE_HELP[compassSource])}</small></label>
               <label className="form-field"><span>{t('config.manualAxis')}</span><select value={manualAxis} onChange={(event) => setManualAxis(event.target.value === 'Polar' ? 'Polar' : 'Compass')}><option value="Compass">Compass</option><option value="Polar">Polar</option></select><small>{t('config.manualAxisHelp')}</small></label>
               <Field label={t('config.manualOffset')} type="number" value={manualOffset} min={-MAX_COMPASS_OFFSET_DEG} max={MAX_COMPASS_OFFSET_DEG} step={0.1} onChange={setManualOffset} help={t('config.manualOffsetHelp')} />
             </div>

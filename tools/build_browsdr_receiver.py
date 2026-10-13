@@ -140,7 +140,7 @@ def _apply_embedded_changes(source: Path) -> None:
     _replace_once(
         html,
         '<div class="brand" v-show="activeWorkspace === \'listener\'">BrowSDR</div>',
-        '<div class="brand" v-show="activeWorkspace === \'listener\'">Freq. Spectrum</div>',
+        '<div class="brand" v-show="activeWorkspace === \'listener\'">{{ t(\'Freq. Spectrum\') }}</div>',
         "Receiver header brand",
     )
     audio_button = (

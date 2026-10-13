@@ -188,7 +188,7 @@ Hentikan server dengan `Ctrl+C`.
 Pilih menu **Receiver** (tombol `7`) atau buka `http://127.0.0.1:8787/#/receiver`. Receiver juga dapat dibuka langsung di `http://127.0.0.1:8787/receiver/`.
 
 - **Browser.** Firefox dan Safari tidak punya WebUSB; di sana **Connect Device** hanya menampilkan pesan bahwa WebUSB tidak tersedia dan meminta Chrome atau Edge.
-- **Mock SDR.** Untuk uji tanpa hardware, buka Receiver langsung dengan `?mock=1` dari alamat loopback, misalnya `http://127.0.0.1:8787/receiver/?mock=1`. Koneksi mock berlabel `MOCK` (`Radio SDR ON · MOCK (no RF)`, `MOCK DEVICE`).
+- **Mock SDR.** Untuk uji tanpa hardware, buka Receiver langsung dengan `?mock=1` dari alamat loopback, misalnya `http://127.0.0.1:8787/receiver/?mock=1`. Dari dalam console, buka `http://127.0.0.1:8787/?mock=1#/receiver` (`?mock=1` ditulis sebelum `#`); halaman Receiver meneruskan `mock=1` ke frame-nya hanya bila host console adalah loopback. Pilih **Connect Mock SDR** (**Sambungkan Mock SDR** dalam bahasa Indonesia). Koneksi mock berlabel `MOCK` (`Radio SDR ON · MOCK (no RF)`, dalam bahasa Indonesia `MOCK (tanpa RF)`, dan `MOCK DEVICE`).
 - **Tetap berjalan saat pindah halaman.** Setelah Receiver dibuka pertama kali, pindah ke halaman lain tidak menghentikan RX, scan, atau rekaman. Receiver berjalan tersembunyi sampai halaman console di-reload atau ditutup, dan tetap mengikuti perubahan tema dan bahasa. Reload console menghentikan sesi Receiver; audio yang sudah terekam tetap tersimpan.
 - **Rekaman aman saat reload atau crash.** Rekaman dan scan arsip ditutup saat halaman unload bila memungkinkan, atau oleh console setelah 2 menit tanpa aktivitas. Segmen seperti itu berstatus "Interrupted" dan tetap bisa diputar. Upload yang gagal menyimpan audio yang sudah masuk sebagai "Partly saved". Rekaman berlanjut di file atau sesi baru saat batas ukuran tercapai, setelah chunk hilang, atau setelah sample rate/FFT size berubah (ada pemberitahuan). Satu sesi armed yang tidak menerima audio selama 2 menit bisa terpecah menjadi beberapa sesi.
 - **Indikator rekaman.** Records menampilkan rekaman yang sedang berjalan ("recording in progress"), tab Listener menampilkan indikator `REC`, dan Spectrum meminta konfirmasi sebelum menghentikan rekaman yang berjalan.
@@ -219,7 +219,7 @@ Ground Console tetap dapat digunakan untuk memeriksa UI tanpa Raspberry atau Dat
 
 Sudut yang dimasukkan adalah bearing geografis: 0° utara, searah jarum jam. Readout, plot polar (selalu mode Compass saat simulasi), dan peta menampilkan angka yang sama; misalnya 45° tampil di arah timur laut di ketiganya. Detail readout menampilkan θ₀ 315° sebagai sudut array yang setara. Panel polar menampilkan badge `SIMULATION`. Simulasi kembali OFF setelah reload.
 
-Mode simulasi hanya mengganti data Overview. Health, diagnostics, MQTT, dan publication gate tetap menggunakan sumber nyata atau tetap `BLOCKED`. Untuk Receiver tanpa hardware, pakai Mock SDR (lihat bagian Receiver).
+Mode simulasi hanya mengganti data Overview. Health, diagnostics, MQTT, dan publication gate tetap menggunakan sumber nyata atau tetap `BLOCKED`. Untuk Receiver tanpa hardware, buka `http://127.0.0.1:8787/?mock=1#/receiver` untuk memakai Mock SDR (lihat bagian Receiver).
 
 ## Menghubungkan Data Out live
 
@@ -254,9 +254,10 @@ Collector tetap read-only dan hanya memakai HTTP GET.
 
 ### Strip status
 
-Strip di bagian atas punya empat item:
+Strip di bagian atas punya enam item, dari kiri ke kanan: DATA, DOA, PUBLIKASI, SNAPSHOT, MQTT, dan SIM. Arahkan kursor ke sebuah item untuk melihat apa yang dilaporkannya; detail status saat ini, misalnya penyebab sebuah masalah, tampil di baris berikutnya.
 
-- **DATA** mengklasifikasikan isi pembacaan terakhir:
+- **DATA** mengklasifikasikan isi pembacaan Data Out terakhir:
+  - `LOADING`: belum ada pembacaan yang selesai.
   - `ERROR`: request ke console gagal.
   - `UNAVAILABLE`: `status.json` tidak terbaca, atau kedua file DoA tidak bisa diambil.
   - `DEGRADED`: sinkronisasi DAQ tidak PASS atau ADC overdrive.
@@ -264,12 +265,14 @@ Strip di bagian atas punya empat item:
   - `CONFLICT`: CSV dan XML dari frame yang sama tidak sepakat.
   - `STALE`: data sumber sudah tua, node berhenti diperbarui, atau jendela lokal 5 detik habis.
   - `INCOMPLETE`: satu view hilang atau tidak bisa dibandingkan.
-  - `AVAILABLE`.
+  - `AVAILABLE`: data node terbaca, segar, dan konsisten.
 
-  Arahkan kursor ke DATA untuk melihat gate reason utama dan error per view (misalnya "XML: HTTP 404").
-- **DOA** menampilkan status DoA di Ringkasan.
-- **SNAPSHOT** menyangkut pembacaan itu sendiri: `CURRENT` selama 5 detik setelah pembacaan selesai (termasuk yang melaporkan UNAVAILABLE), lalu `STALE`; `ERROR` bila request terakhir gagal.
-- **MQTT** menampilkan `ERROR` bila console tidak bisa membaca status monitor.
+  Untuk status selain `AVAILABLE`, tooltip DATA menyebut gate reason utama dan error per view (misalnya "XML: HTTP 404").
+- **DOA** menyatakan apakah bearing dan vektor 360 bin bisa ditampilkan di Ringkasan: `AVAILABLE`, atau `DEGRADED`, `CONFLICT`, `UNAVAILABLE`, `INCOMPLETE`, dan `STALE` dengan penyebab di tooltip. Sebelum pembacaan pertama nilainya `WAITING`. Ini keputusan yang sama yang dipakai readout, plot polar, dan peta.
+- **PUBLIKASI** (`DELIVERY` di bahasa Inggris) adalah gate publikasi dari collector: `READY` hanya bila semua pemeriksaan untuk memublikasikan bearing lolos, selain itu `BLOCKED`. Di Ground Console nilainya selalu `BLOCKED`, juga saat DATA dan DOA `AVAILABLE`; penyebabnya dijelaskan di bagian Kesehatan Sistem di bawah. Tooltip menyebut reason teratas beserta kodenya.
+- **SNAPSHOT** menyangkut pembacaan `/api/snapshot` itu sendiri: `CURRENT` selama 5 detik setelah pembacaan selesai (termasuk yang melaporkan UNAVAILABLE), lalu `STALE`; `ERROR` bila request terakhir gagal. Sebelum pembacaan pertama nilainya `LOADING` atau `WAITING`.
+- **MQTT** adalah koneksi monitor lokal yang hanya berlangganan (subscriber-only) dan tidak pernah publish: `CONNECTED`, `CONNECTING`, `DISCONNECTED`, `ERROR`, atau `OFF` bila host MQTT tidak dikonfigurasi. `ERROR` juga muncul bila monitor tidak bisa dibuat (misalnya `paho-mqtt` tidak terpasang) atau console tidak bisa membaca status monitor; detailnya ada di tooltip.
+- **SIM** bernilai `ON` selama simulasi aktif, yaitu saat Ringkasan menampilkan data sintetis dari browser, dan `OFF` bila Ringkasan memakai Data Out live. Item lain di strip tetap melaporkan data live, juga saat simulasi `ON`.
 
 Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 
@@ -291,6 +294,7 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
   - "DATA_OUT terakhir diketahui N dtk": `settings.json` gagal dibaca dan console memakai pengaturan terakhir dari node yang sama, paling lama 90 detik;
   - "diasumsikan, hanya referensi" (amber) bila offset tidak dilaporkan.
 - **Display peak** menyebut sumbunya (sumbu Compass atau sumbu θ₀ Polar).
+- **Gate publikasi** di readout selalu `BLOCKED` di Ground Console, juga saat bearing tampil normal. Teksnya menyebut reason teratas, biasanya "Sumber otoritas DoA belum dipilih (+2 lagi)". Console ini read-only dan tidak memilih sumber otoritas DoA, jadi `BLOCKED` di sini bukan tanda data rusak; bearing yang tampil tetap bisa dibaca sebagai observasi. Penjelasan lengkap ada di bagian Kesehatan Sistem di bawah.
 - **Bearing disembunyikan bila data tidak bisa dipercaya.** Bearing dan display peak menjadi "—", kurva polar dan overlay peta dikosongkan, dan penyebabnya disebutkan bila:
   - DAQ sync tidak PASS (FAIL atau UNKNOWN) atau ADC overdrive dilaporkan. Status menjadi `DEGRADED`, dan strip menampilkan DATA DEGRADED dan DOA DEGRADED.
   - CSV/XML `CONFLICT`.
@@ -318,7 +322,9 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 ### Kesehatan Sistem dan Diagnostik DoA
 
 - **Kesehatan Sistem.**
-  - Badge **Data Out HTTP** dihitung dari GET per resource pada pembacaan terakhir: `AVAILABLE` (keempat file menjawab), `PARTIAL`, `UNAVAILABLE`, atau `UNKNOWN`. Di sampingnya tampil `overall_state` dari collector. Banner "STALE EVIDENCE" hanya muncul bila pembacaan terakhir punya DoA segar yang kemudian kedaluwarsa.
+  - Badge **Data Out HTTP** dihitung dari GET per resource pada pembacaan terakhir: `AVAILABLE` (keempat file menjawab), `PARTIAL`, `UNAVAILABLE`, atau `UNKNOWN`. Di bawahnya tampil `overall_state` dari collector dalam huruf besar. Banner "STALE EVIDENCE" hanya muncul bila pembacaan terakhir punya DoA segar yang kemudian kedaluwarsa.
+  - **`UNVERIFIED` pada data sehat itu normal.** Collector menentukan `overall_state` berurutan: `UNAVAILABLE` (`status.json` tidak terbaca), `DEGRADED` (DAQ tidak PASS atau ADC overdrive), `INVALID` (tidak ada view DoA yang bisa diparse), `CONFLICT`, `STALE` (tidak ada view DoA yang segar), `INCOMPLETE` (CSV dan XML tidak bisa dibandingkan), lalu `UNVERIFIED` bila belum ada sumber otoritas DoA (`authority` = `none`) atau sudut kanonik belum disetujui. Ground Console selalu memanggil collector dengan `authority="none"` dan tanpa persetujuan sudut kanonik, dan tidak ada flag atau form console yang mengubahnya. Artinya `UNVERIFIED` adalah status terbaik yang bisa tampil: data terbaca, segar, dan CSV/XML konsisten, tetapi tidak ada keputusan yang menetapkan CSV atau XML sebagai sumber bearing resmi. `LIVE` tidak pernah tampil di console ini. Bila data lokal kedaluwarsa, headline berganti menjadi `STALE`.
+  - **Karena itu PUBLIKASI selalu `BLOCKED`.** Gate publikasi (PUBLIKASI di strip, Gate publikasi di Ringkasan, Pemeriksaan gate publikasi di Diagnostik DoA) baru `READY` bila semua pemeriksaannya lolos. Pada data sehat ada tiga reason yang selalu muncul: `DOA_AUTHORITY_NOT_SELECTED` (Sumber otoritas DoA belum dipilih), `CANONICAL_ANGLE_NOT_CONFIGURED` (Konvensi sudut kanonik belum disetujui), dan `GROUND_CLOCK_UNVERIFIED` (Jam ground dan node belum diverifikasi; console tidak memverifikasi jam node, sehingga baris **Jam ground** di Status subsistem selalu `UNVERIFIED`). Di Diagnostik DoA, pemeriksaan Otoritas dipilih, Sudut kanonik siap, DoA terpilih fresh, dan Satuan terpilih valid tampil `BLOCKED`, Status node fresh tampil BELUM DIKONFIGURASI, Otoritas terpilih bernilai `NONE`, dan Kesiapan sudut BELUM DIKONFIGURASI. Memilih sumber otoritas dan menyetujui sudut kanonik adalah keputusan deployment di luar console read-only ini, jadi status tersebut bukan kerusakan data atau node. Reason lain di luar ketiganya menunjukkan masalah nyata.
   - Tabel **Pembacaan resource** menampilkan setiap GET (`/status.json`, `/settings.json`, `/DOA_value.html`, `/doa.xml`) dengan kode HTTP atau jenis error (Connection refused, Timed out, Skipped, Deadline exceeded, dan seterusnya), waktu, dan jumlah percobaan. Catatan di bawahnya membandingkan waktu koleksi dengan anggaran 4 detik dan menjelaskan bila file lain dilewati karena `status.json` tidak terjangkau.
   - Inspector menampilkan status node (VALID/INVALID/UNAVAILABLE), DAQ health, Node progress (`ADVANCING`, `STALLED`, `FIRST_SAMPLE`, `UNAVAILABLE`, `UNTRACKED`), ADC overdrive (PASS, OVERDRIVE dengan mask kanal, atau UNKNOWN), SNR (native XML, tidak terkalibrasi), dan PAPR CSV/XML dalam dB. PAPR bukan confidence 0–1.
 - **Diagnostik DoA.**

@@ -1,10 +1,31 @@
 import { describe, expect, it } from 'vitest';
-import { forwardFrameShortcut, receiverFrameSrc } from './ReceiverPage';
+import { consoleRequestsMockSdr, forwardFrameShortcut, receiverFrameSrc } from './ReceiverPage';
 
 describe('receiverFrameSrc', () => {
   it('passes the console theme and language to the embedded Receiver', () => {
     expect(receiverFrameSrc('light', 'id')).toBe('/receiver/?theme=light&lang=id');
     expect(receiverFrameSrc('dark', 'en')).toBe('/receiver/?theme=dark&lang=en');
+  });
+
+  it('adds mock=1 only when the console asks for the Mock SDR', () => {
+    expect(receiverFrameSrc('light', 'id', true)).toBe('/receiver/?theme=light&lang=id&mock=1');
+    expect(receiverFrameSrc('light', 'id', false)).toBe('/receiver/?theme=light&lang=id');
+  });
+});
+
+describe('consoleRequestsMockSdr', () => {
+  it('passes ?mock=1 on from a loopback console page', () => {
+    expect(consoleRequestsMockSdr({ hostname: '127.0.0.1', search: '?mock=1' })).toBe(true);
+    expect(consoleRequestsMockSdr({ hostname: 'localhost', search: '?lang=id&mock=1' })).toBe(true);
+    expect(consoleRequestsMockSdr({ hostname: '[::1]', search: '?mock=1' })).toBe(true);
+  });
+
+  it('keeps the Mock SDR off without the flag or away from loopback', () => {
+    expect(consoleRequestsMockSdr({ hostname: '127.0.0.1', search: '' })).toBe(false);
+    expect(consoleRequestsMockSdr({ hostname: '127.0.0.1', search: '?mock=0' })).toBe(false);
+    expect(consoleRequestsMockSdr({ hostname: '127.0.0.1', search: '?mock=true' })).toBe(false);
+    expect(consoleRequestsMockSdr({ hostname: 'console.example', search: '?mock=1' })).toBe(false);
+    expect(consoleRequestsMockSdr({ hostname: '192.168.1.20', search: '?mock=1' })).toBe(false);
   });
 });
 

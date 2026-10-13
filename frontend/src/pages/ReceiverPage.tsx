@@ -8,9 +8,21 @@ function consoleTheme(): 'light' | 'dark' {
   return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
 }
 
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/**
+ * The Receiver offers its Mock SDR only with ?mock=1 on a loopback host. A
+ * console page opened as http://127.0.0.1:8787/?mock=1#/receiver passes that
+ * on to the frame; any other host or value leaves the Mock SDR off.
+ */
+export function consoleRequestsMockSdr(location: Pick<Location, 'hostname' | 'search'>): boolean {
+  return LOOPBACK_HOSTS.has(location.hostname.toLowerCase()) && new URLSearchParams(location.search).get('mock') === '1';
+}
+
 /** The Receiver reads theme and language from its URL before its first paint. */
-export function receiverFrameSrc(theme: 'light' | 'dark', lang: Lang): string {
+export function receiverFrameSrc(theme: 'light' | 'dark', lang: Lang, mock = false): string {
   const params = new URLSearchParams({ theme, lang });
+  if (mock) params.set('mock', '1');
   return `/receiver/?${params.toString()}`;
 }
 
@@ -57,7 +69,7 @@ export function ReceiverPage(): JSX.Element {
   langRef.current = lang;
   // Changing the iframe URL would reload the Receiver and stop RX, so later
   // theme and language changes are pushed into the loaded frame instead.
-  const [src] = useState(() => receiverFrameSrc(consoleTheme(), lang));
+  const [src] = useState(() => receiverFrameSrc(consoleTheme(), lang, consoleRequestsMockSdr(window.location)));
 
   // Focus inside the frame would otherwise swallow the console's 1-7 and R keys.
   const onFrameKeyDown = useRef((event: KeyboardEvent) => { forwardFrameShortcut(event, window); }).current;

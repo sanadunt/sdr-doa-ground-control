@@ -471,4 +471,20 @@ export const recordsMethods = {
 	audioRecordUrl(this: AppInstance, segmentId: string): string {
 		return receiverRecordsApi.audioUrl(segmentId);
 	},
+
+	/** Operator label for a stored scan source; the stored value stays the English code. */
+	scanSourceLabel(this: AppInstance, source: ReceiverScanRecord['source']): string {
+		switch (source) {
+			case 'simulated':
+				return this.t('Simulation (synthetic peaks)');
+			case 'native':
+				return this.t('HackRF native sweep');
+			case 'manual':
+				return this.t('HackRF manual sweep');
+			case 'receiver':
+				return this.t('Receiver');
+			default:
+				return source;
+		}
+	},
 };

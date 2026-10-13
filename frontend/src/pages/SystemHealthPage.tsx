@@ -1,4 +1,4 @@
-import type { JSX } from 'react';
+import type { JSX, ReactNode } from 'react';
 import type { Candidate, MqttSnapshot, TelemetrySnapshot, Tone } from '../types';
 import { candidate, formatNumber, numberOrNull, syncCount, toneFor } from '../lib/telemetry';
 import { useI18n } from '../lib/i18n';
@@ -19,7 +19,7 @@ import {
   stateTone,
 } from '../lib/healthView';
 import type { NodeProgressView, ResourceRow, SignalQualityView } from '../lib/healthView';
-import { KeyValue, Metric, Panel, SectionHeading, StatusBadge } from '../components/ui';
+import { CollectorError, KeyValue, Metric, Panel, SectionHeading, StatusBadge } from '../components/ui';
 
 function safeRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? value as Record<string, unknown> : {};
@@ -29,7 +29,7 @@ function statusValue(status: TelemetrySnapshot['status'], key: string): unknown 
   return status?.safe?.[key] ?? status?.[key];
 }
 
-function Subsystem({ name, state, tone, detail }: { name: string; state: string; tone?: Tone; detail: string }): JSX.Element {
+function Subsystem({ name, state, tone, detail }: { name: string; state: string; tone?: Tone; detail: ReactNode }): JSX.Element {
   return (
     <article className="subsystem-card">
       <div className="subsystem-top"><span>{name}</span><StatusBadge label={state} tone={tone ?? stateTone(state)} /></div>
@@ -66,9 +66,9 @@ function overdriveDetail(t: Translate, quality: SignalQualityView | null): strin
   return quality.state === 'OVERDRIVE' ? t('health.adc.overdrive', { sources }) + mask : t('health.adc.pass', { sources });
 }
 
-function sourceRow(t: Translate, item: Candidate, fallback: 'CSV' | 'XML'): [string, string] {
+function sourceRow(t: Translate, item: Candidate, fallback: 'CSV' | 'XML'): [string, ReactNode] {
   const issue = candidateIssue(item);
-  if (item.available !== true) return ['UNAVAILABLE', issue.error ?? t('health.row.nativeView')];
+  if (item.available !== true) return ['UNAVAILABLE', issue.error ? <CollectorError error={issue.error} /> : t('health.row.nativeView')];
   const value = t('health.row.ageAtRead', { format: item.source_format?.toUpperCase() ?? fallback, age: formatAgeText(t, item.freshness) });
   return [value, issue.quarantined ? t('health.row.quarantined', { error: issue.quarantined }) : t('health.row.nativeView')];
 }
@@ -98,7 +98,7 @@ function ResourcesPanel({ snapshot }: { snapshot: TelemetrySnapshot | null }): J
                   <tr key={row.path}>
                     <td><code>{row.path}</code></td>
                     <td><span className={`resource-result status-text-${result.tone}`}>{result.label}</span></td>
-                    <td className="resource-detail">{row.ok === false ? row.error ?? t('health.res.noDetail') : row.ok === true ? t('health.res.received') : t('health.res.notReported')}</td>
+                    <td className="resource-detail">{row.ok === false ? row.error ? <CollectorError error={row.error} /> : t('health.res.noDetail') : row.ok === true ? t('health.res.received') : t('health.res.notReported')}</td>
                     <td>{time !== null && retried ? t('health.res.attempts', { time, count: row.attempts ?? 0 }) : retried ? t('health.res.attemptCount', { count: row.attempts ?? 0 }) : time ?? 'N/A'}</td>
                   </tr>
                 );
@@ -148,8 +148,8 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
   const papr = quality && (quality.paprCsvDb !== null || quality.paprXmlDb !== null)
     ? `CSV ${formatNumber(quality.paprCsvDb, 2)} · XML ${formatNumber(quality.paprXmlDb, 2)} dB`
     : 'N/A';
-  const nodeRows: Array<{ label: string; value: string; detail: string; tone?: Tone }> = [
-    { label: t('health.row.nodeStatus'), value: node.state, detail: node.error ?? t('health.row.nodeStatusDetail'), tone: stateTone(node.state) },
+  const nodeRows: Array<{ label: string; value: string; detail: ReactNode; tone?: Tone }> = [
+    { label: t('health.row.nodeStatus'), value: node.state, detail: node.error ? <CollectorError error={node.error} /> : t('health.row.nodeStatusDetail'), tone: stateTone(node.state) },
     { label: t('health.row.daq'), value: String(daqHealth), detail: daqDetail, tone: toneFor(daqHealth) },
     { label: t('health.row.progress'), value: progress?.state ?? 'N/A', detail: progressDetail(t, progress), tone: progress ? stateTone(progress.state) : undefined },
     { label: t('health.row.adc'), value: quality?.state ?? 'N/A', detail: overdriveDetail(t, quality), tone: quality?.state === 'OVERDRIVE' ? 'bad' : quality?.state === 'PASS' ? 'good' : undefined },
@@ -190,7 +190,7 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
       <Panel className="subsystems-panel" eyebrow={t('health.subsystemsEyebrow')} title={t('health.subsystemsTitle')}>
         <div className="subsystem-grid">
           <Subsystem name="Data Out / HTTP" state={http.state} detail={http.reported ? t('health.sub.httpDetail', { ok: http.ok, total: http.total }) : t('health.sub.httpUnknown')} />
-          <Subsystem name={t('health.sub.node')} state={node.state} detail={node.error ?? t('health.row.nodeStatusDetail')} />
+          <Subsystem name={t('health.sub.node')} state={node.state} detail={node.error ? <CollectorError error={node.error} /> : t('health.row.nodeStatusDetail')} />
           <Subsystem name={t('health.sub.daq')} state={String(status?.daq_health ?? 'UNKNOWN')} detail={dropped === null ? t('health.sub.dropsUnavailable') : t('health.drops', { count: formatNumber(dropped, 0) })} />
           <Subsystem name={t('health.sub.progress')} state={progress?.state ?? 'N/A'} detail={progressDetail(t, progress)} />
           <Subsystem name={t('health.sub.doa')} state={doaState} detail={t('health.sub.doaDetail')} />
