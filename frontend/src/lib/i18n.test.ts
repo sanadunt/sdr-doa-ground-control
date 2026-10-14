@@ -20,6 +20,14 @@ describe('i18n dictionaries', () => {
     }
   });
 
+  it('names the panel as the English UI does and uses one Indonesian tuning verb', () => {
+    expect(translate('en', 'shell.panelControl')).toBe('Control');
+    for (const [key, english] of Object.entries(DICTIONARIES.en)) expect(english, key).not.toMatch(/Kontrol/);
+    for (const [key, indonesian] of Object.entries(DICTIONARIES.id)) expect(indonesian, key).not.toMatch(/\btuning\b/i);
+    expect(translate('en', 'control.intro', { topic: 'cmd/config/patch' })).toContain('Unlock as admin');
+    expect(translate('id', 'control.intro', { topic: 'cmd/config/patch' })).toContain('Buka kunci sebagai admin');
+  });
+
   it('never calls remote publishing disabled while Control has the admin-confirmed config patch', () => {
     for (const lang of ['en', 'id'] as const) {
       for (const key of ['health.sub.publishAdminOnly', 'monitor.subscribeOnly', 'config.mqttPublishDetail'] as const) {

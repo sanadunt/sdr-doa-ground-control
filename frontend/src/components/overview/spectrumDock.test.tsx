@@ -197,7 +197,7 @@ describe('Spectrum dock states', () => {
 
   it('holds when there is no fresh node frequency to follow', () => {
     const markup = dock(bridgeWith({ attach: false }), { snapshot: null });
-    expect(markup).toContain('Frekuensi node belum segar; tuning saat ini dipertahankan.');
+    expect(markup).toContain('Frekuensi node belum segar; penalaan saat ini dipertahankan.');
   });
 
   it('renders without a bridge from App', () => {
