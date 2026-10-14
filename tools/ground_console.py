@@ -22,11 +22,14 @@ from __future__ import annotations
 import argparse
 import base64
 import hmac
+import http.client
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
+import sqlite3
 import tempfile
 import threading
 import time
@@ -37,11 +40,12 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urlsplit
 
-from sdr_doa_collector import CollectorError, DEFAULT_ALLOWED_DATA_HOSTS, collect
-from receiver_record_store import DEFAULT_DATA_DIR, ReceiverRecordStore
+import sdr_doa_mqtt
+from sdr_doa_collector import CollectorError, DEFAULT_ALLOWED_DATA_HOSTS, NodeProgressTracker, collect
+from receiver_record_store import DEFAULT_DATA_DIR, ReceiverConflictError, ReceiverRecordStore
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BROWSDR_SOURCE_ARCHIVE = "freq-spectrum-source.tar.gz"
@@ -171,20 +175,32 @@ MAX_DECODED_LOGO_BYTES = 32 * 1024 * 1024
 # PNG is the only logo format validated fully by the stdlib parser below.
 # Keeping the contract narrow is safer than accepting formats we cannot decode.
 ALLOWED_LOGO_MIME = {"image/png"}
-ALLOWED_REFRESH_INTERVALS = {0, 5, 10, 30}
+# Intervals shorter than the 5 s DoA freshness window keep a live bearing on
+# screen between reads; 0 means manual refresh.
+ALLOWED_REFRESH_INTERVALS = {0, 1, 2, 5, 10, 30}
+DEFAULT_REFRESH_SECONDS = 2
+# One /api/snapshot collection may not take longer than this, so a slow or
+# unreachable Data Out returns an explicit UNAVAILABLE well inside the
+# browser's request timeout.
+SNAPSHOT_TOTAL_BUDGET_S = 4.0
+SNAPSHOT_WAIT_GRACE_S = 2.0
+MAX_CONSOLE_CONFIG_BYTES = 64 * 1024
 CONSOLE_CONFIG_VERSION = 1
+ALLOWED_MQTT_TRANSPORTS = ("tcp", "websockets")
+DEFAULT_MQTT_WS_PATH = "/mqtt"
+# The path is written into the WebSocket request line, so keep it to plain
+# unreserved path characters.
+_MQTT_WS_PATH_RE = re.compile(r"/[A-Za-z0-9._~/-]{0,127}")
+_MQTT_PORT_QUERY_RE = re.compile(r"[0-9]{1,5}")
+MQTT_DEPENDENCY_ERROR = "MQTT monitor dependency paho-mqtt is not installed"
 
 
 # This is deliberately narrower than the full settings document. The ordinary
 # telemetry control path must not change DAQ topology, calibration, endpoints,
 # credentials, or system lifecycle.
-CONFIG_ALLOWLIST = {
-    "center_frequency_hz": (24_000_000.0, 1_800_000_000.0),
-    "gain_db": (-100.0, 60.0),
-    "vfo_frequency_hz": (24_000_000.0, 1_800_000_000.0),
-    "vfo_bandwidth_hz": (100.0, 2_400_000.0),
-    "vfo_squelch_db": (-200.0, 20.0),
-}
+# The dry-run preview validates with the MQTT contract, so its allowlist is
+# the contract's own range table.
+CONFIG_ALLOWLIST = dict(sdr_doa_mqtt.CONFIG_RANGES)
 
 
 def _is_allowed_base_url(value: str) -> bool:
@@ -236,13 +252,77 @@ def _load_mqtt_monitor_class() -> Any:
         from sdr_doa_mqtt_monitor import MqttMonitor as monitor_class
     except ModuleNotFoundError as exc:
         if exc.name == "paho":
-            raise RuntimeError("MQTT monitor dependency paho-mqtt is not installed") from exc
+            raise RuntimeError(MQTT_DEPENDENCY_ERROR) from exc
         raise
     return monitor_class
 
 
-def _new_mqtt_monitor(host: str, port: int, transport: str = "tcp") -> Any:
-    return _load_mqtt_monitor_class()(host, port, transport=transport)
+class _UnavailableMqttMonitor:
+    """Monitor slot that reports why no MQTT client could be created."""
+
+    def __init__(self, host: str, port: int, transport: str, ws_path: str, error: str) -> None:
+        self.host = host
+        self.port = int(port)
+        self.transport = transport
+        self.ws_path = ws_path
+        self.error = error
+
+    def start(self) -> None:
+        return None
+
+    def stop(self) -> None:
+        return None
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            "enabled": True,
+            "read_only": True,
+            "publish_enabled": False,
+            "host": self.host,
+            "port": self.port,
+            "transport": self.transport,
+            "ws_path": self.ws_path,
+            "now_ms": int(time.time() * 1000),
+            "connection": "error",
+            "last_error": self.error,
+            "received": 0,
+            "valid": 0,
+            "invalid": 0,
+            "cleared": 0,
+            "total_bytes": 0,
+            "last_received_at_ms": None,
+            "last_age_ms": None,
+            "last_latency_ms": None,
+            "last_topic": None,
+            "last_by_kind": {},
+            "kind_counts": {},
+            "topic_counts": {},
+        }
+
+    def rdf_node_snapshot(self) -> Dict[str, Any]:
+        snapshot = _empty_rdf_node_mqtt_snapshot()
+        snapshot.update({"enabled": True, "connection": "error", "last_error": "DEPENDENCY_MISSING"})
+        return snapshot
+
+
+def _is_allowed_mqtt_ws_path(value: Any) -> bool:
+    return isinstance(value, str) and _MQTT_WS_PATH_RE.fullmatch(value) is not None
+
+
+def _new_mqtt_monitor(
+    host: str,
+    port: int,
+    transport: str = "tcp",
+    ws_path: str = DEFAULT_MQTT_WS_PATH,
+) -> Any:
+    try:
+        monitor_class = _load_mqtt_monitor_class()
+    except RuntimeError as exc:
+        return _UnavailableMqttMonitor(host, port, transport, ws_path, str(exc))
+    options: Dict[str, Any] = {"transport": transport}
+    if ws_path != DEFAULT_MQTT_WS_PATH:
+        options["ws_path"] = ws_path
+    return monitor_class(host, port, **options)
 
 
 def _safe_config_json(config: Dict[str, Any]) -> str:
@@ -261,9 +341,10 @@ def _default_console_config(
     base_url: str = "http://doasdr.local:8081",
     mqtt_host: str = "10.90.0.1",
     mqtt_port: int = 9001,
-    refresh_seconds: int = 0,
+    refresh_seconds: int = DEFAULT_REFRESH_SECONDS,
     *,
     mqtt_transport: str = "websockets",
+    mqtt_ws_path: str = DEFAULT_MQTT_WS_PATH,
 ) -> Dict[str, Any]:
     return {
         "version": CONSOLE_CONFIG_VERSION,
@@ -271,8 +352,24 @@ def _default_console_config(
         "mqtt_host": mqtt_host,
         "mqtt_port": int(mqtt_port),
         "mqtt_transport": mqtt_transport,
+        "mqtt_ws_path": mqtt_ws_path,
         "refresh_seconds": int(refresh_seconds),
     }
+
+
+def _config_integer(value: Any, field: str) -> int:
+    """Return a JSON integer field without truncating or coercing it.
+
+    ``int()`` would turn 1883.9 into 1883, ``True`` into 1 and "1_883" into
+    1883, so the console would save a value the operator never entered.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value)
+    raise ValueError(f"{field} must be an integer")
 
 
 def _validate_console_config(payload: Any, fallback: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -287,31 +384,157 @@ def _validate_console_config(payload: Any, fallback: Optional[Dict[str, Any]] = 
         mqtt_host = ""
     if not isinstance(mqtt_host, str) or (mqtt_host and not _is_allowed_mqtt_host(mqtt_host)):
         raise ValueError("mqtt_host must be empty, localhost, or a valid IPv4/IPv6 address")
-    try:
-        mqtt_port = int(payload.get("mqtt_port", defaults["mqtt_port"]))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("mqtt_port must be numeric") from exc
+    mqtt_port = _config_integer(payload.get("mqtt_port", defaults["mqtt_port"]), "mqtt_port")
     if not (1 <= mqtt_port <= 65535):
         raise ValueError("mqtt_port must be between 1 and 65535")
     mqtt_transport = payload.get("mqtt_transport", defaults.get("mqtt_transport", "websockets"))
-    if not isinstance(mqtt_transport, str) or mqtt_transport not in {"tcp", "websockets"}:
+    if not isinstance(mqtt_transport, str) or mqtt_transport not in ALLOWED_MQTT_TRANSPORTS:
         raise ValueError("mqtt_transport must be tcp or websockets")
-    try:
-        refresh_seconds = int(payload.get("refresh_seconds", defaults["refresh_seconds"]))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("refresh_seconds must be numeric") from exc
+    mqtt_ws_path = payload.get("mqtt_ws_path", defaults.get("mqtt_ws_path", DEFAULT_MQTT_WS_PATH))
+    if not _is_allowed_mqtt_ws_path(mqtt_ws_path):
+        raise ValueError("mqtt_ws_path must start with / and use only letters, digits, and ._~/- (max 128)")
+    refresh_seconds = _config_integer(payload.get("refresh_seconds", defaults["refresh_seconds"]), "refresh_seconds")
     if refresh_seconds not in ALLOWED_REFRESH_INTERVALS:
         raise ValueError("refresh_seconds is not an allowed interval")
-    return _default_console_config(base_url.rstrip("/"), mqtt_host.strip(), mqtt_port, refresh_seconds, mqtt_transport=mqtt_transport)
+    return _default_console_config(
+        base_url.rstrip("/"),
+        mqtt_host.strip(),
+        mqtt_port,
+        refresh_seconds,
+        mqtt_transport=mqtt_transport,
+        mqtt_ws_path=mqtt_ws_path,
+    )
 
 
-def _load_console_config(path: Path, fallback: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    defaults = dict(fallback or _default_console_config())
+def _mqtt_connection(config: Dict[str, Any]) -> Tuple[str, int, str, str]:
+    return (
+        str(config.get("mqtt_host", "")),
+        int(config.get("mqtt_port", 9001)),
+        str(config.get("mqtt_transport", "websockets")),
+        str(config.get("mqtt_ws_path", DEFAULT_MQTT_WS_PATH)),
+    )
+
+
+def _log_warning(message: str) -> None:
+    print("[ground-console] warning: " + message, flush=True)
+
+
+def _backup_invalid_console_config(path: Path, raw: bytes, log: Callable[[str], None]) -> None:
+    """Keep the operator's invalid file before a later save replaces it."""
+    backup = path.with_name(path.name + ".invalid.bak")
     try:
-        payload = json.loads(path.expanduser().read_text(encoding="utf-8"))
-        return _validate_console_config(payload, defaults)
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        if backup.is_file() and backup.read_bytes() == raw:
+            return
+        fd, temporary = tempfile.mkstemp(prefix=".console-invalid-", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(raw)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, backup)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
+        log(f"a copy of the invalid file was kept at {backup}")
+    except OSError as exc:
+        log(f"could not back up the invalid console config ({type(exc).__name__})")
+
+
+def _load_console_config(
+    path: Path,
+    fallback: Optional[Dict[str, Any]] = None,
+    *,
+    log: Callable[[str], None] = _log_warning,
+) -> Dict[str, Any]:
+    """Load saved connection settings, keeping every field that is still valid.
+
+    One bad field falls back to its default on its own, with a warning naming
+    the field, instead of silently discarding every saved setting. An
+    unreadable file is backed up before any later save can overwrite it.
+    """
+    defaults = dict(fallback or _default_console_config())
+    path = path.expanduser()
+    try:
+        if path.stat().st_size > MAX_CONSOLE_CONFIG_BYTES:
+            log(f"console config {path} exceeds {MAX_CONSOLE_CONFIG_BYTES} bytes; using defaults")
+            return defaults
+        raw = path.read_bytes()
+    except FileNotFoundError:
         return defaults
+    except OSError as exc:
+        log(f"console config {path} is unreadable ({type(exc).__name__}); using defaults")
+        return defaults
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        position = f" at line {exc.lineno} column {exc.colno}" if isinstance(exc, json.JSONDecodeError) else ""
+        log(f"console config {path} is not valid JSON{position}; using defaults")
+        _backup_invalid_console_config(path, raw, log)
+        return defaults
+    if not isinstance(payload, dict):
+        log(f"console config {path} is not a JSON object; using defaults")
+        _backup_invalid_console_config(path, raw, log)
+        return defaults
+    try:
+        return _validate_console_config(payload, defaults)
+    except (ValueError, TypeError):
+        pass
+    accepted: Dict[str, Any] = {}
+    rejected: List[str] = []
+    for field in sorted(key for key in payload if key in defaults and key != "version"):
+        try:
+            _validate_console_config({field: payload[field]}, defaults)
+        except (ValueError, TypeError):
+            rejected.append(field)
+        else:
+            accepted[field] = payload[field]
+    log(
+        f"console config {path}: invalid field(s) {', '.join(rejected) or 'unknown'} "
+        "replaced by defaults; other saved fields are kept"
+    )
+    _backup_invalid_console_config(path, raw, log)
+    try:
+        return _validate_console_config(accepted, defaults)
+    except (ValueError, TypeError):
+        return defaults
+
+
+# Connection fields that a command-line flag of the same name can set.
+CLI_CONFIG_FIELDS = ("base_url", "mqtt_host", "mqtt_port", "mqtt_transport", "mqtt_ws_path")
+
+
+def _explicit_cli_options(argv: Optional[Sequence[str]]) -> Set[str]:
+    """Return the destinations the operator actually typed on the command line."""
+    parser = _build_parser()
+    unset = object()
+    # argparse only fills defaults for attributes the namespace lacks, so a
+    # pre-filled marker survives exactly for the options that were not typed.
+    namespace = argparse.Namespace(**{name: unset for name in vars(parser.parse_args([]))})
+    parsed = parser.parse_args(argv, namespace=namespace)
+    return {name for name, value in vars(parsed).items() if value is not unset}
+
+
+def _apply_cli_overrides(
+    config: Dict[str, Any],
+    args: argparse.Namespace,
+    explicit: Set[str],
+    log: Callable[[str], None] = _log_warning,
+) -> Dict[str, Any]:
+    """Let an explicit flag win over the saved console.json for this run."""
+    overrides = {
+        field: getattr(args, field)
+        for field in CLI_CONFIG_FIELDS
+        if field in explicit and field in config and hasattr(args, field)
+    }
+    if not overrides:
+        return config
+    merged = _validate_console_config({**config, **overrides}, config)
+    for field in sorted(overrides):
+        if merged.get(field) != config.get(field):
+            log(f"--{field.replace('_', '-')} from the command line overrides the saved console config for this run")
+    return merged
 
 
 def _is_loopback_bind(value: str) -> bool:
@@ -383,6 +606,7 @@ def _validate_logo_bytes(mime: str, raw: bytes) -> None:
     saw_idat = False
     saw_iend = False
     idat_closed = False
+    palette_entries = 0
     ihdr_data: Optional[bytes] = None
     idat_chunks: list[bytes] = []
     while index < len(raw):
@@ -425,6 +649,14 @@ def _validate_logo_bytes(mime: str, raw: bytes) -> None:
             saw_iend = True
             index = crc_end
             break
+        elif chunk_type == b"PLTE":
+            # PLTE is critical, so it is handled before the generic branch
+            # that rejects unknown critical chunks.
+            if palette_entries or saw_idat:
+                raise ValueError("logo PNG has a misplaced or repeated palette")
+            if length == 0 or length % 3 != 0 or length > 768:
+                raise ValueError("logo PNG has an invalid palette")
+            palette_entries = length // 3
         else:
             if saw_idat:
                 idat_closed = True
@@ -432,9 +664,6 @@ def _validate_logo_bytes(mime: str, raw: bytes) -> None:
             # are accepted only after their CRC has been checked above.
             if 65 <= chunk_type[0] <= 90:
                 raise ValueError("logo PNG has an unsupported critical chunk")
-            if chunk_type == b"PLTE":
-                if length == 0 or length % 3 != 0 or length > 768:
-                    raise ValueError("logo PNG has an invalid palette")
         index = crc_end
 
     if not saw_ihdr or not saw_idat or not saw_iend or index != len(raw):
@@ -448,19 +677,30 @@ def _validate_logo_bytes(mime: str, raw: bytes) -> None:
     compression = header[10]
     filter_method = header[11]
     interlace = header[12]
-    if (
-        bit_depth != 8
-        or color_type not in {0, 2, 4, 6}
-        or compression != 0
-        or filter_method != 0
-        or interlace != 0
-    ):
-        raise ValueError("logo PNG format is not supported; use RGB/RGBA PNG")
-    channels = {0: 1, 2: 3, 4: 2, 6: 4}[color_type]
-    scanline_bytes = 1 + width * channels
-    expected_scanline_bytes = height * scanline_bytes
-    if expected_scanline_bytes > MAX_DECODED_LOGO_BYTES:
-        raise ValueError("logo PNG decoded data is too large")
+    allowed_depths = PNG_BIT_DEPTHS.get(color_type)
+    if allowed_depths is None or bit_depth not in allowed_depths:
+        raise ValueError(
+            "logo PNG color type or bit depth is not valid; use a standard grayscale, RGB, RGBA or palette PNG"
+        )
+    if compression != 0 or filter_method != 0 or interlace not in {0, 1}:
+        raise ValueError("logo PNG compression, filter or interlace method is not valid")
+    if color_type == 3 and not palette_entries:
+        raise ValueError("logo PNG palette image is missing its palette")
+    if color_type in {0, 4} and palette_entries:
+        raise ValueError("logo PNG grayscale image must not carry a palette")
+    if color_type == 3 and palette_entries > (1 << bit_depth):
+        raise ValueError("logo PNG palette is larger than its bit depth allows")
+    bits_per_pixel = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color_type] * bit_depth
+    scanline_starts: List[int] = []
+    expected_scanline_bytes = 0
+    for pass_width, pass_height in _png_pass_sizes(width, height, interlace == 1):
+        if not pass_width or not pass_height:
+            continue
+        row_bytes = 1 + (pass_width * bits_per_pixel + 7) // 8
+        if expected_scanline_bytes + pass_height * row_bytes > MAX_DECODED_LOGO_BYTES:
+            raise ValueError("logo PNG decoded data is too large")
+        scanline_starts.extend(expected_scanline_bytes + row * row_bytes for row in range(pass_height))
+        expected_scanline_bytes += pass_height * row_bytes
     try:
         decompressor = zlib.decompressobj()
         compressed = b"".join(idat_chunks)
@@ -477,8 +717,40 @@ def _validate_logo_bytes(mime: str, raw: bytes) -> None:
         raise ValueError("logo PNG image data is invalid")
     if len(decoded) != expected_scanline_bytes:
         raise ValueError("logo PNG image data is incomplete")
-    if any(decoded[offset] > 4 for offset in range(0, len(decoded), scanline_bytes)):
+    if any(decoded[offset] > 4 for offset in scanline_starts):
         raise ValueError("logo PNG has an invalid scanline filter")
+
+
+# Valid PNG bit depths per color type (PNG spec, IHDR).
+PNG_BIT_DEPTHS = {
+    0: {1, 2, 4, 8, 16},
+    2: {8, 16},
+    3: {1, 2, 4, 8},
+    4: {8, 16},
+    6: {8, 16},
+}
+# Adam7 passes as (x start, y start, x step, y step).
+_ADAM7_PASSES = (
+    (0, 0, 8, 8),
+    (4, 0, 8, 8),
+    (0, 4, 4, 8),
+    (2, 0, 4, 4),
+    (0, 2, 2, 4),
+    (1, 0, 2, 2),
+    (0, 1, 1, 2),
+)
+
+
+def _png_pass_sizes(width: int, height: int, interlaced: bool) -> List[Tuple[int, int]]:
+    if not interlaced:
+        return [(width, height)]
+    return [
+        (
+            (width - x0 + dx - 1) // dx if width > x0 else 0,
+            (height - y0 + dy - 1) // dy if height > y0 else 0,
+        )
+        for x0, y0, dx, dy in _ADAM7_PASSES
+    ]
 
 
 def _load_branding(path: Path) -> Dict[str, str]:
@@ -633,6 +905,7 @@ input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px r
 .brand-mark::before { top: 7px; bottom: 7px; left: 50%; width: 1px; }
 .brand-mark::after { top: 50%; right: 7px; left: 7px; height: 1px; }
 .brand-mark img { position: relative; z-index: 1; display: block; width: 100%; height: 100%; object-fit: contain; background: var(--surface-2); }
+[hidden] { display: none !important; }
 .logo-placeholder { position: relative; z-index: 1; display: grid; place-items: center; width: 100%; height: 100%; padding: 4px; }
 .logo-placeholder small { color: var(--subtle); font-size: 7px; letter-spacing: 0; }
 .brand-copy { min-width: 0; }
@@ -1151,7 +1424,7 @@ pre { max-height: 260px; overflow: auto; margin: 8px 0 0; padding: 9px; border: 
       <nav class="tabs" aria-label="Settings tabs"><button class="tab active" data-tab="connection" type="button">Data & connection</button><button class="tab" data-tab="branding" type="button">Admin & branding</button></nav>
       <section id="tab-connection" class="tab-panel">
         <p class="note" style="margin:0 0 13px"><strong>Staging-safe:</strong> changes only alter the Ground Console read source and local monitor. Nothing is written to the Raspberry.</p>
-        <div class="form-grid"><div class="field full"><label for="data-url">Data Out URL</label><input id="data-url" value="__BASE_URL__" spellcheck="false"><p class="help">HTTP GET only to the approved SDR-DoA host allowlist. MQTT remains subscriber-only.</p></div><div class="field"><label for="mqtt-host">MQTT monitor host</label><input id="mqtt-host" value="__MQTT_HOST__" placeholder="10.90.0.1" spellcheck="false"></div><div class="field"><label for="mqtt-port">MQTT port</label><input id="mqtt-port" type="number" value="__MQTT_PORT__" min="1" max="65535"></div><div class="field"><label for="refresh-interval">Auto-refresh</label><select id="refresh-interval"><option value="0">Off</option><option value="5">Every 5 seconds</option><option value="10">Every 10 seconds</option><option value="30">Every 30 seconds</option></select></div></div>
+        <div class="form-grid"><div class="field full"><label for="data-url">Data Out URL</label><input id="data-url" value="__BASE_URL__" spellcheck="false"><p class="help">HTTP GET only to the approved SDR-DoA host allowlist. MQTT remains subscriber-only.</p></div><div class="field"><label for="mqtt-host">MQTT monitor host</label><input id="mqtt-host" value="__MQTT_HOST__" placeholder="10.90.0.1" spellcheck="false"></div><div class="field"><label for="mqtt-port">MQTT port</label><input id="mqtt-port" type="number" value="__MQTT_PORT__" min="1" max="65535"></div><div class="field"><label for="refresh-interval">Auto-refresh</label><select id="refresh-interval"><option value="0">Off</option><option value="1">Every 1 second</option><option value="2">Every 2 seconds</option><option value="5">Every 5 seconds</option><option value="10">Every 10 seconds</option><option value="30">Every 30 seconds</option></select></div></div>
         <div class="form-actions"><button id="apply-connection" class="primary-button" type="button">Apply & refresh</button><button id="monitor-connect" class="ghost" type="button">Connect MQTT monitor</button></div><p id="connection-status" class="admin-status"></p>
       </section>
       <section id="tab-branding" class="tab-panel" hidden>
@@ -1166,7 +1439,7 @@ pre { max-height: 260px; overflow: auto; margin: 8px 0 0; padding: 9px; border: 
 const initialConfig = __CONSOLE_CONFIG_JSON__;
 const $ = (id) => document.getElementById(id);
 if (initialConfig && initialConfig.refresh_seconds !== undefined) $('refresh-interval').value = String(initialConfig.refresh_seconds);
-const state = { dataUrl: $('data-url').value, autoTimer: null, branding: null, pendingLogo: null, refreshSequence: 0, mqttSequence: 0, refreshController: null, snapshot: null, polar: { values: null, angle: null, fresh: false, figType: 'Polar', compassOffset: 0 } };
+const state = { dataUrl: $('data-url').value, autoTimer: null, branding: null, pendingLogo: null, refreshSequence: 0, mqttSequence: 0, refreshController: null, expiryTimer: null, snapshot: null, polar: { values: null, angle: null, fresh: false, figType: 'Compass', compassOffset: 0, localAxis: true } };
 function esc(value) { return String(value ?? '—').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;'); }
 function kind(value) { const s=String(value||'').toUpperCase(); return s==='LIVE'||s==='PASS'||s==='READY'||s==='CONNECTED'?'good':(s==='DEGRADED'||s==='STALE'||s==='BLOCKED'||s==='FAIL'||s==='ERROR'?'bad':'warn'); }
 function pill(value) { const cls=kind(value); return `<span class="chip ${cls==='good'?'safe':(cls==='bad'?'bad':'warn')}">${esc(value)}</span>`; }
@@ -1186,7 +1459,19 @@ function reasonLabel(reason) { return ({
   NATIVE_DOA_VIEWS_CONFLICT:'CSV and XML views differ after canonicalization',
   DAQ_HEALTH_GATE_FAILED:'DAQ or frame synchronization gate failed',
   DOA_CANDIDATES_STALE:'DoA output is older than the freshness window',
-  STATUS_UNAVAILABLE_OR_INVALID:'Node status is unavailable or invalid'
+  STATUS_UNAVAILABLE_OR_INVALID:'Node status is unavailable or invalid',
+  NO_VALID_DOA_CANDIDATE:'No valid DoA candidate was parsed',
+  STATUS_STALE:'Node status is older than the freshness window',
+  SELECTED_AUTHORITY_UNAVAILABLE:'Selected authority source is unavailable',
+  SELECTED_DOA_STALE:'Selected DoA source is stale',
+  NODE_CLOCK_STALLED:'Node status counters stopped advancing; Data Out files are frozen',
+  ADC_OVERDRIVE:'ADC overdrive reported; reduce receiver gain',
+  COLLECTION_DEADLINE_EXCEEDED:'Data Out read did not finish within the collection deadline',
+  CSV_VIEW_UNAVAILABLE:'CSV view (DOA_value.html) is unavailable',
+  XML_VIEW_UNAVAILABLE:'XML view (doa.xml) is unavailable',
+  NATIVE_ANGLE_INVALID:'A native DoA angle is out of range or not finite',
+  NATIVE_ANGLE_UNCHECKED:'CSV and XML came from different frames, so their angles were not cross-checked',
+  ANGULAR_PEAK_ANGLE_MISMATCH:'CSV vector peak does not match theta_0'
 }[reason]||reason); }
 function setStatus(id, text, cls='') { $(id).textContent=text; $(id).className=`admin-status ${cls}`; }
 function setReadStatus(text, cls='') { const message=$('message'); const label=message?.querySelector('span:last-child'); if(label) label.textContent=text; else message.textContent=text; $('status-dot').className=`status-dot ${cls}`; }
@@ -1201,53 +1486,69 @@ function renderBranding(data) {
 }
 async function loadBranding() { try { const r=await fetch('/api/branding',{cache:'no-store'}); if(r.ok) renderBranding(await r.json()); } catch(e) {} }
 function setHealthCard(id, value, detail, tone='') { const card=$(id)?.closest('.health-card'); if(!card) return; $(id).textContent=value; $(id).className=''; card.className=`health-card ${tone}`; const detailNode=$(id+'-detail'); if(detailNode) detailNode.textContent=detail; }
+function mqttCount(value) { return Number.isInteger(value)&&value>=0?value:0; }
+function mqttMs(value) { return Number.isFinite(value)?`${value} ms`:'—'; }
+// A zero-length publish removes a retained value: the entry has cleared:true and
+// valid:false, which means "no current value", not an invalid message.
+function mqttContract(entry) { return entry.cleared===true?'CLEARED':(entry.valid===true?'VALID':'INVALID'); }
+function contractPill(state) { return `<span class="chip ${state==='VALID'?'safe':(state==='INVALID'?'bad':'warn')}">${esc(state)}</span>`; }
+function mqttTransport(data) { return data.transport==='tcp'?'MQTT over TCP':(data.transport==='websockets'?`MQTT over WebSocket ${data.ws_path||'/mqtt'}`:'—'); }
 function renderMqtt(data) {
   const enabled=Boolean(data&&data.enabled); const connection=data?.connection||'off';
+  const valid=mqttCount(data?.valid), invalid=mqttCount(data?.invalid), cleared=mqttCount(data?.cleared);
   $('mqtt-connection').textContent=enabled?connection.toUpperCase():'OFF'; $('mqtt-connection').className=`metric-value ${kind(enabled&&connection==='connected'?'PASS':(enabled?'DEGRADED':'UNKNOWN'))}`;
-  $('mqtt-detail').textContent=enabled?`${data.host}:${data.port} · ${data.valid||0}/${data.received||0} valid`:'subscriber-only / off';
-  setHealthCard('health-mqtt', enabled?connection.toUpperCase():'OFF', enabled?'subscriber-only · '+(data.valid||0)+' valid':'subscriber-only', enabled&&connection==='connected'?'good':(enabled?'warn':''));
+  $('mqtt-detail').textContent=enabled?`${data.host}:${data.port} · ${valid} valid · ${invalid} invalid${cleared?` · ${cleared} cleared`:''}`:'subscriber-only / off';
+  setHealthCard('health-mqtt', enabled?connection.toUpperCase():'OFF', enabled?'subscriber-only · '+valid+' valid':'subscriber-only', enabled&&connection==='connected'?'good':(enabled?'warn':''));
   if(!enabled){ $('mqtt-rows').innerHTML=rows([['Mode','OFF'],['Publish',pill('disabled')]]); $('mqtt-last').textContent='MQTT monitor is not enabled.'; return; }
+  const byKind=data.last_by_kind&&typeof data.last_by_kind==='object'&&!Array.isArray(data.last_by_kind)?data.last_by_kind:{};
+  const entries=Object.entries(byKind).filter(([,entry])=>entry&&typeof entry==='object');
+  const kindRows=entries.map(([name,entry])=>[`Latest ${name}`,`${contractPill(mqttContract(entry))}${entry.retained===true?' <span class="muted">retained</span>':''} <span class="muted">${esc(Number.isFinite(entry.age_ms)?`${entry.age_ms} ms ago`:'')}</span>`]);
   $('mqtt-rows').innerHTML=rows([
-    ['Connection',pill(connection)],['Messages',esc(data.received)],['Valid / invalid',esc(`${data.valid} / ${data.invalid}`)],['Bytes',esc(data.total_bytes)],['Last latency',esc(data.last_latency_ms===null?'—':`${data.last_latency_ms} ms`)],['Last age',esc(data.last_age_ms===null?'—':`${data.last_age_ms} ms`)],['Last topic',esc(data.last_topic||'—')],['Publish',pill('false')]
-  ]); $('mqtt-last').textContent=JSON.stringify(data.last_by_kind||{},null,2);
+    ['Connection',pill(connection)],['Transport',esc(mqttTransport(data))],['Messages',esc(mqttCount(data.received))],['Valid / invalid',esc(`${valid} / ${invalid}`)],['Retained clears',esc(cleared)],['Bytes',esc(mqttCount(data.total_bytes))],['Last latency',esc(mqttMs(data.last_latency_ms))],['Last age',esc(mqttMs(data.last_age_ms))],['Last topic',esc(data.last_topic||'—')],...kindRows,['Publish',pill('false')]
+  ]);
+  const records=Object.fromEntries(Object.entries(byKind).map(([name,entry])=>[name,entry&&typeof entry==='object'&&entry.cleared===true?{kind:entry.kind,cleared:true,retained:entry.retained,received_at_ms:entry.received_at_ms,age_ms:entry.age_ms}:entry]));
+  $('mqtt-last').textContent=JSON.stringify(records,null,2);
 }
-function polarSettings(figType, compassOffset) { const requested=String(figType||'Polar').trim(); const safeType=requested.toLowerCase()==='compass'?'Compass':'Polar'; const numeric=Number(compassOffset); return { figType:safeType, compassOffset:Number.isFinite(numeric)?numeric:0 }; }
+// Mirrors frontend/src/lib/polar.ts: Polar is theta_0 counter-clockwise (KrakenSDR Polar plot); Linear has no polar axis, so its compass_offset gets a local Compass axis.
+function polarSettings(figType, compassOffset) { const requested=String(figType??'').trim().toLowerCase(); const numeric=typeof compassOffset==='number'?compassOffset:(typeof compassOffset==='string'&&compassOffset.trim()!==''?Number(compassOffset.trim()):NaN); return { figType:requested==='polar'?'Polar':'Compass', compassOffset:Number.isFinite(numeric)?numeric:0, localAxis:requested!=='polar'&&requested!=='compass' }; }
 function normalizeDegrees(deg) { return ((Number(deg)%360)+360)%360; }
-function drawPolar(values, angle, fresh, figType='Polar', compassOffset=0) {
+function polarDisplayAngle(bin, settings) { return normalizeDegrees(settings.figType==='Compass'?360-bin+settings.compassOffset:bin); }
+function polarScreenAngle(bin, settings) { return settings.figType==='Compass'?polarDisplayAngle(bin,settings):normalizeDegrees(360-bin); }
+function drawPolar(values, angle, fresh, figType='Compass', compassOffset=0) {
   const canvas=$('doa-polar'); const frame=canvas?.closest('.polar-frame')||canvas?.parentElement; if(!canvas||!frame) return;
   const cssSize=Math.max(1,Math.floor(frame.getBoundingClientRect().width||frame.clientWidth||420)); const dpr=Math.min(window.devicePixelRatio||1,2); const size=Math.max(1,Math.floor(cssSize*dpr));
   if(canvas.width!==size||canvas.height!==size){ canvas.width=size; canvas.height=size; }
   const ctx=canvas.getContext('2d'); if(!ctx) return; ctx.setTransform(size/cssSize,0,0,size/cssSize,0,0); ctx.clearRect(0,0,cssSize,cssSize);
   const styles=getComputedStyle(document.documentElement); const line=styles.getPropertyValue('--line').trim()||'#28533b'; const muted=styles.getPropertyValue('--muted').trim()||'#a8c9ad'; const subtle=styles.getPropertyValue('--subtle').trim()||'#7fae89'; const accent=styles.getPropertyValue('--accent').trim()||'#39d98a'; const blue=styles.getPropertyValue('--blue').trim()||'#65c98a';
-  const cx=cssSize/2, cy=cssSize/2, maxR=cssSize*.365; const settings=polarSettings(figType,compassOffset); const toDisplayAngle=deg=>normalizeDegrees(settings.figType==='Compass'?360-deg+settings.compassOffset:deg); const toRadians=deg=>(deg-90)*Math.PI/180;
+  const cx=cssSize/2, cy=cssSize/2, maxR=cssSize*.365; const settings=polarSettings(figType,compassOffset); const compass=settings.figType==='Compass'; const labelPosition=deg=>compass?deg:normalizeDegrees(360-deg); const toRadians=deg=>(deg-90)*Math.PI/180;
   ctx.save(); ctx.translate(cx,cy); ctx.lineWidth=1; ctx.strokeStyle=line; ctx.globalAlpha=.92; [.25,.5,.75,1].forEach(f=>{ ctx.beginPath(); ctx.arc(0,0,maxR*f,0,Math.PI*2); ctx.stroke(); });
   for(let deg=0;deg<360;deg+=45){ const radians=toRadians(deg); ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(Math.cos(radians)*maxR,Math.sin(radians)*maxR); ctx.stroke(); }
   ctx.globalAlpha=1; ctx.fillStyle=muted; ctx.font='700 10px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
-  const perimeterInset=Math.max(9,cssSize*.035); const cardinalRadius=Math.min(maxR+Math.min(23,Math.max(15,cssSize*.06)),cssSize/2-perimeterInset); const degreeRadius=Math.min(maxR+Math.min(18,Math.max(12,cssSize*.045)),cssSize/2-perimeterInset); const directions=[['N',0],['E',90],['S',180],['W',270]];
-  directions.forEach(([label,deg])=>{ const radians=toRadians(deg); ctx.fillText(label,Math.cos(radians)*cardinalRadius,Math.sin(radians)*cardinalRadius); });
+  const perimeterInset=Math.max(9,cssSize*.035); const cardinalRadius=Math.min(maxR+Math.min(23,Math.max(15,cssSize*.06)),cssSize/2-perimeterInset); const degreeRadius=Math.min(maxR+Math.min(18,Math.max(12,cssSize*.045)),cssSize/2-perimeterInset); const directions=[['N',0],['E',90],['S',180],['W',270]]; const axisLabels=compass?directions:[['0°',0],['90°',90],['180°',180],['270°',270]];
+  axisLabels.forEach(([label,deg])=>{ const radians=toRadians(labelPosition(deg)); ctx.fillText(label,Math.cos(radians)*cardinalRadius,Math.sin(radians)*cardinalRadius); });
   ctx.fillStyle=subtle; ctx.font='10px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif'; const diagonalDegrees=new Set([45,135,225,315]);
-  for(let deg=0;deg<360;deg+=45){ const radians=toRadians(deg); ctx.beginPath(); ctx.moveTo(Math.cos(radians)*maxR,Math.sin(radians)*maxR); ctx.lineTo(Math.cos(radians)*(maxR+6),Math.sin(radians)*(maxR+6)); ctx.stroke(); if(diagonalDegrees.has(deg)) ctx.fillText(`${deg}°`,Math.cos(radians)*degreeRadius,Math.sin(radians)*degreeRadius); }
+  for(let deg=0;deg<360;deg+=45){ const radians=toRadians(deg); ctx.beginPath(); ctx.moveTo(Math.cos(radians)*maxR,Math.sin(radians)*maxR); ctx.lineTo(Math.cos(radians)*(maxR+6),Math.sin(radians)*(maxR+6)); ctx.stroke(); if(diagonalDegrees.has(deg)){ const labelRadians=toRadians(labelPosition(deg)); ctx.fillText(`${deg}°`,Math.cos(labelRadians)*degreeRadius,Math.sin(labelRadians)*degreeRadius); } }
   const finite=Array.isArray(values)&&values.length===360?values.map(Number):null; const validData=Boolean(fresh&&finite&&finite.every(Number.isFinite));
   if(validData){
     const floor=Math.min(...finite), peakValue=Math.max(...finite), span=peakValue-floor; const yFor=value=>span>0?Math.max(0,Math.min(1,(value-floor)/span)):1; ctx.textAlign='left'; ctx.fillStyle=subtle; ctx.font='9px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif'; const precision=span<5?1:0;
     [.25,.5,.75,1].forEach(f=>{ const label=`${(floor+span*f).toFixed(precision)} dB`; const radialLabelY=-maxR+(maxR*2.0*f); const labelWidth=ctx.measureText(label).width; const rightEdge=Math.max(0,cssSize/2-4); const radialLabelX=Math.min(maxR+8,rightEdge-labelWidth); ctx.fillText(label,radialLabelX,radialLabelY); });
-    const point=(value,index)=>{ const radians=toRadians(toDisplayAngle(index)), radius=maxR*yFor(value); return [Math.cos(radians)*radius,Math.sin(radians)*radius]; };
+    const point=(value,index)=>{ const radians=toRadians(polarScreenAngle(index,settings)), radius=maxR*yFor(value); return [Math.cos(radians)*radius,Math.sin(radians)*radius]; };
     const drawCurve=()=>{ finite.forEach((value,index)=>{ const [x,y]=point(value,index); index?ctx.lineTo(x,y):ctx.moveTo(x,y); }); const [x0,y0]=point(finite[0],0); ctx.lineTo(x0,y0); };
     ctx.beginPath(); drawCurve(); ctx.closePath(); ctx.fillStyle='rgba(57,217,138,.14)'; ctx.fill(); ctx.beginPath(); drawCurve(); ctx.closePath(); ctx.strokeStyle=accent; ctx.lineWidth=2; ctx.shadowColor='rgba(57,217,138,.48)'; ctx.shadowBlur=8; ctx.stroke();
-    const peakIndex=finite.indexOf(peakValue); if(peakIndex>=0){ const displayPeak=toDisplayAngle(peakIndex), [px,py]=point(finite[peakIndex],peakIndex); ctx.shadowBlur=0; ctx.fillStyle=accent; ctx.beginPath(); ctx.arc(px,py,3.5,0,Math.PI*2); ctx.fill(); ctx.strokeStyle=blue; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(px,py); ctx.lineTo(Math.cos(toRadians(displayPeak))*(maxR+12),Math.sin(toRadians(displayPeak))*(maxR+12)); ctx.stroke(); ctx.fillStyle=accent; ctx.font='700 9px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif'; ctx.textAlign='center'; ctx.fillText(`PLOT ${displayPeak.toFixed(0)}°`,px,py < -maxR*.45 ? py+15 : py-11); }
+    const peakIndex=finite.indexOf(peakValue); if(peakIndex>=0){ const displayPeak=polarDisplayAngle(peakIndex,settings), peakScreen=polarScreenAngle(peakIndex,settings), [px,py]=point(finite[peakIndex],peakIndex); ctx.shadowBlur=0; ctx.fillStyle=accent; ctx.beginPath(); ctx.arc(px,py,3.5,0,Math.PI*2); ctx.fill(); ctx.strokeStyle=blue; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(px,py); ctx.lineTo(Math.cos(toRadians(peakScreen))*(maxR+12),Math.sin(toRadians(peakScreen))*(maxR+12)); ctx.stroke(); ctx.fillStyle=accent; ctx.font='700 9px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif'; ctx.textAlign='center'; ctx.fillText(`PLOT ${displayPeak.toFixed(0)}°`,px,py < -maxR*.45 ? py+15 : py-11); }
   }
   ctx.restore();
 }
-function setPolarUnavailable(reason='polar unavailable', settings=polarSettings(state.polar?.figType,state.polar?.compassOffset)) {
-  state.polar={values:null,angle:null,fresh:false,figType:settings.figType,compassOffset:settings.compassOffset}; drawPolar(null,null,false,settings.figType,settings.compassOffset);
+function setPolarUnavailable(reason='polar unavailable', settings=polarSettings(state.polar?.localAxis?null:state.polar?.figType,state.polar?.compassOffset)) {
+  state.polar={values:null,angle:null,fresh:false,figType:settings.figType,compassOffset:settings.compassOffset,localAxis:settings.localAxis}; drawPolar(null,null,false,settings.figType,settings.compassOffset);
   $('polar-peak').textContent='—'; $('polar-canonical').textContent='—'; $('polar-peak-db').textContent='—'; $('polar-bins').textContent='—'; $('compass-angle').textContent='—°'; $('compass-display-angle').textContent='plot peak · display —°'; $('compass-status').textContent='POLAR UNAVAILABLE'; $('compass-status').className='compass-status unavailable'; $('compass-source').textContent='Data Out · unavailable'; $('compass-detail').innerHTML=`<strong>Unavailable:</strong> ${esc(reason)}`; $('doa-polar').setAttribute('aria-label',`Polar DoA unavailable. ${reason}`);
   $('inspector-angle').textContent='—°'; $('inspector-display-peak').textContent='—'; $('inspector-peak-db').textContent='—'; $('inspector-bins').textContent='—'; $('inspector-freshness').textContent='—'; $('inspector-angle-note').innerHTML='waiting for<br>correlated DoA'; $('inspector-provenance').textContent='No observation selected. Plot is cleared until a fresh, complete vector is available.';
 }
 function renderPolar(snapshot,csv,dataAvailable) {
-  const fields=snapshot.settings?.fields||{}; const requestedType=Object.prototype.hasOwnProperty.call(fields,'doa_fig_type')?fields.doa_fig_type:state.polar?.figType; const requestedOffset=Object.prototype.hasOwnProperty.call(fields,'compass_offset')?fields.compass_offset:state.polar?.compassOffset; const settings=polarSettings(requestedType,requestedOffset); const angle=Number(csv.canonical_angle_deg); const values=Array.isArray(csv.angular_power_db)?csv.angular_power_db:null; const fresh=Boolean(dataAvailable&&csv.freshness?.fresh===true&&values?.length===360&&values.every(value=>Number.isFinite(Number(value))));
-  state.polar={values,angle:Number.isFinite(angle)?angle:null,fresh,figType:settings.figType,compassOffset:settings.compassOffset}; if(!fresh||!Number.isFinite(angle)){ setPolarUnavailable('Curve cleared: DoA data is stale, conflicting, or incomplete.',settings); return; }
-  drawPolar(values,angle,true,settings.figType,settings.compassOffset); const peakIndex=Number(csv.angular_peak_index); const peakReady=Number.isInteger(peakIndex)&&peakIndex>=0&&peakIndex<values.length; const displayAngle=settings.figType==='Compass'&&peakReady?normalizeDegrees(360-peakIndex+settings.compassOffset):(peakReady?peakIndex:null); const peakLabel=displayAngle===null?'—':`${displayAngle.toFixed(0)}° · bin ${peakIndex}`; const canonicalLabel=`${angle.toFixed(1)}° · θ₀`;
-  $('polar-peak').textContent=peakLabel; $('polar-canonical').textContent=canonicalLabel; $('polar-peak-db').textContent=Number.isFinite(Number(csv.angular_peak_db))?`${Number(csv.angular_peak_db).toFixed(1)} dB`:'—'; $('polar-bins').textContent=String(values.length); $('compass-angle').textContent=`${angle.toFixed(1)}°`; $('compass-display-angle').textContent=`plot peak · display ${displayAngle===null?'—':displayAngle.toFixed(0)+'°'} · bin ${peakReady?peakIndex:'—'}`; $('compass-status').textContent='DATA AVAILABLE'; $('compass-status').className='compass-status'; $('compass-source').textContent=`Data Out · ${settings.figType} display axis · ${formatAge(csv.freshness)}`; $('compass-detail').innerHTML=`<strong>Provenance:</strong> canonical source ${angle.toFixed(1)}° (θ₀) versus plotted display peak ${displayAngle===null?'—':displayAngle.toFixed(0)+'°'} (bin ${peakReady?peakIndex:'—'}). Both remain separate metadata · display-only.`; $('doa-polar').setAttribute('aria-label',`Polar DoA. Canonical source angle ${angle.toFixed(1)} degrees. Plotted 360-bin peak display angle ${displayAngle===null?'unavailable':displayAngle.toFixed(0)+' degrees, bin '+peakIndex}. Display-only.`);
+  const fields=snapshot.settings?.fields||{}; const requestedType=Object.prototype.hasOwnProperty.call(fields,'doa_fig_type')?fields.doa_fig_type:(state.polar?.localAxis?null:state.polar?.figType); const requestedOffset=Object.prototype.hasOwnProperty.call(fields,'compass_offset')?fields.compass_offset:state.polar?.compassOffset; const settings=polarSettings(requestedType,requestedOffset); const angle=Number(csv.canonical_angle_deg); const values=Array.isArray(csv.angular_power_db)?csv.angular_power_db:null; const fresh=Boolean(dataAvailable&&csv.freshness?.fresh===true&&values?.length===360&&values.every(value=>Number.isFinite(Number(value))));
+  state.polar={values,angle:Number.isFinite(angle)?angle:null,fresh,figType:settings.figType,compassOffset:settings.compassOffset,localAxis:settings.localAxis}; if(!fresh||!Number.isFinite(angle)){ setPolarUnavailable('Curve cleared: DoA data is stale, conflicting, or incomplete.',settings); return; }
+  drawPolar(values,angle,true,settings.figType,settings.compassOffset); const peakIndex=Number(csv.angular_peak_index); const peakReady=Number.isInteger(peakIndex)&&peakIndex>=0&&peakIndex<values.length; const displayAngle=peakReady?polarDisplayAngle(peakIndex,settings):null; const axisSource=settings.localAxis?'Data Out offset · local Compass axis':`Data Out · ${settings.figType} display axis`; const peakLabel=displayAngle===null?'—':`${displayAngle.toFixed(0)}° · bin ${peakIndex}`; const canonicalLabel=`${angle.toFixed(1)}° · θ₀`;
+  $('polar-peak').textContent=peakLabel; $('polar-canonical').textContent=canonicalLabel; $('polar-peak-db').textContent=Number.isFinite(Number(csv.angular_peak_db))?`${Number(csv.angular_peak_db).toFixed(1)} dB`:'—'; $('polar-bins').textContent=String(values.length); $('compass-angle').textContent=`${angle.toFixed(1)}°`; $('compass-display-angle').textContent=`plot peak · display ${displayAngle===null?'—':displayAngle.toFixed(0)+'°'} · bin ${peakReady?peakIndex:'—'}`; $('compass-status').textContent='DATA AVAILABLE'; $('compass-status').className='compass-status'; $('compass-source').textContent=`${axisSource} · ${formatAge(csv.freshness)}`; $('compass-detail').innerHTML=`<strong>Provenance:</strong> canonical source ${angle.toFixed(1)}° (θ₀) versus plotted display peak ${displayAngle===null?'—':displayAngle.toFixed(0)+'°'} (bin ${peakReady?peakIndex:'—'}). Both remain separate metadata · display-only.`; $('doa-polar').setAttribute('aria-label',`Polar DoA. Canonical source angle ${angle.toFixed(1)} degrees. Plotted 360-bin peak display angle ${displayAngle===null?'unavailable':displayAngle.toFixed(0)+' degrees, bin '+peakIndex}. Display-only.`);
   $('inspector-angle').textContent=`${angle.toFixed(1)}°`; $('inspector-display-peak').textContent=peakLabel; $('inspector-peak-db').textContent=Number.isFinite(Number(csv.angular_peak_db))?`${Number(csv.angular_peak_db).toFixed(1)} dB`:'—'; $('inspector-bins').textContent=String(values.length); $('inspector-freshness').textContent=formatAge(csv.freshness); $('inspector-angle-note').innerHTML='canonical source<br>not authority'; $('inspector-provenance').textContent=`CSV native view · ${settings.figType} display axis · source vector preserved as shifted dB.`;
 }
 function finiteCoordinate(value, lower, upper) { const number=Number(value); return Number.isFinite(number)&&number>=lower&&number<=upper; }
@@ -1298,20 +1599,30 @@ function render(snapshot) {
   const reasons=gate.reasons||[]; $('gate-count').textContent=`${reasons.length} GATES`; $('gate-reasons').innerHTML=reasons.length?reasons.map(reason=>`<li><span>${esc(reasonLabel(reason))}</span><small class="mono">${esc(reason)}</small></li>`).join(''):'<li>No active gate reasons.</li>'; $('gate-debug').textContent=JSON.stringify({state:gateState,checks:gate.checks||{},reasons},null,2);
   const candidates=[{label:'CSV',candidate:csv},{label:'XML',candidate:xml}]; $('doa-rows').innerHTML=signalRows(candidates); $('signal-contract-state').textContent=`${candidates.filter(item=>item.candidate?.available===true).length}/2 NATIVE VIEWS`;
   const sourceRow=(label,candidate)=>[['Source',`${esc(label)} · ${candidate.available?pill('PARSED'):pill('UNAVAILABLE')}`],['  raw angle',candidate.available?`${formatNumber(candidate.doa_raw_deg,1)}° <span class="muted">(${esc(candidate.angle_convention||'native')})</span>`:'—'],['  canonical angle',candidate.available?`${formatNumber(candidate.canonical_angle_deg,1)}° <span class="muted">(${esc(candidate.canonical_angle_convention||'—')})</span>`:'—'],['  freshness',candidate.available?`${formatAge(candidate.freshness)} · ${candidate.freshness?.fresh===true?'fresh':'not fresh'}`:'—'],['  PAPR native',candidate.available?`${formatNumber(candidate.confidence_metric_db,3)} dB · ${candidate.confidence_metric_valid?'valid':'invalid'}`:'—'],['  power native',candidate.available?`${formatNumber(candidate.power_native_db,2)} dB · ${candidate.power_native_valid?'valid':'invalid'}`:'—'],['  frequency',candidate.available?`${esc(candidate.frequency_hz_normalized??'—')} Hz`:'—'],['  contract mapping',candidate.available?`${esc(candidate.contract_mapping_state||'—')} · ${esc((candidate.unit_reasons||[]).join(', ')||'—')}`:'—']];
-  $('source-rows').innerHTML=rows([['Publication',pill(gateState)],['Native correlation',consistency.comparable?`${consistency.same_timestamp?'same timestamp':'adjacent timestamps'} · canonical delta ${formatNumber(consistency.circular_distance_deg,1)}°`:'not comparable'],...sourceRow('CSV',csv),...sourceRow('XML',xml),['Authority',esc(authority.selected||'none')],['Canonical angle gate',authority.canonical_angle_ready?'ready':'not approved'],['Contract confidence',authority.selected_doa?.confidence===null?'not mapped to 0–1':esc(authority.selected_doa?.confidence??'—')],['Gate note',esc((gate.reasons||[]).map(reasonLabel).join(' · ')||'—')]]);
+  $('source-rows').innerHTML=rows([['Publication',pill(gateState)],['Native correlation',consistency.comparable?`${consistency.same_timestamp?'same timestamp':'adjacent frames, angles not cross-checked'} · canonical delta ${formatNumber(consistency.circular_distance_deg,1)}°`:'not comparable'],...sourceRow('CSV',csv),...sourceRow('XML',xml),['Authority',esc(authority.selected||'none')],['Canonical angle gate',authority.canonical_angle_ready?'ready':'not approved'],['Contract confidence',authority.selected_doa?.confidence===null?'not mapped to 0–1':esc(authority.selected_doa?.confidence??'—')],['Gate note',esc((gate.reasons||[]).map(reasonLabel).join(' · ')||'—')]]);
   const daqStatus=safe.daq_status||{}; $('status-rows').innerHTML=rows([['DAQ',pill(daq)],['daq_ok',boolLabel(safe.daq_ok)],['Frame index',esc(daqStatus.data_frame_index)],['Frame sync',boolLabel(daqStatus.frame_sync)],['Sample-delay sync',boolLabel(daqStatus.sample_delay_sync)],['IQ sync',boolLabel(daqStatus.iq_sync)],['ADC overdrive',boolLabel(daqStatus.adc_overdrive)],['Dropped frames',esc(safe.daq_num_dropped_frames)],['Sampling',esc(daqStatus.sampling_frequency_hz?`${daqStatus.sampling_frequency_hz} Hz`:'—')],['Station',esc(safe.station_id)],['Software',esc(safe.software_version)],['Source hash',esc(safe.software_git_short_hash)],['GPS',esc(safe.gps_status)]]);
   const settings=snapshot.settings||{}; const sf=settings.fields||{}; $('settings-rows').innerHTML=Object.keys(sf).sort().map(key=>[key,safeValue(sf[key])]).map(([key,value])=>`<tr><th>${esc(key)}</th><td>${value}</td></tr>`).join('')||'<tr><td colspan="2">Not available</td></tr>';
   setReadStatus(`Snapshot read successfully · ${readAt.toISOString().slice(11,19)}Z`,'good');
 }
 async function refreshMqtt() { const sequence=++state.mqttSequence; try { const r=await fetch('/api/mqtt',{cache:'no-store'}); const payload=await r.json(); if(sequence!==state.mqttSequence) return; renderMqtt(payload); } catch(e) { if(sequence!==state.mqttSequence) return; renderMqtt({enabled:true,connection:'error',host:'?',port:'?',received:0,valid:0,invalid:0,total_bytes:0,last_latency_ms:null,last_age_ms:null,last_topic:null,last_by_kind:{error:'monitor unavailable'}}); } }
-async function refresh() {
+const REQUEST_TIMEOUT_MS=8000;
+function localExpiryMs(snapshot) {
+  // Same rule as the React console: the read keeps only the time still left in the collector's freshness window.
+  if(snapshot?.status?.available!==true) return 0; const windows=[];
+  for(const candidate of Object.values(snapshot.doa_candidates||{})){ const f=candidate?.freshness; if(!f||typeof f!=='object'||f.freshness_known===false) continue; if(f.fresh!==true) return 0; const maxAge=Number(f.max_age_ms); const age=Number(f.age_ms); if(!Number.isFinite(maxAge)||!Number.isFinite(age)||age<0) return 0; windows.push(maxAge-age); }
+  return windows.length?Math.max(0,Math.min(...windows)):5000;
+}
+function scheduleLocalExpiry(snapshot) { if(state.expiryTimer){ clearTimeout(state.expiryTimer); state.expiryTimer=null; } const remaining=localExpiryMs(snapshot); if(remaining<=0) return; state.expiryTimer=setTimeout(()=>{ state.expiryTimer=null; if(state.snapshot!==snapshot) return; setSnapshotUnavailable('local freshness window expired; awaiting a new Data Out read'); setReadStatus('Data expired locally · awaiting a new read','bad'); },remaining); }
+async function refresh(options) {
+  const auto=options?.auto===true; if(auto&&state.refreshController) return;
   const sequence=++state.refreshSequence; if(state.refreshController) state.refreshController.abort(); const controller=typeof AbortController==='function'?new AbortController():null; state.refreshController=controller; const button=$('refresh'); button.disabled=true; setReadStatus('Reading Data Out…');
-  try { const url='/api/snapshot?base_url='+encodeURIComponent(state.dataUrl); const options={cache:'no-store'}; if(controller) options.signal=controller.signal; const response=await fetch(url,options); const data=await response.json(); if(sequence!==state.refreshSequence) return; if(!response.ok) throw new Error(data.error||'snapshot failed'); render(data); }
-  catch(error) { if(sequence!==state.refreshSequence||error?.name==='AbortError') return; const message=error?.message||'snapshot failed'; setSnapshotUnavailable(message); setReadStatus('Read error: '+message,'bad'); }
-  finally { if(sequence===state.refreshSequence){ button.disabled=false; if(state.refreshController===controller) state.refreshController=null; } }
+  let timedOut=false; const timer=controller?setTimeout(()=>{ timedOut=true; controller.abort(); },REQUEST_TIMEOUT_MS):null;
+  try { const url='/api/snapshot?base_url='+encodeURIComponent(state.dataUrl); const init={cache:'no-store'}; if(controller) init.signal=controller.signal; const response=await fetch(url,init); const data=await response.json(); if(sequence!==state.refreshSequence) return; if(!response.ok) throw new Error(data.error||'snapshot failed'); render(data); scheduleLocalExpiry(data); }
+  catch(error) { if(sequence!==state.refreshSequence||(error?.name==='AbortError'&&!timedOut)) return; const message=timedOut?`request timed out after ${REQUEST_TIMEOUT_MS/1000} s`:(error?.message||'snapshot failed'); setSnapshotUnavailable(message); setReadStatus('Read error: '+message,'bad'); }
+  finally { if(timer) clearTimeout(timer); if(sequence===state.refreshSequence){ button.disabled=false; if(state.refreshController===controller) state.refreshController=null; } }
   if(sequence===state.refreshSequence) refreshMqtt();
 }
-function setAuto(seconds) { if(state.autoTimer){ clearInterval(state.autoTimer); state.autoTimer=null; } const interval=Number(seconds||0); $('refresh-interval').value=String(interval); if(interval>0){ refresh(); state.autoTimer=setInterval(refresh,interval*1000); $('auto-refresh').textContent=`Auto: ${interval}s`; } else $('auto-refresh').textContent='Auto: off'; }
+function setAuto(seconds) { if(state.autoTimer){ clearInterval(state.autoTimer); state.autoTimer=null; } const interval=Number(seconds||0); $('refresh-interval').value=String(interval); if(interval>0){ refresh(); state.autoTimer=setInterval(()=>refresh({auto:true}),interval*1000); $('auto-refresh').textContent=`Auto: ${interval}s`; } else $('auto-refresh').textContent='Auto: off'; }
 function openSettings(tab='connection') { $('settings-modal').hidden=false; selectTab(tab); }
 function closeSettings() { $('settings-modal').hidden=true; }
 function selectTab(name) { document.querySelectorAll('.tab').forEach(button=>button.classList.toggle('active',button.dataset.tab===name)); document.querySelectorAll('.tab-panel').forEach(panel=>panel.hidden=panel.id!==`tab-${name}`); }
@@ -1323,7 +1634,7 @@ function readLogo(file) { if(!file) return; if(file.size>256*1024){ setStatus('b
 function resetLogo() { state.pendingLogo=''; $('brand-logo').value=''; $('brand-preview').hidden=true; $('preview-placeholder').hidden=false; setStatus('brand-status','Logo will be removed when saved.',''); }
 async function saveBranding() { const appName=$('brand-name').value.trim(); const logo=state.pendingLogo===null?(state.branding?.logo_data_url||''):state.pendingLogo; try { const r=await fetch('/api/admin/branding',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({app_name:appName,logo_data_url:logo})}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'branding save failed'); state.pendingLogo=null; const verify=await fetch('/api/branding',{cache:'no-store'}); const verified=await verify.json(); if(!verify.ok) throw new Error(verified.error||'branding read-back failed'); renderBranding(verified); setStatus('brand-status','Branding saved and verified from Ground Console local storage.','good'); } catch(e) { setStatus('brand-status',e.message,'bad'); } }
 document.querySelectorAll('[data-nav]').forEach(item=>item.addEventListener('click',()=>{ document.querySelectorAll('.nav-item').forEach(nav=>nav.classList.toggle('active',nav===item)); document.querySelectorAll('.nav-item').forEach(nav=>nav.removeAttribute('aria-current')); item.setAttribute('aria-current','page'); }));
-$('refresh').addEventListener('click',refresh); $('auto-refresh').addEventListener('click',()=>setAuto(state.autoTimer?0:5)); $('settings-open').addEventListener('click',()=>openSettings('connection')); $('settings-close').addEventListener('click',closeSettings); document.querySelector('[data-close-settings]').addEventListener('click',closeSettings); document.querySelectorAll('.tab').forEach(button=>button.addEventListener('click',()=>selectTab(button.dataset.tab))); $('apply-connection').addEventListener('click',applyConnection); $('monitor-connect').addEventListener('click',connectMqtt); $('admin-login').addEventListener('click',adminLogin); $('admin-logout').addEventListener('click',adminLogout); $('brand-logo').addEventListener('change',event=>readLogo(event.target.files[0])); $('brand-reset-logo').addEventListener('click',resetLogo); $('brand-save').addEventListener('click',saveBranding); $('refresh-interval').addEventListener('change',event=>setAuto(event.target.value)); document.addEventListener('keydown',event=>{if(event.key==='Escape')closeSettings();});
+$('refresh').addEventListener('click',refresh); $('auto-refresh').addEventListener('click',()=>setAuto(state.autoTimer?0:2)); $('settings-open').addEventListener('click',()=>openSettings('connection')); $('settings-close').addEventListener('click',closeSettings); document.querySelector('[data-close-settings]').addEventListener('click',closeSettings); document.querySelectorAll('.tab').forEach(button=>button.addEventListener('click',()=>selectTab(button.dataset.tab))); $('apply-connection').addEventListener('click',applyConnection); $('monitor-connect').addEventListener('click',connectMqtt); $('admin-login').addEventListener('click',adminLogin); $('admin-logout').addEventListener('click',adminLogout); $('brand-logo').addEventListener('change',event=>readLogo(event.target.files[0])); $('brand-reset-logo').addEventListener('click',resetLogo); $('brand-save').addEventListener('click',saveBranding); $('refresh-interval').addEventListener('change',event=>setAuto(event.target.value)); document.addEventListener('keydown',event=>{if(event.key==='Escape')closeSettings();});
 window.addEventListener('resize',()=>drawPolar(state.polar.values,state.polar.angle,state.polar.fresh,state.polar.figType,state.polar.compassOffset),{passive:true});
 renderClock(); setInterval(renderClock,1000); loadBranding(); if (initialConfig && initialConfig.refresh_seconds > 0) setAuto(initialConfig.refresh_seconds); else refresh();
 </script>
@@ -1332,20 +1643,13 @@ renderClock(); setInterval(renderClock,1000); loadBranding(); if (initialConfig 
 """
 
 
-def _finite_number(value: Any, field: str) -> float:
-    if isinstance(value, bool):
-        raise ValueError(f"{field} must be numeric")
-    try:
-        number = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{field} must be numeric") from exc
-    if number != number or number in (float("inf"), float("-inf")):
-        raise ValueError(f"{field} must be finite")
-    return number
-
-
 def validate_config_patch(payload: Any, now_ms: Optional[int] = None) -> Dict[str, Any]:
-    """Validate a narrow settings patch without applying or transmitting it."""
+    """Validate a narrow settings patch without applying or transmitting it.
+
+    The preview is built and checked by the shared MQTT contract, so
+    "passed" means the edge agent would accept the same envelope. The agent
+    drops a config_patch without base_config_rev, so the preview requires it.
+    """
     if not isinstance(payload, dict):
         raise ValueError("request must be a JSON object")
     changes = payload.get("changes")
@@ -1354,39 +1658,27 @@ def validate_config_patch(payload: Any, now_ms: Optional[int] = None) -> Dict[st
     unknown = sorted(set(changes) - set(CONFIG_ALLOWLIST))
     if unknown:
         raise ValueError("fields not allowed: " + ", ".join(unknown))
-
-    normalized: Dict[str, Any] = {}
-    for field, value in changes.items():
-        number = _finite_number(value, field)
-        low, high = CONFIG_ALLOWLIST[field]
-        if number < low or number > high:
-            raise ValueError(f"{field} outside allowed range [{low:g}, {high:g}]")
-        normalized[field] = int(number) if number.is_integer() else number
-
-    base_revision = payload.get("base_config_rev")
-    if base_revision is not None:
-        revision = _finite_number(base_revision, "base_config_rev")
-        if revision < 0 or not revision.is_integer():
-            raise ValueError("base_config_rev must be a non-negative integer")
-        base_revision = int(revision)
+    if payload.get("base_config_rev") is None:
+        raise ValueError(
+            "base_config_rev is required: the edge agent rejects a config_patch without the revision it is based on"
+        )
 
     issued = int(time.time() * 1000) if now_ms is None else int(now_ms)
-    command: Dict[str, Any] = {
-        "v": 1,
-        "id": "dryrun-" + uuid.uuid4().hex[:12],
-        "type": "config_patch",
-        "issued_ts_ms": issued,
-        "expires_ts_ms": issued + DEFAULT_COMMAND_TTL_MS,
-        "changes": normalized,
-    }
-    if base_revision is not None:
-        command["base_config_rev"] = base_revision
+    command = sdr_doa_mqtt.build_config_patch(
+        command_id="dryrun-" + uuid.uuid4().hex[:12],
+        base_config_rev=payload["base_config_rev"],
+        changes=changes,
+        issued_ts_ms=issued,
+        expires_ts_ms=issued + DEFAULT_COMMAND_TTL_MS,
+    )
+    sdr_doa_mqtt.validate_config_patch(command, now_ms=issued)
     return {
         "dry_run": True,
         "transport": "none",
         "applied": False,
         "ok": True,
         "validation": "passed",
+        "contract": "sdr/v1 config_patch",
         "command": command,
         "note": "Preview only; no MQTT, HTTP POST, file write, or Raspberry mutation was performed.",
     }
@@ -1503,8 +1795,21 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         )
 
     def _receiver_error(self, exc: Exception) -> None:
-        status = HTTPStatus.NOT_FOUND if isinstance(exc, KeyError) else HTTPStatus.BAD_REQUEST
-        self._send_json({"error": str(exc)}, status)
+        if isinstance(exc, ReceiverConflictError):
+            status = HTTPStatus.CONFLICT
+        elif isinstance(exc, KeyError):
+            status = HTTPStatus.NOT_FOUND
+        elif isinstance(exc, ValueError):
+            status = HTTPStatus.BAD_REQUEST
+        else:
+            status = HTTPStatus.INTERNAL_SERVER_ERROR
+        if isinstance(exc, KeyError) and exc.args and isinstance(exc.args[0], str):
+            message = exc.args[0]
+        elif isinstance(exc, (sqlite3.Error, zlib.error)):
+            message = f"Receiver storage error: {exc}"
+        else:
+            message = str(exc) or exc.__class__.__name__
+        self._send_json({"error": message}, status)
 
     def _receiver_get(self, parsed: Any) -> bool:
         path = parsed.path
@@ -1514,7 +1819,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if path == "/api/receiver/settings":
                 self._send_json(store.get_settings())
             elif path == "/api/receiver/audio-facets":
-                self._send_json(store.audio_record_facets(query.get("time_zone", [None])[0]))
+                self._send_json(store.audio_record_facets(
+                    query.get("time_zone", [None])[0],
+                    query.get("utc_offset_minutes", [None])[0],
+                ))
             elif path == "/api/receiver/records":
                 offset = _query_int(query, "offset", 0)
                 limit = _query_int(query, "limit", 100)
@@ -1526,6 +1834,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                         "time_from",
                         "time_to",
                         "time_zone",
+                        "utc_offset_minutes",
                         "min_frequency_hz",
                         "max_frequency_hz",
                         "vfo_index",
@@ -1613,7 +1922,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 else:
                     return False
             return True
-        except (ValueError, KeyError, OSError) as exc:
+        except (BrokenPipeError, ConnectionResetError):
+            # The browser cancelled the read, as it does for an audio range it no longer
+            # needs; handle() closes the connection without logging an error response.
+            raise
+        except (ValueError, KeyError, OSError, sqlite3.Error, zlib.error) as exc:
             self._receiver_error(exc)
             return True
 
@@ -1666,7 +1979,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     payload = self._read_json(4096)
                     if not isinstance(payload, dict):
                         raise ValueError("request must be a JSON object")
-                    self._send_json(store.finish_scan(parts[3], payload.get("status")))
+                    self._send_json(store.finish_scan(parts[3], payload.get("status"), payload.get("trace_upload_failures")))
                 elif path == "/api/receiver/audio-sessions":
                     self._read_optional_json()
                     self._send_json({"id": store.create_audio_session()["id"]}, HTTPStatus.CREATED)
@@ -1674,8 +1987,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     payload = self._read_json(16 * 1024)
                     self._send_json({"id": store.create_audio_segment(parts[3], payload)["id"]}, HTTPStatus.CREATED)
                 elif len(parts) == 5 and parts[:3] == ["api", "receiver", "audio-sessions"] and parts[4] == "finish":
-                    self._read_optional_json()
-                    self._send_json(store.finish_audio_session(parts[3]))
+                    payload = self._read_optional_json()
+                    if not isinstance(payload, dict):
+                        raise ValueError("request must be a JSON object")
+                    self._send_json(store.finish_audio_session(
+                        parts[3], payload.get("finalize_open_segments", False),
+                    ))
                 elif len(parts) == 5 and parts[:3] == ["api", "receiver", "audio-segments"] and parts[4] == "chunk":
                     raw = self._read_binary(1024 * 1024)
                     self._send_json(store.append_segment_audio(parts[3], raw))
@@ -1685,7 +2002,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 else:
                     return False
             return True
-        except (ValueError, KeyError, OSError) as exc:
+        except (ValueError, KeyError, OSError, sqlite3.Error, zlib.error) as exc:
             self._receiver_error(exc)
             return True
 
@@ -1705,7 +2022,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 raise KeyError("record not found")
             self._send_json({"deleted": True})
             return True
-        except (ValueError, KeyError, OSError) as exc:
+        except (ValueError, KeyError, OSError, sqlite3.Error, zlib.error) as exc:
             self._receiver_error(exc)
             return True
 
@@ -1720,6 +2037,35 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def _is_admin(self) -> bool:
         return self.console_server.is_admin_token(self._admin_token())
+
+    def _send_receiver_build_missing(self) -> None:
+        """Explain the missing embedded Receiver instead of a raw JSON 404 inside the iframe."""
+        body = (
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            "<title>Receiver not built</title><style>"
+            "body{margin:0;padding:24px;font:14px/1.5 system-ui,sans-serif;background:#0f141b;color:#dce3ea}"
+            "code{background:#1d2630;padding:1px 5px;border-radius:3px}"
+            "@media (prefers-color-scheme: light){body{background:#fafbf9;color:#202824}code{background:#e2e6e1}}"
+            "</style></head><body><h1>Receiver is not built</h1>"
+            "<p>The embedded Receiver is built separately from the console. "
+            "<code>npm run build</code> in <code>frontend</code> clears it, so build it again afterwards, "
+            "from the repository root:</p>"
+            "<pre><code>git submodule update --init --recursive\n"
+            "python tools/build_browsdr_receiver.py</code></pre>"
+            "<p>Then reload this page.</p></body></html>"
+        ).encode("utf-8")
+        self.send_response(HTTPStatus.NOT_FOUND)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'self'; form-action 'none'",
+        )
+        self.end_headers()
+        self.wfile.write(body)
 
     def _send_frontend(self, request_path: str) -> None:
         """Serve only allowlisted built UI assets, never source, dotfiles or symlinks."""
@@ -1794,6 +2140,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             path.resolve().relative_to(root.resolve())
             body = path.read_bytes()
         except (OSError, ValueError):
+            if is_receiver and relative == "receiver/index.html":
+                self._send_receiver_build_missing()
+                return
             self._send_json(
                 {"error": "Frontend build unavailable. Run npm ci and npm run build in frontend, or use --legacy-ui."},
                 HTTPStatus.NOT_FOUND,
@@ -1809,8 +2158,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if is_receiver:
             content_security_policy = (
                 "default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; "
-                "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-                "font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; "
+                "style-src 'self' 'unsafe-inline'; "
+                "font-src 'self' data:; img-src 'self' data: blob:; "
                 "media-src 'self' blob: data:; worker-src 'self' blob:; "
                 "connect-src 'self' https://cdn.jsdelivr.net https://huggingface.co https://*.huggingface.co "
                 "https://hf.co https://*.hf.co; object-src 'none'; "
@@ -1822,7 +2171,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         else:
             content_security_policy = (
                 "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-                "img-src 'self' data: https://tile.openstreetmap.de https://tile.openstreetmap.org; "
+                # blob: lets Plotly's "Download plot as a PNG" rasterize the
+                # plot it just serialized in this page.
+                "img-src 'self' data: blob: https://tile.openstreetmap.de https://tile.openstreetmap.org; "
                 "connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org; "
                 "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
             )
@@ -1871,14 +2222,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 )
                 return
             try:
-                snapshot = collect(
-                    base_url=base_url,
-                    authority="none",
-                    clock_source="remote_unverified",
-                )
-                self._send_json(snapshot)
-            except (CollectorError, ValueError, OSError) as exc:
-                self._send_json({"error": str(exc), "read_only": True}, HTTPStatus.BAD_GATEWAY)
+                snapshot = self.console_server.collect_snapshot(base_url)
+            except (CollectorError, ValueError, OSError, http.client.HTTPException) as exc:
+                self._send_json({"error": str(exc) or type(exc).__name__, "read_only": True}, HTTPStatus.BAD_GATEWAY)
+                return
+            self._send_json(snapshot)
             return
         if parsed.path == "/api/capabilities":
             self._send_json({
@@ -1889,17 +2237,21 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 "mqtt_monitor": self.console_server.mqtt_monitor is not None,
                 "admin_branding": True,
                 "admin_auth_required": True,
+                "admin_enabled": bool(ADMIN_PASSWORD),
                 "config_allowlist": sorted(CONFIG_ALLOWLIST),
+                "refresh_intervals_s": sorted(ALLOWED_REFRESH_INTERVALS),
+                "snapshot_budget_ms": int(SNAPSHOT_TOTAL_BUDGET_S * 1000),
             })
             return
         if parsed.path == "/api/console-config":
             self._send_json(self.console_server.get_config())
             return
         if parsed.path == "/api/mqtt":
-            if self.console_server.mqtt_monitor is None:
+            monitor = self.console_server.mqtt_monitor
+            if monitor is None:
                 self._send_json({"enabled": False, "read_only": True, "publish_enabled": False})
             else:
-                self._send_json(self.console_server.mqtt_monitor.snapshot())
+                self._send_json(monitor.snapshot())
             return
         if parsed.path == "/api/mqtt/rdf-node":
             monitor = self.console_server.mqtt_monitor
@@ -1932,9 +2284,22 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             try:
                 payload = self._read_json(4096)
                 password = payload.get("password") if isinstance(payload, dict) else None
+                if not ADMIN_PASSWORD:
+                    self._send_json(
+                        {
+                            "ok": False,
+                            "error": "admin login disabled: set SDR_DOA_ADMIN_PASSWORD",
+                            "code": "ADMIN_DISABLED",
+                        },
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
+                    return
                 token = self.console_server.create_admin_session(password)
                 if not token:
-                    self._send_json({"ok": False, "error": "password admin salah"}, HTTPStatus.UNAUTHORIZED)
+                    self._send_json(
+                        {"ok": False, "error": "admin password is incorrect", "code": "ADMIN_PASSWORD_INVALID"},
+                        HTTPStatus.UNAUTHORIZED,
+                    )
                     return
                 self._send_json(
                     {"ok": True, "authenticated": True},
@@ -1973,19 +2338,34 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/mqtt/connect":
             query = parse_qs(parsed.query, keep_blank_values=False)
             host = query.get("host", [""])[0].strip()
-            try:
-                port = int(query.get("port", ["9001"])[0])
-            except ValueError:
-                self._send_json({"error": "MQTT port must be numeric", "read_only": True}, HTTPStatus.BAD_REQUEST)
+            port_text = query.get("port", ["9001"])[0]
+            if _MQTT_PORT_QUERY_RE.fullmatch(port_text) is None or not (1 <= int(port_text) <= 65535):
+                self._send_json({"error": "MQTT port must be an integer from 1 to 65535", "read_only": True}, HTTPStatus.BAD_REQUEST)
                 return
-            if not host or not (1 <= port <= 65535) or not _is_allowed_mqtt_host(host):
+            port = int(port_text)
+            if not host or not _is_allowed_mqtt_host(host):
                 self._send_json({"error": "MQTT monitor host must be localhost or a valid IPv4/IPv6 address", "read_only": True}, HTTPStatus.BAD_REQUEST)
                 return
+            transport = query.get("transport", [None])[0]
+            if transport is not None and transport not in ALLOWED_MQTT_TRANSPORTS:
+                self._send_json({"error": "MQTT transport must be tcp or websockets", "read_only": True}, HTTPStatus.BAD_REQUEST)
+                return
+            ws_path = query.get("ws_path", [None])[0]
+            if ws_path is not None and not _is_allowed_mqtt_ws_path(ws_path):
+                self._send_json({"error": "MQTT WebSocket path must start with / and use only letters, digits, and ._~/-", "read_only": True}, HTTPStatus.BAD_REQUEST)
+                return
             try:
-                self.console_server.enable_mqtt_monitor(host, port)
-                self._send_json(self.console_server.mqtt_monitor.snapshot())
+                monitor = self.console_server.enable_mqtt_monitor(host, port, transport, ws_path)
+            except ValueError as exc:
+                self._send_json({"error": str(exc), "read_only": True}, HTTPStatus.BAD_REQUEST)
+                return
             except Exception as exc:  # pragma: no cover - broker-dependent
                 self._send_json({"error": str(exc), "read_only": True}, HTTPStatus.BAD_GATEWAY)
+                return
+            if isinstance(monitor, _UnavailableMqttMonitor):
+                self._send_json({"error": monitor.error, "read_only": True}, HTTPStatus.BAD_GATEWAY)
+            else:
+                self._send_json(monitor.snapshot())
             return
         if parsed.path != "/api/dry-run/config-patch":
             self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
@@ -2011,6 +2391,45 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
 
+class _Flight:
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.result: Any = None
+        self.error: Optional[BaseException] = None
+
+
+class _SingleFlight:
+    """Run at most one call per key; concurrent callers wait for its result."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._flights: Dict[str, _Flight] = {}
+
+    def run(self, key: str, produce: Callable[[], Any], wait_timeout_s: float) -> Any:
+        with self._lock:
+            flight = self._flights.get(key)
+            leader = flight is None
+            if flight is None:
+                flight = _Flight()
+                self._flights[key] = flight
+        if not leader:
+            if not flight.done.wait(wait_timeout_s):
+                raise CollectorError("snapshot collection is still in progress")
+            if flight.error is not None:
+                raise CollectorError(str(flight.error) or type(flight.error).__name__)
+            return flight.result
+        try:
+            flight.result = produce()
+            return flight.result
+        except BaseException as exc:
+            flight.error = exc
+            raise
+        finally:
+            with self._lock:
+                self._flights.pop(key, None)
+            flight.done.set()
+
+
 class GroundConsoleServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -2031,18 +2450,26 @@ class GroundConsoleServer(ThreadingHTTPServer):
         if not _is_allowed_base_url(base_url):
             raise ValueError("base_url is outside the local SDR-DoA allowlist")
         self.config_path = Path(config_path).expanduser() if config_path else DEFAULT_CONFIG_PATH
-        fallback = _default_console_config(base_url.rstrip("/"), refresh_seconds=0)
+        fallback = _default_console_config(base_url.rstrip("/"), refresh_seconds=DEFAULT_REFRESH_SECONDS)
         self._config = _validate_console_config(config, fallback) if config is not None else _load_console_config(self.config_path, fallback)
         self._config_lock = threading.RLock()
         self.mqtt_monitor = mqtt_monitor
         if mqtt_monitor is not None:
             self._config["mqtt_host"] = str(getattr(mqtt_monitor, "host", ""))
             self._config["mqtt_port"] = int(getattr(mqtt_monitor, "port", 1883))
+            transport = getattr(mqtt_monitor, "transport", None)
+            if transport in ALLOWED_MQTT_TRANSPORTS:
+                self._config["mqtt_transport"] = transport
+            ws_path = getattr(mqtt_monitor, "ws_path", None)
+            if _is_allowed_mqtt_ws_path(ws_path):
+                self._config["mqtt_ws_path"] = ws_path
         self.branding_path = Path(branding_path).expanduser() if branding_path else DEFAULT_BRANDING_PATH
         self._branding_lock = threading.RLock()
         self._branding = _load_branding(self.branding_path)
         self._session_lock = threading.RLock()
         self._admin_sessions: Dict[str, float] = {}
+        self.node_progress = NodeProgressTracker()
+        self._snapshot_flights = _SingleFlight()
         self.receiver_store = ReceiverRecordStore(
             receiver_data_dir if receiver_data_dir is not None else DEFAULT_DATA_DIR
         )
@@ -2053,6 +2480,25 @@ class GroundConsoleServer(ThreadingHTTPServer):
             self.receiver_store.close()
         finally:
             super().server_close()
+
+    def collect_snapshot(self, base_url: str) -> Dict[str, Any]:
+        """Collect once per base_url at a time; concurrent callers share it.
+
+        Each browser tick used to start its own collection while earlier ones
+        still waited on a slow node, piling up threads and GETs. Requests that
+        arrive during a collection now receive that collection's result.
+        """
+        return self._snapshot_flights.run(
+            base_url.rstrip("/"),
+            lambda: collect(
+                base_url=base_url,
+                authority="none",
+                clock_source="remote_unverified",
+                total_budget_s=SNAPSHOT_TOTAL_BUDGET_S,
+                progress_tracker=self.node_progress,
+            ),
+            SNAPSHOT_TOTAL_BUDGET_S + SNAPSHOT_WAIT_GRACE_S,
+        )
 
     @property
     def base_url(self) -> str:
@@ -2071,44 +2517,50 @@ class GroundConsoleServer(ThreadingHTTPServer):
 
     def apply_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """Persist local console config and reconcile its local MQTT monitor."""
-        with self._config_lock:
-            normalized = _validate_console_config(config, self._config)
-            old_connection = (
-                str(self._config.get("mqtt_host", "")),
-                int(self._config.get("mqtt_port", 9001)),
-                str(self._config.get("mqtt_transport", "websockets")),
-            )
-            new_host = str(normalized["mqtt_host"])
-            new_connection = (
-                new_host,
-                int(normalized["mqtt_port"]),
-                str(normalized["mqtt_transport"]),
-            )
-            monitor_changed = (
-                old_connection != new_connection
-                or bool(new_host) != (self.mqtt_monitor is not None)
-            )
-            replacement = None
-            if monitor_changed and new_host:
-                replacement = _new_mqtt_monitor(
-                    new_host,
-                    int(normalized["mqtt_port"]),
-                    str(normalized["mqtt_transport"]),
+        return self._apply_config(config, restart_monitor=False)[0]
+
+    def _apply_config(
+        self,
+        config: Dict[str, Any],
+        *,
+        restart_monitor: bool,
+    ) -> Tuple[Dict[str, Any], Optional[Any]]:
+        """Return the saved config and the monitor it selected.
+
+        ``restart_monitor`` replaces the monitor even when its target is
+        unchanged, so an operator reconnect does not wait for paho's backoff.
+        """
+        retired: Optional[Any] = None
+        try:
+            with self._config_lock:
+                normalized = _validate_console_config(config, self._config)
+                old_connection = _mqtt_connection(self._config)
+                new_connection = _mqtt_connection(normalized)
+                new_host = new_connection[0]
+                monitor_changed = (
+                    restart_monitor
+                    or old_connection != new_connection
+                    or bool(new_host) != (self.mqtt_monitor is not None)
                 )
-                replacement.start()
-            previous = self.mqtt_monitor
-            try:
-                _save_console_config(self.config_path, normalized)
-            except Exception:
-                if replacement is not None:
-                    replacement.stop()
-                raise
-            if monitor_changed:
-                if previous is not None:
-                    previous.stop()
-                self.mqtt_monitor = replacement
-            self._config = normalized
-            return dict(self._config)
+                replacement = None
+                if monitor_changed and new_host:
+                    replacement = _new_mqtt_monitor(*new_connection)
+                    replacement.start()
+                try:
+                    _save_console_config(self.config_path, normalized)
+                except Exception:
+                    retired = replacement
+                    raise
+                if monitor_changed:
+                    retired = self.mqtt_monitor
+                    self.mqtt_monitor = replacement
+                self._config = normalized
+                return dict(self._config), self.mqtt_monitor
+        finally:
+            # stop() joins the paho thread, which can take seconds while it is
+            # connecting to an unreachable broker; never hold the config lock.
+            if retired is not None:
+                retired.stop()
 
     def get_branding(self) -> Dict[str, str]:
         with self._branding_lock:
@@ -2155,13 +2607,21 @@ class GroundConsoleServer(ThreadingHTTPServer):
             with self._session_lock:
                 self._admin_sessions.pop(token, None)
 
-    def enable_mqtt_monitor(self, host: str, port: int) -> None:
+    def enable_mqtt_monitor(
+        self,
+        host: str,
+        port: int,
+        transport: Optional[str] = None,
+        ws_path: Optional[str] = None,
+    ) -> Any:
+        """Start a fresh monitor for this target and return it."""
         # Use the same validated/reconciled path as the Settings form.
-        self.apply_config({
-            **self.get_config(),
-            "mqtt_host": host,
-            "mqtt_port": port,
-        })
+        update: Dict[str, Any] = {"mqtt_host": host, "mqtt_port": port}
+        if transport is not None:
+            update["mqtt_transport"] = transport
+        if ws_path is not None:
+            update["mqtt_ws_path"] = ws_path
+        return self._apply_config({**self.get_config(), **update}, restart_monitor=True)[1]
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -2174,18 +2634,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mqtt-port", type=int, default=9001, help="MQTT broker port")
     parser.add_argument(
         "--mqtt-transport",
-        choices=("tcp", "websockets"),
+        choices=ALLOWED_MQTT_TRANSPORTS,
         default="websockets",
         help="MQTT transport for the subscriber-only monitor",
     )
+    parser.add_argument("--mqtt-ws-path", default=DEFAULT_MQTT_WS_PATH, help="MQTT WebSocket path when --mqtt-transport is websockets")
     parser.add_argument("--branding-path", default=str(DEFAULT_BRANDING_PATH), help="local branding JSON path")
     parser.add_argument("--config-path", default=str(DEFAULT_CONFIG_PATH), help="local console connection config path")
     parser.add_argument("--data-dir", default=str(DEFAULT_DATA_DIR), help="local Receiver records and audio directory")
     return parser
 
 
-def main() -> int:
-    args = _build_parser().parse_args()
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = _build_parser().parse_args(argv)
     if not (1 <= args.port <= 65535):
         raise SystemExit("port must be between 1 and 65535")
     if not _is_loopback_bind(args.bind):
@@ -2194,12 +2655,24 @@ def main() -> int:
         raise SystemExit("--mqtt-host must be empty, localhost, or a valid IPv4/IPv6 address")
     if not (1 <= args.mqtt_port <= 65535):
         raise SystemExit("--mqtt-port must be between 1 and 65535")
+    if not _is_allowed_mqtt_ws_path(args.mqtt_ws_path):
+        raise SystemExit("--mqtt-ws-path must start with / and use only letters, digits, and ._~/-")
     if not _is_allowed_base_url(args.base_url):
         raise SystemExit("--base-url is outside the local SDR-DoA allowlist")
     config_path = Path(args.config_path).expanduser()
-    fallback_config = _default_console_config(args.base_url, args.mqtt_host, args.mqtt_port, 0, mqtt_transport=args.mqtt_transport)
+    fallback_config = _default_console_config(
+        args.base_url,
+        args.mqtt_host,
+        args.mqtt_port,
+        DEFAULT_REFRESH_SECONDS,
+        mqtt_transport=args.mqtt_transport,
+        mqtt_ws_path=args.mqtt_ws_path,
+    )
     config = _load_console_config(config_path, fallback_config)
-    monitor = _new_mqtt_monitor(config["mqtt_host"], config["mqtt_port"], config["mqtt_transport"]) if config["mqtt_host"] else None
+    config = _apply_cli_overrides(config, args, _explicit_cli_options(argv))
+    monitor = _new_mqtt_monitor(*_mqtt_connection(config)) if config["mqtt_host"] else None
+    if isinstance(monitor, _UnavailableMqttMonitor):
+        print(f"MQTT monitor unavailable: {monitor.error}", flush=True)
     if monitor is not None:
         monitor.start()
     server = GroundConsoleServer(

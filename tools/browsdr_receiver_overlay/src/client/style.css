@@ -2811,6 +2811,11 @@ canvas {
 	font-size: 11px;
 }
 
+/* Options longer than one grid column, such as the source or listen mode, get two columns so the chosen text is not cut off. */
+.sweep-controls > label:has(> select.sweep-select-wide) {
+	grid-column: span 2;
+}
+
 .sweep-controls select,
 .sweep-controls input[type='number'] {
 	width: 100%;
@@ -3938,5 +3943,149 @@ canvas {
 
 	.sweep-visualization-status {
 		padding-inline: 12px;
+	}
+}
+/* Ground Console integration: disabled, simulation, recording and phone layout cues */
+.btn:disabled,
+.btn[disabled] {
+	opacity: 0.45;
+	cursor: not-allowed;
+	filter: saturate(0.55);
+}
+
+.records-header > .btn {
+	flex: 0 0 auto;
+}
+
+.sweep-simulation-badge {
+	padding: 3px 8px;
+	border: 1px solid #d99a1e;
+	border-radius: 3px;
+	background: rgba(217, 154, 30, 0.18);
+	color: #ffd277;
+	font: 700 11px 'Roboto Mono', monospace;
+	letter-spacing: 0.06em;
+}
+
+.sweep-device-state.mock {
+	color: #ffd277;
+}
+
+.sweep-simulation-watermark {
+	position: absolute;
+	top: 18px;
+	left: 50%;
+	z-index: 2;
+	transform: translateX(-50%);
+	padding: 3px 10px;
+	border: 1px solid #d99a1e;
+	border-radius: 3px;
+	background: rgba(23, 18, 6, 0.82);
+	color: #ffd277;
+	font: 700 11px 'Roboto Mono', monospace;
+	letter-spacing: 0.06em;
+	pointer-events: none;
+	white-space: nowrap;
+}
+
+.sweep-error {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 10px;
+}
+
+.sweep-error-dismiss {
+	flex: 0 0 auto;
+	width: 24px;
+	height: 24px;
+	border: 0;
+	border-radius: 3px;
+	background: transparent;
+	color: inherit;
+	font-size: 16px;
+	line-height: 1;
+	cursor: pointer;
+}
+
+.sweep-error-dismiss:hover,
+.sweep-error-dismiss:focus-visible {
+	background: rgba(255, 255, 255, 0.12);
+	outline: none;
+}
+
+/* Logical sides: the tab text runs top to bottom on the side rail and left to right on phones. */
+.workspace-rec-indicator {
+	margin-inline-start: 6px;
+	padding-block: 1px;
+	padding-inline: 5px;
+	border-radius: 3px;
+	background: #b7414d;
+	color: #fff;
+	font: 700 9px 'Roboto Mono', monospace;
+	letter-spacing: 0.05em;
+}
+
+.record-recording {
+	color: #ff9da7;
+	font-weight: 600;
+}
+
+.audio-record-warning,
+.audio-recording-notice {
+	color: #ffd277;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+	.workspace-rec-indicator {
+		animation: workspace-rec-pulse 1.6s ease-in-out infinite;
+	}
+}
+
+@keyframes workspace-rec-pulse {
+	50% {
+		opacity: 0.55;
+	}
+}
+
+@media (max-width: 600px) {
+	.records-table,
+	.records-audio-table {
+		min-width: 0;
+	}
+
+	.records-table thead {
+		display: none;
+	}
+
+	.records-table,
+	.records-table tbody,
+	.records-table tr,
+	.records-table td {
+		display: block;
+		width: 100%;
+	}
+
+	.records-table tr {
+		padding: 8px 0;
+		border-bottom: 1px solid #303949;
+	}
+
+	.records-table td {
+		padding: 4px 6px;
+		border: 0;
+	}
+
+	.records-table audio {
+		width: 100%;
+	}
+
+	.audio-record-segment {
+		flex-wrap: wrap;
+	}
+
+	.audio-record-segment .audio-record-delete-button,
+	.records-audio-table td > .btn {
+		width: 100%;
 	}
 }

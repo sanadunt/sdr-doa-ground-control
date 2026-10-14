@@ -113,11 +113,134 @@ def test_latest_value_wins() -> None:
     queue = contract.LatestValueQueue(("doa", "health"))
     for seq in range(1, 6):
         queue.put("doa", {"seq": seq})
-    assert queue.snapshot() == {"doa": {"seq": 5}}
+    queue.put("health", {"seq": 1})
+    assert queue.snapshot() == {"doa": {"seq": 5}, "health": {"seq": 1}}
     assert queue.pop("doa") == {"seq": 5}
-    assert queue.stats.accepted == 5
+    assert queue.stats.accepted == 6
     assert queue.stats.replaced == 4
+    assert queue.stats.replaced_by_stream == {"doa": 4}
     assert queue.stats.popped == 1
+
+
+def _state(**overrides: Any) -> Dict[str, Any]:
+    fields: Dict[str, Any] = {
+        "ts_ms": 1_000,
+        "config_rev": 3,
+        "running": True,
+        "frequency_hz": 433_920_000,
+        "gain_db": 24,
+        "array": "UCA",
+        "method": "MUSIC",
+        "active_vfos": 4,
+    }
+    fields.update(overrides)
+    return contract.build_state(**fields)
+
+
+def test_output_vfo_all_is_valid_and_other_negatives_are_not() -> None:
+    state = _state(output_vfo=contract.OUTPUT_VFO_ALL)
+    assert contract.decode_payload("state", contract.compact_json(state))["output_vfo"] == -1
+    reported = contract.build_config_reported(
+        ts_ms=1_000,
+        config_rev=3,
+        center_frequency_hz=433_920_000,
+        gain_db=24,
+        array="UCA",
+        method="MUSIC",
+        active_vfos=4,
+        output_vfo=-1,
+    )
+    assert reported["output_vfo"] == -1
+    try:
+        _state(output_vfo=-2)
+    except contract.ContractError:
+        pass
+    else:
+        raise AssertionError("output_vfo below -1 was accepted")
+
+
+def test_source_marker_and_health_reasons() -> None:
+    state = _state(source="synthetic")
+    assert contract.decode_payload("state", contract.compact_json(state))["source"] == "synthetic"
+    health = contract.build_health(
+        ts_ms=1_000,
+        state="STALE",
+        daq_ok=True,
+        dropped_frames=0,
+        gps_status="Disabled",
+        doa_valid=False,
+        doa_age_ms=None,
+        reasons=["STATUS_STALE", "NODE_CLOCK_STALLED"],
+    )
+    assert contract.decode_payload("health", contract.compact_json(health))["reasons"] == ["STATUS_STALE", "NODE_CLOCK_STALLED"]
+    for bad in (
+        {"reasons": "STATUS_STALE"},
+        {"reasons": ["lower_case"]},
+        {"reasons": ["A"] * 2},
+        {"reasons": [f"CODE_{index}" for index in range(contract.MAX_HEALTH_REASONS + 1)]},
+        {"source": ""},
+        {"source": "x" * (contract.MAX_SOURCE_CHARS + 1)},
+        {"telemetry_drop_count": -1},
+        {"settings_valid": "yes"},
+    ):
+        candidate = dict(health)
+        candidate.update(bad)
+        try:
+            contract.validate_payload("health", candidate)
+        except contract.ContractError:
+            pass
+        else:
+            raise AssertionError(f"invalid health accepted: {bad}")
+
+
+def test_availability_contract() -> None:
+    online = contract.build_availability(ts_ms=1_000, online=True)
+    offline = contract.build_availability(ts_ms=1_000, online=False, reason="CONNECTION_LOST")
+    assert contract.decode_payload("availability", contract.compact_json(offline)) == offline
+    assert online == {"v": 1, "ts_ms": 1_000, "online": True}
+    assert contract.kind_for_topic(contract.TOPICS["availability"]) == "availability"
+    for bad in ({"online": "false"}, {"reason": "lost connection"}, {"extra": 1}):
+        candidate = dict(offline)
+        candidate.update(bad)
+        try:
+            contract.validate_payload("availability", candidate)
+        except contract.ContractError:
+            pass
+        else:
+            raise AssertionError(f"invalid availability accepted: {bad}")
+
+
+def test_synthetic_publisher_marks_payloads_and_clears_retained() -> None:
+    import synthetic_mqtt_publisher as synthetic
+
+    payloads = synthetic._build_payloads(1_000, 1)
+    assert {kind: payload.get("source") for kind, payload in payloads.items()} == {
+        kind: "synthetic" for kind in payloads
+    }
+
+    class Info:
+        rc = 0
+
+        def wait_for_publish(self, timeout: float) -> None:
+            return None
+
+        def is_published(self) -> bool:
+            return True
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls: List[Tuple[str, bytes, int, bool]] = []
+
+        def publish(self, topic: str, payload: bytes, qos: int, retain: bool) -> Info:
+            self.calls.append((topic, payload, qos, retain))
+            return Info()
+
+    client = Client()
+    assert synthetic._clear_retained(client) is True
+    assert client.calls == [
+        (contract.TOPICS["state"], b"", 1, True),
+        (contract.TOPICS["config_reported"], b"", 1, True),
+    ]
 
 
 class Capture:
@@ -261,6 +384,10 @@ def main() -> int:
         test_invalid_contract_values_are_rejected,
         test_latest_value_wins,
         test_json_rejects_nonfinite,
+        test_output_vfo_all_is_valid_and_other_negatives_are_not,
+        test_source_marker_and_health_reasons,
+        test_availability_contract,
+        test_synthetic_publisher_marks_payloads_and_clears_retained,
     ]
     for test in tests:
         test()

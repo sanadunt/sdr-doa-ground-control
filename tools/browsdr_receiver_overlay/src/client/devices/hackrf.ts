@@ -98,8 +98,8 @@ export class HackRFDevice implements HackRFSweepDevice {
 		await this.hackrf.setBasebandFilterBandwidth(bwHz);
 	}
 
-	async startRx(callback: (data: ArrayBufferView) => void): Promise<void> {
-		await this.hackrf.startRx(callback as (data: Uint8Array) => void);
+	async startRx(callback: (data: ArrayBufferView) => void, onError?: (error: unknown) => void): Promise<void> {
+		await this.hackrf.startRx(callback as (data: Uint8Array) => void, onError);
 	}
 
 	async stopRx(): Promise<void> {

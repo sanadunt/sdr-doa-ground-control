@@ -1,11 +1,89 @@
-import type { Candidate, GpsConfig, GpsResolution, ManualGpsOverride, MapCoordinate, TelemetrySnapshot } from '../types';
+import type { Candidate, GpsConfig, GpsResolution, GpsSourceMode, ManualGpsOverride, MapCoordinate, TelemetrySnapshot } from '../types';
 
 export const DEFAULT_OSM_TILE_TEMPLATE = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
-// Public OSM-derived tile endpoint used first because some networks reject the
+// Public OSM-derived tile endpoint tried first because some networks reject the
 // main tile.openstreetmap.org host even when the browser has normal HTTPS access.
 // Both endpoints are free; neither requires an API key.
 export const FALLBACK_OSM_TILE_TEMPLATE = 'https://tile.openstreetmap.de/{z}/{x}/{y}.png';
+/**
+ * Tile hosts in the order they are tried. The map uses one host at a time:
+ * MapLibre spreads a multi-URL `tiles` array across hosts by tile index rather
+ * than retrying, which leaves a checkerboard when one host is blocked.
+ */
 export const OSM_TILE_TEMPLATES = [FALLBACK_OSM_TILE_TEMPLATE, DEFAULT_OSM_TILE_TEMPLATE] as const;
+/** Consecutive failed tiles on one host before the next host is tried. */
+export const BASEMAP_FAILURES_PER_HOST = 4;
+/** Failures right after a host switch may still come from the previous host's requests. */
+export const BASEMAP_SWITCH_GRACE_MS = 1500;
+
+export interface BasemapHealth {
+  hostIndex: number;
+  /** Consecutive failed tiles on the current host. */
+  failures: number;
+  /** Hosts that failed since the last loaded tile. */
+  hostsFailed: number;
+  /** A tile loaded on the current host since it was selected. */
+  loaded: boolean;
+  /** Every host failed since the last loaded tile. */
+  unavailable: boolean;
+  switchedAtMs: number | null;
+}
+
+export function initialBasemapHealth(hostIndex = 0): BasemapHealth {
+  return { hostIndex, failures: 0, hostsFailed: 0, loaded: false, unavailable: false, switchedAtMs: null };
+}
+
+/**
+ * Leave a failing or silent host for the next one. Once every host failed the
+ * basemap is reported unavailable, and further calls keep retrying the hosts
+ * in turn until a tile loads.
+ */
+export function nextBasemapHost(state: BasemapHealth, hostCount: number, nowMs: number): BasemapHealth {
+  const count = Math.max(1, hostCount);
+  const hostsFailed = Math.min(count, state.hostsFailed + 1);
+  return { hostIndex: (state.hostIndex + 1) % count, failures: 0, hostsFailed, loaded: false, unavailable: hostsFailed >= count, switchedAtMs: nowMs };
+}
+
+/**
+ * Count loaded and failed basemap tiles. A loaded tile clears every failure.
+ * Failures only move to the next host until all hosts failed; after that the
+ * caller's periodic check retries, so a dead network does not cause a reload loop.
+ */
+export function basemapAfterTile(state: BasemapHealth, loaded: boolean, hostCount: number, nowMs: number): BasemapHealth {
+  if (loaded) return state.loaded && state.failures === 0 && !state.unavailable ? state : { ...initialBasemapHealth(state.hostIndex), loaded: true };
+  if (state.unavailable || (state.switchedAtMs !== null && nowMs - state.switchedAtMs < BASEMAP_SWITCH_GRACE_MS)) return state;
+  const failures = state.failures + 1;
+  return failures < BASEMAP_FAILURES_PER_HOST ? { ...state, failures } : nextBasemapHost(state, hostCount, nowMs);
+}
+
+/**
+ * Basemap health when the map mounts again on Overview. A known outage carries
+ * over, so its notice shows at once instead of after the next round of tile
+ * failures; otherwise the map starts fresh on the last host that worked.
+ */
+export function resumeBasemapHealth(memory: BasemapHealth | null, preferredHost: number, hostCount: number): BasemapHealth {
+  if (memory?.unavailable) return { ...memory, failures: 0, loaded: false };
+  return initialBasemapHealth(Math.max(0, Math.trunc(preferredHost)) % Math.max(1, hostCount));
+}
+
+export interface BasemapPaint {
+  /** Map background, seen wherever no tile is drawn. */
+  background: string;
+  rings: string;
+  guides: string;
+}
+
+/**
+ * Background and reference-line colours for the console theme. OSM tiles are
+ * light in both themes, so the lines stay dark once tiles are drawn; on the
+ * dark background alone they turn light to stay readable.
+ */
+export function basemapPaint(theme: 'light' | 'dark', tilesLoaded: boolean): BasemapPaint {
+  const background = theme === 'dark' ? '#1b242d' : '#dfe4dc';
+  if (theme === 'dark' && !tilesLoaded) return { background, rings: '#c3ced8', guides: '#9aabba' };
+  return { background, rings: '#1f2d3a', guides: '#34495c' };
+}
+
 export const DEFAULT_FALLBACK_COORDINATE = Object.freeze({ latitude: -6.932468839245536, longitude: 107.66069405900005 });
 export const DEFAULT_GPS_CONFIG: GpsConfig = {
   source: 'DATA_OUT',
@@ -107,6 +185,62 @@ export function resolveGpsSource(
     label: 'DATA_OUT GPS · DEFAULT FALLBACK',
     detail: 'Data Out GPS is unavailable or invalid; using the configured fallback station location.',
   };
+}
+
+export interface HeldStation {
+  coordinate: MapCoordinate | null;
+  /** The coordinate is the last live Data Out fix, kept through a freshness gap. */
+  held: boolean;
+  lastLive: MapCoordinate | null;
+}
+
+/**
+ * A fresh, readable status record says the node has no GPS fix: its
+ * gps_status is missing, disabled or not a positive fix state. A CONFLICT, a
+ * missing DoA view or a stale record does not say that.
+ */
+export function gpsReportsNoFix(snapshot: TelemetrySnapshot | null | undefined, localFresh: boolean): boolean {
+  if (!localFresh || snapshot?.status?.available !== true) return false;
+  const raw = snapshot.status.safe?.gps_status;
+  return typeof raw !== 'string' || !GPS_POSITIVE_STATES.has(raw.trim().toLowerCase());
+}
+
+/**
+ * Keep the last live Data Out station position while the current read gives
+ * no usable coordinate (local freshness gap, failed status read, CSV/XML
+ * conflict, missing view) instead of jumping to the configured fallback
+ * position. Only a read that reports no fix (gpsReportsNoFix) drops the
+ * memory. An explicit FALLBACK or MANUAL choice is never replaced.
+ */
+export function holdStationCoordinate(
+  lastLive: MapCoordinate | null,
+  coordinate: MapCoordinate | null,
+  noFixReported: boolean,
+  selectedSource: GpsSourceMode = 'DATA_OUT',
+): HeldStation {
+  if (coordinate?.source === 'DATA_OUT') return { coordinate, held: false, lastLive: coordinate };
+  if (selectedSource !== 'DATA_OUT' || coordinate?.source !== 'FALLBACK') return { coordinate, held: false, lastLive };
+  if (noFixReported) return { coordinate, held: false, lastLive: null };
+  return lastLive ? { coordinate: lastLive, held: true, lastLive } : { coordinate, held: false, lastLive: null };
+}
+
+/** The station position source and GPS selection the camera was last framed on. */
+export interface StationFraming {
+  source: MapCoordinate['source'];
+  selection: GpsSourceMode;
+}
+
+/**
+ * Whether a new station position reframes the camera: the first position, a
+ * new GPS source selection, simulation turning on or off, or a live/manual fix
+ * that replaces the fallback. Losing a live fix to the fallback is not a
+ * reason: the camera stays and only the marker moves.
+ */
+export function shouldReframeStation(framed: StationFraming | null, next: MapCoordinate['source'], selection: GpsSourceMode): boolean {
+  if (!framed || framed.selection !== selection) return true;
+  if (next === framed.source) return false;
+  if (next === 'SIMULATION' || framed.source === 'SIMULATION') return true;
+  return framed.source === 'FALLBACK';
 }
 
 export function coordinateFromCandidate(candidate: Candidate | undefined, source: MapCoordinate['source']): MapCoordinate | null {

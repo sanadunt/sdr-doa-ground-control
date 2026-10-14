@@ -11,8 +11,8 @@ export const bookmarkMethods = {
 		this.bookmarkModal.type = type;
 		this.bookmarkModal.category = '';
 		this.bookmarkModal.name = type === 'individual'
-			? `Frequency ${count}`
-			: `Group ${count}`;
+			? `${this.t('Frequency')} ${count}`
+			: `${this.t('Group')} ${count}`;
 		this.bookmarkModal.show = true;
 		this.$nextTick(() => {
 			if (this.$refs.bookmarkNameInput) {

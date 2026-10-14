@@ -2,6 +2,8 @@
 
 Status: **Implementation and local QA complete (2026-09-25). Operational acceptance remains pending a Ground Station monitor review and live hardware/telemetry validation.**
 
+Status note 2026-10-13: parts of this plan no longer match the console. It now has seven routes (Receiver added, keys 1–7), uses no GSAP, and ships Plotly as a partial polar bundle of about 1.2 MB (PERF-01 below is historical). The 44 x 44 px touch-target acceptance was not met at 320 px in the 2026-10-12 functional audit (AUD-146: EN/ID buttons 34 x 44, Plotly modebar 44 x 22, Graph settings summary 40 px high); see `anti-slop/audit-006-2026-10-12-functional.md` for its fix status and re-measure after any change.
+
 ## Overview
 
 The goal is to make the React Ground Console responsive across phone, tablet, laptop, and wide desktop layouts while giving it a more technical, instrument-grade visual identity. The redesign must preserve the existing telemetry contracts, freshness and publication gates, read-only boundaries, MapLibre behavior, Plotly interaction state, simulation isolation, and light/dark themes.
@@ -188,7 +190,7 @@ Acceptance:
 
 ### Step 7: Verify behavior and release readiness
 
-1. Run `npm run check`, `npm test`, and `npm run build`.
+1. Run `npm run check`, `npm test`, and `npm run build:all` (`npm run build` alone deletes `frontend/dist/receiver`).
 2. Run the Python static/security regression suite after building `frontend/dist`.
 3. Browser-test all routes using the viewport/state matrix from Step 1.
 4. Check keyboard navigation, focus, theme persistence, reduced motion, 200% zoom, MapLibre gestures/settings, Plotly controls/interaction persistence, and simulation transitions.
@@ -220,4 +222,4 @@ Acceptance:
 
 ## Implementation status
 
-The responsive shell, page reflow, plot label adaptation, touch sizing, focus treatment, and technical visual tokens are implemented. Local verification evidence and the remaining hardware, zoom, map-tile, and bundle limitations are recorded in `evaluasi GUI.md` under “Refresh responsif dan visual instrumen”.
+The responsive shell, page reflow, plot label adaptation, touch sizing, focus treatment, and technical visual tokens are implemented. Touch sizing regressed later (AUD-146, see the status note at the top). Local verification evidence and the remaining hardware, zoom, map-tile, and bundle limitations are recorded in `evaluasi GUI.md` under “Refresh responsif dan visual instrumen”.

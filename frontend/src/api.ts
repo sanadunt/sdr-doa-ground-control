@@ -1,4 +1,5 @@
-import type { Branding, ConsoleConfig, MqttSnapshot, TelemetrySnapshot } from './types';
+import type { Branding, ConsoleConfig, MqttSnapshot, MqttTarget, RdfNodeSnapshot, TelemetrySnapshot } from './types';
+import { isMqttTransport, isMqttWsPath, normalizeMqttSnapshot, normalizeRdfNodeSnapshot } from './lib/mqttMonitor';
 
 export const DEFAULT_API_TIMEOUT_MS = 10_000;
 
@@ -10,9 +11,35 @@ function isObject(value: unknown): value is JsonObject {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+/** HTTP error from the local console API; `code` is the server's stable error code, when it sends one. */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+  /** The message is the server's own error text, not the generic status fallback. */
+  readonly serverMessage: boolean;
+
+  constructor(message: string, status: number, code: string | null, serverMessage = true) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+    this.serverMessage = serverMessage;
+  }
+}
+
+/** The console stored something other than what was sent, or its POST and GET answers disagree. */
+export class ConfigReadbackError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConfigReadbackError';
+  }
+}
+
 function responseError(body: unknown, status: number): Error {
-  const detail = isObject(body) && typeof body.error === 'string' && body.error.trim() ? body.error : `request failed (${status})`;
-  return new Error(detail);
+  const serverMessage = isObject(body) && typeof body.error === 'string' && body.error.trim() !== '';
+  const detail = serverMessage ? String(body.error) : `request failed (${status})`;
+  const code = isObject(body) && typeof body.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(body.code) ? body.code : null;
+  return new ApiError(detail, status, code, serverMessage);
 }
 
 async function readJson<T>(response: Response, signal?: AbortSignal): Promise<T> {
@@ -33,7 +60,7 @@ async function readJson<T>(response: Response, signal?: AbortSignal): Promise<T>
 }
 
 function timeoutReason(timeoutMs: number): Error {
-  const error = new Error(`request timed out after ${timeoutMs} ms`);
+  const error = Object.assign(new Error(`request timed out after ${timeoutMs} ms`), { timeoutMs });
   error.name = 'TimeoutError';
   return error;
 }
@@ -143,6 +170,14 @@ export function normalizeConsoleConfig(value: unknown): ConsoleConfig {
     if (!finiteNumber(value.version)) throw new Error('console config response has an invalid version');
     config.version = value.version;
   }
+  if (value.mqtt_transport !== undefined) {
+    if (!isMqttTransport(value.mqtt_transport)) throw new Error('console config response has an invalid MQTT transport');
+    config.mqtt_transport = value.mqtt_transport;
+  }
+  if (value.mqtt_ws_path !== undefined) {
+    if (!isMqttWsPath(value.mqtt_ws_path)) throw new Error('console config response has an invalid MQTT WebSocket path');
+    config.mqtt_ws_path = value.mqtt_ws_path;
+  }
   return config;
 }
 
@@ -151,6 +186,8 @@ function sameConfigValues(left: ConsoleConfig, right: ConsoleConfig): boolean {
     && left.mqtt_host === right.mqtt_host
     && left.mqtt_port === right.mqtt_port
     && left.refresh_seconds === right.refresh_seconds
+    && (left.mqtt_transport === undefined || left.mqtt_transport === right.mqtt_transport)
+    && (left.mqtt_ws_path === undefined || left.mqtt_ws_path === right.mqtt_ws_path)
     && (left.version === undefined || left.version === right.version);
 }
 
@@ -185,12 +222,12 @@ export async function updateConsoleConfig(config: ConsoleConfig, signal?: AbortS
   const readback = await getConsoleConfig(signal);
 
   if (!sameConfigValues(expected, readback)) {
-    throw new Error('console config read-back did not match the requested values');
+    throw new ConfigReadbackError('console config read-back did not match the requested values');
   }
   if (hasConfigFields(postedBody)) {
     const posted = normalizeConsoleConfig(postedBody);
     if (!sameConfigValues(posted, readback)) {
-      throw new Error('console config POST response did not match the GET read-back');
+      throw new ConfigReadbackError('console config POST response did not match the GET read-back');
     }
   }
   return readback;
@@ -254,17 +291,33 @@ export async function getMqtt(signal?: AbortSignal): Promise<MqttSnapshot> {
     cache: 'no-store',
     credentials: 'same-origin',
   }, signal);
-  if (!isObject(body)) throw new Error('MQTT response has an invalid shape');
-  return body as MqttSnapshot;
+  return normalizeMqttSnapshot(body, Date.now());
 }
 
-export async function connectMqtt(host: string, port: number, signal?: AbortSignal): Promise<MqttSnapshot> {
-  const body = await requestJson<unknown>(`/api/mqtt/connect?host=${encodeURIComponent(host)}&port=${encodeURIComponent(port)}`, {
+/** RDF Node v2 telemetry from the same subscriber connection. */
+export async function getRdfNodeMqtt(signal?: AbortSignal): Promise<RdfNodeSnapshot> {
+  const body = await requestJson<unknown>('/api/mqtt/rdf-node', {
+    cache: 'no-store',
+    credentials: 'same-origin',
+  }, signal);
+  return normalizeRdfNodeSnapshot(body, Date.now());
+}
+
+/** Query for /api/mqtt/connect. */
+export function mqttConnectPath(target: MqttTarget): string {
+  const query = new URLSearchParams({ host: target.host, port: String(target.port) });
+  if (target.transport !== undefined) query.set('transport', target.transport);
+  if (target.transport === 'websockets' && target.wsPath !== undefined) query.set('ws_path', target.wsPath);
+  return `/api/mqtt/connect?${query.toString()}`;
+}
+
+export async function connectMqtt(target: MqttTarget, signal?: AbortSignal): Promise<MqttSnapshot> {
+  const body = await requestJson<unknown>(mqttConnectPath(target), {
     method: 'POST',
     credentials: 'same-origin',
   }, signal);
   if (!isObject(body)) throw new Error('MQTT connect response has an invalid shape');
-  return body as MqttSnapshot;
+  return normalizeMqttSnapshot(body, Date.now());
 }
 
 export async function dryRunConfigPatch(payload: {
@@ -279,4 +332,30 @@ export async function dryRunConfigPatch(payload: {
   }, signal);
   if (!isObject(body)) throw new Error('dry-run response has an invalid shape');
   return body;
+}
+
+export interface ConsoleCapabilities {
+  /** Refresh intervals the server accepts, in seconds (0 = manual), or null when not reported. */
+  refreshIntervalsS: number[] | null;
+  /** Whether admin login is configured on the server, or null when not reported. */
+  adminEnabled: boolean | null;
+}
+
+export function normalizeCapabilities(value: unknown): ConsoleCapabilities {
+  const record = isObject(value) ? value : {};
+  const intervals = Array.isArray(record.refresh_intervals_s)
+    ? record.refresh_intervals_s.filter((entry): entry is number => typeof entry === 'number' && Number.isInteger(entry) && entry >= 0 && entry <= 3600).slice(0, 16)
+    : [];
+  return {
+    refreshIntervalsS: intervals.length ? [...new Set(intervals)].sort((a, b) => a - b) : null,
+    adminEnabled: typeof record.admin_enabled === 'boolean' ? record.admin_enabled : null,
+  };
+}
+
+export async function getCapabilities(signal?: AbortSignal): Promise<ConsoleCapabilities> {
+  const body = await requestJson<unknown>('/api/capabilities', {
+    cache: 'no-store',
+    credentials: 'same-origin',
+  }, signal);
+  return normalizeCapabilities(body);
 }

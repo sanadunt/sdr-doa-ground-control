@@ -7,26 +7,46 @@ import { connectionMethods } from './connection';
 import { canvasMethods, mountCanvas } from './canvas';
 import { audioMethods } from './audio';
 import { vfoMethods } from './vfo';
-import { settingsMethods } from './settings';
+import { serializeSweepSettings, settingsMethods } from './settings';
 import { bookmarkMethods } from './bookmarks';
 import { whisperMethods } from './whisper';
 import { pocsagMethods } from './pocsag';
 import { zoomMethods } from './zoom';
-import { remoteMethods } from './remote';
 import { sweepMethods } from './sweep';
 import { recordsMethods } from './records';
 import { audioRecordingMethods } from './audio-recording';
+import { receiverRecordsApi } from './receiver-records-api';
+import { i18nMethods, receiverLanguage, translateReceiver } from './i18n';
+import { setSweepCanvasTranslator } from './sweep-marker-renderer';
 
 const Backend = Comlink.wrap<any>(new Worker(new URL('../worker/main.ts', import.meta.url), { type: 'module' }));
 
-// When a new service worker takes control (after update), reload to get fresh assets
+let receiverApp: any = null;
+
+function receiverIsBusy(app: any): boolean {
+	return Boolean(app && (app.running || app.audioRecording.armed || app.audioRecording.starting
+		|| app.sweep.active || app.sweep.starting || app.sweep.stopping || app.sweep.listening || app.sweep.listenStarting));
+}
+
 if ('serviceWorker' in navigator) {
+	// The first install also fires controllerchange; only an update to an already
+	// controlled page needs fresh assets, and never in the middle of RX, a scan or a recording.
+	const hadController = Boolean(navigator.serviceWorker.controller);
 	navigator.serviceWorker.addEventListener('controllerchange', () => {
+		if (!hadController) return;
+		if (receiverIsBusy(receiverApp)) {
+			receiverApp.showMsg('Receiver update downloaded. Reload this page when RX, scanning and recording have stopped.');
+			return;
+		}
 		window.location.reload();
 	});
 }
+if ('caches' in window) {
+	// Earlier builds cached /api/ responses in the service worker; drop that cache.
+	void caches.delete('api-cache').catch(() => undefined);
+}
 
-createApp({
+receiverApp = createApp({
 	data() { return createAppData(); },
 	computed: { ...computedProperties },
 	methods: {
@@ -40,14 +60,33 @@ createApp({
 		...whisperMethods,
 		...pocsagMethods,
 		...zoomMethods,
-		...remoteMethods,
 		...sweepMethods,
 		...recordsMethods,
 		...audioRecordingMethods,
+		...i18nMethods,
 	},
 	created: async function () {
 		this.loadSetting();
+		this.loadSweepSettings();
 		this.loadBookmarks();
+		this.$watch(() => serializeSweepSettings(this.sweep), () => this.saveSweepSettings());
+
+		// The Receiver iframe is removed when the console leaves #/receiver, and a reload or
+		// closed tab never runs Vue's unmount hooks; keep what was recorded so far.
+		window.addEventListener('pagehide', () => {
+			this.finalizeVfoAudioRecordingForUnload();
+			const scanId = this.sweep.scanId as string | null;
+			if (scanId && (this.sweep.active || this.sweep.starting || this.sweep.stopping)) {
+				void receiverRecordsApi.finishScan(scanId, 'stopped', { keepalive: true }).catch(() => undefined);
+			}
+		});
+		if ('usb' in navigator) {
+			// An unplugged HackRF only shows up here; the RX transfer loop just stops.
+			(navigator.usb as USB & EventTarget).addEventListener('disconnect', (event: Event) => {
+				const device = (event as Event & { device?: USBDevice }).device;
+				if (device) void this.handleUsbDeviceLost(device);
+			});
+		}
 
 		// Track online/offline status for PWA — disables internet-dependent features when offline
 		window.addEventListener('online', () => { this.isOnline = true; });
@@ -114,8 +153,15 @@ createApp({
 			}
 
 			if (this.running && (newVals[0] !== oldVals[0] || newVals[1] !== oldVals[1])) {
-				await this.togglePlay();
-				await this.togglePlay(true);
+				const resumeRecording = this.audioRecording.armed;
+				this._rxRestarting = true;
+				try {
+					await this.togglePlay();
+					await this.togglePlay(true);
+				} finally {
+					this._rxRestarting = false;
+				}
+				if (resumeRecording) await this.resumeVfoAudioRecordingAfterRestart('the sample rate or FFT size changed');
 			}
 
 			if (this.remoteMode === 'host' && this._webrtc) {
@@ -215,8 +261,11 @@ createApp({
 			}
 			this.saveSetting();
 		}, { deep: true });
+		await this.$nextTick();
+		await this.autoConnectAuthorizedHackRF();
 	},
 	mounted() {
+		setSweepCanvasTranslator(text => translateReceiver(this.uiLanguage, text));
 		mountCanvas.call(this);
 		this.initSweepCanvas();
 	},
@@ -226,3 +275,11 @@ createApp({
 		if (this.sweep.active || this.sweep.starting) void this.stopSweep(false, 'stopped');
 	},
 }).mount('#app');
+window.addEventListener('console-language-change', (event: Event) => {
+	receiverApp.uiLanguage = receiverLanguage((event as CustomEvent<unknown>).detail);
+	if (receiverApp.activeWorkspace === 'spectrum') receiverApp.drawSweepSpectrum();
+});
+window.addEventListener('console-theme-change', () => {
+	if (receiverApp.activeWorkspace === 'spectrum') receiverApp.drawSweepSpectrum();
+	else if (receiverApp.activeWorkspace === 'listener') receiverApp.resizeFftCanvas();
+});

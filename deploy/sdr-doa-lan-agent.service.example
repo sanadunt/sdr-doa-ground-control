@@ -9,23 +9,29 @@ Wants=network-online.target
 Type=simple
 User=doasdr
 WorkingDirectory=/home/doasdr/doasdr
+# Holds SDR_DOA_MQTT_PASSWORD=<broker password> only; owner root, group doasdr, mode 0640.
+EnvironmentFile=/etc/sdr-doa-edge/agent.env
 ExecStart=/usr/bin/python3 /home/doasdr/doasdr/sdr_doa_lan_agent.py \
   --base-url http://127.0.0.1:8081 \
   --clock-source local \
   --mqtt-host 192.168.100.173 \
   --mqtt-port 18885 \
+  --mqtt-cafile /etc/sdr-doa-edge/sdr-doa-lan-ca.crt \
+  --mqtt-username sdr-doa-agent \
   --publish \
   --health-interval 1 \
   --doa-rate 0 \
   --state-interval 30 \
-  --poll-interval 0.1
+  --poll-interval 0.1 \
+  --collect-budget 2
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=read-only
 ProtectSystem=strict
-ReadWritePaths=/home/doasdr/doasdr/.sdr-doa-edge
+# Only used with --settings-path; "-" lets the unit start when it is absent.
+ReadWritePaths=-/home/doasdr/doasdr/.sdr-doa-edge
 
 [Install]
 WantedBy=multi-user.target

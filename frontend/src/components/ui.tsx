@@ -1,6 +1,8 @@
 import type { JSX, ReactNode } from 'react';
 import type { Tone } from '../types';
 import { toneFor } from '../lib/telemetry';
+import { useI18n } from '../lib/i18n';
+import { collectorErrorText } from '../lib/healthView';
 
 export function StatusBadge({ label, tone = toneFor(label) }: { label: string; tone?: Tone }): JSX.Element {
   return <span className={`status-badge status-${tone}`}><i aria-hidden="true" />{label}</span>;
@@ -65,14 +67,21 @@ export function EmptyState({ label, detail, tone = 'neutral' }: { label: string;
   );
 }
 
-export function KeyValue({ label, value, detail }: { label: string; value: ReactNode; detail?: ReactNode }): JSX.Element {
+export function KeyValue({ label, value, detail, tone }: { label: string; value: ReactNode; detail?: ReactNode; tone?: Tone }): JSX.Element {
   return (
-    <div className="key-value">
+    <div className={tone ? `key-value key-value-${tone}` : 'key-value'}>
       <span>{label}</span>
       <strong>{value}</strong>
       {detail ? <small>{detail}</small> : null}
     </div>
   );
+}
+
+/** A collector error in the UI language; the collector's own message stays in the tooltip. */
+export function CollectorError({ error }: { error: string }): JSX.Element {
+  const { t } = useI18n();
+  const view = collectorErrorText(t, error);
+  return <span title={view.raw}>{view.text}</span>;
 }
 
 export type IconName = 'overview' | 'health' | 'diagnostics' | 'configuration' | 'monitor' | 'receiver' | 'refresh' | 'lock' | 'map' | 'polar' | 'menu' | 'close' | 'sun' | 'moon' | 'chevron-left' | 'chevron-right' | 'layers' | 'expand' | 'collapse' | 'crosshair';

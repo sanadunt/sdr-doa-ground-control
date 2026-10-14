@@ -20,9 +20,134 @@ function initializeGains(
 	return gains;
 }
 
+const WEBUSB_UNAVAILABLE_MESSAGE = 'This browser has no WebUSB, so it cannot connect a HackRF. Open the console in Chrome or Edge (desktop or Android).';
+const RX_STREAM_FAILED_PREFIX = 'The radio stopped sending samples';
+
+function sameUsbDevice(a: USBDevice, b: USBDevice): boolean {
+	return a === b || (a.vendorId === b.vendorId && a.productId === b.productId
+		&& (a.serialNumber ?? '') === (b.serialNumber ?? ''));
+}
+
+/** False only when WebUSB no longer lists the radio; unknown counts as present. */
+async function usbDeviceIsPresent(device: USBDevice): Promise<boolean> {
+	if (!('usb' in navigator)) return true;
+	try {
+		return (await navigator.usb.getDevices()).some(candidate => sameUsbDevice(candidate, device));
+	} catch {
+		return true;
+	}
+}
+
+/** Hardware scan source for a newly connected radio; Simulation only when the radio cannot scan. */
+function hardwareSweepSource(capabilities: { supportsNativeSweep?: boolean; supportsManualSweep?: boolean } | null): 'native' | 'manual' | null {
+	if (capabilities?.supportsNativeSweep) return 'native';
+	if (capabilities?.supportsManualSweep) return 'manual';
+	return null;
+}
+
 export const connectionMethods = {
+	selectSweepSourceForConnectedDevice(this: AppInstance) {
+		if (this.sweep.active || this.sweep.starting || this.sweep.stopping) return;
+		const source = hardwareSweepSource(this.deviceCapabilities);
+		if (!source || this.sweep.source === source) return;
+		if (this.sweep.hasResults && this.sweep.source === 'simulated') {
+			// Keep the shown results labelled as the simulation they came from.
+			this.showMsg('Radio connected. The results shown are SIMULATION; choose the HackRF source or Clear before scanning.');
+			return;
+		}
+		this.sweep.source = source;
+	},
+
+	async handleUsbDeviceLost(this: AppInstance, device: USBDevice) {
+		// A failed RX transfer may already be stopping RX for the same unplug; let it finish first.
+		if (this._rxFailureHandling) await this._rxFailureHandling;
+		await this._handleRadioLost(device, false);
+	},
+
+	async _handleRadioLost(this: AppInstance, device: USBDevice, recordingWasArmed: boolean) {
+		const opened = this._usbDevice as USBDevice | null;
+		if (!this.connected || this.mockDevice || opened === null || !sameUsbDevice(opened, device)) return;
+		this._usbDevice = null;
+		const wasRecording = recordingWasArmed || this.audioRecording.armed;
+		try {
+			await this.stopSweepForLostRadio();
+		} catch (error) {
+			console.error('Stopping the scan after USB loss failed:', error);
+		}
+		try {
+			if (this.running) await this.togglePlay();
+		} catch (error) {
+			console.error('Stopping RX after USB loss failed:', error);
+			this.running = false;
+		}
+		try {
+			await this.backend?.close();
+		} catch (error) {
+			console.error('Closing the lost device failed:', error);
+		}
+		this.connected = false;
+		this.deviceCapabilities = null;
+		this.info.boardName = '';
+		const message = `Radio disconnected (USB unplugged or lost). RX and scanning stopped${wasRecording ? '; the recording was saved up to this point' : ''}. Reconnect the radio to continue.`;
+		this.audioRecording.notice = wasRecording ? message : this.audioRecording.notice;
+		this.sweep.error = message;
+		this.showMsg(message);
+	},
+
+	/**
+	 * The worker reports the first failed RX bulk transfer of a stream. Stop RX so the
+	 * recording is closed instead of collecting silence, then tell a lost radio apart
+	 * from one that is still attached.
+	 */
+	handleRxStreamError(this: AppInstance, streamId: number, detail: string): Promise<void> | undefined {
+		if (streamId !== this._rxStreamId || !this.running || !this.connected || this._rxFailureHandling) return undefined;
+		const handling = (async () => {
+			const device = this._usbDevice as USBDevice | null;
+			const wasRecording = Boolean(this.audioRecording.armed || this.audioRecording.starting);
+			try {
+				await this.togglePlay();
+			} catch (error) {
+				console.error('Stopping RX after a failed USB transfer failed:', error);
+				this.running = false;
+			}
+			if (device && !(await usbDeviceIsPresent(device))) {
+				await this._handleRadioLost(device, wasRecording);
+				return;
+			}
+			if (!this.connected || this._usbDevice !== device) return;
+			const message = `${RX_STREAM_FAILED_PREFIX} (${detail}). RX stopped${wasRecording ? '; the recording was saved up to this point' : ''}. Check the USB cable, then press Resume or reconnect the radio.`;
+			if (wasRecording) this.audioRecording.notice = message;
+			this.sweep.error = message;
+			this.showMsg(message);
+		})();
+		this._rxFailureHandling = handling;
+		void handling.finally(() => {
+			if (this._rxFailureHandling === handling) this._rxFailureHandling = null;
+		});
+		return handling;
+	},
+
+	async autoConnectAuthorizedHackRF(this: AppInstance) {
+		if (!this.backend || !('usb' in navigator)) return;
+		try {
+			const authorizedDevices = await navigator.usb.getDevices();
+			const hackrfDevices = authorizedDevices.filter(device => lookupDevice(device)?.type === 'hackrf');
+			if (hackrfDevices.length !== 1) return;
+			this._initAudioCtx();
+			this.showMsg('Reconnecting to previously authorized HackRF...');
+			await this.connectToDevice(hackrfDevices[0]);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.showMsg(`HackRF auto-connect failed: ${message}`);
+		}
+	},
 	async connect(this: AppInstance) {
 		if (!this.backend) return;
+		if (!('usb' in navigator)) {
+			this.sweep.error = WEBUSB_UNAVAILABLE_MESSAGE;
+			this.showMsg(WEBUSB_UNAVAILABLE_MESSAGE);
+			return;
+		}
 		this._initAudioCtx(); // create AudioContext within user gesture
 
 		// Get already-paired USB devices and filter to recognized SDR devices
@@ -70,12 +195,17 @@ export const connectionMethods = {
 			});
 			if (ok) {
 				this.connected = true;
+				this.mockDevice = false;
+				this._usbDevice = device;
+				if (this.sweep.error === WEBUSB_UNAVAILABLE_MESSAGE || this.sweep.error.startsWith('Radio disconnected')
+					|| this.sweep.error.startsWith(RX_STREAM_FAILED_PREFIX)) this.sweep.error = '';
 				const info = await this.backend.info();
 				this.info.boardName = info.name;
 
 				// Populate device capabilities for dynamic UI
 				const caps = await this.backend.getDeviceCapabilities();
 				this.deviceCapabilities = caps;
+				this.selectSweepSourceForConnectedDevice();
 				if (caps) {
 					this.gains = initializeGains(caps.gainControls, this.gains);
 
@@ -107,11 +237,14 @@ export const connectionMethods = {
 			const ok = await this.backend.open("mock");
 			if (ok) {
 				this.connected = true;
+				this.mockDevice = true;
+				this._usbDevice = null;
 				const info = await this.backend.info();
 				this.info.boardName = info.name;
 
 				const caps = await this.backend.getDeviceCapabilities();
 				this.deviceCapabilities = caps;
+				this.selectSweepSourceForConnectedDevice();
 				if (caps) {
 					this.gains = initializeGains(caps.gainControls, this.gains);
 				}
@@ -156,6 +289,8 @@ export const connectionMethods = {
 		if (this.running) await this.togglePlay();
 		await this.backend.close();
 		this.connected = false;
+		this.mockDevice = false;
+		this._usbDevice = null;
 		this.deviceCapabilities = null;
 		this.showMsg("Disconnected");
 	},
@@ -175,7 +310,17 @@ export const connectionMethods = {
 	async togglePlay(this: AppInstance, isRestart = false, sweepTransition = false) {
 		if (this.sweep.active || (this.sweep.starting && !sweepTransition)) return;
 		if (this.running) {
+			// Transfer errors from the stream being stopped are expected, not a failure.
+			this._rxStreamId = (this._rxStreamId ?? 0) + 1;
+			const wasRecording = this.audioRecording.armed || this.audioRecording.starting;
 			await this.disarmVfoAudioRecording();
+			if (wasRecording && !this._rxRestarting) {
+				// Opening Spectrum, Pause, or a lost radio all stop RX; say so instead of stopping silently.
+				this.audioRecording.notice = sweepTransition
+					? 'VFO audio recording stopped because the Spectrum scan needs the radio. Saved audio is in Records.'
+					: 'VFO audio recording stopped with the Receiver. Saved audio is in Records.';
+				this.showMsg(this.audioRecording.notice);
+			}
 			await this.backend.stopRx();
 			this.running = false;
 			if (this._statsTimer) { clearInterval(this._statsTimer); this._statsTimer = null; }
@@ -226,6 +371,7 @@ export const connectionMethods = {
 			gains: { ...this.gains },
 		};
 
+		const rxStreamId = this._rxStreamId = (this._rxStreamId ?? 0) + 1;
 		try {
 			await this.backend.startRxStream(opts,
 				Comlink.proxy((spectrumData: any) => this.drawSpectrum(spectrumData)),
@@ -234,7 +380,8 @@ export const connectionMethods = {
 					this._feedWhisperVfo(vfoIndex, freq, samples);
 					this.recordVfoAudio(vfoIndex, freq, samples);
 				}),
-				Comlink.proxy((vfoIndex: number, freq: number, msg: any) => this._onPocsagMessage(vfoIndex, freq, msg))
+				Comlink.proxy((vfoIndex: number, freq: number, msg: any) => this._onPocsagMessage(vfoIndex, freq, msg)),
+				Comlink.proxy((detail: string) => { void this.handleRxStreamError(rxStreamId, detail); }),
 			);
 		} catch (e: any) {
 			console.error('Error starting RX stream:', e);
@@ -243,6 +390,7 @@ export const connectionMethods = {
 			await this.disarmVfoAudioRecording();
 			return;
 		}
+		if (this.sweep.error.startsWith(RX_STREAM_FAILED_PREFIX)) this.sweep.error = '';
 
 		this._statsTimer = setInterval(async () => {
 			if (this.backend && this.running) {
@@ -302,12 +450,12 @@ export const connectionMethods = {
 		await this._acquireWakeLock();
 		if ('mediaSession' in navigator) {
 			navigator.mediaSession.metadata = new MediaMetadata({
-				title: 'BrowSDR',
+				title: 'Freq. Spectrum',
 				artist: 'Receiving',
 				artwork: [
-					{ src: '/icon-96.png', sizes: '96x96', type: 'image/png' },
-					{ src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
-					{ src: '/icon-512.png', sizes: '512x512', type: 'image/png' },
+					{ src: '/receiver/icon-96.png', sizes: '96x96', type: 'image/png' },
+					{ src: '/receiver/icon-192.png', sizes: '192x192', type: 'image/png' },
+					{ src: '/receiver/icon-512.png', sizes: '512x512', type: 'image/png' },
 				],
 			});
 			navigator.mediaSession.playbackState = 'playing';

@@ -27,6 +27,11 @@ describe('i18n dictionaries', () => {
     expect(translate('id', 'route.receiver.hint' as keyof typeof DICTIONARIES.en)).toBe('Spektrum dan rekaman lokal');
   });
 
+  it('keeps status-code badges untranslated', () => {
+    for (const key of ['readout.simulation', 'sim.on', 'sim.off', 'readout.live'] as const) expect(DICTIONARIES.id[key], key).toBe(DICTIONARIES.en[key]);
+    expect(DICTIONARIES.id['readout.simulation']).toBe('SIMULATION');
+  });
+
   it('interpolates named values and leaves unknown placeholders intact', () => {
     expect(translate('en', 'shell.lastRead', { age: '3 s' })).toBe('Last read 3 s');
     expect(translate('id', 'shell.lastRead', { age: '3 dtk' })).toBe('Dibaca 3 dtk lalu');

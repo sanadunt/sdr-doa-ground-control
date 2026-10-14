@@ -7,20 +7,26 @@ Raspberry endpoint, MQTT broker, or remote write path is contacted.
 
 from __future__ import annotations
 
+import atexit
 import base64
+import contextlib
+import http.client
 import http.cookiejar
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import zlib
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterator, List
+from unittest import mock
 
 TOOLS = Path(__file__).resolve().parent
 PROJECT = TOOLS.parent
@@ -31,7 +37,44 @@ import ground_console  # noqa: E402
 import sdr_doa_collector as collector  # noqa: E402
 
 
-def disk_collection(name: str) -> Dict[str, Any]:
+@contextlib.contextmanager
+def isolated_server(
+    base_url: str = "http://doasdr.local:8081",
+    *,
+    serve: bool = False,
+    **kwargs: Any,
+) -> Iterator[Any]:
+    """Run a console whose config, branding and Receiver data stay in a temp dir.
+
+    Without explicit paths the server would read and create state under the
+    developer's real ~/.config and ~/.local/share.
+    """
+    with tempfile.TemporaryDirectory(prefix="sdr-doa-stage3-") as temporary:
+        root = Path(temporary)
+        kwargs.setdefault("config_path", str(root / "console.json"))
+        kwargs.setdefault("branding_path", str(root / "branding.json"))
+        kwargs.setdefault("receiver_data_dir", root / "receiver-data")
+        server = ground_console.GroundConsoleServer(("127.0.0.1", 0), base_url, **kwargs)
+        thread = threading.Thread(target=server.serve_forever, daemon=True) if serve else None
+        try:
+            if thread is not None:
+                thread.start()
+            yield server
+        finally:
+            if thread is not None:
+                server.shutdown()
+                thread.join(timeout=5)
+            server.server_close()
+
+
+def scratch_dir(label: str) -> Path:
+    """Temporary state directory removed when the test process exits."""
+    path = tempfile.mkdtemp(prefix=f"sdr-doa-stage3-{label}-")
+    atexit.register(shutil.rmtree, path, True)
+    return Path(path)
+
+
+def fixture_fetcher(name: str) -> Any:
     root = FIXTURES / name
     assert root.is_dir(), f"fixture missing: {root}"
 
@@ -58,11 +101,15 @@ def disk_collection(name: str) -> Dict[str, Any]:
             retrieved_at_ms=1,
         )
 
+    return fetcher
+
+
+def disk_collection(name: str) -> Dict[str, Any]:
     return collector.collect(
         "http://fixture:8081",
         authority="none",
         clock_source="remote_unverified",
-        fetcher=fetcher,
+        fetcher=fixture_fetcher(name),
     )
 
 
@@ -177,113 +224,125 @@ def test_dry_run_settings_validation_has_no_apply_path() -> None:
 
 
 def test_ground_console_http_smoke_and_target_allowlist() -> None:
-    server = ground_console.GroundConsoleServer(("127.0.0.1", 0), "http://doasdr.local:8081")
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base = f"http://127.0.0.1:{server.server_address[1]}"
+    with isolated_server(serve=True) as server:
+        _http_smoke_and_target_allowlist(f"http://127.0.0.1:{server.server_address[1]}")
+
+
+def _http_smoke_and_target_allowlist(base: str) -> None:
+    with urllib.request.urlopen(base + "/", timeout=2) as response:
+        html = response.read().decode("utf-8")
+        assert response.status == 200
+        assert "SDR-DoA Ground Console" in html
+        assert "control dry-run" in html
+        assert 'id="doa-polar"' in html
+        assert "function drawPolar" in html
+        assert 'class="app-chrome"' in html
+        assert "--bg: #07140d" in html
+        assert "--accent: #39d98a" in html
+        assert "--good: #55e38c" in html
+        assert 'id="delivery-state"' in html
+        assert "refreshSequence" in html
+        assert "AbortController" in html
+        assert "setPolarUnavailable" in html
+        assert "state.polar.figType,state.polar.compassOffset" in html
+        assert "native shifted dB" in html
+        assert "canonical source angle · θ₀" in html
+        assert "plot peak / display angle" in html
+        assert "Canonical source angle (θ₀) is separate" in html
+        assert "Plotted 360-bin peak display angle" in html
+        assert "const directions=[['N',0],['E',90],['S',180],['W',270]]" in html
+        assert "const diagonalDegrees=new Set([45,135,225,315])" in html
+        assert "aria-describedby=\"polar-legend compass-detail\"" in html
+        assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in html
+        assert 'id="doa-compass"' not in html
+        # Mission-control shell and safe OSM readiness state.
+        assert 'class="nav-rail"' in html
+        assert 'id="logo-open-settings"' not in html
+        assert "logo-open-settings" not in html
+        assert "Branding saved and verified from Ground Console local storage." in html
+        assert "const verify=await fetch('/api/branding'" in html
+        assert "function setSnapshotUnavailable" in html
+        assert "Previous signal rows cleared." in html
+        assert "Previous native views cleared." in html
+        assert "Previous node health cleared." in html
+        assert "Previous map coordinates cleared after read failure." in html
+        assert 'data-nav="overview"' in html
+        assert 'data-nav="live-doa"' in html
+        assert 'data-nav="tracks-targets"' in html
+        assert 'data-nav="spectrum"' in html
+        assert 'data-nav="events"' in html
+        assert 'data-nav="system-health"' in html
+        assert 'data-nav="configuration"' in html
+        assert 'id="map-panel"' in html
+        assert 'data-map-state="waiting"' in html
+        assert "MAP NOT CONFIGURED" in html
+        assert "WAITING FOR COORDINATES" in html
+        assert 'id="map-state-badge"' in html
+        assert "UNAVAILABLE · NO POSITION FIX" in html
+        assert "REAL COORDINATES · NO MARKER" in html
+        assert "© OpenStreetMap contributors" in html
+        assert "function renderMap" in html
+        assert "if(latitude===0&&longitude===0) return null" in html
+        assert "gpsDisabled" in html
+        assert "freshnessReady" in html
+        assert "coordinateConflict" in html
+        assert "WAITING FOR CONSISTENT COORDINATES" in html
+        assert "No fresh, valid, mutually consistent latitude / longitude fields" in html
+        assert "GPS is disabled; 0/0 is treated as unset" in html
+        assert "no synthetic marker" in html
+        assert ".inspector-column .table-wrap .data-table { width: 100%; min-width: 0;" in html
+        assert ".inspector-column .table-wrap { overflow-x: visible; }" in html
+        assert "minmax(286px, 300px)" in html
+        assert "minmax(276px, 288px)" in html
+        assert 'class="detail-side-stack"' in html
+        assert "minmax(0, 1.45fr) minmax(270px, .85fr)" in html
+        assert "--subtle: #7fae89" in html
+        assert 'id="tracks-targets"' in html
+        assert 'id="event-log"' in html
+        assert 'id="health-grid"' in html
+        assert 'class="inspector-column"' in html
+        assert "@media (max-width: 700px)" in html
+        assert ".spatial-grid { grid-template-columns: 1fr; }" in html
+
+    capabilities = get_json(base + "/api/capabilities")
+    assert capabilities["read_only"] is True
+    assert capabilities["mqtt_publish"] is False
+    assert capabilities["config_apply"] is False
+
+    request = urllib.request.Request(
+        base + "/api/dry-run/config-patch",
+        data=json.dumps({"base_config_rev": 3, "changes": {"gain_db": 24}}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    dry_run = get_json(request)  # type: ignore[arg-type]
+    assert dry_run["dry_run"] is True
+    assert dry_run["applied"] is False
+    assert dry_run["transport"] == "none"
+    assert dry_run["command"]["base_config_rev"] == 3
+
+    missing_revision = urllib.request.Request(
+        base + "/api/dry-run/config-patch",
+        data=json.dumps({"changes": {"gain_db": 24}}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
     try:
-        with urllib.request.urlopen(base + "/", timeout=2) as response:
-            html = response.read().decode("utf-8")
-            assert response.status == 200
-            assert "SDR-DoA Ground Console" in html
-            assert "control dry-run" in html
-            assert 'id="doa-polar"' in html
-            assert "function drawPolar" in html
-            assert 'class="app-chrome"' in html
-            assert "--bg: #07140d" in html
-            assert "--accent: #39d98a" in html
-            assert "--good: #55e38c" in html
-            assert 'id="delivery-state"' in html
-            assert "refreshSequence" in html
-            assert "AbortController" in html
-            assert "setPolarUnavailable" in html
-            assert "state.polar.figType,state.polar.compassOffset" in html
-            assert "native shifted dB" in html
-            assert "canonical source angle · θ₀" in html
-            assert "plot peak / display angle" in html
-            assert "Canonical source angle (θ₀) is separate" in html
-            assert "Plotted 360-bin peak display angle" in html
-            assert "const directions=[['N',0],['E',90],['S',180],['W',270]]" in html
-            assert "const diagonalDegrees=new Set([45,135,225,315])" in html
-            assert "aria-describedby=\"polar-legend compass-detail\"" in html
-            assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in html
-            assert 'id="doa-compass"' not in html
-            # Mission-control shell and safe OSM readiness state.
-            assert 'class="nav-rail"' in html
-            assert 'id="logo-open-settings"' not in html
-            assert "logo-open-settings" not in html
-            assert "Branding saved and verified from Ground Console local storage." in html
-            assert "const verify=await fetch('/api/branding'" in html
-            assert "function setSnapshotUnavailable" in html
-            assert "Previous signal rows cleared." in html
-            assert "Previous native views cleared." in html
-            assert "Previous node health cleared." in html
-            assert "Previous map coordinates cleared after read failure." in html
-            assert 'data-nav="overview"' in html
-            assert 'data-nav="live-doa"' in html
-            assert 'data-nav="tracks-targets"' in html
-            assert 'data-nav="spectrum"' in html
-            assert 'data-nav="events"' in html
-            assert 'data-nav="system-health"' in html
-            assert 'data-nav="configuration"' in html
-            assert 'id="map-panel"' in html
-            assert 'data-map-state="waiting"' in html
-            assert "MAP NOT CONFIGURED" in html
-            assert "WAITING FOR COORDINATES" in html
-            assert 'id="map-state-badge"' in html
-            assert "UNAVAILABLE · NO POSITION FIX" in html
-            assert "REAL COORDINATES · NO MARKER" in html
-            assert "© OpenStreetMap contributors" in html
-            assert "function renderMap" in html
-            assert "if(latitude===0&&longitude===0) return null" in html
-            assert "gpsDisabled" in html
-            assert "freshnessReady" in html
-            assert "coordinateConflict" in html
-            assert "WAITING FOR CONSISTENT COORDINATES" in html
-            assert "No fresh, valid, mutually consistent latitude / longitude fields" in html
-            assert "GPS is disabled; 0/0 is treated as unset" in html
-            assert "no synthetic marker" in html
-            assert ".inspector-column .table-wrap .data-table { width: 100%; min-width: 0;" in html
-            assert ".inspector-column .table-wrap { overflow-x: visible; }" in html
-            assert "minmax(286px, 300px)" in html
-            assert "minmax(276px, 288px)" in html
-            assert 'class="detail-side-stack"' in html
-            assert "minmax(0, 1.45fr) minmax(270px, .85fr)" in html
-            assert "--subtle: #7fae89" in html
-            assert 'id="tracks-targets"' in html
-            assert 'id="event-log"' in html
-            assert 'id="health-grid"' in html
-            assert 'class="inspector-column"' in html
-            assert "@media (max-width: 700px)" in html
-            assert ".spatial-grid { grid-template-columns: 1fr; }" in html
+        urllib.request.urlopen(missing_revision, timeout=2)
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 400
+        body = json.loads(exc.read().decode("utf-8"))
+        assert body["ok"] is False and "base_config_rev" in body["error"]
+    else:
+        raise AssertionError("dry-run accepted a patch the edge agent would drop")
 
-        capabilities = get_json(base + "/api/capabilities")
-        assert capabilities["read_only"] is True
-        assert capabilities["mqtt_publish"] is False
-        assert capabilities["config_apply"] is False
-
-        request = urllib.request.Request(
-            base + "/api/dry-run/config-patch",
-            data=json.dumps({"changes": {"gain_db": 24}}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        dry_run = get_json(request)  # type: ignore[arg-type]
-        assert dry_run["dry_run"] is True
-        assert dry_run["applied"] is False
-        assert dry_run["transport"] == "none"
-
-        external = base + "/api/snapshot?base_url=http%3A%2F%2Fexample.com%3A8081"
-        try:
-            urllib.request.urlopen(external, timeout=2)
-        except urllib.error.HTTPError as exc:
-            assert exc.code == 400
-        else:
-            raise AssertionError("console accepted an external snapshot target")
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
+    external = base + "/api/snapshot?base_url=http%3A%2F%2Fexample.com%3A8081"
+    try:
+        urllib.request.urlopen(external, timeout=2)
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 400
+    else:
+        raise AssertionError("console accepted an external snapshot target")
 
 
 def _minimal_png() -> bytes:
@@ -342,10 +401,13 @@ def test_branding_validation_and_console_config_reload() -> None:
     fd, config_path = tempfile.mkstemp(prefix="sdr-doa-console-config-", suffix=".json")
     os.close(fd)
     os.unlink(config_path)
+    state = scratch_dir("config-reload")
     first = ground_console.GroundConsoleServer(
         ("127.0.0.1", 0),
         "http://doasdr.local:8081",
         config_path=config_path,
+        branding_path=str(state / "branding.json"),
+        receiver_data_dir=state / "receiver-data",
     )
     try:
         saved = first.update_config({
@@ -362,6 +424,8 @@ def test_branding_validation_and_console_config_reload() -> None:
         ("127.0.0.1", 0),
         "http://doasdr.local:8081",
         config_path=config_path,
+        branding_path=str(state / "branding.json"),
+        receiver_data_dir=state / "receiver-data",
     )
     try:
         assert second.get_config()["base_url"] == "http://192.168.100.100:8081"
@@ -428,6 +492,8 @@ def test_local_mqtt_restore_transition() -> None:
                 initial["base_url"],
                 config_path=str(config_path),
                 config=initial,
+                branding_path=str(Path(td) / "branding.json"),
+                receiver_data_dir=Path(td) / "receiver-data",
             )
             try:
                 saved = server.apply_config(initial)
@@ -467,6 +533,8 @@ def test_local_mqtt_disable_transition() -> None:
             mqtt_monitor=old,
             config_path=str(config_path),
             config=initial,
+            branding_path=str(Path(td) / "branding.json"),
+            receiver_data_dir=Path(td) / "receiver-data",
         )
         try:
             saved = server.apply_config({**server.get_config(), "mqtt_host": ""})
@@ -488,10 +556,13 @@ def test_local_admin_branding_session_and_loopback_guard() -> None:
     os.environ["SDR_DOA_ADMIN_PASSWORD"] = "test-only-admin-password"
     ground_console.ADMIN_PASSWORD = os.environ["SDR_DOA_ADMIN_PASSWORD"]
     try:
+        state = scratch_dir("admin")
         server = ground_console.GroundConsoleServer(
             ("127.0.0.1", 0),
             "http://doasdr.local:8081",
             branding_path=branding_path,
+            config_path=str(state / "console.json"),
+            receiver_data_dir=state / "receiver-data",
         )
     except BaseException:
         if previous_admin_password is None:
@@ -533,7 +604,10 @@ def test_local_admin_branding_session_and_loopback_guard() -> None:
 
     try:
         assert post_json("/api/admin/branding", {"app_name": "must-not-save"})[0] == 401
-        assert post_json("/api/admin/login", {"password": "wrong"})[0] == 401
+        wrong_status, wrong_body = post_json("/api/admin/login", {"password": "wrong"})
+        assert wrong_status == 401
+        assert wrong_body["code"] == "ADMIN_PASSWORD_INVALID"
+        assert get_json(base + "/api/capabilities")["admin_enabled"] is True
 
         jar = http.cookiejar.CookieJar()
         opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
@@ -567,6 +641,328 @@ def test_local_admin_branding_session_and_loopback_guard() -> None:
         assert "loopback" in str(exc)
     else:
         raise AssertionError("Ground Console accepted a non-loopback bind")
+
+
+def test_fixture_vectors_follow_upstream_peak_convention() -> None:
+    """AUD-73: fixtures put the vector peak on theta_0; one fixture keeps a mismatch."""
+    valid = disk_collection("valid")
+    csv_candidate = valid["doa_candidates"]["csv"]
+    assert csv_candidate["angular_peak_index"] == 211
+    assert csv_candidate["canonical_angle_deg"] == 211.0
+    assert csv_candidate["angular_peak_angle_consistent"] is True
+    assert "ANGULAR_PEAK_ANGLE_MISMATCH" not in valid["publication_gate"]["reasons"]
+
+    conflict = disk_collection("conflict")
+    assert conflict["doa_candidates"]["csv"]["angular_peak_angle_consistent"] is True
+    assert conflict["overall_state"] == "CONFLICT"
+
+    mismatch = disk_collection("peak-mismatch")
+    assert mismatch["doa_candidates"]["csv"]["angular_peak_index"] == 10
+    assert mismatch["doa_candidates"]["csv"]["angular_peak_angle_consistent"] is False
+    assert "ANGULAR_PEAK_ANGLE_MISMATCH" in mismatch["publication_gate"]["reasons"]
+
+
+def test_dry_run_uses_the_mqtt_contract_validator() -> None:
+    """AUD-74: a passed preview is an envelope the edge agent would accept."""
+    import sdr_doa_mqtt
+
+    result = ground_console.validate_config_patch(
+        {"base_config_rev": 0, "changes": {"center_frequency_hz": 433_920_000, "gain_db": 24.12345}},
+        now_ms=5_000,
+    )
+    assert result["validation"] == "passed"
+    assert result["contract"] == "sdr/v1 config_patch"
+    command = result["command"]
+    assert command["base_config_rev"] == 0
+    assert command["changes"]["gain_db"] == 24.123
+    sdr_doa_mqtt.validate_config_patch(command, now_ms=5_000)
+    for payload in (
+        {"changes": {"gain_db": 24}},
+        {"base_config_rev": None, "changes": {"gain_db": 24}},
+        {"base_config_rev": -1, "changes": {"gain_db": 24}},
+        {"base_config_rev": 1.5, "changes": {"gain_db": 24}},
+        {"base_config_rev": "7", "changes": {"gain_db": 24}},
+        {"base_config_rev": 7, "changes": {"gain_db": "24"}},
+        {"base_config_rev": 7, "changes": {"gain_db": True}},
+    ):
+        try:
+            ground_console.validate_config_patch(payload, now_ms=5_000)
+        except ValueError:
+            continue
+        raise AssertionError(f"dry-run accepted {payload!r}")
+
+
+def test_snapshot_requests_share_one_collection() -> None:
+    """AUD-09: concurrent /api/snapshot calls do not pile up collections."""
+    calls: List[Dict[str, Any]] = []
+    release = threading.Event()
+
+    def slow_collect(**kwargs: Any) -> Dict[str, Any]:
+        calls.append(kwargs)
+        release.wait(5)
+        return {"overall_state": "FIXTURE", "call": len(calls)}
+
+    results: List[Any] = []
+
+    def fetch(base: str) -> None:
+        try:
+            results.append(get_json(base + "/api/snapshot"))
+        except Exception as exc:  # surfaced by the assertions below
+            results.append(exc)
+
+    with mock.patch.object(ground_console, "collect", side_effect=slow_collect), isolated_server(serve=True) as server:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        threads = [threading.Thread(target=fetch, args=(base,)) for _ in range(5)]
+        for thread in threads:
+            thread.start()
+        deadline = time.monotonic() + 3
+        while not calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.2)
+        release.set()
+        for thread in threads:
+            thread.join(timeout=10)
+    assert len(calls) == 1, len(calls)
+    assert calls[0]["total_budget_s"] == ground_console.SNAPSHOT_TOTAL_BUDGET_S
+    assert isinstance(calls[0]["progress_tracker"], collector.NodeProgressTracker)
+    assert results == [{"overall_state": "FIXTURE", "call": 1}] * 5, results
+
+
+def test_snapshot_reports_malformed_http_as_json() -> None:
+    """AUD-77: a protocol error becomes a JSON 502, not a dropped connection."""
+    with mock.patch.object(ground_console, "collect", side_effect=http.client.BadStatusLine("garbage")), isolated_server(serve=True) as server:
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{server.server_address[1]}/api/snapshot", timeout=5)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 502
+            assert json.loads(exc.read().decode("utf-8"))["read_only"] is True
+        else:
+            raise AssertionError("protocol error was reported as success")
+
+
+def test_snapshot_tracks_node_progress_across_requests() -> None:
+    """AUD-02: the server keeps one tracker, so a frozen node turns STALLED."""
+    clock = [1_000.0]
+    fetcher = fixture_fetcher("valid")
+
+    def frozen_collect(**kwargs: Any) -> Dict[str, Any]:
+        return collector.collect(fetcher=fetcher, monotonic_clock=lambda: clock[0], **kwargs)
+
+    with mock.patch.object(ground_console, "collect", side_effect=frozen_collect), isolated_server(serve=True) as server:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        first = get_json(base + "/api/snapshot")
+        assert first["node_progress"]["state"] == "FIRST_SAMPLE"
+        assert first["doa_candidates"]["csv"]["freshness"]["fresh"] is True
+        clock[0] += 11
+        stalled = get_json(base + "/api/snapshot")
+    assert stalled["node_progress"]["state"] == "STALLED"
+    assert "NODE_CLOCK_STALLED" in stalled["publication_gate"]["reasons"]
+    assert stalled["doa_candidates"]["csv"]["freshness"]["fresh"] is False
+    assert stalled["overall_state"] == "STALE"
+
+
+def test_admin_login_reports_disabled_state() -> None:
+    """AUD-81: no configured password is a disabled login, not a wrong password."""
+    previous = ground_console.ADMIN_PASSWORD
+    ground_console.ADMIN_PASSWORD = None
+    try:
+        with isolated_server(serve=True) as server:
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            request = urllib.request.Request(
+                base + "/api/admin/login",
+                data=json.dumps({"password": "anything"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                urllib.request.urlopen(request, timeout=2)
+            except urllib.error.HTTPError as exc:
+                assert exc.code == 503
+                body = json.loads(exc.read().decode("utf-8"))
+                assert body["code"] == "ADMIN_DISABLED"
+                assert "SDR_DOA_ADMIN_PASSWORD" in body["error"]
+            else:
+                raise AssertionError("login succeeded without a configured password")
+            capabilities = get_json(base + "/api/capabilities")
+            assert capabilities["admin_enabled"] is False
+            assert capabilities["refresh_intervals_s"] == [0, 1, 2, 5, 10, 30]
+            assert capabilities["snapshot_budget_ms"] == 4_000
+    finally:
+        ground_console.ADMIN_PASSWORD = previous
+
+
+def test_refresh_intervals_include_sub_window_values() -> None:
+    """AUD-24: 1 s and 2 s are shorter than the 5 s DoA window; 2 s is the new default."""
+    base = ground_console._default_console_config()
+    assert base["refresh_seconds"] == 2
+    for seconds in (0, 1, 2, 5, 10, 30):
+        assert ground_console._validate_console_config({**base, "refresh_seconds": seconds})["refresh_seconds"] == seconds
+    for seconds in (3, 4, -1, 60):
+        try:
+            ground_console._validate_console_config({**base, "refresh_seconds": seconds})
+        except ValueError:
+            continue
+        raise AssertionError(f"refresh interval accepted: {seconds}")
+    with isolated_server() as server:
+        assert server.get_config()["refresh_seconds"] == 2
+
+
+def test_console_config_keeps_valid_fields_and_backs_up_invalid_file() -> None:
+    """AUD-84: one bad field no longer discards every saved setting."""
+    warnings: List[str] = []
+    state = scratch_dir("config-fields")
+    path = state / "console.json"
+    path.write_text(json.dumps({
+        "version": 1,
+        "base_url": "http://192.168.100.100:8081",
+        "mqtt_host": "not a host",
+        "mqtt_port": 1883,
+        "refresh_seconds": 10,
+    }), encoding="utf-8")
+    loaded = ground_console._load_console_config(path, log=warnings.append)
+    assert loaded["base_url"] == "http://192.168.100.100:8081"
+    assert loaded["mqtt_port"] == 1883
+    assert loaded["refresh_seconds"] == 10
+    assert loaded["mqtt_host"] == ground_console._default_console_config()["mqtt_host"]
+    assert any("mqtt_host" in message and "not a host" not in message for message in warnings), warnings
+    backup = state / "console.json.invalid.bak"
+    assert backup.read_text(encoding="utf-8") == path.read_text(encoding="utf-8")
+
+    warnings.clear()
+    path.write_text('{"base_url": "http://192.168.100.100:8081",}', encoding="utf-8")
+    assert ground_console._load_console_config(path, log=warnings.append) == ground_console._default_console_config()
+    assert any("not valid JSON at line 1" in message for message in warnings), warnings
+    assert backup.read_text(encoding="utf-8") == path.read_text(encoding="utf-8")
+
+    warnings.clear()
+    missing = ground_console._load_console_config(state / "absent.json", log=warnings.append)
+    assert missing == ground_console._default_console_config()
+    assert warnings == []
+
+
+def test_explicit_cli_flags_override_saved_console_config() -> None:
+    """AUD-82: a typed --base-url wins over console.json for this run."""
+    saved = ground_console._default_console_config("http://doasdr.local:8081", "127.0.0.1", 1883, 10)
+    argv = ["--base-url", "http://192.168.100.100:8081", "--mqtt-host", ""]
+    args = ground_console._build_parser().parse_args(argv)
+    explicit = ground_console._explicit_cli_options(argv)
+    assert {"base_url", "mqtt_host"} <= explicit
+    assert "mqtt_port" not in explicit
+    notices: List[str] = []
+    merged = ground_console._apply_cli_overrides(saved, args, explicit, log=notices.append)
+    assert merged["base_url"] == "http://192.168.100.100:8081"
+    assert merged["mqtt_host"] == ""
+    assert merged["mqtt_port"] == 1883
+    assert merged["refresh_seconds"] == 10
+    assert len(notices) == 2, notices
+    untouched = ground_console._apply_cli_overrides(saved, ground_console._build_parser().parse_args([]), ground_console._explicit_cli_options([]))
+    assert untouched == saved
+
+
+def test_legacy_ui_bounds_requests_and_expires_locally() -> None:
+    """AUD-28/AUD-85/AUD-24: legacy page times out, ages out data, hides empty logos."""
+    html = ground_console.HTML
+    assert "const REQUEST_TIMEOUT_MS=8000;" in html
+    assert "function scheduleLocalExpiry(snapshot)" in html
+    assert "render(data); scheduleLocalExpiry(data);" in html
+    assert "if(auto&&state.refreshController) return;" in html
+    assert "setInterval(()=>refresh({auto:true}),interval*1000)" in html
+    assert "[hidden] { display: none !important; }" in html
+    assert '<option value="1">Every 1 second</option><option value="2">Every 2 seconds</option>' in html
+
+
+def test_legacy_ui_reads_cleared_mqtt_entries_and_new_gate_reasons() -> None:
+    """A retained clear (valid:false, cleared:true) is CLEARED, not INVALID, on the legacy page."""
+    html = ground_console.HTML
+    assert "function mqttContract(entry) { return entry.cleared===true?'CLEARED':(entry.valid===true?'VALID':'INVALID'); }" in html
+    assert "['Retained clears',esc(cleared)]" in html
+    assert "cleared=mqttCount(data?.cleared)" in html
+    for reason in ("NODE_CLOCK_STALLED", "ADC_OVERDRIVE", "NATIVE_ANGLE_INVALID", "NATIVE_ANGLE_UNCHECKED"):
+        assert f"  {reason}:'" in html, reason
+    assert "adjacent frames, angles not cross-checked" in html
+
+
+def test_legacy_polar_orientation_matches_the_react_renderer() -> None:
+    """Legacy Polar runs counter-clockwise; Linear keeps compass_offset on a Compass axis."""
+    node = shutil.which("node")
+    if node is None:
+        print("SKIP test_legacy_polar_orientation_matches_the_react_renderer: node not found")
+        return
+    html = ground_console.HTML
+    sources = []
+    for name in ("polarSettings", "normalizeDegrees", "polarDisplayAngle", "polarScreenAngle"):
+        start = html.index(f"function {name}(")
+        sources.append(html[start:html.index("\n", start)])
+    script = "\n".join(sources) + r"""
+const cases = [['Polar', 30], ['polar', 0], ['Compass', 30], ['Linear', 30], ['', 0], [undefined, 'x'], ['Compass', true]];
+const out = cases.map(([type, offset]) => {
+  const settings = polarSettings(type, offset);
+  return { settings, screen: polarScreenAngle(60, settings), display: polarDisplayAngle(60, settings) };
+});
+process.stdout.write(JSON.stringify(out));
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=20, check=True)
+    polar, polar_lower, compass, linear, empty, junk, boolean = json.loads(result.stdout)
+    # React screenAngleForBin/displayAngleForBin for theta_0 bin 60.
+    assert polar == {"settings": {"figType": "Polar", "compassOffset": 30, "localAxis": False}, "screen": 300, "display": 60}
+    assert polar_lower["settings"]["figType"] == "Polar" and polar_lower["screen"] == 300
+    assert compass == {"settings": {"figType": "Compass", "compassOffset": 30, "localAxis": False}, "screen": 330, "display": 330}
+    assert linear == {"settings": {"figType": "Compass", "compassOffset": 30, "localAxis": True}, "screen": 330, "display": 330}
+    assert empty["settings"] == {"figType": "Compass", "compassOffset": 0, "localAxis": True} and empty["screen"] == 300
+    assert junk["settings"]["compassOffset"] == 0 and boolean["settings"]["compassOffset"] == 0
+    assert "const point=(value,index)=>{ const radians=toRadians(polarScreenAngle(index,settings))" in html
+    assert "ctx.lineTo(Math.cos(toRadians(peakScreen))*(maxR+12)" in html
+    assert "const axisLabels=compass?directions:[['0°',0],['90°',90],['180°',180],['270°',270]]" in html
+    assert "'Data Out offset · local Compass axis'" in html
+
+
+def _png(width: int, height: int, bit_depth: int, color_type: int, interlace: int = 0, palette: bytes = b"") -> bytes:
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color_type]
+    bits = channels * bit_depth
+    raw = b""
+    for pass_width, pass_height in ground_console._png_pass_sizes(width, height, interlace == 1):
+        if pass_width and pass_height:
+            raw += (b"\x00" + b"\x01" * ((pass_width * bits + 7) // 8)) * pass_height
+    ihdr = struct.pack(">IIBBBBB", width, height, bit_depth, color_type, 0, 0, interlace)
+    body = chunk(b"IHDR", ihdr)
+    if palette:
+        body += chunk(b"PLTE", palette)
+    body += chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+    return b"\x89PNG\r\n\x1a\n" + body
+
+
+def test_logo_validator_accepts_standard_png_variants() -> None:
+    """AUD-80: palette, 16-bit and interlaced PNGs are valid logos."""
+    accepted = {
+        "palette": _png(5, 3, 8, 3, palette=bytes(range(6))),
+        "palette-2bit": _png(9, 2, 2, 3, palette=bytes(12)),
+        "rgba16": _png(4, 4, 16, 6),
+        "gray1": _png(9, 1, 1, 0),
+        "interlaced-rgb": _png(9, 7, 8, 2, interlace=1),
+        "interlaced-palette": _png(3, 3, 4, 3, interlace=1, palette=bytes(9)),
+    }
+    for name, png in accepted.items():
+        data_url = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+        try:
+            ground_console._normalize_logo_data_url(data_url)
+        except ValueError as exc:
+            raise AssertionError(f"{name} rejected: {exc}") from exc
+    rejected = {
+        "palette-missing": _png(2, 2, 8, 3),
+        "palette-too-large": _png(2, 2, 1, 3, palette=bytes(9)),
+        "gray-with-palette": _png(2, 2, 8, 0, palette=bytes(3)),
+        "rgb-4bit": _png(2, 2, 4, 2),
+    }
+    for name, png in rejected.items():
+        data_url = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+        try:
+            ground_console._normalize_logo_data_url(data_url)
+        except ValueError:
+            continue
+        raise AssertionError(f"{name} accepted")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_SIMULATION, simulationSnapshot, validateSimulation, randomizeSimulationSettings, simulationRayEnd } from './simulation';
-import { polarView } from './polar';
+import { DEFAULT_SIMULATION, simulationHalfPowerWidth, simulationSnapshot, simulationTheta, validateSimulation, randomizeSimulationSettings, simulationRayEnd } from './simulation';
+import { halfPowerWidth } from './doaGeometry';
+import { translate } from './i18n';
+import { bearingForView, geographicBearingForBin, polarView } from './polar';
+import { overviewDoaStatus } from './doaStatus';
 
 describe('local simulation', () => {
   it('randomizes valid angles and shapes without moving the station', () => {
@@ -18,7 +21,21 @@ describe('local simulation', () => {
   it('changes the curve shape when lobe width changes', () => {
     const narrow = polarView(simulationSnapshot({ ...DEFAULT_SIMULATION, width: 5 }));
     const wide = polarView(simulationSnapshot({ ...DEFAULT_SIMULATION, width: 60 }));
-    expect(narrow.values?.[65]).toBeLessThan(wide.values?.[65] ?? 0);
+    const offPeak = (simulationTheta(DEFAULT_SIMULATION.angle) + 20) % 360;
+    expect(narrow.values?.[offPeak]).toBeLessThan(wide.values?.[offPeak] ?? 0);
+  });
+  it.each([0, 45, 90, 180, 270, 315, 359])('reads the entered bearing %s the same on the readout, polar plot and map', angle => {
+    const snapshot = simulationSnapshot({ ...DEFAULT_SIMULATION, angle });
+    const view = polarView(snapshot);
+    const theta = simulationTheta(angle);
+    expect(snapshot.settings?.fields).toEqual({ doa_fig_type: 'Compass', compass_offset: 0 });
+    expect(snapshot.doa_candidates?.csv.canonical_angle_deg).toBe(theta);
+    // Peak bin is theta_0 (upstream convention), as on a live node.
+    expect(view.peakIndex).toBe(theta);
+    expect(bearingForView(view)).toBe(angle);
+    expect(view.displayPeak).toBe(angle);
+    expect(geographicBearingForBin(theta, 0)).toBe(angle);
+    expect(overviewDoaStatus(snapshot, true).shown).toBe(true);
   });
   it.each([[0, 1, 0], [90, 0, 1], [180, -1, 0], [270, 0, -1]])('projects compass bearing %s', (bearing, north, east) => {
     const [lat, lon] = simulationRayEnd(0, 0, bearing);
@@ -47,5 +64,24 @@ describe('local simulation', () => {
     const b = simulationSnapshot(DEFAULT_SIMULATION);
     expect(a.doa_candidates?.csv.angular_power_db).not.toBe(b.doa_candidates?.csv.angular_power_db);
     expect(DEFAULT_SIMULATION.angle).toBe(45);
+  });
+});
+
+describe('simulation lobe spread', () => {
+  it.each([5, 18, 20, 33, 60])('shows the same -3 dB width as the map legend for sigma %s', (width) => {
+    const settings = { ...DEFAULT_SIMULATION, width };
+    const legend = halfPowerWidth(simulationSnapshot(settings).doa_candidates?.csv.angular_power_db ?? []);
+    expect(simulationHalfPowerWidth(settings)).toBe(legend?.widthDeg);
+  });
+
+  it('is a Gaussian sigma, so the -3 dB width is about 0.74 of it', () => {
+    expect(simulationHalfPowerWidth({ ...DEFAULT_SIMULATION, width: 20 })).toBe(15);
+    expect(simulationHalfPowerWidth({ ...DEFAULT_SIMULATION, width: 0 })).toBeNull();
+  });
+
+  it('names the field a spread (sigma), not a width, in both languages', () => {
+    expect(translate('en', 'sim.width')).toContain('σ');
+    expect(translate('id', 'sim.width')).toContain('σ');
+    expect(translate('id', 'sim.widthHalfPower', { width: 15 })).toBe('Lebar −3 dB di legenda peta: 15°.');
   });
 });

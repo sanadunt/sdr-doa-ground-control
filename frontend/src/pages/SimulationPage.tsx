@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { SimulationSettings } from '../lib/simulation';
-import { validateSimulation } from '../lib/simulation';
+import { simulationHalfPowerWidth, validateSimulation } from '../lib/simulation';
 import { useI18n } from '../lib/i18n';
 import type { MessageKey } from '../lib/i18n';
 import { Panel, SectionHeading, StatusBadge } from '../components/ui';
@@ -20,6 +20,10 @@ export function SimulationPage({ enabled, automatic, settings, onEnabled, onAuto
   const { t } = useI18n();
   const [draft, setDraft] = useState({ latitude: String(settings.latitude), longitude: String(settings.longitude), angle: String(settings.angle), width: String(settings.width) });
   const [message, setMessage] = useState<MessageKey | null>(null);
+  // The field is a Gaussian σ; show the -3 dB width it gives, as the map legend reports it.
+  const activeHalfPower = simulationHalfPowerWidth(settings);
+  const draftSigma = draft.width.trim() === '' ? Number.NaN : Number(draft.width);
+  const draftHalfPower = simulationHalfPowerWidth({ ...settings, width: draftSigma });
   return <div className="page">
     <SectionHeading eyebrow={t('sim.eyebrow')} title={t('sim.title')} detail={t('sim.detail')} />
     <Panel title={t('sim.controlTitle')} eyebrow={t('sim.controlEyebrow')} action={<StatusBadge label={enabled ? t('sim.on') : t('sim.off')} tone={enabled ? 'warn' : 'neutral'} />}>
@@ -31,7 +35,7 @@ export function SimulationPage({ enabled, automatic, settings, onEnabled, onAuto
           <button type="button" className="primary-button" onClick={onOverview}>{t('sim.viewOverview')}</button>
         </div>
         <label className="simulation-toggle"><input type="checkbox" checked={automatic} disabled={!enabled} onChange={event => onAutomatic(event.target.checked)} /> {t('sim.auto')}</label>
-        <p className="simulation-active">{t('sim.active', { angle: settings.angle, width: settings.width, lat: settings.latitude.toFixed(6), lon: settings.longitude.toFixed(6) })}</p>
+        <p className="simulation-active">{t('sim.active', { angle: settings.angle, width: settings.width, halfPower: activeHalfPower ?? '—', lat: settings.latitude.toFixed(6), lon: settings.longitude.toFixed(6) })}</p>
       </div>
     </Panel>
     <Panel title={t('sim.scenarioTitle')} eyebrow={t('sim.scenarioEyebrow')}>
@@ -42,7 +46,7 @@ export function SimulationPage({ enabled, automatic, settings, onEnabled, onAuto
         onSettings(next); onAutomatic(false); setMessage('sim.applied');
       }}>
         <div className="form-grid">
-          {SCENARIO_FIELDS.map(field => <label className="form-field" key={field.key}><span>{t(field.label)}</span><input required type="number" min={field.min} max={field.max} step={field.step} value={draft[field.key]} onChange={event => setDraft({ ...draft, [field.key]: event.target.value })} /></label>)}
+          {SCENARIO_FIELDS.map(field => <label className="form-field" key={field.key}><span>{t(field.label)}</span><input required type="number" min={field.min} max={field.max} step={field.step} value={draft[field.key]} onChange={event => setDraft({ ...draft, [field.key]: event.target.value })} />{field.key === 'width' ? <small>{t('sim.widthHelp')}{draftHalfPower !== null ? ` ${t('sim.widthHalfPower', { width: draftHalfPower })}` : ''}</small> : null}</label>)}
         </div>
         <p>{t('sim.shapeNote')}</p>
         <button className="primary-button" type="submit">{t('sim.apply')}</button>

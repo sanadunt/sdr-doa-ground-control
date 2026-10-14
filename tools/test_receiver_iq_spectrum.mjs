@@ -30,3 +30,44 @@ test('spectrum starts with the pinned FFT and removes DC without erasing an off-
     correctedFft.free();
   }
 });
+
+test('DC correction removes a fractional offset instead of rounding it to whole LSBs (AUD-64)', async () => {
+	const { processSpectrumFft } = await import('./browsdr_receiver_overlay/src/client/worker/iq-spectrum.ts');
+	const size = 8192;
+	const window = new Float32Array(size);
+	for (let i = 0; i < size; i++) window[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (size - 1)));
+	let state = 12345;
+	const unit = () => {
+		state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+		return (state + 0.5) / 0x1_0000_0000;
+	};
+	const gauss = () => Math.sqrt(-2 * Math.log(unit())) * Math.cos(2 * Math.PI * unit());
+	const frames = 16;
+	const averagePower = correctDc => {
+		const fft = new FFT(size, window);
+		const output = new Float32Array(size);
+		const power = new Float64Array(size);
+		try {
+			for (let frame = 0; frame < frames; frame++) {
+				const raw = new Int8Array(size * 2);
+				for (let i = 0; i < size; i++) {
+					raw[2 * i] = Math.max(-128, Math.min(127, Math.round(3 * gauss() + 0.45)));
+					raw[2 * i + 1] = Math.max(-128, Math.min(127, Math.round(3 * gauss() - 0.4)));
+				}
+				processSpectrumFft(fft, raw, output, correctDc);
+				for (let i = 0; i < size; i++) power[i] += 10 ** (output[i] / 10) / frames;
+			}
+		} finally {
+			fft.free();
+		}
+		const db = Array.from(power, value => 10 * Math.log10(value));
+		const median = db.slice().sort((a, b) => a - b)[size >> 1];
+		return { centre: db[size / 2] - median, median };
+	};
+	const uncorrected = averagePower(false);
+	const corrected = averagePower(true);
+	assert.ok(uncorrected.centre > 15, `uncorrected DC spike ${uncorrected.centre.toFixed(1)} dB`);
+	// Rounding the mean to whole LSBs left about +21 dB here.
+	assert.ok(corrected.centre < 3, `corrected DC bin ${corrected.centre.toFixed(1)} dB above the noise median`);
+	assert.ok(corrected.median - uncorrected.median < 0.3, 'the noise floor is essentially unchanged');
+});

@@ -2,7 +2,6 @@ import type {
   Candidate,
   DataState,
   Freshness,
-  MqttEntry,
   NativeConsistency,
   TelemetrySnapshot,
   Tone,
@@ -12,8 +11,12 @@ export const DEFAULT_CONSOLE_CONFIG = {
   base_url: 'http://doasdr.local:8081',
   mqtt_host: '10.90.0.1',
   mqtt_port: 9001,
-  refresh_seconds: 0,
+  // Same as the server default for a fresh install; 0 means manual refresh.
+  refresh_seconds: 2,
 };
+
+/** Refresh intervals accepted by /api/console-config, in seconds (0 = manual). */
+export const REFRESH_INTERVALS_S: readonly number[] = [0, 1, 2, 5, 10, 30];
 
 export function candidate(snapshot: TelemetrySnapshot | null | undefined, name: 'csv' | 'xml'): Candidate {
   return snapshot?.doa_candidates?.[name] ?? {};
@@ -28,18 +31,20 @@ export function formatNumber(value: unknown, digits = 1): string {
   return number === null ? 'N/A' : number.toFixed(digits);
 }
 
-export function formatAge(freshness: Freshness | null | undefined): string {
-  if (!freshness) return 'clock unverified';
-  if (freshness.age_ms === null || freshness.age_ms === undefined || typeof freshness.age_ms !== 'number' || !Number.isFinite(freshness.age_ms) || freshness.age_ms < 0) {
-    return 'clock unverified';
-  }
-  return `${(freshness.age_ms / 1000).toFixed(1)} s`;
+/**
+ * A view that parsed with a usable canonical angle. A quarantined view keeps
+ * available=true but carries normalization_error and no angle.
+ */
+export function parsedCandidate(value: Candidate | undefined): boolean {
+  return value?.available === true
+    && !Object.prototype.hasOwnProperty.call(value, 'normalization_error')
+    && numberOrNull(value.canonical_angle_deg) !== null;
 }
 
 export function freshCandidate(value: Candidate | undefined): boolean {
   const age = value?.freshness?.age_ms;
-  return value?.available === true
-    && value.freshness?.fresh === true
+  return parsedCandidate(value)
+    && value?.freshness?.fresh === true
     && typeof age === 'number'
     && Number.isFinite(age)
     && age >= 0;
@@ -66,21 +71,89 @@ export function polarDataReady(snapshot: TelemetrySnapshot | null | undefined): 
   return nativeViewsReady(snapshot) && completeVector(csv);
 }
 
-export function deriveDataState(snapshot: TelemetrySnapshot | null | undefined, error = false): DataState {
+/**
+ * DAQ sync state of a readable status record, or null when there is none to
+ * judge. A record without daq_health counts as UNKNOWN, as it does for the
+ * collector's gate: the collector always reports it.
+ */
+export function daqSyncState(snapshot: TelemetrySnapshot | null | undefined): 'PASS' | 'FAIL' | 'UNKNOWN' | null {
+  if (snapshot?.status?.available !== true) return null;
+  const health = snapshot.status.daq_health;
+  if (health === 'PASS') return 'PASS';
+  if (typeof health !== 'string' || health.trim() === '' || health === 'UNKNOWN') return 'UNKNOWN';
+  return 'FAIL';
+}
+
+/** The node reported failed DAQ synchronization. */
+export function daqFailed(snapshot: TelemetrySnapshot | null | undefined): boolean {
+  return daqSyncState(snapshot) === 'FAIL';
+}
+
+/** The node's DAQ sync state is unknown: some sync flags or daq_health are missing. */
+export function daqUnknown(snapshot: TelemetrySnapshot | null | undefined): boolean {
+  return daqSyncState(snapshot) === 'UNKNOWN';
+}
+
+export function adcOverdriven(snapshot: TelemetrySnapshot | null | undefined): boolean {
+  return snapshot?.publication_gate?.checks?.adc_not_overdriven === false;
+}
+
+/** The collector saw the node's status timestamp, uptime or frame index stop advancing. */
+export function nodeStalled(snapshot: TelemetrySnapshot | null | undefined): boolean {
+  if (!snapshot) return false;
+  const progress = snapshot.node_progress;
+  if (progress !== null && typeof progress === 'object' && progress.stalled === true) return true;
+  return [candidate(snapshot, 'csv'), candidate(snapshot, 'xml')].some((value) => value.freshness?.node_stalled === true);
+}
+
+/** Error text of each DoA view that could not be used, e.g. 'XML: HTTP 404', bounded for a tooltip. */
+export function candidateErrors(snapshot: TelemetrySnapshot | null | undefined): string[] {
+  const errors: string[] = [];
+  for (const name of ['csv', 'xml'] as const) {
+    const view = candidate(snapshot, name);
+    const detail = view.available === true ? view.normalization_error_detail : view.error;
+    if (!parsedCandidate(view) && typeof detail === 'string' && detail.trim()) {
+      errors.push(`${name.toUpperCase()}: ${detail.trim().slice(0, 160)}`);
+    }
+  }
+  return errors;
+}
+
+/** Every DoA view failed at the read itself (transport, HTTP status, deadline), not at parsing. */
+function doaReadsFailed(snapshot: TelemetrySnapshot): boolean {
+  const resources = snapshot.resources;
+  if (!resources || typeof resources !== 'object') return false;
+  return ['/DOA_value.html', '/doa.xml'].every((path) => {
+    const resource = resources[path];
+    return resource !== null && typeof resource === 'object' && resource.ok === false;
+  });
+}
+
+/**
+ * Classify a snapshot in the collector's overall_state order, so a broken or
+ * unreachable source is never shown as old data. STALE is used only when the
+ * snapshot itself says the DoA output is old, or when an otherwise usable
+ * snapshot has outlived its local freshness window.
+ */
+export function deriveDataState(snapshot: TelemetrySnapshot | null | undefined, error = false, localFresh = true): DataState {
   if (error) return 'ERROR';
   if (!snapshot) return 'LOADING';
-  if (snapshot.native_consistency?.conflict === true) return 'CONFLICT';
   if (snapshot.status?.available !== true) return 'UNAVAILABLE';
-  if (snapshot.status?.daq_health && snapshot.status.daq_health !== 'PASS') return 'DEGRADED';
-  if (!nativeViewsReady(snapshot)) return 'STALE';
-  return 'AVAILABLE';
+  if (daqSyncState(snapshot) !== 'PASS' || adcOverdriven(snapshot)) return 'DEGRADED';
+  const views = [candidate(snapshot, 'csv'), candidate(snapshot, 'xml')];
+  const parsed = views.filter(parsedCandidate);
+  if (parsed.length === 0) return doaReadsFailed(snapshot) ? 'UNAVAILABLE' : 'INVALID';
+  if (snapshot.native_consistency?.conflict === true) return 'CONFLICT';
+  if (nodeStalled(snapshot) || !parsed.some(freshCandidate)) return 'STALE';
+  if (!nativeViewsReady(snapshot)) return 'INCOMPLETE';
+  return localFresh ? 'AVAILABLE' : 'STALE';
 }
 
 export function toneFor(value: unknown): Tone {
   const normalized = String(value ?? '').toUpperCase();
-  if (['LIVE', 'PASS', 'READY', 'CONNECTED', 'AVAILABLE', 'VERIFIED', 'GOOD'].includes(normalized)) return 'good';
-  if (['DEGRADED', 'STALE', 'CONFLICT', 'BLOCKED', 'FAIL', 'ERROR', 'UNAVAILABLE', 'INVALID'].includes(normalized)) return 'bad';
-  if (['WAITING', 'UNKNOWN', 'NOT CONFIGURED', 'NOT_READY', 'DISCONNECTED', 'OFF'].includes(normalized)) return 'warn';
+  if (['LIVE', 'PASS', 'READY', 'CONNECTED', 'AVAILABLE', 'VERIFIED', 'GOOD', 'CURRENT'].includes(normalized)) return 'good';
+  if (['DEGRADED', 'STALE', 'CONFLICT', 'BLOCKED', 'FAIL', 'ERROR', 'UNAVAILABLE', 'INVALID', 'STALLED', 'OVERDRIVE'].includes(normalized)) return 'bad';
+  if (['WAITING', 'UNKNOWN', 'NOT CONFIGURED', 'NOT_READY', 'DISCONNECTED', 'OFF', 'INCOMPLETE', 'SIMULATION'].includes(normalized)) return 'warn';
   return 'neutral';
 }
 
@@ -155,40 +228,4 @@ export function eventItems(snapshot: TelemetrySnapshot | null | undefined): Arra
     { label: 'DELIVERY', detail: `${String(gate.state ?? 'BLOCKED').toUpperCase()} · publish path disabled` },
     ...reasons.map((reason) => ({ label: 'GATE', detail: reasonLabel(reason) })),
   ];
-}
-
-function sanitizePayload(value: unknown): unknown {
-  if (Array.isArray(value)) return value.slice(0, 24).map(sanitizePayload);
-  if (!value || typeof value !== 'object') {
-    return typeof value === 'string' && value.length > 180 ? `${value.slice(0, 177)}…` : value;
-  }
-  const input = value as Record<string, unknown>;
-  const output: Record<string, unknown> = {};
-  for (const [key, entry] of Object.entries(input)) {
-    if (/(pass(word)?|secret|token|api[_-]?key|private[_-]?key|credential)/i.test(key)) {
-      output[key] = '[REDACTED]';
-    } else if (/(station|unit|hardware|serial|client|device|host|topic|id)$/i.test(key)) {
-      output[key] = '[REDACTED]';
-    } else {
-      output[key] = sanitizePayload(entry);
-    }
-  }
-  return output;
-}
-
-export function safeMqttEntries(entries: Record<string, MqttEntry> | undefined): Record<string, unknown> {
-  const output: Record<string, unknown> = {};
-  for (const [kind, entry] of Object.entries(entries ?? {})) {
-    output[kind] = {
-      kind: entry.kind ?? kind,
-      bytes: entry.bytes ?? 0,
-      qos: entry.qos ?? 0,
-      retained: entry.retained ?? false,
-      valid: entry.valid ?? false,
-      latency_ms: entry.latency_ms ?? null,
-      error: entry.error,
-      payload: sanitizePayload(entry.payload),
-    };
-  }
-  return output;
 }

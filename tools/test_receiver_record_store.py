@@ -1,14 +1,22 @@
+import gc
 import json
+import os
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
+import warnings
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 TOOLS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS_DIR))
 
-from receiver_record_store import ReceiverRecordStore
+import receiver_record_store
+from receiver_record_store import ReceiverConflictError, ReceiverRecordStore
 
 
 class ReceiverRecordStoreTests(unittest.TestCase):
@@ -19,6 +27,20 @@ class ReceiverRecordStoreTests(unittest.TestCase):
     def tearDown(self):
         self.store.close()
         self.temp.cleanup()
+
+    def test_store_operations_leave_no_unclosed_sqlite_connections(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            store = ReceiverRecordStore(Path(self.temp.name) / "warnings")
+            store.update_settings({"auto_spectrum_recording": True})
+            scan = store.create_scan("simulated", {"start_hz": 100, "end_hz": 500}, True)
+            store.upsert_candidates(scan["id"], [{"id": 1, "meanPeakFrequencyHz": 120, "maxPeakDb": -50, "hits": 1}])
+            store.get_candidates(scan["id"], offset=0, limit=10, sort="peak")
+            store.list_records(record_type="scan")
+            store.close()
+            del store
+            gc.collect()
+        self.assertEqual([str(item.message) for item in caught if issubclass(item.category, ResourceWarning)], [])
 
     def test_settings_candidate_upsert_and_sql_pagination(self):
         self.assertEqual(self.store.get_settings(), {"auto_spectrum_recording": False})
@@ -49,71 +71,68 @@ class ReceiverRecordStoreTests(unittest.TestCase):
         self.assertEqual(len(page["items"]), 105)
         self.assertEqual(page["items"][-1]["id"], 1_105)
 
-    def test_nearby_peak_frequencies_group_before_pagination(self):
+    def test_peak_groups_merge_overlapping_bands_only(self):
         scan = self.store.create_scan("receiver", {}, True)
-        peak_frequencies = [
-            410_001_000,
-            410_100_000,
-            410_201_000,
-            410_301_000,
-            410_401_000,
-            410_502_000,
-        ]
-        candidates = [
-            {
-                "id": index,
-                "startHz": peak_frequency - 10_000,
-                "endHz": peak_frequency + 10_000,
-                "centerHz": peak_frequency,
-                "peakFrequencyHz": peak_frequency,
-                "meanPeakFrequencyHz": peak_frequency + (500 if index == 2 else 0),
-                "minPeakFrequencyHz": peak_frequency,
-                "maxPeakFrequencyHz": peak_frequency,
-                "bandwidthHz": 20_000,
-                "peakDb": peak_db,
-                "noiseFloorDb": -90,
-                "snrDb": peak_db + 90,
-                "firstSeen": 1,
-                "lastSeen": 2,
-                "hits": 2,
+
+        def band(index, low, high, peak, peak_db):
+            return {
+                "id": index, "startHz": low, "endHz": high, "centerHz": (low + high) / 2,
+                "peakFrequencyHz": peak, "meanPeakFrequencyHz": peak + (500 if index == 2 else 0),
+                "minPeakFrequencyHz": peak, "maxPeakFrequencyHz": peak, "bandwidthHz": high - low,
+                "peakDb": peak_db, "noiseFloorDb": -90, "snrDb": peak_db + 90,
+                "firstSeen": 1, "lastSeen": 2, "hits": 2,
             }
-            for index, (peak_frequency, peak_db) in enumerate(
-                zip(peak_frequencies, (-40, -30, -25, -45, -35, -20)),
-                start=1,
-            )
-        ]
-        self.store.upsert_candidates(scan["id"], candidates)
 
-        raw = self.store.get_candidates(scan["id"], limit=10)
+        self.store.upsert_candidates(scan["id"], [
+            band(1, 410_000_000, 410_030_000, 410_010_000, -40),
+            band(2, 410_020_000, 410_050_000, 410_040_000, -30),
+            # 10 kHz gap: a separate signal even though its peak is only 30 kHz away.
+            band(3, 410_060_000, 410_080_000, 410_070_000, -25),
+            band(4, 410_080_000, 410_090_000, 410_085_000, -45),
+            band(5, 410_500_000, 410_520_000, 410_510_000, -20),
+        ])
+
         first_page = self.store.get_candidates(scan["id"], offset=0, limit=1, group_adjacent=True)
-        second_page = self.store.get_candidates(scan["id"], offset=1, limit=1, group_adjacent=True)
-        third_page = self.store.get_candidates(scan["id"], offset=2, limit=1, group_adjacent=True)
+        rows = self.store.get_candidates(scan["id"], limit=10, group_adjacent=True)["items"]
 
-        self.assertEqual(raw["total"], 6)
         self.assertEqual(first_page["total"], 3)
-        first_band = first_page["items"][0]
-        self.assertEqual(first_band["id"], 1)
-        self.assertEqual(first_band["peakRangeStartHz"], 410_001_000)
-        self.assertEqual(first_band["peakRangeEndHz"], 410_100_000)
-        self.assertEqual(first_band["peakRangeCenterHz"], 410_050_500)
-        self.assertEqual(first_band["startHz"], 410_090_000)
-        self.assertEqual(first_band["endHz"], 410_110_000)
-        self.assertEqual(first_band["centerHz"], 410_100_000)
-        self.assertEqual(first_band["bandwidthHz"], 20_000)
-        self.assertEqual(first_band["peakFrequencyHz"], 410_100_000)
-        self.assertEqual(first_band["meanPeakFrequencyHz"], 410_100_500)
+        self.assertEqual(len(first_page["items"]), 1)
+        self.assertEqual([row["id"] for row in rows], [1, 3, 5])
+        first_band = rows[0]
+        self.assertEqual(first_band["peakRangeStartHz"], 410_010_000)
+        self.assertEqual(first_band["peakRangeEndHz"], 410_040_000)
+        self.assertEqual(first_band["peakRangeCenterHz"], 410_025_000)
+        self.assertEqual(first_band["peakFrequencyHz"], 410_040_000)
+        self.assertEqual(first_band["meanPeakFrequencyHz"], 410_040_500)
         self.assertEqual(first_band["peakDb"], -30)
-        self.assertEqual(second_page["items"][0]["peakRangeStartHz"], 410_201_000)
-        self.assertEqual(second_page["items"][0]["peakRangeEndHz"], 410_401_000)
-        self.assertEqual(second_page["items"][0]["peakRangeCenterHz"], 410_301_000)
-        self.assertEqual(third_page["items"][0]["id"], 6)
+        # Touching bands (high == next low) stay together.
+        self.assertEqual((rows[1]["peakRangeStartHz"], rows[1]["peakRangeEndHz"]), (410_070_000, 410_085_000))
+        self.assertEqual(rows[2]["peakRangeStartHz"], 410_510_000)
+
+    def test_dense_noise_candidates_do_not_chain_distinct_carriers(self):
+        scan = self.store.create_scan("receiver", {}, True)
+        candidates = []
+        frequency, index = 121_000_000, 1
+        while frequency <= 128_000_000:
+            peak_db = -20 if frequency in (121_000_000, 125_000_000, 128_000_000) else -45
+            candidates.append({
+                "id": index, "startHz": frequency - 2_500, "endHz": frequency + 2_500,
+                "peakFrequencyHz": frequency, "meanPeakFrequencyHz": frequency, "peakDb": peak_db, "snrDb": 10,
+            })
+            frequency += 20_000
+            index += 1
+        self.store.upsert_candidates(scan["id"], candidates)
+        page = self.store.get_candidates(scan["id"], limit=250, minimum_peak_db=-30, group_adjacent=True)
+        self.assertEqual([row["peakFrequencyHz"] for row in page["items"]], [121_000_000, 125_000_000, 128_000_000])
+        everything = self.store.get_candidates(scan["id"], limit=1, group_adjacent=True)
+        self.assertEqual(everything["total"], len(candidates))
 
     def test_legacy_candidates_backfill_peak_frequency_for_grouping(self):
         with tempfile.TemporaryDirectory() as legacy_dir:
             scan_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
             candidates = [
                 {
-                    "id": 1, "startHz": 409_991_000, "endHz": 410_011_000, "centerHz": 410_001_000,
+                    "id": 1, "startHz": 409_991_000, "endHz": 410_095_000, "centerHz": 410_001_000,
                     "peakFrequencyHz": 410_001_000, "meanPeakFrequencyHz": 410_001_000,
                     "minPeakFrequencyHz": 410_001_000, "maxPeakFrequencyHz": 410_001_000,
                     "bandwidthHz": 20_000, "peakDb": -40, "snrDb": 50, "hits": 1,
@@ -125,7 +144,7 @@ class ReceiverRecordStoreTests(unittest.TestCase):
                     "bandwidthHz": 20_000, "peakDb": -30, "snrDb": 60, "hits": 1,
                 },
             ]
-            with sqlite3.connect(Path(legacy_dir) / "receiver.sqlite3") as db:
+            with closing(sqlite3.connect(Path(legacy_dir) / "receiver.sqlite3")) as db, db:
                 db.executescript("""
                     CREATE TABLE scans (
                         id TEXT PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT,
@@ -225,7 +244,10 @@ class ReceiverRecordStoreTests(unittest.TestCase):
             {"id": 2, "meanPeakFrequencyHz": 2_000_000, "minPeakFrequencyHz": 1_990_000, "maxPeakFrequencyHz": 2_010_000},
         ])
         marker = self.store.save_markers({"name": "Field", "markers": [{"frequency_hz": 1_040_000, "power_db": -30, "label": "A"}]})
-        updated = self.store.save_markers({"name": "Field", "markers": [{"frequency_hz": 1_040_000, "power_db": -25}]})
+        with self.assertRaises(ReceiverConflictError):
+            self.store.save_markers({"name": "Field", "markers": []})
+        self.assertEqual(len(self.store.get_markers()[0]["markers"]), 1)
+        updated = self.store.save_markers({"name": "Field", "overwrite": True, "markers": [{"frequency_hz": 1_040_000, "power_db": -25}]})
         self.assertEqual(marker["id"], updated["id"])
         self.assertEqual(self.store.get_markers(), [updated])
         marked = self.store.get_candidates(scan["id"], marked_only=True, marker_set_id=marker["id"])
@@ -360,6 +382,436 @@ class ReceiverRecordStoreTests(unittest.TestCase):
         self.assertEqual(record["segments"][0]["error"], "MediaRecorder start failed")
         with self.assertRaises(KeyError):
             self.store.get_segment_audio(segment["id"])
+
+
+AUDIO_METADATA = {
+    "vfo_index": 0, "frequency_hz": 144_000_000, "mode": "nfm", "bandwidth_hz": 12_500,
+    "codec": "audio/webm;codecs=opus", "started_at": "2026-09-29T00:00:00Z",
+}
+
+
+def _ebml(element_id, payload, unknown_size=False):
+    identifier = element_id.to_bytes((element_id.bit_length() + 7) // 8, "big")
+    size = b"\x01\xff\xff\xff\xff\xff\xff\xff" if unknown_size else (0x10000000 | len(payload)).to_bytes(4, "big")
+    return identifier + size + payload
+
+
+def synthetic_webm(clusters):
+    """A MediaRecorder-shaped WebM: unknown-size Segment and Clusters, no Duration or Cues."""
+    header = _ebml(0x1A45DFA3, _ebml(0x4282, b"webm"))
+    info = _ebml(0x1549A966, _ebml(0x2AD7B1, (1_000_000).to_bytes(3, "big")) + _ebml(0x4D80, b"Chrome") + _ebml(0x5741, b"Chrome"))
+    tracks = _ebml(0x1654AE6B, _ebml(0xAE, _ebml(0xD7, b"\x01") + _ebml(0x86, b"A_OPUS")))
+    body = b""
+    for cluster_timecode, relatives in clusters:
+        blocks = _ebml(0xE7, cluster_timecode.to_bytes(4, "big"))
+        for relative in relatives:
+            blocks += _ebml(0xA3, b"\x81" + relative.to_bytes(2, "big", signed=True) + b"\x80" + b"\x1f\x43\xb6\x75opus")
+        body += _ebml(0x1F43B675, blocks, unknown_size=True)
+    return header + _ebml(0x18538067, info + tracks + body, unknown_size=True)
+
+
+def webm_duration_seconds(data):
+    layout = receiver_record_store._webm_info_layout(data)
+    if layout["duration_pos"] is None:
+        return None
+    import struct
+    raw = data[layout["duration_pos"]:layout["duration_pos"] + layout["duration_length"]]
+    value = struct.unpack(">d" if len(raw) == 8 else ">f", raw)[0]
+    return value * layout["timecode_scale"] / 1e9
+
+
+class ReceiverRecoveryAndAudioTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self.temp.name)
+        self.store = ReceiverRecordStore(self.data_dir)
+
+    def tearDown(self):
+        self.store.close()
+        self.temp.cleanup()
+
+    def _age(self, table, ident, seconds):
+        stamp = (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+        with closing(sqlite3.connect(self.data_dir / "receiver.sqlite3")) as db, db:
+            db.execute(f"UPDATE {table} SET last_activity=?,started_at=? WHERE id=?", (stamp, stamp, ident))
+
+    def _age_file(self, path, seconds):
+        stamp = time.time() - seconds
+        os.utime(path, (stamp, stamp))
+
+    def test_abandoned_recording_is_recovered_as_interrupted_and_playable(self):
+        session = self.store.create_audio_session()
+        segment = self.store.create_audio_segment(session["id"], dict(AUDIO_METADATA, started_at=(datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()))
+        audio = synthetic_webm([(0, [0, 20, 40]), (1000, [0, 980])])
+        self.store.append_segment_audio(segment["id"], audio)
+        listed = self.store.list_records(record_type="audio-session")["items"][0]
+        self.assertIsNone(listed["completed_at"])
+        self.assertEqual(listed["segments"][0]["status"], "recording")
+        self.assertIsNone(listed["segments"][0]["ended_at"])
+
+        # Still active: nothing is recovered.
+        self.assertEqual(self.store.recover_interrupted_recordings()["audio_sessions"], 0)
+        self._age("audio_sessions", session["id"], 600)
+        self._age_file(self.data_dir / "tmp" / f"{segment['id']}.part", 590)
+        recovered = self.store.recover_interrupted_recordings()
+        self.assertEqual(recovered, {"audio_sessions": 1, "audio_segments": 1, "scans": 0})
+
+        record = self.store.list_records(record_type="audio-session")["items"][0]
+        self.assertIsNotNone(record["completed_at"])
+        saved = record["segments"][0]
+        self.assertEqual(saved["status"], "interrupted")
+        self.assertEqual(saved["error"], receiver_record_store.SEGMENT_INTERRUPTED_ERROR)
+        self.assertAlmostEqual(saved["duration_seconds"], 1.98 + 0.02, places=3)
+        path, _ = self.store.get_segment_audio(segment["id"])
+        self.assertEqual(saved["bytes"], path.stat().st_size)
+        self.assertAlmostEqual(webm_duration_seconds(path.read_bytes()), 2.0, places=3)
+        self.assertFalse((self.data_dir / "tmp" / f"{segment['id']}.part").exists())
+
+    def test_store_restart_recovers_stale_sessions_and_scans(self):
+        session = self.store.create_audio_session()
+        empty = self.store.create_audio_segment(session["id"], AUDIO_METADATA)
+        scan = self.store.create_scan("simulated", {"startHz": 1, "endHz": 2}, True)
+        self.store.add_trace(scan["id"], 1, bytes(2048))
+        live_scan = self.store.create_scan("simulated", {"startHz": 1, "endHz": 2}, True)
+        self._age("audio_sessions", session["id"], 900)
+        self._age_file(self.data_dir / "tmp" / f"{empty['id']}.part", 900)
+        self._age("scans", scan["id"], 900)
+        self.store.close()
+
+        restarted = ReceiverRecordStore(self.data_dir)
+        records = restarted.list_records(limit=10)
+        scans = [item for item in records["items"] if item["type"] == "scan"]
+        self.assertEqual([item["id"] for item in scans], [scan["id"]])
+        self.assertEqual(scans[0]["status"], "interrupted")
+        self.assertEqual(scans[0]["trace_count"], 1)
+        audio = next(item for item in records["items"] if item["type"] == "audio-session")
+        self.assertEqual(audio["segments"][0]["status"], "failed")
+        self.assertEqual(audio["segments"][0]["error"], receiver_record_store.SEGMENT_INTERRUPTED_EMPTY_ERROR)
+        self.assertEqual(audio["segments"][0]["bytes"], 0)
+        self.assertFalse((self.data_dir / "tmp" / f"{empty['id']}.part").exists())
+        self.assertEqual(restarted.scan_info(live_scan["id"])["status"], "running")
+        # A late finish from a browser that was only slow still wins.
+        restarted.finish_scan(scan["id"], "stopped", trace_upload_failures=2)
+        finished = restarted.list_records(record_type="scan")["items"][0]
+        self.assertEqual(finished["status"], "stopped")
+        self.assertEqual(finished["trace_upload_failures"], 2)
+        restarted.close()
+
+    def test_unfinished_scan_without_record_can_be_deleted(self):
+        scan = self.store.create_scan("simulated", {}, True)
+        self.assertTrue(self.store.delete_record(scan["id"]))
+        with self.assertRaises(KeyError):
+            self.store.scan_info(scan["id"])
+
+    def test_page_unload_finalizes_open_segments_in_one_request(self):
+        session = self.store.create_audio_session()
+        segment = self.store.create_audio_segment(session["id"], AUDIO_METADATA)
+        self.store.append_segment_audio(segment["id"], synthetic_webm([(0, [0, 20])]))
+        with self.assertRaises(ValueError):
+            self.store.finish_audio_session(session["id"])
+        self.store.finish_audio_session(session["id"], finalize_open_segments=True)
+        record = self.store.list_records(record_type="audio-session")["items"][0]
+        self.assertIsNotNone(record["completed_at"])
+        self.assertEqual(record["segments"][0]["status"], "interrupted")
+        self.assertEqual(record["segments"][0]["error"], receiver_record_store.SEGMENT_UNCLOSED_ERROR)
+        self.store.get_segment_audio(segment["id"])
+
+    def test_failed_upload_keeps_saved_audio_as_partial_segment(self):
+        session = self.store.create_audio_session()
+        segment = self.store.create_audio_segment(session["id"], AUDIO_METADATA)
+        audio = synthetic_webm([(0, [0, 20, 40])])
+        self.store.append_segment_audio(segment["id"], audio)
+        result = self.store.finish_segment(segment["id"], {
+            "ended_at": "2026-09-29T00:00:05Z", "duration_seconds": 5, "status": "failed", "error": "chunk 6 upload failed",
+        })
+        self.assertEqual(result["status"], "partial")
+        self.store.finish_audio_session(session["id"])
+        saved = self.store.list_records()["items"][0]["segments"][0]
+        self.assertEqual(saved["status"], "partial")
+        self.assertEqual(saved["error"], "chunk 6 upload failed")
+        path, _ = self.store.get_segment_audio(segment["id"])
+        self.assertEqual(saved["bytes"], path.stat().st_size)
+        self.assertGreater(saved["bytes"], len(audio))
+        self.assertAlmostEqual(webm_duration_seconds(path.read_bytes()), 0.06, places=3)
+
+    def test_completed_webm_gets_duration_and_keeps_its_stream(self):
+        session = self.store.create_audio_session()
+        segment = self.store.create_audio_segment(session["id"], AUDIO_METADATA)
+        audio = synthetic_webm([(0, [0, 20]), (5000, [0, 1000, 2500])])
+        half = len(audio) // 2
+        self.store.append_segment_audio(segment["id"], audio[:half])
+        self.store.append_segment_audio(segment["id"], audio[half:])
+        result = self.store.finish_segment(segment["id"], {"ended_at": "2026-09-29T00:00:09Z", "duration_seconds": 9})
+        self.assertAlmostEqual(result["duration_seconds"], 7.52, places=3)
+        path, _ = self.store.get_segment_audio(segment["id"])
+        rewritten = path.read_bytes()
+        self.assertAlmostEqual(webm_duration_seconds(rewritten), 7.52, places=3)
+        layout = receiver_record_store._webm_info_layout(audio)
+        self.assertEqual(rewritten[-(len(audio) - layout["info_end"]):], audio[layout["info_end"]:])
+        self.assertEqual(len(rewritten), len(audio) + 11)
+
+    def test_unparseable_audio_is_kept_unchanged(self):
+        session = self.store.create_audio_session()
+        segment = self.store.create_audio_segment(session["id"], AUDIO_METADATA)
+        self.store.append_segment_audio(segment["id"], b"not a webm file")
+        result = self.store.finish_segment(segment["id"], {"ended_at": "2026-09-29T00:00:02Z", "duration_seconds": 2})
+        self.assertEqual(result["duration_seconds"], 2)
+        path, _ = self.store.get_segment_audio(segment["id"])
+        self.assertEqual(path.read_bytes(), b"not a webm file")
+
+    def test_append_reports_limits_for_client_rollover(self):
+        session = self.store.create_audio_session()
+        segment = self.store.create_audio_segment(session["id"], AUDIO_METADATA)
+        result = self.store.append_segment_audio(segment["id"], b"abc")
+        self.assertEqual(result["segment_bytes"], 3)
+        self.assertEqual(result["max_segment_bytes"], receiver_record_store.MAX_AUDIO_SEGMENT_BYTES)
+        self.assertEqual(result["max_session_bytes"], receiver_record_store.MAX_AUDIO_SESSION_BYTES)
+
+    def test_delete_keeps_rows_when_file_removal_fails(self):
+        session = self.store.create_audio_session()
+        segment = self.store.create_audio_segment(session["id"], AUDIO_METADATA)
+        self.store.append_segment_audio(segment["id"], b"audio")
+        self.store.finish_segment(segment["id"], {"ended_at": "2026-09-29T00:00:01Z", "duration_seconds": 1})
+        self.store.finish_audio_session(session["id"])
+        original_unlink = Path.unlink
+
+        def failing_unlink(path, *args, **kwargs):
+            if path.suffix == ".webm":
+                raise PermissionError(13, "file is in use")
+            return original_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", failing_unlink):
+            with self.assertRaisesRegex(OSError, "record was kept"):
+                self.store.delete_audio_segment(segment["id"])
+            with self.assertRaisesRegex(OSError, "record was kept"):
+                self.store.delete_record(session["id"])
+        self.assertEqual(len(self.store.list_records()["items"][0]["segments"]), 1)
+        self.store.get_segment_audio(segment["id"])
+        self.assertTrue(self.store.delete_record(session["id"]))
+        self.assertEqual(list((self.data_dir / "audio").iterdir()), [])
+
+    def test_active_session_cannot_be_deleted(self):
+        session = self.store.create_audio_session()
+        with self.assertRaisesRegex(ValueError, "stop the VFO audio recording"):
+            self.store.delete_record(session["id"])
+
+    def test_restart_removes_audio_files_without_rows(self):
+        orphan_webm = self.data_dir / "audio" / "11111111-1111-4111-8111-111111111111.webm"
+        orphan_part = self.data_dir / "tmp" / "22222222-2222-4222-8222-222222222222.part"
+        unrelated = self.data_dir / "audio" / "notes.txt"
+        for path in (orphan_webm, orphan_part, unrelated):
+            path.write_bytes(b"x")
+        session = self.store.create_audio_session()
+        live = self.store.create_audio_segment(session["id"], AUDIO_METADATA)
+        self.store.close()
+        ReceiverRecordStore(self.data_dir).close()
+        self.assertFalse(orphan_webm.exists())
+        self.assertFalse(orphan_part.exists())
+        self.assertTrue(unrelated.exists())
+        self.assertTrue((self.data_dir / "tmp" / f"{live['id']}.part").exists())
+
+    def test_minimum_peak_filter_accepts_the_fft_scale(self):
+        scan = self.store.create_scan("receiver", {}, True)
+        self.store.upsert_candidates(scan["id"], [
+            {"id": 1, "startHz": 1, "endHz": 2, "peakDb": -35},
+            {"id": 2, "startHz": 10, "endHz": 20, "peakDb": 17},
+        ])
+        self.assertEqual([row["id"] for row in self.store.get_candidates(scan["id"], minimum_peak_db=10)["items"]], [2])
+        for invalid in (61, -161, True, "nan"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    self.store.get_candidates(scan["id"], minimum_peak_db=invalid)
+
+    def test_renaming_marker_set_to_taken_name_is_a_conflict(self):
+        first = self.store.save_markers({"name": "Alpha", "markers": []})
+        second = self.store.save_markers({"name": "Beta", "markers": []})
+        with self.assertRaises(ReceiverConflictError):
+            self.store.save_markers({"id": second["id"], "name": "Alpha", "markers": []})
+        self.assertEqual(self.store.save_markers({"id": first["id"], "name": "Alpha", "markers": []})["id"], first["id"])
+
+
+class ReceiverAudioFilterTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = ReceiverRecordStore(self.temp.name)
+        session = self.store.create_audio_session()
+        self.segments = {}
+        for name, started, ended in (
+            ("evening", "2026-09-29T14:55:00Z", "2026-09-29T16:30:00Z"),  # 21:55-23:30 WIB
+            ("night", "2026-09-29T17:30:00Z", "2026-09-29T17:40:00Z"),    # 00:30-00:40 WIB next day
+            ("morning", "2026-09-30T01:00:00Z", "2026-09-30T01:05:00Z"),  # 08:00-08:05 WIB
+        ):
+            segment = self.store.create_audio_segment(session["id"], dict(AUDIO_METADATA, started_at=started))
+            self.store.append_segment_audio(segment["id"], b"audio")
+            self.store.finish_segment(segment["id"], {"ended_at": ended, "duration_seconds": 60})
+            self.segments[segment["id"]] = name
+        self.store.finish_audio_session(session["id"])
+
+    def tearDown(self):
+        self.store.close()
+        self.temp.cleanup()
+
+    def names(self, **filters):
+        page = self.store.list_audio_records(filters=filters)
+        return sorted(self.segments[segment["id"]] for item in page["items"] for segment in item["segments"])
+
+    def test_time_of_day_matches_segments_that_overlap_the_window(self):
+        self.assertEqual(self.names(time_zone="Asia/Jakarta", time_from="22:00", time_to="23:00"), ["evening"])
+
+    def test_time_window_wraps_past_midnight(self):
+        self.assertEqual(self.names(time_zone="Asia/Jakarta", time_from="23:00", time_to="01:00"), ["evening", "night"])
+        self.assertEqual(self.names(time_zone="Asia/Jakarta", time_from="23:45", time_to="00:10"), [])
+
+    def test_date_bounds_use_overlap(self):
+        self.assertEqual(
+            self.names(started_after="2026-09-29T16:00:00Z", started_before="2026-09-29T17:00:00Z"),
+            ["evening"],
+        )
+
+    def test_facet_dates_cover_every_recorded_day(self):
+        facets = self.store.audio_record_facets("Asia/Jakarta")
+        self.assertEqual(facets["available_dates"], ["2026-09-29", "2026-09-30"])
+        self.assertFalse(facets["time_zone_fallback"])
+
+    def test_legacy_and_unknown_zones_fall_back_instead_of_failing(self):
+        legacy = self.store.audio_record_facets("Asia/Calcutta")
+        self.assertFalse(legacy["time_zone_fallback"])
+        self.assertEqual(self.names(time_zone="Asia/Saigon", time_from="21:00", time_to="23:59"), ["evening"])
+        unknown = self.store.audio_record_facets("Mars/Olympus_Mons", utc_offset_minutes="420")
+        self.assertTrue(unknown["time_zone_fallback"])
+        self.assertEqual(unknown["available_dates"], ["2026-09-29", "2026-09-30"])
+        with self.assertRaises(ValueError):
+            self.store.audio_record_facets("Mars/Olympus_Mons")
+        with self.assertRaises(ValueError):
+            self.store.audio_record_facets("../etc/passwd", utc_offset_minutes=0)
+        with self.assertRaises(ValueError):
+            self.store.audio_record_facets("Asia/Jakarta", utc_offset_minutes=5000)
+
+    def test_missing_tz_database_uses_browser_offset(self):
+        with mock.patch.object(receiver_record_store, "ZoneInfo", side_effect=receiver_record_store.ZoneInfoNotFoundError("no tzdata")), \
+                mock.patch.object(receiver_record_store, "_TZ_DATABASE_AVAILABLE", False):
+            facets = self.store.audio_record_facets("Asia/Jakarta", utc_offset_minutes=420)
+            self.assertTrue(facets["time_zone_fallback"])
+            self.assertEqual(facets["available_dates"], ["2026-09-29", "2026-09-30"])
+            self.assertFalse(self.store.audio_record_facets("UTC")["time_zone_fallback"])
+            self.assertTrue(self.store.audio_record_facets("Asia/Jakarta")["time_zone_fallback"])
+            self.assertEqual(
+                self.names(time_zone="Asia/Jakarta", utc_offset_minutes="420", time_from="22:00", time_to="23:00"),
+                ["evening"],
+            )
+
+
+class ReceiverHttpTests(unittest.TestCase):
+    """Receiver API status codes and messages through a loopback console."""
+
+    def setUp(self):
+        import http.client
+        import threading
+        import ground_console
+
+        self.http = http.client
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.site = root / "site"
+        (self.site / "assets").mkdir(parents=True)
+        (self.site / "index.html").write_text("<!doctype html>console", encoding="utf-8")
+        self.server = ground_console.GroundConsoleServer(
+            ("127.0.0.1", 0), "http://doasdr.local:8081",
+            config_path=str(root / "console.json"), branding_path=str(root / "branding.json"),
+            frontend_dir=self.site, receiver_data_dir=root / "receiver-data",
+        )
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.port = self.server.server_address[1]
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.thread.join(timeout=5)
+        self.server.server_close()
+        self.temp.cleanup()
+
+    def request(self, method, path, body=None):
+        connection = self.http.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        headers = {"Origin": f"http://127.0.0.1:{self.port}"}
+        if body is not None:
+            body = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        connection.request(method, path, body=body, headers=headers)
+        response = connection.getresponse()
+        payload = response.read()
+        connection.close()
+        return response.status, dict(response.getheaders()), payload
+
+    def test_missing_receiver_build_explains_how_to_build_it(self):
+        status, headers, body = self.request("GET", "/receiver/")
+        self.assertEqual(status, 404)
+        self.assertTrue(headers["Content-Type"].startswith("text/html"))
+        self.assertIn(b"tools/build_browsdr_receiver.py", body)
+        self.assertIn(b"npm run build", body)
+
+    def test_not_found_messages_are_not_python_reprs(self):
+        status, _, body = self.request("GET", "/api/receiver/scans/00000000-0000-4000-8000-000000000000")
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(body), {"error": "scan not found"})
+
+    def test_marker_name_conflicts_return_409(self):
+        status, _, _ = self.request("POST", "/api/receiver/marker-sets", {"name": "Field", "markers": []})
+        self.assertEqual(status, 201)
+        status, _, body = self.request("POST", "/api/receiver/marker-sets", {"name": "Field", "markers": []})
+        self.assertEqual(status, 409)
+        self.assertIn("already exists", json.loads(body)["error"])
+        _, _, other = self.request("POST", "/api/receiver/marker-sets", {"name": "Other", "markers": []})
+        other_id = json.loads(other)["id"]
+        status, _, _ = self.request("POST", "/api/receiver/marker-sets", {"id": other_id, "name": "Field", "markers": []})
+        self.assertEqual(status, 409)
+        status, _, _ = self.request("POST", "/api/receiver/marker-sets", {"name": "Field", "overwrite": True, "markers": []})
+        self.assertEqual(status, 201)
+
+    def test_storage_errors_are_reported_not_dropped(self):
+        with mock.patch.object(self.server.receiver_store, "get_settings", side_effect=sqlite3.OperationalError("database is locked")):
+            status, _, body = self.request("GET", "/api/receiver/settings")
+        self.assertEqual(status, 500)
+        self.assertEqual(json.loads(body), {"error": "Receiver storage error: database is locked"})
+
+    def test_client_disconnect_is_not_answered_with_an_error(self):
+        # A browser that cancels an audio range read shows up as a broken pipe inside the handler.
+        logged = []
+        with mock.patch.object(self.server.receiver_store, "get_settings", side_effect=BrokenPipeError(32, "Broken pipe")), \
+                mock.patch("ground_console.ConsoleHandler.log_message", lambda _handler, fmt, *args: logged.append(fmt % args)):
+            with self.assertRaises(self.http.RemoteDisconnected):
+                self.request("GET", "/api/receiver/settings")
+        self.assertEqual([line for line in logged if " 500 " in line], [])
+
+    def test_unload_request_finishes_session_with_open_segments(self):
+        _, _, created = self.request("POST", "/api/receiver/audio-sessions", {})
+        session_id = json.loads(created)["id"]
+        _, _, segment = self.request("POST", f"/api/receiver/audio-sessions/{session_id}/segments", AUDIO_METADATA)
+        segment_id = json.loads(segment)["id"]
+        connection = self.http.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        connection.request("POST", f"/api/receiver/audio-segments/{segment_id}/chunk", body=synthetic_webm([(0, [0, 20])]),
+                           headers={"Origin": f"http://127.0.0.1:{self.port}", "Content-Type": "application/octet-stream"})
+        self.assertEqual(connection.getresponse().status, 200)
+        connection.close()
+        status, _, _ = self.request("POST", f"/api/receiver/audio-sessions/{session_id}/finish", {})
+        self.assertEqual(status, 400)
+        status, _, _ = self.request("POST", f"/api/receiver/audio-sessions/{session_id}/finish", {"finalize_open_segments": True})
+        self.assertEqual(status, 200)
+        _, _, records = self.request("GET", "/api/receiver/records?type=audio-session")
+        saved = json.loads(records)["items"][0]
+        self.assertIsNotNone(saved["completed_at"])
+        self.assertEqual(saved["segments"][0]["status"], "interrupted")
+        status, headers, _ = self.request("GET", f"/api/receiver/audio-segments/{segment_id}/audio")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "audio/webm")
+
+    def test_receiver_page_csp_has_no_remote_font_hosts(self):
+        receiver = self.site / "receiver"
+        receiver.mkdir()
+        (receiver / "index.html").write_text("<!doctype html>receiver", encoding="utf-8")
+        status, headers, _ = self.request("GET", "/receiver/")
+        self.assertEqual(status, 200)
+        self.assertNotIn("fonts.googleapis.com", headers["Content-Security-Policy"])
+        self.assertNotIn("fonts.gstatic.com", headers["Content-Security-Policy"])
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ import {
 	SWEEP_CANDIDATE_PEAK_TOLERANCE_HZ,
 	SWEEP_DISPLAY_BINS,
 	SWEEP_MAX_BINS,
+	SWEEP_MAX_CANDIDATES,
 	SWEEP_OFFSET_HZ,
 	SWEEP_SAMPLE_RATE_HZ,
 	validateSweepConfig,
@@ -11,8 +12,43 @@ import type { SweepCandidate, SweepConfig, SweepSpectrumFrame } from './sweep-ty
 const NO_SIGNAL_DB = -120;
 const NOISE_BLOCK_BINS = 128;
 const NOISE_HISTOGRAM_SIZE = 161;
+const BLOCK_FLOOR_PERCENTILE = 0.5;
+// Block floors are ranked across this half-width, so a signal wider than one
+// block cannot become its own noise floor.
+const NOISE_FLOOR_HALF_WINDOW_HZ = 10_000_000;
+const WIDEBAND_FLOOR_PERCENTILE = 0.25;
+// Detection uses its own averaging so the false-alarm rate does not follow the
+// display averaging setting.
+const DETECTION_AVERAGE_ALPHA = 0.25;
+// Below this many sweeps the detection average of pure noise still crosses
+// typical thresholds too often to confirm a weak signal.
+const CONFIRMATION_MIN_SWEEPS = 6;
+// Single-sweep receiver noise practically never reaches this far above the floor.
+const IMMEDIATE_DETECTION_SNR_DB = 16;
+const BAND_CONTACT_BINS = 2;
+const SMOOTHING_HALF_WIDTH_BINS = 2;
+
+interface CandidateState {
+	sweep: number;
+	lastPeakFrequencyHz: number;
+	bucket: number;
+}
+
+interface DetectionRun {
+	startHz: number;
+	endHz: number;
+	peakFrequencyHz: number;
+	peakDb: number;
+	noiseFloorDb: number;
+	snrDb: number;
+}
+
+function peakBucket(frequencyHz: number): number {
+	return Math.floor(frequencyHz / SWEEP_CANDIDATE_PEAK_TOLERANCE_HZ);
+}
 
 export class SweepAccumulator {
+	readonly config: SweepConfig;
 	readonly resolutionHz: number;
 	readonly binCount: number;
 	readonly current: Float32Array;
@@ -20,21 +56,28 @@ export class SweepAccumulator {
 	readonly maxHold: Float32Array;
 	readonly hitCount: Uint16Array;
 
+	private readonly detectionAverage: Float32Array;
+	private readonly binOffsets: Float32Array;
 	private readonly currentSums: Float32Array;
 	private readonly currentWeights: Uint8Array;
 	private readonly updated: Uint8Array;
+	private readonly blockFloors: Float32Array;
 	private readonly noiseFloors: Float32Array;
+	private readonly floorWindow: Float32Array;
+	private readonly floorHalfWindowBlocks: number;
 	private readonly noiseHistogram = new Uint16Array(NOISE_HISTOGRAM_SIZE);
 	private readonly candidates: SweepCandidate[] = [];
 	private readonly candidatesByPeakBucket = new Map<number, Set<SweepCandidate>>();
 	private readonly changedCandidates = new Map<number, SweepCandidate>();
-	private readonly candidateSweepState = new Map<number, { sweep: number; lastPeakFrequencyHz: number }>();
+	private readonly removedCandidateIds = new Set<number>();
+	private readonly candidateState = new Map<number, CandidateState>();
 	private nextCandidateId = 1;
 	private sweepActive = false;
 	private _sweepCount = 0;
 
-	constructor(readonly config: SweepConfig) {
+	constructor(config: SweepConfig) {
 		validateSweepConfig(config);
+		this.config = config;
 		this.resolutionHz = SWEEP_SAMPLE_RATE_HZ / config.fftSize;
 		this.binCount = Math.ceil((config.endHz - config.startHz) / this.resolutionHz);
 		if (this.binCount > SWEEP_MAX_BINS) throw new RangeError('Sweep exceeds the supported spectrum memory limit');
@@ -45,10 +88,18 @@ export class SweepAccumulator {
 		this.maxHold = new Float32Array(this.binCount);
 		this.maxHold.fill(NO_SIGNAL_DB);
 		this.hitCount = new Uint16Array(this.binCount);
+		this.detectionAverage = new Float32Array(this.binCount);
+		this.detectionAverage.fill(Number.NaN);
+		this.binOffsets = new Float32Array(this.binCount);
+		this.binOffsets.fill(0.5);
 		this.currentSums = new Float32Array(this.binCount);
 		this.currentWeights = new Uint8Array(this.binCount);
 		this.updated = new Uint8Array(this.binCount);
-		this.noiseFloors = new Float32Array(Math.ceil(this.binCount / NOISE_BLOCK_BINS));
+		const blockCount = Math.ceil(this.binCount / NOISE_BLOCK_BINS);
+		this.blockFloors = new Float32Array(blockCount);
+		this.noiseFloors = new Float32Array(blockCount);
+		this.floorHalfWindowBlocks = Math.max(1, Math.round(NOISE_FLOOR_HALF_WINDOW_HZ / (NOISE_BLOCK_BINS * this.resolutionHz)));
+		this.floorWindow = new Float32Array(this.floorHalfWindowBlocks * 2 + 1);
 	}
 
 	get sweepCount(): number {
@@ -73,12 +124,14 @@ export class SweepAccumulator {
 
 	addSample(frequencyHz: number, powerDb: number): void {
 		if (!Number.isFinite(frequencyHz) || !Number.isFinite(powerDb) || frequencyHz < this.config.startHz || frequencyHz >= this.config.endHz) return;
-		const index = Math.floor((frequencyHz - this.config.startHz) / this.resolutionHz);
+		const position = (frequencyHz - this.config.startHz) / this.resolutionHz;
+		const index = Math.floor(position);
 		if (index < 0 || index >= this.binCount) return;
 		const weight = this.currentWeights[index];
 		this.currentSums[index] += powerDb;
 		if (weight < 0xff) this.currentWeights[index] = weight + 1;
 		this.current[index] = this.currentSums[index] / this.currentWeights[index];
+		this.binOffsets[index] = position - index;
 		this.updated[index] = 1;
 	}
 
@@ -146,18 +199,27 @@ export class SweepAccumulator {
 		return changed;
 	}
 
+	takeRemovedCandidateIds(): number[] {
+		const removed = Array.from(this.removedCandidateIds);
+		this.removedCandidateIds.clear();
+		return removed;
+	}
+
 	clear(): void {
 		this.current.fill(Number.NaN);
 		this.average.fill(Number.NaN);
 		this.maxHold.fill(NO_SIGNAL_DB);
 		this.hitCount.fill(0);
+		this.detectionAverage.fill(Number.NaN);
+		this.binOffsets.fill(0.5);
 		this.currentSums.fill(0);
 		this.currentWeights.fill(0);
 		this.updated.fill(0);
 		this.candidates.length = 0;
-		this.candidateSweepState.clear();
+		this.candidateState.clear();
 		this.candidatesByPeakBucket.clear();
 		this.changedCandidates.clear();
+		this.removedCandidateIds.clear();
 		this.nextCandidateId = 1;
 		this._sweepCount = 0;
 	}
@@ -184,6 +246,11 @@ export class SweepAccumulator {
 				: value;
 			if (value > this.maxHold[index]) this.maxHold[index] = value;
 			if (this.hitCount[index] < 0xffff) this.hitCount[index]++;
+			// Plain mean until the bin has 1/alpha sweeps, so early sweeps are not weighted by the first one.
+			const detectionAlpha = Math.max(DETECTION_AVERAGE_ALPHA, 1 / this.hitCount[index]);
+			this.detectionAverage[index] = Number.isFinite(this.detectionAverage[index])
+				? this.detectionAverage[index] + detectionAlpha * (value - this.detectionAverage[index])
+				: value;
 			this.updated[index] = 0;
 			this.currentSums[index] = 0;
 			this.currentWeights[index] = 0;
@@ -193,133 +260,307 @@ export class SweepAccumulator {
 		this.detectCandidates(Date.now());
 	}
 
-	private detectCandidates(now: number): void {
-		for (let block = 0; block < this.noiseFloors.length; block++) {
+	private updateNoiseFloors(): void {
+		for (let block = 0; block < this.blockFloors.length; block++) {
 			this.noiseHistogram.fill(0);
 			const start = block * NOISE_BLOCK_BINS;
 			const end = Math.min(this.binCount, start + NOISE_BLOCK_BINS);
 			let count = 0;
 			for (let index = start; index < end; index++) {
-				const value = this.average[index];
+				const value = this.detectionAverage[index];
 				if (!Number.isFinite(value)) continue;
 				const bucket = Math.max(0, Math.min(NOISE_HISTOGRAM_SIZE - 1, Math.floor(value + 160)));
 				this.noiseHistogram[bucket]++;
 				count++;
 			}
-			if (count === 0) {
-				this.noiseFloors[block] = NO_SIGNAL_DB;
-				continue;
-			}
-			const target = Math.floor((count - 1) * 0.25);
+			this.blockFloors[block] = Number.NaN;
+			if (count === 0) continue;
+			const target = Math.floor((count - 1) * BLOCK_FLOOR_PERCENTILE);
 			let cumulative = 0;
 			for (let bucket = 0; bucket < this.noiseHistogram.length; bucket++) {
 				cumulative += this.noiseHistogram[bucket];
 				if (cumulative > target) {
-					this.noiseFloors[block] = bucket - 160;
+					this.blockFloors[block] = bucket - 160;
 					break;
 				}
 			}
 		}
 
-		let candidateStart = -1;
-		let candidatePeak = NO_SIGNAL_DB;
-		let candidateNoise = NO_SIGNAL_DB;
-		let candidatePeakFrequencyHz = this.config.startHz;
-		for (let index = 0; index <= this.binCount; index++) {
-			let active = false;
-			if (index < this.binCount && Number.isFinite(this.current[index])) {
-				const floor = this.noiseFloors[Math.floor(index / NOISE_BLOCK_BINS)];
-				active = this.current[index] - floor >= this.config.minSnrDb;
-				if (active && this.current[index] > candidatePeak) {
-					candidatePeak = this.current[index];
-					candidateNoise = floor;
-					candidatePeakFrequencyHz = this.config.startHz + (index + 0.5) * this.resolutionHz;
-				}
+		const halfWindow = this.floorHalfWindowBlocks;
+		for (let block = 0; block < this.blockFloors.length; block++) {
+			let count = 0;
+			const first = Math.max(0, block - halfWindow);
+			const last = Math.min(this.blockFloors.length - 1, block + halfWindow);
+			for (let neighbour = first; neighbour <= last; neighbour++) {
+				const value = this.blockFloors[neighbour];
+				if (Number.isFinite(value)) this.floorWindow[count++] = value;
 			}
-			if (active && candidateStart < 0) candidateStart = index;
-			if (!active && candidateStart >= 0) {
-				this.upsertCandidate(candidateStart, index - 1, candidatePeak, candidateNoise, candidatePeakFrequencyHz, now);
-				candidateStart = -1;
-				candidatePeak = NO_SIGNAL_DB;
-				candidateNoise = NO_SIGNAL_DB;
-				candidatePeakFrequencyHz = this.config.startHz;
+			if (count === 0) {
+				this.noiseFloors[block] = NO_SIGNAL_DB;
+				continue;
 			}
+			const ranked = this.floorWindow.subarray(0, count).sort();
+			const widebandFloor = ranked[Math.floor((count - 1) * WIDEBAND_FLOOR_PERCENTILE)];
+			const ownFloor = this.blockFloors[block];
+			this.noiseFloors[block] = Number.isFinite(ownFloor) ? Math.min(ownFloor, widebandFloor) : widebandFloor;
 		}
 	}
 
-	private upsertCandidate(firstBin: number, lastBin: number, peakDb: number, noiseFloorDb: number, peakFrequencyHz: number, now: number): void {
-		const startHz = this.config.startHz + firstBin * this.resolutionHz;
-		const endHz = Math.min(this.config.endHz, this.config.startHz + (lastBin + 1) * this.resolutionHz);
-		const peakBucket = Math.floor(peakFrequencyHz / SWEEP_CANDIDATE_PEAK_TOLERANCE_HZ);
-		let matchedCandidate: SweepCandidate | undefined;
-		let matchedPeakState: { sweep: number; lastPeakFrequencyHz: number } | undefined;
-		for (let bucket = peakBucket - 1; bucket <= peakBucket + 1 && !matchedCandidate; bucket++) {
-			for (const candidate of this.candidatesByPeakBucket.get(bucket) ?? []) {
-				const state = this.candidateSweepState.get(candidate.id);
-				if (!state || state.sweep === this._sweepCount
-					|| Math.abs(peakFrequencyHz - state.lastPeakFrequencyHz) > SWEEP_CANDIDATE_PEAK_TOLERANCE_HZ) continue;
-				matchedCandidate = candidate;
-				matchedPeakState = state;
-				break;
+	private floorAt(index: number): number {
+		return this.noiseFloors[Math.floor(index / NOISE_BLOCK_BINS)];
+	}
+
+	private binLowHz(index: number): number {
+		const frequencyHz = this.config.startHz + (index + this.binOffsets[index] - 0.5) * this.resolutionHz;
+		return Math.min(this.config.endHz, Math.max(this.config.startHz, frequencyHz));
+	}
+
+	private binHighHz(index: number): number {
+		const frequencyHz = this.config.startHz + (index + this.binOffsets[index] + 0.5) * this.resolutionHz;
+		return Math.min(this.config.endHz, Math.max(this.config.startHz, frequencyHz));
+	}
+
+	private interpolatedPeakHz(peakIndex: number, runStartHz: number, runEndHz: number): number {
+		let fraction = 0;
+		const left = this.current[peakIndex - 1];
+		const centre = this.current[peakIndex];
+		const right = this.current[peakIndex + 1];
+		if (peakIndex > 0 && peakIndex < this.binCount - 1 && Number.isFinite(left) && Number.isFinite(right)
+			&& Math.abs(this.binOffsets[peakIndex - 1] - this.binOffsets[peakIndex]) < 1e-3
+			&& Math.abs(this.binOffsets[peakIndex + 1] - this.binOffsets[peakIndex]) < 1e-3) {
+			const curvature = left - 2 * centre + right;
+			if (curvature < 0) fraction = Math.max(-0.5, Math.min(0.5, 0.5 * (left - right) / curvature));
+		}
+		const frequencyHz = this.config.startHz + (peakIndex + this.binOffsets[peakIndex] + fraction) * this.resolutionHz;
+		return Math.min(runEndHz, Math.max(runStartHz, frequencyHz));
+	}
+
+	private detectCandidates(now: number): void {
+		this.updateNoiseFloors();
+		const minSnrDb = this.config.minSnrDb;
+		const immediateSnrDb = Math.max(minSnrDb, IMMEDIATE_DETECTION_SNR_DB);
+		const runs: DetectionRun[] = [];
+		let runStart = -1;
+		let firstLevelBin = -1;
+		let lastLevelBin = -1;
+		let peakIndex = -1;
+		let peakDb = NO_SIGNAL_DB;
+		let measuredBins = 0;
+		let currentActiveBins = 0;
+		let averageConfirmed = false;
+		let smoothingSum = 0;
+		let smoothingCount = 0;
+		for (let index = 0; index < Math.min(SMOOTHING_HALF_WIDTH_BINS, this.binCount); index++) {
+			if (Number.isFinite(this.current[index])) {
+				smoothingSum += this.current[index];
+				smoothingCount++;
 			}
 		}
-		if (matchedCandidate && matchedPeakState) {
-			const oldPeakBucket = Math.floor(matchedPeakState.lastPeakFrequencyHz / SWEEP_CANDIDATE_PEAK_TOLERANCE_HZ);
-			matchedCandidate.startHz = Math.min(matchedCandidate.startHz, startHz);
-			matchedCandidate.endHz = Math.max(matchedCandidate.endHz, endHz);
-			matchedCandidate.centerHz = (matchedCandidate.startHz + matchedCandidate.endHz) / 2;
-			matchedCandidate.bandwidthHz = matchedCandidate.endHz - matchedCandidate.startHz;
-			matchedCandidate.meanPeakFrequencyHz += (peakFrequencyHz - matchedCandidate.meanPeakFrequencyHz) / (matchedCandidate.hits + 1);
-			matchedCandidate.minPeakFrequencyHz = Math.min(matchedCandidate.minPeakFrequencyHz, peakFrequencyHz);
-			matchedCandidate.maxPeakFrequencyHz = Math.max(matchedCandidate.maxPeakFrequencyHz, peakFrequencyHz);
-			if (peakDb > matchedCandidate.peakDb) {
-				matchedCandidate.peakDb = peakDb;
-				matchedCandidate.peakFrequencyHz = peakFrequencyHz;
+		for (let index = 0; index <= this.binCount; index++) {
+			let currentActive = false;
+			let averageActive = false;
+			let bridged = false;
+			if (index < this.binCount) {
+				const entering = index + SMOOTHING_HALF_WIDTH_BINS;
+				if (entering < this.binCount && Number.isFinite(this.current[entering])) {
+					smoothingSum += this.current[entering];
+					smoothingCount++;
+				}
+				const leaving = index - SMOOTHING_HALF_WIDTH_BINS - 1;
+				if (leaving >= 0 && Number.isFinite(this.current[leaving])) {
+					smoothingSum -= this.current[leaving];
+					smoothingCount--;
+				}
+				const floor = this.floorAt(index);
+				const value = this.current[index];
+				currentActive = Number.isFinite(value) && value - floor >= minSnrDb;
+				averageActive = this.hitCount[index] >= CONFIRMATION_MIN_SWEEPS
+					&& this.detectionAverage[index] - floor >= minSnrDb;
+				// The smoothed level and unmeasured bins (the skipped DC bins of a
+				// manual capture) only bridge a run; they never set its edges.
+				bridged = !Number.isFinite(value)
+					|| (smoothingCount > 0 && smoothingSum / smoothingCount - floor >= minSnrDb);
 			}
-			matchedCandidate.noiseFloorDb = Math.min(matchedCandidate.noiseFloorDb, noiseFloorDb);
-			matchedCandidate.snrDb = matchedCandidate.peakDb - matchedCandidate.noiseFloorDb;
-			matchedCandidate.lastSeen = now;
-			matchedCandidate.hits++;
-			matchedPeakState.sweep = this._sweepCount;
-			matchedPeakState.lastPeakFrequencyHz = peakFrequencyHz;
-			const newPeakBucket = Math.floor(peakFrequencyHz / SWEEP_CANDIDATE_PEAK_TOLERANCE_HZ);
-			if (newPeakBucket !== oldPeakBucket) {
-				this.removeCandidateFromPeakIndex(matchedCandidate, oldPeakBucket);
-				this.addCandidateToPeakIndex(matchedCandidate);
+			const levelActive = currentActive || averageActive;
+			if (levelActive || (bridged && runStart >= 0)) {
+				if (runStart < 0) runStart = index;
+				if (levelActive) {
+					if (firstLevelBin < 0) firstLevelBin = index;
+					lastLevelBin = index;
+				}
+				const value = this.current[index];
+				if (Number.isFinite(value)) {
+					measuredBins++;
+					if (peakIndex < 0 || value > peakDb) {
+						peakDb = value;
+						peakIndex = index;
+					}
+				}
+				if (currentActive) currentActiveBins++;
+				if (averageActive) averageConfirmed = true;
+				if (index < this.binCount) continue;
 			}
-			this.changedCandidates.set(matchedCandidate.id, matchedCandidate);
-			return;
+			if (runStart < 0) continue;
+			// A run must be present in this sweep, not only in the slower detection
+			// average, so a signal that stopped does not keep collecting hits.
+			if (peakIndex >= 0 && currentActiveBins > 0 && currentActiveBins * 4 >= measuredBins) {
+				const noiseFloorDb = this.floorAt(peakIndex);
+				const snrDb = peakDb - noiseFloorDb;
+				if (averageConfirmed || snrDb >= immediateSnrDb) {
+					const startHz = this.binLowHz(firstLevelBin);
+					const endHz = this.binHighHz(lastLevelBin);
+					if (endHz > startHz) {
+						const peakFrequencyHz = this.interpolatedPeakHz(peakIndex, startHz, endHz);
+						runs.push({ startHz, endHz, peakFrequencyHz, peakDb, noiseFloorDb, snrDb });
+					}
+				}
+			}
+			runStart = -1;
+			firstLevelBin = -1;
+			lastLevelBin = -1;
+			peakIndex = -1;
+			peakDb = NO_SIGNAL_DB;
+			measuredBins = 0;
+			currentActiveBins = 0;
+			averageConfirmed = false;
 		}
 
+		// The strongest detections claim existing candidates first, so a weaker run
+		// beside a carrier cannot take the carrier's identity.
+		runs.sort((a, b) => b.snrDb - a.snrDb || a.peakFrequencyHz - b.peakFrequencyHz);
+		for (const run of runs) {
+			const match = this.nearestPeakCandidate(run) ?? this.overlappingCandidate(run);
+			if (match) this.updateCandidate(match, run, now);
+			else this.createCandidate(run, now);
+		}
+	}
+
+	private isUnmatched(candidate: SweepCandidate): boolean {
+		const state = this.candidateState.get(candidate.id);
+		return state !== undefined && state.sweep !== this._sweepCount;
+	}
+
+	private nearestPeakCandidate(run: DetectionRun): SweepCandidate | null {
+		const bucket = peakBucket(run.peakFrequencyHz);
+		let best: SweepCandidate | null = null;
+		let bestDistance = Number.POSITIVE_INFINITY;
+		for (let neighbour = bucket - 1; neighbour <= bucket + 1; neighbour++) {
+			for (const candidate of this.candidatesByPeakBucket.get(neighbour) ?? []) {
+				if (!this.isUnmatched(candidate)) continue;
+				const distance = Math.abs(run.peakFrequencyHz - (this.candidateState.get(candidate.id)?.lastPeakFrequencyHz ?? Number.NaN));
+				if (!(distance <= SWEEP_CANDIDATE_PEAK_TOLERANCE_HZ)) continue;
+				if (distance < bestDistance || (distance === bestDistance && best !== null && candidate.id < best.id)) {
+					best = candidate;
+					bestDistance = distance;
+				}
+			}
+		}
+		return best;
+	}
+
+	// Wideband signals have no stable peak, so they keep their identity through
+	// band overlap instead: at least half of both the run and the candidate.
+	private overlappingCandidate(run: DetectionRun): SweepCandidate | null {
+		const runWidthHz = run.endHz - run.startHz;
+		let best: SweepCandidate | null = null;
+		let bestOverlapHz = 0;
+		for (const candidate of this.candidates) {
+			if (!this.isUnmatched(candidate)) continue;
+			const overlapHz = Math.min(run.endHz, candidate.endHz) - Math.max(run.startHz, candidate.startHz);
+			if (overlapHz * 2 < runWidthHz || overlapHz * 2 < candidate.bandwidthHz) continue;
+			if (overlapHz > bestOverlapHz) {
+				best = candidate;
+				bestOverlapHz = overlapHz;
+			}
+		}
+		return best;
+	}
+
+	private bandContact(candidate: SweepCandidate, run: DetectionRun): boolean {
+		const marginHz = BAND_CONTACT_BINS * this.resolutionHz;
+		return run.startHz <= candidate.endHz + marginHz && run.endHz >= candidate.startHz - marginHz;
+	}
+
+	private updateCandidate(candidate: SweepCandidate, run: DetectionRun, now: number): void {
+		const state = this.candidateState.get(candidate.id);
+		if (!state) return;
+		if (this.bandContact(candidate, run)) {
+			candidate.startHz = Math.min(candidate.startHz, run.startHz);
+			candidate.endHz = Math.max(candidate.endHz, run.endHz);
+		} else {
+			// A peak that moved away from the band only extends it to the peak itself.
+			candidate.startHz = Math.min(candidate.startHz, run.peakFrequencyHz);
+			candidate.endHz = Math.max(candidate.endHz, run.peakFrequencyHz);
+		}
+		candidate.centerHz = (candidate.startHz + candidate.endHz) / 2;
+		candidate.bandwidthHz = candidate.endHz - candidate.startHz;
+		candidate.meanPeakFrequencyHz += (run.peakFrequencyHz - candidate.meanPeakFrequencyHz) / (candidate.hits + 1);
+		candidate.minPeakFrequencyHz = Math.min(candidate.minPeakFrequencyHz, run.peakFrequencyHz);
+		candidate.maxPeakFrequencyHz = Math.max(candidate.maxPeakFrequencyHz, run.peakFrequencyHz);
+		candidate.meanPeakFrequencyHz = Math.min(candidate.maxPeakFrequencyHz, Math.max(candidate.minPeakFrequencyHz, candidate.meanPeakFrequencyHz));
+		if (run.peakDb > candidate.peakDb) {
+			candidate.peakDb = run.peakDb;
+			candidate.peakFrequencyHz = run.peakFrequencyHz;
+		}
+		candidate.noiseFloorDb = Math.min(candidate.noiseFloorDb, run.noiseFloorDb);
+		candidate.snrDb = candidate.peakDb - candidate.noiseFloorDb;
+		candidate.lastSeen = now;
+		candidate.hits++;
+		state.sweep = this._sweepCount;
+		state.lastPeakFrequencyHz = run.peakFrequencyHz;
+		const bucket = peakBucket(run.peakFrequencyHz);
+		if (bucket !== state.bucket) {
+			this.removeCandidateFromPeakIndex(candidate, state.bucket);
+			state.bucket = bucket;
+			this.addCandidateToPeakIndex(candidate, bucket);
+		}
+		this.changedCandidates.set(candidate.id, candidate);
+	}
+
+	private createCandidate(run: DetectionRun, now: number): void {
+		if (this.candidates.length >= SWEEP_MAX_CANDIDATES) this.evictLeastRecentlySeen();
 		const candidate: SweepCandidate = {
 			id: this.nextCandidateId++,
-			startHz,
-			endHz,
-			centerHz: (startHz + endHz) / 2,
-			bandwidthHz: endHz - startHz,
-			peakFrequencyHz,
-			meanPeakFrequencyHz: peakFrequencyHz,
-			minPeakFrequencyHz: peakFrequencyHz,
-			maxPeakFrequencyHz: peakFrequencyHz,
-			peakDb,
-			noiseFloorDb,
-			snrDb: peakDb - noiseFloorDb,
+			startHz: run.startHz,
+			endHz: run.endHz,
+			centerHz: (run.startHz + run.endHz) / 2,
+			bandwidthHz: run.endHz - run.startHz,
+			peakFrequencyHz: run.peakFrequencyHz,
+			meanPeakFrequencyHz: run.peakFrequencyHz,
+			minPeakFrequencyHz: run.peakFrequencyHz,
+			maxPeakFrequencyHz: run.peakFrequencyHz,
+			peakDb: run.peakDb,
+			noiseFloorDb: run.noiseFloorDb,
+			snrDb: run.snrDb,
 			firstSeen: now,
 			lastSeen: now,
 			hits: 1,
 		};
+		const bucket = peakBucket(run.peakFrequencyHz);
 		this.candidates.push(candidate);
-		this.candidateSweepState.set(candidate.id, {
-			sweep: this._sweepCount,
-			lastPeakFrequencyHz: peakFrequencyHz,
-		});
-		this.addCandidateToPeakIndex(candidate);
+		this.candidateState.set(candidate.id, { sweep: this._sweepCount, lastPeakFrequencyHz: run.peakFrequencyHz, bucket });
+		this.addCandidateToPeakIndex(candidate, bucket);
 		this.changedCandidates.set(candidate.id, candidate);
 	}
 
-	private addCandidateToPeakIndex(candidate: SweepCandidate): void {
-		const lastPeakFrequencyHz = this.candidateSweepState.get(candidate.id)?.lastPeakFrequencyHz ?? candidate.meanPeakFrequencyHz;
-		const bucket = Math.floor(lastPeakFrequencyHz / SWEEP_CANDIDATE_PEAK_TOLERANCE_HZ);
+	private evictLeastRecentlySeen(): void {
+		let oldest = 0;
+		for (let index = 1; index < this.candidates.length; index++) {
+			const candidate = this.candidates[index];
+			const current = this.candidates[oldest];
+			if (candidate.lastSeen < current.lastSeen
+				|| (candidate.lastSeen === current.lastSeen && candidate.hits < current.hits)) oldest = index;
+		}
+		const [evicted] = this.candidates.splice(oldest, 1);
+		if (!evicted) return;
+		const state = this.candidateState.get(evicted.id);
+		if (state) this.removeCandidateFromPeakIndex(evicted, state.bucket);
+		this.candidateState.delete(evicted.id);
+		this.changedCandidates.delete(evicted.id);
+		this.removedCandidateIds.add(evicted.id);
+	}
+
+	private addCandidateToPeakIndex(candidate: SweepCandidate, bucket: number): void {
 		let candidates = this.candidatesByPeakBucket.get(bucket);
 		if (!candidates) {
 			candidates = new Set<SweepCandidate>();

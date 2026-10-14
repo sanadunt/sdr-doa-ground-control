@@ -3,6 +3,19 @@
 Tanggal: 21 September 2026
 Status: **Implemented in Ground Console frontend; hardening and live validation ongoing**
 
+Catatan status 2026-10-13 (audit fungsional 2026-10-12, detail di `anti-slop/audit-006-2026-10-12-functional.md`):
+
+- Sudah dipenuhi: uji antimeridian di §5 (AUD-88), peringatan basemap tidak tersedia di §8 dan §10 (AUD-89), dan kamera yang bertahan saat berpindah tab di §7 dan §9 (AUD-90).
+- Perilaku yang berubah dari rencana ini:
+  - Overlay memakai bearing geografis (360 − θ₀ + compass_offset) mod 360, bukan θ₀ mentah (AUD-01).
+  - Skala dB overlay default Auto dari vektor (AUD-07).
+  - Basemap memakai satu host tile pada satu waktu, `tile.openstreetmap.de` lalu `tile.openstreetmap.org` (AUD-32).
+  - Tanpa WebGL2, setelah context hilang, atau bila worker gagal, overlay digambar di kanvas dengan pemberitahuan (AUD-11, AUD-31).
+  - Overlay hanya tampil bila predikat kesiapan DoA (`overviewDoaStatus`) mengizinkan (AUD-04, AUD-21).
+- Belum sesuai rencana: §5 meminta overlay live di posisi manual/fallback hanya lewat pilihan eksplisit `Reference preview`. Saat ini node tanpa fix GPS tetap menggambar bearing live dari posisi referensi dengan label "REFERENCE ONLY · NOT LIVE GPS" (sisa AUD-29, menunggu keputusan produk).
+- Belum diuji: perangkat GPU nyata, tile OSM nyata, dan data live dari node.
+- Perintah validasi di §10 memakai path mesin lain dan `npm run build`, yang kini juga menghapus `frontend/dist/receiver`. Urutan yang berlaku ada di `QUICKSTART.md` (`npm run build:all`).
+
 ## 1. Tujuan dan keputusan
 
 Mengubah peta Ground Console menjadi bantuan navigasi arah: pola angular 360°, garis bearing, dan heatmap relatif ter-overlay pada basemap OSM. **Bukan estimasi lokasi pemancar, RF coverage, pengukuran jarak, atau probabilitas keberadaan target.**

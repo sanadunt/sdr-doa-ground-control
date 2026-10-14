@@ -314,9 +314,16 @@ peak value          : 1.46
 Ground Console memakai 360 nilai ini hanya untuk observability lokal. Nilai CSV
 sudah berupa vektor dB relatif yang digeser oleh source; adapter mempertahankan
 angka dan tanda aslinya, lalu hanya memilih peak signed dengan nilai terbesar.
-Tidak ada `abs()` atau `log10()` kedua. Kurva polar 0°–359° (0° di atas, arah
-clockwise) tetap lokal, tidak masuk payload MQTT, tidak diteruskan oleh LAN edge
-agent, dan tidak mengubah status authority atau publication gate.
+Tidak ada `abs()` atau `log10()` kedua. Kurva polar 0°–359° tetap lokal, tidak
+masuk payload MQTT, tidak diteruskan oleh LAN edge agent, dan tidak mengubah status
+authority atau publication gate.
+
+Orientasi di Ground Console (diperbarui 2026-10-13): mode Polar menggambar bin θ₀
+berlawanan jarum jam dengan 0° di atas, sama dengan plot Polar KrakenSDR. Mode
+Compass dan peta menampilkan bearing geografis (360 − θ₀ + `compass_offset`) mod 360,
+north-up searah jarum jam. Skala radial otomatis mengikuti span data dengan langkah
+1/2/5 × 10^k dan span minimum 1 dB, sehingga snapshot di atas (0,00–1,46) tampil pada
+rentang 0–1,5 dB dengan tick 0,5 dB, bukan 0–10 dB.
 
 ### Perhatian freshness
 

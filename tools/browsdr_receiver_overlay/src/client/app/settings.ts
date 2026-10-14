@@ -1,7 +1,61 @@
 import type { AppInstance } from './types';
 import { makeDefaultVfo } from './constants';
 
+const SWEEP_SETTINGS_KEY = 'ReceiverSweepSettings';
+const LNA_GAINS = [0, 8, 16, 24, 32, 40];
+
+function finiteIn(value: unknown, minimum: number, maximum: number): value is number {
+	return typeof value === 'number' && Number.isFinite(value) && value >= minimum && value <= maximum;
+}
+
+/**
+ * Wide-scan settings survive a reload or a revisit of the Receiver page.
+ * The scan source is not stored: it follows the connected radio.
+ */
+export function restoreSweepSettings(sweep: Record<string, unknown>, raw: string | null): void {
+	if (!raw) return;
+	let stored: unknown;
+	try {
+		stored = JSON.parse(raw);
+	} catch {
+		return;
+	}
+	if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return;
+	const value = stored as Record<string, unknown>;
+	if (finiteIn(value.startMHz, 1, 7250) && finiteIn(value.endMHz, 1, 7250) && value.endMHz > value.startMHz) {
+		sweep.startMHz = value.startMHz;
+		sweep.endMHz = value.endMHz;
+	}
+	if (value.fftSize === 4096 || value.fftSize === 8192) sweep.fftSize = value.fftSize;
+	if (typeof value.lnaGain === 'number' && LNA_GAINS.includes(value.lnaGain)) sweep.lnaGain = value.lnaGain;
+	if (finiteIn(value.vgaGain, 0, 62) && value.vgaGain % 2 === 0) sweep.vgaGain = value.vgaGain;
+	if (typeof value.ampEnabled === 'boolean') sweep.ampEnabled = value.ampEnabled;
+	if (finiteIn(value.minSnrDb, 1, 60)) sweep.minSnrDb = value.minSnrDb;
+	if (finiteIn(value.averageAlpha, 0.01, 1)) sweep.averageAlpha = value.averageAlpha;
+	if (finiteIn(value.minimumPeakDb, -160, 0)) sweep.minimumPeakDb = value.minimumPeakDb;
+	if (typeof value.sortBy === 'string' && ['frequency', 'peak', 'snr', 'hits', 'lastSeen'].includes(value.sortBy)) sweep.sortBy = value.sortBy;
+}
+
+export function serializeSweepSettings(sweep: Record<string, unknown>): string {
+	const { startMHz, endMHz, fftSize, lnaGain, vgaGain, ampEnabled, minSnrDb, averageAlpha, minimumPeakDb, sortBy } = sweep;
+	return JSON.stringify({ startMHz, endMHz, fftSize, lnaGain, vgaGain, ampEnabled, minSnrDb, averageAlpha, minimumPeakDb, sortBy });
+}
+
 export const settingsMethods = {
+	saveSweepSettings(this: AppInstance) {
+		try {
+			localStorage.setItem(SWEEP_SETTINGS_KEY, serializeSweepSettings(this.sweep));
+		} catch {
+			// Storage can be unavailable (private mode); settings then last for this visit only.
+		}
+	},
+	loadSweepSettings(this: AppInstance) {
+		try {
+			restoreSweepSettings(this.sweep, localStorage.getItem(SWEEP_SETTINGS_KEY));
+		} catch {
+			// Storage can be unavailable; defaults stay in place.
+		}
+	},
 	saveSetting(this: AppInstance) {
 		const obj = {
 			radio: this.radio,
@@ -13,7 +67,11 @@ export const settingsMethods = {
 			collapsedPanels: this.collapsedPanels,
 			recentRemoteIds: this.recentRemoteIds,
 		};
-		localStorage.setItem("SDRSetting", JSON.stringify(obj));
+		try {
+			localStorage.setItem("SDRSetting", JSON.stringify(obj));
+		} catch {
+			// Storage can be unavailable (private mode); settings then last for this visit only.
+		}
 	},
 	loadSetting(this: AppInstance) {
 		try {

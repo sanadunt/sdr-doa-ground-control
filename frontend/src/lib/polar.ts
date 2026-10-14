@@ -1,5 +1,7 @@
 import type { Candidate, CompassConfig, CompassResolution, ManualCompassOverride, PolarSettings, PolarView, TelemetrySnapshot } from '../types';
 import { candidate, nativeViewsReady, numberOrNull, polarDataReady } from './telemetry';
+import type { Translate } from './i18n';
+import { formatDuration } from './healthView';
 
 export function polarSettings(figType: unknown, compassOffset: unknown): PolarSettings {
   const requested = String(figType ?? 'Polar').trim().toLowerCase();
@@ -45,33 +47,106 @@ export const DEFAULT_COMPASS_CONFIG: CompassConfig = {
   manualCompassOffset: 0,
 };
 
-function compassSettingsFromSnapshot(snapshot: TelemetrySnapshot | null | undefined, previousSettings: PolarSettings): PolarSettings {
-  const settingsFields = snapshot?.settings?.fields ?? {};
-  return polarSettings(
-    Object.prototype.hasOwnProperty.call(settingsFields, 'doa_fig_type') ? settingsFields.doa_fig_type : previousSettings.figType,
-    Object.prototype.hasOwnProperty.call(settingsFields, 'compass_offset') ? settingsFields.compass_offset : previousSettings.compassOffset,
-  );
+/** How long the last Data Out display settings stay usable when a read fails. */
+export const DATA_OUT_SETTINGS_MAX_AGE_MS = 90_000;
+
+/**
+ * Display settings reported by one Data Out read. A field is null when the node
+ * did not report a usable value: KrakenSDR's default `Linear` plot has no polar
+ * axis, but its `compass_offset` still describes the array orientation.
+ */
+export interface DataOutCompassSettings {
+  baseUrl: string | null;
+  figType: PolarSettings['figType'] | null;
+  compassOffset: number | null;
+  observedAtMs: number | null;
 }
 
-function hasUsableDataOutCompassSettings(snapshot: TelemetrySnapshot | null | undefined): boolean {
-  if (!snapshot || snapshot.status?.available !== true) return false;
-  const fields = snapshot.settings?.fields ?? {};
-  const hasFigType = Object.prototype.hasOwnProperty.call(fields, 'doa_fig_type');
-  const hasOffset = Object.prototype.hasOwnProperty.call(fields, 'compass_offset');
-  if (!hasFigType && !hasOffset) return false;
-  if (hasFigType) {
+export type CompassSourceCode =
+  | 'DATA_OUT'
+  | 'DATA_OUT_LOCAL_AXIS'
+  | 'DATA_OUT_LOCAL_OFFSET'
+  | 'DATA_OUT_UNAVAILABLE'
+  | 'MANUAL'
+  | 'FALLBACK';
+
+export interface CompassSourceResolution extends CompassResolution {
+  code: CompassSourceCode;
+  /** The offset came from Data Out (current or last known) or from a manual entry. */
+  offsetVerified: boolean;
+  /** Age of reused Data Out settings when the current read had none; null otherwise. */
+  lastKnownAgeMs: number | null;
+}
+
+function recordOrNull(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function snapshotBaseUrl(snapshot: TelemetrySnapshot | null | undefined): string | null {
+  const baseUrl = recordOrNull(snapshot?.collector)?.base_url;
+  return typeof baseUrl === 'string' && baseUrl.trim() ? baseUrl.trim() : null;
+}
+
+function nodeRestarted(snapshot: TelemetrySnapshot | null | undefined): boolean {
+  const regressed = recordOrNull(snapshot?.node_progress)?.regressed_counters;
+  return Array.isArray(regressed) && regressed.includes('uptime_ms');
+}
+
+/** Read the display settings of one live snapshot; simulation never counts as Data Out. */
+export function dataOutCompassFromSnapshot(snapshot: TelemetrySnapshot | null | undefined): DataOutCompassSettings | null {
+  if (!snapshot || snapshot.simulation === true || snapshot.status?.available !== true) return null;
+  if (snapshot.settings?.available === false) return null;
+  const fields = recordOrNull(snapshot.settings?.fields) ?? {};
+  let figType: DataOutCompassSettings['figType'] = null;
+  if (Object.prototype.hasOwnProperty.call(fields, 'doa_fig_type')) {
     const requested = String(fields.doa_fig_type ?? '').trim().toLowerCase();
-    if (requested !== 'polar' && requested !== 'compass') return false;
+    if (requested === 'polar') figType = 'Polar';
+    if (requested === 'compass') figType = 'Compass';
   }
-  if (hasOffset && finiteInput(fields.compass_offset) === null) return false;
-  return true;
+  const compassOffset = Object.prototype.hasOwnProperty.call(fields, 'compass_offset') ? finiteInput(fields.compass_offset) : null;
+  if (figType === null && compassOffset === null) return null;
+  return { baseUrl: snapshotBaseUrl(snapshot), figType, compassOffset, observedAtMs: numberOrNull(snapshot.observed_at_ms) };
 }
 
+/** Keep the latest usable Data Out display settings across reads that lack them. */
+export function rememberDataOutCompass(
+  previous: DataOutCompassSettings | null,
+  snapshot: TelemetrySnapshot | null | undefined,
+): DataOutCompassSettings | null {
+  const current = dataOutCompassFromSnapshot(snapshot);
+  if (current) return current;
+  if (!previous || !snapshot || snapshot.simulation === true) return previous;
+  const baseUrl = snapshotBaseUrl(snapshot);
+  if ((baseUrl !== null && previous.baseUrl !== null && baseUrl !== previous.baseUrl) || nodeRestarted(snapshot)) return null;
+  return previous;
+}
+
+function lastKnownAge(
+  memory: DataOutCompassSettings | null,
+  snapshot: TelemetrySnapshot | null | undefined,
+  nowMs: number,
+): number | null {
+  if (!memory || memory.observedAtMs === null || nodeRestarted(snapshot)) return null;
+  const baseUrl = snapshotBaseUrl(snapshot);
+  if (baseUrl !== null && memory.baseUrl !== null && baseUrl !== memory.baseUrl) return null;
+  const now = numberOrNull(snapshot?.observed_at_ms) ?? nowMs;
+  const age = now - memory.observedAtMs;
+  return Number.isFinite(age) && age >= 0 && age <= DATA_OUT_SETTINGS_MAX_AGE_MS ? age : null;
+}
+
+/**
+ * Pick the renderer axis and compass offset. Data Out settings are validated
+ * per field: a `Linear` (or unknown) plot type keeps the reported offset with
+ * a local axis. When the current read has no usable settings, the last Data
+ * Out settings of the same node are reused for a bounded time and labelled.
+ */
 export function resolveCompassSource(
   snapshot: TelemetrySnapshot | null | undefined,
   previousSettings: PolarSettings = { figType: 'Polar', compassOffset: 0 },
   config: CompassConfig = DEFAULT_COMPASS_CONFIG,
-): CompassResolution {
+  memory: DataOutCompassSettings | null = null,
+  nowMs: number = Date.now(),
+): CompassSourceResolution {
   if (config.source === 'MANUAL') {
     const settings = manualCompassOverrideFromInput(config.manualFigType, config.manualCompassOffset).override;
     if (settings) {
@@ -81,6 +156,9 @@ export function resolveCompassSource(
         effectiveSource: 'MANUAL',
         label: 'MANUAL COMPASS',
         detail: 'Using local renderer settings; remote settings and telemetry remain untouched.',
+        code: 'MANUAL',
+        offsetVerified: true,
+        lastKnownAgeMs: null,
       };
     }
   }
@@ -91,16 +169,35 @@ export function resolveCompassSource(
       effectiveSource: 'FALLBACK',
       label: 'DEFAULT FALLBACK',
       detail: 'Using the local renderer fallback; this is not a live Compass setting.',
+      code: 'FALLBACK',
+      offsetVerified: false,
+      lastKnownAgeMs: null,
     };
   }
-  const dataOutSettings = compassSettingsFromSnapshot(snapshot, previousSettings);
-  if (hasUsableDataOutCompassSettings(snapshot)) {
+  const current = dataOutCompassFromSnapshot(snapshot);
+  const age = current ? null : lastKnownAge(memory, snapshot, nowMs);
+  const reported = current ?? (age !== null ? memory : null);
+  if (reported) {
+    const code: CompassSourceCode = reported.figType === null
+      ? 'DATA_OUT_LOCAL_AXIS'
+      : reported.compassOffset === null ? 'DATA_OUT_LOCAL_OFFSET' : 'DATA_OUT';
+    const base = code === 'DATA_OUT_LOCAL_AXIS'
+      ? 'DATA_OUT OFFSET · LOCAL AXIS'
+      : code === 'DATA_OUT_LOCAL_OFFSET' ? 'DATA_OUT AXIS · LOCAL OFFSET' : 'DATA_OUT COMPASS';
     return {
-      settings: dataOutSettings,
+      settings: {
+        figType: reported.figType ?? previousSettings.figType,
+        compassOffset: reported.compassOffset ?? previousSettings.compassOffset,
+      },
       selectedSource: config.source,
       effectiveSource: 'DATA_OUT',
-      label: 'DATA_OUT COMPASS',
-      detail: 'Using the renderer settings reported by Data Out.',
+      label: age !== null ? `${base} · LAST KNOWN` : base,
+      detail: age !== null
+        ? 'This read had no usable Data Out display settings; reusing the last ones reported by this node.'
+        : 'Using the renderer settings reported by Data Out.',
+      code,
+      offsetVerified: reported.compassOffset !== null,
+      lastKnownAgeMs: age,
     };
   }
   return {
@@ -109,7 +206,18 @@ export function resolveCompassSource(
     effectiveSource: 'FALLBACK',
     label: 'DATA_OUT COMPASS · DEFAULT FALLBACK',
     detail: 'Data Out Compass settings are unavailable; using the configured local fallback.',
+    code: 'DATA_OUT_UNAVAILABLE',
+    offsetVerified: false,
+    lastKnownAgeMs: null,
   };
+}
+
+/** Short source label for the compass offset in captions and the bearing readout. */
+export function compassOffsetSourceLabel(resolution: CompassSourceResolution, t: Translate): string {
+  if (!resolution.offsetVerified) return t('polar.offsetAssumed');
+  const base = resolution.code === 'MANUAL' ? 'MANUAL' : resolution.code === 'DATA_OUT_LOCAL_AXIS' ? 'DATA_OUT · LOCAL AXIS' : 'DATA_OUT';
+  if (resolution.lastKnownAgeMs === null) return base;
+  return t('readout.sourceLastKnown', { source: base, age: formatDuration(t, resolution.lastKnownAgeMs) });
 }
 
 export function manualCompassSettings(override: ManualCompassOverride | null | undefined): PolarSettings | null {
@@ -125,6 +233,42 @@ export function normalizeDegrees(degrees: number): number {
 
 export function displayAngleForBin(bin: number, settings: PolarSettings): number {
   return normalizeDegrees(settings.figType === 'Compass' ? 360 - bin + settings.compassOffset : bin);
+}
+
+/**
+ * Geographic bearing (degrees clockwise from north) for an upstream theta_0
+ * array angle or angular bin. theta_0 runs counter-clockwise in the array
+ * frame, so the map always applies the Compass conversion, independent of the
+ * Polar/Compass choice for the polar plot.
+ */
+export function geographicBearingForBin(bin: number, compassOffset: number): number {
+  return normalizeDegrees(360 - bin + (Number.isFinite(compassOffset) ? compassOffset : 0));
+}
+
+/** Geographic bearing of the view's canonical theta_0, or null when there is none. */
+export function bearingForView(view: PolarView): number | null {
+  return view.canonicalAngle === null ? null : geographicBearingForBin(view.canonicalAngle, view.settings.compassOffset);
+}
+
+/**
+ * Plotly angular-axis direction. Compass labels run clockwise. Polar labels are
+ * theta_0 and run counter-clockwise like the upstream KrakenSDR Polar plot, so
+ * with offset 0 both modes put a bin at the same place on screen and differ
+ * only in their labels.
+ */
+export function angularDirection(settings: PolarSettings): 'clockwise' | 'counterclockwise' {
+  return settings.figType === 'Compass' ? 'clockwise' : 'counterclockwise';
+}
+
+/** Screen position of a bin in degrees clockwise from the top, before Head Up. */
+export function screenAngleForBin(bin: number, settings: PolarSettings): number {
+  return settings.figType === 'Compass' ? displayAngleForBin(bin, settings) : normalizeDegrees(360 - bin);
+}
+
+/** Round first, then wrap, so 359.96° reads 0.0° instead of 360.0°. */
+export function formatDegrees(degrees: number, digits = 0): string {
+  if (!Number.isFinite(degrees)) return 'N/A';
+  return normalizeDegrees(Number(degrees.toFixed(digits))).toFixed(digits);
 }
 
 export function signedPeak(values: number[]): { index: number; value: number } | null {
@@ -188,7 +332,11 @@ function cssVar(name: string, fallback: string): string {
   return value || fallback;
 }
 
-/** Draw the local 360-bin renderer: 0° at top, clockwise orientation. */
+/**
+ * Draw the local 360-bin renderer with 0° at the top. Compass labels run
+ * clockwise; Polar labels are theta_0 and run counter-clockwise, as in the
+ * Plotly renderer and the upstream KrakenSDR Polar plot.
+ */
 export function drawPolarCanvas(
   canvas: HTMLCanvasElement,
   values: number[] | null,
@@ -246,9 +394,14 @@ export function drawPolarCanvas(
   const perimeterInset = Math.max(9, cssSize * 0.035);
   const cardinalRadius = Math.min(maxRadius + Math.min(23, Math.max(15, cssSize * 0.06)), cssSize / 2 - perimeterInset);
   const degreeRadius = Math.min(maxRadius + Math.min(18, Math.max(12, cssSize * 0.045)), cssSize / 2 - perimeterInset);
-  const cardinalLabels: ReadonlyArray<readonly [string, number]> = [['N', 0], ['E', 90], ['S', 180], ['W', 270]];
+  const compass = settings.figType === 'Compass';
+  // Polar labels are theta_0 values; label a sits at 360 - a clockwise from the top.
+  const labelPosition = (label: number) => (compass ? label : normalizeDegrees(360 - label));
+  const cardinalLabels: ReadonlyArray<readonly [string, number]> = compass
+    ? [['N', 0], ['E', 90], ['S', 180], ['W', 270]]
+    : [['0°', 0], ['90°', 90], ['180°', 180], ['270°', 270]];
   for (const [label, degrees] of cardinalLabels) {
-    const radians = radiansFor(degrees);
+    const radians = radiansFor(labelPosition(degrees));
     context.fillText(label, Math.cos(radians) * cardinalRadius, Math.sin(radians) * cardinalRadius);
   }
   context.fillStyle = subtle;
@@ -261,7 +414,8 @@ export function drawPolarCanvas(
     context.lineTo(Math.cos(radians) * (maxRadius + 6), Math.sin(radians) * (maxRadius + 6));
     context.stroke();
     if (diagonalDegrees.has(degrees)) {
-      context.fillText(`${degrees}°`, Math.cos(radians) * degreeRadius, Math.sin(radians) * degreeRadius);
+      const labelRadians = radiansFor(labelPosition(degrees));
+      context.fillText(`${degrees}°`, Math.cos(labelRadians) * degreeRadius, Math.sin(labelRadians) * degreeRadius);
     }
   }
 
@@ -286,7 +440,7 @@ export function drawPolarCanvas(
       context.fillText(label, radialLabelX, radialLabelY);
     });
     const point = (value: number, index: number): [number, number] => {
-      const radians = radiansFor(displayAngleForBin(index, settings));
+      const radians = radiansFor(screenAngleForBin(index, settings));
       const radius = maxRadius * yFor(value);
       return [Math.cos(radians) * radius, Math.sin(radians) * radius];
     };
@@ -315,6 +469,7 @@ export function drawPolarCanvas(
     const peak = signedPeak(finite);
     if (peak) {
       const displayPeak = displayAngleForBin(peak.index, settings);
+      const peakScreen = screenAngleForBin(peak.index, settings);
       const [px, py] = point(finite[peak.index], peak.index);
       context.shadowBlur = 0;
       context.fillStyle = accent;
@@ -325,12 +480,12 @@ export function drawPolarCanvas(
       context.lineWidth = 1;
       context.beginPath();
       context.moveTo(px, py);
-      context.lineTo(Math.cos(radiansFor(displayPeak)) * (maxRadius + 12), Math.sin(radiansFor(displayPeak)) * (maxRadius + 12));
+      context.lineTo(Math.cos(radiansFor(peakScreen)) * (maxRadius + 12), Math.sin(radiansFor(peakScreen)) * (maxRadius + 12));
       context.stroke();
       context.fillStyle = accent;
       context.font = '700 9px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
       context.textAlign = 'center';
-      context.fillText(`PLOT ${displayPeak.toFixed(0)}°`, px, py < -maxRadius * 0.45 ? py + 15 : py - 11);
+      context.fillText(`PLOT ${formatDegrees(displayPeak)}°`, px, py < -maxRadius * 0.45 ? py + 15 : py - 11);
     }
   }
   context.restore();
@@ -343,8 +498,8 @@ export function polarMetadata(view: PolarView): {
   bins: string;
 } {
   return {
-    peak: view.displayPeak === null || view.peakIndex === null ? 'N/A' : `${view.displayPeak.toFixed(0)}° · bin ${view.peakIndex}`,
-    canonical: view.canonicalAngle === null ? 'N/A' : `${view.canonicalAngle.toFixed(1)}° · θ₀`,
+    peak: view.displayPeak === null || view.peakIndex === null ? 'N/A' : `${formatDegrees(view.displayPeak)}° · bin ${view.peakIndex}`,
+    canonical: view.canonicalAngle === null ? 'N/A' : `${formatDegrees(view.canonicalAngle, 1)}° · θ₀`,
     peakDb: view.peakValue === null ? 'N/A' : `${view.peakValue.toFixed(1)} dB`,
     bins: view.fresh ? '360' : 'N/A',
   };
@@ -358,9 +513,9 @@ export function polarSourceLabel(snapshot: TelemetrySnapshot | null | undefined,
 }
 
 export function canonicalLabel(view: PolarView): string {
-  return view.canonicalAngle === null ? 'N/A°' : `${view.canonicalAngle.toFixed(1)}°`;
+  return view.canonicalAngle === null ? 'N/A°' : `${formatDegrees(view.canonicalAngle, 1)}°`;
 }
 
 export function displayLabel(view: PolarView): string {
-  return view.displayPeak === null ? 'plot peak · display N/A°' : `plot peak · display ${view.displayPeak.toFixed(0)}° · bin ${view.peakIndex ?? 'N/A'}`;
+  return view.displayPeak === null ? 'plot peak · display N/A°' : `plot peak · display ${formatDegrees(view.displayPeak)}° · bin ${view.peakIndex ?? 'N/A'}`;
 }

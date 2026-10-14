@@ -32,16 +32,19 @@ export interface ReceiverScanRecord {
 	created_at: string;
 	completed_at: string | null;
 	source: SweepSource | 'receiver';
-	status: 'running' | 'complete' | 'stopped' | 'failed';
+	status: 'running' | 'complete' | 'stopped' | 'failed' | 'interrupted';
 	archive: boolean;
 	start_hz: number | null;
 	end_hz: number | null;
 	candidate_count: number;
 	trace_count: number;
+	trace_upload_failures: number;
 }
 
 export interface ReceiverScanDetails extends ReceiverScanRecord {
 	config: SweepConfig;
+	/** Archived trace format, or null for scans archived before the Receiver recorded it. */
+	traceFormat: number | null;
 }
 
 export interface ReceiverTraceRecord {
@@ -67,8 +70,16 @@ export interface ReceiverAudioSegmentRecord {
 	duration_seconds: number | null;
 	codec: string;
 	bytes: number;
-	status: 'complete' | 'failed';
+	/** complete, partial (upload failed later) and interrupted (page closed) segments are playable. */
+	status: 'complete' | 'partial' | 'interrupted' | 'failed' | 'recording';
 	error: string;
+}
+
+export interface ReceiverAudioUsage {
+	sessionBytes: number;
+	segmentBytes: number;
+	maxSessionBytes: number;
+	maxSegmentBytes: number;
 }
 
 export interface ReceiverAudioSessionRecord {
@@ -88,10 +99,34 @@ export interface ReceiverRecordPage {
 	limit: number;
 }
 
+export interface ReceiverAudioRecordFacets {
+	available_dates: string[];
+	vfo_indices: number[];
+	modes: string[];
+	bandwidths_hz: number[];
+	min_frequency_hz: number | null;
+	max_frequency_hz: number | null;
+	time_zone_fallback: boolean;
+}
+
+export interface ReceiverAudioRecordFilters {
+	date: string;
+	timeFrom: string;
+	timeTo: string;
+	timeZone: string;
+	utcOffsetMinutes: number;
+	minimumFrequencyMHz: string;
+	maximumFrequencyMHz: string;
+	vfoIndex: string;
+	mode: string;
+	bandwidthHz: string;
+}
+
 export interface CreateScanInput {
 	source: SweepSource;
 	config: SweepConfig;
 	archive: boolean;
+	traceFormat: number;
 }
 
 export interface CandidateQuery {
@@ -109,6 +144,47 @@ export interface CandidateQuery {
 const API_ROOT = '/api/receiver';
 const JSON_TIMEOUT_MS = 10_000;
 const AUDIO_CHUNK_TIMEOUT_MS = 30_000;
+const ARCHIVE_RETRY_DELAYS_MS = [500, 2_000];
+
+export class ReceiverRequestError extends Error {
+	constructor(message: string, readonly status: number) {
+		super(message);
+		this.name = 'ReceiverRequestError';
+	}
+}
+
+/** Archive writes that still failed after retries, per scan, reported when the scan finishes. */
+const failedTraceUploads = new Map<string, number>();
+
+function delay(ms: number): Promise<void> {
+	return new Promise(resolve => window.setTimeout(resolve, ms));
+}
+
+async function withRetry<T>(operation: () => Promise<T>, shouldRetry: () => boolean = () => true): Promise<T> {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			return await operation();
+		} catch (error) {
+			const status = error instanceof ReceiverRequestError ? error.status : 0;
+			const retryable = status === 0 || status >= 500;
+			if (!retryable || attempt >= ARCHIVE_RETRY_DELAYS_MS.length || !shouldRetry()) throw error;
+			await delay(ARCHIVE_RETRY_DELAYS_MS[attempt]);
+		}
+	}
+}
+
+/** The browser's current UTC offset, used by the console when its tz database lacks the zone. */
+export function browserUtcOffsetMinutes(): number {
+	return -new Date().getTimezoneOffset();
+}
+
+export function browserTimeZone(): string {
+	try {
+		return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+	} catch {
+		return 'UTC';
+	}
+}
 
 function objectValue(value: unknown, label: string): Record<string, unknown> {
 	if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new TypeError(`${label} must be an object.`);
@@ -231,7 +307,7 @@ function parseScanRecord(value: unknown): ReceiverScanRecord {
 	const source = stringValue(row.source, 'scan source');
 	if (!['native', 'manual', 'simulated', 'receiver'].includes(source)) throw new TypeError('scan source is invalid.');
 	const status = stringValue(row.status, 'scan status');
-	if (!['running', 'complete', 'stopped', 'failed'].includes(status)) throw new TypeError('scan status is invalid.');
+	if (!['running', 'complete', 'stopped', 'failed', 'interrupted'].includes(status)) throw new TypeError('scan status is invalid.');
 	if (typeof row.archive !== 'boolean') throw new TypeError('scan archive must be a boolean.');
 	return {
 		type: 'scan',
@@ -245,13 +321,16 @@ function parseScanRecord(value: unknown): ReceiverScanRecord {
 		end_hz: row.end_hz === null ? null : numberValue(row.end_hz, 'scan end_hz'),
 		candidate_count: integerValue(row.candidate_count, 'scan candidate_count'),
 		trace_count: integerValue(row.trace_count, 'scan trace_count'),
+		trace_upload_failures: row.trace_upload_failures === undefined ? 0 : integerValue(row.trace_upload_failures, 'scan trace_upload_failures'),
 	};
 }
 
 function parseAudioSegment(value: unknown): ReceiverAudioSegmentRecord {
 	const row = objectValue(value, 'Audio segment');
 	const status = row.status === undefined ? 'complete' : row.status;
-	if (status !== 'complete' && status !== 'failed') throw new TypeError('Audio segment status is invalid.');
+	if (status !== 'complete' && status !== 'partial' && status !== 'interrupted' && status !== 'failed' && status !== 'recording') {
+		throw new TypeError('Audio segment status is invalid.');
+	}
 	return {
 		id: stringValue(row.id, 'audio segment id'),
 		vfo_index: integerValue(row.vfo_index, 'audio VFO index'),
@@ -309,7 +388,8 @@ function parseScanDetails(value: unknown): ReceiverScanDetails {
 		ampEnabled: config.ampEnabled === true,
 		iqCorrection: config.iqCorrection === true,
 	};
-	return { ...record, config: parsedConfig };
+	const traceFormat = config.traceFormat === undefined ? null : integerValue(config.traceFormat, 'config traceFormat');
+	return { ...record, config: parsedConfig, traceFormat };
 }
 
 async function request<T>(path: string, init: RequestInit, parse: (value: unknown) => T, timeoutMs = JSON_TIMEOUT_MS): Promise<T> {
@@ -323,7 +403,9 @@ async function request<T>(path: string, init: RequestInit, parse: (value: unknow
 			headers,
 			credentials: 'same-origin',
 			cache: 'no-store',
-			signal: controller.signal,
+			// A keepalive request sent while the page unloads must outlive this
+			// document; tying it to the page's AbortController cancels it on detach.
+			...(init.keepalive ? {} : { signal: controller.signal }),
 		});
 		const text = await response.text();
 		if (!response.ok) {
@@ -335,7 +417,7 @@ async function request<T>(path: string, init: RequestInit, parse: (value: unknow
 			} catch {
 				// Keep the server's plain-text diagnostic.
 			}
-			throw new Error(detail || `Receiver records request failed with HTTP ${response.status}.`);
+			throw new ReceiverRequestError(detail || `Receiver records request failed with HTTP ${response.status}.`, response.status);
 		}
 		let body: unknown;
 		if (text) {
@@ -356,7 +438,7 @@ async function requestTrace(path: string): Promise<Uint8Array> {
 	const timeout = window.setTimeout(() => controller.abort(), JSON_TIMEOUT_MS);
 	try {
 		const response = await fetch(`${API_ROOT}${path}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
-		if (!response.ok) throw new Error(`Receiver trace request failed with HTTP ${response.status}.`);
+		if (!response.ok) throw new ReceiverRequestError(`Receiver trace request failed with HTTP ${response.status}.`, response.status);
 		const bytes = new Uint8Array(await response.arrayBuffer());
 		if (bytes.length !== 2_048) throw new TypeError('Receiver trace must contain exactly 2,048 bytes.');
 		return bytes;
@@ -383,7 +465,8 @@ export const receiverRecordsApi = {
 	},
 
 	createScan(input: CreateScanInput): Promise<{ id: string; created_at: string; archive: boolean }> {
-		return request('/scans', json(input), value => {
+		const { traceFormat, ...scan } = input;
+		return request('/scans', json({ ...scan, config: { ...scan.config, traceFormat } }), value => {
 			const row = objectValue(value, 'Created scan');
 			if (typeof row.archive !== 'boolean') throw new TypeError('scan archive must be a boolean.');
 			return { id: stringValue(row.id, 'scan id'), created_at: stringValue(row.created_at, 'scan created_at'), archive: row.archive };
@@ -391,7 +474,7 @@ export const receiverRecordsApi = {
 	},
 
 	upsertCandidates(scanId: string, candidates: SweepCandidate[]): Promise<void> {
-		return request(`/scans/${encodeId(scanId)}/candidates`, json({ candidates }), parseVoid);
+		return withRetry(() => request(`/scans/${encodeId(scanId)}/candidates`, json({ candidates }), parseVoid));
 	},
 
 	getCandidates(scanId: string, query: CandidateQuery): Promise<SweepCandidatePage> {
@@ -419,12 +502,24 @@ export const receiverRecordsApi = {
 		return request(`/scans/${encodeId(scanId)}/candidates?${params.toString()}`, {}, parseCandidatePage);
 	},
 
-	saveTrace(scanId: string, sweep: number, trace: Uint8Array<ArrayBuffer>): Promise<void> {
-		return request(`/scans/${encodeId(scanId)}/trace?sweep=${encodeURIComponent(String(sweep))}`, {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/octet-stream' },
-			body: trace,
-		}, parseVoid);
+	/** `shouldRetry` is asked after each failed attempt; a trace that still fails is counted for finishScan. */
+	async saveTrace(scanId: string, sweep: number, trace: Uint8Array<ArrayBuffer>, shouldRetry?: () => boolean): Promise<void> {
+		try {
+			await withRetry(() => request(`/scans/${encodeId(scanId)}/trace?sweep=${encodeURIComponent(String(sweep))}`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/octet-stream' },
+				body: trace,
+			}, parseVoid), shouldRetry);
+		} catch (error) {
+			receiverRecordsApi.recordTraceUploadFailures(scanId, 1);
+			throw error;
+		}
+	},
+
+	/** Counts traces that were never saved, such as ones dropped from a full upload queue. */
+	recordTraceUploadFailures(scanId: string, count: number): void {
+		if (!Number.isInteger(count) || count <= 0) return;
+		failedTraceUploads.set(scanId, (failedTraceUploads.get(scanId) ?? 0) + count);
 	},
 
 	getScan(scanId: string): Promise<ReceiverScanDetails> {
@@ -440,8 +535,13 @@ export const receiverRecordsApi = {
 		return requestTrace(`/scans/${encodeId(scanId)}/trace?sweep=${encodeURIComponent(String(sweep))}`);
 	},
 
-	finishScan(scanId: string, status: 'complete' | 'stopped' | 'failed'): Promise<void> {
-		return request(`/scans/${encodeId(scanId)}/finish`, json({ status }), parseVoid);
+	async finishScan(scanId: string, status: 'complete' | 'stopped' | 'failed', options: { keepalive?: boolean } = {}): Promise<void> {
+		const failures = failedTraceUploads.get(scanId) ?? 0;
+		await request(`/scans/${encodeId(scanId)}/finish`, {
+			...json({ status, trace_upload_failures: failures }),
+			keepalive: Boolean(options.keepalive),
+		}, parseVoid);
+		failedTraceUploads.delete(scanId);
 	},
 
 	listRecords(type: ReceiverRecord['type'], offset = 0, limit = 100): Promise<ReceiverRecordPage> {
@@ -455,6 +555,75 @@ export const receiverRecordsApi = {
 		});
 	},
 
+	listAudioRecords(offset = 0, limit = 100, filters: ReceiverAudioRecordFilters): Promise<ReceiverRecordPage> {
+		const params = new URLSearchParams({ type: 'audio-session', offset: String(offset), limit: String(limit) });
+		if (filters.date) {
+			const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(filters.date);
+			if (!match) throw new TypeError('Audio date must use YYYY-MM-DD.');
+			const year = Number(match[1]);
+			const month = Number(match[2]);
+			const day = Number(match[3]);
+			const start = new Date(year, month - 1, day);
+			if (year < 100) start.setFullYear(year);
+			if (start.getFullYear() !== year || start.getMonth() !== month - 1 || start.getDate() !== day) {
+				throw new TypeError('Audio date filter is not a valid calendar date.');
+			}
+			const end = new Date(start);
+			end.setDate(end.getDate() + 1);
+			params.set('started_after', start.toISOString());
+			params.set('started_before', end.toISOString());
+		}
+		if (filters.timeFrom) params.set('time_from', filters.timeFrom);
+		if (filters.timeTo) params.set('time_to', filters.timeTo);
+		if (filters.timeFrom || filters.timeTo) {
+			params.set('time_zone', filters.timeZone);
+			params.set('utc_offset_minutes', String(filters.utcOffsetMinutes));
+		}
+		if (filters.minimumFrequencyMHz) {
+			const frequencyMHz = Number(filters.minimumFrequencyMHz);
+			if (!Number.isFinite(frequencyMHz) || frequencyMHz < 0) throw new TypeError('Minimum frequency must be a nonnegative MHz value.');
+			params.set('min_frequency_hz', String(frequencyMHz * 1_000_000));
+		}
+		if (filters.maximumFrequencyMHz) {
+			const frequencyMHz = Number(filters.maximumFrequencyMHz);
+			if (!Number.isFinite(frequencyMHz) || frequencyMHz < 0) throw new TypeError('Maximum frequency must be a nonnegative MHz value.');
+			params.set('max_frequency_hz', String(frequencyMHz * 1_000_000));
+		}
+		if (filters.vfoIndex) params.set('vfo_index', filters.vfoIndex);
+		if (filters.mode) params.set('mode', filters.mode);
+		if (filters.bandwidthHz) params.set('bandwidth_hz', filters.bandwidthHz);
+		return request(`/records?${params.toString()}`, {}, value => {
+			const page = parsePage(value, parseRecord, 'VFO audio records');
+			if (page.items.some(record => record.type !== 'audio-session')) {
+				throw new TypeError('VFO audio records response included another record type.');
+			}
+			return page;
+		});
+	},
+
+	getAudioRecordFacets(timeZone: string, utcOffsetMinutes: number): Promise<ReceiverAudioRecordFacets> {
+		const params = new URLSearchParams({ time_zone: timeZone, utc_offset_minutes: String(utcOffsetMinutes) });
+		return request(`/audio-facets?${params.toString()}`, {}, value => {
+			const row = objectValue(value, 'VFO audio facets');
+			if (!Array.isArray(row.available_dates) || !Array.isArray(row.vfo_indices) || !Array.isArray(row.modes) || !Array.isArray(row.bandwidths_hz)) {
+				throw new TypeError('VFO audio facet options must be arrays.');
+			}
+			return {
+				available_dates: row.available_dates.map((entry, index) => stringValue(entry, `available_dates[${index}]`)),
+				vfo_indices: row.vfo_indices.map((entry, index) => integerValue(entry, `vfo_indices[${index}]`)),
+				modes: row.modes.map((entry, index) => stringValue(entry, `modes[${index}]`)),
+				bandwidths_hz: row.bandwidths_hz.map((entry, index) => numberValue(entry, `bandwidths_hz[${index}]`)),
+				min_frequency_hz: row.min_frequency_hz === null ? null : numberValue(row.min_frequency_hz, 'min_frequency_hz'),
+				max_frequency_hz: row.max_frequency_hz === null ? null : numberValue(row.max_frequency_hz, 'max_frequency_hz'),
+				time_zone_fallback: row.time_zone_fallback === true,
+			};
+		});
+	},
+
+	deleteAudioSegment(segmentId: string): Promise<void> {
+		return request(`/audio-segments/${encodeId(segmentId)}`, { method: 'DELETE' }, parseVoid);
+	},
+
 	deleteRecord(recordId: string): Promise<void> {
 		return request(`/records/${encodeId(recordId)}`, { method: 'DELETE' }, parseVoid);
 	},
@@ -465,11 +634,13 @@ export const receiverRecordsApi = {
 		return result.items.map(parseMarkerSet);
 	},
 
-	async saveMarkerSet(set: ReceiverMarkerSet): Promise<ReceiverMarkerSet> {
+	/** Saving a new set under a taken name fails with HTTP 409 unless overwrite is set. */
+	async saveMarkerSet(set: ReceiverMarkerSet, overwrite = false): Promise<ReceiverMarkerSet> {
 		return request('/marker-sets', json({
 			id: set.id || undefined,
 			name: set.name,
 			markers: set.markers.map(markerToApi),
+			...(overwrite ? { overwrite: true } : {}),
 		}), parseMarkerSet);
 	},
 
@@ -485,20 +656,32 @@ export const receiverRecordsApi = {
 		return request(`/audio-sessions/${encodeId(sessionId)}/segments`, json(metadata), parseIdResponse);
 	},
 
-	appendAudioChunk(segmentId: string, chunk: Blob): Promise<void> {
+	appendAudioChunk(segmentId: string, chunk: Blob): Promise<ReceiverAudioUsage> {
 		return request(`/audio-segments/${encodeId(segmentId)}/chunk`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/octet-stream' },
 			body: chunk,
-		}, parseVoid, AUDIO_CHUNK_TIMEOUT_MS);
+		}, value => {
+			const row = objectValue(value, 'Audio chunk response');
+			return {
+				sessionBytes: integerValue(row.session_bytes, 'session_bytes'),
+				segmentBytes: integerValue(row.segment_bytes, 'segment_bytes'),
+				maxSessionBytes: row.max_session_bytes === undefined ? Number.POSITIVE_INFINITY : integerValue(row.max_session_bytes, 'max_session_bytes'),
+				maxSegmentBytes: row.max_segment_bytes === undefined ? Number.POSITIVE_INFINITY : integerValue(row.max_segment_bytes, 'max_segment_bytes'),
+			};
+		}, AUDIO_CHUNK_TIMEOUT_MS);
 	},
 
 	finishAudioSegment(segmentId: string, metadata: { ended_at: string; duration_seconds: number; status?: 'complete' | 'failed'; error?: string }): Promise<void> {
 		return request(`/audio-segments/${encodeId(segmentId)}/finish`, json(metadata), parseVoid);
 	},
 
-	finishAudioSession(sessionId: string): Promise<void> {
-		return request(`/audio-sessions/${encodeId(sessionId)}/finish`, json({}), parseVoid);
+	/** With finalizeOpenSegments the console closes still-open segments itself (page unload). */
+	finishAudioSession(sessionId: string, options: { finalizeOpenSegments?: boolean; keepalive?: boolean } = {}): Promise<void> {
+		return request(`/audio-sessions/${encodeId(sessionId)}/finish`, {
+			...json(options.finalizeOpenSegments ? { finalize_open_segments: true } : {}),
+			keepalive: Boolean(options.keepalive),
+		}, parseVoid);
 	},
 
 	audioUrl(segmentId: string): string {

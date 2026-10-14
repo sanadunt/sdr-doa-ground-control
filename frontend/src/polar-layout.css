@@ -2,6 +2,9 @@
 .plot-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; padding: 12px; border: 0; }
 .plot-controls .form-field { flex: 1 1 85px; min-width: 75px; }
 .plot-controls input { min-width: 0; }
+.plot-controls input:disabled { opacity: .55; cursor: not-allowed; }
+.plot-manual-toggle { display: inline-flex; flex: 1 1 100%; align-items: center; gap: 8px; min-height: 32px; color: var(--muted); font-size: 12px; cursor: pointer; }
+.plot-manual-toggle input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
 .plot-settings { flex: 0 0 auto; margin: 0 -8px; border-top: 1px solid var(--line-soft); }
 .plot-settings > summary { min-height: 40px; padding: 10px 12px; color: var(--muted); cursor: pointer; font-size: 12px; font-weight: 600; }
 .plot-settings > summary:hover { color: var(--text); }
@@ -15,4 +18,9 @@
   .plot-controls .form-field > span { font-size: 11px; }
   .plot-controls input { min-height: 44px; padding: 6px; font-size: 13px; }
   .plot-controls button { flex: 1 1 auto; min-height: 44px; }
+  .plot-manual-toggle { min-height: 44px; }
+}
+@media (pointer: coarse), (any-pointer: coarse), (max-width: 639px) {
+  .plot-settings > summary { min-height: 44px; padding-block: 12px; }
+  .plot-manual-toggle { min-height: 44px; }
 }

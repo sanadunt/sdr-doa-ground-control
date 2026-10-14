@@ -1,16 +1,20 @@
 import type { JSX } from 'react';
-import { Suspense, lazy, memo, useMemo } from 'react';
+import { Suspense, memo, useMemo } from 'react';
 import type { CompassConfig, GpsConfig, MapCoordinate, PolarSettings, TelemetrySnapshot } from '../types';
 import type { SimulationSettings } from '../lib/simulation';
-import { resolveGpsSource } from '../lib/map';
-import { resolveCompassSource } from '../lib/polar';
+import { gpsReportsNoFix, holdStationCoordinate, resolveGpsSource } from '../lib/map';
+import { doaStatusTextKey, overviewDoaStatus } from '../lib/doaStatus';
+import { lazyWithRetry } from '../lib/lazyRetry';
+import { compassOffsetSourceLabel, polarSettings, rememberDataOutCompass, resolveCompassSource } from '../lib/polar';
+import type { DataOutCompassSettings } from '../lib/polar';
 import { useI18n } from '../lib/i18n';
 import { DoaReadout } from '../components/DoaReadout';
 import { PolarPanel } from '../components/PolarPanel';
+import { LoadErrorBoundary } from '../components/LoadErrorBoundary';
 
-// MapLibre is the largest dependency in the app; load it beside the shell
-// instead of blocking the first paint on it.
-const TacticalMap = lazy(() => import('../components/TacticalMap').then((module) => ({ default: module.TacticalMap })));
+// MapLibre is one of the two large dependencies (Plotly, loaded by PolarPlot,
+// is the other); load it beside the shell instead of blocking the first paint.
+const TacticalMap = lazyWithRetry(() => import('../components/TacticalMap'), (module) => module.TacticalMap);
 
 function MapPlaceholder(): JSX.Element {
   const { t } = useI18n();
@@ -20,6 +24,13 @@ function MapPlaceholder(): JSX.Element {
     </section>
   );
 }
+
+// Last usable Data Out display settings. Module scope keeps them across route
+// changes, so one failed settings.json read does not flip the orientation.
+let dataOutCompassMemory: DataOutCompassSettings | null = null;
+// Last live Data Out station fix for the readout, held through freshness gaps
+// with the same rule the map uses for its marker.
+let lastLiveStation: MapCoordinate | null = null;
 
 function OverviewPageView({
   snapshot,
@@ -37,7 +48,11 @@ function OverviewPageView({
   const { t } = useI18n();
   const evidence = localSnapshotFresh ? snapshot : null;
   const gpsCoordinate = resolveGpsSource(evidence, gpsConfig).coordinate;
-  const compassSettings = resolveCompassSource(evidence, { figType: compassConfig.manualFigType, compassOffset: compassConfig.manualCompassOffset }, compassConfig).settings;
+  const station = simulation ? null : holdStationCoordinate(lastLiveStation, gpsCoordinate, gpsReportsNoFix(snapshot, localSnapshotFresh), gpsConfig.source);
+  if (station) lastLiveStation = station.lastLive;
+  dataOutCompassMemory = rememberDataOutCompass(dataOutCompassMemory, snapshot);
+  const compass = resolveCompassSource(snapshot, { figType: compassConfig.manualFigType, compassOffset: compassConfig.manualCompassOffset }, compassConfig, dataOutCompassMemory);
+  const simulationSettings = simulation ? polarSettings(snapshot?.settings?.fields?.doa_fig_type, snapshot?.settings?.fields?.compass_offset) : null;
   const latitude = simulation?.latitude ?? gpsCoordinate?.latitude;
   const longitude = simulation?.longitude ?? gpsCoordinate?.longitude;
   const source = simulation ? 'SIMULATION' : gpsCoordinate?.source;
@@ -47,19 +62,31 @@ function OverviewPageView({
     () => (latitude === undefined || longitude === undefined || source === undefined ? null : { latitude, longitude, source }),
     [latitude, longitude, source],
   );
-  const figType = simulation ? 'Polar' : compassSettings.figType;
-  const compassOffset = simulation ? 0 : compassSettings.compassOffset;
+  const figType = simulationSettings?.figType ?? compass.settings.figType;
+  const compassOffset = simulationSettings?.compassOffset ?? compass.settings.compassOffset;
+  const offsetSource = simulation ? 'SIMULATION' : compassOffsetSourceLabel(compass, t);
+  const offsetVerified = simulation ? true : compass.offsetVerified;
   const settings = useMemo<PolarSettings>(() => ({ figType, compassOffset }), [figType, compassOffset]);
+  const heldLatitude = station?.held ? station.coordinate?.latitude : undefined;
+  const heldLongitude = station?.held ? station.coordinate?.longitude : undefined;
+  const readoutCoordinate = useMemo<MapCoordinate | null>(
+    () => (heldLatitude === undefined || heldLongitude === undefined ? coordinate : { latitude: heldLatitude, longitude: heldLongitude, source: 'DATA_OUT' }),
+    [coordinate, heldLatitude, heldLongitude],
+  );
+  // One readiness decision for the map overlay, the readout bearing and the polar curve.
+  const doa = overviewDoaStatus(snapshot, localSnapshotFresh);
 
   return (
     <div className="page page-overview" aria-label={t('route.overview')}>
-      <h1 className="visually-hidden">{t('route.overview')}</h1>
-      <DoaReadout snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} coordinate={coordinate} settings={settings} />
+      <h1 className="visually-hidden" data-route-focus tabIndex={-1}>{t('route.overview')}</h1>
+      <DoaReadout snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} coordinate={readoutCoordinate} positionHeld={station?.held === true} settings={settings} offsetSource={offsetSource} offsetVerified={offsetVerified} />
       <div className="overview-spatial">
-        <Suspense fallback={<MapPlaceholder />}>
-          <TacticalMap coordinate={coordinate} snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} />
-        </Suspense>
-        <PolarPanel snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} compassSettings={settings} />
+        <LoadErrorBoundary variant="map">
+          <Suspense fallback={<MapPlaceholder />}>
+            <TacticalMap coordinate={coordinate} snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} compassOffset={compassOffset} orientationVerified={offsetVerified} gpsSource={gpsConfig.source} doaReady={doa.shown} doaHeldCode={doa.shown ? undefined : doa.code} doaHeldText={doa.shown ? undefined : t(doaStatusTextKey(doa.reason))} />
+          </Suspense>
+        </LoadErrorBoundary>
+        <PolarPanel snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} compassSettings={settings} offsetSource={offsetSource} />
       </div>
     </div>
   );

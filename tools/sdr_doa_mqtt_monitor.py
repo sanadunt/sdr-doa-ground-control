@@ -7,6 +7,7 @@ or writes a Raspberry resource.
 
 from __future__ import annotations
 
+import secrets
 import threading
 import time
 from typing import Any, Dict, Optional
@@ -31,10 +32,25 @@ KNOWN_SUFFIXES = {
     "/config/reported": "config_reported",
     "/cmd/config/patch": "config_patch",
     "/ack/config": "ack_config",
+    "/availability": "availability",
 }
 
 MAX_TRACKED_TOPICS = 128
 OTHER_TOPICS_KEY = "__other__"
+DECODED_KINDS = frozenset({
+    "doa", "nav", "health", "state", "config_reported", "config_patch", "ack_config",
+    "availability",
+})
+# Only these v1 kinds are published retained, so only here can a zero-length
+# publish be a retained clear. Elsewhere it is a malformed message.
+RETAINED_KINDS = frozenset({"state", "config_reported", "availability"})
+EMPTY_PAYLOAD_ERROR = "empty payload"
+VALIDITY_FLAG_FIELDS = ("valid", "doa_valid", "settings_valid")
+# Brokers must accept client ids of 1-23 alphanumeric characters. The random
+# suffix keeps two consoles on one broker from taking over each other's session.
+CLIENT_ID_PREFIX = "groundconsole"
+RECONNECT_MIN_DELAY_S = 1
+RECONNECT_MAX_DELAY_S = 10
 
 
 def _now_ms() -> int:
@@ -85,6 +101,7 @@ class MqttMonitor:
         self.ws_path = ws_path
         self.username = username
         self.password = password
+        self.client_id = CLIENT_ID_PREFIX + secrets.token_hex(5)
         self._rdf_node = RdfNodeV2Telemetry(node_id)
         self._filters = (
             self.root + "/#",
@@ -104,12 +121,14 @@ class MqttMonitor:
         self._received = 0
         self._valid = 0
         self._invalid = 0
+        self._cleared = 0
         self._total_bytes = 0
         self._last_received_at_ms: Optional[int] = None
         self._last_latency_ms: Optional[int] = None
         self._last_topic: Optional[str] = None
         self._last_by_kind: Dict[str, Dict[str, Any]] = {}
         self._topic_counts: Dict[str, int] = {}
+        self._kind_counts: Dict[str, int] = {}
 
     def start(self) -> None:
         with self._lifecycle_lock:
@@ -127,7 +146,7 @@ class MqttMonitor:
             try:
                 client = mqtt.Client(
                     callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-                    client_id="ground-console-monitor",
+                    client_id=self.client_id,
                     protocol=mqtt.MQTTv5,
                     transport=self.transport,
                 )
@@ -136,6 +155,10 @@ class MqttMonitor:
                 client.on_disconnect = self._on_disconnect
                 client.on_subscribe = self._on_subscribe
                 client.on_message = self._on_message
+                client.reconnect_delay_set(
+                    min_delay=RECONNECT_MIN_DELAY_S,
+                    max_delay=RECONNECT_MAX_DELAY_S,
+                )
                 if self.username:
                     client.username_pw_set(self.username, self.password or None)
                 if self.transport == "websockets":
@@ -212,13 +235,25 @@ class MqttMonitor:
             self._pending_subacks.clear()
             self._subscriptions_ready = False
             try:
-                options = self._mqtt.SubscribeOptions(
+                # v1 keeps Retain As Published off, so its retain flag marks a
+                # broker replay; v2 validation needs the publisher's flag.
+                v1_options = self._mqtt.SubscribeOptions(
+                    qos=1,
+                    noLocal=False,
+                    retainAsPublished=False,
+                    retainHandling=0,
+                )
+                v2_options = self._mqtt.SubscribeOptions(
                     qos=1,
                     noLocal=False,
                     retainAsPublished=True,
                     retainHandling=0,
                 )
-                subscriptions = [(topic, options) for topic in self._filters]
+                v1_filter, *v2_filters = self._filters
+                subscriptions = [
+                    (v1_filter, v1_options),
+                    *((topic, v2_options) for topic in v2_filters),
+                ]
                 rc, mid = client.subscribe(subscriptions)
                 if rc != getattr(self._mqtt, "MQTT_ERR_SUCCESS", 0):
                     self._set_error_locked("SUBSCRIBE_ERROR")
@@ -308,10 +343,21 @@ class MqttMonitor:
 
             payload_bytes = payload
             kind = _kind_for_topic(topic) or "unknown"
+            retained = bool(getattr(message, "retain", False))
             decoded: Optional[Dict[str, Any]] = None
             error: Optional[str] = None
             valid = True
-            if kind in {"doa", "nav", "health", "state", "config_reported", "config_patch"}:
+            # A zero-length publish is how a publisher removes a retained
+            # value; the broker forwards it to live subscribers. It means "no
+            # current value", not a malformed message. The v1 filter hides the
+            # publisher's retain flag, so the contract's retain policy decides.
+            cleared = not payload_bytes and kind in RETAINED_KINDS
+            if cleared:
+                valid = False
+            elif not payload_bytes:
+                valid = False
+                error = EMPTY_PAYLOAD_ERROR
+            elif kind in DECODED_KINDS:
                 try:
                     decoded = contract.decode_payload(kind, payload_bytes)
                 except (contract.ContractError, ValueError, TypeError) as exc:
@@ -322,17 +368,28 @@ class MqttMonitor:
                 error = "payload exceeds monitor limit"
 
             source_ts = decoded.get("ts_ms") if decoded else None
+            if type(source_ts) is not int:
+                source_ts = None
+            # A retained replay's receive-minus-source time is its age, not
+            # transport latency. The availability will carries the session's
+            # connect time, so its receive time is no latency measure either.
             latency_ms: Optional[int] = None
-            if isinstance(source_ts, int):
+            if source_ts is not None and not retained and kind != "availability":
                 latency_ms = received_at_ms - source_ts
 
             self._received += 1
-            self._valid += 1 if valid else 0
-            self._invalid += 0 if valid else 1
+            if cleared:
+                self._cleared += 1
+            elif valid:
+                self._valid += 1
+            else:
+                self._invalid += 1
             self._total_bytes += len(payload_bytes)
             self._last_received_at_ms = received_at_ms
-            self._last_latency_ms = latency_ms
+            if not retained and not cleared and kind != "availability":
+                self._last_latency_ms = latency_ms
             self._last_topic = topic
+            self._kind_counts[kind] = self._kind_counts.get(kind, 0) + 1
             if topic in self._topic_counts:
                 self._topic_counts[topic] += 1
             elif len(self._topic_counts) < MAX_TRACKED_TOPICS - 1:
@@ -345,12 +402,25 @@ class MqttMonitor:
                 "received_at_ms": received_at_ms,
                 "bytes": len(payload_bytes),
                 "qos": int(message.qos),
-                "retained": bool(message.retain),
+                "retained": retained,
                 "valid": valid,
                 "latency_ms": latency_ms,
+                "source_ts_ms": source_ts,
             }
+            if cleared:
+                entry["cleared"] = True
             if decoded is not None:
                 entry["payload"] = decoded
+                source = decoded.get("source")
+                if isinstance(source, str) and source:
+                    entry["source"] = source[:contract.MAX_SOURCE_CHARS]
+                flags = {
+                    field: decoded[field]
+                    for field in VALIDITY_FLAG_FIELDS
+                    if isinstance(decoded.get(field), bool)
+                }
+                if flags:
+                    entry["validity_flags"] = flags
             if error:
                 entry["error"] = error
             self._last_by_kind[kind] = entry
@@ -358,18 +428,26 @@ class MqttMonitor:
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
             now = _now_ms()
+            last_by_kind = {
+                kind: {**entry, "age_ms": max(0, now - int(entry["received_at_ms"]))}
+                for kind, entry in self._last_by_kind.items()
+            }
             return {
                 "enabled": True,
                 "read_only": True,
                 "publish_enabled": False,
                 "host": self.host,
                 "port": self.port,
+                "transport": self.transport,
+                "ws_path": self.ws_path,
                 "root": self.root,
+                "now_ms": now,
                 "connection": self._connection,
                 "last_error": self._last_error,
                 "received": self._received,
                 "valid": self._valid,
                 "invalid": self._invalid,
+                "cleared": self._cleared,
                 "total_bytes": self._total_bytes,
                 "last_received_at_ms": self._last_received_at_ms,
                 "last_age_ms": (
@@ -379,7 +457,8 @@ class MqttMonitor:
                 ),
                 "last_latency_ms": self._last_latency_ms,
                 "last_topic": self._last_topic,
-                "last_by_kind": dict(self._last_by_kind),
+                "last_by_kind": last_by_kind,
+                "kind_counts": dict(self._kind_counts),
                 "topic_counts": dict(self._topic_counts),
             }
 

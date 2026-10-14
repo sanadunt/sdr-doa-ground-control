@@ -4,7 +4,9 @@
 The static checks use the checked-out ``frontend/dist`` build when it exists.
 They are explicitly skipped (and reported) when that build is not available;
 API and loopback-boundary checks still run so a missing build cannot make the
-whole file vacuously green.
+whole file vacuously green. A missing ``frontend/dist/receiver`` fails the
+Receiver checks when ``frontend/dist`` exists and ``vendor/BrowSDR`` is checked
+out, because ``npm run build`` alone deletes it.
 """
 
 from __future__ import annotations
@@ -32,6 +34,11 @@ from urllib.parse import quote, unquote, urlsplit
 TOOLS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = TOOLS_DIR.parent
 STATIC_ROOT = PROJECT_ROOT / "frontend" / "dist"
+RECEIVER_SOURCE_ROOT = PROJECT_ROOT / "vendor" / "BrowSDR"
+RECEIVER_REBUILD_HINT = (
+    "rebuild with `npm run build:all` in frontend/, or run tools/build_browsdr_receiver.py "
+    "after `npm run build`"
+)
 BASE_URL = "http://doasdr.local:8081"
 _TEST_ADMIN_PASSWORD = "ground-console-static-test-no-secret"
 
@@ -225,6 +232,11 @@ def _static_index() -> Optional[Path]:
     return index if index.is_file() else None
 
 
+def _receiver_source_present() -> bool:
+    # An uninitialized submodule is an empty directory.
+    return (RECEIVER_SOURCE_ROOT / "package.json").is_file()
+
+
 def _asset_references(index: Path) -> List[Tuple[str, Path]]:
     """Return ``(request_path, expected_file)`` pairs linked by the build."""
 
@@ -393,6 +405,59 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
             with self.subTest(host=host):
                 with self.assertRaises(ValueError):
                     ground_console._validate_console_config({**config, "mqtt_host": host})
+
+    def test_integer_config_fields_are_not_truncated_or_coerced(self) -> None:
+        """AUD-41: a fractional, boolean or string port is rejected, not saved as int()."""
+        config = ground_console._default_console_config()
+        for field, value in (("mqtt_port", 1883), ("mqtt_port", 1883.0), ("refresh_seconds", 10), ("refresh_seconds", 0.0)):
+            with self.subTest(field=field, value=value):
+                validated = ground_console._validate_console_config({**config, field: value})
+                self.assertEqual(validated[field], int(value))
+                self.assertIs(type(validated[field]), int)
+        rejected = (1883.9, 0.5, True, False, "1883", "1_883", " 1883", None, [1883], float("nan"), float("inf"))
+        for field in ("mqtt_port", "refresh_seconds"):
+            for value in rejected:
+                with self.subTest(field=field, value=value):
+                    with self.assertRaisesRegex(ValueError, f"{field} must be an integer"):
+                        ground_console._validate_console_config({**config, field: value})
+
+        warnings: list = []
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "console.json"
+            path.write_text(json.dumps({**config, "mqtt_port": 1883.9, "refresh_seconds": 10}), encoding="utf-8")
+            loaded = ground_console._load_console_config(path, log=warnings.append)
+        self.assertEqual((loaded["mqtt_port"], loaded["refresh_seconds"]), (config["mqtt_port"], 10))
+        self.assertTrue(any("mqtt_port" in message for message in warnings), warnings)
+
+        with ConsoleHTTPHarness() as console:
+            before = json.loads(console.request("GET", "/api/console-config").body)
+            for body in ({"mqtt_port": 1883.9}, {"mqtt_port": True}, {"mqtt_port": "1884"}, {"refresh_seconds": True}, {"refresh_seconds": 2.5}):
+                with self.subTest(body=body):
+                    result = console.request(
+                        "POST",
+                        "/api/console-config",
+                        json.dumps(body).encode("utf-8"),
+                        {"Content-Type": "application/json"},
+                    )
+                    self.assertEqual(result.status, 400)
+                    self.assertIn("must be an integer", json.loads(result.body)["error"])
+            self.assertEqual(json.loads(console.request("GET", "/api/console-config").body), before)
+            for port in ("1883.5", "1_883", "+1883", "0", "65536", "%E0%A5%A7"):
+                with self.subTest(port=port):
+                    result = console.request("POST", f"/api/mqtt/connect?host=127.0.0.1&port={port}")
+                    self.assertEqual(result.status, 400)
+                    self.assertIn("MQTT port must be an integer", json.loads(result.body)["error"])
+            accepted = console.request(
+                "POST",
+                "/api/console-config",
+                json.dumps({"mqtt_port": 1884, "refresh_seconds": 5}).encode("utf-8"),
+                {"Content-Type": "application/json"},
+            )
+            self.assertEqual(accepted.status, 200)
+            self.assertEqual(
+                (json.loads(accepted.body)["mqtt_port"], json.loads(accepted.body)["refresh_seconds"]),
+                (1884, 5),
+            )
 
     def _require_static_build(self) -> Path:
         index = _static_index()
@@ -694,10 +759,11 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
             )
             self.assertEqual(empty["total"], 0)
 
+            # Grouping is by band overlap, so this band starts inside the first one.
             adjacent = {
                 **candidate,
                 "id": 2,
-                "startHz": 1_040_000,
+                "startHz": 1_015_000,
                 "endHz": 1_060_000,
                 "centerHz": 1_050_000,
                 "peakFrequencyHz": 1_050_000,
@@ -1021,10 +1087,47 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         self.assertEqual(parsed.data_dir, "/tmp/receiver-data")
 
 
-    def test_receiver_is_same_origin_scoped_and_serves_source(self) -> None:
+    def _require_receiver_build(self) -> Path:
+        """Return the built Receiver index; fail when a checkout should have one."""
         receiver_index = STATIC_ROOT / "receiver" / "index.html"
-        if not receiver_index.is_file():
-            self.skipTest("embedded BrowSDR receiver is absent; build it before static-serving checks")
+        if receiver_index.is_file():
+            return receiver_index
+        if _static_index() is not None and _receiver_source_present():
+            self.fail(
+                f"{receiver_index} is missing although frontend/dist exists and vendor/BrowSDR is "
+                f"checked out. `npm run build` empties frontend/dist; {RECEIVER_REBUILD_HINT}."
+            )
+        self.skipTest(
+            "embedded BrowSDR receiver is absent and vendor/BrowSDR is not checked out; "
+            "run `git submodule update --init --recursive`, then " + RECEIVER_REBUILD_HINT
+        )
+
+    def test_receiver_bundle_is_built_alongside_the_console(self) -> None:
+        self._require_receiver_build()
+
+    def test_missing_receiver_bundle_fails_instead_of_skipping(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            dist = Path(temporary) / "dist"
+            dist.mkdir()
+            (dist / "index.html").write_text("<!doctype html>\n", encoding="utf-8")
+            vendor = Path(temporary) / "BrowSDR"
+            vendor.mkdir()
+            with mock.patch.dict(globals(), {"STATIC_ROOT": dist, "RECEIVER_SOURCE_ROOT": vendor}):
+                with self.assertRaises(unittest.SkipTest):
+                    self._require_receiver_build()
+
+                (vendor / "package.json").write_text("{}\n", encoding="utf-8")
+                with self.assertRaises(self.failureException) as missing:
+                    self._require_receiver_build()
+                self.assertIn("npm run build:all", str(missing.exception))
+                self.assertIn("build_browsdr_receiver.py", str(missing.exception))
+
+                (dist / "receiver").mkdir()
+                (dist / "receiver" / "index.html").write_text("<!doctype html>\n", encoding="utf-8")
+                self.assertEqual(self._require_receiver_build(), dist / "receiver" / "index.html")
+
+    def test_receiver_is_same_origin_scoped_and_serves_source(self) -> None:
+        receiver_index = self._require_receiver_build()
 
         receiver_root = receiver_index.parent
         receiver_manifest = receiver_root / "manifest.webmanifest"
@@ -1098,9 +1201,7 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         self.assertIn("BrowSDR/src/client/index.html", source_names)
 
     def test_receiver_static_boundary_blocks_traversal_and_unknown_extensions(self) -> None:
-        receiver_index = STATIC_ROOT / "receiver" / "index.html"
-        if not receiver_index.is_file():
-            self.skipTest("embedded BrowSDR receiver is absent; build it before static-serving checks")
+        self._require_receiver_build()
         blocked_paths = (
             "/receiver/../.env",
             "/receiver/%2e%2e/.env",
@@ -1147,7 +1248,7 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         self.assertEqual(
             ground.headers.get("content-security-policy"),
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data: https://tile.openstreetmap.de https://tile.openstreetmap.org; "
+            "img-src 'self' data: blob: https://tile.openstreetmap.de https://tile.openstreetmap.org; "
             "connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org; "
             "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
         )
@@ -1248,6 +1349,9 @@ def main() -> int:
             f"{STATIC_ROOT / 'index.html'} is absent",
             flush=True,
         )
+    elif not (STATIC_ROOT / "receiver" / "index.html").is_file():
+        state = "FAILED" if _receiver_source_present() else "skipped (vendor/BrowSDR not checked out)"
+        print(f"STATIC BUILD REPORT: Receiver checks {state}: frontend/dist/receiver is absent; {RECEIVER_REBUILD_HINT}", flush=True)
     return 0 if result.wasSuccessful() else 1
 
 

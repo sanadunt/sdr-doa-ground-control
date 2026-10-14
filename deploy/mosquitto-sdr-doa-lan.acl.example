@@ -1,0 +1,17 @@
+# EXAMPLE ONLY: ACL for tools/mqtt_lan_stage.conf. Copy to
+# /etc/mosquitto/sdr-doa-lan.acl and adjust the account names.
+
+# Edge agent: publishes its own v1 topics (the availability topic is also
+# its MQTT will) and may only read configuration commands.
+user sdr-doa-agent
+topic write sdr/v1/uav-01/telemetry/#
+topic write sdr/v1/uav-01/state
+topic write sdr/v1/uav-01/config/reported
+topic write sdr/v1/uav-01/availability
+topic write sdr/v1/uav-01/ack/config
+topic read sdr/v1/uav-01/cmd/config/patch
+
+# Operator observer for mosquitto_sub: read only. The Ground Console monitor
+# sends no TLS, username or password, so it cannot use this listener.
+user sdr-doa-observer
+topic read sdr/v1/uav-01/#

@@ -334,3 +334,20 @@
 :root[data-theme='light'] .receiver-records-workspace .audio-record-segment {
   color: var(--text-muted);
 }
+
+:root[data-theme='light'] .sweep-simulation-badge,
+:root[data-theme='light'] .sweep-simulation-watermark {
+  border-color: #8a5a00;
+  background: #fff3d6;
+  color: #6b4500;
+}
+
+:root[data-theme='light'] .sweep-device-state.mock,
+:root[data-theme='light'] .audio-record-warning,
+:root[data-theme='light'] .audio-recording-notice {
+  color: #7a4f00;
+}
+
+:root[data-theme='light'] .record-recording {
+  color: #a3263a;
+}

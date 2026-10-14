@@ -17,16 +17,26 @@ import {
   polarDataReady,
 } from './telemetry';
 import {
+  angularDirection,
+  bearingForView,
+  compassOffsetSourceLabel,
+  DATA_OUT_SETTINGS_MAX_AGE_MS,
+  dataOutCompassFromSnapshot,
   displayAngleForBin,
   DEFAULT_COMPASS_CONFIG,
+  formatDegrees,
+  geographicBearingForBin,
   manualCompassOverrideFromInput,
   manualCompassSettings,
   normalizeDegrees,
   polarSettings,
   polarView,
+  rememberDataOutCompass,
   resolveCompassSource,
+  screenAngleForBin,
   signedPeak,
 } from './polar';
+import { translate } from './i18n';
 
 const VECTOR_SIZE = 360;
 
@@ -271,6 +281,17 @@ describe('polar compass transforms', () => {
     expect(normalizeDegrees(730)).toBe(10);
   });
 
+  it('maps theta_0 to a north-clockwise geographic bearing that matches the Compass display peak', () => {
+    for (const offset of [0, 30, -20]) {
+      for (const theta of [0, 90, 180, 270]) {
+        expect(geographicBearingForBin(theta, offset)).toBe(displayAngleForBin(theta, polarSettings('Compass', offset)));
+      }
+    }
+    expect(geographicBearingForBin(90, 0)).toBe(270);
+    expect(geographicBearingForBin(90, 30)).toBe(300);
+    expect(geographicBearingForBin(0, Number.NaN)).toBe(0);
+  });
+
   it('applies the compass transform once to the polar view peak', () => {
     const angularPower = vector();
     angularPower[90] = 5;
@@ -285,6 +306,128 @@ describe('polar compass transforms', () => {
     expect(view.peakIndex).toBe(90);
     expect(view.peakValue).toBe(5);
     expect(view.displayPeak).toBe(280);
+  });
+});
+
+describe('polar orientation against upstream KrakenSDR', () => {
+  // Upstream kraken_web_doa.py: Polar plots theta = bin with Plotly's default
+  // counter-clockwise axis at rotation 90; Compass plots theta = 360 - bin + offset
+  // on a clockwise axis. Screen angles below are degrees clockwise from the top.
+  const upstreamPolarScreen = (bin: number) => normalizeDegrees(-bin);
+
+  it('draws Polar counter-clockwise like upstream, so Polar and Compass at offset 0 coincide on screen', () => {
+    const polar = polarSettings('Polar', 0);
+    const compass = polarSettings('Compass', 0);
+    expect(angularDirection(polar)).toBe('counterclockwise');
+    expect(angularDirection(compass)).toBe('clockwise');
+    for (const bin of [0, 45, 60, 90, 180, 270, 359]) {
+      expect(screenAngleForBin(bin, polar)).toBe(upstreamPolarScreen(bin));
+      expect(screenAngleForBin(bin, compass)).toBe(screenAngleForBin(bin, polar));
+      // Polar keeps theta_0 as its label; Compass labels the bin with its bearing.
+      expect(displayAngleForBin(bin, polar)).toBe(bin);
+      expect(displayAngleForBin(bin, compass)).toBe(geographicBearingForBin(bin, 0));
+    }
+  });
+
+  it('labels the Compass peak with the upstream compass value and the north-clockwise bearing', () => {
+    for (const offset of [0, 30, -20]) {
+      for (const bin of [0, 60, 90, 180, 270]) {
+        const upstreamLabel = normalizeDegrees(360 - bin + offset);
+        const compass = polarSettings('Compass', offset);
+        expect(displayAngleForBin(bin, compass)).toBe(upstreamLabel);
+        // The console's Compass axis is north-up: the label is also the screen position.
+        expect(screenAngleForBin(bin, compass)).toBe(upstreamLabel);
+      }
+    }
+  });
+
+  it('gives the readout the geographic bearing of theta_0, not the raw array angle', () => {
+    const angularPower = vector();
+    angularPower[60] = 5;
+    const value = snapshot(candidate({ canonical_angle_deg: 60, angular_power_db: angularPower }), candidate({ canonical_angle_deg: 60 }));
+    expect(bearingForView(polarView(value, undefined, true, null, { figType: 'Compass', compassOffset: 0 }))).toBe(300);
+    expect(bearingForView(polarView(value, undefined, true, null, { figType: 'Compass', compassOffset: 30 }))).toBe(330);
+    // The Polar axis choice does not change the geographic bearing.
+    expect(bearingForView(polarView(value, undefined, true, null, { figType: 'Polar', compassOffset: 30 }))).toBe(330);
+    expect(bearingForView(polarView(null))).toBeNull();
+  });
+
+  it('rounds before wrapping so north never reads 360', () => {
+    expect(formatDegrees(359.96, 1)).toBe('0.0');
+    expect(formatDegrees(359.6)).toBe('0');
+    expect(formatDegrees(-0.04, 1)).toBe('0.0');
+    expect(formatDegrees(12.34, 1)).toBe('12.3');
+    expect(formatDegrees(Number.NaN)).toBe('N/A');
+  });
+});
+
+describe('Data Out compass settings resolution', () => {
+  const NODE = 'http://doasdr.local:8081';
+  function settingsSnapshot(fields: Record<string, unknown> | null, observedAt = 1_000_000, baseUrl = NODE): TelemetrySnapshot {
+    return snapshot(candidate(), candidate(), {
+      collector: { base_url: baseUrl },
+      observed_at_ms: observedAt,
+      settings: fields === null ? { available: false } : { available: true, fields },
+    });
+  }
+  const LOCAL = { figType: 'Compass' as const, compassOffset: 0 };
+
+  it('keeps the Data Out offset when the plot type is Linear (KrakenSDR default)', () => {
+    const resolution = resolveCompassSource(settingsSnapshot({ doa_fig_type: 'Linear', compass_offset: 30 }), LOCAL, DEFAULT_COMPASS_CONFIG);
+    expect(resolution.settings).toEqual({ figType: 'Compass', compassOffset: 30 });
+    expect(resolution.code).toBe('DATA_OUT_LOCAL_AXIS');
+    expect(resolution.label).toBe('DATA_OUT OFFSET · LOCAL AXIS');
+    expect(resolution.offsetVerified).toBe(true);
+  });
+
+  it('marks a missing offset as local and unverified', () => {
+    const resolution = resolveCompassSource(settingsSnapshot({ doa_fig_type: 'Polar' }), LOCAL, DEFAULT_COMPASS_CONFIG);
+    expect(resolution.settings).toEqual({ figType: 'Polar', compassOffset: 0 });
+    expect(resolution.code).toBe('DATA_OUT_LOCAL_OFFSET');
+    expect(resolution.offsetVerified).toBe(false);
+  });
+
+  it('reuses the last Data Out settings when one settings.json read fails, and labels it', () => {
+    let memory = rememberDataOutCompass(null, settingsSnapshot({ doa_fig_type: 'Compass', compass_offset: 45 }, 1_000_000));
+    const failed = settingsSnapshot(null, 1_002_000);
+    memory = rememberDataOutCompass(memory, failed);
+    const resolution = resolveCompassSource(failed, LOCAL, DEFAULT_COMPASS_CONFIG, memory);
+    expect(resolution.settings).toEqual({ figType: 'Compass', compassOffset: 45 });
+    expect(resolution.effectiveSource).toBe('DATA_OUT');
+    expect(resolution.label).toBe('DATA_OUT COMPASS · LAST KNOWN');
+    expect(resolution.lastKnownAgeMs).toBe(2_000);
+    expect(compassOffsetSourceLabel(resolution, (key, vars) => translate('en', key, vars))).toBe('DATA_OUT last known 2.0 s');
+    // The age unit follows the UI language like every other duration.
+    expect(compassOffsetSourceLabel(resolution, (key, vars) => translate('id', key, vars))).toBe('DATA_OUT terakhir diketahui 2.0 dtk');
+  });
+
+  it('falls back explicitly when the remembered settings are too old or from another node', () => {
+    const memory = dataOutCompassFromSnapshot(settingsSnapshot({ doa_fig_type: 'Compass', compass_offset: 45 }, 1_000_000));
+    const late = settingsSnapshot(null, 1_000_000 + DATA_OUT_SETTINGS_MAX_AGE_MS + 1);
+    expect(resolveCompassSource(late, LOCAL, DEFAULT_COMPASS_CONFIG, memory).label).toBe('DATA_OUT COMPASS · DEFAULT FALLBACK');
+    const otherNode = settingsSnapshot(null, 1_001_000, 'http://192.168.100.100:8081');
+    expect(rememberDataOutCompass(memory, otherNode)).toBeNull();
+    const fallback = resolveCompassSource(otherNode, LOCAL, DEFAULT_COMPASS_CONFIG, memory);
+    expect(fallback.code).toBe('DATA_OUT_UNAVAILABLE');
+    expect(fallback.offsetVerified).toBe(false);
+    expect(compassOffsetSourceLabel(fallback, (key, vars) => translate('en', key, vars))).toBe('assumed');
+  });
+
+  it('never learns compass settings from a simulation snapshot', () => {
+    const simulation = { ...settingsSnapshot({ doa_fig_type: 'Polar', compass_offset: 0 }), simulation: true };
+    expect(dataOutCompassFromSnapshot(simulation)).toBeNull();
+    const memory = dataOutCompassFromSnapshot(settingsSnapshot({ doa_fig_type: 'Compass', compass_offset: 12 }));
+    expect(rememberDataOutCompass(memory, simulation)).toBe(memory);
+  });
+
+  it('lets manual settings win over Data Out', () => {
+    const resolution = resolveCompassSource(
+      settingsSnapshot({ doa_fig_type: 'Compass', compass_offset: 45 }),
+      LOCAL,
+      { source: 'MANUAL', manualFigType: 'Polar', manualCompassOffset: 12.5 },
+    );
+    expect(resolution.settings).toEqual({ figType: 'Polar', compassOffset: 12.5 });
+    expect(compassOffsetSourceLabel(resolution, (key, vars) => translate('en', key, vars))).toBe('MANUAL');
   });
 });
 

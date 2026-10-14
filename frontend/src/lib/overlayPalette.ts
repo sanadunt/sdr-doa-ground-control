@@ -52,3 +52,10 @@ export function formatDistance(metres: number): string {
   if (metres < 1000) return `${Math.round(metres)} m`;
   return `${Number((metres / 1000).toFixed(2))} km`;
 }
+
+/** Bearing text: round first, then wrap, so 359.96° reads 0.0° and not 360.0°. */
+export function formatBearing(degrees: number, digits = 1): string {
+  if (!Number.isFinite(degrees)) return '—';
+  const rounded = Number(degrees.toFixed(digits));
+  return (((rounded % 360) + 360) % 360).toFixed(digits);
+}

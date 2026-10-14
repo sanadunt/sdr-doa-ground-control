@@ -24,6 +24,7 @@
   --mono: ui-monospace, 'SFMono-Regular', 'JetBrains Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
   --rail-w: 220px;
   --topbar-h: 58px;
+  --read-error-h: 34px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, sans-serif;
 }
 :root[data-theme='light'] {
@@ -100,8 +101,17 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .topbar { position: sticky; top: 0; z-index: 40; display: flex; align-items: center; gap: 14px; min-height: var(--topbar-h); padding: 6px 16px; border-bottom: 1px solid var(--line-soft); background: color-mix(in srgb, var(--bg) 94%, transparent); backdrop-filter: blur(10px); }
 .topbar-title { display: flex; flex: 0 1 auto; flex-direction: column; min-width: 0; }
 .topbar-route { overflow: hidden; font-size: 15px; font-weight: 650; letter-spacing: -.01em; text-overflow: ellipsis; white-space: nowrap; }
-.topbar-read { color: var(--subtle); font-family: var(--mono); font-size: 11px; white-space: nowrap; }
-.telemetry-strip { display: flex; flex: 1 1 auto; justify-content: center; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.topbar-read { overflow: hidden; color: var(--subtle); font-family: var(--mono); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.telemetry-strip { display: flex; flex: 1 1 auto; justify-content: flex-start; min-width: 0; overflow-x: auto; scrollbar-width: none;
+  /* Auto margins centre the items but collapse to 0 on overflow, so the first item stays reachable.
+     The local covers hide the edge shades until the strip can scroll that way. */
+  background:
+    linear-gradient(to right, var(--bg) 45%, transparent) left center / 28px 100% no-repeat local,
+    linear-gradient(to left, var(--bg) 45%, transparent) right center / 28px 100% no-repeat local,
+    linear-gradient(to right, color-mix(in srgb, var(--accent) 40%, transparent), transparent) left center / 10px 100% no-repeat scroll,
+    linear-gradient(to left, color-mix(in srgb, var(--accent) 40%, transparent), transparent) right center / 10px 100% no-repeat scroll; }
+.telemetry-strip > :first-child { margin-left: auto; }
+.telemetry-strip > :last-child { margin-right: auto; }
 .telemetry-strip::-webkit-scrollbar { display: none; }
 .telemetry-item { display: flex; flex: none; flex-direction: column; gap: 1px; padding: 2px 12px; border-left: 1px solid var(--line-soft); white-space: nowrap; }
 .telemetry-item:first-child { border-left: 0; }
@@ -124,12 +134,15 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (max-width: 1023px) {
   .topbar { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 6px 10px; padding: 6px 12px; }
-  .telemetry-strip { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; margin: 0 -12px; padding: 2px 4px 0; border-top: 1px solid var(--line-soft); }
-  .telemetry-item { padding: 4px 10px; }
+  /* Narrow screens wrap the chips instead of scrolling, so MQTT and SIM are never hidden off the edge. */
+  .telemetry-strip { grid-column: 1 / -1; grid-row: 2; flex-wrap: wrap; justify-content: flex-start; margin: 0 -12px; padding: 2px 4px 0; overflow: visible; border-top: 1px solid var(--line-soft); background: none; }
+  .telemetry-strip > :first-child, .telemetry-strip > :last-child { margin-inline: 0; }
+  .telemetry-item { flex: 1 0 auto; padding: 4px 10px; }
 }
-@media (pointer: coarse) {
+/* Touch targets are at least 44 x 44 px on touch screens and at phone widths (AUD-146). */
+@media (pointer: coarse), (any-pointer: coarse), (max-width: 639px) {
   .icon-button { width: 44px; height: 44px; }
-  .lang-switch button { min-height: 44px; }
+  .lang-switch button { min-width: 44px; min-height: 44px; }
   .rail-toggle { height: 44px; }
 }
 
@@ -137,6 +150,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .console-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; padding: 0 28px 20px; color: var(--subtle); font-family: var(--mono); font-size: 10.5px; letter-spacing: .02em; text-transform: none; }
 .console-footer span:last-child { text-align: right; }
 .console-shell.is-overview .console-footer { display: none; }
+.read-error-banner { display: flex; flex: none; align-items: baseline; gap: 8px; min-height: var(--read-error-h); padding: 8px 16px; border-bottom: 1px solid color-mix(in srgb, var(--red) 45%, transparent); background: color-mix(in srgb, var(--red) 10%, var(--bg)); color: var(--text); font-family: var(--mono); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+.read-error-banner i { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--red); transform: translateY(-1px); }
+@media (min-width: 1024px) {
+  /* Overview is sized to the viewport; leave room for the banner instead of scrolling the page. */
+  .console-shell.is-overview .console-main:has(> .read-error-banner) .page-content-overview { height: calc(100dvh - var(--topbar-h) - var(--read-error-h)); }
+}
 .skip-link { position: fixed; top: -100px; left: 20px; z-index: 9999; padding: 12px 20px; background: var(--accent); color: var(--on-accent); }
 .skip-link:focus { top: 12px; }
 .route-loading { display: grid; place-items: center; min-height: 40vh; }
@@ -176,7 +195,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .toolbar-button { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 11px; border: 1px solid var(--line); border-radius: 6px; background: color-mix(in srgb, var(--surface) 92%, transparent); color: var(--text); cursor: pointer; font-size: 12px; font-weight: 600; backdrop-filter: blur(6px); }
 .toolbar-button svg { width: 16px; height: 16px; }
 .toolbar-button:hover, .toolbar-button[aria-expanded='true'], .toolbar-button[aria-pressed='true'] { border-color: var(--accent); color: var(--accent); }
-@media (pointer: coarse) { .toolbar-button { min-height: 44px; } }
+@media (pointer: coarse), (any-pointer: coarse), (max-width: 639px) { .toolbar-button { min-height: 44px; } }
 
 /* Receiver keeps the console controls visible while its own workspace scrolls. */
 .console-shell.is-receiver .console-main { height: 100dvh; min-height: 0; overflow: hidden; }
@@ -208,7 +227,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .readout-good .readout-code { color: var(--green); }
 .readout-warn .readout-code { color: var(--amber); }
 .readout-bad .readout-code { color: var(--red); }
-.readout-detail { overflow: hidden; color: var(--muted); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.readout-detail { display: -webkit-box; overflow: hidden; color: var(--muted); font-size: 11.5px; line-height: 1.35; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .readout-warn .readout-detail, .readout-good .readout-detail { color: var(--muted); }
 .overview-spatial { display: grid; flex: 1 1 auto; grid-template-columns: minmax(0, 3fr) minmax(340px, 2fr); align-items: stretch; gap: 10px; min-height: 0; }
 .overview-spatial:has(.polar-expanded) { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); }
@@ -234,15 +253,21 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .map-coordinate strong { overflow: hidden; color: var(--text); font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 .map-coordinate small { letter-spacing: 0; text-transform: none; }
 .map-overlay-controls { position: static; width: auto; max-height: min(64dvh, 650px); overflow: auto; margin: 0; padding: 14px; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--surface); color: var(--text); overscroll-behavior: contain; }
-.map-workspace-settings-open { display: grid; flex: 1 1 auto; grid-template-columns: minmax(280px, .8fr) minmax(0, 2fr); grid-template-rows: minmax(0, 1fr) auto; align-items: stretch; gap: 10px; min-height: 0; padding: 10px 10px 0; }
-.map-workspace-settings-open > .map-overlay-controls { grid-column: 1; grid-row: 1; }
-.map-workspace-settings-open > .map-frame { grid-column: 2; grid-row: 1; height: auto; min-height: 0; border-radius: 6px; }
-.map-workspace-settings-open > .map-bottom-overlay { grid-column: 1 / -1; margin: 0 -10px; }
+.map-stage { position: relative; display: flex; flex: 1 1 0; flex-direction: column; min-width: 0; min-height: 0; }
+/* The Layers panel floats over the map below its toolbar, so opening it
+   never resizes the map or moves the polar column. */
+.map-stage > .map-overlay-controls { position: absolute; z-index: 35; top: 58px; bottom: 10px; left: 10px; width: min(340px, calc(100% - 20px)); max-height: none; box-shadow: 0 10px 28px rgba(0, 0, 0, .28); }
+/* The floating panel covers the notices; hiding them keeps their size, so the camera is not reframed. */
+@media (min-width: 640px) { .map-workspace-settings-open .map-notices { visibility: hidden; } }
 .maplibregl-ctrl-top-right { top: 4px; right: 4px; }
 .maplibregl-ctrl-group { border-radius: 6px !important; }
+:root:not([data-theme='light']) .maplibregl-ctrl-group { background: var(--surface-2); box-shadow: 0 0 0 1px var(--line-soft); }
+:root:not([data-theme='light']) .maplibregl-ctrl-group button + button { border-top-color: var(--line-soft); }
+:root:not([data-theme='light']) .maplibregl-ctrl-group button:not(:disabled):hover { background-color: var(--surface-3); }
+:root:not([data-theme='light']) .maplibregl-ctrl-icon { filter: invert(1) brightness(1.6); }
 .maplibregl-ctrl button { width: 36px; height: 36px; min-width: 36px; min-height: 36px; padding: 0; }
 .maplibregl-ctrl button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-@media (pointer: coarse) { .maplibregl-ctrl button { width: 44px; height: 44px; min-width: 44px; min-height: 44px; } }
+@media (pointer: coarse), (any-pointer: coarse), (max-width: 639px) { .maplibregl-ctrl button { width: 44px; height: 44px; min-width: 44px; min-height: 44px; } }
 
 .panel-toolbar { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 8px; min-height: 48px; padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--line-soft); }
 .polar-status { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0; }
@@ -251,17 +276,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .polar-frame { position: relative; display: flex; flex: 1 1 auto; flex-direction: column; align-items: stretch; min-height: 0; margin: 0; padding: 4px 8px 0; border: 0; }
 .plotly-polar { flex: 1 1 auto; width: 100%; height: auto; min-height: 280px; }
 .polar-axis-caption { margin: 0 4px 4px; padding: 0 8px; color: var(--subtle); font-family: var(--mono); font-size: 10.5px; line-height: 1.5; text-align: center; }
-.js-plotly-plot .modebar-btn { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; }
-@media (pointer: coarse) { .js-plotly-plot .modebar-btn { width: 44px; height: 44px; } }
+/* Plotly injects its own modebar styles after ours, so these need the extra class to win. */
+.plotly-polar.js-plotly-plot .plotly .modebar-btn { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; }
+@media (pointer: coarse), (any-pointer: coarse), (max-width: 639px) { .plotly-polar.js-plotly-plot .plotly .modebar-btn { width: 44px; height: 44px; } }
 
-@media (min-width: 1024px) {
-  .console-shell.is-overview:has(.map-workspace-settings-open) .page-content-overview { height: auto; overflow: visible; }
-  .console-shell.is-overview:has(.map-workspace-settings-open) .page-overview { height: auto; }
-  .overview-spatial:has(.map-workspace-settings-open) { display: flex; flex: none; flex-direction: column; gap: 12px; }
-  .overview-spatial:has(.map-workspace-settings-open) > .panel { height: auto; }
-  .overview-spatial:has(.map-workspace-settings-open) .map-workspace-settings-open > .map-frame { flex: none; height: clamp(440px, 58vh, 620px); min-height: 360px; }
-  .overview-spatial:has(.map-workspace-settings-open) .plotly-polar { height: clamp(360px, 50vh, 560px); flex: none; }
-}
 @media (max-width: 1023px) {
   .page-content-overview { height: auto; overflow: visible; padding: 10px 12px 16px; }
   .page-overview { height: auto; }
@@ -272,9 +290,26 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   .readout-cell:nth-child(5) { grid-column: span 2; }
   .overview-spatial, .overview-spatial:has(.polar-expanded) { display: flex; flex: none; flex-direction: column; gap: 10px; }
   .overview-spatial > .panel { height: auto; }
+  .map-stage { flex: none; }
   .map-frame { flex: none; height: clamp(320px, 52vh, 560px); }
   .plotly-polar { flex: none; height: clamp(300px, 70vw, 520px); }
   .polar-expand-button { display: none; }
+}
+/* Below ~1200 px of viewport, or ~1280 px with the rail open, five cells cut
+   the station coordinate and the GPS caveat, so the row wraps to 3 + 2. */
+@media (min-width: 1024px) and (max-width: 1199px) {
+  .doa-readout { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .readout-cell { border-top: 1px solid var(--line-soft); }
+  .readout-cell:nth-child(-n+3) { border-top: 0; }
+  .readout-cell:nth-child(4) { border-left: 0; }
+  .readout-cell:nth-child(5) { grid-column: span 2; }
+}
+@media (min-width: 1200px) and (max-width: 1279px) {
+  .console-shell:not(.rail-collapsed) .doa-readout { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .console-shell:not(.rail-collapsed) .readout-cell { border-top: 1px solid var(--line-soft); }
+  .console-shell:not(.rail-collapsed) .readout-cell:nth-child(-n+3) { border-top: 0; }
+  .console-shell:not(.rail-collapsed) .readout-cell:nth-child(4) { border-left: 0; }
+  .console-shell:not(.rail-collapsed) .readout-cell:nth-child(5) { grid-column: span 2; }
 }
 @media (max-width: 639px) {
   .page-content { padding: 18px 14px 28px; }
@@ -330,6 +365,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .doa-station-marker:hover { transform: scale(1.12); }
 .doa-station-marker:focus-visible { outline: 3px solid var(--accent); outline-offset: 5px; }
 .maplibregl-marker { z-index: 8; }
+.maplibregl-popup { z-index: 9; }
 .doa-station-popup .maplibregl-popup-content { min-width: 230px; padding: 14px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--text); box-shadow: 0 8px 26px rgba(0,0,0,.34); }
 .doa-station-popup .maplibregl-popup-tip { border-top-color: var(--surface); }
 .doa-station-popup .maplibregl-popup-close-button { width: 30px; height: 30px; color: var(--muted); font-size: 18px; }
@@ -388,6 +424,27 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .monitor-metrics { gap: 0; background: var(--surface); border: 1px solid var(--line-soft); border-radius: 6px; padding: 4px 10px; }
 .monitor-metrics .metric-card { border-top: 0; }
 .monitor-state { font-size: 12px; }
+.monitor-state > span.status-text-bad { color: var(--red); }
+.monitor-grid { grid-template-columns: minmax(0, 1fr); }
+.monitor-metrics .metric-detail { white-space: normal; overflow-wrap: anywhere; }
+.monitor-v2-panel { padding-bottom: 18px; }
+.monitor-v2-panel > .panel-header { margin-bottom: 12px; }
+.monitor-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.monitor-titled { display: inline-flex; max-width: 100%; }
+.monitor-code, .monitor-summary, .monitor-topic { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.monitor-code { padding: 1px 5px; border-radius: 3px; background: var(--surface-2); overflow-wrap: anywhere; }
+.monitor-topic { white-space: nowrap; color: var(--text); }
+.monitor-cell-note { display: block; margin-top: 4px; color: var(--subtle); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.monitor-muted { color: var(--subtle); }
+.monitor-panel-note { margin: 12px 20px 0; color: var(--subtle); font-size: 12px; line-height: 1.5; }
+.monitor-v2-panel > .monitor-panel-note { margin: 0 20px 10px; }
+.monitor-v2-panel > .monitor-state { margin-bottom: 12px; }
+.monitor-notice { margin-bottom: 12px; }
+.monitor-notice-bad { border-left-color: var(--red); }
+.table-wrap .monitor-kind-table { min-width: 760px; }
+.table-wrap .monitor-v2-table { min-width: 680px; }
+.monitor-kind-table td, .monitor-v2-table td { vertical-align: top; }
+.connection-panel .form-field input:disabled { cursor: not-allowed; opacity: .6; }
 table { font-size: 12px; }
 th { font-size: 11px; text-transform: none; letter-spacing: 0; }
 td { padding: 16px 10px; border-color: var(--line-soft); }
@@ -420,7 +477,7 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 .configuration-page .form-actions { min-width: 0; }
 .configuration-page .form-status { min-width: 0; }
 .maplibregl-canvas:focus-visible, .maplibregl-canvas-container:focus-visible { outline: 3px solid var(--accent); outline-offset: -3px; }
-@media (pointer: coarse) {
+@media (pointer: coarse), (any-pointer: coarse), (max-width: 639px) {
   .primary-button, .secondary-button, .text-button { min-height: 44px; }
 }
 .map-bottom-overlay .map-overlay-legend { padding: 2px 0 2px 10px; border-left-color: var(--signal); background: transparent; }
@@ -440,14 +497,8 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
   .gate-row > span:last-child { text-align:right; }
   .config-guard-row { grid-template-columns:1fr 1fr; }
   .monitor-metrics { grid-template-columns:1fr 1fr; }
-  .map-overlay-controls { width:auto; max-height:min(55dvh,460px); }
-  .map-workspace-settings-open { grid-template-columns:minmax(0,1fr); grid-template-rows:auto minmax(360px,auto) auto; gap:10px; }
-  .map-workspace-settings-open > .map-overlay-controls,
-  .map-workspace-settings-open > .map-frame,
-  .map-workspace-settings-open > .map-bottom-overlay { grid-column:1; }
-  .map-workspace-settings-open > .map-overlay-controls { grid-row:1; }
-  .map-workspace-settings-open > .map-frame { grid-row:2; }
-  .map-workspace-settings-open > .map-bottom-overlay { grid-row:3; }
+  /* A phone map is too small to float the panel over; it opens above the map instead. */
+  .map-stage > .map-overlay-controls { position: static; order: -1; width: auto; max-height: min(55dvh, 460px); margin: 8px 8px 10px; box-shadow: none; }
   .overlay-control-fields { grid-template-columns:minmax(0,1fr); }
   .map-panel-actions { width:100%; justify-content:flex-start; }
   .map-bottom-overlay { grid-template-columns:minmax(0,1fr); grid-template-areas:'legend' 'coordinate'; gap:6px; }
@@ -470,7 +521,10 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 @media (max-width: 359px) {
   .topbar { gap: 6px 6px; padding-inline: 8px; }
   .topbar-tools { gap: 4px; }
-  .lang-switch button { min-width: 34px; padding: 0 4px; }
+  .lang-switch button { padding: 0 4px; }
+  /* Two 44 px language buttons leave the page title too little room; the other language stays one tap away. */
+  .lang-switch button[aria-pressed='true'] { display: none; }
+  .lang-switch button + button { border-left: 0; }
   .telemetry-strip { margin: 0 -8px; }
 }
 
@@ -478,6 +532,8 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 .doa-map-label { pointer-events: none; font-family: var(--mono); line-height: 1; white-space: nowrap; user-select: none; }
 .doa-ring-label { padding: 2px 5px; border-radius: 3px; background: rgba(255, 255, 255, .82); color: #1f2d3a; font-size: 10.5px; font-weight: 600; box-shadow: 0 0 0 1px rgba(31, 45, 58, .25); }
 .doa-cardinal-label { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: rgba(17, 23, 30, .82); color: #ffffff; font-size: 11px; font-weight: 700; }
+/* The dark-theme map background is close to the label colour; an outline keeps the circle visible. */
+:root:not([data-theme='light']) .doa-cardinal-label { box-shadow: 0 0 0 1px rgba(230, 237, 243, .45); }
 .doa-bearing-label { padding: 4px 7px; border: 1px solid #e0603a; border-radius: 4px; background: #11171e; color: #ffffff; font-size: 12px; font-weight: 700; box-shadow: 0 2px 8px rgba(0, 0, 0, .35); }
 .doa-hover-popup .maplibregl-popup-content { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); box-shadow: 0 6px 18px rgba(0, 0, 0, .3); pointer-events: none; }
 .doa-hover-popup { pointer-events: none; }
@@ -485,16 +541,70 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 .doa-hover-popup span { color: var(--muted); font-family: var(--mono); font-size: 11.5px; }
 .doa-hover-popup small { color: var(--subtle); font-size: 10.5px; }
 .doa-hover-popup .maplibregl-popup-tip { border-top-color: var(--surface); border-bottom-color: var(--surface); }
-.map-data-chip { position: absolute; top: 58px; left: 10px; z-index: 20; max-width: calc(100% - 80px); padding: 5px 9px; border: 1px solid color-mix(in srgb, var(--amber) 55%, transparent); border-radius: 5px; background: color-mix(in srgb, var(--surface) 94%, transparent); color: var(--amber); font-family: var(--mono); font-size: 11px; }
+.map-notices { position: absolute; top: 58px; left: 10px; z-index: 20; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; max-width: calc(100% - 80px); pointer-events: none; }
+.map-data-chip { max-width: 100%; padding: 5px 9px; border: 1px solid color-mix(in srgb, var(--amber) 55%, transparent); border-radius: 5px; background: color-mix(in srgb, var(--surface) 94%, transparent); color: var(--amber); font-family: var(--mono); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
 .map-overlay-legend { display: flex; flex-direction: column; gap: 6px; max-width: none; }
 .legend-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
 .legend-row > span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
 .legend-reading { color: var(--text); font-family: var(--mono); font-size: 11px; }
 .legend-edge { height: 0 !important; border-top: 2px dotted #e0603a; border-radius: 0 !important; }
 .legend-bearing { background: #e0603a; }
-.legend-scale { display: grid; grid-template-columns: auto minmax(80px, 260px) auto; align-items: center; gap: 8px; color: var(--muted); font-family: var(--mono); font-size: 10.5px; }
+.legend-scale { display: grid; grid-template-columns: auto minmax(80px, 260px) auto auto; justify-content: start; align-items: center; gap: 8px; color: var(--muted); font-family: var(--mono); font-size: 10.5px; }
+.legend-scale-mode { justify-self: start; padding: 1px 5px; border: 1px solid var(--line); border-radius: 3px; color: var(--subtle); font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase; }
+.map-overlay-legend .legend-warning { color: var(--amber); font-size: 11px; line-height: 1.4; white-space: normal; }
+.overlay-control-fields small.overlay-field-error { color: var(--red); }
+.overlay-control-fields input[aria-invalid="true"] { border-color: var(--red); }
+.doa-station-marker.is-stale { opacity: .6; filter: grayscale(.7); }
+/* Title row of the station popup; its padding and height keep the first value clear of the 44 px close button. */
+.doa-station-popup .station-popup-content > strong { min-height: 22px; padding-right: 34px; }
+.app-crash { display: grid; gap: 12px; max-width: 560px; margin: 15vh auto 0; padding: 24px 16px; color: var(--text); }
+.app-crash h1 { margin: 0; font-size: 20px; }
+.app-crash p { margin: 0; color: var(--muted); line-height: 1.6; }
+.app-crash .primary-button { justify-self: start; }
 .legend-scale-bar { position: relative; height: 8px; border-radius: 2px; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .15); }
 .legend-threshold { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--text); }
 .overlay-group { min-width: 0; margin: 0 0 12px; padding: 0; border: 0; }
 .overlay-group > legend { margin-bottom: 8px; padding: 0; color: var(--subtle); font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; }
 .overlay-control-fields label.is-inactive { opacity: .55; }
+
+/* Health, diagnostics and configuration detail ----------------------------- */
+.key-value-good strong { color: var(--green); }
+.key-value-warn strong { color: var(--amber); }
+.key-value-bad strong { color: var(--red); }
+.health-summary-http { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--subtle); font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; }
+.health-headline { overflow-wrap: anywhere; }
+.health-headline.headline-good { color: var(--green); }
+.health-headline.headline-warn { color: var(--amber); }
+.health-headline.headline-bad { color: var(--red); }
+/* The three summary metrics stack when the panel is too narrow for whole values. */
+.health-summary-panel { container-type: inline-size; }
+@container (max-width: 520px) {
+  .health-summary-panel .metric-grid.three { grid-template-columns: minmax(0, 1fr); }
+  .health-summary-panel .metric-detail { white-space: normal; }
+}
+.resources-panel { padding-bottom: 18px; }
+.resources-panel > .panel-header { margin-bottom: 8px; }
+.resource-table td { padding: 10px; vertical-align: top; }
+.resource-table code { color: var(--text); font-family: var(--mono); font-size: 12px; }
+.resource-result { font-family: var(--mono); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.resource-detail { overflow-wrap: anywhere; }
+.resource-empty { padding: 0 20px; }
+.collection-note { margin: 12px 20px 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.collection-note.status-text-warn { color: var(--amber); }
+.native-record-grid .key-value { padding: 10px 0; border-bottom: 1px solid var(--line-soft); background: none; }
+.native-records { grid-template-columns: minmax(0, 1fr); }
+.native-record { min-width: 0; }
+/* Check labels are sentences now; capitalizing each word also turned θ₀ into Θ₀. */
+.gate-row > strong { text-transform: none; }
+.native-record-error { margin: 0 0 10px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.native-record-error strong { margin-right: 4px; font-family: var(--mono); font-size: 11px; }
+.vfo-rows { margin-top: 12px; padding: 0; }
+.vfo-rows table { min-width: 520px; }
+.vfo-rows caption { padding-bottom: 6px; color: var(--subtle); font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-align: left; text-transform: uppercase; }
+.reason-code { margin-left: 6px; color: var(--subtle); font-family: var(--mono); font-size: 10.5px; overflow-wrap: anywhere; }
+.consistency-readout strong.status-text-good { color: var(--green); }
+.consistency-readout strong.status-text-warn { color: var(--amber); }
+.consistency-readout strong.status-text-bad { color: var(--red); }
+.form-contents { display: contents; }
+.dry-run-panel > .form-contents > .form-field { max-width: 360px; margin-left: 20px; }
+.admin-login-form .form-field input:disabled { cursor: not-allowed; opacity: .6; }

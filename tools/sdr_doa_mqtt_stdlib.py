@@ -2,9 +2,9 @@
 """Bounded MQTT 3.1.1 client using only the Python standard library.
 
 This is intentionally a small client for the SDR-DoA edge path. It supports
-CONNECT, PUBLISH QoS 0/1, SUBSCRIBE QoS 1, incoming PUBLISH, PUBACK/SUBACK,
-keepalive, and DISCONNECT. All broker-facing input is validated before it is
-handed to the agent.
+CONNECT (with an optional will), PUBLISH QoS 0/1, SUBSCRIBE QoS 1, incoming
+PUBLISH, PUBACK/SUBACK, keepalive, and DISCONNECT. All broker-facing input is
+validated before it is handed to the agent.
 """
 
 from __future__ import annotations
@@ -147,6 +147,22 @@ class IncomingMessage:
     duplicate: bool
 
 
+@dataclass(frozen=True)
+class WillMessage:
+    """Message the broker publishes if the connection ends without DISCONNECT."""
+
+    topic: str
+    payload: bytes
+    qos: int = 1
+    retain: bool = True
+
+
+def _validate_publish_topic(topic: str, label: str) -> bytes:
+    if not isinstance(topic, str) or not topic or any(ch in topic for ch in ("#", "+", "\x00")):
+        raise ValueError(f"{label} is invalid")
+    return _utf8(topic, label)
+
+
 class Mqtt311Client:
     """Small reconnectable MQTT client for one edge-agent connection."""
 
@@ -163,6 +179,7 @@ class Mqtt311Client:
         password: Optional[str] = None,
         tls_context: Optional[ssl.SSLContext] = None,
         require_secure: bool = False,
+        will: Optional[WillMessage] = None,
     ) -> None:
         if not isinstance(host, str) or not host.strip() or any(ch.isspace() for ch in host):
             raise ValueError("MQTT host is required and must not contain whitespace")
@@ -180,6 +197,14 @@ class Mqtt311Client:
             _utf8(username, "MQTT username")
         if password is not None:
             _utf8(password, "MQTT password")
+        if will is not None:
+            if not isinstance(will, WillMessage):
+                raise ValueError("MQTT will must be a WillMessage")
+            _validate_publish_topic(will.topic, "MQTT will topic")
+            if not isinstance(will.payload, bytes) or len(will.payload) > MAX_PAYLOAD_BYTES:
+                raise ValueError("MQTT will payload must be bounded bytes")
+            if will.qos not in (0, 1):
+                raise ValueError("MQTT will QoS must be 0 or 1")
         secure_required = bool(require_secure) or not is_loopback_host(host)
         if secure_required and (tls_context is None or username is None):
             raise ValueError("non-loopback MQTT requires TLS and broker authentication")
@@ -193,9 +218,13 @@ class Mqtt311Client:
         self.password = password
         self.tls_context = tls_context
         self.require_secure = secure_required
+        self.will = will
         self._sock: Optional[socket.socket] = None
         self._packet_id = 0
-        self._last_activity = 0.0
+        # Keepalive is satisfied only by packets this client sends; brokers
+        # disconnect a client that is silent for 1.5x keepalive even while
+        # they keep delivering messages to it.
+        self._last_sent = 0.0
         self._ping_sent_at: Optional[float] = None
         self._subscriptions: List[Tuple[str, int]] = []
 
@@ -206,6 +235,10 @@ class Mqtt311Client:
     def _build_connect_packet(self) -> bytes:
         connect_flags = 0x02  # clean session
         payload = bytearray(_utf8(self.client_id, "MQTT client_id"))
+        if self.will is not None:
+            connect_flags |= 0x04 | (self.will.qos << 3) | (0x20 if self.will.retain else 0)
+            payload.extend(_utf8(self.will.topic, "MQTT will topic"))
+            payload.extend(struct.pack("!H", len(self.will.payload)) + self.will.payload)
         if self.username is not None:
             connect_flags |= 0x80
             payload.extend(_utf8(self.username, "MQTT username"))
@@ -230,6 +263,7 @@ class Mqtt311Client:
             # close(), including malformed CONNACK and TLS/read failures.
             self._sock = sock
             sock.sendall(self._build_connect_packet())
+            self._last_sent = time.monotonic()
             packet_type, flags, payload = self._read_packet(sock)
             if packet_type != 2 or flags != 0 or len(payload) != 2:
                 raise MqttProtocolError("invalid MQTT CONNACK")
@@ -239,7 +273,6 @@ class Mqtt311Client:
                 raise MqttProtocolError("clean-session CONNACK unexpectedly has a session")
             if payload[1] != 0:
                 raise MqttProtocolError(f"MQTT CONNACK refused: {payload[1]}")
-            self._last_activity = time.monotonic()
             self._ping_sent_at = None
             # Re-subscribe after every clean reconnect.
             for topic, qos in list(self._subscriptions):
@@ -248,14 +281,17 @@ class Mqtt311Client:
             self.close()
             raise
 
-    def close(self) -> None:
+    def close(self, graceful: bool = True) -> None:
+        """Close the connection; ``graceful=False`` skips DISCONNECT so the
+        broker treats the session as lost and publishes the will."""
         sock, self._sock = self._sock, None
         self._ping_sent_at = None
         if sock is not None:
-            try:
-                sock.sendall(b"\xE0\x00")
-            except OSError:
-                pass
+            if graceful:
+                try:
+                    sock.sendall(b"\xE0\x00")
+                except OSError:
+                    pass
             try:
                 sock.close()
             except OSError:
@@ -287,9 +323,9 @@ class Mqtt311Client:
             if now - self._ping_sent_at > self.keepalive / 2:
                 raise TimeoutError("MQTT broker did not answer PINGRESP")
             return
-        if now - self._last_activity >= self.keepalive / 2:
+        if now - self._last_sent >= self.keepalive / 2:
             sock.sendall(b"\xC0\x00")
-            self._last_activity = now
+            self._last_sent = now
             self._ping_sent_at = now
 
     def _parse_incoming_publish(self, flags: int, payload: bytes) -> IncomingMessage:
@@ -327,7 +363,7 @@ class Mqtt311Client:
             sock = self._ensure_socket()
             ack = struct.pack("!H", packet_id)
             sock.sendall(b"\x40" + _encode_remaining_length(2) + ack)
-            self._last_activity = time.monotonic()
+            self._last_sent = time.monotonic()
         return IncomingMessage(topic, body, qos, retain, duplicate)
 
     def _handle_packet(self, packet_type: int, flags: int, payload: bytes) -> Optional[IncomingMessage]:
@@ -358,7 +394,6 @@ class Mqtt311Client:
         if not readable:
             return None
         packet_type, flags, payload = self._read_packet(sock)
-        self._last_activity = time.monotonic()
         return self._handle_packet(packet_type, flags, payload)
 
     def _read_packet_with_timeout(self, timeout: float) -> Tuple[int, int, bytes]:
@@ -366,9 +401,7 @@ class Mqtt311Client:
         previous = sock.gettimeout()
         sock.settimeout(max(0.01, timeout))
         try:
-            result = self._read_packet(sock)
-            self._last_activity = time.monotonic()
-            return result
+            return self._read_packet(sock)
         finally:
             sock.settimeout(previous)
 
@@ -398,7 +431,7 @@ class Mqtt311Client:
         packet_id = self._next_packet_id()
         body = struct.pack("!H", packet_id) + _utf8(topic, "MQTT subscription topic") + bytes((qos,))
         sock.sendall(b"\x82" + _encode_remaining_length(len(body)) + body)
-        self._last_activity = time.monotonic()
+        self._last_sent = time.monotonic()
         payload = self._wait_for(9, packet_id)
         grants = payload[2:]
         if not grants or any(grant not in (0, 1) for grant in grants):
@@ -417,9 +450,7 @@ class Mqtt311Client:
     def publish(self, topic: str, payload: bytes, qos: int = 0, retain: bool = False) -> PublishResult:
         if qos not in (0, 1):
             raise ValueError("only MQTT QoS 0 and 1 are supported")
-        if not isinstance(topic, str) or not topic or any(ch in topic for ch in ("#", "+", "\x00")):
-            raise ValueError("MQTT publish topic is invalid")
-        topic_bytes = _utf8(topic, "MQTT publish topic")
+        topic_bytes = _validate_publish_topic(topic, "MQTT publish topic")
         if not isinstance(payload, bytes):
             raise TypeError("payload must be bytes")
         if len(payload) > MAX_PAYLOAD_BYTES:
@@ -433,7 +464,7 @@ class Mqtt311Client:
         body = variable + payload
         flags = (qos << 1) | (1 if retain else 0)
         sock.sendall(bytes((0x30 | flags,)) + _encode_remaining_length(len(body)) + body)
-        self._last_activity = time.monotonic()
+        self._last_sent = time.monotonic()
         if packet_id is not None:
             self._wait_for(4, packet_id)
         return PublishResult(topic, qos, retain, len(payload))
@@ -464,6 +495,7 @@ __all__ = [
     "Mqtt311Publisher",
     "MqttProtocolError",
     "PublishResult",
+    "WillMessage",
     "create_default_tls_context",
     "is_loopback_host",
 ]
