@@ -84,6 +84,18 @@ describe('Overview dashboard', () => {
     expect(hud).toContain(translate('en', 'polar.conflict'));
   });
 
+  it('marks the HUD age and the node chip STALE once the local window has closed', () => {
+    const fresh = dashboard(snapshot({ overall_state: 'UNVERIFIED' }));
+    expect(fresh).toContain('<span class="ov-hud-age">age 0.2 s</span>');
+    expect(fresh).toContain('<span class="ov-chip tone-info">UNVERIFIED</span>');
+    for (const lang of ['en', 'id'] as const) {
+      const expired = dashboard(snapshot({ overall_state: 'UNVERIFIED' }), { localSnapshotFresh: false }, lang);
+      expect(expired).toContain(`<span class="ov-hud-age is-warn">${translate(lang, 'hud.age', { age: `${translate(lang, 'common.durationS', { value: '0.2' })} · STALE` })}</span>`);
+      expect(expired).toContain('<span class="ov-chip tone-warn">STALE</span>');
+      expect(expired).not.toContain('UNVERIFIED');
+    }
+  });
+
   it('renders the node card summary with the node frequency and gain', () => {
     const markup = dashboard(snapshot({ settings: { available: true, fields: { center_freq: 416.588, uniform_gain: 15.5 } } }));
     expect(markup).toContain('416.588 MHz · gain 15.5 dB');

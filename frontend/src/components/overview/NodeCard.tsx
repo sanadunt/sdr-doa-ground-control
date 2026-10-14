@@ -99,7 +99,9 @@ export function NodeCard({
 }): JSX.Element {
   const { t } = useI18n();
   const summary = nodeSummary(snapshot);
-  const state = snapshot ? String(snapshot.overall_state ?? 'UNKNOWN').toUpperCase() : 'WAITING';
+  // The server state describes the last read; once the local window has
+  // closed or a read failed, the chip says STALE like the top-bar DATA chip.
+  const state = !snapshot ? 'WAITING' : !localSnapshotFresh ? 'STALE' : String(snapshot.overall_state ?? 'UNKNOWN').toUpperCase();
   const reachable = snapshot?.status?.available === true;
   const values = reachable && !localSnapshotFresh ? 'is-stale' : undefined;
   const fmt = (value: number | null, digits: number, unit = '') => (value === null ? '—' : `${value.toFixed(digits)}${unit}`);

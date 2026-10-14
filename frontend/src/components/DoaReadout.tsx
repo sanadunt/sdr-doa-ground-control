@@ -52,7 +52,12 @@ export function DoaReadout({
   const rawAge = numberOrNull(csv.freshness?.age_ms);
   const ageMs = rawAge !== null && rawAge >= 0 ? rawAge : null;
   const bearingTone: Tone = status.shown ? (status.code === 'DEGRADED' || !offsetVerified ? 'warn' : 'good') : status.code === 'WAITING' ? 'neutral' : 'warn';
-  const age = simulation ? 'SIM' : ageMs !== null ? t('common.durationS', { value: (ageMs / 1000).toFixed(1) }) : '—';
+  // The age is the collector's value at the last read and does not grow, so
+  // once the local window has closed (or the source itself is stale) it is
+  // marked STALE instead of reading as current.
+  const ageStale = !simulation && snapshot !== null && (!localSnapshotFresh || status.code === 'STALE');
+  const ageValue = simulation ? 'SIM' : ageMs !== null ? t('common.durationS', { value: (ageMs / 1000).toFixed(1) }) : '—';
+  const age = ageStale ? `${ageValue} · STALE` : ageValue;
   const ageTitle = simulation
     ? t('readout.simulationAge')
     : snapshot && ageMs === null && csv.available === true ? t('readout.clockUnverified') : undefined;
@@ -71,7 +76,7 @@ export function DoaReadout({
       <div className="ov-hud-head">
         <span className="ov-eyebrow">{t('readout.bearing')}</span>
         {simulation ? <span className="ov-tag tone-warn">{t('readout.simulation')}</span> : null}
-        <span className="ov-hud-age" title={ageTitle}>{t('hud.age', { age })}</span>
+        <span className={ageStale ? 'ov-hud-age is-warn' : 'ov-hud-age'} title={ageTitle}>{t('hud.age', { age })}</span>
       </div>
       <div className="ov-hud-bearing" title={`${t('readout.bearingTitle', { source: offsetSource })}${frameDetail === null ? '' : `\n${frameDetail}`}`}>
         {bearing !== null ? <>{formatDegrees(bearing, 1)}<small>°</small></> : <span className="readout-empty">—</span>}
