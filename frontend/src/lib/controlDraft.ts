@@ -1,5 +1,5 @@
 /**
- * Draft request handed from the Overview spectrum dock ("Kirim ke Raspberry")
+ * Draft request handed from the Overview spectrum dock ("Kirim ke RDF-SDR")
  * to the Kontrol panel. It only pre-fills the Kontrol draft; nothing is sent
  * until the operator unlocks admin, reviews the change and confirms it there.
  */

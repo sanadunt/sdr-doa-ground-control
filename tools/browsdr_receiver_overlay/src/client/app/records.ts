@@ -478,9 +478,9 @@ export const recordsMethods = {
 			case 'simulated':
 				return this.t('Simulation (synthetic peaks)');
 			case 'native':
-				return this.t('HackRF native sweep');
+				return this.t('RadioSpectrum native sweep');
 			case 'manual':
-				return this.t('HackRF manual sweep');
+				return this.t('RadioSpectrum manual sweep');
 			case 'receiver':
 				return this.t('Receiver');
 			default:

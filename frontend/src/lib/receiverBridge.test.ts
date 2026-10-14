@@ -76,7 +76,7 @@ function status(overrides: Record<string, unknown> = {}): Record<string, unknown
     pairedCount: 1,
     connected: true,
     mock: false,
-    deviceName: 'HackRF One',
+    deviceName: 'RadioSpectrum One',
     running: true,
     busy: 'none',
     workspace: 'listener',

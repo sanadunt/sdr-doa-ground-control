@@ -72,7 +72,7 @@ describe('Kontrol locked', () => {
     );
     expect(markup).toContain('id="panel-control"');
     expect(markup).toContain('>LOCKED</span>');
-    expect(markup).toContain('Perubahan dikirim ke Raspberry sebagai <span class="ov-mono">cmd/config/patch</span>.');
+    expect(markup).toContain('Perubahan dikirim ke RDF-SDR sebagai <span class="ov-mono">cmd/config/patch</span>.');
     expect(markup).toContain('Memeriksa sesi admin…');
     expect(markup).not.toContain('type="password"');
   });
@@ -86,7 +86,7 @@ describe('Kontrol locked', () => {
     expect(markup).toContain('Kata sandi admin bawaan masih dipakai.');
     // The password itself never appears in the page.
     expect(markup).not.toContain('123456');
-    expect(markup).not.toContain('Kirim ke Raspberry');
+    expect(markup).not.toContain('Kirim ke RDF-SDR');
   });
 
   it('disables the form when admin login is off', () => {
@@ -149,7 +149,7 @@ describe('Kontrol review and send', () => {
     expect(markup).toContain('tidak dilaporkan → <b>433.925 MHz</b>');
     expect(markup).toContain('QoS 1 · kedaluwarsa 60 dtk · rev dasar 42');
     expect(markup).toContain('<span class="ov-mono">--enable-config</span>');
-    expect(markup).toMatch(/<button class="ov-button is-send is-wide" type="button"><svg[\s\S]*?<span>Kirim ke Raspberry<\/span><\/button>/);
+    expect(markup).toMatch(/<button class="ov-button is-send is-wide" type="button"><svg[\s\S]*?<span>Kirim ke RDF-SDR<\/span><\/button>/);
     expect(markup).toContain('>Kembali</button>');
   });
 
@@ -183,7 +183,7 @@ describe('Kontrol results', () => {
     const markup = view({ stage: 'done', done: done('acked', ack('applied')) });
     expect(markup).toContain('ov-control-result tone-ok');
     expect(markup).toContain('ACK · applied');
-    expect(markup).toContain('Raspberry menerapkan 2 perubahan ke settings.json. Config rev sekarang 43.');
+    expect(markup).toContain('RDF-SDR menerapkan 2 perubahan ke settings.json. Config rev sekarang 43.');
     expect(markup).toContain('>Selesai</button>');
     expect(markup).not.toContain('Muat ulang nilai');
   });

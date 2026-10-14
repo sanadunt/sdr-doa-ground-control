@@ -30,7 +30,7 @@ export interface SpectrumDockProps {
   capabilities: ConsoleCapabilities | null;
   panels: OverviewPanels;
   onPanelsChange: (next: OverviewPanels) => void;
-  /** Pre-fill the Kontrol draft ("Kirim ke Raspberry"); it never sends anything by itself. */
+  /** Pre-fill the Kontrol draft ("Kirim ke RDF-SDR"); it never sends anything by itself. */
   onControlDraftRequest: (changes: ConfigPatchChanges) => void;
   /** Mount the persistent Receiver frame; called synchronously inside the Mulai/Dengar click. */
   onRequestReceiver: () => void;
@@ -85,7 +85,7 @@ function spectrumNeedPx(section: HTMLElement): number | null {
 /**
  * Spectrum section of the Overview dock. It drives the hidden, persistent
  * Receiver frame over the bridge: Mulai/Berhenti, Dengar with a mode,
- * click-to-tune and "follow node frequency". "Kirim ke Raspberry" only opens
+ * click-to-tune and "follow node frequency". "Kirim ke RDF-SDR" only opens
  * Kontrol with a draft; the send itself needs admin, review and a confirm.
  */
 export function SpectrumDock({
@@ -354,7 +354,7 @@ export function SpectrumDock({
     });
   };
 
-  // "Kirim ke Raspberry": the RX centre and listen VFO as a Kontrol draft.
+  // "Kirim ke RDF-SDR": the RX centre and listen VFO as a Kontrol draft.
   const ranges = capabilities?.configPatch?.ranges ?? null;
   const rxCenterHz = live?.centerHz ?? target?.centerHz ?? null;
   const rxVfoHz = liveVfo ?? target?.vfoHz ?? rxCenterHz;

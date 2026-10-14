@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
 const source = readFileSync(new URL('./browsdr_receiver_overlay/src/client/app/i18n.ts', import.meta.url), 'utf8');
-const { RECEIVER_INDONESIAN, translateReceiver, translateReceiverMessage, receiverLanguage, receiverDateLocale } = await import(
+const { RECEIVER_INDONESIAN, RECEIVER_INDONESIAN_PATTERNS, i18nMethods, radioDisplayText, translateReceiver, translateReceiverMessage, receiverLanguage, receiverDateLocale } = await import(
 	`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(source, { mode: 'transform' })).toString('base64')}`
 );
 
@@ -31,6 +31,28 @@ test('template, builder and script strings passed to t() have Indonesian text', 
 	assert.ok(keys.size > 100, `expected the Receiver chrome to be translated, found ${keys.size} strings`);
 	const missing = [...keys].filter(key => !(key in RECEIVER_INDONESIAN));
 	assert.deepEqual(missing, []);
+});
+
+test('the radio is shown as RadioSpectrum, never by its upstream brand', () => {
+	assert.equal(radioDisplayText('HackRF One'), 'RadioSpectrum One');
+	assert.equal(radioDisplayText('Mock SDR (Signal Gen)'), 'Mock SDR (Signal Gen)');
+	for (const [english, indonesian] of Object.entries(RECEIVER_INDONESIAN)) {
+		assert.doesNotMatch(english, /HackRF/, english);
+		assert.doesNotMatch(indonesian, /HackRF/, indonesian);
+	}
+	for (const [pattern, template] of RECEIVER_INDONESIAN_PATTERNS) {
+		assert.doesNotMatch(pattern.source, /HackRF/, pattern.source);
+		assert.doesNotMatch(template, /HackRF/, template);
+	}
+	// Error detail from the upstream driver is passed through, with the brand replaced.
+	assert.equal(
+		i18nMethods.tm.call({ uiLanguage: 'id' }, 'Sweep stopped: HackRF could not finish stopping RX: timeout'),
+		'Sweep berhenti: RadioSpectrum could not finish stopping RX: timeout',
+	);
+	assert.equal(
+		i18nMethods.tm.call({ uiLanguage: 'en' }, 'Error stopping sweep: HackRF could not finish stopping RX: timeout'),
+		'Error stopping sweep: RadioSpectrum could not finish stopping RX: timeout',
+	);
 });
 
 test('English is the fallback and only id switches language', () => {

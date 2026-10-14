@@ -36,7 +36,7 @@ function bridgeWith(options: { probe?: number; hello?: boolean; status?: Record<
 
 function status(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    seq: 1, tMs: 0, webusb: true, mockAvailable: false, pairedCount: 1, connected: true, mock: false, deviceName: 'HackRF One',
+    seq: 1, tMs: 0, webusb: true, mockAvailable: false, pairedCount: 1, connected: true, mock: false, deviceName: 'RadioSpectrum One',
     running: true, busy: 'none', workspace: 'listener', centerHz: 433_920_000, sampleRateHz: 20_000_000, frequencyShiftHz: 0,
     gains: { lnaDb: 24, vgaDb: 20, amp: false },
     vfo: { index: 0, enabled: false, mode: 'nfm', frequencyHz: 433_925_000, bandwidthHz: 12_500, squelchEnabled: false, squelchDb: -100, volume: 50 },
@@ -74,7 +74,7 @@ const chip = (markup: string) => /<span class="ov-chip tone-\w+">([^<]*)<\/span>
 describe('Spectrum dock header', () => {
   it('orders title, source, chip, follow, mode, Dengar, Kirim, Mulai and the Receiver link', () => {
     const markup = dock(bridgeWith({ attach: false }));
-    const order = ['Spektrum', 'HackRF · WebUSB', 'ov-chip', 'Ikuti frekuensi node', 'ov-listen-mode', '>Dengar<', '>Kirim ke Raspberry<', '>Mulai<', 'Buka Receiver penuh'];
+    const order = ['Spektrum', 'RadioSpectrum · WebUSB', 'ov-chip', 'Ikuti frekuensi node', 'ov-listen-mode', '>Dengar<', '>Kirim ke RDF-SDR<', '>Mulai<', 'Buka Receiver penuh'];
     const positions = order.map((needle) => markup.indexOf(needle));
     for (const [index, position] of positions.entries()) expect(position, order[index]).toBeGreaterThan(-1);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
@@ -107,7 +107,7 @@ describe('Spectrum dock states', () => {
   it('shows RX OFF and the stopped text before the frame is mounted', () => {
     const markup = dock(bridgeWith({ attach: false }));
     expect(chip(markup)).toBe('RX OFF');
-    expect(markup).toContain('RX berhenti. Tekan Mulai untuk menyalakan HackRF.');
+    expect(markup).toContain('RX berhenti. Tekan Mulai untuk menyalakan RadioSpectrum.');
     // The axis follows the node until the first frame.
     expect(markup).toContain('Tengah 416.588 MHz · span 2.0 MHz · LNA — dB · VGA — dB');
     expect(markup).toContain('<span>415.588</span>');
@@ -171,7 +171,7 @@ describe('Spectrum dock states', () => {
   it('shows the MOCK tag for the Mock SDR and UPCONVERTER for a frequency shift', () => {
     const markup = dock(bridgeWith({ status: status({ mock: true, deviceName: 'Mock SDR', frequencyShiftHz: 125_000_000 }) }));
     expect(markup).toContain('>MOCK</span>');
-    expect(markup).not.toContain('HackRF · WebUSB');
+    expect(markup).not.toContain('RadioSpectrum · WebUSB');
     expect(markup).toContain('>UPCONVERTER</span>');
   });
 
@@ -182,17 +182,17 @@ describe('Spectrum dock states', () => {
     expect(markup).toContain('Buka Receiver (7)');
   });
 
-  it('explains a lost HackRF', () => {
+  it('explains a lost RadioSpectrum', () => {
     const markup = dock(bridgeWith({ status: status({ running: false, connected: false, error: { code: 'USB_LOST' } }) }), { lang: 'en' });
     expect(chip(markup)).toBe('RX OFF');
-    expect(markup).toContain('The HackRF was disconnected.');
+    expect(markup).toContain('RadioSpectrum was disconnected.');
   });
 
-  it('enables Kirim ke Raspberry only for frequencies the Raspberry accepts', () => {
+  it('enables Kirim ke RDF-SDR only for frequencies RDF-SDR accepts', () => {
     const inRange = dock(bridgeWith({ status: status() }));
     expect(inRange).toMatch(/<button class="ov-button ov-spec-send" type="button" title="Buka Kontrol dengan draf tengah RX 433.920 MHz dan VFO 433.925 MHz/);
     const outOfRange = dock(bridgeWith({ status: status({ centerHz: 2_400_000_000, vfo: null }) }));
-    expect(outOfRange).toMatch(/<button class="ov-button ov-spec-send" type="button" disabled="" title="Raspberry menerima 24 s\/d 1800 MHz/);
+    expect(outOfRange).toMatch(/<button class="ov-button ov-spec-send" type="button" disabled="" title="RDF-SDR menerima 24 s\/d 1800 MHz/);
   });
 
   it('holds when there is no fresh node frequency to follow', () => {

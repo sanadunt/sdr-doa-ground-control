@@ -165,7 +165,7 @@ describe('Overview dashboard', () => {
     expect(markup).toContain('Spektrum');
     expect(markup).toMatch(/aria-keyshortcuts="7"[^>]*title="Buka halaman Receiver \(tombol 7\)"/);
     expect(markup).toContain('Ikuti frekuensi node');
-    expect(markup).toContain('>Kirim ke Raspberry<');
+    expect(markup).toContain('>Kirim ke RDF-SDR<');
     expect(markup).toContain('class="ov-spec-canvas"');
     expect(markup).toContain('Kontrol MQTT');
     expect(markup).toContain('LOCKED');

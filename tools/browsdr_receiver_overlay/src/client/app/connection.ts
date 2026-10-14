@@ -1,6 +1,7 @@
 import type { AppInstance } from './types';
 import * as Comlink from 'comlink';
 import { getAllCatalogFilters, lookupDevice } from '../device-catalog';
+import { radioDisplayText } from './i18n';
 
 function initializeGains(
 	gainControls: readonly { name: string; min: number; max: number; step: number; default: number }[],
@@ -20,7 +21,7 @@ function initializeGains(
 	return gains;
 }
 
-export const WEBUSB_UNAVAILABLE_MESSAGE = 'This browser has no WebUSB, so it cannot connect a HackRF. Open the console in Chrome or Edge (desktop or Android).';
+export const WEBUSB_UNAVAILABLE_MESSAGE = 'This browser has no WebUSB, so it cannot connect a RadioSpectrum. Open the console in Chrome or Edge (desktop or Android).';
 export const RX_STREAM_FAILED_PREFIX = 'The radio stopped sending samples';
 /** Start of the message _handleRadioLost shows; the console bridge reports it as USB_LOST. */
 export const RADIO_LOST_PREFIX = 'Radio disconnected';
@@ -54,7 +55,7 @@ export const connectionMethods = {
 		if (!source || this.sweep.source === source) return;
 		if (this.sweep.hasResults && this.sweep.source === 'simulated') {
 			// Keep the shown results labelled as the simulation they came from.
-			this.showMsg('Radio connected. The results shown are SIMULATION; choose the HackRF source or Clear before scanning.');
+			this.showMsg('Radio connected. The results shown are SIMULATION; choose the RadioSpectrum source or Clear before scanning.');
 			return;
 		}
 		this.sweep.source = source;
@@ -136,11 +137,11 @@ export const connectionMethods = {
 			const hackrfDevices = authorizedDevices.filter(device => lookupDevice(device)?.type === 'hackrf');
 			if (hackrfDevices.length !== 1) return;
 			this._initAudioCtx();
-			this.showMsg('Reconnecting to previously authorized HackRF...');
+			this.showMsg('Reconnecting to previously authorized RadioSpectrum...');
 			await this.connectToDevice(hackrfDevices[0]);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			this.showMsg(`HackRF auto-connect failed: ${message}`);
+			this.showMsg(`RadioSpectrum auto-connect failed: ${message}`);
 		}
 	},
 	async connect(this: AppInstance) {
@@ -159,7 +160,7 @@ export const connectionMethods = {
 		for (const device of allPaired) {
 			const driver = lookupDevice(device);
 			if (driver) {
-				sdrDevices.push({ device, driverName: driver.name, productName: device.productName || '' });
+				sdrDevices.push({ device, driverName: radioDisplayText(driver.name), productName: radioDisplayText(device.productName || '') });
 			}
 		}
 
@@ -202,7 +203,7 @@ export const connectionMethods = {
 				if (this.sweep.error === WEBUSB_UNAVAILABLE_MESSAGE || this.sweep.error.startsWith(RADIO_LOST_PREFIX)
 					|| this.sweep.error.startsWith(RX_STREAM_FAILED_PREFIX)) this.sweep.error = '';
 				const info = await this.backend.info();
-				this.info.boardName = info.name;
+				this.info.boardName = radioDisplayText(info.name);
 
 				// Populate device capabilities for dynamic UI
 				const caps = await this.backend.getDeviceCapabilities();

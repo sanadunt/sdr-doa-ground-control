@@ -513,7 +513,7 @@ test('status maps lost radio, stopped stream and missing WebUSB to codes', async
 	assert.deepEqual(latestError(), { code: 'RX_ERROR' });
 	app.running = true;
 	assert.equal(latestError(), null);
-	app.sweep.error = 'This browser has no WebUSB, so it cannot connect a HackRF. Open the console in Chrome or Edge (desktop or Android).';
+	app.sweep.error = 'This browser has no WebUSB, so it cannot connect a RadioSpectrum. Open the console in Chrome or Edge (desktop or Android).';
 	assert.deepEqual(latestError(), { code: 'NO_WEBUSB' });
 	app.sweep.error = 'Sweep error: something else';
 	assert.equal(latestError(), null);

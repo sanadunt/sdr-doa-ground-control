@@ -307,7 +307,7 @@ export function ControlPanelView({
  * Kontrol: an admin-gated, explicitly confirmed sdr/v1 cmd/config/patch to
  * the Raspberry. Locked until admin unlock; then edit -> review -> sending
  * -> done. Nothing is published without the review step and the explicit
- * "Kirim ke Raspberry" press; the server checks Origin, admin, ranges and
+ * "Kirim ke RDF-SDR" press; the server checks Origin, admin, ranges and
  * the base revision again, and reports the edge agent's ACK by command id.
  */
 export function ControlPanel({ capabilities, controlDraftRequest, onClose }: ControlPanelProps): JSX.Element {

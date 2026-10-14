@@ -27,7 +27,7 @@ const STOP = 434_920_000;
 
 function status(overrides: Partial<ReceiverStatus> = {}): ReceiverStatus {
   return {
-    seq: 1, tMs: 0, webusb: true, mockAvailable: false, pairedCount: 1, connected: true, mock: false, deviceName: 'HackRF One',
+    seq: 1, tMs: 0, webusb: true, mockAvailable: false, pairedCount: 1, connected: true, mock: false, deviceName: 'RadioSpectrum One',
     running: true, busy: 'none', workspace: 'listener', centerHz: 433_920_000, sampleRateHz: 20_000_000, frequencyShiftHz: 0,
     gains: { lnaDb: 40, vgaDb: 20, amp: false }, vfo: null, squelchOpen: false, audio: 'running', recording: false, error: null, notice: null,
     ...overrides,
