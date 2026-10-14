@@ -8,6 +8,7 @@ import { DEFAULT_COMPASS_CONFIG } from '../lib/polar';
 import { DEFAULT_CONSOLE_CONFIG } from '../lib/telemetry';
 import { adminErrorKey, gpsInputErrorKey, normalizeConnectionDraft, parseBaseRevision, parseDryRunChanges, refreshIntervalOptions, refreshWarningKey } from '../lib/configForm';
 import { MAX_LOGO_BYTES, pngDataUrl, pngLogoErrorKey, validatePngLogo } from '../lib/pngLogo';
+import { CONFIG_PATCH_FIELDS } from '../lib/configPatch';
 import { DEFAULT_MQTT_TRANSPORT, DEFAULT_MQTT_WS_PATH, mqttTransportFields } from '../lib/mqttMonitor';
 import { MAX_COMPASS_OFFSET_DEG, saveCompassConfig, saveGpsConfig } from '../lib/sourceConfigStorage';
 import { errorNotice } from '../lib/errorNotice';
@@ -15,13 +16,8 @@ import { useI18n } from '../lib/i18n';
 import type { MessageKey, Translate } from '../lib/i18n';
 import { KeyValue, Metric, Panel, SectionHeading, StatusBadge } from '../components/ui';
 
-const DRY_RUN_FIELDS = [
-  { key: 'center_frequency_hz', label: 'config.field.center', min: 24_000_000, max: 1_800_000_000, step: 1_000 },
-  { key: 'gain_db', label: 'config.field.gain', min: -100, max: 60, step: 0.5 },
-  { key: 'vfo_frequency_hz', label: 'config.field.vfo', min: 24_000_000, max: 1_800_000_000, step: 1_000 },
-  { key: 'vfo_bandwidth_hz', label: 'config.field.bandwidth', min: 100, max: 2_400_000, step: 100 },
-  { key: 'vfo_squelch_db', label: 'config.field.squelch', min: -200, max: 20, step: 0.5 },
-] as const satisfies ReadonlyArray<{ key: string; label: MessageKey; min: number; max: number; step: number }>;
+// The allowlisted fields, shared with Kontrol (SI units, ranges, steps).
+const DRY_RUN_FIELDS = CONFIG_PATCH_FIELDS;
 
 type Tone = 'good' | 'warn' | 'bad' | 'neutral';
 // Local messages keep their key so they follow a language switch; server and
@@ -431,7 +427,7 @@ export function ConfigurationPage({
           </form>
         </div>
       </Panel>
-      <div className="config-guard-row"><Metric label={t('config.remoteWrites')} value={t('config.disabled')} detail={t('config.remoteWritesDetail')} tone="good" /><Metric label={t('config.mqttPublish')} value={t('config.disabled')} detail={t('config.mqttPublishDetail')} tone="good" /><Metric label={t('config.secrets')} value={t('config.secretsValue')} detail={t('config.secretsDetail')} tone="good" /><KeyValue label={t('config.adminSession')} value={adminAuthenticated ? t('config.adminSessionActive') : t('config.adminSessionClosed')} detail={t('config.cookieDetail')} /></div>
+      <div className="config-guard-row"><Metric label={t('config.remoteWrites')} value={t('config.disabled')} detail={t('config.remoteWritesDetail')} tone="good" /><Metric label={t('config.mqttPublish')} value={t('config.mqttPublishValue')} detail={t('config.mqttPublishDetail')} tone="warn" /><Metric label={t('config.secrets')} value={t('config.secretsValue')} detail={t('config.secretsDetail')} tone="good" /><KeyValue label={t('config.adminSession')} value={adminAuthenticated ? t('config.adminSessionActive') : t('config.adminSessionClosed')} detail={t('config.cookieDetail')} /></div>
     </div>
   );
 }

@@ -3,20 +3,14 @@ import type { JSX } from 'react';
 import { useI18n } from '../lib/i18n';
 import type { Lang } from '../lib/i18n';
 import { isTextEntryTarget } from '../lib/shortcuts';
+import { consoleRequestsMockSdr } from '../lib/receiverBridge';
+import type { ReceiverBridge } from '../lib/receiverBridge';
+
+// The Overview dock shares the mock rule, so it lives with the bridge.
+export { consoleRequestsMockSdr };
 
 function consoleTheme(): 'light' | 'dark' {
   return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
-}
-
-const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '[::1]']);
-
-/**
- * The Receiver offers its Mock SDR only with ?mock=1 on a loopback host. A
- * console page opened as http://127.0.0.1:8787/?mock=1#/receiver passes that
- * on to the frame; any other host or value leaves the Mock SDR off.
- */
-export function consoleRequestsMockSdr(location: Pick<Location, 'hostname' | 'search'>): boolean {
-  return LOOPBACK_HOSTS.has(location.hostname.toLowerCase()) && new URLSearchParams(location.search).get('mock') === '1';
 }
 
 /** The Receiver reads theme and language from its URL before its first paint. */
@@ -62,11 +56,18 @@ function receiverWindow(frame: HTMLIFrameElement | null): Window | null {
   }
 }
 
-export function ReceiverPage(): JSX.Element {
+export function ReceiverPage({ bridge, visible = true }: {
+  /** The console's Receiver bridge; bound to the frame on every load. */
+  bridge?: ReceiverBridge;
+  /** The Receiver route is showing (the frame stays mounted, hidden, on other routes). */
+  visible?: boolean;
+} = {}): JSX.Element {
   const { t, lang } = useI18n();
   const frameRef = useRef<HTMLIFrameElement>(null);
   const langRef = useRef(lang);
   langRef.current = lang;
+  const bridgeRef = useRef(bridge);
+  bridgeRef.current = bridge;
   // Changing the iframe URL would reload the Receiver and stop RX, so later
   // theme and language changes are pushed into the loaded frame instead.
   const [src] = useState(() => receiverFrameSrc(consoleTheme(), lang, consoleRequestsMockSdr(window.location)));
@@ -93,19 +94,41 @@ export function ReceiverPage(): JSX.Element {
     }
   };
 
+  // Each load is a new Receiver document, so the bridge binds to it again.
+  // Only a loaded /receiver/ document counts; the initial about:blank does not.
+  const attachBridge = () => {
+    const frameWindow = receiverWindow(frameRef.current);
+    if (frameWindow) bridgeRef.current?.attach(frameWindow);
+  };
+
+  const onFrameLoad = () => {
+    syncFrame();
+    attachBridge();
+  };
+
   useEffect(() => {
     const frame = frameRef.current;
+    const attached = bridgeRef.current;
     window.addEventListener('console-theme-change', syncFrame);
     syncFrame();
+    // A remount (StrictMode) finds the frame already loaded and no new load event.
+    attachBridge();
     return () => {
       window.removeEventListener('console-theme-change', syncFrame);
       receiverWindow(frame)?.removeEventListener('keydown', onFrameKeyDown);
+      attached?.detach();
     };
   }, []);
 
   useEffect(() => {
     syncFrame();
   }, [lang]);
+
+  // Shown again after being hidden: the frame's canvases were sized 0x0 while
+  // display:none, and console-theme-change makes the Receiver resize them.
+  useEffect(() => {
+    if (visible) syncFrame();
+  }, [visible]);
 
   return (
     <div className="page page-receiver">
@@ -117,7 +140,7 @@ export function ReceiverPage(): JSX.Element {
         title={t('route.receiver')}
         allow="usb; autoplay"
         loading="eager"
-        onLoad={syncFrame}
+        onLoad={onFrameLoad}
       />
     </div>
   );

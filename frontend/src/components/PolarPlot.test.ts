@@ -2,7 +2,37 @@ import { describe, expect, it } from 'vitest';
 import { translate } from '../lib/i18n';
 import type { MessageKey } from '../lib/i18n';
 import { MIN_AUTO_DB_SPAN } from '../lib/doaGeometry';
-import { niceStep, polarPlotConfig, polarUiRevision, radialAxisAngle, radialDomain, radialTickText, radialTicks, validHeadUp, validPlotRange } from './PolarPlot';
+import { displayAngleForBin } from '../lib/polar';
+import { niceStep, peakUpHead, polarPlotConfig, polarUiRevision, radialAxisAngle, radialDomain, radialTickText, radialTicks, validHeadUp, validPlotRange } from './PolarPlot';
+
+describe('peak up (Puncak ke atas)', () => {
+  it('turns Compass so theta_0 sits at the top: the head is its compass bearing', () => {
+    expect(peakUpHead(312.4, { figType: 'Compass', compassOffset: 0 })).toBe(47.6);
+    expect(peakUpHead(312.4, { figType: 'Compass', compassOffset: 30 })).toBe(77.6);
+  });
+
+  it('turns Polar by the counter-clockwise screen angle and ignores the offset', () => {
+    expect(peakUpHead(312.4, { figType: 'Polar', compassOffset: 30 })).toBe(47.6);
+    expect(peakUpHead(90, { figType: 'Polar', compassOffset: 0 })).toBe(270);
+  });
+
+  it('stays a valid Head Up, never 360', () => {
+    expect(peakUpHead(0, { figType: 'Polar', compassOffset: 0 })).toBe(0);
+    expect(peakUpHead(0.04, { figType: 'Polar', compassOffset: 0 })).toBe(0);
+    for (const bin of [0, 0.04, 45, 179.95, 359.96]) {
+      for (const settings of [{ figType: 'Compass' as const, compassOffset: 12.5 }, { figType: 'Polar' as const, compassOffset: 0 }]) {
+        expect(validHeadUp(peakUpHead(bin, settings)), `${bin} ${settings.figType}`).toBe(true);
+      }
+    }
+  });
+
+  it('puts the bin at the top of the Plotly axis (rotation 90 + head)', () => {
+    // Clockwise Compass: a display angle a sits at a - head clockwise from the top.
+    const settings = { figType: 'Compass' as const, compassOffset: 20 };
+    const head = peakUpHead(100, settings);
+    expect(Math.abs(((displayAngleForBin(100, settings) - head) % 360 + 360) % 360)).toBeLessThan(0.051);
+  });
+});
 
 it('validates manual view controls', () => {
   expect(validPlotRange(90, -60, 0)).toBe(true);

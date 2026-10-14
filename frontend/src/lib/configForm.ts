@@ -105,12 +105,14 @@ export function parseDryRunChanges(
 const ADMIN_ERROR_KEYS: Record<string, MessageKey> = {
   ADMIN_DISABLED: 'config.adminDisabled',
   ADMIN_PASSWORD_INVALID: 'config.adminPasswordInvalid',
+  ADMIN_LOGIN_THROTTLED: 'config.adminThrottled',
 };
 
 /** Translate an admin API failure by its server error code, when it has one. */
 export function adminErrorKey(error: unknown): MessageKey | null {
   if (!(error instanceof ApiError)) return null;
   if (error.code && Object.prototype.hasOwnProperty.call(ADMIN_ERROR_KEYS, error.code)) return ADMIN_ERROR_KEYS[error.code];
+  if (error.status === 429) return 'config.adminThrottled';
   if (error.status === 503) return 'config.adminDisabled';
   if (error.status === 401) return 'config.adminRequired';
   return null;

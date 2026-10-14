@@ -66,25 +66,32 @@ function NumberField({ label, field, settings, disabled, hint, onCommit }: { lab
   </label>;
 }
 
-export function OverlayControls({ settings, scale, onChange, onReset, onClose }: { settings: DoaOverlaySettings; scale: DbScale; onChange: (next: DoaOverlaySettings) => void; onReset: () => void; onClose: () => void }): JSX.Element {
+/**
+ * Advanced overlay settings. Standalone it has its own title, close button and
+ * layer switches; `embedded` (inside the Overview Layers panel, which has its
+ * own switches) renders only the heat, scale and preset groups.
+ */
+export function OverlayControls({ settings, scale, onChange, onReset, onClose, embedded = false }: { settings: DoaOverlaySettings; scale: DbScale; onChange: (next: DoaOverlaySettings) => void; onReset: () => void; onClose?: () => void; embedded?: boolean }): JSX.Element {
   const { t } = useI18n();
   const update = (key: keyof DoaOverlaySettings, value: boolean | number | string) => onChange({ ...settings, [key]: value });
   const preset = (name: 'kraken' | 'focused' | 'wide') => onChange({ ...settings, ...(name === 'kraken' ? DEFAULT_DOA_OVERLAY_SETTINGS : PRESETS[name]) });
   const density = settings.heatStyle === 'density';
   const auto = settings.dbScale === 'auto';
   const autoHint = auto ? t('overlay.autoActive') : undefined;
-  return <div id="doa-overlay-controls" className="map-overlay-controls" role="region" aria-label={t('overlay.region')}>
-    <div className="overlay-control-header"><h3>{t('overlay.title')}</h3><button className="text-button" type="button" aria-label={t('overlay.closeAria')} onClick={onClose}>{t('overlay.close')}</button></div>
-    <fieldset className="overlay-group">
-      <legend>{t('overlay.groupLayers')}</legend>
-      <div className="overlay-control-grid">
-        <label><input type="checkbox" checked={settings.heatmapVisible} onChange={(event) => update('heatmapVisible', event.target.checked)} /> {t('overlay.heatmap')}</label>
-        <label><input type="checkbox" checked={settings.lobeVisible} onChange={(event) => update('lobeVisible', event.target.checked)} /> {t('overlay.lobe')}</label>
-        <label><input type="checkbox" checked={settings.bearingVisible} onChange={(event) => update('bearingVisible', event.target.checked)} /> {t('overlay.bearing')}</label>
-        <label><input type="checkbox" checked={settings.ringsVisible} onChange={(event) => update('ringsVisible', event.target.checked)} /> {t('overlay.rings')}</label>
-        <label><input type="checkbox" checked={settings.guidesVisible} onChange={(event) => update('guidesVisible', event.target.checked)} /> {t('overlay.guides')}</label>
-      </div>
-    </fieldset>
+  return <div id="doa-overlay-controls" className={`map-overlay-controls${embedded ? ' is-embedded' : ''}`} role="region" aria-label={t('overlay.region')}>
+    {!embedded ? <div className="overlay-control-header"><h3>{t('overlay.title')}</h3>{onClose ? <button className="text-button" type="button" aria-label={t('overlay.closeAria')} onClick={onClose}>{t('overlay.close')}</button> : null}</div> : null}
+    {!embedded ? (
+      <fieldset className="overlay-group">
+        <legend>{t('overlay.groupLayers')}</legend>
+        <div className="overlay-control-grid">
+          <label><input type="checkbox" checked={settings.heatmapVisible} onChange={(event) => update('heatmapVisible', event.target.checked)} /> {t('overlay.heatmap')}</label>
+          <label><input type="checkbox" checked={settings.lobeVisible} onChange={(event) => update('lobeVisible', event.target.checked)} /> {t('overlay.lobe')}</label>
+          <label><input type="checkbox" checked={settings.bearingVisible} onChange={(event) => update('bearingVisible', event.target.checked)} /> {t('overlay.bearing')}</label>
+          <label><input type="checkbox" checked={settings.ringsVisible} onChange={(event) => update('ringsVisible', event.target.checked)} /> {t('overlay.rings')}</label>
+          <label><input type="checkbox" checked={settings.guidesVisible} onChange={(event) => update('guidesVisible', event.target.checked)} /> {t('overlay.guides')}</label>
+        </div>
+      </fieldset>
+    ) : null}
     <fieldset className="overlay-group">
       <legend>{t('overlay.groupHeat')}</legend>
       <div className="overlay-control-fields">

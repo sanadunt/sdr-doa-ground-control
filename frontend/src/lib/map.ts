@@ -11,6 +11,23 @@ export const FALLBACK_OSM_TILE_TEMPLATE = 'https://tile.openstreetmap.de/{z}/{x}
  * than retrying, which leaves a checkerboard when one host is blocked.
  */
 export const OSM_TILE_TEMPLATES = [FALLBACK_OSM_TILE_TEMPLATE, DEFAULT_OSM_TILE_TEMPLATE] as const;
+
+/** Basemap state the map reports to the Layers panel. */
+export interface BasemapStatus {
+  /** Tile host in use, e.g. tile.openstreetmap.de. */
+  host: string;
+  /** Every tile host failed; the overlay is still drawn. */
+  unavailable: boolean;
+}
+
+/** Host name of a tile template, for display (e.g. tile.openstreetmap.de). */
+export function tileHost(template: string): string {
+  try {
+    return new URL(template.replace(/\{[a-z]+\}/giu, '0')).host || template;
+  } catch {
+    return template;
+  }
+}
 /** Consecutive failed tiles on one host before the next host is tried. */
 export const BASEMAP_FAILURES_PER_HOST = 4;
 /** Failures right after a host switch may still come from the previous host's requests. */

@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { ConsoleShell, formatElapsed } from './Shell';
+import { ConsoleShell, formatElapsed, refreshSelectOptions } from './Shell';
 import { I18nContext, translate } from '../lib/i18n';
 import type { Lang } from '../lib/i18n';
 import type { TelemetrySnapshot } from '../types';
@@ -177,5 +177,77 @@ describe('status strip tooltips', () => {
       const title = attributes.match(/title="([^"]*)"/)?.[1] ?? '';
       expect(title.replace(/&#x27;/g, "'"), help[index]).toContain(translate(lang, help[index]));
     });
+  });
+});
+
+describe('top bar and page menu (dashboard shell)', () => {
+  const render = (props: Partial<Parameters<typeof ConsoleShell>[0]> = {}, lang: Lang = 'en') => renderToStaticMarkup(
+    <I18nContext.Provider value={{ lang, setLang: () => undefined, t: (key, vars) => translate(lang, key, vars) }}>
+      <ConsoleShell route="overview" onNavigate={() => undefined} branding={{ app_name: 'Ground Console', logo_data_url: '' }} snapshot={liveSnapshot()} localSnapshotFresh loading={false} readError={null} lastReadAgeMs={100} simulationEnabled={false} onRefresh={() => undefined} {...props}>
+        <span>workspace</span>
+      </ConsoleShell>
+    </I18nContext.Provider>,
+  );
+
+  it('keeps every page in a hidden popover menu instead of a rail', () => {
+    const markup = render();
+    expect(markup).not.toContain('class="sidebar"');
+    const menu = markup.match(/<div id="console-navigation"[^>]*>/)?.[0] ?? '';
+    expect(menu).toContain('class="page-menu"');
+    expect(menu).toContain('hidden=""');
+    expect(markup.match(/class="nav-item[^"]*"/g)).toHaveLength(7);
+    const toggle = markup.match(/<button[^>]*menu-toggle[^>]*>/)?.[0] ?? '';
+    expect(toggle).toContain('aria-controls="console-navigation"');
+    expect(toggle).toContain('aria-expanded="false"');
+    expect(toggle).toContain(`aria-label="${translate('en', 'shell.pageMenu')}"`);
+  });
+
+  it('moves the theme toggle and the control note into the menu footer', () => {
+    const footer = render().match(/<div class="page-menu-footer">[\s\S]*?<\/p><\/div>/)?.[0] ?? '';
+    expect(footer).toContain('page-menu-theme');
+    expect(footer).toContain(translate('en', 'shell.readOnly'));
+    expect(footer).toContain(translate('en', 'shell.shortcutHint'));
+  });
+
+  it('shows the route title and read age off Overview only', () => {
+    expect(render()).not.toContain('topbar-title');
+    const health = render({ route: 'system-health' }, 'id');
+    expect(health).toContain('class="topbar-title"');
+    expect(health).toContain('Kesehatan Sistem');
+    expect(health).toContain('Dibaca 0 dtk lalu');
+  });
+
+  it('shows the brand mark only, named for assistive technology', () => {
+    const markup = render();
+    expect(markup).toMatch(/<span class="brand-mark" role="img" aria-label="Ground Console"[^>]*>GC<\/span>/);
+    expect(markup).not.toContain('brand-name');
+  });
+
+  it('offers the saved refresh interval and the server intervals in the top bar', () => {
+    const markup = render({ refreshSeconds: 2, refreshOptions: [0, 1, 2, 5, 10, 30], onRefreshSecondsChange: () => undefined }, 'id');
+    const select = markup.match(/<select[^>]*refresh-interval[\s\S]*?<\/select>/)?.[0] ?? '';
+    expect(select).toContain(`aria-label="${translate('id', 'shell.refreshInterval')}"`);
+    expect(select).not.toContain('disabled');
+    expect(select).toContain('<option value="0">Manual</option>');
+    expect(select).toContain('<option value="2" selected="">2 dtk</option>');
+    expect(select).toContain('<option value="30">30 dtk</option>');
+  });
+
+  it('disables the interval select until the configuration is known, and names a failed save', () => {
+    const waiting = render({ onRefreshSecondsChange: () => undefined }).match(/<select[^>]*>/)?.[0] ?? '';
+    expect(waiting).toContain('disabled');
+    const failed = render({ refreshSeconds: 5, onRefreshSecondsChange: () => undefined, refreshError: 'request failed (500)' }).match(/<select[^>]*>/)?.[0] ?? '';
+    expect(failed).toContain('aria-invalid="true"');
+    expect(failed).toContain('request failed (500)');
+  });
+
+  it('renders the page toolbar slot it is given', () => {
+    expect(render({ toolbar: <div className="probe-toolbar">tools</div> })).toMatch(/<div class="topbar-toolbar"><div class="probe-toolbar">tools<\/div><\/div>/);
+    expect(render()).not.toContain('topbar-toolbar');
+  });
+
+  it('keeps an unknown saved interval selectable', () => {
+    expect(refreshSelectOptions([0, 1, 2], 15)).toEqual([0, 1, 2, 15]);
+    expect(refreshSelectOptions([2, 0, 2], null)).toEqual([0, 2]);
   });
 });

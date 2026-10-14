@@ -1,15 +1,25 @@
 import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
-import { connectMqtt, getBranding, getConsoleConfig, getMqtt, getSnapshot } from './api';
+import { connectMqtt, getBranding, getCapabilities, getConsoleConfig, getMqtt, getSnapshot, updateConsoleConfig } from './api';
+import type { ConsoleCapabilities } from './api';
 import type { Branding, CompassConfig, ConsoleConfig, GpsConfig, MqttSnapshot, MqttTarget, TelemetrySnapshot } from './types';
-import { loadCompassConfig, loadGpsConfig } from './lib/sourceConfigStorage';
+import { loadCompassConfig, loadGpsConfig, saveCompassConfig } from './lib/sourceConfigStorage';
 import { DEFAULT_CONSOLE_CONFIG, deriveDataState } from './lib/telemetry';
+import { refreshIntervalOptions } from './lib/configForm';
+import { loadOverviewPanels, saveOverviewPanels } from './lib/overviewPanels';
+import type { OverviewPanels } from './lib/overviewPanels';
+import { nextControlDraftRequest } from './lib/controlDraft';
+import type { ConfigPatchChanges, ControlDraftRequest } from './lib/controlDraft';
+import { createReceiverBridge } from './lib/receiverBridge';
+import type { ReceiverBridge } from './lib/receiverBridge';
+import { OverviewPanelToggles } from './components/overview/OverviewPanelToggles';
 import { I18nContext, initialLang, storeLang, translate, useI18n } from './lib/i18n';
 import type { I18nValue, Lang } from './lib/i18n';
 import { lazyWithRetry } from './lib/lazyRetry';
 import { errorNotice, noticeText } from './lib/errorNotice';
 import type { Notice } from './lib/errorNotice';
 import { OverviewPage } from './pages/OverviewPage';
+import type { OverviewDashboardProps } from './pages/OverviewPage';
 import { ConsoleShell } from './components/Shell';
 import type { RouteName } from './components/Shell';
 import { useRoute } from './components/Shell';
@@ -190,6 +200,7 @@ function PageForRoute({
   onMqttChanged,
   onRefreshMqtt,
   onReconnectMqtt,
+  overview,
 }: {
   route: RouteName;
   snapshot: TelemetrySnapshot | null;
@@ -209,6 +220,8 @@ function PageForRoute({
   onMqttChanged: (next: MqttSnapshot) => void;
   onRefreshMqtt: () => Promise<void>;
   onReconnectMqtt: (target: MqttTarget) => Promise<void>;
+  /** Dashboard wiring for Overview; every value is stable across the 500 ms freshness tick. */
+  overview: OverviewDashboardProps;
 }): ReactElement {
   switch (route) {
     case 'system-health': return <SystemHealthPage snapshot={snapshot} mqtt={mqtt} mqttError={mqttError} localSnapshotFresh={localFresh} />;
@@ -220,7 +233,7 @@ function PageForRoute({
       : <ConfigUnavailable error={configError} />;
     case 'message-monitor': return <MessageMonitorPage mqtt={mqtt} mqttError={mqttError} config={config} onMqttChanged={onMqttChanged} onRefreshMqtt={onRefreshMqtt} onReconnectMqtt={onReconnectMqtt} />;
     case 'overview':
-    default: return <OverviewPage snapshot={snapshot} localSnapshotFresh={localFresh} gpsConfig={gpsConfig} compassConfig={compassConfig} />;
+    default: return <OverviewPage snapshot={snapshot} localSnapshotFresh={localFresh} gpsConfig={gpsConfig} compassConfig={compassConfig} {...overview} />;
   }
 }
 
@@ -256,10 +269,37 @@ export default function App(): ReactElement {
   const randomizeSimulation = useCallback(() => {
     setSimulationSettings(randomizeSimulationSettings);
   }, []);
+  // Server capabilities (refresh intervals, admin, config patch); null until read.
+  const [capabilities, setCapabilities] = useState<ConsoleCapabilities | null>(null);
+  // Interval chosen in the top bar while its save is in flight, and the last save error.
+  const [refreshPending, setRefreshPending] = useState<number | null>(null);
+  const [refreshSaveError, setRefreshSaveError] = useState<Notice | null>(null);
+  const refreshSaveController = useRef<AbortController | null>(null);
+  // Overview dashboard panels, a per-browser preference.
+  const [overviewPanels, setOverviewPanels] = useState<OverviewPanels>(() => loadOverviewPanels());
+  useEffect(() => { saveOverviewPanels(overviewPanels); }, [overviewPanels]);
+  // A draft handed from the spectrum dock to Kontrol; it is never sent from here.
+  const [controlDraftRequest, setControlDraftRequest] = useState<ControlDraftRequest | null>(null);
+  const onControlDraftRequest = useCallback((changes: ConfigPatchChanges): void => {
+    setControlDraftRequest((previous) => nextControlDraftRequest(previous, changes));
+  }, []);
+  const onCompassConfigChanged = useCallback((next: CompassConfig): void => {
+    setCompassConfig(next);
+    saveCompassConfig(next);
+  }, []);
   // The Receiver frame stays mounted after its first visit so RX, scans and
-  // recordings keep running while the operator uses other pages.
+  // recordings keep running while the operator uses other pages. It also
+  // mounts, once, when the Overview spectrum dock asks for it (Mulai/Dengar);
+  // it never mounts at console load, because mounting claims the HackRF.
+  const [receiverRequested, setReceiverRequested] = useState(false);
+  const requestReceiver = useCallback((): void => { setReceiverRequested(true); }, []);
+  // One bridge to the Receiver frame for the life of the console page; the
+  // Receiver page attaches the frame, the Overview dock drives it.
+  const receiverBridgeRef = useRef<ReceiverBridge | null>(null);
+  if (receiverBridgeRef.current === null) receiverBridgeRef.current = createReceiverBridge();
+  const receiverBridge = receiverBridgeRef.current;
   const [receiverMounted, setReceiverMounted] = useState(route === 'receiver');
-  if (route === 'receiver' && !receiverMounted) setReceiverMounted(true);
+  if ((route === 'receiver' || receiverRequested) && !receiverMounted) setReceiverMounted(true);
   useEffect(() => {
     // Warm the page chunks once the landing view has painted.
     const timer = window.setTimeout(prefetchRoutes, 1200);
@@ -539,6 +579,8 @@ export default function App(): ReactElement {
     setConfig(next);
     setConfigLoaded(true);
     setConfigError(null);
+    // A verified save (here or in Configuration) supersedes a failed interval save.
+    setRefreshSaveError(null);
     if (targetChanged) {
       setSnapshot(null);
       setReceivedAtMonotonic(null);
@@ -554,6 +596,58 @@ export default function App(): ReactElement {
     if (mountedRef.current) setBranding(next);
   }, []);
 
+  // Capabilities are read once the configuration is known; a failed read keeps
+  // the built-in interval list and leaves Kontrol without server ranges.
+  useEffect(() => {
+    if (!configLoaded) return undefined;
+    const controller = new AbortController();
+    getCapabilities(controller.signal).then((next) => {
+      if (mountedRef.current && !controller.signal.aborted) setCapabilities(next);
+    }).catch(() => undefined);
+    return () => controller.abort();
+  }, [configLoaded]);
+
+  // The top-bar interval select saves through the same verified path as the
+  // Configuration form. The chosen interval shows while the save is in flight;
+  // a failed save leaves the previous interval in place and marks the select.
+  useEffect(() => () => refreshSaveController.current?.abort(), []);
+  const onRefreshSecondsChange = useCallback((seconds: number): void => {
+    if (!configReadyRef.current || seconds === configRef.current.refresh_seconds) return;
+    refreshSaveController.current?.abort();
+    const controller = new AbortController();
+    refreshSaveController.current = controller;
+    setRefreshPending(seconds);
+    setRefreshSaveError(null);
+    updateConsoleConfig({ ...configRef.current, refresh_seconds: seconds }, controller.signal)
+      .then((next) => {
+        // The follow-up Data Out read runs on its own; the select need not wait for it.
+        if (!controller.signal.aborted) void onConfigSaved(next);
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted || isAbortError(error) || !mountedRef.current) return;
+        // Not a Data Out read failure: it stays on the select, not in the read banner.
+        setRefreshSaveError(errorNotice(error, 'common.requestFailed'));
+      })
+      .finally(() => {
+        if (refreshSaveController.current !== controller) return;
+        refreshSaveController.current = null;
+        if (mountedRef.current) setRefreshPending(null);
+      });
+  }, [onConfigSaved]);
+
+  const overviewWiring = useMemo<OverviewDashboardProps>(() => ({
+    panels: overviewPanels,
+    onPanelsChange: setOverviewPanels,
+    onCompassConfigChanged,
+    onRequestReceiver: requestReceiver,
+    onNavigate: navigate,
+    capabilities,
+    controlDraftRequest,
+    onControlDraftRequest,
+    receiverBridge,
+  }), [overviewPanels, onCompassConfigChanged, requestReceiver, navigate, capabilities, controlDraftRequest, onControlDraftRequest, receiverBridge]);
+  const refreshOptions = useMemo(() => refreshIntervalOptions(capabilities?.refreshIntervalsS ?? null, config.refresh_seconds), [capabilities, config.refresh_seconds]);
+
   const onRefresh = useCallback((): void => {
     void refresh();
     void refreshMqtt().catch(() => undefined);
@@ -562,6 +656,7 @@ export default function App(): ReactElement {
   const readErrorText = readError ? noticeText(i18n.t, readError) : null;
   const mqttErrorText = mqttError ? noticeText(i18n.t, mqttError) : null;
   const configErrorText = configError ? noticeText(i18n.t, configError) : null;
+  const refreshSaveErrorText = refreshSaveError ? noticeText(i18n.t, refreshSaveError) : null;
   const now = monotonicNow();
   const currentLocalFresh = expiryTick >= 0 && displayFresh(snapshot, receivedAtMonotonic, readError !== null, now);
   const lastReadAgeMs = receivedAtMonotonic === null ? null : Math.max(0, now - receivedAtMonotonic);
@@ -583,14 +678,20 @@ export default function App(): ReactElement {
         mqttError={mqttErrorText}
         simulationEnabled={simulationEnabled}
         onRefresh={onRefresh}
+        refreshSeconds={configLoaded ? refreshPending ?? config.refresh_seconds : undefined}
+        refreshOptions={refreshOptions}
+        refreshDisabled={!configLoaded || refreshPending !== null}
+        refreshError={refreshSaveErrorText}
+        onRefreshSecondsChange={onRefreshSecondsChange}
+        toolbar={route === 'overview' ? <OverviewPanelToggles panels={overviewPanels} onChange={setOverviewPanels} /> : undefined}
       >
         {route !== 'receiver' ? (
           <section ref={contentRef} className="route-content" key={route}>
             <LoadErrorBoundary>
               <Suspense fallback={routeLoading}>
                 {route === 'simulation' ? <SimulationPage enabled={simulationEnabled} automatic={simulationAutomatic} settings={simulationSettings} onEnabled={enabled => { setSimulationEnabled(enabled); if (!enabled) setSimulationAutomatic(false); }} onAutomatic={setSimulationAutomatic} onSettings={setSimulationSettings} onRandomize={randomizeSimulation} onOverview={() => navigate('overview')} />
-                  : route === 'overview' && simulationEnabled ? <OverviewPage snapshot={syntheticSnapshot} localSnapshotFresh={true} gpsConfig={gpsConfig} compassConfig={compassConfig} simulation={simulationSettings} />
-                  : <PageForRoute route={route} snapshot={snapshot} localFresh={currentLocalFresh} mqtt={mqtt} mqttError={mqttErrorText} config={config} configLoaded={configLoaded} configError={configErrorText} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={setGpsConfig} onCompassConfigChanged={setCompassConfig} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} onMqttChanged={applyMqtt} onRefreshMqtt={refreshMqtt} onReconnectMqtt={reconnectMqtt} />}
+                  : route === 'overview' && simulationEnabled ? <OverviewPage snapshot={syntheticSnapshot} localSnapshotFresh={true} gpsConfig={gpsConfig} compassConfig={compassConfig} simulation={simulationSettings} {...overviewWiring} />
+                  : <PageForRoute route={route} snapshot={snapshot} localFresh={currentLocalFresh} mqtt={mqtt} mqttError={mqttErrorText} config={config} configLoaded={configLoaded} configError={configErrorText} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={setGpsConfig} onCompassConfigChanged={onCompassConfigChanged} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} onMqttChanged={applyMqtt} onRefreshMqtt={refreshMqtt} onReconnectMqtt={reconnectMqtt} overview={overviewWiring} />}
               </Suspense>
             </LoadErrorBoundary>
           </section>
@@ -601,7 +702,7 @@ export default function App(): ReactElement {
           <section ref={receiverRef} className="route-content" hidden={route !== 'receiver'} style={route === 'receiver' ? undefined : { display: 'none' }}>
             <LoadErrorBoundary>
               <Suspense fallback={routeLoading}>
-                <ReceiverPage />
+                <ReceiverPage bridge={receiverBridge} visible={route === 'receiver'} />
               </Suspense>
             </LoadErrorBoundary>
           </section>

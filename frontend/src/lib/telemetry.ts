@@ -225,7 +225,7 @@ export function eventItems(snapshot: TelemetrySnapshot | null | undefined): Arra
   return [
     { label: 'SNAPSHOT', detail: `${overall} · Data Out read complete` },
     { label: 'DOA VIEWS', detail: `${relation} · CSV / XML remain separate` },
-    { label: 'DELIVERY', detail: `${String(gate.state ?? 'BLOCKED').toUpperCase()} · publish path disabled` },
+    { label: 'DELIVERY', detail: `${String(gate.state ?? 'BLOCKED').toUpperCase()} · the bearing is never published` },
     ...reasons.map((reason) => ({ label: 'GATE', detail: reasonLabel(reason) })),
   ];
 }

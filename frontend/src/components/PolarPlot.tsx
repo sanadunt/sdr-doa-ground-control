@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Config } from 'plotly.js';
 import type { PolarSettings } from '../types';
 import type { PlotlyApi } from '../lib/plotlyPolar';
-import { angularDirection, displayAngleForBin } from '../lib/polar';
+import { angularDirection, displayAngleForBin, normalizeDegrees, screenAngleForBin } from '../lib/polar';
 import { useI18n } from '../lib/i18n';
 import type { Lang, Translate } from '../lib/i18n';
 
@@ -81,6 +81,15 @@ export function validPlotRange(head: number, min: number, max: number): boolean 
   return validHeadUp(head) && Number.isFinite(min) && Number.isFinite(max) && min < max;
 }
 
+/**
+ * Head Up that puts a bin (theta_0 for "Puncak ke atas") at the top of the
+ * plot. Head Up turns the plot by the bin's screen angle in either axis mode,
+ * so the result is that angle, rounded to 0.1° and kept below 360.
+ */
+export function peakUpHead(bin: number, settings: PolarSettings): number {
+  return Number(normalizeDegrees(screenAngleForBin(bin, settings)).toFixed(1)) % 360;
+}
+
 // Modebar buttons that would upload the figure to Plotly Cloud, or that select
 // points the console does not use.
 export const REMOVED_MODEBAR_BUTTONS = ['sendChartToCloud', 'select2d', 'lasso2d'] as const;
@@ -118,7 +127,24 @@ function dbLabel(value: number): string {
   return `${Number(value.toFixed(2))}`;
 }
 
-export function PolarPlot({ values, settings, simulation, offsetSource }: { values: number[] | null; settings: PolarSettings; simulation: boolean; offsetSource: string }) {
+export interface PolarPlotProps {
+  values: number[] | null;
+  settings: PolarSettings;
+  simulation: boolean;
+  offsetSource: string;
+  /** Controlled Head Up in degrees; the plot's own settings form is used when omitted. */
+  head?: number;
+  /** Controlled radial range: null for automatic, an object for manual; omitted uses the plot's own form. */
+  range?: { min: number; max: number } | null;
+  /** Leave out the built-in settings form (the Overview dock has its own). */
+  hideSettings?: boolean;
+  /** Keep the axis caption for screen readers only; a compact footer shows the essentials. */
+  compactCaption?: boolean;
+  /** Show the Plotly modebar (download, zoom, hover). */
+  modeBar?: boolean;
+}
+
+export function PolarPlot({ values, settings, simulation, offsetSource, head: headProp, range: rangeProp, hideSettings = false, compactCaption = false, modeBar = true }: PolarPlotProps) {
   const { lang, t } = useI18n();
   const loadFailedText = useRef('');
   loadFailedText.current = t('polar.loadFailed');
@@ -138,7 +164,12 @@ export function PolarPlot({ values, settings, simulation, offsetSource }: { valu
   const [draft, setDraft] = useState({ head: '0', min: String(autoLow), max: String(autoHigh), manual: false });
   const [error, setError] = useState('');
   const [theme, setTheme] = useState(0);
-  const [low, high] = controls.manual ? [controls.min, controls.max] : [autoLow, autoHigh];
+  // Controlled values win over the built-in form; an invalid controlled value falls back safely.
+  const head = headProp === undefined ? controls.head : validHeadUp(headProp) ? headProp : 0;
+  const manualRange = rangeProp === undefined
+    ? (controls.manual ? { min: controls.min, max: controls.max } : null)
+    : rangeProp && Number.isFinite(rangeProp.min) && Number.isFinite(rangeProp.max) && rangeProp.min < rangeProp.max ? rangeProp : null;
+  const [low, high] = manualRange ? [manualRange.min, manualRange.max] : [autoLow, autoHigh];
   useEffect(() => {
     const update = () => setTheme(n => n + 1);
     window.addEventListener('console-theme-change', update);
@@ -165,7 +196,9 @@ export function PolarPlot({ values, settings, simulation, offsetSource }: { valu
       const angles = Array.from({ length: 12 }, (_, i) => i * 30);
       const cardinal: Record<number, string> = { 0: t('map.cardinalN'), 90: t('map.cardinalE'), 180: t('map.cardinalS'), 270: t('map.cardinalW') };
       const hoverAxis = settings.figType === 'Compass' ? t('polar.hoverCompass') : t('polar.hoverPolar');
-      const revision = `${polarUiRevision(settings, simulation)}:${controls.revision}:${compact}`;
+      // Head Up and a manual range are part of the revision: restyle and an
+      // unchanged uirevision would otherwise keep the previous rotation and scale.
+      const revision = `${polarUiRevision(settings, simulation)}:${controls.revision}:${compact}:${head}:${manualRange ? `${manualRange.min}..${manualRange.max}` : 'auto'}`;
       const key = `${revision}:${low}:${high}:${theme}:${lang}`;
       // Data-only updates must not replay the layout or Plotly's interaction
       // defaults. Restyle updates the curve while preserving rotated/zoomed axes.
@@ -186,20 +219,20 @@ export function PolarPlot({ values, settings, simulation, offsetSource }: { valu
         hovertemplate: `${hoverAxis} %{theta:.1f}°<br>${t('polar.hoverBin')} %{customdata[0]}<br>%{customdata[1]:.2f} dB<extra></extra>`,
         fill: 'toself', fillcolor: color('--plot-fill'), line: { color: color('--signal'), width: 2 },
       }], { autosize: true, datarevision: ++dataRevision.current, uirevision: revision,
-        margin: compact ? { t: 40, b: 40, l: 40, r: 40 } : { t: 48, b: 48, l: 64, r: 64 },
+        margin: compact ? { t: 32, b: 32, l: 36, r: 36 } : { t: 48, b: 48, l: 64, r: 64 },
         paper_bgcolor: color('--surface'), font: { color: color('--text'), size: 13 }, showlegend: false,
         polar: { bgcolor: color('--surface'), uirevision: revision,
           // Compass labels run clockwise; Polar labels are theta_0 and run
           // counter-clockwise as in KrakenSDR. Head Up turns both the same way.
-          angularaxis: { rotation: 90 + controls.head, direction: angularDirection(settings), tickmode: 'array', tickvals: angles,
+          angularaxis: { rotation: 90 + head, direction: angularDirection(settings), tickmode: 'array', tickvals: angles,
             ticktext: angles.map(a => {
               if (settings.figType !== 'Compass' || !cardinal[a]) return `${a}°`;
               return compact ? cardinal[a] : `${cardinal[a]} ${a}°`;
             }), gridcolor: color('--line') },
           radialaxis: { range: [0, high - low], tickmode: 'array', tickvals: ticks.map(v => v - low),
-            ticktext: radialTickText(ticks, low), angle: radialAxisAngle(controls.head), gridcolor: color('--line') },
+            ticktext: radialTickText(ticks, low), angle: radialAxisAngle(head), gridcolor: color('--line') },
         },
-      }, polarPlotConfig(lang, t));
+      }, { ...polarPlotConfig(lang, t), displayModeBar: modeBar });
       layoutKey.current = key;
     };
     // Serialize Plotly updates; expired snapshots waiting in the queue are skipped.
@@ -208,44 +241,46 @@ export function PolarPlot({ values, settings, simulation, offsetSource }: { valu
         if (!disposed) return render();
       }).catch(() => { if (!disposed) node.textContent = loadFailedText.current; });
     };
-    update();
+    // One Plotly update per frame: a Head Up slider drag re-runs this effect
+    // on every input event, and only the last value of a frame is drawn.
+    const frame = window.requestAnimationFrame(update);
     const observer = new ResizeObserver(() => {
       const nextCompact = node.clientWidth < 420;
       setCompact(current => current === nextCompact ? current : nextCompact);
       if (plot && !disposed) void plot.Plots.resize(node);
     });
     observer.observe(node);
-    return () => { disposed = true; observer.disconnect(); };
-  }, [values, settings, simulation, low, high, controls, theme, compact, lang, t]);
-  const mode = controls.manual ? t('polar.modeManual') : simulation ? t('polar.modeSimulation') : t('polar.modeAuto');
+    return () => { disposed = true; window.cancelAnimationFrame(frame); observer.disconnect(); };
+  }, [values, settings, simulation, low, high, head, manualRange?.min, manualRange?.max, controls.revision, theme, compact, lang, t, modeBar]);
+  const mode = manualRange ? t('polar.modeManual') : simulation ? t('polar.modeSimulation') : t('polar.modeAuto');
   const caption = settings.figType === 'Compass'
     ? t('polar.captionCompass', {
-      head: controls.head,
+      head,
       offset: Number(settings.compassOffset.toFixed(1)),
       source: offsetSource,
       mode,
       low: dbLabel(low),
       high: dbLabel(high),
     })
-    : t('polar.captionPolar', { head: controls.head, mode, low: dbLabel(low), high: dbLabel(high) });
+    : t('polar.captionPolar', { head, mode, low: dbLabel(low), high: dbLabel(high) });
   const syncAutoRange = () => setDraft(current => ({ ...current, min: String(autoLow), max: String(autoHigh) }));
   return <>
     <div ref={host} className="plotly-polar" role="img" aria-label={t('polar.plotAria', { source: simulation ? t('polar.sourceSimulation') : t('polar.sourceLive'), fig: settings.figType })} />
-    <div className="polar-axis-caption">{caption}</div>
-    <details className="plot-settings" onToggle={event => { if (event.currentTarget.open && !controls.manual) syncAutoRange(); }}>
+    <div className={compactCaption ? 'polar-axis-caption visually-hidden' : 'polar-axis-caption'}>{caption}</div>
+    {hideSettings ? null : <details className="plot-settings" onToggle={event => { if (event.currentTarget.open && !controls.manual) syncAutoRange(); }}>
       <summary>{t('polar.settings')}</summary>
       <form className="plot-controls" onSubmit={event => {
         event.preventDefault();
-        const head = Number(draft.head);
-        if (!draft.head.trim() || !validHeadUp(head)) { setError(t('polar.headError')); return; }
+        const nextHead = Number(draft.head);
+        if (!draft.head.trim() || !validHeadUp(nextHead)) { setError(t('polar.headError')); return; }
         if (!draft.manual) {
           // Head Up alone keeps the automatic radial range.
-          setError(''); setControls(current => ({ ...current, head, manual: false, revision: current.revision + 1 }));
+          setError(''); setControls(current => ({ ...current, head: nextHead, manual: false, revision: current.revision + 1 }));
           return;
         }
         const min = Number(draft.min), max = Number(draft.max);
-        if (!draft.min.trim() || !draft.max.trim() || !validPlotRange(head, min, max)) { setError(t('polar.rangeError')); return; }
-        setError(''); setControls(current => ({ head, min, max, manual: true, revision: current.revision + 1 }));
+        if (!draft.min.trim() || !draft.max.trim() || !validPlotRange(nextHead, min, max)) { setError(t('polar.rangeError')); return; }
+        setError(''); setControls(current => ({ head: nextHead, min, max, manual: true, revision: current.revision + 1 }));
       }}>
         <label className="form-field"><span>{t('polar.headUp')}</span><input required type="number" min="0" max="359.999" step="any" value={draft.head} onChange={e => setDraft({ ...draft, head: e.target.value })} /></label>
         <label className="plot-manual-toggle"><input type="checkbox" checked={draft.manual} onChange={e => {
@@ -261,6 +296,6 @@ export function PolarPlot({ values, settings, simulation, offsetSource }: { valu
         }}>{t('polar.default')}</button>
       </form>
       {error ? <p className="plot-control-error" role="alert">{error}</p> : null}
-    </details>
+    </details>}
   </>;
 }
