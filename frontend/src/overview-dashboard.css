@@ -89,7 +89,8 @@
 .ov-left { position: absolute; z-index: 2; top: var(--ov-gap); left: var(--ov-gap); display: flex; flex-direction: column; gap: var(--ov-gap); width: 264px; max-height: calc(100% - var(--ov-dock-h) - 80px); min-height: 0; pointer-events: none; }
 .ov-left > * { pointer-events: auto; }
 .ov-hud { display: flex; flex: none; flex-direction: column; gap: 2px; min-height: 144px; padding: 10px 12px; }
-.ov-hud-head { display: flex; align-items: baseline; gap: 8px; }
+/* Wraps the age (with its STALE mark) under the label instead of cutting the label off. */
+.ov-hud-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
 .ov-hud-head .ov-eyebrow { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ov-hud-age { flex: none; color: var(--muted); font-family: var(--mono); font-size: 11px; }
 .ov-hud-bearing { color: var(--signal); font-family: var(--mono); font-size: 36px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; letter-spacing: -.02em; }
