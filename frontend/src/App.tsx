@@ -665,6 +665,8 @@ export default function App(): ReactElement {
       });
   }, [onConfigSaved]);
 
+  // Kontrol's "Cek ulang": read Data Out now, sharing a read already in flight.
+  const refreshSnapshot = useCallback((): void => { void refresh(); }, [refresh]);
   const overviewWiring = useMemo<OverviewDashboardProps>(() => ({
     panels: overviewPanels,
     onPanelsChange: setOverviewPanels,
@@ -675,7 +677,8 @@ export default function App(): ReactElement {
     controlDraftRequest,
     onControlDraftRequest,
     receiverBridge,
-  }), [overviewPanels, onCompassConfigChanged, requestReceiver, navigate, capabilities, controlDraftRequest, onControlDraftRequest, receiverBridge]);
+    onRefreshSnapshot: refreshSnapshot,
+  }), [overviewPanels, onCompassConfigChanged, requestReceiver, navigate, capabilities, controlDraftRequest, onControlDraftRequest, receiverBridge, refreshSnapshot]);
   const refreshOptions = useMemo(() => refreshIntervalOptions(capabilities?.refreshIntervalsS ?? null, config.refresh_seconds), [capabilities, config.refresh_seconds]);
 
   const onRefresh = useCallback((): void => {

@@ -70,6 +70,8 @@ export interface OverviewDashboardProps {
   capabilities?: ConsoleCapabilities | null;
   controlDraftRequest?: ControlDraftRequest | null;
   onControlDraftRequest?: (changes: ConfigPatchChanges) => void;
+  /** Read Data Out now; Kontrol's "Cek ulang". */
+  onRefreshSnapshot?: () => void;
 }
 
 function OverviewPageView({
@@ -87,6 +89,7 @@ function OverviewPageView({
   capabilities = null,
   controlDraftRequest = null,
   onControlDraftRequest = noop,
+  onRefreshSnapshot = noop,
 }: {
   snapshot: TelemetrySnapshot | null;
   localSnapshotFresh: boolean;
@@ -220,7 +223,16 @@ function OverviewPageView({
           collapsed={panels.nodeCollapsed}
           onToggle={() => onPanelsChange({ ...panels, nodeCollapsed: !panels.nodeCollapsed })}
         />
-        {panels.control ? <ControlPanel capabilities={capabilities} controlDraftRequest={controlDraftRequest} onClose={() => onPanelsChange({ ...panels, control: false })} /> : null}
+        {panels.control ? (
+          <ControlPanel
+            capabilities={capabilities}
+            controlDraftRequest={controlDraftRequest}
+            onClose={() => onPanelsChange({ ...panels, control: false })}
+            snapshot={snapshot}
+            localSnapshotFresh={localSnapshotFresh}
+            onRefreshSnapshot={onRefreshSnapshot}
+          />
+        ) : null}
       </div>
       {dockShown ? (
         <div className="ov-dock" ref={dockRef}>

@@ -6,6 +6,9 @@ import { I18nContext, translate } from '../../lib/i18n';
 import type { Lang } from '../../lib/i18n';
 import { CONFIG_PATCH_FIELDS, commandResultView, draftFromReported, parseDraft } from '../../lib/configPatch';
 import type { DraftValues } from '../../lib/configPatch';
+import { currentConfigValues, dataOutConfigValues, verifyConfigPatch } from '../../lib/configVerify';
+import type { VerifyInput } from '../../lib/configVerify';
+import type { TelemetrySnapshot } from '../../types';
 import { ControlPanel, ControlPanelView, reviewRows } from './ControlPanel';
 import type { ControlPanelViewProps } from './ControlPanel';
 
@@ -210,5 +213,65 @@ describe('Kontrol results', () => {
   it('shows a stale revision in the form', () => {
     const markup = view({ editError: { code: 'CONFIG_REVISION_STALE', message: { key: 'control.error.CONFIG_REVISION_STALE' } } });
     expect(markup).toContain('Konfigurasi yang dilaporkan berubah sejak ditinjau.');
+  });
+});
+
+describe('Kontrol read-back from the RDF-SDR', () => {
+  const changes = { center_frequency_hz: 433_920_000, vfo_frequency_hz: 433_925_000, vfo_squelch_db: -70 };
+  const applied = {
+    view: commandResultView({ state: 'acked', ack: { status: 'applied', configRev: 43, errorCode: null, currentConfigRev: null, changedFields: Object.keys(changes) }, pubackReason: null }, 3, 42, 60),
+    error: null,
+    commandId: 'gc-0123',
+    restarted: false,
+  };
+  const node: TelemetrySnapshot = { settings: { available: true, fields: { center_freq: 433.92, vfo_freq_0: 433_900_000 } } };
+  const check = (overrides: Partial<VerifyInput> = {}) => verifyConfigPatch({
+    changes, issuedAtMs: 1_000, finalAtMs: 0, nowMs: 1_000, reported: REPORTED, snapshot: node, snapshotFresh: true, ...overrides,
+  });
+
+  it('lists each sent field with its Data Out and MQTT values and a status code', () => {
+    const markup = view({ stage: 'done', done: applied, verification: check(), onRecheck: () => undefined });
+    expect(markup).toContain('aria-label="Cek RDF-SDR"');
+    expect(markup).toContain('role="status">Memeriksa RDF-SDR · 1/3</span>');
+    expect(markup).toMatch(/Frekuensi tengah<\/span><span class="ov-tag tone-good">CONFIRMED<\/span>/);
+    expect(markup).toMatch(/Frekuensi VFO<\/span><span class="ov-tag tone-info">PENDING<\/span>/);
+    expect(markup).toMatch(/Squelch VFO<\/span><span class="ov-tag tone-neutral">NOT REPORTED<\/span>/);
+    expect(markup).toContain('<dt>Dikirim</dt><dd class="ov-mono">433.925 MHz</dd>');
+    expect(markup).toContain('<dt>Data Out</dt><dd class="ov-mono">433.900 MHz</dd>');
+    // This config_reported has no receipt time after the command, so it is not evidence.
+    expect(markup).toContain('<dt>MQTT</dt><dd class="ov-mono">—</dd>');
+    expect(markup).toMatch(/<button class="ov-button" type="button"><svg[\s\S]*?<span>Cek ulang<\/span><\/button>/);
+  });
+
+  it('reads the verdict once the window has ended', () => {
+    const after = view({ stage: 'done', done: applied, verification: check({ nowMs: 90_000 }) });
+    expect(after).toContain('Sebagian berubah · 1/3');
+    expect(after).toContain('>UNCHANGED</span>');
+    const confirmed = check({ changes: { center_frequency_hz: 433_920_000 } });
+    expect(view({ stage: 'done', done: applied, verification: confirmed })).toContain('RDF-SDR berubah · 1/1');
+    expect(view({ stage: 'done', done: applied, verification: confirmed }, 'en')).toContain('RDF-SDR changed · 1/1');
+    const unchanged = check({ changes: { vfo_frequency_hz: 433_925_000 }, nowMs: 90_000 });
+    expect(view({ stage: 'done', done: applied, verification: unchanged })).toContain('Belum berubah · 0/1');
+  });
+
+  it('shows the read-back after a rejection, and nothing without one', () => {
+    const rejected = { ...applied, view: commandResultView({ state: 'acked', ack: { status: 'rejected', configRev: null, errorCode: 'REMOTE_CONTROL_DISABLED', currentConfigRev: null, changedFields: [] }, pubackReason: null }, 3, 42, 60) };
+    expect(view({ stage: 'done', done: rejected, verification: check({ nowMs: 90_000 }) })).toContain('Sebagian berubah · 1/3');
+    expect(view({ stage: 'done', done: applied })).not.toContain('ov-verify');
+  });
+
+  it('fills the values MQTT does not report from Data Out', () => {
+    const dataOut = dataOutConfigValues({ settings: { available: true, fields: { center_freq: 415.7882, vfo_freq_0: 433_925_000, vfo_bw_0: 12_500, vfo_squelch_0: -80 } } }, true);
+    const values = currentConfigValues(REPORTED.values, dataOut);
+    const ranges = CAPABILITIES.configPatch?.ranges ?? null;
+    const markup = view({ evaluation: parseDraft(CONFIG_PATCH_FIELDS, draftFromReported(values), values, ranges) });
+    // MQTT still wins for the centre frequency.
+    expect(markup).toContain('value="416.588"');
+    expect(markup).toContain('value="433.925"');
+    expect(markup).toContain('value="12.5"');
+    expect(markup).toContain('value="-80"');
+    expect(markup).not.toContain('tidak dilaporkan');
+    const edited = parseDraft(CONFIG_PATCH_FIELDS, { ...draftFromReported(values), vfo_frequency_hz: '433.95' }, values, ranges);
+    expect(reviewRows(t, edited.fields)).toEqual([{ key: 'vfo_frequency_hz', label: 'Frekuensi VFO', from: '433.925 MHz', to: '433.950 MHz' }]);
   });
 });

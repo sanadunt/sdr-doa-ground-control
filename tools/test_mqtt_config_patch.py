@@ -122,6 +122,13 @@ class FakeMonitor:
                 "vfo_bandwidth_hz": None,
                 "vfo_squelch_db": None,
             },
+            "value_received_at_ms": {
+                "center_frequency_hz": 1,
+                "gain_db": True,
+                "vfo_frequency_hz": 7,
+                "vfo_bandwidth_hz": None,
+                "vfo_squelch_db": None,
+            },
         }
 
     def config_command_observation(self, command_id: str) -> Dict[str, Any]:
@@ -671,6 +678,11 @@ class ConfigPatchServerTests(unittest.TestCase):
         self.assertEqual(body["values"]["center_frequency_hz"], 416_588_000)
         self.assertEqual(body["value_sources"]["gain_db"], "v1_config_reported")
         self.assertIsNone(body["values"]["vfo_frequency_hz"])
+        # Receipt times pass only as integers, and only beside a reported value.
+        self.assertEqual(
+            body["value_received_at_ms"],
+            {"center_frequency_hz": 1, "gain_db": None, "vfo_frequency_hz": None, "vfo_bandwidth_hz": None, "vfo_squelch_db": None},
+        )
         self.assertEqual(body["reported"]["source"], "v1")
         self.assertEqual(
             (body["reported"]["retained"], body["reported"]["age_basis"], body["reported"]["source_ts_ms"]),
@@ -684,6 +696,7 @@ class ConfigPatchServerTests(unittest.TestCase):
         self.assertEqual((body["available"], body["code"]), (False, "MQTT_MONITOR_DISABLED"))
         self.assertEqual(body["broker"]["connection"], "disabled")
         self.assertEqual(set(body["values"].values()), {None})
+        self.assertEqual(set(body["value_received_at_ms"].values()), {None})
         self.assertIsNone(body["base_config_rev"])
 
         self.server.mqtt_monitor = ground_console._UnavailableMqttMonitor("127.0.0.1", 1883, "tcp", "/mqtt", "missing")

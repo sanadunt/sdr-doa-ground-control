@@ -848,6 +848,34 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self.assertEqual(data["value_sources"]["vfo_bandwidth_hz"], "v2_effective")
         self.assertEqual(self.client.publish_calls, [])
 
+    def test_reported_config_keeps_the_receipt_time_of_each_value(self) -> None:
+        self._connected()
+        clock = [1_760_000_000_000]
+        v2 = json.dumps({
+            "v": 2, "sid": "7a8b9c0d", "rev": 3, "t": clock[0], "proof": "unverified", "digest": "abc",
+            "effective": {"vfo0_frequency_hz": 433_900_000, "vfo0_bandwidth_hz": 12_500, "gain_db": 20.5},
+        }).encode("utf-8")
+        v1 = contract.build_config_reported(
+            ts_ms=clock[0], config_rev=4, center_frequency_hz=416_588_000, gain_db=15.5,
+            array="UCA", method="MUSIC", active_vfos=1,
+        )
+        with patch.object(self.module, "_now_ms", lambda: clock[0]):
+            self.client.on_message(self.client, None, message(f"sdr/v2/{NODE}/config/reported", v2, 1, True))
+            v2_at = clock[0]
+            clock[0] += 3_000
+            self._send("config_reported", v1, qos=1)
+            v1_at = clock[0]
+            clock[0] += 500
+            data = self.monitor.reported_config()
+        received = data["value_received_at_ms"]
+        # Each value carries the receipt time of the message it came from.
+        self.assertEqual(received["center_frequency_hz"], v1_at)
+        self.assertEqual(received["gain_db"], v1_at)
+        self.assertEqual(received["vfo_frequency_hz"], v2_at)
+        self.assertEqual(received["vfo_bandwidth_hz"], v2_at)
+        self.assertIsNone(received["vfo_squelch_db"])
+        self.assertEqual(data["reported"]["received_at_ms"], v1_at)
+
 
 class GroundConsoleMqttApplyTests(unittest.TestCase):
     """Monitor lifecycle through the Ground Console config and connect paths."""

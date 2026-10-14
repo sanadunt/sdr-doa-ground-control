@@ -125,7 +125,13 @@ SAFE_SETTINGS_FIELDS = (
     "gps_fixed_heading",
     "en_remote_control",
     "en_peak_hold",
+    "vfo_freq_0",
+    "vfo_bw_0",
+    "vfo_squelch_0",
 )
+# VFO 0 as the edge agent writes it for a config patch (Hz, Hz, dB). Kontrol
+# compares them with what it sent, so only finite numbers pass.
+NUMERIC_SETTINGS_FIELDS = frozenset({"vfo_freq_0", "vfo_bw_0", "vfo_squelch_0"})
 EFFECTIVE_SETTINGS_FIELDS = (
     "center_freq",
     "uniform_gain",
@@ -590,6 +596,8 @@ def parse_settings(resource: FetchedResource) -> Dict[str, Any]:
     for field in SAFE_SETTINGS_FIELDS:
         if field in source:
             value = _optional_scalar(source[field])
+            if field in NUMERIC_SETTINGS_FIELDS and (isinstance(value, bool) or not isinstance(value, (int, float))):
+                continue
             if value is not None:
                 safe[field] = value
     return {

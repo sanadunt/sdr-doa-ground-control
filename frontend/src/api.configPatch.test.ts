@@ -27,6 +27,7 @@ const REPORTED = {
   reported: { config_rev: 42, received_at_ms: 0, age_ms: 1200, retained: true, synthetic: false, source: 'v1+v2' },
   values: { center_frequency_hz: 416588000, gain_db: 15.5, vfo_frequency_hz: null, vfo_bandwidth_hz: 'x', vfo_squelch_db: Number.NaN, extra: 1 },
   value_sources: { center_frequency_hz: 'v1_config_reported', gain_db: 'v1_config_reported', vfo_frequency_hz: 'mqtt' },
+  value_received_at_ms: { center_frequency_hz: 900, gain_db: -1, vfo_frequency_hz: 1.5 },
   pending_command_id: null,
 };
 
@@ -41,6 +42,7 @@ describe('getConfigReported', () => {
     expect(reported.broker).toEqual({ host: '10.90.0.1', port: 9001, transport: 'websockets', connection: 'connected' });
     expect(reported.values).toEqual({ center_frequency_hz: 416588000, gain_db: 15.5, vfo_frequency_hz: null, vfo_bandwidth_hz: null, vfo_squelch_db: null });
     expect(reported.valueSources.vfo_frequency_hz).toBeNull();
+    expect(reported.valueReceivedAtMs).toEqual({ center_frequency_hz: 900, gain_db: null, vfo_frequency_hz: null, vfo_bandwidth_hz: null, vfo_squelch_db: null });
     expect(reported.reported?.synthetic).toBe(false);
   });
 

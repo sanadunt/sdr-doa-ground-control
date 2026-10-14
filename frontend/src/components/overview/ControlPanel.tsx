@@ -9,12 +9,16 @@ import {
   commandResultView,
   displayValue,
   draftFromReported,
+  fieldFor,
   isConfigPatchErrorCode,
   mergeIntoDraft,
   parseDraft,
   rangeParts,
 } from '../../lib/configPatch';
 import type { CommandResultView, ConfigPatchRanges, DraftEvaluation, DraftValues, FieldEvaluation } from '../../lib/configPatch';
+import { VERIFY_WINDOW_MS, currentConfigValues, dataOutConfigValues, verifyConfigPatch } from '../../lib/configVerify';
+import type { ConfigVerification, VerifyStatus, VerifyVerdict } from '../../lib/configVerify';
+import type { TelemetrySnapshot } from '../../types';
 import { errorNotice, noticeText } from '../../lib/errorNotice';
 import type { Notice } from '../../lib/errorNotice';
 import { useI18n } from '../../lib/i18n';
@@ -27,6 +31,11 @@ export interface ControlPanelProps {
   /** Latest draft from the spectrum dock; a new `seq` means a new request. */
   controlDraftRequest: ControlDraftRequest | null;
   onClose: () => void;
+  /** Latest Data Out snapshot: current values the MQTT report lacks, and the read-back check. */
+  snapshot?: TelemetrySnapshot | null;
+  localSnapshotFresh?: boolean;
+  /** Read Data Out now (App's refresh; must be stable). */
+  onRefreshSnapshot?: () => void;
 }
 
 export type ControlAdminState = 'checking' | 'locked' | 'unlocked';
@@ -42,7 +51,11 @@ export interface ControlDone {
   error: ControlFailure | null;
   commandId: string | null;
   restarted: boolean;
+  /** A published command to read back from the RDF-SDR. */
+  verify?: ControlVerifyTarget;
 }
+/** What was sent, when it was issued (server clock) and when it became final (browser clock). */
+export interface ControlVerifyTarget { changes: ConfigPatchChanges; issuedAtMs: number | null; finalAtMs: number }
 
 /** Topic suffix shown before the server reports the full topic. */
 const PATCH_TOPIC_SUFFIX = 'cmd/config/patch';
@@ -105,6 +118,51 @@ export function reviewRows(t: Translate, fields: readonly FieldEvaluation[]): Co
   }));
 }
 
+const VERIFY_CHIPS: Record<VerifyStatus, { code: string; tone: string }> = {
+  confirmed: { code: 'CONFIRMED', tone: 'good' },
+  pending: { code: 'PENDING', tone: 'info' },
+  unchanged: { code: 'UNCHANGED', tone: 'warn' },
+  'not-reported': { code: 'NOT REPORTED', tone: 'neutral' },
+};
+
+const VERIFY_VERDICTS: Record<VerifyVerdict, { key: MessageKey; tone: string }> = {
+  confirmed: { key: 'verify.verdict.confirmed', tone: 'good' },
+  partial: { key: 'verify.verdict.partial', tone: 'warn' },
+  pending: { key: 'verify.verdict.pending', tone: 'info' },
+  unchanged: { key: 'verify.verdict.unchanged', tone: 'warn' },
+  'not-reported': { key: 'verify.verdict.notReported', tone: 'neutral' },
+};
+
+/** Read-back after a final command: sent value, Data Out, MQTT and a status per field. */
+export function VerifyList({ verification, onRecheck }: { verification: ConfigVerification; onRecheck?: () => void }): JSX.Element {
+  const { t } = useI18n();
+  const verdict = VERIFY_VERDICTS[verification.verdict];
+  return (
+    <section className="ov-verify" aria-label={t('verify.title')}>
+      <div className="ov-verify-head">
+        <span className={`ov-verify-verdict tone-${verdict.tone}`} role="status">{t(verdict.key, { confirmed: verification.confirmed, total: verification.total })}</span>
+        {onRecheck ? <button className="ov-button" type="button" onClick={onRecheck}><Icon name="refresh" /><span>{t('verify.recheck')}</span></button> : null}
+      </div>
+      <ul className="ov-verify-list">
+        {verification.fields.map((row) => {
+          const field = fieldFor(row.key);
+          const chip = VERIFY_CHIPS[row.status];
+          return (
+            <li key={row.key}>
+              <div className="ov-verify-row"><span>{t(field.shortLabel)}</span><span className={`ov-tag tone-${chip.tone}`}>{chip.code}</span></div>
+              <dl className="ov-verify-values">
+                <div><dt>{t('verify.sent')}</dt><dd className="ov-mono">{displayValue(field, row.sent)}</dd></div>
+                <div><dt>{t('verify.dataOut')}</dt><dd className="ov-mono">{displayValue(field, row.dataOut)}</dd></div>
+                <div><dt>{t('verify.mqtt')}</dt><dd className="ov-mono">{displayValue(field, row.mqtt)}</dd></div>
+              </dl>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
 export interface ControlPanelViewProps {
   capabilities: ConsoleCapabilities | null;
   admin: ControlAdminState;
@@ -117,6 +175,9 @@ export interface ControlPanelViewProps {
   sending: ControlSending | null;
   done: ControlDone | null;
   editError: ControlFailure | null;
+  /** Read-back of the final command, when it was published. */
+  verification?: ConfigVerification | null;
+  onRecheck?: () => void;
   onClose: () => void;
   onLock: () => void;
   onUnlocked: () => void;
@@ -142,6 +203,8 @@ export function ControlPanelView({
   sending,
   done,
   editError,
+  verification = null,
+  onRecheck,
   onClose,
   onLock,
   onUnlocked,
@@ -276,6 +339,7 @@ export function ControlPanelView({
               {done.restarted ? <span className="ov-control-small">{t('control.result.restarted')}</span> : null}
               {done.commandId ? <span className="ov-mono ov-control-small">{done.commandId}</span> : null}
             </div>
+            {verification ? <VerifyList verification={verification} onRecheck={onRecheck} /> : null}
             <div className="ov-control-actions">
               <button className="ov-button is-wide" type="button" onClick={onDone}>{t('control.done')}</button>
               {done.view?.reload && done.view.tone !== 'ok' ? <button className="ov-button" type="button" onClick={onReload}>{t('control.reload')}</button> : null}
@@ -306,7 +370,7 @@ export function ControlPanelView({
  * "Kirim ke RDF-SDR" press; the server checks Origin, admin, ranges and
  * the base revision again, and reports the edge agent's ACK by command id.
  */
-export function ControlPanel({ capabilities, controlDraftRequest, onClose }: ControlPanelProps): JSX.Element {
+export function ControlPanel({ capabilities, controlDraftRequest, onClose, snapshot = null, localSnapshotFresh = false, onRefreshSnapshot }: ControlPanelProps): JSX.Element {
   const { t } = useI18n();
   const [admin, setAdmin] = useState<ControlAdminState>('checking');
   const [adminNotice, setAdminNotice] = useState<Notice | null>(null);
@@ -321,6 +385,7 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose }: Con
   const [done, setDone] = useState<ControlDone | null>(null);
   const [editError, setEditError] = useState<ControlFailure | null>(null);
   const [pendingDraft, setPendingDraft] = useState<ConfigPatchChanges | null>(null);
+  const [, setVerifyTick] = useState(0);
   const mountedRef = useRef(true);
   const sendController = useRef<AbortController | null>(null);
 
@@ -397,7 +462,11 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose }: Con
 
   const finish = useCallback((status: ConfigCommandStatus, count: number, baseRev: number | null) => {
     const view = commandResultView(status, count, baseRev, ttlS);
-    setDone({ view, error: null, commandId: status.commandId, restarted: status.monitorRestarted });
+    // A publish the broker refused reached nothing; there is nothing to read back.
+    const verify = status.state !== 'publish_failed' && Object.keys(status.changes).length
+      ? { changes: status.changes, issuedAtMs: status.issuedTsMs, finalAtMs: Date.now() }
+      : undefined;
+    setDone({ view, error: null, commandId: status.commandId, restarted: status.monitorRestarted, verify });
     setStage('done');
     if (view.reload) setReloadTick((tick) => tick + 1);
   }, [ttlS]);
@@ -441,7 +510,9 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose }: Con
     };
   }, [sendingId, sendingCount, sendingRev, finish]);
 
-  const values = reported?.values ?? null;
+  // MQTT first; a fresh Data Out snapshot fills what MQTT does not report.
+  const dataOut = useMemo(() => dataOutConfigValues(snapshot, localSnapshotFresh), [snapshot, localSnapshotFresh]);
+  const values = useMemo(() => (reported ? currentConfigValues(reported.values, dataOut) : null), [reported, dataOut]);
   const evaluation = useMemo(
     () => parseDraft(CONFIG_PATCH_FIELDS, { ...(values ? draftFromReported(values) : {}), ...draft }, values ?? {}, ranges),
     [draft, values, ranges],
@@ -459,11 +530,12 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose }: Con
     const merged = { ...draft, ...mergeIntoDraft({}, pendingDraft) };
     setPendingDraft(null);
     setDraft(merged);
-    const next = parseDraft(CONFIG_PATCH_FIELDS, { ...draftFromReported(reported.values), ...merged }, reported.values, ranges);
+    const current = values ?? reported.values;
+    const next = parseDraft(CONFIG_PATCH_FIELDS, { ...draftFromReported(current), ...merged }, current, ranges);
     const publishable = reported.available && capabilities?.configPatch?.enabled !== false;
     if (!next.invalid && Object.keys(next.changes).length && publishable) enterReview(next.changes, reported.baseConfigRev, next.fields);
     else setStage('edit');
-  }, [pendingDraft, admin, reported, stage, draft, ranges, enterReview, capabilities]);
+  }, [pendingDraft, admin, reported, values, stage, draft, ranges, enterReview, capabilities]);
 
   const lock = () => {
     sendController.current?.abort();
@@ -514,6 +586,24 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose }: Con
     });
   };
 
+  // Read back what the RDF-SDR reports now; render once more when the window ends.
+  const verifyTarget = stage === 'done' ? done?.verify ?? null : null;
+  const verifyEndsAt = verifyTarget ? verifyTarget.finalAtMs + VERIFY_WINDOW_MS : null;
+  useEffect(() => {
+    if (verifyEndsAt === null) return undefined;
+    const delay = verifyEndsAt - Date.now();
+    if (delay < 0) return undefined;
+    const timer = setTimeout(() => setVerifyTick((tick) => tick + 1), delay + 1);
+    return () => clearTimeout(timer);
+  }, [verifyEndsAt]);
+  const verification = verifyTarget
+    ? verifyConfigPatch({ ...verifyTarget, nowMs: Date.now(), reported, snapshot, snapshotFresh: localSnapshotFresh })
+    : null;
+  const recheck = useCallback(() => {
+    onRefreshSnapshot?.();
+    setReloadTick((tick) => tick + 1);
+  }, [onRefreshSnapshot]);
+
   return (
     <ControlPanelView
       capabilities={capabilities}
@@ -527,6 +617,8 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose }: Con
       sending={sending}
       done={done}
       editError={editError}
+      verification={verification}
+      onRecheck={recheck}
       onClose={onClose}
       onLock={lock}
       onUnlocked={() => { setAdminNotice(null); setAdmin('unlocked'); }}
