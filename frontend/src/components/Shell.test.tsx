@@ -270,4 +270,9 @@ describe('top bar styles', () => {
     expect(44 + 2 * Number(padding?.[1]) + 1).toBeLessThanOrEqual(tokenHeight);
     expect(css).toMatch(/\.page-content-overview \{[^}]*height: calc\(100dvh - var\(--topbar-h\)\)/);
   });
+
+  it('lets the three-row Overview top bar scroll away on narrow screens', () => {
+    const narrow = css.slice(css.indexOf('@media (max-width: 1023px)'), css.indexOf('@media (max-width: 600px)'));
+    expect(narrow).toMatch(/\.console-shell\.is-overview \.topbar \{ position: static; \}/);
+  });
 });
