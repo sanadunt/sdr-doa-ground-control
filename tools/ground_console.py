@@ -126,10 +126,11 @@ def _read_dotenv(path: Path = DEFAULT_ENV_PATH, *, strict: bool = False) -> Dict
     Existing process environment variables always remain authoritative; this
     helper only supplies local fallback values for variables that are absent.
     With ``strict``, a file that exists but cannot be read or decoded raises
-    ``_DotenvUnreadable`` instead of looking empty.
+    ``_DotenvUnreadable`` instead of looking empty. A leading UTF-8 BOM, as
+    some Windows editors and PowerShell write, is not part of the first key.
     """
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
         return {}
     except OSError:

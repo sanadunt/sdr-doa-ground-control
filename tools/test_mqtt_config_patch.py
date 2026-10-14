@@ -279,14 +279,28 @@ class ConfigPatchServerTests(unittest.TestCase):
         configured = self.root / "configured.env"
         configured.write_text("SDR_DOA_ADMIN_PASSWORD='from-file'\n", encoding="utf-8")
         self.assertEqual(resolve({}, dotenv_path=configured), "from-file")
+        # A UTF-8 BOM (PowerShell 5.1 Set-Content -Encoding UTF8) before the
+        # first key must not hide it and turn on the public default.
+        for name, raw in (
+            ("bom.env", b"\xef\xbb\xbfSDR_DOA_ADMIN_PASSWORD=my-real-secret\r\n"),
+            ("bom-export.env", b"\xef\xbb\xbfexport SDR_DOA_ADMIN_PASSWORD='my-real-secret'\nOTHER=1\n"),
+        ):
+            bom = self.root / name
+            bom.write_bytes(raw)
+            self.assertEqual(ground_console._read_dotenv(bom)["SDR_DOA_ADMIN_PASSWORD"], "my-real-secret", name)
+            self.assertEqual(resolve({}, dotenv_path=bom), "my-real-secret", name)
         # A .env that exists but cannot be read may hold the real password.
         directory = self.root / "directory.env"
         directory.mkdir()
         undecodable = self.root / "undecodable.env"
         undecodable.write_bytes(b"SDR_DOA_ADMIN_PASSWORD=\xff\xfe\n")
+        # PowerShell 5.1 `>` writes UTF-16 LE with its own BOM.
+        utf16 = self.root / "utf16.env"
+        utf16.write_bytes("SDR_DOA_ADMIN_PASSWORD=my-real-secret\r\n".encode("utf-16"))
         with patch("builtins.print"):
             self.assertIsNone(resolve({}, dotenv_path=directory))
             self.assertIsNone(resolve({}, dotenv_path=undecodable))
+            self.assertIsNone(resolve({}, dotenv_path=utf16))
         # The process environment still wins over an unreadable file.
         self.assertEqual(resolve({"SDR_DOA_ADMIN_PASSWORD": "env"}, dotenv_path=directory), "env")
 
