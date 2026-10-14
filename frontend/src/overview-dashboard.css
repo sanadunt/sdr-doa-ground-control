@@ -275,6 +275,20 @@
 .ov-control-result.tone-warn .ov-control-result-title { color: var(--amber); }
 .ov-control-result.tone-err { border-color: var(--red); background: color-mix(in srgb, var(--red) 8%, transparent); }
 .ov-control-result.tone-err .ov-control-result-title { color: var(--red); }
+.ov-verify { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.ov-verify-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 10px; }
+.ov-verify-verdict { font-family: var(--mono); font-size: 12.5px; font-weight: 700; }
+.ov-verify-verdict.tone-good { color: var(--green); }
+.ov-verify-verdict.tone-warn { color: var(--amber); }
+.ov-verify-verdict.tone-info { color: var(--blue); }
+.ov-verify-verdict.tone-neutral { color: var(--subtle); }
+.ov-verify-list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.ov-verify-list li { display: flex; flex-direction: column; gap: 3px; padding-top: 8px; border-top: 1px solid var(--line-soft); }
+.ov-verify-list li:first-child { padding-top: 0; border-top: 0; }
+.ov-verify-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text); font-size: 12px; }
+.ov-verify-values { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 8px; margin: 0; }
+.ov-verify-values dt { color: var(--subtle); font-size: 10.5px; }
+.ov-verify-values dd { margin: 0; font-size: 11.5px; overflow-wrap: anywhere; }
 .ov-admin-unlock { display: flex; flex-direction: column; gap: 6px; }
 .ov-admin-unlock label { color: var(--muted); font-size: 12px; }
 .ov-admin-row { display: flex; gap: 8px; }
