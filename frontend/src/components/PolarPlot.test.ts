@@ -153,4 +153,8 @@ describe('radial axis placement', () => {
     expect(radialTickText([-60, -40, -20, 0], -60)).toEqual(['', '-40', '-20', '0']);
     expect(radialTickText([-2.5, 0.25], -2.5)).toEqual(['', '0.25']);
   });
+
+  it('draws no rim label on a compact plot, where it would collide with the angular labels', () => {
+    expect(radialTickText([0, 20], 0, true)).toEqual(['', '']);
+  });
 });

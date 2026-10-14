@@ -63,10 +63,12 @@ export function radialAxisAngle(head: number): number {
 /**
  * Radial tick labels without a unit: the outer label sits on the rim next to
  * the angular labels, and the caption states the dB range. The centre is left
- * unlabelled because the curve always meets it there.
+ * unlabelled because the curve always meets it there. A compact plot (the
+ * Overview dock) is too small for a rim label beside the angular labels, so it
+ * draws none; the dock's Atur column states the dB range instead.
  */
-export function radialTickText(ticks: readonly number[], low: number): string[] {
-  return ticks.map(value => (value === low ? '' : dbLabel(value)));
+export function radialTickText(ticks: readonly number[], low: number, compact = false): string[] {
+  return ticks.map(value => (compact || value === low ? '' : dbLabel(value)));
 }
 
 export function polarUiRevision(settings: PolarSettings, simulation: boolean): string {
@@ -230,7 +232,7 @@ export function PolarPlot({ values, settings, simulation, offsetSource, head: he
               return compact ? cardinal[a] : `${cardinal[a]} ${a}°`;
             }), gridcolor: color('--line') },
           radialaxis: { range: [0, high - low], tickmode: 'array', tickvals: ticks.map(v => v - low),
-            ticktext: radialTickText(ticks, low), angle: radialAxisAngle(head), gridcolor: color('--line') },
+            ticktext: radialTickText(ticks, low, compact), angle: radialAxisAngle(head), gridcolor: color('--line') },
         },
       }, { ...polarPlotConfig(lang, t), displayModeBar: modeBar });
       layoutKey.current = key;
