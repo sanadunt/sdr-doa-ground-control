@@ -268,18 +268,25 @@ Kontrol adalah satu-satunya cara console mengubah setelan di RDF-SDR. Console me
 
 1. **Kirim ke RDF-SDR** di header Spektrum membuka Kontrol dengan draf: Frekuensi tengah diisi tengah RX dan Frekuensi VFO diisi VFO yang sedang didengar. Tombol ini belum mengirim apa pun, dan nonaktif bila frekuensi belum diketahui atau di luar 24–1800 MHz. Kontrol juga bisa dibuka dengan tombol panel **Kontrol**.
 2. **Buka kunci.** Masukkan kata sandi admin lalu tekan **Buka kunci**. Sesinya sama dengan login admin di Konfigurasi dan berlaku 30 menit.
-3. **Ubah nilai.** Baris atas menampilkan broker, status koneksi, dan `rev dasar`, yaitu revisi konfigurasi terakhir yang dilaporkan RDF-SDR lewat MQTT. Ada lima field: Frekuensi tengah (MHz), Gain (dB), Frekuensi VFO (MHz), Bandwidth VFO (kHz), dan Squelch VFO (dB). Field VFO bertuliskan "tidak dilaporkan" bila node belum melaporkan nilainya. Field yang diubah ditandai "Diubah dari …", dan nilai di luar rentang diberi pesan di field itu; field lain tidak punya keterangan di bawahnya.
+3. **Ubah nilai.** Baris atas menampilkan broker, status koneksi, dan `rev dasar`, yaitu revisi konfigurasi terakhir yang dilaporkan RDF-SDR lewat MQTT. Ada lima field: Frekuensi tengah (MHz), Gain (dB), Frekuensi VFO (MHz), Bandwidth VFO (kHz), dan Squelch VFO (dB). Nilai awal diambil dari MQTT, lalu dari `settings.json` Data Out yang masih segar untuk field yang tidak dilaporkan MQTT (collector membaca `center_freq`, `uniform_gain`, `vfo_freq_0`, `vfo_bw_0` dan `vfo_squelch_0`). Field bertuliskan "tidak dilaporkan" bila tidak ada sumber yang membawa nilainya, atau Data Out sedang STALE. Field yang diubah ditandai "Diubah dari …", dan nilai di luar rentang diberi pesan di field itu; field lain tidak punya keterangan di bawahnya.
 4. **Tinjau perubahan** menampilkan nilai lama → baru dan "QoS 1 · kedaluwarsa 60 dtk · rev dasar N". Agent harus berjalan dengan `--enable-config` agar perubahan diterapkan. **Kembali** untuk mengedit lagi.
 5. **Kirim ke RDF-SDR** di layar tinjauan inilah yang benar-benar mengirim. Tombolnya nonaktif bila monitor MQTT belum terhubung atau rev dasar belum diketahui. Setelah terkirim, Kontrol menunggu jawaban dan memeriksa statusnya setiap detik. Hanya satu perintah yang boleh menunggu hasil pada satu waktu.
 6. Hasil:
-   - `ACK · applied`: agent menulis perubahan ke `settings.json` dan config rev naik. Ini belum membuktikan KrakenSDR memakai nilai baru; lihat frekuensi tengah di kartu node pada pembacaan Data Out berikutnya.
+   - `ACK · applied`: agent menulis perubahan ke `settings.json` dan config rev naik. Ini belum membuktikan RDF-SDR memakai nilai baru; itu dicek oleh **Cek RDF-SDR** di bawah.
    - `Ditolak · CONFIG_REVISION_CONFLICT`: rev dasar sudah usang. Tekan **Muat ulang nilai**, tinjau, lalu kirim lagi.
    - `Ditolak · REMOTE_CONTROL_DISABLED`: agent berjalan tanpa `--enable-config`. Tidak ada yang berubah.
    - `Ditolak` dengan kode lain, `expired`, atau `failed`: kodenya ditampilkan. `expired` biasanya berarti jam console dan RDF-SDR berselisih jauh.
    - **Belum ada ACK** (sekitar 65 detik setelah kirim): tidak ada agent yang menjawab. Periksa bahwa agent berjalan dan memakai broker yang sama. Agent versi lama hanya berlangganan `cmd/config/patch` bila `--enable-config` aktif, sehingga tidak pernah menjawab.
    - **Publish gagal** (PUBACK 128 ke atas): broker menolak publish dari console, biasanya karena ACL.
    - **Tidak terkirim · KODE**: console menolak sebelum publish. Contohnya `CONFIG_REVISION_STALE` (nilai berubah sejak ditinjau; nilai dimuat ulang, tinjau lagi), `MQTT_NOT_CONNECTED`, dan `COMMAND_IN_FLIGHT` (perintah lain masih menunggu hasil).
-7. **Selesai** mengembalikan form ke nilai yang dilaporkan. **Kunci lagi** menutup sesi admin.
+7. **Cek RDF-SDR.** Setelah hasil akhir (semua kecuali **Publish gagal**), Kontrol membandingkan tiap field yang dikirim dengan nilai terbaru dari RDF-SDR. Tiap baris menampilkan Dikirim, Data Out dan MQTT, plus status:
+   - `CONFIRMED`: nilai RDF-SDR sama dengan yang dikirim (toleransi ±500 Hz untuk frekuensi, ±1 Hz untuk bandwidth, ±0,05 dB untuk gain dan squelch).
+   - `PENDING`: belum sama, atau belum ada data segar; masih ditunggu sampai 90 detik setelah hasil akhir.
+   - `UNCHANGED`: setelah 90 detik nilainya tetap belum sama.
+   - `NOT REPORTED`: tidak ada sumber yang membawa field itu.
+
+   Data Out (`settings.json` dari pembacaan yang masih segar) yang menentukan. MQTT hanya dipakai bila Data Out tidak membawa field itu, dan hanya nilai yang diterima setelah perintah dikirim. Snapshot STALE dan data simulasi tidak dihitung. Ringkasan di atas baris, misalnya "RDF-SDR berubah · 2/2" atau "Belum berubah · 0/2", merangkum semuanya. **Cek ulang** membaca Data Out dan MQTT saat itu juga. Dengan interval refresh Manual atau lebih lama dari jendela segar, Data Out hanya terbaca saat **Cek ulang** atau Refresh ditekan.
+8. **Selesai** mengembalikan form ke nilai yang dilaporkan. **Kunci lagi** menutup sesi admin.
 
 Monitor MQTT console tidak memakai TLS, username, atau password. Kontrol hanya bekerja lewat broker yang menerima koneksi seperti itu dan mengizinkan console publish ke `cmd/config/patch`. Broker `tools/mqtt_lan_stage.conf` (TLS dan password) tidak bisa dipakai console.
 
