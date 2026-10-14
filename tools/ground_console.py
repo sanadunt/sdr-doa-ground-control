@@ -522,10 +522,15 @@ def _normalize_reported(data: Dict[str, Any]) -> Dict[str, Any]:
             value = reported_in.get(key)
             return value if type(value) is int else None
 
+        # A retained replay is aged from its source timestamp (age_basis
+        # "source_ts"), or has no age; see sdr_doa_mqtt_monitor._reported_age.
+        age_basis = reported_in.get("age_basis")
         reported = {
             "config_rev": optional_int("config_rev"),
             "received_at_ms": optional_int("received_at_ms"),
+            "source_ts_ms": optional_int("source_ts_ms"),
             "age_ms": optional_int("age_ms"),
+            "age_basis": age_basis if age_basis in {"received", "source_ts"} else None,
             "retained": reported_in.get("retained") is True,
             "synthetic": reported_in.get("synthetic") is True,
             "source": reported_in.get("source") if reported_in.get("source") in {"v1", "v2", "v1+v2"} else None,

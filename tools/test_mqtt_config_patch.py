@@ -101,7 +101,9 @@ class FakeMonitor:
             "reported": {
                 "config_rev": self.base_config_rev,
                 "received_at_ms": 1,
+                "source_ts_ms": 1,
                 "age_ms": 1200,
+                "age_basis": "source_ts",
                 "retained": True,
                 "synthetic": False,
                 "source": "v1",
@@ -670,6 +672,10 @@ class ConfigPatchServerTests(unittest.TestCase):
         self.assertEqual(body["value_sources"]["gain_db"], "v1_config_reported")
         self.assertIsNone(body["values"]["vfo_frequency_hz"])
         self.assertEqual(body["reported"]["source"], "v1")
+        self.assertEqual(
+            (body["reported"]["retained"], body["reported"]["age_basis"], body["reported"]["source_ts_ms"]),
+            (True, "source_ts", 1),
+        )
         self.assertIsNone(body["pending_command_id"])
         self.assertIsInstance(body["now_ms"], int)
 
@@ -857,6 +863,11 @@ class RealMonitorEndToEndTests(unittest.TestCase):
         self.assertEqual((reported["base_config_rev"], reported["base_config_rev_source"]), (42, "config_reported"))
         self.assertEqual(reported["reported"]["config_rev"], 42)
         self.assertIs(reported["reported"]["retained"], True)
+        # The retained replay is aged from its own ts_ms, not from its receipt.
+        self.assertEqual(
+            (reported["reported"]["age_basis"], reported["reported"]["source_ts_ms"]), ("source_ts", now),
+        )
+        self.assertGreaterEqual(reported["reported"]["age_ms"], 0)
 
         status, headers, _body = self.request("POST", "/api/admin/login", {"password": PASSWORD})
         self.assertEqual(status, 200)

@@ -756,6 +756,62 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self.assertIsNone(data["values"]["vfo_frequency_hz"])
         self.assertIsNone(data["value_sources"]["vfo_frequency_hz"])
 
+    def test_retained_config_report_is_aged_from_its_own_timestamp(self) -> None:
+        self._connected()
+        published = 1_760_000_000_000
+        clock = [published + 3 * 3_600_000]
+
+        def config(ts_ms: int, rev: int = 42) -> dict:
+            return contract.build_config_reported(
+                ts_ms=ts_ms, config_rev=rev, center_frequency_hz=416_588_000, gain_db=15.5,
+                array="UCA", method="MUSIC", active_vfos=1,
+            )
+
+        def reported() -> dict:
+            return self.monitor.reported_config()["reported"]
+
+        with patch.object(self.module, "_now_ms", lambda: clock[0]):
+            # The broker replays a report the agent published three hours ago.
+            self._send("config_reported", config(published), retained=True, qos=1)
+            clock[0] += 400
+            replay = reported()
+            self.assertIs(replay["retained"], True)
+            self.assertEqual(
+                (replay["age_ms"], replay["age_basis"], replay["source_ts_ms"]),
+                (3 * 3_600_000 + 400, "source_ts", published),
+            )
+            # A small clock lead on the Raspberry is tolerated (age 0); a large
+            # one, or an unsynced pre-2020 clock, leaves the age unknown.
+            received = clock[0]
+            for ts_ms, expected in (
+                (received + 4_000, (0, "source_ts")),
+                (received + 6_000, (None, None)),
+                (86_400_000, (None, None)),
+            ):
+                self._send("config_reported", config(ts_ms), retained=True, qos=1)
+                entry = reported()
+                self.assertEqual((entry["age_ms"], entry["age_basis"], entry["source_ts_ms"]), (*expected, ts_ms))
+            # A live report is aged from its receipt, whatever its timestamp says.
+            self._send("config_reported", config(published, rev=43), qos=1)
+            clock[0] += 1_500
+            live = reported()
+            self.assertIs(live["retained"], False)
+            self.assertEqual((live["age_ms"], live["age_basis"], live["config_rev"]), (1_500, "received", 43))
+
+            # RDF v2 config/reported follows the same rule with its "t" field.
+            self._send("config_reported", b"", qos=1)
+            v2 = json.dumps({
+                "v": 2, "sid": "7a8b9c0d", "rev": 3, "t": published, "proof": "unverified", "digest": "abc",
+                "effective": {"center_frequency_hz": 433_000_000, "gain_db": 20.5},
+            }).encode("utf-8")
+            self.client.on_message(self.client, None, message(f"sdr/v2/{NODE}/config/reported", v2, 1, True))
+            v2_reported = reported()
+            self.assertEqual(v2_reported["source"], "v2")
+            self.assertEqual(
+                (v2_reported["retained"], v2_reported["age_ms"], v2_reported["age_basis"]),
+                (True, clock[0] - published, "source_ts"),
+            )
+
     def test_reported_config_takes_vfo_values_only_from_rdf_v2_effective(self) -> None:
         self._connected()
         now = int(time.time() * 1000)
