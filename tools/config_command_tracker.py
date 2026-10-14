@@ -50,14 +50,22 @@ def _wall_clock_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _monitor_reference(monitor: Any) -> Callable[[], Any]:
-    """Remember which monitor published without keeping a stopped one alive."""
+def _monitor_reference(monitor: Any, *, strong: bool = False) -> Callable[[], Any]:
+    """Remember which monitor published a command.
+
+    While the command is not final the reference is strong: after a reconnect
+    the stopped publisher may still hold a PUBACK, echo or final ACK that has
+    not been polled yet. At most MAX_TRACKED_COMMANDS entries hold one. A
+    final command keeps only a weak reference, so a stopped monitor is freed.
+    """
     if monitor is None:
         return lambda: None
-    try:
-        return weakref.ref(monitor)
-    except TypeError:
-        return lambda: monitor
+    if not strong:
+        try:
+            return weakref.ref(monitor)
+        except TypeError:
+            pass
+    return lambda: monitor
 
 
 def _empty_observation() -> Dict[str, Any]:
@@ -127,7 +135,7 @@ class ConfigCommandTracker:
             "base_config_rev": int(command["base_config_rev"]),
             "changes": dict(changes) if isinstance(changes, Mapping) else {},
             "published_at_ms": published_at_ms if published_at_ms is not None else self.now_ms(),
-            "monitor": _monitor_reference(monitor),
+            "monitor": _monitor_reference(monitor, strong=not publish_failed),
             "publish_failed": bool(publish_failed),
             "observed": _empty_observation(),
             "final_state": "publish_failed" if publish_failed else None,
@@ -221,6 +229,8 @@ class ConfigCommandTracker:
             else:
                 state = "published"
             if state in FINAL_STATES:
+                if entry["final_state"] is None:
+                    entry["monitor"] = _monitor_reference(entry["monitor"]())
                 entry["final_state"] = state
         return {
             "command_id": entry["command_id"],

@@ -126,10 +126,11 @@ def _read_dotenv(path: Path = DEFAULT_ENV_PATH, *, strict: bool = False) -> Dict
     Existing process environment variables always remain authoritative; this
     helper only supplies local fallback values for variables that are absent.
     With ``strict``, a file that exists but cannot be read or decoded raises
-    ``_DotenvUnreadable`` instead of looking empty.
+    ``_DotenvUnreadable`` instead of looking empty. A leading UTF-8 BOM, as
+    some Windows editors and PowerShell write, is not part of the first key.
     """
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
         return {}
     except OSError:
@@ -223,8 +224,19 @@ if not ADMIN_PASSWORD:
     ADMIN_PASSWORD = None
 ADMIN_SESSION_COOKIE = "sdr_doa_admin"
 ADMIN_SESSION_TTL_SECONDS = 30 * 60
+# State-changing POSTs that need a same-origin loopback Origin before their
+# body is read. Login and logout are here so a cross-site page cannot feed the
+# failed-login throttle; console-config and mqtt/connect replace the MQTT
+# monitor, which is also the config-patch publish channel.
+SAME_ORIGIN_POST_PATHS = frozenset({
+    "/api/admin/login",
+    "/api/admin/logout",
+    "/api/console-config",
+    "/api/mqtt/connect",
+})
 # Failed logins are counted for the whole server: after this many inside the
-# window, every login is refused for the lockout period.
+# window, every login is refused for the lockout period. Only same-origin
+# requests reach the counter.
 ADMIN_LOGIN_MAX_FAILURES = 5
 ADMIN_LOGIN_FAILURE_WINDOW_S = 60.0
 ADMIN_LOGIN_LOCKOUT_S = 30.0
@@ -510,10 +522,15 @@ def _normalize_reported(data: Dict[str, Any]) -> Dict[str, Any]:
             value = reported_in.get(key)
             return value if type(value) is int else None
 
+        # A retained replay is aged from its source timestamp (age_basis
+        # "source_ts"), or has no age; see sdr_doa_mqtt_monitor._reported_age.
+        age_basis = reported_in.get("age_basis")
         reported = {
             "config_rev": optional_int("config_rev"),
             "received_at_ms": optional_int("received_at_ms"),
+            "source_ts_ms": optional_int("source_ts_ms"),
             "age_ms": optional_int("age_ms"),
+            "age_basis": age_basis if age_basis in {"received", "source_ts"} else None,
             "retained": reported_in.get("retained") is True,
             "synthetic": reported_in.get("synthetic") is True,
             "source": reported_in.get("source") if reported_in.get("source") in {"v1", "v2", "v1+v2"} else None,
@@ -2018,8 +2035,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             and target_port == expected_port
         )
 
-    # Receiver mutations and the config-patch publish share this port-exact,
-    # same-origin loopback rule.
+    # Receiver mutations, the config-patch publish and SAME_ORIGIN_POST_PATHS
+    # share this port-exact, same-origin loopback rule.
     _same_origin_loopback_request = _receiver_mutation_origin_is_valid
 
     def _send_config_patch_error(self, status: int, code: str, message: str, **extra: Any) -> None:
@@ -2533,6 +2550,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "Receiver mutation requires a same-origin loopback request"}, HTTPStatus.FORBIDDEN)
             return
         if parsed.path.startswith("/api/receiver/") and self._receiver_post(parsed):
+            return
+        if parsed.path in SAME_ORIGIN_POST_PATHS and not self._same_origin_loopback_request():
+            # Rejected before the body is read, the login throttle or any
+            # config or monitor change.
+            extra = {"read_only": True} if parsed.path in {"/api/console-config", "/api/mqtt/connect"} else {}
+            self._send_config_patch_error(
+                HTTPStatus.FORBIDDEN,
+                "ORIGIN_REJECTED",
+                f"{parsed.path} requires a same-origin loopback request",
+                **extra,
+            )
             return
         if parsed.path == "/api/console-config":
             try:

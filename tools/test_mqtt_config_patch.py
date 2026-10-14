@@ -10,6 +10,7 @@ real MqttMonitor through the fake paho client of test_sdr_doa_mqtt_monitor.
 
 from __future__ import annotations
 
+import gc
 import http.client
 import json
 import os
@@ -20,6 +21,7 @@ import threading
 import time
 import types
 import unittest
+import weakref
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 from unittest.mock import patch
@@ -99,7 +101,9 @@ class FakeMonitor:
             "reported": {
                 "config_rev": self.base_config_rev,
                 "received_at_ms": 1,
+                "source_ts_ms": 1,
                 "age_ms": 1200,
+                "age_basis": "source_ts",
                 "retained": True,
                 "synthetic": False,
                 "source": "v1",
@@ -279,14 +283,28 @@ class ConfigPatchServerTests(unittest.TestCase):
         configured = self.root / "configured.env"
         configured.write_text("SDR_DOA_ADMIN_PASSWORD='from-file'\n", encoding="utf-8")
         self.assertEqual(resolve({}, dotenv_path=configured), "from-file")
+        # A UTF-8 BOM (PowerShell 5.1 Set-Content -Encoding UTF8) before the
+        # first key must not hide it and turn on the public default.
+        for name, raw in (
+            ("bom.env", b"\xef\xbb\xbfSDR_DOA_ADMIN_PASSWORD=my-real-secret\r\n"),
+            ("bom-export.env", b"\xef\xbb\xbfexport SDR_DOA_ADMIN_PASSWORD='my-real-secret'\nOTHER=1\n"),
+        ):
+            bom = self.root / name
+            bom.write_bytes(raw)
+            self.assertEqual(ground_console._read_dotenv(bom)["SDR_DOA_ADMIN_PASSWORD"], "my-real-secret", name)
+            self.assertEqual(resolve({}, dotenv_path=bom), "my-real-secret", name)
         # A .env that exists but cannot be read may hold the real password.
         directory = self.root / "directory.env"
         directory.mkdir()
         undecodable = self.root / "undecodable.env"
         undecodable.write_bytes(b"SDR_DOA_ADMIN_PASSWORD=\xff\xfe\n")
+        # PowerShell 5.1 `>` writes UTF-16 LE with its own BOM.
+        utf16 = self.root / "utf16.env"
+        utf16.write_bytes("SDR_DOA_ADMIN_PASSWORD=my-real-secret\r\n".encode("utf-16"))
         with patch("builtins.print"):
             self.assertIsNone(resolve({}, dotenv_path=directory))
             self.assertIsNone(resolve({}, dotenv_path=undecodable))
+            self.assertIsNone(resolve({}, dotenv_path=utf16))
         # The process environment still wins over an unreadable file.
         self.assertEqual(resolve({"SDR_DOA_ADMIN_PASSWORD": "env"}, dotenv_path=directory), "env")
 
@@ -587,19 +605,50 @@ class ConfigPatchServerTests(unittest.TestCase):
         rejected = self.status_of(sent["command_id"])
         self.assertEqual((rejected["state"], rejected["puback_reason"]), ("publish_failed", 135))
 
+    def replace_monitor(self) -> Tuple[FakeMonitor, "weakref.ReferenceType[FakeMonitor]"]:
+        """Swap in a new monitor and drop the test's own reference to the old one."""
+        retired = weakref.ref(self.monitor)
+        replacement = FakeMonitor()
+        self.server.mqtt_monitor = replacement
+        del self.monitor
+        gc.collect()
+        return replacement, retired
+
     def test_monitor_restart_keeps_tracking_the_command(self) -> None:
         cookie = self.admin_cookie()
         _status, sent = self.send_patch(self.patch_body(), cookie=cookie)
         command_id = sent["command_id"]
         self.monitor.puback(command_id, 0)
-        replacement = FakeMonitor()
-        self.server.mqtt_monitor = replacement
+        replacement, retired = self.replace_monitor()
+        # Only the tracker holds the stopped publisher now, as in production.
+        self.assertIsNotNone(retired())
         restarted = self.status_of(command_id)
         self.assertIs(restarted["monitor_restarted"], True)
         self.assertEqual((restarted["state"], restarted["puback_reason"]), ("delivered", 0))
         replacement.ack(command_id, "applied", config_rev=43)
         acked = self.status_of(command_id)
         self.assertEqual((acked["state"], acked["monitor_restarted"]), ("acked", True))
+        # A final command no longer keeps the stopped monitor alive.
+        gc.collect()
+        self.assertIsNone(retired())
+        self.assertEqual(self.status_of(command_id)["state"], "acked")
+
+    def test_final_ack_seen_only_by_the_retired_monitor_is_kept(self) -> None:
+        cookie = self.admin_cookie()
+        _status, sent = self.send_patch(self.patch_body(), cookie=cookie)
+        command_id = sent["command_id"]
+        # The ACK reaches the old monitor, which is replaced before any poll.
+        self.monitor.puback(command_id, 0)
+        self.monitor.ack(command_id, "applied", config_rev=43)
+        _replacement, retired = self.replace_monitor()
+        acked = self.status_of(command_id)
+        self.assertEqual(
+            (acked["state"], acked["final"], acked["puback_reason"], acked["ack"]["config_rev"]),
+            ("acked", True, 0, 43),
+        )
+        self.assertEqual(self.status_of(command_id)["state"], "acked")
+        gc.collect()
+        self.assertIsNone(retired())
 
     def test_status_routes_validate_the_id(self) -> None:
         _status, _headers, latest = self.request("GET", "/api/mqtt/config-patch")
@@ -623,6 +672,10 @@ class ConfigPatchServerTests(unittest.TestCase):
         self.assertEqual(body["value_sources"]["gain_db"], "v1_config_reported")
         self.assertIsNone(body["values"]["vfo_frequency_hz"])
         self.assertEqual(body["reported"]["source"], "v1")
+        self.assertEqual(
+            (body["reported"]["retained"], body["reported"]["age_basis"], body["reported"]["source_ts_ms"]),
+            (True, "source_ts", 1),
+        )
         self.assertIsNone(body["pending_command_id"])
         self.assertIsInstance(body["now_ms"], int)
 
@@ -673,6 +726,49 @@ class ConfigPatchServerTests(unittest.TestCase):
         clock[0] += 1.5
         status, _headers, body = self.login()
         self.assertEqual((status, body["authenticated"]), (200, True))
+
+    def test_cross_origin_logins_never_reach_the_throttle(self) -> None:
+        port = self.server.server_address[1]
+        for origin in (None, "https://evil.example", f"http://127.0.0.1:{port + 1}", f"http://localhost:{port}"):
+            for _ in range(ground_console.ADMIN_LOGIN_MAX_FAILURES + 1):
+                status, headers, body = self.request("POST", "/api/admin/login", {"password": "x"}, origin=origin)
+                self.assertEqual((status, body["code"], body["ok"]), (403, "ORIGIN_REJECTED", False), origin)
+                self.assertNotIn("Set-Cookie", headers)
+            # The right password from a foreign origin is refused too.
+            status, headers, body = self.request("POST", "/api/admin/login", {"password": PASSWORD}, origin=origin)
+            self.assertEqual((status, body["code"]), (403, "ORIGIN_REJECTED"), origin)
+            self.assertNotIn("Set-Cookie", headers)
+        status, _headers, body = self.login()
+        self.assertEqual((status, body["authenticated"]), (200, True))
+
+    def test_cross_origin_logout_keeps_the_session(self) -> None:
+        cookie = self.admin_cookie()
+        status, headers, body = self.request(
+            "POST", "/api/admin/logout", {}, origin="https://evil.example", cookie=cookie,
+        )
+        self.assertEqual((status, body["code"]), (403, "ORIGIN_REJECTED"))
+        self.assertNotIn("Set-Cookie", headers)
+        _status, _headers, admin = self.request("GET", "/api/admin/status", origin=None, cookie=cookie)
+        self.assertIs(admin["authenticated"], True)
+        status, _headers, _body = self.request("POST", "/api/admin/logout", {}, cookie=cookie)
+        self.assertEqual(status, 200)
+        _status, _headers, admin = self.request("GET", "/api/admin/status", origin=None, cookie=cookie)
+        self.assertIs(admin["authenticated"], False)
+
+    def test_cross_origin_posts_cannot_retarget_the_publish_monitor(self) -> None:
+        config_path = self.root / "console.json"
+        saved = config_path.read_bytes() if config_path.exists() else None
+        config = self.server.get_config()
+        for path, body in (
+            ("/api/console-config", {"mqtt_host": "203.0.113.9", "mqtt_port": 1883, "mqtt_transport": "tcp"}),
+            ("/api/mqtt/connect?host=203.0.113.9&port=1883&transport=tcp", None),
+        ):
+            for origin in (None, "https://evil.example"):
+                status, _headers, response = self.request("POST", path, body, origin=origin)
+                self.assertEqual((status, response["code"], response["read_only"]), (403, "ORIGIN_REJECTED", True))
+        self.assertIs(self.server.mqtt_monitor, self.monitor)
+        self.assertEqual(self.server.get_config(), config)
+        self.assertEqual(config_path.read_bytes() if config_path.exists() else None, saved)
 
     def test_non_ascii_password_is_a_wrong_password_not_a_dropped_connection(self) -> None:
         for raw in (
@@ -767,6 +863,11 @@ class RealMonitorEndToEndTests(unittest.TestCase):
         self.assertEqual((reported["base_config_rev"], reported["base_config_rev_source"]), (42, "config_reported"))
         self.assertEqual(reported["reported"]["config_rev"], 42)
         self.assertIs(reported["reported"]["retained"], True)
+        # The retained replay is aged from its own ts_ms, not from its receipt.
+        self.assertEqual(
+            (reported["reported"]["age_basis"], reported["reported"]["source_ts_ms"]), ("source_ts", now),
+        )
+        self.assertGreaterEqual(reported["reported"]["age_ms"], 0)
 
         status, headers, _body = self.request("POST", "/api/admin/login", {"password": PASSWORD})
         self.assertEqual(status, 200)

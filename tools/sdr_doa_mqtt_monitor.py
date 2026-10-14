@@ -74,6 +74,12 @@ V2_EFFECTIVE_KEYS = {
     "vfo_squelch_db": "vfo0_squelch_db",
 }
 V1_REPORTED_FIELDS = ("center_frequency_hz", "gain_db")
+# A retained config report is a replay: its receive time says nothing about
+# when it was published. Its own timestamp is used instead when it is no more
+# than this far after receipt (the clocks are unverified) and not before
+# 2020-01-01T00:00:00Z (a Raspberry without an RTC that has not synced yet).
+REPORTED_SOURCE_TS_MAX_FUTURE_MS = 5_000
+REPORTED_SOURCE_TS_MIN_MS = 1_577_836_800_000
 
 
 def _now_ms() -> int:
@@ -106,6 +112,20 @@ def _finite_number(value: Any) -> Optional[float]:
     if type(value) is float and math.isfinite(value):
         return value
     return None
+
+
+def _reported_age(now_ms: int, received_at_ms: int, retained: bool, source_ts_ms: Any) -> Dict[str, Any]:
+    """Age fields of a config report.
+
+    A live report is as old as its receipt. A retained replay is aged from its
+    plausible source timestamp, and otherwise has no known age.
+    """
+    source = source_ts_ms if type(source_ts_ms) is int else None
+    if not retained:
+        return {"age_ms": max(0, now_ms - received_at_ms), "age_basis": "received", "source_ts_ms": source}
+    if source is not None and REPORTED_SOURCE_TS_MIN_MS <= source <= received_at_ms + REPORTED_SOURCE_TS_MAX_FUTURE_MS:
+        return {"age_ms": max(0, now_ms - source), "age_basis": "source_ts", "source_ts_ms": source}
+    return {"age_ms": None, "age_basis": None, "source_ts_ms": source}
 
 
 class MqttMonitor:
@@ -729,21 +749,27 @@ class MqttMonitor:
             reported: Optional[Dict[str, Any]] = None
             if v1 is not None:
                 received = int(v1["received_at_ms"])
+                retained = bool(v1["retained"])
                 reported = {
                     "config_rev": v1["payload"].get("config_rev"),
                     "received_at_ms": received,
-                    "age_ms": max(0, now - received),
-                    "retained": bool(v1["retained"]),
+                    **_reported_age(now, received, retained, v1["payload"].get("ts_ms")),
+                    "retained": retained,
                     "synthetic": v1["payload"].get("source") == "synthetic",
                     "source": "v1+v2" if effective is not None else "v1",
                 }
             elif effective is not None:
                 received_v2 = v2_entry.get("received_at_ms")
+                retained_v2 = v2_entry.get("retained") is True
+                if type(received_v2) is int:
+                    age = _reported_age(now, received_v2, retained_v2, v2_payload.get("t"))
+                else:
+                    age = {"age_ms": None, "age_basis": None, "source_ts_ms": None}
                 reported = {
                     "config_rev": None,
                     "received_at_ms": received_v2 if type(received_v2) is int else None,
-                    "age_ms": max(0, now - received_v2) if type(received_v2) is int else None,
-                    "retained": v2_entry.get("retained") is True,
+                    **age,
+                    "retained": retained_v2,
                     "synthetic": False,
                     "source": "v2",
                 }
