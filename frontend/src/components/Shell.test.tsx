@@ -251,3 +251,23 @@ describe('top bar and page menu (dashboard shell)', () => {
     expect(refreshSelectOptions([2, 0, 2], null)).toEqual([0, 2]);
   });
 });
+
+/** Vitest blanks every CSS import, so the stylesheet is read from disk. */
+function readStylesheet(path: string): string {
+  type Fs = { readFileSync(file: URL, encoding: 'utf8'): string };
+  const { process } = globalThis as unknown as { process: { getBuiltinModule(id: 'node:fs'): Fs } };
+  return process.getBuiltinModule('node:fs').readFileSync(new URL(path, import.meta.url), 'utf8');
+}
+
+describe('top bar styles', () => {
+  const css = readStylesheet('../console-design.css');
+
+  it('fits its 44 px controls, padding and border inside --topbar-h so Overview does not scroll by a pixel', () => {
+    const tokenHeight = Number(/--topbar-h:\s*(\d+)px/.exec(css)?.[1]);
+    const rule = /(?:^|\n)\.topbar \{([^}]*)\}/.exec(css)?.[1] ?? '';
+    const padding = /padding:\s*(\d+)px\s+\d+px\s*;/.exec(rule);
+    expect(padding, rule).not.toBeNull();
+    expect(44 + 2 * Number(padding?.[1]) + 1).toBeLessThanOrEqual(tokenHeight);
+    expect(css).toMatch(/\.page-content-overview \{[^}]*height: calc\(100dvh - var\(--topbar-h\)\)/);
+  });
+});

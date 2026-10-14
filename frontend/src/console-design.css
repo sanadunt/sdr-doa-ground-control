@@ -78,7 +78,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .shortcut-hint { margin: 0; color: var(--subtle); font-size: 11px; line-height: 1.5; }
 
 .console-main { display: flex; flex-direction: column; min-width: 0; min-height: 100dvh; }
-.topbar { position: sticky; top: 0; z-index: 40; display: flex; align-items: center; gap: 8px; min-height: var(--topbar-h); padding: 4px 12px; border-bottom: 1px solid var(--line-soft); background: color-mix(in srgb, var(--bg) 96%, transparent); backdrop-filter: blur(10px); }
+/* 44 px controls + 3 px padding each side + the 1 px border fit inside
+   --topbar-h, so the viewport-sized Overview below it does not overflow. */
+.topbar { position: sticky; top: 0; z-index: 40; display: flex; align-items: center; gap: 8px; min-height: var(--topbar-h); padding: 3px 12px; border-bottom: 1px solid var(--line-soft); background: color-mix(in srgb, var(--bg) 96%, transparent); backdrop-filter: blur(10px); }
 .menu-toggle { flex: none; }
 .topbar-title { display: flex; flex: 0 1 auto; flex-direction: column; min-width: 0; margin-right: 4px; }
 .topbar-route { overflow: hidden; font-size: 15px; font-weight: 650; letter-spacing: -.01em; text-overflow: ellipsis; white-space: nowrap; }
