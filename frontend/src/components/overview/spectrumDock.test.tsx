@@ -155,6 +155,11 @@ describe('Spectrum dock states', () => {
     expect(select(dock(bridgeWith({ status: status({ vfo: { index: 0, enabled: false, mode: 'fm', frequencyHz: 433_925_000 } }) })))).toMatch(/<option value="nfm" selected="">NFM<\/option>/);
   });
 
+  it('marks a VFO audio recording armed on the Receiver page with REC', () => {
+    expect(dock(bridgeWith({ status: status({ recording: true }) }))).toContain('<span class="ov-tag tone-bad" title="Rekaman audio VFO yang dinyalakan di halaman Receiver sedang berjalan.">REC</span>');
+    expect(dock(bridgeWith({ status: status() }))).not.toContain('>REC<');
+  });
+
   it('shows the MOCK tag for the Mock SDR and UPCONVERTER for a frequency shift', () => {
     const markup = dock(bridgeWith({ status: status({ mock: true, deviceName: 'Mock SDR', frequencyShiftHz: 125_000_000 }) }));
     expect(markup).toContain('>MOCK</span>');

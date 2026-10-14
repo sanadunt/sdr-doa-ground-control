@@ -42,6 +42,8 @@ export interface SpectrumDockProps {
 /** Codes a successful start makes obsolete. */
 const START_NOTICES: ReadonlySet<DockNotice> = new Set(['NO_WEBUSB', 'NEEDS_PAIRING', 'NEEDS_DEVICE_CHOICE', 'CONNECT_FAILED', 'MOCK_UNAVAILABLE', 'TIMEOUT', 'RX_NOT_RUNNING']);
 const SPAN_HZ = SUBSCRIBE_LIMITS.spanDefaultHz;
+/** How long the Receiver's own notice (its snackbar is hidden here) stays in the dock after a stop. */
+const FRAME_NOTICE_MS = 6_000;
 
 interface Notice {
   code: DockNotice;
@@ -89,7 +91,10 @@ export function SpectrumDock({
   // A click-to-tune frequency for the next Mulai, while the frame is not mounted.
   const [pendingHz, setPendingHz] = useState<number | null>(null);
   const [mockRequested, setMockRequested] = useState(false);
+  // After a dock stop: the Receiver's notice, kept here once it arrives (text null while waiting).
+  const [frameNotice, setFrameNotice] = useState<{ text: string | null } | null>(null);
   const mountedRef = useRef(true);
+  const frameNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The mode the dock last asked the receiver for; read when a start settles.
   const requestedModeRef = useRef<ListenMode>(mode);
 
@@ -114,7 +119,11 @@ export function SpectrumDock({
   useEffect(() => {
     mountedRef.current = true;
     setMockRequested(consoleRequestsMockSdr(window.location));
-    return () => { mountedRef.current = false; };
+    return () => {
+      mountedRef.current = false;
+      if (frameNoticeTimer.current !== null) clearTimeout(frameNoticeTimer.current);
+      frameNoticeTimer.current = null;
+    };
   }, []);
 
   useEffect(() => { bridge.probeBuild(); }, [bridge]);
@@ -166,6 +175,12 @@ export function SpectrumDock({
     if (step.tune) void bridge.send({ type: 'console:tune', centerHz: step.tune.centerHz, vfoHz: step.tune.vfoHz }).then(reportFailure);
   }, [followNode, node, phase, running, liveKnown, liveBusy, liveCenter, liveVfo, starting, bridge]);
 
+  // The Receiver's snackbar text lasts about 3 s; the dock keeps it for FRAME_NOTICE_MS.
+  const liveNotice = live?.notice ?? null;
+  useEffect(() => {
+    if (frameNotice && frameNotice.text === null && liveNotice) setFrameNotice({ text: liveNotice });
+  }, [frameNotice, liveNotice]);
+
   const setFollowNode = (next: boolean) => {
     setFollowNodeState(next);
     saveFollowNode(next);
@@ -202,9 +217,25 @@ export function SpectrumDock({
     });
   };
 
+  const showFrameNotice = () => {
+    if (frameNoticeTimer.current !== null) clearTimeout(frameNoticeTimer.current);
+    setFrameNotice({ text: null });
+    frameNoticeTimer.current = setTimeout(() => {
+      frameNoticeTimer.current = null;
+      if (mountedRef.current) setFrameNotice(null);
+    }, FRAME_NOTICE_MS);
+  };
+
   const stop = () => {
+    // Berhenti also ends a VFO audio recording armed on the Receiver page: ask first.
+    const endsRecording = live?.recording === true;
+    if (endsRecording && !window.confirm(t('spectrum.stopRecordingConfirm'))) return;
     setNotice(null);
-    void bridge.send({ type: 'console:stop' }).then(report);
+    void bridge.send({ type: 'console:stop' }).then((result) => {
+      report(result);
+      // The Receiver reports the ended recording in its own snackbar, which is hidden here.
+      if (endsRecording && result.ok && mountedRef.current) showFrameNotice();
+    });
   };
 
   const toggleListen = () => {
@@ -305,17 +336,20 @@ export function SpectrumDock({
   const frameText = notice?.message && (notice.code === 'CONNECT_FAILED' || notice.code === 'NOT_READY' || notice.code === 'INVALID_COMMAND') ? notice.message : null;
   const messageText = view.message ? t(view.message) : null;
   const followHint = followNode && !node ? t('spectrum.followUnavailable') : null;
-  let lineNotice: ReactNode = null;
+  // The Receiver's own notice after a dock stop, such as the ended recording (already localized there).
+  const frameNoticeLine = frameNotice?.text ? <span className="ov-spec-message tone-warn">{frameNotice.text}</span> : null;
+  let lineNotice: ReactNode = frameNoticeLine;
   if (running && (messageText || followHint)) {
     lineNotice = (
       <>
         {messageText ? <span className={`ov-spec-message tone-${view.tone === 'good' ? 'warn' : view.tone}`}>{messageText}{frameText ? ` (${frameText})` : ''}</span> : null}
         {followHint ? <span className="ov-spec-message tone-neutral">{followHint}</span> : null}
+        {frameNoticeLine}
         {view.openReceiver ? openReceiverButton : null}
       </>
     );
   } else if (!running && followHint && !view.message) {
-    lineNotice = <span className="ov-spec-message tone-neutral">{followHint}</span>;
+    lineNotice = <><span className="ov-spec-message tone-neutral">{followHint}</span>{frameNoticeLine}</>;
   }
   const overlay = (
     <>
@@ -335,6 +369,7 @@ export function SpectrumDock({
           ? <span className="ov-tag tone-warn" title={t('spectrum.mockTitle')}>MOCK</span>
           : <span className="ov-spec-source">{t('spectrum.sourceHackrf')}</span>}
         {shiftHz !== 0 ? <span className="ov-tag tone-info" title={t('spectrum.upconverterTitle', { shift: formatMhz(shiftHz, 3) })}>UPCONVERTER</span> : null}
+        {live?.recording ? <span className="ov-tag tone-bad" title={t('spectrum.recordingTitle')}>REC</span> : null}
         <span className={`ov-chip tone-${view.tone}`}>{view.chip}</span>
         <span className="ov-spacer" />
         <label className="ov-spec-follow" title={t('spectrum.followTitle')}>
