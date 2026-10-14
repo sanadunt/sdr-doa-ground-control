@@ -6,7 +6,7 @@ import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&ur
 import type { Feature, FeatureCollection, LineString, Point, Polygon } from 'geojson';
 import type { GpsSourceMode, MapCoordinate, TelemetrySnapshot } from '../types';
 import { OSM_TILE_TEMPLATES, basemapAfterTile, basemapPaint, gpsReportsNoFix, holdStationCoordinate, nextBasemapHost, resumeBasemapHealth, shouldReframeStation, tileHost, type BasemapHealth, type BasemapStatus, type StationFraming } from '../lib/map';
-import { ZERO_INSETS, clampMapPadding, type MapInsets } from '../lib/mapInsets';
+import { MAP_CONTROLS_ROW_PX, ZERO_INSETS, clampMapPadding, controlsFramingBottom, type MapInsets } from '../lib/mapInsets';
 import {
   DEFAULT_DOA_OVERLAY_SETTINGS,
   EARTH_RADIUS_M,
@@ -52,9 +52,10 @@ const FALLBACK_STATES: ReadonlySet<MapState> = new Set(['no-webgl', 'gl-lost', '
 const DEFAULT_ZOOM = 14;
 const MAX_FRAMING_ZOOM = 17;
 // Keep the framed overlay clear of the map controls (bottom-left row, 44 px
-// plus its 12 px margin). The top grows to clear the notices (framingPadding);
-// the floating dashboard panels are handled by the map padding (insets).
-const FRAMING_PADDING = { top: 24, right: 24, bottom: 68, left: 24 };
+// plus its 12 px margin). framingPadding grows the top to clear the notices
+// and the bottom to clear the controls when they wrap onto a second row; the
+// floating dashboard panels are handled by the map padding (insets).
+const FRAMING_PADDING = { top: 24, right: 24, bottom: controlsFramingBottom(MAP_CONTROLS_ROW_PX), left: 24 };
 const NOTICE_CLEARANCE_PX = 8;
 const GEOMETRY_DEBOUNCE_MS = 120;
 const WORKER_WATCHDOG_MS = 10_000;
@@ -199,6 +200,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const [tilesLoaded, setTilesLoaded] = useState(false);
   const [theme, setTheme] = useState(consoleTheme);
   const noticesRef = useRef<HTMLDivElement>(null);
+  const controlsRef = useRef<HTMLDivElement>(null);
   const settings = overlaySettings;
   // Sliders update paint properties immediately; geometry follows after a short pause.
   const g = useDebouncedValue(settings, GEOMETRY_DEBOUNCE_MS);
@@ -250,12 +252,16 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   }, [stationCoordinate, values, bearing, offset, scale, g.ringsVisible, g.guidesVisible, g.guideInterval, g.heatmapVisible, g.heatStyle, g.lobeVisible, g.bearingVisible, g.edgesVisible, g.maxDistanceM, g.lobeDistanceM, g.contrast, g.radialSamples, g.distanceFalloff]);
   const bearingDrawn = geometry.data['doa-bearing'].features.length > 0;
 
-  // Frame below the notices (basemap unavailable, overlay held...) so they never cover the north label.
+  // Frame below the notices (basemap unavailable, overlay held...) so they never
+  // cover the north label, and above the map controls so they never cover the south one.
   const framingPadding = (map: MapLibreMap) => {
     const notices = noticesRef.current;
     const below = notices && notices.offsetHeight > 0 ? notices.offsetTop + notices.offsetHeight + NOTICE_CLEARANCE_PX : 0;
-    const limit = Math.max(FRAMING_PADDING.top, map.getContainer().clientHeight * 0.45);
-    return { ...FRAMING_PADDING, top: Math.min(limit, Math.max(FRAMING_PADDING.top, below)) };
+    const height = map.getContainer().clientHeight;
+    const limit = Math.max(FRAMING_PADDING.top, height * 0.45);
+    const bottomLimit = Math.max(FRAMING_PADDING.bottom, height * 0.35);
+    const bottom = Math.min(bottomLimit, controlsFramingBottom(controlsRef.current?.offsetHeight ?? 0));
+    return { ...FRAMING_PADDING, top: Math.min(limit, Math.max(FRAMING_PADDING.top, below)), bottom };
   };
   // The dashboard panels float over the map. Their space becomes map padding,
   // clamped so it and the framing padding still leave fitBounds room to act.
@@ -483,6 +489,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     });
     observer.observe(host);
     if (noticesRef.current) observer.observe(noticesRef.current);
+    if (controlsRef.current) observer.observe(controlsRef.current);
     return () => { window.cancelAnimationFrame(frame); observer.disconnect(); };
   }, [mapState]);
 
@@ -772,7 +779,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
           {!stationCoordinate ? <div className="map-empty-wrap"><EmptyState label={t('map.unavailable')} detail={t('map.unavailableDetail')} tone="warn" /></div> : null}
         </div>
         {mapState !== 'no-webgl' ? (
-          <div className="ov-map-controls">
+          <div className="ov-map-controls" ref={controlsRef}>
             <button className="ov-map-button" type="button" aria-label={t('map.ctrlZoomIn')} title={t('map.ctrlZoomIn')} onClick={() => zoomBy(1)}><Icon name="plus" /></button>
             <button className="ov-map-button" type="button" aria-label={t('map.ctrlZoomOut')} title={t('map.ctrlZoomOut')} onClick={() => zoomBy(-1)}><Icon name="minus" /></button>
             {stationCoordinate ? <button className="ov-map-button" type="button" aria-label={t('map.centerAria')} title={t('map.centerAria')} onClick={resetView}><Icon name="crosshair" /></button> : null}

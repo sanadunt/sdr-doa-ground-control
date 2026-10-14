@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ZERO_INSETS, clampMapPadding, computeMapInsets, sameInsets } from './mapInsets';
+import { MAP_CONTROLS_ROW_PX, ZERO_INSETS, clampMapPadding, computeMapInsets, controlsFramingBottom, sameInsets } from './mapInsets';
 
 const map = { left: 0, top: 52, right: 1440, bottom: 900 };
 
@@ -50,5 +50,18 @@ describe('map padding clamp', () => {
 
   it('never returns negative or fractional padding', () => {
     expect(clampMapPadding({ top: -5, right: Number.NaN, bottom: 10.6, left: 3 }, 0, 0, framing)).toEqual({ top: 0, right: 0, bottom: 0, left: 0 });
+  });
+});
+
+describe('framing clearance for the map controls', () => {
+  it('keeps the one-row value on wide layouts', () => {
+    expect(controlsFramingBottom(MAP_CONTROLS_ROW_PX)).toBe(68);
+    expect(controlsFramingBottom(0)).toBe(68);
+    expect(controlsFramingBottom(Number.NaN)).toBe(68);
+  });
+
+  it('grows when the controls wrap onto a second row at phone width', () => {
+    // 44 px buttons, a 6 px gap and the wrapped attribution row.
+    expect(controlsFramingBottom(94)).toBe(118);
   });
 });

@@ -45,6 +45,20 @@ export function computeMapInsets(
   return { top: 0, right: whole(right), bottom: whole(bottom), left: whole(left) };
 }
 
+/** One row of the bottom-left map buttons. */
+export const MAP_CONTROLS_ROW_PX = 44;
+
+/**
+ * Bottom framing padding that keeps the overlay clear of the bottom-left map
+ * controls: their measured height plus their 12 px margin and 12 px of
+ * clearance. At phone width the row wraps (the attribution moves to a second
+ * line), so a fixed one-row value would put the south guide under the buttons.
+ */
+export function controlsFramingBottom(controlsHeight: number, clearance = 24): number {
+  const height = Number.isFinite(controlsHeight) && controlsHeight > MAP_CONTROLS_ROW_PX ? controlsHeight : MAP_CONTROLS_ROW_PX;
+  return Math.round(height + clearance);
+}
+
 export function sameInsets(a: MapInsets, b: MapInsets): boolean {
   return a.top === b.top && a.right === b.right && a.bottom === b.bottom && a.left === b.left;
 }
