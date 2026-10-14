@@ -1,0 +1,301 @@
+/**
+ * Receiver side of the Ground Console bridge protocol: constants, message
+ * parsing and the spectrum crop. Pure functions only, so node tests can use them.
+ *
+ * The console keeps its own copy in frontend/src/lib/receiverBridgeProtocol.ts;
+ * a contract test compares the two. Change both together.
+ *
+ * Every message is { ch: BRIDGE_CHANNEL, v: BRIDGE_VERSION, type, ...payload }.
+ * Frequencies are integer Hz of the displayed frequency (radio.frequencyShift
+ * included), powers are relative dB and times are Date.now() milliseconds.
+ */
+
+export const BRIDGE_CHANNEL = 'sdr-console-receiver';
+export const BRIDGE_VERSION = 1;
+
+/** Frame to console. */
+export const FRAME_MESSAGE_TYPES = ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result'] as const;
+/** Console to frame. */
+export const CONSOLE_MESSAGE_TYPES = [
+	'console:hello',
+	'console:subscribe',
+	'console:start',
+	'console:stop',
+	'console:tune',
+	'console:vfo',
+	'console:listen',
+] as const;
+/** Demodulator modes in UI order; the keys of MODE_DEFAULTS in constants.ts. */
+export const LISTEN_MODES = ['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw'] as const;
+/** receiver:result codes. TIMEOUT is produced by the console only. */
+export const RESULT_CODES = [
+	'OK',
+	'NOT_READY',
+	'INVALID_COMMAND',
+	'NO_WEBUSB',
+	'NEEDS_PAIRING',
+	'NEEDS_DEVICE_CHOICE',
+	'MOCK_UNAVAILABLE',
+	'CONNECT_FAILED',
+	'SWEEP_BUSY',
+	'RX_NOT_RUNNING',
+	'OUT_OF_RANGE',
+	'AUDIO_BLOCKED',
+	'TIMEOUT',
+] as const;
+/** receiver:status error.code values; the console translates them. */
+export const STATUS_ERROR_CODES = ['USB_LOST', 'RX_ERROR', 'NO_WEBUSB'] as const;
+export const BUSY_STATES = ['none', 'sweep', 'scan-listen'] as const;
+export const WORKSPACES = ['spectrum', 'listener', 'records'] as const;
+export const AUDIO_STATES = ['none', 'suspended', 'running'] as const;
+
+export const SUBSCRIBE_LIMITS = {
+	binsMin: 64,
+	binsMax: 2048,
+	binsDefault: 512,
+	fpsMin: 1,
+	fpsMax: 15,
+	fpsDefault: 10,
+	spanMinHz: 100_000,
+	spanDefaultHz: 2_000_000,
+} as const;
+
+/** Displayed centre and VFO frequencies a command may set. */
+export const TUNE_LIMITS = { minHz: 1_000_000, maxHz: 6_000_000_000 } as const;
+export const VOLUME_LIMITS = { min: 0, max: 100 } as const;
+export const COMMAND_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+/** Status changes are sent at most this often. */
+export const STATUS_DEBOUNCE_MS = 100;
+/** Status is repeated this often while the console holds a subscription. */
+export const STATUS_HEARTBEAT_MS = 2_000;
+/** Spectrum bins with no finite power are sent as this level. */
+export const SPECTRUM_FLOOR_DB = -200;
+
+export type FrameMessageType = typeof FRAME_MESSAGE_TYPES[number];
+export type ConsoleMessageType = typeof CONSOLE_MESSAGE_TYPES[number];
+export type ListenMode = typeof LISTEN_MODES[number];
+export type ResultCode = typeof RESULT_CODES[number];
+export type StatusErrorCode = typeof STATUS_ERROR_CODES[number];
+export type BusyState = typeof BUSY_STATES[number];
+export type Workspace = typeof WORKSPACES[number];
+export type AudioState = typeof AUDIO_STATES[number];
+
+export interface Subscription {
+	spectrum: boolean;
+	bins: number;
+	fps: number;
+	spanHz: number;
+}
+
+export type ConsoleCommand =
+	| { type: 'console:hello' }
+	| ({ type: 'console:subscribe'; id: string } & Subscription)
+	| { type: 'console:start'; id: string; mock: boolean; listen: boolean; mode?: ListenMode; centerHz?: number; vfoHz?: number }
+	| { type: 'console:stop'; id: string }
+	| { type: 'console:tune'; id: string; centerHz: number; vfoHz?: number }
+	| { type: 'console:vfo'; id: string; mode?: ListenMode; frequencyHz?: number; volume?: number }
+	| { type: 'console:listen'; id: string; enabled: boolean }
+	/** A console command with a usable id whose payload is wrong; answered with INVALID_COMMAND. */
+	| { type: 'invalid'; id: string };
+
+export type CommandOf<T extends ConsoleCommand['type']> = Extract<ConsoleCommand, { type: T }>;
+
+export interface StatusVfo {
+	index: number;
+	enabled: boolean;
+	mode: string;
+	frequencyHz: number | null;
+	bandwidthHz: number | null;
+	squelchEnabled: boolean;
+	squelchDb: number | null;
+	volume: number | null;
+}
+
+export interface ReceiverStatus {
+	seq: number;
+	tMs: number;
+	webusb: boolean;
+	mockAvailable: boolean;
+	pairedCount: number | null;
+	connected: boolean;
+	mock: boolean;
+	deviceName: string | null;
+	running: boolean;
+	busy: BusyState;
+	workspace: Workspace;
+	centerHz: number | null;
+	sampleRateHz: number | null;
+	frequencyShiftHz: number;
+	gains: { lnaDb: number | null; vgaDb: number | null; amp: boolean };
+	vfo: StatusVfo | null;
+	squelchOpen: boolean;
+	audio: AudioState;
+	recording: boolean;
+	error: { code: StatusErrorCode } | null;
+	notice: string | null;
+}
+
+export interface CroppedSpectrum {
+	startHz: number;
+	stopHz: number;
+	bins: Float32Array;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isListenMode(value: unknown): value is ListenMode {
+	return typeof value === 'string' && (LISTEN_MODES as readonly string[]).includes(value);
+}
+
+/** undefined when absent, null when present but not a finite number. */
+function optionalHz(value: unknown): number | undefined | null {
+	if (value === undefined) return undefined;
+	return typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : null;
+}
+
+function clampNumber(value: unknown, minimum: number, maximum: number, fallback: number): number {
+	if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+	return Math.min(maximum, Math.max(minimum, value));
+}
+
+/** Clamps a requested subscription; values that are not finite numbers take the default. */
+export function clampSubscription(raw: { spectrum?: unknown; bins?: unknown; fps?: unknown; spanHz?: unknown }): Subscription {
+	const limits = SUBSCRIBE_LIMITS;
+	return {
+		spectrum: raw.spectrum === true,
+		bins: Math.round(clampNumber(raw.bins, limits.binsMin, limits.binsMax, limits.binsDefault)),
+		fps: clampNumber(raw.fps, limits.fpsMin, limits.fpsMax, limits.fpsDefault),
+		// The upper bound is the sample rate, applied when a frame is cropped.
+		spanHz: Math.round(clampNumber(raw.spanHz, limits.spanMinHz, TUNE_LIMITS.maxHz, limits.spanDefaultHz)),
+	};
+}
+
+export function isCommandId(value: unknown): value is string {
+	return typeof value === 'string' && COMMAND_ID_PATTERN.test(value);
+}
+
+export function inTuneRange(hz: number): boolean {
+	return Number.isFinite(hz) && hz >= TUNE_LIMITS.minHz && hz <= TUNE_LIMITS.maxHz;
+}
+
+/**
+ * Parses a console message. Returns null for anything that is not a bridge
+ * envelope with a known console type and a valid command id (it is ignored);
+ * returns { type: 'invalid', id } when only the payload is wrong.
+ */
+export function parseConsoleMessage(data: unknown): ConsoleCommand | null {
+	if (!isRecord(data) || data.ch !== BRIDGE_CHANNEL || data.v !== BRIDGE_VERSION || typeof data.type !== 'string') return null;
+	const type = data.type;
+	if (type === 'console:hello') return { type };
+	if (!(CONSOLE_MESSAGE_TYPES as readonly string[]).includes(type) || !isCommandId(data.id)) return null;
+	const id = data.id;
+	const invalid = { type: 'invalid', id } as const;
+	switch (type) {
+		case 'console:subscribe': {
+			if (typeof data.spectrum !== 'boolean') return invalid;
+			return { type, id, ...clampSubscription(data) };
+		}
+		case 'console:start': {
+			if ((data.mock !== undefined && typeof data.mock !== 'boolean')
+				|| (data.listen !== undefined && typeof data.listen !== 'boolean')
+				|| (data.mode !== undefined && !isListenMode(data.mode))) return invalid;
+			const centerHz = optionalHz(data.centerHz);
+			const vfoHz = optionalHz(data.vfoHz);
+			if (centerHz === null || vfoHz === null) return invalid;
+			const command: CommandOf<'console:start'> = { type, id, mock: data.mock === true, listen: data.listen === true };
+			if (data.mode !== undefined) command.mode = data.mode as ListenMode;
+			if (centerHz !== undefined) command.centerHz = centerHz;
+			if (vfoHz !== undefined) command.vfoHz = vfoHz;
+			return command;
+		}
+		case 'console:stop':
+			return { type, id };
+		case 'console:tune': {
+			const centerHz = optionalHz(data.centerHz);
+			const vfoHz = optionalHz(data.vfoHz);
+			if (centerHz === undefined || centerHz === null || vfoHz === null) return invalid;
+			return vfoHz === undefined ? { type, id, centerHz } : { type, id, centerHz, vfoHz };
+		}
+		case 'console:vfo': {
+			if (data.mode !== undefined && !isListenMode(data.mode)) return invalid;
+			const frequencyHz = optionalHz(data.frequencyHz);
+			if (frequencyHz === null) return invalid;
+			if (data.volume !== undefined && (typeof data.volume !== 'number' || !Number.isFinite(data.volume))) return invalid;
+			const command: CommandOf<'console:vfo'> = { type, id };
+			if (data.mode !== undefined) command.mode = data.mode as ListenMode;
+			if (frequencyHz !== undefined) command.frequencyHz = frequencyHz;
+			if (data.volume !== undefined) command.volume = data.volume as number;
+			return command;
+		}
+		case 'console:listen':
+			return typeof data.enabled === 'boolean' ? { type, id, enabled: data.enabled } : invalid;
+		default:
+			return null;
+	}
+}
+
+/**
+ * Crops a DC-centred FFT frame (index N/2 is the centre frequency) to spanHz
+ * around the centre and downsamples it with max-hold into a new Float32Array of
+ * at most `bins` values. stopHz is the exclusive upper edge; bin k covers
+ * [startHz + k*(stopHz-startHz)/binCount, + one step).
+ */
+export function cropSpectrum(
+	data: ArrayLike<number>,
+	centerHz: number,
+	sampleRateHz: number,
+	spanHz: number,
+	bins: number,
+): CroppedSpectrum | null {
+	const size = data.length;
+	if (!size || !Number.isFinite(centerHz) || !Number.isFinite(sampleRateHz) || sampleRateHz <= 0
+		|| !Number.isFinite(spanHz) || spanHz <= 0 || !Number.isFinite(bins) || bins < 1) return null;
+	const binHz = sampleRateHz / size;
+	const half = Math.min(spanHz, sampleRateHz) / 2;
+	const first = Math.max(0, Math.floor(size / 2 - half / binHz));
+	const end = Math.min(size, Math.ceil(size / 2 + half / binHz));
+	if (end <= first) return null;
+	const count = Math.min(Math.floor(bins), end - first);
+	const output = new Float32Array(count);
+	const factor = (end - first) / count;
+	for (let k = 0; k < count; k++) {
+		const from = first + Math.floor(k * factor);
+		const to = Math.max(from + 1, first + Math.floor((k + 1) * factor));
+		let peak = -Infinity;
+		for (let index = from; index < to; index++) {
+			const value = data[index];
+			if (Number.isFinite(value) && value > peak) peak = value;
+		}
+		output[k] = peak === -Infinity ? SPECTRUM_FLOOR_DB : peak;
+	}
+	const lowEdgeHz = centerHz - sampleRateHz / 2;
+	return {
+		startHz: Math.round(lowEdgeHz + first * binHz),
+		stopHz: Math.round(lowEdgeHz + end * binHz),
+		bins: output,
+	};
+}
+
+/**
+ * Passes at most `fps` frames per second on average, timed by the caller's
+ * clock (performance.now()). After a gap the next frame passes at once.
+ */
+export function createFrameThrottle(initialFps: number = SUBSCRIBE_LIMITS.fpsDefault) {
+	let intervalMs = 1000 / initialFps;
+	let nextDueMs = -Infinity;
+	return {
+		setFps(fps: number): void {
+			intervalMs = 1000 / fps;
+			nextDueMs = -Infinity;
+		},
+		accept(nowMs: number): boolean {
+			if (nowMs < nextDueMs) return false;
+			// Keep the average rate when frames arrive slightly late; restart the
+			// schedule after a pause instead of sending a burst.
+			nextDueMs = nowMs - nextDueMs > intervalMs ? nowMs + intervalMs : nextDueMs + intervalMs;
+			return true;
+		},
+	};
+}
