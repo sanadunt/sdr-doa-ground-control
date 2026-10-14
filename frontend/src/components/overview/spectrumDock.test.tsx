@@ -98,8 +98,11 @@ describe('Spectrum dock header', () => {
   it('follows the node by default and keeps the Receiver shortcut', () => {
     const markup = dock(bridgeWith({ attach: false }));
     expect(markup).toMatch(/<input type="checkbox" checked=""\/><span>Ikuti frekuensi node<\/span>/);
-    expect(markup).toMatch(/aria-keyshortcuts="7"[^>]*title="Buka halaman Receiver \(tombol 7\)"/);
+    expect(markup).toMatch(/<button class="ov-button ov-spec-open" type="button" aria-keyshortcuts="7" aria-label="Buka Receiver penuh">/);
     expect(markup).toContain('<kbd aria-hidden="true">7</kbd>');
+    // Labels only: no explanatory tooltips on the follow switch, the trace or the Receiver link.
+    expect(markup).toContain('<label class="ov-spec-follow"><input');
+    expect(markup).not.toMatch(/class="ov-spec-trace[^"]*"[^>]*title=/);
   });
 });
 
@@ -107,7 +110,7 @@ describe('Spectrum dock states', () => {
   it('shows RX OFF and the stopped text before the frame is mounted', () => {
     const markup = dock(bridgeWith({ attach: false }));
     expect(chip(markup)).toBe('RX OFF');
-    expect(markup).toContain('RX berhenti. Tekan Mulai untuk menyalakan RadioSpectrum.');
+    expect(markup).toContain('<div class="ov-spec-overlay"><span>RX berhenti</span></div>');
     // The axis follows the node until the first frame.
     expect(markup).toContain('Tengah 416.588 MHz · span 2.0 MHz · LNA — dB · VGA — dB');
     expect(markup).toContain('<span>415.588</span>');
@@ -137,8 +140,8 @@ describe('Spectrum dock states', () => {
     expect(chip(markup)).toBe('RX');
     expect(markup).toContain('Tengah 433.920 MHz · span 2.0 MHz · LNA 24 dB · VGA 20 dB');
     expect(markup).toContain('>Berhenti<');
-    expect(markup).not.toContain('RX berhenti.');
-    expect(markup).toMatch(/aria-pressed="false" title="Putar audio VFO di browser ini"/);
+    expect(markup).not.toContain('RX berhenti');
+    expect(markup).toMatch(/<button class="ov-button ov-spec-listen" type="button" aria-pressed="false">/);
     expect(markup).toContain('aria-valuetext="433.925 MHz"');
   });
 
@@ -149,7 +152,7 @@ describe('Spectrum dock states', () => {
 
   it('offers Dengar again while the browser holds the audio back', () => {
     const markup = dock(bridgeWith({ status: status({ audio: 'suspended', vfo: { index: 0, enabled: true, mode: 'nfm', frequencyHz: 433_925_000, bandwidthHz: 12_500 } }) }));
-    expect(markup).toMatch(/aria-pressed="true" title="Putar audio VFO di browser ini"/);
+    expect(markup).toMatch(/<button class="ov-button ov-spec-listen" type="button" aria-pressed="true">/);
   });
 
   it('shows the mode the receiver demodulates; the stored preference only until the frame answers', () => {
@@ -164,40 +167,40 @@ describe('Spectrum dock states', () => {
   });
 
   it('marks a VFO audio recording armed on the Receiver page with REC', () => {
-    expect(dock(bridgeWith({ status: status({ recording: true }) }))).toContain('<span class="ov-tag tone-bad" title="Rekaman audio VFO yang dinyalakan di halaman Receiver sedang berjalan.">REC</span>');
+    expect(dock(bridgeWith({ status: status({ recording: true }) }))).toContain('<span class="ov-tag tone-bad">REC</span>');
     expect(dock(bridgeWith({ status: status() }))).not.toContain('>REC<');
   });
 
   it('shows the MOCK tag for the Mock SDR and UPCONVERTER for a frequency shift', () => {
     const markup = dock(bridgeWith({ status: status({ mock: true, deviceName: 'Mock SDR', frequencyShiftHz: 125_000_000 }) }));
-    expect(markup).toContain('>MOCK</span>');
+    expect(markup).toContain('<span class="ov-tag tone-warn">MOCK</span>');
     expect(markup).not.toContain('RadioSpectrum · WebUSB');
-    expect(markup).toContain('>UPCONVERTER</span>');
+    expect(markup).toContain('<span class="ov-tag tone-info" title="Geser frekuensi 125.000 MHz">UPCONVERTER</span>');
   });
 
   it('shows BUSY with the way to the Receiver page during a scan', () => {
     const markup = dock(bridgeWith({ status: status({ busy: 'scan-listen' }) }));
     expect(chip(markup)).toBe('BUSY');
-    expect(markup).toContain('Pindai lebar atau dengar-pindai sedang berjalan');
+    expect(markup).toContain('Pindai berjalan di halaman Receiver');
     expect(markup).toContain('Buka Receiver (7)');
   });
 
   it('explains a lost RadioSpectrum', () => {
     const markup = dock(bridgeWith({ status: status({ running: false, connected: false, error: { code: 'USB_LOST' } }) }), { lang: 'en' });
     expect(chip(markup)).toBe('RX OFF');
-    expect(markup).toContain('RadioSpectrum was disconnected.');
+    expect(markup).toContain('RadioSpectrum disconnected');
   });
 
   it('enables Kirim ke RDF-SDR only for frequencies RDF-SDR accepts', () => {
     const inRange = dock(bridgeWith({ status: status() }));
-    expect(inRange).toMatch(/<button class="ov-button ov-spec-send" type="button" title="Buka Kontrol dengan draf tengah RX 433.920 MHz dan VFO 433.925 MHz/);
+    expect(inRange).toContain('<button class="ov-button ov-spec-send" type="button" title="RX 433.920 MHz · VFO 433.925 MHz">');
     const outOfRange = dock(bridgeWith({ status: status({ centerHz: 2_400_000_000, vfo: null }) }));
-    expect(outOfRange).toMatch(/<button class="ov-button ov-spec-send" type="button" disabled="" title="RDF-SDR menerima 24 s\/d 1800 MHz/);
+    expect(outOfRange).toContain('<button class="ov-button ov-spec-send" type="button" disabled="" title="RDF-SDR menerima 24 s/d 1800 MHz">');
   });
 
   it('holds when there is no fresh node frequency to follow', () => {
     const markup = dock(bridgeWith({ attach: false }), { snapshot: null });
-    expect(markup).toContain('Frekuensi node belum segar; penalaan saat ini dipertahankan.');
+    expect(markup).toContain('<span class="ov-spec-message tone-neutral">Frekuensi node belum segar</span>');
   });
 
   it('renders without a bridge from App', () => {

@@ -372,7 +372,7 @@ export function SpectrumCanvas({ bridge, running, fallbackView, vfo, info, notic
         <span className="ov-spec-peak" ref={peakRef} />
       </div>
       {notice ? <div className="ov-spec-notice" role="status">{notice}</div> : null}
-      <div className={`ov-spec-trace${running ? '' : ' is-stopped'}`} {...pointerHandlers} title={t('spectrum.clickHint')}>
+      <div className={`ov-spec-trace${running ? '' : ' is-stopped'}`} {...pointerHandlers}>
         <canvas
           ref={traceRef}
           className="ov-spec-canvas"

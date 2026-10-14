@@ -72,8 +72,7 @@ describe('Kontrol locked', () => {
     );
     expect(markup).toContain('id="panel-control"');
     expect(markup).toContain('>LOCKED</span>');
-    expect(markup).toContain('Perubahan dikirim ke RDF-SDR sebagai <span class="ov-mono">cmd/config/patch</span>.');
-    expect(markup).toContain('Memeriksa sesi admin…');
+    expect(markup).toMatch(/<div class="ov-control-body"><p class="ov-control-note" role="status">Memeriksa sesi admin…<\/p><\/div>/);
     expect(markup).not.toContain('type="password"');
   });
 
@@ -83,7 +82,7 @@ describe('Kontrol locked', () => {
     expect(markup).toContain('Kata sandi admin');
     expect(markup).toContain('type="password"');
     expect(markup).toMatch(/type="password"[^>]*autoComplete="current-password"/);
-    expect(markup).toContain('Kata sandi admin bawaan masih dipakai.');
+    expect(markup).toContain('<p class="ov-control-warn" role="note">Kata sandi admin bawaan dipakai. Atur SDR_DOA_ADMIN_PASSWORD.</p>');
     // The password itself never appears in the page.
     expect(markup).not.toContain('123456');
     expect(markup).not.toContain('Kirim ke RDF-SDR');
@@ -92,7 +91,7 @@ describe('Kontrol locked', () => {
   it('disables the form when admin login is off', () => {
     const capabilities = { ...CAPABILITIES, adminEnabled: false, adminDefaultPassword: false };
     const markup = view({ admin: 'locked', capabilities });
-    expect(markup).toContain('Login admin nonaktif di console ini');
+    expect(markup).toContain('Login admin nonaktif: SDR_DOA_ADMIN_PASSWORD kosong.');
     expect(markup).toMatch(/<input id="[^"]*" type="password"[^>]*disabled=""/);
     expect(markup).toMatch(/<button class="ov-button is-primary" type="submit" disabled="">Buka kunci<\/button>/);
   });
@@ -112,7 +111,9 @@ describe('Kontrol unlocked', () => {
     for (const label of ['Frekuensi tengah', 'Gain', 'Frekuensi VFO', 'Bandwidth VFO', 'Squelch VFO']) expect(markup).toContain(`>${label}</label>`);
     expect(markup).toContain('value="416.588"');
     expect(markup).toContain('tidak dilaporkan');
-    expect(markup).toContain('24 s/d 1800 MHz');
+    // A field that is reported and unchanged has no line under it; the range shows only with an error.
+    expect(markup).not.toContain('24 s/d 1800 MHz');
+    expect(markup).toMatch(/<input id="ov-control-center_frequency_hz" type="text" inputMode="decimal" autoComplete="off" spellCheck="false" value="416.588"\/><span>MHz<\/span><\/div><\/div>/);
     // Nothing changed yet, so review is disabled.
     expect(markup).toMatch(/<button class="ov-button is-primary is-wide" type="button" disabled="">Tinjau perubahan<\/button>/);
   });
@@ -141,14 +142,14 @@ describe('Kontrol review and send', () => {
   const evaluation = evaluate({ center_frequency_hz: '433.92', vfo_frequency_hz: '433.925' });
   const review = { changes: evaluation.changes, rev: 42, rows: reviewRows(t, evaluation.fields) };
 
-  it('lists from and to, QoS, expiry, base revision and the --enable-config note', () => {
+  it('lists from and to, QoS, expiry and base revision', () => {
     const markup = view({ stage: 'review', review, evaluation });
     expect(markup).toContain('2 perubahan akan dikirim');
     expect(markup).toContain('Frekuensi tengah <span class="ov-mono ov-control-key">center_frequency_hz</span>');
     expect(markup).toContain('416.588 MHz → <b>433.920 MHz</b>');
     expect(markup).toContain('tidak dilaporkan → <b>433.925 MHz</b>');
     expect(markup).toContain('QoS 1 · kedaluwarsa 60 dtk · rev dasar 42');
-    expect(markup).toContain('<span class="ov-mono">--enable-config</span>');
+    expect(markup).not.toContain('--enable-config');
     expect(markup).toMatch(/<button class="ov-button is-send is-wide" type="button"><svg[\s\S]*?<span>Kirim ke RDF-SDR<\/span><\/button>/);
     expect(markup).toContain('>Kembali</button>');
   });
@@ -159,7 +160,7 @@ describe('Kontrol review and send', () => {
     expect(view({ stage: 'review', review: { ...review, rev: null }, evaluation })).toContain('Kirim butuh revisi konfigurasi yang dilaporkan lewat MQTT.');
     const noPublish = { ...CAPABILITIES, configPatch: CAPABILITIES.configPatch ? { ...CAPABILITIES.configPatch, enabled: false } : null };
     const blocked = view({ stage: 'review', review, evaluation, capabilities: noPublish });
-    expect(blocked).toContain('Console ini tidak bisa publish patch konfigurasi');
+    expect(blocked).toContain('Patch konfigurasi tidak tersedia: monitor MQTT mati atau paho-mqtt belum terpasang.');
     expect(blocked).toMatch(/is-send is-wide" type="button" disabled=""/);
   });
 

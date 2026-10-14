@@ -428,15 +428,15 @@ export function SpectrumDock({
       <div className="ov-dock-head ov-spec-head">
         <h2 id="ov-spectrum-title">{t('spectrum.title')}</h2>
         {mock
-          ? <span className="ov-tag tone-warn" title={t('spectrum.mockTitle')}>MOCK</span>
+          ? <span className="ov-tag tone-warn">MOCK</span>
           : <span className="ov-spec-source">{t('spectrum.sourceHackrf')}</span>}
         {shiftHz !== 0 ? <span className="ov-tag tone-info" title={t('spectrum.upconverterTitle', { shift: formatMhz(shiftHz, 3) })}>UPCONVERTER</span> : null}
-        {live?.recording ? <span className="ov-tag tone-bad" title={t('spectrum.recordingTitle')}>REC</span> : null}
+        {live?.recording ? <span className="ov-tag tone-bad">REC</span> : null}
         <span className={`ov-chip tone-${view.tone}`}>{view.chip}</span>
         <span className="ov-spacer" />
         {/* Follow, mode and Dengar wrap as one group, as do Mulai/Berhenti and the Receiver link. */}
         <div className="ov-spec-group">
-          <label className="ov-spec-follow" title={t('spectrum.followTitle')}>
+          <label className="ov-spec-follow">
             <input type="checkbox" checked={followNode} onChange={(event) => setFollowNode(event.target.checked)} />
             <span>{t('spectrum.follow')}</span>
           </label>
@@ -447,7 +447,7 @@ export function SpectrumDock({
             className="ov-button ov-spec-listen"
             type="button"
             aria-pressed={listening}
-            title={listening && !audioHeld ? t('spectrum.listenStop') : t('spectrum.listenTitle')}
+            title={listening && !audioHeld ? t('spectrum.listenStop') : undefined}
             disabled={view.controlsDisabled}
             onClick={toggleListen}
           >
@@ -466,7 +466,7 @@ export function SpectrumDock({
           >
             <Icon name={running ? 'stop' : 'play'} /><span>{running ? t('spectrum.stop') : t('spectrum.start')}</span>
           </button>
-          <button className="ov-button ov-spec-open" type="button" aria-keyshortcuts="7" aria-label={t('spectrum.openReceiver')} title={t('spectrum.openReceiverTitle')} onClick={() => onNavigate('receiver')}>
+          <button className="ov-button ov-spec-open" type="button" aria-keyshortcuts="7" aria-label={t('spectrum.openReceiver')} onClick={() => onNavigate('receiver')}>
             <Icon name="external" /><span className="ov-spec-open-label">{t('spectrum.openReceiver')}</span><kbd aria-hidden="true">7</kbd>
           </button>
         </div>

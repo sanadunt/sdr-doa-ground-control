@@ -42,7 +42,6 @@ export function OverlayLegend({ settings, scale, saturation, ringStepM, halfPowe
         </div>
       ) : null}
       {saturated ? <span className="legend-warning" role="status">{t('map.scaleSaturated', { pct: Math.round(saturation * 100) })}</span> : null}
-      <small>{t('map.legendNote')}</small>
     </div>
   );
 }

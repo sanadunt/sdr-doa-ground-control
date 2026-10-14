@@ -2,7 +2,6 @@ import type { JSX } from 'react';
 import { DEFAULT_DOA_OVERLAY_SETTINGS } from '../../lib/doaGeometry';
 import type { DbScale, DoaOverlaySettings } from '../../lib/doaGeometry';
 import { OVERLAY_OPACITY_MIN } from '../../lib/mapOverlaySettings';
-import type { BasemapStatus } from '../../lib/map';
 import { useI18n } from '../../lib/i18n';
 import type { MessageKey } from '../../lib/i18n';
 import { OverlayControls } from '../OverlayControls';
@@ -24,21 +23,16 @@ const LAYERS: ReadonlyArray<[LayerKey, MessageKey]> = [
 export function LayersPanel({
   settings,
   scale,
-  basemap,
   onChange,
   onClose,
 }: {
   settings: DoaOverlaySettings;
   scale: DbScale;
-  basemap: BasemapStatus;
   onChange: (next: DoaOverlaySettings) => void;
   onClose: () => void;
 }): JSX.Element {
   const { t } = useI18n();
   const opacity = Math.round(settings.overlayOpacity * 100);
-  const scaleText = scale.mode === 'manual'
-    ? t('polarDock.dbManual')
-    : scale.known ? `${t('polarDock.dbAuto')} · ${Number(scale.minDb.toFixed(1))} … ${Number(scale.maxDb.toFixed(1))} dB` : t('polarDock.dbAuto');
   return (
     <section id="panel-layers" className="ov-layers ov-card" aria-labelledby="ov-layers-title">
       <div className="ov-card-head ov-card-head-rule">
@@ -66,10 +60,6 @@ export function LayersPanel({
             onChange={(event) => onChange({ ...settings, overlayOpacity: Number(event.target.value) / 100 })}
           />
         </label>
-        <div className="ov-layers-meta">
-          <span>{t('layers.dbScale', { mode: scaleText })}</span>
-          <span className={basemap.unavailable ? 'is-warn' : 'ov-mono'}>{basemap.unavailable ? t('map.basemapUnavailable') : t('layers.basemap', { host: basemap.host })}</span>
-        </div>
         <details className="ov-advanced">
           <summary>{t('layers.advanced')}</summary>
           <OverlayControls embedded settings={settings} scale={scale} onChange={onChange} onReset={() => onChange({ ...DEFAULT_DOA_OVERLAY_SETTINGS })} />

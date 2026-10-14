@@ -81,7 +81,8 @@ export function controlFailure(error: unknown): ControlFailure {
 
 type HintTone = 'neutral' | 'changed' | 'error';
 
-function fieldHint(t: Translate, evaluation: FieldEvaluation, ranges: ConfigPatchRanges | null): { text: string; tone: HintTone } {
+/** The line under a field: an input error, the reported value it changes, or "not reported"; nothing otherwise. */
+function fieldHint(t: Translate, evaluation: FieldEvaluation, ranges: ConfigPatchRanges | null): { text: string; tone: HintTone } | null {
   const range = t('control.range', rangeParts(evaluation.field, ranges));
   if (evaluation.problem === 'number') return { text: t('control.notNumber'), tone: 'error' };
   if (evaluation.problem === 'range') return { text: t('control.outOfRange', { range }), tone: 'error' };
@@ -91,7 +92,7 @@ function fieldHint(t: Translate, evaluation: FieldEvaluation, ranges: ConfigPatc
     return { text: t('control.changedFrom', { value: from }), tone: 'changed' };
   }
   if (evaluation.reported === null && evaluation.text.trim() === '') return { text: t('control.notReported'), tone: 'neutral' };
-  return { text: range, tone: 'neutral' };
+  return null;
 }
 
 /** Rows of the review box: label, contract key, reported value and new value. */
@@ -174,13 +175,8 @@ export function ControlPanelView({
 
   let body: ReactNode;
   if (!unlocked) {
-    body = (
-      <>
-        <p>{withSlots(t('control.intro'), { topic: PATCH_TOPIC_SUFFIX })}</p>
-        {admin === 'checking' ? <p className="ov-control-note" role="status">{t('control.checking')}</p> : (
-          <AdminUnlock disabled={capabilities?.adminEnabled === false} defaultPassword={defaultPassword} notice={adminNotice} onUnlocked={onUnlocked} />
-        )}
-      </>
+    body = admin === 'checking' ? <p className="ov-control-note" role="status">{t('control.checking')}</p> : (
+      <AdminUnlock disabled={capabilities?.adminEnabled === false} defaultPassword={defaultPassword} notice={adminNotice} onUnlocked={onUnlocked} />
     );
   } else {
     body = (
@@ -208,10 +204,11 @@ export function ControlPanelView({
               {evaluation.fields.map((entry) => {
                 const hint = fieldHint(t, entry, ranges);
                 const inputId = `ov-control-${entry.field.key}`;
+                const hintId = hint ? `${inputId}-hint` : undefined;
                 return (
                   <div className="ov-control-field" key={entry.field.key}>
                     <label htmlFor={inputId}>{t(entry.field.shortLabel)}</label>
-                    <div className={`ov-unit-input${hint.tone === 'error' ? ' is-error' : hint.tone === 'changed' ? ' is-changed' : ''}`}>
+                    <div className={`ov-unit-input${hint?.tone === 'error' ? ' is-error' : hint?.tone === 'changed' ? ' is-changed' : ''}`}>
                       <input
                         id={inputId}
                         type="text"
@@ -220,13 +217,13 @@ export function ControlPanelView({
                         spellCheck={false}
                         value={entry.text}
                         disabled={!reported}
-                        aria-invalid={hint.tone === 'error' ? true : undefined}
-                        aria-describedby={`${inputId}-hint`}
+                        aria-invalid={hint?.tone === 'error' ? true : undefined}
+                        aria-describedby={hintId}
                         onChange={(event) => onDraftChange(entry.field.key, event.target.value)}
                       />
                       <span>{entry.field.unit}</span>
                     </div>
-                    <small id={`${inputId}-hint`} className={`ov-control-hint is-${hint.tone}`}>{hint.text}</small>
+                    {hint ? <small id={hintId} className={`ov-control-hint is-${hint.tone}`}>{hint.text}</small> : null}
                   </div>
                 );
               })}
@@ -251,7 +248,6 @@ export function ControlPanelView({
               ))}
               <span className="ov-control-review-meta">{t('control.reviewMeta', { qos, ttl: ttlS, rev: review.rev ?? t('control.revUnknown') })}</span>
             </div>
-            <p className="ov-control-small">{withSlots(t('control.reviewNote'), { flag: '--enable-config', topic: ACK_TOPIC_SUFFIX })}</p>
             {/* An unavailable publish path is already named above the form. */}
             {reviewBlocked && !patchUnavailable ? <p className="ov-control-warn">{t(reviewBlocked)}</p> : null}
             <div className="ov-control-actions">

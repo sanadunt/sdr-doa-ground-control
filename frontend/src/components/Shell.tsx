@@ -150,8 +150,6 @@ export function ConsoleShell({
   const mqttState = mqttError ? 'ERROR' : (mqttConnection ?? 'OFF').toUpperCase();
   const mqttTone: Tone = mqttState === 'CONNECTED' ? 'good' : mqttState === 'OFF' || mqttState === 'DISABLED' ? 'neutral' : 'warn';
   const mqttTitle = mqttError ? t('app.mqttReadFailed', { error: mqttError }) : undefined;
-  // Every chip explains what it reports; a current cause follows on the next line.
-  const withHelp = (help: MessageKey, detail?: string) => (detail ? `${t(help)}\n${detail}` : t(help));
   const readLabel = loading ? t('shell.reading') : lastReadAgeMs === null ? t('shell.noRead') : t('shell.lastRead', { age: formatElapsed(t, lastReadAgeMs) });
   const overview = route === 'overview';
 
@@ -253,7 +251,6 @@ export function ConsoleShell({
         <nav aria-label={t('shell.primaryNav')} className="primary-nav">
           {ROUTES.map((item, index) => {
             const label = t(`route.${item.id}` as MessageKey);
-            const hint = t(`route.${item.id}.hint` as MessageKey);
             return (
               <button
                 className={`nav-item ${route === item.id ? 'nav-active' : ''}`}
@@ -261,7 +258,6 @@ export function ConsoleShell({
                 type="button"
                 aria-current={route === item.id ? 'page' : undefined}
                 aria-keyshortcuts={String(index + 1)}
-                title={hint}
                 onClick={() => navigate(item.id)}
               >
                 <Icon name={item.icon} />
@@ -275,8 +271,7 @@ export function ConsoleShell({
           <button className="page-menu-theme" type="button" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} aria-label={themeLabel} title={themeLabel}>
             <Icon name={theme === 'dark' ? 'sun' : 'moon'} /><span>{t('shell.theme')}</span>
           </button>
-          <div className="local-chip" title={t('shell.readOnlyDetail')}><Icon name="lock" /><span>{t('shell.readOnly')}</span></div>
-          <p className="shortcut-hint">{t('shell.shortcutHint')}</p>
+          <div className="local-chip"><Icon name="lock" /><span>{t('shell.readOnly')}</span></div>
         </div>
       </div>
       <div className="console-main">
@@ -294,12 +289,12 @@ export function ConsoleShell({
             </div>
           ) : null}
           <div className="telemetry-strip" role="group" aria-label={t('shell.runtimeStatus')}>
-            <TelemetryItem label={t('status.data')} value={dataState} tone={dataTone} title={withHelp('status.dataHelp', dataTitle)} />
-            <TelemetryItem label={t('status.doa')} value={doa.code} tone={doa.tone} title={withHelp('status.doaHelp', doaTitle)} />
-            <TelemetryItem label={t('status.delivery')} value={gate} tone={gate === 'READY' ? 'good' : 'warn'} title={withHelp('status.deliveryHelp', gateReason ? `${gateReason} · ${gateReasonLabel(lang, gateReason)}` : undefined)} />
-            <TelemetryItem label={t('status.snapshot')} value={snapshotState} tone={snapshotTone} title={withHelp('status.snapshotHelp', readError ? t('shell.snapshotError', { error: readError }) : undefined)} live />
-            <TelemetryItem label={t('status.mqtt')} value={mqttState} tone={mqttTone} title={withHelp('status.mqttHelp', mqttTitle)} />
-            <TelemetryItem label={t('status.sim')} value={simulationEnabled ? 'ON' : 'OFF'} tone={simulationEnabled ? 'warn' : 'neutral'} title={t('status.simHelp')} />
+            <TelemetryItem label={t('status.data')} value={dataState} tone={dataTone} title={dataTitle} />
+            <TelemetryItem label={t('status.doa')} value={doa.code} tone={doa.tone} title={doaTitle} />
+            <TelemetryItem label={t('status.delivery')} value={gate} tone={gate === 'READY' ? 'good' : 'warn'} title={gateReason ? `${gateReason} · ${gateReasonLabel(lang, gateReason)}` : undefined} />
+            <TelemetryItem label={t('status.snapshot')} value={snapshotState} tone={snapshotTone} title={readError ? t('shell.snapshotError', { error: readError }) : undefined} live />
+            <TelemetryItem label={t('status.mqtt')} value={mqttState} tone={mqttTone} title={mqttTitle} />
+            <TelemetryItem label={t('status.sim')} value={simulationEnabled ? 'ON' : 'OFF'} tone={simulationEnabled ? 'warn' : 'neutral'} />
           </div>
           <span className="topbar-spacer" aria-hidden="true" />
           {toolbar ? <div className="topbar-toolbar">{toolbar}</div> : null}

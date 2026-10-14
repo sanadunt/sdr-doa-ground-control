@@ -59,9 +59,7 @@ export function DoaReadout({
   const ageStale = !simulation && ageMs !== null && (!localSnapshotFresh || status.code === 'STALE');
   const ageValue = simulation ? 'SIM' : ageMs !== null ? t('common.durationS', { value: (ageMs / 1000).toFixed(1) }) : '—';
   const age = ageStale ? `${ageValue} · STALE` : ageValue;
-  const ageTitle = simulation
-    ? t('readout.simulationAge')
-    : snapshot && ageMs === null && csv.available === true ? t('readout.clockUnverified') : undefined;
+  const ageTitle = !simulation && snapshot && ageMs === null && csv.available === true ? t('readout.clockUnverified') : undefined;
   const frameDetail = bearing !== null && view.canonicalAngle !== null
     ? t(offsetVerified ? 'readout.bearingDetail' : 'readout.bearingDetailAssumed', {
       theta: formatDegrees(view.canonicalAngle, 1),
@@ -79,7 +77,7 @@ export function DoaReadout({
         {simulation ? <span className="ov-tag tone-warn">{t('readout.simulation')}</span> : null}
         <span className={ageStale ? 'ov-hud-age is-warn' : 'ov-hud-age'} title={ageTitle}>{t('hud.age', { age })}</span>
       </div>
-      <div className="ov-hud-bearing" title={`${t('readout.bearingTitle', { source: offsetSource })}${frameDetail === null ? '' : `\n${frameDetail}`}`}>
+      <div className="ov-hud-bearing" title={frameDetail ?? undefined}>
         {bearing !== null ? <>{formatDegrees(bearing, 1)}<small>°</small></> : <span className="readout-empty">—</span>}
       </div>
       {status.shown ? (
@@ -94,7 +92,6 @@ export function DoaReadout({
           {status.code === 'DEGRADED' ? <p className="ov-hud-held">{statusText}</p> : null}
         </>
       ) : <p className="ov-hud-held" role="status">{statusText}</p>}
-      <div className="ov-hud-note">{t('hud.note')}</div>
     </section>
   );
 }

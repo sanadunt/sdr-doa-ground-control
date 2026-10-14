@@ -574,7 +574,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     const unavailable = t('map.popupUnavailable');
     // Popup text comes only from the static dictionary, internal enums, and formatted numbers.
     stationPopupRef.current?.setLngLat([stationCoordinate.longitude, stationCoordinate.latitude]).setHTML(
-      `<div class="station-popup-content"><strong>${t('map.stationTitle')}</strong><dl><dt>${t('map.popupSource')}</dt><dd>${stationCoordinate.source}${station.held ? ' · STALE' : ''}</dd><dt>${t('map.popupPosition')}</dt><dd>${stationCoordinate.latitude.toFixed(6)}°, ${stationCoordinate.longitude.toFixed(6)}°</dd><dt>${t('map.popupBearing')}</dt><dd>${bearing === null ? unavailable : `${formatBearing(bearing, 1)}°`}</dd><dt>${t('map.popupTheta')}</dt><dd>${theta === null ? unavailable : `${formatBearing(theta, 1)}°`}</dd><dt>${t('map.popupOffset')}</dt><dd>${Number(offset.toFixed(1))}°</dd><dt>${t('map.popupHalfPower')}</dt><dd>${geometry.halfPower ? `${geometry.halfPower.widthDeg}°` : unavailable}</dd><dt>${t('map.popupVector')}</dt><dd>${values ? t('map.popupBins') : unavailable}</dd></dl><small>${t('map.popupNote')}</small></div>`,
+      `<div class="station-popup-content"><strong>${t('map.stationTitle')}</strong><dl><dt>${t('map.popupSource')}</dt><dd>${stationCoordinate.source}${station.held ? ' · STALE' : ''}</dd><dt>${t('map.popupPosition')}</dt><dd>${stationCoordinate.latitude.toFixed(6)}°, ${stationCoordinate.longitude.toFixed(6)}°</dd><dt>${t('map.popupBearing')}</dt><dd>${bearing === null ? unavailable : `${formatBearing(bearing, 1)}°`}</dd><dt>${t('map.popupTheta')}</dt><dd>${theta === null ? unavailable : `${formatBearing(theta, 1)}°`}</dd><dt>${t('map.popupOffset')}</dt><dd>${Number(offset.toFixed(1))}°</dd><dt>${t('map.popupHalfPower')}</dt><dd>${geometry.halfPower ? `${geometry.halfPower.widthDeg}°` : unavailable}</dd><dt>${t('map.popupVector')}</dt><dd>${values ? t('map.popupBins') : unavailable}</dd></dl></div>`,
     );
     stationMarkerRef.current.setLngLat([stationCoordinate.longitude, stationCoordinate.latitude]);
   }, [styleReady, stationCoordinate, gpsSource, station.held, bearing, theta, offset, values, geometry.halfPower, t]);
@@ -618,7 +618,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       const { bearingDeg, distanceM } = bearingAndDistance(stationCoordinate, pending.lng, pending.lat);
       if (distanceM > radius || distanceM < 1) { popup.remove(); return; }
       const bin = Math.round(geographicBearingForBin(bearingDeg, offset)) % 360;
-      popup.setLngLat(pending).setHTML(`<strong>${t('map.hoverBearing', { deg: formatBearing(bearingDeg, 0), theta: bin, db: values[bin].toFixed(1) })}</strong><span>${t('map.hoverDistance', { distance: formatDistance(distanceM) })}</span><small>${t('map.hoverNote')}</small>`);
+      popup.setLngLat(pending).setHTML(`<strong>${t('map.hoverBearing', { deg: formatBearing(bearingDeg, 0), theta: bin, db: values[bin].toFixed(1) })}</strong><span>${t('map.hoverDistance', { distance: formatDistance(distanceM) })}</span>`);
       if (!popup.isOpen()) popup.addTo(map);
     };
     const onMove = (event: MapMouseEvent) => {
@@ -762,7 +762,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   if (mapState === 'gl-lost') notices.push(t('map.glLost'));
   if (mapState === 'worker-stalled') notices.push(t('map.workerStalled'));
   if (mapState === 'error') notices.push(t('map.rendererError'));
-  if (basemapUnavailable && mapState !== 'no-webgl') notices.push(`${t('map.basemapUnavailable')} · ${t('map.basemapUnavailableDetail')}`);
+  if (basemapUnavailable && mapState !== 'no-webgl') notices.push(t('map.basemapUnavailable'));
   if (stationCoordinate && !values) notices.push(held ? t('map.overlayHeld', { reason: doaHeldText }) : t('map.overlayCleared'));
   if (values && !orientationVerified) notices.push(t('map.orientationReference', { offset: Number(offset.toFixed(1)) }));
   // DOM labels fade with the overlay through this custom property.

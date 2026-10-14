@@ -3,8 +3,7 @@ import { Suspense, memo, useCallback, useEffect, useMemo, useRef, useState } fro
 import type { ConsoleCapabilities } from '../api';
 import type { CompassConfig, GpsConfig, MapCoordinate, PolarSettings, TelemetrySnapshot } from '../types';
 import type { SimulationSettings } from '../lib/simulation';
-import { OSM_TILE_TEMPLATES, gpsReportsNoFix, holdStationCoordinate, resolveGpsSource, tileHost } from '../lib/map';
-import type { BasemapStatus } from '../lib/map';
+import { gpsReportsNoFix, holdStationCoordinate, resolveGpsSource } from '../lib/map';
 import { doaStatusTextKey, overviewDoaStatus } from '../lib/doaStatus';
 import { lazyWithRetry } from '../lib/lazyRetry';
 import { compassOffsetSourceLabel, polarSettings, rememberDataOutCompass, resolveCompassSource } from '../lib/polar';
@@ -149,11 +148,6 @@ function OverviewPageView({
   const isSimulation = snapshot?.simulation === true;
   const overlayScale = useMemo(() => effectiveDbScale(overlayValues, overlaySettings, isSimulation), [overlayValues, overlaySettings, isSimulation]);
 
-  const [basemap, setBasemap] = useState<BasemapStatus>(() => ({ host: tileHost(OSM_TILE_TEMPLATES[0]), unavailable: false }));
-  const onBasemapChange = useCallback((next: BasemapStatus) => {
-    setBasemap((current) => (current.host === next.host && current.unavailable === next.unavailable ? current : next));
-  }, []);
-
   // The panels float over the map; their space becomes map padding so the
   // station is framed in the part of the map that stays visible.
   const mapRef = useRef<HTMLDivElement>(null);
@@ -206,14 +200,13 @@ function OverviewPageView({
               doaHeldText={doa.shown ? undefined : t(doaStatusTextKey(doa.reason))}
               overlaySettings={overlaySettings}
               insets={insets}
-              onBasemapChange={onBasemapChange}
             />
           </Suspense>
         </LoadErrorBoundary>
       </div>
       <div className="ov-left" ref={leftRef}>
         <DoaReadout snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} settings={plotSettings} offsetSource={offsetSource} offsetVerified={offsetVerified} offsetManual={offsetManual} />
-        {panels.layers ? <LayersPanel settings={overlaySettings} scale={overlayScale} basemap={basemap} onChange={onOverlayChange} onClose={() => onPanelsChange({ ...panels, layers: false })} /> : null}
+        {panels.layers ? <LayersPanel settings={overlaySettings} scale={overlayScale} onChange={onOverlayChange} onClose={() => onPanelsChange({ ...panels, layers: false })} /> : null}
       </div>
       <div className="ov-right" ref={rightRef}>
         <NodeCard

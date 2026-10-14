@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { ConsoleShell, formatElapsed, refreshSelectOptions } from './Shell';
-import { I18nContext, translate } from '../lib/i18n';
+import { I18nContext, gateReasonLabel, translate } from '../lib/i18n';
 import type { Lang } from '../lib/i18n';
 import type { TelemetrySnapshot } from '../types';
 
@@ -169,14 +169,14 @@ describe('status strip tooltips', () => {
     </I18nContext.Provider>,
   );
 
-  it.each(['en', 'id'] as const)('explains each of the six chips in %s', (lang) => {
+  it.each(['en', 'id'] as const)('names only a current cause, without help text, in %s', (lang) => {
     const items = [...render(lang).matchAll(/<span class="telemetry-item[^"]*"([^>]*)>/g)].map((match) => match[1]);
     expect(items).toHaveLength(6);
-    const help = ['status.dataHelp', 'status.doaHelp', 'status.deliveryHelp', 'status.snapshotHelp', 'status.mqttHelp', 'status.simHelp'] as const;
-    items.forEach((attributes, index) => {
-      const title = attributes.match(/title="([^"]*)"/)?.[1] ?? '';
-      expect(title.replace(/&#x27;/g, "'"), help[index]).toContain(translate(lang, help[index]));
-    });
+    const titles = items.map((attributes) => attributes.match(/title="([^"]*)"/)?.[1] ?? null);
+    // Data and Snapshot are healthy and MQTT and Sim have nothing to report; DoA and Delivery name their state.
+    expect(titles[0]).toBeNull();
+    expect(titles[2]).toBe(`GROUND_CLOCK_UNVERIFIED · ${gateReasonLabel(lang, 'GROUND_CLOCK_UNVERIFIED')}`.replace(/'/g, '&#x27;'));
+    expect(titles.slice(3)).toEqual([null, null, null]);
   });
 });
 
@@ -202,11 +202,15 @@ describe('top bar and page menu (dashboard shell)', () => {
     expect(toggle).toContain(`aria-label="${translate('en', 'shell.pageMenu')}"`);
   });
 
-  it('moves the theme toggle and the control note into the menu footer', () => {
-    const footer = render().match(/<div class="page-menu-footer">[\s\S]*?<\/p><\/div>/)?.[0] ?? '';
+  it('keeps the theme toggle and the control chip in the menu footer, without hint text', () => {
+    const markup = render();
+    const footer = markup.match(/<div class="page-menu-footer">[\s\S]*?<span>[^<]*<\/span><\/div><\/div>/)?.[0] ?? '';
     expect(footer).toContain('page-menu-theme');
     expect(footer).toContain(translate('en', 'shell.readOnly'));
-    expect(footer).toContain(translate('en', 'shell.shortcutHint'));
+    expect(footer).not.toMatch(/<p[\s>]/);
+    expect(markup).not.toContain('shortcut-hint');
+    // Menu items carry their label and key only.
+    for (const item of markup.match(/<button[^>]*class="nav-item[^"]*"[^>]*>/g) ?? []) expect(item).not.toContain('title=');
   });
 
   it('shows the route title and read age off Overview only', () => {

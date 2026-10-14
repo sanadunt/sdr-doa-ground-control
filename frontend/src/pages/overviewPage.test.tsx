@@ -67,14 +67,15 @@ describe('Overview dashboard', () => {
     </I18nContext.Provider>,
   );
 
-  it('floats the bearing HUD over the map with theta_0, the display peak and the note', () => {
+  it('floats the bearing HUD over the map with theta_0 and the display peak, without a note', () => {
     const markup = dashboard(snapshot(), {}, 'id');
     const hud = markup.match(/<section class="ov-hud[^"]*" aria-label="Pembacaan DoA">[\s\S]*?<\/section>/)?.[0] ?? '';
     expect(hud).toContain('Bearing dari utara');
     // Compass, offset 0: bearing = (360 - 211) mod 360.
     expect(hud).toContain('149.0<small>°</small>');
     expect(hud).toContain('211.0°');
-    expect(hud).toContain('Arah, bukan lokasi pemancar.');
+    expect(hud).not.toContain('ov-hud-note');
+    expect(hud).not.toContain('Arah, bukan lokasi pemancar.');
     expect(markup).toContain('class="ov-map"');
   });
 
@@ -142,6 +143,9 @@ describe('Overview dashboard', () => {
       expect(layers, label).toContain(label);
     }
     expect(layers).toContain('85 %');
+    // Switches and the opacity only; no dB scale or basemap info lines.
+    expect(layers).not.toContain('ov-layers-meta');
+    expect(layers).not.toContain('OSM');
   });
 
   it('puts the polar mode switch and the settings toggle in the polar header', () => {
@@ -163,13 +167,13 @@ describe('Overview dashboard', () => {
   it('renders the spectrum dock and a locked Kontrol', () => {
     const markup = dashboard(snapshot(), { panels: { layers: false, polar: false, spectrum: true, control: true, nodeCollapsed: true } }, 'id');
     expect(markup).toContain('Spektrum');
-    expect(markup).toMatch(/aria-keyshortcuts="7"[^>]*title="Buka halaman Receiver \(tombol 7\)"/);
+    expect(markup).toMatch(/aria-keyshortcuts="7" aria-label="Buka Receiver penuh"/);
     expect(markup).toContain('Ikuti frekuensi node');
     expect(markup).toContain('>Kirim ke RDF-SDR<');
     expect(markup).toContain('class="ov-spec-canvas"');
     expect(markup).toContain('Kontrol MQTT');
     expect(markup).toContain('LOCKED');
-    expect(markup).toContain('<span class="ov-mono">cmd/config/patch</span>');
+    expect(markup).toContain('Memeriksa sesi admin…');
     // Nothing in the dock mounts or names the Receiver frame.
     expect(markup).not.toContain('receiver-frame');
   });
