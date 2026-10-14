@@ -53,6 +53,37 @@ const DEFAULT_BRANDING: Branding = { app_name: 'SDR-DoA Ground Console', logo_da
 const DEFAULT_LOCAL_EXPIRY_MS = 5_000;
 /** Backoff between attempts to read the local console configuration. */
 export const CONFIG_RETRY_DELAYS_MS: readonly number[] = [1_000, 2_000, 4_000, 8_000, 15_000];
+/**
+ * Read now and, after a failure, again with the capped configuration backoff
+ * until a read succeeds. Returns a stop function that cancels the pending
+ * retry and aborts a read in flight. /api/capabilities goes through this so a
+ * single failed request does not drop the default-password warning (and the
+ * server ranges) for the life of the page.
+ */
+export function readWithRetry<T>(read: (signal: AbortSignal) => Promise<T>, onValue: (value: T) => void, delays: readonly number[] = CONFIG_RETRY_DELAYS_MS): () => void {
+  let stopped = false;
+  let attempt = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let controller: AbortController | null = null;
+  const run = () => {
+    timer = undefined;
+    const current = new AbortController();
+    controller = current;
+    read(current.signal).then((value) => {
+      if (!stopped) onValue(value);
+    }).catch(() => {
+      if (stopped) return;
+      timer = setTimeout(run, delays[Math.min(attempt, delays.length - 1)]);
+      attempt += 1;
+    });
+  };
+  run();
+  return () => {
+    stopped = true;
+    if (timer !== undefined) clearTimeout(timer);
+    controller?.abort();
+  };
+}
 /** Shortest pause between the end of one Data Out read and the next automatic one. */
 const MIN_POLL_GAP_MS = 500;
 /** A read in flight longer than this is shown as "Reading…". */
@@ -596,15 +627,14 @@ export default function App(): ReactElement {
     if (mountedRef.current) setBranding(next);
   }, []);
 
-  // Capabilities are read once the configuration is known; a failed read keeps
-  // the built-in interval list and leaves Kontrol without server ranges.
+  // Capabilities are read once the configuration is known, and retried until
+  // they arrive. Until then the built-in interval list applies and Kontrol has
+  // no server ranges or default-password flag.
   useEffect(() => {
     if (!configLoaded) return undefined;
-    const controller = new AbortController();
-    getCapabilities(controller.signal).then((next) => {
-      if (mountedRef.current && !controller.signal.aborted) setCapabilities(next);
-    }).catch(() => undefined);
-    return () => controller.abort();
+    return readWithRetry(getCapabilities, (next) => {
+      if (mountedRef.current) setCapabilities(next);
+    });
   }, [configLoaded]);
 
   // The top-bar interval select saves through the same verified path as the
