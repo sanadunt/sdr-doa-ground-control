@@ -153,6 +153,37 @@ def test_valid_parsing_but_authority_blocked():
     assert "secret_token" not in json.dumps(result)
 
 
+def test_vfo_settings_are_kept_only_as_finite_numbers():
+    """Kontrol checks a sent VFO patch against these Data Out values."""
+    body = json.dumps({
+        "center_freq": 433.92,
+        "uniform_gain": 15.7,
+        "vfo_freq_0": 433_920_000,
+        "vfo_bw_0": 12_500.0,
+        "vfo_squelch_0": -80,
+        "vfo_demod_0": "FM",
+    }).encode()
+    fields = collector.parse_settings(resource(collector.PATH_SETTINGS, body))["fields"]
+    assert fields["vfo_freq_0"] == 433_920_000
+    assert fields["vfo_bw_0"] == 12_500.0
+    assert fields["vfo_squelch_0"] == -80
+    assert "vfo_demod_0" not in fields
+
+    bad = b'{"vfo_freq_0": "433920000", "vfo_bw_0": true, "vfo_squelch_0": NaN, "uniform_gain": "15.7"}'
+    fields = collector.parse_settings(resource(collector.PATH_SETTINGS, bad))["fields"]
+    assert "vfo_freq_0" not in fields
+    assert "vfo_bw_0" not in fields
+    assert "vfo_squelch_0" not in fields
+    # The older fields keep their scalar rule.
+    assert fields["uniform_gain"] == "15.7"
+
+    fixture = json.loads((Path(__file__).resolve().parent / "fixtures" / "valid" / "settings.json").read_text())
+    fields = collector.parse_settings(resource(collector.PATH_SETTINGS, json.dumps(fixture).encode()))["fields"]
+    assert fields["vfo_freq_0"] == fixture["vfo_freq_0"]
+    assert fields["vfo_bw_0"] == fixture["vfo_bw_0"]
+    assert fields["vfo_squelch_0"] == fixture["vfo_squelch_0"]
+
+
 def test_unhealthy_daq_blocks():
     result = fake_collection(make_status(100_000, daq_ok=False), make_csv(), make_xml())
     assert result["status"]["daq_health"] == "FAIL"
