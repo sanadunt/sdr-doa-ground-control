@@ -674,6 +674,49 @@ class ConfigPatchServerTests(unittest.TestCase):
         status, _headers, body = self.login()
         self.assertEqual((status, body["authenticated"]), (200, True))
 
+    def test_cross_origin_logins_never_reach_the_throttle(self) -> None:
+        port = self.server.server_address[1]
+        for origin in (None, "https://evil.example", f"http://127.0.0.1:{port + 1}", f"http://localhost:{port}"):
+            for _ in range(ground_console.ADMIN_LOGIN_MAX_FAILURES + 1):
+                status, headers, body = self.request("POST", "/api/admin/login", {"password": "x"}, origin=origin)
+                self.assertEqual((status, body["code"], body["ok"]), (403, "ORIGIN_REJECTED", False), origin)
+                self.assertNotIn("Set-Cookie", headers)
+            # The right password from a foreign origin is refused too.
+            status, headers, body = self.request("POST", "/api/admin/login", {"password": PASSWORD}, origin=origin)
+            self.assertEqual((status, body["code"]), (403, "ORIGIN_REJECTED"), origin)
+            self.assertNotIn("Set-Cookie", headers)
+        status, _headers, body = self.login()
+        self.assertEqual((status, body["authenticated"]), (200, True))
+
+    def test_cross_origin_logout_keeps_the_session(self) -> None:
+        cookie = self.admin_cookie()
+        status, headers, body = self.request(
+            "POST", "/api/admin/logout", {}, origin="https://evil.example", cookie=cookie,
+        )
+        self.assertEqual((status, body["code"]), (403, "ORIGIN_REJECTED"))
+        self.assertNotIn("Set-Cookie", headers)
+        _status, _headers, admin = self.request("GET", "/api/admin/status", origin=None, cookie=cookie)
+        self.assertIs(admin["authenticated"], True)
+        status, _headers, _body = self.request("POST", "/api/admin/logout", {}, cookie=cookie)
+        self.assertEqual(status, 200)
+        _status, _headers, admin = self.request("GET", "/api/admin/status", origin=None, cookie=cookie)
+        self.assertIs(admin["authenticated"], False)
+
+    def test_cross_origin_posts_cannot_retarget_the_publish_monitor(self) -> None:
+        config_path = self.root / "console.json"
+        saved = config_path.read_bytes() if config_path.exists() else None
+        config = self.server.get_config()
+        for path, body in (
+            ("/api/console-config", {"mqtt_host": "203.0.113.9", "mqtt_port": 1883, "mqtt_transport": "tcp"}),
+            ("/api/mqtt/connect?host=203.0.113.9&port=1883&transport=tcp", None),
+        ):
+            for origin in (None, "https://evil.example"):
+                status, _headers, response = self.request("POST", path, body, origin=origin)
+                self.assertEqual((status, response["code"], response["read_only"]), (403, "ORIGIN_REJECTED", True))
+        self.assertIs(self.server.mqtt_monitor, self.monitor)
+        self.assertEqual(self.server.get_config(), config)
+        self.assertEqual(config_path.read_bytes() if config_path.exists() else None, saved)
+
     def test_non_ascii_password_is_a_wrong_password_not_a_dropped_connection(self) -> None:
         for raw in (
             json.dumps({"password": "kata-sandi-é"}).encode("utf-8"),

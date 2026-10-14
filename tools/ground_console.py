@@ -223,8 +223,19 @@ if not ADMIN_PASSWORD:
     ADMIN_PASSWORD = None
 ADMIN_SESSION_COOKIE = "sdr_doa_admin"
 ADMIN_SESSION_TTL_SECONDS = 30 * 60
+# State-changing POSTs that need a same-origin loopback Origin before their
+# body is read. Login and logout are here so a cross-site page cannot feed the
+# failed-login throttle; console-config and mqtt/connect replace the MQTT
+# monitor, which is also the config-patch publish channel.
+SAME_ORIGIN_POST_PATHS = frozenset({
+    "/api/admin/login",
+    "/api/admin/logout",
+    "/api/console-config",
+    "/api/mqtt/connect",
+})
 # Failed logins are counted for the whole server: after this many inside the
-# window, every login is refused for the lockout period.
+# window, every login is refused for the lockout period. Only same-origin
+# requests reach the counter.
 ADMIN_LOGIN_MAX_FAILURES = 5
 ADMIN_LOGIN_FAILURE_WINDOW_S = 60.0
 ADMIN_LOGIN_LOCKOUT_S = 30.0
@@ -2018,8 +2029,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             and target_port == expected_port
         )
 
-    # Receiver mutations and the config-patch publish share this port-exact,
-    # same-origin loopback rule.
+    # Receiver mutations, the config-patch publish and SAME_ORIGIN_POST_PATHS
+    # share this port-exact, same-origin loopback rule.
     _same_origin_loopback_request = _receiver_mutation_origin_is_valid
 
     def _send_config_patch_error(self, status: int, code: str, message: str, **extra: Any) -> None:
@@ -2533,6 +2544,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "Receiver mutation requires a same-origin loopback request"}, HTTPStatus.FORBIDDEN)
             return
         if parsed.path.startswith("/api/receiver/") and self._receiver_post(parsed):
+            return
+        if parsed.path in SAME_ORIGIN_POST_PATHS and not self._same_origin_loopback_request():
+            # Rejected before the body is read, the login throttle or any
+            # config or monitor change.
+            extra = {"read_only": True} if parsed.path in {"/api/console-config", "/api/mqtt/connect"} else {}
+            self._send_config_patch_error(
+                HTTPStatus.FORBIDDEN,
+                "ORIGIN_REJECTED",
+                f"{parsed.path} requires a same-origin loopback request",
+                **extra,
+            )
             return
         if parsed.path == "/api/console-config":
             try:

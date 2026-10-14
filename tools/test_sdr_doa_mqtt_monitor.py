@@ -860,7 +860,7 @@ class GroundConsoleMqttApplyTests(unittest.TestCase):
             self.server.mqtt_monitor.stop()
         self.server.server_close()
 
-    def request(self, method: str, path: str, body: object = None) -> tuple[int, dict]:
+    def request(self, method: str, path: str, body: object = None, origin: str | None = "same") -> tuple[int, dict]:
         if self._thread is None:
             self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
             self._thread.start()
@@ -868,6 +868,11 @@ class GroundConsoleMqttApplyTests(unittest.TestCase):
         try:
             data = None if body is None else json.dumps(body).encode("utf-8")
             headers = {} if data is None else {"Content-Type": "application/json"}
+            # Same-origin fetches from the console send Origin on POST.
+            if origin == "same":
+                headers["Origin"] = f"http://127.0.0.1:{self.server.server_address[1]}"
+            elif origin is not None:
+                headers["Origin"] = origin
             connection.request(method, path, body=data, headers=headers)
             response = connection.getresponse()
             return response.status, json.loads(response.read().decode("utf-8"))
@@ -923,6 +928,30 @@ class GroundConsoleMqttApplyTests(unittest.TestCase):
             self.assertEqual(status, 400, query)
             self.assertIn("error", body)
         self.assertEqual(len(self.monitors), count + 1)
+
+    def test_monitor_changing_posts_require_same_loopback_origin(self) -> None:
+        first = self.server.mqtt_monitor
+        count = len(self.monitors)
+        saved = self.config_path.read_bytes()
+        config = self.server.get_config()
+        port = self.server.server_address[1]
+        retarget = {"mqtt_host": "203.0.113.9", "mqtt_port": 1883, "mqtt_transport": "tcp"}
+        for origin in (None, "", "https://evil.example", f"http://127.0.0.1:{port + 1}", f"http://localhost:{port}", "null"):
+            for path, body in (
+                ("/api/console-config", retarget),
+                ("/api/mqtt/connect?host=203.0.113.9&port=1883&transport=tcp", None),
+            ):
+                with self.subTest(origin=origin, path=path):
+                    status, response = self.request("POST", path, body, origin=origin)
+                    self.assertEqual(status, 403)
+                    self.assertEqual(
+                        (response["ok"], response["code"], response["read_only"]), (False, "ORIGIN_REJECTED", True),
+                    )
+        self.assertIs(self.server.mqtt_monitor, first)
+        self.assertFalse(first.stopped)
+        self.assertEqual(len(self.monitors), count)
+        self.assertEqual(self.server.get_config(), config)
+        self.assertEqual(self.config_path.read_bytes(), saved)
 
     def test_config_contract_validates_transport_and_ws_path(self) -> None:
         config = ground_console._default_console_config()
