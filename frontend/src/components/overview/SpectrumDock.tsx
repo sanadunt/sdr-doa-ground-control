@@ -7,7 +7,7 @@ import type { ConfigPatchChanges } from '../../lib/controlDraft';
 import { consoleRequestsMockSdr, createReceiverBridge } from '../../lib/receiverBridge';
 import type { BridgeResult, ReceiverBridge } from '../../lib/receiverBridge';
 import { SUBSCRIBE_LIMITS, isListenMode } from '../../lib/receiverBridgeProtocol';
-import type { BridgeCommand, ListenMode } from '../../lib/receiverBridgeProtocol';
+import type { BridgeCommand, ListenMode, ReceiverStatus } from '../../lib/receiverBridgeProtocol';
 import { nodeFrequencies } from '../../lib/nodeFrequency';
 import type { NodeFrequencies } from '../../lib/nodeFrequency';
 import { LISTEN_MODE_OPTIONS, loadFollowNode, loadListenMode, saveFollowNode, saveListenMode } from '../../lib/listenPrefs';
@@ -49,6 +49,13 @@ interface Notice {
   message?: string;
 }
 
+/** A mode the operator picked, shown until a receiver status newer than its result arrives. */
+interface ModePick {
+  mode: ListenMode;
+  /** The status current when the frame accepted the change; undefined while the change is on its way. */
+  settledOn?: ReceiverStatus | null;
+}
+
 /**
  * Spectrum section of the Overview dock. It drives the hidden, persistent
  * Receiver frame over the bridge: Mulai/Berhenti, Dengar with a mode,
@@ -76,12 +83,15 @@ export function SpectrumDock({
 
   const [followNode, setFollowNodeState] = useState<boolean>(() => loadFollowNode());
   const [mode, setModeState] = useState<ListenMode>(() => loadListenMode());
+  const [modePick, setModePick] = useState<ModePick | null>(null);
   const [starting, setStarting] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   // A click-to-tune frequency for the next Mulai, while the frame is not mounted.
   const [pendingHz, setPendingHz] = useState<number | null>(null);
   const [mockRequested, setMockRequested] = useState(false);
   const mountedRef = useRef(true);
+  // The mode the dock last asked the receiver for; read when a start settles.
+  const requestedModeRef = useRef<ListenMode>(mode);
 
   const fresh = nodeFrequencies(snapshot, localSnapshotFresh);
   const nodeCenter = fresh?.centerHz ?? null;
@@ -93,6 +103,10 @@ export function SpectrumDock({
   const listening = running && live?.vfo?.enabled === true;
   // The VFO is on but the browser has not let its audio play yet.
   const audioHeld = notice?.code === 'AUDIO_BLOCKED' || live?.audio === 'suspended';
+  // The select shows what the receiver demodulates (the Receiver page shares the VFO); the stored
+  // preference is for the next start. A fresh pick holds until the receiver reports on it.
+  const heldMode = modePick && (modePick.settledOn === undefined || modePick.settledOn === bridgeState.status) ? modePick.mode : null;
+  const shownMode: ListenMode = heldMode ?? live?.vfo?.mode ?? mode;
   // Mounted over a running receiver, the dock keeps its tuning (see followMemoryAtMount).
   const followRef = useRef<FollowMemory | null>(null);
   if (followRef.current === null) followRef.current = followMemoryAtMount(running, node);
@@ -167,7 +181,9 @@ export function SpectrumDock({
     onRequestReceiver();
     setStarting(true);
     setNotice(null);
-    const command: BridgeCommand = { type: 'console:start', mock: consoleRequestsMockSdr(window.location), listen, mode };
+    const startMode = shownMode;
+    requestedModeRef.current = startMode;
+    const command: BridgeCommand = { type: 'console:start', mock: consoleRequestsMockSdr(window.location), listen, mode: startMode };
     if (target) {
       command.centerHz = target.centerHz;
       command.vfoHz = target.vfoHz;
@@ -177,7 +193,12 @@ export function SpectrumDock({
       if (!mountedRef.current) return;
       setStarting(false);
       report(result);
-      if (result.ok) setPendingHz(null);
+      if (!result.ok) return;
+      setPendingHz(null);
+      // A mode picked while this start waited behind another Receiver task reached the
+      // frame first and was then replaced by the start's own mode: send it again.
+      const wanted = requestedModeRef.current;
+      if (wanted !== startMode) void bridge.send({ type: 'console:vfo', mode: wanted }).then(reportFailure);
     });
   };
 
@@ -202,7 +223,7 @@ export function SpectrumDock({
       return;
     }
     const frequencyHz = followNode && node ? node.vfoHz : liveVfo ?? undefined;
-    void bridge.send(frequencyHz === undefined ? { type: 'console:vfo', mode } : { type: 'console:vfo', mode, frequencyHz }).then(reportFailure);
+    void bridge.send(frequencyHz === undefined ? { type: 'console:vfo', mode: shownMode } : { type: 'console:vfo', mode: shownMode, frequencyHz }).then(reportFailure);
     void bridge.send({ type: 'console:listen', enabled: true }).then(report);
   };
 
@@ -211,7 +232,17 @@ export function SpectrumDock({
     if (!isListenMode(next)) return;
     setModeState(next);
     saveListenMode(next);
-    if (phase === 'ready') void bridge.send({ type: 'console:vfo', mode: next }).then(reportFailure);
+    requestedModeRef.current = next;
+    // Without a frame the next start carries the mode.
+    if (phase === 'idle' && !starting) return;
+    // Before the frame's hello the bridge queues it behind a waiting start.
+    setModePick({ mode: next });
+    void bridge.send({ type: 'console:vfo', mode: next }).then((result) => {
+      if (!mountedRef.current) return;
+      // A refused change shows the receiver's mode again.
+      setModePick((current) => (current?.mode !== next || current.settledOn !== undefined ? current : result.ok ? { mode: next, settledOn: bridge.getState().status } : null));
+      reportFailure(result);
+    });
   };
 
   // Click-to-tune sets the RX centre and the listen VFO and stops following the node.
@@ -310,7 +341,7 @@ export function SpectrumDock({
           <input type="checkbox" checked={followNode} onChange={(event) => setFollowNode(event.target.checked)} />
           <span>{t('spectrum.follow')}</span>
         </label>
-        <select className="ov-listen-mode" aria-label={t('spectrum.mode')} title={t('spectrum.mode')} value={mode} onChange={changeMode}>
+        <select className="ov-listen-mode" aria-label={t('spectrum.mode')} title={t('spectrum.mode')} value={shownMode} onChange={changeMode}>
           {LISTEN_MODE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
         <button

@@ -144,6 +144,17 @@ describe('Spectrum dock states', () => {
     expect(markup).toMatch(/aria-pressed="true" title="Putar audio VFO di browser ini"/);
   });
 
+  it('shows the mode the receiver demodulates; the stored preference only until the frame answers', () => {
+    const select = (markup: string) => /<select class="ov-listen-mode"[\s\S]*?<\/select>/.exec(markup)?.[0] ?? '';
+    // AM was set on the Receiver page, which shares the VFO; the stored preference is NFM.
+    const live = select(dock(bridgeWith({ status: status({ vfo: { index: 0, enabled: true, mode: 'am', frequencyHz: 433_925_000, bandwidthHz: 10_000 } }) })));
+    expect(live).toMatch(/<option value="am" selected="">AM<\/option>/);
+    expect(live).not.toContain('selected="">NFM');
+    expect(select(dock(bridgeWith({ hello: false })))).toMatch(/<option value="nfm" selected="">NFM<\/option>/);
+    // A mode the console does not know falls back to the preference.
+    expect(select(dock(bridgeWith({ status: status({ vfo: { index: 0, enabled: false, mode: 'fm', frequencyHz: 433_925_000 } }) })))).toMatch(/<option value="nfm" selected="">NFM<\/option>/);
+  });
+
   it('shows the MOCK tag for the Mock SDR and UPCONVERTER for a frequency shift', () => {
     const markup = dock(bridgeWith({ status: status({ mock: true, deviceName: 'Mock SDR', frequencyShiftHz: 125_000_000 }) }));
     expect(markup).toContain('>MOCK</span>');
