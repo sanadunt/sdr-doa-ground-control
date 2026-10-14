@@ -20,6 +20,14 @@ describe('i18n dictionaries', () => {
     }
   });
 
+  it('never calls remote publishing disabled while Control has the admin-confirmed config patch', () => {
+    for (const lang of ['en', 'id'] as const) {
+      for (const key of ['health.sub.publishAdminOnly', 'monitor.subscribeOnly', 'config.mqttPublishDetail'] as const) {
+        expect(translate(lang, key), `${lang} ${key}`).not.toMatch(/disabled|nonaktif/i);
+      }
+    }
+  });
+
   it('labels the Receiver route and its purpose in both languages', () => {
     expect(translate('en', 'route.receiver' as keyof typeof DICTIONARIES.en)).toBe('Receiver');
     expect(translate('id', 'route.receiver' as keyof typeof DICTIONARIES.en)).toBe('Receiver');

@@ -1,5 +1,7 @@
 import type { JSX, ReactNode } from 'react';
 import type { Candidate, MqttSnapshot, TelemetrySnapshot, Tone } from '../types';
+import type { ConsoleCapabilities } from '../api';
+import { configPatchPublishable } from '../lib/configPatch';
 import { candidate, formatNumber, numberOrNull, syncCount, toneFor } from '../lib/telemetry';
 import { useI18n } from '../lib/i18n';
 import type { Translate } from '../lib/i18n';
@@ -127,7 +129,7 @@ function ResourcesPanel({ snapshot }: { snapshot: TelemetrySnapshot | null }): J
   );
 }
 
-export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapshotFresh }: { snapshot: TelemetrySnapshot | null; mqtt: MqttSnapshot | null; mqttError?: string | null; localSnapshotFresh: boolean }): JSX.Element {
+export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapshotFresh, capabilities = null }: { snapshot: TelemetrySnapshot | null; mqtt: MqttSnapshot | null; mqttError?: string | null; localSnapshotFresh: boolean; capabilities?: ConsoleCapabilities | null }): JSX.Element {
   const { t } = useI18n();
   const status = snapshot?.status;
   const daq = safeRecord(statusValue(status, 'daq_status'));
@@ -202,7 +204,7 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
           <Subsystem name={t('health.sub.progress')} state={progress?.state ?? 'N/A'} detail={progressDetail(t, progress)} />
           <Subsystem name={t('health.sub.doa')} state={doaState} detail={t('health.sub.doaDetail')} />
           <Subsystem name={t('health.sub.clock')} state="UNVERIFIED" detail={t('health.sub.clockDetail')} />
-          <Subsystem name={t('health.sub.mqtt')} state={connection} detail={mqtt?.publish_enabled === false ? t('health.sub.publishDisabled') : t('health.sub.noMonitor')} />
+          <Subsystem name={t('health.sub.mqtt')} state={connection} detail={mqtt?.publish_enabled === false ? t(configPatchPublishable(capabilities) ? 'health.sub.publishAdminOnly' : 'health.sub.publishUnavailable') : t('health.sub.noMonitor')} />
         </div>
       </Panel>
     </div>

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import type { ConsoleConfig, MqttSnapshot, MqttTarget, RdfNodeSnapshot, Tone } from '../types';
 import { connectMqtt, getMqtt, getRdfNodeMqtt } from '../api';
+import type { ConsoleCapabilities } from '../api';
+import { configPatchPublishable } from '../lib/configPatch';
 import { formatNumber, safeJson, toneFor } from '../lib/telemetry';
 import { formatDuration } from '../lib/healthView';
 import { errorNotice, noticeText } from '../lib/errorNotice';
@@ -26,6 +28,8 @@ type MessageMonitorPageProps = {
   /** Parent-owned actions give App a request-start token and abort controller. */
   onRefreshMqtt?: () => Promise<void>;
   onReconnectMqtt?: (target: MqttTarget) => Promise<void>;
+  /** Server capabilities; say whether Kontrol can send a config patch over this connection. */
+  capabilities?: ConsoleCapabilities | null;
 };
 
 function Titled({ title, children }: { title?: string; children: ReactNode }): ReactElement {
@@ -119,6 +123,7 @@ export function MessageMonitorPage({
   onMqttChanged,
   onRefreshMqtt,
   onReconnectMqtt,
+  capabilities = null,
 }: MessageMonitorPageProps): ReactElement {
   const { t, lang } = useI18n();
   const [busy, setBusy] = useState(false);
@@ -247,7 +252,7 @@ export function MessageMonitorPage({
     <div className="page message-monitor-page">
       <SectionHeading eyebrow={t('monitor.eyebrow')} title={t('monitor.title')} detail={t('monitor.detail')} />
       <Panel className="monitor-banner" eyebrow={t('monitor.transportEyebrow')} title={t('monitor.transportTitle')} action={<div className="form-actions compact"><button className="secondary-button" type="button" disabled={busy} onClick={refresh}>{t('monitor.refresh')}</button><button className="secondary-button" type="button" disabled={busy} onClick={reconnect} title={t('monitor.reconnectHint')}>{t('monitor.reconnect')}</button></div>}>
-        <div className="monitor-state"><StatusBadge label={connection} tone={connectionTone(connection)} />{mqtt?.enabled ? <span>{transport}</span> : null}<span>{mqtt?.read_only === false || mqtt?.publish_enabled === true ? t('monitor.unexpectedWrite') : t('monitor.readOnly')}</span><span role="status" className={mqttError ? 'status-text-bad' : undefined}>{statusText}</span></div>
+        <div className="monitor-state"><StatusBadge label={connection} tone={connectionTone(connection)} />{mqtt?.enabled ? <span>{transport}</span> : null}<span>{mqtt?.read_only === false || mqtt?.publish_enabled === true ? t('monitor.unexpectedWrite') : t(configPatchPublishable(capabilities) ? 'monitor.subscribeOnly' : 'monitor.subscribeOnlyNoPatch')}</span><span role="status" className={mqttError ? 'status-text-bad' : undefined}>{statusText}</span></div>
       </Panel>
       <div className="metric-grid monitor-metrics">
         <Metric label={t('monitor.received')} value={formatNumber(mqtt?.received, 0)} detail={cleared > 0 ? t('monitor.receivedClearedDetail', { count: cleared }) : t('monitor.receivedDetail')} tone="neutral" />

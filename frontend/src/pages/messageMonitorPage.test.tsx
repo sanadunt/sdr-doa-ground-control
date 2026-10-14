@@ -48,6 +48,13 @@ describe('MessageMonitorPage', () => {
   const markup = render(<MessageMonitorPage mqtt={SNAPSHOT} config={CONFIG} onMqttChanged={() => undefined} />);
   const body = text(markup);
 
+  it('says it only subscribes and that Control sends the config patch over this connection', () => {
+    expect(body).toContain(translate('en', 'monitor.subscribeOnly'));
+    expect(body).not.toContain('publish disabled');
+    const off = text(render(<MessageMonitorPage mqtt={SNAPSHOT} config={CONFIG} onMqttChanged={() => undefined} capabilities={{ refreshIntervalsS: null, adminEnabled: true, adminDefaultPassword: false, configPatch: { enabled: false, requiresAdmin: true, topic: null, qos: null, ttlMs: null, ranges: {} } }} />, 'id'));
+    expect(off).toContain(translate('id', 'monitor.subscribeOnlyNoPatch'));
+  });
+
   it('shows the count of each kind and its own age', () => {
     expect(body).toContain('doa 1 10 min STALE VALID');
     expect(body).toMatch(/health 600 \d+ ms VALID state: ONLINE doa_valid: false/);

@@ -5,6 +5,7 @@
  * The server re-checks the allowlist and ranges; the client copy only gives
  * early feedback.
  */
+import type { ConsoleCapabilities } from '../api';
 import type { MessageKey } from './i18n';
 import type { ConfigPatchChanges, ConfigPatchKey } from './controlDraft';
 import { parseTypedNumber } from './polarViewSettings';
@@ -290,4 +291,15 @@ export function commandResultView(status: CommandStatusLike, changeCount: number
     body: { key: 'control.result.failed' },
     reload: true,
   };
+}
+
+/**
+ * Whether Kontrol can publish the admin-confirmed config patch, by the same
+ * rule Kontrol applies: only an explicit `config_patch.enabled: false` (no
+ * MQTT monitor that can publish) turns the path off. The monitor itself never
+ * publishes on its own; pages that describe publishing use this so their copy
+ * matches what Kontrol will do.
+ */
+export function configPatchPublishable(capabilities: ConsoleCapabilities | null | undefined): boolean {
+  return capabilities?.configPatch?.enabled !== false;
 }

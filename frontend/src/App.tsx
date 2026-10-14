@@ -255,14 +255,14 @@ function PageForRoute({
   overview: OverviewDashboardProps;
 }): ReactElement {
   switch (route) {
-    case 'system-health': return <SystemHealthPage snapshot={snapshot} mqtt={mqtt} mqttError={mqttError} localSnapshotFresh={localFresh} />;
+    case 'system-health': return <SystemHealthPage snapshot={snapshot} mqtt={mqtt} mqttError={mqttError} localSnapshotFresh={localFresh} capabilities={overview.capabilities} />;
     case 'doa-diagnostics': return <DoADiagnosticsPage snapshot={snapshot} localSnapshotFresh={localFresh} />;
     // Until the real configuration has been read, the form would offer the
     // built-in defaults for saving over it.
     case 'configuration': return configLoaded
       ? <ConfigurationPage config={config} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={onGpsConfigChanged} onCompassConfigChanged={onCompassConfigChanged} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} />
       : <ConfigUnavailable error={configError} />;
-    case 'message-monitor': return <MessageMonitorPage mqtt={mqtt} mqttError={mqttError} config={config} onMqttChanged={onMqttChanged} onRefreshMqtt={onRefreshMqtt} onReconnectMqtt={onReconnectMqtt} />;
+    case 'message-monitor': return <MessageMonitorPage mqtt={mqtt} mqttError={mqttError} config={config} onMqttChanged={onMqttChanged} onRefreshMqtt={onRefreshMqtt} onReconnectMqtt={onReconnectMqtt} capabilities={overview.capabilities} />;
     case 'overview':
     default: return <OverviewPage snapshot={snapshot} localSnapshotFresh={localFresh} gpsConfig={gpsConfig} compassConfig={compassConfig} {...overview} />;
   }

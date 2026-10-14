@@ -1,7 +1,7 @@
 import type { ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import type { TelemetrySnapshot } from '../types';
+import type { MqttSnapshot, TelemetrySnapshot } from '../types';
 import { I18nContext, translate } from '../lib/i18n';
 import type { Lang } from '../lib/i18n';
 import { SystemHealthPage, overdriveSourceFile } from './SystemHealthPage';
@@ -76,6 +76,20 @@ describe('System Health ADC overdrive detail', () => {
 });
 
 describe('System Health MQTT card', () => {
+  it('says the monitor never publishes on its own and names the config patch path', () => {
+    const monitor = { enabled: true, read_only: true, publish_enabled: false, connection: 'connected' } as unknown as MqttSnapshot;
+    const patch = (enabled: boolean) => ({ refreshIntervalsS: null, adminEnabled: true, adminDefaultPassword: false, configPatch: { enabled, requiresAdmin: true, topic: null, qos: 1, ttlMs: null, ranges: {} } });
+    for (const lang of ['en', 'id'] as const) {
+      const available = text(render(<SystemHealthPage snapshot={REFUSED} mqtt={monitor} localSnapshotFresh={false} capabilities={patch(true)} />, lang));
+      expect(available).toContain(translate(lang, 'health.sub.publishAdminOnly'));
+      expect(available).not.toMatch(/Publish disabled|Publish nonaktif/);
+      const unknown = text(render(<SystemHealthPage snapshot={REFUSED} mqtt={monitor} localSnapshotFresh={false} />, lang));
+      expect(unknown).toContain(translate(lang, 'health.sub.publishAdminOnly'));
+      const off = text(render(<SystemHealthPage snapshot={REFUSED} mqtt={monitor} localSnapshotFresh={false} capabilities={patch(false)} />, lang));
+      expect(off).toContain(translate(lang, 'health.sub.publishUnavailable'));
+    }
+  });
+
   it('reports a failed /api/mqtt poll as ERROR instead of OFF', () => {
     const page = text(render(<SystemHealthPage snapshot={REFUSED} mqtt={null} mqttError="Console unreachable" localSnapshotFresh={false} />));
     expect(page).toContain('ERROR');

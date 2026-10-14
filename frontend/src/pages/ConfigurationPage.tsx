@@ -8,7 +8,7 @@ import { DEFAULT_COMPASS_CONFIG } from '../lib/polar';
 import { DEFAULT_CONSOLE_CONFIG } from '../lib/telemetry';
 import { adminErrorKey, gpsInputErrorKey, mergeSavedConfigIntoDraft, normalizeConnectionDraft, parseBaseRevision, parseDryRunChanges, refreshIntervalOptions, refreshWarningKey } from '../lib/configForm';
 import { MAX_LOGO_BYTES, pngDataUrl, pngLogoErrorKey, validatePngLogo } from '../lib/pngLogo';
-import { CONFIG_PATCH_FIELDS } from '../lib/configPatch';
+import { CONFIG_PATCH_FIELDS, configPatchPublishable } from '../lib/configPatch';
 import { DEFAULT_MQTT_TRANSPORT, DEFAULT_MQTT_WS_PATH, mqttTransportFields } from '../lib/mqttMonitor';
 import { MAX_COMPASS_OFFSET_DEG, saveCompassConfig, saveGpsConfig } from '../lib/sourceConfigStorage';
 import { errorNotice } from '../lib/errorNotice';
@@ -154,6 +154,8 @@ export function ConfigurationPage({
   const refreshOptions = useMemo(() => refreshIntervalOptions(capabilities?.refreshIntervalsS ?? null, config.refresh_seconds), [capabilities, config.refresh_seconds]);
   const refreshWarning = refreshWarningKey(Number(connection.refresh_seconds));
   const adminDisabled = capabilities?.adminEnabled === false && !adminAuthenticated;
+  const patchPublishable = configPatchPublishable(capabilities);
+  const publishValue = patchPublishable ? t('config.mqttPublishValue') : t('config.publishUnavailable');
 
   useEffect(() => {
     setGpsSource(gpsConfig.source);
@@ -433,7 +435,7 @@ export function ConfigurationPage({
           </form>
         </div>
       </Panel>
-      <div className="config-guard-row"><Metric label={t('config.remoteWrites')} value={t('config.disabled')} detail={t('config.remoteWritesDetail')} tone="good" /><Metric label={t('config.mqttPublish')} value={t('config.mqttPublishValue')} detail={t('config.mqttPublishDetail')} tone="warn" /><Metric label={t('config.secrets')} value={t('config.secretsValue')} detail={t('config.secretsDetail')} tone="good" /><KeyValue label={t('config.adminSession')} value={adminAuthenticated ? t('config.adminSessionActive') : t('config.adminSessionClosed')} detail={t('config.cookieDetail')} /></div>
+      <div className="config-guard-row"><Metric label={t('config.remoteWrites')} value={publishValue} detail={t(patchPublishable ? 'config.remoteWritesDetail' : 'config.remoteWritesNoneDetail')} tone={patchPublishable ? 'warn' : 'neutral'} /><Metric label={t('config.mqttPublish')} value={publishValue} detail={t(patchPublishable ? 'config.mqttPublishDetail' : 'config.mqttPublishNoneDetail')} tone={patchPublishable ? 'warn' : 'neutral'} /><Metric label={t('config.secrets')} value={t('config.secretsValue')} detail={t('config.secretsDetail')} tone="good" /><KeyValue label={t('config.adminSession')} value={adminAuthenticated ? t('config.adminSessionActive') : t('config.adminSessionClosed')} detail={t('config.cookieDetail')} /></div>
     </div>
   );
 }
