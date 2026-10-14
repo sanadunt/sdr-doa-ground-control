@@ -10,6 +10,7 @@ import {
   WATERFALL_ROWS,
   autoDbRange,
   binAt,
+  contentBoxX,
   dbToByte,
   formatDb,
   formatMhz,
@@ -300,9 +301,10 @@ export function SpectrumCanvas({ bridge, running, fallbackView, vfo, info, notic
     drawRef.current();
   }, [running, vfo?.frequencyHz, vfo?.bandwidthHz, fallbackView?.startHz, fallbackView?.stopHz]);
 
-  const pointerX = (event: ReactPointerEvent<HTMLElement>): { x: number; width: number } => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    return { x: event.clientX - rect.left, width: rect.width };
+  /** x across the canvas that was drawn: the trace canvas inside its bordered wrapper, or the waterfall inside its border. */
+  const pointerX = (event: ReactPointerEvent<HTMLElement>): { x: number; width: number } | null => {
+    const canvas = event.currentTarget === waterfallRef.current ? waterfallRef.current : traceRef.current;
+    return canvas ? contentBoxX(event.clientX, canvas) : null;
   };
 
   const onPointerDown = (event: ReactPointerEvent<HTMLElement>) => {
@@ -317,9 +319,9 @@ export function SpectrumCanvas({ bridge, running, fallbackView, vfo, info, notic
     if (!start || start.id !== event.pointerId) return;
     if (Math.hypot(event.clientX - start.x, event.clientY - start.y) >= CLICK_SLOP_PX) return;
     const axis = view();
-    if (!axis) return;
-    const { x, width } = pointerX(event);
-    const hz = freqAtX(x, axis.startHz, axis.stopHz, width);
+    const point = pointerX(event);
+    if (!axis || !point) return;
+    const hz = freqAtX(point.x, axis.startHz, axis.stopHz, point.width);
     if (hz !== null) onTune(snapHz(hz));
   };
 
@@ -331,12 +333,13 @@ export function SpectrumCanvas({ bridge, running, fallbackView, vfo, info, notic
       hover.hidden = true;
       return;
     }
-    const { x, width } = pointerX(event);
-    const hz = freqAtX(x, axis.startHz, axis.stopHz, width);
-    if (hz === null) {
+    const point = pointerX(event);
+    const hz = point ? freqAtX(point.x, axis.startHz, axis.stopHz, point.width) : null;
+    if (!point || hz === null) {
       hover.hidden = true;
       return;
     }
+    const { x, width } = point;
     const frame = frameRef.current;
     const db = frame ? binAt(frame.bins, frame.startHz, frame.stopHz, hz) : null;
     hover.textContent = props.current.t('spectrum.hover', { freq: formatMhz(hz, 3), db: formatDb(db, 1) });

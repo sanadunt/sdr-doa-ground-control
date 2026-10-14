@@ -39,6 +39,23 @@ export function snapHz(hz: number, step = TUNE_SNAP_HZ): number {
   return Math.round(hz / size) * size;
 }
 
+/** What contentBoxX needs from a canvas element. */
+export interface ContentBoxElement {
+  getBoundingClientRect(): { left: number };
+  clientLeft: number;
+  clientWidth: number;
+}
+
+/**
+ * x of a pointer inside an element's content box (inside its border) and that
+ * box's width: the area a canvas is drawn across. The border box would shift
+ * every tune by up to a pixel's worth of frequency.
+ */
+export function contentBoxX(clientX: number, element: ContentBoxElement): { x: number; width: number } {
+  const rect = element.getBoundingClientRect();
+  return { x: clientX - (rect.left + element.clientLeft), width: element.clientWidth };
+}
+
 function percentile(sorted: ArrayLike<number>, fraction: number): number {
   if (!sorted.length) return Number.NaN;
   const index = Math.min(sorted.length - 1, Math.max(0, Math.floor(fraction * (sorted.length - 1))));

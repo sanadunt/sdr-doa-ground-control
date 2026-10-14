@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   autoDbRange,
   binAt,
+  contentBoxX,
   dbToByte,
   formatDb,
   formatMhz,
@@ -54,6 +55,18 @@ describe('spectrum axis', () => {
     expect(ticks(STOP, START)).toEqual([]);
     expect(spanAround(433_920_000, 2_000_000)).toEqual({ startHz: START, stopHz: STOP });
     expect(spanAround(null, 2_000_000)).toBeNull();
+  });
+
+  it('measures a click across the drawn canvas, inside any border', () => {
+    // 1440 px layout: the trace wrapper (x 297, 1 px border) holds the trace canvas at x 298, 1129 px wide;
+    // the waterfall canvas has the same border itself.
+    const traceCanvas = { getBoundingClientRect: () => ({ left: 298 }), clientLeft: 0, clientWidth: 1129 };
+    const waterfall = { getBoundingClientRect: () => ({ left: 297 }), clientLeft: 1, clientWidth: 1129 };
+    expect(contentBoxX(308, traceCanvas)).toEqual({ x: 10, width: 1129 });
+    expect(contentBoxX(308, waterfall)).toEqual({ x: 10, width: 1129 });
+    // The frequency drawn 10 px into the canvas, not the one 11 px into the 1131 px border box.
+    const { x, width } = contentBoxX(308, waterfall);
+    expect(snapHz(freqAtX(x, START, STOP, width) as number)).toBe(432_938_000);
   });
 
   it('formats with a real minus sign', () => {
