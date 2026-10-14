@@ -8,12 +8,12 @@ import { consoleRequestsMockSdr, createReceiverBridge } from '../../lib/receiver
 import type { BridgeResult, ReceiverBridge } from '../../lib/receiverBridge';
 import { SUBSCRIBE_LIMITS, isListenMode } from '../../lib/receiverBridgeProtocol';
 import type { BridgeCommand, ListenMode } from '../../lib/receiverBridgeProtocol';
-import { nodeFrequencies, nodeFrequenciesChanged } from '../../lib/nodeFrequency';
+import { nodeFrequencies } from '../../lib/nodeFrequency';
 import type { NodeFrequencies } from '../../lib/nodeFrequency';
 import { LISTEN_MODE_OPTIONS, loadFollowNode, loadListenMode, saveFollowNode, saveListenMode } from '../../lib/listenPrefs';
 import { fieldFor, fieldRange, inFieldRange } from '../../lib/configPatch';
-import { formatMhz, spanAround, spectrumDockView } from '../../lib/spectrumView';
-import type { DockNotice } from '../../lib/spectrumView';
+import { followMemoryAtMount, followNodeStep, formatMhz, spanAround, spectrumDockView } from '../../lib/spectrumView';
+import type { DockNotice, FollowMemory } from '../../lib/spectrumView';
 import { useI18n } from '../../lib/i18n';
 import type { RouteName } from '../Shell';
 import { Icon } from '../ui';
@@ -42,7 +42,6 @@ export interface SpectrumDockProps {
 /** Codes a successful start makes obsolete. */
 const START_NOTICES: ReadonlySet<DockNotice> = new Set(['NO_WEBUSB', 'NEEDS_PAIRING', 'NEEDS_DEVICE_CHOICE', 'CONNECT_FAILED', 'MOCK_UNAVAILABLE', 'TIMEOUT', 'RX_NOT_RUNNING']);
 const SPAN_HZ = SUBSCRIBE_LIMITS.spanDefaultHz;
-const FOLLOW_TOLERANCE_HZ = 1_000;
 
 interface Notice {
   code: DockNotice;
@@ -83,8 +82,6 @@ export function SpectrumDock({
   const [pendingHz, setPendingHz] = useState<number | null>(null);
   const [mockRequested, setMockRequested] = useState(false);
   const mountedRef = useRef(true);
-  const lastFollowRef = useRef<NodeFrequencies | null>(null);
-  const wasRunningRef = useRef(false);
 
   const fresh = nodeFrequencies(snapshot, localSnapshotFresh);
   const nodeCenter = fresh?.centerHz ?? null;
@@ -96,6 +93,9 @@ export function SpectrumDock({
   const listening = running && live?.vfo?.enabled === true;
   // The VFO is on but the browser has not let its audio play yet.
   const audioHeld = notice?.code === 'AUDIO_BLOCKED' || live?.audio === 'suspended';
+  // Mounted over a running receiver, the dock keeps its tuning (see followMemoryAtMount).
+  const followRef = useRef<FollowMemory | null>(null);
+  if (followRef.current === null) followRef.current = followMemoryAtMount(running, node);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -140,25 +140,23 @@ export function SpectrumDock({
   const liveBusy = live?.busy ?? 'none';
   const liveKnown = live !== null;
   useEffect(() => {
-    const justStarted = running && !wasRunningRef.current;
-    wasRunningRef.current = running;
-    if (!followNode || !node || phase !== 'ready' || !liveKnown || liveBusy !== 'none' || starting) return;
-    const atTarget = liveCenter !== null && Math.abs(liveCenter - node.centerHz) <= FOLLOW_TOLERANCE_HZ
-      && (liveVfo === null || Math.abs(liveVfo - node.vfoHz) <= FOLLOW_TOLERANCE_HZ);
-    if (atTarget) {
-      lastFollowRef.current = node;
-      return;
-    }
-    if (!justStarted && !nodeFrequenciesChanged(lastFollowRef.current, node, FOLLOW_TOLERANCE_HZ)) return;
-    lastFollowRef.current = node;
-    void bridge.send({ type: 'console:tune', centerHz: node.centerHz, vfoHz: node.vfoHz }).then(reportFailure);
+    const step = followNodeStep(followRef.current ?? followMemoryAtMount(running, node), {
+      follow: followNode,
+      node,
+      running,
+      canTune: phase === 'ready' && liveKnown && liveBusy === 'none' && !starting,
+      liveCenterHz: liveCenter,
+      liveVfoHz: liveVfo,
+    });
+    followRef.current = step.memory;
+    if (step.tune) void bridge.send({ type: 'console:tune', centerHz: step.tune.centerHz, vfoHz: step.tune.vfoHz }).then(reportFailure);
   }, [followNode, node, phase, running, liveKnown, liveBusy, liveCenter, liveVfo, starting, bridge]);
 
   const setFollowNode = (next: boolean) => {
     setFollowNodeState(next);
     saveFollowNode(next);
     // Turning it on retunes to the node at once.
-    if (next) lastFollowRef.current = null;
+    if (next && followRef.current) followRef.current = { ...followRef.current, followed: null };
   };
 
   /** Where Mulai tunes: the node under follow-node, otherwise the last click while the frame was away. */
@@ -173,7 +171,7 @@ export function SpectrumDock({
     if (target) {
       command.centerHz = target.centerHz;
       command.vfoHz = target.vfoHz;
-      if (followNode && node) lastFollowRef.current = node;
+      if (followNode && node && followRef.current) followRef.current = { ...followRef.current, followed: node };
     }
     void bridge.send(command).then((result) => {
       if (!mountedRef.current) return;

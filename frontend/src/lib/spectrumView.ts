@@ -6,6 +6,8 @@
 import type { MessageKey } from './i18n';
 import type { BridgePhase, ReceiverBuild } from './receiverBridge';
 import type { ReceiverStatus, ResultCode, StatusErrorCode } from './receiverBridgeProtocol';
+import { nodeFrequenciesChanged } from './nodeFrequency';
+import type { NodeFrequencies } from './nodeFrequency';
 
 export const TUNE_SNAP_HZ = 1_000;
 export const KEY_STEP_HZ = 10_000;
@@ -171,6 +173,54 @@ export function paletteLut(stops: ReadonlyArray<readonly [number, string]>): Uin
     }
   }
   return lut;
+}
+
+/** Follow-node retunes only when the node or the receiver is further away than this. */
+export const FOLLOW_TOLERANCE_HZ = 1_000;
+
+/** What "Ikuti frekuensi node" remembers between runs. */
+export interface FollowMemory {
+  /** RX was running at the previous run; tells an RX start from a dock mounted over a running RX. */
+  wasRunning: boolean;
+  /** The node tuning last followed, or found already tuned. */
+  followed: NodeFrequencies | null;
+}
+
+/**
+ * Memory of a dock that has just mounted. Over a running receiver (a return
+ * to Overview after tuning by hand on the Receiver page) the current node
+ * counts as followed and the start as seen, so mounting alone never retunes:
+ * only a node change seen while mounted, an RX start or re-checking the box does.
+ */
+export function followMemoryAtMount(running: boolean, node: NodeFrequencies | null): FollowMemory {
+  return { wasRunning: running, followed: running ? node : null };
+}
+
+export interface FollowInput {
+  follow: boolean;
+  node: NodeFrequencies | null;
+  running: boolean;
+  /** The bridge is ready with a status, the Receiver is not busy and no start is waiting. */
+  canTune: boolean;
+  liveCenterHz: number | null;
+  liveVfoHz: number | null;
+}
+
+/**
+ * One run of follow-node: retune when the node moves by more than
+ * FOLLOW_TOLERANCE_HZ, and once when RX starts. Returns the next memory and
+ * the tuning to send, if any.
+ */
+export function followNodeStep(memory: FollowMemory, input: FollowInput): { memory: FollowMemory; tune: NodeFrequencies | null } {
+  const justStarted = input.running && !memory.wasRunning;
+  const next: FollowMemory = { wasRunning: input.running, followed: memory.followed };
+  const { node } = input;
+  if (!input.follow || !node || !input.canTune) return { memory: next, tune: null };
+  const atTarget = input.liveCenterHz !== null && Math.abs(input.liveCenterHz - node.centerHz) <= FOLLOW_TOLERANCE_HZ
+    && (input.liveVfoHz === null || Math.abs(input.liveVfoHz - node.vfoHz) <= FOLLOW_TOLERANCE_HZ);
+  if (atTarget) return { memory: { ...next, followed: node }, tune: null };
+  if (!justStarted && !nodeFrequenciesChanged(memory.followed, node, FOLLOW_TOLERANCE_HZ)) return { memory: next, tune: null };
+  return { memory: { ...next, followed: node }, tune: node };
 }
 
 export type DockTone = 'good' | 'warn' | 'bad' | 'neutral' | 'info';

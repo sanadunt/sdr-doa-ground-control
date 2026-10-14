@@ -4,6 +4,8 @@ import {
   binAt,
   contentBoxX,
   dbToByte,
+  followMemoryAtMount,
+  followNodeStep,
   formatDb,
   formatMhz,
   freqAtX,
@@ -16,7 +18,7 @@ import {
   ticks,
   xAtFreq,
 } from './spectrumView';
-import type { DockViewInput } from './spectrumView';
+import type { DockViewInput, FollowInput } from './spectrumView';
 import type { ReceiverStatus } from './receiverBridgeProtocol';
 import { DICTIONARIES } from './i18n';
 
@@ -110,6 +112,50 @@ describe('spectrum levels', () => {
     const lut = paletteLut([[0, '#000000'], [1, '#ff8000']]);
     expect(Array.from(lut.slice(0, 3))).toEqual([0, 0, 0]);
     expect(Array.from(lut.slice(255 * 3, 256 * 3))).toEqual([255, 128, 0]);
+  });
+});
+
+describe('follow node frequency', () => {
+  const NODE = { centerHz: 433_920_000, vfoHz: 433_925_000 };
+  const step = (memory: ReturnType<typeof followMemoryAtMount>, overrides: Partial<FollowInput> = {}) => followNodeStep(memory, {
+    follow: true, node: NODE, running: true, canTune: true, liveCenterHz: 145_500_000, liveVfoHz: 145_500_000, ...overrides,
+  });
+
+  it('keeps a manual tuning when the dock mounts over a running receiver', () => {
+    // Back on Overview after tuning 145.500 MHz on the Receiver page: no retune.
+    const mounted = step(followMemoryAtMount(true, NODE));
+    expect(mounted.tune).toBeNull();
+    // A node change seen while mounted still retunes.
+    const moved = { centerHz: 434_920_000, vfoHz: 434_925_000 };
+    expect(step(mounted.memory, { node: moved }).tune).toEqual(moved);
+  });
+
+  it('tunes once when RX starts, then only when the node moves by more than 1 kHz', () => {
+    // No frame yet: nothing to tune.
+    const idle = step(followMemoryAtMount(false, NODE), { running: false, canTune: false });
+    expect(idle.tune).toBeNull();
+    const started = step(idle.memory);
+    expect(started.tune).toEqual(NODE);
+    expect(step(started.memory).tune).toBeNull();
+    expect(step(started.memory, { node: { centerHz: NODE.centerHz + 900, vfoHz: NODE.vfoHz } }).tune).toBeNull();
+    expect(step(started.memory, { node: { centerHz: NODE.centerHz + 1_500, vfoHz: NODE.vfoHz } }).tune).toEqual({ centerHz: NODE.centerHz + 1_500, vfoHz: NODE.vfoHz });
+  });
+
+  it('remembers a receiver already on the node, and holds while it cannot tune', () => {
+    const atNode = step(followMemoryAtMount(false, null), { liveCenterHz: NODE.centerHz, liveVfoHz: NODE.vfoHz + 500 });
+    expect(atNode).toEqual({ memory: { wasRunning: true, followed: NODE }, tune: null });
+    for (const overrides of [{ follow: false }, { node: null }, { canTune: false }]) {
+      const held = step(followMemoryAtMount(false, null), overrides);
+      expect(held.tune, JSON.stringify(overrides)).toBeNull();
+      // The start was seen, so it does not retune later on its own.
+      expect(held.memory.wasRunning).toBe(true);
+    }
+  });
+
+  it('retunes after the box is checked again', () => {
+    const followed = step(followMemoryAtMount(true, NODE));
+    expect(followed.tune).toBeNull();
+    expect(step({ ...followed.memory, followed: null }).tune).toEqual(NODE);
   });
 });
 
