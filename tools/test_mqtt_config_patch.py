@@ -10,6 +10,7 @@ real MqttMonitor through the fake paho client of test_sdr_doa_mqtt_monitor.
 
 from __future__ import annotations
 
+import gc
 import http.client
 import json
 import os
@@ -20,6 +21,7 @@ import threading
 import time
 import types
 import unittest
+import weakref
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 from unittest.mock import patch
@@ -601,19 +603,50 @@ class ConfigPatchServerTests(unittest.TestCase):
         rejected = self.status_of(sent["command_id"])
         self.assertEqual((rejected["state"], rejected["puback_reason"]), ("publish_failed", 135))
 
+    def replace_monitor(self) -> Tuple[FakeMonitor, "weakref.ReferenceType[FakeMonitor]"]:
+        """Swap in a new monitor and drop the test's own reference to the old one."""
+        retired = weakref.ref(self.monitor)
+        replacement = FakeMonitor()
+        self.server.mqtt_monitor = replacement
+        del self.monitor
+        gc.collect()
+        return replacement, retired
+
     def test_monitor_restart_keeps_tracking_the_command(self) -> None:
         cookie = self.admin_cookie()
         _status, sent = self.send_patch(self.patch_body(), cookie=cookie)
         command_id = sent["command_id"]
         self.monitor.puback(command_id, 0)
-        replacement = FakeMonitor()
-        self.server.mqtt_monitor = replacement
+        replacement, retired = self.replace_monitor()
+        # Only the tracker holds the stopped publisher now, as in production.
+        self.assertIsNotNone(retired())
         restarted = self.status_of(command_id)
         self.assertIs(restarted["monitor_restarted"], True)
         self.assertEqual((restarted["state"], restarted["puback_reason"]), ("delivered", 0))
         replacement.ack(command_id, "applied", config_rev=43)
         acked = self.status_of(command_id)
         self.assertEqual((acked["state"], acked["monitor_restarted"]), ("acked", True))
+        # A final command no longer keeps the stopped monitor alive.
+        gc.collect()
+        self.assertIsNone(retired())
+        self.assertEqual(self.status_of(command_id)["state"], "acked")
+
+    def test_final_ack_seen_only_by_the_retired_monitor_is_kept(self) -> None:
+        cookie = self.admin_cookie()
+        _status, sent = self.send_patch(self.patch_body(), cookie=cookie)
+        command_id = sent["command_id"]
+        # The ACK reaches the old monitor, which is replaced before any poll.
+        self.monitor.puback(command_id, 0)
+        self.monitor.ack(command_id, "applied", config_rev=43)
+        _replacement, retired = self.replace_monitor()
+        acked = self.status_of(command_id)
+        self.assertEqual(
+            (acked["state"], acked["final"], acked["puback_reason"], acked["ack"]["config_rev"]),
+            ("acked", True, 0, 43),
+        )
+        self.assertEqual(self.status_of(command_id)["state"], "acked")
+        gc.collect()
+        self.assertIsNone(retired())
 
     def test_status_routes_validate_the_id(self) -> None:
         _status, _headers, latest = self.request("GET", "/api/mqtt/config-patch")
