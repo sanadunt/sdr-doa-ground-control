@@ -1,5 +1,5 @@
 import type { ChangeEvent, JSX, ReactNode } from 'react';
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { ConsoleCapabilities } from '../../api';
 import type { TelemetrySnapshot } from '../../types';
 import type { OverviewPanels } from '../../lib/overviewPanels';
@@ -44,6 +44,10 @@ const START_NOTICES: ReadonlySet<DockNotice> = new Set(['NO_WEBUSB', 'NEEDS_PAIR
 const SPAN_HZ = SUBSCRIBE_LIMITS.spanDefaultHz;
 /** How long the Receiver's own notice (its snackbar is hidden here) stays in the dock after a stop. */
 const FRAME_NOTICE_MS = 6_000;
+/** Waterfall height kept when the dock grows to fit the rest of the spectrum. */
+const WATERFALL_MIN_PX = 48;
+/** Set on .ov-stage; --ov-dock-h is at least this tall. */
+const DOCK_NEED_PROPERTY = '--ov-spec-need-h';
 
 interface Notice {
   code: DockNotice;
@@ -56,6 +60,26 @@ interface ModePick {
   mode: ListenMode;
   /** The status current when the frame accepted the change; undefined while the change is on its way. */
   settledOn?: ReceiverStatus | null;
+}
+
+/**
+ * Height the spectrum section needs: its header, then the body's padding,
+ * gaps and rows with the waterfall at WATERFALL_MIN_PX, plus the dock border.
+ */
+function spectrumNeedPx(section: HTMLElement): number | null {
+  const head = section.querySelector<HTMLElement>('.ov-spec-head');
+  const body = section.querySelector<HTMLElement>('.ov-spec-body');
+  if (!head || !body) return null;
+  const style = getComputedStyle(body);
+  const px = (value: string) => Number.parseFloat(value) || 0;
+  const rows = Array.from(body.children) as HTMLElement[];
+  let need = head.getBoundingClientRect().height + px(style.paddingTop) + px(style.paddingBottom) + px(style.rowGap) * Math.max(0, rows.length - 1);
+  for (const row of rows) {
+    need += row.classList.contains('ov-spec-waterfall') ? WATERFALL_MIN_PX + row.offsetHeight - row.clientHeight : row.getBoundingClientRect().height;
+  }
+  const dock = section.parentElement;
+  if (dock) need += dock.offsetHeight - dock.clientHeight;
+  return Math.ceil(need);
 }
 
 /**
@@ -97,6 +121,8 @@ export function SpectrumDock({
   const frameNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The mode the dock last asked the receiver for; read when a start settles.
   const requestedModeRef = useRef<ListenMode>(mode);
+  const sectionRef = useRef<HTMLElement>(null);
+  const fitDockRef = useRef<() => void>(() => undefined);
 
   const fresh = nodeFrequencies(snapshot, localSnapshotFresh);
   const nodeCenter = fresh?.centerHz ?? null;
@@ -125,6 +151,42 @@ export function SpectrumDock({
       frameNoticeTimer.current = null;
     };
   }, []);
+
+  // The dock grows to fit the spectrum instead of clipping its axis and waterfall: a header that
+  // wraps (narrow widths, Polar "Atur" open), a notice line or a two-row info line. --ov-dock-h
+  // on .ov-stage reads the height set here; it applies only while the dock floats over the map.
+  useLayoutEffect(() => {
+    const section = sectionRef.current;
+    const stage = section?.closest<HTMLElement>('.ov-stage') ?? null;
+    if (!section || !stage) return undefined;
+    let last = '';
+    let frame = 0;
+    const fit = () => {
+      const need = spectrumNeedPx(section);
+      const value = need === null ? '' : `${need}px`;
+      if (value === last) return;
+      last = value;
+      if (value) stage.style.setProperty(DOCK_NEED_PROPERTY, value);
+      else stage.style.removeProperty(DOCK_NEED_PROPERTY);
+    };
+    fitDockRef.current = fit;
+    fit();
+    // Width changes and late font loads re-wrap the header; the new height is set on the next frame.
+    const observer = typeof ResizeObserver === 'function'
+      ? new ResizeObserver(() => { if (!frame) frame = window.requestAnimationFrame(() => { frame = 0; fit(); }); })
+      : null;
+    for (const element of [section, section.querySelector('.ov-spec-head'), section.querySelector('.ov-spec-info')]) {
+      if (element) observer?.observe(element);
+    }
+    return () => {
+      observer?.disconnect();
+      window.cancelAnimationFrame(frame);
+      fitDockRef.current = () => undefined;
+      stage.style.removeProperty(DOCK_NEED_PROPERTY);
+    };
+  }, []);
+  // A notice line or a new chip can change the height without a resize of the observed elements.
+  useLayoutEffect(() => { fitDockRef.current(); });
 
   useEffect(() => { bridge.probeBuild(); }, [bridge]);
 
@@ -362,7 +424,7 @@ export function SpectrumDock({
   const shiftHz = live?.frequencyShiftHz ?? 0;
 
   return (
-    <section id="panel-spectrum" className="ov-spectrum" aria-labelledby="ov-spectrum-title">
+    <section id="panel-spectrum" className="ov-spectrum" aria-labelledby="ov-spectrum-title" ref={sectionRef}>
       <div className="ov-dock-head ov-spec-head">
         <h2 id="ov-spectrum-title">{t('spectrum.title')}</h2>
         {mock
@@ -372,37 +434,42 @@ export function SpectrumDock({
         {live?.recording ? <span className="ov-tag tone-bad" title={t('spectrum.recordingTitle')}>REC</span> : null}
         <span className={`ov-chip tone-${view.tone}`}>{view.chip}</span>
         <span className="ov-spacer" />
-        <label className="ov-spec-follow" title={t('spectrum.followTitle')}>
-          <input type="checkbox" checked={followNode} onChange={(event) => setFollowNode(event.target.checked)} />
-          <span>{t('spectrum.follow')}</span>
-        </label>
-        <select className="ov-listen-mode" aria-label={t('spectrum.mode')} title={t('spectrum.mode')} value={shownMode} onChange={changeMode}>
-          {LISTEN_MODE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-        </select>
-        <button
-          className="ov-button ov-spec-listen"
-          type="button"
-          aria-pressed={listening}
-          title={listening && !audioHeld ? t('spectrum.listenStop') : t('spectrum.listenTitle')}
-          disabled={view.controlsDisabled}
-          onClick={toggleListen}
-        >
-          <Icon name="headphones" /><span>{t('spectrum.listen')}</span>
-        </button>
+        {/* Follow, mode and Dengar wrap as one group, as do Mulai/Berhenti and the Receiver link. */}
+        <div className="ov-spec-group">
+          <label className="ov-spec-follow" title={t('spectrum.followTitle')}>
+            <input type="checkbox" checked={followNode} onChange={(event) => setFollowNode(event.target.checked)} />
+            <span>{t('spectrum.follow')}</span>
+          </label>
+          <select className="ov-listen-mode" aria-label={t('spectrum.mode')} title={t('spectrum.mode')} value={shownMode} onChange={changeMode}>
+            {LISTEN_MODE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+          <button
+            className="ov-button ov-spec-listen"
+            type="button"
+            aria-pressed={listening}
+            title={listening && !audioHeld ? t('spectrum.listenStop') : t('spectrum.listenTitle')}
+            disabled={view.controlsDisabled}
+            onClick={toggleListen}
+          >
+            <Icon name="headphones" /><span>{t('spectrum.listen')}</span>
+          </button>
+        </div>
         <button className="ov-button ov-spec-send" type="button" disabled={!sendable} title={sendTitle} onClick={sendDraft}>
           <Icon name="send" /><span>{t('spectrum.send')}</span>
         </button>
-        <button
-          className="ov-button ov-spec-run"
-          type="button"
-          disabled={view.controlsDisabled || (starting && !running)}
-          onClick={() => (running ? stop() : start(false))}
-        >
-          <Icon name={running ? 'stop' : 'play'} /><span>{running ? t('spectrum.stop') : t('spectrum.start')}</span>
-        </button>
-        <button className="ov-button ov-spec-open" type="button" aria-keyshortcuts="7" aria-label={t('spectrum.openReceiver')} title={t('spectrum.openReceiverTitle')} onClick={() => onNavigate('receiver')}>
-          <Icon name="external" /><span className="ov-spec-open-label">{t('spectrum.openReceiver')}</span><kbd aria-hidden="true">7</kbd>
-        </button>
+        <div className="ov-spec-group">
+          <button
+            className="ov-button ov-spec-run"
+            type="button"
+            disabled={view.controlsDisabled || (starting && !running)}
+            onClick={() => (running ? stop() : start(false))}
+          >
+            <Icon name={running ? 'stop' : 'play'} /><span>{running ? t('spectrum.stop') : t('spectrum.start')}</span>
+          </button>
+          <button className="ov-button ov-spec-open" type="button" aria-keyshortcuts="7" aria-label={t('spectrum.openReceiver')} title={t('spectrum.openReceiverTitle')} onClick={() => onNavigate('receiver')}>
+            <Icon name="external" /><span className="ov-spec-open-label">{t('spectrum.openReceiver')}</span><kbd aria-hidden="true">7</kbd>
+          </button>
+        </div>
       </div>
       <SpectrumCanvas
         bridge={bridge}

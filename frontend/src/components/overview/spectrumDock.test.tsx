@@ -87,6 +87,14 @@ describe('Spectrum dock header', () => {
     expect(select).toMatch(/<option value="nfm" selected="">NFM<\/option>/);
   });
 
+  it('keeps follow, mode and Dengar together, and Mulai/Berhenti next to the labelled Receiver link', () => {
+    const groups = [...dock(bridgeWith({ attach: false })).matchAll(/<div class="ov-spec-group">([\s\S]*?)<\/div>/g)].map((match) => match[1]);
+    expect(groups).toHaveLength(2);
+    expect(groups[0]).toMatch(/^<label class="ov-spec-follow"[\s\S]*<select class="ov-listen-mode"[\s\S]*<button class="ov-button ov-spec-listen"[\s\S]*>Dengar<\/span><\/button>$/);
+    expect(groups[1]).toMatch(/^<button class="ov-button ov-spec-run"[\s\S]*<button class="ov-button ov-spec-open"[\s\S]*<\/button>$/);
+    expect(groups[1]).toContain('<span class="ov-spec-open-label">Buka Receiver penuh</span><kbd aria-hidden="true">7</kbd>');
+  });
+
   it('follows the node by default and keeps the Receiver shortcut', () => {
     const markup = dock(bridgeWith({ attach: false }));
     expect(markup).toMatch(/<input type="checkbox" checked=""\/><span>Ikuti frekuensi node<\/span>/);
@@ -194,5 +202,34 @@ describe('Spectrum dock states', () => {
 
   it('renders without a bridge from App', () => {
     expect(chip(dock(undefined))).toBe('RX OFF');
+  });
+});
+
+/** Vitest blanks every CSS import, so the stylesheet is read from disk. */
+function readStylesheet(path: string): string {
+  type Fs = { readFileSync(file: URL, encoding: 'utf8'): string };
+  const { process } = globalThis as unknown as { process: { getBuiltinModule(id: 'node:fs'): Fs } };
+  return process.getBuiltinModule('node:fs').readFileSync(new URL(path, import.meta.url), 'utf8');
+}
+
+describe('Spectrum dock styles', () => {
+  const dashboardCss = readStylesheet('../../overview-dashboard.css');
+  const declarations = (selector: string) => [...dashboardCss.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter((match) => match[1].split(',').some((part) => part.trim().endsWith(selector)))
+    .map((match) => match[2]);
+
+  it('never hides the Receiver label', () => {
+    expect(declarations('.ov-spec-open-label').length).toBeGreaterThan(0);
+    expect(declarations('.ov-spec-open-label').join(';')).not.toMatch(/display:\s*none/);
+  });
+
+  it('keeps the inline Receiver button at the 44 px touch target', () => {
+    expect(declarations('.ov-spec-inline-button').length).toBeGreaterThan(0);
+    const heights = declarations('.ov-spec-inline-button').join(';').match(/(?:^|[;\s])(?:min-)?height:\s*(\d+)px/g) ?? [];
+    for (const height of heights) expect(Number(/(\d+)px/.exec(height)?.[1]), height).toBeGreaterThanOrEqual(44);
+  });
+
+  it('grows the dock to the height the spectrum needs', () => {
+    expect(dashboardCss).toMatch(/--ov-dock-h:\s*max\(256px,\s*var\(--ov-spec-need-h,\s*0px\)\)/);
   });
 });

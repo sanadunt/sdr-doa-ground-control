@@ -4,7 +4,8 @@
    polar-layout.css. Below 1024 px everything stacks in normal flow. */
 
 .ov-stage {
-  --ov-dock-h: 256px;
+  /* At least 256 px; taller when the spectrum needs it (SpectrumDock sets --ov-spec-need-h). */
+  --ov-dock-h: max(256px, var(--ov-spec-need-h, 0px));
   --ov-gap: 12px;
   --ov-card-bg: color-mix(in srgb, var(--surface) 95%, transparent);
   --ov-shadow: 0 8px 22px rgba(0, 0, 0, .35);
@@ -190,8 +191,13 @@
 .ov-ps-preview { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--text); font-family: var(--mono); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .ov-spectrum { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; border-left: 1px solid var(--line-soft); container: ov-spec / inline-size; }
 .ov-dock > .ov-spectrum:first-child { border-left: 0; }
-/* Title, source, chip | follow, mode, Dengar, Kirim, Mulai, Receiver; wraps to two rows when narrow. */
+/* Title, source, chip | [follow, mode, Dengar] Kirim [Mulai, Receiver]. It wraps when narrow, the
+   bracketed groups as one item each, and the dock grows to fit the extra rows. */
 .ov-spec-head { flex-wrap: wrap; height: auto; min-height: 48px; column-gap: 8px; row-gap: 0; padding: 2px 12px; }
+.ov-spec-group { display: inline-flex; flex: none; flex-wrap: wrap; align-items: center; gap: 0 8px; max-width: 100%; }
+/* On a phone these labels take two lines before a group splits; a group splits only below that. */
+.ov-spec-group > .ov-spec-follow, .ov-spec-group > .ov-spec-open { flex: 1 1 0; min-width: min-content; }
+.ov-spec-follow > span, .ov-spec-open-label { white-space: normal; }
 .ov-spec-head h2 { flex: none; }
 .ov-spec-source { flex: none; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .ov-spec-follow { display: inline-flex; flex: none; align-items: center; gap: 8px; height: 44px; color: var(--muted); cursor: pointer; font-size: 12.5px; white-space: nowrap; }
@@ -207,7 +213,6 @@
 .ov-button.is-wide { flex: 1 1 auto; }
 .ov-spec-send:not(:disabled) { border-color: color-mix(in srgb, var(--signal) 70%, var(--line)); }
 .ov-spec-run { width: 108px; }
-@container ov-spec (max-width: 1100px) { .ov-spec-open-label { display: none; } }
 @container ov-spec (max-width: 980px) { .ov-spec-source { display: none; } }
 .ov-spec-body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 4px; min-width: 0; min-height: 0; overflow: hidden; padding: 2px 12px 8px; }
 .ov-spec-info { display: flex; flex: none; flex-wrap: wrap; justify-content: space-between; gap: 0 12px; color: var(--muted); font-family: var(--mono); font-size: 11.5px; line-height: 16px; }
@@ -216,8 +221,9 @@
 .ov-spec-message.tone-warn { color: var(--amber); }
 .ov-spec-message.tone-bad { color: var(--red); }
 .ov-spec-message.tone-info, .ov-spec-message.tone-neutral { color: var(--muted); }
-.ov-spec-trace { position: relative; flex: none; height: 76px; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--bg); cursor: crosshair; }
-.ov-spec-canvas { display: block; width: 100%; height: 100%; }
+/* 76 px tall; the stopped overlay may make it taller (a wrapped message above a 44 px button). */
+.ov-spec-trace { position: relative; flex: none; min-height: 76px; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--bg); cursor: crosshair; }
+.ov-spec-canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
 .ov-spec-canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .ov-spec-label { position: absolute; left: 6px; color: var(--subtle); font-family: var(--mono); font-size: 10px; line-height: 12px; pointer-events: none; }
 .ov-spec-label.is-top { top: 2px; }
@@ -226,9 +232,8 @@
 .ov-spec-hover { position: absolute; bottom: 2px; padding: 1px 6px; border-radius: 4px; background: color-mix(in srgb, var(--surface) 90%, transparent); color: var(--text); font-family: var(--mono); font-size: 10.5px; line-height: 14px; white-space: nowrap; pointer-events: none; transform: translateX(8px); }
 .ov-spec-hover[data-side='left'] { transform: translateX(calc(-100% - 8px)); }
 .ov-spec-vfo[hidden], .ov-spec-hover[hidden] { display: none; }
-.ov-spec-overlay { position: absolute; inset: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 2px 12px; padding: 2px 12px; background: color-mix(in srgb, var(--bg) 65%, transparent); color: var(--text); cursor: default; font-size: 12.5px; text-align: center; }
-.ov-spec-inline-button { height: 36px; min-height: 36px; padding: 0 10px; background: var(--surface); font-size: 12px; }
-.ov-spec-notice .ov-spec-inline-button { height: 32px; min-height: 32px; }
+.ov-spec-overlay { position: relative; display: flex; min-height: 74px; flex-wrap: wrap; align-items: center; justify-content: center; gap: 2px 12px; padding: 2px 12px; background: color-mix(in srgb, var(--bg) 65%, transparent); color: var(--text); cursor: default; font-size: 12.5px; text-align: center; }
+.ov-spec-inline-button { padding: 0 10px; background: var(--surface); font-size: 12px; }
 .ov-spec-ticks { display: flex; flex: none; justify-content: space-between; height: 14px; color: var(--subtle); font-family: var(--mono); font-size: 10.5px; line-height: 14px; }
 .ov-spec-waterfall { display: block; flex: 1 1 0; width: 100%; min-height: 24px; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--bg); cursor: crosshair; }
 
