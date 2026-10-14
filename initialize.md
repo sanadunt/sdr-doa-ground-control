@@ -19,8 +19,8 @@ Tujuan UI:
 - melihat station reference dan helper arah pada peta;
 - menguji renderer dengan data simulasi tanpa perangkat SDR;
 - mencoba perubahan konfigurasi secara lokal/dry-run;
-- melihat spektrum HackRF lewat Receiver, mendengar VFO, dan menala dari dasbor;
-- mengirim patch konfigurasi ke Raspberry hanya lewat Kontrol, dengan login admin, tinjauan, dan konfirmasi eksplisit; selain itu tidak ada command remote.
+- melihat spektrum RadioSpectrum (HackRF) lewat Receiver, mendengar VFO, dan menala dari dasbor;
+- mengirim patch konfigurasi ke RDF-SDR (node Raspberry) hanya lewat Kontrol, dengan login admin, tinjauan, dan konfirmasi eksplisit; selain itu tidak ada command remote.
 
 ### Batas keamanan dan interpretasi
 
@@ -284,14 +284,14 @@ Simulasi hanya menggantikan sumber Overview. Simulasi tidak boleh memalsukan Sys
 
 ### Dasbor: Spektrum, Dengar dan Kontrol
 
-Overview adalah dasbor peta penuh. Langkah operator yang lebih rinci ada di `QUICKSTART.md`. Ringkasnya:
+Overview adalah dasbor peta penuh. Langkah operator yang lebih rinci ada di `QUICKSTART.md`. Di UI, node Raspberry tampil sebagai **RDF-SDR** dan receiver HackRF sebagai **RadioSpectrum**; identifier, field API, topik MQTT, dan filter WebUSB tetap memakai nama teknisnya. Dasbor hanya menampilkan label, nilai, chip status, error, dan prompt yang butuh tindakan, tanpa teks penjelasan kecil. Ringkasnya:
 
 - **Panel.** Tombol Lapisan, Polar, Spektrum, dan Kontrol di top bar menampilkan atau menyembunyikan panel. Secara bawaan Polar dan Spektrum aktif. Pilihan panel disimpan di browser.
-- **Mulai/Berhenti.** Mulai memuat Receiver tersembunyi (saat pertama kali), menyambungkan HackRF yang sudah dipasangkan ke browser ini, dan menjalankan RX tanpa suara. Spektrum menampilkan 2 MHz di sekitar tengah RX. HackRF yang belum pernah dipasangkan (`NEEDS_PAIRING`) dipasangkan sekali di halaman Receiver (tombol `7`). Berhenti menghentikan RX.
+- **Mulai/Berhenti.** Mulai memuat Receiver tersembunyi (saat pertama kali), menyambungkan RadioSpectrum yang sudah dipasangkan ke browser ini, dan menjalankan RX tanpa suara. Spektrum menampilkan 2 MHz di sekitar tengah RX. RadioSpectrum yang belum pernah dipasangkan (`NEEDS_PAIRING`) dipasangkan sekali di halaman Receiver (tombol `7`). Berhenti menghentikan RX.
 - **Klik untuk menala.** Klik trace atau waterfall untuk memindahkan tengah RX dan VFO ke frekuensi itu (dibulatkan 1 kHz); ←/→ menggeser 10 kHz, Shift+←/→ 100 kHz. Klik ini mematikan Ikuti frekuensi node.
 - **Ikuti frekuensi node.** Selama Data Out segar, tengah RX mengikuti `center_freq` dari `settings.json` node dan VFO mengikuti frekuensi CSV DoA.
 - **Dengar dengan modulasi.** Dengar memutar audio VFO dengan modulasi yang dipilih (NFM bawaan, WFM, AM, USB, LSB, DSB, CW, RAW), dan menyalakan RX bila belum jalan. Tekan lagi untuk berhenti mendengar.
-- **Kirim ke Raspberry → Kontrol.** Tombol di header Spektrum hanya membuka Kontrol dengan draf frekuensi tengah dan VFO. Di Kontrol: buka kunci dengan kata sandi admin, ubah nilai, **Tinjau perubahan**, lalu **Kirim ke Raspberry**. Hasilnya `ACK · applied` (agent menulis `settings.json`), `Ditolak · KODE` (misalnya `REMOTE_CONTROL_DISABLED` bila agent tanpa `--enable-config`, atau `CONFIG_REVISION_CONFLICT`), **Belum ada ACK** setelah sekitar 65 detik, atau **Publish gagal** bila broker menolak.
+- **Kirim ke RDF-SDR → Kontrol.** Tombol di header Spektrum hanya membuka Kontrol dengan draf frekuensi tengah dan VFO. Di Kontrol: buka kunci dengan kata sandi admin, ubah nilai, **Tinjau perubahan**, lalu **Kirim ke RDF-SDR**. Hasilnya `ACK · applied` (agent menulis `settings.json`), `Ditolak · KODE` (misalnya `REMOTE_CONTROL_DISABLED` bila agent tanpa `--enable-config`, atau `CONFIG_REVISION_CONFLICT`), **Belum ada ACK** setelah sekitar 65 detik, atau **Publish gagal** bila broker menolak.
 - **Polar → Atur.** Putar grafik (Head Up) dan Puncak ke atas, offset kompas Data Out atau Manual (berlaku untuk peta, plot, dan bearing), skala dB Auto atau Manual, dan tombol reset tampilan. Pilihan Kompas|Polar hanya mengubah plot.
 - **Lapisan.** Tujuh sakelar layer overlay, opasitas overlay, dan pengaturan Lanjutan.
 

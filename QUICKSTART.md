@@ -2,6 +2,8 @@
 
 Panduan ini menjalankan Ground Console lokal dari checkout repository. Jalur production lokal memakai Python untuk menyajikan `frontend/dist` dan menyediakan API same-origin. Vite hanya dipakai untuk development/build.
 
+Di UI, node Raspberry tampil sebagai **RDF-SDR** dan receiver HackRF sebagai **RadioSpectrum**. Panduan ini memakai nama UI tersebut; perintah, nama file, field API, dan topik MQTT tetap memakai nama teknisnya.
+
 ## Prasyarat
 
 Install terlebih dahulu:
@@ -9,7 +11,7 @@ Install terlebih dahulu:
 - Git.
 - Node.js LTS. Dokumentasi project merekomendasikan Node 22.12 atau lebih baru dalam lini Node 22. Vite saat ini membutuhkan Node `^20.19.0` atau `>=22.12.0`. Tes Node untuk Receiver (`tools/test_receiver_*.mjs`) membutuhkan Node 22.13 atau lebih baru.
 - Python 3.9 atau lebih baru. Ground Console mengimpor `zoneinfo` saat start (lewat store Receiver), sehingga Python 3.8 langsung berhenti dengan `ModuleNotFoundError: No module named 'zoneinfo'`.
-- Browser berbasis Chromium (Chrome atau Edge) bila memakai Receiver dengan HackRF, karena HackRF tersambung lewat WebUSB.
+- Browser berbasis Chromium (Chrome atau Edge) bila memakai Receiver dengan RadioSpectrum, karena RadioSpectrum tersambung lewat WebUSB.
 - WebGL2 di browser untuk peta. Tanpa WebGL2 peta menampilkan pemberitahuan dan overlay kanvas sederhana; halaman lain tetap berjalan.
 - Akses HTTPS ke `tile.openstreetmap.de` dan/atau `tile.openstreetmap.org` jika ingin basemap tampil.
 - Mosquitto lokal hanya jika ingin menguji MQTT staging.
@@ -33,7 +35,7 @@ Perintah Ground Console default mengaktifkan monitor MQTT ke `10.90.0.1:9001` (W
 
 Untuk menjalankan tanpa monitor, tambahkan `--mqtt-host ''` pada perintah Ground Console.
 
-Atur kata sandi admin sendiri. Login admin membuka branding di **Konfigurasi** dan panel **Kontrol** di Ringkasan, yang mengirim perubahan konfigurasi ke Raspberry. Buat file environment lokal:
+Atur kata sandi admin sendiri. Login admin membuka branding di **Konfigurasi** dan panel **Kontrol** di Ringkasan, yang mengirim perubahan konfigurasi ke RDF-SDR. Buat file environment lokal:
 
 ```sh
 cp .env.example .env
@@ -218,11 +220,11 @@ Pilih menu **Receiver** (tombol `7`) atau buka `http://127.0.0.1:8787/#/receiver
 
 - **Browser.** Firefox dan Safari tidak punya WebUSB; di sana **Connect Device** hanya menampilkan pesan bahwa WebUSB tidak tersedia dan meminta Chrome atau Edge.
 - **Mock SDR.** Untuk uji tanpa hardware, buka Receiver langsung dengan `?mock=1` dari alamat loopback, misalnya `http://127.0.0.1:8787/receiver/?mock=1`. Dari dalam console, buka `http://127.0.0.1:8787/?mock=1#/receiver` (`?mock=1` ditulis sebelum `#`); halaman Receiver meneruskan `mock=1` ke frame-nya hanya bila host console adalah loopback. Pilih **Connect Mock SDR** (**Sambungkan Mock SDR** dalam bahasa Indonesia). Koneksi mock berlabel `MOCK` (`Radio SDR ON · MOCK (no RF)`, dalam bahasa Indonesia `MOCK (tanpa RF)`, dan `MOCK DEVICE`). Untuk dasbor, buka `http://127.0.0.1:8787/?mock=1#/overview` lalu tekan **Mulai** di panel Spektrum.
-- **Kapan Receiver dimuat.** Receiver tidak dimuat saat console dibuka, karena memuatnya langsung menyambungkan HackRF yang sudah diizinkan. Receiver dimuat saat halaman Receiver dibuka pertama kali, atau saat **Mulai** atau **Dengar** ditekan pertama kali di panel Spektrum Ringkasan.
+- **Kapan Receiver dimuat.** Receiver tidak dimuat saat console dibuka, karena memuatnya langsung menyambungkan RadioSpectrum yang sudah diizinkan. Receiver dimuat saat halaman Receiver dibuka pertama kali, atau saat **Mulai** atau **Dengar** ditekan pertama kali di panel Spektrum Ringkasan.
 - **Tetap berjalan saat pindah halaman.** Setelah Receiver dimuat, pindah ke halaman lain tidak menghentikan RX, scan, atau rekaman. Receiver berjalan tersembunyi sampai halaman console di-reload atau ditutup, dan tetap mengikuti perubahan tema dan bahasa. Reload console menghentikan sesi Receiver; audio yang sudah terekam tetap tersimpan.
 - **Rekaman aman saat reload atau crash.** Rekaman dan scan arsip ditutup saat halaman unload bila memungkinkan, atau oleh console setelah 2 menit tanpa aktivitas. Segmen seperti itu berstatus "Interrupted" dan tetap bisa diputar. Upload yang gagal menyimpan audio yang sudah masuk sebagai "Partly saved". Rekaman berlanjut di file atau sesi baru saat batas ukuran tercapai, setelah chunk hilang, atau setelah sample rate/FFT size berubah (ada pemberitahuan). Satu sesi armed yang tidak menerima audio selama 2 menit bisa terpecah menjadi beberapa sesi.
 - **Indikator rekaman.** Records menampilkan rekaman yang sedang berjalan ("recording in progress"), tab Listener menampilkan indikator `REC`, dan Spectrum meminta konfirmasi sebelum menghentikan rekaman yang berjalan.
-- **Radio terputus.** Bila HackRF dicabut, atau transfer USB gagal saat RX, Receiver menghentikan RX dan scan, menutup rekaman yang berjalan (audio yang sudah masuk tetap ada), lalu menampilkan alert. Bila radio masih tersambung, pesannya meminta memeriksa kabel lalu menekan **Resume** atau menyambungkan ulang radio. Gangguan USB sesaat pun menghentikan listening sampai Resume ditekan.
+- **Radio terputus.** Bila RadioSpectrum dicabut, atau transfer USB gagal saat RX, Receiver menghentikan RX dan scan, menutup rekaman yang berjalan (audio yang sudah masuk tetap ada), lalu menampilkan alert. Bila radio masih tersambung, pesannya meminta memeriksa kabel lalu menekan **Resume** atau menyambungkan ulang radio. Gangguan USB sesaat pun menghentikan listening sampai Resume ditekan.
 - **Sumber scan.** Sumber scan mengikuti radio yang tersambung. Sumber Simulation selalu menampilkan badge `SIMULATION` dan label di atas grafik. Pengaturan scan diingat antar kunjungan.
 - **Deteksi wide scan.** Sinyal lemah (SNR antara Detection SNR dan 16 dB di atas floor) baru masuk daftar setelah terlihat sekitar 6 sweep; sinyal 16 dB atau lebih di atas floor muncul di sweep pertama. Riwayat menyimpan paling banyak 1000 kandidat. Noise floor dan SNR mengacu ke median trace rata-rata, sehingga SNR terbaca sekitar 1,5 dB lebih rendah dari versi sebelumnya. Sinyal wideband (DAB, DVB-T, hingga sekitar 20 MHz) terdeteksi sebagai satu band. Grup puncak hanya menggabungkan kandidat yang band-nya bertumpuk atau bersentuhan.
 - **Minimum peak.** Preset sekarang All (default) dan −50 sampai 0 dBFS.
@@ -242,7 +244,7 @@ Ringkasan adalah dasbor peta penuh. Peta mengisi layar. Di kiri ada HUD bearing 
 
 ### Top bar dan panel
 
-- Tombol menu di kiri top bar membuka menu halaman: tujuh halaman, tombol tema, dan catatan kontrol. Menu tertutup dengan `Esc`, klik di luar menu, atau setelah memilih halaman. Tombol `1`–`7` tetap berlaku.
+- Tombol menu di kiri top bar membuka menu halaman: tujuh halaman (label dan tombolnya saja), tombol tema, dan chip kontrol admin. Menu tertutup dengan `Esc`, klik di luar menu, atau setelah memilih halaman. Tombol `1`–`7` tetap berlaku.
 - Di Ringkasan, top bar punya tombol panel **Lapisan**, **Polar**, **Spektrum**, dan **Kontrol**. Secara bawaan Polar dan Spektrum aktif, Lapisan dan Kontrol mati, dan kartu node tampil ringkas. Pilihan ini diingat browser. Bila Polar dan Spektrum dimatikan, dock hilang dan peta memakai seluruh tinggi layar.
 - Select interval di samping tombol refresh menyimpan interval refresh ke konfigurasi console, sama seperti form **Konfigurasi → Connection**.
 - Kartu node menampilkan frekuensi tengah, gain, dan posisi stasiun. Tombol panah di kartu membuka detail: SNR, DAQ, ADC, frame DAQ, kontrol jarak jauh (`en_remote_control`), dan offset kompas.
@@ -250,30 +252,30 @@ Ringkasan adalah dasbor peta penuh. Peta mengisi layar. Di kiri ada HUD bearing 
 
 ### Spektrum dan Dengar
 
-Spektrum memakai HackRF yang sama dengan halaman Receiver, jadi butuh Chrome atau Edge (WebUSB) dan build Receiver. Tanpa build Receiver, chip menampilkan `NOT BUILT`.
+Spektrum memakai RadioSpectrum yang sama dengan halaman Receiver, jadi butuh Chrome atau Edge (WebUSB) dan build Receiver. Tanpa build Receiver, chip menampilkan `NOT BUILT`.
 
-- **Mulai** memuat Receiver di latar belakang (saat pertama kali), menyambungkan HackRF yang sudah dipasangkan ke browser ini, dan menjalankan RX tanpa suara. Grafik menampilkan 2 MHz di sekitar tengah RX: trace di atas, waterfall di bawah, dan pita VFO. Level dalam dBFS relatif, tidak terkalibrasi. **Berhenti** menghentikan RX.
-- **HackRF pertama kali.** Bila chip menampilkan `NEEDS_PAIRING`, tekan **Buka Receiver (7)**, sambungkan HackRF lewat **Connect Device** di halaman Receiver, kembali ke Ringkasan, lalu tekan **Mulai**. `NEEDS_DEVICE_CHOICE` berarti lebih dari satu HackRF sudah dipasangkan; pilih satu di halaman Receiver. Izin WebUSB berlaku per alamat, jadi `localhost:8787` dan `127.0.0.1:8787` dipasangkan masing-masing.
-- **Klik untuk menala.** Klik trace atau waterfall untuk memindahkan tengah RX dan VFO ke frekuensi itu (dibulatkan ke 1 kHz). Klik ini mematikan **Ikuti frekuensi node**. Dengan keyboard, fokuskan grafik lalu tekan ←/→ untuk langkah 10 kHz, atau Shift+←/→ untuk 100 kHz. Arahkan kursor ke grafik untuk membaca frekuensi dan level. VFO lalu berada tepat di tengah RX, tempat spike DC HackRF muncul.
-- **Ikuti frekuensi node** (aktif bawaan). Selama Data Out segar, tengah RX mengikuti `center_freq` dari `settings.json` node dan VFO mengikuti frekuensi baris CSV DoA. Receiver ditala ulang bila frekuensi node bergeser lebih dari 1 kHz. Tanpa Data Out segar, tuning saat ini dipertahankan. Bila Receiver memakai Freq Shift, muncul tag `UPCONVERTER`; frekuensi node dipakai tanpa shift itu, jadi set Freq Shift ke 0 agar HackRF benar-benar menala ke frekuensi node.
+- **Mulai** memuat Receiver di latar belakang (saat pertama kali), menyambungkan RadioSpectrum yang sudah dipasangkan ke browser ini, dan menjalankan RX tanpa suara. Selama RX mati, grafik bertuliskan "RX berhenti". Grafik menampilkan 2 MHz di sekitar tengah RX: trace di atas, waterfall di bawah, dan pita VFO. Level dalam dBFS relatif, tidak terkalibrasi. **Berhenti** menghentikan RX.
+- **RadioSpectrum pertama kali.** Bila chip menampilkan `NEEDS_PAIRING`, tekan **Buka Receiver (7)**, sambungkan RadioSpectrum lewat **Connect Device** di halaman Receiver, kembali ke Ringkasan, lalu tekan **Mulai**. Pemilih USB milik browser tetap menampilkan nama produk USB perangkat (misalnya HackRF One); nama itu berasal dari perangkat dan tidak bisa diganti console. `NEEDS_DEVICE_CHOICE` berarti lebih dari satu RadioSpectrum sudah dipasangkan; pilih satu di halaman Receiver. Izin WebUSB berlaku per alamat, jadi `localhost:8787` dan `127.0.0.1:8787` dipasangkan masing-masing.
+- **Klik untuk menala.** Klik trace atau waterfall untuk memindahkan tengah RX dan VFO ke frekuensi itu (dibulatkan ke 1 kHz). Klik ini mematikan **Ikuti frekuensi node**. Dengan keyboard, fokuskan grafik lalu tekan ←/→ untuk langkah 10 kHz, atau Shift+←/→ untuk 100 kHz. Arahkan kursor ke grafik untuk membaca frekuensi dan level. VFO lalu berada tepat di tengah RX, tempat spike DC RadioSpectrum muncul.
+- **Ikuti frekuensi node** (aktif bawaan). Selama Data Out segar, tengah RX mengikuti `center_freq` dari `settings.json` node dan VFO mengikuti frekuensi baris CSV DoA. Receiver ditala ulang bila frekuensi node bergeser lebih dari 1 kHz. Tanpa Data Out segar, tuning saat ini dipertahankan. Bila Receiver memakai Freq Shift, muncul tag `UPCONVERTER`; frekuensi node dipakai tanpa shift itu, jadi set Freq Shift ke 0 agar RadioSpectrum benar-benar menala ke frekuensi node.
 - **Dengar** memutar audio VFO di browser ini dengan modulasi yang dipilih di sebelahnya: NFM (bawaan), WFM, AM, USB, LSB, DSB, CW, atau RAW. Bila RX belum jalan, Dengar sekaligus menyalakannya. Mengganti modulasi langsung berlaku dan diingat browser. Tekan Dengar lagi untuk berhenti mendengar. Bila browser memblokir audio, tekan Dengar sekali lagi.
 - Chip `BUSY` berarti pindai lebar atau dengar-pindai sedang berjalan di halaman Receiver. Dasbor tidak mengganggunya; hentikan dulu dari halaman Receiver.
 - RX tetap berjalan saat pindah halaman, sama seperti Receiver. Data spektrum hanya dikirim ke dasbor selama panel Spektrum terbuka dan tab browser terlihat.
 
-### Kirim ke Raspberry dan Kontrol
+### Kirim ke RDF-SDR dan Kontrol
 
-Kontrol adalah satu-satunya cara console mengubah setelan di Raspberry. Console mengirim satu patch konfigurasi lewat MQTT ke `sdr/v1/uav-01/cmd/config/patch` (QoS 1, tidak retained, kedaluwarsa 60 detik). Agent di Raspberry yang memutuskan menerapkannya, lalu menjawab di `ack/config`.
+Kontrol adalah satu-satunya cara console mengubah setelan di RDF-SDR. Console mengirim satu patch konfigurasi lewat MQTT ke `sdr/v1/uav-01/cmd/config/patch` (QoS 1, tidak retained, kedaluwarsa 60 detik). Agent di RDF-SDR yang memutuskan menerapkannya, lalu menjawab di `ack/config`.
 
-1. **Kirim ke Raspberry** di header Spektrum membuka Kontrol dengan draf: Frekuensi tengah diisi tengah RX dan Frekuensi VFO diisi VFO yang sedang didengar. Tombol ini belum mengirim apa pun, dan nonaktif bila frekuensi belum diketahui atau di luar 24–1800 MHz. Kontrol juga bisa dibuka dengan tombol panel **Kontrol**.
+1. **Kirim ke RDF-SDR** di header Spektrum membuka Kontrol dengan draf: Frekuensi tengah diisi tengah RX dan Frekuensi VFO diisi VFO yang sedang didengar. Tombol ini belum mengirim apa pun, dan nonaktif bila frekuensi belum diketahui atau di luar 24–1800 MHz. Kontrol juga bisa dibuka dengan tombol panel **Kontrol**.
 2. **Buka kunci.** Masukkan kata sandi admin lalu tekan **Buka kunci**. Sesinya sama dengan login admin di Konfigurasi dan berlaku 30 menit.
-3. **Ubah nilai.** Baris atas menampilkan broker, status koneksi, dan `rev dasar`, yaitu revisi konfigurasi terakhir yang dilaporkan Raspberry lewat MQTT. Ada lima field: Frekuensi tengah (MHz), Gain (dB), Frekuensi VFO (MHz), Bandwidth VFO (kHz), dan Squelch VFO (dB). Field VFO bertuliskan "tidak dilaporkan" bila node belum melaporkan nilainya. Field yang diubah ditandai "Diubah dari …", dan nilai di luar rentang diberi pesan di field itu.
-4. **Tinjau perubahan** menampilkan nilai lama → baru, "QoS 1 · kedaluwarsa 60 dtk · rev dasar N", dan pengingat bahwa agent harus berjalan dengan `--enable-config`. **Kembali** untuk mengedit lagi.
-5. **Kirim ke Raspberry** di layar tinjauan inilah yang benar-benar mengirim. Tombolnya nonaktif bila monitor MQTT belum terhubung atau rev dasar belum diketahui. Setelah terkirim, Kontrol menunggu jawaban dan memeriksa statusnya setiap detik. Hanya satu perintah yang boleh menunggu hasil pada satu waktu.
+3. **Ubah nilai.** Baris atas menampilkan broker, status koneksi, dan `rev dasar`, yaitu revisi konfigurasi terakhir yang dilaporkan RDF-SDR lewat MQTT. Ada lima field: Frekuensi tengah (MHz), Gain (dB), Frekuensi VFO (MHz), Bandwidth VFO (kHz), dan Squelch VFO (dB). Field VFO bertuliskan "tidak dilaporkan" bila node belum melaporkan nilainya. Field yang diubah ditandai "Diubah dari …", dan nilai di luar rentang diberi pesan di field itu; field lain tidak punya keterangan di bawahnya.
+4. **Tinjau perubahan** menampilkan nilai lama → baru dan "QoS 1 · kedaluwarsa 60 dtk · rev dasar N". Agent harus berjalan dengan `--enable-config` agar perubahan diterapkan. **Kembali** untuk mengedit lagi.
+5. **Kirim ke RDF-SDR** di layar tinjauan inilah yang benar-benar mengirim. Tombolnya nonaktif bila monitor MQTT belum terhubung atau rev dasar belum diketahui. Setelah terkirim, Kontrol menunggu jawaban dan memeriksa statusnya setiap detik. Hanya satu perintah yang boleh menunggu hasil pada satu waktu.
 6. Hasil:
    - `ACK · applied`: agent menulis perubahan ke `settings.json` dan config rev naik. Ini belum membuktikan KrakenSDR memakai nilai baru; lihat frekuensi tengah di kartu node pada pembacaan Data Out berikutnya.
    - `Ditolak · CONFIG_REVISION_CONFLICT`: rev dasar sudah usang. Tekan **Muat ulang nilai**, tinjau, lalu kirim lagi.
    - `Ditolak · REMOTE_CONTROL_DISABLED`: agent berjalan tanpa `--enable-config`. Tidak ada yang berubah.
-   - `Ditolak` dengan kode lain, `expired`, atau `failed`: kodenya ditampilkan. `expired` biasanya berarti jam console dan Raspberry berselisih jauh.
+   - `Ditolak` dengan kode lain, `expired`, atau `failed`: kodenya ditampilkan. `expired` biasanya berarti jam console dan RDF-SDR berselisih jauh.
    - **Belum ada ACK** (sekitar 65 detik setelah kirim): tidak ada agent yang menjawab. Periksa bahwa agent berjalan dan memakai broker yang sama. Agent versi lama hanya berlangganan `cmd/config/patch` bila `--enable-config` aktif, sehingga tidak pernah menjawab.
    - **Publish gagal** (PUBACK 128 ke atas): broker menolak publish dari console, biasanya karena ACL.
    - **Tidak terkirim · KODE**: console menolak sebelum publish. Contohnya `CONFIG_REVISION_STALE` (nilai berubah sejak ditinjau; nilai dimuat ulang, tinjau lagi), `MQTT_NOT_CONNECTED`, dan `COMMAND_IN_FLIGHT` (perintah lain masih menunggu hasil).
@@ -295,14 +297,13 @@ Monitor MQTT console tidak memakai TLS, username, atau password. Kontrol hanya b
 
 - Tujuh sakelar overlay peta: Sorotan beam, Lobe, Garis bearing, Tepi −3 dB, Cincin jarak, Arah U/T/S/B, dan Label teks.
 - **Opasitas overlay** 20–100 %.
-- Baris status menyebut skala dB overlay (Auto atau Manual) dan host basemap yang dipakai.
 - **Lanjutan** membuka pengaturan overlay lengkap: jarak proyeksi, skala dB manual dan noise threshold, palet, blur, dan seterusnya.
 
 Semua pengaturan Lapisan disimpan di browser ini.
 
 ## Menjalankan tanpa perangkat SDR
 
-Ground Console tetap dapat digunakan untuk memeriksa UI tanpa Raspberry atau Data Out live:
+Ground Console tetap dapat digunakan untuk memeriksa UI tanpa RDF-SDR atau Data Out live:
 
 1. Buka tab **Simulasi**.
 2. Aktifkan simulasi (`SIMULATION`).
@@ -397,7 +398,7 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
   - Record sudah tua, atau jendela lokal 5 detik habis.
 
   Satu aturan yang sama dipakai untuk readout, polar, dan peta.
-- **Node beku.** Bila DSP node berhenti tetapi port 8081 tetap melayani, data menjadi `STALE` sekitar 5 detik kemudian. Setelah sekitar 10 detik tanpa perubahan timestamp, uptime, atau frame index, reason `NODE_CLOCK_STALLED` muncul dan readout menulis "Output node berhenti diperbarui". Deteksi butuh minimal dua pembacaan, sehingga node yang sudah beku sebelum console start baru terdeteksi setelah pembacaan berikutnya.
+- **Node beku.** Bila DSP node berhenti tetapi port 8081 tetap melayani, data menjadi `STALE` sekitar 5 detik kemudian. Setelah sekitar 10 detik tanpa perubahan timestamp, uptime, atau frame index, reason `NODE_CLOCK_STALLED` muncul dan readout menulis "Output node berhenti". Deteksi butuh minimal dua pembacaan, sehingga node yang sudah beku sebelum console start baru terdeteksi setelah pembacaan berikutnya.
 - **Posisi stasiun saat celah freshness.** Kartu node dan marker peta mempertahankan posisi Data Out live terakhir dengan label "POSISI STASIUN TERAKHIR · STALE". Posisi referensi ("REFERENSI SAJA · BUKAN GPS LIVE") baru dipakai bila `status.json` yang segar melaporkan GPS tanpa fix.
 - **Peta.**
   - Overlay memakai bearing geografis yang sama dengan pembacaan Compass dan display peak. Hover menampilkan bearing, bin θ₀, dan dB.
@@ -597,7 +598,7 @@ Misalnya masih ada menu samping, atau Ringkasan belum berupa dasbor peta penuh. 
 
 ### Spektrum: `NEEDS_PAIRING`, `NO_WEBUSB`, atau `NO BRIDGE`
 
-`NEEDS_PAIRING`: pasangkan HackRF sekali di halaman Receiver (tombol `7`), lalu tekan **Mulai** lagi di Ringkasan. `NO_WEBUSB`: buka console di Chrome atau Edge. `NO BRIDGE`: frame Receiver tidak menjawab; buka halaman Receiver atau muat ulang console.
+`NEEDS_PAIRING`: pasangkan RadioSpectrum sekali di halaman Receiver (tombol `7`), lalu tekan **Mulai** lagi di Ringkasan. `NO_WEBUSB`: buka console di Chrome atau Edge. `NO BRIDGE`: frame Receiver tidak menjawab; buka halaman Receiver atau muat ulang console.
 
 ### Kontrol: Kirim nonaktif, `CONFIG_REVISION_UNKNOWN`, atau Belum ada ACK
 
@@ -636,4 +637,4 @@ MapLibre membutuhkan koneksi HTTPS ke `tile.openstreetmap.de` atau `tile.openstr
 
 ### Keamanan lokal
 
-Tetap gunakan `--bind 127.0.0.1`. Jangan memakai `0.0.0.0` untuk quickstart dan jangan memasukkan secret ke frontend. Config dry-run di Konfigurasi bukan command nyata, tetapi Kontrol di Ringkasan adalah command nyata ke Raspberry. Ganti kata sandi admin bawaan `123456` sebelum console dipakai di komputer bersama. Console menolak `POST /api/mqtt/config-patch` tanpa header `Origin` dari halaman console itu sendiri, tanpa sesi admin, atau tanpa `confirm: true`.
+Tetap gunakan `--bind 127.0.0.1`. Jangan memakai `0.0.0.0` untuk quickstart dan jangan memasukkan secret ke frontend. Config dry-run di Konfigurasi bukan command nyata, tetapi Kontrol di Ringkasan adalah command nyata ke RDF-SDR. Ganti kata sandi admin bawaan `123456` sebelum console dipakai di komputer bersama. Console menolak `POST /api/mqtt/config-patch` tanpa header `Origin` dari halaman console itu sendiri, tanpa sesi admin, atau tanpa `confirm: true`.

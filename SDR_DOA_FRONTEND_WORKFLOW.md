@@ -53,7 +53,7 @@ This selects the previous embedded interface without reverting source or changin
 
 Seven routes, reachable from the page menu in the top bar or with keys `1`–`7` (`R` refreshes). Every route has the same top bar: page menu, status strip, refresh button and refresh-interval select.
 
-- Overview: full-map dashboard with the bearing HUD, node card, Lapisan (map layers), Kontrol (admin-gated config patch), and a bottom dock with Polar (and its Atur settings) and Spektrum (the Receiver's spectrum, Listen and click-to-tune). Its panel toggles sit in the top bar.
+- Overview: full-map dashboard with the bearing HUD, node card, Lapisan (map layers), Kontrol (admin-gated config patch, "Send to RDF-SDR"/"Kirim ke RDF-SDR"), and a bottom dock with Polar (and its Atur settings) and Spektrum (the Receiver's spectrum, Listen and click-to-tune). Its panel toggles sit in the top bar. The UI names the Raspberry node RDF-SDR and the HackRF receiver RadioSpectrum, and shows labels, values, state chips, errors and action prompts without one-line help texts.
 - System Health: summary, Data Out HTTP per-resource reads, inspector, node progress, subsystem status.
 - DoA Diagnostics: delivery gate checks, native-record detection log, frame relation, snapshot-derived operator log, effective config.
 - Configuration: local connection (Data Out, MQTT host/port/transport/WebSocket path, refresh interval), admin/branding, dry-run preview (never sent), GPS and Compass source.
