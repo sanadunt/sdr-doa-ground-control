@@ -55,7 +55,7 @@ export interface ControlDone {
   verify?: ControlVerifyTarget;
 }
 /** What was sent, when it was issued (server clock) and when it became final (browser clock). */
-export interface ControlVerifyTarget { changes: ConfigPatchChanges; issuedAtMs: number | null; finalAtMs: number }
+export interface ControlVerifyTarget { changes: ConfigPatchChanges; issuedAtMs: number | null; finalAtMs: number; windowMs?: number }
 
 /** Topic suffix shown before the server reports the full topic. */
 const PATCH_TOPIC_SUFFIX = 'cmd/config/patch';
@@ -365,7 +365,7 @@ export function ControlPanelView({
 
 /**
  * Kontrol: an admin-gated, explicitly confirmed sdr/v1 cmd/config/patch to
- * the Raspberry. Locked until admin unlock; then edit -> review -> sending
+ * the RDF-SDR. Locked until admin unlock; then edit -> review -> sending
  * -> done. Nothing is published without the review step and the explicit
  * "Kirim ke RDF-SDR" press; the server checks Origin, admin, ranges and
  * the base revision again, and reports the edge agent's ACK by command id.
@@ -463,8 +463,11 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
   const finish = useCallback((status: ConfigCommandStatus, count: number, baseRev: number | null) => {
     const view = commandResultView(status, count, baseRev, ttlS);
     // A publish the broker refused reached nothing; there is nothing to read back.
+    // When the RDF-SDR answered that it did not apply the patch, read back once
+    // without waiting for a change that will not come.
+    const refused = status.ack !== null && status.ack.status !== 'applied';
     const verify = status.state !== 'publish_failed' && Object.keys(status.changes).length
-      ? { changes: status.changes, issuedAtMs: status.issuedTsMs, finalAtMs: Date.now() }
+      ? { changes: status.changes, issuedAtMs: status.issuedTsMs, finalAtMs: Date.now(), ...(refused ? { windowMs: 0 } : {}) }
       : undefined;
     setDone({ view, error: null, commandId: status.commandId, restarted: status.monitorRestarted, verify });
     setStage('done');
@@ -588,7 +591,7 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
 
   // Read back what the RDF-SDR reports now; render once more when the window ends.
   const verifyTarget = stage === 'done' ? done?.verify ?? null : null;
-  const verifyEndsAt = verifyTarget ? verifyTarget.finalAtMs + VERIFY_WINDOW_MS : null;
+  const verifyEndsAt = verifyTarget ? verifyTarget.finalAtMs + (verifyTarget.windowMs ?? VERIFY_WINDOW_MS) : null;
   useEffect(() => {
     if (verifyEndsAt === null) return undefined;
     const delay = verifyEndsAt - Date.now();

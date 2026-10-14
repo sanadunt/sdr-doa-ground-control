@@ -281,8 +281,8 @@ Kontrol adalah satu-satunya cara console mengubah setelan di RDF-SDR. Console me
    - **Tidak terkirim · KODE**: console menolak sebelum publish. Contohnya `CONFIG_REVISION_STALE` (nilai berubah sejak ditinjau; nilai dimuat ulang, tinjau lagi), `MQTT_NOT_CONNECTED`, dan `COMMAND_IN_FLIGHT` (perintah lain masih menunggu hasil).
 7. **Cek RDF-SDR.** Setelah hasil akhir (semua kecuali **Publish gagal**), Kontrol membandingkan tiap field yang dikirim dengan nilai terbaru dari RDF-SDR. Tiap baris menampilkan Dikirim, Data Out dan MQTT, plus status:
    - `CONFIRMED`: nilai RDF-SDR sama dengan yang dikirim (toleransi ±500 Hz untuk frekuensi, ±1 Hz untuk bandwidth, ±0,05 dB untuk gain dan squelch).
-   - `PENDING`: belum sama, atau belum ada data segar; masih ditunggu sampai 90 detik setelah hasil akhir.
-   - `UNCHANGED`: setelah 90 detik nilainya tetap belum sama.
+   - `PENDING`: belum sama, atau belum ada data segar; masih ditunggu sampai 90 detik setelah hasil akhir. Kalau RDF-SDR menolak perintah (`rejected`, `conflict`, `expired`, `failed`), tidak ada masa tunggu: hasil cek langsung keluar.
+   - `UNCHANGED`: setelah 90 detik (atau langsung, setelah penolakan) nilainya tetap belum sama.
    - `NOT REPORTED`: tidak ada sumber yang membawa field itu.
 
    Data Out (`settings.json` dari pembacaan yang masih segar) yang menentukan. MQTT hanya dipakai bila Data Out tidak membawa field itu, dan hanya nilai yang diterima setelah perintah dikirim. Snapshot STALE dan data simulasi tidak dihitung. Ringkasan di atas baris, misalnya "RDF-SDR berubah · 2/2" atau "Belum berubah · 0/2", merangkum semuanya. **Cek ulang** membaca Data Out dan MQTT saat itu juga. Dengan interval refresh Manual atau lebih lama dari jendela segar, Data Out hanya terbaca saat **Cek ulang** atau Refresh ditekan.

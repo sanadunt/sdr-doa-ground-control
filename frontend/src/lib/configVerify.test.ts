@@ -155,6 +155,12 @@ describe('verifyConfigPatch', () => {
     expect(verify({ changes, snapshot: node, windowMs: 5_000, nowMs: FINAL + 5_000 }).fields[0].status).toBe('unchanged');
   });
 
+  it('decides at once with a zero window, as after a refused patch', () => {
+    const changes = { gain_db: 20 };
+    expect(verify({ changes, snapshot: snapshot({ uniform_gain: 10 }), windowMs: 0, nowMs: FINAL }).verdict).toBe('unchanged');
+    expect(verify({ changes, snapshot: snapshot({ uniform_gain: 20 }), windowMs: 0, nowMs: FINAL }).verdict).toBe('confirmed');
+  });
+
   it('skips non-finite sent values', () => {
     const result = verify({ changes: { gain_db: Number.NaN } });
     expect(result).toMatchObject({ fields: [], total: 0, verdict: 'not-reported' });
