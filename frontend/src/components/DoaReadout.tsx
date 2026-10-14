@@ -54,8 +54,9 @@ export function DoaReadout({
   const bearingTone: Tone = status.shown ? (status.code === 'DEGRADED' || !offsetVerified ? 'warn' : 'good') : status.code === 'WAITING' ? 'neutral' : 'warn';
   // The age is the collector's value at the last read and does not grow, so
   // once the local window has closed (or the source itself is stale) it is
-  // marked STALE instead of reading as current.
-  const ageStale = !simulation && snapshot !== null && (!localSnapshotFresh || status.code === 'STALE');
+  // marked STALE instead of reading as current. Without an age (Data Out
+  // unreachable) there is nothing to mark.
+  const ageStale = !simulation && ageMs !== null && (!localSnapshotFresh || status.code === 'STALE');
   const ageValue = simulation ? 'SIM' : ageMs !== null ? t('common.durationS', { value: (ageMs / 1000).toFixed(1) }) : '—';
   const age = ageStale ? `${ageValue} · STALE` : ageValue;
   const ageTitle = simulation

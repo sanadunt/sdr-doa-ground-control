@@ -96,6 +96,15 @@ describe('Overview dashboard', () => {
     }
   });
 
+  it('keeps an UNAVAILABLE or CONFLICT node chip and an unknown age unmarked after local expiry', () => {
+    const unreachable = dashboard(snapshot({ overall_state: 'UNAVAILABLE', status: { available: false }, doa_candidates: {} }), { localSnapshotFresh: false });
+    expect(unreachable).toContain('<span class="ov-chip tone-bad">UNAVAILABLE</span>');
+    expect(unreachable).toContain('<span class="ov-hud-age">age —</span>');
+    expect(unreachable).not.toContain('ov-chip tone-warn">STALE');
+    const conflict = dashboard(snapshot({ overall_state: 'CONFLICT' }), { localSnapshotFresh: false });
+    expect(conflict).toContain('<span class="ov-chip tone-bad">CONFLICT</span>');
+  });
+
   it('renders the node card summary with the node frequency and gain', () => {
     const markup = dashboard(snapshot({ settings: { available: true, fields: { center_freq: 416.588, uniform_gain: 15.5 } } }));
     expect(markup).toContain('416.588 MHz · gain 15.5 dB');
