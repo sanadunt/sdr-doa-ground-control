@@ -133,6 +133,11 @@ def test_dotenv_admin_password_precedence_and_parser() -> None:
     assert ground_console._admin_password_from_sources(
         {"SDR_DOA_ADMIN_PASSWORD": ""}, parsed
     ) is None
+    # Absent from both sources: the documented default applies (the UI warns).
+    assert ground_console._admin_password_from_sources({}, {}) == "123456"
+    assert ground_console.DEFAULT_ADMIN_PASSWORD == "123456"
+    # An explicitly empty .env value still disables login.
+    assert ground_console._admin_password_from_sources({}, {"SDR_DOA_ADMIN_PASSWORD": ""}) is None
     env_file.unlink()
     env_file.parent.rmdir()
 
@@ -305,9 +310,14 @@ def _http_smoke_and_target_allowlist(base: str) -> None:
         assert ".spatial-grid { grid-template-columns: 1fr; }" in html
 
     capabilities = get_json(base + "/api/capabilities")
-    assert capabilities["read_only"] is True
-    assert capabilities["mqtt_publish"] is False
+    # One admin-gated publish path exists; the console still never applies
+    # settings or POSTs to the Raspberry, and the dry run below stays a preview.
+    assert capabilities["read_only"] is False
+    assert capabilities["mqtt_publish"] is True
     assert capabilities["config_apply"] is False
+    assert capabilities["remote_post"] is False
+    assert capabilities["config_patch"]["requires_admin"] is True
+    assert capabilities["config_patch"]["enabled"] is False  # no MQTT monitor here
 
     request = urllib.request.Request(
         base + "/api/dry-run/config-patch",

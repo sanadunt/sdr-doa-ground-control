@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
 """Local Ground Console for staged SDR-DoA inspection.
 
-The console is intentionally safe at this stage:
+The console keeps a narrow boundary:
 
 * it performs bounded read-only GETs through ``sdr_doa_collector``;
-* an optional MQTT monitor subscribes read-only to its configured broker;
-* it exposes no MQTT publish path and no route that writes to the Raspberry;
-* the settings form only validates and renders a dry-run config patch;
-* local admin settings only change this console's branding.
+* an optional MQTT monitor subscribes to its configured broker;
+* its one remote write is ``POST /api/mqtt/config-patch``: an admin-gated,
+  explicitly confirmed config patch published once at QoS 1 (never retained,
+  60 s TTL) to ``cmd/config/patch``. It needs a same-origin loopback request,
+  the admin cookie, ``confirm: true``, values inside the contract ranges and
+  the base revision the operator reviewed. The edge agent decides whether to
+  apply it and answers on ``ack/config``;
+* the settings form's ``/api/dry-run/config-patch`` only validates a preview;
+* local admin settings also change this console's branding.
+
+Admin login uses ``SDR_DOA_ADMIN_PASSWORD`` from the environment or the
+repository ``.env``. When the variable is absent from both, the default
+password ``123456`` applies and the UI warns about it; an explicitly empty
+value disables admin login.
 
 Run from the repository root, for example:
 
@@ -44,6 +54,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 import sdr_doa_mqtt
+from config_command_tracker import ConfigCommandTracker, MonitorPublishError
 from sdr_doa_collector import CollectorError, DEFAULT_ALLOWED_DATA_HOSTS, NodeProgressTracker, collect
 from receiver_record_store import DEFAULT_DATA_DIR, ReceiverConflictError, ReceiverRecordStore
 
@@ -105,18 +116,30 @@ def _parse_audio_byte_range(header: str, size: int) -> Optional[Tuple[int, int]]
         return None
     return start, min(end, size - 1)
 
-def _read_dotenv(path: Path = DEFAULT_ENV_PATH) -> Dict[str, str]:
+class _DotenvUnreadable(Exception):
+    """A .env file exists but cannot be read or decoded."""
+
+
+def _read_dotenv(path: Path = DEFAULT_ENV_PATH, *, strict: bool = False) -> Dict[str, str]:
     """Read a small, dependency-free dotenv subset without logging values.
 
     Existing process environment variables always remain authoritative; this
     helper only supplies local fallback values for variables that are absent.
+    With ``strict``, a file that exists but cannot be read or decoded raises
+    ``_DotenvUnreadable`` instead of looking empty.
     """
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return {}
     except OSError:
+        if strict:
+            raise _DotenvUnreadable(str(path)) from None
         return {}
+    except UnicodeDecodeError:
+        if strict:
+            raise _DotenvUnreadable(str(path)) from None
+        raise
 
     values: Dict[str, str] = {}
     for raw_line in text.splitlines():
@@ -136,16 +159,42 @@ def _read_dotenv(path: Path = DEFAULT_ENV_PATH) -> Dict[str, str]:
     return values
 
 
+# Used only when SDR_DOA_ADMIN_PASSWORD is absent from both the environment
+# and .env. Capabilities report that it is in use so the UI can warn; the
+# console binds to loopback only and throttles failed logins.
+DEFAULT_ADMIN_PASSWORD = "123456"
+
+
 def _admin_password_from_sources(
     environ: Optional[Dict[str, str]] = None,
     dotenv_values: Optional[Dict[str, str]] = None,
+    *,
+    dotenv_path: Path = DEFAULT_ENV_PATH,
 ) -> Optional[str]:
-    """Resolve admin password with process environment precedence."""
+    """Resolve admin password with process environment precedence.
+
+    An explicitly empty value disables admin login (None). A variable absent
+    from both sources falls back to ``DEFAULT_ADMIN_PASSWORD``. A .env that
+    exists but cannot be read also disables login: it may hold the operator's
+    real password, so it must never turn into the public default.
+    """
     source = os.environ if environ is None else environ
     if "SDR_DOA_ADMIN_PASSWORD" in source:
         return source["SDR_DOA_ADMIN_PASSWORD"] or None
-    fallback = dotenv_values if dotenv_values is not None else _read_dotenv()
-    return fallback.get("SDR_DOA_ADMIN_PASSWORD") or None
+    if dotenv_values is not None:
+        fallback = dotenv_values
+    else:
+        try:
+            fallback = _read_dotenv(dotenv_path, strict=True)
+        except _DotenvUnreadable:
+            print(
+                f"[ground-console] warning: {dotenv_path} cannot be read; admin login is disabled",
+                flush=True,
+            )
+            return None
+    if "SDR_DOA_ADMIN_PASSWORD" in fallback:
+        return fallback["SDR_DOA_ADMIN_PASSWORD"] or None
+    return DEFAULT_ADMIN_PASSWORD
 
 
 # HTTP Data Out is the local-LAN path. PPP is reserved for MQTT transport;
@@ -155,18 +204,30 @@ ALLOWED_DATA_HOSTS = frozenset(DEFAULT_ALLOWED_DATA_HOSTS)
 DEFAULT_BIND = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_COMMAND_TTL_MS = 10_000
+# Config patches the console really publishes. Longer than the dry-run TTL to
+# tolerate the unverified clock difference between console and Raspberry, and
+# well under the contract's MAX_CONFIG_TTL_MS.
+CONFIG_COMMAND_TTL_MS = 60_000
+MAX_CONFIG_PATCH_REQUEST_BYTES = 4096
+CONFIG_PATCH_REQUEST_KEYS = frozenset({"changes", "base_config_rev", "confirm"})
+_COMMAND_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 DEFAULT_APP_NAME = "SDR-DoA Ground Console"
 DEFAULT_BRANDING_PATH = Path.home() / ".config" / "sdr-doa-ground-console" / "branding.json"
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "sdr-doa-ground-console" / "console.json"
-# Admin authentication is opt-in; never ship a fallback credential.
 # Process environment wins; a repository-root .env is only a local fallback.
+# With neither, DEFAULT_ADMIN_PASSWORD applies and capabilities flag it.
 ADMIN_PASSWORD = _admin_password_from_sources()
 if not ADMIN_PASSWORD:
-    # Branding remains readable, but admin login is disabled until the operator
-    # supplies the local-only password through the environment or .env fallback.
+    # An explicitly empty SDR_DOA_ADMIN_PASSWORD disables admin login;
+    # branding stays readable.
     ADMIN_PASSWORD = None
 ADMIN_SESSION_COOKIE = "sdr_doa_admin"
 ADMIN_SESSION_TTL_SECONDS = 30 * 60
+# Failed logins are counted for the whole server: after this many inside the
+# window, every login is refused for the lockout period.
+ADMIN_LOGIN_MAX_FAILURES = 5
+ADMIN_LOGIN_FAILURE_WINDOW_S = 60.0
+ADMIN_LOGIN_LOCKOUT_S = 30.0
 MAX_BRANDING_NAME_LENGTH = 60
 MAX_LOGO_BYTES = 256 * 1024
 MAX_LOGO_DIMENSION = 4096
@@ -303,6 +364,169 @@ class _UnavailableMqttMonitor:
         snapshot = _empty_rdf_node_mqtt_snapshot()
         snapshot.update({"enabled": True, "connection": "error", "last_error": "DEPENDENCY_MISSING"})
         return snapshot
+
+    def publish_config_patch(self, _command: Any) -> Dict[str, Any]:
+        raise MonitorPublishError("MQTT_DEPENDENCY_MISSING", self.error)
+
+    def reported_config(self) -> Dict[str, Any]:
+        return {"available": False}
+
+    def config_command_observation(self, _command_id: str) -> Dict[str, Any]:
+        return {"published": False, "puback": None, "echoed_at_ms": None, "ack": None}
+
+
+def _monitor_can_publish(monitor: Any) -> bool:
+    """True for a real monitor that offers the config-patch publish path."""
+    return (
+        monitor is not None
+        and not isinstance(monitor, _UnavailableMqttMonitor)
+        and callable(getattr(monitor, "publish_config_patch", None))
+    )
+
+
+def _plain_number(value: float) -> Any:
+    return int(value) if float(value).is_integer() else value
+
+
+def _config_patch_ranges() -> Dict[str, List[Any]]:
+    return {
+        field: [_plain_number(low), _plain_number(high)]
+        for field, (low, high) in sdr_doa_mqtt.CONFIG_RANGES.items()
+    }
+
+
+class ConfigPatchRejected(Exception):
+    """A config-patch request refused with an HTTP status and a stable code."""
+
+    def __init__(self, status: int, code: str, message: str, **extra: Any) -> None:
+        super().__init__(message)
+        self.status = int(status)
+        self.code = code
+        self.message = message
+        self.extra = extra
+
+    def body(self) -> Dict[str, Any]:
+        return {**self.extra, "ok": False, "code": self.code, "error": self.message}
+
+
+def _parse_config_patch_request(payload: Any) -> Tuple[Dict[str, Any], Optional[int]]:
+    """Checks 3-5 of the config-patch contract; the first failure wins."""
+    if (
+        not isinstance(payload, dict)
+        or "changes" not in payload
+        or "base_config_rev" not in payload
+        or set(payload) - CONFIG_PATCH_REQUEST_KEYS
+    ):
+        raise ConfigPatchRejected(
+            HTTPStatus.BAD_REQUEST,
+            "INVALID_REQUEST",
+            "request must be a JSON object with changes, base_config_rev and confirm only",
+        )
+    changes = payload["changes"]
+    base_config_rev = payload["base_config_rev"]
+    if not isinstance(changes, dict):
+        raise ConfigPatchRejected(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "changes must be a JSON object")
+    if base_config_rev is not None and (
+        isinstance(base_config_rev, bool) or not isinstance(base_config_rev, int) or base_config_rev < 0
+    ):
+        raise ConfigPatchRejected(
+            HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "base_config_rev must be a non-negative integer or null",
+        )
+    if payload.get("confirm") is not True:
+        raise ConfigPatchRejected(
+            HTTPStatus.BAD_REQUEST, "CONFIRM_REQUIRED", "confirm must be true after the change has been reviewed",
+        )
+    if not changes:
+        raise ConfigPatchRejected(HTTPStatus.BAD_REQUEST, "EMPTY_CHANGES", "changes must contain at least one field")
+    unknown = sorted(set(changes) - set(CONFIG_ALLOWLIST))
+    if unknown:
+        raise ConfigPatchRejected(
+            HTTPStatus.BAD_REQUEST,
+            "FIELD_NOT_ALLOWED",
+            "fields not allowed: " + ", ".join(unknown),
+            fields=unknown,
+        )
+    for field, value in changes.items():
+        low, high = CONFIG_ALLOWLIST[field]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or (isinstance(value, float) and not math.isfinite(value))
+            or not low <= value <= high
+        ):
+            raise ConfigPatchRejected(
+                HTTPStatus.BAD_REQUEST,
+                "VALUE_OUT_OF_RANGE",
+                f"{field} must be a finite number from {low:g} to {high:g}",
+                field=field,
+                range=[_plain_number(low), _plain_number(high)],
+            )
+    return dict(changes), base_config_rev
+
+
+_REPORTED_VALUE_SOURCES = frozenset({"v1_config_reported", "v2_effective"})
+_BASE_REVISION_SOURCES = frozenset({"config_reported", "ack", "state"})
+
+
+def _monitor_reported_config(monitor: Any) -> Optional[Dict[str, Any]]:
+    """The monitor's reported_config(), or None when it has none or fails."""
+    reader = getattr(monitor, "reported_config", None)
+    if monitor is None or not callable(reader):
+        return None
+    try:
+        data = reader()
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _finite_or_none(value: Any) -> Any:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _normalize_reported(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only the documented, well-typed fields of reported_config()."""
+    values_in = data.get("values") if isinstance(data.get("values"), dict) else {}
+    sources_in = data.get("value_sources") if isinstance(data.get("value_sources"), dict) else {}
+    values = {field: _finite_or_none(values_in.get(field)) for field in CONFIG_ALLOWLIST}
+    sources = {
+        field: sources_in.get(field) if values[field] is not None and sources_in.get(field) in _REPORTED_VALUE_SOURCES else None
+        for field in CONFIG_ALLOWLIST
+    }
+    revision = data.get("base_config_rev")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        revision = None
+    revision_source = data.get("base_config_rev_source") if revision is not None else None
+    if revision_source not in _BASE_REVISION_SOURCES:
+        revision_source = None
+    reported_in = data.get("reported")
+    reported: Optional[Dict[str, Any]] = None
+    if isinstance(reported_in, dict):
+        def optional_int(key: str) -> Optional[int]:
+            value = reported_in.get(key)
+            return value if type(value) is int else None
+
+        reported = {
+            "config_rev": optional_int("config_rev"),
+            "received_at_ms": optional_int("received_at_ms"),
+            "age_ms": optional_int("age_ms"),
+            "retained": reported_in.get("retained") is True,
+            "synthetic": reported_in.get("synthetic") is True,
+            "source": reported_in.get("source") if reported_in.get("source") in {"v1", "v2", "v1+v2"} else None,
+        }
+    connection = data.get("connection")
+    return {
+        "connection": connection if isinstance(connection, str) and connection else "unknown",
+        "base_config_rev": revision,
+        "base_config_rev_source": revision_source,
+        "reported": reported,
+        "values": values,
+        "value_sources": sources,
+    }
 
 
 def _is_allowed_mqtt_ws_path(value: Any) -> bool:
@@ -1413,7 +1637,7 @@ pre { max-height: 260px; overflow: auto; margin: 8px 0 0; padding: 9px; border: 
       </article>
     </aside>
   </div>
-  <p class="footer">SDR-DoA Ground Console · loopback-only · bounded GET reads · no remote mutation · <span class="mono">control dry-run</span> is preview-only.</p>
+  <p class="footer">SDR-DoA Ground Console · loopback-only · bounded GET reads · this view sends no commands · <span class="mono">control dry-run</span> is preview-only.</p>
 </main>
 
 <div id="settings-modal" class="modal" hidden>
@@ -1424,7 +1648,7 @@ pre { max-height: 260px; overflow: auto; margin: 8px 0 0; padding: 9px; border: 
       <nav class="tabs" aria-label="Settings tabs"><button class="tab active" data-tab="connection" type="button">Data & connection</button><button class="tab" data-tab="branding" type="button">Admin & branding</button></nav>
       <section id="tab-connection" class="tab-panel">
         <p class="note" style="margin:0 0 13px"><strong>Staging-safe:</strong> changes only alter the Ground Console read source and local monitor. Nothing is written to the Raspberry.</p>
-        <div class="form-grid"><div class="field full"><label for="data-url">Data Out URL</label><input id="data-url" value="__BASE_URL__" spellcheck="false"><p class="help">HTTP GET only to the approved SDR-DoA host allowlist. MQTT remains subscriber-only.</p></div><div class="field"><label for="mqtt-host">MQTT monitor host</label><input id="mqtt-host" value="__MQTT_HOST__" placeholder="10.90.0.1" spellcheck="false"></div><div class="field"><label for="mqtt-port">MQTT port</label><input id="mqtt-port" type="number" value="__MQTT_PORT__" min="1" max="65535"></div><div class="field"><label for="refresh-interval">Auto-refresh</label><select id="refresh-interval"><option value="0">Off</option><option value="1">Every 1 second</option><option value="2">Every 2 seconds</option><option value="5">Every 5 seconds</option><option value="10">Every 10 seconds</option><option value="30">Every 30 seconds</option></select></div></div>
+        <div class="form-grid"><div class="field full"><label for="data-url">Data Out URL</label><input id="data-url" value="__BASE_URL__" spellcheck="false"><p class="help">HTTP GET only to the approved SDR-DoA host allowlist. This view only subscribes to MQTT; an admin-confirmed config patch is sent from the main console only.</p></div><div class="field"><label for="mqtt-host">MQTT monitor host</label><input id="mqtt-host" value="__MQTT_HOST__" placeholder="10.90.0.1" spellcheck="false"></div><div class="field"><label for="mqtt-port">MQTT port</label><input id="mqtt-port" type="number" value="__MQTT_PORT__" min="1" max="65535"></div><div class="field"><label for="refresh-interval">Auto-refresh</label><select id="refresh-interval"><option value="0">Off</option><option value="1">Every 1 second</option><option value="2">Every 2 seconds</option><option value="5">Every 5 seconds</option><option value="10">Every 10 seconds</option><option value="30">Every 30 seconds</option></select></div></div>
         <div class="form-actions"><button id="apply-connection" class="primary-button" type="button">Apply & refresh</button><button id="monitor-connect" class="ghost" type="button">Connect MQTT monitor</button></div><p id="connection-status" class="admin-status"></p>
       </section>
       <section id="tab-branding" class="tab-panel" hidden>
@@ -1627,7 +1851,7 @@ function openSettings(tab='connection') { $('settings-modal').hidden=false; sele
 function closeSettings() { $('settings-modal').hidden=true; }
 function selectTab(name) { document.querySelectorAll('.tab').forEach(button=>button.classList.toggle('active',button.dataset.tab===name)); document.querySelectorAll('.tab-panel').forEach(panel=>panel.hidden=panel.id!==`tab-${name}`); }
 async function applyConnection() { const url=$('data-url').value.trim(); const mqttHost=$('mqtt-host').value.trim(); const mqttPort=Number($('mqtt-port').value||9001); const refreshSeconds=Number($('refresh-interval').value||0); if(!url){ setStatus('connection-status','URL is empty.','bad'); return; } try { const r=await fetch('/api/console-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_url:url,mqtt_host:mqttHost,mqtt_port:mqttPort,refresh_seconds:refreshSeconds})}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'configuration rejected'); state.dataUrl=data.base_url; $('source-url').textContent=data.base_url; setAuto(data.refresh_seconds); setStatus('connection-status','Configuration saved locally in Ground Console.','good'); await refresh(); } catch(e) { setStatus('connection-status',e.message,'bad'); } }
-async function connectMqtt() { const host=$('mqtt-host').value.trim(); const port=Number($('mqtt-port').value||9001); if(!host){ setStatus('connection-status','Enter an MQTT broker IP address or localhost first.','bad'); return; } try { const r=await fetch(`/api/mqtt/connect?host=${encodeURIComponent(host)}&port=${encodeURIComponent(port)}`,{method:'POST'}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'MQTT monitor failed'); renderMqtt(data); setStatus('connection-status','MQTT monitor connected as subscriber-only.','good'); setTimeout(refreshMqtt,700); } catch(e) { setStatus('connection-status',e.message,'bad'); } }
+async function connectMqtt() { const host=$('mqtt-host').value.trim(); const port=Number($('mqtt-port').value||9001); if(!host){ setStatus('connection-status','Enter an MQTT broker IP address or localhost first.','bad'); return; } try { const r=await fetch(`/api/mqtt/connect?host=${encodeURIComponent(host)}&port=${encodeURIComponent(port)}`,{method:'POST'}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'MQTT monitor failed'); renderMqtt(data); setStatus('connection-status','MQTT monitor connected; this view only subscribes.','good'); setTimeout(refreshMqtt,700); } catch(e) { setStatus('connection-status',e.message,'bad'); } }
 async function adminLogin() { const password=$('admin-password').value; try { const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password})}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'login failed'); $('admin-login-box').hidden=true; $('admin-workspace').hidden=false; $('admin-password').value=''; setStatus('brand-status','Admin active.','good'); renderBranding(state.branding); } catch(e) { setStatus('admin-login-status',e.message,'bad'); } }
 async function adminLogout() { await fetch('/api/admin/logout',{method:'POST'}); $('admin-login-box').hidden=false; $('admin-workspace').hidden=true; setStatus('admin-login-status','Admin session closed.',''); }
 function readLogo(file) { if(!file) return; if(file.size>256*1024){ setStatus('brand-status','Logo exceeds 256 KiB.','bad'); $('brand-logo').value=''; return; } const reader=new FileReader(); reader.onload=()=>{ state.pendingLogo=String(reader.result||''); $('brand-preview').src=state.pendingLogo; $('brand-preview').hidden=false; $('preview-placeholder').hidden=true; }; reader.onerror=()=>setStatus('brand-status','Logo could not be read.','bad'); reader.readAsDataURL(file); }
@@ -1793,6 +2017,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             and origin_port == expected_port
             and target_port == expected_port
         )
+
+    # Receiver mutations and the config-patch publish share this port-exact,
+    # same-origin loopback rule.
+    _same_origin_loopback_request = _receiver_mutation_origin_is_valid
+
+    def _send_config_patch_error(self, status: int, code: str, message: str, **extra: Any) -> None:
+        self._send_json({**extra, "ok": False, "code": code, "error": message}, status)
 
     def _receiver_error(self, exc: Exception) -> None:
         if isinstance(exc, ReceiverConflictError):
@@ -2229,16 +2460,29 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._send_json(snapshot)
             return
         if parsed.path == "/api/capabilities":
+            monitor = self.console_server.mqtt_monitor
             self._send_json({
-                "read_only": True,
-                "mqtt_publish": False,
+                # The console has one publish path, the admin-gated config
+                # patch below. It never POSTs to the Raspberry or applies
+                # settings itself; the edge agent does.
+                "read_only": False,
+                "mqtt_publish": True,
                 "remote_post": False,
                 "config_apply": False,
-                "mqtt_monitor": self.console_server.mqtt_monitor is not None,
+                "mqtt_monitor": monitor is not None,
                 "admin_branding": True,
                 "admin_auth_required": True,
                 "admin_enabled": bool(ADMIN_PASSWORD),
+                "admin_default_password": ADMIN_PASSWORD == DEFAULT_ADMIN_PASSWORD,
                 "config_allowlist": sorted(CONFIG_ALLOWLIST),
+                "config_patch": {
+                    "enabled": _monitor_can_publish(monitor),
+                    "requires_admin": True,
+                    "topic": sdr_doa_mqtt.TOPICS["config_patch"],
+                    "qos": sdr_doa_mqtt.COMMAND_QOS,
+                    "ttl_ms": CONFIG_COMMAND_TTL_MS,
+                    "ranges": _config_patch_ranges(),
+                },
                 "refresh_intervals_s": sorted(ALLOWED_REFRESH_INTERVALS),
                 "snapshot_budget_ms": int(SNAPSHOT_TOTAL_BUDGET_S * 1000),
             })
@@ -2259,6 +2503,27 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._send_json(_empty_rdf_node_mqtt_snapshot())
             else:
                 self._send_json(monitor.rdf_node_snapshot())
+            return
+        if parsed.path == "/api/mqtt/config-reported":
+            self._send_json(self.console_server.config_reported())
+            return
+        if parsed.path == "/api/mqtt/config-patch":
+            self._send_json({"command": self.console_server.config_commands.latest(self.console_server.mqtt_monitor)})
+            return
+        if parsed.path.startswith("/api/mqtt/config-patch/"):
+            command_id = parsed.path[len("/api/mqtt/config-patch/"):]
+            if _COMMAND_ID_RE.fullmatch(command_id) is None:
+                self._send_config_patch_error(
+                    HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "command id must match [A-Za-z0-9_-]{1,64}",
+                )
+                return
+            status = self.console_server.config_commands.status(command_id, self.console_server.mqtt_monitor)
+            if status is None:
+                self._send_config_patch_error(
+                    HTTPStatus.NOT_FOUND, "COMMAND_UNKNOWN", "this console has no record of that command id",
+                )
+                return
+            self._send_json(status)
             return
         self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -2294,7 +2559,20 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                         HTTPStatus.SERVICE_UNAVAILABLE,
                     )
                     return
-                token = self.console_server.create_admin_session(password)
+                token, retry_after_s = self.console_server.attempt_admin_login(password)
+                if retry_after_s > 0:
+                    seconds = max(1, math.ceil(retry_after_s))
+                    self._send_json(
+                        {
+                            "ok": False,
+                            "error": f"too many failed admin logins; try again in {seconds} s",
+                            "code": "ADMIN_LOGIN_THROTTLED",
+                            "retry_after_s": seconds,
+                        },
+                        HTTPStatus.TOO_MANY_REQUESTS,
+                        headers={"Retry-After": str(seconds)},
+                    )
+                    return
                 if not token:
                     self._send_json(
                         {"ok": False, "error": "admin password is incorrect", "code": "ADMIN_PASSWORD_INVALID"},
@@ -2334,6 +2612,28 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, **branding})
             except (ValueError, OSError) as exc:
                 self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if parsed.path == "/api/mqtt/config-patch":
+            # Checks 1-2 run before the body is read; 3-10 live on the server.
+            if not self._same_origin_loopback_request():
+                self._send_config_patch_error(
+                    HTTPStatus.FORBIDDEN,
+                    "ORIGIN_REJECTED",
+                    "config patch requires a same-origin loopback request",
+                )
+                return
+            if not self._is_admin():
+                self._send_config_patch_error(
+                    HTTPStatus.UNAUTHORIZED, "ADMIN_REQUIRED", "admin authentication required",
+                )
+                return
+            try:
+                payload = self._read_json(MAX_CONFIG_PATCH_REQUEST_BYTES)
+            except ValueError as exc:
+                self._send_config_patch_error(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", str(exc))
+                return
+            status, body = self.console_server.submit_config_patch(payload)
+            self._send_json(body, status)
             return
         if parsed.path == "/api/mqtt/connect":
             query = parse_qs(parsed.query, keep_blank_values=False)
@@ -2468,6 +2768,18 @@ class GroundConsoleServer(ThreadingHTTPServer):
         self._branding = _load_branding(self.branding_path)
         self._session_lock = threading.RLock()
         self._admin_sessions: Dict[str, float] = {}
+        # Failed-login throttle, global to this server and kept under
+        # _session_lock. Tests may replace the clock.
+        self.monotonic: Callable[[], float] = time.monotonic
+        self._login_failures: List[float] = []
+        self._login_locked_until = 0.0
+        # Wall clock for config-patch issue and expiry times; tests may
+        # replace it to step past a command's expiry.
+        self.clock_ms: Callable[[], int] = lambda: int(time.time() * 1000)
+        self.config_commands = ConfigCommandTracker(clock_ms=lambda: self.clock_ms())
+        # One config patch is checked and published at a time, so two
+        # requests cannot both pass the in-flight check.
+        self._config_patch_lock = threading.Lock()
         self.node_progress = NodeProgressTracker()
         self._snapshot_flights = _SingleFlight()
         self.receiver_store = ReceiverRecordStore(
@@ -2576,12 +2888,15 @@ class GroundConsoleServer(ThreadingHTTPServer):
             self._branding = normalized
 
     def create_admin_session(self, password: Any) -> Optional[str]:
-        if (
-            not isinstance(password, str)
-            or not isinstance(ADMIN_PASSWORD, str)
-            or not ADMIN_PASSWORD
-            or not hmac.compare_digest(password, ADMIN_PASSWORD)
-        ):
+        if not isinstance(password, str) or not isinstance(ADMIN_PASSWORD, str) or not ADMIN_PASSWORD:
+            return None
+        try:
+            # Bytes, because compare_digest refuses non-ASCII str; a lone
+            # surrogate from JSON cannot be encoded and is simply wrong.
+            matches = hmac.compare_digest(password.encode("utf-8"), ADMIN_PASSWORD.encode("utf-8"))
+        except (TypeError, ValueError):
+            return None
+        if not matches:
             return None
         token = secrets.token_urlsafe(32)
         with self._session_lock:
@@ -2589,6 +2904,34 @@ class GroundConsoleServer(ThreadingHTTPServer):
             self._admin_sessions = {key: expiry for key, expiry in self._admin_sessions.items() if expiry > now}
             self._admin_sessions[token] = now + ADMIN_SESSION_TTL_SECONDS
         return token
+
+    def attempt_admin_login(self, password: Any) -> Tuple[Optional[str], float]:
+        """Return (token, 0) on success, (None, 0) for a wrong password, or
+        (None, seconds) while failed logins are throttled.
+
+        After ADMIN_LOGIN_MAX_FAILURES failures inside the window, every login
+        is refused for ADMIN_LOGIN_LOCKOUT_S, the correct password included.
+        """
+        with self._session_lock:
+            now = self.monotonic()
+            if self._login_locked_until > now:
+                return None, self._login_locked_until - now
+            try:
+                token = self.create_admin_session(password)
+            except (TypeError, ValueError):
+                token = None
+            if token is not None:
+                self._login_failures.clear()
+                return token, 0.0
+            self._login_failures = [
+                failed_at for failed_at in self._login_failures
+                if now - failed_at < ADMIN_LOGIN_FAILURE_WINDOW_S
+            ]
+            self._login_failures.append(now)
+            if len(self._login_failures) >= ADMIN_LOGIN_MAX_FAILURES:
+                self._login_failures.clear()
+                self._login_locked_until = now + ADMIN_LOGIN_LOCKOUT_S
+            return None, 0.0
 
     def is_admin_token(self, token: str) -> bool:
         if not token:
@@ -2606,6 +2949,147 @@ class GroundConsoleServer(ThreadingHTTPServer):
         if token:
             with self._session_lock:
                 self._admin_sessions.pop(token, None)
+
+    def config_reported(self) -> Dict[str, Any]:
+        """Body of GET /api/mqtt/config-reported; always a 200 payload."""
+        monitor = self.mqtt_monitor
+        config = self.get_config()
+        empty = {field: None for field in CONFIG_ALLOWLIST}
+        body: Dict[str, Any] = {
+            "available": False,
+            "code": None,
+            "now_ms": self.clock_ms(),
+            "broker": {
+                "host": getattr(monitor, "host", None) if monitor is not None else (config.get("mqtt_host") or None),
+                "port": getattr(monitor, "port", None) if monitor is not None else config.get("mqtt_port"),
+                "transport": getattr(monitor, "transport", None) if monitor is not None else config.get("mqtt_transport"),
+                "connection": "disabled",
+            },
+            "base_config_rev": None,
+            "base_config_rev_source": None,
+            "reported": None,
+            "values": dict(empty),
+            "value_sources": dict(empty),
+            "pending_command_id": self.config_commands.in_flight(monitor),
+        }
+        if monitor is None:
+            body["code"] = "MQTT_MONITOR_DISABLED"
+            return body
+        data = _monitor_reported_config(monitor) if _monitor_can_publish(monitor) else None
+        if data is None or data.get("available") is not True:
+            body["code"] = "MQTT_DEPENDENCY_MISSING"
+            body["broker"]["connection"] = "error"
+            return body
+        normalized = _normalize_reported(data)
+        body["broker"]["connection"] = normalized.pop("connection")
+        body.update(normalized)
+        body["available"] = True
+        return body
+
+    def submit_config_patch(self, payload: Any) -> Tuple[int, Dict[str, Any]]:
+        """Checks 3-10 of POST /api/mqtt/config-patch; returns (status, body).
+
+        The caller has already checked the Origin and the admin cookie.
+        """
+        try:
+            changes, requested_revision = _parse_config_patch_request(payload)
+            with self._config_patch_lock:
+                return self._publish_config_patch_locked(changes, requested_revision)
+        except ConfigPatchRejected as rejected:
+            return rejected.status, rejected.body()
+
+    def _publish_config_patch_locked(
+        self,
+        changes: Dict[str, Any],
+        requested_revision: Optional[int],
+    ) -> Tuple[int, Dict[str, Any]]:
+        monitor = self.mqtt_monitor
+        if monitor is None:
+            raise ConfigPatchRejected(
+                HTTPStatus.CONFLICT, "MQTT_MONITOR_DISABLED", "the MQTT monitor is off; set an MQTT host first",
+            )
+        reported = _monitor_reported_config(monitor) if _monitor_can_publish(monitor) else None
+        if reported is None or reported.get("available") is not True:
+            raise ConfigPatchRejected(
+                HTTPStatus.SERVICE_UNAVAILABLE, "MQTT_DEPENDENCY_MISSING", MQTT_DEPENDENCY_ERROR,
+            )
+        current = _normalize_reported(reported)
+        if current["connection"] != "connected":
+            raise ConfigPatchRejected(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "MQTT_NOT_CONNECTED",
+                "the MQTT monitor is not connected with its subscriptions acknowledged",
+            )
+        base_revision = current["base_config_rev"]
+        if base_revision is None:
+            raise ConfigPatchRejected(
+                HTTPStatus.CONFLICT,
+                "CONFIG_REVISION_UNKNOWN",
+                "no config revision has been reported on MQTT yet",
+            )
+        if requested_revision != base_revision:
+            raise ConfigPatchRejected(
+                HTTPStatus.CONFLICT,
+                "CONFIG_REVISION_STALE",
+                "the reviewed base revision is no longer current; reload the reported values",
+                current_base_config_rev=base_revision,
+            )
+        pending = self.config_commands.in_flight(monitor)
+        if pending is not None:
+            raise ConfigPatchRejected(
+                HTTPStatus.CONFLICT,
+                "COMMAND_IN_FLIGHT",
+                "another config patch is still waiting for its result",
+                command_id=pending,
+            )
+        issued = int(self.clock_ms())
+        try:
+            command = sdr_doa_mqtt.build_config_patch(
+                command_id="gc-" + uuid.uuid4().hex[:24],
+                base_config_rev=base_revision,
+                changes=changes,
+                issued_ts_ms=issued,
+                expires_ts_ms=issued + CONFIG_COMMAND_TTL_MS,
+            )
+            sdr_doa_mqtt.validate_config_patch(command, now_ms=issued)
+        except sdr_doa_mqtt.ContractError as exc:
+            raise ConfigPatchRejected(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", str(exc)) from exc
+        try:
+            result = monitor.publish_config_patch(command)
+        except Exception as exc:
+            # Match on the code, not the class: the monitor module may be
+            # loaded under another package name than this one.
+            code = getattr(exc, "code", None)
+            self.config_commands.record(command, monitor, publish_failed=True)
+            if code in {"MQTT_NOT_CONNECTED", "MQTT_DEPENDENCY_MISSING"}:
+                raise ConfigPatchRejected(
+                    HTTPStatus.SERVICE_UNAVAILABLE, code, str(exc) or code, command_id=command["id"],
+                ) from exc
+            raise ConfigPatchRejected(
+                HTTPStatus.BAD_GATEWAY,
+                "MQTT_PUBLISH_FAILED",
+                f"MQTT publish failed: {exc}" if str(exc) else "MQTT publish failed",
+                command_id=command["id"],
+            ) from exc
+        published_at = result.get("published_at_ms") if isinstance(result, dict) else None
+        self.config_commands.record(
+            command,
+            monitor,
+            published_at_ms=published_at if type(published_at) is int else issued,
+        )
+        topic = result.get("topic") if isinstance(result, dict) else None
+        return HTTPStatus.ACCEPTED, {
+            "ok": True,
+            "command_id": command["id"],
+            "state": "published",
+            "topic": topic if isinstance(topic, str) else sdr_doa_mqtt.TOPICS["config_patch"],
+            "qos": sdr_doa_mqtt.COMMAND_QOS,
+            "base_config_rev": command["base_config_rev"],
+            "issued_ts_ms": command["issued_ts_ms"],
+            "expires_ts_ms": command["expires_ts_ms"],
+            "ttl_ms": CONFIG_COMMAND_TTL_MS,
+            "changes": dict(command["changes"]),
+        }
 
     def enable_mqtt_monitor(
         self,
@@ -2625,18 +3109,30 @@ class GroundConsoleServer(ThreadingHTTPServer):
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Local read-only SDR-DoA Ground Console")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Local SDR-DoA Ground Console: read-only Data Out, an MQTT monitor, "
+            "and one admin-confirmed config-patch publish"
+        )
+    )
     parser.add_argument("--base-url", default="http://doasdr.local:8081", help="SDR-DoA Data Out base URL")
     parser.add_argument("--legacy-ui", action="store_true", help="use the previous embedded UI instead of the frontend build")
     parser.add_argument("--bind", default=DEFAULT_BIND, help="local bind address")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="local console port")
-    parser.add_argument("--mqtt-host", default="10.90.0.1", help="MQTT broker IPv4/IPv6 address or localhost; subscriber-only")
+    parser.add_argument(
+        "--mqtt-host",
+        default="10.90.0.1",
+        help=(
+            "MQTT broker IPv4/IPv6 address or localhost; the monitor subscribes and publishes "
+            "only an admin-confirmed config patch"
+        ),
+    )
     parser.add_argument("--mqtt-port", type=int, default=9001, help="MQTT broker port")
     parser.add_argument(
         "--mqtt-transport",
         choices=ALLOWED_MQTT_TRANSPORTS,
         default="websockets",
-        help="MQTT transport for the subscriber-only monitor",
+        help="MQTT transport for the monitor (no TLS or credentials)",
     )
     parser.add_argument("--mqtt-ws-path", default=DEFAULT_MQTT_WS_PATH, help="MQTT WebSocket path when --mqtt-transport is websockets")
     parser.add_argument("--branding-path", default=str(DEFAULT_BRANDING_PATH), help="local branding JSON path")
@@ -2687,6 +3183,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     print(f"Ground Console: http://{args.bind}:{args.port}/", flush=True)
     print(f"Read-only Data Out: {config['base_url']}", flush=True)
+    if ADMIN_PASSWORD == DEFAULT_ADMIN_PASSWORD:
+        print(
+            "Warning: the default admin password is in use. Admin unlocks the config-patch send "
+            "to the Raspberry; set your own SDR_DOA_ADMIN_PASSWORD in .env.",
+            flush=True,
+        )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

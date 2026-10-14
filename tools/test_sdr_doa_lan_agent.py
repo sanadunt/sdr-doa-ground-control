@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sdr_doa_collector as collector
 import sdr_doa_lan_agent as agent
 import sdr_doa_mqtt as contract
-from sdr_doa_mqtt_stdlib import is_loopback_host
+from sdr_doa_mqtt_stdlib import IncomingMessage, is_loopback_host
 
 FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures"
 FIXTURE_TIMESTAMP = "1000000"
@@ -531,6 +531,53 @@ def test_telemetry_drop_count_reports_health_superseded_while_disconnected() -> 
     health = broker.payloads("health")
     assert len(health) == 1
     assert health[0]["telemetry_drop_count"] >= 2, health
+
+
+def test_publish_without_config_control_rejects_patches_with_remote_control_disabled() -> None:
+    """D15: with --publish alone the agent listens and answers instead of staying silent."""
+    broker = FakeBroker()
+    runtime = make_runtime(broker)
+    assert runtime.publish_enabled is True and runtime.config_enabled is False
+    runtime._connect_if_due(time.monotonic())
+    client = broker.clients[-1]
+    assert client.subscriptions == [contract.TOPICS["config_patch"]]
+
+    issued = int(time.time() * 1000)
+    payload = contract.compact_json(
+        contract.build_config_patch(
+            command_id="gc-0123456789abcdef01234567",
+            base_config_rev=0,
+            changes={"center_frequency_hz": 433_920_000},
+            issued_ts_ms=issued,
+            expires_ts_ms=issued + 60_000,
+        )
+    ).encode("utf-8")
+    # Delivered through the callback the agent gave its MQTT client.
+    client.options["on_message"](
+        IncomingMessage(
+            topic=contract.TOPICS["config_patch"],
+            payload=payload,
+            qos=1,
+            retain=False,
+            duplicate=False,
+        )
+    )
+    assert runtime.pending_commands == [], "a disabled agent must not queue the command"
+    runtime._process_commands(int(time.time() * 1000))
+    runtime._flush_or_disconnect()
+
+    acks = broker.payloads("ack_config")
+    assert len(acks) == 1, acks
+    ack = acks[0]
+    contract.validate_payload("ack_config", ack)
+    assert ack["id"] == "gc-0123456789abcdef01234567"
+    assert ack["status"] == "rejected"
+    assert ack["error"]["code"] == "REMOTE_CONTROL_DISABLED"
+    assert ack["readback_ok"] is False
+    assert "changed_fields" not in ack
+    [(_topic, _raw, qos, retain)] = broker.messages("ack_config")
+    assert (qos, retain) == (1, False), "an ACK is QoS 1 and never retained"
+    runtime.close()
 
 
 def test_reconnect_resends_state_and_config_immediately() -> None:

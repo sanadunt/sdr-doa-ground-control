@@ -514,6 +514,13 @@ class RdfNodeV2Telemetry:
         else:
             store("CONTEXT" if retained else "FRESH", value)
 
+    def config_reported_entry(self) -> dict[str, Any]:
+        """Copy of the latest ``config/reported`` entry, for display only.
+
+        Its ``rev`` is never a base revision for a v1 config patch.
+        """
+        return copy.deepcopy(self._topics["config/reported"])
+
     def snapshot(self, now_ms: int) -> dict[str, object]:
         if type(now_ms) is not int or now_ms < 0:
             raise ValueError("invalid snapshot time")

@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Display-only MQTT monitor for the Ground Console.
+"""MQTT monitor for the Ground Console.
 
-It subscribes to a configured topic root and never publishes, sends commands,
-or writes a Raspberry resource.
+It subscribes to a configured topic root and, on its own, never publishes. Its
+one publish path is ``publish_config_patch``: an explicit, admin-confirmed
+config patch that the console server hands it (QoS 1, never retained, only
+while connected). It never writes a Raspberry resource directly; the edge
+agent decides whether to apply the patch and answers on ``ack/config``.
 """
 
 from __future__ import annotations
 
+import math
 import secrets
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 import paho.mqtt.client as mqtt
 from paho.mqtt.packettypes import PacketTypes
@@ -19,8 +23,10 @@ from paho.mqtt.properties import Properties
 import sdr_doa_mqtt as contract
 
 if __package__:
+    from .config_command_tracker import FINAL_ACK_STATUSES, MonitorPublishError
     from .rdf_node_mqtt_v2 import RDF_NODE_V2_SUFFIXES, RdfNodeV2Telemetry
 else:
+    from config_command_tracker import FINAL_ACK_STATUSES, MonitorPublishError
     from rdf_node_mqtt_v2 import RDF_NODE_V2_SUFFIXES, RdfNodeV2Telemetry
 
 
@@ -51,6 +57,23 @@ VALIDITY_FLAG_FIELDS = ("valid", "doa_valid", "settings_valid")
 CLIENT_ID_PREFIX = "groundconsole"
 RECONNECT_MIN_DELAY_S = 1
 RECONNECT_MAX_DELAY_S = 10
+CONFIG_PATCH_SUFFIX = "/cmd/config/patch"
+# Bounded memory for the config-patch path: ACKs by command id, the commands
+# this client published, and PUBACKs that arrived before their mid was known.
+MAX_CONFIG_ACKS = 64
+MAX_CONFIG_PUBLISHES = 32
+MAX_EARLY_PUBACKS = 16
+CONFIG_FIELDS = tuple(contract.CONFIG_RANGES)
+# RDF Node v2 reports the first VFO under its own key names. Only these VFO
+# values are reported anywhere; v1 config_reported has no VFO fields.
+V2_EFFECTIVE_KEYS = {
+    "center_frequency_hz": "center_frequency_hz",
+    "gain_db": "gain_db",
+    "vfo_frequency_hz": "vfo0_frequency_hz",
+    "vfo_bandwidth_hz": "vfo0_bandwidth_hz",
+    "vfo_squelch_db": "vfo0_squelch_db",
+}
+V1_REPORTED_FIELDS = ("center_frequency_hz", "gain_db")
 
 
 def _now_ms() -> int:
@@ -77,8 +100,20 @@ def _kind_for_topic(topic: str) -> Optional[str]:
     return contract.kind_for_topic(topic)
 
 
+def _finite_number(value: Any) -> Optional[float]:
+    if type(value) is int:
+        return value
+    if type(value) is float and math.isfinite(value):
+        return value
+    return None
+
+
 class MqttMonitor:
-    """One read-only MQTT client for v1 metrics and RDF Node v2 telemetry."""
+    """One MQTT client for v1 metrics and RDF Node v2 telemetry.
+
+    It subscribes only; ``publish_config_patch`` is the single publish path,
+    used for an explicit, admin-confirmed config patch.
+    """
 
     def __init__(
         self,
@@ -129,6 +164,16 @@ class MqttMonitor:
         self._last_by_kind: Dict[str, Dict[str, Any]] = {}
         self._topic_counts: Dict[str, int] = {}
         self._kind_counts: Dict[str, int] = {}
+        # Config-patch observations. Kept apart from _last_by_kind so the
+        # Message Monitor snapshot keeps its exact shape.
+        self._message_seq = 0
+        self._v1_reported: Optional[Dict[str, Any]] = None
+        self._v1_state: Optional[Dict[str, Any]] = None
+        self._v1_last_ack: Optional[Dict[str, Any]] = None
+        self._config_acks: Dict[str, Dict[str, Any]] = {}
+        self._config_publishes: Dict[str, Dict[str, Any]] = {}
+        self._publish_mids: Dict[int, str] = {}
+        self._early_pubacks: Dict[int, Dict[str, Any]] = {}
 
     def start(self) -> None:
         with self._lifecycle_lock:
@@ -142,6 +187,9 @@ class MqttMonitor:
                 self._rdf_last_error = None
                 self._pending_subacks.clear()
                 self._subscriptions_ready = False
+                # A new client numbers its packets from scratch.
+                self._publish_mids.clear()
+                self._early_pubacks.clear()
             client: Any = None
             try:
                 client = mqtt.Client(
@@ -155,6 +203,7 @@ class MqttMonitor:
                 client.on_disconnect = self._on_disconnect
                 client.on_subscribe = self._on_subscribe
                 client.on_message = self._on_message
+                client.on_publish = self._on_publish
                 client.reconnect_delay_set(
                     min_delay=RECONNECT_MIN_DELAY_S,
                     max_delay=RECONNECT_MAX_DELAY_S,
@@ -424,6 +473,290 @@ class MqttMonitor:
             if error:
                 entry["error"] = error
             self._last_by_kind[kind] = entry
+            self._observe_config_locked(kind, decoded, payload_bytes, cleared, retained, received_at_ms)
+
+    def _observe_config_locked(
+        self,
+        kind: str,
+        decoded: Optional[Dict[str, Any]],
+        payload_bytes: bytes,
+        cleared: bool,
+        retained: bool,
+        received_at_ms: int,
+    ) -> None:
+        """Keep what the config-patch path needs: revisions, ACKs, echoes."""
+        self._message_seq += 1
+        observed = {
+            "payload": decoded,
+            "received_at_ms": received_at_ms,
+            "retained": retained,
+            "seq": self._message_seq,
+        }
+        if kind == "config_reported":
+            if cleared:
+                self._v1_reported = None
+            elif decoded is not None:
+                self._v1_reported = observed
+        elif kind == "state":
+            if cleared:
+                self._v1_state = None
+            elif decoded is not None:
+                self._v1_state = observed
+        elif kind == "ack_config" and decoded is not None:
+            if not retained:
+                # A broker replay of a retained ACK has no place in time
+                # relative to config_reported, so it never moves the base.
+                self._v1_last_ack = observed
+            command_id = decoded.get("id")
+            if isinstance(command_id, str):
+                error = decoded.get("error") if isinstance(decoded.get("error"), Mapping) else {}
+                changed = decoded.get("changed_fields")
+                ack = {
+                    "status": decoded.get("status"),
+                    "config_rev": decoded.get("config_rev"),
+                    "readback_ok": decoded.get("readback_ok"),
+                    "error_code": error.get("code"),
+                    "current_config_rev": error.get("current_config_rev"),
+                    "changed_fields": list(changed) if isinstance(changed, list) else [],
+                    "received_at_ms": received_at_ms,
+                    "retained": retained,
+                }
+                previous = self._config_acks.pop(command_id, None)
+                if previous is not None and previous.get("status") in FINAL_ACK_STATUSES and ack["status"] not in FINAL_ACK_STATUSES:
+                    # A late progress ACK must not hide the final answer.
+                    ack = previous
+                self._config_acks[command_id] = ack
+                while len(self._config_acks) > MAX_CONFIG_ACKS:
+                    self._config_acks.pop(next(iter(self._config_acks)))
+        elif kind == "config_patch" and decoded is not None:
+            record = self._config_publishes.get(str(decoded.get("id")))
+            if record is not None and record["echoed_at_ms"] is None and record["raw"] == payload_bytes:
+                record["echoed_at_ms"] = received_at_ms
+
+    def _on_publish(
+        self,
+        client: Any,
+        _userdata: Any,
+        mid: Any,
+        reason_code: Any = None,
+        _properties: Any = None,
+    ) -> None:
+        """Record a PUBACK. paho calls this with its own message lock held,
+        which is why ``publish_config_patch`` never publishes under ``_lock``."""
+        if type(mid) is not int:
+            return
+        with self._lock:
+            if client is not self._client or not self._started or self._stopping:
+                return
+            puback = {"received_at_ms": _now_ms(), "reason": _reason_value(reason_code)}
+            command_id = self._publish_mids.pop(mid, None)
+            record = self._config_publishes.get(command_id) if command_id is not None else None
+            if record is not None:
+                record["puback"] = puback
+                return
+            self._early_pubacks.pop(mid, None)
+            self._early_pubacks[mid] = puback
+            while len(self._early_pubacks) > MAX_EARLY_PUBACKS:
+                self._early_pubacks.pop(next(iter(self._early_pubacks)))
+
+    def _publish_ready_locked(self) -> bool:
+        return (
+            self._started
+            and not self._stopping
+            and self._client is not None
+            and self._connection == "connected"
+            and self._subscriptions_ready
+        )
+
+    def publish_config_patch(self, command: Mapping[str, Any]) -> Dict[str, Any]:
+        """Publish one validated config patch at QoS 1, never retained.
+
+        It publishes only while connected with every subscription
+        acknowledged, so paho does not hold a command back for a later
+        reconnect. The broker drops it after its TTL (MessageExpiryInterval),
+        and the edge agent rejects it after ``expires_ts_ms``.
+        """
+        payload = contract.validate_config_patch(command)
+        command_id = str(payload["id"])
+        raw = contract.compact_json(payload).encode("utf-8")
+        topic = self.root + CONFIG_PATCH_SUFFIX
+        ttl_ms = int(payload["expires_ts_ms"]) - int(payload["issued_ts_ms"])
+        with self._lock:
+            if not self._publish_ready_locked():
+                raise MonitorPublishError("MQTT_NOT_CONNECTED", "MQTT monitor is not connected")
+            if command_id in self._config_publishes:
+                raise MonitorPublishError("MQTT_PUBLISH_FAILED", "command id was already published")
+            client = self._client
+            mqtt_module = self._mqtt
+        success = int(getattr(mqtt_module, "MQTT_ERR_SUCCESS", 0))
+        no_connection = int(getattr(mqtt_module, "MQTT_ERR_NO_CONN", 4))
+        # Never under _lock: paho holds its message lock while it calls
+        # on_publish, and publish() takes that same lock.
+        publish_started_ms = _now_ms()
+        try:
+            properties = Properties(getattr(PacketTypes, "PUBLISH", 3))
+            properties.MessageExpiryInterval = max(1, math.ceil(ttl_ms / 1000))
+            info = client.publish(
+                topic,
+                raw,
+                qos=contract.COMMAND_QOS,
+                retain=False,
+                properties=properties,
+            )
+        except Exception as exc:
+            raise MonitorPublishError("MQTT_PUBLISH_FAILED", f"MQTT publish failed: {type(exc).__name__}") from exc
+        published_at_ms = _now_ms()
+        rc = success if info is None else int(getattr(info, "rc", success))
+        mid = getattr(info, "mid", None) if info is not None else None
+        if type(mid) is not int:
+            mid = None
+        if rc != success:
+            if rc == no_connection and self._drop_unsent(client, mid):
+                raise MonitorPublishError("MQTT_NOT_CONNECTED", "MQTT connection closed before the publish")
+            if rc != no_connection:
+                raise MonitorPublishError("MQTT_PUBLISH_FAILED", f"MQTT publish returned rc={rc}")
+            # paho kept the command for its next connection and it could not
+            # be withdrawn; track it so its ACK is still seen. Its TTL bounds
+            # how late it can be applied.
+        with self._lock:
+            record: Dict[str, Any] = {
+                "mid": mid,
+                "published_at_ms": published_at_ms,
+                "puback": None,
+                "echoed_at_ms": None,
+                "raw": raw,
+            }
+            if mid is not None:
+                early = self._early_pubacks.pop(mid, None)
+                # paho reuses mids, so only a PUBACK that arrived during this
+                # publish call can belong to it.
+                if early is not None and early["received_at_ms"] >= publish_started_ms:
+                    record["puback"] = early
+                else:
+                    self._publish_mids[mid] = command_id
+            self._config_publishes[command_id] = record
+            while len(self._config_publishes) > MAX_CONFIG_PUBLISHES:
+                oldest_id = next(iter(self._config_publishes))
+                oldest = self._config_publishes.pop(oldest_id)
+                if oldest.get("mid") is not None and self._publish_mids.get(oldest["mid"]) == oldest_id:
+                    self._publish_mids.pop(oldest["mid"], None)
+        return {"mid": mid, "rc": rc, "published_at_ms": published_at_ms, "topic": topic}
+
+    @staticmethod
+    def _drop_unsent(client: Any, mid: Optional[int]) -> bool:
+        """Withdraw a QoS 1 message paho queued while disconnected.
+
+        With MQTT_ERR_NO_CONN nothing reached the socket, but paho keeps the
+        message and would send it after the next reconnect. Returns True when
+        it was removed. Uses paho 2.x internals; any mismatch is a no-op.
+        """
+        messages = getattr(client, "_out_messages", None)
+        mutex = getattr(client, "_out_message_mutex", None)
+        if mid is None or messages is None or mutex is None:
+            return False
+        try:
+            with mutex:
+                return messages.pop(mid, None) is not None
+        except Exception:
+            return False
+
+    def config_command_observation(self, command_id: str) -> Dict[str, Any]:
+        """PUBACK, broker echo and ACK seen for one published command id."""
+        with self._lock:
+            record = self._config_publishes.get(command_id)
+            ack = self._config_acks.get(command_id)
+            return {
+                "published": record is not None,
+                "puback": dict(record["puback"]) if record is not None and record["puback"] else None,
+                "echoed_at_ms": record["echoed_at_ms"] if record is not None else None,
+                "ack": dict(ack) if ack is not None else None,
+            }
+
+    def _connection_label_locked(self) -> str:
+        if self._publish_ready_locked():
+            return "connected"
+        if self._connection == "connected":
+            return "connecting"
+        return self._connection
+
+    def _base_revision_locked(self) -> tuple[Optional[int], Optional[str]]:
+        """The v1 revision a new patch must be based on (RDF v2 rev never is)."""
+        reported = self._v1_reported
+        if reported is not None:
+            revision: Optional[int] = reported["payload"].get("config_rev")
+            source = "config_reported"
+            ack = self._v1_last_ack
+            if ack is not None and ack["seq"] > reported["seq"]:
+                ack_payload = ack["payload"]
+                status = ack_payload.get("status")
+                ack_revision: Any = None
+                if status == "applied":
+                    ack_revision = ack_payload.get("config_rev")
+                elif status == "conflict" and isinstance(ack_payload.get("error"), Mapping):
+                    ack_revision = ack_payload["error"].get("current_config_rev")
+                if type(ack_revision) is int and ack_revision >= 0:
+                    revision, source = ack_revision, "ack"
+            if type(revision) is int:
+                return revision, source
+        state = self._v1_state
+        if state is not None and type(state["payload"].get("config_rev")) is int:
+            return state["payload"]["config_rev"], "state"
+        return None, None
+
+    def reported_config(self) -> Dict[str, Any]:
+        """Reported settings and the base revision for the Kontrol panel."""
+        with self._lock:
+            now = _now_ms()
+            revision, revision_source = self._base_revision_locked()
+            values: Dict[str, Any] = {field: None for field in CONFIG_FIELDS}
+            sources: Dict[str, Optional[str]] = {field: None for field in CONFIG_FIELDS}
+            v1 = self._v1_reported
+            if v1 is not None:
+                for field in V1_REPORTED_FIELDS:
+                    value = _finite_number(v1["payload"].get(field))
+                    if value is not None:
+                        values[field], sources[field] = value, "v1_config_reported"
+            v2_entry = self._rdf_node.config_reported_entry()
+            v2_payload = v2_entry.get("payload") if v2_entry.get("status") == "CONTEXT" else None
+            effective = v2_payload.get("effective") if isinstance(v2_payload, dict) else None
+            if not isinstance(effective, dict):
+                effective = None
+            if effective is not None:
+                for field, key in V2_EFFECTIVE_KEYS.items():
+                    value = _finite_number(effective.get(key))
+                    if value is not None and values[field] is None:
+                        values[field], sources[field] = value, "v2_effective"
+            reported: Optional[Dict[str, Any]] = None
+            if v1 is not None:
+                received = int(v1["received_at_ms"])
+                reported = {
+                    "config_rev": v1["payload"].get("config_rev"),
+                    "received_at_ms": received,
+                    "age_ms": max(0, now - received),
+                    "retained": bool(v1["retained"]),
+                    "synthetic": v1["payload"].get("source") == "synthetic",
+                    "source": "v1+v2" if effective is not None else "v1",
+                }
+            elif effective is not None:
+                received_v2 = v2_entry.get("received_at_ms")
+                reported = {
+                    "config_rev": None,
+                    "received_at_ms": received_v2 if type(received_v2) is int else None,
+                    "age_ms": max(0, now - received_v2) if type(received_v2) is int else None,
+                    "retained": v2_entry.get("retained") is True,
+                    "synthetic": False,
+                    "source": "v2",
+                }
+            return {
+                "available": True,
+                "connection": self._connection_label_locked(),
+                "now_ms": now,
+                "base_config_rev": revision,
+                "base_config_rev_source": revision_source,
+                "reported": reported,
+                "values": values,
+                "value_sources": sources,
+            }
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:

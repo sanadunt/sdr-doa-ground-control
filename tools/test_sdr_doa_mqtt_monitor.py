@@ -48,11 +48,18 @@ def fake_paho() -> tuple[types.ModuleType, type]:
             self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
             self.subscriptions: list[tuple[str, object]] = []
             self.publish_calls: list[object] = []
+            # None makes publish() return None, as the original fake did;
+            # an int makes it return a paho-like MQTTMessageInfo (rc, mid).
+            self.publish_rc: int | None = None
+            self.publish_hook = None
+            self._out_messages: dict[int, object] = {}
+            self._out_message_mutex = threading.RLock()
             self.on_connect = None
             self.on_connect_fail = None
             self.on_disconnect = None
             self.on_subscribe = None
             self.on_message = None
+            self.on_publish = None
             self.mid = 0
             Client.instances.append(self)
 
@@ -93,8 +100,18 @@ def fake_paho() -> tuple[types.ModuleType, type]:
                     self.subscriptions.append((str(entry), kwargs.get("options")))
             return 0, self.mid
 
-        def publish(self, *args: object, **kwargs: object) -> None:
+        def publish(self, *args: object, **kwargs: object) -> object:
             self.publish_calls.append((args, kwargs))
+            if self.publish_rc is None:
+                return None
+            self.mid += 1
+            mid = self.mid
+            if self.publish_rc == mqtt.MQTT_ERR_NO_CONN:
+                # paho keeps a QoS 1 message it could not send for the next connection.
+                self._out_messages[mid] = (args, kwargs)
+            if self.publish_hook is not None:
+                self.publish_hook(mid)
+            return types.SimpleNamespace(rc=self.publish_rc, mid=mid)
 
     class SubscribeOptions:
         def __init__(self, qos: int = 0, **kwargs: object) -> None:
@@ -119,6 +136,7 @@ def fake_paho() -> tuple[types.ModuleType, type]:
     mqtt.MQTTv5 = 5
     mqtt.MQTT_CLEAN_START_FIRST_ONLY = 3
     mqtt.MQTT_ERR_SUCCESS = 0
+    mqtt.MQTT_ERR_NO_CONN = 4
     mqtt.SubscribeOptions = SubscribeOptions
     mqtt.PacketTypes = packettypes.PacketTypes
     mqtt.packettypes = packettypes
@@ -134,7 +152,7 @@ def load_monitor(paho: types.ModuleType) -> types.ModuleType:
     client_module = types.ModuleType("paho.mqtt.client")
     for name in (
         "Client", "CallbackAPIVersion", "MQTTv5", "MQTT_CLEAN_START_FIRST_ONLY",
-        "MQTT_ERR_SUCCESS", "SubscribeOptions", "PacketTypes",
+        "MQTT_ERR_SUCCESS", "MQTT_ERR_NO_CONN", "SubscribeOptions", "PacketTypes",
     ):
         setattr(client_module, name, getattr(mqtt, name))
     with patch.dict(sys.modules, {
@@ -538,6 +556,241 @@ class SharedMqttMonitorTests(unittest.TestCase):
         clock = [1_700_000_000_000]
         with patch.object(self.module, "_now_ms", lambda: clock[0]):
             self.assertEqual(self.monitor.rdf_node_snapshot()["now_ms"], clock[0])
+
+    # -- config-patch publish path ------------------------------------------
+
+    @staticmethod
+    def _patch_command(command_id: str = "gc-test-1", *, base: int = 7, ttl_ms: int = 60_000) -> dict:
+        issued = int(time.time() * 1000)
+        return contract.build_config_patch(
+            command_id=command_id,
+            base_config_rev=base,
+            changes={"center_frequency_hz": 433_920_000, "gain_db": 24.5},
+            issued_ts_ms=issued,
+            expires_ts_ms=issued + ttl_ms,
+        )
+
+    @staticmethod
+    def _ack(command_id: str, status: str, *, config_rev: int, error: dict | None = None) -> dict:
+        return contract.build_config_ack(
+            command_id=command_id,
+            status=status,
+            ts_ms=int(time.time() * 1000),
+            config_rev=config_rev,
+            readback_ok=status == "applied",
+            error=error,
+            changed_fields=["center_frequency_hz"] if status == "applied" else None,
+        )
+
+    def test_publish_config_patch_publishes_once_at_qos1_without_retain(self) -> None:
+        self._connected()
+        self.assertEqual(self.client.on_publish, self.monitor._on_publish)
+        command = self._patch_command()
+        result = self.monitor.publish_config_patch(command)
+
+        self.assertEqual(len(self.client.publish_calls), 1)
+        (topic, raw), options = self.client.publish_calls[0]
+        self.assertEqual(topic, contract.TOPICS["config_patch"])
+        self.assertEqual(json.loads(raw.decode("utf-8")), command)
+        contract.validate_config_patch(json.loads(raw.decode("utf-8")))
+        self.assertEqual(options["qos"], 1)
+        self.assertIs(options["retain"], False)
+        # The broker drops the command after its TTL even if paho replays it.
+        self.assertEqual(options["properties"].MessageExpiryInterval, 60)
+        # The fake returns None like a paho without MQTTMessageInfo: rc 0, no mid.
+        self.assertEqual((result["rc"], result["mid"]), (0, None))
+        self.assertEqual(result["topic"], contract.TOPICS["config_patch"])
+        observation = self.monitor.config_command_observation(command["id"])
+        self.assertIs(observation["published"], True)
+        self.assertIsNone(observation["puback"])
+        # The Message Monitor snapshot keeps saying the monitor never publishes on its own.
+        snapshot = self.monitor.snapshot()
+        self.assertIs(snapshot["read_only"], True)
+        self.assertIs(snapshot["publish_enabled"], False)
+
+        with self.assertRaises(Exception) as repeated:
+            self.monitor.publish_config_patch(command)
+        self.assertEqual(getattr(repeated.exception, "code", None), "MQTT_PUBLISH_FAILED")
+        self.assertEqual(len(self.client.publish_calls), 1)
+
+    def test_publish_config_patch_requires_a_ready_connection(self) -> None:
+        command = self._patch_command()
+        with self.assertRaises(Exception) as before_start:
+            self.monitor.publish_config_patch(command)
+        self.assertEqual(getattr(before_start.exception, "code", None), "MQTT_NOT_CONNECTED")
+
+        self.client = self._start()
+        self.client.on_connect(self.client, None, {}, types.SimpleNamespace(value=0, is_failure=False), None)
+        with self.assertRaises(Exception) as before_suback:
+            self.monitor.publish_config_patch(command)
+        self.assertEqual(getattr(before_suback.exception, "code", None), "MQTT_NOT_CONNECTED")
+
+        self.acknowledge()
+        self.client.on_disconnect(self.client, None, None, types.SimpleNamespace(value=0), None)
+        with self.assertRaises(Exception) as after_disconnect:
+            self.monitor.publish_config_patch(command)
+        self.assertEqual(getattr(after_disconnect.exception, "code", None), "MQTT_NOT_CONNECTED")
+        self.assertEqual(self.client.publish_calls, [])
+
+    def test_puback_is_correlated_even_when_it_beats_the_publish_return(self) -> None:
+        self._connected()
+        self.client.publish_rc = 0
+        first = self._patch_command("gc-first")
+        result = self.monitor.publish_config_patch(first)
+        self.assertIsInstance(result["mid"], int)
+        self.assertIsNone(self.monitor.config_command_observation("gc-first")["puback"])
+        self.client.on_publish(self.client, None, result["mid"], types.SimpleNamespace(value=0), None)
+        self.assertEqual(self.monitor.config_command_observation("gc-first")["puback"]["reason"], 0)
+
+        # The PUBACK arrives on paho's thread before publish() has returned.
+        self.client.publish_hook = lambda mid: self.client.on_publish(
+            self.client, None, mid, types.SimpleNamespace(value=135, is_failure=True), None,
+        )
+        self.monitor.publish_config_patch(self._patch_command("gc-second"))
+        self.assertEqual(self.monitor.config_command_observation("gc-second")["puback"]["reason"], 135)
+        # A PUBACK from a retired client is ignored.
+        other = self.Client("retired")
+        self.monitor._on_publish(other, None, result["mid"], types.SimpleNamespace(value=0), None)
+        self.assertEqual(self.monitor._early_pubacks, {})
+
+    def test_publish_without_connection_is_withdrawn_from_the_paho_queue(self) -> None:
+        self._connected()
+        self.client.publish_rc = self.module.mqtt.MQTT_ERR_NO_CONN
+        with self.assertRaises(Exception) as raised:
+            self.monitor.publish_config_patch(self._patch_command("gc-raced"))
+        self.assertEqual(getattr(raised.exception, "code", None), "MQTT_NOT_CONNECTED")
+        # Nothing stays queued for a replay after the next reconnect.
+        self.assertEqual(self.client._out_messages, {})
+        self.assertIs(self.monitor.config_command_observation("gc-raced")["published"], False)
+
+    def test_config_acks_are_captured_by_id_and_bounded(self) -> None:
+        self._connected()
+        keys_before = set(self.monitor.snapshot()["last_by_kind"])
+        total = self.module.MAX_CONFIG_ACKS + 6
+        for index in range(total):
+            self._send("ack_config", self._ack(f"cmd-{index}", "rejected", config_rev=3,
+                                               error={"code": "REMOTE_CONTROL_DISABLED"}), qos=1)
+        self.assertEqual(len(self.monitor._config_acks), self.module.MAX_CONFIG_ACKS)
+        self.assertIsNone(self.monitor.config_command_observation("cmd-0")["ack"])
+        last = self.monitor.config_command_observation(f"cmd-{total - 1}")["ack"]
+        self.assertEqual((last["status"], last["error_code"]), ("rejected", "REMOTE_CONTROL_DISABLED"))
+        self.assertIsInstance(last["received_at_ms"], int)
+        # The ACK store lives beside the Message Monitor data, not inside it.
+        self.assertEqual(set(self.monitor.snapshot()["last_by_kind"]) - keys_before, {"ack_config"})
+
+        # A late progress ACK never hides the final answer for the same id.
+        self._send("ack_config", self._ack("cmd-final", "applied", config_rev=4), qos=1)
+        self._send("ack_config", self._ack("cmd-final", "received", config_rev=4), qos=1)
+        final = self.monitor.config_command_observation("cmd-final")["ack"]
+        self.assertEqual((final["status"], final["config_rev"], final["changed_fields"]),
+                         ("applied", 4, ["center_frequency_hz"]))
+
+    def test_broker_echo_of_the_published_command_is_flagged(self) -> None:
+        self._connected()
+        command = self._patch_command("gc-echo")
+        self.monitor.publish_config_patch(command)
+        (_topic, raw), _options = self.client.publish_calls[0]
+        tampered = dict(command, changes={"gain_db": 10})
+        self._send("config_patch", tampered, qos=1)
+        self.assertIsNone(self.monitor.config_command_observation("gc-echo")["echoed_at_ms"])
+        self._send("config_patch", raw, qos=1)
+        self.assertIsInstance(self.monitor.config_command_observation("gc-echo")["echoed_at_ms"], int)
+
+    def test_reported_config_selects_the_v1_base_revision(self) -> None:
+        self._connected()
+        now = int(time.time() * 1000)
+        reported = self.monitor.reported_config()
+        self.assertEqual((reported["base_config_rev"], reported["base_config_rev_source"]), (None, None))
+        self.assertIsNone(reported["reported"])
+        self.assertEqual(reported["connection"], "connected")
+        self.assertEqual(set(reported["values"]), set(contract.CONFIG_RANGES))
+
+        def state(rev: int) -> dict:
+            return contract.build_state(
+                ts_ms=now, config_rev=rev, running=True, frequency_hz=433_920_000,
+                gain_db=10.0, array="UCA", method="MUSIC", active_vfos=1,
+            )
+
+        def config(rev: int, source: str | None = None) -> dict:
+            return contract.build_config_reported(
+                ts_ms=now, config_rev=rev, center_frequency_hz=416_588_000, gain_db=15.5,
+                array="UCA", method="MUSIC", active_vfos=1, source=source,
+            )
+
+        def base() -> tuple:
+            data = self.monitor.reported_config()
+            return data["base_config_rev"], data["base_config_rev_source"]
+
+        self._send("state", state(5), retained=True, qos=1)
+        self.assertEqual(base(), (5, "state"))
+        self._send("config_reported", config(7), retained=True, qos=1)
+        self.assertEqual(base(), (7, "config_reported"))
+        self._send("ack_config", self._ack("a1", "applied", config_rev=8), qos=1)
+        self.assertEqual(base(), (8, "ack"))
+        self._send("ack_config", self._ack("a2", "conflict", config_rev=9,
+                                           error={"code": "CONFIG_REVISION_CONFLICT", "current_config_rev": 9}), qos=1)
+        self.assertEqual(base(), (9, "ack"))
+        # A retained ACK replay has no order relative to config_reported.
+        self._send("ack_config", self._ack("old", "applied", config_rev=99), retained=True, qos=1)
+        self.assertEqual(base(), (9, "ack"))
+        # Rejections carry the agent's revision only incidentally; they never move the base.
+        self._send("config_reported", config(10), qos=1)
+        self._send("ack_config", self._ack("a3", "rejected", config_rev=0,
+                                           error={"code": "REMOTE_CONTROL_DISABLED"}), qos=1)
+        self.assertEqual(base(), (10, "config_reported"))
+        # A retained clear of config_reported falls back to state.
+        self._send("config_reported", b"", qos=1)
+        self.assertEqual(base(), (5, "state"))
+        self._send("state", b"", qos=1)
+        self.assertEqual(base(), (None, None))
+
+        self._send("config_reported", config(11, source="synthetic"), retained=True, qos=1)
+        data = self.monitor.reported_config()
+        self.assertEqual(data["reported"]["config_rev"], 11)
+        self.assertIs(data["reported"]["synthetic"], True)
+        self.assertIs(data["reported"]["retained"], True)
+        self.assertEqual(data["reported"]["source"], "v1")
+        self.assertEqual(data["values"]["center_frequency_hz"], 416_588_000)
+        self.assertEqual(data["values"]["gain_db"], 15.5)
+        self.assertEqual(data["value_sources"]["center_frequency_hz"], "v1_config_reported")
+        self.assertIsNone(data["values"]["vfo_frequency_hz"])
+        self.assertIsNone(data["value_sources"]["vfo_frequency_hz"])
+
+    def test_reported_config_takes_vfo_values_only_from_rdf_v2_effective(self) -> None:
+        self._connected()
+        now = int(time.time() * 1000)
+        v2 = json.dumps({
+            "v": 2, "sid": "7a8b9c0d", "rev": 3, "t": now, "proof": "unverified", "digest": "abc",
+            "effective": {
+                "center_frequency_hz": 433_000_000, "gain_db": 20.5,
+                "vfo0_frequency_hz": 433_900_000, "vfo0_bandwidth_hz": 12_500, "vfo0_squelch_db": -80.0,
+            },
+        }).encode("utf-8")
+        self.client.on_message(self.client, None, message(f"sdr/v2/{NODE}/config/reported", v2, 1, True))
+        data = self.monitor.reported_config()
+        # RDF v2 rev is display-only, never a base revision.
+        self.assertEqual((data["base_config_rev"], data["base_config_rev_source"]), (None, None))
+        self.assertEqual(data["reported"]["source"], "v2")
+        self.assertIsNone(data["reported"]["config_rev"])
+        self.assertEqual(data["values"]["vfo_frequency_hz"], 433_900_000)
+        self.assertEqual(data["values"]["vfo_bandwidth_hz"], 12_500)
+        self.assertEqual(data["values"]["vfo_squelch_db"], -80.0)
+        self.assertEqual(data["values"]["center_frequency_hz"], 433_000_000)
+        self.assertEqual(data["value_sources"]["vfo_frequency_hz"], "v2_effective")
+        self.assertEqual(data["value_sources"]["center_frequency_hz"], "v2_effective")
+
+        v1 = contract.build_config_reported(
+            ts_ms=now, config_rev=4, center_frequency_hz=416_588_000, gain_db=15.5,
+            array="UCA", method="MUSIC", active_vfos=1,
+        )
+        self._send("config_reported", v1, retained=True, qos=1)
+        data = self.monitor.reported_config()
+        self.assertEqual(data["reported"]["source"], "v1+v2")
+        self.assertEqual((data["base_config_rev"], data["base_config_rev_source"]), (4, "config_reported"))
+        self.assertEqual(data["values"]["center_frequency_hz"], 416_588_000)
+        self.assertEqual(data["value_sources"]["center_frequency_hz"], "v1_config_reported")
+        self.assertEqual(data["value_sources"]["vfo_bandwidth_hz"], "v2_effective")
+        self.assertEqual(self.client.publish_calls, [])
 
 
 class GroundConsoleMqttApplyTests(unittest.TestCase):
