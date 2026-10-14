@@ -730,22 +730,28 @@ class MqttMonitor:
             revision, revision_source = self._base_revision_locked()
             values: Dict[str, Any] = {field: None for field in CONFIG_FIELDS}
             sources: Dict[str, Optional[str]] = {field: None for field in CONFIG_FIELDS}
+            # When the message that carried each value arrived; Kontrol counts a
+            # value as evidence for a sent patch only when it arrived later.
+            value_received: Dict[str, Optional[int]] = {field: None for field in CONFIG_FIELDS}
             v1 = self._v1_reported
             if v1 is not None:
                 for field in V1_REPORTED_FIELDS:
                     value = _finite_number(v1["payload"].get(field))
                     if value is not None:
                         values[field], sources[field] = value, "v1_config_reported"
+                        value_received[field] = int(v1["received_at_ms"])
             v2_entry = self._rdf_node.config_reported_entry()
             v2_payload = v2_entry.get("payload") if v2_entry.get("status") == "CONTEXT" else None
             effective = v2_payload.get("effective") if isinstance(v2_payload, dict) else None
             if not isinstance(effective, dict):
                 effective = None
             if effective is not None:
+                received_effective = v2_entry.get("received_at_ms")
                 for field, key in V2_EFFECTIVE_KEYS.items():
                     value = _finite_number(effective.get(key))
                     if value is not None and values[field] is None:
                         values[field], sources[field] = value, "v2_effective"
+                        value_received[field] = received_effective if type(received_effective) is int else None
             reported: Optional[Dict[str, Any]] = None
             if v1 is not None:
                 received = int(v1["received_at_ms"])
@@ -782,6 +788,7 @@ class MqttMonitor:
                 "reported": reported,
                 "values": values,
                 "value_sources": sources,
+                "value_received_at_ms": value_received,
             }
 
     def snapshot(self) -> Dict[str, Any]:

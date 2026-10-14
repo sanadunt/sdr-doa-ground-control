@@ -509,6 +509,11 @@ def _normalize_reported(data: Dict[str, Any]) -> Dict[str, Any]:
         field: sources_in.get(field) if values[field] is not None and sources_in.get(field) in _REPORTED_VALUE_SOURCES else None
         for field in CONFIG_ALLOWLIST
     }
+    received_in = data.get("value_received_at_ms") if isinstance(data.get("value_received_at_ms"), dict) else {}
+    received = {
+        field: received_in.get(field) if values[field] is not None and type(received_in.get(field)) is int and received_in.get(field) >= 0 else None
+        for field in CONFIG_ALLOWLIST
+    }
     revision = data.get("base_config_rev")
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
         revision = None
@@ -543,6 +548,7 @@ def _normalize_reported(data: Dict[str, Any]) -> Dict[str, Any]:
         "reported": reported,
         "values": values,
         "value_sources": sources,
+        "value_received_at_ms": received,
     }
 
 
@@ -2998,6 +3004,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
             "reported": None,
             "values": dict(empty),
             "value_sources": dict(empty),
+            "value_received_at_ms": dict(empty),
             "pending_command_id": self.config_commands.in_flight(monitor),
         }
         if monitor is None:

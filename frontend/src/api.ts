@@ -486,6 +486,8 @@ export interface ConfigReported {
   } | null;
   values: Record<ConfigPatchKey, number | null>;
   valueSources: Record<ConfigPatchKey, ConfigValueSource | null>;
+  /** Server time the message carrying each value arrived; null when unknown. */
+  valueReceivedAtMs: Record<ConfigPatchKey, number | null>;
   pendingCommandId: string | null;
 }
 
@@ -516,6 +518,7 @@ export function normalizeConfigReported(value: unknown): ConfigReported {
     } : null,
     values: patchValues(value.values, finiteOrNull),
     valueSources: patchValues(value.value_sources, (entry) => (oneOfValues(VALUE_SOURCES, entry) ? entry : null)),
+    valueReceivedAtMs: patchValues(value.value_received_at_ms, (entry) => integerOrNull(entry, 0)),
     pendingCommandId: commandIdOrNull(value.pending_command_id),
   };
 }
