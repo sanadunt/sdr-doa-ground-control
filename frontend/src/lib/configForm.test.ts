@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError, normalizeCapabilities } from '../api';
-import { adminErrorKey, gpsInputErrorKey, normalizeConnectionDraft, parseBaseRevision, parseDryRunChanges, refreshIntervalOptions, refreshWarningKey } from './configForm';
+import { adminErrorKey, gpsInputErrorKey, mergeSavedConfigIntoDraft, normalizeConnectionDraft, parseBaseRevision, parseDryRunChanges, refreshIntervalOptions, refreshWarningKey } from './configForm';
 import { manualGpsOverrideFromInput } from './map';
+import type { ConsoleConfig } from '../types';
 
 const DRAFT = { base_url: 'http://127.0.0.1:8081', mqtt_host: '127.0.0.1', mqtt_port: '1883', refresh_seconds: 2 };
 
@@ -21,6 +22,22 @@ describe('connection draft normalization (AUD-41, AUD-106)', () => {
   it('requires a base URL and a listed refresh interval', () => {
     expect(normalizeConnectionDraft({ ...DRAFT, base_url: ' / ' })).toEqual({ ok: false, error: 'config.baseUrlRequired' });
     expect(normalizeConnectionDraft({ ...DRAFT, refresh_seconds: 3 })).toEqual({ ok: false, error: 'config.refreshInvalid' });
+  });
+});
+
+describe('saved config reaching the form draft', () => {
+  const saved = { base_url: 'http://doasdr.local:8081', mqtt_host: '10.90.0.1', mqtt_port: 9001, refresh_seconds: 2 };
+
+  it('keeps unsaved edits when only the top-bar interval was saved', () => {
+    const draft = { ...saved, base_url: 'http://192.168.100.100:8081', mqtt_host: '127.0.0.1' };
+    const next = { ...saved, refresh_seconds: 5 };
+    expect(mergeSavedConfigIntoDraft(draft, saved, next)).toEqual({ ...draft, refresh_seconds: 5 });
+  });
+
+  it('replaces every field whose saved value changed', () => {
+    const draft: ConsoleConfig = { ...saved, base_url: 'http://192.168.100.100:8081' };
+    const next: ConsoleConfig = { ...saved, base_url: 'http://127.0.0.1:8081', mqtt_port: 1883, mqtt_transport: 'tcp' };
+    expect(mergeSavedConfigIntoDraft<ConsoleConfig>(draft, saved, next)).toEqual(next);
   });
 });
 

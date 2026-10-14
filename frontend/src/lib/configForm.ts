@@ -38,6 +38,19 @@ export function normalizeConnectionDraft(draft: ConnectionDraft, intervals: read
   };
 }
 
+/**
+ * Carry a new saved configuration into the form draft one field at a time:
+ * only the fields whose saved value changed are replaced, so a save made
+ * elsewhere (the top-bar interval select) keeps the operator's unsaved edits.
+ */
+export function mergeSavedConfigIntoDraft<T extends object>(draft: T, previous: T, next: T): T {
+  const merged = { ...draft };
+  for (const key of new Set([...Object.keys(previous), ...Object.keys(next)]) as Set<keyof T>) {
+    if (!Object.is(previous[key], next[key])) merged[key] = next[key];
+  }
+  return merged;
+}
+
 /** Intervals to offer: the server's list when it sent one, always including the saved value. */
 export function refreshIntervalOptions(serverIntervals: readonly number[] | null, current: number): number[] {
   const base = serverIntervals && serverIntervals.length ? serverIntervals : REFRESH_INTERVALS_S;

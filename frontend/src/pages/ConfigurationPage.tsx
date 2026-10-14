@@ -6,7 +6,7 @@ import type { ConsoleCapabilities } from '../api';
 import { DEFAULT_FALLBACK_COORDINATE, DEFAULT_GPS_CONFIG, manualGpsOverrideFromInput } from '../lib/map';
 import { DEFAULT_COMPASS_CONFIG } from '../lib/polar';
 import { DEFAULT_CONSOLE_CONFIG } from '../lib/telemetry';
-import { adminErrorKey, gpsInputErrorKey, normalizeConnectionDraft, parseBaseRevision, parseDryRunChanges, refreshIntervalOptions, refreshWarningKey } from '../lib/configForm';
+import { adminErrorKey, gpsInputErrorKey, mergeSavedConfigIntoDraft, normalizeConnectionDraft, parseBaseRevision, parseDryRunChanges, refreshIntervalOptions, refreshWarningKey } from '../lib/configForm';
 import { MAX_LOGO_BYTES, pngDataUrl, pngLogoErrorKey, validatePngLogo } from '../lib/pngLogo';
 import { CONFIG_PATCH_FIELDS } from '../lib/configPatch';
 import { DEFAULT_MQTT_TRANSPORT, DEFAULT_MQTT_WS_PATH, mqttTransportFields } from '../lib/mqttMonitor';
@@ -115,9 +115,15 @@ export function ConfigurationPage({
       logoSequence.current += 1;
     };
   }, []);
+  // A save from the top-bar interval select also lands here; only the saved
+  // fields that changed replace the draft, so unsaved edits survive it.
+  const savedConfigRef = useRef(config);
   useEffect(() => {
-    setConnection({ ...DEFAULT_CONSOLE_CONFIG, ...config });
-    setMqttPortDraft(String(config.mqtt_port));
+    const previous = savedConfigRef.current;
+    savedConfigRef.current = config;
+    if (previous === config) return;
+    setConnection((draft) => mergeSavedConfigIntoDraft(draft, { ...DEFAULT_CONSOLE_CONFIG, ...previous }, { ...DEFAULT_CONSOLE_CONFIG, ...config }));
+    if (previous.mqtt_port !== config.mqtt_port) setMqttPortDraft(String(config.mqtt_port));
   }, [config]);
   useEffect(() => {
     setBrandName(branding.app_name);
