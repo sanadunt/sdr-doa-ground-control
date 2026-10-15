@@ -709,6 +709,11 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		return typeof app.tm === 'function' ? app.tm(notice) as string : notice;
 	}
 
+	/** The Receiver's latest notice, through tm(), or undefined: for a failure that repeats the previous text. */
+	function currentNotice(): string | undefined {
+		return noticeSince(undefined);
+	}
+
 	/**
 	 * Sets the Listener's sample rate. The Receiver's [sampleRate, fftSize]
 	 * watcher restarts a running RX (as the Listener select does), which resumes
@@ -912,19 +917,24 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		if (settled) return settled;
 
 		const noticeBefore = app.snackbar?.message;
-		const errorBefore = sweep.error;
+		let pending: Promise<unknown>;
 		if (hardware) {
 			const capabilities = app.deviceCapabilities;
 			if (!capabilities?.supportsNativeSweep && !capabilities?.supportsManualSweep) return ['SWEEP_UNSUPPORTED'];
-			await app.startHardwareSweep();
+			pending = app.startHardwareSweep();
 		} else {
 			sweep.source = 'simulated';
-			await app.startSweep();
+			pending = app.startSweep();
 		}
+		// startSweep sets starting and clears the scan error before its first await; a start it
+		// refuses with only a notice never gets that far.
+		const begun = Boolean(sweep.starting || sweep.active);
+		await pending;
 		if (!sweep.active) {
-			// A start someone stopped on the way is no failure; one that raised a scan error is.
-			const failed = typeof sweep.error === 'string' && sweep.error !== '' && sweep.error !== errorBefore;
-			return failed ? ['SWEEP_FAILED', noticeSince(noticeBefore)] : ['OK'];
+			// A start someone stopped on the way is no failure; a refused one, or one that raised a
+			// scan error (also the same error as last time), is.
+			const failed = !begun || (typeof sweep.error === 'string' && sweep.error !== '');
+			return failed ? ['SWEEP_FAILED', noticeSince(noticeBefore) ?? currentNotice()] : ['OK'];
 		}
 		sweep.returnToRx = rxWasRunning;
 		if (app.activeWorkspace !== 'spectrum') {

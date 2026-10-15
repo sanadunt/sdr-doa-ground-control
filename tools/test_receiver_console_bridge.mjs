@@ -1903,6 +1903,38 @@ test('sweep-start reports a radio that cannot scan and a scan that fails to star
 		assert.equal(result('sf1').code, 'SWEEP_FAILED');
 		assert.equal(result('sf1').message, 'Sweep error: Sweep range must be increasing and within 1–7250 MHz');
 		assert.equal(app.sweep.active, false);
+		// The same failure again is still a failure, with the same text.
+		failures.sweep = 'Sweep range must be increasing and within 1–7250 MHz';
+		frame.send('console:sweep-start', { id: 'sf2', mock: true });
+		await settle(20);
+		assert.equal(result('sf2').code, 'SWEEP_FAILED');
+		assert.equal(result('sf2').message, 'Sweep error: Sweep range must be increasing and within 1–7250 MHz');
+	});
+	await t.test('refused by the Receiver with only a notice', async st => {
+		const { frame, app, result } = setup(st, { app: { mockSdrEnabled: true } });
+		// startSweep's own guards (backend still initializing, remote mode) return before it marks the start.
+		app.startSweep = async function () { this.showMsg('Receiver backend is still initializing. Wait a moment, then try again.'); };
+		frame.send('console:sweep-start', { id: 'sr1', mock: true });
+		await settle(20);
+		assert.equal(result('sr1').code, 'SWEEP_FAILED');
+		assert.equal(result('sr1').message, 'Receiver backend is still initializing. Wait a moment, then try again.');
+		frame.send('console:sweep-start', { id: 'sr2', mock: true });
+		await settle(20);
+		assert.equal(result('sr2').code, 'SWEEP_FAILED');
+		assert.equal(result('sr2').message, 'Receiver backend is still initializing. Wait a moment, then try again.');
+	});
+	await t.test('stopped on the way is no failure', async st => {
+		const { frame, app, result } = setup(st, { app: { mockSdrEnabled: true } });
+		// A Receiver-page stop while the scan starts: startSweep began, then ends without a scan or an error.
+		app.startSweep = async function () {
+			this.sweep.starting = true;
+			this.sweep.error = '';
+			await Promise.resolve();
+			this.sweep.starting = false;
+		};
+		frame.send('console:sweep-start', { id: 'ss1', mock: true });
+		await settle(20);
+		assert.equal(result('ss1').code, 'OK');
 	});
 });
 
