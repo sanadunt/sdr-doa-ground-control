@@ -18,7 +18,7 @@ import { savedReceiverSweep } from '../../lib/receiverSavedSweep';
 import { recentredRange, sweepRows } from '../../lib/sweepSettings';
 import type { SweepRange } from '../../lib/sweepSettings';
 import { fieldFor, fieldRange, inFieldRange } from '../../lib/configPatch';
-import { followMemoryAtMount, followNodeStep, formatMhz, formatMhzTrim, scanPhaseOf, spanAround, spectrumDockView } from '../../lib/spectrumView';
+import { followMemoryAtMount, followNodeStep, formatMhz, formatMhzTrim, noticeFrameText, scanPhaseOf, spanAround, spectrumDockView } from '../../lib/spectrumView';
 import type { DbRange, DockNotice, FollowMemory } from '../../lib/spectrumView';
 import { manualFromDrawn, spectrumDockStore } from '../../lib/spectrumDockSettings';
 import type { DbScale, DockMode, SpectrumDockSettings } from '../../lib/spectrumDockSettings';
@@ -683,7 +683,7 @@ export function SpectrumDock({
       <Icon name="external" /><span>{t('spectrum.openReceiverShort', { key: RECEIVER_KEY })}</span>
     </button>
   );
-  const frameText = notice?.message && (notice.code === 'CONNECT_FAILED' || notice.code === 'NOT_READY' || notice.code === 'INVALID_COMMAND') ? notice.message : null;
+  const frameText = noticeFrameText(notice);
   const messageText = view.message ? t(view.message) : null;
   const followHint = followNode && !node ? t('spectrum.followUnavailable') : null;
   // The Receiver's own notice after a dock stop, such as the ended recording (already localized there).

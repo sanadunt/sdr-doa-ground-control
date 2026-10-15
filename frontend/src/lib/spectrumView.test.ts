@@ -14,6 +14,7 @@ import {
   freqAtX,
   keyStepHz,
   mhzDigits,
+  noticeFrameText,
   noticeMessage,
   paletteLut,
   peakOf,
@@ -227,7 +228,7 @@ describe('spectrum dock state table', () => {
 
   it('shows BUSY only while the Receiver listens to a scan candidate, and offers the Receiver page', () => {
     expect(spectrumDockView(input({ status: status({ busy: 'scan-listen', running: true }) }))).toMatchObject({
-      chip: 'BUSY', message: 'spectrum.sweepBusy', openReceiver: true, controlsDisabled: true, mode: 'rx', rxRunning: true, live: true, stoppable: false,
+      chip: 'BUSY', message: 'spectrum.scanListenBusy', openReceiver: true, controlsDisabled: true, mode: 'rx', rxRunning: true, live: true, stoppable: false,
     });
   });
 
@@ -286,6 +287,16 @@ describe('spectrum dock state table', () => {
     expect(noticeMessage('RECORDING_ACTIVE')).toBe('spectrum.recordingActive');
     expect(noticeMessage('SWEEP_FAILED')).toBe('spectrum.sweepFailed');
     expect(noticeMessage('SWEEP_UNSUPPORTED')).toBe('spectrum.sweepUnsupported');
+  });
+
+  it('shows the Receiver\'s own text after a failed connect or scan start, not after other codes', () => {
+    expect(noticeFrameText({ code: 'SWEEP_FAILED', message: 'Sweep error: device busy' })).toBe('Sweep error: device busy');
+    expect(noticeFrameText({ code: 'CONNECT_FAILED', message: 'USB claim failed' })).toBe('USB claim failed');
+    expect(noticeFrameText({ code: 'NOT_READY', message: 'x' })).toBe('x');
+    expect(noticeFrameText({ code: 'SWEEP_FAILED' })).toBeNull();
+    expect(noticeFrameText({ code: 'SWEEP_BUSY', message: 'x' })).toBeNull();
+    expect(noticeFrameText({ code: 'TIMEOUT', message: 'x' })).toBeNull();
+    expect(noticeFrameText(null)).toBeNull();
   });
 });
 

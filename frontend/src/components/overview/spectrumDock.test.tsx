@@ -220,7 +220,7 @@ describe('Spectrum dock states', () => {
   it('shows BUSY with the way to the Receiver page only while the Receiver listens to a scan candidate', () => {
     const markup = dock(bridgeWith({ status: status({ busy: 'scan-listen' }) }));
     expect(chip(markup)).toBe('BUSY');
-    expect(markup).toContain('Pindai berjalan di halaman Receiver');
+    expect(markup).toContain('Dengar-pindai berjalan di halaman Receiver');
     expect(markup).toContain('Buka Receiver (2)');
   });
 

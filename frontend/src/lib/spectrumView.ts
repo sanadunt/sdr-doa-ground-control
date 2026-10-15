@@ -394,6 +394,14 @@ export function noticeMessage(notice: DockNotice): MessageKey {
   return NOTICE_MESSAGES[notice] ?? 'spectrum.commandFailed';
 }
 
+/** Codes whose result text, from the Receiver and already localized there, is shown after the dock's message. */
+const FRAME_TEXT_NOTICES: ReadonlySet<DockNotice> = new Set<DockNotice>(['CONNECT_FAILED', 'NOT_READY', 'INVALID_COMMAND', 'SWEEP_FAILED']);
+
+/** The Receiver's own text for a failed dock command, or null. */
+export function noticeFrameText(notice: { code: DockNotice; message?: string } | null): string | null {
+  return notice?.message && FRAME_TEXT_NOTICES.has(notice.code) ? notice.message : null;
+}
+
 /** Codes that leave the radio stopped in an error worth the Receiver page. */
 const STOPPED_BAD: ReadonlySet<DockNotice> = new Set<DockNotice>(['USB_LOST', 'RX_ERROR', 'CONNECT_FAILED', 'SWEEP_FAILED']);
 const STOPPED_OPEN_RECEIVER: ReadonlySet<DockNotice> = new Set<DockNotice>(['RX_ERROR', 'CONNECT_FAILED', 'SWEEP_FAILED', 'SWEEP_UNSUPPORTED']);
@@ -417,7 +425,7 @@ export function spectrumDockView({ build, phase, starting, restarting = false, s
   }
   // The Receiver listens to a scan candidate: the radio is its own until that ends.
   if (live && live.busy === 'scan-listen') {
-    return { ...base, chip: 'BUSY', tone: 'warn', message: 'spectrum.sweepBusy', openReceiver: true, live: rxRunning, controlsDisabled: true };
+    return { ...base, chip: 'BUSY', tone: 'warn', message: 'spectrum.scanListenBusy', openReceiver: true, live: rxRunning, controlsDisabled: true };
   }
   const scan = scanPhaseOf(live);
   if (scan === 'active') {
