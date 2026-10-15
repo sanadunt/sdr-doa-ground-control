@@ -1,4 +1,4 @@
-import type { ChangeEvent, JSX, ReactNode } from 'react';
+import type { ChangeEvent, Dispatch, JSX, ReactNode, SetStateAction } from 'react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { ConsoleCapabilities } from '../../api';
 import type { TelemetrySnapshot } from '../../types';
@@ -7,7 +7,7 @@ import type { ConfigPatchChanges } from '../../lib/controlDraft';
 import { consoleRequestsMockSdr, createReceiverBridge } from '../../lib/receiverBridge';
 import type { BridgeResult, ReceiverBridge } from '../../lib/receiverBridge';
 import { SUBSCRIBE_LIMITS, isListenMode } from '../../lib/receiverBridgeProtocol';
-import type { BridgeCommand, ListenMode, ReceiverStatus, ResultCode } from '../../lib/receiverBridgeProtocol';
+import type { BridgeCommand, GainKind, ListenMode, ResultCode } from '../../lib/receiverBridgeProtocol';
 import { nodeFrequencies } from '../../lib/nodeFrequency';
 import type { NodeFrequencies } from '../../lib/nodeFrequency';
 import { LISTEN_MODE_OPTIONS, followNodeStore, listenModeStore } from '../../lib/listenPrefs';
@@ -19,6 +19,8 @@ import { followMemoryAtMount, followNodeStep, formatMhz, spanAround, spectrumDoc
 import type { DbRange, DockNotice, FollowMemory } from '../../lib/spectrumView';
 import { manualFromDrawn, spectrumDockStore } from '../../lib/spectrumDockSettings';
 import type { DbScale } from '../../lib/spectrumDockSettings';
+import { formatMsps, heldValue, radioRows, settlePick } from '../../lib/radioSettings';
+import type { HeldPick } from '../../lib/radioSettings';
 import { useI18n } from '../../lib/i18n';
 import { routeShortcut } from '../../lib/routes';
 import type { RouteName } from '../../lib/routes';
@@ -68,12 +70,8 @@ interface Notice {
   message?: string;
 }
 
-/** A mode the operator picked, shown until a receiver status newer than its result arrives. */
-interface ModePick {
-  mode: ListenMode;
-  /** The status current when the frame accepted the change; undefined while the change is on its way. */
-  settledOn?: ReceiverStatus | null;
-}
+/** A sample rate change on its way: 'restart' while it restarts a running RX. */
+type RadioPending = 'restart' | 'set' | null;
 
 /**
  * Height the spectrum section needs: its header, then the body's padding,
@@ -123,7 +121,9 @@ function spectrumNeedPx(section: HTMLElement): number | null {
  * The header keeps one row on a wide dock; on a narrow one follow-node, the
  * mode and "Kirim ke RDF-SDR" move into the "Atur" column (CSS shows one of
  * the two copies). The column also holds the RX dB scale, shared with the
- * Receiver's Dengar tab through spectrumDockStore and App's display sync.
+ * Receiver's Dengar tab through spectrumDockStore and App's display sync, and
+ * the Listener's sample rate, LNA, VGA and +14 dB amp, which the frame owns:
+ * the dock shows its status and holds a pick until the frame reports it.
  */
 export function SpectrumDock({
   snapshot,
@@ -146,7 +146,14 @@ export function SpectrumDock({
 
   const followNode = useSyncExternalStore(followNodeStore.subscribe, followNodeStore.get, followNodeStore.get);
   const mode = useSyncExternalStore(listenModeStore.subscribe, listenModeStore.get, listenModeStore.get);
-  const [modePick, setModePick] = useState<ModePick | null>(null);
+  // Picks shown until the frame reports them (lib/radioSettings.ts); one token counter for all.
+  const pickToken = useRef(0);
+  const [modePick, setModePick] = useState<HeldPick<ListenMode> | null>(null);
+  const [ratePick, setRatePick] = useState<HeldPick<number> | null>(null);
+  const [lnaPick, setLnaPick] = useState<HeldPick<number> | null>(null);
+  const [vgaPick, setVgaPick] = useState<HeldPick<number> | null>(null);
+  const [ampPick, setAmpPick] = useState<HeldPick<boolean> | null>(null);
+  const [radioPending, setRadioPending] = useState<RadioPending>(null);
   // A dock tune shown until the frame reports it (lib/receiverSync.ts displayedTuning).
   const [localTune, setLocalTune] = useState<LocalTune | null>(null);
   const tuneToken = useRef(0);
@@ -177,15 +184,19 @@ export function SpectrumDock({
   const nodeVfo = fresh?.vfoHz ?? null;
   const node = useMemo<NodeFrequencies | null>(() => (nodeCenter === null || nodeVfo === null ? null : { centerHz: nodeCenter, vfoHz: nodeVfo }), [nodeCenter, nodeVfo]);
 
-  const view = spectrumDockView({ build, phase, starting, status: live, notice: notice?.code ?? null });
+  const view = spectrumDockView({ build, phase, starting, restarting: radioPending === 'restart', status: live, notice: notice?.code ?? null });
   const running = view.running;
   const listening = running && live?.vfo?.enabled === true;
   // The VFO is on but the browser has not let its audio play yet.
   const audioHeld = notice?.code === 'AUDIO_BLOCKED' || live?.audio === 'suspended';
   // The select shows what the receiver demodulates (the Receiver page shares the VFO); the stored
   // preference is for the next start. A fresh pick holds until the receiver reports on it.
-  const heldMode = modePick && (modePick.settledOn === undefined || modePick.settledOn === bridgeState.status) ? modePick.mode : null;
-  const shownMode: ListenMode = heldMode ?? live?.vfo?.mode ?? mode;
+  const shownMode: ListenMode = heldValue(modePick, bridgeState.status) ?? live?.vfo?.mode ?? mode;
+  // The Listener's radio settings, as the frame reports them and with a fresh pick held.
+  const shownRate = heldValue(ratePick, bridgeState.status) ?? live?.sampleRateHz ?? null;
+  const shownLna = heldValue(lnaPick, bridgeState.status) ?? live?.gains.lnaDb ?? null;
+  const shownVga = heldValue(vgaPick, bridgeState.status) ?? live?.gains.vgaDb ?? null;
+  const shownAmp = heldValue(ampPick, bridgeState.status) ?? (live ? live.gains.amp : null);
   // Mounted over a running receiver, the dock keeps its tuning (see followMemoryAtMount).
   const followRef = useRef<FollowMemory | null>(null);
   if (followRef.current === null) followRef.current = followMemoryAtMount(running, node);
@@ -286,13 +297,13 @@ export function SpectrumDock({
       follow: followNode,
       node,
       running,
-      canTune: phase === 'ready' && liveKnown && liveBusy === 'none' && !starting,
+      canTune: phase === 'ready' && liveKnown && liveBusy === 'none' && !starting && !radioPending,
       liveCenterHz: liveCenter,
       liveVfoHz: liveVfo,
     });
     followRef.current = step.memory;
     if (step.tune) void bridge.send({ type: 'console:tune', centerHz: step.tune.centerHz, vfoHz: step.tune.vfoHz }).then(reportFailure);
-  }, [followNode, node, phase, running, liveKnown, liveBusy, liveCenter, liveVfo, starting, bridge]);
+  }, [followNode, node, phase, running, liveKnown, liveBusy, liveCenter, liveVfo, starting, radioPending, bridge]);
 
   // The Receiver's snackbar text lasts about 3 s; the dock keeps it for FRAME_NOTICE_MS.
   const liveNotice = live?.notice ?? null;
@@ -377,6 +388,22 @@ export function SpectrumDock({
     void bridge.send({ type: 'console:listen', enabled: true }).then(report);
   };
 
+  /**
+   * Shows `value` at once and sends the command; an accepted pick holds until the next
+   * status, a refused one shows the receiver's value again. `done` replaces the failure notice.
+   */
+  function sendHeld<T>(setPick: Dispatch<SetStateAction<HeldPick<T> | null>>, value: T, command: BridgeCommand, done?: (result: BridgeResult) => void): void {
+    pickToken.current += 1;
+    const token = pickToken.current;
+    setPick({ value, token });
+    void bridge.send(command).then((result) => {
+      if (!mountedRef.current) return;
+      setPick((current) => settlePick(current, token, result.ok, bridge.getState().status));
+      if (done) done(result);
+      else reportFailure(result);
+    });
+  }
+
   const changeMode = (event: ChangeEvent<HTMLSelectElement>) => {
     const next = event.target.value;
     if (!isListenMode(next)) return;
@@ -385,13 +412,30 @@ export function SpectrumDock({
     // Without a frame the next start carries the mode.
     if (phase === 'idle' && !starting) return;
     // Before the frame's hello the bridge queues it behind a waiting start.
-    setModePick({ mode: next });
-    void bridge.send({ type: 'console:vfo', mode: next }).then((result) => {
-      if (!mountedRef.current) return;
-      // A refused change shows the receiver's mode again.
-      setModePick((current) => (current?.mode !== next || current.settledOn !== undefined ? current : result.ok ? { mode: next, settledOn: bridge.getState().status } : null));
-      reportFailure(result);
+    sendHeld(setModePick, next, { type: 'console:vfo', mode: next });
+  };
+
+  // The sample rate restarts a running RX; an armed recording continues in a new segment, so ask first.
+  const changeSampleRate = (hz: number) => {
+    if (!Number.isInteger(hz) || hz <= 0 || hz === shownRate) return;
+    const confirmRecording = running && live?.recording === true;
+    if (confirmRecording && !window.confirm(t('spectrum.rateRecordingConfirm'))) return;
+    setRadioPending(running ? 'restart' : 'set');
+    setNotice(null);
+    const command: BridgeCommand = confirmRecording ? { type: 'console:radio', sampleRateHz: hz, confirmRecording: true } : { type: 'console:radio', sampleRateHz: hz };
+    sendHeld(setRatePick, hz, command, (result) => {
+      setRadioPending(null);
+      report(result);
     });
+  };
+  // Gains apply live, without a restart.
+  const changeGain = (kind: GainKind, db: number) => {
+    if (!Number.isFinite(db) || db === (kind === 'lna' ? shownLna : shownVga)) return;
+    if (kind === 'lna') sendHeld(setLnaPick, db, { type: 'console:gains', lnaDb: db });
+    else sendHeld(setVgaPick, db, { type: 'console:gains', vgaDb: db });
+  };
+  const changeAmp = (enabled: boolean) => {
+    sendHeld(setAmpPick, enabled, { type: 'console:gains', amp: enabled });
   };
 
   // Click-to-tune sets the RX centre and the listen VFO and stops following the node.
@@ -462,8 +506,16 @@ export function SpectrumDock({
   const info = t('spectrum.info', {
     center: formatMhz(axisCenter, 3),
     span: (spanHz / 1e6).toFixed(1),
-    lna: gainText(live?.gains.lnaDb),
-    vga: gainText(live?.gains.vgaDb),
+    rate: formatMsps(shownRate),
+    lna: gainText(shownLna),
+    vga: gainText(shownVga),
+  }) + (shownAmp === true ? ` · ${t('spectrum.amp')}` : '');
+
+  const radio = radioRows({
+    live,
+    shown: { sampleRateHz: shownRate, lnaDb: shownLna, vgaDb: shownVga, amp: shownAmp },
+    ratePending: radioPending !== null,
+    starting,
   });
 
   const openReceiverButton = (
@@ -540,7 +592,7 @@ export function SpectrumDock({
           <button
             className="ov-button ov-spec-run"
             type="button"
-            disabled={view.controlsDisabled || (starting && !running)}
+            disabled={view.controlsDisabled || ((starting || radioPending === 'restart') && !running)}
             onClick={() => (running ? stop() : start(false))}
           >
             <Icon name={running ? 'stop' : 'play'} /><span>{running ? t('spectrum.stop') : t('spectrum.start')}</span>
@@ -583,6 +635,10 @@ export function SpectrumDock({
             onDbAuto={chooseDbAuto}
             onDbManual={chooseDbManual}
             onDbRange={(range) => setRxDb({ auto: false, ...range })}
+            radio={radio}
+            onSampleRate={changeSampleRate}
+            onGain={changeGain}
+            onAmp={changeAmp}
           />
         ) : null}
       </div>

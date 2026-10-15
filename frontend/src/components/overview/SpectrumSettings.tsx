@@ -1,6 +1,8 @@
 import type { ChangeEvent, FocusEvent, JSX, KeyboardEvent as ReactKeyboardEvent } from 'react';
-import type { ListenMode } from '../../lib/receiverBridgeProtocol';
-import { DISPLAY_DB_LIMITS } from '../../lib/receiverBridgeProtocol';
+import type { GainKind, ListenMode } from '../../lib/receiverBridgeProtocol';
+import { DISPLAY_DB_LIMITS, gainSteps } from '../../lib/receiverBridgeProtocol';
+import { formatMsps } from '../../lib/radioSettings';
+import type { RadioRows } from '../../lib/radioSettings';
 import { LISTEN_MODE_OPTIONS } from '../../lib/listenPrefs';
 import { keepDbRange } from '../../lib/spectrumDockSettings';
 import type { DbScale } from '../../lib/spectrumDockSettings';
@@ -14,6 +16,11 @@ import { useSyncedDraft } from './useSyncedDraft';
 function dbText(value: number): string {
   return String(Number(value.toFixed(1)));
 }
+
+export type { RadioRows };
+
+const LNA_STEPS = gainSteps('lna');
+const VGA_STEPS = gainSteps('vga');
 
 export interface SpectrumSettingsProps {
   /** Header controls repeated here; CSS shows this copy only while the dock is too narrow for them. */
@@ -31,14 +38,18 @@ export interface SpectrumSettingsProps {
   onDbAuto: () => void;
   onDbManual: () => void;
   onDbRange: (range: { minDb: number; maxDb: number }) => void;
+  radio: RadioRows;
+  onSampleRate: (hz: number) => void;
+  onGain: (kind: GainKind, db: number) => void;
+  onAmp: (enabled: boolean) => void;
 }
 
 /**
  * The spectrum dock's "Atur" column, in the pattern of the Polar dock's: on a
  * narrow dock the follow-node switch, the demodulation mode and "Kirim ke
  * RDF-SDR" move here from the header, then the RX dB scale, which the
- * Receiver's Dengar tab shares. Typed limits apply on Enter or when the field
- * is left.
+ * Receiver's Dengar tab shares, then the Listener's sample rate, LNA, VGA and
+ * +14 dB amp. Typed limits apply on Enter or when the field is left.
  */
 export function SpectrumSettings({
   followNode,
@@ -53,6 +64,10 @@ export function SpectrumSettings({
   onDbAuto,
   onDbManual,
   onDbRange,
+  radio,
+  onSampleRate,
+  onGain,
+  onAmp,
 }: SpectrumSettingsProps): JSX.Element {
   const { t } = useI18n();
   const auto = db.auto;
@@ -83,6 +98,20 @@ export function SpectrumSettings({
   const onBlur = (changed: 'min' | 'max') => (_event: FocusEvent<HTMLInputElement>) => {
     if (rangeError) revert();
     else commit(changed);
+  };
+
+  const rateValue = radio.ready && radio.sampleRateHz !== null ? String(radio.sampleRateHz) : '';
+  /** An LNA or VGA select: every step of the RadioSpectrum control, '—' while the value is unknown. */
+  const gainSelect = (kind: GainKind, db: number | null) => {
+    const value = radio.ready && db !== null ? String(db) : '';
+    const steps = kind === 'lna' ? LNA_STEPS : VGA_STEPS;
+    return (
+      <select className="ov-radio-select" aria-label={t(kind === 'lna' ? 'spectrum.lnaAria' : 'spectrum.vgaAria')} disabled={!radio.ready || radio.gainsDisabled}
+        value={value} onChange={(event) => { if (event.target.value !== '') onGain(kind, Number(event.target.value)); }}>
+        {value === '' || !steps.includes(Number(value)) ? <option value={value}>{value === '' ? '—' : t(kind === 'lna' ? 'spectrum.lnaOption' : 'spectrum.vgaOption', { db: value })}</option> : null}
+        {radio.ready ? steps.map((step) => <option key={step} value={String(step)}>{t(kind === 'lna' ? 'spectrum.lnaOption' : 'spectrum.vgaOption', { db: String(step) })}</option>) : null}
+      </select>
+    );
   };
 
   const dbTag = rangeError
@@ -132,7 +161,33 @@ export function SpectrumSettings({
             onChange={(event) => setMaxDraft(event.target.value)} onKeyDown={onKeyDown('max')} onBlur={onBlur('max')} />
         </div>
       </div>
-      {/* The radio rows (sample rate, gains; the scan's range and resolution) follow here. */}
+      <div className="ov-ps-row">
+        <div className="ov-ps-label">
+          <span id="ov-spec-rate-label">{t('spectrum.sampleRate')}</span>
+          {radio.ratePending ? <span>…</span> : null}
+        </div>
+        <div className="ov-ps-controls">
+          <select className="ov-radio-select" aria-labelledby="ov-spec-rate-label" disabled={!radio.ready || radio.rateDisabled}
+            value={rateValue} onChange={(event) => { if (event.target.value !== '') onSampleRate(Number(event.target.value)); }}>
+            {rateValue === '' ? <option value="">—</option> : null}
+            {radio.ready ? radio.sampleRates.map((rate) => <option key={rate} value={String(rate)}>{t('spectrum.rateOption', { rate: formatMsps(rate) })}</option>) : null}
+          </select>
+        </div>
+      </div>
+      <div className="ov-ps-row">
+        <div className="ov-ps-label">
+          <span id="ov-spec-gain-label">{t('spectrum.gain')}</span>
+        </div>
+        <div className="ov-ps-controls" role="group" aria-labelledby="ov-spec-gain-label">
+          {gainSelect('lna', radio.lnaDb)}
+          {gainSelect('vga', radio.vgaDb)}
+          <button className="ov-button ov-spec-amp" type="button" aria-pressed={radio.ready && radio.amp === true} aria-label={t('spectrum.ampAria')}
+            disabled={!radio.ready || radio.gainsDisabled || radio.amp === null} onClick={() => onAmp(radio.amp !== true)}>
+            {t('spectrum.amp')}
+          </button>
+        </div>
+      </div>
+      {/* The scan's range, resolution and gains follow here. */}
     </div>
   );
 }

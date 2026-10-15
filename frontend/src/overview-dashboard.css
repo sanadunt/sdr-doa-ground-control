@@ -205,6 +205,10 @@
 .ov-spec-follow { display: inline-flex; flex: none; align-items: center; gap: 8px; height: 44px; color: var(--muted); cursor: pointer; font-size: 12.5px; white-space: nowrap; }
 .ov-spec-follow input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
 .ov-listen-mode { flex: none; width: 76px; height: 44px; padding: 0 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+/* Sample rate, LNA and VGA in the spectrum Atur column; with the +14 dB toggle the gain row fits its 313 px. */
+.ov-radio-select { flex: none; width: 108px; height: 44px; padding: 0 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+.ov-radio-select:disabled { cursor: not-allowed; opacity: .55; }
+.ov-spec-amp { padding: 0 10px; font-family: var(--mono); font-size: 12.5px; }
 .ov-button:disabled { cursor: not-allowed; opacity: .45; }
 .ov-button:disabled:hover { border-color: var(--line); }
 .ov-button[aria-pressed='true'] { border-color: var(--signal); background: color-mix(in srgb, var(--signal) 16%, transparent); }

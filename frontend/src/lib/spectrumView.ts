@@ -258,6 +258,8 @@ export interface DockViewInput {
   phase: BridgePhase;
   /** A Mulai/Dengar start is waiting for its result. */
   starting: boolean;
+  /** A dock sample rate change is restarting RX. */
+  restarting?: boolean;
   status: ReceiverStatus | null;
   /** Code of the last failed dock command, cleared by the next success. */
   notice: DockNotice | null;
@@ -286,6 +288,7 @@ const NOTICE_MESSAGES: Partial<Record<DockNotice, MessageKey>> = {
   CONNECT_FAILED: 'spectrum.connectFailed',
   MOCK_UNAVAILABLE: 'spectrum.mockUnavailable',
   TIMEOUT: 'spectrum.timeout',
+  RECORDING_ACTIVE: 'spectrum.recordingActive',
   USB_LOST: 'spectrum.usbLost',
   RX_ERROR: 'spectrum.rxError',
 };
@@ -297,10 +300,10 @@ export function noticeMessage(notice: DockNotice): MessageKey {
 
 /**
  * The dock's chip and body text for one moment, in priority order: build
- * missing, unresponsive frame, connecting, busy Receiver, a code that needs
- * the Receiver page, then running or stopped.
+ * missing, unresponsive frame, busy Receiver, connecting or an RX restart, a
+ * code that needs the Receiver page, then running or stopped.
  */
-export function spectrumDockView({ build, phase, starting, status, notice }: DockViewInput): DockView {
+export function spectrumDockView({ build, phase, starting, restarting = false, status, notice }: DockViewInput): DockView {
   if (build === 'missing') {
     return { chip: 'NOT BUILT', tone: 'warn', message: 'spectrum.notBuilt', openReceiver: false, running: false, controlsDisabled: true };
   }
@@ -314,6 +317,10 @@ export function spectrumDockView({ build, phase, starting, status, notice }: Doc
   }
   if (phase === 'connecting' || (starting && !running)) {
     return { chip: '…', tone: 'info', message: 'spectrum.connecting', openReceiver: false, running: false, controlsDisabled: false };
+  }
+  // A sample rate change stops RX for a moment; it is not "RX stopped".
+  if (restarting && !running) {
+    return { chip: '…', tone: 'info', message: 'spectrum.restarting', openReceiver: false, running: false, controlsDisabled: false };
   }
   const usbError = live?.error?.code ?? null;
   const code = notice ?? (usbError === 'NO_WEBUSB' ? usbError : null);

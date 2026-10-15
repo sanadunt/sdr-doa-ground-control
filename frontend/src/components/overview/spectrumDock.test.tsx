@@ -11,7 +11,7 @@ import { followNodeStore } from '../../lib/listenPrefs';
 import type { ConsoleCapabilities } from '../../api';
 import { SpectrumDock } from './SpectrumDock';
 import { SpectrumSettings } from './SpectrumSettings';
-import type { SpectrumSettingsProps } from './SpectrumSettings';
+import type { RadioRows, SpectrumSettingsProps } from './SpectrumSettings';
 
 const ORIGIN = 'http://127.0.0.1:8787';
 
@@ -140,7 +140,7 @@ describe('Spectrum dock states', () => {
     expect(chip(markup)).toBe('RX OFF');
     expect(markup).toContain('<div class="ov-spec-overlay"><span>RX berhenti</span></div>');
     // The axis follows the node until the first frame.
-    expect(markup).toContain('Tengah 416.588 MHz · span 2.0 MHz · LNA — dB · VGA — dB');
+    expect(markup).toContain('Tengah 416.588 MHz · span 2.0 MHz · — MSPS · LNA — dB · VGA — dB');
     expect(markup).toContain('<span>415.588</span>');
     // Never renders the frame or its URL.
     expect(markup).not.toContain('/receiver/');
@@ -166,7 +166,8 @@ describe('Spectrum dock states', () => {
   it('shows RX, the live centre and gains while running', () => {
     const markup = dock(bridgeWith({ status: status() }), { snapshot: null });
     expect(chip(markup)).toBe('RX');
-    expect(markup).toContain('Tengah 433.920 MHz · span 2.0 MHz · LNA 24 dB · VGA 20 dB');
+    expect(markup).toContain('Tengah 433.920 MHz · span 2.0 MHz · 20 MSPS · LNA 24 dB · VGA 20 dB');
+    expect(markup).not.toContain('+14 dB');
     expect(markup).toContain('>Berhenti<');
     expect(markup).not.toContain('RX berhenti');
     expect(markup).toMatch(/<button class="ov-button ov-spec-listen" type="button" aria-pressed="false">/);
@@ -326,14 +327,19 @@ describe('Spectrum dock styles', () => {
   });
 
   it('keeps the settings controls at 44 px and uses console tokens only', () => {
-    for (const selector of ['.ov-seg', '.ov-db-input', '.ov-ps-controls', '.ov-listen-mode', '.ov-button']) {
+    for (const selector of ['.ov-seg', '.ov-db-input', '.ov-ps-controls', '.ov-listen-mode', '.ov-radio-select', '.ov-button']) {
       expect(declarations(selector).join(';'), selector).toMatch(/(?:^|[;\s])height:\s*44px/);
     }
-    const spectrumRules = [...dashboardCss.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter((match) => /\.ov-spec-(?:settings|main|narrow|wide|mode|mark)/.test(match[1]));
+    const spectrumRules = [...dashboardCss.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter((match) => /\.ov-spec-(?:settings|main|narrow|wide|mode|mark|amp)|\.ov-radio-select/.test(match[1]));
     expect(spectrumRules.length).toBeGreaterThan(4);
     for (const rule of spectrumRules) expect(rule[2], rule[1]).not.toMatch(/#[0-9a-f]{3,8}\b|rgba?\(/i);
   });
 });
+
+/** The radio rows before the Receiver frame answers. */
+const RADIO_UNKNOWN: RadioRows = {
+  ready: false, sampleRateHz: null, sampleRates: [], rateDisabled: true, ratePending: false, lnaDb: null, vgaDb: null, amp: null, gainsDisabled: true,
+};
 
 function settings(overrides: Partial<SpectrumSettingsProps> = {}, lang: Lang = 'id'): string {
   const props: SpectrumSettingsProps = {
@@ -349,6 +355,10 @@ function settings(overrides: Partial<SpectrumSettingsProps> = {}, lang: Lang = '
     onDbAuto: () => undefined,
     onDbManual: () => undefined,
     onDbRange: () => undefined,
+    radio: RADIO_UNKNOWN,
+    onSampleRate: () => undefined,
+    onGain: () => undefined,
+    onAmp: () => undefined,
     ...overrides,
   };
   return renderToStaticMarkup(
@@ -386,6 +396,77 @@ describe('Spectrum dock Atur column', () => {
     expect(markup).toMatch(/<button type="button" aria-pressed="false">Auto<\/button><button type="button" aria-pressed="true">Manual<\/button>/);
     expect(markup).toMatch(/aria-label="Min dB" value="-90"\/>/);
     expect(markup).toMatch(/aria-label="Max dB" value="-20"\/>/);
-    expect(markup).not.toContain('disabled=""');
+    const dbRow = markup.slice(markup.indexOf('id="ov-spec-db-label"'), markup.indexOf('id="ov-spec-rate-label"'));
+    expect(dbRow).toContain('Manual');
+    expect(dbRow).not.toContain('disabled=""');
+  });
+});
+
+describe('Spectrum dock Atur radio rows', () => {
+  const ready: RadioRows = {
+    ready: true, sampleRateHz: 20_000_000, sampleRates: [2e6, 4e6, 5e6, 8e6, 10e6, 16e6, 20e6], rateDisabled: false, ratePending: false,
+    lnaDb: 24, vgaDb: 20, amp: false, gainsDisabled: false,
+  };
+  const row = (markup: string, labelId: string) => {
+    const start = markup.indexOf(`id="${labelId}"`);
+    const end = markup.indexOf('<div class="ov-ps-row', start);
+    return markup.slice(start, end < 0 ? undefined : end);
+  };
+  const selects = (markup: string) => [...markup.matchAll(/<select[^>]*>([\s\S]*?)<\/select>/g)];
+
+  it('follows the dB scale with the sample rate and the gain rows', () => {
+    const markup = settings({ radio: ready });
+    const order = ['id="ov-spec-db-label"', 'id="ov-spec-rate-label"', 'id="ov-spec-gain-label"'];
+    const positions = order.map((needle) => markup.indexOf(needle));
+    for (const position of positions) expect(position).toBeGreaterThan(-1);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+  });
+
+  it('shows the Receiver\'s rate and gains in enabled selects', () => {
+    const markup = settings({ radio: ready }, 'en');
+    const rate = row(markup, 'ov-spec-rate-label');
+    expect(rate).toContain('>Sample rate</span>');
+    expect(rate).toMatch(/<select class="ov-radio-select" aria-labelledby="ov-spec-rate-label">/);
+    expect([...rate.matchAll(/<option value="(\d+)"[^>]*>([^<]*)<\/option>/g)].map((match) => match[2])).toEqual(['2 MSPS', '4 MSPS', '5 MSPS', '8 MSPS', '10 MSPS', '16 MSPS', '20 MSPS']);
+    expect(rate).toMatch(/<option value="20000000" selected="">20 MSPS<\/option>/);
+    const gain = row(markup, 'ov-spec-gain-label');
+    expect(gain).toMatch(/<div class="ov-ps-controls" role="group" aria-labelledby="ov-spec-gain-label">/);
+    const [lna, vga] = selects(gain);
+    expect(lna[0]).toMatch(/aria-label="LNA gain"/);
+    expect([...lna[1].matchAll(/>(LNA \d+ dB)</g)].map((match) => match[1])).toEqual(['LNA 0 dB', 'LNA 8 dB', 'LNA 16 dB', 'LNA 24 dB', 'LNA 32 dB', 'LNA 40 dB']);
+    expect(lna[1]).toMatch(/<option value="24" selected="">LNA 24 dB<\/option>/);
+    expect(vga[0]).toMatch(/aria-label="VGA gain"/);
+    expect(vga[1].match(/<option /g)).toHaveLength(32);
+    expect(vga[1]).toMatch(/<option value="20" selected="">VGA 20 dB<\/option>/);
+    expect(gain).toMatch(/<button class="ov-button ov-spec-amp" type="button" aria-pressed="false" aria-label="RF amp \+14 dB">\+14 dB<\/button>/);
+    expect(row(markup, 'ov-spec-rate-label') + gain).not.toContain('disabled=""');
+    expect(settings({ radio: { ...ready, amp: true } }, 'id')).toMatch(/aria-pressed="true" aria-label="Penguat RF \+14 dB">\+14 dB</);
+  });
+
+  it('shows — in disabled controls while the Receiver frame does not answer', () => {
+    const markup = settings();
+    const rate = row(markup, 'ov-spec-rate-label');
+    expect(rate).toMatch(/<select class="ov-radio-select" aria-labelledby="ov-spec-rate-label" disabled=""><option value="" selected="">—<\/option><\/select>/);
+    const gain = row(markup, 'ov-spec-gain-label');
+    for (const [select] of selects(gain)) expect(select).toMatch(/disabled=""><option value="" selected="">—<\/option><\/select>$/);
+    expect(gain).toMatch(/<button class="ov-button ov-spec-amp" type="button" aria-pressed="false" aria-label="Penguat RF \+14 dB" disabled="">/);
+  });
+
+  it('marks a rate change on its way and keeps an unknown gain selectable', () => {
+    const pending = settings({ radio: { ...ready, rateDisabled: true, ratePending: true } });
+    expect(row(pending, 'ov-spec-rate-label')).toMatch(/^id="ov-spec-rate-label">Sample rate<\/span><span>…<\/span>/);
+    expect(row(pending, 'ov-spec-rate-label')).toContain('disabled=""');
+    const unknown = row(settings({ radio: { ...ready, lnaDb: null, amp: null } }), 'ov-spec-gain-label');
+    const [lna] = selects(unknown);
+    expect(lna[0]).not.toContain('disabled=""');
+    expect(lna[1]).toMatch(/^<option value="" selected="">—<\/option><option value="0">LNA 0 dB<\/option>/);
+    expect(unknown).toMatch(/aria-pressed="false" aria-label="Penguat RF \+14 dB" disabled="">/);
+    // An off-step value from another device stays shown.
+    expect(row(settings({ radio: { ...ready, lnaDb: 14 } }), 'ov-spec-gain-label')).toMatch(/<option value="14" selected="">LNA 14 dB<\/option><option value="0">/);
+  });
+
+  it('adds the rate and the +14 dB amp to the dock info line', () => {
+    expect(dock(bridgeWith({ status: status({ sampleRateHz: 8_000_000, gains: { lnaDb: 32, vgaDb: 16, amp: true } }) }), { snapshot: null, lang: 'en' }))
+      .toContain('Center 433.920 MHz · span 2.0 MHz · 8 MSPS · LNA 32 dB · VGA 16 dB · +14 dB');
   });
 });

@@ -195,6 +195,14 @@ describe('spectrum dock state table', () => {
     expect(spectrumDockView(input({ phase: 'idle', status: null, starting: true }))).toMatchObject({ chip: '…' });
   });
 
+  it('shows an RX restart for a sample rate change instead of RX stopped', () => {
+    const stopped = status({ running: false });
+    expect(spectrumDockView(input({ status: stopped, restarting: true }))).toMatchObject({ chip: '…', tone: 'info', message: 'spectrum.restarting', running: false, controlsDisabled: false });
+    // Running again.
+    expect(spectrumDockView(input({ restarting: true }))).toMatchObject({ chip: 'RX', running: true });
+    expect(spectrumDockView(input({ status: stopped }))).toMatchObject({ chip: 'RX OFF' });
+  });
+
   it('shows NO BRIDGE for an unresponsive frame', () => {
     expect(spectrumDockView(input({ phase: 'unresponsive', status: null }))).toMatchObject({ chip: 'NO BRIDGE', message: 'spectrum.unresponsive', openReceiver: true });
   });
@@ -220,8 +228,9 @@ describe('spectrum dock state table', () => {
   });
 
   it('has a message for every notice code', () => {
-    for (const code of ['NOT_READY', 'INVALID_COMMAND', 'RX_NOT_RUNNING', 'OUT_OF_RANGE', 'TIMEOUT', 'MOCK_UNAVAILABLE', 'CONNECT_FAILED'] as const) {
+    for (const code of ['NOT_READY', 'INVALID_COMMAND', 'RX_NOT_RUNNING', 'OUT_OF_RANGE', 'TIMEOUT', 'MOCK_UNAVAILABLE', 'CONNECT_FAILED', 'RECORDING_ACTIVE'] as const) {
       expect(DICTIONARIES.en[noticeMessage(code)], code).toBeTruthy();
     }
+    expect(noticeMessage('RECORDING_ACTIVE')).toBe('spectrum.recordingActive');
   });
 });
