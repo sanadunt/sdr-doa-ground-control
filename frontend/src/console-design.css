@@ -115,6 +115,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .refresh-interval { flex: none; width: 88px; height: 44px; padding: 0 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 13px; cursor: pointer; }
 .refresh-interval:disabled { cursor: not-allowed; opacity: .6; }
 .refresh-interval.is-error { border-color: var(--red); }
+/* Between 1024 and 1180 px the Dashboard's single-row top bar leaves the
+   status strip about 30 px short; tighter items keep SIM in view. */
+@media (min-width: 1024px) and (max-width: 1180px) {
+  .topbar { gap: 6px; }
+  .telemetry-item { padding: 0 6px; }
+}
 @media (max-width: 1023px) {
   /* Row 1: menu, brand, title, tools. Row 2: status chips, all visible. Row 3: page tools. */
   .topbar { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; grid-template-areas: 'menu brand title tools' 'chips chips chips chips' 'toolbar toolbar toolbar toolbar'; align-items: center; gap: 6px 8px; padding: 4px 12px 8px; }

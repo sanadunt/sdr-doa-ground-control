@@ -16,6 +16,14 @@ import { Icon } from '../components/ui';
 import { Card, DataTable, EmptyState, KeyValueGrid, Page, PageGrid, PageHeader, PageNotice, Segmented, StatRow, StatTile, StatusChip, Tag } from '../components/page';
 import type { DataColumn, KeyValueItem } from '../components/page';
 
+/** A duration for a StatTile: the number as the value, its unit in the small unit slot. */
+function durationTile(t: Translate, ms: number | null): { value: string; unit?: string } {
+  if (ms === null) return { value: 'N/A' };
+  const text = formatDuration(t, ms);
+  const match = /^(.*\d)\s+(\S+)$/.exec(text);
+  return match ? { value: match[1], unit: match[2] } : { value: text };
+}
+
 /** The v2 snapshot has no App-level poll; this page reads it while the v2 view is shown. */
 const RDF_NODE_POLL_MS = 2_000;
 /** Local clock tick for per-kind ages between reads. */
@@ -249,7 +257,7 @@ export function RdfNodeView({ rdfNode, rdfError, nowMs }: { rdfNode: RdfNodeSnap
           <StatTile label={t('monitor.received')} value={count(rdfNode?.received)} />
           <StatTile label={t('monitor.valid')} value={count(rdfNode?.valid)} tone={(rdfNode?.valid ?? 0) > 0 ? 'good' : undefined} />
           <StatTile label={t('monitor.invalid')} value={count(invalid)} tone={invalid !== null && invalid > 0 ? 'warn' : undefined} />
-          <StatTile label={t('monitor.lastAge')} value={lastAge === null ? 'N/A' : formatDuration(t, lastAge)} />
+          <StatTile label={t('monitor.lastAge')} {...durationTile(t, lastAge)} />
         </StatRow>
       </Card>
       <Card
@@ -468,7 +476,7 @@ export function MessageMonitorPage({
               <StatTile label={t('monitor.invalid')} value={count(invalid)} tone={invalid !== null && invalid > 0 ? 'warn' : undefined} />
               <StatTile label={t('monitor.bytes')} value={count(mqtt?.total_bytes)} />
               <StatTile label={t('monitor.latency')} value={latency === null ? 'N/A' : count(latency)} unit={latency === null ? undefined : 'ms'} />
-              <StatTile label={t('monitor.lastAge')} value={lastAge === null ? 'N/A' : formatDuration(t, lastAge)} />
+              <StatTile label={t('monitor.lastAge')} {...durationTile(t, lastAge)} />
             </StatRow>
           </Card>
           <PageGrid>
