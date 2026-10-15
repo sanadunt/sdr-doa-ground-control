@@ -250,7 +250,12 @@ migrate_old_data() {
     fi
     mkdir -p "$DATA_DIR/receiver"
     for name in receiver.sqlite3 receiver.sqlite3-wal receiver.sqlite3-shm audio tmp; do
-      if [ -e "$DATA_DIR/$name" ]; then mv "$DATA_DIR/$name" "$DATA_DIR/receiver/$name"; fi
+      if [ -e "$DATA_DIR/$name" ]; then
+        # An empty directory left by an earlier start would swallow the move.
+        rmdir "$DATA_DIR/receiver/$name" 2>/dev/null || true
+        [ ! -e "$DATA_DIR/receiver/$name" ] || die "both $DATA_DIR/$name and $DATA_DIR/receiver/$name exist; merge them by hand"
+        mv "$DATA_DIR/$name" "$DATA_DIR/receiver/$name"
+      fi
     done
     say "Moved the Receiver records into $DATA_DIR/receiver"
   fi
