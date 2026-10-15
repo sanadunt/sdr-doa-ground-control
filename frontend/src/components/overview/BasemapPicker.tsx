@@ -8,6 +8,9 @@ import { Icon } from '../ui';
 const MENU_ID = 'ov-basemap-menu';
 const GAP_PX = 6;
 const EDGE_PX = 8;
+/** Phone widths keep the page's 16 px side gutter. */
+const PHONE_EDGE_PX = 16;
+const PHONE_MAX_WIDTH_PX = 600;
 const MAX_MENU_HEIGHT_PX = 420;
 
 type PopoverElement = HTMLDivElement & { showPopover?: () => void; hidePopover?: () => void };
@@ -15,21 +18,25 @@ type PopoverElement = HTMLDivElement & { showPopover?: () => void; hidePopover?:
 /**
  * Where the open menu goes: above the button when it fits there (the map
  * controls sit at the bottom of the map), otherwise on the side with more
- * room, kept inside the viewport.
+ * room, kept inside the viewport. The room on that side goes to the
+ * stylesheet as --ov-basemap-space, which caps the menu's max-height together
+ * with the stylesheet's own limits for the layout.
  */
 export function basemapMenuPosition(
   button: { top: number; bottom: number; left: number },
   menu: { width: number; height: number },
   viewport: { width: number; height: number },
 ): CSSProperties {
-  const above = button.top - GAP_PX - EDGE_PX;
-  const below = viewport.height - button.bottom - GAP_PX - EDGE_PX;
+  const edge = viewport.width <= PHONE_MAX_WIDTH_PX ? PHONE_EDGE_PX : EDGE_PX;
+  const above = button.top - GAP_PX - edge;
+  const below = viewport.height - button.bottom - GAP_PX - edge;
   const up = above >= Math.min(menu.height, 240) || above >= below;
-  const maxHeight = Math.max(88, Math.min(MAX_MENU_HEIGHT_PX, up ? above : below));
-  const left = Math.max(EDGE_PX, Math.min(button.left, viewport.width - menu.width - EDGE_PX));
+  const space = Math.round(Math.max(88, Math.min(MAX_MENU_HEIGHT_PX, up ? above : below)));
+  const left = Math.max(edge, Math.min(button.left, viewport.width - menu.width - edge));
+  const room = { '--ov-basemap-space': `${space}px` } as CSSProperties;
   return up
-    ? { left, bottom: viewport.height - button.top + GAP_PX, top: 'auto', maxHeight }
-    : { left, top: button.bottom + GAP_PX, bottom: 'auto', maxHeight };
+    ? { ...room, left, bottom: viewport.height - button.top + GAP_PX, top: 'auto' }
+    : { ...room, left, top: button.bottom + GAP_PX, bottom: 'auto' };
 }
 
 /**

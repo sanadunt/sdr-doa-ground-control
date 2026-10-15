@@ -1,4 +1,4 @@
-import type { ReactElement } from 'react';
+import type { CSSProperties, ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { BASEMAP_ORDER } from '../../lib/basemaps';
@@ -42,13 +42,19 @@ describe('basemap menu', () => {
 
   it('opens above its button when there is room and stays in the viewport', () => {
     const viewport = { width: 1440, height: 900 };
+    const space = (style: CSSProperties) => (style as Record<string, unknown>)['--ov-basemap-space'];
     const up = basemapMenuPosition({ top: 600, bottom: 644, left: 200 }, { width: 280, height: 200 }, viewport);
     expect(up).toMatchObject({ left: 200, bottom: 900 - 600 + 6, top: 'auto' });
-    expect(Number(up.maxHeight)).toBeLessThanOrEqual(420);
+    // The room goes to the stylesheet, which also applies its own caps per layout.
+    expect(up).not.toHaveProperty('maxHeight');
+    expect(space(up)).toBe('420px');
+    expect(space(basemapMenuPosition({ top: 230, bottom: 274, left: 200 }, { width: 280, height: 200 }, viewport))).toBe(`${230 - 6 - 8}px`);
     const down = basemapMenuPosition({ top: 40, bottom: 84, left: 1400 }, { width: 280, height: 200 }, viewport);
     expect(down).toMatchObject({ top: 90, bottom: 'auto', left: 1440 - 280 - 8 });
-    const phone = basemapMenuPosition({ top: 500, bottom: 544, left: 16 }, { width: 280, height: 200 }, { width: 390, height: 844 });
-    expect(phone.left).toBe(16);
+    // Phone widths keep the 16 px side gutter on both sides.
+    const phoneViewport = { width: 390, height: 844 };
+    expect(basemapMenuPosition({ top: 500, bottom: 544, left: 16 }, { width: 280, height: 200 }, phoneViewport).left).toBe(16);
+    expect(basemapMenuPosition({ top: 500, bottom: 544, left: 230 }, { width: 280, height: 200 }, phoneViewport).left).toBe(390 - 280 - 16);
   });
 });
 
@@ -76,7 +82,8 @@ describe('basemap styles', () => {
   it('scrolls the menu inside the viewport and narrows it on a phone', () => {
     expect(declarations('.ov-basemap-menu')).toMatch(/overflow-y:\s*auto/);
     expect(declarations('.ov-basemap-menu')).toMatch(/position:\s*fixed/);
-    expect(css).toMatch(/@media \(max-width: 1023px\)[\s\S]*\.ov-basemap-menu \{ max-height: min\(320px, 40vh\); \}/);
+    expect(declarations('.ov-basemap-menu')).toMatch(/max-height:\s*min\(420px, 60vh, var\(--ov-basemap-space, 420px\)\)/);
+    expect(css).toMatch(/@media \(max-width: 1023px\)[\s\S]*\.ov-basemap-menu \{ max-height: min\(320px, 40vh, var\(--ov-basemap-space, 320px\)\); \}/);
     expect(css).toMatch(/@media \(max-width: 600px\)[\s\S]*\.ov-basemap-menu \{ width: min\(280px, calc\(100vw - 32px\)\); \}/);
     expect(declarations('.ov-basemap-menu[hidden]')).toMatch(/display:\s*none/);
   });
