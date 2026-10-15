@@ -285,6 +285,30 @@ class ReleaseBuildTests(unittest.TestCase):
         with self.assertRaisesRegex(make_release.ReleaseError, "--skip-build"):
             make_release.build_release(ROOT, output_dir=self.tmp / "x", dist_dir=self.dist, allow_dirty=True)
 
+    def test_command_line_skip_build(self):
+        """The CLI as the docs run it, with checksums checked by sha256sum when present."""
+        out = self.tmp / "cli"
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "tools/make_release.py"), "--skip-build", "--allow-dirty",
+             "--dist-dir", str(self.dist), "--output-dir", str(out), "--source-date-epoch", str(EPOCH)],
+            capture_output=True, text=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        printed = [Path(line) for line in result.stdout.splitlines()]
+        self.assertEqual([path.name for path in printed], [self.console_tar.name, self.agent_tar.name, "SHA256SUMS"])
+        self.assertEqual((out / self.console_tar.name).read_bytes(), self.console_tar.read_bytes())
+        if shutil.which("sha256sum"):
+            check = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=out, capture_output=True, text=True)
+            self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+        missing = subprocess.run(
+            [sys.executable, str(ROOT / "tools/make_release.py"), "--skip-build", "--allow-dirty",
+             "--dist-dir", str(self.tmp / "absent"), "--output-dir", str(self.tmp / "cli-missing")],
+            capture_output=True, text=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn("release failed", missing.stderr)
+        self.assertFalse((self.tmp / "cli-missing").exists())
+
 
 class ReleaseHelperTests(unittest.TestCase):
     def test_runtime_modules_follow_lazy_and_relative_imports(self):
