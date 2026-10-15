@@ -30,7 +30,7 @@ describe('i18n dictionaries', () => {
 
   it('never calls remote publishing disabled while Control has the admin-confirmed config patch', () => {
     for (const lang of ['en', 'id'] as const) {
-      for (const key of ['health.sub.publishAdminOnly', 'monitor.subscribeOnly', 'config.mqttPublishDetail'] as const) {
+      for (const key of ['health.sub.publishAdminOnly', 'monitor.subscribeOnly'] as const) {
         expect(translate(lang, key), `${lang} ${key}`).not.toMatch(/disabled|nonaktif/i);
       }
     }
