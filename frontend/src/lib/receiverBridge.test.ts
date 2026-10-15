@@ -1,23 +1,45 @@
 import { describe, expect, it } from 'vitest';
-import { createReceiverBridge, consoleRequestsMockSdr, RECEIVER_BUILD_PROBE_URL } from './receiverBridge';
-import type { BridgeEnvironment, BridgeHostWindow, BridgeResult } from './receiverBridge';
+import { createReceiverBridge, consoleRequestsMockSdr, mergeTuneView, RECEIVER_BUILD_PROBE_URL } from './receiverBridge';
+import type { BridgeEnvironment, BridgeHostWindow, BridgeResult, TuneView } from './receiverBridge';
 import {
   BRIDGE_CHANNEL,
   BRIDGE_VERSION,
   COMMAND_TIMEOUT_MS,
   CONSOLE_MESSAGE_TYPES,
+  DISPLAY_DB_LIMITS,
   FRAME_MESSAGE_TYPES,
+  GAIN_LIMITS,
   HELLO_TIMEOUT_MS,
+  LONG_COMMAND_TYPES,
   LISTEN_MODES,
+  MARKER_LIMITS,
   MAX_QUEUED_COMMANDS,
   RESULT_CODES,
+  SAMPLE_RATES_HZ,
   START_TIMEOUT_MS,
   STATUS_ERROR_CODES,
   SUBSCRIBE_LIMITS,
+  SWEEP_FFT_SIZES,
+  SWEEP_LIMITS,
+  SWEEP_PHASES,
+  SWEEP_SOURCES,
+  SWEEP_SPAN_LIMITS,
+  SWEEP_VIEWS,
+  TUNE_LIMITS,
+  TUNE_SOURCES,
+  clampDisplayRange,
   clampSubscription,
   commandMessage,
+  gainSteps,
+  inMarkerRange,
+  inSweepRange,
+  normalizeMarkers,
+  normalizeTuneStamp,
   parseFrameMessage,
+  snapGain,
+  sweepMaxSpanHz,
 } from './receiverBridgeProtocol';
+import type { SpectrumFrame } from './receiverBridgeProtocol';
 
 const ORIGIN = 'http://127.0.0.1:8787';
 
@@ -90,6 +112,7 @@ function status(overrides: Record<string, unknown> = {}): Record<string, unknown
     recording: false,
     error: null,
     notice: null,
+    tune: { rev: 1, by: 'receiver', id: null, receiverRev: 1 },
     ...overrides,
   };
 }
@@ -98,12 +121,172 @@ describe('receiver bridge protocol', () => {
   it('matches the frame-side constants', () => {
     expect(BRIDGE_CHANNEL).toBe('sdr-console-receiver');
     expect(BRIDGE_VERSION).toBe(1);
-    expect([...FRAME_MESSAGE_TYPES]).toEqual(['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result']);
-    expect([...CONSOLE_MESSAGE_TYPES]).toEqual(['console:hello', 'console:subscribe', 'console:start', 'console:stop', 'console:tune', 'console:vfo', 'console:listen']);
+    expect([...FRAME_MESSAGE_TYPES]).toEqual(['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep', 'receiver:markers']);
+    expect([...CONSOLE_MESSAGE_TYPES]).toEqual([
+      'console:hello', 'console:subscribe', 'console:start', 'console:stop', 'console:tune', 'console:vfo', 'console:listen', 'console:display',
+      'console:gains', 'console:radio', 'console:sweep-start', 'console:sweep-stop', 'console:sweep-config', 'console:sweep-display',
+      'console:marker-add', 'console:marker-remove',
+    ]);
     expect([...LISTEN_MODES]).toEqual(['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw']);
-    expect([...RESULT_CODES]).toEqual(['OK', 'NOT_READY', 'INVALID_COMMAND', 'NO_WEBUSB', 'NEEDS_PAIRING', 'NEEDS_DEVICE_CHOICE', 'MOCK_UNAVAILABLE', 'CONNECT_FAILED', 'SWEEP_BUSY', 'RX_NOT_RUNNING', 'OUT_OF_RANGE', 'AUDIO_BLOCKED', 'TIMEOUT']);
+    expect([...RESULT_CODES]).toEqual([
+      'OK', 'NOT_READY', 'INVALID_COMMAND', 'NO_WEBUSB', 'NEEDS_PAIRING', 'NEEDS_DEVICE_CHOICE', 'MOCK_UNAVAILABLE', 'CONNECT_FAILED', 'SWEEP_BUSY',
+      'RX_NOT_RUNNING', 'OUT_OF_RANGE', 'AUDIO_BLOCKED', 'RECORDING_ACTIVE', 'SWEEP_UNSUPPORTED', 'SWEEP_FAILED', 'MARKER_LIMIT', 'MARKER_NOT_FOUND',
+      'MARKER_SAVE_FAILED', 'TIMEOUT',
+    ]);
     expect([...STATUS_ERROR_CODES]).toEqual(['USB_LOST', 'RX_ERROR', 'NO_WEBUSB']);
     expect(SUBSCRIBE_LIMITS).toEqual({ binsMin: 64, binsMax: 2048, binsDefault: 512, fpsMin: 1, fpsMax: 15, fpsDefault: 10, spanMinHz: 100_000, spanDefaultHz: 2_000_000 });
+    expect([...TUNE_SOURCES]).toEqual(['console', 'receiver']);
+    expect(TUNE_LIMITS).toEqual({ minHz: 1_000_000, maxHz: 6_000_000_000 });
+    // Scans and Receiver markers reach 7.25 GHz; RX tuning stops at 6 GHz.
+    expect(SWEEP_LIMITS).toEqual({ minHz: 1_000_000, maxHz: 7_250_000_000 });
+    expect(MARKER_LIMITS).toEqual({ minHz: 1_000_000, maxHz: 7_250_000_000, maxSent: 512, maxTotal: 10_000, labelMaxChars: 80 });
+    expect(DISPLAY_DB_LIMITS).toEqual({ minDb: -160, maxDb: 60, minGapDb: 5 });
+    expect([...SAMPLE_RATES_HZ]).toEqual([2_000_000, 4_000_000, 5_000_000, 8_000_000, 10_000_000, 16_000_000, 20_000_000]);
+    expect(GAIN_LIMITS).toEqual({ lna: { min: 0, max: 40, step: 8 }, vga: { min: 0, max: 62, step: 2 } });
+    expect([...LONG_COMMAND_TYPES]).toEqual(['console:start', 'console:radio', 'console:sweep-start', 'console:sweep-stop']);
+    expect([...SWEEP_FFT_SIZES]).toEqual([4096, 8192]);
+    expect([...SWEEP_VIEWS]).toEqual(['current', 'average', 'max']);
+    expect([...SWEEP_SOURCES]).toEqual(['native', 'manual', 'simulated']);
+    expect([...SWEEP_PHASES]).toEqual(['idle', 'starting', 'active', 'stopping']);
+    expect(SWEEP_SPAN_LIMITS).toEqual({ minSpanHz: 1_000_000, sampleRateHz: 20_000_000, maxBins: 500_000 });
+  });
+
+  it('checks a scan range in displayed Hz like the frame', () => {
+    expect(sweepMaxSpanHz(8192)).toBe(1_220_703_125);
+    expect(sweepMaxSpanHz(4096)).toBe(2_441_406_250);
+    expect(inSweepRange(100e6, 1000e6, 8192)).toBe(true);
+    expect(inSweepRange(1e6, 1_230_000_000, 8192)).toBe(false);
+    expect(inSweepRange(1e6, 1_230_000_000, 4096)).toBe(true);
+    expect(inSweepRange(100e6, 100.9e6, 8192)).toBe(false);
+    expect(inSweepRange(7_249e6, 7_251e6, 8192)).toBe(false);
+    expect(inSweepRange(7_124e6, 7_125e6, 8192, -125e6)).toBe(true);
+    expect(inSweepRange(7_124e6, 7_126e6, 8192, -125e6)).toBe(false);
+    expect(inSweepRange(100e6, 1000e6, 2048)).toBe(false);
+    expect(inSweepRange('100', 1000e6, 8192)).toBe(false);
+  });
+
+  it('reads the scan state of a status and treats an unusable one as unknown', () => {
+    const sweepOf = (value: unknown) => {
+      const parsed = parseFrameMessage({ ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:status', ...status({ sweep: value }) });
+      return parsed?.type === 'receiver:status' ? parsed.status.sweep : 'not parsed';
+    };
+    const sweep = {
+      phase: 'active', source: 'manual', startHz: 400e6, stopHz: 500e6, fftSize: 4096, resolutionHz: 4882.8125, lnaDb: 32, vgaDb: 20, amp: false,
+      displayMinDb: -110, displayMaxDb: -10, view: 'current',
+    };
+    expect(sweepOf(sweep)).toEqual(sweep);
+    expect(sweepOf({ ...sweep, source: 'radio', view: 'peak', resolutionHz: -1, displayMinDb: Number.NaN, lnaDb: '3', amp: 'yes' })).toEqual({
+      ...sweep, source: 'simulated', view: 'average', resolutionHz: 4882.8125, displayMinDb: -60, displayMaxDb: 0, lnaDb: null, amp: false,
+    });
+    expect(sweepOf({ ...sweep, displayMinDb: -300, displayMaxDb: 300 })).toMatchObject({ displayMinDb: -160, displayMaxDb: 60 });
+    expect(sweepOf(undefined)).toBeNull();
+    expect(sweepOf({ ...sweep, phase: 'paused' })).toBeNull();
+    expect(sweepOf({ ...sweep, fftSize: 2048 })).toBeNull();
+    expect(sweepOf({ ...sweep, stopHz: 400e6 })).toBeNull();
+    expect(sweepOf({ ...sweep, startHz: Number.NaN })).toBeNull();
+  });
+
+  it('copies scan bins and drops bad scan frames', () => {
+    const scan = { ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:sweep', seq: 5, tMs: 2, startHz: 100e6, stopHz: 1000e6, resolutionHz: 2441.40625, sweepCount: 4, view: 'max', binCount: 4 };
+    const bins = new Float64Array([-90, Number.NaN, -40, -80]);
+    const parsed = parseFrameMessage({ ...scan, bins });
+    expect(parsed?.type).toBe('receiver:sweep');
+    if (parsed?.type !== 'receiver:sweep') return;
+    expect(parsed.frame).toMatchObject({ source: 'sweep', seq: 5, startHz: 100e6, stopHz: 1000e6, resolutionHz: 2441.40625, sweepCount: 4, view: 'max', binCount: 4 });
+    expect(Array.from(parsed.frame.bins)).toEqual([-90, -200, -40, -80]);
+    expect(parsed.frame.bins).not.toBe(bins);
+    const loose = parseFrameMessage({ ...scan, resolutionHz: 0, sweepCount: -1, view: 'x', bins: new Float32Array(4) });
+    expect(loose?.type === 'receiver:sweep' ? [loose.frame.resolutionHz, loose.frame.sweepCount, loose.frame.view] : null).toEqual([null, null, 'average']);
+    expect(parseFrameMessage({ ...scan, bins: new Float32Array(3) })).toBeNull();
+    expect(parseFrameMessage({ ...scan, stopHz: 100e6, bins: new Float32Array(4) })).toBeNull();
+    expect(parseFrameMessage({ ...scan, seq: -1, bins: new Float32Array(4) })).toBeNull();
+    expect(parseFrameMessage({ ...scan, binCount: 4096, bins: new Float32Array(4096) })).toBeNull();
+  });
+
+  it('snaps gains to their step inside the limits and lists every step', () => {
+    expect(snapGain('lna', 24)).toBe(24);
+    expect(snapGain('lna', 27)).toBe(24);
+    expect(snapGain('lna', 29)).toBe(32);
+    expect(snapGain('lna', -3)).toBe(0);
+    expect(snapGain('lna', 99)).toBe(40);
+    expect(snapGain('vga', 31)).toBe(32);
+    expect(snapGain('vga', 63)).toBe(62);
+    expect(snapGain('vga', Number.NaN)).toBeNull();
+    expect(snapGain('vga', '20')).toBeNull();
+    expect(gainSteps('lna')).toEqual([0, 8, 16, 24, 32, 40]);
+    expect(gainSteps('vga')).toHaveLength(32);
+    expect(gainSteps('vga').at(-1)).toBe(62);
+  });
+
+  it('reads the device sample rates of a status and drops anything that is not a rate', () => {
+    const rates = (value: unknown) => {
+      const parsed = parseFrameMessage({ ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:status', ...status({ sampleRatesHz: value }) });
+      return parsed?.type === 'receiver:status' ? parsed.status.sampleRatesHz : 'unparsed';
+    };
+    expect(rates([2_000_000, 20_000_000])).toEqual([2_000_000, 20_000_000]);
+    expect(rates(undefined)).toEqual([]);
+    expect(rates('2000000')).toEqual([]);
+    expect(rates([2_000_000, 2_000_000, -4, 2.5, '8000000', null, 10_000_000])).toEqual([2_000_000, 10_000_000]);
+    expect(rates(Array.from({ length: 40 }, (_value, index) => (index + 1) * 1_000_000))).toHaveLength(16);
+  });
+
+  it('keeps a manual dB range inside the graph limits, minimum first', () => {
+    expect(clampDisplayRange(-90, -20)).toEqual({ minDb: -90, maxDb: -20 });
+    expect(clampDisplayRange(-200, 100)).toEqual({ minDb: -160, maxDb: 60 });
+    expect(clampDisplayRange(-20, -90)).toEqual({ minDb: -20, maxDb: -15 });
+    expect(clampDisplayRange(-40.04, -38)).toEqual({ minDb: -40, maxDb: -35 });
+    expect(clampDisplayRange(Number.NaN, 0)).toBeNull();
+    expect(clampDisplayRange('-90', -20)).toBeNull();
+  });
+
+  it('reads the RX dB scale of a status and treats a missing or malformed one as unknown', () => {
+    const display = (value: unknown) => {
+      const parsed = parseFrameMessage({ ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:status', ...status({ display: value }) });
+      return parsed?.type === 'receiver:status' ? parsed.status.display : 'not parsed';
+    };
+    expect(display({ auto: false, minDb: -90, maxDb: -20 })).toEqual({ auto: false, minDb: -90, maxDb: -20 });
+    expect(display({ auto: true, minDb: -300, maxDb: 300 })).toEqual({ auto: true, minDb: -160, maxDb: 60 });
+    expect(display(undefined)).toBeNull();
+    expect(display({ auto: 'yes', minDb: -90, maxDb: -20 })).toBeNull();
+    expect(display({ auto: false, minDb: -90 })).toBeNull();
+  });
+
+  it('parses a tune stamp and refuses an incomplete or inconsistent one', () => {
+    expect(normalizeTuneStamp({ rev: 4, by: 'console', id: 'c3-x', receiverRev: 2 })).toEqual({ rev: 4, by: 'console', id: 'c3-x', receiverRev: 2 });
+    // A Receiver-page change carries no command id; a bad id is dropped.
+    expect(normalizeTuneStamp({ rev: 4, by: 'receiver', id: 'c3-x', receiverRev: 4 })).toEqual({ rev: 4, by: 'receiver', id: null, receiverRev: 4 });
+    expect(normalizeTuneStamp({ rev: 4, by: 'console', id: 'bad id', receiverRev: 0 })).toEqual({ rev: 4, by: 'console', id: null, receiverRev: 0 });
+    for (const bad of [
+      undefined, null, [], 'rev',
+      { rev: 4, by: 'operator', id: null, receiverRev: 0 },
+      { rev: -1, by: 'receiver', id: null, receiverRev: 0 },
+      { rev: 1.5, by: 'receiver', id: null, receiverRev: 0 },
+      { rev: 2, by: 'receiver', id: null, receiverRev: 3 },
+      { rev: 2, by: 'receiver', id: null },
+      { rev: '2', by: 'receiver', id: null, receiverRev: 0 },
+    ]) {
+      expect(normalizeTuneStamp(bad), JSON.stringify(bad)).toBeNull();
+    }
+  });
+
+  it('keeps the tune stamp of a status and treats a missing one as unknown', () => {
+    const parse = (overrides: Record<string, unknown>) => {
+      const parsed = parseFrameMessage({ ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:status', ...status(overrides) });
+      return parsed?.type === 'receiver:status' ? parsed.status : null;
+    };
+    expect(parse({ tune: { rev: 7, by: 'console', id: 'c9-a', receiverRev: 5 } })?.tune).toEqual({ rev: 7, by: 'console', id: 'c9-a', receiverRev: 5 });
+    expect(parse({ tune: undefined })?.tune).toBeNull();
+    expect(parse({ tune: { rev: 7, by: 'nobody', receiverRev: 0 } })?.tune).toBeNull();
+  });
+
+  it('keeps the tuning a result carries and drops a malformed one', () => {
+    const tune = { rev: 3, by: 'console', id: 'c4-a', receiverRev: 1, centerHz: 145_500_000.4, vfoHz: 145_510_000 };
+    const parsed = parseFrameMessage({ ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 'c4-a', ok: true, code: 'OK', tune });
+    expect(parsed).toEqual({ type: 'receiver:result', result: { id: 'c4-a', ok: true, code: 'OK', tune: { ...tune, centerHz: 145_500_000 } } });
+    const refused = parseFrameMessage({ ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 'c4-b', ok: false, code: 'SWEEP_BUSY', tune: { ...tune, centerHz: Number.NaN, vfoHz: null } });
+    expect(refused?.type === 'receiver:result' ? refused.result.tune : undefined).toEqual({ rev: 3, by: 'console', id: 'c4-a', receiverRev: 1, centerHz: null, vfoHz: null });
+    const malformed = parseFrameMessage({ ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 'c4-c', ok: true, code: 'OK', tune: { rev: -3 } });
+    expect(malformed).toEqual({ type: 'receiver:result', result: { id: 'c4-c', ok: true, code: 'OK' } });
   });
 
   it('clamps subscriptions like the frame', () => {
@@ -154,13 +337,86 @@ describe('receiver bridge protocol', () => {
       ch: BRIDGE_CHANNEL, v: 1, type: 'console:start', id: 'c1-a', mock: true, listen: false, mode: 'wfm', centerHz: 433_920_001,
     });
     expect(commandMessage('c2-a', { type: 'console:vfo', volume: 250 })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:vfo', id: 'c2-a', volume: 100 });
+    expect(commandMessage('c3-a', { type: 'console:display', auto: true })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:display', id: 'c3-a', auto: true });
+    expect(commandMessage('c4-a', { type: 'console:display', auto: false, minDb: -95.04, maxDb: -96 })).toEqual({
+      ch: BRIDGE_CHANNEL, v: 1, type: 'console:display', id: 'c4-a', auto: false, minDb: -95, maxDb: -90,
+    });
+    expect(commandMessage('c5-a', { type: 'console:display', auto: false, minDb: Number.NaN, maxDb: -20 })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:display', id: 'c5-a', auto: false });
+    expect(commandMessage('c6-a', { type: 'console:gains', lnaDb: 27, vgaDb: Number.NaN, amp: true })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:gains', id: 'c6-a', lnaDb: 24, amp: true });
+    expect(commandMessage('c7-a', { type: 'console:gains', vgaDb: 63 })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:gains', id: 'c7-a', vgaDb: 62 });
+    expect(commandMessage('c8-a', { type: 'console:radio', sampleRateHz: 8_000_000.2 })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:radio', id: 'c8-a', sampleRateHz: 8_000_000 });
+    expect(commandMessage('c9-a', { type: 'console:radio', sampleRateHz: 8_000_000, confirmRecording: true })).toEqual({
+      ch: BRIDGE_CHANNEL, v: 1, type: 'console:radio', id: 'c9-a', sampleRateHz: 8_000_000, confirmRecording: true,
+    });
+    expect(commandMessage('c10-a', { type: 'console:radio', sampleRateHz: 8_000_000, confirmRecording: false })).not.toHaveProperty('confirmRecording');
+    expect(commandMessage('c11-a', { type: 'console:sweep-start', mock: true })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:sweep-start', id: 'c11-a', mock: true });
+    expect(commandMessage('c12-a', { type: 'console:sweep-start', mock: false, confirmRecording: true })).toEqual({
+      ch: BRIDGE_CHANNEL, v: 1, type: 'console:sweep-start', id: 'c12-a', mock: false, confirmRecording: true,
+    });
+    expect(commandMessage('c13-a', { type: 'console:sweep-stop', resumeRx: false })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:sweep-stop', id: 'c13-a', resumeRx: false });
+    expect(commandMessage('c14-a', { type: 'console:sweep-config', startHz: 400_000_000.6, stopHz: Number.NaN, fftSize: 2048 as 4096, lnaDb: 27, vgaDb: 63, amp: true })).toEqual({
+      ch: BRIDGE_CHANNEL, v: 1, type: 'console:sweep-config', id: 'c14-a', startHz: 400_000_001, lnaDb: 24, vgaDb: 62, amp: true,
+    });
+    expect(commandMessage('c15-a', { type: 'console:sweep-config', fftSize: 4096 })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:sweep-config', id: 'c15-a', fftSize: 4096 });
+    expect(commandMessage('c16-a', { type: 'console:sweep-display', minDb: -40, maxDb: -42 })).toEqual({
+      ch: BRIDGE_CHANNEL, v: 1, type: 'console:sweep-display', id: 'c16-a', minDb: -40, maxDb: -35,
+    });
+    expect(commandMessage('c17-a', { type: 'console:marker-add', frequencyHz: 433_920_000.4 })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:marker-add', id: 'c17-a', frequencyHz: 433_920_000 });
+    expect(commandMessage('c18-a', { type: 'console:marker-remove', markerId: 'c3d1-aa' })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:marker-remove', id: 'c18-a', markerId: 'c3d1-aa' });
+    expect(commandMessage('c19-a', { type: 'console:marker-remove', markerId: 'bad id' })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:marker-remove', id: 'c19-a' });
+  });
+
+  it('checks a marker frequency on the radio side of the frequency shift', () => {
+    expect(inMarkerRange(433_920_000)).toBe(true);
+    expect(inMarkerRange(6_500_000_000)).toBe(true);
+    expect(inMarkerRange(7_250_000_001)).toBe(false);
+    expect(inMarkerRange(500_000)).toBe(false);
+    expect(inMarkerRange(500_000, -125_000_000)).toBe(true);
+    expect(inMarkerRange(Number.NaN)).toBe(false);
+    expect(inMarkerRange('433920000')).toBe(false);
+  });
+
+  it('reads a marker list, drops unusable markers and keeps at most 512 in frequency order', () => {
+    const markers = normalizeMarkers({
+      rev: 3, setId: 'set-1', setName: '  Pita UHF ', frequencyShiftHz: -125_000_000, total: 5, truncated: false,
+      markers: [
+        { id: 'b', frequencyHz: 433_920_000.4, powerDb: -48.25, label: 'Tower' },
+        { id: 'a', frequencyHz: 500_000, powerDb: Number.NaN, label: '' },
+        { id: 'bad id', frequencyHz: 434_000_000, powerDb: null, label: 'x'.repeat(120) },
+        { id: 'out', frequencyHz: -124_500_000, powerDb: null, label: 'Out' },
+        'junk',
+      ],
+    });
+    expect(markers).toEqual({
+      rev: 3, setId: 'set-1', setName: 'Pita UHF', frequencyShiftHz: -125_000_000, total: 5, truncated: true,
+      markers: [
+        { id: 'a', frequencyHz: 500_000, powerDb: null, label: '' },
+        { id: 'b', frequencyHz: 433_920_000, powerDb: -48.25, label: 'Tower' },
+        { id: null, frequencyHz: 434_000_000, powerDb: null, label: `${'x'.repeat(79)}…` },
+      ],
+    });
+    const long = normalizeMarkers({ rev: 1, markers: Array.from({ length: 600 }, (_value, index) => ({ id: `m${index}`, frequencyHz: 600e6 - index * 1e5, powerDb: null, label: 'M' })) });
+    expect(long?.markers).toHaveLength(MARKER_LIMITS.maxSent);
+    expect(long?.markers[0].frequencyHz).toBeLessThan(long?.markers[1].frequencyHz ?? 0);
+    expect(long?.total).toBe(600);
+    expect(long?.truncated).toBe(true);
+    expect(long?.setId).toBeNull();
+    for (const bad of [null, {}, { rev: -1 }, { rev: 1.5 }, { rev: '2' }]) expect(normalizeMarkers(bad)).toBeNull();
+    expect(normalizeMarkers({ rev: 0 })).toMatchObject({ markers: [], total: 0, truncated: false });
+  });
+
+  it('keeps the new marker id a result carries', () => {
+    const message = parseFrameMessage({ ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 'c1-a', ok: true, code: 'OK', markerId: 'c3d1-aa' });
+    expect(message).toEqual({ type: 'receiver:result', result: { id: 'c1-a', ok: true, code: 'OK', markerId: 'c3d1-aa' } });
+    const bad = parseFrameMessage({ ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 'c1-a', ok: true, code: 'OK', markerId: 'not usable' });
+    expect(bad).toEqual({ type: 'receiver:result', result: { id: 'c1-a', ok: true, code: 'OK' } });
   });
 });
 
 describe('createReceiverBridge', () => {
   it('starts idle without touching any window', () => {
     const bridge = createReceiverBridge({ host: () => { throw new Error('window used'); }, setTimeout, clearTimeout, probe: () => Promise.resolve(200), random: Math.random });
-    expect(bridge.getState()).toEqual({ phase: 'idle', build: 'unknown', hello: null, status: null, lastResult: null });
+    expect(bridge.getState()).toEqual({ phase: 'idle', build: 'unknown', hello: null, status: null, tune: null, markers: null, lastResult: null });
   });
 
   it('says hello on attach, becomes ready on the frame hello, and re-sends the subscription', () => {
@@ -221,16 +477,29 @@ describe('createReceiverBridge', () => {
     await expect(pending).resolves.toEqual({ ok: false, code: 'OUT_OF_RANGE', message: 'too far' });
   });
 
-  it('times out a start after 20 s and other commands after 8 s', async () => {
+  it('times out a start and a sample rate change after 20 s and other commands after 8 s', async () => {
     const h = harness();
     h.bridge.attach(h.frame);
     h.fromFrame('receiver:hello', hello);
     const start = h.bridge.send({ type: 'console:start', mock: false, listen: false });
+    const radio = h.bridge.send({ type: 'console:radio', sampleRateHz: 10_000_000 });
+    const sweepStart = h.bridge.send({ type: 'console:sweep-start', mock: false });
+    const sweepStop = h.bridge.send({ type: 'console:sweep-stop', resumeRx: false });
     const stop = h.bridge.send({ type: 'console:stop' });
+    const gains = h.bridge.send({ type: 'console:gains', lnaDb: 16 });
+    const sweepConfig = h.bridge.send({ type: 'console:sweep-config', lnaDb: 16 });
+    let longSettled = 0;
+    for (const long of [radio, sweepStart, sweepStop]) void long.then(() => { longSettled += 1; });
     h.advance(COMMAND_TIMEOUT_MS);
     await expect(stop).resolves.toEqual({ ok: false, code: 'TIMEOUT' });
+    await expect(gains).resolves.toEqual({ ok: false, code: 'TIMEOUT' });
+    await expect(sweepConfig).resolves.toEqual({ ok: false, code: 'TIMEOUT' });
+    expect(longSettled).toBe(0);
     h.advance(START_TIMEOUT_MS - COMMAND_TIMEOUT_MS);
     await expect(start).resolves.toEqual({ ok: false, code: 'TIMEOUT' });
+    await expect(radio).resolves.toEqual({ ok: false, code: 'TIMEOUT' });
+    await expect(sweepStart).resolves.toEqual({ ok: false, code: 'TIMEOUT' });
+    await expect(sweepStop).resolves.toEqual({ ok: false, code: 'TIMEOUT' });
   });
 
   it('refuses more than 16 queued commands', async () => {
@@ -283,15 +552,92 @@ describe('createReceiverBridge', () => {
     expect(calls).toBe(before);
   });
 
-  it('hands spectrum frames to listeners without storing them in state', () => {
+  it('keeps the tuning with the highest rev from statuses and results', async () => {
     const h = harness();
-    const frames: number[] = [];
-    h.bridge.onSpectrum((frame) => frames.push(frame.binCount));
+    h.bridge.attach(h.frame);
+    h.fromFrame('receiver:hello', hello);
+    h.fromFrame('receiver:status', status({ seq: 2, centerHz: 100_000_000, vfo: { index: 0, enabled: false, mode: 'nfm', frequencyHz: 100_010_000 }, tune: { rev: 3, by: 'receiver', id: null, receiverRev: 3 } }));
+    expect(h.bridge.getState().tune).toEqual({ rev: 3, by: 'receiver', commandId: null, receiverRev: 3, centerHz: 100_000_000, vfoHz: 100_010_000 });
+
+    // A tune result shows before the next status.
+    const pending = h.bridge.send({ type: 'console:tune', centerHz: 145_500_000, vfoHz: 145_500_000 });
+    const id = String(h.posted.at(-1)?.message.id);
+    h.fromFrame('receiver:result', { id, ok: true, code: 'OK', tune: { rev: 4, by: 'console', id, receiverRev: 3, centerHz: 145_500_000, vfoHz: 145_500_000 } });
+    await expect(pending).resolves.toEqual({ ok: true, code: 'OK', tune: { rev: 4, by: 'console', id, receiverRev: 3, centerHz: 145_500_000, vfoHz: 145_500_000 } });
+    expect(h.bridge.getState().tune).toEqual({ rev: 4, by: 'console', commandId: id, receiverRev: 3, centerHz: 145_500_000, vfoHz: 145_500_000 });
+    expect(h.bridge.getState().status?.centerHz).toBe(100_000_000);
+
+    // A status sent before the command does not take the tuning back.
+    h.fromFrame('receiver:status', status({ seq: 3, centerHz: 100_000_000, tune: { rev: 3, by: 'receiver', id: null, receiverRev: 3 } }));
+    expect(h.bridge.getState().tune?.centerHz).toBe(145_500_000);
+    h.fromFrame('receiver:status', status({ seq: 4, centerHz: 150_000_000, vfo: { index: 0, enabled: false, mode: 'nfm', frequencyHz: 150_000_000 }, tune: { rev: 5, by: 'receiver', id: null, receiverRev: 5 } }));
+    expect(h.bridge.getState().tune).toMatchObject({ rev: 5, by: 'receiver', receiverRev: 5, centerHz: 150_000_000, vfoHz: 150_000_000 });
+
+    // A status without a stamp (an older frame) keeps the last known tuning; a new document resets it.
+    h.fromFrame('receiver:status', status({ seq: 5, tune: undefined }));
+    expect(h.bridge.getState().tune?.rev).toBe(5);
+    h.bridge.attach(h.frame);
+    expect(h.bridge.getState().tune).toBeNull();
+    h.fromFrame('receiver:hello', hello);
+    h.fromFrame('receiver:status', status({ seq: 1, tune: { rev: 0, by: 'receiver', id: null, receiverRev: 0 } }));
+    expect(h.bridge.getState().tune?.rev).toBe(0);
+    h.bridge.detach();
+    expect(h.bridge.getState().tune).toBeNull();
+  });
+
+  it('a refused tune also reports the tuning the Receiver kept', async () => {
+    const h = harness();
+    h.bridge.attach(h.frame);
+    h.fromFrame('receiver:hello', hello);
+    h.fromFrame('receiver:status', status({ seq: 2, tune: { rev: 2, by: 'receiver', id: null, receiverRev: 2 } }));
+    const pending = h.bridge.send({ type: 'console:tune', centerHz: 145_500_000 });
+    const id = String(h.posted.at(-1)?.message.id);
+    h.fromFrame('receiver:result', { id, ok: false, code: 'SWEEP_BUSY', tune: { rev: 2, by: 'receiver', id: null, receiverRev: 2, centerHz: 433_920_000, vfoHz: 433_920_000 } });
+    await expect(pending).resolves.toMatchObject({ ok: false, code: 'SWEEP_BUSY' });
+    expect(h.bridge.getState().tune).toMatchObject({ rev: 2, centerHz: 433_920_000 });
+  });
+
+  it('keeps the newest marker list until the frame goes, and answers a marker-add with its id', async () => {
+    const h = harness();
+    h.bridge.attach(h.frame);
+    expect(h.bridge.getState().markers).toBeNull();
+    const list = (rev: number, ids: string[]) => ({ rev, setId: null, setName: null, frequencyShiftHz: 0, total: ids.length, truncated: false, markers: ids.map((id, index) => ({ id, frequencyHz: 433_920_000 + index * 1e4, powerDb: null, label: id })) });
+    h.fromFrame('receiver:hello', hello);
+    h.fromFrame('receiver:markers', list(2, ['a', 'b']));
+    expect(h.bridge.getState().markers?.markers.map((marker) => marker.id)).toEqual(['a', 'b']);
+    // An older list is late; it does not take the newer one back.
+    h.fromFrame('receiver:markers', list(1, ['a']));
+    expect(h.bridge.getState().markers?.rev).toBe(2);
+    const pending = h.bridge.send({ type: 'console:marker-add', frequencyHz: 434_000_000 });
+    const id = String(h.posted.at(-1)?.message.id);
+    expect(h.posted.at(-1)?.message).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:marker-add', id, frequencyHz: 434_000_000 });
+    h.fromFrame('receiver:markers', list(3, ['a', 'b', 'c']));
+    h.fromFrame('receiver:result', { id, ok: true, code: 'OK', markerId: 'c' });
+    await expect(pending).resolves.toEqual({ ok: true, code: 'OK', markerId: 'c' });
+    expect(h.bridge.getState().markers?.rev).toBe(3);
+    // A marker command waits COMMAND_TIMEOUT_MS like any short one.
+    const late = h.bridge.send({ type: 'console:marker-remove', markerId: 'a' });
+    h.advance(COMMAND_TIMEOUT_MS);
+    await expect(late).resolves.toEqual({ ok: false, code: 'TIMEOUT' });
+    // A reloaded frame starts again from rev 0.
+    h.bridge.attach(h.frame);
+    expect(h.bridge.getState().markers).toBeNull();
+    h.fromFrame('receiver:markers', list(0, []));
+    expect(h.bridge.getState().markers?.rev).toBe(0);
+    h.bridge.detach();
+    expect(h.bridge.getState().markers).toBeNull();
+  });
+
+  it('hands spectrum and scan frames to listeners without storing them in state', () => {
+    const h = harness();
+    const frames: Array<[SpectrumFrame['source'], number]> = [];
+    h.bridge.onSpectrum((frame) => frames.push([frame.source, frame.binCount]));
     h.bridge.attach(h.frame);
     h.fromFrame('receiver:hello', hello);
     const stateBefore = h.bridge.getState();
     h.fromFrame('receiver:spectrum', { seq: 1, centerHz: 100e6, startHz: 99e6, stopHz: 101e6, sampleRateHz: 20e6, fftSize: 65536, binCount: 64, bins: new Float32Array(64) });
-    expect(frames).toEqual([64]);
+    h.fromFrame('receiver:sweep', { seq: 2, startHz: 100e6, stopHz: 1000e6, resolutionHz: 2441.40625, sweepCount: 1, view: 'average', binCount: 512, bins: new Float32Array(512) });
+    expect(frames).toEqual([['rx', 64], ['sweep', 512]]);
     expect(h.bridge.getState()).toBe(stateBefore);
   });
 
@@ -318,5 +664,21 @@ describe('consoleRequestsMockSdr', () => {
     expect(consoleRequestsMockSdr({ hostname: '127.0.0.1', search: '?mock=1' })).toBe(true);
     expect(consoleRequestsMockSdr({ hostname: '127.0.0.1', search: '?mock=true' })).toBe(false);
     expect(consoleRequestsMockSdr({ hostname: 'example.com', search: '?mock=1' })).toBe(false);
+  });
+});
+
+describe('mergeTuneView', () => {
+  const view = (overrides: Partial<TuneView> = {}): TuneView => ({ rev: 1, by: 'receiver', commandId: null, receiverRev: 1, centerHz: 100_000_000, vfoHz: 100_000_000, ...overrides });
+
+  it('takes the higher rev and never lowers receiverRev', () => {
+    const current = view({ rev: 4, receiverRev: 4 });
+    expect(mergeTuneView(null, current)).toBe(current);
+    expect(mergeTuneView(current, null)).toBe(current);
+    expect(mergeTuneView(current, view({ rev: 3, centerHz: 1 }))).toBe(current);
+    expect(mergeTuneView(current, view({ rev: 4 }))).toBe(current);
+    const next = view({ rev: 5, by: 'console', commandId: 'c1-a', receiverRev: 4, centerHz: 145_500_000 });
+    expect(mergeTuneView(current, next)).toBe(next);
+    expect(mergeTuneView(current, view({ rev: 6, receiverRev: 2 }))).toMatchObject({ rev: 6, receiverRev: 4 });
+    expect(mergeTuneView(view({ rev: 6, receiverRev: 2 }), view({ rev: 6, receiverRev: 6 }))).toMatchObject({ rev: 6, receiverRev: 6 });
   });
 });

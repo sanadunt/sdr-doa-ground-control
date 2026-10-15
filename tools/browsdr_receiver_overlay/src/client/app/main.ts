@@ -8,6 +8,8 @@ import { canvasMethods, mountCanvas } from './canvas';
 import { audioMethods } from './audio';
 import { vfoMethods } from './vfo';
 import { serializeSweepSettings, settingsMethods } from './settings';
+import { listenerDisplayMethods } from './listener-display';
+import { listenerMarkerMethods } from './listener-markers';
 import { bookmarkMethods } from './bookmarks';
 import { whisperMethods } from './whisper';
 import { pocsagMethods } from './pocsag';
@@ -65,12 +67,18 @@ receiverApp = createApp({
 		...recordsMethods,
 		...audioRecordingMethods,
 		...i18nMethods,
+		...listenerDisplayMethods,
+		...listenerMarkerMethods,
 	},
 	created: async function () {
 		this.loadSetting();
+		// Non-reactive: the dB scale last applied to the Listener (listener-display.ts).
+		this._listenerAppliedAuto = this.display.auto !== false;
 		this.loadSweepSettings();
 		this.loadBookmarks();
 		this.$watch(() => serializeSweepSettings(this.sweep), () => this.saveSweepSettings());
+		// The spectrum markers also show on the Listener trace (listener-markers.ts).
+		this.$watch(() => [this.records.markers, this.radio.frequencyShift], () => this.refreshListenerMarkers(), { deep: true, immediate: true });
 
 		// The Receiver iframe is removed when the console leaves #/receiver, and a reload or
 		// closed tab never runs Vue's unmount hooks; keep what was recorded so far.
@@ -260,6 +268,12 @@ receiverApp = createApp({
 		this.$watch('collapsedPanels', () => {
 			this.saveSetting();
 		}, { deep: true });
+
+		// The dB scale, set on the Dengar tab or by the console's Spektrum dock.
+		this.$watch(() => [this.display.auto, this.display.minDB, this.display.maxDB], () => {
+			this.applyListenerDisplay();
+			this.saveSetting();
+		});
 
 		this.$watch('locks', () => {
 			if (this.remoteMode === 'host' && this._webrtc) {

@@ -32,6 +32,7 @@ export const PREFERENCE_KEYS = [
   'sdr-doa-polar-view-v1',
   'sdr-console-listen-mode',
   'sdr-console-follow-node',
+  'sdr-console-spectrum-dock-v1',
   'sdr-doa-gps-source-v1',
   'sdr-doa-compass-source-v1',
   // Embedded Receiver: its settings, wide-scan settings and bookmarks.

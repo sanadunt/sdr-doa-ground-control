@@ -4389,6 +4389,45 @@ input[type='range'] {
 	background-color: currentColor;
 }
 
+/* Dengar dB scale: Auto | Manual as one 44 px segmented control. */
+.listener-db-mode {
+	display: flex;
+	flex: 1 1 auto;
+	height: 44px;
+	overflow: hidden;
+	border: 1px solid var(--border-strong);
+	border-radius: 8px;
+}
+
+.listener-db-mode button {
+	flex: 1 1 0;
+	min-width: 44px;
+	padding: 0 10px;
+	border: 0;
+	background: transparent;
+	color: var(--text-soft);
+	cursor: pointer;
+	font-size: 13px;
+}
+
+.listener-db-mode button + button {
+	border-left: 1px solid var(--border-strong);
+}
+
+.listener-db-mode button:hover {
+	color: var(--text-main);
+}
+
+.listener-db-mode button[aria-pressed='true'] {
+	background: var(--accent-soft);
+	color: var(--text-main);
+}
+
+.listener-db-mode button:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: -2px;
+}
+
 /* Demodulation modes as a segmented grid; the radio stays focusable. */
 .mode-grid {
 	gap: 4px;

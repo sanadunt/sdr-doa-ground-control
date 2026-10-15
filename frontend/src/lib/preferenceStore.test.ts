@@ -17,6 +17,7 @@ import type { PreferenceSync } from './preferenceStore';
 import { OVERVIEW_PANELS_STORAGE_KEY } from './overviewPanels';
 import { FOLLOW_NODE_STORAGE_KEY, LISTEN_MODE_STORAGE_KEY } from './listenPrefs';
 import { POLAR_VIEW_STORAGE_KEY } from './polarViewSettings';
+import { SPECTRUM_DOCK_STORAGE_KEY } from './spectrumDockSettings';
 import { COMPASS_CONFIG_STORAGE_KEY, GPS_CONFIG_STORAGE_KEY } from './sourceConfigStorage';
 import { OVERLAY_SETTINGS_STORAGE_KEY } from './mapOverlaySettings';
 import { BASEMAP_STORAGE_KEY } from './basemaps';
@@ -343,6 +344,7 @@ describe('preference keys', () => {
       POLAR_VIEW_STORAGE_KEY,
       LISTEN_MODE_STORAGE_KEY,
       FOLLOW_NODE_STORAGE_KEY,
+      SPECTRUM_DOCK_STORAGE_KEY,
       GPS_CONFIG_STORAGE_KEY,
       COMPASS_CONFIG_STORAGE_KEY,
     ];

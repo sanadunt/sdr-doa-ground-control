@@ -380,6 +380,7 @@ export const connectionMethods = {
 				Comlink.proxy((spectrumData: any) => {
 					// The console bridge copies what it sends, so the frame keeps this buffer.
 					try {
+						this.updateListenerAutoRange(spectrumData);
 						this.drawSpectrum(spectrumData);
 					} finally {
 						this._consoleBridge?.spectrum(spectrumData);

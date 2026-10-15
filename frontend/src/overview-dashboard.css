@@ -207,8 +207,12 @@
 .ov-ps-preview { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--text); font-family: var(--mono); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .ov-spectrum { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; border-left: 1px solid var(--line-soft); container: ov-spec / inline-size; }
 .ov-dock > .ov-spectrum:first-child { border-left: 0; }
-/* Title, source, chip | [follow, mode, Dengar] Kirim [Mulai, Receiver]. It wraps when narrow, the
-   bracketed groups as one item each, and the dock grows to fit the extra rows. */
+/* Title, source, tags, chip, [mode switch, Penanda] | [follow, mode, Dengar] Kirim [Mulai, Receiver] Atur.
+   It wraps when narrow, the bracketed groups as one item each, and the dock grows to fit the extra
+   rows. Width budget of one row (Indonesian, the longer language): about 980 px for title, tag, chip,
+   mode switch, Penanda, Dengar, Mulai, Receiver and Atur; follow, mode and Kirim (.ov-spec-wide) add
+   about 410 px, so below a 1400 px dock they move into the Atur column; the source text adds about
+   150 px and shows from 1500 px. */
 .ov-spec-head { flex-wrap: wrap; height: auto; min-height: 48px; column-gap: 8px; row-gap: 0; padding: 2px 12px; }
 .ov-spec-group { display: inline-flex; flex: none; flex-wrap: wrap; align-items: center; gap: 0 8px; max-width: 100%; }
 /* On a phone these labels take two lines before a group splits; a group splits only below that. */
@@ -219,6 +223,12 @@
 .ov-spec-follow { display: inline-flex; flex: none; align-items: center; gap: 8px; height: 44px; color: var(--muted); cursor: pointer; font-size: 12.5px; white-space: nowrap; }
 .ov-spec-follow input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
 .ov-listen-mode { flex: none; width: 76px; height: 44px; padding: 0 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+/* Sample rate, LNA and VGA in the spectrum Atur column; with the +14 dB toggle the gain row fits its 313 px. */
+.ov-radio-select { flex: none; width: 108px; height: 44px; padding: 0 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+.ov-radio-select:disabled { cursor: not-allowed; opacity: .55; }
+/* A rate change on its way: no new pick, but a keyboard user keeps focus on the select. */
+.ov-radio-select[aria-disabled='true'] { cursor: progress; opacity: .55; }
+.ov-spec-amp { padding: 0 10px; font-family: var(--mono); font-size: 12.5px; }
 .ov-button:disabled { cursor: not-allowed; opacity: .45; }
 .ov-button:disabled:hover { border-color: var(--line); }
 .ov-button[aria-pressed='true'] { border-color: var(--signal); background: color-mix(in srgb, var(--signal) 16%, transparent); }
@@ -229,7 +239,43 @@
 .ov-button.is-wide { flex: 1 1 auto; }
 .ov-spec-send:not(:disabled) { border-color: color-mix(in srgb, var(--signal) 70%, var(--line)); }
 .ov-spec-run { width: 108px; }
-@container ov-spec (max-width: 980px) { .ov-spec-source { display: none; } }
+.ov-spec-settings-toggle { gap: 5px; padding: 0 10px; }
+/* Taken by the RX|Spektrum mode switch and the Penanda toggle, after the chip. */
+.ov-spec-head > .ov-spec-mode, .ov-spec-head > .ov-spec-mark { flex: none; }
+.ov-spec-mode button { padding: 0 10px; }
+/* Penanda: marking mode for this visit, with the number of markers in the Receiver's list. */
+.ov-spec-mark { padding: 0 10px; }
+.ov-spec-mark-count { min-width: 20px; padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--marker) 22%, transparent); color: var(--text); font-family: var(--mono); font-size: 11px; line-height: 18px; text-align: center; }
+.ov-button.ov-spec-mark[aria-pressed='true'] { border-color: var(--marker); background: color-mix(in srgb, var(--marker) 14%, transparent); }
+.ov-button.ov-spec-mark[aria-pressed='true'] svg { color: var(--marker); }
+.ov-spec-trace.is-marking, .ov-spec-waterfall.is-marking, .ov-spec-trace.is-marking .ov-spec-overlay { cursor: copy; }
+.ov-spec-mark-row { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.ov-spec-mark-readout { color: var(--text); font-family: var(--mono); font-size: 12px; }
+/* Between a phone and a full-width dock the label gives way to the icon and the count (still the button's name),
+   so the header keeps one row with Polar open. */
+@container ov-spec (min-width: 761px) and (max-width: 1099px) {
+  .ov-spec-mark-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}
+/* The scan range in MHz (up to 1 kHz) and the resolution segment in the Atur column. */
+.ov-mhz-input { width: 84px; }
+.ov-spec-settings .ov-spec-res button { min-width: 84px; }
+.ov-spec-settings > .ov-spec-narrow { display: none; }
+@container ov-spec (max-width: 1399px) {
+  .ov-spec-head .ov-spec-wide { display: none; }
+  .ov-spec-settings > .ov-spec-narrow { display: flex; }
+}
+@container ov-spec (max-width: 1499px) { .ov-spec-source { display: none; } }
+/* The trace and waterfall, with the Atur column beside them. */
+.ov-spec-main { position: relative; display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; }
+.ov-spec-main > .ov-spec-body { flex: 1 1 auto; }
+.ov-spec-settings { display: flex; flex: none; flex-direction: column; gap: 6px; width: 337px; min-height: 0; overflow-y: auto; padding: 4px 12px 8px; border-left: 1px solid var(--line-soft); overscroll-behavior: contain; }
+.ov-spec-settings .ov-seg button { padding: 0 4px; white-space: nowrap; }
+.ov-spec-settings .ov-spec-follow { flex: 1 1 auto; min-width: 0; }
+.ov-spec-settings .ov-spec-follow > span { overflow: hidden; text-overflow: ellipsis; }
+/* A dock this narrow keeps the trace its width; the column opens over it and scrolls. */
+@container ov-spec (max-width: 760px) {
+  .ov-spec-settings { position: absolute; z-index: 3; top: 0; right: 0; bottom: 0; width: min(337px, 100%); border: 1px solid var(--line-soft); border-radius: 8px 0 0 8px; background: var(--surface); box-shadow: var(--ov-shadow); }
+}
 .ov-spec-body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 4px; min-width: 0; min-height: 0; overflow: hidden; padding: 2px 12px 8px; }
 .ov-spec-info { display: flex; flex: none; flex-wrap: wrap; justify-content: space-between; gap: 0 12px; color: var(--muted); font-family: var(--mono); font-size: 11.5px; line-height: 16px; }
 .ov-spec-peak { color: var(--text); }
@@ -330,6 +376,9 @@
   .ov-spec-body { min-height: 120px; overflow: visible; }
   .ov-spec-waterfall { flex: none; height: 96px; }
   .ov-basemap-menu { max-height: min(320px, 40vh, var(--ov-basemap-space, 320px)); }
+  /* Stacked, the Atur column flows below the waterfall. */
+  .ov-spec-main { flex-direction: column; }
+  .ov-spec-settings { position: static; width: auto; overflow: visible; padding: 8px 12px 12px; border: 0; border-top: 1px solid var(--line-soft); border-radius: 0; background: transparent; box-shadow: none; }
   .topbar-toolbar .ov-panel-toggles { width: 100%; }
   .topbar-toolbar .ov-panel-toggles button { flex: 1 1 0; }
   .ov-toggle-label { display: inline; }
