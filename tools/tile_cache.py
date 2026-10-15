@@ -493,10 +493,14 @@ class TileCache:
                 return _Fetched("failed", reason="invalid Content-Length")
         chunks: List[bytes] = []
         size = 0
+        # read() would wait until the whole chunk arrived, however slowly;
+        # read1() returns after one socket read, so the deadline is checked
+        # between reads of at most UPSTREAM_TIMEOUT_S each.
+        read = getattr(response, "read1", None) or response.read
         while True:
             if self.monotonic() > deadline:
                 return _Fetched("failed", reason="tile download too slow")
-            chunk = response.read(64 * 1024)
+            chunk = read(64 * 1024)
             if not chunk:
                 break
             size += len(chunk)

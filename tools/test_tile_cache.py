@@ -175,6 +175,20 @@ class FakeUpstream:
             handler.end_headers()
             handler.wfile.write(body)
             return
+        if mode == "trickle":
+            # Headers at once, then the body a few bytes at a time, each well
+            # inside the socket timeout.
+            body = self.body
+            handler.send_response(200)
+            handler.send_header("Content-Type", "image/png")
+            handler.send_header("Content-Length", str(len(body)))
+            handler.end_headers()
+            handler.wfile.flush()
+            for start in range(0, len(body), 8):
+                handler.wfile.write(body[start:start + 8])
+                handler.wfile.flush()
+                time.sleep(0.05)
+            return
         if mode == "redirect":
             handler.send_response(302)
             handler.send_header("Location", f"http://127.0.0.1:{self.port}/redirected/0/0/0.png")
@@ -435,6 +449,21 @@ class RefusedAnswerTests(TileCacheTestCase):
                 self.assertEqual(list(self.tiles.rglob("*.tile")), [])
                 self.assertEqual(list(self.tiles.rglob("*.tmp")), [])
                 self.assertNotIn("/redirected/0/0/0.png", self.upstream.paths(), "redirects are not followed")
+
+    def test_a_trickling_upstream_gives_up_at_the_deadline(self) -> None:
+        # Every write arrives well inside the socket timeout, so only the
+        # per-host deadline stops the download.
+        self.upstream.body = png(3, size=24)
+        self.upstream.mode = "trickle"
+        console = self.console()
+        with patch.object(tile_cache, "UPSTREAM_DEADLINE_S", 0.4):
+            started = time.monotonic()
+            status, _headers, _body = console.get("/api/tiles/osm/6/2/2")
+            elapsed = time.monotonic() - started
+        self.assertEqual(status, 504)
+        self.assertLess(elapsed, 2.0, "the download stops near the deadline, not when the body is complete")
+        self.assertEqual(list(self.tiles.rglob("*.tile")), [])
+        self.assertTrue(any("tile download too slow" in line for line in self.logs), self.logs)
 
     def test_corrupt_cache_file_is_discarded(self) -> None:
         console = self.console()
