@@ -10,6 +10,8 @@ import './polar-layout.css';
 import './overview-dashboard.css';
 // Page kit (components/page/) for every page but the Dashboard and the Receiver.
 import './page-kit.css';
+// Message Monitor and Simulation (chip cells, record picker, lobe preview).
+import './pages/monitor-simulation.css';
 // MapLibre's stylesheet loads with the entry, not with the lazy map chunk:
 // Vite preloads a chunk's CSS only once, so a sheet that failed during a
 // console restart never loaded and a retried import drew markers unstyled.
