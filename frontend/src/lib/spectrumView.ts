@@ -225,12 +225,20 @@ export function stepMarker(markers: readonly BridgeMarker[], axis: FrequencyAxis
 /**
  * Which labels to draw, left to right: a label is left out when it would start within gapPx of
  * the end of the last label drawn (`widths` are the labels' widths, `xs` where they start).
+ * The label at `keep` (the picked marker) is always drawn, and the others give way to it.
  */
-export function markerLabelSlots(xs: readonly number[], widths: readonly number[], gapPx = MARKER_LABEL_GAP_PX): boolean[] {
+export function markerLabelSlots(xs: readonly number[], widths: readonly number[], gapPx = MARKER_LABEL_GAP_PX, keep = -1): boolean[] {
+  const kept = keep >= 0 && keep < xs.length ? { start: xs[keep], end: xs[keep] + (widths[keep] ?? 0) } : null;
   let end = -Infinity;
   return xs.map((x, index) => {
+    const labelEnd = x + (widths[index] ?? 0);
+    if (kept && index === keep) {
+      end = labelEnd;
+      return true;
+    }
     if (x < end + gapPx) return false;
-    end = x + (widths[index] ?? 0);
+    if (kept && x < kept.end + gapPx && labelEnd + gapPx > kept.start) return false;
+    end = labelEnd;
     return true;
   });
 }

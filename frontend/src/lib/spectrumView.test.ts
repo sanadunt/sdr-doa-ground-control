@@ -427,4 +427,15 @@ describe('spectrum dock markers', () => {
     expect(markerLabelSlots([0, 30, 70, 75, 200], [60, 60, 60, 60, 60], 4)).toEqual([true, false, true, false, true]);
     expect(markerLabelSlots([], [])).toEqual([]);
   });
+
+  it('always draws the picked marker\'s label and leaves out the neighbours it would overlap', () => {
+    // The picked second label takes its slot; the first and third would overlap it.
+    expect(markerLabelSlots([0, 30, 70, 200], [60, 60, 60, 60], 4, 1)).toEqual([false, true, false, true]);
+    // Labels clear of the picked one stay; the one running into it from the left goes.
+    expect(markerLabelSlots([0, 70, 100, 200], [60, 60, 60, 60], 4, 2)).toEqual([true, false, true, true]);
+    expect(markerLabelSlots([0, 100], [60, 60], 4, 1)).toEqual([true, true]);
+    // No pick, or one out of range, is the plain left-to-right rule.
+    expect(markerLabelSlots([0, 30, 70], [60, 60, 60], 4, -1)).toEqual([true, false, true]);
+    expect(markerLabelSlots([0, 30, 70], [60, 60, 60], 4, 9)).toEqual([true, false, true]);
+  });
 });

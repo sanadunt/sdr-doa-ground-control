@@ -157,11 +157,11 @@ function drawMarkers(
     const widths = texts.map((text) => context.measureText(text).width + 6 * ratio);
     const starts = shown.map(({ x }, index) => Math.max(0, Math.min(width - widths[index], x + 3 * ratio)));
     // Labels that would run into the one before are left out; the picked marker always shows its own.
-    const slots = markerLabelSlots(starts, widths, MARKER_LABEL_GAP_PX * ratio);
+    const picked = selectedId === null ? -1 : shown.findIndex(({ marker }) => marker.id === selectedId);
+    const slots = markerLabelSlots(starts, widths, MARKER_LABEL_GAP_PX * ratio, picked);
     const top = MARKER_LABEL_TOP_PX * ratio;
     shown.forEach(({ marker }, index) => {
-      const selected = marker.id !== null && marker.id === selectedId;
-      if (!slots[index] && !selected) return;
+      if (!slots[index]) return;
       context.globalAlpha = 0.85;
       context.fillStyle = colors.background;
       context.fillRect(starts[index], top, widths[index], 13 * ratio);
