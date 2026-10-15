@@ -1,5 +1,5 @@
-import type { JSX, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
-import { useEffect, useRef } from 'react';
+import type { JSX, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode, Ref } from 'react';
+import { useEffect, useImperativeHandle, useRef } from 'react';
 import type { ReceiverBridge } from '../../lib/receiverBridge';
 import type { SpectrumFrame } from '../../lib/receiverBridgeProtocol';
 import { PALETTE_STOPS } from '../../lib/overlayPalette';
@@ -58,13 +58,41 @@ function fitCanvas(canvas: HTMLCanvasElement): boolean {
   return true;
 }
 
-interface Waterfall {
+/** Waterfall history in dB (newest row at head - 1), so a new range recolours every row at once. */
+export interface Waterfall {
   bins: number;
   head: number;
   filled: number;
-  rows: Uint8Array;
+  rows: Float32Array;
   image: ImageData | null;
   buffer: HTMLCanvasElement | null;
+}
+
+/** Paints the whole history with one dB range into the waterfall's backing canvas, newest row on top. */
+export function paintWaterfall(state: Waterfall, range: DbRange): void {
+  if (!state.image || !state.buffer || state.bins < 1) return;
+  const pixels = state.image.data;
+  for (let row = 0; row < WATERFALL_ROWS; row++) {
+    const source = (state.head - 1 - row + WATERFALL_ROWS) % WATERFALL_ROWS;
+    const present = row < state.filled;
+    for (let index = 0; index < state.bins; index++) {
+      const pixel = (row * state.bins + index) * 4;
+      const level = present ? dbToByte(state.rows[source * state.bins + index], range) : 0;
+      pixels[pixel] = WATERFALL_LUT[level * 3];
+      pixels[pixel + 1] = WATERFALL_LUT[level * 3 + 1];
+      pixels[pixel + 2] = WATERFALL_LUT[level * 3 + 2];
+      pixels[pixel + 3] = present ? 255 : 0;
+    }
+  }
+  state.buffer.getContext('2d')?.putImageData(state.image, 0, 0);
+}
+
+/** How often the automatic range is reported to an open settings column. */
+const AUTO_REPORT_MS = 500;
+
+export interface SpectrumCanvasHandle {
+  /** The dB range drawn now: the manual one, or the automatic one once a frame arrived. */
+  currentRange(): DbRange | null;
 }
 
 export interface SpectrumCanvasProps {
@@ -86,15 +114,23 @@ export interface SpectrumCanvasProps {
   /** Frequency the arrow keys step from: the listen VFO as the dock shows it. */
   tuneHz: number | null;
   onTune: (hz: number) => void;
+  /** Manual dB range of the trace and the whole waterfall; null follows the signal (Auto). */
+  dbRange: DbRange | null;
+  /** The automatic range in whole dB, at most every 500 ms and only when it changed; for the settings column. */
+  onAutoRange?: (range: DbRange) => void;
+  handle?: Ref<SpectrumCanvasHandle>;
 }
 
 /**
  * Trace and waterfall of the Overview spectrum dock. Frames arrive from the
  * Receiver bridge and are drawn imperatively into canvases; nothing per frame
- * goes through React state. Click (less than 5 px of movement) or the arrow
- * keys tune; hovering shows the frequency and power under the pointer.
+ * goes through React state (an open settings column gets the automatic range
+ * in whole dB, at most twice a second). The dB range is Auto (smoothed, from
+ * the frames) or the manual dbRange, and applies to the trace and the whole
+ * waterfall history. Click (less than 5 px of movement) or the arrow keys
+ * tune; hovering shows the frequency and power under the pointer.
  */
-export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, info, notice, overlay, tuneHz, onTune }: SpectrumCanvasProps): JSX.Element {
+export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, info, notice, overlay, tuneHz, onTune, dbRange, onAutoRange, handle }: SpectrumCanvasProps): JSX.Element {
   const { t } = useI18n();
   const traceRef = useRef<HTMLCanvasElement>(null);
   const waterfallRef = useRef<HTMLCanvasElement>(null);
@@ -105,13 +141,32 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
   const hoverRef = useRef<HTMLSpanElement>(null);
   const ticksRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<SpectrumFrame | null>(null);
-  const rangeRef = useRef<DbRange | null>(null);
+  // The automatic range follows every frame, also in Manual, so Auto takes over without a jump.
+  const autoRef = useRef<DbRange | null>(null);
+  // The range drawn: dbRange, or the automatic one.
+  const rangeRef = useRef<DbRange | null>(dbRange);
+  const reportedRef = useRef<{ range: DbRange; at: number } | null>(null);
   const colorsRef = useRef<Colors | null>(null);
-  const waterfallState = useRef<Waterfall>({ bins: 0, head: 0, filled: 0, rows: new Uint8Array(0), image: null, buffer: null });
+  const waterfallState = useRef<Waterfall>({ bins: 0, head: 0, filled: 0, rows: new Float32Array(0), image: null, buffer: null });
   const pointerRef = useRef<{ x: number; y: number; id: number } | null>(null);
   const drawRef = useRef<() => void>(() => undefined);
-  const props = useRef({ running, fallbackView, centerHz, vfo, t, tuneHz });
-  props.current = { running, fallbackView, centerHz, vfo, t, tuneHz };
+  const props = useRef({ running, fallbackView, centerHz, vfo, t, tuneHz, dbRange, onAutoRange });
+  props.current = { running, fallbackView, centerHz, vfo, t, tuneHz, dbRange, onAutoRange };
+
+  useImperativeHandle(handle, () => ({ currentRange: () => rangeRef.current }), []);
+
+  /** Tells an open settings column the automatic range, in whole dB, when it changed. */
+  const reportAuto = (force: boolean) => {
+    const report = props.current.onAutoRange;
+    const auto = autoRef.current;
+    if (!report || !auto) return;
+    const range = { min: Math.round(auto.min), max: Math.round(auto.max) };
+    const now = Date.now();
+    const last = reportedRef.current;
+    if (!force && last && (now - last.at < AUTO_REPORT_MS || (last.range.min === range.min && last.range.max === range.max))) return;
+    reportedRef.current = { range, at: now };
+    report(range);
+  };
 
   /** The axis in use: the last frame while running at the tuned centre, otherwise the expected span. */
   const view = (): { startHz: number; stopHz: number } | null => {
@@ -226,12 +281,13 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
     };
     const unsubscribe = bridge.onSpectrum((frame) => {
       frameRef.current = frame;
-      rangeRef.current = autoDbRange(frame.bins, rangeRef.current);
-      const range = rangeRef.current;
+      autoRef.current = autoDbRange(frame.bins, autoRef.current);
+      const range = props.current.dbRange ?? autoRef.current;
+      rangeRef.current = range;
       const state = waterfallState.current;
       if (state.bins !== frame.binCount || !state.buffer) {
         state.bins = frame.binCount;
-        state.rows = new Uint8Array(frame.binCount * WATERFALL_ROWS);
+        state.rows = new Float32Array(frame.binCount * WATERFALL_ROWS);
         state.head = 0;
         state.filled = 0;
         state.buffer = state.buffer ?? document.createElement('canvas');
@@ -239,27 +295,14 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
         state.buffer.height = WATERFALL_ROWS;
         state.image = state.buffer.getContext('2d')?.createImageData(frame.binCount, WATERFALL_ROWS) ?? null;
       }
-      if (range && state.image && state.buffer) {
-        const offset = state.head * state.bins;
-        for (let index = 0; index < state.bins; index++) state.rows[offset + index] = dbToByte(frame.bins[index], range);
+      if (state.image && state.buffer) {
+        state.rows.set(frame.bins, state.head * state.bins);
         state.head = (state.head + 1) % WATERFALL_ROWS;
         state.filled = Math.min(WATERFALL_ROWS, state.filled + 1);
-        // Newest row on top.
-        const pixels = state.image.data;
-        for (let row = 0; row < WATERFALL_ROWS; row++) {
-          const source = (state.head - 1 - row + WATERFALL_ROWS) % WATERFALL_ROWS;
-          const present = row < state.filled;
-          for (let index = 0; index < state.bins; index++) {
-            const pixel = (row * state.bins + index) * 4;
-            const level = present ? state.rows[source * state.bins + index] : 0;
-            pixels[pixel] = WATERFALL_LUT[level * 3];
-            pixels[pixel + 1] = WATERFALL_LUT[level * 3 + 1];
-            pixels[pixel + 2] = WATERFALL_LUT[level * 3 + 2];
-            pixels[pixel + 3] = present ? 255 : 0;
-          }
-        }
-        state.buffer.getContext('2d')?.putImageData(state.image, 0, 0);
+        // Every row with the current range: Auto and Manual colour the whole history alike.
+        if (range) paintWaterfall(state, range);
       }
+      reportAuto(false);
       const peak = peakOf(frame.bins, frame.startHz, frame.stopHz);
       if (peakRef.current) {
         peakRef.current.textContent = peak ? props.current.t('spectrum.peak', { db: formatDb(peak.db, 1), freq: formatMhz(peak.hz, 3) }) : '';
@@ -301,6 +344,23 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
   useEffect(() => {
     drawRef.current();
   }, [running, centerHz, vfo?.frequencyHz, vfo?.bandwidthHz, fallbackView?.startHz, fallbackView?.stopHz]);
+
+  // A new dB range (or Auto) recolours the trace and the whole waterfall at once.
+  const manualMin = dbRange?.min;
+  const manualMax = dbRange?.max;
+  useEffect(() => {
+    const range = manualMin !== undefined && manualMax !== undefined ? { min: manualMin, max: manualMax } : autoRef.current;
+    rangeRef.current = range;
+    if (range) paintWaterfall(waterfallState.current, range);
+    drawRef.current();
+  }, [manualMin, manualMax]);
+
+  // An opened settings column gets the automatic range at once.
+  useEffect(() => {
+    reportedRef.current = null;
+    reportAuto(true);
+    // reportAuto reads the latest props through props.current.
+  }, [onAutoRange]);
 
   /** x across the canvas that was drawn: the trace canvas inside its bordered wrapper, or the waterfall inside its border. */
   const pointerX = (event: ReactPointerEvent<HTMLElement>): { x: number; width: number } | null => {

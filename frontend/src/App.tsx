@@ -12,8 +12,9 @@ import { nextControlDraftRequest } from './lib/controlDraft';
 import type { ConfigPatchChanges, ControlDraftRequest } from './lib/controlDraft';
 import { createReceiverBridge } from './lib/receiverBridge';
 import type { ReceiverBridge } from './lib/receiverBridge';
-import { watchReceiverTuning } from './lib/receiverSync';
+import { watchReceiverDisplay, watchReceiverTuning } from './lib/receiverSync';
 import { followNodeStore, listenModeStore } from './lib/listenPrefs';
+import { spectrumDockStore } from './lib/spectrumDockSettings';
 import { OverviewPanelToggles } from './components/overview/OverviewPanelToggles';
 import { I18nContext, initialLang, storeLang, translate, useI18n } from './lib/i18n';
 import type { I18nValue, Lang } from './lib/i18n';
@@ -338,6 +339,9 @@ export default function App(): ReactElement {
     onReceiverTune: () => followNodeStore.set(false),
     onReceiverMode: (mode) => listenModeStore.set(mode),
   }), [receiverBridge]);
+  // The RX dB scale is the Receiver's (Dengar tab) and the dock's at once: the dock keeps the last
+  // value it saw, and a dock change made while the frame is away reaches it at its next hello.
+  useEffect(() => watchReceiverDisplay(receiverBridge, spectrumDockStore), [receiverBridge]);
   const [receiverMounted, setReceiverMounted] = useState(route === 'receiver');
   if ((route === 'receiver' || receiverRequested) && !receiverMounted) setReceiverMounted(true);
   useEffect(() => {

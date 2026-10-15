@@ -1,5 +1,5 @@
 import type { ChangeEvent, JSX, ReactNode } from 'react';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { ConsoleCapabilities } from '../../api';
 import type { TelemetrySnapshot } from '../../types';
 import type { OverviewPanels } from '../../lib/overviewPanels';
@@ -16,12 +16,16 @@ import type { LocalTune } from '../../lib/receiverSync';
 import { savedReceiverTuning } from '../../lib/receiverSavedTuning';
 import { fieldFor, fieldRange, inFieldRange } from '../../lib/configPatch';
 import { followMemoryAtMount, followNodeStep, formatMhz, spanAround, spectrumDockView } from '../../lib/spectrumView';
-import type { DockNotice, FollowMemory } from '../../lib/spectrumView';
+import type { DbRange, DockNotice, FollowMemory } from '../../lib/spectrumView';
+import { manualFromDrawn, spectrumDockStore } from '../../lib/spectrumDockSettings';
+import type { DbScale } from '../../lib/spectrumDockSettings';
 import { useI18n } from '../../lib/i18n';
 import { routeShortcut } from '../../lib/routes';
 import type { RouteName } from '../../lib/routes';
 import { Icon } from '../ui';
 import { SpectrumCanvas } from './SpectrumCanvas';
+import type { SpectrumCanvasHandle } from './SpectrumCanvas';
+import { SpectrumSettings } from './SpectrumSettings';
 
 // The Receiver page's shortcut key follows its place in the page menu.
 const RECEIVER_KEY = routeShortcut('receiver');
@@ -73,7 +77,8 @@ interface ModePick {
 
 /**
  * Height the spectrum section needs: its header, then the body's padding,
- * gaps and rows with the waterfall at WATERFALL_MIN_PX, plus the dock border.
+ * gaps and rows with the waterfall at WATERFALL_MIN_PX, or the open "Atur"
+ * column when that is taller and sits beside the trace, plus the dock border.
  */
 function spectrumNeedPx(section: HTMLElement): number | null {
   const head = section.querySelector<HTMLElement>('.ov-spec-head');
@@ -82,10 +87,23 @@ function spectrumNeedPx(section: HTMLElement): number | null {
   const style = getComputedStyle(body);
   const px = (value: string) => Number.parseFloat(value) || 0;
   const rows = Array.from(body.children) as HTMLElement[];
-  let need = head.getBoundingClientRect().height + px(style.paddingTop) + px(style.paddingBottom) + px(style.rowGap) * Math.max(0, rows.length - 1);
+  let bodyNeed = px(style.paddingTop) + px(style.paddingBottom) + px(style.rowGap) * Math.max(0, rows.length - 1);
   for (const row of rows) {
-    need += row.classList.contains('ov-spec-waterfall') ? WATERFALL_MIN_PX + row.offsetHeight - row.clientHeight : row.getBoundingClientRect().height;
+    bodyNeed += row.classList.contains('ov-spec-waterfall') ? WATERFALL_MIN_PX + row.offsetHeight - row.clientHeight : row.getBoundingClientRect().height;
   }
+  // The column's own content, not its stretched box, so the dock can shrink again. Over the trace
+  // (a narrow dock) the column scrolls instead.
+  const settings = section.querySelector<HTMLElement>('.ov-spec-settings');
+  let settingsNeed = 0;
+  if (settings) {
+    const columnStyle = getComputedStyle(settings);
+    if (columnStyle.position === 'static') {
+      const shown = (Array.from(settings.children) as HTMLElement[]).filter((child) => child.getClientRects().length > 0);
+      settingsNeed = px(columnStyle.paddingTop) + px(columnStyle.paddingBottom) + px(columnStyle.rowGap) * Math.max(0, shown.length - 1);
+      for (const child of shown) settingsNeed += child.getBoundingClientRect().height;
+    }
+  }
+  let need = head.getBoundingClientRect().height + Math.max(bodyNeed, settingsNeed);
   const dock = section.parentElement;
   if (dock) need += dock.offsetHeight - dock.clientHeight;
   return Math.ceil(need);
@@ -101,6 +119,11 @@ function spectrumNeedPx(section: HTMLElement): number | null {
  * once and then what the frame reports (TuneView); a refused tune snaps back.
  * Follow-node and the mode live in page-wide stores, because App also changes
  * them after a Receiver-page change (lib/receiverSync.ts).
+ *
+ * The header keeps one row on a wide dock; on a narrow one follow-node, the
+ * mode and "Kirim ke RDF-SDR" move into the "Atur" column (CSS shows one of
+ * the two copies). The column also holds the RX dB scale, shared with the
+ * Receiver's Dengar tab through spectrumDockStore and App's display sync.
  */
 export function SpectrumDock({
   snapshot,
@@ -140,6 +163,14 @@ export function SpectrumDock({
   const requestedModeRef = useRef<ListenMode>(mode);
   const sectionRef = useRef<HTMLElement>(null);
   const fitDockRef = useRef<() => void>(() => undefined);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // The RX dB scale: the Receiver's once its frame reports it, otherwise the last one known.
+  const dockSettings = useSyncExternalStore(spectrumDockStore.subscribe, spectrumDockStore.get, spectrumDockStore.get);
+  const rxDb = dockSettings.rxDb;
+  const canvasHandle = useRef<SpectrumCanvasHandle | null>(null);
+  // The automatic range, in whole dB and at most twice a second, only while the column shows it.
+  const [autoRange, setAutoRange] = useState<DbRange | null>(null);
+  const onAutoRange = useCallback((range: DbRange) => { setAutoRange(range); }, []);
 
   const fresh = nodeFrequencies(snapshot, localSnapshotFresh);
   const nodeCenter = fresh?.centerHz ?? null;
@@ -386,6 +417,19 @@ export function SpectrumDock({
     });
   };
 
+  // A dock change of the dB scale is pending until the Receiver has it (App sends it).
+  const setRxDb = (next: DbScale) => spectrumDockStore.set({ rxDb: next, rxDbPending: true });
+  const chooseDbAuto = () => {
+    if (!rxDb.auto) setRxDb({ ...rxDb, auto: true });
+  };
+  // Manual starts from the range drawn now, so the trace stays put.
+  const chooseDbManual = () => {
+    if (rxDb.auto) setRxDb(manualFromDrawn(canvasHandle.current?.currentRange() ?? null, rxDb));
+  };
+  const manualMin = rxDb.auto ? null : rxDb.minDb;
+  const manualMax = rxDb.auto ? null : rxDb.maxDb;
+  const dbRange = useMemo(() => (manualMin === null || manualMax === null ? null : { min: manualMin, max: manualMax }), [manualMin, manualMax]);
+
   // "Kirim ke RDF-SDR": the RX centre and listen VFO as a Kontrol draft.
   const ranges = capabilities?.configPatch?.ranges ?? null;
   const rxCenterHz = shownCenter ?? target?.centerHz ?? null;
@@ -456,7 +500,10 @@ export function SpectrumDock({
   const shiftHz = live?.frequencyShiftHz ?? 0;
 
   return (
-    <section id="panel-spectrum" className="ov-spectrum" aria-labelledby="ov-spectrum-title" ref={sectionRef}>
+    <section id="panel-spectrum" className={`ov-spectrum${settingsOpen ? ' is-settings-open' : ''}`} aria-labelledby="ov-spectrum-title" ref={sectionRef}>
+      {/* [title][source or MOCK][tags][chip][mode switch][Penanda] … [follow, mode, Dengar] Kirim [Mulai, Receiver] Atur.
+          The mode switch and the Penanda toggle take their place after the chip. Follow, mode and Kirim
+          carry ov-spec-wide: on a narrow dock they are hidden here and shown in the Atur column. */}
       <div className="ov-dock-head ov-spec-head">
         <h2 id="ov-spectrum-title">{t('spectrum.title')}</h2>
         {mock
@@ -468,11 +515,11 @@ export function SpectrumDock({
         <span className="ov-spacer" />
         {/* Follow, mode and Dengar wrap as one group, as do Mulai/Berhenti and the Receiver link. */}
         <div className="ov-spec-group">
-          <label className="ov-spec-follow">
+          <label className="ov-spec-follow ov-spec-wide">
             <input type="checkbox" checked={followNode} onChange={(event) => setFollowNode(event.target.checked)} />
             <span>{t('spectrum.follow')}</span>
           </label>
-          <select className="ov-listen-mode" aria-label={t('spectrum.mode')} title={t('spectrum.mode')} value={shownMode} onChange={changeMode}>
+          <select className="ov-listen-mode ov-spec-wide" aria-label={t('spectrum.mode')} title={t('spectrum.mode')} value={shownMode} onChange={changeMode}>
             {LISTEN_MODE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
           <button
@@ -486,7 +533,7 @@ export function SpectrumDock({
             <Icon name="headphones" /><span>{t('spectrum.listen')}</span>
           </button>
         </div>
-        <button className="ov-button ov-spec-send" type="button" disabled={!sendable} title={sendTitle} onClick={sendDraft}>
+        <button className="ov-button ov-spec-send ov-spec-wide" type="button" disabled={!sendable} title={sendTitle} onClick={sendDraft}>
           <Icon name="send" /><span>{t('spectrum.send')}</span>
         </button>
         <div className="ov-spec-group">
@@ -502,19 +549,43 @@ export function SpectrumDock({
             <Icon name="external" /><span className="ov-spec-open-label">{t('spectrum.openReceiver')}</span><kbd aria-hidden="true">{RECEIVER_KEY}</kbd>
           </button>
         </div>
+        <button className="ov-button ov-spec-settings-toggle" type="button" aria-expanded={settingsOpen} aria-controls="spectrum-settings" onClick={() => setSettingsOpen(!settingsOpen)}>
+          <Icon name="sliders" /><span>{t('spectrum.settings')}</span>
+        </button>
       </div>
-      <SpectrumCanvas
-        bridge={bridge}
-        running={running}
-        fallbackView={stableFallback}
-        centerHz={axisCenter}
-        vfo={vfoBand}
-        info={info}
-        notice={lineNotice}
-        overlay={overlay}
-        tuneHz={vfoHz}
-        onTune={tune}
-      />
+      <div className="ov-spec-main">
+        <SpectrumCanvas
+          bridge={bridge}
+          running={running}
+          fallbackView={stableFallback}
+          centerHz={axisCenter}
+          vfo={vfoBand}
+          info={info}
+          notice={lineNotice}
+          overlay={overlay}
+          tuneHz={vfoHz}
+          onTune={tune}
+          dbRange={dbRange}
+          onAutoRange={settingsOpen && rxDb.auto ? onAutoRange : undefined}
+          handle={canvasHandle}
+        />
+        {settingsOpen ? (
+          <SpectrumSettings
+            followNode={followNode}
+            onFollowNode={setFollowNode}
+            mode={shownMode}
+            onModeChange={changeMode}
+            sendable={sendable}
+            sendTitle={sendTitle}
+            onSend={sendDraft}
+            db={rxDb}
+            autoRange={autoRange}
+            onDbAuto={chooseDbAuto}
+            onDbManual={chooseDbManual}
+            onDbRange={(range) => setRxDb({ auto: false, ...range })}
+          />
+        ) : null}
+      </div>
     </section>
   );
 }

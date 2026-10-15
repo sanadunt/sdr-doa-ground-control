@@ -10,6 +10,8 @@ import { DEFAULT_OVERVIEW_PANELS } from '../../lib/overviewPanels';
 import { followNodeStore } from '../../lib/listenPrefs';
 import type { ConsoleCapabilities } from '../../api';
 import { SpectrumDock } from './SpectrumDock';
+import { SpectrumSettings } from './SpectrumSettings';
+import type { SpectrumSettingsProps } from './SpectrumSettings';
 
 const ORIGIN = 'http://127.0.0.1:8787';
 
@@ -84,16 +86,16 @@ function dock(bridge: ReceiverBridge | undefined, { lang = 'id', snapshot = NODE
 const chip = (markup: string) => /<span class="ov-chip tone-\w+">([^<]*)<\/span>/.exec(markup)?.[1];
 
 describe('Spectrum dock header', () => {
-  it('orders title, source, chip, follow, mode, Dengar, Kirim, Mulai and the Receiver link', () => {
+  it('orders title, source, chip, follow, mode, Dengar, Kirim, Mulai, the Receiver link and Atur', () => {
     const markup = dock(bridgeWith({ attach: false }));
-    const order = ['Spektrum', 'RadioSpectrum · WebUSB', 'ov-chip', 'Ikuti frekuensi node', 'ov-listen-mode', '>Dengar<', '>Kirim ke RDF-SDR<', '>Mulai<', 'Buka Receiver penuh'];
+    const order = ['Spektrum', 'RadioSpectrum · WebUSB', 'ov-chip', 'Ikuti frekuensi node', 'ov-listen-mode', '>Dengar<', '>Kirim ke RDF-SDR<', '>Mulai<', 'Buka Receiver penuh', '>Atur<'];
     const positions = order.map((needle) => markup.indexOf(needle));
     for (const [index, position] of positions.entries()) expect(position, order[index]).toBeGreaterThan(-1);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
   });
 
   it('offers the eight listen modes with NFM selected by default', () => {
-    const select = /<select class="ov-listen-mode"[\s\S]*?<\/select>/.exec(dock(bridgeWith({ attach: false })))?.[0] ?? '';
+    const select = /<select class="ov-listen-mode ov-spec-wide"[\s\S]*?<\/select>/.exec(dock(bridgeWith({ attach: false })))?.[0] ?? '';
     expect(select).toContain('aria-label="Modulasi"');
     expect([...select.matchAll(/<option value="(\w+)"[^>]*>(\w+)<\/option>/g)].map((match) => `${match[1]}:${match[2]}`)).toEqual(['nfm:NFM', 'wfm:WFM', 'am:AM', 'usb:USB', 'lsb:LSB', 'dsb:DSB', 'cw:CW', 'raw:RAW']);
     expect(select).toMatch(/<option value="nfm" selected="">NFM<\/option>/);
@@ -102,9 +104,23 @@ describe('Spectrum dock header', () => {
   it('keeps follow, mode and Dengar together, and Mulai/Berhenti next to the labelled Receiver link', () => {
     const groups = [...dock(bridgeWith({ attach: false })).matchAll(/<div class="ov-spec-group">([\s\S]*?)<\/div>/g)].map((match) => match[1]);
     expect(groups).toHaveLength(2);
-    expect(groups[0]).toMatch(/^<label class="ov-spec-follow"[\s\S]*<select class="ov-listen-mode"[\s\S]*<button class="ov-button ov-spec-listen"[\s\S]*>Dengar<\/span><\/button>$/);
+    expect(groups[0]).toMatch(/^<label class="ov-spec-follow ov-spec-wide"[\s\S]*<select class="ov-listen-mode ov-spec-wide"[\s\S]*<button class="ov-button ov-spec-listen"[\s\S]*>Dengar<\/span><\/button>$/);
     expect(groups[1]).toMatch(/^<button class="ov-button ov-spec-run"[\s\S]*<button class="ov-button ov-spec-open"[\s\S]*<\/button>$/);
     expect(groups[1]).toContain('<span class="ov-spec-open-label">Buka Receiver penuh</span><kbd aria-hidden="true">2</kbd>');
+  });
+
+  it('ends with a closed Atur toggle and renders no settings column until it opens', () => {
+    const markup = dock(bridgeWith({ attach: false }));
+    expect(markup).toMatch(/<button class="ov-button ov-spec-settings-toggle" type="button" aria-expanded="false" aria-controls="spectrum-settings"><svg[\s\S]*?<\/svg><span>Atur<\/span><\/button><\/div><div class="ov-spec-main">/);
+    expect(markup).not.toContain('id="spectrum-settings"');
+    expect(markup).toContain('<section id="panel-spectrum" class="ov-spectrum"');
+  });
+
+  it('marks follow, mode and Kirim as the header copies a narrow dock moves into Atur; Dengar, Mulai and the Receiver link stay', () => {
+    const markup = dock(bridgeWith({ attach: false }));
+    const wide = [...markup.matchAll(/<(\w+) class="([^"]*\bov-spec-wide\b[^"]*)"/g)].map((match) => `${match[1]}.${match[2]}`);
+    expect(wide).toEqual(['label.ov-spec-follow ov-spec-wide', 'select.ov-listen-mode ov-spec-wide', 'button.ov-button ov-spec-send ov-spec-wide']);
+    for (const kept of ['ov-spec-listen', 'ov-spec-run', 'ov-spec-open', 'ov-spec-settings-toggle']) expect(markup).toMatch(new RegExp(`class="ov-button ${kept}"`));
   });
 
   it('follows the node by default and keeps the Receiver shortcut', () => {
@@ -113,7 +129,7 @@ describe('Spectrum dock header', () => {
     expect(markup).toMatch(/<button class="ov-button ov-spec-open" type="button" aria-keyshortcuts="2" aria-label="Buka Receiver penuh">/);
     expect(markup).toContain('<kbd aria-hidden="true">2</kbd>');
     // Labels only: no explanatory tooltips on the follow switch, the trace or the Receiver link.
-    expect(markup).toContain('<label class="ov-spec-follow"><input');
+    expect(markup).toContain('<label class="ov-spec-follow ov-spec-wide"><input');
     expect(markup).not.toMatch(/class="ov-spec-trace[^"]*"[^>]*title=/);
   });
 });
@@ -168,7 +184,7 @@ describe('Spectrum dock states', () => {
   });
 
   it('shows the mode the receiver demodulates; the stored preference only until the frame answers', () => {
-    const select = (markup: string) => /<select class="ov-listen-mode"[\s\S]*?<\/select>/.exec(markup)?.[0] ?? '';
+    const select = (markup: string) => /<select class="ov-listen-mode ov-spec-wide"[\s\S]*?<\/select>/.exec(markup)?.[0] ?? '';
     // AM was set on the Receiver page, which shares the VFO; the stored preference is NFM.
     const live = select(dock(bridgeWith({ status: status({ vfo: { index: 0, enabled: true, mode: 'am', frequencyHz: 433_925_000, bandwidthHz: 10_000 } }) })));
     expect(live).toMatch(/<option value="am" selected="">AM<\/option>/);
@@ -205,9 +221,9 @@ describe('Spectrum dock states', () => {
 
   it('enables Kirim ke RDF-SDR only for frequencies RDF-SDR accepts', () => {
     const inRange = dock(bridgeWith({ status: status() }));
-    expect(inRange).toContain('<button class="ov-button ov-spec-send" type="button" title="RX 433.920 MHz · VFO 433.925 MHz">');
+    expect(inRange).toContain('<button class="ov-button ov-spec-send ov-spec-wide" type="button" title="RX 433.920 MHz · VFO 433.925 MHz">');
     const outOfRange = dock(bridgeWith({ status: status({ centerHz: 2_400_000_000, vfo: null }) }));
-    expect(outOfRange).toContain('<button class="ov-button ov-spec-send" type="button" disabled="" title="RDF-SDR menerima 24 s/d 1800 MHz">');
+    expect(outOfRange).toContain('<button class="ov-button ov-spec-send ov-spec-wide" type="button" disabled="" title="RDF-SDR menerima 24 s/d 1800 MHz">');
   });
 
   it('holds when there is no fresh node frequency to follow', () => {
@@ -245,7 +261,7 @@ describe('Spectrum dock states', () => {
     expect(markup).toContain('Tengah 145.500 MHz · span 2.0 MHz');
     expect(markup).toContain('aria-valuetext="145.510 MHz"');
     // It is shown, not sent: Kirim ke RDF-SDR still has no frequency.
-    expect(markup).toMatch(/<button class="ov-button ov-spec-send" type="button" disabled=""/);
+    expect(markup).toMatch(/<button class="ov-button ov-spec-send ov-spec-wide" type="button" disabled=""/);
     // Following the node, the node still wins.
     expect(dock(bridgeWith({ attach: false }))).toContain('Tengah 416.588 MHz');
   });
@@ -277,5 +293,99 @@ describe('Spectrum dock styles', () => {
 
   it('grows the dock to the height the spectrum needs', () => {
     expect(dashboardCss).toMatch(/--ov-dock-h:\s*max\(256px,\s*var\(--ov-spec-need-h,\s*0px\)\)/);
+  });
+
+  /** The body of an at-rule block such as `@container ov-spec (max-width: 1279px)`. */
+  const block = (prelude: string): string => {
+    const start = dashboardCss.indexOf(`${prelude} {`);
+    if (start < 0) return '';
+    let depth = 0;
+    for (let index = dashboardCss.indexOf('{', start); index < dashboardCss.length; index++) {
+      if (dashboardCss[index] === '{') depth++;
+      if (dashboardCss[index] === '}' && --depth === 0) return dashboardCss.slice(dashboardCss.indexOf('{', start) + 1, index);
+    }
+    return '';
+  };
+
+  it('moves follow, mode and Kirim into Atur below a 1400 px dock and hides the source text below 1500 px', () => {
+    expect(declarations('.ov-spec-settings > .ov-spec-narrow').join(';')).toMatch(/display:\s*none/);
+    const narrow = block('@container ov-spec (max-width: 1399px)');
+    expect(narrow).toMatch(/\.ov-spec-head \.ov-spec-wide\s*\{\s*display:\s*none;?\s*\}/);
+    expect(narrow).toMatch(/\.ov-spec-settings > \.ov-spec-narrow\s*\{\s*display:\s*flex;?\s*\}/);
+    expect(block('@container ov-spec (max-width: 1499px)')).toMatch(/\.ov-spec-source\s*\{\s*display:\s*none;?\s*\}/);
+  });
+
+  it('puts Atur beside the trace, over it on a dock of 760 px or less, and below it when stacked', () => {
+    expect(declarations('.ov-spec-settings').join(';')).toMatch(/width:\s*337px/);
+    expect(block('@container ov-spec (max-width: 760px)')).toMatch(/\.ov-spec-settings\s*\{[^}]*position:\s*absolute[^}]*width:\s*min\(337px,\s*100%\)/);
+    const stacked = block('@media (max-width: 1023px)');
+    expect(stacked).toMatch(/\.ov-spec-main\s*\{\s*flex-direction:\s*column;?\s*\}/);
+    expect(stacked).toMatch(/\.ov-spec-settings\s*\{[^}]*position:\s*static[^}]*width:\s*auto/);
+    // The stacked rule comes after the container rule, so it wins on a phone.
+    expect(dashboardCss.indexOf('@media (max-width: 1023px)')).toBeGreaterThan(dashboardCss.indexOf('@container ov-spec (max-width: 760px)'));
+  });
+
+  it('keeps the settings controls at 44 px and uses console tokens only', () => {
+    for (const selector of ['.ov-seg', '.ov-db-input', '.ov-ps-controls', '.ov-listen-mode', '.ov-button']) {
+      expect(declarations(selector).join(';'), selector).toMatch(/(?:^|[;\s])height:\s*44px/);
+    }
+    const spectrumRules = [...dashboardCss.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter((match) => /\.ov-spec-(?:settings|main|narrow|wide|mode|mark)/.test(match[1]));
+    expect(spectrumRules.length).toBeGreaterThan(4);
+    for (const rule of spectrumRules) expect(rule[2], rule[1]).not.toMatch(/#[0-9a-f]{3,8}\b|rgba?\(/i);
+  });
+});
+
+function settings(overrides: Partial<SpectrumSettingsProps> = {}, lang: Lang = 'id'): string {
+  const props: SpectrumSettingsProps = {
+    followNode: true,
+    onFollowNode: () => undefined,
+    mode: 'am',
+    onModeChange: () => undefined,
+    sendable: true,
+    sendTitle: 'RX 433.920 MHz · VFO 433.925 MHz',
+    onSend: () => undefined,
+    db: { auto: true, minDb: -70, maxDb: 0 },
+    autoRange: { min: -95, max: -40 },
+    onDbAuto: () => undefined,
+    onDbManual: () => undefined,
+    onDbRange: () => undefined,
+    ...overrides,
+  };
+  return renderToStaticMarkup(
+    <I18nContext.Provider value={{ lang, setLang: () => undefined, t: (key, vars) => translate(lang, key, vars) }}>
+      <SpectrumSettings {...props} />
+    </I18nContext.Provider>,
+  );
+}
+
+describe('Spectrum dock Atur column', () => {
+  it('is the region the toggle controls, with the narrow-dock copies of follow, mode and Kirim first', () => {
+    const markup = settings();
+    expect(markup).toMatch(/^<div id="spectrum-settings" class="ov-spec-settings" role="group" aria-label="Pengaturan spektrum">/);
+    const narrow = [...markup.matchAll(/<div class="ov-ps-row ov-spec-narrow">([\s\S]*?)<\/div><\/div>/g)].map((match) => match[1]);
+    expect(narrow).toHaveLength(2);
+    expect(narrow[0]).toMatch(/<label class="ov-spec-follow"><input type="checkbox" checked=""\/><span>Ikuti frekuensi node<\/span><\/label><select class="ov-listen-mode" aria-label="Modulasi"/);
+    expect(narrow[0]).toMatch(/<option value="am" selected="">AM<\/option>/);
+    expect(narrow[1]).toMatch(/<button class="ov-button ov-spec-send is-wide" type="button" title="RX 433.920 MHz · VFO 433.925 MHz">/);
+    expect(settings({ sendable: false, sendTitle: 'x' })).toMatch(/<button class="ov-button ov-spec-send is-wide" type="button" disabled=""/);
+  });
+
+  it('shows Auto with the range drawn now in disabled fields', () => {
+    const markup = settings();
+    expect(markup).toContain('<span id="ov-spec-db-label">Skala dB</span><span>Auto · −95 s/d −40</span>');
+    expect(markup).toMatch(/<div class="ov-seg ov-w-106" role="group" aria-labelledby="ov-spec-db-label"><button type="button" aria-pressed="true">Auto<\/button><button type="button" aria-pressed="false">Manual<\/button><\/div>/);
+    expect(markup).toMatch(/<input class="ov-db-input" type="text" inputMode="text" autoComplete="off" spellCheck="false" aria-label="Min dB" disabled="" value="-95"\/>/);
+    expect(markup).toMatch(/aria-label="Maks dB" disabled="" value="-40"\/>/);
+    // Before the first frame there is no range to show.
+    expect(settings({ autoRange: null }, 'en')).toContain('<span>Auto · — to —</span>');
+  });
+
+  it('shows Manual with the shared range in editable fields', () => {
+    const markup = settings({ db: { auto: false, minDb: -90, maxDb: -20 } }, 'en');
+    expect(markup).toContain('<span id="ov-spec-db-label">dB scale</span><span class="is-manual">Manual · −90.0 to −20.0</span>');
+    expect(markup).toMatch(/<button type="button" aria-pressed="false">Auto<\/button><button type="button" aria-pressed="true">Manual<\/button>/);
+    expect(markup).toMatch(/aria-label="Min dB" value="-90"\/>/);
+    expect(markup).toMatch(/aria-label="Max dB" value="-20"\/>/);
+    expect(markup).not.toContain('disabled=""');
   });
 });
