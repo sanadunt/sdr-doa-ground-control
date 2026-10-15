@@ -202,6 +202,11 @@ class ReceiverBuildSourceTests(unittest.TestCase):
             self.assertNotIn("this.display.maxDB", canvas)
             self.assertIn("const displayRange = this.listenerDbRange();", canvas)
             self.assertIn("this.syncListenerEngineRange(true);", canvas)
+            # The spectrum markers are drawn on the Listener trace after the VFO highlights.
+            draw_markers = canvas.index("this.drawListenerMarkers(ctx, w, h);")
+            self.assertGreater(draw_markers, canvas.index("// Draw VFO highlights"))
+            self.assertLess(draw_markers, canvas.index("export function mountCanvas("))
+            self.assertIn("...listenerMarkerMethods,", (app / "main.ts").read_text(encoding="utf-8"))
             self.assertIn("@click=\"setListenerDbAuto(false)\"", html)
 
 

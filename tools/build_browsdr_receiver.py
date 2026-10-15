@@ -1231,6 +1231,14 @@ def _apply_embedded_changes(source: Path) -> None:
         "\t\t\tconst n = (valDB - displayRange.min) / dbRange;\n",
         "Listener trace position from the dB scale",
     )
+    # The Receiver's spectrum markers (overlay listener-markers.ts) on the Listener trace, over the
+    # VFO highlights; the console's Spektrum dock marks into the same list.
+    _replace_once(
+        listener_canvas,
+        "\t\t\tctx.restore();\n\t\t}\n\t},\n};\n\nexport function mountCanvas(",
+        "\t\t\tctx.restore();\n\t\t}\n\n\t\tthis.drawListenerMarkers(ctx, w, h);\n\t},\n};\n\nexport function mountCanvas(",
+        "spectrum markers on the Listener trace",
+    )
 
     theme_css = (PROJECT_ROOT / "frontend/src/receiver-embedded-theme.css").read_text(
         encoding="utf-8"
@@ -1332,7 +1340,11 @@ def _write_source_instructions(source: Path) -> None:
         "stops the wide scan through the same queue and connect path as RX (a scan that would "
         "end an armed recording needs the same console confirmation), sets the scan range, "
         "resolution and gains only while no scan runs and the graph range at any time, and "
-        "sends the running scan's trace, downsampled with max-hold, to the console.\n\n"
+        "sends the running scan's trace, downsampled with max-hold, to the console. Spectrum "
+        "markers are also drawn on the Listener trace in its visible span, and the bridge "
+        "mirrors the marker list to the console and adds or removes markers in it (saved to "
+        "the selected marker set, at any time, with the power measured from a running scan) "
+        "without opening a dialog.\n\n"
         "Build with Node.js 22 or later: run npm ci --ignore-scripts, then npm run build -- --base=/receiver/. "
         "The Ground Console repository also includes tools/build_browsdr_receiver.py, "
         "which applies these integration changes and creates this source archive from the "

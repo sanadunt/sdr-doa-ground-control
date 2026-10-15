@@ -9,6 +9,7 @@ import { audioMethods } from './audio';
 import { vfoMethods } from './vfo';
 import { serializeSweepSettings, settingsMethods } from './settings';
 import { listenerDisplayMethods } from './listener-display';
+import { listenerMarkerMethods } from './listener-markers';
 import { bookmarkMethods } from './bookmarks';
 import { whisperMethods } from './whisper';
 import { pocsagMethods } from './pocsag';
@@ -67,6 +68,7 @@ receiverApp = createApp({
 		...audioRecordingMethods,
 		...i18nMethods,
 		...listenerDisplayMethods,
+		...listenerMarkerMethods,
 	},
 	created: async function () {
 		this.loadSetting();
@@ -75,6 +77,8 @@ receiverApp = createApp({
 		this.loadSweepSettings();
 		this.loadBookmarks();
 		this.$watch(() => serializeSweepSettings(this.sweep), () => this.saveSweepSettings());
+		// The spectrum markers also show on the Listener trace (listener-markers.ts).
+		this.$watch(() => [this.records.markers, this.radio.frequencyShift], () => this.refreshListenerMarkers(), { deep: true, immediate: true });
 
 		// The Receiver iframe is removed when the console leaves #/receiver, and a reload or
 		// closed tab never runs Vue's unmount hooks; keep what was recorded so far.
