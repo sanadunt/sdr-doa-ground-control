@@ -1,33 +1,12 @@
 import type { Candidate, GpsConfig, GpsResolution, GpsSourceMode, ManualGpsOverride, MapCoordinate, TelemetrySnapshot } from '../types';
+import type { BasemapTone } from './basemaps';
 
-export const DEFAULT_OSM_TILE_TEMPLATE = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
-// Public OSM-derived tile endpoint tried first because some networks reject the
-// main tile.openstreetmap.org host even when the browser has normal HTTPS access.
-// Both endpoints are free; neither requires an API key.
-export const FALLBACK_OSM_TILE_TEMPLATE = 'https://tile.openstreetmap.de/{z}/{x}/{y}.png';
-/**
- * Tile hosts in the order they are tried. The map uses one host at a time:
- * MapLibre spreads a multi-URL `tiles` array across hosts by tile index rather
- * than retrying, which leaves a checkerboard when one host is blocked.
- */
-export const OSM_TILE_TEMPLATES = [FALLBACK_OSM_TILE_TEMPLATE, DEFAULT_OSM_TILE_TEMPLATE] as const;
+// Basemap health. The console's tile route tries the upstream hosts itself
+// (tools/tile_cache.py), so a style has one URL in the browser and hostCount
+// is 1; the functions still take any count, one host at a time. A host here is
+// one tile URL: MapLibre spreads a multi-URL `tiles` array across hosts by tile
+// index rather than retrying, which leaves a checkerboard when one is blocked.
 
-/** Basemap state the map reports to the Layers panel. */
-export interface BasemapStatus {
-  /** Tile host in use, e.g. tile.openstreetmap.de. */
-  host: string;
-  /** Every tile host failed; the overlay is still drawn. */
-  unavailable: boolean;
-}
-
-/** Host name of a tile template, for display (e.g. tile.openstreetmap.de). */
-export function tileHost(template: string): string {
-  try {
-    return new URL(template.replace(/\{[a-z]+\}/giu, '0')).host || template;
-  } catch {
-    return template;
-  }
-}
 /** Consecutive failed tiles on one host before the next host is tried. */
 export const BASEMAP_FAILURES_PER_HOST = 4;
 /** Failures right after a host switch may still come from the previous host's requests. */
@@ -88,17 +67,23 @@ export interface BasemapPaint {
   background: string;
   rings: string;
   guides: string;
+  /** -3 dB edge lines. */
+  edges: string;
+  edgeWidth: number;
+  lobeOutline: string;
 }
 
 /**
- * Background and reference-line colours for the console theme. OSM tiles are
- * light in both themes, so the lines stay dark once tiles are drawn; on the
- * dark background alone they turn light to stay readable.
+ * Background and reference-line colours. The background follows the console
+ * theme. The lines follow what they are drawn on: the style's tiles once they
+ * load (Dark and the imagery styles are dark, the others light), otherwise
+ * the theme's background, so on a dark surface they turn light to stay readable.
  */
-export function basemapPaint(theme: 'light' | 'dark', tilesLoaded: boolean): BasemapPaint {
+export function basemapPaint(theme: 'light' | 'dark', tilesLoaded: boolean, tone: BasemapTone = 'light'): BasemapPaint {
   const background = theme === 'dark' ? '#1b242d' : '#dfe4dc';
-  if (theme === 'dark' && !tilesLoaded) return { background, rings: '#c3ced8', guides: '#9aabba' };
-  return { background, rings: '#1f2d3a', guides: '#34495c' };
+  const surface = tilesLoaded ? tone : theme;
+  if (surface === 'dark') return { background, rings: '#c3ced8', guides: '#9aabba', edges: '#ff8a5c', edgeWidth: 2, lobeOutline: '#ebbc70' };
+  return { background, rings: '#1f2d3a', guides: '#34495c', edges: '#e0603a', edgeWidth: 1.5, lobeOutline: '#c98a2e' };
 }
 
 export const DEFAULT_FALLBACK_COORDINATE = Object.freeze({ latitude: -6.932468839245536, longitude: 107.66069405900005 });
@@ -107,7 +92,6 @@ export const DEFAULT_GPS_CONFIG: GpsConfig = {
   manualLatitude: DEFAULT_FALLBACK_COORDINATE.latitude,
   manualLongitude: DEFAULT_FALLBACK_COORDINATE.longitude,
 };
-const ALLOWED_TILE_HOST = 'tile.openstreetmap.org';
 const GPS_DISABLED_STATES = new Set(['disabled', 'off', 'none', 'unavailable', 'not fixed', 'no fix']);
 const GPS_POSITIVE_STATES = new Set(['fix', 'fixed', 'enabled', 'active', 'ok', 'pass', 'connected', 'locked', '3d fix', 'gps fix']);
 const COORDINATE_EPSILON = 1e-7;
@@ -323,64 +307,6 @@ export function manualMapReadiness(override: ManualGpsOverride | null | undefine
     label: 'LOCAL GPS OVERRIDE',
     detail: 'The online OSM viewport can load around this entered coordinate; live telemetry remains untouched.',
   };
-}
-
-/**
- * Only the approved OSM HTTPS host is accepted. Keeping the template check
- * here prevents a Vite env value from becoming an unrestricted image proxy.
- */
-export function safeOsmTileTemplate(template: string | undefined = DEFAULT_OSM_TILE_TEMPLATE): string {
-  const candidate = template?.trim() || DEFAULT_OSM_TILE_TEMPLATE;
-  try {
-    const parsed = new URL(candidate);
-    if (
-      parsed.protocol !== 'https:'
-      || parsed.hostname.toLowerCase() !== ALLOWED_TILE_HOST
-      || parsed.search
-      || parsed.hash
-      || !parsed.pathname.endsWith('.png')
-      || !parsed.pathname.includes('{z}')
-      || !parsed.pathname.includes('{x}')
-      || !parsed.pathname.includes('{y}')
-    ) {
-      return DEFAULT_OSM_TILE_TEMPLATE;
-    }
-    return candidate;
-  } catch {
-    return DEFAULT_OSM_TILE_TEMPLATE;
-  }
-}
-
-export function osmTileUrlForIndex(
-  x: number,
-  y: number,
-  zoom = 13,
-  template = DEFAULT_OSM_TILE_TEMPLATE,
-): string {
-  const safeZoom = Math.max(1, Math.min(19, Math.trunc(zoom)));
-  const scale = 2 ** safeZoom;
-  const normalizedX = ((Math.trunc(x) % scale) + scale) % scale;
-  const safeY = Math.max(0, Math.min(scale - 1, Math.trunc(y)));
-  return safeOsmTileTemplate(template)
-    .replace('{z}', String(safeZoom))
-    .replace('{x}', String(normalizedX))
-    .replace('{y}', String(safeY));
-}
-
-export function osmTileUrl(
-  coordinate: MapCoordinate,
-  zoom = 13,
-  template = DEFAULT_OSM_TILE_TEMPLATE,
-): string {
-  const safeZoom = Math.max(1, Math.min(19, Math.trunc(zoom)));
-  const scale = 2 ** safeZoom;
-  const latitude = Math.max(-85.05112878, Math.min(85.05112878, coordinate.latitude));
-  const x = Math.floor(((coordinate.longitude + 180) / 360) * scale);
-  const latitudeRadians = latitude * Math.PI / 180;
-  const y = Math.floor(
-    (1 - Math.asinh(Math.tan(latitudeRadians)) / Math.PI) / 2 * scale,
-  );
-  return osmTileUrlForIndex(x, y, safeZoom, template);
 }
 
 export function mapReadiness(

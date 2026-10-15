@@ -15,7 +15,7 @@ Install terlebih dahulu:
 - Python 3.9 atau lebih baru. Ground Console mengimpor `zoneinfo` saat start (lewat store Receiver), sehingga Python 3.8 langsung berhenti dengan `ModuleNotFoundError: No module named 'zoneinfo'`.
 - Browser berbasis Chromium (Chrome atau Edge) bila memakai Receiver dengan RadioSpectrum, karena RadioSpectrum tersambung lewat WebUSB.
 - WebGL2 di browser untuk peta. Tanpa WebGL2 peta menampilkan pemberitahuan dan overlay kanvas sederhana; halaman lain tetap berjalan.
-- Akses HTTPS ke `tile.openstreetmap.de` dan/atau `tile.openstreetmap.org` jika ingin basemap tampil.
+- Akses HTTPS dari komputer console ke penyedia tile jika ingin basemap tampil (host-nya tetap, di `tools/tile_cache.py`). Browser tidak menghubungi penyedia tile; console mengambil dan menyimpan tile, sehingga area yang pernah tampil tetap terlihat saat offline.
 - Mosquitto lokal hanya jika ingin menguji MQTT staging.
 
 Buka terminal di root repository sebelum menjalankan perintah berikut.
@@ -250,7 +250,7 @@ Dashboard (dulu Ringkasan) adalah dasbor peta penuh di `#/dashboard`; alamat lam
 - Di Dashboard, top bar punya tombol panel **Lapisan**, **Polar**, **Spektrum**, dan **Kontrol**. Secara bawaan Polar dan Spektrum aktif, Lapisan dan Kontrol mati, dan kartu node tampil ringkas. Pilihan ini diingat browser. Bila Polar dan Spektrum dimatikan, dock hilang dan peta memakai seluruh tinggi layar.
 - Select interval di samping tombol refresh menyimpan interval refresh ke konfigurasi console, sama seperti form **Konfigurasi → Connection**.
 - Kartu node menampilkan frekuensi tengah, gain, dan posisi stasiun. Tombol panah di kartu membuka detail: SNR, DAQ, ADC, frame DAQ, kontrol jarak jauh (`en_remote_control`), dan offset kompas.
-- Tombol peta ada di kiri bawah: zoom masuk dan keluar, pusatkan ke stasiun, kembalikan utara ke atas, dan tautan © OpenStreetMap.
+- Tombol peta ada di kiri bawah: zoom masuk dan keluar, pusatkan ke stasiun, kembalikan utara ke atas, **Peta dasar**, dan chip sumber peta (tautan atribusi).
 
 ### Spektrum dan Dengar
 
@@ -302,8 +302,20 @@ Monitor MQTT console tidak memakai TLS, username, atau password. Kontrol hanya b
   - **Atur ulang tampilan grafik** mengembalikan Head Up ke 0°, mode plot ke pengaturan sumbernya, dan skala dB ke Auto. Offset kompas tidak ikut direset.
 - Baris di bawah plot menampilkan puncak (θ₀ di mode Polar), lebar −3 dB, dan Head Up.
 
+### Peta dasar
+
+- Delapan gaya: **Standar**, **Hot**, **Terang**, **Gelap**, **Satelit**, **Satelit + label**, **Topografi**, dan **Polos**. Pilih lewat tombol peta (ikon peta) di kontrol peta atau select **Peta dasar** di baris pertama panel Lapisan; keduanya memakai pilihan yang sama.
+- Menu terbuka di atas tombol. Gaya langsung berlaku dan menu tetap terbuka, jadi tombol panah bisa dipakai untuk berpindah gaya; `Esc`, klik di luar menu, atau Tab keluar menutupnya.
+- Ganti gaya tidak mengubah kamera, overlay DoA, label, marker stasiun, maupun readout hover.
+- Terang dan Gelap memakai tile Standar yang diwarnai ulang di browser (Gelap membalik warnanya), jadi tidak ada penyedia tambahan. Pada Gelap dan Satelit, cincin, arah, tepi −3 dB, dan garis tepi lobe berubah terang.
+- Polos tidak meminta tile sama sekali.
+- Nama gaya tidak menyebut penyedia. Chip kecil di samping tombol peta menyebut sumber data dan citra karena lisensinya mewajibkan atribusi; teks lengkapnya ada di tooltip chip.
+- Satelit dan Satelit + label memakai layanan citra Esri tanpa kunci API. Syarat pemakaian komersialnya diterima dengan risiko; periksa syarat Esri sebelum dipakai di lapangan.
+- Pilihan disimpan di console (`sdr-console-basemap`), sama seperti pengaturan Lapisan. Reset di Lapisan → Lanjutan tidak mengubah peta dasar.
+
 ### Lapisan
 
+- **Peta dasar** di baris pertama (lihat di atas).
 - Tujuh sakelar overlay peta: Sorotan beam, Lobe, Garis bearing, Tepi −3 dB, Cincin jarak, Arah U/T/S/B, dan Label teks.
 - **Opasitas overlay** 20–100 %.
 - **Lanjutan** membuka pengaturan overlay lengkap: jarak proyeksi, skala dB manual dan noise threshold, palet, blur, dan seterusnya.
@@ -414,7 +426,7 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
   - Bila offset kompas tidak dilaporkan, muncul pemberitahuan REFERENSI.
   - **Skala dB** overlay default Auto (dari vektor). Min, Max, dan Noise threshold (Lapisan → Lanjutan) hanya berlaku di mode Manual, dan legend memberi peringatan bila skala manual jenuh.
   - Field angka berlaku saat Enter atau saat field ditinggalkan; `Esc` membatalkan, dan nilai tidak valid ditolak dengan pesan di samping field.
-  - Basemap mencoba `tile.openstreetmap.de` dulu dan pindah ke `tile.openstreetmap.org` setelah beberapa kegagalan; kedua host tidak dipakai bersamaan. Bila keduanya gagal, chip "BASEMAP TIDAK TERSEDIA" muncul dan overlay tetap digambar di latar netral.
+  - Tile basemap selalu diambil dari console (`/api/tiles/<sumber>/<z>/<x>/<y>`). Console mencoba host upstream satu per satu (OSM: `tile.openstreetmap.de` dulu, lalu `tile.openstreetmap.org`), menyimpan tile di cache disk, dan menyajikan tile tersimpan tanpa jaringan. Bila tile area yang tampil tidak bisa diambil dan belum tersimpan, chip "BASEMAP TIDAK TERSEDIA · <gaya>" muncul, overlay tetap digambar di latar netral, dan peta mencoba lagi setiap 60 detik. Gaya tidak diganti otomatis.
   - Tanpa WebGL2, setelah WebGL context hilang, atau bila worker MapLibre gagal, peta menampilkan pemberitahuan dan overlay kanvas sederhana. Crash di dalam peta hanya memengaruhi panel peta.
   - Kamera bertahan saat berpindah halaman. Peta membingkai ulang saat sumber posisi berubah (misalnya fix GPS nyata pertama datang) dan saat panel berubah ukuran, selama operator belum menggeser kamera. Panel yang melayang di atas peta dihitung sebagai padding, sehingga stasiun dibingkai di bagian peta yang terlihat.
 - **Plot polar.**
@@ -630,14 +642,24 @@ Semua yang diubah lewat UI disimpan di server console, bukan hanya di browser. P
 |---|---|---|---|
 | `console.json` | Data Out, MQTT (host, port, transport, path WebSocket), interval refresh | `~/.local/share/sdr-doa-ground-console/` | `/data/` |
 | `branding.json` | nama aplikasi dan logo | sama | sama |
-| `preferences.json` | tema, bahasa, panel Dashboard dan node card, Lapisan/overlay, tampilan polar, sumber dan offset kompas, sumber GPS, mode Dengar, ikuti frekuensi node, pengaturan dan bookmark Receiver | sama | sama |
+| `preferences.json` | tema, bahasa, panel Dashboard dan node card, peta dasar, Lapisan/overlay, tampilan polar, sumber dan offset kompas, sumber GPS, mode Dengar, ikuti frekuensi node, pengaturan dan bookmark Receiver | sama | sama |
 | `receiver/` | rekaman dan scan Receiver | sama | sama |
+| `tiles/` | cache tile basemap; boleh dihapus, terisi lagi saat peta dilihat | sama | sama |
 | `.env` | `SDR_DOA_ADMIN_PASSWORD` (mode 0600) | sama | sama |
 
 - Data realtime (snapshot DoA, pesan MQTT, spektrum) tidak disimpan; data itu terus diperbarui.
 - Browser menyalin preferensi ke console sekitar setengah detik setelah perubahan, dan saat halaman dibuka membaca salinan console lebih dulu. Bila console sedang tidak bisa dihubungi, perubahan dikirim begitu console menjawab lagi.
 - Pengaturan Receiver ikut tersimpan selama halaman console terbuka. ID perangkat Receiver tetap di browser.
-- Saat console dijalankan langsung dari repository tanpa flag, file berada di `~/.config/sdr-doa-ground-console/` (`console.json`, `branding.json`, `preferences.json`), rekaman di `~/.local/share/sdr-doa-ground-console`, dan kata sandi di `.env` root repository. Lokasinya bisa diubah dengan `--config-path`, `--branding-path`, `--preferences-path`, `--data-dir` dan `--env-file`; console mencetak lokasinya saat start.
+- Saat console dijalankan langsung dari repository tanpa flag, file berada di `~/.config/sdr-doa-ground-console/` (`console.json`, `branding.json`, `preferences.json`), rekaman di `~/.local/share/sdr-doa-ground-console`, cache tile di `~/.cache/sdr-doa-ground-console/tiles`, dan kata sandi di `.env` root repository. Lokasinya bisa diubah dengan `--config-path`, `--branding-path`, `--preferences-path`, `--data-dir`, `--tile-cache-dir` dan `--env-file`; console mencetak lokasinya saat start.
+
+### Cache tile dan peta offline
+
+- Console menyimpan setiap tile yang pernah tampil di `--tile-cache-dir` (instalasi: `DATA/tiles`), paling banyak `--tile-cache-max-mb` (bawaan 512 MB; tile yang paling lama tidak dipakai dihapus lebih dulu; `0` berarti tidak menyimpan apa pun).
+- Tile dianggap segar selama max(`max-age` dari upstream, 7 hari), paling lama 30 hari, dan selama segar disajikan tanpa jaringan. Setelah itu console mengambilnya lagi; bila upstream tidak bisa dihubungi, salinan lama tetap disajikan. Tile yang belum pernah tersimpan dijawab 504.
+- Tidak ada unduh massal per area; kebijakan penyedia tile melarangnya. Untuk menyiapkan area sebelum ke lapangan, buka area itu di Dashboard pada zoom dan gaya yang akan dipakai selagi masih online.
+- Host yang gagal dilewati selama 30 detik, sehingga tile yang belum tersimpan langsung dijawab saat offline. Log console mencatat sekali saat upstream sebuah sumber tidak bisa dihubungi dan sekali saat kembali; tile yang berhasil disajikan tidak dicatat.
+- Permintaan keluar memakai proxy standar dari environment (`HTTPS_PROXY`, `NO_PROXY`) dan User-Agent `SDR-DoA-Ground-Console/<versi>`.
+- Setiap tile yang belum tersimpan memberi tahu penyedia area stasiun. Gaya Polos tidak meminta tile.
 - `--base-url` dan `--mqtt-*` menimpa pengaturan tersimpan hanya untuk satu kali jalan dan tidak disimpan. Service dan container sengaja tidak memakainya.
 
 ## Agent RDF-SDR (Raspberry)
@@ -747,9 +769,15 @@ Gunakan Node LTS yang memenuhi requirement Vite. Node 22.12+ direkomendasikan ol
 
 Ini tidak selalu berarti frontend rusak. Buka **Kesehatan Sistem → Pembacaan resource** untuk melihat file mana yang gagal dan kenapa. Periksa DNS atau koneksi ke `doasdr.local:8081`, dan gunakan alamat Data Out yang diizinkan. `STALE` dengan `NODE_CLOCK_STALLED` berarti port 8081 menjawab tetapi DSP node berhenti. `DEGRADED` berarti DAQ sync gagal atau ADC overdrive; turunkan gain bila overdrive. Gunakan tab **Simulasi** untuk memeriksa renderer tanpa hardware.
 
-### Basemap OSM tidak tampil
+### Basemap tidak tampil
 
-MapLibre membutuhkan koneksi HTTPS ke `tile.openstreetmap.de` atau `tile.openstreetmap.org` dan CSP yang sesuai. Kegagalan tile tidak berarti overlay atau polar plot gagal; chip "BASEMAP TIDAK TERSEDIA" muncul bila semua host gagal.
+MapLibre hanya renderer; tile datang dari console lewat `/api/tiles`, dan CSP halaman tidak mengizinkan host tile lain. Kegagalan tile tidak berarti overlay atau polar plot gagal; chip "BASEMAP TIDAK TERSEDIA · <gaya>" muncul bila tile area yang tampil tidak bisa diambil dan belum tersimpan.
+
+- Lihat log console: `tiles <sumber>: upstream unavailable (...)` menyebut penyebabnya (DNS, koneksi ditolak, timeout, HTTP 4xx/5xx, tipe isi ditolak).
+- Periksa koneksi HTTPS dari komputer console (bukan dari browser) ke host di `tools/tile_cache.py`, serta proxy (`HTTPS_PROXY`, `NO_PROXY`), VPN, dan firewall.
+- `curl -s -D - -o /dev/null http://127.0.0.1:8787/api/tiles/osm/0/0/0` menampilkan `X-Tile-Cache: hit`, `miss` atau `stale`; 504 berarti tile belum tersimpan dan upstream tidak terjangkau.
+- Pastikan `--tile-cache-dir` bisa ditulis user console; bila tidak, log mencatat `tile cache ... is not writable` dan tile tetap disajikan tanpa disimpan.
+- Coba gaya lain: tiap gaya punya sumber sendiri, kecuali Terang dan Gelap yang memakai tile Standar.
 
 ### Keamanan lokal
 

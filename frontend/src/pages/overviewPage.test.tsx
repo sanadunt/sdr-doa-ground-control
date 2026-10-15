@@ -177,6 +177,12 @@ describe('Overview dashboard', () => {
     // Nothing in the dock mounts or names the Receiver frame.
     expect(markup).not.toContain('receiver-frame');
   });
+
+  it('puts the basemap select first in the Lapisan panel', () => {
+    const markup = dashboard(snapshot(), { panels: { layers: true, polar: false, spectrum: false, control: false, nodeCollapsed: true } }, 'id');
+    expect(markup).toMatch(/<div class="ov-layers-body"><label class="ov-basemap-row"><span>Peta dasar<\/span><select>/);
+    expect(markup).toContain('<option value="standard" selected="">Standar</option>');
+  });
 });
 
 describe('Overview panel toggles', () => {

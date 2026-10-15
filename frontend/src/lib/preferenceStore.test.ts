@@ -19,6 +19,7 @@ import { FOLLOW_NODE_STORAGE_KEY, LISTEN_MODE_STORAGE_KEY } from './listenPrefs'
 import { POLAR_VIEW_STORAGE_KEY } from './polarViewSettings';
 import { COMPASS_CONFIG_STORAGE_KEY, GPS_CONFIG_STORAGE_KEY } from './sourceConfigStorage';
 import { OVERLAY_SETTINGS_STORAGE_KEY } from './mapOverlaySettings';
+import { BASEMAP_STORAGE_KEY } from './basemaps';
 import { LANG_STORAGE_KEY } from './i18n';
 
 class MemoryStorage {
@@ -337,6 +338,7 @@ describe('preference keys', () => {
       THEME_STORAGE_KEY,
       LANG_STORAGE_KEY,
       OVERVIEW_PANELS_STORAGE_KEY,
+      BASEMAP_STORAGE_KEY,
       OVERLAY_SETTINGS_STORAGE_KEY,
       POLAR_VIEW_STORAGE_KEY,
       LISTEN_MODE_STORAGE_KEY,

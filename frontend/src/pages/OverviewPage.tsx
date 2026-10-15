@@ -12,6 +12,8 @@ import { effectiveDbScale } from '../lib/doaGeometry';
 import type { DoaOverlaySettings } from '../lib/doaGeometry';
 import { loadOverlaySettings, saveOverlaySettings, validateOverlaySettings } from '../lib/mapOverlaySettings';
 import { loadPolarViewSettings, savePolarViewSettings, validatePolarViewSettings, effectiveFigType } from '../lib/polarViewSettings';
+import { loadBasemapId, normalizeBasemapId, saveBasemapId } from '../lib/basemaps';
+import type { BasemapId } from '../lib/basemaps';
 import type { PolarViewSettings } from '../lib/polarViewSettings';
 import { DEFAULT_OVERVIEW_PANELS } from '../lib/overviewPanels';
 import type { OverviewPanels } from '../lib/overviewPanels';
@@ -146,6 +148,13 @@ function OverviewPageView({
     setOverlaySettings(valid);
     saveOverlaySettings(valid);
   }, []);
+  // The basemap style; the map button and the Lapisan select share it.
+  const [basemapId, setBasemapId] = useState<BasemapId>(() => loadBasemapId());
+  const onBasemapSelect = useCallback((id: BasemapId) => {
+    const valid = normalizeBasemapId(id);
+    setBasemapId(valid);
+    saveBasemapId(valid);
+  }, []);
   const csv = candidate(snapshot, 'csv');
   const overlayValues = doa.shown && localSnapshotFresh && Array.isArray(csv.angular_power_db) && csv.angular_power_db.length === 360 ? csv.angular_power_db : null;
   const isSimulation = snapshot?.simulation === true;
@@ -203,13 +212,15 @@ function OverviewPageView({
               doaHeldText={doa.shown ? undefined : t(doaStatusTextKey(doa.reason))}
               overlaySettings={overlaySettings}
               insets={insets}
+              basemapId={basemapId}
+              onBasemapSelect={onBasemapSelect}
             />
           </Suspense>
         </LoadErrorBoundary>
       </div>
       <div className="ov-left" ref={leftRef}>
         <DoaReadout snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} settings={plotSettings} offsetSource={offsetSource} offsetVerified={offsetVerified} offsetManual={offsetManual} />
-        {panels.layers ? <LayersPanel settings={overlaySettings} scale={overlayScale} onChange={onOverlayChange} onClose={() => onPanelsChange({ ...panels, layers: false })} /> : null}
+        {panels.layers ? <LayersPanel settings={overlaySettings} scale={overlayScale} onChange={onOverlayChange} onClose={() => onPanelsChange({ ...panels, layers: false })} basemapId={basemapId} onBasemapChange={onBasemapSelect} /> : null}
       </div>
       <div className="ov-right" ref={rightRef}>
         <NodeCard

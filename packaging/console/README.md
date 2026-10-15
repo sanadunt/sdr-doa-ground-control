@@ -17,8 +17,9 @@ Semua yang diubah lewat UI disimpan di server console, bukan hanya di browser, s
 
 - `console.json`: koneksi Data Out, MQTT (host, port, transport, path WebSocket) dan interval refresh;
 - `branding.json`: nama aplikasi dan logo;
-- `preferences.json`: tampilan (tema, bahasa, panel Overview, node card, Lapisan/overlay, polar, sumber kompas dan offset, sumber GPS, mode dengar, follow-node);
+- `preferences.json`: tampilan (tema, bahasa, panel Overview, node card, peta dasar, Lapisan/overlay, polar, sumber kompas dan offset, sumber GPS, mode dengar, follow-node);
 - `receiver/`: rekaman dan scan Receiver (`receiver.sqlite3`, `audio/`);
+- `tiles/`: cache tile peta dasar (paling banyak 512 MB, area yang pernah tampil tetap terlihat saat offline; boleh dihapus);
 - `.env`: kata sandi admin (`SDR_DOA_ADMIN_PASSWORD`, mode 0600).
 
 Data realtime (snapshot DoA, MQTT, spektrum) tidak disimpan; itu diperbarui terus.

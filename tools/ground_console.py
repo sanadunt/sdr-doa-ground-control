@@ -14,9 +14,13 @@ The console keeps a narrow boundary:
 * the settings form's ``/api/dry-run/config-patch`` only validates a preview;
 * local admin settings also change this console's branding;
 * ``/api/preferences`` keeps the operator's browser preferences (theme,
-  language, Overview panels, overlay, polar view, GPS/Compass source, listen
-  mode, follow node, the Receiver's settings) on this host, so another browser
-  or a cleared cache gets them back.
+  language, Overview panels, basemap, overlay, polar view, GPS/Compass source,
+  listen mode, follow node, the Receiver's settings) on this host, so another
+  browser or a cleared cache gets them back;
+* ``/api/tiles/<source>/<z>/<x>/<y>`` serves the Dashboard basemap from a
+  disk cache (``--tile-cache-dir``) and fetches a missing or stale tile from
+  the fixed upstreams in ``tile_cache.py``, so the browser never contacts a
+  tile provider and the map keeps every area it has shown while offline.
 
 Admin login uses ``SDR_DOA_ADMIN_PASSWORD`` from the environment or the
 ``--env-file`` (default: the repository ``.env``). When the variable is absent
@@ -70,6 +74,16 @@ from config_command_tracker import ConfigCommandTracker, MonitorPublishError
 from sdr_doa_collector import CollectorError, DEFAULT_ALLOWED_DATA_HOSTS, NodeProgressTracker, collect
 from receiver_record_store import DEFAULT_DATA_DIR, ReceiverConflictError, ReceiverRecordStore
 from preferences_store import MAX_PREFERENCES_REQUEST_BYTES, PreferencesRejected, PreferencesStore
+from tile_cache import (
+    BROWSER_MAX_AGE_S,
+    BROWSER_STALE_MAX_AGE_S,
+    DEFAULT_TILE_CACHE_DIR,
+    DEFAULT_TILE_CACHE_MAX_MB,
+    MAX_TILE_CACHE_MB,
+    TILE_ROUTE_PREFIX,
+    TileCache,
+    TileSource,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BROWSDR_SOURCE_ARCHIVE = "freq-spectrum-source.tar.gz"
@@ -1179,7 +1193,7 @@ HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: https://tile.openstreetmap.de https://tile.openstreetmap.org; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'">
 <title>__APP_NAME__</title>
 <style>
 :root {
@@ -2066,7 +2080,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def log_request(self, code: Any = "-", size: Any = "-") -> None:
         # Docker and the launcher poll /api/health every few seconds; a healthy
         # answer would bury the service log. Failures are still logged.
-        if urlsplit(self.path).path == "/api/health" and str(getattr(code, "value", code)) == "200":
+        path = urlsplit(self.path).path
+        status = str(getattr(code, "value", code))
+        if path == "/api/health" and status == "200":
+            return
+        # A map view asks for dozens of tiles. A served tile is not logged, and
+        # neither is a 504 for an uncached tile while the upstream is down: the
+        # tile cache logs that outage once, when it starts and when it ends.
+        if path.startswith(TILE_ROUTE_PREFIX) and status in {"200", "504"}:
             return
         super().log_request(code, size)
 
@@ -2096,7 +2117,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         raw = body.encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data: https://tile.openstreetmap.de https://tile.openstreetmap.org; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org")
+        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(raw)))
@@ -2551,18 +2572,46 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             content_security_policy = (
                 "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
                 # blob: lets Plotly's "Download plot as a PNG" rasterize the
-                # plot it just serialized in this page.
-                "img-src 'self' data: blob: https://tile.openstreetmap.de https://tile.openstreetmap.org; "
-                "connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org; "
+                # plot it just serialized in this page. Basemap tiles come
+                # from this console (/api/tiles), so no tile host is listed.
+                "img-src 'self' data: blob:; "
+                "connect-src 'self'; "
                 "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
             )
         self.send_header("Content-Security-Policy", content_security_policy)
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_tile(self, path: str) -> None:
+        """GET /api/tiles/<source>/<z>/<x>/<y>: a basemap tile from the cache or its upstream."""
+        # Another site's page could still embed these URLs as images and make
+        # the console fetch and cache tiles of any area; browsers mark such a
+        # request cross-site. The console's own map is same-origin, and curl
+        # or a test client sends no Sec-Fetch-Site at all.
+        if self.headers.get("Sec-Fetch-Site", "").strip().lower() == "cross-site":
+            self._send_json({"ok": False, "code": "ORIGIN_REJECTED", "error": "tiles are served to this console's own pages only"}, HTTPStatus.FORBIDDEN)
+            return
+        result = self.console_server.tile_cache.get_path(path)
+        if result.status != HTTPStatus.OK:
+            self._send_json({"error": result.error or "tile unavailable"}, result.status)
+            return
+        max_age = BROWSER_STALE_MAX_AGE_S if result.cache == "stale" else BROWSER_MAX_AGE_S
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", result.content_type)
+        self.send_header("Content-Length", str(len(result.body)))
+        self.send_header("Cache-Control", f"private, max-age={max_age}")
+        self.send_header("X-Tile-Cache", result.cache)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(result.body)
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
         if parsed.path.startswith("/api/receiver/") and self._receiver_get(parsed):
+            return
+        if parsed.path.startswith(TILE_ROUTE_PREFIX):
+            # The query is never forwarded; only the path names a tile.
+            self._send_tile(parsed.path)
             return
         if self.console_server.frontend_dir is not None and not parsed.path.startswith("/api/"):
             self._send_frontend(parsed.path)
@@ -2578,7 +2627,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             body = body.replace("__APP_NAME__", escape(branding["app_name"], quote=True))
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data: https://tile.openstreetmap.de https://tile.openstreetmap.org; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org")
+            self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body.encode("utf-8"))))
@@ -2957,6 +3006,9 @@ class GroundConsoleServer(ThreadingHTTPServer):
         frontend_dir: Optional[Path] = None,
         receiver_data_dir: Optional[Path] = None,
         preferences_path: Optional[str] = None,
+        tile_cache_dir: Optional[Path] = None,
+        tile_cache_max_mb: int = DEFAULT_TILE_CACHE_MAX_MB,
+        tile_sources: Optional[Dict[str, TileSource]] = None,
     ):
         self.frontend_dir = Path(frontend_dir).resolve() if frontend_dir is not None else None
         if not _is_loopback_bind(address[0]):
@@ -2990,6 +3042,25 @@ class GroundConsoleServer(ThreadingHTTPServer):
             resolved_preferences = DEFAULT_PREFERENCES_PATH
         self.preferences = PreferencesStore(resolved_preferences)
         self.version = CONSOLE_VERSION
+        # Like the preferences: without an explicit directory the tiles sit
+        # next to console.json, so a test server never fills the real cache.
+        # tile_sources replaces the fixed upstreams only for tests and local
+        # QA launchers (a loopback fake); the command line cannot change them.
+        if tile_cache_dir is not None:
+            resolved_tiles = Path(tile_cache_dir).expanduser()
+        elif config_path:
+            resolved_tiles = self.config_path.with_name("tiles")
+        else:
+            resolved_tiles = DEFAULT_TILE_CACHE_DIR
+        if not isinstance(tile_cache_max_mb, int) or not 0 <= tile_cache_max_mb <= MAX_TILE_CACHE_MB:
+            raise ValueError(f"tile cache size must be 0..{MAX_TILE_CACHE_MB} MB")
+        self.tile_cache = TileCache(
+            resolved_tiles,
+            tile_cache_max_mb * 1024 * 1024,
+            sources=tile_sources,
+            user_agent=f"SDR-DoA-Ground-Console/{CONSOLE_VERSION}",
+            log=lambda message: print(f"[ground-console] {message}", flush=True),
+        )
         self._session_lock = threading.RLock()
         self._admin_sessions: Dict[str, float] = {}
         # Failed-login throttle, global to this server and kept under
@@ -3373,6 +3444,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--data-dir", default=str(DEFAULT_DATA_DIR), help="local Receiver records and audio directory")
     parser.add_argument(
+        "--tile-cache-dir",
+        default=str(DEFAULT_TILE_CACHE_DIR),
+        help="local directory for cached basemap tiles (kept so the map works offline)",
+    )
+    parser.add_argument(
+        "--tile-cache-max-mb",
+        type=int,
+        default=DEFAULT_TILE_CACHE_MAX_MB,
+        help="size limit of the tile cache in MB; the least recently used tiles go first (0 keeps none)",
+    )
+    parser.add_argument(
         "--env-file",
         default=str(DEFAULT_ENV_PATH),
         help="dotenv file for SDR_DOA_ADMIN_PASSWORD and SDR_DOA_SEED_* (the process environment wins)",
@@ -3395,6 +3477,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit("--mqtt-ws-path must start with / and use only letters, digits, and ._~/-")
     if not _is_allowed_base_url(args.base_url):
         raise SystemExit("--base-url is outside the local SDR-DoA allowlist")
+    if not (0 <= args.tile_cache_max_mb <= MAX_TILE_CACHE_MB):
+        raise SystemExit(f"--tile-cache-max-mb must be between 0 and {MAX_TILE_CACHE_MB}")
     env_path = Path(args.env_file).expanduser()
     env_values, env_readable = _read_env_file(env_path)
     if env_path.resolve() != DEFAULT_ENV_PATH.resolve():
@@ -3424,10 +3508,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         frontend_dir=None if args.legacy_ui else PROJECT_ROOT / "frontend" / "dist",
         receiver_data_dir=Path(args.data_dir).expanduser(),
         preferences_path=str(Path(args.preferences_path).expanduser()),
+        tile_cache_dir=Path(args.tile_cache_dir).expanduser(),
+        tile_cache_max_mb=args.tile_cache_max_mb,
     )
     print(f"Ground Console: http://{args.bind}:{args.port}/", flush=True)
     print(f"Version: {server.version}", flush=True)
     print(f"Saved settings: {config_path}, {server.branding_path}, {server.preferences.path}", flush=True)
+    print(f"Tile cache: {server.tile_cache.cache_dir} (at most {args.tile_cache_max_mb} MB)", flush=True)
     print(f"Read-only Data Out: {config['base_url']}", flush=True)
     if ADMIN_PASSWORD == DEFAULT_ADMIN_PASSWORD:
         print(

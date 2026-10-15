@@ -3,7 +3,6 @@ import type { Candidate, GpsSourceMode, MapCoordinate, TelemetrySnapshot } from 
 import {
   BASEMAP_FAILURES_PER_HOST,
   BASEMAP_SWITCH_GRACE_MS,
-  OSM_TILE_TEMPLATES,
   basemapAfterTile,
   basemapPaint,
   gpsReportsNoFix,
@@ -126,15 +125,16 @@ describe('camera framing on a station source change (AUD-10)', () => {
 });
 
 describe('basemap tile hosts (AUD-32, AUD-89)', () => {
-  const hosts = OSM_TILE_TEMPLATES.length;
-  const fail = (state: BasemapHealth, times: number, nowMs: number) => {
+  // The health logic takes any host count; the console's tile route now does
+  // the host fallback, so the map passes one URL per style (see below).
+  const hosts = 2;
+  const fail = (state: BasemapHealth, times: number, nowMs: number, count = hosts) => {
     let next = state;
-    for (let index = 0; index < times; index += 1) next = basemapAfterTile(next, false, hosts, nowMs);
+    for (let index = 0; index < times; index += 1) next = basemapAfterTile(next, false, count, nowMs);
     return next;
   };
 
   it('uses one host at a time and moves on after repeated failures', () => {
-    expect(OSM_TILE_TEMPLATES[0]).toContain('tile.openstreetmap.de');
     const start = initialBasemapHealth();
     const almost = fail(start, BASEMAP_FAILURES_PER_HOST - 1, 0);
     expect(almost.hostIndex).toBe(0);
@@ -158,6 +158,14 @@ describe('basemap tile hosts (AUD-32, AUD-89)', () => {
     expect(retried.hostIndex).not.toBe(exhausted.hostIndex);
   });
 
+  it('marks a one-URL style unavailable after one round and retries it in place', () => {
+    const exhausted = basemapAfterTile(fail(initialBasemapHealth(), BASEMAP_FAILURES_PER_HOST - 1, 0, 1), false, 1, 0);
+    expect(exhausted).toMatchObject({ hostIndex: 0, hostsFailed: 1, unavailable: true, switchedAtMs: 0 });
+    const retried = nextBasemapHost(exhausted, 1, 60_000);
+    expect(retried).toMatchObject({ hostIndex: 0, unavailable: true, switchedAtMs: 60_000 });
+    expect(basemapAfterTile(retried, true, 1, 61_000)).toMatchObject({ loaded: true, unavailable: false });
+  });
+
   it('clears every failure on the first loaded tile', () => {
     const exhausted = fail(fail(initialBasemapHealth(), BASEMAP_FAILURES_PER_HOST, 0), BASEMAP_FAILURES_PER_HOST, 10_000);
     const loaded = basemapAfterTile(exhausted, true, hosts, 20_000);
@@ -167,7 +175,7 @@ describe('basemap tile hosts (AUD-32, AUD-89)', () => {
 });
 
 describe('basemap state across Overview visits', () => {
-  const hosts = OSM_TILE_TEMPLATES.length;
+  const hosts = 2;
   const exhausted = (): BasemapHealth => {
     let state = initialBasemapHealth();
     for (let index = 0; index < BASEMAP_FAILURES_PER_HOST; index += 1) state = basemapAfterTile(state, false, hosts, 0);
@@ -197,8 +205,26 @@ describe('basemap paint per theme', () => {
     expect(light.background).toBe('#dfe4dc');
     expect(darkBare.background).not.toBe(light.background);
     expect(darkBare.rings).not.toBe(light.rings);
-    // OSM tiles are light, so dark lines come back once they draw.
+    // Standard tiles are light, so dark lines come back once they draw.
     expect(darkTiles.rings).toBe(light.rings);
     expect(basemapPaint('light', true)).toEqual(light);
+  });
+
+  it('follows the tone of the drawn tiles, and the theme while no tiles are drawn', () => {
+    for (const theme of ['light', 'dark'] as const) {
+      const onLight = basemapPaint(theme, true, 'light');
+      const onDark = basemapPaint(theme, true, 'dark');
+      expect(onLight.rings).toBe('#1f2d3a');
+      expect(onDark.rings).toBe('#c3ced8');
+      expect(onDark.guides).not.toBe(onLight.guides);
+      expect(onDark.edges).not.toBe(onLight.edges);
+      expect(onDark.edgeWidth).toBeGreaterThan(onLight.edgeWidth);
+      expect(onDark.lobeOutline).not.toBe(onLight.lobeOutline);
+      // The background always follows the console theme.
+      expect(onDark.background).toBe(onLight.background);
+      expect(basemapPaint(theme, false, 'dark')).toEqual(basemapPaint(theme, false, 'light'));
+    }
+    expect(basemapPaint('light', false, 'dark').rings).toBe('#1f2d3a');
+    expect(basemapPaint('dark', false, 'light').rings).toBe('#c3ced8');
   });
 });

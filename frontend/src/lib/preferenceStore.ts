@@ -27,6 +27,7 @@ export const PREFERENCE_KEYS = [
   'sdr-console-theme',
   'sdr-console-lang',
   'sdr-console-overview-panels-v1',
+  'sdr-console-basemap',
   'sdr-doa-overlay-settings-v4',
   'sdr-doa-polar-view-v1',
   'sdr-console-listen-mode',

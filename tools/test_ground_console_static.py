@@ -487,9 +487,11 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         )
         csp = result.headers.get("content-security-policy", "")
         self.assertTrue(csp, "built root must send a Content-Security-Policy header")
-        self.assertIn("connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org", csp)
-        self.assertIn("https://tile.openstreetmap.de", csp)
-        self.assertIn("https://tile.openstreetmap.org", csp)
+        # Basemap tiles come from the console's own /api/tiles route, so the
+        # page may contact no remote host at all.
+        self.assertIn("connect-src 'self';", csp)
+        self.assertIn("img-src 'self' data: blob:;", csp)
+        self.assertNotRegex(csp, r"https?://|\*", "the main app CSP lists no remote or wildcard source")
         script_directives = []
         for raw_directive in csp.split(";"):
             directive = raw_directive.strip().lower()
@@ -1261,8 +1263,8 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         self.assertEqual(
             ground.headers.get("content-security-policy"),
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data: blob: https://tile.openstreetmap.de https://tile.openstreetmap.org; "
-            "connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org; "
+            "img-src 'self' data: blob:; "
+            "connect-src 'self'; "
             "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
         )
         self.assertNotIn("permissions-policy", ground.headers)
