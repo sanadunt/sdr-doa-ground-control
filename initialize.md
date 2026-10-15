@@ -51,7 +51,7 @@ Tujuan UI:
 - Dashboard (route id `overview`) berupa dasbor peta penuh: HUD bearing, kartu node, panel Lapisan, panel Kontrol, dan dock bawah berisi Polar (dengan pengaturan Atur) dan Spektrum. Panel diaktifkan lewat tombol Lapisan, Polar, Spektrum, dan Kontrol di top bar. HUD bearing, polar, dan overlay peta memakai satu predikat kesiapan (`overviewDoaStatus()` di `frontend/src/lib/doaStatus.ts`), sehingga DAQ gagal, ADC overdrive, CONFLICT, view hilang, atau node beku menyembunyikan ketiganya sekaligus.
 - Bearing geografis dihitung dari θ₀ dengan `geographicBearingForBin()` (`frontend/src/lib/polar.ts`): (360 − θ₀ + compass_offset) mod 360. θ₀ tetap ditampilkan sebagai sudut array.
 - Plot DoA menggunakan bundle Plotly parsial (`plotly.js/lib/core` + `lib/scatterpolar`, didaftarkan di `frontend/src/lib/plotlyPolar.ts`) dan update data mempertahankan camera state selama memungkinkan.
-- Map menggunakan MapLibre GL JS dengan basemap tile OSM publik (`tile.openstreetmap.de`, lalu `tile.openstreetmap.org` bila host pertama gagal).
+- Map menggunakan MapLibre GL JS dengan delapan gaya peta dasar (`frontend/src/lib/basemaps.ts`: Standar, Hot, Terang, Gelap, Satelit, Satelit + label, Topografi, Polos). Semua tile diambil lewat route console `/api/tiles/<sumber>/<z>/<x>/<y>` (`tools/tile_cache.py`), yang menyimpan tile di disk sehingga area yang pernah tampil tetap terlihat saat offline.
 - DoA map overlay: station marker, bearing, lobe, guide angle, dan heat-style direction helper.
 - Canvas fallback overlay menjaga visualisasi DoA tetap terlihat jika WebGL2 tidak tersedia, context WebGL hilang, worker MapLibre gagal, atau layer GeoJSON bermasalah.
 - Overlay settings tersimpan lokal. Panel Lapisan berisi tujuh sakelar layer dan opasitas overlay, dan bagian Lanjutan berisi kontrol advanced untuk jarak/radius, min/max dB, threshold, contrast/intensity, radial samples, distance falloff, opacity, blur, guide interval, dan palette.
@@ -145,6 +145,7 @@ MQTT adalah transport/contract, bukan pengganti DAQ, DSP, normalisasi, gate, ata
 | `tools/rdf_node_mqtt_v2.py` | Parser dan snapshot RDF Node v2 untuk `/api/mqtt/rdf-node` |
 | `tools/receiver_record_store.py` | Store SQLite dan file audio Receiver di bawah `--data-dir` |
 | `tools/preferences_store.py` | Salinan preferensi browser di server (allowlist key, batas ukuran, tulis atomik) untuk `/api/preferences` |
+| `tools/tile_cache.py` | Cache tile basemap untuk `/api/tiles`: upstream tetap (HTTPS, maksimal dua host per sumber), cache disk LRU, sajian stale saat offline |
 | `tools/make_release.py` | Membuat tarball rilis console dan agent beserta `SHA256SUMS`; juga `--stage-console`/`--stage-agent` untuk Docker dan installer |
 | `packaging/`, `Dockerfile*`, `docker-compose*.yml`, `VERSION` | Docker, installer native, systemd unit, dan versi rilis |
 | `tools/build_browsdr_receiver.py` | Builder Receiver: salin submodule, terapkan overlay, `npm ci` + build, tulis `frontend/dist/receiver` |
@@ -161,7 +162,8 @@ MQTT adalah transport/contract, bukan pengganti DAQ, DSP, normalisasi, gate, ata
 | `frontend/src/api.ts` | Same-origin API adapter dengan timeout, abort, validasi shape, dan read-back |
 | `frontend/src/types.ts` | Contract TypeScript untuk snapshot, candidate, gate, config, map, MQTT |
 | `frontend/src/components/Shell.tsx` | Top bar, menu halaman, route, runtime badges, theme, read strip, interval refresh |
-| `frontend/src/components/TacticalMap.tsx` | MapLibre, OSM tile, marker, popup, overlay settings, overlay lifecycle |
+| `frontend/src/components/TacticalMap.tsx` | MapLibre, layer raster peta dasar dan penggantiannya, marker, popup, overlay settings, overlay lifecycle |
+| `frontend/src/lib/basemaps.ts`, `frontend/src/components/overview/BasemapPicker.tsx` | Katalog gaya peta dasar (sumber tile, maxzoom, paint raster, atribusi) dan menu/select pemilihnya |
 | `frontend/src/pages/OverviewPage.tsx`, `frontend/src/components/overview/` | Dasbor Overview: kartu node, Lapisan, Kontrol (`ControlPanel.tsx`), dock Polar (`PolarDock.tsx`) dan Spektrum (`SpectrumDock.tsx`) |
 | `frontend/src/components/PolarPlot.tsx` | Plotly polar/compass renderer, camera state, head-up, manual dB range |
 | `frontend/src/lib/telemetry.ts` | Candidate selection, data state, formatting, gate helpers |
@@ -174,7 +176,7 @@ MQTT adalah transport/contract, bukan pengganti DAQ, DSP, normalisasi, gate, ata
 | `frontend/src/lib/simulation.ts` | Synthetic 360-bin snapshot, validation, randomization |
 | `frontend/src/lib/doaGeometry.ts` | Geometry bearing/lobe/heat/guides dari coordinate + vector + settings |
 | `frontend/src/lib/mapOverlaySettings.ts` | Default, validation, persistence, preset overlay settings |
-| `frontend/src/lib/map.ts` | GPS source resolution, fallback coordinate, posisi live terakhir, OSM tile hosts dan perpindahannya |
+| `frontend/src/lib/map.ts` | GPS source resolution, fallback coordinate, posisi live terakhir, kesehatan basemap, warna garis sesuai tone tile |
 | `frontend/src/lib/polar.ts` | Angle convention, bearing geografis, polar metadata, source conversion |
 | `frontend/src/pages/` | Overview, health, diagnostics, configuration, monitor, simulation, receiver |
 | `frontend/src/console-design.css` | Design layer Ground Console dan responsive/accessibility rules |
@@ -251,11 +253,13 @@ heading / gps_heading / compass_heading
 
 ## 6. Map, overlay, dan simulasi
 
-### MapLibre/OSM
+### MapLibre dan peta dasar
 
-MapLibre adalah renderer, bukan penyedia peta. Basemap memakai tile OSM publik tanpa API key melalui template di `frontend/src/lib/map.ts`. Peta memakai satu host pada satu waktu: `tile.openstreetmap.de` dulu, lalu `tile.openstreetmap.org` setelah 4 kegagalan berturut-turut atau host yang diam. CSP pada `ground_console.py` harus mengizinkan kedua host pada `connect-src` dan `img-src`.
+MapLibre adalah renderer, bukan penyedia peta. Gaya peta dasar ada di `frontend/src/lib/basemaps.ts`; semuanya menggambar tile dari route console `/api/tiles/<sumber>/<z>/<x>/<y>`, sehingga `img-src`/`connect-src` di CSP halaman tidak berisi host tile mana pun. Upstream tiap sumber (`osm`, `hot`, `imagery`, `imagery-labels`, `topo`) tetap di `TILE_SOURCES` pada `tools/tile_cache.py`: HTTPS, maksimal dua host yang dicoba satu per satu (OSM: `tile.openstreetmap.de` lalu `tile.openstreetmap.org`), tanpa redirect, timeout 5 s, isi maksimal 1 MiB dan hanya PNG/JPEG/WebP. Id dan maxzoom kedua daftar harus sama (`tools/test_basemap_contract.py`). Terang dan Gelap adalah tile Standar dengan paint raster MapLibre.
 
-Jika basemap gagal, cek CSP/network browser, tile host, request tile, proxy, VPN, firewall, atau policy jaringan. Jangan menghapus overlay hanya karena imagery OSM gagal.
+Ganti gaya hanya menukar source dan layer raster di bawah `doa-beam`; `map.setStyle()` tidak pernah dipakai karena akan menghapus data GeoJSON dan paint runtime. Cache tile disimpan di `--tile-cache-dir` dan segar selama max(max-age upstream, 7 hari), paling lama 30 hari; saat upstream tidak terjangkau tile lama tetap disajikan, dan tile yang belum tersimpan dijawab 504. Tidak ada prefetch atau unduh massal.
+
+Jika basemap gagal, cek log console (`tiles <sumber>: upstream unavailable`), koneksi HTTPS dari host console ke upstream, proxy (`HTTPS_PROXY`), VPN, firewall, dan apakah `--tile-cache-dir` bisa ditulis. Jangan menghapus overlay hanya karena tile gagal.
 
 ### Overlay direction helper
 
@@ -371,7 +375,7 @@ Untuk static serving/security saja:
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_ground_console_static
 ```
 
-Suite static gagal pada cek Receiver bila `frontend/dist` ada dan submodule sudah diambil tetapi `frontend/dist/receiver` tidak ada. Banyak file test Python adalah script standalone yang tidak dijalankan `unittest discover`; jalankan script modul yang diubah (misalnya `python3 tools/test_sdr_doa_collector.py`). Tes Node Receiver: `node --test tools/test_receiver_*.mjs` (Node 22.13+), termasuk bridge dasbor (`test_receiver_console_bridge.mjs`) dan kecocokan dua salinan protokolnya (`test_receiver_bridge_contract.mjs`). Jalur Kontrol dicakup `tools/test_mqtt_config_patch.py` dan `tools/test_config_patch_contract.py`; keduanya ikut `unittest discover` dan tidak butuh broker.
+Suite static gagal pada cek Receiver bila `frontend/dist` ada dan submodule sudah diambil tetapi `frontend/dist/receiver` tidak ada. Banyak file test Python adalah script standalone yang tidak dijalankan `unittest discover`; jalankan script modul yang diubah (misalnya `python3 tools/test_sdr_doa_collector.py`). Tes Node Receiver: `node --test tools/test_receiver_*.mjs` (Node 22.13+), termasuk bridge dasbor (`test_receiver_console_bridge.mjs`) dan kecocokan dua salinan protokolnya (`test_receiver_bridge_contract.mjs`). Jalur Kontrol dicakup `tools/test_mqtt_config_patch.py` dan `tools/test_config_patch_contract.py`; keduanya ikut `unittest discover` dan tidak butuh broker. Cache tile dicakup `tools/test_tile_cache.py` (upstream palsu di loopback lewat constructor `GroundConsoleServer`) dan kecocokan katalog peta dasar dengan cache oleh `tools/test_basemap_contract.py`; keduanya juga ikut `unittest discover`.
 
 ---
 
@@ -438,9 +442,9 @@ Console tetap berjalan tanpa `paho-mqtt`, tetapi monitor MQTT tidak bisa tersamb
 - **Publish gagal** (PUBACK 128 ke atas): ACL broker tidak mengizinkan console publish ke `cmd/config/patch`.
 - Broker `tools/mqtt_lan_stage.conf` mewajibkan TLS dan password, yang tidak dimiliki monitor console; pakai `tools/mqtt_stage4.conf` untuk uji lokal.
 
-### OSM/MapLibre basemap tidak muncul
+### Basemap MapLibre tidak muncul
 
-MapLibre bukan tile provider. Periksa `connect-src`/`img-src` CSP, host tile, request Network, proxy, VPN, firewall, atau policy jaringan. Tile failure tidak otomatis berarti overlay gagal.
+MapLibre bukan tile provider. Tile datang dari `/api/tiles` di console; periksa log console, `X-Tile-Cache` pada response tile (hit, miss, stale; 504 berarti belum tersimpan dan upstream tidak terjangkau), koneksi HTTPS host console ke upstream di `tools/tile_cache.py`, proxy, VPN, firewall, dan izin tulis `--tile-cache-dir`. Tile failure tidak otomatis berarti overlay gagal.
 
 ### Overlay ada di DOM tetapi tidak terlihat
 

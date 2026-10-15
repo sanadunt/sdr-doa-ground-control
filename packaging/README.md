@@ -34,4 +34,4 @@ Isi tarball console: `frontend/dist` (termasuk `receiver/`), modul runtime di `t
 | `packaging/docker/` | entrypoint console, healthcheck, pemeriksaan build context |
 | `tools/make_release.py` | builder rilis; `--stage-console DIR`/`--stage-agent DIR` dipakai Docker dan installer dari repository |
 
-Semua jalur menjalankan console dengan path data yang sama: `--config-path DATA/console.json --branding-path DATA/branding.json --preferences-path DATA/preferences.json --data-dir DATA/receiver --env-file DATA/.env`, dan `--bind 127.0.0.1`. Tidak ada yang memakai `--base-url`/`--mqtt-*`; nilai awal masuk lewat `SDR_DOA_SEED_*`.
+Semua jalur menjalankan console dengan path data yang sama: `--config-path DATA/console.json --branding-path DATA/branding.json --preferences-path DATA/preferences.json --data-dir DATA/receiver --tile-cache-dir DATA/tiles --env-file DATA/.env`, dan `--bind 127.0.0.1`. Tidak ada yang memakai `--base-url`/`--mqtt-*`; nilai awal masuk lewat `SDR_DOA_SEED_*`.
