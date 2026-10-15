@@ -82,3 +82,14 @@ test('every token the Receiver skin reads is defined in both themes', () => {
 	const darkOnly = [...dark.keys()].filter(name => !light.has(name) && !['--mono', '--sans'].includes(name));
 	assert.deepEqual(darkOnly, [], 'colour tokens without a light value');
 });
+
+test('the dashboard marker colour is the Receiver marker colour in both themes', () => {
+	const renderer = readFileSync(new URL('./browsdr_receiver_overlay/src/client/app/sweep-marker-renderer.ts', import.meta.url), 'utf8');
+	const builder = readFileSync(new URL('./build_browsdr_receiver.py', import.meta.url), 'utf8');
+	const dark = renderer.match(/context\.strokeStyle = '(#[0-9a-f]{6})';/i)?.[1];
+	const light = builder.match(/context\.strokeStyle = lightTheme \? '(#[0-9a-f]{6})' : '#ff75a0';/i)?.[1];
+	assert.equal(dark, '#ff75a0');
+	assert.equal(light, '#a23557');
+	assert.equal(THEMES[0].console.get('--marker'), dark);
+	assert.equal(THEMES[1].console.get('--marker'), light);
+});

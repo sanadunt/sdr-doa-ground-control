@@ -6,7 +6,7 @@
  */
 import type { MessageKey } from './i18n';
 import type { BridgePhase, ReceiverBuild } from './receiverBridge';
-import type { ReceiverStatus, ResultCode, SpectrumFrame, StatusErrorCode, SweepPhase } from './receiverBridgeProtocol';
+import type { BridgeMarker, ReceiverStatus, ResultCode, SpectrumFrame, StatusErrorCode, SweepPhase } from './receiverBridgeProtocol';
 import type { DockMode } from './spectrumDockSettings';
 import { nodeFrequenciesChanged } from './nodeFrequency';
 import type { NodeFrequencies } from './nodeFrequency';
@@ -173,6 +173,66 @@ export function scanPick(bins: ArrayLike<number>, startHz: number, stopHz: numbe
     if (Number.isFinite(bins[index]) && (!Number.isFinite(bins[best]) || bins[index] > bins[best])) best = index;
   }
   return startHz + (best + 0.5) * step;
+}
+
+/** A click this close to a marker (CSS px) picks it instead of adding one; MARKER_HIT_TOUCH_PX for a finger. */
+export const MARKER_HIT_PX = 6;
+export const MARKER_HIT_TOUCH_PX = 12;
+/** A marker label is left out when it would come closer than this to the previous one (CSS px). */
+export const MARKER_LABEL_GAP_PX = 4;
+
+/** A marker inside the drawn axis and its x on a `width`-pixel canvas. */
+export interface MarkerInView {
+  marker: BridgeMarker;
+  x: number;
+}
+
+/** The markers inside an axis (both edges included), in frequency order, with their x. */
+export function markersInView(markers: readonly BridgeMarker[], axis: FrequencyAxis | null, width: number): MarkerInView[] {
+  if (!axis || !(width > 0) || !(axis.stopHz > axis.startHz)) return [];
+  const shown: MarkerInView[] = [];
+  for (const marker of markers) {
+    if (marker.frequencyHz < axis.startHz || marker.frequencyHz > axis.stopHz) continue;
+    const x = xAtFreq(marker.frequencyHz, axis.startHz, axis.stopHz, width);
+    if (x !== null) shown.push({ marker, x });
+  }
+  return shown.sort((a, b) => a.x - b.x);
+}
+
+/** The marker nearest to x within hitPx that the console can address (it has an id), or null. */
+export function nearestMarker(markers: readonly BridgeMarker[], axis: FrequencyAxis | null, x: number, width: number, hitPx: number): BridgeMarker | null {
+  if (!Number.isFinite(x)) return null;
+  let best: MarkerInView | null = null;
+  for (const entry of markersInView(markers, axis, width)) {
+    if (entry.marker.id === null || Math.abs(entry.x - x) > hitPx) continue;
+    if (!best || Math.abs(entry.x - x) < Math.abs(best.x - x)) best = entry;
+  }
+  return best?.marker ?? null;
+}
+
+/**
+ * The marker after (`1`) or before (`-1`) the selected one among those in view ([ and ]), only
+ * markers with an id. Without a selection or with one out of view: the first, or the last going back.
+ */
+export function stepMarker(markers: readonly BridgeMarker[], axis: FrequencyAxis | null, width: number, selectedId: string | null, direction: 1 | -1): BridgeMarker | null {
+  const shown = markersInView(markers, axis, width).map((entry) => entry.marker).filter((marker) => marker.id !== null);
+  if (!shown.length) return null;
+  const index = selectedId === null ? -1 : shown.findIndex((marker) => marker.id === selectedId);
+  if (index < 0) return direction > 0 ? shown[0] : shown[shown.length - 1];
+  return shown[Math.min(shown.length - 1, Math.max(0, index + direction))];
+}
+
+/**
+ * Which labels to draw, left to right: a label is left out when it would start within gapPx of
+ * the end of the last label drawn (`widths` are the labels' widths, `xs` where they start).
+ */
+export function markerLabelSlots(xs: readonly number[], widths: readonly number[], gapPx = MARKER_LABEL_GAP_PX): boolean[] {
+  let end = -Infinity;
+  return xs.map((x, index) => {
+    if (x < end + gapPx) return false;
+    end = x + (widths[index] ?? 0);
+    return true;
+  });
 }
 
 /** The axis span around a centre frequency, used before any frame has arrived. */
@@ -385,6 +445,9 @@ const NOTICE_MESSAGES: Partial<Record<DockNotice, MessageKey>> = {
   RECORDING_ACTIVE: 'spectrum.recordingActive',
   SWEEP_UNSUPPORTED: 'spectrum.sweepUnsupported',
   SWEEP_FAILED: 'spectrum.sweepFailed',
+  MARKER_LIMIT: 'spectrum.markLimit',
+  MARKER_NOT_FOUND: 'spectrum.markNotFound',
+  MARKER_SAVE_FAILED: 'spectrum.markSaveFailed',
   USB_LOST: 'spectrum.usbLost',
   RX_ERROR: 'spectrum.rxError',
 };
@@ -394,8 +457,13 @@ export function noticeMessage(notice: DockNotice): MessageKey {
   return NOTICE_MESSAGES[notice] ?? 'spectrum.commandFailed';
 }
 
+/** Message for the result of a marker command: OUT_OF_RANGE is the marker range, not the tuning range. */
+export function markNoticeMessage(notice: DockNotice): MessageKey {
+  return notice === 'OUT_OF_RANGE' ? 'spectrum.markOutOfRange' : noticeMessage(notice);
+}
+
 /** Codes whose result text, from the Receiver and already localized there, is shown after the dock's message. */
-const FRAME_TEXT_NOTICES: ReadonlySet<DockNotice> = new Set<DockNotice>(['CONNECT_FAILED', 'NOT_READY', 'INVALID_COMMAND', 'SWEEP_FAILED']);
+const FRAME_TEXT_NOTICES: ReadonlySet<DockNotice> = new Set<DockNotice>(['CONNECT_FAILED', 'NOT_READY', 'INVALID_COMMAND', 'SWEEP_FAILED', 'MARKER_SAVE_FAILED']);
 
 /** The Receiver's own text for a failed dock command, or null. */
 export function noticeFrameText(notice: { code: DockNotice; message?: string } | null): string | null {

@@ -20,6 +20,8 @@
   --amber: #f0b65a;
   --red: #f38b84;
   --plot-fill: rgba(235, 188, 112, .14);
+  /* Spectrum markers: the Receiver's marker colour. */
+  --marker: #ff75a0;
   --shadow: none;
   --mono: ui-monospace, 'SFMono-Regular', 'JetBrains Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
   --topbar-h: 52px;
@@ -46,6 +48,7 @@
   --amber: #8a5200;
   --red: #ac2f2a;
   --plot-fill: rgba(154, 91, 18, .12);
+  --marker: #a23557;
 }
 body { background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; }
 ::selection { background: var(--accent); color: var(--on-accent); }

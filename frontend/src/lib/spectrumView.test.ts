@@ -13,7 +13,13 @@ import {
   formatMhzTrim,
   freqAtX,
   keyStepHz,
+  MARKER_HIT_PX,
+  MARKER_HIT_TOUCH_PX,
+  markerLabelSlots,
+  markersInView,
+  markNoticeMessage,
   mhzDigits,
+  nearestMarker,
   noticeFrameText,
   noticeMessage,
   paletteLut,
@@ -23,13 +29,14 @@ import {
   snapHz,
   spanAround,
   spectrumDockView,
+  stepMarker,
   sweepAxis,
   ticks,
   waterfallNeedsReset,
   xAtFreq,
 } from './spectrumView';
 import type { DockViewInput, FollowInput } from './spectrumView';
-import type { ReceiverStatus, StatusSweep } from './receiverBridgeProtocol';
+import type { BridgeMarker, ReceiverStatus, StatusSweep } from './receiverBridgeProtocol';
 import { DICTIONARIES } from './i18n';
 
 const START = 432_920_000;
@@ -287,12 +294,25 @@ describe('spectrum dock state table', () => {
     expect(noticeMessage('RECORDING_ACTIVE')).toBe('spectrum.recordingActive');
     expect(noticeMessage('SWEEP_FAILED')).toBe('spectrum.sweepFailed');
     expect(noticeMessage('SWEEP_UNSUPPORTED')).toBe('spectrum.sweepUnsupported');
+    expect(noticeMessage('MARKER_LIMIT')).toBe('spectrum.markLimit');
+    expect(noticeMessage('MARKER_NOT_FOUND')).toBe('spectrum.markNotFound');
+    expect(noticeMessage('MARKER_SAVE_FAILED')).toBe('spectrum.markSaveFailed');
+    // For a marker command, OUT_OF_RANGE is the marker range; other codes keep their own text.
+    expect(markNoticeMessage('OUT_OF_RANGE')).toBe('spectrum.markOutOfRange');
+    expect(markNoticeMessage('TIMEOUT')).toBe('spectrum.timeout');
+    expect(markNoticeMessage('MARKER_LIMIT')).toBe('spectrum.markLimit');
+    for (const key of ['spectrum.markLimit', 'spectrum.markNotFound', 'spectrum.markSaveFailed', 'spectrum.markOutOfRange'] as const) {
+      expect(DICTIONARIES.en[key], key).toBeTruthy();
+      expect(DICTIONARIES.id[key], key).toBeTruthy();
+    }
   });
 
   it('shows the Receiver\'s own text after a failed connect or scan start, not after other codes', () => {
     expect(noticeFrameText({ code: 'SWEEP_FAILED', message: 'Sweep error: device busy' })).toBe('Sweep error: device busy');
     expect(noticeFrameText({ code: 'CONNECT_FAILED', message: 'USB claim failed' })).toBe('USB claim failed');
     expect(noticeFrameText({ code: 'NOT_READY', message: 'x' })).toBe('x');
+    // A failed marker save names the Receiver's reason.
+    expect(noticeFrameText({ code: 'MARKER_SAVE_FAILED', message: 'Could not save marker set: disk full' })).toBe('Could not save marker set: disk full');
     expect(noticeFrameText({ code: 'SWEEP_FAILED' })).toBeNull();
     expect(noticeFrameText({ code: 'SWEEP_BUSY', message: 'x' })).toBeNull();
     expect(noticeFrameText({ code: 'TIMEOUT', message: 'x' })).toBeNull();
@@ -368,5 +388,43 @@ describe('spectrum dock mode and scan helpers', () => {
     expect(waterfallNeedsReset(scan, rx)).toBe(true);
     expect(waterfallNeedsReset(scan, { ...scan })).toBe(false);
     expect(waterfallNeedsReset(scan, { ...scan, stopHz: 900e6 })).toBe(true);
+  });
+});
+
+describe('spectrum dock markers', () => {
+  const marker = (id: string | null, frequencyHz: number, label = id ?? '?'): BridgeMarker => ({ id, frequencyHz, powerDb: null, label });
+  const AXIS = { startHz: 433_000_000, stopHz: 435_000_000 };
+  const LIST = [marker('a', 432_900_000), marker('b', 433_000_000), marker('c', 433_500_000), marker(null, 433_510_000), marker('d', 434_000_000), marker('e', 435_500_000)];
+
+  it('places the markers inside the axis, edges included, in frequency order', () => {
+    expect(markersInView(LIST, AXIS, 1000).map(({ marker: entry, x }) => [entry.id, x])).toEqual([['b', 0], ['c', 250], [null, 255], ['d', 500]]);
+    expect(markersInView(LIST, null, 1000)).toEqual([]);
+    expect(markersInView(LIST, AXIS, 0)).toEqual([]);
+    expect(markersInView([marker('z', 434_000_000), marker('y', 433_500_000)], AXIS, 1000).map(({ marker: entry }) => entry.id)).toEqual(['y', 'z']);
+  });
+
+  it('picks the nearest addressable marker within 6 px, or 12 px for a finger', () => {
+    expect(MARKER_HIT_PX).toBe(6);
+    expect(MARKER_HIT_TOUCH_PX).toBe(12);
+    expect(nearestMarker(LIST, AXIS, 254, 1000, MARKER_HIT_PX)?.id, 'the marker without an id is skipped').toBe('c');
+    expect(nearestMarker(LIST, AXIS, 492, 1000, MARKER_HIT_PX)).toBeNull();
+    expect(nearestMarker(LIST, AXIS, 492, 1000, MARKER_HIT_TOUCH_PX)?.id).toBe('d');
+    expect(nearestMarker(LIST, AXIS, 700, 1000, MARKER_HIT_TOUCH_PX)).toBeNull();
+    expect(nearestMarker(LIST, AXIS, Number.NaN, 1000, MARKER_HIT_PX)).toBeNull();
+  });
+
+  it('steps the pick through the markers in view with [ and ]', () => {
+    expect(stepMarker(LIST, AXIS, 1000, null, 1)?.id).toBe('b');
+    expect(stepMarker(LIST, AXIS, 1000, null, -1)?.id).toBe('d');
+    expect(stepMarker(LIST, AXIS, 1000, 'c', 1)?.id, 'past the one without an id').toBe('d');
+    expect(stepMarker(LIST, AXIS, 1000, 'd', 1)?.id, 'stays at the end').toBe('d');
+    expect(stepMarker(LIST, AXIS, 1000, 'b', -1)?.id).toBe('b');
+    expect(stepMarker(LIST, AXIS, 1000, 'e', -1)?.id, 'a pick out of view starts from the end').toBe('d');
+    expect(stepMarker([], AXIS, 1000, null, 1)).toBeNull();
+  });
+
+  it('leaves out labels that would run into the one before', () => {
+    expect(markerLabelSlots([0, 30, 70, 75, 200], [60, 60, 60, 60, 60], 4)).toEqual([true, false, true, false, true]);
+    expect(markerLabelSlots([], [])).toEqual([]);
   });
 });

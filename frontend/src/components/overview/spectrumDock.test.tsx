@@ -10,14 +10,15 @@ import { DEFAULT_OVERVIEW_PANELS } from '../../lib/overviewPanels';
 import { followNodeStore } from '../../lib/listenPrefs';
 import { DEFAULT_SPECTRUM_DOCK_SETTINGS, spectrumDockStore } from '../../lib/spectrumDockSettings';
 import type { ConsoleCapabilities } from '../../api';
-import { SpectrumDock } from './SpectrumDock';
+import { SpectrumDock, SpectrumMarkRow } from './SpectrumDock';
+import type { SpectrumMarkRowProps } from './SpectrumDock';
 import { SpectrumSettings } from './SpectrumSettings';
 import type { RadioRows, SpectrumSettingsProps, SweepRows } from './SpectrumSettings';
 
 const ORIGIN = 'http://127.0.0.1:8787';
 
 /** A bridge driven by hand: attach, then feed it frame messages. `tuneResult` answers one console:tune with that tuning. */
-function bridgeWith(options: { probe?: number; hello?: boolean; status?: Record<string, unknown> | null; attach?: boolean; tuneResult?: Record<string, unknown> } = {}): ReceiverBridge {
+function bridgeWith(options: { probe?: number; hello?: boolean; status?: Record<string, unknown> | null; attach?: boolean; tuneResult?: Record<string, unknown>; markers?: Record<string, unknown> } = {}): ReceiverBridge {
   type Listener = (event: { origin: string; source: unknown; data: unknown }) => void;
   const listeners: Listener[] = [];
   const posted: Array<Record<string, unknown>> = [];
@@ -36,6 +37,7 @@ function bridgeWith(options: { probe?: number; hello?: boolean; status?: Record<
   };
   if (options.hello !== false && options.attach !== false) send('receiver:hello', { protocol: 1, mockAvailable: false, webusb: true });
   if (options.status) send('receiver:status', options.status);
+  if (options.markers) send('receiver:markers', options.markers);
   if (options.tuneResult) {
     void bridge.send({ type: 'console:tune', centerHz: Number(options.tuneResult.centerHz) });
     send('receiver:result', { id: posted.at(-1)?.id, ok: true, code: 'OK', tune: options.tuneResult });
@@ -282,9 +284,9 @@ describe('Spectrum dock Spektrum mode', () => {
   const modeSwitch = (markup: string) => /<div class="ov-seg ov-seg-compact ov-spec-mode" role="group" aria-label="Mode spektrum">([\s\S]*?)<\/div>/.exec(markup)?.[1] ?? '';
   const pressed = (markup: string) => [...modeSwitch(markup).matchAll(/aria-pressed="true"[^>]*>([^<]+)</g)].map((match) => match[1]);
 
-  it('puts the RX|Spektrum switch right after the chip and before follow-node', () => {
+  it('puts the RX|Spektrum switch right after the chip, then Penanda, before follow-node', () => {
     const markup = dock(bridgeWith({ attach: false }));
-    const order = ['class="ov-chip', 'ov-spec-mode', '>RX<', '>Spektrum<', 'Ikuti frekuensi node'];
+    const order = ['class="ov-chip', 'ov-spec-mode', '>RX<', '>Spektrum<', 'ov-spec-mark', '>Penanda<', 'Ikuti frekuensi node'];
     const positions = order.map((needle) => markup.indexOf(needle, markup.indexOf('class="ov-chip')));
     for (const [index, position] of positions.entries()) expect(position, order[index]).toBeGreaterThan(-1);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
@@ -629,5 +631,96 @@ describe('Spectrum dock Atur scan rows', () => {
     expect(markup).toMatch(/aria-label="Start MHz"[^>]*value="-25"/);
     expect(markup).toContain('Range');
     expect(markup).toContain('Resolution');
+  });
+});
+
+describe('Spectrum dock markers', () => {
+  const MARKERS = {
+    rev: 2, setId: null, setName: null, frequencyShiftHz: 0, total: 3, truncated: false,
+    markers: [
+      { id: 'm-1', frequencyHz: 433_500_000, powerDb: null, label: 'Marker 1' },
+      { id: 'm-2', frequencyHz: 434_000_000, powerDb: -48.25, label: 'Tower' },
+      { id: 'm-3', frequencyHz: 900_000_000, powerDb: null, label: 'Far' },
+    ],
+  };
+  const toggle = (markup: string) => /<button class="ov-button ov-spec-mark"[^>]*>[\s\S]*?<\/button>/.exec(markup)?.[0] ?? '';
+
+  it('offers Penanda off and disabled until the Receiver frame answers', () => {
+    const button = toggle(dock(bridgeWith({ attach: false })));
+    expect(button).toMatch(/^<button class="ov-button ov-spec-mark" type="button" aria-pressed="false" disabled="">/);
+    expect(button).toContain('<span class="ov-spec-mark-label">Penanda</span>');
+    expect(button).not.toContain('ov-spec-mark-count');
+    expect(toggle(dock(bridgeWith({ attach: false }), { lang: 'en' }))).toContain('>Markers<');
+  });
+
+  it('enables Penanda with the number of markers in the Receiver list, still off at mount', () => {
+    const button = toggle(dock(bridgeWith({ status: status(), markers: MARKERS })));
+    expect(button).toMatch(/^<button class="ov-button ov-spec-mark" type="button" aria-pressed="false">/);
+    expect(button).toContain('<span class="ov-spec-mark-count">3</span>');
+    // Marking is not on, so the notice line has no marking row and the canvas keeps its tune label.
+    const markup = dock(bridgeWith({ status: status(), markers: MARKERS }));
+    expect(markup).not.toContain('ov-spec-mark-row');
+    expect(markup).not.toContain('is-marking');
+    expect(markup).toContain('aria-label="Spektrum di sekitar tengah RX.');
+    // An empty list shows no count.
+    expect(toggle(dock(bridgeWith({ status: status(), markers: { ...MARKERS, total: 0, markers: [] } })))).not.toContain('ov-spec-mark-count');
+  });
+
+  function markRow(overrides: Partial<SpectrumMarkRowProps> = {}, lang: Lang = 'id'): string {
+    const props: SpectrumMarkRowProps = { marker: null, unsaved: false, notice: null, onRemove: () => undefined, onTune: () => undefined, ...overrides };
+    return renderToStaticMarkup(
+      <I18nContext.Provider value={{ lang, setLang: () => undefined, t: (key, vars) => translate(lang, key, vars) }}>
+        <SpectrumMarkRow {...props} />
+      </I18nContext.Provider>,
+    );
+  }
+
+  it('shows the picked marker with Hapus and Tala ke sini, and Belum disimpan without a marker set', () => {
+    const markup = markRow({ marker: MARKERS.markers[1], unsaved: true });
+    expect(markup).toBe(
+      '<span class="ov-spec-mark-row"><span class="ov-spec-mark-readout">Tower · 434.000 MHz · −48.3 dB</span>'
+      + '<button class="ov-button ov-spec-inline-button" type="button">Hapus</button>'
+      + '<button class="ov-button ov-spec-inline-button" type="button">Tala ke sini</button>'
+      + '<span class="ov-tag tone-warn">Belum disimpan</span></span>',
+    );
+    const english = markRow({ marker: MARKERS.markers[0], unsaved: false }, 'en');
+    expect(english).toContain('>Marker 1 · 433.500 MHz</span>');
+    expect(english).toContain('>Remove<');
+    expect(english).toContain('>Tune here<');
+    expect(english).not.toContain('Not saved');
+  });
+
+  it('offers no Remove for a marker the console cannot address, and no tuning above 6 GHz', () => {
+    expect(markRow({ marker: { id: null, frequencyHz: 433_500_000, powerDb: null, label: 'M4' } })).not.toContain('>Hapus<');
+    expect(markRow({ marker: { id: 'h', frequencyHz: 6_500_000_000, powerDb: null, label: 'High' } })).toContain('<button class="ov-button ov-spec-inline-button" type="button" disabled="">Tala ke sini</button>');
+  });
+
+  it('names a refused marker command, with the Receiver text for a failed save', () => {
+    expect(markRow({ notice: { code: 'MARKER_LIMIT' } })).toContain('<span class="ov-spec-message tone-warn">Batas penanda tercapai</span>');
+    expect(markRow({ notice: { code: 'OUT_OF_RANGE' } }, 'en')).toContain('>Outside the marker range<');
+    expect(markRow({ notice: { code: 'MARKER_SAVE_FAILED', message: 'Could not save marker set: disk full' } })).toContain('>Penanda tidak tersimpan ke set (Could not save marker set: disk full)<');
+    expect(markRow({ notice: { code: 'MARKER_NOT_FOUND' } }, 'en')).toContain('>Marker no longer exists<');
+  });
+
+  it('styles Penanda and the markers with the console marker token, at the 44 px target', () => {
+    const dashboardCss = readStylesheet('../../overview-dashboard.css');
+    const designCss = readStylesheet('../../console-design.css');
+    expect(/:root \{[^}]*--marker:\s*#ff75a0;/.exec(designCss)).not.toBeNull();
+    expect(/:root\[data-theme='light'\] \{[^}]*--marker:\s*#a23557;/.exec(designCss)).not.toBeNull();
+    expect(dashboardCss).toMatch(/\.ov-button\.ov-spec-mark\[aria-pressed='true'\] \{[^}]*border-color:\s*var\(--marker\)/);
+    expect(dashboardCss).toMatch(/\.ov-spec-trace\.is-marking, \.ov-spec-waterfall\.is-marking \{\s*cursor:\s*copy;?\s*\}/);
+    // The toggle is an .ov-button, 44 px high, and nothing in its own rules sets another height.
+    const markRules = [...dashboardCss.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter((match) => /\.ov-spec-mark(?![-\w])/.test(match[1]));
+    expect(markRules.length).toBeGreaterThan(2);
+    for (const rule of markRules) expect(rule[2], rule[1]).not.toMatch(/(?:^|[;\s])(?:min-)?height:/);
+  });
+
+  it('keeps the Penanda label as the button name where a mid-width dock shows only the icon and the count', () => {
+    const dashboardCss = readStylesheet('../../overview-dashboard.css');
+    const start = dashboardCss.indexOf('@container ov-spec (min-width: 761px) and (max-width: 1099px) {');
+    expect(start).toBeGreaterThan(-1);
+    const body = dashboardCss.slice(start, dashboardCss.indexOf('}', dashboardCss.indexOf('{', dashboardCss.indexOf('.ov-spec-mark-label', start))) + 1);
+    expect(body).toMatch(/\.ov-spec-mark-label \{[^}]*clip-path:\s*inset\(50%\)/);
+    expect(body).not.toMatch(/display:\s*none/);
   });
 });

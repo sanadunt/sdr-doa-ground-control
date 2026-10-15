@@ -225,6 +225,19 @@
 /* Taken by the RX|Spektrum mode switch and the Penanda toggle, after the chip. */
 .ov-spec-head > .ov-spec-mode, .ov-spec-head > .ov-spec-mark { flex: none; }
 .ov-spec-mode button { padding: 0 10px; }
+/* Penanda: marking mode for this visit, with the number of markers in the Receiver's list. */
+.ov-spec-mark { padding: 0 10px; }
+.ov-spec-mark-count { min-width: 20px; padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--marker) 22%, transparent); color: var(--text); font-family: var(--mono); font-size: 11px; line-height: 18px; text-align: center; }
+.ov-button.ov-spec-mark[aria-pressed='true'] { border-color: var(--marker); background: color-mix(in srgb, var(--marker) 14%, transparent); }
+.ov-button.ov-spec-mark[aria-pressed='true'] svg { color: var(--marker); }
+.ov-spec-trace.is-marking, .ov-spec-waterfall.is-marking { cursor: copy; }
+.ov-spec-mark-row { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0 10px; }
+.ov-spec-mark-readout { color: var(--text); font-family: var(--mono); font-size: 12px; }
+/* Between a phone and a full-width dock the label gives way to the icon and the count (still the button's name),
+   so the header keeps one row with Polar open. */
+@container ov-spec (min-width: 761px) and (max-width: 1099px) {
+  .ov-spec-mark-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}
 /* The scan range in MHz (up to 1 kHz) and the resolution segment in the Atur column. */
 .ov-mhz-input { width: 84px; }
 .ov-spec-settings .ov-spec-res button { min-width: 84px; }

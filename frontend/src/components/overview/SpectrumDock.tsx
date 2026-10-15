@@ -6,8 +6,8 @@ import type { OverviewPanels } from '../../lib/overviewPanels';
 import type { ConfigPatchChanges } from '../../lib/controlDraft';
 import { consoleRequestsMockSdr, createReceiverBridge } from '../../lib/receiverBridge';
 import type { BridgeResult, ReceiverBridge } from '../../lib/receiverBridge';
-import { SUBSCRIBE_LIMITS, SWEEP_SPAN_LIMITS, inTuneRange, isListenMode } from '../../lib/receiverBridgeProtocol';
-import type { BridgeCommand, GainKind, ListenMode, ResultCode, SweepFftSize } from '../../lib/receiverBridgeProtocol';
+import { SUBSCRIBE_LIMITS, SWEEP_SPAN_LIMITS, inMarkerRange, inTuneRange, isListenMode } from '../../lib/receiverBridgeProtocol';
+import type { BridgeCommand, BridgeMarker, GainKind, ListenMode, ResultCode, SweepFftSize } from '../../lib/receiverBridgeProtocol';
 import { nodeFrequencies } from '../../lib/nodeFrequency';
 import type { NodeFrequencies } from '../../lib/nodeFrequency';
 import { LISTEN_MODE_OPTIONS, followNodeStore, listenModeStore } from '../../lib/listenPrefs';
@@ -18,7 +18,7 @@ import { savedReceiverSweep } from '../../lib/receiverSavedSweep';
 import { recentredRange, sweepRows } from '../../lib/sweepSettings';
 import type { SweepRange } from '../../lib/sweepSettings';
 import { fieldFor, fieldRange, inFieldRange } from '../../lib/configPatch';
-import { followMemoryAtMount, followNodeStep, formatMhz, formatMhzTrim, noticeFrameText, scanPhaseOf, spanAround, spectrumDockView } from '../../lib/spectrumView';
+import { followMemoryAtMount, followNodeStep, formatDb, formatMhz, formatMhzTrim, markNoticeMessage, noticeFrameText, scanPhaseOf, spanAround, spectrumDockView } from '../../lib/spectrumView';
 import type { DbRange, DockNotice, FollowMemory } from '../../lib/spectrumView';
 import { manualFromDrawn, spectrumDockStore } from '../../lib/spectrumDockSettings';
 import type { DbScale, DockMode, SpectrumDockSettings } from '../../lib/spectrumDockSettings';
@@ -80,6 +80,9 @@ type RadioPending = 'restart' | 'set' | null;
 
 /** The Receiver's Graph min./max. before it reports one. */
 const SWEEP_DISPLAY_DEFAULT = { minDb: -60, maxDb: 0 } as const;
+/** Ctrl/⌘+Z takes back at most this many of the dock's own marks. */
+const MARK_UNDO_DEPTH = 20;
+const NO_MARKERS: readonly BridgeMarker[] = [];
 
 function setDockSettings(patch: Partial<SpectrumDockSettings>): void {
   spectrumDockStore.set({ ...spectrumDockStore.get(), ...patch });
@@ -119,6 +122,42 @@ function spectrumNeedPx(section: HTMLElement): number | null {
   return Math.ceil(need);
 }
 
+export interface SpectrumMarkRowProps {
+  /** The picked marker, or null. */
+  marker: BridgeMarker | null;
+  /** The Receiver's list is not saved to a marker set (none is selected on the Receiver page). */
+  unsaved: boolean;
+  /** The last failed marker command. */
+  notice: { code: DockNotice; message?: string } | null;
+  onRemove: (markerId: string) => void;
+  onTune: (hz: number) => void;
+}
+
+/** The marking part of the dock's notice line: the picked marker with Remove and Tune here, Not saved, the last marker error. */
+export function SpectrumMarkRow({ marker, unsaved, notice, onRemove, onTune }: SpectrumMarkRowProps): JSX.Element {
+  const { t } = useI18n();
+  const frameText = noticeFrameText(notice);
+  return (
+    <span className="ov-spec-mark-row">
+      {marker ? (
+        <>
+          <span className="ov-spec-mark-readout">
+            {t('spectrum.markReadout', { label: marker.label, freq: formatMhz(marker.frequencyHz, 3) })}
+            {marker.powerDb !== null ? ` · ${formatDb(marker.powerDb, 1)} dB` : ''}
+          </span>
+          {marker.id ? (
+            <button className="ov-button ov-spec-inline-button" type="button" onClick={() => { if (marker.id) onRemove(marker.id); }}>{t('spectrum.markRemove')}</button>
+          ) : null}
+          {/* RX tunes up to 6 GHz; a marker above it can only be removed. */}
+          <button className="ov-button ov-spec-inline-button" type="button" disabled={!inTuneRange(marker.frequencyHz)} onClick={() => onTune(marker.frequencyHz)}>{t('spectrum.markTune')}</button>
+        </>
+      ) : null}
+      {unsaved ? <span className="ov-tag tone-warn">{t('spectrum.markUnsaved')}</span> : null}
+      {notice ? <span className="ov-spec-message tone-warn">{t(markNoticeMessage(notice.code))}{frameText ? ` (${frameText})` : ''}</span> : null}
+    </span>
+  );
+}
+
 /**
  * Spectrum section of the Overview dock. It drives the hidden, persistent
  * Receiver frame over the bridge: Mulai/Berhenti, Dengar with a mode,
@@ -145,6 +184,13 @@ function spectrumNeedPx(section: HTMLElement): number | null {
  * the scan's dB scale (Manual is the Receiver's Graph min./max.), range,
  * resolution and gains, read-only while a scan runs. The frame owns all of
  * them: the dock shows its status and holds a pick until the frame reports it.
+ *
+ * "Penanda" turns marking on for this visit only (it is never saved): a click
+ * on the trace or waterfall adds a marker to the Receiver's Penanda spektrum
+ * list, or picks the one under it, with Remove and Tune here in the notice
+ * line. The list itself is the Receiver's (bridge state); the dock draws it in
+ * both modes and only sends console:marker-add and console:marker-remove, also
+ * while a scan runs.
  */
 export function SpectrumDock({
   snapshot,
@@ -206,6 +252,13 @@ export function SpectrumDock({
   // The automatic range, in whole dB and at most twice a second, only while the column shows it.
   const [autoRange, setAutoRange] = useState<DbRange | null>(null);
   const onAutoRange = useCallback((range: DbRange) => { setAutoRange(range); }, []);
+  // Marking mode, off at every mount; the picked marker, a mark on its way and the dock's own marks for Ctrl/⌘+Z.
+  const [marking, setMarking] = useState(false);
+  const [selectedMarkerId, setSelectedMarkerId] = useState<string | null>(null);
+  const [pendingMark, setPendingMark] = useState<{ token: number; hz: number } | null>(null);
+  const [markNotice, setMarkNotice] = useState<Notice | null>(null);
+  const markToken = useRef(0);
+  const dockMarks = useRef<string[]>([]);
 
   const fresh = nodeFrequencies(snapshot, localSnapshotFresh);
   const nodeCenter = fresh?.centerHz ?? null;
@@ -310,6 +363,24 @@ export function SpectrumDock({
   }, [runningMode]);
   // Each mode has its own automatic range.
   useEffect(() => { setAutoRange(null); }, [dockMode]);
+
+  // The Receiver's markers (displayed Hz) while its frame answers.
+  const markerState = phase === 'ready' ? bridgeState.markers : null;
+  const markerList = markerState?.markers ?? NO_MARKERS;
+  const markerSetId = markerState?.setId ?? null;
+  const selectedMarker = selectedMarkerId === null ? null : markerList.find((marker) => marker.id === selectedMarkerId) ?? null;
+  // Without a frame there is nothing to mark into.
+  useEffect(() => {
+    if (phase !== 'ready') setMarking(false);
+  }, [phase]);
+  // Another marker set on the Receiver page, or the picked marker gone from the list: nothing is picked.
+  useEffect(() => {
+    setSelectedMarkerId(null);
+    dockMarks.current = [];
+  }, [markerSetId]);
+  useEffect(() => {
+    if (selectedMarkerId !== null && !selectedMarker) setSelectedMarkerId(null);
+  }, [selectedMarkerId, selectedMarker]);
 
   const report = (result: BridgeResult): void => {
     if (!mountedRef.current) return;
@@ -559,6 +630,66 @@ export function SpectrumDock({
     });
   };
 
+  const toggleMarking = () => {
+    const next = !marking;
+    setMarking(next);
+    if (!next) {
+      setSelectedMarkerId(null);
+      setMarkNotice(null);
+    }
+  };
+
+  const reportMark = (result: BridgeResult): void => {
+    if (!mountedRef.current) return;
+    setMarkNotice(result.ok ? null : { code: result.code, message: result.message });
+  };
+
+  /** Adds a marker at a displayed frequency; the frame measures its power on a running scan. */
+  const mark = (hz: number) => {
+    if (!Number.isFinite(hz)) return;
+    if (!inMarkerRange(hz, live?.frequencyShiftHz ?? 0)) {
+      setMarkNotice({ code: 'OUT_OF_RANGE' });
+      return;
+    }
+    markToken.current += 1;
+    const token = markToken.current;
+    setPendingMark({ token, hz });
+    setMarkNotice(null);
+    void bridge.send({ type: 'console:marker-add', frequencyHz: hz }).then((result) => {
+      if (!mountedRef.current) return;
+      setPendingMark((current) => (current?.token === token ? null : current));
+      reportMark(result);
+      // Also a marker whose save failed is in the list: pick it, so Remove is one click away.
+      if (result.markerId) {
+        dockMarks.current = [...dockMarks.current.filter((id) => id !== result.markerId), result.markerId].slice(-MARK_UNDO_DEPTH);
+        setSelectedMarkerId(result.markerId);
+      }
+    });
+  };
+
+  const removeMarker = (markerId: string) => {
+    setMarkNotice(null);
+    void bridge.send({ type: 'console:marker-remove', markerId }).then((result) => {
+      if (!mountedRef.current) return;
+      reportMark(result);
+      if (result.ok || result.code === 'MARKER_NOT_FOUND' || result.code === 'MARKER_SAVE_FAILED') {
+        dockMarks.current = dockMarks.current.filter((id) => id !== markerId);
+        setSelectedMarkerId((current) => (current === markerId ? null : current));
+      }
+    });
+  };
+
+  const onMarkerKey = (action: 'remove' | 'undo') => {
+    if (action === 'remove') {
+      if (selectedMarker?.id) removeMarker(selectedMarker.id);
+      return;
+    }
+    // The dock's last mark that is still in the list.
+    const listed = new Set(markerList.map((marker) => marker.id));
+    const last = [...dockMarks.current].reverse().find((id) => listed.has(id));
+    if (last) removeMarker(last);
+  };
+
   // A dock change of the dB scale is pending until the Receiver has it (App sends it).
   const setRxDb = (next: DbScale) => setDockSettings({ rxDb: next, rxDbPending: true });
   const chooseDbAuto = () => {
@@ -685,6 +816,10 @@ export function SpectrumDock({
   );
   const frameText = noticeFrameText(notice);
   const messageText = view.message ? t(view.message) : null;
+  // Marking: the picked marker with Remove and Tune here, whether the list is saved to a set, and the last marker result.
+  const markRow = marking && (selectedMarker || markerSetId === null || markNotice)
+    ? <SpectrumMarkRow marker={selectedMarker} unsaved={markerSetId === null} notice={markNotice} onRemove={removeMarker} onTune={tune} />
+    : null;
   const followHint = followNode && !node ? t('spectrum.followUnavailable') : null;
   // The Receiver's own notice after a dock stop, such as the ended recording (already localized there).
   const frameNoticeLine = frameNotice?.text ? <span className="ov-spec-message tone-warn">{frameNotice.text}</span> : null;
@@ -701,6 +836,7 @@ export function SpectrumDock({
   } else if (!view.live && followHint && !view.message) {
     lineNotice = <><span className="ov-spec-message tone-neutral">{followHint}</span>{frameNoticeLine}</>;
   }
+  if (markRow) lineNotice = <>{lineNotice}{markRow}</>;
   const overlay = (
     <>
       <span>{messageText ?? t(dockMode === 'sweep' ? 'spectrum.sweepStopped' : 'spectrum.stopped')}{frameText ? ` (${frameText})` : ''}</span>
@@ -733,6 +869,10 @@ export function SpectrumDock({
           <button type="button" aria-pressed={dockMode === 'rx'} disabled={modeDisabled} onClick={() => chooseMode('rx')}>{t('spectrum.modeRx')}</button>
           <button type="button" aria-pressed={dockMode === 'sweep'} disabled={modeDisabled} onClick={() => chooseMode('sweep')}>{t('spectrum.modeSweep')}</button>
         </div>
+        <button className="ov-button ov-spec-mark" type="button" aria-pressed={marking} disabled={phase !== 'ready'} onClick={toggleMarking}>
+          <Icon name="marker" /><span className="ov-spec-mark-label">{t('spectrum.mark')}</span>
+          {markerState && markerState.total > 0 ? <span className="ov-spec-mark-count">{markerState.total}</span> : null}
+        </button>
         <span className="ov-spacer" />
         {/* Follow, mode and Dengar wrap as one group, as do Mulai/Berhenti and the Receiver link. */}
         <div className="ov-spec-group">
@@ -796,6 +936,13 @@ export function SpectrumDock({
           dbRange={dbRange}
           onAutoRange={settingsOpen && shownDb.auto ? onAutoRange : undefined}
           handle={canvasHandle}
+          markers={markerList}
+          selectedMarkerId={selectedMarker?.id ?? null}
+          pendingMarkHz={pendingMark?.hz ?? null}
+          marking={marking}
+          onMark={mark}
+          onSelectMarker={setSelectedMarkerId}
+          onMarkerKey={onMarkerKey}
         />
         {settingsOpen ? (
           <SpectrumSettings

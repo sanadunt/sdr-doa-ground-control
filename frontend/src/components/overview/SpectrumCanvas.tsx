@@ -1,13 +1,16 @@
 import type { JSX, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode, Ref } from 'react';
 import { useEffect, useImperativeHandle, useRef } from 'react';
 import type { ReceiverBridge } from '../../lib/receiverBridge';
-import type { SpectrumFrame } from '../../lib/receiverBridgeProtocol';
+import type { BridgeMarker, SpectrumFrame } from '../../lib/receiverBridgeProtocol';
 import type { DockMode } from '../../lib/spectrumDockSettings';
 import { PALETTE_STOPS } from '../../lib/overlayPalette';
 import {
   CLICK_SLOP_PX,
   KEY_STEP_HZ,
   KEY_STEP_LARGE_HZ,
+  MARKER_HIT_PX,
+  MARKER_HIT_TOUCH_PX,
+  MARKER_LABEL_GAP_PX,
   WATERFALL_ROWS,
   autoDbRange,
   axisFor,
@@ -18,11 +21,15 @@ import {
   formatMhz,
   freqAtX,
   keyStepHz,
+  markerLabelSlots,
+  markersInView,
   mhzDigits,
+  nearestMarker,
   paletteLut,
   peakOf,
   scanPick,
   snapHz,
+  stepMarker,
   sweepAxis,
   ticks,
   waterfallNeedsReset,
@@ -34,9 +41,12 @@ import { useI18n } from '../../lib/i18n';
 const TICK_COUNT = 5;
 const WATERFALL_LUT = paletteLut(PALETTE_STOPS.viridis);
 
-interface Colors { trace: string; grid: string; vfo: string; background: string }
+interface Colors { trace: string; grid: string; vfo: string; background: string; marker: string }
 
-const FALLBACK_COLORS: Colors = { trace: '#3cc8dc', grid: '#233040', vfo: '#ebbc70', background: '#0b0f14' };
+const FALLBACK_COLORS: Colors = { trace: '#3cc8dc', grid: '#233040', vfo: '#ebbc70', background: '#0b0f14', marker: '#ff75a0' };
+/** Marker labels on the trace: at most this many characters, below the VFO label row (CSS px). */
+const MARKER_LABEL_CHARS = 14;
+const MARKER_LABEL_TOP_PX = 16;
 
 function readColors(element: Element): Colors {
   try {
@@ -47,6 +57,7 @@ function readColors(element: Element): Colors {
       grid: pick('--line-soft', FALLBACK_COLORS.grid),
       vfo: pick('--signal', FALLBACK_COLORS.vfo),
       background: pick('--bg', FALLBACK_COLORS.background),
+      marker: pick('--marker', FALLBACK_COLORS.marker),
     };
   } catch {
     return FALLBACK_COLORS;
@@ -108,6 +119,60 @@ export function paintWaterfall(state: Waterfall, range: DbRange): void {
 /** How often the automatic range is reported to an open settings column. */
 const AUTO_REPORT_MS = 500;
 
+/** A label for the trace: the marker's own, clipped. */
+function markerLabel(marker: BridgeMarker): string {
+  const text = marker.label || '•';
+  return text.length > MARKER_LABEL_CHARS ? `${text.slice(0, MARKER_LABEL_CHARS - 1)}…` : text;
+}
+
+/** Marker lines (and on the trace, labels where they fit) over a canvas drawn on `axis`. */
+function drawMarkers(
+  context: CanvasRenderingContext2D,
+  options: { markers: readonly BridgeMarker[]; axis: FrequencyAxis; width: number; height: number; ratio: number; colors: Colors; selectedId: string | null; pendingHz: number | null; dashed: boolean; labels: boolean },
+): void {
+  const { axis, width, height, ratio, colors, selectedId } = options;
+  const shown = markersInView(options.markers, axis, width);
+  const pendingX = options.pendingHz === null ? null : xAtFreq(options.pendingHz, axis.startHz, axis.stopHz, width);
+  if (!shown.length && (pendingX === null || pendingX < 0 || pendingX > width)) return;
+  context.save();
+  context.strokeStyle = colors.marker;
+  context.globalAlpha = 0.95;
+  const line = (x: number, thick: boolean, dash: number[]) => {
+    const px = Math.round(x) + 0.5;
+    context.lineWidth = Math.max(1, Math.round((thick ? 2 : 1) * ratio));
+    context.setLineDash(dash);
+    context.beginPath();
+    context.moveTo(px, 0);
+    context.lineTo(px, height);
+    context.stroke();
+  };
+  const dash = options.dashed ? [3 * ratio, 3 * ratio] : [];
+  for (const { marker, x } of shown) line(x, marker.id !== null && marker.id === selectedId, dash);
+  if (pendingX !== null && pendingX >= 0 && pendingX <= width) line(pendingX, false, [2 * ratio, 2 * ratio]);
+  context.setLineDash([]);
+  if (options.labels && shown.length) {
+    context.font = `${Math.round(10 * ratio)}px ui-monospace, monospace`;
+    context.textBaseline = 'top';
+    const texts = shown.map(({ marker }) => markerLabel(marker));
+    const widths = texts.map((text) => context.measureText(text).width + 6 * ratio);
+    const starts = shown.map(({ x }, index) => Math.max(0, Math.min(width - widths[index], x + 3 * ratio)));
+    // Labels that would run into the one before are left out; the picked marker always shows its own.
+    const slots = markerLabelSlots(starts, widths, MARKER_LABEL_GAP_PX * ratio);
+    const top = MARKER_LABEL_TOP_PX * ratio;
+    shown.forEach(({ marker }, index) => {
+      const selected = marker.id !== null && marker.id === selectedId;
+      if (!slots[index] && !selected) return;
+      context.globalAlpha = 0.85;
+      context.fillStyle = colors.background;
+      context.fillRect(starts[index], top, widths[index], 13 * ratio);
+      context.globalAlpha = 1;
+      context.fillStyle = colors.marker;
+      context.fillText(texts[index], starts[index] + 3 * ratio, top + 1.5 * ratio);
+    });
+  }
+  context.restore();
+}
+
 export interface SpectrumCanvasHandle {
   /** The dB range drawn now: the manual one, or the automatic one once a frame arrived. */
   currentRange(): DbRange | null;
@@ -142,7 +207,20 @@ export interface SpectrumCanvasProps {
   /** The automatic range in whole dB, at most every 500 ms and only when it changed; for the settings column. */
   onAutoRange?: (range: DbRange) => void;
   handle?: Ref<SpectrumCanvasHandle>;
+  /** The Receiver's spectrum markers in displayed Hz, drawn on the trace and the waterfall in both modes. */
+  markers?: readonly BridgeMarker[];
+  selectedMarkerId?: string | null;
+  /** A dock mark on its way, drawn dashed until the Receiver's list shows it. */
+  pendingMarkHz?: number | null;
+  /** Marking mode: a click adds a marker or picks one instead of tuning, and the marker keys work. */
+  marking?: boolean;
+  onMark?: (hz: number) => void;
+  onSelectMarker?: (id: string | null) => void;
+  /** Delete/Backspace removes the picked marker; Ctrl/⌘+Z takes back the dock's last mark. */
+  onMarkerKey?: (action: 'remove' | 'undo') => void;
 }
+
+const NO_MARKERS: readonly BridgeMarker[] = [];
 
 /**
  * Trace and waterfall of the Overview spectrum dock. Frames arrive from the
@@ -155,8 +233,14 @@ export interface SpectrumCanvasProps {
  * and the whole waterfall history. Click (less than 5 px of movement) or the
  * arrow keys tune the RX centre and VFO (on a scan: for the next RX, at the
  * strongest nearby bin); hovering shows the frequency and power under the pointer.
+ * The Receiver's markers are lines on the trace (labelled where they fit) and
+ * dashed lines on the waterfall. In marking mode a click adds a marker there,
+ * or picks the one within a few pixels, and Enter, [ ], Delete and Ctrl/⌘+Z work.
  */
-export function SpectrumCanvas({ bridge, mode, live, fallbackView, centerHz, vfo, info, notice, overlay, tuneHz, onTune, dbRange, onAutoRange, handle }: SpectrumCanvasProps): JSX.Element {
+export function SpectrumCanvas({
+  bridge, mode, live, fallbackView, centerHz, vfo, info, notice, overlay, tuneHz, onTune, dbRange, onAutoRange, handle,
+  markers = NO_MARKERS, selectedMarkerId = null, pendingMarkHz = null, marking = false, onMark, onSelectMarker, onMarkerKey,
+}: SpectrumCanvasProps): JSX.Element {
   const { t } = useI18n();
   const traceRef = useRef<HTMLCanvasElement>(null);
   const waterfallRef = useRef<HTMLCanvasElement>(null);
@@ -178,8 +262,8 @@ export function SpectrumCanvas({ bridge, mode, live, fallbackView, centerHz, vfo
   const waterfallState = useRef<Waterfall>({ bins: 0, head: 0, filled: 0, rows: new Float32Array(0), image: null, buffer: null, source: null });
   const pointerRef = useRef<{ x: number; y: number; id: number } | null>(null);
   const drawRef = useRef<() => void>(() => undefined);
-  const props = useRef({ mode, live, fallbackView, centerHz, vfo, t, tuneHz, dbRange, onAutoRange });
-  props.current = { mode, live, fallbackView, centerHz, vfo, t, tuneHz, dbRange, onAutoRange };
+  const props = useRef({ mode, live, fallbackView, centerHz, vfo, t, tuneHz, dbRange, onAutoRange, markers, selectedMarkerId, pendingMarkHz });
+  props.current = { mode, live, fallbackView, centerHz, vfo, t, tuneHz, dbRange, onAutoRange, markers, selectedMarkerId, pendingMarkHz };
 
   useImperativeHandle(handle, () => ({ currentRange: () => rangeRef.current }), []);
 
@@ -213,7 +297,7 @@ export function SpectrumCanvas({ bridge, mode, live, fallbackView, centerHz, vfo
     const context = canvas.getContext('2d');
     if (!context) return;
     const colors = colorsRef.current ?? (colorsRef.current = readColors(canvas));
-    const { live: drawnLive, vfo: band, mode: current } = props.current;
+    const { live: drawnLive, vfo: band, mode: current, markers: markerList, selectedMarkerId: selectedId, pendingMarkHz: pendingHz } = props.current;
     const width = canvas.width;
     const height = canvas.height;
     context.clearRect(0, 0, width, height);
@@ -287,6 +371,9 @@ export function SpectrumCanvas({ bridge, mode, live, fallbackView, centerHz, vfo
       context.fill();
       context.globalAlpha = 1;
     }
+    if (axis) {
+      drawMarkers(context, { markers: markerList, axis, width, height, ratio: width / Math.max(1, canvas.clientWidth), colors, selectedId, pendingHz, dashed: false, labels: true });
+    }
     if (topLabelRef.current) topLabelRef.current.textContent = range ? `${formatDb(range.max, 0)} dBFS` : '';
     if (bottomLabelRef.current) bottomLabelRef.current.textContent = range ? formatDb(range.min, 0) : '';
 
@@ -301,17 +388,21 @@ export function SpectrumCanvas({ bridge, mode, live, fallbackView, centerHz, vfo
 
     const fall = waterfallRef.current;
     const state = waterfallState.current;
-    if (fall && state.image && state.buffer && state.filled > 0) {
-      const target = fall.getContext('2d');
-      if (target && staleScan) {
-        target.clearRect(0, 0, fall.width, fall.height);
-      } else if (target) {
+    const target = fall?.getContext('2d') ?? null;
+    if (fall && target) {
+      if (state.image && state.buffer && state.filled > 0 && !staleScan) {
         target.fillStyle = colors.background;
         target.fillRect(0, 0, fall.width, fall.height);
         target.globalAlpha = drawnLive ? 1 : 0.5;
         target.imageSmoothingEnabled = true;
         target.drawImage(state.buffer, 0, 0, state.bins, WATERFALL_ROWS, 0, 0, fall.width, fall.height);
         target.globalAlpha = 1;
+      } else {
+        // No history, or one of another scan range: only the markers.
+        target.clearRect(0, 0, fall.width, fall.height);
+      }
+      if (axis) {
+        drawMarkers(target, { markers: markerList, axis, width: fall.width, height: fall.height, ratio: fall.width / Math.max(1, fall.clientWidth), colors, selectedId, pendingHz, dashed: true, labels: false });
       }
     }
   };
@@ -405,10 +496,10 @@ export function SpectrumCanvas({ bridge, mode, live, fallbackView, centerHz, vfo
     fall?.getContext('2d')?.clearRect(0, 0, fall.width, fall.height);
   }, [mode]);
 
-  // A stopped radio or scan, a new VFO or a retune redraws without waiting for a frame.
+  // A stopped radio or scan, a new VFO, a retune or a marker change redraws without waiting for a frame.
   useEffect(() => {
     drawRef.current();
-  }, [live, mode, centerHz, vfo?.frequencyHz, vfo?.bandwidthHz, fallbackView?.startHz, fallbackView?.stopHz]);
+  }, [live, mode, centerHz, vfo?.frequencyHz, vfo?.bandwidthHz, fallbackView?.startHz, fallbackView?.stopHz, markers, selectedMarkerId, pendingMarkHz]);
 
   // A new dB range (or Auto) recolours the trace and the whole waterfall at once.
   const manualMin = dbRange?.min;
@@ -449,10 +540,19 @@ export function SpectrumCanvas({ bridge, mode, live, fallbackView, centerHz, vfo
     if (!axis || !point) return;
     const hz = freqAtX(point.x, axis.startHz, axis.stopHz, point.width);
     if (hz === null) return;
+    if (marking) {
+      // A click next to a marker picks it; elsewhere it adds one.
+      const hit = nearestMarker(markers, axis, point.x, point.width, event.pointerType === 'touch' ? MARKER_HIT_TOUCH_PX : MARKER_HIT_PX);
+      if (hit) {
+        onSelectMarker?.(hit.id);
+        return;
+      }
+    }
     // A scan bin is wide: take the strongest one next to the click.
     const frame = frameRef.current;
     const picked = props.current.mode === 'sweep' && frame?.source === 'sweep' ? scanPick(frame.bins, frame.startHz, frame.stopHz, hz) : null;
-    onTune(snapHz(picked ?? hz));
+    if (marking) onMark?.(snapHz(picked ?? hz));
+    else onTune(snapHz(picked ?? hz));
   };
 
   const onPointerMove = (event: ReactPointerEvent<HTMLElement>) => {
@@ -473,7 +573,11 @@ export function SpectrumCanvas({ bridge, mode, live, fallbackView, centerHz, vfo
     const frame = frameRef.current;
     const db = frame ? binAt(frame.bins, frame.startHz, frame.stopHz, hz) : null;
     const digits = readoutDigits(props.current.mode, axis, frame?.binCount ?? 512);
-    hover.textContent = props.current.t('spectrum.hover', { freq: formatMhz(hz, digits), db: formatDb(db, 1) });
+    // While marking, the marker under the pointer is named.
+    const near = marking ? nearestMarker(markers, axis, x, width, event.pointerType === 'touch' ? MARKER_HIT_TOUCH_PX : MARKER_HIT_PX) : null;
+    hover.textContent = near
+      ? props.current.t('spectrum.markReadout', { label: near.label, freq: formatMhz(near.frequencyHz, digits) })
+      : props.current.t('spectrum.hover', { freq: formatMhz(hz, digits), db: formatDb(db, 1) });
     hover.style.left = `${Math.min(100, Math.max(0, (x / width) * 100)).toFixed(1)}%`;
     hover.dataset.side = x > width / 2 ? 'left' : 'right';
     hover.hidden = false;
@@ -484,7 +588,45 @@ export function SpectrumCanvas({ bridge, mode, live, fallbackView, centerHz, vfo
     if (hoverRef.current) hoverRef.current.hidden = true;
   };
 
+  /** The marker keys while marking; true when the key was one of them. */
+  const markerKey = (event: ReactKeyboardEvent<HTMLElement>): boolean => {
+    if (!marking || event.altKey) return false;
+    if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z') {
+      event.preventDefault();
+      onMarkerKey?.('undo');
+      return true;
+    }
+    if (event.ctrlKey || event.metaKey) return false;
+    switch (event.key) {
+      case 'Enter': {
+        event.preventDefault();
+        const hz = props.current.tuneHz;
+        if (hz !== null) onMark?.(snapHz(hz));
+        return true;
+      }
+      case '[':
+      case ']': {
+        event.preventDefault();
+        const next = stepMarker(markers, view(), Math.max(1, traceRef.current?.clientWidth ?? 1), selectedMarkerId, event.key === ']' ? 1 : -1);
+        if (next) onSelectMarker?.(next.id);
+        return true;
+      }
+      case 'Delete':
+      case 'Backspace':
+        event.preventDefault();
+        onMarkerKey?.('remove');
+        return true;
+      case 'Escape':
+        event.preventDefault();
+        onSelectMarker?.(null);
+        return true;
+      default:
+        return false;
+    }
+  };
+
   const onKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (markerKey(event)) return;
     const direction = event.key === 'ArrowRight' || event.key === 'ArrowUp' ? 1 : event.key === 'ArrowLeft' || event.key === 'ArrowDown' ? -1 : 0;
     if (!direction || event.altKey || event.ctrlKey || event.metaKey) return;
     event.preventDefault();
@@ -511,13 +653,13 @@ export function SpectrumCanvas({ bridge, mode, live, fallbackView, centerHz, vfo
         <span className="ov-spec-peak" ref={peakRef} />
       </div>
       {notice ? <div className="ov-spec-notice" role="status">{notice}</div> : null}
-      <div className={`ov-spec-trace${live ? '' : ' is-stopped'}`} {...pointerHandlers}>
+      <div className={`ov-spec-trace${live ? '' : ' is-stopped'}${marking ? ' is-marking' : ''}`} {...pointerHandlers}>
         <canvas
           ref={traceRef}
           className="ov-spec-canvas"
           tabIndex={0}
           role="slider"
-          aria-label={t(mode === 'sweep' ? 'spectrum.canvasAriaSweep' : 'spectrum.canvasAria')}
+          aria-label={t(marking ? 'spectrum.canvasAriaMarking' : mode === 'sweep' ? 'spectrum.canvasAriaSweep' : 'spectrum.canvasAria')}
           aria-valuemin={1}
           aria-valuemax={6000}
           aria-valuenow={tuneHz === null ? undefined : Number((tuneHz / 1e6).toFixed(3))}
@@ -535,7 +677,7 @@ export function SpectrumCanvas({ bridge, mode, live, fallbackView, centerHz, vfo
           <span key={index}>{fallbackView ? ticks(fallbackView.startHz, fallbackView.stopHz, TICK_COUNT, tickDigits(mode, fallbackView, TICK_COUNT))[index]?.label ?? '—' : '—'}</span>
         ))}
       </div>
-      <canvas ref={waterfallRef} className="ov-spec-waterfall" aria-hidden="true" {...pointerHandlers} />
+      <canvas ref={waterfallRef} className={`ov-spec-waterfall${marking ? ' is-marking' : ''}`} aria-hidden="true" {...pointerHandlers} />
     </div>
   );
 }
