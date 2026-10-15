@@ -17,6 +17,7 @@ import {
   BRIDGE_VERSION,
   COMMAND_TIMEOUT_MS,
   HELLO_TIMEOUT_MS,
+  LONG_COMMAND_TYPES,
   MAX_QUEUED_COMMANDS,
   START_TIMEOUT_MS,
   clampSubscription,
@@ -42,7 +43,7 @@ export interface BridgeResult {
   ok: boolean;
   code: ResultCode;
   message?: string;
-  /** The tuning after a tune, vfo or start command, as the frame reported it. */
+  /** The tuning after a tune, vfo, start or radio command, as the frame reported it. */
   tune?: ResultTune;
 }
 
@@ -357,7 +358,7 @@ export function createReceiverBridge(environment: BridgeEnvironment = browserEnv
     send(command) {
       return new Promise<BridgeResult>((resolve) => {
         const id = nextId();
-        const timeoutMs = command.type === 'console:start' ? START_TIMEOUT_MS : COMMAND_TIMEOUT_MS;
+        const timeoutMs = LONG_COMMAND_TYPES.has(command.type) ? START_TIMEOUT_MS : COMMAND_TIMEOUT_MS;
         const entry: PendingCommand = {
           id,
           type: command.type,

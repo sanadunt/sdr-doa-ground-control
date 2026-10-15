@@ -28,6 +28,8 @@ export const CONSOLE_MESSAGE_TYPES = [
   'console:vfo',
   'console:listen',
   'console:display',
+  'console:gains',
+  'console:radio',
 ] as const;
 /** Demodulator modes in UI order; the keys of the Receiver's MODE_DEFAULTS. */
 export const LISTEN_MODES = ['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw'] as const;
@@ -45,6 +47,7 @@ export const RESULT_CODES = [
   'RX_NOT_RUNNING',
   'OUT_OF_RANGE',
   'AUDIO_BLOCKED',
+  'RECORDING_ACTIVE',
   'TIMEOUT',
 ] as const;
 /** receiver:status error.code values; the console translates them. */
@@ -79,11 +82,18 @@ export const VOLUME_LIMITS = { min: 0, max: 100 } as const;
  * the Spektrum dock mirrors: the Receiver's graph limits, at least minGapDb apart.
  */
 export const DISPLAY_DB_LIMITS = { minDb: -160, maxDb: 60, minGapDb: 5 } as const;
+/** RX sample rates a console:radio may set: the RadioSpectrum's list. The frame also checks the connected device's. */
+export const SAMPLE_RATES_HZ = [2_000_000, 4_000_000, 5_000_000, 8_000_000, 10_000_000, 16_000_000, 20_000_000] as const;
+/** RX LNA and VGA gains in dB. The frame checks the connected device's own controls. */
+export const GAIN_LIMITS = {
+  lna: { min: 0, max: 40, step: 8 },
+  vga: { min: 0, max: 62, step: 2 },
+} as const;
 export const COMMAND_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 /** Spectrum bins with no finite power are sent as this level. */
 export const SPECTRUM_FLOOR_DB = -200;
 
-/** console:start waits for a USB connect and the stream; everything else is quick. */
+/** console:start waits for a USB connect and the stream, console:radio for an RX restart; everything else is quick. */
 export const START_TIMEOUT_MS = 20_000;
 export const COMMAND_TIMEOUT_MS = 8_000;
 /** A frame that sends no receiver:hello this long after its load is reported unresponsive. */
@@ -100,6 +110,10 @@ export type BusyState = typeof BUSY_STATES[number];
 export type Workspace = typeof WORKSPACES[number];
 export type AudioState = typeof AUDIO_STATES[number];
 export type TuneSource = typeof TUNE_SOURCES[number];
+export type GainKind = keyof typeof GAIN_LIMITS;
+
+/** Commands that wait for START_TIMEOUT_MS instead of COMMAND_TIMEOUT_MS. */
+export const LONG_COMMAND_TYPES: ReadonlySet<ConsoleMessageType> = new Set<ConsoleMessageType>(['console:start', 'console:radio']);
 
 export interface Subscription {
   spectrum: boolean;
@@ -140,7 +154,7 @@ export interface TuneStamp {
   receiverRev: number;
 }
 
-/** The tuning after a console:tune, console:vfo or console:start, carried by its result. */
+/** The tuning after a console:tune, console:vfo, console:start or console:radio, carried by its result. */
 export interface ResultTune extends TuneStamp {
   centerHz: number | null;
   vfoHz: number | null;
@@ -184,6 +198,8 @@ export interface ReceiverStatus {
   tune: TuneStamp | null;
   /** RX dB scale; null from a frame that does not report it. */
   display: StatusDisplay | null;
+  /** Sample rates of the connected device; [] while none is connected or from a frame that does not report them. */
+  sampleRatesHz: number[];
 }
 
 export interface SpectrumFrame {
@@ -205,7 +221,7 @@ export interface ReceiverResult {
   ok: boolean;
   code: ResultCode;
   message?: string;
-  /** Results of console:tune, console:vfo and console:start: the tuning after the command. */
+  /** Results of console:tune, console:vfo, console:start and console:radio: the tuning after the command. */
   tune?: ResultTune;
 }
 
@@ -223,10 +239,15 @@ export type BridgeCommand =
   | { type: 'console:vfo'; mode?: ListenMode; frequencyHz?: number; volume?: number }
   | { type: 'console:listen'; enabled: boolean }
   /** Without minDb and maxDb the Receiver keeps its manual range. */
-  | { type: 'console:display'; auto: boolean; minDb?: number; maxDb?: number };
+  | { type: 'console:display'; auto: boolean; minDb?: number; maxDb?: number }
+  /** At least one field; gains are snapped to their step. */
+  | { type: 'console:gains'; lnaDb?: number; vgaDb?: number; amp?: boolean }
+  /** confirmRecording only after the operator confirmed it in this page. */
+  | { type: 'console:radio'; sampleRateHz: number; confirmRecording?: boolean };
 
 const MAX_TEXT_CHARS = 300;
 const MAX_DEVICE_NAME_CHARS = 80;
+const MAX_SAMPLE_RATES = 16;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -297,6 +318,20 @@ export function clampDisplayRange(minDb: unknown, maxDb: unknown): DisplayRangeD
   return { minDb: min, maxDb: max };
 }
 
+/** A gain in GAIN_LIMITS on its step, nearest to `value`; null when it is not a finite number. */
+export function snapGain(kind: GainKind, value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  const { min, max, step } = GAIN_LIMITS[kind];
+  const clamped = Math.min(max, Math.max(min, value));
+  return Math.min(max, min + Math.round((clamped - min) / step) * step);
+}
+
+/** The values of a gain control in GAIN_LIMITS, lowest first. */
+export function gainSteps(kind: GainKind): number[] {
+  const { min, max, step } = GAIN_LIMITS[kind];
+  return Array.from({ length: Math.floor((max - min) / step) + 1 }, (_value, index) => min + index * step);
+}
+
 /** Clamps a requested subscription exactly as the frame does; non-numbers take the default. */
 export function clampSubscription(raw: { spectrum?: unknown; bins?: unknown; fps?: unknown; spanHz?: unknown }): Subscription {
   const limits = SUBSCRIBE_LIMITS;
@@ -333,6 +368,15 @@ function normalizeDisplay(value: unknown): StatusDisplay | null {
   if (!isRecord(value) || typeof value.auto !== 'boolean') return null;
   const range = clampDisplayRange(value.minDb, value.maxDb);
   return range ? { auto: value.auto, ...range } : null;
+}
+
+function normalizeSampleRates(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  const rates: number[] = [];
+  for (const rate of value.slice(0, MAX_SAMPLE_RATES)) {
+    if (typeof rate === 'number' && Number.isInteger(rate) && rate > 0 && !rates.includes(rate)) rates.push(rate);
+  }
+  return rates;
 }
 
 function normalizeVfo(value: unknown): StatusVfo | null {
@@ -385,6 +429,7 @@ export function normalizeReceiverStatus(value: unknown): ReceiverStatus | null {
     notice: boundedText(value.notice, MAX_TEXT_CHARS),
     tune: normalizeTuneStamp(value.tune),
     display: normalizeDisplay(value.display),
+    sampleRatesHz: normalizeSampleRates(value.sampleRatesHz),
   };
 }
 
@@ -505,6 +550,20 @@ export function commandMessage(id: string, command: BridgeCommand): Record<strin
       const message: Record<string, unknown> = { ...envelope, auto: command.auto === true };
       const range = clampDisplayRange(command.minDb, command.maxDb);
       if (range) Object.assign(message, range);
+      return message;
+    }
+    case 'console:gains': {
+      const message: Record<string, unknown> = { ...envelope };
+      const lnaDb = snapGain('lna', command.lnaDb);
+      const vgaDb = snapGain('vga', command.vgaDb);
+      if (lnaDb !== null) message.lnaDb = lnaDb;
+      if (vgaDb !== null) message.vgaDb = vgaDb;
+      if (typeof command.amp === 'boolean') message.amp = command.amp;
+      return message;
+    }
+    case 'console:radio': {
+      const message: Record<string, unknown> = { ...envelope, sampleRateHz: Math.round(command.sampleRateHz) };
+      if (command.confirmRecording === true) message.confirmRecording = true;
       return message;
     }
     default:

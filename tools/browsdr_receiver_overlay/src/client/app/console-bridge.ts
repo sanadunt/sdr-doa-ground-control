@@ -1,13 +1,21 @@
 /**
  * Frame side of the Ground Console bridge. When the Receiver runs inside the
  * console's same-origin iframe, the Overview dashboard starts and stops RX,
- * tunes, picks the listen mode, sets the Dengar dB scale and draws a cropped
- * spectrum through window.postMessage. The protocol is in
- * console-bridge-protocol.ts.
+ * tunes, picks the listen mode, sets the Dengar dB scale, the Listener's gains
+ * and sample rate, and draws a cropped spectrum through window.postMessage.
+ * The protocol is in console-bridge-protocol.ts.
  *
  * The bridge only answers its parent window on the page's own origin. It
- * never opens the device picker or the VFO conflict dialog, which would be
- * invisible in the hidden frame. It sends codes, not text.
+ * never opens the device picker, the VFO conflict dialog or a confirm(),
+ * which would be invisible in the hidden frame; the console asks the operator
+ * in its own page (console:radio confirmRecording). It sends codes, not text.
+ *
+ * Gains apply live through the Receiver's gains watcher (no RX restart). A
+ * sample rate change restarts RX through the Receiver's own watcher, as the
+ * Listener select does: console:radio takes only a rate of the device, never
+ * during a scan, an armed recording only with confirmRecording, re-centres an
+ * active VFO the new rate would leave out of band (raw VFOs take the new
+ * rate as bandwidth), and answers once RX runs again and has drawn a frame.
  *
  * One RadioSpectrum cannot run RX and a scan at once, so SWEEP_BUSY follows
  * one rule:
@@ -18,8 +26,7 @@
  *   not stopped RX yet refuses them too;
  * - display (the dB scale), marker and sweep-* commands are never refused
  *   because of a scan.
- * The gains, radio (sample rate), marker and sweep-* commands follow this
- * rule when they are added.
+ * The marker and sweep-* commands follow this rule when they are added.
  *
  * Every console write of the centre or the active VFO goes through
  * writeTuning(), which stamps the change with the command id. Any other change
@@ -40,8 +47,11 @@ import {
 	clampSubscription,
 	createFrameThrottle,
 	cropSpectrum,
+	GAIN_LIMITS,
 	inTuneRange,
+	onGainStep,
 	parseConsoleMessage,
+	SAMPLE_RATES_HZ,
 	VOLUME_LIMITS,
 	type AudioState,
 	type BusyState,
@@ -119,6 +129,12 @@ export interface ConsoleBridgeEnvironment {
  * take a few hundred milliseconds on some audio outputs.
  */
 export const AUDIO_RESUME_WAIT_MS = 1000;
+/** How long console:radio waits for RX to run again at the new rate and draw a frame. */
+export const RADIO_RESTART_WAIT_MS = 10_000;
+/** How often console:radio checks the restart. */
+export const RADIO_POLL_MS = 50;
+/** Status lists at most this many device sample rates. */
+const MAX_SAMPLE_RATES = 16;
 
 function browserEnvironment(): ConsoleBridgeEnvironment {
 	return {
@@ -161,6 +177,21 @@ function isHackRf(device: USBDevice): boolean {
 	return lookupDevice(device)?.type === 'hackrf';
 }
 
+interface GainControlLike {
+	name: string;
+	min: number;
+	max: number;
+	step: number;
+}
+
+function gainControlLike(value: unknown): GainControlLike | null {
+	if (!value || typeof value !== 'object') return null;
+	const control = value as Record<string, unknown>;
+	const numbers = [control.min, control.max, control.step];
+	if (typeof control.name !== 'string' || !numbers.every(number => typeof number === 'number' && Number.isFinite(number))) return null;
+	return { name: control.name, min: control.min as number, max: control.max as number, step: control.step as number };
+}
+
 /**
  * Installs the bridge when the Receiver is framed by the console on the same
  * origin. Returns null, and does nothing, in a standalone /receiver/ tab or
@@ -195,6 +226,8 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 	let pendingListen = true;
 	let connectInFlight: Promise<void> | null = null;
 	let lifecycle: Promise<void> = Promise.resolve();
+	// FFT frames drawn by a running Listener outside an RX restart; console:radio waits for the next one.
+	let rxFrames = 0;
 
 	function post(message: Record<string, unknown>, transfer: Transferable[] = []): void {
 		if (disposed) return;
@@ -254,6 +287,13 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		return { auto: display.auto !== false, minDb: range.minDb, maxDb: range.maxDb };
 	}
 
+	/** The connected device's sample rates, positive integers in its order; [] while none is connected. */
+	function deviceSampleRates(): number[] {
+		const rates: unknown = app.deviceCapabilities?.sampleRates;
+		if (!Array.isArray(rates)) return [];
+		return rates.filter((rate): rate is number => typeof rate === 'number' && Number.isInteger(rate) && rate > 0).slice(0, MAX_SAMPLE_RATES);
+	}
+
 	/** Everything a status reports except its sequence, time and tune stamp (sendStatusNow adds them). */
 	function snapshot(): Omit<ReceiverStatus, 'seq' | 'tMs' | 'tune'> {
 		const index = activeIndex();
@@ -293,6 +333,7 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 			error: statusError(),
 			notice,
 			display: displayState(),
+			sampleRatesHz: deviceSampleRates(),
 		};
 	}
 
@@ -376,7 +417,7 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		post({ type: 'receiver:hello', protocol: BRIDGE_VERSION, mockAvailable: Boolean(app.mockSdrEnabled), webusb: hasWebUsb() });
 	}
 
-	/** withTune: the reply of console:tune, console:vfo and console:start, which carries the tuning after it. */
+	/** withTune: the reply of console:tune, console:vfo, console:start and console:radio, which carries the tuning after it. */
 	function reply(id: string, code: ResultCode, message?: string, withTune = false): void {
 		post({
 			type: 'receiver:result',
@@ -500,6 +541,57 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		return 'OK';
 	}
 
+	/** The embedded build has no remote host or client; a remote session would own these settings. */
+	function remoteSession(): boolean {
+		return (app.remoteMode ?? 'none') !== 'none';
+	}
+
+	/**
+	 * The Listener's gain control for LNA, VGA or the RF amp: the connected
+	 * device's own (null when it has none), otherwise the RadioSpectrum limits
+	 * under the names the device will use.
+	 */
+	function gainControl(kind: 'lna' | 'vga' | 'amp'): GainControlLike | null {
+		const matches = (name: string) => (kind === 'amp' ? name.startsWith('Amp') : name === (kind === 'lna' ? 'LNA' : 'VGA'));
+		const list: unknown = app.deviceCapabilities?.gainControls;
+		if (Array.isArray(list)) {
+			for (const entry of list) {
+				const control = gainControlLike(entry);
+				if (control && matches(control.name)) return control;
+			}
+			return null;
+		}
+		if (kind !== 'amp') return { name: kind === 'lna' ? 'LNA' : 'VGA', ...GAIN_LIMITS[kind] };
+		const saved = Object.keys((app.gains ?? {}) as Record<string, unknown>).find(matches);
+		return { name: saved ?? 'Amp (14dB)', min: 0, max: 1, step: 1 };
+	}
+
+	/**
+	 * The Listener's LNA, VGA and RF amp. The Receiver's gains watcher applies
+	 * them to a running radio and saves them; during a wide scan they wait for
+	 * the next RX start, like a tune. Every value is checked before any is written.
+	 */
+	function applyGains(command: CommandOf<'console:gains'>): ResultCode {
+		if (remoteSession()) return 'NOT_READY';
+		if (tuneRefused()) return 'SWEEP_BUSY';
+		const current = app.gains as Record<string, number> | null | undefined;
+		if (!current || typeof current !== 'object') return 'NOT_READY';
+		const writes: Array<[string, number]> = [];
+		for (const [kind, value] of [['lna', command.lnaDb], ['vga', command.vgaDb]] as const) {
+			if (value === undefined) continue;
+			const control = gainControl(kind);
+			if (!control || !onGainStep(value, control)) return 'OUT_OF_RANGE';
+			writes.push([control.name, value]);
+		}
+		if (command.amp !== undefined) {
+			const control = gainControl('amp');
+			if (!control) return 'OUT_OF_RANGE';
+			writes.push([control.name, command.amp ? control.max : control.min]);
+		}
+		for (const [name, value] of writes) current[name] = value;
+		return 'OK';
+	}
+
 	function delay(ms: number): { promise: Promise<void>; cancel(): void } {
 		let handle: TimerHandle | null = null;
 		const promise = new Promise<void>(resolve => {
@@ -529,6 +621,68 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 			}
 		}
 		return app.audioCtx?.state === 'running' ? 'OK' : 'AUDIO_BLOCKED';
+	}
+
+	/** The Receiver's notice since `before`, through tm(), or undefined. */
+	function noticeSince(before: unknown): string | undefined {
+		const notice = app.snackbar?.message;
+		if (typeof notice !== 'string' || !notice || notice === before) return undefined;
+		return typeof app.tm === 'function' ? app.tm(notice) as string : notice;
+	}
+
+	/**
+	 * Sets the Listener's sample rate. The Receiver's [sampleRate, fftSize]
+	 * watcher restarts a running RX (as the Listener select does), which resumes
+	 * an armed recording in a new segment and recreates the AudioContext. The
+	 * answer waits until that restart is over, RX runs and a frame is drawn.
+	 */
+	async function applySampleRate(command: CommandOf<'console:radio'>): Promise<[ResultCode, string?]> {
+		const rate = command.sampleRateHz;
+		const supported = (): boolean => {
+			const deviceRates = deviceSampleRates();
+			return (SAMPLE_RATES_HZ as readonly number[]).includes(rate) && (deviceRates.length === 0 || deviceRates.includes(rate));
+		};
+		if (!supported()) return ['OUT_OF_RANGE'];
+		if (remoteSession()) return ['NOT_READY'];
+		if (busyState() !== 'none') return ['SWEEP_BUSY'];
+		if (!app.radio || !app.vfos?.[activeIndex()]) return ['NOT_READY'];
+		// An auto-connect may still be opening the radio and read its device list.
+		if (connectInFlight) await connectInFlight;
+		if (!supported()) return ['OUT_OF_RANGE'];
+		if (busyState() !== 'none') return ['SWEEP_BUSY'];
+		if (Number(app.radio.sampleRate) === rate) return ['OK'];
+		const running = Boolean(app.running);
+		if (running && (app.audioRecording?.armed || app.audioRecording?.starting) && command.confirmRecording !== true) return ['RECORDING_ACTIVE'];
+
+		const index = activeIndex();
+		const active = app.vfos[index];
+		const audible = running && Boolean(active.enabled) && audioState() === 'running';
+		// The DSP silently disables a VFO outside ±rate/2 of the centre: keep the one in use.
+		const vfoHz = mhzToHz(active.freq);
+		if (vfoHz !== null && inTuneRange(vfoHz) && Math.abs(vfoHz - currentCenterHz()) > rate / 2) writeTuning(command.id, vfoHz, undefined);
+		for (const each of app.vfos) {
+			if (each && each.mode === 'raw') each.bandwidth = rate;
+		}
+		const noticeBefore = app.snackbar?.message;
+		const framesBefore = rxFrames;
+		app.radio.sampleRate = rate;
+		if (!running) return ['OK'];
+
+		// Vue runs the Receiver's watcher before the next tick; it marks the restart at once.
+		if (typeof app.$nextTick === 'function') await app.$nextTick();
+		const deadline = env.monotonicNow() + RADIO_RESTART_WAIT_MS;
+		for (;;) {
+			const restarting = Boolean(app._rxRestarting);
+			if (!restarting && app.running && rxFrames > framesBefore) break;
+			// A restart that did not bring RX back (the stream failed to start).
+			if (!restarting && !app.running) return ['CONNECT_FAILED', noticeSince(noticeBefore)];
+			if (env.monotonicNow() >= deadline) break;
+			const wait = delay(RADIO_POLL_MS);
+			await wait.promise;
+		}
+		if (!app.running) return ['CONNECT_FAILED', noticeSince(noticeBefore)];
+		// The restart closed the AudioContext; without the click's activation it may stay suspended.
+		return [audible ? await ensureAudio() : 'OK'];
 	}
 
 	function setListening(index: number, enabled: boolean): void {
@@ -630,7 +784,7 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		return [command.listen ? await ensureAudio() : 'OK'];
 	}
 
-	/** Start, stop and listen run one after another so they never race each other. */
+	/** Start, stop, listen and radio run one after another so they never race each other. */
 	function enqueue(
 		id: string,
 		task: () => Promise<[ResultCode, string?]>,
@@ -714,6 +868,21 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 				reply(command.id, code);
 				return;
 			}
+			case 'console:gains': {
+				let code: ResultCode;
+				try {
+					code = applyGains(command);
+				} catch (error) {
+					reply(command.id, 'NOT_READY', errorText(error));
+					return;
+				}
+				reply(command.id, code);
+				return;
+			}
+			case 'console:radio':
+				// After any start or stop before it; its re-centre is a tuning change, so the result carries tune.
+				enqueue(command.id, () => applySampleRate(command), { fallback: 'NOT_READY', withTune: true });
+				return;
 		}
 	}
 
@@ -743,7 +912,9 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 
 	return {
 		spectrum(data: ArrayLike<number>): void {
-			if (disposed || !subscription?.spectrum || !app.running || !data || !data.length) return;
+			if (disposed || !data || !data.length) return;
+			if (app.running && !app._rxRestarting) rxFrames++;
+			if (!subscription?.spectrum || !app.running) return;
 			if (!throttle.accept(env.monotonicNow())) return;
 			const centerHz = mhzToHz(app.radio?.centerFreq);
 			const sampleRateHz = finiteOrNull(app.radio?.sampleRate);

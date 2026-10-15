@@ -33,6 +33,7 @@ function status(overrides: Partial<ReceiverStatus> = {}): ReceiverStatus {
     gains: { lnaDb: 40, vgaDb: 20, amp: false }, vfo: null, squelchOpen: false, audio: 'running', recording: false, error: null, notice: null,
     tune: null,
     display: null,
+    sampleRatesHz: [],
     ...overrides,
   };
 }

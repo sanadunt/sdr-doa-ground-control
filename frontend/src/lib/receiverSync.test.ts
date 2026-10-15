@@ -12,7 +12,7 @@ function receiverStatus(mode: ListenMode | null): ReceiverStatus {
     running: true, busy: 'none', workspace: 'listener', centerHz: 100_000_000, sampleRateHz: 20_000_000, frequencyShiftHz: 0,
     gains: { lnaDb: null, vgaDb: null, amp: false },
     vfo: { index: 0, enabled: false, mode, frequencyHz: 100_000_000, bandwidthHz: 12_500, squelchEnabled: false, squelchDb: null, volume: 50 },
-    squelchOpen: false, audio: 'none', recording: false, error: null, notice: null, tune: null, display: null,
+    squelchOpen: false, audio: 'none', recording: false, error: null, notice: null, tune: null, display: null, sampleRatesHz: [],
   };
 }
 

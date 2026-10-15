@@ -8,10 +8,13 @@ import {
   CONSOLE_MESSAGE_TYPES,
   DISPLAY_DB_LIMITS,
   FRAME_MESSAGE_TYPES,
+  GAIN_LIMITS,
   HELLO_TIMEOUT_MS,
+  LONG_COMMAND_TYPES,
   LISTEN_MODES,
   MAX_QUEUED_COMMANDS,
   RESULT_CODES,
+  SAMPLE_RATES_HZ,
   START_TIMEOUT_MS,
   STATUS_ERROR_CODES,
   SUBSCRIBE_LIMITS,
@@ -21,8 +24,10 @@ import {
   clampDisplayRange,
   clampSubscription,
   commandMessage,
+  gainSteps,
   normalizeTuneStamp,
   parseFrameMessage,
+  snapGain,
 } from './receiverBridgeProtocol';
 
 const ORIGIN = 'http://127.0.0.1:8787';
@@ -106,9 +111,9 @@ describe('receiver bridge protocol', () => {
     expect(BRIDGE_CHANNEL).toBe('sdr-console-receiver');
     expect(BRIDGE_VERSION).toBe(1);
     expect([...FRAME_MESSAGE_TYPES]).toEqual(['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result']);
-    expect([...CONSOLE_MESSAGE_TYPES]).toEqual(['console:hello', 'console:subscribe', 'console:start', 'console:stop', 'console:tune', 'console:vfo', 'console:listen', 'console:display']);
+    expect([...CONSOLE_MESSAGE_TYPES]).toEqual(['console:hello', 'console:subscribe', 'console:start', 'console:stop', 'console:tune', 'console:vfo', 'console:listen', 'console:display', 'console:gains', 'console:radio']);
     expect([...LISTEN_MODES]).toEqual(['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw']);
-    expect([...RESULT_CODES]).toEqual(['OK', 'NOT_READY', 'INVALID_COMMAND', 'NO_WEBUSB', 'NEEDS_PAIRING', 'NEEDS_DEVICE_CHOICE', 'MOCK_UNAVAILABLE', 'CONNECT_FAILED', 'SWEEP_BUSY', 'RX_NOT_RUNNING', 'OUT_OF_RANGE', 'AUDIO_BLOCKED', 'TIMEOUT']);
+    expect([...RESULT_CODES]).toEqual(['OK', 'NOT_READY', 'INVALID_COMMAND', 'NO_WEBUSB', 'NEEDS_PAIRING', 'NEEDS_DEVICE_CHOICE', 'MOCK_UNAVAILABLE', 'CONNECT_FAILED', 'SWEEP_BUSY', 'RX_NOT_RUNNING', 'OUT_OF_RANGE', 'AUDIO_BLOCKED', 'RECORDING_ACTIVE', 'TIMEOUT']);
     expect([...STATUS_ERROR_CODES]).toEqual(['USB_LOST', 'RX_ERROR', 'NO_WEBUSB']);
     expect(SUBSCRIBE_LIMITS).toEqual({ binsMin: 64, binsMax: 2048, binsDefault: 512, fpsMin: 1, fpsMax: 15, fpsDefault: 10, spanMinHz: 100_000, spanDefaultHz: 2_000_000 });
     expect([...TUNE_SOURCES]).toEqual(['console', 'receiver']);
@@ -116,6 +121,36 @@ describe('receiver bridge protocol', () => {
     // Scans and Receiver markers reach 7.25 GHz; RX tuning stops at 6 GHz.
     expect(SWEEP_LIMITS).toEqual({ minHz: 1_000_000, maxHz: 7_250_000_000 });
     expect(DISPLAY_DB_LIMITS).toEqual({ minDb: -160, maxDb: 60, minGapDb: 5 });
+    expect([...SAMPLE_RATES_HZ]).toEqual([2_000_000, 4_000_000, 5_000_000, 8_000_000, 10_000_000, 16_000_000, 20_000_000]);
+    expect(GAIN_LIMITS).toEqual({ lna: { min: 0, max: 40, step: 8 }, vga: { min: 0, max: 62, step: 2 } });
+    expect([...LONG_COMMAND_TYPES]).toEqual(['console:start', 'console:radio']);
+  });
+
+  it('snaps gains to their step inside the limits and lists every step', () => {
+    expect(snapGain('lna', 24)).toBe(24);
+    expect(snapGain('lna', 27)).toBe(24);
+    expect(snapGain('lna', 29)).toBe(32);
+    expect(snapGain('lna', -3)).toBe(0);
+    expect(snapGain('lna', 99)).toBe(40);
+    expect(snapGain('vga', 31)).toBe(32);
+    expect(snapGain('vga', 63)).toBe(62);
+    expect(snapGain('vga', Number.NaN)).toBeNull();
+    expect(snapGain('vga', '20')).toBeNull();
+    expect(gainSteps('lna')).toEqual([0, 8, 16, 24, 32, 40]);
+    expect(gainSteps('vga')).toHaveLength(32);
+    expect(gainSteps('vga').at(-1)).toBe(62);
+  });
+
+  it('reads the device sample rates of a status and drops anything that is not a rate', () => {
+    const rates = (value: unknown) => {
+      const parsed = parseFrameMessage({ ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:status', ...status({ sampleRatesHz: value }) });
+      return parsed?.type === 'receiver:status' ? parsed.status.sampleRatesHz : 'unparsed';
+    };
+    expect(rates([2_000_000, 20_000_000])).toEqual([2_000_000, 20_000_000]);
+    expect(rates(undefined)).toEqual([]);
+    expect(rates('2000000')).toEqual([]);
+    expect(rates([2_000_000, 2_000_000, -4, 2.5, '8000000', null, 10_000_000])).toEqual([2_000_000, 10_000_000]);
+    expect(rates(Array.from({ length: 40 }, (_value, index) => (index + 1) * 1_000_000))).toHaveLength(16);
   });
 
   it('keeps a manual dB range inside the graph limits, minimum first', () => {
@@ -230,6 +265,13 @@ describe('receiver bridge protocol', () => {
       ch: BRIDGE_CHANNEL, v: 1, type: 'console:display', id: 'c4-a', auto: false, minDb: -95, maxDb: -90,
     });
     expect(commandMessage('c5-a', { type: 'console:display', auto: false, minDb: Number.NaN, maxDb: -20 })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:display', id: 'c5-a', auto: false });
+    expect(commandMessage('c6-a', { type: 'console:gains', lnaDb: 27, vgaDb: Number.NaN, amp: true })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:gains', id: 'c6-a', lnaDb: 24, amp: true });
+    expect(commandMessage('c7-a', { type: 'console:gains', vgaDb: 63 })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:gains', id: 'c7-a', vgaDb: 62 });
+    expect(commandMessage('c8-a', { type: 'console:radio', sampleRateHz: 8_000_000.2 })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:radio', id: 'c8-a', sampleRateHz: 8_000_000 });
+    expect(commandMessage('c9-a', { type: 'console:radio', sampleRateHz: 8_000_000, confirmRecording: true })).toEqual({
+      ch: BRIDGE_CHANNEL, v: 1, type: 'console:radio', id: 'c9-a', sampleRateHz: 8_000_000, confirmRecording: true,
+    });
+    expect(commandMessage('c10-a', { type: 'console:radio', sampleRateHz: 8_000_000, confirmRecording: false })).not.toHaveProperty('confirmRecording');
   });
 });
 
@@ -297,16 +339,23 @@ describe('createReceiverBridge', () => {
     await expect(pending).resolves.toEqual({ ok: false, code: 'OUT_OF_RANGE', message: 'too far' });
   });
 
-  it('times out a start after 20 s and other commands after 8 s', async () => {
+  it('times out a start and a sample rate change after 20 s and other commands after 8 s', async () => {
     const h = harness();
     h.bridge.attach(h.frame);
     h.fromFrame('receiver:hello', hello);
     const start = h.bridge.send({ type: 'console:start', mock: false, listen: false });
+    const radio = h.bridge.send({ type: 'console:radio', sampleRateHz: 10_000_000 });
     const stop = h.bridge.send({ type: 'console:stop' });
+    const gains = h.bridge.send({ type: 'console:gains', lnaDb: 16 });
+    let radioSettled = false;
+    void radio.then(() => { radioSettled = true; });
     h.advance(COMMAND_TIMEOUT_MS);
     await expect(stop).resolves.toEqual({ ok: false, code: 'TIMEOUT' });
+    await expect(gains).resolves.toEqual({ ok: false, code: 'TIMEOUT' });
+    expect(radioSettled).toBe(false);
     h.advance(START_TIMEOUT_MS - COMMAND_TIMEOUT_MS);
     await expect(start).resolves.toEqual({ ok: false, code: 'TIMEOUT' });
+    await expect(radio).resolves.toEqual({ ok: false, code: 'TIMEOUT' });
   });
 
   it('refuses more than 16 queued commands', async () => {

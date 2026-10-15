@@ -29,6 +29,8 @@ const SHARED = [
 	'SWEEP_LIMITS',
 	'VOLUME_LIMITS',
 	'DISPLAY_DB_LIMITS',
+	'SAMPLE_RATES_HZ',
+	'GAIN_LIMITS',
 	'SPECTRUM_FLOOR_DB',
 ];
 
@@ -95,4 +97,46 @@ test('a console:display the console sends is one the frame accepts unchanged', (
 		const { ch: _ch, v: _v, ...payload } = wire;
 		assert.deepEqual(parsed, payload, JSON.stringify(command));
 	}
+});
+
+test('a gain the console snaps is one the frame accepts, and every step of the console list too', () => {
+	for (const kind of ['lna', 'vga']) {
+		for (const value of [Number.NaN, -5, 0, 3, 7, 9, 20, 39, 41, 61, 63, 1e9]) {
+			const snapped = consoleSide.snapGain(kind, value);
+			if (!Number.isFinite(value)) {
+				assert.equal(snapped, null);
+				continue;
+			}
+			assert.ok(frameSide.onGainStep(snapped, frameSide.GAIN_LIMITS[kind]), `${kind} ${value} -> ${snapped}`);
+		}
+		const steps = consoleSide.gainSteps(kind);
+		assert.equal(steps[0], frameSide.GAIN_LIMITS[kind].min);
+		assert.equal(steps.at(-1), frameSide.GAIN_LIMITS[kind].max);
+		for (const step of steps) assert.ok(frameSide.onGainStep(step, frameSide.GAIN_LIMITS[kind]), `${kind} ${step}`);
+	}
+});
+
+test('console:gains and console:radio the console sends are commands the frame accepts unchanged', () => {
+	for (const command of [
+		{ type: 'console:gains', lnaDb: 24 },
+		{ type: 'console:gains', lnaDb: 23, vgaDb: 31, amp: true },
+		{ type: 'console:gains', amp: false },
+		{ type: 'console:radio', sampleRateHz: 10_000_000 },
+		{ type: 'console:radio', sampleRateHz: 8_000_000, confirmRecording: true },
+		{ type: 'console:radio', sampleRateHz: 8_000_000, confirmRecording: false },
+	]) {
+		const wire = consoleSide.commandMessage('c9-g', command);
+		const parsed = frameSide.parseConsoleMessage(wire);
+		const { ch: _ch, v: _v, ...payload } = wire;
+		assert.deepEqual(parsed, payload, JSON.stringify(command));
+		assert.notEqual(parsed.type, 'invalid', JSON.stringify(command));
+	}
+});
+
+test('the sample rates a status lists reach the console as sent', () => {
+	const rates = [...frameSide.SAMPLE_RATES_HZ];
+	const status = consoleSide.normalizeReceiverStatus({ seq: 1, sampleRatesHz: rates });
+	assert.deepEqual(status.sampleRatesHz, rates);
+	assert.ok(consoleSide.LONG_COMMAND_TYPES.has('console:radio'), 'a restart has the start timeout');
+	assert.ok(frameSide.RESULT_CODES.indexOf('RECORDING_ACTIVE') < frameSide.RESULT_CODES.indexOf('TIMEOUT'));
 });

@@ -25,6 +25,8 @@ export const CONSOLE_MESSAGE_TYPES = [
 	'console:vfo',
 	'console:listen',
 	'console:display',
+	'console:gains',
+	'console:radio',
 ] as const;
 /** Demodulator modes in UI order; the keys of MODE_DEFAULTS in constants.ts. */
 export const LISTEN_MODES = ['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw'] as const;
@@ -42,6 +44,7 @@ export const RESULT_CODES = [
 	'RX_NOT_RUNNING',
 	'OUT_OF_RANGE',
 	'AUDIO_BLOCKED',
+	'RECORDING_ACTIVE',
 	'TIMEOUT',
 ] as const;
 /** receiver:status error.code values; the console translates them. */
@@ -76,6 +79,16 @@ export const VOLUME_LIMITS = { min: 0, max: 100 } as const;
  * dB scale): the graph limits of the wide scan, at least minGapDb apart.
  */
 export const DISPLAY_DB_LIMITS = { minDb: -160, maxDb: 60, minGapDb: 5 } as const;
+/** Listener sample rates a console:radio may set: the RadioSpectrum's list (devices/hackrf.ts sampleRates). */
+export const SAMPLE_RATES_HZ = [2_000_000, 4_000_000, 5_000_000, 8_000_000, 10_000_000, 16_000_000, 20_000_000] as const;
+/**
+ * Listener LNA and VGA gains in dB (devices/hackrf.ts gainControls). The
+ * connected device's own controls decide; these apply before it connects.
+ */
+export const GAIN_LIMITS = {
+	lna: { min: 0, max: 40, step: 8 },
+	vga: { min: 0, max: 62, step: 2 },
+} as const;
 export const COMMAND_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 /** Status changes are sent at most this often. */
 export const STATUS_DEBOUNCE_MS = 100;
@@ -113,6 +126,10 @@ export type ConsoleCommand =
 	| { type: 'console:listen'; id: string; enabled: boolean }
 	/** Without minDb and maxDb the Listener keeps its manual range. */
 	| { type: 'console:display'; id: string; auto: boolean; minDb?: number; maxDb?: number }
+	/** At least one field. */
+	| { type: 'console:gains'; id: string; lnaDb?: number; vgaDb?: number; amp?: boolean }
+	/** confirmRecording: the operator confirmed, in the console page, that an armed recording continues in a new segment. */
+	| { type: 'console:radio'; id: string; sampleRateHz: number; confirmRecording?: boolean }
 	/** A console command with a usable id whose payload is wrong; answered with INVALID_COMMAND. */
 	| { type: 'invalid'; id: string };
 
@@ -142,7 +159,7 @@ export interface TuneStamp {
 	receiverRev: number;
 }
 
-/** The tuning after a console:tune, console:vfo or console:start, carried by its result. */
+/** The tuning after a console:tune, console:vfo, console:start or console:radio, carried by its result. */
 export interface ResultTune extends TuneStamp {
 	centerHz: number | null;
 	vfoHz: number | null;
@@ -183,6 +200,8 @@ export interface ReceiverStatus {
 	notice: string | null;
 	tune: TuneStamp;
 	display: StatusDisplay;
+	/** Sample rates of the connected device, in its order; [] while none is connected. */
+	sampleRatesHz: number[];
 }
 
 export interface CroppedSpectrum {
@@ -203,6 +222,12 @@ function isListenMode(value: unknown): value is ListenMode {
 function optionalHz(value: unknown): number | undefined | null {
 	if (value === undefined) return undefined;
 	return typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : null;
+}
+
+/** undefined when absent, null when present but not a finite number. */
+function optionalNumber(value: unknown): number | undefined | null {
+	if (value === undefined) return undefined;
+	return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 function clampNumber(value: unknown, minimum: number, maximum: number, fallback: number): number {
@@ -246,6 +271,13 @@ export function isCommandId(value: unknown): value is string {
 
 export function inTuneRange(hz: number): boolean {
 	return Number.isFinite(hz) && hz >= TUNE_LIMITS.minHz && hz <= TUNE_LIMITS.maxHz;
+}
+
+/** A gain value a control accepts: inside min..max and on its step. */
+export function onGainStep(value: number, control: { min: number; max: number; step: number }): boolean {
+	if (!Number.isFinite(value) || value < control.min || value > control.max) return false;
+	const steps = (value - control.min) / control.step;
+	return control.step > 0 && Math.abs(steps - Math.round(steps)) <= 1e-9;
 }
 
 /**
@@ -304,6 +336,23 @@ export function parseConsoleMessage(data: unknown): ConsoleCommand | null {
 			if (data.minDb === undefined) return { type, id, auto: data.auto };
 			const range = clampDisplayRange(data.minDb, data.maxDb);
 			return range ? { type, id, auto: data.auto, ...range } : invalid;
+		}
+		case 'console:gains': {
+			const lnaDb = optionalNumber(data.lnaDb);
+			const vgaDb = optionalNumber(data.vgaDb);
+			if (lnaDb === null || vgaDb === null || (data.amp !== undefined && typeof data.amp !== 'boolean')) return invalid;
+			if (lnaDb === undefined && vgaDb === undefined && data.amp === undefined) return invalid;
+			const command: CommandOf<'console:gains'> = { type, id };
+			if (lnaDb !== undefined) command.lnaDb = lnaDb;
+			if (vgaDb !== undefined) command.vgaDb = vgaDb;
+			if (data.amp !== undefined) command.amp = data.amp as boolean;
+			return command;
+		}
+		case 'console:radio': {
+			const rate = data.sampleRateHz;
+			if (typeof rate !== 'number' || !Number.isInteger(rate) || rate <= 0) return invalid;
+			if (data.confirmRecording !== undefined && typeof data.confirmRecording !== 'boolean') return invalid;
+			return data.confirmRecording === true ? { type, id, sampleRateHz: rate, confirmRecording: true } : { type, id, sampleRateHz: rate };
 		}
 		default:
 			return null;

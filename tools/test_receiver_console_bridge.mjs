@@ -18,7 +18,7 @@ export async function resolve(specifier, context, nextResolve) {
 
 const appDir = new URL('./browsdr_receiver_overlay/src/client/app/', import.meta.url);
 const protocol = await import(new URL('console-bridge-protocol.ts', appDir).href);
-const { installConsoleBridge, AUDIO_RESUME_WAIT_MS } = await import(new URL('console-bridge.ts', appDir).href);
+const { installConsoleBridge, AUDIO_RESUME_WAIT_MS, RADIO_POLL_MS, RADIO_RESTART_WAIT_MS } = await import(new URL('console-bridge.ts', appDir).href);
 const { connectionMethods } = await import(new URL('connection.ts', appDir).href);
 const { vfoMethods } = await import(new URL('vfo.ts', appDir).href);
 const { makeDefaultVfo, MODE_DEFAULTS } = await import(new URL('../vendor/BrowSDR/src/client/app/constants.ts', import.meta.url).href);
@@ -26,9 +26,13 @@ const { makeDefaultVfo, MODE_DEFAULTS } = await import(new URL('../vendor/BrowSD
 const {
 	BRIDGE_CHANNEL, BRIDGE_VERSION, FRAME_MESSAGE_TYPES, CONSOLE_MESSAGE_TYPES, LISTEN_MODES, RESULT_CODES,
 	STATUS_ERROR_CODES, SUBSCRIBE_LIMITS, SPECTRUM_FLOOR_DB, TUNE_SOURCES, SWEEP_LIMITS, STATUS_DEBOUNCE_MS,
-	STATUS_URGENT_MIN_MS, DISPLAY_DB_LIMITS, clampDisplayRange, clampSubscription, cropSpectrum, createFrameThrottle, parseConsoleMessage,
+	STATUS_URGENT_MIN_MS, DISPLAY_DB_LIMITS, SAMPLE_RATES_HZ, GAIN_LIMITS, clampDisplayRange, clampSubscription, cropSpectrum,
+	createFrameThrottle, onGainStep, parseConsoleMessage,
 } = protocol;
 const { SWEEP_MIN_FREQUENCY_HZ, SWEEP_MAX_FREQUENCY_HZ } = await import(new URL('./browsdr_receiver_overlay/src/client/worker/sweep-types.ts', import.meta.url).href);
+const { HackRFDevice } = await import(new URL('./browsdr_receiver_overlay/src/client/devices/hackrf.ts', import.meta.url).href);
+const { MockHackRF } = await import(new URL('./browsdr_receiver_overlay/src/client/worker/mock-hackrf.ts', import.meta.url).href);
+const DEVICE_RATES = [2_000_000, 4_000_000, 5_000_000, 8_000_000, 10_000_000, 16_000_000, 20_000_000];
 
 const ORIGIN = 'http://127.0.0.1:8787';
 const EPOCH_MS = 1_760_000_000_000;
@@ -130,10 +134,12 @@ function createFrame({ parentOrigin = ORIGIN, crossOrigin = false, usbDevices = 
 	return { win, parent, posted, dispatch, send, listeners, usb, usbListeners, navigator: navigatorLike };
 }
 
-function receiverApp({ audioAllowed = true, openOk = true, mockSdrEnabled = false } = {}) {
+function receiverApp({ audioAllowed = true, openOk = true, mockSdrEnabled = false, sampleRates = DEVICE_RATES, ampName = 'Amp (14dB)' } = {}) {
 	const log = [];
 	const watchers = [];
 	const audioPolicy = { allowed: audioAllowed };
+	// Fails the next RX start when set (the stream could not start).
+	const failures = { startRx: false };
 	const backend = {
 		async open(target) { log.push(['open', target === 'mock' ? 'mock' : 'usb']); return openOk; },
 		async info() { return { name: log.some(entry => entry[0] === 'open' && entry[1] === 'mock') ? 'Mock SDR (Signal Gen)' : 'HackRF One' }; },
@@ -142,13 +148,20 @@ function receiverApp({ audioAllowed = true, openOk = true, mockSdrEnabled = fals
 				gainControls: [
 					{ name: 'LNA', min: 0, max: 40, step: 8, default: 40 },
 					{ name: 'VGA', min: 0, max: 62, step: 2, default: 20 },
-					{ name: 'Amp (14dB)', min: 0, max: 1, step: 1, default: 0 },
+					{ name: ampName, min: 0, max: 1, step: 1, default: 0 },
 				],
-				sampleRates: [20_000_000],
+				sampleRates,
 				supportsNativeSweep: true,
 			};
 		},
-		async startRxStream(options) { log.push(['startRx', options.centerFreq]); },
+		async startRxStream(options) {
+			log.push(['startRx', options.centerFreq, options.sampleRate]);
+			if (failures.startRx) {
+				failures.startRx = false;
+				throw new Error('stream failed');
+			}
+		},
+		async setGains(gains) { log.push(['setGains', gains]); },
 		async setFrequency(mhz) { log.push(['setFrequency', mhz]); },
 		async stopRx() { log.push('stopRx'); },
 		setVfoParams(index, params) { log.push(['vfoParams', index, params.freq, params.mode, params.enabled]); },
@@ -209,7 +222,22 @@ function receiverApp({ audioAllowed = true, openOk = true, mockSdrEnabled = fals
 			}
 		}
 	};
-	return { app, log, watchers, flushWatchers, audioPolicy };
+	// Vue runs pending watchers before the next tick resolves.
+	app.$nextTick = async () => { flushWatchers(); };
+	// The Receiver's [sampleRate, fftSize] watcher in main.ts: it restarts a running RX.
+	app.$watch(() => `${app.radio.sampleRate}|${app.radio.fftSize}`, async () => {
+		if (!app.running) return;
+		const resumeRecording = app.audioRecording.armed;
+		app._rxRestarting = true;
+		try {
+			await app.togglePlay();
+			await app.togglePlay(true);
+		} finally {
+			app._rxRestarting = false;
+		}
+		if (resumeRecording) log.push('resumeRecording');
+	});
+	return { app, log, watchers, flushWatchers, audioPolicy, failures };
 }
 
 /** Installs a bridge on a fake app and frame; the stats timer of a started RX is cleared afterwards. */
@@ -250,13 +278,13 @@ test('protocol constants match the console contract', () => {
 	assert.deepEqual([...FRAME_MESSAGE_TYPES], ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result']);
 	assert.deepEqual([...CONSOLE_MESSAGE_TYPES], [
 		'console:hello', 'console:subscribe', 'console:start', 'console:stop', 'console:tune', 'console:vfo', 'console:listen',
-		'console:display',
+		'console:display', 'console:gains', 'console:radio',
 	]);
 	assert.deepEqual([...LISTEN_MODES], ['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw']);
 	assert.deepEqual([...LISTEN_MODES].sort(), Object.keys(MODE_DEFAULTS).sort(), 'every Receiver mode, nothing else');
 	assert.deepEqual([...RESULT_CODES], [
 		'OK', 'NOT_READY', 'INVALID_COMMAND', 'NO_WEBUSB', 'NEEDS_PAIRING', 'NEEDS_DEVICE_CHOICE', 'MOCK_UNAVAILABLE',
-		'CONNECT_FAILED', 'SWEEP_BUSY', 'RX_NOT_RUNNING', 'OUT_OF_RANGE', 'AUDIO_BLOCKED', 'TIMEOUT',
+		'CONNECT_FAILED', 'SWEEP_BUSY', 'RX_NOT_RUNNING', 'OUT_OF_RANGE', 'AUDIO_BLOCKED', 'RECORDING_ACTIVE', 'TIMEOUT',
 	]);
 	assert.deepEqual([...STATUS_ERROR_CODES], ['USB_LOST', 'RX_ERROR', 'NO_WEBUSB']);
 	assert.deepEqual({ ...SUBSCRIBE_LIMITS }, {
@@ -267,6 +295,24 @@ test('protocol constants match the console contract', () => {
 	assert.equal(STATUS_DEBOUNCE_MS, 100);
 	assert.equal(STATUS_URGENT_MIN_MS, 20);
 	assert.deepEqual({ ...DISPLAY_DB_LIMITS }, { minDb: -160, maxDb: 60, minGapDb: 5 }, 'the scan graph limits');
+});
+
+test('sample rates and gain limits are the RadioSpectrum and Mock SDR controls', () => {
+	for (const device of [new HackRFDevice(), new MockHackRF()]) {
+		assert.deepEqual([...SAMPLE_RATES_HZ], [...device.sampleRates], device.deviceType);
+		for (const [kind, name] of [['lna', 'LNA'], ['vga', 'VGA']]) {
+			const control = device.gainControls.find(entry => entry.name === name);
+			assert.deepEqual({ ...GAIN_LIMITS[kind] }, { min: control.min, max: control.max, step: control.step }, `${device.deviceType} ${name}`);
+		}
+		assert.ok(device.gainControls.some(entry => entry.name.startsWith('Amp') && entry.min === 0 && entry.max === 1), `${device.deviceType} amp`);
+	}
+	assert.deepEqual(DEVICE_RATES, [...SAMPLE_RATES_HZ]);
+	assert.equal(onGainStep(24, GAIN_LIMITS.lna), true);
+	assert.equal(onGainStep(0, GAIN_LIMITS.vga), true);
+	assert.equal(onGainStep(62, GAIN_LIMITS.vga), true);
+	for (const [value, control] of [[7, GAIN_LIMITS.lna], [48, GAIN_LIMITS.lna], [-8, GAIN_LIMITS.lna], [63, GAIN_LIMITS.vga], [Number.NaN, GAIN_LIMITS.vga]]) {
+		assert.equal(onGainStep(value, control), false, String(value));
+	}
 });
 
 test('clampDisplayRange keeps a manual range inside the graph limits, min first', () => {
@@ -319,6 +365,15 @@ test('parseConsoleMessage marks a wrong payload invalid and normalizes valid one
 	assert.deepEqual(parseConsoleMessage(envelope('console:display', { auto: 'false' })), invalid);
 	assert.deepEqual(parseConsoleMessage(envelope('console:display', { auto: false, minDb: -90 })), invalid, 'both limits or neither');
 	assert.deepEqual(parseConsoleMessage(envelope('console:display', { auto: false, minDb: -90, maxDb: '-20' })), invalid);
+	assert.deepEqual(parseConsoleMessage(envelope('console:gains', {})), invalid, 'at least one gain');
+	assert.deepEqual(parseConsoleMessage(envelope('console:gains', { lnaDb: '24' })), invalid);
+	assert.deepEqual(parseConsoleMessage(envelope('console:gains', { vgaDb: Number.NaN })), invalid);
+	assert.deepEqual(parseConsoleMessage(envelope('console:gains', { amp: 1 })), invalid);
+	assert.deepEqual(parseConsoleMessage(envelope('console:radio', {})), invalid);
+	assert.deepEqual(parseConsoleMessage(envelope('console:radio', { sampleRateHz: '20000000' })), invalid);
+	assert.deepEqual(parseConsoleMessage(envelope('console:radio', { sampleRateHz: 2_000_000.5 })), invalid);
+	assert.deepEqual(parseConsoleMessage(envelope('console:radio', { sampleRateHz: -2_000_000 })), invalid);
+	assert.deepEqual(parseConsoleMessage(envelope('console:radio', { sampleRateHz: 2_000_000, confirmRecording: 'yes' })), invalid);
 
 	assert.deepEqual(parseConsoleMessage(envelope('console:tune', { centerHz: 433_920_000.4, vfoHz: 434_000_000 })),
 		{ type: 'console:tune', id: 'c2-x', centerHz: 433_920_000, vfoHz: 434_000_000 });
@@ -332,6 +387,12 @@ test('parseConsoleMessage marks a wrong payload invalid and normalizes valid one
 		{ type: 'console:display', id: 'c2-x', auto: false, minDb: -160, maxDb: -155 }, 'clamped like the console sends it');
 	assert.deepEqual(parseConsoleMessage(envelope('console:subscribe', { spectrum: true, bins: 9999, fps: 0, spanHz: 10 })),
 		{ type: 'console:subscribe', id: 'c2-x', spectrum: true, bins: 2048, fps: 1, spanHz: 100_000 });
+	assert.deepEqual(parseConsoleMessage(envelope('console:gains', { lnaDb: 24, amp: false, extra: 1 })), { type: 'console:gains', id: 'c2-x', lnaDb: 24, amp: false });
+	assert.deepEqual(parseConsoleMessage(envelope('console:gains', { vgaDb: 7 })), { type: 'console:gains', id: 'c2-x', vgaDb: 7 }, 'the step is checked against the device');
+	assert.deepEqual(parseConsoleMessage(envelope('console:radio', { sampleRateHz: 8_000_000 })), { type: 'console:radio', id: 'c2-x', sampleRateHz: 8_000_000 });
+	assert.deepEqual(parseConsoleMessage(envelope('console:radio', { sampleRateHz: 8_000_000, confirmRecording: false })), { type: 'console:radio', id: 'c2-x', sampleRateHz: 8_000_000 });
+	assert.deepEqual(parseConsoleMessage(envelope('console:radio', { sampleRateHz: 8_000_000, confirmRecording: true })),
+		{ type: 'console:radio', id: 'c2-x', sampleRateHz: 8_000_000, confirmRecording: true });
 });
 
 test('clampSubscription clamps ranges and defaults non-numbers', () => {
@@ -498,7 +559,7 @@ test('without WebUSB the paired count stays unknown', async t => {
 const STATUS_KEYS = [
 	'ch', 'v', 'type', 'seq', 'tMs', 'webusb', 'mockAvailable', 'pairedCount', 'connected', 'mock', 'deviceName', 'running', 'busy',
 	'workspace', 'centerHz', 'sampleRateHz', 'frequencyShiftHz', 'gains', 'vfo', 'squelchOpen', 'audio', 'recording', 'error', 'notice',
-	'tune', 'display',
+	'tune', 'display', 'sampleRatesHz',
 ];
 
 test('status reports the radio in Hz with the documented fields', async t => {
@@ -525,6 +586,7 @@ test('status reports the radio in Hz with the documented fields', async t => {
 		squelchOpen: true, audio: 'none', recording: true, error: null, notice: null,
 		tune: { rev: 1, by: 'console', id: 's1', receiverRev: 0 },
 		display: { auto: true, minDb: -70, maxDb: 0 },
+		sampleRatesHz: DEVICE_RATES,
 	});
 	assert.equal(status.notice, 'Connected to Mock SDR', 'the visible snackbar text, through tm()');
 	app.snackbar.show = false;
@@ -676,7 +738,7 @@ test('tune while stopped is kept for the next start', async t => {
 	frame.send('console:start', { id: 's2', mock: true, listen: false });
 	await settle(20);
 	assert.equal(result('s2').code, 'OK');
-	assert.deepEqual(log.find(entry => entry[0] === 'startRx'), ['startRx', 145.5]);
+	assert.deepEqual(log.find(entry => entry[0] === 'startRx'), ['startRx', 145.5, 20_000_000]);
 });
 
 test('vfo applies the mode defaults on a mode change only and re-centres an out-of-band frequency', async t => {
@@ -792,7 +854,7 @@ test('start with the Mock SDR applies mode and frequencies, stays muted and open
 		ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 's4', ok: true, code: 'OK',
 		tune: { rev: 1, by: 'console', id: 's4', receiverRev: 0, centerHz: 433_920_000, vfoHz: 433_925_000 },
 	});
-	assert.deepEqual(log.filter(entry => Array.isArray(entry) && (entry[0] === 'open' || entry[0] === 'startRx')), [['open', 'mock'], ['startRx', 433.92]]);
+	assert.deepEqual(log.filter(entry => Array.isArray(entry) && (entry[0] === 'open' || entry[0] === 'startRx')), [['open', 'mock'], ['startRx', 433.92, 20_000_000]]);
 	assert.equal(app.connected && app.mockDevice && app.running, true);
 	assert.equal(app.vfos[0].mode, 'nfm');
 	assert.equal(app.vfos[0].bandwidth, 12_500);
@@ -1176,4 +1238,303 @@ test('dispose removes every listener and timer', async t => {
 	clock.advance(5000);
 	assert.equal(frame.posted.length, count);
 	assert.equal(messages('receiver:result').some(message => message.id === 'late'), false);
+});
+
+// ---------------------------------------------------------------------------
+// Gains and sample rate (console:gains, console:radio)
+
+/** Neither command may open a dialog in the hidden frame; a confirm() there would be invisible. */
+function forbidDialogs(t) {
+	const saved = { confirm: globalThis.confirm, alert: globalThis.alert, prompt: globalThis.prompt };
+	for (const name of Object.keys(saved)) {
+		globalThis[name] = () => { throw new Error(`${name}() in the hidden Receiver frame`); };
+	}
+	t.after(() => Object.assign(globalThis, saved));
+}
+
+/** A running Mock RX started by the console, with the FFT frames the Listener would draw. */
+async function runningMock(t, options = {}) {
+	const context = setup(t, { app: { mockSdrEnabled: true, ...options } });
+	forbidDialogs(t);
+	context.frame.send('console:start', { id: 'rx', mock: true, listen: false, centerHz: 100_000_000, vfoHz: 100_000_000 });
+	await settle(20);
+	assert.equal(context.result('rx').code, 'OK');
+	const frameData = new Float32Array(1024).fill(-80);
+	const drawFrame = () => context.bridge.spectrum(frameData);
+	return { ...context, drawFrame };
+}
+
+test('gains set the Listener gains its watcher applies, before and after the radio connects', async t => {
+	const { frame, app, clock, flushWatchers, messages, result, log } = setup(t, { app: { mockSdrEnabled: true } });
+	forbidDialogs(t);
+	frame.send('console:gains', { id: 'g1', lnaDb: 24, vgaDb: 30, amp: true });
+	assert.deepEqual(result('g1'), { ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 'g1', ok: true, code: 'OK' });
+	assert.deepEqual(app.gains, { LNA: 24, VGA: 30, 'Amp (14dB)': 1 }, 'the RadioSpectrum names before a device is connected');
+	flushWatchers();
+	clock.advance(STATUS_DEBOUNCE_MS);
+	assert.deepEqual(messages('receiver:status').at(-1).gains, { lnaDb: 24, vgaDb: 30, amp: true });
+	assert.deepEqual(messages('receiver:status').at(-1).sampleRatesHz, [], 'no device list before a device connects');
+
+	frame.send('console:start', { id: 'g2', mock: true, listen: false });
+	await settle(20);
+	assert.equal(result('g2').code, 'OK');
+	assert.deepEqual(app.gains, { LNA: 24, VGA: 30, 'Amp (14dB)': 1 }, 'valid values survive the connect');
+	frame.send('console:gains', { id: 'g3', amp: false });
+	assert.equal(result('g3').code, 'OK');
+	assert.equal(app.gains['Amp (14dB)'], 0);
+	assert.deepEqual(log.filter(entry => entry[0] === 'setGains'), [], 'the bridge leaves the backend to the Receiver\'s gains watcher');
+
+	for (const [id, payload] of [['g4', { lnaDb: 20 }], ['g5', { vgaDb: 63 }], ['g6', { lnaDb: 48 }], ['g7', { lnaDb: 32, vgaDb: 7 }]]) {
+		frame.send('console:gains', { id, ...payload });
+		assert.equal(result(id).code, 'OUT_OF_RANGE', JSON.stringify(payload));
+	}
+	assert.deepEqual(app.gains, { LNA: 24, VGA: 30, 'Amp (14dB)': 0 }, 'a refused command writes nothing, also its valid part');
+	frame.send('console:gains', { id: 'g8', lnaDb: '24' });
+	assert.equal(result('g8').code, 'INVALID_COMMAND');
+});
+
+test('gains use the connected device\'s own controls', async t => {
+	const { frame, app, result } = setup(t, { app: { mockSdrEnabled: true, ampName: 'Amp' } });
+	frame.send('console:start', { id: 'm1', mock: true, listen: false });
+	await settle(20);
+	frame.send('console:gains', { id: 'm2', amp: true, vgaDb: 62 });
+	assert.equal(result('m2').code, 'OK');
+	assert.equal(app.gains.Amp, 1, 'the Mock SDR names its amp Amp');
+	assert.equal(app.gains.VGA, 62);
+	assert.equal('Amp (14dB)' in app.gains, false);
+	app.deviceCapabilities = { ...app.deviceCapabilities, gainControls: app.deviceCapabilities.gainControls.filter(control => control.name !== 'Amp') };
+	frame.send('console:gains', { id: 'm3', amp: false });
+	assert.equal(result('m3').code, 'OUT_OF_RANGE', 'a device without an amp');
+});
+
+test('a gain changed on the Receiver page reaches the console within the status window', async t => {
+	const { app, clock, flushWatchers, messages } = setup(t);
+	await settle();
+	clock.advance(STATUS_DEBOUNCE_MS);
+	const before = messages('receiver:status').length;
+	app.gains = { LNA: 16, VGA: 40, 'Amp (14dB)': 1 };
+	flushWatchers();
+	clock.advance(STATUS_DEBOUNCE_MS);
+	assert.equal(messages('receiver:status').length, before + 1);
+	assert.deepEqual(messages('receiver:status').at(-1).gains, { lnaDb: 16, vgaDb: 40, amp: true });
+});
+
+test('gains follow the SWEEP_BUSY rule and refuse a remote session', async t => {
+	const { frame, app, log, result } = setup(t);
+	app.sweep.active = true; // the scan stopped RX before it started
+	frame.send('console:gains', { id: 'b1', lnaDb: 8 });
+	assert.equal(result('b1').code, 'OK', 'a wide scan keeps them for the next RX start');
+	assert.equal(app.gains.LNA, 8);
+	assert.deepEqual(log.filter(entry => entry[0] === 'setGains'), [], 'no backend call during the scan');
+	app.running = true;
+	frame.send('console:gains', { id: 'b2', lnaDb: 16 });
+	assert.equal(result('b2').code, 'SWEEP_BUSY', 'a scan start that has not stopped RX yet');
+	app.running = false;
+	app.sweep.active = false;
+	app.sweep.listening = true;
+	frame.send('console:gains', { id: 'b3', lnaDb: 16 });
+	assert.equal(result('b3').code, 'SWEEP_BUSY', 'a scan listen');
+	app.sweep.listening = false;
+	app.remoteMode = 'client';
+	frame.send('console:gains', { id: 'b4', lnaDb: 16 });
+	assert.equal(result('b4').code, 'NOT_READY');
+	assert.equal(app.gains.LNA, 8);
+});
+
+test('radio sets the sample rate of a stopped Listener at once', async t => {
+	const { frame, app, clock, flushWatchers, messages, result, log } = setup(t);
+	forbidDialogs(t);
+	frame.send('console:radio', { id: 'r1', sampleRateHz: 8_000_000 });
+	await settle();
+	assert.equal(result('r1').code, 'OK');
+	assert.equal(app.radio.sampleRate, 8_000_000);
+	assert.equal(log.filter(entry => entry === 'stopRx').length, 0, 'nothing to restart');
+	assert.deepEqual(result('r1').tune, { rev: 0, by: 'receiver', id: null, receiverRev: 0, centerHz: 100_000_000, vfoHz: 100_000_000 });
+	flushWatchers();
+	clock.advance(STATUS_DEBOUNCE_MS);
+	assert.equal(messages('receiver:status').at(-1).sampleRateHz, 8_000_000);
+	frame.send('console:radio', { id: 'r2', sampleRateHz: 8_000_000 });
+	await settle();
+	assert.equal(result('r2').code, 'OK', 'the same rate changes nothing');
+});
+
+test('radio restarts a running RX and answers after the restart has drawn a frame', async t => {
+	const { frame, app, clock, log, result, drawFrame } = await runningMock(t);
+	assert.equal(app.vfos[0].enabled, false);
+	frame.send('console:radio', { id: 'r3', sampleRateHz: 10_000_000 });
+	await settle(20);
+	assert.deepEqual(log.filter(entry => entry === 'stopRx' || entry[0] === 'startRx').slice(-2), ['stopRx', ['startRx', 100, 10_000_000]], 'the Receiver\'s watcher restarted RX');
+	assert.equal(app.running, true);
+	clock.advance(RADIO_POLL_MS * 4);
+	await settle();
+	assert.equal(result('r3'), undefined, 'waits for the first frame of the new stream');
+	drawFrame();
+	clock.advance(RADIO_POLL_MS);
+	await settle();
+	assert.equal(result('r3').code, 'OK');
+	assert.equal(app.radio.sampleRate, 10_000_000);
+	assert.equal(app.vfoConflictDialog.show, false);
+	assert.equal(app.devicePicker.show, false);
+});
+
+test('radio does not count frames drawn during the restart', async t => {
+	const { frame, app, clock, result, drawFrame } = await runningMock(t);
+	let release;
+	const stopping = new Promise(resolve => { release = resolve; });
+	const stopRx = app.backend.stopRx;
+	app.backend.stopRx = async () => { await stopping; return stopRx(); };
+	frame.send('console:radio', { id: 'r4', sampleRateHz: 16_000_000 });
+	await settle(20);
+	assert.equal(app._rxRestarting, true);
+	drawFrame(); // the old stream, still running while RX stops
+	clock.advance(RADIO_POLL_MS);
+	await settle();
+	release();
+	await settle(20);
+	clock.advance(RADIO_POLL_MS);
+	await settle();
+	assert.equal(result('r4'), undefined, 'a frame from before the restart does not count');
+	drawFrame();
+	clock.advance(RADIO_POLL_MS);
+	await settle();
+	assert.equal(result('r4').code, 'OK');
+});
+
+test('radio re-centres an active VFO the new rate leaves out of band, stamped as the console\'s', async t => {
+	const { frame, app, clock, flushWatchers, messages, result, drawFrame } = await runningMock(t);
+	frame.send('console:vfo', { id: 'r5', mode: 'raw', frequencyHz: 108_000_000 }); // 8 MHz off the centre: inside 20 MSPS
+	assert.equal(result('r5').code, 'OK');
+	assert.equal(app.radio.centerFreq, 100);
+	frame.send('console:radio', { id: 'r6', sampleRateHz: 10_000_000 });
+	await settle(20);
+	drawFrame();
+	clock.advance(RADIO_POLL_MS);
+	await settle();
+	assert.equal(result('r6').code, 'OK');
+	assert.equal(app.radio.centerFreq, 108, 're-centred on the VFO');
+	assert.equal(app.vfos[0].bandwidth, 10_000_000, 'a raw VFO takes the new rate as bandwidth');
+	assert.deepEqual(result('r6').tune, { rev: 2, by: 'console', id: 'r6', receiverRev: 0, centerHz: 108_000_000, vfoHz: 108_000_000 });
+	flushWatchers();
+	clock.advance(STATUS_DEBOUNCE_MS);
+	assert.deepEqual(messages('receiver:status').at(-1).tune, { rev: 2, by: 'console', id: 'r6', receiverRev: 0 }, 'follow-node stays on in the console');
+
+	frame.send('console:radio', { id: 'r7', sampleRateHz: 20_000_000 });
+	await settle(20);
+	drawFrame();
+	clock.advance(RADIO_POLL_MS);
+	await settle();
+	assert.equal(result('r7').code, 'OK');
+	assert.equal(result('r7').tune.rev, 2, 'a VFO still in band keeps the centre');
+});
+
+test('radio refuses a rate the device does not offer, any scan and a remote session', async t => {
+	const { frame, app, result } = setup(t, { app: { mockSdrEnabled: true, sampleRates: [2_000_000, 10_000_000] } });
+	forbidDialogs(t);
+	const refused = async (id, payload, code, message) => {
+		frame.send('console:radio', { id, ...payload });
+		await settle(20);
+		assert.equal(result(id).code, code, message);
+	};
+	await refused('n1', { sampleRateHz: 3_000_000 }, 'OUT_OF_RANGE', 'not a RadioSpectrum rate');
+	frame.send('console:start', { id: 'n2', mock: true, listen: false });
+	await settle(20);
+	await refused('n3', { sampleRateHz: 20_000_000 }, 'OUT_OF_RANGE', 'not in the connected device\'s list');
+	for (const busy of ['active', 'starting', 'stopping', 'listening', 'listenStarting']) {
+		app.sweep[busy] = true;
+		await refused(`n-${busy}`, { sampleRateHz: 2_000_000 }, 'SWEEP_BUSY', busy);
+		app.sweep[busy] = false;
+	}
+	app.remoteMode = 'host';
+	await refused('n4', { sampleRateHz: 2_000_000 }, 'NOT_READY', 'a remote session');
+	assert.equal(app.radio.sampleRate, 20_000_000, 'every refusal left the rate alone');
+});
+
+test('radio needs the console\'s confirmation while a recording is armed, and the recording continues', async t => {
+	const { frame, app, clock, log, result, drawFrame } = await runningMock(t);
+	app.audioRecording.armed = true;
+	frame.send('console:radio', { id: 'c1', sampleRateHz: 4_000_000 });
+	await settle(20);
+	assert.equal(result('c1').code, 'RECORDING_ACTIVE');
+	assert.equal(app.radio.sampleRate, 20_000_000, 'nothing changed');
+	assert.equal(log.includes('resumeRecording'), false);
+	frame.send('console:radio', { id: 'c2', sampleRateHz: 4_000_000, confirmRecording: true });
+	await settle(20);
+	drawFrame();
+	clock.advance(RADIO_POLL_MS);
+	await settle();
+	assert.equal(result('c2').code, 'OK');
+	assert.equal(app.radio.sampleRate, 4_000_000);
+	assert.ok(log.includes('resumeRecording'), 'the Receiver resumes the recording in a new segment');
+});
+
+test('radio reports AUDIO_BLOCKED when audio that played before the restart cannot resume', async t => {
+	const { frame, app, clock, result, drawFrame, audioPolicy } = await runningMock(t);
+	frame.send('console:listen', { id: 'a1', enabled: true });
+	await settle(20);
+	assert.equal(result('a1').code, 'OK');
+	assert.equal(app.audioCtx.state, 'running');
+	audioPolicy.allowed = false; // the click's activation is gone by the time RX is back
+	frame.send('console:radio', { id: 'a2', sampleRateHz: 8_000_000 });
+	await settle(20);
+	drawFrame();
+	clock.advance(RADIO_POLL_MS);
+	await settle();
+	assert.equal(result('a2'), undefined, 'tries to resume the new AudioContext first');
+	clock.advance(AUDIO_RESUME_WAIT_MS);
+	await settle();
+	assert.equal(result('a2').code, 'AUDIO_BLOCKED');
+	assert.equal(app.running, true);
+	assert.equal(app.vfos[0].enabled, true, 'still listening; a Dengar click resumes the audio');
+
+	audioPolicy.allowed = true;
+	frame.send('console:listen', { id: 'a3-listen', enabled: true });
+	await settle(20);
+	assert.equal(result('a3-listen').code, 'OK', 'the next Dengar click resumes it');
+	frame.send('console:radio', { id: 'a3', sampleRateHz: 16_000_000 });
+	await settle(20);
+	drawFrame();
+	clock.advance(RADIO_POLL_MS);
+	await settle();
+	assert.equal(result('a3').code, 'OK');
+	assert.equal(app.audioCtx.state, 'running');
+});
+
+test('radio reports a restart that does not bring RX back, and a slow first frame', async t => {
+	await t.test('the stream fails to start', async st => {
+		const { frame, app, clock, failures, result } = await runningMock(st);
+		failures.startRx = true;
+		frame.send('console:radio', { id: 'f1', sampleRateHz: 2_000_000 });
+		await settle(30);
+		clock.advance(RADIO_POLL_MS);
+		await settle();
+		assert.deepEqual({ code: result('f1').code, message: result('f1').message }, { code: 'CONNECT_FAILED', message: 'Error starting stream.' });
+		assert.equal(app.running, false);
+	});
+	await t.test('no frame within the wait', async st => {
+		const { frame, app, clock, result } = await runningMock(st);
+		frame.send('console:radio', { id: 'f2', sampleRateHz: 2_000_000 });
+		await settle(20);
+		for (let waited = 0; waited < RADIO_RESTART_WAIT_MS && !result('f2'); waited += RADIO_POLL_MS) {
+			clock.advance(RADIO_POLL_MS);
+			await settle(2);
+		}
+		assert.equal(result('f2').code, 'OK', 'RX runs at the new rate');
+		assert.equal(app.running, true);
+	});
+});
+
+test('radio waits behind a start and blocks the next stop until it answers', async t => {
+	const { frame, app, clock, messages, result, bridge } = setup(t, { app: { mockSdrEnabled: true } });
+	frame.send('console:start', { id: 'o1', mock: true, listen: false, centerHz: 145_000_000, vfoHz: 145_000_000 });
+	frame.send('console:radio', { id: 'o2', sampleRateHz: 5_000_000 });
+	frame.send('console:stop', { id: 'o3' });
+	await settle(30);
+	assert.deepEqual(messages('receiver:result').map(message => message.id), ['o1']);
+	bridge.spectrum(new Float32Array(1024));
+	clock.advance(RADIO_POLL_MS);
+	await settle(30);
+	assert.deepEqual(messages('receiver:result').map(message => [message.id, message.code]), [['o1', 'OK'], ['o2', 'OK'], ['o3', 'OK']]);
+	assert.equal(app.radio.sampleRate, 5_000_000);
+	assert.equal(app.running, false);
+	assert.deepEqual([result('o2').tune.by, result('o2').tune.id], ['console', 'o1'], 'the start\'s tuning; the VFO stayed in band');
 });
