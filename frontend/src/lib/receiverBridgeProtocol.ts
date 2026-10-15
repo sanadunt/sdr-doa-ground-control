@@ -17,7 +17,7 @@ export const BRIDGE_CHANNEL = 'sdr-console-receiver';
 export const BRIDGE_VERSION = 1;
 
 /** Frame to console. */
-export const FRAME_MESSAGE_TYPES = ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep'] as const;
+export const FRAME_MESSAGE_TYPES = ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep', 'receiver:markers'] as const;
 /** Console to frame. */
 export const CONSOLE_MESSAGE_TYPES = [
   'console:hello',
@@ -34,6 +34,8 @@ export const CONSOLE_MESSAGE_TYPES = [
   'console:sweep-stop',
   'console:sweep-config',
   'console:sweep-display',
+  'console:marker-add',
+  'console:marker-remove',
 ] as const;
 /** Demodulator modes in UI order; the keys of the Receiver's MODE_DEFAULTS. */
 export const LISTEN_MODES = ['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw'] as const;
@@ -54,6 +56,9 @@ export const RESULT_CODES = [
   'RECORDING_ACTIVE',
   'SWEEP_UNSUPPORTED',
   'SWEEP_FAILED',
+  'MARKER_LIMIT',
+  'MARKER_NOT_FOUND',
+  'MARKER_SAVE_FAILED',
   'TIMEOUT',
 ] as const;
 /** receiver:status error.code values; the console translates them. */
@@ -91,6 +96,13 @@ export const TUNE_LIMITS = { minHz: 1_000_000, maxHz: 6_000_000_000 } as const;
 export const SWEEP_LIMITS = { minHz: 1_000_000, maxHz: 7_250_000_000 } as const;
 /** A scan range the console may set: at least minSpanHz wide, at most maxBins bins of sampleRateHz / fftSize. */
 export const SWEEP_SPAN_LIMITS = { minSpanHz: 1_000_000, sampleRateHz: 20_000_000, maxBins: 500_000 } as const;
+/**
+ * The Receiver's spectrum markers. On the wire a marker frequency is displayed
+ * Hz; minHz..maxHz bound the device frequency (the shift removed), the sweep
+ * range of SWEEP_LIMITS. receiver:markers carries at most maxSent; the
+ * Receiver's list takes at most maxTotal; labels are at most labelMaxChars long.
+ */
+export const MARKER_LIMITS = { minHz: 1_000_000, maxHz: 7_250_000_000, maxSent: 512, maxTotal: 10_000, labelMaxChars: 80 } as const;
 export const VOLUME_LIMITS = { min: 0, max: 100 } as const;
 /**
  * Manual dB range of the Receiver's RX (Dengar) spectrum and waterfall, which
@@ -287,6 +299,32 @@ export interface ReceiverResult {
   message?: string;
   /** Results of console:tune, console:vfo, console:start and console:radio: the tuning after the command. */
   tune?: ResultTune;
+  /** Results of console:marker-add (also MARKER_SAVE_FAILED): the new marker's id. */
+  markerId?: string;
+}
+
+/** One of the Receiver's markers, in displayed Hz. */
+export interface BridgeMarker {
+  /** null when the console cannot address it (it cannot be removed from here then). */
+  id: string | null;
+  frequencyHz: number;
+  powerDb: number | null;
+  label: string;
+}
+
+/** A receiver:markers message: the Receiver's marker list as the console mirrors it. */
+export interface ReceiverMarkers {
+  rev: number;
+  /** The marker set selected on the Receiver page; null while the list is not saved to one. */
+  setId: string | null;
+  setName: string | null;
+  frequencyShiftHz: number;
+  /** In frequency order, inside MARKER_LIMITS, at most MARKER_LIMITS.maxSent. */
+  markers: BridgeMarker[];
+  /** Markers in the Receiver's list. */
+  total: number;
+  /** Some of the list is not in `markers`. */
+  truncated: boolean;
 }
 
 export type FrameMessage =
@@ -294,7 +332,8 @@ export type FrameMessage =
   | { type: 'receiver:status'; status: ReceiverStatus }
   | { type: 'receiver:spectrum'; frame: RxSpectrumFrame }
   | { type: 'receiver:sweep'; frame: SweepSpectrumFrame }
-  | { type: 'receiver:result'; result: ReceiverResult };
+  | { type: 'receiver:result'; result: ReceiverResult }
+  | { type: 'receiver:markers'; markers: ReceiverMarkers };
 
 /** Commands the console sends; the bridge adds `id` and the envelope. */
 export type BridgeCommand =
@@ -315,7 +354,10 @@ export type BridgeCommand =
   /** Displayed Hz; at least one field. The frame refuses it while a scan runs. */
   | { type: 'console:sweep-config'; startHz?: number; stopHz?: number; fftSize?: SweepFftSize; lnaDb?: number; vgaDb?: number; amp?: boolean }
   /** The scan's graph range (the Receiver's Graph min./max.). */
-  | { type: 'console:sweep-display'; minDb: number; maxDb: number };
+  | { type: 'console:sweep-display'; minDb: number; maxDb: number }
+  /** Displayed Hz; the frame measures the power on a running scan. */
+  | { type: 'console:marker-add'; frequencyHz: number }
+  | { type: 'console:marker-remove'; markerId: string };
 
 const MAX_TEXT_CHARS = 300;
 const MAX_DEVICE_NAME_CHARS = 80;
@@ -344,6 +386,13 @@ export function isCommandId(value: unknown): value is string {
 /** True for a displayed frequency a tune command may carry. */
 export function inTuneRange(hz: unknown): hz is number {
   return typeof hz === 'number' && Number.isFinite(hz) && hz >= TUNE_LIMITS.minHz && hz <= TUNE_LIMITS.maxHz;
+}
+
+/** True for a displayed frequency a marker may have: with the shift removed inside MARKER_LIMITS. */
+export function inMarkerRange(displayedHz: unknown, frequencyShiftHz = 0): displayedHz is number {
+  if (typeof displayedHz !== 'number' || !Number.isFinite(displayedHz) || !Number.isFinite(frequencyShiftHz)) return false;
+  const deviceHz = displayedHz - frequencyShiftHz;
+  return deviceHz >= MARKER_LIMITS.minHz && deviceHz <= MARKER_LIMITS.maxHz;
 }
 
 function finiteOrNull(value: unknown): number | null {
@@ -629,6 +678,48 @@ export function normalizeSweepFrame(value: unknown): SweepSpectrumFrame | null {
   };
 }
 
+/** One marker; null when its frequency is unusable. */
+function normalizeMarker(value: unknown, frequencyShiftHz: number): BridgeMarker | null {
+  if (!isRecord(value)) return null;
+  const frequencyHz = hzOrNull(value.frequencyHz);
+  if (frequencyHz === null || !inMarkerRange(frequencyHz, frequencyShiftHz)) return null;
+  return {
+    id: isCommandId(value.id) ? value.id : null,
+    frequencyHz,
+    powerDb: finiteOrNull(value.powerDb),
+    label: boundedText(value.label, MARKER_LIMITS.labelMaxChars) ?? '',
+  };
+}
+
+/**
+ * Normalize a receiver:markers payload: markers outside MARKER_LIMITS or with an
+ * unusable frequency are left out, at most maxSent kept, in frequency order.
+ * null without a usable rev.
+ */
+export function normalizeMarkers(value: unknown): ReceiverMarkers | null {
+  if (!isRecord(value)) return null;
+  const rev = revOrNull(value.rev);
+  if (rev === null) return null;
+  const frequencyShiftHz = hzOrNull(value.frequencyShiftHz) ?? 0;
+  const sent: unknown[] = Array.isArray(value.markers) ? value.markers : [];
+  const markers: BridgeMarker[] = [];
+  for (const entry of sent.slice(0, MARKER_LIMITS.maxSent)) {
+    const marker = normalizeMarker(entry, frequencyShiftHz);
+    if (marker) markers.push(marker);
+  }
+  markers.sort((a, b) => a.frequencyHz - b.frequencyHz);
+  const total = revOrNull(value.total);
+  return {
+    rev,
+    setId: boundedText(value.setId, MARKER_LIMITS.labelMaxChars),
+    setName: boundedText(value.setName, MARKER_LIMITS.labelMaxChars),
+    frequencyShiftHz,
+    markers,
+    total: total !== null && total >= sent.length ? total : sent.length,
+    truncated: value.truncated === true || markers.length < sent.length,
+  };
+}
+
 function normalizeHello(value: Record<string, unknown>): ReceiverHello | null {
   const protocol = finiteOrNull(value.protocol);
   if (protocol !== BRIDGE_VERSION) return null;
@@ -645,6 +736,7 @@ function normalizeResult(value: Record<string, unknown>): ReceiverResult | null 
   if (message) result.message = message;
   const tune = normalizeResultTune(value.tune);
   if (tune) result.tune = tune;
+  if (isCommandId(value.markerId)) result.markerId = value.markerId;
   return result;
 }
 
@@ -674,6 +766,10 @@ export function parseFrameMessage(data: unknown): FrameMessage | null {
     case 'receiver:result': {
       const result = normalizeResult(data);
       return result ? { type: data.type, result } : null;
+    }
+    case 'receiver:markers': {
+      const markers = normalizeMarkers(data);
+      return markers ? { type: data.type, markers } : null;
     }
     default:
       return null;
@@ -755,6 +851,10 @@ export function commandMessage(id: string, command: BridgeCommand): Record<strin
       if (range) Object.assign(message, range);
       return message;
     }
+    case 'console:marker-add':
+      return typeof command.frequencyHz === 'number' && Number.isFinite(command.frequencyHz) ? { ...envelope, frequencyHz: Math.round(command.frequencyHz) } : envelope;
+    case 'console:marker-remove':
+      return isCommandId(command.markerId) ? { ...envelope, markerId: command.markerId } : envelope;
     default:
       return envelope;
   }

@@ -12,6 +12,7 @@ import {
   HELLO_TIMEOUT_MS,
   LONG_COMMAND_TYPES,
   LISTEN_MODES,
+  MARKER_LIMITS,
   MAX_QUEUED_COMMANDS,
   RESULT_CODES,
   SAMPLE_RATES_HZ,
@@ -30,7 +31,9 @@ import {
   clampSubscription,
   commandMessage,
   gainSteps,
+  inMarkerRange,
   inSweepRange,
+  normalizeMarkers,
   normalizeTuneStamp,
   parseFrameMessage,
   snapGain,
@@ -118,15 +121,17 @@ describe('receiver bridge protocol', () => {
   it('matches the frame-side constants', () => {
     expect(BRIDGE_CHANNEL).toBe('sdr-console-receiver');
     expect(BRIDGE_VERSION).toBe(1);
-    expect([...FRAME_MESSAGE_TYPES]).toEqual(['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep']);
+    expect([...FRAME_MESSAGE_TYPES]).toEqual(['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep', 'receiver:markers']);
     expect([...CONSOLE_MESSAGE_TYPES]).toEqual([
       'console:hello', 'console:subscribe', 'console:start', 'console:stop', 'console:tune', 'console:vfo', 'console:listen', 'console:display',
       'console:gains', 'console:radio', 'console:sweep-start', 'console:sweep-stop', 'console:sweep-config', 'console:sweep-display',
+      'console:marker-add', 'console:marker-remove',
     ]);
     expect([...LISTEN_MODES]).toEqual(['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw']);
     expect([...RESULT_CODES]).toEqual([
       'OK', 'NOT_READY', 'INVALID_COMMAND', 'NO_WEBUSB', 'NEEDS_PAIRING', 'NEEDS_DEVICE_CHOICE', 'MOCK_UNAVAILABLE', 'CONNECT_FAILED', 'SWEEP_BUSY',
-      'RX_NOT_RUNNING', 'OUT_OF_RANGE', 'AUDIO_BLOCKED', 'RECORDING_ACTIVE', 'SWEEP_UNSUPPORTED', 'SWEEP_FAILED', 'TIMEOUT',
+      'RX_NOT_RUNNING', 'OUT_OF_RANGE', 'AUDIO_BLOCKED', 'RECORDING_ACTIVE', 'SWEEP_UNSUPPORTED', 'SWEEP_FAILED', 'MARKER_LIMIT', 'MARKER_NOT_FOUND',
+      'MARKER_SAVE_FAILED', 'TIMEOUT',
     ]);
     expect([...STATUS_ERROR_CODES]).toEqual(['USB_LOST', 'RX_ERROR', 'NO_WEBUSB']);
     expect(SUBSCRIBE_LIMITS).toEqual({ binsMin: 64, binsMax: 2048, binsDefault: 512, fpsMin: 1, fpsMax: 15, fpsDefault: 10, spanMinHz: 100_000, spanDefaultHz: 2_000_000 });
@@ -134,6 +139,7 @@ describe('receiver bridge protocol', () => {
     expect(TUNE_LIMITS).toEqual({ minHz: 1_000_000, maxHz: 6_000_000_000 });
     // Scans and Receiver markers reach 7.25 GHz; RX tuning stops at 6 GHz.
     expect(SWEEP_LIMITS).toEqual({ minHz: 1_000_000, maxHz: 7_250_000_000 });
+    expect(MARKER_LIMITS).toEqual({ minHz: 1_000_000, maxHz: 7_250_000_000, maxSent: 512, maxTotal: 10_000, labelMaxChars: 80 });
     expect(DISPLAY_DB_LIMITS).toEqual({ minDb: -160, maxDb: 60, minGapDb: 5 });
     expect([...SAMPLE_RATES_HZ]).toEqual([2_000_000, 4_000_000, 5_000_000, 8_000_000, 10_000_000, 16_000_000, 20_000_000]);
     expect(GAIN_LIMITS).toEqual({ lna: { min: 0, max: 40, step: 8 }, vga: { min: 0, max: 62, step: 2 } });
@@ -355,13 +361,62 @@ describe('receiver bridge protocol', () => {
     expect(commandMessage('c16-a', { type: 'console:sweep-display', minDb: -40, maxDb: -42 })).toEqual({
       ch: BRIDGE_CHANNEL, v: 1, type: 'console:sweep-display', id: 'c16-a', minDb: -40, maxDb: -35,
     });
+    expect(commandMessage('c17-a', { type: 'console:marker-add', frequencyHz: 433_920_000.4 })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:marker-add', id: 'c17-a', frequencyHz: 433_920_000 });
+    expect(commandMessage('c18-a', { type: 'console:marker-remove', markerId: 'c3d1-aa' })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:marker-remove', id: 'c18-a', markerId: 'c3d1-aa' });
+    expect(commandMessage('c19-a', { type: 'console:marker-remove', markerId: 'bad id' })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:marker-remove', id: 'c19-a' });
+  });
+
+  it('checks a marker frequency on the radio side of the frequency shift', () => {
+    expect(inMarkerRange(433_920_000)).toBe(true);
+    expect(inMarkerRange(6_500_000_000)).toBe(true);
+    expect(inMarkerRange(7_250_000_001)).toBe(false);
+    expect(inMarkerRange(500_000)).toBe(false);
+    expect(inMarkerRange(500_000, -125_000_000)).toBe(true);
+    expect(inMarkerRange(Number.NaN)).toBe(false);
+    expect(inMarkerRange('433920000')).toBe(false);
+  });
+
+  it('reads a marker list, drops unusable markers and keeps at most 512 in frequency order', () => {
+    const markers = normalizeMarkers({
+      rev: 3, setId: 'set-1', setName: '  Pita UHF ', frequencyShiftHz: -125_000_000, total: 5, truncated: false,
+      markers: [
+        { id: 'b', frequencyHz: 433_920_000.4, powerDb: -48.25, label: 'Tower' },
+        { id: 'a', frequencyHz: 500_000, powerDb: Number.NaN, label: '' },
+        { id: 'bad id', frequencyHz: 434_000_000, powerDb: null, label: 'x'.repeat(120) },
+        { id: 'out', frequencyHz: -124_500_000, powerDb: null, label: 'Out' },
+        'junk',
+      ],
+    });
+    expect(markers).toEqual({
+      rev: 3, setId: 'set-1', setName: 'Pita UHF', frequencyShiftHz: -125_000_000, total: 5, truncated: true,
+      markers: [
+        { id: 'a', frequencyHz: 500_000, powerDb: null, label: '' },
+        { id: 'b', frequencyHz: 433_920_000, powerDb: -48.25, label: 'Tower' },
+        { id: null, frequencyHz: 434_000_000, powerDb: null, label: `${'x'.repeat(79)}…` },
+      ],
+    });
+    const long = normalizeMarkers({ rev: 1, markers: Array.from({ length: 600 }, (_value, index) => ({ id: `m${index}`, frequencyHz: 600e6 - index * 1e5, powerDb: null, label: 'M' })) });
+    expect(long?.markers).toHaveLength(MARKER_LIMITS.maxSent);
+    expect(long?.markers[0].frequencyHz).toBeLessThan(long?.markers[1].frequencyHz ?? 0);
+    expect(long?.total).toBe(600);
+    expect(long?.truncated).toBe(true);
+    expect(long?.setId).toBeNull();
+    for (const bad of [null, {}, { rev: -1 }, { rev: 1.5 }, { rev: '2' }]) expect(normalizeMarkers(bad)).toBeNull();
+    expect(normalizeMarkers({ rev: 0 })).toMatchObject({ markers: [], total: 0, truncated: false });
+  });
+
+  it('keeps the new marker id a result carries', () => {
+    const message = parseFrameMessage({ ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 'c1-a', ok: true, code: 'OK', markerId: 'c3d1-aa' });
+    expect(message).toEqual({ type: 'receiver:result', result: { id: 'c1-a', ok: true, code: 'OK', markerId: 'c3d1-aa' } });
+    const bad = parseFrameMessage({ ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 'c1-a', ok: true, code: 'OK', markerId: 'not usable' });
+    expect(bad).toEqual({ type: 'receiver:result', result: { id: 'c1-a', ok: true, code: 'OK' } });
   });
 });
 
 describe('createReceiverBridge', () => {
   it('starts idle without touching any window', () => {
     const bridge = createReceiverBridge({ host: () => { throw new Error('window used'); }, setTimeout, clearTimeout, probe: () => Promise.resolve(200), random: Math.random });
-    expect(bridge.getState()).toEqual({ phase: 'idle', build: 'unknown', hello: null, status: null, tune: null, lastResult: null });
+    expect(bridge.getState()).toEqual({ phase: 'idle', build: 'unknown', hello: null, status: null, tune: null, markers: null, lastResult: null });
   });
 
   it('says hello on attach, becomes ready on the frame hello, and re-sends the subscription', () => {
@@ -540,6 +595,37 @@ describe('createReceiverBridge', () => {
     h.fromFrame('receiver:result', { id, ok: false, code: 'SWEEP_BUSY', tune: { rev: 2, by: 'receiver', id: null, receiverRev: 2, centerHz: 433_920_000, vfoHz: 433_920_000 } });
     await expect(pending).resolves.toMatchObject({ ok: false, code: 'SWEEP_BUSY' });
     expect(h.bridge.getState().tune).toMatchObject({ rev: 2, centerHz: 433_920_000 });
+  });
+
+  it('keeps the newest marker list until the frame goes, and answers a marker-add with its id', async () => {
+    const h = harness();
+    h.bridge.attach(h.frame);
+    expect(h.bridge.getState().markers).toBeNull();
+    const list = (rev: number, ids: string[]) => ({ rev, setId: null, setName: null, frequencyShiftHz: 0, total: ids.length, truncated: false, markers: ids.map((id, index) => ({ id, frequencyHz: 433_920_000 + index * 1e4, powerDb: null, label: id })) });
+    h.fromFrame('receiver:hello', hello);
+    h.fromFrame('receiver:markers', list(2, ['a', 'b']));
+    expect(h.bridge.getState().markers?.markers.map((marker) => marker.id)).toEqual(['a', 'b']);
+    // An older list is late; it does not take the newer one back.
+    h.fromFrame('receiver:markers', list(1, ['a']));
+    expect(h.bridge.getState().markers?.rev).toBe(2);
+    const pending = h.bridge.send({ type: 'console:marker-add', frequencyHz: 434_000_000 });
+    const id = String(h.posted.at(-1)?.message.id);
+    expect(h.posted.at(-1)?.message).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:marker-add', id, frequencyHz: 434_000_000 });
+    h.fromFrame('receiver:markers', list(3, ['a', 'b', 'c']));
+    h.fromFrame('receiver:result', { id, ok: true, code: 'OK', markerId: 'c' });
+    await expect(pending).resolves.toEqual({ ok: true, code: 'OK', markerId: 'c' });
+    expect(h.bridge.getState().markers?.rev).toBe(3);
+    // A marker command waits COMMAND_TIMEOUT_MS like any short one.
+    const late = h.bridge.send({ type: 'console:marker-remove', markerId: 'a' });
+    h.advance(COMMAND_TIMEOUT_MS);
+    await expect(late).resolves.toEqual({ ok: false, code: 'TIMEOUT' });
+    // A reloaded frame starts again from rev 0.
+    h.bridge.attach(h.frame);
+    expect(h.bridge.getState().markers).toBeNull();
+    h.fromFrame('receiver:markers', list(0, []));
+    expect(h.bridge.getState().markers?.rev).toBe(0);
+    h.bridge.detach();
+    expect(h.bridge.getState().markers).toBeNull();
   });
 
   it('hands spectrum and scan frames to listeners without storing them in state', () => {

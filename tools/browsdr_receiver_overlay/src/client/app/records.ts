@@ -288,10 +288,15 @@ export const recordsMethods = {
 		this.candidateFilterChanged();
 	},
 
-	async addReceiverMarker(this: AppInstance, frequencyHz: number, powerDb: number | null, label = '') {
+	/**
+	 * Adds a marker to the working list and saves it to the selected marker set. Returns its id and
+	 * whether that save worked (null when no set is selected), or null for an unusable frequency or
+	 * power. The Ground Console bridge adds the dashboard's markers through here.
+	 */
+	async addReceiverMarker(this: AppInstance, frequencyHz: number, powerDb: number | null, label = ''): Promise<{ id: string; saved: boolean | null } | null> {
 		if (!Number.isFinite(frequencyHz) || frequencyHz <= 0 || (powerDb !== null && !Number.isFinite(powerDb))) {
 			this.records.error = 'Marker frequency must be positive and finite; measured power must be finite.';
-			return;
+			return null;
 		}
 		const marker: ReceiverMarker = {
 			id: newMarkerId(),
@@ -303,8 +308,9 @@ export const recordsMethods = {
 		this.records.markerFrequencyDrafts[marker.id] = String(frequencyHz / 1_000_000);
 		this.records.error = '';
 		this.drawSweepSpectrum();
-		if (this.records.selectedMarkerSetId) await this.saveMarkerSet();
-		else this.candidateFilterChanged();
+		if (this.records.selectedMarkerSetId) return { id: marker.id, saved: await this.saveMarkerSet() };
+		this.candidateFilterChanged();
+		return { id: marker.id, saved: null };
 	},
 
 	async addManualReceiverMarker(this: AppInstance) {
@@ -343,17 +349,18 @@ export const recordsMethods = {
 		else this.candidateFilterChanged();
 	},
 
-	async saveMarkerSet(this: AppInstance) {
+	/** Saves the working list as the named set; true once the console has stored it. */
+	async saveMarkerSet(this: AppInstance): Promise<boolean> {
 		const name = String(this.records.markerSetName || '').trim();
 		if (!name) {
 			this.records.error = 'Enter a name before saving this marker set.';
-			return;
+			return false;
 		}
 		if ((this.records.markers as ReceiverMarker[]).some(marker =>
 			!Number.isFinite(marker.frequencyHz) || marker.frequencyHz <= 0
 			|| (marker.powerDb !== null && !Number.isFinite(marker.powerDb)))) {
 			this.records.error = 'Marker frequencies must be positive and finite; measured powers must be finite.';
-			return;
+			return false;
 		}
 		const markerSet = {
 			id: this.records.selectedMarkerSetId,
@@ -368,7 +375,7 @@ export const recordsMethods = {
 				if (!(error instanceof ReceiverRequestError) || error.status !== 409 || markerSet.id) throw error;
 				if (!window.confirm(this.tm(`A marker set named "${name}" already exists. Replace its markers with the ${markerSet.markers.length} marker(s) shown here?`))) {
 					this.records.error = `Not saved: a marker set named "${name}" already exists. Choose another name or load that set.`;
-					return;
+					return false;
 				}
 				saved = await receiverRecordsApi.saveMarkerSet(markerSet, true);
 			}
@@ -381,19 +388,25 @@ export const recordsMethods = {
 			this.records.markerFrequencyDrafts = markerFrequencyDrafts(this.records.markers);
 			this.records.error = '';
 			this.candidateFilterChanged();
+			return true;
 		} catch (error) {
 			this.records.error = `Could not save marker set: ${errorMessage(error)}`;
+			return false;
 		}
 	},
 
-	async removeReceiverMarker(this: AppInstance, markerId: string) {
+	/** Removes a marker from the working list and the selected set; saved is null when no set is selected. */
+	async removeReceiverMarker(this: AppInstance, markerId: string): Promise<{ removed: boolean; saved: boolean | null }> {
+		const before = (this.records.markers as ReceiverMarker[]).length;
 		this.records.markers = (this.records.markers as ReceiverMarker[]).filter(marker => marker.id !== markerId);
+		const removed = (this.records.markers as ReceiverMarker[]).length < before;
 		const drafts = { ...this.records.markerFrequencyDrafts };
 		delete drafts[markerId];
 		this.records.markerFrequencyDrafts = drafts;
 		this.drawSweepSpectrum();
-		if (this.records.selectedMarkerSetId) await this.saveMarkerSet();
-		else this.candidateFilterChanged();
+		if (this.records.selectedMarkerSetId) return { removed, saved: await this.saveMarkerSet() };
+		this.candidateFilterChanged();
+		return { removed, saved: null };
 	},
 
 	async deleteMarkerSet(this: AppInstance) {

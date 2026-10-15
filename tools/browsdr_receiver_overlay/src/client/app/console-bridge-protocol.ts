@@ -14,7 +14,7 @@ export const BRIDGE_CHANNEL = 'sdr-console-receiver';
 export const BRIDGE_VERSION = 1;
 
 /** Frame to console. */
-export const FRAME_MESSAGE_TYPES = ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep'] as const;
+export const FRAME_MESSAGE_TYPES = ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep', 'receiver:markers'] as const;
 /** Console to frame. */
 export const CONSOLE_MESSAGE_TYPES = [
 	'console:hello',
@@ -31,6 +31,8 @@ export const CONSOLE_MESSAGE_TYPES = [
 	'console:sweep-stop',
 	'console:sweep-config',
 	'console:sweep-display',
+	'console:marker-add',
+	'console:marker-remove',
 ] as const;
 /** Demodulator modes in UI order; the keys of MODE_DEFAULTS in constants.ts. */
 export const LISTEN_MODES = ['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw'] as const;
@@ -51,6 +53,9 @@ export const RESULT_CODES = [
 	'RECORDING_ACTIVE',
 	'SWEEP_UNSUPPORTED',
 	'SWEEP_FAILED',
+	'MARKER_LIMIT',
+	'MARKER_NOT_FOUND',
+	'MARKER_SAVE_FAILED',
 	'TIMEOUT',
 ] as const;
 /** receiver:status error.code values; the console translates them. */
@@ -92,6 +97,14 @@ export const SWEEP_LIMITS = { minHz: 1_000_000, maxHz: 7_250_000_000 } as const;
  * validateSweepConfig and SWEEP_MAX_BINS).
  */
 export const SWEEP_SPAN_LIMITS = { minSpanHz: 1_000_000, sampleRateHz: 20_000_000, maxBins: 500_000 } as const;
+/**
+ * The Receiver's spectrum markers (its "Penanda spektrum" list). On the wire a
+ * marker frequency is displayed Hz; minHz..maxHz bound the device frequency
+ * (Freq Shift removed), the sweep range of SWEEP_LIMITS. receiver:markers
+ * carries at most maxSent of them; the Receiver's list takes at most maxTotal
+ * (a saved marker set's limit); labels are at most labelMaxChars long.
+ */
+export const MARKER_LIMITS = { minHz: 1_000_000, maxHz: 7_250_000_000, maxSent: 512, maxTotal: 10_000, labelMaxChars: 80 } as const;
 export const VOLUME_LIMITS = { min: 0, max: 100 } as const;
 /**
  * Manual dB range of the Listener's spectrum and waterfall (the Dengar tab's
@@ -113,6 +126,8 @@ export const COMMAND_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 export const STATUS_DEBOUNCE_MS = 100;
 /** A running, connected, busy, error or recording change is sent at once, at most this often. */
 export const STATUS_URGENT_MIN_MS = 20;
+/** receiver:markers is sent at once after a quiet spell, then at most this often. */
+export const MARKERS_THROTTLE_MS = 100;
 /** Status is repeated this often while the console holds a subscription. */
 export const STATUS_HEARTBEAT_MS = 2_000;
 /** Spectrum bins with no finite power are sent as this level. */
@@ -161,6 +176,9 @@ export type ConsoleCommand =
 	| { type: 'console:sweep-config'; id: string; startHz?: number; stopHz?: number; fftSize?: SweepFftSize; lnaDb?: number; vgaDb?: number; amp?: boolean }
 	/** The scan's graph range (the Receiver's Graph min./max.). */
 	| { type: 'console:sweep-display'; id: string; minDb: number; maxDb: number }
+	/** Displayed Hz. The frame measures the power on a running scan. */
+	| { type: 'console:marker-add'; id: string; frequencyHz: number }
+	| { type: 'console:marker-remove'; id: string; markerId: string }
 	/** A console command with a usable id whose payload is wrong; answered with INVALID_COMMAND. */
 	| { type: 'invalid'; id: string };
 
@@ -251,6 +269,25 @@ export interface ReceiverStatus {
 	/** Sample rates of the connected device, in its order; [] while none is connected. */
 	sampleRatesHz: number[];
 	sweep: StatusSweep;
+}
+
+/** One of the Receiver's markers in receiver:markers. */
+export interface BridgeMarker {
+	/** null when the Receiver's id is not a usable command id (the console cannot remove it then). */
+	id: string | null;
+	/** Displayed Hz. */
+	frequencyHz: number;
+	powerDb: number | null;
+	label: string;
+}
+
+/** The markers of receiver:markers and how many of the Receiver's list they are. */
+export interface MarkersForConsole {
+	markers: BridgeMarker[];
+	/** Markers in the Receiver's list. */
+	total: number;
+	/** Some of them are not in `markers`: outside MARKER_LIMITS or beyond maxSent. */
+	truncated: boolean;
 }
 
 export interface CroppedSpectrum {
@@ -364,6 +401,50 @@ export function inTuneRange(hz: number): boolean {
 	return Number.isFinite(hz) && hz >= TUNE_LIMITS.minHz && hz <= TUNE_LIMITS.maxHz;
 }
 
+/** Whether a displayed frequency is one a marker may have: with the shift removed inside MARKER_LIMITS. */
+export function inMarkerRange(displayedHz: unknown, frequencyShiftHz = 0): boolean {
+	if (typeof displayedHz !== 'number' || !Number.isFinite(displayedHz) || !Number.isFinite(frequencyShiftHz)) return false;
+	const deviceHz = displayedHz - frequencyShiftHz;
+	return deviceHz >= MARKER_LIMITS.minHz && deviceHz <= MARKER_LIMITS.maxHz;
+}
+
+/**
+ * The Receiver's markers (device Hz) as receiver:markers sends them: in
+ * displayed Hz (shift added, rounded), only those inside MARKER_LIMITS, at
+ * most maxSent of them nearest referenceHz (displayed), sorted by frequency.
+ * A missing label becomes M<position in the Receiver's list>, as the
+ * Receiver's canvas names it; labels are clipped to labelMaxChars.
+ */
+export function markersForConsole(
+	list: ReadonlyArray<unknown>,
+	frequencyShiftHz: number,
+	referenceHz: number | null,
+): MarkersForConsole {
+	const shift = Number.isFinite(frequencyShiftHz) ? frequencyShiftHz : 0;
+	const usable: BridgeMarker[] = [];
+	list.forEach((entry, index) => {
+		if (!isRecord(entry) || typeof entry.frequencyHz !== 'number') return;
+		const frequencyHz = Math.round(entry.frequencyHz + shift);
+		if (!inMarkerRange(frequencyHz, shift)) return;
+		const label = typeof entry.label === 'string' ? entry.label.trim().slice(0, MARKER_LIMITS.labelMaxChars) : '';
+		usable.push({
+			id: isCommandId(entry.id) ? entry.id : null,
+			frequencyHz,
+			powerDb: typeof entry.powerDb === 'number' && Number.isFinite(entry.powerDb) ? entry.powerDb : null,
+			label: label || `M${index + 1}`,
+		});
+	});
+	let markers = usable;
+	if (markers.length > MARKER_LIMITS.maxSent) {
+		const reference = typeof referenceHz === 'number' && Number.isFinite(referenceHz) ? referenceHz : 0;
+		markers = [...markers]
+			.sort((a, b) => Math.abs(a.frequencyHz - reference) - Math.abs(b.frequencyHz - reference) || a.frequencyHz - b.frequencyHz)
+			.slice(0, MARKER_LIMITS.maxSent);
+	}
+	markers = [...markers].sort((a, b) => a.frequencyHz - b.frequencyHz || (a.id ?? '').localeCompare(b.id ?? ''));
+	return { markers, total: list.length, truncated: markers.length < list.length };
+}
+
 /** A gain value a control accepts: inside min..max and on its step. */
 export function onGainStep(value: number, control: { min: number; max: number; step: number }): boolean {
 	if (!Number.isFinite(value) || value < control.min || value > control.max) return false;
@@ -475,6 +556,12 @@ export function parseConsoleMessage(data: unknown): ConsoleCommand | null {
 			const range = clampDisplayRange(data.minDb, data.maxDb);
 			return range ? { type, id, ...range } : invalid;
 		}
+		case 'console:marker-add': {
+			const frequencyHz = optionalHz(data.frequencyHz);
+			return typeof frequencyHz === 'number' ? { type, id, frequencyHz } : invalid;
+		}
+		case 'console:marker-remove':
+			return isCommandId(data.markerId) ? { type, id, markerId: data.markerId } : invalid;
 		default:
 			return null;
 	}

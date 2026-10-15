@@ -22,7 +22,7 @@ function tuneView(rev: number, by: 'console' | 'receiver', receiverRev: number):
 
 /** A bridge state source driven by hand, with a send spy that must never be called. */
 function fakeBridge() {
-  let state: BridgeState = { phase: 'idle', build: 'built', hello: null, status: null, tune: null, lastResult: null };
+  let state: BridgeState = { phase: 'idle', build: 'built', hello: null, status: null, tune: null, markers: null, lastResult: null };
   const listeners = new Set<() => void>();
   const sent: unknown[] = [];
   const source: TuningSource & { send(command: unknown): void } = {
@@ -149,7 +149,7 @@ describe('watchReceiverDisplay', () => {
 
   /** A bridge state source whose console:display commands wait until answered by hand. */
   function displayBridge() {
-    let state: BridgeState = { phase: 'idle', build: 'built', hello: null, status: null, tune: null, lastResult: null };
+    let state: BridgeState = { phase: 'idle', build: 'built', hello: null, status: null, tune: null, markers: null, lastResult: null };
     const listeners = new Set<() => void>();
     const sent: Array<{ command: BridgeCommand; answer(result: BridgeResult): void }> = [];
     const source: DisplaySyncSource = {

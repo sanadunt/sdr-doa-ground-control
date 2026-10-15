@@ -9,6 +9,8 @@
  * queue; every command settles, with TIMEOUT when the frame does not answer.
  * The Receiver's tuning is kept as a TuneView: the highest tune rev seen in a
  * status or in a command result, so a tune result shows before the next status.
+ * Its marker list is kept as the newest receiver:markers (highest rev); it
+ * changes only when someone marks, so it is state like the status.
  * Nothing here touches `window` until attach(), so creating a bridge is safe
  * during server rendering.
  */
@@ -28,6 +30,7 @@ import type {
   BridgeCommand,
   ConsoleMessageType,
   ReceiverHello,
+  ReceiverMarkers,
   ReceiverStatus,
   ResultCode,
   ResultTune,
@@ -45,6 +48,8 @@ export interface BridgeResult {
   message?: string;
   /** The tuning after a tune, vfo, start or radio command, as the frame reported it. */
   tune?: ResultTune;
+  /** A marker-add's new marker. */
+  markerId?: string;
 }
 
 export interface BridgeLastResult extends BridgeResult {
@@ -73,6 +78,8 @@ export interface BridgeState {
   status: ReceiverStatus | null;
   /** null until a status with a tune stamp arrives from the attached frame. */
   tune: TuneView | null;
+  /** The Receiver's spectrum markers; null until the attached frame sends them. */
+  markers: ReceiverMarkers | null;
   lastResult: BridgeLastResult | null;
 }
 
@@ -171,7 +178,7 @@ interface PendingCommand {
   resolve(result: BridgeResult): void;
 }
 
-const INITIAL_STATE: BridgeState = Object.freeze({ phase: 'idle', build: 'unknown', hello: null, status: null, tune: null, lastResult: null });
+const INITIAL_STATE: BridgeState = Object.freeze({ phase: 'idle', build: 'unknown', hello: null, status: null, tune: null, markers: null, lastResult: null });
 
 /** The tuning a status reports; null when the frame sent no tune stamp. */
 export function tuneViewFromStatus(status: ReceiverStatus): TuneView | null {
@@ -310,13 +317,18 @@ export function createReceiverBridge(environment: BridgeEnvironment = browserEnv
       case 'receiver:result': {
         const entry = pending.get(message.result.id);
         if (!entry) return;
-        const { ok, code, message: text, tune } = message.result;
+        const { ok, code, message: text, tune, markerId } = message.result;
         const result: BridgeResult = { ok, code };
         if (text) result.message = text;
         if (tune) result.tune = tune;
+        if (markerId) result.markerId = markerId;
         settle(entry, result);
         return;
       }
+      case 'receiver:markers':
+        if (state.markers && message.markers.rev <= state.markers.rev) return;
+        setState({ markers: message.markers });
+        return;
       default:
         return;
     }
@@ -338,7 +350,7 @@ export function createReceiverBridge(environment: BridgeEnvironment = browserEnv
       target = frameWindow;
       lastStatusSeq = -1;
       postedSubscriptionKey = null;
-      setState({ phase: 'connecting', hello: null, status: null, tune: null });
+      setState({ phase: 'connecting', hello: null, status: null, tune: null, markers: null });
       post({ ch: BRIDGE_CHANNEL, v: BRIDGE_VERSION, type: 'console:hello' });
       helloTimer = env.setTimeout(() => {
         helloTimer = null;
@@ -354,7 +366,9 @@ export function createReceiverBridge(environment: BridgeEnvironment = browserEnv
       target = null;
       postedSubscriptionKey = null;
       lastStatusSeq = -1;
-      if (state.phase !== 'idle' || state.status !== null || state.hello !== null || state.tune !== null) setState({ phase: 'idle', hello: null, status: null, tune: null });
+      if (state.phase !== 'idle' || state.status !== null || state.hello !== null || state.tune !== null || state.markers !== null) {
+        setState({ phase: 'idle', hello: null, status: null, tune: null, markers: null });
+      }
     },
 
     send(command) {

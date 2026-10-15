@@ -18,8 +18,11 @@ export async function resolve(specifier, context, nextResolve) {
 
 const appDir = new URL('./browsdr_receiver_overlay/src/client/app/', import.meta.url);
 const protocol = await import(new URL('console-bridge-protocol.ts', appDir).href);
-const { installConsoleBridge, AUDIO_RESUME_WAIT_MS, RADIO_POLL_MS, RADIO_RESTART_WAIT_MS, SWEEP_STOP_WAIT_MS } = await import(new URL('console-bridge.ts', appDir).href);
+const {
+	installConsoleBridge, AUDIO_RESUME_WAIT_MS, MAX_QUEUED_MARKER_COMMANDS, RADIO_POLL_MS, RADIO_RESTART_WAIT_MS, SWEEP_STOP_WAIT_MS,
+} = await import(new URL('console-bridge.ts', appDir).href);
 const { connectionMethods } = await import(new URL('connection.ts', appDir).href);
+const { recordsMethods } = await import(new URL('records.ts', appDir).href);
 const { vfoMethods } = await import(new URL('vfo.ts', appDir).href);
 const { makeDefaultVfo, MODE_DEFAULTS } = await import(new URL('../vendor/BrowSDR/src/client/app/constants.ts', import.meta.url).href);
 
@@ -27,8 +30,8 @@ const {
 	BRIDGE_CHANNEL, BRIDGE_VERSION, FRAME_MESSAGE_TYPES, CONSOLE_MESSAGE_TYPES, LISTEN_MODES, RESULT_CODES,
 	STATUS_ERROR_CODES, SUBSCRIBE_LIMITS, SPECTRUM_FLOOR_DB, TUNE_SOURCES, SWEEP_LIMITS, STATUS_DEBOUNCE_MS,
 	STATUS_URGENT_MIN_MS, DISPLAY_DB_LIMITS, SAMPLE_RATES_HZ, GAIN_LIMITS, SWEEP_FFT_SIZES, SWEEP_VIEWS, SWEEP_SOURCES, SWEEP_PHASES,
-	SWEEP_SPAN_LIMITS, clampDisplayRange, clampSubscription, cropSpectrum, createFrameThrottle, decimateMaxHold, inSweepRange,
-	onGainStep, parseConsoleMessage, sweepMaxSpanHz,
+	SWEEP_SPAN_LIMITS, MARKER_LIMITS, MARKERS_THROTTLE_MS, clampDisplayRange, clampSubscription, cropSpectrum, createFrameThrottle,
+	decimateMaxHold, inMarkerRange, inSweepRange, markersForConsole, onGainStep, parseConsoleMessage, sweepMaxSpanHz,
 } = protocol;
 const {
 	SWEEP_MIN_FREQUENCY_HZ, SWEEP_MAX_FREQUENCY_HZ, SWEEP_MAX_BINS, SWEEP_SAMPLE_RATE_HZ, validateSweepConfig,
@@ -142,7 +145,9 @@ function receiverApp({ audioAllowed = true, openOk = true, mockSdrEnabled = fals
 	const watchers = [];
 	const audioPolicy = { allowed: audioAllowed };
 	// startRx: fails the next RX start (the stream could not start). sweep: the next scan start throws this error.
-	const failures = { startRx: false, sweep: null };
+	// markerSave: 'fail' fails every save of the marker set, 'defer' holds each until markerSaves[n]() resolves it.
+	const failures = { startRx: false, sweep: null, markerSave: null };
+	const markerSaves = [];
 	const backend = {
 		async open(target) { log.push(['open', target === 'mock' ? 'mock' : 'usb']); return openOk; },
 		async info() { return { name: log.some(entry => entry[0] === 'open' && entry[1] === 'mock') ? 'Mock SDR (Signal Gen)' : 'HackRF One' }; },
@@ -261,6 +266,23 @@ function receiverApp({ audioAllowed = true, openOk = true, mockSdrEnabled = fals
 		},
 		initSweepCanvas() { log.push('initSweepCanvas'); },
 		drawSweepSpectrum() { log.push('drawSweepSpectrum'); },
+		// The Receiver's marker list (records.ts) with its real add and remove; only the save to the console is faked.
+		records: { markers: [], markerSets: [], selectedMarkerSetId: '', markerSetName: '', markerFrequencyDrafts: {}, markedOnly: false, error: '' },
+		addReceiverMarker: recordsMethods.addReceiverMarker,
+		removeReceiverMarker: recordsMethods.removeReceiverMarker,
+		candidateFilterChanged() {},
+		async saveMarkerSet() {
+			log.push(['saveMarkerSet', this.records.markers.map(marker => marker.frequencyHz)]);
+			if (failures.markerSave === 'defer') await new Promise(resolve => markerSaves.push(resolve));
+			if (failures.markerSave === 'fail') {
+				this.records.error = 'Could not save marker set: HTTP 500';
+				return false;
+			}
+			this.records.error = '';
+			return true;
+		},
+		// sweep.ts measures a marker's power from the running scan's frame.
+		sweepPowerAt(frequencyHz) { log.push(['sweepPowerAt', frequencyHz]); return -42.5; },
 		// Both can open a confirm() or stop RX on their own; the bridge must never call them.
 		requestWorkspace() { throw new Error('requestWorkspace() from the bridge'); },
 		selectWorkspace() { throw new Error('selectWorkspace() from the bridge'); },
@@ -297,7 +319,7 @@ function receiverApp({ audioAllowed = true, openOk = true, mockSdrEnabled = fals
 		}
 		if (resumeRecording) log.push('resumeRecording');
 	});
-	return { app, log, watchers, flushWatchers, audioPolicy, failures };
+	return { app, log, watchers, flushWatchers, audioPolicy, failures, markerSaves };
 }
 
 /** Installs a bridge on a fake app and frame; the stats timer of a started RX is cleared afterwards. */
@@ -335,18 +357,18 @@ function setup(t, { frame: frameOptions = {}, app: appOptions = {} } = {}) {
 test('protocol constants match the console contract', () => {
 	assert.equal(BRIDGE_CHANNEL, 'sdr-console-receiver');
 	assert.equal(BRIDGE_VERSION, 1);
-	assert.deepEqual([...FRAME_MESSAGE_TYPES], ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep']);
+	assert.deepEqual([...FRAME_MESSAGE_TYPES], ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep', 'receiver:markers']);
 	assert.deepEqual([...CONSOLE_MESSAGE_TYPES], [
 		'console:hello', 'console:subscribe', 'console:start', 'console:stop', 'console:tune', 'console:vfo', 'console:listen',
 		'console:display', 'console:gains', 'console:radio', 'console:sweep-start', 'console:sweep-stop', 'console:sweep-config',
-		'console:sweep-display',
+		'console:sweep-display', 'console:marker-add', 'console:marker-remove',
 	]);
 	assert.deepEqual([...LISTEN_MODES], ['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw']);
 	assert.deepEqual([...LISTEN_MODES].sort(), Object.keys(MODE_DEFAULTS).sort(), 'every Receiver mode, nothing else');
 	assert.deepEqual([...RESULT_CODES], [
 		'OK', 'NOT_READY', 'INVALID_COMMAND', 'NO_WEBUSB', 'NEEDS_PAIRING', 'NEEDS_DEVICE_CHOICE', 'MOCK_UNAVAILABLE',
 		'CONNECT_FAILED', 'SWEEP_BUSY', 'RX_NOT_RUNNING', 'OUT_OF_RANGE', 'AUDIO_BLOCKED', 'RECORDING_ACTIVE', 'SWEEP_UNSUPPORTED',
-		'SWEEP_FAILED', 'TIMEOUT',
+		'SWEEP_FAILED', 'MARKER_LIMIT', 'MARKER_NOT_FOUND', 'MARKER_SAVE_FAILED', 'TIMEOUT',
 	]);
 	assert.deepEqual([...STATUS_ERROR_CODES], ['USB_LOST', 'RX_ERROR', 'NO_WEBUSB']);
 	assert.deepEqual({ ...SUBSCRIBE_LIMITS }, {
@@ -586,6 +608,7 @@ test('the bridge greets on install and on every console hello, then reports the 
 	assert.deepEqual(hello, { ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:hello', protocol: 1, mockAvailable: true, webusb: true });
 	assert.equal(frame.posted[0].message.type, 'receiver:hello');
 	assert.equal(frame.posted[1].message.type, 'receiver:status', 'status follows hello');
+	assert.equal(frame.posted[2].message.type, 'receiver:markers', 'then the marker list');
 	assert.equal(messages('receiver:status')[0].pairedCount, null, 'unknown until WebUSB answers');
 	await settle();
 	clock.advance(100);
@@ -593,7 +616,7 @@ test('the bridge greets on install and on every console hello, then reports the 
 
 	frame.send('console:hello');
 	assert.equal(messages('receiver:hello').length, 2);
-	assert.equal(frame.posted.at(-1).message.type, 'receiver:status', 'an immediate status answers each hello');
+	assert.deepEqual(frame.posted.slice(-3).map(entry => entry.message.type), ['receiver:hello', 'receiver:status', 'receiver:markers'], 'an immediate status and the markers answer each hello');
 	const seqs = messages('receiver:status').map(status => status.seq);
 	assert.deepEqual(seqs, [...seqs].sort((a, b) => a - b));
 	assert.equal(new Set(seqs).size, seqs.length);
@@ -2104,4 +2127,335 @@ test('a tune in Spektrum mode during a dock scan only sets the next RX, stamped 
 	clock.advance(100);
 	assert.deepEqual(messages('receiver:status').at(-1).tune, { rev: 1, by: 'console', id: 'sk2', receiverRev: 0 });
 	assert.equal(app.sweep.active, true, 'the scan keeps running');
+});
+
+// ---------------------------------------------------------------------------
+// Spectrum markers (receiver:markers, console:marker-add, console:marker-remove)
+
+/** A Receiver marker as records.ts stores it, in device Hz. */
+const receiverMarker = (id, frequencyHz, label = `Marker ${id}`, powerDb = null) => ({ id, frequencyHz, powerDb, label });
+
+test('marker constants: the RadioSpectrum sweep range in device Hz, 512 sent, the marker set limit', () => {
+	assert.deepEqual({ ...MARKER_LIMITS }, { minHz: 1_000_000, maxHz: 7_250_000_000, maxSent: 512, maxTotal: 10_000, labelMaxChars: 80 });
+	assert.deepEqual({ minHz: MARKER_LIMITS.minHz, maxHz: MARKER_LIMITS.maxHz }, { ...SWEEP_LIMITS }, 'the range a scan covers');
+	assert.equal(MARKERS_THROTTLE_MS, 100);
+	assert.equal(MAX_QUEUED_MARKER_COMMANDS, 16);
+	// Displayed Hz; the limits apply with the shift removed, so an upconverter's HF markers are fine.
+	assert.equal(inMarkerRange(433_920_000), true);
+	assert.equal(inMarkerRange(7_250_000_000), true);
+	assert.equal(inMarkerRange(7_250_000_001), false);
+	assert.equal(inMarkerRange(999_999), false);
+	assert.equal(inMarkerRange(500_000, -125_000_000), true, '500 kHz behind a -125 MHz upconverter is 125.5 MHz on the radio');
+	assert.equal(inMarkerRange(-124_500_000, -125_000_000), false);
+	for (const value of [Number.NaN, Infinity, '433920000', null]) assert.equal(inMarkerRange(value), false, String(value));
+});
+
+test('parseConsoleMessage reads the marker commands', () => {
+	const envelope = (type, payload) => ({ ch: BRIDGE_CHANNEL, v: BRIDGE_VERSION, type, id: 'm1', ...payload });
+	assert.deepEqual(parseConsoleMessage(envelope('console:marker-add', { frequencyHz: 433_920_000.4 })), { type: 'console:marker-add', id: 'm1', frequencyHz: 433_920_000 });
+	assert.deepEqual(parseConsoleMessage(envelope('console:marker-add', { frequencyHz: 433_920_000, powerDb: -20, label: 'x' })), { type: 'console:marker-add', id: 'm1', frequencyHz: 433_920_000 }, 'the frame measures the power itself');
+	assert.deepEqual(parseConsoleMessage(envelope('console:marker-remove', { markerId: '8d6f-11aa' })), { type: 'console:marker-remove', id: 'm1', markerId: '8d6f-11aa' });
+	for (const [type, payload] of [
+		['console:marker-add', {}], ['console:marker-add', { frequencyHz: '433920000' }], ['console:marker-add', { frequencyHz: Number.NaN }],
+		['console:marker-remove', {}], ['console:marker-remove', { markerId: 'has space' }], ['console:marker-remove', { markerId: 'x'.repeat(65) }],
+	]) {
+		assert.deepEqual(parseConsoleMessage(envelope(type, payload)), { type: 'invalid', id: 'm1' }, `${type} ${JSON.stringify(payload)}`);
+	}
+});
+
+test('markersForConsole sends displayed Hz in frequency order, names unlabeled markers like the Receiver and drops unusable ones', () => {
+	const list = [
+		receiverMarker('b', 558_920_000, '  Tower  '),
+		receiverMarker('a', 300_000_000, ''),
+		{ id: 'bad id', frequencyHz: 400_000_000, powerDb: Number.NaN, label: 'L'.repeat(120) },
+		receiverMarker('high', 7_300_000_000),
+		receiverMarker('nan', Number.NaN),
+		null,
+	];
+	const sent = markersForConsole(list, -125_000_000, 0);
+	assert.deepEqual(sent.markers, [
+		{ id: 'a', frequencyHz: 175_000_000, powerDb: null, label: 'M2' },
+		{ id: null, frequencyHz: 275_000_000, powerDb: null, label: 'L'.repeat(80) },
+		{ id: 'b', frequencyHz: 433_920_000, powerDb: null, label: 'Tower' },
+	]);
+	assert.equal(sent.total, 6);
+	assert.equal(sent.truncated, true, 'some of the list is not sent');
+	assert.deepEqual(markersForConsole([receiverMarker('x', 100e6, 'X', -51.25)], 0, null), {
+		markers: [{ id: 'x', frequencyHz: 100_000_000, powerDb: -51.25, label: 'X' }], total: 1, truncated: false,
+	});
+});
+
+test('the bridge sends the marker list on install and with every console hello', async t => {
+	const { frame, app, messages } = setup(t);
+	const [first] = messages('receiver:markers');
+	assert.deepEqual(first, {
+		ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:markers', rev: 0, setId: null, setName: null, frequencyShiftHz: 0, markers: [], total: 0, truncated: false,
+	});
+	app.records.selectedMarkerSetId = 'set-1';
+	app.records.markerSetName = 'Pita UHF';
+	frame.send('console:hello');
+	const second = messages('receiver:markers').at(-1);
+	assert.equal(messages('receiver:markers').length, 2);
+	assert.deepEqual([second.setId, second.setName], ['set-1', 'Pita UHF']);
+});
+
+test('marker-add marks in displayed Hz, saves to the selected set and answers after the list that shows it', async t => {
+	const { frame, app, log, messages, result } = setup(t);
+	forbidDialogs(t);
+	app.radio.frequencyShift = -125;
+	app.records.selectedMarkerSetId = 'set-1';
+	app.records.markerSetName = 'Pita UHF';
+	frame.send('console:marker-add', { id: 'ma1', frequencyHz: 433_920_000 });
+	await settle();
+	const added = app.records.markers;
+	assert.equal(added.length, 1);
+	assert.equal(added[0].frequencyHz, 558_920_000, 'stored like a Receiver marker, in device Hz');
+	assert.equal(added[0].powerDb, null, 'no scan runs: no power');
+	assert.equal(added[0].label, 'Marker 1');
+	assert.deepEqual(log.filter(entry => entry[0] === 'saveMarkerSet'), [['saveMarkerSet', [558_920_000]]]);
+	assert.equal(log.some(entry => entry[0] === 'sweepPowerAt'), false);
+	assert.deepEqual(result('ma1'), { ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 'ma1', ok: true, code: 'OK', markerId: added[0].id });
+	const types = frame.posted.map(entry => entry.message.type);
+	const list = messages('receiver:markers').at(-1);
+	assert.ok(types.lastIndexOf('receiver:markers') < types.indexOf('receiver:result'), 'the list comes first');
+	assert.equal(list.rev, 1);
+	assert.deepEqual(list.markers, [{ id: added[0].id, frequencyHz: 433_920_000, powerDb: null, label: 'Marker 1' }]);
+	assert.equal(list.frequencyShiftHz, -125_000_000);
+});
+
+test('marker-add without a selected set keeps the marker in the working list only', async t => {
+	const { frame, app, log, messages, result } = setup(t);
+	frame.send('console:marker-add', { id: 'ma2', frequencyHz: 100_000_000 });
+	await settle();
+	assert.equal(result('ma2').code, 'OK');
+	assert.equal(app.records.markers.length, 1);
+	assert.equal(log.some(entry => entry[0] === 'saveMarkerSet'), false);
+	assert.equal(messages('receiver:markers').at(-1).setId, null);
+});
+
+test('marker commands are allowed during a wide scan, which measures the power, and during a scan listen', async t => {
+	const { frame, app, log, result } = setup(t);
+	forbidDialogs(t);
+	app.sweep.active = true;
+	frame.send('console:marker-add', { id: 'ms1', frequencyHz: 433_920_000 });
+	await settle();
+	assert.equal(result('ms1').code, 'OK');
+	assert.deepEqual(log.filter(entry => entry[0] === 'sweepPowerAt'), [['sweepPowerAt', 433_920_000]]);
+	assert.equal(app.records.markers[0].powerDb, -42.5, 'from the scan frame, as a click on the Spektrum canvas measures it');
+	app.sweep.active = false;
+	app.sweep.listening = true;
+	frame.send('console:marker-add', { id: 'ms2', frequencyHz: 434_000_000 });
+	await settle();
+	assert.equal(result('ms2').code, 'OK');
+	assert.equal(app.records.markers[1].powerDb, null);
+	frame.send('console:marker-remove', { id: 'ms3', markerId: app.records.markers[0].id });
+	await settle();
+	assert.equal(result('ms3').code, 'OK');
+	assert.equal(app.records.markers.length, 1);
+});
+
+test('marker-add refuses a frequency outside the RadioSpectrum range and a full list', async t => {
+	const { frame, app, result } = setup(t);
+	frame.send('console:marker-add', { id: 'mr1', frequencyHz: 500_000 });
+	frame.send('console:marker-add', { id: 'mr2', frequencyHz: 7_250_000_001 });
+	await settle();
+	assert.equal(result('mr1').code, 'OUT_OF_RANGE');
+	assert.equal(result('mr2').code, 'OUT_OF_RANGE');
+	app.radio.frequencyShift = -125;
+	frame.send('console:marker-add', { id: 'mr3', frequencyHz: 500_000 });
+	frame.send('console:marker-add', { id: 'mr4', frequencyHz: 6_500_000_000 });
+	await settle();
+	assert.equal(result('mr3').code, 'OK', 'above 6 GHz and below 1 MHz displayed are fine on the radio side');
+	assert.equal(result('mr4').code, 'OK');
+	assert.deepEqual(app.records.markers.map(marker => marker.frequencyHz), [125_500_000, 6_625_000_000]);
+	app.records.markers = Array.from({ length: MARKER_LIMITS.maxTotal }, (_value, index) => receiverMarker(`f${index}`, 100e6 + index * 1e3));
+	frame.send('console:marker-add', { id: 'mr5', frequencyHz: 433_920_000 });
+	await settle();
+	assert.equal(result('mr5').code, 'MARKER_LIMIT');
+	assert.equal(app.records.markers.length, MARKER_LIMITS.maxTotal);
+});
+
+test('a failed save keeps the marker and answers MARKER_SAVE_FAILED with its id and the Receiver text', async t => {
+	const { frame, app, failures, messages, result } = setup(t);
+	app.records.selectedMarkerSetId = 'set-1';
+	app.records.markerSetName = 'Pita UHF';
+	failures.markerSave = 'fail';
+	frame.send('console:marker-add', { id: 'mf1', frequencyHz: 433_920_000 });
+	await settle();
+	const added = app.records.markers[0];
+	assert.deepEqual(result('mf1'), {
+		ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 'mf1', ok: false, code: 'MARKER_SAVE_FAILED', message: 'Could not save marker set: HTTP 500', markerId: added.id,
+	});
+	assert.equal(messages('receiver:markers').at(-1).markers.length, 1, 'still in the list');
+	frame.send('console:marker-remove', { id: 'mf2', markerId: added.id });
+	await settle();
+	assert.equal(result('mf2').code, 'MARKER_SAVE_FAILED');
+	assert.equal(app.records.markers.length, 0, 'removed from the list');
+});
+
+test('marker-remove removes by id; an unknown id is MARKER_NOT_FOUND', async t => {
+	const { frame, app, log, messages, result } = setup(t);
+	app.records.markers = [receiverMarker('m-1', 433_920_000), receiverMarker('m-2', 434_000_000)];
+	app.records.selectedMarkerSetId = 'set-1';
+	app.records.markerSetName = 'Pita UHF';
+	frame.send('console:marker-remove', { id: 'mx1', markerId: 'm-1' });
+	await settle();
+	assert.deepEqual(result('mx1'), { ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 'mx1', ok: true, code: 'OK' });
+	assert.deepEqual(app.records.markers.map(marker => marker.id), ['m-2']);
+	assert.deepEqual(log.filter(entry => entry[0] === 'saveMarkerSet'), [['saveMarkerSet', [434_000_000]]]);
+	assert.deepEqual(messages('receiver:markers').at(-1).markers.map(marker => marker.id), ['m-2']);
+	frame.send('console:marker-remove', { id: 'mx2', markerId: 'm-1' });
+	await settle();
+	assert.equal(result('mx2').code, 'MARKER_NOT_FOUND');
+	frame.send('console:marker-remove', { id: 'mx3', markerId: 'bad id' });
+	frame.send('console:marker-add', { id: 'mx4' });
+	assert.equal(result('mx3').code, 'INVALID_COMMAND');
+	assert.equal(result('mx4').code, 'INVALID_COMMAND');
+});
+
+test('marker commands run one after another, never behind a start, and at most 16 wait', async t => {
+	const { frame, app, failures, markerSaves, result } = setup(t, { app: { mockSdrEnabled: true } });
+	app.records.selectedMarkerSetId = 'set-1';
+	app.records.markerSetName = 'Pita UHF';
+	failures.markerSave = 'defer';
+	// A start that never finishes connecting holds the lifecycle queue.
+	app.connectMock = () => new Promise(() => {});
+	frame.send('console:start', { id: 'st', mock: true, listen: false });
+	frame.send('console:marker-add', { id: 'q1', frequencyHz: 433_920_000 });
+	frame.send('console:marker-add', { id: 'q2', frequencyHz: 434_000_000 });
+	await settle();
+	assert.equal(app.records.markers.length, 1, 'the second add waits for the first save');
+	assert.equal(markerSaves.length, 1);
+	markerSaves[0]();
+	await settle();
+	assert.equal(result('q1').code, 'OK');
+	assert.equal(app.records.markers.length, 2);
+	markerSaves[1]();
+	await settle();
+	assert.equal(result('q2').code, 'OK');
+	assert.equal(result('st'), undefined, 'the start still connects');
+	for (let index = 0; index < MAX_QUEUED_MARKER_COMMANDS + 2; index++) frame.send('console:marker-add', { id: `qq${index}`, frequencyHz: 435_000_000 + index * 1e3 });
+	assert.equal(result(`qq${MAX_QUEUED_MARKER_COMMANDS}`).code, 'NOT_READY');
+	assert.equal(result(`qq${MAX_QUEUED_MARKER_COMMANDS + 1}`).code, 'NOT_READY');
+	assert.equal(result('qq0'), undefined);
+});
+
+test('Receiver-page marker changes reach the console at once, then at most every 100 ms, each counted once', async t => {
+	const { app, clock, flushWatchers, messages } = setup(t);
+	clock.advance(MARKERS_THROTTLE_MS);
+	const count = () => messages('receiver:markers').length;
+	const before = count();
+	app.records.markers.push(receiverMarker('p1', 433_920_000));
+	flushWatchers();
+	assert.equal(count(), before + 1, 'the first change goes at once');
+	assert.equal(messages('receiver:markers').at(-1).rev, 1);
+	app.records.markers.push(receiverMarker('p2', 434_000_000));
+	flushWatchers();
+	clock.advance(10);
+	app.records.markers[1].label = 'Repeater';
+	flushWatchers();
+	assert.equal(count(), before + 1, 'later changes wait for the window');
+	clock.advance(MARKERS_THROTTLE_MS);
+	assert.equal(count(), before + 2);
+	const latest = messages('receiver:markers').at(-1);
+	assert.equal(latest.rev, 3);
+	assert.deepEqual(latest.markers.map(marker => marker.label), ['Marker p1', 'Repeater']);
+	flushWatchers();
+	clock.advance(500);
+	assert.equal(count(), before + 2, 'nothing changed, nothing sent');
+
+	// Loading another set on the Receiver page (selectMarkerSet) replaces the list.
+	app.records.selectedMarkerSetId = 'set-2';
+	app.records.markerSetName = 'HF';
+	app.records.markers = [receiverMarker('h1', 14_200_000)];
+	flushWatchers();
+	const loaded = messages('receiver:markers').at(-1);
+	assert.deepEqual([loaded.rev, loaded.setId, loaded.markers.length], [4, 'set-2', 1]);
+	clock.advance(MARKERS_THROTTLE_MS);
+	// A Freq Shift change moves every displayed frequency.
+	app.radio.frequencyShift = -125;
+	flushWatchers();
+	const shifted = messages('receiver:markers').at(-1);
+	assert.deepEqual([shifted.rev, shifted.frequencyShiftHz, shifted.markers[0].frequencyHz], [5, -125_000_000, -110_800_000]);
+});
+
+test('a long list sends the 512 markers nearest the RX centre, again when the centre moves', async t => {
+	const { app, clock, flushWatchers, messages } = setup(t);
+	clock.advance(MARKERS_THROTTLE_MS);
+	app.records.markers = Array.from({ length: 600 }, (_value, index) => receiverMarker(`n${index}`, 100_000_000 + index * 100_000));
+	flushWatchers();
+	const first = messages('receiver:markers').at(-1);
+	assert.equal(first.total, 600);
+	assert.equal(first.truncated, true);
+	assert.equal(first.markers.length, 512);
+	// Centre 100 MHz: the 512 lowest.
+	assert.deepEqual([first.markers[0].frequencyHz, first.markers.at(-1).frequencyHz], [100_000_000, 151_100_000]);
+	clock.advance(MARKERS_THROTTLE_MS);
+	app.radio.centerFreq = 159.9;
+	flushWatchers();
+	const moved = messages('receiver:markers').at(-1);
+	assert.equal(moved.rev, first.rev + 1);
+	assert.equal(moved.markers.at(-1).frequencyHz, 159_900_000, 'the top of the list is in range now');
+	assert.equal(moved.markers.length, 512);
+	// A short list does not follow the centre.
+	clock.advance(MARKERS_THROTTLE_MS);
+	app.records.markers = [receiverMarker('s1', 100e6)];
+	flushWatchers();
+	const sent = messages('receiver:markers').length;
+	clock.advance(MARKERS_THROTTLE_MS);
+	app.radio.centerFreq = 433.92;
+	flushWatchers();
+	clock.advance(MARKERS_THROTTLE_MS);
+	assert.equal(messages('receiver:markers').length, sent);
+});
+
+test('the marker queue never opens a dialog and the real records.ts saves to the selected set through the console API', async t => {
+	const { frame, app, result, messages } = setup(t);
+	// The real save (records.ts and receiver-records-api.ts) against a fake console.
+	app.saveMarkerSet = recordsMethods.saveMarkerSet;
+	const requests = [];
+	let failNext = false;
+	const saved = { window: globalThis.window, fetch: globalThis.fetch };
+	globalThis.window = {
+		setTimeout: (callback, ms) => setTimeout(callback, ms),
+		clearTimeout: handle => clearTimeout(handle),
+		confirm: () => { throw new Error('confirm() in the hidden Receiver frame'); },
+	};
+	globalThis.fetch = async (url, init) => {
+		const body = JSON.parse(init.body);
+		requests.push({ url, method: init.method, body });
+		if (failNext) return { ok: false, status: 500, text: async () => JSON.stringify({ error: 'disk full' }) };
+		return { ok: true, status: 200, text: async () => JSON.stringify({ id: body.id, name: body.name, markers: body.markers }) };
+	};
+	t.after(() => Object.assign(globalThis, saved));
+	app.records.selectedMarkerSetId = 'set-1';
+	app.records.markerSetName = 'Pita UHF';
+	frame.send('console:marker-add', { id: 'rr1', frequencyHz: 433_920_000 });
+	await settle(30);
+	const added = app.records.markers[0];
+	assert.equal(result('rr1').code, 'OK');
+	assert.equal(result('rr1').markerId, added.id);
+	assert.deepEqual(requests.map(request => [request.url, request.method, request.body.id, request.body.name, request.body.markers.length]), [
+		['/api/receiver/marker-sets', 'POST', 'set-1', 'Pita UHF', 1],
+	]);
+	assert.equal(requests[0].body.markers[0].id, added.id, 'the id is kept');
+	assert.equal(messages('receiver:markers').at(-1).markers[0].id, added.id);
+	failNext = true;
+	frame.send('console:marker-add', { id: 'rr2', frequencyHz: 434_000_000 });
+	await settle(30);
+	assert.equal(result('rr2').code, 'MARKER_SAVE_FAILED');
+	assert.equal(result('rr2').message, 'Could not save marker set: disk full');
+	assert.equal(app.records.markers.length, 2);
+});
+
+test('dispose stops a pending marker list', async t => {
+	const { app, bridge, clock, flushWatchers, messages } = setup(t);
+	app.records.markers.push(receiverMarker('d1', 433_920_000));
+	flushWatchers();
+	assert.ok(clock.pending() > 0, 'the list waits for the window after install');
+	const sent = messages('receiver:markers').length;
+	bridge.dispose();
+	assert.equal(clock.pending(), 0);
+	clock.advance(1000);
+	assert.equal(messages('receiver:markers').length, sent);
 });

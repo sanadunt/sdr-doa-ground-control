@@ -37,6 +37,7 @@ const SHARED = [
 	'SWEEP_SOURCES',
 	'SWEEP_PHASES',
 	'SWEEP_SPAN_LIMITS',
+	'MARKER_LIMITS',
 ];
 
 for (const name of SHARED) {
@@ -201,4 +202,49 @@ test('the scan state and a scan frame the frame sends reach the console as sent'
 	assert.equal(frame.binCount, 512);
 	assert.deepEqual([frame.startHz, frame.stopHz, frame.resolutionHz, frame.sweepCount, frame.view], [100_000_000, 1_000_000_000, 2441.40625, 7, 'current']);
 	assert.notEqual(frame.bins, bins, 'a copy');
+});
+
+test('marker range checks agree, and a marker list the frame sends reaches the console as sent', () => {
+	for (const [hz, shift] of [
+		[433_920_000, 0], [1_000_000, 0], [999_999, 0], [7_250_000_000, 0], [7_250_000_001, 0], [500_000, -125_000_000],
+		[-124_500_000, -125_000_000], [6_500_000_000, -125_000_000], [Number.NaN, 0], ['1e8', 0], [1e8, Number.NaN],
+	]) {
+		assert.equal(consoleSide.inMarkerRange(hz, shift), frameSide.inMarkerRange(hz, shift), `${hz} @${shift}`);
+	}
+	const receiverList = [
+		{ id: 'c3d1-aa', frequencyHz: 558_920_000, powerDb: -48.25, label: 'Tower' },
+		{ id: 'not a usable id', frequencyHz: 300_000_000, powerDb: null, label: '' },
+		{ id: 'hf-1', frequencyHz: 139_200_000, powerDb: null, label: 'L'.repeat(90) },
+		{ id: 'out', frequencyHz: 7_300_000_000, powerDb: null, label: 'Out' },
+	];
+	const shift = -125_000_000;
+	const sent = frameSide.markersForConsole(receiverList, shift, 433_920_000);
+	const wire = { ch: frameSide.BRIDGE_CHANNEL, v: frameSide.BRIDGE_VERSION, type: 'receiver:markers', rev: 7, setId: 'set-1', setName: 'Pita UHF', frequencyShiftHz: shift, ...sent };
+	const parsed = consoleSide.parseFrameMessage(wire);
+	assert.equal(parsed.type, 'receiver:markers');
+	const { ch: _ch, v: _v, type: _type, ...payload } = wire;
+	assert.deepEqual(parsed.markers, payload);
+	assert.equal(parsed.markers.markers.length, 3);
+	assert.equal(parsed.markers.truncated, true);
+});
+
+test('marker commands the console sends are commands the frame accepts unchanged', () => {
+	for (const command of [
+		{ type: 'console:marker-add', frequencyHz: 433_920_000 },
+		{ type: 'console:marker-add', frequencyHz: 433_920_000.4 },
+		{ type: 'console:marker-remove', markerId: 'c3d1-aa' },
+	]) {
+		const wire = consoleSide.commandMessage('c9-m', command);
+		const parsed = frameSide.parseConsoleMessage(wire);
+		const { ch: _ch, v: _v, ...payload } = wire;
+		assert.deepEqual(parsed, payload, JSON.stringify(command));
+		assert.notEqual(parsed.type, 'invalid', JSON.stringify(command));
+	}
+	for (const code of ['MARKER_LIMIT', 'MARKER_NOT_FOUND', 'MARKER_SAVE_FAILED']) {
+		assert.ok(frameSide.RESULT_CODES.indexOf(code) > frameSide.RESULT_CODES.indexOf('SWEEP_FAILED'), code);
+		assert.ok(frameSide.RESULT_CODES.indexOf(code) < frameSide.RESULT_CODES.indexOf('TIMEOUT'), code);
+	}
+	assert.equal(consoleSide.LONG_COMMAND_TYPES.has('console:marker-add'), false, 'a marker command has the short timeout');
+	const result = consoleSide.parseFrameMessage({ ch: frameSide.BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 'c9-m', ok: false, code: 'MARKER_SAVE_FAILED', message: 'Could not save marker set: disk full', markerId: 'c3d1-aa' });
+	assert.deepEqual(result.result, { id: 'c9-m', ok: false, code: 'MARKER_SAVE_FAILED', message: 'Could not save marker set: disk full', markerId: 'c3d1-aa' });
 });

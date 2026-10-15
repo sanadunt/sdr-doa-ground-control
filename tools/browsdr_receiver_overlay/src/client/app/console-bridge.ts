@@ -40,6 +40,17 @@
  * writeTuning(), which stamps the change with the command id. Any other change
  * is the Receiver page's. receiver:status carries the stamp (tune), so the
  * console can tell a Receiver-page retune from its own.
+ *
+ * Markers: the Receiver's "Penanda spektrum" list (records.markers) is the one
+ * store. receiver:markers sends it in displayed Hz (at most MARKER_LIMITS.maxSent,
+ * nearest the RX centre or the running scan) on every change, at once after a
+ * quiet spell and then at most every MARKERS_THROTTLE_MS. console:marker-add and
+ * console:marker-remove run one after another on their own queue, never behind a
+ * start, and only through addReceiverMarker and removeReceiverMarker, which save
+ * to a marker set the operator selected on the Receiver page (never a new one,
+ * so no name conflict asks). The bridge never calls saveMarkerSet,
+ * deleteMarkerSet, selectMarkerSet or requestWorkspace, whose confirm() would be
+ * invisible here. A marker result follows the receiver:markers that shows it.
  */
 import type { AppInstance } from './types';
 import { lookupDevice } from '../device-catalog';
@@ -57,8 +68,13 @@ import {
 	cropSpectrum,
 	decimateMaxHold,
 	GAIN_LIMITS,
+	isCommandId,
+	inMarkerRange,
 	inSweepRange,
 	inTuneRange,
+	MARKER_LIMITS,
+	MARKERS_THROTTLE_MS,
+	markersForConsole,
 	onGainStep,
 	parseConsoleMessage,
 	SAMPLE_RATES_HZ,
@@ -168,6 +184,10 @@ const MAX_SAMPLE_RATES = 16;
 export const SWEEP_STOP_WAIT_MS = 15_000;
 /** The Receiver's Graph min./max. before anything is set (state.ts). */
 const SWEEP_DISPLAY_DEFAULT = { minDb: -60, maxDb: 0 } as const;
+/** Marker commands waiting on their queue; more are answered NOT_READY. */
+export const MAX_QUEUED_MARKER_COMMANDS = 16;
+/** receiver:markers names the selected marker set in at most this many characters. */
+const MAX_SET_TEXT_CHARS = 80;
 
 function browserEnvironment(): ConsoleBridgeEnvironment {
 	return {
@@ -265,6 +285,13 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 	let lifecycle: Promise<void> = Promise.resolve();
 	// FFT frames drawn by a running Listener outside an RX restart; console:radio waits for the next one.
 	let rxFrames = 0;
+	// Markers: see noteMarkers() and scheduleMarkers().
+	let markerRev = 0;
+	let lastMarkersKey = '';
+	let markersTimer: TimerHandle | null = null;
+	let lastMarkersAt = -Infinity;
+	let markerChain: Promise<void> = Promise.resolve();
+	let markersQueued = 0;
 
 	function post(message: Record<string, unknown>, transfer: Transferable[] = []): void {
 		if (disposed) return;
@@ -496,8 +523,11 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		post({ type: 'receiver:hello', protocol: BRIDGE_VERSION, mockAvailable: Boolean(app.mockSdrEnabled), webusb: hasWebUsb() });
 	}
 
-	/** withTune: the reply of console:tune, console:vfo, console:start and console:radio, which carries the tuning after it. */
-	function reply(id: string, code: ResultCode, message?: string, withTune = false): void {
+	/**
+	 * withTune: the reply of console:tune, console:vfo, console:start and console:radio, which carries the
+	 * tuning after it. fields: more result fields (markerId).
+	 */
+	function reply(id: string, code: ResultCode, message?: string, withTune = false, fields: Record<string, unknown> = {}): void {
 		post({
 			type: 'receiver:result',
 			id,
@@ -505,8 +535,81 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 			code,
 			...(message ? { message } : {}),
 			...(withTune ? { tune: resultTune() } : {}),
+			...fields,
 		});
 		scheduleStatus();
+	}
+
+	function markerList(): unknown[] {
+		const list: unknown = app.records?.markers;
+		return Array.isArray(list) ? list : [];
+	}
+
+	/** What the sent markers are nearest to, in displayed Hz: the middle of a running scan, otherwise the RX centre. */
+	function markerReferenceHz(): number | null {
+		if (app.sweep?.active) {
+			const sweep = sweepState();
+			return (sweep.startHz + sweep.stopHz) / 2;
+		}
+		return mhzToHz(app.radio?.centerFreq);
+	}
+
+	function setText(value: unknown): string | null {
+		return typeof value === 'string' && value.trim() ? value.trim().slice(0, MAX_SET_TEXT_CHARS) : null;
+	}
+
+	/** Everything receiver:markers reports, as one string; the view position only when the list is cut around it. */
+	function markersKey(): string {
+		const records = (app.records ?? {}) as Record<string, unknown>;
+		const list = markerList();
+		let key = `${String(records.selectedMarkerSetId ?? '')}|${String(records.markerSetName ?? '')}|${frequencyShiftHz()}|${list.length}`;
+		for (const entry of list) {
+			const marker = (entry ?? {}) as Record<string, unknown>;
+			key += `|${String(marker.id)}:${String(marker.frequencyHz)}:${String(marker.powerDb)}:${String(marker.label)}`;
+		}
+		if (list.length > MARKER_LIMITS.maxSent) key += `|@${markerReferenceHz()}`;
+		return key;
+	}
+
+	/** Counts a change of the markers once; true when there was one. */
+	function noteMarkers(): boolean {
+		const key = markersKey();
+		if (key === lastMarkersKey) return false;
+		lastMarkersKey = key;
+		markerRev++;
+		return true;
+	}
+
+	function sendMarkersNow(): void {
+		if (markersTimer !== null) {
+			env.clearTimeout(markersTimer);
+			markersTimer = null;
+		}
+		const records = (app.records ?? {}) as Record<string, unknown>;
+		const shift = frequencyShiftHz();
+		lastMarkersAt = env.monotonicNow();
+		post({
+			type: 'receiver:markers',
+			rev: markerRev,
+			setId: setText(records.selectedMarkerSetId),
+			setName: setText(records.markerSetName),
+			frequencyShiftHz: shift,
+			...markersForConsole(markerList(), shift, markerReferenceHz()),
+		});
+	}
+
+	/** At once after a quiet MARKERS_THROTTLE_MS, otherwise once more at its end with the latest list. */
+	function scheduleMarkers(): void {
+		if (disposed || markersTimer !== null) return;
+		const waitMs = lastMarkersAt + MARKERS_THROTTLE_MS - env.monotonicNow();
+		if (waitMs <= 0) {
+			sendMarkersNow();
+			return;
+		}
+		markersTimer = env.setTimeout(() => {
+			markersTimer = null;
+			if (!disposed) sendMarkersNow();
+		}, waitMs);
 	}
 
 	async function pairedHackRfs(): Promise<USBDevice[]> {
@@ -1007,6 +1110,79 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		return 'OK';
 	}
 
+	/** The Receiver's records error, through tm(), for a marker save that failed. */
+	function recordsError(): string | undefined {
+		const error: unknown = app.records?.error;
+		if (typeof error !== 'string' || !error) return undefined;
+		return typeof app.tm === 'function' ? app.tm(error) as string : error;
+	}
+
+	/**
+	 * The power the Receiver would store for a marker at this device frequency: from the running
+	 * scan's own frame (sweep.ts sweepPowerAt, as a click on its canvas measures it), otherwise null.
+	 * The dock's RX trace is dBFS of another scale, so an RX marker has no power.
+	 */
+	function scanPowerAt(deviceHz: number): number | null {
+		if (!app.sweep?.active || typeof app.sweepPowerAt !== 'function') return null;
+		return finiteOrNull(app.sweepPowerAt(deviceHz));
+	}
+
+	type MarkerReply = [ResultCode, string?, Record<string, unknown>?];
+
+	/**
+	 * Adds a marker to the Receiver's list as a click on its Spektrum canvas does, saved to the
+	 * selected marker set. Allowed in every radio state: it does not touch the radio.
+	 */
+	async function markerAdd(command: CommandOf<'console:marker-add'>): Promise<MarkerReply> {
+		const records = app.records;
+		if (!records || !Array.isArray(records.markers) || typeof app.addReceiverMarker !== 'function') return ['NOT_READY'];
+		const shift = frequencyShiftHz();
+		if (!inMarkerRange(command.frequencyHz, shift)) return ['OUT_OF_RANGE'];
+		if (records.markers.length >= MARKER_LIMITS.maxTotal) return ['MARKER_LIMIT'];
+		const deviceHz = command.frequencyHz - shift;
+		const added: unknown = await app.addReceiverMarker(deviceHz, scanPowerAt(deviceHz));
+		if (!added || typeof added !== 'object') return ['NOT_READY', recordsError()];
+		const { id, saved } = added as { id?: unknown; saved?: unknown };
+		const fields = isCommandId(id) ? { markerId: id } : {};
+		// The marker stays in the list; only the save to the set failed.
+		if (saved === false) return ['MARKER_SAVE_FAILED', recordsError(), fields];
+		return ['OK', undefined, fields];
+	}
+
+	async function markerRemove(command: CommandOf<'console:marker-remove'>): Promise<MarkerReply> {
+		const records = app.records;
+		if (!records || !Array.isArray(records.markers) || typeof app.removeReceiverMarker !== 'function') return ['NOT_READY'];
+		if (!records.markers.some((marker: { id?: unknown } | null) => marker?.id === command.markerId)) return ['MARKER_NOT_FOUND'];
+		const removed: unknown = await app.removeReceiverMarker(command.markerId);
+		if (removed && typeof removed === 'object' && (removed as { saved?: unknown }).saved === false) return ['MARKER_SAVE_FAILED', recordsError()];
+		return ['OK'];
+	}
+
+	/**
+	 * Marker commands run one after another on their own queue, so two quick adds never race their
+	 * saves, and never wait behind a start. The list that shows the change is posted before the reply.
+	 */
+	function enqueueMarker(id: string, task: () => Promise<MarkerReply>): void {
+		if (markersQueued >= MAX_QUEUED_MARKER_COMMANDS) {
+			reply(id, 'NOT_READY');
+			return;
+		}
+		markersQueued++;
+		const run = async (): Promise<void> => {
+			let result: MarkerReply;
+			try {
+				result = await task();
+			} catch (error) {
+				result = ['NOT_READY', errorText(error)];
+			} finally {
+				markersQueued--;
+			}
+			if (noteMarkers() || markersTimer !== null) sendMarkersNow();
+			reply(id, result[0], result[1], false, result[2]);
+		};
+		markerChain = markerChain.then(run, run);
+	}
+
 	/** Start, stop, listen, radio and the scan's start and stop run one after another so they never race each other. */
 	function enqueue(
 		id: string,
@@ -1032,6 +1208,7 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 			case 'console:hello':
 				sendHello();
 				sendStatusNow();
+				sendMarkersNow();
 				void refreshPairedCount();
 				return;
 			case 'invalid':
@@ -1135,6 +1312,12 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 				reply(command.id, code);
 				return;
 			}
+			case 'console:marker-add':
+				enqueueMarker(command.id, () => markerAdd(command));
+				return;
+			case 'console:marker-remove':
+				enqueueMarker(command.id, () => markerRemove(command));
+				return;
 		}
 	}
 
@@ -1157,9 +1340,15 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 	const unwatch: (() => void) | null = typeof app.$watch === 'function'
 		? app.$watch(() => JSON.stringify(snapshot()), () => onReceiverChange())
 		: null;
+	// The markers at install are rev 0; every later change (Receiver page or console) counts once.
+	lastMarkersKey = markersKey();
+	const unwatchMarkers: (() => void) | null = typeof app.$watch === 'function'
+		? app.$watch(() => markersKey(), () => { if (noteMarkers()) scheduleMarkers(); })
+		: null;
 
 	sendHello();
 	sendStatusNow();
+	sendMarkersNow();
 	void refreshPairedCount();
 
 	return {
@@ -1229,10 +1418,13 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 				usb.removeEventListener('disconnect', onUsbChange);
 			}
 			unwatch?.();
+			unwatchMarkers?.();
 			if (statusTimer !== null) env.clearTimeout(statusTimer);
 			if (heartbeat !== null) env.clearInterval(heartbeat);
+			if (markersTimer !== null) env.clearTimeout(markersTimer);
 			statusTimer = null;
 			heartbeat = null;
+			markersTimer = null;
 		},
 	};
 }
