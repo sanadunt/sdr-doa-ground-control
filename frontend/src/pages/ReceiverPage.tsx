@@ -3,6 +3,7 @@ import type { JSX } from 'react';
 import { useI18n } from '../lib/i18n';
 import type { Lang } from '../lib/i18n';
 import { isTextEntryTarget } from '../lib/shortcuts';
+import { PageHeader } from '../components/page';
 import { consoleRequestsMockSdr } from '../lib/receiverBridge';
 import type { ReceiverBridge } from '../lib/receiverBridge';
 
@@ -132,7 +133,8 @@ export function ReceiverPage({ bridge, visible = true }: {
 
   return (
     <div className="page page-receiver">
-      <h1 className="visually-hidden" data-route-focus tabIndex={-1}>{t('route.receiver')}</h1>
+      {/* Hidden above 600 px, where the top bar names the page; on phones it replaces the cut-off top-bar title. */}
+      <PageHeader title={t('route.receiver')} className="receiver-page-bar" />
       <iframe
         ref={frameRef}
         className="receiver-frame"

@@ -640,8 +640,8 @@ export const sweepMethods = {
 		const tabs = ['spectrum', 'listener', 'records'] as const;
 		const currentIndex = tabs.indexOf(this.activeWorkspace);
 		let nextIndex = currentIndex;
-		if (event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % tabs.length;
-		else if (event.key === 'ArrowUp') nextIndex = (currentIndex + tabs.length - 1) % tabs.length;
+		if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % tabs.length;
+		else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (currentIndex + tabs.length - 1) % tabs.length;
 		else if (event.key === 'Home') nextIndex = 0;
 		else if (event.key === 'End') nextIndex = tabs.length - 1;
 		else return;

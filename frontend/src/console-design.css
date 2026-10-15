@@ -186,11 +186,17 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 /* Receiver keeps the console controls visible while its own workspace scrolls. */
 .console-shell.is-receiver .console-main { height: 100dvh; min-height: 0; overflow: hidden; }
 .console-shell.is-receiver .topbar { flex: none; }
-.console-shell.is-receiver .page-content-receiver { display: flex; max-width: none; padding: 8px; }
+/* The Receiver frame meets the top bar and the window edges; its own header row is the page bar. */
+.console-shell.is-receiver .page-content-receiver { display: flex; max-width: none; padding: 0; }
 .page-content-receiver > .route-content { display: flex; flex: 1 1 auto; min-height: 0; }
 .page-receiver { flex: 1 1 auto; min-width: 0; gap: 0; }
-.receiver-frame { display: block; flex: 1 1 auto; width: 100%; min-height: 0; border: 1px solid var(--line-soft); background: var(--surface); }
+.receiver-frame { display: block; flex: 1 1 auto; width: 100%; min-height: 0; border: 0; background: var(--bg); }
 .receiver-frame:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (max-width: 600px) {
+  /* The top bar has no room for the title on phones; the Receiver's page bar shows it, as on every other page. */
+  .console-shell.is-receiver .topbar-title { display: none; }
+  .page-receiver > .receiver-page-bar { flex: none; min-height: 0; padding: 8px 16px; border-bottom: 1px solid var(--line-soft); }
+}
 
 /* Overview ---------------------------------------------------------------- */
 /* The dashboard layout (map stage, HUD, node card, panels, dock) is in
