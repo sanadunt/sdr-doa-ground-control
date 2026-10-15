@@ -1,5 +1,6 @@
 import { createContext, useContext } from 'react';
 import { GATE_REASON_LABELS } from './telemetry';
+import { readPreference, writePreference } from './preferenceStore';
 
 export type Lang = 'en' | 'id';
 export const LANGS: readonly Lang[] = ['en', 'id'];
@@ -1815,7 +1816,7 @@ export function normalizeLang(value: unknown): Lang {
 
 export function initialLang(): Lang {
   try {
-    const stored = localStorage.getItem(LANG_STORAGE_KEY);
+    const stored = readPreference(LANG_STORAGE_KEY);
     if (stored === 'en' || stored === 'id') return stored;
   } catch { /* Storage may be disabled. */ }
   const browser = typeof navigator !== 'undefined' ? String(navigator.language ?? '') : '';
@@ -1823,7 +1824,8 @@ export function initialLang(): Lang {
 }
 
 export function storeLang(lang: Lang): void {
-  try { localStorage.setItem(LANG_STORAGE_KEY, lang); } catch { /* Storage may be disabled. */ }
+  // localStorage, copied to the console server; writePreference never throws.
+  writePreference(LANG_STORAGE_KEY, lang);
 }
 
 export type Translate = (key: MessageKey, vars?: Record<string, string | number>) => string;

@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
 import { initialLang, translate } from './lib/i18n';
+import { startPreferenceSync } from './lib/preferenceStore';
 import './styles.css';
 import './console-design.css';
 import './polar-layout.css';
@@ -35,10 +36,17 @@ class RootErrorBoundary extends Component<{ children: ReactNode }, { failed: boo
   }
 }
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <RootErrorBoundary>
-      <App />
-    </RootErrorBoundary>
-  </StrictMode>,
-);
+function render(): void {
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <RootErrorBoundary>
+        <App />
+      </RootErrorBoundary>
+    </StrictMode>,
+  );
+}
+
+// The operator's saved preferences come from the console server into
+// localStorage first, so every loader starts from them. The wait is bounded
+// (lib/preferenceStore.ts) and a failure only means local values are used.
+void startPreferenceSync().then(render, render);

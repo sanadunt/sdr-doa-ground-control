@@ -4,6 +4,7 @@
  * storage access is guarded, so a blocked or private storage only loses the
  * preference.
  */
+import { preferenceStorage } from './preferenceStore';
 import { LISTEN_MODES, isListenMode } from './receiverBridgeProtocol';
 import type { ListenMode } from './receiverBridgeProtocol';
 
@@ -14,12 +15,9 @@ export const DEFAULT_FOLLOW_NODE = true;
 
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>;
 
+// localStorage, with writes copied to the console server (lib/preferenceStore.ts).
 function defaultStorage(): StorageLike | null {
-  try {
-    return typeof window !== 'undefined' ? window.localStorage : null;
-  } catch {
-    return null;
-  }
+  return preferenceStorage();
 }
 
 function read(storage: StorageLike | null, key: string): string | null {
