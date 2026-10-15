@@ -20,11 +20,34 @@ describe('i18n dictionaries', () => {
     }
   });
 
-  it('labels the Receiver route and its purpose in both languages', () => {
+  it('names the panel as the English UI does and uses one Indonesian tuning verb', () => {
+    expect(translate('en', 'shell.panelControl')).toBe('Control');
+    for (const [key, english] of Object.entries(DICTIONARIES.en)) expect(english, key).not.toMatch(/Kontrol/);
+    for (const [key, indonesian] of Object.entries(DICTIONARIES.id)) expect(indonesian, key).not.toMatch(/\btuning\b/i);
+    expect(translate('en', 'control.unlock')).toBe('Unlock');
+    expect(translate('id', 'control.unlock')).toBe('Buka kunci');
+  });
+
+  it('never calls remote publishing disabled while Control has the admin-confirmed config patch', () => {
+    for (const lang of ['en', 'id'] as const) {
+      for (const key of ['health.sub.publishAdminOnly', 'monitor.subscribeOnly', 'config.mqttPublishDetail'] as const) {
+        expect(translate(lang, key), `${lang} ${key}`).not.toMatch(/disabled|nonaktif/i);
+      }
+    }
+  });
+
+  it('labels the Receiver route in both languages', () => {
     expect(translate('en', 'route.receiver' as keyof typeof DICTIONARIES.en)).toBe('Receiver');
     expect(translate('id', 'route.receiver' as keyof typeof DICTIONARIES.en)).toBe('Receiver');
-    expect(translate('en', 'route.receiver.hint' as keyof typeof DICTIONARIES.en)).toBe('Local spectrum and recordings');
-    expect(translate('id', 'route.receiver.hint' as keyof typeof DICTIONARIES.en)).toBe('Spektrum dan rekaman lokal');
+  });
+
+  it('names the node RDF-SDR and the receiver radio RadioSpectrum', () => {
+    for (const lang of ['en', 'id'] as const) {
+      for (const [key, text] of Object.entries(DICTIONARIES[lang])) expect(text, `${lang} ${key}`).not.toMatch(/Raspberry|HackRF/i);
+    }
+    expect(translate('en', 'spectrum.send')).toBe('Send to RDF-SDR');
+    expect(translate('id', 'control.send')).toBe('Kirim ke RDF-SDR');
+    expect(translate('id', 'spectrum.sourceHackrf')).toBe('RadioSpectrum · WebUSB');
   });
 
   it('keeps status-code badges untranslated', () => {

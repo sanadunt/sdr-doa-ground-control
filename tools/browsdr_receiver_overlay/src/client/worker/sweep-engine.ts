@@ -167,7 +167,7 @@ export class NativeHackRFSweepEngine extends SpectrumSweepEngine {
 	}
 
 	protected override async startSource(): Promise<void> {
-		if (!this.device.nativeSweepSupported) throw new Error('Native HackRF sweep requires USB API 1.4 or newer');
+		if (!this.device.nativeSweepSupported) throw new Error('Native RadioSpectrum sweep requires USB API 1.4 or newer');
 		const startMHz = Math.floor(this.config.startHz / 1_000_000);
 		const requestedEndMHz = Math.ceil(this.config.endHz / 1_000_000);
 		const stepMHz = SWEEP_TUNE_STEP_HZ / 1_000_000;
@@ -177,7 +177,7 @@ export class NativeHackRFSweepEngine extends SpectrumSweepEngine {
 		await this.device.stopRx();
 		await this.device.setAntennaEnable(false);
 		await this.device.setSampleRate(SWEEP_SAMPLE_RATE_HZ);
-		if (!this.device.setBandwidth) throw new Error('HackRF sweep requires baseband filter control');
+		if (!this.device.setBandwidth) throw new Error('RadioSpectrum sweep requires baseband filter control');
 		await this.device.setBandwidth(SWEEP_BASEBAND_FILTER_BW_HZ);
 		await this.device.setGain('LNA', this.config.lnaGain);
 		await this.device.setGain('VGA', this.config.vgaGain);
@@ -256,7 +256,7 @@ export class ManualSweepEngine extends SpectrumSweepEngine {
 		this.receiverStopped = true;
 		await this.device.setAntennaEnable(false);
 		await this.device.setSampleRate(SWEEP_SAMPLE_RATE_HZ);
-		if (!this.device.setBandwidth) throw new Error('HackRF sweep requires baseband filter control');
+		if (!this.device.setBandwidth) throw new Error('RadioSpectrum sweep requires baseband filter control');
 		await this.device.setBandwidth(SWEEP_BASEBAND_FILTER_BW_HZ);
 		await this.device.setGain('LNA', this.config.lnaGain);
 		await this.device.setGain('VGA', this.config.vgaGain);
@@ -419,9 +419,9 @@ export class SimulatedSweepEngine extends SpectrumSweepEngine {
 
 export function createSweepEngine(source: SweepSource, device: HackRFSweepDevice | null, callbacks: SweepEngineCallbacks): SweepEngine {
 	if (source === 'simulated') return new SimulatedSweepEngine(callbacks);
-	if (!device || !isHackRFSweepDevice(device)) throw new Error('Connect a HackRF to start a hardware sweep');
+	if (!device || !isHackRFSweepDevice(device)) throw new Error('Connect a RadioSpectrum to start a hardware sweep');
 	if (source === 'native') {
-		if (!device.nativeSweepSupported) throw new Error('Native HackRF sweep requires USB API 1.4 or newer; select Manual mode instead');
+		if (!device.nativeSweepSupported) throw new Error('Native RadioSpectrum sweep requires USB API 1.4 or newer; select Manual mode instead');
 		return new NativeHackRFSweepEngine(device, callbacks);
 	}
 	return new ManualSweepEngine(device, callbacks);

@@ -45,6 +45,16 @@ describe('Configuration page', () => {
     expect(render('en', 2)).toContain('5 s minus its age at the read');
   });
 
+  it('shows remote writes as admin-only instead of disabled (one config patch path in Control)', () => {
+    for (const lang of ['en', 'id'] as const) {
+      const guard = render(lang).match(/<div class="config-guard-row">[\s\S]*$/)?.[0] ?? '';
+      expect(guard).toContain(translate(lang, 'config.remoteWrites'));
+      expect(guard.match(new RegExp(translate(lang, 'config.mqttPublishValue'), 'g'))?.length).toBe(2);
+      expect(guard).toContain(translate(lang, 'config.remoteWritesDetail'));
+      expect(guard).not.toMatch(/>DISABLED<|>NONAKTIF</);
+    }
+  });
+
   it('labels the base config revision as required (AUD-74)', () => {
     expect(render()).not.toContain('(optional)');
     expect(render('id')).not.toContain('(opsional)');

@@ -10,7 +10,7 @@ Bahasa kerja project: Bahasa Indonesia. Nama file, identifier, endpoint, schema,
 
 Semua path dan perintah di dokumen ini relatif terhadap root repository (checkout `sdr-doa-ground-control`). Catatan historis lain di repo kadang masih memakai path `/Users/mac/...` dari mesin lain.
 
-Project ini adalah **Ground Console lokal** untuk observasi SDR-DoA yang berjalan pada Raspberry Pi/UAV. Sistem membaca Data Out SDR-DoA, memvalidasi freshness/health/consistency, menampilkan native CSV/XML secara terpisah, dan menyediakan monitor MQTT subscriber-only.
+Project ini adalah **Ground Console lokal** untuk observasi SDR-DoA yang berjalan pada Raspberry Pi/UAV. Sistem membaca Data Out SDR-DoA, memvalidasi freshness/health/consistency, menampilkan native CSV/XML secara terpisah, dan menyediakan monitor MQTT yang berlangganan. Satu-satunya penulisan jarak jauh adalah patch konfigurasi yang ditinjau dan dikonfirmasi admin di panel Kontrol.
 
 Tujuan UI:
 
@@ -19,14 +19,22 @@ Tujuan UI:
 - melihat station reference dan helper arah pada peta;
 - menguji renderer dengan data simulasi tanpa perangkat SDR;
 - mencoba perubahan konfigurasi secara lokal/dry-run;
-- tidak mengirim command remote secara default.
+- melihat spektrum RadioSpectrum (HackRF) lewat Receiver, mendengar VFO, dan menala dari dasbor;
+- mengirim patch konfigurasi ke RDF-SDR (node Raspberry) hanya lewat Kontrol, dengan login admin, tinjauan, dan konfirmasi eksplisit; selain itu tidak ada command remote.
 
 ### Batas keamanan dan interpretasi
 
 - Ground Console adalah **local/loopback console**.
 - Data Out dibaca melalui HTTP `GET` bounded; jangan mengubah read path menjadi remote mutation.
-- MQTT monitor harus tetap subscriber-only: tidak publish command dari GUI.
-- Settings pada GUI adalah local configuration atau dry-run kecuali alur command nyata secara eksplisit disetujui dan diuji.
+- MQTT monitor hanya berlangganan dan tidak pernah publish sendiri. Satu-satunya publish console adalah patch konfigurasi dari Kontrol (`POST /api/mqtt/config-patch` ke `sdr/v1/uav-01/cmd/config/patch`). Aturannya jangan dilonggarkan:
+  - server hanya bind ke loopback, dan request wajib membawa header `Origin` same-origin loopback dengan port yang sama;
+  - wajib sesi admin, dan `confirm: true` hanya dikirim setelah langkah tinjauan di UI;
+  - allowlist field dan rentang `CONFIG_RANGES` diperiksa di server, dan `base_config_rev` yang ditinjau harus sama dengan revisi di server;
+  - QoS 1, tidak retained, kedaluwarsa 60 detik; hanya satu perintah yang boleh menunggu hasil; publish hanya saat monitor terhubung;
+  - tidak ada MQTT di browser dan tidak ada credential MQTT di console.
+
+  Agent di Raspberry yang memutuskan menerapkan patch, lalu menjawab di `ack/config`. Console sendiri tidak pernah memublikasikan bearing DoA.
+- Form Konfigurasi tetap local configuration atau dry-run. Jangan menambah jalur penulisan jarak jauh lain.
 - Raw secret, token, credential, raw settings sensitif, raw IQ, dan raw log tidak boleh diteruskan ke browser/MQTT.
 - Publication gate tetap eksplisit. Health/observability bukan berarti DoA siap dipublikasikan.
 - Overlay map dan simulasi adalah **direction helper/visualisasi**, bukan lokasi target, jarak target, RF coverage, atau estimasi lokasi pemancar.
@@ -39,27 +47,28 @@ Tujuan UI:
 
 - Python Ground Console pada `tools/ground_console.py`.
 - React + TypeScript + Vite frontend pada `frontend/`.
-- Tujuh halaman: Overview (Ringkasan), System Health, DoA Diagnostics, Configuration, Message Monitor, Simulasi, dan Receiver. Shortcut keyboard `1`–`7` dan `R` untuk refresh.
-- Overview dengan map dan plot polar/compass. Readout, polar, dan overlay peta memakai satu predikat kesiapan (`overviewDoaStatus()` di `frontend/src/lib/doaStatus.ts`), sehingga DAQ gagal, ADC overdrive, CONFLICT, view hilang, atau node beku menyembunyikan ketiganya sekaligus.
+- Tujuh halaman: Overview (Ringkasan), System Health, DoA Diagnostics, Configuration, Message Monitor, Simulasi, dan Receiver, dibuka lewat menu halaman di top bar atau shortcut keyboard `1`–`7`; `R` untuk refresh. Top bar yang sama ada di semua halaman.
+- Overview berupa dasbor peta penuh: HUD bearing, kartu node, panel Lapisan, panel Kontrol, dan dock bawah berisi Polar (dengan pengaturan Atur) dan Spektrum. Panel diaktifkan lewat tombol Lapisan, Polar, Spektrum, dan Kontrol di top bar. HUD bearing, polar, dan overlay peta memakai satu predikat kesiapan (`overviewDoaStatus()` di `frontend/src/lib/doaStatus.ts`), sehingga DAQ gagal, ADC overdrive, CONFLICT, view hilang, atau node beku menyembunyikan ketiganya sekaligus.
 - Bearing geografis dihitung dari θ₀ dengan `geographicBearingForBin()` (`frontend/src/lib/polar.ts`): (360 − θ₀ + compass_offset) mod 360. θ₀ tetap ditampilkan sebagai sudut array.
 - Plot DoA menggunakan bundle Plotly parsial (`plotly.js/lib/core` + `lib/scatterpolar`, didaftarkan di `frontend/src/lib/plotlyPolar.ts`) dan update data mempertahankan camera state selama memungkinkan.
 - Map menggunakan MapLibre GL JS dengan basemap tile OSM publik (`tile.openstreetmap.de`, lalu `tile.openstreetmap.org` bila host pertama gagal).
 - DoA map overlay: station marker, bearing, lobe, guide angle, dan heat-style direction helper.
 - Canvas fallback overlay menjaga visualisasi DoA tetap terlihat jika WebGL2 tidak tersedia, context WebGL hilang, worker MapLibre gagal, atau layer GeoJSON bermasalah.
-- Overlay settings tersimpan lokal dan memiliki kontrol advanced untuk jarak/radius, min/max dB, threshold, contrast/intensity, radial samples, distance falloff, opacity, blur, guide interval, dan palette.
+- Overlay settings tersimpan lokal. Panel Lapisan berisi tujuh sakelar layer dan opasitas overlay, dan bagian Lanjutan berisi kontrol advanced untuk jarak/radius, min/max dB, threshold, contrast/intensity, radial samples, distance falloff, opacity, blur, guide interval, dan palette.
 - Marker station interaktif dan dapat membuka popup detail.
 - Tab `Simulasi`: lokasi, sudut DoA, lebar lobe, randomize manual, randomize otomatis.
 - Halaman System Health (termasuk tabel pembacaan per resource), DoA Diagnostics, Configuration, dan Message Monitor (sdr/v1 plus panel RDF Node v2).
 - Collector mendeteksi node beku (`NODE_CLOCK_STALLED`), membatasi satu koleksi dengan anggaran waktu (4 detik untuk `/api/snapshot`), dan membandingkan sudut CSV/XML hanya untuk pasangan dari frame yang sama.
 - Freshness expiry di renderer browser; snapshot stale tidak boleh terus ditampilkan sebagai data aktif. Refresh otomatis default 2 detik (pilihan 1, 2, 5, 10, 30 detik atau manual).
-- Receiver embedded (BrowSDR dari submodule `vendor/BrowSDR`, dengan overlay di `tools/browsdr_receiver_overlay/`) untuk spektrum, scan, rekaman audio, dan Records yang disimpan lokal.
+- Receiver embedded (BrowSDR dari submodule `vendor/BrowSDR`, dengan overlay di `tools/browsdr_receiver_overlay/`) untuk spektrum, scan, rekaman audio, dan Records yang disimpan lokal. Panel Spektrum di Overview mengendalikan frame Receiver yang tersembunyi lewat bridge `postMessage` (Mulai/Berhenti, Dengar dengan modulasi, klik untuk menala, Ikuti frekuensi node).
+- Kontrol: patch konfigurasi MQTT yang dibatasi admin, dengan pelacakan ACK di server (`tools/config_command_tracker.py`).
 - Branding lokal dan konfigurasi console lokal.
 
 ### Staging/rancangan—jangan dianggap production
 
 - Telemetry nyata melalui PPP/T900 belum dianggap lulus hanya karena adapter staging tersedia.
 - Publication gate live terakhir dilaporkan `DEGRADED/BLOCKED` pada dokumentasi baseline karena `daq_ok=false`, sinkronisasi IQ/sample-delay gagal, atau output DoA stale.
-- Command settings nyata ke Raspberry, ACK/read-back production, dan deployment PPP/T900 bukan tanggung jawab UI saat ini.
+- Kontrol mengirim patch konfigurasi nyata dan membaca ACK. Tes otomatisnya memakai fake monitor dan client MQTT palsu; repo ini tidak membuktikan alur end-to-end dengan Raspberry nyata. Agent di Raspberry harus versi repo ini agar menjawab, dan `applied` hanya membuktikan `settings.json` sudah ditulis. ACK/read-back production dan deployment PPP/T900 belum dianggap lulus.
 - Dokumen arsitektur MQTT menjelaskan desain target; cocokkan selalu dengan implementasi `tools/` dan test.
 - Tahap PPP/T900 synthetic end-to-end tertentu masih tercatat blocked/tergantung interface dan route environment.
 
@@ -83,19 +92,29 @@ Ground Console Python (loopback)
         ├── /api/console-config
         ├── /api/branding, /api/admin/*
         ├── /api/mqtt, /api/mqtt/connect, /api/mqtt/rdf-node
+        ├── /api/mqtt/config-reported, /api/mqtt/config-patch[/<id>]   (Kontrol, admin)
         ├── /api/dry-run/config-patch
         ├── /api/receiver/*   (SQLite + file audio di --data-dir)
         └── /receiver/        (build BrowSDR, static root terpisah)
                  │ same-origin fetch
                  ▼
 React frontend
-        ├── Overview: MapLibre/OSM + DoA overlay + Plotly polar
+        ├── Overview: dasbor MapLibre/OSM + DoA overlay + Plotly polar + Spektrum + Kontrol
         ├── System Health
         ├── DoA Diagnostics
         ├── Configuration
         ├── Message Monitor
         ├── Simulasi (browser-only)
-        └── Receiver (iframe /receiver/, tetap ter-mount setelah dibuka)
+        └── Receiver (iframe /receiver/, dimuat saat dibuka pertama kali atau saat Mulai/Dengar
+                      di Spektrum, lalu tetap ter-mount; bridge postMessage ke Overview)
+```
+
+Jalur Kontrol:
+
+```text
+Kontrol (admin) → POST /api/mqtt/config-patch → monitor MQTT
+        → sdr/v1/uav-01/cmd/config/patch → agent di Raspberry
+        → ack/config → status perintah di server → Kontrol
 ```
 
 Arsitektur target telemetry yang terdokumentasi:
@@ -115,11 +134,12 @@ MQTT adalah transport/contract, bukan pengganti DAQ, DSP, normalisasi, gate, ata
 
 | Path | Peran |
 |---|---|
-| `tools/ground_console.py` | HTTP Ground Console, API lokal, static frontend serving, CSP, config/branding/admin lokal |
+| `tools/ground_console.py` | HTTP Ground Console, API lokal, static frontend serving, CSP, config/branding/admin lokal, route patch konfigurasi Kontrol |
+| `tools/config_command_tracker.py` | Status patch konfigurasi yang sudah di-publish (PUBACK, echo broker, ACK agent) |
 | `tools/sdr_doa_collector.py` | Collector read-only, parsing terbatas, redaction, freshness, candidate, gate |
-| `tools/sdr_doa_lan_agent.py` | Edge agent/LAN staging dan payload health/state/config |
+| `tools/sdr_doa_lan_agent.py` | Edge agent/LAN staging dan payload health/state/config; dengan `--publish` selalu berlangganan `cmd/config/patch`, dan tanpa `--enable-config` menolak patch dengan `REMOTE_CONTROL_DISABLED` |
 | `tools/sdr_doa_mqtt.py` | MQTT contract/adapter staging |
-| `tools/sdr_doa_mqtt_monitor.py` | MQTT monitor subscriber-only; memerlukan `paho-mqtt` (tanpa paket ini monitor berstatus ERROR, console tetap jalan) |
+| `tools/sdr_doa_mqtt_monitor.py` | MQTT monitor; berlangganan, dan hanya publish patch konfigurasi lewat `publish_config_patch`. Memerlukan `paho-mqtt` (tanpa paket ini monitor berstatus ERROR, console tetap jalan) |
 | `tools/rdf_node_mqtt_v2.py` | Parser dan snapshot RDF Node v2 untuk `/api/mqtt/rdf-node` |
 | `tools/receiver_record_store.py` | Store SQLite dan file audio Receiver di bawah `--data-dir` |
 | `tools/build_browsdr_receiver.py` | Builder Receiver: salin submodule, terapkan overlay, `npm ci` + build, tulis `frontend/dist/receiver` |
@@ -135,14 +155,16 @@ MQTT adalah transport/contract, bukan pengganti DAQ, DSP, normalisasi, gate, ata
 | `frontend/src/App.tsx` | Route, lifecycle snapshot/config/MQTT, simulation state, freshness expiry, page composition |
 | `frontend/src/api.ts` | Same-origin API adapter dengan timeout, abort, validasi shape, dan read-back |
 | `frontend/src/types.ts` | Contract TypeScript untuk snapshot, candidate, gate, config, map, MQTT |
-| `frontend/src/components/Shell.tsx` | Sidebar, route, runtime badges, theme, read strip, navigation |
+| `frontend/src/components/Shell.tsx` | Top bar, menu halaman, route, runtime badges, theme, read strip, interval refresh |
 | `frontend/src/components/TacticalMap.tsx` | MapLibre, OSM tile, marker, popup, overlay settings, overlay lifecycle |
-| `frontend/src/components/PolarPanel.tsx` | Panel angular response dan metadata DoA |
+| `frontend/src/pages/OverviewPage.tsx`, `frontend/src/components/overview/` | Dasbor Overview: kartu node, Lapisan, Kontrol (`ControlPanel.tsx`), dock Polar (`PolarDock.tsx`) dan Spektrum (`SpectrumDock.tsx`) |
 | `frontend/src/components/PolarPlot.tsx` | Plotly polar/compass renderer, camera state, head-up, manual dB range |
 | `frontend/src/lib/telemetry.ts` | Candidate selection, data state, formatting, gate helpers |
 | `frontend/src/lib/doaStatus.ts` | Predikat kesiapan DoA bersama untuk readout, polar, dan peta |
 | `frontend/src/lib/mqttMonitor.ts` | Normalisasi snapshot MQTT v1/v2 dan redaksi record |
-| `frontend/src/pages/ReceiverPage.tsx` | Host iframe Receiver, sinkron tema/bahasa, penerusan shortcut |
+| `frontend/src/pages/ReceiverPage.tsx` | Host iframe Receiver, sinkron tema/bahasa, penerusan shortcut, menyambungkan bridge ke frame |
+| `frontend/src/lib/receiverBridge.ts`, `receiverBridgeProtocol.ts` | Sisi console bridge Receiver; salinan protokol sisi frame ada di `tools/browsdr_receiver_overlay/src/client/app/console-bridge-protocol.ts` |
+| `frontend/src/lib/configPatch.ts` | Field, satuan, rentang, dan kode error patch konfigurasi untuk Kontrol |
 | `frontend/scripts/build-receiver.mjs` | Menjalankan builder Receiver untuk `npm run build:receiver` dan `build:all` |
 | `frontend/src/lib/simulation.ts` | Synthetic 360-bin snapshot, validation, randomization |
 | `frontend/src/lib/doaGeometry.ts` | Geometry bearing/lobe/heat/guides dari coordinate + vector + settings |
@@ -152,6 +174,7 @@ MQTT adalah transport/contract, bukan pengganti DAQ, DSP, normalisasi, gate, ata
 | `frontend/src/pages/` | Overview, health, diagnostics, configuration, monitor, simulation, receiver |
 | `frontend/src/console-design.css` | Design layer Ground Console dan responsive/accessibility rules |
 | `frontend/src/polar-layout.css` | Plotly layout/controls |
+| `frontend/src/overview-dashboard.css` | Layout dasbor Overview (`.ov-*`), dimuat setelah `polar-layout.css` |
 
 ### Dokumentasi utama
 
@@ -259,6 +282,19 @@ Setiap perubahan overlay harus berdampak pada `doaGeometry.ts` dan renderer aktu
 
 Simulasi hanya menggantikan sumber Overview. Simulasi tidak boleh memalsukan System Health, Diagnostics, MQTT, publication gate, atau mengirim data ke Raspberry.
 
+### Dasbor: Spektrum, Dengar dan Kontrol
+
+Overview adalah dasbor peta penuh. Langkah operator yang lebih rinci ada di `QUICKSTART.md`. Di UI, node Raspberry tampil sebagai **RDF-SDR** dan receiver HackRF sebagai **RadioSpectrum**; identifier, field API, topik MQTT, dan filter WebUSB tetap memakai nama teknisnya. Dasbor hanya menampilkan label, nilai, chip status, error, dan prompt yang butuh tindakan, tanpa teks penjelasan kecil. Ringkasnya:
+
+- **Panel.** Tombol Lapisan, Polar, Spektrum, dan Kontrol di top bar menampilkan atau menyembunyikan panel. Secara bawaan Polar dan Spektrum aktif. Pilihan panel disimpan di browser.
+- **Mulai/Berhenti.** Mulai memuat Receiver tersembunyi (saat pertama kali), menyambungkan RadioSpectrum yang sudah dipasangkan ke browser ini, dan menjalankan RX tanpa suara. Spektrum menampilkan 2 MHz di sekitar tengah RX. RadioSpectrum yang belum pernah dipasangkan (`NEEDS_PAIRING`) dipasangkan sekali di halaman Receiver (tombol `7`). Berhenti menghentikan RX.
+- **Klik untuk menala.** Klik trace atau waterfall untuk memindahkan tengah RX dan VFO ke frekuensi itu (dibulatkan 1 kHz); ←/→ menggeser 10 kHz, Shift+←/→ 100 kHz. Klik ini mematikan Ikuti frekuensi node.
+- **Ikuti frekuensi node.** Selama Data Out segar, tengah RX mengikuti `center_freq` dari `settings.json` node dan VFO mengikuti frekuensi CSV DoA.
+- **Dengar dengan modulasi.** Dengar memutar audio VFO dengan modulasi yang dipilih (NFM bawaan, WFM, AM, USB, LSB, DSB, CW, RAW), dan menyalakan RX bila belum jalan. Tekan lagi untuk berhenti mendengar.
+- **Kirim ke RDF-SDR → Kontrol.** Tombol di header Spektrum hanya membuka Kontrol dengan draf frekuensi tengah dan VFO. Di Kontrol: buka kunci dengan kata sandi admin, ubah nilai, **Tinjau perubahan**, lalu **Kirim ke RDF-SDR**. Hasilnya `ACK · applied` (agent menulis `settings.json`), `Ditolak · KODE` (misalnya `REMOTE_CONTROL_DISABLED` bila agent tanpa `--enable-config`, atau `CONFIG_REVISION_CONFLICT`), **Belum ada ACK** setelah sekitar 65 detik, atau **Publish gagal** bila broker menolak.
+- **Polar → Atur.** Putar grafik (Head Up) dan Puncak ke atas, offset kompas Data Out atau Manual (berlaku untuk peta, plot, dan bearing), skala dB Auto atau Manual, dan tombol reset tampilan. Pilihan Kompas|Polar hanya mengubah plot.
+- **Lapisan.** Tujuh sakelar layer overlay, opasitas overlay, dan pengaturan Lanjutan.
+
 ---
 
 ## 7. Cara menjalankan
@@ -294,6 +330,8 @@ Default URL:
 http://127.0.0.1:8787/
 ```
 
+Kata sandi admin dibaca dari `SDR_DOA_ADMIN_PASSWORD` di environment proses atau di `.env` root repository (salin dari `.env.example`, ganti nilainya, jangan di-commit). Bila variabel tidak ada di keduanya, console memakai kata sandi bawaan `123456`, mencetak peringatan saat start, dan Kontrol menampilkan peringatan; ganti dengan kata sandi sendiri. Nilai kosong (`SDR_DOA_ADMIN_PASSWORD=`) menonaktifkan login admin, begitu juga `.env` yang tidak bisa dibaca. Perubahan kata sandi berlaku setelah console di-restart.
+
 Default CLI mengaktifkan monitor MQTT ke `10.90.0.1:9001` (WebSocket). Tanpa `paho-mqtt` console tetap berjalan dan monitor berstatus ERROR; `--mqtt-host ''` mematikan monitor. Flag eksplisit (`--base-url`, `--mqtt-host`, `--mqtt-port`, `--mqtt-transport`, `--mqtt-ws-path`) mengalahkan `console.json` tersimpan untuk run itu. Data Receiver disimpan di `--data-dir` (default `~/.local/share/sdr-doa-ground-console`). Di Windows, pasang juga `tzdata`.
 
 Jangan memasang dependency ke Python system/Homebrew tanpa alasan. Development frontend saja:
@@ -304,6 +342,17 @@ npm run dev
 ```
 
 Vite dev hanya untuk frontend; endpoint `/api` tetap membutuhkan Ground Console atau proxy yang sesuai.
+
+### Setelah `git pull`
+
+`frontend/dist` tidak ikut diperbarui oleh `git pull`; tanpa build ulang, console menyajikan UI lama. Build ulang lalu restart console:
+
+```bash
+git submodule update --init --recursive   # bila Receiver dipakai
+cd frontend && npm ci && npm run build:all
+```
+
+Tanpa submodule Receiver, ganti `npm run build:all` dengan `npm run build`. Setelah itu hentikan console yang berjalan, jalankan lagi, dan muat ulang halaman browser.
 
 ### Validasi backend
 
@@ -317,7 +366,7 @@ Untuk static serving/security saja:
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_ground_console_static
 ```
 
-Suite static gagal pada cek Receiver bila `frontend/dist` ada dan submodule sudah diambil tetapi `frontend/dist/receiver` tidak ada. Banyak file test Python adalah script standalone yang tidak dijalankan `unittest discover`; jalankan script modul yang diubah (misalnya `python3 tools/test_sdr_doa_collector.py`). Tes Node Receiver: `node --test tools/test_receiver_*.mjs` (Node 22.13+).
+Suite static gagal pada cek Receiver bila `frontend/dist` ada dan submodule sudah diambil tetapi `frontend/dist/receiver` tidak ada. Banyak file test Python adalah script standalone yang tidak dijalankan `unittest discover`; jalankan script modul yang diubah (misalnya `python3 tools/test_sdr_doa_collector.py`). Tes Node Receiver: `node --test tools/test_receiver_*.mjs` (Node 22.13+), termasuk bridge dasbor (`test_receiver_console_bridge.mjs`) dan kecocokan dua salinan protokolnya (`test_receiver_bridge_contract.mjs`). Jalur Kontrol dicakup `tools/test_mqtt_config_patch.py` dan `tools/test_config_patch_contract.py`; keduanya ikut `unittest discover` dan tidak butuh broker.
 
 ---
 
@@ -335,12 +384,13 @@ Suite static gagal pada cek Receiver bila `frontend/dist` ada dan submodule suda
 
 - Pilih perubahan kecil dan terlokalisasi.
 - Pertahankan nama route, exported field, node/endpoint, dan schema yang sudah digunakan.
-- Jangan menghapus freshness gate, publication gate, redaction, timeout, abort, CSP, atau subscriber-only guard.
+- Jangan menghapus freshness gate, publication gate, redaction, timeout, abort, CSP, atau aturan jalur publish Kontrol (lihat bagian 1). Monitor MQTT tidak boleh publish sendiri.
 - Jangan menambah library sebelum memastikan library belum tersedia dan kebutuhan tidak bisa dipenuhi oleh implementation yang ada.
 - Untuk UI, setiap control harus benar-benar memengaruhi renderer atau dihapus.
 - Untuk simulasi, beri label jelas `SIMULATION`; jangan mencampur synthetic dengan health/MQTT nyata.
 - Untuk map, gunakan bahasa helper arah; jangan menyebut overlay sebagai target atau lokasi pemancar.
-- Untuk settings remote, jangan mengubah dry-run menjadi command nyata tanpa requirement dan test baru.
+- Untuk settings remote, form dry-run di Konfigurasi tetap pratinjau. Kontrol adalah satu-satunya command nyata; jangan menambah jalur penulisan jarak jauh lain atau melonggarkan aturannya tanpa requirement dan test baru.
+- Setiap prop yang diteruskan `App.tsx` ke `OverviewPage` (yang di-memo) harus stabil: state, `useCallback`, atau ref. Frame Receiver jangan dipindah atau diberi `key`, karena frame akan reload dan RX berhenti.
 - Jangan menyimpan secret/API key/password di repository atau Brain.
 
 ### Setelah mengedit
@@ -369,7 +419,19 @@ Console tetap berjalan tanpa `paho-mqtt`, tetapi monitor MQTT tidak bisa tersamb
 
 ### Receiver menampilkan "Receiver is not built"
 
-`npm run build` mengosongkan `frontend/dist/receiver`. Jalankan `npm run build:all`, atau `tools/build_browsdr_receiver.py` setelah `npm run build`.
+`npm run build` mengosongkan `frontend/dist/receiver`. Jalankan `npm run build:all`, atau `tools/build_browsdr_receiver.py` setelah `npm run build`. Panel Spektrum di Overview menampilkan `NOT BUILT` untuk penyebab yang sama.
+
+### UI masih versi lama setelah `git pull`
+
+`frontend/dist` belum di-build ulang (misalnya masih ada menu samping dan Overview belum berupa dasbor). Jalankan `cd frontend && npm ci && npm run build:all`, lalu restart console.
+
+### Kontrol tidak mendapat jawaban
+
+- **Belum ada ACK** sekitar 65 detik setelah kirim: agent tidak berjalan, memakai broker lain, atau versi lama yang hanya berlangganan `cmd/config/patch` bila `--enable-config` aktif.
+- `Ditolak · REMOTE_CONTROL_DISABLED`: agent versi repo ini berjalan dengan `--publish` tetapi tanpa `--enable-config`.
+- Kirim nonaktif atau `CONFIG_REVISION_UNKNOWN`: belum ada `config_reported` (atau `ack_config`/`state`) v1 sejak monitor tersambung. Agent baru mengirim `config_reported` setelah bisa membaca `settings.json` lewat Data Out.
+- **Publish gagal** (PUBACK 128 ke atas): ACL broker tidak mengizinkan console publish ke `cmd/config/patch`.
+- Broker `tools/mqtt_lan_stage.conf` mewajibkan TLS dan password, yang tidak dimiliki monitor console; pakai `tools/mqtt_stage4.conf` untuk uji lokal.
 
 ### OSM/MapLibre basemap tidak muncul
 

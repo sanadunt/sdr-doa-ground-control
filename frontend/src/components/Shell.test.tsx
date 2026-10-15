@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { ConsoleShell, formatElapsed } from './Shell';
-import { I18nContext, translate } from '../lib/i18n';
+import { ConsoleShell, formatElapsed, refreshSelectOptions } from './Shell';
+import { I18nContext, gateReasonLabel, translate } from '../lib/i18n';
 import type { Lang } from '../lib/i18n';
 import type { TelemetrySnapshot } from '../types';
 
@@ -169,13 +169,114 @@ describe('status strip tooltips', () => {
     </I18nContext.Provider>,
   );
 
-  it.each(['en', 'id'] as const)('explains each of the six chips in %s', (lang) => {
+  it.each(['en', 'id'] as const)('names only a current cause, without help text, in %s', (lang) => {
     const items = [...render(lang).matchAll(/<span class="telemetry-item[^"]*"([^>]*)>/g)].map((match) => match[1]);
     expect(items).toHaveLength(6);
-    const help = ['status.dataHelp', 'status.doaHelp', 'status.deliveryHelp', 'status.snapshotHelp', 'status.mqttHelp', 'status.simHelp'] as const;
-    items.forEach((attributes, index) => {
-      const title = attributes.match(/title="([^"]*)"/)?.[1] ?? '';
-      expect(title.replace(/&#x27;/g, "'"), help[index]).toContain(translate(lang, help[index]));
-    });
+    const titles = items.map((attributes) => attributes.match(/title="([^"]*)"/)?.[1] ?? null);
+    // Data and Snapshot are healthy and MQTT and Sim have nothing to report; DoA and Delivery name their state.
+    expect(titles[0]).toBeNull();
+    expect(titles[2]).toBe(`GROUND_CLOCK_UNVERIFIED · ${gateReasonLabel(lang, 'GROUND_CLOCK_UNVERIFIED')}`.replace(/'/g, '&#x27;'));
+    expect(titles.slice(3)).toEqual([null, null, null]);
+  });
+});
+
+describe('top bar and page menu (dashboard shell)', () => {
+  const render = (props: Partial<Parameters<typeof ConsoleShell>[0]> = {}, lang: Lang = 'en') => renderToStaticMarkup(
+    <I18nContext.Provider value={{ lang, setLang: () => undefined, t: (key, vars) => translate(lang, key, vars) }}>
+      <ConsoleShell route="overview" onNavigate={() => undefined} branding={{ app_name: 'Ground Console', logo_data_url: '' }} snapshot={liveSnapshot()} localSnapshotFresh loading={false} readError={null} lastReadAgeMs={100} simulationEnabled={false} onRefresh={() => undefined} {...props}>
+        <span>workspace</span>
+      </ConsoleShell>
+    </I18nContext.Provider>,
+  );
+
+  it('keeps every page in a hidden popover menu instead of a rail', () => {
+    const markup = render();
+    expect(markup).not.toContain('class="sidebar"');
+    const menu = markup.match(/<div id="console-navigation"[^>]*>/)?.[0] ?? '';
+    expect(menu).toContain('class="page-menu"');
+    expect(menu).toContain('hidden=""');
+    expect(markup.match(/class="nav-item[^"]*"/g)).toHaveLength(7);
+    const toggle = markup.match(/<button[^>]*menu-toggle[^>]*>/)?.[0] ?? '';
+    expect(toggle).toContain('aria-controls="console-navigation"');
+    expect(toggle).toContain('aria-expanded="false"');
+    expect(toggle).toContain(`aria-label="${translate('en', 'shell.pageMenu')}"`);
+  });
+
+  it('keeps the theme toggle and the control chip in the menu footer, without hint text', () => {
+    const markup = render();
+    const footer = markup.match(/<div class="page-menu-footer">[\s\S]*?<span>[^<]*<\/span><\/div><\/div>/)?.[0] ?? '';
+    expect(footer).toContain('page-menu-theme');
+    expect(footer).toContain(translate('en', 'shell.readOnly'));
+    expect(footer).not.toMatch(/<p[\s>]/);
+    expect(markup).not.toContain('shortcut-hint');
+    // Menu items carry their label and key only.
+    for (const item of markup.match(/<button[^>]*class="nav-item[^"]*"[^>]*>/g) ?? []) expect(item).not.toContain('title=');
+  });
+
+  it('shows the route title and read age off Overview only', () => {
+    expect(render()).not.toContain('topbar-title');
+    const health = render({ route: 'system-health' }, 'id');
+    expect(health).toContain('class="topbar-title"');
+    expect(health).toContain('Kesehatan Sistem');
+    expect(health).toContain('Dibaca 0 dtk lalu');
+  });
+
+  it('shows the brand mark only, named for assistive technology', () => {
+    const markup = render();
+    expect(markup).toMatch(/<span class="brand-mark" role="img" aria-label="Ground Console"[^>]*>GC<\/span>/);
+    expect(markup).not.toContain('brand-name');
+  });
+
+  it('offers the saved refresh interval and the server intervals in the top bar', () => {
+    const markup = render({ refreshSeconds: 2, refreshOptions: [0, 1, 2, 5, 10, 30], onRefreshSecondsChange: () => undefined }, 'id');
+    const select = markup.match(/<select[^>]*refresh-interval[\s\S]*?<\/select>/)?.[0] ?? '';
+    expect(select).toContain(`aria-label="${translate('id', 'shell.refreshInterval')}"`);
+    expect(select).not.toContain('disabled');
+    expect(select).toContain('<option value="0">Manual</option>');
+    expect(select).toContain('<option value="2" selected="">2 dtk</option>');
+    expect(select).toContain('<option value="30">30 dtk</option>');
+  });
+
+  it('disables the interval select until the configuration is known, and names a failed save', () => {
+    const waiting = render({ onRefreshSecondsChange: () => undefined }).match(/<select[^>]*>/)?.[0] ?? '';
+    expect(waiting).toContain('disabled');
+    const failed = render({ refreshSeconds: 5, onRefreshSecondsChange: () => undefined, refreshError: 'request failed (500)' }).match(/<select[^>]*>/)?.[0] ?? '';
+    expect(failed).toContain('aria-invalid="true"');
+    expect(failed).toContain('request failed (500)');
+  });
+
+  it('renders the page toolbar slot it is given', () => {
+    expect(render({ toolbar: <div className="probe-toolbar">tools</div> })).toMatch(/<div class="topbar-toolbar"><div class="probe-toolbar">tools<\/div><\/div>/);
+    expect(render()).not.toContain('topbar-toolbar');
+  });
+
+  it('keeps an unknown saved interval selectable', () => {
+    expect(refreshSelectOptions([0, 1, 2], 15)).toEqual([0, 1, 2, 15]);
+    expect(refreshSelectOptions([2, 0, 2], null)).toEqual([0, 2]);
+  });
+});
+
+/** Vitest blanks every CSS import, so the stylesheet is read from disk. */
+function readStylesheet(path: string): string {
+  type Fs = { readFileSync(file: URL, encoding: 'utf8'): string };
+  const { process } = globalThis as unknown as { process: { getBuiltinModule(id: 'node:fs'): Fs } };
+  return process.getBuiltinModule('node:fs').readFileSync(new URL(path, import.meta.url), 'utf8');
+}
+
+describe('top bar styles', () => {
+  const css = readStylesheet('../console-design.css');
+
+  it('fits its 44 px controls, padding and border inside --topbar-h so Overview does not scroll by a pixel', () => {
+    const tokenHeight = Number(/--topbar-h:\s*(\d+)px/.exec(css)?.[1]);
+    const rule = /(?:^|\n)\.topbar \{([^}]*)\}/.exec(css)?.[1] ?? '';
+    const padding = /padding:\s*(\d+)px\s+\d+px\s*;/.exec(rule);
+    expect(padding, rule).not.toBeNull();
+    expect(44 + 2 * Number(padding?.[1]) + 1).toBeLessThanOrEqual(tokenHeight);
+    expect(css).toMatch(/\.page-content-overview \{[^}]*height: calc\(100dvh - var\(--topbar-h\)\)/);
+  });
+
+  it('lets the three-row Overview top bar scroll away on narrow screens', () => {
+    const narrow = css.slice(css.indexOf('@media (max-width: 1023px)'), css.indexOf('@media (max-width: 600px)'));
+    expect(narrow).toMatch(/\.console-shell\.is-overview \.topbar \{ position: static; \}/);
   });
 });

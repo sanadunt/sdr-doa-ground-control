@@ -7,7 +7,9 @@ It is safe-by-default:
 
 * without ``--publish`` it performs no MQTT transport;
 * DoA is published only when the collector gate is READY;
-* settings control is disabled unless ``--enable-config`` is explicit;
+* settings control is disabled unless ``--enable-config`` is explicit; with
+  ``--publish`` alone the agent still subscribes to ``cmd/config/patch`` and
+  answers every patch with a ``REMOTE_CONTROL_DISABLED`` rejection ACK;
 * config changes use an allowlist, revision, expiry, atomic write, read-back,
   and an ACK (rejected commands are ACKed with a contract error code);
 * the agent never forwards raw settings, raw logs, or the angular array;
@@ -730,7 +732,9 @@ class AgentRuntime:
             return
         command_id = _command_id_from(message.payload)
         if not self.config_enabled:
-            self._reject_command(command_id, "CONTROL_DISABLED", now_ms)
+            # The agent listens with --publish alone so the console gets an
+            # explicit answer instead of waiting out the command's TTL.
+            self._reject_command(command_id, "REMOTE_CONTROL_DISABLED", now_ms)
             return
         if message.qos != contract.COMMAND_QOS:
             self._reject_command(command_id, "WRONG_COMMAND_QOS", now_ms)
@@ -834,7 +838,7 @@ class AgentRuntime:
                         "status": "rejected",
                         "config_rev": self.config_rev,
                         "readback_ok": False,
-                        "error": {"code": "CONTROL_DISABLED"},
+                        "error": {"code": "REMOTE_CONTROL_DISABLED"},
                     }
                 else:
                     result = self.config_applier.apply(decoded, now_ms=now_ms)
@@ -878,8 +882,9 @@ class AgentRuntime:
             return
         try:
             client.connect()
-            if self.config_enabled:
-                client.subscribe(contract.TOPICS["config_patch"], qos=1)
+            # Subscribed whenever publishing, also without --enable-config:
+            # a patch then gets a REMOTE_CONTROL_DISABLED rejection ACK.
+            client.subscribe(contract.TOPICS["config_patch"], qos=1)
             client.publish(
                 contract.TOPICS["availability"],
                 self._availability_payload(True),

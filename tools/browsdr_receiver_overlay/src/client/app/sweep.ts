@@ -701,11 +701,11 @@ export const sweepMethods = {
 		}
 		const source = this.sweep.source as SweepSource;
 		if (source !== 'simulated' && !this.connected) {
-			this.showMsg('Connect a HackRF before selecting a hardware sweep source.');
+			this.showMsg('Connect a RadioSpectrum before selecting a hardware sweep source.');
 			return;
 		}
 		if (source === 'native' && !this.deviceCapabilities?.supportsNativeSweep) {
-			this.showMsg('This HackRF firmware does not support native sweep. Select Manual or Simulated.');
+			this.showMsg('This RadioSpectrum firmware does not support native sweep. Select Manual or Simulated.');
 			return;
 		}
 		if (source === 'manual' && !this.deviceCapabilities?.supportsManualSweep) {

@@ -27,8 +27,8 @@ describe('console shortcuts', () => {
     expect(shortcutAction(key('x'), 7)).toBeNull();
   });
 
-  it('keep working after a checkbox, radio, range slider or button was clicked', () => {
-    for (const type of ['checkbox', 'radio', 'range', 'button', 'color']) {
+  it('keep working after a checkbox, radio or button was clicked', () => {
+    for (const type of ['checkbox', 'radio', 'button', 'color']) {
       expect(shortcutAction(key('2', element('INPUT', { type }, { type })), 7), type).toEqual({ type: 'route', index: 1 });
     }
     expect(shortcutAction(key('2', element('BUTTON')), 7)).toEqual({ type: 'route', index: 1 });
@@ -42,6 +42,12 @@ describe('console shortcuts', () => {
     expect(shortcutAction(key('1', element('SELECT')), 7)).toBeNull();
     expect(shortcutAction(key('1', element('DIV', {}, { isContentEditable: true })), 7)).toBeNull();
     expect(shortcutAction(key('1', element('DIV', { role: 'textbox' })), 7)).toBeNull();
+  });
+
+  it('never fire while a range slider has focus, so a digit does not leave the dashboard', () => {
+    expect(shortcutAction(key('3', element('INPUT', { type: 'range' }, { type: 'range' })), 7)).toBeNull();
+    expect(shortcutAction(key('r', element('INPUT', { type: 'range' })), 7)).toBeNull();
+    expect(isTextEntryTarget(element('INPUT', { type: 'RANGE' }, { type: 'RANGE' }))).toBe(true);
   });
 
   it('never fire with a modifier or after another handler took the key', () => {

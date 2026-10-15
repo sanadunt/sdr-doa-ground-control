@@ -597,14 +597,27 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
 
         self.assertEqual(capabilities_result.status, 200)
         capabilities = _decode_json(self, capabilities_result, "capabilities")
-        self.assertTrue(capabilities["read_only"])
-        self.assertFalse(capabilities["mqtt_publish"])
+        # The console has one publish path (the admin-gated config patch), so
+        # it no longer claims to be read-only. It still never POSTs to the
+        # Raspberry or applies settings itself.
+        self.assertFalse(capabilities["read_only"])
+        self.assertTrue(capabilities["mqtt_publish"])
         self.assertFalse(capabilities["remote_post"])
         self.assertFalse(capabilities["config_apply"])
         self.assertFalse(capabilities["mqtt_monitor"])
         self.assertTrue(capabilities["admin_branding"])
         self.assertTrue(capabilities["admin_auth_required"])
         self.assertIsInstance(capabilities["config_allowlist"], list)
+        # ADMIN_PASSWORD is forced to None above, so login is off and the
+        # default-password warning does not apply.
+        self.assertIs(capabilities["admin_enabled"], False)
+        self.assertIs(capabilities["admin_default_password"], False)
+        config_patch = capabilities["config_patch"]
+        self.assertIs(config_patch["enabled"], False, "no MQTT monitor means no publish path")
+        self.assertIs(config_patch["requires_admin"], True)
+        self.assertEqual(config_patch["topic"], "sdr/v1/uav-01/cmd/config/patch")
+        self.assertEqual((config_patch["qos"], config_patch["ttl_ms"]), (1, 60_000))
+        self.assertEqual(config_patch["ranges"]["center_frequency_hz"], [24_000_000, 1_800_000_000])
 
         self.assertEqual(config_result.status, 200)
         config = _decode_json(self, config_result, "console config")

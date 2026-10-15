@@ -26,7 +26,7 @@ export function OverlayLegend({ settings, scale, saturation, ringStepM, halfPowe
     <div className="map-overlay-legend" role="note">
       <div className="legend-row">
         {settings.bearingVisible ? <span><i className="legend-swatch legend-bearing" /> {t('map.legendBearing')}</span> : null}
-        {settings.bearingVisible && halfPower ? <span><i className="legend-swatch legend-edge" /> {t('map.legendEdges')}</span> : null}
+        {settings.edgesVisible && halfPower ? <span><i className="legend-swatch legend-edge" /> {t('map.legendEdges')}</span> : null}
         {settings.lobeVisible ? <span><i className="legend-swatch legend-lobe" /> {t('map.legendLobe')}</span> : null}
         {settings.ringsVisible && ringStepM > 0 ? <span className="legend-reading">{t('map.ringStep', { step: formatDistance(ringStepM) })}</span> : null}
         <span className="legend-reading">{halfPower ? t('map.halfPower', { deg: halfPower.widthDeg }) : t('map.halfPowerNone')}</span>
@@ -42,7 +42,6 @@ export function OverlayLegend({ settings, scale, saturation, ringStepM, halfPowe
         </div>
       ) : null}
       {saturated ? <span className="legend-warning" role="status">{t('map.scaleSaturated', { pct: Math.round(saturation * 100) })}</span> : null}
-      <small>{t('map.legendNote')}</small>
     </div>
   );
 }

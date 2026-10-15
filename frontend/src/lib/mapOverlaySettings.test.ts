@@ -36,6 +36,19 @@ describe('overlay number fields (AUD-30)', () => {
     expect(maxDb.ok && maxDb.settings.maxDb).toBe(-10);
   });
 
+  it('restores the dashboard layer fields with defaults and bounds the overlay opacity', () => {
+    const legacy: Record<string, unknown> = { ...settings };
+    delete legacy.edgesVisible;
+    delete legacy.labelsVisible;
+    delete legacy.overlayOpacity;
+    const restored = validateOverlaySettings(legacy);
+    expect([restored.edgesVisible, restored.labelsVisible, restored.overlayOpacity]).toEqual([true, true, 0.85]);
+    expect(validateOverlaySettings({ ...settings, overlayOpacity: 0 }).overlayOpacity).toBe(0.2);
+    expect(validateOverlaySettings({ ...settings, overlayOpacity: 4 }).overlayOpacity).toBe(1);
+    expect(validateOverlaySettings({ ...settings, overlayOpacity: Number.NaN }).overlayOpacity).toBe(0.85);
+    expect(validateOverlaySettings({ ...settings, edgesVisible: false, labelsVisible: false })).toMatchObject({ edgesVisible: false, labelsVisible: false });
+  });
+
   it('restores stored settings without a dB scale field to the auto scale', () => {
     const legacy: Record<string, unknown> = { ...settings, minDb: -60, maxDb: 0 };
     delete legacy.dbScale;

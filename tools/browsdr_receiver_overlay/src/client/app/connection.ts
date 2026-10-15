@@ -1,6 +1,7 @@
 import type { AppInstance } from './types';
 import * as Comlink from 'comlink';
 import { getAllCatalogFilters, lookupDevice } from '../device-catalog';
+import { radioDisplayText } from './i18n';
 
 function initializeGains(
 	gainControls: readonly { name: string; min: number; max: number; step: number; default: number }[],
@@ -20,8 +21,10 @@ function initializeGains(
 	return gains;
 }
 
-const WEBUSB_UNAVAILABLE_MESSAGE = 'This browser has no WebUSB, so it cannot connect a HackRF. Open the console in Chrome or Edge (desktop or Android).';
-const RX_STREAM_FAILED_PREFIX = 'The radio stopped sending samples';
+export const WEBUSB_UNAVAILABLE_MESSAGE = 'This browser has no WebUSB, so it cannot connect a RadioSpectrum. Open the console in Chrome or Edge (desktop or Android).';
+export const RX_STREAM_FAILED_PREFIX = 'The radio stopped sending samples';
+/** Start of the message _handleRadioLost shows; the console bridge reports it as USB_LOST. */
+export const RADIO_LOST_PREFIX = 'Radio disconnected';
 
 function sameUsbDevice(a: USBDevice, b: USBDevice): boolean {
 	return a === b || (a.vendorId === b.vendorId && a.productId === b.productId
@@ -52,7 +55,7 @@ export const connectionMethods = {
 		if (!source || this.sweep.source === source) return;
 		if (this.sweep.hasResults && this.sweep.source === 'simulated') {
 			// Keep the shown results labelled as the simulation they came from.
-			this.showMsg('Radio connected. The results shown are SIMULATION; choose the HackRF source or Clear before scanning.');
+			this.showMsg('Radio connected. The results shown are SIMULATION; choose the RadioSpectrum source or Clear before scanning.');
 			return;
 		}
 		this.sweep.source = source;
@@ -134,11 +137,11 @@ export const connectionMethods = {
 			const hackrfDevices = authorizedDevices.filter(device => lookupDevice(device)?.type === 'hackrf');
 			if (hackrfDevices.length !== 1) return;
 			this._initAudioCtx();
-			this.showMsg('Reconnecting to previously authorized HackRF...');
+			this.showMsg('Reconnecting to previously authorized RadioSpectrum...');
 			await this.connectToDevice(hackrfDevices[0]);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			this.showMsg(`HackRF auto-connect failed: ${message}`);
+			this.showMsg(`RadioSpectrum auto-connect failed: ${message}`);
 		}
 	},
 	async connect(this: AppInstance) {
@@ -157,7 +160,7 @@ export const connectionMethods = {
 		for (const device of allPaired) {
 			const driver = lookupDevice(device);
 			if (driver) {
-				sdrDevices.push({ device, driverName: driver.name, productName: device.productName || '' });
+				sdrDevices.push({ device, driverName: radioDisplayText(driver.name), productName: radioDisplayText(device.productName || '') });
 			}
 		}
 
@@ -197,10 +200,10 @@ export const connectionMethods = {
 				this.connected = true;
 				this.mockDevice = false;
 				this._usbDevice = device;
-				if (this.sweep.error === WEBUSB_UNAVAILABLE_MESSAGE || this.sweep.error.startsWith('Radio disconnected')
+				if (this.sweep.error === WEBUSB_UNAVAILABLE_MESSAGE || this.sweep.error.startsWith(RADIO_LOST_PREFIX)
 					|| this.sweep.error.startsWith(RX_STREAM_FAILED_PREFIX)) this.sweep.error = '';
 				const info = await this.backend.info();
-				this.info.boardName = info.name;
+				this.info.boardName = radioDisplayText(info.name);
 
 				// Populate device capabilities for dynamic UI
 				const caps = await this.backend.getDeviceCapabilities();
@@ -374,7 +377,14 @@ export const connectionMethods = {
 		const rxStreamId = this._rxStreamId = (this._rxStreamId ?? 0) + 1;
 		try {
 			await this.backend.startRxStream(opts,
-				Comlink.proxy((spectrumData: any) => this.drawSpectrum(spectrumData)),
+				Comlink.proxy((spectrumData: any) => {
+					// The console bridge copies what it sends, so the frame keeps this buffer.
+					try {
+						this.drawSpectrum(spectrumData);
+					} finally {
+						this._consoleBridge?.spectrum(spectrumData);
+					}
+				}),
 				Comlink.proxy((audioSamples: any) => this.playAudio(audioSamples)),
 				Comlink.proxy((vfoIndex: number, freq: number, samples: Float32Array) => {
 					this._feedWhisperVfo(vfoIndex, freq, samples);
@@ -485,8 +495,9 @@ export const connectionMethods = {
 
 		// Enable first VFO by default only on initial start (not restart).
 		// During a restart (e.g. center freq change), preserve existing mute states.
+		// A start requested from the console dashboard stays muted unless it asked to listen.
 		if (!isRestart) {
-			this.vfos[0].enabled = true;
+			this.vfos[0].enabled = this._consoleBridge?.initialVfoEnabled() ?? true;
 		}
 		this.toggleVfoCheckbox(0);
 

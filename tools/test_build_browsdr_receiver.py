@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import io
+import re
 import shutil
 import subprocess
 import tempfile
@@ -105,7 +106,10 @@ class ReceiverBuildSourceTests(unittest.TestCase):
         wasm.mkdir(parents=True)
         (wasm / "hackrf_web.js").write_text("export {};", encoding="utf-8")
         (wasm / "hackrf_web_bg.wasm").write_bytes(b"wasm")
-        (build / "assets/index.js").write_text("export const receiver = true;", encoding="utf-8")
+        (build / "assets/index.js").write_text(
+            f"export const receiver = true; const channel = {builder.CONSOLE_BRIDGE_CHANNEL!r};",
+            encoding="utf-8",
+        )
         (build / "sw.js").write_text("self.workbox; registerRoute(/api/, new NetworkFirst({cacheName:'api-cache'}))", encoding="utf-8")
         (build / "workbox-1234.js").write_text("workbox runtime", encoding="utf-8")
         return build
@@ -140,6 +144,23 @@ class ReceiverBuildSourceTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, message):
                     builder._verify_embedded_build(build)
 
+    def test_embedded_build_requires_the_console_bridge(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            build = self._valid_build(Path(temporary))
+            builder._retire_service_worker(build)
+            builder._verify_embedded_build(build)
+            (build / "assets/index.js").write_text("export const receiver = true;", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "console dashboard bridge"):
+                builder._verify_embedded_build(build)
+
+    def test_bridge_channel_matches_the_overlay_protocol(self) -> None:
+        protocol = (
+            builder.PROJECT_ROOT / "tools/browsdr_receiver_overlay/src/client/app/console-bridge-protocol.ts"
+        ).read_text(encoding="utf-8")
+        match = re.search(r"export const BRIDGE_CHANNEL = '([^']+)';", protocol)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(1), builder.CONSOLE_BRIDGE_CHANNEL)
+
     @unittest.skipUnless(
         (builder.PROJECT_ROOT / "vendor/BrowSDR/package.json").is_file(),
         "vendor/BrowSDR submodule is not checked out",
@@ -166,6 +187,13 @@ class ReceiverBuildSourceTests(unittest.TestCase):
             hackrf = (work / "src/client/hackrf.ts").read_text(encoding="utf-8")
             self.assertIn("async startRx(callback: RxCallback, onError?: (error: unknown) => void)", hackrf)
             self.assertEqual(hackrf.count("onError?.("), 4)
+            app = work / "src/client/app"
+            self.assertTrue((app / "console-bridge.ts").is_file())
+            self.assertTrue((app / "console-bridge-protocol.ts").is_file())
+            self.assertIn("installConsoleBridge(this)", (app / "main.ts").read_text(encoding="utf-8"))
+            connection = (app / "connection.ts").read_text(encoding="utf-8")
+            self.assertIn("this._consoleBridge?.spectrum(spectrumData)", connection)
+            self.assertIn("this._consoleBridge?.initialVfoEnabled() ?? true", connection)
 
 
 class _StopAfterFirstNpmCall(Exception):

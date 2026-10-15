@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { CONFIG_RETRY_DELAYS_MS, displayFresh, nextPollDelayMs, savedConfigChangesTarget } from './App';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CONFIG_RETRY_DELAYS_MS, displayFresh, nextPollDelayMs, readWithRetry, savedConfigChangesTarget } from './App';
 import { DEFAULT_CONSOLE_CONFIG } from './lib/telemetry';
 import type { TelemetrySnapshot } from './types';
 
@@ -51,5 +51,44 @@ describe('automatic Data Out reads', () => {
   it('retry the console configuration with a capped backoff', () => {
     expect(CONFIG_RETRY_DELAYS_MS[0]).toBe(1_000);
     expect(Math.max(...CONFIG_RETRY_DELAYS_MS)).toBeLessThanOrEqual(15_000);
+  });
+});
+
+describe('reading capabilities', () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('retries a failed read with the backoff until one succeeds', async () => {
+    vi.useFakeTimers();
+    const results: Array<() => Promise<unknown>> = [
+      () => Promise.reject(new Error('timeout')),
+      () => Promise.reject(new Error('restart')),
+      () => Promise.resolve({ adminDefaultPassword: true }),
+    ];
+    const read = vi.fn(() => (results.shift() ?? (() => Promise.reject(new Error('unexpected'))))());
+    const values: unknown[] = [];
+    readWithRetry(read, (value) => values.push(value), [1_000, 2_000]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(read).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(read).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(read).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(read).toHaveBeenCalledTimes(3);
+    expect(values).toEqual([{ adminDefaultPassword: true }]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(read).toHaveBeenCalledTimes(3);
+  });
+
+  it('stops retrying and aborts the read in flight once stopped', async () => {
+    vi.useFakeTimers();
+    const signals: AbortSignal[] = [];
+    const read = vi.fn((signal: AbortSignal) => { signals.push(signal); return Promise.reject(new Error('down')); });
+    const stop = readWithRetry(read, () => undefined, [1_000]);
+    await vi.advanceTimersByTimeAsync(0);
+    stop();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(signals[0].aborted).toBe(true);
   });
 });

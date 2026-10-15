@@ -10,10 +10,12 @@ export interface ShortcutKeyEvent {
   target: EventTarget | null;
 }
 
-// Input types that take typed characters. Checkboxes, radios, ranges, buttons
-// and colour pickers do not, so shortcuts keep working after clicking them.
+// Input types that take typed characters. A focused range slider counts too:
+// the Overview Head Up and opacity sliders sit next to typed fields, and a
+// digit pressed while dragging must not switch pages. Checkboxes, radios,
+// buttons and colour pickers do not, so shortcuts keep working after them.
 const TEXT_INPUT_TYPES = new Set([
-  '', 'text', 'search', 'email', 'url', 'tel', 'password', 'number',
+  '', 'text', 'search', 'email', 'url', 'tel', 'password', 'number', 'range',
   'date', 'datetime-local', 'month', 'time', 'week',
 ]);
 const TEXT_ROLES = new Set(['textbox', 'searchbox', 'combobox', 'spinbutton']);

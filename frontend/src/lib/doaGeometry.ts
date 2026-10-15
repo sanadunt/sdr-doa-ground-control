@@ -9,6 +9,12 @@ export interface DoaOverlaySettings {
   heatmapVisible: boolean;
   guidesVisible: boolean;
   ringsVisible: boolean;
+  /** The two −3 dB edge lines either side of the peak. */
+  edgesVisible: boolean;
+  /** Ring distances, N/E/S/W letters and the bearing pill (DOM labels). */
+  labelsVisible: boolean;
+  /** Multiplies every overlay paint opacity, 0.2 to 1. */
+  overlayOpacity: number;
   heatStyle: 'beam' | 'density';
   /** 'auto' derives the dB range from the current vector; 'manual' uses minDb/maxDb/thresholdDb. */
   dbScale: 'auto' | 'manual';
@@ -34,6 +40,9 @@ export const DEFAULT_DOA_OVERLAY_SETTINGS: DoaOverlaySettings = {
   heatmapVisible: true,
   guidesVisible: true,
   ringsVisible: true,
+  edgesVisible: true,
+  labelsVisible: true,
+  overlayOpacity: 0.85,
   heatStyle: 'beam',
   dbScale: 'auto',
   maxDistanceM: 1000,

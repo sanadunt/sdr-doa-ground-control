@@ -17,6 +17,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BROWSDR_REVISION = "54f6cb7c0d69848461eedc46d278518be6f939d3"
 BROWSDR_OVERLAY_BASE_REVISION = "54f6cb7c0d69848461eedc46d278518be6f939d3"
 SOURCE_ARCHIVE_NAME = "freq-spectrum-source.tar.gz"
+# postMessage channel of the Overview dashboard bridge; BRIDGE_CHANNEL in the
+# overlay's console-bridge-protocol.ts. A build without it leaves the dashboard
+# spectrum and its Start, Listen and tuning controls without a receiver.
+CONSOLE_BRIDGE_CHANNEL = "sdr-console-receiver"
 # Earlier embedded builds registered a Workbox service worker. It cached /api/
 # replies, reloaded the iframe on install, and made Chromium cancel the keepalive
 # request that saves a recording when the Receiver page unloads. Current builds
@@ -1381,6 +1385,8 @@ def _verify_embedded_build(build_dir: Path) -> None:
         raise RuntimeError("the embedded Receiver page is missing its theme boot script")
     if (build_dir / "lib/peerjs.min.js").exists():
         raise RuntimeError("PeerJS was unexpectedly copied into the embedded build")
+    if CONSOLE_BRIDGE_CHANNEL not in bundle_text:
+        raise RuntimeError("the embedded Receiver bundle is missing the console dashboard bridge")
 
 
 def _install_built_receiver(build_dir: Path, output: Path) -> None:

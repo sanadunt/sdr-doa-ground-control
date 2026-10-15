@@ -1,0 +1,333 @@
+/* Overview dashboard: the map fills the stage, the bearing HUD and Layers
+   panel float top-left, the node card and Kontrol float top-right, and the
+   Polar and Spectrum sections share a dock along the bottom. Loaded after
+   polar-layout.css. Below 1024 px everything stacks in normal flow. */
+
+.ov-stage {
+  /* At least 256 px; taller when the spectrum needs it (SpectrumDock sets --ov-spec-need-h). */
+  --ov-dock-h: max(256px, var(--ov-spec-need-h, 0px));
+  --ov-gap: 12px;
+  --ov-card-bg: color-mix(in srgb, var(--surface) 95%, transparent);
+  --ov-shadow: 0 8px 22px rgba(0, 0, 0, .35);
+  position: relative;
+  isolation: isolate;
+  flex: 1 1 auto;
+  gap: 0;
+  height: 100%;
+  min-height: 0;
+}
+:root[data-theme='light'] .ov-stage { --ov-shadow: 0 6px 18px rgba(20, 32, 44, .16); }
+.ov-stage[data-dock='none'] { --ov-dock-h: 0px; }
+
+/* Shared pieces ------------------------------------------------------------ */
+.ov-card { border: 1px solid var(--line-soft); border-radius: 10px; background: var(--ov-card-bg); box-shadow: var(--ov-shadow); }
+.ov-card-head { display: flex; flex: none; align-items: center; gap: 8px; min-height: 44px; padding-left: 12px; }
+.ov-card-head h2, .ov-dock-head h2 { flex: 1 1 auto; min-width: 0; margin: 0; overflow: hidden; font-size: 13.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.ov-card-head-rule { border-bottom: 1px solid var(--line-soft); }
+.ov-eyebrow { color: var(--subtle); font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; }
+.ov-mono { font-family: var(--mono); }
+.ov-spacer { flex: 1 1 auto; }
+.ov-chip, .ov-tag { flex: none; padding: 1px 7px; border: 1px solid currentColor; border-radius: 999px; font-family: var(--mono); font-size: 10.5px; font-weight: 700; line-height: 1.5; white-space: nowrap; }
+.ov-chip.tone-good, .ov-tag.tone-good { color: var(--green); }
+.ov-chip.tone-warn, .ov-tag.tone-warn { color: var(--amber); }
+.ov-chip.tone-bad, .ov-tag.tone-bad { color: var(--red); }
+.ov-chip.tone-info, .ov-tag.tone-info { color: var(--blue); }
+.ov-chip.tone-neutral, .ov-tag.tone-neutral { color: var(--subtle); }
+.ov-icon-button { display: inline-grid; flex: none; place-items: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; }
+.ov-icon-button:hover:not(:disabled) { color: var(--text); background: var(--surface-2); }
+.ov-icon-button.is-bordered { border: 1px solid var(--line); }
+.ov-icon-button:disabled { cursor: not-allowed; opacity: .45; }
+.ov-button { display: inline-flex; flex: none; align-items: center; justify-content: center; gap: 6px; height: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--text); cursor: pointer; font-size: 13px; white-space: nowrap; }
+.ov-button svg { width: 16px; height: 16px; }
+.ov-button:hover { border-color: var(--accent); }
+.ov-button[aria-expanded='true'] { border-color: var(--accent); background: var(--accent-soft); }
+.ov-button kbd { display: inline-grid; place-items: center; width: 20px; height: 20px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-family: var(--mono); font-size: 11px; }
+.ov-seg { display: flex; flex: none; height: 44px; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; }
+.ov-seg button { flex: 1 1 0; min-width: 44px; padding: 0 10px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; }
+.ov-seg button + button { border-left: 1px solid var(--line); }
+.ov-seg button[aria-pressed='true'] { background: var(--surface-3); color: var(--text); }
+.ov-seg button:focus-visible { outline-offset: -2px; }
+.ov-seg button:disabled { cursor: not-allowed; opacity: .5; }
+.ov-stage .is-manual { color: var(--signal); }
+.ov-stage .is-warn { color: var(--amber); }
+.ov-stage .is-error { color: var(--red); }
+.ov-stage .is-good { color: var(--green); }
+.ov-stage .is-bad { color: var(--red); }
+
+/* Top-bar panel toggles (Lapisan | Polar | Spektrum | Kontrol) -------------- */
+.ov-panel-toggles { display: flex; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; }
+.ov-panel-toggles button { display: inline-flex; flex: none; align-items: center; justify-content: center; gap: 6px; min-width: 44px; height: 42px; padding: 0 12px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 13px; }
+.ov-panel-toggles button + button { border-left: 1px solid var(--line); }
+.ov-panel-toggles button svg { width: 16px; height: 16px; }
+.ov-panel-toggles button[aria-pressed='true'] { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--text); }
+.ov-panel-toggles button[aria-pressed='true'] svg { color: var(--accent); }
+.ov-panel-toggles button:focus-visible { outline-offset: -2px; }
+@media (max-width: 1300px) { .ov-toggle-label { display: none; } }
+
+/* Map ---------------------------------------------------------------------- */
+.ov-map { position: absolute; inset: 0; z-index: 0; }
+.ov-map > .map-panel { height: 100%; border: 0; border-radius: 0; }
+.ov-stage .map-notices { top: var(--ov-gap); right: var(--ov-gap); left: var(--ov-gap); align-items: center; max-width: none; }
+.ov-stage .map-data-chip { max-width: min(560px, 100%); text-align: center; }
+.ov-map-controls { position: absolute; z-index: 20; bottom: calc(var(--ov-dock-h) + var(--ov-gap)); left: var(--ov-gap); display: flex; flex-wrap: wrap; align-items: center; gap: 6px; max-width: calc(100% - 2 * var(--ov-gap)); pointer-events: none; }
+.ov-map-controls > * { pointer-events: auto; }
+.ov-map-button { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--ov-card-bg); color: var(--text); cursor: pointer; }
+.ov-map-button:hover { border-color: var(--accent); }
+.ov-map-attribution { display: inline-flex; align-items: center; height: 44px; padding: 0 4px; color: var(--muted); font-size: 11px; text-decoration: none; white-space: nowrap; }
+.ov-map-attribution span { padding: 3px 8px; border-radius: 6px; background: color-mix(in srgb, var(--bg) 85%, transparent); }
+.ov-map-attribution:hover { color: var(--text); }
+/* Legend and coordinates float bottom-right, above the dock. Kontrol takes
+   that corner when it is open; the node card repeats the coordinates. */
+.ov-stage .map-bottom-overlay { position: absolute; z-index: 15; right: var(--ov-gap); bottom: calc(var(--ov-dock-h) + var(--ov-gap)); max-width: min(460px, calc(100% - 380px)); padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--ov-card-bg); box-shadow: var(--ov-shadow); }
+.ov-stage[data-control='open'] .map-bottom-overlay { display: none; }
+@media (min-width: 1024px) and (max-width: 1279px) {
+  .ov-stage .map-bottom-overlay { grid-template-columns: minmax(0, 1fr); grid-template-areas: 'legend'; max-width: 320px; }
+  .ov-stage .map-bottom-overlay .map-coordinate { display: none; }
+}
+
+/* Left column: HUD and Layers ---------------------------------------------- */
+.ov-left { position: absolute; z-index: 2; top: var(--ov-gap); left: var(--ov-gap); display: flex; flex-direction: column; gap: var(--ov-gap); width: 264px; max-height: calc(100% - var(--ov-dock-h) - 80px); min-height: 0; pointer-events: none; }
+.ov-left > * { pointer-events: auto; }
+.ov-hud { display: flex; flex: none; flex-direction: column; gap: 2px; min-height: 144px; padding: 10px 12px; }
+/* Wraps the age (with its STALE mark) under the label instead of cutting the label off. */
+.ov-hud-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+.ov-hud-head .ov-eyebrow { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-hud-age { flex: none; color: var(--muted); font-family: var(--mono); font-size: 11px; }
+.ov-hud-bearing { color: var(--signal); font-family: var(--mono); font-size: 36px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; letter-spacing: -.02em; }
+.ov-hud-bearing small { margin-left: 1px; font-size: .6em; }
+.readout-warn .ov-hud-bearing { color: var(--amber); }
+.readout-neutral .ov-hud-bearing { color: var(--subtle); }
+.readout-empty { color: var(--subtle); }
+.ov-hud-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; color: var(--subtle); font-size: 11.5px; }
+.ov-hud-grid b, .ov-hud-offset b, .ov-node-foot b { color: var(--text); font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
+.ov-hud-offset { overflow: hidden; color: var(--subtle); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.ov-hud-offset > span { font-family: var(--mono); font-weight: 600; }
+.ov-hud-held { margin: 0; color: var(--amber); font-size: 12px; line-height: 1.35; }
+.ov-layers { display: flex; flex: 0 1 auto; flex-direction: column; min-height: 0; }
+.ov-layers-body { min-height: 0; overflow-y: auto; padding: 4px 6px 10px; overscroll-behavior: contain; }
+.ov-layer-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 4px; }
+.ov-check { display: flex; align-items: center; gap: 8px; min-width: 0; height: 44px; padding: 0 6px; cursor: pointer; font-size: 12.5px; }
+.ov-check input { flex: none; width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+.ov-check span { display: -webkit-box; overflow: hidden; line-height: 1.2; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.ov-range { display: flex; flex-direction: column; padding: 4px 6px 0; color: var(--muted); font-size: 12px; }
+.ov-range-head { display: flex; justify-content: space-between; gap: 8px; }
+.ov-range output { color: var(--text); font-family: var(--mono); }
+.ov-range input { width: 100%; height: 44px; margin: 0; accent-color: var(--accent); }
+.ov-advanced { margin-top: 6px; border-top: 1px solid var(--line-soft); }
+.ov-advanced > summary { display: flex; align-items: center; min-height: 44px; padding: 0 6px; color: var(--muted); cursor: pointer; font-size: 12.5px; font-weight: 600; }
+.ov-advanced > summary:hover { color: var(--text); }
+.ov-advanced > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.map-overlay-controls.is-embedded { max-height: none; overflow: visible; padding: 4px 6px; border: 0; background: transparent; }
+.map-overlay-controls.is-embedded .overlay-control-fields { grid-template-columns: minmax(0, 1fr); }
+
+/* Right column: node card and Kontrol ----------------------------------------- */
+.ov-right { position: absolute; z-index: 2; top: var(--ov-gap); right: var(--ov-gap); bottom: calc(var(--ov-dock-h) + var(--ov-gap)); display: flex; flex-direction: column; align-items: flex-end; gap: var(--ov-gap); width: 360px; min-height: 0; pointer-events: none; }
+.ov-right > * { pointer-events: auto; }
+.ov-node { flex: none; width: 264px; }
+.ov-node-summary { display: flex; flex-direction: column; gap: 2px; padding: 0 12px 10px; color: var(--text); font-family: var(--mono); font-size: 12px; }
+.ov-node-summary > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-node-summary.is-stale, .ov-node-detail dl.is-stale dd { color: var(--subtle); }
+.ov-node-summary > .ov-node-source { color: var(--subtle); font-size: 10.5px; letter-spacing: .04em; }
+.ov-node-summary > .ov-node-source.is-warn { color: var(--amber); }
+.ov-node-summary > .ov-node-source.is-manual { color: var(--signal); }
+.ov-node-detail { padding: 2px 12px 12px; border-top: 1px solid var(--line-soft); }
+.ov-node-detail[hidden] { display: none; }
+.ov-node-host { margin: 6px 0 8px; color: var(--subtle); font-family: var(--mono); font-size: 11px; }
+.ov-node-detail dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 12px; margin: 0; }
+.ov-node-detail dt { color: var(--subtle); font-size: 11px; }
+.ov-node-detail dd { margin: 0; overflow: hidden; color: var(--text); font-family: var(--mono); font-size: 12.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.ov-node-detail dd.is-good { color: var(--green); }
+.ov-node-detail dd.is-bad { color: var(--red); }
+.ov-node-foot { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--line-soft); color: var(--subtle); font-size: 11.5px; }
+.ov-control { display: flex; flex: 0 1 auto; flex-direction: column; width: 360px; min-height: 0; background: color-mix(in srgb, var(--surface) 97%, transparent); }
+.ov-control-body { min-height: 0; overflow-y: auto; padding: 10px 12px 12px; color: var(--muted); font-size: 12.5px; overscroll-behavior: contain; }
+.ov-control-body p { margin: 0; }
+.ov-control-body .ov-mono { color: var(--text); }
+
+/* Bottom dock: Polar DoA and Spectrum --------------------------------------- */
+.ov-dock { position: absolute; z-index: 3; right: 0; bottom: 0; left: 0; display: flex; height: var(--ov-dock-h); border-top: 1px solid var(--line-soft); background: color-mix(in srgb, var(--bg) 96%, transparent); }
+.ov-stage[data-dock='polar'] .ov-dock { right: auto; border-right: 1px solid var(--line-soft); border-top-right-radius: 10px; }
+.ov-dock-head { display: flex; flex: none; align-items: center; gap: 8px; height: 48px; padding: 0 4px 0 12px; }
+.ov-dock-head h2 { font-size: 14px; }
+.ov-polar { display: flex; flex: none; flex-direction: column; width: 284px; min-width: 0; }
+.ov-polar.is-settings-open { width: 621px; }
+/* 284 px holds the title, the Compass|Polar switch and "Atur" without truncating. */
+.ov-polar .ov-dock-head { gap: 6px; }
+.ov-polar .ov-dock-head h2 { flex: none; font-size: 13.5px; }
+.ov-polar .ov-dock-head > .ov-seg { margin-left: auto; }
+.ov-seg-compact button { flex: none; min-width: 44px; padding: 0 4px; }
+.ov-polar .ov-dock-head > .ov-button { gap: 5px; padding: 0 8px; }
+.ov-polar-settings .ov-seg button { padding: 0 4px; white-space: nowrap; }
+.ov-polar-body { display: flex; flex: 1 1 auto; min-height: 0; }
+.ov-polar-plot { display: flex; flex: none; flex-direction: column; align-items: center; gap: 2px; width: 284px; min-height: 0; padding-top: 2px; }
+.ov-polar-frame { display: flex; flex: 1 1 auto; flex-direction: column; width: 100%; min-height: 0; }
+.ov-polar .plotly-polar { flex: 1 1 auto; height: 100%; min-height: 0; }
+.ov-polar-footer { max-width: 100%; margin: 0; padding: 0 8px 6px; overflow: hidden; color: var(--muted); font-family: var(--mono); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.ov-polar-settings { display: flex; flex: none; flex-direction: column; gap: 6px; width: 337px; min-height: 0; overflow-y: auto; padding: 4px 12px 8px; border-left: 1px solid var(--line-soft); }
+.ov-ps-row { display: flex; flex-direction: column; }
+.ov-ps-label { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-height: 16px; }
+.ov-ps-label > :first-child { color: var(--muted); font-size: 12px; }
+.ov-ps-label > :last-child:not(:first-child) { color: var(--muted); font-family: var(--mono); font-size: 11px; text-align: right; }
+.ov-ps-label > .is-manual { color: var(--signal); }
+.ov-ps-label > .is-warn { color: var(--amber); }
+.ov-ps-label > .is-error { color: var(--red); }
+.ov-ps-controls { display: flex; align-items: center; gap: 8px; height: 44px; }
+.ov-ps-slider { flex: 1 1 auto; min-width: 0; height: 44px; margin: 0; accent-color: var(--accent); }
+.ov-unit-input { display: flex; flex: none; align-items: center; height: 44px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.ov-unit-input input { flex: 1 1 auto; min-width: 0; height: 42px; padding: 0 6px; border: 0; border-radius: 8px; background: transparent; color: var(--text); font-family: var(--mono); font-size: 13px; }
+.ov-unit-input input:disabled { cursor: not-allowed; }
+.ov-unit-input:has(input:disabled) { opacity: .55; }
+.ov-unit-input > span { padding-right: 8px; color: var(--subtle); }
+.ov-unit-input.is-error, .ov-db-input.is-error { border-color: var(--red); }
+.ov-w-80 { width: 80px; }
+.ov-w-100 { width: 100px; }
+.ov-w-106 { width: 106px; }
+.ov-w-132 { width: 132px; }
+.ov-db-input { flex: none; width: 62px; height: 44px; padding: 0 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+.ov-db-input:disabled { cursor: not-allowed; opacity: .55; }
+.ov-ps-dash { color: var(--subtle); }
+.ov-ps-preview { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--text); font-family: var(--mono); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.ov-spectrum { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; border-left: 1px solid var(--line-soft); container: ov-spec / inline-size; }
+.ov-dock > .ov-spectrum:first-child { border-left: 0; }
+/* Title, source, chip | [follow, mode, Dengar] Kirim [Mulai, Receiver]. It wraps when narrow, the
+   bracketed groups as one item each, and the dock grows to fit the extra rows. */
+.ov-spec-head { flex-wrap: wrap; height: auto; min-height: 48px; column-gap: 8px; row-gap: 0; padding: 2px 12px; }
+.ov-spec-group { display: inline-flex; flex: none; flex-wrap: wrap; align-items: center; gap: 0 8px; max-width: 100%; }
+/* On a phone these labels take two lines before a group splits; a group splits only below that. */
+.ov-spec-group > .ov-spec-follow, .ov-spec-group > .ov-spec-open { flex: 1 1 0; min-width: min-content; }
+.ov-spec-follow > span, .ov-spec-open-label { white-space: normal; }
+.ov-spec-head h2 { flex: none; }
+.ov-spec-source { flex: none; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.ov-spec-follow { display: inline-flex; flex: none; align-items: center; gap: 8px; height: 44px; color: var(--muted); cursor: pointer; font-size: 12.5px; white-space: nowrap; }
+.ov-spec-follow input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+.ov-listen-mode { flex: none; width: 76px; height: 44px; padding: 0 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+.ov-button:disabled { cursor: not-allowed; opacity: .45; }
+.ov-button:disabled:hover { border-color: var(--line); }
+.ov-button[aria-pressed='true'] { border-color: var(--signal); background: color-mix(in srgb, var(--signal) 16%, transparent); }
+.ov-button[aria-pressed='true'] svg { color: var(--signal); }
+.ov-button.is-primary { border-color: var(--accent); background: var(--accent); color: var(--on-accent); font-weight: 600; }
+.ov-button.is-send { border-color: var(--signal); background: var(--signal); color: var(--on-accent); font-weight: 700; }
+.ov-button.is-primary:hover:not(:disabled), .ov-button.is-send:hover:not(:disabled) { filter: brightness(1.08); }
+.ov-button.is-wide { flex: 1 1 auto; }
+.ov-spec-send:not(:disabled) { border-color: color-mix(in srgb, var(--signal) 70%, var(--line)); }
+.ov-spec-run { width: 108px; }
+@container ov-spec (max-width: 980px) { .ov-spec-source { display: none; } }
+.ov-spec-body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 4px; min-width: 0; min-height: 0; overflow: hidden; padding: 2px 12px 8px; }
+.ov-spec-info { display: flex; flex: none; flex-wrap: wrap; justify-content: space-between; gap: 0 12px; color: var(--muted); font-family: var(--mono); font-size: 11.5px; line-height: 16px; }
+.ov-spec-peak { color: var(--text); }
+.ov-spec-notice { display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 0 10px; font-size: 12px; line-height: 16px; }
+.ov-spec-message.tone-warn { color: var(--amber); }
+.ov-spec-message.tone-bad { color: var(--red); }
+.ov-spec-message.tone-info, .ov-spec-message.tone-neutral { color: var(--muted); }
+/* 76 px tall; the stopped overlay may make it taller (a wrapped message above a 44 px button). */
+.ov-spec-trace { position: relative; flex: none; min-height: 76px; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--bg); cursor: crosshair; }
+.ov-spec-canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+.ov-spec-canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ov-spec-label { position: absolute; left: 6px; color: var(--subtle); font-family: var(--mono); font-size: 10px; line-height: 12px; pointer-events: none; }
+.ov-spec-label.is-top { top: 2px; }
+.ov-spec-label.is-bottom { bottom: 2px; }
+.ov-spec-vfo { position: absolute; top: 2px; padding-left: 6px; color: var(--signal); font-family: var(--mono); font-size: 10px; font-weight: 700; line-height: 12px; pointer-events: none; }
+.ov-spec-hover { position: absolute; bottom: 2px; padding: 1px 6px; border-radius: 4px; background: color-mix(in srgb, var(--surface) 90%, transparent); color: var(--text); font-family: var(--mono); font-size: 10.5px; line-height: 14px; white-space: nowrap; pointer-events: none; transform: translateX(8px); }
+.ov-spec-hover[data-side='left'] { transform: translateX(calc(-100% - 8px)); }
+.ov-spec-vfo[hidden], .ov-spec-hover[hidden] { display: none; }
+.ov-spec-overlay { position: relative; display: flex; min-height: 74px; flex-wrap: wrap; align-items: center; justify-content: center; gap: 2px 12px; padding: 2px 12px; background: color-mix(in srgb, var(--bg) 65%, transparent); color: var(--text); cursor: default; font-size: 12.5px; text-align: center; }
+.ov-spec-inline-button { padding: 0 10px; background: var(--surface); font-size: 12px; }
+.ov-spec-ticks { display: flex; flex: none; justify-content: space-between; height: 14px; color: var(--subtle); font-family: var(--mono); font-size: 10.5px; line-height: 14px; }
+.ov-spec-waterfall { display: block; flex: 1 1 0; width: 100%; min-height: 24px; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--bg); cursor: crosshair; }
+
+/* Kontrol (MQTT config patch) ------------------------------------------------ */
+.ov-control-body { display: flex; flex-direction: column; gap: 10px; }
+.ov-control-note { color: var(--subtle); }
+.ov-control-warn { color: var(--amber); font-size: 12px; }
+.ov-control-error { color: var(--red); font-size: 12px; }
+.ov-control-small { color: var(--muted); font-size: 11.5px; }
+.ov-control-meta { display: flex; flex-direction: column; gap: 1px; color: var(--subtle); font-size: 11.5px; }
+.ov-control-meta .ov-mono, .ov-control-topic { color: var(--text); overflow-wrap: anywhere; }
+.ov-control-meta .ov-tag { margin-left: 4px; }
+.ov-control-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; }
+.ov-control-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.ov-control-field label { color: var(--muted); font-size: 12px; }
+.ov-control-field .ov-unit-input input { padding: 0 8px; }
+.ov-unit-input.is-changed { border-color: var(--signal); }
+.ov-control-hint { color: var(--subtle); font-size: 10.5px; line-height: 1.3; }
+.ov-control-hint.is-changed { color: var(--signal); }
+.ov-control-hint.is-error { color: var(--red); }
+.ov-control-actions { display: flex; gap: 8px; }
+.ov-control-review, .ov-control-box, .ov-control-result { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.ov-control-review strong { color: var(--text); font-size: 12.5px; }
+.ov-control-change { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 10px; font-size: 12px; }
+.ov-control-change b { color: var(--signal); font-weight: 600; }
+.ov-control-change .ov-mono { color: var(--text); }
+.ov-control-key { color: var(--subtle) !important; font-size: 11px; }
+.ov-control-review-meta { color: var(--subtle); font-size: 11px; }
+.ov-control-box { color: var(--muted); }
+.ov-control-state { color: var(--text); font-size: 11.5px; }
+.ov-control-result { gap: 4px; }
+.ov-control-result-title { font-family: var(--mono); font-size: 12.5px; font-weight: 700; }
+.ov-control-result > span:not(.ov-control-result-title) { color: var(--text); }
+.ov-control-result > .ov-control-small { color: var(--subtle); }
+.ov-control-result.tone-ok { border-color: var(--green); background: color-mix(in srgb, var(--green) 8%, transparent); }
+.ov-control-result.tone-ok .ov-control-result-title { color: var(--green); }
+.ov-control-result.tone-warn { border-color: var(--amber); background: color-mix(in srgb, var(--amber) 8%, transparent); }
+.ov-control-result.tone-warn .ov-control-result-title { color: var(--amber); }
+.ov-control-result.tone-err { border-color: var(--red); background: color-mix(in srgb, var(--red) 8%, transparent); }
+.ov-control-result.tone-err .ov-control-result-title { color: var(--red); }
+.ov-verify { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.ov-verify-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 10px; }
+.ov-verify-verdict { font-family: var(--mono); font-size: 12.5px; font-weight: 700; }
+.ov-verify-verdict.tone-good { color: var(--green); }
+.ov-verify-verdict.tone-warn { color: var(--amber); }
+.ov-verify-verdict.tone-info { color: var(--blue); }
+.ov-verify-verdict.tone-neutral { color: var(--subtle); }
+.ov-verify-list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.ov-verify-list li { display: flex; flex-direction: column; gap: 3px; padding-top: 8px; border-top: 1px solid var(--line-soft); }
+.ov-verify-list li:first-child { padding-top: 0; border-top: 0; }
+.ov-verify-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text); font-size: 12px; }
+.ov-verify-values { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 8px; margin: 0; }
+.ov-verify-values dt { color: var(--subtle); font-size: 10.5px; }
+.ov-verify-values dd { margin: 0; font-size: 11.5px; overflow-wrap: anywhere; }
+.ov-admin-unlock { display: flex; flex-direction: column; gap: 6px; }
+.ov-admin-unlock label { color: var(--muted); font-size: 12px; }
+.ov-admin-row { display: flex; gap: 8px; }
+.ov-admin-row input { flex: 1 1 auto; min-width: 0; height: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); }
+.ov-admin-row input.is-error { border-color: var(--red); }
+.ov-admin-message { min-height: 18px; color: var(--red); font-size: 12px; }
+
+/* Stacked layout ------------------------------------------------------------ */
+@media (max-width: 1023px) {
+  .ov-stage { --ov-dock-h: 0px; display: flex; flex-direction: column; gap: var(--ov-gap); height: auto; padding: var(--ov-gap); }
+  .ov-map { position: static; flex: none; }
+  .ov-map > .map-panel { height: auto; border: 1px solid var(--line-soft); border-radius: 10px; }
+  .ov-map .map-stage { flex: none; }
+  .ov-map .map-frame { flex: none; height: clamp(320px, 52vh, 560px); }
+  .ov-stage .map-bottom-overlay { position: static; max-width: none; border: 0; border-top: 1px solid var(--line-soft); border-radius: 0; background: transparent; box-shadow: none; }
+  .ov-left, .ov-right { position: static; width: auto; max-height: none; align-items: stretch; pointer-events: auto; }
+  .ov-left > section, .ov-right > section { width: auto; }
+  .ov-card { box-shadow: none; }
+  .ov-dock { position: static; flex-direction: column; gap: var(--ov-gap); height: auto; border: 0; background: transparent; }
+  .ov-stage[data-dock='polar'] .ov-dock { border: 0; border-radius: 0; }
+  .ov-polar, .ov-polar.is-settings-open, .ov-spectrum, .ov-dock > .ov-spectrum:first-child { width: auto; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface); }
+  .ov-polar-plot { flex: 1 1 auto; width: auto; height: 260px; }
+  .ov-spec-body { min-height: 120px; overflow: visible; }
+  .ov-spec-waterfall { flex: none; height: 96px; }
+  .topbar-toolbar .ov-panel-toggles { width: 100%; }
+  .topbar-toolbar .ov-panel-toggles button { flex: 1 1 0; }
+  .ov-toggle-label { display: inline; }
+}
+@media (max-width: 680px) {
+  .ov-polar-body { flex-direction: column; }
+  .ov-polar-settings { width: auto; border-top: 1px solid var(--line-soft); border-left: 0; }
+  .ov-polar-plot { flex: none; }
+}
+@media (max-width: 600px) {
+  .ov-stage { padding: var(--ov-gap) 16px; }
+  .ov-spec-head { padding: 6px 12px; }
+  .ov-control-fields { grid-template-columns: minmax(0, 1fr); }
+  .ov-panel-toggles button { padding: 0 6px; }
+  .ov-ps-controls { flex-wrap: wrap; height: auto; min-height: 44px; }
+  .ov-ps-preview { flex-basis: 100%; }
+  .ov-db-input { flex: 1 1 52px; width: auto; min-width: 0; }
+}
+@media (max-width: 399px) {
+  .ov-toggle-label { display: none; }
+}

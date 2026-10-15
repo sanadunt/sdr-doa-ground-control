@@ -84,7 +84,8 @@ export function CollectorError({ error }: { error: string }): JSX.Element {
   return <span title={view.raw}>{view.text}</span>;
 }
 
-export type IconName = 'overview' | 'health' | 'diagnostics' | 'configuration' | 'monitor' | 'receiver' | 'refresh' | 'lock' | 'map' | 'polar' | 'menu' | 'close' | 'sun' | 'moon' | 'chevron-left' | 'chevron-right' | 'layers' | 'expand' | 'collapse' | 'crosshair';
+export type IconName = 'overview' | 'health' | 'diagnostics' | 'configuration' | 'monitor' | 'receiver' | 'refresh' | 'lock' | 'map' | 'polar' | 'menu' | 'close' | 'sun' | 'moon' | 'chevron-left' | 'chevron-right' | 'layers' | 'expand' | 'collapse' | 'crosshair'
+  | 'spectrum' | 'sliders' | 'external' | 'play' | 'stop' | 'headphones' | 'send' | 'chevron-down' | 'chevron-up' | 'plus' | 'minus' | 'north' | 'peak-up' | 'reset' | 'polar-dock';
 
 export function Icon({ name }: { name: IconName }): JSX.Element {
   const common = { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const, 'aria-hidden': true };
@@ -109,6 +110,21 @@ export function Icon({ name }: { name: IconName }): JSX.Element {
     expand: <><path d="M4 9V4h5" /><path d="M20 9V4h-5" /><path d="M4 15v5h5" /><path d="M20 15v5h-5" /></>,
     collapse: <><path d="M9 4v5H4" /><path d="M15 4v5h5" /><path d="M9 20v-5H4" /><path d="M15 20v-5h5" /></>,
     crosshair: <><circle cx="12" cy="12" r="7" /><path d="M12 2v5M12 17v5M2 12h5M17 12h5" /></>,
+    spectrum: <path d="M3 17l4-4 3 2 3-9 3 8 3-3 2 2" />,
+    sliders: <><path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" /></>,
+    external: <path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" />,
+    play: <path d="M8 5l11 7-11 7z" fill="currentColor" />,
+    stop: <rect x="6" y="6" width="12" height="12" rx="1" fill="currentColor" />,
+    headphones: <><path d="M4 15v-3a8 8 0 0 1 16 0v3" /><rect x="3" y="14" width="4" height="7" rx="1.5" /><rect x="17" y="14" width="4" height="7" rx="1.5" /></>,
+    send: <><path d="M21 3 10 14" /><path d="m21 3-7 18-4-7-7-4z" /></>,
+    'chevron-down': <path d="m6 9 6 6 6-6" />,
+    'chevron-up': <path d="m6 15 6-6 6 6" />,
+    plus: <path d="M12 5v14M5 12h14" />,
+    minus: <path d="M5 12h14" />,
+    north: <path d="M12 3l5 16-5-3-5 3z" />,
+    'peak-up': <path d="M12 20V8M6 14l6-6 6 6M5 4h14" />,
+    reset: <><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /></>,
+    'polar-dock': <><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="4" /><path d="M12 12l5.5-5.5" /></>,
   };
   return <svg {...common}>{paths[name]}</svg>;
 }

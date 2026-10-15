@@ -3,6 +3,8 @@ import { DEFAULT_DOA_OVERLAY_SETTINGS, type DoaOverlaySettings } from './doaGeom
 const STORAGE_KEY = 'sdr-doa-overlay-settings-v4';
 const intervals = new Set([15, 30, 45, 90]);
 const palettes = new Set(['kraken', 'thermal', 'viridis', 'monochrome']);
+/** The overlay never fades out completely, so a stored 0 cannot hide it without a trace. */
+export const OVERLAY_OPACITY_MIN = 0.2;
 
 export function validateOverlaySettings(input: Partial<DoaOverlaySettings>): DoaOverlaySettings {
   const merged = { ...DEFAULT_DOA_OVERLAY_SETTINGS, ...input };
@@ -19,6 +21,9 @@ export function validateOverlaySettings(input: Partial<DoaOverlaySettings>): Doa
     heatmapVisible: Boolean(merged.heatmapVisible),
     guidesVisible: Boolean(merged.guidesVisible),
     ringsVisible: Boolean(merged.ringsVisible),
+    edgesVisible: Boolean(merged.edgesVisible),
+    labelsVisible: Boolean(merged.labelsVisible),
+    overlayOpacity: number(merged.overlayOpacity, DEFAULT_DOA_OVERLAY_SETTINGS.overlayOpacity, OVERLAY_OPACITY_MIN, 1),
     heatStyle: merged.heatStyle === 'density' ? 'density' : 'beam',
     dbScale: merged.dbScale === 'manual' ? 'manual' : 'auto',
     maxDistanceM: number(merged.maxDistanceM, 1000, 100, 20000),

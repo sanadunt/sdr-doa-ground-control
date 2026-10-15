@@ -13,5 +13,8 @@
   "location_source": "Static",
   "output_vfo": 0,
   "uniform_gain": 15.7,
-  "vfo_mode": "Standard"
+  "vfo_bw_0": 12500,
+  "vfo_freq_0": 415788200,
+  "vfo_mode": "Standard",
+  "vfo_squelch_0": -80
 }

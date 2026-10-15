@@ -524,8 +524,8 @@
 					<label>{{ t('Source') }}
 						<select class="sweep-select-wide" v-model="sweep.source" :disabled="sweep.active || sweep.starting || sweep.stopping || sweep.hasResults">
 							<option value="simulated">{{ t('Simulation (synthetic peaks)') }}</option>
-							<option value="native" v-if="deviceCapabilities && deviceCapabilities.supportsNativeSweep">{{ t('HackRF native sweep') }}</option>
-							<option value="manual" v-if="deviceCapabilities && deviceCapabilities.supportsManualSweep">{{ t('HackRF manual sweep') }}</option>
+							<option value="native" v-if="deviceCapabilities && deviceCapabilities.supportsNativeSweep">{{ t('RadioSpectrum native sweep') }}</option>
+							<option value="manual" v-if="deviceCapabilities && deviceCapabilities.supportsManualSweep">{{ t('RadioSpectrum manual sweep') }}</option>
 						</select>
 					</label>
 					<label>{{ t('Start') }}

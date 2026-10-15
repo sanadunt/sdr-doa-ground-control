@@ -299,8 +299,8 @@ export const RECEIVER_INDONESIAN: Readonly<Record<string, string>> = {
 	// Spectrum workspace
 	'Wide Spectrum': 'Spektrum lebar',
 	'Simulation source: peaks are synthetic, not received RF.': 'Sumber simulasi: puncak bersifat sintetis, bukan RF yang diterima.',
-	'HackRF native sweep': 'HackRF sweep bawaan',
-	'HackRF manual sweep': 'HackRF sweep manual',
+	'RadioSpectrum native sweep': 'Sweep bawaan RadioSpectrum',
+	'RadioSpectrum manual sweep': 'Sweep manual RadioSpectrum',
 	'Trace': 'Trace',
 	'Max hold': 'Tahan maksimum',
 	'Listen mode': 'Mode dengar',
@@ -381,11 +381,11 @@ export const RECEIVER_INDONESIAN: Readonly<Record<string, string>> = {
 	'VFO audio recording stopped because the Spectrum scan needs the radio. Saved audio is in Records.': 'Rekaman audio VFO berhenti karena pindai Spektrum membutuhkan radio. Audio yang tersimpan ada di Rekaman.',
 	'VFO audio recording stopped with the Receiver. Saved audio is in Records.': 'Rekaman audio VFO berhenti bersama Receiver. Audio yang tersimpan ada di Rekaman.',
 	'Import failed: invalid JSON file.': 'Impor gagal: file JSON tidak valid.',
-	'This browser has no WebUSB, so it cannot connect a HackRF. Open the console in Chrome or Edge (desktop or Android).': 'Browser ini tidak punya WebUSB, jadi tidak bisa menyambungkan HackRF. Buka console di Chrome atau Edge (desktop atau Android).',
-	'Radio connected. The results shown are SIMULATION; choose the HackRF source or Clear before scanning.': 'Radio tersambung. Hasil yang ditampilkan adalah SIMULATION; pilih sumber HackRF atau Bersihkan sebelum memindai.',
+	'This browser has no WebUSB, so it cannot connect a RadioSpectrum. Open the console in Chrome or Edge (desktop or Android).': 'Browser ini tidak punya WebUSB, jadi tidak bisa menyambungkan RadioSpectrum. Buka console di Chrome atau Edge (desktop atau Android).',
+	'Radio connected. The results shown are SIMULATION; choose the RadioSpectrum source or Clear before scanning.': 'Radio tersambung. Hasil yang ditampilkan adalah SIMULATION; pilih sumber RadioSpectrum atau Bersihkan sebelum memindai.',
 	'Radio disconnected (USB unplugged or lost). RX and scanning stopped. Reconnect the radio to continue.': 'Radio terputus (USB dicabut atau hilang). RX dan pemindaian berhenti. Sambungkan ulang radio untuk melanjutkan.',
 	'Radio disconnected (USB unplugged or lost). RX and scanning stopped; the recording was saved up to this point. Reconnect the radio to continue.': 'Radio terputus (USB dicabut atau hilang). RX dan pemindaian berhenti; rekaman tersimpan sampai titik ini. Sambungkan ulang radio untuk melanjutkan.',
-	'Reconnecting to previously authorized HackRF...': 'Menyambung ulang ke HackRF yang sudah diizinkan...',
+	'Reconnecting to previously authorized RadioSpectrum...': 'Menyambung ulang ke RadioSpectrum yang sudah diizinkan...',
 	'Wait for scan startup to finish before connecting a device.': 'Tunggu pindai selesai dimulai sebelum menyambungkan perangkat.',
 	'Connected to Radio SDR': 'Tersambung ke Radio SDR',
 	'Failed to open device.': 'Gagal membuka perangkat.',
@@ -415,8 +415,8 @@ export const RECEIVER_INDONESIAN: Readonly<Record<string, string>> = {
 	'Listening stopped. Device disconnected; no scan started.': 'Mendengar berhenti. Perangkat terputus; tidak ada pindai yang dimulai.',
 	'Listening stopped. Select Start scan to acquire Spectrum data.': 'Mendengar berhenti. Pilih Mulai pindai untuk mengambil data Spektrum.',
 	'Receiver backend is still initializing. Wait a moment, then try again.': 'Backend Receiver masih disiapkan. Tunggu sebentar, lalu coba lagi.',
-	'Connect a HackRF before selecting a hardware sweep source.': 'Sambungkan HackRF sebelum memilih sumber sweep perangkat keras.',
-	'This HackRF firmware does not support native sweep. Select Manual or Simulated.': 'Firmware HackRF ini tidak mendukung sweep bawaan. Pilih Manual atau Simulasi.',
+	'Connect a RadioSpectrum before selecting a hardware sweep source.': 'Sambungkan RadioSpectrum sebelum memilih sumber sweep perangkat keras.',
+	'This RadioSpectrum firmware does not support native sweep. Select Manual or Simulated.': 'Firmware RadioSpectrum ini tidak mendukung sweep bawaan. Pilih Manual atau Simulasi.',
 	'This device does not support manual sweep. Select an available source.': 'Perangkat ini tidak mendukung sweep manual. Pilih sumber yang tersedia.',
 	'Stop the current Receiver transition before opening an archived scan.': 'Tunggu peralihan Receiver saat ini selesai sebelum membuka pindai terarsip.',
 	'There are no sweep results to save.': 'Tidak ada hasil sweep untuk disimpan.',
@@ -453,7 +453,7 @@ export const RECEIVER_INDONESIAN_PATTERNS: ReadonlyArray<readonly [RegExp, strin
 		'Radio berhenti mengirim sampel ({1}). RX berhenti. Periksa kabel USB, lalu tekan Lanjutkan atau sambungkan ulang radio.'],
 	[/^The radio stopped sending samples \((.*)\)\. RX stopped; the recording was saved up to this point\. Check the USB cable, then press Resume or reconnect the radio\.$/s,
 		'Radio berhenti mengirim sampel ({1}). RX berhenti; rekaman tersimpan sampai titik ini. Periksa kabel USB, lalu tekan Lanjutkan atau sambungkan ulang radio.'],
-	[/^HackRF auto-connect failed: (.*)$/s, 'Sambung otomatis HackRF gagal: {1}'],
+	[/^RadioSpectrum auto-connect failed: (.*)$/s, 'Sambung otomatis RadioSpectrum gagal: {1}'],
 	[/^Connect Error: (.*)$/s, 'Galat sambungan: {1}'],
 	[/^Mock Connect Error: (.*)$/s, 'Galat sambungan Mock: {1}'],
 	[/^Audio recording: (.*)$/s, 'Rekaman audio: {t1}'],
@@ -526,6 +526,18 @@ export const RECEIVER_INDONESIAN_PATTERNS: ReadonlyArray<readonly [RegExp, strin
 	[/^(.*); stopping also failed: (.*)$/s, '{t1}; penghentian juga gagal: {2}'],
 ];
 
+/** Name the Receiver shows for the radio in place of the upstream brand. */
+export const RADIO_DISPLAY_NAME = 'RadioSpectrum';
+
+/**
+ * Text for the screen with the upstream radio brand replaced: board and USB
+ * product names, and error detail passed through from the radio driver. The
+ * browser's own WebUSB chooser still shows the USB product name.
+ */
+export function radioDisplayText(text: string): string {
+	return text.replace(/HackRF/g, RADIO_DISPLAY_NAME);
+}
+
 export function receiverLanguage(value: unknown): ReceiverLanguage {
 	return value === 'id' ? 'id' : 'en';
 }
@@ -560,6 +572,6 @@ export const i18nMethods = {
 		return translateReceiver(this.uiLanguage, text);
 	},
 	tm(this: AppInstance, message: string): string {
-		return translateReceiverMessage(this.uiLanguage, message);
+		return radioDisplayText(translateReceiverMessage(this.uiLanguage, message));
 	},
 };

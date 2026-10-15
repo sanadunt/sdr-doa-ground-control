@@ -25,7 +25,7 @@ import urllib.error
 import urllib.request
 import zlib
 from pathlib import Path
-from typing import Any, Dict, Iterator, List
+from typing import Any, Dict, Iterator, List, Optional
 from unittest import mock
 
 TOOLS = Path(__file__).resolve().parent
@@ -133,6 +133,11 @@ def test_dotenv_admin_password_precedence_and_parser() -> None:
     assert ground_console._admin_password_from_sources(
         {"SDR_DOA_ADMIN_PASSWORD": ""}, parsed
     ) is None
+    # Absent from both sources: the documented default applies (the UI warns).
+    assert ground_console._admin_password_from_sources({}, {}) == "123456"
+    assert ground_console.DEFAULT_ADMIN_PASSWORD == "123456"
+    # An explicitly empty .env value still disables login.
+    assert ground_console._admin_password_from_sources({}, {"SDR_DOA_ADMIN_PASSWORD": ""}) is None
     env_file.unlink()
     env_file.parent.rmdir()
 
@@ -305,9 +310,14 @@ def _http_smoke_and_target_allowlist(base: str) -> None:
         assert ".spatial-grid { grid-template-columns: 1fr; }" in html
 
     capabilities = get_json(base + "/api/capabilities")
-    assert capabilities["read_only"] is True
-    assert capabilities["mqtt_publish"] is False
+    # One admin-gated publish path exists; the console still never applies
+    # settings or POSTs to the Raspberry, and the dry run below stays a preview.
+    assert capabilities["read_only"] is False
+    assert capabilities["mqtt_publish"] is True
     assert capabilities["config_apply"] is False
+    assert capabilities["remote_post"] is False
+    assert capabilities["config_patch"]["requires_admin"] is True
+    assert capabilities["config_patch"]["enabled"] is False  # no MQTT monitor here
 
     request = urllib.request.Request(
         base + "/api/dry-run/config-patch",
@@ -588,11 +598,16 @@ def test_local_admin_branding_session_and_loopback_guard() -> None:
         raise
     base = f"http://127.0.0.1:{server.server_address[1]}"
 
-    def post_json(path: str, payload: Dict[str, Any], opener: Any = None) -> tuple[int, Dict[str, Any]]:
+    def post_json(
+        path: str, payload: Dict[str, Any], opener: Any = None, origin: Optional[str] = base,
+    ) -> tuple[int, Dict[str, Any]]:
+        headers = {"Content-Type": "application/json"}
+        if origin is not None:
+            headers["Origin"] = origin
         request = urllib.request.Request(
             base + path,
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         try:
@@ -611,6 +626,10 @@ def test_local_admin_branding_session_and_loopback_guard() -> None:
 
         jar = http.cookiejar.CookieJar()
         opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        for origin in (None, "https://evil.example"):
+            status, body = post_json("/api/admin/login", {"password": "test-only-admin-password"}, opener, origin)
+            assert (status, body["code"]) == (403, "ORIGIN_REJECTED")
+        assert not list(jar)
         assert post_json("/api/admin/login", {"password": "test-only-admin-password"}, opener)[0] == 200
         assert post_json(
             "/api/admin/branding",
@@ -619,6 +638,10 @@ def test_local_admin_branding_session_and_loopback_guard() -> None:
         )[0] == 200
         assert get_json(base + "/api/branding")["app_name"] == "Pos Komando SDR"
         assert post_json("/api/admin/branding", {"app_name": "x", "logo_data_url": "data:text/plain;base64,eA=="}, opener)[0] == 400
+        # A cross-site logout is refused and leaves the session in place.
+        assert post_json("/api/admin/logout", {}, opener, "https://evil.example")[0] == 403
+        with opener.open(base + "/api/admin/status", timeout=2) as response:
+            assert json.loads(response.read().decode("utf-8")) == {"authenticated": True}
         assert post_json("/api/admin/logout", {}, opener)[0] == 200
         assert post_json("/api/admin/branding", {"app_name": "after-logout"}, opener)[0] == 401
     finally:
@@ -771,7 +794,7 @@ def test_admin_login_reports_disabled_state() -> None:
             request = urllib.request.Request(
                 base + "/api/admin/login",
                 data=json.dumps({"password": "anything"}).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", "Origin": base},
                 method="POST",
             )
             try:

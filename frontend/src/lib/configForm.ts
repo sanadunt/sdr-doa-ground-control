@@ -38,6 +38,19 @@ export function normalizeConnectionDraft(draft: ConnectionDraft, intervals: read
   };
 }
 
+/**
+ * Carry a new saved configuration into the form draft one field at a time:
+ * only the fields whose saved value changed are replaced, so a save made
+ * elsewhere (the top-bar interval select) keeps the operator's unsaved edits.
+ */
+export function mergeSavedConfigIntoDraft<T extends object>(draft: T, previous: T, next: T): T {
+  const merged = { ...draft };
+  for (const key of new Set([...Object.keys(previous), ...Object.keys(next)]) as Set<keyof T>) {
+    if (!Object.is(previous[key], next[key])) merged[key] = next[key];
+  }
+  return merged;
+}
+
 /** Intervals to offer: the server's list when it sent one, always including the saved value. */
 export function refreshIntervalOptions(serverIntervals: readonly number[] | null, current: number): number[] {
   const base = serverIntervals && serverIntervals.length ? serverIntervals : REFRESH_INTERVALS_S;
@@ -105,12 +118,14 @@ export function parseDryRunChanges(
 const ADMIN_ERROR_KEYS: Record<string, MessageKey> = {
   ADMIN_DISABLED: 'config.adminDisabled',
   ADMIN_PASSWORD_INVALID: 'config.adminPasswordInvalid',
+  ADMIN_LOGIN_THROTTLED: 'config.adminThrottled',
 };
 
 /** Translate an admin API failure by its server error code, when it has one. */
 export function adminErrorKey(error: unknown): MessageKey | null {
   if (!(error instanceof ApiError)) return null;
   if (error.code && Object.prototype.hasOwnProperty.call(ADMIN_ERROR_KEYS, error.code)) return ADMIN_ERROR_KEYS[error.code];
+  if (error.status === 429) return 'config.adminThrottled';
   if (error.status === 503) return 'config.adminDisabled';
   if (error.status === 401) return 'config.adminRequired';
   return null;

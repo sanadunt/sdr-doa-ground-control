@@ -1,4 +1,4 @@
-import { createApp } from 'vue';
+import { createApp, markRaw } from 'vue';
 import * as Comlink from 'comlink';
 import { createAppData } from './state';
 import { computedProperties } from './computed';
@@ -18,6 +18,7 @@ import { audioRecordingMethods } from './audio-recording';
 import { receiverRecordsApi } from './receiver-records-api';
 import { i18nMethods, receiverLanguage, translateReceiver } from './i18n';
 import { setSweepCanvasTranslator } from './sweep-marker-renderer';
+import { installConsoleBridge } from './console-bridge';
 
 const Backend = Comlink.wrap<any>(new Worker(new URL('../worker/main.ts', import.meta.url), { type: 'module' }));
 
@@ -103,6 +104,11 @@ receiverApp = createApp({
 		this.backend = await new (Backend as any)();
 		await this.backend.init();
 		await this.loadReceiverSettings();
+		// Inside the console's frame, the Overview dashboard drives RX through this bridge.
+		// Installed before the auto-connect below so a console start can keep VFO 1 muted.
+		// A property outside data() is not reactive.
+		const consoleBridge = installConsoleBridge(this);
+		this._consoleBridge = consoleBridge ? markRaw(consoleBridge) : null;
 
 		let freqDebounce: ReturnType<typeof setTimeout> | null = null;
 		this.$watch(() => this.radio.centerFreq, async (newVal: any, oldVal: any) => {
@@ -262,7 +268,9 @@ receiverApp = createApp({
 			this.saveSetting();
 		}, { deep: true });
 		await this.$nextTick();
-		await this.autoConnectAuthorizedHackRF();
+		const autoConnect = this.autoConnectAuthorizedHackRF();
+		this._consoleBridge?.trackConnect(autoConnect);
+		await autoConnect;
 	},
 	mounted() {
 		setSweepCanvasTranslator(text => translateReceiver(this.uiLanguage, text));
@@ -270,6 +278,8 @@ receiverApp = createApp({
 		this.initSweepCanvas();
 	},
 	beforeUnmount() {
+		this._consoleBridge?.dispose();
+		this._consoleBridge = null;
 		this.disposeSweepCanvas();
 		void this.disarmVfoAudioRecording();
 		if (this.sweep.active || this.sweep.starting) void this.stopSweep(false, 'stopped');

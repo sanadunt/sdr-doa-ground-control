@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError, normalizeCapabilities } from '../api';
-import { adminErrorKey, gpsInputErrorKey, normalizeConnectionDraft, parseBaseRevision, parseDryRunChanges, refreshIntervalOptions, refreshWarningKey } from './configForm';
+import { adminErrorKey, gpsInputErrorKey, mergeSavedConfigIntoDraft, normalizeConnectionDraft, parseBaseRevision, parseDryRunChanges, refreshIntervalOptions, refreshWarningKey } from './configForm';
 import { manualGpsOverrideFromInput } from './map';
+import type { ConsoleConfig } from '../types';
 
 const DRAFT = { base_url: 'http://127.0.0.1:8081', mqtt_host: '127.0.0.1', mqtt_port: '1883', refresh_seconds: 2 };
 
@@ -24,6 +25,22 @@ describe('connection draft normalization (AUD-41, AUD-106)', () => {
   });
 });
 
+describe('saved config reaching the form draft', () => {
+  const saved = { base_url: 'http://doasdr.local:8081', mqtt_host: '10.90.0.1', mqtt_port: 9001, refresh_seconds: 2 };
+
+  it('keeps unsaved edits when only the top-bar interval was saved', () => {
+    const draft = { ...saved, base_url: 'http://192.168.100.100:8081', mqtt_host: '127.0.0.1' };
+    const next = { ...saved, refresh_seconds: 5 };
+    expect(mergeSavedConfigIntoDraft(draft, saved, next)).toEqual({ ...draft, refresh_seconds: 5 });
+  });
+
+  it('replaces every field whose saved value changed', () => {
+    const draft: ConsoleConfig = { ...saved, base_url: 'http://192.168.100.100:8081' };
+    const next: ConsoleConfig = { ...saved, base_url: 'http://127.0.0.1:8081', mqtt_port: 1883, mqtt_transport: 'tcp' };
+    expect(mergeSavedConfigIntoDraft<ConsoleConfig>(draft, saved, next)).toEqual(next);
+  });
+});
+
 describe('refresh intervals (AUD-24)', () => {
   it('offers 1 s and 2 s, preferring the server list and keeping the saved value', () => {
     expect(refreshIntervalOptions(null, 2)).toEqual([0, 1, 2, 5, 10, 30]);
@@ -40,8 +57,34 @@ describe('refresh intervals (AUD-24)', () => {
   });
 
   it('normalizes /api/capabilities defensively', () => {
-    expect(normalizeCapabilities({ refresh_intervals_s: [30, 0, 2, 2, 1, -1, 1.5, '5', 99999], admin_enabled: false })).toEqual({ refreshIntervalsS: [0, 1, 2, 30], adminEnabled: false });
-    expect(normalizeCapabilities('nope')).toEqual({ refreshIntervalsS: null, adminEnabled: null });
+    expect(normalizeCapabilities({ refresh_intervals_s: [30, 0, 2, 2, 1, -1, 1.5, '5', 99999], admin_enabled: false })).toEqual({ refreshIntervalsS: [0, 1, 2, 30], adminEnabled: false, adminDefaultPassword: null, configPatch: null });
+    expect(normalizeCapabilities('nope')).toEqual({ refreshIntervalsS: null, adminEnabled: null, adminDefaultPassword: null, configPatch: null });
+  });
+
+  it('reads the default-password flag and the config patch block without trusting its shape', () => {
+    const capabilities = normalizeCapabilities({
+      admin_enabled: true,
+      admin_default_password: true,
+      config_patch: {
+        enabled: true,
+        requires_admin: true,
+        topic: 'sdr/v1/uav-01/cmd/config/patch',
+        qos: 1,
+        ttl_ms: 60000,
+        ranges: { center_frequency_hz: [24000000, 1800000000], gain_db: [60, -100], vfo_squelch_db: [-200, 'x'], unknown_field: [0, 1] },
+      },
+    });
+    expect(capabilities.adminDefaultPassword).toBe(true);
+    expect(capabilities.configPatch).toEqual({
+      enabled: true,
+      requiresAdmin: true,
+      topic: 'sdr/v1/uav-01/cmd/config/patch',
+      qos: 1,
+      ttlMs: 60000,
+      ranges: { center_frequency_hz: [24000000, 1800000000] },
+    });
+    const hostile = normalizeCapabilities({ config_patch: { enabled: 'yes', requires_admin: 0, topic: 'sdr/#', qos: 7, ttl_ms: 1e9 } }).configPatch;
+    expect(hostile).toEqual({ enabled: false, requiresAdmin: true, topic: null, qos: null, ttlMs: null, ranges: {} });
   });
 });
 
@@ -83,6 +126,8 @@ describe('admin error codes (AUD-81)', () => {
     expect(adminErrorKey(new ApiError('admin login disabled: set SDR_DOA_ADMIN_PASSWORD', 503, 'ADMIN_DISABLED'))).toBe('config.adminDisabled');
     expect(adminErrorKey(new ApiError('admin password is incorrect', 401, 'ADMIN_PASSWORD_INVALID'))).toBe('config.adminPasswordInvalid');
     expect(adminErrorKey(new ApiError('admin authentication required', 401, null))).toBe('config.adminRequired');
+    expect(adminErrorKey(new ApiError('too many failed logins', 429, 'ADMIN_LOGIN_THROTTLED'))).toBe('config.adminThrottled');
+    expect(adminErrorKey(new ApiError('slow down', 429, null))).toBe('config.adminThrottled');
     expect(adminErrorKey(new ApiError('logo exceeds the 256 KiB limit', 400, null))).toBeNull();
     expect(adminErrorKey(new Error('network'))).toBeNull();
   });

@@ -24,7 +24,7 @@ function fieldErrorText(t: Translate, error: OverlayFieldError): string {
  * blur or Enter; Escape restores the current value. Invalid input stays in the
  * field with an inline error and never reaches the map or storage.
  */
-function NumberField({ label, field, settings, disabled, hint, onCommit }: { label: string; field: OverlayNumberKey; settings: DoaOverlaySettings; disabled?: boolean; hint?: string; onCommit: (next: DoaOverlaySettings) => void }): JSX.Element {
+function NumberField({ label, field, settings, disabled, onCommit }: { label: string; field: OverlayNumberKey; settings: DoaOverlaySettings; disabled?: boolean; onCommit: (next: DoaOverlaySettings) => void }): JSX.Element {
   const { t } = useI18n();
   const value = settings[field];
   const [draft, setDraft] = useState(String(value));
@@ -44,7 +44,7 @@ function NumberField({ label, field, settings, disabled, hint, onCommit }: { lab
   };
   // Negative dB values need a keyboard with a minus sign; decimal keypads on phones have none.
   const inputMode = OVERLAY_NUMBER_LIMITS[field].min >= 0 ? 'decimal' : undefined;
-  const message = error ? fieldErrorText(t, error) : hint;
+  const message = error ? fieldErrorText(t, error) : null;
   return <label className={disabled ? 'is-inactive' : undefined}>{label}
     <input
       type="text"
@@ -62,29 +62,35 @@ function NumberField({ label, field, settings, disabled, hint, onCommit }: { lab
         if (event.key === 'Escape' && (draft !== String(value) || error)) { event.stopPropagation(); setDraft(String(value)); setError(null); }
       }}
     />
-    {message ? <small id={messageId} className={error ? 'overlay-field-error' : undefined} role={error ? 'alert' : undefined}>{message}</small> : null}
+    {message ? <small id={messageId} className="overlay-field-error" role="alert">{message}</small> : null}
   </label>;
 }
 
-export function OverlayControls({ settings, scale, onChange, onReset, onClose }: { settings: DoaOverlaySettings; scale: DbScale; onChange: (next: DoaOverlaySettings) => void; onReset: () => void; onClose: () => void }): JSX.Element {
+/**
+ * Advanced overlay settings. Standalone it has its own title, close button and
+ * layer switches; `embedded` (inside the Overview Layers panel, which has its
+ * own switches) renders only the heat, scale and preset groups.
+ */
+export function OverlayControls({ settings, scale, onChange, onReset, onClose, embedded = false }: { settings: DoaOverlaySettings; scale: DbScale; onChange: (next: DoaOverlaySettings) => void; onReset: () => void; onClose?: () => void; embedded?: boolean }): JSX.Element {
   const { t } = useI18n();
   const update = (key: keyof DoaOverlaySettings, value: boolean | number | string) => onChange({ ...settings, [key]: value });
   const preset = (name: 'kraken' | 'focused' | 'wide') => onChange({ ...settings, ...(name === 'kraken' ? DEFAULT_DOA_OVERLAY_SETTINGS : PRESETS[name]) });
   const density = settings.heatStyle === 'density';
   const auto = settings.dbScale === 'auto';
-  const autoHint = auto ? t('overlay.autoActive') : undefined;
-  return <div id="doa-overlay-controls" className="map-overlay-controls" role="region" aria-label={t('overlay.region')}>
-    <div className="overlay-control-header"><h3>{t('overlay.title')}</h3><button className="text-button" type="button" aria-label={t('overlay.closeAria')} onClick={onClose}>{t('overlay.close')}</button></div>
-    <fieldset className="overlay-group">
-      <legend>{t('overlay.groupLayers')}</legend>
-      <div className="overlay-control-grid">
-        <label><input type="checkbox" checked={settings.heatmapVisible} onChange={(event) => update('heatmapVisible', event.target.checked)} /> {t('overlay.heatmap')}</label>
-        <label><input type="checkbox" checked={settings.lobeVisible} onChange={(event) => update('lobeVisible', event.target.checked)} /> {t('overlay.lobe')}</label>
-        <label><input type="checkbox" checked={settings.bearingVisible} onChange={(event) => update('bearingVisible', event.target.checked)} /> {t('overlay.bearing')}</label>
-        <label><input type="checkbox" checked={settings.ringsVisible} onChange={(event) => update('ringsVisible', event.target.checked)} /> {t('overlay.rings')}</label>
-        <label><input type="checkbox" checked={settings.guidesVisible} onChange={(event) => update('guidesVisible', event.target.checked)} /> {t('overlay.guides')}</label>
-      </div>
-    </fieldset>
+  return <div id="doa-overlay-controls" className={`map-overlay-controls${embedded ? ' is-embedded' : ''}`} role="region" aria-label={t('overlay.region')}>
+    {!embedded ? <div className="overlay-control-header"><h3>{t('overlay.title')}</h3>{onClose ? <button className="text-button" type="button" aria-label={t('overlay.closeAria')} onClick={onClose}>{t('overlay.close')}</button> : null}</div> : null}
+    {!embedded ? (
+      <fieldset className="overlay-group">
+        <legend>{t('overlay.groupLayers')}</legend>
+        <div className="overlay-control-grid">
+          <label><input type="checkbox" checked={settings.heatmapVisible} onChange={(event) => update('heatmapVisible', event.target.checked)} /> {t('overlay.heatmap')}</label>
+          <label><input type="checkbox" checked={settings.lobeVisible} onChange={(event) => update('lobeVisible', event.target.checked)} /> {t('overlay.lobe')}</label>
+          <label><input type="checkbox" checked={settings.bearingVisible} onChange={(event) => update('bearingVisible', event.target.checked)} /> {t('overlay.bearing')}</label>
+          <label><input type="checkbox" checked={settings.ringsVisible} onChange={(event) => update('ringsVisible', event.target.checked)} /> {t('overlay.rings')}</label>
+          <label><input type="checkbox" checked={settings.guidesVisible} onChange={(event) => update('guidesVisible', event.target.checked)} /> {t('overlay.guides')}</label>
+        </div>
+      </fieldset>
+    ) : null}
     <fieldset className="overlay-group">
       <legend>{t('overlay.groupHeat')}</legend>
       <div className="overlay-control-fields">
@@ -94,8 +100,8 @@ export function OverlayControls({ settings, scale, onChange, onReset, onClose }:
         <label>{t('overlay.intensity')}<input type="range" min="0.25" max="3" step="0.05" value={settings.heatIntensity} onChange={(event) => update('heatIntensity', Number(event.target.value))} /><output>{settings.heatIntensity.toFixed(2)}×</output></label>
         <label>{t('overlay.falloff')}<input type="range" min="0" max="1" step="0.05" value={settings.distanceFalloff} onChange={(event) => update('distanceFalloff', Number(event.target.value))} /><output>{Math.round(settings.distanceFalloff * 100)}%</output></label>
         <label className={density ? undefined : 'is-inactive'}>{t('overlay.blur')}<input type="range" min="4" max="80" step="1" value={settings.heatBlur} disabled={!density} onChange={(event) => update('heatBlur', Number(event.target.value))} /><output>{density ? `${settings.heatBlur}px` : t('overlay.densityOnly')}</output></label>
-        <NumberField label={t('overlay.samples')} field="radialSamples" settings={settings} hint={t('overlay.samplesHelp')} onCommit={onChange} />
-        <NumberField label={t('overlay.threshold')} field="thresholdDb" settings={settings} disabled={auto} hint={autoHint} onCommit={onChange} />
+        <NumberField label={t('overlay.samples')} field="radialSamples" settings={settings} onCommit={onChange} />
+        <NumberField label={t('overlay.threshold')} field="thresholdDb" settings={settings} disabled={auto} onCommit={onChange} />
       </div>
     </fieldset>
     <fieldset className="overlay-group">
@@ -103,14 +109,14 @@ export function OverlayControls({ settings, scale, onChange, onReset, onClose }:
       <div className="overlay-control-fields">
         <label>{t('overlay.dbScale')}<select value={settings.dbScale} onChange={(event) => update('dbScale', event.target.value === 'manual' ? 'manual' : 'auto')}><option value="auto">{t('overlay.dbScaleAuto')}</option><option value="manual">{t('overlay.dbScaleManual')}</option></select>{auto && scale.known ? <small>{`${Number(scale.minDb.toFixed(1))} … ${Number(scale.maxDb.toFixed(1))} dB`}</small> : null}</label>
         <NumberField label={t('overlay.contrast')} field="contrast" settings={settings} onCommit={onChange} />
-        <NumberField label={t('overlay.minDb')} field="minDb" settings={settings} disabled={auto} hint={autoHint} onCommit={onChange} />
-        <NumberField label={t('overlay.maxDb')} field="maxDb" settings={settings} disabled={auto} hint={autoHint} onCommit={onChange} />
+        <NumberField label={t('overlay.minDb')} field="minDb" settings={settings} disabled={auto} onCommit={onChange} />
+        <NumberField label={t('overlay.maxDb')} field="maxDb" settings={settings} disabled={auto} onCommit={onChange} />
         <label>{t('overlay.guideInterval')}<select value={settings.guideInterval} onChange={(event) => update('guideInterval', Number(event.target.value) as DoaOverlaySettings['guideInterval'])}><option value="15">15°</option><option value="30">30°</option><option value="45">45°</option><option value="90">90°</option></select></label>
         <NumberField label={t('overlay.projection')} field="maxDistanceM" settings={settings} onCommit={onChange} />
         <NumberField label={t('overlay.lobeRadius')} field="lobeDistanceM" settings={settings} onCommit={onChange} />
       </div>
     </fieldset>
     <div className="overlay-presets"><span>{t('overlay.presets')}</span><button className="text-button" type="button" onClick={() => preset('kraken')}>{t('overlay.presetKraken')}</button><button className="text-button" type="button" onClick={() => preset('focused')}>{t('overlay.presetFocused')}</button><button className="text-button" type="button" onClick={() => preset('wide')}>{t('overlay.presetWide')}</button></div>
-    <div className="overlay-control-actions"><button className="text-button" type="button" onClick={onReset}>{t('overlay.reset')}</button><span>{t('overlay.note')}</span></div>
+    <div className="overlay-control-actions"><button className="text-button" type="button" onClick={onReset}>{t('overlay.reset')}</button></div>
   </div>;
 }
