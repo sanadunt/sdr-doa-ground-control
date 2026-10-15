@@ -42,7 +42,8 @@
 .ov-button:hover { border-color: var(--accent); }
 .ov-button[aria-expanded='true'] { border-color: var(--accent); background: var(--accent-soft); }
 .ov-button kbd { display: inline-grid; place-items: center; width: 20px; height: 20px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-family: var(--mono); font-size: 11px; }
-.ov-seg { display: flex; flex: none; height: 44px; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; }
+/* The border is an inset outline so each button keeps the full 44 px. */
+.ov-seg { display: flex; flex: none; height: 44px; overflow: hidden; border: 0; outline: 1px solid var(--line); outline-offset: -1px; border-radius: 8px; }
 .ov-seg button { flex: 1 1 0; min-width: 44px; padding: 0 10px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; }
 .ov-seg button + button { border-left: 1px solid var(--line); }
 .ov-seg button[aria-pressed='true'] { background: var(--surface-3); color: var(--text); }

@@ -267,14 +267,14 @@
 							<div class="form-row">
 								<label for="listener-db-min">{{ t('Minimum') }}</label>
 								<div class="input-group">
-									<input id="listener-db-min" type="number" :value="display.minDB" min="-160" :max="display.maxDB - 5" step="5" @change="commitListenerDbRange('min', $event)">
+									<input id="listener-db-min" type="number" :value="display.minDB" min="-160" :max="display.maxDB - 5" step="any" @change="commitListenerDbRange('min', $event)">
 									<span>dBFS</span>
 								</div>
 							</div>
 							<div class="form-row">
 								<label for="listener-db-max">{{ t('Maximum') }}</label>
 								<div class="input-group">
-									<input id="listener-db-max" type="number" :value="display.maxDB" :min="display.minDB + 5" max="60" step="5" @change="commitListenerDbRange('max', $event)">
+									<input id="listener-db-max" type="number" :value="display.maxDB" :min="display.minDB + 5" max="60" step="any" @change="commitListenerDbRange('max', $event)">
 									<span>dBFS</span>
 								</div>
 							</div>

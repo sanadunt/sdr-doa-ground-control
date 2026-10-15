@@ -287,10 +287,13 @@ class TileRouteTests(TileCacheTestCase):
 
     def test_cross_site_requests_are_refused(self) -> None:
         console = self.console()
-        status, _headers, body = console.get("/api/tiles/osm/1/0/0", {"Sec-Fetch-Site": "cross-site"})
-        self.assertEqual((status, json.loads(body)["code"]), (403, "ORIGIN_REJECTED"))
+        # same-site is another page on this host, e.g. a dev server on another localhost port.
+        for site in ("cross-site", "same-site", "Cross-Site"):
+            with self.subTest(site):
+                status, _headers, body = console.get("/api/tiles/osm/1/0/0", {"Sec-Fetch-Site": site})
+                self.assertEqual((status, json.loads(body)["code"]), (403, "ORIGIN_REJECTED"))
         self.assertEqual(self.upstream.requests, [])
-        for site in ("same-origin", "same-site", "none"):
+        for site in ("same-origin", "none"):
             with self.subTest(site):
                 self.assertEqual(console.get("/api/tiles/osm/1/0/0", {"Sec-Fetch-Site": site})[0], 200)
 

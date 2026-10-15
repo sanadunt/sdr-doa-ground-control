@@ -2584,11 +2584,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def _send_tile(self, path: str) -> None:
         """GET /api/tiles/<source>/<z>/<x>/<y>: a basemap tile from the cache or its upstream."""
-        # Another site's page could still embed these URLs as images and make
-        # the console fetch and cache tiles of any area; browsers mark such a
-        # request cross-site. The console's own map is same-origin, and curl
-        # or a test client sends no Sec-Fetch-Site at all.
-        if self.headers.get("Sec-Fetch-Site", "").strip().lower() == "cross-site":
+        # Another page, even one on another localhost port (same-site), could
+        # embed these URLs as images and make the console fetch and cache
+        # tiles of any area. The console's own map is same-origin, a typed URL
+        # is "none", and curl or a test client sends no Sec-Fetch-Site at all.
+        if self.headers.get("Sec-Fetch-Site", "").strip().lower() not in ("", "none", "same-origin"):
             self._send_json({"ok": False, "code": "ORIGIN_REJECTED", "error": "tiles are served to this console's own pages only"}, HTTPStatus.FORBIDDEN)
             return
         result = self.console_server.tile_cache.get_path(path)
