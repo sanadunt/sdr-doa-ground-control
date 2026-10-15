@@ -1,0 +1,53 @@
+# SDR-DoA Ground Console in Docker, built from this checkout. Linux only.
+#
+#   git submodule update --init --recursive   # vendor/BrowSDR, for the Receiver
+#   docker compose up -d --build              # build, then run in the background
+#   # open http://127.0.0.1:8787/ in Chromium or Chrome (WebUSB for the Receiver)
+#
+# Without Node.js on this machine, use the release tarball and its
+# docker-compose.yml (Dockerfile.release) instead.
+#
+# Everything saved in the UI (connection, MQTT, refresh interval, branding,
+# display preferences, Receiver records) lives in the sdr-doa-data volume at
+# /data, together with /data/.env (admin password). restart: unless-stopped
+# starts the console again with the Docker daemon at boot.
+name: sdr-doa-ground-console
+
+services:
+  console:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sdr-doa-ground-console:2.0.0
+    # The console binds 127.0.0.1 and refuses any other address. With the host
+    # network that is this machine's own loopback, so http://127.0.0.1:8787/
+    # works here and is not reachable from the LAN. A bridge network with
+    # "ports:" would need a non-loopback bind inside the container, which the
+    # console refuses, and would expose admin and the config patch to the LAN.
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - SDR_DOA_PORT=${SDR_DOA_PORT:-8787}
+      # Variables below without a value are passed only when set in your shell
+      # or in a .env file next to this compose file; otherwise they stay unset.
+      #
+      # Admin password. The environment wins over /data/.env. To keep it in the
+      # volume instead, leave this unset and run:
+      #   docker compose exec console sdr-doa-set-admin-password
+      #   docker compose restart console
+      # Unset in both places, the default 123456 applies and the UI warns.
+      # SDR_DOA_ADMIN_PASSWORD= (empty) disables admin login.
+      - SDR_DOA_ADMIN_PASSWORD
+      # First start only: the console writes /data/console.json from these and
+      # ignores them once that file exists. Change settings in the UI later.
+      - SDR_DOA_SEED_BASE_URL
+      - SDR_DOA_SEED_MQTT_HOST
+      - SDR_DOA_SEED_MQTT_PORT
+      - SDR_DOA_SEED_MQTT_TRANSPORT
+      - SDR_DOA_SEED_MQTT_WS_PATH
+      - SDR_DOA_SEED_REFRESH_SECONDS
+    volumes:
+      - sdr-doa-data:/data
+
+volumes:
+  sdr-doa-data:

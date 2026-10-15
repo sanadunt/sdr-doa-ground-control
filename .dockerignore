@@ -1,0 +1,44 @@
+# Build context of Dockerfile (console from source) and Dockerfile.agent.
+# Patterns are anchored at the repository root, so vendor/BrowSDR keeps every
+# tracked file: the Receiver builder refuses a submodule with missing files.
+
+# Git metadata, except the submodule's own: the Receiver builder checks the
+# pinned BrowSDR commit with git -C vendor/BrowSDR.
+.git
+!.git/modules/vendor/BrowSDR
+.claude
+
+# Dependencies, build output and caches; the image builds its own.
+**/node_modules
+**/__pycache__
+**/*.py[cod]
+**/*.tsbuildinfo
+frontend/dist
+dist
+build
+.venv
+venv
+
+# Local secrets and saved state: never part of an image.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.crt
+secrets
+.config
+.sdr-doa-edge
+data
+state
+agent.env
+console.json
+branding.json
+preferences.json
+
+# Documentation the image does not use.
+*.md
+docs
+anti-slop
+deploy

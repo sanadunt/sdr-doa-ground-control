@@ -1,0 +1,39 @@
+# SDR-DoA edge agent on the RDF-SDR (Raspberry) in Docker.
+# The agent release ships this file as docker-compose.yml next to Dockerfile.agent.
+#
+#   cp packaging/agent/agent.env.example agent.env     # then edit it
+#   docker compose -f docker-compose.agent.yml up -d --build   # repository
+#   docker compose up -d --build                               # agent release
+#   docker compose logs -f agent
+#
+# restart: unless-stopped starts the agent again with the Docker daemon at
+# boot. The native alternative is install.sh (a systemd service).
+name: sdr-doa-agent
+
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    image: sdr-doa-agent:2.0.0
+    # 127.0.0.1 must be the Raspberry itself: Data Out on 8081 and a local broker.
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - path: ./agent.env
+        required: false
+    environment:
+      # Paths inside the container; they win over agent.env.
+      STATE_DIR: /state
+      SETTINGS_PATH: /krakensdr/_share/settings.json
+    volumes:
+      - agent-state:/state
+      # ENABLE_CONFIG=1 writes settings.json: mount the KrakenSDR _share
+      # directory and run as its owner (id -u doasdr; id -g doasdr), with a
+      # state directory that user can write:
+      # - /home/doasdr/doasdr/_share:/krakensdr/_share
+      # - ./state:/state
+    # user: "1000:1000"
+
+volumes:
+  agent-state:

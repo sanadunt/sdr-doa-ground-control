@@ -1,0 +1,235 @@
+#!/bin/sh
+# sdr-doa-console: control the installed SDR-DoA Ground Console.
+# Written by install.sh, which filled in the paths below.
+set -eu
+
+APP_DIR='@APP_DIR@'
+DATA_DIR='@DATA_DIR@'
+PORT='@PORT@'
+BIN_PATH='@BIN_PATH@'
+UNIT_FILE='@UNIT_FILE@'
+DESKTOP_FILE='@DESKTOP_FILE@'
+UNIT=sdr-doa-ground-console.service
+PYTHON=$APP_DIR/venv/bin/python
+URL=http://127.0.0.1:$PORT/
+PID_FILE=$DATA_DIR/console.pid
+LOG_FILE=$DATA_DIR/console.log
+
+usage() {
+  cat <<EOF
+Usage: sdr-doa-console COMMAND
+
+  open        start the console if needed and open $URL in Chromium/Chrome
+  start       start it in the background
+  stop        stop it
+  restart     restart it (after changing .env or upgrading)
+  status      show whether it runs and answers
+  logs        follow its log (Ctrl+C to stop)
+  password    change the admin password, then restart the console
+  run         run it in the foreground (what the service runs)
+  info        show the version and the installed paths
+  uninstall   remove the program; add --purge to also delete saved data
+
+Saved settings, branding, preferences, Receiver records and .env: $DATA_DIR
+EOF
+}
+
+die() {
+  printf 'sdr-doa-console: %s\n' "$*" >&2
+  exit 1
+}
+
+use_systemd() {
+  [ -f "$UNIT_FILE" ] && command -v systemctl >/dev/null 2>&1 &&
+    systemctl --user show-environment >/dev/null 2>&1
+}
+
+healthy() {
+  "$PYTHON" "$APP_DIR/packaging/docker/healthcheck.py" "$PORT" >/dev/null 2>&1
+}
+
+wait_healthy() {
+  tries=$1
+  while [ "$tries" -gt 0 ]; do
+    if healthy; then return 0; fi
+    sleep 1
+    tries=$((tries - 1))
+  done
+  return 1
+}
+
+# Without systemd: the pid of a "run" started by this launcher, if it still runs.
+running_pid() {
+  [ -f "$PID_FILE" ] || return 1
+  pid=$(cat "$PID_FILE" 2>/dev/null || true)
+  case $pid in '' | *[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  if [ -r "/proc/$pid/cmdline" ] && ! tr '\0' ' ' <"/proc/$pid/cmdline" | grep -q ground_console.py; then
+    return 1
+  fi
+  printf '%s\n' "$pid"
+}
+
+# The first-start values only count until console.json exists.
+consume_seeds() {
+  if [ -f "$DATA_DIR/console.json" ]; then rm -f "$DATA_DIR/seed.env"; fi
+}
+
+cmd_run() {
+  if [ -f "$DATA_DIR/seed.env" ] && [ ! -f "$DATA_DIR/console.json" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$DATA_DIR/seed.env"
+    set +a
+  fi
+  mkdir -p "$DATA_DIR/receiver"
+  export PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+  umask 077
+  exec "$PYTHON" "$APP_DIR/tools/ground_console.py" \
+    --bind 127.0.0.1 \
+    --port "$PORT" \
+    --config-path "$DATA_DIR/console.json" \
+    --branding-path "$DATA_DIR/branding.json" \
+    --preferences-path "$DATA_DIR/preferences.json" \
+    --data-dir "$DATA_DIR/receiver" \
+    --env-file "$DATA_DIR/.env" \
+    "$@"
+}
+
+cmd_start() {
+  if use_systemd; then
+    systemctl --user start "$UNIT"
+  elif running_pid >/dev/null; then
+    :
+  else
+    if healthy; then die "something else already answers on $URL; stop it first"; fi
+    nohup "$BIN_PATH" run >>"$LOG_FILE" 2>&1 </dev/null &
+    echo $! >"$PID_FILE"
+  fi
+  if wait_healthy 20; then
+    consume_seeds
+    echo "Ground Console: $URL"
+  else
+    die "the console does not answer on $URL; see: sdr-doa-console logs"
+  fi
+}
+
+cmd_stop() {
+  if use_systemd; then
+    systemctl --user stop "$UNIT"
+  elif pid=$(running_pid); then
+    kill "$pid"
+    tries=10
+    while [ "$tries" -gt 0 ] && kill -0 "$pid" 2>/dev/null; do
+      sleep 1
+      tries=$((tries - 1))
+    done
+    rm -f "$PID_FILE"
+  fi
+  echo "Ground Console stopped"
+}
+
+cmd_status() {
+  if use_systemd; then
+    systemctl --user --no-pager status "$UNIT" || true
+  elif pid=$(running_pid); then
+    echo "running without systemd, pid $pid (log: $LOG_FILE)"
+  else
+    echo "not running"
+  fi
+  if healthy; then echo "answering on $URL"; else echo "not answering on $URL"; fi
+}
+
+cmd_logs() {
+  if use_systemd; then
+    exec journalctl --user -u "$UNIT" -f "$@"
+  fi
+  [ -f "$LOG_FILE" ] || die "no log yet at $LOG_FILE"
+  exec tail -f "$LOG_FILE"
+}
+
+cmd_open() {
+  if ! healthy; then cmd_start >/dev/null; fi
+  for browser in chromium chromium-browser google-chrome google-chrome-stable microsoft-edge microsoft-edge-stable brave-browser; do
+    if command -v "$browser" >/dev/null 2>&1; then
+      nohup "$browser" --app="$URL" >/dev/null 2>&1 </dev/null &
+      return 0
+    fi
+  done
+  echo "Chromium or Chrome not found. The Receiver needs WebUSB, which only they provide." >&2
+  if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$URL" >/dev/null 2>&1 &
+  else
+    echo "Open $URL in a browser." >&2
+  fi
+}
+
+cmd_password() {
+  "$PYTHON" "$APP_DIR/packaging/console/set_admin_password.py" --env-file "$DATA_DIR/.env" "$@"
+  if healthy || { use_systemd && systemctl --user is-active --quiet "$UNIT"; }; then
+    cmd_stop >/dev/null
+    cmd_start
+  fi
+}
+
+cmd_info() {
+  echo "SDR-DoA Ground Console $(cat "$APP_DIR/VERSION" 2>/dev/null || echo unknown)"
+  echo "URL:      $URL"
+  echo "Program:  $APP_DIR"
+  echo "Data:     $DATA_DIR"
+  if use_systemd; then echo "Service:  $UNIT_FILE (systemd user service)"; else echo "Service:  none (sdr-doa-console start)"; fi
+}
+
+cmd_uninstall() {
+  purge=0
+  yes=0
+  for arg in "$@"; do
+    case $arg in
+      --purge) purge=1 ;;
+      --yes | -y) yes=1 ;;
+      *) die "uninstall takes --purge and --yes" ;;
+    esac
+  done
+  if [ "$purge" = 1 ] && [ "$yes" = 0 ]; then
+    [ -t 0 ] || die "--purge deletes $DATA_DIR; confirm with --yes"
+    printf 'Delete all saved settings and Receiver records in %s? [y/N] ' "$DATA_DIR"
+    read -r answer
+    case $answer in y | Y | yes | YES) ;; *) die "cancelled" ;; esac
+  fi
+  [ -f "$APP_DIR/.sdr-doa-console-install" ] || die "$APP_DIR is not an install of this console"
+  cmd_stop >/dev/null 2>&1 || true
+  if [ -f "$UNIT_FILE" ]; then
+    if command -v systemctl >/dev/null 2>&1; then systemctl --user disable "$UNIT" >/dev/null 2>&1 || true; fi
+    rm -f "$UNIT_FILE"
+    if command -v systemctl >/dev/null 2>&1; then systemctl --user daemon-reload >/dev/null 2>&1 || true; fi
+  fi
+  rm -f "$DESKTOP_FILE"
+  rm -rf "$APP_DIR"
+  if [ "$purge" = 1 ]; then
+    rm -rf "$DATA_DIR/receiver"
+    rm -f "$DATA_DIR/console.json" "$DATA_DIR/branding.json" "$DATA_DIR/preferences.json" \
+      "$DATA_DIR/.env" "$DATA_DIR/seed.env" "$LOG_FILE" "$PID_FILE"
+    rmdir "$DATA_DIR" 2>/dev/null || true
+    echo "Removed the console and its data"
+  else
+    echo "Removed the console; saved data stays in $DATA_DIR"
+  fi
+  rm -f "$BIN_PATH"
+}
+
+command=${1:-help}
+[ $# -gt 0 ] && shift
+case $command in
+  open) cmd_open ;;
+  start) cmd_start ;;
+  stop) cmd_stop ;;
+  restart) cmd_stop >/dev/null; cmd_start ;;
+  status) cmd_status ;;
+  logs) cmd_logs "$@" ;;
+  password) cmd_password "$@" ;;
+  run) cmd_run "$@" ;;
+  info) cmd_info ;;
+  uninstall) cmd_uninstall "$@" ;;
+  help | -h | --help) usage ;;
+  *) usage >&2; exit 64 ;;
+esac
