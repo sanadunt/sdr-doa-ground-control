@@ -3,6 +3,7 @@ import {
   FOLLOW_NODE_STORAGE_KEY,
   LISTEN_MODE_OPTIONS,
   LISTEN_MODE_STORAGE_KEY,
+  createPreferenceValueStore,
   loadFollowNode,
   loadListenMode,
   saveFollowNode,
@@ -45,5 +46,46 @@ describe('listen preferences', () => {
 
   it('offer the modes in UI order with upper-case labels', () => {
     expect(LISTEN_MODE_OPTIONS.map((option) => option.label)).toEqual(['NFM', 'WFM', 'AM', 'USB', 'LSB', 'DSB', 'CW', 'RAW']);
+  });
+});
+
+describe('page-wide listen preference stores', () => {
+  it('load once, save every change and notify subscribers', () => {
+    const storage = memory({ [FOLLOW_NODE_STORAGE_KEY]: 'true' });
+    let loads = 0;
+    const store = createPreferenceValueStore(() => { loads += 1; return loadFollowNode(storage); }, (value) => saveFollowNode(value, storage));
+    expect(store.get()).toBe(true);
+    expect(store.get()).toBe(true);
+    expect(loads).toBe(1);
+    let calls = 0;
+    const unsubscribe = store.subscribe(() => { calls += 1; });
+    store.set(false);
+    expect(store.get()).toBe(false);
+    expect(storage.values.get(FOLLOW_NODE_STORAGE_KEY)).toBe('false');
+    expect(calls).toBe(1);
+    // An equal value is not saved again and notifies nobody.
+    store.set(false);
+    expect(calls).toBe(1);
+    unsubscribe();
+    store.set(true);
+    expect(calls).toBe(1);
+    expect(loadFollowNode(storage)).toBe(true);
+  });
+
+  it('keep the mode a subscriber set before the first read', () => {
+    const storage = memory({ [LISTEN_MODE_STORAGE_KEY]: 'nfm' });
+    const store = createPreferenceValueStore(() => loadListenMode(storage), (mode) => saveListenMode(mode, storage));
+    store.set('am');
+    expect(store.get()).toBe('am');
+    expect(loadListenMode(storage)).toBe('am');
+  });
+
+  it('survive a subscriber that throws', () => {
+    const store = createPreferenceValueStore(() => 'nfm', () => undefined);
+    let reached = false;
+    store.subscribe(() => { throw new Error('broken'); });
+    store.subscribe(() => { reached = true; });
+    expect(() => store.set('usb')).not.toThrow();
+    expect(reached).toBe(true);
   });
 });

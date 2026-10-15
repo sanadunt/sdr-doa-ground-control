@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   autoDbRange,
+  axisFor,
   binAt,
   contentBoxX,
   dbToByte,
@@ -58,6 +59,24 @@ describe('spectrum axis', () => {
     expect(ticks(STOP, START)).toEqual([]);
     expect(spanAround(433_920_000, 2_000_000)).toEqual({ startHz: START, stopHz: STOP });
     expect(spanAround(null, 2_000_000)).toBeNull();
+  });
+
+  it('uses a running frame axis only while the frame was taken at the tuned centre', () => {
+    const frame = { centerHz: 433_920_000, startHz: START, stopHz: STOP };
+    const retuned = spanAround(145_500_000, 2_000_000);
+    const here = spanAround(433_920_000, 2_000_000);
+    expect(axisFor(frame, 433_920_000, true, here)).toEqual({ startHz: START, stopHz: STOP });
+    // Within the 1 kHz snap the frame still counts as tuned here.
+    expect(axisFor(frame, 433_921_000, true, spanAround(433_921_000, 2_000_000))).toEqual({ startHz: START, stopHz: STOP });
+    // A retune moves the axis before the first frame at the new centre arrives.
+    expect(axisFor(frame, 145_500_000, true, retuned)).toEqual(retuned);
+    // Stopped: the expected span, or the last frame without one.
+    expect(axisFor(frame, 433_920_000, false, retuned)).toEqual(retuned);
+    expect(axisFor(frame, null, false, null)).toEqual({ startHz: START, stopHz: STOP });
+    expect(axisFor(null, 145_500_000, true, retuned)).toEqual(retuned);
+    expect(axisFor(null, null, true, null)).toBeNull();
+    // Without a tuned centre the running frame decides.
+    expect(axisFor(frame, null, true, retuned)).toEqual({ startHz: START, stopHz: STOP });
   });
 
   it('measures a click across the drawn canvas, inside any border', () => {

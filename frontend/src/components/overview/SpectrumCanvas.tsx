@@ -9,6 +9,7 @@ import {
   KEY_STEP_LARGE_HZ,
   WATERFALL_ROWS,
   autoDbRange,
+  axisFor,
   binAt,
   contentBoxX,
   dbToByte,
@@ -70,8 +71,10 @@ export interface SpectrumCanvasProps {
   bridge: ReceiverBridge;
   /** RX is running; a stopped trace is dimmed and covered by `overlay`. */
   running: boolean;
-  /** Axis before the first frame (or after a retune while stopped). */
+  /** Axis before the first frame, while stopped, and after a retune until frames at the new centre arrive. */
   fallbackView: { startHz: number; stopHz: number } | null;
+  /** The RX centre the dock shows as tuned; a frame taken at another centre does not set the axis. */
+  centerHz: number | null;
   /** Listen VFO band, drawn over the trace. */
   vfo: { frequencyHz: number; bandwidthHz: number } | null;
   /** Info line: centre, span and gains. */
@@ -80,7 +83,7 @@ export interface SpectrumCanvasProps {
   notice?: ReactNode;
   /** Shown over the trace while RX is stopped. */
   overlay: ReactNode;
-  /** Frequency the arrow keys step from (the listen VFO). */
+  /** Frequency the arrow keys step from: the listen VFO as the dock shows it. */
   tuneHz: number | null;
   onTune: (hz: number) => void;
 }
@@ -91,7 +94,7 @@ export interface SpectrumCanvasProps {
  * goes through React state. Click (less than 5 px of movement) or the arrow
  * keys tune; hovering shows the frequency and power under the pointer.
  */
-export function SpectrumCanvas({ bridge, running, fallbackView, vfo, info, notice, overlay, tuneHz, onTune }: SpectrumCanvasProps): JSX.Element {
+export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, info, notice, overlay, tuneHz, onTune }: SpectrumCanvasProps): JSX.Element {
   const { t } = useI18n();
   const traceRef = useRef<HTMLCanvasElement>(null);
   const waterfallRef = useRef<HTMLCanvasElement>(null);
@@ -107,15 +110,13 @@ export function SpectrumCanvas({ bridge, running, fallbackView, vfo, info, notic
   const waterfallState = useRef<Waterfall>({ bins: 0, head: 0, filled: 0, rows: new Uint8Array(0), image: null, buffer: null });
   const pointerRef = useRef<{ x: number; y: number; id: number } | null>(null);
   const drawRef = useRef<() => void>(() => undefined);
-  const props = useRef({ running, fallbackView, vfo, t });
-  props.current = { running, fallbackView, vfo, t };
+  const props = useRef({ running, fallbackView, centerHz, vfo, t, tuneHz });
+  props.current = { running, fallbackView, centerHz, vfo, t, tuneHz };
 
-  /** The axis in use: the last frame while running, otherwise the expected span. */
+  /** The axis in use: the last frame while running at the tuned centre, otherwise the expected span. */
   const view = (): { startHz: number; stopHz: number } | null => {
-    const frame = frameRef.current;
-    const { running: live, fallbackView: expected } = props.current;
-    if (frame && (live || !expected)) return { startHz: frame.startHz, stopHz: frame.stopHz };
-    return expected;
+    const { running: live, fallbackView: expected, centerHz: tunedHz } = props.current;
+    return axisFor(frameRef.current, tunedHz, live, expected);
   };
 
   drawRef.current = () => {
@@ -299,7 +300,7 @@ export function SpectrumCanvas({ bridge, running, fallbackView, vfo, info, notic
   // A stopped radio, a new VFO or a retune redraws without waiting for a frame.
   useEffect(() => {
     drawRef.current();
-  }, [running, vfo?.frequencyHz, vfo?.bandwidthHz, fallbackView?.startHz, fallbackView?.stopHz]);
+  }, [running, centerHz, vfo?.frequencyHz, vfo?.bandwidthHz, fallbackView?.startHz, fallbackView?.stopHz]);
 
   /** x across the canvas that was drawn: the trace canvas inside its bordered wrapper, or the waterfall inside its border. */
   const pointerX = (event: ReactPointerEvent<HTMLElement>): { x: number; width: number } | null => {
@@ -357,9 +358,13 @@ export function SpectrumCanvas({ bridge, running, fallbackView, vfo, info, notic
     const direction = event.key === 'ArrowRight' || event.key === 'ArrowUp' ? 1 : event.key === 'ArrowLeft' || event.key === 'ArrowDown' ? -1 : 0;
     if (!direction || event.altKey || event.ctrlKey || event.metaKey) return;
     event.preventDefault();
-    const from = tuneHz ?? (() => { const axis = view(); return axis ? (axis.startHz + axis.stopHz) / 2 : null; })();
+    // A held key steps from the tuning shown after the previous step, not from the last status.
+    const from = props.current.tuneHz ?? (() => { const axis = view(); return axis ? (axis.startHz + axis.stopHz) / 2 : null; })();
     if (from === null) return;
-    onTune(snapHz(from + direction * (event.shiftKey ? KEY_STEP_LARGE_HZ : KEY_STEP_HZ)));
+    const next = snapHz(from + direction * (event.shiftKey ? KEY_STEP_LARGE_HZ : KEY_STEP_HZ));
+    // The next repeat may come before the dock re-renders with this value.
+    props.current = { ...props.current, tuneHz: next };
+    onTune(next);
   };
 
   const pointerHandlers = { onPointerDown, onPointerUp, onPointerMove, onPointerLeave, onPointerCancel: onPointerLeave };

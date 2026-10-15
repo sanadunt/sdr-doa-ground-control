@@ -1,5 +1,5 @@
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TelemetrySnapshot } from '../../types';
 import { I18nContext, translate } from '../../lib/i18n';
 import type { Lang } from '../../lib/i18n';
@@ -7,15 +7,17 @@ import { createReceiverBridge } from '../../lib/receiverBridge';
 import type { BridgeEnvironment, ReceiverBridge } from '../../lib/receiverBridge';
 import { BRIDGE_CHANNEL, BRIDGE_VERSION } from '../../lib/receiverBridgeProtocol';
 import { DEFAULT_OVERVIEW_PANELS } from '../../lib/overviewPanels';
+import { followNodeStore } from '../../lib/listenPrefs';
 import type { ConsoleCapabilities } from '../../api';
 import { SpectrumDock } from './SpectrumDock';
 
 const ORIGIN = 'http://127.0.0.1:8787';
 
-/** A bridge driven by hand: attach, then feed it frame messages. */
-function bridgeWith(options: { probe?: number; hello?: boolean; status?: Record<string, unknown> | null; attach?: boolean } = {}): ReceiverBridge {
+/** A bridge driven by hand: attach, then feed it frame messages. `tuneResult` answers one console:tune with that tuning. */
+function bridgeWith(options: { probe?: number; hello?: boolean; status?: Record<string, unknown> | null; attach?: boolean; tuneResult?: Record<string, unknown> } = {}): ReceiverBridge {
   type Listener = (event: { origin: string; source: unknown; data: unknown }) => void;
   const listeners: Listener[] = [];
+  const posted: Array<Record<string, unknown>> = [];
   const env: BridgeEnvironment = {
     host: () => ({ location: { origin: ORIGIN }, addEventListener: (_type, listener) => { listeners.push(listener as Listener); }, removeEventListener: () => undefined }),
     setTimeout: () => 0 as unknown as ReturnType<typeof setTimeout>,
@@ -24,13 +26,17 @@ function bridgeWith(options: { probe?: number; hello?: boolean; status?: Record<
     random: () => 0.25,
   };
   const bridge = createReceiverBridge(env);
-  const frame = { postMessage: () => undefined };
+  const frame = { postMessage: (message: unknown) => { posted.push(message as Record<string, unknown>); } };
   if (options.attach !== false) bridge.attach(frame);
   const send = (type: string, payload: Record<string, unknown>) => {
     for (const listener of listeners) listener({ origin: ORIGIN, source: frame, data: { ch: BRIDGE_CHANNEL, v: BRIDGE_VERSION, type, ...payload } });
   };
   if (options.hello !== false && options.attach !== false) send('receiver:hello', { protocol: 1, mockAvailable: false, webusb: true });
   if (options.status) send('receiver:status', options.status);
+  if (options.tuneResult) {
+    void bridge.send({ type: 'console:tune', centerHz: Number(options.tuneResult.centerHz) });
+    send('receiver:result', { id: posted.at(-1)?.id, ok: true, code: 'OK', tune: options.tuneResult });
+  }
   return bridge;
 }
 
@@ -41,9 +47,15 @@ function status(overrides: Record<string, unknown> = {}): Record<string, unknown
     gains: { lnaDb: 24, vgaDb: 20, amp: false },
     vfo: { index: 0, enabled: false, mode: 'nfm', frequencyHz: 433_925_000, bandwidthHz: 12_500, squelchEnabled: false, squelchDb: -100, volume: 50 },
     squelchOpen: false, audio: 'running', recording: false, error: null, notice: null,
+    tune: { rev: 1, by: 'receiver', id: null, receiverRev: 1 },
     ...overrides,
   };
 }
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  followNodeStore.set(true);
+});
 
 const NODE: TelemetrySnapshot = {
   status: { available: true },
@@ -205,6 +217,37 @@ describe('Spectrum dock states', () => {
 
   it('renders without a bridge from App', () => {
     expect(chip(dock(undefined))).toBe('RX OFF');
+  });
+
+  it('shows follow-node as the page-wide store holds it', () => {
+    followNodeStore.set(false);
+    const markup = dock(bridgeWith({ attach: false }));
+    expect(markup).toMatch(/<input type="checkbox"\/><span>Ikuti frekuensi node<\/span>/);
+    // Not following: the axis no longer shows the node before the frame is mounted.
+    expect(markup).not.toContain('Tengah 416.588 MHz');
+  });
+
+  it('shows the tuning of a tune result before the next status', () => {
+    const markup = dock(bridgeWith({
+      status: status(),
+      tuneResult: { rev: 2, by: 'console', id: null, receiverRev: 1, centerHz: 145_500_000, vfoHz: 145_510_000 },
+    }), { snapshot: null });
+    expect(markup).toContain('Tengah 145.500 MHz · span 2.0 MHz');
+    expect(markup).toContain('aria-valuetext="145.510 MHz"');
+    expect(markup).toContain('title="RX 145.500 MHz · VFO 145.510 MHz"');
+  });
+
+  it('shows the Receiver\'s saved centre, read only, before the frame is mounted', () => {
+    const saved = JSON.stringify({ radio: { centerFreq: 145.5 }, vfos: [{ freq: 145.51 }], activeVfoIndex: 0 });
+    vi.stubGlobal('window', { localStorage: { getItem: (key: string) => (key === 'SDRSetting' ? saved : null), setItem: () => undefined } });
+    // Without a fresh node frequency to follow, the saved centre is what Mulai would use.
+    const markup = dock(bridgeWith({ attach: false }), { snapshot: null });
+    expect(markup).toContain('Tengah 145.500 MHz · span 2.0 MHz');
+    expect(markup).toContain('aria-valuetext="145.510 MHz"');
+    // It is shown, not sent: Kirim ke RDF-SDR still has no frequency.
+    expect(markup).toMatch(/<button class="ov-button ov-spec-send" type="button" disabled=""/);
+    // Following the node, the node still wins.
+    expect(dock(bridgeWith({ attach: false }))).toContain('Tengah 416.588 MHz');
   });
 });
 

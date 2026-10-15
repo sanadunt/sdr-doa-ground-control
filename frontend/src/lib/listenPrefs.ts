@@ -3,6 +3,11 @@
  * demodulation mode and "follow node frequency". Validated on restore; every
  * storage access is guarded, so a blocked or private storage only loses the
  * preference.
+ *
+ * followNodeStore and listenModeStore hold the current value for the whole
+ * console page, so App can change it while the dock is not mounted (a retune
+ * or a mode change on the Receiver page) and a mounted dock re-renders
+ * (useSyncExternalStore).
  */
 import { preferenceStorage } from './preferenceStore';
 import { LISTEN_MODES, isListenMode } from './receiverBridgeProtocol';
@@ -58,3 +63,47 @@ export function loadFollowNode(storage: StorageLike | null = defaultStorage()): 
 export function saveFollowNode(follow: boolean, storage: StorageLike | null = defaultStorage()): void {
   write(storage, FOLLOW_NODE_STORAGE_KEY, follow ? 'true' : 'false');
 }
+
+export interface PreferenceValueStore<T> {
+  get(): T;
+  /** Saves the value and notifies subscribers; an equal value does nothing. */
+  set(value: T): void;
+  subscribe(listener: () => void): () => void;
+}
+
+/** A value read from storage on first use and written back on every change. */
+export function createPreferenceValueStore<T>(load: () => T, save: (value: T) => void): PreferenceValueStore<T> {
+  let loaded = false;
+  let value: T;
+  const listeners = new Set<() => void>();
+  const get = (): T => {
+    if (!loaded) {
+      value = load();
+      loaded = true;
+    }
+    return value;
+  };
+  return {
+    get,
+    set(next) {
+      if (loaded && Object.is(next, value)) return;
+      value = next;
+      loaded = true;
+      save(next);
+      for (const listener of [...listeners]) {
+        try {
+          listener();
+        } catch {
+          // One failing subscriber must not stop the others.
+        }
+      }
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+  };
+}
+
+export const followNodeStore: PreferenceValueStore<boolean> = createPreferenceValueStore(() => loadFollowNode(), (follow) => saveFollowNode(follow));
+export const listenModeStore: PreferenceValueStore<ListenMode> = createPreferenceValueStore(() => loadListenMode(), (mode) => saveListenMode(mode));

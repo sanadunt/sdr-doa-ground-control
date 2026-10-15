@@ -141,6 +141,31 @@ export function spanAround(centerHz: number | null | undefined, spanHz: number):
   return { startHz: centerHz - spanHz / 2, stopHz: centerHz + spanHz / 2 };
 }
 
+export interface FrequencyAxis {
+  startHz: number;
+  stopHz: number;
+}
+
+/**
+ * The axis the dock draws on. While RX runs it is the last frame's span,
+ * unless that frame was taken at another centre than the one now tuned (more
+ * than TUNE_SNAP_HZ away): then the expected span around the tuned centre, so
+ * a retune moves the axis at once and the old trace stays at its true
+ * frequencies until frames at the new centre arrive. While RX is stopped it
+ * is the expected span, or the last frame's when there is none.
+ */
+export function axisFor(
+  frame: { centerHz: number; startHz: number; stopHz: number } | null,
+  expectedCenterHz: number | null,
+  running: boolean,
+  expected: FrequencyAxis | null,
+): FrequencyAxis | null {
+  if (frame && (!expected || (running && (expectedCenterHz === null || Math.abs(frame.centerHz - expectedCenterHz) <= TUNE_SNAP_HZ)))) {
+    return { startHz: frame.startHz, stopHz: frame.stopHz };
+  }
+  return expected;
+}
+
 /** Map a power to 0..255 on a dB range. */
 export function dbToByte(db: number, range: DbRange): number {
   if (!Number.isFinite(db) || !(range.max > range.min)) return 0;

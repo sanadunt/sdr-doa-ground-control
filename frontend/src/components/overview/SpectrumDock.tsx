@@ -7,10 +7,13 @@ import type { ConfigPatchChanges } from '../../lib/controlDraft';
 import { consoleRequestsMockSdr, createReceiverBridge } from '../../lib/receiverBridge';
 import type { BridgeResult, ReceiverBridge } from '../../lib/receiverBridge';
 import { SUBSCRIBE_LIMITS, isListenMode } from '../../lib/receiverBridgeProtocol';
-import type { BridgeCommand, ListenMode, ReceiverStatus } from '../../lib/receiverBridgeProtocol';
+import type { BridgeCommand, ListenMode, ReceiverStatus, ResultCode } from '../../lib/receiverBridgeProtocol';
 import { nodeFrequencies } from '../../lib/nodeFrequency';
 import type { NodeFrequencies } from '../../lib/nodeFrequency';
-import { LISTEN_MODE_OPTIONS, loadFollowNode, loadListenMode, saveFollowNode, saveListenMode } from '../../lib/listenPrefs';
+import { LISTEN_MODE_OPTIONS, followNodeStore, listenModeStore } from '../../lib/listenPrefs';
+import { displayedTuning } from '../../lib/receiverSync';
+import type { LocalTune } from '../../lib/receiverSync';
+import { savedReceiverTuning } from '../../lib/receiverSavedTuning';
 import { fieldFor, fieldRange, inFieldRange } from '../../lib/configPatch';
 import { followMemoryAtMount, followNodeStep, formatMhz, spanAround, spectrumDockView } from '../../lib/spectrumView';
 import type { DockNotice, FollowMemory } from '../../lib/spectrumView';
@@ -45,6 +48,8 @@ export interface SpectrumDockProps {
 
 /** Codes a successful start makes obsolete. */
 const START_NOTICES: ReadonlySet<DockNotice> = new Set(['NO_WEBUSB', 'NEEDS_PAIRING', 'NEEDS_DEVICE_CHOICE', 'CONNECT_FAILED', 'MOCK_UNAVAILABLE', 'TIMEOUT', 'RX_NOT_RUNNING']);
+/** Start results that leave a click-to-tune frequency unapplied; any other start tuned before it connected. */
+const START_KEEPS_PENDING: ReadonlySet<ResultCode> = new Set(['SWEEP_BUSY', 'OUT_OF_RANGE', 'NOT_READY', 'INVALID_COMMAND', 'TIMEOUT']);
 const SPAN_HZ = SUBSCRIBE_LIMITS.spanDefaultHz;
 /** How long the Receiver's own notice (its snackbar is hidden here) stays in the dock after a stop. */
 const FRAME_NOTICE_MS = 6_000;
@@ -91,6 +96,11 @@ function spectrumNeedPx(section: HTMLElement): number | null {
  * Receiver frame over the bridge: Mulai/Berhenti, Dengar with a mode,
  * click-to-tune and "follow node frequency". "Kirim ke RDF-SDR" only opens
  * Kontrol with a draft; the send itself needs admin, review and a confirm.
+ *
+ * The frame owns the centre and the VFO. The dock shows a click-to-tune at
+ * once and then what the frame reports (TuneView); a refused tune snaps back.
+ * Follow-node and the mode live in page-wide stores, because App also changes
+ * them after a Receiver-page change (lib/receiverSync.ts).
  */
 export function SpectrumDock({
   snapshot,
@@ -111,9 +121,12 @@ export function SpectrumDock({
   const { phase, build } = bridgeState;
   const live = phase === 'ready' ? bridgeState.status : null;
 
-  const [followNode, setFollowNodeState] = useState<boolean>(() => loadFollowNode());
-  const [mode, setModeState] = useState<ListenMode>(() => loadListenMode());
+  const followNode = useSyncExternalStore(followNodeStore.subscribe, followNodeStore.get, followNodeStore.get);
+  const mode = useSyncExternalStore(listenModeStore.subscribe, listenModeStore.get, listenModeStore.get);
   const [modePick, setModePick] = useState<ModePick | null>(null);
+  // A dock tune shown until the frame reports it (lib/receiverSync.ts displayedTuning).
+  const [localTune, setLocalTune] = useState<LocalTune | null>(null);
+  const tuneToken = useRef(0);
   const [starting, setStarting] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   // A click-to-tune frequency for the next Mulai, while the frame is not mounted.
@@ -223,9 +236,18 @@ export function SpectrumDock({
     if (!result.ok) report(result);
   };
 
+  // What the Receiver reports (the highest tune rev seen), and what the dock shows: its own tune until confirmed.
+  const tuneView = phase === 'ready' ? bridgeState.tune : null;
+  const liveCenter = tuneView?.centerHz ?? live?.centerHz ?? null;
+  const liveVfo = tuneView?.vfoHz ?? live?.vfo?.frequencyHz ?? null;
+  const shown = displayedTuning(localTune, tuneView);
+  const shownCenter = shown?.centerHz ?? liveCenter;
+  const shownVfo = shown?.vfoHz ?? liveVfo;
+  // Before the frame is mounted, the Receiver's last saved tuning (read only).
+  const idle = phase === 'idle';
+  const saved = useMemo(() => (idle ? savedReceiverTuning() : null), [idle]);
+
   // Follow the node: retune when its frequency moves by more than 1 kHz, and once when RX starts.
-  const liveCenter = live?.centerHz ?? null;
-  const liveVfo = live?.vfo?.frequencyHz ?? null;
   const liveBusy = live?.busy ?? 'none';
   const liveKnown = live !== null;
   useEffect(() => {
@@ -248,8 +270,7 @@ export function SpectrumDock({
   }, [frameNotice, liveNotice]);
 
   const setFollowNode = (next: boolean) => {
-    setFollowNodeState(next);
-    saveFollowNode(next);
+    followNodeStore.set(next);
     // Turning it on retunes to the node at once.
     if (next && followRef.current) followRef.current = { ...followRef.current, followed: null };
   };
@@ -274,8 +295,8 @@ export function SpectrumDock({
       if (!mountedRef.current) return;
       setStarting(false);
       report(result);
+      if (!START_KEEPS_PENDING.has(result.code)) setPendingHz(null);
       if (!result.ok) return;
-      setPendingHz(null);
       // A mode picked while this start waited behind another Receiver task reached the
       // frame first and was then replaced by the start's own mode: send it again.
       const wanted = requestedModeRef.current;
@@ -327,8 +348,7 @@ export function SpectrumDock({
   const changeMode = (event: ChangeEvent<HTMLSelectElement>) => {
     const next = event.target.value;
     if (!isListenMode(next)) return;
-    setModeState(next);
-    saveListenMode(next);
+    listenModeStore.set(next);
     requestedModeRef.current = next;
     // Without a frame the next start carries the mode.
     if (phase === 'idle' && !starting) return;
@@ -351,17 +371,26 @@ export function SpectrumDock({
       setPendingHz(hz);
       return;
     }
-    // While a start is on its way the tune waits in the bridge queue behind it.
+    // Shown at once; while a start is on its way the tune waits in the bridge queue behind it.
+    tuneToken.current += 1;
+    const token = tuneToken.current;
+    setLocalTune({ token, centerHz: hz, vfoHz: hz, awaitRev: null });
     void bridge.send({ type: 'console:tune', centerHz: hz, vfoHz: hz }).then((result) => {
       report(result);
-      if (result.ok && mountedRef.current) setPendingHz(null);
+      if (!mountedRef.current) return;
+      if (result.ok) setPendingHz(null);
+      setLocalTune((current) => {
+        if (current?.token !== token) return current;
+        // A refused tune snaps back to what the Receiver reports.
+        return result.ok && result.tune ? { ...current, awaitRev: result.tune.rev } : null;
+      });
     });
   };
 
   // "Kirim ke RDF-SDR": the RX centre and listen VFO as a Kontrol draft.
   const ranges = capabilities?.configPatch?.ranges ?? null;
-  const rxCenterHz = live?.centerHz ?? target?.centerHz ?? null;
-  const rxVfoHz = liveVfo ?? target?.vfoHz ?? rxCenterHz;
+  const rxCenterHz = shownCenter ?? target?.centerHz ?? null;
+  const rxVfoHz = shownVfo ?? target?.vfoHz ?? rxCenterHz;
   const sendable = rxCenterHz !== null && rxVfoHz !== null
     && inFieldRange('center_frequency_hz', rxCenterHz, ranges) && inFieldRange('vfo_frequency_hz', rxVfoHz, ranges);
   const [rangeMin, rangeMax] = fieldRange(fieldFor('center_frequency_hz'), ranges);
@@ -378,12 +407,12 @@ export function SpectrumDock({
 
   const sampleRate = live?.sampleRateHz ?? null;
   const spanHz = sampleRate !== null && sampleRate > 0 ? Math.min(SPAN_HZ, sampleRate) : SPAN_HZ;
-  const axisCenter = running ? liveCenter : pendingHz ?? liveCenter ?? target?.centerHz ?? null;
+  const axisCenter = running ? shownCenter : pendingHz ?? shownCenter ?? target?.centerHz ?? saved?.centerHz ?? null;
   const fallbackView = spanAround(axisCenter, spanHz);
   const fallbackStart = fallbackView?.startHz;
   const fallbackStop = fallbackView?.stopHz;
   const stableFallback = useMemo(() => (fallbackStart === undefined || fallbackStop === undefined ? null : { startHz: fallbackStart, stopHz: fallbackStop }), [fallbackStart, fallbackStop]);
-  const vfoHz = liveVfo ?? (pendingHz ?? target?.vfoHz ?? null);
+  const vfoHz = shownVfo ?? pendingHz ?? target?.vfoHz ?? saved?.vfoHz ?? null;
   const vfoBandwidth = live?.vfo?.bandwidthHz ?? 0;
   const vfoBand = useMemo(() => (vfoHz === null ? null : { frequencyHz: vfoHz, bandwidthHz: vfoBandwidth }), [vfoHz, vfoBandwidth]);
   const gainText = (value: number | null | undefined) => (typeof value === 'number' ? String(Number(value.toFixed(1))) : '—');
@@ -479,6 +508,7 @@ export function SpectrumDock({
         bridge={bridge}
         running={running}
         fallbackView={stableFallback}
+        centerHz={axisCenter}
         vfo={vfoBand}
         info={info}
         notice={lineNotice}
