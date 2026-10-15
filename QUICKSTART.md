@@ -2,6 +2,8 @@
 
 Panduan ini menjalankan Ground Console lokal dari checkout repository. Jalur production lokal memakai Python untuk menyajikan `frontend/dist` dan menyediakan API same-origin. Vite hanya dipakai untuk development/build.
 
+Untuk ground station Linux yang hanya ingin memakai console (tanpa build, jalan di background, hidup lagi setelah reboot), lihat [Instalasi Linux: Docker, rilis tar dan service](#instalasi-linux-docker-rilis-tar-dan-service). Agent di RDF-SDR (Raspberry) ada di [Agent RDF-SDR](#agent-rdf-sdr-raspberry).
+
 Di UI, node Raspberry tampil sebagai **RDF-SDR** dan receiver HackRF sebagai **RadioSpectrum**. Panduan ini memakai nama UI tersebut; perintah, nama file, field API, dan topik MQTT tetap memakai nama teknisnya.
 
 ## Prasyarat
@@ -295,7 +297,7 @@ Monitor MQTT console tidak memakai TLS, username, atau password. Kontrol hanya b
 - **Kompas | Polar** memilih mode plot. Pilihan ini hanya mengubah plot dan nilai Puncak di HUD; peta dan bearing tidak berubah.
 - **Atur** membuka pengaturan di samping plot:
   - **Putar grafik (Head Up)**: geser 0–359° atau ketik nilainya. **Puncak ke atas** memutar plot sehingga θ₀ berada di atas; tombol ini nonaktif saat DoA tidak ditampilkan.
-  - **Arah kompas (offset)**: **Data Out** memakai `compass_offset` dari `settings.json` node. **Manual** memakai nilai yang Anda ketik, −360 sampai 360. Offset berlaku untuk peta, plot, dan bearing (tag `MANUAL · peta + polar`), dan tanda "→" menunjukkan bearing hasilnya. Ini pilihan yang sama dengan sumber Compass di Konfigurasi dan disimpan di browser. Saat simulasi pilihan ini terkunci.
+  - **Arah kompas (offset)**: **Data Out** memakai `compass_offset` dari `settings.json` node. **Manual** memakai nilai yang Anda ketik, −360 sampai 360. Offset berlaku untuk peta, plot, dan bearing (tag `MANUAL · peta + polar`), dan tanda "→" menunjukkan bearing hasilnya. Ini pilihan yang sama dengan sumber Compass di Konfigurasi dan disimpan di console (lihat [Apa yang tersimpan](#apa-yang-tersimpan-dan-di-mana)). Saat simulasi pilihan ini terkunci.
   - **Skala dB (relatif)**: Auto mengikuti data. Manual memakai Min dB dan Maks dB; min harus lebih kecil dari maks.
   - **Atur ulang tampilan grafik** mengembalikan Head Up ke 0°, mode plot ke pengaturan sumbernya, dan skala dB ke Auto. Offset kompas tidak ikut direset.
 - Baris di bawah plot menampilkan puncak (θ₀ di mode Polar), lebar −3 dB, dan Head Up.
@@ -306,7 +308,7 @@ Monitor MQTT console tidak memakai TLS, username, atau password. Kontrol hanya b
 - **Opasitas overlay** 20–100 %.
 - **Lanjutan** membuka pengaturan overlay lengkap: jarak proyeksi, skala dB manual dan noise threshold, palet, blur, dan seterusnya.
 
-Semua pengaturan Lapisan disimpan di browser ini.
+Semua pengaturan Lapisan disimpan di console, jadi tetap sama di browser lain atau setelah cache dibersihkan.
 
 ## Menjalankan tanpa perangkat SDR
 
@@ -443,7 +445,7 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 - Dry-run config patch mewajibkan **Base config revision**, yaitu `config_rev` terakhir yang dilaporkan node. Dry-run hanya pratinjau dan tidak mengirim apa pun; perubahan nyata dikirim lewat Kontrol di Ringkasan.
 - Login admin di sini juga membuka Kontrol di Ringkasan (sesi yang sama, 30 menit). Kotak **Publish MQTT** bernilai HANYA ADMIN.
 - Logo PNG boleh grayscale, RGB, RGBA, atau palette, 8/16-bit, interlaced, maksimal 256 KiB dan 4096 × 4096 px. Logo diperiksa di browser sebelum di-stage.
-- Pilihan sumber GPS dan Compass disimpan di browser ini dan dipulihkan setelah reload. Masing-masing punya tombol restore default sendiri. Offset kompas manual berkisar −360 sampai 360, dan juga bisa diatur dari **Polar → Atur** di Ringkasan.
+- Pilihan sumber GPS dan Compass disimpan di console dan dipulihkan setelah reload, di browser lain, dan setelah console di-restart. Masing-masing punya tombol restore default sendiri. Offset kompas manual berkisar −360 sampai 360, dan juga bisa diatur dari **Polar → Atur** di Ringkasan.
 - Bila konfigurasi console tidak bisa dibaca, halaman menampilkan "Konfigurasi console tidak tersedia … Dicoba ulang otomatis" tanpa form. Console mencoba lagi sendiri (1, 2, 4, 8, lalu setiap 15 detik).
 
 ### Monitor Pesan
@@ -551,6 +553,113 @@ Panel **Telemetri RDF Node v2** ada di halaman Monitor Pesan:
 
 Broker TLS, PPP/T900, dan MQTT production tidak disiapkan oleh quickstart ini. Contoh payload dan fixture lokal bukan bukti kompatibilitas perangkat atau acceptance hardware.
 
+## Instalasi Linux: Docker, rilis tar dan service
+
+Bagian ini untuk komputer ground station **Linux** yang hanya memakai console: tidak perlu Node.js atau build, console jalan di background, hidup lagi setelah reboot, dan semua pengaturan tersimpan otomatis. Ada dua cara, pilih salah satu: Docker, atau rilis tar dengan `install.sh`. Keduanya tetap bind ke `127.0.0.1:8787`, jadi console hanya bisa dibuka dari komputer itu sendiri: `http://127.0.0.1:8787/` di Chromium atau Chrome. Detail lengkap ada di `packaging/console/README.md`.
+
+### Membuat rilis tar
+
+Di mesin build (repository dengan submodule `vendor/BrowSDR`, Node.js dan Python):
+
+```sh
+python3 tools/make_release.py              # npm ci + npm run build:all, lalu kedua tarball
+python3 tools/make_release.py --skip-build # pakai frontend/dist yang sudah di-build
+cd dist/release && sha256sum -c SHA256SUMS
+```
+
+Hasilnya di `dist/release/`: `sdr-doa-ground-console-<VERSI>-linux.tar.gz` (console, frontend sudah di-build, installer, Dockerfile rilis, panduan), `sdr-doa-rdf-sdr-agent-<VERSI>.tar.gz` (agent RDF-SDR) dan `SHA256SUMS`. Versi diambil dari file `VERSION` di root repository. `--with-wheels` ikut membawa wheel `paho-mqtt` dan `tzdata` untuk instalasi tanpa internet. Build penuh menolak berjalan bila ada perubahan yang belum di-commit pada input build.
+
+### Docker
+
+Butuh Docker Engine dan Compose v2 di Linux. Console memakai `network_mode: host`: console bind ke `127.0.0.1` dan menolak alamat lain, dan dengan network host loopback itu adalah loopback komputer ini. Jangan ganti ke network bridge dengan `ports:`. Docker Desktop di macOS/Windows tidak didukung.
+
+```sh
+# dari rilis (tanpa Node.js)
+tar -xzf sdr-doa-ground-console-2.0.0-linux.tar.gz
+cd sdr-doa-ground-console-2.0.0-linux
+docker compose up -d --build
+
+# atau dari clone repository biasa (bukan worktree), build frontend di dalam image
+git submodule update --init --recursive
+docker compose up -d --build
+```
+
+- **Data**: semua yang disimpan console ada di volume `sdr-doa-ground-console_sdr-doa-data`, di-mount sebagai `/data`. Volume tetap ada saat container di-restart, dibuat ulang, atau di-upgrade.
+- **Kata sandi admin**: simpan di volume dengan `docker compose exec console sdr-doa-set-admin-password` lalu `docker compose restart console`. Bisa juga lewat `SDR_DOA_ADMIN_PASSWORD` di file `.env` di sebelah `docker-compose.yml`; environment menang atas `/data/.env`. Tanpa keduanya berlaku default `123456` dan UI memberi peringatan.
+- **Nilai awal (seed)**: `SDR_DOA_SEED_BASE_URL`, `SDR_DOA_SEED_MQTT_HOST`, `SDR_DOA_SEED_MQTT_PORT`, `SDR_DOA_SEED_MQTT_TRANSPORT`, `SDR_DOA_SEED_MQTT_WS_PATH` dan `SDR_DOA_SEED_REFRESH_SECONDS` di `.env` sebelah compose hanya dipakai pada start pertama, saat `/data/console.json` belum ada. Setelah itu ubah lewat halaman Konfigurasi. Port diatur dengan `SDR_DOA_PORT` di `.env` yang sama (jangan hanya di shell, karena `docker compose up` berikutnya kembali ke 8787).
+- **Log dan status**: `docker compose ps` (kolom health dari `/api/health`), `docker compose logs -f console`.
+- **Update**: ekstrak rilis baru (atau `git pull` dan `git submodule update`), lalu `docker compose up -d --build`. Volume dan isinya tetap.
+- **Stop**: `docker compose down` (volume tetap); `docker compose down -v` juga menghapus semua data.
+
+Container berjalan sebagai uid 10001 dan `restart: unless-stopped` menyalakannya lagi bersama Docker saat boot (pastikan `systemctl is-enabled docker` bernilai `enabled`).
+
+### Rilis tar dan `install.sh` (tanpa Docker)
+
+Butuh Python 3.9+ dengan modul `venv` (`sudo apt install python3-venv` di Debian/Ubuntu). Jalankan sebagai user desktop biasa, bukan root:
+
+```sh
+tar -xzf sdr-doa-ground-console-2.0.0-linux.tar.gz
+cd sdr-doa-ground-console-2.0.0-linux
+sh install.sh            # menanyakan kata sandi admin; Enter = default 123456
+```
+
+Tanpa pertanyaan, dengan nilai awal: `sh install.sh --yes --generate-password --base-url http://192.168.100.100:8081 --mqtt-host 10.90.0.1 --mqtt-port 9001 --refresh-seconds 2`. Opsi lain: `--password NILAI`, `--port`, `--prefix`, `--data-dir`, `--no-service`, `--no-desktop` (lihat `sh install.sh --help`). Installer memeriksa file rilis terhadap `MANIFEST.sha256`, memasang program dan venv (`paho-mqtt`, `tzdata`) di `~/.local/share/sdr-doa-ground-console/app`, membuat systemd user service, perintah `sdr-doa-console` di `~/.local/bin`, dan entri menu, lalu langsung menjalankan console. Dari repository, `sh packaging/console/install.sh` bekerja sama setelah `npm run build:all`.
+
+```text
+sdr-doa-console open        start bila perlu, lalu buka di Chromium/Chrome
+sdr-doa-console start | stop | restart | status
+sdr-doa-console logs        ikuti log (journalctl --user)
+sdr-doa-console password    ganti kata sandi admin, lalu restart console
+sdr-doa-console info        versi dan lokasi file
+sdr-doa-console uninstall   hapus program; --purge juga menghapus data
+```
+
+Upgrade: ekstrak rilis baru dan jalankan `sh install.sh` lagi. Program dan venv diganti; data, kata sandi, dan console yang sedang jalan dipertahankan.
+
+### Jalan di background dan saat boot
+
+- **Native**: console adalah systemd user service `sdr-doa-ground-console.service` (restart otomatis bila gagal). Installer menjalankan `loginctl enable-linger $USER` agar service mulai saat boot tanpa login; bila ditolak, jalankan sekali `sudo loginctl enable-linger $USER`. Cek dengan `systemctl --user status sdr-doa-ground-console` dan `loginctl show-user $USER -p Linger`. Dengan `--no-service`, atau tanpa systemd user session, console jalan di background sampai reboot berikutnya (`sdr-doa-console start` setelah login).
+- **Docker**: `restart: unless-stopped`, selama service Docker sendiri aktif saat boot.
+- **Agent RDF-SDR**: systemd system service `sdr-doa-agent.service`, enabled, atau container dengan `restart: unless-stopped` (lihat di bawah).
+
+### Apa yang tersimpan dan di mana
+
+Semua yang diubah lewat UI disimpan di server console, bukan hanya di browser. Pengaturan tetap ada saat browser lain dipakai, cache dibersihkan, console di-restart, container dibuat ulang, atau komputer reboot.
+
+| File | Isi | Native | Docker |
+|---|---|---|---|
+| `console.json` | Data Out, MQTT (host, port, transport, path WebSocket), interval refresh | `~/.local/share/sdr-doa-ground-console/` | `/data/` |
+| `branding.json` | nama aplikasi dan logo | sama | sama |
+| `preferences.json` | tema, bahasa, panel Ringkasan dan node card, Lapisan/overlay, tampilan polar, sumber dan offset kompas, sumber GPS, mode Dengar, ikuti frekuensi node, pengaturan dan bookmark Receiver | sama | sama |
+| `receiver/` | rekaman dan scan Receiver | sama | sama |
+| `.env` | `SDR_DOA_ADMIN_PASSWORD` (mode 0600) | sama | sama |
+
+- Data realtime (snapshot DoA, pesan MQTT, spektrum) tidak disimpan; data itu terus diperbarui.
+- Browser menyalin preferensi ke console sekitar setengah detik setelah perubahan, dan saat halaman dibuka membaca salinan console lebih dulu. Bila console sedang tidak bisa dihubungi, perubahan dikirim begitu console menjawab lagi.
+- Pengaturan Receiver ikut tersimpan selama halaman console terbuka. ID perangkat Receiver tetap di browser.
+- Saat console dijalankan langsung dari repository tanpa flag, file berada di `~/.config/sdr-doa-ground-console/` (`console.json`, `branding.json`, `preferences.json`), rekaman di `~/.local/share/sdr-doa-ground-console`, dan kata sandi di `.env` root repository. Lokasinya bisa diubah dengan `--config-path`, `--branding-path`, `--preferences-path`, `--data-dir` dan `--env-file`; console mencetak lokasinya saat start.
+- `--base-url` dan `--mqtt-*` menimpa pengaturan tersimpan hanya untuk satu kali jalan dan tidak disimpan. Service dan container sengaja tidak memakainya.
+
+## Agent RDF-SDR (Raspberry)
+
+Kontrol di console butuh edge agent di RDF-SDR: agent membaca Data Out KrakenSDR dan publish `health`, `state` dan `config_reported` ke MQTT, lalu menjawab patch dari Kontrol di `ack/config`. Detail lengkap ada di `packaging/agent/README.md`.
+
+```sh
+tar -xzf sdr-doa-rdf-sdr-agent-2.0.0.tar.gz
+cd sdr-doa-rdf-sdr-agent-2.0.0
+sudo sh install.sh --dry-run --mqtt-host 10.90.0.1    # lihat dulu apa yang akan dilakukan
+sudo sh install.sh --mqtt-host 10.90.0.1              # pasang dan start
+systemctl status sdr-doa-agent
+journalctl -u sdr-doa-agent -f
+```
+
+- Agent berjalan sebagai service `sdr-doa-agent` (mulai saat boot, restart bila gagal) dengan user biasa: pemilik `settings.json` KrakenSDR, `doasdr`, atau user sistem baru `sdr-doa-agent`. Installer menolak user root.
+- Pengaturan ada di `/etc/sdr-doa-agent/agent.env` (`root:<grup service>`, 0640). Setelah mengubahnya: `sudo systemctl restart sdr-doa-agent`. Variabel lain bisa diset dengan `--set NAMA=NILAI`, misalnya `--set DOA_RATE=0`.
+- Secara bawaan agent menjawab setiap patch dengan `REMOTE_CONTROL_DISABLED`. `sudo sh install.sh --enable-config` mengizinkan Kontrol mengubah `settings.json`; `--disable-config` mematikannya lagi. Aktifkan hanya di broker dan jaringan yang dipercaya.
+- Agent memakai MQTT lewat TCP (default port 1883), bukan WebSocket. Console dan agent harus memakai broker yang sama.
+- Docker (opsional, juga arm64/armv7): salin `packaging/agent/agent.env.example` ke `agent.env`, edit, lalu `docker compose up -d --build` di folder rilis agent (atau `docker compose -f docker-compose.agent.yml up -d --build` di repository). Butuh Compose v2.24+.
+- Upgrade: jalankan installer rilis baru lagi; `agent.env` dan state tetap. Hapus dengan `sudo sh /opt/sdr-doa-agent/uninstall.sh` (`--purge` juga menghapus pengaturan dan state).
+
 ## Validasi setelah install
 
 Frontend:
@@ -644,4 +753,4 @@ MapLibre membutuhkan koneksi HTTPS ke `tile.openstreetmap.de` atau `tile.openstr
 
 ### Keamanan lokal
 
-Tetap gunakan `--bind 127.0.0.1`. Jangan memakai `0.0.0.0` untuk quickstart dan jangan memasukkan secret ke frontend. Config dry-run di Konfigurasi bukan command nyata, tetapi Kontrol di Ringkasan adalah command nyata ke RDF-SDR. Ganti kata sandi admin bawaan `123456` sebelum console dipakai di komputer bersama. Console menolak `POST /api/mqtt/config-patch` tanpa header `Origin` dari halaman console itu sendiri, tanpa sesi admin, atau tanpa `confirm: true`.
+Tetap gunakan `--bind 127.0.0.1` (di Docker: `network_mode: host`). Jangan memakai `0.0.0.0` untuk quickstart dan jangan memasukkan secret ke frontend. Config dry-run di Konfigurasi bukan command nyata, tetapi Kontrol di Ringkasan adalah command nyata ke RDF-SDR. Ganti kata sandi admin bawaan `123456` sebelum console dipakai di komputer bersama. Console menolak `POST /api/mqtt/config-patch` tanpa header `Origin` dari halaman console itu sendiri, tanpa sesi admin, atau tanpa `confirm: true`.

@@ -63,6 +63,8 @@ Tujuan UI:
 - Receiver embedded (BrowSDR dari submodule `vendor/BrowSDR`, dengan overlay di `tools/browsdr_receiver_overlay/`) untuk spektrum, scan, rekaman audio, dan Records yang disimpan lokal. Panel Spektrum di Overview mengendalikan frame Receiver yang tersembunyi lewat bridge `postMessage` (Mulai/Berhenti, Dengar dengan modulasi, klik untuk menala, Ikuti frekuensi node).
 - Kontrol: patch konfigurasi MQTT yang dibatasi admin, dengan pelacakan ACK di server (`tools/config_command_tracker.py`).
 - Branding lokal dan konfigurasi console lokal.
+- Pengaturan tersimpan di server console: koneksi/MQTT/interval di `console.json`, branding, preferensi tampilan browser di `preferences.json` (`GET`/`PUT /api/preferences`, `tools/preferences_store.py`, `frontend/src/lib/preferenceStore.ts`), rekaman Receiver, dan `.env`. Start pertama membuat `console.json` dari `SDR_DOA_SEED_*`. `GET /api/health` untuk healthcheck; versi dari file `VERSION`.
+- Paket Linux: image Docker (`Dockerfile`, `Dockerfile.release`, `docker-compose*.yml`, network host), rilis tar (`tools/make_release.py`), installer console dengan systemd user service (`packaging/console/`), dan installer agent RDF-SDR dengan systemd service atau image ARM (`packaging/agent/`). Lihat QUICKSTART bagian Instalasi Linux.
 
 ### Staging/rancangan—jangan dianggap production
 
@@ -142,6 +144,9 @@ MQTT adalah transport/contract, bukan pengganti DAQ, DSP, normalisasi, gate, ata
 | `tools/sdr_doa_mqtt_monitor.py` | MQTT monitor; berlangganan, dan hanya publish patch konfigurasi lewat `publish_config_patch`. Memerlukan `paho-mqtt` (tanpa paket ini monitor berstatus ERROR, console tetap jalan) |
 | `tools/rdf_node_mqtt_v2.py` | Parser dan snapshot RDF Node v2 untuk `/api/mqtt/rdf-node` |
 | `tools/receiver_record_store.py` | Store SQLite dan file audio Receiver di bawah `--data-dir` |
+| `tools/preferences_store.py` | Salinan preferensi browser di server (allowlist key, batas ukuran, tulis atomik) untuk `/api/preferences` |
+| `tools/make_release.py` | Membuat tarball rilis console dan agent beserta `SHA256SUMS`; juga `--stage-console`/`--stage-agent` untuk Docker dan installer |
+| `packaging/`, `Dockerfile*`, `docker-compose*.yml`, `VERSION` | Docker, installer native, systemd unit, dan versi rilis |
 | `tools/build_browsdr_receiver.py` | Builder Receiver: salin submodule, terapkan overlay, `npm ci` + build, tulis `frontend/dist/receiver` |
 | `tools/browsdr_receiver_overlay/` | Perubahan lokal Receiver yang diterapkan saat build; `vendor/BrowSDR` tidak diedit |
 | `tools/sdr_doa_mqtt_stdlib.py` | Jalur MQTT stdlib/staging alternatif |
@@ -286,7 +291,7 @@ Simulasi hanya menggantikan sumber Overview. Simulasi tidak boleh memalsukan Sys
 
 Overview adalah dasbor peta penuh. Langkah operator yang lebih rinci ada di `QUICKSTART.md`. Di UI, node Raspberry tampil sebagai **RDF-SDR** dan receiver HackRF sebagai **RadioSpectrum**; identifier, field API, topik MQTT, dan filter WebUSB tetap memakai nama teknisnya. Dasbor hanya menampilkan label, nilai, chip status, error, dan prompt yang butuh tindakan, tanpa teks penjelasan kecil. Ringkasnya:
 
-- **Panel.** Tombol Lapisan, Polar, Spektrum, dan Kontrol di top bar menampilkan atau menyembunyikan panel. Secara bawaan Polar dan Spektrum aktif. Pilihan panel disimpan di browser.
+- **Panel.** Tombol Lapisan, Polar, Spektrum, dan Kontrol di top bar menampilkan atau menyembunyikan panel. Secara bawaan Polar dan Spektrum aktif. Pilihan panel disimpan di console (`/api/preferences`), jadi ikut ke browser lain.
 - **Mulai/Berhenti.** Mulai memuat Receiver tersembunyi (saat pertama kali), menyambungkan RadioSpectrum yang sudah dipasangkan ke browser ini, dan menjalankan RX tanpa suara. Spektrum menampilkan 2 MHz di sekitar tengah RX. RadioSpectrum yang belum pernah dipasangkan (`NEEDS_PAIRING`) dipasangkan sekali di halaman Receiver (tombol `7`). Berhenti menghentikan RX.
 - **Klik untuk menala.** Klik trace atau waterfall untuk memindahkan tengah RX dan VFO ke frekuensi itu (dibulatkan 1 kHz); ←/→ menggeser 10 kHz, Shift+←/→ 100 kHz. Klik ini mematikan Ikuti frekuensi node.
 - **Ikuti frekuensi node.** Selama Data Out segar, tengah RX mengikuti `center_freq` dari `settings.json` node dan VFO mengikuti frekuensi CSV DoA.
@@ -332,7 +337,7 @@ http://127.0.0.1:8787/
 
 Kata sandi admin dibaca dari `SDR_DOA_ADMIN_PASSWORD` di environment proses atau di `.env` root repository (salin dari `.env.example`, ganti nilainya, jangan di-commit). Bila variabel tidak ada di keduanya, console memakai kata sandi bawaan `123456`, mencetak peringatan saat start, dan Kontrol menampilkan peringatan; ganti dengan kata sandi sendiri. Nilai kosong (`SDR_DOA_ADMIN_PASSWORD=`) menonaktifkan login admin, begitu juga `.env` yang tidak bisa dibaca. Perubahan kata sandi berlaku setelah console di-restart.
 
-Default CLI mengaktifkan monitor MQTT ke `10.90.0.1:9001` (WebSocket). Tanpa `paho-mqtt` console tetap berjalan dan monitor berstatus ERROR; `--mqtt-host ''` mematikan monitor. Flag eksplisit (`--base-url`, `--mqtt-host`, `--mqtt-port`, `--mqtt-transport`, `--mqtt-ws-path`) mengalahkan `console.json` tersimpan untuk run itu. Data Receiver disimpan di `--data-dir` (default `~/.local/share/sdr-doa-ground-console`). Di Windows, pasang juga `tzdata`.
+Default CLI mengaktifkan monitor MQTT ke `10.90.0.1:9001` (WebSocket). Tanpa `paho-mqtt` console tetap berjalan dan monitor berstatus ERROR; `--mqtt-host ''` mematikan monitor. Flag eksplisit (`--base-url`, `--mqtt-host`, `--mqtt-port`, `--mqtt-transport`, `--mqtt-ws-path`) mengalahkan `console.json` tersimpan untuk run itu. Data Receiver disimpan di `--data-dir` (default `~/.local/share/sdr-doa-ground-console`). Preferensi browser disimpan di `--preferences-path` (default `~/.config/sdr-doa-ground-console/preferences.json`), dan `--env-file` memilih file `.env` lain untuk kata sandi admin dan `SDR_DOA_SEED_*`. Bila `console.json` belum ada, start pertama membuatnya dari `SDR_DOA_SEED_*` dan menyimpannya; start berikutnya mengabaikan seed. Karena flag eksplisit hanya berlaku untuk satu run, service dan container tidak memakainya. Di Windows, pasang juga `tzdata`. Untuk instalasi Linux di background (Docker atau `install.sh`) dan agent RDF-SDR, lihat `QUICKSTART.md` dan `packaging/`.
 
 Jangan memasang dependency ke Python system/Homebrew tanpa alasan. Development frontend saja:
 

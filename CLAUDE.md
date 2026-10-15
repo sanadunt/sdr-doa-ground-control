@@ -16,11 +16,14 @@ cd frontend && npx vitest run src/lib/doaGeometry.test.ts
 cd frontend && npx vitest run -t "partial test name"
 
 # Python unittest-based files (test_ground_console_static, test_rdf_node_mqtt_v2, test_sdr_doa_mqtt_monitor,
-# test_receiver_record_store, test_build_browsdr_receiver, test_mqtt_config_patch, test_config_patch_contract)
+# test_receiver_record_store, test_build_browsdr_receiver, test_mqtt_config_patch, test_config_patch_contract,
+# test_preferences_store, test_make_release)
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_ground_console_static.GroundConsoleStaticRegressionTests.<test_method>
 # Config-patch HTTP contract (fake monitor, no broker) and the backend-code/i18n contract with lib/configPatch.ts
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_mqtt_config_patch tools.test_config_patch_contract
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_mqtt_config_patch.ConfigPatchServerTests.<test_method>
+# Server-side preferences, seeding, /api/health; release tarballs, Docker/compose policy, installers and launcher
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_preferences_store tools.test_make_release
 
 # Python standalone assert scripts (all other tools/test_*.py): run the whole file,
 # or call one test_* function directly
@@ -56,6 +59,15 @@ node --test tools/test_receiver_bridge_contract.mjs   # console and frame protoc
 
 The standalone scripts collect every module-level `test_*` function in their `__main__` block, so `unittest discover` skips them. Run them by name when you touch their modules.
 
+## Settings persistence and Linux packaging
+
+- Everything saved lives on the console host, in files named by flags: `--config-path` (`console.json`: Data Out, MQTT, refresh interval), `--branding-path`, `--preferences-path` (`preferences.json`, the browser UI preferences), `--data-dir` (Receiver records) and `--env-file` (`SDR_DOA_ADMIN_PASSWORD`, `SDR_DOA_SEED_*`; the process environment wins). Running from the repo without flags uses `~/.config/sdr-doa-ground-console/` and the repo `.env`. Installs use one data directory: `/data` in Docker, `~/.local/share/sdr-doa-ground-console` natively.
+- First start only: when `--config-path` does not exist, the console writes it from `SDR_DOA_SEED_BASE_URL`, `_MQTT_HOST`, `_MQTT_PORT`, `_MQTT_TRANSPORT`, `_MQTT_WS_PATH`, `_REFRESH_SECONDS` (invalid or empty values ignored with a warning). `--base-url`/`--mqtt-*` override saved settings for one run and are never saved, so the systemd unit, the launcher and the Docker entrypoint must not pass them.
+- Browser preferences: `PREFERENCE_KEYS` in `frontend/src/lib/preferenceStore.ts` and `tools/preferences_store.py` must stay equal (`tools/test_preferences_store.py` checks). `main.tsx` reads the server copy before the first render (800 ms cap); writes go through `writePreference()`/`preferenceStorage()` and one debounced PUT. `/api/preferences` writes need the same-origin loopback `Origin`; unknown keys, bad values and oversized bodies are refused whole. Live data and secrets never go into preferences.
+- `GET /api/health` (no Data Out read, healthy answers not logged) backs the Docker healthcheck and the launcher; `version` comes from `VERSION` next to `tools/`.
+- Packaging: `tools/make_release.py` builds `dist/release/sdr-doa-ground-console-<VERSION>-linux.tar.gz`, `sdr-doa-rdf-sdr-agent-<VERSION>.tar.gz` and `SHA256SUMS` (runtime modules are the import closure of each entry point; tests never ship; `--skip-build`, `--with-wheels`, `--stage-console`/`--stage-agent`). `packaging/console/install.sh` installs a venv, a systemd user service with lingering and `sdr-doa-console` (refuses root); `packaging/agent/install-agent.sh` installs `sdr-doa-agent.service` as a non-root user (refuses `--user root`), settings in `/etc/sdr-doa-agent/agent.env` read by `run-agent.sh`. Docker: `Dockerfile` (regular clone with the submodule; a git worktree is refused by `packaging/docker/check-build-context.sh`), `Dockerfile.release` (unpacked release), `Dockerfile.agent` (no `RUN`, cross-builds for arm64/armv7). Every compose file uses `network_mode: host` and no `ports:`, because the console only binds loopback.
+- After changing a runtime module's imports, a launch flag, or a packaging file, run `tools.test_make_release`; it checks the shipped module list, that every launch path uses the data directory and loopback, and shell syntax.
+
 ## Verification after a change
 
 The expected sequence before calling work done:
@@ -64,6 +76,7 @@ The expected sequence before calling work done:
 cd frontend && npm test && npm run check && npm run build:all
 cd .. && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest discover -s tools -p 'test_*.py'
 python3 tools/test_<module>.py              # the standalone scripts for the modules you changed
+python3 tools/make_release.py --skip-build --output-dir /tmp/rel   # when packaging changed; then sha256sum -c
 node --test tools/test_receiver_*.mjs       # when Receiver code changed
 git diff --check
 ```
@@ -97,6 +110,11 @@ The `.venv` is not committed. Create it locally with Python 3.9+ (stdlib is enou
 - Kontrol Send stays disabled, or POST returns 409 `CONFIG_REVISION_UNKNOWN`: no v1 `config_reported` (retained by the agent), `ack_config` or `state` has arrived since the monitor connected. The agent publishes `config_reported` only once it can read `settings.json` through Data Out.
 - `tools/mqtt_lan_stage.conf` (TLS, passwords, ACL) cannot carry Kontrol: the console monitor has no TLS or credentials and cannot connect there. Use `tools/mqtt_stage4.conf` (anonymous, `127.0.0.1:18884`) locally, or a broker that admits the console anonymously.
 - `publish_failed` with a PUBACK reason ≥ 128 (135 is "Not authorized"): the broker ACL does not let the console's anonymous client publish to `sdr/v1/uav-01/cmd/config/patch`.
+- Settings look unsaved after a restart: the console was started with `--base-url` or `--mqtt-*`, which override `console.json` for that run. Remove them from the unit or command; change settings in Konfigurasi.
+- Container exits with 73 "not writable by uid 10001": a bind mount for `/data` is owned by another user. Use the named volume or `chown 10001:10001` the directory.
+- `docker compose build` from a git worktree stops in `check-build-context.sh`: the Receiver builder needs `.git/modules/vendor/BrowSDR`. Build from a regular clone or from the release with `Dockerfile.release`.
+- Native console not running after a reboot: lingering is off (`loginctl show-user $USER -p Linger`); run `sudo loginctl enable-linger $USER`.
+- Agent service stopped with exit 78: `run-agent` found an unusable `agent.env` value, or `ENABLE_CONFIG=1` while the service user cannot write `settings.json`. See `journalctl -u sdr-doa-agent`; switch config with `install.sh --enable-config`/`--disable-config`.
 
 ## antislop paths
 
