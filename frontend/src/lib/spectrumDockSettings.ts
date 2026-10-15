@@ -1,7 +1,8 @@
 /**
  * The Spektrum dock's own settings, kept on the console like the other
  * preferences (key sdr-console-spectrum-dock-v1): the RX dB scale as last
- * known.
+ * known, the mode Mulai starts (RX or the wide scan, Spektrum) and whether the
+ * scan's dB scale is Auto.
  *
  * The RX dB scale belongs to the Receiver (its Dengar tab, saved in
  * SDRSetting). The dock mirrors it through the bridge and keeps the last value
@@ -9,6 +10,10 @@
  * dock is marked pending until the Receiver has taken it; one made while no
  * frame answers is sent when the frame says hello (watchReceiverDisplay in
  * lib/receiverSync.ts).
+ *
+ * The scan's manual range is the Receiver's own Graph min./max. (saved with
+ * its scan settings), so only the Auto choice is kept here; Auto draws the
+ * scan with the dock's own automatic range and changes nothing on the Receiver.
  *
  * spectrumDockStore holds the value for the whole console page, so App can
  * mirror the Receiver while the dock is not mounted. Every field is validated
@@ -26,15 +31,23 @@ export const SPECTRUM_DOCK_MAX_CHARS = 1024;
 /** The RX dB scale: Auto, or minDb to maxDb (kept while Auto is on). */
 export type DbScale = StatusDisplay;
 
+/** RX: the 2 MHz around the RX centre. sweep: the Receiver's wide scan (Spektrum). */
+export const DOCK_MODES = ['rx', 'sweep'] as const;
+export type DockMode = typeof DOCK_MODES[number];
+
 export interface SpectrumDockSettings {
   rxDb: DbScale;
   /** A dock change of rxDb the Receiver has not taken yet. */
   rxDbPending: boolean;
+  /** What Mulai starts while nothing runs; the dock shows the mode that runs. */
+  mode: DockMode;
+  /** The scan's dB scale is the dock's automatic one; otherwise the Receiver's Graph min./max. */
+  sweepAuto: boolean;
 }
 
 /** The Receiver's own default: Auto, with the upstream −70 to 0 dB manual range. */
 export const DEFAULT_RX_DB: Readonly<DbScale> = Object.freeze({ auto: true, minDb: -70, maxDb: 0 });
-export const DEFAULT_SPECTRUM_DOCK_SETTINGS: Readonly<SpectrumDockSettings> = Object.freeze({ rxDb: DEFAULT_RX_DB, rxDbPending: false });
+export const DEFAULT_SPECTRUM_DOCK_SETTINGS: Readonly<SpectrumDockSettings> = Object.freeze({ rxDb: DEFAULT_RX_DB, rxDbPending: false, mode: 'rx', sweepAuto: true });
 
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>;
 
@@ -65,6 +78,8 @@ export function validateSpectrumDockSettings(value: unknown): SpectrumDockSettin
     rxDb: rxDb ?? { ...DEFAULT_RX_DB },
     // A pending flag without a usable scale has nothing to send.
     rxDbPending: rxDb !== null && input.rxDbPending === true,
+    mode: input.mode === 'sweep' ? 'sweep' : 'rx',
+    sweepAuto: input.sweepAuto !== false,
   };
 }
 
@@ -113,7 +128,7 @@ export function manualFromDrawn(drawn: { min: number; max: number } | null, curr
 }
 
 export function sameSpectrumDockSettings(left: SpectrumDockSettings, right: SpectrumDockSettings): boolean {
-  return left.rxDbPending === right.rxDbPending && sameDbScale(left.rxDb, right.rxDb);
+  return left.rxDbPending === right.rxDbPending && sameDbScale(left.rxDb, right.rxDb) && left.mode === right.mode && left.sweepAuto === right.sweepAuto;
 }
 
 /** A page-wide store of the dock settings; an equal value is neither saved nor announced. */

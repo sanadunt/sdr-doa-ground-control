@@ -176,7 +176,7 @@ describe('watchReceiverDisplay', () => {
     const dock = store();
     const stop = watchReceiverDisplay(bridge.source, dock.value);
     bridge.update({ phase: 'ready', status: withDisplay(manual(-90, -20)) });
-    expect(dock.value.get()).toEqual({ rxDb: manual(-90, -20), rxDbPending: false });
+    expect(dock.value.get()).toEqual({ rxDb: manual(-90, -20), rxDbPending: false, mode: 'rx', sweepAuto: true });
     bridge.update({ status: withDisplay(AUTO) });
     expect(dock.value.get().rxDb).toEqual(AUTO);
     // An older frame without the field leaves the dock with its own.
@@ -194,21 +194,21 @@ describe('watchReceiverDisplay', () => {
     const dock = store();
     watchReceiverDisplay(bridge.source, dock.value);
     bridge.update({ phase: 'ready', status: withDisplay(AUTO) });
-    dock.value.set({ rxDb: manual(-90, -20), rxDbPending: true });
+    dock.value.set({ rxDb: manual(-90, -20), rxDbPending: true, mode: 'rx', sweepAuto: true });
     expect(bridge.sent.map((entry) => entry.command)).toEqual([{ type: 'console:display', auto: false, minDb: -90, maxDb: -20 }]);
     // A status sent before the frame took the change is not copied back.
     bridge.update({ status: withDisplay(AUTO) });
-    expect(dock.value.get()).toEqual({ rxDb: manual(-90, -20), rxDbPending: true });
+    expect(dock.value.get()).toEqual({ rxDb: manual(-90, -20), rxDbPending: true, mode: 'rx', sweepAuto: true });
     expect(bridge.sent).toHaveLength(1);
     bridge.sent[0].answer({ ok: true, code: 'OK' });
     await settle();
-    expect(dock.value.get()).toEqual({ rxDb: manual(-90, -20), rxDbPending: false });
+    expect(dock.value.get()).toEqual({ rxDb: manual(-90, -20), rxDbPending: false, mode: 'rx', sweepAuto: true });
     bridge.update({ lastResult: null });
     expect(dock.value.get().rxDb).toEqual(manual(-90, -20));
     // The next status carries the change; a later Receiver edit is copied again.
     bridge.update({ status: withDisplay(manual(-90, -20)) });
     bridge.update({ status: withDisplay(manual(-100, -30)) });
-    expect(dock.value.get()).toEqual({ rxDb: manual(-100, -30), rxDbPending: false });
+    expect(dock.value.get()).toEqual({ rxDb: manual(-100, -30), rxDbPending: false, mode: 'rx', sweepAuto: true });
     expect(bridge.sent).toHaveLength(1);
   });
 
@@ -216,7 +216,7 @@ describe('watchReceiverDisplay', () => {
     const bridge = displayBridge();
     const dock = store();
     watchReceiverDisplay(bridge.source, dock.value);
-    dock.value.set({ rxDb: manual(-90, -20), rxDbPending: true });
+    dock.value.set({ rxDb: manual(-90, -20), rxDbPending: true, mode: 'rx', sweepAuto: true });
     bridge.update({ phase: 'connecting' });
     expect(bridge.sent).toEqual([]);
     // The Receiver's saved value arrives first; the dock change wins.
@@ -230,7 +230,7 @@ describe('watchReceiverDisplay', () => {
 
   it('a pending change the Receiver already shows needs no command', () => {
     const bridge = displayBridge();
-    const dock = store({ rxDb: manual(-90, -20), rxDbPending: true });
+    const dock = store({ rxDb: manual(-90, -20), rxDbPending: true, mode: 'rx', sweepAuto: true });
     watchReceiverDisplay(bridge.source, dock.value);
     bridge.update({ phase: 'ready', status: withDisplay(manual(-90, -20)) });
     expect(bridge.sent).toEqual([]);
@@ -242,8 +242,8 @@ describe('watchReceiverDisplay', () => {
     const dock = store();
     watchReceiverDisplay(bridge.source, dock.value);
     bridge.update({ phase: 'ready', status: withDisplay(AUTO) });
-    dock.value.set({ rxDb: manual(-90, -20), rxDbPending: true });
-    dock.value.set({ rxDb: manual(-80, -10), rxDbPending: true });
+    dock.value.set({ rxDb: manual(-90, -20), rxDbPending: true, mode: 'rx', sweepAuto: true });
+    dock.value.set({ rxDb: manual(-80, -10), rxDbPending: true, mode: 'rx', sweepAuto: true });
     expect(bridge.sent).toHaveLength(1);
     bridge.sent[0].answer({ ok: true, code: 'OK' });
     await settle();
@@ -266,12 +266,12 @@ describe('watchReceiverDisplay', () => {
     watchReceiverDisplay(bridge.source, dock.value);
     seq = 50;
     bridge.update({ phase: 'ready', status: withDisplay(AUTO) });
-    dock.value.set({ rxDb: manual(-90, -20), rxDbPending: true });
+    dock.value.set({ rxDb: manual(-90, -20), rxDbPending: true, mode: 'rx', sweepAuto: true });
     bridge.sent[0].answer({ ok: true, code: 'OK' });
     await settle();
     bridge.update({ phase: 'connecting', status: null });
     seq = 0;
     bridge.update({ phase: 'ready', status: withDisplay(manual(-60, -5)) });
-    expect(dock.value.get()).toEqual({ rxDb: manual(-60, -5), rxDbPending: false });
+    expect(dock.value.get()).toEqual({ rxDb: manual(-60, -5), rxDbPending: false, mode: 'rx', sweepAuto: true });
   });
 });

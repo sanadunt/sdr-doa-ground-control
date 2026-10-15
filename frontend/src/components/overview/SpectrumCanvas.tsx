@@ -1,7 +1,8 @@
 import type { JSX, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode, Ref } from 'react';
 import { useEffect, useImperativeHandle, useRef } from 'react';
 import type { ReceiverBridge } from '../../lib/receiverBridge';
-import type { RxSpectrumFrame } from '../../lib/receiverBridgeProtocol';
+import type { SpectrumFrame } from '../../lib/receiverBridgeProtocol';
+import type { DockMode } from '../../lib/spectrumDockSettings';
 import { PALETTE_STOPS } from '../../lib/overlayPalette';
 import {
   CLICK_SLOP_PX,
@@ -16,13 +17,18 @@ import {
   formatDb,
   formatMhz,
   freqAtX,
+  keyStepHz,
+  mhzDigits,
   paletteLut,
   peakOf,
+  scanPick,
   snapHz,
+  sweepAxis,
   ticks,
+  waterfallNeedsReset,
   xAtFreq,
 } from '../../lib/spectrumView';
-import type { DbRange } from '../../lib/spectrumView';
+import type { DbRange, FrequencyAxis, WaterfallSource } from '../../lib/spectrumView';
 import { useI18n } from '../../lib/i18n';
 
 const TICK_COUNT = 5;
@@ -66,6 +72,18 @@ export interface Waterfall {
   rows: Float32Array;
   image: ImageData | null;
   buffer: HTMLCanvasElement | null;
+  /** What the rows hold; a frame of another source, bin count or scan range starts a new history. */
+  source?: WaterfallSource | null;
+}
+
+/** MHz decimals of the readouts: 3 for RX; for a scan, what one of its bins can tell apart. */
+function readoutDigits(mode: DockMode, axis: FrequencyAxis | null, bins: number): number {
+  return mode === 'sweep' && axis ? mhzDigits((axis.stopHz - axis.startHz) / Math.max(1, bins)) : 3;
+}
+
+/** MHz decimals of the axis ticks: 3 for RX; for a scan, one more than the tick step needs (432.5 between 430 and 435). */
+function tickDigits(mode: DockMode, axis: FrequencyAxis | null, count: number): number {
+  return mode === 'sweep' && axis ? mhzDigits((axis.stopHz - axis.startHz) / Math.max(1, count - 1) / 10) : 3;
 }
 
 /** Paints the whole history with one dB range into the waterfall's backing canvas, newest row on top. */
@@ -97,11 +115,16 @@ export interface SpectrumCanvasHandle {
 
 export interface SpectrumCanvasProps {
   bridge: ReceiverBridge;
-  /** RX is running; a stopped trace is dimmed and covered by `overlay`. */
-  running: boolean;
-  /** Axis before the first frame, while stopped, and after a retune until frames at the new centre arrive. */
+  /** RX frames or the wide scan's (Spektrum); frames of the other source are not drawn. */
+  mode: DockMode;
+  /** The trace is live (RX runs in RX mode, a scan runs in Spektrum mode); otherwise it is dimmed and covered by `overlay`. */
+  live: boolean;
+  /**
+   * Axis before the first frame and while stopped: the span around the RX centre, or the scan range.
+   * In RX mode also after a retune until frames at the new centre arrive.
+   */
   fallbackView: { startHz: number; stopHz: number } | null;
-  /** The RX centre the dock shows as tuned; a frame taken at another centre does not set the axis. */
+  /** RX mode: the RX centre the dock shows as tuned; a frame taken at another centre does not set the axis. */
   centerHz: number | null;
   /** Listen VFO band, drawn over the trace. */
   vfo: { frequencyHz: number; bandwidthHz: number } | null;
@@ -109,7 +132,7 @@ export interface SpectrumCanvasProps {
   info: string;
   /** Extra line under the info, such as a follow-node hint or an error. */
   notice?: ReactNode;
-  /** Shown over the trace while RX is stopped. */
+  /** Shown over the trace while it is not live. */
   overlay: ReactNode;
   /** Frequency the arrow keys step from: the listen VFO as the dock shows it. */
   tuneHz: number | null;
@@ -125,33 +148,38 @@ export interface SpectrumCanvasProps {
  * Trace and waterfall of the Overview spectrum dock. Frames arrive from the
  * Receiver bridge and are drawn imperatively into canvases; nothing per frame
  * goes through React state (an open settings column gets the automatic range
- * in whole dB, at most twice a second). The dB range is Auto (smoothed, from
- * the frames) or the manual dbRange, and applies to the trace and the whole
- * waterfall history. Click (less than 5 px of movement) or the arrow keys
- * tune; hovering shows the frequency and power under the pointer.
+ * in whole dB, at most twice a second). In RX mode the frames are the 2 MHz
+ * around the RX centre; in Spektrum mode the wide scan over its range, read
+ * out with the decimals its bins can tell apart. The dB range is Auto
+ * (smoothed, from the frames) or the manual dbRange, and applies to the trace
+ * and the whole waterfall history. Click (less than 5 px of movement) or the
+ * arrow keys tune the RX centre and VFO (on a scan: for the next RX, at the
+ * strongest nearby bin); hovering shows the frequency and power under the pointer.
  */
-export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, info, notice, overlay, tuneHz, onTune, dbRange, onAutoRange, handle }: SpectrumCanvasProps): JSX.Element {
+export function SpectrumCanvas({ bridge, mode, live, fallbackView, centerHz, vfo, info, notice, overlay, tuneHz, onTune, dbRange, onAutoRange, handle }: SpectrumCanvasProps): JSX.Element {
   const { t } = useI18n();
   const traceRef = useRef<HTMLCanvasElement>(null);
   const waterfallRef = useRef<HTMLCanvasElement>(null);
   const peakRef = useRef<HTMLSpanElement>(null);
+  // The peak of the last frame; hidden while a stopped scan shows another range than that frame's.
+  const peakTextRef = useRef('');
   const topLabelRef = useRef<HTMLSpanElement>(null);
   const bottomLabelRef = useRef<HTMLSpanElement>(null);
   const vfoLabelRef = useRef<HTMLSpanElement>(null);
   const hoverRef = useRef<HTMLSpanElement>(null);
   const ticksRef = useRef<HTMLDivElement>(null);
-  const frameRef = useRef<RxSpectrumFrame | null>(null);
+  const frameRef = useRef<SpectrumFrame | null>(null);
   // The automatic range follows every frame, also in Manual, so Auto takes over without a jump.
   const autoRef = useRef<DbRange | null>(null);
   // The range drawn: dbRange, or the automatic one.
   const rangeRef = useRef<DbRange | null>(dbRange);
   const reportedRef = useRef<{ range: DbRange; at: number } | null>(null);
   const colorsRef = useRef<Colors | null>(null);
-  const waterfallState = useRef<Waterfall>({ bins: 0, head: 0, filled: 0, rows: new Float32Array(0), image: null, buffer: null });
+  const waterfallState = useRef<Waterfall>({ bins: 0, head: 0, filled: 0, rows: new Float32Array(0), image: null, buffer: null, source: null });
   const pointerRef = useRef<{ x: number; y: number; id: number } | null>(null);
   const drawRef = useRef<() => void>(() => undefined);
-  const props = useRef({ running, fallbackView, centerHz, vfo, t, tuneHz, dbRange, onAutoRange });
-  props.current = { running, fallbackView, centerHz, vfo, t, tuneHz, dbRange, onAutoRange };
+  const props = useRef({ mode, live, fallbackView, centerHz, vfo, t, tuneHz, dbRange, onAutoRange });
+  props.current = { mode, live, fallbackView, centerHz, vfo, t, tuneHz, dbRange, onAutoRange };
 
   useImperativeHandle(handle, () => ({ currentRange: () => rangeRef.current }), []);
 
@@ -168,10 +196,15 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
     report(range);
   };
 
-  /** The axis in use: the last frame while running at the tuned centre, otherwise the expected span. */
-  const view = (): { startHz: number; stopHz: number } | null => {
-    const { running: live, fallbackView: expected, centerHz: tunedHz } = props.current;
-    return axisFor(frameRef.current, tunedHz, live, expected);
+  /**
+   * The axis in use. RX: the last frame while running at the tuned centre, otherwise the expected
+   * span. Scan: the last frame's range while the scan runs, otherwise the Receiver's range.
+   */
+  const view = (): FrequencyAxis | null => {
+    const { mode: current, live: drawnLive, fallbackView: expected, centerHz: tunedHz } = props.current;
+    const frame = frameRef.current;
+    if (current === 'sweep') return sweepAxis(frame?.source === 'sweep' ? frame : null, drawnLive, expected);
+    return axisFor(frame?.source === 'rx' ? frame : null, tunedHz, drawnLive, expected);
   };
 
   drawRef.current = () => {
@@ -180,7 +213,7 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
     const context = canvas.getContext('2d');
     if (!context) return;
     const colors = colorsRef.current ?? (colorsRef.current = readColors(canvas));
-    const { running: live, vfo: band } = props.current;
+    const { live: drawnLive, vfo: band, mode: current } = props.current;
     const width = canvas.width;
     const height = canvas.height;
     context.clearRect(0, 0, width, height);
@@ -201,6 +234,14 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
     context.stroke();
 
     const axis = view();
+    const frameNow = frameRef.current;
+    // A stopped scan set to another range: its old waterfall and peak do not belong to this axis.
+    const staleScan = current === 'sweep' && frameNow?.source === 'sweep' && axis !== null
+      && (Math.abs(frameNow.startHz - axis.startHz) > 0.5 || Math.abs(frameNow.stopHz - axis.stopHz) > 0.5);
+    if (peakRef.current) {
+      const peakText = staleScan ? '' : peakTextRef.current;
+      if (peakRef.current.textContent !== peakText) peakRef.current.textContent = peakText;
+    }
     const vfoLabel = vfoLabelRef.current;
     let vfoShown = false;
     if (axis && band) {
@@ -236,13 +277,13 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
       context.strokeStyle = colors.trace;
       context.lineWidth = Math.max(1, Math.round(1.4 * (width / Math.max(1, canvas.clientWidth))));
       context.lineJoin = 'round';
-      context.globalAlpha = live ? 1 : 0.35;
+      context.globalAlpha = drawnLive ? 1 : 0.35;
       context.stroke();
       context.lineTo(width, height);
       context.lineTo(0, height);
       context.closePath();
       context.fillStyle = colors.trace;
-      context.globalAlpha = live ? 0.12 : 0.05;
+      context.globalAlpha = drawnLive ? 0.12 : 0.05;
       context.fill();
       context.globalAlpha = 1;
     }
@@ -251,7 +292,7 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
 
     const tickRow = ticksRef.current;
     if (tickRow) {
-      const labels = axis ? ticks(axis.startHz, axis.stopHz, TICK_COUNT) : [];
+      const labels = axis ? ticks(axis.startHz, axis.stopHz, TICK_COUNT, tickDigits(current, axis, TICK_COUNT)) : [];
       Array.from(tickRow.children).forEach((child, index) => {
         const text = labels[index]?.label ?? '—';
         if (child.textContent !== text) child.textContent = text;
@@ -262,10 +303,12 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
     const state = waterfallState.current;
     if (fall && state.image && state.buffer && state.filled > 0) {
       const target = fall.getContext('2d');
-      if (target) {
+      if (target && staleScan) {
+        target.clearRect(0, 0, fall.width, fall.height);
+      } else if (target) {
         target.fillStyle = colors.background;
         target.fillRect(0, 0, fall.width, fall.height);
-        target.globalAlpha = live ? 1 : 0.5;
+        target.globalAlpha = drawnLive ? 1 : 0.5;
         target.imageSmoothingEnabled = true;
         target.drawImage(state.buffer, 0, 0, state.bins, WATERFALL_ROWS, 0, 0, fall.width, fall.height);
         target.globalAlpha = 1;
@@ -280,22 +323,27 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
       if (!scheduled) scheduled = window.requestAnimationFrame(() => { scheduled = 0; drawRef.current(); });
     };
     const unsubscribe = bridge.onSpectrum((frame) => {
-      if (frame.source !== 'rx') return;
+      // An RX frame in Spektrum mode or a scan frame in RX mode (the other mode just ended) is not drawn.
+      if (frame.source !== props.current.mode) return;
       frameRef.current = frame;
       autoRef.current = autoDbRange(frame.bins, autoRef.current);
       const range = props.current.dbRange ?? autoRef.current;
       rangeRef.current = range;
       const state = waterfallState.current;
-      if (state.bins !== frame.binCount || !state.buffer) {
-        state.bins = frame.binCount;
-        state.rows = new Float32Array(frame.binCount * WATERFALL_ROWS);
+      const source: WaterfallSource = { source: frame.source, binCount: frame.binCount, startHz: frame.startHz, stopHz: frame.stopHz };
+      if (waterfallNeedsReset(state.source ?? null, source) || !state.buffer) {
+        if (state.bins !== frame.binCount || !state.buffer) {
+          state.bins = frame.binCount;
+          state.rows = new Float32Array(frame.binCount * WATERFALL_ROWS);
+          state.buffer = state.buffer ?? document.createElement('canvas');
+          state.buffer.width = frame.binCount;
+          state.buffer.height = WATERFALL_ROWS;
+          state.image = state.buffer.getContext('2d')?.createImageData(frame.binCount, WATERFALL_ROWS) ?? null;
+        }
         state.head = 0;
         state.filled = 0;
-        state.buffer = state.buffer ?? document.createElement('canvas');
-        state.buffer.width = frame.binCount;
-        state.buffer.height = WATERFALL_ROWS;
-        state.image = state.buffer.getContext('2d')?.createImageData(frame.binCount, WATERFALL_ROWS) ?? null;
       }
+      state.source = source;
       if (state.image && state.buffer) {
         state.rows.set(frame.bins, state.head * state.bins);
         state.head = (state.head + 1) % WATERFALL_ROWS;
@@ -305,9 +353,9 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
       }
       reportAuto(false);
       const peak = peakOf(frame.bins, frame.startHz, frame.stopHz);
-      if (peakRef.current) {
-        peakRef.current.textContent = peak ? props.current.t('spectrum.peak', { db: formatDb(peak.db, 1), freq: formatMhz(peak.hz, 3) }) : '';
-      }
+      const digits = readoutDigits(frame.source, frame, frame.binCount);
+      // Shown by the next draw.
+      peakTextRef.current = peak ? props.current.t('spectrum.peak', { db: formatDb(peak.db, 1), freq: formatMhz(peak.hz, digits) }) : '';
       schedule();
     });
     return () => {
@@ -341,10 +389,26 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
     };
   }, []);
 
-  // A stopped radio, a new VFO or a retune redraws without waiting for a frame.
+  // A switch between RX and the scan drops the other mode's trace, waterfall and automatic range.
+  useEffect(() => {
+    if (!frameRef.current || frameRef.current.source === mode) return;
+    frameRef.current = null;
+    autoRef.current = null;
+    rangeRef.current = props.current.dbRange;
+    const state = waterfallState.current;
+    state.head = 0;
+    state.filled = 0;
+    state.source = null;
+    peakTextRef.current = '';
+    drawRef.current();
+    const fall = waterfallRef.current;
+    fall?.getContext('2d')?.clearRect(0, 0, fall.width, fall.height);
+  }, [mode]);
+
+  // A stopped radio or scan, a new VFO or a retune redraws without waiting for a frame.
   useEffect(() => {
     drawRef.current();
-  }, [running, centerHz, vfo?.frequencyHz, vfo?.bandwidthHz, fallbackView?.startHz, fallbackView?.stopHz]);
+  }, [live, mode, centerHz, vfo?.frequencyHz, vfo?.bandwidthHz, fallbackView?.startHz, fallbackView?.stopHz]);
 
   // A new dB range (or Auto) recolours the trace and the whole waterfall at once.
   const manualMin = dbRange?.min;
@@ -384,7 +448,11 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
     const point = pointerX(event);
     if (!axis || !point) return;
     const hz = freqAtX(point.x, axis.startHz, axis.stopHz, point.width);
-    if (hz !== null) onTune(snapHz(hz));
+    if (hz === null) return;
+    // A scan bin is wide: take the strongest one next to the click.
+    const frame = frameRef.current;
+    const picked = props.current.mode === 'sweep' && frame?.source === 'sweep' ? scanPick(frame.bins, frame.startHz, frame.stopHz, hz) : null;
+    onTune(snapHz(picked ?? hz));
   };
 
   const onPointerMove = (event: ReactPointerEvent<HTMLElement>) => {
@@ -404,7 +472,8 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
     const { x, width } = point;
     const frame = frameRef.current;
     const db = frame ? binAt(frame.bins, frame.startHz, frame.stopHz, hz) : null;
-    hover.textContent = props.current.t('spectrum.hover', { freq: formatMhz(hz, 3), db: formatDb(db, 1) });
+    const digits = readoutDigits(props.current.mode, axis, frame?.binCount ?? 512);
+    hover.textContent = props.current.t('spectrum.hover', { freq: formatMhz(hz, digits), db: formatDb(db, 1) });
     hover.style.left = `${Math.min(100, Math.max(0, (x / width) * 100)).toFixed(1)}%`;
     hover.dataset.side = x > width / 2 ? 'left' : 'right';
     hover.hidden = false;
@@ -420,9 +489,13 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
     if (!direction || event.altKey || event.ctrlKey || event.metaKey) return;
     event.preventDefault();
     // A held key steps from the tuning shown after the previous step, not from the last status.
-    const from = props.current.tuneHz ?? (() => { const axis = view(); return axis ? (axis.startHz + axis.stopHz) / 2 : null; })();
+    const axis = view();
+    const from = props.current.tuneHz ?? (axis ? (axis.startHz + axis.stopHz) / 2 : null);
     if (from === null) return;
-    const next = snapHz(from + direction * (event.shiftKey ? KEY_STEP_LARGE_HZ : KEY_STEP_HZ));
+    // On a scan the step follows its span (1/200 of it, at least 10 kHz).
+    const step = props.current.mode === 'sweep' && axis ? keyStepHz(axis.stopHz - axis.startHz) : KEY_STEP_HZ;
+    const large = props.current.mode === 'sweep' ? step * 10 : KEY_STEP_LARGE_HZ;
+    const next = snapHz(from + direction * (event.shiftKey ? large : step));
     // The next repeat may come before the dock re-renders with this value.
     props.current = { ...props.current, tuneHz: next };
     onTune(next);
@@ -438,13 +511,13 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
         <span className="ov-spec-peak" ref={peakRef} />
       </div>
       {notice ? <div className="ov-spec-notice" role="status">{notice}</div> : null}
-      <div className={`ov-spec-trace${running ? '' : ' is-stopped'}`} {...pointerHandlers}>
+      <div className={`ov-spec-trace${live ? '' : ' is-stopped'}`} {...pointerHandlers}>
         <canvas
           ref={traceRef}
           className="ov-spec-canvas"
           tabIndex={0}
           role="slider"
-          aria-label={t('spectrum.canvasAria')}
+          aria-label={t(mode === 'sweep' ? 'spectrum.canvasAriaSweep' : 'spectrum.canvasAria')}
           aria-valuemin={1}
           aria-valuemax={6000}
           aria-valuenow={tuneHz === null ? undefined : Number((tuneHz / 1e6).toFixed(3))}
@@ -455,10 +528,12 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
         <span className="ov-spec-label is-bottom" ref={bottomLabelRef} aria-hidden="true" />
         <span className="ov-spec-vfo" ref={vfoLabelRef} aria-hidden="true" hidden>VFO</span>
         <span className="ov-spec-hover" ref={hoverRef} aria-hidden="true" hidden />
-        {!running ? <div className="ov-spec-overlay">{overlay}</div> : null}
+        {!live ? <div className="ov-spec-overlay">{overlay}</div> : null}
       </div>
       <div className="ov-spec-ticks" ref={ticksRef} aria-hidden="true">
-        {Array.from({ length: TICK_COUNT }, (_value, index) => <span key={index}>{fallbackView ? ticks(fallbackView.startHz, fallbackView.stopHz, TICK_COUNT)[index]?.label ?? '—' : '—'}</span>)}
+        {Array.from({ length: TICK_COUNT }, (_value, index) => (
+          <span key={index}>{fallbackView ? ticks(fallbackView.startHz, fallbackView.stopHz, TICK_COUNT, tickDigits(mode, fallbackView, TICK_COUNT))[index]?.label ?? '—' : '—'}</span>
+        ))}
       </div>
       <canvas ref={waterfallRef} className="ov-spec-waterfall" aria-hidden="true" {...pointerHandlers} />
     </div>

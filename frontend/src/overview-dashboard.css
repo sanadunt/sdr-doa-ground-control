@@ -224,6 +224,10 @@
 .ov-spec-settings-toggle { gap: 5px; padding: 0 10px; }
 /* Taken by the RX|Spektrum mode switch and the Penanda toggle, after the chip. */
 .ov-spec-head > .ov-spec-mode, .ov-spec-head > .ov-spec-mark { flex: none; }
+.ov-spec-mode button { padding: 0 10px; }
+/* The scan range in MHz (up to 1 kHz) and the resolution segment in the Atur column. */
+.ov-mhz-input { width: 84px; }
+.ov-spec-settings .ov-spec-res button { min-width: 84px; }
 .ov-spec-settings > .ov-spec-narrow { display: none; }
 @container ov-spec (max-width: 1399px) {
   .ov-spec-head .ov-spec-wide { display: none; }

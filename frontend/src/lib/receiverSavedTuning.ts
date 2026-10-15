@@ -37,8 +37,8 @@ function defaultStorage(): StorageLike | null {
   }
 }
 
-/** The saved centre (MHz in the entry) in Hz, or null when it is missing, malformed or out of range. */
-export function savedReceiverTuning(storage: StorageLike | null = defaultStorage()): SavedReceiverTuning | null {
+/** The SDRSetting entry as an object, or null when it is missing, too large or malformed. */
+function savedSetting(storage: StorageLike | null): Record<string, unknown> | null {
   if (!storage) return null;
   let raw: string | null;
   try {
@@ -47,13 +47,25 @@ export function savedReceiverTuning(storage: StorageLike | null = defaultStorage
     return null;
   }
   if (typeof raw !== 'string' || !raw || raw.length > RECEIVER_SETTING_MAX_CHARS) return null;
-  let setting: unknown;
   try {
-    setting = JSON.parse(raw);
+    const setting: unknown = JSON.parse(raw);
+    return isRecord(setting) ? setting : null;
   } catch {
     return null;
   }
-  if (!isRecord(setting) || !isRecord(setting.radio)) return null;
+}
+
+/** The saved Freq Shift in Hz (MHz in the entry, displayed = SDR + shift); 0 when the entry has none. */
+export function savedFrequencyShiftHz(storage: StorageLike | null = defaultStorage()): number {
+  const setting = savedSetting(storage);
+  const shift = setting && isRecord(setting.radio) ? setting.radio.frequencyShift : undefined;
+  return typeof shift === 'number' && Number.isFinite(shift) && Math.abs(shift) <= 100_000 ? Math.round(shift * 1e6) : 0;
+}
+
+/** The saved centre (MHz in the entry) in Hz, or null when it is missing, malformed or out of range. */
+export function savedReceiverTuning(storage: StorageLike | null = defaultStorage()): SavedReceiverTuning | null {
+  const setting = savedSetting(storage);
+  if (!setting || !isRecord(setting.radio)) return null;
   const centerHz = mhzToTuneHz(setting.radio.centerFreq);
   if (centerHz === null) return null;
   const vfos = Array.isArray(setting.vfos) ? setting.vfos : [];

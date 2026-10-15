@@ -6,19 +6,22 @@ import type { OverviewPanels } from '../../lib/overviewPanels';
 import type { ConfigPatchChanges } from '../../lib/controlDraft';
 import { consoleRequestsMockSdr, createReceiverBridge } from '../../lib/receiverBridge';
 import type { BridgeResult, ReceiverBridge } from '../../lib/receiverBridge';
-import { SUBSCRIBE_LIMITS, isListenMode } from '../../lib/receiverBridgeProtocol';
-import type { BridgeCommand, GainKind, ListenMode, ResultCode } from '../../lib/receiverBridgeProtocol';
+import { SUBSCRIBE_LIMITS, SWEEP_SPAN_LIMITS, inTuneRange, isListenMode } from '../../lib/receiverBridgeProtocol';
+import type { BridgeCommand, GainKind, ListenMode, ResultCode, SweepFftSize } from '../../lib/receiverBridgeProtocol';
 import { nodeFrequencies } from '../../lib/nodeFrequency';
 import type { NodeFrequencies } from '../../lib/nodeFrequency';
 import { LISTEN_MODE_OPTIONS, followNodeStore, listenModeStore } from '../../lib/listenPrefs';
 import { displayedTuning, settleLocalTune } from '../../lib/receiverSync';
 import type { LocalTune } from '../../lib/receiverSync';
 import { savedReceiverTuning } from '../../lib/receiverSavedTuning';
+import { savedReceiverSweep } from '../../lib/receiverSavedSweep';
+import { recentredRange, sweepRows } from '../../lib/sweepSettings';
+import type { SweepRange } from '../../lib/sweepSettings';
 import { fieldFor, fieldRange, inFieldRange } from '../../lib/configPatch';
-import { followMemoryAtMount, followNodeStep, formatMhz, spanAround, spectrumDockView } from '../../lib/spectrumView';
+import { followMemoryAtMount, followNodeStep, formatMhz, formatMhzTrim, scanPhaseOf, spanAround, spectrumDockView } from '../../lib/spectrumView';
 import type { DbRange, DockNotice, FollowMemory } from '../../lib/spectrumView';
 import { manualFromDrawn, spectrumDockStore } from '../../lib/spectrumDockSettings';
-import type { DbScale } from '../../lib/spectrumDockSettings';
+import type { DbScale, DockMode, SpectrumDockSettings } from '../../lib/spectrumDockSettings';
 import { formatMsps, heldValue, radioRows, settlePick } from '../../lib/radioSettings';
 import type { HeldPick } from '../../lib/radioSettings';
 import { useI18n } from '../../lib/i18n';
@@ -52,8 +55,10 @@ export interface SpectrumDockProps {
   receiverBridge?: ReceiverBridge;
 }
 
-/** Codes a successful start makes obsolete. */
-const START_NOTICES: ReadonlySet<DockNotice> = new Set(['NO_WEBUSB', 'NEEDS_PAIRING', 'NEEDS_DEVICE_CHOICE', 'CONNECT_FAILED', 'MOCK_UNAVAILABLE', 'TIMEOUT', 'RX_NOT_RUNNING']);
+/** Codes a successful start (RX or scan) makes obsolete. */
+const START_NOTICES: ReadonlySet<DockNotice> = new Set([
+  'NO_WEBUSB', 'NEEDS_PAIRING', 'NEEDS_DEVICE_CHOICE', 'CONNECT_FAILED', 'MOCK_UNAVAILABLE', 'TIMEOUT', 'RX_NOT_RUNNING', 'SWEEP_FAILED', 'SWEEP_UNSUPPORTED',
+]);
 /** Start results that leave a click-to-tune frequency unapplied; any other start tuned before it connected. */
 const START_KEEPS_PENDING: ReadonlySet<ResultCode> = new Set(['SWEEP_BUSY', 'OUT_OF_RANGE', 'NOT_READY', 'INVALID_COMMAND', 'TIMEOUT']);
 const SPAN_HZ = SUBSCRIBE_LIMITS.spanDefaultHz;
@@ -72,6 +77,13 @@ interface Notice {
 
 /** A sample rate change on its way: 'restart' while it restarts a running RX. */
 type RadioPending = 'restart' | 'set' | null;
+
+/** The Receiver's Graph min./max. before it reports one. */
+const SWEEP_DISPLAY_DEFAULT = { minDb: -60, maxDb: 0 } as const;
+
+function setDockSettings(patch: Partial<SpectrumDockSettings>): void {
+  spectrumDockStore.set({ ...spectrumDockStore.get(), ...patch });
+}
 
 /**
  * Height the spectrum section needs: its header, then the body's padding,
@@ -118,12 +130,21 @@ function spectrumNeedPx(section: HTMLElement): number | null {
  * Follow-node and the mode live in page-wide stores, because App also changes
  * them after a Receiver-page change (lib/receiverSync.ts).
  *
+ * The RX|Spektrum switch picks what the dock shows and Mulai starts: RX (the
+ * 2 MHz around the RX centre) or the Receiver's wide scan over its own range.
+ * The dock shows the mode that runs, also a scan started on the Receiver page;
+ * the stored choice applies while nothing runs. In Spektrum mode Mulai and
+ * Berhenti start and stop the scan, a click sets the RX centre and VFO for the
+ * next RX (the scan keeps running), and Dengar stops the scan and starts RX.
+ *
  * The header keeps one row on a wide dock; on a narrow one follow-node, the
  * mode and "Kirim ke RDF-SDR" move into the "Atur" column (CSS shows one of
- * the two copies). The column also holds the RX dB scale, shared with the
- * Receiver's Dengar tab through spectrumDockStore and App's display sync, and
- * the Listener's sample rate, LNA, VGA and +14 dB amp, which the frame owns:
- * the dock shows its status and holds a pick until the frame reports it.
+ * the two copies). In RX mode the column holds the RX dB scale, shared with
+ * the Receiver's Dengar tab through spectrumDockStore and App's display sync,
+ * and the Listener's sample rate, LNA, VGA and +14 dB amp; in Spektrum mode
+ * the scan's dB scale (Manual is the Receiver's Graph min./max.), range,
+ * resolution and gains, read-only while a scan runs. The frame owns all of
+ * them: the dock shows its status and holds a pick until the frame reports it.
  */
 export function SpectrumDock({
   snapshot,
@@ -153,6 +174,13 @@ export function SpectrumDock({
   const [lnaPick, setLnaPick] = useState<HeldPick<number> | null>(null);
   const [vgaPick, setVgaPick] = useState<HeldPick<number> | null>(null);
   const [ampPick, setAmpPick] = useState<HeldPick<boolean> | null>(null);
+  // The scan's settings and Graph min./max., held the same way.
+  const [rangePick, setRangePick] = useState<HeldPick<SweepRange> | null>(null);
+  const [fftPick, setFftPick] = useState<HeldPick<SweepFftSize> | null>(null);
+  const [sweepLnaPick, setSweepLnaPick] = useState<HeldPick<number> | null>(null);
+  const [sweepVgaPick, setSweepVgaPick] = useState<HeldPick<number> | null>(null);
+  const [sweepAmpPick, setSweepAmpPick] = useState<HeldPick<boolean> | null>(null);
+  const [sweepDbPick, setSweepDbPick] = useState<HeldPick<{ minDb: number; maxDb: number }> | null>(null);
   const [radioPending, setRadioPending] = useState<RadioPending>(null);
   // A dock tune shown until the frame reports it (lib/receiverSync.ts displayedTuning).
   const [localTune, setLocalTune] = useState<LocalTune | null>(null);
@@ -184,8 +212,11 @@ export function SpectrumDock({
   const nodeVfo = fresh?.vfoHz ?? null;
   const node = useMemo<NodeFrequencies | null>(() => (nodeCenter === null || nodeVfo === null ? null : { centerHz: nodeCenter, vfoHz: nodeVfo }), [nodeCenter, nodeVfo]);
 
-  const view = spectrumDockView({ build, phase, starting, restarting: radioPending === 'restart', status: live, notice: notice?.code ?? null });
-  const running = view.running;
+  const view = spectrumDockView({ build, phase, starting, restarting: radioPending === 'restart', status: live, notice: notice?.code ?? null, storedMode: dockSettings.mode });
+  const dockMode = view.mode;
+  const running = view.rxRunning;
+  const scanPhase = scanPhaseOf(live);
+  const scanBusy = scanPhase !== 'idle';
   const listening = running && live?.vfo?.enabled === true;
   // The VFO is on but the browser has not let its audio play yet.
   const audioHeld = notice?.code === 'AUDIO_BLOCKED' || live?.audio === 'suspended';
@@ -265,10 +296,20 @@ export function SpectrumDock({
     };
   }, [bridge]);
 
-  // A running receiver makes the start errors obsolete.
+  // A running receiver or scan makes the start errors obsolete.
+  const drawnLive = view.live;
   useEffect(() => {
-    if (running) setNotice((current) => (current && START_NOTICES.has(current.code) ? null : current));
-  }, [running]);
+    if (drawnLive) setNotice((current) => (current && START_NOTICES.has(current.code) ? null : current));
+  }, [drawnLive]);
+
+  // The stored mode follows what runs, also a scan or RX started on the Receiver page, so the dock
+  // keeps showing that mode once it stops.
+  const runningMode: DockMode | null = live?.busy === 'sweep' ? 'sweep' : live?.running ? 'rx' : null;
+  useEffect(() => {
+    if (runningMode !== null && spectrumDockStore.get().mode !== runningMode) setDockSettings({ mode: runningMode });
+  }, [runningMode]);
+  // Each mode has its own automatic range.
+  useEffect(() => { setAutoRange(null); }, [dockMode]);
 
   const report = (result: BridgeResult): void => {
     if (!mountedRef.current) return;
@@ -323,6 +364,7 @@ export function SpectrumDock({
   const start = (listen: boolean) => {
     // Mount the frame and post the command inside this click, so the frame can use the gesture.
     onRequestReceiver();
+    if (spectrumDockStore.get().mode !== 'rx') setDockSettings({ mode: 'rx' });
     setStarting(true);
     setNotice(null);
     const startMode = shownMode;
@@ -367,7 +409,58 @@ export function SpectrumDock({
     });
   };
 
+  /** Starts the Receiver's wide scan over its own range; confirmRecording after the operator agreed to end a recording. */
+  const startScan = (confirmRecording: boolean) => {
+    onRequestReceiver();
+    setStarting(true);
+    setNotice(null);
+    if (spectrumDockStore.get().mode !== 'sweep') setDockSettings({ mode: 'sweep' });
+    const mock = consoleRequestsMockSdr(window.location);
+    const command: BridgeCommand = confirmRecording ? { type: 'console:sweep-start', mock, confirmRecording: true } : { type: 'console:sweep-start', mock };
+    void bridge.send(command).then((result) => {
+      if (!mountedRef.current) return;
+      setStarting(false);
+      report(result);
+      // A scan that did not start over a running RX leaves the dock on RX.
+      if (!result.ok && bridge.getState().status?.running === true) setDockSettings({ mode: 'rx' });
+    });
+  };
+
+  const stopScan = () => {
+    setNotice(null);
+    void bridge.send({ type: 'console:sweep-stop', resumeRx: false }).then(report);
+  };
+
+  /** RX|Spektrum: with nothing running it only picks what Mulai starts; otherwise it stops one and starts the other. */
+  const chooseMode = (next: DockMode) => {
+    if (next === dockMode) return;
+    if (next === 'sweep') {
+      if (!running) {
+        setDockSettings({ mode: 'sweep' });
+        return;
+      }
+      // The scan stops RX, which ends a VFO audio recording armed on the Receiver page: ask first.
+      const endsRecording = live?.recording === true;
+      if (endsRecording && !window.confirm(t('spectrum.sweepRecordingConfirm'))) return;
+      startScan(endsRecording);
+      return;
+    }
+    if (!scanBusy) {
+      setDockSettings({ mode: 'rx' });
+      return;
+    }
+    // The frame runs these one after another: the scan stops before RX starts.
+    void bridge.send({ type: 'console:sweep-stop', resumeRx: false }).then(reportFailure);
+    start(false);
+  };
+
   const toggleListen = () => {
+    // Spektrum mode: the radio cannot scan and listen at once, so Dengar stops the scan and starts RX.
+    if (dockMode === 'sweep') {
+      if (scanBusy) void bridge.send({ type: 'console:sweep-stop', resumeRx: false }).then(reportFailure);
+      start(true);
+      return;
+    }
     // A VFO that is on while the browser holds the audio back: this click is the
     // gesture the AudioContext needs, so ask again instead of turning it off.
     if (listening && audioHeld) {
@@ -438,9 +531,14 @@ export function SpectrumDock({
     sendHeld(setAmpPick, enabled, { type: 'console:gains', amp: enabled });
   };
 
-  // Click-to-tune sets the RX centre and the listen VFO and stops following the node.
+  // Click-to-tune sets the RX centre and the listen VFO and stops following the node. On a scan
+  // it sets them for the next RX (the scan keeps running); RX cannot tune above TUNE_LIMITS.
   const tune = (hz: number) => {
     if (!Number.isFinite(hz)) return;
+    if (!inTuneRange(hz)) {
+      setNotice({ code: 'OUT_OF_RANGE' });
+      return;
+    }
     setFollowNode(false);
     if (phase === 'idle' && !starting) {
       // No frame yet: the next Mulai tunes here.
@@ -462,7 +560,7 @@ export function SpectrumDock({
   };
 
   // A dock change of the dB scale is pending until the Receiver has it (App sends it).
-  const setRxDb = (next: DbScale) => spectrumDockStore.set({ rxDb: next, rxDbPending: true });
+  const setRxDb = (next: DbScale) => setDockSettings({ rxDb: next, rxDbPending: true });
   const chooseDbAuto = () => {
     if (!rxDb.auto) setRxDb({ ...rxDb, auto: true });
   };
@@ -470,8 +568,45 @@ export function SpectrumDock({
   const chooseDbManual = () => {
     if (rxDb.auto) setRxDb(manualFromDrawn(canvasHandle.current?.currentRange() ?? null, rxDb));
   };
-  const manualMin = rxDb.auto ? null : rxDb.minDb;
-  const manualMax = rxDb.auto ? null : rxDb.maxDb;
+
+  // The scan: its range and settings as the Receiver reports them (a held pick first), or as it saved
+  // them before the frame is mounted.
+  const savedSweep = useMemo(() => (idle ? savedReceiverSweep() : null), [idle]);
+  const liveSweep = live?.sweep ?? null;
+  const sweepRange: SweepRange | null = heldValue(rangePick, bridgeState.status)
+    ?? (liveSweep ? { startHz: liveSweep.startHz, stopHz: liveSweep.stopHz } : savedSweep ? { startHz: savedSweep.startHz, stopHz: savedSweep.stopHz } : null);
+  const sweepFft = heldValue(fftPick, bridgeState.status) ?? liveSweep?.fftSize ?? savedSweep?.fftSize ?? null;
+  const sweepLna = heldValue(sweepLnaPick, bridgeState.status) ?? (liveSweep ? liveSweep.lnaDb : savedSweep?.lnaDb ?? null);
+  const sweepVga = heldValue(sweepVgaPick, bridgeState.status) ?? (liveSweep ? liveSweep.vgaDb : savedSweep?.vgaDb ?? null);
+  const sweepAmp = heldValue(sweepAmpPick, bridgeState.status) ?? (liveSweep ? liveSweep.amp : savedSweep?.amp ?? null);
+  // The scan's dB scale: Auto is the dock's own; Manual is the Receiver's Graph min./max., seeded from it.
+  const sweepDisplay = heldValue(sweepDbPick, bridgeState.status)
+    ?? (liveSweep ? { minDb: liveSweep.displayMinDb, maxDb: liveSweep.displayMaxDb } : savedSweep ? { minDb: savedSweep.displayMinDb, maxDb: savedSweep.displayMaxDb } : SWEEP_DISPLAY_DEFAULT);
+  const sweepDb: DbScale = { auto: dockSettings.sweepAuto, minDb: sweepDisplay.minDb, maxDb: sweepDisplay.maxDb };
+  // Switching to Manual sends nothing: the Receiver's own range applies until a limit is typed.
+  const chooseSweepAuto = (auto: boolean) => { if (dockSettings.sweepAuto !== auto) setDockSettings({ sweepAuto: auto }); };
+  const sendSweepDisplay = (range: { minDb: number; maxDb: number }) => {
+    chooseSweepAuto(false);
+    sendHeld(setSweepDbPick, range, { type: 'console:sweep-display', minDb: range.minDb, maxDb: range.maxDb });
+  };
+  const changeSweepRange = (range: SweepRange) => {
+    sendHeld(setRangePick, range, { type: 'console:sweep-config', startHz: range.startHz, stopHz: range.stopHz });
+  };
+  const changeSweepFft = (fftSize: SweepFftSize) => {
+    sendHeld(setFftPick, fftSize, { type: 'console:sweep-config', fftSize });
+  };
+  const changeSweepGain = (kind: GainKind, db: number) => {
+    if (!Number.isFinite(db) || db === (kind === 'lna' ? sweepLna : sweepVga)) return;
+    if (kind === 'lna') sendHeld(setSweepLnaPick, db, { type: 'console:sweep-config', lnaDb: db });
+    else sendHeld(setSweepVgaPick, db, { type: 'console:sweep-config', vgaDb: db });
+  };
+  const changeSweepAmp = (enabled: boolean) => {
+    sendHeld(setSweepAmpPick, enabled, { type: 'console:sweep-config', amp: enabled });
+  };
+
+  const shownDb = dockMode === 'sweep' ? sweepDb : rxDb;
+  const manualMin = shownDb.auto ? null : shownDb.minDb;
+  const manualMax = shownDb.auto ? null : shownDb.maxDb;
   const dbRange = useMemo(() => (manualMin === null || manualMax === null ? null : { min: manualMin, max: manualMax }), [manualMin, manualMax]);
 
   // "Kirim ke RDF-SDR": the RX centre and listen VFO as a Kontrol draft.
@@ -503,13 +638,24 @@ export function SpectrumDock({
   const vfoBandwidth = live?.vfo?.bandwidthHz ?? 0;
   const vfoBand = useMemo(() => (vfoHz === null ? null : { frequencyHz: vfoHz, bandwidthHz: vfoBandwidth }), [vfoHz, vfoBandwidth]);
   const gainText = (value: number | null | undefined) => (typeof value === 'number' ? String(Number(value.toFixed(1))) : '—');
-  const info = t('spectrum.info', {
-    center: formatMhz(axisCenter, 3),
-    span: (spanHz / 1e6).toFixed(1),
-    rate: formatMsps(shownRate),
-    lna: gainText(shownLna),
-    vga: gainText(shownVga),
-  }) + (shownAmp === true ? ` · ${t('spectrum.amp')}` : '');
+  const sweepStart = sweepRange?.startHz;
+  const sweepStop = sweepRange?.stopHz;
+  const sweepView = useMemo(() => (sweepStart === undefined || sweepStop === undefined ? null : { startHz: sweepStart, stopHz: sweepStop }), [sweepStart, sweepStop]);
+  const info = dockMode === 'sweep'
+    ? t('spectrum.infoSweep', {
+      start: formatMhzTrim(sweepStart),
+      stop: formatMhzTrim(sweepStop),
+      rbw: sweepFft === null ? '—' : (SWEEP_SPAN_LIMITS.sampleRateHz / sweepFft / 1e3).toFixed(2),
+      lna: gainText(sweepLna),
+      vga: gainText(sweepVga),
+    }) + (sweepAmp === true ? ` · ${t('spectrum.amp')}` : '')
+    : t('spectrum.info', {
+      center: formatMhz(axisCenter, 3),
+      span: (spanHz / 1e6).toFixed(1),
+      rate: formatMsps(shownRate),
+      lna: gainText(shownLna),
+      vga: gainText(shownVga),
+    }) + (shownAmp === true ? ` · ${t('spectrum.amp')}` : '');
 
   const radio = radioRows({
     live,
@@ -517,6 +663,20 @@ export function SpectrumDock({
     ratePending: radioPending !== null,
     starting,
   });
+  const sweep = sweepRows({
+    live,
+    shown: { range: sweepRange, fftSize: sweepFft, lnaDb: sweepLna, vgaDb: sweepVga, amp: sweepAmp },
+    saved: savedSweep,
+    starting,
+  });
+  // "Pusatkan ke RX": the scan's span around the RX centre the dock shows.
+  const centerSweep = sweepRange && sweepFft !== null && rxCenterHz !== null
+    ? () => {
+      const next = recentredRange(sweepRange, rxCenterHz, sweep.shiftHz, sweepFft);
+      if (next) changeSweepRange(next);
+      else setNotice({ code: 'OUT_OF_RANGE' });
+    }
+    : null;
 
   const openReceiverButton = (
     <button className="ov-button ov-spec-inline-button" type="button" onClick={() => onNavigate('receiver')}>
@@ -529,7 +689,7 @@ export function SpectrumDock({
   // The Receiver's own notice after a dock stop, such as the ended recording (already localized there).
   const frameNoticeLine = frameNotice?.text ? <span className="ov-spec-message tone-warn">{frameNotice.text}</span> : null;
   let lineNotice: ReactNode = frameNoticeLine;
-  if (running && (messageText || followHint)) {
+  if (view.live && (messageText || followHint)) {
     lineNotice = (
       <>
         {messageText ? <span className={`ov-spec-message tone-${view.tone === 'good' ? 'warn' : view.tone}`}>{messageText}{frameText ? ` (${frameText})` : ''}</span> : null}
@@ -538,18 +698,22 @@ export function SpectrumDock({
         {view.openReceiver ? openReceiverButton : null}
       </>
     );
-  } else if (!running && followHint && !view.message) {
+  } else if (!view.live && followHint && !view.message) {
     lineNotice = <><span className="ov-spec-message tone-neutral">{followHint}</span>{frameNoticeLine}</>;
   }
   const overlay = (
     <>
-      <span>{messageText ?? t('spectrum.stopped')}{frameText ? ` (${frameText})` : ''}</span>
+      <span>{messageText ?? t(dockMode === 'sweep' ? 'spectrum.sweepStopped' : 'spectrum.stopped')}{frameText ? ` (${frameText})` : ''}</span>
       {view.openReceiver ? openReceiverButton : null}
     </>
   );
 
   const mock = live?.mock === true || (mockRequested && !live?.connected);
   const shiftHz = live?.frequencyShiftHz ?? 0;
+  // Only while the simulated scan starts or runs: the scan source stays 'simulated' until a radio that can scan connects.
+  const simulatedScan = liveSweep?.source === 'simulated' && (scanPhase === 'starting' || scanPhase === 'active');
+  const runStops = view.stoppable;
+  const modeDisabled = view.controlsDisabled || starting || radioPending !== null || scanPhase === 'stopping';
 
   return (
     <section id="panel-spectrum" className={`ov-spectrum${settingsOpen ? ' is-settings-open' : ''}`} aria-labelledby="ov-spectrum-title" ref={sectionRef}>
@@ -562,8 +726,13 @@ export function SpectrumDock({
           ? <span className="ov-tag tone-warn">MOCK</span>
           : <span className="ov-spec-source">{t('spectrum.sourceHackrf')}</span>}
         {shiftHz !== 0 ? <span className="ov-tag tone-info" title={t('spectrum.upconverterTitle', { shift: formatMhz(shiftHz, 3) })}>UPCONVERTER</span> : null}
+        {simulatedScan ? <span className="ov-tag tone-warn">SIM</span> : null}
         {live?.recording ? <span className="ov-tag tone-bad">REC</span> : null}
         <span className={`ov-chip tone-${view.tone}`}>{view.chip}</span>
+        <div className="ov-seg ov-seg-compact ov-spec-mode" role="group" aria-label={t('spectrum.modeGroup')}>
+          <button type="button" aria-pressed={dockMode === 'rx'} disabled={modeDisabled} onClick={() => chooseMode('rx')}>{t('spectrum.modeRx')}</button>
+          <button type="button" aria-pressed={dockMode === 'sweep'} disabled={modeDisabled} onClick={() => chooseMode('sweep')}>{t('spectrum.modeSweep')}</button>
+        </div>
         <span className="ov-spacer" />
         {/* Follow, mode and Dengar wrap as one group, as do Mulai/Berhenti and the Receiver link. */}
         <div className="ov-spec-group">
@@ -592,10 +761,16 @@ export function SpectrumDock({
           <button
             className="ov-button ov-spec-run"
             type="button"
-            disabled={view.controlsDisabled || ((starting || radioPending === 'restart') && !running)}
-            onClick={() => (running ? stop() : start(false))}
+            disabled={view.controlsDisabled || scanPhase === 'stopping' || ((starting || radioPending === 'restart') && !runStops)}
+            onClick={() => {
+              if (dockMode === 'sweep') {
+                if (runStops) stopScan();
+                else startScan(false);
+              } else if (runStops) stop();
+              else start(false);
+            }}
           >
-            <Icon name={running ? 'stop' : 'play'} /><span>{running ? t('spectrum.stop') : t('spectrum.start')}</span>
+            <Icon name={runStops ? 'stop' : 'play'} /><span>{runStops ? t('spectrum.stop') : t('spectrum.start')}</span>
           </button>
           <button className="ov-button ov-spec-open" type="button" aria-keyshortcuts={RECEIVER_KEY} aria-label={t('spectrum.openReceiver')} onClick={() => onNavigate('receiver')}>
             <Icon name="external" /><span className="ov-spec-open-label">{t('spectrum.openReceiver')}</span><kbd aria-hidden="true">{RECEIVER_KEY}</kbd>
@@ -608,8 +783,9 @@ export function SpectrumDock({
       <div className="ov-spec-main">
         <SpectrumCanvas
           bridge={bridge}
-          running={running}
-          fallbackView={stableFallback}
+          mode={dockMode}
+          live={view.live}
+          fallbackView={dockMode === 'sweep' ? sweepView : stableFallback}
           centerHz={axisCenter}
           vfo={vfoBand}
           info={info}
@@ -618,11 +794,12 @@ export function SpectrumDock({
           tuneHz={vfoHz}
           onTune={tune}
           dbRange={dbRange}
-          onAutoRange={settingsOpen && rxDb.auto ? onAutoRange : undefined}
+          onAutoRange={settingsOpen && shownDb.auto ? onAutoRange : undefined}
           handle={canvasHandle}
         />
         {settingsOpen ? (
           <SpectrumSettings
+            dockMode={dockMode}
             followNode={followNode}
             onFollowNode={setFollowNode}
             mode={shownMode}
@@ -630,15 +807,22 @@ export function SpectrumDock({
             sendable={sendable}
             sendTitle={sendTitle}
             onSend={sendDraft}
-            db={rxDb}
+            db={shownDb}
+            dbEditable={dockMode === 'rx' || live !== null}
             autoRange={autoRange}
-            onDbAuto={chooseDbAuto}
-            onDbManual={chooseDbManual}
-            onDbRange={(range) => setRxDb({ auto: false, ...range })}
+            onDbAuto={dockMode === 'sweep' ? () => chooseSweepAuto(true) : chooseDbAuto}
+            onDbManual={dockMode === 'sweep' ? () => chooseSweepAuto(false) : chooseDbManual}
+            onDbRange={dockMode === 'sweep' ? sendSweepDisplay : (range) => setRxDb({ auto: false, ...range })}
             radio={radio}
             onSampleRate={changeSampleRate}
             onGain={changeGain}
             onAmp={changeAmp}
+            sweep={sweep}
+            onSweepRange={changeSweepRange}
+            onSweepCenter={centerSweep}
+            onSweepFft={changeSweepFft}
+            onSweepGain={changeSweepGain}
+            onSweepAmp={changeSweepAmp}
           />
         ) : null}
       </div>

@@ -5,26 +5,41 @@ import {
   binAt,
   contentBoxX,
   dbToByte,
+  dockMode,
   followMemoryAtMount,
   followNodeStep,
   formatDb,
   formatMhz,
+  formatMhzTrim,
   freqAtX,
+  keyStepHz,
+  mhzDigits,
   noticeMessage,
   paletteLut,
   peakOf,
+  scanPhaseOf,
+  scanPick,
   snapHz,
   spanAround,
   spectrumDockView,
+  sweepAxis,
   ticks,
+  waterfallNeedsReset,
   xAtFreq,
 } from './spectrumView';
 import type { DockViewInput, FollowInput } from './spectrumView';
-import type { ReceiverStatus } from './receiverBridgeProtocol';
+import type { ReceiverStatus, StatusSweep } from './receiverBridgeProtocol';
 import { DICTIONARIES } from './i18n';
 
 const START = 432_920_000;
 const STOP = 434_920_000;
+
+function sweep(overrides: Partial<StatusSweep> = {}): StatusSweep {
+  return {
+    phase: 'idle', source: 'native', startHz: 100e6, stopHz: 1000e6, fftSize: 8192, resolutionHz: 2441.40625, lnaDb: 40, vgaDb: 20, amp: false,
+    displayMinDb: -60, displayMaxDb: 0, view: 'average', ...overrides,
+  };
+}
 
 function status(overrides: Partial<ReceiverStatus> = {}): ReceiverStatus {
   return {
@@ -188,7 +203,9 @@ describe('spectrum dock state table', () => {
   });
 
   it('shows RX OFF before the frame is mounted', () => {
-    expect(spectrumDockView(input({ phase: 'idle', status: null }))).toMatchObject({ chip: 'RX OFF', message: null, running: false });
+    expect(spectrumDockView(input({ phase: 'idle', status: null }))).toMatchObject({ chip: 'RX OFF', message: null, mode: 'rx', rxRunning: false, live: false, stoppable: false });
+    // The stored Spektrum choice: Mulai starts the scan.
+    expect(spectrumDockView(input({ phase: 'idle', status: null, storedMode: 'sweep' }))).toMatchObject({ chip: 'SCAN OFF', mode: 'sweep', live: false });
   });
 
   it('shows connecting while the frame loads or a start runs', () => {
@@ -198,9 +215,9 @@ describe('spectrum dock state table', () => {
 
   it('shows an RX restart for a sample rate change instead of RX stopped', () => {
     const stopped = status({ running: false });
-    expect(spectrumDockView(input({ status: stopped, restarting: true }))).toMatchObject({ chip: '…', tone: 'info', message: 'spectrum.restarting', running: false, controlsDisabled: false });
+    expect(spectrumDockView(input({ status: stopped, restarting: true }))).toMatchObject({ chip: '…', tone: 'info', message: 'spectrum.restarting', rxRunning: false, controlsDisabled: false });
     // Running again.
-    expect(spectrumDockView(input({ restarting: true }))).toMatchObject({ chip: 'RX', running: true });
+    expect(spectrumDockView(input({ restarting: true }))).toMatchObject({ chip: 'RX', rxRunning: true });
     expect(spectrumDockView(input({ status: stopped }))).toMatchObject({ chip: 'RX OFF' });
   });
 
@@ -208,8 +225,42 @@ describe('spectrum dock state table', () => {
     expect(spectrumDockView(input({ phase: 'unresponsive', status: null }))).toMatchObject({ chip: 'NO BRIDGE', message: 'spectrum.unresponsive', openReceiver: true });
   });
 
-  it('shows BUSY while the Receiver scans and offers the Receiver page', () => {
-    expect(spectrumDockView(input({ status: status({ busy: 'sweep', running: false }) }))).toMatchObject({ chip: 'BUSY', message: 'spectrum.sweepBusy', openReceiver: true, controlsDisabled: true });
+  it('shows BUSY only while the Receiver listens to a scan candidate, and offers the Receiver page', () => {
+    expect(spectrumDockView(input({ status: status({ busy: 'scan-listen', running: true }) }))).toMatchObject({
+      chip: 'BUSY', message: 'spectrum.sweepBusy', openReceiver: true, controlsDisabled: true, mode: 'rx', rxRunning: true, live: true, stoppable: false,
+    });
+  });
+
+  it('shows a running scan as SCAN with live frames and no stopped overlay, also one the Receiver page started', () => {
+    const scanning = status({ busy: 'sweep', running: false, sweep: sweep({ phase: 'active' }) });
+    for (const storedMode of ['rx', 'sweep'] as const) {
+      expect(spectrumDockView(input({ status: scanning, storedMode }))).toMatchObject({
+        chip: 'SCAN', tone: 'good', message: null, mode: 'sweep', rxRunning: false, live: true, stoppable: true, controlsDisabled: false,
+      });
+    }
+    // A refused tune keeps its notice under the live scan.
+    expect(spectrumDockView(input({ status: scanning, notice: 'OUT_OF_RANGE' }))).toMatchObject({ chip: 'SCAN', message: 'spectrum.outOfRange', live: true });
+    // A busy 'sweep' from a frame without a scan state still counts as a running scan.
+    expect(spectrumDockView(input({ status: status({ busy: 'sweep', running: false, sweep: null }) }))).toMatchObject({ chip: 'SCAN', live: true });
+  });
+
+  it('shows … while the scan starts or stops; a starting scan can be stopped', () => {
+    expect(spectrumDockView(input({ status: status({ busy: 'sweep', running: true, sweep: sweep({ phase: 'starting' }) }) }))).toMatchObject({
+      chip: '…', tone: 'info', message: 'spectrum.sweepStarting', mode: 'sweep', live: false, stoppable: true,
+    });
+    expect(spectrumDockView(input({ status: status({ busy: 'sweep', running: false, sweep: sweep({ phase: 'stopping' }) }) }))).toMatchObject({
+      chip: '…', message: 'spectrum.sweepStopping', mode: 'sweep', live: false, stoppable: false,
+    });
+  });
+
+  it('shows SCAN OFF in Spektrum mode with nothing running, with the reason a scan did not start', () => {
+    const idle = status({ running: false, sweep: sweep({ phase: 'idle' }) });
+    expect(spectrumDockView(input({ status: idle, storedMode: 'sweep' }))).toMatchObject({ chip: 'SCAN OFF', tone: 'neutral', message: null, mode: 'sweep', live: false, stoppable: false });
+    expect(spectrumDockView(input({ status: idle, storedMode: 'sweep', notice: 'SWEEP_FAILED' }))).toMatchObject({ chip: 'SCAN OFF', tone: 'bad', message: 'spectrum.sweepFailed', openReceiver: true });
+    expect(spectrumDockView(input({ status: idle, storedMode: 'sweep', notice: 'SWEEP_UNSUPPORTED' }))).toMatchObject({ chip: 'SCAN OFF', tone: 'warn', message: 'spectrum.sweepUnsupported', openReceiver: true });
+    expect(spectrumDockView(input({ status: idle, storedMode: 'sweep', starting: true }))).toMatchObject({ chip: '…', message: 'spectrum.connecting', mode: 'sweep' });
+    // RX running wins over the stored Spektrum choice.
+    expect(spectrumDockView(input({ storedMode: 'sweep' }))).toMatchObject({ chip: 'RX', mode: 'rx', live: true });
   });
 
   it('names WebUSB and pairing problems with the Receiver page as the way out', () => {
@@ -219,7 +270,7 @@ describe('spectrum dock state table', () => {
   });
 
   it('shows RX while running, with an audio-blocked hint when there is one', () => {
-    expect(spectrumDockView(input())).toMatchObject({ chip: 'RX', tone: 'good', message: null, running: true });
+    expect(spectrumDockView(input())).toMatchObject({ chip: 'RX', tone: 'good', message: null, mode: 'rx', rxRunning: true, live: true, stoppable: true });
     expect(spectrumDockView(input({ notice: 'AUDIO_BLOCKED' }))).toMatchObject({ chip: 'RX', message: 'spectrum.audioBlocked' });
   });
 
@@ -229,9 +280,82 @@ describe('spectrum dock state table', () => {
   });
 
   it('has a message for every notice code', () => {
-    for (const code of ['NOT_READY', 'INVALID_COMMAND', 'RX_NOT_RUNNING', 'OUT_OF_RANGE', 'TIMEOUT', 'MOCK_UNAVAILABLE', 'CONNECT_FAILED', 'RECORDING_ACTIVE'] as const) {
+    for (const code of ['NOT_READY', 'INVALID_COMMAND', 'RX_NOT_RUNNING', 'OUT_OF_RANGE', 'TIMEOUT', 'MOCK_UNAVAILABLE', 'CONNECT_FAILED', 'RECORDING_ACTIVE', 'SWEEP_UNSUPPORTED', 'SWEEP_FAILED'] as const) {
       expect(DICTIONARIES.en[noticeMessage(code)], code).toBeTruthy();
     }
     expect(noticeMessage('RECORDING_ACTIVE')).toBe('spectrum.recordingActive');
+    expect(noticeMessage('SWEEP_FAILED')).toBe('spectrum.sweepFailed');
+    expect(noticeMessage('SWEEP_UNSUPPORTED')).toBe('spectrum.sweepUnsupported');
+  });
+});
+
+describe('spectrum dock mode and scan helpers', () => {
+  it('shows the mode that runs, else the stored one', () => {
+    expect(dockMode(null, 'rx')).toBe('rx');
+    expect(dockMode(null, 'sweep')).toBe('sweep');
+    expect(dockMode(status({ running: true }), 'sweep')).toBe('rx');
+    expect(dockMode(status({ busy: 'sweep', running: true }), 'rx')).toBe('sweep');
+    expect(dockMode(status({ busy: 'scan-listen', running: true }), 'sweep')).toBe('rx');
+    expect(dockMode(status({ running: false }), 'sweep')).toBe('sweep');
+    expect(scanPhaseOf(null)).toBe('idle');
+    expect(scanPhaseOf(status({ busy: 'none', sweep: sweep({ phase: 'active' }) }))).toBe('idle');
+    expect(scanPhaseOf(status({ busy: 'sweep', sweep: sweep({ phase: 'stopping' }) }))).toBe('stopping');
+    expect(scanPhaseOf(status({ busy: 'sweep', sweep: sweep({ phase: 'idle' }) }))).toBe('active');
+  });
+
+  it('reads MHz with the decimals a step can tell apart', () => {
+    expect(mhzDigits(1_757_812)).toBe(0);
+    expect(mhzDigits(1_000_000)).toBe(0);
+    expect(mhzDigits(500_000)).toBe(1);
+    expect(mhzDigits(100_000)).toBe(1);
+    expect(mhzDigits(24_000)).toBe(2);
+    expect(mhzDigits(2_441)).toBe(3);
+    expect(mhzDigits(1)).toBe(3);
+    expect(mhzDigits(Number.NaN)).toBe(3);
+    expect(ticks(100e6, 1000e6, 5, mhzDigits(225e6)).map((tick) => tick.label)).toEqual(['100', '325', '550', '775', '1000']);
+    expect(ticks(433e6, 435e6, 5, 1).map((tick) => tick.label)).toEqual(['433.0', '433.5', '434.0', '434.5', '435.0']);
+    expect(formatMhzTrim(100e6)).toBe('100');
+    expect(formatMhzTrim(1000e6)).toBe('1000');
+    expect(formatMhzTrim(433_920_000)).toBe('433.92');
+    expect(formatMhzTrim(-25e6)).toBe('−25');
+    expect(formatMhzTrim(null)).toBe('—');
+  });
+
+  it('steps the arrow keys by a 200th of the scan, at least 10 kHz', () => {
+    expect(keyStepHz(900e6)).toBe(4_500_000);
+    expect(keyStepHz(1e6)).toBe(10_000);
+    expect(keyStepHz(3_333_333)).toBe(17_000);
+    expect(keyStepHz(Number.NaN)).toBe(10_000);
+  });
+
+  it('picks the strongest scan bin next to a click', () => {
+    const bins = new Float32Array(10).fill(-90);
+    bins[4] = -20;
+    // 10 bins of 1 MHz from 100 MHz: a click in bin 2 takes bin 4 (two away), a click in bin 8 stays.
+    expect(scanPick(bins, 100e6, 110e6, 102.3e6)).toBe(104.5e6);
+    expect(scanPick(bins, 100e6, 110e6, 108.3e6)).toBe(108.5e6);
+    expect(scanPick(bins, 100e6, 110e6, 99e6)).toBeNull();
+    expect(scanPick(new Float32Array(0), 100e6, 110e6, 105e6)).toBeNull();
+  });
+
+  it('draws a running scan on its own range, a stopped one on the Receiver range', () => {
+    const frame = { startHz: 100e6, stopHz: 1000e6 };
+    const settings = { startHz: 400e6, stopHz: 500e6 };
+    expect(sweepAxis(frame, true, settings)).toEqual(frame);
+    expect(sweepAxis(frame, false, settings)).toEqual(settings);
+    expect(sweepAxis(frame, false, null)).toEqual(frame);
+    expect(sweepAxis(null, true, settings)).toEqual(settings);
+  });
+
+  it('starts a new waterfall history for another source, bin count or scan range, not for an RX retune', () => {
+    const rx = { source: 'rx' as const, binCount: 512, startHz: 432.9e6, stopHz: 434.9e6 };
+    const scan = { source: 'sweep' as const, binCount: 512, startHz: 100e6, stopHz: 1000e6 };
+    expect(waterfallNeedsReset(null, rx)).toBe(true);
+    expect(waterfallNeedsReset(rx, { ...rx, startHz: 144e6, stopHz: 146e6 })).toBe(false);
+    expect(waterfallNeedsReset(rx, { ...rx, binCount: 256 })).toBe(true);
+    expect(waterfallNeedsReset(rx, scan)).toBe(true);
+    expect(waterfallNeedsReset(scan, rx)).toBe(true);
+    expect(waterfallNeedsReset(scan, { ...scan })).toBe(false);
+    expect(waterfallNeedsReset(scan, { ...scan, stopHz: 900e6 })).toBe(true);
   });
 });

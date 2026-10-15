@@ -8,10 +8,11 @@ import type { BridgeEnvironment, ReceiverBridge } from '../../lib/receiverBridge
 import { BRIDGE_CHANNEL, BRIDGE_VERSION } from '../../lib/receiverBridgeProtocol';
 import { DEFAULT_OVERVIEW_PANELS } from '../../lib/overviewPanels';
 import { followNodeStore } from '../../lib/listenPrefs';
+import { DEFAULT_SPECTRUM_DOCK_SETTINGS, spectrumDockStore } from '../../lib/spectrumDockSettings';
 import type { ConsoleCapabilities } from '../../api';
 import { SpectrumDock } from './SpectrumDock';
 import { SpectrumSettings } from './SpectrumSettings';
-import type { RadioRows, SpectrumSettingsProps } from './SpectrumSettings';
+import type { RadioRows, SpectrumSettingsProps, SweepRows } from './SpectrumSettings';
 
 const ORIGIN = 'http://127.0.0.1:8787';
 
@@ -57,7 +58,16 @@ function status(overrides: Record<string, unknown> = {}): Record<string, unknown
 afterEach(() => {
   vi.unstubAllGlobals();
   followNodeStore.set(true);
+  spectrumDockStore.set({ ...DEFAULT_SPECTRUM_DOCK_SETTINGS });
 });
+
+/** The scan state a Receiver reports; the Receiver defaults unless overridden. */
+function scan(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    phase: 'idle', source: 'native', startHz: 100_000_000, stopHz: 1_000_000_000, fftSize: 8192, resolutionHz: 20_000_000 / 8192,
+    lnaDb: 40, vgaDb: 20, amp: false, displayMinDb: -60, displayMaxDb: 0, view: 'average', ...overrides,
+  };
+}
 
 const NODE: TelemetrySnapshot = {
   status: { available: true },
@@ -207,7 +217,7 @@ describe('Spectrum dock states', () => {
     expect(markup).toContain('<span class="ov-tag tone-info" title="Geser frekuensi 125.000 MHz">UPCONVERTER</span>');
   });
 
-  it('shows BUSY with the way to the Receiver page during a scan', () => {
+  it('shows BUSY with the way to the Receiver page only while the Receiver listens to a scan candidate', () => {
     const markup = dock(bridgeWith({ status: status({ busy: 'scan-listen' }) }));
     expect(chip(markup)).toBe('BUSY');
     expect(markup).toContain('Pindai berjalan di halaman Receiver');
@@ -265,6 +275,78 @@ describe('Spectrum dock states', () => {
     expect(markup).toMatch(/<button class="ov-button ov-spec-send ov-spec-wide" type="button" disabled=""/);
     // Following the node, the node still wins.
     expect(dock(bridgeWith({ attach: false }))).toContain('Tengah 416.588 MHz');
+  });
+});
+
+describe('Spectrum dock Spektrum mode', () => {
+  const modeSwitch = (markup: string) => /<div class="ov-seg ov-seg-compact ov-spec-mode" role="group" aria-label="Mode spektrum">([\s\S]*?)<\/div>/.exec(markup)?.[1] ?? '';
+  const pressed = (markup: string) => [...modeSwitch(markup).matchAll(/aria-pressed="true"[^>]*>([^<]+)</g)].map((match) => match[1]);
+
+  it('puts the RX|Spektrum switch right after the chip and before follow-node', () => {
+    const markup = dock(bridgeWith({ attach: false }));
+    const order = ['class="ov-chip', 'ov-spec-mode', '>RX<', '>Spektrum<', 'Ikuti frekuensi node'];
+    const positions = order.map((needle) => markup.indexOf(needle, markup.indexOf('class="ov-chip')));
+    for (const [index, position] of positions.entries()) expect(position, order[index]).toBeGreaterThan(-1);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+    expect(pressed(markup)).toEqual(['RX']);
+    expect(dock(bridgeWith({ attach: false }), { lang: 'en' })).toMatch(/aria-label="Spectrum mode">[\s\S]*?>RX<\/button>[\s\S]*?>Spectrum<\/button>/);
+  });
+
+  it('follows the stored choice while nothing runs', () => {
+    spectrumDockStore.set({ ...DEFAULT_SPECTRUM_DOCK_SETTINGS, mode: 'sweep' });
+    const markup = dock(bridgeWith({ attach: false }));
+    expect(pressed(markup)).toEqual(['Spektrum']);
+    expect(chip(markup)).toBe('SCAN OFF');
+    expect(markup).toContain('<div class="ov-spec-overlay"><span>Pindai berhenti</span></div>');
+    expect(markup).toContain('>Mulai<');
+    // RX running wins.
+    expect(pressed(dock(bridgeWith({ status: status() })))).toEqual(['RX']);
+  });
+
+  it('shows a scan started on the Receiver page as Spektrum with live frames and no stopped overlay', () => {
+    const markup = dock(bridgeWith({ status: status({ running: false, busy: 'sweep', sweep: scan({ phase: 'active', lnaDb: 32, vgaDb: 16, amp: true, fftSize: 4096, resolutionHz: 4882.8125 }) }) }));
+    expect(pressed(markup)).toEqual(['Spektrum']);
+    expect(chip(markup)).toBe('SCAN');
+    expect(markup).not.toContain('ov-spec-overlay');
+    expect(markup).not.toContain('is-stopped');
+    expect(markup).toContain('>Berhenti<');
+    expect(markup).toContain('100–1000 MHz · RBW 4.88 kHz · LNA 32 dB · VGA 16 dB · +14 dB');
+    expect(markup).toContain('<span>100</span><span>325</span><span>550</span><span>775</span><span>1000</span>');
+    expect(markup).toContain('aria-label="Pindai lebar. Klik, atau pakai tombol panah, untuk mengatur tengah RX dan VFO bagi RX berikutnya."');
+    // Not simulated: no SIM tag.
+    expect(markup).not.toContain('>SIM<');
+    // Dengar stays offered: it stops the scan and starts RX.
+    expect(markup).toMatch(/<button class="ov-button ov-spec-listen" type="button" aria-pressed="false">/);
+  });
+
+  it('tags the simulated scan SIM only while it starts or runs', () => {
+    const sim = (phase: string, busy: string) => dock(bridgeWith({ status: status({ running: false, busy, sweep: scan({ phase, source: 'simulated' }) }) }));
+    expect(sim('active', 'sweep')).toContain('<span class="ov-tag tone-warn">SIM</span>');
+    expect(sim('starting', 'sweep')).toContain('>SIM<');
+    expect(sim('stopping', 'sweep')).not.toContain('>SIM<');
+    // The scan source stays 'simulated' until a radio that can scan connects; idle, that is no simulation.
+    spectrumDockStore.set({ ...DEFAULT_SPECTRUM_DOCK_SETTINGS, mode: 'sweep' });
+    expect(sim('idle', 'none')).not.toContain('>SIM<');
+  });
+
+  it('shows … while a scan starts or stops, and keeps Berhenti for a starting scan', () => {
+    const starting = dock(bridgeWith({ status: status({ running: true, busy: 'sweep', sweep: scan({ phase: 'starting' }) }) }));
+    expect(chip(starting)).toBe('…');
+    expect(starting).toContain('Memulai pindai…');
+    expect(starting).toMatch(/<button class="ov-button ov-spec-run" type="button">[\s\S]*?>Berhenti</);
+    const stopping = dock(bridgeWith({ status: status({ running: false, busy: 'sweep', sweep: scan({ phase: 'stopping' }) }) }));
+    expect(stopping).toContain('Menghentikan pindai…');
+    expect(stopping).toMatch(/<button class="ov-button ov-spec-run" type="button" disabled=""/);
+    expect(modeSwitch(stopping)).toMatch(/disabled=""/);
+  });
+
+  it('draws the Receiver\'s saved scan range before the frame is mounted', () => {
+    spectrumDockStore.set({ ...DEFAULT_SPECTRUM_DOCK_SETTINGS, mode: 'sweep' });
+    const sweepSettings = JSON.stringify({ startMHz: 430, endMHz: 440, fftSize: 8192, lnaGain: 24, vgaGain: 30, ampEnabled: false });
+    vi.stubGlobal('window', { localStorage: { getItem: (key: string) => (key === 'ReceiverSweepSettings' ? sweepSettings : null), setItem: () => undefined } });
+    const markup = dock(bridgeWith({ attach: false }));
+    expect(markup).toContain('430–440 MHz · RBW 2.44 kHz · LNA 24 dB · VGA 30 dB');
+    expect(markup).toContain('<span>430.0</span><span>432.5</span><span>435.0</span><span>437.5</span><span>440.0</span>');
   });
 });
 
@@ -341,8 +423,14 @@ const RADIO_UNKNOWN: RadioRows = {
   ready: false, sampleRateHz: null, sampleRates: [], rateDisabled: true, ratePending: false, lnaDb: null, vgaDb: null, amp: null, gainsDisabled: true,
 };
 
+/** The scan rows before the Receiver frame answers: its saved defaults, disabled. */
+const SWEEP_SAVED: SweepRows = {
+  ready: false, scanning: false, disabled: true, startHz: 100_000_000, stopHz: 1_000_000_000, fftSize: 8192, lnaDb: 40, vgaDb: 20, amp: false, shiftHz: 0,
+};
+
 function settings(overrides: Partial<SpectrumSettingsProps> = {}, lang: Lang = 'id'): string {
   const props: SpectrumSettingsProps = {
+    dockMode: 'rx',
     followNode: true,
     onFollowNode: () => undefined,
     mode: 'am',
@@ -351,6 +439,7 @@ function settings(overrides: Partial<SpectrumSettingsProps> = {}, lang: Lang = '
     sendTitle: 'RX 433.920 MHz · VFO 433.925 MHz',
     onSend: () => undefined,
     db: { auto: true, minDb: -70, maxDb: 0 },
+    dbEditable: true,
     autoRange: { min: -95, max: -40 },
     onDbAuto: () => undefined,
     onDbManual: () => undefined,
@@ -359,6 +448,12 @@ function settings(overrides: Partial<SpectrumSettingsProps> = {}, lang: Lang = '
     onSampleRate: () => undefined,
     onGain: () => undefined,
     onAmp: () => undefined,
+    sweep: SWEEP_SAVED,
+    onSweepRange: () => undefined,
+    onSweepCenter: () => undefined,
+    onSweepFft: () => undefined,
+    onSweepGain: () => undefined,
+    onSweepAmp: () => undefined,
     ...overrides,
   };
   return renderToStaticMarkup(
@@ -471,5 +566,68 @@ describe('Spectrum dock Atur radio rows', () => {
   it('adds the rate and the +14 dB amp to the dock info line', () => {
     expect(dock(bridgeWith({ status: status({ sampleRateHz: 8_000_000, gains: { lnaDb: 32, vgaDb: 16, amp: true } }) }), { snapshot: null, lang: 'en' }))
       .toContain('Center 433.920 MHz · span 2.0 MHz · 8 MSPS · LNA 32 dB · VGA 16 dB · +14 dB');
+  });
+});
+
+describe('Spectrum dock Atur scan rows', () => {
+  const scanning: SweepRows = { ...SWEEP_SAVED, ready: true, scanning: true, disabled: true, startHz: 430_000_000, stopHz: 440_000_000, lnaDb: 32, vgaDb: 16, amp: true };
+  const ready: SweepRows = { ...scanning, scanning: false, disabled: false };
+
+  it('shows the scan dB scale, range, resolution and gains in Spektrum mode instead of the RX rows', () => {
+    const markup = settings({ dockMode: 'sweep', sweep: ready, db: { auto: false, minDb: -110, maxDb: -20 } });
+    const order = ['Skala dB', 'Rentang', 'Resolusi', 'ov-spec-sgain-label'];
+    const positions = order.map((needle) => markup.indexOf(needle));
+    for (const [index, position] of positions.entries()) expect(position, order[index]).toBeGreaterThan(-1);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+    expect(markup).not.toContain('Sample rate');
+    expect(markup).toContain('aria-label="Awal MHz"');
+    expect(markup).toMatch(/aria-label="Awal MHz"[^>]*value="430"/);
+    expect(markup).toMatch(/aria-label="Akhir MHz"[^>]*value="440"/);
+    expect(markup).toContain('<button class="ov-icon-button is-bordered" type="button" aria-label="Pusatkan ke RX" title="Pusatkan ke RX">');
+    expect(markup).toMatch(/<button type="button" aria-pressed="false">4\.88 kHz<\/button><button type="button" aria-pressed="true">2\.44 kHz<\/button>/);
+    expect(markup).toMatch(/<option value="32" selected="">LNA 32 dB<\/option>/);
+    expect(markup).toMatch(/<option value="16" selected="">VGA 16 dB<\/option>/);
+    expect(markup).toMatch(/<button class="ov-button ov-spec-amp" type="button" aria-pressed="true" aria-label="Penguat RF \+14 dB">/);
+    // Manual is the Receiver's Graph min./max., editable while the frame answers.
+    expect(markup).toMatch(/aria-label="Min dB"[^>]*value="-110"/);
+    expect(markup).not.toMatch(/aria-label="Min dB" disabled/);
+    expect(markup).not.toContain('Terkunci');
+  });
+
+  it('keeps the RX rows in RX mode', () => {
+    const markup = settings({ sweep: ready });
+    expect(markup).toContain('Sample rate');
+    expect(markup).not.toContain('Rentang');
+  });
+
+  it('locks the scan settings while a scan runs, as the Receiver page does', () => {
+    const markup = settings({ dockMode: 'sweep', sweep: scanning });
+    expect(markup).toContain('<span class="is-warn">Terkunci selama pindai</span>');
+    expect(markup).toMatch(/aria-label="Awal MHz" disabled=""/);
+    expect(markup).toMatch(/aria-label="Pusatkan ke RX" title="Pusatkan ke RX" disabled=""/);
+    expect(markup).toMatch(/<select class="ov-radio-select" aria-label="Gain LNA" disabled=""/);
+    expect(markup).toMatch(/<button type="button" aria-pressed="true" disabled="">2\.44 kHz/);
+    // The graph range is display only: it stays editable during the scan.
+    expect(settings({ dockMode: 'sweep', sweep: scanning, db: { auto: false, minDb: -110, maxDb: -20 } })).not.toMatch(/aria-label="Min dB" disabled/);
+  });
+
+  it('shows the saved scan settings disabled before the frame answers, the graph limits read only', () => {
+    const markup = settings({ dockMode: 'sweep', sweep: SWEEP_SAVED, dbEditable: false, db: { auto: false, minDb: -60, maxDb: 0 } });
+    expect(markup).toMatch(/aria-label="Awal MHz" disabled=""[^>]*value="100"/);
+    expect(markup).toMatch(/<option value="40" selected="">LNA 40 dB<\/option>/);
+    expect(markup).toMatch(/aria-label="Min dB" disabled=""/);
+    expect(markup).not.toContain('Terkunci');
+  });
+
+  it('does not offer a resolution the range does not fit', () => {
+    const wide = settings({ dockMode: 'sweep', sweep: { ...ready, startHz: 100_000_000, stopHz: 2_000_000_000, fftSize: 4096 } });
+    expect(wide).toMatch(/<button type="button" aria-pressed="true">4\.88 kHz<\/button><button type="button" aria-pressed="false" disabled="">2\.44 kHz<\/button>/);
+  });
+
+  it('shows the range in displayed MHz and the limits of an upconverter', () => {
+    const markup = settings({ dockMode: 'sweep', sweep: { ...ready, startHz: -25_000_000, stopHz: 875_000_000, shiftHz: -125_000_000 } }, 'en');
+    expect(markup).toMatch(/aria-label="Start MHz"[^>]*value="-25"/);
+    expect(markup).toContain('Range');
+    expect(markup).toContain('Resolution');
   });
 });
