@@ -1232,7 +1232,7 @@ def _apply_embedded_changes(source: Path) -> None:
         "Listener trace position from the dB scale",
     )
 
-    theme_css =(PROJECT_ROOT / "frontend/src/receiver-embedded-theme.css").read_text(
+    theme_css = (PROJECT_ROOT / "frontend/src/receiver-embedded-theme.css").read_text(
         encoding="utf-8"
     )
     style.write_text(
