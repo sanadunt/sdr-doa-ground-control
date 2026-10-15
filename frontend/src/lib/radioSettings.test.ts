@@ -60,7 +60,8 @@ describe('Atur radio rows', () => {
 
   it('holds the rate during any scan, a start or another rate change', () => {
     for (const busy of ['sweep', 'scan-listen'] as const) expect(rows({ live: live({ busy, running: false }) }).rateDisabled, busy).toBe(true);
-    expect(rows({ ratePending: true })).toMatchObject({ rateDisabled: true, ratePending: true });
+    // A rate change on its way locks the select through ratePending (aria-disabled), not disabled, so it keeps focus.
+    expect(rows({ ratePending: true })).toMatchObject({ rateDisabled: false, ratePending: true });
     expect(rows({ starting: true }).rateDisabled).toBe(true);
   });
 

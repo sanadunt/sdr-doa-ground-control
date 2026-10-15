@@ -417,7 +417,7 @@ export function SpectrumDock({
 
   // The sample rate restarts a running RX; an armed recording continues in a new segment, so ask first.
   const changeSampleRate = (hz: number) => {
-    if (!Number.isInteger(hz) || hz <= 0 || hz === shownRate) return;
+    if (!Number.isInteger(hz) || hz <= 0 || hz === shownRate || radioPending !== null) return;
     const confirmRecording = running && live?.recording === true;
     if (confirmRecording && !window.confirm(t('spectrum.rateRecordingConfirm'))) return;
     setRadioPending(running ? 'restart' : 'set');

@@ -47,8 +47,12 @@ export interface RadioRows {
   ready: boolean;
   sampleRateHz: number | null;
   sampleRates: readonly number[];
+  /** No frame, a scan or a start: the rate select is disabled. */
   rateDisabled: boolean;
-  /** A sample rate change is on its way (RX restarts). */
+  /**
+   * A sample rate change is on its way (RX restarts). The select takes no new pick but stays
+   * focusable (aria-disabled), so a keyboard pick does not lose focus to the page.
+   */
   ratePending: boolean;
   lnaDb: number | null;
   vgaDb: number | null;
@@ -80,7 +84,7 @@ export function radioRows({ live, shown, ratePending, starting }: RadioRowsInput
     ready,
     sampleRateHz: shown.sampleRateHz,
     sampleRates: sampleRateOptions(live?.sampleRatesHz, shown.sampleRateHz),
-    rateDisabled: !ready || busy !== 'none' || ratePending || starting,
+    rateDisabled: !ready || busy !== 'none' || starting,
     ratePending,
     lnaDb: shown.lnaDb,
     vgaDb: shown.vgaDb,

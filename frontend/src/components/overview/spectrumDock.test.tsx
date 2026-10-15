@@ -453,9 +453,12 @@ describe('Spectrum dock Atur radio rows', () => {
   });
 
   it('marks a rate change on its way and keeps an unknown gain selectable', () => {
-    const pending = settings({ radio: { ...ready, rateDisabled: true, ratePending: true } });
+    const pending = settings({ radio: { ...ready, ratePending: true } });
     expect(row(pending, 'ov-spec-rate-label')).toMatch(/^id="ov-spec-rate-label">Sample rate<\/span><span>…<\/span>/);
-    expect(row(pending, 'ov-spec-rate-label')).toContain('disabled=""');
+    // Locked but focusable: a keyboard pick keeps its focus while RX restarts.
+    expect(row(pending, 'ov-spec-rate-label')).toMatch(/<select class="ov-radio-select" aria-labelledby="ov-spec-rate-label" aria-disabled="true">/);
+    expect(row(pending, 'ov-spec-rate-label')).not.toContain('disabled=""');
+    expect(row(settings({ radio: { ...ready, rateDisabled: true } }), 'ov-spec-rate-label')).toMatch(/aria-labelledby="ov-spec-rate-label" disabled="">/);
     const unknown = row(settings({ radio: { ...ready, lnaDb: null, amp: null } }), 'ov-spec-gain-label');
     const [lna] = selects(unknown);
     expect(lna[0]).not.toContain('disabled=""');

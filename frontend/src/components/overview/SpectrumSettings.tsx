@@ -168,7 +168,8 @@ export function SpectrumSettings({
         </div>
         <div className="ov-ps-controls">
           <select className="ov-radio-select" aria-labelledby="ov-spec-rate-label" disabled={!radio.ready || radio.rateDisabled}
-            value={rateValue} onChange={(event) => { if (event.target.value !== '') onSampleRate(Number(event.target.value)); }}>
+            aria-disabled={radio.ratePending ? true : undefined}
+            value={rateValue} onChange={(event) => { if (!radio.ratePending && event.target.value !== '') onSampleRate(Number(event.target.value)); }}>
             {rateValue === '' ? <option value="">—</option> : null}
             {radio.ready ? radio.sampleRates.map((rate) => <option key={rate} value={String(rate)}>{t('spectrum.rateOption', { rate: formatMsps(rate) })}</option>) : null}
           </select>
