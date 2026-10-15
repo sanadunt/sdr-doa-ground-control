@@ -2,10 +2,12 @@ import type { JSX } from 'react';
 import { DEFAULT_DOA_OVERLAY_SETTINGS } from '../../lib/doaGeometry';
 import type { DbScale, DoaOverlaySettings } from '../../lib/doaGeometry';
 import { OVERLAY_OPACITY_MIN } from '../../lib/mapOverlaySettings';
+import type { BasemapId } from '../../lib/basemaps';
 import { useI18n } from '../../lib/i18n';
 import type { MessageKey } from '../../lib/i18n';
 import { OverlayControls } from '../OverlayControls';
 import { Icon } from '../ui';
+import { BasemapSelect } from './BasemapPicker';
 
 type LayerKey = 'heatmapVisible' | 'lobeVisible' | 'bearingVisible' | 'edgesVisible' | 'ringsVisible' | 'guidesVisible' | 'labelsVisible';
 
@@ -19,17 +21,21 @@ const LAYERS: ReadonlyArray<[LayerKey, MessageKey]> = [
   ['labelsVisible', 'layers.labels'],
 ];
 
-/** Map layers panel: the seven layer switches, overlay opacity and the advanced overlay settings. */
+/** Map layers panel: the basemap, the seven layer switches, overlay opacity and the advanced overlay settings. */
 export function LayersPanel({
   settings,
   scale,
   onChange,
   onClose,
+  basemapId,
+  onBasemapChange,
 }: {
   settings: DoaOverlaySettings;
   scale: DbScale;
   onChange: (next: DoaOverlaySettings) => void;
   onClose: () => void;
+  basemapId: BasemapId;
+  onBasemapChange: (id: BasemapId) => void;
 }): JSX.Element {
   const { t } = useI18n();
   const opacity = Math.round(settings.overlayOpacity * 100);
@@ -40,6 +46,8 @@ export function LayersPanel({
         <button className="ov-icon-button" type="button" aria-label={t('layers.close')} title={t('layers.close')} onClick={onClose}><Icon name="close" /></button>
       </div>
       <div className="ov-layers-body">
+        {/* The basemap is its own preference: Advanced Reset changes only the overlay. */}
+        <BasemapSelect value={basemapId} onChange={onBasemapChange} />
         <div className="ov-layer-grid">
           {LAYERS.map(([key, label]) => (
             <label key={key} className="ov-check">

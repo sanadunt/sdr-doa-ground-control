@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Server-side copy of the console's per-operator browser preferences.
 
-The browser keeps its preferences (theme, language, Overview panels, map
-overlay, polar view, GPS and Compass source, listen mode, follow node, and the
-embedded Receiver's own settings and bookmarks) in ``localStorage``. This store
+The browser keeps its preferences (theme, language, Overview panels, basemap,
+map overlay, polar view, GPS and Compass source, listen mode, follow node, and
+the embedded Receiver's own settings and bookmarks) in ``localStorage``. This store
 keeps the same strings on the console host, so they survive another browser, a
 cleared cache or a new container that mounts the same data directory.
 
@@ -46,6 +46,7 @@ PREFERENCE_KEYS: Dict[str, str] = {
     "sdr-console-lang": TOKEN,
     # Overview dashboard.
     "sdr-console-overview-panels-v1": JSON_OBJECT,
+    "sdr-console-basemap": TOKEN,
     "sdr-doa-overlay-settings-v4": JSON_OBJECT,
     "sdr-doa-polar-view-v1": JSON_OBJECT,
     "sdr-console-listen-mode": TOKEN,

@@ -1,11 +1,12 @@
-import { Component, useEffect, useMemo, useRef, useState } from 'react';
+import { Component, Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, JSX, ReactNode } from 'react';
 import * as maplibregl from 'maplibre-gl';
 import type { Map as MapLibreMap, GeoJSONSource, MapMouseEvent, MapSourceDataEvent, RasterTileSource } from 'maplibre-gl';
 import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import type { Feature, FeatureCollection, LineString, Point, Polygon } from 'geojson';
 import type { GpsSourceMode, MapCoordinate, TelemetrySnapshot } from '../types';
-import { OSM_TILE_TEMPLATES, basemapAfterTile, basemapPaint, gpsReportsNoFix, holdStationCoordinate, nextBasemapHost, resumeBasemapHealth, shouldReframeStation, tileHost, type BasemapHealth, type BasemapStatus, type StationFraming } from '../lib/map';
+import { basemapAfterTile, basemapPaint, gpsReportsNoFix, holdStationCoordinate, nextBasemapHost, resumeBasemapHealth, shouldReframeStation, type BasemapHealth, type StationFraming } from '../lib/map';
+import { BASEMAPS, DEFAULT_BASEMAP_ID, basemapBaseSource, basemapRasterLayers, basemapSourceId, isBasemapSourceId, type BasemapId, type TileSourceId } from '../lib/basemaps';
 import { MAP_CONTROLS_ROW_PX, ZERO_INSETS, clampMapPadding, controlsFramingBottom, type MapInsets } from '../lib/mapInsets';
 import {
   DEFAULT_DOA_OVERLAY_SETTINGS,
@@ -35,6 +36,7 @@ import type { MessageKey, Translate } from '../lib/i18n';
 import { coordinateSourceKey } from './DoaReadout';
 import { OverlayLegend } from './OverlayLegend';
 import { EmptyState, Icon } from './ui';
+import { BasemapMenu } from './overview/BasemapPicker';
 
 // MapLibre 6 looks for its worker next to its own module file. After bundling
 // that file does not exist, so GeoJSON sources would never be parsed. Point it
@@ -61,6 +63,8 @@ const GEOMETRY_DEBOUNCE_MS = 120;
 const WORKER_WATCHDOG_MS = 10_000;
 const BASEMAP_CHECK_MS = 20_000;
 const BASEMAP_RETRY_MS = 60_000;
+// The console's tile route tries each upstream's hosts; the browser has one URL per source.
+const BASEMAP_HOSTS = 1;
 const SOURCE_IDS = ['doa-station', 'doa-beam', 'doa-heat', 'doa-rings', 'doa-guides', 'doa-lobe', 'doa-edges', 'doa-bearing'] as const;
 type SourceId = typeof SOURCE_IDS[number];
 const SOURCE_ID_SET: ReadonlySet<string> = new Set(SOURCE_IDS);
@@ -86,13 +90,21 @@ interface CameraMemory {
 }
 
 // Per page session: the map is unmounted on every route change, so the
-// operator's camera, the last live station fix and the working tile host are
-// kept here and restored when Overview opens again.
+// operator's camera and the last live station fix are kept here and restored
+// when Overview opens again.
 let cameraMemory: CameraMemory | null = null;
 let lastLiveStation: MapCoordinate | null = null;
-let preferredTileHost = 0;
-// A basemap outage seen on an earlier visit, so its notice is shown at once.
-let basemapMemory: BasemapHealth | null = null;
+// Basemap outages seen earlier, per tile source, so a known outage shows its
+// notice at once when the map mounts again or the operator returns to a style.
+const basemapMemory: Partial<Record<TileSourceId, BasemapHealth>> = {};
+
+function basemapHealthFor(source: TileSourceId | null): BasemapHealth {
+  return resumeBasemapHealth(source ? basemapMemory[source] ?? null : null, 0, BASEMAP_HOSTS);
+}
+
+function prefersReducedMotion(): boolean {
+  return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
 
 function consoleTheme(): 'light' | 'dark' {
   return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
@@ -179,11 +191,13 @@ export interface TacticalMapProps {
   overlaySettings?: DoaOverlaySettings;
   /** Space the floating dashboard panels take from the map; it moves the framing, not the canvas. */
   insets?: MapInsets;
-  /** Called when the tile host or its availability changes. */
-  onBasemapChange?: (status: BasemapStatus) => void;
+  /** Basemap style; owned and persisted by the Overview page. */
+  basemapId?: BasemapId;
+  /** Shows the basemap button in the map controls when set. */
+  onBasemapSelect?: (id: BasemapId) => void;
 }
 
-function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, onBasemapChange }: TacticalMapProps): JSX.Element {
+function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect }: TacticalMapProps): JSX.Element {
   const { t, lang } = useI18n();
   const hostRef = useRef<HTMLDivElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -196,7 +210,9 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const appliedDataRef = useRef<Partial<Record<SourceId, OverlayFeatureCollection>>>({});
   const [mapState, setMapState] = useState<MapState>('initializing');
   const [styleReady, setStyleReady] = useState(false);
-  const [basemapUnavailable, setBasemapUnavailable] = useState(() => basemapMemory?.unavailable === true);
+  // The style the map draws; it follows basemapId once the style is ready.
+  const [activeBasemap, setActiveBasemap] = useState<BasemapId>(basemapId);
+  const [basemapUnavailable, setBasemapUnavailable] = useState(() => basemapHealthFor(basemapBaseSource(basemapId)).unavailable);
   const [tilesLoaded, setTilesLoaded] = useState(false);
   const [theme, setTheme] = useState(consoleTheme);
   const noticesRef = useRef<HTMLDivElement>(null);
@@ -206,8 +222,10 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const g = useDebouncedValue(settings, GEOMETRY_DEBOUNCE_MS);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
-  const onBasemapChangeRef = useRef(onBasemapChange);
-  onBasemapChangeRef.current = onBasemapChange;
+  const basemapIdRef = useRef(basemapId);
+  basemapIdRef.current = basemapId;
+  const selectBasemapRef = useRef<((id: BasemapId) => void) | null>(null);
+  const tone = BASEMAPS[activeBasemap].tone;
   const insetsRef = useRef(insets);
   insetsRef.current = insets;
 
@@ -290,7 +308,14 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     let disposed = false;
     const memory = cameraMemory;
     const start = coordinateRef.current;
-    let basemap: BasemapHealth = resumeBasemapHealth(basemapMemory, preferredTileHost, OSM_TILE_TEMPLATES.length);
+    // Tiles come from this console; MapLibre needs absolute tile URLs.
+    const origin = window.location.origin;
+    let activeId: BasemapId = basemapIdRef.current;
+    let activeSource = basemapBaseSource(activeId);
+    let basemap: BasemapHealth = basemapHealthFor(activeSource);
+    // When the active style was chosen or its tiles last reloaded, for the silent-host check.
+    let basemapSince = performance.now();
+    const rasters = basemapRasterLayers(activeId, origin, prefersReducedMotion());
     const paint = basemapPaint(consoleTheme(), false);
     let map: MapLibreMap;
     try {
@@ -304,10 +329,11 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
         maxZoom: 19,
         attributionControl: false,
         locale: mapLocale(t),
-        style: { version: 8, sources: { osm: { type: 'raster', tiles: [OSM_TILE_TEMPLATES[basemap.hostIndex]], tileSize: 256, attribution: '© OpenStreetMap contributors' }, ...Object.fromEntries(SOURCE_IDS.map((id) => [id, { type: 'geojson', data: EMPTY }])) }, layers: [
-          // Neutral land colour under the tiles; it follows the console theme when OSM does not load.
+        style: { version: 8, sources: { ...Object.fromEntries(rasters.map((raster) => [raster.id, raster.source])), ...Object.fromEntries(SOURCE_IDS.map((id) => [id, { type: 'geojson', data: EMPTY }])) }, layers: [
+          // Neutral land colour under the tiles; it follows the console theme when no tiles load.
           { id: 'basemap-background', type: 'background', paint: { 'background-color': paint.background } },
-          { id: 'osm', type: 'raster', source: 'osm' },
+          // Basemap raster layers sit here, under 'doa-beam'; a style change swaps only them.
+          ...rasters.map((raster) => raster.layer),
           { id: 'doa-beam', type: 'fill', source: 'doa-beam', paint: { 'fill-antialias': false, 'fill-color': beamColorExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatPalette), 'fill-opacity': beamOpacityExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatOpacity, DEFAULT_DOA_OVERLAY_SETTINGS.heatIntensity) } },
           { id: 'doa-heat', type: 'heatmap', source: 'doa-heat', maxzoom: 20, paint: { 'heatmap-weight': ['coalesce', ['get', 'densityWeight'], ['get', 'weight'], 0], 'heatmap-intensity': 1, 'heatmap-radius': heatmapRadiusExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatBlur), 'heatmap-opacity': .72, 'heatmap-color': heatmapColorExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatPalette) } },
           { id: 'doa-rings', type: 'line', source: 'doa-rings', paint: { 'line-color': paint.rings, 'line-opacity': .55, 'line-width': 1.2, 'line-dasharray': [4, 3] } },
@@ -333,18 +359,44 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     operatorMovedRef.current = memory?.operatorMoved ?? false;
     setMapState('initializing');
 
-    const reportBasemap = (state: BasemapHealth) => onBasemapChangeRef.current?.({ host: tileHost(OSM_TILE_TEMPLATES[state.hostIndex] ?? OSM_TILE_TEMPLATES[0]), unavailable: state.unavailable });
-    const applyBasemap = (next: BasemapHealth) => {
-      const switched = next.hostIndex !== basemap.hostIndex;
-      const changed = switched || next.unavailable !== basemap.unavailable;
+    // reload: ask for the active style's tiles again (the periodic retry).
+    const applyBasemap = (next: BasemapHealth, reload = false) => {
       basemap = next;
-      basemapMemory = next;
-      if (switched && map.style) (map.getSource('osm') as RasterTileSource | undefined)?.setTiles([OSM_TILE_TEMPLATES[next.hostIndex]]);
+      if (activeSource) basemapMemory[activeSource] = next;
+      if (reload && map.style) {
+        basemapSince = performance.now();
+        for (const raster of basemapRasterLayers(activeId, origin)) (map.getSource(raster.id) as RasterTileSource | undefined)?.setTiles(raster.source.tiles ?? []);
+      }
       setBasemapUnavailable(next.unavailable);
       setTilesLoaded(next.loaded);
-      if (changed) reportBasemap(next);
     };
-    reportBasemap(basemap);
+    // Swap the basemap raster sources and layers under the overlay. Never
+    // map.setStyle(): it would drop the GeoJSON data and runtime paint while
+    // appliedDataRef still believes them applied. Each style has its own
+    // source ids, so late tile errors of the previous style are ignored by id.
+    selectBasemapRef.current = (next: BasemapId) => {
+      if (disposed || next === activeId || !styleReadyRef.current || !map.style) return;
+      try {
+        for (const raster of [...basemapRasterLayers(activeId, origin), ...basemapRasterLayers(next, origin)]) {
+          if (map.getLayer(raster.id)) map.removeLayer(raster.id);
+          if (map.getSource(raster.id)) map.removeSource(raster.id);
+        }
+        for (const raster of basemapRasterLayers(next, origin, prefersReducedMotion())) {
+          map.addSource(raster.id, raster.source);
+          map.addLayer(raster.layer, 'doa-beam');
+        }
+      } catch {
+        // activeId stays, so the next ready style or selection tries again.
+        return;
+      }
+      activeId = next;
+      activeSource = basemapBaseSource(next);
+      basemap = basemapHealthFor(activeSource);
+      basemapSince = performance.now();
+      setActiveBasemap(next);
+      setTilesLoaded(false);
+      setBasemapUnavailable(basemap.unavailable);
+    };
     const onStyleData = () => {
       // Fires for the first style and again after a WebGL context restore.
       if (disposed || styleReadyRef.current || !map.style || !map.getSource('doa-station')) return;
@@ -356,10 +408,14 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     const onError = (event: maplibregl.ErrorEvent) => {
       if (disposed || (event.error as { name?: unknown } | undefined)?.name === 'AbortError') return;
       // A failed raster tile is a network/provider issue, not a failed MapLibre
-      // renderer: it moves the basemap to the next tile host and, when every
-      // host fails, shows a non-blocking notice. Only other errors block the map.
+      // renderer: repeated failures of the active style show a non-blocking
+      // notice and the overlay stays. Only other errors block the map.
       const sourceId = String((event as unknown as { sourceId?: string }).sourceId ?? '');
-      if (sourceId === 'osm') { applyBasemap(basemapAfterTile(basemap, false, OSM_TILE_TEMPLATES.length, performance.now())); return; }
+      if (isBasemapSourceId(sourceId)) {
+        // Only the active base layer counts; a removed style or a label layer does not.
+        if (sourceId === basemapSourceId(activeId)) applyBasemap(basemapAfterTile(basemap, false, BASEMAP_HOSTS, performance.now()));
+        return;
+      }
       const message = String(event.error?.message ?? '').toLowerCase();
       if (message.includes('tile') || message.includes('raster')) return;
       setMapState((state) => (state === 'gl-lost' ? state : 'error'));
@@ -370,11 +426,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     }, WORKER_WATCHDOG_MS);
     const onSourceData = (event: MapSourceDataEvent) => {
       if (disposed) return;
-      if (event.sourceId === 'osm') {
-        if (event.tile) {
-          preferredTileHost = basemap.hostIndex;
-          applyBasemap(basemapAfterTile(basemap, true, OSM_TILE_TEMPLATES.length, performance.now()));
-        }
+      if (isBasemapSourceId(event.sourceId)) {
+        if (event.tile && event.sourceId === basemapSourceId(activeId)) applyBasemap(basemapAfterTile(basemap, true, BASEMAP_HOSTS, performance.now()));
         return;
       }
       // GeoJSON sources report metadata once the worker has parsed their data.
@@ -384,13 +437,14 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
         setMapState((state) => (state === 'worker-stalled' ? (styleReadyRef.current ? 'ready' : 'initializing') : state));
       }
     };
-    // A host that never answers produces no tile errors, so move on from a silent
-    // host; once every host failed, retry them in turn at a slower pace.
+    // Tiles that never answer produce no tile errors, so a style whose tiles
+    // stay silent counts as unavailable; then its tiles are asked for again at
+    // a slower pace. Plain has no tiles to check.
     const basemapCheck = window.setInterval(() => {
       const now = performance.now();
-      if (disposed || basemap.loaded || (basemap.unavailable && now - (basemap.switchedAtMs ?? 0) < BASEMAP_RETRY_MS)) return;
-      applyBasemap(nextBasemapHost(basemap, OSM_TILE_TEMPLATES.length, now));
-    }, BASEMAP_CHECK_MS);
+      if (disposed || !activeSource || basemap.loaded || now - basemapSince < BASEMAP_CHECK_MS || (basemap.unavailable && now - (basemap.switchedAtMs ?? 0) < BASEMAP_RETRY_MS)) return;
+      applyBasemap(nextBasemapHost(basemap, BASEMAP_HOSTS, now), true);
+    }, BASEMAP_CHECK_MS / 4);
     const onContextLost = () => {
       if (disposed) return;
       styleReadyRef.current = false;
@@ -411,6 +465,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     map.on('movestart', onMoveStart);
     return () => {
       disposed = true;
+      selectBasemapRef.current = null;
       window.clearTimeout(workerWatchdog);
       window.clearInterval(basemapCheck);
       cameraMemory = { center: map.getCenter().toArray(), zoom: map.getZoom(), bearing: map.getBearing(), pitch: map.getPitch(), framing: framingRef.current, operatorMoved: operatorMovedRef.current };
@@ -460,15 +515,25 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     return () => window.removeEventListener('console-theme-change', update);
   }, []);
 
-  // Background and reference lines follow the theme while no tiles are drawn.
+  // The chosen basemap style replaces the raster layers once the style is ready
+  // (again after a WebGL context restore, which keeps the swapped layers).
+  useEffect(() => {
+    if (styleReady) selectBasemapRef.current?.(basemapId);
+  }, [styleReady, basemapId]);
+
+  // The background follows the theme; reference lines follow the tiles' tone
+  // once they draw, and the theme while no tiles are drawn.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !styleReady) return;
-    const paint = basemapPaint(theme, tilesLoaded);
+    const paint = basemapPaint(theme, tilesLoaded, tone);
     map.setPaintProperty('basemap-background', 'background-color', paint.background);
     map.setPaintProperty('doa-rings', 'line-color', paint.rings);
     map.setPaintProperty('doa-guides', 'line-color', paint.guides);
-  }, [styleReady, theme, tilesLoaded]);
+    map.setPaintProperty('doa-edges', 'line-color', paint.edges);
+    map.setPaintProperty('doa-edges', 'line-width', paint.edgeWidth);
+    map.setPaintProperty('doa-lobe-outline', 'line-color', paint.lobeOutline);
+  }, [styleReady, theme, tilesLoaded, tone]);
 
   // Resizes from the window, the dashboard layout or the notices keep the
   // overlay framed while the operator has not moved the camera.
@@ -657,8 +722,9 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     const map = mapRef.current;
     // DOM labels need a ready style; without it the canvas writes its own.
     const drawText = !styleReady && settings.labelsVisible;
-    // No map, a lost context, or the dark theme without tiles leaves no light basemap behind the lines.
-    const darkBackground = !map || mapState === 'gl-lost' || (theme === 'dark' && !tilesLoaded);
+    // No map or a lost context leaves no tiles behind the lines; otherwise the
+    // drawn tiles' tone decides, and the theme while no tiles are drawn.
+    const darkBackground = !map || mapState === 'gl-lost' || (tilesLoaded ? tone === 'dark' : theme === 'dark');
     let frame = 0;
     const draw = () => {
       frame = 0;
@@ -692,9 +758,9 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
         context.save(); context.beginPath();
         lobe.geometry.coordinates[0].forEach((position, index) => { const point = project(position); if (index) context.lineTo(point.x, point.y); else context.moveTo(point.x, point.y); });
         context.closePath(); context.fillStyle = `rgba(235,188,112,${settings.lobeOpacity})`; context.fill();
-        context.strokeStyle = 'rgba(201,138,46,.92)'; context.lineWidth = 2; context.stroke(); context.restore();
+        context.strokeStyle = darkBackground ? 'rgba(235,188,112,.92)' : 'rgba(201,138,46,.92)'; context.lineWidth = 2; context.stroke(); context.restore();
       }
-      if (settings.edgesVisible) strokeLines(geometry.data['doa-edges'], 'rgba(224,96,58,.75)', 1.5, [2, 4]);
+      if (settings.edgesVisible) strokeLines(geometry.data['doa-edges'], darkBackground ? 'rgba(255,138,92,.8)' : 'rgba(224,96,58,.75)', darkBackground ? 2 : 1.5, [2, 4]);
       if (settings.bearingVisible) strokeLines(geometry.data['doa-bearing'], '#e0603a', 3, [9, 5]);
       // The station marker stays opaque, as on the map.
       context.globalAlpha = 1;
@@ -732,9 +798,9 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       map?.off('resize', schedule);
       canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
     };
-  }, [fallbackActive, mapState, theme, tilesLoaded, styleReady, stationCoordinate, geometry, bearing, settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.edgesVisible, settings.bearingVisible, settings.labelsVisible, settings.overlayOpacity, settings.lobeOpacity, settings.maxDistanceM, settings.lobeDistanceM, t]);
+  }, [fallbackActive, mapState, theme, tilesLoaded, tone, styleReady, stationCoordinate, geometry, bearing, settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.edgesVisible, settings.bearingVisible, settings.labelsVisible, settings.overlayOpacity, settings.lobeOpacity, settings.maxDistanceM, settings.lobeDistanceM, t]);
 
-  const reducedMotion = () => typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const reducedMotion = prefersReducedMotion;
   const resetView = () => {
     const current = coordinateRef.current;
     const map = mapRef.current;
@@ -762,9 +828,11 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   if (mapState === 'gl-lost') notices.push(t('map.glLost'));
   if (mapState === 'worker-stalled') notices.push(t('map.workerStalled'));
   if (mapState === 'error') notices.push(t('map.rendererError'));
-  if (basemapUnavailable && mapState !== 'no-webgl') notices.push(t('map.basemapUnavailable'));
+  if (basemapUnavailable && mapState !== 'no-webgl') notices.push(t('map.basemapUnavailable', { style: t(BASEMAPS[activeBasemap].labelKey) }));
   if (stationCoordinate && !values) notices.push(held ? t('map.overlayHeld', { reason: doaHeldText }) : t('map.overlayCleared'));
   if (values && !orientationVerified) notices.push(t('map.orientationReference', { offset: Number(offset.toFixed(1)) }));
+  // The credit follows the style the map draws; Plain draws no tiles and needs none.
+  const attribution = BASEMAPS[activeBasemap].attribution;
   // DOM labels fade with the overlay through this custom property.
   const frameStyle = { '--overlay-opacity': String(settings.overlayOpacity) } as CSSProperties;
   // Notices sit top-centre in the space between the floating panels.
@@ -784,7 +852,17 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
             <button className="ov-map-button" type="button" aria-label={t('map.ctrlZoomOut')} title={t('map.ctrlZoomOut')} onClick={() => zoomBy(-1)}><Icon name="minus" /></button>
             {stationCoordinate ? <button className="ov-map-button" type="button" aria-label={t('map.centerAria')} title={t('map.centerAria')} onClick={resetView}><Icon name="crosshair" /></button> : null}
             <button className="ov-map-button" type="button" aria-label={t('map.northUp')} title={t('map.northUp')} onClick={northUp}><Icon name="north" /></button>
-            <a className="ov-map-attribution" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer" title={t('map.attribution')}><span>© OpenStreetMap</span></a>
+            {onBasemapSelect ? <BasemapMenu value={basemapId} onChange={onBasemapSelect} /> : null}
+            {attribution ? (
+              <p className="ov-map-attribution" title={attribution.text}>
+                {attribution.links.map((link, index) => (
+                  <Fragment key={link.href}>
+                    {index ? <span className="ov-map-attribution-sep" aria-hidden="true">·</span> : null}
+                    <a href={link.href} target="_blank" rel="noopener noreferrer" aria-label={t('map.attributionLink', { source: link.text })}>{link.text}</a>
+                  </Fragment>
+                ))}
+              </p>
+            ) : null}
           </div>
         ) : null}
       </div>

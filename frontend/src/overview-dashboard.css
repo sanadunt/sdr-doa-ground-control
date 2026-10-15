@@ -73,9 +73,25 @@
 .ov-map-controls > * { pointer-events: auto; }
 .ov-map-button { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--ov-card-bg); color: var(--text); cursor: pointer; }
 .ov-map-button:hover { border-color: var(--accent); }
-.ov-map-attribution { display: inline-flex; align-items: center; height: 44px; padding: 0 4px; color: var(--muted); font-size: 11px; text-decoration: none; white-space: nowrap; }
-.ov-map-attribution span { padding: 3px 8px; border-radius: 6px; background: color-mix(in srgb, var(--bg) 85%, transparent); }
-.ov-map-attribution:hover { color: var(--text); }
+/* Source credit of the drawn basemap: one 44 px chip, each source a link; the last one ends in an ellipsis when the row is short. */
+.ov-map-attribution { display: flex; flex: 0 1 auto; align-items: center; gap: 0 5px; box-sizing: border-box; min-width: 0; max-width: min(460px, 100%); height: 44px; margin: 0; padding: 0 10px; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--ov-card-bg); color: var(--muted); font-size: 11px; white-space: nowrap; }
+.ov-map-attribution a { display: block; flex: none; color: inherit; line-height: 42px; text-decoration: none; }
+.ov-map-attribution a:last-child { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ov-map-attribution a:hover, .ov-map-attribution a:focus-visible { color: var(--text); text-decoration: underline; }
+.ov-map-attribution-sep { flex: none; }
+/* Basemap picker. The menu is a popover in the top layer, so the floating
+   panels and the dock never cover it; BasemapMenu places it next to its button. */
+.ov-basemap { position: relative; flex: none; }
+.ov-basemap-menu { position: fixed; inset: auto; z-index: 30; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; gap: 2px 4px; box-sizing: border-box; width: 280px; height: auto; max-height: min(420px, 60vh); margin: 0; padding: 6px; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); box-shadow: var(--ov-shadow); overscroll-behavior: contain; }
+.ov-basemap-menu[hidden] { display: none; }
+.ov-basemap-option { display: flex; align-items: center; gap: 8px; min-width: 0; height: 44px; padding: 0 8px; border-radius: 8px; cursor: pointer; font-size: 12.5px; }
+.ov-basemap-option:hover { background: var(--surface-2); }
+.ov-basemap-option:has(input:checked) { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.ov-basemap-option input { flex: none; width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+.ov-basemap-option span { display: -webkit-box; min-width: 0; overflow: hidden; line-height: 1.2; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.ov-basemap-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; padding: 0 6px; color: var(--muted); font-size: 12.5px; }
+.ov-basemap-row > span { flex: none; }
+.ov-basemap-row select { flex: 0 1 160px; min-width: 0; height: 44px; padding: 0 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 12.5px; }
 /* Legend and coordinates float bottom-right, above the dock. Kontrol takes
    that corner when it is open; the node card repeats the coordinates. */
 .ov-stage .map-bottom-overlay { position: absolute; z-index: 15; right: var(--ov-gap); bottom: calc(var(--ov-dock-h) + var(--ov-gap)); max-width: min(460px, calc(100% - 380px)); padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--ov-card-bg); box-shadow: var(--ov-shadow); }
@@ -310,6 +326,7 @@
   .ov-polar-plot { flex: 1 1 auto; width: auto; height: 260px; }
   .ov-spec-body { min-height: 120px; overflow: visible; }
   .ov-spec-waterfall { flex: none; height: 96px; }
+  .ov-basemap-menu { max-height: min(320px, 40vh); }
   .topbar-toolbar .ov-panel-toggles { width: 100%; }
   .topbar-toolbar .ov-panel-toggles button { flex: 1 1 0; }
   .ov-toggle-label { display: inline; }
@@ -321,6 +338,7 @@
 }
 @media (max-width: 600px) {
   .ov-stage { padding: var(--ov-gap) 16px; }
+  .ov-basemap-menu { width: min(280px, calc(100vw - 32px)); }
   .ov-spec-head { padding: 6px 12px; }
   .ov-control-fields { grid-template-columns: minmax(0, 1fr); }
   .ov-panel-toggles button { padding: 0 6px; }

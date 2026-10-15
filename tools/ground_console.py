@@ -1193,7 +1193,7 @@ HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: https://tile.openstreetmap.de https://tile.openstreetmap.org; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'">
 <title>__APP_NAME__</title>
 <style>
 :root {
@@ -2117,7 +2117,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         raw = body.encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data: https://tile.openstreetmap.de https://tile.openstreetmap.org; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org")
+        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(raw)))
@@ -2572,9 +2572,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             content_security_policy = (
                 "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
                 # blob: lets Plotly's "Download plot as a PNG" rasterize the
-                # plot it just serialized in this page.
-                "img-src 'self' data: blob: https://tile.openstreetmap.de https://tile.openstreetmap.org; "
-                "connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org; "
+                # plot it just serialized in this page. Basemap tiles come
+                # from this console (/api/tiles), so no tile host is listed.
+                "img-src 'self' data: blob:; "
+                "connect-src 'self'; "
                 "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
             )
         self.send_header("Content-Security-Policy", content_security_policy)
@@ -2619,7 +2620,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             body = body.replace("__APP_NAME__", escape(branding["app_name"], quote=True))
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data: https://tile.openstreetmap.de https://tile.openstreetmap.org; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' https://tile.openstreetmap.de https://tile.openstreetmap.org")
+            self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body.encode("utf-8"))))
