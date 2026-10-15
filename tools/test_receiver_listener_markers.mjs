@@ -17,6 +17,7 @@ const { listenerMarkers, listenerMarkerMethods } = await import(new URL('listene
 function recordingContext() {
 	const lines = [];
 	const labels = [];
+	const labelRows = [];
 	let x = null;
 	const context = {
 		font: '', textBaseline: '', strokeStyle: '', fillStyle: '', lineWidth: 1,
@@ -25,9 +26,9 @@ function recordingContext() {
 		lineTo() { lines.push({ x, color: context.strokeStyle }); },
 		measureText(text) { return { width: text.length * 6 }; },
 		fillRect() {},
-		fillText(text) { labels.push(text); },
+		fillText(text, _x, y) { labels.push(text); labelRows.push(y); },
 	};
-	return { context, lines, labels };
+	return { context, lines, labels, labelRows };
 }
 
 function listenerApp({ centerMhz = 100, sampleRate = 2_000_000, shiftMhz = 0, markers = [] } = {}) {
@@ -36,6 +37,7 @@ function listenerApp({ centerMhz = 100, sampleRate = 2_000_000, shiftMhz = 0, ma
 		radio: { centerFreq: centerMhz, sampleRate, frequencyShift: shiftMhz },
 		view: { zoomScale: 1, zoomOffset: 0 },
 		records: { markers },
+		vfos: [{}],
 		running: false,
 		drawn: 0,
 		_zoomRepaint: false,
@@ -69,10 +71,12 @@ test('only the markers inside the visible span are drawn, labelled like the Spek
 		{ id: 'out', frequencyHz: 102_000_000, powerDb: null, label: 'Far' },
 	] });
 	app.refreshListenerMarkers();
-	const { context, lines, labels } = recordingContext();
+	const { context, lines, labels, labelRows } = recordingContext();
 	app.drawListenerMarkers(context, 800, 200);
 	assert.deepEqual(lines.map(line => Math.round(line.x)), [600, 0], '100.5 MHz at 3/4 of a 99–101 MHz span, 99 MHz at its left edge');
 	assert.deepEqual(labels, ['Repeater 100.500 MHz', 'M2 99.000 MHz']);
+	// Under the VFO label, alternating left to right: 99 MHz is first, 100.5 MHz second.
+	assert.deepEqual(labelRows, [34, 18]);
 	assert.equal(lines[0].color, '#ff75a0', 'the Receiver marker colour (the builder adds the light theme one)');
 
 	// Zoomed to the upper half: the 99 MHz marker leaves the span.
