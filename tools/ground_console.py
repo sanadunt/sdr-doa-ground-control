@@ -2063,6 +2063,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         # Keep logs bounded and avoid echoing request bodies/settings.
         print("[ground-console] " + (fmt % args), flush=True)
 
+    def log_request(self, code: Any = "-", size: Any = "-") -> None:
+        # Docker and the launcher poll /api/health every few seconds; a healthy
+        # answer would bury the service log. Failures are still logged.
+        if urlsplit(self.path).path == "/api/health" and str(getattr(code, "value", code)) == "200":
+            return
+        super().log_request(code, size)
+
     @property
     def console_server(self) -> "GroundConsoleServer":
         return self.server  # type: ignore[return-value]

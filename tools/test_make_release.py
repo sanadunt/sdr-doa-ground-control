@@ -610,6 +610,14 @@ class PackagingScriptTests(unittest.TestCase):
         self.assertIn("cannot write", result.stderr)
         self.assertIn("--enable-config", result.stderr)
 
+    def test_install_agent_refuses_a_root_service_user(self):
+        result = subprocess.run(
+            [_sh(), str(ROOT / "packaging/agent/install-agent.sh"), "--dry-run", "--user", "root"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must not run as root", result.stderr)
+
     def test_install_agent_rejects_unsafe_values(self):
         result = subprocess.run(
             [_sh(), str(ROOT / "packaging/agent/install-agent.sh"), "--dry-run", "--mqtt-host", "1.2.3.4; rm"],

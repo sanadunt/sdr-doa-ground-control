@@ -408,6 +408,17 @@ class PreferencesHttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIs(body["ok"], True)
 
+    def test_healthy_health_checks_are_not_logged(self) -> None:
+        console = self.harness()
+        lines: List[str] = []
+        record = lambda _handler, fmt, *args: lines.append(fmt % args)  # noqa: E731
+        with patch.object(ground_console.ConsoleHandler, "log_message", record):
+            status, _ = console.request("GET", "/api/health", origin=None)
+            self.assertEqual(status, 200)
+            console.request("GET", "/api/preferences", origin=None)
+        self.assertFalse(any("/api/health" in line for line in lines), lines)
+        self.assertTrue(any("GET /api/preferences" in line for line in lines), lines)
+
 
 class VersionTests(unittest.TestCase):
     def setUp(self) -> None:

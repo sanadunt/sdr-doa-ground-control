@@ -293,6 +293,11 @@ choose_user() {
 }
 
 ensure_user() {
+  # The agent never needs root; a root service would also make a config patch
+  # able to write anywhere ProtectSystem allows.
+  if [ "$AGENT_USER" = root ] || { id "$AGENT_USER" >/dev/null 2>&1 && [ "$(id -u "$AGENT_USER")" = 0 ]; }; then
+    die "the agent must not run as root; pick the owner of settings.json with --user"
+  fi
   if id "$AGENT_USER" >/dev/null 2>&1; then
     AGENT_GROUP=$(id -gn "$AGENT_USER")
     CREATED_USER=0
