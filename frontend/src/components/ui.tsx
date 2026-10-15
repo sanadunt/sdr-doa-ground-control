@@ -47,16 +47,6 @@ export function Panel({
   );
 }
 
-export function SectionHeading({ eyebrow, title, detail }: { eyebrow: string; title: string; detail?: string }): JSX.Element {
-  return (
-    <div className="section-heading">
-      <div className="panel-eyebrow">{eyebrow}</div>
-      <h1>{title}</h1>
-      {detail ? <p>{detail}</p> : null}
-    </div>
-  );
-}
-
 export function EmptyState({ label, detail, tone = 'neutral' }: { label: string; detail: string; tone?: Tone }): JSX.Element {
   return (
     <div className={`empty-state empty-${tone}`} role="status">

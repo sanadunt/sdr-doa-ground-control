@@ -92,14 +92,14 @@ describe('Spectrum dock header', () => {
     expect(groups).toHaveLength(2);
     expect(groups[0]).toMatch(/^<label class="ov-spec-follow"[\s\S]*<select class="ov-listen-mode"[\s\S]*<button class="ov-button ov-spec-listen"[\s\S]*>Dengar<\/span><\/button>$/);
     expect(groups[1]).toMatch(/^<button class="ov-button ov-spec-run"[\s\S]*<button class="ov-button ov-spec-open"[\s\S]*<\/button>$/);
-    expect(groups[1]).toContain('<span class="ov-spec-open-label">Buka Receiver penuh</span><kbd aria-hidden="true">7</kbd>');
+    expect(groups[1]).toContain('<span class="ov-spec-open-label">Buka Receiver penuh</span><kbd aria-hidden="true">2</kbd>');
   });
 
   it('follows the node by default and keeps the Receiver shortcut', () => {
     const markup = dock(bridgeWith({ attach: false }));
     expect(markup).toMatch(/<input type="checkbox" checked=""\/><span>Ikuti frekuensi node<\/span>/);
-    expect(markup).toMatch(/<button class="ov-button ov-spec-open" type="button" aria-keyshortcuts="7" aria-label="Buka Receiver penuh">/);
-    expect(markup).toContain('<kbd aria-hidden="true">7</kbd>');
+    expect(markup).toMatch(/<button class="ov-button ov-spec-open" type="button" aria-keyshortcuts="2" aria-label="Buka Receiver penuh">/);
+    expect(markup).toContain('<kbd aria-hidden="true">2</kbd>');
     // Labels only: no explanatory tooltips on the follow switch, the trace or the Receiver link.
     expect(markup).toContain('<label class="ov-spec-follow"><input');
     expect(markup).not.toMatch(/class="ov-spec-trace[^"]*"[^>]*title=/);
@@ -182,7 +182,7 @@ describe('Spectrum dock states', () => {
     const markup = dock(bridgeWith({ status: status({ busy: 'scan-listen' }) }));
     expect(chip(markup)).toBe('BUSY');
     expect(markup).toContain('Pindai berjalan di halaman Receiver');
-    expect(markup).toContain('Buka Receiver (7)');
+    expect(markup).toContain('Buka Receiver (2)');
   });
 
   it('explains a lost RadioSpectrum', () => {

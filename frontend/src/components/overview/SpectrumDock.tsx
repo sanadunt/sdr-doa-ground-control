@@ -15,9 +15,13 @@ import { fieldFor, fieldRange, inFieldRange } from '../../lib/configPatch';
 import { followMemoryAtMount, followNodeStep, formatMhz, spanAround, spectrumDockView } from '../../lib/spectrumView';
 import type { DockNotice, FollowMemory } from '../../lib/spectrumView';
 import { useI18n } from '../../lib/i18n';
-import type { RouteName } from '../Shell';
+import { routeShortcut } from '../../lib/routes';
+import type { RouteName } from '../../lib/routes';
 import { Icon } from '../ui';
 import { SpectrumCanvas } from './SpectrumCanvas';
+
+// The Receiver page's shortcut key follows its place in the page menu.
+const RECEIVER_KEY = routeShortcut('receiver');
 
 /**
  * Props of the Overview spectrum dock. Every function prop is stable (state
@@ -392,7 +396,7 @@ export function SpectrumDock({
 
   const openReceiverButton = (
     <button className="ov-button ov-spec-inline-button" type="button" onClick={() => onNavigate('receiver')}>
-      <Icon name="external" /><span>{t('spectrum.openReceiverShort')}</span>
+      <Icon name="external" /><span>{t('spectrum.openReceiverShort', { key: RECEIVER_KEY })}</span>
     </button>
   );
   const frameText = notice?.message && (notice.code === 'CONNECT_FAILED' || notice.code === 'NOT_READY' || notice.code === 'INVALID_COMMAND') ? notice.message : null;
@@ -466,8 +470,8 @@ export function SpectrumDock({
           >
             <Icon name={running ? 'stop' : 'play'} /><span>{running ? t('spectrum.stop') : t('spectrum.start')}</span>
           </button>
-          <button className="ov-button ov-spec-open" type="button" aria-keyshortcuts="7" aria-label={t('spectrum.openReceiver')} onClick={() => onNavigate('receiver')}>
-            <Icon name="external" /><span className="ov-spec-open-label">{t('spectrum.openReceiver')}</span><kbd aria-hidden="true">7</kbd>
+          <button className="ov-button ov-spec-open" type="button" aria-keyshortcuts={RECEIVER_KEY} aria-label={t('spectrum.openReceiver')} onClick={() => onNavigate('receiver')}>
+            <Icon name="external" /><span className="ov-spec-open-label">{t('spectrum.openReceiver')}</span><kbd aria-hidden="true">{RECEIVER_KEY}</kbd>
           </button>
         </div>
       </div>

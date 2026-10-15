@@ -32,6 +32,14 @@ describe('dashboard wiring in App', () => {
     expect(renderApp('#/system-health')).not.toContain('ov-panel-toggles');
   });
 
+  it('opens the Dashboard at #/dashboard and still at #/overview', () => {
+    for (const hash of ['#/dashboard', '#/overview']) {
+      const markup = renderApp(hash);
+      expect(markup, hash).toContain('class="ov-panel-toggles"');
+      expect(markup, hash).toMatch(/<h1 class="visually-hidden" data-route-focus="true" tabindex="-1">Dashboard<\/h1>/);
+    }
+  });
+
   it('restores the stored panel choices', () => {
     const markup = renderApp('#/overview', { [OVERVIEW_PANELS_STORAGE_KEY]: JSON.stringify({ layers: true, polar: false, spectrum: true, control: false, nodeCollapsed: true }) });
     expect(markup).toMatch(/aria-pressed="true" aria-controls="panel-layers"/);

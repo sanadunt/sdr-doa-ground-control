@@ -130,3 +130,104 @@ export function adminErrorKey(error: unknown): MessageKey | null {
   if (error.status === 401) return 'config.adminRequired';
   return null;
 }
+
+/** A coordinate as the form shows it: at most 6 decimals (about 0.1 m), no trailing zeros. */
+export function coordinateText(value: number): string {
+  return Number.isFinite(value) ? String(Number(value.toFixed(6))) : '';
+}
+
+/** Which manual GPS field a gpsInputErrorKey message belongs to. */
+export function gpsErrorField(key: MessageKey): 'lat' | 'lon' {
+  return key === 'config.gpsLonNumber' || key === 'config.gpsLonRange' ? 'lon' : 'lat';
+}
+
+/**
+ * True for a host that stays on this machine: localhost, 127.0.0.0/8 or ::1
+ * (also in brackets). The no-TLS warning shows only for other hosts.
+ */
+export function isLoopbackHost(input: string): boolean {
+  const host = input.trim().toLowerCase().replace(/^\[(.*)\]$/u, '$1');
+  if (!host) return false;
+  if (host === 'localhost' || host === '::1' || host === '0:0:0:0:0:0:0:1') return true;
+  const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(host);
+  return Boolean(octets && Number(octets[1]) === 127 && octets.slice(2).every((part) => Number(part) <= 255));
+}
+
+/**
+ * The section index entry to mark as current. `sections` are in page order
+ * with their top edge relative to the viewport; a section is reached once its
+ * top is at or above `threshold` (where a jump puts it). Sections in one grid
+ * row share a top: the earlier one wins unless `preferred` (the last one
+ * jumped to) is among them. At the bottom of the page the sections below the
+ * threshold can never reach it, so the preferred one, when it is not above
+ * the reached row, or else the last section counts as current.
+ */
+export function activeSection(
+  sections: ReadonlyArray<{ id: string; top: number }>,
+  threshold: number,
+  atBottom: boolean,
+  preferred: string | null = null,
+): string | null {
+  if (!sections.length) return null;
+  let current = sections[0].id;
+  let currentTop = Number.NEGATIVE_INFINITY;
+  for (const section of sections) {
+    if (section.top > threshold + 1) continue;
+    if (section.top > currentTop + 1) {
+      current = section.id;
+      currentTop = section.top;
+    } else if (Math.abs(section.top - currentTop) <= 1 && section.id === preferred) {
+      current = section.id;
+    }
+  }
+  if (atBottom) {
+    const target = sections.find((section) => section.id === preferred);
+    if (target && target.top >= currentTop - 1) return target.id;
+    return sections[sections.length - 1].id;
+  }
+  return current;
+}
+
+export interface DryRunSummary {
+  validation: string | null;
+  transport: string | null;
+  baseConfigRev: number | null;
+  /** Normalized changes in the order the server returned them. */
+  changes: Array<{ key: string; value: number }>;
+  ttlMs: number | null;
+}
+
+function recordOrNull(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function shortText(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 && value.length <= 64 ? value : null;
+}
+
+/** The parts of a dry-run response the result grid shows; anything malformed is left out. */
+export function summarizeDryRun(result: Record<string, unknown>): DryRunSummary {
+  const command = recordOrNull(result.command);
+  const changes = recordOrNull(command?.changes);
+  const issued = command?.issued_ts_ms;
+  const expires = command?.expires_ts_ms;
+  const rev = command?.base_config_rev;
+  return {
+    validation: shortText(result.validation),
+    transport: shortText(result.transport),
+    baseConfigRev: typeof rev === 'number' && Number.isInteger(rev) && rev >= 0 ? rev : null,
+    changes: changes
+      ? Object.entries(changes)
+        .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]))
+        .map(([key, value]) => ({ key, value }))
+      : [],
+    ttlMs: typeof issued === 'number' && typeof expires === 'number' && Number.isFinite(issued) && Number.isFinite(expires) && expires > issued ? expires - issued : null,
+  };
+}
+
+/** SI unit of a config patch key on the wire (…_hz, …_db). */
+export function patchKeyUnit(key: string): 'Hz' | 'dB' | '' {
+  if (key.endsWith('_hz')) return 'Hz';
+  if (key.endsWith('_db')) return 'dB';
+  return '';
+}

@@ -244,7 +244,7 @@ export interface DockView {
   tone: DockTone;
   /** Text for the body, or null when the trace speaks for itself. */
   message: MessageKey | null;
-  /** Offer "Buka Receiver (7)" next to the message. */
+  /** Offer "Buka Receiver (key)" next to the message. */
   openReceiver: boolean;
   running: boolean;
   /** Mulai and Dengar cannot run (build missing or the Receiver is busy). */

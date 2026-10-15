@@ -8,48 +8,31 @@ import { THEME_STORAGE_KEY, readPreference, writePreference } from '../lib/prefe
 import { LANGS, gateReasonLabel, useI18n } from '../lib/i18n';
 import type { MessageKey, Translate } from '../lib/i18n';
 import { Icon } from './ui';
-import type { IconName } from './ui';
+import { ROUTES, routeFromHash, routeHash } from '../lib/routes';
+import type { RouteName } from '../lib/routes';
+import { PageReadAgeContext } from './page/pageContext';
 
-export type RouteName = 'overview' | 'system-health' | 'doa-diagnostics' | 'configuration' | 'message-monitor' | 'simulation' | 'receiver';
-
-export const ROUTES: Array<{ id: RouteName; icon: IconName }> = [
-  { id: 'overview', icon: 'overview' },
-  { id: 'system-health', icon: 'health' },
-  { id: 'doa-diagnostics', icon: 'diagnostics' },
-  { id: 'configuration', icon: 'configuration' },
-  { id: 'message-monitor', icon: 'monitor' },
-  { id: 'simulation', icon: 'polar' },
-  { id: 'receiver', icon: 'receiver' },
-];
+export { ROUTES, routeShortcut } from '../lib/routes';
+export type { RouteName } from '../lib/routes';
 
 /** A completed read counts as CURRENT for this long, whatever it contained. */
 export const SNAPSHOT_CURRENT_MS = 5_000;
-
-function routeFromHash(): RouteName {
-  const value = window.location.hash.replace(/^#\/?/, '').split(/[/?]/)[0];
-  if (ROUTES.some((route) => route.id === value)) return value as RouteName;
-  if (value === 'live-doa' || value === 'map') return 'overview';
-  if (value === 'health') return 'system-health';
-  if (value === 'diagnostics') return 'doa-diagnostics';
-  if (value === 'settings') return 'configuration';
-  if (value === 'mqtt') return 'message-monitor';
-  return 'overview';
-}
 
 /**
  * Hash route and a navigate function. The function is stable across renders,
  * so it can be passed to memoized pages without re-rendering them.
  */
 export function useRoute(): [RouteName, (route: RouteName) => void] {
-  const [route, setRoute] = useState<RouteName>(() => routeFromHash());
+  const [route, setRoute] = useState<RouteName>(() => routeFromHash(window.location.hash));
   useEffect(() => {
-    const onHashChange = () => setRoute(routeFromHash());
+    const onHashChange = () => setRoute(routeFromHash(window.location.hash));
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
   const navigate = useCallback((next: RouteName) => {
-    if (routeFromHash() === next) return;
-    window.location.hash = `/${next}`;
+    // #/overview and #/dashboard are one page, so only a page change writes the hash.
+    if (routeFromHash(window.location.hash) === next) return;
+    window.location.hash = routeHash(next);
   }, []);
   return [route, navigate];
 }
@@ -341,11 +324,9 @@ export function ConsoleShell({
           </div>
         </header>
         {readError ? <div className="read-error-banner" role="alert"><i aria-hidden="true" /><span>{t('shell.snapshotError', { error: readError })}</span></div> : null}
-        <main id="console-content" tabIndex={-1} aria-label={overview ? routeLabel : undefined} className={`page-content ${overview ? 'page-content-overview' : route === 'receiver' ? 'page-content-receiver' : ''}`}>{children}</main>
-        <footer className="console-footer">
-          <span>{t('shell.footerLeft')}</span>
-          <span>{t('shell.footerRight')}</span>
-        </footer>
+        <main id="console-content" tabIndex={-1} aria-label={overview ? routeLabel : undefined} className={`page-content ${overview ? 'page-content-overview' : route === 'receiver' ? 'page-content-receiver' : ''}`}>
+          <PageReadAgeContext.Provider value={overview ? null : readLabel}>{children}</PageReadAgeContext.Provider>
+        </main>
       </div>
     </div>
   );
