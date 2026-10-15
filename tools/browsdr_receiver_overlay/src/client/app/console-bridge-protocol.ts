@@ -24,6 +24,7 @@ export const CONSOLE_MESSAGE_TYPES = [
 	'console:tune',
 	'console:vfo',
 	'console:listen',
+	'console:display',
 ] as const;
 /** Demodulator modes in UI order; the keys of MODE_DEFAULTS in constants.ts. */
 export const LISTEN_MODES = ['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw'] as const;
@@ -70,6 +71,11 @@ export const TUNE_LIMITS = { minHz: 1_000_000, maxHz: 6_000_000_000 } as const;
  */
 export const SWEEP_LIMITS = { minHz: 1_000_000, maxHz: 7_250_000_000 } as const;
 export const VOLUME_LIMITS = { min: 0, max: 100 } as const;
+/**
+ * Manual dB range of the Listener's spectrum and waterfall (the Dengar tab's
+ * dB scale): the graph limits of the wide scan, at least minGapDb apart.
+ */
+export const DISPLAY_DB_LIMITS = { minDb: -160, maxDb: 60, minGapDb: 5 } as const;
 export const COMMAND_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 /** Status changes are sent at most this often. */
 export const STATUS_DEBOUNCE_MS = 100;
@@ -105,6 +111,8 @@ export type ConsoleCommand =
 	| { type: 'console:tune'; id: string; centerHz: number; vfoHz?: number }
 	| { type: 'console:vfo'; id: string; mode?: ListenMode; frequencyHz?: number; volume?: number }
 	| { type: 'console:listen'; id: string; enabled: boolean }
+	/** Without minDb and maxDb the Listener keeps its manual range. */
+	| { type: 'console:display'; id: string; auto: boolean; minDb?: number; maxDb?: number }
 	/** A console command with a usable id whose payload is wrong; answered with INVALID_COMMAND. */
 	| { type: 'invalid'; id: string };
 
@@ -140,6 +148,17 @@ export interface ResultTune extends TuneStamp {
 	vfoHz: number | null;
 }
 
+/** A manual dB range in DISPLAY_DB_LIMITS. */
+export interface DisplayRangeDb {
+	minDb: number;
+	maxDb: number;
+}
+
+/** The Listener's dB scale: Auto, or the manual range (kept while Auto is on). */
+export interface StatusDisplay extends DisplayRangeDb {
+	auto: boolean;
+}
+
 export interface ReceiverStatus {
 	seq: number;
 	tMs: number;
@@ -163,6 +182,7 @@ export interface ReceiverStatus {
 	error: { code: StatusErrorCode } | null;
 	notice: string | null;
 	tune: TuneStamp;
+	display: StatusDisplay;
 }
 
 export interface CroppedSpectrum {
@@ -188,6 +208,24 @@ function optionalHz(value: unknown): number | undefined | null {
 function clampNumber(value: unknown, minimum: number, maximum: number, fallback: number): number {
 	if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
 	return Math.min(maximum, Math.max(minimum, value));
+}
+
+/** 0.1 dB steps, so both sides store the same value. */
+function roundDb(value: number): number {
+	return Math.round(value * 10) / 10;
+}
+
+/**
+ * A manual dB range kept inside DISPLAY_DB_LIMITS: the minimum first (at most
+ * maxDb − minGapDb), then the maximum at least minGapDb above it, both in
+ * 0.1 dB steps. null when either is not a finite number.
+ */
+export function clampDisplayRange(minDb: unknown, maxDb: unknown): DisplayRangeDb | null {
+	if (typeof minDb !== 'number' || !Number.isFinite(minDb) || typeof maxDb !== 'number' || !Number.isFinite(maxDb)) return null;
+	const { minDb: floor, maxDb: ceiling, minGapDb: gap } = DISPLAY_DB_LIMITS;
+	const min = roundDb(Math.min(ceiling - gap, Math.max(floor, roundDb(minDb))));
+	const max = roundDb(Math.min(ceiling, Math.max(min + gap, roundDb(maxDb))));
+	return { minDb: min, maxDb: max };
 }
 
 /** Clamps a requested subscription; values that are not finite numbers take the default. */
@@ -261,6 +299,12 @@ export function parseConsoleMessage(data: unknown): ConsoleCommand | null {
 		}
 		case 'console:listen':
 			return typeof data.enabled === 'boolean' ? { type, id, enabled: data.enabled } : invalid;
+		case 'console:display': {
+			if (typeof data.auto !== 'boolean' || (data.minDb === undefined) !== (data.maxDb === undefined)) return invalid;
+			if (data.minDb === undefined) return { type, id, auto: data.auto };
+			const range = clampDisplayRange(data.minDb, data.maxDb);
+			return range ? { type, id, auto: data.auto, ...range } : invalid;
+		}
 		default:
 			return null;
 	}

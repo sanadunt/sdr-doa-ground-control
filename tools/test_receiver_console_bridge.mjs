@@ -26,7 +26,7 @@ const { makeDefaultVfo, MODE_DEFAULTS } = await import(new URL('../vendor/BrowSD
 const {
 	BRIDGE_CHANNEL, BRIDGE_VERSION, FRAME_MESSAGE_TYPES, CONSOLE_MESSAGE_TYPES, LISTEN_MODES, RESULT_CODES,
 	STATUS_ERROR_CODES, SUBSCRIBE_LIMITS, SPECTRUM_FLOOR_DB, TUNE_SOURCES, SWEEP_LIMITS, STATUS_DEBOUNCE_MS,
-	STATUS_URGENT_MIN_MS, clampSubscription, cropSpectrum, createFrameThrottle, parseConsoleMessage,
+	STATUS_URGENT_MIN_MS, DISPLAY_DB_LIMITS, clampDisplayRange, clampSubscription, cropSpectrum, createFrameThrottle, parseConsoleMessage,
 } = protocol;
 const { SWEEP_MIN_FREQUENCY_HZ, SWEEP_MAX_FREQUENCY_HZ } = await import(new URL('./browsdr_receiver_overlay/src/client/worker/sweep-types.ts', import.meta.url).href);
 
@@ -167,6 +167,7 @@ function receiverApp({ audioAllowed = true, openOk = true, mockSdrEnabled = fals
 		remoteMode: 'none',
 		activeWorkspace: 'spectrum',
 		radio: { centerFreq: 100, frequencyShift: 0, sampleRate: 20_000_000, fftSize: 65536, iqCorrection: true },
+		display: { minDB: -70, maxDB: 0, auto: true },
 		gains: {},
 		deviceCapabilities: null,
 		info: { boardName: '' },
@@ -249,6 +250,7 @@ test('protocol constants match the console contract', () => {
 	assert.deepEqual([...FRAME_MESSAGE_TYPES], ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result']);
 	assert.deepEqual([...CONSOLE_MESSAGE_TYPES], [
 		'console:hello', 'console:subscribe', 'console:start', 'console:stop', 'console:tune', 'console:vfo', 'console:listen',
+		'console:display',
 	]);
 	assert.deepEqual([...LISTEN_MODES], ['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw']);
 	assert.deepEqual([...LISTEN_MODES].sort(), Object.keys(MODE_DEFAULTS).sort(), 'every Receiver mode, nothing else');
@@ -264,6 +266,19 @@ test('protocol constants match the console contract', () => {
 	assert.deepEqual({ ...SWEEP_LIMITS }, { minHz: SWEEP_MIN_FREQUENCY_HZ, maxHz: SWEEP_MAX_FREQUENCY_HZ }, 'the Receiver sweep range');
 	assert.equal(STATUS_DEBOUNCE_MS, 100);
 	assert.equal(STATUS_URGENT_MIN_MS, 20);
+	assert.deepEqual({ ...DISPLAY_DB_LIMITS }, { minDb: -160, maxDb: 60, minGapDb: 5 }, 'the scan graph limits');
+});
+
+test('clampDisplayRange keeps a manual range inside the graph limits, min first', () => {
+	assert.deepEqual(clampDisplayRange(-90, -20), { minDb: -90, maxDb: -20 });
+	assert.deepEqual(clampDisplayRange(-90.04, -19.96), { minDb: -90, maxDb: -20 }, '0.1 dB steps');
+	assert.deepEqual(clampDisplayRange(-200, 100), { minDb: -160, maxDb: 60 });
+	assert.deepEqual(clampDisplayRange(-20, -90), { minDb: -20, maxDb: -15 }, 'an inverted range keeps the minimum');
+	assert.deepEqual(clampDisplayRange(-40, -38), { minDb: -40, maxDb: -35 }, 'at least 5 dB apart');
+	assert.deepEqual(clampDisplayRange(70, 80), { minDb: 55, maxDb: 60 });
+	for (const [min, max] of [[Number.NaN, 0], [-70, Infinity], ['-70', 0], [null, 0], [-70, undefined]]) {
+		assert.equal(clampDisplayRange(min, max), null, `${min}, ${max}`);
+	}
 });
 
 test('parseConsoleMessage ignores foreign envelopes and unusable ids', () => {
@@ -300,6 +315,10 @@ test('parseConsoleMessage marks a wrong payload invalid and normalizes valid one
 	assert.deepEqual(parseConsoleMessage(envelope('console:vfo', { volume: null })), invalid);
 	assert.deepEqual(parseConsoleMessage(envelope('console:start', { mock: 'true' })), invalid);
 	assert.deepEqual(parseConsoleMessage(envelope('console:start', { mode: 'NFM' })), invalid);
+	assert.deepEqual(parseConsoleMessage(envelope('console:display', {})), invalid);
+	assert.deepEqual(parseConsoleMessage(envelope('console:display', { auto: 'false' })), invalid);
+	assert.deepEqual(parseConsoleMessage(envelope('console:display', { auto: false, minDb: -90 })), invalid, 'both limits or neither');
+	assert.deepEqual(parseConsoleMessage(envelope('console:display', { auto: false, minDb: -90, maxDb: '-20' })), invalid);
 
 	assert.deepEqual(parseConsoleMessage(envelope('console:tune', { centerHz: 433_920_000.4, vfoHz: 434_000_000 })),
 		{ type: 'console:tune', id: 'c2-x', centerHz: 433_920_000, vfoHz: 434_000_000 });
@@ -308,6 +327,9 @@ test('parseConsoleMessage marks a wrong payload invalid and normalizes valid one
 	assert.deepEqual(parseConsoleMessage(envelope('console:start', {})), { type: 'console:start', id: 'c2-x', mock: false, listen: false });
 	assert.deepEqual(parseConsoleMessage(envelope('console:vfo', { mode: 'usb', volume: 30 })), { type: 'console:vfo', id: 'c2-x', mode: 'usb', volume: 30 });
 	assert.deepEqual(parseConsoleMessage(envelope('console:stop', { extra: 1 })), { type: 'console:stop', id: 'c2-x' });
+	assert.deepEqual(parseConsoleMessage(envelope('console:display', { auto: true })), { type: 'console:display', id: 'c2-x', auto: true });
+	assert.deepEqual(parseConsoleMessage(envelope('console:display', { auto: false, minDb: -200, maxDb: -199 })),
+		{ type: 'console:display', id: 'c2-x', auto: false, minDb: -160, maxDb: -155 }, 'clamped like the console sends it');
 	assert.deepEqual(parseConsoleMessage(envelope('console:subscribe', { spectrum: true, bins: 9999, fps: 0, spanHz: 10 })),
 		{ type: 'console:subscribe', id: 'c2-x', spectrum: true, bins: 2048, fps: 1, spanHz: 100_000 });
 });
@@ -476,7 +498,7 @@ test('without WebUSB the paired count stays unknown', async t => {
 const STATUS_KEYS = [
 	'ch', 'v', 'type', 'seq', 'tMs', 'webusb', 'mockAvailable', 'pairedCount', 'connected', 'mock', 'deviceName', 'running', 'busy',
 	'workspace', 'centerHz', 'sampleRateHz', 'frequencyShiftHz', 'gains', 'vfo', 'squelchOpen', 'audio', 'recording', 'error', 'notice',
-	'tune',
+	'tune', 'display',
 ];
 
 test('status reports the radio in Hz with the documented fields', async t => {
@@ -502,6 +524,7 @@ test('status reports the radio in Hz with the documented fields', async t => {
 		vfo: { index: 0, enabled: false, mode: 'nfm', frequencyHz: 433_925_000, bandwidthHz: 12_500, squelchEnabled: false, squelchDb: -100, volume: 50 },
 		squelchOpen: true, audio: 'none', recording: true, error: null, notice: null,
 		tune: { rev: 1, by: 'console', id: 's1', receiverRev: 0 },
+		display: { auto: true, minDb: -70, maxDb: 0 },
 	});
 	assert.equal(status.notice, 'Connected to Mock SDR', 'the visible snackbar text, through tm()');
 	app.snackbar.show = false;
@@ -1078,6 +1101,45 @@ test('a malformed command gets INVALID_COMMAND; hello and subscribe never fail',
 	assert.deepEqual(result('bad-1'), { ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 'bad-1', ok: false, code: 'INVALID_COMMAND' });
 	frame.send('console:subscribe', { id: 'sub-4', spectrum: true, bins: 1e9 });
 	assert.equal(result('sub-4').code, 'OK');
+});
+
+test('display sets the Dengar dB scale, also during a scan, and the status reports it', async t => {
+	const { frame, app, clock, flushWatchers, messages, result } = setup(t);
+	frame.send('console:display', { id: 'd1', auto: false, minDb: -90, maxDb: -20 });
+	assert.deepEqual(result('d1'), { ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 'd1', ok: true, code: 'OK' });
+	assert.deepEqual(app.display, { minDB: -90, maxDB: -20, auto: false });
+	flushWatchers();
+	clock.advance(STATUS_DEBOUNCE_MS);
+	assert.deepEqual(messages('receiver:status').at(-1).display, { auto: false, minDb: -90, maxDb: -20 });
+
+	// Auto without limits keeps the manual range for the next Manual.
+	frame.send('console:display', { id: 'd2', auto: true });
+	assert.equal(result('d2').code, 'OK');
+	assert.deepEqual(app.display, { minDB: -90, maxDB: -20, auto: true });
+
+	for (const busy of ['active', 'listening']) {
+		app.sweep[busy] = true;
+		frame.send('console:display', { id: `d-${busy}`, auto: false, minDb: -100, maxDb: -40 });
+		assert.equal(result(`d-${busy}`).code, 'OK', `a display change is not a radio command (${busy})`);
+		app.sweep[busy] = false;
+	}
+	assert.deepEqual(app.display, { minDB: -100, maxDB: -40, auto: false });
+
+	frame.send('console:display', { id: 'd3', auto: false, minDb: -90 });
+	assert.equal(result('d3').code, 'INVALID_COMMAND');
+	assert.deepEqual(app.display, { minDB: -100, maxDB: -40, auto: false });
+});
+
+test('status reports a damaged or missing display range as the Listener default', async t => {
+	const { app, clock, flushWatchers, messages } = setup(t);
+	app.display = { minDB: 'loud', maxDB: 0 };
+	flushWatchers();
+	clock.advance(STATUS_DEBOUNCE_MS);
+	assert.deepEqual(messages('receiver:status').at(-1).display, { auto: true, minDb: -70, maxDb: 0 });
+	app.display = null;
+	flushWatchers();
+	clock.advance(STATUS_DEBOUNCE_MS);
+	assert.deepEqual(messages('receiver:status').at(-1).display, { auto: true, minDb: -70, maxDb: 0 });
 });
 
 test('initialVfoEnabled keeps the Receiver page default outside a console start', async t => {

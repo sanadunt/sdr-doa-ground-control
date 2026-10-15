@@ -27,6 +27,7 @@ export const CONSOLE_MESSAGE_TYPES = [
   'console:tune',
   'console:vfo',
   'console:listen',
+  'console:display',
 ] as const;
 /** Demodulator modes in UI order; the keys of the Receiver's MODE_DEFAULTS. */
 export const LISTEN_MODES = ['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw'] as const;
@@ -73,6 +74,11 @@ export const TUNE_LIMITS = { minHz: 1_000_000, maxHz: 6_000_000_000 } as const;
  */
 export const SWEEP_LIMITS = { minHz: 1_000_000, maxHz: 7_250_000_000 } as const;
 export const VOLUME_LIMITS = { min: 0, max: 100 } as const;
+/**
+ * Manual dB range of the Receiver's RX (Dengar) spectrum and waterfall, which
+ * the Spektrum dock mirrors: the Receiver's graph limits, at least minGapDb apart.
+ */
+export const DISPLAY_DB_LIMITS = { minDb: -160, maxDb: 60, minGapDb: 5 } as const;
 export const COMMAND_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 /** Spectrum bins with no finite power are sent as this level. */
 export const SPECTRUM_FLOOR_DB = -200;
@@ -140,6 +146,17 @@ export interface ResultTune extends TuneStamp {
   vfoHz: number | null;
 }
 
+/** A manual dB range in DISPLAY_DB_LIMITS. */
+export interface DisplayRangeDb {
+  minDb: number;
+  maxDb: number;
+}
+
+/** The Receiver's RX dB scale: Auto, or the manual range (kept while Auto is on). */
+export interface StatusDisplay extends DisplayRangeDb {
+  auto: boolean;
+}
+
 export interface ReceiverStatus {
   seq: number;
   tMs: number | null;
@@ -165,6 +182,8 @@ export interface ReceiverStatus {
   notice: string | null;
   /** null when the frame sends no valid stamp; the console then cannot attribute a retune. */
   tune: TuneStamp | null;
+  /** RX dB scale; null from a frame that does not report it. */
+  display: StatusDisplay | null;
 }
 
 export interface SpectrumFrame {
@@ -202,7 +221,9 @@ export type BridgeCommand =
   | { type: 'console:stop' }
   | { type: 'console:tune'; centerHz: number; vfoHz?: number }
   | { type: 'console:vfo'; mode?: ListenMode; frequencyHz?: number; volume?: number }
-  | { type: 'console:listen'; enabled: boolean };
+  | { type: 'console:listen'; enabled: boolean }
+  /** Without minDb and maxDb the Receiver keeps its manual range. */
+  | { type: 'console:display'; auto: boolean; minDb?: number; maxDb?: number };
 
 const MAX_TEXT_CHARS = 300;
 const MAX_DEVICE_NAME_CHARS = 80;
@@ -258,6 +279,24 @@ function clampNumber(value: unknown, minimum: number, maximum: number, fallback:
   return Math.min(maximum, Math.max(minimum, value));
 }
 
+/** 0.1 dB steps, so both sides store the same value. */
+function roundDb(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+/**
+ * A manual dB range kept inside DISPLAY_DB_LIMITS the way the frame keeps it:
+ * the minimum first (at most maxDb − minGapDb), then the maximum at least
+ * minGapDb above it, both in 0.1 dB steps. null when either is not a finite number.
+ */
+export function clampDisplayRange(minDb: unknown, maxDb: unknown): DisplayRangeDb | null {
+  if (typeof minDb !== 'number' || !Number.isFinite(minDb) || typeof maxDb !== 'number' || !Number.isFinite(maxDb)) return null;
+  const { minDb: floor, maxDb: ceiling, minGapDb: gap } = DISPLAY_DB_LIMITS;
+  const min = roundDb(Math.min(ceiling - gap, Math.max(floor, roundDb(minDb))));
+  const max = roundDb(Math.min(ceiling, Math.max(min + gap, roundDb(maxDb))));
+  return { minDb: min, maxDb: max };
+}
+
 /** Clamps a requested subscription exactly as the frame does; non-numbers take the default. */
 export function clampSubscription(raw: { spectrum?: unknown; bins?: unknown; fps?: unknown; spanHz?: unknown }): Subscription {
   const limits = SUBSCRIBE_LIMITS;
@@ -288,6 +327,12 @@ function normalizeResultTune(value: unknown): ResultTune | null {
   const stamp = normalizeTuneStamp(value);
   if (!stamp || !isRecord(value)) return null;
   return { ...stamp, centerHz: hzOrNull(value.centerHz), vfoHz: hzOrNull(value.vfoHz) };
+}
+
+function normalizeDisplay(value: unknown): StatusDisplay | null {
+  if (!isRecord(value) || typeof value.auto !== 'boolean') return null;
+  const range = clampDisplayRange(value.minDb, value.maxDb);
+  return range ? { auto: value.auto, ...range } : null;
 }
 
 function normalizeVfo(value: unknown): StatusVfo | null {
@@ -339,6 +384,7 @@ export function normalizeReceiverStatus(value: unknown): ReceiverStatus | null {
     error,
     notice: boundedText(value.notice, MAX_TEXT_CHARS),
     tune: normalizeTuneStamp(value.tune),
+    display: normalizeDisplay(value.display),
   };
 }
 
@@ -455,6 +501,12 @@ export function commandMessage(id: string, command: BridgeCommand): Record<strin
     }
     case 'console:listen':
       return { ...envelope, enabled: command.enabled === true };
+    case 'console:display': {
+      const message: Record<string, unknown> = { ...envelope, auto: command.auto === true };
+      const range = clampDisplayRange(command.minDb, command.maxDb);
+      if (range) Object.assign(message, range);
+      return message;
+    }
     default:
       return envelope;
   }

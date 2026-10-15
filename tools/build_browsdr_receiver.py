@@ -1203,7 +1203,36 @@ def _apply_embedded_changes(source: Path) -> None:
     ):
         _replace_once(listener_canvas, dark_color, light_color, "theme Listener canvas colors")
 
-    theme_css = (PROJECT_ROOT / "frontend/src/receiver-embedded-theme.css").read_text(
+    # The Dengar tab's dB scale (overlay listener-display.ts): the trace and the
+    # waterfall draw with the Auto or Manual range instead of display.minDB/maxDB.
+    _replace_once(
+        listener_canvas,
+        "\t\tthis._waterfallEngine.setRange(this.display.minDB, this.display.maxDB);\n",
+        "\t\tthis._listenerEngineRange = null;\n"
+        "\t\tthis.syncListenerEngineRange(true);\n",
+        "Listener waterfall range from the dB scale",
+    )
+    _replace_once(
+        listener_canvas,
+        "\t\tconst dbRange = this.display.maxDB - this.display.minDB;\n",
+        "\t\tconst displayRange = this.listenerDbRange();\n"
+        "\t\tconst dbRange = displayRange.max - displayRange.min;\n",
+        "Listener trace range from the dB scale",
+    )
+    _replace_once(
+        listener_canvas,
+        "\t\t\tvalDB = Math.max(this.display.minDB, Math.min(this.display.maxDB, valDB));\n",
+        "\t\t\tvalDB = Math.max(displayRange.min, Math.min(displayRange.max, valDB));\n",
+        "Listener trace clamp from the dB scale",
+    )
+    _replace_once(
+        listener_canvas,
+        "\t\t\tconst n = (valDB - this.display.minDB) / dbRange;\n",
+        "\t\t\tconst n = (valDB - displayRange.min) / dbRange;\n",
+        "Listener trace position from the dB scale",
+    )
+
+    theme_css =(PROJECT_ROOT / "frontend/src/receiver-embedded-theme.css").read_text(
         encoding="utf-8"
     )
     style.write_text(
@@ -1285,15 +1314,18 @@ def _write_source_instructions(source: Path) -> None:
         "unmeasured power stays null. Sweep startup stops RX before scanning, and "
         "acquisition controls unlock when the scan is stopped. Graph range defaults to "
         "-60 dBFS and supports a +60 dBFS ceiling, rescaling Spectrum and Waterfall data "
-        "without changing the captured scan. The Spectrum workspace uses a high-contrast "
+        "without changing the captured scan. The Listener has a dB scale (Auto fits the "
+        "visible spectrum, Manual takes a minimum and maximum) for its trace and waterfall, "
+        "saved with its settings. The Spectrum workspace uses a high-contrast "
         "blue-to-red trace; both charts show a cursor crosshair, and Waterfall reports "
         "frequency, power, and history row in its hover tooltip. Public media, worker, "
         "asset, and PWA paths are scoped to /receiver/. The embedded page registers no "
         "service worker (sw.js only removes the caching worker of older builds), loads no "
         "remote fonts, takes the console theme and language from its URL before first paint, "
         "and offers the Mock SDR only when opened with ?mock=1. Inside the console's same-origin "
-        "frame, a postMessage bridge lets the console dashboard start and stop RX, tune, listen "
-        "and receive a cropped spectrum; it stamps each tuning change with its source, and during "
+        "frame, a postMessage bridge lets the console dashboard start and stop RX, tune, listen, "
+        "set the Listener dB scale and receive a cropped spectrum; it stamps each tuning change "
+        "with its source, and during "
         "a wide scan its tune and VFO changes only update the stopped Listener's settings.\n\n"
         "Build with Node.js 22 or later: run npm ci --ignore-scripts, then npm run build -- --base=/receiver/. "
         "The Ground Console repository also includes tools/build_browsdr_receiver.py, "

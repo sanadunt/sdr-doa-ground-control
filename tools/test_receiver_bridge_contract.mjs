@@ -28,6 +28,7 @@ const SHARED = [
 	'TUNE_LIMITS',
 	'SWEEP_LIMITS',
 	'VOLUME_LIMITS',
+	'DISPLAY_DB_LIMITS',
 	'SPECTRUM_FLOOR_DB',
 ];
 
@@ -67,5 +68,31 @@ test('subscription clamping agrees', () => {
 	];
 	for (const input of inputs) {
 		assert.deepEqual(consoleSide.clampSubscription(input), frameSide.clampSubscription(input), JSON.stringify(input));
+	}
+});
+
+test('display range clamping agrees, and the console takes the range the frame reports', () => {
+	const pairs = [
+		[-90, -20], [-90.04, -19.96], [-200, 100], [-20, -90], [-40, -38], [70, 80], [-160, -155], [55, 60],
+		[Number.NaN, 0], [-70, Infinity], ['-70', 0], [null, 0], [-70, undefined],
+	];
+	for (const [min, max] of pairs) {
+		assert.deepEqual(consoleSide.clampDisplayRange(min, max), frameSide.clampDisplayRange(min, max), `${min}, ${max}`);
+	}
+	const sent = frameSide.clampDisplayRange(-97.3, -12.7);
+	const status = consoleSide.normalizeReceiverStatus({ seq: 1, display: { auto: false, ...sent } });
+	assert.deepEqual(status.display, { auto: false, minDb: -97.3, maxDb: -12.7 });
+});
+
+test('a console:display the console sends is one the frame accepts unchanged', () => {
+	for (const command of [
+		{ type: 'console:display', auto: true },
+		{ type: 'console:display', auto: false, minDb: -90, maxDb: -20 },
+		{ type: 'console:display', auto: false, minDb: -300, maxDb: -299 },
+	]) {
+		const wire = consoleSide.commandMessage('c9-d', command);
+		const parsed = frameSide.parseConsoleMessage(wire);
+		const { ch: _ch, v: _v, ...payload } = wire;
+		assert.deepEqual(parsed, payload, JSON.stringify(command));
 	}
 });

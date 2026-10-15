@@ -249,6 +249,38 @@
 					</div>
 				</div>
 
+				<!-- dB scale of the trace and waterfall (listener-display.ts); the console's Spektrum dock mirrors it. -->
+				<div class="panel">
+					<div class="panel-header panel-header-collapsible" @click="togglePanel('dbScale')">
+						<span>{{ t('dB scale') }}</span>
+						<svg class="panel-chevron" :class="{ 'panel-chevron-collapsed': collapsedPanels['dbScale'] }" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
+					</div>
+					<div class="panel-body" v-show="!collapsedPanels['dbScale']">
+						<div class="form-row">
+							<div class="listener-db-mode" role="group" :aria-label="t('dB scale')">
+								<button type="button" :aria-pressed="display.auto !== false" @click="setListenerDbAuto(true)">Auto</button>
+								<button type="button" :aria-pressed="display.auto === false" @click="setListenerDbAuto(false)">{{ t('Manual') }}</button>
+							</div>
+						</div>
+						<template v-if="display.auto === false">
+							<div class="form-row">
+								<label for="listener-db-min">{{ t('Minimum') }}</label>
+								<div class="input-group">
+									<input id="listener-db-min" type="number" :value="display.minDB" min="-160" :max="display.maxDB - 5" step="5" @change="commitListenerDbRange('min', $event)">
+									<span>dBFS</span>
+								</div>
+							</div>
+							<div class="form-row">
+								<label for="listener-db-max">{{ t('Maximum') }}</label>
+								<div class="input-group">
+									<input id="listener-db-max" type="number" :value="display.maxDB" :min="display.minDB + 5" max="60" step="5" @change="commitListenerDbRange('max', $event)">
+									<span>dBFS</span>
+								</div>
+							</div>
+						</template>
+					</div>
+				</div>
+
 				<div class="panel" v-for="(vfo, i) in vfos" :key="'vfo-panel-' + i" :class="{ disabled: !connected, 'panel-oob': !isFreqInBandwidth(vfo.freq) }">
 					<div class="panel-header panel-header-collapsible" style="display: flex; justify-content: space-between; align-items: center;" @click="togglePanel('vfo-' + i)">
 						<div style="display: flex; align-items: center; gap: 6px;">

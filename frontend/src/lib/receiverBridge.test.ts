@@ -6,6 +6,7 @@ import {
   BRIDGE_VERSION,
   COMMAND_TIMEOUT_MS,
   CONSOLE_MESSAGE_TYPES,
+  DISPLAY_DB_LIMITS,
   FRAME_MESSAGE_TYPES,
   HELLO_TIMEOUT_MS,
   LISTEN_MODES,
@@ -17,6 +18,7 @@ import {
   SWEEP_LIMITS,
   TUNE_LIMITS,
   TUNE_SOURCES,
+  clampDisplayRange,
   clampSubscription,
   commandMessage,
   normalizeTuneStamp,
@@ -104,7 +106,7 @@ describe('receiver bridge protocol', () => {
     expect(BRIDGE_CHANNEL).toBe('sdr-console-receiver');
     expect(BRIDGE_VERSION).toBe(1);
     expect([...FRAME_MESSAGE_TYPES]).toEqual(['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result']);
-    expect([...CONSOLE_MESSAGE_TYPES]).toEqual(['console:hello', 'console:subscribe', 'console:start', 'console:stop', 'console:tune', 'console:vfo', 'console:listen']);
+    expect([...CONSOLE_MESSAGE_TYPES]).toEqual(['console:hello', 'console:subscribe', 'console:start', 'console:stop', 'console:tune', 'console:vfo', 'console:listen', 'console:display']);
     expect([...LISTEN_MODES]).toEqual(['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw']);
     expect([...RESULT_CODES]).toEqual(['OK', 'NOT_READY', 'INVALID_COMMAND', 'NO_WEBUSB', 'NEEDS_PAIRING', 'NEEDS_DEVICE_CHOICE', 'MOCK_UNAVAILABLE', 'CONNECT_FAILED', 'SWEEP_BUSY', 'RX_NOT_RUNNING', 'OUT_OF_RANGE', 'AUDIO_BLOCKED', 'TIMEOUT']);
     expect([...STATUS_ERROR_CODES]).toEqual(['USB_LOST', 'RX_ERROR', 'NO_WEBUSB']);
@@ -113,6 +115,28 @@ describe('receiver bridge protocol', () => {
     expect(TUNE_LIMITS).toEqual({ minHz: 1_000_000, maxHz: 6_000_000_000 });
     // Scans and Receiver markers reach 7.25 GHz; RX tuning stops at 6 GHz.
     expect(SWEEP_LIMITS).toEqual({ minHz: 1_000_000, maxHz: 7_250_000_000 });
+    expect(DISPLAY_DB_LIMITS).toEqual({ minDb: -160, maxDb: 60, minGapDb: 5 });
+  });
+
+  it('keeps a manual dB range inside the graph limits, minimum first', () => {
+    expect(clampDisplayRange(-90, -20)).toEqual({ minDb: -90, maxDb: -20 });
+    expect(clampDisplayRange(-200, 100)).toEqual({ minDb: -160, maxDb: 60 });
+    expect(clampDisplayRange(-20, -90)).toEqual({ minDb: -20, maxDb: -15 });
+    expect(clampDisplayRange(-40.04, -38)).toEqual({ minDb: -40, maxDb: -35 });
+    expect(clampDisplayRange(Number.NaN, 0)).toBeNull();
+    expect(clampDisplayRange('-90', -20)).toBeNull();
+  });
+
+  it('reads the RX dB scale of a status and treats a missing or malformed one as unknown', () => {
+    const display = (value: unknown) => {
+      const parsed = parseFrameMessage({ ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:status', ...status({ display: value }) });
+      return parsed?.type === 'receiver:status' ? parsed.status.display : 'not parsed';
+    };
+    expect(display({ auto: false, minDb: -90, maxDb: -20 })).toEqual({ auto: false, minDb: -90, maxDb: -20 });
+    expect(display({ auto: true, minDb: -300, maxDb: 300 })).toEqual({ auto: true, minDb: -160, maxDb: 60 });
+    expect(display(undefined)).toBeNull();
+    expect(display({ auto: 'yes', minDb: -90, maxDb: -20 })).toBeNull();
+    expect(display({ auto: false, minDb: -90 })).toBeNull();
   });
 
   it('parses a tune stamp and refuses an incomplete or inconsistent one', () => {
@@ -201,6 +225,11 @@ describe('receiver bridge protocol', () => {
       ch: BRIDGE_CHANNEL, v: 1, type: 'console:start', id: 'c1-a', mock: true, listen: false, mode: 'wfm', centerHz: 433_920_001,
     });
     expect(commandMessage('c2-a', { type: 'console:vfo', volume: 250 })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:vfo', id: 'c2-a', volume: 100 });
+    expect(commandMessage('c3-a', { type: 'console:display', auto: true })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:display', id: 'c3-a', auto: true });
+    expect(commandMessage('c4-a', { type: 'console:display', auto: false, minDb: -95.04, maxDb: -96 })).toEqual({
+      ch: BRIDGE_CHANNEL, v: 1, type: 'console:display', id: 'c4-a', auto: false, minDb: -95, maxDb: -90,
+    });
+    expect(commandMessage('c5-a', { type: 'console:display', auto: false, minDb: Number.NaN, maxDb: -20 })).toEqual({ ch: BRIDGE_CHANNEL, v: 1, type: 'console:display', id: 'c5-a', auto: false });
   });
 });
 

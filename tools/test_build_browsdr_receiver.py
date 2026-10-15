@@ -194,6 +194,15 @@ class ReceiverBuildSourceTests(unittest.TestCase):
             connection = (app / "connection.ts").read_text(encoding="utf-8")
             self.assertIn("this._consoleBridge?.spectrum(spectrumData)", connection)
             self.assertIn("this._consoleBridge?.initialVfoEnabled() ?? true", connection)
+            # The Dengar tab's dB scale drives the Listener trace and waterfall.
+            self.assertIn("this.updateListenerAutoRange(spectrumData);", connection)
+            self.assertIn("...listenerDisplayMethods,", (app / "main.ts").read_text(encoding="utf-8"))
+            canvas = (app / "canvas.ts").read_text(encoding="utf-8")
+            self.assertNotIn("this.display.minDB", canvas)
+            self.assertNotIn("this.display.maxDB", canvas)
+            self.assertIn("const displayRange = this.listenerDbRange();", canvas)
+            self.assertIn("this.syncListenerEngineRange(true);", canvas)
+            self.assertIn("@click=\"setListenerDbAuto(false)\"", html)
 
 
 class _StopAfterFirstNpmCall(Exception):

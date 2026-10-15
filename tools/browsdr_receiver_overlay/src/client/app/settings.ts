@@ -1,5 +1,6 @@
 import type { AppInstance } from './types';
 import { makeDefaultVfo } from './constants';
+import { normalizeListenerDisplay } from './listener-display';
 
 const SWEEP_SETTINGS_KEY = 'ReceiverSweepSettings';
 const LNA_GAINS = [0, 8, 16, 24, 32, 40];
@@ -87,7 +88,9 @@ export const settingsMethods = {
 						this.radio.fftSize = 65536;
 					}
 				}
-				if (setting.display) Object.assign(this.display, setting.display);
+				if (setting.display && typeof setting.display === 'object') Object.assign(this.display, setting.display);
+				// Older saves have no auto flag (Auto then applies); a damaged range falls back to the default.
+				normalizeListenerDisplay(this.display);
 				if (setting.gains) Object.assign(this.gains, setting.gains);
 				if (setting.locks) Object.assign(this.locks, setting.locks);
 				// Handle new format (vfos array) or legacy format (audio/audio2)

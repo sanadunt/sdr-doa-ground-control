@@ -1,8 +1,9 @@
 /**
  * Frame side of the Ground Console bridge. When the Receiver runs inside the
  * console's same-origin iframe, the Overview dashboard starts and stops RX,
- * tunes, picks the listen mode and draws a cropped spectrum through
- * window.postMessage. The protocol is in console-bridge-protocol.ts.
+ * tunes, picks the listen mode, sets the Dengar dB scale and draws a cropped
+ * spectrum through window.postMessage. The protocol is in
+ * console-bridge-protocol.ts.
  *
  * The bridge only answers its parent window on the page's own origin. It
  * never opens the device picker or the VFO conflict dialog, which would be
@@ -15,7 +16,8 @@
  *   vfo and gains only change the stopped Listener's settings, with no
  *   backend call (RX uses them when it starts again); a scan start that has
  *   not stopped RX yet refuses them too;
- * - marker and sweep-* commands are never refused because of a scan.
+ * - display (the dB scale), marker and sweep-* commands are never refused
+ *   because of a scan.
  * The gains, radio (sample rate), marker and sweep-* commands follow this
  * rule when they are added.
  *
@@ -27,12 +29,14 @@
 import type { AppInstance } from './types';
 import { lookupDevice } from '../device-catalog';
 import { RADIO_LOST_PREFIX, RX_STREAM_FAILED_PREFIX, WEBUSB_UNAVAILABLE_MESSAGE } from './connection';
+import { LISTENER_DB_DEFAULT } from './listener-display';
 import {
 	BRIDGE_CHANNEL,
 	BRIDGE_VERSION,
 	STATUS_DEBOUNCE_MS,
 	STATUS_HEARTBEAT_MS,
 	STATUS_URGENT_MIN_MS,
+	clampDisplayRange,
 	clampSubscription,
 	createFrameThrottle,
 	cropSpectrum,
@@ -243,6 +247,13 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		return { lnaDb: finiteOrNull(values.LNA), vgaDb: finiteOrNull(values.VGA), amp };
 	}
 
+	/** The Dengar dB scale: Auto, and the manual range kept for Manual. */
+	function displayState(): ReceiverStatus['display'] {
+		const display = (app.display ?? {}) as Record<string, unknown>;
+		const range = clampDisplayRange(display.minDB, display.maxDB) ?? LISTENER_DB_DEFAULT;
+		return { auto: display.auto !== false, minDb: range.minDb, maxDb: range.maxDb };
+	}
+
 	/** Everything a status reports except its sequence, time and tune stamp (sendStatusNow adds them). */
 	function snapshot(): Omit<ReceiverStatus, 'seq' | 'tMs' | 'tune'> {
 		const index = activeIndex();
@@ -281,6 +292,7 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 			recording: Boolean(app.audioRecording?.armed),
 			error: statusError(),
 			notice,
+			display: displayState(),
 		};
 	}
 
@@ -470,6 +482,21 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		if (busyState() !== 'none') return 'OK';
 		if (recentred) app.updateAllBackendVfoParams();
 		else app.updateBackendVfoParams(index);
+		return 'OK';
+	}
+
+	/**
+	 * The Dengar dB scale. Only the display changes, so it is allowed during a
+	 * scan; the Receiver's display watcher redraws and saves it.
+	 */
+	function display(command: CommandOf<'console:display'>): ResultCode {
+		const current = app.display;
+		if (!current || typeof current !== 'object') return 'NOT_READY';
+		if (command.minDb !== undefined && command.maxDb !== undefined) {
+			current.minDB = command.minDb;
+			current.maxDB = command.maxDb;
+		}
+		current.auto = command.auto;
 		return 'OK';
 	}
 
@@ -676,6 +703,17 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 			case 'console:listen':
 				enqueue(command.id, async () => [await listen(command.enabled)], { fallback: 'NOT_READY' });
 				return;
+			case 'console:display': {
+				let code: ResultCode;
+				try {
+					code = display(command);
+				} catch (error) {
+					reply(command.id, 'NOT_READY', errorText(error));
+					return;
+				}
+				reply(command.id, code);
+				return;
+			}
 		}
 	}
 
