@@ -14,7 +14,8 @@ import { MAX_COMPASS_OFFSET_DEG, saveCompassConfig, saveGpsConfig } from '../lib
 import { errorNotice } from '../lib/errorNotice';
 import { useI18n } from '../lib/i18n';
 import type { MessageKey, Translate } from '../lib/i18n';
-import { KeyValue, Metric, Panel, SectionHeading, StatusBadge } from '../components/ui';
+import { KeyValue, Metric, Panel, StatusBadge } from '../components/ui';
+import { Page, PageHeader, StatusChip } from '../components/page';
 
 // The allowlisted fields, shared with Kontrol (SI units, ranges, steps).
 const DRY_RUN_FIELDS = CONFIG_PATCH_FIELDS;
@@ -350,8 +351,14 @@ export function ConfigurationPage({
   const statusLine = (status: Status) => <span className={`form-status status-text-${status.tone}`} role="status">{statusText(status, t)}</span>;
 
   return (
-    <div className="page configuration-page">
-      <SectionHeading eyebrow={t('config.eyebrow')} title={t('config.title')} detail={t('config.detail')} />
+    <Page className="configuration-page">
+      <PageHeader
+        title={t('route.configuration')}
+        chips={<>
+          <StatusChip label={t('page.chip.admin')} code={adminAuthenticated ? 'AUTHENTICATED' : adminDisabled ? 'DISABLED' : 'LOCKED'} tone={adminAuthenticated ? 'good' : adminDisabled ? 'neutral' : 'warn'} />
+          <StatusChip label={t('page.chip.patch')} code={patchPublishable ? 'ADMIN ONLY' : 'UNAVAILABLE'} tone={patchPublishable ? 'warn' : 'neutral'} />
+        </>}
+      />
       <nav className="config-index" aria-label={t('config.sections')}>
         <button type="button" aria-controls="connection-settings" onClick={() => scrollTo('connection-settings')}>{t('config.nav.connection')}</button>
         <button type="button" aria-controls="branding-settings" onClick={() => scrollTo('branding-settings')}>{t('config.nav.branding')}</button>
@@ -436,6 +443,6 @@ export function ConfigurationPage({
         </div>
       </Panel>
       <div className="config-guard-row"><Metric label={t('config.remoteWrites')} value={publishValue} detail={t(patchPublishable ? 'config.remoteWritesDetail' : 'config.remoteWritesNoneDetail')} tone={patchPublishable ? 'warn' : 'neutral'} /><Metric label={t('config.mqttPublish')} value={publishValue} detail={t(patchPublishable ? 'config.mqttPublishDetail' : 'config.mqttPublishNoneDetail')} tone={patchPublishable ? 'warn' : 'neutral'} /><Metric label={t('config.secrets')} value={t('config.secretsValue')} detail={t('config.secretsDetail')} tone="good" /><KeyValue label={t('config.adminSession')} value={adminAuthenticated ? t('config.adminSessionActive') : t('config.adminSessionClosed')} detail={t('config.cookieDetail')} /></div>
-    </div>
+    </Page>
   );
 }

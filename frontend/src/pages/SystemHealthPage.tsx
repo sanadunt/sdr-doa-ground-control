@@ -21,7 +21,8 @@ import {
   stateTone,
 } from '../lib/healthView';
 import type { NodeProgressView, ResourceRow, SignalQualityView } from '../lib/healthView';
-import { CollectorError, KeyValue, Metric, Panel, SectionHeading, StatusBadge } from '../components/ui';
+import { CollectorError, KeyValue, Metric, Panel, StatusBadge } from '../components/ui';
+import { Page, PageHeader, StatusChip } from '../components/page';
 
 function safeRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? value as Record<string, unknown> : {};
@@ -179,8 +180,16 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
         : viewsPresent === 1 ? 'INCOMPLETE'
           : candidateIssue(csv).quarantined || candidateIssue(xml).quarantined ? 'INVALID' : 'PRESENT';
   return (
-    <div className="page">
-      <SectionHeading eyebrow={t('health.eyebrow')} title={t('health.title')} detail={t('health.detail')} />
+    <Page>
+      <PageHeader
+        title={t('route.system-health')}
+        chips={<>
+          <StatusChip code={headline} />
+          <StatusChip label={t('page.chip.http')} code={http.state} />
+          <StatusChip label={t('page.chip.node')} code={node.state} />
+          <StatusChip label={t('page.chip.progress')} code={progress?.state ?? 'N/A'} />
+        </>}
+      />
       {expired ? <div className="dry-run-notice stale-evidence-banner" role="status"><strong>{t('common.staleEvidence')}</strong> {t('health.stale')}</div> : null}
       <div className="health-summary-grid">
         <Panel className="health-summary-panel" eyebrow={t('health.summaryEyebrow')} title={t('health.summaryTitle')}>
@@ -207,6 +216,6 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
           <Subsystem name={t('health.sub.mqtt')} state={connection} detail={mqtt?.publish_enabled === false ? t(configPatchPublishable(capabilities) ? 'health.sub.publishAdminOnly' : 'health.sub.publishUnavailable') : t('health.sub.noMonitor')} />
         </div>
       </Panel>
-    </div>
+    </Page>
   );
 }

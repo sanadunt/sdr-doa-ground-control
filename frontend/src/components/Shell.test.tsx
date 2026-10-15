@@ -4,9 +4,10 @@ import { ConsoleShell, formatElapsed, refreshSelectOptions } from './Shell';
 import { I18nContext, gateReasonLabel, translate } from '../lib/i18n';
 import type { Lang } from '../lib/i18n';
 import type { TelemetrySnapshot } from '../types';
+import { PageHeader } from './page';
 
 describe('Receiver navigation', () => {
-  it('exposes the active Receiver page as the seventh keyboard route', () => {
+  it('exposes the active Receiver page as the second keyboard route', () => {
     const markup = renderToStaticMarkup(
       <ConsoleShell
         route="receiver"
@@ -26,8 +27,46 @@ describe('Receiver navigation', () => {
     const activeItem = markup.match(/<button[^>]*class="nav-item nav-active"[^>]*>[\s\S]*?<\/button>/)?.[0];
 
     expect(activeItem).toContain('aria-current="page"');
-    expect(activeItem).toContain('aria-keyshortcuts="7"');
+    expect(activeItem).toContain('aria-keyshortcuts="2"');
+    expect(activeItem).toContain('<kbd aria-hidden="true">2</kbd>');
     expect(activeItem).toContain('Receiver');
+  });
+
+  it('lists Dashboard, Receiver, then the other pages, numbered by position', () => {
+    const markup = renderToStaticMarkup(
+      <I18nContext.Provider value={{ lang: 'id', setLang: () => undefined, t: (key, vars) => translate('id', key, vars) }}>
+        <ConsoleShell route="overview" onNavigate={() => undefined} branding={{ app_name: 'G', logo_data_url: '' }} snapshot={null} localSnapshotFresh={false} loading={false} readError={null} lastReadAgeMs={null} simulationEnabled={false} onRefresh={() => undefined}>
+          <span />
+        </ConsoleShell>
+      </I18nContext.Provider>,
+    );
+    const items = [...markup.matchAll(/aria-keyshortcuts="(\d)"[^>]*>[\s\S]*?<span class="nav-label">([^<]+)<\/span><kbd aria-hidden="true">(\d)<\/kbd>/g)].map((match) => `${match[1]}:${match[2]}:${match[3]}`);
+    expect(items).toEqual(['1:Dashboard:1', '2:Receiver:2', '3:Kesehatan Sistem:3', '4:Diagnostik DoA:4', '5:Konfigurasi:5', '6:Monitor Pesan:6', '7:Simulasi:7']);
+    expect(markup).not.toContain('Ringkasan');
+  });
+});
+
+describe('page read age', () => {
+  it('hands the read age to the page header off the Dashboard only', () => {
+    const probe = <PageHeader title="Kesehatan Sistem" chips={<span>chip</span>} />;
+    const shell = (route: 'overview' | 'system-health') => renderToStaticMarkup(
+      <I18nContext.Provider value={{ lang: 'id', setLang: () => undefined, t: (key, vars) => translate('id', key, vars) }}>
+        <ConsoleShell route={route} onNavigate={() => undefined} branding={{ app_name: 'G', logo_data_url: '' }} snapshot={null} localSnapshotFresh={false} loading={false} readError={null} lastReadAgeMs={4_000} simulationEnabled={false} onRefresh={() => undefined}>
+          {probe}
+        </ConsoleShell>
+      </I18nContext.Provider>,
+    );
+    expect(shell('system-health')).toContain('<span class="pg-bar-read">Dibaca 4 dtk lalu</span>');
+    expect(shell('overview')).not.toContain('pg-bar-read');
+  });
+
+  it('drops the policy footer from every page', () => {
+    const markup = renderToStaticMarkup(
+      <ConsoleShell route="system-health" onNavigate={() => undefined} branding={{ app_name: 'G', logo_data_url: '' }} snapshot={null} localSnapshotFresh={false} loading={false} readError={null} lastReadAgeMs={null} simulationEnabled={false} onRefresh={() => undefined}>
+        <span />
+      </ConsoleShell>,
+    );
+    expect(markup).not.toContain('console-footer');
   });
 });
 

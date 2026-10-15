@@ -22,7 +22,8 @@ import {
   signalQualityView,
   stateTone,
 } from '../lib/healthView';
-import { CollectorError, KeyValue, Panel, SectionHeading, StatusBadge } from '../components/ui';
+import { CollectorError, KeyValue, Panel, StatusBadge } from '../components/ui';
+import { Page, PageHeader, StatusChip } from '../components/page';
 
 // The collector already allowlists these fields; the cap only bounds an
 // unexpected response.
@@ -133,9 +134,17 @@ export function DoADiagnosticsPage({ snapshot, localSnapshotFresh }: { snapshot:
   const settingsError = typeof snapshot?.settings?.error === 'string' ? snapshot.settings.error : null;
   const { lang, t } = useI18n();
   const events = operatorEvents(snapshot, lang, t);
+  const gateState = String(gate?.state ?? 'BLOCKED').toUpperCase();
   return (
-    <div className="page">
-      <SectionHeading eyebrow={t('diag.eyebrow')} title={t('diag.title')} detail={t('diag.detail')} />
+    <Page>
+      <PageHeader
+        title={t('route.doa-diagnostics')}
+        chips={<>
+          <StatusChip label={t('status.delivery')} code={gateState} tone={gateState === 'READY' ? 'good' : 'warn'} />
+          <StatusChip label="CSV↔XML" code={consistency.relation} />
+          {consistency.frameRelation ? <StatusChip label={t('page.chip.frame')} code={consistency.frameRelation} /> : null}
+        </>}
+      />
       {evidenceExpired(snapshot, localSnapshotFresh) ? <div className="dry-run-notice stale-evidence-banner" role="status"><strong>{t('common.staleEvidence')}</strong> {t('diag.stale')}</div> : null}
       <div className="diagnostics-top-grid">
         <Panel className="gate-panel" eyebrow={t('diag.gateEyebrow')} title={t('diag.gateTitle')} action={<StatusBadge label={String(gate?.state ?? 'BLOCKED').toUpperCase()} tone={gate?.state === 'READY' ? 'good' : 'warn'} />}>
@@ -175,6 +184,6 @@ export function DoADiagnosticsPage({ snapshot, localSnapshotFresh }: { snapshot:
           <pre className="diagnostic-note">{safeJson({ local_snapshot_fresh: localSnapshotFresh, raw_settings_omitted: snapshot?.settings?.raw_fields_omitted ?? true })}</pre>
         </Panel>
       </div>
-    </div>
+    </Page>
   );
 }

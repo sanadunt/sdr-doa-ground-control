@@ -72,7 +72,7 @@ export function ReceiverPage({ bridge, visible = true }: {
   // theme and language changes are pushed into the loaded frame instead.
   const [src] = useState(() => receiverFrameSrc(consoleTheme(), lang, consoleRequestsMockSdr(window.location)));
 
-  // Focus inside the frame would otherwise swallow the console's 1-7 and R keys.
+  // Focus inside the frame would otherwise swallow the console's page keys (1–7) and R.
   const onFrameKeyDown = useRef((event: KeyboardEvent) => { forwardFrameShortcut(event, window); }).current;
 
   const syncFrame = () => {

@@ -24,7 +24,7 @@ import { ConsoleShell } from './components/Shell';
 import type { RouteName } from './components/Shell';
 import { useRoute } from './components/Shell';
 import { LoadErrorBoundary } from './components/LoadErrorBoundary';
-import { EmptyState } from './components/ui';
+import { Page, PageHeader, PageNotice } from './components/page';
 import { DEFAULT_SIMULATION, simulationSnapshot, randomizeSimulationSettings } from './lib/simulation';
 
 // Overview is the landing route and stays in the entry chunk. The other pages
@@ -205,10 +205,10 @@ function ConfigUnavailable({ error }: { error: string | null }): ReactElement {
   const { t } = useI18n();
   if (error === null) return routeLoading;
   return (
-    <div className="page">
-      <h1 className="visually-hidden" data-route-focus tabIndex={-1}>{t('route.configuration')}</h1>
-      <EmptyState label={t('app.configUnavailableTitle')} detail={t('app.configUnavailableDetail', { error })} tone="warn" />
-    </div>
+    <Page>
+      <PageHeader title={t('route.configuration')} />
+      <PageNotice tone="warn" title={t('app.configUnavailableTitle')}>{t('app.configUnavailableDetail', { error })}</PageNotice>
+    </Page>
   );
 }
 

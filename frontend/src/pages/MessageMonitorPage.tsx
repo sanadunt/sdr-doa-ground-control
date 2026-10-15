@@ -12,7 +12,8 @@ import { healthStateTone, lastMessageAgeMs, mqttDetailRecords, mqttKindRows, mqt
 import type { MqttKindRow, RdfTopicRow } from '../lib/mqttMonitor';
 import { gateReasonLabel, useI18n } from '../lib/i18n';
 import type { Lang, Translate } from '../lib/i18n';
-import { KeyValue, Metric, Panel, SectionHeading, StatusBadge } from '../components/ui';
+import { KeyValue, Metric, Panel, StatusBadge } from '../components/ui';
+import { Page, PageHeader, StatusChip, Tag } from '../components/page';
 
 /** The v2 snapshot has no App-level poll; this page reads it while it is shown. */
 const RDF_NODE_POLL_MS = 2_000;
@@ -249,8 +250,15 @@ export function MessageMonitorPage({
     : null;
 
   return (
-    <div className="page message-monitor-page">
-      <SectionHeading eyebrow={t('monitor.eyebrow')} title={t('monitor.title')} detail={t('monitor.detail')} />
+    <Page className="message-monitor-page">
+      <PageHeader
+        title={t('route.message-monitor')}
+        chips={<>
+          <StatusChip code={connection} tone={connectionTone(connection)} />
+          {mqtt?.enabled && mqtt.transport === 'tcp' ? <Tag>TCP</Tag> : mqtt?.enabled && mqtt.transport === 'websockets' ? <Tag>WS</Tag> : null}
+          {synthetic ? <Tag tone="warn">SYNTHETIC</Tag> : null}
+        </>}
+      />
       <Panel className="monitor-banner" eyebrow={t('monitor.transportEyebrow')} title={t('monitor.transportTitle')} action={<div className="form-actions compact"><button className="secondary-button" type="button" disabled={busy} onClick={refresh}>{t('monitor.refresh')}</button><button className="secondary-button" type="button" disabled={busy} onClick={reconnect} title={t('monitor.reconnectHint')}>{t('monitor.reconnect')}</button></div>}>
         <div className="monitor-state"><StatusBadge label={connection} tone={connectionTone(connection)} />{mqtt?.enabled ? <span>{transport}</span> : null}<span>{mqtt?.read_only === false || mqtt?.publish_enabled === true ? t('monitor.unexpectedWrite') : t(configPatchPublishable(capabilities) ? 'monitor.subscribeOnly' : 'monitor.subscribeOnlyNoPatch')}</span><span role="status" className={mqttError ? 'status-text-bad' : undefined}>{statusText}</span></div>
       </Panel>
@@ -295,6 +303,6 @@ export function MessageMonitorPage({
           <pre className="result-box monitor-json">{detailJson}</pre>
         </Panel>
       </div>
-    </div>
+    </Page>
   );
 }

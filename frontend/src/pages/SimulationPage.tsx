@@ -3,7 +3,8 @@ import type { SimulationSettings } from '../lib/simulation';
 import { simulationHalfPowerWidth, validateSimulation } from '../lib/simulation';
 import { useI18n } from '../lib/i18n';
 import type { MessageKey } from '../lib/i18n';
-import { Panel, SectionHeading, StatusBadge } from '../components/ui';
+import { Panel, StatusBadge } from '../components/ui';
+import { Page, PageHeader, StatusChip, Tag } from '../components/page';
 
 const SCENARIO_FIELDS: ReadonlyArray<{ key: 'latitude' | 'longitude' | 'angle' | 'width'; label: MessageKey; min: number; max: number; step: string }> = [
   { key: 'latitude', label: 'sim.latitude', min: -90, max: 90, step: 'any' },
@@ -24,15 +25,21 @@ export function SimulationPage({ enabled, automatic, settings, onEnabled, onAuto
   const activeHalfPower = simulationHalfPowerWidth(settings);
   const draftSigma = draft.width.trim() === '' ? Number.NaN : Number(draft.width);
   const draftHalfPower = simulationHalfPowerWidth({ ...settings, width: draftSigma });
-  return <div className="page">
-    <SectionHeading eyebrow={t('sim.eyebrow')} title={t('sim.title')} detail={t('sim.detail')} />
+  return <Page>
+    <PageHeader
+      title={t('route.simulation')}
+      chips={<>
+        <StatusChip label={t('status.sim')} code={enabled ? 'ON' : 'OFF'} tone={enabled ? 'warn' : 'neutral'} />
+        {enabled ? <Tag tone="warn">SIMULATION</Tag> : null}
+      </>}
+    />
     <Panel title={t('sim.controlTitle')} eyebrow={t('sim.controlEyebrow')} action={<StatusBadge label={enabled ? t('sim.on') : t('sim.off')} tone={enabled ? 'warn' : 'neutral'} />}>
       <div className="simulation-controls">
         <label className="simulation-toggle"><input type="checkbox" checked={enabled} onChange={event => onEnabled(event.target.checked)} /> {t('sim.enable')}</label>
         <p>{t('sim.enableNote')}</p>
         <div className="form-actions compact">
           <button type="button" className="secondary-button" disabled={!enabled} onClick={onRandomize}>{t('sim.randomize')}</button>
-          <button type="button" className="primary-button" onClick={onOverview}>{t('sim.viewOverview')}</button>
+          <button type="button" className="primary-button" onClick={onOverview}>{t('sim.viewDashboard')}</button>
         </div>
         <label className="simulation-toggle"><input type="checkbox" checked={automatic} disabled={!enabled} onChange={event => onAutomatic(event.target.checked)} /> {t('sim.auto')}</label>
         <p className="simulation-active">{t('sim.active', { angle: settings.angle, width: settings.width, halfPower: activeHalfPower ?? '—', lat: settings.latitude.toFixed(6), lon: settings.longitude.toFixed(6) })}</p>
@@ -53,5 +60,5 @@ export function SimulationPage({ enabled, automatic, settings, onEnabled, onAuto
         <p role="status">{message ? t(message) : ''}</p>
       </form>
     </Panel>
-  </div>;
+  </Page>;
 }

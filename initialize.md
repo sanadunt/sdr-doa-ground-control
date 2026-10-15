@@ -47,8 +47,8 @@ Tujuan UI:
 
 - Python Ground Console pada `tools/ground_console.py`.
 - React + TypeScript + Vite frontend pada `frontend/`.
-- Tujuh halaman: Overview (Ringkasan), System Health, DoA Diagnostics, Configuration, Message Monitor, Simulasi, dan Receiver, dibuka lewat menu halaman di top bar atau shortcut keyboard `1`–`7`; `R` untuk refresh. Top bar yang sama ada di semua halaman.
-- Overview berupa dasbor peta penuh: HUD bearing, kartu node, panel Lapisan, panel Kontrol, dan dock bawah berisi Polar (dengan pengaturan Atur) dan Spektrum. Panel diaktifkan lewat tombol Lapisan, Polar, Spektrum, dan Kontrol di top bar. HUD bearing, polar, dan overlay peta memakai satu predikat kesiapan (`overviewDoaStatus()` di `frontend/src/lib/doaStatus.ts`), sehingga DAQ gagal, ADC overdrive, CONFLICT, view hilang, atau node beku menyembunyikan ketiganya sekaligus.
+- Tujuh halaman, berurutan: Dashboard (`#/dashboard`; `#/overview` tetap dibuka), Receiver, System Health, DoA Diagnostics, Configuration, Message Monitor, dan Simulasi, dibuka lewat menu halaman di top bar atau shortcut keyboard `1`–`7` sesuai urutan itu (Receiver `2`); `R` untuk refresh. Top bar yang sama ada di semua halaman. Halaman selain Dashboard dan Receiver memakai page kit yang sama (`frontend/src/components/page/`, `frontend/src/page-kit.css`).
+- Dashboard (route id `overview`) berupa dasbor peta penuh: HUD bearing, kartu node, panel Lapisan, panel Kontrol, dan dock bawah berisi Polar (dengan pengaturan Atur) dan Spektrum. Panel diaktifkan lewat tombol Lapisan, Polar, Spektrum, dan Kontrol di top bar. HUD bearing, polar, dan overlay peta memakai satu predikat kesiapan (`overviewDoaStatus()` di `frontend/src/lib/doaStatus.ts`), sehingga DAQ gagal, ADC overdrive, CONFLICT, view hilang, atau node beku menyembunyikan ketiganya sekaligus.
 - Bearing geografis dihitung dari θ₀ dengan `geographicBearingForBin()` (`frontend/src/lib/polar.ts`): (360 − θ₀ + compass_offset) mod 360. θ₀ tetap ditampilkan sebagai sudut array.
 - Plot DoA menggunakan bundle Plotly parsial (`plotly.js/lib/core` + `lib/scatterpolar`, didaftarkan di `frontend/src/lib/plotlyPolar.ts`) dan update data mempertahankan camera state selama memungkinkan.
 - Map menggunakan MapLibre GL JS dengan basemap tile OSM publik (`tile.openstreetmap.de`, lalu `tile.openstreetmap.org` bila host pertama gagal).
@@ -60,7 +60,7 @@ Tujuan UI:
 - Halaman System Health (termasuk tabel pembacaan per resource), DoA Diagnostics, Configuration, dan Message Monitor (sdr/v1 plus panel RDF Node v2).
 - Collector mendeteksi node beku (`NODE_CLOCK_STALLED`), membatasi satu koleksi dengan anggaran waktu (4 detik untuk `/api/snapshot`), dan membandingkan sudut CSV/XML hanya untuk pasangan dari frame yang sama.
 - Freshness expiry di renderer browser; snapshot stale tidak boleh terus ditampilkan sebagai data aktif. Refresh otomatis default 2 detik (pilihan 1, 2, 5, 10, 30 detik atau manual).
-- Receiver embedded (BrowSDR dari submodule `vendor/BrowSDR`, dengan overlay di `tools/browsdr_receiver_overlay/`) untuk spektrum, scan, rekaman audio, dan Records yang disimpan lokal. Panel Spektrum di Overview mengendalikan frame Receiver yang tersembunyi lewat bridge `postMessage` (Mulai/Berhenti, Dengar dengan modulasi, klik untuk menala, Ikuti frekuensi node).
+- Receiver embedded (BrowSDR dari submodule `vendor/BrowSDR`, dengan overlay di `tools/browsdr_receiver_overlay/`) untuk spektrum, scan, rekaman audio, dan Records yang disimpan lokal. Panel Spektrum di Dashboard mengendalikan frame Receiver yang tersembunyi lewat bridge `postMessage` (Mulai/Berhenti, Dengar dengan modulasi, klik untuk menala, Ikuti frekuensi node).
 - Kontrol: patch konfigurasi MQTT yang dibatasi admin, dengan pelacakan ACK di server (`tools/config_command_tracker.py`).
 - Branding lokal dan konfigurasi console lokal.
 
@@ -99,14 +99,14 @@ Ground Console Python (loopback)
                  │ same-origin fetch
                  ▼
 React frontend
-        ├── Overview: dasbor MapLibre/OSM + DoA overlay + Plotly polar + Spektrum + Kontrol
+        ├── Dashboard (OverviewPage): dasbor MapLibre/OSM + DoA overlay + Plotly polar + Spektrum + Kontrol
+        ├── Receiver (iframe /receiver/, dimuat saat dibuka pertama kali atau saat Mulai/Dengar
+        │             di Spektrum, lalu tetap ter-mount; bridge postMessage ke Dashboard)
         ├── System Health
         ├── DoA Diagnostics
         ├── Configuration
         ├── Message Monitor
-        ├── Simulasi (browser-only)
-        └── Receiver (iframe /receiver/, dimuat saat dibuka pertama kali atau saat Mulai/Dengar
-                      di Spektrum, lalu tetap ter-mount; bridge postMessage ke Overview)
+        └── Simulasi (browser-only)
 ```
 
 Jalur Kontrol:
@@ -280,14 +280,14 @@ Setiap perubahan overlay harus berdampak pada `doaGeometry.ts` dan renderer aktu
 
 `frontend/src/lib/simulation.ts` membuat snapshot sintetis browser-only. Simulasi memiliki coordinate, canonical angle, angular vector 360 bin, freshness synthetic, randomize manual, dan randomize tiap satu detik.
 
-Simulasi hanya menggantikan sumber Overview. Simulasi tidak boleh memalsukan System Health, Diagnostics, MQTT, publication gate, atau mengirim data ke Raspberry.
+Simulasi hanya menggantikan sumber Dashboard. Simulasi tidak boleh memalsukan System Health, Diagnostics, MQTT, publication gate, atau mengirim data ke Raspberry.
 
 ### Dasbor: Spektrum, Dengar dan Kontrol
 
-Overview adalah dasbor peta penuh. Langkah operator yang lebih rinci ada di `QUICKSTART.md`. Di UI, node Raspberry tampil sebagai **RDF-SDR** dan receiver HackRF sebagai **RadioSpectrum**; identifier, field API, topik MQTT, dan filter WebUSB tetap memakai nama teknisnya. Dasbor hanya menampilkan label, nilai, chip status, error, dan prompt yang butuh tindakan, tanpa teks penjelasan kecil. Ringkasnya:
+Dashboard adalah dasbor peta penuh. Langkah operator yang lebih rinci ada di `QUICKSTART.md`. Di UI, node Raspberry tampil sebagai **RDF-SDR** dan receiver HackRF sebagai **RadioSpectrum**; identifier, field API, topik MQTT, dan filter WebUSB tetap memakai nama teknisnya. Dasbor hanya menampilkan label, nilai, chip status, error, dan prompt yang butuh tindakan, tanpa teks penjelasan kecil. Ringkasnya:
 
 - **Panel.** Tombol Lapisan, Polar, Spektrum, dan Kontrol di top bar menampilkan atau menyembunyikan panel. Secara bawaan Polar dan Spektrum aktif. Pilihan panel disimpan di browser.
-- **Mulai/Berhenti.** Mulai memuat Receiver tersembunyi (saat pertama kali), menyambungkan RadioSpectrum yang sudah dipasangkan ke browser ini, dan menjalankan RX tanpa suara. Spektrum menampilkan 2 MHz di sekitar tengah RX. RadioSpectrum yang belum pernah dipasangkan (`NEEDS_PAIRING`) dipasangkan sekali di halaman Receiver (tombol `7`). Berhenti menghentikan RX.
+- **Mulai/Berhenti.** Mulai memuat Receiver tersembunyi (saat pertama kali), menyambungkan RadioSpectrum yang sudah dipasangkan ke browser ini, dan menjalankan RX tanpa suara. Spektrum menampilkan 2 MHz di sekitar tengah RX. RadioSpectrum yang belum pernah dipasangkan (`NEEDS_PAIRING`) dipasangkan sekali di halaman Receiver (tombol `2`). Berhenti menghentikan RX.
 - **Klik untuk menala.** Klik trace atau waterfall untuk memindahkan tengah RX dan VFO ke frekuensi itu (dibulatkan 1 kHz); ←/→ menggeser 10 kHz, Shift+←/→ 100 kHz. Klik ini mematikan Ikuti frekuensi node.
 - **Ikuti frekuensi node.** Selama Data Out segar, tengah RX mengikuti `center_freq` dari `settings.json` node dan VFO mengikuti frekuensi CSV DoA.
 - **Dengar dengan modulasi.** Dengar memutar audio VFO dengan modulasi yang dipilih (NFM bawaan, WFM, AM, USB, LSB, DSB, CW, RAW), dan menyalakan RX bila belum jalan. Tekan lagi untuk berhenti mendengar.
@@ -407,7 +407,7 @@ node --test tools/test_receiver_*.mjs   # bila kode Receiver berubah
 git diff --check
 ```
 
-Untuk perubahan UI, validasi browser bila tersedia: hard refresh production build; cek console/network/CSP; cek Overview no-data, stale, simulation ON/OFF, dan update; cek viewport laptop pendek/mobile; cek keyboard focus dan `prefers-reduced-motion`.
+Untuk perubahan UI, validasi browser bila tersedia: hard refresh production build; cek console/network/CSP; cek Dashboard no-data, stale, simulation ON/OFF, dan update; cek viewport laptop pendek/mobile; cek keyboard focus dan `prefers-reduced-motion`.
 
 ---
 
@@ -419,11 +419,11 @@ Console tetap berjalan tanpa `paho-mqtt`, tetapi monitor MQTT tidak bisa tersamb
 
 ### Receiver menampilkan "Receiver is not built"
 
-`npm run build` mengosongkan `frontend/dist/receiver`. Jalankan `npm run build:all`, atau `tools/build_browsdr_receiver.py` setelah `npm run build`. Panel Spektrum di Overview menampilkan `NOT BUILT` untuk penyebab yang sama.
+`npm run build` mengosongkan `frontend/dist/receiver`. Jalankan `npm run build:all`, atau `tools/build_browsdr_receiver.py` setelah `npm run build`. Panel Spektrum di Dashboard menampilkan `NOT BUILT` untuk penyebab yang sama.
 
 ### UI masih versi lama setelah `git pull`
 
-`frontend/dist` belum di-build ulang (misalnya masih ada menu samping dan Overview belum berupa dasbor). Jalankan `cd frontend && npm ci && npm run build:all`, lalu restart console.
+`frontend/dist` belum di-build ulang (misalnya masih ada menu samping dan Dashboard belum berupa dasbor). Jalankan `cd frontend && npm ci && npm run build:all`, lalu restart console.
 
 ### Kontrol tidak mendapat jawaban
 

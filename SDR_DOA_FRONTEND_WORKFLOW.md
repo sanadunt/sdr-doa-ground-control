@@ -2,7 +2,7 @@
 
 ## Architecture
 
-React + TypeScript + Vite compile the browser application. Python retains the collector, API, local admin/branding, local configuration/dry-run, the MQTT monitor, the admin-gated config-patch publish, and the Receiver record store. The monitor subscribes and never publishes on its own; its one publish is a config patch that an admin reviews and confirms in Kontrol on Overview. The browser never talks to MQTT. Production uses only the loopback Python HTTP server; Node is a development/build dependency, not a second production server. The embedded Receiver is a separate BrowSDR build served by the same Python server at `/receiver/`.
+React + TypeScript + Vite compile the browser application. Python retains the collector, API, local admin/branding, local configuration/dry-run, the MQTT monitor, the admin-gated config-patch publish, and the Receiver record store. The monitor subscribes and never publishes on its own; its one publish is a config patch that an admin reviews and confirms in Kontrol on the Dashboard. The browser never talks to MQTT. Production uses only the loopback Python HTTP server; Node is a development/build dependency, not a second production server. The embedded Receiver is a separate BrowSDR build served by the same Python server at `/receiver/`.
 
 ## Build
 
@@ -51,15 +51,15 @@ This selects the previous embedded interface without reverting source or changin
 
 ## Navigation
 
-Seven routes, reachable from the page menu in the top bar or with keys `1`–`7` (`R` refreshes). Every route has the same top bar: page menu, status strip, refresh button and refresh-interval select.
+Seven routes, in menu order, reachable from the page menu in the top bar or with keys `1`–`7` by that order (`R` refreshes). Every route has the same top bar: page menu, status strip, refresh button and refresh-interval select. The pages other than the Dashboard and the Receiver share the page kit (`frontend/src/components/page/`, styled by `frontend/src/page-kit.css`): a page bar with key state chips and actions, then a 12-column grid of compact cards.
 
-- Overview: full-map dashboard with the bearing HUD, node card, Lapisan (map layers), Kontrol (admin-gated config patch, "Send to RDF-SDR"/"Kirim ke RDF-SDR"), and a bottom dock with Polar (and its Atur settings) and Spektrum (the Receiver's spectrum, Listen and click-to-tune). Its panel toggles sit in the top bar. The UI names the Raspberry node RDF-SDR and the HackRF receiver RadioSpectrum, and shows labels, values, state chips, errors and action prompts without one-line help texts.
+- Dashboard (`#/dashboard`, route id `overview`; `#/overview` still opens it): full-map dashboard with the bearing HUD, node card, Lapisan (map layers), Kontrol (admin-gated config patch, "Send to RDF-SDR"/"Kirim ke RDF-SDR"), and a bottom dock with Polar (and its Atur settings) and Spektrum (the Receiver's spectrum, Listen and click-to-tune). Its panel toggles sit in the top bar. The UI names the Raspberry node RDF-SDR and the HackRF receiver RadioSpectrum, and shows labels, values, state chips, errors and action prompts without one-line help texts.
+- Receiver (key `2`): embedded BrowSDR; mounts on its first visit or the first Mulai/Dengar in the Dashboard spectrum dock, then stays mounted.
 - System Health: summary, Data Out HTTP per-resource reads, inspector, node progress, subsystem status.
 - DoA Diagnostics: delivery gate checks, native-record detection log, frame relation, snapshot-derived operator log, effective config.
 - Configuration: local connection (Data Out, MQTT host/port/transport/WebSocket path, refresh interval), admin/branding, dry-run preview (never sent), GPS and Compass source.
 - Message Monitor: read-only sdr/v1 subscriber state and messages, plus the RDF Node v2 panel.
-- Simulation: browser-only synthetic Overview data.
-- Receiver: embedded BrowSDR; mounts on its first visit or the first Mulai/Dengar in the Overview spectrum dock, then stays mounted.
+- Simulation: browser-only synthetic Dashboard data.
 
 The detection log is not target tracking and the snapshot-derived log is not a durable historical event archive.
 
