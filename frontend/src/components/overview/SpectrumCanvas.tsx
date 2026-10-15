@@ -590,7 +590,16 @@ export function SpectrumCanvas({
 
   /** The marker keys while marking; true when the key was one of them. */
   const markerKey = (event: ReactKeyboardEvent<HTMLElement>): boolean => {
-    if (!marking || event.altKey) return false;
+    if (!marking) return false;
+    // [ and ] need AltGr (Ctrl+Alt) on some keyboard layouts.
+    const altGr = event.ctrlKey && event.altKey && !event.metaKey;
+    if ((event.key === '[' || event.key === ']') && (altGr || !(event.ctrlKey || event.metaKey || event.altKey))) {
+      event.preventDefault();
+      const next = stepMarker(markers, view(), Math.max(1, traceRef.current?.clientWidth ?? 1), selectedMarkerId, event.key === ']' ? 1 : -1);
+      if (next) onSelectMarker?.(next.id);
+      return true;
+    }
+    if (event.altKey) return false;
     if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z') {
       event.preventDefault();
       onMarkerKey?.('undo');
@@ -602,13 +611,6 @@ export function SpectrumCanvas({
         event.preventDefault();
         const hz = props.current.tuneHz;
         if (hz !== null) onMark?.(snapHz(hz));
-        return true;
-      }
-      case '[':
-      case ']': {
-        event.preventDefault();
-        const next = stepMarker(markers, view(), Math.max(1, traceRef.current?.clientWidth ?? 1), selectedMarkerId, event.key === ']' ? 1 : -1);
-        if (next) onSelectMarker?.(next.id);
         return true;
       }
       case 'Delete':
