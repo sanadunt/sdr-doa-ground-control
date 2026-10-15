@@ -1,0 +1,50 @@
+# SDR-DoA Ground Console image from an unpacked release tarball. No Node.js.
+#
+#   tar -xzf sdr-doa-ground-console-<VERSION>-linux.tar.gz
+#   cd sdr-doa-ground-console-<VERSION>-linux
+#   docker compose up -d --build              # docker-compose.yml of the release
+#
+# The build context must be the release directory (it holds MANIFEST.sha256,
+# the prebuilt frontend/dist and only the runtime modules in tools/); in a
+# repository checkout use Dockerfile. Run it only with the host network
+# (network_mode: host): the console binds 127.0.0.1 and refuses any other
+# address.
+
+ARG PYTHON_IMAGE=python:3.12-slim-bookworm
+
+FROM ${PYTHON_IMAGE}
+LABEL org.opencontainers.image.title="SDR-DoA Ground Console" \
+      org.opencontainers.image.description="Loopback-only SDR-DoA Ground Console; run with the host network" \
+      org.opencontainers.image.source="https://github.com/sanadunt/sdr-doa-ground-control"
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH=/opt/venv/bin:$PATH \
+    SDR_DOA_PORT=8787 \
+    SDR_DOA_DATA_DIR=/data \
+    SDR_DOA_ENV_FILE=/data/.env
+# wheels/ is empty unless the release was built with --with-wheels; pip then
+# takes the bundled wheels first and PyPI for the rest.
+COPY packaging/console/requirements.txt /tmp/build/requirements.txt
+COPY wheels/ /tmp/build/wheels/
+RUN python -m venv /opt/venv \
+ && /opt/venv/bin/pip install --no-cache-dir --disable-pip-version-check \
+      --find-links /tmp/build/wheels -r /tmp/build/requirements.txt \
+ && rm -rf /tmp/build \
+ && useradd --system --uid 10001 --user-group --home-dir /data --no-create-home --shell /usr/sbin/nologin sdr-doa \
+ && mkdir -p /data/receiver \
+ && chown -R 10001:10001 /data \
+ && chmod 0750 /data \
+ && ln -s /opt/sdr-doa-ground-console/packaging/console/set_admin_password.py /usr/local/bin/sdr-doa-set-admin-password
+COPY MANIFEST.sha256 VERSION /opt/sdr-doa-ground-console/
+COPY tools/ /opt/sdr-doa-ground-console/tools/
+COPY frontend/dist/ /opt/sdr-doa-ground-console/frontend/dist/
+COPY packaging/console/requirements.txt packaging/console/set_admin_password.py /opt/sdr-doa-ground-console/packaging/console/
+COPY packaging/docker/ /opt/sdr-doa-ground-console/packaging/docker/
+# Every copied file must match the release manifest.
+RUN cd /opt/sdr-doa-ground-console && sha256sum --check --quiet --ignore-missing MANIFEST.sha256
+USER 10001:10001
+WORKDIR /data
+VOLUME ["/data"]
+HEALTHCHECK --interval=30s --timeout=6s --start-period=20s --retries=3 \
+  CMD ["python", "/opt/sdr-doa-ground-console/packaging/docker/healthcheck.py"]
+ENTRYPOINT ["/opt/sdr-doa-ground-console/packaging/docker/console-entrypoint.sh"]

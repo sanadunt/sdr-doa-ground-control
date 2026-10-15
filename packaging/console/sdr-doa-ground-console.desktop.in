@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=SDR-DoA Ground Console
+Comment=Open the local Ground Console in Chromium or Chrome
+Exec=@BIN_PATH@ open
+Icon=@APP_DIR@/packaging/console/sdr-doa-ground-console.svg
+Terminal=false
+Categories=Network;HamRadio;
+StartupNotify=false
