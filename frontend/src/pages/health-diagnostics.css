@@ -1,0 +1,56 @@
+/* System Health and DoA Diagnostics: the few pieces the page kit does not
+   cover (gate checklist, block reasons, CSV/XML relation strip, inline chip
+   cells). Colours come from the console tokens only. */
+
+/* Notices inside a flush card sit above its table. */
+.hd-card-notices { display: flex; flex-direction: column; gap: 8px; padding: var(--pg-pad) var(--pg-pad) 0; }
+.hd-card-notices + .pg-table-wrap, .hd-card-notices + .pg-empty { margin-top: 8px; border-top: 1px solid var(--line-soft); }
+
+/* Resource paths stay on one line. */
+.pg-table td.hd-nowrap { overflow-wrap: normal; white-space: nowrap; }
+
+/* An error text in a table cell: red, wraps, never pushes the row sideways. */
+.pg-table td.hd-error-cell { color: var(--red); font-size: 12px; line-height: 1.35; }
+
+/* A chip and its short value in one cell or key/value row, e.g. HTTP 200 · 89 ms. */
+.hd-cell-inline { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px 6px; min-width: 0; }
+.hd-flags { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+
+/* Gate checklist: label left, chip right, one 36 px row each. */
+.hd-checks { margin: 0; padding: 0; list-style: none; }
+.hd-check { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: var(--pg-row-h); padding: 4px 12px; border-top: 1px solid var(--line-soft); }
+.hd-check:first-child { border-top: 0; }
+.hd-check-label { min-width: 0; color: var(--text); font-size: 13px; overflow-wrap: anywhere; }
+
+/* Block reasons: the translated reason, then its code. Standing reasons are muted. */
+.hd-reasons { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px 12px; border-top: 1px solid var(--line-soft); background: var(--surface-2); }
+.hd-reasons ul { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.hd-reasons li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 10px; min-width: 0; }
+.hd-reason-text { min-width: 0; color: var(--muted); font-size: 12.5px; line-height: 1.35; }
+.hd-reasons li.is-actionable .hd-reason-text { color: var(--text); font-weight: 600; }
+.hd-reasons .ov-tag { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+
+/* CSV / XML ledger: field names read as labels; values stay right-aligned mono. */
+.hd-ledger .pg-table td.hd-field-cell { color: var(--subtle); font-size: 12px; white-space: nowrap; }
+.hd-ledger .pg-table tr.is-error td { vertical-align: top; }
+.hd-ledger .pg-table tr.is-error td.is-num { font-family: inherit; font-size: 12px; font-weight: 400; white-space: normal; }
+/* A long error wraps left-aligned inside its right-aligned column. */
+.hd-ledger .hd-error-text { display: inline-block; text-align: left; }
+.hd-ledger .pg-table tr.is-error td.hd-field-cell { color: var(--red); font-family: var(--mono); font-size: 11.5px; }
+
+/* The relation verdict under the ledger: labelled chips and mono values, no sentence. */
+.hd-relation { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; min-height: var(--pg-head-h); padding: 6px 12px; border-top: 1px solid var(--line-soft); background: var(--surface-2); }
+.hd-relation-value { display: inline-flex; align-items: baseline; gap: 6px; white-space: nowrap; }
+/* Δt and Δθ keep their case (an uppercase θ reads as Θ). */
+.hd-delta { color: var(--subtle); font-family: var(--mono); font-size: 11.5px; }
+
+/* Other VFO rows (multi-VFO CSV) under the relation strip. */
+.hd-vfo { border-top: 1px solid var(--line-soft); }
+.hd-vfo-title { display: block; padding: 10px 12px 2px; }
+
+@media (max-width: 600px) {
+  /* A stacked row drops its empty cells (the Detail of a resource that answered). */
+  .hd-page .pg-table.is-stack td:empty { display: none; }
+  .hd-relation { gap: 6px 12px; }
+  .hd-ledger .pg-table td.hd-field-cell { white-space: normal; }
+}
