@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError, normalizeCapabilities } from '../api';
-import { adminErrorKey, gpsInputErrorKey, mergeSavedConfigIntoDraft, normalizeConnectionDraft, parseBaseRevision, parseDryRunChanges, refreshIntervalOptions, refreshWarningKey } from './configForm';
+import { activeSection, adminErrorKey, coordinateText, gpsErrorField, gpsInputErrorKey, isLoopbackHost, mergeSavedConfigIntoDraft, normalizeConnectionDraft, parseBaseRevision, parseDryRunChanges, patchKeyUnit, refreshIntervalOptions, refreshWarningKey, summarizeDryRun } from './configForm';
 import { manualGpsOverrideFromInput } from './map';
 import type { ConsoleConfig } from '../types';
 
@@ -130,5 +130,73 @@ describe('admin error codes (AUD-81)', () => {
     expect(adminErrorKey(new ApiError('slow down', 429, null))).toBe('config.adminThrottled');
     expect(adminErrorKey(new ApiError('logo exceeds the 256 KiB limit', 400, null))).toBeNull();
     expect(adminErrorKey(new Error('network'))).toBeNull();
+  });
+});
+
+describe('Configuration page helpers', () => {
+  it('shows coordinates with at most 6 decimals', () => {
+    expect(coordinateText(-6.932468839245536)).toBe('-6.932469');
+    expect(coordinateText(107.66069405900005)).toBe('107.660694');
+    expect(coordinateText(-6.5)).toBe('-6.5');
+    expect(coordinateText(Number.NaN)).toBe('');
+  });
+
+  it('puts a manual GPS message under the field it names', () => {
+    expect(gpsErrorField('config.gpsLatNumber')).toBe('lat');
+    expect(gpsErrorField('config.gpsLatRange')).toBe('lat');
+    expect(gpsErrorField('config.gpsLonNumber')).toBe('lon');
+    expect(gpsErrorField('config.gpsLonRange')).toBe('lon');
+    expect(gpsErrorField('config.gpsZero')).toBe('lat');
+  });
+
+  it('treats only this machine as loopback for the no-TLS warning', () => {
+    for (const host of ['localhost', ' LOCALHOST ', '127.0.0.1', '127.10.0.254', '::1', '[::1]']) expect(isLoopbackHost(host), host).toBe(true);
+    for (const host of ['', '10.90.0.1', '192.168.100.100', '127.0.0.256', '128.0.0.1', 'fe80::1', 'localhost.example']) expect(isLoopbackHost(host), host).toBe(false);
+  });
+
+  it('marks the section that reached the sticky index, preferring the one jumped to in a shared row', () => {
+    const sections = [
+      { id: 'connection', top: -400 },
+      { id: 'navigation', top: -400 },
+      { id: 'mqtt', top: 110 },
+      { id: 'branding', top: 110 },
+      { id: 'dry-run', top: 500 },
+    ];
+    expect(activeSection(sections, 120, false)).toBe('mqtt');
+    expect(activeSection(sections, 120, false, 'branding')).toBe('branding');
+    expect(activeSection(sections, 120, false, 'dry-run')).toBe('mqtt');
+    expect(activeSection(sections.map((section) => ({ ...section, top: section.top + 1000 })), 120, false)).toBe('connection');
+    expect(activeSection([], 120, false)).toBeNull();
+  });
+
+  it('marks the last section, or the one jumped to, at the bottom of the page', () => {
+    const sections = [
+      { id: 'connection', top: -900 },
+      { id: 'mqtt', top: 110 },
+      { id: 'branding', top: 110 },
+      { id: 'dry-run', top: 420 },
+    ];
+    expect(activeSection(sections, 120, true)).toBe('dry-run');
+    expect(activeSection(sections, 120, true, 'branding')).toBe('branding');
+    expect(activeSection(sections, 120, true, 'connection')).toBe('dry-run');
+  });
+
+  it('summarizes a dry-run response and leaves malformed parts out', () => {
+    expect(summarizeDryRun({
+      ok: true,
+      validation: 'passed',
+      transport: 'none',
+      command: { base_config_rev: 12, issued_ts_ms: 1000, expires_ts_ms: 61000, changes: { center_frequency_hz: 433920000, gain_db: 12.5, bad: 'x', inf: Number.POSITIVE_INFINITY } },
+    })).toEqual({
+      validation: 'passed',
+      transport: 'none',
+      baseConfigRev: 12,
+      changes: [{ key: 'center_frequency_hz', value: 433920000 }, { key: 'gain_db', value: 12.5 }],
+      ttlMs: 60000,
+    });
+    expect(summarizeDryRun({ command: 'x' })).toEqual({ validation: null, transport: null, baseConfigRev: null, changes: [], ttlMs: null });
+    expect(patchKeyUnit('vfo_bandwidth_hz')).toBe('Hz');
+    expect(patchKeyUnit('vfo_squelch_db')).toBe('dB');
+    expect(patchKeyUnit('other')).toBe('');
   });
 });

@@ -10,8 +10,9 @@ import './polar-layout.css';
 import './overview-dashboard.css';
 // Page kit (components/page/) for every page but the Dashboard and the Receiver.
 import './page-kit.css';
-// System Health and DoA Diagnostics (gate checklist, CSV/XML relation strip).
+// Page layouts on the kit; after page-kit.css so they win equal specificity.
 import './pages/health-diagnostics.css';
+import './pages/configuration.css';
 // MapLibre's stylesheet loads with the entry, not with the lazy map chunk:
 // Vite preloads a chunk's CSS only once, so a sheet that failed during a
 // console restart never loaded and a retried import drew markers unstyled.
