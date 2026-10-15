@@ -230,7 +230,7 @@
 .ov-spec-mark-count { min-width: 20px; padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--marker) 22%, transparent); color: var(--text); font-family: var(--mono); font-size: 11px; line-height: 18px; text-align: center; }
 .ov-button.ov-spec-mark[aria-pressed='true'] { border-color: var(--marker); background: color-mix(in srgb, var(--marker) 14%, transparent); }
 .ov-button.ov-spec-mark[aria-pressed='true'] svg { color: var(--marker); }
-.ov-spec-trace.is-marking, .ov-spec-waterfall.is-marking { cursor: copy; }
+.ov-spec-trace.is-marking, .ov-spec-waterfall.is-marking, .ov-spec-trace.is-marking .ov-spec-overlay { cursor: copy; }
 .ov-spec-mark-row { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0 10px; }
 .ov-spec-mark-readout { color: var(--text); font-family: var(--mono); font-size: 12px; }
 /* Between a phone and a full-width dock the label gives way to the icon and the count (still the button's name),

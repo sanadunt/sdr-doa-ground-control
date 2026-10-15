@@ -708,7 +708,7 @@ describe('Spectrum dock markers', () => {
     expect(/:root \{[^}]*--marker:\s*#ff75a0;/.exec(designCss)).not.toBeNull();
     expect(/:root\[data-theme='light'\] \{[^}]*--marker:\s*#a23557;/.exec(designCss)).not.toBeNull();
     expect(dashboardCss).toMatch(/\.ov-button\.ov-spec-mark\[aria-pressed='true'\] \{[^}]*border-color:\s*var\(--marker\)/);
-    expect(dashboardCss).toMatch(/\.ov-spec-trace\.is-marking, \.ov-spec-waterfall\.is-marking \{\s*cursor:\s*copy;?\s*\}/);
+    expect(dashboardCss).toMatch(/\.ov-spec-trace\.is-marking, \.ov-spec-waterfall\.is-marking, \.ov-spec-trace\.is-marking \.ov-spec-overlay \{\s*cursor:\s*copy;?\s*\}/);
     // The toggle is an .ov-button, 44 px high, and nothing in its own rules sets another height.
     const markRules = [...dashboardCss.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter((match) => /\.ov-spec-mark(?![-\w])/.test(match[1]));
     expect(markRules.length).toBeGreaterThan(2);
