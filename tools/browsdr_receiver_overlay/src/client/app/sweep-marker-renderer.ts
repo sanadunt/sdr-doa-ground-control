@@ -11,21 +11,6 @@ export function sweepCanvasText(text: string): string {
 	return translateCanvasText(text);
 }
 
-export function sweepMarkerHint(): string {
-	const coarsePointer = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-		&& window.matchMedia('(pointer: coarse)').matches;
-	return sweepCanvasText(coarsePointer ? 'Hold to add marker' : 'Click: add marker · drag: pan · wheel: zoom');
-}
-
-export function drawSweepMarkerHint(context: CanvasRenderingContext2D, left: number, width: number, reservedWidth: number): void {
-	const hint = sweepMarkerHint();
-	if (reservedWidth + 16 + context.measureText(hint).width > width) return;
-	const textAlign = context.textAlign;
-	context.textAlign = 'right';
-	context.fillText(hint, left + width, 1);
-	context.textAlign = textAlign;
-}
-
 export interface SweepMarkerPlot {
 	startHz: number;
 	endHz: number;

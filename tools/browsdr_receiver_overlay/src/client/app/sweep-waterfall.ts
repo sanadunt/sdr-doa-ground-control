@@ -1,5 +1,5 @@
 import { convertDecibelToRGB } from '../utils';
-import { drawSweepMarkerHint, sweepCanvasText } from './sweep-marker-renderer';
+import { sweepCanvasText } from './sweep-marker-renderer';
 import { SWEEP_DISPLAY_BINS } from '../worker/sweep-types';
 import type { SweepCandidate, SweepSpectrumFrame } from '../worker/sweep-types';
 
@@ -205,9 +205,7 @@ export class SweepWaterfallRenderer {
 		context.textAlign = 'left';
 		context.textBaseline = 'top';
 		context.fillStyle = '#8ea0b8';
-		const axisLabel = sweepCanvasText('Power (dBFS, relative)');
-		context.fillText(axisLabel, left, 1);
-		drawSweepMarkerHint(context, left, plotWidth, context.measureText(axisLabel).width);
+		context.fillText(sweepCanvasText('Power (dBFS, relative)'), left, 1);
 		context.textBaseline = 'middle';
 		context.textAlign = 'right';
 		context.fillText(sweepCanvasText('Older'), left - 7, top + 7);
