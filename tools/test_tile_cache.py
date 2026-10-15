@@ -217,10 +217,10 @@ class ConsoleWithTiles:
     def cache(self) -> TileCache:
         return self.server.tile_cache
 
-    def get(self, path: str) -> Tuple[int, Dict[str, str], bytes]:
+    def get(self, path: str, headers: Optional[Dict[str, str]] = None) -> Tuple[int, Dict[str, str], bytes]:
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
         try:
-            connection.request("GET", path, headers={"Cookie": "sdr_doa_admin=secret", "Referer": "http://127.0.0.1/"})
+            connection.request("GET", path, headers={"Cookie": "sdr_doa_admin=secret", "Referer": "http://127.0.0.1/", **(headers or {})})
             response = connection.getresponse()
             body = response.read()
             return response.status, {key.lower(): value for key, value in response.getheaders()}, body
@@ -270,6 +270,15 @@ class TileRouteTests(TileCacheTestCase):
         self.assertEqual(headers["user-agent"], f"SDR-DoA-Ground-Console/{ground_console.CONSOLE_VERSION}")
         for forbidden in ("cookie", "referer", "origin", "authorization"):
             self.assertNotIn(forbidden, headers)
+
+    def test_cross_site_requests_are_refused(self) -> None:
+        console = self.console()
+        status, _headers, body = console.get("/api/tiles/osm/1/0/0", {"Sec-Fetch-Site": "cross-site"})
+        self.assertEqual((status, json.loads(body)["code"]), (403, "ORIGIN_REJECTED"))
+        self.assertEqual(self.upstream.requests, [])
+        for site in ("same-origin", "same-site", "none"):
+            with self.subTest(site):
+                self.assertEqual(console.get("/api/tiles/osm/1/0/0", {"Sec-Fetch-Site": site})[0], 200)
 
     def test_invalid_paths_are_404_and_never_reach_the_upstream(self) -> None:
         console = self.console(maxzoom=17)
