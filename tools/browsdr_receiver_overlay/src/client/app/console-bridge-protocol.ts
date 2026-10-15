@@ -14,7 +14,7 @@ export const BRIDGE_CHANNEL = 'sdr-console-receiver';
 export const BRIDGE_VERSION = 1;
 
 /** Frame to console. */
-export const FRAME_MESSAGE_TYPES = ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result'] as const;
+export const FRAME_MESSAGE_TYPES = ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep'] as const;
 /** Console to frame. */
 export const CONSOLE_MESSAGE_TYPES = [
 	'console:hello',
@@ -27,6 +27,10 @@ export const CONSOLE_MESSAGE_TYPES = [
 	'console:display',
 	'console:gains',
 	'console:radio',
+	'console:sweep-start',
+	'console:sweep-stop',
+	'console:sweep-config',
+	'console:sweep-display',
 ] as const;
 /** Demodulator modes in UI order; the keys of MODE_DEFAULTS in constants.ts. */
 export const LISTEN_MODES = ['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw'] as const;
@@ -45,6 +49,8 @@ export const RESULT_CODES = [
 	'OUT_OF_RANGE',
 	'AUDIO_BLOCKED',
 	'RECORDING_ACTIVE',
+	'SWEEP_UNSUPPORTED',
+	'SWEEP_FAILED',
 	'TIMEOUT',
 ] as const;
 /** receiver:status error.code values; the console translates them. */
@@ -54,6 +60,13 @@ export const WORKSPACES = ['spectrum', 'listener', 'records'] as const;
 export const AUDIO_STATES = ['none', 'suspended', 'running'] as const;
 /** Who made the latest change of the centre or the active VFO (receiver:status tune.by). */
 export const TUNE_SOURCES = ['console', 'receiver'] as const;
+/** Wide scan FFT sizes: 4.88 kHz and 2.44 kHz resolution at the scan's 20 MSPS (worker/sweep-types.ts). */
+export const SWEEP_FFT_SIZES = [4096, 8192] as const;
+/** The scan trace the Receiver shows (sweep.view). */
+export const SWEEP_VIEWS = ['current', 'average', 'max'] as const;
+export const SWEEP_SOURCES = ['native', 'manual', 'simulated'] as const;
+/** receiver:status sweep.phase: from the Receiver's sweep.starting, active and stopping. */
+export const SWEEP_PHASES = ['idle', 'starting', 'active', 'stopping'] as const;
 
 export const SUBSCRIBE_LIMITS = {
 	binsMin: 64,
@@ -73,6 +86,12 @@ export const TUNE_LIMITS = { minHz: 1_000_000, maxHz: 6_000_000_000 } as const;
  * spectrum markers: the RadioSpectrum sweep range, wider than TUNE_LIMITS.
  */
 export const SWEEP_LIMITS = { minHz: 1_000_000, maxHz: 7_250_000_000 } as const;
+/**
+ * A wide scan range the console may set: at least minSpanHz wide, and at
+ * most maxBins bins of sampleRateHz / fftSize (worker/sweep-types.ts
+ * validateSweepConfig and SWEEP_MAX_BINS).
+ */
+export const SWEEP_SPAN_LIMITS = { minSpanHz: 1_000_000, sampleRateHz: 20_000_000, maxBins: 500_000 } as const;
 export const VOLUME_LIMITS = { min: 0, max: 100 } as const;
 /**
  * Manual dB range of the Listener's spectrum and waterfall (the Dengar tab's
@@ -108,6 +127,10 @@ export type BusyState = typeof BUSY_STATES[number];
 export type Workspace = typeof WORKSPACES[number];
 export type AudioState = typeof AUDIO_STATES[number];
 export type TuneSource = typeof TUNE_SOURCES[number];
+export type SweepFftSize = typeof SWEEP_FFT_SIZES[number];
+export type SweepView = typeof SWEEP_VIEWS[number];
+export type SweepSource = typeof SWEEP_SOURCES[number];
+export type SweepPhase = typeof SWEEP_PHASES[number];
 
 export interface Subscription {
 	spectrum: boolean;
@@ -130,6 +153,14 @@ export type ConsoleCommand =
 	| { type: 'console:gains'; id: string; lnaDb?: number; vgaDb?: number; amp?: boolean }
 	/** confirmRecording: the operator confirmed, in the console page, that an armed recording continues in a new segment. */
 	| { type: 'console:radio'; id: string; sampleRateHz: number; confirmRecording?: boolean }
+	/** confirmRecording: the operator confirmed, in the console page, that the scan ends an armed recording. */
+	| { type: 'console:sweep-start'; id: string; mock: boolean; confirmRecording?: boolean }
+	/** resumeRx: start RX again when it ran before the scan. */
+	| { type: 'console:sweep-stop'; id: string; resumeRx: boolean }
+	/** Displayed Hz; at least one field. Refused while a scan runs. */
+	| { type: 'console:sweep-config'; id: string; startHz?: number; stopHz?: number; fftSize?: SweepFftSize; lnaDb?: number; vgaDb?: number; amp?: boolean }
+	/** The scan's graph range (the Receiver's Graph min./max.). */
+	| { type: 'console:sweep-display'; id: string; minDb: number; maxDb: number }
 	/** A console command with a usable id whose payload is wrong; answered with INVALID_COMMAND. */
 	| { type: 'invalid'; id: string };
 
@@ -176,6 +207,23 @@ export interface StatusDisplay extends DisplayRangeDb {
 	auto: boolean;
 }
 
+/** The Receiver's wide scan: its state and settings, frequencies in displayed Hz. */
+export interface StatusSweep {
+	phase: SweepPhase;
+	source: SweepSource;
+	startHz: number;
+	stopHz: number;
+	fftSize: SweepFftSize;
+	resolutionHz: number;
+	lnaDb: number | null;
+	vgaDb: number | null;
+	amp: boolean;
+	/** The Receiver's Graph min./max. */
+	displayMinDb: number;
+	displayMaxDb: number;
+	view: SweepView;
+}
+
 export interface ReceiverStatus {
 	seq: number;
 	tMs: number;
@@ -202,6 +250,7 @@ export interface ReceiverStatus {
 	display: StatusDisplay;
 	/** Sample rates of the connected device, in its order; [] while none is connected. */
 	sampleRatesHz: number[];
+	sweep: StatusSweep;
 }
 
 export interface CroppedSpectrum {
@@ -251,6 +300,48 @@ export function clampDisplayRange(minDb: unknown, maxDb: unknown): DisplayRangeD
 	const min = roundDb(Math.min(ceiling - gap, Math.max(floor, roundDb(minDb))));
 	const max = roundDb(Math.min(ceiling, Math.max(min + gap, roundDb(maxDb))));
 	return { minDb: min, maxDb: max };
+}
+
+/** The widest scan range in Hz an FFT size allows. */
+export function sweepMaxSpanHz(fftSize: number): number {
+	const { sampleRateHz, maxBins } = SWEEP_SPAN_LIMITS;
+	return Number.isFinite(fftSize) && fftSize > 0 ? Math.floor((maxBins * sampleRateHz) / fftSize) : 0;
+}
+
+/**
+ * Whether a scan range in displayed Hz is one the Receiver can scan: with the
+ * frequency shift removed inside SWEEP_LIMITS, increasing, at least
+ * minSpanHz wide and at most maxBins bins at this FFT size.
+ */
+export function inSweepRange(startHz: unknown, stopHz: unknown, fftSize: unknown, frequencyShiftHz = 0): boolean {
+	if (typeof startHz !== 'number' || typeof stopHz !== 'number' || !Number.isFinite(startHz) || !Number.isFinite(stopHz)) return false;
+	if (!(SWEEP_FFT_SIZES as readonly unknown[]).includes(fftSize) || !Number.isFinite(frequencyShiftHz)) return false;
+	const deviceStart = startHz - frequencyShiftHz;
+	const deviceStop = stopHz - frequencyShiftHz;
+	if (deviceStart < SWEEP_LIMITS.minHz || deviceStop > SWEEP_LIMITS.maxHz || deviceStop - deviceStart < SWEEP_SPAN_LIMITS.minSpanHz) return false;
+	const resolutionHz = SWEEP_SPAN_LIMITS.sampleRateHz / (fftSize as number);
+	return Math.ceil((deviceStop - deviceStart) / resolutionHz) <= SWEEP_SPAN_LIMITS.maxBins;
+}
+
+/**
+ * Downsamples a scan trace with max-hold into a new Float32Array of at most
+ * `bins` values; a bin without a finite value is SPECTRUM_FLOOR_DB.
+ */
+export function decimateMaxHold(values: ArrayLike<number>, bins: number): Float32Array {
+	const size = values.length;
+	const count = Math.max(0, Math.min(size, Math.floor(bins)));
+	const output = new Float32Array(count);
+	for (let k = 0; k < count; k++) {
+		const from = Math.floor((k * size) / count);
+		const to = Math.max(from + 1, Math.floor(((k + 1) * size) / count));
+		let peak = -Infinity;
+		for (let index = from; index < to; index++) {
+			const value = values[index];
+			if (Number.isFinite(value) && value > peak) peak = value;
+		}
+		output[k] = peak === -Infinity ? SPECTRUM_FLOOR_DB : peak;
+	}
+	return output;
 }
 
 /** Clamps a requested subscription; values that are not finite numbers take the default. */
@@ -353,6 +444,36 @@ export function parseConsoleMessage(data: unknown): ConsoleCommand | null {
 			if (typeof rate !== 'number' || !Number.isInteger(rate) || rate <= 0) return invalid;
 			if (data.confirmRecording !== undefined && typeof data.confirmRecording !== 'boolean') return invalid;
 			return data.confirmRecording === true ? { type, id, sampleRateHz: rate, confirmRecording: true } : { type, id, sampleRateHz: rate };
+		}
+		case 'console:sweep-start': {
+			if ((data.mock !== undefined && typeof data.mock !== 'boolean')
+				|| (data.confirmRecording !== undefined && typeof data.confirmRecording !== 'boolean')) return invalid;
+			const command: CommandOf<'console:sweep-start'> = { type, id, mock: data.mock === true };
+			if (data.confirmRecording === true) command.confirmRecording = true;
+			return command;
+		}
+		case 'console:sweep-stop':
+			return data.resumeRx === undefined || typeof data.resumeRx === 'boolean' ? { type, id, resumeRx: data.resumeRx === true } : invalid;
+		case 'console:sweep-config': {
+			const startHz = optionalHz(data.startHz);
+			const stopHz = optionalHz(data.stopHz);
+			const lnaDb = optionalNumber(data.lnaDb);
+			const vgaDb = optionalNumber(data.vgaDb);
+			if (startHz === null || stopHz === null || lnaDb === null || vgaDb === null) return invalid;
+			if (data.fftSize !== undefined && !(SWEEP_FFT_SIZES as readonly unknown[]).includes(data.fftSize)) return invalid;
+			if (data.amp !== undefined && typeof data.amp !== 'boolean') return invalid;
+			const command: CommandOf<'console:sweep-config'> = { type, id };
+			if (startHz !== undefined) command.startHz = startHz;
+			if (stopHz !== undefined) command.stopHz = stopHz;
+			if (data.fftSize !== undefined) command.fftSize = data.fftSize as SweepFftSize;
+			if (lnaDb !== undefined) command.lnaDb = lnaDb;
+			if (vgaDb !== undefined) command.vgaDb = vgaDb;
+			if (data.amp !== undefined) command.amp = data.amp as boolean;
+			return Object.keys(command).length > 2 ? command : invalid;
+		}
+		case 'console:sweep-display': {
+			const range = clampDisplayRange(data.minDb, data.maxDb);
+			return range ? { type, id, ...range } : invalid;
 		}
 		default:
 			return null;

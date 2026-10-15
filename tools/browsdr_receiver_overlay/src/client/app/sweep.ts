@@ -777,6 +777,8 @@ export const sweepMethods = {
 				Comlink.proxy((frame: SweepSpectrumFrame) => {
 					const currentRuntime = runtimeFor(this);
 					currentRuntime.frame = frame;
+					// Inside the console's frame, the Spektrum dock draws the scan too (console-bridge.ts).
+					this._consoleBridge?.sweepFrame(frame);
 					this.sweep.hasResults = true;
 					this.sweep.progress.sweepCount = frame.sweepCount;
 					const addedWaterfallRow = currentRuntime.waterfallHistory.appendCompletedSweep(frame);

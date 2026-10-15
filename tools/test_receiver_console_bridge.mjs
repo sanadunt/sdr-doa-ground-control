@@ -18,7 +18,7 @@ export async function resolve(specifier, context, nextResolve) {
 
 const appDir = new URL('./browsdr_receiver_overlay/src/client/app/', import.meta.url);
 const protocol = await import(new URL('console-bridge-protocol.ts', appDir).href);
-const { installConsoleBridge, AUDIO_RESUME_WAIT_MS, RADIO_POLL_MS, RADIO_RESTART_WAIT_MS } = await import(new URL('console-bridge.ts', appDir).href);
+const { installConsoleBridge, AUDIO_RESUME_WAIT_MS, RADIO_POLL_MS, RADIO_RESTART_WAIT_MS, SWEEP_STOP_WAIT_MS } = await import(new URL('console-bridge.ts', appDir).href);
 const { connectionMethods } = await import(new URL('connection.ts', appDir).href);
 const { vfoMethods } = await import(new URL('vfo.ts', appDir).href);
 const { makeDefaultVfo, MODE_DEFAULTS } = await import(new URL('../vendor/BrowSDR/src/client/app/constants.ts', import.meta.url).href);
@@ -26,10 +26,13 @@ const { makeDefaultVfo, MODE_DEFAULTS } = await import(new URL('../vendor/BrowSD
 const {
 	BRIDGE_CHANNEL, BRIDGE_VERSION, FRAME_MESSAGE_TYPES, CONSOLE_MESSAGE_TYPES, LISTEN_MODES, RESULT_CODES,
 	STATUS_ERROR_CODES, SUBSCRIBE_LIMITS, SPECTRUM_FLOOR_DB, TUNE_SOURCES, SWEEP_LIMITS, STATUS_DEBOUNCE_MS,
-	STATUS_URGENT_MIN_MS, DISPLAY_DB_LIMITS, SAMPLE_RATES_HZ, GAIN_LIMITS, clampDisplayRange, clampSubscription, cropSpectrum,
-	createFrameThrottle, onGainStep, parseConsoleMessage,
+	STATUS_URGENT_MIN_MS, DISPLAY_DB_LIMITS, SAMPLE_RATES_HZ, GAIN_LIMITS, SWEEP_FFT_SIZES, SWEEP_VIEWS, SWEEP_SOURCES, SWEEP_PHASES,
+	SWEEP_SPAN_LIMITS, clampDisplayRange, clampSubscription, cropSpectrum, createFrameThrottle, decimateMaxHold, inSweepRange,
+	onGainStep, parseConsoleMessage, sweepMaxSpanHz,
 } = protocol;
-const { SWEEP_MIN_FREQUENCY_HZ, SWEEP_MAX_FREQUENCY_HZ } = await import(new URL('./browsdr_receiver_overlay/src/client/worker/sweep-types.ts', import.meta.url).href);
+const {
+	SWEEP_MIN_FREQUENCY_HZ, SWEEP_MAX_FREQUENCY_HZ, SWEEP_MAX_BINS, SWEEP_SAMPLE_RATE_HZ, validateSweepConfig,
+} = await import(new URL('./browsdr_receiver_overlay/src/client/worker/sweep-types.ts', import.meta.url).href);
 const { HackRFDevice } = await import(new URL('./browsdr_receiver_overlay/src/client/devices/hackrf.ts', import.meta.url).href);
 const { MockHackRF } = await import(new URL('./browsdr_receiver_overlay/src/client/worker/mock-hackrf.ts', import.meta.url).href);
 const DEVICE_RATES = [2_000_000, 4_000_000, 5_000_000, 8_000_000, 10_000_000, 16_000_000, 20_000_000];
@@ -134,12 +137,12 @@ function createFrame({ parentOrigin = ORIGIN, crossOrigin = false, usbDevices = 
 	return { win, parent, posted, dispatch, send, listeners, usb, usbListeners, navigator: navigatorLike };
 }
 
-function receiverApp({ audioAllowed = true, openOk = true, mockSdrEnabled = false, sampleRates = DEVICE_RATES, ampName = 'Amp (14dB)' } = {}) {
+function receiverApp({ audioAllowed = true, openOk = true, mockSdrEnabled = false, sampleRates = DEVICE_RATES, ampName = 'Amp (14dB)', sweepSupport = true } = {}) {
 	const log = [];
 	const watchers = [];
 	const audioPolicy = { allowed: audioAllowed };
-	// Fails the next RX start when set (the stream could not start).
-	const failures = { startRx: false };
+	// startRx: fails the next RX start (the stream could not start). sweep: the next scan start throws this error.
+	const failures = { startRx: false, sweep: null };
 	const backend = {
 		async open(target) { log.push(['open', target === 'mock' ? 'mock' : 'usb']); return openOk; },
 		async info() { return { name: log.some(entry => entry[0] === 'open' && entry[1] === 'mock') ? 'Mock SDR (Signal Gen)' : 'HackRF One' }; },
@@ -151,7 +154,8 @@ function receiverApp({ audioAllowed = true, openOk = true, mockSdrEnabled = fals
 					{ name: ampName, min: 0, max: 1, step: 1, default: 0 },
 				],
 				sampleRates,
-				supportsNativeSweep: true,
+				supportsNativeSweep: sweepSupport,
+				supportsManualSweep: sweepSupport,
 			};
 		},
 		async startRxStream(options) {
@@ -188,7 +192,12 @@ function receiverApp({ audioAllowed = true, openOk = true, mockSdrEnabled = fals
 		activeVfoIndex: 0,
 		vfoSquelchOpen: [],
 		snackbar: { show: false, message: '' },
-		sweep: { active: false, starting: false, stopping: false, listening: false, listenStarting: false, error: '', source: 'simulated', hasResults: false },
+		// The Receiver's scan defaults (state.ts).
+		sweep: {
+			active: false, starting: false, stopping: false, listening: false, listenStarting: false, error: '', source: 'simulated', hasResults: false,
+			returnToRx: false, startMHz: 100, endMHz: 1000, fftSize: 8192, lnaGain: 40, vgaGain: 20, ampEnabled: false,
+			displayMinDb: -60, displayMaxDb: 0, view: 'average',
+		},
 		audioRecording: { armed: false, starting: false, notice: '', error: '' },
 		devicePicker: { show: false, devices: [] },
 		vfoConflictDialog: { show: false },
@@ -204,7 +213,58 @@ function receiverApp({ audioAllowed = true, openOk = true, mockSdrEnabled = fals
 		_initAudioCtx() { if (!this.audioCtx) this.audioCtx = new FakeAudioContext(audioPolicy); },
 		async stopVfoAudioRecording() {},
 		async disarmVfoAudioRecording() { this.audioRecording.armed = false; },
-		async stopSweep() { log.push('stopSweep'); },
+		// The Receiver's scan start (sweep.ts startSweep after the builder's pauseReceiverForSweep), without the worker.
+		async startSweep() {
+			log.push(['startSweep', this.sweep.source]);
+			if (this.sweep.active || this.sweep.starting || this.sweep.stopping) return;
+			this.sweep.starting = true;
+			this.sweep.error = '';
+			this.sweep.returnToRx = this.sweep.returnToRx || this.running;
+			try {
+				if (this.running) await this.togglePlay(false, true);
+				if (failures.sweep) {
+					this.sweep.error = failures.sweep;
+					this.showMsg(`Sweep error: ${failures.sweep}`);
+					failures.sweep = null;
+					this.sweep.returnToRx = false;
+					return;
+				}
+				this.sweep.active = true;
+			} finally {
+				this.sweep.starting = false;
+			}
+		},
+		async startHardwareSweep() {
+			const capabilities = this.deviceCapabilities;
+			const source = capabilities?.supportsNativeSweep ? 'native' : capabilities?.supportsManualSweep ? 'manual' : null;
+			if (!source) {
+				this.showMsg('Connected device does not support hardware wide spectrum scanning.');
+				this.sweep.returnToRx = false;
+				return false;
+			}
+			this.sweep.source = source;
+			await this.startSweep();
+			return this.sweep.active || this.sweep.starting;
+		},
+		async stopSweep(resumeReceiver = true) {
+			log.push(['stopSweep', resumeReceiver]);
+			if (this.sweep.starting && !this.sweep.active) return false;
+			if (!this.sweep.active) return !this.sweep.stopping;
+			const shouldResume = resumeReceiver && this.sweep.returnToRx;
+			this.sweep.active = false;
+			this.sweep.stopping = true;
+			await Promise.resolve();
+			this.sweep.stopping = false;
+			this.sweep.returnToRx = false;
+			if (shouldResume && this.connected) await this.startStream();
+			return true;
+		},
+		initSweepCanvas() { log.push('initSweepCanvas'); },
+		drawSweepSpectrum() { log.push('drawSweepSpectrum'); },
+		// Both can open a confirm() or stop RX on their own; the bridge must never call them.
+		requestWorkspace() { throw new Error('requestWorkspace() from the bridge'); },
+		selectWorkspace() { throw new Error('selectWorkspace() from the bridge'); },
+		connect() { throw new Error('connect() from the bridge'); },
 		async pairNewDevice() { log.push('pairNewDevice'); },
 		$watch(getter, callback) {
 			const watcher = { getter, callback, last: getter() };
@@ -275,16 +335,18 @@ function setup(t, { frame: frameOptions = {}, app: appOptions = {} } = {}) {
 test('protocol constants match the console contract', () => {
 	assert.equal(BRIDGE_CHANNEL, 'sdr-console-receiver');
 	assert.equal(BRIDGE_VERSION, 1);
-	assert.deepEqual([...FRAME_MESSAGE_TYPES], ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result']);
+	assert.deepEqual([...FRAME_MESSAGE_TYPES], ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep']);
 	assert.deepEqual([...CONSOLE_MESSAGE_TYPES], [
 		'console:hello', 'console:subscribe', 'console:start', 'console:stop', 'console:tune', 'console:vfo', 'console:listen',
-		'console:display', 'console:gains', 'console:radio',
+		'console:display', 'console:gains', 'console:radio', 'console:sweep-start', 'console:sweep-stop', 'console:sweep-config',
+		'console:sweep-display',
 	]);
 	assert.deepEqual([...LISTEN_MODES], ['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw']);
 	assert.deepEqual([...LISTEN_MODES].sort(), Object.keys(MODE_DEFAULTS).sort(), 'every Receiver mode, nothing else');
 	assert.deepEqual([...RESULT_CODES], [
 		'OK', 'NOT_READY', 'INVALID_COMMAND', 'NO_WEBUSB', 'NEEDS_PAIRING', 'NEEDS_DEVICE_CHOICE', 'MOCK_UNAVAILABLE',
-		'CONNECT_FAILED', 'SWEEP_BUSY', 'RX_NOT_RUNNING', 'OUT_OF_RANGE', 'AUDIO_BLOCKED', 'RECORDING_ACTIVE', 'TIMEOUT',
+		'CONNECT_FAILED', 'SWEEP_BUSY', 'RX_NOT_RUNNING', 'OUT_OF_RANGE', 'AUDIO_BLOCKED', 'RECORDING_ACTIVE', 'SWEEP_UNSUPPORTED',
+		'SWEEP_FAILED', 'TIMEOUT',
 	]);
 	assert.deepEqual([...STATUS_ERROR_CODES], ['USB_LOST', 'RX_ERROR', 'NO_WEBUSB']);
 	assert.deepEqual({ ...SUBSCRIBE_LIMITS }, {
@@ -559,7 +621,7 @@ test('without WebUSB the paired count stays unknown', async t => {
 const STATUS_KEYS = [
 	'ch', 'v', 'type', 'seq', 'tMs', 'webusb', 'mockAvailable', 'pairedCount', 'connected', 'mock', 'deviceName', 'running', 'busy',
 	'workspace', 'centerHz', 'sampleRateHz', 'frequencyShiftHz', 'gains', 'vfo', 'squelchOpen', 'audio', 'recording', 'error', 'notice',
-	'tune', 'display', 'sampleRatesHz',
+	'tune', 'display', 'sampleRatesHz', 'sweep',
 ];
 
 test('status reports the radio in Hz with the documented fields', async t => {
@@ -587,6 +649,11 @@ test('status reports the radio in Hz with the documented fields', async t => {
 		tune: { rev: 1, by: 'console', id: 's1', receiverRev: 0 },
 		display: { auto: true, minDb: -70, maxDb: 0 },
 		sampleRatesHz: DEVICE_RATES,
+		// The scan range in displayed Hz: the Receiver's 100–1000 MHz plus the -125 MHz shift.
+		sweep: {
+			phase: 'idle', source: 'native', startHz: -25_000_000, stopHz: 875_000_000, fftSize: 8192, resolutionHz: 20_000_000 / 8192,
+			lnaDb: 40, vgaDb: 20, amp: false, displayMinDb: -60, displayMaxDb: 0, view: 'average',
+		},
 	});
 	assert.equal(status.notice, 'Connected to Mock SDR', 'the visible snackbar text, through tm()');
 	app.snackbar.show = false;
@@ -1565,4 +1632,444 @@ test('radio waits behind a start and blocks the next stop until it answers', asy
 	assert.equal(app.radio.sampleRate, 5_000_000);
 	assert.equal(app.running, false);
 	assert.deepEqual([result('o2').tune.by, result('o2').tune.id], ['console', 'o1'], 'the start\'s tuning; the VFO stayed in band');
+});
+
+// ---------------------------------------------------------------------------
+// Wide scan (console:sweep-*, receiver:sweep, status.sweep)
+
+test('scan constants are the Receiver scan limits', () => {
+	assert.deepEqual([...SWEEP_FFT_SIZES], [4096, 8192]);
+	assert.deepEqual([...SWEEP_VIEWS], ['current', 'average', 'max']);
+	assert.deepEqual([...SWEEP_SOURCES], ['native', 'manual', 'simulated']);
+	assert.deepEqual([...SWEEP_PHASES], ['idle', 'starting', 'active', 'stopping']);
+	assert.deepEqual({ ...SWEEP_SPAN_LIMITS }, { minSpanHz: 1_000_000, sampleRateHz: SWEEP_SAMPLE_RATE_HZ, maxBins: SWEEP_MAX_BINS });
+	assert.equal(sweepMaxSpanHz(8192), 1_220_703_125);
+	assert.equal(sweepMaxSpanHz(4096), 2_441_406_250);
+});
+
+test('inSweepRange accepts exactly the ranges the Receiver can scan', () => {
+	const config = (startHz, endHz, fftSize) => ({
+		startHz, endHz, fftSize, minSnrDb: 8, averageAlpha: 0.35, lnaGain: 40, vgaGain: 20, ampEnabled: false, iqCorrection: true,
+	});
+	const scans = (startHz, endHz, fftSize) => {
+		try {
+			validateSweepConfig(config(startHz, endHz, fftSize));
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	for (const [start, stop, fft] of [
+		[100e6, 1000e6, 8192], [1e6, 2e6, 8192], [1e6, 1_220_000_000, 8192], [1e6, 1_230_000_000, 8192], [1e6, 1_230_000_000, 4096],
+		[7_249_000_000, 7_250_000_000, 8192], [7_249_000_000, 7_251_000_000, 8192], [500_000, 2e6, 4096], [2e9, 4.5e9, 4096],
+	]) {
+		assert.equal(inSweepRange(start, stop, fft), scans(start, stop, fft), `${start}-${stop} @${fft}`);
+	}
+	assert.equal(inSweepRange(100e6, 100.5e6, 8192), false, 'narrower than 1 MHz');
+	assert.equal(inSweepRange(200e6, 100e6, 8192), false);
+	assert.equal(inSweepRange(100e6, 1000e6, 2048), false);
+	assert.equal(inSweepRange(Number.NaN, 1000e6, 8192), false);
+	// Displayed Hz: a -125 MHz upconverter shift moves the device range up by 125 MHz.
+	assert.equal(inSweepRange(-24e6, 100e6, 8192, -125_000_000), true);
+	assert.equal(inSweepRange(-125e6, 100e6, 8192, -125_000_000), false, 'device 0 Hz');
+});
+
+test('decimateMaxHold keeps the peak of each bin in a new array and floors non-finite bins', () => {
+	const values = new Float32Array([-90, -10, -80, -70, Number.NaN, Number.NaN, -60, -50]);
+	const out = decimateMaxHold(values, 4);
+	assert.deepEqual([...out], [-10, -70, SPECTRUM_FLOOR_DB, -50]);
+	assert.notEqual(out.buffer, values.buffer);
+	assert.deepEqual([...decimateMaxHold(values, 64)], [...values].map(value => (Number.isFinite(value) ? value : SPECTRUM_FLOOR_DB)), 'never upsampled');
+});
+
+test('parseConsoleMessage reads the scan commands', () => {
+	const envelope = (type, payload) => ({ ch: BRIDGE_CHANNEL, v: BRIDGE_VERSION, type, id: 'c3-s', ...payload });
+	const invalid = { type: 'invalid', id: 'c3-s' };
+	assert.deepEqual(parseConsoleMessage(envelope('console:sweep-start', {})), { type: 'console:sweep-start', id: 'c3-s', mock: false });
+	assert.deepEqual(parseConsoleMessage(envelope('console:sweep-start', { mock: true, confirmRecording: true })),
+		{ type: 'console:sweep-start', id: 'c3-s', mock: true, confirmRecording: true });
+	assert.deepEqual(parseConsoleMessage(envelope('console:sweep-start', { mock: true, confirmRecording: false })), { type: 'console:sweep-start', id: 'c3-s', mock: true });
+	assert.deepEqual(parseConsoleMessage(envelope('console:sweep-start', { mock: 1 })), invalid);
+	assert.deepEqual(parseConsoleMessage(envelope('console:sweep-start', { confirmRecording: 'yes' })), invalid);
+	assert.deepEqual(parseConsoleMessage(envelope('console:sweep-stop', {})), { type: 'console:sweep-stop', id: 'c3-s', resumeRx: false });
+	assert.deepEqual(parseConsoleMessage(envelope('console:sweep-stop', { resumeRx: true })), { type: 'console:sweep-stop', id: 'c3-s', resumeRx: true });
+	assert.deepEqual(parseConsoleMessage(envelope('console:sweep-stop', { resumeRx: 'no' })), invalid);
+	assert.deepEqual(parseConsoleMessage(envelope('console:sweep-config', { startHz: 400e6 + 0.4, fftSize: 4096, lnaDb: 24, amp: true, extra: 1 })),
+		{ type: 'console:sweep-config', id: 'c3-s', startHz: 400_000_000, fftSize: 4096, lnaDb: 24, amp: true });
+	for (const payload of [{}, { startHz: '4e8' }, { stopHz: Infinity }, { fftSize: 2048 }, { lnaDb: null }, { vgaDb: Number.NaN }, { amp: 'on' }]) {
+		assert.deepEqual(parseConsoleMessage(envelope('console:sweep-config', payload)), invalid, JSON.stringify(payload));
+	}
+	assert.deepEqual(parseConsoleMessage(envelope('console:sweep-display', { minDb: -100, maxDb: -20 })), { type: 'console:sweep-display', id: 'c3-s', minDb: -100, maxDb: -20 });
+	assert.deepEqual(parseConsoleMessage(envelope('console:sweep-display', { minDb: -300, maxDb: 300 })), { type: 'console:sweep-display', id: 'c3-s', minDb: -160, maxDb: 60 });
+	assert.deepEqual(parseConsoleMessage(envelope('console:sweep-display', { minDb: -100 })), invalid);
+});
+
+/** A wide-scan frame as the worker sends it: 2048 bins with a peak near each end. */
+function scanFrame(startHz = 100e6, endHz = 1000e6, count = 2048) {
+	const current = new Float32Array(count).fill(-110);
+	const average = new Float32Array(count).fill(-100);
+	const maxHold = new Float32Array(count).fill(-90);
+	average[10] = -20;
+	current[count - 5] = -30;
+	maxHold[count / 2] = -10;
+	return { startHz, endHz, resolutionHz: 20_000_000 / 8192, sweepCount: 3, current, average, maxHold };
+}
+
+test('scan frames flow only while subscribed and scanning, in displayed Hz, throttled, decimated and transferred', async t => {
+	const { frame, app, bridge, clock, messages } = setup(t);
+	const data = scanFrame();
+	const feed = (count, everyMs) => {
+		for (let i = 0; i < count; i++) {
+			bridge.sweepFrame(data);
+			clock.advance(everyMs);
+		}
+	};
+	app.sweep.active = true;
+	feed(5, 100);
+	assert.deepEqual(messages('receiver:sweep'), [], 'no subscription yet');
+	frame.send('console:subscribe', { id: 'sub-s', spectrum: true, fps: 4, bins: 512 });
+	app.sweep.active = false;
+	feed(5, 100);
+	assert.deepEqual(messages('receiver:sweep'), [], 'no scan running');
+	app.sweep.active = true;
+	app.radio.frequencyShift = -125;
+	feed(20, 50); // one second of frames
+	const frames = messages('receiver:sweep');
+	assert.equal(frames.length, 4);
+	const first = frames[0];
+	assert.equal(first.startHz, -25_000_000);
+	assert.equal(first.stopHz, 875_000_000);
+	assert.equal(first.binCount, 512);
+	assert.equal(first.view, 'average');
+	assert.equal(first.sweepCount, 3);
+	assert.equal(first.resolutionHz, 20_000_000 / 8192);
+	assert.ok(first.bins instanceof Float32Array && first.bins.length === 512);
+	assert.equal(first.bins[2], -20, 'max-hold of four scan bins');
+	assert.equal(Math.max(...first.bins), -20, 'the average trace');
+	const posts = frame.posted.filter(entry => entry.message.type === 'receiver:sweep');
+	for (const entry of posts) assert.equal(entry.transfer[0].byteLength, 0, 'the copy was transferred');
+	assert.equal(data.average.length, 2048, 'the Receiver keeps its frame');
+
+	app.sweep.view = 'max';
+	clock.advance(1000);
+	bridge.sweepFrame(data);
+	assert.equal(messages('receiver:sweep').at(-1).view, 'max');
+	assert.equal(Math.max(...messages('receiver:sweep').at(-1).bins), -10);
+	app.sweep.view = 'current';
+	clock.advance(1000);
+	bridge.sweepFrame(data);
+	assert.equal(Math.max(...messages('receiver:sweep').at(-1).bins), -30);
+
+	// receiver:spectrum and receiver:sweep share one sequence.
+	app.running = true;
+	clock.advance(1000);
+	bridge.spectrum(new Float32Array(1024).fill(-80));
+	const sequence = frame.posted.map(entry => entry.message).filter(message => message.type === 'receiver:sweep' || message.type === 'receiver:spectrum').map(message => message.seq);
+	assert.deepEqual(sequence, sequence.map((_value, index) => index + 1));
+	app.running = false;
+
+	app.sweep.view = 'average';
+	for (const bad of [null, { ...data, average: new Float32Array(0) }, { ...data, endHz: data.startHz }, { ...data, startHz: Number.NaN }]) {
+		const before = messages('receiver:sweep').length;
+		clock.advance(1000);
+		bridge.sweepFrame(bad);
+		assert.equal(messages('receiver:sweep').length, before);
+	}
+	frame.send('console:subscribe', { id: 'sub-s2', spectrum: false });
+	clock.advance(1000);
+	bridge.sweepFrame(data);
+	assert.equal(messages('receiver:sweep').length, 6, 'spectrum:false stops scan frames');
+});
+
+test('status reports the scan phase at once and its settings in displayed Hz', async t => {
+	const { app, clock, flushWatchers, messages } = setup(t);
+	const latest = () => {
+		flushWatchers();
+		clock.advance(100);
+		return messages('receiver:status').at(-1).sweep;
+	};
+	assert.deepEqual(latest(), {
+		phase: 'idle', source: 'simulated', startHz: 100_000_000, stopHz: 1_000_000_000, fftSize: 8192, resolutionHz: 20_000_000 / 8192,
+		lnaDb: 40, vgaDb: 20, amp: false, displayMinDb: -60, displayMaxDb: 0, view: 'average',
+	});
+	app.sweep.starting = true;
+	flushWatchers();
+	clock.advance(STATUS_URGENT_MIN_MS);
+	assert.equal(messages('receiver:status').at(-1).sweep.phase, 'starting', 'a phase change is urgent');
+	app.sweep.active = true;
+	app.sweep.starting = false;
+	flushWatchers();
+	clock.advance(STATUS_URGENT_MIN_MS);
+	assert.equal(messages('receiver:status').at(-1).sweep.phase, 'active');
+	app.sweep.active = false;
+	app.sweep.stopping = true;
+	assert.equal(latest().phase, 'stopping');
+	app.sweep.stopping = false;
+	Object.assign(app.sweep, { fftSize: 4096, lnaGain: 16, vgaGain: 30, ampEnabled: true, displayMinDb: -500, displayMaxDb: 7, view: 'bogus', source: 'native' });
+	assert.deepEqual(latest(), {
+		phase: 'idle', source: 'native', startHz: 100_000_000, stopHz: 1_000_000_000, fftSize: 4096, resolutionHz: 20_000_000 / 4096,
+		lnaDb: 16, vgaDb: 30, amp: true, displayMinDb: -160, displayMaxDb: 7, view: 'average',
+	});
+	// A progress update alone sends nothing.
+	const count = messages('receiver:status').length;
+	app.sweep.progress = { sweepCount: 9 };
+	flushWatchers();
+	clock.advance(500);
+	assert.equal(messages('receiver:status').length, count);
+});
+
+test('sweep-start with the Mock runs the simulated scan without connecting and shows it in the Spektrum workspace', async t => {
+	const { frame, app, log, result } = setup(t, { app: { mockSdrEnabled: true } });
+	forbidDialogs(t);
+	app.activeWorkspace = 'listener';
+	frame.send('console:sweep-start', { id: 'ss1', mock: true });
+	await settle(20);
+	assert.equal(result('ss1').code, 'OK');
+	assert.equal(app.sweep.active, true);
+	assert.equal(app.sweep.source, 'simulated');
+	assert.equal(app.connected, false, 'the simulated scan needs no radio');
+	assert.equal(app.activeWorkspace, 'spectrum');
+	assert.ok(log.includes('initSweepCanvas'));
+	assert.equal(app.sweep.returnToRx, false);
+	frame.send('console:sweep-start', { id: 'ss2', mock: true });
+	await settle(20);
+	assert.equal(result('ss2').code, 'OK', 'a second start while scanning is a no-op');
+	assert.equal(log.filter(entry => Array.isArray(entry) && entry[0] === 'startSweep').length, 1);
+});
+
+test('sweep-start refuses the Mock when the frame does not offer it, and a scan listen', async t => {
+	const { frame, app, result } = setup(t);
+	frame.send('console:sweep-start', { id: 'sm1', mock: true });
+	await settle(20);
+	assert.equal(result('sm1').code, 'MOCK_UNAVAILABLE');
+	app.sweep.listening = true;
+	frame.send('console:sweep-start', { id: 'sm2', mock: true });
+	await settle(20);
+	assert.equal(result('sm2').code, 'SWEEP_BUSY');
+	assert.equal(app.sweep.active, false);
+});
+
+test('sweep-start connects the one paired RadioSpectrum, keeps VFO 1 muted and scans with its hardware sweep', async t => {
+	const { frame, app, log, result } = setup(t);
+	forbidDialogs(t);
+	frame.send('console:sweep-start', { id: 'sh1', mock: false });
+	await settle(30);
+	assert.equal(result('sh1').code, 'OK');
+	assert.ok(log.some(entry => Array.isArray(entry) && entry[0] === 'open' && entry[1] === 'usb'));
+	assert.equal(app.connected, true);
+	assert.equal(app.sweep.source, 'native');
+	assert.equal(app.sweep.active, true);
+	assert.equal(app.running, false, 'the scan paused the RX the connect started');
+	assert.equal(app.vfos[0].enabled, false, 'that RX start was muted');
+	assert.equal(app.sweep.returnToRx, false, 'RX did not run before the command');
+	assert.equal(log.includes('pairNewDevice'), false);
+});
+
+test('sweep-start reports pairing and device choice instead of opening a picker', async t => {
+	await t.test('none paired, no activation', async st => {
+		const { frame, log, result } = setup(st, { frame: { usbDevices: [] } });
+		frame.send('console:sweep-start', { id: 'sp1', mock: false });
+		await settle(20);
+		assert.equal(result('sp1').code, 'NEEDS_PAIRING');
+		assert.equal(log.includes('pairNewDevice'), false);
+	});
+	await t.test('two paired', async st => {
+		const { frame, result } = setup(st, { frame: { usbDevices: [new FakeUsbDevice('a'), new FakeUsbDevice('b')] } });
+		frame.send('console:sweep-start', { id: 'sp2', mock: false });
+		await settle(20);
+		assert.equal(result('sp2').code, 'NEEDS_DEVICE_CHOICE');
+	});
+	await t.test('no WebUSB', async st => {
+		const { frame, result } = setup(st, { frame: { webusb: false } });
+		frame.send('console:sweep-start', { id: 'sp3', mock: false });
+		await settle(20);
+		assert.equal(result('sp3').code, 'NO_WEBUSB');
+	});
+});
+
+test('sweep-start reports a radio that cannot scan and a scan that fails to start', async t => {
+	await t.test('unsupported', async st => {
+		const { frame, app, result } = setup(st, { app: { sweepSupport: false } });
+		frame.send('console:sweep-start', { id: 'su1', mock: false });
+		await settle(30);
+		assert.equal(result('su1').code, 'SWEEP_UNSUPPORTED');
+		assert.equal(app.sweep.active, false);
+	});
+	await t.test('failed', async st => {
+		const { frame, app, failures, result } = setup(st, { app: { mockSdrEnabled: true } });
+		failures.sweep = 'Sweep range must be increasing and within 1–7250 MHz';
+		frame.send('console:sweep-start', { id: 'sf1', mock: true });
+		await settle(20);
+		assert.equal(result('sf1').code, 'SWEEP_FAILED');
+		assert.equal(result('sf1').message, 'Sweep error: Sweep range must be increasing and within 1–7250 MHz');
+		assert.equal(app.sweep.active, false);
+	});
+});
+
+test('sweep-start over a running RX needs the console\'s confirmation for an armed recording and resumes that RX after a Receiver-page stop', async t => {
+	const { frame, app, result } = await runningMock(t);
+	app.audioRecording.armed = true;
+	frame.send('console:sweep-start', { id: 'sr1', mock: true });
+	await settle(20);
+	assert.equal(result('sr1').code, 'RECORDING_ACTIVE');
+	assert.equal(app.running, true, 'nothing stopped');
+	frame.send('console:sweep-start', { id: 'sr2', mock: true, confirmRecording: true });
+	await settle(30);
+	assert.equal(result('sr2').code, 'OK');
+	assert.equal(app.sweep.active, true);
+	assert.equal(app.running, false);
+	assert.equal(app.audioRecording.armed, false, 'the scan ended the recording');
+	assert.equal(app.sweep.returnToRx, true);
+	// The Receiver page's Stop scan resumes the RX the operator had running.
+	await app.stopSweep();
+	assert.equal(app.running, true);
+});
+
+test('sweep-stop ends the scan without resuming RX unless asked; a following start runs RX', async t => {
+	const { frame, app, result, messages } = await runningMock(t);
+	frame.send('console:sweep-start', { id: 'st1', mock: true });
+	await settle(30);
+	assert.equal(app.sweep.active, true);
+	frame.send('console:sweep-stop', { id: 'st2', resumeRx: false });
+	// Dengar in Spektrum mode: stop the scan, then start RX listening, in one click.
+	frame.send('console:start', { id: 'st3', mock: true, listen: true, mode: 'am' });
+	await settle(40);
+	assert.equal(result('st2').code, 'OK');
+	assert.equal(result('st3').code, 'OK');
+	assert.equal(app.sweep.active, false);
+	assert.equal(app.running, true);
+	assert.equal(app.vfos[0].enabled, true);
+	assert.equal(app.activeWorkspace, 'listener');
+	const order = messages('receiver:result').map(message => message.id);
+	assert.ok(order.indexOf('st2') < order.indexOf('st3'), 'the stop answers before the start runs');
+
+	frame.send('console:sweep-stop', { id: 'st4', resumeRx: false });
+	await settle(20);
+	assert.equal(result('st4').code, 'OK', 'nothing to stop');
+
+	frame.send('console:sweep-start', { id: 'st5', mock: true });
+	await settle(30);
+	frame.send('console:sweep-stop', { id: 'st6', resumeRx: true });
+	await settle(30);
+	assert.equal(result('st6').code, 'OK');
+	assert.equal(app.running, true, 'resumeRx starts the RX that ran before the scan');
+
+	app.sweep.listening = true;
+	frame.send('console:sweep-stop', { id: 'st7', resumeRx: false });
+	await settle(20);
+	assert.equal(result('st7').code, 'SWEEP_BUSY');
+	app.sweep.listening = false;
+});
+
+test('sweep-stop waits for a scan start or a stop already under way', async t => {
+	const { frame, app, clock, result } = setup(t);
+	app.sweep.starting = true;
+	frame.send('console:sweep-stop', { id: 'sw1', resumeRx: false });
+	await settle(20);
+	assert.equal(result('sw1'), undefined, 'waits while the start is on its way');
+	clock.advance(RADIO_POLL_MS);
+	await settle(10);
+	assert.equal(result('sw1'), undefined);
+	app.sweep.starting = false;
+	clock.advance(RADIO_POLL_MS);
+	await settle(10);
+	assert.equal(result('sw1').code, 'OK');
+
+	app.sweep.stopping = true;
+	frame.send('console:sweep-stop', { id: 'sw2', resumeRx: false });
+	await settle(20);
+	clock.advance(SWEEP_STOP_WAIT_MS);
+	await settle(40);
+	for (let i = 0; i < 10 && !result('sw2'); i++) {
+		clock.advance(RADIO_POLL_MS);
+		await settle(10);
+	}
+	assert.equal(result('sw2').code, 'SWEEP_FAILED', 'a stop that never ends');
+	app.sweep.stopping = false;
+});
+
+test('sweep-config sets the scan settings while no scan runs, in displayed Hz, and checks every value first', async t => {
+	const { frame, app, result } = setup(t);
+	app.radio.frequencyShift = -125;
+	frame.send('console:sweep-config', { id: 'sc1', startHz: 300_000_000, stopHz: 500_000_000, fftSize: 4096, lnaDb: 24, vgaDb: 30, amp: true });
+	assert.equal(result('sc1').code, 'OK');
+	assert.equal(app.sweep.startMHz, 425, 'device MHz: the shift removed');
+	assert.equal(app.sweep.endMHz, 625);
+	assert.deepEqual([app.sweep.fftSize, app.sweep.lnaGain, app.sweep.vgaGain, app.sweep.ampEnabled], [4096, 24, 30, true]);
+	const before = JSON.stringify(app.sweep);
+	for (const [id, payload] of [
+		['sc2', { startHz: 7_200_000_000 - 125_000_000, stopHz: 7_260_000_000 - 125_000_000 }],
+		['sc3', { stopHz: 300_500_000 }],
+		['sc4', { startHz: -124_500_000 }],
+		['sc5', { startHz: -100_000_000, stopHz: 2_600_000_000 }],
+		['sc6', { lnaDb: 20, amp: false }],
+		['sc7', { vgaDb: 63 }],
+	]) {
+		frame.send('console:sweep-config', { id, ...payload });
+		assert.equal(result(id).code, 'OUT_OF_RANGE', JSON.stringify(payload));
+	}
+	assert.equal(JSON.stringify(app.sweep), before, 'a refused command writes nothing');
+	// 2.44 kHz bins allow at most 1.22 GHz: the current 200 MHz range fits, a 2 GHz one does not.
+	frame.send('console:sweep-config', { id: 'sc8', startHz: 100_000_000, stopHz: 2_100_000_000 });
+	assert.equal(result('sc8').code, 'OK');
+	frame.send('console:sweep-config', { id: 'sc9', fftSize: 8192 });
+	assert.equal(result('sc9').code, 'OUT_OF_RANGE');
+	assert.equal(app.sweep.fftSize, 4096);
+	frame.send('console:sweep-config', { id: 'sc10', fftSize: 'x' });
+	assert.equal(result('sc10').code, 'INVALID_COMMAND');
+});
+
+test('sweep-config is refused while a scan starts, runs or stops and while a sweep-start waits', async t => {
+	const { frame, app, result } = setup(t, { app: { mockSdrEnabled: true } });
+	for (const flag of ['starting', 'active', 'stopping', 'listening']) {
+		app.sweep[flag] = true;
+		frame.send('console:sweep-config', { id: `sb-${flag}`, lnaDb: 8 });
+		assert.equal(result(`sb-${flag}`).code, 'SWEEP_BUSY', flag);
+		app.sweep[flag] = false;
+	}
+	assert.equal(app.sweep.lnaGain, 40);
+	// Held behind a start in the queue, the sweep-start has not run yet.
+	frame.send('console:start', { id: 'sb1', mock: true, listen: false });
+	frame.send('console:sweep-start', { id: 'sb2', mock: true });
+	frame.send('console:sweep-config', { id: 'sb3', lnaDb: 8 });
+	assert.equal(result('sb3').code, 'SWEEP_BUSY');
+	await settle(40);
+	assert.equal(result('sb2').code, 'OK');
+	frame.send('console:sweep-stop', { id: 'sb4', resumeRx: false });
+	await settle(30);
+	frame.send('console:sweep-config', { id: 'sb5', lnaDb: 8 });
+	assert.equal(result('sb5').code, 'OK');
+	assert.equal(app.sweep.lnaGain, 8);
+});
+
+test('sweep-display sets the Graph min./max. in every state and redraws', async t => {
+	const { frame, app, log, clock, flushWatchers, messages, result } = setup(t);
+	app.sweep.active = true;
+	frame.send('console:sweep-display', { id: 'sd1', minDb: -110, maxDb: -30 });
+	assert.equal(result('sd1').code, 'OK');
+	assert.deepEqual([app.sweep.displayMinDb, app.sweep.displayMaxDb], [-110, -30]);
+	assert.ok(log.includes('drawSweepSpectrum'));
+	flushWatchers();
+	clock.advance(100);
+	assert.deepEqual([messages('receiver:status').at(-1).sweep.displayMinDb, messages('receiver:status').at(-1).sweep.displayMaxDb], [-110, -30]);
+	app.sweep.active = false;
+	app.sweep.listening = true;
+	frame.send('console:sweep-display', { id: 'sd2', minDb: -40, maxDb: -45 });
+	assert.equal(result('sd2').code, 'OK');
+	assert.deepEqual([app.sweep.displayMinDb, app.sweep.displayMaxDb], [-40, -35], 'kept 5 dB apart, the minimum first');
+});
+
+test('a tune in Spektrum mode during a dock scan only sets the next RX, stamped as the console\'s', async t => {
+	const { frame, app, log, clock, flushWatchers, messages, result } = setup(t, { app: { mockSdrEnabled: true } });
+	frame.send('console:sweep-start', { id: 'sk1', mock: true });
+	await settle(20);
+	assert.equal(app.sweep.active, true);
+	frame.send('console:tune', { id: 'sk2', centerHz: 433_920_000, vfoHz: 433_920_000 });
+	assert.equal(result('sk2').code, 'OK');
+	assert.equal(app.radio.centerFreq, 433.92);
+	assert.deepEqual(log.filter(entry => Array.isArray(entry) && (entry[0] === 'vfoParams' || entry[0] === 'setFrequency')), []);
+	flushWatchers();
+	clock.advance(100);
+	assert.deepEqual(messages('receiver:status').at(-1).tune, { rev: 1, by: 'console', id: 'sk2', receiverRev: 0 });
+	assert.equal(app.sweep.active, true, 'the scan keeps running');
 });

@@ -3,7 +3,9 @@
  * console's same-origin iframe, the Overview dashboard starts and stops RX,
  * tunes, picks the listen mode, sets the Dengar dB scale, the Listener's gains
  * and sample rate, and draws a cropped spectrum through window.postMessage.
- * The protocol is in console-bridge-protocol.ts.
+ * Its Spektrum mode also starts and stops the wide scan, sets the scan's
+ * range, resolution, gains and Graph min./max., and draws the scan trace
+ * (receiver:sweep). The protocol is in console-bridge-protocol.ts.
  *
  * The bridge only answers its parent window on the page's own origin. It
  * never opens the device picker, the VFO conflict dialog or a confirm(),
@@ -19,14 +21,20 @@
  *
  * One RadioSpectrum cannot run RX and a scan at once, so SWEEP_BUSY follows
  * one rule:
- * - during a scan listen every radio command is refused;
+ * - during a scan listen every radio command is refused, sweep-start,
+ *   sweep-stop and sweep-config included;
  * - during a wide scan start, stop, listen and radio are refused, while tune,
  *   vfo and gains only change the stopped Listener's settings, with no
  *   backend call (RX uses them when it starts again); a scan start that has
  *   not stopped RX yet refuses them too;
- * - display (the dB scale), marker and sweep-* commands are never refused
- *   because of a scan.
- * The marker and sweep-* commands follow this rule when they are added.
+ * - the scan itself is started and stopped only by sweep-start and
+ *   sweep-stop, through the same queue and connect path as console:start
+ *   (never connect(), requestWorkspace or selectWorkspace, which can open a
+ *   dialog); sweep-start is answered OK while a scan already runs;
+ * - sweep-config is refused while a scan starts, runs or stops: like the
+ *   Receiver page, the scan settings are read-only until it has stopped;
+ * - display and sweep-display (the dB scales) and marker commands are never
+ *   refused because of a scan.
  *
  * Every console write of the centre or the active VFO goes through
  * writeTuning(), which stamps the change with the command id. Any other change
@@ -47,11 +55,15 @@ import {
 	clampSubscription,
 	createFrameThrottle,
 	cropSpectrum,
+	decimateMaxHold,
 	GAIN_LIMITS,
+	inSweepRange,
 	inTuneRange,
 	onGainStep,
 	parseConsoleMessage,
 	SAMPLE_RATES_HZ,
+	SWEEP_SOURCES,
+	SWEEP_SPAN_LIMITS,
 	VOLUME_LIMITS,
 	type AudioState,
 	type BusyState,
@@ -61,15 +73,32 @@ import {
 	type ResultCode,
 	type ResultTune,
 	type StatusErrorCode,
+	type StatusSweep,
 	type Subscription,
+	type SweepFftSize,
+	type SweepPhase,
+	type SweepView,
 	type TuneSource,
 	type TuneStamp,
 	type Workspace,
 } from './console-bridge-protocol';
 
+/** What sweepFrame reads from a wide-scan frame (worker/sweep-types.ts SweepSpectrumFrame). */
+export interface SweepFrameLike {
+	startHz: number;
+	endHz: number;
+	resolutionHz: number;
+	sweepCount: number;
+	current: ArrayLike<number>;
+	average: ArrayLike<number>;
+	maxHold: ArrayLike<number>;
+}
+
 export interface ConsoleBridge {
 	/** Called with every FFT frame the Listener draws. */
 	spectrum(data: ArrayLike<number>): void;
+	/** Called with every frame of a running wide scan (sweep.ts). */
+	sweepFrame(frame: SweepFrameLike): void;
 	/** Whether a fresh RX start unmutes VFO 1: false while a console start without listen runs. */
 	initialVfoEnabled(): boolean;
 	/** A device connection that started outside the bridge; console starts wait for it. */
@@ -135,6 +164,10 @@ export const RADIO_RESTART_WAIT_MS = 10_000;
 export const RADIO_POLL_MS = 50;
 /** Status lists at most this many device sample rates. */
 const MAX_SAMPLE_RATES = 16;
+/** How long console:sweep-stop waits for a scan start or a stop already under way to end. */
+export const SWEEP_STOP_WAIT_MS = 15_000;
+/** The Receiver's Graph min./max. before anything is set (state.ts). */
+const SWEEP_DISPLAY_DEFAULT = { minDb: -60, maxDb: 0 } as const;
 
 function browserEnvironment(): ConsoleBridgeEnvironment {
 	return {
@@ -207,7 +240,9 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 	let disposed = false;
 	let subscription: Subscription | null = null;
 	const throttle = createFrameThrottle();
+	const sweepThrottle = createFrameThrottle();
 	let statusSeq = 0;
+	// Shared by receiver:spectrum and receiver:sweep.
 	let spectrumSeq = 0;
 	let statusTimer: TimerHandle | null = null;
 	let statusDueAt = 0;
@@ -224,6 +259,8 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 	let pairedGeneration = 0;
 	let startsPending = 0;
 	let pendingListen = true;
+	// console:sweep-start commands received and not answered yet; sweep-config waits for them.
+	let sweepStartsPending = 0;
 	let connectInFlight: Promise<void> | null = null;
 	let lifecycle: Promise<void> = Promise.resolve();
 	// FFT frames drawn by a running Listener outside an RX restart; console:radio waits for the next one.
@@ -287,6 +324,47 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		return { auto: display.auto !== false, minDb: range.minDb, maxDb: range.maxDb };
 	}
 
+	function frequencyShiftHz(): number {
+		return mhzToHz(app.radio?.frequencyShift) ?? 0;
+	}
+
+	function sweepPhase(): SweepPhase {
+		const sweep = app.sweep ?? {};
+		if (sweep.stopping) return 'stopping';
+		if (sweep.starting) return 'starting';
+		return sweep.active ? 'active' : 'idle';
+	}
+
+	function sweepView(): SweepView {
+		const view = app.sweep?.view;
+		return view === 'current' || view === 'max' ? view : 'average';
+	}
+
+	/** The wide scan: its state, the range in displayed Hz (frequency shift added) and its settings. */
+	function sweepState(): StatusSweep {
+		const sweep = (app.sweep ?? {}) as Record<string, unknown>;
+		const fftSize: SweepFftSize = sweep.fftSize === 4096 ? 4096 : 8192;
+		const shift = frequencyShiftHz();
+		const display = clampDisplayRange(sweep.displayMinDb, sweep.displayMaxDb) ?? SWEEP_DISPLAY_DEFAULT;
+		const source = (SWEEP_SOURCES as readonly unknown[]).includes(sweep.source) ? sweep.source as StatusSweep['source'] : 'simulated';
+		const startHz = mhzToHz(sweep.startMHz);
+		const stopHz = mhzToHz(sweep.endMHz);
+		return {
+			phase: sweepPhase(),
+			source,
+			startHz: startHz === null ? 0 : startHz + shift,
+			stopHz: stopHz === null ? 0 : stopHz + shift,
+			fftSize,
+			resolutionHz: SWEEP_SPAN_LIMITS.sampleRateHz / fftSize,
+			lnaDb: finiteOrNull(sweep.lnaGain),
+			vgaDb: finiteOrNull(sweep.vgaGain),
+			amp: sweep.ampEnabled === true,
+			displayMinDb: display.minDb,
+			displayMaxDb: display.maxDb,
+			view: sweepView(),
+		};
+	}
+
 	/** The connected device's sample rates, positive integers in its order; [] while none is connected. */
 	function deviceSampleRates(): number[] {
 		const rates: unknown = app.deviceCapabilities?.sampleRates;
@@ -334,6 +412,7 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 			notice,
 			display: displayState(),
 			sampleRatesHz: deviceSampleRates(),
+			sweep: sweepState(),
 		};
 	}
 
@@ -366,8 +445,8 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		return { ...stamp, centerHz: mhzToHz(app.radio?.centerFreq), vfoHz: vfo ? mhzToHz(vfo.freq) : null };
 	}
 
-	function urgentKey(status: Pick<ReceiverStatus, 'running' | 'connected' | 'busy' | 'error' | 'recording'>): string {
-		return `${status.running}|${status.connected}|${status.busy}|${status.error?.code ?? ''}|${status.recording}`;
+	function urgentKey(status: Pick<ReceiverStatus, 'running' | 'connected' | 'busy' | 'error' | 'recording' | 'sweep'>): string {
+		return `${status.running}|${status.connected}|${status.busy}|${status.error?.code ?? ''}|${status.recording}|${status.sweep.phase}`;
 	}
 
 	function sendStatusNow(): void {
@@ -399,8 +478,8 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 
 	/**
 	 * Something the status reports changed. Typed frequencies and other edits are
-	 * coalesced for STATUS_DEBOUNCE_MS; a running, connected, busy, error or
-	 * recording change is sent at once, at most every STATUS_URGENT_MIN_MS.
+	 * coalesced for STATUS_DEBOUNCE_MS; a running, connected, busy, error,
+	 * recording or scan phase change is sent at once, at most every STATUS_URGENT_MIN_MS.
 	 */
 	function onReceiverChange(): void {
 		noteTune(null);
@@ -786,7 +865,139 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		return [command.listen ? await ensureAudio() : 'OK'];
 	}
 
-	/** Start, stop, listen and radio run one after another so they never race each other. */
+	function recordingArmed(): boolean {
+		return Boolean(app.audioRecording?.armed || app.audioRecording?.starting);
+	}
+
+	/**
+	 * Starts the wide scan over the Receiver's own range. A connected radio
+	 * scans with its hardware sweep; without one, a mock start runs the
+	 * simulated scan (the Mock SDR has no sweep) and a real one connects the
+	 * one authorised RadioSpectrum first, as console:start does. The scan stops
+	 * RX, which ends an armed recording, so that needs confirmRecording. The
+	 * Receiver page then shows it in its Spektrum workspace.
+	 */
+	async function sweepStart(command: CommandOf<'console:sweep-start'>): Promise<[ResultCode, string?]> {
+		const sweep = app.sweep;
+		if (remoteSession() || !sweep || typeof sweep !== 'object') return ['NOT_READY'];
+		const check = (): [ResultCode] | null => {
+			const busy = busyState();
+			if (busy === 'scan-listen' || sweep.stopping) return ['SWEEP_BUSY'];
+			return busy === 'sweep' ? ['OK'] : null;
+		};
+		const early = check();
+		if (early) return early;
+		if (!app.backend) return ['NOT_READY'];
+		// RX the operator had running before this command; a Receiver-page stop of the scan resumes it.
+		const rxWasRunning = Boolean(app.running);
+		if (rxWasRunning && recordingArmed() && command.confirmRecording !== true) return ['RECORDING_ACTIVE'];
+		// An auto-connect of the authorised HackRF may already be opening the radio.
+		if (connectInFlight) await connectInFlight;
+		const late = check();
+		if (late) return late;
+		if (app.running && recordingArmed() && command.confirmRecording !== true) return ['RECORDING_ACTIVE'];
+
+		let hardware: boolean;
+		if (app.connected && !app.mockDevice) hardware = true;
+		else if (command.mock) {
+			if (!app.mockSdrEnabled) return ['MOCK_UNAVAILABLE'];
+			hardware = false;
+		} else if (app.connected) hardware = true;
+		else {
+			const failure = await connectForStart(false);
+			if (failure) return failure;
+			hardware = true;
+		}
+		const settled = check();
+		if (settled) return settled;
+
+		const noticeBefore = app.snackbar?.message;
+		const errorBefore = sweep.error;
+		if (hardware) {
+			const capabilities = app.deviceCapabilities;
+			if (!capabilities?.supportsNativeSweep && !capabilities?.supportsManualSweep) return ['SWEEP_UNSUPPORTED'];
+			await app.startHardwareSweep();
+		} else {
+			sweep.source = 'simulated';
+			await app.startSweep();
+		}
+		if (!sweep.active) {
+			// A start someone stopped on the way is no failure; one that raised a scan error is.
+			const failed = typeof sweep.error === 'string' && sweep.error !== '' && sweep.error !== errorBefore;
+			return failed ? ['SWEEP_FAILED', noticeSince(noticeBefore)] : ['OK'];
+		}
+		sweep.returnToRx = rxWasRunning;
+		if (app.activeWorkspace !== 'spectrum') {
+			app.activeWorkspace = 'spectrum';
+			if (typeof app.$nextTick === 'function') await app.$nextTick();
+			if (typeof app.initSweepCanvas === 'function') app.initSweepCanvas();
+		}
+		return ['OK'];
+	}
+
+	/**
+	 * Stops the wide scan; RX starts again only with resumeRx and when it ran
+	 * before the scan. A scan that is still starting stops once it gets there,
+	 * and a stop already under way is waited for, so the next queued command
+	 * (a console:start from Dengar) finds the radio free.
+	 */
+	async function sweepStop(command: CommandOf<'console:sweep-stop'>): Promise<[ResultCode, string?]> {
+		const sweep = app.sweep;
+		if (!sweep || typeof sweep !== 'object') return ['NOT_READY'];
+		const busy = busyState();
+		if (busy === 'scan-listen') return ['SWEEP_BUSY'];
+		if (busy === 'none') return ['OK'];
+		const noticeBefore = app.snackbar?.message;
+		await app.stopSweep(command.resumeRx);
+		const deadline = env.monotonicNow() + SWEEP_STOP_WAIT_MS;
+		while ((sweep.starting || sweep.stopping) && env.monotonicNow() < deadline) {
+			const wait = delay(RADIO_POLL_MS);
+			await wait.promise;
+		}
+		if (sweep.active || sweep.starting || sweep.stopping) return ['SWEEP_FAILED', noticeSince(noticeBefore)];
+		return ['OK'];
+	}
+
+	/**
+	 * The scan's range (displayed Hz), resolution and gains, written to the
+	 * Receiver's scan settings, which it saves. Refused while a scan starts,
+	 * runs or stops, and while a sweep-start waits; every value is checked
+	 * before any is written.
+	 */
+	function sweepConfig(command: CommandOf<'console:sweep-config'>): ResultCode {
+		const sweep = app.sweep;
+		if (remoteSession() || !sweep || typeof sweep !== 'object') return 'NOT_READY';
+		if (busyState() !== 'none' || sweepStartsPending > 0) return 'SWEEP_BUSY';
+		const shift = frequencyShiftHz();
+		const fftSize = command.fftSize ?? (sweep.fftSize === 4096 ? 4096 : 8192);
+		const rangeChanged = command.startHz !== undefined || command.stopHz !== undefined;
+		const startHz = command.startHz ?? (mhzToHz(sweep.startMHz) ?? 0) + shift;
+		const stopHz = command.stopHz ?? (mhzToHz(sweep.endMHz) ?? 0) + shift;
+		if ((rangeChanged || command.fftSize !== undefined) && !inSweepRange(startHz, stopHz, fftSize, shift)) return 'OUT_OF_RANGE';
+		if (command.lnaDb !== undefined && !onGainStep(command.lnaDb, GAIN_LIMITS.lna)) return 'OUT_OF_RANGE';
+		if (command.vgaDb !== undefined && !onGainStep(command.vgaDb, GAIN_LIMITS.vga)) return 'OUT_OF_RANGE';
+		if (rangeChanged) {
+			sweep.startMHz = (startHz - shift) / 1e6;
+			sweep.endMHz = (stopHz - shift) / 1e6;
+		}
+		if (command.fftSize !== undefined) sweep.fftSize = command.fftSize;
+		if (command.lnaDb !== undefined) sweep.lnaGain = command.lnaDb;
+		if (command.vgaDb !== undefined) sweep.vgaGain = command.vgaDb;
+		if (command.amp !== undefined) sweep.ampEnabled = command.amp;
+		return 'OK';
+	}
+
+	/** The scan's Graph min./max.: display only, so it is allowed in every state. */
+	function sweepDisplay(command: CommandOf<'console:sweep-display'>): ResultCode {
+		const sweep = app.sweep;
+		if (!sweep || typeof sweep !== 'object') return 'NOT_READY';
+		sweep.displayMinDb = command.minDb;
+		sweep.displayMaxDb = command.maxDb;
+		if (typeof app.drawSweepSpectrum === 'function') app.drawSweepSpectrum();
+		return 'OK';
+	}
+
+	/** Start, stop, listen, radio and the scan's start and stop run one after another so they never race each other. */
 	function enqueue(
 		id: string,
 		task: () => Promise<[ResultCode, string?]>,
@@ -818,7 +1029,10 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 				return;
 			case 'console:subscribe': {
 				const next = clampSubscription(command);
-				if (!subscription || subscription.fps !== next.fps) throttle.setFps(next.fps);
+				if (!subscription || subscription.fps !== next.fps) {
+					throttle.setFps(next.fps);
+					sweepThrottle.setFps(next.fps);
+				}
 				subscription = next;
 				if (heartbeat === null) heartbeat = env.setInterval(() => { if (!disposed) sendStatusNow(); }, STATUS_HEARTBEAT_MS);
 				reply(command.id, 'OK');
@@ -885,6 +1099,32 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 				// After any start or stop before it; its re-centre is a tuning change, so the result carries tune.
 				enqueue(command.id, () => applySampleRate(command), { fallback: 'NOT_READY', withTune: true });
 				return;
+			case 'console:sweep-start':
+				// Like console:start: an auto-connect that is already opening the radio, or the connect
+				// of this command, starts RX with VFO 1 muted before the scan stops it.
+				startsPending++;
+				pendingListen = false;
+				sweepStartsPending++;
+				enqueue(command.id, () => sweepStart(command), {
+					fallback: 'SWEEP_FAILED',
+					done: () => { startsPending--; sweepStartsPending--; },
+				});
+				return;
+			case 'console:sweep-stop':
+				enqueue(command.id, () => sweepStop(command), { fallback: 'SWEEP_FAILED' });
+				return;
+			case 'console:sweep-config':
+			case 'console:sweep-display': {
+				let code: ResultCode;
+				try {
+					code = command.type === 'console:sweep-config' ? sweepConfig(command) : sweepDisplay(command);
+				} catch (error) {
+					reply(command.id, 'NOT_READY', errorText(error));
+					return;
+				}
+				reply(command.id, code);
+				return;
+			}
 		}
 	}
 
@@ -935,6 +1175,30 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 				binCount: cropped.bins.length,
 				bins: cropped.bins,
 			}, [cropped.bins.buffer]);
+		},
+		sweepFrame(frame: SweepFrameLike): void {
+			if (disposed || !subscription?.spectrum || !app.sweep?.active || !frame) return;
+			const view = sweepView();
+			const values = view === 'current' ? frame.current : view === 'max' ? frame.maxHold : frame.average;
+			const startHz = finiteOrNull(frame.startHz);
+			const endHz = finiteOrNull(frame.endHz);
+			if (!values || !values.length || startHz === null || endHz === null || endHz <= startHz) return;
+			if (!sweepThrottle.accept(env.monotonicNow())) return;
+			// A copy at most `bins` long; the Receiver keeps drawing its own frame.
+			const bins = decimateMaxHold(values, subscription.bins);
+			const shift = frequencyShiftHz();
+			post({
+				type: 'receiver:sweep',
+				seq: ++spectrumSeq,
+				tMs: env.now(),
+				startHz: Math.round(startHz + shift),
+				stopHz: Math.round(endHz + shift),
+				resolutionHz: finiteOrNull(frame.resolutionHz),
+				sweepCount: finiteOrNull(frame.sweepCount),
+				view,
+				binCount: bins.length,
+				bins,
+			}, [bins.buffer]);
 		},
 		initialVfoEnabled(): boolean {
 			return startsPending > 0 ? pendingListen : true;

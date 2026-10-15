@@ -34,6 +34,7 @@ function status(overrides: Partial<ReceiverStatus> = {}): ReceiverStatus {
     tune: null,
     display: null,
     sampleRatesHz: [],
+    sweep: null,
     ...overrides,
   };
 }

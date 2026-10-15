@@ -88,7 +88,7 @@ export interface ReceiverBridge {
   getState(): BridgeState;
   /** For useSyncExternalStore. */
   onState(listener: () => void): () => void;
-  /** Spectrum frames go to canvases directly; they are never React state. */
+  /** RX spectrum and scan frames go to canvases directly; they are never React state. */
   onSpectrum(listener: (frame: SpectrumFrame) => void): () => void;
   /** Probe once whether the Receiver build is being served. */
   probeBuild(): void;
@@ -296,7 +296,9 @@ export function createReceiverBridge(environment: BridgeEnvironment = browserEnv
         lastStatusSeq = message.status.seq;
         setState({ status: message.status, tune: mergeTuneView(state.tune, tuneViewFromStatus(message.status)) });
         return;
+      // RX and scan frames go to the same canvases; the dock draws the one of its mode.
       case 'receiver:spectrum':
+      case 'receiver:sweep':
         for (const listener of [...spectrumListeners]) {
           try {
             listener(message.frame);

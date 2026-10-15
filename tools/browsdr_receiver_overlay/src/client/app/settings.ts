@@ -4,14 +4,19 @@ import { normalizeListenerDisplay } from './listener-display';
 
 const SWEEP_SETTINGS_KEY = 'ReceiverSweepSettings';
 const LNA_GAINS = [0, 8, 16, 24, 32, 40];
+/** The Graph min./max. limits (the builder's SWEEP_DISPLAY_MAX_DB and updateSweepDisplayRange). */
+const GRAPH_MIN_DB = -160;
+const GRAPH_MAX_DB = 60;
+const GRAPH_MIN_GAP_DB = 5;
 
 function finiteIn(value: unknown, minimum: number, maximum: number): value is number {
 	return typeof value === 'number' && Number.isFinite(value) && value >= minimum && value <= maximum;
 }
 
 /**
- * Wide-scan settings survive a reload or a revisit of the Receiver page.
- * The scan source is not stored: it follows the connected radio.
+ * Wide-scan settings survive a reload or a revisit of the Receiver page, the
+ * Graph min./max. included (the console's Spektrum dock shares it). The scan
+ * source is not stored: it follows the connected radio.
  */
 export function restoreSweepSettings(sweep: Record<string, unknown>, raw: string | null): void {
 	if (!raw) return;
@@ -34,12 +39,17 @@ export function restoreSweepSettings(sweep: Record<string, unknown>, raw: string
 	if (finiteIn(value.minSnrDb, 1, 60)) sweep.minSnrDb = value.minSnrDb;
 	if (finiteIn(value.averageAlpha, 0.01, 1)) sweep.averageAlpha = value.averageAlpha;
 	if (finiteIn(value.minimumPeakDb, -160, 0)) sweep.minimumPeakDb = value.minimumPeakDb;
+	if (finiteIn(value.displayMinDb, GRAPH_MIN_DB, GRAPH_MAX_DB) && finiteIn(value.displayMaxDb, GRAPH_MIN_DB, GRAPH_MAX_DB)
+		&& value.displayMaxDb - value.displayMinDb >= GRAPH_MIN_GAP_DB) {
+		sweep.displayMinDb = value.displayMinDb;
+		sweep.displayMaxDb = value.displayMaxDb;
+	}
 	if (typeof value.sortBy === 'string' && ['frequency', 'peak', 'snr', 'hits', 'lastSeen'].includes(value.sortBy)) sweep.sortBy = value.sortBy;
 }
 
 export function serializeSweepSettings(sweep: Record<string, unknown>): string {
-	const { startMHz, endMHz, fftSize, lnaGain, vgaGain, ampEnabled, minSnrDb, averageAlpha, minimumPeakDb, sortBy } = sweep;
-	return JSON.stringify({ startMHz, endMHz, fftSize, lnaGain, vgaGain, ampEnabled, minSnrDb, averageAlpha, minimumPeakDb, sortBy });
+	const { startMHz, endMHz, fftSize, lnaGain, vgaGain, ampEnabled, minSnrDb, averageAlpha, minimumPeakDb, sortBy, displayMinDb, displayMaxDb } = sweep;
+	return JSON.stringify({ startMHz, endMHz, fftSize, lnaGain, vgaGain, ampEnabled, minSnrDb, averageAlpha, minimumPeakDb, sortBy, displayMinDb, displayMaxDb });
 }
 
 export const settingsMethods = {

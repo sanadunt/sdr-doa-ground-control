@@ -1,7 +1,7 @@
 import type { JSX, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode, Ref } from 'react';
 import { useEffect, useImperativeHandle, useRef } from 'react';
 import type { ReceiverBridge } from '../../lib/receiverBridge';
-import type { SpectrumFrame } from '../../lib/receiverBridgeProtocol';
+import type { RxSpectrumFrame } from '../../lib/receiverBridgeProtocol';
 import { PALETTE_STOPS } from '../../lib/overlayPalette';
 import {
   CLICK_SLOP_PX,
@@ -140,7 +140,7 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
   const vfoLabelRef = useRef<HTMLSpanElement>(null);
   const hoverRef = useRef<HTMLSpanElement>(null);
   const ticksRef = useRef<HTMLDivElement>(null);
-  const frameRef = useRef<SpectrumFrame | null>(null);
+  const frameRef = useRef<RxSpectrumFrame | null>(null);
   // The automatic range follows every frame, also in Manual, so Auto takes over without a jump.
   const autoRef = useRef<DbRange | null>(null);
   // The range drawn: dbRange, or the automatic one.
@@ -280,6 +280,7 @@ export function SpectrumCanvas({ bridge, running, fallbackView, centerHz, vfo, i
       if (!scheduled) scheduled = window.requestAnimationFrame(() => { scheduled = 0; drawRef.current(); });
     };
     const unsubscribe = bridge.onSpectrum((frame) => {
+      if (frame.source !== 'rx') return;
       frameRef.current = frame;
       autoRef.current = autoDbRange(frame.bins, autoRef.current);
       const range = props.current.dbRange ?? autoRef.current;
