@@ -82,6 +82,6 @@ describe('simulation lobe spread', () => {
   it('names the field a spread (sigma), not a width, in both languages', () => {
     expect(translate('en', 'sim.width')).toContain('σ');
     expect(translate('id', 'sim.width')).toContain('σ');
-    expect(translate('id', 'sim.widthHalfPower', { width: 15 })).toBe('Lebar −3 dB di legenda peta: 15°.');
+    expect(translate('id', 'sim.halfPower')).toBe('Lebar −3 dB');
   });
 });
