@@ -7,6 +7,8 @@
  * Messages are accepted only from the attached frame window on this page's
  * own origin. Commands sent before the frame says hello wait in a short
  * queue; every command settles, with TIMEOUT when the frame does not answer.
+ * The Receiver's tuning is kept as a TuneView: the highest tune rev seen in a
+ * status or in a command result, so a tune result shows before the next status.
  * Nothing here touches `window` until attach(), so creating a bridge is safe
  * during server rendering.
  */
@@ -27,8 +29,10 @@ import type {
   ReceiverHello,
   ReceiverStatus,
   ResultCode,
+  ResultTune,
   SpectrumFrame,
   Subscription,
+  TuneSource,
 } from './receiverBridgeProtocol';
 
 export type BridgePhase = 'idle' | 'connecting' | 'ready' | 'unresponsive';
@@ -38,11 +42,25 @@ export interface BridgeResult {
   ok: boolean;
   code: ResultCode;
   message?: string;
+  /** The tuning after a tune, vfo or start command, as the frame reported it. */
+  tune?: ResultTune;
 }
 
 export interface BridgeLastResult extends BridgeResult {
   id: string;
   type: ConsoleMessageType;
+}
+
+/** The Receiver's centre and active VFO with the stamp of the change that set them. */
+export interface TuneView {
+  rev: number;
+  by: TuneSource;
+  /** The console command that made the change, when by is 'console'. */
+  commandId: string | null;
+  /** The last rev made on the Receiver page. */
+  receiverRev: number;
+  centerHz: number | null;
+  vfoHz: number | null;
 }
 
 export interface BridgeState {
@@ -52,6 +70,8 @@ export interface BridgeState {
   build: ReceiverBuild;
   hello: ReceiverHello | null;
   status: ReceiverStatus | null;
+  /** null until a status with a tune stamp arrives from the attached frame. */
+  tune: TuneView | null;
   lastResult: BridgeLastResult | null;
 }
 
@@ -150,7 +170,26 @@ interface PendingCommand {
   resolve(result: BridgeResult): void;
 }
 
-const INITIAL_STATE: BridgeState = Object.freeze({ phase: 'idle', build: 'unknown', hello: null, status: null, lastResult: null });
+const INITIAL_STATE: BridgeState = Object.freeze({ phase: 'idle', build: 'unknown', hello: null, status: null, tune: null, lastResult: null });
+
+/** The tuning a status reports; null when the frame sent no tune stamp. */
+export function tuneViewFromStatus(status: ReceiverStatus): TuneView | null {
+  if (!status.tune) return null;
+  const { rev, by, id, receiverRev } = status.tune;
+  return { rev, by, commandId: id, receiverRev, centerHz: status.centerHz, vfoHz: status.vfo?.frequencyHz ?? null };
+}
+
+export function tuneViewFromResult(tune: ResultTune): TuneView {
+  return { rev: tune.rev, by: tune.by, commandId: tune.id, receiverRev: tune.receiverRev, centerHz: tune.centerHz, vfoHz: tune.vfoHz };
+}
+
+/** The newer of two tunings by rev; receiverRev never goes back. Returns `current` when nothing changes. */
+export function mergeTuneView(current: TuneView | null, next: TuneView | null): TuneView | null {
+  if (!next) return current;
+  if (!current) return next;
+  if (next.rev > current.rev) return next.receiverRev >= current.receiverRev ? next : { ...next, receiverRev: current.receiverRev };
+  return next.receiverRev > current.receiverRev ? { ...current, receiverRev: next.receiverRev } : current;
+}
 
 export function createReceiverBridge(environment: BridgeEnvironment = browserEnvironment()): ReceiverBridge {
   const env = environment;
@@ -201,8 +240,9 @@ export function createReceiverBridge(environment: BridgeEnvironment = browserEnv
     pending.delete(entry.id);
     const queued = queue.indexOf(entry);
     if (queued >= 0) queue.splice(queued, 1);
+    const tune = result.tune ? mergeTuneView(state.tune, tuneViewFromResult(result.tune)) : state.tune;
+    setState({ lastResult: { id: entry.id, type: entry.type, ...result }, tune });
     entry.resolve(result);
-    setState({ lastResult: { id: entry.id, type: entry.type, ...result } });
   }
 
   /** Commands already posted to a document that is gone will never be answered. */
@@ -253,7 +293,7 @@ export function createReceiverBridge(environment: BridgeEnvironment = browserEnv
       case 'receiver:status':
         if (message.status.seq <= lastStatusSeq) return;
         lastStatusSeq = message.status.seq;
-        setState({ status: message.status });
+        setState({ status: message.status, tune: mergeTuneView(state.tune, tuneViewFromStatus(message.status)) });
         return;
       case 'receiver:spectrum':
         for (const listener of [...spectrumListeners]) {
@@ -267,8 +307,11 @@ export function createReceiverBridge(environment: BridgeEnvironment = browserEnv
       case 'receiver:result': {
         const entry = pending.get(message.result.id);
         if (!entry) return;
-        const { ok, code } = message.result;
-        settle(entry, message.result.message ? { ok, code, message: message.result.message } : { ok, code });
+        const { ok, code, message: text, tune } = message.result;
+        const result: BridgeResult = { ok, code };
+        if (text) result.message = text;
+        if (tune) result.tune = tune;
+        settle(entry, result);
         return;
       }
       default:
@@ -292,7 +335,7 @@ export function createReceiverBridge(environment: BridgeEnvironment = browserEnv
       target = frameWindow;
       lastStatusSeq = -1;
       postedSubscriptionKey = null;
-      setState({ phase: 'connecting', hello: null, status: null });
+      setState({ phase: 'connecting', hello: null, status: null, tune: null });
       post({ ch: BRIDGE_CHANNEL, v: BRIDGE_VERSION, type: 'console:hello' });
       helloTimer = env.setTimeout(() => {
         helloTimer = null;
@@ -308,7 +351,7 @@ export function createReceiverBridge(environment: BridgeEnvironment = browserEnv
       target = null;
       postedSubscriptionKey = null;
       lastStatusSeq = -1;
-      if (state.phase !== 'idle' || state.status !== null || state.hello !== null) setState({ phase: 'idle', hello: null, status: null });
+      if (state.phase !== 'idle' || state.status !== null || state.hello !== null || state.tune !== null) setState({ phase: 'idle', hello: null, status: null, tune: null });
     },
 
     send(command) {

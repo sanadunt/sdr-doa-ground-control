@@ -48,6 +48,8 @@ export const STATUS_ERROR_CODES = ['USB_LOST', 'RX_ERROR', 'NO_WEBUSB'] as const
 export const BUSY_STATES = ['none', 'sweep', 'scan-listen'] as const;
 export const WORKSPACES = ['spectrum', 'listener', 'records'] as const;
 export const AUDIO_STATES = ['none', 'suspended', 'running'] as const;
+/** Who made the latest change of the centre or the active VFO (receiver:status tune.by). */
+export const TUNE_SOURCES = ['console', 'receiver'] as const;
 
 export const SUBSCRIBE_LIMITS = {
 	binsMin: 64,
@@ -62,10 +64,17 @@ export const SUBSCRIBE_LIMITS = {
 
 /** Displayed centre and VFO frequencies a command may set. */
 export const TUNE_LIMITS = { minHz: 1_000_000, maxHz: 6_000_000_000 } as const;
+/**
+ * Device frequencies (Freq Shift removed) of a wide scan and of the Receiver's
+ * spectrum markers: the RadioSpectrum sweep range, wider than TUNE_LIMITS.
+ */
+export const SWEEP_LIMITS = { minHz: 1_000_000, maxHz: 7_250_000_000 } as const;
 export const VOLUME_LIMITS = { min: 0, max: 100 } as const;
 export const COMMAND_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 /** Status changes are sent at most this often. */
 export const STATUS_DEBOUNCE_MS = 100;
+/** A running, connected, busy, error or recording change is sent at once, at most this often. */
+export const STATUS_URGENT_MIN_MS = 20;
 /** Status is repeated this often while the console holds a subscription. */
 export const STATUS_HEARTBEAT_MS = 2_000;
 /** Spectrum bins with no finite power are sent as this level. */
@@ -79,6 +88,7 @@ export type StatusErrorCode = typeof STATUS_ERROR_CODES[number];
 export type BusyState = typeof BUSY_STATES[number];
 export type Workspace = typeof WORKSPACES[number];
 export type AudioState = typeof AUDIO_STATES[number];
+export type TuneSource = typeof TUNE_SOURCES[number];
 
 export interface Subscription {
 	spectrum: boolean;
@@ -111,6 +121,25 @@ export interface StatusVfo {
 	volume: number | null;
 }
 
+/**
+ * Attribution of the current tuning. rev increases with every change of the
+ * centre, the active VFO index or that VFO's frequency; receiverRev is the
+ * last rev not written by a console command (a Receiver-page change).
+ */
+export interface TuneStamp {
+	rev: number;
+	by: TuneSource;
+	/** The console command that made the latest change; null when by is 'receiver'. */
+	id: string | null;
+	receiverRev: number;
+}
+
+/** The tuning after a console:tune, console:vfo or console:start, carried by its result. */
+export interface ResultTune extends TuneStamp {
+	centerHz: number | null;
+	vfoHz: number | null;
+}
+
 export interface ReceiverStatus {
 	seq: number;
 	tMs: number;
@@ -133,6 +162,7 @@ export interface ReceiverStatus {
 	recording: boolean;
 	error: { code: StatusErrorCode } | null;
 	notice: string | null;
+	tune: TuneStamp;
 }
 
 export interface CroppedSpectrum {

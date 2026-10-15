@@ -25,9 +25,10 @@ const { makeDefaultVfo, MODE_DEFAULTS } = await import(new URL('../vendor/BrowSD
 
 const {
 	BRIDGE_CHANNEL, BRIDGE_VERSION, FRAME_MESSAGE_TYPES, CONSOLE_MESSAGE_TYPES, LISTEN_MODES, RESULT_CODES,
-	STATUS_ERROR_CODES, SUBSCRIBE_LIMITS, SPECTRUM_FLOOR_DB, clampSubscription, cropSpectrum, createFrameThrottle,
-	parseConsoleMessage,
+	STATUS_ERROR_CODES, SUBSCRIBE_LIMITS, SPECTRUM_FLOOR_DB, TUNE_SOURCES, SWEEP_LIMITS, STATUS_DEBOUNCE_MS,
+	STATUS_URGENT_MIN_MS, clampSubscription, cropSpectrum, createFrameThrottle, parseConsoleMessage,
 } = protocol;
+const { SWEEP_MIN_FREQUENCY_HZ, SWEEP_MAX_FREQUENCY_HZ } = await import(new URL('./browsdr_receiver_overlay/src/client/worker/sweep-types.ts', import.meta.url).href);
 
 const ORIGIN = 'http://127.0.0.1:8787';
 const EPOCH_MS = 1_760_000_000_000;
@@ -148,6 +149,7 @@ function receiverApp({ audioAllowed = true, openOk = true, mockSdrEnabled = fals
 			};
 		},
 		async startRxStream(options) { log.push(['startRx', options.centerFreq]); },
+		async setFrequency(mhz) { log.push(['setFrequency', mhz]); },
 		async stopRx() { log.push('stopRx'); },
 		setVfoParams(index, params) { log.push(['vfoParams', index, params.freq, params.mode, params.enabled]); },
 		async addVfo() {},
@@ -258,6 +260,10 @@ test('protocol constants match the console contract', () => {
 	assert.deepEqual({ ...SUBSCRIBE_LIMITS }, {
 		binsMin: 64, binsMax: 2048, binsDefault: 512, fpsMin: 1, fpsMax: 15, fpsDefault: 10, spanMinHz: 100000, spanDefaultHz: 2000000,
 	});
+	assert.deepEqual([...TUNE_SOURCES], ['console', 'receiver']);
+	assert.deepEqual({ ...SWEEP_LIMITS }, { minHz: SWEEP_MIN_FREQUENCY_HZ, maxHz: SWEEP_MAX_FREQUENCY_HZ }, 'the Receiver sweep range');
+	assert.equal(STATUS_DEBOUNCE_MS, 100);
+	assert.equal(STATUS_URGENT_MIN_MS, 20);
 });
 
 test('parseConsoleMessage ignores foreign envelopes and unusable ids', () => {
@@ -422,7 +428,10 @@ test('messages from another origin or window, or outside the envelope, are ignor
 	frame.dispatch(tune);
 	await settle();
 	assert.equal(app.radio.centerFreq, 433.92);
-	assert.deepEqual(messages('receiver:result'), [{ ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 'c1-a', ok: true, code: 'OK' }]);
+	assert.deepEqual(messages('receiver:result'), [{
+		ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 'c1-a', ok: true, code: 'OK',
+		tune: { rev: 1, by: 'console', id: 'c1-a', receiverRev: 0, centerHz: 433_920_000, vfoHz: 100_000_000 },
+	}]);
 	for (const entry of frame.posted) assert.equal(entry.targetOrigin, ORIGIN, 'posts only to the page origin');
 });
 
@@ -467,6 +476,7 @@ test('without WebUSB the paired count stays unknown', async t => {
 const STATUS_KEYS = [
 	'ch', 'v', 'type', 'seq', 'tMs', 'webusb', 'mockAvailable', 'pairedCount', 'connected', 'mock', 'deviceName', 'running', 'busy',
 	'workspace', 'centerHz', 'sampleRateHz', 'frequencyShiftHz', 'gains', 'vfo', 'squelchOpen', 'audio', 'recording', 'error', 'notice',
+	'tune',
 ];
 
 test('status reports the radio in Hz with the documented fields', async t => {
@@ -481,7 +491,8 @@ test('status reports the radio in Hz with the documented fields', async t => {
 	clock.advance(100);
 	const status = messages('receiver:status').at(-1);
 	assert.deepEqual(Object.keys(status).sort(), [...STATUS_KEYS].sort());
-	assert.equal(status.tMs, clock.now());
+	// Arming a recording is sent at once, after the 20 ms gap since the previous status.
+	assert.equal(status.tMs, EPOCH_MS + STATUS_URGENT_MIN_MS);
 	assert.deepEqual({ ...status, seq: 0, tMs: 0, ch: '', v: 0, type: '', notice: null }, {
 		ch: '', v: 0, type: '', seq: 0, tMs: 0,
 		webusb: true, mockAvailable: true, pairedCount: 1,
@@ -490,6 +501,7 @@ test('status reports the radio in Hz with the documented fields', async t => {
 		gains: { lnaDb: 40, vgaDb: 20, amp: false },
 		vfo: { index: 0, enabled: false, mode: 'nfm', frequencyHz: 433_925_000, bandwidthHz: 12_500, squelchEnabled: false, squelchDb: -100, volume: 50 },
 		squelchOpen: true, audio: 'none', recording: true, error: null, notice: null,
+		tune: { rev: 1, by: 'console', id: 's1', receiverRev: 0 },
 	});
 	assert.equal(status.notice, 'Connected to Mock SDR', 'the visible snackbar text, through tm()');
 	app.snackbar.show = false;
@@ -676,9 +688,9 @@ test('vfo applies the mode defaults on a mode change only and re-centres an out-
 	assert.equal(result('v6').code, 'OUT_OF_RANGE');
 	frame.send('console:vfo', { id: 'v7', mode: 'raw' });
 	assert.equal(app.vfos[0].bandwidth, app.radio.sampleRate, 'raw uses the full sample rate');
-	app.sweep.active = true;
+	app.sweep.listening = true;
 	frame.send('console:vfo', { id: 'v8', mode: 'nfm' });
-	assert.equal(result('v8').code, 'SWEEP_BUSY');
+	assert.equal(result('v8').code, 'SWEEP_BUSY', 'a scan listen owns the VFO');
 	assert.equal(app.vfos[0].mode, 'raw');
 });
 
@@ -753,7 +765,10 @@ test('start with the Mock SDR applies mode and frequencies, stays muted and open
 	frame.send('console:start', { id: 's4', mock: true, listen: false, mode: 'nfm', centerHz: 433_920_000, vfoHz: 433_925_000 });
 	assert.equal(bridge.initialVfoEnabled(), false, 'muted while this start runs');
 	await settle(20);
-	assert.deepEqual(result('s4'), { ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 's4', ok: true, code: 'OK' });
+	assert.deepEqual(result('s4'), {
+		ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 's4', ok: true, code: 'OK',
+		tune: { rev: 1, by: 'console', id: 's4', receiverRev: 0, centerHz: 433_920_000, vfoHz: 433_925_000 },
+	});
 	assert.deepEqual(log.filter(entry => Array.isArray(entry) && (entry[0] === 'open' || entry[0] === 'startRx')), [['open', 'mock'], ['startRx', 433.92]]);
 	assert.equal(app.connected && app.mockDevice && app.running, true);
 	assert.equal(app.vfos[0].mode, 'nfm');
@@ -881,6 +896,180 @@ test('start, stop and listen run in order; tune does not wait', async t => {
 	assert.deepEqual(messages('receiver:result').map(message => [message.id, message.code]),
 		[['q3', 'OK'], ['q1', 'OK'], ['q2', 'OK'], ['q4', 'OK']]);
 	assert.equal(app.running, false);
+});
+
+test('a wide scan keeps tune and vfo to the stopped Listener and refuses start, stop and listen', async t => {
+	const { frame, app, log, result } = setup(t, { app: { mockSdrEnabled: true } });
+	app.sweep.active = true; // the scan stopped RX before it started
+	frame.send('console:tune', { id: 'w1', centerHz: 433_920_000, vfoHz: 433_925_000 });
+	assert.equal(result('w1').code, 'OK');
+	assert.equal(app.radio.centerFreq, 433.92);
+	assert.equal(app.vfos[0].freq, 433.925);
+	assert.deepEqual(result('w1').tune, { rev: 1, by: 'console', id: 'w1', receiverRev: 0, centerHz: 433_920_000, vfoHz: 433_925_000 });
+	frame.send('console:vfo', { id: 'w2', mode: 'am', frequencyHz: 868_000_000 });
+	assert.equal(result('w2').code, 'OK');
+	assert.equal(app.radio.centerFreq, 868, 're-centred in the Listener settings');
+	assert.equal(app.vfos[0].mode, 'am');
+	assert.equal(result('w2').tune.by, 'console');
+	assert.deepEqual(log.filter(entry => Array.isArray(entry) && (entry[0] === 'vfoParams' || entry[0] === 'setFrequency')), [], 'no backend call during the scan');
+	for (const [type, payload] of [
+		['console:start', { id: 'w3', mock: true, listen: false, centerHz: 145_000_000 }],
+		['console:stop', { id: 'w4' }],
+		['console:listen', { id: 'w5', enabled: true }],
+	]) {
+		frame.send(type, payload);
+		await settle(20);
+		assert.equal(result(payload.id).code, 'SWEEP_BUSY', type);
+	}
+	assert.equal(app.connected, false);
+	assert.equal(app.radio.centerFreq, 868, 'a refused start applies nothing');
+
+	// A scan start that has not stopped RX yet refuses a tune.
+	app.running = true;
+	frame.send('console:tune', { id: 'w6', centerHz: 145_000_000 });
+	assert.equal(result('w6').code, 'SWEEP_BUSY');
+	assert.equal(result('w6').tune.rev, 2, 'a refused tune reports the tuning it left in place');
+	app.running = false;
+
+	// A scan listen refuses every radio command.
+	app.sweep.active = false;
+	app.sweep.listening = true;
+	frame.send('console:tune', { id: 'w7', centerHz: 145_000_000 });
+	frame.send('console:vfo', { id: 'w8', frequencyHz: 868_010_000 });
+	assert.equal(result('w7').code, 'SWEEP_BUSY');
+	assert.equal(result('w8').code, 'SWEEP_BUSY');
+	assert.equal(app.vfos[0].freq, 868);
+});
+
+// ---------------------------------------------------------------------------
+// Tune attribution and status timing
+
+test('every console write of the centre or the VFO is stamped with its command', async t => {
+	const { frame, app, clock, flushWatchers, messages, result } = setup(t, { app: { mockSdrEnabled: true } });
+	const latestTune = () => {
+		flushWatchers();
+		clock.advance(100);
+		return messages('receiver:status').at(-1).tune;
+	};
+	const writes = [
+		['console:tune', { id: 'p1', centerHz: 433_920_000 }],
+		['console:tune', { id: 'p2', centerHz: 433_920_000, vfoHz: 433_930_000 }],
+		['console:vfo', { id: 'p3', frequencyHz: 433_940_000 }],
+		['console:vfo', { id: 'p4', frequencyHz: 868_000_000 }],
+		['console:start', { id: 'p5', mock: true, listen: false, centerHz: 145_500_000, vfoHz: 145_510_000 }],
+		['console:start', { id: 'p6', mock: true, listen: false, vfoHz: 145_520_000 }],
+		['console:vfo', { id: 'p7', mode: 'am', frequencyHz: 145_530_000 }],
+	];
+	for (const [index, [type, payload]] of writes.entries()) {
+		frame.send(type, payload);
+		await settle(20);
+		const rev = index + 1;
+		assert.equal(result(payload.id).code, 'OK', payload.id);
+		assert.equal(result(payload.id).tune.rev, rev, `${payload.id}: one rev per command`);
+		assert.deepEqual(latestTune(), { rev, by: 'console', id: payload.id, receiverRev: 0 }, payload.id);
+	}
+	assert.equal(app.radio.centerFreq, 145.5);
+	assert.equal(app.vfos[0].freq, 145.53);
+	assert.equal(app.running, true);
+});
+
+test('a Receiver-page change is stamped receiver; unchanged tuning keeps its rev', async t => {
+	const { frame, app, clock, flushWatchers, messages, result } = setup(t);
+	const latest = () => {
+		flushWatchers();
+		clock.advance(100);
+		return messages('receiver:status').at(-1);
+	};
+	assert.deepEqual(messages('receiver:status')[0].tune, { rev: 0, by: 'receiver', id: null, receiverRev: 0 }, 'the tuning at install is the baseline');
+	frame.send('console:tune', { id: 't1', centerHz: 433_920_000, vfoHz: 433_925_000 });
+	assert.deepEqual(result('t1').tune, { rev: 1, by: 'console', id: 't1', receiverRev: 0, centerHz: 433_920_000, vfoHz: 433_925_000 });
+	assert.deepEqual(latest().tune, { rev: 1, by: 'console', id: 't1', receiverRev: 0 });
+
+	app.radio.centerFreq = 150;
+	const typed = latest();
+	assert.equal(typed.centerHz, 150_000_000);
+	assert.deepEqual(typed.tune, { rev: 2, by: 'receiver', id: null, receiverRev: 2 });
+	app.vfos[0].freq = 150.01;
+	assert.deepEqual(latest().tune, { rev: 3, by: 'receiver', id: null, receiverRev: 3 });
+	app.vfos.push(makeDefaultVfo(151));
+	app.activeVfoIndex = 1;
+	const switched = latest();
+	assert.deepEqual(switched.tune, { rev: 4, by: 'receiver', id: null, receiverRev: 4 }, 'another active VFO is a retune');
+	assert.equal(switched.vfo.frequencyHz, 151_000_000);
+
+	frame.send('console:vfo', { id: 'm1', mode: 'usb' });
+	assert.equal(result('m1').tune.rev, 4, 'a mode change is not a retune');
+	frame.send('console:tune', { id: 'same', centerHz: 150_000_000 });
+	assert.deepEqual(result('same').tune, { rev: 4, by: 'receiver', id: null, receiverRev: 4, centerHz: 150_000_000, vfoHz: 151_000_000 }, 'the same values change nothing');
+	frame.send('console:tune', { id: 'far', centerHz: 7_000_000_000 });
+	assert.equal(result('far').code, 'OUT_OF_RANGE');
+	assert.equal(result('far').tune.rev, 4);
+	assert.deepEqual(latest().tune, { rev: 4, by: 'receiver', id: null, receiverRev: 4 });
+});
+
+test('a Receiver edit the watcher has not reported yet keeps its stamp when a console tune follows', async t => {
+	const { frame, app, result } = setup(t);
+	app.radio.centerFreq = 150; // typed on the Receiver page; Vue has not run the watcher yet
+	frame.send('console:tune', { id: 'c1', centerHz: 433_920_000 });
+	assert.deepEqual(result('c1').tune, { rev: 2, by: 'console', id: 'c1', receiverRev: 1, centerHz: 433_920_000, vfoHz: 100_000_000 });
+});
+
+test('a start stamps its tuning even when the radio does not connect', async t => {
+	const { frame, app, result } = setup(t);
+	frame.send('console:start', { id: 'f1', mock: true, listen: false, mode: 'am', centerHz: 145_500_000 });
+	await settle(20);
+	assert.equal(result('f1').code, 'MOCK_UNAVAILABLE');
+	assert.deepEqual(result('f1').tune, { rev: 1, by: 'console', id: 'f1', receiverRev: 0, centerHz: 145_500_000, vfoHz: 100_000_000 });
+	assert.equal(app.radio.centerFreq, 145.5, 'the next start uses it');
+});
+
+test('running, connected, busy, error and recording changes are sent at once, at most every 20 ms', async t => {
+	const { app, clock, flushWatchers, messages } = setup(t);
+	await settle();
+	clock.advance(200);
+	const count = () => messages('receiver:status').length;
+	const before = count();
+	app.running = true;
+	flushWatchers();
+	assert.equal(count(), before + 1, 'not held for the 100 ms window');
+	assert.equal(messages('receiver:status').at(-1).running, true);
+	app.sweep.active = true;
+	flushWatchers();
+	assert.equal(count(), before + 1, 'at most one urgent status per 20 ms');
+	clock.advance(STATUS_URGENT_MIN_MS);
+	assert.equal(count(), before + 2);
+	assert.equal(messages('receiver:status').at(-1).busy, 'sweep');
+
+	// A typed frequency still waits for the window, unless an urgent change comes with it.
+	clock.advance(50);
+	app.radio.centerFreq = 101;
+	flushWatchers();
+	assert.equal(count(), before + 2);
+	clock.advance(STATUS_DEBOUNCE_MS);
+	assert.equal(count(), before + 3);
+	clock.advance(30);
+	app.radio.centerFreq = 102;
+	flushWatchers();
+	app.audioRecording.armed = true;
+	flushWatchers();
+	assert.equal(count(), before + 4);
+	const last = messages('receiver:status').at(-1);
+	assert.equal(last.centerHz, 102_000_000);
+	assert.equal(last.recording, true);
+	clock.advance(500);
+	assert.equal(count(), before + 4, 'the pending window was covered by the urgent status');
+	for (const key of ['connected', 'error']) {
+		const sent = count();
+		if (key === 'connected') app.connected = true;
+		else {
+			app.running = false;
+			app.sweep.error = 'The radio stopped sending samples (stall). RX stopped.';
+		}
+		flushWatchers();
+		assert.equal(count(), sent + 1, key);
+		clock.advance(STATUS_URGENT_MIN_MS);
+	}
+	assert.deepEqual(messages('receiver:status').at(-1).error, { code: 'RX_ERROR' });
 });
 
 test('a malformed command gets INVALID_COMMAND; hello and subscribe never fail', async t => {

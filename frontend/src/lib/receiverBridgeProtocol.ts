@@ -51,6 +51,8 @@ export const STATUS_ERROR_CODES = ['USB_LOST', 'RX_ERROR', 'NO_WEBUSB'] as const
 export const BUSY_STATES = ['none', 'sweep', 'scan-listen'] as const;
 export const WORKSPACES = ['spectrum', 'listener', 'records'] as const;
 export const AUDIO_STATES = ['none', 'suspended', 'running'] as const;
+/** Who made the latest change of the centre or the active VFO (receiver:status tune.by). */
+export const TUNE_SOURCES = ['console', 'receiver'] as const;
 
 export const SUBSCRIBE_LIMITS = {
   binsMin: 64,
@@ -65,6 +67,11 @@ export const SUBSCRIBE_LIMITS = {
 
 /** Displayed centre and VFO frequencies a command may set. */
 export const TUNE_LIMITS = { minHz: 1_000_000, maxHz: 6_000_000_000 } as const;
+/**
+ * Device frequencies (Freq Shift removed) of a wide scan and of the Receiver's
+ * spectrum markers: the RadioSpectrum sweep range, wider than TUNE_LIMITS.
+ */
+export const SWEEP_LIMITS = { minHz: 1_000_000, maxHz: 7_250_000_000 } as const;
 export const VOLUME_LIMITS = { min: 0, max: 100 } as const;
 export const COMMAND_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 /** Spectrum bins with no finite power are sent as this level. */
@@ -86,6 +93,7 @@ export type StatusErrorCode = typeof STATUS_ERROR_CODES[number];
 export type BusyState = typeof BUSY_STATES[number];
 export type Workspace = typeof WORKSPACES[number];
 export type AudioState = typeof AUDIO_STATES[number];
+export type TuneSource = typeof TUNE_SOURCES[number];
 
 export interface Subscription {
   spectrum: boolean;
@@ -112,6 +120,26 @@ export interface StatusVfo {
   volume: number | null;
 }
 
+/**
+ * Attribution of the Receiver's current tuning. rev increases with every
+ * change of the centre, the active VFO index or that VFO's frequency;
+ * receiverRev is the last rev not written by a console command (a change
+ * made on the Receiver page).
+ */
+export interface TuneStamp {
+  rev: number;
+  by: TuneSource;
+  /** The console command that made the latest change; null when by is 'receiver'. */
+  id: string | null;
+  receiverRev: number;
+}
+
+/** The tuning after a console:tune, console:vfo or console:start, carried by its result. */
+export interface ResultTune extends TuneStamp {
+  centerHz: number | null;
+  vfoHz: number | null;
+}
+
 export interface ReceiverStatus {
   seq: number;
   tMs: number | null;
@@ -135,6 +163,8 @@ export interface ReceiverStatus {
   error: { code: StatusErrorCode } | null;
   /** Already-localized Receiver notice text, shown as received. */
   notice: string | null;
+  /** null when the frame sends no valid stamp; the console then cannot attribute a retune. */
+  tune: TuneStamp | null;
 }
 
 export interface SpectrumFrame {
@@ -156,6 +186,8 @@ export interface ReceiverResult {
   ok: boolean;
   code: ResultCode;
   message?: string;
+  /** Results of console:tune, console:vfo and console:start: the tuning after the command. */
+  tune?: ResultTune;
 }
 
 export type FrameMessage =
@@ -237,6 +269,27 @@ export function clampSubscription(raw: { spectrum?: unknown; bins?: unknown; fps
   };
 }
 
+function revOrNull(value: unknown): number | null {
+  const number = finiteOrNull(value);
+  return number !== null && Number.isInteger(number) && number >= 0 ? number : null;
+}
+
+/** A tune stamp, or null when any part of it is missing or out of range. */
+export function normalizeTuneStamp(value: unknown): TuneStamp | null {
+  if (!isRecord(value) || !oneOf(TUNE_SOURCES, value.by)) return null;
+  const rev = revOrNull(value.rev);
+  const receiverRev = revOrNull(value.receiverRev);
+  if (rev === null || receiverRev === null || receiverRev > rev) return null;
+  const id = value.by === 'console' && isCommandId(value.id) ? value.id : null;
+  return { rev, by: value.by, id, receiverRev };
+}
+
+function normalizeResultTune(value: unknown): ResultTune | null {
+  const stamp = normalizeTuneStamp(value);
+  if (!stamp || !isRecord(value)) return null;
+  return { ...stamp, centerHz: hzOrNull(value.centerHz), vfoHz: hzOrNull(value.vfoHz) };
+}
+
 function normalizeVfo(value: unknown): StatusVfo | null {
   if (!isRecord(value)) return null;
   const index = finiteOrNull(value.index);
@@ -285,6 +338,7 @@ export function normalizeReceiverStatus(value: unknown): ReceiverStatus | null {
     recording: value.recording === true,
     error,
     notice: boundedText(value.notice, MAX_TEXT_CHARS),
+    tune: normalizeTuneStamp(value.tune),
   };
 }
 
@@ -338,8 +392,12 @@ function normalizeResult(value: Record<string, unknown>): ReceiverResult | null 
   // An unknown code from a newer frame still settles the command, as a failure.
   const code: ResultCode = isResultCode(value.code) ? value.code : value.ok === true ? 'OK' : 'NOT_READY';
   const ok = value.ok === true && code === 'OK';
+  const result: ReceiverResult = { id: value.id, ok, code: ok ? 'OK' : code };
   const message = boundedText(value.message, MAX_TEXT_CHARS);
-  return message ? { id: value.id, ok, code: ok ? 'OK' : code, message } : { id: value.id, ok, code: ok ? 'OK' : code };
+  if (message) result.message = message;
+  const tune = normalizeResultTune(value.tune);
+  if (tune) result.tune = tune;
+  return result;
 }
 
 /**

@@ -6,8 +6,23 @@
  *
  * The bridge only answers its parent window on the page's own origin. It
  * never opens the device picker or the VFO conflict dialog, which would be
- * invisible in the hidden frame, and it refuses every radio command while a
- * wide scan or a scan listen owns the radio. It sends codes, not text.
+ * invisible in the hidden frame. It sends codes, not text.
+ *
+ * One RadioSpectrum cannot run RX and a scan at once, so SWEEP_BUSY follows
+ * one rule:
+ * - during a scan listen every radio command is refused;
+ * - during a wide scan start, stop, listen and radio are refused, while tune,
+ *   vfo and gains only change the stopped Listener's settings, with no
+ *   backend call (RX uses them when it starts again); a scan start that has
+ *   not stopped RX yet refuses them too;
+ * - marker and sweep-* commands are never refused because of a scan.
+ * The gains, radio (sample rate), marker and sweep-* commands follow this
+ * rule when they are added.
+ *
+ * Every console write of the centre or the active VFO goes through
+ * writeTuning(), which stamps the change with the command id. Any other change
+ * is the Receiver page's. receiver:status carries the stamp (tune), so the
+ * console can tell a Receiver-page retune from its own.
  */
 import type { AppInstance } from './types';
 import { lookupDevice } from '../device-catalog';
@@ -17,6 +32,7 @@ import {
 	BRIDGE_VERSION,
 	STATUS_DEBOUNCE_MS,
 	STATUS_HEARTBEAT_MS,
+	STATUS_URGENT_MIN_MS,
 	clampSubscription,
 	createFrameThrottle,
 	cropSpectrum,
@@ -29,8 +45,11 @@ import {
 	type ConsoleCommand,
 	type ReceiverStatus,
 	type ResultCode,
+	type ResultTune,
 	type StatusErrorCode,
 	type Subscription,
+	type TuneSource,
+	type TuneStamp,
 	type Workspace,
 } from './console-bridge-protocol';
 
@@ -156,7 +175,16 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 	let statusSeq = 0;
 	let spectrumSeq = 0;
 	let statusTimer: TimerHandle | null = null;
+	let statusDueAt = 0;
+	let lastStatusAt = -Infinity;
+	let sentUrgentKey: string | null = null;
 	let heartbeat: TimerHandle | null = null;
+	// Tune attribution: see writeTuning() and noteTune().
+	let tuneRev = 0;
+	let tuneBy: TuneSource = 'receiver';
+	let tuneId: string | null = null;
+	let receiverRev = 0;
+	let lastTuneKey = '';
 	let pairedCount: number | null = null;
 	let pairedGeneration = 0;
 	let startsPending = 0;
@@ -215,7 +243,8 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		return { lnaDb: finiteOrNull(values.LNA), vgaDb: finiteOrNull(values.VGA), amp };
 	}
 
-	function snapshot(): Omit<ReceiverStatus, 'seq' | 'tMs'> {
+	/** Everything a status reports except its sequence, time and tune stamp (sendStatusNow adds them). */
+	function snapshot(): Omit<ReceiverStatus, 'seq' | 'tMs' | 'tune'> {
 		const index = activeIndex();
 		const vfo = Array.isArray(app.vfos) ? app.vfos[index] : null;
 		const connected = Boolean(app.connected);
@@ -255,28 +284,96 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		};
 	}
 
+	/** What a tune rev counts: the centre, the active VFO index and that VFO's frequency. */
+	function tuneKey(): string {
+		const index = activeIndex();
+		const vfo = Array.isArray(app.vfos) ? app.vfos[index] : null;
+		return `${mhzToHz(app.radio?.centerFreq)}|${index}|${vfo ? mhzToHz(vfo.freq) : ''}`;
+	}
+
+	/** Counts a tuning change once: id is the console command that wrote it, null for the Receiver page. */
+	function noteTune(id: string | null): void {
+		const key = tuneKey();
+		if (key === lastTuneKey) return;
+		lastTuneKey = key;
+		tuneRev++;
+		tuneBy = id === null ? 'receiver' : 'console';
+		tuneId = id;
+		if (id === null) receiverRev = tuneRev;
+	}
+
+	function tuneStamp(): TuneStamp {
+		noteTune(null);
+		return { rev: tuneRev, by: tuneBy, id: tuneId, receiverRev };
+	}
+
+	function resultTune(): ResultTune {
+		const stamp = tuneStamp();
+		const vfo = Array.isArray(app.vfos) ? app.vfos[activeIndex()] : null;
+		return { ...stamp, centerHz: mhzToHz(app.radio?.centerFreq), vfoHz: vfo ? mhzToHz(vfo.freq) : null };
+	}
+
+	function urgentKey(status: Pick<ReceiverStatus, 'running' | 'connected' | 'busy' | 'error' | 'recording'>): string {
+		return `${status.running}|${status.connected}|${status.busy}|${status.error?.code ?? ''}|${status.recording}`;
+	}
+
 	function sendStatusNow(): void {
 		if (statusTimer !== null) {
 			env.clearTimeout(statusTimer);
 			statusTimer = null;
 		}
-		post({ type: 'receiver:status', seq: ++statusSeq, tMs: env.now(), ...snapshot() });
+		const stamp = tuneStamp();
+		const current = snapshot();
+		sentUrgentKey = urgentKey(current);
+		lastStatusAt = env.monotonicNow();
+		post({ type: 'receiver:status', seq: ++statusSeq, tMs: env.now(), ...current, tune: stamp });
 	}
 
-	function scheduleStatus(): void {
-		if (disposed || statusTimer !== null) return;
+	/** Sends a status after delayMs; a status already due sooner covers this one. */
+	function scheduleStatus(delayMs: number = STATUS_DEBOUNCE_MS): void {
+		if (disposed) return;
+		const due = env.monotonicNow() + delayMs;
+		if (statusTimer !== null) {
+			if (statusDueAt <= due) return;
+			env.clearTimeout(statusTimer);
+		}
+		statusDueAt = due;
 		statusTimer = env.setTimeout(() => {
 			statusTimer = null;
 			if (!disposed) sendStatusNow();
-		}, STATUS_DEBOUNCE_MS);
+		}, delayMs);
+	}
+
+	/**
+	 * Something the status reports changed. Typed frequencies and other edits are
+	 * coalesced for STATUS_DEBOUNCE_MS; a running, connected, busy, error or
+	 * recording change is sent at once, at most every STATUS_URGENT_MIN_MS.
+	 */
+	function onReceiverChange(): void {
+		noteTune(null);
+		if (urgentKey(snapshot()) === sentUrgentKey) {
+			scheduleStatus();
+			return;
+		}
+		const waitMs = lastStatusAt + STATUS_URGENT_MIN_MS - env.monotonicNow();
+		if (waitMs <= 0) sendStatusNow();
+		else scheduleStatus(waitMs);
 	}
 
 	function sendHello(): void {
 		post({ type: 'receiver:hello', protocol: BRIDGE_VERSION, mockAvailable: Boolean(app.mockSdrEnabled), webusb: hasWebUsb() });
 	}
 
-	function reply(id: string, code: ResultCode, message?: string): void {
-		post({ type: 'receiver:result', id, ok: code === 'OK', code, ...(message ? { message } : {}) });
+	/** withTune: the reply of console:tune, console:vfo and console:start, which carries the tuning after it. */
+	function reply(id: string, code: ResultCode, message?: string, withTune = false): void {
+		post({
+			type: 'receiver:result',
+			id,
+			ok: code === 'OK',
+			code,
+			...(message ? { message } : {}),
+			...(withTune ? { tune: resultTune() } : {}),
+		});
 		scheduleStatus();
 	}
 
@@ -318,24 +415,44 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		return Number.isFinite(sampleRate) && sampleRate > 0 ? sampleRate / 2 : 0;
 	}
 
+	/**
+	 * The only way a console command changes the centre or the active VFO: it writes
+	 * the given values and stamps the change with the command id. A Receiver-page
+	 * change the watcher has not reported yet keeps its own stamp.
+	 */
+	function writeTuning(id: string, centerHz: number | undefined, vfoHz: number | undefined): void {
+		noteTune(null);
+		if (centerHz !== undefined) app.radio.centerFreq = centerHz / 1e6;
+		if (vfoHz !== undefined) setVfoFrequency(activeIndex(), vfoHz);
+		noteTune(id);
+	}
+
+	/**
+	 * SWEEP_BUSY for tune and vfo: always during a scan listen, and during a wide
+	 * scan while RX still runs (a scan start that has not stopped it yet).
+	 */
+	function tuneRefused(): boolean {
+		const busy = busyState();
+		return busy === 'scan-listen' || (busy === 'sweep' && Boolean(app.running));
+	}
+
 	/** Sets the centre and, when given, the active VFO without the VFO conflict dialog. */
-	function tune(centerHz: number, vfoHz: number | undefined): ResultCode {
+	function tune(id: string, centerHz: number, vfoHz: number | undefined): ResultCode {
 		if (!inTuneRange(centerHz)) return 'OUT_OF_RANGE';
 		if (vfoHz !== undefined && (!inTuneRange(vfoHz) || Math.abs(vfoHz - centerHz) > halfSampleRateHz())) return 'OUT_OF_RANGE';
-		if (busyState() !== 'none') return 'SWEEP_BUSY';
+		if (tuneRefused()) return 'SWEEP_BUSY';
 		if (!app.vfos?.[activeIndex()]) return 'NOT_READY';
-		// The centerFreq watcher retunes the radio after its 200 ms debounce; a stopped
-		// radio uses the new values at its next start.
-		app.radio.centerFreq = centerHz / 1e6;
-		if (vfoHz !== undefined) setVfoFrequency(activeIndex(), vfoHz);
-		app.updateAllBackendVfoParams();
+		// The centerFreq watcher retunes a running radio after its 200 ms debounce; a
+		// stopped radio, also one a wide scan stopped, uses the new values at its next start.
+		writeTuning(id, centerHz, vfoHz);
+		if (busyState() === 'none') app.updateAllBackendVfoParams();
 		return 'OK';
 	}
 
-	function vfo(command: { mode?: string; frequencyHz?: number; volume?: number }): ResultCode {
+	function vfo(id: string, command: { mode?: string; frequencyHz?: number; volume?: number }): ResultCode {
 		if (command.frequencyHz !== undefined && !inTuneRange(command.frequencyHz)) return 'OUT_OF_RANGE';
 		if (command.volume !== undefined && (command.volume < VOLUME_LIMITS.min || command.volume > VOLUME_LIMITS.max)) return 'OUT_OF_RANGE';
-		if (busyState() !== 'none') return 'SWEEP_BUSY';
+		if (tuneRefused()) return 'SWEEP_BUSY';
 		const index = activeIndex();
 		const current = app.vfos?.[index];
 		if (!current) return 'NOT_READY';
@@ -345,13 +462,12 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		}
 		let recentred = false;
 		if (command.frequencyHz !== undefined) {
-			if (Math.abs(command.frequencyHz - currentCenterHz()) > halfSampleRateHz()) {
-				app.radio.centerFreq = command.frequencyHz / 1e6;
-				recentred = true;
-			}
-			setVfoFrequency(index, command.frequencyHz);
+			recentred = Math.abs(command.frequencyHz - currentCenterHz()) > halfSampleRateHz();
+			writeTuning(id, recentred ? command.frequencyHz : undefined, command.frequencyHz);
 		}
 		if (command.volume !== undefined) current.volume = command.volume;
+		// A wide scan owns the radio: the Listener keeps the settings for its next start.
+		if (busyState() !== 'none') return 'OK';
 		if (recentred) app.updateAllBackendVfoParams();
 		else app.updateBackendVfoParams(index);
 		return 'OK';
@@ -454,14 +570,14 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		if ((centerHz !== undefined && !inTuneRange(centerHz)) || (vfoHz !== undefined && !inTuneRange(vfoHz))) return ['OUT_OF_RANGE'];
 		if (centerHz !== undefined && vfoHz !== undefined && Math.abs(vfoHz - centerHz) > halfSampleRateHz()) return ['OUT_OF_RANGE'];
 		if (mode !== undefined) {
-			const code = vfo({ mode });
+			const code = vfo(command.id, { mode });
 			if (code !== 'OK') return [code];
 		}
 		if (centerHz !== undefined) {
-			const code = tune(centerHz, vfoHz);
+			const code = tune(command.id, centerHz, vfoHz);
 			if (code !== 'OK') return [code];
 		} else if (vfoHz !== undefined) {
-			const code = vfo({ frequencyHz: vfoHz });
+			const code = vfo(command.id, { frequencyHz: vfoHz });
 			if (code !== 'OK') return [code];
 		}
 
@@ -488,17 +604,21 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 	}
 
 	/** Start, stop and listen run one after another so they never race each other. */
-	function enqueue(id: string, task: () => Promise<[ResultCode, string?]>, fallback: ResultCode, done?: () => void): void {
+	function enqueue(
+		id: string,
+		task: () => Promise<[ResultCode, string?]>,
+		options: { fallback: ResultCode; done?: () => void; withTune?: boolean },
+	): void {
 		const run = async (): Promise<void> => {
 			let result: [ResultCode, string?];
 			try {
 				result = await task();
 			} catch (error) {
-				result = [fallback, errorText(error)];
+				result = [options.fallback, errorText(error)];
 			} finally {
-				done?.();
+				options.done?.();
 			}
-			reply(id, result[0], result[1]);
+			reply(id, result[0], result[1], options.withTune === true);
 		};
 		lifecycle = lifecycle.then(run, run);
 	}
@@ -524,23 +644,23 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 			case 'console:tune': {
 				let code: ResultCode;
 				try {
-					code = tune(command.centerHz, command.vfoHz);
+					code = tune(command.id, command.centerHz, command.vfoHz);
 				} catch (error) {
-					reply(command.id, 'NOT_READY', errorText(error));
+					reply(command.id, 'NOT_READY', errorText(error), true);
 					return;
 				}
-				reply(command.id, code);
+				reply(command.id, code, undefined, true);
 				return;
 			}
 			case 'console:vfo': {
 				let code: ResultCode;
 				try {
-					code = vfo(command);
+					code = vfo(command.id, command);
 				} catch (error) {
-					reply(command.id, 'NOT_READY', errorText(error));
+					reply(command.id, 'NOT_READY', errorText(error), true);
 					return;
 				}
-				reply(command.id, code);
+				reply(command.id, code, undefined, true);
 				return;
 			}
 			case 'console:start':
@@ -548,13 +668,13 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 				// radio reads it when its RX starts.
 				startsPending++;
 				pendingListen = command.listen;
-				enqueue(command.id, () => start(command), 'CONNECT_FAILED', () => { startsPending--; });
+				enqueue(command.id, () => start(command), { fallback: 'CONNECT_FAILED', done: () => { startsPending--; }, withTune: true });
 				return;
 			case 'console:stop':
-				enqueue(command.id, async () => [await stop()], 'NOT_READY');
+				enqueue(command.id, async () => [await stop()], { fallback: 'NOT_READY' });
 				return;
 			case 'console:listen':
-				enqueue(command.id, async () => [await listen(command.enabled)], 'NOT_READY');
+				enqueue(command.id, async () => [await listen(command.enabled)], { fallback: 'NOT_READY' });
 				return;
 		}
 	}
@@ -573,8 +693,10 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		usb.addEventListener('connect', onUsbChange);
 		usb.addEventListener('disconnect', onUsbChange);
 	}
+	// The tuning at install is the baseline; only later changes count.
+	lastTuneKey = tuneKey();
 	const unwatch: (() => void) | null = typeof app.$watch === 'function'
-		? app.$watch(() => JSON.stringify(snapshot()), () => scheduleStatus())
+		? app.$watch(() => JSON.stringify(snapshot()), () => onReceiverChange())
 		: null;
 
 	sendHello();

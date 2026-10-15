@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { createReceiverBridge, consoleRequestsMockSdr, RECEIVER_BUILD_PROBE_URL } from './receiverBridge';
-import type { BridgeEnvironment, BridgeHostWindow, BridgeResult } from './receiverBridge';
+import { createReceiverBridge, consoleRequestsMockSdr, mergeTuneView, RECEIVER_BUILD_PROBE_URL } from './receiverBridge';
+import type { BridgeEnvironment, BridgeHostWindow, BridgeResult, TuneView } from './receiverBridge';
 import {
   BRIDGE_CHANNEL,
   BRIDGE_VERSION,
@@ -14,8 +14,12 @@ import {
   START_TIMEOUT_MS,
   STATUS_ERROR_CODES,
   SUBSCRIBE_LIMITS,
+  SWEEP_LIMITS,
+  TUNE_LIMITS,
+  TUNE_SOURCES,
   clampSubscription,
   commandMessage,
+  normalizeTuneStamp,
   parseFrameMessage,
 } from './receiverBridgeProtocol';
 
@@ -90,6 +94,7 @@ function status(overrides: Record<string, unknown> = {}): Record<string, unknown
     recording: false,
     error: null,
     notice: null,
+    tune: { rev: 1, by: 'receiver', id: null, receiverRev: 1 },
     ...overrides,
   };
 }
@@ -104,6 +109,48 @@ describe('receiver bridge protocol', () => {
     expect([...RESULT_CODES]).toEqual(['OK', 'NOT_READY', 'INVALID_COMMAND', 'NO_WEBUSB', 'NEEDS_PAIRING', 'NEEDS_DEVICE_CHOICE', 'MOCK_UNAVAILABLE', 'CONNECT_FAILED', 'SWEEP_BUSY', 'RX_NOT_RUNNING', 'OUT_OF_RANGE', 'AUDIO_BLOCKED', 'TIMEOUT']);
     expect([...STATUS_ERROR_CODES]).toEqual(['USB_LOST', 'RX_ERROR', 'NO_WEBUSB']);
     expect(SUBSCRIBE_LIMITS).toEqual({ binsMin: 64, binsMax: 2048, binsDefault: 512, fpsMin: 1, fpsMax: 15, fpsDefault: 10, spanMinHz: 100_000, spanDefaultHz: 2_000_000 });
+    expect([...TUNE_SOURCES]).toEqual(['console', 'receiver']);
+    expect(TUNE_LIMITS).toEqual({ minHz: 1_000_000, maxHz: 6_000_000_000 });
+    // Scans and Receiver markers reach 7.25 GHz; RX tuning stops at 6 GHz.
+    expect(SWEEP_LIMITS).toEqual({ minHz: 1_000_000, maxHz: 7_250_000_000 });
+  });
+
+  it('parses a tune stamp and refuses an incomplete or inconsistent one', () => {
+    expect(normalizeTuneStamp({ rev: 4, by: 'console', id: 'c3-x', receiverRev: 2 })).toEqual({ rev: 4, by: 'console', id: 'c3-x', receiverRev: 2 });
+    // A Receiver-page change carries no command id; a bad id is dropped.
+    expect(normalizeTuneStamp({ rev: 4, by: 'receiver', id: 'c3-x', receiverRev: 4 })).toEqual({ rev: 4, by: 'receiver', id: null, receiverRev: 4 });
+    expect(normalizeTuneStamp({ rev: 4, by: 'console', id: 'bad id', receiverRev: 0 })).toEqual({ rev: 4, by: 'console', id: null, receiverRev: 0 });
+    for (const bad of [
+      undefined, null, [], 'rev',
+      { rev: 4, by: 'operator', id: null, receiverRev: 0 },
+      { rev: -1, by: 'receiver', id: null, receiverRev: 0 },
+      { rev: 1.5, by: 'receiver', id: null, receiverRev: 0 },
+      { rev: 2, by: 'receiver', id: null, receiverRev: 3 },
+      { rev: 2, by: 'receiver', id: null },
+      { rev: '2', by: 'receiver', id: null, receiverRev: 0 },
+    ]) {
+      expect(normalizeTuneStamp(bad), JSON.stringify(bad)).toBeNull();
+    }
+  });
+
+  it('keeps the tune stamp of a status and treats a missing one as unknown', () => {
+    const parse = (overrides: Record<string, unknown>) => {
+      const parsed = parseFrameMessage({ ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:status', ...status(overrides) });
+      return parsed?.type === 'receiver:status' ? parsed.status : null;
+    };
+    expect(parse({ tune: { rev: 7, by: 'console', id: 'c9-a', receiverRev: 5 } })?.tune).toEqual({ rev: 7, by: 'console', id: 'c9-a', receiverRev: 5 });
+    expect(parse({ tune: undefined })?.tune).toBeNull();
+    expect(parse({ tune: { rev: 7, by: 'nobody', receiverRev: 0 } })?.tune).toBeNull();
+  });
+
+  it('keeps the tuning a result carries and drops a malformed one', () => {
+    const tune = { rev: 3, by: 'console', id: 'c4-a', receiverRev: 1, centerHz: 145_500_000.4, vfoHz: 145_510_000 };
+    const parsed = parseFrameMessage({ ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 'c4-a', ok: true, code: 'OK', tune });
+    expect(parsed).toEqual({ type: 'receiver:result', result: { id: 'c4-a', ok: true, code: 'OK', tune: { ...tune, centerHz: 145_500_000 } } });
+    const refused = parseFrameMessage({ ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 'c4-b', ok: false, code: 'SWEEP_BUSY', tune: { ...tune, centerHz: Number.NaN, vfoHz: null } });
+    expect(refused?.type === 'receiver:result' ? refused.result.tune : undefined).toEqual({ rev: 3, by: 'console', id: 'c4-a', receiverRev: 1, centerHz: null, vfoHz: null });
+    const malformed = parseFrameMessage({ ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:result', id: 'c4-c', ok: true, code: 'OK', tune: { rev: -3 } });
+    expect(malformed).toEqual({ type: 'receiver:result', result: { id: 'c4-c', ok: true, code: 'OK' } });
   });
 
   it('clamps subscriptions like the frame', () => {
@@ -160,7 +207,7 @@ describe('receiver bridge protocol', () => {
 describe('createReceiverBridge', () => {
   it('starts idle without touching any window', () => {
     const bridge = createReceiverBridge({ host: () => { throw new Error('window used'); }, setTimeout, clearTimeout, probe: () => Promise.resolve(200), random: Math.random });
-    expect(bridge.getState()).toEqual({ phase: 'idle', build: 'unknown', hello: null, status: null, lastResult: null });
+    expect(bridge.getState()).toEqual({ phase: 'idle', build: 'unknown', hello: null, status: null, tune: null, lastResult: null });
   });
 
   it('says hello on attach, becomes ready on the frame hello, and re-sends the subscription', () => {
@@ -283,6 +330,51 @@ describe('createReceiverBridge', () => {
     expect(calls).toBe(before);
   });
 
+  it('keeps the tuning with the highest rev from statuses and results', async () => {
+    const h = harness();
+    h.bridge.attach(h.frame);
+    h.fromFrame('receiver:hello', hello);
+    h.fromFrame('receiver:status', status({ seq: 2, centerHz: 100_000_000, vfo: { index: 0, enabled: false, mode: 'nfm', frequencyHz: 100_010_000 }, tune: { rev: 3, by: 'receiver', id: null, receiverRev: 3 } }));
+    expect(h.bridge.getState().tune).toEqual({ rev: 3, by: 'receiver', commandId: null, receiverRev: 3, centerHz: 100_000_000, vfoHz: 100_010_000 });
+
+    // A tune result shows before the next status.
+    const pending = h.bridge.send({ type: 'console:tune', centerHz: 145_500_000, vfoHz: 145_500_000 });
+    const id = String(h.posted.at(-1)?.message.id);
+    h.fromFrame('receiver:result', { id, ok: true, code: 'OK', tune: { rev: 4, by: 'console', id, receiverRev: 3, centerHz: 145_500_000, vfoHz: 145_500_000 } });
+    await expect(pending).resolves.toEqual({ ok: true, code: 'OK', tune: { rev: 4, by: 'console', id, receiverRev: 3, centerHz: 145_500_000, vfoHz: 145_500_000 } });
+    expect(h.bridge.getState().tune).toEqual({ rev: 4, by: 'console', commandId: id, receiverRev: 3, centerHz: 145_500_000, vfoHz: 145_500_000 });
+    expect(h.bridge.getState().status?.centerHz).toBe(100_000_000);
+
+    // A status sent before the command does not take the tuning back.
+    h.fromFrame('receiver:status', status({ seq: 3, centerHz: 100_000_000, tune: { rev: 3, by: 'receiver', id: null, receiverRev: 3 } }));
+    expect(h.bridge.getState().tune?.centerHz).toBe(145_500_000);
+    h.fromFrame('receiver:status', status({ seq: 4, centerHz: 150_000_000, vfo: { index: 0, enabled: false, mode: 'nfm', frequencyHz: 150_000_000 }, tune: { rev: 5, by: 'receiver', id: null, receiverRev: 5 } }));
+    expect(h.bridge.getState().tune).toMatchObject({ rev: 5, by: 'receiver', receiverRev: 5, centerHz: 150_000_000, vfoHz: 150_000_000 });
+
+    // A status without a stamp (an older frame) keeps the last known tuning; a new document resets it.
+    h.fromFrame('receiver:status', status({ seq: 5, tune: undefined }));
+    expect(h.bridge.getState().tune?.rev).toBe(5);
+    h.bridge.attach(h.frame);
+    expect(h.bridge.getState().tune).toBeNull();
+    h.fromFrame('receiver:hello', hello);
+    h.fromFrame('receiver:status', status({ seq: 1, tune: { rev: 0, by: 'receiver', id: null, receiverRev: 0 } }));
+    expect(h.bridge.getState().tune?.rev).toBe(0);
+    h.bridge.detach();
+    expect(h.bridge.getState().tune).toBeNull();
+  });
+
+  it('a refused tune also reports the tuning the Receiver kept', async () => {
+    const h = harness();
+    h.bridge.attach(h.frame);
+    h.fromFrame('receiver:hello', hello);
+    h.fromFrame('receiver:status', status({ seq: 2, tune: { rev: 2, by: 'receiver', id: null, receiverRev: 2 } }));
+    const pending = h.bridge.send({ type: 'console:tune', centerHz: 145_500_000 });
+    const id = String(h.posted.at(-1)?.message.id);
+    h.fromFrame('receiver:result', { id, ok: false, code: 'SWEEP_BUSY', tune: { rev: 2, by: 'receiver', id: null, receiverRev: 2, centerHz: 433_920_000, vfoHz: 433_920_000 } });
+    await expect(pending).resolves.toMatchObject({ ok: false, code: 'SWEEP_BUSY' });
+    expect(h.bridge.getState().tune).toMatchObject({ rev: 2, centerHz: 433_920_000 });
+  });
+
   it('hands spectrum frames to listeners without storing them in state', () => {
     const h = harness();
     const frames: number[] = [];
@@ -318,5 +410,21 @@ describe('consoleRequestsMockSdr', () => {
     expect(consoleRequestsMockSdr({ hostname: '127.0.0.1', search: '?mock=1' })).toBe(true);
     expect(consoleRequestsMockSdr({ hostname: '127.0.0.1', search: '?mock=true' })).toBe(false);
     expect(consoleRequestsMockSdr({ hostname: 'example.com', search: '?mock=1' })).toBe(false);
+  });
+});
+
+describe('mergeTuneView', () => {
+  const view = (overrides: Partial<TuneView> = {}): TuneView => ({ rev: 1, by: 'receiver', commandId: null, receiverRev: 1, centerHz: 100_000_000, vfoHz: 100_000_000, ...overrides });
+
+  it('takes the higher rev and never lowers receiverRev', () => {
+    const current = view({ rev: 4, receiverRev: 4 });
+    expect(mergeTuneView(null, current)).toBe(current);
+    expect(mergeTuneView(current, null)).toBe(current);
+    expect(mergeTuneView(current, view({ rev: 3, centerHz: 1 }))).toBe(current);
+    expect(mergeTuneView(current, view({ rev: 4 }))).toBe(current);
+    const next = view({ rev: 5, by: 'console', commandId: 'c1-a', receiverRev: 4, centerHz: 145_500_000 });
+    expect(mergeTuneView(current, next)).toBe(next);
+    expect(mergeTuneView(current, view({ rev: 6, receiverRev: 2 }))).toMatchObject({ rev: 6, receiverRev: 4 });
+    expect(mergeTuneView(view({ rev: 6, receiverRev: 2 }), view({ rev: 6, receiverRev: 6 }))).toMatchObject({ rev: 6, receiverRev: 6 });
   });
 });

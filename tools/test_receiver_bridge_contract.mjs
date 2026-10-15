@@ -23,8 +23,10 @@ const SHARED = [
 	'BUSY_STATES',
 	'WORKSPACES',
 	'AUDIO_STATES',
+	'TUNE_SOURCES',
 	'SUBSCRIBE_LIMITS',
 	'TUNE_LIMITS',
+	'SWEEP_LIMITS',
 	'VOLUME_LIMITS',
 	'SPECTRUM_FLOOR_DB',
 ];
@@ -41,6 +43,17 @@ test('command id pattern accepts and rejects the same ids', () => {
 	const samples = ['c1-abc', 'A_b-9', 'x'.repeat(64), '', 'x'.repeat(65), 'bad id', 'semi;colon', 'ünï'];
 	for (const id of samples) {
 		assert.equal(consoleSide.COMMAND_ID_PATTERN.test(id), frameSide.COMMAND_ID_PATTERN.test(id), id);
+	}
+});
+
+test('a tune stamp the frame sends is one the console accepts', () => {
+	const stamps = [
+		{ rev: 0, by: 'receiver', id: null, receiverRev: 0 },
+		{ rev: 9, by: 'console', id: 'c7-abc', receiverRev: 4 },
+	];
+	for (const stamp of stamps) {
+		assert.ok(frameSide.TUNE_SOURCES.includes(stamp.by));
+		assert.deepEqual(consoleSide.normalizeTuneStamp(stamp), stamp, JSON.stringify(stamp));
 	}
 });
 
