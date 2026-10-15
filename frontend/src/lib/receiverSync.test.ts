@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { displayedTuning, watchReceiverTuning } from './receiverSync';
+import { displayedTuning, settleLocalTune, watchReceiverTuning } from './receiverSync';
 import type { LocalTune, TuningSource } from './receiverSync';
 import type { BridgeState, TuneView } from './receiverBridge';
 import type { ListenMode, ReceiverStatus } from './receiverBridgeProtocol';
@@ -111,5 +111,30 @@ describe('displayedTuning', () => {
     expect(displayedTuning(null, frame(2))).toEqual({ centerHz: 100_000_000, vfoHz: 100_000_000 });
     expect(displayedTuning(null, null)).toBeNull();
     expect(displayedTuning(local({ awaitRev: 4 }), null)).toBeNull();
+  });
+});
+
+describe('settleLocalTune', () => {
+  const local = (overrides: Partial<LocalTune> = {}): LocalTune => ({ token: 2, centerHz: 145_500_000, vfoHz: 145_500_000, awaitRev: null, ...overrides });
+
+  it('drops a refused tune and one the TuneView already shows', () => {
+    expect(settleLocalTune(local(), 2, { ok: false, tune: { rev: 4 } }, { rev: 4 })).toBeNull();
+    expect(settleLocalTune(local(), 2, { ok: true }, { rev: 4 })).toBeNull();
+    // The bridge merges the result's tuning before the command settles, so this is the usual case.
+    expect(settleLocalTune(local(), 2, { ok: true, tune: { rev: 5 } }, { rev: 5 })).toBeNull();
+    expect(settleLocalTune(local(), 2, { ok: true, tune: { rev: 5 } }, null)).toBeNull();
+  });
+
+  it('waits for the rev only while the TuneView is behind, and ignores an older command', () => {
+    expect(settleLocalTune(local(), 2, { ok: true, tune: { rev: 5 } }, { rev: 4 })).toEqual(local({ awaitRev: 5 }));
+    const newer = local({ token: 3 });
+    expect(settleLocalTune(newer, 2, { ok: false }, { rev: 4 })).toBe(newer);
+    expect(settleLocalTune(null, 2, { ok: true, tune: { rev: 5 } }, { rev: 5 })).toBeNull();
+  });
+
+  it('never shows a settled tune again once a reloaded Receiver counts from 0', () => {
+    // A kept tune with awaitRev 12 would hide every rev of the new frame below 12.
+    const settled = settleLocalTune(local(), 2, { ok: true, tune: { rev: 12 } }, { rev: 12 });
+    expect(displayedTuning(settled, { rev: 1, centerHz: 150_000_000, vfoHz: 150_000_000 })).toEqual({ centerHz: 150_000_000, vfoHz: 150_000_000 });
   });
 });

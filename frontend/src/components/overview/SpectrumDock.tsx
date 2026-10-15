@@ -11,7 +11,7 @@ import type { BridgeCommand, ListenMode, ReceiverStatus, ResultCode } from '../.
 import { nodeFrequencies } from '../../lib/nodeFrequency';
 import type { NodeFrequencies } from '../../lib/nodeFrequency';
 import { LISTEN_MODE_OPTIONS, followNodeStore, listenModeStore } from '../../lib/listenPrefs';
-import { displayedTuning } from '../../lib/receiverSync';
+import { displayedTuning, settleLocalTune } from '../../lib/receiverSync';
 import type { LocalTune } from '../../lib/receiverSync';
 import { savedReceiverTuning } from '../../lib/receiverSavedTuning';
 import { fieldFor, fieldRange, inFieldRange } from '../../lib/configPatch';
@@ -340,7 +340,8 @@ export function SpectrumDock({
       start(true);
       return;
     }
-    const frequencyHz = followNode && node ? node.vfoHz : liveVfo ?? undefined;
+    // The shown VFO: a dock tune still on its way must not be undone by this command.
+    const frequencyHz = followNode && node ? node.vfoHz : shownVfo ?? undefined;
     void bridge.send(frequencyHz === undefined ? { type: 'console:vfo', mode: shownMode } : { type: 'console:vfo', mode: shownMode, frequencyHz }).then(reportFailure);
     void bridge.send({ type: 'console:listen', enabled: true }).then(report);
   };
@@ -379,11 +380,9 @@ export function SpectrumDock({
       report(result);
       if (!mountedRef.current) return;
       if (result.ok) setPendingHz(null);
-      setLocalTune((current) => {
-        if (current?.token !== token) return current;
-        // A refused tune snaps back to what the Receiver reports.
-        return result.ok && result.tune ? { ...current, awaitRev: result.tune.rev } : null;
-      });
+      // A refused tune snaps back to what the Receiver reports; an applied one is in the TuneView by now.
+      const view = bridge.getState().tune;
+      setLocalTune((current) => settleLocalTune(current, token, result, view));
     });
   };
 

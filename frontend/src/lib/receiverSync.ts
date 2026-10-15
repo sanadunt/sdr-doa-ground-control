@@ -76,11 +76,29 @@ export interface DisplayedTuning {
 
 /**
  * What the dock shows: its own pending tune until the frame reports that rev
- * (or a later one), then the frame's tuning. A settled local tune is dropped
- * when the frame goes away, so it never outlives the Receiver it was sent to.
+ * (or a later one), then the frame's tuning. Without a frame a settled local
+ * tune shows nothing.
  */
 export function displayedTuning(local: LocalTune | null, tune: Pick<TuneView, 'rev' | 'centerHz' | 'vfoHz'> | null): DisplayedTuning | null {
   if (local && local.awaitRev === null) return { centerHz: local.centerHz, vfoHz: local.vfoHz };
   if (local && tune && tune.rev < (local.awaitRev ?? 0)) return { centerHz: local.centerHz, vfoHz: local.vfoHz };
   return tune ? { centerHz: tune.centerHz, vfoHz: tune.vfoHz } : null;
+}
+
+/**
+ * The dock's local tune once the command with `token` settled. A refused tune
+ * is dropped (the dock snaps back to the frame), and so is one the frame's
+ * TuneView already covers, so a settled local tune never waits for a rev a
+ * reloaded Receiver, counting from 0 again, would only reach much later.
+ * A result for an older token leaves `current` as it is.
+ */
+export function settleLocalTune(
+  current: LocalTune | null,
+  token: number,
+  result: { ok: boolean; tune?: { rev: number } },
+  view: Pick<TuneView, 'rev'> | null,
+): LocalTune | null {
+  if (!current || current.token !== token) return current;
+  if (!result.ok || !result.tune || !view || view.rev >= result.tune.rev) return null;
+  return { ...current, awaitRev: result.tune.rev };
 }
