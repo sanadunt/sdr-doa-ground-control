@@ -1499,6 +1499,34 @@ test('radio reports AUDIO_BLOCKED when audio that played before the restart cann
 	assert.equal(app.audioCtx.state, 'running');
 });
 
+test('radio checks the audio of a listening VFO only once the restarted stream has created its AudioContext', async t => {
+	const { frame, app, clock, result, drawFrame } = await runningMock(t);
+	frame.send('console:listen', { id: 'w1', enabled: true });
+	await settle(20);
+	assert.equal(result('w1').code, 'OK');
+	// startStream sets running, then waits for the stream before it sets up the VFOs and the audio.
+	let release;
+	const held = new Promise(resolve => { release = resolve; });
+	const startRxStream = app.backend.startRxStream;
+	app.backend.startRxStream = async (...args) => { await held; return startRxStream(...args); };
+	frame.send('console:radio', { id: 'w2', sampleRateHz: 8_000_000 });
+	await settle(20);
+	assert.equal(app.running, true);
+	assert.equal(app._rxRestarting, false);
+	assert.equal(app.audioCtx, null, 'the stop closed it and the start has not created the new one');
+	drawFrame(); // the new stream draws before startRxStream has resolved
+	clock.advance(RADIO_POLL_MS * 2);
+	await settle();
+	assert.equal(result('w2'), undefined, 'no AUDIO_BLOCKED for a context that does not exist yet');
+	release();
+	await settle(20);
+	clock.advance(RADIO_POLL_MS);
+	await settle();
+	assert.equal(result('w2').code, 'OK');
+	assert.equal(app.audioCtx.state, 'running');
+	assert.equal(app.vfos[0].enabled, true);
+});
+
 test('radio reports a restart that does not bring RX back, and a slow first frame', async t => {
 	await t.test('the stream fails to start', async st => {
 		const { frame, app, clock, failures, result } = await runningMock(st);

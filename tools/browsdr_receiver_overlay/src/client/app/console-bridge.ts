@@ -673,7 +673,9 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		const deadline = env.monotonicNow() + RADIO_RESTART_WAIT_MS;
 		for (;;) {
 			const restarting = Boolean(app._rxRestarting);
-			if (!restarting && app.running && rxFrames > framesBefore) break;
+			// startStream draws frames before it has set up the VFOs and created the new AudioContext;
+			// an audible VFO waits for that context, or the check below would find none.
+			if (!restarting && app.running && rxFrames > framesBefore && (!audible || app.audioCtx)) break;
 			// A restart that did not bring RX back (the stream failed to start).
 			if (!restarting && !app.running) return ['CONNECT_FAILED', noticeSince(noticeBefore)];
 			if (env.monotonicNow() >= deadline) break;
