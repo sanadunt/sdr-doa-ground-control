@@ -93,6 +93,7 @@ cmd_run() {
     --branding-path "$DATA_DIR/branding.json" \
     --preferences-path "$DATA_DIR/preferences.json" \
     --data-dir "$DATA_DIR/receiver" \
+    --tile-cache-dir "$DATA_DIR/tiles" \
     --env-file "$DATA_DIR/.env" \
     "$@"
 }

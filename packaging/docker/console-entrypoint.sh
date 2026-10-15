@@ -2,7 +2,8 @@
 # Entrypoint of the Ground Console image.
 #
 # Everything the console saves lives in one directory (default /data, the
-# volume): console.json, branding.json, preferences.json, receiver/ and .env.
+# volume): console.json, branding.json, preferences.json, receiver/, tiles/
+# (the basemap tile cache) and .env.
 # The console binds 127.0.0.1 only. Run the container with the host network
 # (network_mode: host, Linux) so that loopback is the host's loopback; a bridge
 # network with a published port cannot reach a loopback-only server.
@@ -37,5 +38,6 @@ exec "$PYTHON" "$APP_DIR/tools/ground_console.py" \
   --branding-path "$DATA_DIR/branding.json" \
   --preferences-path "$DATA_DIR/preferences.json" \
   --data-dir "$DATA_DIR/receiver" \
+  --tile-cache-dir "$DATA_DIR/tiles" \
   --env-file "$DATA_DIR/.env" \
   "$@"

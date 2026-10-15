@@ -37,6 +37,7 @@ CONSOLE_MODULES = {
     "sdr_doa_collector.py",
     "sdr_doa_mqtt.py",
     "sdr_doa_mqtt_monitor.py",
+    "tile_cache.py",
 }
 AGENT_MODULES = {"sdr_doa_lan_agent.py", "sdr_doa_collector.py", "sdr_doa_mqtt.py", "sdr_doa_mqtt_stdlib.py"}
 SHELL_SCRIPTS = (
@@ -406,7 +407,7 @@ class DockerAndComposeTests(unittest.TestCase):
             self.assertNotIn("0.0.0.0", text)
 
     def test_every_launch_path_uses_the_data_directory_and_loopback(self):
-        flags = ("--bind 127.0.0.1", "--config-path", "--branding-path", "--preferences-path", "--data-dir", "--env-file")
+        flags = ("--bind 127.0.0.1", "--config-path", "--branding-path", "--preferences-path", "--data-dir", "--tile-cache-dir", "--env-file")
         sources = {
             "packaging/docker/console-entrypoint.sh": self.read("packaging/docker/console-entrypoint.sh").replace("\\\n", " "),
             "packaging/console/sdr-doa-ground-console.service.in": self.read("packaging/console/sdr-doa-ground-console.service.in"),
@@ -646,7 +647,8 @@ class PackagingScriptTests(unittest.TestCase):
                 result.stdout.split(),
                 ["--bind", "127.0.0.1", "--port", "8790", "--config-path", f"{data}/console.json",
                  "--branding-path", f"{data}/branding.json", "--preferences-path", f"{data}/preferences.json",
-                 "--data-dir", f"{data}/receiver", "--env-file", f"{data}/.env", "--legacy-ui"],
+                 "--data-dir", f"{data}/receiver", "--tile-cache-dir", f"{data}/tiles", "--env-file", f"{data}/.env",
+                 "--legacy-ui"],
             )
             self.assertTrue(Path(data, "receiver").is_dir())
             bad = subprocess.run([_sh(), script], capture_output=True, text=True, env={**env, "SDR_DOA_PORT": "80a"})
