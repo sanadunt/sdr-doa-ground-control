@@ -12,12 +12,24 @@ The console keeps a narrow boundary:
   the base revision the operator reviewed. The edge agent decides whether to
   apply it and answers on ``ack/config``;
 * the settings form's ``/api/dry-run/config-patch`` only validates a preview;
-* local admin settings also change this console's branding.
+* local admin settings also change this console's branding;
+* ``/api/preferences`` keeps the operator's browser preferences (theme,
+  language, Overview panels, overlay, polar view, GPS/Compass source, listen
+  mode, follow node, the Receiver's settings) on this host, so another browser
+  or a cleared cache gets them back.
 
 Admin login uses ``SDR_DOA_ADMIN_PASSWORD`` from the environment or the
-repository ``.env``. When the variable is absent from both, the default
-password ``123456`` applies and the UI warns about it; an explicitly empty
-value disables admin login.
+``--env-file`` (default: the repository ``.env``). When the variable is absent
+from both, the default password ``123456`` applies and the UI warns about it;
+an explicitly empty value disables admin login.
+
+Everything the operator saves lives in local files: ``--config-path``
+(connection, MQTT, refresh interval), ``--branding-path``,
+``--preferences-path`` and ``--data-dir`` (Receiver records). On the first
+start, when ``--config-path`` does not exist yet, the console builds it from
+``SDR_DOA_SEED_*`` variables (environment or env file) and saves it; later
+starts read the file and ignore the seed. ``--base-url`` and ``--mqtt-*``
+override the saved file for one run only, so a service should not pass them.
 
 Run from the repository root, for example:
 
@@ -57,11 +69,29 @@ import sdr_doa_mqtt
 from config_command_tracker import ConfigCommandTracker, MonitorPublishError
 from sdr_doa_collector import CollectorError, DEFAULT_ALLOWED_DATA_HOSTS, NodeProgressTracker, collect
 from receiver_record_store import DEFAULT_DATA_DIR, ReceiverConflictError, ReceiverRecordStore
+from preferences_store import MAX_PREFERENCES_REQUEST_BYTES, PreferencesRejected, PreferencesStore
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BROWSDR_SOURCE_ARCHIVE = "freq-spectrum-source.tar.gz"
 DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+VERSION_PATH = PROJECT_ROOT / "VERSION"
+_VERSION_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}")
+
+
+def _read_version(path: Path = VERSION_PATH) -> str:
+    """Return the first line of the VERSION file, or "dev" without a usable one."""
+    try:
+        with open(path, "rb") as handle:
+            text = handle.read(256).decode("utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return "dev"
+    lines = text.strip().splitlines()
+    first = lines[0].strip() if lines else ""
+    return first if _VERSION_RE.fullmatch(first) else "dev"
+
+
+CONSOLE_VERSION = _read_version()
 
 
 def _query_int(query: Dict[str, list], key: str, default: Optional[int]) -> Optional[int]:
@@ -215,6 +245,7 @@ _COMMAND_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 DEFAULT_APP_NAME = "SDR-DoA Ground Console"
 DEFAULT_BRANDING_PATH = Path.home() / ".config" / "sdr-doa-ground-console" / "branding.json"
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "sdr-doa-ground-console" / "console.json"
+DEFAULT_PREFERENCES_PATH = Path.home() / ".config" / "sdr-doa-ground-console" / "preferences.json"
 # Process environment wins; a repository-root .env is only a local fallback.
 # With neither, DEFAULT_ADMIN_PASSWORD applies and capabilities flag it.
 ADMIN_PASSWORD = _admin_password_from_sources()
@@ -227,12 +258,14 @@ ADMIN_SESSION_TTL_SECONDS = 30 * 60
 # State-changing POSTs that need a same-origin loopback Origin before their
 # body is read. Login and logout are here so a cross-site page cannot feed the
 # failed-login throttle; console-config and mqtt/connect replace the MQTT
-# monitor, which is also the config-patch publish channel.
+# monitor, which is also the config-patch publish channel; preferences would
+# otherwise let any page rewrite the operator's saved view.
 SAME_ORIGIN_POST_PATHS = frozenset({
     "/api/admin/login",
     "/api/admin/logout",
     "/api/console-config",
     "/api/mqtt/connect",
+    "/api/preferences",
 })
 # Failed logins are counted for the whole server: after this many inside the
 # window, every login is refused for the lockout period. Only same-origin
@@ -782,6 +815,91 @@ def _apply_cli_overrides(
         if merged.get(field) != config.get(field):
             log(f"--{field.replace('_', '-')} from the command line overrides the saved console config for this run")
     return merged
+
+
+# First-start seed for console.json: environment variable, config field and
+# whether the value is an integer. Read from the process environment first,
+# then the env file; validated like a saved config.
+SEED_ENV_FIELDS: Tuple[Tuple[str, str, bool], ...] = (
+    ("SDR_DOA_SEED_BASE_URL", "base_url", False),
+    ("SDR_DOA_SEED_MQTT_HOST", "mqtt_host", False),
+    ("SDR_DOA_SEED_MQTT_PORT", "mqtt_port", True),
+    ("SDR_DOA_SEED_MQTT_TRANSPORT", "mqtt_transport", False),
+    ("SDR_DOA_SEED_MQTT_WS_PATH", "mqtt_ws_path", False),
+    ("SDR_DOA_SEED_REFRESH_SECONDS", "refresh_seconds", True),
+)
+_SEED_INTEGER_RE = re.compile(r"[0-9]{1,5}")
+
+
+def _seed_console_config(
+    environ: Optional[Dict[str, str]] = None,
+    dotenv_values: Optional[Dict[str, str]] = None,
+    *,
+    log: Callable[[str], None] = _log_warning,
+) -> Dict[str, Any]:
+    """Build the first console config from SDR_DOA_SEED_* over the defaults.
+
+    An empty variable counts as unset, so a compose file can pass an unset
+    variable through. An invalid value is ignored with a warning that names
+    the variable only; the other seed values still apply.
+    """
+    source = os.environ if environ is None else environ
+    fallback = dotenv_values or {}
+    defaults = _default_console_config()
+    accepted: Dict[str, Any] = {}
+    for variable, field, integer in SEED_ENV_FIELDS:
+        raw = source.get(variable)
+        if raw is None or not raw.strip():
+            raw = fallback.get(variable)
+        if raw is None or not raw.strip():
+            continue
+        text = raw.strip()
+        value: Any = text
+        if integer:
+            if _SEED_INTEGER_RE.fullmatch(text) is None:
+                log(f"{variable} is not a valid {field}; ignored")
+                continue
+            value = int(text)
+        try:
+            _validate_console_config({field: value}, defaults)
+        except (ValueError, TypeError):
+            log(f"{variable} is not a valid {field}; ignored")
+            continue
+        accepted[field] = value
+    return _validate_console_config(accepted, defaults)
+
+
+def _initial_console_config(
+    path: Path,
+    environ: Optional[Dict[str, str]] = None,
+    dotenv_values: Optional[Dict[str, str]] = None,
+    *,
+    log: Callable[[str], None] = _log_warning,
+) -> Dict[str, Any]:
+    """Load console.json, or on the first start seed it and save it.
+
+    Once the file exists (even an unreadable or invalid one) the seed is never
+    used again, so later changes from the UI are what the next start reads.
+    """
+    path = path.expanduser()
+    if os.path.lexists(path):
+        return _load_console_config(path, _default_console_config(), log=log)
+    config = _seed_console_config(environ, dotenv_values, log=log)
+    try:
+        _save_console_config(path, config)
+    except OSError as exc:
+        log(f"could not save the initial console config {path} ({type(exc).__name__}); it applies to this run only")
+    else:
+        print(f"[ground-console] saved the initial console config to {path}", flush=True)
+    return config
+
+
+def _read_env_file(path: Path) -> Tuple[Dict[str, str], bool]:
+    """Return the env file's values and whether it could be read."""
+    try:
+        return _read_dotenv(path, strict=True), True
+    except _DotenvUnreadable:
+        return {}, False
 
 
 def _is_loopback_bind(value: str) -> bool:
@@ -2460,6 +2578,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body.encode("utf-8"))
             return
+        if parsed.path == "/api/health":
+            # For container and service health checks: no Data Out read, no
+            # broker call, no file access.
+            self._send_json({"ok": True, "version": self.console_server.version})
+            return
+        if parsed.path == "/api/preferences":
+            self._send_json(self.console_server.preferences.snapshot())
+            return
         if parsed.path == "/api/branding":
             self._send_json(self.console_server.get_branding())
             return
@@ -2508,6 +2634,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 },
                 "refresh_intervals_s": sorted(ALLOWED_REFRESH_INTERVALS),
                 "snapshot_budget_ms": int(SNAPSHOT_TOTAL_BUDGET_S * 1000),
+                # Browser preferences are kept on this host (/api/preferences).
+                "preferences": True,
+                "version": self.console_server.version,
             })
             return
         if parsed.path == "/api/console-config":
@@ -2550,6 +2679,46 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
+    def _send_preferences_error(self, status: int, code: str, message: str) -> None:
+        # Same body shape as the config-patch errors; the browser sync only
+        # logs these, Kontrol never shows them.
+        self._send_json({"ok": False, "code": code, "error": message}, status)
+
+    def _write_preferences(self) -> None:
+        """PUT or POST /api/preferences: merge known keys, no admin needed."""
+        if not self._same_origin_loopback_request():
+            self._send_preferences_error(
+                HTTPStatus.FORBIDDEN,
+                "ORIGIN_REJECTED",
+                "/api/preferences requires a same-origin loopback request",
+            )
+            return
+        try:
+            payload = self._read_json(MAX_PREFERENCES_REQUEST_BYTES)
+        except ValueError as exc:
+            self._send_preferences_error(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", str(exc))
+            return
+        try:
+            snapshot = self.console_server.preferences.update(payload)
+        except PreferencesRejected as exc:
+            self._send_preferences_error(exc.status, exc.code, str(exc))
+            return
+        except OSError as exc:
+            self._send_preferences_error(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "PREFERENCES_WRITE_FAILED",
+                f"preferences could not be saved ({type(exc).__name__})",
+            )
+            return
+        self._send_json({"ok": True, **snapshot})
+
+    def do_PUT(self) -> None:  # noqa: N802
+        parsed = urlsplit(self.path)
+        if parsed.path == "/api/preferences":
+            self._write_preferences()
+            return
+        self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
         if parsed.path.startswith("/api/receiver/") and not self._receiver_mutation_origin_is_valid():
@@ -2567,6 +2736,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 f"{parsed.path} requires a same-origin loopback request",
                 **extra,
             )
+            return
+        if parsed.path == "/api/preferences":
+            self._write_preferences()
             return
         if parsed.path == "/api/console-config":
             try:
@@ -2777,6 +2949,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
         config: Optional[Dict[str, Any]] = None,
         frontend_dir: Optional[Path] = None,
         receiver_data_dir: Optional[Path] = None,
+        preferences_path: Optional[str] = None,
     ):
         self.frontend_dir = Path(frontend_dir).resolve() if frontend_dir is not None else None
         if not _is_loopback_bind(address[0]):
@@ -2800,6 +2973,16 @@ class GroundConsoleServer(ThreadingHTTPServer):
         self.branding_path = Path(branding_path).expanduser() if branding_path else DEFAULT_BRANDING_PATH
         self._branding_lock = threading.RLock()
         self._branding = _load_branding(self.branding_path)
+        # Without an explicit path the preferences sit next to console.json,
+        # so a server with a temporary config never touches the real home.
+        if preferences_path:
+            resolved_preferences = Path(preferences_path).expanduser()
+        elif config_path:
+            resolved_preferences = self.config_path.with_name(DEFAULT_PREFERENCES_PATH.name)
+        else:
+            resolved_preferences = DEFAULT_PREFERENCES_PATH
+        self.preferences = PreferencesStore(resolved_preferences)
+        self.version = CONSOLE_VERSION
         self._session_lock = threading.RLock()
         self._admin_sessions: Dict[str, float] = {}
         # Failed-login throttle, global to this server and kept under
@@ -3171,12 +3354,27 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--mqtt-ws-path", default=DEFAULT_MQTT_WS_PATH, help="MQTT WebSocket path when --mqtt-transport is websockets")
     parser.add_argument("--branding-path", default=str(DEFAULT_BRANDING_PATH), help="local branding JSON path")
-    parser.add_argument("--config-path", default=str(DEFAULT_CONFIG_PATH), help="local console connection config path")
+    parser.add_argument(
+        "--config-path",
+        default=str(DEFAULT_CONFIG_PATH),
+        help="local console connection config path; created from SDR_DOA_SEED_* on the first start",
+    )
+    parser.add_argument(
+        "--preferences-path",
+        default=str(DEFAULT_PREFERENCES_PATH),
+        help="local JSON file that keeps the operator's browser preferences",
+    )
     parser.add_argument("--data-dir", default=str(DEFAULT_DATA_DIR), help="local Receiver records and audio directory")
+    parser.add_argument(
+        "--env-file",
+        default=str(DEFAULT_ENV_PATH),
+        help="dotenv file for SDR_DOA_ADMIN_PASSWORD and SDR_DOA_SEED_* (the process environment wins)",
+    )
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    global ADMIN_PASSWORD
     args = _build_parser().parse_args(argv)
     if not (1 <= args.port <= 65535):
         raise SystemExit("port must be between 1 and 65535")
@@ -3190,16 +3388,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit("--mqtt-ws-path must start with / and use only letters, digits, and ._~/-")
     if not _is_allowed_base_url(args.base_url):
         raise SystemExit("--base-url is outside the local SDR-DoA allowlist")
+    env_path = Path(args.env_file).expanduser()
+    env_values, env_readable = _read_env_file(env_path)
+    if env_path.resolve() != DEFAULT_ENV_PATH.resolve():
+        # The import resolved the password from the default .env; this run
+        # names another file. An unreadable one disables login, as before.
+        ADMIN_PASSWORD = _admin_password_from_sources(
+            dotenv_values=env_values if env_readable else None,
+            dotenv_path=env_path,
+        ) or None
     config_path = Path(args.config_path).expanduser()
-    fallback_config = _default_console_config(
-        args.base_url,
-        args.mqtt_host,
-        args.mqtt_port,
-        DEFAULT_REFRESH_SECONDS,
-        mqtt_transport=args.mqtt_transport,
-        mqtt_ws_path=args.mqtt_ws_path,
-    )
-    config = _load_console_config(config_path, fallback_config)
+    # Saved settings first (seeded and saved on the first start); a typed
+    # --base-url or --mqtt-* flag then overrides them for this run only.
+    config = _initial_console_config(config_path, dotenv_values=env_values)
     config = _apply_cli_overrides(config, args, _explicit_cli_options(argv))
     monitor = _new_mqtt_monitor(*_mqtt_connection(config)) if config["mqtt_host"] else None
     if isinstance(monitor, _UnavailableMqttMonitor):
@@ -3215,13 +3416,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         config,
         frontend_dir=None if args.legacy_ui else PROJECT_ROOT / "frontend" / "dist",
         receiver_data_dir=Path(args.data_dir).expanduser(),
+        preferences_path=str(Path(args.preferences_path).expanduser()),
     )
     print(f"Ground Console: http://{args.bind}:{args.port}/", flush=True)
+    print(f"Version: {server.version}", flush=True)
+    print(f"Saved settings: {config_path}, {server.branding_path}, {server.preferences.path}", flush=True)
     print(f"Read-only Data Out: {config['base_url']}", flush=True)
     if ADMIN_PASSWORD == DEFAULT_ADMIN_PASSWORD:
         print(
             "Warning: the default admin password is in use. Admin unlocks the config-patch send "
-            "to the Raspberry; set your own SDR_DOA_ADMIN_PASSWORD in .env.",
+            f"to the Raspberry; set your own SDR_DOA_ADMIN_PASSWORD in {env_path}.",
             flush=True,
         )
     try:
