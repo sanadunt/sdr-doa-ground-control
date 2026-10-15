@@ -3,8 +3,10 @@
 # On the Raspberry (from the repository or the unpacked agent release):
 #   docker compose -f docker-compose.agent.yml up -d --build   # repository
 #   docker compose up -d --build                               # agent release
-# Cross-build on another machine:
-#   docker buildx build --platform linux/arm64,linux/arm/v7 -f Dockerfile.agent -t sdr-doa-agent:2.0.0 .
+# Cross-build on another machine (one platform into the local store, or
+# several with a buildx builder and a registry):
+#   docker buildx build --platform linux/arm64 -f Dockerfile.agent -t sdr-doa-agent:2.0.0 --load .
+#   docker buildx build --platform linux/arm64,linux/arm/v7 -f Dockerfile.agent -t REGISTRY/sdr-doa-agent:2.0.0 --push .
 #
 # The agent uses only the Python standard library and this file has no RUN
 # step, so a cross-build needs no emulation. Run it with the host network

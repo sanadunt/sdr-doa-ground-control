@@ -45,11 +45,13 @@ if is_on MQTT_TLS "${MQTT_TLS:-0}"; then set -- "$@" --mqtt-tls; fi
 if [ -n "${MQTT_CAFILE:-}" ]; then set -- "$@" --mqtt-cafile "$MQTT_CAFILE"; fi
 if [ -n "${MQTT_USERNAME:-}" ]; then set -- "$@" --mqtt-username "$MQTT_USERNAME"; fi
 if is_on PUBLISH "${PUBLISH:-1}"; then set -- "$@" --publish; fi
+config_on=0
 if is_on ENABLE_CONFIG "${ENABLE_CONFIG:-0}"; then
   if [ -z "${SETTINGS_PATH:-}" ]; then
     echo "run-agent: ENABLE_CONFIG=1 needs SETTINGS_PATH (the KrakenSDR settings.json)" >&2
     exit 78
   fi
+  config_on=1
   set -- "$@" --enable-config
 fi
 if [ -n "${SETTINGS_PATH:-}" ]; then set -- "$@" --settings-path "$SETTINGS_PATH"; fi
@@ -72,6 +74,18 @@ if [ "${SDR_DOA_AGENT_PRINT_COMMAND:-0}" = 1 ]; then
   printf ' %s' "$@"
   printf '\n'
   exit 0
+fi
+# A config patch replaces settings.json through a temporary file next to it,
+# so this user needs write access to the file and its directory. Stop with
+# the cause instead of answering every patch with a failed ACK.
+if [ "$config_on" = 1 ]; then
+  settings_dir=$(dirname -- "$SETTINGS_PATH")
+  if [ ! -w "$settings_dir" ] || { [ -e "$SETTINGS_PATH" ] && [ ! -w "$SETTINGS_PATH" ]; }; then
+    echo "run-agent: ENABLE_CONFIG=1, but uid $(id -u) cannot write $SETTINGS_PATH or $settings_dir." >&2
+    echo "Native install: sudo sh install.sh --enable-config --user <owner of settings.json>." >&2
+    echo "Docker: mount the KrakenSDR _share directory and run as its owner (docker-compose.yml)." >&2
+    exit 78
+  fi
 fi
 export PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 exec "$python" "$home/tools/sdr_doa_lan_agent.py" "$@"

@@ -31,6 +31,7 @@ EPOCH = 1_700_000_000
 CONSOLE_MODULES = {
     "ground_console.py",
     "config_command_tracker.py",
+    "preferences_store.py",
     "rdf_node_mqtt_v2.py",
     "receiver_record_store.py",
     "sdr_doa_collector.py",
@@ -491,7 +492,8 @@ class PackagingScriptTests(unittest.TestCase):
             env = {**os.environ, "SDR_DOA_MQTT_PASSWORD": "p4ss"}
             result = subprocess.run(
                 [_sh(), str(ROOT / "packaging/agent/install-agent.sh"), "--root", str(root), "--user", "nobody",
-                 "--mqtt-host", "10.90.0.2", "--mqtt-port=8883", "--mqtt-tls", "--mqtt-username", "agent", "--enable-config"],
+                 "--mqtt-host", "10.90.0.2", "--mqtt-port=8883", "--mqtt-tls", "--mqtt-username", "agent", "--enable-config",
+                 "--set", "DOA_RATE=0", "--set=HEALTH_INTERVAL=2"],
                 capture_output=True, text=True, env=env,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -510,7 +512,10 @@ class PackagingScriptTests(unittest.TestCase):
             self.assertEqual(values["SDR_DOA_MQTT_PASSWORD"], "p4ss")
             self.assertEqual(values["STATE_DIR"], "/var/lib/sdr-doa-agent")
             self.assertEqual(values["BASE_URL"], "http://127.0.0.1:8081")
-            unit = (root / "etc/systemd/system/sdr-doa-agent.service").read_text()
+            self.assertEqual(values["DOA_RATE"], "0")
+            self.assertEqual(values["HEALTH_INTERVAL"], "2")
+            unit_path = root / "etc/systemd/system/sdr-doa-agent.service"
+            unit = unit_path.read_text()
             self.assertIn("ExecStart=/opt/sdr-doa-agent/bin/run-agent", unit)
             self.assertIn("EnvironmentFile=/etc/sdr-doa-agent/agent.env", unit)
             self.assertIn("User=nobody", unit)
@@ -533,6 +538,10 @@ class PackagingScriptTests(unittest.TestCase):
             self.assertEqual(values["ENABLE_CONFIG"], "0")
             self.assertEqual(values["MQTT_HOST"], "10.90.0.2")
             self.assertEqual(values["SDR_DOA_MQTT_PASSWORD"], "p4ss")
+            self.assertEqual(values["DOA_RATE"], "0")
+            unit = unit_path.read_text()
+            self.assertNotRegex(unit, r"(?m)^ReadWritePaths=-/home/doasdr", "settings stay read-only without config")
+            self.assertIn("ReadWritePaths=/var/lib/sdr-doa-agent", unit)
 
             removed = subprocess.run(
                 [_sh(), str(prefix / "uninstall.sh"), "--root", str(root)], capture_output=True, text=True
@@ -556,6 +565,26 @@ class PackagingScriptTests(unittest.TestCase):
         self.assertIn("ENABLE_CONFIG=0", result.stdout)
         self.assertIn("tools/sdr_doa_lan_agent.py --base-url http://127.0.0.1:8081", result.stdout)
         self.assertIn("Dry run: nothing was changed.", result.stdout)
+
+    def test_install_agent_set_only_takes_known_variables(self):
+        for value, message in (("NOPE=1", "does not know NOPE"), ("STATE_DIR=/x", "--state-dir"),
+                               ("SDR_DOA_MQTT_PASSWORD=x", "SDR_DOA_MQTT_PASSWORD"), ("DOA_RATE", "NAME=VALUE")):
+            result = subprocess.run(
+                [_sh(), str(ROOT / "packaging/agent/install-agent.sh"), "--dry-run", "--set", value],
+                capture_output=True, text=True,
+            )
+            self.assertNotEqual(result.returncode, 0, value)
+            self.assertIn(message, result.stderr, value)
+
+    def test_run_agent_stops_when_config_cannot_write_settings(self):
+        with tempfile.TemporaryDirectory(prefix="agent-settings-") as tmp:
+            settings = Path(tmp) / "missing" / "settings.json"
+            env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "ENABLE_CONFIG": "1", "SETTINGS_PATH": str(settings),
+                   "PUBLISH": "1", "SDR_DOA_AGENT_PYTHON": "/bin/false"}
+            result = subprocess.run([_sh(), str(ROOT / "packaging/agent/run-agent.sh")], capture_output=True, text=True, env=env)
+        self.assertEqual(result.returncode, 78, result.stderr)
+        self.assertIn("cannot write", result.stderr)
+        self.assertIn("--enable-config", result.stderr)
 
     def test_install_agent_rejects_unsafe_values(self):
         result = subprocess.run(
@@ -590,6 +619,46 @@ class PackagingScriptTests(unittest.TestCase):
             self.assertTrue(Path(data, "receiver").is_dir())
             bad = subprocess.run([_sh(), script], capture_output=True, text=True, env={**env, "SDR_DOA_PORT": "80a"})
             self.assertEqual(bad.returncode, 64)
+
+    def render_launcher(self, base: Path) -> Path:
+        """The sdr-doa-console launcher over a fake install whose health check logs each call."""
+        app, data = base / "app", base / "data"
+        (app / "venv/bin").mkdir(parents=True)
+        (app / "venv/bin/python").symlink_to(sys.executable)
+        (app / "packaging/console").mkdir(parents=True)
+        shutil.copy(ROOT / "packaging/console/set_admin_password.py", app / "packaging/console/")
+        (app / "packaging/docker").mkdir(parents=True)
+        (app / "packaging/docker/healthcheck.py").write_text(
+            f"open({str(base / 'health-calls')!r}, 'a').write('x')\n", encoding="utf-8"
+        )
+        (app / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+        launcher = base / "sdr-doa-console"
+        text = (ROOT / "packaging/console/sdr-doa-console").read_text(encoding="utf-8")
+        for name, value in (("APP_DIR", app), ("DATA_DIR", data), ("PORT", "8791"), ("BIN_PATH", launcher),
+                            ("UNIT_FILE", base / "no.service"), ("DESKTOP_FILE", base / "no.desktop")):
+            text = text.replace(f"@{name}@", str(value))
+        self.assertNotRegex(text, r"@[A-Z_]+@")
+        launcher.write_text(text, encoding="utf-8")
+        launcher.chmod(0o755)
+        return launcher
+
+    def test_launcher_password_status_does_not_restart(self):
+        with tempfile.TemporaryDirectory(prefix="launcher-") as tmp:
+            base = Path(tmp)
+            launcher = self.render_launcher(base)
+            env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": tmp}
+            status = subprocess.run([_sh(), str(launcher), "password", "--status"], capture_output=True, text=True, env=env)
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertEqual(status.stdout.strip(), "default")
+            self.assertFalse((base / "health-calls").exists(), "--status must not touch the running console")
+            # A change restarts a console that answers; this fake one answers but was not
+            # started by the launcher, so the restart refuses to start a second one.
+            changed = subprocess.run([_sh(), str(launcher), "password", "--default"], capture_output=True, text=True, env=env)
+            self.assertTrue((base / "health-calls").exists())
+            self.assertIn("already answers", changed.stderr)
+            info = subprocess.run([_sh(), str(launcher), "info"], capture_output=True, text=True, env=env)
+            self.assertIn("9.9.9", info.stdout)
+            self.assertIn("none (sdr-doa-console start)", info.stdout)
 
     def test_console_installer_help_and_root_refusal(self):
         result = subprocess.run([_sh(), str(ROOT / "packaging/console/install.sh"), "--help"], capture_output=True, text=True)

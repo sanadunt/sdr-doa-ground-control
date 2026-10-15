@@ -193,7 +193,13 @@ with socket.socket() as probe:
 EOF
 }
 
+# Sets WAS_RUNNING=1 when the installed console answered before the upgrade,
+# so a --no-service install starts it again afterwards.
 stop_previous() {
+  WAS_RUNNING=0
+  if [ -x "$BIN_DIR/sdr-doa-console" ] && "$BIN_DIR/sdr-doa-console" status 2>/dev/null | grep -q '^answering on'; then
+    WAS_RUNNING=1
+  fi
   if [ -f "$UNIT_FILE" ] && have_user_systemd; then
     systemctl --user stop "$UNIT" 2>/dev/null || true
   elif [ -x "$BIN_DIR/sdr-doa-console" ]; then
@@ -358,7 +364,7 @@ main() {
   install_launcher
   service=0
   install_service || service=$?
-  if [ "$service" = 1 ]; then
+  if [ "$service" = 1 ] && [ "$WAS_RUNNING" = 0 ]; then
     say "Start it with: sdr-doa-console start   (or in the foreground: sdr-doa-console run)"
   elif port_busy; then
     warn "port $PORT is already in use (another console?); stop it, then run: sdr-doa-console start"

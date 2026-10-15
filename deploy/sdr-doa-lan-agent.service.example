@@ -1,6 +1,9 @@
 [Unit]
 # EXAMPLE ONLY: do not enable until broker auth/ACL/TLS and independent review
 # pass. This unit intentionally has no --enable-config and disables DoA.
+# packaging/agent/install-agent.sh installs the maintained form of this unit
+# (sdr-doa-agent.service, settings in /etc/sdr-doa-agent/agent.env); its
+# --dry-run prints the unit and the agent command without changing anything.
 Description=SDR-DoA LAN Edge Agent (health/state/config-reported only)
 After=network-online.target
 Wants=network-online.target

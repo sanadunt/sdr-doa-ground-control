@@ -41,6 +41,8 @@ Agent settings (written to agent.env; on an upgrade only the ones given change):
   --no-publish          do not connect to MQTT at all
   --settings-path PATH  KrakenSDR settings.json
                         (default /home/doasdr/doasdr/_share/settings.json)
+  --set NAME=VALUE      any other agent.env variable, e.g. --set DOA_RATE=0
+                        (an empty VALUE restores the agent's default)
 
 Install:
   --user NAME           service user (default: owner of the settings file,
@@ -123,6 +125,19 @@ parse_args() {
       --disable-config) update ENABLE_CONFIG 0 ;;
       --no-publish) update PUBLISH 0; update ENABLE_CONFIG 0 ;;
       --settings-path) need_value "$@"; update SETTINGS_PATH "$2"; shift ;;
+      --set)
+        need_value "$@"
+        case $2 in *=*) ;; *) die "--set needs NAME=VALUE" ;; esac
+        name=${2%%=*}
+        case $name in
+          BASE_URL | MQTT_HOST | MQTT_PORT | MQTT_TLS | MQTT_CAFILE | MQTT_USERNAME | PUBLISH | ENABLE_CONFIG | \
+            SETTINGS_PATH | CLOCK_SOURCE | AUTHORITY | HEALTH_INTERVAL | DOA_RATE | STATE_INTERVAL | POLL_INTERVAL | \
+            COLLECT_BUDGET) ;;
+          *) die "--set does not know $name; see packaging/agent/agent.env.example (STATE_DIR: --state-dir, password: SDR_DOA_MQTT_PASSWORD)" ;;
+        esac
+        update "$name" "${2#*=}"
+        shift
+        ;;
       --user) need_value "$@"; AGENT_USER=$2; shift ;;
       --prefix) need_value "$@"; PREFIX=$2; shift ;;
       --config-dir) need_value "$@"; CONFIG_DIR=$2; shift ;;
@@ -344,11 +359,17 @@ install_config() {
 }
 
 install_unit() {
-  settings_dir=$(dirname -- "$SETTINGS_PATH")
-  if [ -n "$SETTINGS_PATH" ]; then
-    settings_rw="ReadWritePaths=-$settings_dir"
+  # The settings directory is writable only while agent.env enables config
+  # patches; run-agent stops with a message when ENABLE_CONFIG=1 meets a
+  # read-only settings.json, so re-run the installer with --enable-config.
+  case $(python3 "$WORK/helper.py" get "$ROOT$CONFIG_DIR/agent.env" ENABLE_CONFIG) in
+    1 | true | TRUE | True | yes | YES | on | ON) config_on=1 ;;
+    *) config_on=0 ;;
+  esac
+  if [ "$config_on" = 1 ] && [ -n "$SETTINGS_PATH" ]; then
+    settings_rw="ReadWritePaths=-$(dirname -- "$SETTINGS_PATH")"
   else
-    settings_rw="# no SETTINGS_PATH: the settings directory stays read-only"
+    settings_rw="# ENABLE_CONFIG=0: the settings directory stays read-only (install.sh --enable-config changes this)"
   fi
   python3 "$WORK/helper.py" render "$ASSETS/sdr-doa-agent.service.in" "$ROOT$UNIT_DIR/$SERVICE.service" \
     "PREFIX=$PREFIX" "CONFIG_DIR=$CONFIG_DIR" "STATE_DIR=$STATE_DIR" "USER=$AGENT_USER" \

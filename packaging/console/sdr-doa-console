@@ -2,6 +2,8 @@
 # sdr-doa-console: control the installed SDR-DoA Ground Console.
 # Written by install.sh, which filled in the paths below.
 set -eu
+# The pid and log files sit next to .env; keep them private too.
+umask 077
 
 APP_DIR='@APP_DIR@'
 DATA_DIR='@DATA_DIR@'
@@ -84,7 +86,6 @@ cmd_run() {
   fi
   mkdir -p "$DATA_DIR/receiver"
   export PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-  umask 077
   exec "$PYTHON" "$APP_DIR/tools/ground_console.py" \
     --bind 127.0.0.1 \
     --port "$PORT" \
@@ -166,6 +167,8 @@ cmd_open() {
 
 cmd_password() {
   "$PYTHON" "$APP_DIR/packaging/console/set_admin_password.py" --env-file "$DATA_DIR/.env" "$@"
+  # --status only reads; anything else changed .env, which the console reads at start.
+  case " $* " in *" --status "*) return 0 ;; esac
   if healthy || { use_systemd && systemctl --user is-active --quiet "$UNIT"; }; then
     cmd_stop >/dev/null
     cmd_start
