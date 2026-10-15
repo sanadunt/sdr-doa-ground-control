@@ -4,6 +4,7 @@ import type { Branding, TelemetrySnapshot, Tone } from '../types';
 import { REFRESH_INTERVALS_S, candidateErrors, deriveDataState, toneFor } from '../lib/telemetry';
 import { actionableGateReasons, doaStatusTextKey, overviewDoaStatus, rankGateReasons } from '../lib/doaStatus';
 import { shortcutAction } from '../lib/shortcuts';
+import { THEME_STORAGE_KEY, readPreference, writePreference } from '../lib/preferenceStore';
 import { LANGS, gateReasonLabel, useI18n } from '../lib/i18n';
 import type { MessageKey, Translate } from '../lib/i18n';
 import { Icon } from './ui';
@@ -210,12 +211,11 @@ export function ConsoleShell({
   }, []);
 
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
-    try { return localStorage.getItem('sdr-console-theme') === 'light' ? 'light' : 'dark'; }
-    catch { return 'dark'; }
+    return readPreference(THEME_STORAGE_KEY) === 'light' ? 'light' : 'dark';
   });
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    try { localStorage.setItem('sdr-console-theme', theme); } catch { /* Storage may be disabled. */ }
+    writePreference(THEME_STORAGE_KEY, theme);
     window.dispatchEvent(new Event('console-theme-change'));
   }, [theme]);
 
