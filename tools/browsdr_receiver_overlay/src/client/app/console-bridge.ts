@@ -585,6 +585,8 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 			env.clearTimeout(markersTimer);
 			markersTimer = null;
 		}
+		// A change Vue has not reported to the watcher yet (a hello in between) still gets its own rev.
+		noteMarkers();
 		const records = (app.records ?? {}) as Record<string, unknown>;
 		const shift = frequencyShiftHz();
 		lastMarkersAt = env.monotonicNow();

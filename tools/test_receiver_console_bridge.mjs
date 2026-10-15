@@ -2186,7 +2186,7 @@ test('markersForConsole sends displayed Hz in frequency order, names unlabeled m
 });
 
 test('the bridge sends the marker list on install and with every console hello', async t => {
-	const { frame, app, messages } = setup(t);
+	const { frame, app, clock, flushWatchers, messages } = setup(t);
 	const [first] = messages('receiver:markers');
 	assert.deepEqual(first, {
 		ch: BRIDGE_CHANNEL, v: 1, type: 'receiver:markers', rev: 0, setId: null, setName: null, frequencyShiftHz: 0, markers: [], total: 0, truncated: false,
@@ -2197,6 +2197,11 @@ test('the bridge sends the marker list on install and with every console hello',
 	const second = messages('receiver:markers').at(-1);
 	assert.equal(messages('receiver:markers').length, 2);
 	assert.deepEqual([second.setId, second.setName], ['set-1', 'Pita UHF']);
+	assert.equal(second.rev, 1, 'a change the watcher has not seen yet still counts as a new rev');
+	// The watcher then finds nothing new to send.
+	flushWatchers();
+	clock.advance(MARKERS_THROTTLE_MS * 2);
+	assert.equal(messages('receiver:markers').length, 2);
 });
 
 test('marker-add marks in displayed Hz, saves to the selected set and answers after the list that shows it', async t => {
