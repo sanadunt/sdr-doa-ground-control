@@ -9,6 +9,7 @@ import { DEFAULT_CONSOLE_CONFIG } from '../lib/telemetry';
 import {
   activeSection,
   adminErrorKey,
+  atPageBottom,
   coordinateText,
   gpsErrorField,
   gpsInputErrorKey,
@@ -31,7 +32,7 @@ import type { Notice } from '../lib/errorNotice';
 import { useI18n } from '../lib/i18n';
 import type { MessageKey } from '../lib/i18n';
 import { Icon } from '../components/ui';
-import { Card, FileButton, FormField, KeyValueGrid, Page, PageGrid, PageHeader, PageNotice, Segmented, StatusChip, Tag } from '../components/page';
+import { Card, FileButton, FormField, KeyValueGrid, Page, PageGrid, PageHeader, PageNotice, PageStack, Segmented, StatusChip, Tag } from '../components/page';
 import type { KeyValueItem, PageTone } from '../components/page';
 // Styled by pages/configuration.css, which main.tsx loads with the entry (no CSS in lazy chunks).
 
@@ -51,8 +52,8 @@ const SOURCE_TONES: Record<SourceCode, PageTone> = { DATA_OUT: 'neutral', MANUAL
 
 const SECTIONS = [
   { id: 'connection-settings', label: 'config.nav.connection' },
-  { id: 'navigation-settings', label: 'config.nav.navigation' },
   { id: 'mqtt-settings', label: 'config.nav.mqtt' },
+  { id: 'navigation-settings', label: 'config.nav.navigation' },
   { id: 'branding-settings', label: 'config.nav.branding' },
   { id: 'dry-run-settings', label: 'config.nav.dryRun' },
 ] as const satisfies ReadonlyArray<{ id: string; label: MessageKey }>;
@@ -281,8 +282,7 @@ export function ConfigurationPage({
         if (!element) return;
         sections.push({ id: section.id, top: element.getBoundingClientRect().top });
       }
-      const root = document.documentElement;
-      const atBottom = window.innerHeight + window.scrollY >= root.scrollHeight - 2;
+      const atBottom = atPageBottom(window.innerHeight, window.scrollY, document.documentElement.scrollHeight);
       const next = activeSection(sections, stickyOffset(indexRef.current?.closest('.pg-bar') ?? null), atBottom, preferredSection.current);
       if (next) setCurrentSection(next as SectionId);
     };
@@ -667,142 +667,147 @@ export function ConfigurationPage({
         )}
       />
       <PageGrid className="cfg-grid">
-        <Card id="connection-settings" span={6} className="cfg-section cfg-wide-md" bodyClassName="cfg-conn-body" title={t('config.connectionTitle')}>
-          <form className="cfg-form cfg-conn-form" noValidate onSubmit={submitWith(() => { if (!busy) void saveConnection(); })}>
-            <FormField label={t('config.baseUrl')} mono error={fieldError(connectionErrors.baseUrl)} className={changedClass(changed.baseUrl)}>
-              <input type="text" inputMode="url" list={`${ids}-data-out`} value={connection.base_url} placeholder={DATA_OUT_URLS[0]} title={DATA_OUT_HOSTS} spellCheck={false} autoComplete="off" onChange={(event) => editConnection({ base_url: event.target.value }, 'baseUrl')} />
-            </FormField>
-            <datalist id={`${ids}-data-out`}>{DATA_OUT_URLS.map((url) => <option key={url} value={url} />)}</datalist>
-            <div className="cfg-group">
-              <span className="pg-field-label" aria-hidden="true">{refreshLabel}</span>
-              <Segmented
-                label={refreshLabel}
-                className={changedClass(changed.refresh)}
-                options={refreshOptions.map((seconds) => ({ value: seconds, label: seconds === 0 ? t('shell.refreshManual') : t('common.durationS', { value: seconds }) }))}
-                value={Number(connection.refresh_seconds)}
-                onChange={(seconds) => editConnection({ refresh_seconds: seconds }, 'refresh')}
-              />
-              {connectionErrors.refresh ? <span className="pg-field-error" role="alert">{fieldError(connectionErrors.refresh)}</span> : null}
-              {refreshWarning ? <span className="cfg-warn" role="status">{t(refreshWarning)}</span> : null}
-            </div>
-            <div className="cfg-actions">
-              <button className={primaryWhen(connectionDirty)} type="submit" disabled={busy !== null} aria-busy={busy === 'connection' || undefined}>{t('config.save')}</button>
-              <ResultLine result={connectionResult} />
-            </div>
-          </form>
-        </Card>
-
-        <Card id="navigation-settings" span={6} className="cfg-section cfg-wide-md" bodyClassName="cfg-nav-body" title={t('config.navTitle')}>
-          <div className="cfg-split">
-            <form className="cfg-sub" noValidate aria-labelledby={`${ids}-gps`} onSubmit={submitWith(applyGpsConfig)}>
-              <div className="cfg-sub-head">
-                <h3 id={`${ids}-gps`} className="cfg-sub-title">{t('config.gpsTitle')}</h3>
-                <Tag tone={SOURCE_TONES[gpsConfig.source]}>{gpsConfig.source}</Tag>
-              </div>
-              <Segmented label={t('config.gpsSource')} className={changedClass(changed.gpsSource)} options={sourceOptions} value={gpsSource} onChange={(source) => { setGpsSource(source); setGpsErrors({}); setGpsResult(null); }} />
-              <div className="cfg-pair">
-                <FormField label={t('config.manualLat')} unit="°" error={fieldError(gpsErrors.lat)} className={changedClass(changed.lat)}>
-                  <input type="number" inputMode="decimal" value={manualLatitude} min={-90} max={90} step={0.000001} placeholder="−90…90" disabled={gpsSource !== 'MANUAL'} onChange={(event) => { setManualLatitude(event.target.value); setGpsErrors({}); setGpsResult(null); }} />
-                </FormField>
-                <FormField label={t('config.manualLon')} unit="°" error={fieldError(gpsErrors.lon)} className={changedClass(changed.lon)}>
-                  <input type="number" inputMode="decimal" value={manualLongitude} min={-180} max={180} step={0.000001} placeholder="−180…180" disabled={gpsSource !== 'MANUAL'} onChange={(event) => { setManualLongitude(event.target.value); setGpsErrors({}); setGpsResult(null); }} />
-                </FormField>
-              </div>
-              <KeyValueGrid columns={1} items={[{ id: 'fallback', label: t('config.sourceFallback'), value: `${DEFAULT_FALLBACK_COORDINATE.latitude.toFixed(6)}, ${DEFAULT_FALLBACK_COORDINATE.longitude.toFixed(6)}` }]} />
-              <div className="cfg-actions">
-                <button className={primaryWhen(gpsDirty)} type="submit" aria-label={t('config.applyGps')}>{t('config.apply')}</button>
-                <button className="ov-icon-button is-bordered" type="button" aria-label={t('config.restoreGpsDefaults')} title={t('config.restoreGpsDefaults')} onClick={restoreGpsDefaults}><Icon name="reset" /></button>
-                <ResultLine result={gpsResult} />
-              </div>
-            </form>
-            <form className="cfg-sub" noValidate aria-labelledby={`${ids}-compass`} onSubmit={submitWith(applyCompassConfig)}>
-              <div className="cfg-sub-head">
-                <h3 id={`${ids}-compass`} className="cfg-sub-title">{t('config.compassTitle')}</h3>
-                <Tag tone={SOURCE_TONES[compassConfig.source]}>{compassConfig.source}</Tag>
-              </div>
-              <Segmented label={t('config.compassSource')} className={changedClass(changed.compassSource)} options={sourceOptions} value={compassSource} onChange={(source) => { setCompassSource(source); setCompassResult(null); }} />
-              <div className="cfg-pair">
-                <div className="cfg-group">
-                  <span className="pg-field-label" aria-hidden="true">{axisLabel}</span>
-                  <Segmented label={axisLabel} className={changedClass(changed.axis)} options={[{ value: 'Compass' as const, label: t('polarDock.viewCompass') }, { value: 'Polar' as const, label: t('polarDock.viewPolar') }]} value={manualAxis} onChange={(axis) => { setManualAxis(axis); setCompassResult(null); }} />
-                </div>
-                <FormField label={t('config.manualOffset')} unit="°" error={fieldError(compassError)} className={changedClass(changed.offset)}>
-                  <input type="number" inputMode="decimal" value={manualOffset} min={-MAX_COMPASS_OFFSET_DEG} max={MAX_COMPASS_OFFSET_DEG} step={0.1} onChange={(event) => { setManualOffset(event.target.value); setCompassError(null); setCompassResult(null); }} />
-                </FormField>
-              </div>
-              <div className="cfg-actions">
-                <button className={primaryWhen(compassDirty)} type="submit" aria-label={t('config.applyCompass')}>{t('config.apply')}</button>
-                <button className="ov-icon-button is-bordered" type="button" aria-label={t('config.restoreCompassDefaults')} title={t('config.restoreCompassDefaults')} onClick={restoreCompassDefaults}><Icon name="reset" /></button>
-                <ResultLine result={compassResult} />
-              </div>
-            </form>
-          </div>
-        </Card>
-
-        <Card id="mqtt-settings" span={6} className="cfg-section" title={t('config.mqttTitle')} chip={<StatusChip code={mqttCode} tone={connectionTone(mqttCode)} title={mqttTitle} />}>
-          <form className="cfg-form" noValidate onSubmit={submitWith(() => { if (!busy) void saveMqtt(); })}>
-            <div className="cfg-row">
-              <FormField label={t('config.mqttHost')} mono className={['cfg-grow', changedClass(changed.host)].filter(Boolean).join(' ')} error={fieldError(mqttErrors.host)}>
-                <input type="text" value={connection.mqtt_host} placeholder={t('config.mqttHostPlaceholder')} spellCheck={false} autoComplete="off" onChange={(event) => editMqtt({ mqtt_host: event.target.value }, 'host')} />
+        {/* Two columns of content-height cards (Data Out and MQTT; GPS & Compass and Branding), so no card stretches to its neighbour's height. */}
+        <PageStack span={6}>
+          <Card id="connection-settings" span={6} className="cfg-section" bodyClassName="cfg-conn-body" title={t('config.connectionTitle')}>
+            <form className="cfg-form cfg-conn-form" noValidate onSubmit={submitWith(() => { if (!busy) void saveConnection(); })}>
+              <FormField label={t('config.baseUrl')} mono error={fieldError(connectionErrors.baseUrl)} className={changedClass(changed.baseUrl)}>
+                <input type="text" inputMode="url" list={`${ids}-data-out`} value={connection.base_url} placeholder={DATA_OUT_URLS[0]} title={DATA_OUT_HOSTS} spellCheck={false} autoComplete="off" onChange={(event) => editConnection({ base_url: event.target.value }, 'baseUrl')} />
               </FormField>
-              <FormField label={t('config.mqttPort')} size="sm" error={fieldError(mqttErrors.port)} className={changedClass(changed.port)}>
-                <input type="number" inputMode="numeric" value={mqttPortDraft} min={1} max={65535} step={1} onChange={(event) => { setMqttPortDraft(event.target.value); setMqttErrors((errors) => ({ ...errors, port: undefined })); setMqttResult(null); }} />
-              </FormField>
-            </div>
-            <div className="cfg-row">
+              <datalist id={`${ids}-data-out`}>{DATA_OUT_URLS.map((url) => <option key={url} value={url} />)}</datalist>
               <div className="cfg-group">
-                <span className="pg-field-label" aria-hidden="true">{transportLabel}</span>
-                <Segmented label={transportLabel} className={changedClass(changed.transport)} options={[{ value: 'websockets' as const, label: t('config.mqttTransportWs') }, { value: 'tcp' as const, label: t('config.mqttTransportTcp') }]} value={transport} onChange={(next) => editMqtt({ mqtt_transport: next }, 'wsPath')} />
+                <span className="pg-field-label" aria-hidden="true">{refreshLabel}</span>
+                <Segmented
+                  label={refreshLabel}
+                  className={changedClass(changed.refresh)}
+                  options={refreshOptions.map((seconds) => ({ value: seconds, label: seconds === 0 ? t('shell.refreshManual') : t('common.durationS', { value: seconds }) }))}
+                  value={Number(connection.refresh_seconds)}
+                  onChange={(seconds) => editConnection({ refresh_seconds: seconds }, 'refresh')}
+                />
+                {connectionErrors.refresh ? <span className="pg-field-error" role="alert">{fieldError(connectionErrors.refresh)}</span> : null}
+                {refreshWarning ? <span className="cfg-warn" role="status">{t(refreshWarning)}</span> : null}
               </div>
-              <FormField label={t('config.mqttWsPath')} size="sm" mono error={fieldError(mqttErrors.wsPath)} className={changedClass(changed.wsPath)}>
-                <input type="text" value={wsPath} spellCheck={false} autoComplete="off" disabled={transport !== 'websockets'} onChange={(event) => editMqtt({ mqtt_ws_path: event.target.value }, 'wsPath')} />
-              </FormField>
-            </div>
-            {noTls ? <PageNotice tone="warn" title="NO TLS">{t('config.mqttNoCredentials')}</PageNotice> : null}
-            <div className="cfg-actions">
-              <button className={primaryWhen(mqttDirty)} type="submit" disabled={busy !== null} aria-busy={busy === 'mqtt' || undefined}>{t('config.save')}</button>
-              <button className="ov-button" type="button" disabled={busy !== null || !savedHost} aria-busy={busy === 'reconnect' || undefined} onClick={() => { void reconnect(); }}>{t('config.reconnect')}</button>
-              <ResultLine result={mqttResult} />
-            </div>
-          </form>
-        </Card>
-
-        <Card id="branding-settings" span={6} className="cfg-section" title={t('config.brandingTitle')} chip={<StatusChip code={adminCode} tone={adminTone} />}>
-          {capabilities?.adminDefaultPassword ? <PageNotice tone="warn" title="DEFAULT PASSWORD">{t('control.defaultPassword')}</PageNotice> : null}
-          {adminReadError && !adminAuthenticated ? <PageNotice tone="warn" title="ADMIN">{noticeText(t, adminReadError)}</PageNotice> : null}
-          {adminDisabled ? <PageNotice tone="warn" title="DISABLED">{t('config.adminDisabled')}</PageNotice> : null}
-          {!adminAuthenticated ? (
-            <form className="cfg-form" noValidate onSubmit={submitWith(() => { if (!busy) void signIn(); })}>
-              <FormField label={t('config.password')} size="md" error={fieldError(passwordError)}>
-                <input type="password" value={password} disabled={adminDisabled} autoComplete="current-password" onChange={(event) => { setPassword(event.target.value); setPasswordError(null); }} />
-              </FormField>
               <div className="cfg-actions">
-                <button className="ov-button is-primary" type="submit" disabled={busy !== null || !password || adminDisabled} aria-busy={busy === 'login' || undefined}>{t('config.unlock')}</button>
+                <button className={primaryWhen(connectionDirty)} type="submit" disabled={busy !== null} aria-busy={busy === 'connection' || undefined}>{t('config.save')}</button>
+                <ResultLine result={connectionResult} />
               </div>
             </form>
-          ) : (
-            <form className="cfg-form" noValidate onSubmit={submitWith(() => { if (!busy) void persistBranding(); })}>
-              <div className="cfg-brand">
-                <div className="cfg-logo">{selectedLogo ? <img src={selectedLogo} alt={t('config.logoPreview')} /> : <span>{t('config.noLogo')}</span>}</div>
-                <div className="cfg-brand-fields">
-                  <FormField label={t('config.appName')} className={changedClass(changed.appName)}>
-                    <input type="text" value={brandName} maxLength={60} autoComplete="off" onChange={(event) => { setBrandName(event.target.value); setBrandResult(null); }} />
+          </Card>
+
+          <Card id="mqtt-settings" span={6} className="cfg-section" title={t('config.mqttTitle')} chip={<StatusChip code={mqttCode} tone={connectionTone(mqttCode)} title={mqttTitle} />}>
+            <form className="cfg-form" noValidate onSubmit={submitWith(() => { if (!busy) void saveMqtt(); })}>
+              <div className="cfg-row">
+                <FormField label={t('config.mqttHost')} mono className={['cfg-grow', changedClass(changed.host)].filter(Boolean).join(' ')} error={fieldError(mqttErrors.host)}>
+                  <input type="text" value={connection.mqtt_host} placeholder={t('config.mqttHostPlaceholder')} spellCheck={false} autoComplete="off" onChange={(event) => editMqtt({ mqtt_host: event.target.value }, 'host')} />
+                </FormField>
+                <FormField label={t('config.mqttPort')} size="sm" error={fieldError(mqttErrors.port)} className={changedClass(changed.port)}>
+                  <input type="number" inputMode="numeric" value={mqttPortDraft} min={1} max={65535} step={1} onChange={(event) => { setMqttPortDraft(event.target.value); setMqttErrors((errors) => ({ ...errors, port: undefined })); setMqttResult(null); }} />
+                </FormField>
+              </div>
+              <div className="cfg-row">
+                <div className="cfg-group">
+                  <span className="pg-field-label" aria-hidden="true">{transportLabel}</span>
+                  <Segmented label={transportLabel} className={changedClass(changed.transport)} options={[{ value: 'websockets' as const, label: t('config.mqttTransportWs') }, { value: 'tcp' as const, label: t('config.mqttTransportTcp') }]} value={transport} onChange={(next) => editMqtt({ mqtt_transport: next }, 'wsPath')} />
+                </div>
+                <FormField label={t('config.mqttWsPath')} size="sm" mono error={fieldError(mqttErrors.wsPath)} className={changedClass(changed.wsPath)}>
+                  <input type="text" value={wsPath} spellCheck={false} autoComplete="off" disabled={transport !== 'websockets'} onChange={(event) => editMqtt({ mqtt_ws_path: event.target.value }, 'wsPath')} />
+                </FormField>
+              </div>
+              {noTls ? <PageNotice tone="warn" title="NO TLS">{t('config.mqttNoCredentials')}</PageNotice> : null}
+              <div className="cfg-actions">
+                <button className={primaryWhen(mqttDirty)} type="submit" disabled={busy !== null} aria-busy={busy === 'mqtt' || undefined}>{t('config.save')}</button>
+                <button className="ov-button" type="button" disabled={busy !== null || !savedHost} aria-busy={busy === 'reconnect' || undefined} onClick={() => { void reconnect(); }}>{t('config.reconnect')}</button>
+                <ResultLine result={mqttResult} />
+              </div>
+            </form>
+          </Card>
+        </PageStack>
+
+        <PageStack span={6}>
+          <Card id="navigation-settings" className="cfg-section" bodyClassName="cfg-nav-body" title={t('config.navTitle')}>
+            <div className="cfg-split">
+              <form className="cfg-sub" noValidate aria-labelledby={`${ids}-gps`} onSubmit={submitWith(applyGpsConfig)}>
+                <div className="cfg-sub-head">
+                  <h3 id={`${ids}-gps`} className="cfg-sub-title">{t('config.gpsTitle')}</h3>
+                  <Tag tone={SOURCE_TONES[gpsConfig.source]}>{gpsConfig.source}</Tag>
+                </div>
+                <Segmented label={t('config.gpsSource')} className={changedClass(changed.gpsSource)} options={sourceOptions} value={gpsSource} onChange={(source) => { setGpsSource(source); setGpsErrors({}); setGpsResult(null); }} />
+                <div className="cfg-pair">
+                  <FormField label={t('config.manualLat')} unit="°" error={fieldError(gpsErrors.lat)} className={changedClass(changed.lat)}>
+                    <input type="number" inputMode="decimal" value={manualLatitude} min={-90} max={90} step={0.000001} placeholder="−90…90" disabled={gpsSource !== 'MANUAL'} onChange={(event) => { setManualLatitude(event.target.value); setGpsErrors({}); setGpsResult(null); }} />
                   </FormField>
-                  <div className="cfg-group" role="group" aria-label={t('config.logo')}>
-                    <span className="pg-field-label" aria-hidden="true">{t('config.logo')}</span>
-                    <FileButton label={t('config.choosePng')} accept="image/png" fileName={logoFileName ?? (pendingLogo === '' ? '—' : null)} placeholder={t('config.logoLimits')} disabled={busy !== null} onChange={chooseLogo} />
+                  <FormField label={t('config.manualLon')} unit="°" error={fieldError(gpsErrors.lon)} className={changedClass(changed.lon)}>
+                    <input type="number" inputMode="decimal" value={manualLongitude} min={-180} max={180} step={0.000001} placeholder="−180…180" disabled={gpsSource !== 'MANUAL'} onChange={(event) => { setManualLongitude(event.target.value); setGpsErrors({}); setGpsResult(null); }} />
+                  </FormField>
+                </div>
+                <KeyValueGrid columns={1} items={[{ id: 'fallback', label: t('config.sourceFallback'), value: `${DEFAULT_FALLBACK_COORDINATE.latitude.toFixed(6)}, ${DEFAULT_FALLBACK_COORDINATE.longitude.toFixed(6)}` }]} />
+                <div className="cfg-actions">
+                  <button className={primaryWhen(gpsDirty)} type="submit" aria-label={t('config.applyGps')}>{t('config.apply')}</button>
+                  <button className="ov-icon-button is-bordered" type="button" aria-label={t('config.restoreGpsDefaults')} title={t('config.restoreGpsDefaults')} onClick={restoreGpsDefaults}><Icon name="reset" /></button>
+                  <ResultLine result={gpsResult} />
+                </div>
+              </form>
+              <form className="cfg-sub" noValidate aria-labelledby={`${ids}-compass`} onSubmit={submitWith(applyCompassConfig)}>
+                <div className="cfg-sub-head">
+                  <h3 id={`${ids}-compass`} className="cfg-sub-title">{t('config.compassTitle')}</h3>
+                  <Tag tone={SOURCE_TONES[compassConfig.source]}>{compassConfig.source}</Tag>
+                </div>
+                <Segmented label={t('config.compassSource')} className={changedClass(changed.compassSource)} options={sourceOptions} value={compassSource} onChange={(source) => { setCompassSource(source); setCompassResult(null); }} />
+                <div className="cfg-pair">
+                  <div className="cfg-group">
+                    <span className="pg-field-label" aria-hidden="true">{axisLabel}</span>
+                    <Segmented label={axisLabel} className={changedClass(changed.axis)} options={[{ value: 'Compass' as const, label: t('polarDock.viewCompass') }, { value: 'Polar' as const, label: t('polarDock.viewPolar') }]} value={manualAxis} onChange={(axis) => { setManualAxis(axis); setCompassResult(null); }} />
+                  </div>
+                  <FormField label={t('config.manualOffset')} unit="°" error={fieldError(compassError)} className={changedClass(changed.offset)}>
+                    <input type="number" inputMode="decimal" value={manualOffset} min={-MAX_COMPASS_OFFSET_DEG} max={MAX_COMPASS_OFFSET_DEG} step={0.1} onChange={(event) => { setManualOffset(event.target.value); setCompassError(null); setCompassResult(null); }} />
+                  </FormField>
+                </div>
+                <div className="cfg-actions">
+                  <button className={primaryWhen(compassDirty)} type="submit" aria-label={t('config.applyCompass')}>{t('config.apply')}</button>
+                  <button className="ov-icon-button is-bordered" type="button" aria-label={t('config.restoreCompassDefaults')} title={t('config.restoreCompassDefaults')} onClick={restoreCompassDefaults}><Icon name="reset" /></button>
+                  <ResultLine result={compassResult} />
+                </div>
+              </form>
+            </div>
+          </Card>
+
+          <Card id="branding-settings" className="cfg-section" title={t('config.brandingTitle')} chip={<StatusChip code={adminCode} tone={adminTone} />}>
+            {capabilities?.adminDefaultPassword ? <PageNotice tone="warn" title="DEFAULT PASSWORD">{t('control.defaultPassword')}</PageNotice> : null}
+            {adminReadError && !adminAuthenticated ? <PageNotice tone="warn" title="ADMIN">{noticeText(t, adminReadError)}</PageNotice> : null}
+            {adminDisabled ? <PageNotice tone="warn" title="DISABLED">{t('config.adminDisabled')}</PageNotice> : null}
+            {!adminAuthenticated ? (
+              <form className="cfg-form" noValidate onSubmit={submitWith(() => { if (!busy) void signIn(); })}>
+                <FormField label={t('config.password')} size="md" error={fieldError(passwordError)}>
+                  <input type="password" value={password} disabled={adminDisabled} autoComplete="current-password" onChange={(event) => { setPassword(event.target.value); setPasswordError(null); }} />
+                </FormField>
+                <div className="cfg-actions">
+                  <button className="ov-button is-primary" type="submit" disabled={busy !== null || !password || adminDisabled} aria-busy={busy === 'login' || undefined}>{t('config.unlock')}</button>
+                </div>
+              </form>
+            ) : (
+              <form className="cfg-form" noValidate onSubmit={submitWith(() => { if (!busy) void persistBranding(); })}>
+                <div className="cfg-brand">
+                  <div className="cfg-logo">{selectedLogo ? <img src={selectedLogo} alt={t('config.logoPreview')} /> : <span>{t('config.noLogo')}</span>}</div>
+                  <div className="cfg-brand-fields">
+                    <FormField label={t('config.appName')} className={changedClass(changed.appName)}>
+                      <input type="text" value={brandName} maxLength={60} autoComplete="off" onChange={(event) => { setBrandName(event.target.value); setBrandResult(null); }} />
+                    </FormField>
+                    <div className="cfg-group" role="group" aria-label={t('config.logo')}>
+                      <span className="pg-field-label" aria-hidden="true">{t('config.logo')}</span>
+                      <FileButton label={t('config.choosePng')} accept="image/png" fileName={logoFileName ?? (pendingLogo === '' ? '—' : null)} placeholder={t('config.logoLimits')} disabled={busy !== null} onChange={chooseLogo} />
+                    </div>
                   </div>
                 </div>
-              </div>
-              <div className="cfg-actions">
-                <button className={primaryWhen(brandingDirty)} type="submit" disabled={busy !== null} aria-busy={busy === 'branding' || undefined}>{t('config.save')}</button>
-                <button className="ov-button" type="button" disabled={busy !== null || selectedLogo === ''} onClick={() => { setPendingLogo(''); setLogoFileName(null); setBrandResult({ code: 'STAGED', tone: 'warn', message: { key: 'config.logoRemoval' } }); }}>{t('config.resetLogo')}</button>
-                <button className="ov-button tone-bad" type="button" disabled={busy !== null} aria-busy={busy === 'logout' || undefined} onClick={() => { void signOut(); }}>{t('config.closeAdmin')}</button>
-                <ResultLine result={brandResult} />
-              </div>
-            </form>
-          )}
-        </Card>
+                <div className="cfg-actions">
+                  <button className={primaryWhen(brandingDirty)} type="submit" disabled={busy !== null} aria-busy={busy === 'branding' || undefined}>{t('config.save')}</button>
+                  <button className="ov-button" type="button" disabled={busy !== null || selectedLogo === ''} onClick={() => { setPendingLogo(''); setLogoFileName(null); setBrandResult({ code: 'STAGED', tone: 'warn', message: { key: 'config.logoRemoval' } }); }}>{t('config.resetLogo')}</button>
+                  <button className="ov-button tone-bad" type="button" disabled={busy !== null} aria-busy={busy === 'logout' || undefined} onClick={() => { void signOut(); }}>{t('config.closeAdmin')}</button>
+                  <ResultLine result={brandResult} />
+                </div>
+              </form>
+            )}
+          </Card>
+        </PageStack>
 
         <Card id="dry-run-settings" span={12} className="cfg-section" title={t('config.dryRunTitle')} chip={<Tag>DRY-RUN</Tag>}>
           <form className="cfg-form" noValidate onSubmit={submitWith(() => { if (!busy) void runDryRun(); })}>

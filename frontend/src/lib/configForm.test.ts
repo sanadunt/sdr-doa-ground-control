@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError, normalizeCapabilities } from '../api';
-import { activeSection, adminErrorKey, coordinateText, gpsErrorField, gpsInputErrorKey, isLoopbackHost, mergeSavedConfigIntoDraft, normalizeConnectionDraft, parseBaseRevision, parseDryRunChanges, patchKeyUnit, refreshIntervalOptions, refreshWarningKey, summarizeDryRun } from './configForm';
+import { activeSection, adminErrorKey, atPageBottom, coordinateText, gpsErrorField, gpsInputErrorKey, isLoopbackHost, mergeSavedConfigIntoDraft, normalizeConnectionDraft, parseBaseRevision, parseDryRunChanges, patchKeyUnit, refreshIntervalOptions, refreshWarningKey, summarizeDryRun } from './configForm';
 import { manualGpsOverrideFromInput } from './map';
 import type { ConsoleConfig } from '../types';
 
@@ -179,6 +179,15 @@ describe('Configuration page helpers', () => {
     expect(activeSection(sections, 120, true)).toBe('dry-run');
     expect(activeSection(sections, 120, true, 'branding')).toBe('branding');
     expect(activeSection(sections, 120, true, 'connection')).toBe('dry-run');
+  });
+
+  it('counts the end of a scrolling page as its bottom, never a page that fits the viewport', () => {
+    expect(atPageBottom(900, 48, 948)).toBe(true);
+    expect(atPageBottom(900, 47, 948)).toBe(true);
+    expect(atPageBottom(900, 0, 948)).toBe(false);
+    // The two-column layout fits 1440 × 900: the index keeps the first section instead of jumping to Dry-run.
+    expect(atPageBottom(900, 0, 900)).toBe(false);
+    expect(atPageBottom(900, 0, 640)).toBe(false);
   });
 
   it('summarizes a dry-run response and leaves malformed parts out', () => {

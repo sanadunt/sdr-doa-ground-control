@@ -460,11 +460,12 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 
 ### Konfigurasi
 
+- Kartu tersusun dalam dua kolom setinggi isinya masing-masing: **Koneksi & refresh** dan **Monitor MQTT** di kiri, **GPS & Kompas** dan **Branding & admin** di kanan, lalu **Patch dry-run** selebar halaman. Bilah bagian (Koneksi, MQTT, GPS & Kompas, Branding, Dry-run) mengikuti urutan itu. Pada lebar 1024–1279 px Koneksi dan MQTT berdampingan dan kartu lain selebar halaman; di bawah 1024 px semua kartu satu kolom dengan urutan yang sama.
 - Enter di bagian mana pun men-submit bagian itu.
 - URL Data Out disimpan tanpa garis miring di akhir. Port MQTT harus bilangan bulat 1–65535.
 - **Transport MQTT** (WebSocket default, atau TCP) harus sama dengan listener broker. **Path WebSocket** (default `/mqtt`) hanya dipakai dengan WebSocket. Mengubah host, port, transport, atau path me-restart monitor dan mereset penghitungnya.
-- Dry-run config patch mewajibkan **Base config revision**, yaitu `config_rev` terakhir yang dilaporkan node. Dry-run hanya pratinjau dan tidak mengirim apa pun; perubahan nyata dikirim lewat Kontrol di Dashboard.
-- Login admin di sini juga membuka Kontrol di Dashboard (sesi yang sama, 30 menit). Kotak **Publish MQTT** bernilai HANYA ADMIN.
+- Dry-run config patch mewajibkan **Revisi konfigurasi dasar** (Base config revision), yaitu `config_rev` terakhir yang dilaporkan node. Dry-run hanya pratinjau dan tidak mengirim apa pun; perubahan nyata dikirim lewat Kontrol di Dashboard.
+- Login admin di sini juga membuka Kontrol di Dashboard (sesi yang sama, 30 menit). Chip **PATCH** di bilah halaman bernilai `ADMIN ONLY`.
 - Logo PNG boleh grayscale, RGB, RGBA, atau palette, 8/16-bit, interlaced, maksimal 256 KiB dan 4096 × 4096 px. Logo diperiksa di browser sebelum di-stage.
 - Pilihan sumber GPS dan Compass disimpan di console dan dipulihkan setelah reload, di browser lain, dan setelah console di-restart. Masing-masing punya tombol restore default sendiri. Offset kompas manual berkisar −360 sampai 360, dan juga bisa diatur dari **Polar → Atur** di Dashboard.
 - Bila konfigurasi console tidak bisa dibaca, halaman menampilkan "Konfigurasi console tidak tersedia … Dicoba ulang otomatis" tanpa form. Console mencoba lagi sendiri (1, 2, 4, 8, lalu setiap 15 detik).
