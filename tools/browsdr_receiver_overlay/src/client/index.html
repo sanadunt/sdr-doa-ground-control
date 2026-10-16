@@ -942,11 +942,11 @@
 							</thead>
 							<tbody>
 								<tr v-for="record in records.audioItems" :key="record.id">
-									<td>
+									<td :data-label="t('Started')">
 										<time :datetime="record.created_at">{{ new Date(record.created_at).toLocaleString(uiLanguage === 'id' ? 'id-ID' : 'en-GB', { hourCycle: 'h23' }) }}</time>
 										<span class="record-meta">{{ record.segments.length }} {{ t(record.segments.length === 1 ? 'segment' : 'segments') }} · <span :class="{ 'record-recording': !record.completed_at }">{{ t(record.completed_at ? 'finalized' : 'recording in progress') }}</span></span>
 									</td>
-									<td>
+									<td :data-label="t('Audio segments')">
 										<div class="records-audio-segments" v-if="record.segments.length">
 											<div class="audio-record-segment" v-for="segment in record.segments" :key="segment.id">
 												<div class="audio-record-segment-details">

@@ -5449,12 +5449,28 @@ input[type='range'] {
 	background: transparent;
 }
 
+/* Labels are one 16 px line, 4 px above their field, as in the console's forms; the
+   time and frequency pairs keep the grid's 12 px column gap. */
 .records-audio-filters label,
 .records-audio-filters .audio-filter-fieldset legend,
 .records-audio-filters .audio-date-picker summary {
 	color: var(--text-soft);
 	font-size: 12px;
 	font-weight: 400;
+	line-height: 16px;
+}
+
+.records-audio-filters .audio-filter-fieldset legend {
+	margin-bottom: 4px;
+}
+
+.records-audio-filters .audio-filter-fieldset label,
+.records-audio-filters .audio-filter-select {
+	gap: 4px;
+}
+
+.audio-filter-pair {
+	gap: 12px;
 }
 
 .records-audio-filters input,
@@ -5478,7 +5494,7 @@ input[type='range'] {
 
 .audio-date-picker > summary strong {
 	font-size: 13px;
-	font-weight: 600;
+	font-weight: 400;
 }
 
 .records-audio-filters {
@@ -5492,7 +5508,7 @@ input[type='range'] {
 /* The date field reads like the others: label above, value in the box. */
 .audio-date-picker > summary {
 	position: relative;
-	margin-top: 21px;
+	margin-top: 20px;
 	list-style: none;
 }
 
@@ -5500,6 +5516,7 @@ input[type='range'] {
 	display: none;
 }
 
+/* 4 px above the field like the other labels: the offset counts from inside the 1 px border. */
 .audio-date-picker > summary > span {
 	position: absolute;
 	bottom: calc(100% + 5px);
@@ -5568,6 +5585,22 @@ input[type='range'] {
 
 .audio-record-segment .audio-record-delete-button {
 	min-height: 36px;
+}
+
+/* A session's start, its first segment and its Delete session share the top line, and the
+   start reads like the Started column of the scans above. */
+.records-audio-table td {
+	vertical-align: top;
+}
+
+.records-audio-table .audio-record-segment {
+	align-items: flex-start;
+}
+
+.records-audio-table td:first-child time {
+	color: var(--text-soft);
+	font: 400 12.5px var(--mono);
+	font-variant-numeric: tabular-nums;
 }
 
 .audio-recording-status {
@@ -5809,5 +5842,23 @@ input[type='range'] {
 
 	.sweep-candidates tbody tr.selected {
 		background: color-mix(in srgb, var(--signal) 12%, transparent);
+	}
+
+	/* VFO audio cards: the segments take the card's width under their label, left-aligned
+	   like their audio player and buttons. */
+	.records-audio-table .records-audio-segments,
+	.records-audio-table td > .records-empty {
+		flex: 1 0 100%;
+		min-width: 0;
+		text-align: left;
+	}
+
+	.records-audio-table .audio-record-segment {
+		align-items: stretch;
+	}
+
+	.records-audio-table td:first-child .record-meta {
+		flex: 1 0 100%;
+		margin-top: 0;
 	}
 }
