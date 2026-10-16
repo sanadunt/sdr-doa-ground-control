@@ -111,8 +111,13 @@ export interface SweepFrameLike {
 }
 
 export interface ConsoleBridge {
-	/** Called with every FFT frame the Listener draws. */
-	spectrum(data: ArrayLike<number>): void;
+	/**
+	 * Called with every FFT frame the Listener draws, with the device Hz the
+	 * worker took it at (worker/spectrum-tuning.ts): null while the radio
+	 * retunes or its smoothing settles, undefined when unknown (then the
+	 * Receiver's centre).
+	 */
+	spectrum(data: ArrayLike<number>, deviceHz?: number | null): void;
 	/** Called with every frame of a running wide scan (sweep.ts). */
 	sweepFrame(frame: SweepFrameLike): void;
 	/** Whether a fresh RX start unmutes VFO 1: false while a console start without listen runs. */
@@ -1354,12 +1359,17 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 	void refreshPairedCount();
 
 	return {
-		spectrum(data: ArrayLike<number>): void {
+		spectrum(data: ArrayLike<number>, deviceHz?: number | null): void {
 			if (disposed || !data || !data.length) return;
 			if (app.running && !app._rxRestarting) rxFrames++;
 			if (!subscription?.spectrum || !app.running) return;
+			// Taken while the radio retuned: it belongs to no one centre, so the dock keeps its last frame.
+			if (deviceHz === null) return;
 			if (!throttle.accept(env.monotonicNow())) return;
-			const centerHz = mhzToHz(app.radio?.centerFreq);
+			// The centre the stream was tuned to, in displayed Hz; the Receiver's centre moves before its
+			// debounced setFrequency reaches the radio.
+			const tunedHz = deviceHz === undefined ? null : finiteOrNull(deviceHz);
+			const centerHz = deviceHz === undefined ? mhzToHz(app.radio?.centerFreq) : tunedHz === null ? null : Math.round(tunedHz + frequencyShiftHz());
 			const sampleRateHz = finiteOrNull(app.radio?.sampleRate);
 			if (centerHz === null || sampleRateHz === null) return;
 			const cropped = cropSpectrum(data, centerHz, sampleRateHz, subscription.spanHz, subscription.bins);

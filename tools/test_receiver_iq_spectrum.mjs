@@ -71,3 +71,40 @@ test('DC correction removes a fractional offset instead of rounding it to whole 
 	assert.ok(corrected.centre < 3, `corrected DC bin ${corrected.centre.toFixed(1)} dB above the noise median`);
 	assert.ok(corrected.median - uncorrected.median < 0.3, 'the noise floor is essentially unchanged');
 });
+
+test('each spectrum frame carries the device frequency it was taken at, none while the radio retunes', async () => {
+	const { createSpectrumTuning, SPECTRUM_SETTLE_FRAMES } = await import('./browsdr_receiver_overlay/src/client/worker/spectrum-tuning.ts');
+	assert.equal(SPECTRUM_SETTLE_FRAMES, 3);
+	const tuning = createSpectrumTuning(433_920_000);
+	assert.equal(tuning.frameStamp(), 433_920_000, 'the stream starts tuned');
+	assert.equal(tuning.frameStamp(), 433_920_000);
+
+	const applied = tuning.retune();
+	assert.equal(tuning.frameStamp(), null, 'the radio is retuning');
+	applied(435_000_000);
+	// The next frames still blend the old tuning (the chunk in flight, then the 0.6 EMA).
+	for (let frame = 0; frame < SPECTRUM_SETTLE_FRAMES; frame++) assert.equal(tuning.frameStamp(), null, `settling frame ${frame}`);
+	assert.equal(tuning.frameStamp(), 435_000_000);
+
+	// Two retunes on the way: the first to finish does not stamp frames while the second still runs.
+	const first = tuning.retune();
+	const second = tuning.retune();
+	first(436_000_000);
+	assert.equal(tuning.frameStamp(), null);
+	second(437_000_000);
+	for (let frame = 0; frame < SPECTRUM_SETTLE_FRAMES; frame++) tuning.frameStamp();
+	assert.equal(tuning.frameStamp(), 437_000_000);
+
+	// A failed control transfer leaves the radio where it was, also when an earlier retune reached it later.
+	tuning.retune()(null);
+	assert.equal(tuning.frameStamp(), 437_000_000, 'no settling: nothing moved');
+	const reached = tuning.retune();
+	const refused = tuning.retune();
+	refused(null);
+	assert.equal(tuning.frameStamp(), null, 'the first one still runs');
+	reached(438_000_000);
+	for (let frame = 0; frame < SPECTRUM_SETTLE_FRAMES; frame++) assert.equal(tuning.frameStamp(), null);
+	assert.equal(tuning.frameStamp(), 438_000_000);
+	reached(439_000_000);
+	assert.equal(tuning.frameStamp(), 438_000_000, 'each retune finishes once');
+});

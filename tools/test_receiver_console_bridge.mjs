@@ -789,6 +789,37 @@ test('spectrum frames flow only while subscribed and running, cropped, throttled
 	assert.equal(messages('receiver:spectrum').length, 5, 'spectrum:false stops frames');
 });
 
+test('a spectrum frame carries the centre the stream was tuned to, not the one still on its way', async t => {
+	const { frame, app, bridge, clock, messages } = setup(t);
+	app.radio.centerFreq = 433.92;
+	app.running = true;
+	frame.send('console:subscribe', { id: 'sub-t', spectrum: true, fps: 10, bins: 256, spanHz: 2_000_000 });
+	const data = new Float32Array(65536).fill(-80);
+	data[32768] = -3;
+	// The Receiver debounces setFrequency: the centre already reads 435 MHz, the radio is still on 433.92 MHz.
+	app.radio.centerFreq = 435;
+	bridge.spectrum(data, 433_920_000);
+	let last = messages('receiver:spectrum').at(-1);
+	assert.equal(last.centerHz, 433_920_000, 'drawn at the frequencies it was taken at');
+	assert.ok(last.startHz < 433_920_000 && last.stopHz > 433_920_000);
+	assert.ok(last.stopHz < 435_000_000);
+	// While the radio retunes, and until its smoothing has settled, a frame belongs to neither tuning.
+	clock.advance(200);
+	bridge.spectrum(data, null);
+	assert.equal(messages('receiver:spectrum').length, 1, 'not sent');
+	bridge.spectrum(data, 435_000_000);
+	assert.equal(messages('receiver:spectrum').length, 2, 'a dropped frame does not use up the frame rate');
+	assert.equal(messages('receiver:spectrum').at(-1).centerHz, 435_000_000);
+	// The worker reports device Hz; with an upconverter the frame is in displayed Hz.
+	app.radio.frequencyShift = -125;
+	app.radio.centerFreq = 7;
+	clock.advance(200);
+	bridge.spectrum(data, 132_000_000);
+	last = messages('receiver:spectrum').at(-1);
+	assert.equal(last.centerHz, 7_000_000);
+	assert.ok(Math.abs(last.startHz - 6_000_000) < 1_000 && Math.abs(last.stopHz - 8_000_000) < 1_000);
+});
+
 // ---------------------------------------------------------------------------
 // Commands
 
