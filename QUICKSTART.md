@@ -678,8 +678,8 @@ Kontrol di console butuh edge agent di RDF-SDR: agent membaca Data Out KrakenSDR
 ```sh
 tar -xzf sdr-doa-rdf-sdr-agent-2.0.0.tar.gz
 cd sdr-doa-rdf-sdr-agent-2.0.0
-sudo sh install.sh --dry-run --mqtt-host 10.90.0.1    # lihat dulu apa yang akan dilakukan
-sudo sh install.sh --mqtt-host 10.90.0.1              # pasang dan start
+sudo sh install.sh --dry-run --mqtt-host 127.0.0.1    # lihat dulu apa yang akan dilakukan
+sudo sh install.sh --mqtt-host 127.0.0.1              # pasang dan start (broker di RDF-SDR sendiri)
 systemctl status sdr-doa-agent
 journalctl -u sdr-doa-agent -f
 ```
@@ -687,7 +687,7 @@ journalctl -u sdr-doa-agent -f
 - Agent berjalan sebagai service `sdr-doa-agent` (mulai saat boot, restart bila gagal) dengan user biasa: pemilik `settings.json` KrakenSDR, `doasdr`, atau user sistem baru `sdr-doa-agent`. Installer menolak user root.
 - Pengaturan ada di `/etc/sdr-doa-agent/agent.env` (`root:<grup service>`, 0640). Setelah mengubahnya: `sudo systemctl restart sdr-doa-agent`. Variabel lain bisa diset dengan `--set NAMA=NILAI`, misalnya `--set DOA_RATE=0`.
 - Secara bawaan agent menjawab setiap patch dengan `REMOTE_CONTROL_DISABLED`. `sudo sh install.sh --enable-config` mengizinkan Kontrol mengubah `settings.json`; `--disable-config` mematikannya lagi. Aktifkan hanya di broker dan jaringan yang dipercaya.
-- Agent memakai MQTT lewat TCP (default port 1883), bukan WebSocket. Console dan agent harus memakai broker yang sama.
+- Agent memakai MQTT lewat TCP (default port 1883), bukan WebSocket. Console dan agent harus memakai broker yang sama. Broker di luar loopback wajib TLS dan username (`MQTT_TLS=1` atau `MQTT_CAFILE`, `MQTT_USERNAME`, dan `SDR_DOA_MQTT_PASSWORD` di `agent.env`; lihat `packaging/agent/README.md`).
 - Docker (opsional, juga arm64/armv7): salin `packaging/agent/agent.env.example` ke `agent.env`, edit, lalu `docker compose up -d --build` di folder rilis agent (atau `docker compose -f docker-compose.agent.yml up -d --build` di repository). Butuh Compose v2.24+.
 - Upgrade: jalankan installer rilis baru lagi; `agent.env` dan state tetap. Hapus dengan `sudo sh /opt/sdr-doa-agent/uninstall.sh` (`--purge` juga menghapus pengaturan dan state).
 

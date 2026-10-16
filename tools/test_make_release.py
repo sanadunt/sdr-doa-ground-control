@@ -694,6 +694,24 @@ class PackagingScriptTests(unittest.TestCase):
             self.assertIn("9.9.9", info.stdout)
             self.assertIn("none (sdr-doa-console start)", info.stdout)
 
+    def test_launcher_uninstall_purge_removes_every_data_file(self):
+        with tempfile.TemporaryDirectory(prefix="launcher-") as tmp:
+            base = Path(tmp)
+            launcher = self.render_launcher(base)
+            (base / "app/.sdr-doa-console-install").write_text("", encoding="utf-8")
+            data = base / "data"
+            for name in ("console.json", "branding.json", "preferences.json", ".env", "receiver/receiver.sqlite3",
+                         "tiles/osm/1/0/0.png"):
+                (data / name).parent.mkdir(parents=True, exist_ok=True)
+                (data / name).write_text("x", encoding="utf-8")
+            env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": tmp}
+            result = subprocess.run([_sh(), str(launcher), "uninstall", "--purge", "--yes"],
+                                    capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(data.exists(), "--purge leaves nothing behind, the tile cache included")
+            self.assertFalse((base / "app").exists())
+            self.assertFalse(launcher.exists())
+
     def test_console_installer_help_and_root_refusal(self):
         result = subprocess.run([_sh(), str(ROOT / "packaging/console/install.sh"), "--help"], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0)

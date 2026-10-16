@@ -196,7 +196,7 @@ cmd_uninstall() {
   done
   if [ "$purge" = 1 ] && [ "$yes" = 0 ]; then
     [ -t 0 ] || die "--purge deletes $DATA_DIR; confirm with --yes"
-    printf 'Delete all saved settings and Receiver records in %s? [y/N] ' "$DATA_DIR"
+    printf 'Delete all saved settings, Receiver records and cached map tiles in %s? [y/N] ' "$DATA_DIR"
     read -r answer
     case $answer in y | Y | yes | YES) ;; *) die "cancelled" ;; esac
   fi
@@ -210,7 +210,7 @@ cmd_uninstall() {
   rm -f "$DESKTOP_FILE"
   rm -rf "$APP_DIR"
   if [ "$purge" = 1 ]; then
-    rm -rf "$DATA_DIR/receiver"
+    rm -rf "$DATA_DIR/receiver" "$DATA_DIR/tiles"
     rm -f "$DATA_DIR/console.json" "$DATA_DIR/branding.json" "$DATA_DIR/preferences.json" \
       "$DATA_DIR/.env" "$DATA_DIR/seed.env" "$LOG_FILE" "$PID_FILE"
     rmdir "$DATA_DIR" 2>/dev/null || true
