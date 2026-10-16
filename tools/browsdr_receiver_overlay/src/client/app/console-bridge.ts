@@ -422,7 +422,9 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 			connected,
 			mock,
 			deviceName: connected ? (mock ? 'Mock SDR' : (String(app.info?.boardName ?? '') || null)) : null,
-			running: Boolean(app.running),
+			// A restart for a new sample rate or FFT size (main.ts) is no stop and start: the console's
+			// follow-node retunes once when RX starts, and a rate change alone must not retune.
+			running: Boolean(app.running) || Boolean(app._rxRestarting),
 			busy: busyState(),
 			workspace: workspace(),
 			centerHz: mhzToHz(app.radio?.centerFreq),

@@ -1551,6 +1551,39 @@ test('radio re-centres an active VFO the new rate leaves out of band, stamped as
 	assert.equal(result('r7').tune.rev, 2, 'a VFO still in band keeps the centre');
 });
 
+test('an RX restart for a sample rate change shows as running throughout, so follow-node sees no new start', async t => {
+	await t.test('the Receiver page\'s Sample rate select', async st => {
+		const { app, clock, flushWatchers, messages, drawFrame } = await runningMock(st);
+		// Vue runs the snapshot watcher between the restart's stop and its start (after running = false).
+		app._releaseWakeLock = () => { clock.advance(STATUS_URGENT_MIN_MS); flushWatchers(); };
+		const before = messages('receiver:status').length;
+		app.radio.sampleRate = 10_000_000;
+		flushWatchers();
+		await settle(20);
+		drawFrame();
+		flushWatchers();
+		clock.advance(STATUS_DEBOUNCE_MS);
+		const during = messages('receiver:status').slice(before);
+		assert.ok(during.length > 0);
+		assert.deepEqual(during.map(status => status.running), during.map(() => true), 'no stop and start for the console');
+		assert.equal(during.at(-1).sampleRateHz, 10_000_000);
+		assert.equal(during.at(-1).tune.rev, during[0].tune.rev, 'and no retune');
+		assert.equal(app.running, true);
+	});
+	await t.test('a restart that does not bring RX back', async st => {
+		const { app, clock, flushWatchers, messages, failures } = await runningMock(st);
+		app._releaseWakeLock = () => { clock.advance(STATUS_URGENT_MIN_MS); flushWatchers(); };
+		failures.startRx = true;
+		app.radio.sampleRate = 10_000_000;
+		flushWatchers();
+		await settle(20);
+		assert.equal(app.running, false);
+		flushWatchers();
+		clock.advance(STATUS_DEBOUNCE_MS);
+		assert.equal(messages('receiver:status').at(-1).running, false, 'reported as stopped');
+	});
+});
+
 test('radio refuses a rate the device does not offer, any scan and a remote session', async t => {
 	const { frame, app, result } = setup(t, { app: { mockSdrEnabled: true, sampleRates: [2_000_000, 10_000_000] } });
 	forbidDialogs(t);
