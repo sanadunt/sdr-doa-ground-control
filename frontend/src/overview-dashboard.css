@@ -274,8 +274,8 @@
 .ov-spec-settings .ov-spec-follow { flex: 1 1 auto; min-width: 0; }
 .ov-spec-settings .ov-spec-follow > span { overflow: hidden; text-overflow: ellipsis; }
 /* A dock this narrow keeps the trace its width; the column opens below it, in two columns where they fit,
-   and the dock grows to fit both (spectrumNeedPx), up to the height of the stage. Taller than that, the
-   trace and the column scroll together under the header. */
+   and the dock grows to fit both (spectrumNeedPx) while DOCK_MAP_KEEP_PX of map stays above it. Taller
+   than that, the trace and the column scroll together under the header. */
 @container ov-spec (max-width: 760px) {
   .ov-spec-main { flex-direction: column; overflow-y: auto; overscroll-behavior: contain; }
   .ov-spec-main > .ov-spec-body { flex: 1 0 auto; }

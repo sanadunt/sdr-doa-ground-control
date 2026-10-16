@@ -10,7 +10,7 @@ import { DEFAULT_OVERVIEW_PANELS } from '../../lib/overviewPanels';
 import { followNodeStore } from '../../lib/listenPrefs';
 import { DEFAULT_SPECTRUM_DOCK_SETTINGS, spectrumDockStore } from '../../lib/spectrumDockSettings';
 import type { ConsoleCapabilities } from '../../api';
-import { SpectrumDock, SpectrumMarkRow, spectrumNeedFromParts } from './SpectrumDock';
+import { DOCK_MAP_KEEP_PX, SpectrumDock, SpectrumMarkRow, dockNeedWithinStage, spectrumNeedFromParts } from './SpectrumDock';
 import type { SpectrumMarkRowProps } from './SpectrumDock';
 import { SpectrumSettings } from './SpectrumSettings';
 import type { RadioRows, SpectrumSettingsProps, SweepRows } from './SpectrumSettings';
@@ -386,6 +386,21 @@ describe('Spectrum dock styles', () => {
     expect(spectrumNeedFromParts(48, 180, 120, false, 1)).toBe(229);
     expect(spectrumNeedFromParts(48, 180, 194, true, 1)).toBe(423);
     expect(spectrumNeedFromParts(48.2, 180.1, 0, true, 0)).toBe(229);
+  });
+
+  it('lets the open Atur column grow the dock only while the map keeps its HUD, buttons, node card and legend', () => {
+    expect(DOCK_MAP_KEEP_PX).toBe(256);
+    // 1440x900, column beside the trace: unchanged.
+    expect(dockNeedWithinStage(360, 229, 848)).toBe(360);
+    // 1024x768 with Polar open, column below: 716 px stage, 460 px left for the dock, the rest scrolls.
+    expect(dockNeedWithinStage(513, 320, 716)).toBe(460);
+    // 1280x800 with Polar "Atur" open as well: one column, far taller than the room.
+    expect(dockNeedWithinStage(900, 360, 748)).toBe(492);
+    // The header and the trace keep their room on a short window, but never more than the stage.
+    expect(dockNeedWithinStage(600, 300, 500)).toBe(300);
+    expect(dockNeedWithinStage(600, 300, 280)).toBe(280);
+    // Before layout the stage reads 0.
+    expect(dockNeedWithinStage(513, 320, 0)).toBe(513);
   });
 
   /** The body of an at-rule block such as `@container ov-spec (max-width: 1279px)`. */

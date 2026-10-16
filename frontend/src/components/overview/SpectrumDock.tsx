@@ -68,6 +68,12 @@ const FRAME_NOTICE_MS = 6_000;
 const WATERFALL_MIN_PX = 48;
 /** Set on .ov-stage; --ov-dock-h is at least this tall. */
 const DOCK_NEED_PROPERTY = '--ov-spec-need-h';
+/**
+ * Map height an open "Atur" column leaves above the dock: the bearing HUD
+ * above the map buttons on the left, the node card above the legend on the
+ * right, without overlapping.
+ */
+export const DOCK_MAP_KEEP_PX = 256;
 
 interface Notice {
   code: DockNotice;
@@ -99,11 +105,25 @@ export function spectrumNeedFromParts(headPx: number, bodyPx: number, settingsPx
 }
 
 /**
+ * The dock height to set for a spectrum that needs `needPx`, of which
+ * `traceNeedPx` are the header and the trace without the "Atur" column, on a
+ * stage `stagePx` tall (0 before layout). The column never takes the dock
+ * above DOCK_MAP_KEEP_PX of map; it scrolls instead (beside the trace on its
+ * own, below it with the trace under the header). The header and the trace
+ * keep their room, but never more than the stage.
+ */
+export function dockNeedWithinStage(needPx: number, traceNeedPx: number, stagePx: number): number {
+  if (!(stagePx > 0)) return needPx;
+  return Math.min(needPx, stagePx, Math.max(traceNeedPx, stagePx - DOCK_MAP_KEEP_PX));
+}
+
+/**
  * Height the spectrum section needs: its header, then the body's padding,
  * gaps and rows with the waterfall at WATERFALL_MIN_PX, and the open "Atur"
- * column beside or below the trace, plus the dock border.
+ * column beside or below the trace, plus the dock border; `trace` leaves the
+ * column out.
  */
-function spectrumNeedPx(section: HTMLElement): number | null {
+function spectrumNeedPx(section: HTMLElement): { need: number; trace: number } | null {
   const head = section.querySelector<HTMLElement>('.ov-spec-head');
   const body = section.querySelector<HTMLElement>('.ov-spec-body');
   if (!head || !body) return null;
@@ -132,7 +152,12 @@ function spectrumNeedPx(section: HTMLElement): number | null {
     }
   }
   const dock = section.parentElement;
-  return spectrumNeedFromParts(head.getBoundingClientRect().height, bodyNeed, settingsNeed, settingsBelow, dock ? dock.offsetHeight - dock.clientHeight : 0);
+  const headPx = head.getBoundingClientRect().height;
+  const borderPx = dock ? dock.offsetHeight - dock.clientHeight : 0;
+  return {
+    need: spectrumNeedFromParts(headPx, bodyNeed, settingsNeed, settingsBelow, borderPx),
+    trace: spectrumNeedFromParts(headPx, bodyNeed, 0, settingsBelow, borderPx),
+  };
 }
 
 export interface SpectrumMarkRowProps {
@@ -319,8 +344,8 @@ export function SpectrumDock({
     let frame = 0;
     const fit = () => {
       const need = spectrumNeedPx(section);
-      // Never taller than the stage, so the header stays in view; a narrow dock scrolls below it instead.
-      const value = need === null ? '' : `${stage.clientHeight > 0 ? Math.min(need, stage.clientHeight) : need}px`;
+      // The open column keeps DOCK_MAP_KEEP_PX of map above the dock; beyond that it scrolls under the header.
+      const value = need === null ? '' : `${dockNeedWithinStage(need.need, need.trace, stage.clientHeight)}px`;
       if (value === last) return;
       last = value;
       if (value) stage.style.setProperty(DOCK_NEED_PROPERTY, value);
