@@ -531,8 +531,9 @@ export function SpectrumDock({
       if (!mountedRef.current) return;
       setStarting(false);
       report(result);
-      // A scan that did not start over a running RX leaves the dock on RX.
-      if (!result.ok && bridge.getState().status?.running === true) setDockSettings({ mode: 'rx' });
+      // A scan that did not start over a running RX leaves the dock on RX. A TIMEOUT is not
+      // a refusal: the frame may still start the scan, and the dock then stays in Spektrum.
+      if (!result.ok && result.code !== 'TIMEOUT' && bridge.getState().status?.running === true) setDockSettings({ mode: 'rx' });
     });
   };
 

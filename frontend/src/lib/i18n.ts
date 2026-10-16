@@ -1093,7 +1093,7 @@ const id: Dictionary = {
   'map.unavailable': 'PETA TIDAK TERSEDIA',
   'map.unavailableDetail': 'Koordinat stasiun tidak valid',
   'map.basemapUnavailable': 'BASEMAP TIDAK TERSEDIA · {style}',
-  'map.basemapPartial': 'PETA DASAR SEBAGIAN · {style}',
+  'map.basemapPartial': 'BASEMAP SEBAGIAN · {style}',
   'map.loading': 'Memuat peta…',
   'map.sourceSimulation': 'SIMULASI · BUKAN GPS LIVE',
   'map.sourceFallback': 'REFERENSI SAJA · BUKAN GPS LIVE',
