@@ -5,7 +5,7 @@ import type { Map as MapLibreMap, GeoJSONSource, MapMouseEvent, MapSourceDataEve
 import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import type { Feature, FeatureCollection, LineString, Point, Polygon } from 'geojson';
 import type { GpsSourceMode, MapCoordinate, TelemetrySnapshot } from '../types';
-import { basemapAfterTile, basemapPaint, gpsReportsNoFix, holdStationCoordinate, nextBasemapHost, resumeBasemapHealth, shouldReframeStation, type BasemapHealth, type StationFraming } from '../lib/map';
+import { basemapAfterTile, basemapNotice, basemapPaint, basemapPartialCheck, gpsReportsNoFix, holdStationCoordinate, nextBasemapHost, resumeBasemapHealth, shouldReframeStation, type BasemapHealth, type BasemapNotice, type StationFraming } from '../lib/map';
 import { BASEMAPS, DEFAULT_BASEMAP_ID, basemapBaseSource, basemapRasterLayers, basemapSourceId, isBasemapSourceId, type BasemapId, type TileSourceId } from '../lib/basemaps';
 import { MAP_CONTROLS_ROW_PX, ZERO_INSETS, clampMapPadding, controlsFramingBottom, type MapInsets } from '../lib/mapInsets';
 import {
@@ -212,7 +212,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const [styleReady, setStyleReady] = useState(false);
   // The style the map draws; it follows basemapId once the style is ready.
   const [activeBasemap, setActiveBasemap] = useState<BasemapId>(basemapId);
-  const [basemapUnavailable, setBasemapUnavailable] = useState(() => basemapHealthFor(basemapBaseSource(basemapId)).unavailable);
+  const [basemapStatus, setBasemapStatus] = useState<BasemapNotice>(() => basemapNotice(basemapHealthFor(basemapBaseSource(basemapId))));
   const [tilesLoaded, setTilesLoaded] = useState(false);
   const [theme, setTheme] = useState(consoleTheme);
   const noticesRef = useRef<HTMLDivElement>(null);
@@ -367,7 +367,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
         basemapSince = performance.now();
         for (const raster of basemapRasterLayers(activeId, origin)) (map.getSource(raster.id) as RasterTileSource | undefined)?.setTiles(raster.source.tiles ?? []);
       }
-      setBasemapUnavailable(next.unavailable);
+      setBasemapStatus(basemapNotice(next));
       setTilesLoaded(next.loaded);
     };
     // Swap the basemap raster sources and layers under the overlay. Never
@@ -395,7 +395,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       basemapSince = performance.now();
       setActiveBasemap(next);
       setTilesLoaded(false);
-      setBasemapUnavailable(basemap.unavailable);
+      setBasemapStatus(basemapNotice(basemap));
     };
     const onStyleData = () => {
       // Fires for the first style and again after a WebGL context restore.
@@ -439,10 +439,17 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     };
     // Tiles that never answer produce no tile errors, so a style whose tiles
     // stay silent counts as unavailable; then its tiles are asked for again at
-    // a slower pace. Plain has no tiles to check.
+    // a slower pace. A partial style is asked for again at that pace too, since
+    // MapLibre does not request a failed tile twice. Plain has no tiles to check.
     const basemapCheck = window.setInterval(() => {
       const now = performance.now();
-      if (disposed || !activeSource || basemap.loaded || now - basemapSince < BASEMAP_CHECK_MS || (basemap.unavailable && now - (basemap.switchedAtMs ?? 0) < BASEMAP_RETRY_MS)) return;
+      if (disposed || !activeSource) return;
+      if (basemap.loaded) {
+        const partial = basemapPartialCheck(basemap, BASEMAP_HOSTS, now, BASEMAP_RETRY_MS);
+        if (partial.state !== basemap) applyBasemap(partial.state, partial.reload);
+        return;
+      }
+      if (now - basemapSince < BASEMAP_CHECK_MS || (basemap.unavailable && now - (basemap.switchedAtMs ?? 0) < BASEMAP_RETRY_MS)) return;
       applyBasemap(nextBasemapHost(basemap, BASEMAP_HOSTS, now), true);
     }, BASEMAP_CHECK_MS / 4);
     const onContextLost = () => {
@@ -828,7 +835,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   if (mapState === 'gl-lost') notices.push(t('map.glLost'));
   if (mapState === 'worker-stalled') notices.push(t('map.workerStalled'));
   if (mapState === 'error') notices.push(t('map.rendererError'));
-  if (basemapUnavailable && mapState !== 'no-webgl') notices.push(t('map.basemapUnavailable', { style: t(BASEMAPS[activeBasemap].labelKey) }));
+  if (basemapStatus && mapState !== 'no-webgl') notices.push(t(basemapStatus === 'partial' ? 'map.basemapPartial' : 'map.basemapUnavailable', { style: t(BASEMAPS[activeBasemap].labelKey) }));
   if (stationCoordinate && !values) notices.push(held ? t('map.overlayHeld', { reason: doaHeldText }) : t('map.overlayCleared'));
   if (values && !orientationVerified) notices.push(t('map.orientationReference', { offset: Number(offset.toFixed(1)) }));
   // The credit follows the style the map draws; Plain draws no tiles and needs none.

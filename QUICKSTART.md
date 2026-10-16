@@ -435,7 +435,7 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
   - Bila offset kompas tidak dilaporkan, muncul pemberitahuan REFERENSI.
   - **Skala dB** overlay default Auto (dari vektor). Min, Max, dan Noise threshold (Lapisan → Lanjutan) hanya berlaku di mode Manual, dan legend memberi peringatan bila skala manual jenuh.
   - Field angka berlaku saat Enter atau saat field ditinggalkan; `Esc` membatalkan, dan nilai tidak valid ditolak dengan pesan di samping field.
-  - Tile basemap selalu diambil dari console (`/api/tiles/<sumber>/<z>/<x>/<y>`). Console mencoba host upstream satu per satu (OSM: `tile.openstreetmap.de` dulu, lalu `tile.openstreetmap.org`), menyimpan tile di cache disk, dan menyajikan tile tersimpan tanpa jaringan. Bila tile area yang tampil tidak bisa diambil dan belum tersimpan, chip "BASEMAP TIDAK TERSEDIA · <gaya>" muncul, overlay tetap digambar di latar netral, dan peta mencoba lagi setiap 60 detik. Gaya tidak diganti otomatis.
+  - Tile basemap selalu diambil dari console (`/api/tiles/<sumber>/<z>/<x>/<y>`). Console mencoba host upstream satu per satu (OSM: `tile.openstreetmap.de` dulu, lalu `tile.openstreetmap.org`), menyimpan tile di cache disk, dan menyajikan tile tersimpan tanpa jaringan. Bila tile area yang tampil tidak bisa diambil dan belum tersimpan, chip "BASEMAP TIDAK TERSEDIA · <gaya>" muncul, overlay tetap digambar di latar netral, dan peta mencoba lagi setiap 60 detik. Bila sebagian tile tampil (misalnya offline dan hanya sebagian area pernah tersimpan) sementara tile lain terus gagal, chip "PETA DASAR SEBAGIAN · <gaya>" muncul; peta juga mencoba lagi setiap 60 detik dan chip hilang bila percobaan berikutnya tidak gagal lagi. Gaya tidak diganti otomatis.
   - Tanpa WebGL2, setelah WebGL context hilang, atau bila worker MapLibre gagal, peta menampilkan pemberitahuan dan overlay kanvas sederhana. Crash di dalam peta hanya memengaruhi panel peta.
   - Kamera bertahan saat berpindah halaman. Peta membingkai ulang saat sumber posisi berubah (misalnya fix GPS nyata pertama datang) dan saat panel berubah ukuran, selama operator belum menggeser kamera. Panel yang melayang di atas peta dihitung sebagai padding, sehingga stasiun dibingkai di bagian peta yang terlihat.
 - **Plot polar.**
@@ -795,7 +795,7 @@ Ini tidak selalu berarti frontend rusak. Buka **Kesehatan Sistem → Pembacaan r
 
 ### Basemap tidak tampil
 
-MapLibre hanya renderer; tile datang dari console lewat `/api/tiles`, dan CSP halaman tidak mengizinkan host tile lain. Kegagalan tile tidak berarti overlay atau polar plot gagal; chip "BASEMAP TIDAK TERSEDIA · <gaya>" muncul bila tile area yang tampil tidak bisa diambil dan belum tersimpan.
+MapLibre hanya renderer; tile datang dari console lewat `/api/tiles`, dan CSP halaman tidak mengizinkan host tile lain. Kegagalan tile tidak berarti overlay atau polar plot gagal; chip "BASEMAP TIDAK TERSEDIA · <gaya>" muncul bila tile area yang tampil tidak bisa diambil dan belum tersimpan, dan "PETA DASAR SEBAGIAN · <gaya>" bila sebagian tile tampil dan sisanya gagal.
 
 - Lihat log console: `tiles <sumber>: upstream unavailable (...)` menyebut penyebabnya (DNS, koneksi ditolak, timeout, HTTP 4xx/5xx, tipe isi ditolak).
 - Periksa koneksi HTTPS dari komputer console (bukan dari browser) ke host di `tools/tile_cache.py`, serta proxy (`HTTPS_PROXY`, `NO_PROXY`), VPN, dan firewall.

@@ -56,6 +56,7 @@ describe('basemap catalogue', () => {
     for (const lang of ['en', 'id'] as const) {
       expect(DICTIONARIES[lang]['map.basemap']).not.toMatch(PROVIDER_NAMES);
       expect(DICTIONARIES[lang]['map.basemapUnavailable']).toContain('{style}');
+      expect(DICTIONARIES[lang]['map.basemapPartial']).toContain('{style}');
     }
     expect(DICTIONARIES.en['basemap.hybrid']).toBe('Satellite + labels');
     expect(DICTIONARIES.id['basemap.hybrid']).toBe('Satelit + label');
