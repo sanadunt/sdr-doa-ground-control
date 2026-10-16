@@ -467,6 +467,16 @@ async function addSweepMarkerAt(app: AppInstance, canvas: HTMLCanvasElement, cli
 	app.showMsg(`Marker added at ${(marker.frequencyHz / 1_000_000).toFixed(6)} MHz. Press ${undoKeys} to remove it.`);
 }
 
+/** The power a marker at this scan frequency stores: the shown trace of the latest scan frame, or null outside it. */
+function sweepPowerAtFrequency(app: AppInstance, frequencyHz: number): number | null {
+	const frame = runtimeFor(app).frame;
+	if (!frame || !(frequencyHz >= frame.startHz && frequencyHz < frame.endHz)) return null;
+	const values = app.sweep.view === 'current' ? frame.current : app.sweep.view === 'max' ? frame.maxHold : frame.average;
+	if (values.length === 0) return null;
+	const index = Math.min(values.length - 1, Math.floor((frequencyHz - frame.startHz) / (frame.endHz - frame.startHz) * values.length));
+	return Number.isFinite(values[index]) ? values[index] : null;
+}
+
 async function addSweepMarkerAtPoint(app: AppInstance, canvas: HTMLCanvasElement, clientX: number, clientY: number): Promise<boolean> {
 	const rect = canvas.getBoundingClientRect();
 	const x = clientX - rect.left;
@@ -474,20 +484,16 @@ async function addSweepMarkerAtPoint(app: AppInstance, canvas: HTMLCanvasElement
 	if (x < 54 || x > rect.width - 12 || y < 14 || y > rect.height - 28) return false;
 	const ratio = (x - 54) / Math.max(1, rect.width - 66);
 	const frequencyHz = app.sweep.viewportStartHz + ratio * (app.sweep.viewportEndHz - app.sweep.viewportStartHz);
-	const frame = runtimeFor(app).frame;
-	let powerDb: number | null = null;
-	if (frame && frequencyHz >= frame.startHz && frequencyHz < frame.endHz) {
-		const values = app.sweep.view === 'current' ? frame.current : app.sweep.view === 'max' ? frame.maxHold : frame.average;
-		if (values.length > 0) {
-			const index = Math.min(values.length - 1, Math.floor((frequencyHz - frame.startHz) / (frame.endHz - frame.startHz) * values.length));
-			if (Number.isFinite(values[index])) powerDb = values[index];
-		}
-	}
-	await app.addReceiverMarker(frequencyHz, powerDb);
+	await app.addReceiverMarker(frequencyHz, sweepPowerAtFrequency(app, frequencyHz));
 	return true;
 }
 
 export const sweepMethods = {
+	/** The power a marker at this scan frequency (device Hz) stores; the console bridge measures dashboard markers with it. */
+	sweepPowerAt(this: AppInstance, frequencyHz: number): number | null {
+		return Number.isFinite(frequencyHz) ? sweepPowerAtFrequency(this, frequencyHz) : null;
+	},
+
 	initSweepCanvas(this: AppInstance) {
 		const runtime = runtimeFor(this);
 		runtime.spectrumCanvas = this.$refs.sweepSpectrum || null;
@@ -640,8 +646,8 @@ export const sweepMethods = {
 		const tabs = ['spectrum', 'listener', 'records'] as const;
 		const currentIndex = tabs.indexOf(this.activeWorkspace);
 		let nextIndex = currentIndex;
-		if (event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % tabs.length;
-		else if (event.key === 'ArrowUp') nextIndex = (currentIndex + tabs.length - 1) % tabs.length;
+		if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % tabs.length;
+		else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (currentIndex + tabs.length - 1) % tabs.length;
 		else if (event.key === 'Home') nextIndex = 0;
 		else if (event.key === 'End') nextIndex = tabs.length - 1;
 		else return;
@@ -777,6 +783,8 @@ export const sweepMethods = {
 				Comlink.proxy((frame: SweepSpectrumFrame) => {
 					const currentRuntime = runtimeFor(this);
 					currentRuntime.frame = frame;
+					// Inside the console's frame, the Spektrum dock draws the scan too (console-bridge.ts).
+					this._consoleBridge?.sweepFrame(frame);
 					this.sweep.hasResults = true;
 					this.sweep.progress.sweepCount = frame.sweepCount;
 					const addedWaterfallRow = currentRuntime.waterfallHistory.appendCompletedSweep(frame);

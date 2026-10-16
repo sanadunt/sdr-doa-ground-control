@@ -192,8 +192,45 @@ class ReceiverBuildSourceTests(unittest.TestCase):
             self.assertTrue((app / "console-bridge-protocol.ts").is_file())
             self.assertIn("installConsoleBridge(this)", (app / "main.ts").read_text(encoding="utf-8"))
             connection = (app / "connection.ts").read_text(encoding="utf-8")
-            self.assertIn("this._consoleBridge?.spectrum(spectrumData)", connection)
+            # Each spectrum frame goes to the bridge with the device frequency the worker took it at.
+            self.assertIn("this._consoleBridge?.spectrum(spectrumData, deviceHz)", connection)
+            worker = work / "src/client/worker"
+            self.assertTrue((worker / "spectrum-tuning.ts").is_file())
+            self.assertIn("spectrumCallback(Comlink.transfer(specCopy, [specCopy.buffer]), stampHz)", (worker / "rx-stream.ts").read_text(encoding="utf-8"))
+            self.assertIn("this._spectrumTuning?.retune()", (worker / "backend.ts").read_text(encoding="utf-8"))
             self.assertIn("this._consoleBridge?.initialVfoEnabled() ?? true", connection)
+            # The Dengar tab's dB scale drives the Listener trace and waterfall.
+            self.assertIn("this.updateListenerAutoRange(spectrumData);", connection)
+            self.assertIn("...listenerDisplayMethods,", (app / "main.ts").read_text(encoding="utf-8"))
+            canvas = (app / "canvas.ts").read_text(encoding="utf-8")
+            self.assertNotIn("this.display.minDB", canvas)
+            self.assertNotIn("this.display.maxDB", canvas)
+            self.assertIn("const displayRange = this.listenerDbRange();", canvas)
+            self.assertIn("this.syncListenerEngineRange(true);", canvas)
+            # The spectrum markers are drawn on the Listener trace after the VFO highlights.
+            draw_markers = canvas.index("this.drawListenerMarkers(ctx, w, h);")
+            self.assertGreater(draw_markers, canvas.index("// Draw VFO highlights"))
+            self.assertLess(draw_markers, canvas.index("export function mountCanvas("))
+            self.assertIn("...listenerMarkerMethods,", (app / "main.ts").read_text(encoding="utf-8"))
+            self.assertIn("@click=\"setListenerDbAuto(false)\"", html)
+            # Every dB limit field (Dengar dB scale, scan Graph min./max.) takes any value the
+            # console may send, such as 0.1 dB, so none of them is marked invalid.
+            db_inputs = re.findall(
+                r"<input [^>]*(?:sweep\.displayM(?:in|ax)Db|listener-db-m(?:in|ax))[^>]*>", html
+            )
+            self.assertEqual(len(db_inputs), 4)
+            for field in db_inputs:
+                self.assertIn('step="any"', field)
+            # The Listener's WebGL waterfall is transparent where it has no data, and the
+            # canvas background behind it follows the theme.
+            utils = (work / "src/client/utils.ts").read_text(encoding="utf-8")
+            self.assertIn("gl.RGBA, gl.UNSIGNED_BYTE, null);", utils)
+            self.assertNotIn("gl.UNSIGNED_BYTE, this.canvas);", utils)
+            self.assertNotIn("vec4(0.0, 0.0, 0.0, 1.0)", utils)
+            self.assertIn("gl.clearColor(0.0, 0.0, 0.0, 0.0);", utils)
+            style = (work / "src/client/style.css").read_text(encoding="utf-8")
+            self.assertIn("#waterfall {\n\tbackground: var(--canvas-bg);\n}", style)
+            self.assertIn("--canvas-bg: #fafbf9;", style)
 
 
 class _StopAfterFirstNpmCall(Exception):

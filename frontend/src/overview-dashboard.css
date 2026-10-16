@@ -42,7 +42,8 @@
 .ov-button:hover { border-color: var(--accent); }
 .ov-button[aria-expanded='true'] { border-color: var(--accent); background: var(--accent-soft); }
 .ov-button kbd { display: inline-grid; place-items: center; width: 20px; height: 20px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-family: var(--mono); font-size: 11px; }
-.ov-seg { display: flex; flex: none; height: 44px; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; }
+/* The border is an inset outline so each button keeps the full 44 px. */
+.ov-seg { display: flex; flex: none; height: 44px; overflow: hidden; border: 0; outline: 1px solid var(--line); outline-offset: -1px; border-radius: 8px; }
 .ov-seg button { flex: 1 1 0; min-width: 44px; padding: 0 10px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; }
 .ov-seg button + button { border-left: 1px solid var(--line); }
 .ov-seg button[aria-pressed='true'] { background: var(--surface-3); color: var(--text); }
@@ -69,13 +70,31 @@
 .ov-map > .map-panel { height: 100%; border: 0; border-radius: 0; }
 .ov-stage .map-notices { top: var(--ov-gap); right: var(--ov-gap); left: var(--ov-gap); align-items: center; max-width: none; }
 .ov-stage .map-data-chip { max-width: min(560px, 100%); text-align: center; }
-.ov-map-controls { position: absolute; z-index: 20; bottom: calc(var(--ov-dock-h) + var(--ov-gap)); left: var(--ov-gap); display: flex; flex-wrap: wrap; align-items: center; gap: 6px; max-width: calc(100% - 2 * var(--ov-gap)); pointer-events: none; }
+/* Floating layout: one row that ends before the right column, so a long source
+   credit is shortened (not wrapped up under Lapisan, not run under Kontrol). */
+.ov-map-controls { position: absolute; z-index: 20; bottom: calc(var(--ov-dock-h) + var(--ov-gap)); left: var(--ov-gap); display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; max-width: calc(100% - 3 * var(--ov-gap) - 360px); pointer-events: none; }
 .ov-map-controls > * { pointer-events: auto; }
-.ov-map-button { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--ov-card-bg); color: var(--text); cursor: pointer; }
+.ov-map-button { display: grid; flex: none; place-items: center; width: 44px; height: 44px; padding: 0; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--ov-card-bg); color: var(--text); cursor: pointer; }
 .ov-map-button:hover { border-color: var(--accent); }
-.ov-map-attribution { display: inline-flex; align-items: center; height: 44px; padding: 0 4px; color: var(--muted); font-size: 11px; text-decoration: none; white-space: nowrap; }
-.ov-map-attribution span { padding: 3px 8px; border-radius: 6px; background: color-mix(in srgb, var(--bg) 85%, transparent); }
-.ov-map-attribution:hover { color: var(--text); }
+/* Source credit of the drawn basemap: one 44 px chip, each source a link; the last one ends in an ellipsis when the row is short. */
+.ov-map-attribution { display: flex; flex: 0 1 auto; align-items: center; gap: 0 5px; box-sizing: border-box; min-width: 0; max-width: min(460px, 100%); height: 44px; margin: 0; padding: 0 10px; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--ov-card-bg); color: var(--muted); font-size: 11px; white-space: nowrap; }
+.ov-map-attribution a { display: block; flex: none; color: inherit; line-height: 42px; text-decoration: none; }
+.ov-map-attribution a:last-child { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ov-map-attribution a:hover, .ov-map-attribution a:focus-visible { color: var(--text); text-decoration: underline; }
+.ov-map-attribution-sep { flex: none; }
+/* Basemap picker. The menu is a popover in the top layer, so the floating
+   panels and the dock never cover it; BasemapMenu places it next to its button. */
+.ov-basemap { position: relative; flex: none; }
+.ov-basemap-menu { position: fixed; inset: auto; z-index: 30; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; gap: 2px 4px; box-sizing: border-box; width: 280px; height: auto; max-height: min(420px, 60vh, var(--ov-basemap-space, 420px)); margin: 0; padding: 6px; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); box-shadow: var(--ov-shadow); overscroll-behavior: contain; }
+.ov-basemap-menu[hidden] { display: none; }
+.ov-basemap-option { display: flex; align-items: center; gap: 8px; min-width: 0; height: 44px; padding: 0 8px; border-radius: 8px; cursor: pointer; font-size: 12.5px; }
+.ov-basemap-option:hover { background: var(--surface-2); }
+.ov-basemap-option:has(input:checked) { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.ov-basemap-option input { flex: none; width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+.ov-basemap-option span { display: -webkit-box; min-width: 0; overflow: hidden; line-height: 1.2; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.ov-basemap-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; padding: 0 6px; color: var(--muted); font-size: 12.5px; }
+.ov-basemap-row > span { flex: none; }
+.ov-basemap-row select { flex: 0 1 160px; min-width: 0; height: 44px; padding: 0 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 12.5px; }
 /* Legend and coordinates float bottom-right, above the dock. Kontrol takes
    that corner when it is open; the node card repeats the coordinates. */
 .ov-stage .map-bottom-overlay { position: absolute; z-index: 15; right: var(--ov-gap); bottom: calc(var(--ov-dock-h) + var(--ov-gap)); max-width: min(460px, calc(100% - 380px)); padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--ov-card-bg); box-shadow: var(--ov-shadow); }
@@ -189,8 +208,12 @@
 .ov-ps-preview { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--text); font-family: var(--mono); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .ov-spectrum { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; border-left: 1px solid var(--line-soft); container: ov-spec / inline-size; }
 .ov-dock > .ov-spectrum:first-child { border-left: 0; }
-/* Title, source, chip | [follow, mode, Dengar] Kirim [Mulai, Receiver]. It wraps when narrow, the
-   bracketed groups as one item each, and the dock grows to fit the extra rows. */
+/* Title, source, tags, chip, [mode switch, Penanda] | [follow, mode, Dengar] Kirim [Mulai, Receiver] Atur.
+   It wraps when narrow, the bracketed groups as one item each, and the dock grows to fit the extra
+   rows. Width budget of one row (Indonesian, the longer language): about 980 px for title, tag, chip,
+   mode switch, Penanda, Dengar, Mulai, Receiver and Atur; follow, mode and Kirim (.ov-spec-wide) add
+   about 410 px, so below a 1400 px dock they move into the Atur column; the source text adds about
+   150 px and shows from 1500 px. */
 .ov-spec-head { flex-wrap: wrap; height: auto; min-height: 48px; column-gap: 8px; row-gap: 0; padding: 2px 12px; }
 .ov-spec-group { display: inline-flex; flex: none; flex-wrap: wrap; align-items: center; gap: 0 8px; max-width: 100%; }
 /* On a phone these labels take two lines before a group splits; a group splits only below that. */
@@ -201,6 +224,12 @@
 .ov-spec-follow { display: inline-flex; flex: none; align-items: center; gap: 8px; height: 44px; color: var(--muted); cursor: pointer; font-size: 12.5px; white-space: nowrap; }
 .ov-spec-follow input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
 .ov-listen-mode { flex: none; width: 76px; height: 44px; padding: 0 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+/* Sample rate, LNA and VGA in the spectrum Atur column; with the +14 dB toggle the gain row fits its 313 px. */
+.ov-radio-select { flex: none; width: 108px; height: 44px; padding: 0 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+.ov-radio-select:disabled { cursor: not-allowed; opacity: .55; }
+/* A rate change on its way: no new pick, but a keyboard user keeps focus on the select. */
+.ov-radio-select[aria-disabled='true'] { cursor: progress; opacity: .55; }
+.ov-spec-amp { padding: 0 10px; font-family: var(--mono); font-size: 12.5px; }
 .ov-button:disabled { cursor: not-allowed; opacity: .45; }
 .ov-button:disabled:hover { border-color: var(--line); }
 .ov-button[aria-pressed='true'] { border-color: var(--signal); background: color-mix(in srgb, var(--signal) 16%, transparent); }
@@ -211,7 +240,48 @@
 .ov-button.is-wide { flex: 1 1 auto; }
 .ov-spec-send:not(:disabled) { border-color: color-mix(in srgb, var(--signal) 70%, var(--line)); }
 .ov-spec-run { width: 108px; }
-@container ov-spec (max-width: 980px) { .ov-spec-source { display: none; } }
+.ov-spec-settings-toggle { gap: 5px; padding: 0 10px; }
+/* Taken by the RX|Spektrum mode switch and the Penanda toggle, after the chip. */
+.ov-spec-head > .ov-spec-mode, .ov-spec-head > .ov-spec-mark { flex: none; }
+.ov-spec-mode button { padding: 0 10px; }
+/* Penanda: marking mode for this visit, with the number of markers in the Receiver's list. */
+.ov-spec-mark { padding: 0 10px; }
+.ov-spec-mark-count { min-width: 20px; padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--marker) 22%, transparent); color: var(--text); font-family: var(--mono); font-size: 11px; line-height: 18px; text-align: center; }
+.ov-button.ov-spec-mark[aria-pressed='true'] { border-color: var(--marker); background: color-mix(in srgb, var(--marker) 14%, transparent); }
+.ov-button.ov-spec-mark[aria-pressed='true'] svg { color: var(--marker); }
+.ov-spec-trace.is-marking, .ov-spec-waterfall.is-marking, .ov-spec-trace.is-marking .ov-spec-overlay { cursor: copy; }
+.ov-spec-mark-row { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.ov-spec-mark-readout { color: var(--text); font-family: var(--mono); font-size: 12px; }
+/* Between a phone and a full-width dock the label gives way to the icon and the count (still the button's name),
+   so the header keeps one row with Polar open. */
+@container ov-spec (min-width: 761px) and (max-width: 1099px) {
+  .ov-spec-mark-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}
+/* The scan range in MHz (up to 1 kHz) and the resolution segment in the Atur column. */
+.ov-mhz-input { width: 84px; }
+.ov-spec-settings .ov-spec-res button { min-width: 84px; }
+.ov-spec-settings > .ov-spec-narrow { display: none; }
+@container ov-spec (max-width: 1399px) {
+  .ov-spec-head .ov-spec-wide { display: none; }
+  .ov-spec-settings > .ov-spec-narrow { display: flex; }
+}
+@container ov-spec (max-width: 1499px) { .ov-spec-source { display: none; } }
+/* The trace and waterfall, with the Atur column beside them. */
+.ov-spec-main { position: relative; display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; }
+.ov-spec-main > .ov-spec-body { flex: 1 1 auto; }
+.ov-spec-settings { display: flex; flex: none; flex-direction: column; gap: 6px; width: 337px; min-height: 0; overflow-y: auto; padding: 4px 12px 8px; border-left: 1px solid var(--line-soft); overscroll-behavior: contain; }
+.ov-spec-settings .ov-seg button { padding: 0 4px; white-space: nowrap; }
+.ov-spec-settings .ov-spec-follow { flex: 1 1 auto; min-width: 0; }
+.ov-spec-settings .ov-spec-follow > span { overflow: hidden; text-overflow: ellipsis; }
+/* A dock this narrow keeps the trace its width; the column opens below it, in two columns where they fit,
+   and the dock grows to fit both (spectrumNeedPx) while DOCK_MAP_KEEP_PX of map stays above it. Taller
+   than that, the trace and the column scroll together under the header. */
+@container ov-spec (max-width: 760px) {
+  .ov-spec-main { flex-direction: column; overflow-y: auto; overscroll-behavior: contain; }
+  .ov-spec-main > .ov-spec-body { flex: 1 0 auto; }
+  .ov-spec-main .ov-spec-waterfall { min-height: 48px; }
+  .ov-spec-settings { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(313px, 100%), 1fr)); align-content: start; column-gap: 16px; width: auto; overflow: visible; border-top: 1px solid var(--line-soft); border-left: 0; }
+}
 .ov-spec-body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 4px; min-width: 0; min-height: 0; overflow: hidden; padding: 2px 12px 8px; }
 .ov-spec-info { display: flex; flex: none; flex-wrap: wrap; justify-content: space-between; gap: 0 12px; color: var(--muted); font-family: var(--mono); font-size: 11.5px; line-height: 16px; }
 .ov-spec-peak { color: var(--text); }
@@ -302,6 +372,7 @@
   .ov-map .map-frame { flex: none; height: clamp(320px, 52vh, 560px); }
   .ov-stage .map-bottom-overlay { position: static; max-width: none; border: 0; border-top: 1px solid var(--line-soft); border-radius: 0; background: transparent; box-shadow: none; }
   .ov-left, .ov-right { position: static; width: auto; max-height: none; align-items: stretch; pointer-events: auto; }
+  .ov-map-controls { flex-wrap: wrap; max-width: calc(100% - 2 * var(--ov-gap)); }
   .ov-left > section, .ov-right > section { width: auto; }
   .ov-card { box-shadow: none; }
   .ov-dock { position: static; flex-direction: column; gap: var(--ov-gap); height: auto; border: 0; background: transparent; }
@@ -310,6 +381,10 @@
   .ov-polar-plot { flex: 1 1 auto; width: auto; height: 260px; }
   .ov-spec-body { min-height: 120px; overflow: visible; }
   .ov-spec-waterfall { flex: none; height: 96px; }
+  .ov-basemap-menu { max-height: min(320px, 40vh, var(--ov-basemap-space, 320px)); }
+  /* Stacked, the Atur column flows below the waterfall. */
+  .ov-spec-main { flex-direction: column; }
+  .ov-spec-settings { position: static; width: auto; overflow: visible; padding: 8px 12px 12px; border: 0; border-top: 1px solid var(--line-soft); border-radius: 0; background: transparent; box-shadow: none; }
   .topbar-toolbar .ov-panel-toggles { width: 100%; }
   .topbar-toolbar .ov-panel-toggles button { flex: 1 1 0; }
   .ov-toggle-label { display: inline; }
@@ -321,6 +396,7 @@
 }
 @media (max-width: 600px) {
   .ov-stage { padding: var(--ov-gap) 16px; }
+  .ov-basemap-menu { width: min(280px, calc(100vw - 32px)); }
   .ov-spec-head { padding: 6px 12px; }
   .ov-control-fields { grid-template-columns: minmax(0, 1fr); }
   .ov-panel-toggles button { padding: 0 6px; }

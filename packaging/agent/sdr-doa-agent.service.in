@@ -1,0 +1,37 @@
+# Installed by the SDR-DoA agent installer. Settings: @CONFIG_DIR@/agent.env
+# (sudo systemctl restart sdr-doa-agent after a change). Re-run the installer
+# to change the user or the paths below.
+[Unit]
+Description=SDR-DoA edge agent (RDF-SDR Data Out health and config over MQTT)
+Documentation=file://@PREFIX@/README.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+EnvironmentFile=@CONFIG_DIR@/agent.env
+Environment=SDR_DOA_AGENT_HOME=@PREFIX@
+ExecStart=@PREFIX@/bin/run-agent
+Restart=on-failure
+RestartSec=5
+# 78: run-agent found a setting it cannot use; 2: a flag the agent rejects.
+# Both wait for a fixed agent.env and a restart instead of looping.
+RestartPreventExitStatus=2 78
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0027
+ReadWritePaths=@STATE_DIR@
+@SETTINGS_RW@
+
+[Install]
+WantedBy=multi-user.target

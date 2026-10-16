@@ -2,6 +2,8 @@
 
 Panduan ini menjalankan Ground Console lokal dari checkout repository. Jalur production lokal memakai Python untuk menyajikan `frontend/dist` dan menyediakan API same-origin. Vite hanya dipakai untuk development/build.
 
+Untuk ground station Linux yang hanya ingin memakai console (tanpa build, jalan di background, hidup lagi setelah reboot), lihat [Instalasi Linux: Docker, rilis tar dan service](#instalasi-linux-docker-rilis-tar-dan-service). Agent di RDF-SDR (Raspberry) ada di [Agent RDF-SDR](#agent-rdf-sdr-raspberry).
+
 Di UI, node Raspberry tampil sebagai **RDF-SDR** dan receiver HackRF sebagai **RadioSpectrum**. Panduan ini memakai nama UI tersebut; perintah, nama file, field API, dan topik MQTT tetap memakai nama teknisnya.
 
 ## Prasyarat
@@ -13,7 +15,7 @@ Install terlebih dahulu:
 - Python 3.9 atau lebih baru. Ground Console mengimpor `zoneinfo` saat start (lewat store Receiver), sehingga Python 3.8 langsung berhenti dengan `ModuleNotFoundError: No module named 'zoneinfo'`.
 - Browser berbasis Chromium (Chrome atau Edge) bila memakai Receiver dengan RadioSpectrum, karena RadioSpectrum tersambung lewat WebUSB.
 - WebGL2 di browser untuk peta. Tanpa WebGL2 peta menampilkan pemberitahuan dan overlay kanvas sederhana; halaman lain tetap berjalan.
-- Akses HTTPS ke `tile.openstreetmap.de` dan/atau `tile.openstreetmap.org` jika ingin basemap tampil.
+- Akses HTTPS dari komputer console ke penyedia tile jika ingin basemap tampil (host-nya tetap, di `tools/tile_cache.py`). Browser tidak menghubungi penyedia tile; console mengambil dan menyimpan tile, sehingga area yang pernah tampil tetap terlihat saat offline.
 - Mosquitto lokal hanya jika ingin menguji MQTT staging.
 
 Buka terminal di root repository sebelum menjalankan perintah berikut.
@@ -35,7 +37,7 @@ Perintah Ground Console default mengaktifkan monitor MQTT ke `10.90.0.1:9001` (W
 
 Untuk menjalankan tanpa monitor, tambahkan `--mqtt-host ''` pada perintah Ground Console.
 
-Atur kata sandi admin sendiri. Login admin membuka branding di **Konfigurasi** dan panel **Kontrol** di Ringkasan, yang mengirim perubahan konfigurasi ke RDF-SDR. Buat file environment lokal:
+Atur kata sandi admin sendiri. Login admin membuka branding di **Konfigurasi** dan panel **Kontrol** di Dashboard, yang mengirim perubahan konfigurasi ke RDF-SDR. Buat file environment lokal:
 
 ```sh
 cp .env.example .env
@@ -216,11 +218,11 @@ Tanpa submodule Receiver, ganti `npm run build:all` dengan `npm run build`. Lalu
 
 ## Receiver embedded
 
-Pilih menu **Receiver** (tombol `7`) atau buka `http://127.0.0.1:8787/#/receiver`. Receiver juga dapat dibuka langsung di `http://127.0.0.1:8787/receiver/`.
+Pilih menu **Receiver** (tombol `2`) atau buka `http://127.0.0.1:8787/#/receiver`. Receiver juga dapat dibuka langsung di `http://127.0.0.1:8787/receiver/`.
 
 - **Browser.** Firefox dan Safari tidak punya WebUSB; di sana **Connect Device** hanya menampilkan pesan bahwa WebUSB tidak tersedia dan meminta Chrome atau Edge.
-- **Mock SDR.** Untuk uji tanpa hardware, buka Receiver langsung dengan `?mock=1` dari alamat loopback, misalnya `http://127.0.0.1:8787/receiver/?mock=1`. Dari dalam console, buka `http://127.0.0.1:8787/?mock=1#/receiver` (`?mock=1` ditulis sebelum `#`); halaman Receiver meneruskan `mock=1` ke frame-nya hanya bila host console adalah loopback. Pilih **Connect Mock SDR** (**Sambungkan Mock SDR** dalam bahasa Indonesia). Koneksi mock berlabel `MOCK` (`Radio SDR ON · MOCK (no RF)`, dalam bahasa Indonesia `MOCK (tanpa RF)`, dan `MOCK DEVICE`). Untuk dasbor, buka `http://127.0.0.1:8787/?mock=1#/overview` lalu tekan **Mulai** di panel Spektrum.
-- **Kapan Receiver dimuat.** Receiver tidak dimuat saat console dibuka, karena memuatnya langsung menyambungkan RadioSpectrum yang sudah diizinkan. Receiver dimuat saat halaman Receiver dibuka pertama kali, atau saat **Mulai** atau **Dengar** ditekan pertama kali di panel Spektrum Ringkasan.
+- **Mock SDR.** Untuk uji tanpa hardware, buka Receiver langsung dengan `?mock=1` dari alamat loopback, misalnya `http://127.0.0.1:8787/receiver/?mock=1`. Dari dalam console, buka `http://127.0.0.1:8787/?mock=1#/receiver` (`?mock=1` ditulis sebelum `#`); halaman Receiver meneruskan `mock=1` ke frame-nya hanya bila host console adalah loopback. Pilih **Connect Mock SDR** (**Sambungkan Mock SDR** dalam bahasa Indonesia). Koneksi mock berlabel `MOCK` (`Radio SDR ON · MOCK (no RF)`, dalam bahasa Indonesia `MOCK (tanpa RF)`, dan `MOCK DEVICE`). Untuk dasbor, buka `http://127.0.0.1:8787/?mock=1#/dashboard` lalu tekan **Mulai** di panel Spektrum.
+- **Kapan Receiver dimuat.** Receiver tidak dimuat saat console dibuka, karena memuatnya langsung menyambungkan RadioSpectrum yang sudah diizinkan. Receiver dimuat saat halaman Receiver dibuka pertama kali, atau saat **Mulai** atau **Dengar** ditekan pertama kali di panel Spektrum Dashboard.
 - **Tetap berjalan saat pindah halaman.** Setelah Receiver dimuat, pindah ke halaman lain tidak menghentikan RX, scan, atau rekaman. Receiver berjalan tersembunyi sampai halaman console di-reload atau ditutup, dan tetap mengikuti perubahan tema dan bahasa. Reload console menghentikan sesi Receiver; audio yang sudah terekam tetap tersimpan.
 - **Rekaman aman saat reload atau crash.** Rekaman dan scan arsip ditutup saat halaman unload bila memungkinkan, atau oleh console setelah 2 menit tanpa aktivitas. Segmen seperti itu berstatus "Interrupted" dan tetap bisa diputar. Upload yang gagal menyimpan audio yang sudah masuk sebagai "Partly saved". Rekaman berlanjut di file atau sesi baru saat batas ukuran tercapai, setelah chunk hilang, atau setelah sample rate/FFT size berubah (ada pemberitahuan). Satu sesi armed yang tidak menerima audio selama 2 menit bisa terpecah menjadi beberapa sesi.
 - **Indikator rekaman.** Records menampilkan rekaman yang sedang berjalan ("recording in progress"), tab Listener menampilkan indikator `REC`, dan Spectrum meminta konfirmasi sebelum menghentikan rekaman yang berjalan.
@@ -231,7 +233,8 @@ Pilih menu **Receiver** (tombol `7`) atau buka `http://127.0.0.1:8787/#/receiver
 - **Listen.** Listen meng-unmute VFO aktif dan menerapkan Freq Shift: scan menampilkan frekuensi SDR (perangkat), Listener menampilkan frekuensi tampilan.
 - **IQ Correction (DC).** Koreksi kini menghapus offset DC pecahan. Pada gain sangat rendah noise floor naik sekitar 0,7–2 dB; matikan koreksi bila itu penting.
 - **Waterfall dan arsip** menyimpan level hingga +60 dB. Arsip dan sesi lama tetap terbuka dengan batas 0 dB lamanya.
-- **Marker.** Dengan mouse, klik menambah marker dan `Ctrl+Z` (`⌘Z`) menghapus marker terakhir. Di layar sentuh, tap membaca level dan tahan untuk menambah marker. Menyimpan marker set dengan nama yang sudah ada meminta konfirmasi sebelum mengganti.
+- **Skala dB Listener.** Tab Listener (Dengar) punya panel **Skala dB**: Auto (bawaan) mengikuti bagian spektrum yang tampil, Manual memakai Minimum dan Maksimum dBFS (−160 s/d 60, selisih minimal 5 dB; berlaku saat Enter atau keluar dari kolom). Skala dipakai trace dan waterfall Listener, diingat bersama pengaturan Receiver, dan sama dengan Skala dB di dock Spektrum Dashboard. Pengaturan Receiver yang tersimpan sebelum panel ini ada terbuka dengan Auto. Waterfall Listener memakai skala baru untuk baris berikutnya; baris yang sudah tergambar tetap.
+- **Marker.** Dengan mouse, klik menambah marker dan `Ctrl+Z` (`⌘Z`) menghapus marker terakhir. Di layar sentuh, tap membaca level dan tahan untuk menambah marker. Menyimpan marker set dengan nama yang sudah ada meminta konfirmasi sebelum mengganti. Daftar **Penanda spektrum** juga tampil di trace tab **Dengar** (garis dan label pada rentang yang tampil, pada frekuensi tampilan bila memakai Freq Shift; di grafik Spektrum dan trace Dengar label yang akan bertumpuk pindah ke baris berikutnya, dan setelah empat baris tidak ditampilkan, sedangkan garisnya tetap) dan di dock Spektrum Dashboard, yang bisa menambah dan menghapus marker di daftar yang sama (lihat **Penanda** di bawah). Marker hanya tersimpan bila sebuah marker set dipilih; tanpa itu daftar hilang saat console dimuat ulang.
 - **Filter audio.** Filter tanggal dan jam mencocokkan rekaman yang tumpang tindih dengan jendela, dan jendela boleh melewati tengah malam (misalnya 22:00–02:00).
 - **Upload arsip gagal.** Dengan arsip scan otomatis aktif, upload trace atau kandidat yang gagal menampilkan banner merah di Spectrum dan Records. Banner hilang sendiri setelah penyimpanan pulih; trace yang hilang tampil di Records sebagai "(N tidak tersimpan)". Kandidat yang gagal dikirim ulang otomatis.
 - **Bahasa.** Receiver mengikuti EN/ID console. Status code (`SIMULATION`, `SCANNING`, `STOPPED`, `MOCK`, `REC`, `LIVE`), satuan, dan detail error dari browser atau radio tetap berbahasa Inggris.
@@ -240,33 +243,41 @@ Pilih menu **Receiver** (tombol `7`) atau buka `http://127.0.0.1:8787/#/receiver
 
 ## Dasbor: Spektrum, Dengar dan Kontrol
 
-Ringkasan adalah dasbor peta penuh. Peta mengisi layar. Di kiri ada HUD bearing (dan panel Lapisan), di kanan kartu node (dan panel Kontrol), dan di bawah ada dock berisi Polar dan Spektrum. Pada lebar 1023 px ke bawah semua panel tersusun ke bawah dan halaman bisa digulir.
+Dashboard (dulu Ringkasan) adalah dasbor peta penuh di `#/dashboard`; alamat lama `#/overview` tetap dibuka. Peta mengisi layar. Di kiri ada HUD bearing (dan panel Lapisan), di kanan kartu node (dan panel Kontrol), dan di bawah ada dock berisi Polar dan Spektrum. Pada lebar 1023 px ke bawah semua panel tersusun ke bawah dan halaman bisa digulir.
 
 ### Top bar dan panel
 
-- Tombol menu di kiri top bar membuka menu halaman: tujuh halaman (label dan tombolnya saja), tombol tema, dan chip kontrol admin. Menu tertutup dengan `Esc`, klik di luar menu, atau setelah memilih halaman. Tombol `1`–`7` tetap berlaku.
-- Di Ringkasan, top bar punya tombol panel **Lapisan**, **Polar**, **Spektrum**, dan **Kontrol**. Secara bawaan Polar dan Spektrum aktif, Lapisan dan Kontrol mati, dan kartu node tampil ringkas. Pilihan ini diingat browser. Bila Polar dan Spektrum dimatikan, dock hilang dan peta memakai seluruh tinggi layar.
-- Select interval di samping tombol refresh menyimpan interval refresh ke konfigurasi console, sama seperti form **Konfigurasi → Connection**.
+- Tombol menu di kiri top bar membuka menu halaman: tujuh halaman (label dan tombolnya saja), tombol tema, dan chip kontrol admin. Urutannya Dashboard (`1`), Receiver (`2`), Kesehatan Sistem (`3`), Diagnostik DoA (`4`), Konfigurasi (`5`), Monitor Pesan (`6`), dan Simulasi (`7`). Menu tertutup dengan `Esc`, klik di luar menu, atau setelah memilih halaman. Tombol `1`–`7` tetap berlaku.
+- Di Dashboard, top bar punya tombol panel **Lapisan**, **Polar**, **Spektrum**, dan **Kontrol**. Secara bawaan Polar dan Spektrum aktif, Lapisan dan Kontrol mati, dan kartu node tampil ringkas. Pilihan ini diingat browser. Bila Polar dan Spektrum dimatikan, dock hilang dan peta memakai seluruh tinggi layar.
+- Select interval di samping tombol refresh menyimpan interval refresh ke konfigurasi console, sama seperti form **Konfigurasi → Koneksi**.
 - Kartu node menampilkan frekuensi tengah, gain, dan posisi stasiun. Tombol panah di kartu membuka detail: SNR, DAQ, ADC, frame DAQ, kontrol jarak jauh (`en_remote_control`), dan offset kompas.
-- Tombol peta ada di kiri bawah: zoom masuk dan keluar, pusatkan ke stasiun, kembalikan utara ke atas, dan tautan © OpenStreetMap.
+- Tombol peta ada di kiri bawah: zoom masuk dan keluar, pusatkan ke stasiun, kembalikan utara ke atas, **Peta dasar**, dan chip sumber peta (tautan atribusi).
 
 ### Spektrum dan Dengar
 
 Spektrum memakai RadioSpectrum yang sama dengan halaman Receiver, jadi butuh Chrome atau Edge (WebUSB) dan build Receiver. Tanpa build Receiver, chip menampilkan `NOT BUILT`.
 
 - **Mulai** memuat Receiver di latar belakang (saat pertama kali), menyambungkan RadioSpectrum yang sudah dipasangkan ke browser ini, dan menjalankan RX tanpa suara. Selama RX mati, grafik bertuliskan "RX berhenti". Grafik menampilkan 2 MHz di sekitar tengah RX: trace di atas, waterfall di bawah, dan pita VFO. Level dalam dBFS relatif, tidak terkalibrasi. **Berhenti** menghentikan RX.
-- **RadioSpectrum pertama kali.** Bila chip menampilkan `NEEDS_PAIRING`, tekan **Buka Receiver (7)**, sambungkan RadioSpectrum lewat **Connect Device** di halaman Receiver, kembali ke Ringkasan, lalu tekan **Mulai**. Pemilih USB milik browser tetap menampilkan nama produk USB perangkat (misalnya HackRF One); nama itu berasal dari perangkat dan tidak bisa diganti console. `NEEDS_DEVICE_CHOICE` berarti lebih dari satu RadioSpectrum sudah dipasangkan; pilih satu di halaman Receiver. Izin WebUSB berlaku per alamat, jadi `localhost:8787` dan `127.0.0.1:8787` dipasangkan masing-masing.
-- **Klik untuk menala.** Klik trace atau waterfall untuk memindahkan tengah RX dan VFO ke frekuensi itu (dibulatkan ke 1 kHz). Klik ini mematikan **Ikuti frekuensi node**. Dengan keyboard, fokuskan grafik lalu tekan ←/→ untuk langkah 10 kHz, atau Shift+←/→ untuk 100 kHz. Arahkan kursor ke grafik untuk membaca frekuensi dan level. VFO lalu berada tepat di tengah RX, tempat spike DC RadioSpectrum muncul.
-- **Ikuti frekuensi node** (aktif bawaan). Selama Data Out segar, tengah RX mengikuti `center_freq` dari `settings.json` node dan VFO mengikuti frekuensi baris CSV DoA. Receiver ditala ulang bila frekuensi node bergeser lebih dari 1 kHz. Tanpa Data Out segar, tuning saat ini dipertahankan. Bila Receiver memakai Freq Shift, muncul tag `UPCONVERTER`; frekuensi node dipakai tanpa shift itu, jadi set Freq Shift ke 0 agar RadioSpectrum benar-benar menala ke frekuensi node.
-- **Dengar** memutar audio VFO di browser ini dengan modulasi yang dipilih di sebelahnya: NFM (bawaan), WFM, AM, USB, LSB, DSB, CW, atau RAW. Bila RX belum jalan, Dengar sekaligus menyalakannya. Mengganti modulasi langsung berlaku dan diingat browser. Tekan Dengar lagi untuk berhenti mendengar. Bila browser memblokir audio, tekan Dengar sekali lagi.
-- Chip `BUSY` berarti pindai lebar atau dengar-pindai sedang berjalan di halaman Receiver. Dasbor tidak mengganggunya; hentikan dulu dari halaman Receiver.
+- **RadioSpectrum pertama kali.** Bila chip menampilkan `NEEDS_PAIRING`, tekan **Buka Receiver (2)**, sambungkan RadioSpectrum lewat **Connect Device** di halaman Receiver, kembali ke Dashboard, lalu tekan **Mulai**. Pemilih USB milik browser tetap menampilkan nama produk USB perangkat (misalnya HackRF One); nama itu berasal dari perangkat dan tidak bisa diganti console. `NEEDS_DEVICE_CHOICE` berarti lebih dari satu RadioSpectrum sudah dipasangkan; pilih satu di halaman Receiver. Izin WebUSB berlaku per alamat, jadi `localhost:8787` dan `127.0.0.1:8787` dipasangkan masing-masing.
+- **Klik untuk menala.** Klik trace atau waterfall untuk memindahkan tengah RX dan VFO ke frekuensi itu (dibulatkan ke 1 kHz). Klik ini mematikan **Ikuti frekuensi node**. Saat **Penanda** aktif, klik menambah penanda, bukan menala. Dengan keyboard, fokuskan grafik lalu tekan ←/→ untuk langkah 10 kHz, atau Shift+←/→ untuk 100 kHz; menahan tombol melangkah dari frekuensi yang tampil, jadi tidak ada langkah yang hilang. Arahkan kursor ke grafik untuk membaca frekuensi dan level. VFO lalu berada tepat di tengah RX, tempat spike DC RadioSpectrum muncul. Bila Receiver menolak tuning itu (misalnya `SWEEP_BUSY`), grafik kembali ke frekuensi Receiver.
+- **Sinkron dengan halaman Receiver.** Tengah RX dan VFO dipegang Receiver. Perubahan di halaman Receiver (misalnya Center 100 → 150 MHz) tampil di Spektrum dalam sekitar 150 ms, juga bila Anda baru kembali dari halaman Receiver. Klik atau ←/→ di Spektrum langsung mengubah Center dan VFO di halaman Receiver; sampai radio benar-benar pindah frekuensi (Receiver menunggu sekitar 200 ms), spektrum lama tetap digambar di frekuensinya sendiri. Mengubah tengah atau VFO di halaman Receiver, termasuk memanggil bookmark atau selesai dengar-pindai, mematikan **Ikuti frekuensi node**, sama seperti klik di grafik; centang lagi untuk kembali ke frekuensi node. Modulasi yang dipilih di halaman Receiver juga menjadi modulasi untuk Mulai berikutnya. Setelah console dimuat ulang dan sebelum Receiver dimuat, grafik menampilkan tengah dan VFO terakhir yang disimpan Receiver bila Ikuti frekuensi node tidak sedang menunjuk node; nilai itu hanya tampilan, Mulai tetap memakai setelan Receiver.
+- **Ikuti frekuensi node** (aktif bawaan). Selama Data Out segar, tengah RX mengikuti `center_freq` dari `settings.json` node dan VFO mengikuti frekuensi baris CSV DoA. Receiver ditala ulang bila frekuensi node bergeser lebih dari 1 kHz; mengganti Sample rate (di dock atau di halaman Receiver) tidak menala ulang. Tanpa Data Out segar, tuning saat ini dipertahankan. Bila Receiver memakai Freq Shift, muncul tag `UPCONVERTER`; frekuensi node dipakai tanpa shift itu, jadi set Freq Shift ke 0 agar RadioSpectrum benar-benar menala ke frekuensi node.
+- **Dengar** memutar audio VFO di browser ini dengan modulasi yang dipilih di sebelahnya (di **Atur** bila dock sempit): NFM (bawaan), WFM, AM, USB, LSB, DSB, CW, atau RAW. Bila RX belum jalan, Dengar sekaligus menyalakannya. Mengganti modulasi langsung berlaku dan diingat browser. Tekan Dengar lagi untuk berhenti mendengar. Bila browser memblokir audio, tekan Dengar sekali lagi.
+- **RX | Spektrum** (sakelar setelah chip) memilih isi grafik dan apa yang dijalankan **Mulai**: **RX** (2 MHz di sekitar tengah RX) atau **Spektrum** (pindai lebar Receiver di rentangnya sendiri). Selama tidak ada yang berjalan, sakelar hanya memilih mode dan tidak memuat Receiver. Dock selalu menampilkan mode yang sedang berjalan: pindai yang dimulai di halaman Receiver tampil sebagai Spektrum dengan grafik hidup.
+- **Mode Spektrum.** **Mulai** menjalankan pindai lebar dengan rentang dan pengaturan pindai Receiver (bawaan 100–1000 MHz), **Berhenti** menghentikannya tanpa menyalakan RX. Chip `SCAN` berarti pindai berjalan, `…` berarti pindai sedang dimulai atau dihentikan, `SCAN OFF` berarti berhenti. Dengan `?mock=1` pindai memakai sumber simulasi dan header menampilkan tag `SIM` selama pindai itu berjalan. Baris info menampilkan rentang, RBW, LNA, dan VGA pindai. Klik atau ←/→ pada grafik menyimpan tengah dan VFO untuk RX berikutnya (pada bin terkuat di dekat klik; langkah ←/→ 1/200 rentang, minimal 10 kHz) dan mematikan **Ikuti frekuensi node**; pindai tetap berjalan. **Dengar** menghentikan pindai lalu menjalankan RX dan memutar audio. Pindah ke **RX** saat pindai berjalan menghentikan pindai dan menjalankan RX; pindah ke **Spektrum** saat RX berjalan memulai pindai. Pindai menghentikan RX, jadi bila rekaman audio VFO sedang berjalan console menanyakan dulu karena rekaman itu berakhir.
+- **Penanda** (tombol setelah sakelar RX | Spektrum, dengan jumlah penanda di daftar Receiver) menyalakan mode menandai untuk kunjungan ini saja; setelah halaman dibuka lagi mode ini mati. Pada dock selebar 761–1099 px tombol ini hanya menampilkan ikon dan jumlah. Penandanya adalah daftar **Penanda spektrum** halaman Receiver: garis merah muda di trace dan garis putus-putus di waterfall, pada mode RX dan Spektrum, juga saat mode menandai mati. Saat menandai, klik grafik menambah penanda di frekuensi itu (dibulatkan ke 1 kHz; pada mode Spektrum di bin terkuat di dekat klik), dan klik dekat penanda memilihnya. Baris di atas grafik menampilkan penanda terpilih (nama, MHz, dan dB bila diukur) dengan **Hapus** dan **Tala ke sini** (menala RX ke penanda itu dan mematikan **Ikuti frekuensi node**; nonaktif di atas 6000 MHz). Tag **Belum disimpan** berarti belum ada marker set yang dipilih di halaman Receiver. Dengan keyboard pada grafik: Enter menandai VFO, `[` dan `]` memilih penanda sebelumnya atau berikutnya, Delete menghapus penanda terpilih, `Ctrl+Z` (`⌘Z`) menghapus penanda terakhir dari dock, Esc melepas pilihan; ←/→ tetap menala. Menandai juga bisa selama pindai berjalan; daya penanda diukur dari pindai itu, sedangkan penanda pada mode RX tidak punya daya. Penanda dari dock langsung tampil di halaman Receiver (daftar, grafik Spektrum, dan trace Dengar), dan perubahan di halaman Receiver tampil di dock dalam sekitar 100 ms.
+- Chip `BUSY` berarti dengar-pindai sedang berjalan di halaman Receiver (Receiver sedang mendengarkan satu kandidat). Dasbor tidak mengganggunya: Mulai, Berhenti, Dengar, dan klik di grafik ditolak sampai dengar-pindai dihentikan dari halaman Receiver.
 - RX tetap berjalan saat pindah halaman, sama seperti Receiver. Data spektrum hanya dikirim ke dasbor selama panel Spektrum terbuka dan tab browser terlihat.
+- **Atur** (tombol terakhir di header) membuka kolom pengaturan di samping grafik. Bila dock Spektrum lebih sempit dari 1400 px (misalnya layar 1440 px dengan Polar terbuka), **Ikuti frekuensi node**, modulasi, dan **Kirim ke RDF-SDR** pindah dari header ke kolom ini, sehingga header tetap satu baris pada dock selebar kira-kira 950 px ke atas; pada dock yang lebih sempit tombol header turun ke baris berikutnya dan dock bertambah tinggi. Pada dock 760 px ke bawah (misalnya layar 1024 px dengan Polar terbuka) kolom ini terbuka di bawah waterfall, dua kolom bila muat, tanpa menutupi grafik atau tombol penanda, dan dock bertambah tinggi selama peta di atasnya masih setinggi 256 px; selebihnya grafik dan kolom digulir di bawah header. Pada layar 1023 px ke bawah kolom ini juga ada di bawah waterfall.
+- **Sample rate** dan **Gain** di **Atur** adalah pengaturan Listener di halaman Receiver: Sample rate 2, 4, 5, 8, 10, 16 atau 20 MSPS, LNA 0–40 dB (langkah 8), VGA 0–62 dB (langkah 2), dan tombol **+14 dB** (penguat RF). Nilainya sama dengan isian Radio di tab **Dengar** dan sinkron dua arah: perubahan di halaman Receiver tampil di dock dalam sekitar 100 ms, perubahan di dock langsung terlihat di halaman Receiver. Gain berlaku langsung tanpa menghentikan RX. Mengganti Sample rate saat RX jalan memulai ulang RX sebentar (chip `…`); spektrum dock tetap 2 MHz. Bila rekaman audio VFO sedang berjalan, console menanyakan dulu; rekaman berlanjut di segmen baru. Bila audio diblokir browser setelah RX dimulai ulang, tekan **Dengar** sekali lagi. Sample rate tidak bisa diganti selama pindai, dan sebelum Receiver dimuat semua isian ini nonaktif dengan `—`. Baris info di atas grafik menampilkan sample rate, LNA, VGA, dan `+14 dB` bila penguat RF aktif.
+- **Skala dB** di **Atur**: Auto (bawaan) mengikuti sinyal. Manual memakai Min dB dan Maks dB yang diketik; nilai berlaku saat menekan Enter atau keluar dari kolom, dibatasi −160 s/d 60 dB dengan selisih minimal 5 dB. Trace dan seluruh riwayat waterfall langsung diwarnai ulang. Manual dimulai dari rentang yang sedang tampil. Skala ini sama dengan panel **Skala dB** di tab **Dengar** halaman Receiver: mengubahnya di satu tempat mengubah yang lain. Sebelum Receiver dimuat, dock memakai skala terakhir yang diketahuinya; perubahan saat itu dikirim ke Receiver begitu Receiver dimuat.
+- **Atur pada mode Spektrum.** Kolom ini menampilkan pengaturan pindai Receiver, bukan pengaturan RX: **Skala dB** pindai, **Rentang** (Awal dan Akhir MHz, berlaku saat Enter atau keluar dari kolom; tombol **Pusatkan ke RX** memusatkan lebar rentang yang sama pada tengah RX), **Resolusi** (4.88 kHz atau 2.44 kHz; resolusi yang tidak muat untuk rentang itu nonaktif), dan **Gain** pindai (LNA, VGA, +14 dB), yang terpisah dari gain RX seperti di halaman Receiver. Rentang 1–7250 MHz (frekuensi perangkat; dengan Freq Shift kolom menampilkan frekuensi tampilan), minimal 1 MHz, dan paling lebar 1220 MHz pada 2.44 kHz atau 2441 MHz pada 4.88 kHz. Selama pindai berjalan isian ini terkunci ("Terkunci selama pindai"), sama seperti di halaman Receiver; hentikan pindai untuk mengubahnya. Manual pada **Skala dB** pindai adalah **Grafik min./maks.** halaman Receiver: memilih Manual memakai nilai Receiver tanpa mengubahnya, dan nilai yang diketik langsung berlaku di halaman Receiver (juga saat pindai berjalan). Auto hanya berlaku di dock. Sebelum Receiver dimuat, kolom menampilkan pengaturan pindai yang terakhir disimpan Receiver, nonaktif.
 
 ### Kirim ke RDF-SDR dan Kontrol
 
 Kontrol adalah satu-satunya cara console mengubah setelan di RDF-SDR. Console mengirim satu patch konfigurasi lewat MQTT ke `sdr/v1/uav-01/cmd/config/patch` (QoS 1, tidak retained, kedaluwarsa 60 detik). Agent di RDF-SDR yang memutuskan menerapkannya, lalu menjawab di `ack/config`.
 
-1. **Kirim ke RDF-SDR** di header Spektrum membuka Kontrol dengan draf: Frekuensi tengah diisi tengah RX dan Frekuensi VFO diisi VFO yang sedang didengar. Tombol ini belum mengirim apa pun, dan nonaktif bila frekuensi belum diketahui atau di luar 24–1800 MHz. Kontrol juga bisa dibuka dengan tombol panel **Kontrol**.
+1. **Kirim ke RDF-SDR** di header Spektrum (di **Atur** bila dock sempit) membuka Kontrol dengan draf: Frekuensi tengah diisi tengah RX dan Frekuensi VFO diisi VFO yang sedang didengar. Tombol ini belum mengirim apa pun, dan nonaktif bila frekuensi belum diketahui atau di luar 24–1800 MHz. Kontrol juga bisa dibuka dengan tombol panel **Kontrol**.
 2. **Buka kunci.** Masukkan kata sandi admin lalu tekan **Buka kunci**. Sesinya sama dengan login admin di Konfigurasi dan berlaku 30 menit.
 3. **Ubah nilai.** Baris atas menampilkan broker, status koneksi, dan `rev dasar`, yaitu revisi konfigurasi terakhir yang dilaporkan RDF-SDR lewat MQTT. Ada lima field: Frekuensi tengah (MHz), Gain (dB), Frekuensi VFO (MHz), Bandwidth VFO (kHz), dan Squelch VFO (dB). Nilai awal diambil dari MQTT, lalu dari `settings.json` Data Out yang masih segar untuk field yang tidak dilaporkan MQTT (collector membaca `center_freq`, `uniform_gain`, `vfo_freq_0`, `vfo_bw_0` dan `vfo_squelch_0`). Field bertuliskan "tidak dilaporkan" bila tidak ada sumber yang membawa nilainya, atau Data Out sedang STALE. Field yang diubah ditandai "Diubah dari …", dan nilai di luar rentang diberi pesan di field itu; field lain tidak punya keterangan di bawahnya.
 4. **Tinjau perubahan** menampilkan nilai lama → baru dan "QoS 1 · kedaluwarsa 60 dtk · rev dasar N". Agent harus berjalan dengan `--enable-config` agar perubahan diterapkan. **Kembali** untuk mengedit lagi.
@@ -295,18 +306,30 @@ Monitor MQTT console tidak memakai TLS, username, atau password. Kontrol hanya b
 - **Kompas | Polar** memilih mode plot. Pilihan ini hanya mengubah plot dan nilai Puncak di HUD; peta dan bearing tidak berubah.
 - **Atur** membuka pengaturan di samping plot:
   - **Putar grafik (Head Up)**: geser 0–359° atau ketik nilainya. **Puncak ke atas** memutar plot sehingga θ₀ berada di atas; tombol ini nonaktif saat DoA tidak ditampilkan.
-  - **Arah kompas (offset)**: **Data Out** memakai `compass_offset` dari `settings.json` node. **Manual** memakai nilai yang Anda ketik, −360 sampai 360. Offset berlaku untuk peta, plot, dan bearing (tag `MANUAL · peta + polar`), dan tanda "→" menunjukkan bearing hasilnya. Ini pilihan yang sama dengan sumber Compass di Konfigurasi dan disimpan di browser. Saat simulasi pilihan ini terkunci.
+  - **Arah kompas (offset)**: **Data Out** memakai `compass_offset` dari `settings.json` node. **Manual** memakai nilai yang Anda ketik, −360 sampai 360. Offset berlaku untuk peta, plot, dan bearing (tag `MANUAL · peta + polar`), dan tanda "→" menunjukkan bearing hasilnya. Ini pilihan yang sama dengan sumber Compass di Konfigurasi dan disimpan di console (lihat [Apa yang tersimpan](#apa-yang-tersimpan-dan-di-mana)). Saat simulasi pilihan ini terkunci.
   - **Skala dB (relatif)**: Auto mengikuti data. Manual memakai Min dB dan Maks dB; min harus lebih kecil dari maks.
   - **Atur ulang tampilan grafik** mengembalikan Head Up ke 0°, mode plot ke pengaturan sumbernya, dan skala dB ke Auto. Offset kompas tidak ikut direset.
 - Baris di bawah plot menampilkan puncak (θ₀ di mode Polar), lebar −3 dB, dan Head Up.
 
+### Peta dasar
+
+- Delapan gaya: **Standar**, **Hot**, **Terang**, **Gelap**, **Satelit**, **Satelit + label**, **Topografi**, dan **Polos**. Pilih lewat tombol peta (ikon peta) di kontrol peta atau select **Peta dasar** di baris pertama panel Lapisan; keduanya memakai pilihan yang sama.
+- Menu terbuka di atas tombol. Gaya langsung berlaku dan menu tetap terbuka, jadi tombol panah bisa dipakai untuk berpindah gaya; `Esc`, klik di luar menu, atau Tab keluar menutupnya.
+- Ganti gaya tidak mengubah kamera, overlay DoA, label, marker stasiun, maupun readout hover.
+- Terang dan Gelap memakai tile Standar yang diwarnai ulang di browser (Gelap membalik warnanya), jadi tidak ada penyedia tambahan. Pada Gelap dan Satelit, cincin, arah, tepi −3 dB, dan garis tepi lobe berubah terang.
+- Polos tidak meminta tile sama sekali.
+- Nama gaya tidak menyebut penyedia. Chip kecil di samping tombol peta menyebut sumber data dan citra karena lisensinya mewajibkan atribusi; teks lengkapnya ada di tooltip chip.
+- Satelit dan Satelit + label memakai layanan citra Esri tanpa kunci API. Syarat pemakaian komersialnya diterima dengan risiko; periksa syarat Esri sebelum dipakai di lapangan.
+- Pilihan disimpan di console (`sdr-console-basemap`), sama seperti pengaturan Lapisan. Reset di Lapisan → Lanjutan tidak mengubah peta dasar.
+
 ### Lapisan
 
+- **Peta dasar** di baris pertama (lihat di atas).
 - Tujuh sakelar overlay peta: Sorotan beam, Lobe, Garis bearing, Tepi −3 dB, Cincin jarak, Arah U/T/S/B, dan Label teks.
 - **Opasitas overlay** 20–100 %.
 - **Lanjutan** membuka pengaturan overlay lengkap: jarak proyeksi, skala dB manual dan noise threshold, palet, blur, dan seterusnya.
 
-Semua pengaturan Lapisan disimpan di browser ini.
+Semua pengaturan Lapisan disimpan di console, jadi tetap sama di browser lain atau setelah cache dibersihkan.
 
 ## Menjalankan tanpa perangkat SDR
 
@@ -316,12 +339,12 @@ Ground Console tetap dapat digunakan untuk memeriksa UI tanpa RDF-SDR atau Data 
 2. Aktifkan simulasi (`SIMULATION`).
 3. Atur latitude, longitude, **Bearing dari utara (0–359°)**, dan lebar lobe.
 4. Klik **Terapkan skenario**.
-5. Buka **Ringkasan** (Overview).
+5. Buka **Dashboard**.
 6. Periksa direction helper di peta dan kurva polar sintetis.
 
 Sudut yang dimasukkan adalah bearing geografis: 0° utara, searah jarum jam. HUD, plot polar (mode Compass, kecuali Anda memilih Polar di dock), dan peta menampilkan angka yang sama; misalnya 45° tampil di arah timur laut di ketiganya. HUD menampilkan θ₀ 315° sebagai sudut array yang setara. Panel polar menampilkan badge `SIMULATION`. Simulasi kembali OFF setelah reload.
 
-Mode simulasi hanya mengganti data Overview. Health, diagnostics, MQTT, dan publication gate tetap menggunakan sumber nyata atau tetap `BLOCKED`. Untuk Receiver tanpa hardware, buka `http://127.0.0.1:8787/?mock=1#/receiver` untuk memakai Mock SDR (lihat bagian Receiver).
+Mode simulasi hanya mengganti data Dashboard. Health, diagnostics, MQTT, dan publication gate tetap menggunakan sumber nyata atau tetap `BLOCKED`. Untuk Receiver tanpa hardware, buka `http://127.0.0.1:8787/?mock=1#/receiver` untuk memakai Mock SDR (lihat bagian Receiver).
 
 ## Menghubungkan Data Out live
 
@@ -346,7 +369,7 @@ Windows PowerShell:
 .\.venv\Scripts\python.exe tools\ground_console.py --base-url http://192.168.100.100:8081 --bind 127.0.0.1 --port 8787
 ```
 
-Flag yang diketik eksplisit (`--base-url`, `--mqtt-host`, `--mqtt-port`, `--mqtt-transport`, `--mqtt-ws-path`) mengalahkan konfigurasi tersimpan (`~/.config/sdr-doa-ground-console/console.json`) untuk run itu saja. Server mencetak pemberitahuan seperti `--base-url from the command line overrides the saved console config for this run`. File tersimpan tidak berubah sampai Anda menyimpan form **Konfigurasi → Connection**; saat itu nilai yang sedang aktif ikut tersimpan. Flag yang tidak diketik memakai nilai tersimpan.
+Flag yang diketik eksplisit (`--base-url`, `--mqtt-host`, `--mqtt-port`, `--mqtt-transport`, `--mqtt-ws-path`) mengalahkan konfigurasi tersimpan (`~/.config/sdr-doa-ground-console/console.json`) untuk run itu saja. Server mencetak pemberitahuan seperti `--base-url from the command line overrides the saved console config for this run`. File tersimpan tidak berubah sampai Anda menyimpan form **Konfigurasi → Koneksi** atau **Konfigurasi → MQTT**; saat itu nilai yang sedang aktif ikut tersimpan. Flag yang tidak diketik memakai nilai tersimpan.
 
 Bila `console.json` rusak, field yang valid tetap dipakai, server mencatat nama field yang dikembalikan ke default, dan salinan file asli disimpan sebagai `console.json.invalid.bak`.
 
@@ -370,24 +393,24 @@ Strip di top bar punya enam item, dari kiri ke kanan: DATA, DOA, PUBLIKASI, SNAP
   - `AVAILABLE`: data node terbaca, segar, dan konsisten.
 
   Untuk status selain `AVAILABLE`, tooltip DATA menyebut gate reason utama dan error per view (misalnya "XML: HTTP 404").
-- **DOA** menyatakan apakah bearing dan vektor 360 bin bisa ditampilkan di Ringkasan: `AVAILABLE`, atau `DEGRADED`, `CONFLICT`, `UNAVAILABLE`, `INCOMPLETE`, dan `STALE` dengan penyebab di tooltip. Sebelum pembacaan pertama nilainya `WAITING`. Ini keputusan yang sama yang dipakai readout, plot polar, dan peta.
+- **DOA** menyatakan apakah bearing dan vektor 360 bin bisa ditampilkan di Dashboard: `AVAILABLE`, atau `DEGRADED`, `CONFLICT`, `UNAVAILABLE`, `INCOMPLETE`, dan `STALE` dengan penyebab di tooltip. Sebelum pembacaan pertama nilainya `WAITING`. Ini keputusan yang sama yang dipakai readout, plot polar, dan peta.
 - **PUBLIKASI** (`DELIVERY` di bahasa Inggris) adalah gate publikasi dari collector: `READY` hanya bila semua pemeriksaan untuk memublikasikan bearing lolos, selain itu `BLOCKED`. Di Ground Console nilainya selalu `BLOCKED`, juga saat DATA dan DOA `AVAILABLE`; penyebabnya dijelaskan di bagian Kesehatan Sistem di bawah. Tooltip menyebut reason teratas beserta kodenya.
 - **SNAPSHOT** menyangkut pembacaan `/api/snapshot` itu sendiri: `CURRENT` selama 5 detik setelah pembacaan selesai (termasuk yang melaporkan UNAVAILABLE), lalu `STALE`; `ERROR` bila request terakhir gagal. Sebelum pembacaan pertama nilainya `LOADING` atau `WAITING`.
 - **MQTT** adalah koneksi monitor lokal. Monitor ini berlangganan dan tidak pernah publish sendiri; satu-satunya publish adalah patch konfigurasi yang dikonfirmasi admin di Kontrol. Nilainya `CONNECTED`, `CONNECTING`, `DISCONNECTED`, `ERROR`, atau `OFF` bila host MQTT tidak dikonfigurasi. `ERROR` juga muncul bila monitor tidak bisa dibuat (misalnya `paho-mqtt` tidak terpasang) atau console tidak bisa membaca status monitor; detailnya ada di tooltip.
-- **SIM** bernilai `ON` selama simulasi aktif, yaitu saat Ringkasan menampilkan data sintetis dari browser, dan `OFF` bila Ringkasan memakai Data Out live. Item lain di strip tetap melaporkan data live, juga saat simulasi `ON`.
+- **SIM** bernilai `ON` selama simulasi aktif, yaitu saat Dashboard menampilkan data sintetis dari browser, dan `OFF` bila Dashboard memakai Data Out live. Item lain di strip tetap melaporkan data live, juga saat simulasi `ON`.
 
 Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 
 ### Refresh
 
-- Pilihan interval: Manual, 1, 2, 5, 10, dan 30 detik. Instalasi baru memakai 2 detik. Interval bisa diganti di select samping tombol refresh di top bar atau di **Konfigurasi → Connection**; keduanya menyimpan ke konfigurasi console.
+- Pilihan interval: Manual, 1, 2, 5, 10, dan 30 detik. Instalasi baru memakai 2 detik. Interval bisa diganti di select samping tombol refresh di top bar atau di **Konfigurasi → Koneksi**; keduanya menyimpan ke konfigurasi console.
 - Data DoA dianggap segar 5 detik setelah dibaca. Dengan Manual atau interval di atas 5 detik, bearing dan kurva polar kosong di antara pembacaan; form Konfigurasi memberi peringatan untuk pilihan itu.
 - Pembacaan yang sedang berjalan tidak dibatalkan oleh tick berikutnya. Layar mempertahankan data terakhir selama refresh, sehingga tidak berkedip setiap poll.
 - "Membaca…" hanya muncul pada pembacaan pertama atau pembacaan yang lebih lama dari 1 detik.
 - Tombol Refresh dan tombol `R` tetap bisa dipakai saat pembacaan berjalan; keduanya menunggu pembacaan itu.
 - Data Out yang tidak terjangkau atau macet tampil `UNAVAILABLE` dalam sekitar 4 detik.
 
-### Ringkasan (Overview)
+### Dashboard
 
 - **Bearing dari utara** adalah bearing geografis searah jarum jam: (360 − θ₀ + compass_offset) mod 360. θ₀ mentah dari Data Out (sudut array berlawanan jarum jam) tampil di bawahnya di HUD, bersama Puncak (display peak), umur data, dan offset beserta sumbernya:
   - `DATA_OUT`;
@@ -396,7 +419,7 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
   - "DATA_OUT terakhir diketahui N dtk": `settings.json` gagal dibaca dan console memakai pengaturan terakhir dari node yang sama, paling lama 90 detik;
   - "diasumsikan, hanya referensi" (amber) bila offset tidak dilaporkan.
 - **Puncak** (display peak) menyebut sumbunya di tooltip (sumbu Compass atau sumbu θ₀ Polar).
-- **Gate publikasi** tidak lagi tampil di panel Ringkasan; lihat chip PUBLIKASI di top bar. Nilainya selalu `BLOCKED` di Ground Console, juga saat bearing tampil normal, dan tooltip-nya menyebut reason teratas, biasanya "Sumber otoritas DoA belum dipilih". Console ini tidak memilih sumber otoritas DoA dan tidak pernah memublikasikan bearing, jadi `BLOCKED` di sini bukan tanda data rusak; bearing yang tampil tetap bisa dibaca sebagai observasi. Penjelasan lengkap ada di bagian Kesehatan Sistem di bawah.
+- **Gate publikasi** tidak lagi tampil di panel Dashboard; lihat chip PUBLIKASI di top bar. Nilainya selalu `BLOCKED` di Ground Console, juga saat bearing tampil normal, dan tooltip-nya menyebut reason teratas, biasanya "Sumber otoritas DoA belum dipilih". Console ini tidak memilih sumber otoritas DoA dan tidak pernah memublikasikan bearing, jadi `BLOCKED` di sini bukan tanda data rusak; bearing yang tampil tetap bisa dibaca sebagai observasi. Penjelasan lengkap ada di bagian Kesehatan Sistem di bawah.
 - **Bearing disembunyikan bila data tidak bisa dipercaya.** Bearing dan display peak menjadi "—", kurva polar dan overlay peta dikosongkan, dan penyebabnya disebutkan bila:
   - DAQ sync tidak PASS (FAIL atau UNKNOWN) atau ADC overdrive dilaporkan. Status menjadi `DEGRADED`, dan strip menampilkan DATA DEGRADED dan DOA DEGRADED.
   - CSV/XML `CONFLICT`.
@@ -412,7 +435,7 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
   - Bila offset kompas tidak dilaporkan, muncul pemberitahuan REFERENSI.
   - **Skala dB** overlay default Auto (dari vektor). Min, Max, dan Noise threshold (Lapisan → Lanjutan) hanya berlaku di mode Manual, dan legend memberi peringatan bila skala manual jenuh.
   - Field angka berlaku saat Enter atau saat field ditinggalkan; `Esc` membatalkan, dan nilai tidak valid ditolak dengan pesan di samping field.
-  - Basemap mencoba `tile.openstreetmap.de` dulu dan pindah ke `tile.openstreetmap.org` setelah beberapa kegagalan; kedua host tidak dipakai bersamaan. Bila keduanya gagal, chip "BASEMAP TIDAK TERSEDIA" muncul dan overlay tetap digambar di latar netral.
+  - Tile basemap selalu diambil dari console (`/api/tiles/<sumber>/<z>/<x>/<y>`). Console mencoba host upstream satu per satu (OSM: `tile.openstreetmap.de` dulu, lalu `tile.openstreetmap.org`), menyimpan tile di cache disk, dan menyajikan tile tersimpan tanpa jaringan. Bila tile area yang tampil tidak bisa diambil dan belum tersimpan, chip "BASEMAP TIDAK TERSEDIA · <gaya>" muncul, overlay tetap digambar di latar netral, dan peta mencoba lagi setiap 60 detik. Bila sebagian tile tampil (misalnya offline dan hanya sebagian area pernah tersimpan) sementara tile lain terus gagal, chip "BASEMAP SEBAGIAN · <gaya>" muncul; peta juga mencoba lagi setiap 60 detik dan chip hilang bila percobaan berikutnya tidak gagal lagi. Bila tampilan tidak lagi menggambar satu pun tile gaya itu (misalnya setelah menggeser peta offline ke area yang belum pernah tampil), chip kembali menjadi "BASEMAP TIDAK TERSEDIA · <gaya>". Gaya tidak diganti otomatis.
   - Tanpa WebGL2, setelah WebGL context hilang, atau bila worker MapLibre gagal, peta menampilkan pemberitahuan dan overlay kanvas sederhana. Crash di dalam peta hanya memengaruhi panel peta.
   - Kamera bertahan saat berpindah halaman. Peta membingkai ulang saat sumber posisi berubah (misalnya fix GPS nyata pertama datang) dan saat panel berubah ukuran, selama operator belum menggeser kamera. Panel yang melayang di atas peta dihitung sebagai padding, sehingga stasiun dibingkai di bagian peta yang terlihat.
 - **Plot polar.**
@@ -424,11 +447,12 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 ### Kesehatan Sistem dan Diagnostik DoA
 
 - **Kesehatan Sistem.**
-  - Badge **Data Out HTTP** dihitung dari GET per resource pada pembacaan terakhir: `AVAILABLE` (keempat file menjawab), `PARTIAL`, `UNAVAILABLE`, atau `UNKNOWN`. Di bawahnya tampil `overall_state` dari collector dalam huruf besar. Banner "STALE EVIDENCE" hanya muncul bila pembacaan terakhir punya DoA segar yang kemudian kedaluwarsa.
+  - Bilah halaman menampilkan `overall_state` dari collector, lalu chip **HTTP**, **Node**, dan **Progres**. Chip HTTP dihitung dari GET per resource pada pembacaan terakhir: `AVAILABLE` (keempat file menjawab), `PARTIAL`, `UNAVAILABLE`, `UNKNOWN`, atau `WAITING` sebelum pembacaan pertama. Peringatan "DATA LAMA" (EN: STALE EVIDENCE) hanya muncul bila pembacaan terakhir punya DoA segar yang kemudian kedaluwarsa.
   - **`UNVERIFIED` pada data sehat itu normal.** Collector menentukan `overall_state` berurutan: `UNAVAILABLE` (`status.json` tidak terbaca), `DEGRADED` (DAQ tidak PASS atau ADC overdrive), `INVALID` (tidak ada view DoA yang bisa diparse), `CONFLICT`, `STALE` (tidak ada view DoA yang segar), `INCOMPLETE` (CSV dan XML tidak bisa dibandingkan), lalu `UNVERIFIED` bila belum ada sumber otoritas DoA (`authority` = `none`) atau sudut kanonik belum disetujui. Ground Console selalu memanggil collector dengan `authority="none"` dan tanpa persetujuan sudut kanonik, dan tidak ada flag atau form console yang mengubahnya. Artinya `UNVERIFIED` adalah status terbaik yang bisa tampil: data terbaca, segar, dan CSV/XML konsisten, tetapi tidak ada keputusan yang menetapkan CSV atau XML sebagai sumber bearing resmi. `LIVE` tidak pernah tampil di console ini. Bila data lokal kedaluwarsa, headline berganti menjadi `STALE`.
-  - **Karena itu PUBLIKASI selalu `BLOCKED`.** Gate publikasi (PUBLIKASI di strip dan Pemeriksaan gate publikasi di Diagnostik DoA) baru `READY` bila semua pemeriksaannya lolos. Pada data sehat ada tiga reason yang selalu muncul: `DOA_AUTHORITY_NOT_SELECTED` (Sumber otoritas DoA belum dipilih), `CANONICAL_ANGLE_NOT_CONFIGURED` (Konvensi sudut kanonik belum disetujui), dan `GROUND_CLOCK_UNVERIFIED` (Jam ground dan node belum diverifikasi; console tidak memverifikasi jam node, sehingga baris **Jam ground** di Status subsistem selalu `UNVERIFIED`). Di Diagnostik DoA, pemeriksaan Otoritas dipilih, Sudut kanonik siap, DoA terpilih fresh, dan Satuan terpilih valid tampil `BLOCKED`, Status node fresh tampil BELUM DIKONFIGURASI, Otoritas terpilih bernilai `NONE`, dan Kesiapan sudut BELUM DIKONFIGURASI. Memilih sumber otoritas dan menyetujui sudut kanonik adalah keputusan deployment di luar console ini, jadi status tersebut bukan kerusakan data atau node. Reason lain di luar ketiganya menunjukkan masalah nyata.
-  - Tabel **Pembacaan resource** menampilkan setiap GET (`/status.json`, `/settings.json`, `/DOA_value.html`, `/doa.xml`) dengan kode HTTP atau jenis error (Connection refused, Timed out, Skipped, Deadline exceeded, dan seterusnya), waktu, dan jumlah percobaan. Catatan di bawahnya membandingkan waktu koleksi dengan anggaran 4 detik dan menjelaskan bila file lain dilewati karena `status.json` tidak terjangkau.
-  - Inspector menampilkan status node (VALID/INVALID/UNAVAILABLE), DAQ health, Node progress (`ADVANCING`, `STALLED`, `FIRST_SAMPLE`, `UNAVAILABLE`, `UNTRACKED`), ADC overdrive (PASS, OVERDRIVE dengan mask kanal, atau UNKNOWN), SNR (native XML, tidak terkalibrasi), dan PAPR CSV/XML dalam dB. PAPR bukan confidence 0–1.
+  - **Karena itu PUBLIKASI selalu `BLOCKED`.** Gate publikasi (PUBLIKASI di strip dan kartu **Gate publikasi** di Diagnostik DoA) baru `READY` bila semua pemeriksaannya lolos. Pada data sehat ada tiga reason yang selalu muncul: `DOA_AUTHORITY_NOT_SELECTED` (Sumber otoritas DoA belum dipilih), `CANONICAL_ANGLE_NOT_CONFIGURED` (Konvensi sudut kanonik belum disetujui), dan `GROUND_CLOCK_UNVERIFIED` (Jam ground dan node belum diverifikasi; console tidak memverifikasi jam node, sehingga tile **Jam** di baris stat Kesehatan Sistem selalu `UNVERIFIED`). Di Diagnostik DoA, pemeriksaan Otoritas dipilih, Sudut kanonik siap, DoA terpilih fresh, dan Satuan terpilih valid tampil `BLOCKED`, Status node fresh tampil `NOT CONFIGURED`, dan di kartu Collector Otoritas bernilai `NONE` dan Kesiapan sudut `NOT CONFIGURED`. Memilih sumber otoritas dan menyetujui sudut kanonik adalah keputusan deployment di luar console ini, jadi status tersebut bukan kerusakan data atau node. Reason lain di luar ketiganya menunjukkan masalah nyata.
+  - Baris stat menampilkan DAQ health (dengan jumlah frame hilang), sinkron (`x/3`), ADC overdrive (PASS, OVERDRIVE dengan file yang melaporkannya, atau UNKNOWN), SNR (native XML, tidak terkalibrasi), PAPR CSV/XML dalam dB, MQTT, dan Jam. PAPR bukan confidence 0–1.
+  - Kartu **RDF-SDR** menampilkan status node (VALID/INVALID/UNAVAILABLE) dan Progres (`ADVANCING`, `UNCHANGED` dengan umurnya, `STALLED`, `FIRST_SAMPLE`, `UNAVAILABLE`, `UNTRACKED`), indeks frame, frame hilang, flag sinkron, sumber noise, dan status GPS. Tooltip Progres hanya muncul bila ada penyebab: counter yang berhenti atau mundur, atau `status.json` yang tidak bisa dipakai. ADC overdrive (dengan mask kanal), sync gagal, dan node beku tampil sebagai peringatan di kartu ini. Kartu **Tampilan DoA** menampilkan CSV dan XML dengan statusnya dan umurnya saat dibaca.
+  - Kartu **Data Out** menampilkan setiap GET (`/status.json`, `/settings.json`, `/DOA_value.html`, `/doa.xml`) dengan kode HTTP atau jenis error (Connection refused, Timed out, Skipped, Deadline exceeded, dan seterusnya) dan waktunya; jumlah percobaan tampil bila lebih dari satu. Kepala kartu membandingkan waktu koleksi dengan anggaran 4 detik (misalnya `372 ms / 4.0 dtk`). Peringatan `COLLECTION_DEADLINE_EXCEEDED` muncul bila pembacaan dihentikan di batas waktu, dan peringatan `status.json` bila file lain dilewati karena `status.json` tidak terjangkau. Kartu **Monitor MQTT** menampilkan broker, transport, publish, pesan terakhir, jumlah pesan, dan pesan tidak valid.
 - **Diagnostik DoA.**
   - Reason gate diurutkan dari yang paling bisa ditindaklanjuti, masing-masing dengan kode mentahnya. Reason baru: `NODE_CLOCK_STALLED`, `ADC_OVERDRIVE`, `COLLECTION_DEADLINE_EXCEEDED`, `CSV_VIEW_UNAVAILABLE`, `XML_VIEW_UNAVAILABLE`, `NATIVE_ANGLE_INVALID`, `ANGULAR_PEAK_ANGLE_MISMATCH` (puncak vektor CSV berjarak lebih dari 3° dari θ₀), dan `NATIVE_ANGLE_UNCHECKED` (CSV dan XML berasal dari frame berbeda, sehingga sudutnya tidak dicek silang).
   - Relasi CSV/XML tampil sebagai EQUAL, NOT CHECKED, NOT COMPARABLE, CONFLICT, atau ANGLE INVALID, beserta relasi frame, selisih timestamp, jarak, dan toleransi.
@@ -437,19 +461,20 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 
 ### Konfigurasi
 
+- Kartu tersusun dalam dua kolom setinggi isinya masing-masing: **Koneksi & refresh** dan **Monitor MQTT** di kiri, **GPS & Kompas** dan **Branding & admin** di kanan, lalu **Patch dry-run** selebar halaman. Bilah bagian (Koneksi, MQTT, GPS & Kompas, Branding, Dry-run) mengikuti urutan itu. Pada lebar 1024–1279 px Koneksi dan MQTT berdampingan dan kartu lain selebar halaman; di bawah 1024 px semua kartu satu kolom dengan urutan yang sama.
 - Enter di bagian mana pun men-submit bagian itu.
 - URL Data Out disimpan tanpa garis miring di akhir. Port MQTT harus bilangan bulat 1–65535.
 - **Transport MQTT** (WebSocket default, atau TCP) harus sama dengan listener broker. **Path WebSocket** (default `/mqtt`) hanya dipakai dengan WebSocket. Mengubah host, port, transport, atau path me-restart monitor dan mereset penghitungnya.
-- Dry-run config patch mewajibkan **Base config revision**, yaitu `config_rev` terakhir yang dilaporkan node. Dry-run hanya pratinjau dan tidak mengirim apa pun; perubahan nyata dikirim lewat Kontrol di Ringkasan.
-- Login admin di sini juga membuka Kontrol di Ringkasan (sesi yang sama, 30 menit). Kotak **Publish MQTT** bernilai HANYA ADMIN.
+- Dry-run config patch mewajibkan **Revisi konfigurasi dasar** (Base config revision), yaitu `config_rev` terakhir yang dilaporkan node. Dry-run hanya pratinjau dan tidak mengirim apa pun; perubahan nyata dikirim lewat Kontrol di Dashboard.
+- Login admin di sini juga membuka Kontrol di Dashboard (sesi yang sama, 30 menit). Chip **PATCH** di bilah halaman bernilai `ADMIN ONLY`.
 - Logo PNG boleh grayscale, RGB, RGBA, atau palette, 8/16-bit, interlaced, maksimal 256 KiB dan 4096 × 4096 px. Logo diperiksa di browser sebelum di-stage.
-- Pilihan sumber GPS dan Compass disimpan di browser ini dan dipulihkan setelah reload. Masing-masing punya tombol restore default sendiri. Offset kompas manual berkisar −360 sampai 360, dan juga bisa diatur dari **Polar → Atur** di Ringkasan.
+- Pilihan sumber GPS dan Compass disimpan di console dan dipulihkan setelah reload, di browser lain, dan setelah console di-restart. Masing-masing punya tombol restore default sendiri. Offset kompas manual berkisar −360 sampai 360, dan juga bisa diatur dari **Polar → Atur** di Dashboard.
 - Bila konfigurasi console tidak bisa dibaca, halaman menampilkan "Konfigurasi console tidak tersedia … Dicoba ulang otomatis" tanpa form. Console mencoba lagi sendiri (1, 2, 4, 8, lalu setiap 15 detik).
 
 ### Monitor Pesan
 
-- Baris metrik: Received, Valid, Invalid, Bytes, Last latency. Last latency hanya menghitung pesan live. Di ponsel baris ini dua kolom.
-- Banner menampilkan status koneksi dan transport ("MQTT over TCP" atau "MQTT over WebSocket, path /x").
+- Bilah halaman menampilkan chip koneksi, tag transport (`TCP` atau `WS`), `SYNTHETIC` bila ada payload sintetis, sakelar sdr/v1 | RDF Node v2, **Muat ulang**, dan **Sambungkan ulang**. Kartu **Koneksi** menampilkan broker, transport (`TCP` atau `WS /path`), topik terakhir (disamarkan), dan publish.
+- Baris metrik: Diterima, Valid, Tidak valid, Byte, Latensi terakhir, Pesan terakhir. Latensi terakhir hanya menghitung pesan live. Di ponsel baris ini dua kolom.
 - Tabel per kind:
   - **Count** adalah jumlah pesan per kind sejak monitor start.
   - **Age** menghitung naik setiap detik sejak console menerima pesan. Badge `STALE` muncul setelah doa 5 detik, nav 5 detik, health 8 detik, dan state/config_reported 65 detik. Ini ambang tampilan, bukan gate.
@@ -457,7 +482,7 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
   - Badge `RETAINED` berarti pesan di-replay broker saat subscribe; pesan seperti itu dinilai dari timestamp-nya sendiri dan tidak punya latency.
   - Payload status menampilkan flag node apa adanya (`valid`, `doa_valid`, `settings_valid`), state health beserta reason, dan availability `ONLINE`/`OFFLINE`.
   - Badge `SYNTHETIC` muncul untuk payload dengan `source: "synthetic"`.
-- **Sambungkan ulang monitor lokal** selalu membuka sesi subscriber baru dengan pengaturan broker tersimpan; penghitung dan record terakhir mulai dari nol. Tanpa tombol ini, monitor mencoba lagi sendiri dalam sekitar 10 detik.
+- **Sambungkan ulang** selalu membuka sesi subscriber baru dengan pengaturan broker tersimpan; penghitung dan record terakhir mulai dari nol. Tanpa tombol ini, monitor mencoba lagi sendiri dalam sekitar 10 detik.
 - Client id MQTT sekarang `groundconsole` plus 10 karakter hex acak per monitor, sehingga dua console bisa memakai satu broker. ACL atau log broker yang memakai id lama `ground-console-monitor` perlu diperbarui.
 - Status MQTT diperbarui sendiri setiap 2 detik di Monitor Pesan dan Kesehatan Sistem, dan setiap 5 detik di halaman lain.
 - Panel **Telemetri RDF Node v2** dijelaskan di bagian MQTT di bawah.
@@ -465,7 +490,7 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 ### Shortcut keyboard
 
 - `1`–`7` membuka halaman sesuai urutan menu, `R` me-refresh. Shortcut juga bekerja saat fokus berada di dalam Receiver, kecuali saat mengetik di field teks atau angka.
-- Shortcut tetap bekerja setelah mengklik checkbox atau radio button. Selama fokus berada di slider (misalnya Head Up atau opasitas overlay), shortcut tidak aktif, sehingga tombol angka tidak berpindah halaman.
+- Shortcut tetap bekerja setelah mengklik checkbox atau radio button. Selama fokus berada di slider (misalnya Head Up atau opasitas overlay), shortcut tidak aktif, sehingga tombol angka tidak berpindah halaman. Di menu basemap yang terbuka, tombol angka juga tidak berpindah halaman; `R` tetap me-refresh.
 - Shortcut halaman menutup menu halaman yang terbuka. `Esc`, klik di luar menu, atau Tab keluar dari menu juga menutupnya.
 - "Skip to workspace" memindahkan fokus ke isi halaman tanpa mengganti halaman.
 
@@ -481,7 +506,7 @@ Koneksi MQTT default adalah `10.90.0.1:9001`, WebSocket, path `/mqtt`. Host mene
 
 Monitor memakai MQTTv5 dan satu konfigurasi broker bersama: host, port, transport, dan WebSocket path berlaku untuk kedua keluarga topic. Filter v1 adalah `sdr/v1/uav-01/#`; RDF Node v2 memakai prefix `sdr/v2/uav-01/` dan sepuluh suffix: `telemetry/doa`, `telemetry/health`, `telemetry/health/detail`, `telemetry/angular`, `state`, `capabilities`, `config/reported`, `availability`, `ack/config`, dan `ack/operation`. Status `READY` menunggu SUBACK berhasil untuk seluruh filter bersama. Parser dan snapshot v1/v2 tetap terpisah agar validasi satu schema tidak mengubah statistik schema lain.
 
-Konfigurasi lama `rdf_node_mqtt` tidak digunakan atau dimigrasikan; field itu hilang saat konfigurasi disimpan berikutnya. Atur endpoint kedua keluarga topic melalui **Konfigurasi → Connection**.
+Konfigurasi lama `rdf_node_mqtt` tidak digunakan atau dimigrasikan; field itu hilang saat konfigurasi disimpan berikutnya. Atur endpoint kedua keluarga topic melalui **Konfigurasi → MQTT**.
 
 ### Broker staging lokal
 
@@ -547,9 +572,126 @@ Panel **Telemetri RDF Node v2** ada di halaman Monitor Pesan:
 - `READY` berarti seluruh SUBACK untuk filter bersama berhasil, bukan DAQ sehat. Availability adalah petunjuk koneksi, bukan health.
 - Per topic tampil count, status (`FRESH`, `STALE`, `CONTEXT`, `INCONSISTENT`, `INVALID`, atau `UNAVAILABLE` bila belum pernah diterima), umur, RETAINED/LIVE, dan ringkasan field. Nilai retained yang dihapus publisher (pesan retained kosong) tampil `UNAVAILABLE`.
 - Nilai DoA dan Angular hanya tampil selama `FRESH`. `FRESH` menjadi `STALE` bila halaman tidak membaca state v2 baru selama 5 detik.
-- Untuk menerima Angular live, atur `require_ground_receipt_for_bulk=false` secara terpisah pada Edge. MQTT v2 tidak mengubah HTTP Data Out, publication gate, atau simulasi Overview.
+- Untuk menerima Angular live, atur `require_ground_receipt_for_bulk=false` secara terpisah pada Edge. MQTT v2 tidak mengubah HTTP Data Out, publication gate, atau simulasi Dashboard.
 
 Broker TLS, PPP/T900, dan MQTT production tidak disiapkan oleh quickstart ini. Contoh payload dan fixture lokal bukan bukti kompatibilitas perangkat atau acceptance hardware.
+
+## Instalasi Linux: Docker, rilis tar dan service
+
+Bagian ini untuk komputer ground station **Linux** yang hanya memakai console: tidak perlu Node.js atau build, console jalan di background, hidup lagi setelah reboot, dan semua pengaturan tersimpan otomatis. Ada dua cara, pilih salah satu: Docker, atau rilis tar dengan `install.sh`. Keduanya tetap bind ke `127.0.0.1:8787`, jadi console hanya bisa dibuka dari komputer itu sendiri: `http://127.0.0.1:8787/` di Chromium atau Chrome. Detail lengkap ada di `packaging/console/README.md`.
+
+### Membuat rilis tar
+
+Di mesin build (repository dengan submodule `vendor/BrowSDR`, Node.js dan Python):
+
+```sh
+python3 tools/make_release.py              # npm ci + npm run build:all, lalu kedua tarball
+python3 tools/make_release.py --skip-build # pakai frontend/dist yang sudah di-build
+cd dist/release && sha256sum -c SHA256SUMS
+```
+
+Hasilnya di `dist/release/`: `sdr-doa-ground-console-<VERSI>-linux.tar.gz` (console, frontend sudah di-build, installer, Dockerfile rilis, panduan), `sdr-doa-rdf-sdr-agent-<VERSI>.tar.gz` (agent RDF-SDR) dan `SHA256SUMS`. Versi diambil dari file `VERSION` di root repository. `--with-wheels` ikut membawa wheel `paho-mqtt` dan `tzdata` untuk instalasi tanpa internet. Build penuh menolak berjalan bila ada perubahan yang belum di-commit pada input build.
+
+### Docker
+
+Butuh Docker Engine dan Compose v2 di Linux. Console memakai `network_mode: host`: console bind ke `127.0.0.1` dan menolak alamat lain, dan dengan network host loopback itu adalah loopback komputer ini. Jangan ganti ke network bridge dengan `ports:`. Docker Desktop di macOS/Windows tidak didukung.
+
+```sh
+# dari rilis (tanpa Node.js)
+tar -xzf sdr-doa-ground-console-2.0.0-linux.tar.gz
+cd sdr-doa-ground-console-2.0.0-linux
+docker compose up -d --build
+
+# atau dari clone repository biasa (bukan worktree), build frontend di dalam image
+git submodule update --init --recursive
+docker compose up -d --build
+```
+
+- **Data**: semua yang disimpan console ada di volume `sdr-doa-ground-console_sdr-doa-data`, di-mount sebagai `/data`. Volume tetap ada saat container di-restart, dibuat ulang, atau di-upgrade.
+- **Kata sandi admin**: simpan di volume dengan `docker compose exec console sdr-doa-set-admin-password` lalu `docker compose restart console`. Bisa juga lewat `SDR_DOA_ADMIN_PASSWORD` di file `.env` di sebelah `docker-compose.yml`; environment menang atas `/data/.env`. Tanpa keduanya berlaku default `123456` dan UI memberi peringatan.
+- **Nilai awal (seed)**: `SDR_DOA_SEED_BASE_URL`, `SDR_DOA_SEED_MQTT_HOST`, `SDR_DOA_SEED_MQTT_PORT`, `SDR_DOA_SEED_MQTT_TRANSPORT`, `SDR_DOA_SEED_MQTT_WS_PATH` dan `SDR_DOA_SEED_REFRESH_SECONDS` di `.env` sebelah compose hanya dipakai pada start pertama, saat `/data/console.json` belum ada. Setelah itu ubah lewat halaman Konfigurasi. Port diatur dengan `SDR_DOA_PORT` di `.env` yang sama (jangan hanya di shell, karena `docker compose up` berikutnya kembali ke 8787).
+- **Log dan status**: `docker compose ps` (kolom health dari `/api/health`), `docker compose logs -f console`.
+- **Update**: ekstrak rilis baru (atau `git pull` dan `git submodule update`), lalu `docker compose up -d --build`. Volume dan isinya tetap.
+- **Stop**: `docker compose down` (volume tetap); `docker compose down -v` juga menghapus semua data.
+
+Container berjalan sebagai uid 10001 dan `restart: unless-stopped` menyalakannya lagi bersama Docker saat boot (pastikan `systemctl is-enabled docker` bernilai `enabled`).
+
+### Rilis tar dan `install.sh` (tanpa Docker)
+
+Butuh Python 3.9+ dengan modul `venv` (`sudo apt install python3-venv` di Debian/Ubuntu). Jalankan sebagai user desktop biasa, bukan root:
+
+```sh
+tar -xzf sdr-doa-ground-console-2.0.0-linux.tar.gz
+cd sdr-doa-ground-console-2.0.0-linux
+sh install.sh            # menanyakan kata sandi admin; Enter = default 123456
+```
+
+Tanpa pertanyaan, dengan nilai awal: `sh install.sh --yes --generate-password --base-url http://192.168.100.100:8081 --mqtt-host 10.90.0.1 --mqtt-port 9001 --refresh-seconds 2`. Opsi lain: `--password NILAI`, `--port`, `--prefix`, `--data-dir`, `--no-service`, `--no-desktop` (lihat `sh install.sh --help`). Installer memeriksa file rilis terhadap `MANIFEST.sha256`, memasang program dan venv (`paho-mqtt`, `tzdata`) di `~/.local/share/sdr-doa-ground-console/app`, membuat systemd user service, perintah `sdr-doa-console` di `~/.local/bin`, dan entri menu, lalu langsung menjalankan console. Dari repository, `sh packaging/console/install.sh` bekerja sama setelah `npm run build:all`.
+
+```text
+sdr-doa-console open        start bila perlu, lalu buka di Chromium/Chrome
+sdr-doa-console start | stop | restart | status
+sdr-doa-console logs        ikuti log (journalctl --user)
+sdr-doa-console password    ganti kata sandi admin, lalu restart console
+sdr-doa-console info        versi dan lokasi file
+sdr-doa-console uninstall   hapus program; --purge juga menghapus data
+```
+
+Upgrade: ekstrak rilis baru dan jalankan `sh install.sh` lagi. Program dan venv diganti; data, kata sandi, dan console yang sedang jalan dipertahankan.
+
+### Jalan di background dan saat boot
+
+- **Native**: console adalah systemd user service `sdr-doa-ground-console.service` (restart otomatis bila gagal). Installer menjalankan `loginctl enable-linger $USER` agar service mulai saat boot tanpa login; bila ditolak, jalankan sekali `sudo loginctl enable-linger $USER`. Cek dengan `systemctl --user status sdr-doa-ground-console` dan `loginctl show-user $USER -p Linger`. Dengan `--no-service`, atau tanpa systemd user session, console jalan di background sampai reboot berikutnya (`sdr-doa-console start` setelah login).
+- **Docker**: `restart: unless-stopped`, selama service Docker sendiri aktif saat boot.
+- **Agent RDF-SDR**: systemd system service `sdr-doa-agent.service`, enabled, atau container dengan `restart: unless-stopped` (lihat di bawah).
+
+### Apa yang tersimpan dan di mana
+
+Semua yang diubah lewat UI disimpan di server console, bukan hanya di browser. Pengaturan tetap ada saat browser lain dipakai, cache dibersihkan, console di-restart, container dibuat ulang, atau komputer reboot.
+
+| File | Isi | Native | Docker |
+|---|---|---|---|
+| `console.json` | Data Out, MQTT (host, port, transport, path WebSocket), interval refresh | `~/.local/share/sdr-doa-ground-console/` | `/data/` |
+| `branding.json` | nama aplikasi dan logo | sama | sama |
+| `preferences.json` | tema, bahasa, panel Dashboard dan node card, peta dasar, Lapisan/overlay, tampilan polar, sumber dan offset kompas, sumber GPS, mode Dengar, ikuti frekuensi node, mode dock Spektrum (RX atau Spektrum) dan skala dB terakhirnya, pengaturan (termasuk Skala dB tab Dengar), pengaturan pindai (termasuk Grafik min./maks.) dan bookmark Receiver | sama | sama |
+| `receiver/` | rekaman, scan, dan marker set Receiver | sama | sama |
+| `tiles/` | cache tile basemap; boleh dihapus, terisi lagi saat peta dilihat | sama | sama |
+| `.env` | `SDR_DOA_ADMIN_PASSWORD` (mode 0600) | sama | sama |
+
+- Data realtime (snapshot DoA, pesan MQTT, spektrum) tidak disimpan; data itu terus diperbarui.
+- Browser menyalin preferensi ke console sekitar setengah detik setelah perubahan, dan saat halaman dibuka membaca salinan console lebih dulu. Bila console sedang tidak bisa dihubungi, perubahan dikirim begitu console menjawab lagi.
+- Pengaturan Receiver ikut tersimpan selama halaman console terbuka. ID perangkat Receiver tetap di browser.
+- Saat console dijalankan langsung dari repository tanpa flag, file berada di `~/.config/sdr-doa-ground-console/` (`console.json`, `branding.json`, `preferences.json`), rekaman di `~/.local/share/sdr-doa-ground-console`, cache tile di `~/.cache/sdr-doa-ground-console/tiles`, dan kata sandi di `.env` root repository. Lokasinya bisa diubah dengan `--config-path`, `--branding-path`, `--preferences-path`, `--data-dir`, `--tile-cache-dir` dan `--env-file`; console mencetak lokasinya saat start.
+
+### Cache tile dan peta offline
+
+- Console menyimpan setiap tile yang pernah tampil di `--tile-cache-dir` (instalasi: `DATA/tiles`), paling banyak `--tile-cache-max-mb` (bawaan 512 MB; tile yang paling lama tidak dipakai dihapus lebih dulu; `0` berarti tidak menyimpan apa pun).
+- Tile dianggap segar selama max(`max-age` dari upstream, 7 hari), paling lama 30 hari, dan selama segar disajikan tanpa jaringan. Setelah itu console mengambilnya lagi; bila upstream tidak bisa dihubungi, salinan lama tetap disajikan. Tile yang belum pernah tersimpan dijawab 504.
+- Tidak ada unduh massal per area; kebijakan penyedia tile melarangnya. Untuk menyiapkan area sebelum ke lapangan, buka area itu di Dashboard pada zoom dan gaya yang akan dipakai selagi masih online.
+- Host yang gagal dilewati selama 30 detik, sehingga tile yang belum tersimpan langsung dijawab saat offline. Log console mencatat sekali saat upstream sebuah sumber tidak bisa dihubungi dan sekali saat kembali; tile yang berhasil disajikan tidak dicatat.
+- Permintaan keluar memakai proxy standar dari environment (`HTTPS_PROXY`, `NO_PROXY`) dan User-Agent `SDR-DoA-Ground-Console/<versi>`.
+- Setiap tile yang belum tersimpan memberi tahu penyedia area stasiun. Gaya Polos tidak meminta tile.
+- `--base-url` dan `--mqtt-*` menimpa pengaturan tersimpan hanya untuk satu kali jalan dan tidak disimpan. Service dan container sengaja tidak memakainya.
+
+## Agent RDF-SDR (Raspberry)
+
+Kontrol di console butuh edge agent di RDF-SDR: agent membaca Data Out KrakenSDR dan publish `health`, `state` dan `config_reported` ke MQTT, lalu menjawab patch dari Kontrol di `ack/config`. Detail lengkap ada di `packaging/agent/README.md`.
+
+```sh
+tar -xzf sdr-doa-rdf-sdr-agent-2.0.0.tar.gz
+cd sdr-doa-rdf-sdr-agent-2.0.0
+sudo sh install.sh --dry-run --mqtt-host 127.0.0.1    # lihat dulu apa yang akan dilakukan
+sudo sh install.sh --mqtt-host 127.0.0.1              # pasang dan start (broker di RDF-SDR sendiri)
+systemctl status sdr-doa-agent
+journalctl -u sdr-doa-agent -f
+```
+
+- Agent berjalan sebagai service `sdr-doa-agent` (mulai saat boot, restart bila gagal) dengan user biasa: pemilik `settings.json` KrakenSDR, `doasdr`, atau user sistem baru `sdr-doa-agent`. Installer menolak user root.
+- Pengaturan ada di `/etc/sdr-doa-agent/agent.env` (`root:<grup service>`, 0640). Setelah mengubahnya: `sudo systemctl restart sdr-doa-agent`. Variabel lain bisa diset dengan `--set NAMA=NILAI`, misalnya `--set DOA_RATE=0`.
+- Secara bawaan agent menjawab setiap patch dengan `REMOTE_CONTROL_DISABLED`. `sudo sh install.sh --enable-config` mengizinkan Kontrol mengubah `settings.json`; `--disable-config` mematikannya lagi. Aktifkan hanya di broker dan jaringan yang dipercaya.
+- Agent memakai MQTT lewat TCP (default port 1883), bukan WebSocket. Console dan agent harus memakai broker yang sama. Broker di luar loopback wajib TLS dan username (`MQTT_TLS=1` atau `MQTT_CAFILE`, `MQTT_USERNAME`, dan `SDR_DOA_MQTT_PASSWORD` di `agent.env`; lihat `packaging/agent/README.md`).
+- Docker (opsional, juga arm64/armv7): salin `packaging/agent/agent.env.example` ke `agent.env`, edit, lalu `docker compose up -d --build` di folder rilis agent (atau `docker compose -f docker-compose.agent.yml up -d --build` di repository). Butuh Compose v2.24+.
+- Upgrade: jalankan installer rilis baru lagi; `agent.env` dan state tetap. Hapus dengan `sudo sh /opt/sdr-doa-agent/uninstall.sh` (`--purge` juga menghapus pengaturan dan state).
 
 ## Validasi setelah install
 
@@ -601,11 +743,26 @@ Jalankan `npm run build:all` (atau `npm run build` tanpa Receiver) dari `fronten
 
 ### UI masih versi lama setelah `git pull`
 
-Misalnya masih ada menu samping, atau Ringkasan belum berupa dasbor peta penuh. `frontend/dist` belum di-build ulang. Jalankan `cd frontend && npm ci && npm run build:all`, restart console, lalu muat ulang halaman. Lihat [Setelah `git pull`](#setelah-git-pull).
+Misalnya masih ada menu samping, atau Dashboard belum berupa dasbor peta penuh. `frontend/dist` belum di-build ulang. Jalankan `cd frontend && npm ci && npm run build:all`, restart console, lalu muat ulang halaman. Lihat [Setelah `git pull`](#setelah-git-pull).
 
 ### Spektrum: `NEEDS_PAIRING`, `NO_WEBUSB`, atau `NO BRIDGE`
 
-`NEEDS_PAIRING`: pasangkan RadioSpectrum sekali di halaman Receiver (tombol `7`), lalu tekan **Mulai** lagi di Ringkasan. `NO_WEBUSB`: buka console di Chrome atau Edge. `NO BRIDGE`: frame Receiver tidak menjawab; buka halaman Receiver atau muat ulang console.
+`NEEDS_PAIRING`: pasangkan RadioSpectrum sekali di halaman Receiver (tombol `2`), lalu tekan **Mulai** lagi di Dashboard. `NO_WEBUSB`: buka console di Chrome atau Edge. `NO BRIDGE`: frame Receiver tidak menjawab; buka halaman Receiver atau muat ulang console.
+
+### Spektrum: Ikuti frekuensi node mati sendiri
+
+Tengah atau VFO diubah di halaman Receiver (mengetik Center atau VFO, menggeser VFO di grafik Receiver, memanggil bookmark, atau selesai dengar-pindai), grafik diklik pada mode Spektrum, atau **Tala ke sini** ditekan pada sebuah penanda. Dasbor lalu memakai frekuensi itu dan berhenti mengikuti node agar node tidak menimpanya. Centang **Ikuti frekuensi node** lagi untuk kembali ke frekuensi node.
+
+### Spektrum: mode Spektrum `SWEEP_UNSUPPORTED`, `SWEEP_FAILED`, atau isian Atur terkunci
+
+`SWEEP_UNSUPPORTED`: radio yang tersambung tidak punya sweep hardware (Mock SDR hanya memakai sumber simulasi, dan hanya dengan `?mock=1`). `SWEEP_FAILED`: pindai gagal dimulai; teks di sampingnya adalah pesan Receiver, dan halaman Receiver (tombol `2`) menampilkan detailnya, misalnya rentang yang ditolak sweep native di dekat 7250 MHz. RX yang dihentikan untuk pindai itu jalan lagi, dan VFO tetap terdengar atau tetap senyap seperti sebelumnya. Rentang, Resolusi, dan Gain pindai terkunci selama pindai berjalan; tekan **Berhenti** lalu ubah.
+
+### Spektrum: Penanda nonaktif, **Belum disimpan**, atau penanda ditolak
+
+- **Penanda** nonaktif: Receiver belum dimuat atau tidak menjawab. Tekan **Mulai** (atau buka halaman Receiver) dulu.
+- **Belum disimpan**: belum ada marker set yang dipilih di halaman Receiver, jadi penanda hilang saat console dimuat ulang. Di halaman Receiver (tombol `2`), pilih set di **Set tersimpan** atau isi nama lalu **Simpan set**; penanda berikutnya dari dock tersimpan ke set itu.
+- **Penanda tidak tersimpan ke set**: penanda masuk daftar, tetapi penyimpanan ke set gagal; teks dalam kurung adalah pesan Receiver. Periksa console, lalu simpan set lagi di halaman Receiver.
+- **Di luar jangkauan penanda**: frekuensi perangkat (tanpa Freq Shift) harus 1–7250 MHz. **Batas penanda tercapai**: daftar sudah berisi 10 000 penanda. **Penanda sudah tidak ada**: penanda itu sudah dihapus di halaman Receiver.
 
 ### Kontrol: Kirim nonaktif, `CONFIG_REVISION_UNKNOWN`, atau Belum ada ACK
 
@@ -638,10 +795,16 @@ Gunakan Node LTS yang memenuhi requirement Vite. Node 22.12+ direkomendasikan ol
 
 Ini tidak selalu berarti frontend rusak. Buka **Kesehatan Sistem → Pembacaan resource** untuk melihat file mana yang gagal dan kenapa. Periksa DNS atau koneksi ke `doasdr.local:8081`, dan gunakan alamat Data Out yang diizinkan. `STALE` dengan `NODE_CLOCK_STALLED` berarti port 8081 menjawab tetapi DSP node berhenti. `DEGRADED` berarti DAQ sync gagal atau ADC overdrive; turunkan gain bila overdrive. Gunakan tab **Simulasi** untuk memeriksa renderer tanpa hardware.
 
-### Basemap OSM tidak tampil
+### Basemap tidak tampil
 
-MapLibre membutuhkan koneksi HTTPS ke `tile.openstreetmap.de` atau `tile.openstreetmap.org` dan CSP yang sesuai. Kegagalan tile tidak berarti overlay atau polar plot gagal; chip "BASEMAP TIDAK TERSEDIA" muncul bila semua host gagal.
+MapLibre hanya renderer; tile datang dari console lewat `/api/tiles`, dan CSP halaman tidak mengizinkan host tile lain. Kegagalan tile tidak berarti overlay atau polar plot gagal; chip "BASEMAP TIDAK TERSEDIA · <gaya>" muncul bila tile area yang tampil tidak bisa diambil dan belum tersimpan, dan "BASEMAP SEBAGIAN · <gaya>" bila sebagian tile tampil dan sisanya gagal.
+
+- Lihat log console: `tiles <sumber>: upstream unavailable (...)` menyebut penyebabnya (DNS, koneksi ditolak, timeout, HTTP 4xx/5xx, tipe isi ditolak).
+- Periksa koneksi HTTPS dari komputer console (bukan dari browser) ke host di `tools/tile_cache.py`, serta proxy (`HTTPS_PROXY`, `NO_PROXY`), VPN, dan firewall.
+- `curl -s -D - -o /dev/null http://127.0.0.1:8787/api/tiles/osm/0/0/0` menampilkan `X-Tile-Cache: hit`, `miss` atau `stale`; 504 berarti tile belum tersimpan dan upstream tidak terjangkau.
+- Pastikan `--tile-cache-dir` bisa ditulis user console; bila tidak, log mencatat `tile cache ... is not writable` dan tile tetap disajikan tanpa disimpan.
+- Coba gaya lain: tiap gaya punya sumber sendiri, kecuali Terang dan Gelap yang memakai tile Standar.
 
 ### Keamanan lokal
 
-Tetap gunakan `--bind 127.0.0.1`. Jangan memakai `0.0.0.0` untuk quickstart dan jangan memasukkan secret ke frontend. Config dry-run di Konfigurasi bukan command nyata, tetapi Kontrol di Ringkasan adalah command nyata ke RDF-SDR. Ganti kata sandi admin bawaan `123456` sebelum console dipakai di komputer bersama. Console menolak `POST /api/mqtt/config-patch` tanpa header `Origin` dari halaman console itu sendiri, tanpa sesi admin, atau tanpa `confirm: true`.
+Tetap gunakan `--bind 127.0.0.1` (di Docker: `network_mode: host`). Jangan memakai `0.0.0.0` untuk quickstart dan jangan memasukkan secret ke frontend. Config dry-run di Konfigurasi bukan command nyata, tetapi Kontrol di Dashboard adalah command nyata ke RDF-SDR. Ganti kata sandi admin bawaan `123456` sebelum console dipakai di komputer bersama. Console menolak `POST /api/mqtt/config-patch` tanpa header `Origin` dari halaman console itu sendiri, tanpa sesi admin, atau tanpa `confirm: true`.

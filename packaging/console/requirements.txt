@@ -1,0 +1,7 @@
+# Runtime packages for the Ground Console (Docker image and native install).
+# paho-mqtt: MQTT monitor and the Kontrol config patch. Without it the console
+# still starts and the monitor reports ERROR.
+# tzdata: IANA zones for the Receiver Records time filters when the system has
+# no zoneinfo database.
+paho-mqtt==2.1.0
+tzdata==2026.4

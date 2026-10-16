@@ -9,15 +9,20 @@ import {
   durationParts,
   evidenceExpired,
   formatAgeText,
+  formatCount,
   formatDuration,
   gateCheckKey,
+  gateCheckRows,
   healthHeadline,
   isSecretSettingKey,
   nodeProgressView,
   nodeStatus,
   resourceRows,
+  settingUnit,
+  settingValueText,
   signalQualityView,
   stateTone,
+  syncFlagsView,
 } from './healthView';
 
 const PATHS = ['/status.json', '/settings.json', '/DOA_value.html', '/doa.xml'];
@@ -200,5 +205,61 @@ describe('collector error messages', () => {
 
   it('shows an unknown message unchanged', () => {
     expect(collectorErrorText(id, 'expected 377 CSV fields, found 3')).toEqual({ text: 'expected 377 CSV fields, found 3', raw: 'expected 377 CSV fields, found 3', known: false });
+  });
+});
+
+describe('publication-gate checks for Diagnostics', () => {
+  it('puts failing node checks first, then the standing blocks, unset checks and passes', () => {
+    const rows = gateCheckRows({ status_available: true, authority_selected: false, status_fresh: null, adc_not_overdriven: false, daq_healthy: true, canonical_angle_ready: false });
+    expect(rows.map((row) => `${row.key}:${row.state}:${row.tone}`)).toEqual([
+      'adc_not_overdriven:FAIL:bad',
+      'authority_selected:BLOCKED:warn',
+      'canonical_angle_ready:BLOCKED:warn',
+      'status_fresh:NOT CONFIGURED:neutral',
+      'status_available:PASS:good',
+      'daq_healthy:PASS:good',
+    ]);
+  });
+
+  it('ignores a gate without checks', () => {
+    expect(gateCheckRows(undefined)).toEqual([]);
+    expect(gateCheckRows(['status_available'])).toEqual([]);
+  });
+});
+
+describe('DAQ sync flags', () => {
+  it('reads each required flag as passing, failing or missing', () => {
+    const value = snapshot({ status: { available: true, safe: { daq_status: { frame_sync: true, iq_sync: false } } } });
+    expect(syncFlagsView(value)).toEqual([
+      { key: 'frame_sync', label: 'frame', ok: true },
+      { key: 'sample_delay_sync', label: 'delay', ok: null },
+      { key: 'iq_sync', label: 'IQ', ok: false },
+    ]);
+    expect(syncFlagsView(null).every((flag) => flag.ok === null)).toBe(true);
+  });
+});
+
+describe('effective settings on Diagnostics', () => {
+  it('appends the unit KrakenSDR uses for each known field', () => {
+    expect(settingUnit('center_freq')).toBe('MHz');
+    expect(settingUnit('vfo_freq_0')).toBe('Hz');
+    expect(settingUnit('vfo_bw_1')).toBe('Hz');
+    expect(settingUnit('vfo_squelch_0')).toBe('dB');
+    expect(settingUnit('doa_method')).toBeNull();
+    expect(settingValueText('center_freq', 415.7882)).toBe('415.7882 MHz');
+    expect(settingValueText('compass_offset', 12.5)).toBe('12.5°');
+    expect(settingValueText('vfo_freq_0', 415788200)).toBe('415788200 Hz');
+    expect(settingValueText('en_doa', true)).toBe('ON');
+    expect(settingValueText('doa_method', 'MUSIC')).toBe('MUSIC');
+    // A unit only follows a number, never a text value under a numeric key.
+    expect(settingValueText('center_freq', 'n/a')).toBe('n/a');
+    expect(settingValueText('location_source', null)).toBe('N/A');
+  });
+
+  it('formats counts with the thousands separator of the UI language', () => {
+    expect(formatCount('en', 1204)).toBe('1,204');
+    expect(formatCount('id', 1204)).toBe('1.204');
+    expect(formatCount('en', null)).toBe('N/A');
+    expect(formatCount('en', Number.NaN)).toBe('N/A');
   });
 });

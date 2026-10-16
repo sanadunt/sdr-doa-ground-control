@@ -1,5 +1,5 @@
 import type { JSX } from 'react';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import type { CompassConfig, PolarSettings, TelemetrySnapshot } from '../../types';
 import { bearingForView, formatDegrees, normalizeDegrees, polarView } from '../../lib/polar';
 import { overviewDoaStatus } from '../../lib/doaStatus';
@@ -9,6 +9,7 @@ import type { PolarViewSettings } from '../../lib/polarViewSettings';
 import { useI18n } from '../../lib/i18n';
 import { PolarPlot, peakUpHead, radialDomain } from '../PolarPlot';
 import { Icon } from '../ui';
+import { useSyncedDraft } from './useSyncedDraft';
 
 function degreesLabel(value: number): string {
   return String(Number(value.toFixed(1)));
@@ -16,23 +17,6 @@ function degreesLabel(value: number): string {
 
 function dbText(value: number): string {
   return String(Number(value.toFixed(2)));
-}
-
-/**
- * Keep a typed draft while it still parses to the stored value; otherwise
- * follow the stored value (Reset, slider, another control).
- */
-function useSyncedDraft(value: number | null, parse: (text: string) => number | null, format: (value: number) => string): [string, (next: string) => void] {
-  const [draft, setDraft] = useState(() => (value === null ? '' : format(value)));
-  useEffect(() => {
-    setDraft((current) => {
-      if (value === null) return current;
-      const parsed = parse(current);
-      return parsed !== null && Math.abs(parsed - value) < 1e-9 ? current : format(value);
-    });
-    // parse and format are pure module-level helpers.
-  }, [value]);
-  return [draft, setDraft];
 }
 
 const parseHead = (text: string): number | null => {

@@ -30,6 +30,8 @@ export interface RadioState {
 export interface DisplayState {
 	minDB: number;
 	maxDB: number;
+	/** Auto fits the visible spectrum; false draws minDB to maxDB. */
+	auto: boolean;
 }
 
 export type GainState = Record<string, number>;

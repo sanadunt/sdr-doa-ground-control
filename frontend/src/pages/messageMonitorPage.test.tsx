@@ -4,8 +4,8 @@ import { describe, expect, it } from 'vitest';
 import type { ConsoleConfig } from '../types';
 import { I18nContext, translate } from '../lib/i18n';
 import type { Lang } from '../lib/i18n';
-import { normalizeMqttSnapshot } from '../lib/mqttMonitor';
-import { MessageMonitorPage } from './MessageMonitorPage';
+import { normalizeMqttSnapshot, normalizeRdfNodeSnapshot } from '../lib/mqttMonitor';
+import { MessageMonitorPage, RdfNodeView } from './MessageMonitorPage';
 
 const CONFIG: ConsoleConfig = { base_url: 'http://doasdr.local:8081', mqtt_host: '127.0.0.1', mqtt_port: 18884, mqtt_transport: 'tcp', mqtt_ws_path: '/mqtt', refresh_seconds: 2 };
 
@@ -24,6 +24,8 @@ const SNAPSHOT = normalizeMqttSnapshot({
   enabled: true,
   read_only: true,
   publish_enabled: false,
+  host: '127.0.0.1',
+  port: 18884,
   transport: 'tcp',
   ws_path: '/mqtt',
   now_ms: now,
@@ -39,49 +41,71 @@ const SNAPSHOT = normalizeMqttSnapshot({
   kind_counts: { doa: 1, health: 600 },
   topic_counts: { 'sdr/v1/uav-01/telemetry/doa': 1, 'sdr/v1/uav-01/telemetry/health': 600 },
   last_by_kind: {
-    doa: { kind: 'doa', received_at_ms: now - 600_000, age_ms: 600_000, bytes: 180, qos: 0, retained: false, valid: true, latency_ms: 0, source_ts_ms: now - 600_000, validity_flags: { valid: false }, payload: { v: 1, valid: false } },
+    doa: { kind: 'doa', received_at_ms: now - 600_000, age_ms: 600_000, bytes: 180, qos: 0, retained: false, valid: true, latency_ms: 0, source_ts_ms: now - 600_000, validity_flags: { valid: false }, payload: { v: 1, valid: false, station_id: 'uav-01' } },
     health: { kind: 'health', received_at_ms: now, age_ms: 0, bytes: 200, qos: 0, retained: false, valid: true, latency_ms: 4, source_ts_ms: now - 4, validity_flags: { doa_valid: false }, payload: { v: 1, state: 'ONLINE', doa_valid: false } },
   },
 }, now);
+
+const CAPABILITIES_NO_PATCH = { refreshIntervalsS: null, adminEnabled: true, adminDefaultPassword: false, configPatch: { enabled: false, requiresAdmin: true, topic: null, qos: null, ttlMs: null, ranges: {} } };
 
 describe('MessageMonitorPage', () => {
   const markup = render(<MessageMonitorPage mqtt={SNAPSHOT} config={CONFIG} onMqttChanged={() => undefined} />);
   const body = text(markup);
 
-  it('says it only subscribes and that Control sends the config patch over this connection', () => {
-    expect(body).toContain(translate('en', 'monitor.subscribeOnly'));
+  it('shows the publish mode as a value: admin config patch only, or subscribe only', () => {
+    expect(body).toContain(`${translate('en', 'monitor.publish')} ${translate('en', 'monitor.subscribeOnly')}`);
     expect(body).not.toContain('publish disabled');
-    const off = text(render(<MessageMonitorPage mqtt={SNAPSHOT} config={CONFIG} onMqttChanged={() => undefined} capabilities={{ refreshIntervalsS: null, adminEnabled: true, adminDefaultPassword: false, configPatch: { enabled: false, requiresAdmin: true, topic: null, qos: null, ttlMs: null, ranges: {} } }} />, 'id'));
-    expect(off).toContain(translate('id', 'monitor.subscribeOnlyNoPatch'));
+    const off = text(render(<MessageMonitorPage mqtt={SNAPSHOT} config={CONFIG} onMqttChanged={() => undefined} capabilities={CAPABILITIES_NO_PATCH} />, 'id'));
+    expect(off).toContain(`${translate('id', 'monitor.publish')} ${translate('id', 'monitor.subscribeOnlyNoPatch')}`);
+    const unexpected = text(render(<MessageMonitorPage mqtt={{ ...SNAPSHOT, publish_enabled: true }} config={CONFIG} onMqttChanged={() => undefined} />));
+    expect(unexpected).toContain(translate('en', 'monitor.unexpectedWrite'));
   });
 
-  it('shows the count of each kind and its own age', () => {
-    expect(body).toContain('doa 1 10 min STALE VALID');
-    expect(body).toMatch(/health 600 \d+ ms VALID state: ONLINE doa_valid: false/);
+  it('shows each kind with its count, its own age, contract and payload status in one row', () => {
+    expect(body).toContain('doa 1 STALE 10 min VALID valid: false 180 0 ms');
+    expect(body).toMatch(/health 600 \d+ ms VALID state: ONLINE doa_valid: false 200 4 ms/);
   });
 
-  it('shows the node flags instead of redacting them', () => {
-    expect(body).toContain('valid: false');
-    expect(body).toContain('doa_valid: false');
-    expect(markup).not.toContain('"valid": "[REDACTED]"');
-    expect(markup).toContain('&quot;valid&quot;: false');
+  it('right-aligns the numeric columns', () => {
+    expect(markup).toMatch(/<th scope="col" class="is-num">Count<\/th>/);
+    expect(markup).toMatch(/<td data-label="Bytes" class="is-num">180<\/td>/);
   });
 
-  it('names the transport and says a reconnect resets the counters', () => {
-    expect(body).toContain('MQTT over TCP');
-    expect(markup).toContain(`title="${translate('en', 'monitor.reconnectHint')}"`);
-    expect(translate('en', 'monitor.requested')).toMatch(/zero/);
-    expect(translate('id', 'monitor.requested')).toMatch(/nol/);
+  it('shows the latest record of the chosen kind as fields, with the node flags instead of redacting them', () => {
+    expect(markup).toContain('<select aria-label="Kind">');
+    expect(markup).toContain('<dt>validity_flags</dt><dd class="is-mono">{valid: false}</dd>');
+    expect(markup).toMatch(/<dt>valid<\/dt><dd class="is-mono">false<\/dd>/);
+    expect(markup).toMatch(/<dt>station_id<\/dt><dd class="is-mono">\[REDACTED\]<\/dd>/);
+    expect(markup).not.toContain('uav-01');
+    expect(markup).not.toContain('<pre');
   });
 
-  it('renders the RDF Node v2 panel with every subscribed topic', () => {
-    expect(body).toContain('RDF Node v2 telemetry');
-    for (const suffix of ['telemetry/doa', 'telemetry/angular', 'availability', 'ack/operation']) expect(body).toContain(suffix);
+  it('puts the connection, transport and actions in the page bar and the broker in the connection card', () => {
+    expect(markup).toMatch(/<div class="pg-bar-chips"><span class="ov-chip tone-good">CONNECTED<\/span><span class="ov-tag tone-neutral">TCP<\/span><\/div>/);
+    // Reconnect carries no explanatory tooltip.
+    expect(markup).toContain(`<button class="ov-button" type="button">${translate('en', 'monitor.reconnect')}</button>`);
+    expect(body).toContain(`${translate('en', 'monitor.broker')} 127.0.0.1:18884`);
+    expect(body).toContain(`${translate('en', 'monitor.transport')} TCP`);
+    expect(body).toContain(`${translate('en', 'monitor.topic')} [REDACTED]`);
+    // The reconnect result is a short state, not an explanation of the new session.
+    expect(translate('en', 'monitor.requested')).toBe('Monitor restarted.');
+    expect(translate('id', 'monitor.requested')).toBe('Monitor dimulai ulang.');
   });
 
-  it('lets the metric row reflow on phones', () => {
-    expect(markup).toContain('class="metric-grid monitor-metrics"');
-    expect(markup).not.toContain('metric-grid five');
+  it('switches between sdr/v1 and RDF Node v2 and shows only the selected one', () => {
+    expect(markup).toMatch(/<button type="button" aria-pressed="true">sdr\/v1<\/button><button type="button" aria-pressed="false">RDF Node v2<\/button>/);
+    expect(body).not.toContain('telemetry/doa');
+    const v2 = text(render(<MessageMonitorPage mqtt={SNAPSHOT} config={CONFIG} onMqttChanged={() => undefined} initialProtocol="v2" />));
+    expect(v2).toContain(translate('en', 'monitor.v2Loading'));
+    expect(v2).not.toContain(translate('en', 'monitor.kindsTitle'));
+  });
+
+  it('shows the counters as a stat row with grouped thousands and no prose', () => {
+    expect(markup).toContain('class="pg-stats"');
+    expect(body).toContain(`${translate('en', 'monitor.bytes')} 1,000`);
+    expect(text(render(<MessageMonitorPage mqtt={SNAPSHOT} config={CONFIG} onMqttChanged={() => undefined} />, 'id'))).toContain(`${translate('id', 'monitor.bytes')} 1.000`);
+    expect(body).toContain(`${translate('en', 'monitor.latency')} 4 ms`);
+    expect(body).not.toContain('bounded events');
   });
 
   it('shows a failed monitor read as ERROR, not as a monitor that is switched off', () => {
@@ -89,20 +113,75 @@ describe('MessageMonitorPage', () => {
     const failedMarkup = render(<MessageMonitorPage mqtt={null} mqttError={error} config={CONFIG} onMqttChanged={() => undefined} />);
     const failed = text(failedMarkup);
     expect(failed).toContain(translate('en', 'monitor.stateUnknown', { error }));
-    expect(failed).toContain(`${translate('en', 'monitor.connection')} ERROR ${error}`);
-    expect(failed).not.toContain(translate('en', 'monitor.noError'));
+    expect(failed).toContain(`${translate('en', 'monitor.connection')} ERROR`);
+    expect(failed).toContain(`${translate('en', 'monitor.error')} ${error}`);
     expect(failed).not.toMatch(/\bOFF\b/);
-    expect(failedMarkup).toContain('class="status-text-bad"');
+    expect(failedMarkup).toContain('class="pg-notice tone-bad" role="alert"');
 
     const off = text(render(<MessageMonitorPage mqtt={null} config={CONFIG} onMqttChanged={() => undefined} />));
-    expect(off).toContain(`${translate('en', 'monitor.connection')} OFF ${translate('en', 'monitor.noError')}`);
+    expect(off).toContain(`${translate('en', 'monitor.connection')} OFF`);
     expect(off).not.toContain('ERROR');
+    expect(off).not.toContain(translate('en', 'monitor.error'));
+    expect(off).toContain(translate('en', 'monitor.noEvents'));
+  });
+
+  it('tags synthetic data and reports an OFFLINE edge agent', () => {
+    const synthetic = normalizeMqttSnapshot({
+      enabled: true, read_only: true, publish_enabled: false, transport: 'websockets', ws_path: '/mqtt', now_ms: now, connection: 'connected',
+      kind_counts: { availability: 2 },
+      last_by_kind: { availability: { received_at_ms: now, age_ms: 0, bytes: 40, retained: true, valid: true, source: 'synthetic', source_ts_ms: now, payload: { v: 1, online: false, reason: 'SHUTDOWN' } } },
+    }, now);
+    const markup = render(<MessageMonitorPage mqtt={synthetic} config={CONFIG} onMqttChanged={() => undefined} />);
+    const body = text(markup);
+    expect(markup).toContain('<span class="ov-tag tone-neutral">WS</span><span class="ov-tag tone-warn" title="source: synthetic">SYNTHETIC</span>');
+    expect(body).toContain(translate('en', 'monitor.offlineNotice', { reason: 'SHUTDOWN' }));
+    expect(body).toContain('availability SYNTHETIC 2');
+    expect(body).toContain('OFFLINE SHUTDOWN');
+    expect(body).toContain(`${translate('en', 'monitor.transport')} WS /mqtt`);
   });
 
   it('renders in Indonesian', () => {
     const id = text(render(<MessageMonitorPage mqtt={SNAPSHOT} config={CONFIG} onMqttChanged={() => undefined} />, 'id'));
-    expect(id).toContain('MQTT lewat TCP');
-    expect(id).toContain('Telemetri RDF Node v2');
-    expect(id).toContain('10 mnt STALE');
+    expect(id).toContain('Jenis pesan');
+    expect(id).toContain('STALE 10 mnt');
+    expect(id).toContain('Muat ulang');
+    expect(id).toContain('Sambungkan ulang');
+  });
+});
+
+describe('RdfNodeView', () => {
+  const quiet = normalizeRdfNodeSnapshot({ enabled: true, connection: 'ready', now_ms: now, received: 0, valid: 0, invalid: 0, topic_counts: {}, topics: {} }, now);
+
+  it('labels READY as the subscription state and shows one line instead of empty topic rows', () => {
+    const body = text(render(<RdfNodeView rdfNode={quiet} rdfError={null} nowMs={now} />));
+    expect(body).toContain(`${translate('en', 'monitor.v2Subscription')} READY`);
+    expect(body).toContain(translate('en', 'monitor.v2NoMessage'));
+    expect(body).not.toContain('UNAVAILABLE');
+    expect(body).not.toContain('telemetry/angular');
+  });
+
+  it('lists topics with messages and folds the empty ones behind a toggle', () => {
+    const busy = normalizeRdfNodeSnapshot({
+      enabled: true, connection: 'ready', now_ms: now, received: 3, valid: 3, invalid: 0, last_received_at_ms: now - 1_000,
+      topic_counts: { state: 2, availability: 1 },
+      topics: {
+        state: { status: 'FRESH', received_at_ms: now - 1_000, qos: 1, retained: true, payload: { run: 'RUNNING', daq: 'OK' } },
+        availability: { status: 'CONTEXT', received_at_ms: now - 2_000, qos: 1, retained: true, payload: { online: true } },
+      },
+    }, now);
+    const markup = render(<RdfNodeView rdfNode={busy} rdfError={null} nowMs={now} />);
+    const body = text(markup);
+    expect(body).toContain('state 2 FRESH');
+    expect(body).toContain('run RUNNING · daq OK');
+    expect(body).toContain('availability 1 CONTEXT');
+    expect(body).not.toContain('telemetry/doa');
+    expect(body).toContain(translate('en', 'monitor.v2ShowEmpty', { count: 8 }));
+    expect(markup).toContain('aria-pressed="false"');
+  });
+
+  it('reports a failed read', () => {
+    const body = text(render(<RdfNodeView rdfNode={null} rdfError={{ text: 'boom' }} nowMs={now} />, 'id'));
+    expect(body).toContain(translate('id', 'monitor.v2ReadFailed', { error: 'boom' }));
+    expect(body).toContain(`${translate('id', 'monitor.v2Subscription')} ERROR`);
   });
 });

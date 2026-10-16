@@ -52,6 +52,7 @@ import {
 import { startRxStream } from './rx-stream';
 import type { VfoParams, VfoState, PerfCounters, RxStreamOpts, RemoteClientState, DeviceOpenOpts } from './types';
 import { displayToDeviceFrequencyHz } from '../frequency-shift';
+import type { SpectrumTuning } from './spectrum-tuning';
 
 export class Backend {
 	// Hardware — generic SDR device
@@ -82,6 +83,8 @@ export class Backend {
 	_spawnWorker?: (index: number, params: VfoParams) => Worker;
 	_handleWorkerAudio?: (v: number, msg: any) => void;
 	_setSpectrumIqCorrection?: (enabled: boolean) => void;
+	// The device frequency each spectrum frame of the running stream was taken at.
+	_spectrumTuning?: SpectrumTuning;
 	_mixBuf?: Float32Array;
 	_latchedSquelchOpen?: boolean[];
 
@@ -173,7 +176,7 @@ export class Backend {
 
 	async startRxStream(
 		opts: RxStreamOpts,
-		spectrumCallback: (spectrumData: Float32Array) => void,
+		spectrumCallback: (spectrumData: Float32Array, deviceHz: number | null) => void,
 		audioCallback: (audioSamples: Float32Array) => void,
 		whisperCallback: ((vfoIndex: number, frequencyHz: number, samples: Float32Array) => void) | null = null,
 		pocsagCallback: ((vfoIndex: number, frequencyHz: number, message: unknown) => void) | null = null,
@@ -304,7 +307,16 @@ export class Backend {
 
 	async setFrequency(centerFreqMhz: number, frequencyShiftMhz = 0): Promise<void> {
 		if (!this.device) throw new Error('No device connected');
-		await this.device.setFrequency(displayToDeviceFrequencyHz(centerFreqMhz, frequencyShiftMhz));
+		const deviceHz = displayToDeviceFrequencyHz(centerFreqMhz, frequencyShiftMhz);
+		// Spectrum frames taken until the radio has retuned carry no one frequency.
+		const tuned = this._spectrumTuning?.retune();
+		try {
+			await this.device.setFrequency(deviceHz);
+		} catch (error) {
+			tuned?.(null);
+			throw error;
+		}
+		tuned?.(deviceHz);
 
 		this._centerFreq = centerFreqMhz;
 
@@ -381,6 +393,7 @@ export class Backend {
 			this._perf = undefined;
 			this._handleWorkerAudio = undefined;
 			this._setSpectrumIqCorrection = undefined;
+			this._spectrumTuning = undefined;
 		}
 	}
 

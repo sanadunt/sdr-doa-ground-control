@@ -41,7 +41,7 @@ const overview = (value: TelemetrySnapshot) => render(<OverviewPage snapshot={va
 
 describe('Overview', () => {
   it('has a route focus target like the other pages', () => {
-    expect(overview(snapshot())).toMatch(/<h1 class="visually-hidden" data-route-focus="true" tabindex="-1">Overview<\/h1>/);
+    expect(overview(snapshot())).toMatch(/<h1 class="visually-hidden" data-route-focus="true" tabindex="-1">Dashboard<\/h1>/);
   });
 
   it('keeps the live station position through a CSV/XML conflict', () => {
@@ -167,7 +167,7 @@ describe('Overview dashboard', () => {
   it('renders the spectrum dock and a locked Kontrol', () => {
     const markup = dashboard(snapshot(), { panels: { layers: false, polar: false, spectrum: true, control: true, nodeCollapsed: true } }, 'id');
     expect(markup).toContain('Spektrum');
-    expect(markup).toMatch(/aria-keyshortcuts="7" aria-label="Buka Receiver penuh"/);
+    expect(markup).toMatch(/aria-keyshortcuts="2" aria-label="Buka Receiver penuh"/);
     expect(markup).toContain('Ikuti frekuensi node');
     expect(markup).toContain('>Kirim ke RDF-SDR<');
     expect(markup).toContain('class="ov-spec-canvas"');
@@ -176,6 +176,12 @@ describe('Overview dashboard', () => {
     expect(markup).toContain('Memeriksa sesi admin…');
     // Nothing in the dock mounts or names the Receiver frame.
     expect(markup).not.toContain('receiver-frame');
+  });
+
+  it('puts the basemap select first in the Lapisan panel', () => {
+    const markup = dashboard(snapshot(), { panels: { layers: true, polar: false, spectrum: false, control: false, nodeCollapsed: true } }, 'id');
+    expect(markup).toMatch(/<div class="ov-layers-body"><label class="ov-basemap-row"><span>Peta dasar<\/span><select>/);
+    expect(markup).toContain('<option value="standard" selected="">Standar</option>');
   });
 });
 

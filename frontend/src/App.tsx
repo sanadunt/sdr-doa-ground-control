@@ -12,6 +12,9 @@ import { nextControlDraftRequest } from './lib/controlDraft';
 import type { ConfigPatchChanges, ControlDraftRequest } from './lib/controlDraft';
 import { createReceiverBridge } from './lib/receiverBridge';
 import type { ReceiverBridge } from './lib/receiverBridge';
+import { watchReceiverDisplay, watchReceiverTuning } from './lib/receiverSync';
+import { followNodeStore, listenModeStore } from './lib/listenPrefs';
+import { spectrumDockStore } from './lib/spectrumDockSettings';
 import { OverviewPanelToggles } from './components/overview/OverviewPanelToggles';
 import { I18nContext, initialLang, storeLang, translate, useI18n } from './lib/i18n';
 import type { I18nValue, Lang } from './lib/i18n';
@@ -24,7 +27,7 @@ import { ConsoleShell } from './components/Shell';
 import type { RouteName } from './components/Shell';
 import { useRoute } from './components/Shell';
 import { LoadErrorBoundary } from './components/LoadErrorBoundary';
-import { EmptyState } from './components/ui';
+import { Page, PageHeader, PageNotice } from './components/page';
 import { DEFAULT_SIMULATION, simulationSnapshot, randomizeSimulationSettings } from './lib/simulation';
 
 // Overview is the landing route and stays in the entry chunk. The other pages
@@ -205,10 +208,10 @@ function ConfigUnavailable({ error }: { error: string | null }): ReactElement {
   const { t } = useI18n();
   if (error === null) return routeLoading;
   return (
-    <div className="page">
-      <h1 className="visually-hidden" data-route-focus tabIndex={-1}>{t('route.configuration')}</h1>
-      <EmptyState label={t('app.configUnavailableTitle')} detail={t('app.configUnavailableDetail', { error })} tone="warn" />
-    </div>
+    <Page>
+      <PageHeader title={t('route.configuration')} />
+      <PageNotice tone="warn" title={t('app.configUnavailableTitle')}>{t('app.configUnavailableDetail', { error })}</PageNotice>
+    </Page>
   );
 }
 
@@ -329,6 +332,16 @@ export default function App(): ReactElement {
   const receiverBridgeRef = useRef<ReceiverBridge | null>(null);
   if (receiverBridgeRef.current === null) receiverBridgeRef.current = createReceiverBridge();
   const receiverBridge = receiverBridgeRef.current;
+  // A centre or VFO change made on the Receiver page ends "follow node frequency", also while
+  // the dock is not mounted, and the Receiver's mode becomes the dock's mode for the next start.
+  // Only preferences are written here; nothing is sent back to the frame.
+  useEffect(() => watchReceiverTuning(receiverBridge, {
+    onReceiverTune: () => followNodeStore.set(false),
+    onReceiverMode: (mode) => listenModeStore.set(mode),
+  }), [receiverBridge]);
+  // The RX dB scale is the Receiver's (Dengar tab) and the dock's at once: the dock keeps the last
+  // value it saw, and a dock change made while the frame is away reaches it at its next hello.
+  useEffect(() => watchReceiverDisplay(receiverBridge, spectrumDockStore), [receiverBridge]);
   const [receiverMounted, setReceiverMounted] = useState(route === 'receiver');
   if ((route === 'receiver' || receiverRequested) && !receiverMounted) setReceiverMounted(true);
   useEffect(() => {

@@ -407,6 +407,73 @@ export function humanizeKey(key: string): string {
   return key.replace(/_/g, ' ').replace(/\b\w/g, (value) => value.toUpperCase());
 }
 
+// Checks that fail on every console read: the console never selects an
+// authority or approves the angle convention, so the selected-source checks
+// follow. They block delivery by design and are not a node fault.
+const STANDING_GATE_CHECKS: ReadonlySet<string> = new Set([
+  'authority_selected',
+  'canonical_angle_ready',
+  'selected_doa_fresh',
+  'selected_units_valid',
+]);
+
+export type GateCheckState = 'FAIL' | 'BLOCKED' | 'NOT CONFIGURED' | 'PASS';
+
+export interface GateCheckRow {
+  key: string;
+  state: GateCheckState;
+  tone: Tone;
+}
+
+const GATE_CHECK_ORDER: Record<GateCheckState, number> = { FAIL: 0, BLOCKED: 1, 'NOT CONFIGURED': 2, PASS: 3 };
+const MAX_GATE_CHECKS = 32;
+
+/**
+ * Publication-gate checks in reading order: failing node checks first, then
+ * the checks the console blocks by design, then unset ones, then passes.
+ * A false check is FAIL (bad) unless it is one of the standing checks,
+ * which read BLOCKED (warn).
+ */
+export function gateCheckRows(checks: unknown): GateCheckRow[] {
+  const value = record(checks);
+  if (!value) return [];
+  return Object.entries(value)
+    .slice(0, MAX_GATE_CHECKS)
+    .map(([key, result], index) => {
+      const state: GateCheckState = result === true ? 'PASS'
+        : result === false ? (STANDING_GATE_CHECKS.has(key) ? 'BLOCKED' : 'FAIL')
+          : 'NOT CONFIGURED';
+      const tone: Tone = state === 'PASS' ? 'good' : state === 'FAIL' ? 'bad' : state === 'BLOCKED' ? 'warn' : 'neutral';
+      return { row: { key, state, tone }, index };
+    })
+    .sort((a, b) => GATE_CHECK_ORDER[a.row.state] - GATE_CHECK_ORDER[b.row.state] || a.index - b.index)
+    .map(({ row }) => row);
+}
+
+// ---------------------------------------------------------------------------
+// DAQ sync flags
+
+export const SYNC_FLAGS = [
+  { key: 'frame_sync', label: 'frame' },
+  { key: 'sample_delay_sync', label: 'delay' },
+  { key: 'iq_sync', label: 'IQ' },
+] as const;
+
+export interface SyncFlagView {
+  key: typeof SYNC_FLAGS[number]['key'];
+  label: string;
+  /** true passing, false failing, null not reported. */
+  ok: boolean | null;
+}
+
+/** The three required DAQ sync flags from status.json, each passing, failing or missing. */
+export function syncFlagsView(snapshot: TelemetrySnapshot | null | undefined): SyncFlagView[] {
+  const status = record(snapshot?.status);
+  const safe = record(status?.safe);
+  const daq = record(safe?.daq_status) ?? record(status?.daq_status);
+  return SYNC_FLAGS.map(({ key, label }) => ({ key, label, ok: bool(daq?.[key]) }));
+}
+
 // ---------------------------------------------------------------------------
 // Settings shown on Diagnostics
 
@@ -426,6 +493,33 @@ export function isSecretSettingKey(key: string): boolean {
     .split(/[\s_.-]+/)
     .filter(Boolean);
   return segments.some((segment) => SECRET_SEGMENTS.has(segment) || SECRET_WORDS.test(segment));
+}
+
+// Units of the settings.json fields the collector passes (KrakenSDR's own
+// units: center_freq in MHz, VFO frequency and bandwidth in Hz).
+const SETTING_UNITS: Readonly<Record<string, string>> = {
+  center_freq: 'MHz',
+  uniform_gain: 'dB',
+  ant_spacing_meters: 'm',
+  compass_offset: '°',
+};
+
+/** The unit of a Data Out settings field, or null when it has none or is unknown. */
+export function settingUnit(key: string): string | null {
+  if (Object.prototype.hasOwnProperty.call(SETTING_UNITS, key)) return SETTING_UNITS[key];
+  if (/^vfo_(freq|bw)_\d+$/.test(key)) return 'Hz';
+  if (/^vfo_squelch_\d+$/.test(key)) return 'dB';
+  return null;
+}
+
+/** A settings value as shown on Diagnostics: booleans as ON/OFF, a known unit appended to numbers. */
+export function settingValueText(key: string, value: unknown): string {
+  if (typeof value === 'boolean') return value ? 'ON' : 'OFF';
+  if (value === null || value === undefined) return 'N/A';
+  const unit = typeof value === 'number' ? settingUnit(key) : null;
+  const text = boundedText(String(value), 80) ?? '—';
+  if (!unit) return text;
+  return unit === '°' ? `${text}°` : `${text} ${unit}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -495,6 +589,16 @@ const DURATION_KEYS: Record<DurationUnit, MessageKey> = {
 export function formatDuration(t: Translate, ms: number): string {
   const { unit, value } = durationParts(ms);
   return t(DURATION_KEYS[unit], { value });
+}
+
+const COUNT_FORMATS: Record<string, Intl.NumberFormat> = {};
+
+/** An integer count with the UI language's thousands separator (1,204 / 1.204), or N/A. */
+export function formatCount(lang: string, value: number | null | undefined): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 'N/A';
+  const locale = lang === 'id' ? 'id-ID' : 'en-US';
+  COUNT_FORMATS[locale] ??= new Intl.NumberFormat(locale, { maximumFractionDigits: 0 });
+  return COUNT_FORMATS[locale].format(Math.round(value));
 }
 
 /** Age at read in the UI language, or the explicit unknown-clock wording. */

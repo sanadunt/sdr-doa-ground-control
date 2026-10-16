@@ -47,11 +47,11 @@ Tujuan UI:
 
 - Python Ground Console pada `tools/ground_console.py`.
 - React + TypeScript + Vite frontend pada `frontend/`.
-- Tujuh halaman: Overview (Ringkasan), System Health, DoA Diagnostics, Configuration, Message Monitor, Simulasi, dan Receiver, dibuka lewat menu halaman di top bar atau shortcut keyboard `1`–`7`; `R` untuk refresh. Top bar yang sama ada di semua halaman.
-- Overview berupa dasbor peta penuh: HUD bearing, kartu node, panel Lapisan, panel Kontrol, dan dock bawah berisi Polar (dengan pengaturan Atur) dan Spektrum. Panel diaktifkan lewat tombol Lapisan, Polar, Spektrum, dan Kontrol di top bar. HUD bearing, polar, dan overlay peta memakai satu predikat kesiapan (`overviewDoaStatus()` di `frontend/src/lib/doaStatus.ts`), sehingga DAQ gagal, ADC overdrive, CONFLICT, view hilang, atau node beku menyembunyikan ketiganya sekaligus.
+- Tujuh halaman, berurutan: Dashboard (`#/dashboard`; `#/overview` tetap dibuka), Receiver, System Health, DoA Diagnostics, Configuration, Message Monitor, dan Simulasi, dibuka lewat menu halaman di top bar atau shortcut keyboard `1`–`7` sesuai urutan itu (Receiver `2`); `R` untuk refresh. Top bar yang sama ada di semua halaman. Halaman selain Dashboard dan Receiver memakai page kit yang sama (`frontend/src/components/page/`, `frontend/src/page-kit.css`).
+- Dashboard (route id `overview`) berupa dasbor peta penuh: HUD bearing, kartu node, panel Lapisan, panel Kontrol, dan dock bawah berisi Polar (dengan pengaturan Atur) dan Spektrum. Panel diaktifkan lewat tombol Lapisan, Polar, Spektrum, dan Kontrol di top bar. HUD bearing, polar, dan overlay peta memakai satu predikat kesiapan (`overviewDoaStatus()` di `frontend/src/lib/doaStatus.ts`), sehingga DAQ gagal, ADC overdrive, CONFLICT, view hilang, atau node beku menyembunyikan ketiganya sekaligus.
 - Bearing geografis dihitung dari θ₀ dengan `geographicBearingForBin()` (`frontend/src/lib/polar.ts`): (360 − θ₀ + compass_offset) mod 360. θ₀ tetap ditampilkan sebagai sudut array.
 - Plot DoA menggunakan bundle Plotly parsial (`plotly.js/lib/core` + `lib/scatterpolar`, didaftarkan di `frontend/src/lib/plotlyPolar.ts`) dan update data mempertahankan camera state selama memungkinkan.
-- Map menggunakan MapLibre GL JS dengan basemap tile OSM publik (`tile.openstreetmap.de`, lalu `tile.openstreetmap.org` bila host pertama gagal).
+- Map menggunakan MapLibre GL JS dengan delapan gaya peta dasar (`frontend/src/lib/basemaps.ts`: Standar, Hot, Terang, Gelap, Satelit, Satelit + label, Topografi, Polos). Semua tile diambil lewat route console `/api/tiles/<sumber>/<z>/<x>/<y>` (`tools/tile_cache.py`), yang menyimpan tile di disk sehingga area yang pernah tampil tetap terlihat saat offline.
 - DoA map overlay: station marker, bearing, lobe, guide angle, dan heat-style direction helper.
 - Canvas fallback overlay menjaga visualisasi DoA tetap terlihat jika WebGL2 tidak tersedia, context WebGL hilang, worker MapLibre gagal, atau layer GeoJSON bermasalah.
 - Overlay settings tersimpan lokal. Panel Lapisan berisi tujuh sakelar layer dan opasitas overlay, dan bagian Lanjutan berisi kontrol advanced untuk jarak/radius, min/max dB, threshold, contrast/intensity, radial samples, distance falloff, opacity, blur, guide interval, dan palette.
@@ -60,9 +60,11 @@ Tujuan UI:
 - Halaman System Health (termasuk tabel pembacaan per resource), DoA Diagnostics, Configuration, dan Message Monitor (sdr/v1 plus panel RDF Node v2).
 - Collector mendeteksi node beku (`NODE_CLOCK_STALLED`), membatasi satu koleksi dengan anggaran waktu (4 detik untuk `/api/snapshot`), dan membandingkan sudut CSV/XML hanya untuk pasangan dari frame yang sama.
 - Freshness expiry di renderer browser; snapshot stale tidak boleh terus ditampilkan sebagai data aktif. Refresh otomatis default 2 detik (pilihan 1, 2, 5, 10, 30 detik atau manual).
-- Receiver embedded (BrowSDR dari submodule `vendor/BrowSDR`, dengan overlay di `tools/browsdr_receiver_overlay/`) untuk spektrum, scan, rekaman audio, dan Records yang disimpan lokal. Panel Spektrum di Overview mengendalikan frame Receiver yang tersembunyi lewat bridge `postMessage` (Mulai/Berhenti, Dengar dengan modulasi, klik untuk menala, Ikuti frekuensi node).
+- Receiver embedded (BrowSDR dari submodule `vendor/BrowSDR`, dengan overlay di `tools/browsdr_receiver_overlay/`) untuk spektrum, scan, rekaman audio, dan Records yang disimpan lokal. Panel Spektrum di Dashboard mengendalikan frame Receiver yang tersembunyi lewat bridge `postMessage` (Mulai/Berhenti, Dengar dengan modulasi, klik untuk menala, Ikuti frekuensi node, Skala dB RX, sample rate, LNA, VGA, +14 dB, mode RX | Spektrum untuk pindai lebar, dan Penanda).
 - Kontrol: patch konfigurasi MQTT yang dibatasi admin, dengan pelacakan ACK di server (`tools/config_command_tracker.py`).
 - Branding lokal dan konfigurasi console lokal.
+- Pengaturan tersimpan di server console: koneksi/MQTT/interval di `console.json`, branding, preferensi tampilan browser di `preferences.json` (`GET`/`PUT /api/preferences`, `tools/preferences_store.py`, `frontend/src/lib/preferenceStore.ts`), rekaman Receiver, dan `.env`. Start pertama membuat `console.json` dari `SDR_DOA_SEED_*`. `GET /api/health` untuk healthcheck; versi dari file `VERSION`.
+- Paket Linux: image Docker (`Dockerfile`, `Dockerfile.release`, `docker-compose*.yml`, network host), rilis tar (`tools/make_release.py`), installer console dengan systemd user service (`packaging/console/`), dan installer agent RDF-SDR dengan systemd service atau image ARM (`packaging/agent/`). Lihat QUICKSTART bagian Instalasi Linux.
 
 ### Staging/rancangan—jangan dianggap production
 
@@ -99,14 +101,14 @@ Ground Console Python (loopback)
                  │ same-origin fetch
                  ▼
 React frontend
-        ├── Overview: dasbor MapLibre/OSM + DoA overlay + Plotly polar + Spektrum + Kontrol
+        ├── Dashboard (OverviewPage): dasbor MapLibre/OSM + DoA overlay + Plotly polar + Spektrum + Kontrol
+        ├── Receiver (iframe /receiver/, dimuat saat dibuka pertama kali atau saat Mulai/Dengar
+        │             di Spektrum, lalu tetap ter-mount; bridge postMessage ke Dashboard)
         ├── System Health
         ├── DoA Diagnostics
         ├── Configuration
         ├── Message Monitor
-        ├── Simulasi (browser-only)
-        └── Receiver (iframe /receiver/, dimuat saat dibuka pertama kali atau saat Mulai/Dengar
-                      di Spektrum, lalu tetap ter-mount; bridge postMessage ke Overview)
+        └── Simulasi (browser-only)
 ```
 
 Jalur Kontrol:
@@ -142,6 +144,10 @@ MQTT adalah transport/contract, bukan pengganti DAQ, DSP, normalisasi, gate, ata
 | `tools/sdr_doa_mqtt_monitor.py` | MQTT monitor; berlangganan, dan hanya publish patch konfigurasi lewat `publish_config_patch`. Memerlukan `paho-mqtt` (tanpa paket ini monitor berstatus ERROR, console tetap jalan) |
 | `tools/rdf_node_mqtt_v2.py` | Parser dan snapshot RDF Node v2 untuk `/api/mqtt/rdf-node` |
 | `tools/receiver_record_store.py` | Store SQLite dan file audio Receiver di bawah `--data-dir` |
+| `tools/preferences_store.py` | Salinan preferensi browser di server (allowlist key, batas ukuran, tulis atomik) untuk `/api/preferences` |
+| `tools/tile_cache.py` | Cache tile basemap untuk `/api/tiles`: upstream tetap (HTTPS, maksimal dua host per sumber), cache disk LRU, sajian stale saat offline |
+| `tools/make_release.py` | Membuat tarball rilis console dan agent beserta `SHA256SUMS`; juga `--stage-console`/`--stage-agent` untuk Docker dan installer |
+| `packaging/`, `Dockerfile*`, `docker-compose*.yml`, `VERSION` | Docker, installer native, systemd unit, dan versi rilis |
 | `tools/build_browsdr_receiver.py` | Builder Receiver: salin submodule, terapkan overlay, `npm ci` + build, tulis `frontend/dist/receiver` |
 | `tools/browsdr_receiver_overlay/` | Perubahan lokal Receiver yang diterapkan saat build; `vendor/BrowSDR` tidak diedit |
 | `tools/sdr_doa_mqtt_stdlib.py` | Jalur MQTT stdlib/staging alternatif |
@@ -156,7 +162,8 @@ MQTT adalah transport/contract, bukan pengganti DAQ, DSP, normalisasi, gate, ata
 | `frontend/src/api.ts` | Same-origin API adapter dengan timeout, abort, validasi shape, dan read-back |
 | `frontend/src/types.ts` | Contract TypeScript untuk snapshot, candidate, gate, config, map, MQTT |
 | `frontend/src/components/Shell.tsx` | Top bar, menu halaman, route, runtime badges, theme, read strip, interval refresh |
-| `frontend/src/components/TacticalMap.tsx` | MapLibre, OSM tile, marker, popup, overlay settings, overlay lifecycle |
+| `frontend/src/components/TacticalMap.tsx` | MapLibre, layer raster peta dasar dan penggantiannya, marker, popup, overlay settings, overlay lifecycle |
+| `frontend/src/lib/basemaps.ts`, `frontend/src/components/overview/BasemapPicker.tsx` | Katalog gaya peta dasar (sumber tile, maxzoom, paint raster, atribusi) dan menu/select pemilihnya |
 | `frontend/src/pages/OverviewPage.tsx`, `frontend/src/components/overview/` | Dasbor Overview: kartu node, Lapisan, Kontrol (`ControlPanel.tsx`), dock Polar (`PolarDock.tsx`) dan Spektrum (`SpectrumDock.tsx`) |
 | `frontend/src/components/PolarPlot.tsx` | Plotly polar/compass renderer, camera state, head-up, manual dB range |
 | `frontend/src/lib/telemetry.ts` | Candidate selection, data state, formatting, gate helpers |
@@ -169,7 +176,7 @@ MQTT adalah transport/contract, bukan pengganti DAQ, DSP, normalisasi, gate, ata
 | `frontend/src/lib/simulation.ts` | Synthetic 360-bin snapshot, validation, randomization |
 | `frontend/src/lib/doaGeometry.ts` | Geometry bearing/lobe/heat/guides dari coordinate + vector + settings |
 | `frontend/src/lib/mapOverlaySettings.ts` | Default, validation, persistence, preset overlay settings |
-| `frontend/src/lib/map.ts` | GPS source resolution, fallback coordinate, posisi live terakhir, OSM tile hosts dan perpindahannya |
+| `frontend/src/lib/map.ts` | GPS source resolution, fallback coordinate, posisi live terakhir, kesehatan basemap, warna garis sesuai tone tile |
 | `frontend/src/lib/polar.ts` | Angle convention, bearing geografis, polar metadata, source conversion |
 | `frontend/src/pages/` | Overview, health, diagnostics, configuration, monitor, simulation, receiver |
 | `frontend/src/console-design.css` | Design layer Ground Console dan responsive/accessibility rules |
@@ -246,11 +253,13 @@ heading / gps_heading / compass_heading
 
 ## 6. Map, overlay, dan simulasi
 
-### MapLibre/OSM
+### MapLibre dan peta dasar
 
-MapLibre adalah renderer, bukan penyedia peta. Basemap memakai tile OSM publik tanpa API key melalui template di `frontend/src/lib/map.ts`. Peta memakai satu host pada satu waktu: `tile.openstreetmap.de` dulu, lalu `tile.openstreetmap.org` setelah 4 kegagalan berturut-turut atau host yang diam. CSP pada `ground_console.py` harus mengizinkan kedua host pada `connect-src` dan `img-src`.
+MapLibre adalah renderer, bukan penyedia peta. Gaya peta dasar ada di `frontend/src/lib/basemaps.ts`; semuanya menggambar tile dari route console `/api/tiles/<sumber>/<z>/<x>/<y>`, sehingga `img-src`/`connect-src` di CSP halaman tidak berisi host tile mana pun. Upstream tiap sumber (`osm`, `hot`, `imagery`, `imagery-labels`, `topo`) tetap di `TILE_SOURCES` pada `tools/tile_cache.py`: HTTPS, maksimal dua host yang dicoba satu per satu (OSM: `tile.openstreetmap.de` lalu `tile.openstreetmap.org`), tanpa redirect, timeout 5 s, isi maksimal 1 MiB dan hanya PNG/JPEG/WebP. Id dan maxzoom kedua daftar harus sama (`tools/test_basemap_contract.py`). Terang dan Gelap adalah tile Standar dengan paint raster MapLibre.
 
-Jika basemap gagal, cek CSP/network browser, tile host, request tile, proxy, VPN, firewall, atau policy jaringan. Jangan menghapus overlay hanya karena imagery OSM gagal.
+Ganti gaya hanya menukar source dan layer raster di bawah `doa-beam`; `map.setStyle()` tidak pernah dipakai karena akan menghapus data GeoJSON dan paint runtime. Cache tile disimpan di `--tile-cache-dir` dan segar selama max(max-age upstream, 7 hari), paling lama 30 hari; saat upstream tidak terjangkau tile lama tetap disajikan, dan tile yang belum tersimpan dijawab 504. Tidak ada prefetch atau unduh massal.
+
+Jika basemap gagal, cek log console (`tiles <sumber>: upstream unavailable`), koneksi HTTPS dari host console ke upstream, proxy (`HTTPS_PROXY`), VPN, firewall, dan apakah `--tile-cache-dir` bisa ditulis. Jangan menghapus overlay hanya karena tile gagal.
 
 ### Overlay direction helper
 
@@ -280,18 +289,21 @@ Setiap perubahan overlay harus berdampak pada `doaGeometry.ts` dan renderer aktu
 
 `frontend/src/lib/simulation.ts` membuat snapshot sintetis browser-only. Simulasi memiliki coordinate, canonical angle, angular vector 360 bin, freshness synthetic, randomize manual, dan randomize tiap satu detik.
 
-Simulasi hanya menggantikan sumber Overview. Simulasi tidak boleh memalsukan System Health, Diagnostics, MQTT, publication gate, atau mengirim data ke Raspberry.
+Simulasi hanya menggantikan sumber Dashboard. Simulasi tidak boleh memalsukan System Health, Diagnostics, MQTT, publication gate, atau mengirim data ke Raspberry.
 
 ### Dasbor: Spektrum, Dengar dan Kontrol
 
-Overview adalah dasbor peta penuh. Langkah operator yang lebih rinci ada di `QUICKSTART.md`. Di UI, node Raspberry tampil sebagai **RDF-SDR** dan receiver HackRF sebagai **RadioSpectrum**; identifier, field API, topik MQTT, dan filter WebUSB tetap memakai nama teknisnya. Dasbor hanya menampilkan label, nilai, chip status, error, dan prompt yang butuh tindakan, tanpa teks penjelasan kecil. Ringkasnya:
+Dashboard adalah dasbor peta penuh. Langkah operator yang lebih rinci ada di `QUICKSTART.md`. Di UI, node Raspberry tampil sebagai **RDF-SDR** dan receiver HackRF sebagai **RadioSpectrum**; identifier, field API, topik MQTT, dan filter WebUSB tetap memakai nama teknisnya. Dasbor hanya menampilkan label, nilai, chip status, error, dan prompt yang butuh tindakan, tanpa teks penjelasan kecil. Ringkasnya:
 
-- **Panel.** Tombol Lapisan, Polar, Spektrum, dan Kontrol di top bar menampilkan atau menyembunyikan panel. Secara bawaan Polar dan Spektrum aktif. Pilihan panel disimpan di browser.
-- **Mulai/Berhenti.** Mulai memuat Receiver tersembunyi (saat pertama kali), menyambungkan RadioSpectrum yang sudah dipasangkan ke browser ini, dan menjalankan RX tanpa suara. Spektrum menampilkan 2 MHz di sekitar tengah RX. RadioSpectrum yang belum pernah dipasangkan (`NEEDS_PAIRING`) dipasangkan sekali di halaman Receiver (tombol `7`). Berhenti menghentikan RX.
-- **Klik untuk menala.** Klik trace atau waterfall untuk memindahkan tengah RX dan VFO ke frekuensi itu (dibulatkan 1 kHz); ←/→ menggeser 10 kHz, Shift+←/→ 100 kHz. Klik ini mematikan Ikuti frekuensi node.
+- **Panel.** Tombol Lapisan, Polar, Spektrum, dan Kontrol di top bar menampilkan atau menyembunyikan panel. Secara bawaan Polar dan Spektrum aktif. Pilihan panel disimpan di console (`/api/preferences`), jadi ikut ke browser lain.
+- **Mulai/Berhenti.** Mulai memuat Receiver tersembunyi (saat pertama kali), menyambungkan RadioSpectrum yang sudah dipasangkan ke browser ini, dan menjalankan RX tanpa suara. Spektrum menampilkan 2 MHz di sekitar tengah RX. RadioSpectrum yang belum pernah dipasangkan (`NEEDS_PAIRING`) dipasangkan sekali di halaman Receiver (tombol `2`). Berhenti menghentikan RX.
+- **Klik untuk menala.** Klik trace atau waterfall untuk memindahkan tengah RX dan VFO ke frekuensi itu (dibulatkan 1 kHz); ←/→ menggeser 10 kHz, Shift+←/→ 100 kHz. Klik ini mematikan Ikuti frekuensi node. Tengah dan VFO dipegang Receiver dan sinkron dua arah: perubahan di halaman Receiver tampil di Spektrum dan juga mematikan Ikuti frekuensi node.
 - **Ikuti frekuensi node.** Selama Data Out segar, tengah RX mengikuti `center_freq` dari `settings.json` node dan VFO mengikuti frekuensi CSV DoA.
 - **Dengar dengan modulasi.** Dengar memutar audio VFO dengan modulasi yang dipilih (NFM bawaan, WFM, AM, USB, LSB, DSB, CW, RAW), dan menyalakan RX bila belum jalan. Tekan lagi untuk berhenti mendengar.
 - **Kirim ke RDF-SDR → Kontrol.** Tombol di header Spektrum hanya membuka Kontrol dengan draf frekuensi tengah dan VFO. Di Kontrol: buka kunci dengan kata sandi admin, ubah nilai, **Tinjau perubahan**, lalu **Kirim ke RDF-SDR**. Hasilnya `ACK · applied` (agent menulis `settings.json`), `Ditolak · KODE` (misalnya `REMOTE_CONTROL_DISABLED` bila agent tanpa `--enable-config`, atau `CONFIG_REVISION_CONFLICT`), **Belum ada ACK** setelah sekitar 65 detik, atau **Publish gagal** bila broker menolak.
+- **Spektrum → Atur.** Kolom pengaturan Spektrum. Pada dock yang lebih sempit dari 1400 px, Ikuti frekuensi node, modulasi, dan Kirim ke RDF-SDR pindah dari header ke kolom ini. **Skala dB** (Auto atau Manual dengan min dan maks, −160 s/d 60 dB, selisih minimal 5 dB) sama dengan panel Skala dB di tab Dengar halaman Receiver dan sinkron dua arah; trace dan seluruh waterfall diwarnai ulang. Skala terakhir yang diketahui dock disimpan di console (`sdr-console-spectrum-dock-v1`). **Sample rate**, **LNA**, **VGA**, dan **+14 dB** adalah pengaturan Listener Receiver dan sinkron dua arah; gain berlaku langsung, sample rate memulai ulang RX yang sedang jalan (ditanyakan dulu bila rekaman VFO berjalan, ditolak selama pindai). Sebelum Receiver dimuat isian ini nonaktif dengan `—`.
+- **RX | Spektrum.** Sakelar setelah chip Spektrum memilih isi grafik dan apa yang dijalankan Mulai: RX (2 MHz di sekitar tengah RX) atau pindai lebar Receiver di rentangnya sendiri. Dock menampilkan mode yang sedang berjalan, termasuk pindai yang dimulai di halaman Receiver (chip `SCAN` dengan grafik hidup; `BUSY` hanya untuk dengar-pindai). Pada mode Spektrum, klik grafik menyimpan tengah dan VFO untuk RX berikutnya tanpa menghentikan pindai, dan Dengar menghentikan pindai lalu menjalankan RX. Di Atur, mode Spektrum menampilkan Skala dB pindai (Manual = Grafik min./maks. halaman Receiver, sinkron dua arah), Rentang dengan Pusatkan ke RX, Resolusi, dan Gain pindai; isian pindai terkunci selama pindai berjalan, sama seperti di halaman Receiver.
+- **Penanda.** Tombol setelah sakelar RX | Spektrum menyalakan mode menandai (tidak disimpan; mati setiap kali dock dibuka). Penandanya adalah daftar Penanda spektrum Receiver: tampil di dock (trace dan waterfall, kedua mode), di grafik Spektrum dan trace Dengar halaman Receiver, dan sinkron dua arah. Klik grafik menambah penanda, klik dekat penanda memilihnya (Hapus, Tala ke sini); Enter, `[` `]`, Delete, Ctrl+Z, dan Esc bekerja pada grafik. Menandai juga bisa selama pindai, dengan daya diukur dari pindai itu. Penanda tersimpan hanya bila marker set dipilih di halaman Receiver (tag **Belum disimpan** bila belum).
 - **Polar → Atur.** Putar grafik (Head Up) dan Puncak ke atas, offset kompas Data Out atau Manual (berlaku untuk peta, plot, dan bearing), skala dB Auto atau Manual, dan tombol reset tampilan. Pilihan Kompas|Polar hanya mengubah plot.
 - **Lapisan.** Tujuh sakelar layer overlay, opasitas overlay, dan pengaturan Lanjutan.
 
@@ -332,7 +344,7 @@ http://127.0.0.1:8787/
 
 Kata sandi admin dibaca dari `SDR_DOA_ADMIN_PASSWORD` di environment proses atau di `.env` root repository (salin dari `.env.example`, ganti nilainya, jangan di-commit). Bila variabel tidak ada di keduanya, console memakai kata sandi bawaan `123456`, mencetak peringatan saat start, dan Kontrol menampilkan peringatan; ganti dengan kata sandi sendiri. Nilai kosong (`SDR_DOA_ADMIN_PASSWORD=`) menonaktifkan login admin, begitu juga `.env` yang tidak bisa dibaca. Perubahan kata sandi berlaku setelah console di-restart.
 
-Default CLI mengaktifkan monitor MQTT ke `10.90.0.1:9001` (WebSocket). Tanpa `paho-mqtt` console tetap berjalan dan monitor berstatus ERROR; `--mqtt-host ''` mematikan monitor. Flag eksplisit (`--base-url`, `--mqtt-host`, `--mqtt-port`, `--mqtt-transport`, `--mqtt-ws-path`) mengalahkan `console.json` tersimpan untuk run itu. Data Receiver disimpan di `--data-dir` (default `~/.local/share/sdr-doa-ground-console`). Di Windows, pasang juga `tzdata`.
+Default CLI mengaktifkan monitor MQTT ke `10.90.0.1:9001` (WebSocket). Tanpa `paho-mqtt` console tetap berjalan dan monitor berstatus ERROR; `--mqtt-host ''` mematikan monitor. Flag eksplisit (`--base-url`, `--mqtt-host`, `--mqtt-port`, `--mqtt-transport`, `--mqtt-ws-path`) mengalahkan `console.json` tersimpan untuk run itu. Data Receiver disimpan di `--data-dir` (default `~/.local/share/sdr-doa-ground-console`). Cache tile peta dasar disimpan di `--tile-cache-dir` (default `~/.cache/sdr-doa-ground-console/tiles`, paling banyak `--tile-cache-max-mb`, bawaan 512 MB). Preferensi browser disimpan di `--preferences-path` (default `~/.config/sdr-doa-ground-console/preferences.json`), dan `--env-file` memilih file `.env` lain untuk kata sandi admin dan `SDR_DOA_SEED_*`. Bila `console.json` belum ada, start pertama membuatnya dari `SDR_DOA_SEED_*` dan menyimpannya; start berikutnya mengabaikan seed. Karena flag eksplisit hanya berlaku untuk satu run, service dan container tidak memakainya. Di Windows, pasang juga `tzdata`. Untuk instalasi Linux di background (Docker atau `install.sh`) dan agent RDF-SDR, lihat `QUICKSTART.md` dan `packaging/`.
 
 Jangan memasang dependency ke Python system/Homebrew tanpa alasan. Development frontend saja:
 
@@ -366,7 +378,7 @@ Untuk static serving/security saja:
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_ground_console_static
 ```
 
-Suite static gagal pada cek Receiver bila `frontend/dist` ada dan submodule sudah diambil tetapi `frontend/dist/receiver` tidak ada. Banyak file test Python adalah script standalone yang tidak dijalankan `unittest discover`; jalankan script modul yang diubah (misalnya `python3 tools/test_sdr_doa_collector.py`). Tes Node Receiver: `node --test tools/test_receiver_*.mjs` (Node 22.13+), termasuk bridge dasbor (`test_receiver_console_bridge.mjs`) dan kecocokan dua salinan protokolnya (`test_receiver_bridge_contract.mjs`). Jalur Kontrol dicakup `tools/test_mqtt_config_patch.py` dan `tools/test_config_patch_contract.py`; keduanya ikut `unittest discover` dan tidak butuh broker.
+Suite static gagal pada cek Receiver bila `frontend/dist` ada dan submodule sudah diambil tetapi `frontend/dist/receiver` tidak ada. Banyak file test Python adalah script standalone yang tidak dijalankan `unittest discover`; jalankan script modul yang diubah (misalnya `python3 tools/test_sdr_doa_collector.py`). Tes Node Receiver: `node --test tools/test_receiver_*.mjs` (Node 22.13+), termasuk bridge dasbor (`test_receiver_console_bridge.mjs`) dan kecocokan dua salinan protokolnya (`test_receiver_bridge_contract.mjs`). Jalur Kontrol dicakup `tools/test_mqtt_config_patch.py` dan `tools/test_config_patch_contract.py`; keduanya ikut `unittest discover` dan tidak butuh broker. Cache tile dicakup `tools/test_tile_cache.py` (upstream palsu di loopback lewat constructor `GroundConsoleServer`) dan kecocokan katalog peta dasar dengan cache oleh `tools/test_basemap_contract.py`; keduanya juga ikut `unittest discover`.
 
 ---
 
@@ -407,7 +419,7 @@ node --test tools/test_receiver_*.mjs   # bila kode Receiver berubah
 git diff --check
 ```
 
-Untuk perubahan UI, validasi browser bila tersedia: hard refresh production build; cek console/network/CSP; cek Overview no-data, stale, simulation ON/OFF, dan update; cek viewport laptop pendek/mobile; cek keyboard focus dan `prefers-reduced-motion`.
+Untuk perubahan UI, validasi browser bila tersedia: hard refresh production build; cek console/network/CSP; cek Dashboard no-data, stale, simulation ON/OFF, dan update; cek viewport laptop pendek/mobile; cek keyboard focus dan `prefers-reduced-motion`.
 
 ---
 
@@ -419,11 +431,11 @@ Console tetap berjalan tanpa `paho-mqtt`, tetapi monitor MQTT tidak bisa tersamb
 
 ### Receiver menampilkan "Receiver is not built"
 
-`npm run build` mengosongkan `frontend/dist/receiver`. Jalankan `npm run build:all`, atau `tools/build_browsdr_receiver.py` setelah `npm run build`. Panel Spektrum di Overview menampilkan `NOT BUILT` untuk penyebab yang sama.
+`npm run build` mengosongkan `frontend/dist/receiver`. Jalankan `npm run build:all`, atau `tools/build_browsdr_receiver.py` setelah `npm run build`. Panel Spektrum di Dashboard menampilkan `NOT BUILT` untuk penyebab yang sama.
 
 ### UI masih versi lama setelah `git pull`
 
-`frontend/dist` belum di-build ulang (misalnya masih ada menu samping dan Overview belum berupa dasbor). Jalankan `cd frontend && npm ci && npm run build:all`, lalu restart console.
+`frontend/dist` belum di-build ulang (misalnya masih ada menu samping dan Dashboard belum berupa dasbor). Jalankan `cd frontend && npm ci && npm run build:all`, lalu restart console.
 
 ### Kontrol tidak mendapat jawaban
 
@@ -433,9 +445,9 @@ Console tetap berjalan tanpa `paho-mqtt`, tetapi monitor MQTT tidak bisa tersamb
 - **Publish gagal** (PUBACK 128 ke atas): ACL broker tidak mengizinkan console publish ke `cmd/config/patch`.
 - Broker `tools/mqtt_lan_stage.conf` mewajibkan TLS dan password, yang tidak dimiliki monitor console; pakai `tools/mqtt_stage4.conf` untuk uji lokal.
 
-### OSM/MapLibre basemap tidak muncul
+### Basemap MapLibre tidak muncul
 
-MapLibre bukan tile provider. Periksa `connect-src`/`img-src` CSP, host tile, request Network, proxy, VPN, firewall, atau policy jaringan. Tile failure tidak otomatis berarti overlay gagal.
+MapLibre bukan tile provider. Tile datang dari `/api/tiles` di console; periksa log console, `X-Tile-Cache` pada response tile (hit, miss, stale; 504 berarti belum tersimpan dan upstream tidak terjangkau), koneksi HTTPS host console ke upstream di `tools/tile_cache.py`, proxy, VPN, firewall, dan izin tulis `--tile-cache-dir`. Tile failure tidak otomatis berarti overlay gagal.
 
 ### Overlay ada di DOM tetapi tidak terlihat
 

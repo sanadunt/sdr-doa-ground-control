@@ -1,37 +1,29 @@
 import type { Candidate, GpsConfig, GpsResolution, GpsSourceMode, ManualGpsOverride, MapCoordinate, TelemetrySnapshot } from '../types';
+import type { BasemapTone } from './basemaps';
 
-export const DEFAULT_OSM_TILE_TEMPLATE = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
-// Public OSM-derived tile endpoint tried first because some networks reject the
-// main tile.openstreetmap.org host even when the browser has normal HTTPS access.
-// Both endpoints are free; neither requires an API key.
-export const FALLBACK_OSM_TILE_TEMPLATE = 'https://tile.openstreetmap.de/{z}/{x}/{y}.png';
-/**
- * Tile hosts in the order they are tried. The map uses one host at a time:
- * MapLibre spreads a multi-URL `tiles` array across hosts by tile index rather
- * than retrying, which leaves a checkerboard when one host is blocked.
- */
-export const OSM_TILE_TEMPLATES = [FALLBACK_OSM_TILE_TEMPLATE, DEFAULT_OSM_TILE_TEMPLATE] as const;
+// Basemap health. The console's tile route tries the upstream hosts itself
+// (tools/tile_cache.py), so a style has one URL in the browser and hostCount
+// is 1; the functions still take any count, one host at a time. A host here is
+// one tile URL: MapLibre spreads a multi-URL `tiles` array across hosts by tile
+// index rather than retrying, which leaves a checkerboard when one is blocked.
+//
+// Two outages are told apart. Unavailable: tiles fail and none has drawn since
+// the style was chosen or last asked for again, or none of the style's tiles
+// is drawn in the view any more. Partial: tiles keep failing while others
+// draw, as offline with part of the view cached, where every cached tile that
+// loads would otherwise hide the failures of the rest.
 
-/** Basemap state the map reports to the Layers panel. */
-export interface BasemapStatus {
-  /** Tile host in use, e.g. tile.openstreetmap.de. */
-  host: string;
-  /** Every tile host failed; the overlay is still drawn. */
-  unavailable: boolean;
-}
-
-/** Host name of a tile template, for display (e.g. tile.openstreetmap.de). */
-export function tileHost(template: string): string {
-  try {
-    return new URL(template.replace(/\{[a-z]+\}/giu, '0')).host || template;
-  } catch {
-    return template;
-  }
-}
 /** Consecutive failed tiles on one host before the next host is tried. */
 export const BASEMAP_FAILURES_PER_HOST = 4;
 /** Failures right after a host switch may still come from the previous host's requests. */
 export const BASEMAP_SWITCH_GRACE_MS = 1500;
+/**
+ * BASEMAP_FAILURES_PER_HOST failures within this window, while a tile of the
+ * style has drawn, make the basemap partial. A retry of a partial basemap
+ * waits this long for its tiles before it is judged; the tile route answers
+ * within 10 s (two hosts, 5 s each).
+ */
+export const BASEMAP_PARTIAL_WINDOW_MS = 15_000;
 
 export interface BasemapHealth {
   hostIndex: number;
@@ -44,10 +36,38 @@ export interface BasemapHealth {
   /** Every host failed since the last loaded tile. */
   unavailable: boolean;
   switchedAtMs: number | null;
+  /** Tiles keep failing while others draw. */
+  partial: boolean;
+  /** When the partial state began or was last confirmed; its retry is due a retry interval later. */
+  partialSinceMs: number | null;
+  /** A retry of the partial basemap that waits for its tiles. */
+  partialRetryAtMs: number | null;
+  /** Times of the last BASEMAP_FAILURES_PER_HOST failed tiles, oldest first. */
+  recentFailuresMs: readonly number[];
+  lastLoadedAtMs: number | null;
 }
 
+export type BasemapNotice = 'unavailable' | 'partial' | null;
+
 export function initialBasemapHealth(hostIndex = 0): BasemapHealth {
-  return { hostIndex, failures: 0, hostsFailed: 0, loaded: false, unavailable: false, switchedAtMs: null };
+  return {
+    hostIndex, failures: 0, hostsFailed: 0, loaded: false, unavailable: false, switchedAtMs: null,
+    partial: false, partialSinceMs: null, partialRetryAtMs: null, recentFailuresMs: [], lastLoadedAtMs: null,
+  };
+}
+
+/** The map notice for a basemap state; unavailable wins over partial. */
+export function basemapNotice(state: BasemapHealth): BasemapNotice {
+  if (state.unavailable) return 'unavailable';
+  return state.partial ? 'partial' : null;
+}
+
+function failureBurst(failures: readonly number[], nowMs: number): boolean {
+  return failures.length >= BASEMAP_FAILURES_PER_HOST && nowMs - failures[failures.length - BASEMAP_FAILURES_PER_HOST] <= BASEMAP_PARTIAL_WINDOW_MS;
+}
+
+function withPartial(state: BasemapHealth, nowMs: number): BasemapHealth {
+  return state.partial ? state : { ...state, partial: true, partialSinceMs: nowMs, partialRetryAtMs: null };
 }
 
 /**
@@ -58,28 +78,69 @@ export function initialBasemapHealth(hostIndex = 0): BasemapHealth {
 export function nextBasemapHost(state: BasemapHealth, hostCount: number, nowMs: number): BasemapHealth {
   const count = Math.max(1, hostCount);
   const hostsFailed = Math.min(count, state.hostsFailed + 1);
-  return { hostIndex: (state.hostIndex + 1) % count, failures: 0, hostsFailed, loaded: false, unavailable: hostsFailed >= count, switchedAtMs: nowMs };
+  return { ...state, hostIndex: (state.hostIndex + 1) % count, failures: 0, hostsFailed, loaded: false, unavailable: hostsFailed >= count, switchedAtMs: nowMs };
 }
 
 /**
- * Count loaded and failed basemap tiles. A loaded tile clears every failure.
- * Failures only move to the next host until all hosts failed; after that the
- * caller's periodic check retries, so a dead network does not cause a reload loop.
+ * Count loaded and failed basemap tiles. A loaded tile clears the host
+ * failures. Before any tile loaded, failures move to the next host until all
+ * hosts failed; after that the caller's periodic check retries, so a dead
+ * network does not cause a reload loop. Once a tile loaded, failures only
+ * count towards the partial state.
  */
 export function basemapAfterTile(state: BasemapHealth, loaded: boolean, hostCount: number, nowMs: number): BasemapHealth {
-  if (loaded) return state.loaded && state.failures === 0 && !state.unavailable ? state : { ...initialBasemapHealth(state.hostIndex), loaded: true };
-  if (state.unavailable || (state.switchedAtMs !== null && nowMs - state.switchedAtMs < BASEMAP_SWITCH_GRACE_MS)) return state;
+  if (loaded) {
+    let next: BasemapHealth = { ...state, failures: 0, hostsFailed: 0, loaded: true, unavailable: false, switchedAtMs: null, lastLoadedAtMs: nowMs };
+    // After an outage the partial state starts over from the failures just seen.
+    if (state.unavailable) next = { ...next, partial: false, partialSinceMs: null, partialRetryAtMs: null };
+    return failureBurst(next.recentFailuresMs, nowMs) ? withPartial(next, nowMs) : next;
+  }
+  const counted = { ...state, recentFailuresMs: [...state.recentFailuresMs, nowMs].slice(-BASEMAP_FAILURES_PER_HOST) };
+  if (state.loaded) return failureBurst(counted.recentFailuresMs, nowMs) ? withPartial(counted, nowMs) : counted;
+  if (state.unavailable || (state.switchedAtMs !== null && nowMs - state.switchedAtMs < BASEMAP_SWITCH_GRACE_MS)) return counted;
   const failures = state.failures + 1;
-  return failures < BASEMAP_FAILURES_PER_HOST ? { ...state, failures } : nextBasemapHost(state, hostCount, nowMs);
+  return failures < BASEMAP_FAILURES_PER_HOST ? { ...counted, failures } : nextBasemapHost(counted, hostCount, nowMs);
+}
+
+/**
+ * A partial basemap whose view draws none of its tiles any more, as after
+ * panning offline to an area never viewed, is unavailable: earlier tiles drew
+ * elsewhere, not here. drawn is null when the renderer cannot tell; the
+ * partial retry then decides.
+ */
+export function basemapAfterView(state: BasemapHealth, drawn: boolean | null, hostCount: number, nowMs: number): BasemapHealth {
+  if (drawn !== false || !state.partial || state.unavailable) return state;
+  return nextBasemapHost({ ...state, partialRetryAtMs: null }, hostCount, nowMs);
+}
+
+/**
+ * Periodic check of a partial basemap: MapLibre does not ask for a failed tile
+ * again by itself, so every retryMs the caller reloads the style's tiles
+ * (reload: true). The retry is judged BASEMAP_PARTIAL_WINDOW_MS later: no
+ * failure since clears the partial state, failures with loaded tiles keep it,
+ * and failures with nothing loaded make the basemap unavailable.
+ */
+export function basemapPartialCheck(state: BasemapHealth, hostCount: number, nowMs: number, retryMs: number): { state: BasemapHealth; reload: boolean } {
+  if (!state.partial || state.unavailable) return { state, reload: false };
+  const retryAt = state.partialRetryAtMs;
+  if (retryAt === null) {
+    return nowMs - (state.partialSinceMs ?? nowMs) >= retryMs ? { state: { ...state, partialRetryAtMs: nowMs }, reload: true } : { state, reload: false };
+  }
+  if (nowMs - retryAt < BASEMAP_PARTIAL_WINDOW_MS) return { state, reload: false };
+  const lastFailure = state.recentFailuresMs.length ? state.recentFailuresMs[state.recentFailuresMs.length - 1] : null;
+  if (lastFailure === null || lastFailure < retryAt) return { state: { ...state, partial: false, partialSinceMs: null, partialRetryAtMs: null }, reload: false };
+  if (state.lastLoadedAtMs !== null && state.lastLoadedAtMs >= retryAt) return { state: { ...state, partialSinceMs: retryAt, partialRetryAtMs: null }, reload: false };
+  return { state: nextBasemapHost({ ...state, partialRetryAtMs: null }, hostCount, nowMs), reload: false };
 }
 
 /**
  * Basemap health when the map mounts again on Overview. A known outage carries
  * over, so its notice shows at once instead of after the next round of tile
- * failures; otherwise the map starts fresh on the last host that worked.
+ * failures; otherwise the map starts fresh on the last host that worked. A
+ * partial state is found again from the new map's own tiles.
  */
 export function resumeBasemapHealth(memory: BasemapHealth | null, preferredHost: number, hostCount: number): BasemapHealth {
-  if (memory?.unavailable) return { ...memory, failures: 0, loaded: false };
+  if (memory?.unavailable) return { ...memory, failures: 0, loaded: false, partial: false, partialSinceMs: null, partialRetryAtMs: null };
   return initialBasemapHealth(Math.max(0, Math.trunc(preferredHost)) % Math.max(1, hostCount));
 }
 
@@ -88,17 +149,23 @@ export interface BasemapPaint {
   background: string;
   rings: string;
   guides: string;
+  /** -3 dB edge lines. */
+  edges: string;
+  edgeWidth: number;
+  lobeOutline: string;
 }
 
 /**
- * Background and reference-line colours for the console theme. OSM tiles are
- * light in both themes, so the lines stay dark once tiles are drawn; on the
- * dark background alone they turn light to stay readable.
+ * Background and reference-line colours. The background follows the console
+ * theme. The lines follow what they are drawn on: the style's tiles once they
+ * load (Dark and the imagery styles are dark, the others light), otherwise
+ * the theme's background, so on a dark surface they turn light to stay readable.
  */
-export function basemapPaint(theme: 'light' | 'dark', tilesLoaded: boolean): BasemapPaint {
+export function basemapPaint(theme: 'light' | 'dark', tilesLoaded: boolean, tone: BasemapTone = 'light'): BasemapPaint {
   const background = theme === 'dark' ? '#1b242d' : '#dfe4dc';
-  if (theme === 'dark' && !tilesLoaded) return { background, rings: '#c3ced8', guides: '#9aabba' };
-  return { background, rings: '#1f2d3a', guides: '#34495c' };
+  const surface = tilesLoaded ? tone : theme;
+  if (surface === 'dark') return { background, rings: '#c3ced8', guides: '#9aabba', edges: '#ff8a5c', edgeWidth: 2, lobeOutline: '#ebbc70' };
+  return { background, rings: '#1f2d3a', guides: '#34495c', edges: '#e0603a', edgeWidth: 1.5, lobeOutline: '#c98a2e' };
 }
 
 export const DEFAULT_FALLBACK_COORDINATE = Object.freeze({ latitude: -6.932468839245536, longitude: 107.66069405900005 });
@@ -107,7 +174,6 @@ export const DEFAULT_GPS_CONFIG: GpsConfig = {
   manualLatitude: DEFAULT_FALLBACK_COORDINATE.latitude,
   manualLongitude: DEFAULT_FALLBACK_COORDINATE.longitude,
 };
-const ALLOWED_TILE_HOST = 'tile.openstreetmap.org';
 const GPS_DISABLED_STATES = new Set(['disabled', 'off', 'none', 'unavailable', 'not fixed', 'no fix']);
 const GPS_POSITIVE_STATES = new Set(['fix', 'fixed', 'enabled', 'active', 'ok', 'pass', 'connected', 'locked', '3d fix', 'gps fix']);
 const COORDINATE_EPSILON = 1e-7;
@@ -323,64 +389,6 @@ export function manualMapReadiness(override: ManualGpsOverride | null | undefine
     label: 'LOCAL GPS OVERRIDE',
     detail: 'The online OSM viewport can load around this entered coordinate; live telemetry remains untouched.',
   };
-}
-
-/**
- * Only the approved OSM HTTPS host is accepted. Keeping the template check
- * here prevents a Vite env value from becoming an unrestricted image proxy.
- */
-export function safeOsmTileTemplate(template: string | undefined = DEFAULT_OSM_TILE_TEMPLATE): string {
-  const candidate = template?.trim() || DEFAULT_OSM_TILE_TEMPLATE;
-  try {
-    const parsed = new URL(candidate);
-    if (
-      parsed.protocol !== 'https:'
-      || parsed.hostname.toLowerCase() !== ALLOWED_TILE_HOST
-      || parsed.search
-      || parsed.hash
-      || !parsed.pathname.endsWith('.png')
-      || !parsed.pathname.includes('{z}')
-      || !parsed.pathname.includes('{x}')
-      || !parsed.pathname.includes('{y}')
-    ) {
-      return DEFAULT_OSM_TILE_TEMPLATE;
-    }
-    return candidate;
-  } catch {
-    return DEFAULT_OSM_TILE_TEMPLATE;
-  }
-}
-
-export function osmTileUrlForIndex(
-  x: number,
-  y: number,
-  zoom = 13,
-  template = DEFAULT_OSM_TILE_TEMPLATE,
-): string {
-  const safeZoom = Math.max(1, Math.min(19, Math.trunc(zoom)));
-  const scale = 2 ** safeZoom;
-  const normalizedX = ((Math.trunc(x) % scale) + scale) % scale;
-  const safeY = Math.max(0, Math.min(scale - 1, Math.trunc(y)));
-  return safeOsmTileTemplate(template)
-    .replace('{z}', String(safeZoom))
-    .replace('{x}', String(normalizedX))
-    .replace('{y}', String(safeY));
-}
-
-export function osmTileUrl(
-  coordinate: MapCoordinate,
-  zoom = 13,
-  template = DEFAULT_OSM_TILE_TEMPLATE,
-): string {
-  const safeZoom = Math.max(1, Math.min(19, Math.trunc(zoom)));
-  const scale = 2 ** safeZoom;
-  const latitude = Math.max(-85.05112878, Math.min(85.05112878, coordinate.latitude));
-  const x = Math.floor(((coordinate.longitude + 180) / 360) * scale);
-  const latitudeRadians = latitude * Math.PI / 180;
-  const y = Math.floor(
-    (1 - Math.asinh(Math.tan(latitudeRadians)) / Math.PI) / 2 * scale,
-  );
-  return osmTileUrlForIndex(x, y, safeZoom, template);
 }
 
 export function mapReadiness(
