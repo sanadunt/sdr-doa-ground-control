@@ -228,10 +228,13 @@ function receiverApp({ audioAllowed = true, openOk = true, mockSdrEnabled = fals
 			try {
 				if (this.running) await this.togglePlay(false, true);
 				if (failures.sweep) {
+					// As sweep.ts does on a failed start: report it and resume the RX it stopped.
+					const shouldResume = this.sweep.returnToRx && this.connected;
 					this.sweep.error = failures.sweep;
 					this.showMsg(`Sweep error: ${failures.sweep}`);
 					failures.sweep = null;
 					this.sweep.returnToRx = false;
+					if (shouldResume) await this.startStream();
 					return;
 				}
 				this.sweep.active = true;
@@ -787,6 +790,37 @@ test('spectrum frames flow only while subscribed and running, cropped, throttled
 	frame.send('console:subscribe', { id: 'sub-3', spectrum: false });
 	feed(30, 33);
 	assert.equal(messages('receiver:spectrum').length, 5, 'spectrum:false stops frames');
+});
+
+test('a spectrum frame carries the centre the stream was tuned to, not the one still on its way', async t => {
+	const { frame, app, bridge, clock, messages } = setup(t);
+	app.radio.centerFreq = 433.92;
+	app.running = true;
+	frame.send('console:subscribe', { id: 'sub-t', spectrum: true, fps: 10, bins: 256, spanHz: 2_000_000 });
+	const data = new Float32Array(65536).fill(-80);
+	data[32768] = -3;
+	// The Receiver debounces setFrequency: the centre already reads 435 MHz, the radio is still on 433.92 MHz.
+	app.radio.centerFreq = 435;
+	bridge.spectrum(data, 433_920_000);
+	let last = messages('receiver:spectrum').at(-1);
+	assert.equal(last.centerHz, 433_920_000, 'drawn at the frequencies it was taken at');
+	assert.ok(last.startHz < 433_920_000 && last.stopHz > 433_920_000);
+	assert.ok(last.stopHz < 435_000_000);
+	// While the radio retunes, and until its smoothing has settled, a frame belongs to neither tuning.
+	clock.advance(200);
+	bridge.spectrum(data, null);
+	assert.equal(messages('receiver:spectrum').length, 1, 'not sent');
+	bridge.spectrum(data, 435_000_000);
+	assert.equal(messages('receiver:spectrum').length, 2, 'a dropped frame does not use up the frame rate');
+	assert.equal(messages('receiver:spectrum').at(-1).centerHz, 435_000_000);
+	// The worker reports device Hz; with an upconverter the frame is in displayed Hz.
+	app.radio.frequencyShift = -125;
+	app.radio.centerFreq = 7;
+	clock.advance(200);
+	bridge.spectrum(data, 132_000_000);
+	last = messages('receiver:spectrum').at(-1);
+	assert.equal(last.centerHz, 7_000_000);
+	assert.ok(Math.abs(last.startHz - 6_000_000) < 1_000 && Math.abs(last.stopHz - 8_000_000) < 1_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -1517,6 +1551,53 @@ test('radio re-centres an active VFO the new rate leaves out of band, stamped as
 	assert.equal(result('r7').tune.rev, 2, 'a VFO still in band keeps the centre');
 });
 
+test('an RX restart for a sample rate change shows as running throughout, so follow-node sees no new start', async t => {
+	await t.test('the Receiver page\'s Sample rate select', async st => {
+		const { app, clock, flushWatchers, messages, drawFrame } = await runningMock(st);
+		// Vue runs the snapshot watcher between the restart's stop and its start (after running = false).
+		app._releaseWakeLock = () => { clock.advance(STATUS_URGENT_MIN_MS); flushWatchers(); };
+		const before = messages('receiver:status').length;
+		app.radio.sampleRate = 10_000_000;
+		flushWatchers();
+		await settle(20);
+		drawFrame();
+		flushWatchers();
+		clock.advance(STATUS_DEBOUNCE_MS);
+		const during = messages('receiver:status').slice(before);
+		assert.ok(during.length > 0);
+		assert.deepEqual(during.map(status => status.running), during.map(() => true), 'no stop and start for the console');
+		assert.equal(during.at(-1).sampleRateHz, 10_000_000);
+		assert.equal(during.at(-1).tune.rev, during[0].tune.rev, 'and no retune');
+		assert.equal(app.running, true);
+	});
+	await t.test('a restart that does not bring RX back', async st => {
+		const { app, clock, flushWatchers, messages, failures } = await runningMock(st);
+		// Vue runs the snapshot watcher after each reactive change: the stop, then the failed start, both
+		// while _rxRestarting is still set. Clearing that flag (no Vue state) runs no watcher.
+		app._releaseWakeLock = () => { clock.advance(STATUS_DEBOUNCE_MS); flushWatchers(); };
+		const disarm = app.disarmVfoAudioRecording;
+		app.disarmVfoAudioRecording = async function () {
+			await disarm.call(this);
+			if (!this.running && this._rxRestarting) {
+				clock.advance(STATUS_DEBOUNCE_MS);
+				flushWatchers();
+			}
+		};
+		failures.startRx = true;
+		app.radio.sampleRate = 10_000_000;
+		flushWatchers();
+		await settle(20);
+		assert.equal(app.running, false);
+		assert.equal(app._rxRestarting, false);
+		assert.equal(messages('receiver:status').at(-1).running, true, 'sent while the restart still ran');
+		clock.advance(RADIO_POLL_MS + STATUS_URGENT_MIN_MS);
+		assert.equal(messages('receiver:status').at(-1).running, false, 'reported as stopped without waiting for the heartbeat');
+		const sent = messages('receiver:status').length;
+		clock.advance(RADIO_POLL_MS * 4);
+		assert.equal(messages('receiver:status').length, sent, 'and the poll ends');
+	});
+});
+
 test('radio refuses a rate the device does not offer, any scan and a remote session', async t => {
 	const { frame, app, result } = setup(t, { app: { mockSdrEnabled: true, sampleRates: [2_000_000, 10_000_000] } });
 	forbidDialogs(t);
@@ -1958,6 +2039,60 @@ test('sweep-start reports a radio that cannot scan and a scan that fails to star
 		frame.send('console:sweep-start', { id: 'ss1', mock: true });
 		await settle(20);
 		assert.equal(result('ss1').code, 'OK');
+	});
+});
+
+test('a sweep-start that fails over a running RX resumes it with the VFO audible or muted as before', async t => {
+	await t.test('listening', async st => {
+		const { frame, app, failures, result, clock, messages, flushWatchers } = await runningMock(st);
+		frame.send('console:listen', { id: 'l1', enabled: true });
+		await settle(20);
+		assert.equal(result('l1').code, 'OK');
+		assert.equal(app.vfos[0].enabled, true);
+		failures.sweep = 'Sweep range must be increasing and within 1–7250 MHz';
+		frame.send('console:sweep-start', { id: 'sf1', mock: true });
+		await settle(30);
+		assert.equal(result('sf1').code, 'SWEEP_FAILED');
+		assert.equal(app.sweep.active, false);
+		assert.equal(app.running, true, 'the RX the scan stopped runs again');
+		assert.equal(app.vfos[0].enabled, true, 'and is still audible');
+		assert.equal(app.audioCtx?.state, 'running');
+		flushWatchers();
+		clock.advance(STATUS_DEBOUNCE_MS);
+		assert.equal(messages('receiver:status').at(-1).vfo.enabled, true);
+		assert.equal(app._consoleBridge.initialVfoEnabled(), true, 'back to the Receiver page default');
+	});
+	await t.test('muted', async st => {
+		const { frame, app, failures, result } = await runningMock(st);
+		assert.equal(app.vfos[0].enabled, false);
+		failures.sweep = 'Sweep range must be increasing and within 1–7250 MHz';
+		frame.send('console:sweep-start', { id: 'sf2', mock: true });
+		await settle(30);
+		assert.equal(result('sf2').code, 'SWEEP_FAILED');
+		assert.equal(app.running, true);
+		assert.equal(app.vfos[0].enabled, false, 'still muted');
+	});
+	await t.test('stopped on the way by the Receiver page', async st => {
+		const { frame, app, result } = await runningMock(st);
+		frame.send('console:listen', { id: 'l3', enabled: true });
+		await settle(20);
+		// startSweep stops RX, then a Receiver-page Stop ends the start and resumes that RX (sweep.ts stopRequested).
+		app.startSweep = async function () {
+			this.sweep.starting = true;
+			this.sweep.error = '';
+			const resume = this.running;
+			try {
+				if (this.running) await this.togglePlay(false, true);
+				if (resume && this.connected) await this.startStream();
+			} finally {
+				this.sweep.starting = false;
+			}
+		};
+		frame.send('console:sweep-start', { id: 'ss3', mock: true });
+		await settle(30);
+		assert.equal(result('ss3').code, 'OK');
+		assert.equal(app.running, true);
+		assert.equal(app.vfos[0].enabled, true, 'audible as before');
 	});
 });
 

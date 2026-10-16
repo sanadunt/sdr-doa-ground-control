@@ -111,11 +111,16 @@ export interface SweepFrameLike {
 }
 
 export interface ConsoleBridge {
-	/** Called with every FFT frame the Listener draws. */
-	spectrum(data: ArrayLike<number>): void;
+	/**
+	 * Called with every FFT frame the Listener draws, with the device Hz the
+	 * worker took it at (worker/spectrum-tuning.ts): null while the radio
+	 * retunes or its smoothing settles, undefined when unknown (then the
+	 * Receiver's centre).
+	 */
+	spectrum(data: ArrayLike<number>, deviceHz?: number | null): void;
 	/** Called with every frame of a running wide scan (sweep.ts). */
 	sweepFrame(frame: SweepFrameLike): void;
-	/** Whether a fresh RX start unmutes VFO 1: false while a console start without listen runs. */
+	/** Whether a fresh RX start unmutes VFO 1: false while a console start without listen runs, as before a scan start that resumes RX. */
 	initialVfoEnabled(): boolean;
 	/** A device connection that started outside the bridge; console starts wait for it. */
 	trackConnect(pending: Promise<unknown>): void;
@@ -269,6 +274,8 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 	let lastStatusAt = -Infinity;
 	let sentUrgentKey: string | null = null;
 	let heartbeat: TimerHandle | null = null;
+	// See watchRestart().
+	let restartPoll: TimerHandle | null = null;
 	// Tune attribution: see writeTuning() and noteTune().
 	let tuneRev = 0;
 	let tuneBy: TuneSource = 'receiver';
@@ -281,6 +288,8 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 	let pendingListen = true;
 	// console:sweep-start commands received and not answered yet; sweep-config waits for them.
 	let sweepStartsPending = 0;
+	// While a sweep-start runs over a running RX: whether VFO 1 played, for the Receiver's resume of that RX.
+	let resumeVfoEnabled: boolean | null = null;
 	let connectInFlight: Promise<void> | null = null;
 	let lifecycle: Promise<void> = Promise.resolve();
 	// FFT frames drawn by a running Listener outside an RX restart; console:radio waits for the next one.
@@ -415,7 +424,9 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 			connected,
 			mock,
 			deviceName: connected ? (mock ? 'Mock SDR' : (String(app.info?.boardName ?? '') || null)) : null,
-			running: Boolean(app.running),
+			// A restart for a new sample rate or FFT size (main.ts) is no stop and start: the console's
+			// follow-node retunes once when RX starts, and a rate change alone must not retune.
+			running: Boolean(app.running) || Boolean(app._rxRestarting),
 			busy: busyState(),
 			workspace: workspace(),
 			centerHz: mhzToHz(app.radio?.centerFreq),
@@ -486,6 +497,23 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		sentUrgentKey = urgentKey(current);
 		lastStatusAt = env.monotonicNow();
 		post({ type: 'receiver:status', seq: ++statusSeq, tMs: env.now(), ...current, tune: stamp });
+		watchRestart();
+	}
+
+	/**
+	 * _rxRestarting is no Vue state, so the end of a restart runs no watcher. While
+	 * it alone reports a stopped RX as running, look again every RADIO_POLL_MS: a
+	 * restart that does not bring RX back then shows as stopped at once, not with
+	 * the next heartbeat.
+	 */
+	function watchRestart(): void {
+		if (disposed || restartPoll !== null || app.running || !app._rxRestarting) return;
+		restartPoll = env.setTimeout(() => {
+			restartPoll = null;
+			if (disposed) return;
+			if (app._rxRestarting && !app.running) watchRestart();
+			else if (!app.running) onReceiverChange();
+		}, RADIO_POLL_MS);
 	}
 
 	/** Sends a status after delayMs; a status already due sooner covers this one. */
@@ -985,9 +1013,26 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 	 * simulated scan (the Mock SDR has no sweep) and a real one connects the
 	 * one authorised RadioSpectrum first, as console:start does. The scan stops
 	 * RX, which ends an armed recording, so that needs confirmRecording. The
-	 * Receiver page then shows it in its Spektrum workspace.
+	 * Receiver page then shows it in its Spektrum workspace. A start that
+	 * fails, or is stopped on the way, resumes the RX it stopped (sweep.ts);
+	 * VFO 1 then plays or stays muted as it did before.
 	 */
 	async function sweepStart(command: CommandOf<'console:sweep-start'>): Promise<[ResultCode, string?]> {
+		// RX the operator had running before this command; a Receiver-page stop of the scan resumes it.
+		const rxWasRunning = Boolean(app.running);
+		const playing = rxWasRunning && audioState() === 'running' && Array.isArray(app.vfos) && app.vfos.some((vfo: { enabled?: unknown } | null) => Boolean(vfo?.enabled));
+		resumeVfoEnabled = rxWasRunning ? Boolean(app.vfos?.[0]?.enabled) : null;
+		try {
+			const answer = await startScan(command, rxWasRunning);
+			// The resumed RX has a new AudioContext; without the click's activation it may stay suspended.
+			if (playing && app.running && !app.sweep?.active) await ensureAudio();
+			return answer;
+		} finally {
+			resumeVfoEnabled = null;
+		}
+	}
+
+	async function startScan(command: CommandOf<'console:sweep-start'>, rxWasRunning: boolean): Promise<[ResultCode, string?]> {
 		const sweep = app.sweep;
 		if (remoteSession() || !sweep || typeof sweep !== 'object') return ['NOT_READY'];
 		const check = (): [ResultCode] | null => {
@@ -998,8 +1043,6 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		const early = check();
 		if (early) return early;
 		if (!app.backend) return ['NOT_READY'];
-		// RX the operator had running before this command; a Receiver-page stop of the scan resumes it.
-		const rxWasRunning = Boolean(app.running);
 		if (rxWasRunning && recordingArmed() && command.confirmRecording !== true) return ['RECORDING_ACTIVE'];
 		// An auto-connect of the authorised HackRF may already be opening the radio.
 		if (connectInFlight) await connectInFlight;
@@ -1354,12 +1397,17 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 	void refreshPairedCount();
 
 	return {
-		spectrum(data: ArrayLike<number>): void {
+		spectrum(data: ArrayLike<number>, deviceHz?: number | null): void {
 			if (disposed || !data || !data.length) return;
 			if (app.running && !app._rxRestarting) rxFrames++;
 			if (!subscription?.spectrum || !app.running) return;
+			// Taken while the radio retuned: it belongs to no one centre, so the dock keeps its last frame.
+			if (deviceHz === null) return;
 			if (!throttle.accept(env.monotonicNow())) return;
-			const centerHz = mhzToHz(app.radio?.centerFreq);
+			// The centre the stream was tuned to, in displayed Hz; the Receiver's centre moves before its
+			// debounced setFrequency reaches the radio.
+			const tunedHz = deviceHz === undefined ? null : finiteOrNull(deviceHz);
+			const centerHz = deviceHz === undefined ? mhzToHz(app.radio?.centerFreq) : tunedHz === null ? null : Math.round(tunedHz + frequencyShiftHz());
 			const sampleRateHz = finiteOrNull(app.radio?.sampleRate);
 			if (centerHz === null || sampleRateHz === null) return;
 			const cropped = cropSpectrum(data, centerHz, sampleRateHz, subscription.spanHz, subscription.bins);
@@ -1402,6 +1450,7 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 			}, [bins.buffer]);
 		},
 		initialVfoEnabled(): boolean {
+			if (resumeVfoEnabled !== null) return resumeVfoEnabled;
 			return startsPending > 0 ? pendingListen : true;
 		},
 		trackConnect(pending: Promise<unknown>): void {
@@ -1423,9 +1472,11 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 			unwatchMarkers?.();
 			if (statusTimer !== null) env.clearTimeout(statusTimer);
 			if (heartbeat !== null) env.clearInterval(heartbeat);
+			if (restartPoll !== null) env.clearTimeout(restartPoll);
 			if (markersTimer !== null) env.clearTimeout(markersTimer);
 			statusTimer = null;
 			heartbeat = null;
+			restartPoll = null;
 			markersTimer = null;
 		},
 	};

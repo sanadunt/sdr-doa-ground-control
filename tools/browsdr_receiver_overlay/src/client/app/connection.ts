@@ -377,13 +377,14 @@ export const connectionMethods = {
 		const rxStreamId = this._rxStreamId = (this._rxStreamId ?? 0) + 1;
 		try {
 			await this.backend.startRxStream(opts,
-				Comlink.proxy((spectrumData: any) => {
-					// The console bridge copies what it sends, so the frame keeps this buffer.
+				Comlink.proxy((spectrumData: any, deviceHz?: number | null) => {
+					// The console bridge copies what it sends, so the frame keeps this buffer. It stamps the
+					// frame with the device frequency the worker took it at, not the centre still on its way.
 					try {
 						this.updateListenerAutoRange(spectrumData);
 						this.drawSpectrum(spectrumData);
 					} finally {
-						this._consoleBridge?.spectrum(spectrumData);
+						this._consoleBridge?.spectrum(spectrumData, deviceHz);
 					}
 				}),
 				Comlink.proxy((audioSamples: any) => this.playAudio(audioSamples)),

@@ -192,7 +192,12 @@ class ReceiverBuildSourceTests(unittest.TestCase):
             self.assertTrue((app / "console-bridge-protocol.ts").is_file())
             self.assertIn("installConsoleBridge(this)", (app / "main.ts").read_text(encoding="utf-8"))
             connection = (app / "connection.ts").read_text(encoding="utf-8")
-            self.assertIn("this._consoleBridge?.spectrum(spectrumData)", connection)
+            # Each spectrum frame goes to the bridge with the device frequency the worker took it at.
+            self.assertIn("this._consoleBridge?.spectrum(spectrumData, deviceHz)", connection)
+            worker = work / "src/client/worker"
+            self.assertTrue((worker / "spectrum-tuning.ts").is_file())
+            self.assertIn("spectrumCallback(Comlink.transfer(specCopy, [specCopy.buffer]), stampHz)", (worker / "rx-stream.ts").read_text(encoding="utf-8"))
+            self.assertIn("this._spectrumTuning?.retune()", (worker / "backend.ts").read_text(encoding="utf-8"))
             self.assertIn("this._consoleBridge?.initialVfoEnabled() ?? true", connection)
             # The Dengar tab's dB scale drives the Listener trace and waterfall.
             self.assertIn("this.updateListenerAutoRange(spectrumData);", connection)

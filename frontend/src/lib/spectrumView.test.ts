@@ -224,8 +224,9 @@ describe('spectrum dock state table', () => {
   it('shows an RX restart for a sample rate change instead of RX stopped', () => {
     const stopped = status({ running: false });
     expect(spectrumDockView(input({ status: stopped, restarting: true }))).toMatchObject({ chip: '…', tone: 'info', message: 'spectrum.restarting', rxRunning: false, controlsDisabled: false });
-    // Running again.
-    expect(spectrumDockView(input({ restarting: true }))).toMatchObject({ chip: 'RX', rxRunning: true });
+    // The frame reports RX as running through the restart; the dock shows it until the change is answered.
+    expect(spectrumDockView(input({ restarting: true }))).toMatchObject({ chip: '…', message: 'spectrum.restarting', rxRunning: true, live: false });
+    expect(spectrumDockView(input({}))).toMatchObject({ chip: 'RX', rxRunning: true });
     expect(spectrumDockView(input({ status: stopped }))).toMatchObject({ chip: 'RX OFF' });
   });
 

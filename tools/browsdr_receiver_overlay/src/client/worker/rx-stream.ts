@@ -27,6 +27,7 @@ import type { RxStreamOpts, VfoParams, VfoState, PerfCounters } from './types';
 import { IF_RATES, AUDIO_RATE } from './types';
 import type { Backend } from './backend';
 import { displayToDeviceFrequencyHz } from '../frequency-shift';
+import { createSpectrumTuning } from './spectrum-tuning';
 
 let _streamStarting = false;
 
@@ -49,7 +50,11 @@ export async function startRxStream(
 		const { centerFreq, frequencyShift = 0, sampleRate, fftSize, gains, iqCorrection = true } = opts;
 
 		await device.setSampleRate(sampleRate);
-		await device.setFrequency(displayToDeviceFrequencyHz(centerFreq, frequencyShift));
+		const startHz = displayToDeviceFrequencyHz(centerFreq, frequencyShift);
+		await device.setFrequency(startHz);
+		// Each spectrum frame carries the frequency it was taken at; setFrequency() retunes it.
+		const spectrumTuning = createSpectrumTuning(startHz);
+		backend._spectrumTuning = spectrumTuning;
 
 		// ── Spectrum FFT setup ────────────────────────────────────────
 		const spectrumWindowFunc = (x: number): number => {
@@ -677,7 +682,8 @@ export async function startRxStream(
 							// Slice for remote BEFORE Comlink.transfer — transfer detaches specCopy.buffer,
 							// making any subsequent .slice() throw "detached ArrayBuffer".
 							if (backend._remoteHostFftCb) backend._remoteHostFftCb(specCopy.slice());
-							if (spectrumCallback) spectrumCallback(Comlink.transfer(specCopy, [specCopy.buffer]));
+							const stampHz = spectrumTuning.frameStamp();
+							if (spectrumCallback) spectrumCallback(Comlink.transfer(specCopy, [specCopy.buffer]), stampHz);
 						}
 					}
 				}

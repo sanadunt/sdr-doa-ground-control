@@ -513,8 +513,9 @@ export function spectrumDockView({ build, phase, starting, restarting = false, s
   if (phase === 'connecting' || (starting && !rxRunning)) {
     return { ...base, chip: '…', tone: 'info', message: 'spectrum.connecting' };
   }
-  // A sample rate change stops RX for a moment; it is not "RX stopped".
-  if (restarting && !rxRunning) {
+  // A dock sample rate change restarts RX until the new stream draws; the frame reports RX as running
+  // throughout (no stop and start), and an older frame's brief stop is not "RX stopped" either.
+  if (restarting) {
     return { ...base, chip: '…', tone: 'info', message: 'spectrum.restarting' };
   }
   const usbError = live?.error?.code ?? null;

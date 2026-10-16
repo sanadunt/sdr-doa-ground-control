@@ -10,7 +10,7 @@ import { DEFAULT_OVERVIEW_PANELS } from '../../lib/overviewPanels';
 import { followNodeStore } from '../../lib/listenPrefs';
 import { DEFAULT_SPECTRUM_DOCK_SETTINGS, spectrumDockStore } from '../../lib/spectrumDockSettings';
 import type { ConsoleCapabilities } from '../../api';
-import { SpectrumDock, SpectrumMarkRow } from './SpectrumDock';
+import { DOCK_MAP_KEEP_PX, SpectrumDock, SpectrumMarkRow, dockNeedWithinStage, spectrumNeedFromParts } from './SpectrumDock';
 import type { SpectrumMarkRowProps } from './SpectrumDock';
 import { SpectrumSettings } from './SpectrumSettings';
 import type { RadioRows, SpectrumSettingsProps, SweepRows } from './SpectrumSettings';
@@ -380,6 +380,29 @@ describe('Spectrum dock styles', () => {
     expect(dashboardCss).toMatch(/--ov-dock-h:\s*max\(256px,\s*var\(--ov-spec-need-h,\s*0px\)\)/);
   });
 
+  it('counts the open Atur column beside the trace only when taller, and below it in full', () => {
+    // Header 48, body 180, column 311, dock border 1.
+    expect(spectrumNeedFromParts(48, 180, 311, false, 1)).toBe(360);
+    expect(spectrumNeedFromParts(48, 180, 120, false, 1)).toBe(229);
+    expect(spectrumNeedFromParts(48, 180, 194, true, 1)).toBe(423);
+    expect(spectrumNeedFromParts(48.2, 180.1, 0, true, 0)).toBe(229);
+  });
+
+  it('lets the open Atur column grow the dock only while the map keeps its HUD, buttons, node card and legend', () => {
+    expect(DOCK_MAP_KEEP_PX).toBe(256);
+    // 1440x900, column beside the trace: unchanged.
+    expect(dockNeedWithinStage(360, 229, 848)).toBe(360);
+    // 1024x768 with Polar open, column below: 716 px stage, 460 px left for the dock, the rest scrolls.
+    expect(dockNeedWithinStage(513, 320, 716)).toBe(460);
+    // 1280x800 with Polar "Atur" open as well: one column, far taller than the room.
+    expect(dockNeedWithinStage(900, 360, 748)).toBe(492);
+    // The header and the trace keep their room on a short window, but never more than the stage.
+    expect(dockNeedWithinStage(600, 300, 500)).toBe(300);
+    expect(dockNeedWithinStage(600, 300, 280)).toBe(280);
+    // Before layout the stage reads 0.
+    expect(dockNeedWithinStage(513, 320, 0)).toBe(513);
+  });
+
   /** The body of an at-rule block such as `@container ov-spec (max-width: 1279px)`. */
   const block = (prelude: string): string => {
     const start = dashboardCss.indexOf(`${prelude} {`);
@@ -400,9 +423,16 @@ describe('Spectrum dock styles', () => {
     expect(block('@container ov-spec (max-width: 1499px)')).toMatch(/\.ov-spec-source\s*\{\s*display:\s*none;?\s*\}/);
   });
 
-  it('puts Atur beside the trace, over it on a dock of 760 px or less, and below it when stacked', () => {
+  it('puts Atur beside the trace, below it on a dock of 760 px or less, and below it when stacked', () => {
     expect(declarations('.ov-spec-settings').join(';')).toMatch(/width:\s*337px/);
-    expect(block('@container ov-spec (max-width: 760px)')).toMatch(/\.ov-spec-settings\s*\{[^}]*position:\s*absolute[^}]*width:\s*min\(337px,\s*100%\)/);
+    const narrow = block('@container ov-spec (max-width: 760px)');
+    // Below the trace, never over it: nothing in the column covers the marker row's buttons.
+    expect(narrow).not.toMatch(/position:\s*absolute/);
+    expect(narrow).toMatch(/\.ov-spec-main\s*\{[^}]*flex-direction:\s*column[^}]*overflow-y:\s*auto/);
+    expect(narrow).toMatch(/\.ov-spec-settings\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fill,\s*minmax\(min\(313px,\s*100%\),\s*1fr\)\)[^}]*width:\s*auto[^}]*overflow:\s*visible/);
+    // Scrolled under the header when the stage is too short, the trace keeps its waterfall.
+    expect(narrow).toMatch(/\.ov-spec-main > \.ov-spec-body\s*\{\s*flex:\s*1 0 auto;?\s*\}/);
+    expect(narrow).toMatch(/\.ov-spec-main \.ov-spec-waterfall\s*\{\s*min-height:\s*48px;?\s*\}/);
     const stacked = block('@media (max-width: 1023px)');
     expect(stacked).toMatch(/\.ov-spec-main\s*\{\s*flex-direction:\s*column;?\s*\}/);
     expect(stacked).toMatch(/\.ov-spec-settings\s*\{[^}]*position:\s*static[^}]*width:\s*auto/);
