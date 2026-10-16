@@ -154,6 +154,17 @@ export function isLoopbackHost(input: string): boolean {
 }
 
 /**
+ * Whether the index treats the page as scrolled to its end. A page that fits
+ * the viewport has no end to reach: it counts as one only while a section was
+ * jumped to (`jumped`), so that section keeps its mark when the window is
+ * resized; otherwise the index marks the section at the top.
+ */
+export function atPageBottom(viewportHeight: number, scrollY: number, scrollHeight: number, jumped = false): boolean {
+  if (scrollHeight <= viewportHeight + 2) return jumped;
+  return viewportHeight + scrollY >= scrollHeight - 2;
+}
+
+/**
  * The section index entry to mark as current. `sections` are in page order
  * with their top edge relative to the viewport; a section is reached once its
  * top is at or above `threshold` (where a jump puts it). Sections in one grid

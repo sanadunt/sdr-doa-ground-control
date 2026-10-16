@@ -1,8 +1,9 @@
 /* Configuration page (pages/ConfigurationPage.tsx), on the page kit
    (page-kit.css). Only layout the kit has no piece for: the sticky section
-   bar, equal-height card rows with the actions at the bottom, the GPS and
-   Compass halves, the branding block and the dry-run grid. Colours come from
-   the console-design.css tokens; type sizes follow the kit's six steps. */
+   bar, the two columns of content-height cards, the GPS and Compass halves
+   with their actions on one line, the branding block and the dry-run grid.
+   Colours come from the console-design.css tokens; type sizes follow the
+   kit's six steps. */
 
 /* Section bar ------------------------------------------------------------------ */
 .cfg-index { display: flex; min-width: 0; max-width: 100%; }
@@ -19,11 +20,15 @@
   .cfg-index { width: 100%; }
 }
 
-/* Cards in a row share a height; each form keeps its actions at the bottom. */
-.cfg-grid { align-items: stretch; }
-/* 1024–1279 px: Connection and GPS & Compass take full rows, so neither leaves a half-empty card beside the other. */
+/* Each column (pages/ConfigurationPage.tsx: Connection and MQTT, GPS & Compass
+   and Branding) stacks its cards at their own height, so no card stretches to
+   a taller neighbour and leaves an empty band above its actions. */
+/* 1024–1279 px: a half-width GPS & Compass card stacks its fields and outgrows
+   the left column, so the columns dissolve into the grid: Connection beside
+   MQTT (span 6, each at its own height), then GPS & Compass and Branding on
+   full rows. */
 @media (min-width: 1024px) and (max-width: 1279px) {
-  .cfg-grid > .cfg-wide-md { grid-column: 1 / -1; }
+  .cfg-grid > .pg-stack { display: contents; }
 }
 /* A full-width Connection card puts the URL and the interval side by side. */
 .cfg-conn-body { container-type: inline-size; }
@@ -31,7 +36,6 @@
   .cfg-form.cfg-conn-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 10px 12px; }
   .cfg-form.cfg-conn-form > .cfg-actions { grid-column: 1 / -1; }
 }
-.cfg-grid > .pg-card > .pg-card-body { flex: 1 1 auto; }
 .cfg-section h2:focus { outline: none; }
 .cfg-section h2:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .cfg-form { display: flex; flex: 1 1 auto; flex-direction: column; gap: 10px; min-width: 0; }
@@ -66,7 +70,8 @@
 .cfg-sub-title { margin: 0; color: var(--subtle); font-family: var(--mono); font-size: 10.5px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; }
 .cfg-sub > .pg-seg { width: 100%; }
 .cfg-pair { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 10px 12px; }
-@container (min-width: 300px) {
+/* 280 px keeps latitude and longitude, axis and offset side by side in a half-width card from 1280 px. */
+@container (min-width: 280px) {
   .cfg-pair { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .cfg-sub .pg-kv-row { min-height: 32px; }

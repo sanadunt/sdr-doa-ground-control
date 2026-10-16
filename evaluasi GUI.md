@@ -2,16 +2,18 @@
 
 Tanggal: 21 September 2026
 
-## Status saat ini (2026-10-15)
+## Status saat ini (2026-10-16)
 
 Isi dokumen di bawah bagian ini adalah catatan historis per tanggal masing-masing. Bila bertentangan dengan daftar berikut, daftar ini dan kode aktif yang berlaku. Perilaku yang terlihat operator dijelaskan di `QUICKSTART.md`; audit fungsional 2026-10-12 dan status perbaikannya ada di `anti-slop/audit-006-2026-10-12-functional.md`.
 
 - **Route.** Tujuh halaman dengan urutan Dashboard (route id `overview`, `#/dashboard`), Receiver, System Health, DoA Diagnostics, Configuration, Message Monitor, Simulasi; shortcut `1`–`7` menurut urutan itu (Receiver `2`) dan `R`. Receiver ter-mount pada kunjungan pertama ke `#/receiver` atau klik Mulai/Dengar pertama di dock Spektrum, lalu tetap ter-mount (tersembunyi).
-- **Motion.** GSAP tidak dipakai lagi. Halaman selain Overview memakai animasi CSS `route-in` 0,22 s, yang dimatikan oleh `prefers-reduced-motion`.
+- **Top bar dan menu.** Tidak ada rail atau sidebar. Semua route memakai satu top bar: tombol menu halaman (popover berisi ketujuh halaman beserta tombolnya, sakelar tema, dan chip kontrol admin), brand, judul halaman dan umur baca (kecuali di Dashboard), strip status, refresh, select interval, dan EN|ID. Ringkasan/Overview di catatan lama kini bernama Dashboard, dan tab Simulasi kini halaman ketujuh (tombol `7`).
+- **Halaman selain Dashboard dan Receiver.** Memakai page kit (`components/page/`, `page-kit.css`): bilah halaman dengan chip state dan aksi, lalu grid 12 kolom berisi kartu ringkas (satu kolom di bawah 1024 px). Kesehatan Sistem: baris stat, lalu RDF-SDR dan Tampilan DoA di kiri, Data Out dan Monitor MQTT di kanan. Diagnostik DoA: Gate publikasi dan Collector di kiri, Rekaman native di kanan, Konfigurasi efektif selebar halaman. Konfigurasi: dua kolom kartu setinggi isinya (Koneksi & refresh dan Monitor MQTT; GPS & Kompas dan Branding & admin), lalu Patch dry-run selebar halaman; pada 1024–1279 px Koneksi dan MQTT berdampingan dan kartu lain selebar halaman. Monitor Pesan: sakelar sdr/v1 | RDF Node v2 di bilah halaman. Simulasi: kartu Kontrol, Skenario, dan Pratinjau. Isinya label, nilai, chip, error, peringatan, dan prompt yang perlu tindakan, tanpa kalimat bantuan; tooltip hanya menyebut penyebab saat ini.
+- **Motion.** GSAP tidak dipakai lagi. Halaman selain Dashboard memakai animasi CSS `route-in` 0,22 s, yang dimatikan oleh `prefers-reduced-motion`.
 - **Peta.** Renderer adalah MapLibre GL JS, bukan Leaflet. Style dianggap siap pada `styledata`, bukan `load`, karena `load` menunggu tile raster dan tidak pernah terjadi saat offline. Delapan gaya peta dasar (`lib/basemaps.ts`) semuanya mengambil tile dari route console `/api/tiles`; console mencoba host upstream satu per satu (OSM: `tile.openstreetmap.de` dulu, lalu `tile.openstreetmap.org`) dan menyimpan tile di disk, sehingga area yang pernah tampil tetap terlihat saat offline. Browser memakai satu URL per sumber, karena MapLibre membagi array `tiles` per indeks tile dan tidak mencoba host lain. Ganti gaya hanya menukar layer raster, tanpa `setStyle`. Bila tile gaya yang dipilih terus gagal dan belum ada yang tampil, chip BASEMAP UNAVAILABLE · <gaya> muncul; bila sebagian tile tampil dan sisanya terus gagal (offline dengan sebagian area tersimpan), chip BASEMAP PARTIAL · <gaya> muncul, dan menjadi UNAVAILABLE bila tampilan tidak lagi menggambar satu pun tile gaya itu. Keduanya dicoba lagi setiap 60 detik. Tanpa WebGL2, setelah context hilang, atau bila worker gagal, overlay digambar di kanvas.
 - **Dock Spektrum.** Dock menggerakkan Receiver tersembunyi lewat bridge `postMessage` (`lib/receiverBridge.ts`, protokol di dua salinan yang dibandingkan tes kontrak). Frekuensi sinkron dua arah: klik di dock menala Receiver, dan perubahan tengah atau VFO di halaman Receiver mematikan "Ikuti frekuensi node". Header memuat sakelar RX|Spektrum dan Penanda; kolom Atur memuat skala dB (Auto|Manual; mode RX sama dengan Skala dB tab Dengar, mode Spektrum sama dengan Grafik min./maks.), sample rate (MSPS), LNA, VGA dan amp +14 dB, serta pada mode Spektrum rentang, resolusi dan gain pindai yang terkunci selama pindai berjalan. Penanda tampil di dock (kedua mode), kanvas Spektrum Receiver dan trace Dengar. Frame spektrum tidak pernah masuk state React. Validasi hanya dengan Mock SDR (`?mock=1`, pindai simulasi) di Chromium swiftshader; HackRF asli belum diuji.
 - **Arah.** Peta, readout, dan mode Compass memakai bearing geografis (360 − θ₀ + compass_offset) mod 360. Mode Polar menggambar θ₀ berlawanan jarum jam seperti KrakenSDR. Satu predikat kesiapan (`overviewDoaStatus`) mengosongkan readout, polar, dan overlay bersamaan.
-- **Simulasi.** Tidak ada banner global. Penanda `SIMULATION` ada di readout, strip status, peta, dan panel polar. Sudut simulasi adalah bearing dari utara.
+- **Simulasi.** Tidak ada banner global. Penanda `SIMULATION` ada di readout, peta, dan panel polar, dan strip status menampilkan SIM `ON`. Sudut simulasi adalah bearing dari utara.
 - **Urutan mobile.** Pada layar sempit peta tampil sebelum plot polar (urutan DOM), bukan sebaliknya.
 - **Plotly.** Bundle parsial (`plotly.js/lib/core` + `lib/scatterpolar`), sekitar 1,2 MB, bukan `plotly.js-dist-min` 4,7 MB. Tombol Share ke Plotly Cloud dihapus dan ekspor PNG berfungsi. Skala radial otomatis mengikuti span data, bukan kelipatan 10 dB. Head Up tidak lagi memaksa rentang manual.
 - **Overlay.** Skala dB default Auto dari vektor; −60…0 dB hanya untuk simulasi atau mode Manual.
@@ -129,6 +131,8 @@ Console instrumen, bukan landing page atau simulasi radar.
   Ground Console dijalankan di target Ground Console; validasi saat ini mencakup compile/build
   dan lifecycle code review.
 
+Tabel ini mencatat redesign 21 September 2026. Tata letak yang berlaku ada di bagian Status saat ini.
+
 | Area | Implementasi |
 |---|---|
 | Shell | Navigasi lebih tenang, refresh jelas, switch tema tersimpan lokal, skip link |
@@ -223,28 +227,30 @@ broker. Koneksi broker sebenarnya belum diverifikasi. `.venv/` diabaikan Git.
 
 ## Checklist penerimaan manual
 
-### Tambahan: tab Simulasi
+### Tambahan: halaman Simulasi
 
-- Sidebar memiliki tab Simulasi. Aktifkan checkbox, atur latitude/longitude,
-  DoA 0–359°, dan lebar lobe 5–60°, lalu klik Terapkan skenario.
-- Buka Overview untuk melihat map dan kurva sintetis 360 bin. Randomize DoA
-  tersedia manual atau otomatis setiap satu detik. Menerapkan skenario menghentikan
-  randomize otomatis; OFF juga menghentikan timer.
-- Banner global menandai mode simulasi. Hanya map/polar Overview memakai data
-  sintetis; header runtime, health, diagnostics, dan MQTT tetap sumber nyata.
+- Buka halaman Simulasi dari menu halaman atau dengan tombol `7`. Nyalakan sakelar
+  Simulasi di Dashboard, atur bearing 0–359°, sebaran σ 5–60°, latitude, dan
+  longitude, lalu klik Terapkan.
+- Buka Dashboard (Lihat di Dashboard) untuk melihat peta dan kurva sintetis 360 bin.
+  Acak tersedia manual (Acak sekarang) atau otomatis setiap detik. Terapkan
+  menghentikan acak otomatis; sakelar OFF juga menghentikan timer.
+- Tidak ada banner global; mode simulasi ditandai SIM ON di strip status dan SIMULATION
+  di readout, peta, dan panel polar. Hanya Dashboard memakai data sintetis; chip lain
+  di strip status, health, diagnostics, MQTT, dock Spektrum, dan Kontrol tetap sumber nyata.
   Pembacaan live existing tetap berjalan sesuai konfigurasi, terpisah dari generator.
 - Generator berjalan di browser, tanpa API write/publish. Publication gate fixture
   selalu BLOCKED; tidak ada authority yang dipilih. Reload mereset simulasi ke OFF.
 - Kurva Gaussian −50 sampai −5 dB adalah fixture renderer, bukan model fisika RF.
   Preview statis tidak kedaluwarsa seperti telemetry live. Sumber koordinat berlabel
-  SIMULATION dan axis preview memakai Polar tanpa offset, terpisah dari settings live.
+  SIMULATION, dan Pratinjau memakai kompas (bearing dari utara), terpisah dari settings live.
 - Validasi: 55 tes lulus (10 tes generator baru), build TypeScript/Vite berhasil.
   Browser memverifikasi mode ON, sumber SIMULATION, metadata 45°/−5 dB/360 bins,
   randomize manual/otomatis, OFF menghentikan otomatis, reset setelah reload,
   serta tidak ada overflow pada 390 px untuk tab Simulasi dan Overview aktif.
   Pemeriksaan screenshot visual dan koneksi hardware tidak dilakukan.
 
-- Buka kelima halaman pada 1366×768 dan monitor operator sebenarnya.
+- Buka ketujuh halaman pada 1366×768 dan monitor operator sebenarnya.
 - Bandingkan dark/light; pastikan grafik, status, label, dan form nyaman dibaca.
 - Gunakan Tab untuk navigasi, ganti tema, refresh, zoom/recenter map.
 - Aktifkan reduced motion OS dan pastikan tidak ada entrance/recenter animation.

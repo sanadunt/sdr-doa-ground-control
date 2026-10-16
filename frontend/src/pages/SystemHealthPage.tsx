@@ -36,25 +36,23 @@ function safeRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? value as Record<string, unknown> : {};
 }
 
-/** Why progress reads as it does; shown as the tooltip of the progress value. */
-function progressDetail(t: Translate, progress: NodeProgressView | null): string {
-  if (!progress) return t('health.progress.notReported');
-  const regressed = progress.regressedCounters.length ? ` ${t('health.progress.regressed', { counters: progress.regressedCounters.join(', ') })}` : '';
+/**
+ * The cause behind a progress state, for the tooltip of the progress value and
+ * the stall notice: which counters stalled or went backwards, or that
+ * status.json was unusable. A state without a cause (ADVANCING, UNCHANGED with
+ * its age beside the chip, FIRST_SAMPLE, UNTRACKED) gets none.
+ */
+function progressCause(t: Translate, progress: NodeProgressView | null): string | undefined {
+  if (!progress) return undefined;
+  const regressed = progress.regressedCounters.length ? t('health.progress.regressed', { counters: progress.regressedCounters.join(', ') }) : '';
   switch (progress.state) {
     case 'STALLED':
-      return t('health.progress.stalled', {
+      return [t('health.progress.stalled', {
         counters: progress.stalledCounters.join(', ') || 'status',
         age: progress.longestUnchangedMs === null ? 'N/A' : formatDuration(t, progress.longestUnchangedMs),
-      }) + regressed;
-    case 'ADVANCING': return t('health.progress.advancing') + regressed;
-    case 'UNCHANGED':
-      return t('health.progress.unchanged', {
-        age: progress.longestUnchangedMs === null ? 'N/A' : formatDuration(t, progress.longestUnchangedMs),
-      });
-    case 'FIRST_SAMPLE': return t('health.progress.firstSample');
+      }), regressed].filter(Boolean).join(' ');
     case 'UNAVAILABLE': return t('health.progress.unavailable');
-    case 'UNTRACKED': return t('health.progress.untracked');
-    default: return t('health.progress.notReported');
+    default: return regressed || undefined;
   }
 }
 
@@ -266,7 +264,7 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
   const noise = quality?.noiseSourceEnabled === true ? 'ON' : quality?.noiseSourceEnabled === false ? 'OFF' : 'N/A';
   const gps = String(statusValue(status, 'gps_status') ?? 'UNKNOWN');
   const nodeItems: KeyValueItem[] = [
-    { id: 'progress', label: t('health.row.progress'), value: progressValue, title: progressDetail(t, progress) },
+    { id: 'progress', label: t('health.row.progress'), value: progressValue, title: progressCause(t, progress) },
     { id: 'frame', label: t('health.row.frame'), value: typeof daq.data_frame_index === 'number' ? formatCount(lang, daq.data_frame_index) : 'N/A' },
     { id: 'dropped', label: t('health.row.dropped'), value: dropped === null ? 'N/A' : formatCount(lang, dropped), tone: dropped !== null && dropped > 0 ? 'warn' : undefined },
     {
@@ -311,7 +309,7 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
         <PageStack span={6}>
           <Card title={t('node.title')} chip={<StatusChip code={node.state} />}>
             {node.error ? <Notice tone="bad" title={node.state}><CollectorError error={node.error} /></Notice> : null}
-            {progress?.state === 'STALLED' ? <Notice tone="bad" title="NODE_CLOCK_STALLED">{progressDetail(t, progress)}</Notice> : null}
+            {progress?.state === 'STALLED' ? <Notice tone="bad" title="NODE_CLOCK_STALLED">{progressCause(t, progress)}</Notice> : null}
             {progress && progress.state !== 'STALLED' && progress.regressedCounters.length
               ? <Notice tone="warn" title={progress.state}>{t('health.progress.regressed', { counters: progress.regressedCounters.join(', ') })}</Notice>
               : null}

@@ -30,6 +30,13 @@ function render({ lang = 'en', refreshSeconds = 10, gps = DEFAULT_GPS_CONFIG, co
   );
 }
 
+/** Vitest blanks every CSS import, so the stylesheet is read from disk. */
+function readSource(path: string): string {
+  type Fs = { readFileSync(file: URL, encoding: 'utf8'): string };
+  const { process } = globalThis as unknown as { process: { getBuiltinModule(id: 'node:fs'): Fs } };
+  return process.getBuiltinModule('node:fs').readFileSync(new URL(path, import.meta.url), 'utf8');
+}
+
 describe('Configuration page', () => {
   it('wraps each section in a form so Enter submits it (AUD-106)', () => {
     const markup = render();
@@ -42,13 +49,36 @@ describe('Configuration page', () => {
 
   it('lays the cards out in the section index order', () => {
     const markup = render();
-    const ids = ['connection-settings', 'navigation-settings', 'mqtt-settings', 'branding-settings', 'dry-run-settings'];
+    const ids = ['connection-settings', 'mqtt-settings', 'navigation-settings', 'branding-settings', 'dry-run-settings'];
     const cardOrder = ids.map((id) => markup.indexOf(`<section id="${id}"`));
     expect(cardOrder.every((index) => index > 0)).toBe(true);
     expect([...cardOrder].sort((a, b) => a - b)).toEqual(cardOrder);
     const index = markup.match(/<nav class="cfg-index"[\s\S]*?<\/nav>/)?.[0] ?? '';
     expect([...index.matchAll(/aria-controls="([^"]+)"/g)].map((match) => match[1])).toEqual(ids);
     expect(index).toContain('aria-current="location"');
+  });
+
+  it('stacks the cards in two content-height columns, so none stretches to a taller neighbour', () => {
+    const markup = render();
+    const grid = markup.indexOf('<div class="pg-grid cfg-grid">');
+    expect(grid).toBeGreaterThan(0);
+    const columns = [...markup.slice(grid).matchAll(/<div class="pg-stack pg-span-6">/g)].map((match) => grid + (match.index ?? 0));
+    expect(columns).toHaveLength(2);
+    const at = (id: string) => markup.indexOf(`<section id="${id}"`);
+    // Data Out and MQTT on the left, GPS & Compass and Branding on the right, the dry-run on a full row below.
+    expect(columns[0]).toBeLessThan(at('connection-settings'));
+    expect(at('mqtt-settings')).toBeLessThan(columns[1]);
+    expect(columns[1]).toBeLessThan(at('navigation-settings'));
+    expect(at('branding-settings')).toBeLessThan(at('dry-run-settings'));
+    expect(markup).toMatch(/<\/div><section id="dry-run-settings" class="pg-card pg-span-12/);
+    const css = readSource('./configuration.css');
+    expect(css).not.toMatch(/align-items:\s*stretch/);
+    expect(css).not.toMatch(/\.pg-card-body\s*\{[^}]*flex:\s*1 1 auto/);
+    expect(css).not.toContain('cfg-wide-md');
+    // Only 1024–1279 px dissolves the columns into the grid (Connection beside MQTT, GPS & Compass and Branding on full rows).
+    const contents = css.match(/@media \(min-width: 1024px\) and \(max-width: 1279px\) \{\s*\.cfg-grid > \.pg-stack \{ display: contents; \}\s*\}/g);
+    expect(contents).toHaveLength(1);
+    expect(css.match(/display: contents/g)).toHaveLength(1);
   });
 
   it('offers the refresh intervals as one segmented control and warns about a 10 s interval (AUD-24)', () => {
@@ -107,6 +137,10 @@ describe('Configuration page', () => {
     expect(markup).toContain('<span class="ov-tag tone-signal">MANUAL</span>');
     expect(markup).toContain('aria-pressed="true">Fallback</button>');
     expect(markup).toContain('aria-pressed="true">Manual</button>');
+  });
+
+  it('lists the accepted MQTT host forms in the placeholder without a sentence', () => {
+    for (const lang of ['en', 'id'] as const) expect(render({ lang })).toContain('placeholder="IPv4 · IPv6 · localhost"');
   });
 
   it('warns about a monitor without TLS only for a host off this machine', () => {

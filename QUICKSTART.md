@@ -249,7 +249,7 @@ Dashboard (dulu Ringkasan) adalah dasbor peta penuh di `#/dashboard`; alamat lam
 
 - Tombol menu di kiri top bar membuka menu halaman: tujuh halaman (label dan tombolnya saja), tombol tema, dan chip kontrol admin. Urutannya Dashboard (`1`), Receiver (`2`), Kesehatan Sistem (`3`), Diagnostik DoA (`4`), Konfigurasi (`5`), Monitor Pesan (`6`), dan Simulasi (`7`). Menu tertutup dengan `Esc`, klik di luar menu, atau setelah memilih halaman. Tombol `1`–`7` tetap berlaku.
 - Di Dashboard, top bar punya tombol panel **Lapisan**, **Polar**, **Spektrum**, dan **Kontrol**. Secara bawaan Polar dan Spektrum aktif, Lapisan dan Kontrol mati, dan kartu node tampil ringkas. Pilihan ini diingat browser. Bila Polar dan Spektrum dimatikan, dock hilang dan peta memakai seluruh tinggi layar.
-- Select interval di samping tombol refresh menyimpan interval refresh ke konfigurasi console, sama seperti form **Konfigurasi → Connection**.
+- Select interval di samping tombol refresh menyimpan interval refresh ke konfigurasi console, sama seperti form **Konfigurasi → Koneksi**.
 - Kartu node menampilkan frekuensi tengah, gain, dan posisi stasiun. Tombol panah di kartu membuka detail: SNR, DAQ, ADC, frame DAQ, kontrol jarak jauh (`en_remote_control`), dan offset kompas.
 - Tombol peta ada di kiri bawah: zoom masuk dan keluar, pusatkan ke stasiun, kembalikan utara ke atas, **Peta dasar**, dan chip sumber peta (tautan atribusi).
 
@@ -369,7 +369,7 @@ Windows PowerShell:
 .\.venv\Scripts\python.exe tools\ground_console.py --base-url http://192.168.100.100:8081 --bind 127.0.0.1 --port 8787
 ```
 
-Flag yang diketik eksplisit (`--base-url`, `--mqtt-host`, `--mqtt-port`, `--mqtt-transport`, `--mqtt-ws-path`) mengalahkan konfigurasi tersimpan (`~/.config/sdr-doa-ground-console/console.json`) untuk run itu saja. Server mencetak pemberitahuan seperti `--base-url from the command line overrides the saved console config for this run`. File tersimpan tidak berubah sampai Anda menyimpan form **Konfigurasi → Connection**; saat itu nilai yang sedang aktif ikut tersimpan. Flag yang tidak diketik memakai nilai tersimpan.
+Flag yang diketik eksplisit (`--base-url`, `--mqtt-host`, `--mqtt-port`, `--mqtt-transport`, `--mqtt-ws-path`) mengalahkan konfigurasi tersimpan (`~/.config/sdr-doa-ground-console/console.json`) untuk run itu saja. Server mencetak pemberitahuan seperti `--base-url from the command line overrides the saved console config for this run`. File tersimpan tidak berubah sampai Anda menyimpan form **Konfigurasi → Koneksi** atau **Konfigurasi → MQTT**; saat itu nilai yang sedang aktif ikut tersimpan. Flag yang tidak diketik memakai nilai tersimpan.
 
 Bila `console.json` rusak, field yang valid tetap dipakai, server mencatat nama field yang dikembalikan ke default, dan salinan file asli disimpan sebagai `console.json.invalid.bak`.
 
@@ -403,7 +403,7 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 
 ### Refresh
 
-- Pilihan interval: Manual, 1, 2, 5, 10, dan 30 detik. Instalasi baru memakai 2 detik. Interval bisa diganti di select samping tombol refresh di top bar atau di **Konfigurasi → Connection**; keduanya menyimpan ke konfigurasi console.
+- Pilihan interval: Manual, 1, 2, 5, 10, dan 30 detik. Instalasi baru memakai 2 detik. Interval bisa diganti di select samping tombol refresh di top bar atau di **Konfigurasi → Koneksi**; keduanya menyimpan ke konfigurasi console.
 - Data DoA dianggap segar 5 detik setelah dibaca. Dengan Manual atau interval di atas 5 detik, bearing dan kurva polar kosong di antara pembacaan; form Konfigurasi memberi peringatan untuk pilihan itu.
 - Pembacaan yang sedang berjalan tidak dibatalkan oleh tick berikutnya. Layar mempertahankan data terakhir selama refresh, sehingga tidak berkedip setiap poll.
 - "Membaca…" hanya muncul pada pembacaan pertama atau pembacaan yang lebih lama dari 1 detik.
@@ -447,11 +447,12 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 ### Kesehatan Sistem dan Diagnostik DoA
 
 - **Kesehatan Sistem.**
-  - Badge **Data Out HTTP** dihitung dari GET per resource pada pembacaan terakhir: `AVAILABLE` (keempat file menjawab), `PARTIAL`, `UNAVAILABLE`, atau `UNKNOWN`. Di bawahnya tampil `overall_state` dari collector dalam huruf besar. Banner "STALE EVIDENCE" hanya muncul bila pembacaan terakhir punya DoA segar yang kemudian kedaluwarsa.
+  - Bilah halaman menampilkan `overall_state` dari collector, lalu chip **HTTP**, **Node**, dan **Progres**. Chip HTTP dihitung dari GET per resource pada pembacaan terakhir: `AVAILABLE` (keempat file menjawab), `PARTIAL`, `UNAVAILABLE`, `UNKNOWN`, atau `WAITING` sebelum pembacaan pertama. Peringatan "DATA LAMA" (EN: STALE EVIDENCE) hanya muncul bila pembacaan terakhir punya DoA segar yang kemudian kedaluwarsa.
   - **`UNVERIFIED` pada data sehat itu normal.** Collector menentukan `overall_state` berurutan: `UNAVAILABLE` (`status.json` tidak terbaca), `DEGRADED` (DAQ tidak PASS atau ADC overdrive), `INVALID` (tidak ada view DoA yang bisa diparse), `CONFLICT`, `STALE` (tidak ada view DoA yang segar), `INCOMPLETE` (CSV dan XML tidak bisa dibandingkan), lalu `UNVERIFIED` bila belum ada sumber otoritas DoA (`authority` = `none`) atau sudut kanonik belum disetujui. Ground Console selalu memanggil collector dengan `authority="none"` dan tanpa persetujuan sudut kanonik, dan tidak ada flag atau form console yang mengubahnya. Artinya `UNVERIFIED` adalah status terbaik yang bisa tampil: data terbaca, segar, dan CSV/XML konsisten, tetapi tidak ada keputusan yang menetapkan CSV atau XML sebagai sumber bearing resmi. `LIVE` tidak pernah tampil di console ini. Bila data lokal kedaluwarsa, headline berganti menjadi `STALE`.
-  - **Karena itu PUBLIKASI selalu `BLOCKED`.** Gate publikasi (PUBLIKASI di strip dan Pemeriksaan gate publikasi di Diagnostik DoA) baru `READY` bila semua pemeriksaannya lolos. Pada data sehat ada tiga reason yang selalu muncul: `DOA_AUTHORITY_NOT_SELECTED` (Sumber otoritas DoA belum dipilih), `CANONICAL_ANGLE_NOT_CONFIGURED` (Konvensi sudut kanonik belum disetujui), dan `GROUND_CLOCK_UNVERIFIED` (Jam ground dan node belum diverifikasi; console tidak memverifikasi jam node, sehingga baris **Jam ground** di Status subsistem selalu `UNVERIFIED`). Di Diagnostik DoA, pemeriksaan Otoritas dipilih, Sudut kanonik siap, DoA terpilih fresh, dan Satuan terpilih valid tampil `BLOCKED`, Status node fresh tampil BELUM DIKONFIGURASI, Otoritas terpilih bernilai `NONE`, dan Kesiapan sudut BELUM DIKONFIGURASI. Memilih sumber otoritas dan menyetujui sudut kanonik adalah keputusan deployment di luar console ini, jadi status tersebut bukan kerusakan data atau node. Reason lain di luar ketiganya menunjukkan masalah nyata.
-  - Tabel **Pembacaan resource** menampilkan setiap GET (`/status.json`, `/settings.json`, `/DOA_value.html`, `/doa.xml`) dengan kode HTTP atau jenis error (Connection refused, Timed out, Skipped, Deadline exceeded, dan seterusnya), waktu, dan jumlah percobaan. Catatan di bawahnya membandingkan waktu koleksi dengan anggaran 4 detik dan menjelaskan bila file lain dilewati karena `status.json` tidak terjangkau.
-  - Inspector menampilkan status node (VALID/INVALID/UNAVAILABLE), DAQ health, Node progress (`ADVANCING`, `STALLED`, `FIRST_SAMPLE`, `UNAVAILABLE`, `UNTRACKED`), ADC overdrive (PASS, OVERDRIVE dengan mask kanal, atau UNKNOWN), SNR (native XML, tidak terkalibrasi), dan PAPR CSV/XML dalam dB. PAPR bukan confidence 0–1.
+  - **Karena itu PUBLIKASI selalu `BLOCKED`.** Gate publikasi (PUBLIKASI di strip dan kartu **Gate publikasi** di Diagnostik DoA) baru `READY` bila semua pemeriksaannya lolos. Pada data sehat ada tiga reason yang selalu muncul: `DOA_AUTHORITY_NOT_SELECTED` (Sumber otoritas DoA belum dipilih), `CANONICAL_ANGLE_NOT_CONFIGURED` (Konvensi sudut kanonik belum disetujui), dan `GROUND_CLOCK_UNVERIFIED` (Jam ground dan node belum diverifikasi; console tidak memverifikasi jam node, sehingga tile **Jam** di baris stat Kesehatan Sistem selalu `UNVERIFIED`). Di Diagnostik DoA, pemeriksaan Otoritas dipilih, Sudut kanonik siap, DoA terpilih fresh, dan Satuan terpilih valid tampil `BLOCKED`, Status node fresh tampil `NOT CONFIGURED`, dan di kartu Collector Otoritas bernilai `NONE` dan Kesiapan sudut `NOT CONFIGURED`. Memilih sumber otoritas dan menyetujui sudut kanonik adalah keputusan deployment di luar console ini, jadi status tersebut bukan kerusakan data atau node. Reason lain di luar ketiganya menunjukkan masalah nyata.
+  - Baris stat menampilkan DAQ health (dengan jumlah frame hilang), sinkron (`x/3`), ADC overdrive (PASS, OVERDRIVE dengan file yang melaporkannya, atau UNKNOWN), SNR (native XML, tidak terkalibrasi), PAPR CSV/XML dalam dB, MQTT, dan Jam. PAPR bukan confidence 0–1.
+  - Kartu **RDF-SDR** menampilkan status node (VALID/INVALID/UNAVAILABLE) dan Progres (`ADVANCING`, `UNCHANGED` dengan umurnya, `STALLED`, `FIRST_SAMPLE`, `UNAVAILABLE`, `UNTRACKED`), indeks frame, frame hilang, flag sinkron, sumber noise, dan status GPS. Tooltip Progres hanya muncul bila ada penyebab: counter yang berhenti atau mundur, atau `status.json` yang tidak bisa dipakai. ADC overdrive (dengan mask kanal), sync gagal, dan node beku tampil sebagai peringatan di kartu ini. Kartu **Tampilan DoA** menampilkan CSV dan XML dengan statusnya dan umurnya saat dibaca.
+  - Kartu **Data Out** menampilkan setiap GET (`/status.json`, `/settings.json`, `/DOA_value.html`, `/doa.xml`) dengan kode HTTP atau jenis error (Connection refused, Timed out, Skipped, Deadline exceeded, dan seterusnya) dan waktunya; jumlah percobaan tampil bila lebih dari satu. Kepala kartu membandingkan waktu koleksi dengan anggaran 4 detik (misalnya `372 ms / 4.0 dtk`). Peringatan `COLLECTION_DEADLINE_EXCEEDED` muncul bila pembacaan dihentikan di batas waktu, dan peringatan `status.json` bila file lain dilewati karena `status.json` tidak terjangkau. Kartu **Monitor MQTT** menampilkan broker, transport, publish, pesan terakhir, jumlah pesan, dan pesan tidak valid.
 - **Diagnostik DoA.**
   - Reason gate diurutkan dari yang paling bisa ditindaklanjuti, masing-masing dengan kode mentahnya. Reason baru: `NODE_CLOCK_STALLED`, `ADC_OVERDRIVE`, `COLLECTION_DEADLINE_EXCEEDED`, `CSV_VIEW_UNAVAILABLE`, `XML_VIEW_UNAVAILABLE`, `NATIVE_ANGLE_INVALID`, `ANGULAR_PEAK_ANGLE_MISMATCH` (puncak vektor CSV berjarak lebih dari 3° dari θ₀), dan `NATIVE_ANGLE_UNCHECKED` (CSV dan XML berasal dari frame berbeda, sehingga sudutnya tidak dicek silang).
   - Relasi CSV/XML tampil sebagai EQUAL, NOT CHECKED, NOT COMPARABLE, CONFLICT, atau ANGLE INVALID, beserta relasi frame, selisih timestamp, jarak, dan toleransi.
@@ -460,19 +461,20 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 
 ### Konfigurasi
 
+- Kartu tersusun dalam dua kolom setinggi isinya masing-masing: **Koneksi & refresh** dan **Monitor MQTT** di kiri, **GPS & Kompas** dan **Branding & admin** di kanan, lalu **Patch dry-run** selebar halaman. Bilah bagian (Koneksi, MQTT, GPS & Kompas, Branding, Dry-run) mengikuti urutan itu. Pada lebar 1024–1279 px Koneksi dan MQTT berdampingan dan kartu lain selebar halaman; di bawah 1024 px semua kartu satu kolom dengan urutan yang sama.
 - Enter di bagian mana pun men-submit bagian itu.
 - URL Data Out disimpan tanpa garis miring di akhir. Port MQTT harus bilangan bulat 1–65535.
 - **Transport MQTT** (WebSocket default, atau TCP) harus sama dengan listener broker. **Path WebSocket** (default `/mqtt`) hanya dipakai dengan WebSocket. Mengubah host, port, transport, atau path me-restart monitor dan mereset penghitungnya.
-- Dry-run config patch mewajibkan **Base config revision**, yaitu `config_rev` terakhir yang dilaporkan node. Dry-run hanya pratinjau dan tidak mengirim apa pun; perubahan nyata dikirim lewat Kontrol di Dashboard.
-- Login admin di sini juga membuka Kontrol di Dashboard (sesi yang sama, 30 menit). Kotak **Publish MQTT** bernilai HANYA ADMIN.
+- Dry-run config patch mewajibkan **Revisi konfigurasi dasar** (Base config revision), yaitu `config_rev` terakhir yang dilaporkan node. Dry-run hanya pratinjau dan tidak mengirim apa pun; perubahan nyata dikirim lewat Kontrol di Dashboard.
+- Login admin di sini juga membuka Kontrol di Dashboard (sesi yang sama, 30 menit). Chip **PATCH** di bilah halaman bernilai `ADMIN ONLY`.
 - Logo PNG boleh grayscale, RGB, RGBA, atau palette, 8/16-bit, interlaced, maksimal 256 KiB dan 4096 × 4096 px. Logo diperiksa di browser sebelum di-stage.
 - Pilihan sumber GPS dan Compass disimpan di console dan dipulihkan setelah reload, di browser lain, dan setelah console di-restart. Masing-masing punya tombol restore default sendiri. Offset kompas manual berkisar −360 sampai 360, dan juga bisa diatur dari **Polar → Atur** di Dashboard.
 - Bila konfigurasi console tidak bisa dibaca, halaman menampilkan "Konfigurasi console tidak tersedia … Dicoba ulang otomatis" tanpa form. Console mencoba lagi sendiri (1, 2, 4, 8, lalu setiap 15 detik).
 
 ### Monitor Pesan
 
-- Baris metrik: Received, Valid, Invalid, Bytes, Last latency. Last latency hanya menghitung pesan live. Di ponsel baris ini dua kolom.
-- Banner menampilkan status koneksi dan transport ("MQTT over TCP" atau "MQTT over WebSocket, path /x").
+- Bilah halaman menampilkan chip koneksi, tag transport (`TCP` atau `WS`), `SYNTHETIC` bila ada payload sintetis, sakelar sdr/v1 | RDF Node v2, **Muat ulang**, dan **Sambungkan ulang**. Kartu **Koneksi** menampilkan broker, transport (`TCP` atau `WS /path`), topik terakhir (disamarkan), dan publish.
+- Baris metrik: Diterima, Valid, Tidak valid, Byte, Latensi terakhir, Pesan terakhir. Latensi terakhir hanya menghitung pesan live. Di ponsel baris ini dua kolom.
 - Tabel per kind:
   - **Count** adalah jumlah pesan per kind sejak monitor start.
   - **Age** menghitung naik setiap detik sejak console menerima pesan. Badge `STALE` muncul setelah doa 5 detik, nav 5 detik, health 8 detik, dan state/config_reported 65 detik. Ini ambang tampilan, bukan gate.
@@ -480,7 +482,7 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
   - Badge `RETAINED` berarti pesan di-replay broker saat subscribe; pesan seperti itu dinilai dari timestamp-nya sendiri dan tidak punya latency.
   - Payload status menampilkan flag node apa adanya (`valid`, `doa_valid`, `settings_valid`), state health beserta reason, dan availability `ONLINE`/`OFFLINE`.
   - Badge `SYNTHETIC` muncul untuk payload dengan `source: "synthetic"`.
-- **Sambungkan ulang monitor lokal** selalu membuka sesi subscriber baru dengan pengaturan broker tersimpan; penghitung dan record terakhir mulai dari nol. Tanpa tombol ini, monitor mencoba lagi sendiri dalam sekitar 10 detik.
+- **Sambungkan ulang** selalu membuka sesi subscriber baru dengan pengaturan broker tersimpan; penghitung dan record terakhir mulai dari nol. Tanpa tombol ini, monitor mencoba lagi sendiri dalam sekitar 10 detik.
 - Client id MQTT sekarang `groundconsole` plus 10 karakter hex acak per monitor, sehingga dua console bisa memakai satu broker. ACL atau log broker yang memakai id lama `ground-console-monitor` perlu diperbarui.
 - Status MQTT diperbarui sendiri setiap 2 detik di Monitor Pesan dan Kesehatan Sistem, dan setiap 5 detik di halaman lain.
 - Panel **Telemetri RDF Node v2** dijelaskan di bagian MQTT di bawah.
@@ -504,7 +506,7 @@ Koneksi MQTT default adalah `10.90.0.1:9001`, WebSocket, path `/mqtt`. Host mene
 
 Monitor memakai MQTTv5 dan satu konfigurasi broker bersama: host, port, transport, dan WebSocket path berlaku untuk kedua keluarga topic. Filter v1 adalah `sdr/v1/uav-01/#`; RDF Node v2 memakai prefix `sdr/v2/uav-01/` dan sepuluh suffix: `telemetry/doa`, `telemetry/health`, `telemetry/health/detail`, `telemetry/angular`, `state`, `capabilities`, `config/reported`, `availability`, `ack/config`, dan `ack/operation`. Status `READY` menunggu SUBACK berhasil untuk seluruh filter bersama. Parser dan snapshot v1/v2 tetap terpisah agar validasi satu schema tidak mengubah statistik schema lain.
 
-Konfigurasi lama `rdf_node_mqtt` tidak digunakan atau dimigrasikan; field itu hilang saat konfigurasi disimpan berikutnya. Atur endpoint kedua keluarga topic melalui **Konfigurasi → Connection**.
+Konfigurasi lama `rdf_node_mqtt` tidak digunakan atau dimigrasikan; field itu hilang saat konfigurasi disimpan berikutnya. Atur endpoint kedua keluarga topic melalui **Konfigurasi → MQTT**.
 
 ### Broker staging lokal
 

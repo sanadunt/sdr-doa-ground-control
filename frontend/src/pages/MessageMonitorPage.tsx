@@ -459,7 +459,7 @@ export function MessageMonitorPage({
             options={[{ value: 'v1', label: 'sdr/v1' }, { value: 'v2', label: 'RDF Node v2' }]}
           />
           <button className="ov-button" type="button" disabled={busy} onClick={refresh}><Icon name="refresh" />{t('monitor.refresh')}</button>
-          <button className="ov-button" type="button" disabled={busy} onClick={reconnect} title={t('monitor.reconnectHint')}>{t('monitor.reconnect')}</button>
+          <button className="ov-button" type="button" disabled={busy} onClick={reconnect}>{t('monitor.reconnect')}</button>
         </>}
       />
       {mqttError ? <PageNotice tone="bad" title="ERROR">{t('monitor.stateUnknown', { error: mqttError })}</PageNotice> : null}
