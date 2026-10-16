@@ -6,11 +6,24 @@ import type { BasemapTone } from './basemaps';
 // is 1; the functions still take any count, one host at a time. A host here is
 // one tile URL: MapLibre spreads a multi-URL `tiles` array across hosts by tile
 // index rather than retrying, which leaves a checkerboard when one is blocked.
+//
+// Two outages are told apart. Unavailable: tiles fail and none has drawn since
+// the style was chosen or last asked for again, or none of the style's tiles
+// is drawn in the view any more. Partial: tiles keep failing while others
+// draw, as offline with part of the view cached, where every cached tile that
+// loads would otherwise hide the failures of the rest.
 
 /** Consecutive failed tiles on one host before the next host is tried. */
 export const BASEMAP_FAILURES_PER_HOST = 4;
 /** Failures right after a host switch may still come from the previous host's requests. */
 export const BASEMAP_SWITCH_GRACE_MS = 1500;
+/**
+ * BASEMAP_FAILURES_PER_HOST failures within this window, while a tile of the
+ * style has drawn, make the basemap partial. A retry of a partial basemap
+ * waits this long for its tiles before it is judged; the tile route answers
+ * within 10 s (two hosts, 5 s each).
+ */
+export const BASEMAP_PARTIAL_WINDOW_MS = 15_000;
 
 export interface BasemapHealth {
   hostIndex: number;
@@ -23,10 +36,38 @@ export interface BasemapHealth {
   /** Every host failed since the last loaded tile. */
   unavailable: boolean;
   switchedAtMs: number | null;
+  /** Tiles keep failing while others draw. */
+  partial: boolean;
+  /** When the partial state began or was last confirmed; its retry is due a retry interval later. */
+  partialSinceMs: number | null;
+  /** A retry of the partial basemap that waits for its tiles. */
+  partialRetryAtMs: number | null;
+  /** Times of the last BASEMAP_FAILURES_PER_HOST failed tiles, oldest first. */
+  recentFailuresMs: readonly number[];
+  lastLoadedAtMs: number | null;
 }
 
+export type BasemapNotice = 'unavailable' | 'partial' | null;
+
 export function initialBasemapHealth(hostIndex = 0): BasemapHealth {
-  return { hostIndex, failures: 0, hostsFailed: 0, loaded: false, unavailable: false, switchedAtMs: null };
+  return {
+    hostIndex, failures: 0, hostsFailed: 0, loaded: false, unavailable: false, switchedAtMs: null,
+    partial: false, partialSinceMs: null, partialRetryAtMs: null, recentFailuresMs: [], lastLoadedAtMs: null,
+  };
+}
+
+/** The map notice for a basemap state; unavailable wins over partial. */
+export function basemapNotice(state: BasemapHealth): BasemapNotice {
+  if (state.unavailable) return 'unavailable';
+  return state.partial ? 'partial' : null;
+}
+
+function failureBurst(failures: readonly number[], nowMs: number): boolean {
+  return failures.length >= BASEMAP_FAILURES_PER_HOST && nowMs - failures[failures.length - BASEMAP_FAILURES_PER_HOST] <= BASEMAP_PARTIAL_WINDOW_MS;
+}
+
+function withPartial(state: BasemapHealth, nowMs: number): BasemapHealth {
+  return state.partial ? state : { ...state, partial: true, partialSinceMs: nowMs, partialRetryAtMs: null };
 }
 
 /**
@@ -37,28 +78,69 @@ export function initialBasemapHealth(hostIndex = 0): BasemapHealth {
 export function nextBasemapHost(state: BasemapHealth, hostCount: number, nowMs: number): BasemapHealth {
   const count = Math.max(1, hostCount);
   const hostsFailed = Math.min(count, state.hostsFailed + 1);
-  return { hostIndex: (state.hostIndex + 1) % count, failures: 0, hostsFailed, loaded: false, unavailable: hostsFailed >= count, switchedAtMs: nowMs };
+  return { ...state, hostIndex: (state.hostIndex + 1) % count, failures: 0, hostsFailed, loaded: false, unavailable: hostsFailed >= count, switchedAtMs: nowMs };
 }
 
 /**
- * Count loaded and failed basemap tiles. A loaded tile clears every failure.
- * Failures only move to the next host until all hosts failed; after that the
- * caller's periodic check retries, so a dead network does not cause a reload loop.
+ * Count loaded and failed basemap tiles. A loaded tile clears the host
+ * failures. Before any tile loaded, failures move to the next host until all
+ * hosts failed; after that the caller's periodic check retries, so a dead
+ * network does not cause a reload loop. Once a tile loaded, failures only
+ * count towards the partial state.
  */
 export function basemapAfterTile(state: BasemapHealth, loaded: boolean, hostCount: number, nowMs: number): BasemapHealth {
-  if (loaded) return state.loaded && state.failures === 0 && !state.unavailable ? state : { ...initialBasemapHealth(state.hostIndex), loaded: true };
-  if (state.unavailable || (state.switchedAtMs !== null && nowMs - state.switchedAtMs < BASEMAP_SWITCH_GRACE_MS)) return state;
+  if (loaded) {
+    let next: BasemapHealth = { ...state, failures: 0, hostsFailed: 0, loaded: true, unavailable: false, switchedAtMs: null, lastLoadedAtMs: nowMs };
+    // After an outage the partial state starts over from the failures just seen.
+    if (state.unavailable) next = { ...next, partial: false, partialSinceMs: null, partialRetryAtMs: null };
+    return failureBurst(next.recentFailuresMs, nowMs) ? withPartial(next, nowMs) : next;
+  }
+  const counted = { ...state, recentFailuresMs: [...state.recentFailuresMs, nowMs].slice(-BASEMAP_FAILURES_PER_HOST) };
+  if (state.loaded) return failureBurst(counted.recentFailuresMs, nowMs) ? withPartial(counted, nowMs) : counted;
+  if (state.unavailable || (state.switchedAtMs !== null && nowMs - state.switchedAtMs < BASEMAP_SWITCH_GRACE_MS)) return counted;
   const failures = state.failures + 1;
-  return failures < BASEMAP_FAILURES_PER_HOST ? { ...state, failures } : nextBasemapHost(state, hostCount, nowMs);
+  return failures < BASEMAP_FAILURES_PER_HOST ? { ...counted, failures } : nextBasemapHost(counted, hostCount, nowMs);
+}
+
+/**
+ * A partial basemap whose view draws none of its tiles any more, as after
+ * panning offline to an area never viewed, is unavailable: earlier tiles drew
+ * elsewhere, not here. drawn is null when the renderer cannot tell; the
+ * partial retry then decides.
+ */
+export function basemapAfterView(state: BasemapHealth, drawn: boolean | null, hostCount: number, nowMs: number): BasemapHealth {
+  if (drawn !== false || !state.partial || state.unavailable) return state;
+  return nextBasemapHost({ ...state, partialRetryAtMs: null }, hostCount, nowMs);
+}
+
+/**
+ * Periodic check of a partial basemap: MapLibre does not ask for a failed tile
+ * again by itself, so every retryMs the caller reloads the style's tiles
+ * (reload: true). The retry is judged BASEMAP_PARTIAL_WINDOW_MS later: no
+ * failure since clears the partial state, failures with loaded tiles keep it,
+ * and failures with nothing loaded make the basemap unavailable.
+ */
+export function basemapPartialCheck(state: BasemapHealth, hostCount: number, nowMs: number, retryMs: number): { state: BasemapHealth; reload: boolean } {
+  if (!state.partial || state.unavailable) return { state, reload: false };
+  const retryAt = state.partialRetryAtMs;
+  if (retryAt === null) {
+    return nowMs - (state.partialSinceMs ?? nowMs) >= retryMs ? { state: { ...state, partialRetryAtMs: nowMs }, reload: true } : { state, reload: false };
+  }
+  if (nowMs - retryAt < BASEMAP_PARTIAL_WINDOW_MS) return { state, reload: false };
+  const lastFailure = state.recentFailuresMs.length ? state.recentFailuresMs[state.recentFailuresMs.length - 1] : null;
+  if (lastFailure === null || lastFailure < retryAt) return { state: { ...state, partial: false, partialSinceMs: null, partialRetryAtMs: null }, reload: false };
+  if (state.lastLoadedAtMs !== null && state.lastLoadedAtMs >= retryAt) return { state: { ...state, partialSinceMs: retryAt, partialRetryAtMs: null }, reload: false };
+  return { state: nextBasemapHost({ ...state, partialRetryAtMs: null }, hostCount, nowMs), reload: false };
 }
 
 /**
  * Basemap health when the map mounts again on Overview. A known outage carries
  * over, so its notice shows at once instead of after the next round of tile
- * failures; otherwise the map starts fresh on the last host that worked.
+ * failures; otherwise the map starts fresh on the last host that worked. A
+ * partial state is found again from the new map's own tiles.
  */
 export function resumeBasemapHealth(memory: BasemapHealth | null, preferredHost: number, hostCount: number): BasemapHealth {
-  if (memory?.unavailable) return { ...memory, failures: 0, loaded: false };
+  if (memory?.unavailable) return { ...memory, failures: 0, loaded: false, partial: false, partialSinceMs: null, partialRetryAtMs: null };
   return initialBasemapHealth(Math.max(0, Math.trunc(preferredHost)) % Math.max(1, hostCount));
 }
 

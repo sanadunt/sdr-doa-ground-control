@@ -531,6 +531,24 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
                 self.assertIn(_content_type(result), expected_mimes, request_path)
                 self.assertEqual(result.body, expected_file.read_bytes(), request_path)
 
+    def test_built_page_links_its_own_favicons_and_they_are_served(self) -> None:
+        index = self._require_static_build()
+        html = index.read_text(encoding="utf-8")
+        links = re.findall(r"<link\b[^>]*\brel=\"icon\"[^>]*>", html)
+        hrefs = sorted(re.search(r'href="([^"]+)"', link).group(1) for link in links)
+        # Without a declared icon the browser asks for /favicon.ico on every load.
+        self.assertEqual(hrefs, ["/favicon.ico", "/favicon.svg"])
+        with ConsoleHTTPHarness() as console:
+            results = {href: console.request("GET", href) for href in hrefs}
+        for href, mime in (("/favicon.ico", "image/x-icon"), ("/favicon.svg", "image/svg+xml")):
+            with self.subTest(href=href):
+                result = results[href]
+                self.assertEqual(result.status, 200, href)
+                self.assertEqual(_content_type(result), mime)
+                self.assertEqual(result.body, (STATIC_ROOT / href.lstrip("/")).read_bytes())
+                self.assertNotRegex(result.headers.get("content-security-policy", ""), r"https?://|\*")
+        self.assertEqual(results["/favicon.ico"].body[:4], b"\x00\x00\x01\x00", "favicon.ico must be an ICO file")
+
     def test_static_path_boundary_blocks_traversal_dotenv_and_unknown_extensions(self) -> None:
         self._require_static_build()
         blocked_paths = (
@@ -1319,6 +1337,51 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         for path, result in blocked:
             with self.subTest(path=path):
                 self.assertEqual(result.status, 404, path)
+    def test_root_favicons_are_served_and_the_receiver_keeps_its_own(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="favicon-static-fixture-") as temporary:
+            root = Path(temporary)
+            (root / "assets").mkdir()
+            (root / "receiver").mkdir()
+            console_ico = b"\x00\x00\x01\x00console"
+            console_svg = b'<svg xmlns="http://www.w3.org/2000/svg"/>'
+            receiver_ico = b"\x00\x00\x01\x00receiver"
+            (root / "index.html").write_text("<!doctype html>ground", encoding="utf-8")
+            (root / "favicon.ico").write_bytes(console_ico)
+            (root / "favicon.svg").write_bytes(console_svg)
+            (root / "favicon.png").write_bytes(b"png")
+            (root / "robots.svg").write_bytes(console_svg)
+            (root / "receiver" / "index.html").write_text("<!doctype html>receiver", encoding="utf-8")
+            (root / "receiver" / "favicon.ico").write_bytes(receiver_ico)
+
+            with ConsoleHTTPHarness(frontend_dir=root) as console:
+                ico = console.request("GET", "/favicon.ico")
+                svg = console.request("GET", "/favicon.svg")
+                receiver = console.request("GET", "/receiver/favicon.ico")
+                others = [(path, console.request("GET", path)) for path in ("/favicon.png", "/robots.svg", "/FAVICON.ICO", "/assets/../favicon.ico")]
+
+        self.assertEqual(ico.status, 200)
+        self.assertEqual(ico.headers.get("content-type"), "image/x-icon")
+        self.assertEqual(ico.body, console_ico)
+        self.assertEqual(svg.status, 200)
+        self.assertEqual(svg.headers.get("content-type"), "image/svg+xml")
+        self.assertEqual(svg.body, console_svg)
+        # The console icons carry the console's own CSP, unchanged.
+        for result in (ico, svg):
+            self.assertEqual(
+                result.headers.get("content-security-policy"),
+                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data: blob:; "
+                "connect-src 'self'; "
+                "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+            )
+        self.assertEqual(receiver.status, 200)
+        self.assertEqual(receiver.body, receiver_ico)
+        self.assertEqual(receiver.headers.get("permissions-policy"), "usb=(self), autoplay=(self)")
+        # Only the two named icons join index.html at the root.
+        for path, result in others:
+            with self.subTest(path=path):
+                self.assertEqual(result.status, 404, path)
+
     def test_non_loopback_bind_is_refused(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ground-console-bind-test-") as temporary:
             root = Path(temporary)

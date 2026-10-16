@@ -95,6 +95,7 @@ BUILD_INPUTS = (
     "frontend/index.html",
     "frontend/package.json",
     "frontend/package-lock.json",
+    "frontend/public",
     "frontend/src",
     "frontend/scripts",
     "frontend/vite.config.ts",

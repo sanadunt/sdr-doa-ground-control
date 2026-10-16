@@ -26,7 +26,15 @@ interface ElementLike {
   type?: unknown;
   isContentEditable?: unknown;
   getAttribute?: (name: string) => string | null;
+  closest?: (selector: string) => unknown;
 }
+
+/**
+ * Marks a container whose keys stay inside it, such as the basemap radio
+ * menu over the map: a digit pressed there would leave the page under the
+ * open menu. R still refreshes.
+ */
+export const NO_PAGE_SHORTCUTS_ATTRIBUTE = 'data-no-page-shortcuts';
 
 /**
  * Whether a key press belongs to a text-entry control. Duck-typed so it also
@@ -44,9 +52,17 @@ export function isTextEntryTarget(target: EventTarget | null): boolean {
   return TEXT_ROLES.has(attribute('role').trim().toLowerCase());
 }
 
+/** Whether a key press comes from inside a container marked with NO_PAGE_SHORTCUTS_ATTRIBUTE. Duck-typed like isTextEntryTarget. */
+export function blocksPageShortcuts(target: EventTarget | null): boolean {
+  const element = target as ElementLike | null;
+  if (!element || element.nodeType !== 1 || typeof element.closest !== 'function') return false;
+  return Boolean(element.closest(`[${NO_PAGE_SHORTCUTS_ATTRIBUTE}]`));
+}
+
 export function shortcutAction(event: ShortcutKeyEvent, routeCount: number): ShortcutAction | null {
   if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || isTextEntryTarget(event.target)) return null;
   if (/^[1-9]$/.test(event.key)) {
+    if (blocksPageShortcuts(event.target)) return null;
     const index = Number(event.key) - 1;
     return index < routeCount ? { type: 'route', index } : null;
   }

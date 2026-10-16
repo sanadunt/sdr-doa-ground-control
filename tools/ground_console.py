@@ -87,6 +87,9 @@ from tile_cache import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BROWSDR_SOURCE_ARCHIVE = "freq-spectrum-source.tar.gz"
+# Files the built console serves from the root of frontend/dist besides
+# assets/: the page and its icons (copied there from frontend/public).
+FRONTEND_ROOT_FILES = frozenset({"index.html", "favicon.ico", "favicon.svg"})
 DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 VERSION_PATH = PROJECT_ROOT / "VERSION"
@@ -2519,7 +2522,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         allowed_root_path = (
             relative.startswith("receiver/")
             if is_receiver
-            else relative == "index.html" or relative.startswith("assets/")
+            else relative in FRONTEND_ROOT_FILES or relative.startswith("assets/")
         )
         suffix = Path(relative).suffix.lower() if is_receiver else Path(relative).suffix
         if (
