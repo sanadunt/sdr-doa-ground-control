@@ -208,6 +208,14 @@ class ReceiverBuildSourceTests(unittest.TestCase):
             self.assertLess(draw_markers, canvas.index("export function mountCanvas("))
             self.assertIn("...listenerMarkerMethods,", (app / "main.ts").read_text(encoding="utf-8"))
             self.assertIn("@click=\"setListenerDbAuto(false)\"", html)
+            # Every dB limit field (Dengar dB scale, scan Graph min./max.) takes any value the
+            # console may send, such as 0.1 dB, so none of them is marked invalid.
+            db_inputs = re.findall(
+                r"<input [^>]*(?:sweep\.displayM(?:in|ax)Db|listener-db-m(?:in|ax))[^>]*>", html
+            )
+            self.assertEqual(len(db_inputs), 4)
+            for field in db_inputs:
+                self.assertIn('step="any"', field)
             # The Listener's WebGL waterfall is transparent where it has no data, and the
             # canvas background behind it follows the theme.
             utils = (work / "src/client/utils.ts").read_text(encoding="utf-8")

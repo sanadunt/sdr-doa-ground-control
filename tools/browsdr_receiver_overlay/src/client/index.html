@@ -620,13 +620,13 @@
 					</label>
 					<label>Graph minimum
 						<div class="sweep-input-unit">
-							<input type="number" v-model.number="sweep.displayMinDb" min="-160" :max="sweep.displayMaxDb - 5" step="5" @change="updateSweepDisplayRange('min')">
+							<input type="number" v-model.number="sweep.displayMinDb" min="-160" :max="sweep.displayMaxDb - 5" step="any" @change="updateSweepDisplayRange('min')">
 							<span>dBFS</span>
 						</div>
 					</label>
 					<label>Graph maximum
 						<div class="sweep-input-unit">
-							<input type="number" v-model.number="sweep.displayMaxDb" :min="sweep.displayMinDb + 5" max="0" step="5" @change="updateSweepDisplayRange('max')">
+							<input type="number" v-model.number="sweep.displayMaxDb" :min="sweep.displayMinDb + 5" max="0" step="any" @change="updateSweepDisplayRange('max')">
 							<span>dBFS</span>
 						</div>
 					</label>
