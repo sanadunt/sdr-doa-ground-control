@@ -139,6 +139,10 @@ describe('Configuration page', () => {
     expect(markup).toContain('aria-pressed="true">Manual</button>');
   });
 
+  it('lists the accepted MQTT host forms in the placeholder without a sentence', () => {
+    for (const lang of ['en', 'id'] as const) expect(render({ lang })).toContain('placeholder="IPv4 · IPv6 · localhost"');
+  });
+
   it('warns about a monitor without TLS only for a host off this machine', () => {
     expect(render({ config: { mqtt_host: '127.0.0.1' } })).not.toContain('NO TLS');
     expect(render()).not.toContain('NO TLS');

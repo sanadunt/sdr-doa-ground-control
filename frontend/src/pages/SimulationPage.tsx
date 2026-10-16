@@ -107,6 +107,11 @@ function LobePreview({ settings, label }: { settings: SimulationSettings; label:
   );
 }
 
+/** The result of Apply; it names the stopped randomizer only when one was running. */
+export function appliedMessage(automatic: boolean): MessageKey {
+  return automatic ? 'sim.appliedAutoStopped' : 'sim.applied';
+}
+
 export function SimulationPage({ enabled, automatic, settings, onEnabled, onAutomatic, onSettings, onRandomize, onOverview }: {
   enabled: boolean; automatic: boolean; settings: SimulationSettings;
   onEnabled: (value: boolean) => void; onAutomatic: (value: boolean) => void;
@@ -125,7 +130,7 @@ export function SimulationPage({ enabled, automatic, settings, onEnabled, onAuto
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!draftValid) { setMessage('sim.invalid'); return; }
-    onSettings(parsed); onAutomatic(false); setMessage('sim.applied');
+    onSettings(parsed); onAutomatic(false); setMessage(appliedMessage(automatic));
   };
 
   return (

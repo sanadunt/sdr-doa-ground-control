@@ -82,12 +82,14 @@ describe('MessageMonitorPage', () => {
 
   it('puts the connection, transport and actions in the page bar and the broker in the connection card', () => {
     expect(markup).toMatch(/<div class="pg-bar-chips"><span class="ov-chip tone-good">CONNECTED<\/span><span class="ov-tag tone-neutral">TCP<\/span><\/div>/);
-    expect(markup).toContain(`title="${translate('en', 'monitor.reconnectHint')}"`);
+    // Reconnect carries no explanatory tooltip.
+    expect(markup).toContain(`<button class="ov-button" type="button">${translate('en', 'monitor.reconnect')}</button>`);
     expect(body).toContain(`${translate('en', 'monitor.broker')} 127.0.0.1:18884`);
     expect(body).toContain(`${translate('en', 'monitor.transport')} TCP`);
     expect(body).toContain(`${translate('en', 'monitor.topic')} [REDACTED]`);
-    expect(translate('en', 'monitor.requested')).toMatch(/zero/);
-    expect(translate('id', 'monitor.requested')).toMatch(/nol/);
+    // The reconnect result is a short state, not an explanation of the new session.
+    expect(translate('en', 'monitor.requested')).toBe('Monitor restarted.');
+    expect(translate('id', 'monitor.requested')).toBe('Monitor dimulai ulang.');
   });
 
   it('switches between sdr/v1 and RDF Node v2 and shows only the selected one', () => {

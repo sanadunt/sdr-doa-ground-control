@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { I18nContext, translate } from '../lib/i18n';
 import type { Lang } from '../lib/i18n';
 import { DEFAULT_SIMULATION } from '../lib/simulation';
-import { SimulationPage } from './SimulationPage';
+import { SimulationPage, appliedMessage } from './SimulationPage';
 
 function render(element: ReactElement, lang: Lang = 'en'): string {
   return renderToStaticMarkup(
@@ -76,6 +76,13 @@ describe('SimulationPage', () => {
     expect(tip).not.toBeNull();
     expect(Number(tip?.[1])).toBeGreaterThan(120);
     expect(Number(tip?.[2])).toBeLessThan(120);
+  });
+
+  it('names the stopped randomizer after Apply only when it was running', () => {
+    expect(translate('en', appliedMessage(false))).toBe('Scenario applied.');
+    expect(translate('id', appliedMessage(false))).toBe('Skenario diterapkan.');
+    expect(translate('en', appliedMessage(true))).toBe('Scenario applied. Automatic randomize stopped.');
+    expect(translate('id', appliedMessage(true))).toBe('Skenario diterapkan. Acak otomatis dihentikan.');
   });
 
   it('carries no explanatory prose and renders in Indonesian', () => {

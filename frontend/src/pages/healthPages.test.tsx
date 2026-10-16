@@ -119,6 +119,23 @@ describe('System Health layout', () => {
     expect(markup).toContain('<span class="ov-tag tone-good" title="iq_sync">IQ</span>');
   });
 
+  it('gives the progress value a tooltip only for a cause, never an explanation of the state', () => {
+    const progressRow = (markup: string) => markup.match(/<div class="pg-kv-row"[^>]*><dt>Progress<\/dt>/)?.[0] ?? '';
+    const withProgress = (progress: Record<string, unknown>) => ({ ...VALID, node_progress: { stalled: false, stalled_counters: [], regressed_counters: [], unchanged_for_ms: {}, max_stall_ms: 10000, ...progress } }) as unknown as TelemetrySnapshot;
+    for (const state of ['ADVANCING', 'UNCHANGED', 'FIRST_SAMPLE', 'UNTRACKED']) {
+      const row = progressRow(render(<SystemHealthPage snapshot={withProgress({ state, unchanged_for_ms: { timestamp_ms: 4000 } })} mqtt={null} localSnapshotFresh />));
+      expect(row, state).toContain('<dt>Progress</dt>');
+      expect(row, state).not.toContain('title=');
+    }
+    const stalled = render(<SystemHealthPage snapshot={withProgress({ state: 'STALLED', stalled: true, stalled_counters: ['timestamp_ms', 'uptime_ms'], unchanged_for_ms: { timestamp_ms: 12000, uptime_ms: 12000 } })} mqtt={null} localSnapshotFresh />);
+    expect(progressRow(stalled)).toContain('title="No change in timestamp_ms, uptime_ms for 12.0 s; Data Out files are frozen"');
+    expect(text(stalled)).toContain('NODE_CLOCK_STALLED No change in timestamp_ms, uptime_ms for 12.0 s');
+    const regressed = render(<SystemHealthPage snapshot={withProgress({ state: 'ADVANCING', regressed_counters: ['uptime_ms'] })} mqtt={null} localSnapshotFresh />);
+    expect(progressRow(regressed)).toContain('title="Went backwards: uptime_ms (node restart?)."');
+    const unavailable = render(<SystemHealthPage snapshot={withProgress({ state: 'UNAVAILABLE' })} mqtt={null} localSnapshotFresh />);
+    expect(progressRow(unavailable)).toContain(`title="${translate('en', 'health.progress.unavailable')}"`);
+  });
+
   it('marks a failing sync flag and names it in a notice', () => {
     const failed = { ...VALID, status: { ...VALID.status, daq_health: 'FAIL', failed_sync_flags: ['iq_sync'], safe: { daq_status: { frame_sync: true, sample_delay_sync: true, iq_sync: false } } } } as unknown as TelemetrySnapshot;
     const markup = render(<SystemHealthPage snapshot={failed} mqtt={null} localSnapshotFresh />);
@@ -201,12 +218,11 @@ describe('System Health shows why Data Out failed (AUD-27, AUD-101)', () => {
     const markup = render(<SystemHealthPage snapshot={unchanged} mqtt={null} localSnapshotFresh={false} />);
     const page = text(markup);
     expect(page).toContain('Progress UNCHANGED 4.0 s');
-    // The cause stays on the progress value as its tooltip, not as a line of prose.
-    expect(markup).toContain('title="No counter changed since the previous read (4.0 s); not proof of fresh data"');
-    expect(page).not.toContain('No counter changed');
+    // The chip and the age beside it say it all: no tooltip restating them, no prose.
+    expect(markup).not.toContain('No counter changed');
     expect(page).not.toContain('are advancing');
     expect(page).not.toContain('NODE_CLOCK_STALLED');
-    expect(render(<SystemHealthPage snapshot={unchanged} mqtt={null} localSnapshotFresh={false} />, 'id')).toContain('title="Tidak ada counter yang berubah');
+    expect(render(<SystemHealthPage snapshot={unchanged} mqtt={null} localSnapshotFresh={false} />, 'id')).not.toContain('Tidak ada counter yang berubah');
   });
 
   it('speaks Indonesian for error kinds, collector messages and durations', () => {
