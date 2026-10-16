@@ -8,9 +8,10 @@ import type { BasemapTone } from './basemaps';
 // index rather than retrying, which leaves a checkerboard when one is blocked.
 //
 // Two outages are told apart. Unavailable: tiles fail and none has drawn since
-// the style was chosen or last asked for again. Partial: tiles keep failing
-// while others draw, as offline with part of the view cached, where every
-// cached tile that loads would otherwise hide the failures of the rest.
+// the style was chosen or last asked for again, or none of the style's tiles
+// is drawn in the view any more. Partial: tiles keep failing while others
+// draw, as offline with part of the view cached, where every cached tile that
+// loads would otherwise hide the failures of the rest.
 
 /** Consecutive failed tiles on one host before the next host is tried. */
 export const BASEMAP_FAILURES_PER_HOST = 4;
@@ -99,6 +100,17 @@ export function basemapAfterTile(state: BasemapHealth, loaded: boolean, hostCoun
   if (state.unavailable || (state.switchedAtMs !== null && nowMs - state.switchedAtMs < BASEMAP_SWITCH_GRACE_MS)) return counted;
   const failures = state.failures + 1;
   return failures < BASEMAP_FAILURES_PER_HOST ? { ...counted, failures } : nextBasemapHost(counted, hostCount, nowMs);
+}
+
+/**
+ * A partial basemap whose view draws none of its tiles any more, as after
+ * panning offline to an area never viewed, is unavailable: earlier tiles drew
+ * elsewhere, not here. drawn is null when the renderer cannot tell; the
+ * partial retry then decides.
+ */
+export function basemapAfterView(state: BasemapHealth, drawn: boolean | null, hostCount: number, nowMs: number): BasemapHealth {
+  if (drawn !== false || !state.partial || state.unavailable) return state;
+  return nextBasemapHost({ ...state, partialRetryAtMs: null }, hostCount, nowMs);
 }
 
 /**

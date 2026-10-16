@@ -5,6 +5,7 @@ import {
   BASEMAP_PARTIAL_WINDOW_MS,
   BASEMAP_SWITCH_GRACE_MS,
   basemapAfterTile,
+  basemapAfterView,
   basemapNotice,
   basemapPaint,
   basemapPartialCheck,
@@ -256,6 +257,28 @@ describe('partial basemap (offline with part of the view cached)', () => {
     // The unavailable path takes over; its own retry clears it when a tile draws.
     expect(basemapPartialCheck(judged, 1, retryAt + 2 * RETRY_MS, RETRY_MS)).toEqual({ state: judged, reload: false });
     expect(basemapNotice(basemapAfterTile(judged, true, 1, retryAt + 2 * RETRY_MS))).toBeNull();
+  });
+
+  it('turns UNAVAILABLE at once when the view draws none of its tiles, as after panning far offline', () => {
+    // Tiles drew earlier, elsewhere; the new view fails tile after tile.
+    const panned = tiles(tiles(initialBasemapHealth(), 'LLLL', 0), 'FFFFFF', 120_000);
+    expect(basemapNotice(panned)).toBe('partial');
+    const blank = basemapAfterView(panned, false, 1, 125_000);
+    expect(blank).toMatchObject({ loaded: false, unavailable: true, partialRetryAtMs: null });
+    expect(basemapNotice(blank)).toBe('unavailable');
+    // Panning back over cached tiles draws them and finds the partial state again.
+    expect(basemapNotice(tiles(blank, 'L', 126_000))).toBe('partial');
+  });
+
+  it('keeps PARTIAL while some of its tiles draw in the view, or when the renderer cannot tell', () => {
+    const partial = tiles(initialBasemapHealth(), 'LFFFFL', 0);
+    expect(basemapAfterView(partial, true, 1, 5_000)).toBe(partial);
+    expect(basemapAfterView(partial, null, 1, 5_000)).toBe(partial);
+    // Only a partial state is judged by the view: a healthy or unavailable one is left as it is.
+    const healthy = tiles(initialBasemapHealth(), 'LLLL', 0);
+    expect(basemapAfterView(healthy, false, 1, 5_000)).toBe(healthy);
+    const unavailable = tiles(initialBasemapHealth(), 'FFFF', 0);
+    expect(basemapAfterView(unavailable, false, 1, 5_000)).toBe(unavailable);
   });
 
   it('is not carried to the next Overview visit; the new map finds it again from its own tiles', () => {

@@ -5,7 +5,7 @@ import type { Map as MapLibreMap, GeoJSONSource, MapMouseEvent, MapSourceDataEve
 import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import type { Feature, FeatureCollection, LineString, Point, Polygon } from 'geojson';
 import type { GpsSourceMode, MapCoordinate, TelemetrySnapshot } from '../types';
-import { basemapAfterTile, basemapNotice, basemapPaint, basemapPartialCheck, gpsReportsNoFix, holdStationCoordinate, nextBasemapHost, resumeBasemapHealth, shouldReframeStation, type BasemapHealth, type BasemapNotice, type StationFraming } from '../lib/map';
+import { basemapAfterTile, basemapAfterView, basemapNotice, basemapPaint, basemapPartialCheck, gpsReportsNoFix, holdStationCoordinate, nextBasemapHost, resumeBasemapHealth, shouldReframeStation, type BasemapHealth, type BasemapNotice, type StationFraming } from '../lib/map';
 import { BASEMAPS, DEFAULT_BASEMAP_ID, basemapBaseSource, basemapRasterLayers, basemapSourceId, isBasemapSourceId, type BasemapId, type TileSourceId } from '../lib/basemaps';
 import { MAP_CONTROLS_ROW_PX, ZERO_INSETS, clampMapPadding, controlsFramingBottom, type MapInsets } from '../lib/mapInsets';
 import {
@@ -100,6 +100,19 @@ const basemapMemory: Partial<Record<TileSourceId, BasemapHealth>> = {};
 
 function basemapHealthFor(source: TileSourceId | null): BasemapHealth {
   return resumeBasemapHealth(source ? basemapMemory[source] ?? null : null, 0, BASEMAP_HOSTS);
+}
+
+/**
+ * Whether the map draws any tile of a raster source in the current view,
+ * fallback parents and children included; null when MapLibre cannot tell.
+ */
+function rasterSourceDrawn(map: MapLibreMap, sourceId: string): boolean | null {
+  try {
+    const ids: unknown = map.style?.tileManagers?.[sourceId]?.getRenderableIds();
+    return Array.isArray(ids) ? ids.length > 0 : null;
+  } catch {
+    return null;
+  }
 }
 
 function prefersReducedMotion(): boolean {
@@ -440,11 +453,17 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     // Tiles that never answer produce no tile errors, so a style whose tiles
     // stay silent counts as unavailable; then its tiles are asked for again at
     // a slower pace. A partial style is asked for again at that pace too, since
-    // MapLibre does not request a failed tile twice. Plain has no tiles to check.
+    // MapLibre does not request a failed tile twice, and turns unavailable once
+    // none of its tiles is drawn in the view. Plain has no tiles to check.
     const basemapCheck = window.setInterval(() => {
       const now = performance.now();
       if (disposed || !activeSource) return;
       if (basemap.loaded) {
+        const viewed = basemapAfterView(basemap, rasterSourceDrawn(map, basemapSourceId(activeId)), BASEMAP_HOSTS, now);
+        if (viewed !== basemap) {
+          applyBasemap(viewed);
+          return;
+        }
         const partial = basemapPartialCheck(basemap, BASEMAP_HOSTS, now, BASEMAP_RETRY_MS);
         if (partial.state !== basemap) applyBasemap(partial.state, partial.reload);
         return;
