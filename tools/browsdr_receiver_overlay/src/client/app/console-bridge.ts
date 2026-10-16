@@ -120,7 +120,7 @@ export interface ConsoleBridge {
 	spectrum(data: ArrayLike<number>, deviceHz?: number | null): void;
 	/** Called with every frame of a running wide scan (sweep.ts). */
 	sweepFrame(frame: SweepFrameLike): void;
-	/** Whether a fresh RX start unmutes VFO 1: false while a console start without listen runs. */
+	/** Whether a fresh RX start unmutes VFO 1: false while a console start without listen runs, as before a scan start that resumes RX. */
 	initialVfoEnabled(): boolean;
 	/** A device connection that started outside the bridge; console starts wait for it. */
 	trackConnect(pending: Promise<unknown>): void;
@@ -286,6 +286,8 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 	let pendingListen = true;
 	// console:sweep-start commands received and not answered yet; sweep-config waits for them.
 	let sweepStartsPending = 0;
+	// While a sweep-start runs over a running RX: whether VFO 1 played, for the Receiver's resume of that RX.
+	let resumeVfoEnabled: boolean | null = null;
 	let connectInFlight: Promise<void> | null = null;
 	let lifecycle: Promise<void> = Promise.resolve();
 	// FFT frames drawn by a running Listener outside an RX restart; console:radio waits for the next one.
@@ -990,9 +992,26 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 	 * simulated scan (the Mock SDR has no sweep) and a real one connects the
 	 * one authorised RadioSpectrum first, as console:start does. The scan stops
 	 * RX, which ends an armed recording, so that needs confirmRecording. The
-	 * Receiver page then shows it in its Spektrum workspace.
+	 * Receiver page then shows it in its Spektrum workspace. A start that
+	 * fails, or is stopped on the way, resumes the RX it stopped (sweep.ts);
+	 * VFO 1 then plays or stays muted as it did before.
 	 */
 	async function sweepStart(command: CommandOf<'console:sweep-start'>): Promise<[ResultCode, string?]> {
+		// RX the operator had running before this command; a Receiver-page stop of the scan resumes it.
+		const rxWasRunning = Boolean(app.running);
+		const playing = rxWasRunning && audioState() === 'running' && Array.isArray(app.vfos) && app.vfos.some((vfo: { enabled?: unknown } | null) => Boolean(vfo?.enabled));
+		resumeVfoEnabled = rxWasRunning ? Boolean(app.vfos?.[0]?.enabled) : null;
+		try {
+			const answer = await startScan(command, rxWasRunning);
+			// The resumed RX has a new AudioContext; without the click's activation it may stay suspended.
+			if (playing && app.running && !app.sweep?.active) await ensureAudio();
+			return answer;
+		} finally {
+			resumeVfoEnabled = null;
+		}
+	}
+
+	async function startScan(command: CommandOf<'console:sweep-start'>, rxWasRunning: boolean): Promise<[ResultCode, string?]> {
 		const sweep = app.sweep;
 		if (remoteSession() || !sweep || typeof sweep !== 'object') return ['NOT_READY'];
 		const check = (): [ResultCode] | null => {
@@ -1003,8 +1022,6 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		const early = check();
 		if (early) return early;
 		if (!app.backend) return ['NOT_READY'];
-		// RX the operator had running before this command; a Receiver-page stop of the scan resumes it.
-		const rxWasRunning = Boolean(app.running);
 		if (rxWasRunning && recordingArmed() && command.confirmRecording !== true) return ['RECORDING_ACTIVE'];
 		// An auto-connect of the authorised HackRF may already be opening the radio.
 		if (connectInFlight) await connectInFlight;
@@ -1412,6 +1429,7 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 			}, [bins.buffer]);
 		},
 		initialVfoEnabled(): boolean {
+			if (resumeVfoEnabled !== null) return resumeVfoEnabled;
 			return startsPending > 0 ? pendingListen : true;
 		},
 		trackConnect(pending: Promise<unknown>): void {

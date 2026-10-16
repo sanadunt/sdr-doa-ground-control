@@ -228,10 +228,13 @@ function receiverApp({ audioAllowed = true, openOk = true, mockSdrEnabled = fals
 			try {
 				if (this.running) await this.togglePlay(false, true);
 				if (failures.sweep) {
+					// As sweep.ts does on a failed start: report it and resume the RX it stopped.
+					const shouldResume = this.sweep.returnToRx && this.connected;
 					this.sweep.error = failures.sweep;
 					this.showMsg(`Sweep error: ${failures.sweep}`);
 					failures.sweep = null;
 					this.sweep.returnToRx = false;
+					if (shouldResume) await this.startStream();
 					return;
 				}
 				this.sweep.active = true;
@@ -1989,6 +1992,60 @@ test('sweep-start reports a radio that cannot scan and a scan that fails to star
 		frame.send('console:sweep-start', { id: 'ss1', mock: true });
 		await settle(20);
 		assert.equal(result('ss1').code, 'OK');
+	});
+});
+
+test('a sweep-start that fails over a running RX resumes it with the VFO audible or muted as before', async t => {
+	await t.test('listening', async st => {
+		const { frame, app, failures, result, clock, messages, flushWatchers } = await runningMock(st);
+		frame.send('console:listen', { id: 'l1', enabled: true });
+		await settle(20);
+		assert.equal(result('l1').code, 'OK');
+		assert.equal(app.vfos[0].enabled, true);
+		failures.sweep = 'Sweep range must be increasing and within 1–7250 MHz';
+		frame.send('console:sweep-start', { id: 'sf1', mock: true });
+		await settle(30);
+		assert.equal(result('sf1').code, 'SWEEP_FAILED');
+		assert.equal(app.sweep.active, false);
+		assert.equal(app.running, true, 'the RX the scan stopped runs again');
+		assert.equal(app.vfos[0].enabled, true, 'and is still audible');
+		assert.equal(app.audioCtx?.state, 'running');
+		flushWatchers();
+		clock.advance(STATUS_DEBOUNCE_MS);
+		assert.equal(messages('receiver:status').at(-1).vfo.enabled, true);
+		assert.equal(app._consoleBridge.initialVfoEnabled(), true, 'back to the Receiver page default');
+	});
+	await t.test('muted', async st => {
+		const { frame, app, failures, result } = await runningMock(st);
+		assert.equal(app.vfos[0].enabled, false);
+		failures.sweep = 'Sweep range must be increasing and within 1–7250 MHz';
+		frame.send('console:sweep-start', { id: 'sf2', mock: true });
+		await settle(30);
+		assert.equal(result('sf2').code, 'SWEEP_FAILED');
+		assert.equal(app.running, true);
+		assert.equal(app.vfos[0].enabled, false, 'still muted');
+	});
+	await t.test('stopped on the way by the Receiver page', async st => {
+		const { frame, app, result } = await runningMock(st);
+		frame.send('console:listen', { id: 'l3', enabled: true });
+		await settle(20);
+		// startSweep stops RX, then a Receiver-page Stop ends the start and resumes that RX (sweep.ts stopRequested).
+		app.startSweep = async function () {
+			this.sweep.starting = true;
+			this.sweep.error = '';
+			const resume = this.running;
+			try {
+				if (this.running) await this.togglePlay(false, true);
+				if (resume && this.connected) await this.startStream();
+			} finally {
+				this.sweep.starting = false;
+			}
+		};
+		frame.send('console:sweep-start', { id: 'ss3', mock: true });
+		await settle(30);
+		assert.equal(result('ss3').code, 'OK');
+		assert.equal(app.running, true);
+		assert.equal(app.vfos[0].enabled, true, 'audible as before');
 	});
 });
 

@@ -753,7 +753,7 @@ Tengah atau VFO diubah di halaman Receiver (mengetik Center atau VFO, menggeser 
 
 ### Spektrum: mode Spektrum `SWEEP_UNSUPPORTED`, `SWEEP_FAILED`, atau isian Atur terkunci
 
-`SWEEP_UNSUPPORTED`: radio yang tersambung tidak punya sweep hardware (Mock SDR hanya memakai sumber simulasi, dan hanya dengan `?mock=1`). `SWEEP_FAILED`: pindai gagal dimulai; teks di sampingnya adalah pesan Receiver, dan halaman Receiver (tombol `2`) menampilkan detailnya, misalnya rentang yang ditolak sweep native di dekat 7250 MHz. Rentang, Resolusi, dan Gain pindai terkunci selama pindai berjalan; tekan **Berhenti** lalu ubah.
+`SWEEP_UNSUPPORTED`: radio yang tersambung tidak punya sweep hardware (Mock SDR hanya memakai sumber simulasi, dan hanya dengan `?mock=1`). `SWEEP_FAILED`: pindai gagal dimulai; teks di sampingnya adalah pesan Receiver, dan halaman Receiver (tombol `2`) menampilkan detailnya, misalnya rentang yang ditolak sweep native di dekat 7250 MHz. RX yang dihentikan untuk pindai itu jalan lagi, dan VFO tetap terdengar atau tetap senyap seperti sebelumnya. Rentang, Resolusi, dan Gain pindai terkunci selama pindai berjalan; tekan **Berhenti** lalu ubah.
 
 ### Spektrum: Penanda nonaktif, **Belum disimpan**, atau penanda ditolak
 
