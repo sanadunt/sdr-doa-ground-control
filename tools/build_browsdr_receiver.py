@@ -267,26 +267,26 @@ def _apply_embedded_changes(source: Path) -> None:
         html,
         "\t\t\t\t\t<label>Graph minimum\n"
         "\t\t\t\t\t\t<div class=\"sweep-input-unit\">\n"
-        "\t\t\t\t\t\t\t<input type=\"number\" v-model.number=\"sweep.displayMinDb\" min=\"-160\" :max=\"sweep.displayMaxDb - 5\" step=\"5\" @change=\"updateSweepDisplayRange('min')\">\n"
+        "\t\t\t\t\t\t\t<input type=\"number\" v-model.number=\"sweep.displayMinDb\" min=\"-160\" :max=\"sweep.displayMaxDb - 5\" step=\"any\" @change=\"updateSweepDisplayRange('min')\">\n"
         "\t\t\t\t\t\t\t<span>dBFS</span>\n"
         "\t\t\t\t\t\t</div>\n"
         "\t\t\t\t\t</label>\n"
         "\t\t\t\t\t<label>Graph maximum\n"
         "\t\t\t\t\t\t<div class=\"sweep-input-unit\">\n"
-        "\t\t\t\t\t\t\t<input type=\"number\" v-model.number=\"sweep.displayMaxDb\" :min=\"sweep.displayMinDb + 5\" max=\"0\" step=\"5\" @change=\"updateSweepDisplayRange('max')\">\n"
+        "\t\t\t\t\t\t\t<input type=\"number\" v-model.number=\"sweep.displayMaxDb\" :min=\"sweep.displayMinDb + 5\" max=\"0\" step=\"any\" @change=\"updateSweepDisplayRange('max')\">\n"
         "\t\t\t\t\t\t\t<span>dBFS</span>\n"
         "\t\t\t\t\t\t</div>\n"
         "\t\t\t\t\t</label>\n",
         "\t\t\t\t\t<div class=\"sweep-display-range\" role=\"group\" :aria-label=\"t('Spectrum display limits')\">\n"
         "\t\t\t\t\t\t<label>{{ t('Graph min.') }}\n"
         "\t\t\t\t\t\t\t<div class=\"sweep-input-unit\">\n"
-        "\t\t\t\t\t\t\t\t<input type=\"number\" v-model.number=\"sweep.displayMinDb\" min=\"-160\" :max=\"sweep.displayMaxDb - 5\" step=\"5\" :aria-label=\"t('Graph minimum dBFS')\" @input=\"previewSweepDisplayRange('min', $event)\" @change=\"updateSweepDisplayRange('min')\">\n"
+        "\t\t\t\t\t\t\t\t<input type=\"number\" v-model.number=\"sweep.displayMinDb\" min=\"-160\" :max=\"sweep.displayMaxDb - 5\" step=\"any\" :aria-label=\"t('Graph minimum dBFS')\" @input=\"previewSweepDisplayRange('min', $event)\" @change=\"updateSweepDisplayRange('min')\">\n"
         "\t\t\t\t\t\t\t\t<span>dBFS</span>\n"
         "\t\t\t\t\t\t\t</div>\n"
         "\t\t\t\t\t\t</label>\n"
         "\t\t\t\t\t\t<label>{{ t('Graph max.') }}\n"
         "\t\t\t\t\t\t\t<div class=\"sweep-input-unit\">\n"
-        "\t\t\t\t\t\t\t\t<input type=\"number\" v-model.number=\"sweep.displayMaxDb\" :min=\"sweep.displayMinDb + 5\" max=\"60\" step=\"5\" :aria-label=\"t('Graph maximum dBFS')\" @input=\"previewSweepDisplayRange('max', $event)\" @change=\"updateSweepDisplayRange('max')\">\n"
+        "\t\t\t\t\t\t\t\t<input type=\"number\" v-model.number=\"sweep.displayMaxDb\" :min=\"sweep.displayMinDb + 5\" max=\"60\" step=\"any\" :aria-label=\"t('Graph maximum dBFS')\" @input=\"previewSweepDisplayRange('max', $event)\" @change=\"updateSweepDisplayRange('max')\">\n"
         "\t\t\t\t\t\t\t\t<span>dBFS</span>\n"
         "\t\t\t\t\t\t\t</div>\n"
         "\t\t\t\t\t\t</label>\n"
@@ -1238,6 +1238,29 @@ def _apply_embedded_changes(source: Path) -> None:
         "\t\t\tctx.restore();\n\t\t}\n\t},\n};\n\nexport function mountCanvas(",
         "\t\t\tctx.restore();\n\t\t}\n\n\t\tthis.drawListenerMarkers(ctx, w, h);\n\t},\n};\n\nexport function mountCanvas(",
         "spectrum markers on the Listener trace",
+    )
+
+    # The Listener's WebGL waterfall starts transparent and draws transparent outside the
+    # zoomed band, so rows without data show the canvas background (#waterfall in the
+    # overlay style.css, --canvas-bg) in both themes; rows with data keep the colour map.
+    waterfall_gl = source / "src/client/utils.ts"
+    _replace_once(
+        waterfall_gl,
+        "\t\tgl.clearColor(0.0, 0.0, 0.0, 1.0);\n",
+        "\t\tgl.clearColor(0.0, 0.0, 0.0, 0.0);\n",
+        "transparent Listener waterfall before its first draw",
+    )
+    _replace_once(
+        waterfall_gl,
+        "\t\t\tgl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.canvas);\n",
+        "\t\t\tgl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this.bandSize, this.historySize, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);\n",
+        "transparent Listener waterfall rows without data",
+    )
+    _replace_once(
+        waterfall_gl,
+        "\t\t\t\t\tgl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);\n",
+        "\t\t\t\t\tgl_FragColor = vec4(0.0);\n",
+        "transparent Listener waterfall outside the zoomed band",
     )
 
     theme_css = (PROJECT_ROOT / "frontend/src/receiver-embedded-theme.css").read_text(

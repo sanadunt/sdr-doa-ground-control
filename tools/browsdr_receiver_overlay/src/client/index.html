@@ -620,13 +620,13 @@
 					</label>
 					<label>Graph minimum
 						<div class="sweep-input-unit">
-							<input type="number" v-model.number="sweep.displayMinDb" min="-160" :max="sweep.displayMaxDb - 5" step="5" @change="updateSweepDisplayRange('min')">
+							<input type="number" v-model.number="sweep.displayMinDb" min="-160" :max="sweep.displayMaxDb - 5" step="any" @change="updateSweepDisplayRange('min')">
 							<span>dBFS</span>
 						</div>
 					</label>
 					<label>Graph maximum
 						<div class="sweep-input-unit">
-							<input type="number" v-model.number="sweep.displayMaxDb" :min="sweep.displayMinDb + 5" max="0" step="5" @change="updateSweepDisplayRange('max')">
+							<input type="number" v-model.number="sweep.displayMaxDb" :min="sweep.displayMinDb + 5" max="0" step="any" @change="updateSweepDisplayRange('max')">
 							<span>dBFS</span>
 						</div>
 					</label>
@@ -942,11 +942,11 @@
 							</thead>
 							<tbody>
 								<tr v-for="record in records.audioItems" :key="record.id">
-									<td>
+									<td :data-label="t('Started')">
 										<time :datetime="record.created_at">{{ new Date(record.created_at).toLocaleString(uiLanguage === 'id' ? 'id-ID' : 'en-GB', { hourCycle: 'h23' }) }}</time>
 										<span class="record-meta">{{ record.segments.length }} {{ t(record.segments.length === 1 ? 'segment' : 'segments') }} · <span :class="{ 'record-recording': !record.completed_at }">{{ t(record.completed_at ? 'finalized' : 'recording in progress') }}</span></span>
 									</td>
-									<td>
+									<td :data-label="t('Audio segments')">
 										<div class="records-audio-segments" v-if="record.segments.length">
 											<div class="audio-record-segment" v-for="segment in record.segments" :key="segment.id">
 												<div class="audio-record-segment-details">

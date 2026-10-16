@@ -18,6 +18,7 @@ function recordingContext() {
 	const lines = [];
 	const labels = [];
 	const labelRows = [];
+	const boxes = [];
 	let x = null;
 	const context = {
 		font: '', textBaseline: '', strokeStyle: '', fillStyle: '', lineWidth: 1,
@@ -25,10 +26,10 @@ function recordingContext() {
 		moveTo(atX) { x = atX; },
 		lineTo() { lines.push({ x, color: context.strokeStyle }); },
 		measureText(text) { return { width: text.length * 6 }; },
-		fillRect() {},
+		fillRect(atX, atY, width, height) { boxes.push({ x: atX, y: atY, width, height }); },
 		fillText(text, _x, y) { labels.push(text); labelRows.push(y); },
 	};
-	return { context, lines, labels, labelRows };
+	return { context, lines, labels, labelRows, boxes };
 }
 
 function listenerApp({ centerMhz = 100, sampleRate = 2_000_000, shiftMhz = 0, markers = [] } = {}) {
@@ -75,8 +76,8 @@ test('only the markers inside the visible span are drawn, labelled like the Spek
 	app.drawListenerMarkers(context, 800, 200);
 	assert.deepEqual(lines.map(line => Math.round(line.x)), [600, 0], '100.5 MHz at 3/4 of a 99–101 MHz span, 99 MHz at its left edge');
 	assert.deepEqual(labels, ['Repeater 100.500 MHz', 'M2 99.000 MHz']);
-	// Under the VFO label, alternating left to right: 99 MHz is first, 100.5 MHz second.
-	assert.deepEqual(labelRows, [34, 18]);
+	// Labels that do not touch share the first row under the VFO label.
+	assert.deepEqual(labelRows, [18, 18]);
 	assert.equal(lines[0].color, '#ff75a0', 'the Receiver marker colour (the builder adds the light theme one)');
 
 	// Zoomed to the upper half: the 99 MHz marker leaves the span.
@@ -114,4 +115,30 @@ test('a changed list redraws a stopped Listener once; a running one waits for it
 	const { context, lines } = recordingContext();
 	app.drawListenerMarkers(context, 0, 200);
 	assert.equal(lines.length, 0, 'a canvas without size draws nothing');
+});
+
+test('dense markers move their labels down a row, and leave out what still overlaps, keeping every line', () => {
+	// Six markers within 1.5 kHz around 100 MHz, two VFOs: labels start under the two VFO labels.
+	const markers = Array.from({ length: 6 }, (_, index) => ({ id: `m${index}`, frequencyHz: 100_000_000 + index * 300, powerDb: null, label: '' }));
+	const app = listenerApp({ markers });
+	app.vfos = [{}, {}];
+	app.refreshListenerMarkers();
+	const { context, lines, labels, labelRows, boxes } = recordingContext();
+	app.drawListenerMarkers(context, 800, 200);
+	assert.equal(lines.length, 6, 'every marker keeps its line');
+	assert.deepEqual(labels, ['M1 100.000 MHz', 'M2 100.000 MHz', 'M3 100.001 MHz', 'M4 100.001 MHz']);
+	assert.deepEqual(labelRows, [30, 46, 62, 78], 'four rows from under the second VFO label, then left out');
+	for (let a = 0; a < boxes.length; a++) {
+		for (let b = a + 1; b < boxes.length; b++) {
+			const apart = boxes[a].x + boxes[a].width <= boxes[b].x || boxes[b].x + boxes[b].width <= boxes[a].x
+				|| boxes[a].y + boxes[a].height <= boxes[b].y || boxes[b].y + boxes[b].height <= boxes[a].y;
+			assert.ok(apart, `labels ${a} and ${b} overlap`);
+		}
+	}
+	// Spread out again, they all fit on the first row.
+	app.records.markers = markers.map((marker, index) => ({ ...marker, frequencyHz: 99_100_000 + index * 300_000 }));
+	app.refreshListenerMarkers();
+	const spread = recordingContext();
+	app.drawListenerMarkers(spread.context, 800, 200);
+	assert.deepEqual(spread.labelRows, [30, 30, 30, 30, 30, 30]);
 });
