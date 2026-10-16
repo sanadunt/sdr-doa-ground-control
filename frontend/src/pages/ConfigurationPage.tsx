@@ -282,7 +282,7 @@ export function ConfigurationPage({
         if (!element) return;
         sections.push({ id: section.id, top: element.getBoundingClientRect().top });
       }
-      const atBottom = atPageBottom(window.innerHeight, window.scrollY, document.documentElement.scrollHeight);
+      const atBottom = atPageBottom(window.innerHeight, window.scrollY, document.documentElement.scrollHeight, preferredSection.current !== null);
       const next = activeSection(sections, stickyOffset(indexRef.current?.closest('.pg-bar') ?? null), atBottom, preferredSection.current);
       if (next) setCurrentSection(next as SectionId);
     };

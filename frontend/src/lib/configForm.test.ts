@@ -181,13 +181,27 @@ describe('Configuration page helpers', () => {
     expect(activeSection(sections, 120, true, 'connection')).toBe('dry-run');
   });
 
-  it('counts the end of a scrolling page as its bottom, never a page that fits the viewport', () => {
+  it('counts the end of a scrolling page as its bottom, and a page that fits the viewport only after a jump', () => {
     expect(atPageBottom(900, 48, 948)).toBe(true);
     expect(atPageBottom(900, 47, 948)).toBe(true);
     expect(atPageBottom(900, 0, 948)).toBe(false);
+    expect(atPageBottom(900, 0, 948, true)).toBe(false);
     // The two-column layout fits 1440 × 900: the index keeps the first section instead of jumping to Dry-run.
     expect(atPageBottom(900, 0, 900)).toBe(false);
     expect(atPageBottom(900, 0, 640)).toBe(false);
+    // A section jumped to on a page that fits keeps its mark when the window is resized.
+    expect(atPageBottom(900, 0, 900, true)).toBe(true);
+    const fitting = [
+      { id: 'connection', top: 120 },
+      { id: 'mqtt', top: 400 },
+      { id: 'navigation', top: 120 },
+      { id: 'branding', top: 452 },
+      { id: 'dry-run', top: 680 },
+    ];
+    expect(activeSection(fitting, 110, atPageBottom(900, 0, 900, false), null)).toBe('connection');
+    for (const id of ['mqtt', 'navigation', 'branding', 'dry-run', 'connection']) {
+      expect(activeSection(fitting, 110, atPageBottom(900, 0, 900, true), id)).toBe(id);
+    }
   });
 
   it('summarizes a dry-run response and leaves malformed parts out', () => {

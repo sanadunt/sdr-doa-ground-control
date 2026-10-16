@@ -154,11 +154,14 @@ export function isLoopbackHost(input: string): boolean {
 }
 
 /**
- * Whether the page is scrolled to its end. A page that fits the viewport has
- * no bottom to reach, so the index keeps marking the section at the top.
+ * Whether the index treats the page as scrolled to its end. A page that fits
+ * the viewport has no end to reach: it counts as one only while a section was
+ * jumped to (`jumped`), so that section keeps its mark when the window is
+ * resized; otherwise the index marks the section at the top.
  */
-export function atPageBottom(viewportHeight: number, scrollY: number, scrollHeight: number): boolean {
-  return scrollHeight > viewportHeight + 2 && viewportHeight + scrollY >= scrollHeight - 2;
+export function atPageBottom(viewportHeight: number, scrollY: number, scrollHeight: number, jumped = false): boolean {
+  if (scrollHeight <= viewportHeight + 2) return jumped;
+  return viewportHeight + scrollY >= scrollHeight - 2;
 }
 
 /**

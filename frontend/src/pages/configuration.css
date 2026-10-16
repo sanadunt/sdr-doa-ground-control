@@ -25,7 +25,8 @@
    a taller neighbour and leaves an empty band above its actions. */
 /* 1024–1279 px: a half-width GPS & Compass card stacks its fields and outgrows
    the left column, so the columns dissolve into the grid: Connection beside
-   MQTT (span 6, equally tall), then GPS & Compass and Branding on full rows. */
+   MQTT (span 6, each at its own height), then GPS & Compass and Branding on
+   full rows. */
 @media (min-width: 1024px) and (max-width: 1279px) {
   .cfg-grid > .pg-stack { display: contents; }
 }
