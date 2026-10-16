@@ -89,9 +89,19 @@ function setDockSettings(patch: Partial<SpectrumDockSettings>): void {
 }
 
 /**
+ * Height of the spectrum section from its parts: the header, then the body
+ * and the open "Atur" column. Beside the trace the column counts only when it
+ * is taller than the body; below it (a dock of 760 px or less) it adds its
+ * own height. `borderPx` is the dock's border.
+ */
+export function spectrumNeedFromParts(headPx: number, bodyPx: number, settingsPx: number, settingsBelow: boolean, borderPx: number): number {
+  return Math.ceil(headPx + (settingsBelow ? bodyPx + settingsPx : Math.max(bodyPx, settingsPx)) + borderPx);
+}
+
+/**
  * Height the spectrum section needs: its header, then the body's padding,
- * gaps and rows with the waterfall at WATERFALL_MIN_PX, or the open "Atur"
- * column when that is taller and sits beside the trace, plus the dock border.
+ * gaps and rows with the waterfall at WATERFALL_MIN_PX, and the open "Atur"
+ * column beside or below the trace, plus the dock border.
  */
 function spectrumNeedPx(section: HTMLElement): number | null {
   const head = section.querySelector<HTMLElement>('.ov-spec-head');
@@ -104,22 +114,25 @@ function spectrumNeedPx(section: HTMLElement): number | null {
   for (const row of rows) {
     bodyNeed += row.classList.contains('ov-spec-waterfall') ? WATERFALL_MIN_PX + row.offsetHeight - row.clientHeight : row.getBoundingClientRect().height;
   }
-  // The column's own content, not its stretched box, so the dock can shrink again. Over the trace
-  // (a narrow dock) the column scrolls instead.
+  // Beside the trace: the column's own content, not its stretched box, so the dock can shrink again.
+  // Below it (a narrow dock lays .ov-spec-main out as a column): its box, which takes its content's height.
   const settings = section.querySelector<HTMLElement>('.ov-spec-settings');
   let settingsNeed = 0;
+  let settingsBelow = false;
   if (settings) {
-    const columnStyle = getComputedStyle(settings);
-    if (columnStyle.position === 'static') {
+    const main = settings.parentElement;
+    settingsBelow = main !== null && getComputedStyle(main).flexDirection === 'column';
+    if (settingsBelow) {
+      settingsNeed = settings.getBoundingClientRect().height;
+    } else {
+      const columnStyle = getComputedStyle(settings);
       const shown = (Array.from(settings.children) as HTMLElement[]).filter((child) => child.getClientRects().length > 0);
       settingsNeed = px(columnStyle.paddingTop) + px(columnStyle.paddingBottom) + px(columnStyle.rowGap) * Math.max(0, shown.length - 1);
       for (const child of shown) settingsNeed += child.getBoundingClientRect().height;
     }
   }
-  let need = head.getBoundingClientRect().height + Math.max(bodyNeed, settingsNeed);
   const dock = section.parentElement;
-  if (dock) need += dock.offsetHeight - dock.clientHeight;
-  return Math.ceil(need);
+  return spectrumNeedFromParts(head.getBoundingClientRect().height, bodyNeed, settingsNeed, settingsBelow, dock ? dock.offsetHeight - dock.clientHeight : 0);
 }
 
 export interface SpectrumMarkRowProps {
@@ -306,7 +319,8 @@ export function SpectrumDock({
     let frame = 0;
     const fit = () => {
       const need = spectrumNeedPx(section);
-      const value = need === null ? '' : `${need}px`;
+      // Never taller than the stage, so the header stays in view; a narrow dock scrolls below it instead.
+      const value = need === null ? '' : `${stage.clientHeight > 0 ? Math.min(need, stage.clientHeight) : need}px`;
       if (value === last) return;
       last = value;
       if (value) stage.style.setProperty(DOCK_NEED_PROPERTY, value);
@@ -314,11 +328,11 @@ export function SpectrumDock({
     };
     fitDockRef.current = fit;
     fit();
-    // Width changes and late font loads re-wrap the header; the new height is set on the next frame.
+    // Width changes and late font loads re-wrap the header, and a shorter window lowers the cap; the new height is set on the next frame.
     const observer = typeof ResizeObserver === 'function'
       ? new ResizeObserver(() => { if (!frame) frame = window.requestAnimationFrame(() => { frame = 0; fit(); }); })
       : null;
-    for (const element of [section, section.querySelector('.ov-spec-head'), section.querySelector('.ov-spec-info')]) {
+    for (const element of [stage, section, section.querySelector('.ov-spec-head'), section.querySelector('.ov-spec-info')]) {
       if (element) observer?.observe(element);
     }
     return () => {

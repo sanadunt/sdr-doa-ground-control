@@ -10,7 +10,7 @@ import { DEFAULT_OVERVIEW_PANELS } from '../../lib/overviewPanels';
 import { followNodeStore } from '../../lib/listenPrefs';
 import { DEFAULT_SPECTRUM_DOCK_SETTINGS, spectrumDockStore } from '../../lib/spectrumDockSettings';
 import type { ConsoleCapabilities } from '../../api';
-import { SpectrumDock, SpectrumMarkRow } from './SpectrumDock';
+import { SpectrumDock, SpectrumMarkRow, spectrumNeedFromParts } from './SpectrumDock';
 import type { SpectrumMarkRowProps } from './SpectrumDock';
 import { SpectrumSettings } from './SpectrumSettings';
 import type { RadioRows, SpectrumSettingsProps, SweepRows } from './SpectrumSettings';
@@ -380,6 +380,14 @@ describe('Spectrum dock styles', () => {
     expect(dashboardCss).toMatch(/--ov-dock-h:\s*max\(256px,\s*var\(--ov-spec-need-h,\s*0px\)\)/);
   });
 
+  it('counts the open Atur column beside the trace only when taller, and below it in full', () => {
+    // Header 48, body 180, column 311, dock border 1.
+    expect(spectrumNeedFromParts(48, 180, 311, false, 1)).toBe(360);
+    expect(spectrumNeedFromParts(48, 180, 120, false, 1)).toBe(229);
+    expect(spectrumNeedFromParts(48, 180, 194, true, 1)).toBe(423);
+    expect(spectrumNeedFromParts(48.2, 180.1, 0, true, 0)).toBe(229);
+  });
+
   /** The body of an at-rule block such as `@container ov-spec (max-width: 1279px)`. */
   const block = (prelude: string): string => {
     const start = dashboardCss.indexOf(`${prelude} {`);
@@ -400,9 +408,16 @@ describe('Spectrum dock styles', () => {
     expect(block('@container ov-spec (max-width: 1499px)')).toMatch(/\.ov-spec-source\s*\{\s*display:\s*none;?\s*\}/);
   });
 
-  it('puts Atur beside the trace, over it on a dock of 760 px or less, and below it when stacked', () => {
+  it('puts Atur beside the trace, below it on a dock of 760 px or less, and below it when stacked', () => {
     expect(declarations('.ov-spec-settings').join(';')).toMatch(/width:\s*337px/);
-    expect(block('@container ov-spec (max-width: 760px)')).toMatch(/\.ov-spec-settings\s*\{[^}]*position:\s*absolute[^}]*width:\s*min\(337px,\s*100%\)/);
+    const narrow = block('@container ov-spec (max-width: 760px)');
+    // Below the trace, never over it: nothing in the column covers the marker row's buttons.
+    expect(narrow).not.toMatch(/position:\s*absolute/);
+    expect(narrow).toMatch(/\.ov-spec-main\s*\{[^}]*flex-direction:\s*column[^}]*overflow-y:\s*auto/);
+    expect(narrow).toMatch(/\.ov-spec-settings\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fill,\s*minmax\(min\(313px,\s*100%\),\s*1fr\)\)[^}]*width:\s*auto[^}]*overflow:\s*visible/);
+    // Scrolled under the header when the stage is too short, the trace keeps its waterfall.
+    expect(narrow).toMatch(/\.ov-spec-main > \.ov-spec-body\s*\{\s*flex:\s*1 0 auto;?\s*\}/);
+    expect(narrow).toMatch(/\.ov-spec-main \.ov-spec-waterfall\s*\{\s*min-height:\s*48px;?\s*\}/);
     const stacked = block('@media (max-width: 1023px)');
     expect(stacked).toMatch(/\.ov-spec-main\s*\{\s*flex-direction:\s*column;?\s*\}/);
     expect(stacked).toMatch(/\.ov-spec-settings\s*\{[^}]*position:\s*static[^}]*width:\s*auto/);
