@@ -4541,6 +4541,12 @@ input[type='range'] {
 	background: var(--bg-dark);
 }
 
+/* The Listener waterfall is transparent where it has no data yet (the builder patches its
+   WebGL engine), so that part shows the trace's background in either theme. */
+#waterfall {
+	background: var(--canvas-bg);
+}
+
 .tick {
 	color: var(--text-muted);
 	font-size: 11px;
@@ -4567,7 +4573,7 @@ input[type='range'] {
 	color: var(--signal);
 }
 
-/* The waterfall stays dark in both themes, so the label carries its own backdrop. */
+/* Waterfall rows with data are dark in both themes, so the label carries its own backdrop. */
 .active-audio-title {
 	padding: 1px 6px;
 	border-radius: 4px;

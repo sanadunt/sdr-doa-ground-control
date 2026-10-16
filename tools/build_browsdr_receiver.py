@@ -1240,6 +1240,29 @@ def _apply_embedded_changes(source: Path) -> None:
         "spectrum markers on the Listener trace",
     )
 
+    # The Listener's WebGL waterfall starts transparent and draws transparent outside the
+    # zoomed band, so rows without data show the canvas background (#waterfall in the
+    # overlay style.css, --canvas-bg) in both themes; rows with data keep the colour map.
+    waterfall_gl = source / "src/client/utils.ts"
+    _replace_once(
+        waterfall_gl,
+        "\t\tgl.clearColor(0.0, 0.0, 0.0, 1.0);\n",
+        "\t\tgl.clearColor(0.0, 0.0, 0.0, 0.0);\n",
+        "transparent Listener waterfall before its first draw",
+    )
+    _replace_once(
+        waterfall_gl,
+        "\t\t\tgl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.canvas);\n",
+        "\t\t\tgl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this.bandSize, this.historySize, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);\n",
+        "transparent Listener waterfall rows without data",
+    )
+    _replace_once(
+        waterfall_gl,
+        "\t\t\t\t\tgl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);\n",
+        "\t\t\t\t\tgl_FragColor = vec4(0.0);\n",
+        "transparent Listener waterfall outside the zoomed band",
+    )
+
     theme_css = (PROJECT_ROOT / "frontend/src/receiver-embedded-theme.css").read_text(
         encoding="utf-8"
     )

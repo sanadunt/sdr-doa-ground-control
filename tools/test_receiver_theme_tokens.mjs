@@ -93,3 +93,15 @@ test('the dashboard marker colour is the Receiver marker colour in both themes',
 	assert.equal(THEMES[0].console.get('--marker'), dark);
 	assert.equal(THEMES[1].console.get('--marker'), light);
 });
+
+test('the Listener waterfall shows the trace background where it has no data, in both themes', () => {
+	const builder = readFileSync(new URL('./build_browsdr_receiver.py', import.meta.url), 'utf8');
+	// The trace's background in canvas.ts (black upstream; the builder adds the light one).
+	const trace = builder.match(/ctx\.fillStyle = lightTheme \? "(#[0-9a-f]{6})" : "rgba\(0, 0, 0, 1\)";/i);
+	assert.ok(trace, 'the Listener trace background patch');
+	assert.equal(THEMES[0].receiver.get('--canvas-bg'), '#000000');
+	assert.equal(THEMES[1].receiver.get('--canvas-bg'), trace[1].toLowerCase());
+	assert.match(overlayCss, /#waterfall \{\s*background: var\(--canvas-bg\);\s*\}/);
+	// The WebGL engine leaves rows without data transparent, so that background shows.
+	assert.match(builder, /gl\.texImage2D\(gl\.TEXTURE_2D, 0, gl\.RGBA, this\.bandSize, this\.historySize, 0, gl\.RGBA, gl\.UNSIGNED_BYTE, null\);/);
+});

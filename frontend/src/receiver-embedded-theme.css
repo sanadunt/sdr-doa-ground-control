@@ -30,6 +30,8 @@
   --signal: #ebbc70;
   --marker: #ff75a0;
   --marker-text: #ffd3e0;
+  /* The Listener trace background (canvas.ts, light value patched by the builder). */
+  --canvas-bg: #000000;
   --overlay: rgba(11, 15, 20, .9);
   --mono: ui-monospace, 'SFMono-Regular', 'JetBrains Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, sans-serif;
@@ -61,5 +63,6 @@
   --signal: #9a5b12;
   --marker: #a23557;
   --marker-text: #74243f;
+  --canvas-bg: #fafbf9;
   --overlay: rgba(255, 255, 255, .94);
 }
