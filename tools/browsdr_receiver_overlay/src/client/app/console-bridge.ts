@@ -274,6 +274,8 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 	let lastStatusAt = -Infinity;
 	let sentUrgentKey: string | null = null;
 	let heartbeat: TimerHandle | null = null;
+	// See watchRestart().
+	let restartPoll: TimerHandle | null = null;
 	// Tune attribution: see writeTuning() and noteTune().
 	let tuneRev = 0;
 	let tuneBy: TuneSource = 'receiver';
@@ -495,6 +497,23 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		sentUrgentKey = urgentKey(current);
 		lastStatusAt = env.monotonicNow();
 		post({ type: 'receiver:status', seq: ++statusSeq, tMs: env.now(), ...current, tune: stamp });
+		watchRestart();
+	}
+
+	/**
+	 * _rxRestarting is no Vue state, so the end of a restart runs no watcher. While
+	 * it alone reports a stopped RX as running, look again every RADIO_POLL_MS: a
+	 * restart that does not bring RX back then shows as stopped at once, not with
+	 * the next heartbeat.
+	 */
+	function watchRestart(): void {
+		if (disposed || restartPoll !== null || app.running || !app._rxRestarting) return;
+		restartPoll = env.setTimeout(() => {
+			restartPoll = null;
+			if (disposed) return;
+			if (app._rxRestarting && !app.running) watchRestart();
+			else if (!app.running) onReceiverChange();
+		}, RADIO_POLL_MS);
 	}
 
 	/** Sends a status after delayMs; a status already due sooner covers this one. */
@@ -1453,9 +1472,11 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 			unwatchMarkers?.();
 			if (statusTimer !== null) env.clearTimeout(statusTimer);
 			if (heartbeat !== null) env.clearInterval(heartbeat);
+			if (restartPoll !== null) env.clearTimeout(restartPoll);
 			if (markersTimer !== null) env.clearTimeout(markersTimer);
 			statusTimer = null;
 			heartbeat = null;
+			restartPoll = null;
 			markersTimer = null;
 		},
 	};

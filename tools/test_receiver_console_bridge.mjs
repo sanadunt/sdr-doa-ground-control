@@ -1572,15 +1572,29 @@ test('an RX restart for a sample rate change shows as running throughout, so fol
 	});
 	await t.test('a restart that does not bring RX back', async st => {
 		const { app, clock, flushWatchers, messages, failures } = await runningMock(st);
-		app._releaseWakeLock = () => { clock.advance(STATUS_URGENT_MIN_MS); flushWatchers(); };
+		// Vue runs the snapshot watcher after each reactive change: the stop, then the failed start, both
+		// while _rxRestarting is still set. Clearing that flag (no Vue state) runs no watcher.
+		app._releaseWakeLock = () => { clock.advance(STATUS_DEBOUNCE_MS); flushWatchers(); };
+		const disarm = app.disarmVfoAudioRecording;
+		app.disarmVfoAudioRecording = async function () {
+			await disarm.call(this);
+			if (!this.running && this._rxRestarting) {
+				clock.advance(STATUS_DEBOUNCE_MS);
+				flushWatchers();
+			}
+		};
 		failures.startRx = true;
 		app.radio.sampleRate = 10_000_000;
 		flushWatchers();
 		await settle(20);
 		assert.equal(app.running, false);
-		flushWatchers();
-		clock.advance(STATUS_DEBOUNCE_MS);
-		assert.equal(messages('receiver:status').at(-1).running, false, 'reported as stopped');
+		assert.equal(app._rxRestarting, false);
+		assert.equal(messages('receiver:status').at(-1).running, true, 'sent while the restart still ran');
+		clock.advance(RADIO_POLL_MS + STATUS_URGENT_MIN_MS);
+		assert.equal(messages('receiver:status').at(-1).running, false, 'reported as stopped without waiting for the heartbeat');
+		const sent = messages('receiver:status').length;
+		clock.advance(RADIO_POLL_MS * 4);
+		assert.equal(messages('receiver:status').length, sent, 'and the poll ends');
 	});
 });
 
