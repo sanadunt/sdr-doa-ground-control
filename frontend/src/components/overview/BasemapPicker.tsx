@@ -154,6 +154,7 @@ export function BasemapMenu({ value, onChange }: { value: BasemapId; onChange: (
         popover="manual"
         role="radiogroup"
         aria-label={label}
+        data-no-page-shortcuts=""
         hidden={!open}
         style={position}
         onBlur={onBlur}

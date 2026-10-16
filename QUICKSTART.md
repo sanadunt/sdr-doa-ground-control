@@ -488,7 +488,7 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 ### Shortcut keyboard
 
 - `1`–`7` membuka halaman sesuai urutan menu, `R` me-refresh. Shortcut juga bekerja saat fokus berada di dalam Receiver, kecuali saat mengetik di field teks atau angka.
-- Shortcut tetap bekerja setelah mengklik checkbox atau radio button. Selama fokus berada di slider (misalnya Head Up atau opasitas overlay), shortcut tidak aktif, sehingga tombol angka tidak berpindah halaman.
+- Shortcut tetap bekerja setelah mengklik checkbox atau radio button. Selama fokus berada di slider (misalnya Head Up atau opasitas overlay), shortcut tidak aktif, sehingga tombol angka tidak berpindah halaman. Di menu basemap yang terbuka, tombol angka juga tidak berpindah halaman; `R` tetap me-refresh.
 - Shortcut halaman menutup menu halaman yang terbuka. `Esc`, klik di luar menu, atau Tab keluar dari menu juga menutupnya.
 - "Skip to workspace" memindahkan fokus ke isi halaman tanpa mengganti halaman.
 

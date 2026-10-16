@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { BASEMAP_ORDER } from '../../lib/basemaps';
 import { I18nContext, translate } from '../../lib/i18n';
 import type { Lang } from '../../lib/i18n';
+import { NO_PAGE_SHORTCUTS_ATTRIBUTE } from '../../lib/shortcuts';
 import { BasemapMenu, BasemapSelect, basemapMenuPosition } from './BasemapPicker';
 
 function render(element: ReactElement, lang: Lang = 'en'): string {
@@ -26,10 +27,15 @@ describe('basemap menu', () => {
     const html = render(<BasemapMenu value="satellite" onChange={noop} />);
     expect(html).toMatch(/<button class="ov-map-button" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="ov-basemap-menu" aria-label="Basemap" title="Basemap">/);
     // A popover is drawn in the top layer, above the map's floating panels and the dock.
-    expect(html).toMatch(/<div id="ov-basemap-menu" class="ov-basemap-menu" popover="manual" role="radiogroup" aria-label="Basemap" hidden=""/);
+    expect(html).toMatch(/<div id="ov-basemap-menu" class="ov-basemap-menu" popover="manual" role="radiogroup" aria-label="Basemap" data-no-page-shortcuts="" hidden=""/);
     const inputs = [...html.matchAll(/<input type="radio" name="ov-basemap-menu"[^>]*>/g)].map((match) => match[0]);
     expect(inputs.map((input) => /value="([a-z]+)"/.exec(input)?.[1])).toEqual([...BASEMAP_ORDER]);
     expect(inputs.filter((input) => input.includes('checked=""')).map((input) => /value="([a-z]+)"/.exec(input)?.[1])).toEqual(['satellite']);
+  });
+
+  it('keeps digit keys inside the open menu, so a digit does not leave the Dashboard', () => {
+    const html = render(<BasemapMenu value="standard" onChange={noop} />);
+    expect(html).toMatch(new RegExp(`<div id="ov-basemap-menu"[^>]* ${NO_PAGE_SHORTCUTS_ATTRIBUTE}=""`));
   });
 
   it('shows the style names in both languages', () => {
