@@ -28,6 +28,11 @@ UNIT_NAME=sdr-doa-docker-update
 MARKER='# Written by sdr-doa-docker'
 LOG_KEEP=500
 BAD_KEEP=20
+# update --auto holds an update back while the console's Receiver records or
+# archives a scan, at most this long (7 days), so a station that records day
+# and night still gets updates.
+BUSY_DEFER_MAX=604800
+HEALTHCHECK_PATH=/opt/sdr-doa-ground-console/packaging/docker/healthcheck.py
 
 DOCKER=${SDR_DOA_DOCKER:-docker}
 SYSTEMCTL=${SDR_DOA_SYSTEMCTL:-systemctl}
@@ -35,6 +40,9 @@ SYSTEMD_DIR=${SDR_DOA_SYSTEMD_DIR:-/etc/systemd/system}
 HEALTH_TIMEOUT=${SDR_DOA_HEALTH_TIMEOUT:-180}
 HEALTH_INTERVAL=${SDR_DOA_HEALTH_INTERVAL:-2}
 AGENT_SETTLE=${SDR_DOA_AGENT_SETTLE:-20}
+# Owner that root's timer accepts for DIR and the script besides uid 0; only
+# tests that fake root as another user set it.
+ROOT_UID=${SDR_DOA_ROOT_UID:-0}
 
 DIR=
 VARIANT=console
@@ -48,16 +56,20 @@ REF=
 PREV_REF=
 LOG_FILE=
 BAD_FILE=
+BUSY_FILE=
 LOCK_DIR=
 ACTION=$PROG
 COMPOSE_KIND=
 COMPOSE_HINT='docker compose'
 COMPOSE_PULL_NEVER=0
 REASON=
+IMAGE_FAULT=0
 CURRENT=
 NEW=
 CID=
 C_STATUS=
+C_HEALTH=
+UPDATE_YES=0
 
 usage() {
   cat <<'EOF'
@@ -73,7 +85,8 @@ Commands:
                 the previous image back when the new one fails
   rollback      go back to the previous image (sdr-doa-previous), wait healthy
   auto-update on|off|status
-                daily update with a systemd timer (on and off need root)
+                daily update: as root a systemd timer (one install per host),
+                as another user a crontab line to add
   status        image, container state and health, auto-update, last update
   help          this help
 
@@ -102,19 +115,32 @@ install options:
 update options:
   --dir DIR         install directory (default: the console install, else the
                     agent install, in the home directory or /opt)
-  --check          only report whether the channel has a different image
-  --auto            no questions; skip an image that failed before (the timer)
+  --check           only report whether the channel has a different image;
+                    without the docker buildx plugin it pulls the image to
+                    compare (the running container and the tag stay as they
+                    are)
+  --auto            the timer: no questions; skip an image that failed before
+                    or is older than the running one, and wait for the next
+                    run while the console's Receiver records or archives a
+                    scan (at most 7 days)
+  --yes             no questions: install an older image, one that failed
+                    before, or over a running recording
 
 rollback, status and auto-update take --dir DIR; auto-update on takes
---time HH:MM.
+--time HH:MM and --force (move the timer from another install to this one).
 
 A re-run of install keeps .env and agent.env; only the options given change.
+update only replaces the image: apply an edit of .env or agent.env with
+'docker compose up -d' in DIR (or a re-run of install). In both files wrap a
+value with a $ in single quotes (SDR_DOA_ADMIN_PASSWORD='...'): docker
+compose replaces $name in unquoted and double-quoted values.
 A new major version arrives only when you change the channel, for example
   sdr-doa-docker install --channel 3
-Admin password of the console (default 123456 until you set one):
+Admin password of the console (default 123456 until you set one); use sudo
+for an install in /opt:
   cd /opt/sdr-doa-ground-console
-  docker compose exec console sdr-doa-set-admin-password
-  docker compose restart console
+  sudo docker compose exec console sdr-doa-set-admin-password
+  sudo docker compose restart console
 
 Files in DIR: compose.yml and .env (written by install), agent.env (agent
 settings), update.log (one line per step), .bad-images (images that failed
@@ -125,7 +151,8 @@ binary), SDR_DOA_SYSTEMD_DIR (unit directory, implies systemd),
 SDR_DOA_SYSTEMCTL, SDR_DOA_BIN_DIR (where install copies this script),
 SDR_DOA_HEALTH_TIMEOUT (seconds, default 180), SDR_DOA_HEALTH_INTERVAL
 (seconds between checks, default 2), SDR_DOA_AGENT_SETTLE (seconds an image
-without a health check must run without restarting, default 20).
+without a health check must run without restarting, default 20),
+SDR_DOA_ROOT_UID (tests only: another owner root's timer accepts).
 EOF
 }
 
@@ -312,9 +339,20 @@ write_file() {
   mv -f "$wf_tmp" "$1"
 }
 
+# A root install keeps .env 0600; without sudo it cannot be read, and the
+# defaults would be used silently.
+need_readable() {
+  if [ -e "$1" ] && [ ! -r "$1" ]; then die "cannot read $1 (mode 0600); run with sudo"; fi
+}
+
 # Reads DIR/.env and exports the values, so docker compose interpolates
-# exactly what this script uses, whatever the caller's shell holds.
+# exactly what this script uses, whatever the caller's shell holds. The
+# console variables compose.yml passes without a value are unset, so compose
+# takes them only from DIR/.env.
 read_env() {
+  need_readable "$DIR/.env"
+  unset SDR_DOA_ADMIN_PASSWORD SDR_DOA_SEED_BASE_URL SDR_DOA_SEED_MQTT_HOST SDR_DOA_SEED_MQTT_PORT \
+    SDR_DOA_SEED_MQTT_TRANSPORT SDR_DOA_SEED_MQTT_WS_PATH SDR_DOA_SEED_REFRESH_SECONDS
   IMAGE=$(env_get "$DIR/.env" SDR_DOA_IMAGE)
   [ -n "$IMAGE" ] || IMAGE=$DEFAULT_IMAGE
   CHANNEL=$(env_get "$DIR/.env" SDR_DOA_IMAGE_TAG)
@@ -332,6 +370,39 @@ read_env() {
   export SDR_DOA_IMAGE SDR_DOA_IMAGE_TAG SDR_DOA_PORT
   LOG_FILE=$DIR/update.log
   BAD_FILE=$DIR/.bad-images
+  BUSY_FILE=$DIR/.deferred-since
+}
+
+# The keys of FILE whose value holds a $ outside single quotes; KEYS is an
+# awk regular expression of the keys to look at.
+dollar_keys() {
+  [ -r "$1" ] || return 0
+  awk -v keys="$2" '
+    {
+      line = $0
+      sub(/^[[:space:]]*(export[[:space:]]+)?/, "", line)
+      eq = index(line, "=")
+      if (eq < 2) next
+      key = substr(line, 1, eq - 1)
+      value = substr(line, eq + 1)
+      if (key !~ ("^(" keys ")$")) next
+      if (index(value, "$") > 0 && substr(value, 1, 1) != "\047") print key
+    }' "$1"
+}
+
+# Warns (in the log too) about a value docker compose would change: it
+# replaces $name in unquoted and double-quoted values of .env and env_file.
+# Names only, never a value.
+warn_dollars() {
+  if [ "$VARIANT" = agent ]; then
+    wd_list="$DIR/agent.env|[A-Za-z_][A-Za-z0-9_]*"
+  else
+    wd_list="$DIR/.env|SDR_DOA_ADMIN_PASSWORD|SDR_DOA_SEED_[A-Z_]+"
+  fi
+  wd_file=${wd_list%%|*}
+  for wd_key in $(dollar_keys "$wd_file" "${wd_list#*|}"); do
+    "${1:-log}" "warning: $wd_key in $wd_file has a \$ outside single quotes; docker compose replaces \$name there, so the container gets another value. Write it as $wd_key='...'"
+  done
 }
 
 load_install() {
@@ -418,14 +489,17 @@ container_info() {
     "$1" 2>/dev/null
 }
 
-# Sets CID, C_STATUS and CURRENT (the image the container runs, else the
-# image the channel tag points to on this host).
+# Sets CID, C_STATUS, C_HEALTH and CURRENT (the image the container runs,
+# else the image the channel tag points to on this host).
 find_current() {
   CID=$(container_id)
   C_STATUS=
+  C_HEALTH=
   CURRENT=
   if [ -n "$CID" ] && fc_info=$(container_info "$CID"); then
     C_STATUS=${fc_info%%|*}
+    fc_rest=${fc_info#*|}
+    C_HEALTH=${fc_rest%%|*}
     CURRENT=${fc_info##*|}
   else
     CID=
@@ -435,9 +509,12 @@ find_current() {
 
 # wait_healthy IMAGE_ID: 0 once the container reports healthy (or, for an
 # image without a health check, runs AGENT_SETTLE seconds without
-# restarting); otherwise 1 with the cause in REASON.
+# restarting); otherwise 1 with the cause in REASON. IMAGE_FAULT=1 when the
+# image itself failed (unhealthy, exited, restarting); a missing container or
+# a timeout on a slow host does not show that.
 wait_healthy() {
   REASON=
+  IMAGE_FAULT=0
   wh_cid=$(container_id)
   if [ -z "$wh_cid" ]; then
     REASON="no $SERVICE container after compose up"
@@ -461,6 +538,7 @@ EOF
     [ -n "$wh_base" ] || wh_base=$wh_restarts
     if [ "$wh_restarts" != "$wh_base" ]; then
       REASON="the container restarted (exit code $wh_exit)"
+      IMAGE_FAULT=1
       return 1
     fi
     case $wh_status in
@@ -469,6 +547,7 @@ EOF
           healthy) return 0 ;;
           unhealthy)
             REASON='the health check reports unhealthy'
+            IMAGE_FAULT=1
             return 1
             ;;
           none)
@@ -479,10 +558,12 @@ EOF
         ;;
       restarting)
         REASON="the container keeps restarting (exit code $wh_exit)"
+        IMAGE_FAULT=1
         return 1
         ;;
       exited | dead)
         REASON="the container $wh_status with exit code $wh_exit"
+        IMAGE_FAULT=1
         return 1
         ;;
     esac
@@ -590,8 +671,12 @@ apply_new() {
     log "no previous image to go back to; see '$COMPOSE_HINT logs $SERVICE' in $DIR"
     return 1
   fi
-  mark_bad "$NEW"
-  log "rolling back to $(describe "$CURRENT"); auto-update skips $(short_id "$NEW") until a different image is published"
+  if [ "$IMAGE_FAULT" = 1 ]; then
+    mark_bad "$NEW"
+    log "rolling back to $(describe "$CURRENT"); auto-update skips $(short_id "$NEW") until a different image is published"
+  else
+    log "rolling back to $(describe "$CURRENT"); this does not show that $(short_id "$NEW") is broken, so the next run tries it again"
+  fi
   "$DOCKER" tag "$CURRENT" "$REF" || log "cannot tag $(short_id "$CURRENT") as $REF"
   if [ -n "$an_old_prev" ]; then
     "$DOCKER" tag "$an_old_prev" "$PREV_REF" || true
@@ -613,8 +698,170 @@ restore_tag() {
   fi
 }
 
+# version_cmp A B: -1, 0 or 1 for two X.Y.Z[-pre] versions (a prerelease
+# ranks below its release); nothing when either is not such a version.
+version_cmp() {
+  awk -v a="$1" -v b="$2" '
+    function valid(v) { return v ~ /^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$/ }
+    function part(x, y,   xn, yn) {
+      xn = x ~ /^[0-9]+$/
+      yn = y ~ /^[0-9]+$/
+      if (xn && yn) return (x + 0 < y + 0) ? -1 : (x + 0 > y + 0)
+      if (xn != yn) return xn ? -1 : 1
+      return (x < y) ? -1 : (x > y)
+    }
+    BEGIN {
+      if (!valid(a) || !valid(b)) exit
+      ai = index(a, "-"); bi = index(b, "-")
+      ac = ai ? substr(a, 1, ai - 1) : a; ap = ai ? substr(a, ai + 1) : ""
+      bc = bi ? substr(b, 1, bi - 1) : b; bp = bi ? substr(b, bi + 1) : ""
+      split(ac, x, "."); split(bc, y, ".")
+      for (i = 1; i <= 3; i++) {
+        c = part(x[i], y[i])
+        if (c != 0) { print c; exit }
+      }
+      if (ap == "" || bp == "") { print (ap == bp) ? 0 : (ap == "" ? 1 : -1); exit }
+      n = split(ap, p, "."); m = split(bp, q, ".")
+      for (i = 1; i <= n && i <= m; i++) {
+        c = part(p[i], q[i])
+        if (c != 0) { print c; exit }
+      }
+      print (n < m) ? -1 : (n > m)
+    }'
+}
+
+# ask QUESTION: 0 for yes. --yes, or no terminal, answers yes; the caller
+# logs what it then does.
+ask() {
+  if [ "$UPDATE_YES" = 1 ] || ! { [ -t 0 ] && [ -t 1 ]; }; then return 0; fi
+  printf '%s [y/N] ' "$1"
+  ak_answer=
+  read -r ak_answer || ak_answer=
+  case $ak_answer in
+    y | Y | yes | YES) return 0 ;;
+  esac
+  return 1
+}
+
+# A NEW image older than the running one (both versions labelled): install
+# takes it (the operator chose the channel), --auto skips it, and update asks
+# on a terminal. 0: go on; 1: skip it (the tag points back at CURRENT).
+check_older() {
+  co_new=$(image_version "$NEW")
+  co_current=$(image_version "$CURRENT")
+  [ -n "$co_new" ] && [ -n "$co_current" ] || return 0
+  [ "$(version_cmp "$co_new" "$co_current")" = -1 ] || return 0
+  if [ "$2" = 1 ]; then
+    log "installing $co_new, older than the running $co_current (channel $CHANNEL)"
+    return 0
+  fi
+  if [ "$1" = 1 ]; then
+    restore_tag
+    log "skipped: $REF points to older $co_new than the running $co_current; run $PROG update to install it"
+    return 1
+  fi
+  if ! ask "$REF points to $co_new, older than the running $co_current. Install it?"; then
+    restore_tag
+    log "skipped: $co_new is older than the running $co_current"
+    return 1
+  fi
+  log "installing $co_new, older than the running $co_current"
+}
+
+# Whether the console's Receiver records or archives a scan right now. An
+# image whose health check does not know --busy answers neither word.
+receiver_busy() {
+  [ "$VARIANT" = console ] && [ -n "$CID" ] && [ "$C_STATUS" = running ] || return 1
+  rb_out=$("$DOCKER" exec "$CID" python "$HEALTHCHECK_PATH" --busy 2>/dev/null) || return 1
+  [ "$rb_out" = busy ]
+}
+
+# Before NEW replaces a running console. 0: go on; 1: not now (--auto waits
+# for the next run, at most BUSY_DEFER_MAX after the first deferral; a manual
+# update without a terminal and without --yes stops).
+check_busy() {
+  if ! receiver_busy; then
+    rm -f "$BUSY_FILE"
+    return 0
+  fi
+  if [ "$1" = 1 ]; then
+    cb_now=$(now)
+    cb_since=$(cat "$BUSY_FILE" 2>/dev/null || true)
+    case $cb_since in
+      '' | *[!0-9]*) cb_since=$cb_now ;;
+    esac
+    [ "$cb_since" -le "$cb_now" ] || cb_since=$cb_now
+    if [ $((cb_now - cb_since)) -lt "$BUSY_DEFER_MAX" ]; then
+      printf '%s\n' "$cb_since" >"$BUSY_FILE"
+      restore_tag
+      log "deferred: Receiver recording or scan active; the next run tries $(describe "$NEW") again"
+      return 1
+    fi
+    rm -f "$BUSY_FILE"
+    log "the Receiver was busy at every run for $((BUSY_DEFER_MAX / 86400)) days; updating anyway"
+    return 0
+  fi
+  if [ "$2" = 1 ] || [ "$UPDATE_YES" = 1 ]; then
+    log "warning: the Receiver records or archives a scan; the restart interrupts it"
+    return 0
+  fi
+  if [ -t 0 ] && [ -t 1 ]; then
+    if ask "The Receiver records or archives a scan; the update restarts the console and interrupts it. Update now?"; then
+      return 0
+    fi
+    restore_tag
+    log "not updated: the Receiver records or archives a scan"
+    return 1
+  fi
+  restore_tag
+  log "not updated: the Receiver records or archives a scan; run '$PROG update --yes' to update anyway"
+  RU_REFUSED=1
+  return 1
+}
+
+# The channel image is the one the container runs. update leaves a healthy
+# one alone, waits for one that is starting and starts a stopped one; when it
+# does not turn healthy (an update cut short, or a broken image), it goes
+# back to the previous image. install applies compose.yml.
+run_current() {
+  if [ "$1" != 1 ] && [ "$C_STATUS" = running ] && { [ "$C_HEALTH" = healthy ] || [ "$C_HEALTH" = none ]; }; then
+    log "up to date: $SERVICE runs $(describe "$NEW")"
+    rm -f "$BUSY_FILE"
+    return 0
+  fi
+  rc_up=1
+  if [ "$1" = 1 ]; then
+    log "image $(describe "$NEW") is current; applying compose.yml"
+  elif [ "$C_STATUS" = running ]; then
+    log "up to date: $(describe "$NEW"), but its health is $C_HEALTH; waiting for it"
+    rc_up=0
+  else
+    log "up to date: $(describe "$NEW"); starting the $C_STATUS container"
+  fi
+  if { [ "$rc_up" = 0 ] || compose_up; } && wait_healthy "$NEW"; then
+    log "OK: $SERVICE runs $(describe "$NEW") and is healthy"
+    return 0
+  fi
+  log "FAILED: $(describe "$NEW"): $REASON"
+  rc_prev=$(image_id "$PREV_REF")
+  if [ "$1" = 1 ] || [ -z "$rc_prev" ] || [ "$rc_prev" = "$NEW" ] || is_bad "$rc_prev"; then
+    log "see '$COMPOSE_HINT logs $SERVICE' in $DIR"
+    return 1
+  fi
+  if [ "$IMAGE_FAULT" = 1 ]; then mark_bad "$NEW"; fi
+  log "going back to the previous image $(describe "$rc_prev")"
+  "$DOCKER" tag "$rc_prev" "$REF" || log "cannot tag $(short_id "$rc_prev") as $REF"
+  if compose_up never && wait_healthy "$rc_prev"; then
+    log "rolled back: $SERVICE runs $(describe "$rc_prev") again"
+  else
+    log "rollback FAILED: $REASON; see '$COMPOSE_HINT logs $SERVICE' in $DIR"
+  fi
+  return 1
+}
+
 # run_update AUTO INSTALL
 run_update() {
+  RU_REFUSED=0
   find_current
   if [ "$1" = 1 ]; then
     if [ -z "$CID" ]; then
@@ -631,8 +878,13 @@ run_update() {
   fi
   log "pulling $REF"
   if ! ru_out=$("$DOCKER" pull -q "$REF" 2>&1); then
-    log "FAILED: pull of $REF: $(last_line "$ru_out")"
-    return 1
+    # install still applies compose.yml with an image this host already has
+    # (an offline host changing the port).
+    if [ "$2" != 1 ] || [ -z "$(image_id "$REF")" ]; then
+      log "FAILED: pull of $REF: $(last_line "$ru_out")"
+      return 1
+    fi
+    log "pull of $REF failed ($(last_line "$ru_out")); using the image on this host"
   fi
   NEW=$(image_id "$REF")
   if [ -z "$NEW" ]; then
@@ -640,42 +892,29 @@ run_update() {
     return 1
   fi
   if [ "$NEW" = "$CURRENT" ] && [ -n "$CID" ]; then
-    if [ "$2" != 1 ] && [ "$C_STATUS" = running ]; then
-      log "up to date: $SERVICE runs $(describe "$NEW")"
-      return 0
+    if [ "$2" = 1 ] && receiver_busy; then
+      log "warning: the Receiver records or archives a scan; a changed compose.yml restarts the console"
     fi
-    if [ "$2" = 1 ]; then
-      log "image $(describe "$NEW") is current; applying compose.yml"
-    else
-      log "up to date: $(describe "$NEW"); starting the $C_STATUS container"
-    fi
-    if compose_up && wait_healthy "$NEW"; then
-      log "OK: $SERVICE runs $(describe "$NEW") and is healthy"
-      return 0
-    fi
-    log "FAILED: $(describe "$NEW"): $REASON; see '$COMPOSE_HINT logs $SERVICE' in $DIR"
-    return 1
+    run_current "$2"
+    return
   fi
+  check_older "$1" "$2" || return 0
   if is_bad "$NEW"; then
     if [ "$1" = 1 ]; then
       restore_tag
       log "skipped: $(describe "$NEW") failed its health check before; waiting for a different image"
       return 0
     fi
-    if [ -t 0 ] && [ -t 1 ]; then
-      printf 'Image %s failed its health check before. Try it again? [y/N] ' "$(describe "$NEW")"
-      ru_answer=
-      read -r ru_answer || ru_answer=
-      case $ru_answer in
-        y | Y | yes | YES) ;;
-        *)
-          restore_tag
-          log "skipped: $(describe "$NEW") failed before"
-          return 0
-          ;;
-      esac
+    if ! ask "Image $(describe "$NEW") failed its health check before. Try it again?"; then
+      restore_tag
+      log "skipped: $(describe "$NEW") failed before"
+      return 0
     fi
     log "trying $(describe "$NEW") again; it failed its health check before"
+  fi
+  if ! check_busy "$1" "$2"; then
+    [ "$RU_REFUSED" = 0 ] || return 1
+    return 0
   fi
   if [ -n "$CURRENT" ] && [ "$CURRENT" != "$NEW" ]; then
     log "new image: $(describe "$NEW"), running $(describe "$CURRENT")"
@@ -739,7 +978,9 @@ services:
     restart: unless-stopped
     environment:
       - SDR_DOA_PORT=\${SDR_DOA_PORT:-$DEFAULT_PORT}
-      # Passed only when set in .env next to this file (or the shell).
+      # Passed only when set in .env next to this file ($PROG update and
+      # install ignore the shell's values); wrap a value with a \$ in single
+      # quotes there, since compose replaces \$name in other values.
       # Admin password: the environment wins over /data/.env. To keep it in
       # the volume instead, leave this unset and run
       #   docker compose exec console sdr-doa-set-admin-password
@@ -809,7 +1050,8 @@ agent_env_template() {
 # Apply a change with docker compose up -d in this directory (sdr-doa-docker
 # update only replaces the image). STATE_DIR and SETTINGS_PATH are set by
 # compose.yml. Keep this file mode 0600: it may hold the MQTT password. Empty
-# values use the agent's defaults.
+# values use the agent's defaults. Wrap a value with a $ in single quotes
+# (SDR_DOA_MQTT_PASSWORD='...'): docker compose replaces $name in other values.
 
 # KrakenSDR Data Out on this Raspberry.
 BASE_URL=http://127.0.0.1:8081
@@ -846,15 +1088,21 @@ EOF
 env_header() {
   cat <<EOF
 # Settings of the $PROG install in this directory, read by docker compose
-# and $PROG. SDR_DOA_IMAGE_TAG is the update channel: 2 follows every 2.x.y
-# release, 2.0 only 2.0.z, 2.0.0 stays on that release. Change it with
+# and $PROG. SDR_DOA_IMAGE_TAG is the update channel: $DEFAULT_CHANNEL follows every
+# $DEFAULT_CHANNEL.x.y release, $DEFAULT_CHANNEL.0 only $DEFAULT_CHANNEL.0.z, $DEFAULT_CHANNEL.0.0 stays on that release.
+# Change it with
 #   $PROG install --channel TAG
 # Keep this file mode 0600.
 EOF
   if [ "$VARIANT" = console ]; then
     cat <<EOF
-# The console variables of compose.yml (SDR_DOA_ADMIN_PASSWORD and the
-# first-start SDR_DOA_SEED_* values) may go here too.
+# Admin password: set it with
+#   docker compose exec console sdr-doa-set-admin-password
+# (it is kept in /data/.env in the volume). If SDR_DOA_ADMIN_PASSWORD or a
+# first-start SDR_DOA_SEED_* value goes here instead, wrap the value in
+# single quotes: docker compose replaces \$name in unquoted and double-quoted
+# values. Apply a change of this file with docker compose up -d here (or a
+# re-run of install); $PROG update only replaces the image.
 EOF
   fi
 }
@@ -869,37 +1117,111 @@ have_systemd() {
 service_file() { printf '%s/%s.service' "$SYSTEMD_DIR" "$UNIT_NAME"; }
 timer_file() { printf '%s/%s.timer' "$SYSTEMD_DIR" "$UNIT_NAME"; }
 
-# The command the timer runs: the installed copy of this script.
-self_path() {
-  sp_bin="$(bin_dir)/$PROG"
-  if [ -x "$sp_bin" ]; then
-    printf '%s' "$sp_bin"
-  elif [ -f "$0" ]; then
-    absolute "$0"
-  else
-    printf '%s' "$sp_bin"
+# root_only PATH: owned by root (or SDR_DOA_ROOT_UID) and writable by no one
+# else; a group- or world-writable directory only with the sticky bit (/tmp).
+root_only() {
+  # shellcheck disable=SC2012 # ls -n is the portable way to read owner and mode
+  ls -nd -- "$1" 2>/dev/null | awk -v root="$ROOT_UID" '
+    NR == 1 {
+      mode = $1
+      if ($3 != 0 && $3 != root) exit 1
+      if (substr(mode, 1, 1) == "l") exit 1
+      writable = substr(mode, 6, 1) == "w" || substr(mode, 9, 1) == "w"
+      if (writable && !(substr(mode, 1, 1) == "d" && substr(mode, 10, 1) ~ /[tT]/)) exit 1
+      ok = 1
+    }
+    END { exit ok ? 0 : 1 }'
+}
+
+# root_only_chain DIR: DIR (its physical path) and every directory above it.
+# Sets UNSAFE to the first one that is not root-only.
+root_only_chain() {
+  UNSAFE=$1
+  ro_path=$(cd -P -- "$1" 2>/dev/null && pwd -P) || return 1
+  while :; do
+    UNSAFE=$ro_path
+    root_only "$ro_path" || return 1
+    [ "$ro_path" != / ] || return 0
+    ro_path=$(dirname -- "$ro_path")
+  done
+}
+
+# The nearest existing directory of PATH (install creates the rest as root).
+existing_dir() {
+  ed_path=$1
+  while [ ! -d "$ed_path" ]; do ed_path=$(dirname -- "$ed_path"); done
+  printf '%s' "$ed_path"
+}
+
+# cron_line TIME COMMAND
+cron_line() {
+  printf '%s %s * * * %s update --auto --dir %s >/dev/null 2>&1\n' "${1#*:}" "${1%%:*}" "$2" "$DIR"
+}
+
+# user_cron TIME COMMAND: the line for the crontab of the user that owns DIR.
+user_cron() {
+  uc_prefix=
+  case ${DOCKER_HOST:-} in
+    '' | *[!A-Za-z0-9:/._@-]*) ;;
+    *) uc_prefix="DOCKER_HOST=$DOCKER_HOST " ;;
+  esac
+  say "For a daily update at $1, add this line with crontab -e as the user that owns $DIR:"
+  cron_line "$1" "$uc_prefix$2"
+  if [ -z "$uc_prefix" ]; then
+    say "With rootless Docker, put DOCKER_HOST=unix:///run/user/<uid>/docker.sock before the command."
   fi
 }
 
-cron_line() {
-  printf '%s %s * * * %s update --auto --dir %s >/dev/null 2>&1\n' "${1#*:}" "${1%%:*}" "$(self_path)" "$DIR"
+# The installed copy for root's timer: owned and writable by root only, in
+# directories only root can change; never a copy elsewhere ($0) that another
+# user could edit.
+root_self() {
+  if [ -f "$0" ] && grep -q '^PROG=sdr-doa-docker$' "$0" 2>/dev/null; then install_self >&2; fi
+  rs_self="$(bin_dir)/$PROG"
+  if [ ! -f "$rs_self" ] || [ -L "$rs_self" ]; then
+    die "$rs_self is missing; run '$PROG install' (or this command) from the script file first"
+  fi
+  if ! root_only "$rs_self" || ! root_only_chain "$(dirname -- "$rs_self")"; then
+    die "$rs_self (or a directory above it) is not owned by root or is writable by another user; root's timer must not run it"
+  fi
+  printf '%s' "$rs_self"
 }
 
+# The --dir of the existing timer, if any.
+timer_dir() {
+  [ -f "$(service_file)" ] || return 0
+  sed -n 's/^ExecStart=.* --dir \(.*\)$/\1/p' "$(service_file)" | head -n 1
+}
+
+# auto_update_on TIME [force]
 auto_update_on() {
   au_time=$1
-  if ! have_systemd; then
-    say "systemd was not found, so no timer was installed. For a daily update at $au_time,"
-    say "add this line with crontab -e for root (or a user that may use docker):"
-    cron_line "$au_time"
+  if ! is_root; then
+    # Root's timer must not run a script or a compose.yml this user can
+    # change, so the update runs from this user's crontab.
+    install_self
+    user_cron "$au_time" "$(bin_dir)/$PROG"
     return 0
   fi
-  if ! is_root; then
-    warn "error: auto-update installs systemd system units in $SYSTEMD_DIR and needs root:"
-    warn "  sudo $PROG auto-update on --dir $DIR --time $au_time"
+  if ! root_only_chain "$DIR"; then
+    warn "error: $UNSAFE is not owned by root or is writable by another user, so root's timer must not update $DIR"
+    # shellcheck disable=SC2016 # $HOME is for cron to expand
+    user_cron "$au_time" '$HOME/.local/bin/sdr-doa-docker'
+    exit 1
+  fi
+  au_other=$(timer_dir)
+  if [ -n "$au_other" ] && [ "$au_other" != "$DIR" ] && [ "${2:-}" != force ]; then
+    warn "error: the timer updates $au_other (one auto-update install per host); turn it off first or pass --force"
     exit 2
   fi
-  au_self=$(self_path)
+  au_self=$(root_self) || exit 1
   check_dir "$au_self"
+  if ! have_systemd; then
+    say "systemd was not found, so no timer was installed. For a daily update at $au_time,"
+    say "add this line with crontab -e for root:"
+    cron_line "$au_time" "$au_self"
+    return 0
+  fi
   mkdir -p "$SYSTEMD_DIR"
   write_file "$(service_file)" 0644 <<EOF
 $MARKER (auto-update). '$PROG auto-update off' removes it.
@@ -966,7 +1288,7 @@ auto_update_state() {
     return 0
   fi
   as_time=$(sed -n 's/^OnCalendar=\*-\*-\* \([0-9][0-9]:[0-9][0-9]\):00$/\1/p' "$as_timer" | head -n 1)
-  as_dir=$(sed -n 's/^ExecStart=.* --dir \(.*\)$/\1/p' "$as_service" | head -n 1)
+  as_dir=$(timer_dir)
   as_state=
   if have_systemd; then
     as_enabled=$("$SYSTEMCTL" is-enabled "$UNIT_NAME.timer" 2>/dev/null || true)
@@ -1125,14 +1447,22 @@ cmd_install() {
   [ -z "$in_port" ] || check_port "$in_port"
   [ -z "$in_time" ] || check_time "$in_time"
   if [ -n "$in_time" ] && [ "$in_auto" != 1 ]; then usage_error "--time needs --auto-update"; fi
-  if [ "$in_auto" = 1 ] && have_systemd && ! is_root; then
-    warn "error: --auto-update installs systemd system units and needs root (sudo)"
-    exit 2
-  fi
   need_home
   if [ -n "$in_dir" ]; then DIR=$(absolute "$in_dir"); else DIR=$(default_dir "$VARIANT"); fi
   DIR=${DIR%/}
   check_dir "$DIR"
+  # Root's timer: checked before anything is written (auto_update_on checks again).
+  if [ "$in_auto" = 1 ] && is_root; then
+    if ! root_only_chain "$(existing_dir "$DIR")"; then
+      warn "error: $UNSAFE is not owned by root or is writable by another user, so root's timer must not update $DIR; install without --auto-update, or in a directory only root can change"
+      exit 2
+    fi
+    in_other=$(timer_dir)
+    if [ -n "$in_other" ] && [ "$in_other" != "$DIR" ] && [ "$in_force" != 1 ]; then
+      warn "error: the timer updates $in_other (one auto-update install per host); run '$PROG auto-update off' first, or pass --force"
+      exit 2
+    fi
+  fi
   # The native agent (packaging/agent/install-agent.sh) uses /opt/sdr-doa-agent
   # and a system unit; two agents would both publish and answer config patches.
   if [ "$VARIANT" = agent ] && [ "$in_force" != 1 ]; then
@@ -1155,6 +1485,7 @@ cmd_install() {
   take_lock
   ACTION=install
   LOG_FILE=$DIR/update.log
+  need_readable "$DIR/.env"
 
   if [ ! -f "$DIR/.env" ]; then env_header | write_file "$DIR/.env" 0600; fi
   # A custom image stays; the default of the other variant (--force) does not.
@@ -1181,6 +1512,7 @@ cmd_install() {
     console_compose | write_file "$DIR/compose.yml" 0644
   fi
   log "wrote $DIR/compose.yml and $DIR/.env (channel $CHANNEL)"
+  warn_dollars
   install_self
 
   in_rc=0
@@ -1191,21 +1523,25 @@ cmd_install() {
     exit "$in_rc"
   fi
   say ""
+  # .env is root's (0600) in a root install, so its commands need sudo.
+  if is_root; then in_sudo='sudo '; else in_sudo=; fi
   if [ "$VARIANT" = console ]; then
     say "The Ground Console runs from $REF."
     say "Open http://127.0.0.1:$PORT/ in Chromium or Chrome on this computer."
     say "Set the admin password (default 123456 until you do):"
     say "  cd $DIR"
-    say "  $COMPOSE_HINT exec console sdr-doa-set-admin-password"
-    say "  $COMPOSE_HINT restart console"
+    say "  $in_sudo$COMPOSE_HINT exec console sdr-doa-set-admin-password"
+    say "  $in_sudo$COMPOSE_HINT restart console"
   else
     say "The RDF-SDR agent runs from $REF; settings in $DIR/agent.env."
-    say "Logs: cd $DIR && $COMPOSE_HINT logs -f agent"
+    say "Logs: cd $DIR && $in_sudo$COMPOSE_HINT logs -f agent"
   fi
   if [ "$in_auto" = 1 ]; then
-    auto_update_on "${in_time:-$DEFAULT_TIME}"
+    if [ "$in_force" = 1 ]; then auto_update_on "${in_time:-$DEFAULT_TIME}" force; else auto_update_on "${in_time:-$DEFAULT_TIME}"; fi
+  elif is_root; then
+    say "Update: sudo $PROG update --dir $DIR; daily: sudo $PROG auto-update on --dir $DIR"
   else
-    say "Update: $PROG update --dir $DIR; daily: sudo $PROG auto-update on --dir $DIR"
+    say "Update: $PROG update --dir $DIR; daily: $PROG auto-update on --dir $DIR (prints a crontab line)"
   fi
 }
 
@@ -1219,15 +1555,18 @@ cmd_update() {
       --dir) need_value "$@"; up_dir=$2; shift ;;
       --check) up_check=1 ;;
       --auto) up_auto=1 ;;
+      --yes | -y) UPDATE_YES=1 ;;
       -h | --help) usage; exit 0 ;;
       *) usage_error "update does not take '$1'" ;;
     esac
     shift
   done
+  if [ "$up_auto" = 1 ] && [ "$UPDATE_YES" = 1 ]; then usage_error "--auto and --yes do not go together"; fi
   resolve_dir "$up_dir"
   load_install
   check_docker
   if [ "$up_check" = 1 ]; then
+    warn_dollars say
     run_check
     return 0
   fi
@@ -1235,6 +1574,7 @@ cmd_update() {
   take_lock
   ACTION=update
   [ "$up_auto" = 0 ] || ACTION='update --auto'
+  warn_dollars
   up_rc=0
   run_update "$up_auto" 0 || up_rc=$?
   exit "$up_rc"
@@ -1296,30 +1636,31 @@ cmd_auto_update() {
   [ $# -eq 0 ] || shift
   au_dir=
   au_time=
+  au_force=
   while [ $# -gt 0 ]; do
     case $1 in
       --dir=*) au_dir=${1#*=} ;;
       --dir) need_value "$@"; au_dir=$2; shift ;;
       --time=*) au_time=${1#*=} ;;
       --time) need_value "$@"; au_time=$2; shift ;;
+      --force) au_force=force ;;
       -h | --help) usage; exit 0 ;;
       *) usage_error "auto-update does not take '$1'" ;;
     esac
     shift
   done
   [ -z "$au_time" ] || check_time "$au_time"
+  if [ "$au_action" != on ] && [ -n "$au_time$au_force" ]; then usage_error "--time and --force are options of auto-update on"; fi
   case $au_action in
     on)
       resolve_dir "$au_dir"
       load_install
-      auto_update_on "${au_time:-$DEFAULT_TIME}"
+      auto_update_on "${au_time:-$DEFAULT_TIME}" "$au_force"
       ;;
     off)
-      [ -z "$au_time" ] || usage_error "--time is an option of auto-update on"
       auto_update_off
       ;;
     status)
-      [ -z "$au_time" ] || usage_error "--time is an option of auto-update on"
       if [ -n "$au_dir" ]; then resolve_dir "$au_dir"; fi
       say "auto-update: $(auto_update_state)"
       ;;
@@ -1370,6 +1711,11 @@ EOF
   if [ -f "$BAD_FILE" ] && [ -s "$BAD_FILE" ]; then
     say "skipped:     $(wc -l <"$BAD_FILE" | tr -d ' ') image(s) that failed their health check ($BAD_FILE)"
   fi
+  st_since=$(cat "$BUSY_FILE" 2>/dev/null || true)
+  case $st_since in
+    '' | *[!0-9]*) ;;
+    *) say "deferred:    since $(date -u -d "@$st_since" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf '%s s after the epoch' "$st_since") (the Receiver was busy at each run)" ;;
+  esac
   say "auto-update: $(auto_update_state)"
   if [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
     say "last update: $(tail -n 1 "$LOG_FILE")"
@@ -1377,6 +1723,7 @@ EOF
     say "last update: none"
   fi
   if [ "$VARIANT" = console ]; then say "URL:         http://127.0.0.1:$PORT/"; fi
+  warn_dollars say
 }
 
 check_number SDR_DOA_HEALTH_TIMEOUT "$HEALTH_TIMEOUT"

@@ -28,6 +28,8 @@ GHCR_COMPOSE = ROOT / "docker-compose.ghcr.yml"
 CONSOLE_IMAGE = "ghcr.io/sanadunt/sdr-doa-ground-console"
 AGENT_IMAGE = "ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent"
 MARKER = "# Written by sdr-doa-docker"
+# The default channel the script writes, so a major bump changes one place.
+CHANNEL = re.search(r"(?m)^DEFAULT_CHANNEL=(\S+)$", SCRIPT.read_text(encoding="utf-8")).group(1)
 
 
 def image_id(letter: str) -> str:
@@ -221,7 +223,8 @@ with open(CALLS, "a", encoding="utf-8") as handle:
     handle.write(json.dumps({
         "argv": argv,
         "cwd": os.getcwd(),
-        "env": {k: v for k, v in os.environ.items() if k in ("SDR_DOA_IMAGE", "SDR_DOA_IMAGE_TAG", "SDR_DOA_PORT")},
+        "env": {k: v for k, v in os.environ.items()
+                if k in ("SDR_DOA_IMAGE", "SDR_DOA_IMAGE_TAG", "SDR_DOA_PORT", "SDR_DOA_ADMIN_PASSWORD", "SDR_DOA_SEED_BASE_URL")},
     }) + "\n")
 
 if state.get("daemon_down") and argv[:1] != ["compose"]:
@@ -299,6 +302,17 @@ elif cmd == "inspect":
             break
     else:
         fail(f"Error: No such container: {wanted}")
+elif cmd == "exec":
+    # docker exec CID python HEALTHCHECK --busy
+    if argv[2:] != ["python", "/opt/sdr-doa-ground-console/packaging/docker/healthcheck.py", "--busy"]:
+        fail(f"fake docker: unknown exec {argv}")
+    if not any(c["id"] == argv[1] for c in state["containers"].values()):
+        fail(f"Error response from daemon: No such container: {argv[1]}")
+    if state.get("busy_unsupported"):
+        print("unhealthy: invalid port '--busy'")
+        save(state)
+        sys.exit(1)
+    print("busy" if state.get("receiver_busy") else "idle")
 elif cmd == "buildx" and argv[1:3] == ["imagetools", "inspect"]:
     if state.get("no_buildx"):
         fail("docker: 'buildx' is not a docker command.")
@@ -375,7 +389,7 @@ class Harness:
             "behaviour": {},
             "counter": 0,
         })
-        self.publish(CONSOLE_IMAGE + ":2", "a", "2.0.0")
+        self.publish(f"{CONSOLE_IMAGE}:{CHANNEL}", "a", "2.0.0")
 
     # state -------------------------------------------------------------------
     def read_state(self) -> dict:
@@ -437,11 +451,14 @@ class Harness:
             "SDR_DOA_HEALTH_TIMEOUT": "10",
             "SDR_DOA_HEALTH_INTERVAL": "0",
             "SDR_DOA_AGENT_SETTLE": "0",
+            # A test that fakes root owns its files as this user.
+            "SDR_DOA_ROOT_UID": str(os.geteuid()),
             "FAKE_DOCKER_STATE": str(self.state_path),
             "FAKE_DOCKER_CALLS": str(self.calls_path),
             "FAKE_SYSTEMCTL_CALLS": str(self.systemctl_calls),
             "LC_ALL": "C",
         }
+        env.pop("DOCKER_HOST", None)
         env.update(extra)
         return env
 
@@ -507,16 +524,16 @@ class InstallTests(DockerScriptTestCase):
         self.assertEqual(stat.S_IMODE(env_file.stat().st_mode), 0o600)
         values = read_env_file(env_file)
         self.assertEqual(values["SDR_DOA_IMAGE"], CONSOLE_IMAGE)
-        self.assertEqual(values["SDR_DOA_IMAGE_TAG"], "2")
+        self.assertEqual(values["SDR_DOA_IMAGE_TAG"], CHANNEL)
         self.assertEqual(values["SDR_DOA_PORT"], "8787")
         copy = self.h.installed_bin / "sdr-doa-docker"
         self.assertEqual(copy.read_bytes(), SCRIPT.read_bytes())
         self.assertEqual(stat.S_IMODE(copy.stat().st_mode), 0o755)
         container = self.h.container()
         self.assertEqual(container["image"], image_id("a"))
-        self.assertEqual(container["ref"], f"{CONSOLE_IMAGE}:2")
+        self.assertEqual(container["ref"], f"{CONSOLE_IMAGE}:{CHANNEL}")
         argvs = self.h.argvs()
-        self.assertIn(["pull", "-q", f"{CONSOLE_IMAGE}:2"], argvs)
+        self.assertIn(["pull", "-q", f"{CONSOLE_IMAGE}:{CHANNEL}"], argvs)
         self.assertIn(["compose", "-p", "sdr-doa-ground-console", "-f", "compose.yml", "up", "-d"], argvs)
         for call in self.h.calls():
             if call["argv"][:1] == ["compose"] and "-p" in call["argv"]:
@@ -531,21 +548,21 @@ class InstallTests(DockerScriptTestCase):
         self.assertFalse(list(self.dir.glob("*.tmp.*")))
 
     def test_rerun_keeps_env_lines_and_applies_options(self):
-        self.h.publish(f"{CONSOLE_IMAGE}:2.0", "a", "2.0.0")
-        self.install("--port", "8790", "--channel", "2.0")
+        self.h.publish(f"{CONSOLE_IMAGE}:{CHANNEL}.0", "a", "2.0.0")
+        self.install("--port", "8790", "--channel", f"{CHANNEL}.0")
         env_file = self.dir / ".env"
         env_file.write_text(env_file.read_text() + "SDR_DOA_ADMIN_PASSWORD=s3cret\n")
         self.h.reset_calls()
         result = self.install()
         values = read_env_file(env_file)
         self.assertEqual(values["SDR_DOA_PORT"], "8790")
-        self.assertEqual(values["SDR_DOA_IMAGE_TAG"], "2.0")
+        self.assertEqual(values["SDR_DOA_IMAGE_TAG"], f"{CHANNEL}.0")
         self.assertEqual(values["SDR_DOA_ADMIN_PASSWORD"], "s3cret")
         self.assertEqual(stat.S_IMODE(env_file.stat().st_mode), 0o600)
         self.assertIn("http://127.0.0.1:8790/", result.stdout)
-        self.assertIn(["pull", "-q", f"{CONSOLE_IMAGE}:2.0"], self.h.argvs())
+        self.assertIn(["pull", "-q", f"{CONSOLE_IMAGE}:{CHANNEL}.0"], self.h.argvs())
         compose_env = [call["env"] for call in self.h.calls() if "up" in call["argv"] and "--help" not in call["argv"]]
-        self.assertEqual(compose_env[-1], {"SDR_DOA_IMAGE": CONSOLE_IMAGE, "SDR_DOA_IMAGE_TAG": "2.0", "SDR_DOA_PORT": "8790"})
+        self.assertEqual(compose_env[-1], {"SDR_DOA_IMAGE": CONSOLE_IMAGE, "SDR_DOA_IMAGE_TAG": f"{CHANNEL}.0", "SDR_DOA_PORT": "8790"})
         self.assertNotIn("s3cret", result.stdout + result.stderr)
 
     def test_install_applies_a_changed_port_with_the_same_image(self):
@@ -559,7 +576,7 @@ class InstallTests(DockerScriptTestCase):
         self.install()
         self.h.reset_calls()
         self.update(env={"SDR_DOA_IMAGE_TAG": "9", "SDR_DOA_PORT": "1"})
-        self.assertIn(["pull", "-q", f"{CONSOLE_IMAGE}:2"], self.h.argvs())
+        self.assertIn(["pull", "-q", f"{CONSOLE_IMAGE}:{CHANNEL}"], self.h.argvs())
 
     def test_refuses_a_compose_file_it_did_not_write(self):
         self.dir.mkdir()
@@ -606,12 +623,12 @@ class InstallTests(DockerScriptTestCase):
         self.assertIn("docker compose logs console", result.stdout)
 
     def test_agent_variant(self):
-        self.h.publish(f"{AGENT_IMAGE}:2", "b", "2.0.0", behaviour="none")
+        self.h.publish(f"{AGENT_IMAGE}:{CHANNEL}", "b", "2.0.0", behaviour="none")
         result = self.install("--agent")
         text = (self.dir / "compose.yml").read_text()
         self.assertTrue(text.startswith(f"{MARKER} (agent)."))
         self.assertRegex(text, r"(?m)^name: sdr-doa-agent$")
-        self.assertIn("image: ${SDR_DOA_IMAGE:-%s}:${SDR_DOA_IMAGE_TAG:-2}" % AGENT_IMAGE, text)
+        self.assertIn("image: ${SDR_DOA_IMAGE:-%s}:${SDR_DOA_IMAGE_TAG:-%s}" % (AGENT_IMAGE, CHANNEL), text)
         self.assertRegex(text, r"(?m)^      - agent\.env$")
         self.assertRegex(text, r"(?m)^      - agent-state:/state$")
         self.assertRegex(text, r"(?m)^      STATE_DIR: /state$")
@@ -632,7 +649,7 @@ class InstallTests(DockerScriptTestCase):
         self.assertEqual(read_env_file(agent_env)["MQTT_HOST"], "10.90.0.1")
 
     def test_agent_refuses_a_native_agent(self):
-        self.h.publish(f"{AGENT_IMAGE}:2", "b", "2.0.0", behaviour="none")
+        self.h.publish(f"{AGENT_IMAGE}:{CHANNEL}", "b", "2.0.0", behaviour="none")
         self.dir.mkdir(parents=True)
         native = self.dir / "install-info"
         native.write_text(f"PREFIX={self.dir}\n")
@@ -652,7 +669,7 @@ class InstallTests(DockerScriptTestCase):
         self.assertEqual(self.h.container("sdr-doa-agent/agent")["image"], image_id("b"))
 
     def test_agent_env_template_follows_the_example(self):
-        self.h.publish(f"{AGENT_IMAGE}:2", "b", "2.0.0", behaviour="none")
+        self.h.publish(f"{AGENT_IMAGE}:{CHANNEL}", "b", "2.0.0", behaviour="none")
         self.install("--agent")
         written = read_env_file(self.dir / "agent.env")
         example = read_env_file(ROOT / "packaging/agent/agent.env.example")
@@ -662,7 +679,7 @@ class InstallTests(DockerScriptTestCase):
 
     @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "needs root to chown")
     def test_agent_enable_and_disable_config(self):
-        self.h.publish(f"{AGENT_IMAGE}:2", "b", "2.0.0", behaviour="none")
+        self.h.publish(f"{AGENT_IMAGE}:{CHANNEL}", "b", "2.0.0", behaviour="none")
         share = self.base / "share"
         share.mkdir()
         os.chown(share, 1234, 1235)
@@ -722,7 +739,7 @@ class UpdateTests(DockerScriptTestCase):
         super().setUp()
         self.install()
         self.h.reset_calls()
-        self.ref = f"{CONSOLE_IMAGE}:2"
+        self.ref = f"{CONSOLE_IMAGE}:{CHANNEL}"
         self.prev = f"{CONSOLE_IMAGE}:sdr-doa-previous"
 
     def test_no_change(self):
@@ -747,7 +764,7 @@ class UpdateTests(DockerScriptTestCase):
         self.assertNotIn(image_id("a"), self.h.read_state()["images"])
         self.assertIn("removed the image before the previous one (aaaaaaaaaaaa)", result.stdout)
 
-    def assert_rolled_back(self, result: subprocess.CompletedProcess, reason: str) -> None:
+    def assert_rolled_back(self, result: subprocess.CompletedProcess, reason: str, marked: bool = True) -> None:
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn(reason, result.stdout)
         self.assertIn("rolling back to 2.0.0 (aaaaaaaaaaaa)", result.stdout)
@@ -755,6 +772,10 @@ class UpdateTests(DockerScriptTestCase):
         self.assertEqual(self.h.container()["image"], image_id("a"))
         self.assertEqual(self.h.tag(self.ref), image_id("a"))
         self.assertIsNone(self.h.tag(self.prev), "the previous tag is as before the update")
+        if not marked:
+            self.assertFalse((self.dir / ".bad-images").exists(), "a slow host or a compose error is no image fault")
+            self.assertIn("so the next run tries it again", result.stdout)
+            return
         bad = (self.dir / ".bad-images").read_text()
         self.assertRegex(bad, r"^%s \S+Z 2\.0\.1\n$" % re.escape(image_id("b")))
         rollback_up = self.up_calls()[-1]
@@ -777,7 +798,23 @@ class UpdateTests(DockerScriptTestCase):
     def test_slow_image_times_out_and_is_rolled_back(self):
         self.h.publish(self.ref, "b", "2.0.1", behaviour="slow")
         result = self.h.run("update", "--dir", str(self.dir), env={"SDR_DOA_HEALTH_TIMEOUT": "1"})
-        self.assert_rolled_back(result, "not healthy within 1 s (state running, health starting)")
+        self.assert_rolled_back(result, "not healthy within 1 s (state running, health starting)", marked=False)
+        # Not recorded, so the timer tries it again; a faster start succeeds.
+        self.h.set_behaviour("b", "healthy")
+        self.update("--auto")
+        self.assertEqual(self.h.container()["image"], image_id("b"))
+
+    def test_compose_error_is_rolled_back_without_marking_the_image(self):
+        self.h.publish(self.ref, "b", "2.0.1")
+        self.h.update_state(up_fails=True)
+        result = self.update(code=1)
+        self.assertIn("compose up failed: Error response from daemon: fake up failure", result.stdout)
+        self.assertIn("so the next run tries it again", result.stdout)
+        self.assertFalse((self.dir / ".bad-images").exists())
+        self.assertEqual(self.h.container()["image"], image_id("a"))
+        self.h.update_state(up_fails=False)
+        self.update("--auto")
+        self.assertEqual(self.h.container()["image"], image_id("b"))
 
     def test_rollback_without_pull_never_on_old_compose(self):
         self.h.update_state(compose_old=True)
@@ -931,6 +968,224 @@ class UpdateTests(DockerScriptTestCase):
         result = self.ok(self.h.run("status", "--dir", str(self.dir)))
         self.assertIn("the daemon is not reachable", result.stdout)
 
+    def test_auto_skips_an_older_image_and_update_installs_it(self):
+        # A channel tag that moved back (an old release built late, a rerun).
+        self.h.publish(self.ref, "b", "1.9.0")
+        result = self.update("--auto")
+        self.assertIn(f"skipped: {self.ref} points to older 1.9.0 than the running 2.0.0; run sdr-doa-docker update to install it",
+                      result.stdout)
+        self.assertEqual(self.h.container()["image"], image_id("a"))
+        self.assertEqual(self.h.tag(self.ref), image_id("a"), "the tag points at the running image again")
+        self.assertEqual(self.up_calls(), [])
+        # By hand without a terminal it goes ahead, with a log line.
+        result = self.update()
+        self.assertIn("installing 1.9.0, older than the running 2.0.0", result.stdout)
+        self.assertEqual(self.h.container()["image"], image_id("b"))
+
+    def test_install_takes_an_older_image_of_the_chosen_channel(self):
+        self.h.publish(f"{CONSOLE_IMAGE}:{CHANNEL}.0.0", "z", "1.0.0")
+        result = self.install("--channel", f"{CHANNEL}.0.0")
+        self.assertIn(f"installing 1.0.0, older than the running 2.0.0 (channel {CHANNEL}.0.0)", result.stdout)
+        self.assertEqual(self.h.container()["image"], image_id("z"))
+
+    def test_versions_are_compared_only_when_both_are_labelled(self):
+        for letter, running, new, installed in (
+            ("e", "2.0.0", "", True),         # an image without a version label is not compared
+            ("f", "2.0.9", "2.0.10", True),   # numbers, not strings
+            ("g", "2.1.0-rc.1", "2.1.0", True),
+            ("h", "2.1.0", "2.1.0-rc.2", False),
+            ("i", "2.1.0-rc.10", "2.1.0-rc.9", False),
+        ):
+            with self.subTest(running=running, new=new):
+                state = self.h.read_state()
+                running_id = state["containers"]["sdr-doa-ground-console/console"]["image"]
+                state["images"][running_id]["version"] = running
+                self.h.write_state(state)
+                self.h.publish(self.ref, letter, new)
+                self.update("--auto")
+                self.assertEqual(self.h.container()["image"] == image_id(letter), installed)
+
+    def test_version_cmp(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        function = re.search(r"(?ms)^version_cmp\(\) \{\n.*?^\}\n", text).group(0)
+        for a, b, expected in (
+            ("2.0.0", "2.0.0", "0"), ("2.0.1", "2.0.0", "1"), ("2.0.9", "2.0.10", "-1"), ("10.0.0", "9.9.9", "1"),
+            ("2.1.0-rc.1", "2.1.0", "-1"), ("2.1.0", "2.1.0-rc.1", "1"), ("2.1.0-rc.2", "2.1.0-rc.10", "-1"),
+            ("2.1.0-rc.1", "2.1.0-beta", "1"), ("2.1.0-1", "2.1.0-alpha", "-1"), ("2.1.0-rc", "2.1.0-rc.1", "-1"),
+            ("2.0", "2.0.0", ""), ("", "2.0.0", ""), ("v2.0.0", "2.0.0", ""),
+        ):
+            result = subprocess.run(["sh", "-c", function + 'version_cmp "$1" "$2"', "sh", a, b], capture_output=True, text=True)
+            self.assertEqual((result.returncode, result.stdout.strip()), (0, expected), (a, b))
+
+    def test_auto_waits_while_the_receiver_records(self):
+        self.h.update_state(receiver_busy=True)
+        self.h.publish(self.ref, "b", "2.0.1")
+        result = self.update("--auto")
+        self.assertIn("deferred: Receiver recording or scan active; the next run tries 2.0.1 (bbbbbbbbbbbb) again", result.stdout)
+        self.assertEqual(self.h.container()["image"], image_id("a"))
+        self.assertEqual(self.h.tag(self.ref), image_id("a"))
+        since_file = self.dir / ".deferred-since"
+        since = since_file.read_text().strip()
+        self.assertRegex(since, r"^\d+$")
+        self.assertIn(["exec", self.h.container()["id"], "python",
+                       "/opt/sdr-doa-ground-console/packaging/docker/healthcheck.py", "--busy"], self.h.argvs())
+        self.update("--auto")
+        self.assertEqual(since_file.read_text().strip(), since, "the first deferral counts")
+        self.assertIn("deferred:    since", self.ok(self.h.run("status", "--dir", str(self.dir))).stdout)
+        # After 7 days of deferrals the update goes ahead.
+        since_file.write_text(f"{int(since) - 7 * 86400}\n")
+        result = self.update("--auto")
+        self.assertIn("busy at every run for 7 days; updating anyway", result.stdout)
+        self.assertEqual(self.h.container()["image"], image_id("b"))
+        self.assertFalse(since_file.exists())
+
+    def test_idle_or_older_console_is_updated(self):
+        for state, letter in (({"receiver_busy": False}, "b"), ({"receiver_busy": True, "busy_unsupported": True}, "c")):
+            with self.subTest(state=state):
+                self.h.update_state(**state)
+                self.h.publish(self.ref, letter, "2.0.%d" % (ord(letter) - ord("a")))
+                result = self.update("--auto")
+                self.assertNotIn("deferred", result.stdout)
+                self.assertEqual(self.h.container()["image"], image_id(letter))
+
+    def test_manual_update_over_a_recording_needs_yes(self):
+        self.h.update_state(receiver_busy=True)
+        self.h.publish(self.ref, "b", "2.0.1")
+        result = self.update(code=1)
+        self.assertIn("not updated: the Receiver records or archives a scan; run 'sdr-doa-docker update --yes'", result.stdout)
+        self.assertEqual(self.h.container()["image"], image_id("a"))
+        self.assertEqual(self.h.tag(self.ref), image_id("a"))
+        result = self.update("--yes")
+        self.assertIn("warning: the Receiver records or archives a scan; the restart interrupts it", result.stdout)
+        self.assertEqual(self.h.container()["image"], image_id("b"))
+        self.assertEqual(self.h.run("update", "--dir", str(self.dir), "--auto", "--yes").returncode, 2)
+
+    def test_agent_is_never_asked_for_the_receiver(self):
+        agent_dir = self.base / "agent"
+        self.h.publish(f"{AGENT_IMAGE}:{CHANNEL}", "e", "2.0.0", behaviour="none")
+        self.ok(self.h.run("install", "--agent", "--dir", str(agent_dir)))
+        self.h.update_state(receiver_busy=True)
+        self.h.publish(f"{AGENT_IMAGE}:{CHANNEL}", "f", "2.0.1", behaviour="none")
+        self.h.reset_calls()
+        self.ok(self.h.run("update", "--auto", "--dir", str(agent_dir)))
+        self.assertEqual(self.h.container("sdr-doa-agent/agent")["image"], image_id("f"))
+        self.assertFalse(any(argv[:1] == ["exec"] for argv in self.h.argvs()))
+
+    def test_unhealthy_current_image_goes_back_to_the_previous_one(self):
+        # An update cut short (SIGKILL, power loss) or a broken image that
+        # turned unhealthy later: the next run must not call it up to date.
+        self.h.publish(self.ref, "b", "2.0.1")
+        self.update()
+        self.h.set_behaviour("b", "unhealthy")
+        state = self.h.read_state()
+        state["containers"]["sdr-doa-ground-console/console"]["inspects"] = 5
+        self.h.write_state(state)
+        result = self.update("--auto", code=1)
+        self.assertIn("up to date: 2.0.1 (bbbbbbbbbbbb), but its health is unhealthy; waiting for it", result.stdout)
+        self.assertIn("going back to the previous image 2.0.0 (aaaaaaaaaaaa)", result.stdout)
+        self.assertIn("rolled back: console runs 2.0.0 (aaaaaaaaaaaa) again", result.stdout)
+        self.assertEqual(self.h.container()["image"], image_id("a"))
+        self.assertEqual(self.h.tag(self.ref), image_id("a"))
+        self.assertIn(image_id("b"), (self.dir / ".bad-images").read_text())
+        # The next run stays there.
+        self.update("--auto")
+        self.assertEqual(self.h.container()["image"], image_id("a"))
+
+    def test_slow_current_image_goes_back_without_marking_it(self):
+        self.h.publish(self.ref, "b", "2.0.1")
+        self.update()
+        self.h.set_behaviour("b", "slow")
+        result = self.h.run("update", "--auto", "--dir", str(self.dir), env={"SDR_DOA_HEALTH_TIMEOUT": "1"})
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("waiting for it", result.stdout)
+        self.assertIn("going back to the previous image 2.0.0", result.stdout)
+        self.assertFalse((self.dir / ".bad-images").exists())
+
+    def test_unhealthy_current_image_without_a_previous_one(self):
+        self.h.set_behaviour("a", "unhealthy")
+        state = self.h.read_state()
+        state["containers"]["sdr-doa-ground-console/console"]["inspects"] = 5
+        self.h.write_state(state)
+        result = self.update("--auto", code=1)
+        self.assertIn("FAILED: 2.0.0 (aaaaaaaaaaaa): the health check reports unhealthy", result.stdout)
+        self.assertIn("see 'docker compose logs console'", result.stdout)
+        self.assertEqual(self.h.container()["image"], image_id("a"))
+
+    def test_offline_install_applies_compose_yml_with_the_local_image(self):
+        first = self.h.container()["id"]
+        self.h.update_state(pull_fails=True)
+        result = self.install("--port", "9000")
+        self.assertIn(f"pull of {self.ref} failed", result.stdout)
+        self.assertIn("using the image on this host", result.stdout)
+        self.assertNotEqual(self.h.container()["id"], first, "the new port recreates the container")
+        self.assertIn("http://127.0.0.1:9000/", result.stdout)
+        # A channel this host never pulled cannot be installed offline.
+        result = self.h.run("install", "--dir", str(self.dir), "--channel", f"{CHANNEL}.9")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FAILED: pull of", result.stdout)
+        # update stays strict.
+        self.assertIn("FAILED: pull of", self.update(code=1).stdout)
+
+    def test_dollar_outside_single_quotes_is_reported_by_name(self):
+        env_file = self.dir / ".env"
+        base = env_file.read_text()
+        for line, warned in (
+            ("SDR_DOA_ADMIN_PASSWORD=Xk9$q2!aB", True),
+            ('SDR_DOA_ADMIN_PASSWORD="Xk9$q2!aB"', True),
+            ("export SDR_DOA_SEED_BASE_URL=http://$host:8081", True),
+            ("SDR_DOA_ADMIN_PASSWORD='Xk9$q2!aB'", False),
+            ("SDR_DOA_ADMIN_PASSWORD=plain", False),
+            ("OTHER_VALUE=$x", False),
+        ):
+            with self.subTest(line=line):
+                env_file.write_text(base + line + "\n")
+                for result in (self.update(), self.ok(self.h.run("status", "--dir", str(self.dir)))):
+                    out = result.stdout
+                    self.assertEqual("has a $ outside single quotes" in out, warned, out)
+                    self.assertNotIn("Xk9", out + result.stderr)
+                    self.assertNotIn("$host", out + result.stderr)
+        self.assertIn("SDR_DOA_SEED_BASE_URL in", (self.dir / "update.log").read_text())
+
+    def test_agent_env_dollar_is_reported(self):
+        agent_dir = self.base / "agent"
+        self.h.publish(f"{AGENT_IMAGE}:{CHANNEL}", "e", "2.0.0", behaviour="none")
+        self.ok(self.h.run("install", "--agent", "--dir", str(agent_dir)))
+        agent_env = agent_dir / "agent.env"
+        agent_env.write_text(agent_env.read_text().replace("SDR_DOA_MQTT_PASSWORD=", "SDR_DOA_MQTT_PASSWORD=ab$cd"))
+        result = self.ok(self.h.run("update", "--dir", str(agent_dir)))
+        self.assertIn(f"warning: SDR_DOA_MQTT_PASSWORD in {agent_env} has a $ outside single quotes", result.stdout)
+        self.assertNotIn("ab$cd", result.stdout)
+
+    def test_shell_values_of_the_console_variables_do_not_reach_compose(self):
+        self.h.publish(self.ref, "b", "2.0.1")
+        self.h.reset_calls()
+        self.update(env={"SDR_DOA_ADMIN_PASSWORD": "fromshell", "SDR_DOA_SEED_BASE_URL": "http://127.0.0.1:8081"})
+        up = [call for call in self.h.calls() if "up" in call["argv"] and "--help" not in call["argv"]]
+        self.assertTrue(up)
+        for call in up:
+            self.assertNotIn("SDR_DOA_ADMIN_PASSWORD", call["env"])
+            self.assertNotIn("SDR_DOA_SEED_BASE_URL", call["env"])
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a 0600 file anyway; CI runs this as a user")
+    def test_unreadable_env_file_is_an_error_not_the_defaults(self):
+        env_file = self.dir / ".env"
+        env_file.chmod(0)
+        try:
+            result = self.h.run("status", "--dir", str(self.dir), nonroot=True)
+        finally:
+            env_file.chmod(0o600)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"cannot read {env_file} (mode 0600); run with sudo", result.stderr)
+        self.assertNotIn("URL:", result.stdout)
+
+    def test_env_header_explains_quotes_and_how_a_change_applies(self):
+        header = (self.dir / ".env").read_text()
+        self.assertIn("wrap the value in", header)
+        self.assertIn("single quotes", header)
+        self.assertIn("docker compose up -d here", header)
+        self.assertIn("sdr-doa-set-admin-password", header)
+        self.assertNotIn("may go here too", header)
+
     def test_default_dir_as_a_user(self):
         user_dir = self.h.home / "sdr-doa-ground-console"
         result = self.h.run("install", nonroot=True)
@@ -985,19 +1240,111 @@ class AutoUpdateTests(DockerScriptTestCase):
         self.ok(self.h.run("install", "--dir", str(self.dir), "--auto-update", "--time", "22:05"))
         self.assertIn("OnCalendar=*-*-* 22:05:00\n", self.timer.read_text())
 
-    def test_needs_root(self):
+    def test_a_user_gets_a_crontab_line_not_sudo(self):
         self.h.reset_calls()
-        for args in (("auto-update", "on", "--dir", str(self.dir)), ("install", "--dir", str(self.dir), "--auto-update")):
-            result = self.h.run(*args, nonroot=True)
-            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-            self.assertIn("needs root", result.stderr)
+        result = self.ok(self.h.run("auto-update", "on", "--dir", str(self.dir), "--time", "04:15", nonroot=True))
+        self.assertIn("crontab -e as the user that owns", result.stdout)
+        self.assertIn(f"15 04 * * * {self.h.installed_bin}/sdr-doa-docker update --auto --dir {self.dir} >/dev/null 2>&1",
+                      result.stdout)
+        self.assertIn("With rootless Docker, put DOCKER_HOST=", result.stdout)
+        self.assertNotIn("sudo", result.stdout + result.stderr)
+        self.assertFalse(self.timer.exists() or self.service.exists())
+        # The line carries the user's DOCKER_HOST (rootless Docker).
+        result = self.ok(self.h.run("auto-update", "on", "--dir", str(self.dir), nonroot=True,
+                                    env={"DOCKER_HOST": "unix:///run/user/1000/docker.sock"}))
+        self.assertIn(f"30 03 * * * DOCKER_HOST=unix:///run/user/1000/docker.sock {self.h.installed_bin}/sdr-doa-docker update",
+                      result.stdout)
+        # install --auto-update as a user installs and prints the same line.
+        result = self.ok(self.h.run("install", "--dir", str(self.dir), "--auto-update", nonroot=True))
+        self.assertIn("update --auto --dir", result.stdout)
         self.assertFalse(self.timer.exists())
-        self.assertEqual(self.h.argvs(), [], "install --auto-update stops before docker")
+        self.assertIn("daily: sdr-doa-docker auto-update on", self.ok(self.h.run("install", "--dir", str(self.dir), nonroot=True)).stdout)
+        # Removing root's timer still needs root.
         self.ok(self.h.run("auto-update", "on", "--dir", str(self.dir)))
         result = self.h.run("auto-update", "off", nonroot=True)
         self.assertEqual(result.returncode, 2)
         self.assertTrue(self.timer.exists())
         self.assertIn("auto-update: on", self.ok(self.h.run("auto-update", "status", nonroot=True)).stdout)
+
+    def refuse_owner(self, path: Path) -> Dict[str, str]:
+        """Make root's timer see ``path`` as owned by another user."""
+        if os.geteuid() == 0:
+            os.chown(path, 12345, 12345)
+            return {}
+        return {"SDR_DOA_ROOT_UID": "0"}  # the test user's files are then not root's
+
+    def test_root_timer_refuses_a_directory_another_user_can_change(self):
+        for case in ("owner", "mode"):
+            with self.subTest(case=case):
+                env: Dict[str, str] = {}
+                if case == "owner":
+                    env = self.refuse_owner(self.dir)
+                else:
+                    self.dir.chmod(0o777)
+                result = self.h.run("auto-update", "on", "--dir", str(self.dir), env=env)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("is not owned by root or is writable by another user", result.stderr)
+                self.assertIn("$HOME/.local/bin/sdr-doa-docker update --auto --dir", result.stdout)
+                self.assertFalse(self.timer.exists() or self.service.exists())
+                refused = self.h.run("install", "--dir", str(self.dir), "--auto-update", env=env)
+                self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
+                if os.geteuid() == 0:
+                    os.chown(self.dir, 0, 0)
+                self.dir.chmod(0o755)
+
+    def test_root_timer_runs_only_a_root_only_copy_of_the_script(self):
+        # Run from a download elsewhere: the unit runs the installed copy, never $0.
+        download = self.base / "downloads" / "sdr-doa-docker"
+        download.parent.mkdir()
+        shutil.copy(SCRIPT, download)
+        self.ok(self.h.run("auto-update", "on", "--dir", str(self.dir), script=download))
+        self.assertIn(f"ExecStart={self.h.installed_bin}/sdr-doa-docker update --auto --dir {self.dir}\n", self.service.read_text())
+        self.assertNotIn(str(download), self.service.read_text())
+        self.ok(self.h.run("auto-update", "off"))
+        copy = self.h.installed_bin / "sdr-doa-docker"
+        # A copy others may write is refused (run from that copy, so it is not replaced).
+        copy.chmod(0o777)
+        result = self.h.run("auto-update", "on", "--dir", str(self.dir), script=copy)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("root's timer must not run it", result.stderr)
+        copy.chmod(0o755)
+        self.h.installed_bin.chmod(0o777)
+        result = self.h.run("auto-update", "on", "--dir", str(self.dir), script=copy)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.h.installed_bin.chmod(0o755)
+        env = self.refuse_owner(copy)
+        result = self.h.run("auto-update", "on", "--dir", str(self.dir), script=copy, env=env)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertFalse(self.timer.exists())
+
+    def test_one_auto_update_install_per_host(self):
+        self.ok(self.h.run("auto-update", "on", "--dir", str(self.dir)))
+        other = self.base / "other"
+        self.h.publish(f"{AGENT_IMAGE}:{CHANNEL}", "b", "2.0.0", behaviour="none")
+        self.ok(self.h.run("install", "--agent", "--dir", str(other)))
+        result = self.h.run("auto-update", "on", "--dir", str(other))
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(f"the timer updates {self.dir} (one auto-update install per host)", result.stderr)
+        self.h.reset_calls()
+        result = self.h.run("install", "--agent", "--dir", str(other), "--auto-update")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual(self.h.argvs(), [], "refused before docker")
+        self.assertIn(f"--dir {self.dir}\n", self.service.read_text())
+        self.ok(self.h.run("auto-update", "on", "--dir", str(other), "--force"))
+        self.assertIn(f"--dir {other}\n", self.service.read_text())
+        self.ok(self.h.run("install", "--dir", str(self.dir), "--auto-update", "--force"))
+        self.assertIn(f"--dir {self.dir}\n", self.service.read_text())
+        for args in (("auto-update", "off", "--force"), ("auto-update", "status", "--time", "04:00")):
+            self.assertEqual(self.h.run(*args).returncode, 2, args)
+
+    def test_install_hints_use_sudo_only_for_a_root_install(self):
+        result = self.ok(self.h.run("install", "--dir", str(self.dir)))
+        self.assertIn("  sudo docker compose exec console sdr-doa-set-admin-password", result.stdout)
+        self.assertIn(f"Update: sudo sdr-doa-docker update --dir {self.dir}; daily: sudo sdr-doa-docker auto-update on", result.stdout)
+        user_dir = self.h.home / "sdr-doa-ground-console"
+        result = self.ok(self.h.run("install", "--dir", str(user_dir), nonroot=True))
+        self.assertIn("\n  docker compose exec console sdr-doa-set-admin-password", result.stdout)
+        self.assertNotIn("sudo", result.stdout)
 
     def test_without_systemd_prints_a_cron_line(self):
         env = {"SDR_DOA_SYSTEMCTL": str(self.base / "no-systemctl"), "SDR_DOA_SYSTEMD_DIR": None}
@@ -1018,7 +1365,7 @@ class ComposePolicyTests(DockerScriptTestCase):
         self.install()
         console = (self.dir / "compose.yml").read_text()
         agent_dir = self.base / "agent"
-        self.h.publish(f"{AGENT_IMAGE}:2", "b", "2.0.0", behaviour="none")
+        self.h.publish(f"{AGENT_IMAGE}:{CHANNEL}", "b", "2.0.0", behaviour="none")
         self.ok(self.h.run("install", "--agent", "--dir", str(agent_dir)))
         agent = (agent_dir / "compose.yml").read_text()
         for text in (console, agent):
@@ -1031,7 +1378,7 @@ class ComposePolicyTests(DockerScriptTestCase):
         self.assertRegex(console, r"(?m)^      - sdr-doa-data:/data$")
         self.assertRegex(console, r"(?m)^  sdr-doa-data:$")
         self.assertRegex(console, r"(?m)^      - SDR_DOA_ADMIN_PASSWORD$")
-        self.assertIn("image: ${SDR_DOA_IMAGE:-%s}:${SDR_DOA_IMAGE_TAG:-2}" % CONSOLE_IMAGE, console)
+        self.assertIn("image: ${SDR_DOA_IMAGE:-%s}:${SDR_DOA_IMAGE_TAG:-%s}" % (CONSOLE_IMAGE, CHANNEL), console)
         repo_env = re.findall(r"(?m)^      - (SDR_DOA_[A-Z_]+)", (ROOT / "docker-compose.yml").read_text())
         self.assertEqual(re.findall(r"(?m)^      - (SDR_DOA_[A-Z_]+)", console), repo_env)
         self.assertRegex(agent, r"(?m)^name: sdr-doa-agent$")
@@ -1059,7 +1406,9 @@ class ComposePolicyTests(DockerScriptTestCase):
     def test_no_bashisms_that_dash_would_miss(self):
         text = SCRIPT.read_text()
         code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
-        for pattern in (r"\[\[\s", r"(?m)^\s*local\s", r"\bfunction\s+\w+", r"\$\{[A-Za-z_]+//", r"<<<", r"\bsource\s"):
+        # A shell "function name {" (awk programs have "function name(args) {").
+        for pattern in (r"\[\[\s", r"(?m)^\s*local\s", r"(?m)^\s*function\s+\w+\s*(\(\s*\)\s*)?\{\s*$",
+                        r"\$\{[A-Za-z_]+//", r"<<<", r"\bsource\s"):
             self.assertNotRegex(code, pattern)
 
     def test_runs_under_dash(self):
@@ -1070,7 +1419,7 @@ class ComposePolicyTests(DockerScriptTestCase):
         result = subprocess.run([dash, str(SCRIPT), "install", "--dir", str(self.dir)],
                                 capture_output=True, text=True, env=environment, stdin=subprocess.DEVNULL)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.h.publish(f"{CONSOLE_IMAGE}:2", "b", "2.0.1", behaviour="unhealthy")
+        self.h.publish(f"{CONSOLE_IMAGE}:{CHANNEL}", "b", "2.0.1", behaviour="unhealthy")
         result = subprocess.run([dash, str(SCRIPT), "update", "--dir", str(self.dir)],
                                 capture_output=True, text=True, env=environment, stdin=subprocess.DEVNULL)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
