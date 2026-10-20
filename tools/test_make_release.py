@@ -171,6 +171,7 @@ class ReleaseBuildTests(unittest.TestCase):
             "frontend/dist/receiver/assets/app.js",
             "packaging/console/requirements.txt",
             "packaging/console/set_admin_password.py",
+            "packaging/console/update_release.py",
             "packaging/console/sdr-doa-console",
             "packaging/console/sdr-doa-ground-console.service.in",
             "packaging/console/sdr-doa-ground-console.desktop.in",
@@ -220,7 +221,7 @@ class ReleaseBuildTests(unittest.TestCase):
         executables = {
             (self.console_tar, f"{self.console_top}/{name}")
             for name in ("install.sh", "packaging/console/sdr-doa-console", "packaging/console/set_admin_password.py",
-                         "packaging/docker/console-entrypoint.sh")
+                         "packaging/console/update_release.py", "packaging/docker/console-entrypoint.sh")
         } | {
             (self.agent_tar, f"{self.agent_top}/{name}")
             for name in ("install.sh", "packaging/agent/run-agent.sh", "packaging/agent/uninstall-agent.sh")
@@ -257,6 +258,7 @@ class ReleaseBuildTests(unittest.TestCase):
         self.assertEqual({path.name for path in (target / "tools").iterdir()}, set(make_release.runtime_modules(make_release.CONSOLE_ENTRY)))
         entrypoint = target / "packaging/docker/console-entrypoint.sh"
         self.assertTrue(entrypoint.stat().st_mode & stat.S_IXUSR)
+        self.assertTrue((target / "packaging/console/update_release.py").is_file(), "an install from the repository can update too")
         self.assertFalse((target / "install.sh").exists(), "the app tree holds no installer")
         with self.assertRaises(make_release.ReleaseError):
             make_release.stage_tree(make_release.console_app_entries(ROOT, self.dist), target)

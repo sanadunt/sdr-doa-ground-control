@@ -62,6 +62,7 @@ _SKIP_SUFFIXES = (".pyc", ".pyo")
 CONSOLE_APP_FILES = (
     ("packaging/console/requirements.txt", "packaging/console/requirements.txt", False),
     ("packaging/console/set_admin_password.py", "packaging/console/set_admin_password.py", True),
+    ("packaging/console/update_release.py", "packaging/console/update_release.py", True),
     ("packaging/docker/console-entrypoint.sh", "packaging/docker/console-entrypoint.sh", True),
     ("packaging/docker/healthcheck.py", "packaging/docker/healthcheck.py", False),
 )
