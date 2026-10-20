@@ -50,7 +50,7 @@ Kontrol (Overview, admin) -> POST /api/mqtt/config-patch -> MqttMonitor.publish_
 - `tools/fixtures/`: valid, stale, unhealthy, malformed, nonfinite, missing-status, conflict, partial, and peak-mismatch Data Out cases.
 - `tools/browsdr_receiver_overlay/`, `vendor/BrowSDR` (submodule): Receiver sources; see `CLAUDE.md`. The Records workspace is `tools/browsdr_receiver_overlay/src/client/app/records-archive*.ts`.
 - `deploy/`: example-only rollout/service material. Treat as plan, not an enabled deployment.
-- `packaging/`: Linux packaging. `console/` has `install.sh`, the `sdr-doa-console` launcher, the systemd user unit and desktop templates, `set_admin_password.py` and `requirements.txt` (`paho-mqtt`, `tzdata`); `docker/` the console entrypoint, healthcheck and build-context check; `agent/` the RDF-SDR agent installer, `run-agent.sh` (flags from `agent.env`), the systemd unit template and uninstaller. `Dockerfile` (from a regular clone with the submodule), `Dockerfile.release` (from an unpacked release), `Dockerfile.agent` and the three `docker-compose*.yml` sit at the root; `VERSION` names the release (`2.0.0`).
+- `packaging/`: Linux packaging. `console/` has `install.sh`, the `sdr-doa-console` launcher, the systemd user unit and desktop templates, `set_admin_password.py` and `requirements.txt` (`paho-mqtt`, `tzdata`); `docker/` the console entrypoint, healthcheck, build-context check and `sdr-doa-docker` (installs and updates the GHCR images with a health check, rollback and a daily timer); `agent/` the RDF-SDR agent installer, `run-agent.sh` (flags from `agent.env`), the systemd unit template and uninstaller. `Dockerfile` (from a regular clone with the submodule), `Dockerfile.release` (from an unpacked release), `Dockerfile.agent` and the four `docker-compose*.yml` (`docker-compose.ghcr.yml` runs the published GHCR image) sit at the root; `VERSION` names the release (`2.0.0`).
 - `dist/release/`: tarballs and `SHA256SUMS` written by `tools/make_release.py` (generated, ignored).
 
 ## Development Commands
@@ -84,6 +84,7 @@ Release and packaging (Linux; details in `QUICKSTART.md` and `packaging/*/README
 python3 tools/make_release.py                 # npm ci + build:all, then both tarballs in dist/release
 python3 tools/make_release.py --skip-build    # package the existing frontend/dist
 docker compose up -d --build                  # console image from a regular clone (host network, volume /data)
+sudo sh packaging/docker/sdr-doa-docker install --auto-update   # console from the GHCR image, daily update with rollback
 sh packaging/console/install.sh --help        # native install: venv, systemd user service, sdr-doa-console
 sudo sh packaging/agent/install-agent.sh --dry-run   # RDF-SDR agent as a systemd service
 ```

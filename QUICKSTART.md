@@ -595,6 +595,28 @@ cd dist/release && sha256sum -c SHA256SUMS
 
 Hasilnya di `dist/release/`: `sdr-doa-ground-console-<VERSI>-linux.tar.gz` (console, frontend sudah di-build, installer, Dockerfile rilis, panduan), `sdr-doa-rdf-sdr-agent-<VERSI>.tar.gz` (agent RDF-SDR) dan `SHA256SUMS`. Versi diambil dari file `VERSION` di root repository. `--with-wheels` ikut membawa wheel `paho-mqtt` dan `tzdata` untuk instalasi tanpa internet. Build penuh menolak berjalan bila ada perubahan yang belum di-commit pada input build.
 
+### Docker dari image GHCR (tanpa build, update otomatis)
+
+Setiap rilis GitHub (`v<VERSI>`) juga menerbitkan image publik `ghcr.io/sanadunt/sdr-doa-ground-console` (amd64, arm64) dan `ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent` (amd64, arm64, armv7). Image publik bisa di-pull tanpa login GitHub, jadi update cukup `docker pull`. Script `sdr-doa-docker` (aset rilis, juga ada di tarball console sebagai `packaging/docker/sdr-doa-docker`) mengurus pemasangan, update, rollback, dan timer update harian; yang dibutuhkan hanya Docker Engine dengan Compose v2, tanpa git, curl, atau Python.
+
+```sh
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/sdr-doa-docker
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
+sudo sh sdr-doa-docker install --auto-update   # /opt/sdr-doa-ground-console, update harian 03:30
+sdr-doa-docker status
+sudo sdr-doa-docker update                     # update sekarang
+sudo sdr-doa-docker rollback                   # kembali ke image sebelumnya
+```
+
+- **Kanal update**: `SDR_DOA_IMAGE_TAG` di `/opt/sdr-doa-ground-console/.env`. Bawaannya `2`, yaitu setiap rilis 2.x.y; `2.0` hanya 2.0.z; `2.0.0` tetap di rilis itu. Versi mayor baru hanya datang bila kanal diganti, misalnya `sudo sdr-doa-docker install --channel 3`. Port diatur dengan `--port` (`SDR_DOA_PORT`), dan `SDR_DOA_ADMIN_PASSWORD` serta `SDR_DOA_SEED_*` boleh ditulis di `.env` yang sama.
+- **Update**: `update` mem-pull tag kanal. Bila image-nya berubah, container dibuat ulang lalu ditunggu sampai healthcheck `healthy` (paling lama 180 detik). Bila gagal (unhealthy, berhenti, atau restart terus), image sebelumnya dipasang lagi dan image yang gagal dicatat di `.bad-images`, sehingga update otomatis melewatinya sampai ada image lain. Image sebelumnya disimpan dengan tag `sdr-doa-previous`, yang lebih lama dihapus. `update --check` hanya memberi tahu apakah ada image baru.
+- **Update otomatis**: `sudo sdr-doa-docker auto-update on --time 03:30` memasang `sdr-doa-docker-update.timer` (harian, ditambah acak sampai 15 menit, menyusul bila komputer mati pada jam itu); `auto-update off` dan `auto-update status`. Tanpa systemd, perintah itu mencetak baris cron. Setiap langkah tercatat di `update.log`. Container yang di-stop manual tidak dinyalakan oleh update otomatis.
+- **Data**: nama project compose dan volume sama dengan `docker-compose.yml` (`sdr-doa-ground-console`, `sdr-doa-data`), jadi console yang sebelumnya di-build dari repository atau dari rilis tetap memakai datanya setelah pindah ke image GHCR.
+- **Kata sandi admin**: `cd /opt/sdr-doa-ground-console`, lalu `docker compose exec console sdr-doa-set-admin-password` dan `docker compose restart console`.
+- **Tanpa script**: `docker-compose.ghcr.yml` (di repository dan tarball console) berisi compose yang sama; `docker compose -f docker-compose.ghcr.yml pull` lalu `docker compose -f docker-compose.ghcr.yml up -d`, tanpa tunggu healthcheck dan rollback.
+- **Agent RDF-SDR**: `sudo sh sdr-doa-docker install --agent` memasang agent di `/opt/sdr-doa-agent` dengan pengaturan di `agent.env`; `--enable-config` me-mount `/home/doasdr/doasdr/_share` (`--share-dir`) dan menjalankan agent sebagai pemiliknya.
+
 ### Docker
 
 Butuh Docker Engine dan Compose v2 di Linux. Console memakai `network_mode: host`: console bind ke `127.0.0.1` dan menolak alamat lain, dan dengan network host loopback itu adalah loopback komputer ini. Jangan ganti ke network bridge dengan `ports:`. Docker Desktop di macOS/Windows tidak didukung.
@@ -614,7 +636,7 @@ docker compose up -d --build
 - **Kata sandi admin**: simpan di volume dengan `docker compose exec console sdr-doa-set-admin-password` lalu `docker compose restart console`. Bisa juga lewat `SDR_DOA_ADMIN_PASSWORD` di file `.env` di sebelah `docker-compose.yml`; environment menang atas `/data/.env`. Tanpa keduanya berlaku default `123456` dan UI memberi peringatan.
 - **Nilai awal (seed)**: `SDR_DOA_SEED_BASE_URL`, `SDR_DOA_SEED_MQTT_HOST`, `SDR_DOA_SEED_MQTT_PORT`, `SDR_DOA_SEED_MQTT_TRANSPORT`, `SDR_DOA_SEED_MQTT_WS_PATH` dan `SDR_DOA_SEED_REFRESH_SECONDS` di `.env` sebelah compose hanya dipakai pada start pertama, saat `/data/console.json` belum ada. Setelah itu ubah lewat halaman Konfigurasi. Port diatur dengan `SDR_DOA_PORT` di `.env` yang sama (jangan hanya di shell, karena `docker compose up` berikutnya kembali ke 8787).
 - **Log dan status**: `docker compose ps` (kolom health dari `/api/health`), `docker compose logs -f console`.
-- **Update**: ekstrak rilis baru (atau `git pull` dan `git submodule update`), lalu `docker compose up -d --build`. Volume dan isinya tetap.
+- **Update**: ekstrak rilis baru (atau `git pull` dan `git submodule update`), lalu `docker compose up -d --build`. Volume dan isinya tetap. Untuk update tanpa build, pindah ke image GHCR dengan `sdr-doa-docker install` (bagian sebelumnya).
 - **Stop**: `docker compose down` (volume tetap); `docker compose down -v` juga menghapus semua data.
 
 Container berjalan sebagai uid 10001 dan `restart: unless-stopped` menyalakannya lagi bersama Docker saat boot (pastikan `systemctl is-enabled docker` bernilai `enabled`).
@@ -693,7 +715,7 @@ journalctl -u sdr-doa-agent -f
 - Pengaturan ada di `/etc/sdr-doa-agent/agent.env` (`root:<grup service>`, 0640). Setelah mengubahnya: `sudo systemctl restart sdr-doa-agent`. Variabel lain bisa diset dengan `--set NAMA=NILAI`, misalnya `--set DOA_RATE=0`.
 - Secara bawaan agent menjawab setiap patch dengan `REMOTE_CONTROL_DISABLED`. `sudo sh install.sh --enable-config` mengizinkan Kontrol mengubah `settings.json`; `--disable-config` mematikannya lagi. Aktifkan hanya di broker dan jaringan yang dipercaya.
 - Agent memakai MQTT lewat TCP (default port 1883), bukan WebSocket. Console dan agent harus memakai broker yang sama. Broker di luar loopback wajib TLS dan username (`MQTT_TLS=1` atau `MQTT_CAFILE`, `MQTT_USERNAME`, dan `SDR_DOA_MQTT_PASSWORD` di `agent.env`; lihat `packaging/agent/README.md`).
-- Docker (opsional, juga arm64/armv7): salin `packaging/agent/agent.env.example` ke `agent.env`, edit, lalu `docker compose up -d --build` di folder rilis agent (atau `docker compose -f docker-compose.agent.yml up -d --build` di repository). Butuh Compose v2.24+.
+- Docker (opsional, juga arm64/armv7): salin `packaging/agent/agent.env.example` ke `agent.env`, edit, lalu `docker compose up -d --build` di folder rilis agent (atau `docker compose -f docker-compose.agent.yml up -d --build` di repository). Butuh Compose v2.24+. Tanpa build, dari image GHCR dengan update otomatis: `sudo sh sdr-doa-docker install --agent --auto-update` (lihat [Docker dari image GHCR](#docker-dari-image-ghcr-tanpa-build-update-otomatis)).
 - Upgrade: jalankan installer rilis baru lagi; `agent.env` dan state tetap. Hapus dengan `sudo sh /opt/sdr-doa-agent/uninstall.sh` (`--purge` juga menghapus pengaturan dan state).
 
 ## Validasi setelah install
