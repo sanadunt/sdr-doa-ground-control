@@ -1,4 +1,12 @@
-"""Local SQLite-backed Receiver records and audio storage."""
+"""Local SQLite-backed Receiver records and audio storage.
+
+Schema version 1 (PRAGMA user_version) adds the Records archive columns:
+start_ms/end_ms, normalised frequency, VFO, mode, bandwidth and status,
+search text, and exact trace, candidate and byte counts per scan. They are
+written with every row and backfilled at start for rows an older console
+wrote, so the archive queries never parse JSON. Limits, request parsing and
+the ZIP writer live in receiver_archive.py.
+"""
 from __future__ import annotations
 
 import json
@@ -13,10 +21,14 @@ import time
 import uuid
 import zlib
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import receiver_archive as ra
+from receiver_archive import ArchiveError, ArchiveFilter
 
 TRACE_BYTES = 2048
 MAX_AUDIO_CHUNK_BYTES = 1024 * 1024
@@ -103,8 +115,8 @@ def _finite_number(value: Any) -> bool:
         return False
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _json(value: Any) -> str:
@@ -178,6 +190,11 @@ def _audio_time_zone(value: Any, utc_offset_minutes: Any = None) -> Tuple[tzinfo
     return timezone.utc, True
 
 
+def resolve_time_zone(value: Any, utc_offset_minutes: Any = None) -> Tuple[tzinfo, bool]:
+    """The browser's zone for file names and filters; see _audio_time_zone."""
+    return _audio_time_zone(value, utc_offset_minutes)
+
+
 def _overlaps_time_of_day(start: datetime, end: datetime, zone: tzinfo,
                           time_from: Optional[int], time_to: Optional[int]) -> bool:
     """True when [start, end] covers any local minute of the daily window.
@@ -205,6 +222,205 @@ def _segment_interval(segment: Dict[str, Any], now: datetime) -> Optional[Tuple[
     if end is None or end < start:
         end = start
     return start, end
+
+
+# Archive columns added by schema version 1, guarded by PRAGMA table_info.
+_SEGMENT_ARCHIVE_COLUMNS = (
+    ("start_ms", "INTEGER"),
+    ("end_ms", "INTEGER"),
+    ("frequency_hz", "REAL"),
+    ("vfo_index", "INTEGER"),
+    ("mode", "TEXT"),
+    ("bandwidth_hz", "REAL"),
+    ("status", "TEXT"),
+    ("duration_s", "REAL"),
+    ("search_text", "TEXT NOT NULL DEFAULT ''"),
+)
+_SCAN_ARCHIVE_COLUMNS = (
+    ("start_ms", "INTEGER"),
+    ("end_ms", "INTEGER"),
+    ("start_hz", "REAL"),
+    ("end_hz", "REAL"),
+    ("fft_size", "INTEGER"),
+    ("source", "TEXT NOT NULL DEFAULT ''"),
+    ("status", "TEXT NOT NULL DEFAULT 'running'"),
+    ("archived", "INTEGER NOT NULL DEFAULT 0"),
+    ("trace_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("candidate_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("byte_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("search_text", "TEXT NOT NULL DEFAULT ''"),
+)
+SCHEMA_VERSION = 1
+_BACKFILL_BATCH = 500
+_FINISHED_AUDIO_STATUSES = ("complete", "partial", "interrupted", "failed")
+_FINISHED_SCAN_STATUSES = ("complete", "stopped", "failed", "interrupted")
+_MAX_SEGMENT_DURATION_S = 604_800
+_MAX_FFT_SIZE = 1_048_576
+# Segment and session predicates shared by the retention pass and its preview.
+_RETENTION_SEGMENT_SQL = (
+    "a.finished_at IS NOT NULL AND g.finished_at IS NOT NULL AND g.end_ms IS NOT NULL AND g.end_ms < :cutoff"
+)
+_RETENTION_SCAN_SQL = (
+    "s.archived=1 AND s.finished_at IS NOT NULL AND s.end_ms IS NOT NULL AND s.end_ms < :cutoff AND s.status!='deleting'"
+)
+_AUDIO_DOWNLOADABLE_SQL = (
+    "g.finished_at IS NOT NULL AND g.file_name IS NOT NULL AND g.byte_count > 0 "
+    "AND g.status IN ('complete','partial','interrupted')"
+)
+_AUDIO_LEG_COLUMNS = (
+    "'audio' AS kind, g.id AS id, g.start_ms AS start_ms, g.end_ms AS end_ms, g.duration_s AS duration_s, "
+    "g.byte_count AS bytes, g.status AS status, g.frequency_hz AS low_hz, "
+    f"(CASE WHEN {_AUDIO_DOWNLOADABLE_SQL} THEN 1 ELSE 0 END) AS downloadable, "
+    f"g.byte_count + {ra.ESTIMATE_AUDIO_EXTRA_BYTES} AS estimated_bytes"
+)
+_SCAN_LEG_COLUMNS = (
+    "'scan' AS kind, s.id AS id, s.start_ms AS start_ms, s.end_ms AS end_ms, "
+    "(CASE WHEN s.end_ms IS NULL OR s.start_ms IS NULL THEN NULL ELSE (s.end_ms - s.start_ms) / 1000.0 END) AS duration_s, "
+    "s.byte_count AS bytes, s.status AS status, s.start_hz AS low_hz, "
+    "(CASE WHEN s.finished_at IS NOT NULL THEN 1 ELSE 0 END) AS downloadable, "
+    f"s.trace_count * {ra.ESTIMATE_SCAN_TRACE_BYTES} + s.candidate_count * {ra.ESTIMATE_SCAN_CANDIDATE_BYTES} "
+    f"+ {ra.ESTIMATE_SCAN_EXTRA_BYTES} AS estimated_bytes"
+)
+_SORT_COLUMNS = {
+    "start": "start_ms",
+    "end": "COALESCE(end_ms, :now)",
+    "duration": "duration_s",
+    "frequency": "low_hz",
+    "size": "bytes",
+    "type": "kind",
+    "status": "status",
+}
+
+
+def _stamp_ms(value: Any) -> Optional[int]:
+    """Epoch ms of an ISO stamp with a zone, or None."""
+    parsed = _parse_audio_timestamp(value)
+    if parsed is None:
+        return None
+    milliseconds = ra.ms_from_datetime(parsed)
+    return milliseconds if 0 <= milliseconds <= ra.MAX_MS else None
+
+
+def _loads_dict(raw: Any) -> Dict[str, Any]:
+    try:
+        value = json.loads(raw) if isinstance(raw, (str, bytes)) else None
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _finite_float(value: Any) -> Optional[float]:
+    return float(value) if _finite_number(value) else None
+
+
+def _segment_archive_values(ident: str, started_at: Any, finished_at: Any, metadata: Dict[str, Any],
+                            has_file: bool, fallback_ms: int) -> Dict[str, Any]:
+    """Archive columns of a segment, normalised the same way for new rows and the backfill."""
+    start = _stamp_ms(started_at)
+    if start is None:
+        start = _stamp_ms(metadata.get("started_at"))
+    if start is None:
+        # No parseable time: the migration time, so retention never removes the row early.
+        start = fallback_ms
+    duration = metadata.get("duration_seconds")
+    duration_valid = _finite_number(duration) and duration >= 0
+    if finished_at is None:
+        end = None
+        status = "recording"
+    else:
+        if duration_valid and duration <= _MAX_SEGMENT_DURATION_S:
+            end = start + round(duration * 1000)
+        else:
+            finished = _stamp_ms(finished_at)
+            end = max(start, finished) if finished is not None else start
+        raw_status = metadata.get("status")
+        if raw_status is None:
+            status = "complete" if has_file else "failed"
+        else:
+            status = raw_status if raw_status in _FINISHED_AUDIO_STATUSES else "failed"
+    if finished_at is None:
+        duration_s = None
+    elif duration_valid:
+        duration_s = float(duration)
+    else:
+        duration_s = (end - start) / 1000
+    vfo_index = ra.normalize_vfo_index(metadata.get("vfo_index"))
+    mode = ra.normalize_mode(metadata.get("mode"))
+    frequency = _finite_float(metadata.get("frequency_hz"))
+    return {
+        "start_ms": start,
+        "end_ms": end,
+        "frequency_hz": frequency,
+        "vfo_index": vfo_index,
+        "mode": mode,
+        "bandwidth_hz": _finite_float(metadata.get("bandwidth_hz")),
+        "status": status,
+        "duration_s": duration_s,
+        "search_text": ra.audio_search_text(ident, vfo_index, mode, frequency),
+    }
+
+
+def _scan_config_values(ident: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
+    config = metadata.get("config")
+    if not isinstance(config, dict):
+        config = {}
+
+    def first_finite(*keys: str) -> Optional[float]:
+        for key in keys:
+            value = _finite_float(config.get(key))
+            if value is not None:
+                return value
+        return None
+
+    start_hz, end_hz = first_finite("startHz", "start_hz"), first_finite("endHz", "end_hz")
+    fft_size = config.get("fftSize")
+    if isinstance(fft_size, bool) or not isinstance(fft_size, int) or not 1 <= fft_size <= _MAX_FFT_SIZE:
+        fft_size = None
+    source = ra.normalize_source(metadata.get("source"))
+    return {
+        "start_hz": start_hz,
+        "end_hz": end_hz,
+        "fft_size": fft_size,
+        "source": source,
+        "search_text": ra.scan_search_text(ident, source, start_hz, end_hz),
+    }
+
+
+def _scan_archive_values(ident: str, started_at: Any, finished_at: Any, last_activity: Any,
+                         metadata: Dict[str, Any], has_record: bool, fallback_ms: int) -> Dict[str, Any]:
+    start = _stamp_ms(started_at)
+    if start is None:
+        start = fallback_ms
+    if finished_at is None:
+        status, end = "running", None
+    else:
+        raw_status = metadata.get("status")
+        status = raw_status if raw_status in _FINISHED_SCAN_STATUSES else "complete"
+        # Recovery stamps finished_at when it runs, which can be days after the
+        # last trace; an interrupted scan ends at its last activity.
+        candidates = (last_activity, finished_at) if status == "interrupted" else (finished_at,)
+        end = None
+        for candidate in candidates:
+            end = _stamp_ms(candidate)
+            if end is not None:
+                break
+        end = start if end is None else max(start, end)
+    return {
+        "start_ms": start,
+        "end_ms": end,
+        "status": status,
+        "archived": 1 if has_record or metadata.get("archive") is True else 0,
+        **_scan_config_values(ident, metadata),
+    }
+
+
+def _like_pattern(text: str) -> str:
+    return "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _chunks(values: Sequence[Any], size: int) -> Iterator[Sequence[Any]]:
+    for index in range(0, len(values), size):
+        yield values[index:index + size]
 
 
 # Matroska/WebM element IDs used to give MediaRecorder output a Duration.
@@ -439,7 +655,9 @@ def _apply_webm_duration(path: Path, duration_seconds: float, scratch_path: Path
 class ReceiverRecordStore:
     """Owns generated-path audio files and their SQLite metadata."""
 
-    def __init__(self, data_dir: Union[os.PathLike, str] = DEFAULT_DATA_DIR):
+    def __init__(self, data_dir: Union[os.PathLike, str] = DEFAULT_DATA_DIR,
+                 clock: Optional[Callable[[], datetime]] = None,
+                 log: Optional[Callable[[str], None]] = None):
         self.data_dir = Path(data_dir).expanduser().resolve()
         self.audio_dir = self.data_dir / "audio"
         self.temp_dir = self.data_dir / "tmp"
@@ -447,12 +665,29 @@ class ReceiverRecordStore:
         self.audio_dir.mkdir(exist_ok=True)
         self.temp_dir.mkdir(exist_ok=True)
         self.db_path = self.data_dir / "receiver.sqlite3"
+        # Every time the store writes or compares goes through this clock (an
+        # aware UTC datetime), so a test clock moves stamps and recovery alike.
+        self.clock: Callable[[], datetime] = clock or _utc_now
+        # Monotonic time for the retention pass budget; tests may replace it.
+        self.monotonic: Callable[[], float] = time.monotonic
+        self.log = log
         self._lock = threading.RLock()
+        # One retention pass at a time; a second caller returns at once.
+        self._retention_mutex = threading.Lock()
         self._last_recovery = 0.0
         self._initialize()
+        self._migrate()
+        self._backfill_archive_columns()
+        self._finish_interrupted_scan_deletes()
         with self._lock:
             self.recover_interrupted_recordings()
             self._remove_unreferenced_files()
+
+    def _now(self) -> str:
+        return self.clock().astimezone(timezone.utc).isoformat()
+
+    def _now_ms(self) -> int:
+        return ra.ms_from_datetime(self.clock())
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -566,6 +801,190 @@ class ReceiverRecordStore:
                 CREATE INDEX IF NOT EXISTS audio_segments_session_order ON audio_segments(session_id,started_at);
             """)
 
+    def _migrate(self) -> None:
+        """Schema version 0 to 1 in one transaction; a failure rolls back and the next start retries."""
+        with self._lock:
+            db = sqlite3.connect(self.db_path, timeout=10, isolation_level=None)
+            try:
+                if db.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:
+                    return
+                db.execute("BEGIN IMMEDIATE")
+                try:
+                    for table, columns in (("audio_segments", _SEGMENT_ARCHIVE_COLUMNS), ("scans", _SCAN_ARCHIVE_COLUMNS)):
+                        existing = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+                        for name, declaration in columns:
+                            if name not in existing:
+                                db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+                    for statement in (
+                        "CREATE INDEX IF NOT EXISTS audio_segments_start_ms ON audio_segments(start_ms)",
+                        "CREATE INDEX IF NOT EXISTS audio_segments_end_ms ON audio_segments(end_ms)",
+                        "CREATE INDEX IF NOT EXISTS scans_start_ms ON scans(start_ms)",
+                        "CREATE INDEX IF NOT EXISTS scans_end_ms ON scans(end_ms)",
+                        "INSERT OR IGNORE INTO settings(key,value) VALUES('retention_days','null')",
+                        "INSERT OR IGNORE INTO settings(key,value) VALUES('retention_last_run','null')",
+                        f"PRAGMA user_version={SCHEMA_VERSION}",
+                    ):
+                        db.execute(statement)
+                    db.execute("COMMIT")
+                except BaseException:
+                    try:
+                        db.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
+                    raise
+            finally:
+                db.close()
+
+    def _backfill_archive_columns(self) -> None:
+        """Fill the archive columns of rows an older console wrote (start_ms NULL), 500 per transaction.
+
+        Runs at every start, so rows written after a downgrade are caught too.
+        """
+        fallback_ms = self._now_ms()
+        last_row_id = 0
+        while True:
+            with self._lock, self._connect() as db:
+                rows = db.execute(
+                    "SELECT rowid AS row_id,id,started_at,finished_at,file_name,metadata FROM audio_segments "
+                    "WHERE rowid>? AND (start_ms IS NULL OR (finished_at IS NOT NULL AND end_ms IS NULL)) "
+                    "ORDER BY rowid LIMIT ?",
+                    (last_row_id, _BACKFILL_BATCH),
+                ).fetchall()
+                if not rows:
+                    break
+                last_row_id = int(rows[-1]["row_id"])
+                updates = []
+                for row in rows:
+                    values = _segment_archive_values(
+                        row["id"], row["started_at"], row["finished_at"], _loads_dict(row["metadata"]),
+                        row["file_name"] is not None, fallback_ms,
+                    )
+                    updates.append({**values, "row_id": row["row_id"]})
+                db.executemany(
+                    "UPDATE audio_segments SET start_ms=:start_ms,end_ms=:end_ms,frequency_hz=:frequency_hz,"
+                    "vfo_index=:vfo_index,mode=:mode,bandwidth_hz=:bandwidth_hz,status=:status,"
+                    "duration_s=:duration_s,search_text=:search_text WHERE rowid=:row_id",
+                    updates,
+                )
+        last_row_id = 0
+        while True:
+            with self._lock, self._connect() as db:
+                rows = db.execute(
+                    "SELECT rowid AS row_id,id,started_at,finished_at,last_activity,metadata FROM scans "
+                    "WHERE rowid>? AND status!='deleting' AND (start_ms IS NULL OR (finished_at IS NOT NULL AND end_ms IS NULL)) "
+                    "ORDER BY rowid LIMIT ?",
+                    (last_row_id, _BACKFILL_BATCH),
+                ).fetchall()
+                if not rows:
+                    break
+                last_row_id = int(rows[-1]["row_id"])
+                ids = [row["id"] for row in rows]
+                marks = ",".join("?" * len(ids))
+                frames = {
+                    item[0]: (item[1], item[2]) for item in db.execute(
+                        f"SELECT scan_id,count(*),coalesce(sum(length(payload)),0) FROM frames WHERE scan_id IN ({marks}) GROUP BY scan_id",
+                        ids,
+                    )
+                }
+                candidates = {
+                    item[0]: (item[1], item[2]) for item in db.execute(
+                        f"SELECT scan_id,count(*),coalesce(sum(length(payload)),0) FROM candidates WHERE scan_id IN ({marks}) GROUP BY scan_id",
+                        ids,
+                    )
+                }
+                records = {item[0] for item in db.execute(f"SELECT scan_id FROM records WHERE scan_id IN ({marks})", ids)}
+                updates = []
+                for row in rows:
+                    values = _scan_archive_values(
+                        row["id"], row["started_at"], row["finished_at"], row["last_activity"],
+                        _loads_dict(row["metadata"]), row["id"] in records, fallback_ms,
+                    )
+                    trace_count, frame_bytes = frames.get(row["id"], (0, 0))
+                    candidate_count, candidate_bytes = candidates.get(row["id"], (0, 0))
+                    updates.append({
+                        **values,
+                        "trace_count": trace_count,
+                        "candidate_count": candidate_count,
+                        "byte_count": frame_bytes + candidate_bytes,
+                        "row_id": row["row_id"],
+                    })
+                db.executemany(
+                    "UPDATE scans SET start_ms=:start_ms,end_ms=:end_ms,start_hz=:start_hz,end_hz=:end_hz,"
+                    "fft_size=:fft_size,source=:source,status=:status,archived=:archived,trace_count=:trace_count,"
+                    "candidate_count=:candidate_count,byte_count=:byte_count,search_text=:search_text WHERE rowid=:row_id",
+                    updates,
+                )
+
+    def _finish_interrupted_scan_deletes(self) -> None:
+        """A crash during a scan delete leaves it 'deleting'; finish it off."""
+        with self._lock, self._connect() as db:
+            pending = [row[0] for row in db.execute("SELECT id FROM scans WHERE status='deleting'")]
+        for scan_id in pending:
+            try:
+                self._purge_scan(scan_id)
+            except sqlite3.Error:
+                continue
+
+    def _begin_scan_delete(self, db: sqlite3.Connection, scan_id: str,
+                           check: Optional[Callable[[sqlite3.Row], Optional[str]]] = None) -> Tuple[Optional[str], int]:
+        """Mark a scan 'deleting' and drop its records row in the caller's transaction.
+
+        Returns (refusal code or None, byte_count). Listings, previews,
+        downloads and retention ignore 'deleting' scans from then on.
+        """
+        row = db.execute(
+            "SELECT id,status,finished_at,archived,end_ms,byte_count FROM scans WHERE id=?", (scan_id,),
+        ).fetchone()
+        if row is None or row["status"] == "deleting":
+            return ra.ARCHIVE_NOT_FOUND, 0
+        if check is not None:
+            code = check(row)
+            if code is not None:
+                return code, 0
+        db.execute("UPDATE scans SET status='deleting' WHERE id=?", (scan_id,))
+        db.execute("DELETE FROM records WHERE scan_id=?", (scan_id,))
+        return None, int(row["byte_count"] or 0)
+
+    def _purge_scan(self, scan_id: str) -> None:
+        """Delete a 'deleting' scan's frames, then candidates, in short transactions, then the scan.
+
+        The lock is released between batches, so a 300 000-frame delete never
+        stalls a live recording's chunk uploads for the whole cascade.
+        """
+        for table in ("frames", "candidates"):
+            while True:
+                batch = max(1, int(ra.SCAN_DELETE_BATCH_ROWS))
+                with self._lock, self._connect() as db:
+                    removed = db.execute(
+                        f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE scan_id=? LIMIT ?)",
+                        (scan_id, batch),
+                    ).rowcount
+                if removed < batch:
+                    break
+        with self._lock, self._connect() as db:
+            db.execute("DELETE FROM scans WHERE id=? AND status='deleting'", (scan_id,))
+
+    def _delete_scan(self, scan_id: str,
+                     check: Optional[Callable[[sqlite3.Row], Optional[str]]] = None) -> Tuple[Optional[str], int]:
+        """The one scan delete path: mark, then purge in batches. Returns (refusal code or None, bytes)."""
+        with self._lock, self._connect() as db:
+            code, size = self._begin_scan_delete(db, scan_id, check)
+        if code is None:
+            self._purge_scan(scan_id)
+        return code, size
+
+    def _recount_scan(self, db: sqlite3.Connection, scan_id: str) -> None:
+        traces, frame_bytes = db.execute(
+            "SELECT count(*),coalesce(sum(length(payload)),0) FROM frames WHERE scan_id=?", (scan_id,),
+        ).fetchone()
+        candidates, candidate_bytes = db.execute(
+            "SELECT count(*),coalesce(sum(length(payload)),0) FROM candidates WHERE scan_id=?", (scan_id,),
+        ).fetchone()
+        db.execute(
+            "UPDATE scans SET trace_count=?,candidate_count=?,byte_count=? WHERE id=?",
+            (traces, candidates, frame_bytes + candidate_bytes, scan_id),
+        )
+
     def _exists(self, db: sqlite3.Connection, table: str, ident: str) -> bool:
         return db.execute(f"SELECT 1 FROM {table} WHERE id=?", (ident,)).fetchone() is not None
 
@@ -580,7 +999,7 @@ class ReceiverRecordStore:
         Saved audio is kept and marked "interrupted"; an archived scan gets its
         Records entry with status "interrupted".
         """
-        now = now or datetime.now(timezone.utc)
+        now = (now or self.clock()).astimezone(timezone.utc)
         cutoff = now - timedelta(seconds=stale_seconds)
         recovered = {"audio_sessions": 0, "audio_segments": 0, "scans": 0}
         with self._lock:
@@ -590,7 +1009,8 @@ class ReceiverRecordStore:
                     "SELECT id,started_at,last_activity FROM audio_sessions WHERE finished_at IS NULL"
                 ).fetchall()
                 scans = db.execute(
-                    "SELECT id,started_at,last_activity,metadata FROM scans WHERE finished_at IS NULL"
+                    "SELECT id,started_at,last_activity FROM scans "
+                    "WHERE finished_at IS NULL AND archived=1 AND status!='deleting'"
                 ).fetchall()
             for session in sessions:
                 activity = _parse_audio_timestamp(session["last_activity"]) or _parse_audio_timestamp(session["started_at"])
@@ -619,18 +1039,16 @@ class ReceiverRecordStore:
                     continue
                 recovered["audio_sessions"] += 1
             for scan in scans:
-                try:
-                    metadata = json.loads(scan["metadata"])
-                except (TypeError, ValueError):
-                    continue
-                if not isinstance(metadata, dict) or not metadata.get("archive"):
-                    continue
                 activity = _parse_audio_timestamp(scan["last_activity"]) or _parse_audio_timestamp(scan["started_at"])
                 if activity is not None and activity > cutoff:
                     continue
                 try:
                     with self._connect() as db:
-                        self._finish_scan(db, scan["id"], "interrupted", now.isoformat())
+                        # The scan ends at its last activity, not at this recovery.
+                        self._finish_scan(
+                            db, scan["id"], "interrupted", now.isoformat(),
+                            end_ms=ra.ms_from_datetime(activity) if activity is not None else None,
+                        )
                 except (sqlite3.Error, ValueError):
                     continue
                 recovered["scans"] += 1
@@ -686,18 +1104,25 @@ class ReceiverRecordStore:
         """Close every unfinished segment of a session from its saved bytes."""
         with self._connect() as db:
             rows = db.execute(
-                "SELECT id,started_at,temp_name,byte_count,metadata FROM audio_segments WHERE session_id=? AND finished_at IS NULL",
+                "SELECT id,started_at,start_ms,temp_name,byte_count,metadata FROM audio_segments "
+                "WHERE session_id=? AND finished_at IS NULL",
                 (session_id,),
             ).fetchall()
         for row in rows:
             metadata = json.loads(row["metadata"])
             started = _parse_audio_timestamp(metadata.get("started_at")) or _parse_audio_timestamp(row["started_at"])
-            ended = datetime.now(timezone.utc)
+            ended = self.clock().astimezone(timezone.utc)
+            end_ms = ra.ms_from_datetime(ended)
             part = self.temp_dir / f"{row['id']}.part"
             try:
-                ended = datetime.fromtimestamp(part.stat().st_mtime, timezone.utc)
+                modified = part.stat().st_mtime
             except OSError:
                 pass
+            else:
+                ended = datetime.fromtimestamp(modified, timezone.utc)
+                end_ms = int(modified * 1000)
+            if row["start_ms"] is not None:
+                end_ms = max(int(row["start_ms"]), end_ms)
             if started is not None and ended < started:
                 ended = started
             duration = (ended - started).total_seconds() if started is not None else 0.0
@@ -715,8 +1140,9 @@ class ReceiverRecordStore:
             })
             with self._connect() as db:
                 db.execute(
-                    "UPDATE audio_segments SET finished_at=?,file_name=?,byte_count=?,metadata=? WHERE id=?",
-                    (ended.isoformat(), file_name, size, _json(metadata), row["id"]),
+                    "UPDATE audio_segments SET finished_at=?,file_name=?,byte_count=?,metadata=?,"
+                    "end_ms=?,status=?,duration_s=? WHERE id=?",
+                    (ended.isoformat(), file_name, size, _json(metadata), end_ms, status, duration, row["id"]),
                 )
                 db.execute(
                     "UPDATE audio_sessions SET byte_count=MAX(0,byte_count+?) WHERE id=?",
@@ -724,37 +1150,116 @@ class ReceiverRecordStore:
                 )
         return len(rows)
 
+    def _setting(self, db: sqlite3.Connection, key: str) -> Any:
+        row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        if row is None:
+            return None
+        try:
+            return json.loads(row["value"])
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _put_setting(db: sqlite3.Connection, key: str, value: Any) -> None:
+        db.execute(
+            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, _json(value)),
+        )
+
+    @staticmethod
+    def _valid_retention_days(value: Any) -> Optional[int]:
+        if isinstance(value, bool) or not isinstance(value, int) or value not in ra.RETENTION_DAY_OPTIONS:
+            return None
+        return value
+
     def get_settings(self) -> Dict[str, Any]:
         with self._lock, self._connect() as db:
-            row = db.execute("SELECT value FROM settings WHERE key='auto_spectrum_recording'").fetchone()
-        return {"auto_spectrum_recording": json.loads(row["value"]) if row else False}
+            auto = self._setting(db, "auto_spectrum_recording")
+            days = self._setting(db, "retention_days")
+            last = self._setting(db, "retention_last_run")
+        removed = None
+        last_ms = None
+        if isinstance(last, dict) and isinstance(last.get("ms"), int):
+            last_ms = last["ms"]
+            removed = {
+                key: (bool(last.get(key)) if key == "more" else int(last.get(key) or 0))
+                for key in ("audio", "sessions", "scans", "bytes", "failed", "more")
+            }
+        return {
+            "auto_spectrum_recording": auto if isinstance(auto, bool) else False,
+            "retention_days": self._valid_retention_days(days),
+            "retention_options": list(ra.RETENTION_DAY_OPTIONS),
+            "retention_last_run_ms": last_ms,
+            "retention_last_removed": removed,
+            "retention_running": self._retention_mutex.locked(),
+        }
+
+    def save_settings(self, values: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+        """Save settings; returns (settings, whether a new non-null retention value was saved).
+
+        A non-null retention_days that differs from the saved one needs
+        confirm: true; the same value, Off (null) or no retention_days needs none.
+        """
+        if not isinstance(values, dict) or set(values) - {"auto_spectrum_recording", "retention_days", "confirm"}:
+            raise ValueError("unsupported setting")
+        if "confirm" in values:
+            if values["confirm"] is not True:
+                raise ValueError("confirm must be true")
+            if "retention_days" not in values:
+                raise ValueError("confirm goes with retention_days")
+        if "auto_spectrum_recording" in values and not isinstance(values["auto_spectrum_recording"], bool):
+            raise ValueError("auto_spectrum_recording must be boolean")
+        days = ra.parse_retention_days(values["retention_days"]) if "retention_days" in values else None
+        changed = False
+        with self._lock, self._connect() as db:
+            if "retention_days" in values:
+                current = self._valid_retention_days(self._setting(db, "retention_days"))
+                if days is not None and days != current and values.get("confirm") is not True:
+                    raise ArchiveError(
+                        400, ra.RETENTION_CONFIRM_REQUIRED,
+                        "a new retention_days value needs confirm: true",
+                    )
+                changed = days is not None and days != current
+            if "auto_spectrum_recording" in values:
+                self._put_setting(db, "auto_spectrum_recording", values["auto_spectrum_recording"])
+            if "retention_days" in values:
+                self._put_setting(db, "retention_days", days)
+        return self.get_settings(), changed
 
     def update_settings(self, values: Dict[str, Any]) -> Dict[str, Any]:
-        if not isinstance(values, dict) or set(values) - {"auto_spectrum_recording"}:
-            raise ValueError("unsupported setting")
-        value = values.get("auto_spectrum_recording", self.get_settings()["auto_spectrum_recording"])
-        if not isinstance(value, bool):
-            raise ValueError("auto_spectrum_recording must be boolean")
-        with self._lock, self._connect() as db:
-            db.execute("INSERT INTO settings(key,value) VALUES('auto_spectrum_recording',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (_json(value),))
-        return self.get_settings()
+        return self.save_settings(values)[0]
 
     def create_scan(self, source: str = "", config: Optional[Dict[str, Any]] = None, archive: bool = False) -> Dict[str, Any]:
         if not isinstance(source, str) or not isinstance(config, dict) or not isinstance(archive, bool):
             raise ValueError("invalid scan metadata")
-        ident, stamp = str(uuid.uuid4()), _now()
+        ident, stamp = str(uuid.uuid4()), self._now()
         metadata = {"source": source, "config": config, "archive": archive}
+        values = _scan_archive_values(ident, stamp, None, None, metadata, False, self._now_ms())
         with self._lock, self._connect() as db:
-            previous = db.execute("SELECT id,metadata FROM scans").fetchall()
-            for row in previous:
-                if not json.loads(row["metadata"]).get("archive", False):
-                    db.execute("DELETE FROM scans WHERE id=?", (row["id"],))
-            db.execute("INSERT INTO scans(id,started_at,metadata,last_activity) VALUES(?,?,?,?)", (ident, stamp, _json(metadata), stamp))
+            # The previous unarchived scan is Spectrum working data; it goes
+            # through the batched delete once the new scan exists.
+            previous = [
+                row["id"] for row in db.execute("SELECT id FROM scans WHERE archived=0 AND status!='deleting'")
+            ]
+            for scan_id in previous:
+                self._begin_scan_delete(db, scan_id)
+            db.execute(
+                "INSERT INTO scans(id,started_at,metadata,last_activity,start_ms,start_hz,end_hz,fft_size,source,"
+                "status,archived,search_text) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (ident, stamp, _json(metadata), stamp, values["start_ms"], values["start_hz"], values["end_hz"],
+                 values["fft_size"], values["source"], "running", 1 if archive else 0, values["search_text"]),
+            )
+        for scan_id in previous:
+            self._purge_scan(scan_id)
         return {"id": ident, "created_at": stamp, "archive": archive}
 
-    def _require_scan(self, db: sqlite3.Connection, scan_id: str) -> None:
-        if not self._exists(db, "scans", _id(scan_id)):
+    def _require_scan(self, db: sqlite3.Connection, scan_id: str) -> sqlite3.Row:
+        row = db.execute(
+            "SELECT id,archived,finished_at FROM scans WHERE id=? AND status!='deleting'", (_id(scan_id),),
+        ).fetchone()
+        if row is None:
             raise KeyError("scan not found")
+        return row
 
     def upsert_candidates(self, scan_id: str, candidates: List[Dict[str, Any]]) -> int:
         scan_id = _id(scan_id)
@@ -784,13 +1289,16 @@ class ReceiverRecordStore:
                 low, high, peak, snr, hits, last_seen,
             ))
         with self._lock, self._connect() as db:
-            self._require_scan(db, scan_id)
-            db.execute("UPDATE scans SET last_activity=? WHERE id=?", (_now(), scan_id))
+            scan = self._require_scan(db, scan_id)
+            db.execute("UPDATE scans SET last_activity=? WHERE id=?", (self._now(), scan_id))
             db.executemany("""INSERT INTO candidates(scan_id,candidate_id,payload,frequency,peak_hz,low_hz,high_hz,peak,snr,hits,last_seen)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(scan_id,candidate_id) DO UPDATE SET
                 payload=excluded.payload,frequency=excluded.frequency,peak_hz=excluded.peak_hz,
                 low_hz=excluded.low_hz,high_hz=excluded.high_hz,
                 peak=excluded.peak,snr=excluded.snr,hits=excluded.hits,last_seen=excluded.last_seen""", rows)
+            if scan["finished_at"] is not None:
+                # A late upload after finish; running scans are counted at finish.
+                self._recount_scan(db, scan_id)
         return len(rows)
 
     def get_candidates(self, scan_id: str, offset: int = 0, limit: int = 100, sort: str = "frequency",
@@ -938,14 +1446,15 @@ class ReceiverRecordStore:
         if not isinstance(payload, bytes) or len(payload) != TRACE_BYTES:
             raise ValueError("trace must contain exactly 2048 bytes")
         with self._lock, self._connect() as db:
-            self._require_scan(db, scan_id)
-            settings_enabled = json.loads(db.execute("SELECT value FROM settings WHERE key='auto_spectrum_recording'").fetchone()[0])
-            metadata = json.loads(db.execute("SELECT metadata FROM scans WHERE id=?", (scan_id,)).fetchone()[0])
-            if not settings_enabled and not metadata.get("archive"):
+            scan = self._require_scan(db, scan_id)
+            settings_enabled = self._setting(db, "auto_spectrum_recording") is True
+            if not settings_enabled and not scan["archived"]:
                 return None
-            stamp = _now()
+            stamp = self._now()
             cursor = db.execute("INSERT INTO frames(scan_id,sweep,captured_at,payload) VALUES(?,?,?,?)", (scan_id, sweep, stamp, sqlite3.Binary(zlib.compress(payload))))
             db.execute("UPDATE scans SET last_activity=? WHERE id=?", (stamp, scan_id))
+            if scan["finished_at"] is not None:
+                self._recount_scan(db, scan_id)
             return int(cursor.lastrowid)
 
     def finish_scan(self, scan_id: str, status: str, trace_upload_failures: Any = None) -> Dict[str, Any]:
@@ -957,20 +1466,31 @@ class ReceiverRecordStore:
             or not 0 <= trace_upload_failures <= 1_000_000_000
         ):
             raise ValueError("trace_upload_failures must be a nonnegative integer")
-        stamp = _now()
+        stamp = self._now()
         with self._lock, self._connect() as db:
             self._require_scan(db, scan_id)
             metadata = self._finish_scan(db, scan_id, status, stamp, trace_upload_failures)
         return {"id": scan_id, "scan_id": scan_id, "finished_at": stamp, "status": status, "archive": metadata.get("archive", False)}
 
     def _finish_scan(self, db: sqlite3.Connection, scan_id: str, status: str, stamp: str,
-                     trace_upload_failures: Optional[int] = None) -> Dict[str, Any]:
-        metadata = json.loads(db.execute("SELECT metadata FROM scans WHERE id=?", (scan_id,)).fetchone()["metadata"])
+                     trace_upload_failures: Optional[int] = None, end_ms: Optional[int] = None) -> Dict[str, Any]:
+        row = db.execute("SELECT metadata,start_ms,archived FROM scans WHERE id=?", (scan_id,)).fetchone()
+        metadata = json.loads(row["metadata"])
         metadata["status"] = status
         if trace_upload_failures is not None:
             metadata["trace_upload_failures"] = trace_upload_failures
-        db.execute("UPDATE scans SET finished_at=?,metadata=?,last_activity=? WHERE id=?", (stamp, _json(metadata), stamp, scan_id))
-        if metadata.get("archive"):
+        if end_ms is None:
+            end_ms = _stamp_ms(stamp)
+        if end_ms is None:
+            end_ms = self._now_ms()
+        if row["start_ms"] is not None:
+            end_ms = max(int(row["start_ms"]), end_ms)
+        db.execute(
+            "UPDATE scans SET finished_at=?,metadata=?,last_activity=?,end_ms=?,status=? WHERE id=?",
+            (stamp, _json(metadata), stamp, end_ms, status, scan_id),
+        )
+        self._recount_scan(db, scan_id)
+        if row["archived"] or metadata.get("archive"):
             db.execute("INSERT INTO records(id,scan_id,created_at,metadata) VALUES(?,?,?,?) ON CONFLICT(scan_id) DO UPDATE SET metadata=excluded.metadata", (scan_id, scan_id, stamp, _json(metadata)))
         return metadata
 
@@ -990,7 +1510,9 @@ class ReceiverRecordStore:
     def scan_info(self, scan_id: str) -> Dict[str, Any]:
         scan_id = _id(scan_id)
         with self._lock, self._connect() as db:
-            row = db.execute("SELECT started_at,finished_at,metadata FROM scans WHERE id=?", (scan_id,)).fetchone()
+            row = db.execute(
+                "SELECT started_at,finished_at,metadata FROM scans WHERE id=? AND status!='deleting'", (scan_id,),
+            ).fetchone()
             if row is None:
                 raise KeyError("scan not found")
             metadata = json.loads(row["metadata"])
@@ -1213,7 +1735,7 @@ class ReceiverRecordStore:
             return self.list_records(offset, limit, "audio-session")
 
         self._maybe_recover()
-        now = datetime.now(timezone.utc)
+        now = self.clock().astimezone(timezone.utc)
         with self._lock, self._connect() as db:
             rows = db.execute(
                 """SELECT a.id AS session_id,a.started_at AS session_started_at,a.finished_at AS session_finished_at,
@@ -1294,7 +1816,7 @@ class ReceiverRecordStore:
     def audio_record_facets(self, time_zone: str, utc_offset_minutes: Any = None) -> Dict[str, Any]:
         zone, fallback = _audio_time_zone(time_zone, utc_offset_minutes)
         self._maybe_recover()
-        now = datetime.now(timezone.utc)
+        now = self.clock().astimezone(timezone.utc)
         with self._lock, self._connect() as db:
             rows = db.execute(
                 """SELECT g.started_at AS segment_started_at,g.finished_at AS segment_finished_at,g.metadata AS segment_metadata
@@ -1373,6 +1895,7 @@ class ReceiverRecordStore:
                 ) from exc
 
     def delete_audio_segment(self, segment_id: str) -> bool:
+        """Delete one finished segment; its session goes too when it is finished and left empty."""
         ident = _id(segment_id)
         with self._lock:
             with self._connect() as db:
@@ -1394,47 +1917,75 @@ class ReceiverRecordStore:
                     "UPDATE audio_sessions SET byte_count=MAX(0,byte_count-?) WHERE id=?",
                     (row["byte_count"], row["session_id"]),
                 )
+            try:
+                self._delete_session_if_empty(row["session_id"])
+            except OSError:
+                # A legacy session file that cannot go now; retention retries the empty session.
+                pass
         return True
 
-    def delete_record(self, record_id: str) -> bool:
-        ident = _id(record_id)
+    def _session_files(self, db: sqlite3.Connection, ident: str, session: sqlite3.Row) -> List[Path]:
+        paths: List[Path] = []
+        for segment in db.execute("SELECT id,temp_name,file_name FROM audio_segments WHERE session_id=?", (ident,)):
+            for directory, stored, expected in (
+                (self.temp_dir, segment["temp_name"], f"{segment['id']}.part"),
+                (self.audio_dir, segment["file_name"], f"{segment['id']}.webm"),
+            ):
+                if stored == expected:
+                    paths.append(directory / expected)
+        # Sessions written before segments existed kept one session-level file.
+        if session["temp_name"] == f"{ident}.part":
+            paths.append(self.temp_dir / session["temp_name"])
+        if session["file_name"] == f"{ident}.webm":
+            paths.append(self.audio_dir / session["file_name"])
+        return paths
+
+    def _delete_session(self, ident: str) -> bool:
+        """The session delete path: files first (segments and legacy session files), then the rows."""
         with self._lock:
             with self._connect() as db:
-                scan = db.execute("SELECT scan_id FROM records WHERE id=?", (ident,)).fetchone()
-                if scan is not None:
-                    db.execute("DELETE FROM records WHERE id=?", (ident,))
-                    db.execute("DELETE FROM scans WHERE id=?", (scan["scan_id"],))
-                    return True
-                # A scan that never reached finish has no records row; it is still deletable.
-                if db.execute("DELETE FROM scans WHERE id=?", (ident,)).rowcount:
-                    return True
-                audio = db.execute("SELECT finished_at,temp_name,file_name FROM audio_sessions WHERE id=?", (ident,)).fetchone()
-                if audio is None:
+                session = db.execute(
+                    "SELECT finished_at,temp_name,file_name FROM audio_sessions WHERE id=?", (ident,),
+                ).fetchone()
+                if session is None:
                     return False
-                if audio["finished_at"] is None:
+                if session["finished_at"] is None:
                     raise ValueError("stop the VFO audio recording before deleting its session")
-                segments = db.execute("SELECT id,temp_name,file_name FROM audio_segments WHERE session_id=?", (ident,)).fetchall()
-            paths: List[Path] = []
-            for segment in segments:
-                for directory, stored, expected in (
-                    (self.temp_dir, segment["temp_name"], f"{segment['id']}.part"),
-                    (self.audio_dir, segment["file_name"], f"{segment['id']}.webm"),
-                ):
-                    if stored == expected:
-                        paths.append(directory / expected)
-            if audio["temp_name"] == f"{ident}.part":
-                paths.append(self.temp_dir / audio["temp_name"])
-            if audio["file_name"] == f"{ident}.webm":
-                paths.append(self.audio_dir / audio["file_name"])
+                paths = self._session_files(db, ident, session)
             self._unlink_audio_files(paths)
             with self._connect() as db:
                 db.execute("DELETE FROM audio_sessions WHERE id=?", (ident,))
         return True
 
+    def _delete_session_if_empty(self, ident: str) -> bool:
+        with self._lock:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT finished_at FROM audio_sessions a WHERE id=? AND finished_at IS NOT NULL "
+                    "AND NOT EXISTS(SELECT 1 FROM audio_segments g WHERE g.session_id=a.id)",
+                    (ident,),
+                ).fetchone()
+            if row is None:
+                return False
+            return self._delete_session(ident)
+
+    def delete_record(self, record_id: str) -> bool:
+        ident = _id(record_id)
+        with self._lock:
+            with self._connect() as db:
+                record = db.execute("SELECT scan_id FROM records WHERE id=?", (ident,)).fetchone()
+                # A scan that never reached finish has no records row; it is still deletable.
+                scan_id = record["scan_id"] if record is not None else ident
+                is_scan = db.execute("SELECT 1 FROM scans WHERE id=?", (scan_id,)).fetchone() is not None
+            if is_scan:
+                code, _ = self._delete_scan(scan_id)
+                return code is None
+            return self._delete_session(ident)
+
     def create_audio_session(self, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if metadata is not None and not isinstance(metadata, dict):
             raise ValueError("audio session metadata must be an object")
-        ident, stamp = str(uuid.uuid4()), _now()
+        ident, stamp = str(uuid.uuid4()), self._now()
         with self._lock, self._connect() as db:
             db.execute(
                 "INSERT INTO audio_sessions(id,started_at,temp_name,metadata,last_activity) VALUES(?,?,?,?,?)",
@@ -1453,7 +2004,8 @@ class ReceiverRecordStore:
                 or not isinstance(metadata["mode"], str) or not isinstance(metadata["codec"], str)
                 or not isinstance(metadata["started_at"], str)):
             raise ValueError("audio segment metadata has invalid types")
-        ident, stamp = str(uuid.uuid4()), _now()
+        ident, stamp = str(uuid.uuid4()), self._now()
+        values = _segment_archive_values(ident, stamp, None, metadata, False, self._now_ms())
         temp_name = f"{ident}.part"
         temp_path = self.temp_dir / temp_name
         with self._lock:
@@ -1467,7 +2019,12 @@ class ReceiverRecordStore:
             os.close(fd)
             try:
                 with self._connect() as db:
-                    db.execute("INSERT INTO audio_segments(id,session_id,started_at,temp_name,metadata) VALUES(?,?,?,?,?)", (ident, session_id, stamp, temp_name, _json(metadata)))
+                    db.execute(
+                        "INSERT INTO audio_segments(id,session_id,started_at,temp_name,metadata,start_ms,frequency_hz,"
+                        "vfo_index,mode,bandwidth_hz,status,search_text) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (ident, session_id, stamp, temp_name, _json(metadata), values["start_ms"], values["frequency_hz"],
+                         values["vfo_index"], values["mode"], values["bandwidth_hz"], "recording", values["search_text"]),
+                    )
                     db.execute("UPDATE audio_sessions SET last_activity=? WHERE id=?", (stamp, session_id))
             except Exception:
                 temp_path.unlink(missing_ok=True)
@@ -1503,7 +2060,7 @@ class ReceiverRecordStore:
                     target.flush()
                     os.fsync(target.fileno())
                 with self._connect() as db:
-                    db.execute("UPDATE audio_sessions SET byte_count=byte_count+?,last_activity=? WHERE id=?", (len(payload), _now(), row["session_id"]))
+                    db.execute("UPDATE audio_sessions SET byte_count=byte_count+?,last_activity=? WHERE id=?", (len(payload), self._now(), row["session_id"]))
                     db.execute("UPDATE audio_segments SET byte_count=byte_count+? WHERE id=?", (len(payload), segment_id))
             except Exception:
                 with path.open("r+b") as target:
@@ -1536,7 +2093,7 @@ class ReceiverRecordStore:
                 if not finalize_open_segments:
                     raise ValueError("all audio segments must be finalized before the session")
                 self._finalize_open_segments(session_id, SEGMENT_UNCLOSED_ERROR)
-            stamp = _now()
+            stamp = self._now()
             with self._connect() as db:
                 db.execute("UPDATE audio_sessions SET finished_at=?,last_activity=? WHERE id=?", (stamp, stamp, session_id))
                 byte_count = db.execute("SELECT byte_count FROM audio_sessions WHERE id=?", (session_id,)).fetchone()[0]
@@ -1558,7 +2115,7 @@ class ReceiverRecordStore:
             raise ValueError("invalid segment recording status")
         with self._lock:
             with self._connect() as db:
-                row = db.execute("""SELECT g.session_id,g.started_at,g.finished_at,g.byte_count,g.temp_name,g.file_name,
+                row = db.execute("""SELECT g.session_id,g.started_at,g.start_ms,g.finished_at,g.byte_count,g.temp_name,g.file_name,
                     a.finished_at AS session_finished,g.metadata FROM audio_segments g
                     JOIN audio_sessions a ON a.id=g.session_id WHERE g.id=?""", (segment_id,)).fetchone()
             if row is None:
@@ -1583,12 +2140,18 @@ class ReceiverRecordStore:
                 metadata["error"] = error or SEGMENT_PARTIAL_ERROR
             else:
                 metadata["error"] = error or SEGMENT_FAILED_ERROR
+            # finished_at keeps the browser's ended_at (a retried finish answers it
+            # again); end_ms is the server clock, never before the server start.
+            end_ms = self._now_ms()
+            if row["start_ms"] is not None:
+                end_ms = max(int(row["start_ms"]), end_ms)
             try:
                 with self._connect() as db:
-                    db.execute("UPDATE audio_segments SET finished_at=?,file_name=?,byte_count=?,metadata=? WHERE id=?",
-                               (ended_at, file_name, size, _json(metadata), segment_id))
+                    db.execute("UPDATE audio_segments SET finished_at=?,file_name=?,byte_count=?,metadata=?,"
+                               "end_ms=?,status=?,duration_s=? WHERE id=?",
+                               (ended_at, file_name, size, _json(metadata), end_ms, outcome, duration, segment_id))
                     db.execute("UPDATE audio_sessions SET byte_count=MAX(0,byte_count+?),last_activity=? WHERE id=?",
-                               (size - row["byte_count"], _now(), row["session_id"]))
+                               (size - row["byte_count"], self._now(), row["session_id"]))
             except Exception:
                 if file_name is not None:
                     os.replace(final_path, temp_path)
@@ -1611,6 +2174,893 @@ class ReceiverRecordStore:
         if not path.is_file():
             raise KeyError("audio file not found")
         return path, "audio/webm"
+
+    # --- Records archive -------------------------------------------------
+
+    @staticmethod
+    def _common_conditions(alias: str, archive_filter: ArchiveFilter, params: Dict[str, Any]) -> List[str]:
+        """Time, status and search conditions; an open item ends at :now."""
+        conditions = []
+        if archive_filter.from_ms is not None and archive_filter.to_ms is not None:
+            params["from_ms"], params["to_ms"] = archive_filter.from_ms, archive_filter.to_ms
+            conditions.append(
+                f"{alias}.start_ms < :to_ms AND ({alias}.end_ms > :from_ms OR ({alias}.end_ms IS NULL AND :now > :from_ms))"
+            )
+        elif archive_filter.windows:
+            parts = []
+            for index, (start, end) in enumerate(archive_filter.windows):
+                params[f"wa{index}"], params[f"wb{index}"] = start, end
+                parts.append(
+                    f"({alias}.start_ms < :wb{index} AND ({alias}.end_ms > :wa{index} "
+                    f"OR ({alias}.end_ms IS NULL AND :now > :wa{index})))"
+                )
+            conditions.append("(" + " OR ".join(parts) + ")")
+        if archive_filter.status is not None:
+            params["status"] = archive_filter.status
+            conditions.append(f"{alias}.status = :status")
+        if archive_filter.q:
+            params["q"] = _like_pattern(archive_filter.q)
+            conditions.append(f"{alias}.search_text LIKE :q ESCAPE '\\'")
+        return conditions
+
+    def _archive_leg(self, kind: str, archive_filter: ArchiveFilter, params: Dict[str, Any],
+                     downloadable_only: bool = False, extra: Sequence[str] = ()) -> Optional[str]:
+        """One leg of the archive union, or None when the filter excludes that kind.
+
+        Every value is a bound parameter; only allowlisted SQL text is joined.
+        """
+        if kind == "audio":
+            if not archive_filter.includes_audio:
+                return None
+            conditions = self._common_conditions("g", archive_filter, params)
+            if archive_filter.has_frequency:
+                conditions.append("g.frequency_hz IS NOT NULL")
+            if archive_filter.min_frequency_hz is not None:
+                params["fmin"] = archive_filter.min_frequency_hz
+                conditions.append("g.frequency_hz >= :fmin")
+            if archive_filter.max_frequency_hz is not None:
+                params["fmax"] = archive_filter.max_frequency_hz
+                conditions.append("g.frequency_hz <= :fmax")
+            if archive_filter.vfo_index is not None:
+                params["vfo"] = archive_filter.vfo_index
+                conditions.append("g.vfo_index = :vfo")
+            if archive_filter.mode is not None:
+                params["mode"] = archive_filter.mode
+                conditions.append("g.mode = :mode")
+            if archive_filter.bandwidth_hz is not None:
+                params["bandwidth"] = archive_filter.bandwidth_hz
+                conditions.append("g.bandwidth_hz = :bandwidth")
+            if downloadable_only:
+                conditions.append(_AUDIO_DOWNLOADABLE_SQL)
+            conditions.extend(extra)
+            where = " WHERE " + " AND ".join(conditions) if conditions else ""
+            return f"SELECT {_AUDIO_LEG_COLUMNS} FROM audio_segments g{where}"
+        if not archive_filter.includes_scans:
+            return None
+        # Unarchived scans are Spectrum working data and never listed.
+        conditions = ["s.archived=1", "s.status!='deleting'"] + self._common_conditions("s", archive_filter, params)
+        if archive_filter.has_frequency:
+            conditions.append("s.start_hz IS NOT NULL AND s.end_hz IS NOT NULL")
+        if archive_filter.min_frequency_hz is not None:
+            params["fmin"] = archive_filter.min_frequency_hz
+            conditions.append("s.end_hz >= :fmin")
+        if archive_filter.max_frequency_hz is not None:
+            params["fmax"] = archive_filter.max_frequency_hz
+            conditions.append("s.start_hz <= :fmax")
+        if downloadable_only:
+            conditions.append("s.finished_at IS NOT NULL")
+        conditions.extend(extra)
+        return f"SELECT {_SCAN_LEG_COLUMNS} FROM scans s WHERE " + " AND ".join(conditions)
+
+    def _archive_legs(self, archive_filter: ArchiveFilter, now_ms: int,
+                      downloadable_only: bool = False) -> Tuple[str, Dict[str, Any]]:
+        params: Dict[str, Any] = {"now": now_ms}
+        legs = [
+            leg for leg in (
+                self._archive_leg("audio", archive_filter, params, downloadable_only),
+                self._archive_leg("scan", archive_filter, params, downloadable_only),
+            ) if leg is not None
+        ]
+        if not legs:
+            legs = [f"SELECT {_AUDIO_LEG_COLUMNS} FROM audio_segments g WHERE 0"]
+        return " UNION ALL ".join(legs), params
+
+    @staticmethod
+    def _counts(db: sqlite3.Connection, union: str, params: Dict[str, Any]) -> Dict[str, int]:
+        totals = {"audio": 0, "scan": 0, "bytes": 0, "estimated_bytes": 0}
+        for row in db.execute(
+            f"SELECT kind,count(*),coalesce(sum(bytes),0),coalesce(sum(estimated_bytes),0) FROM ({union}) GROUP BY kind",
+            params,
+        ):
+            totals[row[0]] = int(row[1])
+            totals["bytes"] += int(row[2])
+            totals["estimated_bytes"] += int(row[3])
+        return totals
+
+    @staticmethod
+    def _audio_item(row: sqlite3.Row) -> Dict[str, Any]:
+        metadata = _loads_dict(row["metadata"])
+        finished = row["finished_at"] is not None
+        playable = bool(
+            finished and row["file_name"] is not None and row["byte_count"] > 0
+            and row["status"] in ra.PLAYABLE_AUDIO_STATUSES
+        )
+        error = metadata.get("error")
+        codec = metadata.get("codec")
+        return {
+            "kind": "audio",
+            "id": row["id"],
+            "session_id": row["session_id"],
+            "start": ra.iso_from_ms(row["start_ms"]),
+            "end": ra.iso_from_ms(row["end_ms"]),
+            "start_ms": row["start_ms"],
+            "end_ms": row["end_ms"],
+            "duration_s": row["duration_s"],
+            "bytes": int(row["byte_count"]),
+            "estimated_bytes": ra.export_estimate("audio", row["byte_count"]),
+            "status": row["status"],
+            "error": error if isinstance(error, str) else "",
+            "playable": playable,
+            "previewable": playable,
+            "downloadable": playable,
+            "deletable": finished,
+            "vfo_index": row["vfo_index"],
+            "frequency_hz": row["frequency_hz"],
+            "mode": row["mode"],
+            "bandwidth_hz": row["bandwidth_hz"],
+            "codec": codec if isinstance(codec, str) else None,
+            "source": None,
+            "start_hz": None,
+            "end_hz": None,
+            "fft_size": None,
+            "trace_count": None,
+            "candidate_count": None,
+            "trace_upload_failures": None,
+        }
+
+    @staticmethod
+    def _scan_item(row: sqlite3.Row) -> Dict[str, Any]:
+        metadata = _loads_dict(row["metadata"])
+        finished = row["finished_at"] is not None
+        failures = metadata.get("trace_upload_failures")
+        if isinstance(failures, bool) or not isinstance(failures, int) or failures < 0:
+            failures = 0
+        error = metadata.get("error")
+        duration = None
+        if finished and row["end_ms"] is not None and row["start_ms"] is not None:
+            duration = (row["end_ms"] - row["start_ms"]) / 1000
+        return {
+            "kind": "scan",
+            "id": row["id"],
+            "session_id": None,
+            "start": ra.iso_from_ms(row["start_ms"]),
+            "end": ra.iso_from_ms(row["end_ms"]),
+            "start_ms": row["start_ms"],
+            "end_ms": row["end_ms"],
+            "duration_s": duration,
+            "bytes": int(row["byte_count"]),
+            "estimated_bytes": ra.export_estimate("scan", 0, row["trace_count"], row["candidate_count"]),
+            "status": row["status"],
+            "error": error if isinstance(error, str) else "",
+            "playable": False,
+            "previewable": bool(finished and row["trace_count"] > 0),
+            "downloadable": finished,
+            "deletable": finished,
+            "vfo_index": None,
+            "frequency_hz": None,
+            "mode": None,
+            "bandwidth_hz": None,
+            "codec": None,
+            "source": row["source"],
+            "start_hz": row["start_hz"],
+            "end_hz": row["end_hz"],
+            "fft_size": row["fft_size"],
+            "trace_count": int(row["trace_count"]),
+            "candidate_count": int(row["candidate_count"]),
+            "trace_upload_failures": failures,
+        }
+
+    def _archive_rows(self, db: sqlite3.Connection, keys: Sequence[Tuple[str, str]]) -> Dict[Tuple[str, str], Dict[str, Any]]:
+        """ArchiveItem dicts of the listed (kind, id) pairs that still exist."""
+        found: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        audio = [ident for kind, ident in keys if kind == "audio"]
+        scans = [ident for kind, ident in keys if kind == "scan"]
+        for batch in _chunks(audio, 500):
+            marks = ",".join("?" * len(batch))
+            for row in db.execute(
+                "SELECT id,session_id,start_ms,end_ms,duration_s,byte_count,status,frequency_hz,vfo_index,mode,"
+                f"bandwidth_hz,metadata,finished_at,file_name FROM audio_segments WHERE id IN ({marks})",
+                list(batch),
+            ):
+                found[("audio", row["id"])] = self._audio_item(row)
+        for batch in _chunks(scans, 500):
+            marks = ",".join("?" * len(batch))
+            for row in db.execute(
+                "SELECT id,start_ms,end_ms,byte_count,status,start_hz,end_hz,fft_size,trace_count,candidate_count,"
+                f"source,metadata,finished_at FROM scans WHERE id IN ({marks}) AND archived=1 AND status!='deleting'",
+                list(batch),
+            ):
+                found[("scan", row["id"])] = self._scan_item(row)
+        return found
+
+    def archive_items(self, archive_filter: ArchiveFilter, sort: str = "start", order: str = "desc",
+                      offset: int = 0, limit: int = ra.ITEMS_DEFAULT_LIMIT) -> Dict[str, Any]:
+        if sort not in _SORT_COLUMNS or order not in ra.SORT_ORDERS:
+            raise ra.invalid("sort or order is not supported")
+        if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= ra.ITEMS_MAX_OFFSET:
+            raise ra.invalid(f"offset must be an integer between 0 and {ra.ITEMS_MAX_OFFSET}")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= ra.ITEMS_MAX_LIMIT:
+            raise ra.invalid(f"limit must be an integer between 1 and {ra.ITEMS_MAX_LIMIT}")
+        self._maybe_recover()
+        now_ms = self._now_ms()
+        union, params = self._archive_legs(archive_filter, now_ms)
+        direction = "ASC" if order == "asc" else "DESC"
+        with self._lock, self._connect() as db:
+            totals = self._counts(db, union, params)
+            page = [
+                (row[0], row[1]) for row in db.execute(
+                    f"SELECT kind,id FROM ({union}) ORDER BY {_SORT_COLUMNS[sort]} {direction},kind,id "
+                    "LIMIT :limit OFFSET :offset",
+                    {**params, "limit": limit, "offset": offset},
+                )
+            ]
+            details = self._archive_rows(db, page)
+        return {
+            "items": [details[key] for key in page if key in details],
+            "total": totals["audio"] + totals["scan"],
+            "totals": totals,
+            "offset": offset,
+            "limit": limit,
+            "now_ms": now_ms,
+        }
+
+    def archive_count(self, archive_filter: ArchiveFilter, downloadable_only: bool = False) -> Dict[str, int]:
+        union, params = self._archive_legs(archive_filter, self._now_ms(), downloadable_only)
+        with self._lock, self._connect() as db:
+            return self._counts(db, union, params)
+
+    def archive_facets(self) -> Dict[str, Any]:
+        self._maybe_recover()
+        now_ms = self._now_ms()
+        limit = ra.FACET_LIMIT
+        scans_sql = "FROM scans WHERE archived=1 AND status!='deleting'"
+        with self._lock, self._connect() as db:
+            vfo_indices = [row[0] for row in db.execute(
+                "SELECT DISTINCT vfo_index FROM audio_segments WHERE vfo_index IS NOT NULL ORDER BY vfo_index LIMIT ?", (limit,))]
+            modes = [row[0] for row in db.execute(
+                "SELECT DISTINCT mode FROM audio_segments WHERE mode IS NOT NULL ORDER BY mode LIMIT ?", (limit,))]
+            bandwidths = [row[0] for row in db.execute(
+                "SELECT DISTINCT bandwidth_hz FROM audio_segments WHERE bandwidth_hz IS NOT NULL ORDER BY bandwidth_hz LIMIT ?", (limit,))]
+            sources = [row[0] for row in db.execute(
+                f"SELECT DISTINCT source {scans_sql} AND source!='' ORDER BY source LIMIT ?", (limit,))]
+            statuses = [row[0] for row in db.execute(
+                f"SELECT status FROM (SELECT status FROM audio_segments UNION SELECT status {scans_sql}) "
+                "WHERE status IS NOT NULL ORDER BY status LIMIT ?", (limit,))]
+            audio = db.execute(
+                "SELECT count(*),coalesce(sum(byte_count),0),min(frequency_hz),max(frequency_hz),min(start_ms),"
+                "max(coalesce(end_ms,?)) FROM audio_segments", (now_ms,),
+            ).fetchone()
+            scan = db.execute(
+                f"SELECT count(*),coalesce(sum(byte_count),0),min(start_hz),max(end_hz),min(start_ms),"
+                f"max(coalesce(end_ms,?)) {scans_sql}", (now_ms,),
+            ).fetchone()
+        try:
+            free_bytes: Optional[int] = int(shutil.disk_usage(self.data_dir).free)
+        except OSError:
+            free_bytes = None
+
+        def pick(values: Sequence[Any], choose: Callable[..., Any]) -> Any:
+            present = [value for value in values if value is not None]
+            return choose(present) if present else None
+
+        return {
+            "vfo_indices": vfo_indices,
+            "modes": modes,
+            "bandwidths_hz": bandwidths,
+            "sources": sources,
+            "statuses": statuses,
+            "min_frequency_hz": pick((audio[2], scan[2]), min),
+            "max_frequency_hz": pick((audio[3], scan[3]), max),
+            "totals": {"audio": int(audio[0]), "scan": int(scan[0]), "bytes": int(audio[1]) + int(scan[1])},
+            "first_ms": pick((audio[4], scan[4]), min),
+            "last_ms": pick((audio[5] if audio[0] else None, scan[5] if scan[0] else None), max),
+            "free_bytes": free_bytes,
+            "now_ms": now_ms,
+        }
+
+    def archive_calendar(self, bounds: Sequence[int], kind: str = "all") -> Dict[str, Any]:
+        """Per-day counts for the browser's local midnights; an item counts on every day it overlaps."""
+        if kind not in ra.TYPE_FILTERS:
+            raise ra.invalid("type must be all, audio or scan")
+        now_ms = self._now_ms()
+        cap = max(1, int(ra.CALENDAR_ROW_CAP))
+        archive_filter = ArchiveFilter(from_ms=bounds[0], to_ms=bounds[-1], kind=kind)
+        days = {"audio": [0] * (len(bounds) - 1), "scan": [0] * (len(bounds) - 1)}
+        truncated = False
+        first_ms = last_ms = None
+        with self._lock, self._connect() as db:
+            for leg_kind in ("audio", "scan"):
+                params: Dict[str, Any] = {"now": now_ms}
+                leg = self._archive_leg(leg_kind, archive_filter, params)
+                if leg is None:
+                    continue
+                rows = db.execute(
+                    f"SELECT start_ms,COALESCE(end_ms,:now) FROM ({leg}) LIMIT :cap", {**params, "cap": cap + 1},
+                ).fetchall()
+                truncated = truncated or len(rows) > cap
+                days[leg_kind] = ra.bucket_days(bounds, ((row[0], row[1]) for row in rows[:cap]))
+                span_params: Dict[str, Any] = {"now": now_ms}
+                span_leg = self._archive_leg(leg_kind, ArchiveFilter(kind=kind), span_params)
+                low, high = db.execute(
+                    f"SELECT min(start_ms),max(COALESCE(end_ms,:now)) FROM ({span_leg})", span_params,
+                ).fetchone()
+                if low is not None:
+                    first_ms = low if first_ms is None else min(first_ms, low)
+                    last_ms = high if last_ms is None else max(last_ms, high)
+        return {
+            "days": [{"audio": audio, "scan": scan} for audio, scan in zip(days["audio"], days["scan"])],
+            "first_ms": first_ms,
+            "last_ms": last_ms,
+            "now_ms": now_ms,
+            "truncated": truncated,
+        }
+
+    def archive_timeline(self, from_ms: int, to_ms: int, archive_filter: ArchiveFilter) -> Dict[str, Any]:
+        """Merged busy intervals per kind for one day strip; the filter's own time is ignored."""
+        now_ms = self._now_ms()
+        cap = max(1, int(ra.TIMELINE_ROW_CAP))
+        day_filter = replace(archive_filter.without_time(), from_ms=from_ms, to_ms=to_ms)
+        result: Dict[str, Any] = {"from_ms": from_ms, "to_ms": to_ms, "now_ms": now_ms, "audio": [], "scan": [],
+                                  "counts": {"audio": 0, "scan": 0}, "truncated": False}
+        with self._lock, self._connect() as db:
+            for kind in ("audio", "scan"):
+                params: Dict[str, Any] = {"now": now_ms}
+                leg = self._archive_leg(kind, day_filter, params)
+                if leg is None:
+                    continue
+                rows = db.execute(
+                    f"SELECT start_ms,COALESCE(end_ms,:now) FROM ({leg}) ORDER BY start_ms LIMIT :cap",
+                    {**params, "cap": cap + 1},
+                ).fetchall()
+                cut = len(rows) > cap
+                count = len(rows) if not cut else int(db.execute(f"SELECT count(*) FROM ({leg})", params).fetchone()[0])
+                merged, merged_cut = ra.merge_intervals(((row[0], row[1]) for row in rows[:cap]), from_ms, to_ms)
+                result[kind] = merged
+                result["counts"][kind] = count
+                result["truncated"] = result["truncated"] or cut or merged_cut
+        return result
+
+    def resolve_selection(self, selection: "ra.Selection", cap: int,
+                          downloadable_only: bool = False) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
+        """Rows of an export or delete selection: (rows, missing, matching total).
+
+        Explicit ids: unknown ones go to missing ('not_found'), and with
+        downloadable_only so do ones that cannot be downloaded. A filter must
+        still match expected_count, and at most cap rows may be selected.
+        """
+        now_ms = self._now_ms()
+        if selection.items is not None:
+            with self._lock, self._connect() as db:
+                found = self._archive_rows(db, selection.items)
+            rows, missing = [], []
+            for kind, ident in selection.items:
+                item = found.get((kind, ident))
+                if item is None:
+                    missing.append({"kind": kind, "id": ident, "reason": "not_found"})
+                elif downloadable_only and not item["downloadable"]:
+                    missing.append({"kind": kind, "id": ident, "reason": "not_downloadable"})
+                else:
+                    rows.append(item)
+            return rows, missing, len(found)
+        archive_filter = selection.filter
+        union, params = self._archive_legs(archive_filter, now_ms)
+        with self._lock, self._connect() as db:
+            totals = self._counts(db, union, params)
+            total = totals["audio"] + totals["scan"]
+            if total != selection.expected_count:
+                raise ArchiveError(409, ra.ARCHIVE_SELECTION_CHANGED, "the matching records changed", count=total)
+            if downloadable_only:
+                union, params = self._archive_legs(archive_filter, now_ms, downloadable_only=True)
+                downloadable = self._counts(db, union, params)
+                selected = downloadable["audio"] + downloadable["scan"]
+            else:
+                selected = total
+            if selected > cap:
+                raise ArchiveError(413, ra.ARCHIVE_TOO_MANY_ITEMS, f"at most {cap} records per request",
+                                   count=selected, limit=cap)
+            keys = [
+                (row[0], row[1]) for row in db.execute(
+                    f"SELECT kind,id FROM ({union}) ORDER BY start_ms,kind,id LIMIT :cap", {**params, "cap": cap + 1},
+                )
+            ]
+            found = self._archive_rows(db, keys)
+        return [found[key] for key in keys if key in found], [], total
+
+    def _delete_segment_batch(self, ids: Sequence[str], cutoff_ms: Optional[int] = None) -> Dict[str, Any]:
+        """Delete finished segments: re-checked under the lock, files first, then the rows in one transaction.
+
+        With cutoff_ms (retention) a row that no longer matches the retention
+        predicate is left alone silently. An emptied finished session goes too.
+        """
+        outcome: Dict[str, Any] = {"deleted": [], "bytes": 0, "sessions": 0, "skipped": [], "failed": 0}
+        with self._lock:
+            with self._connect() as db:
+                marks = ",".join("?" * len(ids)) or "NULL"
+                rows = {
+                    row["id"]: row for row in db.execute(
+                        "SELECT g.id,g.session_id,g.finished_at,g.end_ms,g.byte_count,g.temp_name,g.file_name,"
+                        "a.finished_at AS session_finished FROM audio_segments g JOIN audio_sessions a "
+                        f"ON a.id=g.session_id WHERE g.id IN ({marks})",
+                        list(ids),
+                    )
+                }
+            removable = []
+            for ident in ids:
+                row = rows.get(ident)
+                if row is None:
+                    if cutoff_ms is None:
+                        outcome["skipped"].append(("audio", ident, ra.ARCHIVE_NOT_FOUND))
+                    continue
+                if row["finished_at"] is None:
+                    if cutoff_ms is None:
+                        outcome["skipped"].append(("audio", ident, ra.ARCHIVE_ITEM_ACTIVE))
+                    continue
+                if cutoff_ms is not None and not (
+                    row["session_finished"] is not None and row["end_ms"] is not None and row["end_ms"] < cutoff_ms
+                ):
+                    continue
+                try:
+                    paths = [
+                        path for path in (
+                            self._managed_audio_path(self.temp_dir, row["temp_name"], f"{ident}.part"),
+                            self._managed_audio_path(self.audio_dir, row["file_name"], f"{ident}.webm"),
+                        ) if path is not None
+                    ]
+                    self._unlink_audio_files(paths)
+                except OSError:
+                    outcome["failed"] += 1
+                    outcome["skipped"].append(("audio", ident, ra.ARCHIVE_STORAGE_ERROR))
+                    continue
+                removable.append(row)
+            if removable:
+                try:
+                    with self._connect() as db:
+                        db.executemany("DELETE FROM audio_segments WHERE id=?", [(row["id"],) for row in removable])
+                        for row in removable:
+                            db.execute(
+                                "UPDATE audio_sessions SET byte_count=MAX(0,byte_count-?) WHERE id=?",
+                                (row["byte_count"], row["session_id"]),
+                            )
+                except sqlite3.Error:
+                    outcome["failed"] += len(removable)
+                    outcome["skipped"].extend(("audio", row["id"], ra.ARCHIVE_STORAGE_ERROR) for row in removable)
+                    return outcome
+            outcome["deleted"] = [row["id"] for row in removable]
+            outcome["bytes"] = sum(int(row["byte_count"]) for row in removable)
+            for session_id in dict.fromkeys(row["session_id"] for row in removable):
+                try:
+                    if self._delete_session_if_empty(session_id):
+                        outcome["sessions"] += 1
+                except (OSError, sqlite3.Error, ValueError):
+                    outcome["failed"] += 1
+        return outcome
+
+    @staticmethod
+    def _archive_scan_check(row: sqlite3.Row) -> Optional[str]:
+        if not row["archived"]:
+            return ra.ARCHIVE_NOT_FOUND
+        if row["finished_at"] is None:
+            return ra.ARCHIVE_ITEM_ACTIVE
+        return None
+
+    def archive_delete(self, entries: Sequence[Tuple[str, str]]) -> Dict[str, Any]:
+        """Delete records by id: audio first, then scans, 50 per batch. Marker sets and settings stay."""
+        result: Dict[str, Any] = {
+            "deleted": {"audio": 0, "scan": 0}, "deleted_scan_ids": [], "sessions": 0, "bytes": 0,
+            "skipped": [], "skipped_count": 0,
+        }
+        skipped: List[Tuple[str, str, str]] = []
+        audio = [ident for kind, ident in entries if kind == "audio"]
+        scans = [ident for kind, ident in entries if kind == "scan"]
+        for batch in _chunks(audio, max(1, int(ra.DELETE_BATCH_ITEMS))):
+            try:
+                outcome = self._delete_segment_batch(batch)
+            except sqlite3.Error:
+                skipped.extend(("audio", ident, ra.ARCHIVE_STORAGE_ERROR) for ident in batch)
+                continue
+            result["deleted"]["audio"] += len(outcome["deleted"])
+            result["bytes"] += outcome["bytes"]
+            result["sessions"] += outcome["sessions"]
+            skipped.extend(outcome["skipped"])
+        for batch in _chunks(scans, max(1, int(ra.DELETE_BATCH_ITEMS))):
+            for scan_id in batch:
+                try:
+                    code, size = self._delete_scan(scan_id, self._archive_scan_check)
+                except sqlite3.Error:
+                    code, size = ra.ARCHIVE_STORAGE_ERROR, 0
+                if code is not None:
+                    skipped.append(("scan", scan_id, code))
+                    continue
+                result["deleted"]["scan"] += 1
+                result["deleted_scan_ids"].append(scan_id)
+                result["bytes"] += size
+        result["skipped_count"] = len(skipped)
+        result["skipped"] = [
+            {"kind": kind, "id": ident, "code": code, "error": ra.ARCHIVE_ERROR_MESSAGES[code]}
+            for kind, ident, code in skipped[:ra.SKIPPED_REPORT_LIMIT]
+        ]
+        return result
+
+    def archive_audio_entry(self, segment_id: str) -> Dict[str, Any]:
+        ident = _id(segment_id)
+        with self._lock, self._connect() as db:
+            row = db.execute(
+                "SELECT id,session_id,start_ms,end_ms,duration_s,byte_count,status,frequency_hz,vfo_index,mode,"
+                "bandwidth_hz,metadata,finished_at,file_name FROM audio_segments WHERE id=?",
+                (ident,),
+            ).fetchone()
+        if row is None:
+            raise ArchiveError(404, ra.ARCHIVE_NOT_FOUND)
+        item = self._audio_item(row)
+        raw_mode = _loads_dict(row["metadata"]).get("mode")
+        item["raw_mode"] = raw_mode if isinstance(raw_mode, str) else None
+        return item
+
+    def archive_scan_entry(self, scan_id: str) -> Dict[str, Any]:
+        """An archived scan that is not being deleted, with what its export needs."""
+        ident = _id(scan_id)
+        with self._lock, self._connect() as db:
+            row = db.execute(
+                "SELECT id,start_ms,end_ms,byte_count,status,start_hz,end_hz,fft_size,trace_count,candidate_count,"
+                "source,metadata,finished_at FROM scans WHERE id=? AND archived=1 AND status!='deleting'",
+                (ident,),
+            ).fetchone()
+            if row is None:
+                raise ArchiveError(404, ra.ARCHIVE_NOT_FOUND)
+            candidate_bytes = db.execute(
+                "SELECT coalesce(sum(length(payload)),0) FROM candidates WHERE scan_id=?", (ident,),
+            ).fetchone()[0]
+        item = self._scan_item(row)
+        metadata = _loads_dict(row["metadata"])
+        config = metadata.get("config") if isinstance(metadata.get("config"), dict) else {}
+        trace_format, supported = ra.trace_format_of(config)
+        item.update({
+            "config": config,
+            "trace_format": trace_format,
+            "trace_format_supported": supported,
+            "candidate_bytes": int(candidate_bytes),
+        })
+        return item
+
+    def _scan_alive(self, db: sqlite3.Connection, scan_id: str) -> bool:
+        return db.execute("SELECT 1 FROM scans WHERE id=? AND status!='deleting'", (scan_id,)).fetchone() is not None
+
+    def iter_scan_frames(self, scan_id: str, batch: int = 100) -> Iterator[Tuple[int, str, Optional[bytes]]]:
+        """(sweep, captured_at, 2048 bytes or None when damaged) in sweep order, 100 rows per locked read.
+
+        Raises ArchiveItemGone when the scan is deleted between batches.
+        """
+        ident = _id(scan_id)
+        last_sweep, last_id = -1, 0
+        while True:
+            with self._lock, self._connect() as db:
+                if not self._scan_alive(db, ident):
+                    raise ra.ArchiveItemGone(ident)
+                rows = db.execute(
+                    "SELECT id,sweep,captured_at,payload FROM frames WHERE scan_id=? "
+                    "AND (sweep>? OR (sweep=? AND id>?)) ORDER BY sweep,id LIMIT ?",
+                    (ident, last_sweep, last_sweep, last_id, batch),
+                ).fetchall()
+            for row in rows:
+                yield int(row["sweep"]), row["captured_at"], ra.inflate_trace(row["payload"])
+            if len(rows) < batch:
+                return
+            last_sweep, last_id = int(rows[-1]["sweep"]), int(rows[-1]["id"])
+
+    def iter_scan_candidates(self, scan_id: str, batch: int = 500) -> Iterator[str]:
+        """Stored candidate payloads (JSON text) in frequency order, 500 rows per locked read."""
+        ident = _id(scan_id)
+        key: Optional[Tuple[float, str]] = None
+        while True:
+            with self._lock, self._connect() as db:
+                if not self._scan_alive(db, ident):
+                    raise ra.ArchiveItemGone(ident)
+                if key is None:
+                    rows = db.execute(
+                        "SELECT frequency,candidate_id,payload FROM candidates WHERE scan_id=? "
+                        "ORDER BY frequency,candidate_id LIMIT ?",
+                        (ident, batch),
+                    ).fetchall()
+                else:
+                    rows = db.execute(
+                        "SELECT frequency,candidate_id,payload FROM candidates WHERE scan_id=? "
+                        "AND (frequency>? OR (frequency=? AND candidate_id>?)) ORDER BY frequency,candidate_id LIMIT ?",
+                        (ident, key[0], key[0], key[1], batch),
+                    ).fetchall()
+            for row in rows:
+                yield row["payload"]
+            if len(rows) < batch:
+                return
+            key = (rows[-1]["frequency"], rows[-1]["candidate_id"])
+
+    def archive_scan_preview(self, scan_id: str) -> Dict[str, Any]:
+        """Max and mean of at most 256 evenly spaced traces, reduced to 512 bins, and the top candidates."""
+        ident = _id(scan_id)
+        with self._lock, self._connect() as db:
+            row = db.execute(
+                "SELECT start_hz,end_hz,metadata FROM scans WHERE id=? AND archived=1 AND finished_at IS NOT NULL "
+                "AND status!='deleting'",
+                (ident,),
+            ).fetchone()
+            if row is None:
+                raise ArchiveError(404, ra.ARCHIVE_NOT_FOUND)
+            trace_count = int(db.execute("SELECT count(*) FROM frames WHERE scan_id=?", (ident,)).fetchone()[0])
+            candidate_rows = db.execute(
+                "SELECT payload,peak_hz FROM candidates WHERE scan_id=? ORDER BY peak DESC,candidate_id LIMIT ?",
+                (ident, ra.PREVIEW_MAX_CANDIDATES),
+            ).fetchall()
+        config = _loads_dict(row["metadata"]).get("config")
+        trace_format, supported = ra.trace_format_of(config)
+        picked: List[int] = []
+        if supported and trace_count:
+            wanted = min(trace_count, ra.PREVIEW_MAX_TRACES)
+            positions = sorted({round(index * (trace_count - 1) / max(1, wanted - 1)) for index in range(wanted)})
+            targets = iter(positions)
+            target = next(targets, None)
+            with self._lock, self._connect() as db:
+                # (id, sweep) only, through frames_scan_sweep_order.
+                for position, (frame_id,) in enumerate(db.execute(
+                    "SELECT id FROM frames WHERE scan_id=? ORDER BY sweep,id", (ident,),
+                )):
+                    if target is None:
+                        break
+                    if position == target:
+                        picked.append(int(frame_id))
+                        target = next(targets, None)
+        maximum: Optional[List[float]] = None
+        total: Optional[List[float]] = None
+        used = skipped = 0
+        for batch in _chunks(picked, ra.PREVIEW_BATCH):
+            marks = ",".join("?" * len(batch))
+            with self._lock, self._connect() as db:
+                blobs = [item[0] for item in db.execute(f"SELECT payload FROM frames WHERE id IN ({marks})", list(batch))]
+            for blob in blobs:
+                payload = ra.inflate_trace(blob)
+                if payload is None:
+                    skipped += 1
+                    continue
+                levels = ra.decode_trace(payload, trace_format)
+                if maximum is None or total is None:
+                    maximum, total = list(levels), list(levels)
+                else:
+                    maximum = list(map(max, maximum, levels))
+                    total = [a + b for a, b in zip(total, levels)]
+                used += 1
+        max_db: List[float] = []
+        mean_db: List[float] = []
+        if maximum is not None and total is not None and used:
+            group = ra.TRACE_BYTES // ra.PREVIEW_BINS
+            for bin_index in range(ra.PREVIEW_BINS):
+                low = bin_index * group
+                max_db.append(round(max(maximum[low:low + group]), 1))
+                mean_db.append(round(sum(total[low:low + group]) / (group * used), 1))
+
+        def number(value: Any) -> Optional[float]:
+            return float(value) if _finite_number(value) else None
+
+        candidates = []
+        for candidate in candidate_rows:
+            payload = _loads_dict(candidate["payload"])
+            frequency = number(payload.get("peakFrequencyHz"))
+            candidates.append({
+                "frequency_hz": frequency if frequency is not None else number(candidate["peak_hz"]),
+                "peak_db": number(payload.get("peakDb")),
+                "snr_db": number(payload.get("snrDb")),
+                "bandwidth_hz": number(payload.get("bandwidthHz")),
+            })
+        return {
+            "id": ident,
+            "start_hz": row["start_hz"],
+            "end_hz": row["end_hz"],
+            "bins": ra.PREVIEW_BINS,
+            "trace_format": trace_format,
+            "trace_count": trace_count,
+            "traces_used": used,
+            "traces_skipped": skipped,
+            "max_db": max_db,
+            "mean_db": mean_db,
+            "candidates": candidates,
+        }
+
+    # --- retention ----------------------------------------------------------
+
+    def _retention_days(self) -> Optional[int]:
+        with self._lock, self._connect() as db:
+            return self._valid_retention_days(self._setting(db, "retention_days"))
+
+    @staticmethod
+    def _empty_old_sessions(rows: Iterable[sqlite3.Row], cutoff_ms: int) -> List[str]:
+        old = []
+        for row in rows:
+            finished = _stamp_ms(row["finished_at"])
+            if finished is not None and finished < cutoff_ms:
+                old.append(row["id"])
+        return old
+
+    def retention_preview(self, days: int, now: Optional[datetime] = None) -> Dict[str, Any]:
+        """What apply_retention would remove right now with this limit."""
+        if isinstance(days, bool) or not isinstance(days, int) or days not in ra.RETENTION_DAY_OPTIONS:
+            raise ArchiveError(400, ra.RETENTION_INVALID)
+        now_ms = ra.ms_from_datetime(now or self.clock())
+        cutoff = now_ms - days * ra.DAY_MS
+        params = {"cutoff": cutoff}
+        with self._lock, self._connect() as db:
+            audio, audio_bytes = db.execute(
+                "SELECT count(*),coalesce(sum(g.byte_count),0) FROM audio_segments g JOIN audio_sessions a "
+                f"ON a.id=g.session_id WHERE {_RETENTION_SEGMENT_SQL}", params,
+            ).fetchone()
+            emptied = db.execute(
+                "SELECT count(*) FROM audio_sessions a WHERE a.finished_at IS NOT NULL "
+                "AND EXISTS(SELECT 1 FROM audio_segments g WHERE g.session_id=a.id) "
+                "AND NOT EXISTS(SELECT 1 FROM audio_segments g WHERE g.session_id=a.id "
+                "AND NOT (g.finished_at IS NOT NULL AND g.end_ms IS NOT NULL AND g.end_ms < :cutoff))", params,
+            ).fetchone()[0]
+            empty_rows = db.execute(
+                "SELECT id,finished_at FROM audio_sessions a WHERE a.finished_at IS NOT NULL "
+                "AND NOT EXISTS(SELECT 1 FROM audio_segments g WHERE g.session_id=a.id)"
+            ).fetchall()
+            scans, scan_bytes = db.execute(
+                f"SELECT count(*),coalesce(sum(s.byte_count),0) FROM scans s WHERE {_RETENTION_SCAN_SQL}", params,
+            ).fetchone()
+        return {
+            "days": days,
+            "cutoff_ms": cutoff,
+            "audio": int(audio),
+            "sessions": int(emptied) + len(self._empty_old_sessions(empty_rows, cutoff)),
+            "scans": int(scans),
+            "bytes": int(audio_bytes) + int(scan_bytes),
+        }
+
+    def _retention_remaining(self, cutoff: int) -> bool:
+        params = {"cutoff": cutoff}
+        with self._lock, self._connect() as db:
+            if db.execute(
+                "SELECT 1 FROM audio_segments g JOIN audio_sessions a ON a.id=g.session_id "
+                f"WHERE {_RETENTION_SEGMENT_SQL} LIMIT 1", params,
+            ).fetchone() is not None:
+                return True
+            if db.execute(f"SELECT 1 FROM scans s WHERE {_RETENTION_SCAN_SQL} LIMIT 1", params).fetchone() is not None:
+                return True
+            empty_rows = db.execute(
+                "SELECT id,finished_at FROM audio_sessions a WHERE a.finished_at IS NOT NULL "
+                "AND NOT EXISTS(SELECT 1 FROM audio_segments g WHERE g.session_id=a.id)"
+            ).fetchall()
+        return bool(self._empty_old_sessions(empty_rows, cutoff))
+
+    def apply_retention(self, now: Optional[datetime] = None, budget_s: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        """One retention pass: finished items whose end is older than the limit.
+
+        Order: finished segments of finished sessions (an emptied session goes
+        with its last segment), then finished sessions already empty before
+        the cutoff, then finished archived scans. Never: marker sets, settings,
+        open sessions and their segments, running or unarchived scans. Returns
+        None when Off or when another pass is running.
+        """
+        if not self._retention_mutex.acquire(blocking=False):
+            return None
+        try:
+            days = self._retention_days()
+            if days is None:
+                return None
+            now_ms = ra.ms_from_datetime(now or self.clock())
+            cutoff = now_ms - days * ra.DAY_MS
+            started = self.monotonic()
+            limit = max(1, int(ra.RETENTION_MAX_ITEMS_PER_PASS))
+            batch_size = max(1, int(ra.RETENTION_CANDIDATE_BATCH))
+            result: Dict[str, Any] = {"audio": 0, "sessions": 0, "scans": 0, "bytes": 0, "failed": 0, "more": False}
+            handled = 0
+            stopped = False
+
+            def exhausted() -> bool:
+                return handled >= limit or (budget_s is not None and self.monotonic() - started >= budget_s)
+
+            params: Dict[str, Any] = {"cutoff": cutoff}
+            last_end, last_id = -1, ""
+            while not stopped:
+                if exhausted():
+                    stopped = True
+                    break
+                with self._lock, self._connect() as db:
+                    rows = db.execute(
+                        "SELECT g.id,g.end_ms FROM audio_segments g JOIN audio_sessions a ON a.id=g.session_id "
+                        f"WHERE {_RETENTION_SEGMENT_SQL} AND (g.end_ms>:last_end OR (g.end_ms=:last_end AND g.id>:last_id)) "
+                        "ORDER BY g.end_ms,g.id LIMIT :batch",
+                        {**params, "last_end": last_end, "last_id": last_id, "batch": batch_size},
+                    ).fetchall()
+                if not rows:
+                    break
+                last_end, last_id = int(rows[-1]["end_ms"]), rows[-1]["id"]
+                ids = [row["id"] for row in rows][:limit - handled]
+                try:
+                    outcome = self._delete_segment_batch(ids, cutoff_ms=cutoff)
+                except (OSError, sqlite3.Error):
+                    result["failed"] += len(ids)
+                else:
+                    result["audio"] += len(outcome["deleted"])
+                    result["bytes"] += outcome["bytes"]
+                    result["sessions"] += outcome["sessions"]
+                    result["failed"] += outcome["failed"]
+                handled += len(ids)
+
+            last_session = ""
+            while not stopped:
+                if exhausted():
+                    stopped = True
+                    break
+                with self._lock, self._connect() as db:
+                    rows = db.execute(
+                        "SELECT id,finished_at FROM audio_sessions a WHERE a.finished_at IS NOT NULL "
+                        "AND NOT EXISTS(SELECT 1 FROM audio_segments g WHERE g.session_id=a.id) AND a.id>? "
+                        "ORDER BY a.id LIMIT ?",
+                        (last_session, batch_size),
+                    ).fetchall()
+                if not rows:
+                    break
+                last_session = rows[-1]["id"]
+                for session_id in self._empty_old_sessions(rows, cutoff):
+                    if exhausted():
+                        stopped = True
+                        break
+                    try:
+                        if self._delete_session_if_empty(session_id):
+                            result["sessions"] += 1
+                    except (OSError, sqlite3.Error, ValueError):
+                        result["failed"] += 1
+                    handled += 1
+
+            last_end, last_id = -1, ""
+            while not stopped:
+                if exhausted():
+                    stopped = True
+                    break
+                with self._lock, self._connect() as db:
+                    rows = db.execute(
+                        f"SELECT s.id,s.end_ms FROM scans s WHERE {_RETENTION_SCAN_SQL} "
+                        "AND (s.end_ms>:last_end OR (s.end_ms=:last_end AND s.id>:last_id)) ORDER BY s.end_ms,s.id LIMIT :batch",
+                        {**params, "last_end": last_end, "last_id": last_id, "batch": batch_size},
+                    ).fetchall()
+                if not rows:
+                    break
+                last_end, last_id = int(rows[-1]["end_ms"]), rows[-1]["id"]
+                for row in rows:
+                    if exhausted():
+                        stopped = True
+                        break
+
+                    def still_expired(scan: sqlite3.Row) -> Optional[str]:
+                        if scan["archived"] and scan["finished_at"] is not None and scan["end_ms"] is not None \
+                                and scan["end_ms"] < cutoff:
+                            return None
+                        return "kept"
+
+                    try:
+                        code, size = self._delete_scan(row["id"], still_expired)
+                    except sqlite3.Error:
+                        result["failed"] += 1
+                    else:
+                        if code is None:
+                            result["scans"] += 1
+                            result["bytes"] += size
+                    handled += 1
+            if stopped:
+                result["more"] = self._retention_remaining(cutoff)
+            with self._lock, self._connect() as db:
+                self._put_setting(db, "retention_last_run", {"ms": now_ms, "days": days, **result})
+            if self.log is not None and (result["audio"] or result["scans"] or result["sessions"] or result["failed"]):
+                self.log(ra.retention_log_line(days, result))
+            return result
+        finally:
+            self._retention_mutex.release()
 
     def get_markers(self, marker_id: Optional[str] = None) -> Any:
         with self._lock, self._connect() as db:
@@ -1642,7 +3092,7 @@ class ReceiverRecordStore:
         if not isinstance(overwrite, bool):
             raise ValueError("overwrite must be boolean")
         ident = _id(payload["id"]) if payload.get("id") is not None else (str(uuid.uuid4()) if marker_id is None else _id(marker_id))
-        name, stamp = payload["name"].strip(), _now()
+        name, stamp = payload["name"].strip(), self._now()
         with self._lock, self._connect() as db:
             existing = db.execute("SELECT id FROM markers WHERE name=?", (name,)).fetchone()
             if existing is not None and existing["id"] != ident:

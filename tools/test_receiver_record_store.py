@@ -43,8 +43,19 @@ class ReceiverRecordStoreTests(unittest.TestCase):
         self.assertEqual([str(item.message) for item in caught if issubclass(item.category, ResourceWarning)], [])
 
     def test_settings_candidate_upsert_and_sql_pagination(self):
-        self.assertEqual(self.store.get_settings(), {"auto_spectrum_recording": False})
-        self.assertEqual(self.store.update_settings({"auto_spectrum_recording": True}), {"auto_spectrum_recording": True})
+        defaults = {
+            "auto_spectrum_recording": False,
+            "retention_days": None,
+            "retention_options": [1, 3, 7, 14, 30, 60, 90],
+            "retention_last_run_ms": None,
+            "retention_last_removed": None,
+            "retention_running": False,
+        }
+        self.assertEqual(self.store.get_settings(), defaults)
+        self.assertEqual(
+            self.store.update_settings({"auto_spectrum_recording": True}),
+            {**defaults, "auto_spectrum_recording": True},
+        )
         scan = self.store.create_scan("receiver", {"start_hz": 100, "end_hz": 500}, False)
         candidates = [
             {"id": 1, "meanPeakFrequencyHz": 120, "minPeakFrequencyHz": 110, "maxPeakFrequencyHz": 130, "maxPeakDb": -50, "hits": 2},
