@@ -62,6 +62,7 @@ import math
 import os
 import re
 import secrets
+import signal
 import socket
 import sqlite3
 import tempfile
@@ -85,6 +86,7 @@ import receiver_archive as ra
 from receiver_archive import ArchiveError
 from receiver_record_store import (
     DEFAULT_DATA_DIR,
+    STALE_RECORDING_SECONDS,
     ReceiverConflictError,
     ReceiverRecordStore,
     _utc_offset_minutes,
@@ -2654,6 +2656,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def _receiver_post(self, parsed: Any) -> bool:
         path = parsed.path
         store = self.console_server.receiver_store
+        activity = self.console_server.receiver_activity
         if path.startswith("/api/receiver/archive/"):
             try:
                 self._archive_post(parsed)
@@ -2670,6 +2673,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 if not isinstance(payload, dict) or not {"source", "config", "archive"}.issubset(payload):
                     raise ValueError("scan body requires source, config, and archive")
                 result = store.create_scan(payload["source"], payload["config"], payload["archive"])
+                activity.wrote(opened=f"scan:{result['id']}")
                 self._send_json(result, HTTPStatus.CREATED)
             elif path == "/api/receiver/marker-sets":
                 payload = self._read_json(256 * 1024)
@@ -2695,38 +2699,51 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     payload = self._read_json(2 * 1024 * 1024)
                     if not isinstance(payload, dict) or not isinstance(payload.get("candidates"), list):
                         raise ValueError("candidates must be an array")
-                    self._send_json({"upserted": store.upsert_candidates(parts[3], payload["candidates"])})
+                    upserted = store.upsert_candidates(parts[3], payload["candidates"])
+                    activity.wrote()
+                    self._send_json({"upserted": upserted})
                 elif len(parts) == 5 and parts[:3] == ["api", "receiver", "scans"] and parts[4] == "trace":
                     sweep = _query_int(parse_qs(parsed.query), "sweep", None)
                     if sweep is None:
                         raise ValueError("sweep query parameter is required")
                     raw = self._read_binary(2048)
                     frame_id = store.add_trace(parts[3], sweep, raw)
+                    activity.wrote()
                     self._send_json({"stored": frame_id is not None, "id": frame_id})
                 elif len(parts) == 5 and parts[:3] == ["api", "receiver", "scans"] and parts[4] == "finish":
                     payload = self._read_json(4096)
                     if not isinstance(payload, dict):
                         raise ValueError("request must be a JSON object")
-                    self._send_json(store.finish_scan(parts[3], payload.get("status"), payload.get("trace_upload_failures")))
+                    finished = store.finish_scan(parts[3], payload.get("status"), payload.get("trace_upload_failures"))
+                    activity.wrote(closed=f"scan:{parts[3]}")
+                    self._send_json(finished)
                 elif path == "/api/receiver/audio-sessions":
                     self._read_optional_json()
-                    self._send_json({"id": store.create_audio_session()["id"]}, HTTPStatus.CREATED)
+                    session_id = store.create_audio_session()["id"]
+                    activity.wrote(opened=f"audio:{session_id}")
+                    self._send_json({"id": session_id}, HTTPStatus.CREATED)
                 elif len(parts) == 5 and parts[:3] == ["api", "receiver", "audio-sessions"] and parts[4] == "segments":
                     payload = self._read_json(16 * 1024)
-                    self._send_json({"id": store.create_audio_segment(parts[3], payload)["id"]}, HTTPStatus.CREATED)
+                    segment_id = store.create_audio_segment(parts[3], payload)["id"]
+                    activity.wrote()
+                    self._send_json({"id": segment_id}, HTTPStatus.CREATED)
                 elif len(parts) == 5 and parts[:3] == ["api", "receiver", "audio-sessions"] and parts[4] == "finish":
                     payload = self._read_optional_json()
                     if not isinstance(payload, dict):
                         raise ValueError("request must be a JSON object")
-                    self._send_json(store.finish_audio_session(
-                        parts[3], payload.get("finalize_open_segments", False),
-                    ))
+                    finished = store.finish_audio_session(parts[3], payload.get("finalize_open_segments", False))
+                    activity.wrote(closed=f"audio:{parts[3]}")
+                    self._send_json(finished)
                 elif len(parts) == 5 and parts[:3] == ["api", "receiver", "audio-segments"] and parts[4] == "chunk":
                     raw = self._read_binary(1024 * 1024)
-                    self._send_json(store.append_segment_audio(parts[3], raw))
+                    appended = store.append_segment_audio(parts[3], raw)
+                    activity.wrote()
+                    self._send_json(appended)
                 elif len(parts) == 5 and parts[:3] == ["api", "receiver", "audio-segments"] and parts[4] == "finish":
                     payload = self._read_json(4096)
-                    self._send_json(store.finish_segment(parts[3], payload))
+                    finished = store.finish_segment(parts[3], payload)
+                    activity.wrote()
+                    self._send_json(finished)
                 else:
                     return False
             return True
@@ -2964,8 +2981,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/health":
             # For container and service health checks: no Data Out read, no
-            # broker call, no file access.
-            self._send_json({"ok": True, "version": self.console_server.version})
+            # broker call, no file access. receiver_busy tells the updaters to
+            # wait while the Receiver records or archives a scan.
+            self._send_json({
+                "ok": True,
+                "version": self.console_server.version,
+                "receiver_busy": self.console_server.receiver_activity.busy(),
+            })
             return
         if parsed.path == "/api/preferences":
             self._send_json(self.console_server.preferences.snapshot())
@@ -3288,6 +3310,43 @@ class _Flight:
         self.error: Optional[BaseException] = None
 
 
+# /api/health reports receiver_busy while the Receiver writes records, so the
+# updaters do not restart the console in the middle of a recording or scan:
+# any Receiver write in the last RECEIVER_BUSY_WRITE_S, or an audio session or
+# scan still open with a write in the store's stale window (after that a
+# restart would close it as Interrupted anyway).
+RECEIVER_BUSY_WRITE_S = 30.0
+RECEIVER_BUSY_OPEN_S = float(STALE_RECORDING_SECONDS)
+
+
+class ReceiverActivity:
+    """In-memory record of Receiver writes for /api/health; reads no file."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic):
+        self.clock = clock
+        self._lock = threading.Lock()
+        self._last_write: Optional[float] = None
+        self._open: Set[str] = set()
+
+    def wrote(self, opened: Optional[str] = None, closed: Optional[str] = None) -> None:
+        """A Receiver write; ``opened``/``closed`` name a session or scan that starts or ends with it."""
+        with self._lock:
+            self._last_write = self.clock()
+            if opened:
+                self._open.add(opened)
+            if closed:
+                self._open.discard(closed)
+
+    def busy(self) -> bool:
+        with self._lock:
+            if self._last_write is None:
+                return False
+            age = self.clock() - self._last_write
+            if age < RECEIVER_BUSY_WRITE_S:
+                return True
+            return bool(self._open) and age < RECEIVER_BUSY_OPEN_S
+
+
 class _SingleFlight:
     """Run at most one call per key; concurrent callers wait for its result."""
 
@@ -3411,6 +3470,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
             receiver_data_dir if receiver_data_dir is not None else DEFAULT_DATA_DIR,
             log=lambda message: print(message, flush=True),
         )
+        self.receiver_activity = ReceiverActivity()
         # Prepared Records ZIPs (single use, 120 s) and the two stream slots
         # shared by selection and single-scan ZIPs.
         self.archive_exports = ra.ArchiveExports()
@@ -3436,6 +3496,11 @@ class GroundConsoleServer(ThreadingHTTPServer):
         scheduler = self._retention_scheduler
         if scheduler is not None:
             scheduler.wake()
+
+    def stop_retention(self) -> None:
+        scheduler = getattr(self, "_retention_scheduler", None)
+        if scheduler is not None:
+            scheduler.stop()
 
     def server_close(self) -> None:
         try:
@@ -3884,6 +3949,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             f"to the Raspberry; set your own SDR_DOA_ADMIN_PASSWORD in {env_path}.",
             flush=True,
         )
+    # docker stop and systemctl stop send SIGTERM. Python as PID 1 in the
+    # container would ignore it without a handler, and natively its default
+    # ends the process at once; both cut a Receiver write in half. A second
+    # SIGTERM during the stop is ignored.
+    def _terminate(signum: int, frame: Any) -> None:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        raise KeyboardInterrupt
+
+    previous_sigterm = signal.signal(signal.SIGTERM, _terminate)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -3891,7 +3965,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     finally:
         if server.mqtt_monitor is not None:
             server.mqtt_monitor.stop()
-        server.server_close()
+        server.stop_retention()
+        # Wait for a Receiver write in progress (an audio chunk is fsynced,
+        # then counted in the database) and let none start after it, so the
+        # stop never leaves a segment file longer than its metadata. Request
+        # threads are daemons and end with the process.
+        with server.receiver_store._lock:
+            server.server_close()
+        signal.signal(signal.SIGTERM, previous_sigterm)
     return 0
 
 
