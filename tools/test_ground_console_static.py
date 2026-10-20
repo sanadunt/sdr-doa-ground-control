@@ -668,6 +668,10 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
                 headers={"Origin": "https://attacker.invalid"},
             )
             self.assertEqual(rejected_create.status, 403)
+            self.assertEqual(
+                _decode_json(self, rejected_create, "rejected Receiver mutation"),
+                {"ok": False, "code": "ORIGIN_REJECTED", "error": "Receiver mutation requires a same-origin loopback request"},
+            )
             self.assertEqual(console.server.receiver_store.list_records()["total"], 0)
 
             rejected_missing_origin = console.request(
@@ -676,7 +680,25 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
                 headers={"Origin": ""},
             )
             self.assertEqual(rejected_missing_origin.status, 403)
+            self.assertEqual(_decode_json(self, rejected_missing_origin, "missing Origin")["code"], "ORIGIN_REJECTED")
             self.assertEqual(console.server.receiver_store.list_records()["total"], 0)
+
+            # Receiver reads come from this console's own pages only.
+            store = console.server.receiver_store
+            session = store.create_audio_session()
+            segment = store.create_audio_segment(session["id"], {
+                "vfo_index": 0, "frequency_hz": 144_000_000, "mode": "nfm", "bandwidth_hz": 12_500,
+                "codec": "audio/webm;codecs=opus", "started_at": "2026-09-29T00:00:00Z",
+            })
+            store.append_segment_audio(segment["id"], b"protected audio")
+            store.finish_segment(segment["id"], {"ended_at": "2026-09-29T00:00:01Z", "duration_seconds": 1})
+            for path in (f"/api/receiver/audio-segments/{segment['id']}/audio", "/api/receiver/archive/items"):
+                for headers in ({"Sec-Fetch-Site": "cross-site"}, {"Host": f"attacker.invalid:{console.port}"}):
+                    refused = console.request("GET", path, headers=headers)
+                    self.assertEqual(refused.status, 403, (path, headers))
+                    self.assertEqual(_decode_json(self, refused, "refused Receiver read")["code"], "ORIGIN_REJECTED")
+                    self.assertNotIn(b"protected audio", refused.body)
+                self.assertEqual(console.request("GET", path, headers={"Sec-Fetch-Site": "same-origin"}).status, 200)
 
             marker = console.server.receiver_store.save_markers({
                 "name": "Protected marker",
@@ -688,6 +710,7 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
                 headers={"Origin": "https://attacker.invalid"},
             )
             self.assertEqual(rejected_delete.status, 403)
+            self.assertEqual(_decode_json(self, rejected_delete, "rejected Receiver delete")["code"], "ORIGIN_REJECTED")
             marker_sets = _decode_json(self, console.request("GET", "/api/receiver/marker-sets"), "protected marker set")
             self.assertEqual([item["id"] for item in marker_sets["items"]], [marker["id"]])
 

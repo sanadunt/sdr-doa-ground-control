@@ -43,8 +43,19 @@ class ReceiverRecordStoreTests(unittest.TestCase):
         self.assertEqual([str(item.message) for item in caught if issubclass(item.category, ResourceWarning)], [])
 
     def test_settings_candidate_upsert_and_sql_pagination(self):
-        self.assertEqual(self.store.get_settings(), {"auto_spectrum_recording": False})
-        self.assertEqual(self.store.update_settings({"auto_spectrum_recording": True}), {"auto_spectrum_recording": True})
+        defaults = {
+            "auto_spectrum_recording": False,
+            "retention_days": None,
+            "retention_options": [1, 3, 7, 14, 30, 60, 90],
+            "retention_last_run_ms": None,
+            "retention_last_removed": None,
+            "retention_running": False,
+        }
+        self.assertEqual(self.store.get_settings(), defaults)
+        self.assertEqual(
+            self.store.update_settings({"auto_spectrum_recording": True}),
+            {**defaults, "auto_spectrum_recording": True},
+        )
         scan = self.store.create_scan("receiver", {"start_hz": 100, "end_hz": 500}, False)
         candidates = [
             {"id": 1, "meanPeakFrequencyHz": 120, "minPeakFrequencyHz": 110, "maxPeakFrequencyHz": 130, "maxPeakDb": -50, "hits": 2},
@@ -730,13 +741,14 @@ class ReceiverHttpTests(unittest.TestCase):
         self.server.server_close()
         self.temp.cleanup()
 
-    def request(self, method, path, body=None):
+    def request(self, method, path, body=None, headers=None):
         connection = self.http.HTTPConnection("127.0.0.1", self.port, timeout=10)
-        headers = {"Origin": f"http://127.0.0.1:{self.port}"}
+        request_headers = {"Origin": f"http://127.0.0.1:{self.port}"}
         if body is not None:
             body = json.dumps(body).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        connection.request(method, path, body=body, headers=headers)
+            request_headers["Content-Type"] = "application/json"
+        request_headers.update(headers or {})
+        connection.request(method, path, body=body, headers=request_headers)
         response = connection.getresponse()
         payload = response.read()
         connection.close()
@@ -803,6 +815,56 @@ class ReceiverHttpTests(unittest.TestCase):
         status, headers, _ = self.request("GET", f"/api/receiver/audio-segments/{segment_id}/audio")
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "audio/webm")
+
+    def test_receiver_reads_need_this_consoles_pages(self):
+        for headers in (
+            {"Sec-Fetch-Site": "cross-site"},
+            {"Sec-Fetch-Site": "same-site"},
+            {"Host": f"evil.example:{self.port}"},
+            {"Host": f"127.0.0.1:{self.port + 1 if self.port < 65535 else self.port - 1}"},
+        ):
+            with self.subTest(headers=headers):
+                status, _, body = self.request("GET", "/api/receiver/settings", headers=headers)
+                self.assertEqual(status, 403)
+                self.assertEqual(json.loads(body)["code"], "ORIGIN_REJECTED")
+        for headers in (
+            {}, {"Sec-Fetch-Site": "none"}, {"Sec-Fetch-Site": "same-origin"},
+            {"Host": f"localhost:{self.port}"}, {"Host": f"[::1]:{self.port}"},
+        ):
+            with self.subTest(headers=headers):
+                status, _, _ = self.request("GET", "/api/receiver/settings", headers=headers)
+                self.assertEqual(status, 200)
+
+    def _finished_segment(self, session_id, finish=True):
+        _, _, segment = self.request("POST", f"/api/receiver/audio-sessions/{session_id}/segments", AUDIO_METADATA)
+        segment_id = json.loads(segment)["id"]
+        connection = self.http.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        connection.request("POST", f"/api/receiver/audio-segments/{segment_id}/chunk", body=b"audio",
+                           headers={"Origin": f"http://127.0.0.1:{self.port}", "Content-Type": "application/octet-stream"})
+        self.assertEqual(connection.getresponse().status, 200)
+        connection.close()
+        if finish:
+            status, _, _ = self.request("POST", f"/api/receiver/audio-segments/{segment_id}/finish",
+                                        {"ended_at": "2026-09-29T00:00:01Z", "duration_seconds": 1})
+            self.assertEqual(status, 200)
+        return segment_id
+
+    def test_deleting_the_last_segment_removes_a_finished_session_only(self):
+        _, _, finished = self.request("POST", "/api/receiver/audio-sessions", {})
+        finished_id = json.loads(finished)["id"]
+        last = self._finished_segment(finished_id)
+        self.assertEqual(self.request("POST", f"/api/receiver/audio-sessions/{finished_id}/finish", {})[0], 200)
+
+        _, _, open_session = self.request("POST", "/api/receiver/audio-sessions", {})
+        open_id = json.loads(open_session)["id"]
+        done = self._finished_segment(open_id)
+
+        status, _, body = self.request("DELETE", f"/api/receiver/audio-segments/{last}")
+        self.assertEqual((status, json.loads(body)), (200, {"deleted": True}))
+        status, _, _ = self.request("DELETE", f"/api/receiver/audio-segments/{done}")
+        self.assertEqual(status, 200)
+        _, _, records = self.request("GET", "/api/receiver/records?type=audio-session")
+        self.assertEqual([item["id"] for item in json.loads(records)["items"]], [open_id])
 
     def test_receiver_page_csp_has_no_remote_font_hosts(self):
         receiver = self.site / "receiver"
