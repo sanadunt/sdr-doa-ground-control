@@ -1,29 +1,51 @@
 # GitHub Release and GHCR images of one VERSION.
 #
-#   1. Bump VERSION on main (X.Y.Z, or X.Y.Z-rc.1 for a prerelease).
+#   1. Bump VERSION on main (X.Y.Z, or X.Y.Z-rc.1 for a prerelease), together
+#      with the files that name it (QUICKSTART.md, "Rilis di GitHub"): the
+#      image: tags of docker-compose.yml, docker-compose.release.yml and
+#      docker-compose.agent.yml and sdr-doa-agent:<V> in Dockerfile.agent; a new
+#      major also changes DEFAULT_CHANNEL in packaging/docker/sdr-doa-docker
+#      and ${SDR_DOA_IMAGE_TAG:-N} in docker-compose.ghcr.yml. The test job
+#      fails when one of them is left behind.
 #   2. Push the tag v<VERSION> on that commit, or run this workflow on main
 #      (Actions > Release > Run workflow), which creates the tag when missing.
 #
 # The run tests the tree (ci.yml), builds the tarballs with make_release.py,
 # publishes the release with the console and agent tarballs, sdr-doa-docker
-# and SHA256SUMS, and pushes the images built from those same tarballs:
+# and SHA256SUMS, and then pushes the images built from those same tarballs:
 #   ghcr.io/<owner>/sdr-doa-ground-console  linux/amd64, linux/arm64
 #   ghcr.io/<owner>/sdr-doa-rdf-sdr-agent   linux/amd64, linux/arm64, linux/arm/v7
-# tagged <V>, <MAJOR>.<MINOR>, <MAJOR> and latest (a prerelease only <V>).
+# tagged <V>. The channel tags <MAJOR>.<MINOR>, <MAJOR> and latest then point
+# at that same image, each only when no higher stable release it covers
+# exists (release_check.py channels), so an older release built late or a
+# rerun of an old tag never moves them back. A prerelease gets only <V>.
+# An image of <V> that is already on ghcr.io from this commit is not built
+# again (its digest stays what the hosts run); force_images rebuilds it.
 # The repository is public, so assets and (once the packages are public)
 # images can be fetched without a GitHub login.
+#
+# Before each release, bump the base image digest in PYTHON_IMAGE below (the
+# images job) to get the Debian security fixes; Dependabot does not see it.
 name: Release
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      force_images:
+        description: Build and push the images of this version again, even when ghcr.io already has them
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
+# One release run at a time, whatever its ref: a tag push and a dispatch of
+# the same version run one after the other. GitHub keeps one pending run per
+# group, so a third run queued meanwhile cancels the second; run that again.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 defaults:
@@ -48,10 +70,11 @@ jobs:
       sha: ${{ steps.tag.outputs.sha }}
       create_tag: ${{ steps.tag.outputs.create_tag }}
       prerelease: ${{ steps.tag.outputs.prerelease }}
+      newest: ${{ steps.images.outputs.newest }}
       console_image: ${{ steps.images.outputs.console_image }}
-      console_tags: ${{ steps.images.outputs.console_tags }}
+      console_ref: ${{ steps.images.outputs.console_ref }}
       agent_image: ${{ steps.images.outputs.agent_image }}
-      agent_tags: ${{ steps.images.outputs.agent_tags }}
+      agent_ref: ${{ steps.images.outputs.agent_ref }}
       labels: ${{ steps.images.outputs.labels }}
     steps:
       - name: Check out with the BrowSDR submodule
@@ -83,7 +106,7 @@ jobs:
           GIT_REF: ${{ github.ref }}
         run: python3 tools/release_check.py tag --event "$EVENT_NAME" --ref "$GIT_REF"
 
-      - name: Image names, tags and labels
+      - name: Image names, labels and whether this is the newest release
         id: images
         env:
           OWNER: ${{ github.repository_owner }}
@@ -91,8 +114,9 @@ jobs:
           REVISION: ${{ steps.tag.outputs.sha }}
           SOURCE: ${{ github.server_url }}/${{ github.repository }}
         run: |
-          python3 tools/release_check.py images --owner "$OWNER" --version "$VERSION" \
-            --revision "$REVISION" --source "$SOURCE"
+          # The release tags of this checkout (fetch-depth: 0 fetched them all).
+          git tag -l 'v*' | python3 tools/release_check.py images --owner "$OWNER" --version "$VERSION" \
+            --revision "$REVISION" --source "$SOURCE" --tags-file -
 
       - name: Build the release (npm ci, build:all, tarballs with wheels)
         run: python3 tools/make_release.py --with-wheels
@@ -138,6 +162,18 @@ jobs:
           TAG: ${{ needs.build.outputs.tag }}
           SHA: ${{ needs.build.outputs.sha }}
         run: |
+          # "Re-run failed jobs" reuses the build outputs, so the tag may be
+          # there already from the first attempt. The commits endpoint resolves
+          # an annotated tag to its commit.
+          existing=$(gh api "repos/$GH_REPO/commits/tags/$TAG" --jq .sha 2> /dev/null) || existing=
+          if [ "$existing" = "$SHA" ]; then
+            echo "Tag $TAG already on $SHA"
+            exit 0
+          fi
+          if [ -n "$existing" ]; then
+            echo "::error::tag $TAG exists on $existing, not on $SHA"
+            exit 1
+          fi
           if ! gh api --method POST "repos/$GH_REPO/git/refs" -f "ref=refs/tags/$TAG" -f "sha=$SHA" > /dev/null; then
             echo "::error::Could not create the tag $TAG on $SHA. Push it yourself (git tag $TAG $SHA && git push origin $TAG); that push runs this workflow again."
             exit 1
@@ -151,6 +187,7 @@ jobs:
           TAG: ${{ needs.build.outputs.tag }}
           VERSION: ${{ needs.build.outputs.version }}
           PRERELEASE: ${{ needs.build.outputs.prerelease }}
+          NEWEST: ${{ needs.build.outputs.newest }}
         run: |
           assets=(
             "release/sdr-doa-ground-console-${VERSION}-linux.tar.gz"
@@ -166,19 +203,44 @@ jobs:
             flags=(--verify-tag --generate-notes --title "SDR-DoA Ground Console $VERSION")
             if [ "$PRERELEASE" = true ]; then
               flags+=(--prerelease)
+            elif [ "$NEWEST" != true ]; then
+              # A backport after a higher release must not become "Latest",
+              # which the native updater reads.
+              flags+=(--latest=false)
             fi
             gh release create "$TAG" "${assets[@]}" "${flags[@]}"
           fi
 
   images:
     name: GHCR images
-    needs: build
+    # Only once the tag and the GitHub Release exist, so the channel tags
+    # never point at a version without a release.
+    needs: [build, release]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions:
       contents: read
       packages: write
+    # Also serialised on its own: the channel tags are computed right before
+    # they move, against the release tags that exist at that moment.
+    concurrency:
+      group: ghcr-images
+      cancel-in-progress: false
+    env:
+      # The base of both images, pinned to its multi-arch index (amd64, arm64,
+      # arm/v7). Bump it for each release:
+      #   docker buildx imagetools inspect python:3.12-slim-bookworm
+      # and copy the Digest of the index (the first one listed).
+      PYTHON_IMAGE: python:3.12-slim-bookworm@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258
     steps:
+      - name: Check out tools/ at the release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.build.outputs.sha }}
+          path: src
+          sparse-checkout: tools
+          persist-credentials: false
+
       - name: Download the release assets
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -205,10 +267,14 @@ jobs:
       - name: Set up QEMU (arm64, arm/v7)
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         with:
+          # Runs privileged and executes the arm RUN steps: pinned like the actions.
+          image: docker.io/tonistiigi/binfmt:qemu-v10.2.3-68@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
           platforms: arm64,arm
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
 
       - name: Log in to ghcr.io
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -217,25 +283,103 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Find the images of this version already on ghcr.io
+        id: existing
+        env:
+          CONSOLE_REF: ${{ needs.build.outputs.console_ref }}
+          AGENT_REF: ${{ needs.build.outputs.agent_ref }}
+          SHA: ${{ needs.build.outputs.sha }}
+          FORCE_IMAGES: ${{ inputs.force_images && 'true' || 'false' }}
+        run: |
+          # build: the image is missing (or force_images); reuse: it is there
+          # from this commit, so a rerun keeps the digest the hosts already run.
+          decide() {
+            local ref=$1 out revision
+            DECISION=
+            if [ "$FORCE_IMAGES" = true ]; then
+              echo "force_images: building $ref again"
+              DECISION=build
+              return 0
+            fi
+            if ! out=$(docker buildx imagetools inspect --format '{{json .Image}}' "$ref" 2>&1); then
+              # A missing tag is "not found"; a package that does not exist
+              # yet (the first release) may also answer "denied".
+              if printf '%s\n' "$out" | grep -q -i -E 'not found|manifest unknown|name unknown|denied'; then
+                echo "$ref is not on ghcr.io yet ($(printf '%s\n' "$out" | tail -n 1))"
+                DECISION=build
+                return 0
+              fi
+              echo "::error::cannot inspect $ref: $out"
+              return 1
+            fi
+            if ! revision=$(printf '%s\n' "$out" | python3 src/tools/release_check.py revision); then
+              echo "$revision"
+              return 1
+            fi
+            if [ "$revision" != "$SHA" ]; then
+              echo "::error::$ref exists from commit $revision, not from $SHA; run the workflow with force_images to replace it"
+              return 1
+            fi
+            echo "$ref is already on ghcr.io from $SHA; not building it again"
+            DECISION=reuse
+          }
+          decide "$CONSOLE_REF"
+          console=$DECISION
+          decide "$AGENT_REF"
+          agent=$DECISION
+          echo "console=$console" >> "$GITHUB_OUTPUT"
+          echo "agent=$agent" >> "$GITHUB_OUTPUT"
+
       - name: Build and push the console image (Dockerfile.release)
+        if: steps.existing.outputs.console == 'build'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ${{ steps.unpack.outputs.console_dir }}
           file: ${{ steps.unpack.outputs.console_dir }}/Dockerfile.release
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ needs.build.outputs.console_tags }}
+          tags: ${{ needs.build.outputs.console_ref }}
           labels: ${{ needs.build.outputs.labels }}
+          build-args: PYTHON_IMAGE=${{ env.PYTHON_IMAGE }}
 
       - name: Build and push the agent image (Dockerfile.agent)
+        if: steps.existing.outputs.agent == 'build'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ${{ steps.unpack.outputs.agent_dir }}
           file: ${{ steps.unpack.outputs.agent_dir }}/Dockerfile.agent
           platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
-          tags: ${{ needs.build.outputs.agent_tags }}
+          tags: ${{ needs.build.outputs.agent_ref }}
           labels: ${{ needs.build.outputs.labels }}
+          build-args: PYTHON_IMAGE=${{ env.PYTHON_IMAGE }}
+
+      - name: Point the channel tags at this version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+          CONSOLE_IMAGE: ${{ needs.build.outputs.console_image }}
+          AGENT_IMAGE: ${{ needs.build.outputs.agent_image }}
+        run: |
+          # The release tags as they are now, not when the build started: a
+          # higher release published meanwhile keeps its channel tags.
+          gh api --paginate "repos/$GH_REPO/git/matching-refs/tags/v" --jq '.[].ref' > release-tags.txt
+          python3 src/tools/release_check.py channels --version "$VERSION" --tags-file release-tags.txt > channels.txt
+          channels=$(sed -n 's/^channels: //p' channels.txt)
+          if [ -z "$channels" ]; then
+            echo "No channel tag moves: a higher release exists, or $VERSION is a prerelease."
+            exit 0
+          fi
+          for image in "$CONSOLE_IMAGE" "$AGENT_IMAGE"; do
+            args=()
+            for channel in $channels; do
+              args+=(-t "$image:$channel")
+            done
+            # The same index as <V>: hosts on a channel get the digest of <V>.
+            docker buildx imagetools create "${args[@]}" "$image:$VERSION"
+            echo "$image:$VERSION is now also: $channels"
+          done
 
       - name: Log out of ghcr.io
         if: always()
@@ -243,8 +387,8 @@ jobs:
 
       - name: Check an anonymous pull
         env:
-          CONSOLE_REF: ${{ needs.build.outputs.console_image }}:${{ needs.build.outputs.version }}
-          AGENT_REF: ${{ needs.build.outputs.agent_image }}:${{ needs.build.outputs.version }}
+          CONSOLE_REF: ${{ needs.build.outputs.console_ref }}
+          AGENT_REF: ${{ needs.build.outputs.agent_ref }}
         run: |
           # sdr-doa-docker pulls without a login, so the packages must be public.
           # GHCR creates a new package as private; its visibility is set once.

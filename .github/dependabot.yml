@@ -1,0 +1,13 @@
+# Pull requests for new versions of the actions the workflows pin by commit.
+# The image digests in release.yml (PYTHON_IMAGE, the QEMU and BuildKit
+# images) are not covered: bump PYTHON_IMAGE for each release (see the
+# header of release.yml).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

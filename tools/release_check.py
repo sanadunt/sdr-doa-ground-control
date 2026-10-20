@@ -12,7 +12,16 @@ Subcommands:
 * ``assets``: checks that a release directory holds exactly the release
   assets, that ``SHA256SUMS`` covers each of them, and that the console
   tarball ships the same ``sdr-doa-docker`` as the standalone asset.
-* ``images``: writes the GHCR image names, their tags and the OCI labels.
+* ``images``: writes the GHCR image names, the image reference of this
+  version, the OCI labels, the channel tags this version may take and
+  whether it is the newest release.
+* ``channels``: the channel tags (``<MAJOR>.<MINOR>``, ``<MAJOR>``,
+  ``latest``) this version may take, given the release tags that exist now.
+  A channel tag moves only to the highest stable release it covers, so an
+  older release built late, or a rerun of an old tag, never moves it back.
+* ``revision``: the ``org.opencontainers.image.revision`` label of an image,
+  read from ``docker buildx imagetools inspect --format '{{json .Image}}'``
+  on stdin.
 
 Standard library only; ``tag`` runs git. Nothing here touches the network.
 """
@@ -21,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -29,7 +39,7 @@ import tarfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -247,12 +257,85 @@ def _check_console_docker_script(directory: Path, version: str) -> List[str]:
     return []
 
 
-def image_tags(version: str) -> List[str]:
-    """<V>, <MAJOR>.<MINOR>, <MAJOR> and latest; a prerelease gets only <V>."""
-    major, minor, _patch, pre = parse_release_version(version)
+def stable_release_versions(tags: Iterable[str]) -> List[Tuple[int, int, int]]:
+    """(major, minor, patch) of every stable release tag in ``tags``.
+
+    Takes tag names or refs (``v2.0.1``, ``refs/tags/v2.0.1``, or ``git
+    ls-remote`` lines); prereleases and anything that is not v<VERSION> are
+    left out.
+    """
+    versions = set()
+    for raw in tags:
+        name = raw.strip().split()[-1] if raw.strip() else ""
+        name = name[len("refs/tags/"):] if name.startswith("refs/tags/") else name
+        if name.endswith("^{}"):
+            name = name[:-3]
+        if not name.startswith("v"):
+            continue
+        try:
+            major, minor, patch, pre = parse_release_version(name[1:])
+        except CheckError:
+            continue
+        if pre is None:
+            versions.add((major, minor, patch))
+    return sorted(versions)
+
+
+def floating_tags(version: str, tags: Iterable[str] = ()) -> List[str]:
+    """The channel tags of ``version``: <MAJOR>.<MINOR>, <MAJOR> and latest.
+
+    Each one only when no stable release in ``tags`` that it covers is
+    higher than ``version``; a prerelease gets none.
+    """
+    major, minor, patch, pre = parse_release_version(version)
     if pre is not None:
-        return [version]
-    return [version, f"{major}.{minor}", f"{major}", "latest"]
+        return []
+    own = (major, minor, patch)
+    higher = [other for other in stable_release_versions(tags) if other > own]
+    channels = []
+    if not any(other[:2] == (major, minor) for other in higher):
+        channels.append(f"{major}.{minor}")
+    if not any(other[0] == major for other in higher):
+        channels.append(f"{major}")
+    if not higher:
+        channels.append("latest")
+    return channels
+
+
+def image_tags(version: str, tags: Iterable[str] = ()) -> List[str]:
+    """<V> and the channel tags it may take (see floating_tags)."""
+    return [version] + floating_tags(version, tags)
+
+
+def is_newest(version: str, tags: Iterable[str] = ()) -> bool:
+    """A stable release with no higher stable release in ``tags``."""
+    return "latest" in floating_tags(version, tags)
+
+
+def image_revision(inspect_json: str) -> str:
+    """The one revision label of ``docker buildx imagetools inspect --format '{{json .Image}}'``.
+
+    A single-platform image prints its config; a multi-platform one a map of
+    platform to config. Every platform must carry the same revision.
+    """
+    try:
+        data = json.loads(inspect_json)
+    except ValueError:
+        raise CheckError("the image inspect output is not JSON") from None
+    if not isinstance(data, dict):
+        raise CheckError("the image inspect output is not a JSON object")
+    configs = [data] if "config" in data or "architecture" in data else list(data.values())
+    revisions = set()
+    for image in configs:
+        config = image.get("config") if isinstance(image, dict) else None
+        labels = config.get("Labels") if isinstance(config, dict) else None
+        revision = labels.get("org.opencontainers.image.revision") if isinstance(labels, dict) else None
+        # Attestation entries carry no image config and no labels.
+        if isinstance(revision, str) and revision:
+            revisions.add(revision)
+    if len(revisions) != 1:
+        raise CheckError(f"the image has {len(revisions)} revision labels, not one: {sorted(revisions)}")
+    return revisions.pop()
 
 
 def image_name(owner: str, image: str, registry: str = REGISTRY) -> str:
@@ -275,14 +358,36 @@ def oci_labels(version: str, revision: str, source: str) -> List[str]:
     ]
 
 
-def image_outputs(owner: str, version: str, revision: str, source: str) -> Dict[str, str]:
+def channel_outputs(version: str, tags: Iterable[str]) -> Dict[str, str]:
+    tags = list(tags)
+    return {
+        "channels": " ".join(floating_tags(version, tags)),
+        "newest": "true" if is_newest(version, tags) else "false",
+    }
+
+
+def image_outputs(owner: str, version: str, revision: str, source: str, tags: Iterable[str] = ()) -> Dict[str, str]:
+    """Image names, the <V> reference the build pushes, labels and the channels."""
     outputs = {}
     for key, image in (("console", CONSOLE_IMAGE), ("agent", AGENT_IMAGE)):
         name = image_name(owner, image)
         outputs[f"{key}_image"] = name
-        outputs[f"{key}_tags"] = "\n".join(f"{name}:{tag}" for tag in image_tags(version))
+        outputs[f"{key}_ref"] = f"{name}:{version}"
     outputs["labels"] = "\n".join(oci_labels(version, revision, source))
+    outputs.update(channel_outputs(version, tags))
     return outputs
+
+
+def read_tags(path: Optional[str]) -> List[str]:
+    """Tag names or refs, one per line, from a file or stdin ("-"); none without a path."""
+    if not path:
+        return []
+    try:
+        if path == "-":
+            return sys.stdin.read().splitlines()
+        return Path(path).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise CheckError(f"cannot read the tag list {path}: {exc}") from None
 
 
 def write_outputs(values: Dict[str, str], path: Optional[str]) -> None:
@@ -317,11 +422,17 @@ def _parser() -> argparse.ArgumentParser:
     assets = commands.add_parser("assets", help="check a release directory and print its assets")
     assets.add_argument("--dir", type=Path, required=True)
     assets.add_argument("--version", required=True)
-    images = commands.add_parser("images", help="image names, tags and OCI labels")
+    tags_help = "release tags or refs that exist, one per line ('-' for stdin)"
+    images = commands.add_parser("images", help="image names, references, OCI labels and channels")
     images.add_argument("--owner", required=True, help="github.repository_owner")
     images.add_argument("--version", required=True)
     images.add_argument("--revision", required=True, help="full commit SHA")
     images.add_argument("--source", required=True, help="repository URL")
+    images.add_argument("--tags-file", help=tags_help)
+    channels = commands.add_parser("channels", help="the channel tags this version may take now")
+    channels.add_argument("--version", required=True)
+    channels.add_argument("--tags-file", required=True, help=tags_help)
+    commands.add_parser("revision", help="the revision label of 'imagetools inspect --format {{json .Image}}' on stdin")
     return parser
 
 
@@ -334,8 +445,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif args.command == "assets":
             for path in check_assets(args.dir, args.version):
                 print(path, flush=True)
+        elif args.command == "images":
+            tags = read_tags(args.tags_file)
+            write_outputs(image_outputs(args.owner, args.version, args.revision, args.source, tags), args.github_output)
+        elif args.command == "channels":
+            write_outputs(channel_outputs(args.version, read_tags(args.tags_file)), args.github_output)
         else:
-            write_outputs(image_outputs(args.owner, args.version, args.revision, args.source), args.github_output)
+            print(image_revision(sys.stdin.read()), flush=True)
     except CheckError as exc:
         # A workflow command on stdout, so the run shows it as an annotation.
         message = str(exc).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")

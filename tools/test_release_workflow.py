@@ -183,6 +183,19 @@ class WorkflowTextTests(unittest.TestCase):
             "::warning::",
             "Public",
             "fetch-depth: 0",
+            # Channel tags move last, against the release tags of that moment.
+            "git tag -l 'v*' | python3 tools/release_check.py images",
+            "--tags-file -",
+            'repos/$GH_REPO/git/matching-refs/tags/v',
+            "src/tools/release_check.py channels --version",
+            'docker buildx imagetools create "${args[@]}" "$image:$VERSION"',
+            # A rerun reuses an image of this commit instead of rebuilding it.
+            "docker buildx imagetools inspect --format '{{json .Image}}'",
+            "src/tools/release_check.py revision",
+            "force_images",
+            # A tag that a first attempt created is accepted on a rerun.
+            'repos/$GH_REPO/commits/tags/$TAG',
+            "--latest=false",
         ):
             self.assertIn(snippet, text)
         for asset in (
@@ -194,6 +207,21 @@ class WorkflowTextTests(unittest.TestCase):
             self.assertIn(f'"{asset}"', text)
         self.assertEqual(text.count("platforms: linux/amd64,linux/arm64\n"), 1)
         self.assertEqual(text.count(f"platforms: {AGENT_PLATFORMS}\n"), 1)
+
+    def test_third_party_images_are_pinned_to_a_digest(self):
+        # The images job holds packages: write; what it runs privileged or
+        # builds from is pinned like the actions are.
+        text = self.texts["release.yml"]
+        digest = r"@sha256:[0-9a-f]{64}"
+        self.assertRegex(text, r"(?m)^\s+image: docker\.io/tonistiigi/binfmt:[\w.-]+" + digest + "$")
+        self.assertRegex(text, r"(?m)^\s+driver-opts: image=moby/buildkit:v[\w.-]+" + digest + "$")
+        self.assertRegex(text, r"(?m)^\s+PYTHON_IMAGE: python:3\.12-slim-bookworm" + digest + "$")
+        self.assertEqual(text.count("build-args: PYTHON_IMAGE=${{ env.PYTHON_IMAGE }}"), 2)
+
+    def test_dependabot_updates_the_actions(self):
+        text = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+        self.assertRegex(text, r"(?m)^version: 2$")
+        self.assertRegex(text, r"(?m)^  - package-ecosystem: github-actions$")
 
     def test_checkouts_keep_no_credentials(self):
         for name, text in self.texts.items():
@@ -223,13 +251,18 @@ class WorkflowStructureTests(unittest.TestCase):
         on = self.release["on"]
         self.assertEqual(set(on), {"push", "workflow_dispatch"})
         self.assertEqual(on["push"], {"tags": ["v*"]})
-        self.assertIn("github.ref", self.release["concurrency"]["group"])
-        self.assertIs(self.release["concurrency"]["cancel-in-progress"], False)
+        force = on["workflow_dispatch"]["inputs"]["force_images"]
+        self.assertEqual((force["type"], force["default"]), ("boolean", False))
+        # One group for every ref: a tag push and a dispatch of one version
+        # never run at the same time.
+        self.assertEqual(self.release["concurrency"], {"group": "release", "cancel-in-progress": False})
+        images = self.release["jobs"]["images"]
+        self.assertEqual(images["concurrency"], {"group": "ghcr-images", "cancel-in-progress": False})
 
     def test_ci_concurrency_differs_from_the_release_group(self):
         # A called workflow evaluates github.* in the caller's context.
         self.assertTrue(self.ci["concurrency"]["group"].startswith("ci-"))
-        self.assertTrue(self.release["concurrency"]["group"].startswith("release-"))
+        self.assertNotEqual(self.ci["concurrency"]["group"], self.release["concurrency"]["group"])
 
     def test_permissions(self):
         for workflow in (self.ci, self.release):
@@ -251,7 +284,8 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertEqual(jobs["test"]["uses"], "./.github/workflows/ci.yml")
         self.assertEqual(jobs["build"]["needs"], "test")
         self.assertEqual(jobs["release"]["needs"], "build")
-        self.assertEqual(jobs["images"]["needs"], "build")
+        # The channel tags move only once the tag and the release exist.
+        self.assertEqual(jobs["images"]["needs"], ["build", "release"])
 
     def test_every_step_pinned_and_scripts_take_expressions_through_env(self):
         for workflow in (self.ci, self.release):
@@ -319,8 +353,11 @@ class WorkflowStructureTests(unittest.TestCase):
         (upload,) = steps_using(build, "actions/upload-artifact")
         self.assertEqual(upload["with"]["path"], "dist/release/")
         self.assertEqual(upload["with"]["if-no-files-found"], "error")
-        for output in ("version", "tag", "sha", "create_tag", "prerelease", "console_tags", "agent_tags", "labels"):
+        for output in ("version", "tag", "sha", "create_tag", "prerelease", "newest", "console_ref", "agent_ref", "labels"):
             self.assertIn(output, build["outputs"])
+        images = build["steps"][names.index("images")]
+        self.assertIn("git tag -l 'v*' |", images["run"])
+        self.assertIn("--tags-file -", images["run"])
 
     def test_release_job(self):
         release = self.release["jobs"]["release"]
@@ -328,12 +365,20 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertEqual(download["with"]["name"], "release-assets")
         create_tag = next(step for step in release["steps"] if "git/refs" in step.get("run", ""))
         self.assertEqual(create_tag["if"], "needs.build.outputs.create_tag == 'true'")
+        script = create_tag["run"]
+        # Idempotent: the tag of a first attempt is fine, one on another commit is not.
+        self.assertLess(script.index("commits/tags/$TAG"), script.index("--method POST"))
+        self.assertIn('if [ "$existing" = "$SHA" ]', script)
+        self.assertIn("::error::tag $TAG exists on $existing, not on $SHA", script)
         publish = next(step for step in release["steps"] if "gh release create" in step.get("run", ""))
         self.assertEqual(publish["env"]["GH_TOKEN"], "${{ secrets.GITHUB_TOKEN }}")
+        self.assertEqual(publish["env"]["NEWEST"], "${{ needs.build.outputs.newest }}")
         script = publish["run"]
         self.assertIn('gh release upload "$TAG" "${assets[@]}" --clobber', script)
         self.assertIn('--title "SDR-DoA Ground Console $VERSION"', script)
         self.assertIn('if [ "$PRERELEASE" = true ]', script)
+        self.assertIn('elif [ "$NEWEST" != true ]', script)
+        self.assertIn("flags+=(--latest=false)", script)
 
     def test_images_job(self):
         images = self.release["jobs"]["images"]
@@ -342,26 +387,48 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertEqual(login["with"]["password"], "${{ secrets.GITHUB_TOKEN }}")
         self.assertEqual(len(steps_using(images, "docker/setup-qemu-action")), 1)
         self.assertEqual(len(steps_using(images, "docker/setup-buildx-action")), 1)
+        (qemu,) = steps_using(images, "docker/setup-qemu-action")
+        self.assertRegex(qemu["with"]["image"], r"^docker\.io/tonistiigi/binfmt:[\w.-]+@sha256:[0-9a-f]{64}$")
+        (buildx,) = steps_using(images, "docker/setup-buildx-action")
+        self.assertRegex(buildx["with"]["driver-opts"], r"^image=moby/buildkit:v[\w.-]+@sha256:[0-9a-f]{64}$")
+        self.assertRegex(images["env"]["PYTHON_IMAGE"], r"^python:3\.12-slim-bookworm@sha256:[0-9a-f]{64}$")
+        (checkout,) = steps_using(images, "actions/checkout")
+        self.assertEqual(checkout["with"]["ref"], "${{ needs.build.outputs.sha }}")
+        self.assertEqual(checkout["with"]["sparse-checkout"], "tools")
+        self.assertEqual(checkout["with"]["path"], "src")
+        self.assertIs(checkout["with"]["persist-credentials"], False)
         console, agent = steps_using(images, "docker/build-push-action")
         self.assertTrue(console["with"]["file"].endswith("/Dockerfile.release"))
         self.assertEqual(console["with"]["context"], "${{ steps.unpack.outputs.console_dir }}")
         self.assertEqual(console["with"]["platforms"], CONSOLE_PLATFORMS)
-        self.assertEqual(console["with"]["tags"], "${{ needs.build.outputs.console_tags }}")
+        # Only <V>; the channel tags are pointed at it afterwards.
+        self.assertEqual(console["with"]["tags"], "${{ needs.build.outputs.console_ref }}")
+        self.assertEqual(console["if"], "steps.existing.outputs.console == 'build'")
         self.assertTrue(agent["with"]["file"].endswith("/Dockerfile.agent"))
         self.assertEqual(agent["with"]["context"], "${{ steps.unpack.outputs.agent_dir }}")
         self.assertEqual(agent["with"]["platforms"], AGENT_PLATFORMS)
-        self.assertEqual(agent["with"]["tags"], "${{ needs.build.outputs.agent_tags }}")
+        self.assertEqual(agent["with"]["tags"], "${{ needs.build.outputs.agent_ref }}")
+        self.assertEqual(agent["if"], "steps.existing.outputs.agent == 'build'")
         for step in (console, agent):
             self.assertIs(step["with"]["push"], True)
             self.assertEqual(step["with"]["labels"], "${{ needs.build.outputs.labels }}")
+            self.assertEqual(step["with"]["build-args"], "PYTHON_IMAGE=${{ env.PYTHON_IMAGE }}")
+        existing = next(step for step in images["steps"] if step.get("id") == "existing")
+        self.assertEqual(existing["env"]["FORCE_IMAGES"], "${{ inputs.force_images && 'true' || 'false' }}")
+        self.assertIn('if [ "$revision" != "$SHA" ]', existing["run"])
+        channels = next(i for i, step in enumerate(images["steps"]) if "release_check.py channels" in step.get("run", ""))
+        self.assertNotIn("${{", images["steps"][channels]["run"])
         unpack = next(step for step in images["steps"] if step.get("id") == "unpack")
         self.assertIn("sha256sum -c SHA256SUMS", unpack["run"])
         self.assertEqual(unpack["run"].count("MANIFEST.sha256"), 2)
         names = [step.get("name", "") for step in images["steps"]]
         logout = next(i for i, step in enumerate(images["steps"]) if step.get("run") == "docker logout ghcr.io")
         check = next(i for i, step in enumerate(images["steps"]) if "docker manifest inspect" in step.get("run", ""))
-        self.assertLess(names.index(console["name"]), logout)
-        self.assertLess(names.index(agent["name"]), logout)
+        self.assertLess(names.index("Log in to ghcr.io"), names.index(existing["name"]))
+        self.assertLess(names.index(existing["name"]), names.index(console["name"]))
+        self.assertLess(names.index(console["name"]), channels)
+        self.assertLess(names.index(agent["name"]), channels)
+        self.assertLess(channels, logout)
         self.assertLess(logout, check)
         self.assertIn("::warning::", images["steps"][check]["run"])
         self.assertNotIn("exit 1", images["steps"][check]["run"])
@@ -404,20 +471,70 @@ class VersionTests(unittest.TestCase):
             for tag in release_check.image_tags(version):
                 self.assertRegex(tag, r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
 
+    def test_channel_tags_move_only_forward(self):
+        tags = ["v2.0.0", "v2.0.1", "v2.1.0", "v2.1.0-rc.1", "v3.0.0-rc.1"]
+        floating = release_check.floating_tags
+        # The highest release takes every channel; its own tag does not count as higher.
+        self.assertEqual(floating("2.1.0", tags), ["2.1", "2", "latest"])
+        # A 2.0.z backport after 2.1.0 keeps only its minor channel.
+        self.assertEqual(floating("2.0.2", tags), ["2.0"])
+        # An old release built late or rerun moves nothing.
+        self.assertEqual(floating("2.0.0", tags), [])
+        self.assertEqual(floating("2.0.1", tags + ["v2.0.2"]), [])
+        # A prerelease of a higher version is not a release yet.
+        self.assertEqual(floating("2.1.1", tags + ["v3.0.0-rc.2"]), ["2.1", "2", "latest"])
+        # A newer major keeps latest, the old major keeps its own channels.
+        self.assertEqual(floating("2.1.1", tags + ["v3.0.0"]), ["2.1", "2"])
+        self.assertEqual(floating("2.1.0-rc.2", tags), [])
+        self.assertIs(release_check.is_newest("2.1.0", tags), True)
+        self.assertIs(release_check.is_newest("2.0.2", tags), False)
+        self.assertIs(release_check.is_newest("2.1.0-rc.2", []), False)
+
+    def test_tag_lists_in_every_form(self):
+        lines = [
+            "v2.0.0",
+            "refs/tags/v2.0.1",
+            f"{SHA_A}\trefs/tags/v2.1.0",
+            f"{SHA_A}\trefs/tags/v2.1.0^{{}}",
+            "v2.2.0-rc.1",
+            "2.9.9",
+            "vnext",
+            "v02.0.0",
+            "",
+        ]
+        self.assertEqual(release_check.stable_release_versions(lines), [(2, 0, 0), (2, 0, 1), (2, 1, 0)])
+
+    def test_image_revision_from_imagetools_inspect(self):
+        def config(revision):
+            return {"architecture": "amd64", "os": "linux", "config": {"Labels": {"org.opencontainers.image.revision": revision}}}
+
+        import json
+
+        self.assertEqual(release_check.image_revision(json.dumps(config(SHA_A))), SHA_A)
+        multi = {"linux/amd64": config(SHA_A), "linux/arm64": config(SHA_A), "unknown/unknown": None}
+        self.assertEqual(release_check.image_revision(json.dumps(multi)), SHA_A)
+        for bad in (
+            json.dumps({"linux/amd64": config(SHA_A), "linux/arm64": config("b" * 40)}),
+            json.dumps({"architecture": "amd64", "config": {"Labels": {}}}),
+            "not json",
+            "[]",
+        ):
+            with self.assertRaises(release_check.CheckError, msg=bad):
+                release_check.image_revision(bad)
+
     def test_image_outputs_follow_the_contract(self):
         outputs = release_check.image_outputs(
             "Sanadunt", "2.0.0", SHA_A, "https://github.com/sanadunt/sdr-doa-ground-control"
         )
         self.assertEqual(outputs["console_image"], "ghcr.io/sanadunt/sdr-doa-ground-console")
         self.assertEqual(outputs["agent_image"], "ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent")
-        self.assertEqual(
-            outputs["console_tags"].splitlines(),
-            [f"ghcr.io/sanadunt/sdr-doa-ground-console:{tag}" for tag in ("2.0.0", "2.0", "2", "latest")],
+        self.assertEqual(outputs["console_ref"], "ghcr.io/sanadunt/sdr-doa-ground-console:2.0.0")
+        self.assertEqual(outputs["agent_ref"], "ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent:2.0.0")
+        self.assertEqual((outputs["channels"], outputs["newest"]), ("2.0 2 latest", "true"))
+        backport = release_check.image_outputs(
+            "sanadunt", "2.0.1", SHA_A, "https://github.com/sanadunt/sdr-doa-ground-control", ["v2.1.0"]
         )
-        self.assertEqual(
-            outputs["agent_tags"].splitlines(),
-            [f"ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent:{tag}" for tag in ("2.0.0", "2.0", "2", "latest")],
-        )
+        self.assertEqual((backport["channels"], backport["newest"]), ("2.0", "false"))
         self.assertEqual(
             outputs["labels"].splitlines(),
             [
@@ -427,7 +544,8 @@ class VersionTests(unittest.TestCase):
             ],
         )
         pre = release_check.image_outputs("sanadunt", "2.1.0-rc.1", SHA_A, "https://github.com/sanadunt/x")
-        self.assertEqual(pre["console_tags"], "ghcr.io/sanadunt/sdr-doa-ground-console:2.1.0-rc.1")
+        self.assertEqual(pre["console_ref"], "ghcr.io/sanadunt/sdr-doa-ground-console:2.1.0-rc.1")
+        self.assertEqual((pre["channels"], pre["newest"]), ("", "false"))
 
     def test_image_inputs_are_checked(self):
         source = "https://github.com/sanadunt/sdr-doa-ground-control"
@@ -731,8 +849,9 @@ class CrossTrackContractTests(unittest.TestCase):
     def test_docker_script_pulls_the_images_the_workflow_pushes(self):
         self.assertEqual(self.script_value("CONSOLE_IMAGE"), release_check.image_name(self.owner, release_check.CONSOLE_IMAGE))
         self.assertEqual(self.script_value("AGENT_IMAGE"), release_check.image_name(self.owner, release_check.AGENT_IMAGE))
-        # Its default channel is one of the tags a release of this VERSION pushes.
-        self.assertIn(self.script_value("DEFAULT_CHANNEL"), release_check.image_tags(self.version))
+        # Its default channel is the major of this VERSION, which every stable
+        # release of that major moves (a prerelease VERSION moves none).
+        self.assertEqual(self.script_value("DEFAULT_CHANNEL"), str(release_check.parse_release_version(self.version)[0]))
 
     def test_ghcr_compose_uses_the_console_image(self):
         text = (ROOT / "docker-compose.ghcr.yml").read_text(encoding="utf-8")
@@ -825,8 +944,33 @@ class OutputFormatTests(unittest.TestCase):
                 key, value = line.split("=", 1)
                 values[key] = value
         self.assertEqual(values["console_image"], "ghcr.io/sanadunt/sdr-doa-ground-console")
-        self.assertEqual(values["agent_tags"][-1], "ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent:latest")
+        self.assertEqual(values["agent_ref"], "ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent:2.0.0")
+        self.assertEqual((values["channels"], values["newest"]), ("2.0 2 latest", "true"))
         self.assertEqual(len(values["labels"]), 3)
+
+    def test_channels_command_reads_a_tag_file(self):
+        with tempfile.TemporaryDirectory(prefix="test-release-channels-") as tmp:
+            tags = Path(tmp) / "tags"
+            tags.write_text("refs/tags/v2.0.0\nrefs/tags/v2.1.0\n", encoding="utf-8")
+            output = Path(tmp) / "out"
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = release_check.main(
+                    ["--github-output", str(output), "channels", "--version", "2.0.3", "--tags-file", str(tags)]
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(output.read_text(encoding="utf-8"), "channels=2.0\nnewest=false\n")
+            self.assertIn("channels: 2.0", out.getvalue())
+            with redirect_stdout(io.StringIO()) as refused:
+                code = release_check.main(["channels", "--version", "2.0.3", "--tags-file", str(Path(tmp) / "missing")])
+            self.assertEqual(code, 1)
+            self.assertIn("::error::cannot read the tag list", refused.getvalue())
+
+    def test_revision_command_reads_stdin(self):
+        payload = '{"architecture": "amd64", "config": {"Labels": {"org.opencontainers.image.revision": "%s"}}}' % SHA_A
+        with mock.patch("sys.stdin", io.StringIO(payload)), redirect_stdout(io.StringIO()) as out:
+            code = release_check.main(["revision"])
+        self.assertEqual((code, out.getvalue()), (0, SHA_A + "\n"))
 
 
 if __name__ == "__main__":
