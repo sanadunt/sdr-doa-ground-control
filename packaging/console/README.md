@@ -8,6 +8,7 @@ Ground Console bisa dipasang dengan dua cara di komputer Linux ground station. K
 | Jalan di background | systemd user service + lingering | `restart: unless-stopped` |
 | Data | `~/.local/share/sdr-doa-ground-console` | volume `sdr-doa-data` (`/data`) |
 | Kontrol | `sdr-doa-console start|stop|restart|status|logs|open` | `docker compose ...` |
+| Update tanpa login GitHub | `sdr-doa-console update`, `auto-update on` | `sdr-doa-docker update`, `auto-update on` (image GHCR) |
 
 Console selalu bind ke `127.0.0.1:8787`, jadi hanya bisa dibuka dari komputer itu sendiri: `http://127.0.0.1:8787/`. Pakai Chromium atau Chrome; Receiver (HackRF lewat WebUSB) tidak jalan di Firefox.
 
@@ -27,10 +28,15 @@ Data realtime (snapshot DoA, MQTT, spektrum) tidak disimpan; itu diperbarui teru
 ## Native
 
 ```sh
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v2.0.0/sdr-doa-ground-console-2.0.0-linux.tar.gz
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v2.0.0/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
 tar -xzf sdr-doa-ground-console-2.0.0-linux.tar.gz
 cd sdr-doa-ground-console-2.0.0-linux
 sh install.sh
 ```
+
+Ganti `2.0.0` dengan versi di halaman Releases. Setelah terpasang, versi berikutnya datang lewat `sdr-doa-console update` (bagian "Update dari GitHub Releases").
 
 Installer memeriksa file rilis terhadap `MANIFEST.sha256`, membuat venv berisi `paho-mqtt` dan `tzdata` (dari folder `wheels/` bila ada, selain itu dari PyPI), lalu menanyakan kata sandi admin: ketik sendiri, ketik `random` untuk dibuatkan, atau tekan Enter untuk memakai default `123456` (akan muncul peringatan). Setelah itu console langsung jalan dan dibuka dengan `sdr-doa-console open` atau menu **SDR-DoA Ground Console**.
 
@@ -114,6 +120,25 @@ Upgrade manual: ekstrak rilis baru dan jalankan `sh install.sh` lagi. Program da
 ## Docker
 
 Hanya Linux, karena memakai `network_mode: host`. Console bind ke `127.0.0.1` dan menolak alamat lain. Dengan network host, loopback itu adalah loopback komputer ini, jadi `http://127.0.0.1:8787/` bisa dibuka di sini dan tidak terbuka ke LAN. Network bridge dengan `ports:` tidak dipakai: di dalam container console harus bind ke alamat non-loopback (ditolak console), dan admin serta patch konfigurasi akan terbuka ke LAN. Docker Desktop di macOS/Windows tidak meneruskan network host ke komputer.
+
+### Dari image GHCR, dengan update otomatis
+
+Tanpa build dan tanpa login GitHub: image `ghcr.io/sanadunt/sdr-doa-ground-console` publik. `sdr-doa-docker` (aset rilis, juga `packaging/docker/sdr-doa-docker` di tarball) menulis `compose.yml` dan `.env` di direktori install, mem-pull image, lalu menunggu healthcheck. Yang dibutuhkan hanya Docker Engine dengan Compose v2.
+
+```sh
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/sdr-doa-docker
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
+sudo sh sdr-doa-docker install --auto-update     # /opt/sdr-doa-ground-console, timer harian 03:30
+sdr-doa-docker status
+sudo sdr-doa-docker update                       # sekarang; --check hanya melihat
+sudo sdr-doa-docker rollback                     # kembali ke image sebelumnya
+sudo sdr-doa-docker auto-update off
+```
+
+Kanal update adalah `SDR_DOA_IMAGE_TAG` di `/opt/sdr-doa-ground-console/.env` (bawaan `2`: setiap rilis 2.x.y; `2.0` hanya 2.0.z; versi mayor baru hanya dengan `install --channel 3`). Image baru yang tidak `healthy` dalam 180 detik diganti lagi dengan image sebelumnya (tag `sdr-doa-previous`) dan dicatat di `.bad-images`, sehingga update otomatis melewatinya; setiap langkah tercatat di `update.log`. Nama project compose dan volume sama dengan compose di bawah, jadi data tetap saat pindah dari image yang di-build sendiri. `SDR_DOA_ADMIN_PASSWORD`, `SDR_DOA_SEED_*` dan `SDR_DOA_PORT` (atau `--port`) boleh ditulis di `.env` itu. Rincian di `QUICKSTART.md`, "Docker dari image GHCR".
+
+### Di-build dari rilis atau repository
 
 Dari rilis (tidak perlu Node.js):
 

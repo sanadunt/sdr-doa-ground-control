@@ -23,6 +23,20 @@ SHA256SUMS                     sha256sum -c SHA256SUMS
 
 Isi tarball console: `frontend/dist` (termasuk `receiver/`), modul runtime di `tools/`, `install.sh`, `packaging/console`, `packaging/docker` (termasuk `sdr-doa-docker`), `Dockerfile.release`, `docker-compose.yml` (dari `docker-compose.release.yml`), `docker-compose.ghcr.yml`, `.env.example`, `QUICKSTART.md`, manual PDF, lisensi BrowSDR, `wheels/`, dan `MANIFEST.sha256`. Tarball agent: modul agent, `install.sh`, `packaging/agent`, `Dockerfile.agent`, `docker-compose.yml` (dari `docker-compose.agent.yml`), dan `MANIFEST.sha256`.
 
+## Rilis di GitHub dan image GHCR
+
+Rilis untuk operator dibuat GitHub Actions dari `main`, bukan dari build lokal: naikkan `VERSION`, merge ke `main`, lalu push tag `v<VERSION>` (`git tag v2.0.1 && git push origin v2.0.1`) atau jalankan **Actions > Release > Run workflow** di `main` (tag dibuat bila belum ada). `.github/workflows/release.yml` menjalankan `ci.yml`, lalu `make_release.py --with-wheels`, dan `tools/release_check.py` memeriksa tag (harus `v<VERSION>` dari commit di `origin/main`) serta aset (tepat empat file di atas, `SHA256SUMS` mencakup ketiganya, dan `sdr-doa-docker` di tarball sama dengan asetnya). Setelah itu:
+
+- job `release` menerbitkan rilis dengan keempat aset (prerelease bila versi memuat `-`; menjalankan ulang rilis yang sama mengganti asetnya);
+- job `images` mengekstrak kedua tarball, memeriksa `SHA256SUMS` dan `MANIFEST.sha256`, lalu mem-push `ghcr.io/sanadunt/sdr-doa-ground-console` (`Dockerfile.release`, linux/amd64 dan arm64) dan `ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent` (`Dockerfile.agent`, linux/amd64, arm64 dan arm/v7) dengan tag `<V>`, `<MAYOR>.<MINOR>`, `<MAYOR>` dan `latest` (prerelease hanya `<V>`) serta label OCI `version`, `revision` dan `source`. Jadi isi image sama dengan isi tarball.
+
+GHCR bisa membuat package baru sebagai private. Setelah rilis pertama, bila job `images` memberi peringatan tentang pull tanpa login, ubah kedua package ke Public sekali (GitHub > Packages > package > Package settings > Change visibility). Tanpa itu `sdr-doa-docker` di komputer lain tidak bisa mem-pull.
+
+Update di komputer operator tanpa login GitHub:
+
+- Docker: `packaging/docker/sdr-doa-docker` (aset rilis) mem-pull tag kanal (bawaan versi mayor, `2`), menunggu healthcheck, dan mengembalikan image sebelumnya bila gagal; `auto-update on` memasang timer harian. Lihat `QUICKSTART.md`, "Docker dari image GHCR".
+- Native: `sdr-doa-console update` dan `auto-update on` (`packaging/console/update_release.py`) mengambil rilis terbaru dengan versi mayor yang sama dari API GitHub, memeriksa SHA-256 dan `MANIFEST.sha256`, menjalankan `install.sh` rilis itu, dan mengembalikan program lama bila `/api/health` tidak melaporkan versi baru. Lihat `console/README.md`.
+
 ## File
 
 | File | Isi |
@@ -35,5 +49,7 @@ Isi tarball console: `frontend/dist` (termasuk `receiver/`), modul runtime di `t
 | `packaging/agent/` | `install-agent.sh`, `uninstall-agent.sh`, `run-agent.sh`, template service, `agent.env.example` |
 | `packaging/docker/` | entrypoint console, healthcheck, pemeriksaan build context, dan `sdr-doa-docker` (install, update dengan healthcheck dan rollback, timer update harian; `tools/test_docker_update.py`) |
 | `tools/make_release.py` | builder rilis; `--stage-console DIR`/`--stage-agent DIR` dipakai Docker dan installer dari repository |
+| `.github/workflows/ci.yml`, `release.yml` | CI (pull request dan push ke `main`) dan rilis (tag `v*` atau Run workflow di `main`) |
+| `tools/release_check.py` | aturan tag, aset rilis, serta nama, tag dan label image yang dipakai `release.yml` |
 
 Semua jalur menjalankan console dengan path data yang sama: `--config-path DATA/console.json --branding-path DATA/branding.json --preferences-path DATA/preferences.json --data-dir DATA/receiver --tile-cache-dir DATA/tiles --env-file DATA/.env`, dan `--bind 127.0.0.1`. Tidak ada yang memakai `--base-url`/`--mqtt-*`; nilai awal masuk lewat `SDR_DOA_SEED_*`.

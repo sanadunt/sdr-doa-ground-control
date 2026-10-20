@@ -2,11 +2,14 @@
 
 Agent membaca Data Out KrakenSDR di Raspberry (`http://127.0.0.1:8081`), lalu publish `health`, `state` dan `config_reported` ke MQTT (`sdr/v1/uav-01/...`). Kontrol di Ground Console butuh agent ini: tanpa `config_reported` rev dasar tidak diketahui dan tombol Kirim nonaktif. Agent hanya memakai standard library Python, jadi tidak perlu `pip`.
 
-Ada dua cara memasang. Keduanya jalan di background, mulai saat boot, dan restart sendiri bila gagal.
+Ada tiga cara memasang; pakai satu saja. Semuanya jalan di background, mulai saat boot, dan restart sendiri bila gagal. Hanya image GHCR yang di-update otomatis; service native di-upgrade dengan menjalankan installer rilis baru.
 
 ## Native (systemd)
 
 ```sh
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v2.0.0/sdr-doa-rdf-sdr-agent-2.0.0.tar.gz
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v2.0.0/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
 tar -xzf sdr-doa-rdf-sdr-agent-2.0.0.tar.gz
 cd sdr-doa-rdf-sdr-agent-2.0.0
 sudo sh install.sh                    # lihat dulu: sudo sh install.sh --dry-run
@@ -49,7 +52,25 @@ sudo sh /opt/sdr-doa-agent/uninstall.sh --purge    # hapus juga
 
 `ENABLE_CONFIG=1` berarti Kontrol di ground bisa mengubah `settings.json` KrakenSDR. Aktifkan hanya di broker dan jaringan yang dipercaya; console publish tanpa TLS atau password. Ubah dengan `sudo sh install.sh --enable-config` (atau `--disable-config`), bukan hanya lewat `agent.env`: service hanya boleh menulis direktori `settings.json` bila installer dijalankan dengan config aktif. Bila `ENABLE_CONFIG=1` tetapi user service tidak bisa menulis `settings.json`, agent berhenti dengan pesan di `journalctl -u sdr-doa-agent` (exit 78) dan tidak di-restart terus-menerus. Console dan agent harus memakai broker yang sama (atau bridge yang meneruskan `sdr/v1/uav-01/#`).
 
-## Docker
+## Docker dari image GHCR (update otomatis)
+
+Image `ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent` (linux/amd64, arm64, arm/v7) publik, jadi pull dan update tidak butuh login GitHub. `sdr-doa-docker` (aset rilis) menulis `compose.yml`, `.env` dan `agent.env` di `/opt/sdr-doa-agent`, mem-pull image kanal (bawaan versi mayor, `2`) dan menjalankannya; dengan `--auto-update` juga timer harian 03:30.
+
+```sh
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/sdr-doa-docker
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
+sudo sh sdr-doa-docker install --agent --auto-update
+sudoedit /opt/sdr-doa-agent/agent.env                  # MQTT_HOST, MQTT_PORT, TLS, ...
+cd /opt/sdr-doa-agent && sudo docker compose up -d     # terapkan agent.env yang diubah
+sudo docker compose logs -f agent
+sudo sdr-doa-docker update --dir /opt/sdr-doa-agent    # update sekarang
+sudo sdr-doa-docker rollback --dir /opt/sdr-doa-agent  # kembali ke image sebelumnya
+```
+
+`agent.env` di sini memakai variabel yang sama dengan tabel di atas; `STATE_DIR` dan `SETTINGS_PATH` diatur oleh `compose.yml`. `sudo sh sdr-doa-docker install --agent --enable-config` me-mount direktori `_share` KrakenSDR (`--share-dir`, bawaan `/home/doasdr/doasdr/_share`), menjalankan agent sebagai pemiliknya (`--user UID:GID` bila perlu, tidak boleh root) dengan state di `/opt/sdr-doa-agent/state`, dan menulis `ENABLE_CONFIG=1`; `--disable-config` mengembalikannya. Image agent tidak punya healthcheck: image baru dianggap gagal bila container berhenti atau restart dalam 20 detik pertama, lalu image sebelumnya dipakai lagi. Project compose `sdr-doa-agent` dan volume `agent-state` sama dengan compose di bawah, jadi state di volume itu tetap saat pindah. Service native dan container tidak boleh jalan bersamaan (keduanya akan publish dan menjawab patch): selama service native masih terpasang, `sdr-doa-docker install --agent` menolak (kecuali `--force`). Hapus service native dulu dengan `sudo sh /opt/sdr-doa-agent/uninstall.sh` (tanpa `--purge`, jadi `/etc/sdr-doa-agent/agent.env` tetap ada untuk disalin ke `/opt/sdr-doa-agent/agent.env`).
+
+## Docker yang di-build sendiri
 
 ```sh
 cp packaging/agent/agent.env.example agent.env     # lalu edit

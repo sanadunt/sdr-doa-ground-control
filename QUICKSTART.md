@@ -581,7 +581,7 @@ Broker TLS, PPP/T900, dan MQTT production tidak disiapkan oleh quickstart ini. C
 
 ## Instalasi Linux: Docker, rilis tar dan service
 
-Bagian ini untuk komputer ground station **Linux** yang hanya memakai console: tidak perlu Node.js atau build, console jalan di background, hidup lagi setelah reboot, dan semua pengaturan tersimpan otomatis. Ada dua cara, pilih salah satu: Docker, atau rilis tar dengan `install.sh`. Keduanya tetap bind ke `127.0.0.1:8787`, jadi console hanya bisa dibuka dari komputer itu sendiri: `http://127.0.0.1:8787/` di Chromium atau Chrome. Detail lengkap ada di `packaging/console/README.md`.
+Bagian ini untuk komputer ground station **Linux** yang hanya memakai console: tidak perlu Node.js atau build, console jalan di background, hidup lagi setelah reboot, dan semua pengaturan tersimpan otomatis. Ada tiga cara, pilih salah satu: Docker dari image GHCR (paling mudah di-update), Docker yang di-build dari rilis atau repository, atau rilis tar dengan `install.sh`. Image GHCR dan rilis tar bisa di-update otomatis tanpa login GitHub. Keduanya tetap bind ke `127.0.0.1:8787`, jadi console hanya bisa dibuka dari komputer itu sendiri: `http://127.0.0.1:8787/` di Chromium atau Chrome. Detail lengkap ada di `packaging/console/README.md`.
 
 ### Membuat rilis tar
 
@@ -593,7 +593,23 @@ python3 tools/make_release.py --skip-build # pakai frontend/dist yang sudah di-b
 cd dist/release && sha256sum -c SHA256SUMS
 ```
 
-Hasilnya di `dist/release/`: `sdr-doa-ground-console-<VERSI>-linux.tar.gz` (console, frontend sudah di-build, installer, Dockerfile rilis, panduan), `sdr-doa-rdf-sdr-agent-<VERSI>.tar.gz` (agent RDF-SDR) dan `SHA256SUMS`. Versi diambil dari file `VERSION` di root repository. `--with-wheels` ikut membawa wheel `paho-mqtt` dan `tzdata` untuk instalasi tanpa internet. Build penuh menolak berjalan bila ada perubahan yang belum di-commit pada input build.
+Hasilnya di `dist/release/`: `sdr-doa-ground-console-<VERSI>-linux.tar.gz` (console, frontend sudah di-build, installer, Dockerfile rilis, panduan), `sdr-doa-rdf-sdr-agent-<VERSI>.tar.gz` (agent RDF-SDR), `sdr-doa-docker` (script host Docker) dan `SHA256SUMS`. Build lokal ini untuk uji coba atau instalasi tanpa internet; rilis untuk operator dibuat di GitHub (bagian berikut). Versi diambil dari file `VERSION` di root repository. `--with-wheels` ikut membawa wheel `paho-mqtt` dan `tzdata` untuk instalasi tanpa internet. Build penuh menolak berjalan bila ada perubahan yang belum di-commit pada input build.
+
+### Rilis di GitHub
+
+Rilis resmi dibuat GitHub Actions (`.github/workflows/release.yml`), bukan dari build lokal:
+
+1. Naikkan `VERSION` di `main` (misalnya `2.0.1`; prerelease `2.1.0-rc.1`; tanpa nol di depan dan tanpa `+build`), lalu merge ke `main`.
+2. Push tag yang sama persis dengan `VERSION`: `git tag v2.0.1 && git push origin v2.0.1`. Atau buka **Actions > Release > Run workflow** di branch `main`; tag `v<VERSI>` dibuat otomatis bila belum ada.
+
+Workflow menjalankan seluruh test (`ci.yml`), membangun tarball dengan `make_release.py --with-wheels`, lalu menerbitkan rilis `v<VERSI>` dengan empat aset: `sdr-doa-ground-console-<VERSI>-linux.tar.gz`, `sdr-doa-rdf-sdr-agent-<VERSI>.tar.gz`, `sdr-doa-docker` dan `SHA256SUMS`. Dari tarball yang sama dibuat image `ghcr.io/sanadunt/sdr-doa-ground-console` (amd64, arm64) dan `ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent` (amd64, arm64, armv7) dengan tag `<VERSI>`, `<MAYOR>.<MINOR>`, `<MAYOR>` dan `latest`; prerelease hanya mendapat `<VERSI>`. Tag yang tidak sama dengan `VERSION`, atau commit yang belum ada di `main`, menghentikan workflow dengan pesan yang menyebut sebabnya.
+
+Aset rilis bisa diunduh tanpa login karena repository publik:
+
+- aset yang namanya tetap, dari rilis terbaru: `https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/sdr-doa-docker` dan `https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/SHA256SUMS`;
+- tarball, yang namanya memuat versi: `https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v2.0.0/sdr-doa-ground-console-2.0.0-linux.tar.gz` (`latest/download/<aset>` juga bisa, asal versi di nama file memang versi terbaru).
+
+**Sekali setelah rilis pertama**: GHCR bisa membuat package baru sebagai private. Bila job `images` memberi peringatan bahwa image tidak bisa di-pull tanpa login, buka GitHub > profil > **Packages** > `sdr-doa-ground-console` > **Package settings** > **Change visibility** > **Public**, lalu lakukan hal yang sama untuk `sdr-doa-rdf-sdr-agent`. Sebelum itu `docker pull` dari komputer lain ditolak (`denied` atau `unauthorized`). Rilis berikutnya tidak perlu langkah ini lagi.
 
 ### Docker dari image GHCR (tanpa build, update otomatis)
 
@@ -615,7 +631,8 @@ sudo sdr-doa-docker rollback                   # kembali ke image sebelumnya
 - **Data**: nama project compose dan volume sama dengan `docker-compose.yml` (`sdr-doa-ground-console`, `sdr-doa-data`), jadi console yang sebelumnya di-build dari repository atau dari rilis tetap memakai datanya setelah pindah ke image GHCR.
 - **Kata sandi admin**: `cd /opt/sdr-doa-ground-console`, lalu `docker compose exec console sdr-doa-set-admin-password` dan `docker compose restart console`.
 - **Tanpa script**: `docker-compose.ghcr.yml` (di repository dan tarball console) berisi compose yang sama; `docker compose -f docker-compose.ghcr.yml pull` lalu `docker compose -f docker-compose.ghcr.yml up -d`, tanpa tunggu healthcheck dan rollback.
-- **Agent RDF-SDR**: `sudo sh sdr-doa-docker install --agent` memasang agent di `/opt/sdr-doa-agent` dengan pengaturan di `agent.env`; `--enable-config` me-mount `/home/doasdr/doasdr/_share` (`--share-dir`) dan menjalankan agent sebagai pemiliknya.
+- **Agent RDF-SDR**: `sudo sh sdr-doa-docker install --agent` memasang agent di `/opt/sdr-doa-agent` dengan pengaturan di `agent.env`; `--enable-config` me-mount `/home/doasdr/doasdr/_share` (`--share-dir`) dan menjalankan agent sebagai pemiliknya. Langkahnya ada di [Agent RDF-SDR](#agent-rdf-sdr-raspberry).
+- **Script-nya sendiri** tidak meng-update dirinya. Untuk versi script yang lebih baru, unduh lagi `sdr-doa-docker` dari rilis terbaru dan jalankan `sudo sh sdr-doa-docker install` (pengaturan di `.env` tetap).
 
 ### Docker
 
@@ -646,9 +663,13 @@ Container berjalan sebagai uid 10001 dan `restart: unless-stopped` menyalakannya
 Butuh Python 3.9+ dengan modul `venv` (`sudo apt install python3-venv` di Debian/Ubuntu). Jalankan sebagai user desktop biasa, bukan root:
 
 ```sh
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v2.0.0/sdr-doa-ground-console-2.0.0-linux.tar.gz
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v2.0.0/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
 tar -xzf sdr-doa-ground-console-2.0.0-linux.tar.gz
 cd sdr-doa-ground-console-2.0.0-linux
 sh install.sh            # menanyakan kata sandi admin; Enter = default 123456
+sdr-doa-console auto-update on   # opsional: update otomatis setiap hari 03.45
 ```
 
 Tanpa pertanyaan, dengan nilai awal: `sh install.sh --yes --generate-password --base-url http://192.168.100.100:8081 --mqtt-host 10.90.0.1 --mqtt-port 9001 --refresh-seconds 2`. Opsi lain: `--password NILAI`, `--port`, `--prefix`, `--data-dir`, `--no-service`, `--no-desktop` (lihat `sh install.sh --help`). Installer memeriksa file rilis terhadap `MANIFEST.sha256`, memasang program dan venv (`paho-mqtt`, `tzdata`) di `~/.local/share/sdr-doa-ground-console/app`, membuat systemd user service, perintah `sdr-doa-console` di `~/.local/bin`, dan entri menu, lalu langsung menjalankan console. Dari repository, `sh packaging/console/install.sh` bekerja sama setelah `npm run build:all`.
@@ -717,8 +738,21 @@ journalctl -u sdr-doa-agent -f
 - Pengaturan ada di `/etc/sdr-doa-agent/agent.env` (`root:<grup service>`, 0640). Setelah mengubahnya: `sudo systemctl restart sdr-doa-agent`. Variabel lain bisa diset dengan `--set NAMA=NILAI`, misalnya `--set DOA_RATE=0`.
 - Secara bawaan agent menjawab setiap patch dengan `REMOTE_CONTROL_DISABLED`. `sudo sh install.sh --enable-config` mengizinkan Kontrol mengubah `settings.json`; `--disable-config` mematikannya lagi. Aktifkan hanya di broker dan jaringan yang dipercaya.
 - Agent memakai MQTT lewat TCP (default port 1883), bukan WebSocket. Console dan agent harus memakai broker yang sama. Broker di luar loopback wajib TLS dan username (`MQTT_TLS=1` atau `MQTT_CAFILE`, `MQTT_USERNAME`, dan `SDR_DOA_MQTT_PASSWORD` di `agent.env`; lihat `packaging/agent/README.md`).
-- Docker (opsional, juga arm64/armv7): salin `packaging/agent/agent.env.example` ke `agent.env`, edit, lalu `docker compose up -d --build` di folder rilis agent (atau `docker compose -f docker-compose.agent.yml up -d --build` di repository). Butuh Compose v2.24+. Tanpa build, dari image GHCR dengan update otomatis: `sudo sh sdr-doa-docker install --agent --auto-update` (lihat [Docker dari image GHCR](#docker-dari-image-ghcr-tanpa-build-update-otomatis)).
-- Upgrade: jalankan installer rilis baru lagi; `agent.env` dan state tetap. Hapus dengan `sudo sh /opt/sdr-doa-agent/uninstall.sh` (`--purge` juga menghapus pengaturan dan state).
+- Docker dari image GHCR (arm64 atau armv7, tanpa build, update otomatis tanpa login GitHub), sebagai pengganti service di atas, bukan bersamaan. Selama service native masih terpasang, script menolak memasang agent; hapus dulu dengan `sudo sh /opt/sdr-doa-agent/uninstall.sh` (pengaturan di `/etc/sdr-doa-agent/agent.env` tetap, salin nilainya ke `agent.env` yang baru):
+
+  ```sh
+  curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/sdr-doa-docker
+  curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/SHA256SUMS
+  sha256sum -c --ignore-missing SHA256SUMS
+  sudo sh sdr-doa-docker install --agent --auto-update     # /opt/sdr-doa-agent, update harian 03:30
+  sudoedit /opt/sdr-doa-agent/agent.env                     # MQTT_HOST, MQTT_PORT, dan lain-lain
+  cd /opt/sdr-doa-agent && sudo docker compose up -d        # terapkan agent.env yang diubah
+  sudo docker compose logs -f agent
+  ```
+
+  `--enable-config` mengizinkan Kontrol mengubah `settings.json`: script me-mount `/home/doasdr/doasdr/_share` (`--share-dir`) dan menjalankan agent sebagai pemilik direktori itu; `--disable-config` mematikannya lagi. `sdr-doa-docker update --dir /opt/sdr-doa-agent` dan `rollback` bekerja seperti pada console; image agent tidak punya healthcheck, jadi image baru dianggap gagal bila container berhenti atau restart dalam 20 detik pertama.
+- Docker yang di-build sendiri (juga arm64/armv7): salin `packaging/agent/agent.env.example` ke `agent.env`, edit, lalu `docker compose up -d --build` di folder rilis agent (atau `docker compose -f docker-compose.agent.yml up -d --build` di repository). Butuh Compose v2.24+. Project dan volume-nya sama dengan yang ditulis `sdr-doa-docker install --agent`, jadi state di volume `agent-state` tetap saat pindah ke image GHCR; salin isi `agent.env` lama ke `/opt/sdr-doa-agent/agent.env`.
+- Upgrade service: jalankan installer rilis baru lagi; `agent.env` dan state tetap. Hapus dengan `sudo sh /opt/sdr-doa-agent/uninstall.sh` (`--purge` juga menghapus pengaturan dan state).
 
 ## Validasi setelah install
 
@@ -798,6 +832,14 @@ Tengah atau VFO diubah di halaman Receiver (mengetik Center atau VFO, menggeser 
 - `Ditolak · REMOTE_CONTROL_DISABLED`: agent berjalan tanpa `--enable-config`.
 - **Publish gagal**: ACL broker tidak mengizinkan console publish ke `sdr/v1/uav-01/cmd/config/patch`.
 - Kontrol tidak bisa dibuka karena login admin nonaktif: `SDR_DOA_ADMIN_PASSWORD` diisi nilai kosong, atau `.env` tidak bisa dibaca. Isi kata sandi lalu restart console.
+
+### `sdr-doa-docker`: pull ditolak (`denied`, `unauthorized`)
+
+Package GHCR masih private (lihat [Rilis di GitHub](#rilis-di-github)), atau Docker menyimpan login `ghcr.io` lama yang tokennya sudah kedaluwarsa (`~/.docker/config.json`, untuk sudo `/root/.docker/config.json`): jalankan `sudo docker logout ghcr.io` lalu ulangi. Image publik tidak butuh login. Di belakang proxy, daemon Docker memakai proxy dari konfigurasi service Docker, bukan dari shell.
+
+### Update dibatalkan dan versi lama jalan lagi
+
+Docker: `update.log` di direktori install (`/opt/sdr-doa-ground-console` atau `/opt/sdr-doa-agent`) menyebut sebabnya pada baris `FAILED`. Image yang gagal dicatat di `.bad-images`, dan update otomatis melewatinya sampai ada image lain; `sudo sdr-doa-docker update` di terminal menawarkan untuk mencobanya lagi. Native: `sdr-doa-console auto-update status` menampilkan hasil terakhir, `journalctl --user -u sdr-doa-console-update` lognya; rilis yang gagal dilewati sampai ada rilis yang lebih baru, dan `sdr-doa-console update --to <versi>` mencobanya lagi.
 
 ### Halaman Receiver menampilkan "Receiver is not built"
 
