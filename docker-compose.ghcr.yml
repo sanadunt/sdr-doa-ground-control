@@ -40,7 +40,9 @@ services:
       #   docker compose exec console sdr-doa-set-admin-password
       #   docker compose restart console
       # Unset in both places, the default 123456 applies and the UI warns.
-      # SDR_DOA_ADMIN_PASSWORD= (empty) disables admin login.
+      # SDR_DOA_ADMIN_PASSWORD= (empty) disables admin login. In .env, wrap a
+      # value with a $ in single quotes (SDR_DOA_ADMIN_PASSWORD='...'): compose
+      # replaces $name in unquoted and double-quoted values.
       - SDR_DOA_ADMIN_PASSWORD
       # First start only: the console writes /data/console.json from these and
       # ignores them once that file exists. Change settings in the UI later.

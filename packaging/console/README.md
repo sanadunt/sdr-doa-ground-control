@@ -95,6 +95,7 @@ sdr-doa-console uninstall [--purge]
 sdr-doa-console update --check       versi terpasang dan rilis terbaru, tanpa mengubah apa pun
 sdr-doa-console update               unduh, periksa, pasang (bertanya dulu)
 sdr-doa-console update --yes         tanpa pertanyaan
+sdr-doa-console update --auto        seperti timer: tanpa pertanyaan, dan menunggu selama Receiver merekam atau memindai
 sdr-doa-console update --to 2.0.1    rilis tertentu, juga untuk kembali ke versi lama atau mencoba prerelease
 sdr-doa-console update --allow-major izinkan versi mayor baru (baca catatan rilisnya dulu)
 ```
@@ -107,9 +108,9 @@ Tidak perlu akun atau token GitHub: repository publik, jadi daftar rilis dan fil
 4. jalankan `install.sh` rilis baru dengan opsi instalasi sekarang. `install.sh` mencatat opsinya di `app/install-options` (`--prefix`, `--data-dir`, `--bin-dir`, `--port`, `--no-service`, `--no-desktop`); kata sandi dan nilai awal tidak pernah dicatat;
 5. tunggu sampai `/api/health` melaporkan versi baru, paling lama 60 detik. Bila gagal, `app.previous` dikembalikan, console lama dijalankan lagi, dan perintah keluar dengan kode 1. Rilis itu dilewati oleh update berikutnya sampai ada rilis yang lebih baru; `--to <versi>` mencobanya lagi.
 
-Data dan kata sandi tidak disentuh. Hanya satu update berjalan pada satu waktu. Hasil terakhir terlihat di `sdr-doa-console auto-update status` (tersimpan di `update-state.json` di direktori data).
+Data dan kata sandi tidak disentuh. Hanya satu update berjalan pada satu waktu. Selama `/api/health` melaporkan `receiver_busy` (Receiver merekam audio atau mengarsipkan pindai), update otomatis (`--auto`) ditunda ke jadwal berikutnya dan mencatat `deferred: Receiver recording or scan active`; setelah 7 hari tertunda terus, update tetap dijalankan. Update manual memberi peringatan, lalu bertanya atau butuh `--yes`. Bila unit update di-stop selama update berjalan (shutdown, logout), instalasi dikembalikan sampai selesai; sinyal kedua tidak memotong pengembalian itu. Hasil terakhir terlihat di `sdr-doa-console auto-update status` (tersimpan di `update-state.json` di direktori data).
 
-Update otomatis: `sdr-doa-console auto-update on` memasang systemd user timer `sdr-doa-console-update.timer` di sebelah service console. Timer berjalan setiap hari pukul 03.45 waktu lokal (`--time 04:30` untuk jam lain), diacak sampai 15 menit, dan menyusul saat komputer menyala lagi bila jadwal terlewat; isinya `sdr-doa-console update --yes`. Butuh service console (instalasi tanpa `--no-service`) dan lingering; tanpa systemd user session perintah menampilkan baris cron sebagai gantinya. Log: `journalctl --user -u sdr-doa-console-update`. User service tidak membaca `~/.profile`, jadi bila perlu proxy, tulis `HTTPS_PROXY=...` di `~/.config/environment.d/proxy.conf` (berlaku setelah reboot) dan untuk sekarang `systemctl --user set-environment HTTPS_PROXY=...`. Matikan dengan `sdr-doa-console auto-update off`.
+Update otomatis: `sdr-doa-console auto-update on` memasang systemd user timer `sdr-doa-console-update.timer` di sebelah service console. Timer berjalan setiap hari pukul 03.45 waktu lokal (`--time 04:30` untuk jam lain), diacak sampai 15 menit, dan menyusul saat komputer menyala lagi bila jadwal terlewat; isinya `sdr-doa-console update --auto` (tanpa pertanyaan, dan menunggu selama Receiver sibuk). Butuh service console (instalasi tanpa `--no-service`) dan lingering; tanpa systemd user session perintah menampilkan baris cron sebagai gantinya. Log: `journalctl --user -u sdr-doa-console-update`. User service tidak membaca `~/.profile`, jadi bila perlu proxy, tulis `HTTPS_PROXY=...` di `~/.config/environment.d/proxy.conf` (berlaku setelah reboot) dan untuk sekarang `systemctl --user set-environment HTTPS_PROXY=...`. Matikan dengan `sdr-doa-console auto-update off`.
 
 Instalasi dari tarball yang belum punya perintah `update` dipasang ulang sekali dengan `sh install.sh` dari rilis baru; setelah itu `update` tersedia.
 
@@ -123,20 +124,25 @@ Hanya Linux, karena memakai `network_mode: host`. Console bind ke `127.0.0.1` da
 
 ### Dari image GHCR, dengan update otomatis
 
-Tanpa build dan tanpa login GitHub: image `ghcr.io/sanadunt/sdr-doa-ground-console` publik. `sdr-doa-docker` (aset rilis, juga `packaging/docker/sdr-doa-docker` di tarball) menulis `compose.yml` dan `.env` di direktori install, mem-pull image, lalu menunggu healthcheck. Yang dibutuhkan hanya Docker Engine dengan Compose v2.
+Tanpa build dan tanpa login GitHub: image `ghcr.io/sanadunt/sdr-doa-ground-console` publik. `sdr-doa-docker` (aset rilis, juga `packaging/docker/sdr-doa-docker` di tarball) menulis `compose.yml` dan `.env` di direktori install, mem-pull image, lalu menunggu healthcheck. Update hanya butuh Docker Engine dengan Compose v2; unduhan pertama butuh `curl` atau `wget` (URL yang sama).
 
 ```sh
 curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/sdr-doa-docker
 curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS
 sudo sh sdr-doa-docker install --auto-update     # /opt/sdr-doa-ground-console, timer harian 03:30
-sdr-doa-docker status
+sudo sdr-doa-docker status
 sudo sdr-doa-docker update                       # sekarang; --check hanya melihat
 sudo sdr-doa-docker rollback                     # kembali ke image sebelumnya
 sudo sdr-doa-docker auto-update off
+cd /opt/sdr-doa-ground-console && sudo docker compose exec console sdr-doa-set-admin-password && sudo docker compose restart console
 ```
 
-Kanal update adalah `SDR_DOA_IMAGE_TAG` di `/opt/sdr-doa-ground-console/.env` (bawaan `2`: setiap rilis 2.x.y; `2.0` hanya 2.0.z; versi mayor baru hanya dengan `install --channel 3`). Image baru yang tidak `healthy` dalam 180 detik diganti lagi dengan image sebelumnya (tag `sdr-doa-previous`) dan dicatat di `.bad-images`, sehingga update otomatis melewatinya; setiap langkah tercatat di `update.log`. Nama project compose dan volume sama dengan compose di bawah, jadi data tetap saat pindah dari image yang di-build sendiri. `SDR_DOA_ADMIN_PASSWORD`, `SDR_DOA_SEED_*` dan `SDR_DOA_PORT` (atau `--port`) boleh ditulis di `.env` itu. Rincian di `QUICKSTART.md`, "Docker dari image GHCR".
+Semua perintah untuk instalasi di `/opt` pakai `sudo`, karena `.env` di sana milik root (0600). Kanal update adalah `SDR_DOA_IMAGE_TAG` di `/opt/sdr-doa-ground-console/.env` (bawaan `2`: setiap rilis 2.x.y; `2.0` hanya 2.0.z; versi mayor baru hanya dengan `install --channel 3`). Image baru yang tidak `healthy` dalam 180 detik diganti lagi dengan image sebelumnya (tag `sdr-doa-previous`); bila image itu sendiri gagal (unhealthy, berhenti, restart terus) ia dicatat di `.bad-images` dan update otomatis melewatinya. Image yang lebih lama dari yang jalan juga dilewati update otomatis, dan selama Receiver merekam atau mengarsipkan pindai update otomatis ditunda (paling lama 7 hari). Tanpa plugin `docker buildx`, `update --check` mem-pull image untuk membandingkannya (container dan tag yang jalan tetap). Setiap langkah tercatat di `update.log`. Satu host punya satu timer update (`auto-update on --force` memindahkannya), dan timer root hanya untuk direktori milik root; instalasi milik user mendapat baris crontab dari `sdr-doa-docker auto-update on` tanpa sudo.
+
+`update` hanya mengganti image: perubahan `.env` (port, kata sandi, nilai awal) diterapkan dengan `cd /opt/sdr-doa-ground-console && sudo docker compose up -d` atau `sudo sdr-doa-docker install` lagi. Nilai `SDR_DOA_ADMIN_PASSWORD` atau `SDR_DOA_SEED_*` yang memuat `$` ditulis dalam kutip tunggal (`SDR_DOA_ADMIN_PASSWORD='Xk9$q2!aB'`), karena docker compose mengganti `$nama` di nilai tanpa kutip atau berkutip ganda; script memberi peringatan bila tidak.
+
+Pindah dari image yang di-build sendiri: nama project compose dan volume sama dengan compose di bawah, jadi datanya tetap. Pengaturan di `.env` lama tidak ikut: salin baris `SDR_DOA_ADMIN_PASSWORD`, `SDR_DOA_PORT` dan `SDR_DOA_SEED_*` dari `.env` di sebelah `docker-compose.yml` ke `/opt/sdr-doa-ground-console/.env` (atau pakai `--port`), jalankan `cd /opt/sdr-doa-ground-console && sudo docker compose up -d`, lalu jangan pakai `docker compose` di direktori lama lagi (project yang sama; `up -d --build` di sana mengembalikan build lokal). Rincian di `QUICKSTART.md`, "Docker dari image GHCR".
 
 ### Di-build dari rilis atau repository
 
@@ -166,8 +172,9 @@ Kata sandi admin, pilih salah satu:
 docker compose exec console sdr-doa-set-admin-password
 docker compose restart console
 
-# atau lewat environment: shell atau file .env di sebelah docker-compose.yml
-echo 'SDR_DOA_ADMIN_PASSWORD=rahasia-anda' >> .env
+# atau lewat environment: shell atau file .env di sebelah docker-compose.yml;
+# kutip tunggal, karena docker compose mengganti $nama di nilai lain
+echo "SDR_DOA_ADMIN_PASSWORD='rahasia-anda'" >> .env
 docker compose up -d
 ```
 
