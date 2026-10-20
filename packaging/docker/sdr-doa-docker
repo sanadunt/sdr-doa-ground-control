@@ -804,9 +804,10 @@ EOF
 agent_env_template() {
   cat <<'EOF'
 # Settings of the SDR-DoA edge agent in Docker (sdr-doa-docker install --agent).
-# Apply a change with: sdr-doa-docker update, or docker compose up -d in this
-# directory. STATE_DIR and SETTINGS_PATH are set by compose.yml. Keep this file
-# mode 0600: it may hold the MQTT password. Empty values use the agent's defaults.
+# Apply a change with docker compose up -d in this directory (sdr-doa-docker
+# update only replaces the image). STATE_DIR and SETTINGS_PATH are set by
+# compose.yml. Keep this file mode 0600: it may hold the MQTT password. Empty
+# values use the agent's defaults.
 
 # KrakenSDR Data Out on this Raspberry.
 BASE_URL=http://127.0.0.1:8081
@@ -1022,7 +1023,7 @@ agent_setup() {
   ag_user=$3
   if [ ! -f "$DIR/agent.env" ]; then
     agent_env_template | write_file "$DIR/agent.env" 0600
-    log "wrote $DIR/agent.env with the defaults; edit it, then run '$PROG update'"
+    log "wrote $DIR/agent.env with the defaults; edit it, then run '$COMPOSE_HINT up -d' in $DIR"
   fi
   case $ag_config in
     enable)

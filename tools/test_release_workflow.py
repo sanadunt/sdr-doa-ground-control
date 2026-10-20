@@ -525,10 +525,6 @@ class AssetCheckTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertTrue(out.getvalue().startswith("::error::release assets in"), out.getvalue())
 
-    @unittest.skipUnless(
-        (ROOT / release_check.DOCKER_SCRIPT_IN_CONSOLE).is_file(),
-        "packaging/docker/sdr-doa-docker is not in this checkout yet",
-    )
     def test_make_release_output_passes_the_check(self):
         dist = Path(self._tmp.name) / "dist"
         for name in ("index.html", "receiver/index.html"):
@@ -693,6 +689,108 @@ class TagCheckTests(unittest.TestCase):
             )
         self.assertEqual(code, 1)
         self.assertIn("::error::tag v9.9.9 does not match VERSION 2.0.0", refused.getvalue())
+
+
+def _dockerfile_copy_sources(text: str) -> List[str]:
+    """The source paths of every COPY line (flags such as --chmod left out)."""
+    sources = []
+    for line in re.findall(r"(?m)^COPY (.+)$", text):
+        words = [word for word in line.split() if not word.startswith("--")]
+        sources += words[:-1]
+    return sources
+
+
+class CrossTrackContractTests(unittest.TestCase):
+    """The workflow, make_release.py, sdr-doa-docker and the native updater
+    must name the same repository, assets, tarball layout and images."""
+
+    REPOSITORY = "sanadunt/sdr-doa-ground-control"
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(ROOT / "packaging" / "console"))
+        try:
+            import update_release  # noqa: E402
+        finally:
+            sys.path.remove(str(ROOT / "packaging" / "console"))
+        cls.updater = update_release
+        cls.version = make_release.read_version(ROOT)
+        cls.script = (ROOT / release_check.DOCKER_SCRIPT_IN_CONSOLE).read_text(encoding="utf-8")
+        cls.owner = cls.REPOSITORY.split("/")[0]
+
+    def script_value(self, name: str) -> str:
+        match = re.search(r"(?m)^%s=(\S+)$" % name, self.script)
+        self.assertIsNotNone(match, name)
+        return match.group(1)
+
+    def test_docker_script_pulls_the_images_the_workflow_pushes(self):
+        self.assertEqual(self.script_value("CONSOLE_IMAGE"), release_check.image_name(self.owner, release_check.CONSOLE_IMAGE))
+        self.assertEqual(self.script_value("AGENT_IMAGE"), release_check.image_name(self.owner, release_check.AGENT_IMAGE))
+        # Its default channel is one of the tags a release of this VERSION pushes.
+        self.assertIn(self.script_value("DEFAULT_CHANNEL"), release_check.image_tags(self.version))
+
+    def test_ghcr_compose_uses_the_console_image(self):
+        text = (ROOT / "docker-compose.ghcr.yml").read_text(encoding="utf-8")
+        self.assertIn("${SDR_DOA_IMAGE:-%s}" % self.script_value("CONSOLE_IMAGE"), text)
+
+    def test_native_updater_reads_the_assets_make_release_writes(self):
+        updater = self.updater
+        assets = release_check.release_assets(self.version)
+        self.assertEqual(updater.DEFAULT_REPO, self.REPOSITORY)
+        self.assertEqual(updater.CONSOLE_ASSET.format(version=self.version), assets[0])
+        self.assertEqual(updater.SUMS_ASSET, assets[-1])
+        self.assertEqual(updater.SUMS_ASSET, make_release.CHECKSUMS_NAME)
+        self.assertEqual(updater.CONSOLE_TOP.format(version=self.version), make_release.console_release_name(self.version))
+        self.assertEqual(updater.MANIFEST_NAME, make_release.MANIFEST_NAME)
+
+    def test_repository_url_is_the_same_everywhere(self):
+        url = f"https://github.com/{self.REPOSITORY}"
+        for name in ("Dockerfile", "Dockerfile.release", "Dockerfile.agent"):
+            sources = re.findall(r'org\.opencontainers\.image\.source="([^"]+)"', (ROOT / name).read_text(encoding="utf-8"))
+            self.assertEqual(sources, [url], name)
+        quickstart = (ROOT / "QUICKSTART.md").read_text(encoding="utf-8")
+        downloads = set(re.findall(r"https://github\.com/([^/\s]+/[^/\s]+)/releases/", quickstart))
+        self.assertEqual(downloads, {self.REPOSITORY})
+
+    def test_release_tarballs_hold_what_the_images_and_the_updater_need(self):
+        with tempfile.TemporaryDirectory(prefix="test-release-contract-") as tmp:
+            dist = Path(tmp) / "dist"
+            for name in ("index.html", "receiver/index.html"):
+                (dist / name).parent.mkdir(parents=True, exist_ok=True)
+                (dist / name).write_text("<!doctype html>", encoding="utf-8")
+            out = Path(tmp) / "out"
+            with mock.patch("sys.stderr", new=io.StringIO()):
+                paths = make_release.build_release(
+                    ROOT, output_dir=out, dist_dir=dist, skip_build=True, allow_dirty=True, epoch=1_700_000_000
+                )
+            self.assertEqual([path.name for path in paths], release_check.release_assets(self.version))
+            members = {}
+            for path, top in (
+                (paths[0], make_release.console_release_name(self.version)),
+                (paths[1], make_release.agent_release_name(self.version)),
+            ):
+                with tarfile.open(path, "r:gz") as archive:
+                    names = archive.getnames()
+                self.assertTrue(all(name == top or name.startswith(top + "/") for name in names), path.name)
+                members[path.name] = {name[len(top) + 1:] for name in names if name != top}
+        console, agent = members[paths[0].name], members[paths[1].name]
+        for required in (
+            "install.sh", "VERSION", make_release.MANIFEST_NAME, "Dockerfile.release", "docker-compose.yml",
+            "docker-compose.ghcr.yml", release_check.DOCKER_SCRIPT_IN_CONSOLE, "packaging/console/update_release.py",
+            "packaging/docker/healthcheck.py", "packaging/docker/console-entrypoint.sh",
+        ):
+            self.assertIn(required, console)
+        for required in ("install.sh", "VERSION", make_release.MANIFEST_NAME, "Dockerfile.agent", "docker-compose.yml"):
+            self.assertIn(required, agent)
+        # release.yml builds each image with the tarball's own Dockerfile and
+        # the unpacked tarball as the context, so every COPY source must be in it.
+        for tree, dockerfile in ((console, "Dockerfile.release"), (agent, "Dockerfile.agent")):
+            for source in _dockerfile_copy_sources((ROOT / dockerfile).read_text(encoding="utf-8")):
+                source = source.rstrip("/")
+                self.assertTrue(
+                    source in tree or any(name.startswith(source + "/") for name in tree),
+                    f"{dockerfile} copies {source}, which its tarball does not hold",
+                )
 
 
 class OutputFormatTests(unittest.TestCase):
