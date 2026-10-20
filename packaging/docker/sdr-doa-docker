@@ -95,7 +95,9 @@ install options:
                     --share-dir; never root)
   --auto-update     also turn the daily update on (root)
   --time HH:MM      time of the daily update (default 03:30, local time)
-  --force           replace a compose.yml that sdr-doa-docker did not write
+  --force           replace a compose.yml that sdr-doa-docker did not write;
+                    (agent) install although the native agent service is
+                    installed, which must then be stopped
 
 update options:
   --dir DIR         install directory (default: the console install, else the
@@ -1131,6 +1133,13 @@ cmd_install() {
   if [ -n "$in_dir" ]; then DIR=$(absolute "$in_dir"); else DIR=$(default_dir "$VARIANT"); fi
   DIR=${DIR%/}
   check_dir "$DIR"
+  # The native agent (packaging/agent/install-agent.sh) uses /opt/sdr-doa-agent
+  # and a system unit; two agents would both publish and answer config patches.
+  if [ "$VARIANT" = agent ] && [ "$in_force" != 1 ]; then
+    if [ -f "$DIR/install-info" ] || [ -f "$SYSTEMD_DIR/sdr-doa-agent.service" ]; then
+      die "the native RDF-SDR agent service (install-agent.sh) is installed, and two agents must not run at once; remove it first with 'sudo sh /opt/sdr-doa-agent/uninstall.sh' (agent.env and state stay), or pass --force"
+    fi
+  fi
 
   check_docker
   detect_compose

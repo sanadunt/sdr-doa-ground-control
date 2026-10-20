@@ -631,6 +631,26 @@ class InstallTests(DockerScriptTestCase):
         self.install("--agent")
         self.assertEqual(read_env_file(agent_env)["MQTT_HOST"], "10.90.0.1")
 
+    def test_agent_refuses_a_native_agent(self):
+        self.h.publish(f"{AGENT_IMAGE}:2", "b", "2.0.0", behaviour="none")
+        self.dir.mkdir(parents=True)
+        native = self.dir / "install-info"
+        native.write_text(f"PREFIX={self.dir}\n")
+        unit = self.h.systemd / "sdr-doa-agent.service"
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        for present in (native, unit):
+            if present is unit:
+                native.unlink()
+                unit.write_text("[Service]\n")
+            result = self.h.run("install", "--agent", "--dir", str(self.dir))
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("native RDF-SDR agent service", result.stderr)
+            self.assertIn("uninstall.sh", result.stderr)
+            self.assertFalse((self.dir / "compose.yml").exists())
+            self.assertEqual(self.h.argvs(), [], "refused before docker")
+        self.ok(self.h.run("install", "--agent", "--dir", str(self.dir), "--force"))
+        self.assertEqual(self.h.container("sdr-doa-agent/agent")["image"], image_id("b"))
+
     def test_agent_env_template_follows_the_example(self):
         self.h.publish(f"{AGENT_IMAGE}:2", "b", "2.0.0", behaviour="none")
         self.install("--agent")
