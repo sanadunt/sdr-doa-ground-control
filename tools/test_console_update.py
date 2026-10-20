@@ -73,6 +73,7 @@ echo "# replaced by $(cat "$here/VERSION")" >>"$bin/sdr-doa-console"
 
 FAKE_LAUNCHER = """#!/bin/sh
 printf '%s\\n' "$*" >>"{log}"
+if [ "$1" = stop ] && [ -n "${{FAKE_LAUNCHER_STOP_SLEEP:-}}" ]; then sleep "$FAKE_LAUNCHER_STOP_SLEEP"; fi
 """
 
 
@@ -197,11 +198,15 @@ class FakeConsole(FakeServer):
         super().__init__()
         self.version_file = version_file
         self.fixed = fixed
+        self.busy: Optional[bool] = None  # None: an older console without receiver_busy
         self.routes["/api/health"] = self.health
 
     def health(self):
         version = self.fixed or (self.version_file.read_text(encoding="utf-8").strip() if self.version_file else "dev")
-        return json_answer({"ok": True, "version": version})
+        body = {"ok": True, "version": version}
+        if self.busy is not None:
+            body["receiver_busy"] = self.busy
+        return json_answer(body)
 
 
 def release_tarball(version: str, directory: Path, *, install: str = FAKE_INSTALL, extra=(), version_file: str = "") -> bytes:
@@ -800,6 +805,91 @@ class UpdateFlowTests(UpdaterTestCase):
         self.assertIsNone(state.get("failed_version"), "an interrupted update does not mark the release bad")
         self.assertIs(signal.getsignal(signal.SIGTERM), handler)
 
+    def test_second_sigterm_does_not_cut_the_rollback_short(self):
+        # systemd stops the unit with SIGTERM and may send another one to what
+        # is left (final-sigterm) while the rollback stops the console.
+        install = self.make_install()
+        self.github.add_release("2.0.1", self.tarball("2.0.1"), latest=True)
+
+        def terminate_twice():
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and not install.install_log.exists():
+                time.sleep(0.02)
+            os.kill(os.getpid(), signal.SIGTERM)
+            while time.monotonic() < deadline:
+                if install.launcher_log.exists() and "stop" in install.launcher_log.read_text(encoding="utf-8"):
+                    time.sleep(0.1)
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    return
+                time.sleep(0.02)
+
+        killer = threading.Thread(target=terminate_twice, daemon=True)
+        with mock.patch.dict(os.environ, {"FAKE_INSTALL_SLEEP": "30", "FAKE_LAUNCHER_STOP_SLEEP": "1"}):
+            killer.start()
+            code, out, err = self.run_main(*install.argv("apply", "--yes"))
+        killer.join(5)
+        self.assertEqual(code, 130, out + err)
+        self.assertIn("the update was interrupted; restoring 2.0.0", out)
+        self.assert_untouched(install)
+        self.assertEqual(install.launcher_log.read_text(encoding="utf-8").split(), ["stop", "start"])
+
+    def test_auto_waits_while_the_receiver_records(self):
+        install = self.make_install()
+        self.console.busy = True
+        self.github.add_release("2.0.1", self.tarball("2.0.1"), latest=True)
+        code, out, err = self.run_main(*install.argv("apply", "--auto"))
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("deferred: Receiver recording or scan active; 2.0.1 is installed on a later run", out)
+        self.assert_untouched(install)
+        self.assertIsNone(install.installed_args())
+        first = install.state()
+        self.assertEqual(first["result"], "deferred")
+        self.assertIsInstance(first["deferred_since"], int)
+        code, out, _ = self.run_main(*install.argv("apply", "--auto"))
+        self.assertEqual(code, 0)
+        self.assertEqual(install.state()["deferred_since"], first["deferred_since"], "the first deferral counts")
+        code, out, _ = self.run_main(*install.argv("status"))
+        self.assertIn("deferred: Receiver recording or scan active", out)
+        # After 7 days of deferrals it updates anyway.
+        state = install.state()
+        state["deferred_since"] -= update_release.BUSY_DEFER_MAX_S
+        (install.data / "update-state.json").write_text(json.dumps(state), encoding="utf-8")
+        code, out, err = self.run_main(*install.argv("apply", "--auto"))
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("The Receiver was busy at every update run for 7 days; updating anyway", out)
+        self.assertEqual(install.version(), "2.0.1")
+        self.assertIsNone(install.state()["deferred_since"])
+
+    def test_auto_updates_an_idle_or_older_console(self):
+        install = self.make_install()
+        self.github.add_release("2.0.1", self.tarball("2.0.1"), latest=True)
+        # None: a console from before receiver_busy, which counts as idle.
+        for busy in (False, None):
+            with self.subTest(busy=busy):
+                (install.app / "VERSION").write_text("2.0.0\n", encoding="utf-8")
+                self.console.busy = busy
+                code, out, err = self.run_main(*install.argv("apply", "--auto"))
+                self.assertEqual(code, 0, out + err)
+                self.assertIn("Updated the Ground Console from 2.0.0 to 2.0.1.", out)
+                self.assertNotIn("deferred", out)
+                self.assertNotIn("Warning", out)
+
+    def test_manual_update_warns_while_the_receiver_records(self):
+        install = self.make_install()
+        self.console.busy = True
+        self.github.add_release("2.0.1", self.tarball("2.0.1"), latest=True)
+        code, out, err = self.run_main(*install.argv("apply", "--yes"))
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("Warning: the Receiver is recording or archiving a scan.", out)
+        self.assertEqual(install.version(), "2.0.1")
+        # Without --yes it still asks, and there is no terminal here.
+        self.console.busy = True
+        self.github.add_release("2.0.2", self.tarball("2.0.2"), latest=True)
+        code, out, err = self.run_main(*install.argv("apply"))
+        self.assertEqual(code, 1)
+        self.assertIn("Warning: the Receiver is recording", out)
+        self.assertIn("confirm with --yes", err)
+
     def test_console_that_was_not_running_stays_stopped(self):
         install = self.make_install(running=False)
         self.github.add_release("2.0.1", self.tarball("2.0.1"), latest=True)
@@ -981,7 +1071,8 @@ class LauncherTests(UpdaterTestCase):
         service = (self.unit_dir / "sdr-doa-console-update.service").read_text(encoding="utf-8")
         timer = (self.unit_dir / "sdr-doa-console-update.timer").read_text(encoding="utf-8")
         self.assertIn("Type=oneshot", service)
-        self.assertIn(f"ExecStart={launcher} update --yes", service)
+        self.assertIn(f"ExecStart={launcher} update --auto", service)
+        self.assertIn("TimeoutStopSec=5min", service.splitlines())
         for line in ("OnCalendar=*-*-* 03:45:00", "RandomizedDelaySec=15min", "Persistent=true", "WantedBy=timers.target"):
             self.assertIn(line, timer.splitlines())
         self.assertEqual(oct((self.unit_dir / "sdr-doa-console-update.timer").stat().st_mode & 0o777), "0o644")
@@ -1016,7 +1107,7 @@ class LauncherTests(UpdaterTestCase):
         result = self.launcher_run(launcher, {**env, "STUB_NO_SYSTEMD": "1"}, "auto-update", "on", "--time", "05:07")
         self.assertEqual(result.returncode, 1)
         self.assertIn("no systemd user session", result.stderr)
-        self.assertIn(f"7 5 * * * {launcher} update --yes >>{self.tmp / 'data/update.log'} 2>&1", result.stderr)
+        self.assertIn(f"7 5 * * * {launcher} update --auto >>{self.tmp / 'data/update.log'} 2>&1", result.stderr)
         result = self.launcher_run(launcher, env, "auto-update", "on")
         self.assertEqual(result.returncode, 1)
         self.assertIn("needs the systemd user service of the console", result.stderr)
@@ -1051,8 +1142,12 @@ class LauncherTests(UpdaterTestCase):
         result = self.launcher_run(launcher, env, "update")
         self.assertEqual(result.returncode, 1)
         self.assertIn("confirm with --yes", result.stderr)
-        for bad in (["--bogus"], ["--to"]):
+        for bad in (["--bogus"], ["--to"], ["--check", "--auto"]):
             self.assertEqual(self.launcher_run(launcher, env, "update", *bad).returncode, 64, bad)
+        # --auto reaches the updater as the timer's run, which asks nothing.
+        result = self.launcher_run(launcher, env, "update", "--auto")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Updated the Ground Console from 2.0.0 to 2.0.1.", result.stdout)
         self.assertIn("auto-update on [--time HH:MM]", self.launcher_run(launcher, env, "help").stdout)
 
 

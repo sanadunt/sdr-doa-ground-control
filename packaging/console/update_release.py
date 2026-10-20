@@ -11,7 +11,9 @@ apply     check, then download and verify the release, keep a copy of the
           program as APP_DIR.previous, run the release's install.sh with the
           options of the current install, and wait until /api/health reports
           the new version; when it does not within 60 s, put the copy back,
-          start it again and exit 1
+          start it again and exit 1. While /api/health reports receiver_busy
+          (the Receiver records audio or archives a scan), --auto (the timer)
+          waits for the next run, for at most 7 days; a manual run warns
 status    print the result of the last check or update
 
 Requests are anonymous (no token is ever sent, even when GITHUB_TOKEN is set)
@@ -82,6 +84,9 @@ RETRY_DELAY_S = 2.0
 HEALTH_TIMEOUT_S = 60.0
 HEALTH_POLL_S = 1.0
 RESTORE_HEALTH_TIMEOUT_S = 30.0
+# --auto holds an update back while the Receiver is busy, then goes ahead
+# anyway, so a station that records day and night still gets updates.
+BUSY_DEFER_MAX_S = 7 * 24 * 3600
 INSTALL_TIMEOUT_S = 30 * 60.0
 LAUNCHER_TIMEOUT_S = 90.0
 TRANSIENT_HTTP = frozenset({500, 502, 503, 504})
@@ -641,18 +646,30 @@ def install_env(install: Install) -> Dict[str, str]:
     return env
 
 
-def health_version(port: int) -> Optional[str]:
-    """The version /api/health reports on 127.0.0.1, never through a proxy; None when it does not answer ok."""
+def health(port: int) -> Optional[dict]:
+    """The /api/health answer on 127.0.0.1, never through a proxy; None when it does not answer ok."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
         with opener.open(f"http://127.0.0.1:{port}/api/health", timeout=4) as response:
             body = json.loads(response.read(4096).decode("utf-8"))
     except Exception:  # any failure means "not answering"
         return None
-    if isinstance(body, dict) and body.get("ok") is True:
-        version = body.get("version")
-        return version if isinstance(version, str) else ""
-    return None
+    return body if isinstance(body, dict) and body.get("ok") is True else None
+
+
+def health_version(port: int) -> Optional[str]:
+    """The version /api/health reports; None when it does not answer ok."""
+    body = health(port)
+    if body is None:
+        return None
+    version = body.get("version")
+    return version if isinstance(version, str) else ""
+
+
+def receiver_busy(port: int) -> bool:
+    """Whether the console reports a Receiver recording or scan; a console without the field is not busy."""
+    body = health(port)
+    return body is not None and body.get("receiver_busy") is True
 
 
 def wait_for_version(port: int, version: str, timeout_s: float) -> Tuple[bool, Optional[str]]:
@@ -1007,6 +1024,12 @@ def _sigterm_interrupts() -> Iterator[None]:
         signal.signal(signal.SIGTERM, previous)
 
 
+def _ignore_sigterm() -> None:
+    """From here on a SIGTERM (systemd stopping the unit again) must not cut the rollback short."""
+    with contextlib.suppress(ValueError):  # not the main thread
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+
 def _apply(args, install: Install, requested: Optional[Version], installed: Optional[Version]) -> int:
     _clear_stale_backup(install, installed)
     client = _client(installed)
@@ -1017,13 +1040,31 @@ def _apply(args, install: Install, requested: Optional[Version], installed: Opti
     if plan.action != "update":
         say(plan.message)
         write_state(install.data_dir, command="apply", result=plan.action, message=plan.message,
-                    installed=str(installed or ""), release=release.version.text)
+                    installed=str(installed or ""), release=release.version.text, deferred_since=None)
         return 0
     new = release.version
     options = install_options(install)
+    if receiver_busy(install.port):
+        if args.auto:
+            since = state.get("deferred_since")
+            now = int(time.time())
+            if not isinstance(since, int) or isinstance(since, bool) or since > now:
+                since = now
+            if now - since < BUSY_DEFER_MAX_S:
+                message = f"deferred: Receiver recording or scan active; {new} is installed on a later run"
+                say(message)
+                write_state(install.data_dir, command="apply", result="deferred", message=message,
+                            installed=str(installed or ""), release=new.text, deferred_since=since)
+                return 0
+            say(f"The Receiver was busy at every update run for {BUSY_DEFER_MAX_S // 86400} days; updating anyway")
+        else:
+            say("Warning: the Receiver is recording or archiving a scan. The update restarts the console, which "
+                "interrupts it (the recording goes on in a new segment).")
+    elif state.get("deferred_since") is not None:
+        write_state(install.data_dir, deferred_since=None)
     say(f"Installed: {installed or 'unknown'}")
     say(f"Release:   {release.label()}" + (f"  {release.page}" if release.page else ""))
-    if not args.yes and not _confirm(f"Update the Ground Console to {new}? It restarts once. [y/N] "):
+    if not (args.yes or args.auto) and not _confirm(f"Update the Ground Console to {new}? It restarts once. [y/N] "):
         say("Nothing was changed.")
         return 1
     with work_dir(install.data_dir) as work:
@@ -1036,6 +1077,7 @@ def _apply(args, install: Install, requested: Optional[Version], installed: Opti
         try:
             failure = _install_and_wait(args, install, tree, options, new, expect_running)
         except KeyboardInterrupt:
+            _ignore_sigterm()
             _roll_back(install, old, new, "the update was interrupted", expect_running, release_failed=False)
             raise
         if failure is None:
@@ -1045,8 +1087,9 @@ def _apply(args, install: Install, requested: Optional[Version], installed: Opti
                 message += " It was not running and stays stopped; start it with: sdr-doa-console start"
             say(message)
             write_state(install.data_dir, command="apply", result="updated", message=message,
-                        installed=new.text, release=new.text, failed_version=None)
+                        installed=new.text, release=new.text, failed_version=None, deferred_since=None)
             return 0
+        _ignore_sigterm()
         error = UpdateError(_roll_back(install, old, new, failure, expect_running))
         error.recorded = True  # type: ignore[attr-defined]
         raise error
@@ -1127,6 +1170,8 @@ def build_parser() -> argparse.ArgumentParser:
     check.set_defaults(handler=cmd_check)
     apply = commands.add_parser("apply", parents=[paths, choice], help="install the newer release")
     apply.add_argument("--yes", "-y", action="store_true", help="do not ask before installing")
+    apply.add_argument("--auto", action="store_true",
+                       help="the daily timer: do not ask, and wait for a later run while the Receiver records or scans")
     apply.add_argument("--health-timeout", type=float, default=HEALTH_TIMEOUT_S, metavar="S",
                        help=f"seconds the new version has to answer /api/health (default {HEALTH_TIMEOUT_S:.0f})")
     apply.set_defaults(handler=cmd_apply)

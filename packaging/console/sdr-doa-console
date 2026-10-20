@@ -36,9 +36,11 @@ Usage: sdr-doa-console COMMAND
   password    change the admin password, then restart the console
   update      install the latest release of this major version from GitHub
               --check: only show it; --yes: do not ask; --to X.Y.Z: that
-              release; --allow-major: also a new major version
+              release; --allow-major: also a new major version; --auto: as
+              the timer (no questions; while the Receiver records or scans,
+              wait for the next run, at most 7 days)
   auto-update on [--time HH:MM] | off | status
-              check daily (default 03:45 local time) and install with --yes
+              check daily (default 03:45 local time) and install with --auto
   run         run it in the foreground (what the service runs)
   info        show the version and the installed paths
   uninstall   remove the program; add --purge to also delete saved data
@@ -206,16 +208,20 @@ cmd_info() {
 
 # update_release.py with the paths of this install. It runs on python3 from
 # PATH, which install.sh needs anyway, because the update may rebuild the venv.
+# exec: python becomes the update unit's main process, so stopping the unit
+# sends it one SIGTERM, which rolls a running install back; it is the last
+# command of every caller.
 updater() {
   py=$(command -v python3 2>/dev/null || true)
   [ -n "$py" ] || py=$PYTHON
   [ -f "$UPDATER" ] || die "$UPDATER is missing; run install.sh of the release again"
-  "$py" -I "$UPDATER" "$@" --app-dir "$APP_DIR" --data-dir "$DATA_DIR" --port "$PORT" \
+  exec "$py" -I "$UPDATER" "$@" --app-dir "$APP_DIR" --data-dir "$DATA_DIR" --port "$PORT" \
     --launcher "$BIN_PATH" --unit-file "$UNIT_FILE" --desktop-file "$DESKTOP_FILE"
 }
 
 cmd_update() {
   action=apply
+  auto=0
   count=$#
   while [ "$count" -gt 0 ]; do
     arg=$1
@@ -223,6 +229,7 @@ cmd_update() {
     count=$((count - 1))
     case $arg in
       --check) action=check ;;
+      --auto) auto=1; set -- "$@" "$arg" ;;
       --yes | -y | --allow-major | --to=*) set -- "$@" "$arg" ;;
       --to)
         [ "$count" -gt 0 ] || usage_error "--to needs a version such as 2.0.1"
@@ -230,9 +237,10 @@ cmd_update() {
         shift
         count=$((count - 1))
         ;;
-      *) usage_error "update takes --check, --yes, --to X.Y.Z and --allow-major" ;;
+      *) usage_error "update takes --check, --yes, --auto, --to X.Y.Z and --allow-major" ;;
     esac
   done
+  if [ "$action" = check ] && [ "$auto" = 1 ]; then usage_error "--auto installs; it does not go with --check"; fi
   updater "$action" "$@"
 }
 
@@ -243,7 +251,7 @@ timer_time() {
 cron_line() {
   hour=${1%:*}
   minute=${1#*:}
-  printf '%s %s * * * %s update --yes >>%s 2>&1\n' "${minute#0}" "${hour#0}" "$BIN_PATH" "$UPDATE_LOG"
+  printf '%s %s * * * %s update --auto >>%s 2>&1\n' "${minute#0}" "${hour#0}" "$BIN_PATH" "$UPDATE_LOG"
 }
 
 write_unit() {
@@ -272,8 +280,11 @@ Documentation=file://$APP_DIR/README.md
 
 [Service]
 Type=oneshot
-ExecStart=$BIN_PATH update --yes
+ExecStart=$BIN_PATH update --auto
 TimeoutStartSec=45min
+# A stop during an update rolls it back: the console stop (up to 90 s), the
+# restore, its start and 30 s for it to answer.
+TimeoutStopSec=5min
 Nice=10
 UNIT
   write_unit "$UPDATE_TIMER_FILE" <<UNIT
@@ -297,7 +308,7 @@ UNIT
     echo "sdr-doa-console: warning: lingering is off, so the timer runs only while $user is logged in; turn it on with: sudo loginctl enable-linger $user" >&2
   fi
   echo "Auto-update on: daily at $1 local time (up to 15 min later; a missed run follows the next start)"
-  echo "It installs new releases of this major version with: sdr-doa-console update --yes"
+  echo "It installs new releases of this major version with: sdr-doa-console update --auto"
 }
 
 auto_update_off() {
