@@ -29,7 +29,7 @@ Isi tarball console: `frontend/dist` (termasuk `receiver/`), modul runtime di `t
 | `Dockerfile`, `docker-compose.yml` | image console dari repository (build stage Node 22, runtime Python 3.12 slim) |
 | `Dockerfile.release`, `docker-compose.release.yml` | image console dari rilis yang diekstrak, tanpa Node |
 | `Dockerfile.agent`, `docker-compose.agent.yml` | image agent, multi-arch, tanpa langkah `RUN` |
-| `packaging/console/` | `install.sh`, perintah `sdr-doa-console`, template service/desktop, `set_admin_password.py`, `requirements.txt` |
+| `packaging/console/` | `install.sh`, perintah `sdr-doa-console`, template service/desktop, `set_admin_password.py`, `update_release.py` (updater `sdr-doa-console update`), `requirements.txt` |
 | `packaging/agent/` | `install-agent.sh`, `uninstall-agent.sh`, `run-agent.sh`, template service, `agent.env.example` |
 | `packaging/docker/` | entrypoint console, healthcheck, pemeriksaan build context |
 | `tools/make_release.py` | builder rilis; `--stage-console DIR`/`--stage-agent DIR` dipakai Docker dan installer dari repository |

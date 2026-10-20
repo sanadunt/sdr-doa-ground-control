@@ -76,14 +76,40 @@ sdr-doa-console open        start bila perlu, lalu buka di Chromium/Chrome (mode
 sdr-doa-console start|stop|restart|status
 sdr-doa-console logs        ikuti log (journalctl --user)
 sdr-doa-console password    ganti kata sandi admin, lalu restart console
+sdr-doa-console update      pasang rilis terbaru dari GitHub (lihat di bawah)
+sdr-doa-console auto-update on [--time HH:MM] | off | status
 sdr-doa-console run         jalankan di foreground (perintah yang sama dengan service)
 sdr-doa-console info        versi dan path
 sdr-doa-console uninstall [--purge]
 ```
 
-### Upgrade dan uninstall
+### Update dari GitHub Releases
 
-Upgrade: ekstrak rilis baru dan jalankan `sh install.sh` lagi. Program dan venv diganti, direktori data tetap. `sdr-doa-console uninstall` menghapus program, service, menu, dan perintahnya; data tetap di tempatnya. `sdr-doa-console uninstall --purge` juga menghapus data (dengan konfirmasi).
+```text
+sdr-doa-console update --check       versi terpasang dan rilis terbaru, tanpa mengubah apa pun
+sdr-doa-console update               unduh, periksa, pasang (bertanya dulu)
+sdr-doa-console update --yes         tanpa pertanyaan
+sdr-doa-console update --to 2.0.1    rilis tertentu, juga untuk kembali ke versi lama atau mencoba prerelease
+sdr-doa-console update --allow-major izinkan versi mayor baru (baca catatan rilisnya dulu)
+```
+
+Tidak perlu akun atau token GitHub: repository publik, jadi daftar rilis dan file rilis bisa diambil tanpa login. Token di environment (`GITHUB_TOKEN`) tidak pernah dikirim. Updater memakai proxy dari environment (`HTTPS_PROXY`, `NO_PROXY`). Urutannya:
+
+1. baca rilis terbaru; prerelease tidak pernah dipilih, dan versi mayor lain (misalnya 3.x saat 2.x terpasang) hanya dengan `--allow-major`;
+2. unduh `SHA256SUMS` dan `sdr-doa-ground-console-<versi>-linux.tar.gz`, cocokkan SHA-256, ekstrak hanya file dan folder di dalam folder rilis, lalu cocokkan `MANIFEST.sha256`. Tidak ada isi unduhan yang dijalankan sebelum hash cocok;
+3. salin program sekarang (dengan venv, perintah `sdr-doa-console`, service, dan menu) ke `app.previous`;
+4. jalankan `install.sh` rilis baru dengan opsi instalasi sekarang. `install.sh` mencatat opsinya di `app/install-options` (`--prefix`, `--data-dir`, `--bin-dir`, `--port`, `--no-service`, `--no-desktop`); kata sandi dan nilai awal tidak pernah dicatat;
+5. tunggu sampai `/api/health` melaporkan versi baru, paling lama 60 detik. Bila gagal, `app.previous` dikembalikan, console lama dijalankan lagi, dan perintah keluar dengan kode 1. Rilis itu dilewati oleh update berikutnya sampai ada rilis yang lebih baru; `--to <versi>` mencobanya lagi.
+
+Data dan kata sandi tidak disentuh. Hanya satu update berjalan pada satu waktu. Hasil terakhir terlihat di `sdr-doa-console auto-update status` (tersimpan di `update-state.json` di direktori data).
+
+Update otomatis: `sdr-doa-console auto-update on` memasang systemd user timer `sdr-doa-console-update.timer` di sebelah service console. Timer berjalan setiap hari pukul 03.45 waktu lokal (`--time 04:30` untuk jam lain), diacak sampai 15 menit, dan menyusul saat komputer menyala lagi bila jadwal terlewat; isinya `sdr-doa-console update --yes`. Butuh service console (instalasi tanpa `--no-service`) dan lingering; tanpa systemd user session perintah menampilkan baris cron sebagai gantinya. Log: `journalctl --user -u sdr-doa-console-update`. User service tidak membaca `~/.profile`, jadi bila perlu proxy, tulis `HTTPS_PROXY=...` di `~/.config/environment.d/proxy.conf` (berlaku setelah reboot) dan untuk sekarang `systemctl --user set-environment HTTPS_PROXY=...`. Matikan dengan `sdr-doa-console auto-update off`.
+
+Instalasi dari tarball yang belum punya perintah `update` dipasang ulang sekali dengan `sh install.sh` dari rilis baru; setelah itu `update` tersedia.
+
+### Upgrade manual dan uninstall
+
+Upgrade manual: ekstrak rilis baru dan jalankan `sh install.sh` lagi. Program dan venv diganti, direktori data tetap. `sdr-doa-console uninstall` menghapus program, service, timer update, salinan `app.previous`, menu, dan perintahnya; data tetap di tempatnya. `sdr-doa-console uninstall --purge` juga menghapus data (dengan konfirmasi).
 
 ## Docker
 
