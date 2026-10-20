@@ -1,4 +1,5 @@
 import type { PolarSettings } from '../types';
+import { preferenceStorage } from './preferenceStore';
 
 /**
  * Local view choices of the Overview polar plot: a Compass/Polar override of
@@ -22,12 +23,9 @@ export const POLAR_RANGE_LIMIT_DB = 1000;
 
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>;
 
+// localStorage, with writes copied to the console server (lib/preferenceStore.ts).
 function defaultStorage(): StorageLike | null {
-  try {
-    return typeof window !== 'undefined' ? window.localStorage : null;
-  } catch {
-    return null;
-  }
+  return preferenceStorage();
 }
 
 function finite(value: unknown): number | null {

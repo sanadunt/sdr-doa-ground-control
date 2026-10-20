@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest';
 import type { Candidate, GpsSourceMode, MapCoordinate, TelemetrySnapshot } from '../types';
 import {
   BASEMAP_FAILURES_PER_HOST,
+  BASEMAP_PARTIAL_WINDOW_MS,
   BASEMAP_SWITCH_GRACE_MS,
-  OSM_TILE_TEMPLATES,
   basemapAfterTile,
+  basemapAfterView,
+  basemapNotice,
   basemapPaint,
+  basemapPartialCheck,
   gpsReportsNoFix,
   holdStationCoordinate,
   initialBasemapHealth,
@@ -126,15 +129,16 @@ describe('camera framing on a station source change (AUD-10)', () => {
 });
 
 describe('basemap tile hosts (AUD-32, AUD-89)', () => {
-  const hosts = OSM_TILE_TEMPLATES.length;
-  const fail = (state: BasemapHealth, times: number, nowMs: number) => {
+  // The health logic takes any host count; the console's tile route now does
+  // the host fallback, so the map passes one URL per style (see below).
+  const hosts = 2;
+  const fail = (state: BasemapHealth, times: number, nowMs: number, count = hosts) => {
     let next = state;
-    for (let index = 0; index < times; index += 1) next = basemapAfterTile(next, false, hosts, nowMs);
+    for (let index = 0; index < times; index += 1) next = basemapAfterTile(next, false, count, nowMs);
     return next;
   };
 
   it('uses one host at a time and moves on after repeated failures', () => {
-    expect(OSM_TILE_TEMPLATES[0]).toContain('tile.openstreetmap.de');
     const start = initialBasemapHealth();
     const almost = fail(start, BASEMAP_FAILURES_PER_HOST - 1, 0);
     expect(almost.hostIndex).toBe(0);
@@ -144,30 +148,147 @@ describe('basemap tile hosts (AUD-32, AUD-89)', () => {
 
   it('ignores late failures from the previous host right after a switch', () => {
     const switched = fail(initialBasemapHealth(), BASEMAP_FAILURES_PER_HOST, 0);
-    expect(fail(switched, 10, BASEMAP_SWITCH_GRACE_MS - 1)).toBe(switched);
+    expect(fail(switched, 10, BASEMAP_SWITCH_GRACE_MS - 1)).toMatchObject({ hostIndex: switched.hostIndex, failures: 0, hostsFailed: switched.hostsFailed, switchedAtMs: switched.switchedAtMs });
   });
 
   it('reports the basemap unavailable once every host failed, without switching in a loop', () => {
     const second = fail(initialBasemapHealth(), BASEMAP_FAILURES_PER_HOST, 0);
     const exhausted = fail(second, BASEMAP_FAILURES_PER_HOST, 10_000);
     expect(exhausted.unavailable).toBe(true);
-    expect(fail(exhausted, 50, 20_000)).toBe(exhausted);
+    expect(fail(exhausted, 50, 20_000)).toMatchObject({ hostIndex: exhausted.hostIndex, failures: 0, unavailable: true, switchedAtMs: exhausted.switchedAtMs });
+    expect(basemapNotice(exhausted)).toBe('unavailable');
     // The periodic check keeps retrying hosts in turn while unavailable.
     const retried = nextBasemapHost(exhausted, hosts, 40_000);
     expect(retried.unavailable).toBe(true);
     expect(retried.hostIndex).not.toBe(exhausted.hostIndex);
   });
 
+  it('marks a one-URL style unavailable after one round and retries it in place', () => {
+    const exhausted = basemapAfterTile(fail(initialBasemapHealth(), BASEMAP_FAILURES_PER_HOST - 1, 0, 1), false, 1, 0);
+    expect(exhausted).toMatchObject({ hostIndex: 0, hostsFailed: 1, unavailable: true, switchedAtMs: 0 });
+    const retried = nextBasemapHost(exhausted, 1, 60_000);
+    expect(retried).toMatchObject({ hostIndex: 0, unavailable: true, switchedAtMs: 60_000 });
+    expect(basemapAfterTile(retried, true, 1, 61_000)).toMatchObject({ loaded: true, unavailable: false });
+  });
+
   it('clears every failure on the first loaded tile', () => {
     const exhausted = fail(fail(initialBasemapHealth(), BASEMAP_FAILURES_PER_HOST, 0), BASEMAP_FAILURES_PER_HOST, 10_000);
     const loaded = basemapAfterTile(exhausted, true, hosts, 20_000);
     expect(loaded).toMatchObject({ hostIndex: exhausted.hostIndex, failures: 0, hostsFailed: 0, loaded: true, unavailable: false });
-    expect(basemapAfterTile(loaded, true, hosts, 20_001)).toBe(loaded);
+    expect(basemapAfterTile(loaded, true, hosts, 20_001)).toMatchObject({ hostIndex: exhausted.hostIndex, failures: 0, loaded: true, unavailable: false });
+  });
+});
+
+describe('partial basemap (offline with part of the view cached)', () => {
+  const RETRY_MS = 60_000;
+  // Cached tiles load and uncached ones fail in one burst, in any order.
+  const tiles = (state: BasemapHealth, pattern: string, startMs: number, stepMs = 100): BasemapHealth => {
+    let next = state;
+    [...pattern].forEach((tile, index) => { next = basemapAfterTile(next, tile === 'L', 1, startMs + index * stepMs); });
+    return next;
+  };
+
+  it('shows PARTIAL when tiles keep failing while others load, where each load used to hide the failures', () => {
+    const state = tiles(initialBasemapHealth(), 'LFLFLFLFL', 0);
+    expect(state).toMatchObject({ loaded: true, unavailable: false, partial: true });
+    expect(basemapNotice(state)).toBe('partial');
+  });
+
+  it('keeps UNAVAILABLE when every tile fails', () => {
+    const state = tiles(initialBasemapHealth(), 'FFFFFFFF', 0);
+    expect(basemapNotice(state)).toBe('unavailable');
+    expect(state.partial).toBe(false);
+  });
+
+  it('turns an early UNAVAILABLE into PARTIAL once a cached tile draws', () => {
+    const unavailable = tiles(initialBasemapHealth(), 'FFFF', 0);
+    expect(basemapNotice(unavailable)).toBe('unavailable');
+    expect(basemapNotice(basemapAfterTile(unavailable, true, 1, 1_000))).toBe('partial');
+  });
+
+  it('counts tiles that fail after the view loaded, such as an uncached area panned or zoomed into', () => {
+    const loaded = tiles(initialBasemapHealth(), 'LLLL', 0);
+    expect(basemapNotice(tiles(loaded, 'FFFFFF', 120_000))).toBe('partial');
+  });
+
+  it('ignores failures spread wider than the window, and a single failed tile', () => {
+    const loaded = tiles(initialBasemapHealth(), 'LLLLF', 0);
+    expect(basemapNotice(loaded)).toBeNull();
+    const spread = tiles(loaded, 'FFFF', 30_000, BASEMAP_PARTIAL_WINDOW_MS / 3 + 1);
+    expect(spread.partial).toBe(false);
+    expect(basemapNotice(basemapAfterTile(spread, true, 1, 50_000))).toBeNull();
+  });
+
+  it('retries a partial style at the slow pace and clears it when the retry brings no failure', () => {
+    const partial = tiles(initialBasemapHealth(), 'LFFFFL', 0);
+    expect(partial.partialSinceMs).not.toBeNull();
+    const since = partial.partialSinceMs ?? 0;
+    expect(basemapPartialCheck(partial, 1, since + RETRY_MS - 1, RETRY_MS)).toEqual({ state: partial, reload: false });
+    const retry = basemapPartialCheck(partial, 1, since + RETRY_MS, RETRY_MS);
+    expect(retry.reload).toBe(true);
+    // The tiles come back while the retry waits; the notice stays until it is judged.
+    const answered = tiles(retry.state, 'LLLL', since + RETRY_MS + 200);
+    expect(basemapNotice(answered)).toBe('partial');
+    expect(basemapPartialCheck(answered, 1, since + RETRY_MS + BASEMAP_PARTIAL_WINDOW_MS - 1, RETRY_MS).state).toBe(answered);
+    const cleared = basemapPartialCheck(answered, 1, since + RETRY_MS + BASEMAP_PARTIAL_WINDOW_MS, RETRY_MS);
+    expect(cleared.reload).toBe(false);
+    expect(basemapNotice(cleared.state)).toBeNull();
+  });
+
+  it('keeps PARTIAL when the retry fails again, and retries again later without flicker', () => {
+    const partial = tiles(initialBasemapHealth(), 'LFFFFL', 0);
+    const retryAt = (partial.partialSinceMs ?? 0) + RETRY_MS;
+    const retried = tiles(basemapPartialCheck(partial, 1, retryAt, RETRY_MS).state, 'LFFLFF', retryAt + 100);
+    expect(basemapNotice(retried)).toBe('partial');
+    const judged = basemapPartialCheck(retried, 1, retryAt + BASEMAP_PARTIAL_WINDOW_MS, RETRY_MS);
+    expect(basemapNotice(judged.state)).toBe('partial');
+    expect(judged.state.partialRetryAtMs).toBeNull();
+    expect(basemapPartialCheck(judged.state, 1, retryAt + RETRY_MS - 1, RETRY_MS).reload).toBe(false);
+    expect(basemapPartialCheck(judged.state, 1, retryAt + RETRY_MS, RETRY_MS).reload).toBe(true);
+  });
+
+  it('turns UNAVAILABLE when a retry loads nothing, as after panning to an area never viewed', () => {
+    const partial = tiles(initialBasemapHealth(), 'LFFFFL', 0);
+    const retryAt = (partial.partialSinceMs ?? 0) + RETRY_MS;
+    const failed = tiles(basemapPartialCheck(partial, 1, retryAt, RETRY_MS).state, 'FFFFFF', retryAt + 100);
+    const judged = basemapPartialCheck(failed, 1, retryAt + BASEMAP_PARTIAL_WINDOW_MS, RETRY_MS).state;
+    expect(judged).toMatchObject({ loaded: false, unavailable: true });
+    expect(basemapNotice(judged)).toBe('unavailable');
+    // The unavailable path takes over; its own retry clears it when a tile draws.
+    expect(basemapPartialCheck(judged, 1, retryAt + 2 * RETRY_MS, RETRY_MS)).toEqual({ state: judged, reload: false });
+    expect(basemapNotice(basemapAfterTile(judged, true, 1, retryAt + 2 * RETRY_MS))).toBeNull();
+  });
+
+  it('turns UNAVAILABLE at once when the view draws none of its tiles, as after panning far offline', () => {
+    // Tiles drew earlier, elsewhere; the new view fails tile after tile.
+    const panned = tiles(tiles(initialBasemapHealth(), 'LLLL', 0), 'FFFFFF', 120_000);
+    expect(basemapNotice(panned)).toBe('partial');
+    const blank = basemapAfterView(panned, false, 1, 125_000);
+    expect(blank).toMatchObject({ loaded: false, unavailable: true, partialRetryAtMs: null });
+    expect(basemapNotice(blank)).toBe('unavailable');
+    // Panning back over cached tiles draws them and finds the partial state again.
+    expect(basemapNotice(tiles(blank, 'L', 126_000))).toBe('partial');
+  });
+
+  it('keeps PARTIAL while some of its tiles draw in the view, or when the renderer cannot tell', () => {
+    const partial = tiles(initialBasemapHealth(), 'LFFFFL', 0);
+    expect(basemapAfterView(partial, true, 1, 5_000)).toBe(partial);
+    expect(basemapAfterView(partial, null, 1, 5_000)).toBe(partial);
+    // Only a partial state is judged by the view: a healthy or unavailable one is left as it is.
+    const healthy = tiles(initialBasemapHealth(), 'LLLL', 0);
+    expect(basemapAfterView(healthy, false, 1, 5_000)).toBe(healthy);
+    const unavailable = tiles(initialBasemapHealth(), 'FFFF', 0);
+    expect(basemapAfterView(unavailable, false, 1, 5_000)).toBe(unavailable);
+  });
+
+  it('is not carried to the next Overview visit; the new map finds it again from its own tiles', () => {
+    const partial = tiles(initialBasemapHealth(), 'LFFFFL', 0);
+    expect(basemapNotice(resumeBasemapHealth(partial, 0, 1))).toBeNull();
   });
 });
 
 describe('basemap state across Overview visits', () => {
-  const hosts = OSM_TILE_TEMPLATES.length;
+  const hosts = 2;
   const exhausted = (): BasemapHealth => {
     let state = initialBasemapHealth();
     for (let index = 0; index < BASEMAP_FAILURES_PER_HOST; index += 1) state = basemapAfterTile(state, false, hosts, 0);
@@ -197,8 +318,26 @@ describe('basemap paint per theme', () => {
     expect(light.background).toBe('#dfe4dc');
     expect(darkBare.background).not.toBe(light.background);
     expect(darkBare.rings).not.toBe(light.rings);
-    // OSM tiles are light, so dark lines come back once they draw.
+    // Standard tiles are light, so dark lines come back once they draw.
     expect(darkTiles.rings).toBe(light.rings);
     expect(basemapPaint('light', true)).toEqual(light);
+  });
+
+  it('follows the tone of the drawn tiles, and the theme while no tiles are drawn', () => {
+    for (const theme of ['light', 'dark'] as const) {
+      const onLight = basemapPaint(theme, true, 'light');
+      const onDark = basemapPaint(theme, true, 'dark');
+      expect(onLight.rings).toBe('#1f2d3a');
+      expect(onDark.rings).toBe('#c3ced8');
+      expect(onDark.guides).not.toBe(onLight.guides);
+      expect(onDark.edges).not.toBe(onLight.edges);
+      expect(onDark.edgeWidth).toBeGreaterThan(onLight.edgeWidth);
+      expect(onDark.lobeOutline).not.toBe(onLight.lobeOutline);
+      // The background always follows the console theme.
+      expect(onDark.background).toBe(onLight.background);
+      expect(basemapPaint(theme, false, 'dark')).toEqual(basemapPaint(theme, false, 'light'));
+    }
+    expect(basemapPaint('light', false, 'dark').rings).toBe('#1f2d3a');
+    expect(basemapPaint('dark', false, 'light').rings).toBe('#c3ced8');
   });
 });

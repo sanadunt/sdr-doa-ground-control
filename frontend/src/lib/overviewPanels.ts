@@ -1,6 +1,8 @@
+import { preferenceStorage } from './preferenceStore';
+
 /**
- * Which Overview dashboard panels are open. A per-browser preference, kept in
- * localStorage and validated on restore; it never reaches the console server.
+ * Which Overview dashboard panels are open. An operator preference, kept in
+ * localStorage (copied to the console server) and validated on restore.
  */
 export interface OverviewPanels {
   /** Map layers panel (left column). */
@@ -31,12 +33,9 @@ const KEYS: ReadonlyArray<keyof OverviewPanels> = ['layers', 'polar', 'spectrum'
 
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>;
 
+// localStorage, with writes copied to the console server (lib/preferenceStore.ts).
 function defaultStorage(): StorageLike | null {
-  try {
-    return typeof window !== 'undefined' ? window.localStorage : null;
-  } catch {
-    return null;
-  }
+  return preferenceStorage();
 }
 
 /** Every field that is not a boolean falls back to its default on its own. */

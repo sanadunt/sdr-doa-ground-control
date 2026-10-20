@@ -1,6 +1,7 @@
 import { DEFAULT_DOA_OVERLAY_SETTINGS, type DoaOverlaySettings } from './doaGeometry';
+import { readPreference, writePreference } from './preferenceStore';
 
-const STORAGE_KEY = 'sdr-doa-overlay-settings-v4';
+export const OVERLAY_SETTINGS_STORAGE_KEY = 'sdr-doa-overlay-settings-v4';
 const intervals = new Set([15, 30, 45, 90]);
 const palettes = new Set(['kraken', 'thermal', 'viridis', 'monochrome']);
 /** The overlay never fades out completely, so a stored 0 cannot hide it without a trace. */
@@ -83,7 +84,7 @@ export function applyOverlayNumber(settings: DoaOverlaySettings, key: OverlayNum
 
 export function loadOverlaySettings(): DoaOverlaySettings {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = readPreference(OVERLAY_SETTINGS_STORAGE_KEY);
     return raw ? validateOverlaySettings(JSON.parse(raw) as Partial<DoaOverlaySettings>) : DEFAULT_DOA_OVERLAY_SETTINGS;
   } catch {
     return DEFAULT_DOA_OVERLAY_SETTINGS;
@@ -91,5 +92,6 @@ export function loadOverlaySettings(): DoaOverlaySettings {
 }
 
 export function saveOverlaySettings(settings: DoaOverlaySettings): void {
-  try { window.localStorage.setItem(STORAGE_KEY, JSON.stringify(validateOverlaySettings(settings))); } catch { /* local persistence is optional */ }
+  // localStorage, copied to the console server; writePreference never throws.
+  writePreference(OVERLAY_SETTINGS_STORAGE_KEY, JSON.stringify(validateOverlaySettings(settings)));
 }

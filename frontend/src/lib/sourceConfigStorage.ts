@@ -1,6 +1,7 @@
 import type { CompassConfig, GpsConfig } from '../types';
 import { DEFAULT_GPS_CONFIG, manualGpsOverrideFromInput } from './map';
 import { DEFAULT_COMPASS_CONFIG } from './polar';
+import { preferenceStorage } from './preferenceStore';
 
 export const GPS_CONFIG_STORAGE_KEY = 'sdr-doa-gps-source-v1';
 export const COMPASS_CONFIG_STORAGE_KEY = 'sdr-doa-compass-source-v1';
@@ -15,12 +16,9 @@ function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+// localStorage, with writes copied to the console server (lib/preferenceStore.ts).
 function defaultStorage(): StorageLike | null {
-  try {
-    return typeof window !== 'undefined' ? window.localStorage : null;
-  } catch {
-    return null;
-  }
+  return preferenceStorage();
 }
 
 function readJson(storage: StorageLike | null, key: string): unknown {

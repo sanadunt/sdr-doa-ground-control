@@ -17,9 +17,17 @@ node_modules/
 .venv/
 venv/
 
+# Release tarballs from tools/make_release.py (also covered by dist/ above)
+dist/release/
+
 # Local Ground Console/edge state and uploaded branding
 .config/
 .sdr-doa-edge/
 secrets/
 branding.json
 console.json
+preferences.json
+# docker-compose.agent.yml settings (may hold the MQTT password) and bind mounts
+agent.env
+/data/
+/state/

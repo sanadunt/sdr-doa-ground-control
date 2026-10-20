@@ -9,7 +9,7 @@ Catatan status 2026-10-13 (audit fungsional 2026-10-12, detail di `anti-slop/aud
 - Perilaku yang berubah dari rencana ini:
   - Overlay memakai bearing geografis (360 − θ₀ + compass_offset) mod 360, bukan θ₀ mentah (AUD-01).
   - Skala dB overlay default Auto dari vektor (AUD-07).
-  - Basemap memakai satu host tile pada satu waktu, `tile.openstreetmap.de` lalu `tile.openstreetmap.org` (AUD-32).
+  - Basemap memakai satu host tile pada satu waktu, `tile.openstreetmap.de` lalu `tile.openstreetmap.org` (AUD-32). Sejak pemilih peta dasar, percobaan host ini dilakukan cache tile di server (`tools/tile_cache.py`); browser hanya memanggil `/api/tiles`.
   - Tanpa WebGL2, setelah context hilang, atau bila worker gagal, overlay digambar di kanvas dengan pemberitahuan (AUD-11, AUD-31).
   - Overlay hanya tampil bila predikat kesiapan DoA (`overviewDoaStatus`) mengizinkan (AUD-04, AUD-21).
 - Belum sesuai rencana: §5 meminta overlay live di posisi manual/fallback hanya lewat pilihan eksplisit `Reference preview`. Saat ini node tanpa fix GPS tetap menggambar bearing live dari posisi referensi dengan label "REFERENCE ONLY · NOT LIVE GPS" (sisa AUD-29, menunggu keputusan produk).
@@ -113,7 +113,7 @@ Nama modul adalah usulan implementasi, bukan klaim file sudah tersedia.
 - Import CSS MapLibre secara lokal; lazy-load renderer ketika map dibuka.
 - Tahap awal memakai raster OSM dalam style MapLibre minimal; tidak memerlukan Mapbox token atau layanan style berbayar.
 - OSM adalah sumber basemap, bukan mesin renderer. Tile tetap memerlukan jaringan kecuali deployment memiliki penyedia offline sendiri.
-- Tampilkan atribusi OpenStreetMap beserta tautan lisensinya; patuhi kebijakan tile provider, tanpa prefetch/bulk download.
+- Tampilkan atribusi sumber data dan citra gaya yang sedang digambar beserta tautan lisensinya; patuhi kebijakan tile provider, tanpa prefetch/bulk download. Cache tile console hanya menyimpan tile yang pernah dilihat.
 - Audit CSP/worker/blob URL dan static serving Ground Console. Jangan melonggarkan kebijakan keamanan secara global untuk membuat worker berjalan.
 - Bila WebGL gagal/context lost: tampilkan kegagalan dan retry yang jelas; Plotly tetap tersedia. Jangan diam-diam menampilkan data lama sebagai aktif.
 - Hapus Leaflet dan typenya hanya setelah semua pemakaian selesai dimigrasikan dan tes lulus.

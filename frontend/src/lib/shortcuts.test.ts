@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isTextEntryTarget, shortcutAction } from './shortcuts';
+import { NO_PAGE_SHORTCUTS_ATTRIBUTE, blocksPageShortcuts, isTextEntryTarget, shortcutAction } from './shortcuts';
 import type { ShortcutKeyEvent } from './shortcuts';
 
 // Duck-typed elements, as an element of the Receiver frame would look to the console window.
@@ -48,6 +48,20 @@ describe('console shortcuts', () => {
     expect(shortcutAction(key('3', element('INPUT', { type: 'range' }, { type: 'range' })), 7)).toBeNull();
     expect(shortcutAction(key('r', element('INPUT', { type: 'range' })), 7)).toBeNull();
     expect(isTextEntryTarget(element('INPUT', { type: 'RANGE' }, { type: 'RANGE' }))).toBe(true);
+  });
+
+  it('never switch pages from inside the basemap radio menu, where R still refreshes', () => {
+    // A radio of the open menu: closest() finds the marked container, as the DOM would.
+    const menu = element('DIV', { role: 'radiogroup', [NO_PAGE_SHORTCUTS_ATTRIBUTE]: '' });
+    const radio = element('INPUT', { type: 'radio' }, { type: 'radio', closest: (selector: string) => (selector === `[${NO_PAGE_SHORTCUTS_ATTRIBUTE}]` ? menu : null) });
+    for (const digit of ['1', '2', '3', '7']) expect(shortcutAction(key(digit, radio), 7), digit).toBeNull();
+    expect(shortcutAction(key('r', radio), 7)).toEqual({ type: 'refresh' });
+    expect(blocksPageShortcuts(radio)).toBe(true);
+    // Radios elsewhere, and elements without closest(), keep the shortcuts.
+    const otherRadio = element('INPUT', { type: 'radio' }, { type: 'radio', closest: () => null });
+    expect(shortcutAction(key('3', otherRadio), 7)).toEqual({ type: 'route', index: 2 });
+    expect(blocksPageShortcuts(element('BUTTON'))).toBe(false);
+    expect(blocksPageShortcuts(null)).toBe(false);
   });
 
   it('never fire with a modifier or after another handler took the key', () => {

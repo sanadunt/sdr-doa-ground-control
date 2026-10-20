@@ -1,11 +1,13 @@
 /**
  * Pure helpers for the Overview spectrum dock: pixel <-> frequency mapping,
  * snapping, the automatic dB scale, the peak, axis ticks, the waterfall
- * palette and the dock's state table. Frequencies are integer Hz.
+ * palette and the dock's state table, for RX and for the wide scan
+ * (Spektrum mode). Frequencies are integer Hz.
  */
 import type { MessageKey } from './i18n';
 import type { BridgePhase, ReceiverBuild } from './receiverBridge';
-import type { ReceiverStatus, ResultCode, StatusErrorCode } from './receiverBridgeProtocol';
+import type { BridgeMarker, ReceiverStatus, ResultCode, SpectrumFrame, StatusErrorCode, SweepPhase } from './receiverBridgeProtocol';
+import type { DockMode } from './spectrumDockSettings';
 import { nodeFrequenciesChanged } from './nodeFrequency';
 import type { NodeFrequencies } from './nodeFrequency';
 
@@ -126,12 +128,118 @@ export function formatDb(db: number | null | undefined, digits = 1): string {
   return db < 0 && Number(text) !== 0 ? `−${text}` : text;
 }
 
-/** `count` evenly spaced labels from start to stop, both ends included. */
-export function ticks(startHz: number, stopHz: number, count = 5): Array<{ hz: number; label: string }> {
+/** MHz text with at most `maxDigits` decimals and no trailing zeros: 100, 433.92. */
+export function formatMhzTrim(hz: number | null | undefined, maxDigits = 3): string {
+  if (typeof hz !== 'number' || !Number.isFinite(hz)) return '—';
+  const text = formatMhz(hz, maxDigits);
+  return text.includes('.') ? text.replace(/\.?0+$/u, '') : text;
+}
+
+/**
+ * Decimals a MHz value needs to tell two frequencies `stepHz` apart: 0 for a
+ * step of 1 MHz or more, up to 3 (1 kHz). A wide scan's 1.8 MHz bins read in
+ * whole MHz; the RX dock keeps 3.
+ */
+export function mhzDigits(stepHz: number): number {
+  if (!Number.isFinite(stepHz) || stepHz <= 0) return 3;
+  return Math.min(3, Math.max(0, Math.ceil(-Math.log10(stepHz / 1e6) - 1e-9)));
+}
+
+/** `count` evenly spaced labels from start to stop, both ends included, with `digits` MHz decimals. */
+export function ticks(startHz: number, stopHz: number, count = 5, digits = 3): Array<{ hz: number; label: string }> {
   if (!Number.isFinite(startHz) || !Number.isFinite(stopHz) || stopHz <= startHz || count < 2) return [];
   return Array.from({ length: count }, (_value, index) => {
     const hz = startHz + ((stopHz - startHz) * index) / (count - 1);
-    return { hz, label: formatMhz(hz, 3) };
+    return { hz, label: formatMhz(hz, digits) };
+  });
+}
+
+/** Arrow-key step on a scan of `spanHz`: 1/200 of it, at least KEY_STEP_HZ, on the 1 kHz grid. */
+export function keyStepHz(spanHz: number): number {
+  if (!Number.isFinite(spanHz) || spanHz <= 0) return KEY_STEP_HZ;
+  return Math.max(KEY_STEP_HZ, snapHz(spanHz / 200));
+}
+
+/**
+ * A pick on the scan trace: the centre of the strongest bin within `radius`
+ * bins of the clicked one, since a 512-bin scan bin is wide. null outside the trace.
+ */
+export function scanPick(bins: ArrayLike<number>, startHz: number, stopHz: number, hz: number, radius = 2): number | null {
+  if (!bins.length || !Number.isFinite(hz) || !Number.isFinite(startHz) || !Number.isFinite(stopHz) || stopHz <= startHz || hz < startHz || hz >= stopHz) return null;
+  const step = (stopHz - startHz) / bins.length;
+  const clicked = Math.min(bins.length - 1, Math.floor((hz - startHz) / step));
+  let best = clicked;
+  for (let index = Math.max(0, clicked - radius); index <= Math.min(bins.length - 1, clicked + radius); index++) {
+    if (Number.isFinite(bins[index]) && (!Number.isFinite(bins[best]) || bins[index] > bins[best])) best = index;
+  }
+  return startHz + (best + 0.5) * step;
+}
+
+/** A click this close to a marker (CSS px) picks it instead of adding one; MARKER_HIT_TOUCH_PX for a finger. */
+export const MARKER_HIT_PX = 6;
+export const MARKER_HIT_TOUCH_PX = 12;
+/** A marker label is left out when it would come closer than this to the previous one (CSS px). */
+export const MARKER_LABEL_GAP_PX = 4;
+
+/** A marker inside the drawn axis and its x on a `width`-pixel canvas. */
+export interface MarkerInView {
+  marker: BridgeMarker;
+  x: number;
+}
+
+/** The markers inside an axis (both edges included), in frequency order, with their x. */
+export function markersInView(markers: readonly BridgeMarker[], axis: FrequencyAxis | null, width: number): MarkerInView[] {
+  if (!axis || !(width > 0) || !(axis.stopHz > axis.startHz)) return [];
+  const shown: MarkerInView[] = [];
+  for (const marker of markers) {
+    if (marker.frequencyHz < axis.startHz || marker.frequencyHz > axis.stopHz) continue;
+    const x = xAtFreq(marker.frequencyHz, axis.startHz, axis.stopHz, width);
+    if (x !== null) shown.push({ marker, x });
+  }
+  return shown.sort((a, b) => a.x - b.x);
+}
+
+/** The marker nearest to x within hitPx that the console can address (it has an id), or null. */
+export function nearestMarker(markers: readonly BridgeMarker[], axis: FrequencyAxis | null, x: number, width: number, hitPx: number): BridgeMarker | null {
+  if (!Number.isFinite(x)) return null;
+  let best: MarkerInView | null = null;
+  for (const entry of markersInView(markers, axis, width)) {
+    if (entry.marker.id === null || Math.abs(entry.x - x) > hitPx) continue;
+    if (!best || Math.abs(entry.x - x) < Math.abs(best.x - x)) best = entry;
+  }
+  return best?.marker ?? null;
+}
+
+/**
+ * The marker after (`1`) or before (`-1`) the selected one among those in view ([ and ]), only
+ * markers with an id. Without a selection or with one out of view: the first, or the last going back.
+ */
+export function stepMarker(markers: readonly BridgeMarker[], axis: FrequencyAxis | null, width: number, selectedId: string | null, direction: 1 | -1): BridgeMarker | null {
+  const shown = markersInView(markers, axis, width).map((entry) => entry.marker).filter((marker) => marker.id !== null);
+  if (!shown.length) return null;
+  const index = selectedId === null ? -1 : shown.findIndex((marker) => marker.id === selectedId);
+  if (index < 0) return direction > 0 ? shown[0] : shown[shown.length - 1];
+  return shown[Math.min(shown.length - 1, Math.max(0, index + direction))];
+}
+
+/**
+ * Which labels to draw, left to right: a label is left out when it would start within gapPx of
+ * the end of the last label drawn (`widths` are the labels' widths, `xs` where they start).
+ * The label at `keep` (the picked marker) is always drawn, and the others give way to it.
+ */
+export function markerLabelSlots(xs: readonly number[], widths: readonly number[], gapPx = MARKER_LABEL_GAP_PX, keep = -1): boolean[] {
+  const kept = keep >= 0 && keep < xs.length ? { start: xs[keep], end: xs[keep] + (widths[keep] ?? 0) } : null;
+  let end = -Infinity;
+  return xs.map((x, index) => {
+    const labelEnd = x + (widths[index] ?? 0);
+    if (kept && index === keep) {
+      end = labelEnd;
+      return true;
+    }
+    if (x < end + gapPx) return false;
+    if (kept && x < kept.end + gapPx && labelEnd + gapPx > kept.start) return false;
+    end = labelEnd;
+    return true;
   });
 }
 
@@ -139,6 +247,58 @@ export function ticks(startHz: number, stopHz: number, count = 5): Array<{ hz: n
 export function spanAround(centerHz: number | null | undefined, spanHz: number): { startHz: number; stopHz: number } | null {
   if (typeof centerHz !== 'number' || !Number.isFinite(centerHz) || !Number.isFinite(spanHz) || spanHz <= 0) return null;
   return { startHz: centerHz - spanHz / 2, stopHz: centerHz + spanHz / 2 };
+}
+
+export interface FrequencyAxis {
+  startHz: number;
+  stopHz: number;
+}
+
+/**
+ * The axis the dock draws on. While RX runs it is the last frame's span,
+ * unless that frame was taken at another centre than the one now tuned (more
+ * than TUNE_SNAP_HZ away): then the expected span around the tuned centre, so
+ * a retune moves the axis at once and the old trace stays at its true
+ * frequencies until frames at the new centre arrive. While RX is stopped it
+ * is the expected span, or the last frame's when there is none.
+ */
+export function axisFor(
+  frame: { centerHz: number; startHz: number; stopHz: number } | null,
+  expectedCenterHz: number | null,
+  running: boolean,
+  expected: FrequencyAxis | null,
+): FrequencyAxis | null {
+  if (frame && (!expected || (running && (expectedCenterHz === null || Math.abs(frame.centerHz - expectedCenterHz) <= TUNE_SNAP_HZ)))) {
+    return { startHz: frame.startHz, stopHz: frame.stopHz };
+  }
+  return expected;
+}
+
+/**
+ * The axis of a scan: the frame's range while the scan runs, otherwise the
+ * expected range (the Receiver's settings), or the last frame's when there is none.
+ */
+export function sweepAxis(frame: FrequencyAxis | null, live: boolean, expected: FrequencyAxis | null): FrequencyAxis | null {
+  if (frame && (!expected || live)) return { startHz: frame.startHz, stopHz: frame.stopHz };
+  return expected;
+}
+
+/** What the waterfall history was filled with. */
+export interface WaterfallSource {
+  source: SpectrumFrame['source'];
+  binCount: number;
+  startHz: number;
+  stopHz: number;
+}
+
+/**
+ * Whether a frame cannot join the waterfall history: another source (RX or
+ * scan), another bin count, or a scan over another range. An RX retune keeps
+ * the history; the rows taken at the old centre scroll away.
+ */
+export function waterfallNeedsReset(previous: WaterfallSource | null, frame: WaterfallSource): boolean {
+  if (!previous || previous.source !== frame.source || previous.binCount !== frame.binCount) return true;
+  return frame.source === 'sweep' && (previous.startHz !== frame.startHz || previous.stopHz !== frame.stopHz);
 }
 
 /** Map a power to 0..255 on a dB range. */
@@ -231,11 +391,15 @@ export type DockNotice = ResultCode | StatusErrorCode;
 export interface DockViewInput {
   build: ReceiverBuild;
   phase: BridgePhase;
-  /** A Mulai/Dengar start is waiting for its result. */
+  /** A Mulai/Dengar start (RX or scan) is waiting for its result. */
   starting: boolean;
+  /** A dock sample rate change is restarting RX. */
+  restarting?: boolean;
   status: ReceiverStatus | null;
   /** Code of the last failed dock command, cleared by the next success. */
   notice: DockNotice | null;
+  /** The stored mode: what Mulai starts while nothing runs. */
+  storedMode?: DockMode;
 }
 
 export interface DockView {
@@ -244,11 +408,36 @@ export interface DockView {
   tone: DockTone;
   /** Text for the body, or null when the trace speaks for itself. */
   message: MessageKey | null;
-  /** Offer "Buka Receiver (7)" next to the message. */
+  /** Offer "Buka Receiver (key)" next to the message. */
   openReceiver: boolean;
-  running: boolean;
+  /** The mode shown: the one that runs, otherwise the stored one. */
+  mode: DockMode;
+  /** The Receiver's RX runs (Dengar, follow-node and the RX axis use it). */
+  rxRunning: boolean;
+  /** The trace is drawn live: RX in RX mode, a running scan in Spektrum mode; otherwise it is dimmed under the overlay. */
+  live: boolean;
+  /** Mulai shows as Berhenti: RX runs in RX mode, or a scan starts or runs. */
+  stoppable: boolean;
   /** Mulai and Dengar cannot run (build missing or the Receiver is busy). */
   controlsDisabled: boolean;
+}
+
+/** The scan's phase as the Receiver reports it; a busy 'sweep' without a usable scan state counts as active. */
+export function scanPhaseOf(status: ReceiverStatus | null): SweepPhase {
+  if (status?.busy !== 'sweep') return 'idle';
+  const phase = status.sweep?.phase;
+  return phase && phase !== 'idle' ? phase : 'active';
+}
+
+/**
+ * The mode the dock shows: Spektrum while the Receiver scans (also a scan
+ * started on the Receiver page), RX while its RX runs, otherwise the stored
+ * choice, which is what Mulai starts.
+ */
+export function dockMode(status: ReceiverStatus | null, stored: DockMode): DockMode {
+  if (status?.busy === 'sweep') return 'sweep';
+  if (status?.running === true) return 'rx';
+  return stored;
 }
 
 const NOTICE_MESSAGES: Partial<Record<DockNotice, MessageKey>> = {
@@ -261,6 +450,12 @@ const NOTICE_MESSAGES: Partial<Record<DockNotice, MessageKey>> = {
   CONNECT_FAILED: 'spectrum.connectFailed',
   MOCK_UNAVAILABLE: 'spectrum.mockUnavailable',
   TIMEOUT: 'spectrum.timeout',
+  RECORDING_ACTIVE: 'spectrum.recordingActive',
+  SWEEP_UNSUPPORTED: 'spectrum.sweepUnsupported',
+  SWEEP_FAILED: 'spectrum.sweepFailed',
+  MARKER_LIMIT: 'spectrum.markLimit',
+  MARKER_NOT_FOUND: 'spectrum.markNotFound',
+  MARKER_SAVE_FAILED: 'spectrum.markSaveFailed',
   USB_LOST: 'spectrum.usbLost',
   RX_ERROR: 'spectrum.rxError',
 };
@@ -270,41 +465,73 @@ export function noticeMessage(notice: DockNotice): MessageKey {
   return NOTICE_MESSAGES[notice] ?? 'spectrum.commandFailed';
 }
 
+/** Message for the result of a marker command: OUT_OF_RANGE is the marker range, not the tuning range. */
+export function markNoticeMessage(notice: DockNotice): MessageKey {
+  return notice === 'OUT_OF_RANGE' ? 'spectrum.markOutOfRange' : noticeMessage(notice);
+}
+
+/** Codes whose result text, from the Receiver and already localized there, is shown after the dock's message. */
+const FRAME_TEXT_NOTICES: ReadonlySet<DockNotice> = new Set<DockNotice>(['CONNECT_FAILED', 'NOT_READY', 'INVALID_COMMAND', 'SWEEP_FAILED', 'MARKER_SAVE_FAILED']);
+
+/** The Receiver's own text for a failed dock command, or null. */
+export function noticeFrameText(notice: { code: DockNotice; message?: string } | null): string | null {
+  return notice?.message && FRAME_TEXT_NOTICES.has(notice.code) ? notice.message : null;
+}
+
+/** Codes that leave the radio stopped in an error worth the Receiver page. */
+const STOPPED_BAD: ReadonlySet<DockNotice> = new Set<DockNotice>(['USB_LOST', 'RX_ERROR', 'CONNECT_FAILED', 'SWEEP_FAILED']);
+const STOPPED_OPEN_RECEIVER: ReadonlySet<DockNotice> = new Set<DockNotice>(['RX_ERROR', 'CONNECT_FAILED', 'SWEEP_FAILED', 'SWEEP_UNSUPPORTED']);
+
 /**
  * The dock's chip and body text for one moment, in priority order: build
- * missing, unresponsive frame, connecting, busy Receiver, a code that needs
- * the Receiver page, then running or stopped.
+ * missing, unresponsive frame, a scan listen on the Receiver page (BUSY), a
+ * scan that starts, runs or stops (Spektrum mode), connecting or an RX
+ * restart, a code that needs the Receiver page, then RX running or stopped.
  */
-export function spectrumDockView({ build, phase, starting, status, notice }: DockViewInput): DockView {
-  if (build === 'missing') {
-    return { chip: 'NOT BUILT', tone: 'warn', message: 'spectrum.notBuilt', openReceiver: false, running: false, controlsDisabled: true };
-  }
+export function spectrumDockView({ build, phase, starting, restarting = false, status, notice, storedMode = 'rx' }: DockViewInput): DockView {
   const live = phase === 'ready' ? status : null;
-  const running = live?.running === true;
+  const mode = dockMode(live, storedMode);
+  const rxRunning = live?.running === true;
+  const base = { mode, rxRunning, live: false, stoppable: false, controlsDisabled: false, openReceiver: false, message: null };
+  if (build === 'missing') {
+    return { ...base, chip: 'NOT BUILT', tone: 'warn', message: 'spectrum.notBuilt', rxRunning: false, controlsDisabled: true };
+  }
   if (phase === 'unresponsive') {
-    return { chip: 'NO BRIDGE', tone: 'bad', message: 'spectrum.unresponsive', openReceiver: true, running: false, controlsDisabled: false };
+    return { ...base, chip: 'NO BRIDGE', tone: 'bad', message: 'spectrum.unresponsive', openReceiver: true, rxRunning: false };
   }
-  if (live && live.busy !== 'none') {
-    return { chip: 'BUSY', tone: 'warn', message: 'spectrum.sweepBusy', openReceiver: true, running, controlsDisabled: true };
+  // The Receiver listens to a scan candidate: the radio is its own until that ends.
+  if (live && live.busy === 'scan-listen') {
+    return { ...base, chip: 'BUSY', tone: 'warn', message: 'spectrum.scanListenBusy', openReceiver: true, live: rxRunning, controlsDisabled: true };
   }
-  if (phase === 'connecting' || (starting && !running)) {
-    return { chip: '…', tone: 'info', message: 'spectrum.connecting', openReceiver: false, running: false, controlsDisabled: false };
+  const scan = scanPhaseOf(live);
+  if (scan === 'active') {
+    return { ...base, chip: 'SCAN', tone: 'good', message: notice ? noticeMessage(notice) : null, live: true, stoppable: true };
+  }
+  if (scan !== 'idle') {
+    return { ...base, chip: '…', tone: 'info', message: scan === 'stopping' ? 'spectrum.sweepStopping' : 'spectrum.sweepStarting', stoppable: scan === 'starting' };
+  }
+  if (phase === 'connecting' || (starting && !rxRunning)) {
+    return { ...base, chip: '…', tone: 'info', message: 'spectrum.connecting' };
+  }
+  // A dock sample rate change restarts RX until the new stream draws; the frame reports RX as running
+  // throughout (no stop and start), and an older frame's brief stop is not "RX stopped" either.
+  if (restarting) {
+    return { ...base, chip: '…', tone: 'info', message: 'spectrum.restarting' };
   }
   const usbError = live?.error?.code ?? null;
   const code = notice ?? (usbError === 'NO_WEBUSB' ? usbError : null);
-  if (!running && (code === 'NO_WEBUSB' || code === 'NEEDS_PAIRING' || code === 'NEEDS_DEVICE_CHOICE')) {
-    return { chip: code, tone: code === 'NO_WEBUSB' ? 'bad' : 'warn', message: noticeMessage(code), openReceiver: code !== 'NO_WEBUSB', running: false, controlsDisabled: false };
+  if (!rxRunning && (code === 'NO_WEBUSB' || code === 'NEEDS_PAIRING' || code === 'NEEDS_DEVICE_CHOICE')) {
+    return { ...base, chip: code, tone: code === 'NO_WEBUSB' ? 'bad' : 'warn', message: noticeMessage(code), openReceiver: code !== 'NO_WEBUSB' };
   }
-  if (running) {
-    return { chip: 'RX', tone: 'good', message: notice ? noticeMessage(notice) : null, openReceiver: notice === 'SWEEP_BUSY', running: true, controlsDisabled: false };
+  if (rxRunning) {
+    return { ...base, chip: 'RX', tone: 'good', message: notice ? noticeMessage(notice) : null, openReceiver: notice === 'SWEEP_BUSY', live: true, stoppable: true };
   }
   const stoppedBy = notice ?? (usbError === 'USB_LOST' || usbError === 'RX_ERROR' ? usbError : null);
   return {
-    chip: 'RX OFF',
-    tone: stoppedBy === 'USB_LOST' || stoppedBy === 'RX_ERROR' || stoppedBy === 'CONNECT_FAILED' ? 'bad' : 'neutral',
+    ...base,
+    chip: mode === 'sweep' ? 'SCAN OFF' : 'RX OFF',
+    tone: stoppedBy && STOPPED_BAD.has(stoppedBy) ? 'bad' : stoppedBy === 'SWEEP_UNSUPPORTED' ? 'warn' : 'neutral',
     message: stoppedBy ? noticeMessage(stoppedBy) : null,
-    openReceiver: stoppedBy === 'RX_ERROR' || stoppedBy === 'CONNECT_FAILED',
-    running: false,
-    controlsDisabled: false,
+    openReceiver: stoppedBy !== null && STOPPED_OPEN_RECEIVER.has(stoppedBy),
   };
 }

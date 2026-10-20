@@ -48,7 +48,7 @@ Config : disabled (tanpa --enable-config)
 
    Password observer ditulis di `~/.config/mosquitto_sub` (satu opsi per baris, `-P <password>`, mode 0600), jadi tidak muncul di command line. Amati juga service SDR, port 8080/8081, dan file `_share`. `health.state` bernilai `ONLINE`, `STALE`, `DEGRADED`, atau `UNAVAILABLE` dengan kode di `health.reasons`; `doa_valid` tetap `false` karena DoA dinonaktifkan. Agent membaca Data Out sesuai jadwal health (sekitar 2 GET/s dengan `--health-interval 1` dan tanpa authority), dan satu koleksi dibatasi `--collect-budget`.
 8. Hentikan proses manual dan pastikan proses/file SDR-DoA tidak berubah.
-9. Hanya setelah hasil health-only lulus, pertimbangkan unit systemd terpisah.
+9. Hanya setelah hasil health-only lulus, pertimbangkan unit systemd terpisah. `packaging/agent/install-agent.sh` (atau `install.sh` di tarball agent) memasangnya sebagai `sdr-doa-agent.service` dengan `/etc/sdr-doa-agent/agent.env`; untuk rollout ini pakai `--mqtt-host 192.168.100.173 --mqtt-port 18885 --mqtt-cafile /etc/sdr-doa-edge/sdr-doa-lan-ca.crt --mqtt-username sdr-doa-agent` tanpa `--enable-config`, tambah `--set DOA_RATE=0`, dan periksa dulu hasilnya dengan `--dry-run`.
 
 ## Rollback
 

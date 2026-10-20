@@ -34,9 +34,11 @@ export function createAppData() {
 			fftSize: 65536,
 			iqCorrection: true,
 		},
+		/** Listener dB scale: Auto, or minDB to maxDB (listener-display.ts). */
 		display: {
 			minDB: -70.0,
 			maxDB: 0.0,
+			auto: true,
 		},
 		gains: {} as Record<string, number>,
 		deviceCapabilities: null as any,
