@@ -107,7 +107,8 @@ class ReceiverBuildSourceTests(unittest.TestCase):
         (wasm / "hackrf_web.js").write_text("export {};", encoding="utf-8")
         (wasm / "hackrf_web_bg.wasm").write_bytes(b"wasm")
         (build / "assets/index.js").write_text(
-            f"export const receiver = true; const channel = {builder.CONSOLE_BRIDGE_CHANNEL!r};",
+            f"export const receiver = true; const channel = {builder.CONSOLE_BRIDGE_CHANNEL!r};"
+            f" const archive = {builder.RECORDS_ARCHIVE_API_ROOT!r};",
             encoding="utf-8",
         )
         (build / "sw.js").write_text("self.workbox; registerRoute(/api/, new NetworkFirst({cacheName:'api-cache'}))", encoding="utf-8")
@@ -152,6 +153,25 @@ class ReceiverBuildSourceTests(unittest.TestCase):
             (build / "assets/index.js").write_text("export const receiver = true;", encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "console dashboard bridge"):
                 builder._verify_embedded_build(build)
+
+    def test_embedded_build_requires_the_records_archive_client(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            build = self._valid_build(Path(temporary))
+            builder._retire_service_worker(build)
+            builder._verify_embedded_build(build)
+            (build / "assets/index.js").write_text(
+                f"export const channel = {builder.CONSOLE_BRIDGE_CHANNEL!r};", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(RuntimeError, "Records archive client"):
+                builder._verify_embedded_build(build)
+
+    def test_records_archive_root_matches_the_overlay_client(self) -> None:
+        client = (
+            builder.PROJECT_ROOT / "tools/browsdr_receiver_overlay/src/client/app/records-archive-api.ts"
+        ).read_text(encoding="utf-8")
+        match = re.search(r"export const ARCHIVE_API_ROOT = '([^']+)';", client)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(1) + "/", builder.RECORDS_ARCHIVE_API_ROOT)
 
     def test_bridge_channel_matches_the_overlay_protocol(self) -> None:
         protocol = (
@@ -231,6 +251,14 @@ class ReceiverBuildSourceTests(unittest.TestCase):
             style = (work / "src/client/style.css").read_text(encoding="utf-8")
             self.assertIn("#waterfall {\n\tbackground: var(--canvas-bg);\n}", style)
             self.assertIn("--canvas-bg: #fafbf9;", style)
+            # The old Records view's styles are gone; the Listener REC button and the
+            # Records archive section stay.
+            self.assertNotIn(".audio-calendar", style)
+            self.assertNotIn(".records-audio-filters", style)
+            self.assertIn(".audio-record-button.recording {", style)
+            self.assertIn("/* ── Records archive", style)
+            self.assertIn("app.component('receiver-archive', ReceiverArchive);", (app / "main.ts").read_text(encoding="utf-8"))
+            self.assertIn("<receiver-archive ", html)
 
 
 class _StopAfterFirstNpmCall(Exception):
