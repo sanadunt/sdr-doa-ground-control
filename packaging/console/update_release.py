@@ -580,6 +580,11 @@ def installed_version(install: Install) -> Optional[Version]:
         return None
 
 
+def _same_path(first: str, second: str) -> bool:
+    """Equal once repeated slashes are collapsed (normpath keeps a leading "//") and a trailing "/" is dropped."""
+    return os.path.normpath(re.sub("/{2,}", "/", first)) == os.path.normpath(re.sub("/{2,}", "/", second))
+
+
 def install_options(install: Install) -> List[str]:
     """The options for the next install.sh: the recorded ones, checked against the launcher's paths."""
     expected = {
@@ -608,7 +613,10 @@ def install_options(install: Install) -> List[str]:
             else:
                 raise UpdateError(f"{path} has an unexpected line {line[:60]!r}; run install.sh of the new release by hand")
         for name, value in recorded.items():
-            if value != expected[name]:
+            # install.sh records a path as typed; an older one kept "//" or a
+            # trailing "/", which the launcher's (pathlib) paths do not have.
+            same = _same_path(value, expected[name]) if name in PATH_OPTIONS else value == expected[name]
+            if not same:
                 raise UpdateError(f"{path} records {name}={value}, but the launcher uses {expected[name]}; run install.sh by hand")
     else:
         # An install from before install-options existed: read the choices from what it installed.

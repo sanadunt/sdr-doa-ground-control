@@ -858,6 +858,18 @@ class UpdateFlowTests(UpdaterTestCase):
         code, _, err = self.run_main(*install.argv("apply", "--yes"))
         self.assertIn("has an unexpected line '--password=secret'", err)
         self.assertIsNone(install.installed_args())
+        # A path recorded with a trailing slash or "//" (install.sh kept it as
+        # typed) is the launcher's path.
+        options.write_text(
+            f"--prefix={install.app}/\n--data-dir=/{install.data}\n--bin-dir={str(install.bin).replace('/', '//')}\n"
+            f"--port={install.port}\n--no-service\n--no-desktop\n",
+            encoding="utf-8",
+        )
+        code, out, err = self.run_main(*install.argv("check"))
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(update_release.install_options(update_release._install_from(
+            update_release.build_parser().parse_args(install.argv("apply"))
+        )), install.expected_options())
         # An install from before install-options: the flags follow what it installed.
         options.unlink()
         install.desktop_file.parent.mkdir(parents=True)
@@ -1130,6 +1142,27 @@ exec {real} "$@"
             self.assertIn("Keeping the admin password", again.stdout)
             self.assertEqual(options_file.read_text(encoding="utf-8"), text)
             self.assertIn("SDR_DOA_SEED_BASE_URL", (data / "seed.env").read_text(encoding="utf-8"))
+
+    def test_install_records_one_spelling_of_each_path(self):
+        with tempfile.TemporaryDirectory(prefix="install-", dir=self.tmp) as tmp:
+            base = Path(tmp)
+            env = self.environment(base)
+            tree = self.release_tree("2.0.0", base)
+            data, bin_dir, port = base / "data", base / "bin", free_port()
+            # A trailing slash from tab completion and a doubled one; the prefix defaults to DATA/app.
+            result = subprocess.run(
+                [sh(), str(tree / "install.sh"), "--yes", "--data-dir", f"{data}/", "--bin-dir", str(bin_dir).replace("/", "//"),
+                 "--port", str(port), "--no-service", "--no-desktop"],
+                capture_output=True, text=True, env=env, timeout=120,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            options = [line for line in (data / "app/install-options").read_text(encoding="utf-8").splitlines() if not line.startswith("#")]
+            self.assertEqual(options[:3], [f"--prefix={data}/app", f"--data-dir={data}", f"--bin-dir={bin_dir}"])
+            for option, value in (("--bin-dir", f"{base}/./bin"), ("--prefix", f"{base}/x/../app"), ("--data-dir", f"{base}/..")):
+                refused = subprocess.run([sh(), str(tree / "install.sh"), "--yes", option, value, "--no-service", "--no-desktop"],
+                                         capture_output=True, text=True, env=env, timeout=60)
+                self.assertNotEqual(refused.returncode, 0, option)
+                self.assertIn("must not contain . or .. components", refused.stderr + refused.stdout, option)
 
     def test_update_through_the_installed_launcher(self):
         with tempfile.TemporaryDirectory(prefix="install-", dir=self.tmp) as tmp:

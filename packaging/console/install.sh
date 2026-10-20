@@ -77,6 +77,20 @@ check_path() {
   case $2 in
     *[[:space:]]* | *[\'\"\\\`\$%\|\&]*) die "$1 must not contain spaces or any of ' \" \\ \` \$ % | &: $2" ;;
   esac
+  case $2 in
+    */./* | */../* | */. | */..) die "$1 must not contain . or .. components: $2" ;;
+  esac
+}
+
+# One spelling per path: repeated slashes collapsed and no trailing slash,
+# so install-options records the path update_release.py compares it with.
+normal_path() {
+  np=$(printf '%s' "$1" | tr -s /)
+  case $np in
+    / | '') ;;
+    */) np=${np%/} ;;
+  esac
+  printf '%s' "$np"
 }
 
 # First-start values, written to seed.env as SDR_DOA_SEED_* variables.
@@ -125,7 +139,9 @@ parse_args() {
     esac
     shift
   done
-  APP_DIR=${APP_DIR:-$DATA_DIR/app}
+  DATA_DIR=$(normal_path "$DATA_DIR")
+  APP_DIR=$(normal_path "${APP_DIR:-$DATA_DIR/app}")
+  BIN_DIR=$(normal_path "$BIN_DIR")
   check_path --prefix "$APP_DIR"
   check_path --data-dir "$DATA_DIR"
   check_path --bin-dir "$BIN_DIR"
