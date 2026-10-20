@@ -168,6 +168,17 @@ test('the Records archive CSS: tokens only, 44 px targets, breakpoints, no inner
 	assert.equal(declarations('.archive-week').gap, '3px');
 	assert.equal(declarations('.archive-timeline')['touch-action'], 'pan-y');
 	assert.equal(declarations('.archive-table th').position, 'sticky');
+	// Stuck at the scrollport edge: the negative of the workspace's 12 px top padding,
+	// so no rows show through above the header.
+	assert.equal(declarations('.archive-table th').top, '-12px');
+	// The workspace's own rule outside any media query (the 10 px one at 700 px and
+	// below applies to the phone cards, which hide the header row).
+	const workspace = /\/\* Records workspace\. \*\/\n\.receiver-records-workspace \{([^}]*)\}/.exec(style);
+	assert.ok(workspace, 'the Records workspace rule');
+	assert.match(workspace[1], /\bpadding: 12px;/, 'the sticky header offset follows this padding');
+	// The phone cards hide the header row for sight only; its full-width row must not
+	// widen the frame's scrollable area (a sideways pan at 390 px).
+	assert.equal(declarations('.archive-table thead').contain, 'paint');
 	for (const selector of ['.archive-tl-hour', '.archive-tl-selection', '.archive-tl-now', '.archive-trace-max']) {
 		assert.equal(declarations(selector)['vector-effect'], 'non-scaling-stroke', selector);
 	}

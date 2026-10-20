@@ -6094,9 +6094,11 @@ input[type='range'] {
 	font-size: 13px;
 }
 
+/* The workspace scrolls with 12 px of padding; a header stuck at top: 0 would sit
+   12 px down and show rows scrolling past above it, so it sticks at the edge. */
 .archive-table th {
 	position: sticky;
-	top: 0;
+	top: -12px;
 	z-index: 2;
 	height: 44px;
 	padding: 0 8px;
@@ -6561,11 +6563,14 @@ input[type='range'] {
 		display: none;
 	}
 
+	/* Hidden for sight but kept for screen readers. contain: paint keeps its
+	   wider row out of the frame's scrollable area (no horizontal scroll). */
 	.archive-table thead {
 		position: absolute;
 		width: 1px;
 		height: 1px;
 		clip-path: inset(50%);
+		contain: paint;
 	}
 
 	.archive-table,

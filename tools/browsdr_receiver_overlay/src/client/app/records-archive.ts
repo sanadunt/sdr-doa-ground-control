@@ -195,7 +195,7 @@ export const ReceiverArchive = {
 					const exists = cell.endMs > cell.startMs;
 					const label = formatDateKeyLabel(cell.key, this.locale, CELL_DATE_FORMAT);
 					const ariaLabel = audio || scan
-						? `${label}, ${audio} ${this.t('audio')}, ${scan} ${this.t('scans')}`
+						? `${label}, ${audio} ${this.t('audio')}, ${scan} ${this.t(scan === 1 ? 'scan' : 'scans')}`
 						: `${label}, ${this.t('no records')}`;
 					return {
 						key: cell.key,
@@ -229,7 +229,7 @@ export const ReceiverArchive = {
 			return formatDateKeyLabel(this.view.fromDate, this.locale);
 		},
 		dayValues(this: Vm): string {
-			return `${this.totals.audio} ${this.t('audio')} · ${this.totals.scan} ${this.t('scans')}`;
+			return `${this.totals.audio} ${this.t('audio')} · ${this.totals.scan} ${this.t(this.totals.scan === 1 ? 'scan' : 'scans')}`;
 		},
 		periodNav(this: Vm) {
 			if (this.view.mode === 'all') return { prev: false, next: false };
@@ -388,7 +388,7 @@ export const ReceiverArchive = {
 			const preview = this.confirm.preview as RetentionPreview;
 			return {
 				optionLabel: this.retentionLabel(this.confirm.days),
-				countsLabel: `${preview.audio} ${this.t('audio')} · ${preview.scans} ${this.t('scans')} · ${formatBytes(preview.bytes)}`,
+				countsLabel: `${preview.audio} ${this.t('audio')} · ${preview.scans} ${this.t(preview.scans === 1 ? 'scan' : 'scans')} · ${formatBytes(preview.bytes)}`,
 			};
 		},
 		storedLabel(this: Vm): string {
