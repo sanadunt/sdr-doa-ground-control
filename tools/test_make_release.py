@@ -49,7 +49,12 @@ SHELL_SCRIPTS = (
     "packaging/console/sdr-doa-console",
     "packaging/docker/console-entrypoint.sh",
     "packaging/docker/check-build-context.sh",
+    "packaging/docker/sdr-doa-docker",
 )
+# Every compose file at the repository root; the policy tests cover each one.
+COMPOSE_FILES = tuple(sorted(path.name for path in ROOT.glob("docker-compose*.yml")))
+# Compose files of the console (the rest is the agent's).
+CONSOLE_COMPOSE_FILES = ("docker-compose.yml", "docker-compose.release.yml", "docker-compose.ghcr.yml")
 
 
 def make_fake_dist(base: Path) -> Path:
@@ -104,7 +109,7 @@ class ReleaseBuildTests(unittest.TestCase):
                         epoch=EPOCH,
                     )
                 )
-        cls.console_tar, cls.agent_tar, cls.checksums = cls.outputs[0]
+        cls.console_tar, cls.agent_tar, cls.docker_script, cls.checksums = cls.outputs[0]
         cls.console_top = make_release.console_release_name(cls.version)
         cls.agent_top = make_release.agent_release_name(cls.version)
 
@@ -120,15 +125,25 @@ class ReleaseBuildTests(unittest.TestCase):
         self.assertRegex(self.version, make_release.VERSION_RE)
         self.assertEqual(self.console_tar.name, f"sdr-doa-ground-console-{self.version}-linux.tar.gz")
         self.assertEqual(self.agent_tar.name, f"sdr-doa-rdf-sdr-agent-{self.version}.tar.gz")
+        self.assertEqual(self.docker_script.name, "sdr-doa-docker")
         self.assertEqual(self.checksums.name, "SHA256SUMS")
 
-    def test_sha256sums_match_tarballs(self):
+    def test_sha256sums_match_assets(self):
         lines = self.checksums.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(len(lines), 2)
-        for line, tarball in zip(lines, sorted([self.console_tar, self.agent_tar], key=lambda p: p.name)):
+        self.assertEqual(len(lines), 3)
+        assets = sorted([self.console_tar, self.agent_tar, self.docker_script], key=lambda p: p.name)
+        for line, asset in zip(lines, assets):
             digest, name = re.fullmatch(r"([0-9a-f]{64})  (\S+)", line).groups()
-            self.assertEqual(name, tarball.name)
-            self.assertEqual(digest, hashlib.sha256(tarball.read_bytes()).hexdigest())
+            self.assertEqual(name, asset.name)
+            self.assertEqual(digest, hashlib.sha256(asset.read_bytes()).hexdigest())
+
+    def test_standalone_docker_script(self):
+        self.assertEqual(self.docker_script.read_bytes(), (ROOT / make_release.DOCKER_SCRIPT).read_bytes())
+        self.assertEqual(stat.S_IMODE(self.docker_script.stat().st_mode), 0o755)
+        self.assertEqual(
+            tar_read(self.console_tar, f"{self.console_top}/{make_release.DOCKER_SCRIPT}"),
+            self.docker_script.read_bytes(),
+        )
 
     def test_builds_are_byte_identical(self):
         for first, second in zip(*self.outputs):
@@ -176,6 +191,8 @@ class ReleaseBuildTests(unittest.TestCase):
             "packaging/console/sdr-doa-ground-console.desktop.in",
             "packaging/docker/console-entrypoint.sh",
             "packaging/docker/healthcheck.py",
+            "packaging/docker/sdr-doa-docker",
+            "docker-compose.ghcr.yml",
             "wheels",
         ):
             self.assertIn(required, names)
@@ -220,7 +237,7 @@ class ReleaseBuildTests(unittest.TestCase):
         executables = {
             (self.console_tar, f"{self.console_top}/{name}")
             for name in ("install.sh", "packaging/console/sdr-doa-console", "packaging/console/set_admin_password.py",
-                         "packaging/docker/console-entrypoint.sh")
+                         "packaging/docker/console-entrypoint.sh", "packaging/docker/sdr-doa-docker")
         } | {
             (self.agent_tar, f"{self.agent_top}/{name}")
             for name in ("install.sh", "packaging/agent/run-agent.sh", "packaging/agent/uninstall-agent.sh")
@@ -297,7 +314,8 @@ class ReleaseBuildTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         printed = [Path(line) for line in result.stdout.splitlines()]
-        self.assertEqual([path.name for path in printed], [self.console_tar.name, self.agent_tar.name, "SHA256SUMS"])
+        self.assertEqual([path.name for path in printed],
+                         [self.console_tar.name, self.agent_tar.name, "sdr-doa-docker", "SHA256SUMS"])
         self.assertEqual((out / self.console_tar.name).read_bytes(), self.console_tar.read_bytes())
         if shutil.which("sha256sum"):
             check = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=out, capture_output=True, text=True)
@@ -385,18 +403,34 @@ class DockerAndComposeTests(unittest.TestCase):
             tags = re.findall(r"^\s+image: \S+:(\S+)$", self.read(name), re.M)
             self.assertEqual(tags, [version], name)
         self.assertIn(f"sdr-doa-agent:{version}", self.read("Dockerfile.agent"))
+        # The GHCR compose follows the major version's channel by default.
+        major = version.split(".")[0]
+        images = re.findall(r"(?m)^    image: (\S+)$", self.read("docker-compose.ghcr.yml"))
+        self.assertEqual(images, ["${SDR_DOA_IMAGE:-ghcr.io/sanadunt/sdr-doa-ground-console}:${SDR_DOA_IMAGE_TAG:-%s}" % major])
+        self.assertNotRegex(self.read("docker-compose.ghcr.yml"), r"(?m)^\s+build:")
+
+    def test_every_compose_file_is_covered(self):
+        self.assertEqual(
+            set(COMPOSE_FILES),
+            {"docker-compose.yml", "docker-compose.release.yml", "docker-compose.agent.yml", "docker-compose.ghcr.yml"},
+            "a new compose file needs its place in these policy tests",
+        )
 
     def test_compose_uses_host_network_and_no_published_ports(self):
-        for name in ("docker-compose.yml", "docker-compose.release.yml", "docker-compose.agent.yml"):
+        for name in COMPOSE_FILES:
             text = self.read(name)
             self.assertRegex(text, r"(?m)^    network_mode: host$", name)
             self.assertRegex(text, r"(?m)^    restart: unless-stopped$", name)
             self.assertNotRegex(text, r"(?m)^\s+ports:", name)
             # An empty value would disable admin login; pass-through stays unset when not given.
             self.assertNotRegex(text, r"(?m)^\s+(- )?SDR_DOA_ADMIN_PASSWORD[=:]", name)
-        for name in ("docker-compose.yml", "docker-compose.release.yml"):
+        for name in CONSOLE_COMPOSE_FILES:
+            self.assertRegex(self.read(name), r"(?m)^name: sdr-doa-ground-console$", name)
             self.assertRegex(self.read(name), r"(?m)^      - SDR_DOA_ADMIN_PASSWORD$", name)
             self.assertRegex(self.read(name), r"(?m)^      - sdr-doa-data:/data$", name)
+            self.assertNotIn("0.0.0.0", self.read(name), name)
+        environment = [re.findall(r"(?m)^      - (SDR_DOA_\w+)", self.read(name)) for name in CONSOLE_COMPOSE_FILES]
+        self.assertTrue(all(names == environment[0] for names in environment), environment)
 
     def test_console_images(self):
         for name in ("Dockerfile", "Dockerfile.release"):
