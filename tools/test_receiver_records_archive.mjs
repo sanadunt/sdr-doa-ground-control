@@ -537,3 +537,29 @@ test('every error text and retention label has Indonesian text', () => {
 	for (const key of Object.values(format.RETENTION_LABEL_KEYS)) assert.notEqual(translateReceiver('id', key), key);
 	assert.equal(translateReceiverMessage('id', 'Could not load Records: Check the filter values.'), 'Rekaman tidak bisa dimuat: Periksa nilai filter.');
 });
+
+test('Records refreshes when shown again after another console page, and a tab switch refreshes only through active', async () => {
+	globalThis.window ??= globalThis;
+	const { ReceiverArchive } = await import(new URL('records-archive.ts', appDir).href);
+	const calls = [];
+	const vm = {
+		_shown: true, _hiddenWhileActive: false, _started: true, active: true, confirm: null,
+		refreshAll() { calls.push('refresh'); },
+		scheduleLiveRefresh() { calls.push('live'); },
+		pauseAudio() { calls.push('pause'); },
+		cancelConfirm() {},
+		clearTimer() {},
+	};
+	const shown = ReceiverArchive.methods.onShownChange;
+	// The console route changed: the frame hid while Records was the open tab.
+	shown.call(vm, false);
+	shown.call(vm, true);
+	assert.deepEqual(calls, ['pause', 'refresh']);
+	calls.length = 0;
+	// A Receiver tab switch: active was already false when it hid, and the active watcher refreshes.
+	vm.active = false;
+	shown.call(vm, false);
+	vm.active = true;
+	shown.call(vm, true);
+	assert.deepEqual(calls, ['pause', 'live']);
+});

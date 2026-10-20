@@ -482,6 +482,7 @@ export const ReceiverArchive = {
 		// Non-reactive bookkeeping: latest-request ids, abort controllers and timers.
 		this._started = false;
 		this._shown = true;
+		this._hiddenWhileActive = false;
 		this._requestIds = {} as Record<LoadKind, number>;
 		this._aborts = {} as Record<LoadKind, AbortController | undefined>;
 		this._timers = { search: 0, live: 0, soon: 0, retention: 0, export: 0 } as Record<string, number>;
@@ -671,6 +672,8 @@ export const ReceiverArchive = {
 		},
 
 		async loadItems(this: Vm) {
+			// A console left open past midnight: Next day and the today mark follow the clock.
+			this.todayKey = localDateKey(Date.now());
 			const params = itemsQuery(this.filters, this.timeSpec.query, {
 				sort: this.sort.key,
 				order: this.sort.order,
@@ -716,9 +719,16 @@ export const ReceiverArchive = {
 			if (shown === this._shown) return;
 			this._shown = shown;
 			if (shown) {
-				this.scheduleLiveRefresh();
+				// Back from another console page with Records still the open tab: what was
+				// recorded or deleted meanwhile shows at once. A tab switch refreshes through
+				// the active watcher instead (active was already false when it hid).
+				const wasHiddenWhileActive = this._hiddenWhileActive;
+				this._hiddenWhileActive = false;
+				if (wasHiddenWhileActive && this.active && this._started) void this.refreshAll();
+				else this.scheduleLiveRefresh();
 				return;
 			}
+			this._hiddenWhileActive = Boolean(this.active);
 			this.pauseAudio();
 			if (this.confirm) this.cancelConfirm();
 			this.clearTimer('live');
@@ -885,6 +895,7 @@ export const ReceiverArchive = {
 
 		shiftPeriod(this: Vm, direction: number) {
 			if (this.view.mode === 'all') return;
+			this.todayKey = localDateKey(Date.now());
 			if (direction > 0 && !this.periodNav.next) return;
 			if (this.view.mode === 'range') {
 				const span = daySpan(this.view.fromDate, this.view.toDate);
