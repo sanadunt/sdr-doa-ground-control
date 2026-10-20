@@ -149,6 +149,10 @@ class WorkflowTextTests(unittest.TestCase):
             "paho-mqtt==2.1.0",
             # Without PyYAML the YAML checks of this file would be skipped in CI.
             "PyYAML==",
+            # The lint lines of the verification sequence (CLAUDE.md).
+            "actionlint-py==",
+            ".venv/bin/actionlint .github/workflows/*.yml",
+            "shellcheck -s sh packaging/docker/sdr-doa-docker packaging/console/sdr-doa-console packaging/console/install.sh",
             'python-version: "3.12"',
             'python-version: "3.9"',
             'node-version: "22"',
@@ -297,6 +301,7 @@ class WorkflowStructureTests(unittest.TestCase):
             "tools/test_*.py",
             "node --test",
             "make_release.py --skip-build",
+            ".venv/bin/actionlint",
             "git diff --check",
         ]
         positions = [next(i for i, run in enumerate(runs) if needle in run) for needle in order]

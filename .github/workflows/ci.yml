@@ -51,12 +51,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Create .venv with paho-mqtt and PyYAML
+      - name: Create .venv with paho-mqtt, PyYAML and actionlint
         # PyYAML only lets tools/test_release_workflow.py also run its YAML
-        # checks; nothing else imports it.
+        # checks; nothing else imports it. actionlint-py ships the actionlint
+        # binary for the lint step.
         run: |
           python -m venv .venv
-          .venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir paho-mqtt==2.1.0 PyYAML==6.0.3
+          .venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir paho-mqtt==2.1.0 PyYAML==6.0.3 actionlint-py==1.7.12.24
 
       - name: Start the staging MQTT broker (127.0.0.1:18884)
         id: broker
@@ -139,6 +140,16 @@ jobs:
           out="$RUNNER_TEMP/release"
           .venv/bin/python tools/make_release.py --skip-build --output-dir "$out"
           (cd "$out" && sha256sum -c SHA256SUMS)
+
+      - name: Lint the workflows and the shell scripts
+        run: |
+          if ! command -v shellcheck > /dev/null; then
+            sudo apt-get install -y -qq --no-install-recommends shellcheck
+          fi
+          shellcheck --version | sed -n 2p
+          shellcheck -s sh packaging/docker/sdr-doa-docker packaging/console/sdr-doa-console packaging/console/install.sh
+          # actionlint also runs shellcheck on every run: script.
+          .venv/bin/actionlint .github/workflows/*.yml
 
       - name: git diff --check
         env:
