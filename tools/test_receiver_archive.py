@@ -654,6 +654,15 @@ class ParameterValidationTests(unittest.TestCase):
             parse(query)
         self.assertEqual((caught.exception.status, caught.exception.code), (400, ra.ARCHIVE_INVALID_REQUEST))
 
+    def test_a_366_day_range_across_daylight_saving_is_accepted(self) -> None:
+        # Europe/Berlin 2023-10-29 .. 2024-10-28: 366 local days that are one hour longer
+        # than 366 x 24 h (two autumn changes, one spring change), as the Receiver sends it.
+        query = {"from_ms": ["1698530400000"], "to_ms": ["1730156400000"]}
+        self.assertEqual(1730156400000 - 1698530400000, 366 * 86_400_000 + 3_600_000)
+        parsed = ra.parse_filter_query(query)
+        self.assertEqual((parsed.from_ms, parsed.to_ms), (1698530400000, 1730156400000))
+        self.assert_invalid({"from_ms": ["0"], "to_ms": [str(367 * 86_400_000)]})
+
     def test_filter_queries_are_refused_with_the_field_named(self) -> None:
         for query in (
             {"from_ms": ["1"]},

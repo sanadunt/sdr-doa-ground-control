@@ -83,7 +83,9 @@ MUTATION_REJECTED_MESSAGE = "Receiver mutation requires a same-origin loopback r
 # --- limits ------------------------------------------------------------------
 
 MAX_MS = 253_402_300_799_999  # 9999-12-31T23:59:59.999Z; keeps SQLite integers far below 2**63
-MAX_ITEMS_SPAN_MS = 31_622_400_000  # 366 days
+# 366 local days, the longest Range the Receiver offers. Across daylight-saving
+# changes those days can add up to an hour or two more than 366 x 24 h.
+MAX_ITEMS_SPAN_MS = 366 * 86_400_000 + 2 * 3_600_000
 MAX_WINDOWS = 62
 MAX_WINDOW_MS = 90_000_000  # 25 h
 MAX_WINDOWS_TEXT = 2048
