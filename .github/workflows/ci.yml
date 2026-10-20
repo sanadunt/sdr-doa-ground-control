@@ -1,0 +1,196 @@
+# The repository's verification sequence (CLAUDE.md, "Verification after a
+# change"), on every pull request and push to main. release.yml calls it as
+# its first job, so a release is built only from a tree that passes.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  verify:
+    name: Verify (Node 22, Python 3.12)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out with the BrowSDR submodule
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          # Full history, so the whitespace check can diff against the base.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          # The latest 22.x; the Receiver node tests need 22.13 or later.
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            vendor/BrowSDR/package-lock.json
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Create .venv with paho-mqtt, PyYAML and actionlint
+        # PyYAML only lets tools/test_release_workflow.py also run its YAML
+        # checks; nothing else imports it. actionlint-py ships the actionlint
+        # binary for the lint step.
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir paho-mqtt==2.1.0 PyYAML==6.0.3 actionlint-py==1.7.12.24
+
+      - name: Start the staging MQTT broker (127.0.0.1:18884)
+        id: broker
+        run: |
+          # tools/mqtt_stage4.conf: anonymous, loopback only. Only
+          # test_sdr_doa_mqtt_stdlib.py needs it; without it that script is
+          # skipped with a warning and everything else still runs.
+          if sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends mosquitto; then
+            mosquitto -c tools/mqtt_stage4.conf -d
+            for _ in $(seq 1 50); do
+              if python -c "import socket; socket.create_connection(('127.0.0.1', 18884), 1).close()" 2>/dev/null; then
+                echo "ready=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              sleep 0.2
+            done
+          fi
+          echo "::warning::No staging MQTT broker on 127.0.0.1:18884; tools/test_sdr_doa_mqtt_stdlib.py will be skipped"
+          echo "ready=false" >> "$GITHUB_OUTPUT"
+
+      - name: npm ci
+        working-directory: frontend
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: npm test
+        working-directory: frontend
+        run: npm test
+
+      - name: npm run check
+        working-directory: frontend
+        run: npm run check
+
+      - name: npm run build:all (console and embedded Receiver)
+        working-directory: frontend
+        run: npm run build:all
+
+      - name: Python unit tests (unittest discover)
+        run: .venv/bin/python -m unittest discover -s tools -p 'test_*.py'
+
+      - name: Python standalone test scripts
+        env:
+          BROKER_READY: ${{ steps.broker.outputs.ready }}
+        run: |
+          # unittest discover runs the files with a unittest.TestCase; the
+          # others are assert scripts that run their test_* functions in __main__.
+          status=0
+          for script in tools/test_*.py; do
+            if grep -q 'unittest\.TestCase' "$script"; then
+              continue
+            fi
+            args=()
+            case "$script" in
+              tools/test_sdr_doa_mqtt_stdlib.py)
+                if [ "$BROKER_READY" != true ]; then
+                  echo "::warning file=$script::Skipped: no staging MQTT broker on 127.0.0.1:18884"
+                  continue
+                fi
+                ;;
+              tools/test_sdr_doa_mqtt.py)
+                # With a host and port it also runs its broker round trip.
+                if [ "$BROKER_READY" = true ]; then
+                  args=(127.0.0.1 18884)
+                fi
+                ;;
+            esac
+            echo "::group::$script ${args[*]}"
+            if ! .venv/bin/python "$script" "${args[@]}"; then
+              echo "::error file=$script::$script failed"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+      - name: Receiver overlay node tests
+        run: node --test tools/test_receiver_*.mjs
+
+      - name: Release tarballs and SHA256SUMS
+        run: |
+          out="$RUNNER_TEMP/release"
+          .venv/bin/python tools/make_release.py --skip-build --output-dir "$out"
+          (cd "$out" && sha256sum -c SHA256SUMS)
+
+      - name: Lint the workflows and the shell scripts
+        run: |
+          if ! command -v shellcheck > /dev/null; then
+            sudo apt-get install -y -qq --no-install-recommends shellcheck
+          fi
+          shellcheck --version | sed -n 2p
+          shellcheck -s sh packaging/docker/sdr-doa-docker packaging/console/sdr-doa-console packaging/console/install.sh
+          # actionlint also runs shellcheck on every run: script.
+          .venv/bin/actionlint .github/workflows/*.yml
+
+      - name: git diff --check
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          git diff --check
+          # The change itself: the pull request, or the commits of this push.
+          if [ -n "$BASE_SHA" ] && git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            git diff --check "$BASE_SHA" HEAD
+          fi
+          # The run must leave tracked files as they were.
+          changed="$(git status --porcelain --untracked-files=no)"
+          if [ -n "$changed" ]; then
+            echo "::error::The verification changed tracked files:"
+            echo "$changed"
+            exit 1
+          fi
+
+  python-minimum:
+    name: Python 3.9 unit tests (console minimum, no frontend build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out with the BrowSDR submodule
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Set up Python 3.9
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.9"
+
+      - name: Create .venv with paho-mqtt
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir paho-mqtt==2.1.0
+
+      - name: Python unit tests (unittest discover)
+        # Without frontend/dist the static suite skips its build checks.
+        run: .venv/bin/python -m unittest discover -s tools -p 'test_*.py'

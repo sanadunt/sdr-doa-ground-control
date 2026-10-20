@@ -1,6 +1,6 @@
 import { makeDefaultVfo, BOOKMARK_CATEGORIES } from './constants';
 import { receiverLanguage } from './i18n';
-import type { ReceiverAudioRecordFacets, ReceiverAudioSessionRecord, ReceiverMarker, ReceiverMarkerSet, ReceiverScanRecord } from './receiver-records-api';
+import type { ReceiverMarker, ReceiverMarkerSet } from './receiver-records-api';
 import type { SweepCandidate, SweepProgress, SweepSource, SweepSpectrumView } from '../worker/sweep-types';
 
 export function createAppData() {
@@ -46,29 +46,7 @@ export function createAppData() {
 			settingsLoaded: false,
 			autoSpectrumRecording: false,
 			savedAutoSpectrumRecording: false,
-			loading: false,
 			error: '',
-			scanItems: [] as ReceiverScanRecord[],
-			scanTotal: 0,
-			scanPage: 0,
-			audioItems: [] as ReceiverAudioSessionRecord[],
-			audioTotal: 0,
-			audioPage: 0,
-			audioDateFilter: '',
-			audioTimeFrom: '',
-			audioTimeTo: '',
-			audioMinimumFrequencyMHz: '',
-			audioMaximumFrequencyMHz: '',
-			audioVfoFilter: '',
-			audioModeFilter: '',
-			audioBandwidthFilter: '',
-			audioFacets: null as ReceiverAudioRecordFacets | null,
-			audioAvailableDateLookup: {} as Record<string, boolean>,
-			audioCalendarMonth: '',
-			audioCalendarFocusedDate: '',
-			audioCalendarOpen: false,
-			deletingAudioSegmentId: '',
-			pageSize: 20,
 			markerSets: [] as ReceiverMarkerSet[],
 			selectedMarkerSetId: '',
 			markerSetName: '',

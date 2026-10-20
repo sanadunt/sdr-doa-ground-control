@@ -1,0 +1,1745 @@
+#!/bin/sh
+# sdr-doa-docker: install, update and roll back the SDR-DoA Ground Console (or
+# the RDF-SDR edge agent) on a Linux Docker host from the public images on
+# GHCR. An update needs only docker with compose: no GitHub login, git, curl
+# or Python. It pulls the channel tag (default: the major version), waits for
+# the container to report healthy, and puts the previous image back when the
+# new one fails.
+#
+#   sudo sh sdr-doa-docker install --auto-update   # console in /opt/sdr-doa-ground-console
+#   sdr-doa-docker update                          # by hand, any time
+#   sdr-doa-docker help
+#
+# This file is standalone: it is a release asset, ships in the console tarball
+# as packaging/docker/sdr-doa-docker, and install copies it to
+# /usr/local/bin/sdr-doa-docker (root) or ~/.local/bin/sdr-doa-docker.
+set -eu
+
+PROG=sdr-doa-docker
+# The update channel of a new install: the major version of this release.
+DEFAULT_CHANNEL=2
+CONSOLE_IMAGE=ghcr.io/sanadunt/sdr-doa-ground-console
+AGENT_IMAGE=ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent
+PREVIOUS_TAG=sdr-doa-previous
+DEFAULT_PORT=8787
+DEFAULT_TIME=03:30
+DEFAULT_SHARE_DIR=/home/doasdr/doasdr/_share
+UNIT_NAME=sdr-doa-docker-update
+MARKER='# Written by sdr-doa-docker'
+LOG_KEEP=500
+BAD_KEEP=20
+# update --auto holds an update back while the console's Receiver records or
+# archives a scan, at most this long (7 days), so a station that records day
+# and night still gets updates.
+BUSY_DEFER_MAX=604800
+HEALTHCHECK_PATH=/opt/sdr-doa-ground-console/packaging/docker/healthcheck.py
+
+DOCKER=${SDR_DOA_DOCKER:-docker}
+SYSTEMCTL=${SDR_DOA_SYSTEMCTL:-systemctl}
+SYSTEMD_DIR=${SDR_DOA_SYSTEMD_DIR:-/etc/systemd/system}
+HEALTH_TIMEOUT=${SDR_DOA_HEALTH_TIMEOUT:-180}
+HEALTH_INTERVAL=${SDR_DOA_HEALTH_INTERVAL:-2}
+AGENT_SETTLE=${SDR_DOA_AGENT_SETTLE:-20}
+# Owner that root's timer accepts for DIR and the script besides uid 0; only
+# tests that fake root as another user set it.
+ROOT_UID=${SDR_DOA_ROOT_UID:-0}
+
+DIR=
+VARIANT=console
+PROJECT=sdr-doa-ground-console
+SERVICE=console
+DEFAULT_IMAGE=$CONSOLE_IMAGE
+IMAGE=
+CHANNEL=
+PORT=$DEFAULT_PORT
+REF=
+PREV_REF=
+LOG_FILE=
+BAD_FILE=
+BUSY_FILE=
+LOCK_DIR=
+ACTION=$PROG
+COMPOSE_KIND=
+COMPOSE_HINT='docker compose'
+COMPOSE_PULL_NEVER=0
+REASON=
+IMAGE_FAULT=0
+CURRENT=
+NEW=
+CID=
+C_STATUS=
+C_HEALTH=
+UPDATE_YES=0
+
+usage() {
+  cat <<'EOF'
+Usage: sdr-doa-docker COMMAND [options]
+
+Runs the SDR-DoA Ground Console (or, with --agent, the RDF-SDR edge agent)
+from its public GHCR image with docker compose, and keeps it up to date
+without a GitHub login.
+
+Commands:
+  install       write DIR/compose.yml and DIR/.env, pull, start, wait healthy
+  update        pull the channel tag; start a new image, wait healthy, and put
+                the previous image back when the new one fails
+  rollback      go back to the previous image (sdr-doa-previous), wait healthy
+  auto-update on|off|status
+                daily update: as root a systemd timer (one install per host),
+                as another user a crontab line to add
+  status        image, container state and health, auto-update, last update
+  help          this help
+
+install options:
+  --dir DIR         install directory (default /opt/sdr-doa-ground-console as
+                    root, else ~/sdr-doa-ground-console; with --agent
+                    /opt/sdr-doa-agent or ~/sdr-doa-agent)
+  --channel TAG     image tag to follow: 2 (default) takes every 2.x.y release,
+                    2.0 only 2.0.z, 2.0.0 stays put, latest follows every
+                    release including a new major version
+  --port N          console port (default 8787; the console binds 127.0.0.1)
+  --agent           install the RDF-SDR edge agent instead of the console
+  --enable-config   (agent) let Kontrol write settings.json: mounts --share-dir
+                    and runs the agent as its owner, state in DIR/state
+  --disable-config  (agent) answer config patches with REMOTE_CONTROL_DISABLED
+  --share-dir PATH  (agent) KrakenSDR _share directory
+                    (default /home/doasdr/doasdr/_share)
+  --user UID:GID    (agent) user for --enable-config (default: owner of
+                    --share-dir; never root)
+  --auto-update     also turn the daily update on (root)
+  --time HH:MM      time of the daily update (default 03:30, local time)
+  --force           replace a compose.yml that sdr-doa-docker did not write;
+                    (agent) install although the native agent service is
+                    installed, which must then be stopped
+
+update options:
+  --dir DIR         install directory (default: the console install, else the
+                    agent install, in the home directory or /opt)
+  --check           only report whether the channel has a different image;
+                    without the docker buildx plugin it pulls the image to
+                    compare (the running container and the tag stay as they
+                    are)
+  --auto            the timer: no questions; skip an image that failed before
+                    or is older than the running one, and wait for the next
+                    run while the console's Receiver records or archives a
+                    scan (at most 7 days)
+  --yes             no questions: install an older image, one that failed
+                    before, or over a running recording
+
+rollback, status and auto-update take --dir DIR; auto-update on takes
+--time HH:MM and --force (move the timer from another install to this one).
+
+A re-run of install keeps .env and agent.env; only the options given change.
+update only replaces the image: apply an edit of .env or agent.env with
+'docker compose up -d' in DIR (or a re-run of install). In both files wrap a
+value with a $ in single quotes (SDR_DOA_ADMIN_PASSWORD='...'): docker
+compose replaces $name in unquoted and double-quoted values.
+A new major version arrives only when you change the channel, for example
+  sdr-doa-docker install --channel 3
+Admin password of the console (default 123456 until you set one); use sudo
+for an install in /opt:
+  cd /opt/sdr-doa-ground-console
+  sudo docker compose exec console sdr-doa-set-admin-password
+  sudo docker compose restart console
+
+Files in DIR: compose.yml and .env (written by install), agent.env (agent
+settings), update.log (one line per step), .bad-images (images that failed
+their health check; auto-update skips them until a different image appears).
+
+Environment overrides (tests and special setups): SDR_DOA_DOCKER (docker
+binary), SDR_DOA_SYSTEMD_DIR (unit directory, implies systemd),
+SDR_DOA_SYSTEMCTL, SDR_DOA_BIN_DIR (where install copies this script),
+SDR_DOA_HEALTH_TIMEOUT (seconds, default 180), SDR_DOA_HEALTH_INTERVAL
+(seconds between checks, default 2), SDR_DOA_AGENT_SETTLE (seconds an image
+without a health check must run without restarting, default 20),
+SDR_DOA_ROOT_UID (tests only: another owner root's timer accepts).
+EOF
+}
+
+say() { printf '%s\n' "$*"; }
+warn() { printf '%s: %s\n' "$PROG" "$*" >&2; }
+die() {
+  warn "error: $*"
+  exit 1
+}
+usage_error() {
+  warn "error: $*"
+  warn "see '$PROG help'"
+  exit 2
+}
+need_value() {
+  [ $# -ge 2 ] || usage_error "$1 needs a value"
+}
+
+is_root() { [ "$(id -u)" = 0 ]; }
+timestamp() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+now() { date '+%s'; }
+
+# One line per step, on stdout and in DIR/update.log.
+log() {
+  lg_line="$(timestamp) $ACTION: $*"
+  printf '%s\n' "$lg_line"
+  if [ -n "$LOG_FILE" ]; then
+    printf '%s\n' "$lg_line" >>"$LOG_FILE" 2>/dev/null || true
+  fi
+}
+
+last_line() { printf '%s\n' "$1" | sed '/^[[:space:]]*$/d' | tail -n 1; }
+
+short_id() { printf '%s' "${1#sha256:}" | cut -c1-12; }
+
+check_number() {
+  case $2 in
+    '' | *[!0-9]*) usage_error "$1 must be a whole number of seconds, got '$2'" ;;
+  esac
+}
+
+check_dir() {
+  case $1 in
+    /*) ;;
+    *) usage_error "the directory must be an absolute path, got '$1'" ;;
+  esac
+  case $1 in
+    *[!A-Za-z0-9._/+@-]* | */../* | */.. | */./* | */.)
+      usage_error "the directory '$1' may hold only letters, digits and . _ / + @ - (it goes into compose and systemd files)"
+      ;;
+  esac
+}
+
+check_tag() {
+  case $1 in
+    '' | *[!A-Za-z0-9_.-]* | [.-]*) usage_error "the channel must be an image tag such as 2, 2.0 or 2.0.0, got '$1'" ;;
+  esac
+  [ "$1" != "$PREVIOUS_TAG" ] || usage_error "$PREVIOUS_TAG is the tag of the previous image, not a channel"
+  [ "${#1}" -le 128 ] || usage_error "the channel '$1' is longer than 128 characters"
+}
+
+check_image() {
+  case $1 in
+    '' | *[!a-z0-9./_:-]* | *: | */ | /* | *:*:*) die "SDR_DOA_IMAGE must be an image name without a tag, got '$1'" ;;
+  esac
+  case ${1##*/} in
+    *:*) die "SDR_DOA_IMAGE must be an image name without a tag, got '$1'" ;;
+  esac
+}
+
+check_port() {
+  case $1 in
+    '' | *[!0-9]*) usage_error "the port must be a number, got '$1'" ;;
+  esac
+  if [ "$1" -lt 1 ] || [ "$1" -gt 65535 ]; then
+    usage_error "the port must be 1 to 65535, got '$1'"
+  fi
+}
+
+check_time() {
+  case $1 in
+    [0-2][0-9]:[0-5][0-9]) ;;
+    *) usage_error "--time must be HH:MM (24 h, local time), got '$1'" ;;
+  esac
+  [ "${1%%:*}" -le 23 ] || usage_error "--time must be HH:MM (24 h, local time), got '$1'"
+}
+
+absolute() {
+  case $1 in
+    /*) printf '%s' "$1" ;;
+    *) printf '%s/%s' "$(pwd)" "$1" ;;
+  esac
+}
+
+need_home() {
+  is_root || [ -n "${HOME:-}" ] || usage_error "HOME is not set; pass --dir"
+}
+
+default_dir() {
+  if is_root; then dd_base=/opt; else dd_base=$HOME; fi
+  if [ "$1" = agent ]; then printf '%s/sdr-doa-agent' "$dd_base"; else printf '%s/sdr-doa-ground-console' "$dd_base"; fi
+}
+
+# DIR for update, rollback, status and auto-update: --dir, else the console
+# default, else the agent default when only that one exists.
+resolve_dir() {
+  if [ -n "$1" ]; then
+    DIR=$(absolute "$1")
+  else
+    need_home
+    DIR=$(default_dir console)
+    # A user also finds the root install in /opt (status, update --check).
+    for rd_candidate in "$DIR" "$(default_dir agent)" /opt/sdr-doa-ground-console /opt/sdr-doa-agent; do
+      if [ -f "$rd_candidate/compose.yml" ]; then
+        DIR=$rd_candidate
+        break
+      fi
+    done
+  fi
+  DIR=${DIR%/}
+  check_dir "$DIR"
+}
+
+set_variant() {
+  VARIANT=$1
+  if [ "$VARIANT" = agent ]; then
+    PROJECT=sdr-doa-agent
+    SERVICE=agent
+    DEFAULT_IMAGE=$AGENT_IMAGE
+  else
+    PROJECT=sdr-doa-ground-console
+    SERVICE=console
+    DEFAULT_IMAGE=$CONSOLE_IMAGE
+  fi
+}
+
+# console, agent, or empty for a compose file this script did not write.
+variant_of() {
+  vo_first=$(head -n 1 "$1" 2>/dev/null || true)
+  case $vo_first in
+    "$MARKER (console)."*) printf 'console' ;;
+    "$MARKER (agent)."*) printf 'agent' ;;
+  esac
+}
+
+# env_get FILE KEY: the last assignment of KEY, without surrounding quotes.
+env_get() {
+  [ -f "$1" ] || return 0
+  eg_value=$(sed -n "s/^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}$2=//p" "$1" | tail -n 1)
+  case $eg_value in
+    \"*\") eg_value=${eg_value#\"}; eg_value=${eg_value%\"} ;;
+    \'*\') eg_value=${eg_value#\'}; eg_value=${eg_value%\'} ;;
+  esac
+  printf '%s' "$eg_value"
+}
+
+# env_set FILE KEY VALUE: replace or append KEY=VALUE, keep every other line,
+# mode 0600 (the file may hold a password).
+env_set() {
+  es_tmp="$1.tmp.$$"
+  (
+    umask 077
+    if [ -f "$1" ]; then
+      awk -v key="$2" -v value="$3" '
+        BEGIN { done = 0 }
+        $0 ~ "^[[:space:]]*(export[[:space:]]+)?" key "=" {
+          if (!done) { print key "=" value; done = 1 }
+          next
+        }
+        { print }
+        END { if (!done) print key "=" value }
+      ' "$1" >"$es_tmp"
+    else
+      printf '%s=%s\n' "$2" "$3" >"$es_tmp"
+    fi
+  )
+  chmod 600 "$es_tmp"
+  mv -f "$es_tmp" "$1"
+}
+
+# Writes stdin to FILE through a temporary file in the same directory.
+write_file() {
+  wf_tmp="$1.tmp.$$"
+  cat >"$wf_tmp"
+  chmod "$2" "$wf_tmp"
+  mv -f "$wf_tmp" "$1"
+}
+
+# A root install keeps .env 0600; without sudo it cannot be read, and the
+# defaults would be used silently.
+need_readable() {
+  if [ -e "$1" ] && [ ! -r "$1" ]; then die "cannot read $1 (mode 0600); run with sudo"; fi
+}
+
+# Reads DIR/.env and exports the values, so docker compose interpolates
+# exactly what this script uses, whatever the caller's shell holds. The
+# console variables compose.yml passes without a value are unset, so compose
+# takes them only from DIR/.env.
+read_env() {
+  need_readable "$DIR/.env"
+  unset SDR_DOA_ADMIN_PASSWORD SDR_DOA_SEED_BASE_URL SDR_DOA_SEED_MQTT_HOST SDR_DOA_SEED_MQTT_PORT \
+    SDR_DOA_SEED_MQTT_TRANSPORT SDR_DOA_SEED_MQTT_WS_PATH SDR_DOA_SEED_REFRESH_SECONDS
+  IMAGE=$(env_get "$DIR/.env" SDR_DOA_IMAGE)
+  [ -n "$IMAGE" ] || IMAGE=$DEFAULT_IMAGE
+  CHANNEL=$(env_get "$DIR/.env" SDR_DOA_IMAGE_TAG)
+  [ -n "$CHANNEL" ] || CHANNEL=$DEFAULT_CHANNEL
+  PORT=$(env_get "$DIR/.env" SDR_DOA_PORT)
+  [ -n "$PORT" ] || PORT=$DEFAULT_PORT
+  check_image "$IMAGE"
+  check_tag "$CHANNEL"
+  check_port "$PORT"
+  REF=$IMAGE:$CHANNEL
+  PREV_REF=$IMAGE:$PREVIOUS_TAG
+  SDR_DOA_IMAGE=$IMAGE
+  SDR_DOA_IMAGE_TAG=$CHANNEL
+  SDR_DOA_PORT=$PORT
+  export SDR_DOA_IMAGE SDR_DOA_IMAGE_TAG SDR_DOA_PORT
+  LOG_FILE=$DIR/update.log
+  BAD_FILE=$DIR/.bad-images
+  BUSY_FILE=$DIR/.deferred-since
+}
+
+# The keys of FILE whose value holds a $ outside single quotes; KEYS is an
+# awk regular expression of the keys to look at.
+dollar_keys() {
+  [ -r "$1" ] || return 0
+  awk -v keys="$2" '
+    {
+      line = $0
+      sub(/^[[:space:]]*(export[[:space:]]+)?/, "", line)
+      eq = index(line, "=")
+      if (eq < 2) next
+      key = substr(line, 1, eq - 1)
+      value = substr(line, eq + 1)
+      if (key !~ ("^(" keys ")$")) next
+      if (index(value, "$") > 0 && substr(value, 1, 1) != "\047") print key
+    }' "$1"
+}
+
+# Warns (in the log too) about a value docker compose would change: it
+# replaces $name in unquoted and double-quoted values of .env and env_file.
+# Names only, never a value.
+warn_dollars() {
+  if [ "$VARIANT" = agent ]; then
+    wd_list="$DIR/agent.env|[A-Za-z_][A-Za-z0-9_]*"
+  else
+    wd_list="$DIR/.env|SDR_DOA_ADMIN_PASSWORD|SDR_DOA_SEED_[A-Z_]+"
+  fi
+  wd_file=${wd_list%%|*}
+  for wd_key in $(dollar_keys "$wd_file" "${wd_list#*|}"); do
+    "${1:-log}" "warning: $wd_key in $wd_file has a \$ outside single quotes; docker compose replaces \$name there, so the container gets another value. Write it as $wd_key='...'"
+  done
+}
+
+load_install() {
+  [ -f "$DIR/compose.yml" ] || die "no $PROG install in $DIR; run '$PROG install' first, or pass --dir"
+  li_variant=$(variant_of "$DIR/compose.yml")
+  [ -n "$li_variant" ] || die "$DIR/compose.yml was not written by $PROG"
+  set_variant "$li_variant"
+  read_env
+}
+
+# --- docker -----------------------------------------------------------------
+
+check_docker() {
+  command -v "$DOCKER" >/dev/null 2>&1 || die "docker was not found ($DOCKER); install Docker Engine first"
+  "$DOCKER" info >/dev/null 2>&1 ||
+    die "cannot reach the Docker daemon: is it running, and may this user use it (root, or the docker group)?"
+}
+
+detect_compose() {
+  [ -z "$COMPOSE_KIND" ] || return 0
+  if "$DOCKER" compose version >/dev/null 2>&1; then
+    COMPOSE_KIND=plugin
+    COMPOSE_HINT='docker compose'
+  elif command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE_KIND=standalone
+    COMPOSE_HINT=docker-compose
+    case $(docker-compose version --short 2>/dev/null || true) in
+      1.* | v1.*) die "docker-compose 1.x is not supported; install Compose v2 (the docker compose plugin)" ;;
+    esac
+  else
+    die "Docker Compose was not found: install the compose plugin (docker compose) or docker-compose"
+  fi
+  if compose_bare up --help 2>/dev/null | grep -q -- '--pull'; then COMPOSE_PULL_NEVER=1; fi
+}
+
+compose_bare() {
+  if [ "$COMPOSE_KIND" = plugin ]; then "$DOCKER" compose "$@"; else docker-compose "$@"; fi
+}
+
+compose() {
+  detect_compose
+  (cd "$DIR" && compose_bare -p "$PROJECT" -f compose.yml "$@")
+}
+
+# compose up -d; with "never", only images already on this host.
+compose_up() {
+  if [ "${1:-}" = never ] && [ "$COMPOSE_PULL_NEVER" = 1 ]; then
+    set -- up -d --pull never
+  else
+    set -- up -d
+  fi
+  if ! cu_out=$(compose "$@" 2>&1); then
+    REASON="compose up failed: $(last_line "$cu_out")"
+    return 1
+  fi
+}
+
+image_id() { "$DOCKER" image inspect --format '{{.Id}}' "$1" 2>/dev/null || true; }
+
+image_version() {
+  iv=$("$DOCKER" image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$1" 2>/dev/null || true)
+  [ "$iv" != '<no value>' ] || iv=
+  printf '%s' "$iv"
+}
+
+image_digests() { "$DOCKER" image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$1" 2>/dev/null || true; }
+
+describe() {
+  ds_version=$(image_version "$1")
+  if [ -n "$ds_version" ]; then printf '%s (%s)' "$ds_version" "$(short_id "$1")"; else short_id "$1"; fi
+}
+
+container_id() {
+  "$DOCKER" ps -a -q --no-trunc \
+    --filter "label=com.docker.compose.project=$PROJECT" \
+    --filter "label=com.docker.compose.service=$SERVICE" \
+    --filter "label=com.docker.compose.oneoff=False" 2>/dev/null | head -n 1
+}
+
+# status|health|restarts|exit code|image ID
+container_info() {
+  "$DOCKER" inspect --type container \
+    --format '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.RestartCount}}|{{.State.ExitCode}}|{{.Image}}' \
+    "$1" 2>/dev/null
+}
+
+# Sets CID, C_STATUS, C_HEALTH and CURRENT (the image the container runs,
+# else the image the channel tag points to on this host).
+find_current() {
+  CID=$(container_id)
+  C_STATUS=
+  C_HEALTH=
+  CURRENT=
+  if [ -n "$CID" ] && fc_info=$(container_info "$CID"); then
+    C_STATUS=${fc_info%%|*}
+    fc_rest=${fc_info#*|}
+    C_HEALTH=${fc_rest%%|*}
+    CURRENT=${fc_info##*|}
+  else
+    CID=
+  fi
+  [ -n "$CURRENT" ] || CURRENT=$(image_id "$REF")
+}
+
+# wait_healthy IMAGE_ID: 0 once the container reports healthy (or, for an
+# image without a health check, runs AGENT_SETTLE seconds without
+# restarting); otherwise 1 with the cause in REASON. IMAGE_FAULT=1 when the
+# image itself failed (unhealthy, exited, restarting); a missing container or
+# a timeout on a slow host does not show that.
+wait_healthy() {
+  REASON=
+  IMAGE_FAULT=0
+  wh_cid=$(container_id)
+  if [ -z "$wh_cid" ]; then
+    REASON="no $SERVICE container after compose up"
+    return 1
+  fi
+  wh_start=$(now)
+  wh_since=
+  wh_base=
+  while :; do
+    if ! wh_info=$(container_info "$wh_cid"); then
+      REASON='the container disappeared'
+      return 1
+    fi
+    IFS='|' read -r wh_status wh_health wh_restarts wh_exit wh_image <<EOF
+$wh_info
+EOF
+    if [ -n "$1" ] && [ "$wh_image" != "$1" ]; then
+      REASON="the container runs $(short_id "$wh_image"), not $(short_id "$1")"
+      return 1
+    fi
+    [ -n "$wh_base" ] || wh_base=$wh_restarts
+    if [ "$wh_restarts" != "$wh_base" ]; then
+      REASON="the container restarted (exit code $wh_exit)"
+      IMAGE_FAULT=1
+      return 1
+    fi
+    case $wh_status in
+      running)
+        case $wh_health in
+          healthy) return 0 ;;
+          unhealthy)
+            REASON='the health check reports unhealthy'
+            IMAGE_FAULT=1
+            return 1
+            ;;
+          none)
+            [ -n "$wh_since" ] || wh_since=$(now)
+            if [ $(($(now) - wh_since)) -ge "$AGENT_SETTLE" ]; then return 0; fi
+            ;;
+        esac
+        ;;
+      restarting)
+        REASON="the container keeps restarting (exit code $wh_exit)"
+        IMAGE_FAULT=1
+        return 1
+        ;;
+      exited | dead)
+        REASON="the container $wh_status with exit code $wh_exit"
+        IMAGE_FAULT=1
+        return 1
+        ;;
+    esac
+    if [ $(($(now) - wh_start)) -ge "$HEALTH_TIMEOUT" ]; then
+      REASON="not healthy within $HEALTH_TIMEOUT s (state $wh_status, health $wh_health)"
+      return 1
+    fi
+    sleep "$HEALTH_INTERVAL"
+  done
+}
+
+is_bad() { [ -n "$1" ] && [ -f "$BAD_FILE" ] && grep -q "^$1 " "$BAD_FILE"; }
+
+mark_bad() {
+  mb_tmp="$BAD_FILE.tmp.$$"
+  {
+    if [ -f "$BAD_FILE" ]; then grep -v "^$1 " "$BAD_FILE" || true; fi
+    printf '%s %s %s\n' "$1" "$(timestamp)" "$(image_version "$1")"
+  } | tail -n "$BAD_KEEP" >"$mb_tmp"
+  mv -f "$mb_tmp" "$BAD_FILE"
+}
+
+unmark_bad() {
+  is_bad "$1" || return 0
+  ub_tmp="$BAD_FILE.tmp.$$"
+  grep -v "^$1 " "$BAD_FILE" >"$ub_tmp" || true
+  mv -f "$ub_tmp" "$BAD_FILE"
+}
+
+# --- lock and log -------------------------------------------------------------
+
+take_lock() {
+  [ -w "$DIR" ] || die "cannot write $DIR; run $PROG as its owner (or root)"
+  LOCK_DIR=$DIR/.sdr-doa-docker.lock
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    tl_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
+    case $tl_pid in
+      '' | *[!0-9]*)
+        LOCK_DIR=
+        die "another $PROG run is working on $DIR (remove $DIR/.sdr-doa-docker.lock if none is)"
+        ;;
+    esac
+    if kill -0 "$tl_pid" 2>/dev/null; then
+      LOCK_DIR=
+      die "another $PROG run (pid $tl_pid) is working on $DIR"
+    fi
+    rm -rf "$LOCK_DIR"
+    mkdir "$LOCK_DIR" 2>/dev/null || {
+      LOCK_DIR=
+      die "cannot lock $DIR"
+    }
+  fi
+  printf '%s\n' "$$" >"$LOCK_DIR/pid"
+}
+
+trim_log() {
+  [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ] || return 0
+  tl_lines=$(wc -l <"$LOG_FILE" | tr -d ' ')
+  if [ "$tl_lines" -gt "$LOG_KEEP" ]; then
+    tail -n "$LOG_KEEP" "$LOG_FILE" >"$LOG_FILE.tmp.$$" && mv -f "$LOG_FILE.tmp.$$" "$LOG_FILE"
+  fi
+}
+
+finish() {
+  if [ -n "$LOCK_DIR" ]; then
+    trim_log || true
+    rm -rf "$LOCK_DIR"
+    LOCK_DIR=
+  fi
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# --- update ---------------------------------------------------------------------
+
+# Start NEW (already the channel tag), wait healthy; on failure record it as
+# bad and put CURRENT back. Keeps CURRENT as sdr-doa-previous and removes the
+# image that held that tag before.
+apply_new() {
+  an_old_prev=
+  if [ -n "$CURRENT" ] && [ "$CURRENT" != "$NEW" ]; then
+    an_old_prev=$(image_id "$PREV_REF")
+    if ! "$DOCKER" tag "$CURRENT" "$PREV_REF"; then
+      log "FAILED: cannot tag $(short_id "$CURRENT") as $PREV_REF; the running image is unchanged"
+      "$DOCKER" tag "$CURRENT" "$REF" || true
+      return 1
+    fi
+  fi
+  log "starting $(describe "$NEW")"
+  if compose_up && wait_healthy "$NEW"; then
+    log "OK: $SERVICE runs $(describe "$NEW") and is healthy"
+    unmark_bad "$NEW"
+    if [ -n "$an_old_prev" ] && [ "$an_old_prev" != "$CURRENT" ] && [ "$an_old_prev" != "$NEW" ]; then
+      if "$DOCKER" image rm "$an_old_prev" >/dev/null 2>&1; then
+        log "removed the image before the previous one ($(short_id "$an_old_prev"))"
+      else
+        log "kept the image before the previous one ($(short_id "$an_old_prev")): still tagged or in use"
+      fi
+    fi
+    return 0
+  fi
+  log "FAILED: $(describe "$NEW"): $REASON"
+  if [ -z "$CURRENT" ] || [ "$CURRENT" = "$NEW" ]; then
+    log "no previous image to go back to; see '$COMPOSE_HINT logs $SERVICE' in $DIR"
+    return 1
+  fi
+  if [ "$IMAGE_FAULT" = 1 ]; then
+    mark_bad "$NEW"
+    log "rolling back to $(describe "$CURRENT"); auto-update skips $(short_id "$NEW") until a different image is published"
+  else
+    log "rolling back to $(describe "$CURRENT"); this does not show that $(short_id "$NEW") is broken, so the next run tries it again"
+  fi
+  "$DOCKER" tag "$CURRENT" "$REF" || log "cannot tag $(short_id "$CURRENT") as $REF"
+  if [ -n "$an_old_prev" ]; then
+    "$DOCKER" tag "$an_old_prev" "$PREV_REF" || true
+  else
+    "$DOCKER" image rm "$PREV_REF" >/dev/null 2>&1 || true
+  fi
+  if compose_up never && wait_healthy "$CURRENT"; then
+    log "rolled back: $SERVICE runs $(describe "$CURRENT") again"
+  else
+    log "rollback FAILED: $REASON; see '$COMPOSE_HINT logs $SERVICE' in $DIR"
+  fi
+  return 1
+}
+
+# Point the channel tag back at CURRENT after a pull that will not be used.
+restore_tag() {
+  if [ -n "$CURRENT" ] && [ "$CURRENT" != "$NEW" ]; then
+    "$DOCKER" tag "$CURRENT" "$REF" || log "cannot tag $(short_id "$CURRENT") as $REF"
+  fi
+}
+
+# version_cmp A B: -1, 0 or 1 for two X.Y.Z[-pre] versions (a prerelease
+# ranks below its release); nothing when either is not such a version.
+version_cmp() {
+  awk -v a="$1" -v b="$2" '
+    function valid(v) { return v ~ /^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$/ }
+    function part(x, y,   xn, yn) {
+      xn = x ~ /^[0-9]+$/
+      yn = y ~ /^[0-9]+$/
+      if (xn && yn) return (x + 0 < y + 0) ? -1 : (x + 0 > y + 0)
+      if (xn != yn) return xn ? -1 : 1
+      return (x < y) ? -1 : (x > y)
+    }
+    BEGIN {
+      if (!valid(a) || !valid(b)) exit
+      ai = index(a, "-"); bi = index(b, "-")
+      ac = ai ? substr(a, 1, ai - 1) : a; ap = ai ? substr(a, ai + 1) : ""
+      bc = bi ? substr(b, 1, bi - 1) : b; bp = bi ? substr(b, bi + 1) : ""
+      split(ac, x, "."); split(bc, y, ".")
+      for (i = 1; i <= 3; i++) {
+        c = part(x[i], y[i])
+        if (c != 0) { print c; exit }
+      }
+      if (ap == "" || bp == "") { print (ap == bp) ? 0 : (ap == "" ? 1 : -1); exit }
+      n = split(ap, p, "."); m = split(bp, q, ".")
+      for (i = 1; i <= n && i <= m; i++) {
+        c = part(p[i], q[i])
+        if (c != 0) { print c; exit }
+      }
+      print (n < m) ? -1 : (n > m)
+    }'
+}
+
+# ask QUESTION: 0 for yes. --yes, or no terminal, answers yes; the caller
+# logs what it then does.
+ask() {
+  if [ "$UPDATE_YES" = 1 ] || ! { [ -t 0 ] && [ -t 1 ]; }; then return 0; fi
+  printf '%s [y/N] ' "$1"
+  ak_answer=
+  read -r ak_answer || ak_answer=
+  case $ak_answer in
+    y | Y | yes | YES) return 0 ;;
+  esac
+  return 1
+}
+
+# A NEW image older than the running one (both versions labelled): install
+# takes it (the operator chose the channel), --auto skips it, and update asks
+# on a terminal. 0: go on; 1: skip it (the tag points back at CURRENT).
+check_older() {
+  co_new=$(image_version "$NEW")
+  co_current=$(image_version "$CURRENT")
+  [ -n "$co_new" ] && [ -n "$co_current" ] || return 0
+  [ "$(version_cmp "$co_new" "$co_current")" = -1 ] || return 0
+  if [ "$2" = 1 ]; then
+    log "installing $co_new, older than the running $co_current (channel $CHANNEL)"
+    return 0
+  fi
+  if [ "$1" = 1 ]; then
+    restore_tag
+    log "skipped: $REF points to older $co_new than the running $co_current; run $PROG update to install it"
+    return 1
+  fi
+  if ! ask "$REF points to $co_new, older than the running $co_current. Install it?"; then
+    restore_tag
+    log "skipped: $co_new is older than the running $co_current"
+    return 1
+  fi
+  log "installing $co_new, older than the running $co_current"
+}
+
+# Whether the console's Receiver records or archives a scan right now. An
+# image whose health check does not know --busy answers neither word.
+receiver_busy() {
+  [ "$VARIANT" = console ] && [ -n "$CID" ] && [ "$C_STATUS" = running ] || return 1
+  rb_out=$("$DOCKER" exec "$CID" python "$HEALTHCHECK_PATH" --busy 2>/dev/null) || return 1
+  [ "$rb_out" = busy ]
+}
+
+# Before NEW replaces a running console. 0: go on; 1: not now (--auto waits
+# for the next run, at most BUSY_DEFER_MAX after the first deferral; a manual
+# update without a terminal and without --yes stops).
+check_busy() {
+  if ! receiver_busy; then
+    rm -f "$BUSY_FILE"
+    return 0
+  fi
+  if [ "$1" = 1 ]; then
+    cb_now=$(now)
+    cb_since=$(cat "$BUSY_FILE" 2>/dev/null || true)
+    case $cb_since in
+      '' | *[!0-9]*) cb_since=$cb_now ;;
+    esac
+    [ "$cb_since" -le "$cb_now" ] || cb_since=$cb_now
+    if [ $((cb_now - cb_since)) -lt "$BUSY_DEFER_MAX" ]; then
+      printf '%s\n' "$cb_since" >"$BUSY_FILE"
+      restore_tag
+      log "deferred: Receiver recording or scan active; the next run tries $(describe "$NEW") again"
+      return 1
+    fi
+    rm -f "$BUSY_FILE"
+    log "the Receiver was busy at every run for $((BUSY_DEFER_MAX / 86400)) days; updating anyway"
+    return 0
+  fi
+  if [ "$2" = 1 ] || [ "$UPDATE_YES" = 1 ]; then
+    log "warning: the Receiver records or archives a scan; the restart interrupts it"
+    return 0
+  fi
+  if [ -t 0 ] && [ -t 1 ]; then
+    if ask "The Receiver records or archives a scan; the update restarts the console and interrupts it. Update now?"; then
+      return 0
+    fi
+    restore_tag
+    log "not updated: the Receiver records or archives a scan"
+    return 1
+  fi
+  restore_tag
+  log "not updated: the Receiver records or archives a scan; run '$PROG update --yes' to update anyway"
+  RU_REFUSED=1
+  return 1
+}
+
+# The channel image is the one the container runs. update leaves a healthy
+# one alone, waits for one that is starting and starts a stopped one; when it
+# does not turn healthy (an update cut short, or a broken image), it goes
+# back to the previous image. install applies compose.yml.
+run_current() {
+  if [ "$1" != 1 ] && [ "$C_STATUS" = running ] && { [ "$C_HEALTH" = healthy ] || [ "$C_HEALTH" = none ]; }; then
+    log "up to date: $SERVICE runs $(describe "$NEW")"
+    rm -f "$BUSY_FILE"
+    return 0
+  fi
+  rc_up=1
+  if [ "$1" = 1 ]; then
+    log "image $(describe "$NEW") is current; applying compose.yml"
+  elif [ "$C_STATUS" = running ]; then
+    log "up to date: $(describe "$NEW"), but its health is $C_HEALTH; waiting for it"
+    rc_up=0
+  else
+    log "up to date: $(describe "$NEW"); starting the $C_STATUS container"
+  fi
+  if { [ "$rc_up" = 0 ] || compose_up; } && wait_healthy "$NEW"; then
+    log "OK: $SERVICE runs $(describe "$NEW") and is healthy"
+    return 0
+  fi
+  log "FAILED: $(describe "$NEW"): $REASON"
+  rc_prev=$(image_id "$PREV_REF")
+  if [ "$1" = 1 ] || [ -z "$rc_prev" ] || [ "$rc_prev" = "$NEW" ] || is_bad "$rc_prev"; then
+    log "see '$COMPOSE_HINT logs $SERVICE' in $DIR"
+    return 1
+  fi
+  if [ "$IMAGE_FAULT" = 1 ]; then mark_bad "$NEW"; fi
+  log "going back to the previous image $(describe "$rc_prev")"
+  "$DOCKER" tag "$rc_prev" "$REF" || log "cannot tag $(short_id "$rc_prev") as $REF"
+  if compose_up never && wait_healthy "$rc_prev"; then
+    log "rolled back: $SERVICE runs $(describe "$rc_prev") again"
+  else
+    log "rollback FAILED: $REASON; see '$COMPOSE_HINT logs $SERVICE' in $DIR"
+  fi
+  return 1
+}
+
+# run_update AUTO INSTALL
+run_update() {
+  RU_REFUSED=0
+  find_current
+  if [ "$1" = 1 ]; then
+    if [ -z "$CID" ]; then
+      log "skipped: no $SERVICE container; run '$PROG install' or '$PROG update'"
+      return 0
+    fi
+    case $C_STATUS in
+      running | restarting) ;;
+      *)
+        log "skipped: the $SERVICE container is $C_STATUS (stopped by hand?); '$PROG update' starts it"
+        return 0
+        ;;
+    esac
+  fi
+  log "pulling $REF"
+  if ! ru_out=$("$DOCKER" pull -q "$REF" 2>&1); then
+    # install still applies compose.yml with an image this host already has
+    # (an offline host changing the port).
+    if [ "$2" != 1 ] || [ -z "$(image_id "$REF")" ]; then
+      log "FAILED: pull of $REF: $(last_line "$ru_out")"
+      return 1
+    fi
+    log "pull of $REF failed ($(last_line "$ru_out")); using the image on this host"
+  fi
+  NEW=$(image_id "$REF")
+  if [ -z "$NEW" ]; then
+    log "FAILED: no image $REF after the pull"
+    return 1
+  fi
+  if [ "$NEW" = "$CURRENT" ] && [ -n "$CID" ]; then
+    if [ "$2" = 1 ] && receiver_busy; then
+      log "warning: the Receiver records or archives a scan; a changed compose.yml restarts the console"
+    fi
+    run_current "$2"
+    return
+  fi
+  check_older "$1" "$2" || return 0
+  if is_bad "$NEW"; then
+    if [ "$1" = 1 ]; then
+      restore_tag
+      log "skipped: $(describe "$NEW") failed its health check before; waiting for a different image"
+      return 0
+    fi
+    if ! ask "Image $(describe "$NEW") failed its health check before. Try it again?"; then
+      restore_tag
+      log "skipped: $(describe "$NEW") failed before"
+      return 0
+    fi
+    log "trying $(describe "$NEW") again; it failed its health check before"
+  fi
+  if ! check_busy "$1" "$2"; then
+    [ "$RU_REFUSED" = 0 ] || return 1
+    return 0
+  fi
+  if [ -n "$CURRENT" ] && [ "$CURRENT" != "$NEW" ]; then
+    log "new image: $(describe "$NEW"), running $(describe "$CURRENT")"
+  fi
+  apply_new
+}
+
+# The remote digest of REF, without pulling; fails when buildx cannot tell.
+remote_digest() {
+  rd_out=$("$DOCKER" buildx imagetools inspect --format '{{json .Manifest}}' "$1" 2>/dev/null) || return 1
+  rd_digest=$(printf '%s\n' "$rd_out" | tr ',' '\n' |
+    sed -n 's/.*"digest":[[:space:]]*"\(sha256:[0-9a-f]\{64\}\)".*/\1/p' | head -n 1)
+  [ -n "$rd_digest" ] || return 1
+  printf '%s\n' "$rd_digest"
+}
+
+run_check() {
+  find_current
+  if rc_digest=$(remote_digest "$REF"); then
+    if [ -n "$CURRENT" ] && image_digests "$CURRENT" | grep -q -F "@$rc_digest"; then
+      say "up to date: $SERVICE runs $(describe "$CURRENT"), the image of $REF"
+    elif [ -n "$CURRENT" ]; then
+      say "update available: $REF is $rc_digest; $SERVICE runs $(describe "$CURRENT")"
+    else
+      say "update available: $REF is $rc_digest; nothing runs here yet"
+    fi
+    return 0
+  fi
+  # Without buildx: pull, compare, and point the tag back at the running image.
+  take_lock
+  if ! rc_out=$("$DOCKER" pull -q "$REF" 2>&1); then
+    die "cannot check $REF: $(last_line "$rc_out")"
+  fi
+  NEW=$(image_id "$REF")
+  restore_tag
+  if [ -n "$CURRENT" ] && [ "$NEW" = "$CURRENT" ]; then
+    say "up to date: $SERVICE runs $(describe "$CURRENT"), the image of $REF"
+  elif is_bad "$NEW"; then
+    say "update available: $REF is $(describe "$NEW"), which failed its health check before"
+  else
+    say "update available: $REF is $(describe "$NEW")${CURRENT:+; $SERVICE runs $(describe "$CURRENT")}"
+  fi
+}
+
+# --- templates ------------------------------------------------------------------
+
+console_compose() {
+  cat <<EOF
+$MARKER (console). '$PROG install' rewrites this file;
+# put settings in .env next to it (SDR_DOA_IMAGE_TAG is the update channel).
+name: sdr-doa-ground-console
+
+services:
+  console:
+    image: \${SDR_DOA_IMAGE:-$CONSOLE_IMAGE}:\${SDR_DOA_IMAGE_TAG:-$DEFAULT_CHANNEL}
+    # The console binds 127.0.0.1 and refuses any other address. With the host
+    # network that is this machine's own loopback, so http://127.0.0.1:8787/
+    # works here and is not reachable from the LAN. Never use a bridge network
+    # with "ports:": it would expose admin and the config patch to the LAN.
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - SDR_DOA_PORT=\${SDR_DOA_PORT:-$DEFAULT_PORT}
+      # Passed only when set in .env next to this file ($PROG update and
+      # install ignore the shell's values); wrap a value with a \$ in single
+      # quotes there, since compose replaces \$name in other values.
+      # Admin password: the environment wins over /data/.env. To keep it in
+      # the volume instead, leave this unset and run
+      #   docker compose exec console sdr-doa-set-admin-password
+      #   docker compose restart console
+      - SDR_DOA_ADMIN_PASSWORD
+      # First start only: the console writes /data/console.json from these.
+      - SDR_DOA_SEED_BASE_URL
+      - SDR_DOA_SEED_MQTT_HOST
+      - SDR_DOA_SEED_MQTT_PORT
+      - SDR_DOA_SEED_MQTT_TRANSPORT
+      - SDR_DOA_SEED_MQTT_WS_PATH
+      - SDR_DOA_SEED_REFRESH_SECONDS
+    volumes:
+      - sdr-doa-data:/data
+
+volumes:
+  sdr-doa-data:
+EOF
+}
+
+# agent_compose CONFIG SHARE_DIR USER
+agent_compose() {
+  cat <<EOF
+$MARKER (agent). '$PROG install --agent' rewrites this file;
+# agent settings go in agent.env, the image channel in .env.
+name: sdr-doa-agent
+
+services:
+  agent:
+    image: \${SDR_DOA_IMAGE:-$AGENT_IMAGE}:\${SDR_DOA_IMAGE_TAG:-$DEFAULT_CHANNEL}
+    # 127.0.0.1 must be the Raspberry itself: Data Out on 8081 and a local broker.
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - agent.env
+    environment:
+      # Paths inside the container; they win over agent.env.
+      STATE_DIR: /state
+      SETTINGS_PATH: /krakensdr/_share/settings.json
+EOF
+  if [ "$1" = 1 ]; then
+    cat <<EOF
+    # ENABLE_CONFIG=1: the agent writes settings.json as the owner of the
+    # KrakenSDR _share directory ($PROG install --agent --enable-config).
+    user: "$3"
+    volumes:
+      - ./state:/state
+      - $2:/krakensdr/_share
+EOF
+  else
+    cat <<EOF
+    volumes:
+      - agent-state:/state
+EOF
+  fi
+  cat <<EOF
+
+volumes:
+  agent-state:
+EOF
+}
+
+# The defaults of packaging/agent/agent.env.example for a container.
+agent_env_template() {
+  cat <<'EOF'
+# Settings of the SDR-DoA edge agent in Docker (sdr-doa-docker install --agent).
+# Apply a change with docker compose up -d in this directory (sdr-doa-docker
+# update only replaces the image). STATE_DIR and SETTINGS_PATH are set by
+# compose.yml. Keep this file mode 0600: it may hold the MQTT password. Empty
+# values use the agent's defaults. Wrap a value with a $ in single quotes
+# (SDR_DOA_MQTT_PASSWORD='...'): docker compose replaces $name in other values.
+
+# KrakenSDR Data Out on this Raspberry.
+BASE_URL=http://127.0.0.1:8081
+
+# MQTT broker. The agent speaks MQTT 3.1.1 over TCP, not WebSocket. A broker
+# that is not on loopback needs TLS (MQTT_TLS=1, or a CA file in MQTT_CAFILE)
+# and a username; the password goes in SDR_DOA_MQTT_PASSWORD.
+MQTT_HOST=127.0.0.1
+MQTT_PORT=1883
+MQTT_TLS=0
+MQTT_CAFILE=
+MQTT_USERNAME=
+SDR_DOA_MQTT_PASSWORD=
+
+# 1: publish health, state and config_reported (Kontrol needs them). 0: no MQTT.
+PUBLISH=1
+# 1: apply Kontrol config patches to settings.json (needs PUBLISH=1 and the
+# mount from sdr-doa-docker install --agent --enable-config).
+# 0: answer every patch with REMOTE_CONTROL_DISABLED.
+ENABLE_CONFIG=0
+
+# Optional tuning. CLOCK_SOURCE: local or remote_unverified.
+# AUTHORITY: none, csv or xml (with none the agent publishes no DoA).
+CLOCK_SOURCE=local
+AUTHORITY=
+HEALTH_INTERVAL=
+DOA_RATE=
+STATE_INTERVAL=
+POLL_INTERVAL=
+COLLECT_BUDGET=
+EOF
+}
+
+env_header() {
+  cat <<EOF
+# Settings of the $PROG install in this directory, read by docker compose
+# and $PROG. SDR_DOA_IMAGE_TAG is the update channel: $DEFAULT_CHANNEL follows every
+# $DEFAULT_CHANNEL.x.y release, $DEFAULT_CHANNEL.0 only $DEFAULT_CHANNEL.0.z, $DEFAULT_CHANNEL.0.0 stays on that release.
+# Change it with
+#   $PROG install --channel TAG
+# Keep this file mode 0600.
+EOF
+  if [ "$VARIANT" = console ]; then
+    cat <<EOF
+# Admin password: set it with
+#   docker compose exec console sdr-doa-set-admin-password
+# (it is kept in /data/.env in the volume). If SDR_DOA_ADMIN_PASSWORD or a
+# first-start SDR_DOA_SEED_* value goes here instead, wrap the value in
+# single quotes: docker compose replaces \$name in unquoted and double-quoted
+# values. Apply a change of this file with docker compose up -d here (or a
+# re-run of install); $PROG update only replaces the image.
+EOF
+  fi
+}
+
+# --- auto-update ----------------------------------------------------------------
+
+have_systemd() {
+  command -v "$SYSTEMCTL" >/dev/null 2>&1 || return 1
+  [ -d /run/systemd/system ] || [ -n "${SDR_DOA_SYSTEMD_DIR:-}" ]
+}
+
+service_file() { printf '%s/%s.service' "$SYSTEMD_DIR" "$UNIT_NAME"; }
+timer_file() { printf '%s/%s.timer' "$SYSTEMD_DIR" "$UNIT_NAME"; }
+
+# root_only PATH: owned by root (or SDR_DOA_ROOT_UID) and writable by no one
+# else; a group- or world-writable directory only with the sticky bit (/tmp).
+root_only() {
+  # shellcheck disable=SC2012 # ls -n is the portable way to read owner and mode
+  ls -nd -- "$1" 2>/dev/null | awk -v root="$ROOT_UID" '
+    NR == 1 {
+      mode = $1
+      if ($3 != 0 && $3 != root) exit 1
+      if (substr(mode, 1, 1) == "l") exit 1
+      writable = substr(mode, 6, 1) == "w" || substr(mode, 9, 1) == "w"
+      if (writable && !(substr(mode, 1, 1) == "d" && substr(mode, 10, 1) ~ /[tT]/)) exit 1
+      ok = 1
+    }
+    END { exit ok ? 0 : 1 }'
+}
+
+# root_only_chain DIR: DIR (its physical path) and every directory above it.
+# Sets UNSAFE to the first one that is not root-only.
+root_only_chain() {
+  UNSAFE=$1
+  ro_path=$(cd -P -- "$1" 2>/dev/null && pwd -P) || return 1
+  while :; do
+    UNSAFE=$ro_path
+    root_only "$ro_path" || return 1
+    [ "$ro_path" != / ] || return 0
+    ro_path=$(dirname -- "$ro_path")
+  done
+}
+
+# The nearest existing directory of PATH (install creates the rest as root).
+existing_dir() {
+  ed_path=$1
+  while [ ! -d "$ed_path" ]; do ed_path=$(dirname -- "$ed_path"); done
+  printf '%s' "$ed_path"
+}
+
+# cron_line TIME COMMAND
+cron_line() {
+  printf '%s %s * * * %s update --auto --dir %s >/dev/null 2>&1\n' "${1#*:}" "${1%%:*}" "$2" "$DIR"
+}
+
+# user_cron TIME COMMAND: the line for the crontab of the user that owns DIR.
+user_cron() {
+  uc_prefix=
+  case ${DOCKER_HOST:-} in
+    '' | *[!A-Za-z0-9:/._@-]*) ;;
+    *) uc_prefix="DOCKER_HOST=$DOCKER_HOST " ;;
+  esac
+  say "For a daily update at $1, add this line with crontab -e as the user that owns $DIR:"
+  cron_line "$1" "$uc_prefix$2"
+  if [ -z "$uc_prefix" ]; then
+    say "With rootless Docker, put DOCKER_HOST=unix:///run/user/<uid>/docker.sock before the command."
+  fi
+}
+
+# The installed copy for root's timer: owned and writable by root only, in
+# directories only root can change; never a copy elsewhere ($0) that another
+# user could edit.
+root_self() {
+  if [ -f "$0" ] && grep -q '^PROG=sdr-doa-docker$' "$0" 2>/dev/null; then install_self >&2; fi
+  rs_self="$(bin_dir)/$PROG"
+  if [ ! -f "$rs_self" ] || [ -L "$rs_self" ]; then
+    die "$rs_self is missing; run '$PROG install' (or this command) from the script file first"
+  fi
+  if ! root_only "$rs_self" || ! root_only_chain "$(dirname -- "$rs_self")"; then
+    die "$rs_self (or a directory above it) is not owned by root or is writable by another user; root's timer must not run it"
+  fi
+  printf '%s' "$rs_self"
+}
+
+# The --dir of the existing timer, if any.
+timer_dir() {
+  [ -f "$(service_file)" ] || return 0
+  sed -n 's/^ExecStart=.* --dir \(.*\)$/\1/p' "$(service_file)" | head -n 1
+}
+
+# auto_update_on TIME [force]
+auto_update_on() {
+  au_time=$1
+  if ! is_root; then
+    # Root's timer must not run a script or a compose.yml this user can
+    # change, so the update runs from this user's crontab.
+    install_self
+    user_cron "$au_time" "$(bin_dir)/$PROG"
+    return 0
+  fi
+  if ! root_only_chain "$DIR"; then
+    warn "error: $UNSAFE is not owned by root or is writable by another user, so root's timer must not update $DIR"
+    # shellcheck disable=SC2016 # $HOME is for cron to expand
+    user_cron "$au_time" '$HOME/.local/bin/sdr-doa-docker'
+    exit 1
+  fi
+  au_other=$(timer_dir)
+  if [ -n "$au_other" ] && [ "$au_other" != "$DIR" ] && [ "${2:-}" != force ]; then
+    warn "error: the timer updates $au_other (one auto-update install per host); turn it off first or pass --force"
+    exit 2
+  fi
+  au_self=$(root_self) || exit 1
+  check_dir "$au_self"
+  if ! have_systemd; then
+    say "systemd was not found, so no timer was installed. For a daily update at $au_time,"
+    say "add this line with crontab -e for root:"
+    cron_line "$au_time" "$au_self"
+    return 0
+  fi
+  mkdir -p "$SYSTEMD_DIR"
+  write_file "$(service_file)" 0644 <<EOF
+$MARKER (auto-update). '$PROG auto-update off' removes it.
+[Unit]
+Description=Update the SDR-DoA Docker install in $DIR
+Documentation=https://github.com/sanadunt/sdr-doa-ground-control
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=$au_self update --auto --dir $DIR
+TimeoutStartSec=1h
+EOF
+  write_file "$(timer_file)" 0644 <<EOF
+$MARKER (auto-update). '$PROG auto-update off' removes it.
+[Unit]
+Description=Daily update of the SDR-DoA Docker install in $DIR
+
+[Timer]
+OnCalendar=*-*-* $au_time:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  "$SYSTEMCTL" daemon-reload || die "systemctl daemon-reload failed"
+  "$SYSTEMCTL" enable --now "$UNIT_NAME.timer" || die "systemctl enable --now $UNIT_NAME.timer failed"
+  say "auto-update on: daily at $au_time (local time, up to 15 min later) for $DIR"
+  say "log: $DIR/update.log; last run: systemctl status $UNIT_NAME.service"
+}
+
+auto_update_off() {
+  if [ ! -f "$(service_file)" ] && [ ! -f "$(timer_file)" ]; then
+    say "auto-update is already off"
+    return 0
+  fi
+  if ! is_root; then
+    warn "error: auto-update removes systemd system units from $SYSTEMD_DIR and needs root:"
+    warn "  sudo $PROG auto-update off"
+    exit 2
+  fi
+  if have_systemd; then "$SYSTEMCTL" disable --now "$UNIT_NAME.timer" >/dev/null 2>&1 || true; fi
+  for ao_file in "$(timer_file)" "$(service_file)"; do
+    if [ -f "$ao_file" ]; then
+      if head -n 1 "$ao_file" | grep -q -F "$MARKER"; then
+        rm -f "$ao_file"
+      else
+        warn "kept $ao_file: it was not written by $PROG"
+      fi
+    fi
+  done
+  if have_systemd; then "$SYSTEMCTL" daemon-reload || true; fi
+  say "auto-update off"
+}
+
+# One line: on/off, time and directory of the timer.
+auto_update_state() {
+  as_timer=$(timer_file)
+  as_service=$(service_file)
+  if [ ! -f "$as_timer" ] || [ ! -f "$as_service" ]; then
+    if have_systemd; then printf 'off\n'; else printf 'off (no systemd; a cron line from auto-update on runs it)\n'; fi
+    return 0
+  fi
+  as_time=$(sed -n 's/^OnCalendar=\*-\*-\* \([0-9][0-9]:[0-9][0-9]\):00$/\1/p' "$as_timer" | head -n 1)
+  as_dir=$(timer_dir)
+  as_state=
+  if have_systemd; then
+    as_enabled=$("$SYSTEMCTL" is-enabled "$UNIT_NAME.timer" 2>/dev/null || true)
+    as_active=$("$SYSTEMCTL" is-active "$UNIT_NAME.timer" 2>/dev/null || true)
+    as_state=", timer ${as_enabled:-unknown}, ${as_active:-unknown}"
+  fi
+  as_other=
+  if [ -n "$DIR" ] && [ "$as_dir" != "$DIR" ]; then as_other=' (another install)'; fi
+  printf 'on: daily at %s (up to 15 min later) for %s%s%s\n' "${as_time:-?}" "${as_dir:-?}" "$as_other" "$as_state"
+}
+
+# --- commands -------------------------------------------------------------------
+
+bin_dir() {
+  if [ -n "${SDR_DOA_BIN_DIR:-}" ]; then
+    printf '%s' "$SDR_DOA_BIN_DIR"
+  elif is_root; then
+    printf '/usr/local/bin'
+  else
+    printf '%s/.local/bin' "$HOME"
+  fi
+}
+
+# Copies this script to the bin directory, so the timer and the operator
+# run the version that wrote the install.
+install_self() {
+  is_target="$(bin_dir)/$PROG"
+  if [ ! -f "$0" ] || ! grep -q '^PROG=sdr-doa-docker$' "$0"; then
+    warn "cannot copy this script to $is_target (run it from a file: sh sdr-doa-docker install)"
+    return 0
+  fi
+  mkdir -p "$(bin_dir)"
+  is_source=$(cd "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")
+  is_dest=$(cd "$(bin_dir)" && pwd -P)/$PROG
+  if [ "$is_source" != "$is_dest" ]; then
+    cp "$0" "$is_target.tmp.$$"
+    chmod 0755 "$is_target.tmp.$$"
+    mv -f "$is_target.tmp.$$" "$is_target"
+    log "installed $is_target"
+  fi
+  case :$PATH: in
+    *:"$(bin_dir)":*) ;;
+    *) say "note: $(bin_dir) is not on PATH; run $is_target" ;;
+  esac
+}
+
+# Agent --enable-config: the owner (UID:GID) of the share directory.
+share_owner() {
+  so_line=$(ls -nd "$1" 2>/dev/null) || return 1
+  printf '%s' "$so_line" | awk '{ print $3 ":" $4 }'
+}
+
+agent_setup() {
+  ag_config=$1
+  ag_share=$2
+  ag_user=$3
+  if [ ! -f "$DIR/agent.env" ]; then
+    agent_env_template | write_file "$DIR/agent.env" 0600
+    log "wrote $DIR/agent.env with the defaults; edit it, then run '$COMPOSE_HINT up -d' in $DIR"
+  fi
+  case $ag_config in
+    enable)
+      [ -n "$ag_share" ] || ag_share=$(env_get "$DIR/.env" SDR_DOA_AGENT_SHARE_DIR)
+      [ -n "$ag_share" ] || ag_share=$DEFAULT_SHARE_DIR
+      check_dir "$ag_share"
+      [ -d "$ag_share" ] || die "--share-dir $ag_share is not a directory (the KrakenSDR _share directory)"
+      if [ -z "$ag_user" ]; then ag_user=$(share_owner "$ag_share") || die "cannot read the owner of $ag_share"; fi
+      case $ag_user in
+        *:*) ;;
+        *)
+          id "$ag_user" >/dev/null 2>&1 || usage_error "--user $ag_user: no such user"
+          ag_user=$(id -u "$ag_user"):$(id -g "$ag_user")
+          ;;
+      esac
+      case $ag_user in
+        '' | *[!0-9:]* | *:*:* | :* | *:) usage_error "--user must be UID:GID or a user name, got '$ag_user'" ;;
+      esac
+      [ "${ag_user%%:*}" != 0 ] || die "the agent must not run as root; pick the owner of settings.json with --user"
+      mkdir -p "$DIR/state"
+      if [ "$(share_owner "$DIR/state")" != "$ag_user" ]; then
+        chown "$ag_user" "$DIR/state" || die "cannot give $DIR/state to $ag_user (run as root)"
+      fi
+      chmod 0700 "$DIR/state"
+      env_set "$DIR/.env" SDR_DOA_AGENT_CONFIG 1
+      env_set "$DIR/.env" SDR_DOA_AGENT_SHARE_DIR "$ag_share"
+      env_set "$DIR/.env" SDR_DOA_AGENT_USER "$ag_user"
+      env_set "$DIR/agent.env" ENABLE_CONFIG 1
+      env_set "$DIR/agent.env" PUBLISH 1
+      log "config patches on: $ag_share mounted, agent runs as $ag_user, state in $DIR/state"
+      ;;
+    disable)
+      env_set "$DIR/.env" SDR_DOA_AGENT_CONFIG 0
+      env_set "$DIR/agent.env" ENABLE_CONFIG 0
+      log "config patches off: the agent answers them with REMOTE_CONTROL_DISABLED"
+      ;;
+  esac
+  if [ "$(env_get "$DIR/.env" SDR_DOA_AGENT_CONFIG)" = 1 ]; then
+    ag_share=$(env_get "$DIR/.env" SDR_DOA_AGENT_SHARE_DIR)
+    ag_user=$(env_get "$DIR/.env" SDR_DOA_AGENT_USER)
+    check_dir "$ag_share"
+    case $ag_user in
+      '' | *[!0-9:]* | 0:*) die "SDR_DOA_AGENT_USER in $DIR/.env must be a non-root UID:GID" ;;
+    esac
+    agent_compose 1 "$ag_share" "$ag_user" | write_file "$DIR/compose.yml" 0644
+  else
+    agent_compose 0 '' '' | write_file "$DIR/compose.yml" 0644
+  fi
+}
+
+cmd_install() {
+  in_dir=
+  in_channel=
+  in_port=
+  in_agent=0
+  in_auto=0
+  in_time=
+  in_force=0
+  in_config=
+  in_share=
+  in_user=
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --*=*)
+        in_opt=${1%%=*}
+        in_value=${1#*=}
+        shift
+        set -- "$in_opt" "$in_value" "$@"
+        continue
+        ;;
+    esac
+    case $1 in
+      --dir) need_value "$@"; in_dir=$2; shift ;;
+      --channel) need_value "$@"; in_channel=$2; shift ;;
+      --port) need_value "$@"; in_port=$2; shift ;;
+      --agent) in_agent=1 ;;
+      --enable-config) in_config=enable ;;
+      --disable-config) in_config=disable ;;
+      --share-dir) need_value "$@"; in_share=$2; shift ;;
+      --user) need_value "$@"; in_user=$2; shift ;;
+      --auto-update) in_auto=1 ;;
+      --time) need_value "$@"; in_time=$2; shift ;;
+      --force) in_force=1 ;;
+      -h | --help) usage; exit 0 ;;
+      *) usage_error "install does not take '$1'" ;;
+    esac
+    shift
+  done
+  if [ "$in_agent" = 1 ]; then
+    [ -z "$in_port" ] || usage_error "--port is a console option"
+    set_variant agent
+  else
+    if [ -n "$in_config$in_share$in_user" ]; then usage_error "--enable-config, --disable-config, --share-dir and --user need --agent"; fi
+    set_variant console
+  fi
+  [ -z "$in_channel" ] || check_tag "$in_channel"
+  [ -z "$in_port" ] || check_port "$in_port"
+  [ -z "$in_time" ] || check_time "$in_time"
+  if [ -n "$in_time" ] && [ "$in_auto" != 1 ]; then usage_error "--time needs --auto-update"; fi
+  need_home
+  if [ -n "$in_dir" ]; then DIR=$(absolute "$in_dir"); else DIR=$(default_dir "$VARIANT"); fi
+  DIR=${DIR%/}
+  check_dir "$DIR"
+  # Root's timer: checked before anything is written (auto_update_on checks again).
+  if [ "$in_auto" = 1 ] && is_root; then
+    if ! root_only_chain "$(existing_dir "$DIR")"; then
+      warn "error: $UNSAFE is not owned by root or is writable by another user, so root's timer must not update $DIR; install without --auto-update, or in a directory only root can change"
+      exit 2
+    fi
+    in_other=$(timer_dir)
+    if [ -n "$in_other" ] && [ "$in_other" != "$DIR" ] && [ "$in_force" != 1 ]; then
+      warn "error: the timer updates $in_other (one auto-update install per host); run '$PROG auto-update off' first, or pass --force"
+      exit 2
+    fi
+  fi
+  # The native agent (packaging/agent/install-agent.sh) uses /opt/sdr-doa-agent
+  # and a system unit; two agents would both publish and answer config patches.
+  if [ "$VARIANT" = agent ] && [ "$in_force" != 1 ]; then
+    if [ -f "$DIR/install-info" ] || [ -f "$SYSTEMD_DIR/sdr-doa-agent.service" ]; then
+      die "the native RDF-SDR agent service (install-agent.sh) is installed, and two agents must not run at once; remove it first with 'sudo sh /opt/sdr-doa-agent/uninstall.sh' (agent.env and state stay), or pass --force"
+    fi
+  fi
+
+  check_docker
+  detect_compose
+  if [ -e "$DIR/compose.yml" ] && [ "$in_force" != 1 ]; then
+    in_old=$(variant_of "$DIR/compose.yml")
+    if [ -z "$in_old" ]; then
+      die "$DIR/compose.yml was not written by $PROG; move it away or pass --force"
+    elif [ "$in_old" != "$VARIANT" ]; then
+      die "$DIR holds the $in_old install; pick another --dir or pass --force"
+    fi
+  fi
+  mkdir -p "$DIR"
+  take_lock
+  ACTION=install
+  LOG_FILE=$DIR/update.log
+  need_readable "$DIR/.env"
+
+  if [ ! -f "$DIR/.env" ]; then env_header | write_file "$DIR/.env" 0600; fi
+  # A custom image stays; the default of the other variant (--force) does not.
+  case $(env_get "$DIR/.env" SDR_DOA_IMAGE) in
+    '' | "$CONSOLE_IMAGE" | "$AGENT_IMAGE") env_set "$DIR/.env" SDR_DOA_IMAGE "$DEFAULT_IMAGE" ;;
+  esac
+  if [ -n "$in_channel" ]; then
+    env_set "$DIR/.env" SDR_DOA_IMAGE_TAG "$in_channel"
+  elif [ -z "$(env_get "$DIR/.env" SDR_DOA_IMAGE_TAG)" ]; then
+    env_set "$DIR/.env" SDR_DOA_IMAGE_TAG "$DEFAULT_CHANNEL"
+  fi
+  if [ "$VARIANT" = console ]; then
+    if [ -n "$in_port" ]; then
+      env_set "$DIR/.env" SDR_DOA_PORT "$in_port"
+    elif [ -z "$(env_get "$DIR/.env" SDR_DOA_PORT)" ]; then
+      env_set "$DIR/.env" SDR_DOA_PORT "$DEFAULT_PORT"
+    fi
+  fi
+  chmod 600 "$DIR/.env"
+  read_env
+  if [ "$VARIANT" = agent ]; then
+    agent_setup "$in_config" "$in_share" "$in_user"
+  else
+    console_compose | write_file "$DIR/compose.yml" 0644
+  fi
+  log "wrote $DIR/compose.yml and $DIR/.env (channel $CHANNEL)"
+  warn_dollars
+  install_self
+
+  in_rc=0
+  run_update 0 1 || in_rc=$?
+  if [ "$in_rc" != 0 ]; then
+    say ""
+    say "The install did not finish. Look at: cd $DIR && $COMPOSE_HINT logs $SERVICE"
+    exit "$in_rc"
+  fi
+  say ""
+  # .env is root's (0600) in a root install, so its commands need sudo.
+  if is_root; then in_sudo='sudo '; else in_sudo=; fi
+  if [ "$VARIANT" = console ]; then
+    say "The Ground Console runs from $REF."
+    say "Open http://127.0.0.1:$PORT/ in Chromium or Chrome on this computer."
+    say "Set the admin password (default 123456 until you do):"
+    say "  cd $DIR"
+    say "  $in_sudo$COMPOSE_HINT exec console sdr-doa-set-admin-password"
+    say "  $in_sudo$COMPOSE_HINT restart console"
+  else
+    say "The RDF-SDR agent runs from $REF; settings in $DIR/agent.env."
+    say "Logs: cd $DIR && $in_sudo$COMPOSE_HINT logs -f agent"
+  fi
+  if [ "$in_auto" = 1 ]; then
+    if [ "$in_force" = 1 ]; then auto_update_on "${in_time:-$DEFAULT_TIME}" force; else auto_update_on "${in_time:-$DEFAULT_TIME}"; fi
+  elif is_root; then
+    say "Update: sudo $PROG update --dir $DIR; daily: sudo $PROG auto-update on --dir $DIR"
+  else
+    say "Update: $PROG update --dir $DIR; daily: $PROG auto-update on --dir $DIR (prints a crontab line)"
+  fi
+}
+
+cmd_update() {
+  up_dir=
+  up_check=0
+  up_auto=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --dir=*) up_dir=${1#*=} ;;
+      --dir) need_value "$@"; up_dir=$2; shift ;;
+      --check) up_check=1 ;;
+      --auto) up_auto=1 ;;
+      --yes | -y) UPDATE_YES=1 ;;
+      -h | --help) usage; exit 0 ;;
+      *) usage_error "update does not take '$1'" ;;
+    esac
+    shift
+  done
+  if [ "$up_auto" = 1 ] && [ "$UPDATE_YES" = 1 ]; then usage_error "--auto and --yes do not go together"; fi
+  resolve_dir "$up_dir"
+  load_install
+  check_docker
+  if [ "$up_check" = 1 ]; then
+    warn_dollars say
+    run_check
+    return 0
+  fi
+  detect_compose
+  take_lock
+  ACTION=update
+  [ "$up_auto" = 0 ] || ACTION='update --auto'
+  warn_dollars
+  up_rc=0
+  run_update "$up_auto" 0 || up_rc=$?
+  exit "$up_rc"
+}
+
+cmd_rollback() {
+  rb_dir=
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --dir=*) rb_dir=${1#*=} ;;
+      --dir) need_value "$@"; rb_dir=$2; shift ;;
+      -h | --help) usage; exit 0 ;;
+      *) usage_error "rollback does not take '$1'" ;;
+    esac
+    shift
+  done
+  resolve_dir "$rb_dir"
+  load_install
+  check_docker
+  detect_compose
+  take_lock
+  ACTION=rollback
+  rb_prev=$(image_id "$PREV_REF")
+  if [ -z "$rb_prev" ]; then
+    log "FAILED: no previous image ($PREV_REF); a rollback needs one successful update first"
+    exit 1
+  fi
+  find_current
+  if [ "$rb_prev" = "$CURRENT" ]; then
+    log "$SERVICE already runs the previous image $(describe "$rb_prev")"
+    exit 0
+  fi
+  log "going back from $(describe "$CURRENT") to $(describe "$rb_prev")"
+  "$DOCKER" tag "$rb_prev" "$REF" || die "cannot tag $(short_id "$rb_prev") as $REF"
+  if [ -n "$CURRENT" ]; then "$DOCKER" tag "$CURRENT" "$PREV_REF" || true; fi
+  if compose_up never && wait_healthy "$rb_prev"; then
+    log "OK: $SERVICE runs $(describe "$rb_prev") and is healthy"
+    if [ -n "$CURRENT" ]; then
+      mark_bad "$CURRENT"
+      log "auto-update skips $(short_id "$CURRENT") until a different image is published; '$PROG update' installs it again"
+    fi
+    exit 0
+  fi
+  log "FAILED: $(describe "$rb_prev"): $REASON"
+  if [ -n "$CURRENT" ]; then
+    "$DOCKER" tag "$CURRENT" "$REF" || true
+    "$DOCKER" tag "$rb_prev" "$PREV_REF" || true
+    if compose_up never && wait_healthy "$CURRENT"; then
+      log "back on $(describe "$CURRENT")"
+    else
+      log "FAILED to start $(describe "$CURRENT") again: $REASON; see '$COMPOSE_HINT logs $SERVICE' in $DIR"
+    fi
+  fi
+  exit 1
+}
+
+cmd_auto_update() {
+  au_action=${1:-}
+  [ $# -eq 0 ] || shift
+  au_dir=
+  au_time=
+  au_force=
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --dir=*) au_dir=${1#*=} ;;
+      --dir) need_value "$@"; au_dir=$2; shift ;;
+      --time=*) au_time=${1#*=} ;;
+      --time) need_value "$@"; au_time=$2; shift ;;
+      --force) au_force=force ;;
+      -h | --help) usage; exit 0 ;;
+      *) usage_error "auto-update does not take '$1'" ;;
+    esac
+    shift
+  done
+  [ -z "$au_time" ] || check_time "$au_time"
+  if [ "$au_action" != on ] && [ -n "$au_time$au_force" ]; then usage_error "--time and --force are options of auto-update on"; fi
+  case $au_action in
+    on)
+      resolve_dir "$au_dir"
+      load_install
+      auto_update_on "${au_time:-$DEFAULT_TIME}" "$au_force"
+      ;;
+    off)
+      auto_update_off
+      ;;
+    status)
+      if [ -n "$au_dir" ]; then resolve_dir "$au_dir"; fi
+      say "auto-update: $(auto_update_state)"
+      ;;
+    *) usage_error "auto-update needs on, off or status" ;;
+  esac
+}
+
+cmd_status() {
+  st_dir=
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --dir=*) st_dir=${1#*=} ;;
+      --dir) need_value "$@"; st_dir=$2; shift ;;
+      -h | --help) usage; exit 0 ;;
+      *) usage_error "status does not take '$1'" ;;
+    esac
+    shift
+  done
+  resolve_dir "$st_dir"
+  load_install
+  say "install:     $DIR ($VARIANT, compose project $PROJECT)"
+  say "image:       $REF"
+  if command -v "$DOCKER" >/dev/null 2>&1 && "$DOCKER" info >/dev/null 2>&1; then
+    find_current
+    st_tag=$(image_id "$REF")
+    if [ -n "$st_tag" ]; then
+      st_version=$(image_version "$st_tag")
+      say "image ID:    $st_tag${st_version:+, version $st_version}"
+    else
+      say "image ID:    none (not pulled)"
+    fi
+    if [ -n "$CID" ]; then
+      st_info=$(container_info "$CID" || true)
+      IFS='|' read -r st_status st_health st_restarts st_exit st_image <<EOF
+$st_info
+EOF
+      st_line="$st_status, health $st_health, restarts $st_restarts"
+      [ "$st_status" = running ] || st_line="$st_line, exit code $st_exit"
+      say "container:   $st_line, image $(describe "$st_image")"
+    else
+      say "container:   none"
+    fi
+    st_prev=$(image_id "$PREV_REF")
+    if [ -n "$st_prev" ]; then say "previous:    $(describe "$st_prev") ($PREV_REF)"; else say "previous:    none"; fi
+  else
+    say "docker:      the daemon is not reachable"
+  fi
+  if [ -f "$BAD_FILE" ] && [ -s "$BAD_FILE" ]; then
+    say "skipped:     $(wc -l <"$BAD_FILE" | tr -d ' ') image(s) that failed their health check ($BAD_FILE)"
+  fi
+  st_since=$(cat "$BUSY_FILE" 2>/dev/null || true)
+  case $st_since in
+    '' | *[!0-9]*) ;;
+    *) say "deferred:    since $(date -u -d "@$st_since" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf '%s s after the epoch' "$st_since") (the Receiver was busy at each run)" ;;
+  esac
+  say "auto-update: $(auto_update_state)"
+  if [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
+    say "last update: $(tail -n 1 "$LOG_FILE")"
+  else
+    say "last update: none"
+  fi
+  if [ "$VARIANT" = console ]; then say "URL:         http://127.0.0.1:$PORT/"; fi
+  warn_dollars say
+}
+
+check_number SDR_DOA_HEALTH_TIMEOUT "$HEALTH_TIMEOUT"
+check_number SDR_DOA_HEALTH_INTERVAL "$HEALTH_INTERVAL"
+check_number SDR_DOA_AGENT_SETTLE "$AGENT_SETTLE"
+
+command=${1:-help}
+[ $# -eq 0 ] || shift
+case $command in
+  install) cmd_install "$@" ;;
+  update) cmd_update "$@" ;;
+  rollback) cmd_rollback "$@" ;;
+  auto-update) cmd_auto_update "$@" ;;
+  status) cmd_status "$@" ;;
+  help | -h | --help) usage ;;
+  *) usage_error "unknown command '$command'" ;;
+esac

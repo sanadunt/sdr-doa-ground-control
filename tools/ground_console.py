@@ -20,7 +20,14 @@ The console keeps a narrow boundary:
 * ``/api/tiles/<source>/<z>/<x>/<y>`` serves the Dashboard basemap from a
   disk cache (``--tile-cache-dir``) and fetches a missing or stale tile from
   the fixed upstreams in ``tile_cache.py``, so the browser never contacts a
-  tile provider and the map keeps every area it has shown while offline.
+  tile provider and the map keeps every area it has shown while offline;
+* ``/api/receiver/*`` keeps the Receiver's records under ``--data-dir``
+  (``receiver_record_store.py``), with the Records archive routes under
+  ``/api/receiver/archive/`` (``receiver_archive.py``: calendar, time line,
+  table, previews, downloads, ZIP exports, delete) and a retention pass that
+  runs in its own thread. Every Receiver GET must come from this console's
+  own pages (Sec-Fetch-Site and a loopback Host on this port); every POST
+  and DELETE needs the same-origin loopback Origin.
 
 Admin login uses ``SDR_DOA_ADMIN_PASSWORD`` from the environment or the
 ``--env-file`` (default: the repository ``.env``). When the variable is absent
@@ -55,12 +62,15 @@ import math
 import os
 import re
 import secrets
+import signal
+import socket
 import sqlite3
 import tempfile
 import threading
 import time
 import uuid
 import zlib
+from datetime import timedelta, timezone
 from html import escape
 from http import HTTPStatus
 from http.cookies import SimpleCookie
@@ -72,7 +82,16 @@ from urllib.parse import parse_qs, urlsplit
 import sdr_doa_mqtt
 from config_command_tracker import ConfigCommandTracker, MonitorPublishError
 from sdr_doa_collector import CollectorError, DEFAULT_ALLOWED_DATA_HOSTS, NodeProgressTracker, collect
-from receiver_record_store import DEFAULT_DATA_DIR, ReceiverConflictError, ReceiverRecordStore
+import receiver_archive as ra
+from receiver_archive import ArchiveError
+from receiver_record_store import (
+    DEFAULT_DATA_DIR,
+    STALE_RECORDING_SECONDS,
+    ReceiverConflictError,
+    ReceiverRecordStore,
+    _utc_offset_minutes,
+    resolve_time_zone,
+)
 from preferences_store import MAX_PREFERENCES_REQUEST_BYTES, PreferencesRejected, PreferencesStore
 from tile_cache import (
     BROWSER_MAX_AGE_S,
@@ -2214,10 +2233,302 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             message = str(exc) or exc.__class__.__name__
         self._send_json({"error": message}, status)
 
-    def _receiver_get(self, parsed: Any) -> bool:
+    def _receiver_read_is_allowed(self) -> bool:
+        """Receiver GETs come from this console's own pages only.
+
+        Sec-Fetch-Site must be absent (curl, http.client, older browsers),
+        "none" (a typed URL) or "same-origin", as for /api/tiles; another site
+        or another localhost port (same-site) is refused. The Host must be a
+        loopback name on this console's port, which also stops DNS rebinding:
+        a rebinding page sends its own host name.
+        """
+        site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if site not in ("", "none", "same-origin"):
+            return False
+        hosts = self.headers.get_all("Host") or []
+        if len(hosts) != 1:
+            return False
+        host = hosts[0].strip()
+        if not host or len(host) > 255:
+            return False
+        try:
+            target = urlsplit(f"http://{host}")
+            port = target.port or 80
+        except ValueError:
+            return False
+        if target.username is not None or target.password is not None or target.path or target.query or target.fragment:
+            return False
+        hostname = (target.hostname or "").lower().rstrip(".")
+        return bool(hostname) and _is_loopback_bind(hostname) and port == self.console_server.server_address[1]
+
+    def _send_archive_error(self, status: int, code: str, message: str, **extra: Any) -> None:
+        # Archive codes go through this helper, never the Kontrol error helper,
+        # so the config-patch error-code contract does not count them.
+        self._send_json({**extra, "ok": False, "code": code, "error": message}, status)
+
+    def _archive_failure(self, exc: Exception) -> None:
+        """Archive and extended settings routes: ArchiveError, then ValueError, KeyError, storage errors."""
+        if isinstance(exc, ArchiveError):
+            self._send_archive_error(exc.status, exc.code, exc.message, **exc.extra)
+        elif isinstance(exc, ValueError):
+            message = str(exc) or ra.ARCHIVE_ERROR_MESSAGES[ra.ARCHIVE_INVALID_REQUEST]
+            self._send_archive_error(HTTPStatus.BAD_REQUEST, ra.ARCHIVE_INVALID_REQUEST, message[:200])
+        elif isinstance(exc, KeyError):
+            self._send_archive_error(HTTPStatus.NOT_FOUND, ra.ARCHIVE_NOT_FOUND, ra.ARCHIVE_ERROR_MESSAGES[ra.ARCHIVE_NOT_FOUND])
+        else:
+            self._send_archive_error(
+                HTTPStatus.INTERNAL_SERVER_ERROR, ra.ARCHIVE_STORAGE_ERROR, ra.ARCHIVE_ERROR_MESSAGES[ra.ARCHIVE_STORAGE_ERROR],
+            )
+
+    def _stream_body(self, write: Callable[[], None]) -> None:
+        """Streaming rule: called right after send_response and the headers are queued.
+
+        A stalled or paused client is cut off by the write timeout, and once
+        the status line has gone out no exception may produce a second
+        response: the connection is closed and one line is logged.
+        """
+        try:
+            self.connection.settimeout(ra.STREAM_WRITE_TIMEOUT_S)
+            write()
+        except Exception as exc:  # noqa: BLE001 - nothing may follow a started body
+            self.close_connection = True
+            print(f"[ground-console] receiver download aborted: {type(exc).__name__}", flush=True)
+
+    @staticmethod
+    def _archive_zone(time_zone: Any, utc_offset_minutes: Any) -> Tuple[Any, str, bool]:
+        """(tzinfo, name, fallback) for file names; UTC without a zone."""
+        if time_zone is None or time_zone == "":
+            if utc_offset_minutes in (None, ""):
+                return timezone.utc, "UTC", False
+            # Only the browser's current offset: a fixed zone, marked as a fallback.
+            minutes = _utc_offset_minutes(utc_offset_minutes)
+            return timezone(timedelta(minutes=minutes)), "UTC", True
+        zone, fallback = resolve_time_zone(time_zone, utc_offset_minutes)
+        return zone, str(time_zone), fallback
+
+    def _archive_get(self, parsed: Any) -> None:
         path = parsed.path
         store = self.console_server.receiver_store
         query = parse_qs(parsed.query, keep_blank_values=False)
+
+        def first(key: str) -> Optional[str]:
+            values = query.get(key)
+            return values[0] if values else None
+
+        parts = path.strip("/").split("/")[3:]
+        if parts == ["facets"]:
+            self._send_json(store.archive_facets())
+        elif parts == ["calendar"]:
+            bounds = ra.parse_calendar_bounds(first("bounds"))
+            self._send_json(store.archive_calendar(bounds, ra.parse_calendar_type(first("type"))))
+        elif parts == ["timeline"]:
+            from_ms, to_ms, archive_filter = ra.parse_timeline_query(query)
+            self._send_json(store.archive_timeline(from_ms, to_ms, archive_filter))
+        elif parts == ["items"]:
+            archive_filter = ra.parse_filter_query(query)
+            sort, order, offset, limit = ra.parse_paging_query(query)
+            self._send_json(store.archive_items(archive_filter, sort, order, offset, limit))
+        elif parts == ["retention-preview"]:
+            self._send_json(store.retention_preview(ra.parse_retention_query(first("days"))))
+        elif len(parts) == 3 and parts[0] == "scans" and parts[2] == "preview":
+            self._send_json(store.archive_scan_preview(ra.parse_item_id(parts[1])))
+        elif len(parts) == 3 and parts[0] == "audio" and parts[2] == "download":
+            self._archive_audio_download(ra.parse_item_id(parts[1]), first("time_zone"), first("utc_offset_minutes"))
+        elif len(parts) == 3 and parts[0] == "scans" and parts[2] == "download":
+            self._archive_scan_download(ra.parse_item_id(parts[1]), first("time_zone"), first("utc_offset_minutes"))
+        elif len(parts) == 2 and parts[0] == "exports":
+            self._archive_export_download(parts[1])
+        else:
+            raise ArchiveError(HTTPStatus.NOT_FOUND, ra.ARCHIVE_NOT_FOUND, "unknown Receiver archive route")
+
+    def _archive_audio_download(self, segment_id: str, time_zone: Any, utc_offset_minutes: Any) -> None:
+        """GET archive/audio/<id>/download: the stored .webm as an attachment, never a Range."""
+        store = self.console_server.receiver_store
+        zone, _, _ = self._archive_zone(time_zone, utc_offset_minutes)
+        item = store.archive_audio_entry(segment_id)
+        if not item["downloadable"]:
+            raise ArchiveError(HTTPStatus.NOT_FOUND, ra.ARCHIVE_FILE_MISSING)
+        try:
+            audio_path, _content_type = store.get_segment_audio(segment_id)
+            source = audio_path.open("rb")
+        except (KeyError, OSError) as exc:
+            raise ArchiveError(HTTPStatus.NOT_FOUND, ra.ARCHIVE_FILE_MISSING) from exc
+        with source:
+            size = os.fstat(source.fileno()).st_size
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "audio/webm")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition", f'attachment; filename="{ra.audio_download_name(item, zone)}"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+
+            def write() -> None:
+                self.end_headers()
+                remaining = size
+                while remaining > 0:
+                    chunk = source.read(min(ra.STREAM_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+
+            self._stream_body(write)
+
+    def _archive_scan_download(self, scan_id: str, time_zone: Any, utc_offset_minutes: Any) -> None:
+        store = self.console_server.receiver_store
+        zone, zone_name, fallback = self._archive_zone(time_zone, utc_offset_minutes)
+        scan = store.archive_scan_entry(scan_id)
+        if not scan["downloadable"]:
+            raise ArchiveError(HTTPStatus.NOT_FOUND, ra.ARCHIVE_NOT_FOUND)
+        slots = self.console_server.archive_export_slots
+        if not slots.acquire(blocking=False):
+            raise ArchiveError(HTTPStatus.SERVICE_UNAVAILABLE, ra.ARCHIVE_EXPORT_BUSY)
+        try:
+            self._stream_zip((("scan", scan_id),), zone, zone_name, fallback, ra.scan_download_name(scan, zone), ())
+        finally:
+            slots.release()
+
+    def _archive_export_download(self, token: str) -> None:
+        """GET archive/exports/<id>: a prepared ZIP, once; the slot is taken before the token."""
+        if not ra.EXPORT_ID_RE.fullmatch(token):
+            raise ArchiveError(HTTPStatus.NOT_FOUND, ra.ARCHIVE_NOT_FOUND, "this download expired or was used; prepare it again")
+        slots = self.console_server.archive_export_slots
+        if not slots.acquire(blocking=False):
+            raise ArchiveError(HTTPStatus.SERVICE_UNAVAILABLE, ra.ARCHIVE_EXPORT_BUSY)
+        try:
+            export = self.console_server.archive_exports.take(token)
+            if export is None:
+                raise ArchiveError(HTTPStatus.NOT_FOUND, ra.ARCHIVE_NOT_FOUND, "this download expired or was used; prepare it again")
+            self._stream_zip(export.entries, export.zone, export.time_zone_name, export.time_zone_fallback,
+                             export.filename, export.missing)
+        finally:
+            slots.release()
+
+    def _stream_zip(self, entries: Sequence[Tuple[str, str]], zone: Any, zone_name: str, fallback: bool,
+                    filename: str, missing: Sequence[Dict[str, Any]]) -> None:
+        """A streamed ZIP. HTTP/1.1 gets chunked framing on this handler only, then the connection closes."""
+        chunked = self.request_version == "HTTP/1.1"
+        if chunked:
+            # The class stays HTTP/1.0; this response alone is HTTP/1.1, so a
+            # broken stream (no final 0-chunk) shows as a failed download.
+            self.protocol_version = "HTTP/1.1"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if chunked:
+            self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Connection", "close")
+        server = self.console_server
+
+        def write() -> None:
+            self.end_headers()
+            writer = ra.ChunkedWriter(self.wfile, chunked=chunked)
+            try:
+                ra.write_archive_zip(
+                    server.receiver_store, entries, writer, zone,
+                    time_zone_name=zone_name, time_zone_fallback=fallback, console_version=server.version,
+                    created_ms=server.receiver_store._now_ms(), missing=missing,
+                )
+                writer.finish()
+            except BaseException:
+                writer.abort()
+                raise
+
+        self._stream_body(write)
+
+    def _archive_post(self, parsed: Any) -> None:
+        server = self.console_server
+        store = server.receiver_store
+        parts = parsed.path.strip("/").split("/")[3:]
+        if parts == ["exports"]:
+            payload = self._read_json(ra.SELECTION_BODY_MAX_BYTES)
+            selection = ra.parse_selection(payload, ra.EXPORT_MAX_ITEMS)
+            zone, zone_name, fallback = self._archive_zone(selection.time_zone, selection.utc_offset_minutes)
+            rows, missing, total = store.resolve_selection(selection, ra.EXPORT_MAX_ITEMS, downloadable_only=True)
+            if selection.items is not None and total == 0:
+                raise ArchiveError(HTTPStatus.NOT_FOUND, ra.ARCHIVE_NOT_FOUND)
+            if not rows:
+                raise ArchiveError(HTTPStatus.NOT_FOUND, ra.ARCHIVE_FILE_MISSING, "nothing in this selection can be downloaded")
+            estimate = sum(int(row["estimated_bytes"]) for row in rows)
+            if estimate > ra.EXPORT_MAX_BYTES:
+                raise ArchiveError(
+                    HTTPStatus.REQUEST_ENTITY_TOO_LARGE, ra.ARCHIVE_EXPORT_TOO_LARGE,
+                    f"the selection is estimated above {ra.EXPORT_MAX_BYTES} bytes",
+                    estimated_bytes=estimate, limit_bytes=ra.EXPORT_MAX_BYTES,
+                )
+            # Advisory: the download itself takes the slot.
+            if not server.archive_export_slots.acquire(blocking=False):
+                raise ArchiveError(HTTPStatus.SERVICE_UNAVAILABLE, ra.ARCHIVE_EXPORT_BUSY)
+            server.archive_export_slots.release()
+            filename = ra.selection_download_name(store._now_ms(), zone)
+            token = server.archive_exports.create(ra.PendingExport(
+                entries=tuple((row["kind"], row["id"]) for row in rows), zone=zone, time_zone_name=zone_name,
+                time_zone_fallback=fallback, filename=filename, missing=tuple(missing),
+            ))
+            missing_count = len(missing) if selection.items is not None else total - len(rows)
+            self._send_json({
+                "export_id": token,
+                "url": f"/api/receiver/archive/exports/{token}",
+                "filename": filename,
+                "count": {
+                    "audio": sum(1 for row in rows if row["kind"] == "audio"),
+                    "scan": sum(1 for row in rows if row["kind"] == "scan"),
+                },
+                "missing": missing_count,
+                "estimated_bytes": estimate,
+                "expires_in_s": int(server.archive_exports.ttl_s),
+            }, HTTPStatus.CREATED)
+        elif parts == ["delete"]:
+            payload = self._read_json(ra.SELECTION_BODY_MAX_BYTES)
+            selection = ra.parse_selection(payload, ra.DELETE_MAX_ITEMS)
+            if selection.time_zone is not None or selection.utc_offset_minutes is not None:
+                self._archive_zone(selection.time_zone, selection.utc_offset_minutes)
+            rows, missing, _ = store.resolve_selection(selection, ra.DELETE_MAX_ITEMS)
+            entries = [(row["kind"], row["id"]) for row in rows] + [(item["kind"], item["id"]) for item in missing]
+            self._send_json(store.archive_delete(entries))
+        else:
+            raise ArchiveError(HTTPStatus.NOT_FOUND, ra.ARCHIVE_NOT_FOUND, "unknown Receiver archive route")
+
+    def _receiver_settings_post(self) -> None:
+        """POST settings: a confirmed new retention value runs one pass here, with a time budget."""
+        server = self.console_server
+        store = server.receiver_store
+        payload = self._read_json(ra.SETTINGS_BODY_MAX_BYTES)
+        try:
+            settings, changed = store.save_settings(payload)
+        except ArchiveError as exc:
+            self._archive_failure(exc)
+            return
+        if changed:
+            result = store.apply_retention(budget_s=ra.RETENTION_SYNC_BUDGET_S)
+            settings = store.get_settings()
+            if result is None:
+                server.wake_retention()
+                settings["retention_running"] = True
+            else:
+                if result.get("more"):
+                    server.wake_retention()
+                    settings["retention_running"] = True
+                settings["retention_result"] = result
+        self._send_json(settings)
+
+    def _receiver_get(self, parsed: Any) -> bool:
+        if not self._receiver_read_is_allowed():
+            self._send_archive_error(HTTPStatus.FORBIDDEN, ra.ORIGIN_REJECTED, ra.READ_REJECTED_MESSAGE)
+            return True
+        path = parsed.path
+        store = self.console_server.receiver_store
+        query = parse_qs(parsed.query, keep_blank_values=False)
+        if path.startswith("/api/receiver/archive/"):
+            try:
+                self._archive_get(parsed)
+            except (BrokenPipeError, ConnectionResetError):
+                raise
+            except (ArchiveError, ValueError, KeyError, OSError, sqlite3.Error, zlib.error) as exc:
+                self._archive_failure(exc)
+            return True
         try:
             if path == "/api/receiver/settings":
                 self._send_json(store.get_settings())
@@ -2304,24 +2615,33 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                         return True
                     start, end = byte_range if byte_range is not None else (0, size - 1)
                     content_length = max(0, end - start + 1)
-                    self.send_response(HTTPStatus.PARTIAL_CONTENT if byte_range is not None else HTTPStatus.OK)
-                    self.send_header("Content-Type", content_type)
-                    self.send_header("Content-Length", str(content_length))
-                    self.send_header("Accept-Ranges", "bytes")
-                    if byte_range is not None:
-                        self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-                    self.send_header("Cache-Control", "no-store")
-                    self.send_header("X-Content-Type-Options", "nosniff")
-                    self.end_headers()
-                    with audio_path.open("rb") as source:
-                        source.seek(start)
-                        remaining = content_length
-                        while remaining:
-                            chunk = source.read(min(64 * 1024, remaining))
-                            if not chunk:
-                                break
-                            self.wfile.write(chunk)
-                            remaining -= len(chunk)
+                    try:
+                        source = audio_path.open("rb")
+                    except OSError as exc:
+                        raise KeyError("audio file not found") from exc
+                    with source:
+                        self.send_response(HTTPStatus.PARTIAL_CONTENT if byte_range is not None else HTTPStatus.OK)
+                        self.send_header("Content-Type", content_type)
+                        self.send_header("Content-Length", str(content_length))
+                        self.send_header("Accept-Ranges", "bytes")
+                        if byte_range is not None:
+                            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+                        self.send_header("Cache-Control", "no-store")
+                        self.send_header("X-Content-Type-Options", "nosniff")
+
+                        def write() -> None:
+                            # A paused <audio> reconnects with Range after the write timeout.
+                            self.end_headers()
+                            source.seek(start)
+                            remaining = content_length
+                            while remaining:
+                                chunk = source.read(min(ra.STREAM_CHUNK_BYTES, remaining))
+                                if not chunk:
+                                    break
+                                self.wfile.write(chunk)
+                                remaining -= len(chunk)
+
+                        self._stream_body(write)
                 else:
                     return False
             return True
@@ -2336,15 +2656,24 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def _receiver_post(self, parsed: Any) -> bool:
         path = parsed.path
         store = self.console_server.receiver_store
+        activity = self.console_server.receiver_activity
+        if path.startswith("/api/receiver/archive/"):
+            try:
+                self._archive_post(parsed)
+            except (BrokenPipeError, ConnectionResetError):
+                raise
+            except (ArchiveError, ValueError, KeyError, OSError, sqlite3.Error, zlib.error) as exc:
+                self._archive_failure(exc)
+            return True
         try:
             if path == "/api/receiver/settings":
-                payload = self._read_json(4096)
-                self._send_json(store.update_settings(payload))
+                self._receiver_settings_post()
             elif path == "/api/receiver/scans":
                 payload = self._read_json(64 * 1024)
                 if not isinstance(payload, dict) or not {"source", "config", "archive"}.issubset(payload):
                     raise ValueError("scan body requires source, config, and archive")
                 result = store.create_scan(payload["source"], payload["config"], payload["archive"])
+                activity.wrote(opened=f"scan:{result['id']}")
                 self._send_json(result, HTTPStatus.CREATED)
             elif path == "/api/receiver/marker-sets":
                 payload = self._read_json(256 * 1024)
@@ -2370,38 +2699,51 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     payload = self._read_json(2 * 1024 * 1024)
                     if not isinstance(payload, dict) or not isinstance(payload.get("candidates"), list):
                         raise ValueError("candidates must be an array")
-                    self._send_json({"upserted": store.upsert_candidates(parts[3], payload["candidates"])})
+                    upserted = store.upsert_candidates(parts[3], payload["candidates"])
+                    activity.wrote()
+                    self._send_json({"upserted": upserted})
                 elif len(parts) == 5 and parts[:3] == ["api", "receiver", "scans"] and parts[4] == "trace":
                     sweep = _query_int(parse_qs(parsed.query), "sweep", None)
                     if sweep is None:
                         raise ValueError("sweep query parameter is required")
                     raw = self._read_binary(2048)
                     frame_id = store.add_trace(parts[3], sweep, raw)
+                    activity.wrote()
                     self._send_json({"stored": frame_id is not None, "id": frame_id})
                 elif len(parts) == 5 and parts[:3] == ["api", "receiver", "scans"] and parts[4] == "finish":
                     payload = self._read_json(4096)
                     if not isinstance(payload, dict):
                         raise ValueError("request must be a JSON object")
-                    self._send_json(store.finish_scan(parts[3], payload.get("status"), payload.get("trace_upload_failures")))
+                    finished = store.finish_scan(parts[3], payload.get("status"), payload.get("trace_upload_failures"))
+                    activity.wrote(closed=f"scan:{parts[3]}")
+                    self._send_json(finished)
                 elif path == "/api/receiver/audio-sessions":
                     self._read_optional_json()
-                    self._send_json({"id": store.create_audio_session()["id"]}, HTTPStatus.CREATED)
+                    session_id = store.create_audio_session()["id"]
+                    activity.wrote(opened=f"audio:{session_id}")
+                    self._send_json({"id": session_id}, HTTPStatus.CREATED)
                 elif len(parts) == 5 and parts[:3] == ["api", "receiver", "audio-sessions"] and parts[4] == "segments":
                     payload = self._read_json(16 * 1024)
-                    self._send_json({"id": store.create_audio_segment(parts[3], payload)["id"]}, HTTPStatus.CREATED)
+                    segment_id = store.create_audio_segment(parts[3], payload)["id"]
+                    activity.wrote()
+                    self._send_json({"id": segment_id}, HTTPStatus.CREATED)
                 elif len(parts) == 5 and parts[:3] == ["api", "receiver", "audio-sessions"] and parts[4] == "finish":
                     payload = self._read_optional_json()
                     if not isinstance(payload, dict):
                         raise ValueError("request must be a JSON object")
-                    self._send_json(store.finish_audio_session(
-                        parts[3], payload.get("finalize_open_segments", False),
-                    ))
+                    finished = store.finish_audio_session(parts[3], payload.get("finalize_open_segments", False))
+                    activity.wrote(closed=f"audio:{parts[3]}")
+                    self._send_json(finished)
                 elif len(parts) == 5 and parts[:3] == ["api", "receiver", "audio-segments"] and parts[4] == "chunk":
                     raw = self._read_binary(1024 * 1024)
-                    self._send_json(store.append_segment_audio(parts[3], raw))
+                    appended = store.append_segment_audio(parts[3], raw)
+                    activity.wrote()
+                    self._send_json(appended)
                 elif len(parts) == 5 and parts[:3] == ["api", "receiver", "audio-segments"] and parts[4] == "finish":
                     payload = self._read_json(4096)
-                    self._send_json(store.finish_segment(parts[3], payload))
+                    finished = store.finish_segment(parts[3], payload)
+                    activity.wrote()
+                    self._send_json(finished)
                 else:
                     return False
             return True
@@ -2639,8 +2981,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/health":
             # For container and service health checks: no Data Out read, no
-            # broker call, no file access.
-            self._send_json({"ok": True, "version": self.console_server.version})
+            # broker call, no file access. receiver_busy tells the updaters to
+            # wait while the Receiver records or archives a scan.
+            self._send_json({
+                "ok": True,
+                "version": self.console_server.version,
+                "receiver_busy": self.console_server.receiver_activity.busy(),
+            })
             return
         if parsed.path == "/api/preferences":
             self._send_json(self.console_server.preferences.snapshot())
@@ -2781,7 +3128,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
         if parsed.path.startswith("/api/receiver/") and not self._receiver_mutation_origin_is_valid():
-            self._send_json({"error": "Receiver mutation requires a same-origin loopback request"}, HTTPStatus.FORBIDDEN)
+            self._send_archive_error(HTTPStatus.FORBIDDEN, ra.ORIGIN_REJECTED, ra.MUTATION_REJECTED_MESSAGE)
             return
         if parsed.path.startswith("/api/receiver/") and self._receiver_post(parsed):
             return
@@ -2949,7 +3296,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
         if parsed.path.startswith("/api/receiver/") and not self._receiver_mutation_origin_is_valid():
-            self._send_json({"error": "Receiver mutation requires a same-origin loopback request"}, HTTPStatus.FORBIDDEN)
+            self._send_archive_error(HTTPStatus.FORBIDDEN, ra.ORIGIN_REJECTED, ra.MUTATION_REJECTED_MESSAGE)
             return
         if parsed.path.startswith("/api/receiver/") and self._receiver_delete(parsed):
             return
@@ -2961,6 +3308,43 @@ class _Flight:
         self.done = threading.Event()
         self.result: Any = None
         self.error: Optional[BaseException] = None
+
+
+# /api/health reports receiver_busy while the Receiver writes records, so the
+# updaters do not restart the console in the middle of a recording or scan:
+# any Receiver write in the last RECEIVER_BUSY_WRITE_S, or an audio session or
+# scan still open with a write in the store's stale window (after that a
+# restart would close it as Interrupted anyway).
+RECEIVER_BUSY_WRITE_S = 30.0
+RECEIVER_BUSY_OPEN_S = float(STALE_RECORDING_SECONDS)
+
+
+class ReceiverActivity:
+    """In-memory record of Receiver writes for /api/health; reads no file."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic):
+        self.clock = clock
+        self._lock = threading.Lock()
+        self._last_write: Optional[float] = None
+        self._open: Set[str] = set()
+
+    def wrote(self, opened: Optional[str] = None, closed: Optional[str] = None) -> None:
+        """A Receiver write; ``opened``/``closed`` name a session or scan that starts or ends with it."""
+        with self._lock:
+            self._last_write = self.clock()
+            if opened:
+                self._open.add(opened)
+            if closed:
+                self._open.discard(closed)
+
+    def busy(self) -> bool:
+        with self._lock:
+            if self._last_write is None:
+                return False
+            age = self.clock() - self._last_write
+            if age < RECEIVER_BUSY_WRITE_S:
+                return True
+            return bool(self._open) and age < RECEIVER_BUSY_OPEN_S
 
 
 class _SingleFlight:
@@ -3012,6 +3396,8 @@ class GroundConsoleServer(ThreadingHTTPServer):
         tile_cache_dir: Optional[Path] = None,
         tile_cache_max_mb: int = DEFAULT_TILE_CACHE_MAX_MB,
         tile_sources: Optional[Dict[str, TileSource]] = None,
+        retention_interval_s: float = ra.RETENTION_INTERVAL_S,
+        retention_start_delay_s: float = ra.RETENTION_START_DELAY_S,
     ):
         self.frontend_dir = Path(frontend_dir).resolve() if frontend_dir is not None else None
         if not _is_loopback_bind(address[0]):
@@ -3081,13 +3467,51 @@ class GroundConsoleServer(ThreadingHTTPServer):
         self.node_progress = NodeProgressTracker()
         self._snapshot_flights = _SingleFlight()
         self.receiver_store = ReceiverRecordStore(
-            receiver_data_dir if receiver_data_dir is not None else DEFAULT_DATA_DIR
+            receiver_data_dir if receiver_data_dir is not None else DEFAULT_DATA_DIR,
+            log=lambda message: print(message, flush=True),
         )
+        self.receiver_activity = ReceiverActivity()
+        # Prepared Records ZIPs (single use, 120 s) and the two stream slots
+        # shared by selection and single-scan ZIPs.
+        self.archive_exports = ra.ArchiveExports()
+        self.archive_export_slots = threading.BoundedSemaphore(ra.EXPORT_SLOTS)
+        self._retention_scheduler: Optional[ra.RetentionScheduler] = None
         super().__init__(address, ConsoleHandler)
+        # Only once the socket is bound: a failed bind leaves no thread. The
+        # first pass waits, so it never delays the first answer or the
+        # healthcheck, and a clock that NTP corrects right after boot is in use.
+        self._retention_scheduler = ra.RetentionScheduler(
+            self.run_retention,
+            interval_s=retention_interval_s,
+            start_delay_s=retention_start_delay_s,
+            log=lambda message: print(message, flush=True),
+        )
+        self._retention_scheduler.start()
+
+    def run_retention(self) -> Optional[Dict[str, Any]]:
+        """One background retention pass (no time budget beyond the per-pass item bound)."""
+        return self.receiver_store.apply_retention()
+
+    def wake_retention(self) -> None:
+        scheduler = self._retention_scheduler
+        if scheduler is not None:
+            scheduler.wake()
+
+    def stop_retention(self) -> None:
+        scheduler = getattr(self, "_retention_scheduler", None)
+        if scheduler is not None:
+            scheduler.stop()
 
     def server_close(self) -> None:
         try:
-            self.receiver_store.close()
+            # The scheduler stops before the store closes. TCPServer calls this
+            # on a failed bind too, before the scheduler exists.
+            scheduler = getattr(self, "_retention_scheduler", None)
+            if scheduler is not None:
+                scheduler.stop()
+            store = getattr(self, "receiver_store", None)
+            if store is not None:
+                store.close()
         finally:
             super().server_close()
 
@@ -3525,6 +3949,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             f"to the Raspberry; set your own SDR_DOA_ADMIN_PASSWORD in {env_path}.",
             flush=True,
         )
+    # docker stop and systemctl stop send SIGTERM. Python as PID 1 in the
+    # container would ignore it without a handler, and natively its default
+    # ends the process at once; both cut a Receiver write in half. A second
+    # SIGTERM during the stop is ignored.
+    def _terminate(signum: int, frame: Any) -> None:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        raise KeyboardInterrupt
+
+    previous_sigterm = signal.signal(signal.SIGTERM, _terminate)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -3532,7 +3965,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     finally:
         if server.mqtt_monitor is not None:
             server.mqtt_monitor.stop()
-        server.server_close()
+        server.stop_retention()
+        # Wait for a Receiver write in progress (an audio chunk is fsynced,
+        # then counted in the database) and let none start after it, so the
+        # stop never leaves a segment file longer than its metadata. Request
+        # threads are daemons and end with the process.
+        with server.receiver_store._lock:
+            server.server_close()
+        signal.signal(signal.SIGTERM, previous_sigterm)
     return 0
 
 

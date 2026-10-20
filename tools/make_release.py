@@ -6,10 +6,14 @@ Writes, in ``dist/release`` by default:
 * ``sdr-doa-ground-console-<VERSION>-linux.tar.gz``: the prebuilt frontend
   (``frontend/dist`` with the embedded Receiver), the console's runtime Python
   modules, the native installer, ``Dockerfile.release`` with its compose file,
-  ``QUICKSTART.md`` and the user manual PDF;
+  ``docker-compose.ghcr.yml``, the Docker host script
+  ``packaging/docker/sdr-doa-docker``, ``QUICKSTART.md`` and the user manual
+  PDF;
 * ``sdr-doa-rdf-sdr-agent-<VERSION>.tar.gz``: the edge agent's runtime
   modules, its installer and systemd unit, and ``Dockerfile.agent``;
-* ``SHA256SUMS`` for both, in ``sha256sum -c`` format.
+* ``sdr-doa-docker``: the Docker host script on its own (install, update and
+  roll back the GHCR images), a release asset next to the tarballs;
+* ``SHA256SUMS`` for the three, in ``sha256sum -c`` format.
 
 The runtime modules are the import closure of each entry point inside
 ``tools/``, so tests, fixtures and staging tools never ship. Every tree also
@@ -49,6 +53,9 @@ CONSOLE_ENTRY = "ground_console"
 AGENT_ENTRY = "sdr_doa_lan_agent"
 MANIFEST_NAME = "MANIFEST.sha256"
 CHECKSUMS_NAME = "SHA256SUMS"
+# The Docker host script: in the console tarball and a standalone asset.
+DOCKER_SCRIPT = "packaging/docker/sdr-doa-docker"
+DOCKER_SCRIPT_ASSET = "sdr-doa-docker"
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 # 1980-01-01, the earliest time every archive format can store.
 FALLBACK_EPOCH = 315532800
@@ -62,6 +69,7 @@ _SKIP_SUFFIXES = (".pyc", ".pyo")
 CONSOLE_APP_FILES = (
     ("packaging/console/requirements.txt", "packaging/console/requirements.txt", False),
     ("packaging/console/set_admin_password.py", "packaging/console/set_admin_password.py", True),
+    ("packaging/console/update_release.py", "packaging/console/update_release.py", True),
     ("packaging/docker/console-entrypoint.sh", "packaging/docker/console-entrypoint.sh", True),
     ("packaging/docker/healthcheck.py", "packaging/docker/healthcheck.py", False),
 )
@@ -74,6 +82,8 @@ CONSOLE_RELEASE_FILES = (
     ("packaging/console/sdr-doa-ground-console.svg", "packaging/console/sdr-doa-ground-console.svg", False),
     ("Dockerfile.release", "Dockerfile.release", False),
     ("docker-compose.yml", "docker-compose.release.yml", False),
+    ("docker-compose.ghcr.yml", "docker-compose.ghcr.yml", False),
+    (DOCKER_SCRIPT, DOCKER_SCRIPT, True),
     (".env.example", ".env.example", False),
     ("QUICKSTART.md", "QUICKSTART.md", False),
     (MANUAL_PDF, MANUAL_PDF, False),
@@ -346,6 +356,22 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def write_asset(source: Path, destination: Path, executable: bool = False) -> Path:
+    """Copy one standalone release asset, atomically, with a fixed mode."""
+    if not source.is_file():
+        raise ReleaseError(f"release input {source} is missing")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    try:
+        temporary.write_bytes(source.read_bytes())
+        temporary.chmod(0o755 if executable else 0o644)
+        os.replace(temporary, destination)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return destination
+
+
 def write_checksums(paths: Sequence[Path], destination: Path) -> Path:
     lines = "".join(f"{sha256_file(path)}  {path.name}\n" for path in sorted(paths, key=lambda item: item.name))
     temporary = destination.with_name(f".{destination.name}.tmp")
@@ -454,7 +480,7 @@ def build_release(
     with_wheels: bool = False,
     epoch: Optional[int] = None,
 ) -> List[Path]:
-    """Build both tarballs and SHA256SUMS; returns their paths."""
+    """Build both tarballs, the standalone Docker script and SHA256SUMS; returns their paths."""
     root = root.resolve()
     version = read_version(root)
     dist = (dist_dir or root / "frontend" / "dist").resolve()
@@ -474,12 +500,13 @@ def build_release(
         output_dir = output_dir.resolve()
         console_name = console_release_name(version)
         agent_name = agent_release_name(version)
-        tarballs = [
+        assets = [
             write_tarball(console, console_name, output_dir / f"{console_name}.tar.gz", mtime),
             write_tarball(agent, agent_name, output_dir / f"{agent_name}.tar.gz", mtime),
+            write_asset(root / DOCKER_SCRIPT, output_dir / DOCKER_SCRIPT_ASSET, executable=True),
         ]
-    checksums = write_checksums(tarballs, output_dir / CHECKSUMS_NAME)
-    return tarballs + [checksums]
+    checksums = write_checksums(assets, output_dir / CHECKSUMS_NAME)
+    return assets + [checksums]
 
 
 def _parser() -> argparse.ArgumentParser:

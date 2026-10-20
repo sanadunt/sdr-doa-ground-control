@@ -113,7 +113,7 @@ py -3 -m venv .venv
 .venv\Scripts\python.exe -m pip install --upgrade pip
 ```
 
-Seperti di macOS/Linux, monitor MQTT default membutuhkan `paho-mqtt`; tanpa paket ini console tetap berjalan dengan monitor berstatus ERROR. Python di Windows juga tidak membawa database zona waktu, jadi pasang `tzdata` agar filter tanggal dan jam di **Records** Receiver memakai zona waktu browser lengkap dengan aturan DST.
+Seperti di macOS/Linux, monitor MQTT default membutuhkan `paho-mqtt`; tanpa paket ini console tetap berjalan dengan monitor berstatus ERROR. Python di Windows juga tidak membawa database zona waktu. Kalender dan rentang waktu di **Rekaman** Receiver memakai batas hari dari browser sendiri, jadi tidak bergantung pada `tzdata`; paket ini hanya membuat jam lokal di nama file ZIP mengikuti zona waktu browser lengkap dengan aturan DST.
 
 PowerShell:
 
@@ -127,7 +127,7 @@ Command Prompt:
 .venv\Scripts\python.exe -m pip install paho-mqtt==2.1.0 tzdata
 ```
 
-Tanpa `tzdata`, Records tetap terbuka, tetapi filter memakai offset UTC browser saat ini dan label tanggal menandai "UTC offset".
+Tanpa `tzdata`, Rekaman tetap bekerja seperti biasa; hanya jam di nama file ZIP yang memakai offset UTC browser saat ini.
 
 Opsional, buat file environment lokal:
 
@@ -225,7 +225,7 @@ Pilih menu **Receiver** (tombol `2`) atau buka `http://127.0.0.1:8787/#/receiver
 - **Kapan Receiver dimuat.** Receiver tidak dimuat saat console dibuka, karena memuatnya langsung menyambungkan RadioSpectrum yang sudah diizinkan. Receiver dimuat saat halaman Receiver dibuka pertama kali, atau saat **Mulai** atau **Dengar** ditekan pertama kali di panel Spektrum Dashboard.
 - **Tetap berjalan saat pindah halaman.** Setelah Receiver dimuat, pindah ke halaman lain tidak menghentikan RX, scan, atau rekaman. Receiver berjalan tersembunyi sampai halaman console di-reload atau ditutup, dan tetap mengikuti perubahan tema dan bahasa. Reload console menghentikan sesi Receiver; audio yang sudah terekam tetap tersimpan.
 - **Rekaman aman saat reload atau crash.** Rekaman dan scan arsip ditutup saat halaman unload bila memungkinkan, atau oleh console setelah 2 menit tanpa aktivitas. Segmen seperti itu berstatus "Interrupted" dan tetap bisa diputar. Upload yang gagal menyimpan audio yang sudah masuk sebagai "Partly saved". Rekaman berlanjut di file atau sesi baru saat batas ukuran tercapai, setelah chunk hilang, atau setelah sample rate/FFT size berubah (ada pemberitahuan). Satu sesi armed yang tidak menerima audio selama 2 menit bisa terpecah menjadi beberapa sesi.
-- **Indikator rekaman.** Records menampilkan rekaman yang sedang berjalan ("recording in progress"), tab Listener menampilkan indikator `REC`, dan Spectrum meminta konfirmasi sebelum menghentikan rekaman yang berjalan.
+- **Indikator rekaman.** Di **Rekaman**, segmen yang sedang direkam berstatus `REC` dan pindai yang sedang berjalan `SCANNING`; keduanya ikut diperbarui setiap 10 detik selama tab terbuka. Tab Listener menampilkan indikator `REC`, dan Spectrum meminta konfirmasi sebelum menghentikan rekaman yang berjalan.
 - **Radio terputus.** Bila RadioSpectrum dicabut, atau transfer USB gagal saat RX, Receiver menghentikan RX dan scan, menutup rekaman yang berjalan (audio yang sudah masuk tetap ada), lalu menampilkan alert. Bila radio masih tersambung, pesannya meminta memeriksa kabel lalu menekan **Resume** atau menyambungkan ulang radio. Gangguan USB sesaat pun menghentikan listening sampai Resume ditekan.
 - **Sumber scan.** Sumber scan mengikuti radio yang tersambung. Sumber Simulation selalu menampilkan badge `SIMULATION` dan label di atas grafik. Pengaturan scan diingat antar kunjungan.
 - **Deteksi wide scan.** Sinyal lemah (SNR antara Detection SNR dan 16 dB di atas floor) baru masuk daftar setelah terlihat sekitar 6 sweep; sinyal 16 dB atau lebih di atas floor muncul di sweep pertama. Riwayat menyimpan paling banyak 1000 kandidat. Noise floor dan SNR mengacu ke median trace rata-rata, sehingga SNR terbaca sekitar 1,5 dB lebih rendah dari versi sebelumnya. Sinyal wideband (DAB, DVB-T, hingga sekitar 20 MHz) terdeteksi sebagai satu band. Grup puncak hanya menggabungkan kandidat yang band-nya bertumpuk atau bersentuhan.
@@ -235,8 +235,11 @@ Pilih menu **Receiver** (tombol `2`) atau buka `http://127.0.0.1:8787/#/receiver
 - **Waterfall dan arsip** menyimpan level hingga +60 dB. Arsip dan sesi lama tetap terbuka dengan batas 0 dB lamanya.
 - **Skala dB Listener.** Tab Listener (Dengar) punya panel **Skala dB**: Auto (bawaan) mengikuti bagian spektrum yang tampil, Manual memakai Minimum dan Maksimum dBFS (−160 s/d 60, selisih minimal 5 dB; berlaku saat Enter atau keluar dari kolom). Skala dipakai trace dan waterfall Listener, diingat bersama pengaturan Receiver, dan sama dengan Skala dB di dock Spektrum Dashboard. Pengaturan Receiver yang tersimpan sebelum panel ini ada terbuka dengan Auto. Waterfall Listener memakai skala baru untuk baris berikutnya; baris yang sudah tergambar tetap.
 - **Marker.** Dengan mouse, klik menambah marker dan `Ctrl+Z` (`⌘Z`) menghapus marker terakhir. Di layar sentuh, tap membaca level dan tahan untuk menambah marker. Menyimpan marker set dengan nama yang sudah ada meminta konfirmasi sebelum mengganti. Daftar **Penanda spektrum** juga tampil di trace tab **Dengar** (garis dan label pada rentang yang tampil, pada frekuensi tampilan bila memakai Freq Shift; di grafik Spektrum dan trace Dengar label yang akan bertumpuk pindah ke baris berikutnya, dan setelah empat baris tidak ditampilkan, sedangkan garisnya tetap) dan di dock Spektrum Dashboard, yang bisa menambah dan menghapus marker di daftar yang sama (lihat **Penanda** di bawah). Marker hanya tersimpan bila sebuah marker set dipilih; tanpa itu daftar hilang saat console dimuat ulang.
-- **Filter audio.** Filter tanggal dan jam mencocokkan rekaman yang tumpang tindih dengan jendela, dan jendela boleh melewati tengah malam (misalnya 22:00–02:00).
-- **Upload arsip gagal.** Dengan arsip scan otomatis aktif, upload trace atau kandidat yang gagal menampilkan banner merah di Spectrum dan Records. Banner hilang sendiri setelah penyimpanan pulih; trace yang hilang tampil di Records sebagai "(N tidak tersimpan)". Kandidat yang gagal dikirim ulang otomatis.
+- **Rekaman: kalender dan linimasa.** Tab **Rekaman** dibuka seperti rekaman CCTV: kalender menandai hari yang punya audio (titik biru) dan pindai (titik kuning); pilih **Hari**, **Rentang** (klik hari awal lalu hari akhir, maksimal 366 hari) atau **Semua tanggal**. Dalam mode Hari, linimasa 24 jam menampilkan audio dan pindai hari itu: klik memilih satu jam, seret memilih rentang (kelipatan 5 menit), atau ketik **Dari**/**Sampai**; **Sepanjang hari** menghapus pilihan. Hari dan jam memakai jam lokal browser.
+- **Rekaman: tabel dan filter.** Tabel menampilkan audio dan pindai bersama (Mulai, Selesai, Jenis, Frekuensi, Mode, Durasi, Ukuran, Status), bisa diurutkan per kolom dan dibagi per halaman (50/100/200 baris). Filter: jenis, status, frekuensi (MHz), VFO, mode, bandwidth, cari, dan **Jam (lokal)** Dari–Sampai untuk mode Rentang sampai 62 hari (Sampai lebih awal dari Dari berarti melewati tengah malam, misalnya 22:00–02:00).
+- **Rekaman: pratinjau dan unduhan.** Tombol putar memutar audio di baris itu; pratinjau pindai menampilkan trace Max dan Rata-rata, kandidat teratas, dan **Buka di Spektrum** (bila RX atau rekaman berjalan, ada konfirmasi di halaman lebih dulu). **Unduh** di baris mengunduh satu file: `.webm` untuk audio, ZIP untuk pindai. Centang baris (atau **Pilih halaman**, lalu **Pilih semua hasil**) lalu **Unduh ZIP** untuk banyak rekaman sekaligus: maksimal 1000 rekaman atau perkiraan 4 GiB per ZIP, dengan `manifest.json` di akhir yang mencatat rekaman yang tidak ikut. Paling banyak dua ZIP berjalan bersamaan; Chrome bisa meminta izin satu kali untuk beberapa unduhan.
+- **Rekaman: hapus dan Retensi.** **Hapus** (per baris atau untuk pilihan) meminta konfirmasi di halaman, bukan dialog browser; rekaman yang sedang direkam dan pindai yang berjalan tidak bisa dihapus. **Retensi** (Mati, 1, 3, 7, 14, 30, 60 atau 90 hari) menampilkan berapa rekaman akan terhapus sebelum **Terapkan**. Setelah aktif, retensi berjalan 1 menit setelah console start, lalu tiap jam, dan langsung setelah diubah; set penanda, sesi yang masih merekam dan pindai yang berjalan tidak pernah dihapus. File database tidak mengecil setelah retensi; ruang dipakai ulang untuk rekaman baru.
+- **Upload arsip gagal.** Dengan arsip scan otomatis aktif, upload trace atau kandidat yang gagal menampilkan banner merah di Spectrum dan Rekaman. Banner hilang sendiri setelah penyimpanan pulih; trace yang hilang tampil di status pindai sebagai chip "N tidak tersimpan". Kandidat yang gagal dikirim ulang otomatis.
 - **Bahasa.** Receiver mengikuti EN/ID console. Status code (`SIMULATION`, `SCANNING`, `STOPPED`, `MOCK`, `REC`, `LIVE`), satuan, dan detail error dari browser atau radio tetap berbahasa Inggris.
 - **Tanpa service worker dan font remote.** Build Receiver tidak mendaftarkan service worker dan tidak memuat font dari internet. Browser yang masih punya service worker dari build lama menghapusnya sendiri pada kunjungan berikutnya; bila tampilan masih lama, muat ulang sekali lagi. Origin berbeda (`localhost:8787` dan `127.0.0.1:8787`) memerlukan izin WebUSB masing-masing.
 - **Mutasi API.** Mutasi `/api/receiver/*` memerlukan header `Origin` same-origin yang cocok dengan host dan port loopback; tanpa header itu atau dari origin lain, server mengembalikan HTTP 403.
@@ -578,7 +581,7 @@ Broker TLS, PPP/T900, dan MQTT production tidak disiapkan oleh quickstart ini. C
 
 ## Instalasi Linux: Docker, rilis tar dan service
 
-Bagian ini untuk komputer ground station **Linux** yang hanya memakai console: tidak perlu Node.js atau build, console jalan di background, hidup lagi setelah reboot, dan semua pengaturan tersimpan otomatis. Ada dua cara, pilih salah satu: Docker, atau rilis tar dengan `install.sh`. Keduanya tetap bind ke `127.0.0.1:8787`, jadi console hanya bisa dibuka dari komputer itu sendiri: `http://127.0.0.1:8787/` di Chromium atau Chrome. Detail lengkap ada di `packaging/console/README.md`.
+Bagian ini untuk komputer ground station **Linux** yang hanya memakai console: tidak perlu Node.js atau build, console jalan di background, hidup lagi setelah reboot, dan semua pengaturan tersimpan otomatis. Ada tiga cara, pilih salah satu: Docker dari image GHCR (paling mudah di-update), Docker yang di-build dari rilis atau repository, atau rilis tar dengan `install.sh`. Image GHCR dan rilis tar bisa di-update otomatis tanpa login GitHub. Keduanya tetap bind ke `127.0.0.1:8787`, jadi console hanya bisa dibuka dari komputer itu sendiri: `http://127.0.0.1:8787/` di Chromium atau Chrome. Detail lengkap ada di `packaging/console/README.md`.
 
 ### Membuat rilis tar
 
@@ -590,7 +593,64 @@ python3 tools/make_release.py --skip-build # pakai frontend/dist yang sudah di-b
 cd dist/release && sha256sum -c SHA256SUMS
 ```
 
-Hasilnya di `dist/release/`: `sdr-doa-ground-console-<VERSI>-linux.tar.gz` (console, frontend sudah di-build, installer, Dockerfile rilis, panduan), `sdr-doa-rdf-sdr-agent-<VERSI>.tar.gz` (agent RDF-SDR) dan `SHA256SUMS`. Versi diambil dari file `VERSION` di root repository. `--with-wheels` ikut membawa wheel `paho-mqtt` dan `tzdata` untuk instalasi tanpa internet. Build penuh menolak berjalan bila ada perubahan yang belum di-commit pada input build.
+Hasilnya di `dist/release/`: `sdr-doa-ground-console-<VERSI>-linux.tar.gz` (console, frontend sudah di-build, installer, Dockerfile rilis, panduan), `sdr-doa-rdf-sdr-agent-<VERSI>.tar.gz` (agent RDF-SDR), `sdr-doa-docker` (script host Docker) dan `SHA256SUMS`. Build lokal ini untuk uji coba atau instalasi tanpa internet; rilis untuk operator dibuat di GitHub (bagian berikut). Versi diambil dari file `VERSION` di root repository. `--with-wheels` ikut membawa wheel `paho-mqtt` dan `tzdata` untuk instalasi tanpa internet. Build penuh menolak berjalan bila ada perubahan yang belum di-commit pada input build.
+
+### Rilis di GitHub
+
+Rilis resmi dibuat GitHub Actions (`.github/workflows/release.yml`), bukan dari build lokal:
+
+1. Naikkan `VERSION` di `main` (misalnya `2.0.1`; prerelease `2.1.0-rc.1`; tanpa nol di depan dan tanpa `+build`), lalu merge ke `main`. Di commit yang sama ubah juga file yang menyebut versi itu, karena job `test` gagal bila salah satunya tertinggal:
+   - setiap rilis: tag `image:` di `docker-compose.yml`, `docker-compose.release.yml` dan `docker-compose.agent.yml`, serta `sdr-doa-agent:<VERSI>` di `Dockerfile.agent`;
+   - versi mayor baru (misalnya 3.0.0): juga `DEFAULT_CHANNEL` di `packaging/docker/sdr-doa-docker`, default `${SDR_DOA_IMAGE_TAG:-N}` di `docker-compose.ghcr.yml`, dan teks kanal `2` di bantuan script, komentar `docker-compose.ghcr.yml` serta dokumentasi ini (`--channel 2`, `install --channel 3`);
+   - sebaiknya setiap rilis: digest `PYTHON_IMAGE` di job `images` (`.github/workflows/release.yml`), agar image membawa perbaikan keamanan Debian terbaru (`docker buildx imagetools inspect python:3.12-slim-bookworm`, salin `Digest` index-nya).
+2. Push tag yang sama persis dengan `VERSION`: `git tag v2.0.1 && git push origin v2.0.1`. Atau buka **Actions > Release > Run workflow** di branch `main`; tag `v<VERSI>` dibuat otomatis bila belum ada.
+
+Workflow menjalankan seluruh test (`ci.yml`), membangun tarball dengan `make_release.py --with-wheels`, lalu menerbitkan rilis `v<VERSI>` dengan empat aset: `sdr-doa-ground-console-<VERSI>-linux.tar.gz`, `sdr-doa-rdf-sdr-agent-<VERSI>.tar.gz`, `sdr-doa-docker` dan `SHA256SUMS`. Setelah rilis itu ada, dari tarball yang sama dibuat image `ghcr.io/sanadunt/sdr-doa-ground-console` (amd64, arm64) dan `ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent` (amd64, arm64, armv7) dengan tag `<VERSI>`. Tag kanal `<MAYOR>.<MINOR>`, `<MAYOR>` dan `latest` lalu diarahkan ke image yang sama, masing-masing hanya bila belum ada rilis stabil lebih tinggi yang dicakupnya; rilis lama yang selesai belakangan, rerun tag lama, atau backport 2.0.z setelah 2.1.0 tidak pernah memundurkan `2` atau `latest` (backport juga tidak menjadi "Latest" di GitHub). Prerelease hanya mendapat `<VERSI>`. Image `<VERSI>` yang sudah ada dari commit yang sama tidak di-build ulang saat rerun, jadi host tidak di-restart untuk versi yang sama; input `force_images` di Run workflow memaksa build ulang. Tag yang tidak sama dengan `VERSION`, atau commit yang belum ada di `main`, menghentikan workflow dengan pesan yang menyebut sebabnya.
+
+Aset rilis bisa diunduh tanpa login karena repository publik:
+
+- aset yang namanya tetap, dari rilis terbaru: `https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/sdr-doa-docker` dan `https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/SHA256SUMS`;
+- tarball, yang namanya memuat versi: `https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v2.0.0/sdr-doa-ground-console-2.0.0-linux.tar.gz` (`latest/download/<aset>` juga bisa, asal versi di nama file memang versi terbaru).
+
+**Sekali setelah rilis pertama**: GHCR bisa membuat package baru sebagai private. Bila job `images` memberi peringatan bahwa image tidak bisa di-pull tanpa login, buka GitHub > profil > **Packages** > `sdr-doa-ground-console` > **Package settings** > **Change visibility** > **Public**, lalu lakukan hal yang sama untuk `sdr-doa-rdf-sdr-agent`. Sebelum itu `docker pull` dari komputer lain ditolak (`denied` atau `unauthorized`). Rilis berikutnya tidak perlu langkah ini lagi.
+
+**Siapa yang bisa menerbitkan**: update otomatis memasang apa pun yang diterbitkan repository ini, di setiap host dalam sehari (timer Docker berjalan sebagai root). Jadi setiap orang dengan akses write ke repository, dan setiap token dengan `contents:write` atau `packages:write`, bisa menjangkau semua host itu: tag dari commit yang belum di-review menjalankan `release.yml` versi commit itu, dan pemeriksaan tag di dalam repository tidak bisa mencegahnya. Pengaturan sekali di GitHub yang disarankan:
+
+- akses write hanya untuk maintainer yang dipercaya, dengan 2FA;
+- branch ruleset pada `main` yang mewajibkan pull request yang sudah di-review;
+- tag ruleset pada `refs/tags/v*` yang membatasi create, update dan delete untuk pemilik saja. `GITHUB_TOKEN` bukan bypass actor, jadi langkah "Create the tag on main" pada Run workflow lalu ditolak; rilis dengan push tag sendiri, seperti yang disebut pesan error langkah itu;
+- di **Package settings > Manage Actions access** kedua package, izinkan hanya repository ini dan jangan tambahkan user lain.
+
+Image atau aset yang ditandatangani (cosign keyless atau `attest-build-provenance`, lalu diverifikasi `sdr-doa-docker`) adalah langkah terpisah untuk nanti.
+
+### Docker dari image GHCR (tanpa build, update otomatis)
+
+Setiap rilis GitHub (`v<VERSI>`) juga menerbitkan image publik `ghcr.io/sanadunt/sdr-doa-ground-console` (amd64, arm64) dan `ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent` (amd64, arm64, armv7). Image publik bisa di-pull tanpa login GitHub, jadi update cukup `docker pull`. Script `sdr-doa-docker` (aset rilis, juga ada di tarball console sebagai `packaging/docker/sdr-doa-docker`) mengurus pemasangan, update, rollback, dan timer update harian. Update hanya butuh Docker Engine dengan Compose v2 (tanpa git, curl, Python, atau login GitHub); unduhan pertama butuh `curl` atau `wget`.
+
+```sh
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/sdr-doa-docker
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/SHA256SUMS
+# tanpa curl: wget https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/sdr-doa-docker
+#             wget https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
+sudo sh sdr-doa-docker install --auto-update   # /opt/sdr-doa-ground-console, update harian 03:30
+sudo sdr-doa-docker status
+sudo sdr-doa-docker update                     # update sekarang
+sudo sdr-doa-docker rollback                   # kembali ke image sebelumnya
+```
+
+Semua perintah untuk instalasi di `/opt` pakai `sudo`: `.env` di sana milik root dengan mode 0600, dan tanpa `sudo` script berhenti dengan "cannot read ... run with sudo".
+
+- **Kanal update**: `SDR_DOA_IMAGE_TAG` di `/opt/sdr-doa-ground-console/.env`. Bawaannya `2`, yaitu setiap rilis 2.x.y; `2.0` hanya 2.0.z; `2.0.0` tetap di rilis itu. Versi mayor baru hanya datang bila kanal diganti, misalnya `sudo sdr-doa-docker install --channel 3`. Port diatur dengan `--port` (`SDR_DOA_PORT`).
+- **Mengubah `.env`**: `update` hanya mengganti image. Perubahan `.env` diterapkan dengan `cd /opt/sdr-doa-ground-console && sudo docker compose up -d` (atau `sudo sdr-doa-docker install` lagi). Kata sandi admin sebaiknya diatur dengan `sdr-doa-set-admin-password` (lihat di bawah; disimpan di `/data/.env` di volume). Bila `SDR_DOA_ADMIN_PASSWORD` atau `SDR_DOA_SEED_*` tetap ditulis di `.env`, bungkus nilainya dengan tanda kutip tunggal (`SDR_DOA_ADMIN_PASSWORD='Xk9$q2!aB'`): docker compose mengganti `$nama` di nilai tanpa kutip atau berkutip ganda, sehingga console menerima kata sandi lain atau kosong (kosong menonaktifkan login admin). `install`, `update` dan `status` memberi peringatan (hanya nama variabel) bila ada `$` di luar kutip tunggal. Hanya nilai dari `.env` yang dipakai; nilai variabel itu di shell diabaikan.
+- **Update**: `update` mem-pull tag kanal. Bila image-nya berubah, container dibuat ulang lalu ditunggu sampai healthcheck `healthy` (paling lama 180 detik). Bila image itu gagal (unhealthy, berhenti, atau restart terus), image sebelumnya dipasang lagi dan image yang gagal dicatat di `.bad-images`, sehingga update otomatis melewatinya sampai ada image lain. Gagal karena hal lain (error `docker compose up`, disk penuh, host lambat sampai 180 detik habis) juga dikembalikan, tetapi tidak dicatat, jadi update berikutnya mencoba lagi. Image sebelumnya disimpan dengan tag `sdr-doa-previous`, yang lebih lama dihapus. Bila container dari image kanal ternyata tidak sehat (misalnya update terputus karena listrik padam), `update` berikutnya kembali ke `sdr-doa-previous`. Image yang versinya lebih lama dari yang sedang jalan dilewati update otomatis; `sudo sdr-doa-docker update` menanyakannya di terminal, dan `install --channel` memasangnya. `update --check` hanya memberi tahu apakah ada image baru; tanpa plugin `docker buildx`, `--check` mem-pull image untuk membandingkannya (container dan tag yang jalan tetap).
+- **Rekaman dan pindai Receiver**: selama Receiver merekam audio atau mengarsipkan pindai, update otomatis ditunda (`deferred: Receiver recording or scan active` di `update.log`) dan dicoba lagi pada jadwal berikutnya; setelah 7 hari tertunda terus, update tetap dijalankan. `sudo sdr-doa-docker update` di terminal menanyakannya dulu; tanpa terminal butuh `--yes`.
+- **Update otomatis**: `sudo sdr-doa-docker auto-update on --time 03:30` memasang `sdr-doa-docker-update.timer` (harian, ditambah acak sampai 15 menit, menyusul bila komputer mati pada jam itu); `auto-update off` dan `auto-update status`. Satu host hanya punya satu timer: `auto-update on` untuk instalasi kedua (misalnya agent di samping console) ditolak, kecuali dengan `--force`, yang memindahkan timer ke instalasi itu. Timer root hanya menjalankan salinan script di `/usr/local/bin` dan hanya untuk direktori yang dimiliki root dan tidak bisa ditulis user lain; untuk instalasi milik user (misalnya rootless Docker di `~/sdr-doa-ground-console`), `sdr-doa-docker auto-update on` tanpa sudo mencetak baris crontab user itu. Tanpa systemd, perintah itu mencetak baris cron. Setiap langkah tercatat di `update.log`. Container yang di-stop manual tidak dinyalakan oleh update otomatis.
+- **Data**: nama project compose dan volume sama dengan `docker-compose.yml` (`sdr-doa-ground-console`, `sdr-doa-data`), jadi console yang sebelumnya di-build dari repository atau dari rilis tetap memakai datanya setelah pindah ke image GHCR. Pengaturan di `.env` lama (di sebelah `docker-compose.yml`) tidak ikut pindah: salin baris `SDR_DOA_ADMIN_PASSWORD`, `SDR_DOA_PORT` dan `SDR_DOA_SEED_*` dari sana ke `/opt/sdr-doa-ground-console/.env` (atau pakai `--port N`), lalu `cd /opt/sdr-doa-ground-console && sudo docker compose up -d`. Setelah itu jangan jalankan `docker compose` lagi di direktori lama: project-nya sama, jadi `docker compose up -d --build` di sana mengembalikan console ke build lokal.
+- **Kata sandi admin**: `cd /opt/sdr-doa-ground-console && sudo docker compose exec console sdr-doa-set-admin-password && sudo docker compose restart console`.
+- **Tanpa script**: `docker-compose.ghcr.yml` (di repository dan tarball console) berisi compose yang sama; `docker compose -f docker-compose.ghcr.yml pull` lalu `docker compose -f docker-compose.ghcr.yml up -d`, tanpa tunggu healthcheck dan rollback.
+- **Agent RDF-SDR**: `sudo sh sdr-doa-docker install --agent` memasang agent di `/opt/sdr-doa-agent` dengan pengaturan di `agent.env`; `--enable-config` me-mount `/home/doasdr/doasdr/_share` (`--share-dir`) dan menjalankan agent sebagai pemiliknya. Langkahnya ada di [Agent RDF-SDR](#agent-rdf-sdr-raspberry).
+- **Script-nya sendiri** tidak meng-update dirinya. Untuk versi script yang lebih baru, unduh lagi `sdr-doa-docker` dari rilis terbaru dan jalankan `sudo sh sdr-doa-docker install` (pengaturan di `.env` tetap).
 
 ### Docker
 
@@ -608,10 +668,10 @@ docker compose up -d --build
 ```
 
 - **Data**: semua yang disimpan console ada di volume `sdr-doa-ground-console_sdr-doa-data`, di-mount sebagai `/data`. Volume tetap ada saat container di-restart, dibuat ulang, atau di-upgrade.
-- **Kata sandi admin**: simpan di volume dengan `docker compose exec console sdr-doa-set-admin-password` lalu `docker compose restart console`. Bisa juga lewat `SDR_DOA_ADMIN_PASSWORD` di file `.env` di sebelah `docker-compose.yml`; environment menang atas `/data/.env`. Tanpa keduanya berlaku default `123456` dan UI memberi peringatan.
+- **Kata sandi admin**: simpan di volume dengan `docker compose exec console sdr-doa-set-admin-password` lalu `docker compose restart console`. Bisa juga lewat `SDR_DOA_ADMIN_PASSWORD` di file `.env` di sebelah `docker-compose.yml`, dengan nilai dalam kutip tunggal bila ada `$` (docker compose mengganti `$nama` di nilai lain); environment menang atas `/data/.env`. Tanpa keduanya berlaku default `123456` dan UI memberi peringatan.
 - **Nilai awal (seed)**: `SDR_DOA_SEED_BASE_URL`, `SDR_DOA_SEED_MQTT_HOST`, `SDR_DOA_SEED_MQTT_PORT`, `SDR_DOA_SEED_MQTT_TRANSPORT`, `SDR_DOA_SEED_MQTT_WS_PATH` dan `SDR_DOA_SEED_REFRESH_SECONDS` di `.env` sebelah compose hanya dipakai pada start pertama, saat `/data/console.json` belum ada. Setelah itu ubah lewat halaman Konfigurasi. Port diatur dengan `SDR_DOA_PORT` di `.env` yang sama (jangan hanya di shell, karena `docker compose up` berikutnya kembali ke 8787).
 - **Log dan status**: `docker compose ps` (kolom health dari `/api/health`), `docker compose logs -f console`.
-- **Update**: ekstrak rilis baru (atau `git pull` dan `git submodule update`), lalu `docker compose up -d --build`. Volume dan isinya tetap.
+- **Update**: ekstrak rilis baru (atau `git pull` dan `git submodule update`), lalu `docker compose up -d --build`. Volume dan isinya tetap. Untuk update tanpa build, pindah ke image GHCR dengan `sudo sh sdr-doa-docker install` (bagian sebelumnya); salin dulu `SDR_DOA_ADMIN_PASSWORD`, `SDR_DOA_PORT` dan `SDR_DOA_SEED_*` dari `.env` di sini ke `/opt/sdr-doa-ground-console/.env`, lalu jangan pakai `docker compose` di direktori ini lagi (lihat **Data** di bagian sebelumnya).
 - **Stop**: `docker compose down` (volume tetap); `docker compose down -v` juga menghapus semua data.
 
 Container berjalan sebagai uid 10001 dan `restart: unless-stopped` menyalakannya lagi bersama Docker saat boot (pastikan `systemctl is-enabled docker` bernilai `enabled`).
@@ -621,9 +681,13 @@ Container berjalan sebagai uid 10001 dan `restart: unless-stopped` menyalakannya
 Butuh Python 3.9+ dengan modul `venv` (`sudo apt install python3-venv` di Debian/Ubuntu). Jalankan sebagai user desktop biasa, bukan root:
 
 ```sh
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v2.0.0/sdr-doa-ground-console-2.0.0-linux.tar.gz
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v2.0.0/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
 tar -xzf sdr-doa-ground-console-2.0.0-linux.tar.gz
 cd sdr-doa-ground-console-2.0.0-linux
 sh install.sh            # menanyakan kata sandi admin; Enter = default 123456
+sdr-doa-console auto-update on   # opsional: update otomatis setiap hari 03.45
 ```
 
 Tanpa pertanyaan, dengan nilai awal: `sh install.sh --yes --generate-password --base-url http://192.168.100.100:8081 --mqtt-host 10.90.0.1 --mqtt-port 9001 --refresh-seconds 2`. Opsi lain: `--password NILAI`, `--port`, `--prefix`, `--data-dir`, `--no-service`, `--no-desktop` (lihat `sh install.sh --help`). Installer memeriksa file rilis terhadap `MANIFEST.sha256`, memasang program dan venv (`paho-mqtt`, `tzdata`) di `~/.local/share/sdr-doa-ground-console/app`, membuat systemd user service, perintah `sdr-doa-console` di `~/.local/bin`, dan entri menu, lalu langsung menjalankan console. Dari repository, `sh packaging/console/install.sh` bekerja sama setelah `npm run build:all`.
@@ -633,11 +697,13 @@ sdr-doa-console open        start bila perlu, lalu buka di Chromium/Chrome
 sdr-doa-console start | stop | restart | status
 sdr-doa-console logs        ikuti log (journalctl --user)
 sdr-doa-console password    ganti kata sandi admin, lalu restart console
+sdr-doa-console update      pasang rilis terbaru dari GitHub (--check hanya menampilkan)
+sdr-doa-console auto-update on|off|status   update otomatis setiap hari (default 03.45)
 sdr-doa-console info        versi dan lokasi file
 sdr-doa-console uninstall   hapus program; --purge juga menghapus data
 ```
 
-Upgrade: ekstrak rilis baru dan jalankan `sh install.sh` lagi. Program dan venv diganti; data, kata sandi, dan console yang sedang jalan dipertahankan.
+Upgrade: `sdr-doa-console update` mengambil rilis terbaru dengan versi mayor yang sama dari GitHub Releases tanpa login (repository publik), memeriksa SHA-256-nya, lalu menjalankan `install.sh` rilis itu dengan opsi instalasi sekarang. Bila versi baru tidak menjawab `/api/health` dalam 60 detik, program lama dikembalikan dan dijalankan lagi. `sdr-doa-console auto-update on` melakukannya setiap hari lewat systemd user timer (`sdr-doa-console update --auto`); selama Receiver merekam atau mengarsipkan pindai, update itu ditunda ke jadwal berikutnya, paling lama 7 hari. Instalasi dari tarball tanpa perintah `update` (semua instalasi sebelum rilis GitHub pertama) menjalankan sekali `sh install.sh` dari rilis baru; setelah itu `sdr-doa-console update` dan `auto-update on` tersedia. Cara manual tetap bisa: ekstrak rilis baru dan jalankan `sh install.sh` lagi. Program dan venv diganti; data, kata sandi, dan console yang sedang jalan dipertahankan. Rincian di `packaging/console/README.md`.
 
 ### Jalan di background dan saat boot
 
@@ -690,8 +756,22 @@ journalctl -u sdr-doa-agent -f
 - Pengaturan ada di `/etc/sdr-doa-agent/agent.env` (`root:<grup service>`, 0640). Setelah mengubahnya: `sudo systemctl restart sdr-doa-agent`. Variabel lain bisa diset dengan `--set NAMA=NILAI`, misalnya `--set DOA_RATE=0`.
 - Secara bawaan agent menjawab setiap patch dengan `REMOTE_CONTROL_DISABLED`. `sudo sh install.sh --enable-config` mengizinkan Kontrol mengubah `settings.json`; `--disable-config` mematikannya lagi. Aktifkan hanya di broker dan jaringan yang dipercaya.
 - Agent memakai MQTT lewat TCP (default port 1883), bukan WebSocket. Console dan agent harus memakai broker yang sama. Broker di luar loopback wajib TLS dan username (`MQTT_TLS=1` atau `MQTT_CAFILE`, `MQTT_USERNAME`, dan `SDR_DOA_MQTT_PASSWORD` di `agent.env`; lihat `packaging/agent/README.md`).
-- Docker (opsional, juga arm64/armv7): salin `packaging/agent/agent.env.example` ke `agent.env`, edit, lalu `docker compose up -d --build` di folder rilis agent (atau `docker compose -f docker-compose.agent.yml up -d --build` di repository). Butuh Compose v2.24+.
-- Upgrade: jalankan installer rilis baru lagi; `agent.env` dan state tetap. Hapus dengan `sudo sh /opt/sdr-doa-agent/uninstall.sh` (`--purge` juga menghapus pengaturan dan state).
+- Docker dari image GHCR (arm64 atau armv7, tanpa build, update otomatis tanpa login GitHub), sebagai pengganti service di atas, bukan bersamaan. Selama service native masih terpasang, script menolak memasang agent; hapus dulu dengan `sudo sh /opt/sdr-doa-agent/uninstall.sh` (pengaturan di `/etc/sdr-doa-agent/agent.env` tetap, salin nilainya ke `agent.env` yang baru):
+
+  ```sh
+  curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/sdr-doa-docker
+  curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/SHA256SUMS
+  # tanpa curl: wget dengan URL yang sama
+  sha256sum -c --ignore-missing SHA256SUMS
+  sudo sh sdr-doa-docker install --agent --auto-update     # /opt/sdr-doa-agent, update harian 03:30
+  sudoedit /opt/sdr-doa-agent/agent.env                     # MQTT_HOST, MQTT_PORT, dan lain-lain
+  cd /opt/sdr-doa-agent && sudo docker compose up -d        # terapkan agent.env yang diubah
+  sudo docker compose logs -f agent
+  ```
+
+  `--enable-config` mengizinkan Kontrol mengubah `settings.json`: script me-mount `/home/doasdr/doasdr/_share` (`--share-dir`) dan menjalankan agent sebagai pemilik direktori itu; `--disable-config` mematikannya lagi. `sdr-doa-docker update --dir /opt/sdr-doa-agent` dan `rollback` bekerja seperti pada console; image agent tidak punya healthcheck, jadi image baru dianggap gagal bila container berhenti atau restart dalam 20 detik pertama.
+- Docker yang di-build sendiri (juga arm64/armv7): salin `packaging/agent/agent.env.example` ke `agent.env`, edit, lalu `docker compose up -d --build` di folder rilis agent (atau `docker compose -f docker-compose.agent.yml up -d --build` di repository). Butuh Compose v2.24+. Project dan volume-nya sama dengan yang ditulis `sdr-doa-docker install --agent`, jadi state di volume `agent-state` tetap saat pindah ke image GHCR; salin isi `agent.env` lama ke `/opt/sdr-doa-agent/agent.env`.
+- Upgrade service: jalankan installer rilis baru lagi; `agent.env` dan state tetap. Hapus dengan `sudo sh /opt/sdr-doa-agent/uninstall.sh` (`--purge` juga menghapus pengaturan dan state).
 
 ## Validasi setelah install
 
@@ -771,6 +851,14 @@ Tengah atau VFO diubah di halaman Receiver (mengetik Center atau VFO, menggeser 
 - `Ditolak · REMOTE_CONTROL_DISABLED`: agent berjalan tanpa `--enable-config`.
 - **Publish gagal**: ACL broker tidak mengizinkan console publish ke `sdr/v1/uav-01/cmd/config/patch`.
 - Kontrol tidak bisa dibuka karena login admin nonaktif: `SDR_DOA_ADMIN_PASSWORD` diisi nilai kosong, atau `.env` tidak bisa dibaca. Isi kata sandi lalu restart console.
+
+### `sdr-doa-docker`: pull ditolak (`denied`, `unauthorized`)
+
+Package GHCR masih private (lihat [Rilis di GitHub](#rilis-di-github)), atau Docker menyimpan login `ghcr.io` lama yang tokennya sudah kedaluwarsa (`~/.docker/config.json`, untuk sudo `/root/.docker/config.json`): jalankan `sudo docker logout ghcr.io` lalu ulangi. Image publik tidak butuh login. Di belakang proxy, daemon Docker memakai proxy dari konfigurasi service Docker, bukan dari shell.
+
+### Update dibatalkan dan versi lama jalan lagi
+
+Docker: `update.log` di direktori install (`/opt/sdr-doa-ground-console` atau `/opt/sdr-doa-agent`) menyebut sebabnya pada baris `FAILED`. Image yang gagal healthcheck dicatat di `.bad-images`, dan update otomatis melewatinya sampai ada image lain; `sudo sdr-doa-docker update` di terminal menawarkan untuk mencobanya lagi. Gagal karena hal lain (error compose, waktu habis) tidak dicatat dan dicoba lagi pada jadwal berikutnya. Baris `deferred:` berarti Receiver sedang merekam atau mengarsipkan pindai; `skipped: ... points to older` berarti tag kanal menunjuk versi yang lebih lama dari yang jalan. Native: `sdr-doa-console auto-update status` menampilkan hasil terakhir, `journalctl --user -u sdr-doa-console-update` lognya; rilis yang gagal dilewati sampai ada rilis yang lebih baru, dan `sdr-doa-console update --to <versi>` mencobanya lagi.
 
 ### Halaman Receiver menampilkan "Receiver is not built"
 

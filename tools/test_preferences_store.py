@@ -15,8 +15,10 @@ import http.client
 import json
 import os
 import re
+import signal
 import socket
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -395,7 +397,7 @@ class PreferencesHttpTests(unittest.TestCase):
         console = self.harness()
         console.server.version = "2.0.0"
         status, body = console.request("GET", "/api/health", origin=None)
-        self.assertEqual((status, body), (200, {"ok": True, "version": "2.0.0"}))
+        self.assertEqual((status, body), (200, {"ok": True, "version": "2.0.0", "receiver_busy": False}))
         status, capabilities = console.request("GET", "/api/capabilities", origin=None)
         self.assertEqual(status, 200)
         self.assertEqual(capabilities["version"], "2.0.0")
@@ -407,6 +409,70 @@ class PreferencesHttpTests(unittest.TestCase):
             status, body = console.request("GET", "/api/health", origin=None)
         self.assertEqual(status, 200)
         self.assertIs(body["ok"], True)
+
+    def test_health_reports_receiver_busy_while_it_records(self) -> None:
+        console = self.harness()
+        now = [1000.0]
+        console.server.receiver_activity.clock = lambda: now[0]
+
+        def busy() -> bool:
+            status, body = console.request("GET", "/api/health", origin=None)
+            self.assertEqual(status, 200)
+            return body["receiver_busy"]
+
+        self.assertIs(busy(), False)
+        status, created = console.request("POST", "/api/receiver/audio-sessions", {})
+        self.assertEqual(status, 201)
+        self.assertIs(busy(), True)
+        # An open session with a write in the stale window keeps it busy.
+        now[0] += ground_console.RECEIVER_BUSY_WRITE_S + 1
+        self.assertIs(busy(), True)
+        now[0] += ground_console.RECEIVER_BUSY_OPEN_S
+        self.assertIs(busy(), False, "an abandoned session does not hold updates back")
+        status, _ = console.request("POST", f"/api/receiver/audio-sessions/{created['id']}/finish", {})
+        self.assertEqual(status, 200)
+        self.assertIs(busy(), True, "the finish is a write")
+        now[0] += ground_console.RECEIVER_BUSY_WRITE_S + 1
+        self.assertIs(busy(), False, "no open session after the finish")
+
+    def test_healthcheck_busy_flag(self) -> None:
+        console = self.harness()
+        script = PROJECT_ROOT / "packaging" / "docker" / "healthcheck.py"
+
+        def check(*args: str) -> Tuple[int, str]:
+            result = subprocess.run(
+                [sys.executable, "-I", str(script), str(console.port), *args],
+                capture_output=True, text=True, timeout=30,
+                env={key: value for key, value in os.environ.items() if not key.lower().endswith("_proxy")},
+            )
+            return result.returncode, result.stdout.strip()
+
+        self.assertEqual(check("--busy"), (0, "idle"))
+        status, _ = console.request("POST", "/api/receiver/audio-sessions", {})
+        self.assertEqual(status, 201)
+        self.assertEqual(check("--busy"), (0, "busy"))
+        code, out = check()
+        self.assertEqual(code, 0)
+        self.assertTrue(out.startswith("healthy: version"), out)
+        closed = _free_port()
+        result = subprocess.run([sys.executable, "-I", str(script), str(closed), "--busy"],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(result.stdout.startswith("unhealthy:"), result.stdout)
+
+    def test_receiver_activity_counts_scans_and_writes(self) -> None:
+        now = [0.0]
+        activity = ground_console.ReceiverActivity(clock=lambda: now[0])
+        self.assertIs(activity.busy(), False)
+        activity.wrote(opened="scan:1")
+        now[0] = ground_console.RECEIVER_BUSY_OPEN_S - 1
+        self.assertIs(activity.busy(), True)
+        activity.wrote()
+        activity.wrote(closed="scan:1")
+        now[0] += ground_console.RECEIVER_BUSY_WRITE_S - 1
+        self.assertIs(activity.busy(), True)
+        now[0] += 2
+        self.assertIs(activity.busy(), False)
 
     def test_healthy_health_checks_are_not_logged(self) -> None:
         console = self.harness()
@@ -631,6 +697,22 @@ class MainWiringTests(unittest.TestCase):
     def test_missing_env_file_uses_the_default_password(self) -> None:
         self.run_main()
         self.assertEqual(ground_console.ADMIN_PASSWORD, ground_console.DEFAULT_ADMIN_PASSWORD)
+
+    def test_sigterm_stops_cleanly_behind_the_receiver_store_lock(self) -> None:
+        held: List[bool] = []
+        original_close = ground_console.GroundConsoleServer.server_close
+
+        def close(server: Any) -> None:
+            held.append(server.receiver_store._lock._is_owned())
+            original_close(server)
+
+        before = signal.getsignal(signal.SIGTERM)
+        with patch.object(ground_console.GroundConsoleServer, "serve_forever",
+                          side_effect=lambda: os.kill(os.getpid(), signal.SIGTERM)), \
+                patch.object(ground_console.GroundConsoleServer, "server_close", close):
+            self.run_main()
+        self.assertEqual(held, [True], "server_close runs once, holding the store lock")
+        self.assertIs(signal.getsignal(signal.SIGTERM), before, "main puts the previous handler back")
 
     def test_cli_override_is_not_saved(self) -> None:
         server = self.run_main("--base-url", "http://192.168.100.100:8081")

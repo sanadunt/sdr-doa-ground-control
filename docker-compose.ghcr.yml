@@ -1,0 +1,59 @@
+# SDR-DoA Ground Console in Docker from the published image on GHCR. Linux only.
+# No build, no Node.js and no GitHub login: the image is public.
+#
+#   docker compose -f docker-compose.ghcr.yml pull
+#   docker compose -f docker-compose.ghcr.yml up -d
+#   # open http://127.0.0.1:8787/ in Chromium or Chrome (WebUSB for the Receiver)
+#
+# The image tag is the update channel: 2 (the default) follows every 2.x.y
+# release, 2.0 only 2.0.z, 2.0.0 stays on that release. Set SDR_DOA_IMAGE_TAG
+# and SDR_DOA_PORT in a .env file next to this file. Update by hand with the
+# same pull and up -d. packaging/docker/sdr-doa-docker (also a release asset)
+# writes this file for you and adds a health check after each update, a
+# rollback to the previous image and a daily update timer.
+#
+# Everything saved in the UI (connection, MQTT, refresh interval, branding,
+# display preferences, Receiver records) lives in the sdr-doa-data volume at
+# /data, together with /data/.env (admin password). The project name and the
+# volume are the ones of docker-compose.yml, so a console built from the
+# repository keeps its data when it moves to this file. restart:
+# unless-stopped starts the console again with the Docker daemon at boot.
+name: sdr-doa-ground-console
+
+services:
+  console:
+    image: ${SDR_DOA_IMAGE:-ghcr.io/sanadunt/sdr-doa-ground-console}:${SDR_DOA_IMAGE_TAG:-2}
+    # The console binds 127.0.0.1 and refuses any other address. With the host
+    # network that is this machine's own loopback, so http://127.0.0.1:8787/
+    # works here and is not reachable from the LAN. A bridge network with
+    # "ports:" would need a non-loopback bind inside the container, which the
+    # console refuses, and would expose admin and the config patch to the LAN.
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - SDR_DOA_PORT=${SDR_DOA_PORT:-8787}
+      # Variables below without a value are passed only when set in your shell
+      # or in a .env file next to this compose file; otherwise they stay unset.
+      #
+      # Admin password. The environment wins over /data/.env. To keep it in the
+      # volume instead, leave this unset and run:
+      #   docker compose exec console sdr-doa-set-admin-password
+      #   docker compose restart console
+      # Unset in both places, the default 123456 applies and the UI warns.
+      # SDR_DOA_ADMIN_PASSWORD= (empty) disables admin login. In .env, wrap a
+      # value with a $ in single quotes (SDR_DOA_ADMIN_PASSWORD='...'): compose
+      # replaces $name in unquoted and double-quoted values.
+      - SDR_DOA_ADMIN_PASSWORD
+      # First start only: the console writes /data/console.json from these and
+      # ignores them once that file exists. Change settings in the UI later.
+      - SDR_DOA_SEED_BASE_URL
+      - SDR_DOA_SEED_MQTT_HOST
+      - SDR_DOA_SEED_MQTT_PORT
+      - SDR_DOA_SEED_MQTT_TRANSPORT
+      - SDR_DOA_SEED_MQTT_WS_PATH
+      - SDR_DOA_SEED_REFRESH_SECONDS
+    volumes:
+      - sdr-doa-data:/data
+
+volumes:
+  sdr-doa-data:

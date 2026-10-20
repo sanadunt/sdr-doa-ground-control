@@ -9,8 +9,11 @@
 #   sh install.sh            # asks for the admin password
 #   sh install.sh --yes      # no questions
 #
-# Re-running it upgrades the program and keeps the saved data. Run it from the
-# unpacked release, or from a repository checkout after npm run build:all.
+# Re-running it upgrades the program and keeps the saved data and the admin
+# password. It records its options (never the password or first-start values)
+# in APP_DIR/install-options, so sdr-doa-console update can run the install.sh
+# of a newer release the same way. Run it from the unpacked release, or from a
+# repository checkout after npm run build:all.
 set -eu
 
 DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
@@ -27,6 +30,7 @@ DESKTOP_ON=1
 WORK=
 UNIT=sdr-doa-ground-console.service
 MARKER=.sdr-doa-console-install
+OPTIONS=install-options
 
 usage() {
   cat <<'EOF'
@@ -73,6 +77,20 @@ check_path() {
   case $2 in
     *[[:space:]]* | *[\'\"\\\`\$%\|\&]*) die "$1 must not contain spaces or any of ' \" \\ \` \$ % | &: $2" ;;
   esac
+  case $2 in
+    */./* | */../* | */. | */..) die "$1 must not contain . or .. components: $2" ;;
+  esac
+}
+
+# One spelling per path: repeated slashes collapsed and no trailing slash,
+# so install-options records the path update_release.py compares it with.
+normal_path() {
+  np=$(printf '%s' "$1" | tr -s /)
+  case $np in
+    / | '') ;;
+    */) np=${np%/} ;;
+  esac
+  printf '%s' "$np"
 }
 
 # First-start values, written to seed.env as SDR_DOA_SEED_* variables.
@@ -121,7 +139,9 @@ parse_args() {
     esac
     shift
   done
-  APP_DIR=${APP_DIR:-$DATA_DIR/app}
+  DATA_DIR=$(normal_path "$DATA_DIR")
+  APP_DIR=$(normal_path "${APP_DIR:-$DATA_DIR/app}")
+  BIN_DIR=$(normal_path "$BIN_DIR")
   check_path --prefix "$APP_DIR"
   check_path --data-dir "$DATA_DIR"
   check_path --bin-dir "$BIN_DIR"
@@ -237,6 +257,21 @@ install_app() {
   "$venv/bin/python" -m pip install --quiet --disable-pip-version-check --no-input "$@" \
     -r "$APP_DIR/packaging/console/requirements.txt" ||
     die "pip could not install packaging/console/requirements.txt (network or proxy?)"
+  write_options
+}
+
+# The options of this run, one per line, for sdr-doa-console update. The paths
+# passed check_path, so a line needs no quoting.
+write_options() {
+  {
+    printf '%s\n' "# Written by install.sh $VERSION. sdr-doa-console update passes these options to the"
+    printf '%s\n' "# install.sh of a newer release. Passwords and first-start values are never kept."
+    printf '%s\n' "--prefix=$APP_DIR" "--data-dir=$DATA_DIR" "--bin-dir=$BIN_DIR" "--port=$PORT"
+    if [ "$SERVICE_ON" = 0 ]; then printf '%s\n' --no-service; fi
+    if [ "$DESKTOP_ON" = 0 ]; then printf '%s\n' --no-desktop; fi
+  } >"$APP_DIR/$OPTIONS.tmp"
+  chmod 0644 "$APP_DIR/$OPTIONS.tmp"
+  mv "$APP_DIR/$OPTIONS.tmp" "$APP_DIR/$OPTIONS"
 }
 
 # Settings saved by a console run from the repository with default paths.
@@ -336,7 +371,7 @@ install_service() {
   render "$ASSETS/sdr-doa-ground-console.service.in" "$UNIT_FILE" 0644
   systemctl --user daemon-reload
   systemctl --user enable "$UNIT" >/dev/null 2>&1 || die "systemctl --user enable $UNIT failed"
-  user=$(id -un)
+  user=$(id -un 2>/dev/null || id -u)
   if command -v loginctl >/dev/null 2>&1; then
     if [ "$(loginctl show-user "$user" -p Linger --value 2>/dev/null || true)" != yes ]; then
       loginctl enable-linger "$user" 2>/dev/null ||
@@ -385,6 +420,7 @@ main() {
     *) warn "$BIN_DIR is not on PATH; log in again or use $BIN_DIR/sdr-doa-console" ;;
   esac
   say "Open it: sdr-doa-console open (Chromium or Chrome; the Receiver needs WebUSB)"
+  say "Updates: sdr-doa-console update, or daily with: sdr-doa-console auto-update on"
   say "Saved data: $DATA_DIR    Help: sdr-doa-console help"
 }
 

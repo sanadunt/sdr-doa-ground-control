@@ -1,6 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import { consoleRequestsMockSdr, forwardFrameShortcut, receiverFrameSrc } from './ReceiverPage';
 
+/** A file next to this test; the app tsconfig has no Node types, as in basemapPicker.test.tsx. */
+function readSibling(path: string): string {
+  type Fs = { readFileSync(file: URL, encoding: 'utf8'): string };
+  const { process } = globalThis as unknown as { process: { getBuiltinModule(id: 'node:fs'): Fs } };
+  return process.getBuiltinModule('node:fs').readFileSync(new URL(path, import.meta.url), 'utf8');
+}
+
+describe('Receiver iframe', () => {
+  it('stays unsandboxed so Records downloads (<a download>, attachments) work inside it', () => {
+    const source = readSibling('./ReceiverPage.tsx');
+    const frame = source.match(/<iframe\b[\s\S]*?\/>/)?.[0] ?? '';
+    expect(frame).toContain('allow="usb; autoplay"');
+    const sandbox = /\bsandbox=(?:"([^"]*)"|\{['"]([^'"]*)['"]\})/.exec(frame);
+    // A sandbox would also need allow-scripts, allow-same-origin and allow-popups.
+    if (sandbox) expect((sandbox[1] ?? sandbox[2]).split(/\s+/)).toContain('allow-downloads');
+    else expect(frame).not.toMatch(/\bsandbox\b/);
+  });
+});
+
 describe('receiverFrameSrc', () => {
   it('passes the console theme and language to the embedded Receiver', () => {
     expect(receiverFrameSrc('light', 'id')).toBe('/receiver/?theme=light&lang=id');

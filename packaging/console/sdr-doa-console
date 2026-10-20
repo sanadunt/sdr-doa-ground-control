@@ -16,6 +16,12 @@ PYTHON=$APP_DIR/venv/bin/python
 URL=http://127.0.0.1:$PORT/
 PID_FILE=$DATA_DIR/console.pid
 LOG_FILE=$DATA_DIR/console.log
+UPDATER=$APP_DIR/packaging/console/update_release.py
+UPDATE_UNIT=sdr-doa-console-update
+UNIT_DIR=${UNIT_FILE%/*}
+UPDATE_SERVICE_FILE=$UNIT_DIR/$UPDATE_UNIT.service
+UPDATE_TIMER_FILE=$UNIT_DIR/$UPDATE_UNIT.timer
+UPDATE_LOG=$DATA_DIR/update.log
 
 usage() {
   cat <<EOF
@@ -28,6 +34,13 @@ Usage: sdr-doa-console COMMAND
   status      show whether it runs and answers
   logs        follow its log (Ctrl+C to stop)
   password    change the admin password, then restart the console
+  update      install the latest release of this major version from GitHub
+              --check: only show it; --yes: do not ask; --to X.Y.Z: that
+              release; --allow-major: also a new major version; --auto: as
+              the timer (no questions; while the Receiver records or scans,
+              wait for the next run, at most 7 days)
+  auto-update on [--time HH:MM] | off | status
+              check daily (default 03:45 local time) and install with --auto
   run         run it in the foreground (what the service runs)
   info        show the version and the installed paths
   uninstall   remove the program; add --purge to also delete saved data
@@ -41,9 +54,17 @@ die() {
   exit 1
 }
 
+usage_error() {
+  printf 'sdr-doa-console: %s\n' "$*" >&2
+  exit 64
+}
+
+have_user_systemd() {
+  command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1
+}
+
 use_systemd() {
-  [ -f "$UNIT_FILE" ] && command -v systemctl >/dev/null 2>&1 &&
-    systemctl --user show-environment >/dev/null 2>&1
+  [ -f "$UNIT_FILE" ] && have_user_systemd
 }
 
 healthy() {
@@ -182,6 +203,166 @@ cmd_info() {
   echo "Program:  $APP_DIR"
   echo "Data:     $DATA_DIR"
   if use_systemd; then echo "Service:  $UNIT_FILE (systemd user service)"; else echo "Service:  none (sdr-doa-console start)"; fi
+  if [ -f "$UPDATE_TIMER_FILE" ]; then echo "Updates:  daily at $(timer_time) (sdr-doa-console auto-update status)"; else echo "Updates:  sdr-doa-console update"; fi
+}
+
+# update_release.py with the paths of this install. It runs on python3 from
+# PATH, which install.sh needs anyway, because the update may rebuild the venv.
+# exec: python becomes the update unit's main process, so stopping the unit
+# sends it one SIGTERM, which rolls a running install back; it is the last
+# command of every caller.
+updater() {
+  py=$(command -v python3 2>/dev/null || true)
+  [ -n "$py" ] || py=$PYTHON
+  [ -f "$UPDATER" ] || die "$UPDATER is missing; run install.sh of the release again"
+  exec "$py" -I "$UPDATER" "$@" --app-dir "$APP_DIR" --data-dir "$DATA_DIR" --port "$PORT" \
+    --launcher "$BIN_PATH" --unit-file "$UNIT_FILE" --desktop-file "$DESKTOP_FILE"
+}
+
+cmd_update() {
+  action=apply
+  auto=0
+  count=$#
+  while [ "$count" -gt 0 ]; do
+    arg=$1
+    shift
+    count=$((count - 1))
+    case $arg in
+      --check) action=check ;;
+      --auto) auto=1; set -- "$@" "$arg" ;;
+      --yes | -y | --allow-major | --to=*) set -- "$@" "$arg" ;;
+      --to)
+        [ "$count" -gt 0 ] || usage_error "--to needs a version such as 2.0.1"
+        set -- "$@" --to "$1"
+        shift
+        count=$((count - 1))
+        ;;
+      *) usage_error "update takes --check, --yes, --auto, --to X.Y.Z and --allow-major" ;;
+    esac
+  done
+  if [ "$action" = check ] && [ "$auto" = 1 ]; then usage_error "--auto installs; it does not go with --check"; fi
+  updater "$action" "$@"
+}
+
+timer_time() {
+  sed -n 's/^OnCalendar=\*-\*-\* \([0-2][0-9]:[0-5][0-9]\):00$/\1/p' "$UPDATE_TIMER_FILE" 2>/dev/null
+}
+
+cron_line() {
+  hour=${1%:*}
+  minute=${1#*:}
+  printf '%s %s * * * %s update --auto >>%s 2>&1\n' "${minute#0}" "${hour#0}" "$BIN_PATH" "$UPDATE_LOG"
+}
+
+write_unit() {
+  cat >"$1.tmp"
+  chmod 0644 "$1.tmp"
+  mv "$1.tmp" "$1"
+}
+
+auto_update_on() {
+  if ! have_user_systemd; then
+    echo "sdr-doa-console: no systemd user session here, so no timer was set up. To check daily with cron instead, add this line with crontab -e:" >&2
+    cron_line "$1" >&2
+    exit 1
+  fi
+  if [ ! -f "$UNIT_FILE" ]; then
+    echo "sdr-doa-console: the daily update needs the systemd user service of the console (install.sh without --no-service). With cron instead, add this line with crontab -e:" >&2
+    cron_line "$1" >&2
+    exit 1
+  fi
+  mkdir -p "$UNIT_DIR"
+  write_unit "$UPDATE_SERVICE_FILE" <<UNIT
+# Written by sdr-doa-console auto-update on; remove with: sdr-doa-console auto-update off
+[Unit]
+Description=Update the SDR-DoA Ground Console from its GitHub release
+Documentation=file://$APP_DIR/README.md
+
+[Service]
+Type=oneshot
+ExecStart=$BIN_PATH update --auto
+TimeoutStartSec=45min
+# A stop during an update rolls it back: the console stop (up to 90 s), the
+# restore, its start and 30 s for it to answer.
+TimeoutStopSec=5min
+Nice=10
+UNIT
+  write_unit "$UPDATE_TIMER_FILE" <<UNIT
+# Written by sdr-doa-console auto-update on; remove with: sdr-doa-console auto-update off
+[Unit]
+Description=Daily update check of the SDR-DoA Ground Console
+
+[Timer]
+OnCalendar=*-*-* $1:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+  systemctl --user daemon-reload
+  systemctl --user enable --now "$UPDATE_UNIT.timer" >/dev/null 2>&1 || die "systemctl --user enable --now $UPDATE_UNIT.timer failed"
+  user=$(id -un 2>/dev/null || id -u)
+  if command -v loginctl >/dev/null 2>&1 &&
+    [ "$(loginctl show-user "$user" -p Linger --value 2>/dev/null || true)" != yes ]; then
+    echo "sdr-doa-console: warning: lingering is off, so the timer runs only while $user is logged in; turn it on with: sudo loginctl enable-linger $user" >&2
+  fi
+  echo "Auto-update on: daily at $1 local time (up to 15 min later; a missed run follows the next start)"
+  echo "It installs new releases of this major version with: sdr-doa-console update --auto"
+}
+
+auto_update_off() {
+  if [ -f "$UPDATE_TIMER_FILE" ] || [ -f "$UPDATE_SERVICE_FILE" ]; then
+    if have_user_systemd; then systemctl --user disable --now "$UPDATE_UNIT.timer" >/dev/null 2>&1 || true; fi
+    rm -f "$UPDATE_TIMER_FILE" "$UPDATE_SERVICE_FILE"
+    if have_user_systemd; then systemctl --user daemon-reload >/dev/null 2>&1 || true; fi
+  fi
+  echo "Auto-update off (update by hand with: sdr-doa-console update)"
+}
+
+auto_update_status() {
+  if [ -f "$UPDATE_TIMER_FILE" ]; then
+    echo "Auto-update: on, daily at $(timer_time) local time"
+    if have_user_systemd; then
+      enabled=$(systemctl --user is-enabled "$UPDATE_UNIT.timer" 2>/dev/null || true)
+      active=$(systemctl --user is-active "$UPDATE_UNIT.timer" 2>/dev/null || true)
+      next=$(systemctl --user show "$UPDATE_UNIT.timer" -p NextElapseUSecRealtime --value 2>/dev/null || true)
+      echo "Timer:       ${enabled:-unknown}, ${active:-unknown}${next:+; next run $next}"
+    else
+      echo "Timer:       no systemd user session here, so it does not run"
+    fi
+  else
+    echo "Auto-update: off (turn on with: sdr-doa-console auto-update on)"
+  fi
+  updater status
+}
+
+cmd_auto_update() {
+  sub=${1:-status}
+  [ $# -gt 0 ] && shift
+  time=03:45
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --time)
+        [ $# -ge 2 ] || usage_error "--time needs HH:MM"
+        time=$2
+        shift
+        ;;
+      --time=*) time=${1#--time=} ;;
+      *) usage_error "auto-update takes on [--time HH:MM], off or status" ;;
+    esac
+    shift
+  done
+  case $time in
+    [01][0-9]:[0-5][0-9] | 2[0-3]:[0-5][0-9]) ;;
+    *) usage_error "--time needs HH:MM between 00:00 and 23:59, not $time" ;;
+  esac
+  case $sub in
+    on) auto_update_on "$time" ;;
+    off) auto_update_off ;;
+    status) auto_update_status ;;
+    *) usage_error "auto-update takes on [--time HH:MM], off or status" ;;
+  esac
 }
 
 cmd_uninstall() {
@@ -202,17 +383,19 @@ cmd_uninstall() {
   fi
   [ -f "$APP_DIR/.sdr-doa-console-install" ] || die "$APP_DIR is not an install of this console"
   cmd_stop >/dev/null 2>&1 || true
+  auto_update_off >/dev/null
   if [ -f "$UNIT_FILE" ]; then
     if command -v systemctl >/dev/null 2>&1; then systemctl --user disable "$UNIT" >/dev/null 2>&1 || true; fi
     rm -f "$UNIT_FILE"
     if command -v systemctl >/dev/null 2>&1; then systemctl --user daemon-reload >/dev/null 2>&1 || true; fi
   fi
   rm -f "$DESKTOP_FILE"
-  rm -rf "$APP_DIR"
+  rm -rf "$APP_DIR" "$APP_DIR.previous"
   if [ "$purge" = 1 ]; then
     rm -rf "$DATA_DIR/receiver" "$DATA_DIR/tiles"
     rm -f "$DATA_DIR/console.json" "$DATA_DIR/branding.json" "$DATA_DIR/preferences.json" \
-      "$DATA_DIR/.env" "$DATA_DIR/seed.env" "$LOG_FILE" "$PID_FILE"
+      "$DATA_DIR/.env" "$DATA_DIR/seed.env" "$LOG_FILE" "$PID_FILE" \
+      "$DATA_DIR/update-state.json" "$DATA_DIR/.update.lock" "$UPDATE_LOG"
     rmdir "$DATA_DIR" 2>/dev/null || true
     echo "Removed the console and its data"
   else
@@ -231,6 +414,8 @@ case $command in
   status) cmd_status ;;
   logs) cmd_logs "$@" ;;
   password) cmd_password "$@" ;;
+  update) cmd_update "$@" ;;
+  auto-update) cmd_auto_update "$@" ;;
   run) cmd_run "$@" ;;
   info) cmd_info ;;
   uninstall) cmd_uninstall "$@" ;;
