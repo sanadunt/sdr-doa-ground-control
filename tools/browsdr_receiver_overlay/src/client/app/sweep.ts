@@ -618,9 +618,8 @@ export const sweepMethods = {
 		}
 
 		if (workspace === 'records') {
+			// The Records component loads its own data when it becomes active.
 			this.activeWorkspace = 'records';
-			await this.$nextTick();
-			await this.loadReceiverRecords();
 			return;
 		}
 

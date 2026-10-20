@@ -21,6 +21,7 @@ import { receiverRecordsApi } from './receiver-records-api';
 import { i18nMethods, receiverLanguage, translateReceiver } from './i18n';
 import { setSweepCanvasTranslator } from './sweep-marker-renderer';
 import { installConsoleBridge } from './console-bridge';
+import { ReceiverArchive } from './records-archive';
 
 const Backend = Comlink.wrap<any>(new Worker(new URL('../worker/main.ts', import.meta.url), { type: 'module' }));
 
@@ -49,7 +50,7 @@ if ('caches' in window) {
 	void caches.delete('api-cache').catch(() => undefined);
 }
 
-receiverApp = createApp({
+const app = createApp({
 	data() { return createAppData(); },
 	computed: { ...computedProperties },
 	methods: {
@@ -298,7 +299,10 @@ receiverApp = createApp({
 		void this.disarmVfoAudioRecording();
 		if (this.sweep.active || this.sweep.starting) void this.stopSweep(false, 'stopped');
 	},
-}).mount('#app');
+});
+// The Records workspace (records-archive.ts); registered before mount so the in-DOM template finds it.
+app.component('receiver-archive', ReceiverArchive);
+receiverApp = app.mount('#app');
 window.addEventListener('console-language-change', (event: Event) => {
 	receiverApp.uiLanguage = receiverLanguage((event as CustomEvent<unknown>).detail);
 	if (receiverApp.activeWorkspace === 'spectrum') receiverApp.drawSweepSpectrum();

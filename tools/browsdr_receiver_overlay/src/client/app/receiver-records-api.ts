@@ -59,67 +59,11 @@ export interface ReceiverTracePage {
 	limit: number;
 }
 
-export interface ReceiverAudioSegmentRecord {
-	id: string;
-	vfo_index: number;
-	frequency_hz: number;
-	mode: string;
-	bandwidth_hz: number;
-	started_at: string;
-	ended_at: string | null;
-	duration_seconds: number | null;
-	codec: string;
-	bytes: number;
-	/** complete, partial (upload failed later) and interrupted (page closed) segments are playable. */
-	status: 'complete' | 'partial' | 'interrupted' | 'failed' | 'recording';
-	error: string;
-}
-
 export interface ReceiverAudioUsage {
 	sessionBytes: number;
 	segmentBytes: number;
 	maxSessionBytes: number;
 	maxSegmentBytes: number;
-}
-
-export interface ReceiverAudioSessionRecord {
-	type: 'audio-session';
-	id: string;
-	created_at: string;
-	completed_at: string | null;
-	segments: ReceiverAudioSegmentRecord[];
-}
-
-export type ReceiverRecord = ReceiverScanRecord | ReceiverAudioSessionRecord;
-
-export interface ReceiverRecordPage {
-	items: ReceiverRecord[];
-	total: number;
-	offset: number;
-	limit: number;
-}
-
-export interface ReceiverAudioRecordFacets {
-	available_dates: string[];
-	vfo_indices: number[];
-	modes: string[];
-	bandwidths_hz: number[];
-	min_frequency_hz: number | null;
-	max_frequency_hz: number | null;
-	time_zone_fallback: boolean;
-}
-
-export interface ReceiverAudioRecordFilters {
-	date: string;
-	timeFrom: string;
-	timeTo: string;
-	timeZone: string;
-	utcOffsetMinutes: number;
-	minimumFrequencyMHz: string;
-	maximumFrequencyMHz: string;
-	vfoIndex: string;
-	mode: string;
-	bandwidthHz: string;
 }
 
 export interface CreateScanInput {
@@ -329,41 +273,6 @@ function parseScanRecord(value: unknown): ReceiverScanRecord {
 	};
 }
 
-function parseAudioSegment(value: unknown): ReceiverAudioSegmentRecord {
-	const row = objectValue(value, 'Audio segment');
-	const status = row.status === undefined ? 'complete' : row.status;
-	if (status !== 'complete' && status !== 'partial' && status !== 'interrupted' && status !== 'failed' && status !== 'recording') {
-		throw new TypeError('Audio segment status is invalid.');
-	}
-	return {
-		id: stringValue(row.id, 'audio segment id'),
-		vfo_index: integerValue(row.vfo_index, 'audio VFO index'),
-		frequency_hz: numberValue(row.frequency_hz, 'audio frequency_hz'),
-		mode: stringValue(row.mode, 'audio mode'),
-		bandwidth_hz: numberValue(row.bandwidth_hz, 'audio bandwidth_hz'),
-		started_at: stringValue(row.started_at, 'audio started_at'),
-		ended_at: nullableString(row.ended_at, 'audio ended_at'),
-		duration_seconds: row.duration_seconds === null || row.duration_seconds === undefined ? null : numberValue(row.duration_seconds, 'audio duration_seconds'),
-		codec: stringValue(row.codec, 'audio codec'),
-		bytes: integerValue(row.bytes, 'audio bytes'),
-		status,
-		error: typeof row.error === 'string' ? row.error : '',
-	};
-}
-
-function parseRecord(value: unknown): ReceiverRecord {
-	const row = objectValue(value, 'Receiver record');
-	if (row.type === 'scan') return parseScanRecord(row);
-	if (row.type !== 'audio-session' || !Array.isArray(row.segments)) throw new TypeError('Receiver record type is invalid.');
-	return {
-		type: 'audio-session',
-		id: stringValue(row.id, 'audio session id'),
-		created_at: stringValue(row.created_at, 'audio session created_at'),
-		completed_at: nullableString(row.completed_at, 'audio session completed_at'),
-		segments: row.segments.map(parseAudioSegment),
-	};
-}
-
 function parseTrace(value: unknown): ReceiverTraceRecord {
 	const row = objectValue(value, 'Trace record');
 	return { sweep: integerValue(row.sweep, 'trace sweep'), created_at: stringValue(row.created_at, 'trace created_at') };
@@ -562,90 +471,6 @@ export const receiverRecordsApi = {
 		failedTraceUploads.delete(scanId);
 	},
 
-	listRecords(type: ReceiverRecord['type'], offset = 0, limit = 100): Promise<ReceiverRecordPage> {
-		const params = new URLSearchParams({ type, offset: String(offset), limit: String(limit) });
-		return request(`/records?${params.toString()}`, {}, value => {
-			const page = parsePage(value, parseRecord, 'Records page');
-			if (page.items.some(record => record.type !== type)) {
-				throw new TypeError(`Records response included an item outside the ${type} filter.`);
-			}
-			return page;
-		});
-	},
-
-	listAudioRecords(offset = 0, limit = 100, filters: ReceiverAudioRecordFilters): Promise<ReceiverRecordPage> {
-		const params = new URLSearchParams({ type: 'audio-session', offset: String(offset), limit: String(limit) });
-		if (filters.date) {
-			const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(filters.date);
-			if (!match) throw new TypeError('Audio date must use YYYY-MM-DD.');
-			const year = Number(match[1]);
-			const month = Number(match[2]);
-			const day = Number(match[3]);
-			const start = new Date(year, month - 1, day);
-			if (year < 100) start.setFullYear(year);
-			if (start.getFullYear() !== year || start.getMonth() !== month - 1 || start.getDate() !== day) {
-				throw new TypeError('Audio date filter is not a valid calendar date.');
-			}
-			const end = new Date(start);
-			end.setDate(end.getDate() + 1);
-			params.set('started_after', start.toISOString());
-			params.set('started_before', end.toISOString());
-		}
-		if (filters.timeFrom) params.set('time_from', filters.timeFrom);
-		if (filters.timeTo) params.set('time_to', filters.timeTo);
-		if (filters.timeFrom || filters.timeTo) {
-			params.set('time_zone', filters.timeZone);
-			params.set('utc_offset_minutes', String(filters.utcOffsetMinutes));
-		}
-		if (filters.minimumFrequencyMHz) {
-			const frequencyMHz = Number(filters.minimumFrequencyMHz);
-			if (!Number.isFinite(frequencyMHz) || frequencyMHz < 0) throw new TypeError('Minimum frequency must be a nonnegative MHz value.');
-			params.set('min_frequency_hz', String(frequencyMHz * 1_000_000));
-		}
-		if (filters.maximumFrequencyMHz) {
-			const frequencyMHz = Number(filters.maximumFrequencyMHz);
-			if (!Number.isFinite(frequencyMHz) || frequencyMHz < 0) throw new TypeError('Maximum frequency must be a nonnegative MHz value.');
-			params.set('max_frequency_hz', String(frequencyMHz * 1_000_000));
-		}
-		if (filters.vfoIndex) params.set('vfo_index', filters.vfoIndex);
-		if (filters.mode) params.set('mode', filters.mode);
-		if (filters.bandwidthHz) params.set('bandwidth_hz', filters.bandwidthHz);
-		return request(`/records?${params.toString()}`, {}, value => {
-			const page = parsePage(value, parseRecord, 'VFO audio records');
-			if (page.items.some(record => record.type !== 'audio-session')) {
-				throw new TypeError('VFO audio records response included another record type.');
-			}
-			return page;
-		});
-	},
-
-	getAudioRecordFacets(timeZone: string, utcOffsetMinutes: number): Promise<ReceiverAudioRecordFacets> {
-		const params = new URLSearchParams({ time_zone: timeZone, utc_offset_minutes: String(utcOffsetMinutes) });
-		return request(`/audio-facets?${params.toString()}`, {}, value => {
-			const row = objectValue(value, 'VFO audio facets');
-			if (!Array.isArray(row.available_dates) || !Array.isArray(row.vfo_indices) || !Array.isArray(row.modes) || !Array.isArray(row.bandwidths_hz)) {
-				throw new TypeError('VFO audio facet options must be arrays.');
-			}
-			return {
-				available_dates: row.available_dates.map((entry, index) => stringValue(entry, `available_dates[${index}]`)),
-				vfo_indices: row.vfo_indices.map((entry, index) => integerValue(entry, `vfo_indices[${index}]`)),
-				modes: row.modes.map((entry, index) => stringValue(entry, `modes[${index}]`)),
-				bandwidths_hz: row.bandwidths_hz.map((entry, index) => numberValue(entry, `bandwidths_hz[${index}]`)),
-				min_frequency_hz: row.min_frequency_hz === null ? null : numberValue(row.min_frequency_hz, 'min_frequency_hz'),
-				max_frequency_hz: row.max_frequency_hz === null ? null : numberValue(row.max_frequency_hz, 'max_frequency_hz'),
-				time_zone_fallback: row.time_zone_fallback === true,
-			};
-		});
-	},
-
-	deleteAudioSegment(segmentId: string): Promise<void> {
-		return request(`/audio-segments/${encodeId(segmentId)}`, { method: 'DELETE' }, parseVoid);
-	},
-
-	deleteRecord(recordId: string): Promise<void> {
-		return request(`/records/${encodeId(recordId)}`, { method: 'DELETE' }, parseVoid);
-	},
-
 	async getMarkerSets(): Promise<ReceiverMarkerSet[]> {
 		const result = objectValue(await request('/marker-sets', {}, value => value), 'Marker sets');
 		if (!Array.isArray(result.items)) throw new TypeError('Marker sets items must be an array.');
@@ -700,9 +525,5 @@ export const receiverRecordsApi = {
 			...json(options.finalizeOpenSegments ? { finalize_open_segments: true } : {}),
 			keepalive: Boolean(options.keepalive),
 		}, parseVoid);
-	},
-
-	audioUrl(segmentId: string): string {
-		return `${API_ROOT}/audio-segments/${encodeId(segmentId)}/audio`;
 	},
 };

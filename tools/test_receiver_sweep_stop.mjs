@@ -258,9 +258,10 @@ test('returning to Spectrum without a Listen session asks before ending a VFO re
 test('arrow keys away from Spectrum do not ask', async () => {
 	const { app, log } = workspaceApp(false);
 	app.activeWorkspace = 'spectrum';
+	// The Records component loads its own data once it is active; the root loads nothing.
 	app.loadReceiverRecords = async () => { log.push('records'); };
 	app.onWorkspaceTabsKeydown(arrowKey('End'));
 	await settle();
-	assert.deepEqual(log, ['records']);
+	assert.deepEqual(log, []);
 	assert.equal(app.activeWorkspace, 'records');
 });
