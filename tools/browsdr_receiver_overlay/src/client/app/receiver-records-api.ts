@@ -147,7 +147,11 @@ const AUDIO_CHUNK_TIMEOUT_MS = 30_000;
 const ARCHIVE_RETRY_DELAYS_MS = [500, 2_000];
 
 export class ReceiverRequestError extends Error {
-	constructor(message: string, readonly status: number) {
+	/**
+	 * `code` is the console's error code ({ok: false, code, error}), and `details` the
+	 * rest of that body, such as the count of an ARCHIVE_SELECTION_CHANGED answer.
+	 */
+	constructor(message: string, readonly status: number, readonly code = '', readonly details: Readonly<Record<string, unknown>> = {}) {
 		super(message);
 		this.name = 'ReceiverRequestError';
 	}
@@ -392,9 +396,19 @@ function parseScanDetails(value: unknown): ReceiverScanDetails {
 	return { ...record, config: parsedConfig, traceFormat };
 }
 
-async function request<T>(path: string, init: RequestInit, parse: (value: unknown) => T, timeoutMs = JSON_TIMEOUT_MS): Promise<T> {
+/**
+ * A same-origin JSON request to /api/receiver. `init.signal` cancels it as well as the
+ * timeout; an error answer throws ReceiverRequestError with the console's code.
+ */
+export async function request<T>(path: string, init: RequestInit, parse: (value: unknown) => T, timeoutMs = JSON_TIMEOUT_MS): Promise<T> {
 	const controller = new AbortController();
 	const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+	const outer = init.signal;
+	const abortFromOuter = () => controller.abort();
+	if (outer) {
+		if (outer.aborted) controller.abort();
+		else outer.addEventListener('abort', abortFromOuter, { once: true });
+	}
 	try {
 		const headers = new Headers(init.headers);
 		if (typeof init.body === 'string') headers.set('Content-Type', 'application/json');
@@ -410,14 +424,17 @@ async function request<T>(path: string, init: RequestInit, parse: (value: unknow
 		const text = await response.text();
 		if (!response.ok) {
 			let detail = text;
+			let code = '';
+			let details: Record<string, unknown> = {};
 			try {
-				const body: unknown = JSON.parse(text);
-				const error = objectValue(body, 'Receiver error').error;
-				if (typeof error === 'string') detail = error;
+				const body = objectValue(JSON.parse(text), 'Receiver error');
+				if (typeof body.error === 'string') detail = body.error;
+				if (typeof body.code === 'string') code = body.code;
+				details = body;
 			} catch {
 				// Keep the server's plain-text diagnostic.
 			}
-			throw new ReceiverRequestError(detail || `Receiver records request failed with HTTP ${response.status}.`, response.status);
+			throw new ReceiverRequestError(detail || `Receiver records request failed with HTTP ${response.status}.`, response.status, code, details);
 		}
 		let body: unknown;
 		if (text) {
@@ -430,6 +447,7 @@ async function request<T>(path: string, init: RequestInit, parse: (value: unknow
 		return parse(body);
 	} finally {
 		window.clearTimeout(timeout);
+		outer?.removeEventListener('abort', abortFromOuter);
 	}
 }
 

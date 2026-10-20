@@ -33,6 +33,15 @@ test('template, builder and script strings passed to t() have Indonesian text', 
 	assert.deepEqual(missing, []);
 });
 
+test('no key appears twice in RECEIVER_INDONESIAN', () => {
+	// The overlay build runs vite without tsc, so a repeated key would silently override the first.
+	const block = source.slice(source.indexOf('export const RECEIVER_INDONESIAN:'), source.indexOf('export const RECEIVER_INDONESIAN_PATTERNS'));
+	const keys = [...block.matchAll(/^\t'((?:[^'\\]|\\.)*)':/gm)].map(match => match[1]);
+	assert.ok(keys.length > 400, `expected the dictionary keys, found ${keys.length}`);
+	assert.equal(keys.length, Object.keys(RECEIVER_INDONESIAN).length, 'every entry is a single-quoted key on its own line');
+	assert.deepEqual(keys.filter((key, index) => keys.indexOf(key) !== index), []);
+});
+
 test('the radio is shown as RadioSpectrum, never by its upstream brand', () => {
 	assert.equal(radioDisplayText('HackRF One'), 'RadioSpectrum One');
 	assert.equal(radioDisplayText('Mock SDR (Signal Gen)'), 'Mock SDR (Signal Gen)');
@@ -114,6 +123,12 @@ test('run-time messages are translated, including known errors inside them', () 
 			'Arsip pindai menyimpan lagi; 1 trace sweep dari pindai ini tidak tersimpan.'],
 		['VFO audio recording stopped because the sample rate or FFT size changed. Saved audio is in Records.',
 			'Rekaman audio VFO berhenti karena sample rate atau ukuran FFT berubah. Audio yang tersimpan ada di Rekaman.'],
+		['3 records deleted.', '3 rekaman dihapus.'],
+		['1 record was not deleted.', '1 rekaman tidak dihapus.'],
+		['Retention removed 34 records (1.2 GiB).', 'Retensi menghapus 34 rekaman (1.2 GiB).'],
+		['2 not removed', '2 tidak terhapus'],
+		['Could not prepare the ZIP: The selection is too large for one ZIP.', 'ZIP tidak bisa disiapkan: Pilihan terlalu besar untuk satu ZIP.'],
+		['Could not delete records: Stop the recording or scan before deleting it.', 'Rekaman tidak bisa dihapus: Hentikan rekaman atau pindai sebelum menghapusnya.'],
 	];
 	for (const [english, indonesian] of cases) {
 		assert.equal(translateReceiverMessage('id', english), indonesian);
@@ -127,7 +142,7 @@ test('run-time messages are translated, including known errors inside them', () 
 test('bookmark categories and calendar days have Indonesian text; status codes stay English', () => {
 	const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 	assert.deepEqual(weekdays.filter(key => !(key in RECEIVER_INDONESIAN)), []);
-	for (const code of ['SIMULATION', 'SCANNING', 'STOPPED', 'MOCK', 'REC', 'stopped', 'complete']) {
+	for (const code of ['SIMULATION', 'SCANNING', 'STOPPED', 'COMPLETE', 'PARTIAL', 'INTERRUPTED', 'FAILED', 'MOCK', 'REC', 'stopped', 'complete']) {
 		assert.equal(translateReceiver('id', code), code);
 	}
 	assert.equal(receiverDateLocale('id'), 'id-ID');
