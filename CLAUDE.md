@@ -17,7 +17,8 @@ cd frontend && npx vitest run -t "partial test name"
 
 # Python unittest-based files (test_ground_console_static, test_rdf_node_mqtt_v2, test_sdr_doa_mqtt_monitor,
 # test_receiver_record_store, test_build_browsdr_receiver, test_mqtt_config_patch, test_config_patch_contract,
-# test_preferences_store, test_make_release, test_tile_cache, test_basemap_contract, test_receiver_archive)
+# test_preferences_store, test_make_release, test_tile_cache, test_basemap_contract, test_receiver_archive,
+# test_release_workflow)
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_ground_console_static.GroundConsoleStaticRegressionTests.<test_method>
 # Records archive: migration, queries, retention, delete, ZIP export, the read rule and the archive routes
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_receiver_archive tools.test_receiver_record_store
@@ -28,6 +29,8 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_mqtt_config_pa
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_preferences_store tools.test_make_release
 # Basemap tile route and cache (loopback fake upstream, no network) and the lib/basemaps.ts <-> tile_cache.py contract
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_tile_cache tools.test_basemap_contract
+# GitHub workflows and tools/release_check.py (tag rule, assets, image tags); the YAML checks skip without PyYAML
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_release_workflow
 
 # Python standalone assert scripts (all other tools/test_*.py): run the whole file,
 # or call one test_* function directly
@@ -90,6 +93,14 @@ The standalone scripts collect every module-level `test_*` function in their `__
 - Packaging: `tools/make_release.py` builds `dist/release/sdr-doa-ground-console-<VERSION>-linux.tar.gz`, `sdr-doa-rdf-sdr-agent-<VERSION>.tar.gz` and `SHA256SUMS` (runtime modules are the import closure of each entry point; tests never ship; `--skip-build`, `--with-wheels`, `--stage-console`/`--stage-agent`). `packaging/console/install.sh` installs a venv, a systemd user service with lingering and `sdr-doa-console` (refuses root); `packaging/agent/install-agent.sh` installs `sdr-doa-agent.service` as a non-root user (refuses `--user root`), settings in `/etc/sdr-doa-agent/agent.env` read by `run-agent.sh`. Docker: `Dockerfile` (regular clone with the submodule; a git worktree is refused by `packaging/docker/check-build-context.sh`), `Dockerfile.release` (unpacked release), `Dockerfile.agent` (no `RUN`, cross-builds for arm64/armv7). Every compose file uses `network_mode: host` and no `ports:`, because the console only binds loopback.
 - After changing a runtime module's imports, a launch flag, or a packaging file, run `tools.test_make_release`; it checks the shipped module list, that every launch path uses the data directory and loopback, and shell syntax.
 
+## CI and releases
+
+- `.github/workflows/ci.yml` runs on pull requests, pushes to main and as the first job of a release (`workflow_call`). Job `verify` (ubuntu-24.04, Node 22, Python 3.12) runs the sequence of "Verification after a change", with every standalone `tools/test_*.py` (a file without `unittest.TestCase`; spell the base that way, `tools/test_release_workflow.py` checks it). `test_sdr_doa_mqtt_stdlib.py` and the broker part of `test_sdr_doa_mqtt.py` use mosquitto with `tools/mqtt_stage4.conf`; when the broker cannot start, only the stdlib script is skipped, with a warning. `make_release.py --skip-build` goes to a temp directory with `sha256sum -c`, `git diff --check` covers the pull request or the pushed commits, and the job fails when the run changed a tracked file. Job `python-minimum` runs `unittest discover` under Python 3.9 without a frontend build. The CI `.venv` also gets PyYAML so the YAML checks of `test_release_workflow` run.
+- `.github/workflows/release.yml` runs on a pushed `v*` tag or by hand (Run workflow) on main: `test` (ci.yml), then `build`: `tools/release_check.py tag` requires the tag to be `v<VERSION>` of the tagged commit and that commit to be on `origin/main`; a manual run on main releases `v<VERSION>`, creates the tag when it is missing and fails when the tag is on another commit. Then `make_release.py --with-wheels` and `release_check.py assets` (exactly the assets below, `SHA256SUMS` over the other three, the console tarball's `packaging/docker/sdr-doa-docker` equal to the asset). After `build`, in parallel: `release` (`contents: write`) creates a missing tag through the API and runs `gh release create --verify-tag --generate-notes` with the title "SDR-DoA Ground Console <V>", `--prerelease` when V has a `-`; a rerun of an existing release replaces its assets (`--clobber`). `images` (`packages: write`) unpacks both tarballs, checks `SHA256SUMS` and each `MANIFEST.sha256`, and pushes the console image (`Dockerfile.release`, linux/amd64 and arm64) and the agent image (`Dockerfile.agent`, linux/amd64, arm64 and arm/v7), then logs out and checks an anonymous `docker manifest inspect`.
+- Release assets: `sdr-doa-ground-console-<V>-linux.tar.gz`, `sdr-doa-rdf-sdr-agent-<V>.tar.gz`, `sdr-doa-docker` and `SHA256SUMS`. Images: `ghcr.io/sanadunt/sdr-doa-ground-console` and `ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent` (the namespace is the repository owner, lowercase), tagged `<V>`, `<MAJOR>.<MINOR>`, `<MAJOR>` and `latest`; a prerelease gets only `<V>`. Labels `org.opencontainers.image.version`, `revision` (the commit) and `source` (the repository URL).
+- Workflow rules, checked by `tools/test_release_workflow.py`: workflow permissions `contents: read` and writes only on `release` and `images`; every third-party action pinned to a full commit SHA with its version in a comment (look new ones up with `git ls-remote https://github.com/<owner>/<action> 'refs/tags/v*'`); no secret but `GITHUB_TOKEN`; no `${{ }}` inside a `run:` script (values go through `env:`); checkouts with `persist-credentials: false`. Lint workflow changes with `actionlint` (for example `pip install actionlint-py shellcheck-py` in a scratch venv).
+- Cutting a release: bump `VERSION` on main (`X.Y.Z`, or `X.Y.Z-rc.N` for a prerelease; no leading zeros and no `+build`, since it is also the image tag), then `git tag vX.Y.Z <commit on main> && git push origin vX.Y.Z`, or Actions > Release > Run workflow on main. GHCR creates a new package as private, so after the first release set both packages to Public once (package settings, Change visibility); until then Docker hosts cannot pull without a login and the `images` job warns.
+
 ## Verification after a change
 
 The expected sequence before calling work done:
@@ -103,7 +114,7 @@ node --test tools/test_receiver_*.mjs       # when Receiver code changed
 git diff --check
 ```
 
-`npm run build:all` needs the submodule. Without it, `npm run build` is the frontend-only build and the Receiver checks are skipped.
+CI (`.github/workflows/ci.yml`, see "CI and releases") runs all of it on every pull request and push to main. `npm run build:all` needs the submodule. Without it, `npm run build` is the frontend-only build and the Receiver checks are skipped.
 
 The `.venv` is not committed. Create it locally with Python 3.9+ (stdlib is enough for most tools; add `paho-mqtt==2.1.0` for the MQTT monitor/publisher and their tests).
 
