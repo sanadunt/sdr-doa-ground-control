@@ -291,7 +291,7 @@ WantedBy=timers.target
 UNIT
   systemctl --user daemon-reload
   systemctl --user enable --now "$UPDATE_UNIT.timer" >/dev/null 2>&1 || die "systemctl --user enable --now $UPDATE_UNIT.timer failed"
-  user=$(id -un)
+  user=$(id -un 2>/dev/null || id -u)
   if command -v loginctl >/dev/null 2>&1 &&
     [ "$(loginctl show-user "$user" -p Linger --value 2>/dev/null || true)" != yes ]; then
     echo "sdr-doa-console: warning: lingering is off, so the timer runs only while $user is logged in; turn it on with: sudo loginctl enable-linger $user" >&2

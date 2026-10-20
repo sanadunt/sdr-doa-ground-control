@@ -332,6 +332,9 @@ FAKE_ID = r'''#!/bin/sh
 if [ "${1:-}" = -u ] && [ $# -eq 1 ]; then echo 1000; exit 0; fi
 exec /usr/bin/id "$@"
 '''
+# The same for root, so the root paths (auto-update on) also run in a test
+# that is not root, as on a CI runner; every path they write is redirected.
+FAKE_ROOT_ID = FAKE_ID.replace("echo 1000", "echo 0")
 
 
 class Harness:
@@ -359,6 +362,11 @@ class Harness:
         fake_id = self.nonroot_bin / "id"
         fake_id.write_text(FAKE_ID, encoding="utf-8")
         fake_id.chmod(0o755)
+        self.root_bin = base / "root-bin"
+        self.root_bin.mkdir()
+        fake_root_id = self.root_bin / "id"
+        fake_root_id.write_text(FAKE_ROOT_ID, encoding="utf-8")
+        fake_root_id.chmod(0o755)
         self.write_state({
             "registry": {},
             "images": {},
@@ -417,6 +425,8 @@ class Harness:
         path = os.environ.get("PATH", "/usr/bin:/bin")
         if nonroot:
             path = f"{self.nonroot_bin}:{path}"
+        elif os.geteuid() != 0:
+            path = f"{self.root_bin}:{path}"
         env = {
             "PATH": f"{self.bin}:{path}",
             "HOME": str(self.home),

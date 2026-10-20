@@ -619,7 +619,11 @@ class SourceTableTests(unittest.TestCase):
             tile_cache.validate_sources({"other": TileSource("osm", ("https://a/{z}/{x}/{y}",), 19)})
 
     def test_upstream_opener_uses_the_environment_proxy_except_for_loopback(self) -> None:
-        cache = TileCache(Path(tempfile.gettempdir()) / "unused-tile-cache", 0)
+        # urllib keeps a ProxyHandler only when the environment names a proxy,
+        # so give it one: a CI runner usually has none.
+        proxy = "http://proxy.invalid:3128"
+        with patch.dict(os.environ, {"https_proxy": proxy, "HTTPS_PROXY": proxy}):
+            cache = TileCache(Path(tempfile.gettempdir()) / "unused-tile-cache", 0)
         proxied = [type(handler).__name__ for handler in cache._proxy_opener.handlers]
         direct = [handler for handler in cache._direct_opener.handlers if getattr(handler, "proxies", None)]
         self.assertIn("ProxyHandler", proxied)

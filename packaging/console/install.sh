@@ -355,7 +355,7 @@ install_service() {
   render "$ASSETS/sdr-doa-ground-console.service.in" "$UNIT_FILE" 0644
   systemctl --user daemon-reload
   systemctl --user enable "$UNIT" >/dev/null 2>&1 || die "systemctl --user enable $UNIT failed"
-  user=$(id -un)
+  user=$(id -un 2>/dev/null || id -u)
   if command -v loginctl >/dev/null 2>&1; then
     if [ "$(loginctl show-user "$user" -p Linger --value 2>/dev/null || true)" != yes ]; then
       loginctl enable-linger "$user" 2>/dev/null ||
