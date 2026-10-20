@@ -658,11 +658,13 @@ sdr-doa-console open        start bila perlu, lalu buka di Chromium/Chrome
 sdr-doa-console start | stop | restart | status
 sdr-doa-console logs        ikuti log (journalctl --user)
 sdr-doa-console password    ganti kata sandi admin, lalu restart console
+sdr-doa-console update      pasang rilis terbaru dari GitHub (--check hanya menampilkan)
+sdr-doa-console auto-update on|off|status   update otomatis setiap hari (default 03.45)
 sdr-doa-console info        versi dan lokasi file
 sdr-doa-console uninstall   hapus program; --purge juga menghapus data
 ```
 
-Upgrade: ekstrak rilis baru dan jalankan `sh install.sh` lagi. Program dan venv diganti; data, kata sandi, dan console yang sedang jalan dipertahankan.
+Upgrade: `sdr-doa-console update` mengambil rilis terbaru dengan versi mayor yang sama dari GitHub Releases tanpa login (repository publik), memeriksa SHA-256-nya, lalu menjalankan `install.sh` rilis itu dengan opsi instalasi sekarang. Bila versi baru tidak menjawab `/api/health` dalam 60 detik, program lama dikembalikan dan dijalankan lagi. `sdr-doa-console auto-update on` melakukannya setiap hari lewat systemd user timer. Cara manual tetap bisa: ekstrak rilis baru dan jalankan `sh install.sh` lagi. Program dan venv diganti; data, kata sandi, dan console yang sedang jalan dipertahankan. Rincian di `packaging/console/README.md`.
 
 ### Jalan di background dan saat boot
 

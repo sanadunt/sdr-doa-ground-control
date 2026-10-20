@@ -31,7 +31,7 @@ Isi tarball console: `frontend/dist` (termasuk `receiver/`), modul runtime di `t
 | `Dockerfile.release`, `docker-compose.release.yml` | image console dari rilis yang diekstrak, tanpa Node |
 | `Dockerfile.agent`, `docker-compose.agent.yml` | image agent, multi-arch, tanpa langkah `RUN` |
 | `docker-compose.ghcr.yml` | console dari image GHCR (`${SDR_DOA_IMAGE_TAG:-2}`), compose yang sama dengan yang ditulis `sdr-doa-docker` |
-| `packaging/console/` | `install.sh`, perintah `sdr-doa-console`, template service/desktop, `set_admin_password.py`, `requirements.txt` |
+| `packaging/console/` | `install.sh`, perintah `sdr-doa-console`, template service/desktop, `set_admin_password.py`, `update_release.py` (updater `sdr-doa-console update`), `requirements.txt` |
 | `packaging/agent/` | `install-agent.sh`, `uninstall-agent.sh`, `run-agent.sh`, template service, `agent.env.example` |
 | `packaging/docker/` | entrypoint console, healthcheck, pemeriksaan build context, dan `sdr-doa-docker` (install, update dengan healthcheck dan rollback, timer update harian; `tools/test_docker_update.py`) |
 | `tools/make_release.py` | builder rilis; `--stage-console DIR`/`--stage-agent DIR` dipakai Docker dan installer dari repository |

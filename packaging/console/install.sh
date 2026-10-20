@@ -9,8 +9,11 @@
 #   sh install.sh            # asks for the admin password
 #   sh install.sh --yes      # no questions
 #
-# Re-running it upgrades the program and keeps the saved data. Run it from the
-# unpacked release, or from a repository checkout after npm run build:all.
+# Re-running it upgrades the program and keeps the saved data and the admin
+# password. It records its options (never the password or first-start values)
+# in APP_DIR/install-options, so sdr-doa-console update can run the install.sh
+# of a newer release the same way. Run it from the unpacked release, or from a
+# repository checkout after npm run build:all.
 set -eu
 
 DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
@@ -27,6 +30,7 @@ DESKTOP_ON=1
 WORK=
 UNIT=sdr-doa-ground-console.service
 MARKER=.sdr-doa-console-install
+OPTIONS=install-options
 
 usage() {
   cat <<'EOF'
@@ -237,6 +241,21 @@ install_app() {
   "$venv/bin/python" -m pip install --quiet --disable-pip-version-check --no-input "$@" \
     -r "$APP_DIR/packaging/console/requirements.txt" ||
     die "pip could not install packaging/console/requirements.txt (network or proxy?)"
+  write_options
+}
+
+# The options of this run, one per line, for sdr-doa-console update. The paths
+# passed check_path, so a line needs no quoting.
+write_options() {
+  {
+    printf '%s\n' "# Written by install.sh $VERSION. sdr-doa-console update passes these options to the"
+    printf '%s\n' "# install.sh of a newer release. Passwords and first-start values are never kept."
+    printf '%s\n' "--prefix=$APP_DIR" "--data-dir=$DATA_DIR" "--bin-dir=$BIN_DIR" "--port=$PORT"
+    if [ "$SERVICE_ON" = 0 ]; then printf '%s\n' --no-service; fi
+    if [ "$DESKTOP_ON" = 0 ]; then printf '%s\n' --no-desktop; fi
+  } >"$APP_DIR/$OPTIONS.tmp"
+  chmod 0644 "$APP_DIR/$OPTIONS.tmp"
+  mv "$APP_DIR/$OPTIONS.tmp" "$APP_DIR/$OPTIONS"
 }
 
 # Settings saved by a console run from the repository with default paths.
@@ -385,6 +404,7 @@ main() {
     *) warn "$BIN_DIR is not on PATH; log in again or use $BIN_DIR/sdr-doa-console" ;;
   esac
   say "Open it: sdr-doa-console open (Chromium or Chrome; the Receiver needs WebUSB)"
+  say "Updates: sdr-doa-console update, or daily with: sdr-doa-console auto-update on"
   say "Saved data: $DATA_DIR    Help: sdr-doa-console help"
 }
 
