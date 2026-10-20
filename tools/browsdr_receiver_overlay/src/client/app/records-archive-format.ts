@@ -1004,7 +1004,8 @@ export function buildArchiveRow(item: ArchiveRowItem, context: RowContext): Arch
 		frequencyLabel,
 		modeLabel,
 		durationLabel: formatDuration(item.duration_s),
-		sizeLabel: formatBytes(item.bytes),
+		// A running scan's size is counted when it finishes, so it has none to show yet.
+		sizeLabel: !audio && item.status === 'running' ? '—' : formatBytes(item.bytes),
 		statusCode: statusCode(item.status),
 		statusClass,
 		statusTitle: item.error ? context.tm(item.error) : '',

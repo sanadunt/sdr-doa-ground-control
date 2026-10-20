@@ -374,6 +374,8 @@ test('table rows: labels prepared once, status codes, download links only when d
 		const scan = format.buildArchiveRow({ ...base, kind: 'scan', status: 'running', source: 'simulated', start_hz: 100e6, end_hz: 200e6, fft_size: 4096, trace_upload_failures: 3, error: 'Receiver storage error.' }, context);
 		assert.deepEqual([scan.typeLabel, scan.sourceLabel, scan.simulated, scan.statusCode, scan.modeLabel], ['Pindai', 'src:simulated', true, 'SCANNING', '4.88 kHz']);
 		assert.equal(scan.notSavedLabel, '3 tidak tersimpan');
+		assert.equal(scan.sizeLabel, '—', 'a running scan is counted when it finishes, so it shows no size yet');
+		assert.equal(format.buildArchiveRow({ ...base, kind: 'scan', bytes: 0, start_hz: 1e8, end_hz: 2e8 }, context).sizeLabel, '0 B');
 		assert.equal(scan.statusTitle, 'Galat penyimpanan Receiver.');
 		const ranged = format.buildArchiveRow({ ...base, kind: 'audio', start_ms: day.startMs + HOUR }, { ...context, mode: 'range' });
 		assert.equal(ranged.startDate, '20 Oct 2026', 'Range and All dates always show the date');
