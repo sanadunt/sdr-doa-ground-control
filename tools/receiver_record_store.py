@@ -961,6 +961,8 @@ class ReceiverRecordStore:
                     ).rowcount
                 if removed < batch:
                     break
+                # Let a waiting request (an audio chunk upload) take the lock.
+                time.sleep(ra.SCAN_DELETE_PAUSE_S)
         with self._lock, self._connect() as db:
             db.execute("DELETE FROM scans WHERE id=? AND status='deleting'", (scan_id,))
 

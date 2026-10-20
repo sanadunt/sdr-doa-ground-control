@@ -121,6 +121,9 @@ STREAM_CHUNK_BYTES = 64 * 1024
 # Rows each transaction of a scan delete removes; the store lock is released
 # between them so live audio chunk uploads are not stalled.
 SCAN_DELETE_BATCH_ROWS = 2000
+# Pause between those transactions. Python locks are not fair: without it the
+# deleting thread takes the lock straight back and a waiting upload starves.
+SCAN_DELETE_PAUSE_S = 0.002
 # Export size estimate; records-archive-format.ts uses the same numbers.
 ESTIMATE_AUDIO_EXTRA_BYTES = 1024
 ESTIMATE_SCAN_TRACE_BYTES = 16 * 1024

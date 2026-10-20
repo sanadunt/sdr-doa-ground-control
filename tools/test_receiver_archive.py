@@ -1048,6 +1048,22 @@ class SelectionAndDeleteTests(StoreCase):
         size = self.sql("SELECT byte_count FROM audio_segments WHERE id=?", (live,))[0][0]
         self.assertEqual(size, len(b"webm audio") + len(b"live chunk"))
 
+    def test_scan_delete_pauses_outside_the_lock_between_batches(self) -> None:
+        # Python locks are not fair: without a pause the deleting thread takes the
+        # lock straight back and a waiting chunk upload starves for the whole delete.
+        self.store.update_settings({"auto_spectrum_recording": True})
+        scan_id = self.scan(BASE, BASE + timedelta(minutes=1), traces=10)
+        pauses: List[Tuple[float, bool]] = []
+
+        def pause(seconds: float) -> None:
+            pauses.append((seconds, self.store._lock._is_owned()))
+
+        with mock.patch.object(ra, "SCAN_DELETE_BATCH_ROWS", 3), mock.patch.object(receiver_record_store.time, "sleep", pause):
+            result = self.store.archive_delete([("scan", scan_id)])
+        self.assertEqual(result["deleted"]["scan"], 1)
+        # Frames 3+3+3+1: a pause after each full batch, none after the last one.
+        self.assertEqual(pauses, [(ra.SCAN_DELETE_PAUSE_S, False)] * 3)
+
 
 class RetentionTests(StoreCase):
     def set_retention(self, days: Optional[int]) -> None:
