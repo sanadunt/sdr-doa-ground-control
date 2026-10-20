@@ -113,7 +113,7 @@ py -3 -m venv .venv
 .venv\Scripts\python.exe -m pip install --upgrade pip
 ```
 
-Seperti di macOS/Linux, monitor MQTT default membutuhkan `paho-mqtt`; tanpa paket ini console tetap berjalan dengan monitor berstatus ERROR. Python di Windows juga tidak membawa database zona waktu, jadi pasang `tzdata` agar filter tanggal dan jam di **Records** Receiver memakai zona waktu browser lengkap dengan aturan DST.
+Seperti di macOS/Linux, monitor MQTT default membutuhkan `paho-mqtt`; tanpa paket ini console tetap berjalan dengan monitor berstatus ERROR. Python di Windows juga tidak membawa database zona waktu. Kalender dan rentang waktu di **Rekaman** Receiver memakai batas hari dari browser sendiri, jadi tidak bergantung pada `tzdata`; paket ini hanya membuat jam lokal di nama file ZIP mengikuti zona waktu browser lengkap dengan aturan DST.
 
 PowerShell:
 
@@ -127,7 +127,7 @@ Command Prompt:
 .venv\Scripts\python.exe -m pip install paho-mqtt==2.1.0 tzdata
 ```
 
-Tanpa `tzdata`, Records tetap terbuka, tetapi filter memakai offset UTC browser saat ini dan label tanggal menandai "UTC offset".
+Tanpa `tzdata`, Rekaman tetap bekerja seperti biasa; hanya jam di nama file ZIP yang memakai offset UTC browser saat ini.
 
 Opsional, buat file environment lokal:
 
