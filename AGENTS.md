@@ -127,6 +127,7 @@ Most Python test files are standalone scripts with plain `assert` functions, so 
 - `initialize.md`: current repository entrypoint and safety rules.
 - `SDR_DOA_FRONTEND_WORKFLOW.md`: install, build, runtime, credential, and release workflow.
 - `QUICKSTART.md`: cross-platform install, build, run, simulation, and troubleshooting guide.
+- `docs/RUNBOOK_INSTALL_UPDATE.md`: step-by-step install and update runbook (Indonesian prose, exact commands) for an AI agent or an operator on a new host: rules, the values to ask the human, preflight, the Docker/native console and agent paths, migration, updates, verification, troubleshooting and uninstall. Keep it in step with `sdr-doa-docker`, `install.sh`, `update_release.py` and `install-agent.sh` when their commands, flags or messages change.
 - `frontend/package.json`, `frontend/package-lock.json`: npm scripts and locked dependency graph.
 - `frontend/src/main.tsx`, `frontend/src/App.tsx`: browser entry and application orchestration.
 - `frontend/src/api.ts`, `frontend/src/types.ts`: same-origin API adapter and shared data contracts.
