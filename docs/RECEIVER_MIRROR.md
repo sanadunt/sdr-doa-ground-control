@@ -184,6 +184,8 @@ Aturan basi (`mirrorView()` di `lib/receiverMirror.ts`, berurutan):
 
 RX yang berhenti bukan basi: tidak ada frame yang diharapkan, chip `RX OFF`, dan jejak terakhir tetap tergambar redup.
 
+Tombol Mulai/Berhenti dock MIRROR (nonaktif) mengikuti state terakhir seperti dock groundstation, bukan umur frame: Berhenti selama pindai `starting` atau `active` dan selama RX berjalan di luar scan listen, juga saat chip `STALE` atau **SUMBER PUTUS**; kesegaran hanya ditunjukkan chip.
+
 **Frame hanya mengalir selama halaman console groundstation terlihat.** Halaman tersembunyi (tab lain, jendela diminimalkan) tidak meminta frame dan mengirim `source.visible: false`, sehingga penampil menampilkan `STALE` dengan "Halaman groundstation tersembunyi; frame berhenti." Chrome juga bisa memperlambat timer di tab tersembunyi (sampai sekitar sekali per menit setelah beberapa menit tersembunyi), sehingga heartbeat bisa terlambat dan penampil menampilkan **SUMBER PUTUS**. Fase 0 dan 4 (tab engine khusus) dibuat untuk masalah ini.
 
 ## 7. Ukuran dan laju

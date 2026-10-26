@@ -270,4 +270,25 @@ describe('mirror view (stale rules)', () => {
     expect(at(answer({}, { busy: 'sweep', scan: { phase: 'active', start_hz: 1, stop_hz: 2, resolution_hz: null } }), 0)).toMatchObject({ phase: 'stale', message: 'mirror.noFrame' });
     expect(at(answer({}, { busy: 'scan-listen' }), 0)).toMatchObject({ phase: 'live', chip: 'BUSY', tone: 'warn', message: 'spectrum.scanListenBusy' });
   });
+
+  it('shows Stop from the last state, as the groundstation dock does, also while STALE or the source is lost', () => {
+    const fixture = readFixture();
+    const sweepFrame = { ...(fixture.frame as MirrorFrame), kind: 'sweep' as const };
+    const scan = (phase: 'starting' | 'active' | 'stopping') => answer({ frame: sweepFrame }, { busy: 'sweep', running: false, scan: { phase, start_hz: 400_000_000, stop_hz: 500_000_000, resolution_hz: 4882.8125 } });
+    for (const [elapsed, phase] of [[0, 'live'], [5_000, 'stale'], [20_000, 'lost']] as const) {
+      expect(at(scan('active'), elapsed)).toMatchObject({ phase, mode: 'sweep', stoppable: true });
+      expect(at(answer(), elapsed)).toMatchObject({ phase, mode: 'rx', stoppable: true });
+    }
+    // A scan that starts can be stopped; one that stops cannot (the dock's DockView.stoppable).
+    expect(at(scan('starting'), 0)).toMatchObject({ phase: 'changing', stoppable: true });
+    expect(at(scan('starting'), 20_000)).toMatchObject({ phase: 'lost', stoppable: true });
+    expect(at(scan('stopping'), 0)).toMatchObject({ phase: 'changing', stoppable: false });
+    // A scan listen on the Receiver page: BUSY, the radio is not the dock's to stop.
+    expect(at(answer({}, { busy: 'scan-listen' }), 0)).toMatchObject({ chip: 'BUSY', stoppable: false });
+    expect(at(answer({}, { running: false }), 0)).toMatchObject({ phase: 'stopped', mode: 'rx', stoppable: false });
+    expect(at(answer({}, { running: false }), 20_000)).toMatchObject({ phase: 'lost', stoppable: false });
+    expect(at(null, 0)).toMatchObject({ phase: 'connecting', stoppable: false });
+    expect(at(null, 0, true)).toMatchObject({ phase: 'lost', stoppable: false });
+    expect(at(answer({ source: null, state: null, frame: null }), 0)).toMatchObject({ phase: 'none', stoppable: false });
+  });
 });

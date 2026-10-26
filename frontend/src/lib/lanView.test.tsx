@@ -253,6 +253,37 @@ describe('LAN view UI', () => {
     expect(translate('id', 'mirror.chipLost')).toBe('SUMBER PUTUS');
   });
 
+  it('keeps Stop on a running scan or RX while its frames are STALE or its source is lost', () => {
+    const fixture = JSON.parse(readSource('../../../tools/fixtures/receiver-mirror/publish.json')) as Record<string, unknown>;
+    const fixtureState = fixture.state as Record<string, unknown>;
+    const answerWith = (state: Record<string, unknown>, frameKind: 'rx' | 'sweep') => normalizeMirrorAnswer({
+      ok: true, v: 1, rev: 5, frame_rev: 3, source: fixture.source, source_age_ms: 100, state, state_age_ms: 100,
+      frame: { ...(fixture.frame as Record<string, unknown>), kind: frameKind }, frame_age_ms: 150, limits: { frame_stale_ms: 3000, source_lost_ms: 10000 },
+    });
+    const scanAnswer = answerWith({ ...fixtureState, busy: 'sweep', running: false, scan: { phase: 'active', start_hz: 400_000_000, stop_hz: 500_000_000, resolution_hz: 4882.8125 } }, 'sweep');
+    const rxAnswer = answerWith(fixtureState, 'rx');
+    expect([scanAnswer?.state?.busy, rxAnswer?.state?.running]).toEqual(['sweep', true]);
+    const feedAt = (answer: typeof scanAnswer, ageMs: number): ReceiverMirrorFeed => {
+      const state: MirrorFeedState = { answer, receivedAtMs: Date.now() - ageMs, error: false };
+      return { retain: () => () => undefined, getState: () => state, onState: () => () => undefined, onSpectrum: () => () => undefined };
+    };
+    const chip = (markup: string) => markup.match(/<span class="ov-chip tone-\w+">([^<]*)<\/span>/)?.[1];
+    const runLabel = (markup: string) => markup.match(/<button class="ov-button ov-spec-run" type="button" disabled="">[\s\S]*?<span>([^<]*)<\/span>/)?.[1];
+    for (const lang of ['en', 'id'] as const) {
+      const stop = translate(lang, 'spectrum.stop');
+      for (const [answer, liveChip] of [[scanAnswer, 'SCAN'], [rxAnswer, 'RX']] as const) {
+        const live = withI18n(<SpectrumDockMirror feed={feedAt(answer, 0)} />, lang);
+        expect([chip(live), runLabel(live)]).toEqual([liveChip, stop]);
+        const stale = withI18n(<SpectrumDockMirror feed={feedAt(answer, 5_000)} />, lang);
+        expect([chip(stale), runLabel(stale)]).toEqual(['STALE', stop]);
+        const lost = withI18n(<SpectrumDockMirror feed={feedAt(answer, 20_000)} />, lang);
+        expect([chip(lost), runLabel(lost)]).toEqual([translate(lang, 'mirror.chipLost'), stop]);
+      }
+      const stopped = withI18n(<SpectrumDockMirror feed={feedAt(answerWith({ ...fixtureState, running: false }, 'rx'), 0)} />, lang);
+      expect([chip(stopped), runLabel(stopped)]).toEqual(['RX OFF', translate(lang, 'spectrum.start')]);
+    }
+  });
+
   it('has no Reconnect on the Message Monitor in the LAN view', () => {
     const page = (readOnly: boolean) => withI18n(
       <MessageMonitorPage mqtt={null} config={{ base_url: 'http://127.0.0.1:8081', mqtt_host: '127.0.0.1', mqtt_port: 1883, refresh_seconds: 2 }} onMqttChanged={() => undefined} readOnly={readOnly} />,

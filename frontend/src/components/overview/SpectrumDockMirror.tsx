@@ -137,7 +137,8 @@ export function SpectrumDockMirror({ feed: given = null }: { feed?: ReceiverMirr
   const view = useMirrorView(feed);
   const state = view.state;
   const shiftHz = state?.frequency_shift_hz ?? 0;
-  const running = view.mode === 'sweep' ? view.phase === 'live' || view.phase === 'changing' : state?.running === true;
+  // From the last state, as on the groundstation's dock; the chip shows STALE or SOURCE LOST.
+  const stoppable = view.stoppable;
   const listening = state?.running === true && state.vfo?.enabled === true;
   return (
     <section id="panel-spectrum" className="ov-spectrum is-view-only is-mirror" aria-labelledby="ov-spectrum-title">
@@ -162,7 +163,7 @@ export function SpectrumDockMirror({ feed: given = null }: { feed?: ReceiverMirr
         </div>
         <div className="ov-spec-group">
           <button className="ov-button ov-spec-run" type="button" disabled>
-            <Icon name={running ? 'stop' : 'play'} /><span>{running ? t('spectrum.stop') : t('spectrum.start')}</span>
+            <Icon name={stoppable ? 'stop' : 'play'} /><span>{stoppable ? t('spectrum.stop') : t('spectrum.start')}</span>
           </button>
         </div>
       </div>

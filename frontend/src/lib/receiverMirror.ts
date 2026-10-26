@@ -480,6 +480,13 @@ export interface MirrorView {
   tone: DockTone;
   /** The mode the Receiver runs: Spektrum while it scans, otherwise RX. */
   mode: DockMode;
+  /**
+   * Start/Stop shows Stop, as on the groundstation's dock (DockView.stoppable):
+   * a scan that starts or runs, or RX running outside a scan listen. It
+   * follows the last state, also while its frames are STALE or the source is
+   * lost; only the chip shows the freshness.
+   */
+  stoppable: boolean;
   /** The trace is drawn live; otherwise it is dimmed under the overlay. */
   live: boolean;
   message: MessageKey | null;
@@ -520,7 +527,9 @@ export function mirrorView({ answer, receivedAtMs, error, nowMs }: MirrorViewInp
   const state = answer?.state ?? null;
   const source = answer?.source ?? null;
   const mode: DockMode = state?.busy === 'sweep' ? 'sweep' : 'rx';
-  const base = { mode, live: false, sourceAgeMs, frameAgeMs, state, source, messageAgeMs: null, chipKey: null };
+  const scanPhase: SweepPhase = state?.busy === 'sweep' ? state.scan?.phase && state.scan.phase !== 'idle' ? state.scan.phase : 'active' : 'idle';
+  const stoppable = mode === 'sweep' ? scanPhase === 'active' || scanPhase === 'starting' : state?.running === true && state.busy !== 'scan-listen';
+  const base = { mode, stoppable, live: false, sourceAgeMs, frameAgeMs, state, source, messageAgeMs: null, chipKey: null };
   if (!answer) {
     return error
       ? { ...base, phase: 'lost', chip: '', chipKey: 'mirror.chipLost', tone: 'bad', message: 'mirror.readFailed' }
@@ -533,7 +542,6 @@ export function mirrorView({ answer, receivedAtMs, error, nowMs }: MirrorViewInp
   if (sourceAgeMs === null || sourceAgeMs > lostAfter) {
     return { ...base, phase: 'lost', chip: '', chipKey: 'mirror.chipLost', tone: 'bad', message: 'mirror.sourceLost', messageAgeMs: sourceAgeMs };
   }
-  const scanPhase: SweepPhase = state.busy === 'sweep' ? state.scan?.phase && state.scan.phase !== 'idle' ? state.scan.phase : 'active' : 'idle';
   const expected = mode === 'sweep' ? scanPhase === 'active' : state.running;
   if (expected) {
     const frame = answer.frame;
