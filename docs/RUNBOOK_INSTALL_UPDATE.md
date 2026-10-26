@@ -43,7 +43,7 @@ Konvensi:
 
 ### 1.2 Berhenti dan tanya manusia bila
 
-- Input di bagian 2 belum lengkap, atau nilainya di luar yang diterima kode (misalnya Data Out bukan salah satu dari empat host yang diizinkan).
+- Input di bagian 2 belum lengkap, atau nilainya di luar yang diterima kode (misalnya host base URL Data Out tidak ada di daftar host Data Out (cadangan) yang dipilih manusia, atau port selain 8081).
 - Preflight (bagian 4) gagal: arsitektur tidak didukung, Docker atau plugin `docker compose` (v2 atau lebih baru) tidak ada, Python < 3.9, disk tidak cukup, port 8787 dipakai, akses HTTPS ke GitHub/GHCR tertutup.
 - `sudo -n true` gagal (sudo butuh kata sandi) untuk Jalur A, C atau D (4.9). Jangan pernah meminta, menerima, atau mengetik kata sandi sudo.
 - Perlu memasang paket sistem (Docker Engine, `python3-venv`) atau mengubah proxy Docker daemon.
