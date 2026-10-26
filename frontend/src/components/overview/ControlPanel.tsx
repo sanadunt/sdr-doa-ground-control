@@ -34,7 +34,7 @@ export interface ControlPanelProps {
   /** Latest Data Out snapshot: current values the MQTT report lacks, and the read-back check. */
   snapshot?: TelemetrySnapshot | null;
   localSnapshotFresh?: boolean;
-  /** Read Data Out now (App's refresh; must be stable). */
+  /** Read Data Out now, settings.json included (App's refresh; must be stable). */
   onRefreshSnapshot?: () => void;
 }
 
@@ -472,7 +472,10 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
     setDone({ view, error: null, commandId: status.commandId, restarted: status.monitorRestarted, verify });
     setStage('done');
     if (view.reload) setReloadTick((tick) => tick + 1);
-  }, [ttlS]);
+    // The console may reuse settings.json for a while; read it now so the
+    // read-back starts from the node's current values.
+    if (verify) onRefreshSnapshot?.();
+  }, [ttlS, onRefreshSnapshot]);
 
   // Command status, every second until it is final.
   const sendingId = stage === 'sending' ? sending?.commandId ?? null : null;

@@ -2,6 +2,7 @@ import type { Candidate, CompassConfig, CompassResolution, ManualCompassOverride
 import { candidate, nativeViewsReady, numberOrNull, polarDataReady } from './telemetry';
 import type { Translate } from './i18n';
 import { formatDuration } from './healthView';
+import { settingsReadAtMs } from './snapshotRead';
 
 export function polarSettings(figType: unknown, compassOffset: unknown): PolarSettings {
   const requested = String(figType ?? 'Polar').trim().toLowerCase();
@@ -105,7 +106,8 @@ export function dataOutCompassFromSnapshot(snapshot: TelemetrySnapshot | null | 
   }
   const compassOffset = Object.prototype.hasOwnProperty.call(fields, 'compass_offset') ? finiteInput(fields.compass_offset) : null;
   if (figType === null && compassOffset === null) return null;
-  return { baseUrl: snapshotBaseUrl(snapshot), figType, compassOffset, observedAtMs: numberOrNull(snapshot.observed_at_ms) };
+  // A reused settings.json is as old as the read it came from.
+  return { baseUrl: snapshotBaseUrl(snapshot), figType, compassOffset, observedAtMs: settingsReadAtMs(snapshot) ?? numberOrNull(snapshot.observed_at_ms) };
 }
 
 /** Keep the latest usable Data Out display settings across reads that lack them. */

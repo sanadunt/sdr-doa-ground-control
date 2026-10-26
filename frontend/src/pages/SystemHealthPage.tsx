@@ -74,12 +74,14 @@ function overdriveNotice(t: Translate, quality: SignalQualityView): string {
 }
 
 function resourceResult(t: Translate, row: ResourceRow): { label: string; tone: Tone } {
+  if (row.reused && row.ok === true) return { label: 'REUSED', tone: 'neutral' };
   if (row.ok === true) return { label: row.httpStatus === null ? 'OK' : `HTTP ${row.httpStatus}`, tone: 'good' };
   if (row.ok === false) return { label: t(errorKindKey(row.errorKind)), tone: row.errorKind === 'skipped' ? 'warn' : 'bad' };
   return { label: 'N/A', tone: 'neutral' };
 }
 
 function resourceTime(t: Translate, row: ResourceRow): string {
+  if (row.reused) return row.reusedAgeMs === null ? 'N/A' : t('health.res.age', { age: formatDuration(t, row.reusedAgeMs) });
   const time = row.elapsedMs === null ? null : formatDuration(t, row.elapsedMs);
   const retried = row.attempts !== null && row.attempts > 1;
   if (time !== null && retried) return t('health.res.attempts', { time, count: row.attempts ?? 0 });

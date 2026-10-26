@@ -401,6 +401,15 @@ describe('Data Out compass settings resolution', () => {
     expect(compassOffsetSourceLabel(resolution, (key, vars) => translate('id', key, vars))).toBe('DATA_OUT terakhir diketahui 2.0 dtk');
   });
 
+  // #13: a reused settings.json is as old as the read it came from.
+  it('ages remembered settings from the settings.json read, not the snapshot', () => {
+    const reused = { ...settingsSnapshot({ doa_fig_type: 'Compass', compass_offset: 45 }, 1_030_000), settings: { available: true, fields: { doa_fig_type: 'Compass', compass_offset: 45 }, reused: true, read_at_ms: 1_000_000 } };
+    expect(dataOutCompassFromSnapshot(reused)?.observedAtMs).toBe(1_000_000);
+    const failed = settingsSnapshot(null, 1_032_000);
+    const resolution = resolveCompassSource(failed, LOCAL, DEFAULT_COMPASS_CONFIG, rememberDataOutCompass(dataOutCompassFromSnapshot(reused), failed));
+    expect(resolution.lastKnownAgeMs).toBe(32_000);
+  });
+
   it('falls back explicitly when the remembered settings are too old or from another node', () => {
     const memory = dataOutCompassFromSnapshot(settingsSnapshot({ doa_fig_type: 'Compass', compass_offset: 45 }, 1_000_000));
     const late = settingsSnapshot(null, 1_000_000 + DATA_OUT_SETTINGS_MAX_AGE_MS + 1);

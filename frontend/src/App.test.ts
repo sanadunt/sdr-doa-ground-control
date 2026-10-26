@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CONFIG_RETRY_DELAYS_MS, displayFresh, nextPollDelayMs, readWithRetry, savedConfigChangesTarget } from './App';
+import { CONFIG_RETRY_DELAYS_MS, displayFresh, inFlightReadCovers, nextPollDelayMs, readWithRetry, savedConfigChangesTarget } from './App';
 import { DEFAULT_CONSOLE_CONFIG } from './lib/telemetry';
+import { snapshotReadAtMonotonic } from './lib/snapshotRead';
 import type { TelemetrySnapshot } from './types';
 
 const fresh: TelemetrySnapshot = {
@@ -20,6 +21,16 @@ describe('display freshness', () => {
 
   it('is false while the last read failed', () => {
     expect(displayFresh(fresh, 0, true, 100)).toBe(false);
+  });
+
+  // #13: an answer from the console's shared read can be older than its arrival.
+  it('counts the time the answer waited on the console', () => {
+    const waited = { ...fresh, collection: { id: '0badc0de-3', age_ms: 1_500, shared: true } };
+    const readAt = snapshotReadAtMonotonic(waited, 10_000);
+    expect(readAt).toBe(8_500);
+    // 4 000 ms of the DoA window were left at the read, 1 500 of them passed on the console.
+    expect(displayFresh(waited, readAt, false, 12_400)).toBe(true);
+    expect(displayFresh(waited, readAt, false, 12_600)).toBe(false);
   });
 });
 
@@ -46,6 +57,26 @@ describe('automatic Data Out reads', () => {
   it('leave a gap after a read that took longer than the interval', () => {
     expect(nextPollDelayMs(1_000, 4_000)).toBe(500);
     expect(nextPollDelayMs(2_000, Number.NaN)).toBe(2_000);
+  });
+
+  // #13: a page that got an earlier shared read polls again one interval after
+  // that read, so it gets the next shared read when it is new.
+  it('start one interval after the node was read when the answer came from an earlier read', () => {
+    expect(nextPollDelayMs(2_000, 20, 1_200)).toBe(800);
+    expect(nextPollDelayMs(2_000, 300, 100)).toBe(1_700);
+    expect(nextPollDelayMs(2_000, 20, 1_900)).toBe(500);
+    expect(nextPollDelayMs(2_000, 20, Number.NaN)).toBe(1_980);
+  });
+
+  it('share a read in flight unless the new one asks for more', () => {
+    const automatic = { manual: false, freshSettings: false };
+    expect(inFlightReadCovers(automatic, {})).toBe(true);
+    expect(inFlightReadCovers(automatic, { manual: true })).toBe(false);
+    expect(inFlightReadCovers(automatic, { manual: true, freshSettings: true })).toBe(false);
+    expect(inFlightReadCovers({ manual: true, freshSettings: false }, { manual: true })).toBe(true);
+    expect(inFlightReadCovers({ manual: true, freshSettings: false }, { manual: true, freshSettings: true })).toBe(false);
+    expect(inFlightReadCovers({ manual: true, freshSettings: true }, { manual: true, freshSettings: true })).toBe(true);
+    expect(inFlightReadCovers({ manual: true, freshSettings: true }, {})).toBe(true);
   });
 
   it('retry the console configuration with a capped backoff', () => {

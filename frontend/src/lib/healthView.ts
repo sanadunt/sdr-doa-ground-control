@@ -1,6 +1,7 @@
 import type { Candidate, Freshness, NativeConsistency, TelemetrySnapshot, Tone } from '../types';
 import type { MessageKey, Translate } from './i18n';
 import { candidate, toneFor } from './telemetry';
+import { settingsAgeMs } from './snapshotRead';
 
 /** The four bounded GETs the collector makes, in the order it reads them. */
 export const DATA_OUT_RESOURCE_PATHS = ['/status.json', '/settings.json', '/DOA_value.html', '/doa.xml'] as const;
@@ -71,6 +72,10 @@ export interface ResourceRow {
   errorKind: ResourceErrorKind | null;
   elapsedMs: number | null;
   attempts: number | null;
+  /** Not read in this collection: the console reused a recent copy (settings.json). */
+  reused: boolean;
+  /** Age of a reused copy when the snapshot was answered, else null. */
+  reusedAgeMs: number | null;
 }
 
 /** Per-resource read results, normalized from the untrusted snapshot. */
@@ -80,6 +85,7 @@ export function resourceRows(snapshot: TelemetrySnapshot | null | undefined): Re
     const entry = record(resources?.[path]);
     const status = finite(entry?.http_status);
     const attempts = nonNegative(entry?.attempts);
+    const reused = entry?.reused === true;
     return {
       path,
       ok: bool(entry?.ok),
@@ -88,6 +94,8 @@ export function resourceRows(snapshot: TelemetrySnapshot | null | undefined): Re
       errorKind: code(entry?.error_kind, RESOURCE_ERROR_KINDS) as ResourceErrorKind | null,
       elapsedMs: nonNegative(entry?.elapsed_ms),
       attempts: attempts !== null && Number.isInteger(attempts) ? attempts : null,
+      reused,
+      reusedAgeMs: reused && path === '/settings.json' ? settingsAgeMs(snapshot) : null,
     };
   });
 }
