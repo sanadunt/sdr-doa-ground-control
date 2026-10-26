@@ -1,6 +1,6 @@
 # Packaging: rilis, installer, dan Docker
 
-Panduan pemakaian ada di [`console/README.md`](console/README.md) (Ground Console, Linux) dan [`agent/README.md`](agent/README.md) (agent di RDF-SDR). Halaman ini untuk yang membuat rilis.
+Panduan pemakaian ada di [`console/README.md`](console/README.md) (Ground Console, Linux), [`agent/README.md`](agent/README.md) (agent di RDF-SDR) dan [`ground-link/README.md`](ground-link/README.md) (link T900 di host groundstation). Halaman ini untuk yang membuat rilis.
 
 ## Membuat rilis
 
@@ -21,7 +21,7 @@ SHA256SUMS                     sha256sum -c SHA256SUMS
 
 `VERSION` di root repository menentukan nama rilis dan tag image di file compose; ubah keduanya bersamaan (`tools/test_make_release.py` memeriksa tag compose). Daftar lengkap file yang ikut berubah, termasuk untuk versi mayor baru, ada di `QUICKSTART.md`, "Rilis di GitHub", langkah 1. Tanpa `--allow-dirty`, script menolak input rilis yang belum di-commit. Modul Python yang ikut adalah import closure dari `tools/ground_console.py` dan `tools/sdr_doa_lan_agent.py`, jadi test, fixture, dan tool staging tidak ikut. Arsipnya deterministik: urutan tetap, owner root, mode tetap, dan mtime dari `SOURCE_DATE_EPOCH` atau commit terakhir.
 
-Isi tarball console: `frontend/dist` (termasuk `receiver/`), modul runtime di `tools/`, `install.sh`, `packaging/console`, `packaging/docker` (termasuk `sdr-doa-docker`), `Dockerfile.release`, `docker-compose.yml` (dari `docker-compose.release.yml`), `docker-compose.ghcr.yml`, `.env.example`, `QUICKSTART.md`, manual PDF, lisensi BrowSDR, `wheels/`, dan `MANIFEST.sha256`. Tarball agent: modul agent, `install.sh`, `packaging/agent`, `Dockerfile.agent`, `docker-compose.yml` (dari `docker-compose.agent.yml`), dan `MANIFEST.sha256`.
+Isi tarball console: `frontend/dist` (termasuk `receiver/`), modul runtime di `tools/`, `install.sh`, `packaging/console`, `packaging/docker` (termasuk `sdr-doa-docker`), `packaging/ground-link` (alat link T900 untuk host groundstation, dengan installer sendiri; tidak masuk image console), `Dockerfile.release`, `docker-compose.yml` (dari `docker-compose.release.yml`), `docker-compose.ghcr.yml`, `.env.example`, `QUICKSTART.md`, manual PDF, lisensi BrowSDR, `wheels/`, dan `MANIFEST.sha256`. Tarball agent: modul agent, `install.sh`, `packaging/agent`, `Dockerfile.agent`, `docker-compose.yml` (dari `docker-compose.agent.yml`), dan `MANIFEST.sha256`.
 
 ## Rilis di GitHub dan image GHCR
 
@@ -51,6 +51,7 @@ Update di komputer operator tanpa login GitHub:
 | `packaging/console/` | `install.sh`, perintah `sdr-doa-console`, template service/desktop, `set_admin_password.py`, `update_release.py` (updater `sdr-doa-console update`), `requirements.txt` |
 | `packaging/agent/` | `install-agent.sh`, `uninstall-agent.sh`, `run-agent.sh`, template service, `agent.env.example` |
 | `packaging/docker/` | entrypoint console, healthcheck, pemeriksaan build context, dan `sdr-doa-docker` (install, update dengan healthcheck dan rollback, timer update harian; `tools/test_docker_update.py`) |
+| `packaging/ground-link/` | alat host groundstation untuk link PPP lewat T900, di luar Docker: `t900-ground-diag` (laporan read-only), `t900-ground-watchdog` dengan service root dan timer 30 detik, perintah operator `t900-link` dengan aturan polkit, `install.sh`, `uninstall.sh` (`tools/test_ground_link.py`); lihat `ground-link/README.md` |
 | `tools/make_release.py` | builder rilis; `--stage-console DIR`/`--stage-agent DIR` dipakai Docker dan installer dari repository |
 | `.github/workflows/ci.yml`, `release.yml` | CI (pull request dan push ke `main`) dan rilis (tag `v*` atau Run workflow di `main`) |
 | `tools/release_check.py` | aturan tag, aset rilis, serta nama, tag dan label image yang dipakai `release.yml` |

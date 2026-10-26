@@ -1,0 +1,17 @@
+// Written by the t900-ground-link installer (packaging/ground-link/install.sh).
+// Lets @USER@ restart @PPP_SERVICE@ and start t900-ground-usbreset.service
+// without a password (t900-link restart, t900-link usb-reset). Every other
+// systemd action, and every other user, keeps the usual authentication.
+// Needs polkit 0.106 or later (JavaScript rules).
+polkit.addRule(function (action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units" || subject.user !== "@USER@") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    var unit = action.lookup("unit");
+    var verb = action.lookup("verb");
+    if ((unit === "@PPP_SERVICE@" && verb === "restart") ||
+        (unit === "t900-ground-usbreset.service" && verb === "start")) {
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});

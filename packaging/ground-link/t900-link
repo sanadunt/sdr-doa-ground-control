@@ -1,0 +1,126 @@
+#!/bin/sh
+# t900-link: operator commands for the T900 PPP link of the groundstation.
+# Part of t900-ground-link (packaging/ground-link).
+#
+#   t900-link status       PPP service, interface and watchdog state
+#   t900-link restart      restart the PPP service
+#   t900-link usb-reset    re-enumerate the T900 USB device, then restart the PPP service
+#   t900-link diag [...]   write a t900-ground-diag report (options: t900-link diag --help)
+#   t900-link log [N]      the last N (default 50) watchdog journal lines
+#
+# restart and usb-reset need no password for the user named at install time
+# (polkit rule 50-t900-ground-link.rules); other users get systemd's usual
+# authentication or use sudo.
+set -u
+
+USBRESET_UNIT=t900-ground-usbreset.service
+TAG=t900-ground-watchdog
+
+usage() {
+  cat <<'EOF'
+Usage: t900-link COMMAND
+
+  status       PPP service, interface and watchdog state
+  restart      restart the PPP service
+  usb-reset    re-enumerate the T900 USB device, then restart the PPP service
+  diag [...]   write a t900-ground-diag report (t900-link diag --help)
+  log [N]      the last N (default 50) watchdog journal lines
+
+After restart or usb-reset, wait 30-60 s and run t900-link diag.
+EOF
+}
+
+die() {
+  printf 't900-link: %s\n' "$*" >&2
+  exit 1
+}
+
+# The tools sit next to this script (repository) or in ../sbin (install).
+find_tool() {
+  for candidate in "$HERE/$1" "$HERE/../sbin/$1" "$HERE/../bin/$1"; do
+    if [ -x "$candidate" ]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  command -v "$1" 2>/dev/null
+}
+
+load_settings() {
+  PPP_SERVICE=t900-ground-ppp.service
+  PPP_IFACE=ppp0
+  watchdog=$(find_tool t900-ground-watchdog) || return 0
+  if ! values=$("$watchdog" check-config 2>&1); then
+    printf 'warning: link.conf has an error (%s); using %s\n' \
+      "$(printf '%s' "$values" | tail -n 1)" "$PPP_SERVICE" >&2
+    return 0
+  fi
+  PPP_SERVICE=$(printf '%s\n' "$values" | sed -n 's/^PPP_SERVICE=//p')
+  PPP_IFACE=$(printf '%s\n' "$values" | sed -n 's/^PPP_IFACE=//p')
+}
+
+after_action() {
+  printf 'Wait 30-60 s, then check: t900-link diag (or t900-link status)\n'
+}
+
+cmd_status() {
+  systemctl status --no-pager --lines=0 "$PPP_SERVICE"
+  printf '\n'
+  if ! ip addr show dev "$PPP_IFACE" 2>/dev/null; then
+    printf '%s: missing\n' "$PPP_IFACE"
+  fi
+  printf '\n'
+  watchdog=$(find_tool t900-ground-watchdog) || {
+    printf 'watchdog: not installed\n'
+    return 0
+  }
+  "$watchdog" status
+  systemctl list-timers --no-pager t900-ground-watchdog.timer 2>/dev/null | sed -n '1,2p'
+}
+
+cmd_restart() {
+  printf 'Restarting %s ...\n' "$PPP_SERVICE"
+  if systemctl restart "$PPP_SERVICE"; then
+    printf 'Restarted %s.\n' "$PPP_SERVICE"
+    after_action
+    return 0
+  fi
+  die "restart failed; without the polkit rule for this user: sudo systemctl restart $PPP_SERVICE"
+}
+
+cmd_usb_reset() {
+  printf 'Re-enumerating the T900 USB device, then restarting %s (up to a few minutes) ...\n' "$PPP_SERVICE"
+  if systemctl start "$USBRESET_UNIT"; then
+    printf 'Done. Details: t900-link log 20\n'
+    after_action
+    return 0
+  fi
+  die "$USBRESET_UNIT failed or was refused; details: t900-link log 20 (without the polkit rule: sudo systemctl start $USBRESET_UNIT)"
+}
+
+cmd_log() {
+  lines=${1:-50}
+  case $lines in '' | *[!0-9]*) die "log takes a number of lines" ;; esac
+  journalctl -t "$TAG" -n "$lines" --no-pager -o short-iso
+}
+
+main() {
+  HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+  command=${1:-}
+  [ $# -eq 0 ] || shift
+  case $command in
+    status) [ $# -eq 0 ] || die "status takes no arguments"; load_settings; cmd_status ;;
+    restart) [ $# -eq 0 ] || die "restart takes no arguments"; load_settings; cmd_restart ;;
+    usb-reset) [ $# -eq 0 ] || die "usb-reset takes no arguments"; load_settings; cmd_usb_reset ;;
+    diag)
+      diag=$(find_tool t900-ground-diag) || die "t900-ground-diag is not installed"
+      exec "$diag" "$@"
+      ;;
+    log) [ $# -le 1 ] || die "log takes one number"; cmd_log "$@" ;;
+    -h | --help | help) usage ;;
+    '') usage; exit 2 ;;
+    *) die "unknown command $command (see t900-link --help)" ;;
+  esac
+}
+
+main "$@"
