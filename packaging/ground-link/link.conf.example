@@ -41,7 +41,8 @@ BACKOFF_MAX=900
 
 # After this many actions within an hour the watchdog holds "remote
 # unreachable" and acts no more until a new PPP session comes up (PPP_IFACE
-# gets an address on a new interface) or PEER answers again (1-60).
+# gets an address on a new interface), PEER answers again or the host boots
+# again (1-60). The actions of the last hour still count after a boot.
 MAX_ACTIONS_PER_HOUR=4
 
 # Second stage: re-enumerate the USB device, wait USB_SETTLE seconds, restart

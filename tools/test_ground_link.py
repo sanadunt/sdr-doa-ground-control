@@ -6,7 +6,8 @@ The scripts run with sh against fake commands (systemctl, journalctl, ip,
 ping, lsusb, udevadm, usbreset, uhubctl, logger, sleep, id, dmesg, pkaction
 and a relay switch) that read one scenario JSON file and log every call, a
 fake sysfs, a fixed clock (T900_LINK_NOW) and temporary config and state
-paths. PATH holds only the fakes and an allowlist of harmless real tools, so
+paths, and a fake /proc boot id. PATH holds only the fakes and an allowlist
+of harmless real tools, so
 nothing here can restart a service, reset a USB device or read the real
 journal; no systemd, network or file outside the temporary directory is
 touched.
@@ -231,6 +232,7 @@ class Harness:
         self.fakebin = self.base / "fakebin"
         self.realbin = self.base / "realbin"
         self.sysfs = self.base / "sys"
+        self.proc = self.base / "proc"
         self.dev = self.base / "dev"
         self.state_dir = self.base / "state"
         self.config = self.base / "link.conf"
@@ -265,6 +267,7 @@ class Harness:
         for name in ("bind", "unbind"):
             (self.sysfs / "bus/usb/drivers/ch341" / name).write_text("", encoding="utf-8")
         self.write_config()
+        self.boot("6f0c1a52-3b9e-4c47-9a1d-2f7e8b5c0d11")
 
     def cleanup(self) -> None:
         self._tmp.cleanup()
@@ -288,6 +291,12 @@ class Harness:
         (self.sysfs / "bus/usb/devices" / name).symlink_to(device)
         (self.sysfs / "bus/usb/devices" / f"{name}:1.0").symlink_to(interface)
         (self.sysfs / "class/tty" / tty).symlink_to(tty_class)
+
+    def boot(self, boot_id: str) -> None:
+        """The kernel's id of the running boot (a new one is a reboot)."""
+        path = self.proc / "sys/kernel/random/boot_id"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{boot_id}\n", encoding="utf-8")
 
     def save(self) -> None:
         self.scenario_path.write_text(json.dumps(self.scenario), encoding="utf-8")
@@ -332,6 +341,7 @@ class Harness:
             "T900_LINK_CONFIG": str(self.config),
             "T900_LINK_STATE_DIR": str(self.state_dir),
             "T900_LINK_SYSFS": str(self.sysfs),
+            "T900_LINK_PROC": str(self.proc),
             "T900_LINK_ROOT_UID": str(os.geteuid()),
         }
         environment.update(extra)
@@ -690,6 +700,78 @@ class WatchdogTests(HarnessCase):
         for now in (5100, 5160):
             self.h.check(now)
         self.assertEqual(self.h.actions()[-1], ["systemctl", "restart", SERVICE])
+
+    def test_a_new_boot_starts_the_outage_afresh(self):
+        self.down()
+        for now in (1000, 1060, 1120):
+            self.h.check(now)
+        state = self.h.state()
+        self.assertEqual((state["FAIL_SINCE"], state["ACTIONS"], state["NEXT_STAGE"]), ("1000", "2", "restart"))
+        self.assertEqual(state["BOOT_ID"], "6f0c1a52-3b9e-4c47-9a1d-2f7e8b5c0d11")
+        self.h.boot("0b8e2d4f-7a61-4e3c-8f25-91c4d6a7e302")
+        status = self.h.run(WATCHDOG, "status", now=1150).stdout
+        self.assertIn("boot:      the state below is from the previous boot; the next check starts afresh", status)
+        # The PPP service starts anew with the boot: FAIL_AFTER again, from the
+        # first stage, while the two actions of the previous boot still count.
+        self.h.clear_calls()
+        self.h.check(1200)
+        self.assertEqual(self.h.messages(), ["new boot: outage of the previous boot cleared",
+                                             "link down: ppp0 has no IPv4 address"])
+        state = self.h.state()
+        self.assertEqual((state["FAIL_SINCE"], state["ACTIONS"], state["BOOT_ID"]),
+                         ("1200", "0", "0b8e2d4f-7a61-4e3c-8f25-91c4d6a7e302"))
+        self.h.check(1230)
+        self.assertEqual(self.h.actions(), [])
+        self.h.check(1260)
+        self.assertEqual(self.h.actions(), [["systemctl", "reset-failed", SERVICE], ["systemctl", "restart", SERVICE]])
+        self.assert_logged("link down 60 s (ppp0 has no IPv4 address): action 1, 3 of 4 this hour")
+        self.assertNotIn("boot:", self.h.run(WATCHDOG, "status", now=1270).stdout)
+
+    def test_a_new_boot_clears_the_hold_but_not_the_hourly_count(self):
+        self.h.write_config(MAX_ACTIONS_PER_HOUR=1)
+        self.down()
+        for now in (1000, 1060, 1120):
+            self.h.check(now)
+        self.assertEqual(self.h.state()["HOLD"], "1")
+        self.h.boot("0b8e2d4f-7a61-4e3c-8f25-91c4d6a7e302")
+        self.h.clear_calls()
+        self.h.check(1200)
+        self.assert_logged("new boot: outage and remote unreachable hold of the previous boot cleared")
+        self.assertEqual(self.h.state()["HOLD"], "0")
+        # The restart at 1060 is still within the hour: no action, hold again.
+        self.h.check(1260)
+        self.assertEqual(self.h.actions(), [])
+        self.assertEqual(self.h.state()["HOLD"], "1")
+        self.assert_logged("remote unreachable: 1 recovery actions in the last hour")
+
+    def test_a_state_without_a_boot_id_belongs_to_this_boot(self):
+        # Written by a watchdog that kept no boot id: the outage goes on.
+        self.h.state_dir.mkdir()
+        (self.h.state_dir / "state").write_text(
+            "FAIL_SINCE=1000\nREASON=no-address\nNEXT_STAGE=restart\nLAST_STATE=no-address\n", encoding="utf-8")
+        self.down()
+        self.h.check(1060)
+        self.assertEqual(self.h.actions()[-1], ["systemctl", "restart", SERVICE])
+        self.assertFalse([m for m in self.h.messages() if m.startswith("new boot")])
+        self.assertEqual(self.h.state()["BOOT_ID"], "6f0c1a52-3b9e-4c47-9a1d-2f7e8b5c0d11")
+        # Without a readable boot id nothing is reset and nothing is lost.
+        self.h.proc.joinpath("sys/kernel/random/boot_id").unlink()
+        self.h.check(1090)
+        self.assertEqual(self.h.state()["BOOT_ID"], "6f0c1a52-3b9e-4c47-9a1d-2f7e8b5c0d11")
+        self.assertEqual(self.h.state()["FAIL_SINCE"], "1000")
+
+    def test_action_stamps_later_than_now_do_not_count(self):
+        # The clock went back (no clock battery, NTP not yet synced): the
+        # hourly window must not hold the watchdog until the clock catches up.
+        self.h.state_dir.mkdir()
+        (self.h.state_dir / "state").write_text(
+            "BOOT_ID=6f0c1a52-3b9e-4c47-9a1d-2f7e8b5c0d11\nRECENT=50000 50060 50120 50180\n", encoding="utf-8")
+        self.down()
+        for now in (1000, 1060):
+            self.h.check(now)
+        self.assertEqual(self.h.actions()[-1], ["systemctl", "restart", SERVICE])
+        self.assert_logged("action 1, 1 of 4 this hour")
+        self.assertEqual(self.h.state()["RECENT"], "1060")
 
     def test_usb_stage_rebinds_ch341_of_the_adapter_behind_the_device_node(self):
         self.h.write_config(USB_RESET_METHOD="unbind")

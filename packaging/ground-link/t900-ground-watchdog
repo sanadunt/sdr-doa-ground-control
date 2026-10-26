@@ -21,6 +21,8 @@
 # MAX_ACTIONS_PER_HOUR actions in the last hour did not help, it holds a
 # "remote unreachable" state and acts no more until a new PPP session comes up
 # (the interface gets an address on a new ifindex) or the link answers again.
+# A new boot starts afresh: the outage and the hold of the previous boot are
+# cleared, only the actions of the last hour still count.
 # Every message goes to the journal with the tag t900-ground-watchdog.
 set -u
 umask 022
@@ -28,8 +30,10 @@ umask 022
 TAG=t900-ground-watchdog
 CONFIG=${T900_LINK_CONFIG:-/etc/t900-ground-link/link.conf}
 STATE_DIR=${T900_LINK_STATE_DIR:-/var/lib/t900-ground-link}
-# Tests only: a fake sysfs, a fixed clock and the uid that counts as root.
+# Tests only: a fake sysfs and /proc, a fixed clock and the uid that counts
+# as root.
 SYSFS=${T900_LINK_SYSFS:-/sys}
+PROC=${T900_LINK_PROC:-/proc}
 ROOT_UID=${T900_LINK_ROOT_UID:-0}
 EX_CONFIG=78
 HOUR=3600
@@ -254,6 +258,12 @@ fmt_time() {
   date -d "@$1" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '@%s' "$1"
 }
 
+# The kernel's id of this boot; empty when it cannot be read.
+boot_id() {
+  id_text=$(cat "$PROC/sys/kernel/random/boot_id" 2>/dev/null || true)
+  case $id_text in '' | *[!0-9a-f-]*) ;; *) printf '%s' "$id_text" ;; esac
+}
+
 # ---- state ---------------------------------------------------------------
 
 reset_outage() {
@@ -270,7 +280,8 @@ reset_outage() {
 
 load_state() {
   reset_outage
-  # Kept across outages: the hourly window and what was done last.
+  # Kept across outages: the boot, the hourly window and what was done last.
+  BOOT_ID=
   RECENT=
   IDLE=0
   LAST_CHECK_AT=0
@@ -292,6 +303,7 @@ load_state() {
         if is_uint "$value"; then eval "$key=\$value"; fi
         ;;
       HOLD_IFINDEX) if is_uint "$value"; then HOLD_IFINDEX=$value; fi ;;
+      BOOT_ID) case $value in '' | *[!0-9a-f-]*) ;; *) BOOT_ID=$value ;; esac ;;
       RECENT) case $value in *[!0-9\ ]*) ;; *) RECENT=$value ;; esac ;;
       REASON) case $value in no-interface | no-address | no-peer-reply) REASON=$value ;; esac ;;
       LAST_STATE) case $value in up | no-interface | no-address | no-peer-reply) LAST_STATE=$value ;; esac ;;
@@ -307,7 +319,7 @@ save_state() {
   tmp=$STATE_FILE.tmp.$$
   if {
     printf '# t900-ground-watchdog state; t900-ground-watchdog status reads it\n'
-    for key in FAIL_SINCE REASON ACTIONS NEXT_STAGE NEXT_AT RECENT HOLD HOLD_SINCE HOLD_IFINDEX \
+    for key in BOOT_ID FAIL_SINCE REASON ACTIONS NEXT_STAGE NEXT_AT RECENT HOLD HOLD_SINCE HOLD_IFINDEX \
       HOLD_LOGGED_AT IDLE LAST_CHECK_AT LAST_STATE LAST_ACTION LAST_ACTION_AT LAST_RESULT; do
       eval "printf '%s=%s\n' \"\$key\" \"\${$key}\""
     done
@@ -319,17 +331,38 @@ save_state() {
   return 1
 }
 
-# Actions of the last hour; sets RECENT_COUNT.
+# Actions of the last hour; sets RECENT_COUNT. A stamp later than now (the
+# clock went back, as on a host without a clock battery before NTP) is
+# dropped, so it cannot hold the watchdog back until the clock catches up.
 prune_recent() {
   kept=
   RECENT_COUNT=0
   for stamp in $RECENT; do
-    if [ "$stamp" -gt $((NOW - HOUR)) ]; then
+    if [ "$stamp" -gt $((NOW - HOUR)) ] && [ "$stamp" -le "$NOW" ]; then
       kept="$kept $stamp"
       RECENT_COUNT=$((RECENT_COUNT + 1))
     fi
   done
   RECENT=${kept# }
+}
+
+# The first run of a new boot starts afresh: the PPP service starts anew, so
+# the outage, the stage and the hold of the previous boot no longer apply and
+# FAIL_AFTER gives the link its time again. The actions of the last hour
+# still count. A state without a boot id (an older watchdog) is this boot's.
+new_boot() {
+  current_boot=$(boot_id)
+  if [ -n "$current_boot" ] && [ -n "$BOOT_ID" ] && [ "$current_boot" != "$BOOT_ID" ]; then
+    if [ "$HOLD" = 1 ]; then
+      log notice "new boot: outage and remote unreachable hold of the previous boot cleared"
+    elif [ "$FAIL_SINCE" -gt 0 ]; then
+      log notice "new boot: outage of the previous boot cleared"
+    fi
+    reset_outage
+  fi
+  if [ -n "$current_boot" ]; then
+    BOOT_ID=$current_boot
+  fi
 }
 
 # take_lock WAIT COMMAND: one run at a time (the timer's check, an operator's
@@ -752,6 +785,7 @@ cmd_check() {
   fi
   load_state
   NOW=$(now)
+  new_boot
   LAST_CHECK_AT=$NOW
   if ! service_watched; then
     if [ "$IDLE" != 1 ]; then
@@ -860,6 +894,7 @@ cmd_usb_reset() {
   fi
   load_state
   NOW=$(now)
+  new_boot
   mode=
   if [ "$DRY_RUN" = 0 ] && [ "$STATE_DRY" = 1 ]; then
     mode=" (runs: DRY_RUN=1 applies to the checks only)"
@@ -911,6 +946,10 @@ cmd_status() {
   fi
   if [ "$LAST_CHECK_AT" -gt 0 ]; then
     printf 'checked:   %s (%s s ago)\n' "$(fmt_time "$LAST_CHECK_AT")" $((NOW - LAST_CHECK_AT))
+  fi
+  current_boot=$(boot_id)
+  if [ -n "$current_boot" ] && [ -n "$BOOT_ID" ] && [ "$current_boot" != "$BOOT_ID" ]; then
+    printf 'boot:      the state below is from the previous boot; the next check starts afresh\n'
   fi
   if [ "$IDLE" = 1 ]; then
     printf 'link:      not watched: %s is stopped or disabled\n' "$PPP_SERVICE"
