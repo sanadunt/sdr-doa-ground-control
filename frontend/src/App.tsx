@@ -29,7 +29,7 @@ import { useRoute } from './components/Shell';
 import { LoadErrorBoundary } from './components/LoadErrorBoundary';
 import { Page, PageHeader, PageNotice } from './components/page';
 import { DEFAULT_SIMULATION, simulationSnapshot, randomizeSimulationSettings } from './lib/simulation';
-import { snapshotCollectionId, snapshotReadAtMonotonic, snapshotServedAgeMs } from './lib/snapshotRead';
+import { snapshotCollectionId, snapshotConsoleRefreshSeconds, snapshotReadAtMonotonic, snapshotServedAgeMs } from './lib/snapshotRead';
 
 // Overview is the landing route and stays in the entry chunk. The other pages
 // load on first visit so the initial bundle only carries what the operator sees.
@@ -219,6 +219,79 @@ export function nextPollDelayMs(intervalMs: number, readElapsedMs: number, serve
   return Math.max(intervalMs - Math.max(elapsed, served), MIN_POLL_GAP_MS);
 }
 
+/** What the poll schedule keeps of the last snapshot answer. */
+export interface PollAnswer {
+  /** Monotonic time the answer arrived. */
+  atMonotonic: number;
+  /** How long before the answer its shared read completed. */
+  servedAgeMs: number;
+  /** The console's saved interval (s) the answer reported, or null. */
+  consoleRefreshSeconds: number | null;
+}
+
+/**
+ * Delay before the next automatic read once the read that started at
+ * `startedAt` is done. An answer that arrived since then sets it: one interval
+ * after its node read, with the console's interval when that is longer than
+ * the page's (another page saved it and this page has not re-read the config
+ * yet), so a page never asks again and again for a read the console still
+ * shares. The first automatic read after load or an interval change uses it
+ * too, so a page that opened on an older shared read asks for the next one
+ * when it is due instead of a full interval later.
+ */
+export function pollDelayAfterReadMs(intervalMs: number, startedAt: number, now: number, answer: PollAnswer | null): number {
+  if (answer === null || !(answer.atMonotonic >= startedAt)) return nextPollDelayMs(intervalMs, now - startedAt);
+  const consoleMs = (answer.consoleRefreshSeconds ?? 0) * 1000;
+  return nextPollDelayMs(Math.max(intervalMs, consoleMs), now - startedAt, now - answer.atMonotonic + answer.servedAgeMs);
+}
+
+/**
+ * Automatic Data Out reads at `intervalMs`: each one is scheduled when the
+ * previous one has finished (`pollDelayAfterReadMs`), so requests never pile
+ * up or abort each other. The first is scheduled once `pending` (the read the
+ * page started on load or with the new interval) is done, from its answer.
+ * Returns the stop function.
+ */
+export function startAutomaticReads(options: {
+  intervalMs: number;
+  /** One automatic read; resolves when it is done and never rejects. */
+  read: () => Promise<void>;
+  pending: Promise<void> | null;
+  lastAnswer: () => PollAnswer | null;
+  now: () => number;
+}): () => void {
+  const { intervalMs, read, lastAnswer, now } = options;
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  function schedule(startedAt: number): void {
+    if (stopped) return;
+    timer = setTimeout(() => { void tick(); }, pollDelayAfterReadMs(intervalMs, startedAt, now(), lastAnswer()));
+  }
+  async function tick(): Promise<void> {
+    const started = now();
+    await read();
+    schedule(started);
+  }
+  const started = now();
+  void (options.pending ?? Promise.resolve()).then(() => schedule(started));
+  return () => {
+    stopped = true;
+    clearTimeout(timer);
+  };
+}
+
+/**
+ * The shared read whose answer shows that the console's saved interval is not
+ * this page's (another page changed it), so the page re-reads the config;
+ * null when it matches, is not reported, or was already re-read for that read.
+ */
+export function configResyncFor(snapshot: TelemetrySnapshot | null, pageRefreshSeconds: number, syncedFor: string | null): string | null {
+  const reported = snapshotConsoleRefreshSeconds(snapshot);
+  const collectionId = snapshotCollectionId(snapshot);
+  if (reported === null || collectionId === null || reported === pageRefreshSeconds || collectionId === syncedFor) return null;
+  return collectionId;
+}
+
 function isAbortError(error: unknown): boolean {
   if (error && typeof error === 'object' && 'name' in error) {
     return String((error as { name?: unknown }).name) === 'AbortError';
@@ -393,9 +466,13 @@ export default function App(): ReactElement {
   const mqttSequence = useRef(0);
   const readInFlight = useRef<InFlightRead | null>(null);
   // The shared read the page shows (sent as `seen`), and the last answer's
-  // arrival and served age for the poll schedule.
+  // arrival, served age and the console's interval for the poll schedule.
   const shownCollectionId = useRef<string | null>(null);
-  const lastAnswer = useRef<{ atMonotonic: number; servedAgeMs: number } | null>(null);
+  const lastAnswer = useRef<PollAnswer | null>(null);
+  // Re-read of the saved config when an answer reports another interval:
+  // the request in flight and the shared read it was made for.
+  const configSyncController = useRef<AbortController | null>(null);
+  const configSyncedFor = useRef<string | null>(null);
   const mqttController = useRef<AbortController | null>(null);
   const contentRef = useRef<HTMLElement | null>(null);
   const receiverRef = useRef<HTMLElement | null>(null);
@@ -502,7 +579,7 @@ export default function App(): ReactElement {
         if (!mountedRef.current || sequence !== refreshSequence.current) return;
         const arrived = monotonicNow();
         shownCollectionId.current = snapshotCollectionId(next);
-        lastAnswer.current = { atMonotonic: arrived, servedAgeMs: snapshotServedAgeMs(next) };
+        lastAnswer.current = { atMonotonic: arrived, servedAgeMs: snapshotServedAgeMs(next), consoleRefreshSeconds: snapshotConsoleRefreshSeconds(next) };
         setSnapshot(next);
         setReadAtMonotonic(snapshotReadAtMonotonic(next, arrived));
         setReadError(null);
@@ -594,25 +671,18 @@ export default function App(): ReactElement {
   }, []);
 
   // Automatic Data Out reads: the next one is scheduled when the previous one
-  // has finished, so requests never pile up or abort each other.
+  // has finished, so requests never pile up or abort each other. The first one
+  // is scheduled from the read this page started on load or with the new
+  // interval, whose answer can be an older shared read.
   useEffect(() => {
     if (!configLoaded || !Number.isFinite(config.refresh_seconds) || config.refresh_seconds <= 0) return undefined;
-    const intervalMs = config.refresh_seconds * 1000;
-    let stopped = false;
-    let timer: number | undefined;
-    const tick = async () => {
-      const started = monotonicNow();
-      await refresh();
-      if (stopped) return;
-      const answer = lastAnswer.current;
-      const servedAgeMs = answer && answer.atMonotonic >= started ? answer.servedAgeMs : 0;
-      timer = window.setTimeout(() => { void tick(); }, nextPollDelayMs(intervalMs, monotonicNow() - started, servedAgeMs));
-    };
-    timer = window.setTimeout(() => { void tick(); }, intervalMs);
-    return () => {
-      stopped = true;
-      window.clearTimeout(timer);
-    };
+    return startAutomaticReads({
+      intervalMs: config.refresh_seconds * 1000,
+      read: () => refresh(),
+      pending: readInFlight.current?.promise ?? null,
+      lastAnswer: () => lastAnswer.current,
+      now: monotonicNow,
+    });
   }, [configLoaded, config.refresh_seconds, refresh]);
 
   // MQTT monitor state has its own poll, faster on the pages that show it.
@@ -657,6 +727,7 @@ export default function App(): ReactElement {
 
   const onConfigSaved = useCallback(async (next: ConsoleConfig): Promise<void> => {
     if (!mountedRef.current) return;
+    configSyncController.current?.abort();
     const targetChanged = savedConfigChangesTarget(configRef.current, next);
     ++configSequence.current;
     configController.current?.abort();
@@ -673,6 +744,7 @@ export default function App(): ReactElement {
       setReadAtMonotonic(null);
       setReadError(null);
       shownCollectionId.current = null;
+      lastAnswer.current = null;
     }
     // A config save can replace the local subscriber. Read its state under the
     // same guard before the snapshot request is allowed to update the shell.
@@ -701,6 +773,7 @@ export default function App(): ReactElement {
   const onRefreshSecondsChange = useCallback((seconds: number): void => {
     if (!configReadyRef.current || seconds === configRef.current.refresh_seconds) return;
     refreshSaveController.current?.abort();
+    configSyncController.current?.abort();
     const controller = new AbortController();
     refreshSaveController.current = controller;
     setRefreshPending(seconds);
@@ -721,6 +794,29 @@ export default function App(): ReactElement {
         if (mountedRef.current) setRefreshPending(null);
       });
   }, [onConfigSaved]);
+
+  // Every answer reports the console's saved interval. When it is not this
+  // page's (another page changed it), the page re-reads the saved config,
+  // once per shared read, and applies it like a save made here, so the
+  // top-bar select and the poll follow the console's one Data Out read.
+  useEffect(() => {
+    if (!configLoaded || refreshPending !== null || configSyncController.current !== null) return;
+    const collectionId = configResyncFor(snapshot, config.refresh_seconds, configSyncedFor.current);
+    if (collectionId === null) return;
+    configSyncedFor.current = collectionId;
+    const controller = new AbortController();
+    configSyncController.current = controller;
+    getConsoleConfig(controller.signal)
+      .then((next) => {
+        if (controller.signal.aborted || !mountedRef.current || next.refresh_seconds === configRef.current.refresh_seconds) return;
+        void onConfigSaved(next);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (configSyncController.current === controller) configSyncController.current = null;
+      });
+  }, [configLoaded, snapshot, config.refresh_seconds, refreshPending, onConfigSaved]);
+  useEffect(() => () => configSyncController.current?.abort(), []);
 
   // Kontrol's "Cek ulang" and a command that became final: read Data Out now,
   // settings.json included, after a plainer read already in flight.

@@ -117,6 +117,8 @@ export interface CollectionInfo {
   settings_reused?: boolean;
   /** Age of the settings.json used, at the time of the answer. */
   settings_age_ms?: number | null;
+  /** The console's saved refresh interval when the answer was sent; it sets how long one read is shared. */
+  refresh_seconds?: number | null;
 }
 
 export interface ResourceInfo {

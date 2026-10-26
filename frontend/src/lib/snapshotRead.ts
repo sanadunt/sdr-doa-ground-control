@@ -10,6 +10,8 @@ import type { TelemetrySnapshot } from '../types';
 /** An answer older than this is treated as this old; the server keeps none longer than 30 s. */
 export const MAX_SERVED_AGE_MS = 120_000;
 const COLLECTION_ID_RE = /^[0-9a-f]{8}-[0-9]{1,12}$/;
+/** A reported interval above this is not taken (the console offers at most 30 s). */
+const MAX_REFRESH_SECONDS = 3_600;
 
 function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -25,6 +27,16 @@ export function snapshotServedAgeMs(snapshot: TelemetrySnapshot | null | undefin
 /** Monotonic time the node was read: the answer's arrival minus its served age. */
 export function snapshotReadAtMonotonic(snapshot: TelemetrySnapshot | null | undefined, receivedAtMonotonic: number): number {
   return receivedAtMonotonic - snapshotServedAgeMs(snapshot);
+}
+
+/**
+ * The console's saved refresh interval (s) when the answer was sent, or null.
+ * It sets how long the console shares one read, so a page that loaded another
+ * interval polls at this one and re-reads the console config.
+ */
+export function snapshotConsoleRefreshSeconds(snapshot: TelemetrySnapshot | null | undefined): number | null {
+  const seconds = record(snapshot?.collection)?.refresh_seconds;
+  return typeof seconds === 'number' && Number.isInteger(seconds) && seconds >= 0 && seconds <= MAX_REFRESH_SECONDS ? seconds : null;
 }
 
 /** The shared read's id, sent back as `seen` so the next poll gets a new read. */

@@ -6,6 +6,7 @@ import {
   settingsAgeMs,
   settingsReadAtMs,
   snapshotCollectionId,
+  snapshotConsoleRefreshSeconds,
   snapshotReadAtMonotonic,
   snapshotServedAgeMs,
 } from './snapshotRead';
@@ -33,6 +34,15 @@ describe('the time a shared Data Out read was taken (#13)', () => {
 
   it('bounds an implausible age', () => {
     expect(snapshotServedAgeMs(shared({ age_ms: 10 * MAX_SERVED_AGE_MS }))).toBe(MAX_SERVED_AGE_MS);
+  });
+
+  it('reads the console interval the answer reports', () => {
+    expect(snapshotConsoleRefreshSeconds(shared({ refresh_seconds: 30 }))).toBe(30);
+    expect(snapshotConsoleRefreshSeconds(shared({ refresh_seconds: 0 }))).toBe(0);
+    for (const seconds of [undefined, null, -1, 2.5, '5', true, Number.NaN, 86_400]) {
+      expect(snapshotConsoleRefreshSeconds(shared({ refresh_seconds: seconds }))).toBeNull();
+    }
+    expect(snapshotConsoleRefreshSeconds(null)).toBeNull();
   });
 
   it('echoes only an id the console issued', () => {
