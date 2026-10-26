@@ -2,6 +2,8 @@ import type { Branding, ConsoleConfig, MqttSnapshot, MqttTarget, RdfNodeSnapshot
 import { isMqttTransport, isMqttWsPath, normalizeMqttSnapshot, normalizeRdfNodeSnapshot } from './lib/mqttMonitor';
 import { CONFIG_PATCH_KEYS } from './lib/controlDraft';
 import type { ConfigPatchKey } from './lib/controlDraft';
+import { isConsoleAccess } from './lib/access';
+import type { ConsoleAccess } from './lib/access';
 
 export const DEFAULT_API_TIMEOUT_MS = 10_000;
 
@@ -361,6 +363,125 @@ export interface ConsoleCapabilities {
   adminDefaultPassword: boolean | null;
   /** Config patch publishing, or null when the server does not report it. */
   configPatch: ConfigPatchCapability | null;
+  /** Which listener answered: the console's own ("local") or the LAN view; null when not reported. */
+  access?: ConsoleAccess | null;
+  /** State of the LAN view listener; null when not reported. */
+  lanAccess?: LanAccessBrief | null;
+}
+
+// ---------------------------------------------------------------------------
+// LAN view (lan_access): the opt-in, read-only second listener.
+// ---------------------------------------------------------------------------
+
+export const LAN_ACCESS_STATES = ['open', 'closed'] as const;
+export type LanAccessState = typeof LAN_ACCESS_STATES[number];
+/** Why the LAN view is closed (tools/lan_access.py CLOSED_*). */
+export const LAN_CLOSED_REASONS = ['DISABLED', 'ADMIN_PASSWORD_DEFAULT', 'ADMIN_DISABLED', 'PORT_CONFLICT', 'BIND_FAILED', 'STOPPED'] as const;
+export type LanClosedReason = typeof LAN_CLOSED_REASONS[number];
+/** Codes of POST /api/lan-access errors (tools/lan_access.py), each with an EN and ID message. */
+export const LAN_ACCESS_ERROR_CODES = ['ORIGIN_REJECTED', 'ADMIN_REQUIRED', 'LAN_ACCESS_INVALID', 'LAN_ADMIN_PASSWORD_DEFAULT', 'LAN_ACCESS_SAVE_FAILED'] as const;
+export type LanAccessErrorCode = typeof LAN_ACCESS_ERROR_CODES[number];
+/** Same bounds as tools/lan_access.py. */
+export const LAN_PORT_MIN = 1024;
+export const LAN_PORT_MAX = 65535;
+export const LAN_MAX_ALLOWED_CLIENTS = 32;
+
+/** The state /api/health and the LAN view's capabilities carry. */
+export interface LanAccessBrief {
+  enabled: boolean;
+  state: LanAccessState;
+  reason: LanClosedReason | null;
+}
+
+export interface LanAccessStatus extends LanAccessBrief {
+  /** errno name of a failed bind (EADDRINUSE, EADDRNOTAVAIL, ...). */
+  detail: string | null;
+  bind: string | null;
+  port: number | null;
+  /** host:port while open. */
+  address: string | null;
+  allowedClientCount: number | null;
+}
+
+export interface LanAccessSettings {
+  enabled: boolean;
+  port: number;
+  bind: string;
+  allowedClients: string[];
+}
+
+export interface LanAccessView {
+  config: LanAccessSettings;
+  status: LanAccessStatus;
+}
+
+function oneOf<T extends string>(values: readonly T[], value: unknown): T | null {
+  return typeof value === 'string' && (values as readonly string[]).includes(value) ? value as T : null;
+}
+
+function shortText(value: unknown, maxChars: number): string | null {
+  return typeof value === 'string' && value.length > 0 && value.length <= maxChars && /^[\x21-\x7e]+$/u.test(value) ? value : null;
+}
+
+function lanPort(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= LAN_PORT_MAX ? value : null;
+}
+
+export function normalizeLanAccessBrief(value: unknown): LanAccessBrief | null {
+  if (!isObject(value)) return null;
+  const state = oneOf(LAN_ACCESS_STATES, value.state);
+  if (state === null || typeof value.enabled !== 'boolean') return null;
+  return { enabled: value.enabled, state, reason: state === 'open' ? null : oneOf(LAN_CLOSED_REASONS, value.reason) };
+}
+
+export function normalizeLanAccessStatus(value: unknown): LanAccessStatus | null {
+  const brief = normalizeLanAccessBrief(value);
+  if (!brief || !isObject(value)) return null;
+  const count = value.allowed_client_count;
+  return {
+    ...brief,
+    detail: shortText(value.detail, 32),
+    bind: shortText(value.bind, 64),
+    port: lanPort(value.port),
+    address: brief.state === 'open' ? shortText(value.address, 80) : null,
+    allowedClientCount: typeof count === 'number' && Number.isInteger(count) && count >= 0 && count <= LAN_MAX_ALLOWED_CLIENTS ? count : null,
+  };
+}
+
+export function normalizeLanAccessView(value: unknown): LanAccessView {
+  if (!isObject(value) || !isObject(value.config)) throw new Error('lan-access response has an invalid shape');
+  const config = value.config;
+  const port = lanPort(config.port);
+  const bind = shortText(config.bind, 64);
+  const clients = Array.isArray(config.allowed_clients) ? config.allowed_clients : null;
+  const status = normalizeLanAccessStatus(value.status);
+  if (typeof config.enabled !== 'boolean' || port === null || bind === null || clients === null || status === null
+    || clients.length > LAN_MAX_ALLOWED_CLIENTS || !clients.every((entry) => shortText(entry, 64) !== null)) {
+    throw new Error('lan-access response has an invalid shape');
+  }
+  return { config: { enabled: config.enabled, port, bind, allowedClients: clients as string[] }, status };
+}
+
+/** GET /api/lan-access: the saved setting and the listener's state (no admin needed). */
+export async function getLanAccess(signal?: AbortSignal): Promise<LanAccessView> {
+  const body = await requestJson<unknown>('/api/lan-access', { cache: 'no-store', credentials: 'same-origin' }, signal);
+  return normalizeLanAccessView(body);
+}
+
+/** POST /api/lan-access (admin): save and apply; the answer carries the new state. */
+export async function updateLanAccess(settings: LanAccessSettings, signal?: AbortSignal): Promise<LanAccessView> {
+  const body = await requestJson<unknown>('/api/lan-access', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({
+      enabled: settings.enabled,
+      port: settings.port,
+      bind: settings.bind,
+      allowed_clients: settings.allowedClients,
+    }),
+  }, signal);
+  return normalizeLanAccessView(body);
 }
 
 function normalizeTopic(value: unknown): string | null {
@@ -401,6 +522,8 @@ export function normalizeCapabilities(value: unknown): ConsoleCapabilities {
     adminEnabled: typeof record.admin_enabled === 'boolean' ? record.admin_enabled : null,
     adminDefaultPassword: typeof record.admin_default_password === 'boolean' ? record.admin_default_password : null,
     configPatch: normalizeConfigPatchCapability(record.config_patch),
+    access: isConsoleAccess(record.access) ? record.access : null,
+    lanAccess: normalizeLanAccessBrief(record.lan_access),
   };
 }
 

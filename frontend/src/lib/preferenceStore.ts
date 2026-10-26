@@ -18,6 +18,9 @@
  * - The embedded Receiver writes its own keys (same origin, same
  *   localStorage); the `storage` event that reaches this window carries them
  *   to the server too.
+ * - In the LAN view the server answers `read_only: true`: its copy only
+ *   fills keys this browser does not have yet, and nothing is ever sent, so
+ *   a tablet keeps its own choices and never changes the groundstation's.
  *
  * Live data never goes through here, and nothing secret is stored.
  */
@@ -80,8 +83,10 @@ export interface PreferenceSyncDeps {
  * hydrating / offline: the server copy is not known yet; changes are kept
  * and sent once it is. ready: synced. unsupported: the server has no
  * preferences route (an older console or the Vite dev server); local only.
+ * readonly: the LAN view; the server copy filled the keys this browser
+ * lacked, and writes stay local.
  */
-export type PreferenceSyncState = 'idle' | 'hydrating' | 'ready' | 'offline' | 'unsupported';
+export type PreferenceSyncState = 'idle' | 'hydrating' | 'ready' | 'offline' | 'unsupported' | 'readonly';
 
 export interface PreferenceSync {
   readonly state: () => PreferenceSyncState;
@@ -239,7 +244,7 @@ export function createPreferenceSync(deps: PreferenceSyncDeps): PreferenceSync {
   }
 
   async function hydrate(timeoutMs = HYDRATE_TIMEOUT_MS): Promise<PreferenceSyncState> {
-    if (disposed || state === 'unsupported' || state === 'ready') return state;
+    if (disposed || state === 'unsupported' || state === 'ready' || state === 'readonly') return state;
     clearRetry();
     if (state === 'idle') state = 'hydrating';
     let response: Answer;
@@ -262,6 +267,17 @@ export function createPreferenceSync(deps: PreferenceSyncDeps): PreferenceSync {
       // A definite answer that is not a preferences document, such as the
       // Vite dev server's index.html fallback: no server copy here.
       goUnsupported();
+      return state;
+    }
+    if (isRecord(response.body) && response.body.read_only === true) {
+      // The LAN view: the groundstation's choices are only defaults here.
+      for (const [key, value] of values) {
+        if (!pending.has(key) && readLocal(key) === null) writeLocal(key, value);
+      }
+      state = 'readonly';
+      pending.clear();
+      clearDebounce();
+      clearRetry();
       return state;
     }
     server.clear();
@@ -368,7 +384,7 @@ export function createPreferenceSync(deps: PreferenceSyncDeps): PreferenceSync {
   }
 
   function note(key: PreferenceKey, value: string, previous: string | null): void {
-    if (disposed || state === 'idle' || state === 'unsupported') return;
+    if (disposed || state === 'idle' || state === 'unsupported' || state === 'readonly') return;
     if (state !== 'ready') {
       // Before the server copy is known, only a real change is kept: a
       // default filled into empty storage must not replace what the server

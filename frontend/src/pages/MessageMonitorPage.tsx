@@ -46,6 +46,8 @@ type MessageMonitorPageProps = {
   capabilities?: ConsoleCapabilities | null;
   /** The view shown first (sdr/v1 by default); RDF Node v2 is polled only while it is shown. */
   initialProtocol?: MonitorProtocol;
+  /** The LAN view: no Reconnect, which replaces the console's monitor. */
+  readOnly?: boolean;
 };
 
 type ActionMessage = { notice: Notice; tone: 'good' | 'info' | 'warn' | 'bad' };
@@ -299,6 +301,7 @@ export function MessageMonitorPage({
   onReconnectMqtt,
   capabilities = null,
   initialProtocol = 'v1',
+  readOnly = false,
 }: MessageMonitorPageProps): ReactElement {
   const { t, lang } = useI18n();
   const count = useCountFormat(lang);
@@ -459,7 +462,7 @@ export function MessageMonitorPage({
             options={[{ value: 'v1', label: 'sdr/v1' }, { value: 'v2', label: 'RDF Node v2' }]}
           />
           <button className="ov-button" type="button" disabled={busy} onClick={refresh}><Icon name="refresh" />{t('monitor.refresh')}</button>
-          <button className="ov-button" type="button" disabled={busy} onClick={reconnect}>{t('monitor.reconnect')}</button>
+          {readOnly ? null : <button className="ov-button" type="button" disabled={busy} onClick={reconnect}>{t('monitor.reconnect')}</button>}
         </>}
       />
       {mqttError ? <PageNotice tone="bad" title="ERROR">{t('monitor.stateUnknown', { error: mqttError })}</PageNotice> : null}

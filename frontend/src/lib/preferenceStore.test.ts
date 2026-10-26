@@ -333,6 +333,68 @@ describe('preference sync', () => {
   });
 });
 
+describe('preference sync in the LAN view', () => {
+  let storage: MemoryStorage;
+  let console_: FakeConsole;
+  let sync: PreferenceSync;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    storage = new MemoryStorage();
+    console_ = new FakeConsole();
+    sync = createPreferenceSync({
+      fetch: console_.fetch,
+      storage: () => storage,
+      setTimeout: (callback, ms) => setTimeout(callback, ms),
+      clearTimeout: (handle) => clearTimeout(handle),
+    });
+  });
+
+  afterEach(() => {
+    sync.dispose();
+    vi.useRealTimers();
+  });
+
+  it('takes the server copy only for keys this browser lacks and never sends', async () => {
+    storage.setItem(THEME_STORAGE_KEY, 'dark');
+    storage.setItem(LANG_STORAGE_KEY, 'id');
+    console_.queue('GET', json({ version: 1, updated_at_ms: 1, read_only: true, values: { [THEME_STORAGE_KEY]: 'light', [OVERVIEW_PANELS_STORAGE_KEY]: PANELS } }));
+    await expect(sync.hydrate()).resolves.toBe('readonly');
+    // The tablet keeps its own theme; the groundstation's panels fill the gap.
+    expect(storage.getItem(THEME_STORAGE_KEY)).toBe('dark');
+    expect(storage.getItem(OVERVIEW_PANELS_STORAGE_KEY)).toBe(PANELS);
+    // No migration upload, and later writes stay in this browser.
+    sync.write(THEME_STORAGE_KEY, 'light');
+    sync.noteExternalWrite(BASEMAP_STORAGE_KEY, 'dark', null);
+    await sync.flush();
+    sync.flushOnHide();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(storage.getItem(THEME_STORAGE_KEY)).toBe('light');
+    expect(console_.puts()).toEqual([]);
+    expect(sync.pendingKeys()).toEqual([]);
+    // It does not ask the server again.
+    await expect(sync.hydrate()).resolves.toBe('readonly');
+    expect(console_.calls).toHaveLength(1);
+  });
+
+  it('keeps a change made while the first read was on its way, without sending it', async () => {
+    storage.setItem(THEME_STORAGE_KEY, 'dark');
+    console_.queue('GET', 'hang');
+    void sync.hydrate(HYDRATE_TIMEOUT_MS);
+    sync.write(THEME_STORAGE_KEY, 'light');
+    expect(sync.pendingKeys()).toEqual([THEME_STORAGE_KEY]);
+    await vi.advanceTimersByTimeAsync(HYDRATE_TIMEOUT_MS + 1);
+    expect(sync.state()).toBe('offline');
+    console_.queue('GET', json({ version: 1, updated_at_ms: 1, read_only: true, values: { [THEME_STORAGE_KEY]: 'dark' } }));
+    await vi.advanceTimersByTimeAsync(RETRY_DELAYS_MS[0]);
+    expect(sync.state()).toBe('readonly');
+    expect(storage.getItem(THEME_STORAGE_KEY)).toBe('light');
+    expect(sync.pendingKeys()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(console_.puts()).toEqual([]);
+  });
+});
+
 describe('preference keys', () => {
   it('cover every preference module key and nothing else', () => {
     const moduleKeys = [

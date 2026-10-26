@@ -15,10 +15,10 @@ function memoryStorage(entries: Record<string, string>): Storage {
   };
 }
 
-function renderApp(hash: string, entries: Record<string, string> = {}): string {
+function renderApp(hash: string, entries: Record<string, string> = {}, hostname = '127.0.0.1'): string {
   const storage = memoryStorage({ 'sdr-console-lang': 'en', ...entries });
   vi.stubGlobal('localStorage', storage);
-  vi.stubGlobal('window', { localStorage: storage, location: { hash, hostname: '127.0.0.1', search: '' } });
+  vi.stubGlobal('window', { localStorage: storage, location: { hash, hostname, search: '' } });
   return renderToStaticMarkup(<App />);
 }
 
@@ -56,5 +56,37 @@ describe('dashboard wiring in App', () => {
   it('keeps the refresh interval select disabled until the configuration is read', () => {
     const select = renderApp('#/overview').match(/<select[^>]*refresh-interval[^>]*>/)?.[0] ?? '';
     expect(select).toContain('disabled');
+  });
+});
+
+describe('the LAN view in App', () => {
+  const LAN_HOST = '192.168.1.10';
+  const PANELS = JSON.stringify({ layers: false, polar: true, spectrum: true, control: true, nodeCollapsed: true });
+
+  it('is view only from the first render on a LAN address: chip, no Kontrol, no Receiver dock', () => {
+    const markup = renderApp('#/dashboard', { [OVERVIEW_PANELS_STORAGE_KEY]: PANELS }, LAN_HOST);
+    expect(markup).toContain('view-only-chip');
+    expect(markup).not.toContain('aria-controls="panel-control"');
+    expect(markup).not.toContain('id="panel-control"');
+    expect(markup).toContain('ov-spectrum is-view-only');
+    expect(markup).not.toContain('receiver-frame');
+  });
+
+  it('never mounts the Receiver frame on the Receiver route', () => {
+    const markup = renderApp('#/receiver', {}, LAN_HOST);
+    expect(markup).not.toContain('receiver-frame');
+    expect(markup).not.toContain('/receiver/');
+    expect(markup).not.toContain('page-content-receiver');
+    expect(markup).toContain('The Receiver runs on the groundstation.');
+  });
+
+  it('stays the full console on the loopback address', () => {
+    const markup = renderApp('#/dashboard', { [OVERVIEW_PANELS_STORAGE_KEY]: PANELS });
+    expect(markup).not.toContain('view-only-chip');
+    expect(markup).toContain('id="panel-control"');
+    // The Receiver section mounts (its lazy page is still loading in a static render).
+    const receiver = renderApp('#/receiver');
+    expect(receiver).toContain('page-content-receiver');
+    expect(receiver).not.toContain('The Receiver runs on the groundstation.');
   });
 });
