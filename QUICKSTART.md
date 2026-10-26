@@ -464,12 +464,13 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 
 ### Konfigurasi
 
-- Kartu tersusun dalam dua kolom setinggi isinya masing-masing: **Koneksi & refresh** dan **Monitor MQTT** di kiri, **GPS & Kompas** dan **Branding & admin** di kanan, lalu **Patch dry-run** selebar halaman. Bilah bagian (Koneksi, MQTT, GPS & Kompas, Branding, Dry-run) mengikuti urutan itu. Pada lebar 1024–1279 px Koneksi dan MQTT berdampingan dan kartu lain selebar halaman; di bawah 1024 px semua kartu satu kolom dengan urutan yang sama.
+- Kartu tersusun dalam dua kolom setinggi isinya masing-masing: **Koneksi & refresh**, **Monitor MQTT** dan **Akses LAN** di kiri, **GPS & Kompas** dan **Branding & admin** di kanan, lalu **Patch dry-run** selebar halaman. Bilah bagian (Koneksi, MQTT, Akses LAN, GPS & Kompas, Branding, Dry-run) mengikuti urutan itu. Pada lebar 1024–1279 px Koneksi dan MQTT berdampingan dan kartu lain selebar halaman; di bawah 1024 px semua kartu satu kolom dengan urutan yang sama.
 - Enter di bagian mana pun men-submit bagian itu.
 - URL Data Out disimpan tanpa garis miring di akhir. Port MQTT harus bilangan bulat 1–65535.
 - **Transport MQTT** (WebSocket default, atau TCP) harus sama dengan listener broker. **Path WebSocket** (default `/mqtt`) hanya dipakai dengan WebSocket. Mengubah host, port, transport, atau path me-restart monitor dan mereset penghitungnya.
 - Dry-run config patch mewajibkan **Revisi konfigurasi dasar** (Base config revision), yaitu `config_rev` terakhir yang dilaporkan node. Dry-run hanya pratinjau dan tidak mengirim apa pun; perubahan nyata dikirim lewat Kontrol di Dashboard.
 - Login admin di sini juga membuka Kontrol di Dashboard (sesi yang sama, 30 menit). Chip **PATCH** di bilah halaman bernilai `ADMIN ONLY`.
+- **Akses LAN** menyalakan tampilan LAN lihat-saja (lihat [Tampilan LAN](#tampilan-lan-lihat-saja)): **Lihat dari LAN**, **Port**, **Alamat bind**, **Klien yang diizinkan**, dan statusnya (`OPEN` dengan alamatnya, atau `CLOSED` dengan alasannya). Mengubahnya butuh admin; tanpa admin isian terkunci.
 - Logo PNG boleh grayscale, RGB, RGBA, atau palette, 8/16-bit, interlaced, maksimal 256 KiB dan 4096 × 4096 px. Logo diperiksa di browser sebelum di-stage.
 - Pilihan sumber GPS dan Compass disimpan di console dan dipulihkan setelah reload, di browser lain, dan setelah console di-restart. Masing-masing punya tombol restore default sendiri. Offset kompas manual berkisar −360 sampai 360, dan juga bisa diatur dari **Polar → Atur** di Dashboard.
 - Bila konfigurasi console tidak bisa dibaca, halaman menampilkan "Konfigurasi console tidak tersedia … Dicoba ulang otomatis" tanpa form. Console mencoba lagi sendiri (1, 2, 4, 8, lalu setiap 15 detik).
@@ -581,7 +582,7 @@ Broker TLS, PPP/T900, dan MQTT production tidak disiapkan oleh quickstart ini. C
 
 ## Instalasi Linux: Docker, rilis tar dan service
 
-Bagian ini untuk komputer ground station **Linux** yang hanya memakai console: tidak perlu Node.js atau build, console jalan di background, hidup lagi setelah reboot, dan semua pengaturan tersimpan otomatis. Ada tiga cara, pilih salah satu: Docker dari image GHCR (paling mudah di-update), Docker yang di-build dari rilis atau repository, atau rilis tar dengan `install.sh`. Image GHCR dan rilis tar bisa di-update otomatis tanpa login GitHub. Keduanya tetap bind ke `127.0.0.1:8787`, jadi console hanya bisa dibuka dari komputer itu sendiri: `http://127.0.0.1:8787/` di Chromium atau Chrome. Detail lengkap ada di `packaging/console/README.md`.
+Bagian ini untuk komputer ground station **Linux** yang hanya memakai console: tidak perlu Node.js atau build, console jalan di background, hidup lagi setelah reboot, dan semua pengaturan tersimpan otomatis. Ada tiga cara, pilih salah satu: Docker dari image GHCR (paling mudah di-update), Docker yang di-build dari rilis atau repository, atau rilis tar dengan `install.sh`. Image GHCR dan rilis tar bisa di-update otomatis tanpa login GitHub. Keduanya tetap bind ke `127.0.0.1:8787`, jadi console hanya bisa dibuka dari komputer itu sendiri: `http://127.0.0.1:8787/` di Chromium atau Chrome. Tablet dan komputer lain di LAN hanya bisa melihat, lewat [tampilan LAN](#tampilan-lan-lihat-saja) yang dinyalakan admin. Detail lengkap ada di `packaging/console/README.md`.
 
 ### Membuat rilis tar
 
@@ -654,7 +655,7 @@ Semua perintah untuk instalasi di `/opt` pakai `sudo`: `.env` di sana milik root
 
 ### Docker
 
-Butuh Docker Engine dan Compose v2 di Linux. Console memakai `network_mode: host`: console bind ke `127.0.0.1` dan menolak alamat lain, dan dengan network host loopback itu adalah loopback komputer ini. Jangan ganti ke network bridge dengan `ports:`. Docker Desktop di macOS/Windows tidak didukung.
+Butuh Docker Engine dan Compose v2 di Linux. Console memakai `network_mode: host`: console bind ke `127.0.0.1` dan menolak alamat lain, dan dengan network host loopback itu adalah loopback komputer ini. Tampilan LAN, bila dinyalakan, juga langsung memakai network host. Jangan ganti ke network bridge dengan `ports:`. Docker Desktop di macOS/Windows tidak didukung.
 
 ```sh
 # dari rilis (tanpa Node.js)
@@ -717,7 +718,7 @@ Semua yang diubah lewat UI disimpan di server console, bukan hanya di browser. P
 
 | File | Isi | Native | Docker |
 |---|---|---|---|
-| `console.json` | Data Out, MQTT (host, port, transport, path WebSocket), interval refresh | `~/.local/share/sdr-doa-ground-console/` | `/data/` |
+| `console.json` | Data Out, MQTT (host, port, transport, path WebSocket), interval refresh, akses LAN (`lan_access`) | `~/.local/share/sdr-doa-ground-console/` | `/data/` |
 | `branding.json` | nama aplikasi dan logo | sama | sama |
 | `preferences.json` | tema, bahasa, panel Dashboard dan node card, peta dasar, Lapisan/overlay, tampilan polar, sumber dan offset kompas, sumber GPS, mode Dengar, ikuti frekuensi node, mode dock Spektrum (RX atau Spektrum) dan skala dB terakhirnya, pengaturan (termasuk Skala dB tab Dengar), pengaturan pindai (termasuk Grafik min./maks.) dan bookmark Receiver | sama | sama |
 | `receiver/` | rekaman, scan, dan marker set Receiver | sama | sama |
@@ -738,6 +739,18 @@ Semua yang diubah lewat UI disimpan di server console, bukan hanya di browser. P
 - Permintaan keluar memakai proxy standar dari environment (`HTTPS_PROXY`, `NO_PROXY`) dan User-Agent `SDR-DoA-Ground-Console/<versi>`.
 - Setiap tile yang belum tersimpan memberi tahu penyedia area stasiun. Gaya Polos tidak meminta tile.
 - `--base-url` dan `--mqtt-*` menimpa pengaturan tersimpan hanya untuk satu kali jalan dan tidak disimpan. Service dan container sengaja tidak memakainya.
+
+### Tampilan LAN (lihat saja)
+
+Untuk tablet atau komputer lain di LAN yang hanya perlu melihat Dashboard, peta, polar, health dan monitor. Ini pengganti forward `socat 0.0.0.0:8788 → 127.0.0.1:8787`; hentikan forward itu dulu, karena ia meneruskan login admin dan Kontrol juga.
+
+- Listener kedua di proses console, mati secara default. Port console tetap hanya `127.0.0.1:8787`.
+- Dinyalakan di **Konfigurasi → Akses LAN** setelah buka kunci admin: **Lihat dari LAN**, **Port** (`8788`), **Alamat bind** (`0.0.0.0`, `::` atau IP antarmuka LAN), dan **Klien yang diizinkan** (alamat atau jaringan IPv4/IPv6, misalnya `192.168.1.20, 192.168.1.0/24`; paling banyak 32, tidak lebih luas dari /16 atau /48; daftar kosong berarti tidak ada yang boleh). Simpan langsung membuka, memindah atau menutup listener.
+- Ditolak selama kata sandi admin masih `123456` atau login admin mati. Pengaturan yang menyala tetap tertutup saat start dalam keadaan itu; alasannya ada di log, `/api/health` dan kartu Akses LAN.
+- Klien lain mendapat 403 tanpa isi (dicatat di log sekali per menit per alamat). Klien yang diizinkan hanya mendapat UI dan API baca-saja; login admin, Kontrol, Konfigurasi, preferensi, Receiver dan Rekaman ditolak (`LAN_READ_ONLY`). `Host` harus IP, nama `.local` atau nama host komputer ini.
+- Di tablet, top bar menampilkan **LIHAT SAJA**, Kontrol dan buka kunci admin tidak ada, Konfigurasi hanya menampilkan nilai, dan Receiver serta panel Spektrum menampilkan "Receiver berjalan di groundstation." (RadioSpectrum terpasang di USB groundstation). Pilihan tampilan tablet disimpan di browser tablet saja.
+- Firewall: buka port LAN hanya untuk jaringan LAN, misalnya `sudo ufw allow from 192.168.1.0/24 to any port 8788 proto tcp`. Port console jangan dibuka.
+- Cek dari komputer lain yang diizinkan: `curl http://<IP groundstation>:8788/api/health` menjawab `"ok": true`, dan `curl -o /dev/null -w '%{http_code}\n' http://<IP groundstation>:8788/api/receiver/settings` mencetak `403`. Langkah lengkap ada di `docs/RUNBOOK_INSTALL_UPDATE.md` bagian 6.2.
 
 ## Agent RDF-SDR (Raspberry)
 
@@ -895,4 +908,4 @@ MapLibre hanya renderer; tile datang dari console lewat `/api/tiles`, dan CSP ha
 
 ### Keamanan lokal
 
-Tetap gunakan `--bind 127.0.0.1` (di Docker: `network_mode: host`). Jangan memakai `0.0.0.0` untuk quickstart dan jangan memasukkan secret ke frontend. Config dry-run di Konfigurasi bukan command nyata, tetapi Kontrol di Dashboard adalah command nyata ke RDF-SDR. Ganti kata sandi admin bawaan `123456` sebelum console dipakai di komputer bersama. Console menolak `POST /api/mqtt/config-patch` tanpa header `Origin` dari halaman console itu sendiri, tanpa sesi admin, atau tanpa `confirm: true`.
+Tetap gunakan `--bind 127.0.0.1` (di Docker: `network_mode: host`). Jangan memakai `0.0.0.0` untuk quickstart dan jangan memasukkan secret ke frontend. Satu-satunya jalan dari LAN adalah [tampilan LAN lihat-saja](#tampilan-lan-lihat-saja), bukan reverse proxy atau `socat`. Config dry-run di Konfigurasi bukan command nyata, tetapi Kontrol di Dashboard adalah command nyata ke RDF-SDR. Ganti kata sandi admin bawaan `123456` sebelum console dipakai di komputer bersama. Console menolak `POST /api/mqtt/config-patch` tanpa header `Origin` dari halaman console itu sendiri, tanpa sesi admin, atau tanpa `confirm: true`.

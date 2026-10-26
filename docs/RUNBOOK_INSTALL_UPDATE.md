@@ -28,7 +28,7 @@ Konvensi:
 
 ### 1.1 Dilarang
 
-1. Membuat console bisa dijangkau dari jaringan. Console hanya bind `127.0.0.1`. Jangan pakai `--bind 0.0.0.0` atau alamat non-loopback, jangan pasang reverse proxy, `socat`, atau port-forward yang membuka port console ke LAN.
+1. Membuat console bisa dijangkau dari jaringan dengan cara apa pun selain mode LAN lihat-saja (6.2). Console hanya bind `127.0.0.1`. Jangan pakai `--bind 0.0.0.0` atau alamat non-loopback, jangan pasang reverse proxy, `socat`, atau port-forward yang membuka port console ke LAN; forward `socat 0.0.0.0:8788 → 127.0.0.1:8787` yang lama diganti mode 6.2. Mode LAN lihat-saja adalah satu-satunya pengecualian: listener kedua di proses console, mati secara default, yang hanya melayani halaman baca-saja ke alamat klien yang diizinkan. Menyalakannya keputusan manusia, dilakukan manusia sendiri di halaman Konfigurasi dengan sesi admin.
 2. Mengubah Docker console ke network bridge, menambah `ports:`, atau mengedit `compose.yml` yang ditulis `sdr-doa-docker` (`install` menulisnya ulang). Semua compose memakai `network_mode: host`.
 3. Menjalankan `install.sh` console sebagai root. Installer menolak (`run install.sh as the desktop user, not root; the console runs as a user service`). Jangan akali dengan `sudo -u` tanpa sesi login user itu.
 4. Menaruh kata sandi admin atau kata sandi MQTT di command line, di riwayat shell, di log, atau di pesan chat. Jadi **jangan** pakai `install.sh --password NILAI`, `echo "SDR_DOA_ADMIN_PASSWORD=..."`, atau `export SDR_DOA_MQTT_PASSWORD=...`. Jangan `cat` file `.env`, `agent.env`, atau variabel proxy yang mungkin memuat kredensial. Jangan juga jalankan perintah yang mencetak environment container atau compose yang sudah diinterpolasi: `docker inspect` tanpa `--format` yang memilih field tertentu (bukan `.Config.Env`), `docker compose config`, `docker compose exec ... env`/`printenv`, `cat /proc/*/environ`. Di agent Docker, `SDR_DOA_MQTT_PASSWORD` ada di environment container; di console Docker, `SDR_DOA_ADMIN_PASSWORD` juga ada di sana bila ditaruh di `DIR/.env` (misalnya setelah 5.6 E1).
@@ -94,7 +94,7 @@ Tanyakan semua yang relevan sebelum mulai. Kolom "Default" adalah nilai dari kod
 | Input | Format yang diterima kode | Default | Catatan |
 |---|---|---|---|
 | User Linux console native (Jalur B) | nama user biasa yang memakai browser di host ini | — | Agent butuh shell login langsung sebagai user ini (SSH sebagai user itu). Bila agent hanya punya shell root: berhenti dan minta akses SSH sebagai user itu. |
-| Port console | 1–65535 | `8787` | Selalu di `127.0.0.1`. |
+| Port console | 1–65535 | `8787` | Selalu di `127.0.0.1`. Mode LAN lihat-saja (6.2) memakai port lain. |
 | Kata sandi admin | 1 baris, maks. 256 karakter | `123456` (diberi peringatan) | **Manusia sendiri** yang mengetiknya (A4/B3). Membuka branding dan Kontrol. |
 | Data Out base URL | `http://<host>:8081`; host hanya `doasdr.local`, `192.168.100.100`, `127.0.0.1`, `localhost` | `http://doasdr.local:8081` | Host lain ditolak kode (allowlist tetap di `tools/sdr_doa_collector.py`). Bila Data Out ada di IP lain: berhenti dan tanya. Jalur A: pakai IP (`http://192.168.100.100:8081`) kecuali `doasdr.local` terbukti teresolusi di dalam container (8.1 langkah 6); image console kemungkinan besar tidak bisa meresolusi nama mDNS. |
 | MQTT host | literal IPv4/IPv6 atau `localhost` (bukan nama DNS) | `10.90.0.1` | Console tidak punya TLS atau username/password MQTT. |
@@ -102,7 +102,8 @@ Tanyakan semua yang relevan sebelum mulai. Kolom "Default" adalah nilai dari kod
 | MQTT transport | `websockets` atau `tcp` | `websockets` | |
 | MQTT WebSocket path | diawali `/`, huruf, angka, `._~/-` | `/mqtt` | Hanya untuk `websockets`. |
 | Interval refresh | `0` (manual), `1`, `2`, `5`, `10`, `30` detik | `2` | |
-| Akses UI dari komputer lain? | ya / tidak | — | Lewat SSH tunnel (bagian 6). |
+| Akses UI dari komputer lain? | tidak / SSH tunnel / LAN lihat-saja | — | SSH tunnel (6.1): console penuh di browser komputer itu. LAN lihat-saja (6.2): tablet atau komputer di LAN hanya melihat. |
+| Mode LAN lihat-saja (bila dipilih) | port 1024–65535, bukan port console; bind `0.0.0.0`, `::` atau IP antarmuka LAN host ini; klien yang diizinkan: alamat atau jaringan IPv4/IPv6, maks. 32, tidak lebih luas dari /16 (IPv4) atau /48 (IPv6), bukan loopback | mati; port `8788`, bind `0.0.0.0`, klien kosong (tidak ada yang diizinkan) | Butuh kata sandi admin sendiri (A4/B3). **Manusia sendiri** yang menyalakannya (6.2). Tanyakan juga alamat LAN host console dan siapa yang mengatur firewall. |
 | Basemap online? | ya / tidak | — | Butuh HTTPS ke host tile (4.6). |
 
 Nilai koneksi (Data Out, MQTT, refresh) hanya dipakai saat start pertama. Setelah itu diubah di halaman **Konfigurasi** di UI.
@@ -824,7 +825,14 @@ echo "OLD=$OLD"
 
 ## 6. Membuka UI dari komputer lain
 
-Console hanya mendengarkan `127.0.0.1:<port>` di host console. Dari komputer lain, pakai SSH tunnel dengan **nomor port yang sama** di kedua sisi:
+Console mendengarkan `127.0.0.1:<port>` di host console. Ada dua cara dari komputer lain:
+
+- **SSH tunnel (6.1)**: console penuh (admin, Kontrol, Receiver dengan RadioSpectrum di komputer itu) di browser komputer yang punya akses SSH.
+- **Mode LAN lihat-saja (6.2)**: tablet atau komputer di LAN membuka console di port LAN dan hanya melihat. Pengganti forward `socat` lama.
+
+### 6.1 SSH tunnel
+
+Pakai SSH tunnel dengan **nomor port yang sama** di kedua sisi:
 
 ```sh
 ssh -N -L 127.0.0.1:8787:127.0.0.1:8787 operator@192.0.2.10     # user dan alamat host console: (contoh)
@@ -845,7 +853,62 @@ Bila port 8787 di komputer lokal sudah dipakai: ubah port console di host (`--po
 Catatan:
 - `localhost:8787` dan `127.0.0.1:8787` adalah origin berbeda untuk izin WebUSB browser. Pakai satu alamat secara konsisten.
 - Receiver memakai WebUSB di browser yang membuka halaman, jadi RadioSpectrum (HackRF) dicolokkan ke komputer yang menjalankan browser itu. Firefox tidak mendukung WebUSB.
-- Jangan membuka port console ke LAN sebagai pengganti tunnel (aturan 1.1.1).
+- Jangan membuka port console ke LAN sebagai pengganti tunnel (aturan 1.1.1). Untuk melihat saja dari LAN, pakai 6.2.
+
+### 6.2 Mode LAN lihat-saja
+
+Belum ada di `v2.0.0`: kartu **Akses LAN** di Konfigurasi dan `GET /api/lan-access` hanya ada di rilis yang membawanya. Pada rilis lama, berhenti dan tanya manusia.
+
+Listener kedua di proses console yang sama, mati secara default. Pengaturannya blok `lan_access` di `console.json` (`enabled`, `port`, `bind`, `allowed_clients`). Port console tetap hanya `127.0.0.1`. Listener LAN:
+
+- hanya menerima alamat klien di `allowed_clients`; klien lain mendapat `403` tanpa isi, dan log console mencatat `LAN view refused <ip>: not in lan_access.allowed_clients ...` paling banyak sekali per menit per alamat;
+- hanya `GET` dan `HEAD` untuk UI dan API baca-saja (`/api/health`, `/api/capabilities`, `/api/snapshot`, `/api/console-config`, `/api/mqtt`, `/api/mqtt/rdf-node`, `/api/preferences`, `/api/branding`, `/api/tiles/...`, `/api/admin/status`). Selain itu `403` atau `405` dengan `{"code": "LAN_READ_ONLY", ...}`: login admin, Kontrol, Konfigurasi, preferensi, Receiver (`/receiver/`) dan Rekaman (`/api/receiver/*`) tidak bisa dari LAN, dan cookie admin tidak pernah dipakai;
+- menolak `Host` yang bukan alamat IP, nama `.local`, atau nama host komputer ini, dan permintaan `Sec-Fetch-Site: cross-site` (`403 ORIGIN_REJECTED`);
+- tidak terbuka selama kata sandi admin masih `123456` atau login admin mati. Saat start, pengaturan yang menyala dibiarkan tertutup dengan alasan di log (`warning: lan_access is enabled but the LAN view stays closed: ...`), di `/api/health` dan di `/api/capabilities`.
+
+Di tablet, top bar menampilkan chip **LIHAT SAJA** (EN: **VIEW ONLY**); Kontrol, buka kunci admin dan Simpan di Konfigurasi tidak ada. Receiver dan panel Spektrum menampilkan "Receiver berjalan di groundstation." karena RadioSpectrum terpasang di USB groundstation. Pilihan tampilan di tablet (tema, bahasa, panel) disimpan di browser tablet saja.
+
+**Menyalakan** (oleh manusia, di browser groundstation, setelah A4/B3 memasang kata sandi admin sendiri):
+
+1. Bila forward lama masih jalan (unit `sdr-doa-console-lan` atau `socat` ke `127.0.0.1:8787`), manusia menghentikan dan menonaktifkannya dulu lewat `systemctl` (bukan `pkill`, aturan 1.1.12). Forward itu meneruskan semua permintaan, termasuk login dan Kontrol, dan memakai port yang sama. Periksa: `ss -ltnp 'sport = :8788'` tidak menampilkan `socat`.
+2. Konfigurasi → **Branding & admin** → isi kata sandi → **Buka kunci**.
+3. Kartu **Akses LAN**: nyalakan **Lihat dari LAN**, isi **Port** (`8788`), **Alamat bind** (`0.0.0.0`, atau IP antarmuka LAN host ini), dan **Klien yang diizinkan**, misalnya `192.168.1.20, 192.168.1.0/24` **(contoh)**, lalu **Simpan**. Listener langsung terbuka, pindah, atau tertutup; tidak perlu restart.
+
+**Periksa**: kartu menampilkan chip `OPEN` dan alamat `http://0.0.0.0:8788/`. `CLOSED` dengan alasan: lihat bagian 9.
+
+**Firewall**: buka port LAN hanya untuk jaringan LAN, port console (`8787`) tidak pernah. Contoh untuk ufw dan firewalld **(contoh)**, hanya dengan izin manusia:
+
+```sh
+sudo ufw allow from 192.168.1.0/24 to any port 8788 proto tcp
+sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="192.168.1.0/24" port port="8788" protocol="tcp" accept' && sudo firewall-cmd --reload
+```
+
+Docker (Jalur A) memakai `network_mode: host`, jadi listener LAN langsung ada di host; jangan tambah `ports:` (aturan 1.1.2).
+
+**Verifikasi di host console**:
+
+```sh
+curl -s --noproxy '*' http://127.0.0.1:8787/api/health; echo
+curl -s --noproxy '*' http://127.0.0.1:8787/api/lan-access; echo
+ss -ltn 'sport = :8788'
+```
+
+**Hasil**: health berisi `"lan_access": {"enabled": true, "reason": null, "state": "open"}`. `lan-access` berisi `"config"` dengan pengaturan yang disimpan dan `"status"` dengan `"state": "open"` dan `"address": "0.0.0.0:8788"`. `ss`: satu baris `LISTEN` di `0.0.0.0:8788` (atau alamat bind yang dipilih). 8.1 langkah 2 tetap: port console hanya `127.0.0.1`.
+
+**Verifikasi dari komputer lain di LAN** yang alamatnya diizinkan (`H` = alamat LAN host console **(contoh)**):
+
+```sh
+H=192.168.1.10
+curl -s --noproxy '*' "http://$H:8788/api/health"; echo
+curl -s --noproxy '*' "http://$H:8788/api/capabilities" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["access"], d["read_only"], d["admin_enabled"])'
+curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' "http://$H:8788/api/receiver/settings"
+curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' -X POST -d '{}' "http://$H:8788/api/admin/login"
+curl -s --noproxy '*' --max-time 3 -o /dev/null "http://$H:8787/api/health"; echo "rc=$?"
+```
+
+**Hasil**: `{"lan_access": ..., "ok": true, ...}`; `lan-view True False`; `403`; `405`; `rc=7` (port console tertutup dari LAN). Dari komputer yang **tidak** diizinkan, `curl -s -o /dev/null -w '%{http_code}\n' "http://$H:8788/"` mencetak `403`, dan log console mencatat alamatnya.
+
+**Mematikan**: kartu **Akses LAN** → matikan **Lihat dari LAN** → **Simpan**. Chip `CLOSED`, `ss -ltn 'sport = :8788'` kosong. Tutup lagi port firewall-nya.
 
 ---
 
@@ -1022,7 +1085,7 @@ Jalankan setelah setiap instalasi dan setiap update. Ganti port bila bukan `8787
 # 1. health
 curl -s --noproxy '*' http://127.0.0.1:8787/api/health; echo
 ```
-**Hasil**: `{"ok": true, "receiver_busy": false, "version": "2.0.0"}` (versi sesuai yang dipasang).
+**Hasil**: `{"ok": true, "receiver_busy": false, "version": "2.0.0"}` (versi sesuai yang dipasang). Rilis dengan mode LAN (6.2) menambah `"lan_access": {"enabled": false, "reason": "DISABLED", "state": "closed"}`; `"state": "open"` hanya bila manusia menyalakannya.
 
 ```sh
 # 2. hanya loopback
@@ -1030,7 +1093,7 @@ P=8787
 ss -ltn "sport = :$P" 2>/dev/null || cat /proc/net/tcp /proc/net/tcp6 2>/dev/null \
   | awk -v p=":$(printf '%04X' "$P")" 'NR>1 && $4=="0A" && substr($2, length($2)-4)==p {print $2}'
 ```
-**Hasil** dengan `ss`: satu baris `LISTEN` dengan kolom Local Address `127.0.0.1:8787` (kolom Peer `0.0.0.0:*` itu wajar). Tanpa `ss`: satu baris `0100007F:2253` (= `127.0.0.1:8787`). Alamat lain (`0.0.0.0:8787`, `*:8787`, IP LAN; tanpa `ss` misalnya `00000000:2253`): berhenti, ini pelanggaran aturan 1.1.1.
+**Hasil** dengan `ss`: satu baris `LISTEN` dengan kolom Local Address `127.0.0.1:8787` (kolom Peer `0.0.0.0:*` itu wajar). Tanpa `ss`: satu baris `0100007F:2253` (= `127.0.0.1:8787`). Alamat lain (`0.0.0.0:8787`, `*:8787`, IP LAN; tanpa `ss` misalnya `00000000:2253`): berhenti, ini pelanggaran aturan 1.1.1. Listener mode LAN (6.2) memakai port lain dan tidak muncul di sini; port itu hanya boleh ada bila manusia menyalakannya.
 
 ```sh
 # 3. admin dan versi
@@ -1152,6 +1215,7 @@ Satu blok singkat berisi:
 - kanal image (Docker) dan status update otomatis (jam di zona host dan di zona manusia bila berbeda, timer aktif atau baris cron yang harus ditambah);
 - agent: user service (`install-info` `AGENT_USER` atau `agent runs as`), `ENABLE_CONFIG`, status kata sandi MQTT (terisi/kosong, tanpa nilainya);
 - status kata sandi admin (`set`/`default`/`disabled`), tanpa nilainya;
+- mode LAN lihat-saja (6.2): mati, atau terbuka di alamat mana dan untuk klien mana, dan siapa yang mengatur firewall-nya;
 - hasil 8.1–8.4 (yang lolos, yang tidak, dan yang belum bisa diperiksa);
 - sisa pekerjaan untuk manusia: kata sandi, lingering, proxy, keputusan `ENABLE_CONFIG`, tunnel SSH, baris crontab.
 
@@ -1187,6 +1251,12 @@ Satu blok singkat berisi:
 | `pip could not install packaging/console/requirements.txt (network or proxy?)` | pip tidak bisa mengambil paket | Periksa proxy (4.7); tarball rilis membawa wheel di `wheels/`. |
 | `the release files do not match MANIFEST.sha256; unpack the tarball again` | Ekstraksi rusak atau file diubah | Hapus direktori ekstrak, ekstrak ulang dari tarball yang lolos `sha256sum`. |
 | `warning: port 8787 is already in use (another console?)` / `something else already answers on http://127.0.0.1:8787/` | Console lain (repo, native, Docker) jalan | Berhenti; jangan dua console di satu port. |
+| Akses LAN `CLOSED` dengan `ADMIN_PASSWORD_DEFAULT`, log `lan_access is enabled but the LAN view stays closed: the default admin password is in use` | Kata sandi admin masih `123456` | A4/B3 (manusia mengetik kata sandi), lalu restart console; listener terbuka saat start. |
+| Akses LAN `CLOSED` dengan `ADMIN_DISABLED` | `SDR_DOA_ADMIN_PASSWORD` kosong atau `.env` tidak terbaca | Pasang kata sandi admin (A4/B3). |
+| Akses LAN `CLOSED` dengan `BIND_FAILED` (`EADDRINUSE`), log `the LAN view could not bind ...` | Port LAN dipakai program lain, misalnya forward `socat` lama | Hentikan forward lama (6.2 langkah 1) atau pilih port lain, lalu Simpan lagi. |
+| Akses LAN `CLOSED` dengan `BIND_FAILED` (`EADDRNOTAVAIL`) | Alamat bind bukan alamat host ini | Pakai `0.0.0.0` atau IP antarmuka LAN host ini. |
+| Tablet mendapat `403` tanpa isi; log `LAN view refused <ip>: ...` | Alamat tablet tidak ada di Klien yang diizinkan | Tambahkan alamat atau jaringannya di kartu Akses LAN (keputusan manusia). |
+| Tablet mendapat `403` `ORIGIN_REJECTED` | Dibuka lewat nama DNS biasa atau proxy, bukan IP, nama `.local`, atau nama host | Buka `http://<IP LAN>:8788/`. |
 | `no systemd user session here, so the console will not start at boot` | Installer tidak dijalankan di sesi login | Login sebagai user itu (SSH), ulangi B2. |
 | Console native tidak jalan setelah reboot | Lingering mati | `loginctl show-user $USER -p Linger`; `sudo loginctl enable-linger $USER`. |
 | `sdr-doa-console update ...` mencetak teks bantuan tanpa baris `update` dan keluar 64 | Instalasi lama tanpa updater | 5.6 E2. |
@@ -1212,7 +1282,7 @@ Satu blok singkat berisi:
 | Kontrol: "Belum ada ACK" (`no_ack`) sekitar 65 detik setelah Kirim | Tidak ada agent yang menjawab di `ack/config` | Agent mati, broker lain, atau agent lama. |
 | Kontrol: `Ditolak · REMOTE_CONTROL_DISABLED` | Agent tanpa `--enable-config` | Sesuai desain bila manusia memilih remote config mati. |
 | Kontrol: `publish_failed`, PUBACK ≥ 128 (135 "Not authorized") | ACL broker tidak mengizinkan console publish ke `sdr/v1/uav-01/cmd/config/patch` | Konfigurasi broker (di luar repository ini). |
-| Rekaman: "Open the Receiver from this console." (403 `ORIGIN_REJECTED`) | Dibuka lewat port-forward yang mengubah host atau port | Tunnel dengan port yang sama (bagian 6). |
+| Rekaman: "Open the Receiver from this console." (403 `ORIGIN_REJECTED`) | Dibuka lewat port-forward yang mengubah host atau port | Tunnel dengan port yang sama (6.1). Dari mode LAN (6.2) Rekaman memang tidak tersedia. |
 | Basemap `BASEMAP UNAVAILABLE` / `BASEMAP PARTIAL` | Host tile tidak terjangkau dari host console | Log console `tiles <source>: upstream unavailable (...)`; 4.6, 4.7; cek `X-Tile-Cache` (8.1 langkah 7). Console Docker di jaringan yang keluar hanya lewat proxy tidak bisa mengambil tile (4.7): laporkan. |
 | Pengaturan tampak tidak tersimpan setelah restart | Console dijalankan dengan `--base-url`/`--mqtt-*` | Hapus flag itu dari perintah; ubah di Konfigurasi. |
 | UI lama setelah update | Halaman lama masih di browser | Muat ulang halaman. |
@@ -1356,7 +1426,8 @@ Bila uninstall biasa sudah dijalankan dan manusia kemudian meminta data dihapus:
 | | Nilai |
 |---|---|
 | Console | `127.0.0.1:8787` (hanya loopback) |
-| Health | `GET http://127.0.0.1:8787/api/health` → `{"ok": true, "receiver_busy": false, "version": "<V>"}` |
+| Mode LAN lihat-saja | mati secara default; bila dinyalakan manusia (6.2): `<bind>:8788` (default), hanya untuk klien yang diizinkan, baca-saja |
+| Health | `GET http://127.0.0.1:8787/api/health` → `{"ok": true, "receiver_busy": false, "version": "<V>"}` (rilis dengan mode LAN: juga `"lan_access"`) |
 | Data Out (dibaca console) | `http://<host>:8081`, host: `doasdr.local`, `192.168.100.100`, `127.0.0.1`, `localhost`; default `http://doasdr.local:8081` |
 | MQTT console | default `10.90.0.1:9001`, `websockets`, path `/mqtt`; tanpa TLS dan kredensial |
 | MQTT agent | default `127.0.0.1:1883`, TCP, MQTT 3.1.1 |
