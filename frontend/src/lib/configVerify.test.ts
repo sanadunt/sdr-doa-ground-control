@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { TelemetrySnapshot } from '../types';
 import { CONFIG_PATCH_KEYS } from './controlDraft';
 import type { ConfigPatchKey } from './controlDraft';
-import { VERIFY_WINDOW_MS, currentConfigValues, dataOutConfigValues, verifyConfigPatch } from './configVerify';
+import { VERIFY_WINDOW_MS, currentConfigValues, dataOutConfigValues, settingsReadAfter, verifyConfigPatch } from './configVerify';
 import type { VerifyInput } from './configVerify';
 
 const ISSUED = 1_000_000;
@@ -124,6 +124,23 @@ describe('verifyConfigPatch', () => {
     const after = verify({ snapshot: node, snapshotFresh: false, nowMs: FINAL + VERIFY_WINDOW_MS + 1 });
     expect(after.fields[0].status).toBe('not-reported');
     expect(after.verdict).toBe('not-reported');
+  });
+
+  // #13: the console reuses settings.json for up to 30 s between reads.
+  it('takes no evidence from settings.json read before the command was issued', () => {
+    const before = snapshot({ center_freq: 415.7882 }, { settings: { available: true, fields: { center_freq: 415.7882 }, reused: true, read_at_ms: ISSUED - 5_000 } });
+    const during = verify({ snapshot: before });
+    expect(during.fields[0]).toMatchObject({ dataOut: null, basis: null, status: 'pending' });
+    const mqtt = reported({ center_frequency_hz: 433_920_000 }, { center_frequency_hz: ISSUED + 10 });
+    expect(verify({ snapshot: before, reported: mqtt }).fields[0]).toMatchObject({ dataOut: null, basis: 'mqtt', status: 'confirmed' });
+    expect(verify({ snapshot: before, nowMs: FINAL + VERIFY_WINDOW_MS + 1 }).fields[0].status).toBe('not-reported');
+    const after = snapshot({}, { settings: { available: true, fields: { center_freq: 433.92 }, read_at_ms: ISSUED + 2_000 } });
+    expect(verify({ snapshot: after }).fields[0]).toMatchObject({ dataOut: 433_920_000, basis: 'data-out', status: 'confirmed' });
+    expect(settingsReadAfter(before, ISSUED)).toBe(false);
+    expect(settingsReadAfter(after, ISSUED)).toBe(true);
+    // An older console that does not say when settings.json was read: as before.
+    expect(settingsReadAfter(snapshot({ center_freq: 433.92 }), ISSUED)).toBe(true);
+    expect(settingsReadAfter(before, null)).toBe(true);
   });
 
   it('ignores a synthetic snapshot', () => {

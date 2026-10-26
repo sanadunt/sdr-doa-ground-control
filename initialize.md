@@ -59,6 +59,7 @@ Tujuan UI:
 - Tab `Simulasi`: lokasi, sudut DoA, lebar lobe, randomize manual, randomize otomatis.
 - Halaman System Health (termasuk tabel pembacaan per resource), DoA Diagnostics, Configuration, dan Message Monitor (sdr/v1 plus panel RDF Node v2).
 - Collector mendeteksi node beku (`NODE_CLOCK_STALLED`), membatasi satu koleksi dengan anggaran waktu (4 detik untuk `/api/snapshot`), dan membandingkan sudut CSV/XML hanya untuk pasangan dari frame yang sama.
+- Console membaca Data Out satu kali per interval refresh untuk semua penampil (`tools/data_out_reader.py`) dan memakai ulang `settings.json` paling lama 30 detik; umur data di browser dihitung sejak node dibaca.
 - Freshness expiry di renderer browser; snapshot stale tidak boleh terus ditampilkan sebagai data aktif. Refresh otomatis default 2 detik (pilihan 1, 2, 5, 10, 30 detik atau manual).
 - Receiver embedded (BrowSDR dari submodule `vendor/BrowSDR`, dengan overlay di `tools/browsdr_receiver_overlay/`) untuk spektrum, scan, rekaman audio, dan Records yang disimpan lokal. Panel Spektrum di Dashboard mengendalikan frame Receiver yang tersembunyi lewat bridge `postMessage` (Mulai/Berhenti, Dengar dengan modulasi, klik untuk menala, Ikuti frekuensi node, Skala dB RX, sample rate, LNA, VGA, +14 dB, mode RX | Spektrum untuk pindai lebar, dan Penanda).
 - Kontrol: patch konfigurasi MQTT yang dibatasi admin, dengan pelacakan ACK di server (`tools/config_command_tracker.py`).

@@ -213,6 +213,17 @@ describe('System Health shows why Data Out failed (AUD-27, AUD-101)', () => {
     expect(page).toMatch(/Resource Result Time \/status\.json HTTP 200/);
   });
 
+  // #13: settings.json was not read in this collection; the console reused it.
+  it('shows a reused settings.json as REUSED with its age', () => {
+    const reused = {
+      ...VALID,
+      resources: { ...OK_RESOURCES, '/settings.json': { ...OK_RESOURCES['/settings.json'], reused: true } },
+      collection: { elapsed_ms: 30, budget_ms: 4000, settings_reused: true, settings_age_ms: 12_000 },
+    } as unknown as TelemetrySnapshot;
+    expect(text(render(<SystemHealthPage snapshot={reused} mqtt={null} localSnapshotFresh />))).toMatch(/\/settings\.json REUSED 12\.0 s old/);
+    expect(text(render(<SystemHealthPage snapshot={reused} mqtt={null} localSnapshotFresh />, 'id'))).toMatch(/\/settings\.json REUSED umur 12\.0 dtk/);
+  });
+
   it('does not call unchanged counters advancing', () => {
     const unchanged = { ...MALFORMED, node_progress: { state: 'UNCHANGED', stalled: false, stalled_counters: [], changed_counters: [], unchanged_for_ms: { timestamp_ms: 4000, uptime_ms: 4000 }, regressed_counters: [], max_stall_ms: 10000, samples: 3 } } as unknown as TelemetrySnapshot;
     const markup = render(<SystemHealthPage snapshot={unchanged} mqtt={null} localSnapshotFresh={false} />);

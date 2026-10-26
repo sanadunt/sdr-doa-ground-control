@@ -2,13 +2,16 @@
  * Did the RDF-SDR take a sent config patch? Each sent field is compared with
  * the latest Data Out settings.json first; MQTT is used for a field only when
  * a fresh Data Out snapshot does not carry it, and only with a value that
- * arrived after the command was issued. An ACK only says the edge agent wrote
- * settings.json; this reads the values back from the node.
+ * arrived after the command was issued. The console may reuse settings.json
+ * for a while, so a copy read before the command was issued is not evidence
+ * either. An ACK only says the edge agent wrote settings.json; this reads the
+ * values back from the node.
  */
 import type { ConfigReported } from '../api';
 import type { TelemetrySnapshot } from '../types';
 import { CONFIG_PATCH_KEYS } from './controlDraft';
 import type { ConfigPatchChanges, ConfigPatchKey } from './controlDraft';
+import { settingsReadAtMs } from './snapshotRead';
 
 export type VerifyStatus = 'confirmed' | 'pending' | 'unchanged' | 'not-reported';
 export type VerifyVerdict = 'confirmed' | 'partial' | 'pending' | 'unchanged' | 'not-reported';
@@ -113,10 +116,16 @@ function matches(key: ConfigPatchKey, value: number, sent: number): boolean {
   return Math.abs(value - sent) <= VERIFY_FIELD_RULES[key].tolerance + 1e-9;
 }
 
+/** settings.json in this snapshot was read after the command was issued (unknown counts as after). */
+export function settingsReadAfter(snapshot: TelemetrySnapshot | null, issuedAtMs: number | null): boolean {
+  const readAt = settingsReadAtMs(snapshot);
+  return readAt === null || issuedAtMs === null || readAt >= issuedAtMs;
+}
+
 export function verifyConfigPatch(input: VerifyInput): ConfigVerification {
   const windowEndsAtMs = input.finalAtMs + (input.windowMs ?? VERIFY_WINDOW_MS);
   const open = input.nowMs < windowEndsAtMs;
-  const fresh = dataOutConfigValues(input.snapshot, input.snapshotFresh);
+  const fresh = dataOutConfigValues(input.snapshot, input.snapshotFresh && settingsReadAfter(input.snapshot, input.issuedAtMs));
   // A stale snapshot is not evidence, but it shows the node reports the field.
   const carried = settingsValues(input.snapshot);
   const fields: VerifyField[] = [];

@@ -4,6 +4,7 @@ import { candidate, numberOrNull } from '../lib/telemetry';
 import { bearingForView, formatDegrees, polarView } from '../lib/polar';
 import { doaStatusTextKey, overviewDoaStatus } from '../lib/doaStatus';
 import { useI18n } from '../lib/i18n';
+import { ageAtAnswerMs } from '../lib/snapshotRead';
 import type { MessageKey } from '../lib/i18n';
 
 export function coordinateSourceKey(source: MapCoordinate['source'] | undefined): MessageKey {
@@ -50,9 +51,10 @@ export function DoaReadout({
   const bearing = status.shown ? bearingForView(view) : null;
   const csv = candidate(snapshot, 'csv');
   const rawAge = numberOrNull(csv.freshness?.age_ms);
-  const ageMs = rawAge !== null && rawAge >= 0 ? rawAge : null;
+  // The DoA age when this page got the answer: a shared read's own age counts.
+  const ageMs = ageAtAnswerMs(rawAge !== null && rawAge >= 0 ? rawAge : null, snapshot);
   const bearingTone: Tone = status.shown ? (status.code === 'DEGRADED' || !offsetVerified ? 'warn' : 'good') : status.code === 'WAITING' ? 'neutral' : 'warn';
-  // The age is the collector's value at the last read and does not grow, so
+  // The age is the value when the last answer arrived and does not grow, so
   // once the local window has closed (or the source itself is stale) it is
   // marked STALE instead of reading as current. Without an age (Data Out
   // unreachable) there is nothing to mark.

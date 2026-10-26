@@ -654,7 +654,16 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         )
 
         self.assertEqual(snapshot_result.status, 200)
-        self.assertEqual(_decode_json(self, snapshot_result, "snapshot"), fixture_snapshot)
+        snapshot = _decode_json(self, snapshot_result, "snapshot")
+        # The shared Data Out read adds its reuse facts to the collection block.
+        collection = snapshot.pop("collection")
+        self.assertEqual(snapshot, fixture_snapshot)
+        self.assertEqual(
+            sorted(collection),
+            ["age_ms", "collected_at_ms", "id", "refresh_seconds", "settings_reused", "shared"],
+        )
+        self.assertEqual(collection["refresh_seconds"], config["refresh_seconds"])
+        self.assertIs(collection["shared"], False)
         self.assertEqual(len(collect_calls), 1, "snapshot test must use only the local fixture collector")
 
         self.assertEqual(missing_result.status, 404)

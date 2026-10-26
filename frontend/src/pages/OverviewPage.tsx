@@ -72,7 +72,7 @@ export interface OverviewDashboardProps {
   capabilities?: ConsoleCapabilities | null;
   controlDraftRequest?: ControlDraftRequest | null;
   onControlDraftRequest?: (changes: ConfigPatchChanges) => void;
-  /** Read Data Out now; Kontrol's "Cek ulang". */
+  /** Read Data Out now, settings.json included; Kontrol's "Cek ulang". */
   onRefreshSnapshot?: () => void;
 }
 

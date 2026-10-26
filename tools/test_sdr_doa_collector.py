@@ -914,6 +914,165 @@ def test_missing_status_in_remote_mode_leaves_doa_freshness_unknown():
     assert local["doa_candidates"]["csv"]["freshness"]["freshness_known"] is True
 
 
+class SettingsNode:
+    """Data Out behind a fake fetcher for the settings.json reuse tests; counts GETs."""
+
+    def __init__(self) -> None:
+        self.timestamp = 100_000
+        self.uptime_ms = 60_000
+        self.status_changes = {}
+        self.daq_changes = {}
+        self.frequency_hz = 416_588_000
+        self.center_freq = 416.588
+        self.status_unreachable = False
+        self.gets = {path: 0 for path in (collector.PATH_STATUS, collector.PATH_SETTINGS, collector.PATH_CSV, collector.PATH_XML)}
+
+    def status(self) -> bytes:
+        document = json.loads(make_status(self.timestamp))
+        document["uptime_ms"] = self.uptime_ms
+        document.update(self.status_changes)
+        document["daq_status"].update(self.daq_changes)
+        return json.dumps(document).encode()
+
+    def fetcher(self, base_url, path, timeout, max_body):
+        self.gets[path] += 1
+        if path == collector.PATH_STATUS and self.status_unreachable:
+            return collector.FetchedResource(path, base_url + path, False, None, None, b"", 1_000, "connection refused", "connection_refused", 1)
+        bodies = {
+            collector.PATH_STATUS: self.status(),
+            collector.PATH_SETTINGS: json.dumps({"center_freq": self.center_freq, "secret_token": "do-not-return"}).encode(),
+            collector.PATH_CSV: make_csv(self.timestamp, frequency_hz=str(self.frequency_hz)),
+            collector.PATH_XML: make_xml(self.timestamp, frequency_mhz=f"{self.frequency_hz / 1e6:.6f}"),
+        }
+        return resource(path, bodies[path])
+
+
+class SettingsRun:
+    """Collections two seconds apart with one SettingsCache, as the console runs them."""
+
+    def __init__(self) -> None:
+        self.node = SettingsNode()
+        self.cache = collector.SettingsCache()
+        self.clock = FakeClock()
+
+    def collect(self, advance_s: float = 2.0, **options):
+        self.clock.advance(advance_s)
+        self.node.timestamp += int(advance_s * 1000)
+        self.node.uptime_ms += int(advance_s * 1000)
+        return collector.collect(
+            "http://fixture:8081",
+            fetcher=self.node.fetcher,
+            monotonic_clock=self.clock,
+            settings_cache=self.cache,
+            total_budget_s=4.0,
+            **options,
+        )
+
+
+def test_settings_json_is_reused_for_thirty_seconds():
+    """#13: settings.json (4.7 kB of ~8 kB) is read at most every 30 s."""
+    run = SettingsRun()
+    first = run.collect()
+    assert first["settings"]["reused"] is False
+    assert first["collection"]["settings_reused"] is False
+    assert first["collection"]["settings_age_ms"] == 0
+    assert first["settings"]["read_at_ms"] == 1_000
+    assert "reused" not in first["resources"]["/settings.json"]
+    for step in range(1, 15):
+        snapshot = run.collect()
+        assert snapshot["settings"]["reused"] is True, step
+        assert snapshot["collection"]["settings_reused"] is True
+        assert snapshot["collection"]["settings_age_ms"] == step * 2_000
+        assert snapshot["settings"]["fields"] == {"center_freq": 416.588}
+        assert snapshot["settings"]["read_at_ms"] == first["settings"]["read_at_ms"]
+        assert snapshot["resources"]["/settings.json"]["reused"] is True
+        assert list(snapshot["resources"]) == ["/status.json", "/settings.json", "/DOA_value.html", "/doa.xml"]
+    assert run.node.gets[collector.PATH_SETTINGS] == 1
+    assert run.node.gets[collector.PATH_STATUS] == 15
+    expired = run.collect()
+    assert expired["settings"]["reused"] is False
+    assert run.node.gets[collector.PATH_SETTINGS] == 2
+
+
+def test_fresh_settings_reads_settings_json():
+    run = SettingsRun()
+    run.collect()
+    run.node.center_freq = 433.0
+    assert run.collect()["settings"]["fields"]["center_freq"] == 416.588
+    checked = run.collect(fresh_settings=True)
+    assert checked["settings"]["reused"] is False
+    assert checked["settings"]["fields"]["center_freq"] == 433.0
+    # The fresh copy is the one reused afterwards.
+    assert run.collect()["settings"]["fields"]["center_freq"] == 433.0
+    assert run.node.gets[collector.PATH_SETTINGS] == 2
+
+
+def test_a_new_settings_cache_reads_settings_json():
+    """A console restart starts with an empty cache."""
+    run = SettingsRun()
+    run.collect()
+    run.cache = collector.SettingsCache()
+    assert run.collect()["settings"]["reused"] is False
+    assert run.node.gets[collector.PATH_SETTINGS] == 2
+
+
+def test_status_values_that_follow_the_settings_end_the_reuse():
+    for status_changes, daq_changes in (
+        ({"software_version": "next"}, {}),
+        ({"station_id": "OTHER"}, {}),
+        ({}, {"sampling_frequency_hz": 1_200_000}),
+    ):
+        run = SettingsRun()
+        run.collect()
+        assert run.collect()["settings"]["reused"] is True
+        run.node.status_changes = status_changes
+        run.node.daq_changes = daq_changes
+        assert run.collect()["settings"]["reused"] is False, (status_changes, daq_changes)
+        assert run.node.gets[collector.PATH_SETTINGS] == 2
+        assert run.collect()["settings"]["reused"] is True
+
+
+def test_a_node_restart_ends_the_settings_reuse():
+    run = SettingsRun()
+    run.collect()
+    run.node.uptime_ms = 1_000
+    assert run.collect()["settings"]["reused"] is False
+    assert run.node.gets[collector.PATH_SETTINGS] == 2
+
+
+def test_a_retune_seen_in_the_doa_views_reads_settings_in_the_same_collection():
+    run = SettingsRun()
+    run.collect()
+    run.node.frequency_hz = 433_920_000
+    run.node.center_freq = 433.92
+    retuned = run.collect()
+    assert retuned["settings"]["reused"] is False
+    assert retuned["settings"]["fields"]["center_freq"] == 433.92
+    assert run.node.gets[collector.PATH_SETTINGS] == 2
+    assert run.node.gets[collector.PATH_STATUS] == 2
+    assert run.collect()["settings"]["reused"] is True
+
+
+def test_an_unreachable_node_reports_no_settings():
+    run = SettingsRun()
+    run.collect()
+    run.node.status_unreachable = True
+    down = run.collect()
+    assert down["settings"]["available"] is False
+    assert down["settings"]["reused"] is False
+    assert down["settings"]["read_at_ms"] is None
+    assert down["collection"]["settings_age_ms"] is None
+    assert run.node.gets[collector.PATH_SETTINGS] == 1
+
+
+def test_without_a_settings_cache_every_collection_reads_settings_json():
+    run = SettingsRun()
+    for _ in range(3):
+        snapshot = collector.collect("http://fixture:8081", fetcher=run.node.fetcher, monotonic_clock=run.clock, total_budget_s=4.0)
+        assert snapshot["settings"]["reused"] is False
+    assert run.node.gets[collector.PATH_SETTINGS] == 3
+
+
 def test_cli_help_example_uses_an_allowlisted_host():
     """AUD-78: the documented example must pass the allowlist."""
     help_text = collector._build_parser().format_help()

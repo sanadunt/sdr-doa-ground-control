@@ -238,8 +238,27 @@ export async function updateConsoleConfig(config: ConsoleConfig, signal?: AbortS
   return readback;
 }
 
-export async function getSnapshot(baseUrl: string, signal?: AbortSignal): Promise<TelemetrySnapshot> {
-  const url = `/api/snapshot?base_url=${encodeURIComponent(baseUrl)}`;
+/** How a snapshot read asks the console's shared Data Out read. */
+export interface SnapshotReadOptions {
+  /** The operator's Refresh: a new read once the last one is 1 s old. */
+  refresh?: boolean;
+  /** Kontrol's "Cek ulang": read settings.json too instead of its recent copy. */
+  freshSettings?: boolean;
+  /** Collection id this page already shows, so the next poll gets a new read. */
+  seen?: string | null;
+}
+
+/** /api/snapshot URL for a read; the console decides whether it reads Data Out. */
+export function snapshotUrl(baseUrl: string, options: SnapshotReadOptions = {}): string {
+  let url = `/api/snapshot?base_url=${encodeURIComponent(baseUrl)}`;
+  if (options.refresh || options.freshSettings) url += '&refresh=1';
+  if (options.freshSettings) url += '&fresh_settings=1';
+  if (options.seen) url += `&seen=${encodeURIComponent(options.seen)}`;
+  return url;
+}
+
+export async function getSnapshot(baseUrl: string, signal?: AbortSignal, options: SnapshotReadOptions = {}): Promise<TelemetrySnapshot> {
+  const url = snapshotUrl(baseUrl, options);
   const body = await requestJson<unknown>(url, {
     cache: 'no-store',
     credentials: 'same-origin',

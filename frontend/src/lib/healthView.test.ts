@@ -52,6 +52,18 @@ describe('Data Out HTTP reachability (AUD-101)', () => {
     expect(nodeStatus(value)).toEqual({ state: 'INVALID', error: 'status.daq_ok must be boolean' });
   });
 
+  // #13: the console reuses settings.json for up to 30 s between reads.
+  it('marks a reused settings.json with its age and still counts it as answered', () => {
+    const value = snapshot({
+      resources: resources({ '/settings.json': { reused: true, elapsed_ms: 40 } }),
+      collection: { settings_reused: true, settings_age_ms: 12_000 },
+    });
+    expect(dataOutHttp(value)).toEqual({ state: 'AVAILABLE', ok: 4, reported: 4, total: 4 });
+    expect(resourceRows(value)[1]).toMatchObject({ path: '/settings.json', ok: true, reused: true, reusedAgeMs: 12_000 });
+    expect(resourceRows(value)[0]).toMatchObject({ reused: false, reusedAgeMs: null });
+    expect(resourceRows(snapshot())[1]).toMatchObject({ reused: false, reusedAgeMs: null });
+  });
+
   it('is PARTIAL when doa.xml answers 404, even though status.json is valid', () => {
     const value = snapshot({ resources: resources({ '/doa.xml': { ok: false, http_status: 404, error: 'HTTP 404', error_kind: 'http_status' } }) });
     expect(dataOutHttp(value).state).toBe('PARTIAL');

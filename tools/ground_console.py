@@ -3,7 +3,9 @@
 
 The console keeps a narrow boundary:
 
-* it performs bounded read-only GETs through ``sdr_doa_collector``;
+* it performs bounded read-only GETs through ``sdr_doa_collector``, one
+  collection per refresh interval for every viewer together
+  (``data_out_reader``);
 * an optional MQTT monitor subscribes to its configured broker;
 * its one remote write is ``POST /api/mqtt/config-patch``: an admin-gated,
   explicitly confirmed config patch published once at QoS 1 (never retained,
@@ -81,7 +83,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import sdr_doa_mqtt
 from config_command_tracker import ConfigCommandTracker, MonitorPublishError
-from sdr_doa_collector import CollectorError, DEFAULT_ALLOWED_DATA_HOSTS, NodeProgressTracker, collect
+from sdr_doa_collector import CollectorError, DEFAULT_ALLOWED_DATA_HOSTS, NodeProgressTracker, SettingsCache, collect
+from data_out_reader import DataOutReader, SnapshotRequest, valid_collection_id
 import receiver_archive as ra
 from receiver_archive import ArchiveError
 from receiver_record_store import (
@@ -1840,7 +1843,7 @@ pre { max-height: 260px; overflow: auto; margin: 8px 0 0; padding: 9px; border: 
 const initialConfig = __CONSOLE_CONFIG_JSON__;
 const $ = (id) => document.getElementById(id);
 if (initialConfig && initialConfig.refresh_seconds !== undefined) $('refresh-interval').value = String(initialConfig.refresh_seconds);
-const state = { dataUrl: $('data-url').value, autoTimer: null, branding: null, pendingLogo: null, refreshSequence: 0, mqttSequence: 0, refreshController: null, expiryTimer: null, snapshot: null, polar: { values: null, angle: null, fresh: false, figType: 'Compass', compassOffset: 0, localAxis: true } };
+const state = { dataUrl: $('data-url').value, autoTimer: null, autoSeconds: 0, collectionId: null, consoleSeconds: Number(initialConfig?.refresh_seconds)||0, branding: null, pendingLogo: null, refreshSequence: 0, mqttSequence: 0, refreshController: null, expiryTimer: null, snapshot: null, polar: { values: null, angle: null, fresh: false, figType: 'Compass', compassOffset: 0, localAxis: true } };
 function esc(value) { return String(value ?? '—').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;'); }
 function kind(value) { const s=String(value||'').toUpperCase(); return s==='LIVE'||s==='PASS'||s==='READY'||s==='CONNECTED'?'good':(s==='DEGRADED'||s==='STALE'||s==='BLOCKED'||s==='FAIL'||s==='ERROR'?'bad':'warn'); }
 function pill(value) { const cls=kind(value); return `<span class="chip ${cls==='good'?'safe':(cls==='bad'?'bad':'warn')}">${esc(value)}</span>`; }
@@ -1991,9 +1994,9 @@ function setSnapshotUnavailable(reason='snapshot unavailable') {
 function render(snapshot) {
   state.snapshot=snapshot; const gate=snapshot.publication_gate||{}; const status=snapshot.status||{}; const safe=status.safe||{}; const csv=(snapshot.doa_candidates||{}).csv||{}; const xml=(snapshot.doa_candidates||{}).xml||{}; const consistency=snapshot.native_consistency||{}; const authority=snapshot.authority||{};
   const overall=snapshot.overall_state||'UNKNOWN'; $('overall').textContent=overall; $('overall').className=`metric-value ${kind(overall)}`; $('system-state').textContent=overall; $('system-state').className=kind(overall); $('overall-detail').textContent=`DAQ ${status.daq_health||'—'} · native DoA ${csv.native_metrics_state||'—'} · delivery ${gate.state||'—'}`;
-  const readAt=new Date(); $('last-read-chip').textContent=readAt.toISOString().slice(11,19)+'Z'; $('source-url').textContent=snapshot.collector?.base_url||state.dataUrl;
+  const collectedAt=Number(snapshot.collection?.collected_at_ms); const readAt=new Date(Number.isFinite(collectedAt)&&collectedAt>0?collectedAt:Date.now()); $('last-read-chip').textContent=readAt.toISOString().slice(11,19)+'Z'; $('source-url').textContent=snapshot.collector?.base_url||state.dataUrl;
   const daq=status.daq_health||'UNKNOWN'; const daqTop=safe.daq_status||{}; const syncFlags=[daqTop.frame_sync,daqTop.sample_delay_sync,daqTop.iq_sync]; const syncPassed=syncFlags.filter(value=>value===true).length; $('daq').textContent=daq; $('daq').className=`metric-value ${kind(daq)}`; $('daq-detail').textContent=`frame #${daqTop.data_frame_index??'—'} · sync ${syncPassed}/3`;
-  const freshnessItems=[csv.freshness,xml.freshness].filter(Boolean); const ages=freshnessItems.map(x=>x.age_ms); const validAges=ages.length===2&&ages.every(x=>typeof x==='number'&&Number.isFinite(x)&&x>=0); const maxAge=validAges?Math.max(...ages):null; const freshnessOk=validAges&&freshnessItems.every(x=>x.fresh===true); $('doa-age').textContent=maxAge===null?'—':`${(Number(maxAge)/1000).toFixed(1)} s`; $('doa-age').className=`metric-value ${freshnessOk&&maxAge<=5000?'good':'bad'}`; const relation=consistency.conflict===true?'CONFLICT':(consistency.comparable===true?(typeof consistency.circular_distance_deg==='number'&&consistency.circular_distance_deg<=3?'EQUAL':'DIFFERENT'):'NOT COMPARABLE'); $('doa-detail').textContent=`CSV ${formatNumber(csv.canonical_angle_deg,1)}° / XML ${formatNumber(xml.canonical_angle_deg,1)}° · ${relation}`;
+  const freshnessItems=[csv.freshness,xml.freshness].filter(Boolean); const ages=freshnessItems.map(x=>x.age_ms); const validAges=ages.length===2&&ages.every(x=>typeof x==='number'&&Number.isFinite(x)&&x>=0); const maxAge=validAges?Math.max(...ages)+servedAgeMs(snapshot):null; const freshnessOk=validAges&&freshnessItems.every(x=>x.fresh===true); $('doa-age').textContent=maxAge===null?'—':`${(Number(maxAge)/1000).toFixed(1)} s`; $('doa-age').className=`metric-value ${freshnessOk&&maxAge<=5000?'good':'bad'}`; const relation=consistency.conflict===true?'CONFLICT':(consistency.comparable===true?(typeof consistency.circular_distance_deg==='number'&&consistency.circular_distance_deg<=3?'EQUAL':'DIFFERENT'):'NOT COMPARABLE'); $('doa-detail').textContent=`CSV ${formatNumber(csv.canonical_angle_deg,1)}° / XML ${formatNumber(xml.canonical_angle_deg,1)}° · ${relation}`;
   const drops=safe.daq_num_dropped_frames; $('drops').textContent=drops===undefined?'—':drops; $('drops').className=`metric-value ${drops===0?'good':'warn'}`; $('drops-detail').textContent='status.json counter';
   const dataAvailable=Boolean(csv.available&&xml.available&&csv.freshness?.fresh&&xml.freshness?.fresh&&consistency.comparable===true&&consistency.conflict!==true); const gateState=String(gate.state||'BLOCKED').toUpperCase(); $('delivery-summary').textContent=gateState; $('delivery-summary').className=`metric-value ${kind(gateState)}`; $('delivery-state').textContent=gateState; $('delivery-state').className=kind(gateState); $('delivery-detail').textContent=gateState==='READY'?'delivery ready':'publish held'; $('gate-title').textContent=gateState; $('gate-pill').innerHTML=pill(gateState); $('gate-banner').className=`gate-banner ${gateState==='READY'?'good':''}`; $('gate-copy').textContent=gateState==='READY'?'Delivery gate is ready.':(dataAvailable?'DoA data is observable; delivery remains held by the publication gate.':'DoA data is not sufficiently fresh or consistent for usable delivery.');
   renderPolar(snapshot,csv,dataAvailable); renderMap(snapshot,csv,xml); renderHealthCards(snapshot,csv,xml,consistency); renderEvents(snapshot,gate,consistency);
@@ -2011,23 +2014,29 @@ function localExpiryMs(snapshot) {
   // Same rule as the React console: the read keeps only the time still left in the collector's freshness window.
   if(snapshot?.status?.available!==true) return 0; const windows=[];
   for(const candidate of Object.values(snapshot.doa_candidates||{})){ const f=candidate?.freshness; if(!f||typeof f!=='object'||f.freshness_known===false) continue; if(f.fresh!==true) return 0; const maxAge=Number(f.max_age_ms); const age=Number(f.age_ms); if(!Number.isFinite(maxAge)||!Number.isFinite(age)||age<0) return 0; windows.push(maxAge-age); }
-  return windows.length?Math.max(0,Math.min(...windows)):5000;
+  // A shared read can be older than the answer (collection.age_ms); that time counts too.
+  const waited=servedAgeMs(snapshot);
+  return windows.length?Math.max(0,Math.min(...windows)-waited):Math.max(0,5000-waited);
 }
+// How long before the answer its shared Data Out read completed, as the React console bounds it.
+function servedAgeMs(snapshot) { const served=Number(snapshot?.collection?.age_ms); return Number.isFinite(served)&&served>0?Math.min(served,120000):0; }
+// A running auto-refresh follows the console's saved interval, which every answer reports, so this page polls when the console reads Data Out.
+function followConsoleInterval(snapshot) { const seconds=snapshot?.collection?.refresh_seconds; if(!Number.isInteger(seconds)||seconds<0) return; state.consoleSeconds=seconds; if(state.autoTimer&&seconds>0&&seconds!==state.autoSeconds) setAuto(seconds,false); }
 function scheduleLocalExpiry(snapshot) { if(state.expiryTimer){ clearTimeout(state.expiryTimer); state.expiryTimer=null; } const remaining=localExpiryMs(snapshot); if(remaining<=0) return; state.expiryTimer=setTimeout(()=>{ state.expiryTimer=null; if(state.snapshot!==snapshot) return; setSnapshotUnavailable('local freshness window expired; awaiting a new Data Out read'); setReadStatus('Data expired locally · awaiting a new read','bad'); },remaining); }
 async function refresh(options) {
-  const auto=options?.auto===true; if(auto&&state.refreshController) return;
+  const auto=options?.auto===true; const manual=options?.manual===true; if(auto&&state.refreshController) return;
   const sequence=++state.refreshSequence; if(state.refreshController) state.refreshController.abort(); const controller=typeof AbortController==='function'?new AbortController():null; state.refreshController=controller; const button=$('refresh'); button.disabled=true; setReadStatus('Reading Data Out…');
   let timedOut=false; const timer=controller?setTimeout(()=>{ timedOut=true; controller.abort(); },REQUEST_TIMEOUT_MS):null;
-  try { const url='/api/snapshot?base_url='+encodeURIComponent(state.dataUrl); const init={cache:'no-store'}; if(controller) init.signal=controller.signal; const response=await fetch(url,init); const data=await response.json(); if(sequence!==state.refreshSequence) return; if(!response.ok) throw new Error(data.error||'snapshot failed'); render(data); scheduleLocalExpiry(data); }
+  try { const url='/api/snapshot?base_url='+encodeURIComponent(state.dataUrl)+(manual?'&refresh=1':'')+(state.collectionId?'&seen='+encodeURIComponent(state.collectionId):''); const init={cache:'no-store'}; if(controller) init.signal=controller.signal; const response=await fetch(url,init); const data=await response.json(); if(sequence!==state.refreshSequence) return; if(!response.ok) throw new Error(data.error||'snapshot failed'); const id=data.collection?.id; state.collectionId=typeof id==='string'&&/^[0-9a-f]{8}-[0-9]{1,12}$/.test(id)?id:null; render(data); scheduleLocalExpiry(data); followConsoleInterval(data); }
   catch(error) { if(sequence!==state.refreshSequence||(error?.name==='AbortError'&&!timedOut)) return; const message=timedOut?`request timed out after ${REQUEST_TIMEOUT_MS/1000} s`:(error?.message||'snapshot failed'); setSnapshotUnavailable(message); setReadStatus('Read error: '+message,'bad'); }
   finally { if(timer) clearTimeout(timer); if(sequence===state.refreshSequence){ button.disabled=false; if(state.refreshController===controller) state.refreshController=null; } }
   if(sequence===state.refreshSequence) refreshMqtt();
 }
-function setAuto(seconds) { if(state.autoTimer){ clearInterval(state.autoTimer); state.autoTimer=null; } const interval=Number(seconds||0); $('refresh-interval').value=String(interval); if(interval>0){ refresh(); state.autoTimer=setInterval(()=>refresh({auto:true}),interval*1000); $('auto-refresh').textContent=`Auto: ${interval}s`; } else $('auto-refresh').textContent='Auto: off'; }
+function setAuto(seconds,readNow=true) { if(state.autoTimer){ clearInterval(state.autoTimer); state.autoTimer=null; } const interval=Number(seconds||0); state.autoSeconds=interval; $('refresh-interval').value=String(interval); if(interval>0){ if(readNow) refresh(); state.autoTimer=setInterval(()=>refresh({auto:true}),interval*1000); $('auto-refresh').textContent=`Auto: ${interval}s`; } else $('auto-refresh').textContent='Auto: off'; }
 function openSettings(tab='connection') { $('settings-modal').hidden=false; selectTab(tab); }
 function closeSettings() { $('settings-modal').hidden=true; }
 function selectTab(name) { document.querySelectorAll('.tab').forEach(button=>button.classList.toggle('active',button.dataset.tab===name)); document.querySelectorAll('.tab-panel').forEach(panel=>panel.hidden=panel.id!==`tab-${name}`); }
-async function applyConnection() { const url=$('data-url').value.trim(); const mqttHost=$('mqtt-host').value.trim(); const mqttPort=Number($('mqtt-port').value||9001); const refreshSeconds=Number($('refresh-interval').value||0); if(!url){ setStatus('connection-status','URL is empty.','bad'); return; } try { const r=await fetch('/api/console-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_url:url,mqtt_host:mqttHost,mqtt_port:mqttPort,refresh_seconds:refreshSeconds})}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'configuration rejected'); state.dataUrl=data.base_url; $('source-url').textContent=data.base_url; setAuto(data.refresh_seconds); setStatus('connection-status','Configuration saved locally in Ground Console.','good'); await refresh(); } catch(e) { setStatus('connection-status',e.message,'bad'); } }
+async function applyConnection() { const url=$('data-url').value.trim(); const mqttHost=$('mqtt-host').value.trim(); const mqttPort=Number($('mqtt-port').value||9001); const refreshSeconds=Number($('refresh-interval').value||0); if(!url){ setStatus('connection-status','URL is empty.','bad'); return; } try { const r=await fetch('/api/console-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_url:url,mqtt_host:mqttHost,mqtt_port:mqttPort,refresh_seconds:refreshSeconds})}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'configuration rejected'); state.dataUrl=data.base_url; $('source-url').textContent=data.base_url; state.consoleSeconds=Number(data.refresh_seconds)||0; setAuto(data.refresh_seconds); setStatus('connection-status','Configuration saved locally in Ground Console.','good'); await refresh({manual:true}); } catch(e) { setStatus('connection-status',e.message,'bad'); } }
 async function connectMqtt() { const host=$('mqtt-host').value.trim(); const port=Number($('mqtt-port').value||9001); if(!host){ setStatus('connection-status','Enter an MQTT broker IP address or localhost first.','bad'); return; } try { const r=await fetch(`/api/mqtt/connect?host=${encodeURIComponent(host)}&port=${encodeURIComponent(port)}`,{method:'POST'}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'MQTT monitor failed'); renderMqtt(data); setStatus('connection-status','MQTT monitor connected; this view only subscribes.','good'); setTimeout(refreshMqtt,700); } catch(e) { setStatus('connection-status',e.message,'bad'); } }
 async function adminLogin() { const password=$('admin-password').value; try { const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password})}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'login failed'); $('admin-login-box').hidden=true; $('admin-workspace').hidden=false; $('admin-password').value=''; setStatus('brand-status','Admin active.','good'); renderBranding(state.branding); } catch(e) { setStatus('admin-login-status',e.message,'bad'); } }
 async function adminLogout() { await fetch('/api/admin/logout',{method:'POST'}); $('admin-login-box').hidden=false; $('admin-workspace').hidden=true; setStatus('admin-login-status','Admin session closed.',''); }
@@ -2035,7 +2044,7 @@ function readLogo(file) { if(!file) return; if(file.size>256*1024){ setStatus('b
 function resetLogo() { state.pendingLogo=''; $('brand-logo').value=''; $('brand-preview').hidden=true; $('preview-placeholder').hidden=false; setStatus('brand-status','Logo will be removed when saved.',''); }
 async function saveBranding() { const appName=$('brand-name').value.trim(); const logo=state.pendingLogo===null?(state.branding?.logo_data_url||''):state.pendingLogo; try { const r=await fetch('/api/admin/branding',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({app_name:appName,logo_data_url:logo})}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'branding save failed'); state.pendingLogo=null; const verify=await fetch('/api/branding',{cache:'no-store'}); const verified=await verify.json(); if(!verify.ok) throw new Error(verified.error||'branding read-back failed'); renderBranding(verified); setStatus('brand-status','Branding saved and verified from Ground Console local storage.','good'); } catch(e) { setStatus('brand-status',e.message,'bad'); } }
 document.querySelectorAll('[data-nav]').forEach(item=>item.addEventListener('click',()=>{ document.querySelectorAll('.nav-item').forEach(nav=>nav.classList.toggle('active',nav===item)); document.querySelectorAll('.nav-item').forEach(nav=>nav.removeAttribute('aria-current')); item.setAttribute('aria-current','page'); }));
-$('refresh').addEventListener('click',refresh); $('auto-refresh').addEventListener('click',()=>setAuto(state.autoTimer?0:2)); $('settings-open').addEventListener('click',()=>openSettings('connection')); $('settings-close').addEventListener('click',closeSettings); document.querySelector('[data-close-settings]').addEventListener('click',closeSettings); document.querySelectorAll('.tab').forEach(button=>button.addEventListener('click',()=>selectTab(button.dataset.tab))); $('apply-connection').addEventListener('click',applyConnection); $('monitor-connect').addEventListener('click',connectMqtt); $('admin-login').addEventListener('click',adminLogin); $('admin-logout').addEventListener('click',adminLogout); $('brand-logo').addEventListener('change',event=>readLogo(event.target.files[0])); $('brand-reset-logo').addEventListener('click',resetLogo); $('brand-save').addEventListener('click',saveBranding); $('refresh-interval').addEventListener('change',event=>setAuto(event.target.value)); document.addEventListener('keydown',event=>{if(event.key==='Escape')closeSettings();});
+$('refresh').addEventListener('click',()=>refresh({manual:true})); $('auto-refresh').addEventListener('click',()=>setAuto(state.autoTimer?0:(state.consoleSeconds>0?state.consoleSeconds:2))); $('settings-open').addEventListener('click',()=>openSettings('connection')); $('settings-close').addEventListener('click',closeSettings); document.querySelector('[data-close-settings]').addEventListener('click',closeSettings); document.querySelectorAll('.tab').forEach(button=>button.addEventListener('click',()=>selectTab(button.dataset.tab))); $('apply-connection').addEventListener('click',applyConnection); $('monitor-connect').addEventListener('click',connectMqtt); $('admin-login').addEventListener('click',adminLogin); $('admin-logout').addEventListener('click',adminLogout); $('brand-logo').addEventListener('change',event=>readLogo(event.target.files[0])); $('brand-reset-logo').addEventListener('click',resetLogo); $('brand-save').addEventListener('click',saveBranding); document.addEventListener('keydown',event=>{if(event.key==='Escape')closeSettings();});
 window.addEventListener('resize',()=>drawPolar(state.polar.values,state.polar.angle,state.polar.fresh,state.polar.figType,state.polar.compassOffset),{passive:true});
 renderClock(); setInterval(renderClock,1000); loadBranding(); if (initialConfig && initialConfig.refresh_seconds > 0) setAuto(initialConfig.refresh_seconds); else refresh();
 </script>
@@ -3007,8 +3016,16 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     HTTPStatus.BAD_REQUEST,
                 )
                 return
+            # refresh=1: the operator's Refresh; fresh_settings=1: Kontrol's
+            # "Cek ulang" (both read again only when the last read is 1 s old);
+            # seen: the collection id the viewer already shows.
+            request = SnapshotRequest(
+                refresh=query.get("refresh", [""])[0] == "1",
+                fresh_settings=query.get("fresh_settings", [""])[0] == "1",
+                seen=valid_collection_id(query.get("seen", [""])[0]),
+            )
             try:
-                snapshot = self.console_server.collect_snapshot(base_url)
+                snapshot = self.console_server.collect_snapshot(base_url, request)
             except (CollectorError, ValueError, OSError, http.client.HTTPException) as exc:
                 self._send_json({"error": str(exc) or type(exc).__name__, "read_only": True}, HTTPStatus.BAD_GATEWAY)
                 return
@@ -3303,13 +3320,6 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
 
-class _Flight:
-    def __init__(self) -> None:
-        self.done = threading.Event()
-        self.result: Any = None
-        self.error: Optional[BaseException] = None
-
-
 # /api/health reports receiver_busy while the Receiver writes records, so the
 # updaters do not restart the console in the middle of a recording or scan:
 # any Receiver write in the last RECEIVER_BUSY_WRITE_S, or an audio session or
@@ -3347,38 +3357,6 @@ class ReceiverActivity:
             return bool(self._open) and age < RECEIVER_BUSY_OPEN_S
 
 
-class _SingleFlight:
-    """Run at most one call per key; concurrent callers wait for its result."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._flights: Dict[str, _Flight] = {}
-
-    def run(self, key: str, produce: Callable[[], Any], wait_timeout_s: float) -> Any:
-        with self._lock:
-            flight = self._flights.get(key)
-            leader = flight is None
-            if flight is None:
-                flight = _Flight()
-                self._flights[key] = flight
-        if not leader:
-            if not flight.done.wait(wait_timeout_s):
-                raise CollectorError("snapshot collection is still in progress")
-            if flight.error is not None:
-                raise CollectorError(str(flight.error) or type(flight.error).__name__)
-            return flight.result
-        try:
-            flight.result = produce()
-            return flight.result
-        except BaseException as exc:
-            flight.error = exc
-            raise
-        finally:
-            with self._lock:
-                self._flights.pop(key, None)
-            flight.done.set()
-
-
 class GroundConsoleServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -3398,6 +3376,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
         tile_sources: Optional[Dict[str, TileSource]] = None,
         retention_interval_s: float = ra.RETENTION_INTERVAL_S,
         retention_start_delay_s: float = ra.RETENTION_START_DELAY_S,
+        data_out_fetcher: Optional[Callable[..., Any]] = None,
     ):
         self.frontend_dir = Path(frontend_dir).resolve() if frontend_dir is not None else None
         if not _is_loopback_bind(address[0]):
@@ -3465,7 +3444,17 @@ class GroundConsoleServer(ThreadingHTTPServer):
         # requests cannot both pass the in-flight check.
         self._config_patch_lock = threading.Lock()
         self.node_progress = NodeProgressTracker()
-        self._snapshot_flights = _SingleFlight()
+        # One Data Out read serves every viewer (data_out_reader.py); the
+        # collector reuses settings.json through settings_cache.
+        # data_out_fetcher replaces the HTTP GETs only for tests (a loopback
+        # fake node); the command line cannot set it.
+        self.settings_cache = SettingsCache()
+        self._data_out_fetcher = data_out_fetcher
+        self.data_out = DataOutReader(
+            self._collect_data_out,
+            refresh_seconds=lambda: self._config.get("refresh_seconds"),
+            wait_timeout_s=SNAPSHOT_TOTAL_BUDGET_S + SNAPSHOT_WAIT_GRACE_S,
+        )
         self.receiver_store = ReceiverRecordStore(
             receiver_data_dir if receiver_data_dir is not None else DEFAULT_DATA_DIR,
             log=lambda message: print(message, flush=True),
@@ -3515,23 +3504,28 @@ class GroundConsoleServer(ThreadingHTTPServer):
         finally:
             super().server_close()
 
-    def collect_snapshot(self, base_url: str) -> Dict[str, Any]:
-        """Collect once per base_url at a time; concurrent callers share it.
+    def collect_snapshot(self, base_url: str, request: Optional[SnapshotRequest] = None) -> Dict[str, Any]:
+        """Answer /api/snapshot from the shared Data Out read for ``base_url``.
 
-        Each browser tick used to start its own collection while earlier ones
-        still waited on a slow node, piling up threads and GETs. Requests that
-        arrive during a collection now receive that collection's result.
+        Every viewer gets the last collection while it is younger than the
+        reuse window (the saved refresh interval, at least 1 s); concurrent
+        misses share one collection. See data_out_reader.py.
         """
-        return self._snapshot_flights.run(
-            base_url.rstrip("/"),
-            lambda: collect(
-                base_url=base_url,
-                authority="none",
-                clock_source="remote_unverified",
-                total_budget_s=SNAPSHOT_TOTAL_BUDGET_S,
-                progress_tracker=self.node_progress,
-            ),
-            SNAPSHOT_TOTAL_BUDGET_S + SNAPSHOT_WAIT_GRACE_S,
+        return self.data_out.snapshot(base_url, request or SnapshotRequest())
+
+    def _collect_data_out(self, base_url: str, fresh_settings: bool) -> Dict[str, Any]:
+        options: Dict[str, Any] = {}
+        if self._data_out_fetcher is not None:
+            options["fetcher"] = self._data_out_fetcher
+        return collect(
+            base_url=base_url,
+            authority="none",
+            clock_source="remote_unverified",
+            total_budget_s=SNAPSHOT_TOTAL_BUDGET_S,
+            progress_tracker=self.node_progress,
+            settings_cache=self.settings_cache,
+            fresh_settings=fresh_settings,
+            **options,
         )
 
     @property

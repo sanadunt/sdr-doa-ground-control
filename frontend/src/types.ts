@@ -77,6 +77,10 @@ export interface SettingsSnapshot {
   redacted?: boolean;
   fields?: Record<string, unknown>;
   raw_fields_omitted?: boolean;
+  /** settings.json was not read in this collection; a recent copy was reused. */
+  reused?: boolean;
+  /** Console clock (ms) when the settings.json used here was read. */
+  read_at_ms?: number | null;
 }
 
 export interface AuthoritySnapshot {
@@ -102,6 +106,19 @@ export interface CollectionInfo {
   budget_ms?: number | null;
   deadline_exceeded?: boolean;
   status_transport_failed?: boolean;
+  /** The shared Data Out read this answer came from; sent back as `seen`. */
+  id?: string;
+  /** Console clock (ms) when the collection completed. */
+  collected_at_ms?: number;
+  /** How long before this answer the collection completed. */
+  age_ms?: number;
+  /** The answer came from a collection another request started. */
+  shared?: boolean;
+  settings_reused?: boolean;
+  /** Age of the settings.json used, at the time of the answer. */
+  settings_age_ms?: number | null;
+  /** The console's saved refresh interval when the answer was sent; it sets how long one read is shared. */
+  refresh_seconds?: number | null;
 }
 
 export interface ResourceInfo {
