@@ -154,6 +154,7 @@ class _ServerCase(unittest.TestCase):
         quiet.__enter__()
         self.addCleanup(quiet.__exit__, None, None, None)
         self.snapshot_targets: List[str] = []
+        self.snapshot_requests: List[Any] = []
 
     def start_server(self, config: Optional[Dict[str, Any]] = None) -> Any:
         # No MQTT host: a config save would otherwise start a real monitor.
@@ -169,8 +170,9 @@ class _ServerCase(unittest.TestCase):
             tile_cache_dir=self.root / "tiles",
         )
 
-        def fake_collect(base_url: str) -> Dict[str, Any]:
+        def fake_collect(base_url: str, request: Any = None) -> Dict[str, Any]:
             self.snapshot_targets.append(base_url)
+            self.snapshot_requests.append(request)
             return dict(FAKE_SNAPSHOT)
 
         server.collect_snapshot = fake_collect  # type: ignore[method-assign]
@@ -558,6 +560,15 @@ class LanListenerTests(_ServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(_json(body), FAKE_SNAPSHOT)
         self.assertEqual(self.snapshot_targets, [BASE_URL])
+
+    def test_the_snapshot_shares_the_read_without_fresh_settings(self) -> None:
+        # seen and refresh take part in the shared read; fresh_settings is
+        # Kontrol's, which the LAN view does not have.
+        seen = "0123abcd-42"
+        status, _headers, _body = self.get(f"/api/snapshot?seen={seen}&refresh=1&fresh_settings=1")
+        self.assertEqual(status, 200)
+        (request,) = self.snapshot_requests
+        self.assertEqual((request.seen, request.refresh, request.fresh_settings), (seen, True, False))
 
     def test_the_built_ui_is_served_with_the_console_headers(self) -> None:
         main_port = self.server.server_address[1]
