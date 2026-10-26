@@ -397,7 +397,12 @@ class PreferencesHttpTests(unittest.TestCase):
         console = self.harness()
         console.server.version = "2.0.0"
         status, body = console.request("GET", "/api/health", origin=None)
-        self.assertEqual((status, body), (200, {"ok": True, "version": "2.0.0", "receiver_busy": False}))
+        self.assertEqual((status, body), (200, {
+            "ok": True,
+            "version": "2.0.0",
+            "receiver_busy": False,
+            "lan_access": {"enabled": False, "state": "closed", "reason": "DISABLED"},
+        }))
         status, capabilities = console.request("GET", "/api/capabilities", origin=None)
         self.assertEqual(status, 200)
         self.assertEqual(capabilities["version"], "2.0.0")
@@ -553,6 +558,8 @@ class SeedTests(unittest.TestCase):
             "mqtt_transport": "tcp",
             "mqtt_ws_path": "/ws",
             "refresh_seconds": 5,
+            # The LAN view has no seed: it starts off, for nobody.
+            "lan_access": {"enabled": False, "port": 8788, "bind": "0.0.0.0", "allowed_clients": []},
         }
         self.assertEqual(config, expected)
         self.assertEqual(self.saved(), expected)

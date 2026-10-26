@@ -10,7 +10,7 @@ Ground Console bisa dipasang dengan dua cara di komputer Linux ground station. K
 | Kontrol | `sdr-doa-console start|stop|restart|status|logs|open` | `docker compose ...` |
 | Update tanpa login GitHub | `sdr-doa-console update`, `auto-update on` | `sdr-doa-docker update`, `auto-update on` (image GHCR) |
 
-Console selalu bind ke `127.0.0.1:8787`, jadi hanya bisa dibuka dari komputer itu sendiri: `http://127.0.0.1:8787/`. Pakai Chromium atau Chrome; Receiver (HackRF lewat WebUSB) tidak jalan di Firefox.
+Console selalu bind ke `127.0.0.1:8787`, jadi hanya bisa dibuka dari komputer itu sendiri: `http://127.0.0.1:8787/`. Pakai Chromium atau Chrome; Receiver (HackRF lewat WebUSB) tidak jalan di Firefox. Tablet atau komputer lain di LAN hanya bisa melihat, lewat tampilan LAN yang dinyalakan admin di **Konfigurasi → Akses LAN** (listener kedua, mati secara default; lihat `QUICKSTART.md`, "Tampilan LAN (lihat saja)"). Receiver di sana adalah mirror dari Receiver yang terbuka di console ini (`docs/RECEIVER_MIRROR.md`), jadi biarkan halaman console di groundstation terbuka dan terlihat.
 
 ## Yang tersimpan otomatis
 
@@ -120,7 +120,7 @@ Upgrade manual: ekstrak rilis baru dan jalankan `sh install.sh` lagi. Program da
 
 ## Docker
 
-Hanya Linux, karena memakai `network_mode: host`. Console bind ke `127.0.0.1` dan menolak alamat lain. Dengan network host, loopback itu adalah loopback komputer ini, jadi `http://127.0.0.1:8787/` bisa dibuka di sini dan tidak terbuka ke LAN. Network bridge dengan `ports:` tidak dipakai: di dalam container console harus bind ke alamat non-loopback (ditolak console), dan admin serta patch konfigurasi akan terbuka ke LAN. Docker Desktop di macOS/Windows tidak meneruskan network host ke komputer.
+Hanya Linux, karena memakai `network_mode: host`. Console bind ke `127.0.0.1` dan menolak alamat lain. Dengan network host, loopback itu adalah loopback komputer ini, jadi `http://127.0.0.1:8787/` bisa dibuka di sini dan tidak terbuka ke LAN. Network bridge dengan `ports:` tidak dipakai: di dalam container console harus bind ke alamat non-loopback (ditolak console), dan admin serta patch konfigurasi akan terbuka ke LAN. Tampilan LAN lihat-saja, bila dinyalakan, juga langsung memakai network host, tanpa `ports:`. Docker Desktop di macOS/Windows tidak meneruskan network host ke komputer.
 
 ### Dari image GHCR, dengan update otomatis
 

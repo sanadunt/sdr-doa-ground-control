@@ -51,6 +51,9 @@
 .cfg-section h2:focus { outline: none; }
 .cfg-section h2:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .cfg-form { display: flex; flex: 1 1 auto; flex-direction: column; gap: 10px; min-width: 0; }
+/* Groups a form's fields so one `disabled` locks them (the LAN view, LAN access without admin);
+   it adds no box, so the fields stay items of the form's own layout. */
+.cfg-fieldset { display: contents; min-width: 0; margin: 0; padding: 0; border: 0; }
 .cfg-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 10px 12px; min-width: 0; }
 .cfg-row > .cfg-grow, .cfg-row > .cfg-group { flex: 1 1 200px; }
 .cfg-group { display: flex; flex-direction: column; gap: 4px; min-width: 0; }

@@ -1,0 +1,54 @@
+{
+  "v": 1,
+  "source": {
+    "id": "kiosk-test-0001",
+    "kind": "kiosk-tab",
+    "visible": true
+  },
+  "state": {
+    "rev": 7,
+    "t_ms": 1761000000000,
+    "connected": true,
+    "running": true,
+    "recording": false,
+    "mock": false,
+    "busy": "none",
+    "center_hz": 433920000,
+    "sample_rate_hz": 10000000,
+    "span_hz": 2000000,
+    "frequency_shift_hz": 0,
+    "gains": {
+      "lna_db": 16,
+      "vga_db": 20,
+      "amp": false
+    },
+    "vfo": {
+      "index": 0,
+      "enabled": true,
+      "mode": "nfm",
+      "frequency_hz": 433925000,
+      "bandwidth_hz": 12500,
+      "squelch_enabled": false,
+      "squelch_db": -60.5
+    },
+    "scan": {
+      "phase": "idle",
+      "start_hz": 400000000,
+      "stop_hz": 500000000,
+      "resolution_hz": 4882.8125
+    },
+    "error": null
+  },
+  "frame": {
+    "seq": 7,
+    "t_ms": 1761000000007,
+    "kind": "rx",
+    "center_hz": 433920000,
+    "start_hz": 432920000,
+    "stop_hz": 434920000,
+    "bin_count": 16,
+    "db_min": -120,
+    "db_max": -20.5,
+    "bins": "ABAgMEBQYHCAkKCwwNDg8A=="
+  }
+}

@@ -30,6 +30,8 @@ import { NodeCard } from '../components/overview/NodeCard';
 import { LayersPanel } from '../components/overview/LayersPanel';
 import { PolarDock } from '../components/overview/PolarDock';
 import { SpectrumDock } from '../components/overview/SpectrumDock';
+import { SpectrumDockMirror } from '../components/overview/SpectrumDockMirror';
+import type { ReceiverMirrorFeed } from '../lib/receiverMirrorFeed';
 import { ControlPanel } from '../components/overview/ControlPanel';
 
 // MapLibre is one of the two large dependencies (Plotly, loaded by PolarPlot,
@@ -74,6 +76,10 @@ export interface OverviewDashboardProps {
   onControlDraftRequest?: (changes: ConfigPatchChanges) => void;
   /** Read Data Out now, settings.json included; Kontrol's "Cek ulang". */
   onRefreshSnapshot?: () => void;
+  /** The LAN view: no Kontrol, and the spectrum dock never mounts the Receiver frame. */
+  viewOnly?: boolean;
+  /** The LAN view's Receiver mirror; the spectrum dock shows it in MIRROR mode. */
+  mirrorFeed?: ReceiverMirrorFeed | null;
 }
 
 function OverviewPageView({
@@ -92,6 +98,8 @@ function OverviewPageView({
   controlDraftRequest = null,
   onControlDraftRequest = noop,
   onRefreshSnapshot = noop,
+  viewOnly = false,
+  mirrorFeed = null,
 }: {
   snapshot: TelemetrySnapshot | null;
   localSnapshotFresh: boolean;
@@ -168,6 +176,8 @@ function OverviewPageView({
   const dockRef = useRef<HTMLDivElement>(null);
   const [insets, setInsets] = useState<MapInsets>(ZERO_INSETS);
   const dockShown = panels.polar || panels.spectrum;
+  // Kontrol publishes to the node; the LAN view never shows it, whatever the saved panels say.
+  const controlShown = panels.control && !viewOnly;
   useEffect(() => {
     const mapElement = mapRef.current;
     if (!mapElement || typeof ResizeObserver !== 'function') return undefined;
@@ -192,10 +202,10 @@ function OverviewPageView({
     }
     schedule();
     return () => { window.cancelAnimationFrame(frame); observer.disconnect(); };
-  }, [panels.layers, panels.control, panels.polar, panels.spectrum, panels.nodeCollapsed]);
+  }, [panels.layers, controlShown, panels.polar, panels.spectrum, panels.nodeCollapsed]);
 
   return (
-    <div className="page page-overview ov-stage" data-dock={dockShown ? (panels.spectrum ? 'full' : 'polar') : 'none'} data-control={panels.control ? 'open' : undefined}>
+    <div className="page page-overview ov-stage" data-dock={dockShown ? (panels.spectrum ? 'full' : 'polar') : 'none'} data-control={controlShown ? 'open' : undefined}>
       <h1 className="visually-hidden" data-route-focus tabIndex={-1}>{t('route.overview')}</h1>
       <div className="ov-map" ref={mapRef}>
         <LoadErrorBoundary variant="map">
@@ -234,7 +244,7 @@ function OverviewPageView({
           collapsed={panels.nodeCollapsed}
           onToggle={() => onPanelsChange({ ...panels, nodeCollapsed: !panels.nodeCollapsed })}
         />
-        {panels.control ? (
+        {controlShown ? (
           <ControlPanel
             capabilities={capabilities}
             controlDraftRequest={controlDraftRequest}
@@ -260,7 +270,8 @@ function OverviewPageView({
               onViewChange={onPolarViewChange}
             />
           ) : null}
-          {panels.spectrum ? (
+          {panels.spectrum && viewOnly ? <SpectrumDockMirror feed={mirrorFeed} /> : null}
+          {panels.spectrum && !viewOnly ? (
             <SpectrumDock
               snapshot={snapshot}
               localSnapshotFresh={localSnapshotFresh}

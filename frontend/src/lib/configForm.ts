@@ -1,4 +1,5 @@
 import { ApiError } from '../api';
+import { isLoopbackHost } from './access';
 import type { MessageKey } from './i18n';
 import { REFRESH_INTERVALS_S } from './telemetry';
 
@@ -141,17 +142,8 @@ export function gpsErrorField(key: MessageKey): 'lat' | 'lon' {
   return key === 'config.gpsLonNumber' || key === 'config.gpsLonRange' ? 'lon' : 'lat';
 }
 
-/**
- * True for a host that stays on this machine: localhost, 127.0.0.0/8 or ::1
- * (also in brackets). The no-TLS warning shows only for other hosts.
- */
-export function isLoopbackHost(input: string): boolean {
-  const host = input.trim().toLowerCase().replace(/^\[(.*)\]$/u, '$1');
-  if (!host) return false;
-  if (host === 'localhost' || host === '::1' || host === '0:0:0:0:0:0:0:1') return true;
-  const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(host);
-  return Boolean(octets && Number(octets[1]) === 127 && octets.slice(2).every((part) => Number(part) <= 255));
-}
+// The no-TLS warning shows only for a host that is not loopback; the LAN view uses the same test.
+export { isLoopbackHost };
 
 /**
  * Whether the index treats the page as scrolled to its end. A page that fits

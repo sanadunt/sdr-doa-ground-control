@@ -40,16 +40,16 @@ function readSource(path: string): string {
 describe('Configuration page', () => {
   it('wraps each section in a form so Enter submits it (AUD-106)', () => {
     const markup = render();
-    // connection, GPS, Compass, MQTT, admin login, dry-run
-    expect(markup.match(/<form\b/g)?.length).toBe(6);
-    expect(markup.match(/type="submit"/g)?.length).toBe(6);
+    // connection, MQTT, LAN access, GPS, Compass, admin login, dry-run
+    expect(markup.match(/<form\b/g)?.length).toBe(7);
+    expect(markup.match(/type="submit"/g)?.length).toBe(7);
     expect(markup).toContain('aria-label="Restore GPS defaults"');
     expect(markup).toContain('aria-label="Restore Compass defaults"');
   });
 
   it('lays the cards out in the section index order', () => {
     const markup = render();
-    const ids = ['connection-settings', 'mqtt-settings', 'navigation-settings', 'branding-settings', 'dry-run-settings'];
+    const ids = ['connection-settings', 'mqtt-settings', 'lan-settings', 'navigation-settings', 'branding-settings', 'dry-run-settings'];
     const cardOrder = ids.map((id) => markup.indexOf(`<section id="${id}"`));
     expect(cardOrder.every((index) => index > 0)).toBe(true);
     expect([...cardOrder].sort((a, b) => a - b)).toEqual(cardOrder);
@@ -78,7 +78,8 @@ describe('Configuration page', () => {
     // Only 1024–1279 px dissolves the columns into the grid (Connection beside MQTT, GPS & Compass and Branding on full rows).
     const contents = css.match(/@media \(min-width: 1024px\) and \(max-width: 1279px\) \{\s*\.cfg-grid > \.pg-stack \{ display: contents; \}\s*\}/g);
     expect(contents).toHaveLength(1);
-    expect(css.match(/display: contents/g)).toHaveLength(1);
+    // The other display: contents is the field group that only carries `disabled`.
+    expect(css.replace(/\.cfg-fieldset \{[^}]*\}/, '').match(/display: contents/g)).toHaveLength(1);
   });
 
   it('offers the refresh intervals as one segmented control and warns about a 10 s interval (AUD-24)', () => {
@@ -90,7 +91,8 @@ describe('Configuration page', () => {
 
   it('warns about a 5 s interval too, since the window counts from the data age, and not at 2 s', () => {
     expect(render({ refreshSeconds: 5 })).toContain('so at 5 s or longer the bearing and polar curve clear between reads');
-    expect(render({ refreshSeconds: 2 })).not.toContain('cfg-warn');
+    const connection = (markup: string) => markup.match(/<section id="connection-settings"[\s\S]*?<\/section>/)?.[0] ?? '';
+    expect(connection(render({ refreshSeconds: 2 }))).not.toContain('cfg-warn');
     expect(render({ refreshSeconds: 0 })).toContain(translate('en', 'config.refreshManualWarning'));
   });
 

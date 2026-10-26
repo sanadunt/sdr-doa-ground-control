@@ -146,6 +146,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   .telemetry-item:nth-child(4) { border-left: 0; }
   .telemetry-item:nth-child(n+4) { border-top: 1px solid var(--line-soft); }
   .topbar-read { font-size: 10.5px; }
+  /* The LAN view's interval select only shows the console's value; on a phone its
+     place goes to the VIEW ONLY chip, so the first row still fits. */
+  .console-shell.is-view-only .refresh-interval { display: none; }
 }
 
 .page-content { flex: 1 1 auto; width: 100%; max-width: 1860px; min-height: 0; margin: 0 auto; padding: 24px 28px 36px; }

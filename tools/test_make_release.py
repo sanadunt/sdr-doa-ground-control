@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import re
 import shutil
@@ -33,9 +34,11 @@ CONSOLE_MODULES = {
     "config_command_tracker.py",
     "data_out_reader.py",
     "mdns_resolver.py",
+    "lan_access.py",
     "preferences_store.py",
     "rdf_node_mqtt_v2.py",
     "receiver_archive.py",
+    "receiver_mirror.py",
     "receiver_record_store.py",
     "sdr_doa_collector.py",
     "sdr_doa_mqtt.py",
@@ -57,6 +60,7 @@ SHELL_SCRIPTS = (
     "packaging/ground-link/t900-ground-diag",
     "packaging/ground-link/t900-ground-watchdog",
     "packaging/ground-link/t900-link",
+    "packaging/receiver-engine/trial-receiver-engine.sh",
 )
 # The groundstation's T900 link tools ship in the console release only.
 GROUND_LINK_EXECUTABLES = {
@@ -66,6 +70,9 @@ GROUND_LINK_EXECUTABLES = {
     "packaging/ground-link/t900-ground-watchdog",
     "packaging/ground-link/t900-link",
 }
+# The phase 0 Receiver engine trial (issue #15): run by hand on the
+# groundstation, never shipped or installed.
+RECEIVER_ENGINE_KIT = "packaging/receiver-engine"
 # Every compose file at the repository root; the policy tests cover each one.
 COMPOSE_FILES = tuple(sorted(path.name for path in ROOT.glob("docker-compose*.yml")))
 # Compose files of the console (the rest is the agent's).
@@ -264,6 +271,7 @@ class ReleaseBuildTests(unittest.TestCase):
                 self.assertFalse(base.startswith("test_") or base.endswith((".pyc", ".pyo")), member.name)
                 for forbidden in ("node_modules", "__pycache__", "fixtures", ".git", ".venv"):
                     self.assertNotIn(forbidden, parts, member.name)
+                self.assertNotIn("receiver-engine", parts, member.name)
 
     def test_executables(self):
         executables = {
@@ -519,6 +527,42 @@ class PackagingScriptTests(unittest.TestCase):
             text=True,
             env=environment,
         )
+
+    def test_receiver_engine_kit_is_not_wired_into_any_installer(self):
+        kit = ROOT / RECEIVER_ENGINE_KIT
+        policy = json.loads((kit / "sdr-doa-receiver-engine.json").read_text(encoding="utf-8"))
+        self.assertEqual(policy, {"WebUsbAllowDevicesForUrls": [{
+            "devices": [{"vendor_id": 0x1D50, "product_id": 0x6089}],
+            "urls": ["http://127.0.0.1:8787"],
+        }]})
+        for path in (
+            "packaging/console/install.sh",
+            "packaging/console/sdr-doa-console",
+            "packaging/docker/sdr-doa-docker",
+            "packaging/docker/console-entrypoint.sh",
+            "packaging/agent/install-agent.sh",
+            "tools/make_release.py",
+            "Dockerfile",
+            "Dockerfile.release",
+        ):
+            self.assertNotIn("receiver-engine", (ROOT / path).read_text(encoding="utf-8"), path)
+        script = kit / "trial-receiver-engine.sh"
+        dry = subprocess.run(
+            [_sh(), str(script), "--dry-run", "--browser", "/usr/bin/chromium", "--headless"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn("--user-data-dir=PROFILE", dry.stdout)
+        self.assertIn("--headless=new", dry.stdout)
+        self.assertIn("http://127.0.0.1:8787/#/receiver", dry.stdout)
+        self.assertNotIn("remote-debugging", dry.stdout)
+        self.assertNotIn("no-sandbox", dry.stdout)
+        refused = subprocess.run(
+            [_sh(), str(script), "--dry-run", "--browser", "/usr/bin/chromium", "--url", "http://localhost:8787/"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("origin the WebUSB policy names", refused.stderr)
 
     def test_run_agent_builds_flags_from_agent_env(self):
         result = self.run_agent(

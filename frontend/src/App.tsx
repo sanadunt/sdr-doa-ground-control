@@ -28,6 +28,11 @@ import type { RouteName } from './components/Shell';
 import { useRoute } from './components/Shell';
 import { LoadErrorBoundary } from './components/LoadErrorBoundary';
 import { Page, PageHeader, PageNotice } from './components/page';
+import { ReceiverMirrorPage } from './pages/ReceiverMirrorPage';
+import { createMirrorFeed } from './lib/receiverMirrorFeed';
+import type { ReceiverMirrorFeed } from './lib/receiverMirrorFeed';
+import { startMirrorPublisher } from './lib/receiverMirrorPublisher';
+import { consoleAccess, pageHostname } from './lib/access';
 import { DEFAULT_SIMULATION, simulationSnapshot, randomizeSimulationSettings } from './lib/simulation';
 import { snapshotCollectionId, snapshotConsoleRefreshSeconds, snapshotReadAtMonotonic, snapshotServedAgeMs } from './lib/snapshotRead';
 
@@ -360,9 +365,9 @@ function PageForRoute({
     // Until the real configuration has been read, the form would offer the
     // built-in defaults for saving over it.
     case 'configuration': return configLoaded
-      ? <ConfigurationPage config={config} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={onGpsConfigChanged} onCompassConfigChanged={onCompassConfigChanged} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} />
+      ? <ConfigurationPage config={config} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={onGpsConfigChanged} onCompassConfigChanged={onCompassConfigChanged} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} readOnly={overview.viewOnly} />
       : <ConfigUnavailable error={configError} />;
-    case 'message-monitor': return <MessageMonitorPage mqtt={mqtt} mqttError={mqttError} config={config} onMqttChanged={onMqttChanged} onRefreshMqtt={onRefreshMqtt} onReconnectMqtt={onReconnectMqtt} capabilities={overview.capabilities} />;
+    case 'message-monitor': return <MessageMonitorPage mqtt={mqtt} mqttError={mqttError} config={config} onMqttChanged={onMqttChanged} onRefreshMqtt={onRefreshMqtt} onReconnectMqtt={onReconnectMqtt} capabilities={overview.capabilities} readOnly={overview.viewOnly} />;
     case 'overview':
     default: return <OverviewPage snapshot={snapshot} localSnapshotFresh={localFresh} gpsConfig={gpsConfig} compassConfig={compassConfig} {...overview} />;
   }
@@ -403,6 +408,11 @@ export default function App(): ReactElement {
   }, []);
   // Server capabilities (refresh intervals, admin, config patch); null until read.
   const [capabilities, setCapabilities] = useState<ConsoleCapabilities | null>(null);
+  // The LAN view (lan_access on the console) writes nothing: no admin, no
+  // Kontrol, no Receiver frame, preferences kept in this browser. Until
+  // capabilities say so, a page from a non-loopback host counts as the LAN view.
+  const access = consoleAccess(capabilities?.access ?? null, pageHostname());
+  const viewOnly = access === 'lan-view';
   // Interval chosen in the top bar while its save is in flight, and the last save error.
   const [refreshPending, setRefreshPending] = useState<number | null>(null);
   const [refreshSaveError, setRefreshSaveError] = useState<Notice | null>(null);
@@ -440,8 +450,20 @@ export default function App(): ReactElement {
   // The RX dB scale is the Receiver's (Dengar tab) and the dock's at once: the dock keeps the last
   // value it saw, and a dock change made while the frame is away reaches it at its next hello.
   useEffect(() => watchReceiverDisplay(receiverBridge, spectrumDockStore), [receiverBridge]);
-  const [receiverMounted, setReceiverMounted] = useState(route === 'receiver');
-  if ((route === 'receiver' || receiverRequested) && !receiverMounted) setReceiverMounted(true);
+  // Never in the LAN view: the frame would claim a HackRF through this browser's WebUSB.
+  const [receiverMounted, setReceiverMounted] = useState(route === 'receiver' && !viewOnly);
+  if ((route === 'receiver' || receiverRequested) && !receiverMounted && !viewOnly) setReceiverMounted(true);
+  const receiverFrame = receiverMounted && !viewOnly;
+  // The Receiver mirror (issue #15): this page publishes its Receiver for the LAN view while the
+  // frame is mounted and the console's LAN view is open; the LAN view reads it through one feed.
+  useEffect(() => {
+    if (!receiverFrame) return undefined;
+    const publisher = startMirrorPublisher(receiverBridge);
+    return () => publisher.stop();
+  }, [receiverFrame, receiverBridge]);
+  const mirrorFeedRef = useRef<ReceiverMirrorFeed | null>(null);
+  if (mirrorFeedRef.current === null) mirrorFeedRef.current = createMirrorFeed();
+  const mirrorFeed = mirrorFeedRef.current;
   useEffect(() => {
     // Warm the page chunks once the landing view has painted.
     const timer = window.setTimeout(prefetchRoutes, 1200);
@@ -699,7 +721,7 @@ export default function App(): ReactElement {
   }, [configLoaded, mqttFocused, refreshMqtt]);
 
   useLayoutEffect(() => {
-    const content = route === 'receiver' ? receiverRef.current : contentRef.current;
+    const content = route === 'receiver' && !viewOnly ? receiverRef.current : contentRef.current;
     if (!content) return undefined;
 
     // Lazy routes render their heading after the chunk arrives, so wait for the
@@ -723,7 +745,7 @@ export default function App(): ReactElement {
     });
     observer.observe(content, { childList: true, subtree: true });
     return () => observer.disconnect();
-  }, [route]);
+  }, [route, viewOnly]);
 
   const onConfigSaved = useCallback(async (next: ConsoleConfig): Promise<void> => {
     if (!mountedRef.current) return;
@@ -832,7 +854,9 @@ export default function App(): ReactElement {
     onControlDraftRequest,
     receiverBridge,
     onRefreshSnapshot: refreshSnapshot,
-  }), [overviewPanels, onCompassConfigChanged, requestReceiver, navigate, capabilities, controlDraftRequest, onControlDraftRequest, receiverBridge, refreshSnapshot]);
+    viewOnly,
+    mirrorFeed,
+  }), [overviewPanels, onCompassConfigChanged, requestReceiver, navigate, capabilities, controlDraftRequest, onControlDraftRequest, receiverBridge, refreshSnapshot, viewOnly, mirrorFeed]);
   const refreshOptions = useMemo(() => refreshIntervalOptions(capabilities?.refreshIntervalsS ?? null, config.refresh_seconds), [capabilities, config.refresh_seconds]);
 
   const onRefresh = useCallback((): void => {
@@ -870,21 +894,24 @@ export default function App(): ReactElement {
         refreshOptions={refreshOptions}
         refreshDisabled={!configLoaded || refreshPending !== null}
         refreshError={refreshSaveErrorText}
-        onRefreshSecondsChange={onRefreshSecondsChange}
-        toolbar={route === 'overview' ? <OverviewPanelToggles panels={overviewPanels} onChange={setOverviewPanels} /> : undefined}
+        // The interval is the console's saved setting; the LAN view only shows it.
+        onRefreshSecondsChange={viewOnly ? undefined : onRefreshSecondsChange}
+        toolbar={route === 'overview' ? <OverviewPanelToggles panels={overviewPanels} onChange={setOverviewPanels} viewOnly={viewOnly} /> : undefined}
+        access={access}
       >
-        {route !== 'receiver' ? (
+        {route !== 'receiver' || viewOnly ? (
           <section ref={contentRef} className="route-content" key={route}>
             <LoadErrorBoundary>
               <Suspense fallback={routeLoading}>
-                {route === 'simulation' ? <SimulationPage enabled={simulationEnabled} automatic={simulationAutomatic} settings={simulationSettings} onEnabled={enabled => { setSimulationEnabled(enabled); if (!enabled) setSimulationAutomatic(false); }} onAutomatic={setSimulationAutomatic} onSettings={setSimulationSettings} onRandomize={randomizeSimulation} onOverview={() => navigate('overview')} />
+                {route === 'receiver' ? <ReceiverMirrorPage feed={mirrorFeed} />
+                  : route === 'simulation' ? <SimulationPage enabled={simulationEnabled} automatic={simulationAutomatic} settings={simulationSettings} onEnabled={enabled => { setSimulationEnabled(enabled); if (!enabled) setSimulationAutomatic(false); }} onAutomatic={setSimulationAutomatic} onSettings={setSimulationSettings} onRandomize={randomizeSimulation} onOverview={() => navigate('overview')} />
                   : route === 'overview' && simulationEnabled ? <OverviewPage snapshot={syntheticSnapshot} localSnapshotFresh={true} gpsConfig={gpsConfig} compassConfig={compassConfig} simulation={simulationSettings} {...overviewWiring} />
                   : <PageForRoute route={route} snapshot={snapshot} localFresh={currentLocalFresh} mqtt={mqtt} mqttError={mqttErrorText} config={config} configLoaded={configLoaded} configError={configErrorText} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={setGpsConfig} onCompassConfigChanged={onCompassConfigChanged} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} onMqttChanged={applyMqtt} onRefreshMqtt={refreshMqtt} onReconnectMqtt={reconnectMqtt} overview={overviewWiring} />}
               </Suspense>
             </LoadErrorBoundary>
           </section>
         ) : null}
-        {receiverMounted ? (
+        {receiverFrame ? (
           // Inline display:none because the Overview layout gives every
           // .route-content a display value that would override `hidden`.
           <section ref={receiverRef} className="route-content" hidden={route !== 'receiver'} style={route === 'receiver' ? undefined : { display: 'none' }}>

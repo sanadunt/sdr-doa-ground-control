@@ -1,8 +1,10 @@
 import type { FormEvent, JSX, KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { Branding, CompassConfig, ConsoleConfig, GpsConfig, MqttTransport, PolarSettings } from '../types';
-import { ApiError, connectMqtt, dryRunConfigPatch, getAdminStatus, getBranding, getCapabilities, getConfigReported, loginAdmin, logoutAdmin, saveBranding, updateConsoleConfig } from '../api';
-import type { ConfigReported, ConsoleCapabilities } from '../api';
+import { ApiError, LAN_MAX_ALLOWED_CLIENTS, connectMqtt, dryRunConfigPatch, getAdminStatus, getBranding, getCapabilities, getConfigReported, getLanAccess, loginAdmin, logoutAdmin, saveBranding, updateConsoleConfig, updateLanAccess } from '../api';
+import type { ConfigReported, ConsoleCapabilities, LanAccessView } from '../api';
+import { lanDraftDirty, lanDraftFrom, lanErrorKey, lanReasonKey, lanSettingsFromDraft, lanStateChip, parseLanClients } from '../lib/lanAccessForm';
+import type { LanDraft, LanDraftField } from '../lib/lanAccessForm';
 import { DEFAULT_FALLBACK_COORDINATE, DEFAULT_GPS_CONFIG, manualGpsOverrideFromInput } from '../lib/map';
 import { DEFAULT_COMPASS_CONFIG } from '../lib/polar';
 import { DEFAULT_CONSOLE_CONFIG } from '../lib/telemetry';
@@ -33,7 +35,7 @@ import type { Notice } from '../lib/errorNotice';
 import { useI18n } from '../lib/i18n';
 import type { MessageKey } from '../lib/i18n';
 import { Icon } from '../components/ui';
-import { Card, FileButton, FormField, KeyValueGrid, Page, PageGrid, PageHeader, PageNotice, PageStack, Segmented, StatusChip, Tag } from '../components/page';
+import { Card, FileButton, FormField, KeyValueGrid, Page, PageGrid, PageHeader, PageNotice, PageStack, Segmented, StatusChip, Switch, Tag } from '../components/page';
 import type { KeyValueItem, PageTone } from '../components/page';
 // Styled by pages/configuration.css, which main.tsx loads with the entry (no CSS in lazy chunks).
 
@@ -59,11 +61,14 @@ const SOURCE_TONES: Record<SourceCode, PageTone> = { DATA_OUT: 'neutral', MANUAL
 const SECTIONS = [
   { id: 'connection-settings', label: 'config.nav.connection' },
   { id: 'mqtt-settings', label: 'config.nav.mqtt' },
+  { id: 'lan-settings', label: 'config.nav.lan' },
   { id: 'navigation-settings', label: 'config.nav.navigation' },
   { id: 'branding-settings', label: 'config.nav.branding' },
   { id: 'dry-run-settings', label: 'config.nav.dryRun' },
 ] as const satisfies ReadonlyArray<{ id: string; label: MessageKey }>;
 type SectionId = typeof SECTIONS[number]['id'];
+// The LAN view shows the settings without its write-only sections.
+const LOCAL_ONLY_SECTIONS: ReadonlySet<SectionId> = new Set(['lan-settings', 'dry-run-settings']);
 const NAVIGATION_KEYS = new Set(['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown', ' ']);
 
 type Tone = 'good' | 'warn' | 'bad' | 'neutral';
@@ -129,6 +134,147 @@ function ResultLine({ result }: { result: Result | null }): JSX.Element {
   );
 }
 
+/** The console's own port, which the LAN view may not use; null when the page does not know it. */
+function pagePort(): number | null {
+  try {
+    const port = typeof window !== 'undefined' ? Number(window.location.port) : Number.NaN;
+    return Number.isInteger(port) && port > 0 ? port : null;
+  } catch {
+    return null;
+  }
+}
+
+const LAN_DEFAULT_DRAFT: LanDraft = { enabled: false, port: '8788', bind: '0.0.0.0', clients: '' };
+
+/**
+ * The opt-in LAN view (a second, read-only listener of the console): its
+ * saved setting and its live state. Reading needs no admin; a change needs
+ * the admin session and opens, moves or closes the listener at once.
+ */
+export function LanAccessCard({ adminAuthenticated, defaultPassword, onAdminLost, initialView = null }: {
+  adminAuthenticated: boolean;
+  /** The admin password is the built-in default: the LAN view cannot be switched on. */
+  defaultPassword: boolean;
+  /** POST answered ADMIN_REQUIRED: the session ended. */
+  onAdminLost: () => void;
+  /** The first state, for a static render; the card reads /api/lan-access itself otherwise. */
+  initialView?: LanAccessView | null;
+}): JSX.Element {
+  const { t } = useI18n();
+  const ids = useId();
+  const [view, setView] = useState<LanAccessView | null>(initialView);
+  const [readError, setReadError] = useState<Notice | null>(null);
+  const [draft, setDraft] = useState<LanDraft>(() => (initialView ? lanDraftFrom(initialView.config) : LAN_DEFAULT_DRAFT));
+  const [errors, setErrors] = useState<Partial<Record<LanDraftField, Notice>>>({});
+  const [result, setResult] = useState<Result | null>(null);
+  const [busy, setBusy] = useState(false);
+  const mountedRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    const controller = new AbortController();
+    getLanAccess(controller.signal).then((next) => {
+      if (controller.signal.aborted) return;
+      setView(next);
+      setDraft(lanDraftFrom(next.config));
+      setReadError(null);
+    }).catch((error: unknown) => {
+      if (!controller.signal.aborted) setReadError(errorNotice(error, 'config.lanReadFailed'));
+    });
+    return () => {
+      mountedRef.current = false;
+      controller.abort();
+    };
+  }, []);
+
+  const saved = view?.config ?? null;
+  const status = view?.status ?? null;
+  const editable = adminAuthenticated && saved !== null && !busy;
+  const dirty = saved !== null && lanDraftDirty(draft, saved);
+  const chip = lanStateChip(status);
+  const edit = (patch: Partial<LanDraft>, field: LanDraftField | null) => {
+    setDraft((current) => ({ ...current, ...patch }));
+    if (field) setErrors((current) => ({ ...current, [field]: undefined }));
+    setResult(null);
+  };
+  const fieldError = (notice: Notice | undefined) => (notice ? noticeText(t, notice) : undefined);
+
+  const save = async () => {
+    if (!editable) return;
+    const parsed = lanSettingsFromDraft(draft, pagePort());
+    if (!parsed.ok) {
+      setErrors({ [parsed.field]: { key: parsed.error, vars: parsed.vars } });
+      return;
+    }
+    setErrors({});
+    setResult(null);
+    setBusy(true);
+    try {
+      const next = await updateLanAccess(parsed.value);
+      if (!mountedRef.current) return;
+      setView(next);
+      setDraft(lanDraftFrom(next.config));
+      setResult({ code: 'SAVED', tone: 'good' });
+    } catch (error: unknown) {
+      if (!mountedRef.current) return;
+      const code = error instanceof ApiError ? error.code : null;
+      if (code === 'ADMIN_REQUIRED') onAdminLost();
+      const key = lanErrorKey(code);
+      if (key === 'config.lanError.LAN_ACCESS_INVALID') setResult({ code: 'REJECTED', tone: 'bad', message: { key, vars: { error: error instanceof Error ? error.message : '' } } });
+      else if (key) setResult({ code: 'ERROR', tone: 'bad', message: { key } });
+      else setResult(failure(error, 'common.requestFailed'));
+    } finally {
+      if (mountedRef.current) setBusy(false);
+    }
+  };
+
+  const closedReason = status && status.state === 'closed' && status.reason && status.reason !== 'DISABLED' ? status.reason : null;
+  const stateItems: KeyValueItem[] = [
+    { id: 'state', label: t('config.lanState'), value: chip.code, tone: chip.tone },
+    { id: 'address', label: t('config.lanAddress'), value: status?.address ? `http://${status.address}/` : '—' },
+  ];
+  const clientsCount = parseLanClients(draft.clients).length;
+
+  return (
+    <Card id="lan-settings" span={6} className="cfg-section" title={t('config.lanTitle')} chip={<StatusChip code={chip.code} tone={chip.tone} />}>
+      {readError ? <PageNotice tone="warn" title="ERROR">{noticeText(t, readError)}</PageNotice> : null}
+      {closedReason ? (
+        <PageNotice tone="warn" title={closedReason}>{t(lanReasonKey(closedReason), { detail: status?.detail ?? '—' })}</PageNotice>
+      ) : null}
+      <form className="cfg-form" noValidate onSubmit={submitWith(() => { void save(); })}>
+        <fieldset className="cfg-fieldset" disabled={!editable}>
+          <Switch
+            checked={draft.enabled}
+            label={t('config.lanEnabled')}
+            // The console refuses to switch it on while the default admin password is in use.
+            disabled={defaultPassword && !draft.enabled}
+            onChange={(enabled) => edit({ enabled }, null)}
+          />
+          <div className="cfg-row">
+            <FormField label={t('config.lanPort')} size="sm" error={fieldError(errors.port)}>
+              <input type="number" inputMode="numeric" value={draft.port} min={1024} max={65535} step={1} onChange={(event) => edit({ port: event.target.value }, 'port')} />
+            </FormField>
+            <FormField label={t('config.lanBind')} mono className="cfg-grow" error={fieldError(errors.bind)}>
+              <input type="text" list={`${ids}-lan-bind`} value={draft.bind} spellCheck={false} autoComplete="off" onChange={(event) => edit({ bind: event.target.value }, 'bind')} />
+            </FormField>
+            <datalist id={`${ids}-lan-bind`}><option value="0.0.0.0" /><option value="::" /></datalist>
+          </div>
+          <FormField label={t('config.lanClients')} mono unit={`${clientsCount}/${LAN_MAX_ALLOWED_CLIENTS}`} error={fieldError(errors.clients)}>
+            <input type="text" value={draft.clients} placeholder={t('config.lanClientsPlaceholder')} spellCheck={false} autoComplete="off" onChange={(event) => edit({ clients: event.target.value }, 'clients')} />
+          </FormField>
+          {draft.enabled && clientsCount === 0 ? <span className="cfg-warn" role="status">{t('config.lanNoClients')}</span> : null}
+        </fieldset>
+        <KeyValueGrid columns={2} items={stateItems} />
+        {!adminAuthenticated ? <span className="cfg-warn" role="status">{t('config.lanAdminNeeded')}</span> : null}
+        <div className="cfg-actions">
+          <button className={primaryWhen(dirty)} type="submit" disabled={!editable} aria-busy={busy || undefined}>{t('config.save')}</button>
+          <ResultLine result={result} />
+        </div>
+      </form>
+    </Card>
+  );
+}
+
 export function ConfigurationPage({
   config,
   branding,
@@ -138,6 +284,7 @@ export function ConfigurationPage({
   onCompassConfigChanged,
   onConfigSaved,
   onBrandingChanged,
+  readOnly = false,
 }: {
   config: ConsoleConfig;
   branding: Branding;
@@ -147,9 +294,15 @@ export function ConfigurationPage({
   onCompassConfigChanged: (next: CompassConfig) => void;
   onConfigSaved: (config: ConsoleConfig) => Promise<void>;
   onBrandingChanged: (branding: Branding) => void;
+  /**
+   * The LAN view: the console's settings show without Save, admin unlock,
+   * LAN access or dry-run. GPS and Compass stay this browser's own choice.
+   */
+  readOnly?: boolean;
 }): JSX.Element {
   const { t, lang } = useI18n();
   const ids = useId();
+  const sections = useMemo(() => SECTIONS.filter((section) => !readOnly || !LOCAL_ONLY_SECTIONS.has(section.id)), [readOnly]);
   const saved = useMemo<ConsoleConfig>(() => ({ ...DEFAULT_CONSOLE_CONFIG, ...config }), [config]);
   const [connection, setConnection] = useState<ConsoleConfig>({ ...DEFAULT_CONSOLE_CONFIG, ...config });
   // The port stays text while it is edited so clearing the field does not turn it into 0.
@@ -225,6 +378,8 @@ export function ConfigurationPage({
     setLogoFileName(null);
   }, [branding]);
   useEffect(() => {
+    // The LAN view never signs in.
+    if (readOnly) return undefined;
     let active = true;
     getAdminStatus().then((result) => {
       if (!active) return;
@@ -236,7 +391,7 @@ export function ConfigurationPage({
       setAdminReadError(errorNotice(error, 'config.adminUnavailable'));
     });
     return () => { active = false; };
-  }, []);
+  }, [readOnly]);
   useEffect(() => {
     const controller = new AbortController();
     // Older servers have no capability fields; the form then keeps its built-in defaults.
@@ -247,7 +402,9 @@ export function ConfigurationPage({
   }, []);
   // The monitor connection (page bar and MQTT card) and the reported values
   // the dry-run fields show as placeholders. A save or reconnect reads again at once.
+  // The LAN view does not answer config-reported, and shows neither.
   useEffect(() => {
+    if (readOnly) return undefined;
     let active = true;
     let timer: number | undefined;
     let controller: AbortController | null = null;
@@ -270,7 +427,7 @@ export function ConfigurationPage({
       window.clearTimeout(timer);
       controller?.abort();
     };
-  }, [reportedTick]);
+  }, [reportedTick, readOnly]);
 
   useEffect(() => {
     setGpsSource(gpsConfig.source);
@@ -289,14 +446,14 @@ export function ConfigurationPage({
     let frame = 0;
     const update = () => {
       frame = 0;
-      const sections: Array<{ id: SectionId; top: number }> = [];
-      for (const section of SECTIONS) {
+      const tops: Array<{ id: SectionId; top: number }> = [];
+      for (const section of sections) {
         const element = document.getElementById(section.id);
         if (!element) return;
-        sections.push({ id: section.id, top: element.getBoundingClientRect().top });
+        tops.push({ id: section.id, top: element.getBoundingClientRect().top });
       }
       const atBottom = atPageBottom(window.innerHeight, window.scrollY, document.documentElement.scrollHeight, preferredSection.current !== null);
-      const next = activeSection(sections, stickyOffset(indexRef.current?.closest('.pg-bar') ?? null), atBottom, preferredSection.current);
+      const next = activeSection(tops, stickyOffset(indexRef.current?.closest('.pg-bar') ?? null), atBottom, preferredSection.current);
       if (next) setCurrentSection(next as SectionId);
     };
     const schedule = () => {
@@ -321,7 +478,7 @@ export function ConfigurationPage({
       window.removeEventListener('touchstart', release);
       window.removeEventListener('keydown', releaseOnKey);
     };
-  }, []);
+  }, [sections]);
 
   const jumpTo = (id: SectionId) => {
     const element = document.getElementById(id);
@@ -702,7 +859,7 @@ export function ConfigurationPage({
       <PageHeader
         title={t('route.configuration')}
         className="cfg-bar"
-        chips={<>
+        chips={readOnly ? <StatusChip code={t('shell.viewOnly')} tone="info" /> : <>
           <StatusChip label={t('page.chip.admin')} code={adminCode} tone={adminTone} />
           <StatusChip label={t('status.mqtt')} code={mqttCode} tone={connectionTone(mqttCode)} title={mqttTitle} />
           <StatusChip label={t('page.chip.patch')} code={patchPublishable ? 'ADMIN ONLY' : 'UNAVAILABLE'} tone={patchPublishable ? 'warn' : 'neutral'} />
@@ -710,7 +867,7 @@ export function ConfigurationPage({
         actions={(
           <nav ref={indexRef} className="cfg-index" aria-label={t('config.sections')}>
             <div className="ov-seg pg-seg is-compact" onKeyDown={indexKeys}>
-              {SECTIONS.map((section) => (
+              {sections.map((section) => (
                 <button key={section.id} type="button" aria-controls={section.id} aria-current={currentSection === section.id ? 'location' : undefined} onClick={() => jumpTo(section.id)}>{t(section.label)}</button>
               ))}
             </div>
@@ -721,7 +878,8 @@ export function ConfigurationPage({
         {/* Two columns of content-height cards (Data Out and MQTT; GPS & Compass and Branding), so no card stretches to its neighbour's height. */}
         <PageStack span={6}>
           <Card id="connection-settings" span={6} className="cfg-section" bodyClassName="cfg-conn-body" title={t('config.connectionTitle')}>
-            <form className="cfg-form cfg-conn-form" noValidate onSubmit={submitWith(() => { if (!busy) void saveConnection(); })}>
+            <form className="cfg-form cfg-conn-form" noValidate onSubmit={submitWith(() => { if (!busy && !readOnly) void saveConnection(); })}>
+              <fieldset className="cfg-fieldset" disabled={readOnly}>
               <FormField label={t('config.baseUrl')} mono error={fieldError(connectionErrors.baseUrl)} className={changedClass(changed.baseUrl)}>
                 <input type="text" inputMode="url" list={`${ids}-data-out`} value={connection.base_url} placeholder={dataOutUrl(DEFAULT_DATA_OUT_HOSTS[0])} spellCheck={false} autoComplete="off" onChange={(event) => editConnection({ base_url: event.target.value }, 'baseUrl')} />
               </FormField>
@@ -771,15 +929,19 @@ export function ConfigurationPage({
                   <button className="ov-button" type="button" disabled={busy !== null || !newHost.trim()} onClick={addHost}>{t('config.dataOutHostAdd')}</button>
                 </div>
               </div>
-              <div className="cfg-actions">
-                <button className={primaryWhen(connectionDirty)} type="submit" disabled={busy !== null} aria-busy={busy === 'connection' || undefined}>{t('config.save')}</button>
-                <ResultLine result={connectionResult} />
-              </div>
+              </fieldset>
+              {readOnly ? null : (
+                <div className="cfg-actions">
+                  <button className={primaryWhen(connectionDirty)} type="submit" disabled={busy !== null} aria-busy={busy === 'connection' || undefined}>{t('config.save')}</button>
+                  <ResultLine result={connectionResult} />
+                </div>
+              )}
             </form>
           </Card>
 
-          <Card id="mqtt-settings" span={6} className="cfg-section" title={t('config.mqttTitle')} chip={<StatusChip code={mqttCode} tone={connectionTone(mqttCode)} title={mqttTitle} />}>
-            <form className="cfg-form" noValidate onSubmit={submitWith(() => { if (!busy) void saveMqtt(); })}>
+          <Card id="mqtt-settings" span={6} className="cfg-section" title={t('config.mqttTitle')} chip={readOnly ? undefined : <StatusChip code={mqttCode} tone={connectionTone(mqttCode)} title={mqttTitle} />}>
+            <form className="cfg-form" noValidate onSubmit={submitWith(() => { if (!busy && !readOnly) void saveMqtt(); })}>
+              <fieldset className="cfg-fieldset" disabled={readOnly}>
               <div className="cfg-row">
                 <FormField label={t('config.mqttHost')} mono className={['cfg-grow', changedClass(changed.host)].filter(Boolean).join(' ')} error={fieldError(mqttErrors.host)}>
                   <input type="text" value={connection.mqtt_host} placeholder={t('config.mqttHostPlaceholder')} spellCheck={false} autoComplete="off" onChange={(event) => editMqtt({ mqtt_host: event.target.value }, 'host')} />
@@ -797,14 +959,27 @@ export function ConfigurationPage({
                   <input type="text" value={wsPath} spellCheck={false} autoComplete="off" disabled={transport !== 'websockets'} onChange={(event) => editMqtt({ mqtt_ws_path: event.target.value }, 'wsPath')} />
                 </FormField>
               </div>
-              {noTls ? <PageNotice tone="warn" title="NO TLS">{t('config.mqttNoCredentials')}</PageNotice> : null}
-              <div className="cfg-actions">
-                <button className={primaryWhen(mqttDirty)} type="submit" disabled={busy !== null} aria-busy={busy === 'mqtt' || undefined}>{t('config.save')}</button>
-                <button className="ov-button" type="button" disabled={busy !== null || !savedHost} aria-busy={busy === 'reconnect' || undefined} onClick={() => { void reconnect(); }}>{t('config.reconnect')}</button>
-                <ResultLine result={mqttResult} />
-              </div>
+              </fieldset>
+              {readOnly ? null : (
+                <>
+                  {noTls ? <PageNotice tone="warn" title="NO TLS">{t('config.mqttNoCredentials')}</PageNotice> : null}
+                  <div className="cfg-actions">
+                    <button className={primaryWhen(mqttDirty)} type="submit" disabled={busy !== null} aria-busy={busy === 'mqtt' || undefined}>{t('config.save')}</button>
+                    <button className="ov-button" type="button" disabled={busy !== null || !savedHost} aria-busy={busy === 'reconnect' || undefined} onClick={() => { void reconnect(); }}>{t('config.reconnect')}</button>
+                    <ResultLine result={mqttResult} />
+                  </div>
+                </>
+              )}
             </form>
           </Card>
+
+          {readOnly ? null : (
+            <LanAccessCard
+              adminAuthenticated={adminAuthenticated}
+              defaultPassword={capabilities?.adminDefaultPassword === true}
+              onAdminLost={() => setAdmin('locked')}
+            />
+          )}
         </PageStack>
 
         <PageStack span={6}>
@@ -855,11 +1030,19 @@ export function ConfigurationPage({
             </div>
           </Card>
 
-          <Card id="branding-settings" className="cfg-section" title={t('config.brandingTitle')} chip={<StatusChip code={adminCode} tone={adminTone} />}>
-            {capabilities?.adminDefaultPassword ? <PageNotice tone="warn" title="DEFAULT PASSWORD">{t('control.defaultPassword')}</PageNotice> : null}
-            {adminReadError && !adminAuthenticated ? <PageNotice tone="warn" title="ADMIN">{noticeText(t, adminReadError)}</PageNotice> : null}
-            {adminDisabled ? <PageNotice tone="warn" title="DISABLED">{t('config.adminDisabled')}</PageNotice> : null}
-            {!adminAuthenticated ? (
+          <Card id="branding-settings" className="cfg-section" title={t('config.brandingTitle')} chip={readOnly ? undefined : <StatusChip code={adminCode} tone={adminTone} />}>
+            {!readOnly && capabilities?.adminDefaultPassword ? <PageNotice tone="warn" title="DEFAULT PASSWORD">{t('control.defaultPassword')}</PageNotice> : null}
+            {!readOnly && adminReadError && !adminAuthenticated ? <PageNotice tone="warn" title="ADMIN">{noticeText(t, adminReadError)}</PageNotice> : null}
+            {!readOnly && adminDisabled ? <PageNotice tone="warn" title="DISABLED">{t('config.adminDisabled')}</PageNotice> : null}
+            {readOnly ? (
+              // No admin in the LAN view: the branding shows as it is.
+              <div className="cfg-brand">
+                <div className="cfg-logo">{branding.logo_data_url ? <img src={branding.logo_data_url} alt={t('config.logoPreview')} /> : <span>{t('config.noLogo')}</span>}</div>
+                <div className="cfg-brand-fields">
+                  <KeyValueGrid columns={1} items={[{ id: 'app-name', label: t('config.appName'), value: branding.app_name, mono: false }]} />
+                </div>
+              </div>
+            ) : !adminAuthenticated ? (
               <form className="cfg-form" noValidate onSubmit={submitWith(() => { if (!busy) void signIn(); })}>
                 <FormField label={t('config.password')} size="md" error={fieldError(passwordError)}>
                   <input type="password" value={password} disabled={adminDisabled} autoComplete="current-password" onChange={(event) => { setPassword(event.target.value); setPasswordError(null); }} />
@@ -893,6 +1076,7 @@ export function ConfigurationPage({
           </Card>
         </PageStack>
 
+        {readOnly ? null : (
         <Card id="dry-run-settings" span={12} className="cfg-section" title={t('config.dryRunTitle')} chip={<Tag>DRY-RUN</Tag>}>
           <form className="cfg-form" noValidate onSubmit={submitWith(() => { if (!busy) void runDryRun(); })}>
             <div className="cfg-dry-fields">
@@ -954,6 +1138,7 @@ export function ConfigurationPage({
             </div>
           ) : null}
         </Card>
+        )}
       </PageGrid>
     </Page>
   );

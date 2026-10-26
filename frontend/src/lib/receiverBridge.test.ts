@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createReceiverBridge, consoleRequestsMockSdr, mergeTuneView, RECEIVER_BUILD_PROBE_URL } from './receiverBridge';
+import { createReceiverBridge, consoleRequestsMockSdr, mergeSubscriptions, mergeTuneView, RECEIVER_BUILD_PROBE_URL } from './receiverBridge';
 import type { BridgeEnvironment, BridgeHostWindow, BridgeResult, TuneView } from './receiverBridge';
 import {
   BRIDGE_CHANNEL,
@@ -432,6 +432,36 @@ describe('createReceiverBridge', () => {
     const subscribe = h.posted.at(-1)?.message;
     expect(subscribe).toMatchObject({ type: 'console:subscribe', spectrum: true, bins: 512, fps: 10, spanHz: 2_000_000 });
     expect(typeof subscribe?.id).toBe('string');
+  });
+
+  it('sends one subscription that serves the dock and the Receiver mirror', () => {
+    const h = harness();
+    h.bridge.attach(h.frame);
+    h.fromFrame('receiver:hello', hello);
+    const subscriptions = () => h.posted.map((entry) => entry.message).filter((message) => message.type === 'console:subscribe');
+    h.bridge.subscribe({ spectrum: true, bins: 512, fps: 5 }, 'mirror');
+    expect(subscriptions().at(-1)).toMatchObject({ spectrum: true, bins: 512, fps: 5, spanHz: 2_000_000 });
+    // The dock (the default owner) asks for more: the highest rate and its span win.
+    h.bridge.subscribe({ spectrum: true, fps: 10, spanHz: 1_000_000 });
+    expect(subscriptions().at(-1)).toMatchObject({ spectrum: true, bins: 512, fps: 10, spanHz: 1_000_000 });
+    // The dock unmounts: frames keep flowing for the mirror at its own rate.
+    h.bridge.subscribe({ spectrum: false });
+    expect(subscriptions().at(-1)).toMatchObject({ spectrum: true, fps: 5, spanHz: 2_000_000 });
+    const count = subscriptions().length;
+    h.bridge.subscribe({ spectrum: false });
+    expect(subscriptions()).toHaveLength(count);
+    h.bridge.subscribe({ spectrum: false }, 'mirror');
+    expect(subscriptions().at(-1)).toMatchObject({ spectrum: false });
+  });
+
+  it('merges owner subscriptions', () => {
+    expect(mergeSubscriptions(new Map())).toBeNull();
+    const off = { spectrum: false, bins: 2048, fps: 15, spanHz: 6_000_000 };
+    expect(mergeSubscriptions(new Map([['dock', off]]))).toEqual({ spectrum: false, bins: 512, fps: 10, spanHz: 2_000_000 });
+    expect(mergeSubscriptions(new Map([
+      ['mirror', { spectrum: true, bins: 512, fps: 5, spanHz: 2_000_000 }],
+      ['dock', { spectrum: true, bins: 256, fps: 10, spanHz: 4_000_000 }],
+    ]))).toEqual({ spectrum: true, bins: 512, fps: 10, spanHz: 4_000_000 });
   });
 
   it('ignores messages from another origin, another window or with a wrong envelope', () => {

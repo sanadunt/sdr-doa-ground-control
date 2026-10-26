@@ -12,12 +12,12 @@ const TOGGLES: ReadonlyArray<{ key: OverviewPanelKey; icon: IconName; label: Mes
   { key: 'control', icon: 'sliders', label: 'shell.panelControl', controls: 'panel-control' },
 ];
 
-/** Top-bar switches for the Overview dashboard panels. */
-export function OverviewPanelToggles({ panels, onChange }: { panels: OverviewPanels; onChange: (next: OverviewPanels) => void }): JSX.Element {
+/** Top-bar switches for the Overview dashboard panels; the LAN view has no Kontrol switch. */
+export function OverviewPanelToggles({ panels, onChange, viewOnly = false }: { panels: OverviewPanels; onChange: (next: OverviewPanels) => void; viewOnly?: boolean }): JSX.Element {
   const { t } = useI18n();
   return (
     <div className="ov-panel-toggles" role="group" aria-label={t('shell.panels')}>
-      {TOGGLES.map(({ key, icon, label, controls }) => {
+      {TOGGLES.filter(({ key }) => !(viewOnly && key === 'control')).map(({ key, icon, label, controls }) => {
         const open = panels[key];
         const text = t(label);
         return (
