@@ -26,7 +26,9 @@ collection per base URL and answers from it:
 needs a new Data Out read. Each answer carries the reuse facts in its
 ``collection`` block (``id``, ``collected_at_ms``, ``age_ms``, ``shared``,
 ``settings_reused``, ``settings_age_ms``), so the browser can age the data
-from when the node was read rather than from when the answer arrived.
+from when the node was read rather than from when the answer arrived, and the
+saved interval the window comes from (``refresh_seconds``), so a page that
+loaded another interval polls at the console's and re-reads its config.
 """
 
 from __future__ import annotations
@@ -61,6 +63,13 @@ def reuse_window_s(refresh_seconds: Any) -> float:
     if not math.isfinite(seconds):
         return MIN_REUSE_WINDOW_S
     return max(MIN_REUSE_WINDOW_S, seconds)
+
+
+def saved_refresh_seconds(refresh_seconds: Any) -> Optional[int]:
+    """The saved refresh interval as answers report it: a whole number of seconds, else None."""
+    if isinstance(refresh_seconds, bool) or not isinstance(refresh_seconds, int) or refresh_seconds < 0:
+        return None
+    return refresh_seconds
 
 
 def valid_collection_id(value: Any) -> Optional[str]:
@@ -228,6 +237,10 @@ class DataOutReader:
             "collected_at_ms": collected_at_ms,
             "age_ms": age_ms,
             "shared": shared,
+            # The saved interval now, which sets the window: a page polling at
+            # another interval (it loaded the config before another page
+            # changed it) follows the console's.
+            "refresh_seconds": saved_refresh_seconds(self._refresh_seconds()),
         })
         settings_age = block.get("settings_age_ms")
         if isinstance(settings_age, int) and not isinstance(settings_age, bool):

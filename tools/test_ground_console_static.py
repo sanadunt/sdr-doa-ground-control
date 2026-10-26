@@ -660,8 +660,9 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         self.assertEqual(snapshot, fixture_snapshot)
         self.assertEqual(
             sorted(collection),
-            ["age_ms", "collected_at_ms", "id", "settings_reused", "shared"],
+            ["age_ms", "collected_at_ms", "id", "refresh_seconds", "settings_reused", "shared"],
         )
+        self.assertEqual(collection["refresh_seconds"], config["refresh_seconds"])
         self.assertIs(collection["shared"], False)
         self.assertEqual(len(collect_calls), 1, "snapshot test must use only the local fixture collector")
 

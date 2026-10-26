@@ -205,6 +205,19 @@ class SharedReadTests(unittest.TestCase):
         reader.snapshot(BASE_URL)
         self.assertEqual(len(fake.calls), 2)
 
+    def test_answers_report_the_saved_interval_now(self) -> None:
+        reader, clock, _fake, config = make_reader(refresh_seconds=2)
+        self.assertEqual(reader.snapshot(BASE_URL)["collection"]["refresh_seconds"], 2)
+        # Another page saves 30 s: the next answer, still the same read, says so.
+        config["refresh_seconds"] = 30
+        clock.advance(0.5)
+        shared = reader.snapshot(BASE_URL)
+        self.assertTrue(shared["collection"]["shared"])
+        self.assertEqual(shared["collection"]["refresh_seconds"], 30)
+        self.assertEqual(dor.saved_refresh_seconds(0), 0)
+        for bad in (None, "5", True, 2.5, -1, float("nan")):
+            self.assertIsNone(dor.saved_refresh_seconds(bad), bad)
+
     def test_targets_are_kept_apart(self) -> None:
         reader, _clock, fake, _config = make_reader()
         reader.snapshot(BASE_URL)
@@ -486,8 +499,9 @@ class SnapshotHttpTests(unittest.TestCase):
         server.data_out.clock = clock
         first = self.get(port)
         collection = first["collection"]
-        for key in ("id", "collected_at_ms", "age_ms", "shared", "settings_reused", "settings_age_ms", "elapsed_ms", "budget_ms"):
+        for key in ("id", "collected_at_ms", "age_ms", "shared", "settings_reused", "settings_age_ms", "elapsed_ms", "budget_ms", "refresh_seconds"):
             self.assertIn(key, collection)
+        self.assertEqual(collection["refresh_seconds"], 30)
         self.assertEqual((collection["shared"], collection["settings_reused"]), (False, False))
         self.assertIsInstance(first["settings"]["read_at_ms"], int)
         # Inside the window the same collection is shared; a bad seen is ignored.
