@@ -48,7 +48,7 @@ Konvensi:
 - `sudo -n true` gagal (sudo butuh kata sandi) untuk Jalur A, C atau D (4.9). Jangan pernah meminta, menerima, atau mengetik kata sandi sudo.
 - Perlu memasang paket sistem (Docker Engine, `python3-venv`) atau mengubah proxy Docker daemon.
 - Langkah A0/B0/C0/D0 menemukan instalasi yang sudah ada, padahal manusia meminta instalasi baru. Lanjut ke bagian 7 (update) atau 5.6 (migrasi) hanya bila manusia meminta update atau migrasi. Jangan memasang ulang di atas instalasi yang ada.
-- Sebuah perintah keluar dengan kode bukan 0, kecuali langkah itu sendiri menyebut hasil itu sebagai yang diharapkan (4.5 `rc=7`, 5.6 E2 `rc=64`, baris `test`/`grep -c` yang mencetak hasil sendiri, B5 tanpa systemd user session: exit 1 dengan baris cron); atau output berisi `FAILED`, `error:`, `rollback FAILED`, `not updated`.
+- Sebuah perintah keluar dengan kode bukan 0, kecuali langkah itu sendiri menyebut hasil itu sebagai yang diharapkan (4.5 `rc=7`, 5.6 E2 `rc=64`, 6.2 `rc=7` atau `rc=28` dari komputer lain, baris `test`/`grep -c` yang mencetak hasil sendiri, B5 tanpa systemd user session: exit 1 dengan baris cron); atau output berisi `FAILED`, `error:`, `rollback FAILED`, `not updated`.
 - Kata sandi harus dimasukkan (bagian 5.2 A4, 5.3 B3, 5.4 C4, 5.5 D4).
 - `/api/health` melaporkan `"receiver_busy": true` sebelum update manual.
 
@@ -918,7 +918,7 @@ curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' -X POST -d '{}' "http://$
 curl -s --noproxy '*' --max-time 3 -o /dev/null "http://$H:8787/api/health"; echo "rc=$?"
 ```
 
-**Hasil**: `{"lan_access": ..., "ok": true, ...}`; `lan-view True False`; `403`; `405`; `200`; `405` (mirror hanya dibaca dari LAN); `rc=7` (port console tertutup dari LAN). Dari komputer yang **tidak** diizinkan, `curl -s -o /dev/null -w '%{http_code}\n' "http://$H:8788/"` mencetak `403`, dan log console mencatat alamatnya.
+**Hasil**: `{"lan_access": ..., "ok": true, ...}`; `lan-view True False`; `403`; `405`; `200`; `405` (mirror hanya dibaca dari LAN); `rc=7` (connection refused) atau `rc=28` (timeout, bila firewall host membuang paket ke port itu, seperti `ufw` dengan kebijakan bawaannya `deny incoming` dan aturan di atas): keduanya berarti port console tertutup dari LAN. Jawaban HTTP apa pun dari port 8787 berarti port console terbuka ke LAN: berhenti dan tanya manusia. Dari komputer yang **tidak** diizinkan, `curl -s -o /dev/null -w '%{http_code}\n' "http://$H:8788/"` mencetak `403`, dan log console mencatat alamatnya.
 
 **Mematikan**: kartu **Akses LAN** → matikan **Lihat dari LAN** → **Simpan**. Chip `CLOSED`, `ss -ltn 'sport = :8788'` kosong. Tutup lagi port firewall-nya.
 

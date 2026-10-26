@@ -16,7 +16,7 @@ Console selalu bind ke `127.0.0.1:8787`, jadi hanya bisa dibuka dari komputer it
 
 Semua yang diubah lewat UI disimpan di server console, bukan hanya di browser, sehingga tetap ada saat browser lain dipakai, cache dibersihkan, console di-restart, atau komputer reboot:
 
-- `console.json`: koneksi Data Out, MQTT (host, port, transport, path WebSocket) dan interval refresh;
+- `console.json`: koneksi Data Out (base URL dan daftar host Data Out (cadangan)), MQTT (host, port, transport, path WebSocket), interval refresh dan akses LAN (`lan_access`);
 - `branding.json`: nama aplikasi dan logo;
 - `preferences.json`: tampilan (tema, bahasa, panel Overview, node card, peta dasar, Lapisan/overlay, polar, sumber kompas dan offset, sumber GPS, mode dengar, follow-node);
 - `receiver/`: rekaman dan scan Receiver (`receiver.sqlite3`, `audio/`);
