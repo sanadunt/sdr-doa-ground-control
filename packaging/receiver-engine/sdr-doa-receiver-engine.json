@@ -1,0 +1,15 @@
+{
+  "WebUsbAllowDevicesForUrls": [
+    {
+      "devices": [
+        {
+          "vendor_id": 7504,
+          "product_id": 24713
+        }
+      ],
+      "urls": [
+        "http://127.0.0.1:8787"
+      ]
+    }
+  ]
+}
