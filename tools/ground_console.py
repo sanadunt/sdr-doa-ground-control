@@ -3,7 +3,9 @@
 
 The console keeps a narrow boundary:
 
-* it performs bounded read-only GETs through ``sdr_doa_collector``;
+* it performs bounded read-only GETs through ``sdr_doa_collector``, one
+  collection per refresh interval for every viewer together
+  (``data_out_reader``);
 * an optional MQTT monitor subscribes to its configured broker;
 * its one remote write is ``POST /api/mqtt/config-patch``: an admin-gated,
   explicitly confirmed config patch published once at QoS 1 (never retained,
@@ -81,7 +83,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import sdr_doa_mqtt
 from config_command_tracker import ConfigCommandTracker, MonitorPublishError
-from sdr_doa_collector import CollectorError, DEFAULT_ALLOWED_DATA_HOSTS, NodeProgressTracker, collect
+from sdr_doa_collector import CollectorError, DEFAULT_ALLOWED_DATA_HOSTS, NodeProgressTracker, SettingsCache, collect
+from data_out_reader import DataOutReader, SnapshotRequest, valid_collection_id
 import receiver_archive as ra
 from receiver_archive import ArchiveError
 from receiver_record_store import (
@@ -3007,8 +3010,16 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     HTTPStatus.BAD_REQUEST,
                 )
                 return
+            # refresh=1: the operator's Refresh; fresh_settings=1: Kontrol's
+            # "Cek ulang" (both read again only when the last read is 1 s old);
+            # seen: the collection id the viewer already shows.
+            request = SnapshotRequest(
+                refresh=query.get("refresh", [""])[0] == "1",
+                fresh_settings=query.get("fresh_settings", [""])[0] == "1",
+                seen=valid_collection_id(query.get("seen", [""])[0]),
+            )
             try:
-                snapshot = self.console_server.collect_snapshot(base_url)
+                snapshot = self.console_server.collect_snapshot(base_url, request)
             except (CollectorError, ValueError, OSError, http.client.HTTPException) as exc:
                 self._send_json({"error": str(exc) or type(exc).__name__, "read_only": True}, HTTPStatus.BAD_GATEWAY)
                 return
@@ -3303,13 +3314,6 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
 
-class _Flight:
-    def __init__(self) -> None:
-        self.done = threading.Event()
-        self.result: Any = None
-        self.error: Optional[BaseException] = None
-
-
 # /api/health reports receiver_busy while the Receiver writes records, so the
 # updaters do not restart the console in the middle of a recording or scan:
 # any Receiver write in the last RECEIVER_BUSY_WRITE_S, or an audio session or
@@ -3347,38 +3351,6 @@ class ReceiverActivity:
             return bool(self._open) and age < RECEIVER_BUSY_OPEN_S
 
 
-class _SingleFlight:
-    """Run at most one call per key; concurrent callers wait for its result."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._flights: Dict[str, _Flight] = {}
-
-    def run(self, key: str, produce: Callable[[], Any], wait_timeout_s: float) -> Any:
-        with self._lock:
-            flight = self._flights.get(key)
-            leader = flight is None
-            if flight is None:
-                flight = _Flight()
-                self._flights[key] = flight
-        if not leader:
-            if not flight.done.wait(wait_timeout_s):
-                raise CollectorError("snapshot collection is still in progress")
-            if flight.error is not None:
-                raise CollectorError(str(flight.error) or type(flight.error).__name__)
-            return flight.result
-        try:
-            flight.result = produce()
-            return flight.result
-        except BaseException as exc:
-            flight.error = exc
-            raise
-        finally:
-            with self._lock:
-                self._flights.pop(key, None)
-            flight.done.set()
-
-
 class GroundConsoleServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -3398,6 +3370,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
         tile_sources: Optional[Dict[str, TileSource]] = None,
         retention_interval_s: float = ra.RETENTION_INTERVAL_S,
         retention_start_delay_s: float = ra.RETENTION_START_DELAY_S,
+        data_out_fetcher: Optional[Callable[..., Any]] = None,
     ):
         self.frontend_dir = Path(frontend_dir).resolve() if frontend_dir is not None else None
         if not _is_loopback_bind(address[0]):
@@ -3465,7 +3438,17 @@ class GroundConsoleServer(ThreadingHTTPServer):
         # requests cannot both pass the in-flight check.
         self._config_patch_lock = threading.Lock()
         self.node_progress = NodeProgressTracker()
-        self._snapshot_flights = _SingleFlight()
+        # One Data Out read serves every viewer (data_out_reader.py); the
+        # collector reuses settings.json through settings_cache.
+        # data_out_fetcher replaces the HTTP GETs only for tests (a loopback
+        # fake node); the command line cannot set it.
+        self.settings_cache = SettingsCache()
+        self._data_out_fetcher = data_out_fetcher
+        self.data_out = DataOutReader(
+            self._collect_data_out,
+            refresh_seconds=lambda: self._config.get("refresh_seconds"),
+            wait_timeout_s=SNAPSHOT_TOTAL_BUDGET_S + SNAPSHOT_WAIT_GRACE_S,
+        )
         self.receiver_store = ReceiverRecordStore(
             receiver_data_dir if receiver_data_dir is not None else DEFAULT_DATA_DIR,
             log=lambda message: print(message, flush=True),
@@ -3515,23 +3498,28 @@ class GroundConsoleServer(ThreadingHTTPServer):
         finally:
             super().server_close()
 
-    def collect_snapshot(self, base_url: str) -> Dict[str, Any]:
-        """Collect once per base_url at a time; concurrent callers share it.
+    def collect_snapshot(self, base_url: str, request: Optional[SnapshotRequest] = None) -> Dict[str, Any]:
+        """Answer /api/snapshot from the shared Data Out read for ``base_url``.
 
-        Each browser tick used to start its own collection while earlier ones
-        still waited on a slow node, piling up threads and GETs. Requests that
-        arrive during a collection now receive that collection's result.
+        Every viewer gets the last collection while it is younger than the
+        reuse window (the saved refresh interval, at least 1 s); concurrent
+        misses share one collection. See data_out_reader.py.
         """
-        return self._snapshot_flights.run(
-            base_url.rstrip("/"),
-            lambda: collect(
-                base_url=base_url,
-                authority="none",
-                clock_source="remote_unverified",
-                total_budget_s=SNAPSHOT_TOTAL_BUDGET_S,
-                progress_tracker=self.node_progress,
-            ),
-            SNAPSHOT_TOTAL_BUDGET_S + SNAPSHOT_WAIT_GRACE_S,
+        return self.data_out.snapshot(base_url, request or SnapshotRequest())
+
+    def _collect_data_out(self, base_url: str, fresh_settings: bool) -> Dict[str, Any]:
+        options: Dict[str, Any] = {}
+        if self._data_out_fetcher is not None:
+            options["fetcher"] = self._data_out_fetcher
+        return collect(
+            base_url=base_url,
+            authority="none",
+            clock_source="remote_unverified",
+            total_budget_s=SNAPSHOT_TOTAL_BUDGET_S,
+            progress_tracker=self.node_progress,
+            settings_cache=self.settings_cache,
+            fresh_settings=fresh_settings,
+            **options,
         )
 
     @property

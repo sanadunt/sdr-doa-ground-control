@@ -748,7 +748,13 @@ def test_snapshot_requests_share_one_collection() -> None:
     assert len(calls) == 1, len(calls)
     assert calls[0]["total_budget_s"] == ground_console.SNAPSHOT_TOTAL_BUDGET_S
     assert isinstance(calls[0]["progress_tracker"], collector.NodeProgressTracker)
+    assert isinstance(calls[0]["settings_cache"], collector.SettingsCache)
+    assert calls[0]["fresh_settings"] is False
+    collections = [result.pop("collection") for result in results]
     assert results == [{"overall_state": "FIXTURE", "call": 1}] * 5, results
+    # One request started the collection; the other four shared it (#13).
+    assert len({entry["id"] for entry in collections}) == 1, collections
+    assert sorted(entry["shared"] for entry in collections) == [False, True, True, True, True], collections
 
 
 def test_snapshot_reports_malformed_http_as_json() -> None:
@@ -772,6 +778,9 @@ def test_snapshot_tracks_node_progress_across_requests() -> None:
         return collector.collect(fetcher=fetcher, monotonic_clock=lambda: clock[0], **kwargs)
 
     with mock.patch.object(ground_console, "collect", side_effect=frozen_collect), isolated_server(serve=True) as server:
+        # The shared Data Out read (#13) keeps a collection for the refresh
+        # interval; on the same clock the second request is 11 s later.
+        server.data_out.clock = lambda: clock[0]
         base = f"http://127.0.0.1:{server.server_address[1]}"
         first = get_json(base + "/api/snapshot")
         assert first["node_progress"]["state"] == "FIRST_SAMPLE"
