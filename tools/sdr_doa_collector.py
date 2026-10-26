@@ -64,6 +64,20 @@ CSV_XML_FREQUENCY_MATCH_HZ = 1_000
 XML_POWER_CLIP_FLOOR = 0.0
 CSV_POWER_FLOOR_DB = -100.0
 NODE_PROGRESS_COUNTERS = ("timestamp_ms", "uptime_ms", "data_frame_index")
+# settings.json is about 4.7 kB of the ~8 kB one collection reads. With a
+# SettingsCache a collection reuses the last good copy for at most this long
+# (see SettingsCache for what makes it read the file again sooner).
+SETTINGS_REUSE_MAX_MS = 30_000
+# status.json fields that follow the node's settings: when one of them
+# changes, the cached settings.json is not reused.
+SETTINGS_STATUS_FIELDS = (
+    "station_id",
+    "hardware_id",
+    "unit_id",
+    "software_version",
+    "software_git_short_hash",
+)
+SETTINGS_DAQ_FIELDS = ("sampling_frequency_hz", "bandwidth_hz", "decimated_bandwidth_hz", "buffer_size_ms")
 TRANSPORT_ERROR_KINDS = frozenset({"timeout", "connection_refused", "unreachable"})
 DEFAULT_ALLOWED_DATA_HOSTS = frozenset({
     "doasdr.local",
@@ -1172,6 +1186,130 @@ def _untracked_progress(state: str, max_stall_ms: int) -> Dict[str, Any]:
     }
 
 
+def _settings_status_signature(status: Mapping[str, Any]) -> Tuple[Any, ...]:
+    """The status.json values that change when the node's settings change."""
+    safe = status.get("safe") if isinstance(status.get("safe"), Mapping) else {}
+    daq_status = safe.get("daq_status") if isinstance(safe.get("daq_status"), Mapping) else {}
+    return tuple(safe.get(name) for name in SETTINGS_STATUS_FIELDS) + tuple(
+        daq_status.get(name) for name in SETTINGS_DAQ_FIELDS
+    )
+
+
+def _status_uptime(status: Mapping[str, Any]) -> Optional[int]:
+    safe = status.get("safe") if isinstance(status.get("safe"), Mapping) else {}
+    value = safe.get("uptime_ms")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _settings_view_signature(
+    csv_candidate: Mapping[str, Any],
+    xml_candidate: Mapping[str, Any],
+) -> Tuple[Optional[Tuple[Any, ...]], Optional[Tuple[Any, ...]]]:
+    """What the DoA views show of the settings: VFO frequencies, array and station.
+
+    A part is None when that view was not read or did not parse, so it tells
+    nothing about the settings.
+    """
+    csv_part: Optional[Tuple[Any, ...]] = None
+    frequencies: List[int] = []
+    if csv_candidate.get("available") is True and isinstance(csv_candidate.get("frequency_hz"), int):
+        frequencies.append(int(csv_candidate["frequency_hz"]))
+    for row in csv_candidate.get("additional_vfo_rows") or []:
+        if isinstance(row, Mapping) and isinstance(row.get("frequency_hz"), int):
+            frequencies.append(int(row["frequency_hz"]))
+    if frequencies:
+        csv_part = (
+            tuple(sorted(frequencies)),
+            csv_candidate.get("array_type") if csv_candidate.get("available") is True else None,
+            csv_candidate.get("station_id") if csv_candidate.get("available") is True else None,
+        )
+    xml_part: Optional[Tuple[Any, ...]] = None
+    if xml_candidate.get("available") is True:
+        xml_part = (xml_candidate.get("frequency_mhz"), xml_candidate.get("station_id"))
+    return csv_part, xml_part
+
+
+@dataclass
+class CachedSettings:
+    """One good settings.json read and what the node showed at that time."""
+
+    resource: "FetchedResource"
+    settings: Dict[str, Any]
+    read_monotonic: float
+    status_signature: Tuple[Any, ...]
+    uptime_ms: Optional[int]
+    view_signature: Tuple[Optional[Tuple[Any, ...]], Optional[Tuple[Any, ...]]]
+
+
+class SettingsCache:
+    """Remember the last good settings.json per node so a collection can skip it.
+
+    A collection reuses the cached copy only while it is younger than
+    ``max_age_ms`` (30 s by default), status.json was read and parsed in the
+    same collection, the node has not restarted (``uptime_ms`` did not go
+    back) and the status.json values that follow the settings (station,
+    hardware, unit, software and the DAQ sample rate and bandwidths) are
+    unchanged. When the CSV or XML view of the same collection then shows a
+    VFO frequency, VFO count, array or station other than the one seen with the
+    cached copy, the collection reads settings.json after all. The cache lives
+    in memory, so the first collection after a restart always reads the file.
+    """
+
+    def __init__(self, max_age_ms: int = SETTINGS_REUSE_MAX_MS, max_keys: int = 16) -> None:
+        if isinstance(max_age_ms, bool) or not isinstance(max_age_ms, int) or max_age_ms < 0:
+            raise ValueError("max_age_ms must be a non-negative integer")
+        self.max_age_ms = max_age_ms
+        self._lock = threading.Lock()
+        self._entries: "OrderedDict[str, CachedSettings]" = OrderedDict()
+        self._max_keys = max(1, int(max_keys))
+
+    def reusable(self, key: str, status: Mapping[str, Any], now_monotonic: float) -> Optional[CachedSettings]:
+        """The cached copy when the status.json just read allows reusing it."""
+        if status.get("available") is not True:
+            return None
+        with self._lock:
+            entry = self._entries.get(key)
+        if entry is None:
+            return None
+        age_ms = (now_monotonic - entry.read_monotonic) * 1000.0
+        if not 0 <= age_ms < self.max_age_ms:
+            return None
+        uptime = _status_uptime(status)
+        if entry.uptime_ms is not None and (uptime is None or uptime < entry.uptime_ms):
+            return None
+        if _settings_status_signature(status) != entry.status_signature:
+            return None
+        return entry
+
+    @staticmethod
+    def views_changed(entry: CachedSettings, view_signature: Tuple[Optional[Tuple[Any, ...]], Optional[Tuple[Any, ...]]]) -> bool:
+        """True when a DoA view read now shows other settings than it did with ``entry``."""
+        return any(current is not None and current != cached for current, cached in zip(view_signature, entry.view_signature))
+
+    def store(
+        self,
+        key: str,
+        resource: "FetchedResource",
+        settings: Mapping[str, Any],
+        read_monotonic: float,
+        status: Mapping[str, Any],
+        view_signature: Tuple[Optional[Tuple[Any, ...]], Optional[Tuple[Any, ...]]],
+    ) -> None:
+        entry = CachedSettings(
+            resource=resource,
+            settings=json.loads(json.dumps(settings)),
+            read_monotonic=read_monotonic,
+            status_signature=_settings_status_signature(status),
+            uptime_ms=_status_uptime(status),
+            view_signature=view_signature,
+        )
+        with self._lock:
+            self._entries.pop(key, None)
+            self._entries[key] = entry
+            while len(self._entries) > self._max_keys:
+                self._entries.popitem(last=False)
+
+
 class _Worker:
     """Run one read in a daemon thread so a deadline can abandon it."""
 
@@ -1387,15 +1525,21 @@ def collect(
     total_budget_s: Optional[float] = None,
     progress_tracker: Optional[NodeProgressTracker] = None,
     monotonic_clock: Callable[[], float] = time.monotonic,
+    settings_cache: Optional[SettingsCache] = None,
+    fresh_settings: bool = False,
 ) -> Dict[str, Any]:
     """Read the four Data Out resources once and assess them.
 
     ``total_budget_s`` bounds the whole collection; a read still running when
     it expires is reported as unavailable instead of holding the caller.
     ``progress_tracker`` remembers node counters across calls so a frozen
-    node is detected (``NODE_CLOCK_STALLED``). ``monotonic_clock`` measures
-    Ground elapsed time for ages and progress; it exists for deterministic
-    tests and does not affect the deadline.
+    node is detected (``NODE_CLOCK_STALLED``). ``settings_cache`` lets a
+    collection reuse a recent settings.json instead of reading it again (see
+    ``SettingsCache``); ``fresh_settings`` reads it regardless. The snapshot
+    says which happened (``settings.reused``, ``collection.settings_age_ms``).
+    ``monotonic_clock`` measures Ground elapsed time for ages, progress and the
+    settings reuse; it exists for deterministic tests and does not affect the
+    deadline.
     """
     if authority not in {"none", "csv", "xml"}:
         raise ValueError("authority must be one of: none, csv, xml")
@@ -1479,6 +1623,12 @@ def collect(
         status_first_seen_mono = changed_at.get("timestamp_ms", status_started_mono)
     node_stalled = node_progress.get("stalled") is True
 
+    settings_key = _redact_url(base_url)
+    cached_settings: Optional[CachedSettings] = None
+    if settings_cache is not None and not fresh_settings and not status_transport_failed:
+        cached_settings = settings_cache.reusable(settings_key, status, monotonic_clock())
+
+    reads_started_mono = monotonic_clock()
     if status_transport_failed:
         skipped = "skipped: status.json transport failure"
         first_reads = {
@@ -1486,21 +1636,34 @@ def collect(
             for path in (PATH_SETTINGS, PATH_CSV, PATH_XML)
         }
     else:
-        first_reads = read_all({
-            PATH_SETTINGS: reader(PATH_SETTINGS, parse_settings),
-            PATH_CSV: reader(PATH_CSV, parse_csv_rows_wrapper),
-            PATH_XML: reader(PATH_XML, parse_xml_wrapper),
-        })
+        reads: Dict[str, Callable[[], Any]] = {}
+        if cached_settings is None:
+            reads[PATH_SETTINGS] = reader(PATH_SETTINGS, parse_settings)
+        reads[PATH_CSV] = reader(PATH_CSV, parse_csv_rows_wrapper)
+        reads[PATH_XML] = reader(PATH_XML, parse_xml_wrapper)
+        first_reads = read_all(reads)
 
-    settings_resource, settings = first_reads[PATH_SETTINGS]
-    resources[PATH_SETTINGS] = settings_resource
-    if not settings or settings.get("available") is not True:
-        settings = {
-            "available": False,
-            "redacted": True,
-            "error": (settings or {}).get("error", "settings parse failed"),
-            "raw_fields_omitted": True,
-        }
+    def settings_view(read: Tuple[FetchedResource, Optional[Dict[str, Any]]]) -> Tuple[FetchedResource, Dict[str, Any]]:
+        resource, parsed = read
+        if not parsed or parsed.get("available") is not True:
+            return resource, {
+                "available": False,
+                "redacted": True,
+                "error": (parsed or {}).get("error", "settings parse failed"),
+                "raw_fields_omitted": True,
+            }
+        return resource, parsed
+
+    settings_reused = False
+    settings_read_mono: Optional[float] = None
+    if cached_settings is not None:
+        settings_resource = cached_settings.resource
+        settings = json.loads(json.dumps(cached_settings.settings))
+        settings_reused = True
+        settings_read_mono = cached_settings.read_monotonic
+    else:
+        settings_resource, settings = settings_view(first_reads[PATH_SETTINGS])
+        settings_read_mono = reads_started_mono
 
     def native_pair(
         csv_read: Tuple[FetchedResource, Optional[Dict[str, Any]]],
@@ -1545,10 +1708,40 @@ def collect(
     resources[PATH_CSV] = csv_resource
     resources[PATH_XML] = xml_resource
 
+    # A DoA view that shows another VFO, array or station than it did with the
+    # cached settings means the settings changed: read them after all.
+    view_signature = _settings_view_signature(csv_candidate, xml_candidate)
+    if cached_settings is not None and SettingsCache.views_changed(cached_settings, view_signature):
+        settings_read_mono = monotonic_clock()
+        settings_resource, settings = settings_view(
+            read_all({PATH_SETTINGS: reader(PATH_SETTINGS, parse_settings)})[PATH_SETTINGS]
+        )
+        settings_reused = False
+    resources[PATH_SETTINGS] = settings_resource
+    if (
+        settings_cache is not None
+        and not settings_reused
+        and status_available
+        and settings.get("available") is True
+        and settings_read_mono is not None
+    ):
+        settings_cache.store(settings_key, settings_resource, settings, settings_read_mono, status, view_signature)
+
     completed_mono = monotonic_clock()
     completed_at_ms = now_ms()
     elapsed_ms = max(0, int(round((completed_mono - started_mono) * 1000)))
     deadline_exceeded = any(getattr(resource, "error_kind", None) == "deadline" for resource in resources.values())
+    # How old the settings in this snapshot are when it completes; a reused
+    # copy keeps the time of the read it came from.
+    settings_age_ms: Optional[int] = None
+    if settings.get("available") is True and settings_read_mono is not None:
+        settings_age_ms = max(0, int(round((completed_mono - settings_read_mono) * 1000)))
+    resource_metadata: Dict[str, Dict[str, Any]] = {}
+    for path in (PATH_STATUS, PATH_SETTINGS, PATH_CSV, PATH_XML):
+        if path in resources:
+            resource_metadata[path] = resources[path].metadata()
+    if settings_reused:
+        resource_metadata[PATH_SETTINGS]["reused"] = True
 
     # DoA and status timestamps originate from the same Raspberry clock, so
     # their difference stays meaningful on Ground without clock sync. The
@@ -1777,13 +1970,19 @@ def collect(
             "deadline_exceeded": deadline_exceeded,
             "pair_reads": pair_reads,
             "status_transport_failed": status_transport_failed,
+            "settings_reused": settings_reused,
+            "settings_age_ms": settings_age_ms,
         },
-        "resources": {path: resource.metadata() for path, resource in resources.items()},
+        "resources": resource_metadata,
         "status": {
             **status,
             "freshness": status_age,
         },
-        "settings": settings,
+        "settings": {
+            **settings,
+            "reused": settings_reused,
+            "read_at_ms": settings_resource.retrieved_at_ms if settings.get("available") is True else None,
+        },
         "doa_candidates": candidates,
         "authority": {
             "selected": authority if authority != "none" else None,
