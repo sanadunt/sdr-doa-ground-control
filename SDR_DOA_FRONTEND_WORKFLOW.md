@@ -39,7 +39,7 @@ After building, run from the repository root with the project `.venv`:
 .venv/bin/python tools/ground_console.py --bind 127.0.0.1 --port 8787
 ```
 
-The default MQTT monitor target is `10.90.0.1:9001` over WebSocket. Install `paho-mqtt==2.1.0` into `.venv` for the monitor; without it the console still starts and reports the monitor as ERROR. Add `--mqtt-host ''` to run without a monitor. Explicit `--base-url` and `--mqtt-*` flags override the saved `console.json` for that run; the `--base-url` host must be in the saved Data Out (fallback) host list (`data_out_hosts`, edited in Configuration), on port 8081. Runtime serves `frontend/dist` with same-origin APIs. Never expose the console or development server on a non-loopback address.
+The default MQTT monitor target is `10.90.0.1:9001` over WebSocket. Install `paho-mqtt==2.1.0` into `.venv` for the monitor; without it the console still starts and reports the monitor as ERROR. Add `--mqtt-host ''` to run without a monitor. Explicit `--base-url` and `--mqtt-*` flags override the saved `console.json` for that run and are never saved (a save writes only the fields it changes); the `--base-url` host must be in the saved Data Out (fallback) host list (`data_out_hosts`, edited in Configuration), on port 8081. Runtime serves `frontend/dist` with same-origin APIs. Never expose the console or development server on a non-loopback address.
 
 ## Rollback
 

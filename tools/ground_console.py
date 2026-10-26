@@ -4111,6 +4111,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
         retention_interval_s: float = ra.RETENTION_INTERVAL_S,
         retention_start_delay_s: float = ra.RETENTION_START_DELAY_S,
         data_out_fetcher: Optional[Callable[..., Any]] = None,
+        saved_config: Optional[Dict[str, Any]] = None,
     ):
         self.frontend_dir = Path(frontend_dir).resolve() if frontend_dir is not None else None
         if not _is_loopback_bind(address[0]):
@@ -4136,6 +4137,13 @@ class GroundConsoleServer(ThreadingHTTPServer):
             ws_path = getattr(mqtt_monitor, "ws_path", None)
             if _is_allowed_mqtt_ws_path(ws_path):
                 self._config["mqtt_ws_path"] = ws_path
+        # console.json as saved, without the --base-url/--mqtt-* flags main()
+        # merged into ``config`` for this run. A save writes only the fields
+        # it changes into this copy (_saved_copy_locked), so a flag never
+        # reaches the file. Without it the active config is the saved one.
+        self._saved_config = (
+            _validate_console_config(saved_config, self._config) if saved_config is not None else dict(self._config)
+        )
         self.branding_path = Path(branding_path).expanduser() if branding_path else DEFAULT_BRANDING_PATH
         self._branding_lock = threading.RLock()
         self._branding = _load_branding(self.branding_path)
@@ -4302,9 +4310,36 @@ class GroundConsoleServer(ThreadingHTTPServer):
         with self._config_lock:
             # lan_access changes only through set_lan_access().
             normalized = _validate_console_config({**config, "lan_access": self._config["lan_access"]}, self._config)
-            _save_console_config(self.config_path, normalized)
+            saved = self._saved_copy_locked(normalized)
+            _save_console_config(self.config_path, saved)
+            self._saved_config = saved
             self._config = normalized
             return dict(self._config)
+
+    def _saved_copy_locked(self, active: Dict[str, Any]) -> Dict[str, Any]:
+        """Return console.json for the new active config ``active``.
+
+        Only the fields ``active`` changes go into the saved copy; a field it
+        leaves alone keeps its saved value, so a --base-url or --mqtt-* flag of
+        this run is never written by a save of another field (the LAN access
+        card, the refresh interval, the MQTT form). A field the save does
+        change is saved as given and ends that flag's override. When the host
+        list no longer has the saved Data Out URL's host, the URL in use is
+        saved with it, the only one that fits the list.
+        """
+        saved = dict(self._saved_config)
+        for field, value in active.items():
+            if value != self._config.get(field):
+                saved[field] = value
+        try:
+            return _validate_console_config(saved, self._saved_config)
+        except DataOutHostError:
+            _log_warning(
+                f"the saved Data Out URL {self._saved_config['base_url']} has no host in the new list; "
+                f"saving the URL in use, {active['base_url']}"
+            )
+            saved["base_url"] = active["base_url"]
+            return _validate_console_config(saved, self._saved_config)
 
     def lan_access_view(self) -> Dict[str, Any]:
         """Body of GET /api/lan-access: the saved setting and the listener's state."""
@@ -4334,14 +4369,16 @@ class GroundConsoleServer(ThreadingHTTPServer):
                         "the LAN view stays off while the default admin password is in use; set SDR_DOA_ADMIN_PASSWORD and restart the console",
                     )
                 config = {**self._config, "lan_access": settings}
+                saved = self._saved_copy_locked(config)
                 try:
-                    _save_console_config(self.config_path, config)
+                    _save_console_config(self.config_path, saved)
                 except OSError as exc:
                     raise LanAccessRejected(
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         lan.LAN_ACCESS_SAVE_FAILED,
                         f"lan_access could not be saved ({type(exc).__name__})",
                     ) from exc
+                self._saved_config = saved
                 self._config = config
             status = self.lan.apply(settings)
         return {"config": dict(settings), "status": status}
@@ -4375,18 +4412,20 @@ class GroundConsoleServer(ThreadingHTTPServer):
                     or old_connection != new_connection
                     or bool(new_host) != (self.mqtt_monitor is not None)
                 )
+                saved = self._saved_copy_locked(normalized)
                 replacement = None
                 if monitor_changed and new_host:
                     replacement = _new_mqtt_monitor(*new_connection)
                     replacement.start()
                 try:
-                    _save_console_config(self.config_path, normalized)
+                    _save_console_config(self.config_path, saved)
                 except Exception:
                     retired = replacement
                     raise
                 if monitor_changed:
                     retired = self.mqtt_monitor
                     self.mqtt_monitor = replacement
+                self._saved_config = saved
                 self._config = normalized
                 return dict(self._config), self.mqtt_monitor
         finally:
@@ -4719,11 +4758,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     config_path = Path(args.config_path).expanduser()
     # Saved settings first (seeded and saved on the first start); a typed
     # --base-url or --mqtt-* flag then overrides them for this run only.
-    config = _initial_console_config(config_path, dotenv_values=env_values)
+    saved_config = _initial_console_config(config_path, dotenv_values=env_values)
     try:
         # A typed --base-url is checked against the saved host list (on a
         # first start the one just seeded, which is the defaults without a seed).
-        config = _apply_cli_overrides(config, args, _explicit_cli_options(argv))
+        config = _apply_cli_overrides(saved_config, args, _explicit_cli_options(argv))
     except DataOutHostError as exc:
         raise SystemExit(f"--base-url: {exc}; the list is data_out_hosts in {config_path} (Konfigurasi)") from None
     monitor = _new_mqtt_monitor(*_mqtt_connection(config)) if config["mqtt_host"] else None
@@ -4743,6 +4782,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         preferences_path=str(Path(args.preferences_path).expanduser()),
         tile_cache_dir=Path(args.tile_cache_dir).expanduser(),
         tile_cache_max_mb=args.tile_cache_max_mb,
+        saved_config=saved_config,
     )
     print(f"Ground Console: http://{args.bind}:{args.port}/", flush=True)
     print(f"Version: {server.version}", flush=True)

@@ -739,6 +739,51 @@ class MainWiringTests(unittest.TestCase):
         self.assertEqual(saved["base_url"], "http://doasdr.local:8081")
         self.assertEqual(server.get_config()["base_url"], "http://192.168.100.100:8081")
 
+    def saved_file(self) -> Dict[str, Any]:
+        return json.loads((self.root / "data" / "console.json").read_text(encoding="utf-8"))
+
+    def test_a_lan_access_save_never_writes_the_cli_overrides(self) -> None:
+        server = self.run_main("--base-url", "http://192.168.100.100:8081", "--mqtt-host", "127.0.0.1")
+        result = server.set_lan_access({"enabled": False, "port": 8799})
+        self.assertEqual(result["config"]["port"], 8799)
+        saved = self.saved_file()
+        self.assertEqual((saved["base_url"], saved["mqtt_host"]), ("http://doasdr.local:8081", "10.90.0.1"))
+        self.assertEqual(saved["lan_access"]["port"], 8799)
+        active = server.get_config()
+        self.assertEqual((active["base_url"], active["mqtt_host"]), ("http://192.168.100.100:8081", "127.0.0.1"))
+        self.assertEqual(active["lan_access"]["port"], 8799)
+
+    def test_a_console_config_save_writes_only_the_fields_it_changes(self) -> None:
+        server = self.run_main("--base-url", "http://192.168.100.100:8081", "--mqtt-host", "127.0.0.1")
+        # The top bar's interval select sends the whole config it shows.
+        server.apply_config({**server.get_config(), "refresh_seconds": 5})
+        saved = self.saved_file()
+        self.assertEqual(
+            (saved["base_url"], saved["mqtt_host"], saved["refresh_seconds"]),
+            ("http://doasdr.local:8081", "10.90.0.1", 5),
+        )
+        self.assertEqual(server.get_config()["base_url"], "http://192.168.100.100:8081")
+        # A changed field is saved and ends that flag's override; the other stays.
+        server.update_config({**server.get_config(), "base_url": "http://127.0.0.1:8081"})
+        saved = self.saved_file()
+        self.assertEqual((saved["base_url"], saved["mqtt_host"]), ("http://127.0.0.1:8081", "10.90.0.1"))
+        active = server.get_config()
+        self.assertEqual((active["base_url"], active["mqtt_host"]), ("http://127.0.0.1:8081", "127.0.0.1"))
+        server.apply_config({**server.get_config(), "refresh_seconds": 2})
+        self.assertEqual(self.saved_file()["base_url"], "http://127.0.0.1:8081")
+
+    def test_dropping_the_saved_urls_host_saves_the_url_in_use(self) -> None:
+        server = self.run_main("--base-url", "http://192.168.100.100:8081")
+        server.apply_config({**server.get_config(), "data_out_hosts": ["192.168.100.100", "127.0.0.1"]})
+        saved = self.saved_file()
+        self.assertEqual(saved["data_out_hosts"], ["192.168.100.100", "127.0.0.1"])
+        self.assertEqual(saved["base_url"], "http://192.168.100.100:8081")
+        # The console loads the file it wrote.
+        self.assertEqual(
+            ground_console._load_console_config(self.root / "data" / "console.json")["base_url"],
+            "http://192.168.100.100:8081",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
