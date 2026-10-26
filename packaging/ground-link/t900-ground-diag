@@ -196,6 +196,10 @@ parse_args() {
     *) die "--usb-id must look like 1a86:7523: $USB_ID" ;;
   esac
   USB_ID=$(printf '%s' "$USB_ID" | tr 'A-F' 'a-f')
+  # Before the probes, so a missing directory costs no collection.
+  if [ "$OUTPUT" != - ] && [ ! -d "$OUTPUT" ]; then
+    die "output directory $OUTPUT does not exist (create it: mkdir -p $OUTPUT)"
+  fi
 }
 
 # Every command runs with a time limit, so a hung tool cannot hang the report.
@@ -465,7 +469,7 @@ main() {
     printf '%s\n' "$report"
     return 0
   fi
-  [ -d "$OUTPUT" ] || die "output directory $OUTPUT does not exist"
+  [ -d "$OUTPUT" ] || die "output directory $OUTPUT does not exist (create it: mkdir -p $OUTPUT)"
   file=$OUTPUT/t900-diag-$HOST-$STAMP.txt
   tmp=$OUTPUT/.t900-diag-$HOST-$STAMP.$$
   if ! printf '%s\n' "$report" >"$tmp" 2>/dev/null; then

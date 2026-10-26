@@ -31,16 +31,16 @@ sudo sh packaging/ground-link/install.sh --watchdog-dry-run   # watchdog hanya m
 sudo sh packaging/ground-link/install.sh --watchdog-live      # watchdog menjalankan tindakannya
 ```
 
-Direktori yang sama ada di tarball console (`sdr-doa-ground-console-<V>-linux.tar.gz`, `packaging/ground-link/`). Host yang memasang console lewat `sdr-doa-docker` tidak mengunduh tarball itu: ambil tarball dari halaman rilis (cek `SHA256SUMS`) atau pakai clone repository. Butuh `/bin/sh`, systemd, `iproute2` (`ip`), `iputils-ping`, `usbutils` (`lsusb`, `usbreset`) dan, untuk aturan operator, polkit 0.106 atau lebih baru.
+Direktori yang sama ada di tarball console (`sdr-doa-ground-console-<V>-linux.tar.gz`, `packaging/ground-link/`). Host yang memasang console lewat `sdr-doa-docker` tidak mengunduh tarball itu: ambil tarball dari halaman rilis (cek `SHA256SUMS`) atau pakai clone repository. Butuh `/bin/sh`, systemd, `util-linux` (`flock`), `iproute2` (`ip`), `iputils-ping`, `usbutils` (`lsusb`, `usbreset`) dan, untuk aturan operator, polkit 0.106 atau lebih baru.
 
 | Opsi | Arti |
 |---|---|
 | `--user NAMA` | operator yang boleh restart service PPP dan menjalankan `t900-ground-usbreset.service` tanpa password (bawaan `rdf`; harus ada) |
 | `--no-polkit` | tanpa aturan polkit; operator memakai `sudo` |
-| `--prefix DIR` | lokasi program (bawaan `/usr/local`) |
+| `--prefix DIR` | lokasi program (bawaan `/usr/local`); `bin`, `sbin`, `share/t900-ground-link` dan setiap direktori di atasnya harus milik root dan tidak bisa ditulis user lain |
 | `--watchdog-dry-run`, `--watchdog-live` | tulis `DRY_RUN=1` atau `0` di `link.conf` |
 | `--no-watchdog` | pasang watchdog tetapi matikan timernya |
-| `--dry-run` | tampilkan file dan perintah, tidak mengubah apa pun |
+| `--dry-run` | tampilkan file dan perintah, tidak mengubah apa pun; memeriksa path sungguhan dan berakhir dengan exit 1 bila install akan berhenti |
 | `--root DIR` | pasang di bawah DIR tanpa `systemctl` (untuk test) |
 
 Yang dipasang:
@@ -56,16 +56,19 @@ Yang dipasang:
 /var/lib/t900-ground-link/                  state watchdog (dibuat saat pemeriksaan pertama)
 ```
 
-Menjalankan installer lagi memperbarui program, unit dan aturan polkit, dan mempertahankan `link.conf`. Installer menolak menimpa file dengan nama yang sama yang tidak ia tulis sendiri. Setelah mengubah `PPP_SERVICE` di `link.conf`, jalankan installer lagi supaya aturan polkit dan unit memakai nama baru.
+Menjalankan installer lagi memperbarui program, unit dan aturan polkit, dan mempertahankan `link.conf`. Installer menolak menimpa file dengan nama yang sama yang tidak ia tulis sendiri, dan menolak `--prefix` yang direktorinya (atau direktori di atasnya) bukan milik root atau bisa ditulis user lain, karena timer root menjalankan `sbin/t900-ground-watchdog` dari sana. Direktori yang ia buat selalu `0755` (installer memakai `umask 022`, juga bila `sudo` mempertahankan umask yang lebih ketat), supaya operator bisa membaca `link.conf`. Setelah mengubah `PPP_SERVICE` di `link.conf`, jalankan installer lagi supaya aturan polkit dan unit memakai nama baru.
 
 ## Diagnosis: `t900-ground-diag`
 
 ```sh
 t900-ground-diag                      # tanpa root; laporan di direktori saat ini
-sudo t900-ground-diag -o /root/t900   # lengkap, dengan journal dan log kernel
+mkdir -p ~/t900                       # sekali, sebagai operator: direktori laporan
+sudo t900-ground-diag -o ~/t900       # lengkap, dengan journal dan log kernel
 t900-ground-diag -o -                 # cetak ke layar, tanpa file
 t900-link diag                        # sama, lewat perintah operator
 ```
+
+Direktori `-o` harus sudah ada; diag tidak membuatnya dan berhenti sebelum memeriksa apa pun bila tidak ada.
 
 Satu laporan `t900-diag-<host>-<waktu UTC>.txt` berisi ringkasan, lalu: status `t900-ground-ppp.service`, 50 baris journal terakhir service itu (pppd), `ip addr` dari `ppp0` dan rute ke peer, node `/dev/t900-ground` dan targetnya, `lsusb -d 1a86:7523` beserta lokasi sysfs dan driver (`3-2`, `ch341 on 3-2:1.0`), 30 baris kernel terakhir tentang `usb`, `ch341` dan `ttyUSB` (boot ini), tiga ping ke `10.90.0.2` lewat `ppp0`, `udevadm info` dari node itu, dan status watchdog. Skrip tidak mengubah apa pun.
 
@@ -82,9 +85,9 @@ ssh USER@RDF-SDR 'sudo sh /tmp/t900-ground-diag --raspberry -o /tmp'
 
 Jalankan bila link putus dan watchdog sudah berstatus "remote unreachable" (`t900-link status`), atau watchdog belum dipasang. Selama watchdog masih bertindak sendiri, tunggu sampai ia berhenti, atau hentikan dulu timernya (`sudo systemctl stop t900-ground-watchdog.timer`) supaya langkah manual dan otomatis tidak bercampur.
 
-1. Diagnosis awal: `sudo t900-ground-diag -o ~/t900` (satu file per langkah, nama bertanda waktu).
+1. Diagnosis awal: `mkdir -p ~/t900`, lalu `sudo t900-ground-diag -o ~/t900` (satu file per langkah, nama bertanda waktu).
 2. **Langkah 1, restart service:** `t900-link restart`. Tunggu 30–60 detik, lalu `sudo t900-ground-diag -o ~/t900`.
-3. **Langkah 2, usbreset lalu restart:** `t900-link usb-reset` (`usbreset` adapter `1a86:7523`, tunggu 5 detik, restart service). Tunggu 30–60 detik, lalu diag lagi.
+3. **Langkah 2, usbreset lalu restart:** `t900-link usb-reset` (`usbreset` adapter `1a86:7523`, tunggu 5 detik, restart service). Perintah ini selalu dijalankan sungguhan, juga saat watchdog dalam mode dry run, dan gagal dengan pesan bila `usbreset` tidak mencetak `ok` atau `USB_RESET_METHOD=none`; bila gagal, langkah ini belum terjadi. Tunggu 30–60 detik, lalu diag lagi.
 4. **Langkah 3, cabut-colok USB T900:** baru sekarang, karena ini satu-satunya langkah yang memutus daya T900. Tunggu 30–60 detik (`ExecStartPre` menunggu device sampai 60 detik), lalu diag lagi.
 5. Simpan semua laporan dan catat langkah yang memulihkan link. Bila timer dihentikan: `sudo systemctl start t900-ground-watchdog.timer`.
 
@@ -114,12 +117,12 @@ Timer menjalankan `t900-ground-watchdog check` tiap 30 detik (pertama 2 menit se
 
 1. restart `t900-ground-ppp.service` (`systemctl reset-failed`, lalu `restart`);
 2. enumerasi ulang USB (`usbreset BUS/DEV` dari adapter di balik `/dev/t900-ground`, atau unbind/bind `ch341` lewat sysfs), tunggu `USB_SETTLE`, restart service;
-3. hanya bila `POWER_METHOD` diatur: putus-sambung daya T900 (`uhubctl` atau perintah relay), tunggu `POWER_SETTLE`, restart service;
+3. hanya bila `POWER_METHOD` diatur: putus daya T900 (`uhubctl -a off` atau perintah relay "off"), tunggu `POWER_OFF_SECONDS`, sambung lagi ("on" selalu dijalankan, juga setelah "off" gagal atau permintaan stop di tengahnya), tunggu `POWER_SETTLE`, restart service;
 4. lalu dari langkah 1 lagi.
 
 Dengan nilai bawaan dan tanpa pengatur daya: putus di detik 0, restart di 180, USB di 300, restart di 540, USB di 1020. Bila `MAX_ACTIONS_PER_HOUR` (4) tindakan dalam satu jam terakhir tidak memulihkan link, watchdog masuk status **remote unreachable** dan tidak bertindak lagi sampai sesi PPP baru terbentuk (`ppp0` mendapat alamat dengan ifindex baru) atau peer menjawab lagi. Restart oleh operator yang menghasilkan sesi baru juga mengakhiri status itu; `sudo t900-ground-watchdog reset` menghapus status, riwayat tindakan, dan hitungan per jam.
 
-Watchdog tidak bertindak bila `t900-ground-ppp.service` dihentikan atau dinonaktifkan operator (`systemctl stop` atau `disable`), dan mulai mengawasi lagi saat service jalan. Satu run pada satu waktu: pemeriksaan yang bertemu `usb-reset` operator yang sedang jalan dilewati. Setelah `usb-reset` operator, watchdog menunggu `BACKOFF_BASE` detik sebelum bertindak sendiri.
+Watchdog tidak bertindak bila `t900-ground-ppp.service` dihentikan atau dinonaktifkan operator (`systemctl stop` atau `disable`), dan mulai mengawasi lagi saat service jalan. Satu run pada satu waktu, lewat `flock` pada `/var/lib/t900-ground-link/run.lock`: pemeriksaan yang bertemu `usb-reset` operator yang sedang jalan dilewati. Kernel melepas kunci saat run berakhir, juga setelah crash, kill atau listrik padam, jadi kunci lama tidak pernah menghentikan watchdog; pemeriksaan yang menemukan kunci dipegang 10 menit atau lebih mencatat run mana yang memegangnya. Setelah `usb-reset` operator, watchdog menunggu `BACKOFF_BASE` detik sebelum bertindak sendiri.
 
 Semua pesan masuk journal dengan tag tetap `t900-ground-watchdog`:
 
@@ -132,9 +135,11 @@ sudo systemctl stop t900-ground-watchdog.timer      # jeda sampai boot berikutny
 sudo systemctl disable --now t900-ground-watchdog.timer   # matikan
 ```
 
-Contoh baris journal: `link down: ppp0 has no IPv4 address`, `link down 180 s (ppp0 has no IPv4 address): action 1, 1 of 4 this hour: restart t900-ground-ppp.service`, `ran: usbreset 003/005`, `remote unreachable: 4 recovery actions in the last hour did not bring the link back (...)`, `new PPP session on ppp0 (...): remote unreachable hold cleared`, `link up: 10.90.0.2 answers on ppp0 (...)`.
+Contoh baris journal: `link down: ppp0 has no IPv4 address`, `link down 180 s (ppp0 has no IPv4 address): action 1, 1 of 4 this hour: restart t900-ground-ppp.service`, `ran: usbreset 003/005: Resetting USB Serial ... ok`, `remote unreachable: 4 recovery actions in the last hour did not bring the link back (...)`, `new PPP session on ppp0 (...): remote unreachable hold cleared`, `link up: 10.90.0.2 answers on ppp0 (...)`.
 
-Mode dry run (`DRY_RUN=1`, `--watchdog-dry-run`, atau `--dry-run` pada satu perintah) mencatat setiap tindakan sebagai `dry-run: would run: ...` tanpa menjalankannya, memakai state terpisah (`state.dry-run`), jadi beralih ke mode live mulai bersih. Cara aman memasang pertama kali: `--watchdog-dry-run`, amati journal sehari, lalu `--watchdog-live`.
+Mode dry run (`DRY_RUN=1`, `--watchdog-dry-run`, atau `--dry-run` pada satu perintah) mencatat setiap tindakan sebagai `dry-run: would run: ...` tanpa menjalankannya, memakai state terpisah (`state.dry-run`), jadi beralih ke mode live mulai bersih. `DRY_RUN=1` hanya berlaku untuk pemeriksaan timer: `t900-link usb-reset` operator tetap dijalankan sungguhan dan dicatat di state yang dibaca pemeriksaan itu; hanya `sudo t900-ground-watchdog --dry-run usb-reset` yang tidak menjalankan apa pun. Cara aman memasang pertama kali: `--watchdog-dry-run`, amati journal sehari, lalu `--watchdog-live`.
+
+`usbreset` dari usbutils keluar dengan status 0 juga saat gagal membuka atau me-reset device (`can't open [...]`, `failed [...]`); watchdog menganggap reset berhasil hanya bila baris terakhirnya diakhiri `ok`, dan mencatat output itu.
 
 ### Pengaturan (`/etc/t900-ground-link/link.conf`)
 
@@ -147,7 +152,7 @@ Format `NAMA=NILAI`, dibaca apa adanya (tanpa ekspansi `$`); nilai dengan spasi 
 | `PPP_IFACE` | `ppp0` | interface PPP |
 | `PEER` | `10.90.0.2` | alamat ujung lain (Raspberry) |
 | `USB_ID` | `1a86:7523` | id USB adapter CH340 |
-| `DRY_RUN` | `0` | `1`: catat tindakan, jangan jalankan |
+| `DRY_RUN` | `0` | `1`: pemeriksaan timer mencatat tindakan tanpa menjalankannya; `usb-reset` operator tetap jalan |
 | `FAIL_AFTER` | `180` | detik putus sebelum tindakan pertama (30–86400) |
 | `PING_COUNT`, `PING_TIMEOUT` | `3`, `2` | jumlah ping dan batas waktu tiap ping (detik) |
 | `BACKOFF_BASE`, `BACKOFF_MAX` | `120`, `900` | jarak antar tindakan: awal, berlipat dua sampai batas ini |
@@ -155,9 +160,9 @@ Format `NAMA=NILAI`, dibaca apa adanya (tanpa ekspansi `$`); nilai dengan spasi 
 | `USB_RESET_METHOD` | `auto` | `auto` (`usbreset` bila terpasang, selain itu `unbind`), `usbreset`, `unbind` (unbind/bind `ch341`), `none` |
 | `USB_SETTLE` | `5` | detik menunggu setelah enumerasi ulang |
 | `POWER_METHOD` | `none` | `none`, `uhubctl`, `relay` |
-| `UHUBCTL_LOCATION`, `UHUBCTL_PORT` | kosong | lokasi hub dan port untuk `uhubctl -l LOKASI -p PORT -a cycle` |
+| `UHUBCTL_LOCATION`, `UHUBCTL_PORT` | kosong | lokasi hub dan port untuk `uhubctl -l LOKASI -p PORT -a off`, lalu `-a on` |
 | `RELAY_OFF_COMMAND`, `RELAY_ON_COMMAND` | kosong | perintah relay (dijalankan `sh -c` sebagai root); "on" selalu dijalankan, juga setelah "off" gagal |
-| `POWER_OFF_SECONDS` | `5` | lama daya diputus |
+| `POWER_OFF_SECONDS` | `5` | lama daya diputus (1–300); "on" selalu dijalankan sesudahnya |
 | `POWER_SETTLE` | `10` | detik menunggu setelah daya kembali |
 
 ## Pemicu operator: `t900-link`

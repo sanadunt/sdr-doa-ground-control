@@ -781,7 +781,7 @@ journalctl -u sdr-doa-agent -f
 sudo sh packaging/ground-link/install.sh --dry-run   # lihat dulu
 sudo sh packaging/ground-link/install.sh             # operator: user rdf (--user NAMA)
 t900-link status                                     # service PPP, ppp0, status watchdog
-sudo t900-ground-diag -o ~/t900                      # laporan diagnosis bertanda waktu
+mkdir -p ~/t900 && sudo t900-ground-diag -o ~/t900   # laporan diagnosis bertanda waktu
 t900-link restart                                    # restart t900-ground-ppp.service
 t900-link usb-reset                                  # usbreset 1a86:7523, lalu restart service
 journalctl -t t900-ground-watchdog -f                # setiap tindakan watchdog
@@ -789,7 +789,7 @@ journalctl -t t900-ground-watchdog -f                # setiap tindakan watchdog
 
 - `t900-ground-diag` hanya membaca: status service, 50 baris journal pppd, `ip addr` dari `ppp0`, node `/dev/t900-ground`, `lsusb`, 30 baris kernel tentang USB dan `ch341`, ping ke `10.90.0.2`, dan `udevadm info`. Tanpa root bagian journal dilewati dan disebut di laporan. Di Raspberry: `t900-ground-diag --raspberry`.
 - `t900-ground-watchdog.timer` memeriksa link tiap 30 detik. Bila `ppp0` tidak punya alamat atau peer tidak menjawab ping selama 180 detik, watchdog restart service, lalu mengenumerasi ulang USB, lalu (hanya bila hardware-nya diatur) memutus daya T900, dengan jarak yang makin panjang. Setelah 4 tindakan dalam satu jam ia berhenti dengan status "remote unreachable" sampai sesi PPP baru terbentuk.
-- Installer tidak mengubah `t900-ground-ppp.service`, `/etc/ppp/peers/t900-ground` atau udev rule, dan tidak membuka port. `--watchdog-dry-run` membuat watchdog hanya mencatat tindakannya.
+- Installer tidak mengubah `t900-ground-ppp.service`, `/etc/ppp/peers/t900-ground` atau udev rule, dan tidak membuka port. `--watchdog-dry-run` membuat pemeriksaan watchdog hanya mencatat tindakannya; `t900-link usb-reset` tetap dijalankan.
 
 ## Validasi setelah install
 

@@ -21,7 +21,8 @@ USB_ID=1a86:7523
 
 # ---- Watchdog ----------------------------------------------------------------
 
-# 1: log every action as "dry-run: would run: ..." and run nothing. A dry run
+# 1: the timer's checks log every action as "dry-run: would run: ..." and run
+# nothing. An operator's usb-reset (t900-link usb-reset) still runs. A dry run
 # keeps its own state, so switching back to 0 starts clean.
 DRY_RUN=0
 
@@ -55,12 +56,14 @@ USB_SETTLE=5
 
 # Third stage, off by default: power-cycle the T900, wait POWER_SETTLE
 # seconds, restart the PPP service. Only with hardware that can cut its power:
-#   uhubctl  a hub with per-port power switching, run as
-#            uhubctl -l UHUBCTL_LOCATION -p UHUBCTL_PORT -a cycle -d POWER_OFF_SECONDS
-#            (find the location and port with: sudo uhubctl)
+#   uhubctl  a hub with per-port power switching:
+#            uhubctl -l UHUBCTL_LOCATION -p UHUBCTL_PORT -a off, POWER_OFF_SECONDS
+#            later the same with -a on (find the location and port with:
+#            sudo uhubctl)
 #   relay    a relay in the T900's supply: RELAY_OFF_COMMAND, POWER_OFF_SECONDS
-#            later RELAY_ON_COMMAND (always, also after a failed "off"); both
-#            run as root with sh -c
+#            later RELAY_ON_COMMAND; both run as root with sh -c
+# "On" always runs, also after a failed "off" or a stop in between.
+# POWER_OFF_SECONDS: 1-300.
 POWER_METHOD=none
 UHUBCTL_LOCATION=
 UHUBCTL_PORT=

@@ -12,6 +12,9 @@
 # opens no port. Re-running it upgrades in place and keeps link.conf. Run it
 # from packaging/ground-link in the repository or in the console release.
 set -eu
+# Directories it creates must be readable by the operator also on a host
+# whose sudo keeps a stricter umask (027): t900-link reads link.conf.
+umask 022
 
 MARKER=t900-ground-link
 PREFIX=/usr/local
@@ -22,7 +25,11 @@ POLKIT_DIR=/etc/polkit-1/rules.d
 POLKIT_NAME=50-t900-ground-link.rules
 STATE_DIR=/var/lib/t900-ground-link
 ROOT=
+REAL_ROOT=
 DRY_RUN=0
+DRY_STOP=0
+# Tests only: the uid whose files count as root's.
+ROOT_UID=${T900_LINK_ROOT_UID:-0}
 POLKIT_ON=1
 TIMER_ON=1
 WATCHDOG_MODE=
@@ -45,7 +52,8 @@ Usage: sudo sh install.sh [options]
   --no-watchdog        install the watchdog but leave its timer off (and
                        turn it off when an earlier install turned it on)
   --root DIR           install below DIR (test staging): no systemctl
-  --dry-run            show the files and commands, change nothing
+  --dry-run            show the files and commands, change nothing; exits 1
+                       when the install would stop
   -h, --help           this help
 
 Settings: /etc/t900-ground-link/link.conf, written from link.conf.example on
@@ -59,6 +67,16 @@ warn() { printf 'warning: %s\n' "$*" >&2; }
 die() {
   printf 'error: %s\n' "$*" >&2
   exit 1
+}
+
+# refuse MESSAGE: the install stops; a dry run notes it and goes on.
+refuse() {
+  if [ "$DRY_RUN" = 1 ]; then
+    warn "the install would stop here: $*"
+    DRY_STOP=1
+  else
+    die "$*"
+  fi
 }
 
 cleanup() {
@@ -144,8 +162,60 @@ locate_source() {
 # Refuse to replace a file this installer did not write.
 check_ours() {
   if [ -e "$1" ] && ! grep -q "$MARKER" "$1" 2>/dev/null; then
-    die "$1 exists and was not written by this installer; move it away or choose another --prefix"
+    refuse "$1 exists and was not written by this installer; move it away or choose another --prefix"
   fi
+}
+
+# root_only PATH: owned by root and writable by no one else; a group- or
+# world-writable directory only with the sticky bit (/tmp).
+root_only() {
+  # shellcheck disable=SC2012 # ls -n is the portable way to read owner and mode
+  ls -nd -- "$1" 2>/dev/null | awk -v root="$ROOT_UID" '
+    NR == 1 {
+      mode = $1
+      if ($3 != 0 && $3 != root) exit 1
+      if (substr(mode, 1, 1) == "l") exit 1
+      writable = substr(mode, 6, 1) == "w" || substr(mode, 9, 1) == "w"
+      if (writable && !(substr(mode, 1, 1) == "d" && substr(mode, 10, 1) ~ /[tT]/)) exit 1
+      ok = 1
+    }
+    END { exit ok ? 0 : 1 }'
+}
+
+# root_only_chain PATH: the nearest existing directory of PATH (the installer
+# creates the rest as root) and every directory above it, by physical path.
+# Sets UNSAFE to the first one that is not root-only.
+root_only_chain() {
+  UNSAFE=$1
+  while [ ! -d "$UNSAFE" ]; do UNSAFE=$(dirname -- "$UNSAFE"); done
+  ro_path=$(cd -P -- "$UNSAFE" 2>/dev/null && pwd -P) || return 1
+  while :; do
+    UNSAFE=$ro_path
+    root_only "$ro_path" || return 1
+    [ "$ro_path" != / ] || return 0
+    ro_path=$(dirname -- "$ro_path")
+  done
+}
+
+# check_targets TREE: what the install below TREE ("" for the system) would
+# replace or run as root.
+check_targets() {
+  for target in "$1$PREFIX/bin/t900-link" "$1$PREFIX/bin/t900-ground-diag" "$1$PREFIX/sbin/t900-ground-watchdog" \
+    "$1$UNIT_DIR/t900-ground-watchdog.service" "$1$UNIT_DIR/t900-ground-watchdog.timer" \
+    "$1$UNIT_DIR/t900-ground-usbreset.service" "$1$POLKIT_DIR/$POLKIT_NAME"; do
+    check_ours "$target"
+  done
+  if [ -e "$1$SHARE_DIR" ] && [ ! -f "$1$SHARE_DIR/install-info" ] && [ -n "$(ls -A "$1$SHARE_DIR")" ]; then
+    refuse "$SHARE_DIR is not empty and holds no t900-ground-link install"
+  fi
+  # Root's timer and t900-ground-usbreset.service run sbin/t900-ground-watchdog,
+  # and root runs t900-ground-diag and uninstall.sh: a user who can change
+  # one of these directories could run anything as root.
+  for dir in "$1$PREFIX/sbin" "$1$PREFIX/bin" "$1$SHARE_DIR"; do
+    if ! root_only_chain "$dir"; then
+      refuse "$UNSAFE is not owned by root or is writable by another user, so root must not run programs from $dir; choose another --prefix, or: sudo chown root:root $UNSAFE && sudo chmod go-w $UNSAFE"
+    fi
+  done
 }
 
 # render TEMPLATE TARGET: replace the @NAME@ placeholders.
@@ -204,11 +274,7 @@ preflight() {
     return 0
   fi
   if [ "$POLKIT_ON" = 1 ] && ! id "$OP_USER" >/dev/null 2>&1; then
-    if [ "$DRY_RUN" = 1 ]; then
-      warn "user $OP_USER does not exist; the install would stop here (pick one with --user, or --no-polkit)"
-    else
-      die "user $OP_USER does not exist; pick the operator with --user, or install without the rule: --no-polkit"
-    fi
+    refuse "user $OP_USER does not exist; pick the operator with --user, or install without the rule: --no-polkit"
   fi
   if [ ! -d /run/systemd/system ]; then
     warn "systemd is not running: the watchdog timer and the polkit rule need it"
@@ -226,13 +292,9 @@ install_files() {
   share=$ROOT$SHARE_DIR
   config=$ROOT$CONFIG_DIR/link.conf
   units=$ROOT$UNIT_DIR
-  for target in "$bin/t900-link" "$bin/t900-ground-diag" "$sbin/t900-ground-watchdog" \
-    "$units/t900-ground-watchdog.service" "$units/t900-ground-watchdog.timer" \
-    "$units/t900-ground-usbreset.service" "$ROOT$POLKIT_DIR/$POLKIT_NAME"; do
-    check_ours "$target"
-  done
-  if [ -e "$share" ] && [ ! -f "$share/install-info" ] && [ -n "$(ls -A "$share")" ]; then
-    die "$SHARE_DIR is not empty and holds no t900-ground-link install"
+  # A dry run checked the real paths before it switched to its scratch tree.
+  if [ "$DRY_RUN" = 0 ]; then
+    check_targets "$ROOT"
   fi
 
   mkdir -p "$bin" "$sbin" "$share" "$units" "$ROOT$CONFIG_DIR"
@@ -319,11 +381,12 @@ main() {
   SHARE_DIR=$PREFIX/share/t900-ground-link
   locate_source
   if [ "$DRY_RUN" = 1 ]; then
+    REAL_ROOT=$ROOT
     ROOT=$WORK/root
     # Show what the existing install would become, without touching it.
-    if [ -f "$CONFIG_DIR/link.conf" ]; then
+    if [ -f "$REAL_ROOT$CONFIG_DIR/link.conf" ]; then
       mkdir -p "$ROOT$CONFIG_DIR"
-      cp "$CONFIG_DIR/link.conf" "$ROOT$CONFIG_DIR/link.conf"
+      cp "$REAL_ROOT$CONFIG_DIR/link.conf" "$ROOT$CONFIG_DIR/link.conf"
       chmod 0644 "$ROOT$CONFIG_DIR/link.conf"
     fi
   elif [ -z "$ROOT" ] && [ "$(id -u)" != 0 ]; then
@@ -338,6 +401,7 @@ main() {
 
   if [ "$DRY_RUN" = 1 ]; then
     say "Dry run of the t900-ground-link install into $PREFIX (operator $OP_USER)"
+    check_targets "$REAL_ROOT"
   else
     say "Installing t900-ground-link into $ROOT$PREFIX (operator $OP_USER)"
   fi
@@ -345,6 +409,10 @@ main() {
   enable_units
   if [ "$DRY_RUN" = 1 ]; then
     show_dry_run
+    if [ "$DRY_STOP" = 1 ]; then
+      say "Dry run: nothing was changed. The install would stop: see the warnings."
+      return 1
+    fi
     say "Dry run: nothing was changed."
     return 0
   fi

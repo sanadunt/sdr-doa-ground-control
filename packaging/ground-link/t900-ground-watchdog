@@ -9,6 +9,9 @@
 #   t900-ground-watchdog check-config     validate link.conf and print the values in use
 #   t900-ground-watchdog --dry-run check  log what it would do, run nothing
 #
+# DRY_RUN=1 in link.conf applies to check only: an operator's usb-reset runs
+# unless --dry-run is given on its own command line.
+#
 # A check counts the link as down when the PPP interface is missing, has no
 # IPv4 address, or the peer does not answer ping on it. Once it has been down
 # for FAIL_AFTER seconds, each check may take one action, BACKOFF_BASE seconds
@@ -32,6 +35,8 @@ EX_CONFIG=78
 HOUR=3600
 # Upper bound for one command (a service restart waits for ExecStartPre).
 ACTION_TIMEOUT=180
+# A check that finds the lock held this long logs who holds it.
+LOCK_WARN_AFTER=600
 
 # Defaults; link.conf.example documents each one.
 PPP_SERVICE=t900-ground-ppp.service
@@ -74,8 +79,10 @@ Commands:
   check-config   validate the config file and print the values in use
 
 Options:
-  --dry-run      log every action instead of running it (as DRY_RUN=1); keeps
-                 its own state, so a dry run never affects the live watchdog
+  --dry-run      log every action instead of running it; keeps its own state,
+                 so a dry run never affects the live watchdog. DRY_RUN=1 in the
+                 config does the same for check only: usb-reset runs unless
+                 --dry-run is given here
   --config FILE  config file (default /etc/t900-ground-link/link.conf)
   -h, --help     this help
 EOF
@@ -271,7 +278,9 @@ load_state() {
   LAST_ACTION=
   LAST_ACTION_AT=0
   LAST_RESULT=
-  if [ "$DRY_RUN" = 1 ]; then
+  # The state of the watchdog's own mode: an operator's usb-reset that runs
+  # while the checks are a dry run is recorded where those checks read it.
+  if [ "$STATE_DRY" = 1 ]; then
     STATE_FILE=$STATE_DIR/state.dry-run
   else
     STATE_FILE=$STATE_DIR/state
@@ -323,31 +332,47 @@ prune_recent() {
   RECENT=${kept# }
 }
 
-# One run at a time: the timer's check and an operator's usb-reset.
+# take_lock WAIT COMMAND: one run at a time (the timer's check, an operator's
+# usb-reset, reset), waiting up to WAIT seconds. flock(1) on a file: the
+# kernel releases it when the run ends, also after a crash, a kill or a power
+# loss, so no stale lock can stop the watchdog. The file names the holder.
 take_lock() {
-  LOCK=$STATE_DIR/lock
+  LOCK_FILE=$STATE_DIR/run.lock
   mkdir -p "$STATE_DIR" || die "cannot create $STATE_DIR"
-  waited=0
-  while ! mkdir "$LOCK" 2>/dev/null; do
-    holder=$(cat "$LOCK/pid" 2>/dev/null || true)
-    stale=0
-    if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
-      stale=1
-    elif [ -z "$holder" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then
-      stale=1
-    fi
-    if [ "$stale" = 1 ]; then
-      rm -rf "$LOCK" || return 1
-      continue
-    fi
-    [ "$waited" -lt "$1" ] || return 1
-    sleep 2
-    waited=$((waited + 2))
-  done
-  printf '%s\n' "$$" >"$LOCK/pid"
-  trap 'rm -rf "$LOCK"' EXIT
+  command -v flock >/dev/null 2>&1 || {
+    log err "flock (util-linux) is missing: $2 not run"
+    exit 1
+  }
+  # 'command' keeps a failed open from ending the shell.
+  command exec 9>>"$LOCK_FILE" || {
+    log err "cannot open $LOCK_FILE: $2 not run"
+    exit 1
+  }
+  if [ "$1" -gt 0 ]; then
+    flock -w "$1" 9 || return 1
+  else
+    flock -n 9 || return 1
+  fi
+  printf '%s %s %s\n' "$$" "$2" "$(now)" >"$LOCK_FILE"
   trap 'exit 143' TERM
   trap 'exit 130' INT
+}
+
+# Sets LOCK_HOLDER to what the lock file says about the run that holds it and
+# LOCK_HELD to how long it has held it (empty when it cannot tell).
+lock_holder() {
+  LOCK_HOLDER=
+  LOCK_HELD=
+  holder_pid=''
+  holder_command=''
+  holder_since=''
+  read -r holder_pid holder_command holder_since _ <"$LOCK_FILE" 2>/dev/null || true
+  is_uint "$holder_pid" || return 0
+  case $holder_command in check | usb-reset | reset) ;; *) return 0 ;; esac
+  LOCK_HOLDER="$holder_command (pid $holder_pid)"
+  if is_uint "$holder_since" && [ "$(now)" -ge "$holder_since" ]; then
+    LOCK_HELD=$(($(now) - holder_since))
+  fi
 }
 
 # ---- probes --------------------------------------------------------------
@@ -441,12 +466,24 @@ find_usb_device() {
 
 # ---- actions -------------------------------------------------------------
 
+# The lock's descriptor 9 is closed for the command, so nothing it leaves
+# running can hold the lock.
 run_timed() {
   if command -v timeout >/dev/null 2>&1; then
-    timeout "$ACTION_TIMEOUT" "$@"
+    timeout "$ACTION_TIMEOUT" "$@" 9>&-
   else
-    "$@"
+    "$@" 9>&-
   fi
+}
+
+# run_action CMD...: run one recovery command with the time limit. Sets
+# ACT_OUT to the last three lines of its output, on one line, and returns its
+# exit status.
+run_action() {
+  ACT_OUT=$(run_timed "$@" 2>&1)
+  act_rc=$?
+  ACT_OUT=$(trim "$(printf '%s' "$ACT_OUT" | tail -n 3 | tr '\n' ' ')")
+  return "$act_rc"
 }
 
 # act CMD...: run one recovery command, or only log it in a dry run.
@@ -455,12 +492,36 @@ act() {
     log notice "dry-run: would run: $*"
     return 0
   fi
-  if out=$(run_timed "$@" 2>&1); then
-    log notice "ran: $*"
+  if run_action "$@"; then
+    log notice "ran: $*${ACT_OUT:+: $ACT_OUT}"
     return 0
   else
     act_rc=$?
-    log err "failed (exit $act_rc): $*: $(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
+    log err "failed (exit $act_rc): $*${ACT_OUT:+: $ACT_OUT}"
+    return "$act_rc"
+  fi
+}
+
+# act_usbreset TARGET: usbutils' usbreset exits 0 also when it cannot open or
+# reset the device ("can't open [...]", "failed [...]"); only a last line that
+# ends in "ok" is a reset.
+act_usbreset() {
+  if [ "$DRY_RUN" = 1 ]; then
+    log notice "dry-run: would run: usbreset $1"
+    return 0
+  fi
+  if run_action usbreset "$1"; then
+    case $ACT_OUT in
+      *' ok')
+        log notice "ran: usbreset $1: $ACT_OUT"
+        return 0
+        ;;
+    esac
+    log err "failed: usbreset $1: ${ACT_OUT:-no output}"
+    return 1
+  else
+    act_rc=$?
+    log err "failed (exit $act_rc): usbreset $1${ACT_OUT:+: $ACT_OUT}"
     return "$act_rc"
   fi
 }
@@ -560,7 +621,7 @@ usb_reset() {
           target=$(printf '%03d/%03d' "$bus" "$num")
         fi
       fi
-      act usbreset "$target"
+      act_usbreset "$target"
       ;;
     unbind)
       if [ -z "$USB_DEV" ]; then
@@ -570,25 +631,39 @@ usb_reset() {
       rebind_ch341
       ;;
     none)
-      log notice "USB_RESET_METHOD=none: no USB reset"
+      log err "USB_RESET_METHOD=none: no USB reset"
+      return 1
       ;;
   esac
 }
 
+# Off, POWER_OFF_SECONDS, on: "on" always runs, also after a failed or
+# timed-out "off" (one uhubctl "-a cycle" killed by the time limit while the
+# port is off would leave it off), and a stop in between waits for it.
 power_cycle() {
+  power_rc=0
+  POWER_STOP=
+  trap 'POWER_STOP=143' TERM
+  trap 'POWER_STOP=130' INT
   case $POWER_METHOD in
     uhubctl)
-      act uhubctl -l "$UHUBCTL_LOCATION" -p "$UHUBCTL_PORT" -a cycle -d "$POWER_OFF_SECONDS"
+      act uhubctl -l "$UHUBCTL_LOCATION" -p "$UHUBCTL_PORT" -a off || power_rc=1
+      pause "$POWER_OFF_SECONDS"
+      act uhubctl -l "$UHUBCTL_LOCATION" -p "$UHUBCTL_PORT" -a on || power_rc=1
       ;;
     relay)
-      power_rc=0
       act sh -c "$RELAY_OFF_COMMAND" || power_rc=1
       pause "$POWER_OFF_SECONDS"
-      # Always switch it on again, also after a failed "off".
       act sh -c "$RELAY_ON_COMMAND" || power_rc=1
-      return "$power_rc"
       ;;
   esac
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  if [ -n "$POWER_STOP" ]; then
+    log warning "stop requested during the power cycle: ran the \"on\" step first"
+    exit "$POWER_STOP"
+  fi
+  return "$power_rc"
 }
 
 stage_available() {
@@ -666,8 +741,13 @@ need_root() {
 }
 
 cmd_check() {
-  if ! take_lock 0; then
-    # An operator's usb-reset is under way; the next check looks again.
+  if ! take_lock 0 check; then
+    # Another run (an operator's usb-reset) is under way; the next check
+    # looks again. One that holds the lock for long is named.
+    lock_holder
+    if [ -n "$LOCK_HELD" ] && [ "$LOCK_HELD" -ge "$LOCK_WARN_AFTER" ]; then
+      log warning "check skipped: ${LOCK_HOLDER} has held $LOCK_FILE for $LOCK_HELD s"
+    fi
     return 0
   fi
   load_state
@@ -769,13 +849,22 @@ cmd_check() {
 }
 
 cmd_usb_reset() {
-  if ! take_lock 300; then
-    log err "usb-reset not run: another watchdog run kept the lock for 5 minutes"
+  if [ "$USB_RESET_METHOD" = none ]; then
+    log err "usb-reset not run: USB_RESET_METHOD=none in $CONFIG"
+    return 1
+  fi
+  if ! take_lock 300 usb-reset; then
+    lock_holder
+    log err "usb-reset not run: ${LOCK_HOLDER:-another watchdog run} kept $LOCK_FILE for 5 minutes"
     return 1
   fi
   load_state
   NOW=$(now)
-  log notice "usb-reset requested: re-enumerate USB $USB_ID ($(usb_method)), then restart $PPP_SERVICE"
+  mode=
+  if [ "$DRY_RUN" = 0 ] && [ "$STATE_DRY" = 1 ]; then
+    mode=" (runs: DRY_RUN=1 applies to the checks only)"
+  fi
+  log notice "usb-reset requested: re-enumerate USB $USB_ID ($(usb_method)), then restart $PPP_SERVICE$mode"
   if run_stage usb; then
     LAST_RESULT=ok
     result=0
@@ -795,7 +884,10 @@ cmd_usb_reset() {
 }
 
 cmd_reset() {
-  take_lock 30 || die "another watchdog run holds $STATE_DIR/lock"
+  if ! take_lock 30 reset; then
+    lock_holder
+    die "${LOCK_HOLDER:-another watchdog run} holds $LOCK_FILE"
+  fi
   load_state
   reset_outage
   RECENT=
@@ -807,8 +899,8 @@ cmd_reset() {
 cmd_status() {
   load_state
   NOW=$(now)
-  if [ "$DRY_RUN" = 1 ]; then
-    printf 'mode:      dry run (actions are logged, not run)\n'
+  if [ "$STATE_DRY" = 1 ]; then
+    printf 'mode:      dry run (the checks log their actions and run none)\n'
   else
     printf 'mode:      live\n'
   fi
@@ -876,6 +968,12 @@ main() {
   validate_config
   if [ "$FORCE_DRY_RUN" = 1 ]; then
     DRY_RUN=1
+  fi
+  # STATE_DRY picks the state file: the mode the checks run in.
+  STATE_DRY=$DRY_RUN
+  if [ "$command" = usb-reset ]; then
+    # Asked for by an operator: DRY_RUN=1 in the config does not apply.
+    DRY_RUN=$FORCE_DRY_RUN
   fi
   case $command in
     check) need_root "$command"; cmd_check ;;

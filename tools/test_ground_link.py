@@ -14,6 +14,7 @@ touched.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -42,7 +43,7 @@ SH = shutil.which("dash") or shutil.which("sh") or "/bin/sh"
 REAL_TOOLS = (
     "sh", "dash", "bash", "cat", "sed", "awk", "grep", "tr", "tail", "head", "date", "readlink", "mv", "rm",
     "mkdir", "chmod", "cp", "ls", "find", "timeout", "uname", "uptime", "basename", "dirname", "mktemp",
-    "rmdir", "env", "sort", "wc", "cut", "touch",
+    "rmdir", "env", "sort", "wc", "cut", "touch", "flock",
 )
 FAKE_TOOLS = (
     "systemctl", "journalctl", "ip", "ping", "lsusb", "udevadm", "usbreset", "uhubctl", "logger", "sleep",
@@ -52,6 +53,7 @@ FAKE_TOOLS = (
 FAKE = r'''
 import json
 import os
+import signal
 import sys
 
 SCENARIO = os.environ["FAKE_SCENARIO"]
@@ -163,12 +165,29 @@ elif NAME == "lsusb":
 elif NAME == "udevadm":
     print("P: /devices/pci0000:00/usb3/3-2/3-2:1.0/ttyUSB0/tty/ttyUSB0\nN: ttyUSB0\nS: t900-ground\nE: ID_VENDOR_ID=1a86")
 elif NAME == "usbreset":
-    code = state["usbreset_rc"]
-    if code == 0:
-        print("Resetting CH340 serial converter ... ok")
+    # usbutils' usbreset: exit 1 only when it finds no device; an open or
+    # ioctl failure is reported on stdout with exit 0.
+    result = state["usbreset"]
+    if result == "missing":
+        sys.stderr.write("No such device found\n")
+        code = 1
+    elif result == "busy":
+        print("Resetting USB Serial ... failed [Device or resource busy]")
+    elif result == "cannot-open":
+        print("Resetting USB Serial ... can't open [No such file or directory]")
+    else:
+        print("Resetting USB Serial ... ok")
         fix(state, "usb")
 elif NAME == "uhubctl":
-    fix(state, "power")
+    action = ARGS[ARGS.index("-a") + 1]
+    if action == "off":
+        code = state["uhubctl_off_rc"]
+    elif action == "on":
+        fix(state, "power")
+elif NAME == "sleep":
+    # A stop (systemctl stop, shutdown) that arrives during this pause.
+    if state["sleep_term"] is not None and ARGS == [state["sleep_term"]]:
+        os.kill(os.getppid(), signal.SIGTERM)
 elif NAME == "relay":
     if ARGS == ["on"]:
         fix(state, "power")
@@ -234,7 +253,8 @@ class Harness:
             "uid": os.geteuid(), "user": "root", "groups": "root", "users": ["root", "rdf"],
             "enabled": "enabled", "active": "active", "sub": "running",
             "iface": {"ifindex": 7, "addr": "10.90.0.1"}, "ping": True, "usb": True,
-            "restart_rc": 0, "start_rc": 0, "usbreset_rc": 0, "fix_on": None, "next_ifindex": 20,
+            "restart_rc": 0, "start_rc": 0, "usbreset": "ok", "uhubctl_off_rc": 0, "sleep_term": None,
+            "fix_on": None, "next_ifindex": 20,
             "units": [SERVICE], "pkaction": "pkaction version 124",
         }
         self.save()
@@ -302,6 +322,8 @@ class Harness:
         environment = {
             "PATH": f"{self.fakebin}:{self.realbin}",
             "HOME": str(self.base),
+            # The installer's mktemp, independent of who may write /tmp.
+            "TMPDIR": str(self.base),
             "LC_ALL": "C",
             "TZ": "UTC",
             "FAKE_SCENARIO": str(self.scenario_path),
@@ -512,6 +534,14 @@ class DiagTests(HarnessCase):
             self.assertEqual(result.returncode, 2, args)
             self.assertIn("t900-ground-diag:", result.stderr)
 
+    def test_missing_output_directory_is_named_before_any_probe(self):
+        absent = self.h.base / "absent"
+        result = self.diag("-o", str(absent))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(f"output directory {absent} does not exist (create it: mkdir -p {absent})", result.stderr)
+        self.assertFalse(absent.exists(), "diag creates nothing")
+        self.assertEqual({call[0] for call in self.h.calls()} - {"id"}, set(), "no probe ran")
+
 
 # ---------------------------------------------------------------------------
 
@@ -554,7 +584,9 @@ class WatchdogTests(HarnessCase):
                 self.assertEqual(self.h.messages(), [f"link down: {text}"])
 
     def test_escalation_order_backoff_and_hold(self):
-        self.h.write_config(POWER_METHOD="uhubctl", UHUBCTL_LOCATION="3", UHUBCTL_PORT="2")
+        # An off longer than the 180 s limit of one command: off and on are
+        # two commands with the pause between them.
+        self.h.write_config(POWER_METHOD="uhubctl", UHUBCTL_LOCATION="3", UHUBCTL_PORT="2", POWER_OFF_SECONDS=200)
         self.down()
         # FAIL_AFTER 60, then BACKOFF_BASE 60 doubling to BACKOFF_MAX 240.
         schedule = {1060: "restart", 1120: "usb", 1240: "power", 1480: "restart"}
@@ -566,12 +598,13 @@ class WatchdogTests(HarnessCase):
         self.assertEqual(self.h.actions(), [
             ["systemctl", "reset-failed", SERVICE], ["systemctl", "restart", SERVICE],
             ["usbreset", "003/005"], ["systemctl", "reset-failed", SERVICE], ["systemctl", "restart", SERVICE],
-            ["uhubctl", "-l", "3", "-p", "2", "-a", "cycle", "-d", "5"],
+            ["uhubctl", "-l", "3", "-p", "2", "-a", "off"], ["uhubctl", "-l", "3", "-p", "2", "-a", "on"],
             ["systemctl", "reset-failed", SERVICE], ["systemctl", "restart", SERVICE],
             ["systemctl", "reset-failed", SERVICE], ["systemctl", "restart", SERVICE],
         ])
         sleeps = [call for call in self.h.calls() if call[0] == "sleep"]
-        self.assertEqual(sleeps, [["sleep", "5"], ["sleep", "10"]], "USB_SETTLE and POWER_SETTLE")
+        self.assertEqual(sleeps, [["sleep", "5"], ["sleep", "200"], ["sleep", "10"]],
+                         "USB_SETTLE, POWER_OFF_SECONDS and POWER_SETTLE")
         # At 1720 the fifth action is due, but four ran in the last hour.
         self.assert_logged("remote unreachable: 4 recovery actions in the last hour did not bring the link back")
         state = self.h.state()
@@ -726,7 +759,8 @@ class WatchdogTests(HarnessCase):
         self.assertNotIn("sleep", [call[0] for call in self.h.calls()])
         self.assert_logged("dry-run: would run: systemctl restart t900-ground-ppp.service")
         self.assert_logged("dry-run: would run: usbreset 003/005")
-        self.assert_logged("dry-run: would run: uhubctl -l 1-1.4 -p 3 -a cycle -d 5")
+        self.assert_logged("dry-run: would run: uhubctl -l 1-1.4 -p 3 -a off")
+        self.assert_logged("dry-run: would run: uhubctl -l 1-1.4 -p 3 -a on")
         self.assertTrue((self.h.state_dir / "state.dry-run").is_file())
         self.assertFalse((self.h.state_dir / "state").exists(), "a dry run keeps its own state")
         status = self.h.run(WATCHDOG, "status", now=1250)
@@ -791,23 +825,140 @@ class WatchdogTests(HarnessCase):
         self.assertEqual(self.h.actions()[-1], ["systemctl", "restart", SERVICE])
 
     def test_failed_usbreset_is_reported(self):
-        self.h.set(usbreset_rc=1)
-        result = self.h.run(WATCHDOG, "usb-reset", now=1000)
-        self.assertEqual(result.returncode, 1)
-        self.assert_logged("failed (exit 1): usbreset 003/005")
-        self.assertEqual(self.h.state()["LAST_RESULT"], "failed")
+        # usbreset exits 1 only without a device; a failed open or reset is
+        # "can't open [...]" or "failed [...]" on stdout with exit 0.
+        for result, fragment in (
+            ("missing", "failed (exit 1): usbreset 003/005: No such device found"),
+            ("busy", "failed: usbreset 003/005: Resetting USB Serial ... failed [Device or resource busy]"),
+            ("cannot-open", "failed: usbreset 003/005: Resetting USB Serial ... can't open [No such file or directory]"),
+        ):
+            with self.subTest(result=result):
+                self.h.clear_calls()
+                self.h.set(usbreset=result)
+                run = self.h.run(WATCHDOG, "usb-reset", now=1000)
+                self.assertEqual(run.returncode, 1)
+                self.assert_logged(fragment)
+                self.assertFalse(any(m.startswith("ran: usbreset") for m in self.h.messages()), self.h.messages())
+                self.assertEqual(self.h.state()["LAST_RESULT"], "failed")
+                self.assertEqual(self.h.actions()[-1], ["systemctl", "restart", SERVICE], "the restart still runs")
 
-    def test_lock_held_by_a_live_run_skips_the_check(self):
-        lock = self.h.state_dir / "lock"
-        lock.mkdir(parents=True)
-        (lock / "pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+    def test_successful_usbreset_logs_its_output(self):
+        result = self.h.run(WATCHDOG, "usb-reset", now=1000)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_logged("ran: usbreset 003/005: Resetting USB Serial ... ok")
+        self.assertEqual(self.h.state()["LAST_RESULT"], "ok")
+
+    def test_operator_usb_reset_runs_although_the_checks_are_a_dry_run(self):
+        self.h.write_config(DRY_RUN=1)
         self.down()
         self.h.check(1000)
+        result = self.h.run(WATCHDOG, "usb-reset", now=1100)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.h.actions(), [["usbreset", "003/005"], ["systemctl", "reset-failed", SERVICE],
+                                            ["systemctl", "restart", SERVICE]])
+        self.assert_logged("then restart t900-ground-ppp.service (runs: DRY_RUN=1 applies to the checks only)")
+        self.assertFalse(any(m.startswith("dry-run:") for m in self.h.messages()), self.h.messages())
+        # Recorded where the dry-run checks read it, so they wait BACKOFF_BASE too.
+        state = self.h.state("state.dry-run")
+        self.assertEqual((state["LAST_ACTION"], state["LAST_RESULT"]), ("usb-reset", "ok"))
+        self.assertFalse((self.h.state_dir / "state").exists())
+        status = self.h.run(WATCHDOG, "status", now=1110).stdout
+        self.assertIn("mode:      dry run (the checks log their actions and run none)", status)
+        self.assertIn("last:      usb-reset at", status)
+        # Only --dry-run on the command line makes it a dry run.
+        self.h.clear_calls()
+        result = self.h.run(WATCHDOG, "--dry-run", "usb-reset", now=1200)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.h.actions(), [])
+        self.assert_logged("dry-run: would run: usbreset 003/005")
+
+    def test_usb_reset_fails_without_a_usb_method(self):
+        self.h.write_config(USB_RESET_METHOD="none")
+        result = self.h.run(WATCHDOG, "usb-reset", now=1000)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.h.actions(), [], "no restart either: the operator asked for a USB reset")
+        self.assert_logged("usb-reset not run: USB_RESET_METHOD=none in")
+        # So t900-link reports an error instead of "Done.".
+        self.h.set(start_rc=1)
+        result = self.h.run(LINK, "usb-reset")
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("Done.", result.stdout)
+
+    def hold_lock(self, text: str):
+        """Holds the watchdog's flock as a live run would; returns the open file."""
+        self.h.state_dir.mkdir(parents=True, exist_ok=True)
+        handle = open(self.h.state_dir / "run.lock", "a+", encoding="utf-8")
+        self.addCleanup(handle.close)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        (self.h.state_dir / "run.lock").write_text(text, encoding="utf-8")
+        return handle
+
+    def test_lock_held_by_a_live_run_skips_the_check(self):
+        handle = self.hold_lock(f"{os.getpid()} usb-reset 1000\n")
+        self.down()
+        self.h.check(1100)
         self.assertEqual([call for call in self.h.calls() if call[0] != "id"], [], "nothing but the root check")
-        (lock / "pid").write_text("999999999\n", encoding="utf-8")
-        self.h.check(1000)
+        self.assertEqual(self.h.messages(), [], "a short hold is not worth a line")
+        # Held for 10 minutes or more: each skipped check names the holder.
+        self.h.check(1600)
+        self.assert_logged(f"check skipped: usb-reset (pid {os.getpid()}) has held {self.h.state_dir}/run.lock for 600 s")
+        self.assertEqual(self.h.actions(), [])
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        self.h.check(1630)
         self.assert_logged("link down")
-        self.assertFalse(lock.exists(), "a stale lock is taken over and released")
+        self.assertEqual((self.h.state_dir / "run.lock").read_text(encoding="utf-8").split()[1:], ["check", "1630"])
+
+    def test_a_lock_left_by_an_earlier_boot_stops_nothing(self):
+        """A crash or power loss leaves the lock file, but no lock: the kernel
+        released it with the process, whatever its pid names now."""
+        self.h.state_dir.mkdir(parents=True)
+        (self.h.state_dir / "run.lock").write_text("1 check 100\n", encoding="utf-8")
+        self.down()
+        for now in (1000, 1060):
+            self.h.check(now)
+        self.assert_logged("link down")
+        self.assertEqual(self.h.actions()[-1], ["systemctl", "restart", SERVICE])
+        result = self.h.run(WATCHDOG, "reset", now=1100)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.h.run(WATCHDOG, "usb-reset", now=1200)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_actions_do_not_inherit_the_lock(self):
+        """A command an action leaves running cannot hold the lock."""
+        if not os.path.isdir("/proc/self/fd"):
+            self.skipTest("no /proc/self/fd")
+        self.h.write_config(USB_RESET_METHOD="none", POWER_METHOD="relay",
+                            RELAY_OFF_COMMAND="'[ ! -e /proc/self/fd/9 ]'", RELAY_ON_COMMAND="'relay on'")
+        self.down()
+        for now in (1000, 1060, 1120):
+            self.h.check(now)
+        self.assert_logged("ran: sh -c [ ! -e /proc/self/fd/9 ]")
+
+    def test_stop_during_the_power_cycle_still_switches_on(self):
+        self.h.write_config(USB_RESET_METHOD="none", POWER_METHOD="uhubctl", UHUBCTL_LOCATION="3",
+                            UHUBCTL_PORT="2", POWER_OFF_SECONDS=7)
+        self.down()
+        for now in (1000, 1060):
+            self.h.check(now)
+        self.h.clear_calls()
+        self.h.set(sleep_term="7")
+        result = self.h.run(WATCHDOG, "check", now=1120)
+        self.assertEqual(result.returncode, 143, result.stderr)
+        self.assertEqual(self.h.actions(), [["uhubctl", "-l", "3", "-p", "2", "-a", "off"],
+                                            ["uhubctl", "-l", "3", "-p", "2", "-a", "on"]])
+        self.assert_logged('stop requested during the power cycle: ran the "on" step first')
+        self.assertEqual(self.h.state()["LAST_ACTION"], "power", "counted before it ran")
+
+    def test_uhubctl_switches_on_after_a_failed_off(self):
+        self.h.write_config(USB_RESET_METHOD="none", POWER_METHOD="uhubctl", UHUBCTL_LOCATION="3", UHUBCTL_PORT="2")
+        self.h.set(uhubctl_off_rc=1)
+        self.down()
+        for now in (1000, 1060, 1120):
+            self.h.check(now)
+        uhubctl = [call[-1] for call in self.h.actions() if call[0] == "uhubctl"]
+        self.assertEqual(uhubctl, ["off", "on"])
+        self.assert_logged("failed (exit 1): uhubctl -l 3 -p 2 -a off")
+        self.assertEqual(self.h.state()["LAST_RESULT"], "failed")
 
     def test_status_and_reset(self):
         status = self.h.run(WATCHDOG, "status", now=1000)
@@ -830,7 +981,9 @@ class WatchdogTests(HarnessCase):
         self.assertIn("actions:   0 in this outage, 0 of 4 in the last hour", status)
 
     def test_acting_commands_need_root(self):
-        self.h.set(uid=1000)
+        # Any uid but the one that counts as root (T900_LINK_ROOT_UID is the
+        # test user's), whoever runs the suite.
+        self.h.set(uid=os.geteuid() + 1)
         for command in ("check", "usb-reset", "reset"):
             result = self.h.run(WATCHDOG, command, now=1000)
             self.assertEqual(result.returncode, 1, command)
@@ -998,6 +1151,10 @@ class InstallerTests(HarnessCase):
     def setUp(self) -> None:
         super().setUp()
         self.root = self.h.base / "root"
+        self.root.mkdir()
+        # Root-only, as the installer requires of the tree it runs programs
+        # from, whatever the umask of the test run.
+        self.root.chmod(0o755)
         self.before = {}
         for name, text in self.PRESENT.items():
             path = self.root / name
@@ -1117,6 +1274,63 @@ class InstallerTests(HarnessCase):
         self.assertIn("POLKIT_RULE=\n", (self.root / "usr/local/share/t900-ground-link/install-info").read_text())
         self.assertIn("skipped (--root): systemctl disable --now t900-ground-watchdog.timer", result.stdout)
         self.assertIn("timer off", result.stdout)
+
+    def test_directories_are_readable_under_a_strict_umask(self):
+        """sudo keeps a hardened umask such as 027; the operator must still
+        read link.conf and run t900-link."""
+        previous = os.umask(0o027)
+        try:
+            result = self.install("--prefix", "/opt/t900")
+        finally:
+            os.umask(previous)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in ("etc/t900-ground-link", "opt/t900", "opt/t900/bin", "opt/t900/sbin", "opt/t900/share",
+                     "opt/t900/share/t900-ground-link", "etc/polkit-1/rules.d"):
+            self.assertEqual(stat.S_IMODE((self.root / name).stat().st_mode), 0o755, name)
+
+    def test_refuses_a_prefix_others_can_change(self):
+        """Root's timer runs PREFIX/sbin/t900-ground-watchdog: no other user may
+        be able to replace it."""
+        opt = self.root / "opt"
+        opt.mkdir(mode=0o755)
+        opt.chmod(0o775)
+        result = self.install("--prefix", "/opt/t900")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"{opt} is not owned by root or is writable by another user", result.stderr)
+        self.assertFalse((opt / "t900").exists(), "refused before anything was written")
+        opt.chmod(0o1777)
+        self.assertEqual(self.install("--prefix", "/opt/t900").returncode, 0, "a sticky directory like /tmp")
+        # Another owner.
+        sbin = self.root / "opt/t900/sbin"
+        if os.geteuid() == 0:
+            os.chown(sbin, 12345, -1)
+            extra = {}
+        else:
+            extra = {"T900_LINK_ROOT_UID": "0"}  # the test user's files are then not root's
+        result = self.h.run(INSTALL, "--root", str(self.root), "--prefix", "/opt/t900", **extra)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("is not owned by root or is writable by another user", result.stderr)
+
+    def test_dry_run_shows_the_refusals_of_the_real_install(self):
+        foreign = self.root / "etc/systemd/system/t900-ground-watchdog.service"
+        foreign.write_text("[Service]\nExecStart=/opt/other\n", encoding="utf-8")
+        config = self.root / "etc/t900-ground-link/link.conf"
+        config.parent.mkdir(parents=True)
+        config.write_text("PPP_SERVICE=gs-ppp.service\n", encoding="utf-8")
+        config.chmod(0o644)
+        result = self.install("--dry-run")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(f"the install would stop here: {foreign} exists and was not written by this installer",
+                      result.stderr)
+        self.assertIn("The install would stop: see the warnings.", result.stdout)
+        self.assertIn('unit === "gs-ppp.service"', result.stdout, "the config of the tree it checks")
+        self.assertEqual(foreign.read_text(encoding="utf-8"), "[Service]\nExecStart=/opt/other\n")
+        self.assertEqual(self.files(), set(self.PRESENT) | {
+            "etc/systemd/system/t900-ground-watchdog.service", "etc/t900-ground-link/link.conf"})
+        foreign.unlink()
+        result = self.install("--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Dry run: nothing was changed.\n", result.stdout)
 
     def test_custom_prefix(self):
         result = self.install("--prefix", "/opt/t900")
