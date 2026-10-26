@@ -34,7 +34,10 @@ view (``lan_access`` in ``--config-path``, changed by an admin through
 ``POST /api/lan-access``): a second listener in this process that serves the
 built UI and a read-only list of API routes to the client addresses the
 operator allowed. It stays closed while the default admin password is in use
-or admin login is disabled; ``lan_access.py`` holds its rules.
+or admin login is disabled; ``lan_access.py`` holds its rules. While it is
+open, the groundstation page that runs the Receiver publishes its state and
+spectrum to ``POST /api/mirror/receiver`` and the LAN view reads them back
+from ``GET /api/mirror/receiver`` (``receiver_mirror.py``, memory only).
 
 Admin login uses ``SDR_DOA_ADMIN_PASSWORD`` from the environment or the
 ``--env-file`` (default: the repository ``.env``). When the variable is absent
@@ -93,6 +96,7 @@ import sdr_doa_mqtt
 from config_command_tracker import ConfigCommandTracker, MonitorPublishError
 from sdr_doa_collector import CollectorError, DEFAULT_ALLOWED_DATA_HOSTS, NodeProgressTracker, collect
 import receiver_archive as ra
+import receiver_mirror as rm
 from receiver_archive import ArchiveError
 from receiver_record_store import (
     DEFAULT_DATA_DIR,
@@ -2146,6 +2150,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         # tile cache logs that outage once, when it starts and when it ends.
         if path.startswith(TILE_ROUTE_PREFIX) and status in {"200", "504"}:
             return
+        # The Receiver mirror is posted and polled several times a second. A
+        # served answer and a rate refusal are not logged (the mirror counts
+        # refusals); every other refusal is.
+        if path == rm.ROUTE and status in {"200", "429"}:
+            return
         super().log_request(code, size)
 
     @property
@@ -3123,6 +3132,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(self.console_server.lan_access_view())
             return
+        if parsed.path == rm.ROUTE:
+            self._get_mirror()
+            return
         if parsed.path == "/api/mqtt":
             monitor = self.console_server.mqtt_monitor
             if monitor is None:
@@ -3193,6 +3205,73 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"ok": True, **snapshot})
 
+    def _send_mirror_error(self, code: str, message: str) -> None:
+        # Mirror codes go through this helper, never the Kontrol error helper,
+        # so the config-patch code contract does not count them.
+        self._send_json({"ok": False, "code": code, "error": message}, rm.ERROR_CODES_HTTP[code])
+
+    def _discard_body(self, max_bytes: int) -> None:
+        """Read and drop a refused request's body up to ``max_bytes``, so the client sees the answer, not a reset."""
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            return
+        if 0 < length <= max_bytes:
+            try:
+                self.rfile.read(length)
+            except OSError:
+                pass
+
+    def _get_mirror(self) -> None:
+        """GET /api/mirror/receiver (both listeners): the latest mirrored state and frame with their ages."""
+        # Readable by the LAN view and this console's pages; another site's
+        # page (Sec-Fetch-Site: cross-site) is refused, as for the tiles.
+        if not lan.fetch_site_allowed(self.headers.get("Sec-Fetch-Site")):
+            self._send_mirror_error(rm.ORIGIN_REJECTED, "the Receiver mirror is read by this console's pages only")
+            return
+        self._send_json(self.console_server.receiver_mirror.view())
+
+    def _post_mirror(self) -> None:
+        """POST /api/mirror/receiver: the kiosk page publishes its Receiver's state and latest frame.
+
+        In order: the same-origin loopback Origin (403), the body length
+        (413), the rate (429), an open LAN view (409), then the schema (400).
+        A body of at most MAX_BODY_BYTES is read before every answer, also a
+        refusal, so the client reads its answer rather than a reset.
+        """
+        mirror = self.console_server.receiver_mirror
+        if not self._same_origin_loopback_request():
+            self._discard_body(rm.MAX_BODY_BYTES)
+            self._send_mirror_error(rm.ORIGIN_REJECTED, f"{rm.ROUTE} requires a same-origin loopback request")
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            length = -1
+        if length > rm.MAX_BODY_BYTES:
+            self.close_connection = True
+            self._discard_body(lan.MAX_DISCARDED_BODY_BYTES)
+            self._send_mirror_error(rm.MIRROR_TOO_LARGE, f"the body must be at most {rm.MAX_BODY_BYTES} bytes")
+            return
+        if length < 1:
+            self._send_mirror_error(rm.MIRROR_INVALID, "the body must be JSON with a Content-Length")
+            return
+        raw = self.rfile.read(length)
+        if not mirror.admit():
+            self._send_mirror_error(rm.MIRROR_RATE_LIMITED, f"at most {rm.MAX_POSTS_PER_S} posts a second")
+            return
+        if not self.console_server.lan.is_open():
+            self._send_mirror_error(rm.MIRROR_LAN_CLOSED, "the LAN view is closed; nothing is mirrored")
+            return
+        try:
+            if len(raw) != length:
+                raise rm.MirrorRejected(rm.MIRROR_INVALID, "the body is incomplete")
+            source, state, frame = rm.decode_publish(raw)
+        except rm.MirrorRejected as exc:
+            self._send_mirror_error(exc.code, exc.message)
+            return
+        self._send_json({"ok": True, **mirror.publish(source, state, frame)})
+
     def _post_lan_access(self) -> None:
         """POST /api/lan-access: change the LAN view and open, move or close it at once.
 
@@ -3227,6 +3306,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._send_archive_error(HTTPStatus.FORBIDDEN, ra.ORIGIN_REJECTED, ra.MUTATION_REJECTED_MESSAGE)
             return
         if parsed.path.startswith("/api/receiver/") and self._receiver_post(parsed):
+            return
+        if parsed.path == rm.ROUTE:
+            self._post_mirror()
             return
         if parsed.path in SAME_ORIGIN_POST_PATHS and not self._same_origin_loopback_request():
             # Rejected before the body is read, the login throttle or any
@@ -3581,8 +3663,9 @@ class LanConsoleHandler(ConsoleHandler):
         if route == "/api/admin/status":
             self._send_json({"authenticated": False})
             return
-        # health, capabilities, console-config, mqtt, mqtt/rdf-node, branding:
-        # the loopback listener's answer (capabilities through the override).
+        # health, capabilities, console-config, mqtt, mqtt/rdf-node, branding,
+        # mirror/receiver: the loopback listener's answer (capabilities through
+        # the override).
         super().do_GET()
 
     def do_POST(self) -> None:  # noqa: N802
@@ -3769,7 +3852,16 @@ class LanAccessManager:
             server.server_close()
         if thread is not None:
             thread.join(timeout=5)
+        # Nothing mirrored outlives the LAN view it was published for.
+        mirror = getattr(self.console, "receiver_mirror", None)
+        if mirror is not None:
+            mirror.clear()
         print("[ground-console] LAN view closed", flush=True)
+
+    def is_open(self) -> bool:
+        """The listener is open (the Receiver mirror is published only then)."""
+        with self._lock:
+            return self._server is not None
 
     def close(self) -> None:
         """Close the listener for good (console stop)."""
@@ -3978,6 +4070,9 @@ class GroundConsoleServer(ThreadingHTTPServer):
         self.archive_exports = ra.ArchiveExports()
         self.archive_export_slots = threading.BoundedSemaphore(ra.EXPORT_SLOTS)
         self._retention_scheduler: Optional[ra.RetentionScheduler] = None
+        # The Receiver mirror (receiver_mirror.py): the kiosk page's latest
+        # Receiver state and frame for the LAN view, in memory only.
+        self.receiver_mirror = rm.ReceiverMirror()
         # The opt-in LAN view: a second listener of this process
         # (lan_access.py). It opens below, once this loopback socket is bound.
         self.lan = LanAccessManager(self)

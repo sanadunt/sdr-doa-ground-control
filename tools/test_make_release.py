@@ -35,6 +35,7 @@ CONSOLE_MODULES = {
     "preferences_store.py",
     "rdf_node_mqtt_v2.py",
     "receiver_archive.py",
+    "receiver_mirror.py",
     "receiver_record_store.py",
     "sdr_doa_collector.py",
     "sdr_doa_mqtt.py",

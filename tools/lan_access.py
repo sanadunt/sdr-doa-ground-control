@@ -142,6 +142,8 @@ API_ROUTES = frozenset({
     "/api/preferences",
     "/api/branding",
     "/api/admin/status",
+    # The Receiver mirror (receiver_mirror.py): the kiosk's Receiver, view only.
+    "/api/mirror/receiver",
 })
 ROUTE_UI = "ui"
 ROUTE_TILE = "tile"

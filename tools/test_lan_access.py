@@ -376,10 +376,11 @@ class LanRequestRuleTests(unittest.TestCase):
             self.assertEqual(lan.lan_route(path), path)
         self.assertEqual(lan.API_ROUTES, frozenset({
             "/api/health", "/api/capabilities", "/api/snapshot", "/api/console-config", "/api/mqtt",
-            "/api/mqtt/rdf-node", "/api/preferences", "/api/branding", "/api/admin/status",
+            "/api/mqtt/rdf-node", "/api/preferences", "/api/branding", "/api/admin/status", "/api/mirror/receiver",
         }))
         for path in (
             "/receiver", "/receiver/", "/receiver/index.html", "/api/receiver/settings", "/api/lan-access",
+            "/api/mirror/", "/api/mirror/receiver/", "/api/mirror/receiver/frame",
             "/api/admin/login", "/api/admin/branding", "/api/mqtt/config-patch", "/api/mqtt/config-patch/abc",
             "/api/mqtt/config-reported", "/api/mqtt/connect", "/api/dry-run/config-patch", "/assets/", "/assets",
             "/api/health/", "/api/", "/.env", "/tools/ground_console.py",
@@ -522,7 +523,7 @@ class LanListenerTests(_ServerCase):
 
     def test_the_read_only_routes_answer(self) -> None:
         for path in ("/api/health", "/api/capabilities", "/api/console-config", "/api/mqtt", "/api/mqtt/rdf-node",
-                     "/api/preferences", "/api/branding", "/api/admin/status", "/api/snapshot"):
+                     "/api/preferences", "/api/branding", "/api/admin/status", "/api/snapshot", "/api/mirror/receiver"):
             with self.subTest(path=path):
                 status, headers, body = self.get(path)
                 self.assertEqual(status, 200, body)
@@ -614,6 +615,7 @@ class LanListenerTests(_ServerCase):
             ("PUT", "/api/preferences", {"values": {"sdr-console-theme": "light"}}),
             ("POST", "/api/admin/branding", {"app_name": "LAN"}),
             ("POST", "/api/receiver/sessions", {}),
+            ("POST", "/api/mirror/receiver", {"v": 1}),
             ("DELETE", "/api/receiver/scans/abc", None),
             ("POST", "/api/dry-run/config-patch", {"changes": {}}),
             ("PATCH", "/", None),
