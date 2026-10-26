@@ -773,6 +773,24 @@ journalctl -u sdr-doa-agent -f
 - Docker yang di-build sendiri (juga arm64/armv7): salin `packaging/agent/agent.env.example` ke `agent.env`, edit, lalu `docker compose up -d --build` di folder rilis agent (atau `docker compose -f docker-compose.agent.yml up -d --build` di repository). Butuh Compose v2.24+. Project dan volume-nya sama dengan yang ditulis `sdr-doa-docker install --agent`, jadi state di volume `agent-state` tetap saat pindah ke image GHCR; salin isi `agent.env` lama ke `/opt/sdr-doa-agent/agent.env`.
 - Upgrade service: jalankan installer rilis baru lagi; `agent.env` dan state tetap. Hapus dengan `sudo sh /opt/sdr-doa-agent/uninstall.sh` (`--purge` juga menghapus pengaturan dan state).
 
+## Link T900/PPP di groundstation
+
+`packaging/ground-link/` (juga di tarball console) berisi alat host untuk link PPP lewat T900 ke RDF-SDR. Semuanya dipasang di host groundstation, di luar Docker; console tidak mendapat kendali host. Detail, prosedur insiden dan pengaturan ada di `packaging/ground-link/README.md`.
+
+```sh
+sudo sh packaging/ground-link/install.sh --dry-run   # lihat dulu
+sudo sh packaging/ground-link/install.sh             # operator: user rdf (--user NAMA)
+t900-link status                                     # service PPP, ppp0, status watchdog
+sudo t900-ground-diag -o ~/t900                      # laporan diagnosis bertanda waktu
+t900-link restart                                    # restart t900-ground-ppp.service
+t900-link usb-reset                                  # usbreset 1a86:7523, lalu restart service
+journalctl -t t900-ground-watchdog -f                # setiap tindakan watchdog
+```
+
+- `t900-ground-diag` hanya membaca: status service, 50 baris journal pppd, `ip addr` dari `ppp0`, node `/dev/t900-ground`, `lsusb`, 30 baris kernel tentang USB dan `ch341`, ping ke `10.90.0.2`, dan `udevadm info`. Tanpa root bagian journal dilewati dan disebut di laporan. Di Raspberry: `t900-ground-diag --raspberry`.
+- `t900-ground-watchdog.timer` memeriksa link tiap 30 detik. Bila `ppp0` tidak punya alamat atau peer tidak menjawab ping selama 180 detik, watchdog restart service, lalu mengenumerasi ulang USB, lalu (hanya bila hardware-nya diatur) memutus daya T900, dengan jarak yang makin panjang. Setelah 4 tindakan dalam satu jam ia berhenti dengan status "remote unreachable" sampai sesi PPP baru terbentuk.
+- Installer tidak mengubah `t900-ground-ppp.service`, `/etc/ppp/peers/t900-ground` atau udev rule, dan tidak membuka port. `--watchdog-dry-run` membuat watchdog hanya mencatat tindakannya.
+
 ## Validasi setelah install
 
 Frontend:
@@ -892,6 +910,10 @@ MapLibre hanya renderer; tile datang dari console lewat `/api/tiles`, dan CSP ha
 - `curl -s -D - -o /dev/null http://127.0.0.1:8787/api/tiles/osm/0/0/0` menampilkan `X-Tile-Cache: hit`, `miss` atau `stale`; 504 berarti tile belum tersimpan dan upstream tidak terjangkau.
 - Pastikan `--tile-cache-dir` bisa ditulis user console; bila tidak, log mencatat `tile cache ... is not writable` dan tile tetap disajikan tanpa disimpan.
 - Coba gaya lain: tiap gaya punya sumber sendiri, kecuali Terang dan Gelap yang memakai tile Standar.
+
+### Link PPP ke RDF-SDR putus (`LCP: timeout` di journal pppd)
+
+Jalankan `sudo t900-ground-diag` lalu lihat `t900-link status`. Status "remote unreachable" berarti tindakan watchdog dalam satu jam terakhir tidak memulihkan link. Ikuti prosedur insiden di `packaging/ground-link/README.md`: restart service, lalu `usbreset` dan restart, baru cabut-colok, masing-masing ditunggu 30–60 detik dan diikuti diag. Langkah yang memulihkan menunjukkan lapisan yang macet (pppd, CH340, radio T900 ground, atau link RF dan sisi Raspberry).
 
 ### Keamanan lokal
 
