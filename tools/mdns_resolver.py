@@ -12,6 +12,15 @@ query (RFC 6762 sections 5.1 and 6.7): the responder answers by unicast to
 that port and repeats the query ID. The wait is at most ``QUERY_TIMEOUT_S``
 and never longer than the caller's remaining budget.
 
+The query goes out once on every interface that is up, running,
+multicast-capable, not loopback and has an IPv4 address (``IP_MULTICAST_IF``
+set to that address), as avahi does. A plain ``sendto`` would leave only
+through the interface the routing table picks for 224.0.0.251: with no
+default route it fails with ENETUNREACH, and with the default route on an
+uplink the node on another LAN never sees the query. The interface list is
+read with Linux ioctls; where it cannot be read, or no interface qualifies or
+takes the packet, the query is sent once through the routing table.
+
 Answers are parsed strictly and with bounds checks: the response must come
 from the port the query went to, carry the query ID, be a response with
 opcode and rcode 0, and name compression may only point backwards (so a
@@ -32,10 +41,16 @@ import re
 import secrets
 import socket
 import struct
+import sys
 import threading
 import time
 from collections import OrderedDict
 from typing import Callable, List, Optional, Tuple
+
+try:
+    import fcntl
+except ImportError:  # Windows: no interface flags, the routing table decides.
+    fcntl = None  # type: ignore[assignment]
 
 MDNS_ADDRESS: Tuple[str, int] = ("224.0.0.251", 5353)
 QUERY_TIMEOUT_S = 1.0
@@ -49,6 +64,9 @@ MAX_DATAGRAMS = 32
 MAX_POINTER_JUMPS = 16
 MAX_NAME_WIRE_BYTES = 255
 MAX_CACHE_ENTRIES = 64
+# Interfaces one query is sent on; a host with many container veths still
+# lists its physical links first (lowest indexes).
+MAX_INTERFACES = 32
 TYPE_A = 1
 CLASS_IN = 1
 QU_BIT = 0x8000
@@ -56,6 +74,17 @@ CLASS_MASK = 0x7FFF
 _HEADER = struct.Struct("!HHHHHH")
 _RECORD = struct.Struct("!HHIH")
 _LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+# Linux <linux/sockios.h> and <net/if.h>; 40 bytes hold a struct ifreq on
+# 32- and 64-bit kernels.
+_SIOCGIFFLAGS = 0x8913
+_SIOCGIFADDR = 0x8915
+_IFREQ = struct.Struct("16sH22x")
+_IFF_UP = 0x1
+_IFF_LOOPBACK = 0x8
+_IFF_RUNNING = 0x40
+_IFF_MULTICAST = 0x1000
+_IFF_WANTED = _IFF_UP | _IFF_RUNNING | _IFF_MULTICAST
+_ANY = socket.inet_aton("0.0.0.0")
 
 
 class MdnsPacketError(ValueError):
@@ -157,6 +186,44 @@ def _usable_address(raw: bytes) -> Optional[str]:
     return str(address)
 
 
+def multicast_interface_addresses() -> List[str]:
+    """IPv4 addresses of the interfaces an mDNS query goes out on, in index order.
+
+    An interface counts when it is up, running, multicast-capable, not
+    loopback and has an IPv4 address (its primary one). Empty where the
+    flags cannot be read (not Linux, no ``fcntl``) or nothing qualifies; the
+    caller then sends through the routing table.
+    """
+    if fcntl is None or not sys.platform.startswith("linux"):
+        return []
+    try:
+        interfaces = socket.if_nameindex()
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError:
+        return []
+    addresses: List[str] = []
+    with probe:
+        for _index, name in interfaces:
+            try:
+                request = _IFREQ.pack(name.encode("ascii")[:15], 0)
+                flags = _IFREQ.unpack(fcntl.ioctl(probe.fileno(), _SIOCGIFFLAGS, request))[1]
+                if flags & _IFF_WANTED != _IFF_WANTED or flags & _IFF_LOOPBACK:
+                    continue
+                # struct sockaddr_in at offset 16: family, port, address.
+                raw = fcntl.ioctl(probe.fileno(), _SIOCGIFADDR, request)
+            except (OSError, UnicodeError, struct.error):
+                continue
+            if len(raw) < 24 or struct.unpack_from("H", raw, 16)[0] != socket.AF_INET:
+                continue
+            address = ipaddress.IPv4Address(raw[20:24])
+            if address.is_unspecified or address.is_loopback or str(address) in addresses:
+                continue
+            addresses.append(str(address))
+            if len(addresses) >= MAX_INTERFACES:
+                break
+    return addresses
+
+
 def parse_response(packet: bytes, name: str, query_id: int) -> Optional[Tuple[str, int]]:
     """Return ``(address, ttl)`` of the first A answer for ``name``, or None.
 
@@ -208,7 +275,9 @@ class MdnsResolver:
 
     ``destination`` is the mDNS group; tests point it at a loopback responder.
     Responses are accepted only from the port the query was sent to (5353
-    for the group).
+    for the group). ``interfaces`` lists the IPv4 addresses of the interfaces
+    a query to a multicast destination is sent on (default
+    ``multicast_interface_addresses``).
     """
 
     def __init__(
@@ -220,6 +289,7 @@ class MdnsResolver:
         max_ttl_s: float = MAX_TTL_S,
         negative_ttl_s: float = NEGATIVE_TTL_S,
         clock: Callable[[], float] = time.monotonic,
+        interfaces: Callable[[], List[str]] = multicast_interface_addresses,
     ) -> None:
         if not 0 < timeout_s <= 5:
             raise ValueError("timeout_s must be within (0, 5]")
@@ -231,6 +301,11 @@ class MdnsResolver:
         self.max_ttl_s = float(max_ttl_s)
         self.negative_ttl_s = float(negative_ttl_s)
         self.clock = clock
+        self.interfaces = interfaces
+        try:
+            self._multicast = ipaddress.IPv4Address(self.destination[0]).is_multicast
+        except ValueError:
+            self._multicast = False
         self._lock = threading.Lock()
         self._query_lock = threading.Lock()
         # name -> (address or None for a failed lookup, expires at)
@@ -312,7 +387,8 @@ class MdnsResolver:
             except OSError:
                 pass
             sock.bind(("0.0.0.0", 0))
-            sock.sendto(query, self.destination)
+            if not self._send(sock, query):
+                return None
             for _ in range(MAX_DATAGRAMS):
                 remaining = deadline - self.clock()
                 if remaining <= 0:
@@ -335,3 +411,37 @@ class MdnsResolver:
             return None
         finally:
             sock.close()
+
+    def _send(self, sock: socket.socket, query: bytes) -> bool:
+        """Send the query on every multicast interface, else through the routing table.
+
+        True when at least one copy left. Answers to every copy come back to
+        the one socket by unicast.
+        """
+        if self._multicast:
+            sent = False
+            try:
+                addresses = list(self.interfaces())[:MAX_INTERFACES]
+            except (OSError, ValueError):
+                addresses = []
+            for address in addresses:
+                try:
+                    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(address))
+                    sock.sendto(query, self.destination)
+                    sent = True
+                except OSError:
+                    # ENETUNREACH, EADDRNOTAVAIL: that link went down or lost
+                    # its address since the list was read.
+                    continue
+            if sent:
+                return True
+            try:
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, _ANY)
+            except OSError:
+                pass
+        try:
+            sock.sendto(query, self.destination)
+        except OSError:
+            # ENETUNREACH: no interface, or no route for the group.
+            return False
+        return True

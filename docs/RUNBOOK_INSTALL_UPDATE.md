@@ -1058,7 +1058,7 @@ curl -s --noproxy '*' --max-time 10 http://127.0.0.1:8787/api/snapshot | python3
 ```
 **Hasil**: `UNVERIFIED` bila Data Out terjangkau dan sehat (console memang tidak pernah melaporkan `LIVE`). `UNAVAILABLE`: Data Out tidak terjangkau dari host ini (cek 4.10; console native di belakang proxy: `NO_PROXY`, 4.7). `STALE`, `DEGRADED`, dan seterusnya: data terbaca tetapi ada masalah di node. Ini bukan kegagalan instalasi; laporkan.
 
-Nama `.local` di Docker: resolver sistem container tidak bisa meresolusi mDNS (tidak ada nss-mdns), jadi console mengirim sendiri satu query mDNS (paling lama sekitar 1 detik) dan menyambung ke alamat itu dengan header `Host` tetap nama aslinya. Lihat bagaimana host teresolusi:
+Nama `.local` di Docker: resolver sistem container tidak bisa meresolusi mDNS (tidak ada nss-mdns), jadi console mengirim sendiri query mDNS, sekali lewat setiap interface jaringan yang aktif dan punya alamat IPv4 (juga di LAN tanpa default route; paling lama sekitar 1 detik), lalu menyambung ke alamat itu dengan header `Host` tetap nama aslinya. Lihat bagaimana host teresolusi:
 
 ```sh
 curl -s --noproxy '*' --max-time 10 http://127.0.0.1:8787/api/snapshot | python3 -c 'import json,sys; d=json.load(sys.stdin); r=d["collection"]["host_resolution"]; print(r["method"], r["address"], d["resources"]["/status.json"].get("error"))'

@@ -5,11 +5,15 @@ Packet building and strict parsing (name compression, loops, truncation,
 foreign or hostile answers), the cache, a loopback UDP responder standing in
 for the mDNS group, and the collector path with the resolver patched in: the
 connect goes to the mDNS address while the URL and Host header keep the name.
-No multicast leaves the machine; every socket is on 127.0.0.1.
+The send on every multicast interface runs against a fake socket and fake
+interface ioctls. No multicast leaves the machine; every real socket is on
+127.0.0.1.
 """
 
 from __future__ import annotations
 
+import errno
+import ipaddress
 import os
 import random
 import socket
@@ -17,6 +21,7 @@ import struct
 import sys
 import threading
 import time
+import types
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -344,6 +349,173 @@ class LoopbackResolverTests(unittest.TestCase):
                 thread.join(3)
         self.assertEqual(results, ["192.168.100.100"] * 4)
         self.assertEqual(len(responder.queries), 1)
+
+
+class FakeNetwork:
+    """What the query socket sees: which interfaces exist, route and answer.
+
+    ``answering`` are the interface addresses whose link the node is on, and
+    ``default_route`` the interface a plain sendto leaves through (None: no
+    route for 224.0.0.251, so ENETUNREACH). ``gone`` interfaces refuse
+    IP_MULTICAST_IF, ``down`` ones refuse the send.
+    """
+
+    def __init__(self, answering: Tuple[str, ...] = (), default_route: Optional[str] = None,
+                 gone: Tuple[str, ...] = (), down: Tuple[str, ...] = ()) -> None:
+        self.answering = set(answering)
+        self.default_route = default_route
+        self.gone = set(gone)
+        self.down = set(down)
+        self.sent: List[Tuple[Optional[str], Tuple[str, int]]] = []
+        self.interfaces_set: List[Optional[str]] = []
+
+    def socket(self, *args: Any, **kwargs: Any) -> "FakeQuerySocket":
+        return FakeQuerySocket(self)
+
+
+class FakeQuerySocket:
+    def __init__(self, network: FakeNetwork) -> None:
+        self.network = network
+        self.interface: Optional[str] = None
+        self.inbox: List[Tuple[bytes, Tuple[str, int]]] = []
+
+    def setsockopt(self, level: int, option: int, value: Any) -> None:
+        if option != socket.IP_MULTICAST_IF:
+            return
+        address = socket.inet_ntoa(value)
+        if address in self.network.gone:
+            raise OSError(errno.EADDRNOTAVAIL, "Cannot assign requested address")
+        self.interface = None if address == "0.0.0.0" else address
+        self.network.interfaces_set.append(self.interface)
+
+    def bind(self, address: Tuple[str, int]) -> None:
+        return None
+
+    def settimeout(self, value: float) -> None:
+        return None
+
+    def sendto(self, data: bytes, destination: Tuple[str, int]) -> int:
+        out = self.interface or self.network.default_route
+        if out is None or out in self.network.down:
+            raise OSError(errno.ENETUNREACH, "Network is unreachable")
+        self.network.sent.append((self.interface, destination))
+        if out in self.network.answering:
+            self.inbox.append((answer_to(data), ("192.168.100.100", 5353)))
+        return len(data)
+
+    def recvfrom(self, size: int) -> Tuple[bytes, Tuple[str, int]]:
+        if not self.inbox:
+            raise socket.timeout("timed out")
+        return self.inbox.pop(0)
+
+    def close(self) -> None:
+        return None
+
+
+class InterfaceSendTests(unittest.TestCase):
+    """A query to the mDNS group goes out on every multicast interface, as avahi's does."""
+
+    def resolve(self, network: FakeNetwork, interfaces: List[str]) -> Optional[str]:
+        resolver = mdns.MdnsResolver(timeout_s=0.5, interfaces=lambda: list(interfaces))
+        with mock.patch.object(mdns.socket, "socket", network.socket):
+            return resolver.resolve(NAME)
+
+    def test_without_a_route_for_the_group_each_lan_still_gets_the_query(self) -> None:
+        # Static 192.168.100.x, no gateway: a plain sendto fails with ENETUNREACH.
+        network = FakeNetwork(answering=("192.168.100.5",), default_route=None, down=("10.20.0.2",))
+        self.assertEqual(self.resolve(network, ["10.20.0.2", "172.17.0.1", "192.168.100.5"]), "192.168.100.100")
+        self.assertEqual(network.interfaces_set, ["10.20.0.2", "172.17.0.1", "192.168.100.5"])
+        self.assertEqual(network.sent, [("172.17.0.1", mdns.MDNS_ADDRESS), ("192.168.100.5", mdns.MDNS_ADDRESS)])
+
+    def test_the_node_off_the_default_route_link_is_reached(self) -> None:
+        # The default route is the uplink; the node is on the LAN interface.
+        network = FakeNetwork(answering=("192.168.100.5",), default_route="10.64.0.9")
+        self.assertEqual(self.resolve(network, ["10.64.0.9", "192.168.100.5"]), "192.168.100.100")
+        self.assertEqual([interface for interface, _ in network.sent], ["10.64.0.9", "192.168.100.5"])
+
+    def test_the_routing_table_is_the_fallback(self) -> None:
+        for interfaces in ([], ["10.20.0.2"]):
+            with self.subTest(interfaces=interfaces):
+                network = FakeNetwork(answering=("192.168.100.5",), default_route="192.168.100.5", gone=("10.20.0.2",))
+                self.assertEqual(self.resolve(network, interfaces), "192.168.100.100")
+                self.assertEqual(network.sent, [(None, mdns.MDNS_ADDRESS)])
+                if interfaces:
+                    self.assertEqual(network.interfaces_set, [None], "the interface choice is reset first")
+
+    def test_enetunreach_everywhere_is_a_quick_failure(self) -> None:
+        network = FakeNetwork(default_route=None, down=("10.20.0.2",))
+        started = time.monotonic()
+        self.assertIsNone(self.resolve(network, ["10.20.0.2"]))
+        self.assertLess(time.monotonic() - started, 0.3, "nothing left, so no wait for an answer")
+        self.assertEqual(network.sent, [])
+
+    def test_a_unicast_destination_never_reads_the_interfaces(self) -> None:
+        def interfaces() -> List[str]:
+            raise AssertionError("not for a unicast destination")
+
+        with LoopbackResponder(lambda query: [(answer_to(query), False)]) as responder:
+            resolver = mdns.MdnsResolver(("127.0.0.1", responder.port), timeout_s=1.0, interfaces=interfaces)
+            self.assertEqual(resolver.resolve(NAME), "192.168.100.100")
+
+
+UP, LOOPBACK, RUNNING, MULTICAST = 0x1, 0x8, 0x40, 0x1000
+
+
+class FakeIoctl:
+    """SIOCGIFFLAGS and SIOCGIFADDR answers for named interfaces."""
+
+    def __init__(self, interfaces: Dict[str, Tuple[int, Optional[str]]], broken: Tuple[str, ...] = ()) -> None:
+        self.interfaces = interfaces
+        self.broken = set(broken)
+
+    def ioctl(self, fd: int, request: int, arg: bytes) -> bytes:
+        name = arg[:16].rstrip(b"\0").decode("ascii")
+        if name in self.broken or name not in self.interfaces:
+            raise OSError(errno.ENODEV, "No such device")
+        flags, address = self.interfaces[name]
+        if request == 0x8913:
+            return arg[:16] + struct.pack("H", flags) + b"\0" * 22
+        if request == 0x8915:
+            if address is None:
+                raise OSError(errno.EADDRNOTAVAIL, "Cannot assign requested address")
+            return arg[:16] + struct.pack("H", socket.AF_INET) + b"\0\0" + socket.inet_aton(address) + b"\0" * 16
+        raise OSError(errno.EINVAL, "Invalid argument")
+
+
+class InterfaceListTests(unittest.TestCase):
+    def addresses(self, interfaces: Dict[str, Tuple[int, Optional[str]]], broken: Tuple[str, ...] = (), platform: str = "linux") -> List[str]:
+        index = [(position + 1, name) for position, name in enumerate(list(interfaces) + list(broken))]
+        with mock.patch.object(mdns, "fcntl", FakeIoctl(interfaces, broken)), \
+                mock.patch.object(mdns, "sys", types.SimpleNamespace(platform=platform)), \
+                mock.patch.object(mdns.socket, "if_nameindex", lambda: index):
+            return mdns.multicast_interface_addresses()
+
+    def test_up_running_multicast_links_with_an_ipv4_address(self) -> None:
+        interfaces = {
+            "lo": (UP | RUNNING | LOOPBACK, "127.0.0.1"),
+            "eth0": (UP | RUNNING | MULTICAST, "192.168.100.5"),
+            "wlan0": (UP | MULTICAST, "10.1.1.2"),  # no carrier
+            "tun0": (UP | RUNNING, "10.8.0.2"),  # no multicast
+            "br0": (UP | RUNNING | MULTICAST, None),  # no IPv4 address
+            "eth1": (UP | RUNNING | MULTICAST, "10.20.0.2"),
+            "eth2": (RUNNING | MULTICAST, "10.30.0.2"),  # down
+            "veth9": (UP | RUNNING | MULTICAST, "192.168.100.5"),  # same address again
+        }
+        self.assertEqual(self.addresses(interfaces, broken=("gone0",)), ["192.168.100.5", "10.20.0.2"])
+
+    def test_the_list_is_bounded_and_linux_only(self) -> None:
+        many = {f"veth{index}": (UP | RUNNING | MULTICAST, f"10.0.{index}.1") for index in range(mdns.MAX_INTERFACES + 8)}
+        listed = self.addresses(many)
+        self.assertEqual(len(listed), mdns.MAX_INTERFACES)
+        self.assertEqual(listed[0], "10.0.0.1")
+        self.assertEqual(self.addresses(many, platform="win32"), [])
+        with mock.patch.object(mdns, "fcntl", None):
+            self.assertEqual(mdns.multicast_interface_addresses(), [])
+
+    def test_this_host_lists_only_usable_addresses(self) -> None:
+        for address in mdns.multicast_interface_addresses():
+            parsed = ipaddress.IPv4Address(address)
+            self.assertFalse(parsed.is_loopback or parsed.is_unspecified, address)
 
 
 class StubResolver:
