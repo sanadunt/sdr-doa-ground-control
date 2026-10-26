@@ -862,12 +862,19 @@ Belum ada di `v2.0.0`: kartu **Akses LAN** di Konfigurasi dan `GET /api/lan-acce
 Listener kedua di proses console yang sama, mati secara default. Pengaturannya blok `lan_access` di `console.json` (`enabled`, `port`, `bind`, `allowed_clients`). Port console tetap hanya `127.0.0.1`. Listener LAN:
 
 - hanya menerima alamat klien di `allowed_clients`; klien lain langsung mendapat `403` tanpa isi (permintaannya tidak dibaca), dan log console mencatat `LAN view refused <ip>: not in lan_access.allowed_clients ...` paling banyak sekali per menit per alamat;
-- hanya `GET` dan `HEAD` untuk UI dan API baca-saja (`/api/health`, `/api/capabilities`, `/api/snapshot`, `/api/console-config`, `/api/mqtt`, `/api/mqtt/rdf-node`, `/api/preferences`, `/api/branding`, `/api/tiles/...`, `/api/admin/status`). Selain itu `403` atau `405` dengan `{"code": "LAN_READ_ONLY", ...}`: login admin, Kontrol, Konfigurasi, preferensi, Receiver (`/receiver/`) dan Rekaman (`/api/receiver/*`) tidak bisa dari LAN, dan cookie admin tidak pernah dipakai;
+- hanya `GET` dan `HEAD` untuk UI dan API baca-saja (`/api/health`, `/api/capabilities`, `/api/snapshot`, `/api/console-config`, `/api/mqtt`, `/api/mqtt/rdf-node`, `/api/preferences`, `/api/branding`, `/api/tiles/...`, `/api/admin/status`, `/api/mirror/receiver`). Selain itu `403` atau `405` dengan `{"code": "LAN_READ_ONLY", ...}`: login admin, Kontrol, Konfigurasi, preferensi, Receiver (`/receiver/`) dan Rekaman (`/api/receiver/*`) tidak bisa dari LAN, dan cookie admin tidak pernah dipakai;
 - menolak `Host` yang bukan alamat IP, nama host komputer ini, atau `<nama host>.local` (nama `.local` lain ditolak), dan permintaan `Sec-Fetch-Site: cross-site` (`403 ORIGIN_REJECTED`);
 - menjalankan paling banyak 32 permintaan sekaligus (selebihnya `503` tanpa isi, log `LAN view busy: ...` sekali per menit), dan tiap permintaan harus terkirim dalam 10 detik;
 - tidak terbuka selama kata sandi admin masih `123456` atau login admin mati. Saat start, pengaturan yang menyala dibiarkan tertutup dengan alasan di log (`warning: lan_access is enabled but the LAN view stays closed: ...`), di `/api/health` dan di `/api/capabilities`.
 
-Di tablet, top bar menampilkan chip **LIHAT SAJA** (EN: **VIEW ONLY**); Kontrol, buka kunci admin dan Simpan di Konfigurasi tidak ada. Receiver dan panel Spektrum menampilkan "Receiver berjalan di groundstation." karena RadioSpectrum terpasang di USB groundstation. Pilihan tampilan di tablet (tema, bahasa, panel) disimpan di browser tablet saja.
+Di tablet, top bar menampilkan chip **LIHAT SAJA** (EN: **VIEW ONLY**); Kontrol, buka kunci admin dan Simpan di Konfigurasi tidak ada. Pilihan tampilan di tablet (tema, bahasa, panel) disimpan di browser tablet saja.
+
+Receiver di tablet adalah **mirror** dari Receiver groundstation (kontrak: `docs/RECEIVER_MIRROR.md`). RadioSpectrum tetap terpasang di USB groundstation dan hanya halaman console di groundstation yang membukanya. Selama mode LAN terbuka, halaman itu mengirim status Receiver dan frame spektrum ke `POST /api/mirror/receiver` (hanya dari loopback, disimpan di memori saja), dan tablet membacanya lewat `GET /api/mirror/receiver`:
+
+- Panel Spektrum di tablet menampilkan tag `MIRROR`, umur frame, spektrum dan waterfall; tombol RX/Spektrum, Dengar dan Mulai terlihat tetapi nonaktif, dan tidak ada audio. Rute Receiver menampilkan spektrum yang sama dan status Receiver.
+- Chip `STALE`: RX berjalan tetapi frame terakhir lebih tua dari 3 detik. Chip **SUMBER PUTUS** (EN: **SOURCE LOST**): groundstation tidak mengirim apa pun selama 10 detik, atau belum pernah.
+- Mirror hanya mengalir selama halaman console groundstation **memasang Receiver** (rute Receiver pernah dibuka, atau Mulai di panel Spektrum) dan **terlihat** di layar. Halaman yang tersembunyi atau diminimalkan berhenti mengirim frame (tablet: `STALE`), dan tab yang lama tersembunyi bisa berhenti mengirim sama sekali (tablet: **SUMBER PUTUS**). Biarkan halaman console groundstation terbuka di depan.
+- Kontrol Receiver dari tablet belum ada (fase 3 issue #15, menunggu keputusan HTTPS).
 
 **Menyalakan** (oleh manusia, di browser groundstation, setelah A4/B3 memasang kata sandi admin sendiri):
 
@@ -892,9 +899,10 @@ Docker (Jalur A) memakai `network_mode: host`, jadi listener LAN langsung ada di
 curl -s --noproxy '*' http://127.0.0.1:8787/api/health; echo
 curl -s --noproxy '*' http://127.0.0.1:8787/api/lan-access; echo
 ss -ltn 'sport = :8788'
+curl -s --noproxy '*' http://127.0.0.1:8787/api/mirror/receiver | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["ok"], d["source_age_ms"], d["frame_age_ms"])'
 ```
 
-**Hasil**: health berisi `"lan_access": {"enabled": true, "reason": null, "state": "open"}`. `lan-access` berisi `"config"` dengan pengaturan yang disimpan dan `"status"` dengan `"state": "open"` dan `"address": "0.0.0.0:8788"`. `ss`: satu baris `LISTEN` di `0.0.0.0:8788` (atau alamat bind yang dipilih). 8.1 langkah 2 tetap: port console hanya `127.0.0.1`.
+**Hasil**: health berisi `"lan_access": {"enabled": true, "reason": null, "state": "open"}`. `lan-access` berisi `"config"` dengan pengaturan yang disimpan dan `"status"` dengan `"state": "open"` dan `"address": "0.0.0.0:8788"`. `ss`: satu baris `LISTEN` di `0.0.0.0:8788` (atau alamat bind yang dipilih). 8.1 langkah 2 tetap: port console hanya `127.0.0.1`. Mirror: `True` dengan umur sumber di bawah `10000` selama halaman console groundstation memasang Receiver dan terlihat (umur frame di bawah `3000` selama RX berjalan); `True None None` bila Receiver belum dibuka di groundstation, dan itu bukan kesalahan.
 
 **Verifikasi dari komputer lain di LAN** yang alamatnya diizinkan (`H` = alamat LAN host console **(contoh)**):
 
@@ -904,10 +912,12 @@ curl -s --noproxy '*' "http://$H:8788/api/health"; echo
 curl -s --noproxy '*' "http://$H:8788/api/capabilities" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["access"], d["read_only"], d["admin_enabled"])'
 curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' "http://$H:8788/api/receiver/settings"
 curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' -X POST -d '{}' "http://$H:8788/api/admin/login"
+curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' "http://$H:8788/api/mirror/receiver"
+curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' -X POST -d '{}' "http://$H:8788/api/mirror/receiver"
 curl -s --noproxy '*' --max-time 3 -o /dev/null "http://$H:8787/api/health"; echo "rc=$?"
 ```
 
-**Hasil**: `{"lan_access": ..., "ok": true, ...}`; `lan-view True False`; `403`; `405`; `rc=7` (port console tertutup dari LAN). Dari komputer yang **tidak** diizinkan, `curl -s -o /dev/null -w '%{http_code}\n' "http://$H:8788/"` mencetak `403`, dan log console mencatat alamatnya.
+**Hasil**: `{"lan_access": ..., "ok": true, ...}`; `lan-view True False`; `403`; `405`; `200`; `405` (mirror hanya dibaca dari LAN); `rc=7` (port console tertutup dari LAN). Dari komputer yang **tidak** diizinkan, `curl -s -o /dev/null -w '%{http_code}\n' "http://$H:8788/"` mencetak `403`, dan log console mencatat alamatnya.
 
 **Mematikan**: kartu **Akses LAN** → matikan **Lihat dari LAN** → **Simpan**. Chip `CLOSED`, `ss -ltn 'sport = :8788'` kosong. Tutup lagi port firewall-nya.
 
@@ -1259,6 +1269,8 @@ Satu blok singkat berisi:
 | Tablet mendapat `403` tanpa isi; log `LAN view refused <ip>: ...` | Alamat tablet tidak ada di Klien yang diizinkan | Tambahkan alamat atau jaringannya di kartu Akses LAN (keputusan manusia). |
 | Tablet mendapat `403` `ORIGIN_REJECTED` | Dibuka lewat nama DNS biasa, proxy, atau nama `.local` yang bukan `<nama host>.local` (misalnya `<nama host>-2.local` setelah avahi mengganti nama) | Buka `http://<IP LAN>:8788/`. |
 | Tablet kadang mendapat `503` tanpa isi; log `LAN view busy: 32 requests open ...` | 32 permintaan LAN berjalan sekaligus (banyak tablet atau tab) | Tutup tab yang tidak dipakai; console menjawab lagi begitu permintaan selesai. |
+| Panel Spektrum atau rute Receiver di tablet menampilkan **SUMBER PUTUS** (`SOURCE LOST`) | Tidak ada post ke `/api/mirror/receiver` selama 10 detik: halaman console groundstation belum memasang Receiver, sudah ditutup atau dimuat ulang, atau lama tersembunyi; mode LAN baru dinyalakan (halaman groundstation memeriksanya tiap 10 detik) | Di groundstation buka console di `http://127.0.0.1:8787/`, buka rute Receiver sekali (atau Mulai di panel Spektrum), biarkan halaman di depan. Periksa dengan `curl` mirror di 6.2. |
+| Tablet menampilkan `STALE` padahal RX berjalan | Halaman console groundstation tersembunyi atau diminimalkan (frame hanya dikirim selama halaman terlihat) | Tampilkan lagi halaman console di groundstation. |
 | `no systemd user session here, so the console will not start at boot` | Installer tidak dijalankan di sesi login | Login sebagai user itu (SSH), ulangi B2. |
 | Console native tidak jalan setelah reboot | Lingering mati | `loginctl show-user $USER -p Linger`; `sudo loginctl enable-linger $USER`. |
 | `sdr-doa-console update ...` mencetak teks bantuan tanpa baris `update` dan keluar 64 | Instalasi lama tanpa updater | 5.6 E2. |
