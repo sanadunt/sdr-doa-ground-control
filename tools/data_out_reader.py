@@ -26,9 +26,12 @@ collection per base URL and answers from it:
 needs a new Data Out read. Each answer carries the reuse facts in its
 ``collection`` block (``id``, ``collected_at_ms``, ``age_ms``, ``shared``,
 ``settings_reused``, ``settings_age_ms``), so the browser can age the data
-from when the node was read rather than from when the answer arrived, and the
+from when the node was read rather than from when the answer arrived, the
 saved interval the window comes from (``refresh_seconds``), so a page that
-loaded another interval polls at the console's and re-reads its config.
+loaded another interval polls at the console's and re-reads its config, and
+the console's Data Out URL (``console_base_url``), so a page that loaded
+another URL (another page saved a new one) re-reads its config too instead of
+keeping a second read of the old target.
 """
 
 from __future__ import annotations
@@ -107,6 +110,10 @@ class _Collection:
         return isinstance(collection, dict) and collection.get("settings_reused") is True
 
 
+def _console_url(value: Any) -> Optional[str]:
+    return value.rstrip("/") if isinstance(value, str) and value else None
+
+
 class _Target:
     """The state kept for one base URL."""
 
@@ -125,10 +132,12 @@ class DataOutReader:
         wait_timeout_s: float,
         clock: Callable[[], float] = time.monotonic,
         wall_ms: Callable[[], int] = lambda: int(time.time() * 1000),
+        console_base_url: Callable[[], Any] = lambda: None,
     ) -> None:
         """``collect(base_url, fresh_settings)`` runs one collection."""
         self._collect = collect
         self._refresh_seconds = refresh_seconds
+        self._console_base_url = console_base_url
         self._wait_timeout_s = float(wait_timeout_s)
         self.clock = clock
         self.wall_ms = wall_ms
@@ -241,6 +250,9 @@ class DataOutReader:
             # another interval (it loaded the config before another page
             # changed it) follows the console's.
             "refresh_seconds": saved_refresh_seconds(self._refresh_seconds()),
+            # The console's Data Out URL now: a page still reading the URL it
+            # loaded before another page saved a new one re-reads the config.
+            "console_base_url": _console_url(self._console_base_url()),
         })
         settings_age = block.get("settings_age_ms")
         if isinstance(settings_age, int) and not isinstance(settings_age, bool):

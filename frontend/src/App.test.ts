@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CONFIG_RETRY_DELAYS_MS, configResyncFor, displayFresh, inFlightReadCovers, nextPollDelayMs, pollDelayAfterReadMs, readWithRetry, savedConfigChangesTarget, startAutomaticReads } from './App';
+import { CONFIG_RETRY_DELAYS_MS, configChangesReads, configResyncFor, displayFresh, inFlightReadCovers, nextPollDelayMs, pollDelayAfterReadMs, readErrorRefusesUrl, readWithRetry, refusalResyncFor, savedConfigChangesTarget, startAutomaticReads } from './App';
 import type { PollAnswer } from './App';
+import { ApiError } from './api';
 import { DEFAULT_CONSOLE_CONFIG } from './lib/telemetry';
 import { snapshotReadAtMonotonic } from './lib/snapshotRead';
 import type { TelemetrySnapshot } from './types';
@@ -154,15 +155,47 @@ describe('automatic Data Out reads', () => {
   // change left its select and its poll on the old value.
   it('re-read the config once per shared read that reports another interval', () => {
     const answer = (collection: Record<string, unknown>) => ({ collection } as TelemetrySnapshot);
-    expect(configResyncFor(answer({ id: '0badc0de-4', refresh_seconds: 30 }), 2, null)).toBe('0badc0de-4');
-    expect(configResyncFor(answer({ id: '0badc0de-4', refresh_seconds: 30 }), 2, '0badc0de-4')).toBeNull();
-    expect(configResyncFor(answer({ id: '0badc0de-5', refresh_seconds: 30 }), 2, '0badc0de-4')).toBe('0badc0de-5');
-    expect(configResyncFor(answer({ id: '0badc0de-4', refresh_seconds: 0 }), 2, null)).toBe('0badc0de-4');
-    expect(configResyncFor(answer({ id: '0badc0de-4', refresh_seconds: 2 }), 2, null)).toBeNull();
+    const page = { base_url: 'http://doasdr.local:8081', refresh_seconds: 2 };
+    expect(configResyncFor(answer({ id: '0badc0de-4', refresh_seconds: 30 }), page, null)).toBe('0badc0de-4');
+    expect(configResyncFor(answer({ id: '0badc0de-4', refresh_seconds: 30 }), page, '0badc0de-4')).toBeNull();
+    expect(configResyncFor(answer({ id: '0badc0de-5', refresh_seconds: 30 }), page, '0badc0de-4')).toBe('0badc0de-5');
+    expect(configResyncFor(answer({ id: '0badc0de-4', refresh_seconds: 0 }), page, null)).toBe('0badc0de-4');
+    expect(configResyncFor(answer({ id: '0badc0de-4', refresh_seconds: 2 }), page, null)).toBeNull();
     // An older console, a malformed answer or no answer: nothing to compare.
-    expect(configResyncFor(answer({ id: '0badc0de-4' }), 2, null)).toBeNull();
-    expect(configResyncFor(answer({ refresh_seconds: 30 }), 2, null)).toBeNull();
-    expect(configResyncFor(null, 2, null)).toBeNull();
+    expect(configResyncFor(answer({ id: '0badc0de-4' }), page, null)).toBeNull();
+    expect(configResyncFor(answer({ refresh_seconds: 30 }), page, null)).toBeNull();
+    expect(configResyncFor(null, page, null)).toBeNull();
+  });
+
+  // #11/#13 review: a page kept the Data Out URL it loaded, so after another
+  // page moved Data Out it read the old target as a second shared read, or
+  // was refused for good once the old host left the list.
+  it('re-read the config when the console reads another Data Out URL or refuses the page\'s', () => {
+    const answer = (collection: Record<string, unknown>) => ({ collection } as TelemetrySnapshot);
+    const page = { base_url: 'http://doasdr.local:8081', refresh_seconds: 2 };
+    const moved = { id: '0badc0de-7', refresh_seconds: 2, console_base_url: 'http://192.168.100.100:8081' };
+    expect(configResyncFor(answer(moved), page, null)).toBe('0badc0de-7');
+    expect(configResyncFor(answer(moved), page, '0badc0de-7')).toBeNull();
+    expect(configResyncFor(answer({ ...moved, console_base_url: 'http://doasdr.local:8081/' }), page, null)).toBeNull();
+    expect(configResyncFor(answer({ ...moved, console_base_url: 'http://doasdr.local:8081' }), { ...page, base_url: 'http://doasdr.local:8081/' }, null)).toBeNull();
+    for (const bad of ['', 8081, null]) {
+      expect(configResyncFor(answer({ ...moved, console_base_url: bad }), page, null)).toBeNull();
+    }
+    // A refused URL: once per refusal run, and only while the page still uses that URL.
+    const refused = new ApiError('not allowed', 400, 'DATA_OUT_URL_NOT_ALLOWED');
+    expect(readErrorRefusesUrl(refused)).toBe(true);
+    expect(readErrorRefusesUrl(new ApiError('bad gateway', 502, 'COLLECTION_FAILED'))).toBe(false);
+    expect(readErrorRefusesUrl(new Error('DATA_OUT_URL_NOT_ALLOWED'))).toBe(false);
+    const refusal = { baseUrl: 'http://doasdr.local:8081', run: 3 };
+    expect(refusalResyncFor(refusal, page, null)).toBe('refused-3');
+    expect(refusalResyncFor(refusal, page, 'refused-3')).toBeNull();
+    expect(refusalResyncFor({ ...refusal, run: 4 }, page, 'refused-3')).toBe('refused-4');
+    expect(refusalResyncFor(refusal, { ...page, base_url: 'http://192.168.100.100:8081' }, null)).toBeNull();
+    expect(refusalResyncFor(null, page, null)).toBeNull();
+    // The re-read config is applied only when it moves the reads.
+    expect(configChangesReads(page, { ...page, base_url: 'http://192.168.100.100:8081' })).toBe(true);
+    expect(configChangesReads(page, { ...page, refresh_seconds: 5 })).toBe(true);
+    expect(configChangesReads(page, { ...page, base_url: 'http://doasdr.local:8081/' })).toBe(false);
   });
 
   it('share a read in flight unless the new one asks for more', () => {

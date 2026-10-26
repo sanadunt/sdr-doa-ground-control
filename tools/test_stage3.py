@@ -950,6 +950,42 @@ process.stdout.write(JSON.stringify({ expiry, calls, afterManual, consoleSeconds
     assert out["afterManual"] == 0 and out["consoleSeconds"] == 5, out
 
 
+def test_legacy_ui_follows_the_console_data_out_url() -> None:
+    """#11/#13 review: a legacy page on the old URL follows the URL the console reads."""
+    html = ground_console.HTML
+    assert "followConsoleInterval(data); followConsoleUrl(data.collection?.console_base_url); }" in html
+    assert "if(data.code==='DATA_OUT_URL_NOT_ALLOWED') followSavedUrl();" in html
+    node = shutil.which("node")
+    if node is None:
+        print("SKIP test_legacy_ui_follows_the_console_data_out_url (node part): node not found")
+        return
+    start = html.index("function followConsoleUrl(")
+    script = html[start:html.index("\n", start)] + r"""
+const reads = [];
+const fields = { 'data-url': { value: '' }, 'source-url': { textContent: '' } };
+const $ = (id) => fields[id];
+const state = { dataUrl: 'http://doasdr.local:8081', collectionId: '0badc0de-4' };
+function refresh() { reads.push(state.dataUrl); }
+function setTimeout(fn) { fn(); }
+const results = [
+  followConsoleUrl('http://doasdr.local:8081'),
+  followConsoleUrl('http://doasdr.local:8081/'),
+  followConsoleUrl(undefined), followConsoleUrl(''), followConsoleUrl(8081),
+  followConsoleUrl('http://192.168.100.100:8081/'),
+  followConsoleUrl('http://192.168.100.100:8081'),
+];
+process.stdout.write(JSON.stringify({ results, reads, state, fields }));
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=20, check=True)
+    out = json.loads(result.stdout)
+    # Only another URL switches the page, once, with one read of the new URL.
+    assert out["results"] == [False, False, False, False, False, True, False], out
+    assert out["reads"] == ["http://192.168.100.100:8081"], out
+    assert out["state"] == {"dataUrl": "http://192.168.100.100:8081", "collectionId": None}, out
+    assert out["fields"]["data-url"]["value"] == "http://192.168.100.100:8081", out
+    assert out["fields"]["source-url"]["textContent"] == "http://192.168.100.100:8081", out
+
+
 def test_legacy_ui_reads_cleared_mqtt_entries_and_new_gate_reasons() -> None:
     """A retained clear (valid:false, cleared:true) is CLEARED, not INVALID, on the legacy page."""
     html = ground_console.HTML

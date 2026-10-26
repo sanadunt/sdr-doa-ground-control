@@ -119,6 +119,8 @@ export interface CollectionInfo {
   settings_age_ms?: number | null;
   /** The console's saved refresh interval when the answer was sent; it sets how long one read is shared. */
   refresh_seconds?: number | null;
+  /** The console's Data Out URL when the answer was sent; a page on another URL re-reads the config. */
+  console_base_url?: string | null;
   /** How the Data Out host became an address: literal (IP in the URL), system, mdns, proxy (no address), or null. */
   host_resolution?: { host?: string | null; method?: string | null; address?: string | null };
 }

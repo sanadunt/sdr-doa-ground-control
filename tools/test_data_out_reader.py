@@ -96,8 +96,11 @@ class FakeCollect:
 def make_reader(refresh_seconds: Any = 2, duration: float = 0.0) -> Tuple[DataOutReader, FakeClock, FakeCollect, Dict[str, Any]]:
     clock = FakeClock()
     fake = FakeCollect(clock, duration)
-    config: Dict[str, Any] = {"refresh_seconds": refresh_seconds}
-    reader = DataOutReader(fake, lambda: config["refresh_seconds"], wait_timeout_s=5.0, clock=clock, wall_ms=lambda: 9_000_000)
+    config: Dict[str, Any] = {"refresh_seconds": refresh_seconds, "base_url": BASE_URL}
+    reader = DataOutReader(
+        fake, lambda: config["refresh_seconds"], wait_timeout_s=5.0, clock=clock, wall_ms=lambda: 9_000_000,
+        console_base_url=lambda: config["base_url"],
+    )
     return reader, clock, fake, config
 
 
@@ -217,6 +220,21 @@ class SharedReadTests(unittest.TestCase):
         self.assertEqual(dor.saved_refresh_seconds(0), 0)
         for bad in (None, "5", True, 2.5, -1, float("nan")):
             self.assertIsNone(dor.saved_refresh_seconds(bad), bad)
+
+    def test_answers_report_the_console_url_now(self) -> None:
+        reader, clock, _fake, config = make_reader(refresh_seconds=2)
+        self.assertEqual(reader.snapshot(BASE_URL)["collection"]["console_base_url"], BASE_URL)
+        # Another page moves Data Out: a page still reading the old URL is told.
+        config["base_url"] = "http://192.168.100.100:8081/"
+        clock.advance(0.5)
+        self.assertEqual(reader.snapshot(BASE_URL)["collection"]["console_base_url"], "http://192.168.100.100:8081")
+        for bad in (None, "", 8081):
+            config["base_url"] = bad
+            clock.advance(0.1)
+            self.assertIsNone(reader.snapshot(BASE_URL)["collection"]["console_base_url"], bad)
+        # A reader without the callable reports none.
+        plain = DataOutReader(lambda _url, _fresh: {"collection": {}}, lambda: 2, wait_timeout_s=1.0)
+        self.assertIsNone(plain.snapshot(BASE_URL)["collection"]["console_base_url"])
 
     def test_targets_are_kept_apart(self) -> None:
         reader, _clock, fake, _config = make_reader()
@@ -499,9 +517,11 @@ class SnapshotHttpTests(unittest.TestCase):
         server.data_out.clock = clock
         first = self.get(port)
         collection = first["collection"]
-        for key in ("id", "collected_at_ms", "age_ms", "shared", "settings_reused", "settings_age_ms", "elapsed_ms", "budget_ms", "refresh_seconds"):
+        for key in ("id", "collected_at_ms", "age_ms", "shared", "settings_reused", "settings_age_ms", "elapsed_ms", "budget_ms",
+                    "refresh_seconds", "console_base_url"):
             self.assertIn(key, collection)
         self.assertEqual(collection["refresh_seconds"], 30)
+        self.assertEqual(collection["console_base_url"], BASE_URL)
         self.assertEqual((collection["shared"], collection["settings_reused"]), (False, False))
         self.assertIsInstance(first["settings"]["read_at_ms"], int)
         # Inside the window the same collection is shared; a bad seen is ignored.
@@ -526,6 +546,17 @@ class SnapshotHttpTests(unittest.TestCase):
         self.get(port, "&refresh=1&fresh_settings=1")
         self.assertEqual(self.node.gets[collector.PATH_SETTINGS], 2)
         self.assertEqual(self.node.gets[collector.PATH_STATUS], 3)
+
+    def test_a_page_on_the_old_url_learns_the_saved_one(self) -> None:
+        # #11/#13 review: a page loaded before another page moved Data Out kept
+        # its URL; the answer now names the console's, so the page re-reads
+        # its config instead of keeping a second read of the old target.
+        server, port = self.start_console(refresh_seconds=2)
+        config = server.get_config()
+        server.update_config({**config, "base_url": "http://localhost:8081"})
+        old = self.get(port)
+        self.assertEqual(old["collector"]["base_url"], BASE_URL)
+        self.assertEqual(old["collection"]["console_base_url"], "http://localhost:8081")
 
 
 if __name__ == "__main__":

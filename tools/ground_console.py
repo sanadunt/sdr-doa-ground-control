@@ -2148,13 +2148,15 @@ function localExpiryMs(snapshot) {
 // How long before the answer its shared Data Out read completed, as the React console bounds it.
 function servedAgeMs(snapshot) { const served=Number(snapshot?.collection?.age_ms); return Number.isFinite(served)&&served>0?Math.min(served,120000):0; }
 // A running auto-refresh follows the console's saved interval, which every answer reports, so this page polls when the console reads Data Out.
+function followConsoleUrl(url) { if(typeof url!=='string'||!url||url.length>512) return false; url=url.replace(/\/+$/,''); if(url===state.dataUrl) return false; state.dataUrl=url; state.collectionId=null; $('data-url').value=url; $('source-url').textContent=url; setTimeout(()=>refresh(),0); return true; }
+async function followSavedUrl() { try { const r=await fetch('/api/console-config',{cache:'no-store'}); if(r.ok) followConsoleUrl((await r.json())?.base_url); } catch(e) {} }
 function followConsoleInterval(snapshot) { const seconds=snapshot?.collection?.refresh_seconds; if(!Number.isInteger(seconds)||seconds<0) return; state.consoleSeconds=seconds; if(state.autoTimer&&seconds>0&&seconds!==state.autoSeconds) setAuto(seconds,false); }
 function scheduleLocalExpiry(snapshot) { if(state.expiryTimer){ clearTimeout(state.expiryTimer); state.expiryTimer=null; } const remaining=localExpiryMs(snapshot); if(remaining<=0) return; state.expiryTimer=setTimeout(()=>{ state.expiryTimer=null; if(state.snapshot!==snapshot) return; setSnapshotUnavailable('local freshness window expired; awaiting a new Data Out read'); setReadStatus('Data expired locally · awaiting a new read','bad'); },remaining); }
 async function refresh(options) {
   const auto=options?.auto===true; const manual=options?.manual===true; if(auto&&state.refreshController) return;
   const sequence=++state.refreshSequence; if(state.refreshController) state.refreshController.abort(); const controller=typeof AbortController==='function'?new AbortController():null; state.refreshController=controller; const button=$('refresh'); button.disabled=true; setReadStatus('Reading Data Out…');
   let timedOut=false; const timer=controller?setTimeout(()=>{ timedOut=true; controller.abort(); },REQUEST_TIMEOUT_MS):null;
-  try { const url='/api/snapshot?base_url='+encodeURIComponent(state.dataUrl)+(manual?'&refresh=1':'')+(state.collectionId?'&seen='+encodeURIComponent(state.collectionId):''); const init={cache:'no-store'}; if(controller) init.signal=controller.signal; const response=await fetch(url,init); const data=await response.json(); if(sequence!==state.refreshSequence) return; if(!response.ok) throw new Error(data.error||'snapshot failed'); const id=data.collection?.id; state.collectionId=typeof id==='string'&&/^[0-9a-f]{8}-[0-9]{1,12}$/.test(id)?id:null; render(data); scheduleLocalExpiry(data); followConsoleInterval(data); }
+  try { const url='/api/snapshot?base_url='+encodeURIComponent(state.dataUrl)+(manual?'&refresh=1':'')+(state.collectionId?'&seen='+encodeURIComponent(state.collectionId):''); const init={cache:'no-store'}; if(controller) init.signal=controller.signal; const response=await fetch(url,init); const data=await response.json(); if(sequence!==state.refreshSequence) return; if(!response.ok){ if(data.code==='DATA_OUT_URL_NOT_ALLOWED') followSavedUrl(); throw new Error(data.error||'snapshot failed'); } const id=data.collection?.id; state.collectionId=typeof id==='string'&&/^[0-9a-f]{8}-[0-9]{1,12}$/.test(id)?id:null; render(data); scheduleLocalExpiry(data); followConsoleInterval(data); followConsoleUrl(data.collection?.console_base_url); }
   catch(error) { if(sequence!==state.refreshSequence||(error?.name==='AbortError'&&!timedOut)) return; const message=timedOut?`request timed out after ${REQUEST_TIMEOUT_MS/1000} s`:(error?.message||'snapshot failed'); setSnapshotUnavailable(message); setReadStatus('Read error: '+message,'bad'); }
   finally { if(timer) clearTimeout(timer); if(sequence===state.refreshSequence){ button.disabled=false; if(state.refreshController===controller) state.refreshController=null; } }
   if(sequence===state.refreshSequence) refreshMqtt();
@@ -4267,6 +4269,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
             self._collect_data_out,
             refresh_seconds=lambda: self._config.get("refresh_seconds"),
             wait_timeout_s=SNAPSHOT_TOTAL_BUDGET_S + SNAPSHOT_WAIT_GRACE_S,
+            console_base_url=lambda: self._config.get("base_url"),
         )
         self.receiver_store = ReceiverRecordStore(
             receiver_data_dir if receiver_data_dir is not None else DEFAULT_DATA_DIR,

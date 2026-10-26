@@ -7,6 +7,7 @@ import {
   settingsAgeMs,
   settingsReadAtMs,
   snapshotCollectionId,
+  snapshotConsoleBaseUrl,
   snapshotConsoleRefreshSeconds,
   snapshotReadAtMonotonic,
   snapshotServedAgeMs,
@@ -50,6 +51,15 @@ describe('the time a shared Data Out read was taken (#13)', () => {
       expect(snapshotConsoleRefreshSeconds(shared({ refresh_seconds: seconds }))).toBeNull();
     }
     expect(snapshotConsoleRefreshSeconds(null)).toBeNull();
+  });
+
+  it('reads the console Data Out URL the answer reports', () => {
+    expect(snapshotConsoleBaseUrl(shared({ console_base_url: 'http://192.168.100.100:8081' }))).toBe('http://192.168.100.100:8081');
+    expect(snapshotConsoleBaseUrl(shared({ console_base_url: 'http://doasdr.local:8081/' }))).toBe('http://doasdr.local:8081');
+    for (const url of [undefined, null, '', 8081, true, 'x'.repeat(513)]) {
+      expect(snapshotConsoleBaseUrl(shared({ console_base_url: url }))).toBeNull();
+    }
+    expect(snapshotConsoleBaseUrl(null)).toBeNull();
   });
 
   it('echoes only an id the console issued', () => {

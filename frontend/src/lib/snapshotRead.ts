@@ -48,6 +48,16 @@ export function snapshotConsoleRefreshSeconds(snapshot: TelemetrySnapshot | null
   return typeof seconds === 'number' && Number.isInteger(seconds) && seconds >= 0 && seconds <= MAX_REFRESH_SECONDS ? seconds : null;
 }
 
+/**
+ * The console's Data Out URL when the answer was sent, without a trailing
+ * slash, or null. A page that loaded another URL (another page saved a new
+ * one) re-reads the console config instead of reading the old target.
+ */
+export function snapshotConsoleBaseUrl(snapshot: TelemetrySnapshot | null | undefined): string | null {
+  const url = record(snapshot?.collection)?.console_base_url;
+  return typeof url === 'string' && url.length > 0 && url.length <= 512 ? url.replace(/\/+$/, '') : null;
+}
+
 /** The shared read's id, sent back as `seen` so the next poll gets a new read. */
 export function snapshotCollectionId(snapshot: TelemetrySnapshot | null | undefined): string | null {
   const id = record(snapshot?.collection)?.id;

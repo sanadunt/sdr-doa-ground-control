@@ -1,6 +1,6 @@
 import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
-import { connectMqtt, getBranding, getCapabilities, getConsoleConfig, getMqtt, getSnapshot, updateConsoleConfig } from './api';
+import { ApiError, connectMqtt, getBranding, getCapabilities, getConsoleConfig, getMqtt, getSnapshot, updateConsoleConfig } from './api';
 import type { ConsoleCapabilities } from './api';
 import type { Branding, CompassConfig, ConsoleConfig, GpsConfig, MqttSnapshot, MqttTarget, TelemetrySnapshot } from './types';
 import { loadCompassConfig, loadGpsConfig, saveCompassConfig } from './lib/sourceConfigStorage';
@@ -34,7 +34,7 @@ import type { ReceiverMirrorFeed } from './lib/receiverMirrorFeed';
 import { startMirrorPublisher } from './lib/receiverMirrorPublisher';
 import { consoleAccess, pageHostname } from './lib/access';
 import { DEFAULT_SIMULATION, simulationSnapshot, randomizeSimulationSettings } from './lib/simulation';
-import { snapshotCollectionId, snapshotConsoleRefreshSeconds, snapshotReadAtMonotonic, snapshotServedAgeMs } from './lib/snapshotRead';
+import { snapshotCollectionId, snapshotConsoleBaseUrl, snapshotConsoleRefreshSeconds, snapshotReadAtMonotonic, snapshotServedAgeMs } from './lib/snapshotRead';
 
 // Overview is the landing route and stays in the entry chunk. The other pages
 // load on first visit so the initial bundle only carries what the operator sees.
@@ -285,16 +285,51 @@ export function startAutomaticReads(options: {
   };
 }
 
+/** The part of the console config the page's Data Out reads follow. */
+export type ReadConfig = Pick<ConsoleConfig, 'base_url' | 'refresh_seconds'>;
+
+function withoutTrailingSlash(url: string): string {
+  return url.replace(/\/+$/, '');
+}
+
 /**
- * The shared read whose answer shows that the console's saved interval is not
- * this page's (another page changed it), so the page re-reads the config;
- * null when it matches, is not reported, or was already re-read for that read.
+ * The shared read whose answer shows that the console's saved interval or
+ * Data Out URL is not this page's (another page changed it), so the page
+ * re-reads the config; null when both match or are not reported, or the
+ * config was already re-read for that read.
  */
-export function configResyncFor(snapshot: TelemetrySnapshot | null, pageRefreshSeconds: number, syncedFor: string | null): string | null {
-  const reported = snapshotConsoleRefreshSeconds(snapshot);
+export function configResyncFor(snapshot: TelemetrySnapshot | null, page: ReadConfig, syncedFor: string | null): string | null {
   const collectionId = snapshotCollectionId(snapshot);
-  if (reported === null || collectionId === null || reported === pageRefreshSeconds || collectionId === syncedFor) return null;
-  return collectionId;
+  if (collectionId === null || collectionId === syncedFor) return null;
+  const interval = snapshotConsoleRefreshSeconds(snapshot);
+  const url = snapshotConsoleBaseUrl(snapshot);
+  const intervalDiffers = interval !== null && interval !== page.refresh_seconds;
+  const urlDiffers = url !== null && url !== withoutTrailingSlash(page.base_url);
+  return intervalDiffers || urlDiffers ? collectionId : null;
+}
+
+/** A run of reads the console refused because its host list no longer has the page's Data Out URL. */
+export interface UrlRefusal {
+  baseUrl: string;
+  /** Counts refusal runs, so each run re-reads the config once. */
+  run: number;
+}
+
+/** The read error says the console no longer takes this page's Data Out URL (another page dropped its host). */
+export function readErrorRefusesUrl(error: unknown): boolean {
+  return error instanceof ApiError && error.code === 'DATA_OUT_URL_NOT_ALLOWED';
+}
+
+/** Key of the config re-read for a refusal of the page's current URL, or null when there is none or it was done. */
+export function refusalResyncFor(refusal: UrlRefusal | null, page: ReadConfig, syncedFor: string | null): string | null {
+  if (refusal === null || withoutTrailingSlash(refusal.baseUrl) !== withoutTrailingSlash(page.base_url)) return null;
+  const key = `refused-${refusal.run}`;
+  return key === syncedFor ? null : key;
+}
+
+/** A re-read config the page applies: it moves the reads to another URL or interval. */
+export function configChangesReads(current: ReadConfig, next: ReadConfig): boolean {
+  return withoutTrailingSlash(current.base_url) !== withoutTrailingSlash(next.base_url) || current.refresh_seconds !== next.refresh_seconds;
 }
 
 function isAbortError(error: unknown): boolean {
@@ -491,10 +526,13 @@ export default function App(): ReactElement {
   // arrival, served age and the console's interval for the poll schedule.
   const shownCollectionId = useRef<string | null>(null);
   const lastAnswer = useRef<PollAnswer | null>(null);
-  // Re-read of the saved config when an answer reports another interval:
-  // the request in flight and the shared read it was made for.
+  // Re-read of the saved config when an answer reports another interval or
+  // Data Out URL, or the console refused the page's URL: the request in
+  // flight and the shared read (or refusal run) it was made for.
   const configSyncController = useRef<AbortController | null>(null);
   const configSyncedFor = useRef<string | null>(null);
+  const [urlRefusal, setUrlRefusal] = useState<UrlRefusal | null>(null);
+  const urlRefusalRuns = useRef(0);
   const mqttController = useRef<AbortController | null>(null);
   const contentRef = useRef<HTMLElement | null>(null);
   const receiverRef = useRef<HTMLElement | null>(null);
@@ -605,8 +643,14 @@ export default function App(): ReactElement {
         setSnapshot(next);
         setReadAtMonotonic(snapshotReadAtMonotonic(next, arrived));
         setReadError(null);
+        setUrlRefusal(null);
       } catch (error: unknown) {
         if (!mountedRef.current || sequence !== refreshSequence.current || isAbortError(error)) return;
+        if (readErrorRefusesUrl(error)) {
+          setUrlRefusal((previous) => previous !== null && previous.baseUrl === targetBaseUrl
+            ? previous
+            : { baseUrl: targetBaseUrl, run: ++urlRefusalRuns.current });
+        }
         // Keep the previous evidence in place, but the display freshness stays
         // false while this error is shown so old data cannot look live. The
         // error stays until a read succeeds.
@@ -817,27 +861,34 @@ export default function App(): ReactElement {
       });
   }, [onConfigSaved]);
 
-  // Every answer reports the console's saved interval. When it is not this
-  // page's (another page changed it), the page re-reads the saved config,
-  // once per shared read, and applies it like a save made here, so the
-  // top-bar select and the poll follow the console's one Data Out read.
+  // Every answer reports the console's saved interval and Data Out URL. When
+  // one is not this page's (another page changed it), or the console refused
+  // the page's URL (another page dropped its host from the list), the page
+  // re-reads the saved config, once per shared read or refusal run, and
+  // applies it like a save made here, so the top-bar select, the poll and the
+  // URL follow the console's one Data Out read.
+  const readConfig = useMemo<ReadConfig>(
+    () => ({ base_url: config.base_url, refresh_seconds: config.refresh_seconds }),
+    [config.base_url, config.refresh_seconds],
+  );
   useEffect(() => {
     if (!configLoaded || refreshPending !== null || configSyncController.current !== null) return;
-    const collectionId = configResyncFor(snapshot, config.refresh_seconds, configSyncedFor.current);
-    if (collectionId === null) return;
-    configSyncedFor.current = collectionId;
+    const syncKey = configResyncFor(snapshot, readConfig, configSyncedFor.current)
+      ?? refusalResyncFor(urlRefusal, readConfig, configSyncedFor.current);
+    if (syncKey === null) return;
+    configSyncedFor.current = syncKey;
     const controller = new AbortController();
     configSyncController.current = controller;
     getConsoleConfig(controller.signal)
       .then((next) => {
-        if (controller.signal.aborted || !mountedRef.current || next.refresh_seconds === configRef.current.refresh_seconds) return;
+        if (controller.signal.aborted || !mountedRef.current || !configChangesReads(configRef.current, next)) return;
         void onConfigSaved(next);
       })
       .catch(() => undefined)
       .finally(() => {
         if (configSyncController.current === controller) configSyncController.current = null;
       });
-  }, [configLoaded, snapshot, config.refresh_seconds, refreshPending, onConfigSaved]);
+  }, [configLoaded, snapshot, readConfig, urlRefusal, refreshPending, onConfigSaved]);
   useEffect(() => () => configSyncController.current?.abort(), []);
 
   // Kontrol's "Cek ulang" and a command that became final: read Data Out now,
