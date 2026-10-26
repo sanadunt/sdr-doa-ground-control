@@ -333,7 +333,9 @@ class FetchedResource:
     elapsed_ms: Optional[int] = None
     attempts: int = 1
     # How the host became an address: "literal" (an IP address), "system"
-    # (the system resolver, address of the connected peer) or "mdns".
+    # (the system resolver, address of the connected peer), "mdns", or
+    # "proxy" (an environment proxy took the request and resolved the name;
+    # no address, since the peer is the proxy).
     resolved_via: Optional[str] = None
     resolved_address: Optional[str] = None
 
@@ -604,8 +606,9 @@ def fetch_resource(
     )
     host = (urllib.parse.urlsplit(safe_base).hostname or "").lower().rstrip(".")
     literal = _is_ip_literal(host)
+    direct = _goes_direct(request)
     mdns = mdns_resolver if (
-        mdns_resolver is not None and not literal and host.endswith(".local") and _goes_direct(request)
+        mdns_resolver is not None and not literal and host.endswith(".local") and direct
     ) else None
 
     def failure(
@@ -637,7 +640,9 @@ def fetch_resource(
             known: Optional[str] = pinned
         else:
             opener = urllib.request.build_opener(_NoRedirectHandler)
-            via = "literal" if literal else None
+            # None until a response names the peer; through a proxy the peer
+            # is the proxy, not the Data Out host.
+            via = "literal" if literal else (None if direct else "proxy")
             known = host if literal else None
         remaining = request_deadline - time.monotonic()
         if remaining <= 0:
@@ -1652,8 +1657,10 @@ def _host_resolution(base_url: str, resources: Iterable[FetchedResource]) -> Dic
 
     ``method`` is "literal" (the URL holds an IP address), "system" (the
     system resolver; ``address`` is the connected peer), "mdns" (the
-    one-shot mDNS fallback for a .local name) or None when no read got that
-    far. The first resource that knows it decides (status.json is read first).
+    one-shot mDNS fallback for a .local name), "proxy" (an environment proxy
+    took the request and resolved the name; ``address`` is None, because the
+    connected peer is the proxy) or None when no read got that far. The
+    first resource that knows it decides (status.json is read first).
     """
     try:
         host: Optional[str] = (urllib.parse.urlsplit(str(base_url)).hostname or "").lower().rstrip(".") or None

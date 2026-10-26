@@ -146,7 +146,7 @@ export interface CollectionView {
   deadlineExceeded: boolean;
   statusTransportFailed: boolean;
   pairReads: number | null;
-  /** Null for an IP address in the URL, or when no read reached the host. */
+  /** Null for an IP address in the URL, a read through a proxy, or when no read reached the host. */
   resolution: HostResolutionView | null;
 }
 

@@ -557,6 +557,25 @@ class DataOutStub(BaseHTTPRequestHandler):
         return None
 
 
+class ProxyStub(BaseHTTPRequestHandler):
+    """A forward proxy that answers status.json itself and 404 for the rest."""
+
+    requested: List[str] = []
+
+    def do_GET(self) -> None:  # noqa: N802
+        ProxyStub.requested.append(self.path)
+        found = self.path.endswith("/status.json")
+        body = b'{"ok": true}' if found else b"{}"
+        self.send_response(200 if found else 404)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args: Any) -> None:
+        return None
+
+
 def unresolvable(*args: Any, **kwargs: Any) -> Any:
     raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
 
@@ -644,6 +663,27 @@ class CollectorPathTests(unittest.TestCase):
             fetched = self.fetch(resolver)
         self.assertFalse(fetched.ok)
         self.assertEqual(resolver.resolve_calls, [], "the proxy resolves the name; no mDNS, no direct connect")
+
+    def test_through_a_proxy_no_address_is_recorded(self) -> None:
+        # The peer of a proxied request is the proxy, not the Data Out host.
+        proxy = ThreadingHTTPServer(("127.0.0.1", 0), ProxyStub)
+        thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(proxy.server_close)
+        self.addCleanup(proxy.shutdown)
+        ProxyStub.requested = []
+        resolver = StubResolver("10.9.9.9")
+        with mock.patch.dict(os.environ, {"http_proxy": f"http://127.0.0.1:{proxy.server_address[1]}", "no_proxy": ""}):
+            fetched = self.fetch(resolver)
+            missing = self.fetch(resolver, collector.PATH_CSV)
+            result = collector.collect("http://doasdr.local:8081", total_budget_s=3.0, mdns_resolver=resolver)
+        self.assertTrue(fetched.ok, fetched.error)
+        self.assertEqual((fetched.resolved_via, fetched.resolved_address), ("proxy", None))
+        self.assertEqual((missing.http_status, missing.resolved_via, missing.resolved_address), (404, "proxy", None))
+        self.assertEqual(result["collection"]["host_resolution"], {"host": "doasdr.local", "method": "proxy", "address": None})
+        self.assertIn("http://doasdr.local:8081/status.json", ProxyStub.requested)
+        self.assertEqual(resolver.resolve_calls, [])
 
     def test_the_pinned_request_keeps_every_rule(self) -> None:
         resolver = StubResolver("127.0.0.1")

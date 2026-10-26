@@ -1063,7 +1063,7 @@ Nama `.local` di Docker: resolver sistem container tidak bisa meresolusi mDNS (t
 ```sh
 curl -s --noproxy '*' --max-time 10 http://127.0.0.1:8787/api/snapshot | python3 -c 'import json,sys; d=json.load(sys.stdin); r=d["collection"]["host_resolution"]; print(r["method"], r["address"], d["resources"]["/status.json"].get("error"))'
 ```
-**Hasil**: `mdns <IP> None` (lewat fallback mDNS), `system <IP> None` (resolver sistem), atau `literal <IP> None` (base URL berisi IP). `None None doasdr.local could not be resolved (system and mDNS); use an IP address`: nama itu tidak teresolusi, juga lewat mDNS (node mati, beda segmen jaringan, atau multicast diblok). Minta manusia memilih IP Data Out, lalu ubah base URL (dan daftar host bila IP itu belum ada) di halaman Konfigurasi.
+**Hasil**: `mdns <IP> None` (lewat fallback mDNS), `system <IP> None` (resolver sistem), `literal <IP> None` (base URL berisi IP), atau `proxy None None` (dibaca lewat proxy lingkungan, jadi alamat node tidak diketahui console; agar dibaca langsung, isi `NO_PROXY`, 4.7). `None None doasdr.local could not be resolved (system and mDNS); use an IP address`: nama itu tidak teresolusi, juga lewat mDNS (node mati, beda segmen jaringan, atau multicast diblok). Minta manusia memilih IP Data Out, lalu ubah base URL (dan daftar host bila IP itu belum ada) di halaman Konfigurasi.
 
 ```sh
 # 7. tile (opsional, bila basemap dipakai)

@@ -112,6 +112,9 @@ describe('new collector fields', () => {
     expect(resolved({ host: 'doasdr.local', method: 'mdns', address: '192.168.100.100' })).toEqual({ method: 'mdns', address: '192.168.100.100' });
     expect(resolved({ host: 'rdf.local', method: 'system', address: 'fd00::1' })).toEqual({ method: 'system', address: 'fd00::1' });
     expect(resolved({ host: '127.0.0.1', method: 'literal', address: '127.0.0.1' })).toBeNull();
+    // Through an environment proxy the collector knows no Data Out address.
+    expect(resolved({ host: 'doasdr.local', method: 'proxy', address: null })).toBeNull();
+    expect(resolved({ host: 'doasdr.local', method: 'proxy', address: '10.0.0.3' })).toBeNull();
     expect(resolved({ host: 'doasdr.local', method: null, address: null })).toBeNull();
     expect(resolved({ method: 'mdns', address: '<script>' })).toBeNull();
     expect(resolved(undefined)).toBeNull();

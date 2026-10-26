@@ -102,7 +102,7 @@ export interface CollectionInfo {
   budget_ms?: number | null;
   deadline_exceeded?: boolean;
   status_transport_failed?: boolean;
-  /** How the Data Out host became an address: literal (IP in the URL), system, mdns, or null. */
+  /** How the Data Out host became an address: literal (IP in the URL), system, mdns, proxy (no address), or null. */
   host_resolution?: { host?: string | null; method?: string | null; address?: string | null };
 }
 
