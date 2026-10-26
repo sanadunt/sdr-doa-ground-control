@@ -149,6 +149,41 @@ describe('Configuration page', () => {
     expect(render({ config: { mqtt_host: '10.90.0.1' } })).toContain(translate('en', 'config.mqttNoCredentials'));
   });
 
+  it('edits the Data Out host list in the Connection card, keeping the URL host', () => {
+    for (const lang of ['en', 'id'] as const) {
+      const markup = render({ lang, config: { base_url: 'http://rdf.local:8081', data_out_hosts: ['rdf.local', '192.168.100.100', 'fd00::1'] } });
+      const card = markup.match(/<section id="connection-settings"[\s\S]*?<\/section>/)?.[0] ?? '';
+      expect(card).toContain(`>${translate(lang, 'config.dataOutHosts')}</span>`);
+      const pills = [...card.matchAll(/<li class="cfg-host"><span class="cfg-host-name">([^<]+)<\/span><button class="cfg-host-remove" type="button" aria-label="([^"]+)"( disabled="")?/g)];
+      expect(pills.map((pill) => pill[1])).toEqual(['rdf.local', '192.168.100.100', 'fd00::1']);
+      expect(pills.map((pill) => pill[2])).toEqual(['rdf.local', '192.168.100.100', 'fd00::1'].map((host) => translate(lang, 'config.dataOutHostRemove', { host })));
+      // The host of the URL in the field cannot be removed; the others can.
+      expect(pills.map((pill) => Boolean(pill[3]))).toEqual([true, false, false]);
+      // The URL suggestions follow the list, an IPv6 host in brackets.
+      expect(card).toContain('<option value="http://rdf.local:8081"></option><option value="http://192.168.100.100:8081"></option><option value="http://[fd00::1]:8081"></option>');
+      expect(card).toContain(`>${translate(lang, 'config.dataOutHostNew')}</span>`);
+      expect(card).toContain('placeholder="rdf.local · 192.168.1.20"');
+      expect(card).toMatch(new RegExp(`<button class="ov-button" type="button" disabled="">${translate(lang, 'config.dataOutHostAdd')}</button>`));
+      // Host editing never submits the card: only Save is a submit button.
+      expect(card.match(/type="submit"/g)).toHaveLength(1);
+      expect(card).not.toContain(' title=');
+    }
+  });
+
+  it('shows the default hosts for a server that reports no list', () => {
+    const card = render().match(/<section id="connection-settings"[\s\S]*?<\/section>/)?.[0] ?? '';
+    expect([...card.matchAll(/<span class="cfg-host-name">([^<]+)<\/span>/g)].map((match) => match[1])).toEqual(['doasdr.local', '192.168.100.100', '127.0.0.1', 'localhost']);
+  });
+
+  it('styles the host pills as 44 px targets with console tokens only', () => {
+    const css = readSource('./configuration.css');
+    const rules = css.slice(css.indexOf('.cfg-host-list'), css.indexOf('.cfg-host-add > .cfg-grow'));
+    expect(rules).toMatch(/\.cfg-host \{[^}]*height: 44px;/);
+    expect(rules).toMatch(/\.cfg-host-remove \{[^}]*width: 44px;/);
+    expect(rules).not.toMatch(/#[0-9a-f]{3,8}\b|rgb\(/i);
+    expect(css).toMatch(/\.cfg-form\.cfg-conn-form > \.cfg-actions, \.cfg-form\.cfg-conn-form > \.cfg-hosts \{ grid-column: 1 \/ -1; \}/);
+  });
+
   it('carries no help prose (no-helper-prose rule)', () => {
     for (const lang of ['en', 'id'] as const) {
       const markup = render({ lang, refreshSeconds: 2 });

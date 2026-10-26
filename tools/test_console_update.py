@@ -1212,7 +1212,8 @@ exec {real} "$@"
             first = subprocess.run(
                 [sh(), str(tree / "install.sh"), "--yes", "--prefix", str(app), f"--data-dir={data}", "--bin-dir", str(bin_dir),
                  "--port", str(port), "--no-service", "--no-desktop", "--password", "s3cret-value",
-                 "--base-url", "http://192.168.100.100:8081", "--mqtt-host", "10.90.0.1"],
+                 "--base-url", "http://192.168.100.100:8081", "--data-out-hosts", "rdf.local,192.168.100.100",
+                 "--mqtt-host", "10.90.0.1"],
                 capture_output=True, text=True, env=env, timeout=120,
             )
             self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
@@ -1224,8 +1225,11 @@ exec {real} "$@"
             self.assertNotIn("s3cret", text)
             self.assertNotIn("192.168", text)
             self.assertNotIn("10.90.0.1", text)
+            self.assertNotIn("rdf.local", text)
             self.assertTrue((app / "packaging/console/update_release.py").is_file())
-            self.assertIn("SDR_DOA_SEED_BASE_URL=http://192.168.100.100:8081", (data / "seed.env").read_text(encoding="utf-8"))
+            seeds = (data / "seed.env").read_text(encoding="utf-8")
+            self.assertIn("SDR_DOA_SEED_BASE_URL=http://192.168.100.100:8081", seeds)
+            self.assertIn("SDR_DOA_SEED_DATA_OUT_HOSTS=rdf.local,192.168.100.100", seeds)
             env_file = (data / ".env").read_text(encoding="utf-8")
             self.assertIn("s3cret-value", env_file)
             self.assertIn("sdr-doa-console auto-update on", first.stdout)

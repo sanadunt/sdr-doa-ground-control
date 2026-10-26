@@ -120,11 +120,16 @@ function DataOutCard({ snapshot }: { snapshot: TelemetrySnapshot | null }): JSX.
   const timing = collection && collection.elapsedMs !== null
     ? `${formatDuration(t, collection.elapsedMs)}${collection.budgetMs !== null ? ` / ${formatDuration(t, collection.budgetMs)}` : ''}`
     : null;
+  // The address the host name led to; "mDNS" marks the fallback for a .local name.
+  const resolved = collection?.resolution
+    ? `${collection.resolution.method === 'mdns' ? 'mDNS ' : ''}${collection.resolution.address}`
+    : null;
+  const meta = [resolved, timing].filter(Boolean).join(' · ');
   return (
     <Card
       title="Data Out"
       chip={<StatusChip code={http.state} title={baseUrl ?? undefined} />}
-      actions={timing ? <span className="pg-card-meta">{timing}</span> : null}
+      actions={meta ? <span className="pg-card-meta">{meta}</span> : null}
       flush
     >
       {collection?.deadlineExceeded || collection?.statusTransportFailed ? (

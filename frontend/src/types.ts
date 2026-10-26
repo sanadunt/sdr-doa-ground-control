@@ -119,6 +119,8 @@ export interface CollectionInfo {
   settings_age_ms?: number | null;
   /** The console's saved refresh interval when the answer was sent; it sets how long one read is shared. */
   refresh_seconds?: number | null;
+  /** How the Data Out host became an address: literal (IP in the URL), system, mdns, proxy (no address), or null. */
+  host_resolution?: { host?: string | null; method?: string | null; address?: string | null };
 }
 
 export interface ResourceInfo {
@@ -168,6 +170,8 @@ export interface ConsoleConfig {
   mqtt_transport?: MqttTransport;
   /** WebSocket path, used only with the websockets transport. */
   mqtt_ws_path?: string;
+  /** Hosts Data Out may be read from (port 8081); base_url's host is one of them. Absent from older servers. */
+  data_out_hosts?: string[];
   refresh_seconds: number;
 }
 

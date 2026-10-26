@@ -46,6 +46,7 @@ services:
       - SDR_DOA_ADMIN_PASSWORD
       # First start only: the console writes /data/console.json from these and
       # ignores them once that file exists. Change settings in the UI later.
+      - SDR_DOA_SEED_DATA_OUT_HOSTS
       - SDR_DOA_SEED_BASE_URL
       - SDR_DOA_SEED_MQTT_HOST
       - SDR_DOA_SEED_MQTT_PORT
