@@ -327,6 +327,10 @@ class FetchedResource:
     error_kind: Optional[str] = None
     elapsed_ms: Optional[int] = None
     attempts: int = 1
+    # How the host became an address: "literal" (an IP address), "system"
+    # (the system resolver, address of the connected peer) or "mdns".
+    resolved_via: Optional[str] = None
+    resolved_address: Optional[str] = None
 
     def metadata(self) -> Dict[str, Any]:
         result: Dict[str, Any] = {
@@ -486,20 +490,93 @@ def _validate_base_url(base_url: str, allowed_hosts: Iterable[str]) -> str:
     return check_data_out_url(base_url, allowed_hosts)
 
 
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """An HTTP connection to a fixed address; the URL and the Host header keep the name."""
+
+    def __init__(self, host: str, *args: Any, pinned_address: str, **kwargs: Any) -> None:
+        super().__init__(host, *args, **kwargs)
+
+        def connect_pinned(address: Tuple[str, int], timeout: Any, source_address: Any) -> socket.socket:
+            return socket.create_connection((pinned_address, address[1]), timeout, source_address)
+
+        self._create_connection = connect_pinned
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    """Replaces the opener's HTTP handler so the connect goes to an mDNS address."""
+
+    def __init__(self, address: str) -> None:
+        super().__init__()
+        self._address = address
+
+    def http_open(self, req: Any) -> Any:
+        return self.do_open(functools.partial(_PinnedHTTPConnection, pinned_address=self._address), req)
+
+
+class _HostNotResolved(Exception):
+    """The system resolver could not resolve a host that mDNS may answer."""
+
+
+def _is_ip_literal(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def _goes_direct(request: urllib.request.Request) -> bool:
+    """True when the opener's environment proxy does not take this request.
+
+    Through a proxy, the proxy resolves the name; mDNS is only for direct
+    connections, so the proxy behaviour stays exactly as it was.
+    """
+    if not urllib.request.getproxies().get(request.type):
+        return True
+    return bool(urllib.request.proxy_bypass(request.host))
+
+
+def _name_resolution_failed(exc: BaseException) -> bool:
+    reason: Any = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    return isinstance(reason, socket.gaierror)
+
+
+def _peer_address(response: Any) -> Optional[str]:
+    """Address of the connected peer of a response (or of an HTTPError's response)."""
+    for candidate in (response, getattr(response, "fp", None)):
+        sock = getattr(getattr(getattr(candidate, "fp", None), "raw", None), "_sock", None)
+        if sock is None:
+            continue
+        try:
+            return str(sock.getpeername()[0])
+        except (OSError, IndexError, TypeError):
+            return None
+    return None
+
+
 def fetch_resource(
     base_url: str,
     path: str,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
     allowed_hosts: Optional[Iterable[str]] = None,
+    mdns_resolver: Any = None,
 ) -> FetchedResource:
     """Fetch one known resource with a bounded read-only GET.
 
     ``timeout_seconds`` bounds every socket operation, and the body read as a
     whole, so a server that trickles body bytes cannot hold the read open.
     The status line and headers are bounded per socket operation only.
+
     ``allowed_hosts`` is the Data Out host list (default: the four default
-    hosts); the port is always 8081.
+    hosts); the port is always 8081. ``mdns_resolver`` (an
+    ``mdns_resolver.MdnsResolver``, which the console passes) answers a
+    ``.local`` host that the system resolver cannot, for a request that goes
+    to Data Out directly rather than through a proxy. It is asked only after
+    the system resolver failed for the host; while it caches an address for
+    the host, the request connects there at once. Either way the URL and the
+    Host header keep the name, and every other rule stays: no redirects, the
+    size and time bounds, the path allowlist.
     """
     allowed = DEFAULT_DATA_OUT_HOSTS if allowed_hosts is None else allowed_hosts
     try:
@@ -520,9 +597,19 @@ def fetch_resource(
         method="GET",
         headers={"Accept": "application/json, application/xml, text/plain, */*"},
     )
-    opener = urllib.request.build_opener(_NoRedirectHandler)
+    host = (urllib.parse.urlsplit(safe_base).hostname or "").lower().rstrip(".")
+    literal = _is_ip_literal(host)
+    mdns = mdns_resolver if (
+        mdns_resolver is not None and not literal and host.endswith(".local") and _goes_direct(request)
+    ) else None
 
-    def failure(error: str, kind: str, http_status: Optional[int] = None) -> FetchedResource:
+    def failure(
+        error: str,
+        kind: str,
+        http_status: Optional[int] = None,
+        via: Optional[str] = None,
+        address: Optional[str] = None,
+    ) -> FetchedResource:
         return FetchedResource(
             path=path,
             url=url,
@@ -534,10 +621,54 @@ def fetch_resource(
             error=error,
             error_kind=kind,
             elapsed_ms=_elapsed_ms(started),
+            resolved_via=via,
+            resolved_address=address,
         )
 
-    try:
-        with opener.open(request, timeout=budget) as response:
+    def attempt(pinned: Optional[str]) -> FetchedResource:
+        if pinned is not None:
+            opener = urllib.request.build_opener(_NoRedirectHandler, _PinnedHTTPHandler(pinned))
+            via: Optional[str] = "mdns"
+            known: Optional[str] = pinned
+        else:
+            opener = urllib.request.build_opener(_NoRedirectHandler)
+            via = "literal" if literal else None
+            known = host if literal else None
+        remaining = request_deadline - time.monotonic()
+        if remaining <= 0:
+            return failure("timed out", "timeout", via=via, address=known)
+        try:
+            return read(opener, remaining, via, known)
+        except urllib.error.HTTPError as exc:
+            # HTTPError is a URLError subclass; keep the status code instead of
+            # reporting a 404 like a refused connection.
+            if via is None:
+                via, known = "system", _peer_address(exc)
+            try:
+                code: Optional[int] = int(exc.code)
+            except (TypeError, ValueError):
+                code = None
+            try:
+                exc.close()
+            except Exception:
+                pass
+            return failure(f"HTTP {code}" if code is not None else "HTTP error", "http_status", code, via, known)
+        except CollectorError as exc:
+            message = str(exc)
+            return failure(message, "redirect" if "redirect" in message else "body_too_large", via=via, address=known)
+        except http.client.HTTPException as exc:
+            # BadStatusLine, LineTooLong and IncompleteRead are not OSError.
+            return failure(f"invalid HTTP response ({type(exc).__name__})", "protocol", via=via, address=known)
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            if pinned is None and mdns is not None and _name_resolution_failed(exc):
+                raise _HostNotResolved() from None
+            message, kind = _transport_error(exc)
+            return failure(message, kind, via=via, address=known)
+
+    def read(opener: Any, timeout: float, via: Optional[str], known: Optional[str]) -> FetchedResource:
+        with opener.open(request, timeout=timeout) as response:
+            if via is None:
+                via, known = "system", _peer_address(response)
             status = getattr(response, "status", None) or response.getcode()
             content_type = response.headers.get("Content-Type")
             content_length = response.headers.get("Content-Length")
@@ -574,28 +705,23 @@ def fetch_resource(
                 body=b"".join(chunks),
                 retrieved_at_ms=retrieved_at_ms,
                 elapsed_ms=_elapsed_ms(started),
+                resolved_via=via,
+                resolved_address=known,
             )
-    except urllib.error.HTTPError as exc:
-        # HTTPError is a URLError subclass; keep the status code instead of
-        # reporting a 404 like a refused connection.
-        try:
-            code: Optional[int] = int(exc.code)
-        except (TypeError, ValueError):
-            code = None
-        try:
-            exc.close()
-        except Exception:
-            pass
-        return failure(f"HTTP {code}" if code is not None else "HTTP error", "http_status", code)
-    except CollectorError as exc:
-        message = str(exc)
-        return failure(message, "redirect" if "redirect" in message else "body_too_large")
-    except http.client.HTTPException as exc:
-        # BadStatusLine, LineTooLong and IncompleteRead are not OSError.
-        return failure(f"invalid HTTP response ({type(exc).__name__})", "protocol")
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        message, kind = _transport_error(exc)
-        return failure(message, kind)
+
+    if mdns is not None:
+        cached = mdns.cached(host)
+        if cached is not None:
+            return attempt(cached)
+    try:
+        return attempt(None)
+    except _HostNotResolved:
+        pass
+    remaining = request_deadline - time.monotonic()
+    address = mdns.resolve(host, remaining) if mdns is not None and remaining > 0 else None
+    if address is None:
+        return failure(f"{host} could not be resolved (system and mDNS); use an IP address", "unreachable")
+    return attempt(address)
 
 
 def _limit_socket_timeout(response: Any, remaining_seconds: float) -> None:
@@ -1516,6 +1642,25 @@ def _signal_quality(status: Mapping[str, Any], candidates: Mapping[str, Mapping[
     }
 
 
+def _host_resolution(base_url: str, resources: Iterable[FetchedResource]) -> Dict[str, Any]:
+    """How the Data Out host became an address in this collection.
+
+    ``method`` is "literal" (the URL holds an IP address), "system" (the
+    system resolver; ``address`` is the connected peer), "mdns" (the
+    one-shot mDNS fallback for a .local name) or None when no read got that
+    far. The first resource that knows it decides (status.json is read first).
+    """
+    try:
+        host: Optional[str] = (urllib.parse.urlsplit(str(base_url)).hostname or "").lower().rstrip(".") or None
+    except ValueError:
+        host = None
+    for resource in resources:
+        via = getattr(resource, "resolved_via", None)
+        if via:
+            return {"host": host, "method": via, "address": getattr(resource, "resolved_address", None)}
+    return {"host": host, "method": None, "address": None}
+
+
 def collect(
     base_url: str,
     authority: str = "none",
@@ -1535,6 +1680,7 @@ def collect(
     progress_tracker: Optional[NodeProgressTracker] = None,
     monotonic_clock: Callable[[], float] = time.monotonic,
     allowed_hosts: Optional[Iterable[str]] = None,
+    mdns_resolver: Any = None,
 ) -> Dict[str, Any]:
     """Read the four Data Out resources once and assess them.
 
@@ -1544,7 +1690,9 @@ def collect(
     node is detected (``NODE_CLOCK_STALLED``). ``monotonic_clock`` measures
     Ground elapsed time for ages and progress; it exists for deterministic
     tests and does not affect the deadline. ``allowed_hosts`` (the saved
-    Data Out host list) goes to ``fetch_resource`` when it is the fetcher.
+    Data Out host list) and ``mdns_resolver`` go to ``fetch_resource`` when
+    it is the fetcher; ``collection.host_resolution`` reports how the host
+    became an address.
     """
     if authority not in {"none", "csv", "xml"}:
         raise ValueError("authority must be one of: none, csv, xml")
@@ -1558,8 +1706,8 @@ def collect(
             or not 0 < total_budget_s <= MAX_TOTAL_BUDGET_SECONDS
         ):
             raise ValueError(f"total_budget_s must be within (0, {MAX_TOTAL_BUDGET_SECONDS:g}]")
-    if fetcher is fetch_resource and allowed_hosts is not None:
-        fetcher = functools.partial(fetch_resource, allowed_hosts=allowed_hosts)
+    if fetcher is fetch_resource and (allowed_hosts is not None or mdns_resolver is not None):
+        fetcher = functools.partial(fetch_resource, allowed_hosts=allowed_hosts, mdns_resolver=mdns_resolver)
     started_real = time.monotonic()
     started_mono = monotonic_clock()
     deadline = started_real + float(total_budget_s) if total_budget_s is not None else None
@@ -1928,6 +2076,7 @@ def collect(
             "deadline_exceeded": deadline_exceeded,
             "pair_reads": pair_reads,
             "status_transport_failed": status_transport_failed,
+            "host_resolution": _host_resolution(base_url, resources.values()),
         },
         "resources": {path: resource.metadata() for path, resource in resources.items()},
         "status": {

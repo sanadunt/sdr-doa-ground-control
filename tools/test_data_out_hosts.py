@@ -5,8 +5,8 @@ The host rules against tools/fixtures/data_out_hosts.json (the same cases
 frontend/src/lib/dataOutHosts.test.ts runs), console.json validation and
 loading, first-start seeding (SDR_DOA_SEED_DATA_OUT_HOSTS), the --base-url
 check in main(), and over HTTP: /api/console-config with its DATA_OUT_*
-codes, /api/snapshot handing the list to the collector, and the legacy UI.
-No network: a loopback console only.
+codes, /api/snapshot handing the list and the mDNS resolver to the
+collector, and the legacy UI. No network: a loopback console only.
 """
 
 from __future__ import annotations
@@ -422,7 +422,7 @@ class HttpTests(unittest.TestCase):
                 self.assertEqual((status, body["code"]), (403, "ORIGIN_REJECTED"))
         self.assertEqual(self.config(), before)
 
-    def test_snapshot_uses_the_saved_list(self) -> None:
+    def test_snapshot_uses_the_saved_list_and_the_resolver(self) -> None:
         calls: List[Dict[str, Any]] = []
 
         def fake_collect(**kwargs: Any) -> Dict[str, Any]:
@@ -445,6 +445,8 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         for call in calls:
             self.assertEqual(call["allowed_hosts"], ["rdf.local"])
+            self.assertIs(call["mdns_resolver"], self.console.server.mdns_resolver)
+        self.assertIsInstance(self.console.server.mdns_resolver, ground_console.MdnsResolver)
 
     def test_the_legacy_ui_still_serves_and_saves(self) -> None:
         status, page = self.console.request("GET", "/")

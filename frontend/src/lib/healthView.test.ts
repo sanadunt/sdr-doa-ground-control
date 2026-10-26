@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { TelemetrySnapshot } from '../types';
 import { DICTIONARIES, gateReasonLabel, translate } from './i18n';
 import {
+  collectionView,
   collectorErrorText,
   consistencyView,
   csvRowsView,
@@ -106,6 +107,16 @@ describe('health headline and stale evidence', () => {
 });
 
 describe('new collector fields', () => {
+  it('reads how the Data Out host was resolved, keeping only an address (#12)', () => {
+    const resolved = (hostResolution: unknown) => collectionView(snapshot({ collection: { elapsed_ms: 10, host_resolution: hostResolution } } as Partial<TelemetrySnapshot>))?.resolution;
+    expect(resolved({ host: 'doasdr.local', method: 'mdns', address: '192.168.100.100' })).toEqual({ method: 'mdns', address: '192.168.100.100' });
+    expect(resolved({ host: 'rdf.local', method: 'system', address: 'fd00::1' })).toEqual({ method: 'system', address: 'fd00::1' });
+    expect(resolved({ host: '127.0.0.1', method: 'literal', address: '127.0.0.1' })).toBeNull();
+    expect(resolved({ host: 'doasdr.local', method: null, address: null })).toBeNull();
+    expect(resolved({ method: 'mdns', address: '<script>' })).toBeNull();
+    expect(resolved(undefined)).toBeNull();
+  });
+
   it('reads node progress, keeping only known counters', () => {
     const value = snapshot({ node_progress: { state: 'STALLED', stalled: true, stalled_counters: ['timestamp_ms', 'evil'], unchanged_for_ms: { timestamp_ms: 12000, uptime_ms: 11000 }, regressed_counters: [], max_stall_ms: 10000 } });
     expect(nodeProgressView(value)).toEqual({ state: 'STALLED', stalledCounters: ['timestamp_ms'], regressedCounters: [], longestUnchangedMs: 12000, maxStallMs: 10000 });
@@ -201,6 +212,10 @@ describe('collector error messages', () => {
     expect(collectorErrorText(en, 'network error (OSError)').text).toBe('Network error while reading Data Out.');
     expect(collectorErrorText(id, 'invalid JSON at /status.json').text).toBe('JSON tidak valid di /status.json.');
     expect(collectorErrorText(en, 'collection deadline exceeded').text).toBe('Not read: the collection deadline was reached.');
+    // A .local name that neither the system resolver nor mDNS answered (#12).
+    const local = 'doasdr.local could not be resolved (system and mDNS); use an IP address';
+    expect(collectorErrorText(en, local).text).toBe('doasdr.local could not be resolved, also not over mDNS. Use the IP address in the Data Out (fallback) URL.');
+    expect(collectorErrorText(id, local).text).toBe('doasdr.local tidak bisa di-resolve, juga lewat mDNS. Pakai alamat IP di URL Data Out (cadangan).');
   });
 
   it('shows an unknown message unchanged', () => {

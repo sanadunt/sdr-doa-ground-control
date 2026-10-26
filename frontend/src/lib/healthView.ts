@@ -134,12 +134,29 @@ export function nodeStatus(snapshot: TelemetrySnapshot | null | undefined): { st
 // ---------------------------------------------------------------------------
 // Collection, node progress and signal quality (collector contract §4)
 
+/** How the collector reached the Data Out host: through the system resolver or the one-shot mDNS fallback (#12). */
+export interface HostResolutionView {
+  method: 'system' | 'mdns';
+  address: string;
+}
+
 export interface CollectionView {
   elapsedMs: number | null;
   budgetMs: number | null;
   deadlineExceeded: boolean;
   statusTransportFailed: boolean;
   pairReads: number | null;
+  /** Null for an IP address in the URL, or when no read reached the host. */
+  resolution: HostResolutionView | null;
+}
+
+function hostResolution(value: unknown): HostResolutionView | null {
+  const resolution = record(value);
+  const method = resolution?.method;
+  const address = resolution?.address;
+  if ((method !== 'system' && method !== 'mdns') || typeof address !== 'string') return null;
+  // An IPv4 or IPv6 address as the collector reports it, nothing else.
+  return /^[0-9A-Fa-f.:]{2,45}$/u.test(address) ? { method, address } : null;
 }
 
 export function collectionView(snapshot: TelemetrySnapshot | null | undefined): CollectionView | null {
@@ -151,6 +168,7 @@ export function collectionView(snapshot: TelemetrySnapshot | null | undefined): 
     deadlineExceeded: collection.deadline_exceeded === true,
     statusTransportFailed: collection.status_transport_failed === true,
     pairReads: nonNegative(collection.pair_reads),
+    resolution: hostResolution(collection.host_resolution),
   };
 }
 
@@ -529,6 +547,7 @@ const COLLECTOR_ERRORS: ReadonlyArray<[RegExp, (match: RegExpMatchArray) => [Mes
   [/^connection refused$/, () => ['health.error.connectionRefused']],
   [/^timed out$/, () => ['health.error.timedOut']],
   [/^host name resolution failed$/, () => ['health.error.dnsFailed']],
+  [/^([a-z0-9.-]{1,253}\.local) could not be resolved \(system and mDNS\); use an IP address$/, (match) => ['health.error.localNameFailed', { host: match[1] }]],
   [/^host unreachable$/, () => ['health.error.hostUnreachable']],
   [/^network error( \(\w+\))?$/, () => ['health.error.network']],
   [/^HTTP (\d{3})$/, (match) => ['health.error.httpStatus', { code: match[1] }]],

@@ -31,6 +31,7 @@ EPOCH = 1_700_000_000
 CONSOLE_MODULES = {
     "ground_console.py",
     "config_command_tracker.py",
+    "mdns_resolver.py",
     "preferences_store.py",
     "rdf_node_mqtt_v2.py",
     "receiver_archive.py",

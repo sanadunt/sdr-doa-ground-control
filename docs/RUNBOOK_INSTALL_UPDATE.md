@@ -97,7 +97,7 @@ Tanyakan semua yang relevan sebelum mulai. Kolom "Default" adalah nilai dari kod
 | Port console | 1–65535 | `8787` | Selalu di `127.0.0.1`. |
 | Kata sandi admin | 1 baris, maks. 256 karakter | `123456` (diberi peringatan) | **Manusia sendiri** yang mengetiknya (A4/B3). Membuka branding dan Kontrol. |
 | Host Data Out (cadangan) | daftar 1–16 host, dipisah koma: nama DNS (huruf kecil, huruf/angka/`-`) atau IPv4/IPv6; tanpa skema, port, path, atau wildcard | `doasdr.local,192.168.100.100,127.0.0.1,localhost` | Disimpan di `console.json` (`data_out_hosts`), diubah di Konfigurasi → Koneksi & refresh. Start pertama: `SDR_DOA_SEED_DATA_OUT_HOSTS` (Jalur A, di `.env`) atau `--data-out-hosts` (Jalur B). Wajib memuat host base URL. |
-| Data Out base URL | `http://<host>:8081` dengan `<host>` dari daftar host Data Out | `http://doasdr.local:8081` | Host di luar daftar ditolak dengan pesan yang menyebut daftar host dan port 8081. Host baru (misalnya `rdf.local`): masukkan juga ke daftar host. Jalur A: pakai IP (`http://192.168.100.100:8081`) kecuali `doasdr.local` terbukti teresolusi di dalam container (8.1 langkah 6); image console kemungkinan besar tidak bisa meresolusi nama mDNS. |
+| Data Out base URL | `http://<host>:8081` dengan `<host>` dari daftar host Data Out | `http://doasdr.local:8081` | Host di luar daftar ditolak dengan pesan yang menyebut daftar host dan port 8081. Host baru (misalnya `rdf.local`): masukkan juga ke daftar host. Jalur A: nama `.local` dicoba lewat resolver sistem container, lalu lewat satu query mDNS dari console sendiri (container tidak punya nss-mdns); bila keduanya gagal, pakai IP (`http://192.168.100.100:8081`). Periksa di 8.1 langkah 6. |
 | MQTT host | literal IPv4/IPv6 atau `localhost` (bukan nama DNS) | `10.90.0.1` | Console tidak punya TLS atau username/password MQTT. |
 | MQTT port | 1–65535 | `9001` | |
 | MQTT transport | `websockets` atau `tcp` | `websockets` | |
@@ -1058,11 +1058,12 @@ curl -s --noproxy '*' --max-time 10 http://127.0.0.1:8787/api/snapshot | python3
 ```
 **Hasil**: `UNVERIFIED` bila Data Out terjangkau dan sehat (console memang tidak pernah melaporkan `LIVE`). `UNAVAILABLE`: Data Out tidak terjangkau dari host ini (cek 4.10; console native di belakang proxy: `NO_PROXY`, 4.7). `STALE`, `DEGRADED`, dan seterusnya: data terbaca tetapi ada masalah di node. Ini bukan kegagalan instalasi; laporkan.
 
-`UNAVAILABLE` dengan `doasdr.local` di Docker: periksa apakah nama itu teresolusi di dalam container. Tidak ada output berarti tidak; minta manusia memilih IP Data Out dan ubah di halaman Konfigurasi (base URL, dan daftar host bila IP itu belum ada).
+Nama `.local` di Docker: resolver sistem container tidak bisa meresolusi mDNS (tidak ada nss-mdns), jadi console mengirim sendiri satu query mDNS (paling lama sekitar 1 detik) dan menyambung ke alamat itu dengan header `Host` tetap nama aslinya. Lihat bagaimana host teresolusi:
 
 ```sh
-cd /opt/sdr-doa-ground-console && sudo docker compose exec -T console getent hosts doasdr.local
+curl -s --noproxy '*' --max-time 10 http://127.0.0.1:8787/api/snapshot | python3 -c 'import json,sys; d=json.load(sys.stdin); r=d["collection"]["host_resolution"]; print(r["method"], r["address"], d["resources"]["/status.json"].get("error"))'
 ```
+**Hasil**: `mdns <IP> None` (lewat fallback mDNS), `system <IP> None` (resolver sistem), atau `literal <IP> None` (base URL berisi IP). `None None doasdr.local could not be resolved (system and mDNS); use an IP address`: nama itu tidak teresolusi, juga lewat mDNS (node mati, beda segmen jaringan, atau multicast diblok). Minta manusia memilih IP Data Out, lalu ubah base URL (dan daftar host bila IP itu belum ada) di halaman Konfigurasi.
 
 ```sh
 # 7. tile (opsional, bila basemap dipakai)
@@ -1210,6 +1211,7 @@ Satu blok singkat berisi:
 | `the native RDF-SDR agent service (install-agent.sh) is installed, and two agents must not run at once; ...` | Agent native masih ada | 5.6 E3. |
 | Monitor MQTT `ERROR` `MQTT monitor dependency paho-mqtt is not installed` | venv console native rusak | Pasang ulang rilis yang sama: tulis versi terpasang (`sdr-doa-console info`) ke `~/sdr-doa-dl/release-version`, lalu B1 dan blok "Upgrade manual" di 7.2 (dengan opsi yang tercatat). |
 | Konfigurasi: `Pakai http://<host>:8081 dengan host dari daftar: ...` (`DATA_OUT_URL_NOT_ALLOWED`), atau console menolak start dengan `--base-url: the Data Out URL must be http://HOST:8081 with HOST in the Data Out host list (...)` | Host base URL tidak ada di daftar host Data Out (cadangan) | Tambahkan host di Konfigurasi → Koneksi & refresh, lalu Simpan bersama base URL. Docker sebelum start pertama: `SDR_DOA_SEED_DATA_OUT_HOSTS` (A2). |
+| Kesehatan Sistem: "`<nama>.local` tidak bisa di-resolve, juga lewat mDNS" (`... could not be resolved (system and mDNS); use an IP address`) | Resolver sistem dan satu query mDNS tidak menemukan nama itu | Node mati, beda segmen jaringan, atau multicast diblok. Pakai IP node di base URL (8.1 langkah 6). |
 | Kontrol: Kirim nonaktif, `CONFIG_REVISION_UNKNOWN` | Belum ada `config_reported`/`ack_config`/`state` v1 dari agent di broker yang sama | 8.4 ujung ke ujung; agent harus bisa membaca `settings.json` lewat Data Out. |
 | Kontrol: "Belum ada ACK" (`no_ack`) sekitar 65 detik setelah Kirim | Tidak ada agent yang menjawab di `ack/config` | Agent mati, broker lain, atau agent lama. |
 | Kontrol: `Ditolak · REMOTE_CONTROL_DISABLED` | Agent tanpa `--enable-config` | Sesuai desain bila manusia memilih remote config mati. |
@@ -1359,7 +1361,7 @@ Bila uninstall biasa sudah dijalankan dan manusia kemudian meminta data dihapus:
 |---|---|
 | Console | `127.0.0.1:8787` (hanya loopback) |
 | Health | `GET http://127.0.0.1:8787/api/health` → `{"ok": true, "receiver_busy": false, "version": "<V>"}` |
-| Data Out (dibaca console) | `http://<host>:8081`, `<host>` dari daftar `data_out_hosts` di `console.json` (default `doasdr.local`, `192.168.100.100`, `127.0.0.1`, `localhost`; paling banyak 16); default `http://doasdr.local:8081`. |
+| Data Out (dibaca console) | `http://<host>:8081`, `<host>` dari daftar `data_out_hosts` di `console.json` (default `doasdr.local`, `192.168.100.100`, `127.0.0.1`, `localhost`; paling banyak 16); default `http://doasdr.local:8081`. Nama `.local` yang tidak bisa diresolusi resolver sistem dicoba lewat satu query mDNS. |
 | MQTT console | default `10.90.0.1:9001`, `websockets`, path `/mqtt`; tanpa TLS dan kredensial |
 | MQTT agent | default `127.0.0.1:1883`, TCP, MQTT 3.1.1 |
 | Topik | `sdr/v1/uav-01/...`; patch Kontrol ke `sdr/v1/uav-01/cmd/config/patch`, ACK di `sdr/v1/uav-01/ack/config` |

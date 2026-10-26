@@ -81,6 +81,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import sdr_doa_mqtt
 from config_command_tracker import ConfigCommandTracker, MonitorPublishError
+from mdns_resolver import MdnsResolver
 from sdr_doa_collector import (
     DATA_OUT_HOST_IN_USE,
     DATA_OUT_PORT,
@@ -3504,6 +3505,9 @@ class GroundConsoleServer(ThreadingHTTPServer):
         self._config = _validate_console_config(config, fallback) if config is not None else _load_console_config(self.config_path, fallback)
         # base_url is the fallback URL; it has to be in the host list in use.
         check_data_out_url(base_url, self._config["data_out_hosts"])
+        # One-shot mDNS for a .local Data Out host the system resolver cannot
+        # answer (the Docker image has no nss-mdns). Tests replace it.
+        self.mdns_resolver: Any = MdnsResolver()
         self._config_lock = threading.RLock()
         self.mqtt_monitor = mqtt_monitor
         if mqtt_monitor is not None:
@@ -3629,6 +3633,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
                 total_budget_s=SNAPSHOT_TOTAL_BUDGET_S,
                 progress_tracker=self.node_progress,
                 allowed_hosts=hosts,
+                mdns_resolver=self.mdns_resolver,
             ),
             SNAPSHOT_TOTAL_BUDGET_S + SNAPSHOT_WAIT_GRACE_S,
         )

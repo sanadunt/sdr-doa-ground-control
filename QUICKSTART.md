@@ -883,7 +883,7 @@ Gunakan Node LTS yang memenuhi requirement Vite. Node 22.12+ direkomendasikan ol
 
 ### Data Out UNAVAILABLE, ERROR, atau STALE
 
-Ini tidak selalu berarti frontend rusak. Buka **Kesehatan Sistem → Pembacaan resource** untuk melihat file mana yang gagal dan kenapa. Periksa DNS atau koneksi ke `doasdr.local:8081`, dan gunakan host yang ada di daftar **Host Data Out (cadangan)** (Konfigurasi). `STALE` dengan `NODE_CLOCK_STALLED` berarti port 8081 menjawab tetapi DSP node berhenti. `DEGRADED` berarti DAQ sync gagal atau ADC overdrive; turunkan gain bila overdrive. Gunakan tab **Simulasi** untuk memeriksa renderer tanpa hardware.
+Ini tidak selalu berarti frontend rusak. Buka **Kesehatan Sistem → Pembacaan resource** untuk melihat file mana yang gagal dan kenapa. Periksa DNS atau koneksi ke `doasdr.local:8081`, dan gunakan host yang ada di daftar **Host Data Out (cadangan)** (Konfigurasi). Nama `.local` dicoba dulu lewat resolver sistem; bila gagal (misalnya di container Docker yang tidak punya mDNS), collector mengirim satu query mDNS (paling lama sekitar 1 detik, hasil disimpan 5 sampai 60 detik) dan tetap memakai nama itu di header `Host`. Kartu Data Out di Kesehatan Sistem lalu menampilkan `mDNS <alamat>`. Bila mDNS juga tidak menjawab, pesannya "`<nama>.local` tidak bisa di-resolve, juga lewat mDNS": pakai alamat IP node di base URL (dan di daftar host). Lewat proxy (`HTTP_PROXY` tanpa `NO_PROXY` untuk host itu) tidak ada fallback mDNS, karena proxy yang meresolusi nama. `STALE` dengan `NODE_CLOCK_STALLED` berarti port 8081 menjawab tetapi DSP node berhenti. `DEGRADED` berarti DAQ sync gagal atau ADC overdrive; turunkan gain bila overdrive. Gunakan tab **Simulasi** untuk memeriksa renderer tanpa hardware.
 
 ### Basemap tidak tampil
 
