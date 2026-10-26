@@ -861,9 +861,10 @@ Belum ada di `v2.0.0`: kartu **Akses LAN** di Konfigurasi dan `GET /api/lan-acce
 
 Listener kedua di proses console yang sama, mati secara default. Pengaturannya blok `lan_access` di `console.json` (`enabled`, `port`, `bind`, `allowed_clients`). Port console tetap hanya `127.0.0.1`. Listener LAN:
 
-- hanya menerima alamat klien di `allowed_clients`; klien lain mendapat `403` tanpa isi, dan log console mencatat `LAN view refused <ip>: not in lan_access.allowed_clients ...` paling banyak sekali per menit per alamat;
+- hanya menerima alamat klien di `allowed_clients`; klien lain langsung mendapat `403` tanpa isi (permintaannya tidak dibaca), dan log console mencatat `LAN view refused <ip>: not in lan_access.allowed_clients ...` paling banyak sekali per menit per alamat;
 - hanya `GET` dan `HEAD` untuk UI dan API baca-saja (`/api/health`, `/api/capabilities`, `/api/snapshot`, `/api/console-config`, `/api/mqtt`, `/api/mqtt/rdf-node`, `/api/preferences`, `/api/branding`, `/api/tiles/...`, `/api/admin/status`). Selain itu `403` atau `405` dengan `{"code": "LAN_READ_ONLY", ...}`: login admin, Kontrol, Konfigurasi, preferensi, Receiver (`/receiver/`) dan Rekaman (`/api/receiver/*`) tidak bisa dari LAN, dan cookie admin tidak pernah dipakai;
-- menolak `Host` yang bukan alamat IP, nama `.local`, atau nama host komputer ini, dan permintaan `Sec-Fetch-Site: cross-site` (`403 ORIGIN_REJECTED`);
+- menolak `Host` yang bukan alamat IP, nama host komputer ini, atau `<nama host>.local` (nama `.local` lain ditolak), dan permintaan `Sec-Fetch-Site: cross-site` (`403 ORIGIN_REJECTED`);
+- menjalankan paling banyak 32 permintaan sekaligus (selebihnya `503` tanpa isi, log `LAN view busy: ...` sekali per menit), dan tiap permintaan harus terkirim dalam 10 detik;
 - tidak terbuka selama kata sandi admin masih `123456` atau login admin mati. Saat start, pengaturan yang menyala dibiarkan tertutup dengan alasan di log (`warning: lan_access is enabled but the LAN view stays closed: ...`), di `/api/health` dan di `/api/capabilities`.
 
 Di tablet, top bar menampilkan chip **LIHAT SAJA** (EN: **VIEW ONLY**); Kontrol, buka kunci admin dan Simpan di Konfigurasi tidak ada. Receiver dan panel Spektrum menampilkan "Receiver berjalan di groundstation." karena RadioSpectrum terpasang di USB groundstation. Pilihan tampilan di tablet (tema, bahasa, panel) disimpan di browser tablet saja.
@@ -1256,7 +1257,8 @@ Satu blok singkat berisi:
 | Akses LAN `CLOSED` dengan `BIND_FAILED` (`EADDRINUSE`), log `the LAN view could not bind ...` | Port LAN dipakai program lain, misalnya forward `socat` lama | Hentikan forward lama (6.2 langkah 1) atau pilih port lain, lalu Simpan lagi. |
 | Akses LAN `CLOSED` dengan `BIND_FAILED` (`EADDRNOTAVAIL`) | Alamat bind bukan alamat host ini | Pakai `0.0.0.0` atau IP antarmuka LAN host ini. |
 | Tablet mendapat `403` tanpa isi; log `LAN view refused <ip>: ...` | Alamat tablet tidak ada di Klien yang diizinkan | Tambahkan alamat atau jaringannya di kartu Akses LAN (keputusan manusia). |
-| Tablet mendapat `403` `ORIGIN_REJECTED` | Dibuka lewat nama DNS biasa atau proxy, bukan IP, nama `.local`, atau nama host | Buka `http://<IP LAN>:8788/`. |
+| Tablet mendapat `403` `ORIGIN_REJECTED` | Dibuka lewat nama DNS biasa, proxy, atau nama `.local` yang bukan `<nama host>.local` (misalnya `<nama host>-2.local` setelah avahi mengganti nama) | Buka `http://<IP LAN>:8788/`. |
+| Tablet kadang mendapat `503` tanpa isi; log `LAN view busy: 32 requests open ...` | 32 permintaan LAN berjalan sekaligus (banyak tablet atau tab) | Tutup tab yang tidak dipakai; console menjawab lagi begitu permintaan selesai. |
 | `no systemd user session here, so the console will not start at boot` | Installer tidak dijalankan di sesi login | Login sebagai user itu (SSH), ulangi B2. |
 | Console native tidak jalan setelah reboot | Lingering mati | `loginctl show-user $USER -p Linger`; `sudo loginctl enable-linger $USER`. |
 | `sdr-doa-console update ...` mencetak teks bantuan tanpa baris `update` dan keluar 64 | Instalasi lama tanpa updater | 5.6 E2. |

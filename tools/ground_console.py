@@ -2112,6 +2112,14 @@ def validate_config_patch(payload: Any, now_ms: Optional[int] = None) -> Dict[st
     }
 
 
+def _header_values(headers: Any, name: str) -> List[str]:
+    """Every value of one request header; none for an HTTP/0.9 request (Python 3.13 leaves a plain dict)."""
+    get_all = getattr(headers, "get_all", None)
+    if not callable(get_all):
+        return []
+    return [str(value) for value in get_all(name) or []]
+
+
 class ConsoleHandler(BaseHTTPRequestHandler):
     server_version = "SDRDoAGroundConsole/0.2"
 
@@ -2272,7 +2280,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
         if site not in ("", "none", "same-origin"):
             return False
-        hosts = self.headers.get_all("Host") or []
+        hosts = _header_values(self.headers, "Host")
         if len(hosts) != 1:
             return False
         host = hosts[0].strip()
@@ -3408,17 +3416,6 @@ class LanAccessRejected(Exception):
         self.message = message
 
 
-# The whole answer to a client address the LAN view does not admit: no body,
-# no server name, nothing about the console.
-_LAN_REFUSAL = (
-    b"HTTP/1.0 403 Forbidden\r\n"
-    b"Content-Length: 0\r\n"
-    b"Cache-Control: no-store\r\n"
-    b"Connection: close\r\n"
-    b"\r\n"
-)
-
-
 class _HeadBody:
     """wfile of a HEAD request: the status line and headers go out, the body does not."""
 
@@ -3436,17 +3433,18 @@ class _HeadBody:
 
 
 class LanConsoleHandler(ConsoleHandler):
-    """One request on the LAN view listener; lan_access.py holds the rules.
+    """One request of an allowed client on the LAN view listener; lan_access.py holds the rules.
 
-    In order: the client address (not allowed: 403 without a body, logged at
-    most once a minute per address), the method (GET and HEAD only, else 405
-    LAN_READ_ONLY), Host and Sec-Fetch-Site (403 ORIGIN_REJECTED), then the
-    path: the built UI and a fixed list of read-only API routes, else 403
-    LAN_READ_ONLY. An admin cookie is never read here.
+    LanViewServer has admitted the client address already (any other gets a
+    bare 403 from the accept thread). In order: an HTTP/0.9 request, which
+    has no Host (403 ORIGIN_REJECTED), the method (GET and HEAD only, else
+    405 LAN_READ_ONLY), Host and Sec-Fetch-Site (403 ORIGIN_REJECTED), then
+    the path: the built UI and a fixed list of read-only API routes, else 403
+    LAN_READ_ONLY. The request line and headers must arrive within
+    lan.REQUEST_DEADLINE_S. An admin cookie is never read here.
     """
 
     timeout = lan.REQUEST_TIMEOUT_S
-    _lan_client = False
 
     @property
     def console_server(self) -> "GroundConsoleServer":
@@ -3454,23 +3452,21 @@ class LanConsoleHandler(ConsoleHandler):
 
     def setup(self) -> None:
         super().setup()
-        self._lan_client = self.server.admits(self.client_address[0])  # type: ignore[attr-defined]
-        if not self._lan_client:
-            self.connection.settimeout(lan.REFUSED_CLIENT_TIMEOUT_S)
+        # Every read of this connection ends by one deadline, so a client
+        # that sends its request a byte at a time cannot keep the thread.
+        buffered = self.rfile
+        self.rfile = lan.request_reader(
+            self.connection,
+            deadline_s=self.server.request_deadline_s,  # type: ignore[attr-defined]
+            timeout_s=lan.REQUEST_TIMEOUT_S,
+        )
+        buffered.close()
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        # A refused address is logged by the refusal log only.
-        if self._lan_client:
-            print(f"[ground-console] lan {self.client_address[0]} " + (fmt % args), flush=True)
-
-    def send_error(self, code: int, message: Optional[str] = None, explain: Optional[str] = None) -> None:
-        if not self._lan_client:
-            self._refuse_client()
-            return
-        super().send_error(code, message, explain)
+        print(f"[ground-console] lan {self.client_address[0]} " + (fmt % args), flush=True)
 
     def _discard_small_body(self) -> None:
-        """Read and drop a small body of a refused request, so the client sees the answer, not a reset."""
+        """Read and drop a small body of a refused write, so the client sees the answer, not a reset."""
         headers = getattr(self, "headers", None)
         if headers is None or (headers.get("Expect") or "").strip().lower() == "100-continue":
             return
@@ -3484,14 +3480,6 @@ class LanConsoleHandler(ConsoleHandler):
             except OSError:
                 pass
 
-    def _refuse_client(self) -> None:
-        self.server.refusals.note(str(self.client_address[0]))  # type: ignore[attr-defined]
-        self.close_connection = True
-        self._discard_small_body()
-        # Written as is: after a malformed request line the handler is in
-        # HTTP/0.9 mode, where send_response would drop the status line.
-        self.wfile.write(_LAN_REFUSAL)
-
     def _refuse_method(self) -> None:
         # The connection closes after the answer; a large body is never read.
         self.close_connection = True
@@ -3503,9 +3491,6 @@ class LanConsoleHandler(ConsoleHandler):
         )
 
     def handle_expect_100(self) -> bool:
-        if not self._lan_client:
-            self._refuse_client()
-            return False
         if self.command not in lan.READ_METHODS:
             return True  # refused right after, without a 100 Continue
         return super().handle_expect_100()
@@ -3513,18 +3498,21 @@ class LanConsoleHandler(ConsoleHandler):
     def parse_request(self) -> bool:
         if not super().parse_request():
             return False
-        if not self._lan_client:
-            self._refuse_client()
-            return False
-        if self.command not in lan.READ_METHODS:
+        host_message = "the LAN view answers a Host that is an IP address, this host's name or <host name>.local, on its own port"
+        if self.request_version == "HTTP/0.9":
+            # No headers, so no Host (Python 3.13 leaves self.headers a plain
+            # dict). Answered with a status line, which HTTP/0.9 leaves out.
+            self.request_version = "HTTP/1.0"
+            message = host_message
+        elif self.command not in lan.READ_METHODS:
             self._refuse_method()
             return False
-        if not lan.host_allowed(
-            self.headers.get_all("Host") or [],
+        elif not lan.host_allowed(
+            _header_values(self.headers, "Host"),
             self.server.server_address[1],
             self.server.own_names,  # type: ignore[attr-defined]
         ):
-            message = "the LAN view answers a Host that is an IP address, a .local name or this host's name, on its own port"
+            message = host_message
         elif not lan.fetch_site_allowed(self.headers.get("Sec-Fetch-Site")):
             message = "the LAN view refuses cross-site requests"
         else:
@@ -3605,7 +3593,15 @@ class LanConsoleHandler(ConsoleHandler):
 
 
 class LanViewServer(ThreadingHTTPServer):
-    """The LAN view listener: a second socket of the same console."""
+    """The LAN view listener: a second socket of the same console.
+
+    Admission is decided on the accept thread, before a handler thread
+    exists: a client address outside allowed_clients gets the bare 403 there
+    without its request being read, and an allowed client finds at most
+    lan.MAX_CONNECTIONS requests running (a bare 503 beyond). So the LAN
+    costs the console at most that many threads and lan.ANSWERED_MAX_SOCKETS
+    answered sockets, whatever other hosts send.
+    """
 
     daemon_threads = True
     # Closing (a move, disable or console stop) does not wait for requests
@@ -3623,8 +3619,61 @@ class LanViewServer(ThreadingHTTPServer):
         self.allowed = tuple(allowed)
         self.own_names = lan.own_host_names()
         self.refusals = refusals
+        # Set before the bind, whose failure calls server_close.
+        self.answered = lan.AnsweredSockets(
+            max_sockets=lan.ANSWERED_MAX_SOCKETS, linger_s=lan.ANSWERED_LINGER_S, max_bytes=lan.ANSWERED_MAX_BYTES,
+        )
+        self.max_connections = lan.MAX_CONNECTIONS
+        self.request_deadline_s = lan.REQUEST_DEADLINE_S
+        self._slots = threading.BoundedSemaphore(self.max_connections)
+        self._busy_logged_at: Optional[float] = None
         self.address_family = socket.AF_INET6 if ":" in address[0] else socket.AF_INET
         super().__init__(address, LanConsoleHandler)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        address = str(client_address[0])
+        if not self.admits(address):
+            self.refusals.note(address)
+            self.answered.answer(request, lan.REFUSED_ANSWER)
+            return
+        if not self._slots.acquire(blocking=False):
+            self._note_busy(address)
+            self.answered.answer(request, lan.BUSY_ANSWER)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            # The thread did not start (it releases the slot when it ends).
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+    def _note_busy(self, address: str) -> None:
+        now = time.monotonic()
+        if self._busy_logged_at is not None and now - self._busy_logged_at < lan.REFUSAL_LOG_INTERVAL_S:
+            return
+        self._busy_logged_at = now
+        print(
+            f"[ground-console] LAN view busy: {self.max_connections} requests open, "
+            f"answered {address} with 503 (logged once a minute)",
+            flush=True,
+        )
+
+    def service_actions(self) -> None:
+        # serve_forever calls this at least every poll interval (0.5 s).
+        super().service_actions()
+        self.answered.sweep()
+
+    def server_close(self) -> None:
+        try:
+            super().server_close()
+        finally:
+            self.answered.close()
 
     def server_bind(self) -> None:
         if self.address_family == socket.AF_INET6:

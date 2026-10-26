@@ -24,6 +24,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -98,6 +99,25 @@ def _request(
         return response.status, {key.lower(): value for key, value in response.getheaders()}, response.read()
     finally:
         connection.close()
+
+
+def _read_all(sock: socket.socket) -> bytes:
+    """Everything the peer sends until it closes its side."""
+    chunks: List[bytes] = []
+    while True:
+        chunk = sock.recv(65536)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _wait_until(predicate: Any, timeout_s: float) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return bool(predicate())
 
 
 def _json(body: bytes) -> Dict[str, Any]:
@@ -305,18 +325,21 @@ class LanSettingsTests(unittest.TestCase):
 
 class LanRequestRuleTests(unittest.TestCase):
     def test_host_rule(self) -> None:
-        names = frozenset({"groundstation"})
+        names = frozenset({"groundstation", "groundstation.local"})
         allowed = [
             "192.168.1.10:8788", "[fd00::1]:8788", "[::1]:8788", "groundstation.local:8788",
-            "GroundStation.Local.:8788", "rdf-ground.lan.local:8788", "groundstation:8788",
+            "GroundStation.Local.:8788", "groundstation:8788",
         ]
         for host in allowed:
             with self.subTest(host=host):
                 self.assertTrue(lan.host_allowed([host], 8788, names))
+        # Another .local name may belong to any host on the LAN (mDNS has no
+        # owner), so it could rebind to the console like a public name.
         refused = [
             "evil.example:8788", "localhost:8788", "192.168.1.10", "192.168.1.10:8787", "groundstation.local",
             "user@192.168.1.10:8788", "192.168.1.10:8788/x", "", "local:8788", "-bad.local:8788", "[fd00::1]",
-            "192.168.1.10:notaport",
+            "192.168.1.10:notaport", "evil.local:8788", "rdf-ground.lan.local:8788", "groundstation-2.local:8788",
+            "groundstation.lan:8788",
         ]
         for host in refused:
             with self.subTest(host=host):
@@ -324,6 +347,19 @@ class LanRequestRuleTests(unittest.TestCase):
         self.assertFalse(lan.host_allowed([], 8788, names))
         self.assertFalse(lan.host_allowed(["192.168.1.10:8788", "192.168.1.10:8788"], 8788, names))
         self.assertNotIn("localhost", lan.own_host_names())
+
+    def test_own_host_names_are_this_host_and_its_local_name(self) -> None:
+        cases = {
+            "GroundStation": {"groundstation", "groundstation.local"},
+            "rdf-ground.example.org.": {"rdf-ground.example.org", "rdf-ground", "rdf-ground.local"},
+            "groundstation.local": {"groundstation.local", "groundstation"},
+            "localhost": set(),
+        }
+        for name, expected in cases.items():
+            with self.subTest(name=name), patch.object(lan.socket, "gethostname", return_value=name):
+                self.assertEqual(lan.own_host_names(), frozenset(expected))
+        with patch.object(lan.socket, "gethostname", side_effect=OSError("no name")):
+            self.assertEqual(lan.own_host_names(), frozenset())
 
     def test_fetch_site_rule(self) -> None:
         for value in (None, "", "none", "same-origin", "same-site", "Same-Origin"):
@@ -376,6 +412,97 @@ class LanRequestRuleTests(unittest.TestCase):
         for index in range(20):
             log.note(f"198.51.100.{index}")
         self.assertLessEqual(len(log._last), 4)
+
+
+class LanSocketHelperTests(unittest.TestCase):
+    """AnsweredSockets and request_reader on socket pairs, with a test clock."""
+
+    def pair(self) -> Tuple[socket.socket, socket.socket]:
+        server, client = socket.socketpair()
+        self.addCleanup(server.close)
+        self.addCleanup(client.close)
+        client.settimeout(5)
+        return server, client
+
+    def answered(self, now: List[float], **limits: Any) -> Any:
+        options = {"max_sockets": 4, "linger_s": 2.0, "max_bytes": 64, **limits}
+        answered = lan.AnsweredSockets(clock=lambda: now[0], **options)
+        self.addCleanup(answered.close)
+        return answered
+
+    def test_an_answer_goes_out_at_once_and_the_socket_closes_with_its_peer(self) -> None:
+        now = [10.0]
+        answered = self.answered(now)
+        server, client = self.pair()
+        answered.answer(server, lan.REFUSED_ANSWER)
+        self.assertEqual(_read_all(client), lan.REFUSED_ANSWER)
+        self.assertEqual(len(answered), 1)
+        # Request bytes after the answer are read and dropped, never parsed.
+        client.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n")
+        answered.sweep()
+        self.assertEqual(len(answered), 1)
+        client.close()
+        answered.sweep()
+        self.assertEqual(len(answered), 0)
+        self.assertEqual(server.fileno(), -1)
+
+    def test_a_socket_closes_after_the_linger_time_or_the_byte_cap(self) -> None:
+        now = [10.0]
+        answered = self.answered(now)
+        quiet, _quiet_client = self.pair()
+        answered.answer(quiet, lan.REFUSED_ANSWER)
+        now[0] = 11.9
+        answered.sweep()
+        self.assertEqual(len(answered), 1)
+        now[0] = 12.0
+        answered.sweep()
+        self.assertEqual((len(answered), quiet.fileno()), (0, -1))
+        chatty, chatty_client = self.pair()
+        answered.answer(chatty, lan.REFUSED_ANSWER)
+        chatty_client.sendall(b"x" * 64)
+        answered.sweep()
+        self.assertEqual((len(answered), chatty.fileno()), (0, -1))
+
+    def test_beyond_the_socket_cap_a_socket_closes_right_after_its_answer(self) -> None:
+        now = [10.0]
+        answered = self.answered(now, max_sockets=2)
+        pairs = [self.pair() for _ in range(3)]
+        for server, _client in pairs:
+            answered.answer(server, lan.BUSY_ANSWER)
+        self.assertEqual(len(answered), 2)
+        self.assertEqual(pairs[2][0].fileno(), -1)
+        for _server, client in pairs:
+            self.assertEqual(_read_all(client), lan.BUSY_ANSWER)
+        answered.close()
+        self.assertEqual([server.fileno() for server, _client in pairs], [-1, -1, -1])
+
+    def test_an_answer_to_a_closed_peer_closes_quietly(self) -> None:
+        answered = self.answered([10.0])
+        server, client = self.pair()
+        client.close()
+        answered.answer(server, lan.REFUSED_ANSWER)
+        self.assertEqual((len(answered), server.fileno()), (0, -1))
+
+    def test_the_request_reader_ends_every_read_at_one_deadline(self) -> None:
+        server, client = self.pair()
+        now = [100.0]
+        reader = lan.request_reader(server, deadline_s=1.0, timeout_s=5.0, clock=lambda: now[0])
+        client.sendall(b"GET / HTTP/1.1\r\n")
+        self.assertEqual(reader.readline(), b"GET / HTTP/1.1\r\n")
+        self.assertEqual(server.gettimeout(), 5.0)
+        client.sendall(b"Host: x\r\n")
+        now[0] = 101.0
+        with self.assertRaises(socket.timeout):
+            reader.readline()
+        # With the real clock a silent peer ends at the deadline, not after
+        # the per-read timeout, and writes keep the full timeout.
+        server, _client = self.pair()
+        reader = lan.request_reader(server, deadline_s=0.3, timeout_s=5.0)
+        started = time.monotonic()
+        with self.assertRaises(socket.timeout):
+            reader.readline()
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertEqual(server.gettimeout(), 5.0)
 
 
 class LanListenerTests(_ServerCase):
@@ -514,19 +641,20 @@ class LanListenerTests(_ServerCase):
 
     def test_host_and_fetch_site_rules(self) -> None:
         port = self.port
-        for host in (f"evil.example:{port}", f"localhost:{port}", "127.0.0.1", f"127.0.0.1:{port + 1}", f"user@127.0.0.1:{port}"):
+        own_names = sorted(self.server.lan._server.own_names)
+        for host in (
+            f"evil.example:{port}", f"localhost:{port}", "127.0.0.1", f"127.0.0.1:{port + 1}", f"user@127.0.0.1:{port}",
+            f"evil.local:{port}", f"not-this-console.local:{port}",
+        ):
             with self.subTest(host=host):
                 self.assert_refused(self.get("/api/health", host=host), 403, "ORIGIN_REJECTED")
         self.assert_refused(self.get("/api/health", host=None), 403, "ORIGIN_REJECTED")
         self.assert_refused(
             _request(port, "GET", "/api/health", [("Host", f"127.0.0.1:{port}")]), 403, "ORIGIN_REJECTED",
         )
-        for host in (f"groundstation.local:{port}", f"[::1]:{port}", f"192.168.1.10:{port}"):
+        for host in [f"[::1]:{port}", f"192.168.1.10:{port}"] + [f"{name}:{port}" for name in own_names]:
             with self.subTest(host=host):
                 self.assertEqual(self.get("/api/health", host=host)[0], 200)
-        names = sorted(lan.own_host_names())
-        if names:
-            self.assertEqual(self.get("/api/health", host=f"{names[0]}:{port}")[0], 200)
         self.assert_refused(self.get("/api/health", [("Sec-Fetch-Site", "cross-site")]), 403, "ORIGIN_REJECTED")
         for site in ("same-origin", "same-site", "none"):
             self.assertEqual(self.get("/api/health", [("Sec-Fetch-Site", site)])[0], 200, site)
@@ -547,6 +675,85 @@ class LanListenerTests(_ServerCase):
             self.assertTrue(raw.recv(4096).startswith(b"HTTP/1.0 403 Forbidden\r\nContent-Length: 0\r\n"))
         self.assertEqual(self.output.getvalue().count("LAN view refused 127.0.0.1") - before, 1)
         self.assertNotIn('lan 127.0.0.1 "GET', self.output.getvalue())
+
+    def test_a_client_not_allowed_costs_no_thread_and_its_socket_is_closed(self) -> None:
+        with patch.object(lan, "ANSWERED_LINGER_S", 0.5):
+            self.port = self.open_lan(self.server, NOBODY)
+        answered = self.server.lan._server.answered
+        threads = threading.active_count()
+        clients: List[socket.socket] = []
+        try:
+            # Each sends one byte of its request, as a client that trickles
+            # its request to hold a connection open.
+            for _index in range(lan.ANSWERED_MAX_SOCKETS + 8):
+                client = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+                clients.append(client)
+                client.sendall(b"G")
+            answers = []
+            for client in clients:
+                try:
+                    answers.append(_read_all(client))
+                except ConnectionResetError:
+                    answers.append(b"reset")  # a socket beyond the cap may close with the byte unread
+            self.assertGreaterEqual(answers.count(lan.REFUSED_ANSWER), lan.ANSWERED_MAX_SOCKETS)
+            self.assertEqual(set(answers) - {lan.REFUSED_ANSWER, b"reset"}, set())
+            self.assertLessEqual(threading.active_count(), threads)
+            self.assertLessEqual(len(answered), lan.ANSWERED_MAX_SOCKETS)
+            # Clients that keep their socket open lose it after the linger time.
+            self.assertTrue(_wait_until(lambda: len(answered) == 0, 3))
+        finally:
+            for client in clients:
+                client.close()
+        self.assertNotIn('lan 127.0.0.1 "', self.output.getvalue())
+
+    def test_requests_beyond_the_cap_get_503_and_a_slow_request_ends_at_the_deadline(self) -> None:
+        with patch.object(lan, "MAX_CONNECTIONS", 3), patch.object(lan, "REQUEST_DEADLINE_S", 1.0):
+            self.port = self.open_lan(self.server)
+        threads = threading.active_count()
+        slow = [socket.create_connection(("127.0.0.1", self.port), timeout=5) for _index in range(3)]
+        stop = threading.Event()
+
+        def trickle(client: socket.socket) -> None:
+            # A byte every 0.2 s: the 30 s per-read timeout alone would never end it.
+            while not stop.wait(0.2):
+                try:
+                    client.sendall(b"X")
+                except OSError:
+                    return
+
+        try:
+            for client in slow:
+                client.sendall(b"GET /api/health HTTP/1.1\r\nX-Slow: ")
+            self.assertTrue(_wait_until(lambda: threading.active_count() >= threads + 3, 5))
+            status, headers, body = _request(self.port, "GET", "/api/health")
+            self.assertEqual((status, body, headers.get("retry-after")), (503, b"", "1"))
+            self.assertIn("LAN view busy: 3 requests open", self.output.getvalue())
+            trickler = threading.Thread(target=trickle, args=(slow[0],), daemon=True)
+            trickler.start()
+            started = time.monotonic()
+            for client in slow:
+                self.assertEqual(_read_all(client), b"")  # closed at the deadline, no answer
+            self.assertLess(time.monotonic() - started, 4.0)
+            self.assertTrue(_wait_until(lambda: _request(self.port, "GET", "/api/health")[0] == 200, 5))
+        finally:
+            stop.set()
+            for client in slow:
+                client.close()
+
+    def test_an_http_0_9_request_is_refused_without_an_error(self) -> None:
+        errors = io.StringIO()
+        answers = []
+        with contextlib.redirect_stderr(errors):
+            for port, path in ((self.port, "/api/health"), (self.server.server_address[1], "/api/lan-access")):
+                with socket.create_connection(("127.0.0.1", port), timeout=5) as raw:
+                    raw.sendall(f"GET {path}\r\n\r\n".encode("ascii"))
+                    answers.append(_read_all(raw))
+        self.assertNotIn("Traceback", errors.getvalue())
+        lan_answer, local_answer = answers
+        self.assertTrue(lan_answer.startswith(b"HTTP/1.0 403 Forbidden\r\n"), lan_answer)
+        self.assertEqual(_json(lan_answer.split(b"\r\n\r\n", 1)[1])["code"], "ORIGIN_REJECTED")
+        # The loopback listener answers HTTP/0.9 as HTTP/0.9 (a bare body).
+        self.assertEqual(_json(local_answer)["code"], "ORIGIN_REJECTED")
 
     def test_the_listener_moves_and_closes_live(self) -> None:
         first = self.port

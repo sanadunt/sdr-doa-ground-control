@@ -9,25 +9,32 @@ tablet or another computer on the LAN can watch the console. That listener:
   own (not the built-in default, not disabled);
 * admits only client addresses listed in ``allowed_clients`` (IPv4/IPv6
   addresses or networks, at most 32, none broader than /16 or /48, none
-  loopback only); an empty list admits nobody;
+  loopback only); an empty list admits nobody. Another address gets a bare
+  403 from the accept thread, without a handler thread and without its
+  request being read;
+* runs at most ``MAX_CONNECTIONS`` requests at once (a bare 503 beyond), and
+  each must send its request line and headers within ``REQUEST_DEADLINE_S``;
 * answers GET and HEAD of the built UI and of a fixed list of read-only API
   routes; every other method and path is refused with ``LAN_READ_ONLY``, and
   an admin cookie is never honoured;
-* refuses a Host that is not an IP literal, a ``.local`` name or this
-  machine's own host name (DNS rebinding), and a cross-site Sec-Fetch-Site.
+* refuses a Host that is not an IP literal, this machine's host name or
+  ``<host name>.local`` (DNS rebinding), and a cross-site Sec-Fetch-Site.
 
-This module holds the settings validation and the request rules; the
+This module holds the settings validation, the request rules and the socket
+helpers of the listener (``AnsweredSockets``, ``request_reader``); the
 listener itself lives in ``ground_console.py``. Standard library only.
 """
 
 from __future__ import annotations
 
+import io
 import ipaddress
-import re
+import selectors
 import socket
 import threading
 import time
-from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Union
+from collections import OrderedDict
+from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple, Union
 from urllib.parse import urlsplit
 
 Network = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
@@ -50,13 +57,43 @@ FIELDS = ("enabled", "port", "bind", "allowed_clients")
 # addresses is bounded so a scan of the LAN cannot grow it without limit.
 REFUSAL_LOG_INTERVAL_S = 60.0
 REFUSAL_LOG_MAX_ADDRESSES = 1024
-# Socket timeouts of the LAN listener: an allowed client gets room for a slow
-# Data Out read, a refused one only enough to send its request.
+# Resource bounds of the LAN listener. An allowed client gets a handler
+# thread while fewer than MAX_CONNECTIONS requests are open (a bare 503
+# otherwise); its request line and headers must arrive within
+# REQUEST_DEADLINE_S in all, and REQUEST_TIMEOUT_S bounds each single read and
+# write, which leaves room for a slow Data Out read. A refused or busy answer
+# is sent from the accept thread; its socket stays open after that only to
+# drop the request bytes still arriving (AnsweredSockets): at most
+# ANSWERED_MAX_SOCKETS sockets, each for ANSWERED_LINGER_S and
+# ANSWERED_MAX_BYTES at most.
+MAX_CONNECTIONS = 32
+REQUEST_DEADLINE_S = 10.0
 REQUEST_TIMEOUT_S = 30.0
-REFUSED_CLIENT_TIMEOUT_S = 5.0
-# A refused request's body up to this size is read and dropped before the
-# answer, so the client gets the 403/405 rather than a connection reset.
+ANSWERED_MAX_SOCKETS = 64
+ANSWERED_LINGER_S = 2.0
+ANSWERED_MAX_BYTES = 64 * 1024
+# A refused write's body (405) up to this size is read and dropped before the
+# answer, so the client gets the 405 rather than a connection reset.
 MAX_DISCARDED_BODY_BYTES = 64 * 1024
+
+# The whole answer to a client address the LAN view does not admit: no body,
+# no server name, nothing about the console.
+REFUSED_ANSWER = (
+    b"HTTP/1.0 403 Forbidden\r\n"
+    b"Content-Length: 0\r\n"
+    b"Cache-Control: no-store\r\n"
+    b"Connection: close\r\n"
+    b"\r\n"
+)
+# The answer to an allowed client while MAX_CONNECTIONS requests are open.
+BUSY_ANSWER = (
+    b"HTTP/1.0 503 Service Unavailable\r\n"
+    b"Content-Length: 0\r\n"
+    b"Retry-After: 1\r\n"
+    b"Cache-Control: no-store\r\n"
+    b"Connection: close\r\n"
+    b"\r\n"
+)
 
 # /api/capabilities "access": the loopback listener or the LAN view.
 ACCESS_LOCAL = "local"
@@ -109,8 +146,6 @@ API_ROUTES = frozenset({
 ROUTE_UI = "ui"
 ROUTE_TILE = "tile"
 READ_METHODS = ("GET", "HEAD")
-
-_LOCAL_NAME_RE = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+local")
 
 
 def default_settings() -> Dict[str, Any]:
@@ -246,21 +281,28 @@ def client_allowed(allowed: Sequence[Network], address: Any) -> bool:
 
 
 def own_host_names() -> FrozenSet[str]:
-    """This machine's host name, full and first label, in lower case."""
+    """The names a LAN Host may carry: this machine's host name, its first label and ``<first label>.local``.
+
+    In lower case; avahi publishes the first label under ``.local``.
+    """
     try:
         name = socket.gethostname()
     except OSError:
         return frozenset()
     name = name.strip().lower().rstrip(".")
-    names = {name, name.split(".", 1)[0]} - {"", "localhost"}
+    first = name.split(".", 1)[0]
+    names = {name, first} - {"", "localhost"}
+    if first and first != "localhost":
+        names.add(f"{first}.local")
     return frozenset(names)
 
 
 def host_allowed(values: Sequence[str], port: int, own_names: Iterable[str]) -> bool:
-    """Exactly one Host: an IP literal, a .local name or this host's name, on ``port``.
+    """Exactly one Host on ``port``: an IP literal or one of ``own_names`` (own_host_names()).
 
-    A DNS rebinding page sends its own (public) host name, so only names that
-    cannot be a public site's pass.
+    A DNS rebinding page sends its own host name. Any other name, a ``.local``
+    one included, may be answered by another host (on the LAN anyone can
+    answer mDNS for a free name), so only this machine's own names pass.
     """
     if len(values) != 1:
         return False
@@ -284,8 +326,6 @@ def host_allowed(values: Sequence[str], port: int, own_names: Iterable[str]) -> 
         return True
     except ValueError:
         pass
-    if _LOCAL_NAME_RE.fullmatch(hostname) is not None and len(hostname) <= 253:
-        return True
     return hostname in set(own_names)
 
 
@@ -339,3 +379,143 @@ class RefusalLog:
             self._last[address] = now
         self._log(f"LAN view refused {address}: not in lan_access.allowed_clients (logged once a minute per address)")
         return True
+
+
+class _DeadlineReader(io.RawIOBase):
+    """The reads of one connection: each waits ``timeout_s`` at most, all together end at ``deadline``.
+
+    A socket timeout alone bounds each read only, so a client that sends a
+    byte every few seconds could hold the connection for ever.
+    """
+
+    def __init__(self, sock: socket.socket, deadline: float, timeout_s: float, clock: Callable[[], float]) -> None:
+        super().__init__()
+        self._sock = sock
+        self._deadline = deadline
+        self._timeout_s = timeout_s
+        self._clock = clock
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        remaining = self._deadline - self._clock()
+        if remaining <= 0:
+            raise socket.timeout("the request did not arrive in time")
+        self._sock.settimeout(min(self._timeout_s, remaining))
+        try:
+            return self._sock.recv_into(buffer)
+        finally:
+            # Writes keep the full timeout.
+            self._sock.settimeout(self._timeout_s)
+
+
+def request_reader(
+    sock: socket.socket,
+    *,
+    deadline_s: float,
+    timeout_s: float,
+    clock: Callable[[], float] = time.monotonic,
+) -> io.BufferedReader:
+    """A buffered reader of ``sock`` whose reads all end ``deadline_s`` from now (socket.timeout)."""
+    return io.BufferedReader(_DeadlineReader(sock, clock() + deadline_s, timeout_s, clock))
+
+
+def _close_quietly(sock: socket.socket) -> None:
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+
+class AnsweredSockets:
+    """Connections the LAN listener answered on its accept thread, kept until their peer closes.
+
+    ``answer`` sends a fixed answer without blocking and shuts the write side
+    (FIN); the request is never parsed. The socket stays open so the request
+    bytes that arrive after the answer are read and dropped: closing a socket
+    with unread bytes sends a reset, which can make the client lose the
+    answer. ``sweep`` reads what arrived and closes a socket when its peer
+    closes, after ``linger_s`` or after ``max_bytes``; beyond ``max_sockets``
+    a socket closes right after its answer. Nothing here blocks. Every call
+    runs on the listener's serve_forever thread, ``close`` after it ended.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_sockets: int,
+        linger_s: float,
+        max_bytes: int,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._max_sockets = max_sockets
+        self._linger_s = linger_s
+        self._max_bytes = max_bytes
+        self._clock = clock
+        self._selector = selectors.DefaultSelector()
+        # socket -> (close deadline, bytes read); insertion order is deadline order.
+        self._open: "OrderedDict[socket.socket, Tuple[float, int]]" = OrderedDict()
+
+    def __len__(self) -> int:
+        return len(self._open)
+
+    def answer(self, sock: socket.socket, response: bytes) -> None:
+        try:
+            sock.setblocking(False)
+            sent = sock.send(response)
+            sock.shutdown(socket.SHUT_WR)
+        except OSError:
+            _close_quietly(sock)
+            return
+        if sent != len(response) or len(self._open) >= self._max_sockets:
+            _close_quietly(sock)
+            return
+        try:
+            self._selector.register(sock, selectors.EVENT_READ)
+        except (OSError, ValueError):
+            _close_quietly(sock)
+            return
+        self._open[sock] = (self._clock() + self._linger_s, 0)
+
+    def sweep(self) -> None:
+        if not self._open:
+            return
+        for key, _events in self._selector.select(0):
+            self._read(key.fileobj)  # type: ignore[arg-type]
+        now = self._clock()
+        while self._open:
+            sock, (deadline, _used) = next(iter(self._open.items()))
+            if deadline > now:
+                break
+            self._drop(sock)
+
+    def _read(self, sock: socket.socket) -> None:
+        entry = self._open.get(sock)
+        if entry is None:
+            return
+        deadline, used = entry
+        try:
+            data = sock.recv(self._max_bytes - used)
+        except (BlockingIOError, InterruptedError):
+            return
+        except OSError:
+            data = b""
+        used += len(data)
+        if not data or used >= self._max_bytes:
+            self._drop(sock)
+        else:
+            self._open[sock] = (deadline, used)
+
+    def _drop(self, sock: socket.socket) -> None:
+        self._open.pop(sock, None)
+        try:
+            self._selector.unregister(sock)
+        except (KeyError, ValueError, OSError):
+            pass
+        _close_quietly(sock)
+
+    def close(self) -> None:
+        for sock in list(self._open):
+            self._drop(sock)
+        self._selector.close()
