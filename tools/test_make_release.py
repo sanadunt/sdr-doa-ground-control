@@ -50,7 +50,20 @@ SHELL_SCRIPTS = (
     "packaging/docker/console-entrypoint.sh",
     "packaging/docker/check-build-context.sh",
     "packaging/docker/sdr-doa-docker",
+    "packaging/ground-link/install.sh",
+    "packaging/ground-link/uninstall.sh",
+    "packaging/ground-link/t900-ground-diag",
+    "packaging/ground-link/t900-ground-watchdog",
+    "packaging/ground-link/t900-link",
 )
+# The groundstation's T900 link tools ship in the console release only.
+GROUND_LINK_EXECUTABLES = {
+    "packaging/ground-link/install.sh",
+    "packaging/ground-link/uninstall.sh",
+    "packaging/ground-link/t900-ground-diag",
+    "packaging/ground-link/t900-ground-watchdog",
+    "packaging/ground-link/t900-link",
+}
 # Every compose file at the repository root; the policy tests cover each one.
 COMPOSE_FILES = tuple(sorted(path.name for path in ROOT.glob("docker-compose*.yml")))
 # Compose files of the console (the rest is the agent's).
@@ -203,6 +216,22 @@ class ReleaseBuildTests(unittest.TestCase):
         self.assertEqual(tar_read(self.console_tar, f"{self.console_top}/VERSION").decode().strip(), self.version)
         compose = tar_read(self.console_tar, f"{self.console_top}/docker-compose.yml").decode()
         self.assertIn("dockerfile: Dockerfile.release", compose)
+
+    def test_console_release_ships_every_ground_link_file(self):
+        names = self.names(self.console_tar, self.console_top)
+        shipped = {name for name in names if name.startswith("packaging/ground-link/")}
+        on_disk = {f"packaging/ground-link/{path.name}" for path in (ROOT / "packaging/ground-link").iterdir()}
+        self.assertEqual(shipped, on_disk, "a new file in packaging/ground-link needs GROUND_LINK_FILES")
+        modes = {member.name[len(self.console_top) + 1:]: member.mode for member in tar_members(self.console_tar)}
+        for name in shipped:
+            self.assertEqual(modes[name], 0o755 if name in GROUND_LINK_EXECUTABLES else 0o644, name)
+        self.assertEqual({name for name in shipped if os.access(ROOT / name, os.X_OK)}, GROUND_LINK_EXECUTABLES)
+        # Host tooling: never in the installed console, so never in its image.
+        app = {entry.arcname for entry in make_release.console_app_entries(ROOT, self.dist)}
+        self.assertFalse({name for name in app if name.startswith("packaging/ground-link/")})
+        self.assertNotIn("ground-link", (ROOT / "Dockerfile.release").read_text(encoding="utf-8"))
+        agent = self.names(self.agent_tar, self.agent_top)
+        self.assertFalse({name for name in agent if "ground-link" in name})
 
     def test_agent_tarball_contents(self):
         names = self.names(self.agent_tar, self.agent_top)

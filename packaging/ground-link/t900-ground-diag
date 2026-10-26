@@ -1,0 +1,482 @@
+#!/bin/sh
+# t900-ground-diag: one read-only, timestamped report on the T900 PPP link of
+# this host. Part of t900-ground-link (packaging/ground-link).
+#
+#   t900-ground-diag                  # groundstation; report in the current directory
+#   sudo t900-ground-diag -o /root    # also the pppd journal and the kernel log
+#   t900-ground-diag --raspberry      # RDF-SDR side: t900-ppp.service, /dev/t900, peer 10.90.0.1
+#   t900-ground-diag -o -             # print the report instead of writing a file
+#
+# It changes nothing on the link: it reads the service state, the journal, the
+# interface, the device node, USB and udev, and sends three pings to the peer.
+# Without root (or the systemd-journal or adm group) the journal parts are
+# skipped and the report says so.
+set -u
+
+SERVICE=t900-ground-ppp.service
+DEVICE=/dev/t900-ground
+IFACE=ppp0
+PEER=10.90.0.2
+USB_ID=1a86:7523
+DEFAULT_CONFIG=/etc/t900-ground-link/link.conf
+# Tests point this at a fake; nothing else should change it.
+SYSFS=${T900_LINK_SYSFS:-/sys}
+JOURNAL_LINES=50
+KERNEL_LINES=30
+CMD_TIMEOUT=20
+
+usage() {
+  cat <<'EOF'
+Usage: t900-ground-diag [options]
+
+Writes one report on the T900 PPP link: service status, the last 50 lines of
+its journal, the interface address, the device node, lsusb, the last 30 kernel
+lines about USB and ch341, a ping to the peer and udevadm info of the device.
+It changes nothing.
+
+  -o, --output DIR    directory for the report (default: the current
+                      directory); "-" prints it instead
+  --raspberry         RDF-SDR side defaults: --service t900-ppp.service
+                      --device /dev/t900 --peer 10.90.0.1, no config file
+  --service UNIT      PPP service (default t900-ground-ppp.service)
+  --device PATH       T900 device node (default /dev/t900-ground)
+  --iface NAME        PPP interface (default ppp0)
+  --peer ADDRESS      address at the other end of the link (default 10.90.0.2)
+  --usb-id VID:PID    USB id of the T900 serial adapter (default 1a86:7523)
+  --config FILE       read PPP_SERVICE, PPP_DEVICE, PPP_IFACE, PEER and USB_ID
+                      from FILE (default /etc/t900-ground-link/link.conf when
+                      it exists); options win over the file
+  --no-config         ignore the config file
+  -h, --help          this help
+EOF
+}
+
+die() {
+  printf 't900-ground-diag: %s\n' "$*" >&2
+  exit 2
+}
+
+need_value() {
+  if [ $# -lt 2 ] || [ -z "$2" ]; then
+    die "$1 needs a value"
+  fi
+}
+
+trim() {
+  text=$1
+  text=${text#"${text%%[![:space:]]*}"}
+  printf '%s' "${text%"${text##*[![:space:]]}"}"
+}
+
+# parse_value TEXT: the value of NAME=TEXT, read literally (no expansion): a
+# quoted string, or one word up to an optional " # comment". Sets PARSED.
+parse_value() {
+  text=$(trim "$1")
+  case $text in
+    \"*)
+      rest=${text#\"}
+      case $rest in *\"*) ;; *) return 1 ;; esac
+      PARSED=${rest%%\"*}
+      after=${rest#*\"}
+      ;;
+    \'*)
+      rest=${text#\'}
+      case $rest in *\'*) ;; *) return 1 ;; esac
+      PARSED=${rest%%\'*}
+      after=${rest#*\'}
+      ;;
+    *)
+      case $text in *[[:space:]]\#*) text=${text%%[[:space:]]\#*} ;; esac
+      PARSED=$(trim "$text")
+      after=
+      case $PARSED in *[[:space:]]*) return 1 ;; esac
+      ;;
+  esac
+  after=$(trim "$after")
+  case $after in '' | '#'*) return 0 ;; *) return 1 ;; esac
+}
+
+# Only the link settings; the watchdog keys in the same file are not ours.
+read_config() {
+  file=$1
+  [ -r "$file" ] || {
+    NOTES="${NOTES}config $file is not readable; built-in defaults used
+"
+    return 0
+  }
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=$(trim "$line")
+    case $line in '' | '#'*) continue ;; *=*) ;; *) continue ;; esac
+    key=$(trim "${line%%=*}")
+    parse_value "${line#*=}" || continue
+    case $key in
+      PPP_SERVICE) CFG_SERVICE=$PARSED ;;
+      PPP_DEVICE) CFG_DEVICE=$PARSED ;;
+      PPP_IFACE) CFG_IFACE=$PARSED ;;
+      PEER) CFG_PEER=$PARSED ;;
+      USB_ID) CFG_USB_ID=$PARSED ;;
+    esac
+  done <"$file"
+}
+
+parse_args() {
+  OUTPUT=.
+  CONFIG=
+  USE_CONFIG=auto
+  RASPBERRY=0
+  OPT_SERVICE=''
+  OPT_DEVICE=''
+  OPT_IFACE=''
+  OPT_PEER=''
+  OPT_USB_ID=''
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --*=*)
+        opt=${1%%=*}
+        value=${1#*=}
+        shift
+        set -- "$opt" "$value" "$@"
+        continue
+        ;;
+    esac
+    case $1 in
+      -o | --output) need_value "$@"; OUTPUT=$2; shift ;;
+      --raspberry) RASPBERRY=1 ;;
+      --service) need_value "$@"; OPT_SERVICE=$2; shift ;;
+      --device) need_value "$@"; OPT_DEVICE=$2; shift ;;
+      --iface) need_value "$@"; OPT_IFACE=$2; shift ;;
+      --peer) need_value "$@"; OPT_PEER=$2; shift ;;
+      --usb-id) need_value "$@"; OPT_USB_ID=$2; shift ;;
+      --config) need_value "$@"; CONFIG=$2; USE_CONFIG=yes; shift ;;
+      --no-config) USE_CONFIG=no ;;
+      -h | --help) usage; exit 0 ;;
+      *) die "unknown option $1 (see --help)" ;;
+    esac
+    shift
+  done
+
+  NOTES=
+  CFG_SERVICE=''
+  CFG_DEVICE=''
+  CFG_IFACE=''
+  CFG_PEER=''
+  CFG_USB_ID=''
+  if [ "$RASPBERRY" = 1 ]; then
+    SERVICE=t900-ppp.service
+    DEVICE=/dev/t900
+    PEER=10.90.0.1
+    [ "$USE_CONFIG" = yes ] || USE_CONFIG=no
+  fi
+  if [ "$USE_CONFIG" = auto ]; then
+    if [ -e "$DEFAULT_CONFIG" ]; then
+      CONFIG=$DEFAULT_CONFIG
+      USE_CONFIG=yes
+    else
+      USE_CONFIG=no
+    fi
+  fi
+  if [ "$USE_CONFIG" = yes ]; then
+    [ -e "$CONFIG" ] || die "config $CONFIG does not exist"
+    read_config "$CONFIG"
+  else
+    CONFIG=
+  fi
+  SERVICE=${OPT_SERVICE:-${CFG_SERVICE:-$SERVICE}}
+  DEVICE=${OPT_DEVICE:-${CFG_DEVICE:-$DEVICE}}
+  IFACE=${OPT_IFACE:-${CFG_IFACE:-$IFACE}}
+  PEER=${OPT_PEER:-${CFG_PEER:-$PEER}}
+  USB_ID=${OPT_USB_ID:-${CFG_USB_ID:-$USB_ID}}
+
+  # These end up as command arguments; keep them to plain names.
+  case $SERVICE in *[!A-Za-z0-9@._:-]* | '' | -*) die "--service: not a unit name: $SERVICE" ;; esac
+  case $IFACE in *[!A-Za-z0-9._-]* | '' | -*) die "--iface: not an interface name: $IFACE" ;; esac
+  case $PEER in *[!0-9A-Fa-f.:]* | '' | -*) die "--peer: not an IP address: $PEER" ;; esac
+  case $DEVICE in /*) ;; *) die "--device must be an absolute path: $DEVICE" ;; esac
+  case $USB_ID in [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;;
+    *) die "--usb-id must look like 1a86:7523: $USB_ID" ;;
+  esac
+  USB_ID=$(printf '%s' "$USB_ID" | tr 'A-F' 'a-f')
+}
+
+# Every command runs with a time limit, so a hung tool cannot hang the report.
+run_quiet() {
+  if [ -n "$TIMEOUT_BIN" ]; then
+    "$TIMEOUT_BIN" "$CMD_TIMEOUT" "$@"
+  else
+    "$@"
+  fi
+}
+
+# show CMD...: the command line, its output and a non-zero exit status.
+show() {
+  printf '$ %s\n' "$*"
+  if command -v "$1" >/dev/null 2>&1; then
+    run_quiet "$@" 2>&1
+    status=$?
+    [ "$status" = 0 ] || printf '(exit %s)\n' "$status"
+  else
+    printf '(skipped: %s is not installed)\n' "$1"
+  fi
+}
+
+section() {
+  printf '\n== %s ==\n' "$*"
+}
+
+# Runs inside the report body; main() collects these lines for the summary.
+skip_root() {
+  printf '(skipped: needs root or the systemd-journal or adm group%s)\n' "${1:-}"
+}
+
+can_read_journal() {
+  [ "$UID_NOW" = 0 ] && return 0
+  for group in $(id -Gn 2>/dev/null); do
+    case $group in systemd-journal | adm | wheel) return 0 ;; esac
+  done
+  return 1
+}
+
+# Sets USB_DEVS: the sysfs directories of the T900 adapter, the one behind the
+# device node first (exact even with several adapters of the same id).
+find_usb() {
+  USB_DEVS=
+  vid=${USB_ID%%:*}
+  pid=${USB_ID#*:}
+  if [ -e "$DEVICE" ]; then
+    # class/tty/ttyUSB0/device is the usb-serial port below the interface
+    # (ttyACM: the interface); the USB device is the first parent with an id.
+    tty=$(readlink -f -- "$DEVICE" 2>/dev/null)
+    dir=$(readlink -f -- "$SYSFS/class/tty/${tty##*/}/device" 2>/dev/null || true)
+    while [ -n "$dir" ] && [ ! -f "$dir/idVendor" ]; do
+      dir=${dir%/*}
+    done
+    if [ -n "$dir" ]; then
+      USB_DEVS=$dir
+      return 0
+    fi
+  fi
+  for dev in "$SYSFS"/bus/usb/devices/*; do
+    [ -f "$dev/idVendor" ] || continue
+    [ "$(cat "$dev/idVendor")" = "$vid" ] || continue
+    [ "$(cat "$dev/idProduct" 2>/dev/null)" = "$pid" ] || continue
+    USB_DEVS="${USB_DEVS}${USB_DEVS:+ }$(readlink -f -- "$dev")"
+  done
+}
+
+usb_line() {
+  dev=$1
+  name=${dev##*/}
+  bus=$(cat "$dev/busnum" 2>/dev/null || echo '?')
+  num=$(cat "$dev/devnum" 2>/dev/null || echo '?')
+  drivers=
+  for intf in "$dev/$name":*; do
+    [ -d "$intf" ] || continue
+    if [ -e "$intf/driver" ]; then
+      driver=$(readlink -f -- "$intf/driver")
+      drivers="${drivers}${drivers:+, }${driver##*/} on ${intf##*/}"
+    else
+      drivers="${drivers}${drivers:+, }no driver on ${intf##*/}"
+    fi
+  done
+  ids=$(cat "$dev/idVendor" 2>/dev/null):$(cat "$dev/idProduct" 2>/dev/null)
+  printf '%s, id %s (bus %s device %s), %s' "$name" "$ids" "$bus" "$num" "${drivers:-no interfaces}"
+}
+
+body() {
+  section "service: $SERVICE"
+  show systemctl status --no-pager --lines=0 "$SERVICE"
+  show systemctl show -p ActiveState -p SubState -p Result -p NRestarts -p ExecMainStartTimestamp "$SERVICE"
+
+  section "pppd journal: last $JOURNAL_LINES lines of $SERVICE"
+  if [ "$JOURNAL_OK" = 1 ]; then
+    show journalctl -u "$SERVICE" -n "$JOURNAL_LINES" --no-pager -o short-iso
+  else
+    skip_root
+  fi
+
+  section "interface: $IFACE"
+  show ip addr show dev "$IFACE"
+  show ip route get "$PEER"
+
+  section "device: $DEVICE"
+  if [ -e "$DEVICE" ] || [ -L "$DEVICE" ]; then
+    show ls -l "$DEVICE"
+    target=$(readlink -f -- "$DEVICE" 2>/dev/null || true)
+    if [ -n "$target" ] && [ "$target" != "$DEVICE" ]; then
+      show ls -l "$target"
+    fi
+  else
+    printf '%s does not exist\n' "$DEVICE"
+  fi
+
+  section "USB: $USB_ID"
+  show lsusb -d "$USB_ID"
+  if [ -n "$USB_DEVS" ]; then
+    for dev in $USB_DEVS; do
+      printf 'sysfs: %s\n' "$(usb_line "$dev")"
+    done
+  else
+    printf 'sysfs: no USB device %s\n' "$USB_ID"
+  fi
+
+  section "kernel log: last $KERNEL_LINES lines about usb, ch341 and ttyUSB (this boot)"
+  if [ "$JOURNAL_OK" = 1 ] && command -v journalctl >/dev/null 2>&1; then
+    printf '$ journalctl -k -b --no-pager -o short-iso | grep -iE '\''usb|ch34[01]|ttyUSB'\'' | tail -n %s\n' "$KERNEL_LINES"
+    run_quiet journalctl -k -b --no-pager -o short-iso 2>&1 | grep -iE 'usb|ch34[01]|ttyUSB' | tail -n "$KERNEL_LINES"
+  elif command -v dmesg >/dev/null 2>&1 && kernel=$(run_quiet dmesg 2>/dev/null); then
+    printf '$ dmesg | grep -iE '\''usb|ch34[01]|ttyUSB'\'' | tail -n %s\n' "$KERNEL_LINES"
+    printf '%s\n' "$kernel" | grep -iE 'usb|ch34[01]|ttyUSB' | tail -n "$KERNEL_LINES"
+  else
+    skip_root "; dmesg is restricted"
+  fi
+
+  section "ping: $PEER via $IFACE"
+  printf '%s\n' "$PING_OUTPUT"
+
+  section "udev: $DEVICE"
+  if [ -e "$DEVICE" ]; then
+    show udevadm info --query=all --name="$DEVICE"
+  else
+    printf '%s does not exist\n' "$DEVICE"
+  fi
+
+  section "watchdog"
+  watchdog=
+  for candidate in "$HERE/t900-ground-watchdog" "$HERE/../sbin/t900-ground-watchdog"; do
+    if [ -x "$candidate" ]; then
+      watchdog=$candidate
+      break
+    fi
+  done
+  if [ -z "$watchdog" ]; then
+    watchdog=$(command -v t900-ground-watchdog 2>/dev/null || true)
+  fi
+  if [ -n "$watchdog" ]; then
+    printf '$ t900-ground-watchdog status\n'
+    run_quiet "$watchdog" status 2>&1
+  else
+    printf 'not installed on this host\n'
+  fi
+}
+
+summary() {
+  active=$(run_quiet systemctl show -p ActiveState --value "$SERVICE" 2>/dev/null || true)
+  sub=$(run_quiet systemctl show -p SubState --value "$SERVICE" 2>/dev/null || true)
+  restarts=$(run_quiet systemctl show -p NRestarts --value "$SERVICE" 2>/dev/null || true)
+  if [ -z "$active" ]; then
+    printf 'service:  %s state unknown (systemctl failed)\n' "$SERVICE"
+  else
+    printf 'service:  %s %s (%s), %s automatic restarts\n' "$SERVICE" "$active" "${sub:-?}" "${restarts:-?}"
+  fi
+  printf '%-9s %s\n' "$IFACE:" "$LINK_TEXT"
+  if [ -e "$DEVICE" ]; then
+    printf 'device:   %s -> %s\n' "$DEVICE" "$(readlink -f -- "$DEVICE" 2>/dev/null)"
+  else
+    printf 'device:   %s missing\n' "$DEVICE"
+  fi
+  if [ -n "$USB_DEVS" ]; then
+    for dev in $USB_DEVS; do
+      printf 'usb:      %s\n' "$(usb_line "$dev")"
+    done
+  else
+    printf 'usb:      %s not found\n' "$USB_ID"
+  fi
+  printf 'ping:     %s\n' "$PING_TEXT"
+  if [ -n "$SKIPPED" ]; then
+    printf 'skipped:  %s (need root or the systemd-journal or adm group; run with sudo for the full report)\n' "$SKIPPED"
+  else
+    printf 'skipped:  nothing\n'
+  fi
+}
+
+probe_link() {
+  addr=
+  if out=$(run_quiet ip -4 -o addr show dev "$IFACE" 2>/dev/null); then
+    addr=$(printf '%s\n' "$out" | awk '{ for (i = 1; i < NF; i++) if ($i == "inet") { print $(i + 1); exit } }')
+    if [ -n "$addr" ]; then
+      LINK_TEXT="${addr%%/*} (up)"
+    else
+      LINK_TEXT="no IPv4 address"
+    fi
+    LINK_PRESENT=1
+  else
+    LINK_TEXT="missing"
+    LINK_PRESENT=0
+  fi
+  if [ "$LINK_PRESENT" = 0 ]; then
+    PING_OUTPUT="(skipped: $IFACE does not exist)"
+    PING_TEXT="skipped ($IFACE missing)"
+    return
+  fi
+  if ! command -v ping >/dev/null 2>&1; then
+    PING_OUTPUT="(skipped: ping is not installed)"
+    PING_TEXT="skipped (no ping)"
+    return
+  fi
+  PING_OUTPUT=$(printf '$ ping -n -c 3 -W 2 -I %s %s\n' "$IFACE" "$PEER"; run_quiet ping -n -c 3 -W 2 -I "$IFACE" "$PEER" 2>&1; status=$?; [ "$status" = 0 ] || printf '(exit %s)\n' "$status")
+  received=$(printf '%s\n' "$PING_OUTPUT" | sed -n 's/.* \([0-9][0-9]*\) \(packets \)\{0,1\}received.*/\1/p' | tail -n 1)
+  PING_TEXT="${received:-0}/3 replies from $PEER"
+}
+
+main() {
+  parse_args "$@"
+  HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+  TIMEOUT_BIN=$(command -v timeout 2>/dev/null || true)
+  UID_NOW=$(id -u 2>/dev/null || echo unknown)
+  USER_NOW=$(id -un 2>/dev/null || echo unknown)
+  SKIPPED=
+  if can_read_journal; then JOURNAL_OK=1; else JOURNAL_OK=0; fi
+  NOW_LOCAL=$(date '+%Y-%m-%d %H:%M:%S %Z')
+  NOW_UTC=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  STAMP=$(date -u '+%Y%m%dT%H%M%SZ')
+  HOST=$(uname -n 2>/dev/null || echo host)
+
+  find_usb
+  probe_link
+  # The body runs first so the summary can list what it skipped.
+  BODY=$(body)
+  # The sections that skipped a part for lack of root, by title.
+  SKIPPED=$(printf '%s\n' "$BODY" | awk '
+    /^== / { title = $0; sub(/^== /, "", title); sub(/:.*/, "", title) }
+    /^\(skipped: needs root/ { printf "%s%s", sep, title; sep = ", " }')
+
+  report=$(
+    printf 'T900 link report\n'
+    printf 'time:     %s (%s)\n' "$NOW_LOCAL" "$NOW_UTC"
+    printf 'host:     %s (%s)\n' "$HOST" "$(uname -sr 2>/dev/null)"
+    if [ "$UID_NOW" = 0 ]; then
+      printf 'user:     %s (uid 0)\n' "$USER_NOW"
+    else
+      printf 'user:     %s (uid %s, not root)\n' "$USER_NOW" "$UID_NOW"
+    fi
+    printf 'uptime:   %s\n' "$(trim "$(uptime 2>/dev/null || echo unknown)")"
+    printf 'settings: service %s, device %s, interface %s, peer %s, USB %s\n' \
+      "$SERVICE" "$DEVICE" "$IFACE" "$PEER" "$USB_ID"
+    printf 'config:   %s\n' "${CONFIG:-none}"
+    if [ -n "$NOTES" ]; then
+      printf '%s' "$NOTES" | sed 's/^/note:     /'
+    fi
+    section summary
+    summary
+    printf '%s\n' "$BODY"
+  )
+
+  if [ "$OUTPUT" = - ]; then
+    printf '%s\n' "$report"
+    return 0
+  fi
+  [ -d "$OUTPUT" ] || die "output directory $OUTPUT does not exist"
+  file=$OUTPUT/t900-diag-$HOST-$STAMP.txt
+  tmp=$OUTPUT/.t900-diag-$HOST-$STAMP.$$
+  if ! printf '%s\n' "$report" >"$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    die "cannot write to $OUTPUT; pass -o DIR"
+  fi
+  mv -f "$tmp" "$file" || die "cannot write $file"
+  printf 'Report: %s\n' "$file"
+  if [ -n "$SKIPPED" ]; then
+    printf 'Skipped without root: %s\n' "$SKIPPED"
+  fi
+}
+
+main "$@"

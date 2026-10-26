@@ -1,0 +1,889 @@
+#!/bin/sh
+# t900-ground-watchdog: brings the T900 PPP link of the groundstation back
+# when it stays down. Part of t900-ground-link (packaging/ground-link).
+#
+#   t900-ground-watchdog check            one check (t900-ground-watchdog.timer, every 30 s)
+#   t900-ground-watchdog usb-reset        re-enumerate the T900 USB device, restart the PPP service
+#   t900-ground-watchdog status           what the last checks saw and did
+#   t900-ground-watchdog reset            forget the outage, the attempts and the hold
+#   t900-ground-watchdog check-config     validate link.conf and print the values in use
+#   t900-ground-watchdog --dry-run check  log what it would do, run nothing
+#
+# A check counts the link as down when the PPP interface is missing, has no
+# IPv4 address, or the peer does not answer ping on it. Once it has been down
+# for FAIL_AFTER seconds, each check may take one action, BACKOFF_BASE seconds
+# after the previous one and doubling up to BACKOFF_MAX: restart the PPP
+# service; re-enumerate the USB device and restart; power-cycle the T900 and
+# restart (only when POWER_METHOD is set); then from the start again. When
+# MAX_ACTIONS_PER_HOUR actions in the last hour did not help, it holds a
+# "remote unreachable" state and acts no more until a new PPP session comes up
+# (the interface gets an address on a new ifindex) or the link answers again.
+# Every message goes to the journal with the tag t900-ground-watchdog.
+set -u
+umask 022
+
+TAG=t900-ground-watchdog
+CONFIG=${T900_LINK_CONFIG:-/etc/t900-ground-link/link.conf}
+STATE_DIR=${T900_LINK_STATE_DIR:-/var/lib/t900-ground-link}
+# Tests only: a fake sysfs, a fixed clock and the uid that counts as root.
+SYSFS=${T900_LINK_SYSFS:-/sys}
+ROOT_UID=${T900_LINK_ROOT_UID:-0}
+EX_CONFIG=78
+HOUR=3600
+# Upper bound for one command (a service restart waits for ExecStartPre).
+ACTION_TIMEOUT=180
+
+# Defaults; link.conf.example documents each one.
+PPP_SERVICE=t900-ground-ppp.service
+PPP_DEVICE=/dev/t900-ground
+PPP_IFACE=ppp0
+PEER=10.90.0.2
+USB_ID=1a86:7523
+DRY_RUN=0
+FAIL_AFTER=180
+PING_COUNT=3
+PING_TIMEOUT=2
+BACKOFF_BASE=120
+BACKOFF_MAX=900
+MAX_ACTIONS_PER_HOUR=4
+USB_RESET_METHOD=auto
+USB_SETTLE=5
+POWER_METHOD=none
+UHUBCTL_LOCATION=
+UHUBCTL_PORT=
+RELAY_OFF_COMMAND=
+RELAY_ON_COMMAND=
+POWER_OFF_SECONDS=5
+POWER_SETTLE=10
+
+CONFIG_KEYS='PPP_SERVICE PPP_DEVICE PPP_IFACE PEER USB_ID DRY_RUN FAIL_AFTER PING_COUNT PING_TIMEOUT
+BACKOFF_BASE BACKOFF_MAX MAX_ACTIONS_PER_HOUR USB_RESET_METHOD USB_SETTLE POWER_METHOD UHUBCTL_LOCATION
+UHUBCTL_PORT RELAY_OFF_COMMAND RELAY_ON_COMMAND POWER_OFF_SECONDS POWER_SETTLE'
+
+usage() {
+  cat <<'EOF'
+Usage: t900-ground-watchdog [--dry-run] [--config FILE] COMMAND
+
+Commands:
+  check          check the link once and act when it has been down long enough
+                 (t900-ground-watchdog.timer runs this every 30 s)
+  usb-reset      re-enumerate the T900 USB device, then restart the PPP service
+                 (t900-ground-usbreset.service runs this for the operator)
+  status         the state the last checks left: outage, actions, hold
+  reset          clear the outage, the action history and the hold
+  check-config   validate the config file and print the values in use
+
+Options:
+  --dry-run      log every action instead of running it (as DRY_RUN=1); keeps
+                 its own state, so a dry run never affects the live watchdog
+  --config FILE  config file (default /etc/t900-ground-link/link.conf)
+  -h, --help     this help
+EOF
+}
+
+# log LEVEL MESSAGE: to the journal under the fixed tag. Outside a systemd
+# unit (no INVOCATION_ID) also to stderr, so a manual run and the installer
+# see it; inside one, stderr would put it in the journal twice.
+log() {
+  level=$1
+  shift
+  sent=0
+  if command -v logger >/dev/null 2>&1 && logger -t "$TAG" -p "daemon.$level" "$*" 2>/dev/null; then
+    sent=1
+  fi
+  if [ "$sent" = 0 ] || [ -z "${INVOCATION_ID:-}" ]; then
+    printf '%s: %s\n' "$TAG" "$*" >&2
+  fi
+}
+
+config_error() {
+  log err "config error: $*"
+  exit "$EX_CONFIG"
+}
+
+die() {
+  printf '%s: %s\n' "$TAG" "$*" >&2
+  exit 1
+}
+
+trim() {
+  text=$1
+  text=${text#"${text%%[![:space:]]*}"}
+  printf '%s' "${text%"${text##*[![:space:]]}"}"
+}
+
+# parse_value TEXT: the value of NAME=TEXT, read literally (no expansion): a
+# quoted string, or one word up to an optional " # comment". Sets PARSED.
+parse_value() {
+  text=$(trim "$1")
+  case $text in
+    \"*)
+      rest=${text#\"}
+      case $rest in *\"*) ;; *) return 1 ;; esac
+      PARSED=${rest%%\"*}
+      after=${rest#*\"}
+      ;;
+    \'*)
+      rest=${text#\'}
+      case $rest in *\'*) ;; *) return 1 ;; esac
+      PARSED=${rest%%\'*}
+      after=${rest#*\'}
+      ;;
+    *)
+      case $text in *[[:space:]]\#*) text=${text%%[[:space:]]\#*} ;; esac
+      PARSED=$(trim "$text")
+      after=
+      case $PARSED in *[[:space:]]*) return 1 ;; esac
+      ;;
+  esac
+  after=$(trim "$after")
+  case $after in '' | '#'*) return 0 ;; *) return 1 ;; esac
+}
+
+is_root() { [ "$(id -u)" = "$ROOT_UID" ]; }
+
+# A plain non-negative integer without a leading zero (sh arithmetic would
+# read 010 as octal).
+is_uint() {
+  case $1 in '' | *[!0-9]* | 0?*) return 1 ;; esac
+  [ ${#1} -le 12 ]
+}
+
+# The watchdog runs the relay commands of this file as root, so it must be
+# root's (or the caller's) and writable by no one else.
+check_config_file() {
+  [ ! -L "$CONFIG" ] || config_error "$CONFIG must be a regular file, not a symlink"
+  info=$(ls -lnd -- "$CONFIG" 2>/dev/null) || config_error "cannot read $CONFIG"
+  mode=${info%% *}
+  owner=$(printf '%s\n' "$info" | awk '{ print $3 }')
+  if [ "$owner" != "$ROOT_UID" ] && [ "$owner" != 0 ] && [ "$owner" != "$(id -u)" ]; then
+    config_error "$CONFIG must be owned by root (sudo chown root:root $CONFIG)"
+  fi
+  case $mode in
+    ?????w* | ????????w*) config_error "$CONFIG must be writable only by its owner (sudo chmod 644 $CONFIG)" ;;
+  esac
+  [ -r "$CONFIG" ] || config_error "cannot read $CONFIG"
+}
+
+load_config() {
+  [ -e "$CONFIG" ] || [ -L "$CONFIG" ] || return 0
+  check_config_file
+  known=" $(printf '%s' "$CONFIG_KEYS" | tr '\n' ' ') "
+  n=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    line=$(trim "$line")
+    case $line in '' | '#'*) continue ;; *=*) ;; *) config_error "$CONFIG line $n: expected NAME=VALUE" ;; esac
+    key=$(trim "${line%%=*}")
+    case $known in
+      *" $key "*) ;;
+      *) config_error "$CONFIG line $n: unknown setting $key" ;;
+    esac
+    parse_value "${line#*=}" || config_error "$CONFIG line $n: $key: put a value with spaces in quotes and close them"
+    # $key is one of CONFIG_KEYS; the value is assigned as it is.
+    eval "$key=\$PARSED"
+  done <"$CONFIG"
+}
+
+need_uint() {
+  eval "value=\${$1}"
+  is_uint "$value" || config_error "$1 must be a whole number, found '$value'"
+  if [ "$value" -lt "$2" ] || [ "$value" -gt "$3" ]; then
+    config_error "$1 must be from $2 to $3, found $value"
+  fi
+}
+
+validate_config() {
+  case $DRY_RUN in 0 | 1) ;; *) config_error "DRY_RUN must be 0 or 1, found '$DRY_RUN'" ;; esac
+  need_uint FAIL_AFTER 30 86400
+  need_uint PING_COUNT 1 10
+  need_uint PING_TIMEOUT 1 30
+  need_uint BACKOFF_BASE 10 86400
+  need_uint BACKOFF_MAX "$BACKOFF_BASE" 86400
+  need_uint MAX_ACTIONS_PER_HOUR 1 60
+  need_uint USB_SETTLE 0 300
+  need_uint POWER_OFF_SECONDS 1 300
+  need_uint POWER_SETTLE 0 600
+  case $PPP_SERVICE in
+    *[!A-Za-z0-9@._:-]* | -* | '') config_error "PPP_SERVICE is not a unit name: '$PPP_SERVICE'" ;;
+    *.service) ;;
+    *) config_error "PPP_SERVICE must end in .service: '$PPP_SERVICE'" ;;
+  esac
+  case $PPP_DEVICE in /*) ;; *) config_error "PPP_DEVICE must be an absolute path: '$PPP_DEVICE'" ;; esac
+  case $PPP_IFACE in *[!A-Za-z0-9._-]* | -* | '') config_error "PPP_IFACE is not an interface name: '$PPP_IFACE'" ;; esac
+  case $PEER in *[!0-9A-Fa-f.:]* | -* | '') config_error "PEER is not an IP address: '$PEER'" ;; esac
+  case $USB_ID in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f]:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    *) config_error "USB_ID must look like 1a86:7523 (lower case): '$USB_ID'" ;;
+  esac
+  case $USB_RESET_METHOD in
+    auto | usbreset | unbind | none) ;;
+    *) config_error "USB_RESET_METHOD must be auto, usbreset, unbind or none: '$USB_RESET_METHOD'" ;;
+  esac
+  case $POWER_METHOD in
+    none) ;;
+    uhubctl)
+      case $UHUBCTL_LOCATION in '' | *[!0-9.-]*) config_error "POWER_METHOD=uhubctl needs UHUBCTL_LOCATION, such as 3 or 1-1.4" ;; esac
+      case $UHUBCTL_PORT in '' | *[!0-9,-]*) config_error "POWER_METHOD=uhubctl needs UHUBCTL_PORT, such as 2" ;; esac
+      ;;
+    relay)
+      if [ -z "$RELAY_OFF_COMMAND" ] || [ -z "$RELAY_ON_COMMAND" ]; then
+        config_error "POWER_METHOD=relay needs RELAY_OFF_COMMAND and RELAY_ON_COMMAND"
+      fi
+      ;;
+    *) config_error "POWER_METHOD must be none, uhubctl or relay: '$POWER_METHOD'" ;;
+  esac
+}
+
+now() {
+  if [ -n "${T900_LINK_NOW:-}" ]; then
+    printf '%s\n' "$T900_LINK_NOW"
+  else
+    date +%s
+  fi
+}
+
+fmt_time() {
+  date -d "@$1" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '@%s' "$1"
+}
+
+# ---- state ---------------------------------------------------------------
+
+reset_outage() {
+  FAIL_SINCE=0
+  REASON=
+  ACTIONS=0
+  NEXT_STAGE=restart
+  NEXT_AT=0
+  HOLD=0
+  HOLD_SINCE=0
+  HOLD_IFINDEX=
+  HOLD_LOGGED_AT=0
+}
+
+load_state() {
+  reset_outage
+  # Kept across outages: the hourly window and what was done last.
+  RECENT=
+  IDLE=0
+  LAST_CHECK_AT=0
+  LAST_STATE=
+  LAST_ACTION=
+  LAST_ACTION_AT=0
+  LAST_RESULT=
+  if [ "$DRY_RUN" = 1 ]; then
+    STATE_FILE=$STATE_DIR/state.dry-run
+  else
+    STATE_FILE=$STATE_DIR/state
+  fi
+  [ -f "$STATE_FILE" ] || return 0
+  while IFS='=' read -r key value; do
+    case $key in
+      FAIL_SINCE | ACTIONS | NEXT_AT | HOLD | HOLD_SINCE | HOLD_LOGGED_AT | IDLE | LAST_CHECK_AT | LAST_ACTION_AT)
+        if is_uint "$value"; then eval "$key=\$value"; fi
+        ;;
+      HOLD_IFINDEX) if is_uint "$value"; then HOLD_IFINDEX=$value; fi ;;
+      RECENT) case $value in *[!0-9\ ]*) ;; *) RECENT=$value ;; esac ;;
+      REASON) case $value in no-interface | no-address | no-peer-reply) REASON=$value ;; esac ;;
+      LAST_STATE) case $value in up | no-interface | no-address | no-peer-reply) LAST_STATE=$value ;; esac ;;
+      NEXT_STAGE) case $value in restart | usb | power) NEXT_STAGE=$value ;; esac ;;
+      LAST_ACTION) case $value in restart | usb | power | usb-reset) LAST_ACTION=$value ;; esac ;;
+      LAST_RESULT) case $value in ok | failed) LAST_RESULT=$value ;; esac ;;
+    esac
+  done <"$STATE_FILE"
+}
+
+save_state() {
+  mkdir -p "$STATE_DIR" || die "cannot create $STATE_DIR"
+  tmp=$STATE_FILE.tmp.$$
+  if {
+    printf '# t900-ground-watchdog state; t900-ground-watchdog status reads it\n'
+    for key in FAIL_SINCE REASON ACTIONS NEXT_STAGE NEXT_AT RECENT HOLD HOLD_SINCE HOLD_IFINDEX \
+      HOLD_LOGGED_AT IDLE LAST_CHECK_AT LAST_STATE LAST_ACTION LAST_ACTION_AT LAST_RESULT; do
+      eval "printf '%s=%s\n' \"\$key\" \"\${$key}\""
+    done
+  } >"$tmp" && mv -f "$tmp" "$STATE_FILE"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  log err "cannot write $STATE_FILE"
+  return 1
+}
+
+# Actions of the last hour; sets RECENT_COUNT.
+prune_recent() {
+  kept=
+  RECENT_COUNT=0
+  for stamp in $RECENT; do
+    if [ "$stamp" -gt $((NOW - HOUR)) ]; then
+      kept="$kept $stamp"
+      RECENT_COUNT=$((RECENT_COUNT + 1))
+    fi
+  done
+  RECENT=${kept# }
+}
+
+# One run at a time: the timer's check and an operator's usb-reset.
+take_lock() {
+  LOCK=$STATE_DIR/lock
+  mkdir -p "$STATE_DIR" || die "cannot create $STATE_DIR"
+  waited=0
+  while ! mkdir "$LOCK" 2>/dev/null; do
+    holder=$(cat "$LOCK/pid" 2>/dev/null || true)
+    stale=0
+    if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+      stale=1
+    elif [ -z "$holder" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then
+      stale=1
+    fi
+    if [ "$stale" = 1 ]; then
+      rm -rf "$LOCK" || return 1
+      continue
+    fi
+    [ "$waited" -lt "$1" ] || return 1
+    sleep 2
+    waited=$((waited + 2))
+  done
+  printf '%s\n' "$$" >"$LOCK/pid"
+  trap 'rm -rf "$LOCK"' EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+}
+
+# ---- probes --------------------------------------------------------------
+
+# Sets LINK_STATE (up, no-interface, no-address, no-peer-reply), LINK_IFINDEX
+# and LINK_ADDR.
+probe_link() {
+  LINK_IFINDEX=
+  LINK_ADDR=
+  if ! link=$(ip -o link show dev "$PPP_IFACE" 2>/dev/null) || [ -z "$link" ]; then
+    LINK_STATE=no-interface
+    return
+  fi
+  LINK_IFINDEX=${link%%:*}
+  is_uint "$LINK_IFINDEX" || LINK_IFINDEX=
+  addr=$(ip -4 -o addr show dev "$PPP_IFACE" 2>/dev/null |
+    awk '{ for (i = 1; i < NF; i++) if ($i == "inet") { print $(i + 1); exit } }')
+  if [ -z "$addr" ]; then
+    LINK_STATE=no-address
+    return
+  fi
+  LINK_ADDR=${addr%%/*}
+  if ping -n -q -c "$PING_COUNT" -W "$PING_TIMEOUT" -I "$PPP_IFACE" "$PEER" >/dev/null 2>&1; then
+    LINK_STATE=up
+  else
+    LINK_STATE=no-peer-reply
+  fi
+}
+
+describe() {
+  case $1 in
+    no-interface) printf '%s is missing' "$PPP_IFACE" ;;
+    no-address) printf '%s has no IPv4 address' "$PPP_IFACE" ;;
+    no-peer-reply) printf '%s does not answer ping on %s' "$PEER" "$PPP_IFACE" ;;
+    up) printf '%s answers on %s' "$PEER" "$PPP_IFACE" ;;
+  esac
+}
+
+# The watchdog leaves a PPP service alone that an operator stopped or
+# disabled; sets WHY when it does.
+service_watched() {
+  enabled=$(systemctl is-enabled "$PPP_SERVICE" 2>/dev/null || true)
+  case $enabled in
+    '' | not-found) WHY="not installed"; return 1 ;;
+    disabled | masked | masked-runtime) WHY=$enabled; return 1 ;;
+  esac
+  active=$(systemctl show -p ActiveState --value "$PPP_SERVICE" 2>/dev/null || true)
+  if [ "$active" = inactive ]; then
+    WHY=stopped
+    return 1
+  fi
+  return 0
+}
+
+# Sets USB_DEV to the sysfs directory of the T900 adapter: the one behind
+# PPP_DEVICE, else the only device with USB_ID. Empty when there is none, or
+# several and no device node to tell them apart (USB_AMBIGUOUS=1).
+find_usb_device() {
+  USB_DEV=
+  USB_AMBIGUOUS=0
+  vid=${USB_ID%%:*}
+  pid=${USB_ID#*:}
+  if [ -e "$PPP_DEVICE" ]; then
+    # class/tty/ttyUSB0/device is the usb-serial port below the interface
+    # (ttyACM: the interface); the USB device is the first parent with an id.
+    tty=$(readlink -f -- "$PPP_DEVICE" 2>/dev/null)
+    dir=$(readlink -f -- "$SYSFS/class/tty/${tty##*/}/device" 2>/dev/null || true)
+    while [ -n "$dir" ] && [ ! -f "$dir/idVendor" ]; do
+      dir=${dir%/*}
+    done
+    if [ -n "$dir" ] && [ "$(cat "$dir/idVendor")" = "$vid" ] && [ "$(cat "$dir/idProduct" 2>/dev/null)" = "$pid" ]; then
+      USB_DEV=$dir
+      return 0
+    fi
+  fi
+  found=
+  count=0
+  for dev in "$SYSFS"/bus/usb/devices/*; do
+    [ -f "$dev/idVendor" ] || continue
+    [ "$(cat "$dev/idVendor")" = "$vid" ] || continue
+    [ "$(cat "$dev/idProduct" 2>/dev/null)" = "$pid" ] || continue
+    found=$(readlink -f -- "$dev")
+    count=$((count + 1))
+  done
+  if [ "$count" = 1 ]; then
+    USB_DEV=$found
+  elif [ "$count" -gt 1 ]; then
+    USB_AMBIGUOUS=1
+  fi
+}
+
+# ---- actions -------------------------------------------------------------
+
+run_timed() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$ACTION_TIMEOUT" "$@"
+  else
+    "$@"
+  fi
+}
+
+# act CMD...: run one recovery command, or only log it in a dry run.
+act() {
+  if [ "$DRY_RUN" = 1 ]; then
+    log notice "dry-run: would run: $*"
+    return 0
+  fi
+  if out=$(run_timed "$@" 2>&1); then
+    log notice "ran: $*"
+    return 0
+  else
+    act_rc=$?
+    log err "failed (exit $act_rc): $*: $(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
+    return "$act_rc"
+  fi
+}
+
+sysfs_write() {
+  if [ "$DRY_RUN" = 1 ]; then
+    log notice "dry-run: would write $1 to $2"
+    return 0
+  fi
+  if printf '%s' "$1" 2>/dev/null >"$2"; then
+    log notice "wrote $1 to $2"
+    return 0
+  fi
+  log err "failed: write $1 to $2"
+  return 1
+}
+
+pause() {
+  if [ "$1" -gt 0 ] && [ "$DRY_RUN" != 1 ]; then
+    sleep "$1"
+  fi
+}
+
+restart_service() {
+  if [ "$DRY_RUN" != 1 ]; then
+    # A unit stopped by its start limit refuses a plain restart.
+    systemctl reset-failed "$PPP_SERVICE" >/dev/null 2>&1 || true
+  fi
+  act systemctl restart "$PPP_SERVICE"
+}
+
+usb_method() {
+  if [ "$USB_RESET_METHOD" != auto ]; then
+    printf '%s' "$USB_RESET_METHOD"
+  elif command -v usbreset >/dev/null 2>&1; then
+    printf usbreset
+  else
+    printf unbind
+  fi
+}
+
+# Unbind the adapter's interfaces from ch341 and bind them again: the tty and
+# its udev symlink are created anew.
+rebind_ch341() {
+  driver_dir=$SYSFS/bus/usb/drivers/ch341
+  [ -d "$driver_dir" ] || {
+    log err "cannot rebind: the ch341 driver is not loaded ($driver_dir is missing)"
+    return 1
+  }
+  name=${USB_DEV##*/}
+  interfaces=
+  for intf in "$USB_DEV/$name":*; do
+    [ -d "$intf" ] || continue
+    driver=
+    if [ -e "$intf/driver" ]; then
+      driver=$(readlink -f -- "$intf/driver")
+      driver=${driver##*/}
+    fi
+    case $driver in ch341 | '') interfaces="$interfaces ${intf##*/}" ;; esac
+  done
+  [ -n "$interfaces" ] || {
+    log err "cannot rebind: USB $name has no interface for ch341"
+    return 1
+  }
+  # sh has no local variables: each function keeps its own result name.
+  bind_rc=0
+  # A stop between unbind and bind would leave the adapter without a tty.
+  trap '' TERM INT
+  for intf in $interfaces; do
+    if [ -e "$USB_DEV/$intf/driver" ]; then
+      sysfs_write "$intf" "$driver_dir/unbind" || bind_rc=1
+    fi
+  done
+  pause 1
+  # An interface left unbound by an earlier failed bind is bound here too.
+  for intf in $interfaces; do
+    sysfs_write "$intf" "$driver_dir/bind" || bind_rc=1
+  done
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  return "$bind_rc"
+}
+
+usb_reset() {
+  find_usb_device
+  if [ "$USB_AMBIGUOUS" = 1 ]; then
+    log err "several USB devices $USB_ID and $PPP_DEVICE does not lead to one: not resetting a device that may not be the T900"
+    return 1
+  fi
+  case $(usb_method) in
+    usbreset)
+      target=$USB_ID
+      if [ -n "$USB_DEV" ]; then
+        bus=$(cat "$USB_DEV/busnum" 2>/dev/null || true)
+        num=$(cat "$USB_DEV/devnum" 2>/dev/null || true)
+        if is_uint "$bus" && is_uint "$num"; then
+          target=$(printf '%03d/%03d' "$bus" "$num")
+        fi
+      fi
+      act usbreset "$target"
+      ;;
+    unbind)
+      if [ -z "$USB_DEV" ]; then
+        log err "cannot rebind: no USB device $USB_ID in $SYSFS/bus/usb/devices"
+        return 1
+      fi
+      rebind_ch341
+      ;;
+    none)
+      log notice "USB_RESET_METHOD=none: no USB reset"
+      ;;
+  esac
+}
+
+power_cycle() {
+  case $POWER_METHOD in
+    uhubctl)
+      act uhubctl -l "$UHUBCTL_LOCATION" -p "$UHUBCTL_PORT" -a cycle -d "$POWER_OFF_SECONDS"
+      ;;
+    relay)
+      power_rc=0
+      act sh -c "$RELAY_OFF_COMMAND" || power_rc=1
+      pause "$POWER_OFF_SECONDS"
+      # Always switch it on again, also after a failed "off".
+      act sh -c "$RELAY_ON_COMMAND" || power_rc=1
+      return "$power_rc"
+      ;;
+  esac
+}
+
+stage_available() {
+  case $1 in
+    restart) return 0 ;;
+    usb) [ "$USB_RESET_METHOD" != none ] ;;
+    power) [ "$POWER_METHOD" != none ] ;;
+    *) return 1 ;;
+  esac
+}
+
+# The stage after $1: restart, usb, power, then restart again, skipping the
+# ones the config turns off.
+next_stage() {
+  case $1 in
+    restart) candidates="usb power" ;;
+    usb) candidates="power" ;;
+    *) candidates= ;;
+  esac
+  for stage in $candidates; do
+    if stage_available "$stage"; then
+      printf '%s' "$stage"
+      return
+    fi
+  done
+  printf restart
+}
+
+stage_text() {
+  case $1 in
+    restart) printf 'restart %s' "$PPP_SERVICE" ;;
+    usb) printf 're-enumerate USB %s (%s), then restart %s' "$USB_ID" "$(usb_method)" "$PPP_SERVICE" ;;
+    power) printf 'power-cycle the T900 (%s), then restart %s' "$POWER_METHOD" "$PPP_SERVICE" ;;
+  esac
+}
+
+run_stage() {
+  stage_rc=0
+  case $1 in
+    usb)
+      usb_reset || stage_rc=1
+      pause "$USB_SETTLE"
+      ;;
+    power)
+      power_cycle || stage_rc=1
+      pause "$POWER_SETTLE"
+      ;;
+  esac
+  restart_service || stage_rc=1
+  return "$stage_rc"
+}
+
+backoff_for() {
+  delay=$BACKOFF_BASE
+  i=1
+  while [ "$i" -lt "$1" ] && [ "$delay" -lt "$BACKOFF_MAX" ]; do
+    delay=$((delay * 2))
+    i=$((i + 1))
+  done
+  if [ "$delay" -gt "$BACKOFF_MAX" ]; then
+    delay=$BACKOFF_MAX
+  fi
+  printf '%s' "$delay"
+}
+
+# ---- commands ------------------------------------------------------------
+
+need_root() {
+  if [ "$DRY_RUN" = 1 ]; then
+    mkdir -p "$STATE_DIR" 2>/dev/null || die "cannot create $STATE_DIR; run with sudo"
+    [ -w "$STATE_DIR" ] || die "cannot write $STATE_DIR; run with sudo"
+  elif ! is_root; then
+    die "run as root (sudo t900-ground-watchdog $*)"
+  fi
+}
+
+cmd_check() {
+  if ! take_lock 0; then
+    # An operator's usb-reset is under way; the next check looks again.
+    return 0
+  fi
+  load_state
+  NOW=$(now)
+  LAST_CHECK_AT=$NOW
+  if ! service_watched; then
+    if [ "$IDLE" != 1 ]; then
+      log notice "$PPP_SERVICE is $WHY: watchdog idle until it runs again"
+      IDLE=1
+      reset_outage
+    fi
+    save_state
+    return 0
+  fi
+  if [ "$IDLE" = 1 ]; then
+    log notice "$PPP_SERVICE runs again: watching $PPP_IFACE"
+    IDLE=0
+  fi
+
+  probe_link
+  LAST_STATE=$LINK_STATE
+  if [ "$LINK_STATE" = up ]; then
+    if [ "$FAIL_SINCE" -gt 0 ] || [ "$HOLD" = 1 ]; then
+      log notice "link up: $(describe up) ($LINK_ADDR), down $((NOW - FAIL_SINCE)) s, $ACTIONS actions"
+    fi
+    reset_outage
+    save_state
+    return 0
+  fi
+
+  if [ "$HOLD" = 1 ]; then
+    if [ -n "$LINK_ADDR" ] && [ "$LINK_IFINDEX" != "$HOLD_IFINDEX" ]; then
+      log notice "new PPP session on $PPP_IFACE ($LINK_ADDR, ifindex $LINK_IFINDEX): remote unreachable hold cleared; $(describe "$LINK_STATE")"
+      reset_outage
+      FAIL_SINCE=$NOW
+      REASON=$LINK_STATE
+    elif [ $((NOW - HOLD_LOGGED_AT)) -ge "$HOUR" ]; then
+      log warning "remote unreachable since $(fmt_time "$HOLD_SINCE"): $(describe "$LINK_STATE"); no action until a new PPP session"
+      HOLD_LOGGED_AT=$NOW
+    fi
+    save_state
+    return 0
+  fi
+
+  if [ "$FAIL_SINCE" = 0 ]; then
+    FAIL_SINCE=$NOW
+    REASON=$LINK_STATE
+    log warning "link down: $(describe "$LINK_STATE")"
+    save_state
+    return 0
+  fi
+  if [ "$LINK_STATE" != "$REASON" ]; then
+    log notice "link still down: $(describe "$LINK_STATE")"
+    REASON=$LINK_STATE
+  fi
+  down=$((NOW - FAIL_SINCE))
+  if [ "$down" -lt "$FAIL_AFTER" ] || [ "$NOW" -lt "$NEXT_AT" ]; then
+    save_state
+    return 0
+  fi
+
+  prune_recent
+  if [ "$RECENT_COUNT" -ge "$MAX_ACTIONS_PER_HOUR" ]; then
+    HOLD=1
+    HOLD_SINCE=$NOW
+    HOLD_LOGGED_AT=$NOW
+    HOLD_IFINDEX=
+    if [ -n "$LINK_ADDR" ]; then
+      HOLD_IFINDEX=$LINK_IFINDEX
+    fi
+    log warning "remote unreachable: $RECENT_COUNT recovery actions in the last hour did not bring the link back ($(describe "$LINK_STATE")); no action until a new PPP session"
+    save_state
+    return 0
+  fi
+
+  stage=$NEXT_STAGE
+  if ! stage_available "$stage"; then
+    stage=$(next_stage "$stage")
+  fi
+  ACTIONS=$((ACTIONS + 1))
+  RECENT="${RECENT}${RECENT:+ }$NOW"
+  RECENT_COUNT=$((RECENT_COUNT + 1))
+  delay=$(backoff_for "$ACTIONS")
+  NEXT_STAGE=$(next_stage "$stage")
+  NEXT_AT=$((NOW + delay))
+  LAST_ACTION=$stage
+  LAST_ACTION_AT=$NOW
+  LAST_RESULT=
+  log warning "link down $down s ($(describe "$LINK_STATE")): action $ACTIONS, $RECENT_COUNT of $MAX_ACTIONS_PER_HOUR this hour: $(stage_text "$stage")"
+  # Saved first, so an action cut short by a timeout still counts.
+  save_state
+  if run_stage "$stage"; then
+    LAST_RESULT=ok
+  else
+    LAST_RESULT=failed
+  fi
+  NEXT_AT=$(($(now) + delay))
+  save_state
+}
+
+cmd_usb_reset() {
+  if ! take_lock 300; then
+    log err "usb-reset not run: another watchdog run kept the lock for 5 minutes"
+    return 1
+  fi
+  load_state
+  NOW=$(now)
+  log notice "usb-reset requested: re-enumerate USB $USB_ID ($(usb_method)), then restart $PPP_SERVICE"
+  if run_stage usb; then
+    LAST_RESULT=ok
+    result=0
+  else
+    LAST_RESULT=failed
+    result=1
+  fi
+  LAST_ACTION=usb-reset
+  LAST_ACTION_AT=$NOW
+  # Give the link BACKOFF_BASE seconds before the watchdog acts on its own.
+  until_at=$(($(now) + BACKOFF_BASE))
+  if [ "$NEXT_AT" -lt "$until_at" ]; then
+    NEXT_AT=$until_at
+  fi
+  save_state
+  return "$result"
+}
+
+cmd_reset() {
+  take_lock 30 || die "another watchdog run holds $STATE_DIR/lock"
+  load_state
+  reset_outage
+  RECENT=
+  IDLE=0
+  save_state
+  log notice "state reset by $(id -un 2>/dev/null || echo root): outage, action history and hold cleared"
+}
+
+cmd_status() {
+  load_state
+  NOW=$(now)
+  if [ "$DRY_RUN" = 1 ]; then
+    printf 'mode:      dry run (actions are logged, not run)\n'
+  else
+    printf 'mode:      live\n'
+  fi
+  printf 'service:   %s, interface %s, peer %s, USB %s\n' "$PPP_SERVICE" "$PPP_IFACE" "$PEER" "$USB_ID"
+  if [ ! -f "$STATE_FILE" ]; then
+    printf 'state:     no check has run yet (%s)\n' "$STATE_FILE"
+    return 0
+  fi
+  if [ "$LAST_CHECK_AT" -gt 0 ]; then
+    printf 'checked:   %s (%s s ago)\n' "$(fmt_time "$LAST_CHECK_AT")" $((NOW - LAST_CHECK_AT))
+  fi
+  if [ "$IDLE" = 1 ]; then
+    printf 'link:      not watched: %s is stopped or disabled\n' "$PPP_SERVICE"
+  elif [ "$FAIL_SINCE" -gt 0 ]; then
+    printf 'link:      down since %s (%s s): %s\n' "$(fmt_time "$FAIL_SINCE")" $((NOW - FAIL_SINCE)) "$(describe "${LAST_STATE:-$REASON}")"
+  else
+    printf 'link:      up at the last check\n'
+  fi
+  prune_recent
+  printf 'actions:   %s in this outage, %s of %s in the last hour\n' "$ACTIONS" "$RECENT_COUNT" "$MAX_ACTIONS_PER_HOUR"
+  if [ -n "$LAST_ACTION" ]; then
+    printf 'last:      %s at %s (%s)\n' "$LAST_ACTION" "$(fmt_time "$LAST_ACTION_AT")" "${LAST_RESULT:-running}"
+  fi
+  if [ "$HOLD" = 1 ]; then
+    printf 'hold:      remote unreachable since %s; no action until a new PPP session\n' "$(fmt_time "$HOLD_SINCE")"
+  elif [ "$FAIL_SINCE" -gt 0 ]; then
+    stage=$NEXT_STAGE
+    stage_available "$stage" || stage=$(next_stage "$stage")
+    first=$((FAIL_SINCE + FAIL_AFTER))
+    [ "$NEXT_AT" -gt "$first" ] && first=$NEXT_AT
+    printf 'next:      %s, not before %s\n' "$(stage_text "$stage")" "$(fmt_time "$first")"
+  fi
+}
+
+cmd_check_config() {
+  for key in $(printf '%s' "$CONFIG_KEYS" | tr '\n' ' '); do
+    eval "printf '%s=%s\n' \"\$key\" \"\${$key}\""
+  done
+}
+
+main() {
+  FORCE_DRY_RUN=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --dry-run) FORCE_DRY_RUN=1 ;;
+      --config)
+        [ $# -ge 2 ] || die "--config needs a value"
+        CONFIG=$2
+        shift
+        ;;
+      --config=*) CONFIG=${1#--config=} ;;
+      -h | --help) usage; exit 0 ;;
+      -*) die "unknown option $1 (see --help)" ;;
+      *) break ;;
+    esac
+    shift
+  done
+  command=${1:-check}
+  [ $# -le 1 ] || die "too many arguments (see --help)"
+  case $command in
+    check | usb-reset | status | reset | check-config) ;;
+    *) die "unknown command $command (see --help)" ;;
+  esac
+  load_config
+  validate_config
+  if [ "$FORCE_DRY_RUN" = 1 ]; then
+    DRY_RUN=1
+  fi
+  case $command in
+    check) need_root "$command"; cmd_check ;;
+    usb-reset) need_root "$command"; cmd_usb_reset ;;
+    reset) need_root "$command"; cmd_reset ;;
+    status) cmd_status ;;
+    check-config) cmd_check_config ;;
+  esac
+}
+
+main "$@"

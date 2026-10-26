@@ -1,0 +1,14 @@
+# Written by the t900-ground-link installer (packaging/ground-link/install.sh).
+# Pause the watchdog: sudo systemctl stop t900-ground-watchdog.timer
+# (it starts again at the next boot; disable it to keep it off).
+[Unit]
+Description=Check the T900 PPP link every 30 s
+
+[Timer]
+OnBootSec=2min
+OnActiveSec=1min
+OnUnitInactiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

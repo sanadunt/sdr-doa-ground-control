@@ -1,0 +1,70 @@
+# Settings of t900-ground-link on the groundstation (packaging/ground-link).
+# Installed as /etc/t900-ground-link/link.conf (owner root, mode 0644); the
+# installer writes it once and keeps it on every later run. Change it with
+# sudoedit, then check it: sudo t900-ground-watchdog check-config
+# The timer picks up a change at its next check; re-run install.sh after
+# changing PPP_SERVICE, so the polkit rule names the new service.
+#
+# NAME=VALUE per line, read literally (no $ expansion). Put a value with
+# spaces in quotes. A line left out keeps the default shown here.
+
+# ---- The link (also read by t900-ground-diag and t900-link) ----------------
+
+# The PPP service, the T900 device node its udev rule creates, the PPP
+# interface, the address at the other end and the USB id of the T900's CH340
+# serial adapter. The installer never changes the service or the udev rule.
+PPP_SERVICE=t900-ground-ppp.service
+PPP_DEVICE=/dev/t900-ground
+PPP_IFACE=ppp0
+PEER=10.90.0.2
+USB_ID=1a86:7523
+
+# ---- Watchdog ----------------------------------------------------------------
+
+# 1: log every action as "dry-run: would run: ..." and run nothing. A dry run
+# keeps its own state, so switching back to 0 starts clean.
+DRY_RUN=0
+
+# The link is down when PPP_IFACE is missing, has no IPv4 address, or PEER
+# answers none of PING_COUNT pings (PING_TIMEOUT seconds each). The first
+# action comes FAIL_AFTER seconds after the first failed check (30-86400).
+FAIL_AFTER=180
+PING_COUNT=3
+PING_TIMEOUT=2
+
+# Seconds between actions: BACKOFF_BASE after the first, then doubling up to
+# BACKOFF_MAX. Give the PPP service time to come up: its ExecStartPre waits up
+# to 60 s for the device and LCP needs a few echo intervals.
+BACKOFF_BASE=120
+BACKOFF_MAX=900
+
+# After this many actions within an hour the watchdog holds "remote
+# unreachable" and acts no more until a new PPP session comes up (PPP_IFACE
+# gets an address on a new interface) or PEER answers again (1-60).
+MAX_ACTIONS_PER_HOUR=4
+
+# Second stage: re-enumerate the USB device, wait USB_SETTLE seconds, restart
+# the PPP service.
+#   auto      usbreset when it is installed, else unbind
+#   usbreset  usbreset BUS/DEV of the adapter behind PPP_DEVICE (else USB_ID)
+#   unbind    unbind its interfaces from the ch341 driver and bind them again
+#   none      skip this stage
+# None of these cuts the T900's power.
+USB_RESET_METHOD=auto
+USB_SETTLE=5
+
+# Third stage, off by default: power-cycle the T900, wait POWER_SETTLE
+# seconds, restart the PPP service. Only with hardware that can cut its power:
+#   uhubctl  a hub with per-port power switching, run as
+#            uhubctl -l UHUBCTL_LOCATION -p UHUBCTL_PORT -a cycle -d POWER_OFF_SECONDS
+#            (find the location and port with: sudo uhubctl)
+#   relay    a relay in the T900's supply: RELAY_OFF_COMMAND, POWER_OFF_SECONDS
+#            later RELAY_ON_COMMAND (always, also after a failed "off"); both
+#            run as root with sh -c
+POWER_METHOD=none
+UHUBCTL_LOCATION=
+UHUBCTL_PORT=
+RELAY_OFF_COMMAND=
+RELAY_ON_COMMAND=
+POWER_OFF_SECONDS=5
+POWER_SETTLE=10

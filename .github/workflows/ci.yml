@@ -147,7 +147,7 @@ jobs:
             sudo apt-get install -y -qq --no-install-recommends shellcheck
           fi
           shellcheck --version | sed -n 2p
-          shellcheck -s sh packaging/docker/sdr-doa-docker packaging/console/sdr-doa-console packaging/console/install.sh
+          shellcheck -s sh packaging/docker/sdr-doa-docker packaging/console/sdr-doa-console packaging/console/install.sh packaging/ground-link/t900-ground-diag packaging/ground-link/t900-ground-watchdog packaging/ground-link/t900-link packaging/ground-link/install.sh packaging/ground-link/uninstall.sh
           # actionlint also runs shellcheck on every run: script.
           .venv/bin/actionlint .github/workflows/*.yml
 

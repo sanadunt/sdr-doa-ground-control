@@ -18,7 +18,7 @@ cd frontend && npx vitest run -t "partial test name"
 # Python unittest-based files (test_ground_console_static, test_rdf_node_mqtt_v2, test_sdr_doa_mqtt_monitor,
 # test_receiver_record_store, test_build_browsdr_receiver, test_mqtt_config_patch, test_config_patch_contract,
 # test_preferences_store, test_make_release, test_tile_cache, test_basemap_contract, test_receiver_archive,
-# test_release_workflow, test_docker_update, test_console_update)
+# test_release_workflow, test_docker_update, test_console_update, test_ground_link)
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_ground_console_static.GroundConsoleStaticRegressionTests.<test_method>
 # Records archive: migration, queries, retention, delete, ZIP export, the read rule and the archive routes
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_receiver_archive tools.test_receiver_record_store
@@ -33,6 +33,8 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_tile_cache too
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_release_workflow
 # sdr-doa-docker against a fake docker and systemctl; the native updater against a loopback fake GitHub, proxy and /api/health
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_docker_update tools.test_console_update
+# packaging/ground-link (T900 diag, watchdog, t900-link, installer) against fake commands, a fake sysfs and a fixed clock
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_ground_link
 
 # Python standalone assert scripts (all other tools/test_*.py): run the whole file,
 # or call one test_* function directly
@@ -118,7 +120,7 @@ python3 tools/test_<module>.py              # the standalone scripts for the mod
 python3 tools/make_release.py --skip-build --output-dir /tmp/rel   # when packaging changed; then sha256sum -c
 node --test tools/test_receiver_*.mjs       # when Receiver code changed
 actionlint .github/workflows/*.yml          # when a workflow changed (with shellcheck on PATH)
-shellcheck -s sh packaging/docker/sdr-doa-docker packaging/console/sdr-doa-console packaging/console/install.sh   # when a shell script changed
+shellcheck -s sh packaging/docker/sdr-doa-docker packaging/console/sdr-doa-console packaging/console/install.sh packaging/ground-link/t900-ground-diag packaging/ground-link/t900-ground-watchdog packaging/ground-link/t900-link packaging/ground-link/install.sh packaging/ground-link/uninstall.sh   # when a shell script changed
 git diff --check
 ```
 

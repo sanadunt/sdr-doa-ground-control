@@ -7,8 +7,9 @@ Writes, in ``dist/release`` by default:
   (``frontend/dist`` with the embedded Receiver), the console's runtime Python
   modules, the native installer, ``Dockerfile.release`` with its compose file,
   ``docker-compose.ghcr.yml``, the Docker host script
-  ``packaging/docker/sdr-doa-docker``, ``QUICKSTART.md`` and the user manual
-  PDF;
+  ``packaging/docker/sdr-doa-docker``, the groundstation's T900 link tools
+  ``packaging/ground-link`` (with their own installer), ``QUICKSTART.md`` and
+  the user manual PDF;
 * ``sdr-doa-rdf-sdr-agent-<VERSION>.tar.gz``: the edge agent's runtime
   modules, its installer and systemd unit, and ``Dockerfile.agent``;
 * ``sdr-doa-docker``: the Docker host script on its own (install, update and
@@ -66,6 +67,26 @@ _SKIP_NAMES = frozenset({"node_modules", "__pycache__", ".git", ".DS_Store"})
 _SKIP_SUFFIXES = (".pyc", ".pyo")
 
 # (published path, source path relative to the repository, executable)
+# Host tooling for the T900 PPP link of the groundstation: shipped in the
+# console release for its own installer, never in the console app tree or
+# image (the console has no control over the host).
+GROUND_LINK_DIR = "packaging/ground-link"
+GROUND_LINK_FILES = tuple(
+    (f"{GROUND_LINK_DIR}/{name}", f"{GROUND_LINK_DIR}/{name}", executable)
+    for name, executable in (
+        ("README.md", False),
+        ("install.sh", True),
+        ("uninstall.sh", True),
+        ("t900-ground-diag", True),
+        ("t900-ground-watchdog", True),
+        ("t900-link", True),
+        ("link.conf.example", False),
+        ("t900-ground-watchdog.service.in", False),
+        ("t900-ground-watchdog.timer", False),
+        ("t900-ground-usbreset.service.in", False),
+        ("50-t900-ground-link.rules.in", False),
+    )
+)
 CONSOLE_APP_FILES = (
     ("packaging/console/requirements.txt", "packaging/console/requirements.txt", False),
     ("packaging/console/set_admin_password.py", "packaging/console/set_admin_password.py", True),
@@ -87,7 +108,7 @@ CONSOLE_RELEASE_FILES = (
     (".env.example", ".env.example", False),
     ("QUICKSTART.md", "QUICKSTART.md", False),
     (MANUAL_PDF, MANUAL_PDF, False),
-)
+) + GROUND_LINK_FILES
 AGENT_APP_FILES = (
     ("packaging/agent/run-agent.sh", "packaging/agent/run-agent.sh", True),
 )
