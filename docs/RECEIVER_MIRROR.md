@@ -126,7 +126,7 @@ Pemeriksaan, berurutan; yang pertama gagal menentukan jawaban. Semua error berbe
 | 2 | `Content-Length` paling banyak 8192 byte | `413 MIRROR_TOO_LARGE` |
 | 3 | Paling banyak 12 post lolos pemeriksaan laju dalam satu detik mana pun (post yang ditolak karena laju tidak dihitung) | `429 MIRROR_RATE_LIMITED` |
 | 4 | Mode LAN lihat-saja terbuka | `409 MIRROR_LAN_CLOSED` |
-| 5 | Skema ketat: JSON UTF-8 tanpa NaN/Infinity, field persis seperti bagian 2 dan 3 (field asing, field hilang, tipe salah, boolean sebagai angka, nilai di luar rentang ditolak seluruhnya) | `400 MIRROR_INVALID` dengan nama field pertama yang salah |
+| 5 | Skema ketat: JSON UTF-8 tanpa NaN/Infinity, field persis seperti bagian 2 dan 3 (field asing, field hilang, tipe salah, boolean sebagai angka, nilai di luar rentang, termasuk bilangan bulat yang melampaui float, ditolak seluruhnya; JSON yang bersarang terlalu dalam juga tidak valid) | `400 MIRROR_INVALID` dengan nama field pertama yang salah |
 
 Berhasil: `200 {"ok": true, "rev": <post ke-n>, "frame_rev": <frame ke-n>}`. Body yang panjangnya dalam batas dibaca dulu sebelum jawaban apa pun, juga penolakan, supaya klien membaca jawabannya, bukan reset koneksi. Listener LAN tidak pernah menerima POST ini (`405 LAN_READ_ONLY`).
 

@@ -133,7 +133,11 @@ def _integer(value: Any, field: str, low: int, high: int, *, nullable: bool = Fa
 def _number(value: Any, field: str, low: float, high: float, *, nullable: bool = False) -> Optional[float]:
     if value is None and nullable:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _invalid(f"{field} must be a finite number")
+    # A JSON integer is always finite and is compared exactly below;
+    # math.isfinite() would raise OverflowError on one beyond a float.
+    if isinstance(value, float) and not math.isfinite(value):
         raise _invalid(f"{field} must be a finite number")
     if not low <= value <= high:
         raise _invalid(f"{field} is out of range")
@@ -299,12 +303,16 @@ def _reject_constant(name: str) -> Any:
 
 
 def decode_publish(raw: bytes) -> Tuple[Dict[str, Any], Dict[str, Any], Optional[Dict[str, Any]]]:
-    """parse_publish of a raw POST body (UTF-8 JSON; NaN and Infinity are refused)."""
+    """parse_publish of a raw POST body (UTF-8 JSON; NaN and Infinity are refused).
+
+    Every refusal is a MirrorRejected: a body nested too deeply for the JSON
+    decoder (RecursionError up to Python 3.11) is invalid JSON here too.
+    """
     if len(raw) > MAX_BODY_BYTES:
         raise MirrorRejected(MIRROR_TOO_LARGE, f"the body must be at most {MAX_BODY_BYTES} bytes")
     try:
         payload = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
-    except (UnicodeDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise _invalid("the body is not valid JSON") from exc
     return parse_publish(payload)
 

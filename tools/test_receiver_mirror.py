@@ -11,13 +11,16 @@ hook. Nothing contacts Data Out, a broker, a tile provider or a radio.
 from __future__ import annotations
 
 import base64
+import contextlib
 import copy
+import io
 import json
 import os
 import re
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 from typing import Any, Dict, List, Optional, Tuple
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -91,6 +94,20 @@ def _publish(seq: int = 1, *, frame: bool = True, source_id: str = SOURCE_ID) ->
     if frame:
         body["frame"] = _frame(seq)
     return body
+
+
+def _beyond_a_float() -> bytes:
+    """A publish body whose lna_db is an integer too large for a float (a 401-digit JSON integer)."""
+    body = json.dumps(_publish()).encode("utf-8")
+    assert body.count(b'"lna_db": 16') == 1
+    return body.replace(b'"lna_db": 16', b'"lna_db": 1' + b"0" * 400)
+
+
+# Bodies within the size limit that once escaped the schema check as an
+# exception other than MirrorRejected: an integer beyond a float in a float
+# field (OverflowError) and a nesting deeper than the JSON decoder's
+# recursion limit (RecursionError on Python 3.9 to 3.11).
+BODIES_BEYOND_THE_DECODER = (_beyond_a_float(), b"[" * 5000)
 
 
 class _Clock:
@@ -179,6 +196,14 @@ class MirrorSchemaTests(unittest.TestCase):
             ("dB below the floor", mutate(("frame", "db_min"), -201)),
             ("frame field missing", mutate(("frame", "db_max"), None, delete=True)),
             ("body as a list", [_publish()]),  # type: ignore[list-item]
+            # Integers beyond a float: refused as out of range, never an OverflowError.
+            ("gain beyond a float", mutate(("state", "gains", "lna_db"), 10 ** 400)),
+            ("VGA beyond a float", mutate(("state", "gains", "vga_db"), 10 ** 400)),
+            ("squelch beyond a float", mutate(("state", "vfo", "squelch_db"), -(10 ** 400))),
+            ("resolution beyond a float", mutate(("state", "scan", "resolution_hz"), 10 ** 400)),
+            ("dB floor beyond a float", mutate(("frame", "db_min"), -(10 ** 400))),
+            ("dB ceiling beyond a float", mutate(("frame", "db_max"), 10 ** 400)),
+            ("centre beyond a float", mutate(("state", "center_hz"), 10 ** 400)),
         ]
         for name, body in cases:
             with self.subTest(name), self.assertRaises(rm.MirrorRejected) as caught:
@@ -190,10 +215,16 @@ class MirrorSchemaTests(unittest.TestCase):
         good = json.dumps(_publish()).encode("utf-8")
         self.assertEqual(rm.decode_publish(good)[0]["id"], SOURCE_ID)
         for raw in (b"\xff\xfe", b"{", b"[]", good.replace(b'"db_max": -20.5', b'"db_max": NaN'),
-                    good.replace(b'"db_max": -20.5', b'"db_max": Infinity')):
+                    good.replace(b'"db_max": -20.5', b'"db_max": Infinity'), *BODIES_BEYOND_THE_DECODER):
             with self.subTest(raw=raw[:20]), self.assertRaises(rm.MirrorRejected) as caught:
                 rm.decode_publish(raw)
             self.assertEqual(caught.exception.code, rm.MIRROR_INVALID)
+        # Python 3.12 and later decode the deep body to a ValueError; the
+        # RecursionError of 3.9 to 3.11 is refused the same way.
+        with mock.patch.object(rm.json, "loads", side_effect=RecursionError("maximum recursion depth exceeded")):
+            with self.assertRaises(rm.MirrorRejected) as caught:
+                rm.decode_publish(good)
+        self.assertEqual(caught.exception.code, rm.MIRROR_INVALID)
         with self.assertRaises(rm.MirrorRejected) as caught:
             rm.decode_publish(good + b" " * rm.MAX_BODY_BYTES)
         self.assertEqual((caught.exception.code, caught.exception.status), (rm.MIRROR_TOO_LARGE, 413))
@@ -385,6 +416,18 @@ class MirrorRouteTests(_ServerCase):
         status, answer = self.post(bad)
         self.assertEqual(status, 400)
         self.assertIn("frame.bins", answer["error"])
+        self.assertIsNone(self.get()[1]["source"])
+
+    def test_a_body_beyond_the_decoder_is_answered_400(self) -> None:
+        # Once an OverflowError or RecursionError escaped the handler: a
+        # traceback in the log and a reset instead of the answer.
+        self.open_lan(self.server)
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            for raw in BODIES_BEYOND_THE_DECODER:
+                with self.subTest(raw=raw[:20]):
+                    self.assert_code(self.post(None, raw=raw), 400, rm.MIRROR_INVALID)
+        self.assertNotIn("Traceback", errors.getvalue() + self.output.getvalue())
         self.assertIsNone(self.get()[1]["source"])
 
     def test_at_most_twelve_posts_a_second(self) -> None:
