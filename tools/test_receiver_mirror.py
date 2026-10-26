@@ -449,6 +449,41 @@ class MirrorRouteTests(_ServerCase):
                 self.assert_code(self.get(port, [("Sec-Fetch-Site", "cross-site")]), 403, rm.ORIGIN_REJECTED)
                 self.assertEqual(self.get(port, [("Sec-Fetch-Site", "same-origin")])[0], 200)
 
+    def test_the_loopback_listener_reads_it_under_the_receiver_rule(self) -> None:
+        # The mirror carries what the Receiver shows, so on the loopback
+        # listener it is read like /api/receiver/*: one loopback Host on the
+        # console's port (a DNS rebinding page sends its own host name) and
+        # no other site or localhost port.
+        lan_port = self.open_lan(self.server)
+        self.post(_publish())
+        port = self.main_port
+        for host in (f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}", f"LOCALHOST.:{port}"):
+            with self.subTest(host=host):
+                status, _headers, body = _request(port, "GET", rm.ROUTE, [("Sec-Fetch-Site", "same-origin")], host=host)
+                self.assertEqual(status, 200, body)
+                self.assertEqual(_json(body)["state"]["center_hz"], _state()["center_hz"])
+        refused: List[Tuple[Optional[str], List[Tuple[str, str]]]] = [
+            (f"attacker.example:{port}", [("Sec-Fetch-Site", "same-origin")]),
+            (f"attacker.example:{port}", []),
+            (f"192.168.1.20:{port}", []),
+            (f"127.0.0.1:{lan_port}", []),
+            ("127.0.0.1", []),
+            (None, []),
+            (f"127.0.0.1:{port}", [("Host", f"127.0.0.1:{port}")]),
+            (f"127.0.0.1:{port}", [("Sec-Fetch-Site", "same-site")]),
+            (f"127.0.0.1:{port}", [("Sec-Fetch-Site", "cross-site")]),
+        ]
+        for host, headers in refused:
+            with self.subTest(host=host, headers=headers):
+                status, _headers, body = _request(port, "GET", rm.ROUTE, headers, host=host)
+                self.assert_code((status, _json(body)), 403, rm.ORIGIN_REJECTED)
+        # The LAN view keeps its own rule: an IP literal on its port, and a
+        # same-site page (another port of the tablet's site) may read it.
+        status, _headers, body = _request(lan_port, "GET", rm.ROUTE, [("Sec-Fetch-Site", "same-site")])
+        self.assertEqual(status, 200, body)
+        status, _headers, body = _request(lan_port, "GET", rm.ROUTE, host=f"attacker.example:{lan_port}")
+        self.assert_code((status, _json(body)), 403, rm.ORIGIN_REJECTED)
+
     def test_memory_only_and_cleared_with_the_lan_view(self) -> None:
         self.open_lan(self.server)
         before = sorted(str(path.relative_to(self.root)) for path in self.root.rglob("*"))

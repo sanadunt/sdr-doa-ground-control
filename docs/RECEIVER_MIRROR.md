@@ -134,7 +134,12 @@ Tidak ada yang ditulis ke disk. Post terbaru menggantikan yang sebelumnya; resta
 
 ## 5. `GET /api/mirror/receiver`
 
-Dilayani listener loopback dan listener LAN (masuk daftar route LAN). Hanya `Sec-Fetch-Site: cross-site` yang ditolak (`403 ORIGIN_REJECTED`), seperti `/api/tiles`. Aturan baca loopback `/api/receiver/*` tidak berubah dan tetap tertutup dari LAN; prefix `/api/mirror/` dipilih justru supaya aturan itu tidak tersentuh.
+Dilayani listener loopback dan listener LAN (masuk daftar route LAN), masing-masing dengan aturan bacanya sendiri. Permintaan yang gagal dijawab `403 ORIGIN_REJECTED`:
+
+- Listener loopback memakai aturan baca Receiver, sama dengan `/api/receiver/*`: `Sec-Fetch-Site` tidak ada, `none`, atau `same-origin`, dan tepat satu `Host` berupa nama loopback (`127.0.0.1`, `localhost`, `[::1]`) di port console. Mirror membawa apa yang ditampilkan Receiver (frekuensi, mode, gain, status rekam, spektrum), jadi situs lain, halaman dari port localhost lain, dan halaman DNS rebinding (yang mengirim nama host-nya sendiri) tidak bisa membacanya.
+- Listener LAN memakai aturan `Host`-nya sendiri (alamat IP, atau nama komputer ini, di port LAN) dan hanya menolak `Sec-Fetch-Site: cross-site`, seperti `/api/tiles`.
+
+Route `/api/receiver/*` tetap tertutup dari LAN; prefix `/api/mirror/` dipilih justru supaya daftar route LAN tidak perlu membukanya.
 
 ```json
 {

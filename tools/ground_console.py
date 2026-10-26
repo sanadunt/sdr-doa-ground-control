@@ -3222,11 +3222,19 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             except OSError:
                 pass
 
+    def _mirror_read_is_allowed(self) -> bool:
+        """GET /api/mirror/receiver on this listener: the Receiver's read rule.
+
+        The mirror carries what the Receiver shows (frequencies, mode, gains,
+        recording, the spectrum), so it is read like /api/receiver/*: one
+        loopback Host on this port, which stops a DNS rebinding page, and no
+        other site or localhost port. LanConsoleHandler has its own rule.
+        """
+        return self._receiver_read_is_allowed()
+
     def _get_mirror(self) -> None:
         """GET /api/mirror/receiver (both listeners): the latest mirrored state and frame with their ages."""
-        # Readable by the LAN view and this console's pages; another site's
-        # page (Sec-Fetch-Site: cross-site) is refused, as for the tiles.
-        if not lan.fetch_site_allowed(self.headers.get("Sec-Fetch-Site")):
+        if not self._mirror_read_is_allowed():
             self._send_mirror_error(rm.ORIGIN_REJECTED, "the Receiver mirror is read by this console's pages only")
             return
         self._send_json(self.console_server.receiver_mirror.view())
@@ -3613,6 +3621,16 @@ class LanConsoleHandler(ConsoleHandler):
 
     def _is_admin(self) -> bool:
         return False
+
+    def _mirror_read_is_allowed(self) -> bool:
+        # The LAN view's own Host rule (an IP literal or this machine's own
+        # names, on this port) and no cross-site request; parse_request
+        # refused anything else already, this repeats it next to the route.
+        return lan.host_allowed(
+            _header_values(self.headers, "Host"),
+            self.server.server_address[1],
+            self.server.own_names,  # type: ignore[attr-defined]
+        ) and lan.fetch_site_allowed(self.headers.get("Sec-Fetch-Site"))
 
     def _capabilities_body(self) -> Dict[str, Any]:
         body = super()._capabilities_body()

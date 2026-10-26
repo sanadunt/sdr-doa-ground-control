@@ -11,7 +11,11 @@ shows, and the LAN view draws it without a radio of its own:
   (429 beyond). The schema below is checked strictly: unknown fields, wrong
   types and values out of range are refused whole.
 * ``GET /api/mirror/receiver`` answers on both listeners with the latest
-  source, state and frame and their ages in the server's own clock.
+  source, state and frame and their ages in the server's own clock: on the
+  loopback listener under the Receiver's read rule (one loopback Host on the
+  console's port; Sec-Fetch-Site absent, none or same-origin), on the LAN
+  view under its own Host rule and without cross-site requests (403
+  ORIGIN_REJECTED otherwise).
 
 Nothing is written to disk: the latest POST replaces the previous one, and a
 restart or a closed LAN view clears it. docs/RECEIVER_MIRROR.md is the
