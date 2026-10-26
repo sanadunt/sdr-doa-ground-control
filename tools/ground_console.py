@@ -29,6 +29,13 @@ The console keeps a narrow boundary:
   own pages (Sec-Fetch-Site and a loopback Host on this port); every POST
   and DELETE needs the same-origin loopback Origin.
 
+The console listens on loopback only. The one exception is the opt-in LAN
+view (``lan_access`` in ``--config-path``, changed by an admin through
+``POST /api/lan-access``): a second listener in this process that serves the
+built UI and a read-only list of API routes to the client addresses the
+operator allowed. It stays closed while the default admin password is in use
+or admin login is disabled; ``lan_access.py`` holds its rules.
+
 Admin login uses ``SDR_DOA_ADMIN_PASSWORD`` from the environment or the
 ``--env-file`` (default: the repository ``.env``). When the variable is absent
 from both, the default password ``123456`` applies and the UI warns about it;
@@ -54,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import hmac
 import http.client
 import ipaddress
@@ -64,6 +72,7 @@ import re
 import secrets
 import signal
 import socket
+import socketserver
 import sqlite3
 import tempfile
 import threading
@@ -79,6 +88,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urlsplit
 
+import lan_access as lan
 import sdr_doa_mqtt
 from config_command_tracker import ConfigCommandTracker, MonitorPublishError
 from sdr_doa_collector import CollectorError, DEFAULT_ALLOWED_DATA_HOSTS, NodeProgressTracker, collect
@@ -294,12 +304,14 @@ ADMIN_SESSION_TTL_SECONDS = 30 * 60
 # State-changing POSTs that need a same-origin loopback Origin before their
 # body is read. Login and logout are here so a cross-site page cannot feed the
 # failed-login throttle; console-config and mqtt/connect replace the MQTT
-# monitor, which is also the config-patch publish channel; preferences would
-# otherwise let any page rewrite the operator's saved view.
+# monitor, which is also the config-patch publish channel; lan-access opens a
+# listener on the LAN; preferences would otherwise let any page rewrite the
+# operator's saved view.
 SAME_ORIGIN_POST_PATHS = frozenset({
     "/api/admin/login",
     "/api/admin/logout",
     "/api/console-config",
+    "/api/lan-access",
     "/api/mqtt/connect",
     "/api/preferences",
 })
@@ -661,6 +673,7 @@ def _default_console_config(
     *,
     mqtt_transport: str = "websockets",
     mqtt_ws_path: str = DEFAULT_MQTT_WS_PATH,
+    lan_access: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     return {
         "version": CONSOLE_CONFIG_VERSION,
@@ -670,7 +683,16 @@ def _default_console_config(
         "mqtt_transport": mqtt_transport,
         "mqtt_ws_path": mqtt_ws_path,
         "refresh_seconds": int(refresh_seconds),
+        # The opt-in LAN view (lan_access.py). It is saved here with the
+        # rest, but only POST /api/lan-access (admin) changes it, and the
+        # console-config routes never show it.
+        "lan_access": dict(lan_access) if lan_access is not None else lan.default_settings(),
     }
+
+
+def _public_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """The console config as /api/console-config shows it: without lan_access."""
+    return {key: value for key, value in config.items() if key != "lan_access"}
 
 
 def _config_integer(value: Any, field: str) -> int:
@@ -712,6 +734,10 @@ def _validate_console_config(payload: Any, fallback: Optional[Dict[str, Any]] = 
     refresh_seconds = _config_integer(payload.get("refresh_seconds", defaults["refresh_seconds"]), "refresh_seconds")
     if refresh_seconds not in ALLOWED_REFRESH_INTERVALS:
         raise ValueError("refresh_seconds is not an allowed interval")
+    fallback_lan = defaults.get("lan_access")
+    if not isinstance(fallback_lan, dict):
+        fallback_lan = lan.default_settings()
+    lan_access = lan.validate_settings(payload.get("lan_access", fallback_lan), fallback_lan)
     return _default_console_config(
         base_url.rstrip("/"),
         mqtt_host.strip(),
@@ -719,6 +745,7 @@ def _validate_console_config(payload: Any, fallback: Optional[Dict[str, Any]] = 
         refresh_seconds,
         mqtt_transport=mqtt_transport,
         mqtt_ws_path=mqtt_ws_path,
+        lan_access=lan_access,
     )
 
 
@@ -2950,6 +2977,76 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(result.body)
 
+    def _capabilities_body(self) -> Dict[str, Any]:
+        """Body of GET /api/capabilities on the loopback listener."""
+        monitor = self.console_server.mqtt_monitor
+        return {
+            # The console has one publish path, the admin-gated config
+            # patch below. It never POSTs to the Raspberry or applies
+            # settings itself; the edge agent does.
+            "read_only": False,
+            "mqtt_publish": True,
+            "remote_post": False,
+            "config_apply": False,
+            "mqtt_monitor": monitor is not None,
+            "admin_branding": True,
+            "admin_auth_required": True,
+            "admin_enabled": bool(ADMIN_PASSWORD),
+            "admin_default_password": ADMIN_PASSWORD == DEFAULT_ADMIN_PASSWORD,
+            "config_allowlist": sorted(CONFIG_ALLOWLIST),
+            "config_patch": {
+                "enabled": _monitor_can_publish(monitor),
+                "requires_admin": True,
+                "topic": sdr_doa_mqtt.TOPICS["config_patch"],
+                "qos": sdr_doa_mqtt.COMMAND_QOS,
+                "ttl_ms": CONFIG_COMMAND_TTL_MS,
+                "ranges": _config_patch_ranges(),
+            },
+            "refresh_intervals_s": sorted(ALLOWED_REFRESH_INTERVALS),
+            "snapshot_budget_ms": int(SNAPSHOT_TOTAL_BUDGET_S * 1000),
+            # Browser preferences are kept on this host (/api/preferences).
+            "preferences": True,
+            "version": self.console_server.version,
+            # Which listener answered: "local" here, "lan-view" on the LAN
+            # view (LanConsoleHandler), and the LAN view's state.
+            "access": lan.ACCESS_LOCAL,
+            "lan_access": self.console_server.lan.status(),
+        }
+
+    def _health_body(self) -> Dict[str, Any]:
+        """Body of GET /api/health.
+
+        For container and service health checks: no Data Out read, no broker
+        call, no file access. receiver_busy tells the updaters to wait while
+        the Receiver records or archives a scan; lan_access says whether the
+        LAN view is open and, when it is enabled but closed, why.
+        """
+        return {
+            "ok": True,
+            "version": self.console_server.version,
+            "receiver_busy": self.console_server.receiver_activity.busy(),
+            "lan_access": self.console_server.lan.brief_status(),
+        }
+
+    def _send_snapshot(self, base_url: str) -> None:
+        try:
+            snapshot = self.console_server.collect_snapshot(base_url)
+        except (CollectorError, ValueError, OSError, http.client.HTTPException) as exc:
+            self._send_json({"error": str(exc) or type(exc).__name__, "read_only": True}, HTTPStatus.BAD_GATEWAY)
+            return
+        self._send_json(snapshot)
+
+    def _send_lan_error(self, status: int, code: str, message: str, **extra: Any) -> None:
+        # LAN view and /api/lan-access codes go through this helper, never the
+        # Kontrol error helper, so the config-patch code contract does not
+        # count them.
+        self._send_json({**extra, "ok": False, "code": code, "error": message}, status)
+
+    # The Receiver's read rule also guards GET /api/lan-access: this
+    # console's own pages only (Sec-Fetch-Site, a loopback Host on this port).
+    def _local_read_is_allowed(self) -> bool:
+        return self._receiver_read_is_allowed()
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
         if parsed.path.startswith("/api/receiver/") and self._receiver_get(parsed):
@@ -2968,7 +3065,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             body = body.replace("__MQTT_HOST__", escape(config["mqtt_host"], quote=True))
             body = body.replace("__MQTT_PORT__", str(config["mqtt_port"]))
             body = body.replace("__REFRESH_SECONDS__", str(config["refresh_seconds"]))
-            body = body.replace("__CONSOLE_CONFIG_JSON__", _safe_config_json(config))
+            body = body.replace("__CONSOLE_CONFIG_JSON__", _safe_config_json(_public_config(config)))
             body = body.replace("__APP_NAME__", escape(branding["app_name"], quote=True))
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -2980,14 +3077,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self.wfile.write(body.encode("utf-8"))
             return
         if parsed.path == "/api/health":
-            # For container and service health checks: no Data Out read, no
-            # broker call, no file access. receiver_busy tells the updaters to
-            # wait while the Receiver records or archives a scan.
-            self._send_json({
-                "ok": True,
-                "version": self.console_server.version,
-                "receiver_busy": self.console_server.receiver_activity.busy(),
-            })
+            self._send_json(self._health_body())
             return
         if parsed.path == "/api/preferences":
             self._send_json(self.console_server.preferences.snapshot())
@@ -3007,46 +3097,23 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     HTTPStatus.BAD_REQUEST,
                 )
                 return
-            try:
-                snapshot = self.console_server.collect_snapshot(base_url)
-            except (CollectorError, ValueError, OSError, http.client.HTTPException) as exc:
-                self._send_json({"error": str(exc) or type(exc).__name__, "read_only": True}, HTTPStatus.BAD_GATEWAY)
-                return
-            self._send_json(snapshot)
+            self._send_snapshot(base_url)
             return
         if parsed.path == "/api/capabilities":
-            monitor = self.console_server.mqtt_monitor
-            self._send_json({
-                # The console has one publish path, the admin-gated config
-                # patch below. It never POSTs to the Raspberry or applies
-                # settings itself; the edge agent does.
-                "read_only": False,
-                "mqtt_publish": True,
-                "remote_post": False,
-                "config_apply": False,
-                "mqtt_monitor": monitor is not None,
-                "admin_branding": True,
-                "admin_auth_required": True,
-                "admin_enabled": bool(ADMIN_PASSWORD),
-                "admin_default_password": ADMIN_PASSWORD == DEFAULT_ADMIN_PASSWORD,
-                "config_allowlist": sorted(CONFIG_ALLOWLIST),
-                "config_patch": {
-                    "enabled": _monitor_can_publish(monitor),
-                    "requires_admin": True,
-                    "topic": sdr_doa_mqtt.TOPICS["config_patch"],
-                    "qos": sdr_doa_mqtt.COMMAND_QOS,
-                    "ttl_ms": CONFIG_COMMAND_TTL_MS,
-                    "ranges": _config_patch_ranges(),
-                },
-                "refresh_intervals_s": sorted(ALLOWED_REFRESH_INTERVALS),
-                "snapshot_budget_ms": int(SNAPSHOT_TOTAL_BUDGET_S * 1000),
-                # Browser preferences are kept on this host (/api/preferences).
-                "preferences": True,
-                "version": self.console_server.version,
-            })
+            self._send_json(self._capabilities_body())
             return
         if parsed.path == "/api/console-config":
-            self._send_json(self.console_server.get_config())
+            self._send_json(_public_config(self.console_server.get_config()))
+            return
+        if parsed.path == "/api/lan-access":
+            # Readable from this console's own pages without admin (the
+            # Configuration card); changing it needs admin (POST).
+            if not self._local_read_is_allowed():
+                self._send_lan_error(
+                    HTTPStatus.FORBIDDEN, lan.ORIGIN_REJECTED, "/api/lan-access is read from this console's own pages only",
+                )
+                return
+            self._send_json(self.console_server.lan_access_view())
             return
         if parsed.path == "/api/mqtt":
             monitor = self.console_server.mqtt_monitor
@@ -3118,6 +3185,27 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"ok": True, **snapshot})
 
+    def _post_lan_access(self) -> None:
+        """POST /api/lan-access: change the LAN view and open, move or close it at once.
+
+        The same-origin loopback Origin was checked before (SAME_ORIGIN_POST_PATHS);
+        then admin, the body, the settings, the admin password rule, the save.
+        """
+        if not self._is_admin():
+            self._send_lan_error(HTTPStatus.UNAUTHORIZED, lan.ADMIN_REQUIRED, "admin authentication required")
+            return
+        try:
+            payload = self._read_json(4096)
+        except ValueError as exc:
+            self._send_lan_error(HTTPStatus.BAD_REQUEST, lan.LAN_ACCESS_INVALID, str(exc))
+            return
+        try:
+            body = self.console_server.set_lan_access(payload)
+        except LanAccessRejected as exc:
+            self._send_lan_error(exc.status, exc.code, exc.message)
+            return
+        self._send_json({"ok": True, **body})
+
     def do_PUT(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
         if parsed.path == "/api/preferences":
@@ -3151,11 +3239,18 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 payload = self._read_json(16 * 1024)
                 if not isinstance(payload, dict):
                     raise ValueError("request must be a JSON object")
+                if "lan_access" in payload:
+                    # No admin is needed here, so the LAN view never changes
+                    # through this route.
+                    raise ValueError("lan_access is changed through POST /api/lan-access (admin)")
                 current = self.console_server.get_config()
                 config = self.console_server.apply_config({**current, **payload})
-                self._send_json(config)
+                self._send_json(_public_config(config))
             except (ValueError, OSError) as exc:
                 self._send_json({"ok": False, "error": str(exc), "read_only": True}, HTTPStatus.BAD_REQUEST)
+            return
+        if parsed.path == "/api/lan-access":
+            self._post_lan_access()
             return
         if parsed.path == "/api/admin/login":
             try:
@@ -3301,6 +3396,364 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/receiver/") and self._receiver_delete(parsed):
             return
         self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+
+class LanAccessRejected(Exception):
+    """A refused POST /api/lan-access: HTTP status, code and message."""
+
+    def __init__(self, status: int, code: str, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.message = message
+
+
+# The whole answer to a client address the LAN view does not admit: no body,
+# no server name, nothing about the console.
+_LAN_REFUSAL = (
+    b"HTTP/1.0 403 Forbidden\r\n"
+    b"Content-Length: 0\r\n"
+    b"Cache-Control: no-store\r\n"
+    b"Connection: close\r\n"
+    b"\r\n"
+)
+
+
+class _HeadBody:
+    """wfile of a HEAD request: the status line and headers go out, the body does not."""
+
+    def __init__(self, raw: Any) -> None:
+        self.raw = raw
+        self.headers_sent = False
+
+    def write(self, data: bytes) -> int:
+        if self.headers_sent:
+            return len(data)
+        return self.raw.write(data)
+
+    def flush(self) -> None:
+        self.raw.flush()
+
+
+class LanConsoleHandler(ConsoleHandler):
+    """One request on the LAN view listener; lan_access.py holds the rules.
+
+    In order: the client address (not allowed: 403 without a body, logged at
+    most once a minute per address), the method (GET and HEAD only, else 405
+    LAN_READ_ONLY), Host and Sec-Fetch-Site (403 ORIGIN_REJECTED), then the
+    path: the built UI and a fixed list of read-only API routes, else 403
+    LAN_READ_ONLY. An admin cookie is never read here.
+    """
+
+    timeout = lan.REQUEST_TIMEOUT_S
+    _lan_client = False
+
+    @property
+    def console_server(self) -> "GroundConsoleServer":
+        return self.server.console  # type: ignore[attr-defined,no-any-return]
+
+    def setup(self) -> None:
+        super().setup()
+        self._lan_client = self.server.admits(self.client_address[0])  # type: ignore[attr-defined]
+        if not self._lan_client:
+            self.connection.settimeout(lan.REFUSED_CLIENT_TIMEOUT_S)
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        # A refused address is logged by the refusal log only.
+        if self._lan_client:
+            print(f"[ground-console] lan {self.client_address[0]} " + (fmt % args), flush=True)
+
+    def send_error(self, code: int, message: Optional[str] = None, explain: Optional[str] = None) -> None:
+        if not self._lan_client:
+            self._refuse_client()
+            return
+        super().send_error(code, message, explain)
+
+    def _discard_small_body(self) -> None:
+        """Read and drop a small body of a refused request, so the client sees the answer, not a reset."""
+        headers = getattr(self, "headers", None)
+        if headers is None or (headers.get("Expect") or "").strip().lower() == "100-continue":
+            return
+        try:
+            length = int(headers.get("Content-Length") or "0")
+        except ValueError:
+            return
+        if 0 < length <= lan.MAX_DISCARDED_BODY_BYTES:
+            try:
+                self.rfile.read(length)
+            except OSError:
+                pass
+
+    def _refuse_client(self) -> None:
+        self.server.refusals.note(str(self.client_address[0]))  # type: ignore[attr-defined]
+        self.close_connection = True
+        self._discard_small_body()
+        # Written as is: after a malformed request line the handler is in
+        # HTTP/0.9 mode, where send_response would drop the status line.
+        self.wfile.write(_LAN_REFUSAL)
+
+    def _refuse_method(self) -> None:
+        # The connection closes after the answer; a large body is never read.
+        self.close_connection = True
+        self._discard_small_body()
+        self._send_json(
+            {"ok": False, "code": lan.LAN_READ_ONLY, "error": "the LAN view is read only"},
+            HTTPStatus.METHOD_NOT_ALLOWED,
+            headers={"Allow": ", ".join(lan.READ_METHODS)},
+        )
+
+    def handle_expect_100(self) -> bool:
+        if not self._lan_client:
+            self._refuse_client()
+            return False
+        if self.command not in lan.READ_METHODS:
+            return True  # refused right after, without a 100 Continue
+        return super().handle_expect_100()
+
+    def parse_request(self) -> bool:
+        if not super().parse_request():
+            return False
+        if not self._lan_client:
+            self._refuse_client()
+            return False
+        if self.command not in lan.READ_METHODS:
+            self._refuse_method()
+            return False
+        if not lan.host_allowed(
+            self.headers.get_all("Host") or [],
+            self.server.server_address[1],
+            self.server.own_names,  # type: ignore[attr-defined]
+        ):
+            message = "the LAN view answers a Host that is an IP address, a .local name or this host's name, on its own port"
+        elif not lan.fetch_site_allowed(self.headers.get("Sec-Fetch-Site")):
+            message = "the LAN view refuses cross-site requests"
+        else:
+            return True
+        self.close_connection = True
+        self._send_lan_error(HTTPStatus.FORBIDDEN, lan.ORIGIN_REJECTED, message)
+        return False
+
+    def end_headers(self) -> None:
+        super().end_headers()
+        if isinstance(self.wfile, _HeadBody):
+            self.wfile.headers_sent = True
+
+    def _admin_token(self) -> str:
+        return ""
+
+    def _is_admin(self) -> bool:
+        return False
+
+    def _capabilities_body(self) -> Dict[str, Any]:
+        body = super()._capabilities_body()
+        body.update({
+            # Nothing is written from the LAN: no admin, no Kontrol, no
+            # preference writes, no Receiver.
+            "read_only": True,
+            "mqtt_publish": False,
+            "admin_branding": False,
+            "admin_enabled": False,
+            "admin_default_password": False,
+            "config_patch": {**body["config_patch"], "enabled": False},
+            "preferences_read_only": True,
+            "access": lan.ACCESS_LAN_VIEW,
+            "lan_access": self.console_server.lan.brief_status(),
+        })
+        return body
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        raw = self.wfile
+        self.wfile = _HeadBody(raw)
+        try:
+            self.do_GET()
+        finally:
+            self.wfile = raw
+
+    def do_GET(self) -> None:  # noqa: N802
+        parsed = urlsplit(self.path)
+        route = lan.lan_route(parsed.path)
+        if route is None:
+            self._send_lan_error(HTTPStatus.FORBIDDEN, lan.LAN_READ_ONLY, "the LAN view answers the console's read-only pages only")
+            return
+        if route == lan.ROUTE_UI:
+            # The built UI only, never the legacy page or /receiver/.
+            self._send_frontend(parsed.path)
+            return
+        if route == lan.ROUTE_TILE:
+            self._send_tile(parsed.path)
+            return
+        if route == "/api/snapshot":
+            # Only the configured Data Out; a base_url in the query is ignored.
+            self._send_snapshot(self.console_server.base_url)
+            return
+        if route == "/api/preferences":
+            # Read only: the page keeps its own changes in this browser.
+            self._send_json({**self.console_server.preferences.snapshot(), "read_only": True})
+            return
+        if route == "/api/admin/status":
+            self._send_json({"authenticated": False})
+            return
+        # health, capabilities, console-config, mqtt, mqtt/rdf-node, branding:
+        # the loopback listener's answer (capabilities through the override).
+        super().do_GET()
+
+    def do_POST(self) -> None:  # noqa: N802
+        self._refuse_method()
+
+    do_PUT = do_POST
+    do_DELETE = do_POST
+
+
+class LanViewServer(ThreadingHTTPServer):
+    """The LAN view listener: a second socket of the same console."""
+
+    daemon_threads = True
+    # Closing (a move, disable or console stop) does not wait for requests
+    # in flight; they end on their own.
+    block_on_close = False
+
+    def __init__(
+        self,
+        console: "GroundConsoleServer",
+        address: Tuple[str, int],
+        allowed: Sequence[lan.Network],
+        refusals: lan.RefusalLog,
+    ) -> None:
+        self.console = console
+        self.allowed = tuple(allowed)
+        self.own_names = lan.own_host_names()
+        self.refusals = refusals
+        self.address_family = socket.AF_INET6 if ":" in address[0] else socket.AF_INET
+        super().__init__(address, LanConsoleHandler)
+
+    def server_bind(self) -> None:
+        if self.address_family == socket.AF_INET6:
+            # "::" also takes IPv4 clients (as IPv4-mapped peers); a literal
+            # IPv6 address takes only its own family.
+            try:
+                self.socket.setsockopt(
+                    socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0 if self.server_address[0] == "::" else 1,
+                )
+            except (AttributeError, OSError):
+                pass
+        # HTTPServer.server_bind would also resolve a host name (getfqdn),
+        # which can wait on DNS inside a request that applies the setting.
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = port
+
+    def admits(self, address: Any) -> bool:
+        return lan.client_allowed(self.allowed, address)
+
+
+class LanAccessManager:
+    """Opens, moves and closes the LAN view listener of one console."""
+
+    def __init__(self, console: "GroundConsoleServer") -> None:
+        self.console = console
+        self._lock = threading.RLock()
+        self._server: Optional[LanViewServer] = None
+        self._thread: Optional[threading.Thread] = None
+        self._settings: Dict[str, Any] = lan.default_settings()
+        self._reason: Optional[str] = lan.CLOSED_DISABLED
+        self._detail: Optional[str] = None
+        self.refusals = lan.RefusalLog(lambda message: print(f"[ground-console] {message}", flush=True))
+
+    def _closed_reason(self, settings: Dict[str, Any]) -> Optional[str]:
+        if not settings.get("enabled"):
+            return lan.CLOSED_DISABLED
+        if not ADMIN_PASSWORD:
+            return lan.CLOSED_ADMIN_DISABLED
+        if ADMIN_PASSWORD == DEFAULT_ADMIN_PASSWORD:
+            return lan.CLOSED_ADMIN_PASSWORD_DEFAULT
+        if settings.get("port") == self.console.server_address[1]:
+            return lan.CLOSED_PORT_CONFLICT
+        return None
+
+    def apply(self, settings: Dict[str, Any], *, allowed: Optional[Sequence[lan.Network]] = None) -> Dict[str, Any]:
+        """Close the listener, then open it again for these settings when they allow it.
+
+        ``settings`` is a validated lan_access block. ``allowed`` replaces the
+        parsed allowed_clients; only tests pass it, to admit a loopback client.
+        """
+        with self._lock:
+            self._close_locked()
+            self._settings = dict(settings)
+            self._detail = None
+            reason = self._closed_reason(settings)
+            if reason is not None:
+                self._reason = reason
+                if reason != lan.CLOSED_DISABLED:
+                    _log_warning(f"lan_access is enabled but the LAN view stays closed: {lan.CLOSED_REASON_TEXT[reason]}")
+                return self.status()
+            allowed_networks = list(allowed) if allowed is not None else lan.networks(settings)
+            try:
+                server = LanViewServer(self.console, (str(settings["bind"]), int(settings["port"])), allowed_networks, self.refusals)
+            except OSError as exc:
+                self._reason = lan.CLOSED_BIND_FAILED
+                self._detail = (errno.errorcode.get(exc.errno) if exc.errno else None) or type(exc).__name__
+                _log_warning(f"the LAN view could not bind {settings['bind']}:{settings['port']} ({self._detail}); it stays closed")
+                return self.status()
+            thread = threading.Thread(target=server.serve_forever, name="lan-view", daemon=True)
+            thread.start()
+            self._server = server
+            self._thread = thread
+            self._reason = None
+            status = self.status()
+            print(
+                f"[ground-console] LAN view (read only) open on http://{status['address']}/ "
+                f"for {len(allowed_networks)} allowed client entr{'y' if len(allowed_networks) == 1 else 'ies'}",
+                flush=True,
+            )
+            return status
+
+    def _close_locked(self) -> None:
+        server, thread = self._server, self._thread
+        self._server = None
+        self._thread = None
+        if server is None:
+            return
+        try:
+            server.shutdown()
+        finally:
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        print("[ground-console] LAN view closed", flush=True)
+
+    def close(self) -> None:
+        """Close the listener for good (console stop)."""
+        with self._lock:
+            was_open = self._server is not None
+            self._close_locked()
+            if was_open:
+                self._reason = lan.CLOSED_STOPPED
+
+    def status(self) -> Dict[str, Any]:
+        """The LAN view's state for /api/lan-access and the loopback capabilities."""
+        with self._lock:
+            server = self._server
+            settings = self._settings
+            address = None
+            if server is not None:
+                host, port = server.server_address[:2]
+                address = f"[{host}]:{port}" if ":" in str(host) else f"{host}:{port}"
+            return {
+                "enabled": bool(settings.get("enabled")),
+                "state": lan.STATE_OPEN if server is not None else lan.STATE_CLOSED,
+                "reason": None if server is not None else self._reason,
+                "detail": None if server is not None else self._detail,
+                "bind": settings.get("bind"),
+                "port": settings.get("port"),
+                "address": address,
+                "allowed_client_count": len(settings.get("allowed_clients") or []),
+            }
+
+    def brief_status(self) -> Dict[str, Any]:
+        """The state without addresses, for /api/health and the LAN view's capabilities."""
+        full = self.status()
+        return {key: full[key] for key in ("enabled", "state", "reason")}
 
 
 class _Flight:
@@ -3476,6 +3929,12 @@ class GroundConsoleServer(ThreadingHTTPServer):
         self.archive_exports = ra.ArchiveExports()
         self.archive_export_slots = threading.BoundedSemaphore(ra.EXPORT_SLOTS)
         self._retention_scheduler: Optional[ra.RetentionScheduler] = None
+        # The opt-in LAN view: a second listener of this process
+        # (lan_access.py). It opens below, once this loopback socket is bound.
+        self.lan = LanAccessManager(self)
+        # One lan_access change is saved and applied at a time, so the saved
+        # setting and the open listener always agree.
+        self._lan_apply_lock = threading.Lock()
         super().__init__(address, ConsoleHandler)
         # Only once the socket is bound: a failed bind leaves no thread. The
         # first pass waits, so it never delays the first answer or the
@@ -3487,6 +3946,9 @@ class GroundConsoleServer(ThreadingHTTPServer):
             log=lambda message: print(message, flush=True),
         )
         self._retention_scheduler.start()
+        # An enabled LAN view opens now, unless the admin password is the
+        # default or admin login is disabled; the status and the log say why.
+        self.lan.apply(self._config["lan_access"])
 
     def run_retention(self) -> Optional[Dict[str, Any]]:
         """One background retention pass (no time budget beyond the per-pass item bound)."""
@@ -3504,6 +3966,10 @@ class GroundConsoleServer(ThreadingHTTPServer):
 
     def server_close(self) -> None:
         try:
+            # The LAN view closes with the console (server_close, SIGTERM).
+            lan_manager = getattr(self, "lan", None)
+            if lan_manager is not None:
+                lan_manager.close()
             # The scheduler stops before the store closes. TCPServer calls this
             # on a failed bind too, before the scheduler exists.
             scheduler = getattr(self, "_retention_scheduler", None)
@@ -3544,10 +4010,51 @@ class GroundConsoleServer(ThreadingHTTPServer):
 
     def update_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         with self._config_lock:
-            normalized = _validate_console_config(config, self._config)
+            # lan_access changes only through set_lan_access().
+            normalized = _validate_console_config({**config, "lan_access": self._config["lan_access"]}, self._config)
             _save_console_config(self.config_path, normalized)
             self._config = normalized
             return dict(self._config)
+
+    def lan_access_view(self) -> Dict[str, Any]:
+        """Body of GET /api/lan-access: the saved setting and the listener's state."""
+        with self._config_lock:
+            settings = dict(self._config["lan_access"])
+        return {"config": settings, "status": self.lan.status()}
+
+    def set_lan_access(self, payload: Any) -> Dict[str, Any]:
+        """Validate, save and apply a lan_access change (POST /api/lan-access).
+
+        Fields the payload leaves out keep their saved value. Enabling is
+        refused while the default admin password is in use. The listener
+        opens, moves or closes at once; a bind that fails leaves it closed
+        with the reason in the returned status.
+        """
+        with self._lan_apply_lock:
+            with self._config_lock:
+                current = self._config["lan_access"]
+                try:
+                    settings = lan.validate_settings(payload, current, console_port=self.server_address[1])
+                except ValueError as exc:
+                    raise LanAccessRejected(HTTPStatus.BAD_REQUEST, lan.LAN_ACCESS_INVALID, str(exc)) from exc
+                if settings["enabled"] and ADMIN_PASSWORD == DEFAULT_ADMIN_PASSWORD:
+                    raise LanAccessRejected(
+                        HTTPStatus.CONFLICT,
+                        lan.LAN_ADMIN_PASSWORD_DEFAULT,
+                        "the LAN view stays off while the default admin password is in use; set SDR_DOA_ADMIN_PASSWORD and restart the console",
+                    )
+                config = {**self._config, "lan_access": settings}
+                try:
+                    _save_console_config(self.config_path, config)
+                except OSError as exc:
+                    raise LanAccessRejected(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        lan.LAN_ACCESS_SAVE_FAILED,
+                        f"lan_access could not be saved ({type(exc).__name__})",
+                    ) from exc
+                self._config = config
+            status = self.lan.apply(settings)
+        return {"config": dict(settings), "status": status}
 
     def apply_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """Persist local console config and reconcile its local MQTT monitor."""
@@ -3567,7 +4074,9 @@ class GroundConsoleServer(ThreadingHTTPServer):
         retired: Optional[Any] = None
         try:
             with self._config_lock:
-                normalized = _validate_console_config(config, self._config)
+                # lan_access changes only through set_lan_access(); a config
+                # read before a concurrent change must not put the old one back.
+                normalized = _validate_console_config({**config, "lan_access": self._config["lan_access"]}, self._config)
                 old_connection = _mqtt_connection(self._config)
                 new_connection = _mqtt_connection(normalized)
                 new_host = new_connection[0]
