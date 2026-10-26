@@ -81,7 +81,18 @@ from urllib.parse import parse_qs, urlsplit
 
 import sdr_doa_mqtt
 from config_command_tracker import ConfigCommandTracker, MonitorPublishError
-from sdr_doa_collector import CollectorError, DEFAULT_ALLOWED_DATA_HOSTS, NodeProgressTracker, collect
+from sdr_doa_collector import (
+    DATA_OUT_HOST_IN_USE,
+    DATA_OUT_PORT,
+    DEFAULT_DATA_OUT_HOSTS,
+    CollectorError,
+    DataOutHostError,
+    NodeProgressTracker,
+    check_data_out_url,
+    collect,
+    data_out_url_host,
+    normalize_data_out_hosts,
+)
 import receiver_archive as ra
 from receiver_archive import ArchiveError
 from receiver_record_store import (
@@ -264,10 +275,10 @@ def _admin_password_from_sources(
     return DEFAULT_ADMIN_PASSWORD
 
 
-# HTTP Data Out is the local-LAN path. PPP is reserved for MQTT transport;
-# keeping this set identical to the collector prevents a UI-only route from
-# advertising a target that the actual GET collector will reject.
-ALLOWED_DATA_HOSTS = frozenset(DEFAULT_ALLOWED_DATA_HOSTS)
+# HTTP Data Out (the fallback) is read from a host in the saved host list,
+# console.json data_out_hosts (default DEFAULT_DATA_OUT_HOSTS), on port 8081
+# only. Every check here and the collector itself get that same list, so the
+# console never accepts a URL the collector would refuse to read.
 DEFAULT_BIND = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_COMMAND_TTL_MS = 10_000
@@ -343,22 +354,6 @@ MQTT_DEPENDENCY_ERROR = "MQTT monitor dependency paho-mqtt is not installed"
 # The dry-run preview validates with the MQTT contract, so its allowlist is
 # the contract's own range table.
 CONFIG_ALLOWLIST = dict(sdr_doa_mqtt.CONFIG_RANGES)
-
-
-def _is_allowed_base_url(value: str) -> bool:
-    if not isinstance(value, str):
-        return False
-    parsed = urlsplit(value)
-    if parsed.scheme != "http" or parsed.username or parsed.password:
-        return False
-    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
-        return False
-    hostname = (parsed.hostname or "").lower().rstrip(".")
-    try:
-        port = parsed.port
-    except ValueError:
-        return False
-    return hostname in {item.lower().rstrip(".") for item in ALLOWED_DATA_HOSTS} and port in (None, 8081)
 
 
 def _is_allowed_mqtt_host(value: str) -> bool:
@@ -661,10 +656,13 @@ def _default_console_config(
     *,
     mqtt_transport: str = "websockets",
     mqtt_ws_path: str = DEFAULT_MQTT_WS_PATH,
+    data_out_hosts: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     return {
         "version": CONSOLE_CONFIG_VERSION,
         "base_url": base_url,
+        # Hosts Data Out may be read from (port 8081); base_url's host is one of them.
+        "data_out_hosts": list(DEFAULT_DATA_OUT_HOSTS if data_out_hosts is None else data_out_hosts),
         "mqtt_host": mqtt_host,
         "mqtt_port": int(mqtt_port),
         "mqtt_transport": mqtt_transport,
@@ -688,13 +686,37 @@ def _config_integer(value: Any, field: str) -> int:
     raise ValueError(f"{field} must be an integer")
 
 
+def _validate_data_out(payload: Dict[str, Any], defaults: Dict[str, Any]) -> Tuple[str, List[str]]:
+    """Return the Data Out URL and host list, or raise DataOutHostError.
+
+    The list is checked first, then the URL against it. A list that drops the
+    host of an unchanged URL is DATA_OUT_HOST_IN_USE; a URL whose host is not
+    in the list is DATA_OUT_URL_NOT_ALLOWED. Both errors carry the list.
+    """
+    hosts = normalize_data_out_hosts(
+        payload.get("data_out_hosts", defaults.get("data_out_hosts", list(DEFAULT_DATA_OUT_HOSTS)))
+    )
+    base_url = payload.get("base_url", defaults["base_url"])
+    url_host = data_out_url_host(base_url)
+    if url_host is not None and url_host in hosts:
+        return str(base_url).rstrip("/"), hosts
+    previous = data_out_url_host(defaults.get("base_url"))
+    if "data_out_hosts" in payload and url_host is not None and url_host == previous:
+        raise DataOutHostError(
+            DATA_OUT_HOST_IN_USE,
+            f"data_out_hosts must keep {url_host}, the host of the Data Out URL "
+            f"({', '.join(hosts)} given; port {DATA_OUT_PORT})",
+            host=url_host,
+            hosts=hosts,
+        )
+    return check_data_out_url(base_url, hosts), hosts
+
+
 def _validate_console_config(payload: Any, fallback: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     defaults = dict(fallback or _default_console_config())
     if not isinstance(payload, dict):
         raise ValueError("console config must be a JSON object")
-    base_url = payload.get("base_url", defaults["base_url"])
-    if not _is_allowed_base_url(base_url):
-        raise ValueError("base_url is outside the local SDR-DoA allowlist")
+    base_url, data_out_hosts = _validate_data_out(payload, defaults)
     mqtt_host = payload.get("mqtt_host", defaults["mqtt_host"])
     if mqtt_host is None:
         mqtt_host = ""
@@ -713,12 +735,13 @@ def _validate_console_config(payload: Any, fallback: Optional[Dict[str, Any]] = 
     if refresh_seconds not in ALLOWED_REFRESH_INTERVALS:
         raise ValueError("refresh_seconds is not an allowed interval")
     return _default_console_config(
-        base_url.rstrip("/"),
+        base_url,
         mqtt_host.strip(),
         mqtt_port,
         refresh_seconds,
         mqtt_transport=mqtt_transport,
         mqtt_ws_path=mqtt_ws_path,
+        data_out_hosts=data_out_hosts,
     )
 
 
@@ -799,7 +822,27 @@ def _load_console_config(
         pass
     accepted: Dict[str, Any] = {}
     rejected: List[str] = []
-    for field in sorted(key for key in payload if key in defaults and key != "version"):
+    # The URL is checked against the host list, so the two are taken
+    # together first; failing that, the list on its own (with the default
+    # URL), then the URL against whichever list was kept.
+    data_out = {field: payload[field] for field in DATA_OUT_FIELDS if field in payload}
+    try:
+        _validate_console_config(data_out, defaults)
+        accepted.update(data_out)
+    except (ValueError, TypeError):
+        if "data_out_hosts" in data_out:
+            try:
+                _validate_console_config({"data_out_hosts": data_out["data_out_hosts"]}, defaults)
+                accepted["data_out_hosts"] = data_out["data_out_hosts"]
+            except (ValueError, TypeError):
+                rejected.append("data_out_hosts")
+        if "base_url" in data_out:
+            try:
+                _validate_console_config({**accepted, "base_url": data_out["base_url"]}, defaults)
+                accepted["base_url"] = data_out["base_url"]
+            except (ValueError, TypeError):
+                rejected.append("base_url")
+    for field in sorted(key for key in payload if key in defaults and key not in ("version", *DATA_OUT_FIELDS)):
         try:
             _validate_console_config({field: payload[field]}, defaults)
         except (ValueError, TypeError):
@@ -819,6 +862,8 @@ def _load_console_config(
 
 # Connection fields that a command-line flag of the same name can set.
 CLI_CONFIG_FIELDS = ("base_url", "mqtt_host", "mqtt_port", "mqtt_transport", "mqtt_ws_path")
+# Validated together: base_url's host must be in data_out_hosts.
+DATA_OUT_FIELDS = ("data_out_hosts", "base_url")
 
 
 def _explicit_cli_options(argv: Optional[Sequence[str]]) -> Set[str]:
@@ -855,8 +900,11 @@ def _apply_cli_overrides(
 
 # First-start seed for console.json: environment variable, config field and
 # whether the value is an integer. Read from the process environment first,
-# then the env file; validated like a saved config.
+# then the env file; validated like a saved config. The host list is comma
+# separated and replaces the default list; base_url is checked against the
+# list that applies (seeded or default).
 SEED_ENV_FIELDS: Tuple[Tuple[str, str, bool], ...] = (
+    ("SDR_DOA_SEED_DATA_OUT_HOSTS", "data_out_hosts", False),
     ("SDR_DOA_SEED_BASE_URL", "base_url", False),
     ("SDR_DOA_SEED_MQTT_HOST", "mqtt_host", False),
     ("SDR_DOA_SEED_MQTT_PORT", "mqtt_port", True),
@@ -883,6 +931,7 @@ def _seed_console_config(
     fallback = dotenv_values or {}
     defaults = _default_console_config()
     accepted: Dict[str, Any] = {}
+    seeded_hosts: Optional[str] = None
     for variable, field, integer in SEED_ENV_FIELDS:
         raw = source.get(variable)
         if raw is None or not raw.strip():
@@ -891,6 +940,29 @@ def _seed_console_config(
             continue
         text = raw.strip()
         value: Any = text
+        if field == "data_out_hosts":
+            value = [part.strip() for part in text.split(",")]
+            # On its own the list is checked with base_url left out, so a
+            # list without the default URL's host waits for the URL seed.
+            try:
+                normalize_data_out_hosts(value)
+            except DataOutHostError:
+                log(f"{variable} is not a valid {field}; ignored")
+                continue
+            accepted[field] = value
+            seeded_hosts = variable
+            continue
+        if field == "base_url":
+            try:
+                _validate_data_out({**accepted, field: value}, defaults)
+            except (ValueError, TypeError):
+                if data_out_url_host(value) is not None:
+                    log(f"{variable} names a host outside the Data Out host list; ignored")
+                else:
+                    log(f"{variable} is not a valid {field}; ignored")
+                continue
+            accepted[field] = value
+            continue
         if integer:
             if _SEED_INTEGER_RE.fullmatch(text) is None:
                 log(f"{variable} is not a valid {field}; ignored")
@@ -902,6 +974,13 @@ def _seed_console_config(
             log(f"{variable} is not a valid {field}; ignored")
             continue
         accepted[field] = value
+    if seeded_hosts is not None and "base_url" not in accepted:
+        try:
+            _validate_data_out({"data_out_hosts": accepted["data_out_hosts"]}, defaults)
+        except (ValueError, TypeError):
+            # The list would leave the default Data Out URL outside it.
+            log(f"{seeded_hosts} does not include the host of the Data Out URL; ignored")
+            del accepted["data_out_hosts"]
     return _validate_console_config(accepted, defaults)
 
 
@@ -3001,11 +3080,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/snapshot":
             query = parse_qs(parsed.query, keep_blank_values=False)
             base_url = query.get("base_url", [self.console_server.base_url])[0]
-            if not _is_allowed_base_url(base_url):
-                self._send_json(
-                    {"error": "base_url is outside the local SDR-DoA allowlist", "read_only": True},
-                    HTTPStatus.BAD_REQUEST,
-                )
+            try:
+                check_data_out_url(base_url, self.console_server.data_out_hosts)
+            except DataOutHostError as exc:
+                self._send_data_out_error(exc)
                 return
             try:
                 snapshot = self.console_server.collect_snapshot(base_url)
@@ -3085,6 +3163,21 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
+    def _send_data_out_error(self, exc: DataOutHostError) -> None:
+        # The code is a variable, so the Kontrol error-code contract does not
+        # count these; the Configuration page translates them with the list.
+        body: Dict[str, Any] = {
+            "ok": False,
+            "code": exc.code,
+            "error": str(exc),
+            "read_only": True,
+            "data_out_hosts": list(exc.hosts),
+            "port": DATA_OUT_PORT,
+        }
+        if exc.host:
+            body["host"] = exc.host
+        self._send_json(body, HTTPStatus.BAD_REQUEST)
+
     def _send_preferences_error(self, status: int, code: str, message: str) -> None:
         # Same body shape as the config-patch errors; the browser sync only
         # logs these, Kontrol never shows them.
@@ -3154,6 +3247,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 current = self.console_server.get_config()
                 config = self.console_server.apply_config({**current, **payload})
                 self._send_json(config)
+            except DataOutHostError as exc:
+                self._send_data_out_error(exc)
             except (ValueError, OSError) as exc:
                 self._send_json({"ok": False, "error": str(exc), "read_only": True}, HTTPStatus.BAD_REQUEST)
             return
@@ -3402,11 +3497,13 @@ class GroundConsoleServer(ThreadingHTTPServer):
         self.frontend_dir = Path(frontend_dir).resolve() if frontend_dir is not None else None
         if not _is_loopback_bind(address[0]):
             raise ValueError("Ground Console must bind to loopback; admin branding is local-only")
-        if not _is_allowed_base_url(base_url):
-            raise ValueError("base_url is outside the local SDR-DoA allowlist")
+        if not isinstance(base_url, str):
+            raise ValueError("base_url must be a string")
         self.config_path = Path(config_path).expanduser() if config_path else DEFAULT_CONFIG_PATH
         fallback = _default_console_config(base_url.rstrip("/"), refresh_seconds=DEFAULT_REFRESH_SECONDS)
         self._config = _validate_console_config(config, fallback) if config is not None else _load_console_config(self.config_path, fallback)
+        # base_url is the fallback URL; it has to be in the host list in use.
+        check_data_out_url(base_url, self._config["data_out_hosts"])
         self._config_lock = threading.RLock()
         self.mqtt_monitor = mqtt_monitor
         if mqtt_monitor is not None:
@@ -3522,6 +3619,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
         still waited on a slow node, piling up threads and GETs. Requests that
         arrive during a collection now receive that collection's result.
         """
+        hosts = self.data_out_hosts
         return self._snapshot_flights.run(
             base_url.rstrip("/"),
             lambda: collect(
@@ -3530,6 +3628,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
                 clock_source="remote_unverified",
                 total_budget_s=SNAPSHOT_TOTAL_BUDGET_S,
                 progress_tracker=self.node_progress,
+                allowed_hosts=hosts,
             ),
             SNAPSHOT_TOTAL_BUDGET_S + SNAPSHOT_WAIT_GRACE_S,
         )
@@ -3537,6 +3636,11 @@ class GroundConsoleServer(ThreadingHTTPServer):
     @property
     def base_url(self) -> str:
         return str(self._config["base_url"])
+
+    @property
+    def data_out_hosts(self) -> List[str]:
+        with self._config_lock:
+            return list(self._config["data_out_hosts"])
 
     def get_config(self) -> Dict[str, Any]:
         with self._config_lock:
@@ -3838,7 +3942,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "and one admin-confirmed config-patch publish"
         )
     )
-    parser.add_argument("--base-url", default="http://doasdr.local:8081", help="SDR-DoA Data Out base URL")
+    parser.add_argument(
+        "--base-url",
+        default="http://doasdr.local:8081",
+        help="SDR-DoA Data Out base URL for this run (port 8081, a host in the saved Data Out host list)",
+    )
     parser.add_argument("--legacy-ui", action="store_true", help="use the previous embedded UI instead of the frontend build")
     parser.add_argument("--bind", default=DEFAULT_BIND, help="local bind address")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="local console port")
@@ -3902,8 +4010,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit("--mqtt-port must be between 1 and 65535")
     if not _is_allowed_mqtt_ws_path(args.mqtt_ws_path):
         raise SystemExit("--mqtt-ws-path must start with / and use only letters, digits, and ._~/-")
-    if not _is_allowed_base_url(args.base_url):
-        raise SystemExit("--base-url is outside the local SDR-DoA allowlist")
     if not (0 <= args.tile_cache_max_mb <= MAX_TILE_CACHE_MB):
         raise SystemExit(f"--tile-cache-max-mb must be between 0 and {MAX_TILE_CACHE_MB}")
     env_path = Path(args.env_file).expanduser()
@@ -3919,7 +4025,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # Saved settings first (seeded and saved on the first start); a typed
     # --base-url or --mqtt-* flag then overrides them for this run only.
     config = _initial_console_config(config_path, dotenv_values=env_values)
-    config = _apply_cli_overrides(config, args, _explicit_cli_options(argv))
+    try:
+        # A typed --base-url is checked against the saved host list (on a
+        # first start the one just seeded, which is the defaults without a seed).
+        config = _apply_cli_overrides(config, args, _explicit_cli_options(argv))
+    except DataOutHostError as exc:
+        raise SystemExit(f"--base-url: {exc}; the list is data_out_hosts in {config_path} (Konfigurasi)") from None
     monitor = _new_mqtt_monitor(*_mqtt_connection(config)) if config["mqtt_host"] else None
     if isinstance(monitor, _UnavailableMqttMonitor):
         print(f"MQTT monitor unavailable: {monitor.error}", flush=True)

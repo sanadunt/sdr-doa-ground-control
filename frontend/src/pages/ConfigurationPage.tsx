@@ -23,6 +23,7 @@ import {
   refreshWarningKey,
   summarizeDryRun,
 } from '../lib/configForm';
+import { DATA_OUT_PORT, DEFAULT_DATA_OUT_HOSTS, addDataOutHost, checkDataOutDraft, dataOutErrorNotice, dataOutUrlHost } from '../lib/dataOutHosts';
 import { MAX_LOGO_BYTES, pngDataUrl, pngLogoErrorKey, validatePngLogo } from '../lib/pngLogo';
 import { CONFIG_PATCH_FIELDS, configPatchPublishable, fieldRange, plainNumber } from '../lib/configPatch';
 import { DEFAULT_MQTT_TRANSPORT, DEFAULT_MQTT_WS_PATH, mqttTargetFromConfig, mqttTransportFields } from '../lib/mqttMonitor';
@@ -40,9 +41,14 @@ import type { KeyValueItem, PageTone } from '../components/page';
 const DRY_RUN_FIELDS = CONFIG_PATCH_FIELDS;
 /** config-reported carries the monitor connection and the values the dry-run placeholders show. */
 const REPORTED_POLL_MS = 3_000;
-/** Data Out URLs the server accepts (ground_console.py ALLOWED_HOSTS, port 8081). */
-const DATA_OUT_URLS = ['http://doasdr.local:8081', 'http://192.168.100.100:8081', 'http://127.0.0.1:8081', 'http://localhost:8081'] as const;
-const DATA_OUT_HOSTS = 'doasdr.local · 192.168.100.100 · 127.0.0.1 · localhost · :8081';
+/** A Data Out URL for a host of the list, as the URL field suggests it (IPv6 in brackets). */
+function dataOutUrl(host: string): string {
+  return `http://${host.includes(':') ? `[${host}]` : host}:${DATA_OUT_PORT}`;
+}
+
+function sameHosts(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((host, index) => host === right[index]);
+}
 
 type SourceCode = GpsConfig['source'];
 const SOURCES: readonly SourceCode[] = ['DATA_OUT', 'MANUAL', 'FALLBACK'];
@@ -148,7 +154,11 @@ export function ConfigurationPage({
   const [connection, setConnection] = useState<ConsoleConfig>({ ...DEFAULT_CONSOLE_CONFIG, ...config });
   // The port stays text while it is edited so clearing the field does not turn it into 0.
   const [mqttPortDraft, setMqttPortDraft] = useState(String(config.mqtt_port));
-  const [connectionErrors, setConnectionErrors] = useState<{ baseUrl?: Notice; refresh?: Notice }>({});
+  const savedHosts = config.data_out_hosts ?? DEFAULT_DATA_OUT_HOSTS;
+  // The host list is its own draft: a new saved list replaces it only when its content changed.
+  const [hostsDraft, setHostsDraft] = useState<readonly string[]>(savedHosts);
+  const [newHost, setNewHost] = useState('');
+  const [connectionErrors, setConnectionErrors] = useState<{ baseUrl?: Notice; refresh?: Notice; hosts?: Notice; newHost?: Notice }>({});
   const [connectionResult, setConnectionResult] = useState<Result | null>(null);
   const [mqttErrors, setMqttErrors] = useState<{ host?: Notice; port?: Notice; wsPath?: Notice }>({});
   const [mqttResult, setMqttResult] = useState<Result | null>(null);
@@ -204,6 +214,9 @@ export function ConfigurationPage({
     if (previous === config) return;
     setConnection((draft) => mergeSavedConfigIntoDraft(draft, { ...DEFAULT_CONSOLE_CONFIG, ...previous }, { ...DEFAULT_CONSOLE_CONFIG, ...config }));
     if (previous.mqtt_port !== config.mqtt_port) setMqttPortDraft(String(config.mqtt_port));
+    const previousHosts = previous.data_out_hosts ?? DEFAULT_DATA_OUT_HOSTS;
+    const nextHosts = config.data_out_hosts ?? DEFAULT_DATA_OUT_HOSTS;
+    if (!sameHosts(previousHosts, nextHosts)) setHostsDraft(nextHosts);
   }, [config]);
   useEffect(() => {
     setBrandName(branding.app_name);
@@ -355,6 +368,7 @@ export function ConfigurationPage({
 
   const changed = {
     baseUrl: connection.base_url.trim().replace(/\/+$/u, '') !== saved.base_url,
+    hosts: !sameHosts(hostsDraft, savedHosts),
     refresh: Number(connection.refresh_seconds) !== saved.refresh_seconds,
     host: connection.mqtt_host.trim() !== saved.mqtt_host,
     port: mqttPortDraft.trim() !== String(saved.mqtt_port),
@@ -368,7 +382,9 @@ export function ConfigurationPage({
     offset: manualOffset.trim() !== String(compassConfig.manualCompassOffset),
     appName: brandName.trim() !== branding.app_name,
   };
-  const connectionDirty = changed.baseUrl || changed.refresh;
+  const connectionDirty = changed.baseUrl || changed.hosts || changed.refresh;
+  // The host of the URL being edited cannot be removed from the list.
+  const draftUrlHost = dataOutUrlHost(connection.base_url.trim().replace(/\/+$/u, ''));
   const mqttDirty = changed.host || changed.port || changed.transport || changed.wsPath;
   const gpsDirty = changed.gpsSource || changed.lat || changed.lon;
   const compassDirty = changed.compassSource || changed.axis || changed.offset;
@@ -378,7 +394,23 @@ export function ConfigurationPage({
 
   const editConnection = (patch: Partial<ConsoleConfig>, field: 'baseUrl' | 'refresh') => {
     setConnection((draft) => ({ ...draft, ...patch }));
-    setConnectionErrors((errors) => ({ ...errors, [field]: undefined }));
+    setConnectionErrors((errors) => ({ ...errors, [field]: undefined, ...(field === 'baseUrl' ? { hosts: undefined } : {}) }));
+    setConnectionResult(null);
+  };
+  const addHost = () => {
+    const next = addDataOutHost(hostsDraft, newHost);
+    if (!next.ok) {
+      setConnectionErrors((errors) => ({ ...errors, newHost: { key: next.error, vars: next.vars } }));
+      return;
+    }
+    setHostsDraft(next.value);
+    setNewHost('');
+    setConnectionErrors((errors) => ({ ...errors, newHost: undefined, hosts: undefined, baseUrl: undefined }));
+    setConnectionResult(null);
+  };
+  const removeHost = (host: string) => {
+    setHostsDraft((hosts) => hosts.filter((entry) => entry !== host));
+    setConnectionErrors((errors) => ({ ...errors, hosts: undefined, baseUrl: undefined }));
     setConnectionResult(null);
   };
   const editMqtt = (patch: Partial<ConsoleConfig>, field: 'host' | 'wsPath' | null) => {
@@ -401,17 +433,36 @@ export function ConfigurationPage({
       else setConnectionResult({ code: 'ERROR', tone: 'bad', message: { key: draft.error, vars: draft.vars } });
       return;
     }
+    // The URL's host must be in the list (port 8081), as the server checks it.
+    const dataOut = checkDataOutDraft(connection.base_url, hostsDraft, saved.base_url);
+    if (!dataOut.ok) {
+      setConnectionErrors({ [dataOut.field]: dataOut.notice });
+      return;
+    }
     setConnectionErrors({});
     setConnectionResult(null);
     setBusy('connection');
     try {
-      const normalized = await updateConsoleConfig({ ...saved, base_url: draft.value.base_url, refresh_seconds: draft.value.refresh_seconds });
+      const normalized = await updateConsoleConfig({
+        ...saved,
+        base_url: dataOut.value.base_url,
+        data_out_hosts: dataOut.value.data_out_hosts,
+        refresh_seconds: draft.value.refresh_seconds,
+      });
       await onConfigSaved(normalized);
       if (!mountedRef.current) return;
       setConnection((current) => ({ ...current, base_url: normalized.base_url, refresh_seconds: normalized.refresh_seconds }));
+      setHostsDraft(normalized.data_out_hosts ?? dataOut.value.data_out_hosts);
       setConnectionResult({ code: 'SAVED', tone: 'good' });
     } catch (error: unknown) {
-      if (mountedRef.current) setConnectionResult(failure(error, 'config.connectionRejected'));
+      if (!mountedRef.current) return;
+      const dataOutError = dataOutErrorNotice(error);
+      if (dataOutError) {
+        setConnectionErrors({ [dataOutError.field]: dataOutError.notice });
+        setConnectionResult({ code: 'ERROR', tone: 'bad' });
+      } else {
+        setConnectionResult(failure(error, 'config.connectionRejected'));
+      }
     } finally {
       if (mountedRef.current) setBusy(null);
     }
@@ -672,9 +723,9 @@ export function ConfigurationPage({
           <Card id="connection-settings" span={6} className="cfg-section" bodyClassName="cfg-conn-body" title={t('config.connectionTitle')}>
             <form className="cfg-form cfg-conn-form" noValidate onSubmit={submitWith(() => { if (!busy) void saveConnection(); })}>
               <FormField label={t('config.baseUrl')} mono error={fieldError(connectionErrors.baseUrl)} className={changedClass(changed.baseUrl)}>
-                <input type="text" inputMode="url" list={`${ids}-data-out`} value={connection.base_url} placeholder={DATA_OUT_URLS[0]} title={DATA_OUT_HOSTS} spellCheck={false} autoComplete="off" onChange={(event) => editConnection({ base_url: event.target.value }, 'baseUrl')} />
+                <input type="text" inputMode="url" list={`${ids}-data-out`} value={connection.base_url} placeholder={dataOutUrl(DEFAULT_DATA_OUT_HOSTS[0])} spellCheck={false} autoComplete="off" onChange={(event) => editConnection({ base_url: event.target.value }, 'baseUrl')} />
               </FormField>
-              <datalist id={`${ids}-data-out`}>{DATA_OUT_URLS.map((url) => <option key={url} value={url} />)}</datalist>
+              <datalist id={`${ids}-data-out`}>{hostsDraft.map((host) => <option key={host} value={dataOutUrl(host)} />)}</datalist>
               <div className="cfg-group">
                 <span className="pg-field-label" aria-hidden="true">{refreshLabel}</span>
                 <Segmented
@@ -686,6 +737,39 @@ export function ConfigurationPage({
                 />
                 {connectionErrors.refresh ? <span className="pg-field-error" role="alert">{fieldError(connectionErrors.refresh)}</span> : null}
                 {refreshWarning ? <span className="cfg-warn" role="status">{t(refreshWarning)}</span> : null}
+              </div>
+              <div className={['cfg-group', 'cfg-hosts', changedClass(changed.hosts)].filter(Boolean).join(' ')} role="group" aria-labelledby={`${ids}-hosts`}>
+                <span className="pg-field-label" id={`${ids}-hosts`}>{t('config.dataOutHosts')}</span>
+                <ul className="cfg-host-list">
+                  {hostsDraft.map((host) => (
+                    <li key={host} className="cfg-host">
+                      <span className="cfg-host-name">{host}</span>
+                      <button className="cfg-host-remove" type="button" aria-label={t('config.dataOutHostRemove', { host })} disabled={busy !== null || host === draftUrlHost} onClick={() => removeHost(host)}><Icon name="close" /></button>
+                    </li>
+                  ))}
+                </ul>
+                {connectionErrors.hosts ? <span className="pg-field-error" role="alert">{fieldError(connectionErrors.hosts)}</span> : null}
+                <div className="cfg-host-add">
+                  <FormField label={t('config.dataOutHostNew')} mono className="cfg-grow" error={fieldError(connectionErrors.newHost)}>
+                    <input
+                      type="text"
+                      value={newHost}
+                      placeholder="rdf.local · 192.168.1.20"
+                      spellCheck={false}
+                      autoComplete="off"
+                      autoCapitalize="none"
+                      onChange={(event) => { setNewHost(event.target.value); setConnectionErrors((errors) => ({ ...errors, newHost: undefined })); }}
+                      onKeyDown={(event) => {
+                        // Enter adds the typed host instead of saving the card.
+                        if (event.key === 'Enter' && newHost.trim()) {
+                          event.preventDefault();
+                          addHost();
+                        }
+                      }}
+                    />
+                  </FormField>
+                  <button className="ov-button" type="button" disabled={busy !== null || !newHost.trim()} onClick={addHost}>{t('config.dataOutHostAdd')}</button>
+                </div>
               </div>
               <div className="cfg-actions">
                 <button className={primaryWhen(connectionDirty)} type="submit" disabled={busy !== null} aria-busy={busy === 'connection' || undefined}>{t('config.save')}</button>

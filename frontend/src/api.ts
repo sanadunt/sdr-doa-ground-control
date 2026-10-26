@@ -1,6 +1,7 @@
 import type { Branding, ConsoleConfig, MqttSnapshot, MqttTarget, RdfNodeSnapshot, TelemetrySnapshot } from './types';
 import { isMqttTransport, isMqttWsPath, normalizeMqttSnapshot, normalizeRdfNodeSnapshot } from './lib/mqttMonitor';
 import { CONFIG_PATCH_KEYS } from './lib/controlDraft';
+import { normalizeDataOutHostList } from './lib/dataOutHosts';
 import type { ConfigPatchKey } from './lib/controlDraft';
 
 export const DEFAULT_API_TIMEOUT_MS = 10_000;
@@ -183,7 +184,12 @@ export function normalizeConsoleConfig(value: unknown): ConsoleConfig {
     if (!isMqttWsPath(value.mqtt_ws_path)) throw new Error('console config response has an invalid MQTT WebSocket path');
     config.mqtt_ws_path = value.mqtt_ws_path;
   }
+  if (value.data_out_hosts !== undefined) config.data_out_hosts = normalizeDataOutHostList(value.data_out_hosts);
   return config;
+}
+
+function sameHosts(left: readonly string[], right: readonly string[] | undefined): boolean {
+  return right !== undefined && left.length === right.length && left.every((host, index) => host === right[index]);
 }
 
 function sameConfigValues(left: ConsoleConfig, right: ConsoleConfig): boolean {
@@ -193,6 +199,7 @@ function sameConfigValues(left: ConsoleConfig, right: ConsoleConfig): boolean {
     && left.refresh_seconds === right.refresh_seconds
     && (left.mqtt_transport === undefined || left.mqtt_transport === right.mqtt_transport)
     && (left.mqtt_ws_path === undefined || left.mqtt_ws_path === right.mqtt_ws_path)
+    && (left.data_out_hosts === undefined || sameHosts(left.data_out_hosts, right.data_out_hosts))
     && (left.version === undefined || left.version === right.version);
 }
 

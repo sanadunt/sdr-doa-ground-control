@@ -547,6 +547,7 @@ class SeedTests(unittest.TestCase):
         expected = {
             "version": 1,
             "base_url": "http://192.168.100.100:8081",
+            "data_out_hosts": ["doasdr.local", "192.168.100.100", "127.0.0.1", "localhost"],
             "mqtt_host": "127.0.0.1",
             "mqtt_port": 18884,
             "mqtt_transport": "tcp",

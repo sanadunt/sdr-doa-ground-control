@@ -353,8 +353,8 @@ need_readable() {
 # takes them only from DIR/.env.
 read_env() {
   need_readable "$DIR/.env"
-  unset SDR_DOA_ADMIN_PASSWORD SDR_DOA_SEED_BASE_URL SDR_DOA_SEED_MQTT_HOST SDR_DOA_SEED_MQTT_PORT \
-    SDR_DOA_SEED_MQTT_TRANSPORT SDR_DOA_SEED_MQTT_WS_PATH SDR_DOA_SEED_REFRESH_SECONDS
+  unset SDR_DOA_ADMIN_PASSWORD SDR_DOA_SEED_DATA_OUT_HOSTS SDR_DOA_SEED_BASE_URL SDR_DOA_SEED_MQTT_HOST \
+    SDR_DOA_SEED_MQTT_PORT SDR_DOA_SEED_MQTT_TRANSPORT SDR_DOA_SEED_MQTT_WS_PATH SDR_DOA_SEED_REFRESH_SECONDS
   IMAGE=$(env_get "$DIR/.env" SDR_DOA_IMAGE)
   [ -n "$IMAGE" ] || IMAGE=$DEFAULT_IMAGE
   CHANNEL=$(env_get "$DIR/.env" SDR_DOA_IMAGE_TAG)
@@ -989,6 +989,7 @@ services:
       #   docker compose restart console
       - SDR_DOA_ADMIN_PASSWORD
       # First start only: the console writes /data/console.json from these.
+      - SDR_DOA_SEED_DATA_OUT_HOSTS
       - SDR_DOA_SEED_BASE_URL
       - SDR_DOA_SEED_MQTT_HOST
       - SDR_DOA_SEED_MQTT_PORT

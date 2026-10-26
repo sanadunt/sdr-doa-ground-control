@@ -69,7 +69,7 @@ sh install.sh --yes --generate-password \
 | `--port PORT` | port di 127.0.0.1 (default 8787) |
 | `--no-service` | tanpa systemd service; jalankan dengan `sdr-doa-console start` (tidak hidup lagi setelah reboot) |
 | `--no-desktop` | tanpa entri menu |
-| `--base-url`, `--mqtt-host`, `--mqtt-port`, `--mqtt-transport`, `--mqtt-ws-path`, `--refresh-seconds` | nilai awal untuk start pertama |
+| `--base-url`, `--data-out-hosts`, `--mqtt-host`, `--mqtt-port`, `--mqtt-transport`, `--mqtt-ws-path`, `--refresh-seconds` | nilai awal untuk start pertama; `--data-out-hosts` berisi host Data Out (cadangan) dipisah koma, misalnya `rdf.local,192.168.100.100`, dan host `--base-url` harus salah satunya |
 
 Nilai awal ditulis ke `seed.env` di direktori data sebagai `SDR_DOA_SEED_*`. Console memakainya hanya saat `console.json` belum ada, lalu menulis `console.json`; sesudah itu `seed.env` dihapus dan perubahan dilakukan di halaman **Konfigurasi**. Service sengaja tidak memakai `--base-url`/`--mqtt-*`, karena flag itu menimpa pengaturan tersimpan di setiap start dan perubahan dari UI akan tampak tidak tersimpan.
 
@@ -180,7 +180,7 @@ docker compose up -d
 
 Environment menang atas `/data/.env`. Bila tidak di-set di keduanya, default `123456` berlaku dan UI memberi peringatan; `SDR_DOA_ADMIN_PASSWORD=` (kosong) mematikan login admin.
 
-Nilai awal start pertama dan port juga dibaca dari environment atau `.env` di sebelah compose: `SDR_DOA_SEED_BASE_URL`, `SDR_DOA_SEED_MQTT_HOST`, `SDR_DOA_SEED_MQTT_PORT`, `SDR_DOA_SEED_MQTT_TRANSPORT`, `SDR_DOA_SEED_MQTT_WS_PATH`, `SDR_DOA_SEED_REFRESH_SECONDS`, `SDR_DOA_PORT`. Variabel yang tidak di-set tidak diteruskan ke container.
+Nilai awal start pertama dan port juga dibaca dari environment atau `.env` di sebelah compose: `SDR_DOA_SEED_DATA_OUT_HOSTS` (dipisah koma), `SDR_DOA_SEED_BASE_URL`, `SDR_DOA_SEED_MQTT_HOST`, `SDR_DOA_SEED_MQTT_PORT`, `SDR_DOA_SEED_MQTT_TRANSPORT`, `SDR_DOA_SEED_MQTT_WS_PATH`, `SDR_DOA_SEED_REFRESH_SECONDS`, `SDR_DOA_PORT`. Variabel yang tidak di-set tidak diteruskan ke container.
 
 Perintah berguna:
 

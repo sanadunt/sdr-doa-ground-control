@@ -14,10 +14,13 @@ import argparse
 import csv
 import dataclasses
 import errno
+import functools
 import http.client
 import io
+import ipaddress
 import json
 import math
+import re
 import socket
 import sys
 import threading
@@ -28,7 +31,7 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 SCHEMA_VERSION = 1
 DEFAULT_TIMEOUT_SECONDS = 5.0
@@ -65,12 +68,25 @@ XML_POWER_CLIP_FLOOR = 0.0
 CSV_POWER_FLOOR_DB = -100.0
 NODE_PROGRESS_COUNTERS = ("timestamp_ms", "uptime_ms", "data_frame_index")
 TRANSPORT_ERROR_KINDS = frozenset({"timeout", "connection_refused", "unreachable"})
-DEFAULT_ALLOWED_DATA_HOSTS = frozenset({
-    "doasdr.local",
-    "192.168.100.100",
-    "127.0.0.1",
-    "localhost",
-})
+# Data Out answers on this port only; the hosts are a saved console setting
+# (console.json data_out_hosts), these four are its default.
+DATA_OUT_PORT = 8081
+DEFAULT_DATA_OUT_HOSTS: Tuple[str, ...] = ("doasdr.local", "192.168.100.100", "127.0.0.1", "localhost")
+DEFAULT_ALLOWED_DATA_HOSTS = frozenset(DEFAULT_DATA_OUT_HOSTS)
+MAX_DATA_OUT_HOSTS = 16
+# Error codes of the Data Out address rules; the console sends them with
+# the hosts and the port, and the Configuration page translates them.
+DATA_OUT_HOST_INVALID = "DATA_OUT_HOST_INVALID"
+DATA_OUT_HOSTS_EMPTY = "DATA_OUT_HOSTS_EMPTY"
+DATA_OUT_HOSTS_TOO_MANY = "DATA_OUT_HOSTS_TOO_MANY"
+DATA_OUT_HOST_IN_USE = "DATA_OUT_HOST_IN_USE"
+DATA_OUT_URL_NOT_ALLOWED = "DATA_OUT_URL_NOT_ALLOWED"
+_DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_ASCII_SPACE = " \t\n\r\x0b\x0c"
+_IPV6_CHARS_RE = re.compile(r"[0-9A-Fa-f:]+")
+# http://NETLOC with no path or "/"; NETLOC is checked further on its own.
+_DATA_OUT_URL_RE = re.compile(r"[Hh][Tt][Tt][Pp]://([^/]*)/?")
+_IPV4_RE = re.compile(r"(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}")
 
 PATH_STATUS = "/status.json"
 PATH_SETTINGS = "/settings.json"
@@ -155,6 +171,147 @@ def settings_are_effective(settings: Mapping[str, Any]) -> bool:
 
 class CollectorError(ValueError):
     """Raised when a resource body violates the expected bounded schema."""
+
+
+class DataOutHostError(ValueError):
+    """A Data Out host list or URL that breaks the address rules.
+
+    ``code`` is one of the DATA_OUT_* codes. ``hosts`` is the list a URL was
+    checked against, so the message and the console's answer can name it
+    together with the port.
+    """
+
+    def __init__(self, code: str, message: str, *, host: Optional[str] = None, hosts: Sequence[str] = ()) -> None:
+        super().__init__(message)
+        self.code = code
+        self.host = host
+        self.hosts = tuple(hosts)
+
+
+def normalize_data_out_host(value: Any) -> str:
+    """Return one Data Out host in its saved form, or raise DataOutHostError.
+
+    A host is a DNS name (RFC 1123 labels of letters, digits and inner
+    hyphens, lowercased, one trailing dot removed) or an IPv4 or IPv6 address
+    (IPv6 may be in brackets; saved in its compressed form). A name whose
+    last label is all digits must be a dotted-quad IPv4 address without
+    leading zeros. Wildcards, schemes, ports, paths, userinfo, IPv6 zone ids,
+    IPv4-in-IPv6 notation and the unspecified address are refused.
+    frontend/src/lib/dataOutHosts.ts applies the same rules; the cases in
+    tools/fixtures/data_out_hosts.json pin both.
+    """
+    if not isinstance(value, str):
+        raise DataOutHostError(DATA_OUT_HOST_INVALID, "a Data Out host must be text")
+    text = value.strip(_ASCII_SPACE)
+    shown = text[:80]
+
+    def invalid() -> DataOutHostError:
+        return DataOutHostError(DATA_OUT_HOST_INVALID, f"{shown!r} is not a host name or IP address", host=shown)
+
+    if not text or len(text) > 255 or not text.isascii():
+        raise invalid()
+    bracketed = text.startswith("[") and text.endswith("]")
+    candidate = text[1:-1] if bracketed else text
+    if ":" in candidate:
+        if _IPV6_CHARS_RE.fullmatch(candidate) is None:
+            raise invalid()
+        try:
+            address = ipaddress.IPv6Address(candidate)
+        except ValueError:
+            raise invalid() from None
+        if address.is_unspecified:
+            raise invalid()
+        return address.compressed
+    if bracketed:
+        raise invalid()
+    name = candidate.lower()
+    if name.endswith("."):
+        name = name[:-1]
+    labels = name.split(".")
+    if labels[-1].isdigit():
+        if _IPV4_RE.fullmatch(name) is None or name == "0.0.0.0":
+            raise invalid()
+        return name
+    if len(name) > 253 or not all(_DNS_LABEL_RE.fullmatch(label) for label in labels):
+        raise invalid()
+    return name
+
+
+def data_out_host_key(value: Any) -> Optional[str]:
+    """The saved form of a host for comparison, or None when it is not a valid host."""
+    try:
+        return normalize_data_out_host(value)
+    except DataOutHostError:
+        return None
+
+
+def normalize_data_out_hosts(values: Any) -> List[str]:
+    """Validate a Data Out host list: 1..MAX_DATA_OUT_HOSTS hosts, duplicates removed, order kept."""
+    if not isinstance(values, (list, tuple)):
+        raise DataOutHostError(DATA_OUT_HOST_INVALID, "data_out_hosts must be a list of host names or IP addresses")
+    if len(values) > 4 * MAX_DATA_OUT_HOSTS:
+        raise DataOutHostError(DATA_OUT_HOSTS_TOO_MANY, f"data_out_hosts allows at most {MAX_DATA_OUT_HOSTS} hosts")
+    hosts: List[str] = []
+    for value in values:
+        host = normalize_data_out_host(value)
+        if host not in hosts:
+            hosts.append(host)
+    if not hosts:
+        raise DataOutHostError(DATA_OUT_HOSTS_EMPTY, "data_out_hosts needs at least one host")
+    if len(hosts) > MAX_DATA_OUT_HOSTS:
+        raise DataOutHostError(DATA_OUT_HOSTS_TOO_MANY, f"data_out_hosts allows at most {MAX_DATA_OUT_HOSTS} hosts")
+    return hosts
+
+
+def data_out_url_host(base_url: Any) -> Optional[str]:
+    """The host of ``http://HOST[:8081][/]`` in its saved form, or None for any other URL.
+
+    The URL is printable ASCII without spaces, userinfo, query, fragment or a
+    path other than "/"; the port, when given, is exactly 8081. An IPv6 host
+    is in brackets.
+    """
+    if not isinstance(base_url, str) or not base_url or not base_url.isascii():
+        return None
+    if any(ord(char) <= 32 or ord(char) == 127 for char in base_url) or "?" in base_url or "#" in base_url:
+        return None
+    match = _DATA_OUT_URL_RE.fullmatch(base_url)
+    if match is None:
+        return None
+    netloc = match.group(1)
+    if "@" in netloc:
+        return None
+    if netloc.startswith("["):
+        host, closed, rest = netloc[1:].partition("]")
+        if not closed or ":" not in host or (rest and not rest.startswith(":")):
+            return None
+        port: Optional[str] = rest[1:] if rest else None
+    else:
+        host, colon, port_text = netloc.partition(":")
+        port = port_text if colon else None
+    if port is not None and port != str(DATA_OUT_PORT):
+        return None
+    return data_out_host_key(host)
+
+
+def data_out_url_message(hosts: Iterable[str]) -> str:
+    """The rule a Data Out URL breaks, naming the allowed hosts and the port."""
+    return (
+        f"the Data Out URL must be http://HOST:{DATA_OUT_PORT} with HOST in the Data Out host list "
+        f"({', '.join(hosts)})"
+    )
+
+
+def check_data_out_url(base_url: Any, hosts: Iterable[str]) -> str:
+    """Return ``base_url`` without a trailing slash, or raise DataOutHostError.
+
+    The URL must be plain http on port 8081 (or no port), without userinfo,
+    path, query or fragment, and its host must be in ``hosts``.
+    """
+    allowed = [key for key in (data_out_host_key(host) for host in hosts) if key is not None]
+    host = data_out_url_host(base_url)
+    if host is None or host not in allowed:
+        raise DataOutHostError(DATA_OUT_URL_NOT_ALLOWED, data_out_url_message(allowed), host=host, hosts=allowed)
+    return str(base_url).rstrip("/")
 
 
 @dataclass(frozen=True)
@@ -323,22 +480,10 @@ def _redact_url(url: Any) -> str:
         return "<invalid-url>"
 
 
-def _validate_base_url(base_url: str, allowed_hosts: Set[str]) -> str:
+def _validate_base_url(base_url: str, allowed_hosts: Iterable[str]) -> str:
     if not isinstance(base_url, str) or not base_url:
         raise ValueError("base_url must be a non-empty string")
-    parsed = urllib.parse.urlsplit(base_url)
-    if parsed.scheme != "http":
-        raise ValueError("base_url must use http")
-    if parsed.username or parsed.password:
-        raise ValueError("base_url userinfo is not allowed")
-    if parsed.query or parsed.fragment or not parsed.hostname:
-        raise ValueError("base_url must not contain query/fragment and must have a host")
-    hostname = parsed.hostname.lower().rstrip(".")
-    if hostname not in {item.lower().rstrip(".") for item in allowed_hosts}:
-        raise ValueError("base_url host is not allowlisted")
-    if parsed.port not in (None, 8081):
-        raise ValueError("base_url port is not allowlisted")
-    return base_url.rstrip("/")
+    return check_data_out_url(base_url, allowed_hosts)
 
 
 def fetch_resource(
@@ -346,17 +491,19 @@ def fetch_resource(
     path: str,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
-    allowed_hosts: Optional[Set[str]] = None,
+    allowed_hosts: Optional[Iterable[str]] = None,
 ) -> FetchedResource:
     """Fetch one known resource with a bounded read-only GET.
 
     ``timeout_seconds`` bounds every socket operation, and the body read as a
     whole, so a server that trickles body bytes cannot hold the read open.
     The status line and headers are bounded per socket operation only.
+    ``allowed_hosts`` is the Data Out host list (default: the four default
+    hosts); the port is always 8081.
     """
-    allowed = DEFAULT_ALLOWED_DATA_HOSTS if allowed_hosts is None else allowed_hosts
+    allowed = DEFAULT_DATA_OUT_HOSTS if allowed_hosts is None else allowed_hosts
     try:
-        safe_base = _validate_base_url(base_url, set(allowed))
+        safe_base = _validate_base_url(base_url, allowed)
     except ValueError as exc:
         return FetchedResource(
             path, str(base_url), False, None, None, b"", now_ms(), str(exc), error_kind="invalid_target", elapsed_ms=0
@@ -1387,6 +1534,7 @@ def collect(
     total_budget_s: Optional[float] = None,
     progress_tracker: Optional[NodeProgressTracker] = None,
     monotonic_clock: Callable[[], float] = time.monotonic,
+    allowed_hosts: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     """Read the four Data Out resources once and assess them.
 
@@ -1395,7 +1543,8 @@ def collect(
     ``progress_tracker`` remembers node counters across calls so a frozen
     node is detected (``NODE_CLOCK_STALLED``). ``monotonic_clock`` measures
     Ground elapsed time for ages and progress; it exists for deterministic
-    tests and does not affect the deadline.
+    tests and does not affect the deadline. ``allowed_hosts`` (the saved
+    Data Out host list) goes to ``fetch_resource`` when it is the fetcher.
     """
     if authority not in {"none", "csv", "xml"}:
         raise ValueError("authority must be one of: none, csv, xml")
@@ -1409,6 +1558,8 @@ def collect(
             or not 0 < total_budget_s <= MAX_TOTAL_BUDGET_SECONDS
         ):
             raise ValueError(f"total_budget_s must be within (0, {MAX_TOTAL_BUDGET_SECONDS:g}]")
+    if fetcher is fetch_resource and allowed_hosts is not None:
+        fetcher = functools.partial(fetch_resource, allowed_hosts=allowed_hosts)
     started_real = time.monotonic()
     started_mono = monotonic_clock()
     deadline = started_real + float(total_budget_s) if total_budget_s is not None else None
@@ -1805,11 +1956,21 @@ def collect(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read-only SDR-DoA Data Out collector")
-    allowed = ", ".join(sorted(DEFAULT_ALLOWED_DATA_HOSTS))
+    allowed = ", ".join(DEFAULT_DATA_OUT_HOSTS)
     parser.add_argument(
         "--base-url",
         required=True,
-        help=f"Data Out base URL on port 8081, for example http://192.168.100.100:8081 (allowed hosts: {allowed})",
+        help=(
+            f"Data Out base URL on port {DATA_OUT_PORT}, for example http://192.168.100.100:{DATA_OUT_PORT} "
+            f"(default hosts: {allowed})"
+        ),
+    )
+    parser.add_argument(
+        "--data-out-host",
+        action="append",
+        default=None,
+        metavar="HOST",
+        help=f"allow this Data Out host instead of the defaults (repeatable, at most {MAX_DATA_OUT_HOSTS})",
     )
     parser.add_argument("--authority", choices=("none", "csv", "xml"), default="none")
     parser.add_argument(
@@ -1830,6 +1991,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
+        hosts = normalize_data_out_hosts(args.data_out_host) if args.data_out_host else None
         result = collect(
             base_url=args.base_url,
             authority=args.authority,
@@ -1840,6 +2002,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             doa_max_age_ms=args.doa_max_age_ms,
             max_future_skew_ms=args.max_future_skew_ms,
             total_budget_s=args.total_budget,
+            allowed_hosts=hosts,
         )
         print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))
         return 0

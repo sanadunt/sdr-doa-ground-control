@@ -357,7 +357,9 @@ Ground Console default memakai:
 http://doasdr.local:8081
 ```
 
-Host yang diizinkan collector adalah `doasdr.local`, `192.168.100.100`, `127.0.0.1`, dan `localhost`, dengan port `8081`. Jika alamat Data Out berbeda, jalankan dengan `--base-url`, misalnya:
+Data Out (cadangan) hanya dibaca dari host di daftar **Host Data Out (cadangan)**, selalu di port `8081`. Daftar itu disimpan di `console.json` (`data_out_hosts`) dan diubah di **Konfigurasi → Koneksi & refresh**: tambah host (nama DNS seperti `rdf.local` atau alamat IPv4/IPv6, tanpa skema, port, path, atau wildcard), hapus host, lalu **Simpan** bersama base URL. Default-nya `doasdr.local`, `192.168.100.100`, `127.0.0.1`, dan `localhost`; paling banyak 16 host, dan host base URL yang dipakai tidak bisa dihapus. Base URL di luar daftar ditolak dengan pesan yang menyebut host yang diizinkan dan port `8081`.
+
+Untuk satu run saja, jalankan dengan `--base-url`; host-nya harus ada di daftar tersimpan (pada start pertama: daftar dari `SDR_DOA_SEED_DATA_OUT_HOSTS`, atau default), misalnya:
 
 ```sh
 .venv/bin/python tools/ground_console.py \
@@ -669,7 +671,7 @@ docker compose up -d --build
 
 - **Data**: semua yang disimpan console ada di volume `sdr-doa-ground-console_sdr-doa-data`, di-mount sebagai `/data`. Volume tetap ada saat container di-restart, dibuat ulang, atau di-upgrade.
 - **Kata sandi admin**: simpan di volume dengan `docker compose exec console sdr-doa-set-admin-password` lalu `docker compose restart console`. Bisa juga lewat `SDR_DOA_ADMIN_PASSWORD` di file `.env` di sebelah `docker-compose.yml`, dengan nilai dalam kutip tunggal bila ada `$` (docker compose mengganti `$nama` di nilai lain); environment menang atas `/data/.env`. Tanpa keduanya berlaku default `123456` dan UI memberi peringatan.
-- **Nilai awal (seed)**: `SDR_DOA_SEED_BASE_URL`, `SDR_DOA_SEED_MQTT_HOST`, `SDR_DOA_SEED_MQTT_PORT`, `SDR_DOA_SEED_MQTT_TRANSPORT`, `SDR_DOA_SEED_MQTT_WS_PATH` dan `SDR_DOA_SEED_REFRESH_SECONDS` di `.env` sebelah compose hanya dipakai pada start pertama, saat `/data/console.json` belum ada. Setelah itu ubah lewat halaman Konfigurasi. Port diatur dengan `SDR_DOA_PORT` di `.env` yang sama (jangan hanya di shell, karena `docker compose up` berikutnya kembali ke 8787).
+- **Nilai awal (seed)**: `SDR_DOA_SEED_DATA_OUT_HOSTS`, `SDR_DOA_SEED_BASE_URL`, `SDR_DOA_SEED_MQTT_HOST`, `SDR_DOA_SEED_MQTT_PORT`, `SDR_DOA_SEED_MQTT_TRANSPORT`, `SDR_DOA_SEED_MQTT_WS_PATH` dan `SDR_DOA_SEED_REFRESH_SECONDS` di `.env` sebelah compose hanya dipakai pada start pertama, saat `/data/console.json` belum ada. `SDR_DOA_SEED_DATA_OUT_HOSTS` berisi host Data Out dipisah koma (misalnya `rdf.local,192.168.100.100`) dan menggantikan daftar default; `SDR_DOA_SEED_BASE_URL` harus memakai salah satunya. Daftar yang tidak memuat host base URL diabaikan dengan peringatan (hanya nama variabel). Setelah itu ubah lewat halaman Konfigurasi. Port diatur dengan `SDR_DOA_PORT` di `.env` yang sama (jangan hanya di shell, karena `docker compose up` berikutnya kembali ke 8787).
 - **Log dan status**: `docker compose ps` (kolom health dari `/api/health`), `docker compose logs -f console`.
 - **Update**: ekstrak rilis baru (atau `git pull` dan `git submodule update`), lalu `docker compose up -d --build`. Volume dan isinya tetap. Untuk update tanpa build, pindah ke image GHCR dengan `sudo sh sdr-doa-docker install` (bagian sebelumnya); salin dulu `SDR_DOA_ADMIN_PASSWORD`, `SDR_DOA_PORT` dan `SDR_DOA_SEED_*` dari `.env` di sini ke `/opt/sdr-doa-ground-console/.env`, lalu jangan pakai `docker compose` di direktori ini lagi (lihat **Data** di bagian sebelumnya).
 - **Stop**: `docker compose down` (volume tetap); `docker compose down -v` juga menghapus semua data.
@@ -690,7 +692,7 @@ sh install.sh            # menanyakan kata sandi admin; Enter = default 123456
 sdr-doa-console auto-update on   # opsional: update otomatis setiap hari 03.45
 ```
 
-Tanpa pertanyaan, dengan nilai awal: `sh install.sh --yes --generate-password --base-url http://192.168.100.100:8081 --mqtt-host 10.90.0.1 --mqtt-port 9001 --refresh-seconds 2`. Opsi lain: `--password NILAI`, `--port`, `--prefix`, `--data-dir`, `--no-service`, `--no-desktop` (lihat `sh install.sh --help`). Installer memeriksa file rilis terhadap `MANIFEST.sha256`, memasang program dan venv (`paho-mqtt`, `tzdata`) di `~/.local/share/sdr-doa-ground-console/app`, membuat systemd user service, perintah `sdr-doa-console` di `~/.local/bin`, dan entri menu, lalu langsung menjalankan console. Dari repository, `sh packaging/console/install.sh` bekerja sama setelah `npm run build:all`.
+Tanpa pertanyaan, dengan nilai awal: `sh install.sh --yes --generate-password --base-url http://192.168.100.100:8081 --mqtt-host 10.90.0.1 --mqtt-port 9001 --refresh-seconds 2`. Untuk host Data Out di luar daftar default, tambahkan misalnya `--data-out-hosts rdf.local,192.168.100.100 --base-url http://rdf.local:8081`. Opsi lain: `--password NILAI`, `--port`, `--prefix`, `--data-dir`, `--no-service`, `--no-desktop` (lihat `sh install.sh --help`). Installer memeriksa file rilis terhadap `MANIFEST.sha256`, memasang program dan venv (`paho-mqtt`, `tzdata`) di `~/.local/share/sdr-doa-ground-console/app`, membuat systemd user service, perintah `sdr-doa-console` di `~/.local/bin`, dan entri menu, lalu langsung menjalankan console. Dari repository, `sh packaging/console/install.sh` bekerja sama setelah `npm run build:all`.
 
 ```text
 sdr-doa-console open        start bila perlu, lalu buka di Chromium/Chrome
@@ -717,7 +719,7 @@ Semua yang diubah lewat UI disimpan di server console, bukan hanya di browser. P
 
 | File | Isi | Native | Docker |
 |---|---|---|---|
-| `console.json` | Data Out, MQTT (host, port, transport, path WebSocket), interval refresh | `~/.local/share/sdr-doa-ground-console/` | `/data/` |
+| `console.json` | Data Out (base URL dan daftar host), MQTT (host, port, transport, path WebSocket), interval refresh | `~/.local/share/sdr-doa-ground-console/` | `/data/` |
 | `branding.json` | nama aplikasi dan logo | sama | sama |
 | `preferences.json` | tema, bahasa, panel Dashboard dan node card, peta dasar, Lapisan/overlay, tampilan polar, sumber dan offset kompas, sumber GPS, mode Dengar, ikuti frekuensi node, mode dock Spektrum (RX atau Spektrum) dan skala dB terakhirnya, pengaturan (termasuk Skala dB tab Dengar), pengaturan pindai (termasuk Grafik min./maks.) dan bookmark Receiver | sama | sama |
 | `receiver/` | rekaman, scan, dan marker set Receiver | sama | sama |
@@ -881,7 +883,7 @@ Gunakan Node LTS yang memenuhi requirement Vite. Node 22.12+ direkomendasikan ol
 
 ### Data Out UNAVAILABLE, ERROR, atau STALE
 
-Ini tidak selalu berarti frontend rusak. Buka **Kesehatan Sistem → Pembacaan resource** untuk melihat file mana yang gagal dan kenapa. Periksa DNS atau koneksi ke `doasdr.local:8081`, dan gunakan alamat Data Out yang diizinkan. `STALE` dengan `NODE_CLOCK_STALLED` berarti port 8081 menjawab tetapi DSP node berhenti. `DEGRADED` berarti DAQ sync gagal atau ADC overdrive; turunkan gain bila overdrive. Gunakan tab **Simulasi** untuk memeriksa renderer tanpa hardware.
+Ini tidak selalu berarti frontend rusak. Buka **Kesehatan Sistem → Pembacaan resource** untuk melihat file mana yang gagal dan kenapa. Periksa DNS atau koneksi ke `doasdr.local:8081`, dan gunakan host yang ada di daftar **Host Data Out (cadangan)** (Konfigurasi). `STALE` dengan `NODE_CLOCK_STALLED` berarti port 8081 menjawab tetapi DSP node berhenti. `DEGRADED` berarti DAQ sync gagal atau ADC overdrive; turunkan gain bila overdrive. Gunakan tab **Simulasi** untuk memeriksa renderer tanpa hardware.
 
 ### Basemap tidak tampil
 

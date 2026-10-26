@@ -151,6 +151,8 @@ export interface ConsoleConfig {
   mqtt_transport?: MqttTransport;
   /** WebSocket path, used only with the websockets transport. */
   mqtt_ws_path?: string;
+  /** Hosts Data Out may be read from (port 8081); base_url's host is one of them. Absent from older servers. */
+  data_out_hosts?: string[];
   refresh_seconds: number;
 }
 
