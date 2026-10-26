@@ -3387,17 +3387,20 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if not mirror.admit():
             self._send_mirror_error(rm.MIRROR_RATE_LIMITED, f"at most {rm.MAX_POSTS_PER_S} posts a second")
             return
+        # is_open() waits while the LAN view is being opened, moved or closed.
         if not self.console_server.lan.is_open():
-            self._send_mirror_error(rm.MIRROR_LAN_CLOSED, "the LAN view is closed; nothing is mirrored")
+            self._send_mirror_error(rm.MIRROR_LAN_CLOSED, rm.LAN_CLOSED_MESSAGE)
             return
         try:
             if len(raw) != length:
                 raise rm.MirrorRejected(rm.MIRROR_INVALID, "the body is incomplete")
             source, state, frame = rm.decode_publish(raw)
+            # Refused as MIRROR_LAN_CLOSED when the LAN view closed since the check above.
+            result = mirror.publish(source, state, frame)
         except rm.MirrorRejected as exc:
             self._send_mirror_error(exc.code, exc.message)
             return
-        self._send_json({"ok": True, **mirror.publish(source, state, frame)})
+        self._send_json({"ok": True, **result})
 
     def _post_lan_access(self) -> None:
         """POST /api/lan-access: change the LAN view and open, move or close it at once.
@@ -3974,6 +3977,7 @@ class LanAccessManager:
             self._server = server
             self._thread = thread
             self._reason = None
+            self._mirror_open(True)
             status = self.status()
             print(
                 f"[ground-console] LAN view (read only) open on http://{status['address']}/ "
@@ -3988,17 +3992,26 @@ class LanAccessManager:
         self._thread = None
         if server is None:
             return
+        # Nothing mirrored outlives the LAN view it was published for: the
+        # mirror refuses posts and forgets what it holds before the listener
+        # stops, also a POST that found the view open a moment ago.
+        self._mirror_open(False)
         try:
             server.shutdown()
         finally:
             server.server_close()
         if thread is not None:
             thread.join(timeout=5)
-        # Nothing mirrored outlives the LAN view it was published for.
-        mirror = getattr(self.console, "receiver_mirror", None)
-        if mirror is not None:
-            mirror.clear()
         print("[ground-console] LAN view closed", flush=True)
+
+    def _mirror_open(self, opened: bool) -> None:
+        mirror = getattr(self.console, "receiver_mirror", None)
+        if mirror is None:
+            return
+        if opened:
+            mirror.open()
+        else:
+            mirror.close()
 
     def is_open(self) -> bool:
         """The listener is open (the Receiver mirror is published only then)."""

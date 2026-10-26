@@ -78,6 +78,7 @@ MIRROR_TOO_LARGE = "MIRROR_TOO_LARGE"
 MIRROR_RATE_LIMITED = "MIRROR_RATE_LIMITED"
 MIRROR_LAN_CLOSED = "MIRROR_LAN_CLOSED"
 ORIGIN_REJECTED = "ORIGIN_REJECTED"
+LAN_CLOSED_MESSAGE = "the LAN view is closed; nothing is mirrored"
 ERROR_CODES_HTTP = {
     ORIGIN_REJECTED: 403,
     MIRROR_INVALID: 400,
@@ -339,6 +340,12 @@ class ReceiverMirror:
     ``admit`` is the rate rule (at most MAX_POSTS_PER_S taken in any
     RATE_WINDOW_S; a refused POST does not count). Ages use ``clock``
     (monotonic seconds), so the kiosk's and the viewers' clocks never matter.
+
+    The mirror takes posts only between ``open()`` and ``close()``, which the
+    LAN view's manager calls with its listener under its own lock. ``close()``
+    forgets everything in the same step, so a POST that found the LAN view
+    open and is still decoding when it closes is refused by ``publish()``
+    instead of storing its state after the clear.
     """
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
@@ -351,6 +358,7 @@ class ReceiverMirror:
         self._seen_at: Optional[float] = None
         self._state_at: Optional[float] = None
         self._frame_at: Optional[float] = None
+        self._open = False
         # Server-side counters: every accepted POST, and every accepted frame.
         self._rev = 0
         self._frame_rev = 0
@@ -367,9 +375,34 @@ class ReceiverMirror:
             self._taken.append(now)
             return True
 
-    def publish(self, source: Dict[str, Any], state: Dict[str, Any], frame: Optional[Dict[str, Any]]) -> Dict[str, int]:
-        """Keep this POST as the latest; a frame of another source than the stored one is not kept."""
+    def open(self) -> None:
+        """Take posts from now on (the LAN view opened)."""
         with self._lock:
+            self._open = True
+
+    def close(self) -> None:
+        """Refuse posts and forget everything (the LAN view closed, moved or was disabled)."""
+        with self._lock:
+            self._open = False
+            self._source = None
+            self._state = None
+            self._frame = None
+            self._seen_at = None
+            self._state_at = None
+            self._frame_at = None
+
+    def is_open(self) -> bool:
+        with self._lock:
+            return self._open
+
+    def publish(self, source: Dict[str, Any], state: Dict[str, Any], frame: Optional[Dict[str, Any]]) -> Dict[str, int]:
+        """Keep this POST as the latest; a frame of another source than the stored one is not kept.
+
+        Raises MirrorRejected (MIRROR_LAN_CLOSED) while the mirror is closed.
+        """
+        with self._lock:
+            if not self._open:
+                raise MirrorRejected(MIRROR_LAN_CLOSED, LAN_CLOSED_MESSAGE)
             now = self._clock()
             if self._source is not None and self._source["id"] != source["id"]:
                 # Another page took over: nothing of the previous one stays.
@@ -385,15 +418,6 @@ class ReceiverMirror:
                 self._frame_at = now
                 self._frame_rev += 1
             return {"rev": self._rev, "frame_rev": self._frame_rev}
-
-    def clear(self) -> None:
-        with self._lock:
-            self._source = None
-            self._state = None
-            self._frame = None
-            self._seen_at = None
-            self._state_at = None
-            self._frame_at = None
 
     def _age_ms(self, at: Optional[float], now: float) -> Optional[int]:
         return None if at is None else max(0, int(round((now - at) * 1000)))

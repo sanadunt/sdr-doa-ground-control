@@ -284,6 +284,7 @@ class MirrorStoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.clock = _Clock()
         self.mirror = rm.ReceiverMirror(clock=self.clock)
+        self.mirror.open()
 
     def test_at_most_twelve_posts_in_any_second(self) -> None:
         self.assertEqual([self.mirror.admit() for _ in range(rm.MAX_POSTS_PER_S)], [True] * rm.MAX_POSTS_PER_S)
@@ -330,12 +331,29 @@ class MirrorStoreTests(unittest.TestCase):
         self.assertIsNone(view["frame"])
         self.assertIsNone(view["frame_age_ms"])
 
-    def test_clear_forgets_everything_but_the_counters(self) -> None:
+    def test_close_forgets_everything_but_the_counters(self) -> None:
         self.mirror.publish(*rm.parse_publish(_publish(1)))
-        self.mirror.clear()
+        self.mirror.close()
         view = self.mirror.view()
         self.assertEqual((view["source"], view["state"], view["frame"], view["source_age_ms"]), (None, None, None, None))
         self.assertEqual((view["rev"], view["frame_rev"]), (1, 1))
+
+    def test_posts_are_taken_only_while_open(self) -> None:
+        closed = rm.ReceiverMirror(clock=self.clock)
+        self.assertFalse(closed.is_open())
+        for mirror in (closed, self.mirror):
+            if mirror is self.mirror:
+                mirror.close()
+            with self.subTest(opened_before=mirror is self.mirror):
+                with self.assertRaises(rm.MirrorRejected) as refused:
+                    mirror.publish(*rm.parse_publish(_publish(2)))
+                self.assertEqual((refused.exception.code, refused.exception.status), (rm.MIRROR_LAN_CLOSED, 409))
+                view = mirror.view()
+                self.assertEqual((view["source"], view["state"], view["frame"]), (None, None, None))
+        # Opened again (the LAN view moved or was enabled again), it takes posts.
+        self.mirror.open()
+        self.assertTrue(self.mirror.is_open())
+        self.assertEqual(self.mirror.publish(*rm.parse_publish(_publish(3))), {"rev": 1, "frame_rev": 1})
 
 
 class MirrorRouteTests(_ServerCase):
@@ -497,6 +515,36 @@ class MirrorRouteTests(_ServerCase):
         view = self.get()[1]
         self.assertEqual((view["source"], view["state"], view["frame"]), (None, None, None))
         self.assert_code(self.post(_publish(6)), 409, rm.MIRROR_LAN_CLOSED)
+
+    def test_a_post_in_flight_when_the_lan_view_closes_is_not_kept(self) -> None:
+        # The POST found the LAN view open; the view closes while its body is
+        # decoded. Its state must not be stored after the close cleared the
+        # mirror, or the loopback GET would serve it, and a LAN view enabled
+        # hours later would show it at once.
+        self.open_lan(self.server)
+        self.assertEqual(self.post(_publish(1))[0], 200)
+        decode = rm.decode_publish
+
+        def close_then_decode(raw: bytes) -> Any:
+            self.server.lan.apply({"enabled": False, "port": 0, "bind": "127.0.0.1", "allowed_clients": []})
+            return decode(raw)
+
+        with mock.patch.object(rm, "decode_publish", side_effect=close_then_decode):
+            self.assert_code(self.post(_publish(2)), 409, rm.MIRROR_LAN_CLOSED)
+        view = self.get()[1]
+        self.assertEqual((view["source"], view["state"], view["frame"]), (None, None, None))
+        self.assertEqual((view["rev"], view["frame_rev"]), (1, 1))
+        # Opened again, the next post is taken.
+        self.open_lan(self.server)
+        self.assertEqual(self.post(_publish(3)), (200, {"ok": True, "rev": 2, "frame_rev": 2}))
+
+    def test_moving_the_lan_view_keeps_taking_posts(self) -> None:
+        self.open_lan(self.server)
+        self.assertEqual(self.post(_publish(1))[0], 200)
+        self.open_lan(self.server)
+        self.assertIsNone(self.get()[1]["source"])
+        self.assertEqual(self.post(_publish(2))[0], 200)
+        self.assertEqual(self.get()[1]["state"]["rev"], 2)
 
     def test_served_answers_are_not_logged_and_refusals_are(self) -> None:
         self.open_lan(self.server, allowed=NOBODY)

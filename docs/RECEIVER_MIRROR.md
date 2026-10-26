@@ -130,7 +130,7 @@ Pemeriksaan, berurutan; yang pertama gagal menentukan jawaban. Semua error berbe
 
 Berhasil: `200 {"ok": true, "rev": <post ke-n>, "frame_rev": <frame ke-n>}`. Body yang panjangnya dalam batas dibaca dulu sebelum jawaban apa pun, juga penolakan, supaya klien membaca jawabannya, bukan reset koneksi. Listener LAN tidak pernah menerima POST ini (`405 LAN_READ_ONLY`).
 
-Tidak ada yang ditulis ke disk. Post terbaru menggantikan yang sebelumnya; restart console, atau listener LAN yang ditutup, dipindah, atau dimatikan, mengosongkannya. Jawaban 200 dan 429 tidak dicatat di log console (route ini dipanggil beberapa kali per detik); penolakan lain dicatat.
+Tidak ada yang ditulis ke disk. Post terbaru menggantikan yang sebelumnya; restart console, atau listener LAN yang ditutup, dipindah, atau dimatikan, mengosongkannya. Pengosongan itu dan penolakan post berikutnya satu langkah (`ReceiverMirror.close()` di bawah kunci manajer LAN): post yang sudah lolos pemeriksaan 4 tetapi baru disimpan setelah mode LAN ditutup dijawab `409 MIRROR_LAN_CLOSED` dan tidak disimpan. Jawaban 200 dan 429 tidak dicatat di log console (route ini dipanggil beberapa kali per detik); penolakan lain dicatat.
 
 ## 5. `GET /api/mirror/receiver`
 
