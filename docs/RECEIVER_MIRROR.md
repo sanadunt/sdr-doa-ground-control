@@ -180,9 +180,9 @@ Aturan basi (`mirrorView()` di `lib/receiverMirror.ts`, berurutan):
 | Basi | frame diharapkan (RX berjalan, atau pindai `active`) tetapi frame lebih tua dari 3 detik, tidak ada, atau jenisnya lain | `STALE` |
 | Live | frame diharapkan dan umurnya paling lama 3 detik | `RX`, `SCAN`, atau `BUSY` (scan listen) |
 | Pindai mulai atau berhenti | `scan.phase` `starting` atau `stopping` | `…` |
-| Berhenti | RX tidak berjalan dan tidak memindai | `RX OFF` atau `SCAN OFF` |
+| Berhenti | RX tidak berjalan dan tidak memindai | `SCAN OFF` (mode Spektrum) bila frame terakhir dari pindai, selain itu `RX OFF` |
 
-RX yang berhenti bukan basi: tidak ada frame yang diharapkan, chip `RX OFF`, dan jejak terakhir tetap tergambar redup.
+RX yang berhenti bukan basi: tidak ada frame yang diharapkan, chip `RX OFF`, dan jejak terakhir tetap tergambar redup. Setelah pindai berhenti, bridge melaporkan `busy: "none"` dan `scan.phase: "idle"`; penampil mengambil mode dari frame terakhir, jadi jejak pindai yang redup tetap di mode Spektrum dengan chip `SCAN OFF`, seperti dock groundstation.
 
 Tombol Mulai/Berhenti dock MIRROR (nonaktif) mengikuti state terakhir seperti dock groundstation, bukan umur frame: Berhenti selama pindai `starting` atau `active` dan selama RX berjalan di luar scan listen, juga saat chip `STALE` atau **SUMBER PUTUS**; kesegaran hanya ditunjukkan chip.
 

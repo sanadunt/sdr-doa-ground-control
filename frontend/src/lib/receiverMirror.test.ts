@@ -269,6 +269,16 @@ describe('mirror view (stale rules)', () => {
     // An RX frame while the Receiver scans is not this mode's frame.
     expect(at(answer({}, { busy: 'sweep', scan: { phase: 'active', start_hz: 1, stop_hz: 2, resolution_hz: null } }), 0)).toMatchObject({ phase: 'stale', message: 'mirror.noFrame' });
     expect(at(answer({}, { busy: 'scan-listen' }), 0)).toMatchObject({ phase: 'live', chip: 'BUSY', tone: 'warn', message: 'spectrum.scanListenBusy' });
+    // #15 review: once the scan stopped the bridge reports busy 'none'; the
+    // last frame is the scan's, so the mirror stays in Spektrum with SCAN OFF.
+    const stopped = answer({ frame: sweepFrame, frameAgeMs: 60_000 }, { busy: 'none', running: false, scan: { phase: 'idle', start_hz: 400_000_000, stop_hz: 500_000_000, resolution_hz: 4882.8125 } });
+    expect(at(stopped, 0)).toMatchObject({ phase: 'stopped', chip: 'SCAN OFF', mode: 'sweep', tone: 'neutral', live: false, stoppable: false, message: null });
+    // An RX frame, no frame, or RX running again: RX.
+    expect(at(answer({ frameAgeMs: 60_000 }, { busy: 'none', running: false }), 0)).toMatchObject({ chip: 'RX OFF', mode: 'rx' });
+    expect(at(answer({ frame: null }, { busy: 'none', running: false }), 0)).toMatchObject({ chip: 'RX OFF', mode: 'rx' });
+    expect(at(answer({ frame: sweepFrame }, { busy: 'none', running: true }), 0)).toMatchObject({ phase: 'stale', mode: 'rx', message: 'mirror.noFrame' });
+    // A lost source after a scan keeps the scan's mode for the dimmed trace.
+    expect(at(stopped, 20_000)).toMatchObject({ phase: 'lost', mode: 'sweep', stoppable: false });
   });
 
   it('shows Stop from the last state, as the groundstation dock does, also while STALE or the source is lost', () => {

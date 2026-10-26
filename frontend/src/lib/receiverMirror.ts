@@ -478,7 +478,11 @@ export interface MirrorView {
   chip: string;
   chipKey: MessageKey | null;
   tone: DockTone;
-  /** The mode the Receiver runs: Spektrum while it scans, otherwise RX. */
+  /**
+   * The mode the Receiver runs: Spektrum while it scans, otherwise RX. While
+   * nothing runs, the mode of the last frame: Spektrum (SCAN OFF) over the
+   * last scan, as the groundstation's dock stays in Spektrum after a scan.
+   */
   mode: DockMode;
   /**
    * Start/Stop shows Stop, as on the groundstation's dock (DockView.stoppable):
@@ -526,8 +530,12 @@ export function mirrorView({ answer, receivedAtMs, error, nowMs }: MirrorViewInp
   const frameAgeMs = answer?.frameAgeMs === null || answer?.frameAgeMs === undefined ? null : answer.frameAgeMs + elapsed;
   const state = answer?.state ?? null;
   const source = answer?.source ?? null;
-  const mode: DockMode = state?.busy === 'sweep' ? 'sweep' : 'rx';
-  const scanPhase: SweepPhase = state?.busy === 'sweep' ? state.scan?.phase && state.scan.phase !== 'idle' ? state.scan.phase : 'active' : 'idle';
+  const scanning = state?.busy === 'sweep';
+  // Nothing runs: the last frame says what the dimmed trace is, so a scan
+  // that stopped reads SCAN OFF over its own axis, not RX OFF.
+  const stoppedAfterScan = state !== null && !scanning && !state.running && state.busy === 'none' && answer?.frame?.kind === 'sweep';
+  const mode: DockMode = scanning || stoppedAfterScan ? 'sweep' : 'rx';
+  const scanPhase: SweepPhase = scanning ? state.scan?.phase && state.scan.phase !== 'idle' ? state.scan.phase : 'active' : 'idle';
   const stoppable = mode === 'sweep' ? scanPhase === 'active' || scanPhase === 'starting' : state?.running === true && state.busy !== 'scan-listen';
   const base = { mode, stoppable, live: false, sourceAgeMs, frameAgeMs, state, source, messageAgeMs: null, chipKey: null };
   if (!answer) {
