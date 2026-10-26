@@ -903,6 +903,53 @@ def test_legacy_ui_bounds_requests_and_expires_locally() -> None:
     assert '<option value="1">Every 1 second</option><option value="2">Every 2 seconds</option>' in html
 
 
+def test_legacy_ui_follows_the_shared_data_out_read() -> None:
+    """#13: Refresh asks for a new read, reads name the shown one, ages count the shared read."""
+    html = ground_console.HTML
+    assert "$('refresh').addEventListener('click',()=>refresh({manual:true}));" in html
+    assert "await refresh({manual:true}); }" in html, "Apply & refresh is the operator's read too"
+    assert "(manual?'&refresh=1':'')+(state.collectionId?'&seen='+encodeURIComponent(state.collectionId):'')" in html
+    assert "render(data); scheduleLocalExpiry(data); followConsoleInterval(data);" in html
+    assert "const maxAge=validAges?Math.max(...ages)+servedAgeMs(snapshot):null;" in html
+    # The interval select is saved with Apply like the other connection fields.
+    assert "$('refresh-interval').addEventListener('change'" not in html
+    assert "setAuto(state.autoTimer?0:(state.consoleSeconds>0?state.consoleSeconds:2))" in html
+    node = shutil.which("node")
+    if node is None:
+        print("SKIP test_legacy_ui_follows_the_shared_data_out_read (node part): node not found")
+        return
+    sources = []
+    for name in ("localExpiryMs", "servedAgeMs", "followConsoleInterval"):
+        start = html.index(f"function {name}(")
+        end = html.index("\n}", start) + 2 if name == "localExpiryMs" else html.index("\n", start)
+        sources.append(html[start:end])
+    script = "\n".join(sources) + r"""
+const calls = [];
+const state = { autoTimer: 1, autoSeconds: 2, consoleSeconds: 2 };
+function setAuto(seconds, readNow) { calls.push([seconds, readNow]); state.autoSeconds = seconds; }
+const live = (age, served) => ({ status: { available: true }, collection: { age_ms: served },
+  doa_candidates: { csv: { freshness: { fresh: true, age_ms: age, max_age_ms: 5000 } } } });
+const expiry = [localExpiryMs(live(400, 0)), localExpiryMs(live(400, 3500)), localExpiryMs(live(400, 9000)),
+  servedAgeMs(live(0, 1e9)), servedAgeMs(live(0, -5)), servedAgeMs({})];
+followConsoleInterval({ collection: { refresh_seconds: 30 } });
+followConsoleInterval({ collection: { refresh_seconds: 30 } });
+followConsoleInterval({ collection: { refresh_seconds: 0 } });
+const afterManual = state.consoleSeconds;
+followConsoleInterval({ collection: { refresh_seconds: 'x' } });
+state.autoTimer = null;
+followConsoleInterval({ collection: { refresh_seconds: 5 } });
+process.stdout.write(JSON.stringify({ expiry, calls, afterManual, consoleSeconds: state.consoleSeconds }));
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=20, check=True)
+    out = json.loads(result.stdout)
+    # The time the answer waited on the console comes off the DoA window; the bound is the React one.
+    assert out["expiry"] == [4600, 1100, 0, 120000, 0, 0], out
+    # A running auto-refresh moves to the console's interval once, without an extra read;
+    # manual mode on the console and a stopped auto-refresh leave the timer alone.
+    assert out["calls"] == [[30, False]], out
+    assert out["afterManual"] == 0 and out["consoleSeconds"] == 5, out
+
+
 def test_legacy_ui_reads_cleared_mqtt_entries_and_new_gate_reasons() -> None:
     """A retained clear (valid:false, cleared:true) is CLEARED, not INVALID, on the legacy page."""
     html = ground_console.HTML
