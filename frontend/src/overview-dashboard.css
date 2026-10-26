@@ -250,6 +250,8 @@
 .ov-button.ov-spec-mark[aria-pressed='true'] { border-color: var(--marker); background: color-mix(in srgb, var(--marker) 14%, transparent); }
 .ov-button.ov-spec-mark[aria-pressed='true'] svg { color: var(--marker); }
 .ov-spec-trace.is-marking, .ov-spec-waterfall.is-marking, .ov-spec-trace.is-marking .ov-spec-overlay { cursor: copy; }
+/* The Receiver mirror (LAN view): a picture only, nothing to tune. */
+.ov-spec-trace.is-read-only, .ov-spec-waterfall.is-read-only { cursor: default; }
 .ov-spec-mark-row { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
 .ov-spec-mark-readout { color: var(--text); font-family: var(--mono); font-size: 12px; }
 /* Between a phone and a full-width dock the label gives way to the icon and the count (still the button's name),

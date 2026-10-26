@@ -68,16 +68,19 @@ describe('the LAN view in App', () => {
     expect(markup).toContain('view-only-chip');
     expect(markup).not.toContain('aria-controls="panel-control"');
     expect(markup).not.toContain('id="panel-control"');
-    expect(markup).toContain('ov-spectrum is-view-only');
+    expect(markup).toContain('ov-spectrum is-view-only is-mirror');
+    expect(markup).toContain('<span class="ov-tag tone-info">MIRROR</span>');
     expect(markup).not.toContain('receiver-frame');
   });
 
-  it('never mounts the Receiver frame on the Receiver route', () => {
+  it('never mounts the Receiver frame on the Receiver route: it shows the mirror', () => {
     const markup = renderApp('#/receiver', {}, LAN_HOST);
     expect(markup).not.toContain('receiver-frame');
     expect(markup).not.toContain('/receiver/');
     expect(markup).not.toContain('page-content-receiver');
-    expect(markup).toContain('The Receiver runs on the groundstation.');
+    expect(markup).toContain('rx-mirror-page');
+    expect(markup).toContain('>Receiver state</h2>');
+    expect(markup).not.toContain('<audio');
   });
 
   it('stays the full console on the loopback address', () => {

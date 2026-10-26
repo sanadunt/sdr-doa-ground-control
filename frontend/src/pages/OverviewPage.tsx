@@ -30,7 +30,8 @@ import { NodeCard } from '../components/overview/NodeCard';
 import { LayersPanel } from '../components/overview/LayersPanel';
 import { PolarDock } from '../components/overview/PolarDock';
 import { SpectrumDock } from '../components/overview/SpectrumDock';
-import { SpectrumDockViewOnly } from '../components/overview/SpectrumDockViewOnly';
+import { SpectrumDockMirror } from '../components/overview/SpectrumDockMirror';
+import type { ReceiverMirrorFeed } from '../lib/receiverMirrorFeed';
 import { ControlPanel } from '../components/overview/ControlPanel';
 
 // MapLibre is one of the two large dependencies (Plotly, loaded by PolarPlot,
@@ -77,6 +78,8 @@ export interface OverviewDashboardProps {
   onRefreshSnapshot?: () => void;
   /** The LAN view: no Kontrol, and the spectrum dock never mounts the Receiver frame. */
   viewOnly?: boolean;
+  /** The LAN view's Receiver mirror; the spectrum dock shows it in MIRROR mode. */
+  mirrorFeed?: ReceiverMirrorFeed | null;
 }
 
 function OverviewPageView({
@@ -96,6 +99,7 @@ function OverviewPageView({
   onControlDraftRequest = noop,
   onRefreshSnapshot = noop,
   viewOnly = false,
+  mirrorFeed = null,
 }: {
   snapshot: TelemetrySnapshot | null;
   localSnapshotFresh: boolean;
@@ -266,7 +270,7 @@ function OverviewPageView({
               onViewChange={onPolarViewChange}
             />
           ) : null}
-          {panels.spectrum && viewOnly ? <SpectrumDockViewOnly /> : null}
+          {panels.spectrum && viewOnly ? <SpectrumDockMirror feed={mirrorFeed} /> : null}
           {panels.spectrum && !viewOnly ? (
             <SpectrumDock
               snapshot={snapshot}

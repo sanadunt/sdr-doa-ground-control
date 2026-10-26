@@ -14,6 +14,7 @@ import base64
 import copy
 import json
 import os
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -27,6 +28,11 @@ import receiver_mirror as rm  # noqa: E402
 from test_lan_access import NOBODY, _json, _request, _ServerCase  # noqa: E402
 
 SOURCE_ID = "kiosk-test-0001"
+PROJECT_ROOT = TOOLS_DIR.parent
+# One publish body both sides check: this file parses it, and the browser's
+# Vitest (lib/receiverMirror.test.ts) reads it and builds the same shape.
+FIXTURE = TOOLS_DIR / "fixtures" / "receiver-mirror" / "publish.json"
+MIRROR_TS = PROJECT_ROOT / "frontend" / "src" / "lib" / "receiverMirror.ts"
 
 
 def _bins(count: int, value: int = 128) -> str:
@@ -195,6 +201,52 @@ class MirrorSchemaTests(unittest.TestCase):
     def test_a_full_publish_fits_the_body_limit(self) -> None:
         body = json.dumps(_publish(), separators=(",", ":")).encode("utf-8")
         self.assertLess(len(body), rm.MAX_BODY_BYTES // 2)
+
+
+def _ts_number(text: str) -> float:
+    """A TypeScript numeric literal or a product of them (8 * 1024)."""
+    value = 1.0
+    for factor in text.replace("_", "").split("*"):
+        value *= float(factor.strip())
+    return value
+
+
+class MirrorContractTests(unittest.TestCase):
+    """The browser's copy (frontend/src/lib/receiverMirror.ts) and the shared fixture."""
+
+    def test_the_shared_fixture_parses_unchanged(self) -> None:
+        body = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        source, state, frame = rm.parse_publish(copy.deepcopy(body))
+        self.assertEqual((source, state, frame), (body["source"], body["state"], body["frame"]))
+
+    def test_the_browser_limits_match(self) -> None:
+        text = MIRROR_TS.read_text(encoding="utf-8")
+        block = re.search(r"export const MIRROR_LIMITS = \{(.*?)\} as const;", text, re.S)
+        assert block is not None, "MIRROR_LIMITS not found"
+        values = {name: _ts_number(number) for name, number in re.findall(r"(\w+): ([-0-9_ *.]+),", block.group(1))}
+        self.assertEqual(values, {
+            "minBins": rm.MIN_BINS,
+            "maxBins": rm.MAX_BINS,
+            "maxBodyBytes": rm.MAX_BODY_BYTES,
+            "maxPostsPerS": rm.MAX_POSTS_PER_S,
+            "frameStaleMs": rm.FRAME_STALE_MS,
+            "sourceLostMs": rm.SOURCE_LOST_MS,
+            "heartbeatMs": rm.HEARTBEAT_MS,
+            "dbFloor": rm.DB_FLOOR,
+            "dbCeiling": rm.DB_CEILING,
+            "minDbSpan": rm.MIN_DB_SPAN,
+            "maxAbsFrequencyHz": rm.MAX_ABS_FREQUENCY_HZ,
+            "maxSampleRateHz": rm.MAX_SAMPLE_RATE_HZ,
+        })
+        self.assertIn(f"export const MIRROR_ROUTE = '{rm.ROUTE}';", text)
+        self.assertIn(f"export const MIRROR_VERSION = {rm.VERSION};", text)
+        kinds = re.search(r"export const MIRROR_SOURCE_KINDS = \[([^\]]*)\]", text)
+        assert kinds is not None
+        self.assertEqual(set(re.findall(r"'([a-z-]+)'", kinds.group(1))), set(rm.SOURCE_KINDS))
+        # The publisher's pace stays under the server's rate limit.
+        interval = re.search(r"export const MIRROR_POST_INTERVAL_MS = (\d+);", text)
+        assert interval is not None
+        self.assertLessEqual(1000 / int(interval.group(1)), rm.MAX_POSTS_PER_S)
 
 
 class MirrorStoreTests(unittest.TestCase):

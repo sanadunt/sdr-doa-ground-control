@@ -15,7 +15,11 @@ import { OverviewPanelToggles } from '../components/overview/OverviewPanelToggle
 import { ConfigurationPage, LanAccessCard } from '../pages/ConfigurationPage';
 import { MessageMonitorPage } from '../pages/MessageMonitorPage';
 import { OverviewPage } from '../pages/OverviewPage';
-import { ReceiverViewOnlyPage } from '../pages/ReceiverViewOnlyPage';
+import { ReceiverMirrorPage } from '../pages/ReceiverMirrorPage';
+import { createMirrorFeed } from './receiverMirrorFeed';
+import type { MirrorFeedState, ReceiverMirrorFeed } from './receiverMirrorFeed';
+import { normalizeMirrorAnswer } from './receiverMirror';
+import { SpectrumDockMirror } from '../components/overview/SpectrumDockMirror';
 
 /** Vitest blanks every CSS import, so a stylesheet is read from disk. */
 function readSource(path: string): string {
@@ -191,20 +195,62 @@ describe('LAN view UI', () => {
     );
     expect(markup).not.toContain('id="panel-control"');
     expect(markup).not.toContain('data-control="open"');
-    expect(markup).toContain('<section id="panel-spectrum" class="ov-spectrum is-view-only"');
-    expect(markup).toContain(translate('en', 'lanView.receiverOnGroundstation'));
-    expect(markup).not.toContain('ov-spec-run');
+    // The dock shows the groundstation's Receiver as MIRROR, every control disabled.
+    expect(markup).toContain('<section id="panel-spectrum" class="ov-spectrum is-view-only is-mirror"');
+    expect(markup).toContain('<span class="ov-tag tone-info">MIRROR</span>');
+    expect(markup).toContain(translate('en', 'mirror.connecting'));
+    const dock = markup.slice(markup.indexOf('<section id="panel-spectrum"'));
+    const dockButtons = dock.slice(0, dock.indexOf('</section>')).match(/<button[^>]*>/g) ?? [];
+    expect(dockButtons).toHaveLength(4);
+    for (const tag of dockButtons) expect(tag).toContain('disabled');
+    expect(markup).toContain('role="img"');
+    expect(markup).not.toContain('role="slider"');
+    expect(markup).not.toContain('ov-spec-settings-toggle');
+    expect(markup).not.toContain('ov-spec-mark');
     expect(markup).not.toContain('/receiver/');
     expect(markup).not.toContain('<iframe');
+    expect(markup).not.toContain('<audio');
   });
 
-  it('shows the Receiver route as a page without the frame', () => {
+  it('shows the Receiver route as the mirror without the frame', () => {
     for (const lang of ['en', 'id'] as const) {
-      const markup = withI18n(<ReceiverViewOnlyPage />, lang);
-      expect(markup).toContain(translate(lang, 'lanView.receiverOnGroundstation'));
-      expect(markup).toContain(translate(lang, 'shell.viewOnly'));
+      const markup = withI18n(<ReceiverMirrorPage feed={createMirrorFeed()} />, lang);
+      expect(markup).toContain('>MIRROR</span>');
+      expect(markup).toContain(translate(lang, 'mirror.stateTitle'));
+      expect(markup).toContain(translate(lang, 'mirror.connecting'));
+      expect(markup).toContain('class="ov-spectrum is-view-only is-mirror rx-mirror-spectrum"');
       expect(markup).not.toContain('<iframe');
+      expect(markup).not.toContain('<audio');
+      expect(markup).not.toContain('role="slider"');
     }
+  });
+
+  it('shows the mirror as live, STALE after 3 s and SOURCE LOST / SUMBER PUTUS after 10 s', () => {
+    const fixture = JSON.parse(readSource('../../../tools/fixtures/receiver-mirror/publish.json')) as Record<string, unknown>;
+    const answer = normalizeMirrorAnswer({
+      ok: true, v: 1, rev: 5, frame_rev: 3, source: fixture.source, source_age_ms: 100, state: fixture.state, state_age_ms: 100,
+      frame: fixture.frame, frame_age_ms: 150, limits: { frame_stale_ms: 3000, source_lost_ms: 10000 },
+    });
+    expect(answer).not.toBeNull();
+    const feedAt = (ageMs: number): ReceiverMirrorFeed => {
+      const state: MirrorFeedState = { answer, receivedAtMs: Date.now() - ageMs, error: false };
+      return { retain: () => () => undefined, getState: () => state, onState: () => () => undefined, onSpectrum: () => () => undefined };
+    };
+    const chip = (markup: string) => markup.match(/<span class="ov-chip tone-(\w+)">([^<]*)<\/span>/)?.slice(1);
+    const live = withI18n(<SpectrumDockMirror feed={feedAt(0)} />);
+    expect(chip(live)).toEqual(['good', 'RX']);
+    expect(live).not.toContain('is-stopped');
+    expect(live).toContain('Center 433.920 MHz');
+    const stale = withI18n(<SpectrumDockMirror feed={feedAt(5_000)} />, 'id');
+    expect(chip(stale)).toEqual(['warn', 'STALE']);
+    expect(stale).toContain('ov-spec-trace is-stopped');
+    expect(stale).toMatch(/Frame terakhir 5\.\d dtk lalu\./);
+    for (const lang of ['en', 'id'] as const) {
+      const lost = withI18n(<SpectrumDockMirror feed={feedAt(20_000)} />, lang);
+      expect(chip(lost)).toEqual(['bad', translate(lang, 'mirror.chipLost')]);
+      expect(lost).toContain('ov-spec-trace is-stopped');
+    }
+    expect(translate('id', 'mirror.chipLost')).toBe('SUMBER PUTUS');
   });
 
   it('has no Reconnect on the Message Monitor in the LAN view', () => {

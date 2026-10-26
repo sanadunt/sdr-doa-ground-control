@@ -28,7 +28,10 @@ import type { RouteName } from './components/Shell';
 import { useRoute } from './components/Shell';
 import { LoadErrorBoundary } from './components/LoadErrorBoundary';
 import { Page, PageHeader, PageNotice } from './components/page';
-import { ReceiverViewOnlyPage } from './pages/ReceiverViewOnlyPage';
+import { ReceiverMirrorPage } from './pages/ReceiverMirrorPage';
+import { createMirrorFeed } from './lib/receiverMirrorFeed';
+import type { ReceiverMirrorFeed } from './lib/receiverMirrorFeed';
+import { startMirrorPublisher } from './lib/receiverMirrorPublisher';
 import { consoleAccess, pageHostname } from './lib/access';
 import { DEFAULT_SIMULATION, simulationSnapshot, randomizeSimulationSettings } from './lib/simulation';
 
@@ -353,6 +356,16 @@ export default function App(): ReactElement {
   const [receiverMounted, setReceiverMounted] = useState(route === 'receiver' && !viewOnly);
   if ((route === 'receiver' || receiverRequested) && !receiverMounted && !viewOnly) setReceiverMounted(true);
   const receiverFrame = receiverMounted && !viewOnly;
+  // The Receiver mirror (issue #15): this page publishes its Receiver for the LAN view while the
+  // frame is mounted and the console's LAN view is open; the LAN view reads it through one feed.
+  useEffect(() => {
+    if (!receiverFrame) return undefined;
+    const publisher = startMirrorPublisher(receiverBridge);
+    return () => publisher.stop();
+  }, [receiverFrame, receiverBridge]);
+  const mirrorFeedRef = useRef<ReceiverMirrorFeed | null>(null);
+  if (mirrorFeedRef.current === null) mirrorFeedRef.current = createMirrorFeed();
+  const mirrorFeed = mirrorFeedRef.current;
   useEffect(() => {
     // Warm the page chunks once the landing view has painted.
     const timer = window.setTimeout(prefetchRoutes, 1200);
@@ -701,7 +714,8 @@ export default function App(): ReactElement {
     receiverBridge,
     onRefreshSnapshot: refreshSnapshot,
     viewOnly,
-  }), [overviewPanels, onCompassConfigChanged, requestReceiver, navigate, capabilities, controlDraftRequest, onControlDraftRequest, receiverBridge, refreshSnapshot, viewOnly]);
+    mirrorFeed,
+  }), [overviewPanels, onCompassConfigChanged, requestReceiver, navigate, capabilities, controlDraftRequest, onControlDraftRequest, receiverBridge, refreshSnapshot, viewOnly, mirrorFeed]);
   const refreshOptions = useMemo(() => refreshIntervalOptions(capabilities?.refreshIntervalsS ?? null, config.refresh_seconds), [capabilities, config.refresh_seconds]);
 
   const onRefresh = useCallback((): void => {
@@ -747,7 +761,7 @@ export default function App(): ReactElement {
           <section ref={contentRef} className="route-content" key={route}>
             <LoadErrorBoundary>
               <Suspense fallback={routeLoading}>
-                {route === 'receiver' ? <ReceiverViewOnlyPage />
+                {route === 'receiver' ? <ReceiverMirrorPage feed={mirrorFeed} />
                   : route === 'simulation' ? <SimulationPage enabled={simulationEnabled} automatic={simulationAutomatic} settings={simulationSettings} onEnabled={enabled => { setSimulationEnabled(enabled); if (!enabled) setSimulationAutomatic(false); }} onAutomatic={setSimulationAutomatic} onSettings={setSimulationSettings} onRandomize={randomizeSimulation} onOverview={() => navigate('overview')} />
                   : route === 'overview' && simulationEnabled ? <OverviewPage snapshot={syntheticSnapshot} localSnapshotFresh={true} gpsConfig={gpsConfig} compassConfig={compassConfig} simulation={simulationSettings} {...overviewWiring} />
                   : <PageForRoute route={route} snapshot={snapshot} localFresh={currentLocalFresh} mqtt={mqtt} mqttError={mqttErrorText} config={config} configLoaded={configLoaded} configError={configErrorText} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={setGpsConfig} onCompassConfigChanged={onCompassConfigChanged} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} onMqttChanged={applyMqtt} onRefreshMqtt={refreshMqtt} onReconnectMqtt={reconnectMqtt} overview={overviewWiring} />}

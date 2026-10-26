@@ -11,6 +11,9 @@
  * status or in a command result, so a tune result shows before the next status.
  * Its marker list is kept as the newest receiver:markers (highest rev); it
  * changes only when someone marks, so it is state like the status.
+ * Spectrum subscriptions are kept per owner (the dock, the Receiver mirror
+ * publisher) and sent to the frame as one console:subscribe that serves them
+ * all (mergeSubscriptions), so the protocol is unchanged.
  * Nothing here touches `window` until attach(), so creating a bridge is safe
  * during server rendering.
  */
@@ -83,15 +86,42 @@ export interface BridgeState {
   lastResult: BridgeLastResult | null;
 }
 
-export interface ReceiverBridge {
+/** Who asked for spectrum frames: the Overview dock or the Receiver mirror publisher (receiverMirrorPublisher.ts). */
+export type SubscriptionOwner = 'dock' | 'mirror';
+/** Priority order: the first active owner's span is the one sent. */
+export const SUBSCRIPTION_OWNERS: readonly SubscriptionOwner[] = ['dock', 'mirror'];
+
+/**
+ * One subscription that serves every owner: frames while any owner wants them,
+ * the most bins and the highest rate any of them asked for, and the span of
+ * the first active owner in SUBSCRIPTION_OWNERS order. Null before any owner subscribed.
+ */
+export function mergeSubscriptions(claims: ReadonlyMap<SubscriptionOwner, Subscription>): Subscription | null {
+  if (!claims.size) return null;
+  const active = SUBSCRIPTION_OWNERS.map((owner) => claims.get(owner)).filter((claim): claim is Subscription => claim?.spectrum === true);
+  if (!active.length) return clampSubscription({ spectrum: false });
+  return {
+    spectrum: true,
+    bins: Math.max(...active.map((claim) => claim.bins)),
+    fps: Math.max(...active.map((claim) => claim.fps)),
+    spanHz: active[0].spanHz,
+  };
+}
+
+/** What draws spectrum frames needs only this: the bridge, or the Receiver mirror feed in the LAN view. */
+export interface SpectrumFeed {
+  onSpectrum(listener: (frame: SpectrumFrame) => void): () => void;
+}
+
+export interface ReceiverBridge extends SpectrumFeed {
   /** Bind the loaded frame window; called on every iframe load. */
   attach(frameWindow: BridgeFrameWindow): void;
   /** Forget the frame window; queued (unsent) commands are kept for the next attach. */
   detach(): void;
   /** Post a command (synchronously when the frame is ready) and settle with its result. */
   send(command: BridgeCommand): Promise<BridgeResult>;
-  /** Set the spectrum subscription; it is re-sent after every hello. */
-  subscribe(options: { spectrum: boolean; bins?: number; fps?: number; spanHz?: number }): void;
+  /** Set one owner's spectrum subscription (default the dock's); the merged one is re-sent after every hello. */
+  subscribe(options: { spectrum: boolean; bins?: number; fps?: number; spanHz?: number }, owner?: SubscriptionOwner): void;
   getState(): BridgeState;
   /** For useSyncExternalStore. */
   onState(listener: () => void): () => void;
@@ -206,6 +236,7 @@ export function createReceiverBridge(environment: BridgeEnvironment = browserEnv
   let target: BridgeFrameWindow | null = null;
   let helloTimer: TimerHandle | null = null;
   let subscription: Subscription | null = null;
+  const claims = new Map<SubscriptionOwner, Subscription>();
   let postedSubscriptionKey: string | null = null;
   let lastStatusSeq = -1;
   let commandCounter = 0;
@@ -401,8 +432,9 @@ export function createReceiverBridge(environment: BridgeEnvironment = browserEnv
       });
     },
 
-    subscribe(options) {
-      subscription = clampSubscription(options);
+    subscribe(options, owner = 'dock') {
+      claims.set(owner, clampSubscription(options));
+      subscription = mergeSubscriptions(claims);
       postSubscription(false);
     },
 
