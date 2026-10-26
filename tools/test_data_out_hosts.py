@@ -466,11 +466,14 @@ class HttpTests(unittest.TestCase):
             self.assertEqual(status, 200)
             status, body = self.console.request("GET", "/api/snapshot?base_url=http%3A%2F%2Frdf.local%3A8081")
             self.assertEqual(status, 200, body)
+            first_id = body["collection"]["id"]
+            # The saved URL is the same node: answered from the shared read.
             status, body = self.console.request("GET", "/api/snapshot")
             self.assertEqual(status, 200, body)
+            self.assertEqual((body["collection"]["id"], body["collection"]["shared"]), (first_id, True))
             status, body = self.console.request("GET", "/api/snapshot?base_url=http%3A%2F%2Fdoasdr.local%3A8081")
             self.assertEqual((status, body["code"]), (400, collector.DATA_OUT_URL_NOT_ALLOWED))
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 1)
         for call in calls:
             self.assertEqual(call["allowed_hosts"], ["rdf.local"])
             self.assertIs(call["mdns_resolver"], self.console.server.mdns_resolver)
