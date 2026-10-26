@@ -3,6 +3,7 @@ import { snapshotUrl } from '../api';
 import type { TelemetrySnapshot } from '../types';
 import {
   MAX_SERVED_AGE_MS,
+  ageAtAnswerMs,
   settingsAgeMs,
   settingsReadAtMs,
   snapshotCollectionId,
@@ -34,6 +35,12 @@ describe('the time a shared Data Out read was taken (#13)', () => {
 
   it('bounds an implausible age', () => {
     expect(snapshotServedAgeMs(shared({ age_ms: 10 * MAX_SERVED_AGE_MS }))).toBe(MAX_SERVED_AGE_MS);
+  });
+
+  it('adds the age of the shared read to an age taken at the node read', () => {
+    expect(ageAtAnswerMs(400, shared({ age_ms: 3_500 }))).toBe(3_900);
+    expect(ageAtAnswerMs(400, shared({}))).toBe(400);
+    expect(ageAtAnswerMs(null, shared({ age_ms: 3_500 }))).toBeNull();
   });
 
   it('reads the console interval the answer reports', () => {

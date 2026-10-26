@@ -30,6 +30,15 @@ export function snapshotReadAtMonotonic(snapshot: TelemetrySnapshot | null | und
 }
 
 /**
+ * A collector age (ms, counted when the node was read) as of when the answer
+ * was sent: the time the shared read waited on the console is added. This is
+ * the age the HUD shows, as it was when every answer was a new read.
+ */
+export function ageAtAnswerMs(ageMs: number | null, snapshot: TelemetrySnapshot | null | undefined): number | null {
+  return ageMs === null ? null : ageMs + snapshotServedAgeMs(snapshot);
+}
+
+/**
  * The console's saved refresh interval (s) when the answer was sent, or null.
  * It sets how long the console shares one read, so a page that loaded another
  * interval polls at this one and re-reads the console config.
