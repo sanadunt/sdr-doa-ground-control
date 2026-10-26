@@ -80,10 +80,16 @@ function compressIpv6(groups: readonly number[]): string {
   return `${head}::${tail}`;
 }
 
+/** An IPv4-mapped IPv6 address (::ffff:0:0/96), which the collector refuses too. */
+function isIpv4Mapped(groups: readonly number[]): boolean {
+  return groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff;
+}
+
 /**
  * One host in its saved form, or null: a DNS name (lowercase, one trailing
  * dot removed) or an IPv4/IPv6 address (IPv6 compressed, brackets allowed).
- * No wildcard, scheme, port, path, userinfo, zone id or unspecified address.
+ * No wildcard, scheme, port, path, userinfo, zone id, IPv4-mapped or
+ * unspecified address.
  */
 export function normalizeDataOutHost(input: string): string | null {
   const text = input.replace(ASCII_SPACE, '');
@@ -92,7 +98,7 @@ export function normalizeDataOutHost(input: string): string | null {
   const candidate = bracketed ? text.slice(1, -1) : text;
   if (candidate.includes(':')) {
     const groups = parseIpv6(candidate);
-    if (!groups || groups.every((group) => group === 0)) return null;
+    if (!groups || groups.every((group) => group === 0) || isIpv4Mapped(groups)) return null;
     return compressIpv6(groups);
   }
   if (bracketed) return null;

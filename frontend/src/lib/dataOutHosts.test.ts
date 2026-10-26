@@ -55,6 +55,18 @@ describe('Data Out host rules (same cases as the collector)', () => {
   it.each(CASES.urls)('read the host of URL %j as %j', (input, expected) => {
     expect(dataOutUrlHost(input)).toBe(expected);
   });
+
+  it('read every saved form back as itself, and refuse IPv4-mapped addresses', () => {
+    for (const [, expected] of CASES.hosts) {
+      if (expected !== null) expect(normalizeDataOutHost(expected)).toBe(expected);
+    }
+    // The collector refuses these too: Python may save a mapped address as a dotted quad.
+    for (const host of ['::ffff:c0a8:6464', '::ffff:0:0', '0:0:0:0:0:ffff:7f00:1', '[::ffff:a00:1]']) {
+      expect(normalizeDataOutHost(host)).toBeNull();
+    }
+    expect(normalizeDataOutHostList(['doasdr.local', '::ffff:0:c0a8:6464'])).toEqual(['doasdr.local', '::ffff:0:c0a8:6464']);
+    expect(() => normalizeDataOutHostList(['doasdr.local', '::ffff:192.168.100.100'])).toThrow();
+  });
 });
 
 describe('Data Out host list draft', () => {

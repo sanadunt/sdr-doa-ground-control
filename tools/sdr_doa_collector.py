@@ -196,7 +196,9 @@ def normalize_data_out_host(value: Any) -> str:
     (IPv6 may be in brackets; saved in its compressed form). A name whose
     last label is all digits must be a dotted-quad IPv4 address without
     leading zeros. Wildcards, schemes, ports, paths, userinfo, IPv6 zone ids,
-    IPv4-in-IPv6 notation and the unspecified address are refused.
+    IPv4-in-IPv6 notation, IPv4-mapped addresses (``::ffff:0:0/96``; the
+    IPv4 address is the host to list) and the unspecified address are
+    refused.
     frontend/src/lib/dataOutHosts.ts applies the same rules; the cases in
     tools/fixtures/data_out_hosts.json pin both.
     """
@@ -219,7 +221,10 @@ def normalize_data_out_host(value: Any) -> str:
             address = ipaddress.IPv6Address(candidate)
         except ValueError:
             raise invalid() from None
-        if address.is_unspecified:
+        # Some Python releases write a mapped address's compressed form as a
+        # dotted quad, which neither this function nor dataOutHosts.ts reads
+        # back, so a saved list would break the next load.
+        if address.is_unspecified or address.ipv4_mapped is not None:
             raise invalid()
         return address.compressed
     if bracketed:

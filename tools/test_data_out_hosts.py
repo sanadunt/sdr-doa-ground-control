@@ -14,6 +14,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import random
 import socket
 import sys
 import tempfile
@@ -50,6 +51,31 @@ class HostRuleTests(unittest.TestCase):
         for value, expected in CASES["urls"]:
             with self.subTest(url=value):
                 self.assertEqual(collector.data_out_url_host(value), expected)
+
+    def test_a_saved_host_reads_back_as_itself(self) -> None:
+        # The saved form must pass the same check on the next load (and in
+        # dataOutHosts.ts, which runs the fixture). Some Python releases write
+        # an IPv4-mapped address with a dotted quad, so those are refused.
+        for value, expected in CASES["hosts"]:
+            if expected is not None:
+                with self.subTest(host=value):
+                    self.assertEqual(collector.data_out_host_key(expected), expected)
+        generator = random.Random(11)
+        prefixes = ([0, 0, 0, 0, 0, 0xFFFF], [0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0xFFFF, 0], [0x64, 0xFF9B, 0, 0, 0, 0])
+        for _ in range(4000):
+            groups = list(generator.choice(prefixes)) + [generator.choice((0, 1, 0x7F00, 0xC0A8, generator.randrange(0x10000))) for _ in range(2)]
+            if generator.random() < 0.3:
+                groups = [generator.choice((0, 0, 1, 0xFFFF, generator.randrange(0x10000))) for _ in range(8)]
+            text = ":".join(f"{group:x}" for group in groups)
+            saved = collector.data_out_host_key(text)
+            mapped = groups[:6] == [0, 0, 0, 0, 0, 0xFFFF]
+            with self.subTest(host=text):
+                if mapped or not any(groups):
+                    self.assertIsNone(saved)
+                else:
+                    self.assertIsNotNone(saved)
+                    self.assertNotIn(".", saved or "")
+                    self.assertEqual(collector.data_out_host_key(saved), saved)
 
     def test_defaults_port_limit_and_codes_match_the_frontend_cases(self) -> None:
         self.assertEqual(list(collector.DEFAULT_DATA_OUT_HOSTS), CASES["defaults"])
@@ -395,6 +421,8 @@ class HttpTests(unittest.TestCase):
             ({"base_url": "http://doasdr.local:8082"}, collector.DATA_OUT_URL_NOT_ALLOWED, DEFAULTS),
             ({"data_out_hosts": ["192.168.100.100"]}, collector.DATA_OUT_HOST_IN_USE, ["192.168.100.100"]),
             ({"data_out_hosts": ["doasdr.local", "*.local"]}, collector.DATA_OUT_HOST_INVALID, []),
+            ({"data_out_hosts": ["doasdr.local", "::ffff:c0a8:6464"]}, collector.DATA_OUT_HOST_INVALID, []),
+            ({"base_url": "http://[::ffff:c0a8:6464]:8081", "data_out_hosts": ["doasdr.local", "::ffff:c0a8:6464"]}, collector.DATA_OUT_HOST_INVALID, []),
             ({"data_out_hosts": ["doasdr.local", "http://rdf.local:8081"]}, collector.DATA_OUT_HOST_INVALID, []),
             ({"data_out_hosts": []}, collector.DATA_OUT_HOSTS_EMPTY, []),
             ({"data_out_hosts": [f"n{index}.local" for index in range(16)] + ["doasdr.local"]}, collector.DATA_OUT_HOSTS_TOO_MANY, []),

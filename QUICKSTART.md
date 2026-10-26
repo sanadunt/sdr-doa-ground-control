@@ -357,7 +357,7 @@ Ground Console default memakai:
 http://doasdr.local:8081
 ```
 
-Data Out (cadangan) hanya dibaca dari host di daftar **Host Data Out (cadangan)**, selalu di port `8081`. Daftar itu disimpan di `console.json` (`data_out_hosts`) dan diubah di **Konfigurasi → Koneksi & refresh**: tambah host (nama DNS seperti `rdf.local` atau alamat IPv4/IPv6, tanpa skema, port, path, atau wildcard), hapus host, lalu **Simpan** bersama base URL. Default-nya `doasdr.local`, `192.168.100.100`, `127.0.0.1`, dan `localhost`; paling banyak 16 host, dan host base URL yang dipakai tidak bisa dihapus. Base URL di luar daftar ditolak dengan pesan yang menyebut host yang diizinkan dan port `8081`.
+Data Out (cadangan) hanya dibaca dari host di daftar **Host Data Out (cadangan)**, selalu di port `8081`. Daftar itu disimpan di `console.json` (`data_out_hosts`) dan diubah di **Konfigurasi → Koneksi & refresh**: tambah host (nama DNS seperti `rdf.local` atau alamat IPv4/IPv6, tanpa skema, port, path, atau wildcard; untuk alamat IPv4-mapped `::ffff:…` masukkan alamat IPv4-nya), hapus host, lalu **Simpan** bersama base URL. Default-nya `doasdr.local`, `192.168.100.100`, `127.0.0.1`, dan `localhost`; paling banyak 16 host, dan host base URL yang dipakai tidak bisa dihapus. Base URL di luar daftar ditolak dengan pesan yang menyebut host yang diizinkan dan port `8081`.
 
 Untuk satu run saja, jalankan dengan `--base-url`; host-nya harus ada di daftar tersimpan (pada start pertama: daftar dari `SDR_DOA_SEED_DATA_OUT_HOSTS`, atau default), misalnya:
 
