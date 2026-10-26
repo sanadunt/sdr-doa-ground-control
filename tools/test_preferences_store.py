@@ -235,6 +235,17 @@ class PreferencesStoreTests(unittest.TestCase):
         self.assertEqual(len(frontend), len(set(frontend)))
         self.assertEqual(set(frontend), set(PREFERENCE_KEYS))
 
+    def test_the_lan_view_gets_only_its_own_keys(self) -> None:
+        self.assertLess(set(preferences_store.LAN_VIEW_PREFERENCE_KEYS), set(PREFERENCE_KEYS))
+        for key in ("SDRSetting", "ReceiverSweepSettings", "sdr-web-bookmarks"):
+            self.assertNotIn(key, preferences_store.LAN_VIEW_PREFERENCE_KEYS)
+        store = self.store()
+        store.update({"values": {"sdr-console-theme": "light", "sdr-web-bookmarks": "[]", "SDRSetting": "{}"}})
+        lan_view = store.lan_view_snapshot()
+        self.assertEqual(lan_view["values"], {"sdr-console-theme": "light"})
+        self.assertEqual(lan_view["updated_at_ms"], store.snapshot()["updated_at_ms"])
+        self.assertEqual(len(store.snapshot()["values"]), 3)
+
     def test_every_key_is_a_storage_key_in_the_sources(self) -> None:
         roots = [PROJECT_ROOT / "frontend" / "src", PROJECT_ROOT / "tools" / "browsdr_receiver_overlay" / "src"]
         texts = []

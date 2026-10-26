@@ -62,6 +62,24 @@ PREFERENCE_KEYS: Dict[str, str] = {
     "sdr-web-bookmarks": JSON_ARRAY,
 }
 
+# The keys the LAN view (lan_access) gets from GET /api/preferences: what its
+# screens read, that is the shell, the Overview panels and map, the polar view
+# and the GPS and Compass source. The groundstation's spectrum dock (listen
+# mode, follow node, the dock's mode and scale) and the embedded Receiver's own
+# keys (its VFOs, scan settings and named bookmarks) are left out: the LAN view
+# shows the Receiver mirror instead and refuses every /api/receiver/* route. A
+# key added to PREFERENCE_KEYS stays off the LAN until it is listed here.
+LAN_VIEW_PREFERENCE_KEYS = frozenset({
+    "sdr-console-theme",
+    "sdr-console-lang",
+    "sdr-console-overview-panels-v1",
+    "sdr-console-basemap",
+    "sdr-doa-overlay-settings-v4",
+    "sdr-doa-polar-view-v1",
+    "sdr-doa-gps-source-v1",
+    "sdr-doa-compass-source-v1",
+})
+
 # Bounds, in UTF-8 bytes. One value (the Receiver bookmarks are the largest)
 # and the whole stored document, so the file and a browser keepalive flush
 # stay small.
@@ -268,6 +286,15 @@ class PreferencesStore:
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
             return self._snapshot_locked()
+
+    def lan_view_snapshot(self) -> Dict[str, Any]:
+        """The snapshot with only the LAN view's keys (``LAN_VIEW_PREFERENCE_KEYS``)."""
+        with self._lock:
+            snapshot = self._snapshot_locked()
+        snapshot["values"] = {
+            key: value for key, value in snapshot["values"].items() if key in LAN_VIEW_PREFERENCE_KEYS
+        }
+        return snapshot
 
     def _snapshot_locked(self) -> Dict[str, Any]:
         return {

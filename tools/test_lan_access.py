@@ -47,6 +47,7 @@ finally:
         os.environ["SDR_DOA_ADMIN_PASSWORD"] = _SAVED_ADMIN_PASSWORD
 
 import lan_access as lan  # noqa: E402
+import preferences_store  # noqa: E402
 from tile_cache import TILE_ROUTE_PREFIX  # noqa: E402
 
 BASE_URL = "http://doasdr.local:8081"
@@ -539,6 +540,31 @@ class LanListenerTests(_ServerCase):
         self.assertIs(preferences["read_only"], True)
         health = _json(self.get("/api/health")[2])
         self.assertEqual(health["lan_access"], {"enabled": True, "state": "open", "reason": None})
+
+    def test_preferences_carry_only_the_lan_views_keys(self) -> None:
+        # Every saved key, the Receiver's settings and bookmarks included.
+        values = {}
+        for key, kind in preferences_store.PREFERENCE_KEYS.items():
+            values[key] = {"token": "dark", "json-object": '{"v":1}', "json-array": '[{"name":"tower","f":433920000}]'}[kind]
+        status, _answer = self.main_request(self.server, "PUT", "/api/preferences", {"values": values})
+        self.assertEqual(status, 200)
+        self.assertEqual(set(self.server.preferences.snapshot()["values"]), set(preferences_store.PREFERENCE_KEYS))
+        status, _headers, body = self.get("/api/preferences")
+        self.assertEqual(status, 200, body)
+        answer = _json(body)
+        self.assertIs(answer["read_only"], True)
+        self.assertEqual(set(answer["values"]), set(preferences_store.LAN_VIEW_PREFERENCE_KEYS))
+        for key in ("SDRSetting", "ReceiverSweepSettings", "sdr-web-bookmarks", "sdr-console-listen-mode",
+                    "sdr-console-follow-node", "sdr-console-spectrum-dock-v1"):
+            self.assertNotIn(key, answer["values"])
+        self.assertNotIn(b"tower", body)
+        for key in preferences_store.LAN_VIEW_PREFERENCE_KEYS:
+            self.assertEqual(answer["values"][key], values[key])
+        # The loopback listener still answers the whole copy, and the Receiver's
+        # own route stays refused on the LAN.
+        self.assertEqual(set(self.main_request(self.server, "GET", "/api/preferences", origin=False)[1]["values"]),
+                         set(preferences_store.PREFERENCE_KEYS))
+        self.assert_refused(self.get("/api/receiver/marker-sets"), 403, "LAN_READ_ONLY")
 
     def test_capabilities_say_lan_view_and_nothing_writable(self) -> None:
         caps = _json(self.get("/api/capabilities")[2])

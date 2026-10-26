@@ -3802,8 +3802,10 @@ class LanConsoleHandler(ConsoleHandler):
             self._send_snapshot(self.console_server.base_url, _snapshot_request(query, fresh_settings=False))
             return
         if route == "/api/preferences":
-            # Read only: the page keeps its own changes in this browser.
-            self._send_json({**self.console_server.preferences.snapshot(), "read_only": True})
+            # Read only: the page keeps its own changes in this browser. Only
+            # the keys the LAN view's screens read; the Receiver's settings and
+            # bookmarks stay on this host, like every /api/receiver/* route.
+            self._send_json({**self.console_server.preferences.lan_view_snapshot(), "read_only": True})
             return
         if route == "/api/admin/status":
             self._send_json({"authenticated": False})

@@ -18,9 +18,11 @@
  * - The embedded Receiver writes its own keys (same origin, same
  *   localStorage); the `storage` event that reaches this window carries them
  *   to the server too.
- * - In the LAN view the server answers `read_only: true`: its copy only
- *   fills keys this browser does not have yet, and nothing is ever sent, so
- *   a tablet keeps its own choices and never changes the groundstation's.
+ * - In the LAN view the server answers `read_only: true` with the view's own
+ *   keys only (no Receiver settings or bookmarks, no spectrum dock keys): its
+ *   copy only fills keys this browser does not have yet, and nothing is ever
+ *   sent, so a tablet keeps its own choices and never changes the
+ *   groundstation's.
  *
  * Live data never goes through here, and nothing secret is stored.
  */
