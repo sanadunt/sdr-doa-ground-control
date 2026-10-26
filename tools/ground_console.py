@@ -3926,6 +3926,14 @@ class LanViewServer(ThreadingHTTPServer):
         return lan.client_allowed(self.allowed, address)
 
 
+# A bind that fails because the address is not on this host yet (a literal
+# LAN address the network brings up after the console started at boot) or the
+# port is still held is tried again while the setting stays enabled: after
+# these delays, the last one repeating. Other errors stay closed until a save.
+LAN_BIND_RETRY_ERRNOS = frozenset({errno.EADDRNOTAVAIL, errno.EADDRINUSE})
+LAN_BIND_RETRY_DELAYS_S: Tuple[float, ...] = (5.0, 10.0, 20.0, 40.0, 60.0)
+
+
 class LanAccessManager:
     """Opens, moves and closes the LAN view listener of one console."""
 
@@ -3938,6 +3946,13 @@ class LanAccessManager:
         self._reason: Optional[str] = lan.CLOSED_DISABLED
         self._detail: Optional[str] = None
         self.refusals = lan.RefusalLog(lambda message: print(f"[ground-console] {message}", flush=True))
+        # Bind retries: every apply() and close() starts a new generation,
+        # which a pending retry of an older one ignores.
+        self.retry_delays_s: Sequence[float] = LAN_BIND_RETRY_DELAYS_S
+        self._generation = 0
+        self._retry_timer: Optional[threading.Timer] = None
+        self._retry_attempt = 0
+        self._allowed_networks: List[lan.Network] = []
 
     def _closed_reason(self, settings: Dict[str, Any]) -> Optional[str]:
         if not settings.get("enabled"):
@@ -3957,6 +3972,7 @@ class LanAccessManager:
         parsed allowed_clients; only tests pass it, to admit a loopback client.
         """
         with self._lock:
+            self._new_generation_locked()
             self._close_locked()
             self._settings = dict(settings)
             self._detail = None
@@ -3966,27 +3982,74 @@ class LanAccessManager:
                 if reason != lan.CLOSED_DISABLED:
                     _log_warning(f"lan_access is enabled but the LAN view stays closed: {lan.CLOSED_REASON_TEXT[reason]}")
                 return self.status()
-            allowed_networks = list(allowed) if allowed is not None else lan.networks(settings)
-            try:
-                server = LanViewServer(self.console, (str(settings["bind"]), int(settings["port"])), allowed_networks, self.refusals)
-            except OSError as exc:
-                self._reason = lan.CLOSED_BIND_FAILED
-                self._detail = (errno.errorcode.get(exc.errno) if exc.errno else None) or type(exc).__name__
-                _log_warning(f"the LAN view could not bind {settings['bind']}:{settings['port']} ({self._detail}); it stays closed")
-                return self.status()
-            thread = threading.Thread(target=server.serve_forever, name="lan-view", daemon=True)
-            thread.start()
-            self._server = server
-            self._thread = thread
-            self._reason = None
-            self._mirror_open(True)
-            status = self.status()
-            print(
-                f"[ground-console] LAN view (read only) open on http://{status['address']}/ "
-                f"for {len(allowed_networks)} allowed client entr{'y' if len(allowed_networks) == 1 else 'ies'}",
-                flush=True,
-            )
-            return status
+            self._allowed_networks = list(allowed) if allowed is not None else lan.networks(settings)
+            return self._open_locked()
+
+    def _open_locked(self) -> Dict[str, Any]:
+        settings = self._settings
+        allowed_networks = self._allowed_networks
+        retry = self._retry_attempt > 0
+        try:
+            server = LanViewServer(self.console, (str(settings["bind"]), int(settings["port"])), allowed_networks, self.refusals)
+        except OSError as exc:
+            detail = (errno.errorcode.get(exc.errno) if exc.errno else None) or type(exc).__name__
+            retryable = exc.errno in LAN_BIND_RETRY_ERRNOS
+            if not retry or detail != self._detail:
+                _log_warning(
+                    f"the LAN view could not bind {settings['bind']}:{settings['port']} ({detail}); "
+                    + ("it stays closed and the bind is tried again" if retryable else "it stays closed")
+                )
+            self._reason = lan.CLOSED_BIND_FAILED
+            self._detail = detail
+            if retryable:
+                self._schedule_retry_locked()
+            return self.status()
+        self._retry_attempt = 0
+        thread = threading.Thread(target=server.serve_forever, name="lan-view", daemon=True)
+        thread.start()
+        self._server = server
+        self._thread = thread
+        self._reason = None
+        self._mirror_open(True)
+        status = self.status()
+        print(
+            f"[ground-console] LAN view (read only) open on http://{status['address']}/ "
+            f"for {len(allowed_networks)} allowed client entr{'y' if len(allowed_networks) == 1 else 'ies'}"
+            + (" after a failed bind" if retry else ""),
+            flush=True,
+        )
+        return status
+
+    def _new_generation_locked(self) -> None:
+        """Forget a pending bind retry; apply() and close() start afresh."""
+        self._generation += 1
+        self._retry_attempt = 0
+        timer, self._retry_timer = self._retry_timer, None
+        if timer is not None:
+            timer.cancel()
+
+    def _schedule_retry_locked(self) -> None:
+        delays = list(self.retry_delays_s) or list(LAN_BIND_RETRY_DELAYS_S)
+        delay = delays[min(self._retry_attempt, len(delays) - 1)]
+        self._retry_attempt += 1
+        timer = threading.Timer(delay, self._retry_bind, args=(self._generation,))
+        timer.daemon = True
+        timer.name = "lan-view-bind-retry"
+        self._retry_timer = timer
+        timer.start()
+
+    def _retry_bind(self, generation: int) -> None:
+        with self._lock:
+            # A save or a stop in between owns the listener now.
+            if generation != self._generation or self._server is not None:
+                return
+            self._retry_timer = None
+            self._open_locked()
+
+    def retry_pending(self) -> bool:
+        """A failed bind waits to be tried again."""
+        with self._lock:
+            return self._retry_timer is not None
 
     def _close_locked(self) -> None:
         server, thread = self._server, self._thread
@@ -4023,10 +4086,13 @@ class LanAccessManager:
     def close(self) -> None:
         """Close the listener for good (console stop)."""
         with self._lock:
+            retrying = self._retry_timer is not None
+            self._new_generation_locked()
             was_open = self._server is not None
             self._close_locked()
-            if was_open:
+            if was_open or retrying:
                 self._reason = lan.CLOSED_STOPPED
+                self._detail = None
 
     def status(self) -> Dict[str, Any]:
         """The LAN view's state for /api/lan-access and the loopback capabilities."""

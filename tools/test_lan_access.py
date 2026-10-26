@@ -13,6 +13,7 @@ provider.
 from __future__ import annotations
 
 import contextlib
+import errno
 import http.client
 import io
 import ipaddress
@@ -875,6 +876,114 @@ class LanStartTests(_ServerCase):
             self.assertEqual(ground_console.main(argv), 0)
         self.assertEqual(seen, [True])
         self.assertTrue(_closed(port))
+
+
+class LanBindRetryTests(_ServerCase):
+    """A bind that fails while the address or port is not ready is tried again."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        delays = patch.object(ground_console, "LAN_BIND_RETRY_DELAYS_S", (0.05, 0.1))
+        delays.start()
+        self.addCleanup(delays.stop)
+
+    def wait_for(self, predicate: Any, timeout: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.02)
+        return bool(predicate())
+
+    def failing_then_real(self, failures: int, error: int = errno.EADDRNOTAVAIL) -> List[Any]:
+        """LanViewServer fails ``failures`` times, then binds 127.0.0.1 on the asked port."""
+        real = ground_console.LanViewServer
+        calls: List[Any] = []
+
+        def factory(console: Any, address: Tuple[str, int], allowed: Any, refusals: Any) -> Any:
+            calls.append(address)
+            if len(calls) <= failures:
+                raise OSError(error, os.strerror(error))
+            return real(console, ("127.0.0.1", address[1]), allowed, refusals)
+
+        patcher = patch.object(ground_console, "LanViewServer", factory)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return calls
+
+    def test_an_address_that_comes_up_after_the_start_opens_the_view(self) -> None:
+        port = _free_port()
+        calls = self.failing_then_real(3)
+        server = self.start_server({
+            "version": 1,
+            "base_url": BASE_URL,
+            "mqtt_host": "",
+            "lan_access": {"enabled": True, "port": port, "bind": "192.0.2.77", "allowed_clients": [TEST_NET]},
+        })
+        status = server.lan.status()
+        self.assertEqual((status["state"], status["reason"], status["detail"]), ("closed", "BIND_FAILED", "EADDRNOTAVAIL"))
+        self.assertTrue(server.lan.retry_pending())
+        self.assertTrue(self.wait_for(lambda: server.lan.status()["state"] == "open"), server.lan.status())
+        self.assertEqual(len(calls), 4)
+        self.assertFalse(server.lan.retry_pending())
+        self.assertEqual(self.main_request(server, "GET", "/api/health", origin=False)[1]["lan_access"],
+                         {"enabled": True, "state": "open", "reason": None})
+        # 127.0.0.1 is not in the TEST-NET allowlist.
+        self.assertEqual(_request(port, "GET", "/api/health")[0::2], (403, b""))
+        log = self.output.getvalue()
+        self.assertEqual(log.count("could not bind"), 1, log)
+        self.assertIn("(EADDRNOTAVAIL); it stays closed and the bind is tried again", log)
+        self.assertIn("after a failed bind", log)
+
+    def test_a_held_port_opens_once_it_is_free(self) -> None:
+        server = self.start_server()
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(blocker.close)
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        port = blocker.getsockname()[1]
+        status = server.lan.apply({"enabled": True, "port": port, "bind": "127.0.0.1", "allowed_clients": []}, allowed=LOOPBACK)
+        self.assertEqual((status["state"], status["reason"], status["detail"]), ("closed", "BIND_FAILED", "EADDRINUSE"))
+        time.sleep(0.4)
+        self.assertEqual(server.lan.status()["state"], "closed")
+        self.assertTrue(server.lan.retry_pending())
+        # The same error again is not logged again.
+        self.assertEqual(self.output.getvalue().count("could not bind"), 1)
+        blocker.close()
+        self.assertTrue(self.wait_for(lambda: server.lan.status()["state"] == "open"), server.lan.status())
+        self.assertEqual(_request(port, "GET", "/api/health")[0], 200)
+
+    def test_another_bind_error_is_not_tried_again(self) -> None:
+        server = self.start_server()
+        calls = self.failing_then_real(100, errno.EACCES)
+        status = server.lan.apply(
+            {"enabled": True, "port": _free_port(), "bind": "127.0.0.1", "allowed_clients": []}, allowed=LOOPBACK,
+        )
+        self.assertEqual((status["reason"], status["detail"]), ("BIND_FAILED", "EACCES"))
+        self.assertFalse(server.lan.retry_pending())
+        time.sleep(0.3)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("(EACCES); it stays closed\n", self.output.getvalue())
+
+    def test_a_save_or_a_stop_ends_the_retries(self) -> None:
+        server = self.start_server()
+        calls = self.failing_then_real(10_000)
+        settings = {"enabled": True, "port": _free_port(), "bind": "127.0.0.1", "allowed_clients": []}
+        server.lan.apply(settings, allowed=LOOPBACK)
+        self.assertTrue(self.wait_for(lambda: len(calls) >= 3))
+        self.assertEqual(server.lan.apply({**settings, "enabled": False})["reason"], "DISABLED")
+        self.assertFalse(server.lan.retry_pending())
+        count = len(calls)
+        time.sleep(0.3)
+        self.assertEqual(len(calls), count)
+        server.lan.apply(settings, allowed=LOOPBACK)
+        self.assertTrue(server.lan.retry_pending())
+        server.lan.close()
+        self.assertFalse(server.lan.retry_pending())
+        self.assertEqual(server.lan.status()["reason"], "STOPPED")
+        count = len(calls)
+        time.sleep(0.3)
+        self.assertEqual(len(calls), count)
 
 
 class LanAccessRouteTests(_ServerCase):
