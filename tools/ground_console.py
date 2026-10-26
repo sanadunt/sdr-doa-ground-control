@@ -702,16 +702,18 @@ def _public_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in config.items() if key != "lan_access"}
 
 
-def _snapshot_request(query: Dict[str, List[str]], *, fresh_settings: bool = True) -> SnapshotRequest:
+def _snapshot_request(
+    query: Dict[str, List[str]], *, fresh_settings: bool = True, refresh: bool = True
+) -> SnapshotRequest:
     """The read flags of one /api/snapshot query (data_out_reader.py).
 
     refresh=1 is the operator's Refresh and fresh_settings=1 Kontrol's "Cek
     ulang" (both read again only when the last read is 1 s old); seen is the
-    collection id the viewer already shows. ``fresh_settings=False`` ignores
-    that flag.
+    collection id the viewer already shows. ``fresh_settings=False`` and
+    ``refresh=False`` ignore those flags.
     """
     return SnapshotRequest(
-        refresh=query.get("refresh", [""])[0] == "1",
+        refresh=refresh and query.get("refresh", [""])[0] == "1",
         fresh_settings=fresh_settings and query.get("fresh_settings", [""])[0] == "1",
         seen=valid_collection_id(query.get("seen", [""])[0]),
     )
@@ -3798,10 +3800,15 @@ class LanConsoleHandler(ConsoleHandler):
             return
         if route == "/api/snapshot":
             # Only the configured Data Out; a base_url in the query is ignored.
-            # seen and refresh share the read like a loopback viewer;
-            # fresh_settings is Kontrol's, which the LAN view does not have.
+            # seen shares the read like a loopback viewer. refresh is ignored,
+            # so LAN clients never read Data Out more often than the saved
+            # interval over the radio link; fresh_settings is Kontrol's, which
+            # the LAN view does not have.
             query = parse_qs(parsed.query, keep_blank_values=False)
-            self._send_snapshot(self.console_server.base_url, _snapshot_request(query, fresh_settings=False))
+            self._send_snapshot(
+                self.console_server.base_url,
+                _snapshot_request(query, fresh_settings=False, refresh=False),
+            )
             return
         if route == "/api/preferences":
             # Read only: the page keeps its own changes in this browser. Only
