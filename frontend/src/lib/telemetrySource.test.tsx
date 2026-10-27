@@ -3,15 +3,17 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { TelemetrySnapshot } from '../types';
 import { I18nContext, gateReasonLabel, translate } from './i18n';
 import type { Lang } from './i18n';
-import { overviewDoaStatus } from './doaStatus';
+import { actionableGateReasons, overviewDoaStatus } from './doaStatus';
 import { candidateErrors, deriveDataState, nativeViewsReady, polarDataReady, primaryCandidate, sourceViewNames } from './telemetry';
 import { gpsReportsNoFix, holdStationCoordinate, resolveGpsSource, resolveStationCoordinate } from './map';
 import { nodeFrequencies } from './nodeFrequency';
-import { dataOutCompassFromSnapshot, polarView } from './polar';
+import { DEFAULT_COMPASS_CONFIG, dataOutCompassFromSnapshot, polarView } from './polar';
+import { DEFAULT_POLAR_VIEW_SETTINGS } from './polarViewSettings';
 import { SOURCE_REASONS, isMqttSnapshot, mqttAngleMode, mqttDiagnosticRows, snapshotSourceKind, snapshotSourceReasons, sourceBadge } from './telemetrySource';
 import { localSnapshotFresh } from '../App';
 import { ConsoleShell } from '../components/Shell';
 import { DoaReadout } from '../components/DoaReadout';
+import { PolarDock } from '../components/overview/PolarDock';
 
 /** An answer of tools/telemetry_source.py, written by tools/test_telemetry_source.py. */
 function answer(name: string): TelemetrySnapshot {
@@ -156,6 +158,41 @@ describe('MQTT first, Data Out as the fallback', () => {
     expect(markup).toContain('<span class="ov-tag tone-good">MQTT</span>');
     // θ₀ 160° with offset 12°: bearing (360 - 160 + 12) mod 360.
     expect(markup).toContain('212.0');
+  });
+
+  it('shows a LIVE MQTT DoA between Angular frames without the curve', () => {
+    // The edge sends Angular about every 9 s and none for 20 s after a
+    // command: the bearing stays, only the curve waits for the next frame.
+    const snapshot = answer('mqtt-live.json');
+    const view = snapshot.doa_candidates!.mqtt;
+    for (const key of ['angular_power_db', 'angular_peak_index', 'angular_peak_value', 'angular_peak_db', 'angular_bins'] as const) delete (view as Record<string, unknown>)[key];
+    view.angular_pairing = 'PEAK_MOVED';
+    snapshot.native_consistency = { ...snapshot.native_consistency, comparable: false, frame_relation: 'INCOMPLETE', angle_checked: false, conflict: false };
+    snapshot.publication_gate!.reasons = [...(snapshot.publication_gate!.reasons ?? []), 'MQTT_ANGULAR_UNAVAILABLE'];
+    expect(polarDataReady(snapshot)).toBe(false);
+    expect(deriveDataState(snapshot, false, true)).toBe('AVAILABLE');
+    expect(overviewDoaStatus(snapshot, true)).toMatchObject({ code: 'AVAILABLE', shown: true });
+    const polar = polarView(snapshot, { figType: 'Compass', compassOffset: 0 }, true);
+    expect(polar.values).toBeNull();
+    expect(polar.canonicalAngle).toBe(160);
+    expect(hud(snapshot)).toContain('212.0');
+    const dock = (lang: Lang) => renderToStaticMarkup(
+      <I18nContext.Provider value={{ lang, setLang: () => undefined, t: t(lang) }}>
+        <PolarDock snapshot={snapshot} localSnapshotFresh settings={{ figType: 'Polar', compassOffset: 12 }} offsetSource="DATA_OUT" offsetVerified compassConfig={DEFAULT_COMPASS_CONFIG} view={DEFAULT_POLAR_VIEW_SETTINGS} onViewChange={() => undefined} />
+      </I18nContext.Provider>,
+    );
+    expect(dock('en')).toContain('θ₀ 160.0°');
+    expect(dock('en')).toContain(`<span class="is-warn"> · ${translate('en', 'polarDock.noCurve')}</span>`);
+    expect(dock('id')).toContain(translate('id', 'polarDock.noCurve'));
+    expect(renderToStaticMarkup(
+      <PolarDock snapshot={answer('mqtt-live.json')} localSnapshotFresh settings={{ figType: 'Polar', compassOffset: 12 }} offsetSource="DATA_OUT" offsetVerified compassConfig={DEFAULT_COMPASS_CONFIG} view={DEFAULT_POLAR_VIEW_SETTINGS} onViewChange={() => undefined} />,
+    )).not.toContain(translate('en', 'polarDock.noCurve'));
+    // It comes and goes with the frames and needs no action.
+    expect(actionableGateReasons(snapshot.publication_gate!.reasons)).not.toContain('MQTT_ANGULAR_UNAVAILABLE');
+    // A Data Out answer still needs the vector.
+    const legacy = dataOut();
+    delete (legacy.doa_candidates!.csv as Record<string, unknown>).angular_power_db;
+    expect(overviewDoaStatus(legacy, true)).toMatchObject({ code: 'INCOMPLETE', reason: 'vectorIncomplete', shown: false });
   });
 
   it('takes what MQTT never carries from the light Data Out read', () => {

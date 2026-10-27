@@ -1,6 +1,6 @@
 import type { Candidate, TelemetrySnapshot, Tone } from '../types';
 import type { MessageKey } from './i18n';
-import { adcOverdriven, candidate, completeVector, daqFailed, daqUnknown, freshCandidate, nativeViewsReady, nodeStalled, parsedCandidate, polarDataReady } from './telemetry';
+import { adcOverdriven, candidate, completeVector, daqFailed, daqUnknown, doaDataReady, freshCandidate, nativeViewsReady, nodeStalled, parsedCandidate } from './telemetry';
 import { isMqttSnapshot, mqttDoaUnverified } from './telemetrySource';
 
 /** Why the DoA curve and bearing are, or are not, shown. */
@@ -38,12 +38,13 @@ function viewMissing(value: Candidate): boolean {
 
 /**
  * The snapshot carries a fresh, comparable, non-conflicting pair of views with
- * a finite canonical angle and a complete 360-bin vector, and the local
- * freshness window is still open. This is the data condition only; the DAQ and
- * ADC checks are applied by doaStatus.
+ * a finite canonical angle and a complete 360-bin vector (an MQTT answer: a
+ * fresh LIVE DoA, with or without its Angular vector; doaDataReady), and the
+ * local freshness window is still open. This is the data condition only; the
+ * DAQ and ADC checks are applied by doaStatus.
  */
 export function doaDrawable(snapshot: TelemetrySnapshot | null | undefined, localFresh: boolean): boolean {
-  return localFresh && polarDataReady(snapshot);
+  return localFresh && doaDataReady(snapshot);
 }
 
 /**
@@ -70,13 +71,12 @@ export function doaStatus(snapshot: TelemetrySnapshot | null | undefined, localF
   if (adcOverdriven(snapshot)) return blocked('DEGRADED', 'adcOverdrive');
   if (drawable && localFresh) return { code: 'AVAILABLE', tone: 'good', reason: 'available', shown: true };
   if (isMqttSnapshot(snapshot)) {
-    // One view from MQTT: the LIVE DoA (ok=1) with its Angular frame. An
-    // UNVERIFIED DoA (ok=0) is a diagnostic and never shown.
+    // One view from MQTT: the LIVE DoA (ok=1), shown with or without its
+    // Angular frame. An UNVERIFIED DoA (ok=0) is a diagnostic and never shown.
     const view = candidate(snapshot, 'mqtt');
     if (view.available !== true) return mqttDoaUnverified(snapshot) ? blocked('UNVERIFIED', 'mqttUnverified') : blocked('STALE', 'mqttNoDoa');
     if (!parsedCandidate(view)) return blocked('INCOMPLETE', 'angleMissing');
     if (!freshCandidate(view)) return blocked('STALE', 'sourceStale');
-    if (!completeVector(view)) return blocked('INCOMPLETE', 'vectorIncomplete');
     if (!localFresh) return blocked('STALE', 'localExpired');
     return blocked('INCOMPLETE', 'angleMissing');
   }
@@ -129,7 +129,9 @@ export function doaStatusTextKey(reason: DoaStatusReason): MessageKey {
 // authority/unit contracts are not configured) go last so the summary shows
 // the reason an operator can act on. NATIVE_ANGLE_UNCHECKED comes and goes
 // with read timing (CSV and XML from adjacent frames, or an MQTT DoA newer
-// than its Angular frame) and needs no action.
+// than its Angular frame) and needs no action, and so does
+// MQTT_ANGULAR_UNAVAILABLE (an MQTT DoA between Angular frames, shown
+// without its curve).
 const STANDING_GATE_REASONS = [
   'POWER_FLOOR_LOSSY',
   'POWER_MAPPING_UNVERIFIED',
@@ -139,6 +141,7 @@ const STANDING_GATE_REASONS = [
   'CANONICAL_ANGLE_NOT_CONFIGURED',
   'GROUND_CLOCK_UNVERIFIED',
   'NATIVE_ANGLE_UNCHECKED',
+  'MQTT_ANGULAR_UNAVAILABLE',
 ];
 
 const ACTIONABLE_GATE_REASONS = [
@@ -154,7 +157,6 @@ const ACTIONABLE_GATE_REASONS = [
   'MQTT_NO_DOA',
   'MQTT_DOA_UNVERIFIED',
   'MQTT_ANGLE_CONVENTION_UNKNOWN',
-  'MQTT_ANGULAR_UNAVAILABLE',
   'CSV_VIEW_UNAVAILABLE',
   'XML_VIEW_UNAVAILABLE',
   'NATIVE_ANGLE_INVALID',

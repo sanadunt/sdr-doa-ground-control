@@ -136,7 +136,7 @@ export function PolarDock({
           <div className="ov-polar-frame">
             <PolarPlot values={values} settings={settings} simulation={simulation} offsetSource={offsetSource} head={head} range={view.range} hideSettings compactCaption modeBar={false} sourceLabel={sourceLabel} />
           </div>
-          <p className="ov-polar-footer">{footer}{manualOffset && compass ? <span className="is-manual"> · MANUAL</span> : null}</p>
+          <p className="ov-polar-footer">{footer}{status.shown && !values ? <span className="is-warn"> · {t('polarDock.noCurve')}</span> : null}{manualOffset && compass ? <span className="is-manual"> · MANUAL</span> : null}</p>
         </div>
         {settingsOpen ? (
           <div id="polar-settings" className="ov-polar-settings" role="group" aria-label={t('polarDock.settingsRegion')}>

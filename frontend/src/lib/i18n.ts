@@ -173,6 +173,7 @@ const en = {
   'polarDock.footer': 'Peak {peak}° · −3 dB {width} · HU {head}°',
   'polarDock.footerPolar': 'θ₀ {theta}° · −3 dB {width} · HU {head}°',
   'polarDock.footerWaiting': 'Waiting for fresh data · HU {head}°',
+  'polarDock.noCurve': 'no Angular curve',
 
   'spectrum.title': 'Spectrum',
   'spectrum.openReceiver': 'Open full Receiver',
@@ -400,6 +401,7 @@ const en = {
   'map.bearingReference': '{deg}° reference',
   'map.bearingUnavailable': 'bearing unavailable',
   'map.noVector': 'No fresh 360-bin vector',
+  'map.bearingOnly': '{deg}° reference · no Angular curve',
   'map.legendBearing': 'Bearing',
   'map.legendLobe': 'Lobe',
   'map.legendEdges': '−3 dB edges',
@@ -1091,6 +1093,7 @@ const id: Dictionary = {
   'polarDock.footer': 'Puncak {peak}° · −3 dB {width} · HU {head}°',
   'polarDock.footerPolar': 'θ₀ {theta}° · −3 dB {width} · HU {head}°',
   'polarDock.footerWaiting': 'Menunggu data segar · HU {head}°',
+  'polarDock.noCurve': 'tanpa kurva Angular',
 
   'spectrum.title': 'Spektrum',
   'spectrum.openReceiver': 'Buka Receiver penuh',
@@ -1318,6 +1321,7 @@ const id: Dictionary = {
   'map.bearingReference': 'referensi {deg}°',
   'map.bearingUnavailable': 'bearing tidak tersedia',
   'map.noVector': 'Tidak ada vektor 360 bin yang fresh',
+  'map.bearingOnly': 'referensi {deg}° · tanpa kurva Angular',
   'map.legendBearing': 'Bearing',
   'map.legendLobe': 'Lobe',
   'map.legendEdges': 'Tepi −3 dB',

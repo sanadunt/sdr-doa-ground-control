@@ -93,8 +93,20 @@ export function nativeViewsReady(snapshot: TelemetrySnapshot | null | undefined)
     && consistency.conflict !== true;
 }
 
+/** The views are ready and carry the 360-bin vector the polar curve and the map overlay draw. */
 export function polarDataReady(snapshot: TelemetrySnapshot | null | undefined): boolean {
   return nativeViewsReady(snapshot) && completeVector(primaryCandidate(snapshot));
+}
+
+/**
+ * The DoA (theta_0 and the bearing) may be drawn. Data Out needs the curve
+ * too. A LIVE MQTT DoA is a detection by itself, as for the edge's own
+ * Ground: the edge sends its Angular frame far less often than the DoA
+ * (about every 9 s, none for 20 s after a command or reconnect, none in
+ * profile control), so between frames the bearing is shown without a curve.
+ */
+export function doaDataReady(snapshot: TelemetrySnapshot | null | undefined): boolean {
+  return isMqttSnapshot(snapshot) ? nativeViewsReady(snapshot) : polarDataReady(snapshot);
 }
 
 /**

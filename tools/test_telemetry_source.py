@@ -450,8 +450,11 @@ class MqttSnapshotTests(unittest.TestCase):
         view = snapshot["doa_candidates"]["mqtt"]
         self.assertNotIn("angular_power_db", view)
         self.assertEqual(view["angular_pairing"], "NONE")
-        self.assertEqual(snapshot["overall_state"], "INCOMPLETE")
+        # The LIVE DoA is still a detection: its angle is kept, without a curve.
+        self.assertEqual(view["canonical_angle_deg"], THETA)
+        self.assertEqual(snapshot["overall_state"], "UNVERIFIED")
         self.assertIn("MQTT_ANGULAR_UNAVAILABLE", snapshot["publication_gate"]["reasons"])
+        self.assertIs(snapshot["publication_gate"]["checks"]["angular_vector_live"], False)
         self.assertEqual(snapshot["mqtt"]["angular_unverified"]["flags"], 23)
         self.assertNotIn("values", snapshot["mqtt"]["angular_unverified"])
         # The diagnostic topic is the same: UNVERIFIED, kept apart.
@@ -510,7 +513,8 @@ class MqttSnapshotTests(unittest.TestCase):
         self.assertNotIn("angular_power_db", view)
         self.assertNotIn("angular_peak_index", view)
         self.assertEqual(snapshot["native_consistency"]["frame_relation"], "INCOMPLETE")
-        self.assertEqual(snapshot["overall_state"], "INCOMPLETE")
+        # The bearing itself stays: the DoA is LIVE, only the curve is missing.
+        self.assertEqual(snapshot["overall_state"], "UNVERIFIED")
         self.assertIn("MQTT_ANGULAR_UNAVAILABLE", snapshot["publication_gate"]["reasons"])
         # The next frame of the current record gives it back, checked as one record.
         self.edge.angular(130.0)
@@ -519,6 +523,33 @@ class MqttSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["doa_candidates"]["mqtt"]["angular_peak_index"], 130)
         self.assertEqual(snapshot["overall_state"], "UNVERIFIED")
         self.assertNotIn("NATIVE_ANGLE_UNCHECKED", snapshot["publication_gate"]["reasons"])
+
+    def test_the_edges_angular_pace_never_hides_a_live_doa(self) -> None:
+        # The edge's schedule (agent._schedule at 8691ad0): health and DoA every
+        # second, Angular paced to the Bulk budget (about 9 s at 350 B/s) and
+        # held for resume_stable_seconds (20 s) after a command or a reconnect.
+        # The DoA keeps its angle and state through every gap; only the curve
+        # comes and goes with the frames.
+        self.edge.hello()
+        states = collections.Counter()
+        curves = 0
+        angular_at = {0, 9, 18, 47, 56}
+        for second in range(60):
+            if second:
+                self.clock.now += 1_000
+            self.edge.health()
+            self.edge.doa()
+            if second in angular_at:
+                self.edge.angular()
+            snapshot = build(self.edge)
+            view = snapshot["doa_candidates"]["mqtt"]
+            states[snapshot["overall_state"]] += 1
+            self.assertEqual(view["canonical_angle_deg"], THETA, second)
+            curves += "angular_power_db" in view
+        self.assertEqual(states, {"UNVERIFIED": 60})
+        # A curve while a frame is LIVE (10 s), none in the 29 s gap.
+        self.assertGreater(curves, 20)
+        self.assertLess(curves, 60)
 
     def test_an_old_doa_is_stale(self) -> None:
         self.edge.live()

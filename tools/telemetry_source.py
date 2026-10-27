@@ -21,6 +21,17 @@ clock ``remote_unverified``, publication gate ``BLOCKED`` and an
 trust-only Angular and both diagnostic topics stay in the ``mqtt`` block as
 diagnostics and never fill ``doa_candidates``.
 
+A LIVE DoA is a detection by itself, as it is for the edge's own Ground
+(``ground.py``: ``detection.valid`` from the DoA alone): the store's LIVE rule
+already holds the session, the sequence, the 5 s source time and a fresh
+``daq=1`` health. The Angular vector only adds the curve. The edge sends it
+far less often than the DoA (paced to the Bulk budget, about 9 s at the
+default 350 B/s), holds it while a command runs and for
+``resume_stable_seconds`` (20 s) after every command and reconnect, and never
+in profile ``control``, so a DoA without a paired frame is the normal case
+between frames. It keeps its angle and stays ``UNVERIFIED``;
+``MQTT_ANGULAR_UNAVAILABLE`` in the gate says the curve is missing.
+
 The mapping, with its evidence in the edge's code (commit 8691ad0):
 
 - ``telemetry/doa`` and ``telemetry/angular`` come from one DOA_value.html
@@ -42,8 +53,8 @@ The mapping, with its evidence in the edge's code (commit 8691ad0):
   newest DoA is usually newer than the newest Angular frame. Such a frame
   still gives the DoA its vector only while the vector's peak is within 3
   degrees of that DoA's theta_0, so the bearing and the curve drawn from them
-  never point apart; otherwise it is ``PEAK_MOVED`` and the DoA has no vector
-  until the next frame.
+  never point apart; otherwise it is ``PEAK_MOVED`` and the DoA is shown
+  without a curve until the next frame.
 - ``daq=1`` in health means status.json was fresh with ``daq_ok`` and all
   three sync flags true (``source.Source.view``), so the DAQ state is PASS.
 
@@ -621,14 +632,15 @@ def _overall_and_gate(
         "angular_peak_consistent": peak_consistent is not False,
     }
     # The collector's order: DEGRADED, CONFLICT, STALE, INCOMPLETE, then
-    # UNVERIFIED, which is as far as the console ever goes.
+    # UNVERIFIED, which is as far as the console ever goes. A LIVE DoA without
+    # its Angular vector is not INCOMPLETE: the vector only adds the curve.
     if overdrive is True:
         state = "DEGRADED"
     elif conflict:
         state = "CONFLICT"
     elif candidate.get("available") is True:
         state = "STALE" if not (_record(candidate.get("freshness")) or {}).get("fresh") else (
-            "INCOMPLETE" if not parsed or not vector else "UNVERIFIED")
+            "INCOMPLETE" if not parsed else "UNVERIFIED")
     else:
         state = "UNVERIFIED" if unverified_current else "STALE"
     return state, {"state": "BLOCKED", "checks": checks, "reasons": reasons}

@@ -31,6 +31,7 @@ import {
 import { geographicBearingForBin } from '../lib/polar';
 import { beamColorExpression, beamOpacityExpression, formatBearing, formatDistance, heatmapColorExpression, heatmapRadiusExpression } from '../lib/overlayPalette';
 import { numberOrNull, primaryCandidate } from '../lib/telemetry';
+import { isMqttSnapshot } from '../lib/telemetrySource';
 import { useI18n } from '../lib/i18n';
 import type { MessageKey, Translate } from '../lib/i18n';
 import { coordinateSourceKey } from './DoaReadout';
@@ -255,7 +256,9 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const values = doaReady && fresh && Array.isArray(csv.angular_power_db) && csv.angular_power_db.length === 360 ? csv.angular_power_db : null;
   const offset = Number.isFinite(compassOffset) ? compassOffset : 0;
   // theta_0 is the array-frame angle; only its geographic bearing is drawn or reported.
-  const theta = values ? numberOrNull(csv.canonical_angle_deg) : null;
+  // An MQTT DoA is shown without its Angular vector between frames: the
+  // bearing line stays, the beam, lobe and edges need the vector.
+  const theta = doaReady && fresh && (values || isMqttSnapshot(snapshot)) ? numberOrNull(csv.canonical_angle_deg) : null;
   const bearing = theta === null ? null : geographicBearingForBin(theta, offset);
   // Only the scale fields matter here; depending on all of g would rebuild geometry on paint-only changes.
   const scale = useMemo(() => effectiveDbScale(values, g, simulation), [values, simulation, g.dbScale, g.minDb, g.maxDb, g.thresholdDb]);
@@ -271,7 +274,11 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     if (ringSet) data['doa-rings'] = ringSet.features;
     if (g.guidesVisible) data['doa-guides'] = guideFeatures(stationCoordinate, g);
     const draw: DoaOverlaySettings = { ...g, minDb: scale.minDb, maxDb: scale.maxDb, thresholdDb: scale.thresholdDb };
-    if (!values || draw.maxDb <= draw.minDb) return { data, rings: ringSet?.rings ?? [], halfPower: null };
+    if (!values) {
+      if (g.bearingVisible && bearing !== null) data['doa-bearing'] = { type: 'FeatureCollection', features: [bearingFeature(stationCoordinate, bearing, draw)] };
+      return { data, rings: ringSet?.rings ?? [], halfPower: null };
+    }
+    if (draw.maxDb <= draw.minDb) return { data, rings: ringSet?.rings ?? [], halfPower: null };
     const halfPower = halfPowerWidth(values);
     if (g.heatmapVisible && g.heatStyle === 'beam') data['doa-beam'] = beamFeatures(stationCoordinate, values, draw, offset);
     if (g.heatmapVisible && g.heatStyle === 'density') data['doa-heat'] = heatFeatures(stationCoordinate, values, draw, offset);
@@ -846,17 +853,20 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     mapRef.current?.easeTo({ bearing: 0, pitch: 0, duration: reducedMotion() ? 0 : 300 });
   };
   const held = !doaReady && doaHeldText !== undefined;
+  // An MQTT DoA between Angular frames: the bearing without the curve.
+  const bearingOnly = !values && bearing !== null;
   const dataLabel = values
     ? t('map.vectorReady', { bearing: bearing === null ? t('map.bearingUnavailable') : t('map.bearingReference', { deg: formatBearing(bearing, 0) }) })
-    : held && doaHeldCode ? t('map.doaHeld', { code: doaHeldCode }) : t('map.noVector');
+    : bearingOnly ? t('map.bearingOnly', { deg: formatBearing(bearing, 0) })
+      : held && doaHeldCode ? t('map.doaHeld', { code: doaHeldCode }) : t('map.noVector');
   const notices: string[] = [];
   if (mapState === 'no-webgl') notices.push(t('map.noWebgl'));
   if (mapState === 'gl-lost') notices.push(t('map.glLost'));
   if (mapState === 'worker-stalled') notices.push(t('map.workerStalled'));
   if (mapState === 'error') notices.push(t('map.rendererError'));
   if (basemapStatus && mapState !== 'no-webgl') notices.push(t(basemapStatus === 'partial' ? 'map.basemapPartial' : 'map.basemapUnavailable', { style: t(BASEMAPS[activeBasemap].labelKey) }));
-  if (stationCoordinate && !values) notices.push(held ? t('map.overlayHeld', { reason: doaHeldText }) : t('map.overlayCleared'));
-  if (values && !orientationVerified) notices.push(t('map.orientationReference', { offset: Number(offset.toFixed(1)) }));
+  if (stationCoordinate && !values && !bearingOnly) notices.push(held ? t('map.overlayHeld', { reason: doaHeldText }) : t('map.overlayCleared'));
+  if ((values || bearingOnly) && !orientationVerified) notices.push(t('map.orientationReference', { offset: Number(offset.toFixed(1)) }));
   // The credit follows the style the map draws; Plain draws no tiles and needs none.
   const attribution = BASEMAPS[activeBasemap].attribution;
   // DOM labels fade with the overlay through this custom property.
