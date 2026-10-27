@@ -398,9 +398,17 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(topic(store, "telemetry/health/detail", NOW + 15001)["status"], "STALE")
         self.assertTrue(node(store, NOW + 15001)["detail"]["stale"])
         self.assertEqual(feed(store, "telemetry-doa.ok1.json")["error"], "DOA_WITHOUT_HEALTH")
-        for change in ({"sync": [True, True]}, {"sync": None}, {"cpu": 101}, {"adrop": None}, {"throt": 0}):
+        for change in ({"sync": [True, True]}, {"sync": None}, {"cpu": -0.1}, {"cpu": "50"}, {"mem": 101},
+                       {"disk_free": -1}, {"adrop": None}, {"throt": 0}):
             with self.subTest(change=change):
                 self.assertEqual(put(store, "telemetry/health/detail", obj("telemetry-health-detail.json", **change))["status"], "INVALID")
+        # The edge's cpu has no clamp: an iowait counter that steps back on a
+        # busy Pi gives a little over 100 (monitor.probe), still the edge's value.
+        for cpu in (100.4, 0, None):
+            with self.subTest(cpu=cpu):
+                entry = put(store, "telemetry/health/detail", obj("telemetry-health-detail.json", t=NOW, cpu=cpu))
+                self.assertEqual(entry["status"], "FRESH")
+                self.assertEqual(node(store, NOW)["detail"]["cpu"], cpu)
 
 
 class DoaTests(unittest.TestCase):

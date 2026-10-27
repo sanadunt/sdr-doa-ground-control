@@ -324,7 +324,12 @@ def _validate_detail(data: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(sync, list) or len(sync) != 3 or any(item is not None and type(item) is not bool for item in sync):
         raise _Invalid("INVALID_FIELD", "sync")
     value["sync"] = list(sync)
-    for key in ("cpu", "mem", "disk_free"):
+    # The edge computes cpu from /proc/stat idle+iowait without a clamp
+    # (monitor.probe), and iowait may step back, so a busy Pi can report a
+    # little over 100. Any finite value >= 0 is the edge's; mem and disk_free
+    # come from ratios that stay inside 0..100.
+    value["cpu"] = _number(data, "cpu", 0, math.inf, nullable=True)
+    for key in ("mem", "disk_free"):
         value[key] = _number(data, key, 0, 100, nullable=True)
     for key in ("throt", "uv"):
         value[key] = _bool(data, key, nullable=True)
