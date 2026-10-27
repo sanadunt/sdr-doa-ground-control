@@ -22,6 +22,10 @@ Subcommands:
 * ``revision``: the ``org.opencontainers.image.revision`` label of an image,
   read from ``docker buildx imagetools inspect --format '{{json .Image}}'``
   on stdin.
+* ``notes``: the ``## <VERSION>`` section of ``CHANGELOG.md``, which the
+  release job puts on the GitHub Release page ahead of the generated notes,
+  so a new major's move (the Docker channel, ``update --allow-major``) is on
+  the page the native updater names. A version without a section fails.
 
 Standard library only; ``tag`` runs git. Nothing here touches the network.
 """
@@ -58,6 +62,7 @@ EVENTS = ("push", "workflow_dispatch")
 RELEASE_VERSION_RE = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z][0-9A-Za-z.-]*))?$"
 )
+CHANGELOG_NAME = "CHANGELOG.md"
 _SHA256SUMS_LINE = re.compile(r"^([0-9a-f]{64}) [ *](\S+)$")
 
 
@@ -373,6 +378,55 @@ def image_outputs(owner: str, version: str, revision: str, source: str, tags: It
     return outputs
 
 
+def release_notes(changelog: str, version: str) -> str:
+    """The body of the ``## <version>`` section of a changelog, without its heading.
+
+    The section ends at the next level-2 heading; ``###`` headings and fenced
+    code inside it stay. A missing or empty section is an error, so a release
+    never goes out without the notes that say how a host moves to it.
+    """
+    heading = f"## {version}"
+    lines = changelog.splitlines()
+    start = None
+    fenced = False
+    for index, line in enumerate(lines):
+        if line.startswith("```"):
+            fenced = not fenced
+        if not fenced and line.rstrip() == heading:
+            start = index + 1
+            break
+    if start is None:
+        raise CheckError(f"{CHANGELOG_NAME} has no section '{heading}'; add the notes of this release there")
+    body = []
+    fenced = False
+    for line in lines[start:]:
+        if line.startswith("```"):
+            fenced = not fenced
+        if not fenced and line.startswith("## "):
+            break
+        body.append(line)
+    text = "\n".join(body).strip()
+    if not text:
+        raise CheckError(f"the section '{heading}' of {CHANGELOG_NAME} is empty")
+    return text + "\n"
+
+
+def write_release_notes(root: Path, version: str, output: Path) -> None:
+    """Write the notes of ``version`` from ``root/CHANGELOG.md`` to ``output``."""
+    parse_release_version(version)
+    path = root / CHANGELOG_NAME
+    try:
+        changelog = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise CheckError(f"cannot read {path}: {exc}") from None
+    notes = release_notes(changelog, version)
+    try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(notes, encoding="utf-8")
+    except OSError as exc:
+        raise CheckError(f"cannot write {output}: {exc}") from None
+
+
 def read_tags(path: Optional[str]) -> List[str]:
     """Tag names or refs, one per line, from a file or stdin ("-"); none without a path."""
     if not path:
@@ -428,6 +482,9 @@ def _parser() -> argparse.ArgumentParser:
     channels.add_argument("--version", required=True)
     channels.add_argument("--tags-file", required=True, help=tags_help)
     commands.add_parser("revision", help="the revision label of 'imagetools inspect --format {{json .Image}}' on stdin")
+    notes = commands.add_parser("notes", help=f"write the '## <VERSION>' section of {CHANGELOG_NAME}")
+    notes.add_argument("--version", required=True)
+    notes.add_argument("--output", type=Path, required=True, help="file the notes are written to")
     return parser
 
 
@@ -445,6 +502,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             write_outputs(image_outputs(args.owner, args.version, args.revision, args.source, tags), args.github_output)
         elif args.command == "channels":
             write_outputs(channel_outputs(args.version, read_tags(args.tags_file)), args.github_output)
+        elif args.command == "notes":
+            write_release_notes(args.root.resolve(), args.version, args.output)
+            print(f"notes: {args.output}", flush=True)
         else:
             print(image_revision(sys.stdin.read()), flush=True)
     except CheckError as exc:

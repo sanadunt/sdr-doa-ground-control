@@ -173,6 +173,8 @@ class WorkflowTextTests(unittest.TestCase):
             "tools/make_release.py --with-wheels",
             "--verify-tag",
             "--generate-notes",
+            "--notes-file notes/NOTES.md",
+            'tools/release_check.py notes --version "$VERSION" --output dist/release-notes/NOTES.md',
             "--clobber",
             "--prerelease",
             'SDR-DoA Ground Console $VERSION',
@@ -350,9 +352,19 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertLess(names.index("tag"), next(i for i, s in enumerate(build["steps"]) if "make_release.py" in s.get("run", "")))
         tag_step = build["steps"][names.index("tag")]
         self.assertEqual(tag_step["env"], {"EVENT_NAME": "${{ github.event_name }}", "GIT_REF": "${{ github.ref }}"})
-        (upload,) = steps_using(build, "actions/upload-artifact")
-        self.assertEqual(upload["with"]["path"], "dist/release/")
-        self.assertEqual(upload["with"]["if-no-files-found"], "error")
+        uploads = {step["with"]["name"]: step for step in steps_using(build, "actions/upload-artifact")}
+        self.assertEqual(sorted(uploads), ["release-assets", "release-notes"])
+        self.assertEqual(uploads["release-assets"]["with"]["path"], "dist/release/")
+        # The notes stay out of dist/release, which holds exactly the assets.
+        self.assertEqual(uploads["release-notes"]["with"]["path"], "dist/release-notes/")
+        for upload in uploads.values():
+            self.assertEqual(upload["with"]["if-no-files-found"], "error")
+        # The notes are written before the long build, so a missing section fails early.
+        notes_index = next(i for i, s in enumerate(build["steps"]) if "release_check.py notes" in s.get("run", ""))
+        build_index = next(i for i, s in enumerate(build["steps"]) if "make_release.py" in s.get("run", ""))
+        self.assertLess(names.index("tag"), notes_index)
+        self.assertLess(notes_index, build_index)
+        self.assertEqual(build["steps"][notes_index]["env"], {"VERSION": "${{ steps.tag.outputs.version }}"})
         for output in ("version", "tag", "sha", "create_tag", "prerelease", "newest", "console_image", "console_ref", "labels"):
             self.assertIn(output, build["outputs"])
         images = build["steps"][names.index("images")]
@@ -361,8 +373,8 @@ class WorkflowStructureTests(unittest.TestCase):
 
     def test_release_job(self):
         release = self.release["jobs"]["release"]
-        (download,) = steps_using(release, "actions/download-artifact")
-        self.assertEqual(download["with"]["name"], "release-assets")
+        downloads = {step["with"]["name"]: step["with"]["path"] for step in steps_using(release, "actions/download-artifact")}
+        self.assertEqual(downloads, {"release-assets": "release", "release-notes": "notes"})
         create_tag = next(step for step in release["steps"] if "git/refs" in step.get("run", ""))
         self.assertEqual(create_tag["if"], "needs.build.outputs.create_tag == 'true'")
         script = create_tag["run"]
@@ -376,6 +388,8 @@ class WorkflowStructureTests(unittest.TestCase):
         script = publish["run"]
         self.assertIn('gh release upload "$TAG" "${assets[@]}" --clobber', script)
         self.assertIn('--title "SDR-DoA Ground Console $VERSION"', script)
+        # The CHANGELOG.md section is the release page's text, ahead of the generated list.
+        self.assertIn("flags=(--verify-tag --notes-file notes/NOTES.md --generate-notes", script)
         self.assertIn('if [ "$PRERELEASE" = true ]', script)
         self.assertIn('elif [ "$NEWEST" != true ]', script)
         self.assertIn("flags+=(--latest=false)", script)
@@ -949,6 +963,49 @@ class OutputFormatTests(unittest.TestCase):
                 code = release_check.main(["channels", "--version", "2.0.3", "--tags-file", str(Path(tmp) / "missing")])
             self.assertEqual(code, 1)
             self.assertIn("::error::cannot read the tag list", refused.getvalue())
+
+    def test_notes_command_writes_the_changelog_section(self):
+        changelog = (
+            "# Catatan perubahan\n\nIntro.\n\n## 3.1.0\n\nNewer.\n\n## 3.0.0\n\nMajor.\n\n### Pindah ke 3.0.0\n\n"
+            "```sh\n## not a heading inside a fence\nsudo sh sdr-doa-docker install --channel 3\n```\n\n"
+            "## 2.0.0\n\nOld.\n"
+        )
+        with tempfile.TemporaryDirectory(prefix="test-release-notes-") as tmp:
+            root = Path(tmp)
+            (root / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
+            output = root / "out" / "NOTES.md"
+            with redirect_stdout(io.StringIO()):
+                code = release_check.main(["--root", str(root), "notes", "--version", "3.0.0", "--output", str(output)])
+            self.assertEqual(code, 0)
+            notes = output.read_text(encoding="utf-8")
+            self.assertTrue(notes.startswith("Major.\n"))
+            self.assertIn("### Pindah ke 3.0.0", notes)
+            self.assertIn("## not a heading inside a fence\nsudo sh sdr-doa-docker install --channel 3\n```\n", notes)
+            self.assertNotIn("Old.", notes)
+            self.assertNotIn("Newer.", notes)
+            for version, message in (
+                ("3.0.1", "has no section '## 3.0.1'"),
+                ("3.0", "is not a release version"),
+            ):
+                with redirect_stdout(io.StringIO()) as refused:
+                    code = release_check.main(["--root", str(root), "notes", "--version", version, "--output", str(output)])
+                self.assertEqual(code, 1)
+                self.assertIn(message, refused.getvalue())
+            (root / "CHANGELOG.md").write_text("## 3.0.0\n\n## 2.0.0\n\nOld.\n", encoding="utf-8")
+            with redirect_stdout(io.StringIO()) as refused:
+                code = release_check.main(["--root", str(root), "notes", "--version", "3.0.0", "--output", str(output)])
+            self.assertEqual(code, 1)
+            self.assertIn("is empty", refused.getvalue())
+
+    def test_repository_version_has_release_notes(self):
+        # Checked on every push, so a VERSION bump without its notes fails before the tag.
+        version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        notes = release_check.release_notes((ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), version)
+        if release_check.parse_release_version(version)[1:3] == (0, 0):
+            # A new major says how a host moves to it: the Docker channel and the native updater.
+            major = version.split(".", 1)[0]
+            self.assertIn(f"--channel {major}", notes)
+            self.assertIn("update --allow-major", notes)
 
     def test_revision_command_reads_stdin(self):
         payload = '{"architecture": "amd64", "config": {"Labels": {"org.opencontainers.image.revision": "%s"}}}' % SHA_A

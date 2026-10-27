@@ -115,6 +115,11 @@ jobs:
           git tag -l 'v*' | python3 tools/release_check.py images --owner "$OWNER" --version "$VERSION" \
             --revision "$REVISION" --source "$SOURCE" --tags-file -
 
+      - name: Release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: python3 tools/release_check.py notes --version "$VERSION" --output dist/release-notes/NOTES.md
+
       - name: Build the release (npm ci, build:all, tarball with wheels)
         run: python3 tools/make_release.py --with-wheels
 
@@ -133,6 +138,14 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Upload the release notes
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: dist/release-notes/
+          if-no-files-found: error
+          retention-days: 14
+
   release:
     name: GitHub Release
     needs: build
@@ -146,6 +159,12 @@ jobs:
         with:
           name: release-assets
           path: release
+
+      - name: Download the release notes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+          path: notes
 
       - name: Verify SHA256SUMS
         working-directory: release
@@ -196,7 +215,9 @@ jobs:
             gh release upload "$TAG" "${assets[@]}" --clobber
             echo "Updated the assets of release $TAG"
           else
-            flags=(--verify-tag --generate-notes --title "SDR-DoA Ground Console $VERSION")
+            # The CHANGELOG.md section first (a new major's move to its
+            # channel and --allow-major), then GitHub's list of changes.
+            flags=(--verify-tag --notes-file notes/NOTES.md --generate-notes --title "SDR-DoA Ground Console $VERSION")
             if [ "$PRERELEASE" = true ]; then
               flags+=(--prerelease)
             elif [ "$NEWEST" != true ]; then
