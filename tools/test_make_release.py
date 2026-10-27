@@ -43,6 +43,7 @@ CONSOLE_MODULES = {
     "sdr_doa_collector.py",
     "sdr_doa_mqtt.py",
     "sdr_doa_mqtt_monitor.py",
+    "telemetry_source.py",
     "tile_cache.py",
 }
 AGENT_MODULES = {"sdr_doa_lan_agent.py", "sdr_doa_collector.py", "sdr_doa_mqtt.py", "sdr_doa_mqtt_stdlib.py"}

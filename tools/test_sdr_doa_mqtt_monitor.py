@@ -598,6 +598,28 @@ class SharedMqttMonitorTests(unittest.TestCase):
         with patch.object(self.module, "_now_ms", lambda: clock[0]):
             self.assertEqual(self.monitor.rdf_node_snapshot()["now_ms"], clock[0])
 
+    def test_rdf_node_view_feeds_the_telemetry_source(self) -> None:
+        # Issue #8: the Dashboard's source reads the node view with the LIVE
+        # Angular values, and nothing while the monitor is stopped.
+        self.assertIsNone(self.monitor.rdf_node_view())
+        fixtures = TOOLS_DIR / "fixtures" / "rdf-node"
+        manifest = json.loads((fixtures / "manifest.json").read_text(encoding="utf-8"))
+        by_file = {entry["file"]: entry for entry in manifest["fixtures"]}
+        self._connected()
+        with patch.object(self.module, "_now_ms", lambda: manifest["generated_at_ms"]):
+            for name in ("state.json", "telemetry-health.json", "telemetry-doa.ok1.json", "telemetry-angular.live.json"):
+                entry = by_file[name]
+                self.client.on_message(self.client, None, message(
+                    f"sdr/v2/{NODE}/{entry['topic']}", (fixtures / name).read_bytes(), entry["qos"], entry["retain"],
+                ))
+            view = self.monitor.rdf_node_view()
+        self.assertEqual((view["connection"], view["node_id"], view["now_ms"]), ("ready", NODE, manifest["generated_at_ms"]))
+        self.assertTrue(view["node"]["health"]["fresh"])
+        self.assertTrue(view["node"]["doa"]["live"])
+        self.assertEqual(len(view["node"]["angular"]["values"]), 360)
+        self.monitor.stop()
+        self.assertIsNone(self.monitor.rdf_node_view())
+
     # -- config-patch publish path ------------------------------------------
 
     @staticmethod

@@ -3,9 +3,11 @@
 
 The console keeps a narrow boundary:
 
-* it performs bounded read-only GETs through ``sdr_doa_collector``, one
-  collection per refresh interval for every viewer together
-  (``data_out_reader``);
+* ``/api/snapshot`` answers from MQTT while the RDF Node's health is fresh
+  (``telemetry_source``), with a light Data Out read for what MQTT never
+  carries, and otherwise from Data Out (the fallback): bounded read-only GETs
+  through ``sdr_doa_collector``, one collection per refresh interval for
+  every viewer together (``data_out_reader``);
 * an optional MQTT monitor subscribes to its configured broker;
 * its one remote write is ``POST /api/mqtt/config-patch``: an admin-gated,
   explicitly confirmed config patch published once at QoS 1 (never retained,
@@ -108,6 +110,7 @@ from sdr_doa_collector import (
     SettingsCache,
     check_data_out_url,
     collect,
+    collect_light,
     data_out_url_host,
     normalize_data_out_hosts,
 )
@@ -703,19 +706,21 @@ def _public_config(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _snapshot_request(
-    query: Dict[str, List[str]], *, fresh_settings: bool = True, refresh: bool = True
+    query: Dict[str, List[str]], *, fresh_settings: bool = True, refresh: bool = True, data_out_only: bool = True
 ) -> SnapshotRequest:
     """The read flags of one /api/snapshot query (data_out_reader.py).
 
     refresh=1 is the operator's Refresh and fresh_settings=1 Kontrol's "Cek
     ulang" (both read again only when the last read is 1 s old); seen is the
-    collection id the viewer already shows. ``fresh_settings=False`` and
-    ``refresh=False`` ignore those flags.
+    collection id the viewer already shows; source=data_out (the legacy UI)
+    reads Data Out even while MQTT is fresh. ``fresh_settings=False``,
+    ``refresh=False`` and ``data_out_only=False`` ignore those flags.
     """
     return SnapshotRequest(
         refresh=refresh and query.get("refresh", [""])[0] == "1",
         fresh_settings=fresh_settings and query.get("fresh_settings", [""])[0] == "1",
         seen=valid_collection_id(query.get("seen", [""])[0]),
+        data_out_only=data_out_only and query.get("source", [""])[0] == "data_out",
     )
 
 
@@ -2158,7 +2163,7 @@ async function refresh(options) {
   const auto=options?.auto===true; const manual=options?.manual===true; if(auto&&state.refreshController) return;
   const sequence=++state.refreshSequence; if(state.refreshController) state.refreshController.abort(); const controller=typeof AbortController==='function'?new AbortController():null; state.refreshController=controller; const button=$('refresh'); button.disabled=true; setReadStatus('Reading Data Out…');
   let timedOut=false; const timer=controller?setTimeout(()=>{ timedOut=true; controller.abort(); },REQUEST_TIMEOUT_MS):null;
-  try { const url='/api/snapshot?base_url='+encodeURIComponent(state.dataUrl)+(manual?'&refresh=1':'')+(state.collectionId?'&seen='+encodeURIComponent(state.collectionId):''); const init={cache:'no-store'}; if(controller) init.signal=controller.signal; const response=await fetch(url,init); const data=await response.json(); if(sequence!==state.refreshSequence) return; if(!response.ok){ if(data.code==='DATA_OUT_URL_NOT_ALLOWED') followSavedUrl(); throw new Error(data.error||'snapshot failed'); } const id=data.collection?.id; state.collectionId=typeof id==='string'&&/^[0-9a-f]{8}-[0-9]{1,12}$/.test(id)?id:null; render(data); scheduleLocalExpiry(data); followConsoleInterval(data); followConsoleUrl(data.collection?.console_base_url); }
+  try { const url='/api/snapshot?source=data_out&base_url='+encodeURIComponent(state.dataUrl)+(manual?'&refresh=1':'')+(state.collectionId?'&seen='+encodeURIComponent(state.collectionId):''); const init={cache:'no-store'}; if(controller) init.signal=controller.signal; const response=await fetch(url,init); const data=await response.json(); if(sequence!==state.refreshSequence) return; if(!response.ok){ if(data.code==='DATA_OUT_URL_NOT_ALLOWED') followSavedUrl(); throw new Error(data.error||'snapshot failed'); } const id=data.collection?.id; state.collectionId=typeof id==='string'&&/^[0-9a-f]{8}-[0-9]{1,12}$/.test(id)?id:null; render(data); scheduleLocalExpiry(data); followConsoleInterval(data); followConsoleUrl(data.collection?.console_base_url); }
   catch(error) { if(sequence!==state.refreshSequence||(error?.name==='AbortError'&&!timedOut)) return; const message=timedOut?`request timed out after ${REQUEST_TIMEOUT_MS/1000} s`:(error?.message||'snapshot failed'); setSnapshotUnavailable(message); setReadStatus('Read error: '+message,'bad'); }
   finally { if(timer) clearTimeout(timer); if(sequence===state.refreshSequence){ button.disabled=false; if(state.refreshController===controller) state.refreshController=null; } }
   if(sequence===state.refreshSequence) refreshMqtt();
@@ -3807,7 +3812,7 @@ class LanConsoleHandler(ConsoleHandler):
             query = parse_qs(parsed.query, keep_blank_values=False)
             self._send_snapshot(
                 self.console_server.base_url,
-                _snapshot_request(query, fresh_settings=False, refresh=False),
+                _snapshot_request(query, fresh_settings=False, refresh=False, data_out_only=False),
             )
             return
         if route == "/api/preferences":
@@ -4272,11 +4277,15 @@ class GroundConsoleServer(ThreadingHTTPServer):
         # fake node); the command line cannot set it.
         self.settings_cache = SettingsCache()
         self._data_out_fetcher = data_out_fetcher
+        # MQTT first (issue #8): while the RDF Node's health is fresh the
+        # answers come from the monitor and only a light Data Out read runs.
         self.data_out = DataOutReader(
             self._collect_data_out,
             refresh_seconds=lambda: self._config.get("refresh_seconds"),
             wait_timeout_s=SNAPSHOT_TOTAL_BUDGET_S + SNAPSHOT_WAIT_GRACE_S,
             console_base_url=lambda: self._config.get("base_url"),
+            collect_light=self._collect_light_data_out,
+            mqtt_view=self._mqtt_view,
         )
         self.receiver_store = ReceiverRecordStore(
             receiver_data_dir if receiver_data_dir is not None else DEFAULT_DATA_DIR,
@@ -4344,13 +4353,38 @@ class GroundConsoleServer(ThreadingHTTPServer):
             super().server_close()
 
     def collect_snapshot(self, base_url: str, request: Optional[SnapshotRequest] = None) -> Dict[str, Any]:
-        """Answer /api/snapshot from the shared Data Out read for ``base_url``.
+        """Answer /api/snapshot: from MQTT while it is fresh, else Data Out.
 
-        Every viewer gets the last collection while it is younger than the
-        reuse window (the saved refresh interval, at least 1 s); concurrent
-        misses share one collection. See data_out_reader.py.
+        While MQTT is fresh only a light Data Out read runs (at most every
+        30 s); otherwise every viewer gets the last collection while it is
+        younger than the reuse window (the saved refresh interval, at least
+        1 s) and concurrent misses share one collection. See
+        data_out_reader.py and telemetry_source.py.
         """
         return self.data_out.snapshot(base_url, request or SnapshotRequest())
+
+    def _mqtt_view(self) -> Optional[Dict[str, Any]]:
+        """The monitor's RDF Node view for the telemetry source, or None without one."""
+        reader = getattr(self.mqtt_monitor, "rdf_node_view", None)
+        if reader is None:
+            return None
+        view = reader()
+        return view if isinstance(view, dict) else None
+
+    def _collect_light_data_out(self, base_url: str, fresh_settings: bool) -> Dict[str, Any]:
+        """status.json, settings.json and doa.xml while MQTT carries the DoA."""
+        options: Dict[str, Any] = {}
+        if self._data_out_fetcher is not None:
+            options["fetcher"] = self._data_out_fetcher
+        return collect_light(
+            base_url=base_url,
+            total_budget_s=SNAPSHOT_TOTAL_BUDGET_S,
+            settings_cache=self.settings_cache,
+            fresh_settings=fresh_settings,
+            allowed_hosts=self.data_out_hosts,
+            mdns_resolver=self.mdns_resolver,
+            **options,
+        )
 
     def _collect_data_out(self, base_url: str, fresh_settings: bool) -> Dict[str, Any]:
         options: Dict[str, Any] = {}

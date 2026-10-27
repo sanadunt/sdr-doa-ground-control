@@ -657,6 +657,10 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         snapshot = _decode_json(self, snapshot_result, "snapshot")
         # The shared Data Out read adds its reuse facts to the collection block.
         collection = snapshot.pop("collection")
+        # Without a monitor the answer comes from Data Out (issue #8); this
+        # fixture has no readable status.json, so there is no source at all.
+        source = snapshot.pop("source")
+        self.assertEqual((source["kind"], source["reasons"]), ("none", ["MQTT_DISABLED", "DATA_OUT_UNAVAILABLE"]))
         self.assertEqual(snapshot, fixture_snapshot)
         self.assertEqual(
             sorted(collection),

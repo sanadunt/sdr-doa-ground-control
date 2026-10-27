@@ -2313,6 +2313,205 @@ def collect(
     }
 
 
+def collect_light(
+    base_url: str,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
+    status_max_age_ms: int = DEFAULT_STATUS_MAX_AGE_MS,
+    doa_max_age_ms: int = DEFAULT_DOA_MAX_AGE_MS,
+    max_future_skew_ms: int = DEFAULT_MAX_FUTURE_SKEW_MS,
+    fetcher: Any = fetch_resource,
+    parse_attempts: int = 3,
+    retry_delay_seconds: float = 0.05,
+    *,
+    total_budget_s: Optional[float] = None,
+    monotonic_clock: Callable[[], float] = time.monotonic,
+    settings_cache: Optional[SettingsCache] = None,
+    fresh_settings: bool = False,
+    allowed_hosts: Optional[Iterable[str]] = None,
+    mdns_resolver: Any = None,
+) -> Dict[str, Any]:
+    """Read what MQTT never carries: status.json, settings.json and doa.xml.
+
+    While MQTT is fresh (issue #8) the console reads no DOA_value.html and runs
+    no DoA gates on Data Out: the DoA comes over MQTT. This light read keeps
+    only the values the edge does not publish: the station position (doa.xml
+    LOCATION with status.json ``gps_status``), the settings fields the node
+    card, follow-node, the compass and Kontrol's read-back use, and the ADC
+    overdrive and SNR. It applies the same fetch rules as ``collect`` (host
+    list, timeouts, body limit, budget, no retry after a transport failure, the
+    settings.json reuse of ``settings_cache``), reads doa.xml only when
+    status.json was read, and ages doa.xml from the status.json timestamp, the
+    same node clock. About 5.8 kB, against about 8 kB for a full collection.
+    """
+    if total_budget_s is not None:
+        if (
+            isinstance(total_budget_s, bool)
+            or not isinstance(total_budget_s, (int, float))
+            or not math.isfinite(total_budget_s)
+            or not 0 < total_budget_s <= MAX_TOTAL_BUDGET_SECONDS
+        ):
+            raise ValueError(f"total_budget_s must be within (0, {MAX_TOTAL_BUDGET_SECONDS:g}]")
+    if fetcher is fetch_resource and (allowed_hosts is not None or mdns_resolver is not None):
+        fetcher = functools.partial(fetch_resource, allowed_hosts=allowed_hosts, mdns_resolver=mdns_resolver)
+    started_mono = monotonic_clock()
+    deadline = time.monotonic() + float(total_budget_s) if total_budget_s is not None else None
+    observed_at_ms = now_ms()
+
+    def reader(path: str, parser: Any) -> Callable[[], Tuple[FetchedResource, Optional[Dict[str, Any]]]]:
+        def read() -> Tuple[FetchedResource, Optional[Dict[str, Any]]]:
+            return fetch_and_parse_with_retry(
+                base_url, path, parser, timeout_seconds, max_body_bytes,
+                attempts=parse_attempts, retry_delay_seconds=retry_delay_seconds, fetcher=fetcher, deadline=deadline,
+            )
+        return read
+
+    def read_all(reads: Mapping[str, Callable[[], Any]]) -> Dict[str, Tuple[FetchedResource, Optional[Dict[str, Any]]]]:
+        completed: Dict[str, Tuple[FetchedResource, Optional[Dict[str, Any]]]] = {}
+        for path, result in _run_reads(reads, deadline).items():
+            if result is None:
+                resource = _not_fetched(base_url, path, "collection deadline exceeded", "deadline")
+                completed[path] = (resource, {"available": False, "error": "collection deadline exceeded"})
+            else:
+                completed[path] = result
+        return completed
+
+    def parse_xml_wrapper(resource: FetchedResource) -> Dict[str, Any]:
+        return parse_xml_doa(resource, observed_at_ms, doa_max_age_ms, max_future_skew_ms)
+
+    resources: Dict[str, FetchedResource] = {}
+    status_started_mono = monotonic_clock()
+    status_resource, status = read_all({PATH_STATUS: reader(PATH_STATUS, parse_status)})[PATH_STATUS]
+    resources[PATH_STATUS] = status_resource
+    if not status or status.get("available") is not True:
+        status = {"available": False, "error": (status or {}).get("error", "status parse failed")}
+    status_available = bool(status.get("available"))
+    status_transport_failed = getattr(status_resource, "error_kind", None) in TRANSPORT_ERROR_KINDS
+
+    settings_key = _redact_url(base_url)
+    cached_settings: Optional[CachedSettings] = None
+    if settings_cache is not None and not fresh_settings and not status_transport_failed:
+        cached_settings = settings_cache.reusable(settings_key, status, monotonic_clock())
+    reads_started_mono = monotonic_clock()
+    if status_transport_failed:
+        skipped = "skipped: status.json transport failure"
+        reads_done = {
+            path: (_not_fetched(base_url, path, skipped, "skipped"), {"available": False, "error": skipped})
+            for path in (PATH_SETTINGS, PATH_XML)
+        }
+    else:
+        reads: Dict[str, Callable[[], Any]] = {PATH_XML: reader(PATH_XML, parse_xml_wrapper)}
+        if cached_settings is None:
+            reads[PATH_SETTINGS] = reader(PATH_SETTINGS, parse_settings)
+        reads_done = read_all(reads)
+
+    settings_reused = cached_settings is not None
+    settings_read_mono: Optional[float] = None
+    if cached_settings is not None:
+        settings_resource = cached_settings.resource
+        settings = json.loads(json.dumps(cached_settings.settings))
+        settings_read_mono = cached_settings.read_monotonic
+    else:
+        settings_resource, parsed_settings = reads_done[PATH_SETTINGS]
+        if not parsed_settings or parsed_settings.get("available") is not True:
+            settings = {
+                "available": False,
+                "redacted": True,
+                "error": (parsed_settings or {}).get("error", "settings parse failed"),
+                "raw_fields_omitted": True,
+            }
+        else:
+            settings = parsed_settings
+            settings_read_mono = reads_started_mono
+    resources[PATH_SETTINGS] = settings_resource
+
+    xml_resource, xml_parsed = reads_done[PATH_XML]
+    resources[PATH_XML] = xml_resource
+    if not xml_parsed or xml_parsed.get("available") is not True:
+        xml_candidate = _unavailable(xml_resource)
+        xml_candidate["error"] = (xml_parsed or {}).get("error") or xml_candidate.get("error") or "XML parse failed"
+    else:
+        xml_candidate = dict(xml_parsed)
+
+    if settings_cache is not None and not settings_reused and status_available and settings.get("available") is True:
+        settings_cache.store(
+            settings_key, settings_resource, settings, reads_started_mono, status,
+            _settings_view_signature({}, xml_candidate),
+        )
+
+    completed_mono = monotonic_clock()
+    completed_at_ms = now_ms()
+    # Without a progress tracker the node's "now" is the status timestamp plus
+    # the Ground time since it was read, as in collect().
+    if status_available and isinstance(xml_candidate.get("timestamp_ms"), int):
+        ground_elapsed_ms = max(0, int(round((completed_mono - status_started_mono) * 1000)))
+        freshness = _age_assessment(
+            xml_candidate["timestamp_ms"],
+            int(status["safe"]["timestamp_ms"]) + ground_elapsed_ms,
+            doa_max_age_ms,
+            max_future_skew_ms,
+            "status_timestamp_ms",
+            True,
+        )
+        freshness["ground_elapsed_ms"] = ground_elapsed_ms
+        freshness["status_timestamp_ms"] = status["safe"]["timestamp_ms"]
+        xml_candidate["freshness"] = freshness
+    elif xml_candidate.get("available") is True:
+        xml_candidate["freshness"] = _age_assessment(
+            xml_candidate["timestamp_ms"], completed_at_ms, doa_max_age_ms, max_future_skew_ms, "local_observed_at", False,
+        )
+    if xml_candidate.get("available") is True:
+        try:
+            xml_candidate = normalize_doa_candidate(xml_candidate)
+        except CollectorError as exc:
+            xml_candidate["units_valid"] = False
+            xml_candidate["normalization_error"] = type(exc).__name__
+            xml_candidate["normalization_error_detail"] = str(exc)
+
+    status_age: Optional[Dict[str, Any]] = None
+    if status_available:
+        status_age = _age_assessment(
+            status["safe"]["timestamp_ms"], observed_at_ms, status_max_age_ms, max_future_skew_ms, "ground_observed_at", False,
+        )
+    settings_age_ms: Optional[int] = None
+    if settings.get("available") is True and settings_read_mono is not None:
+        settings_age_ms = max(0, int(round((completed_mono - settings_read_mono) * 1000)))
+    resource_metadata = {path: resources[path].metadata() for path in (PATH_STATUS, PATH_SETTINGS, PATH_XML)}
+    if settings_reused:
+        resource_metadata[PATH_SETTINGS]["reused"] = True
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "collector": {
+            "mode": "read_only",
+            "read": "light",
+            "base_url": base_url.rstrip("/"),
+            "mqtt_publish": False,
+            "raw_settings_omitted": True,
+        },
+        "observed_at_ms": observed_at_ms,
+        "completed_at_ms": completed_at_ms,
+        "collection": {
+            "read": "light",
+            "elapsed_ms": max(0, int(round((completed_mono - started_mono) * 1000))),
+            "budget_ms": int(round(float(total_budget_s) * 1000)) if total_budget_s is not None else None,
+            "deadline_exceeded": any(getattr(resource, "error_kind", None) == "deadline" for resource in resources.values()),
+            "status_transport_failed": status_transport_failed,
+            "settings_reused": settings_reused,
+            "settings_age_ms": settings_age_ms,
+            "host_resolution": _host_resolution(base_url, resources.values()),
+        },
+        "resources": resource_metadata,
+        "status": {**status, "freshness": status_age},
+        "settings": {
+            **settings,
+            "reused": settings_reused,
+            "read_at_ms": settings_resource.retrieved_at_ms if settings.get("available") is True else None,
+        },
+        "xml": xml_candidate,
+        "signal_quality": _signal_quality(status, {"xml": xml_candidate}),
+    }
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read-only SDR-DoA Data Out collector")
     allowed = ", ".join(DEFAULT_DATA_OUT_HOSTS)

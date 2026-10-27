@@ -816,26 +816,43 @@ class MqttMonitor:
         with self._lock:
             return self._rdf_node.ack(command_id)
 
+    def _rdf_connection_locked(self) -> str:
+        if not self._started:
+            return "disabled"
+        if self._connection == "connected" and self._subscriptions_ready:
+            return "ready"
+        if self._connection in ("disconnected", "error"):
+            return self._connection
+        return "connecting"
+
     def rdf_node_snapshot(self) -> Dict[str, Any]:
         with self._lock:
-            if not self._started:
-                connection = "disabled"
-            elif self._connection == "connected" and self._subscriptions_ready:
-                connection = "ready"
-            elif self._connection == "disconnected":
-                connection = "disconnected"
-            elif self._connection == "error":
-                connection = "error"
-            else:
-                connection = "connecting"
             result = self._rdf_node.snapshot(_now_ms())
             result.update({
                 "enabled": self._started,
-                "connection": connection,
+                "connection": self._rdf_connection_locked(),
                 "node_id": self._rdf_node.node_id,
                 "last_error": self._rdf_last_error,
             })
             return result
+
+    def rdf_node_view(self) -> Optional[Dict[str, Any]]:
+        """The RDF Node view the Dashboard's telemetry source reads (issue #8).
+
+        The accepted values of the node (``RdfNodeV2Telemetry.node_view``,
+        with the LIVE Angular frame's 360 values) at one time, or None while
+        the monitor is stopped.
+        """
+        with self._lock:
+            if not self._started:
+                return None
+            now = _now_ms()
+            return {
+                "now_ms": now,
+                "connection": self._rdf_connection_locked(),
+                "node_id": self._rdf_node.node_id,
+                "node": self._rdf_node.node_view(now),
+            }
 
 
 __all__ = ["MqttMonitor"]
