@@ -1,7 +1,7 @@
 """Tests for tools/make_release.py and the packaging scripts it ships.
 
-The release tests build both tarballs from this repository into a temporary
-directory with --skip-build and a fake frontend dist, so they need neither
+The release tests build the console tarball from this repository into a
+temporary directory with --skip-build and a fake frontend dist, so they need neither
 Node.js nor the BrowSDR submodule. The script tests run the shell scripts
 with sh in temporary roots; nothing touches systemd, users or the network.
 """

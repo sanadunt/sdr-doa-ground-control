@@ -4,8 +4,11 @@
 #      with the files that name it (QUICKSTART.md, "Rilis di GitHub"): the
 #      image: tags of docker-compose.yml and docker-compose.release.yml; a new
 #      major also changes DEFAULT_CHANNEL in packaging/docker/sdr-doa-docker
-#      and ${SDR_DOA_IMAGE_TAG:-N} in docker-compose.ghcr.yml. The test job
-#      fails when one of them is left behind.
+#      and ${SDR_DOA_IMAGE_TAG:-N} in docker-compose.ghcr.yml. Every release
+#      also needs a "## <VERSION>" section in CHANGELOG.md, the release page's
+#      text (the build job's notes step stops without it); for a new major it
+#      says how a host moves: "install --channel N" and "update --allow-major".
+#      The test job fails when one of them is left behind.
 #   2. Push the tag v<VERSION> on that commit, or run this workflow on main
 #      (Actions > Release > Run workflow), which creates the tag when missing.
 #

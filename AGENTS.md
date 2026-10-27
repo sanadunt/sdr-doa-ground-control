@@ -96,7 +96,7 @@ The default URL is `http://127.0.0.1:8787/`. Vite alone does not provide the `/a
 Release and packaging (Linux; details in `QUICKSTART.md` and `packaging/*/README.md`):
 
 ```sh
-python3 tools/make_release.py                 # npm ci + build:all, then both tarballs in dist/release
+python3 tools/make_release.py                 # npm ci + build:all, then the console tarball, sdr-doa-docker and SHA256SUMS in dist/release
 python3 tools/make_release.py --skip-build    # package the existing frontend/dist
 docker compose up -d --build                  # console image from a regular clone (host network, volume /data)
 sudo sh packaging/docker/sdr-doa-docker install --auto-update   # console from the GHCR image, daily update with rollback
@@ -141,7 +141,7 @@ Most Python test files are standalone scripts with plain `assert` functions, so 
 - `initialize.md`: current repository entrypoint and safety rules.
 - `SDR_DOA_FRONTEND_WORKFLOW.md`: install, build, runtime, credential, and release workflow.
 - `QUICKSTART.md`: cross-platform install, build, run, simulation, and troubleshooting guide.
-- `docs/RUNBOOK_INSTALL_UPDATE.md`: step-by-step install and update runbook (Indonesian prose, exact commands) for an AI agent or an operator on a new host: rules, the values to ask the human, preflight, the Docker/native console and agent paths, migration, updates, verification, troubleshooting and uninstall. Keep it in step with `sdr-doa-docker`, `install.sh` and `update_release.py` when their commands, flags or messages change.
+- `docs/RUNBOOK_INSTALL_UPDATE.md`: step-by-step install and update runbook (Indonesian prose, exact commands) for an AI agent or an operator on a new host: rules, the values to ask the human, preflight, the Docker/native console paths, stopping a 2.x RDF-SDR agent (10.3), migration, updates, verification, troubleshooting and uninstall. Keep it in step with `sdr-doa-docker`, `install.sh` and `update_release.py` when their commands, flags or messages change.
 - `frontend/package.json`, `frontend/package-lock.json`: npm scripts and locked dependency graph.
 - `frontend/src/main.tsx`, `frontend/src/App.tsx`: browser entry and application orchestration.
 - `frontend/src/api.ts`, `frontend/src/types.ts`: same-origin API adapter and shared data contracts.
