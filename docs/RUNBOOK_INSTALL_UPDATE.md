@@ -431,7 +431,7 @@ Opsi lain bila diminta manusia: `--port N` (default `8787`), `--channel TAG` (de
 - baris `install: wrote /opt/sdr-doa-ground-console/compose.yml and /opt/sdr-doa-ground-console/.env (channel 3)`;
 - baris `install: installed /usr/local/bin/sdr-doa-docker`;
 - baris `install: OK: console runs 3.0.0 (<id 12 hex>) and is healthy`;
-- teks `The Ground Console runs from ghcr.io/sanadunt/sdr-doa-ground-console:2.`;
+- teks `The Ground Console runs from ghcr.io/sanadunt/sdr-doa-ground-console:3.`;
 - dengan `--auto-update`: `auto-update on: daily at 03:30 (local time, up to 15 min later) for /opt/sdr-doa-ground-console`.
 
 Baris `note: /usr/local/bin is not on PATH; run /usr/local/bin/sdr-doa-docker` tidak masalah: runbook selalu memakai path lengkap.
@@ -1011,7 +1011,7 @@ Satu blok singkat berisi:
 | `docker-compose 1.x is not supported; install Compose v2 (the docker compose plugin)` / `Docker Compose was not found: ...` | Plugin `docker compose` (v2 atau lebih baru) tidak ada; hanya `docker-compose` 1.x | Berhenti; pasang plugin compose (keputusan manusia). |
 | `error: cannot read /opt/.../.env (mode 0600); run with sudo` | Instalasi root dijalankan tanpa sudo | Ulangi dengan `sudo`. |
 | `... compose.yml was not written by sdr-doa-docker; move it away or pass --force` | Ada compose lain di DIR | Berhenti dan tanya; jangan `--force` tanpa izin. |
-| `this directory holds the RDF-SDR agent install of sdr-doa-docker 2, which sdr-doa-docker 3 no longer manages ...` | DIR berisi agent dari console 2.x | Hentikan agent itu (10.3), atau pakai DIR lain. `--force` (menaruh console di sana) hanya dengan izin manusia. |
+| `this directory holds the RDF-SDR agent install of sdr-doa-docker 2, which sdr-doa-docker 3 no longer manages ...` | DIR berisi agent dari console 2.x | Hentikan agent itu (10.3), atau pakai DIR lain. `--force` tidak menimpanya; console di direktori itu hanya dengan izin manusia, setelah agent dihentikan dan `compose.yml`-nya dipindah. |
 | `--agent was an RDF-SDR agent option; sdr-doa-docker 3 installs the console only ...` | Opsi agent dari runbook atau script lama | Agent RDF-SDR tidak lagi dipasang; RDF-SDR menjalankan RDF Node edge. |
 | `another sdr-doa-docker run (pid N) is working on DIR` | Update lain (mis. timer) sedang jalan | Tunggu, lalu ulangi. Tanpa pid: hapus `DIR/.sdr-doa-docker.lock` hanya bila pasti tidak ada run. |
 | `FAILED: pull of ghcr.io/...: ... denied` / `unauthorized` | Package GHCR private, atau login `ghcr.io` lama yang kedaluwarsa | `sudo docker logout ghcr.io`, ulangi. Image publik tidak butuh login. |
@@ -1091,7 +1091,7 @@ IMG=$(sudo sed -n 's/^SDR_DOA_IMAGE=//p' /opt/sdr-doa-ground-console/.env | tail
 T=$(sudo sed -n 's/^SDR_DOA_IMAGE_TAG=//p' /opt/sdr-doa-ground-console/.env | tail -n 1) &&
 sudo docker run --rm --user 0 --entrypoint tar \
   -v sdr-doa-ground-console_sdr-doa-data:/data:ro -v "$HOME/sdr-doa-backup":/backup \
-  "${IMG:-ghcr.io/sanadunt/sdr-doa-ground-console}:${T:-2}" -C /data -czf /backup/sdr-doa-data.tar.gz . &&
+  "${IMG:-ghcr.io/sanadunt/sdr-doa-ground-console}:${T:-3}" -C /data -czf /backup/sdr-doa-data.tar.gz . &&
 sudo chown "$(id -u):$(id -g)" ~/sdr-doa-backup/sdr-doa-data.tar.gz &&
 chmod 600 ~/sdr-doa-backup/sdr-doa-data.tar.gz &&
 tar -tzf ~/sdr-doa-backup/sdr-doa-data.tar.gz | grep -c '^\./console\.json$'
@@ -1107,7 +1107,7 @@ cd /opt/sdr-doa-ground-console && sudo docker compose down
 
 **Periksa**: `sudo docker ps -a --filter label=com.docker.compose.project=sdr-doa-ground-console` kosong; `sudo docker volume ls | grep sdr-doa-data` masih ada.
 
-Membersihkan program (data tetap di volume): `sudo docker image rm ghcr.io/sanadunt/sdr-doa-ground-console:3 ghcr.io/sanadunt/sdr-doa-ground-console:sdr-doa-previous` (tag yang ada saja), lalu hapus `/opt/sdr-doa-ground-console` dan `/usr/local/bin/sdr-doa-docker` bila manusia setuju (script itu juga dipakai agent Docker di host yang sama).
+Membersihkan program (data tetap di volume): `sudo docker image rm ghcr.io/sanadunt/sdr-doa-ground-console:3 ghcr.io/sanadunt/sdr-doa-ground-console:sdr-doa-previous` (tag yang ada saja), lalu hapus `/opt/sdr-doa-ground-console` dan `/usr/local/bin/sdr-doa-docker` bila manusia setuju. Instalasi agent dari console 2.x tidak memakai script ini lagi; hentikan dengan 10.3.
 
 PURGE (menghapus semua pengaturan, rekaman, dan cache tile; jalan juga setelah `down` biasa, tetapi sebelum `/opt/sdr-doa-ground-console` dihapus, karena butuh `compose.yml` di sana):
 
