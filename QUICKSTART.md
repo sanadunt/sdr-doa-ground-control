@@ -2,7 +2,7 @@
 
 Panduan ini menjalankan Ground Console lokal dari checkout repository. Jalur production lokal memakai Python untuk menyajikan `frontend/dist` dan menyediakan API same-origin. Vite hanya dipakai untuk development/build.
 
-Untuk ground station Linux yang hanya ingin memakai console (tanpa build, jalan di background, hidup lagi setelah reboot), lihat [Instalasi Linux: Docker, rilis tar dan service](#instalasi-linux-docker-rilis-tar-dan-service). Agent di RDF-SDR (Raspberry) ada di [Agent RDF-SDR](#agent-rdf-sdr-raspberry).
+Untuk ground station Linux yang hanya ingin memakai console (tanpa build, jalan di background, hidup lagi setelah reboot), lihat [Instalasi Linux: Docker, rilis tar dan service](#instalasi-linux-docker-rilis-tar-dan-service). RDF-SDR (Raspberry) menjalankan RDF Node edge dari repository `sanadunt/rdf-indicator-raspberry`; repository ini tidak lagi membawa agent sendiri (lihat `CHANGELOG.md`).
 
 Di UI, node Raspberry tampil sebagai **RDF-SDR** dan receiver HackRF sebagai **RadioSpectrum**. Panduan ini memakai nama UI tersebut; perintah, nama file, field API, dan topik MQTT tetap memakai nama teknisnya.
 
@@ -478,7 +478,7 @@ Dashboard, peta, polar, readout DoA, dan chip DATA/DOA memakai **MQTT** dulu dan
   - **Karena itu PUBLIKASI selalu `BLOCKED`.** Gate publikasi (PUBLIKASI di strip dan kartu **Gate publikasi** di Diagnostik DoA) baru `READY` bila semua pemeriksaannya lolos. Pada data sehat ada tiga reason yang selalu muncul: `DOA_AUTHORITY_NOT_SELECTED` (Sumber otoritas DoA belum dipilih), `CANONICAL_ANGLE_NOT_CONFIGURED` (Konvensi sudut kanonik belum disetujui), dan `GROUND_CLOCK_UNVERIFIED` (Jam ground dan node belum diverifikasi; console tidak memverifikasi jam node, sehingga tile **Jam** di baris stat Kesehatan Sistem selalu `UNVERIFIED`). Di Diagnostik DoA, pemeriksaan Otoritas dipilih, Sudut kanonik siap, DoA terpilih fresh, dan Satuan terpilih valid tampil `BLOCKED`, Status node fresh tampil `NOT CONFIGURED`, dan di kartu Collector Otoritas bernilai `NONE` dan Kesiapan sudut `NOT CONFIGURED`. Memilih sumber otoritas dan menyetujui sudut kanonik adalah keputusan deployment di luar console ini, jadi status tersebut bukan kerusakan data atau node. Reason lain di luar ketiganya menunjukkan masalah nyata.
   - Baris stat menampilkan DAQ health (dengan jumlah frame hilang), sinkron (`x/3`), ADC overdrive (PASS, OVERDRIVE dengan file yang melaporkannya, atau UNKNOWN), SNR (native XML, tidak terkalibrasi), PAPR CSV/XML dalam dB, MQTT, dan Jam. PAPR bukan confidence 0–1.
   - Kartu **RDF-SDR** menampilkan status node (VALID/INVALID/UNAVAILABLE) dan Progres (`ADVANCING`, `UNCHANGED` dengan umurnya, `STALLED`, `FIRST_SAMPLE`, `UNAVAILABLE`, `UNTRACKED`), indeks frame, frame hilang, flag sinkron, sumber noise, dan status GPS. Tooltip Progres hanya muncul bila ada penyebab: counter yang berhenti atau mundur, atau `status.json` yang tidak bisa dipakai. ADC overdrive (dengan mask kanal), sync gagal, dan node beku tampil sebagai peringatan di kartu ini. Kartu **Tampilan DoA** menampilkan CSV dan XML dengan statusnya dan umurnya saat dibaca.
-  - Kartu **Data Out** menampilkan setiap GET (`/status.json`, `/settings.json`, `/DOA_value.html`, `/doa.xml`) dengan kode HTTP atau jenis error (Connection refused, Timed out, Skipped, Deadline exceeded, dan seterusnya) dan waktunya; jumlah percobaan tampil bila lebih dari satu. `settings.json` yang dipakai ulang dari pembacaan sebelumnya tampil `REUSED` dengan umurnya. Kepala kartu membandingkan waktu koleksi dengan anggaran 4 detik (misalnya `372 ms / 4.0 dtk`). Peringatan `COLLECTION_DEADLINE_EXCEEDED` muncul bila pembacaan dihentikan di batas waktu, dan peringatan `status.json` bila file lain dilewati karena `status.json` tidak terjangkau. Kartu **Monitor MQTT** menampilkan broker, transport, publish, pesan terakhir, jumlah pesan, dan pesan tidak valid.
+  - Kartu **Data Out** menampilkan setiap GET (`/status.json`, `/settings.json`, `/DOA_value.html`, `/doa.xml`) dengan kode HTTP atau jenis error (Connection refused, Timed out, Skipped, Deadline exceeded, dan seterusnya) dan waktunya; jumlah percobaan tampil bila lebih dari satu. `settings.json` yang dipakai ulang dari pembacaan sebelumnya tampil `REUSED` dengan umurnya. Kepala kartu membandingkan waktu koleksi dengan anggaran 4 detik (misalnya `372 ms / 4.0 dtk`). Peringatan `COLLECTION_DEADLINE_EXCEEDED` muncul bila pembacaan dihentikan di batas waktu, dan peringatan `status.json` bila file lain dilewati karena `status.json` tidak terjangkau. Kartu **MQTT** menampilkan broker, transport, publish, pesan terakhir, jumlah pesan, dan pesan tidak valid, dihitung atas semua topik RDF Node yang dilanggan.
 - **Diagnostik DoA.**
   - Reason gate diurutkan dari yang paling bisa ditindaklanjuti, masing-masing dengan kode mentahnya. Reason baru: `NODE_CLOCK_STALLED`, `ADC_OVERDRIVE`, `COLLECTION_DEADLINE_EXCEEDED`, `CSV_VIEW_UNAVAILABLE`, `XML_VIEW_UNAVAILABLE`, `NATIVE_ANGLE_INVALID`, `ANGULAR_PEAK_ANGLE_MISMATCH` (puncak vektor CSV berjarak lebih dari 3° dari θ₀), dan `NATIVE_ANGLE_UNCHECKED` (CSV dan XML berasal dari frame berbeda, sehingga sudutnya tidak dicek silang).
   - Relasi CSV/XML tampil sebagai EQUAL, NOT CHECKED, NOT COMPARABLE, CONFLICT, atau ANGLE INVALID, beserta relasi frame, selisih timestamp, jarak, dan toleransi.
@@ -487,7 +487,8 @@ Dashboard, peta, polar, readout DoA, dan chip DATA/DOA memakai **MQTT** dulu dan
 
 ### Konfigurasi
 
-- Kartu tersusun dalam dua kolom setinggi isinya masing-masing: **Koneksi & refresh**, **Monitor MQTT** dan **Akses LAN** di kiri, **GPS & Kompas** dan **Branding & admin** di kanan, lalu **Patch dry-run** selebar halaman. Bilah bagian (Koneksi, MQTT, Akses LAN, GPS & Kompas, Branding, Dry-run) mengikuti urutan itu. Pada lebar 1024–1279 px Koneksi dan MQTT berdampingan dan kartu lain selebar halaman; di bawah 1024 px semua kartu satu kolom dengan urutan yang sama.
+- Kartu tersusun dalam dua kolom setinggi isinya masing-masing: **Koneksi & refresh**, **MQTT** dan **Akses LAN** di kiri, **GPS & Kompas** dan **Branding & admin** di kanan, lalu **Patch dry-run** selebar halaman. Bilah bagian (Koneksi, MQTT, Akses LAN, GPS & Kompas, Branding, Dry-run) mengikuti urutan itu. Pada lebar 1024–1279 px Koneksi dan MQTT berdampingan dan kartu lain selebar halaman; di bawah 1024 px semua kartu satu kolom dengan urutan yang sama.
+- Kartu **MQTT** menampilkan **Pesan** (jumlah pesan MQTT semua topik RDF Node, ditambah jumlah yang tidak valid bila ada) dan **Pesan terakhir** (umurnya), lalu host, port, transport, dan path WebSocket.
 - Enter di bagian mana pun men-submit bagian itu.
 - URL Data Out disimpan tanpa garis miring di akhir. Port MQTT harus bilangan bulat 1–65535.
 - **Transport MQTT** (WebSocket default, atau TCP) harus sama dengan listener broker. **Path WebSocket** (default `/mqtt`) hanya dipakai dengan WebSocket. Mengubah host, port, transport, atau path me-restart monitor dan mereset penghitungnya.
@@ -500,18 +501,10 @@ Dashboard, peta, polar, readout DoA, dan chip DATA/DOA memakai **MQTT** dulu dan
 
 ### Monitor Pesan
 
-- Bilah halaman menampilkan chip koneksi, tag transport (`TCP` atau `WS`), `SYNTHETIC` bila ada payload sintetis, sakelar sdr/v1 | RDF Node, **Muat ulang**, dan **Sambungkan ulang**. Kartu **Koneksi** menampilkan broker, transport (`TCP` atau `WS /path`), topik terakhir (disamarkan), dan publish.
-- Baris metrik: Diterima, Valid, Tidak valid, Byte, Latensi terakhir, Pesan terakhir. Latensi terakhir hanya menghitung pesan live. Di ponsel baris ini dua kolom.
-- Tabel per kind:
-  - **Count** adalah jumlah pesan per kind sejak monitor start.
-  - **Age** menghitung naik setiap detik sejak console menerima pesan. Badge `STALE` muncul setelah doa 5 detik, nav 5 detik, health 8 detik, dan state/config_reported 65 detik. Ini ambang tampilan, bukan gate.
-  - **Contract** bernilai `VALID`, `INVALID`, atau `CLEARED` (publisher menghapus nilai retained).
-  - Badge `RETAINED` berarti pesan di-replay broker saat subscribe; pesan seperti itu dinilai dari timestamp-nya sendiri dan tidak punya latency.
-  - Payload status menampilkan flag node apa adanya (`valid`, `doa_valid`, `settings_valid`), state health beserta reason, dan availability `ONLINE`/`OFFLINE`.
-  - Badge `SYNTHETIC` muncul untuk payload dengan `source: "synthetic"`.
-- **Sambungkan ulang** selalu membuka sesi subscriber baru dengan pengaturan broker tersimpan; penghitung dan record terakhir mulai dari nol. Tanpa tombol ini, monitor mencoba lagi sendiri dalam sekitar 10 detik.
+- Bilah halaman menampilkan chip koneksi, tag transport (`TCP` atau `WS`), **Muat ulang**, dan **Sambungkan ulang**. Tidak ada sakelar keluarga topik: halaman langsung menampilkan tampilan RDF Node (baris metrik, kartu Node, ACK, dan tabel topik), lalu kartu **Koneksi** dengan broker, transport (`TCP` atau `WS /path`), root topik (`sdr/v2/uav-01`), dan publish.
+- **Sambungkan ulang** selalu membuka sesi subscriber baru dengan pengaturan broker tersimpan; penghitung dan status topik mulai dari nol. Tanpa tombol ini, monitor mencoba lagi sendiri dalam sekitar 10 detik.
 - Client id MQTT sekarang `groundconsole` plus 10 karakter hex acak per monitor, sehingga dua console bisa memakai satu broker. ACL atau log broker yang memakai id lama `ground-console-monitor` perlu diperbarui.
-- Status MQTT diperbarui sendiri setiap 2 detik di Monitor Pesan dan Kesehatan Sistem, dan setiap 5 detik di halaman lain.
+- Status MQTT (`/api/mqtt`: koneksi dan jumlah pesan semua topik RDF Node) diperbarui sendiri setiap 2 detik di Monitor Pesan dan Kesehatan Sistem, dan setiap 5 detik di halaman lain. Kartu **MQTT** di Konfigurasi dan Kesehatan Sistem memakai hitungan yang sama.
 - Tampilan **RDF Node** dijelaskan di bagian [RDF Node](#rdf-node) di bawah.
 
 ### Shortcut keyboard
@@ -527,13 +520,13 @@ Kode halaman, termasuk peta, diambil di latar belakang tidak lama setelah consol
 
 ## MQTT staging, opsional
 
-MQTT adalah sumber utama Dashboard, peta, dan polar; tanpa MQTT yang segar console memakai Data Out (cadangan), lihat [Sumber data Dashboard](#sumber-data-dashboard). Spektrum dan simulasi tidak memerlukan MQTT; Kontrol membutuhkannya. Ground Console memakai satu koneksi ke broker yang dikonfigurasi. Koneksi itu berlangganan topik `sdr/v1/uav-01` dan topik RDF Node di `sdr/v2/uav-01` sekaligus, dan hanya publish perintah Kontrol (admin) ke `sdr/v2/uav-01/cmd/config/patch` dan `cmd/config/get`. `paho-mqtt` diperlukan untuk monitor MQTT, Kontrol, dan synthetic publisher.
+MQTT adalah sumber utama Dashboard, peta, dan polar; tanpa MQTT yang segar console memakai Data Out (cadangan), lihat [Sumber data Dashboard](#sumber-data-dashboard). Spektrum dan simulasi tidak memerlukan MQTT; Kontrol membutuhkannya. Ground Console memakai satu koneksi ke broker yang dikonfigurasi. Koneksi itu hanya berlangganan topik RDF Node di `sdr/v2/uav-01` (satu MQTT, `docs/KEPUTUSAN_MQTT.md`), dan hanya publish perintah Kontrol (admin) ke `sdr/v2/uav-01/cmd/config/patch` dan `cmd/config/get`. `paho-mqtt` diperlukan untuk monitor MQTT dan Kontrol.
 
-Koneksi MQTT default adalah `10.90.0.1:9001`, WebSocket, path `/mqtt`. Host menerima literal IPv4/IPv6 apa pun atau `localhost`, bukan nama DNS; masukkan IPv6 tanpa kurung siku. Ground Console membuka koneksi keluar ke broker, tetapi HTTP Ground Console tetap bind ke loopback. Monitor tidak punya opsi username, password, atau TLS untuk TCP maupun WebSocket, sehingga payload, termasuk patch dari Kontrol, melintas tanpa enkripsi. Gunakan hanya broker dan jaringan tepercaya; jangan kirim payload rahasia melalui koneksi ini. Karena itu console tidak bisa tersambung ke broker LAN `tools/mqtt_lan_stage.conf` yang mewajibkan TLS dan password.
+Koneksi MQTT default adalah `10.90.0.1:9001`, WebSocket, path `/mqtt`. Host menerima literal IPv4/IPv6 apa pun atau `localhost`, bukan nama DNS; masukkan IPv6 tanpa kurung siku. Ground Console membuka koneksi keluar ke broker, tetapi HTTP Ground Console tetap bind ke loopback. Monitor tidak punya opsi username, password, atau TLS untuk TCP maupun WebSocket, sehingga payload, termasuk patch dari Kontrol, melintas tanpa enkripsi. Gunakan hanya broker dan jaringan tepercaya; jangan kirim payload rahasia melalui koneksi ini. Karena itu console butuh listener broker yang menerimanya tanpa TLS dan kredensial (di groundstation: listener loopback).
 
-Monitor memakai MQTTv5 dan satu konfigurasi broker bersama: host, port, transport, dan WebSocket path berlaku untuk kedua root topik. Filter `sdr/v1/uav-01/#` tetap ada sampai jalur lama dihapus; RDF Node memakai prefix `sdr/v2/uav-01/` dan 12 suffix dari kontrak edge (`docs/MQTT_KONTRAK.md`): `state`, `capabilities`, `availability`, `telemetry/health`, `telemetry/health/detail`, `telemetry/doa`, `telemetry/diagnostic/doa`, `telemetry/angular`, `telemetry/diagnostic/angular`, `settings/reported`, `ack/config`, dan `ack/operation`. `config/reported` bukan bagian kontrak dan tidak di-subscribe, jadi nilai retained sisa di broker tidak dibaca. Status `READY` menunggu SUBACK berhasil untuk seluruh filter bersama. Parser dan snapshot kedua root tetap terpisah agar validasi satu schema tidak mengubah statistik schema lain.
+Monitor memakai MQTTv5 dan satu konfigurasi broker: host, port, transport, dan WebSocket path. Ia berlangganan prefix `sdr/v2/uav-01/` dengan 12 suffix dari kontrak edge (`docs/MQTT_KONTRAK.md`): `state`, `capabilities`, `availability`, `telemetry/health`, `telemetry/health/detail`, `telemetry/doa`, `telemetry/diagnostic/doa`, `telemetry/angular`, `telemetry/diagnostic/angular`, `settings/reported`, `ack/config`, dan `ack/operation`. `config/reported` bukan bagian kontrak dan tidak di-subscribe, jadi nilai retained sisa di broker tidak dibaca. Status `READY` menunggu SUBACK berhasil untuk seluruh filter. Topik lain di broker, termasuk topik lama console 2.x, tidak di-subscribe dan tidak dihitung.
 
-Konfigurasi lama `rdf_node_mqtt` tidak digunakan atau dimigrasikan; field itu hilang saat konfigurasi disimpan berikutnya. Atur endpoint kedua keluarga topic melalui **Konfigurasi → MQTT**.
+Konfigurasi lama `rdf_node_mqtt` tidak digunakan atau dimigrasikan; field itu hilang saat konfigurasi disimpan berikutnya. Atur broker melalui **Konfigurasi → MQTT**.
 
 ### Broker staging lokal
 
@@ -563,29 +556,15 @@ Windows PowerShell:
 
 Folder `.config/` di root repository diabaikan Git.
 
-Synthetic publisher:
+Tanpa RDF Node, `tools/test_rdf_node_broker.py` mengirim payload buatan kode edge (`tools/fixtures/rdf-node`) lewat broker ini ke monitor console dan memeriksa tampilan node, status MQTT, sesi retained, dan satu perintah Kontrol beserta PUBACK dan ACK-nya:
 
 ```sh
-.venv/bin/python tools/synthetic_mqtt_publisher.py \
-  --host 127.0.0.1 \
-  --port 18884 \
-  --duration 5 \
-  --doa-rate 2 \
-  --nav-rate 1 \
-  --health-rate 1
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_rdf_node_broker
 ```
-
-Di Windows, ganti prefix Python menjadi `.\.venv\Scripts\python.exe`:
-
-```powershell
-.\.venv\Scripts\python.exe tools\synthetic_mqtt_publisher.py --host 127.0.0.1 --port 18884 --duration 5 --doa-rate 2 --nav-rate 1 --health-rate 1
-```
-
-Semua payload synthetic publisher membawa `source: "synthetic"` dan tampil dengan badge `SYNTHETIC`. State dan config retained-nya dihapus saat publisher selesai; tambahkan `--keep-retained` bila ingin menyimpannya di broker.
 
 ### Menguji Kontrol di broker staging
 
-Broker `tools/mqtt_stage4.conf` menerima koneksi anonim di loopback, jadi console bisa publish ke sana. Kontrol butuh RDF Node (edge) yang tersambung ke broker yang sama dan mengirim `state` dan `telemetry/health`; agent bawaan repo ini dan synthetic publisher memakai topik lama dan tidak menjawab Kontrol. Tanpa RDF Node, Kirim nonaktif ("Kirim butuh state RDF-SDR lewat MQTT"). Listener `mqtt_stage4.conf` tidak memakai TLS, jadi RDF Node menjawab **Baca settings** dengan `TLS_REQUIRED_FOR_SETTINGS_REPORT`. Tanpa perangkat, `tools/test_mqtt_config_patch.py` dan `tools/test_rdf_node_commands.py` menjalankan alur Kontrol dengan payload yang dinilai kode edge sendiri (`tools/fixtures/rdf-node/commands.json`).
+Broker `tools/mqtt_stage4.conf` menerima koneksi anonim di loopback, jadi console bisa publish ke sana. Kontrol butuh RDF Node (edge) yang tersambung ke broker yang sama dan mengirim `state` dan `telemetry/health`. Tanpa RDF Node, Kirim nonaktif ("Kirim butuh state RDF-SDR lewat MQTT"). Listener `mqtt_stage4.conf` tidak memakai TLS, jadi RDF Node menjawab **Baca settings** dengan `TLS_REQUIRED_FOR_SETTINGS_REPORT`. Tanpa perangkat, `tools/test_mqtt_config_patch.py` dan `tools/test_rdf_node_commands.py` menjalankan alur Kontrol dengan payload yang dinilai kode edge sendiri (`tools/fixtures/rdf-node/commands.json`).
 
 ### RDF Node
 
@@ -597,8 +576,8 @@ Kontrak per topik (field wajib, QoS, retained, expiry, batas freshness, dan atur
 
 Tampilan **RDF Node** ada di halaman Monitor Pesan:
 
-- Memakai koneksi broker yang sama dengan `sdr/v1`, tetapi penghitungnya terpisah. Dibaca setiap 2 detik hanya selama tampilan ini terbuka.
-- `READY` berarti seluruh SUBACK untuk filter bersama berhasil, bukan DAQ sehat. Availability adalah petunjuk koneksi, bukan health.
+- Dibaca setiap 2 detik selama Monitor Pesan terbuka. Penghitungnya sama dengan status MQTT di `/api/mqtt`.
+- `READY` berarti seluruh SUBACK berhasil, bukan DAQ sehat. Availability adalah petunjuk koneksi, bukan health.
 - Kartu **Node** berisi nilai terakhir yang diterima, per bagian: Sesi (`sid`, `cfg`, run, profile, clock dari `state`), Health (segar 8 detik), Detail health, DoA (`LIVE` hanya untuk `ok=1` dengan health segar `daq=1`), DoA RAW (`ok=0`, selalu `UNVERIFIED`), DoA doa.xml (diagnostik), Angular (`LIVE` hanya untuk `flags=63`), Kandidat Angular (trust-only atau diagnostik, `UNVERIFIED`, dengan alasannya), Kapabilitas, Ketersediaan, dan Settings (hanya setelah `config.get`; teks `settings.json` tetap di server). Pesan yang ditolak tidak pernah masuk kartu ini.
 - Kartu **ACK** menampilkan ACK terakhir per perintah dengan status jurnal edge, tag `FINAL`, dan kode error edge (sampai 64 karakter, misalnya `CENTER_CHANGE_REQUIRES_VFO0_TARGET`). `challenge` dari ACK prepare tidak disimpan.
 - Tabel topik menampilkan count, status pesan terakhir (`LIVE`, `UNVERIFIED`, `FRESH`, `CONTEXT`, `STALE`, `INCONSISTENT`, `IGNORED`, `INVALID`, `UNAVAILABLE` bila belum pernah diterima, atau `CLEARED` bila publisher menghapus nilai retained), umur, RETAINED/LIVE, ringkasan field, dan kode penolakan beserta nama field (misalnya `INVALID_FIELD a`).
@@ -617,44 +596,44 @@ Bagian ini untuk komputer ground station **Linux** yang hanya memakai console: t
 Di mesin build (repository dengan submodule `vendor/BrowSDR`, Node.js dan Python):
 
 ```sh
-python3 tools/make_release.py              # npm ci + npm run build:all, lalu kedua tarball
+python3 tools/make_release.py              # npm ci + npm run build:all, lalu tarball console
 python3 tools/make_release.py --skip-build # pakai frontend/dist yang sudah di-build
 cd dist/release && sha256sum -c SHA256SUMS
 ```
 
-Hasilnya di `dist/release/`: `sdr-doa-ground-console-<VERSI>-linux.tar.gz` (console, frontend sudah di-build, installer, Dockerfile rilis, panduan), `sdr-doa-rdf-sdr-agent-<VERSI>.tar.gz` (agent RDF-SDR), `sdr-doa-docker` (script host Docker) dan `SHA256SUMS`. Build lokal ini untuk uji coba atau instalasi tanpa internet; rilis untuk operator dibuat di GitHub (bagian berikut). Versi diambil dari file `VERSION` di root repository. `--with-wheels` ikut membawa wheel `paho-mqtt` dan `tzdata` untuk instalasi tanpa internet. Build penuh menolak berjalan bila ada perubahan yang belum di-commit pada input build.
+Hasilnya di `dist/release/`: `sdr-doa-ground-console-<VERSI>-linux.tar.gz` (console, frontend sudah di-build, installer, Dockerfile rilis, panduan), `sdr-doa-docker` (script host Docker) dan `SHA256SUMS`. Build lokal ini untuk uji coba atau instalasi tanpa internet; rilis untuk operator dibuat di GitHub (bagian berikut). Versi diambil dari file `VERSION` di root repository. `--with-wheels` ikut membawa wheel `paho-mqtt` dan `tzdata` untuk instalasi tanpa internet. Build penuh menolak berjalan bila ada perubahan yang belum di-commit pada input build.
 
 ### Rilis di GitHub
 
 Rilis resmi dibuat GitHub Actions (`.github/workflows/release.yml`), bukan dari build lokal:
 
-1. Naikkan `VERSION` di `main` (misalnya `2.0.1`; prerelease `2.1.0-rc.1`; tanpa nol di depan dan tanpa `+build`), lalu merge ke `main`. Di commit yang sama ubah juga file yang menyebut versi itu, karena job `test` gagal bila salah satunya tertinggal:
-   - setiap rilis: tag `image:` di `docker-compose.yml`, `docker-compose.release.yml` dan `docker-compose.agent.yml`, serta `sdr-doa-agent:<VERSI>` di `Dockerfile.agent`;
-   - versi mayor baru (misalnya 3.0.0): juga `DEFAULT_CHANNEL` di `packaging/docker/sdr-doa-docker`, default `${SDR_DOA_IMAGE_TAG:-N}` di `docker-compose.ghcr.yml`, dan teks kanal `2` di bantuan script, komentar `docker-compose.ghcr.yml` serta dokumentasi ini (`--channel 2`, `install --channel 3`);
+1. Naikkan `VERSION` di `main` (misalnya `3.0.1`; prerelease `3.1.0-rc.1`; tanpa nol di depan dan tanpa `+build`), lalu merge ke `main`. Di commit yang sama ubah juga file yang menyebut versi itu, karena job `test` gagal bila salah satunya tertinggal, dan tulis catatannya di `CHANGELOG.md`:
+   - setiap rilis: tag `image:` di `docker-compose.yml` dan `docker-compose.release.yml`;
+   - versi mayor baru (misalnya 4.0.0): juga `DEFAULT_CHANNEL` di `packaging/docker/sdr-doa-docker`, default `${SDR_DOA_IMAGE_TAG:-N}` di `docker-compose.ghcr.yml`, dan teks kanal `3` di bantuan script, komentar `docker-compose.ghcr.yml` serta dokumentasi ini (`--channel 3`, `install --channel 4`); catatan rilisnya menyebut cara pindah kanal (Docker) dan `update --allow-major` (native);
    - sebaiknya setiap rilis: digest `PYTHON_IMAGE` di job `images` (`.github/workflows/release.yml`), agar image membawa perbaikan keamanan Debian terbaru (`docker buildx imagetools inspect python:3.12-slim-bookworm`, salin `Digest` index-nya).
-2. Push tag yang sama persis dengan `VERSION`: `git tag v2.0.1 && git push origin v2.0.1`. Atau buka **Actions > Release > Run workflow** di branch `main`; tag `v<VERSI>` dibuat otomatis bila belum ada.
+2. Push tag yang sama persis dengan `VERSION`: `git tag v3.0.1 && git push origin v3.0.1`. Atau buka **Actions > Release > Run workflow** di branch `main`; tag `v<VERSI>` dibuat otomatis bila belum ada.
 
-Workflow menjalankan seluruh test (`ci.yml`), membangun tarball dengan `make_release.py --with-wheels`, lalu menerbitkan rilis `v<VERSI>` dengan empat aset: `sdr-doa-ground-console-<VERSI>-linux.tar.gz`, `sdr-doa-rdf-sdr-agent-<VERSI>.tar.gz`, `sdr-doa-docker` dan `SHA256SUMS`. Setelah rilis itu ada, dari tarball yang sama dibuat image `ghcr.io/sanadunt/sdr-doa-ground-console` (amd64, arm64) dan `ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent` (amd64, arm64, armv7) dengan tag `<VERSI>`. Tag kanal `<MAYOR>.<MINOR>`, `<MAYOR>` dan `latest` lalu diarahkan ke image yang sama, masing-masing hanya bila belum ada rilis stabil lebih tinggi yang dicakupnya; rilis lama yang selesai belakangan, rerun tag lama, atau backport 2.0.z setelah 2.1.0 tidak pernah memundurkan `2` atau `latest` (backport juga tidak menjadi "Latest" di GitHub). Prerelease hanya mendapat `<VERSI>`. Image `<VERSI>` yang sudah ada dari commit yang sama tidak di-build ulang saat rerun, jadi host tidak di-restart untuk versi yang sama; input `force_images` di Run workflow memaksa build ulang. Tag yang tidak sama dengan `VERSION`, atau commit yang belum ada di `main`, menghentikan workflow dengan pesan yang menyebut sebabnya.
+Workflow menjalankan seluruh test (`ci.yml`), membangun tarball dengan `make_release.py --with-wheels`, lalu menerbitkan rilis `v<VERSI>` dengan tiga aset: `sdr-doa-ground-console-<VERSI>-linux.tar.gz`, `sdr-doa-docker` dan `SHA256SUMS`. Setelah rilis itu ada, dari tarball yang sama dibuat image `ghcr.io/sanadunt/sdr-doa-ground-console` (amd64, arm64) dengan tag `<VERSI>`. Sejak 3.0.0 tidak ada lagi tarball dan image agent RDF-SDR. Tag kanal `<MAYOR>.<MINOR>`, `<MAYOR>` dan `latest` lalu diarahkan ke image yang sama, masing-masing hanya bila belum ada rilis stabil lebih tinggi yang dicakupnya; rilis lama yang selesai belakangan, rerun tag lama, atau backport 3.0.z setelah 3.1.0 tidak pernah memundurkan `3` atau `latest` (backport juga tidak menjadi "Latest" di GitHub). Prerelease hanya mendapat `<VERSI>`. Image `<VERSI>` yang sudah ada dari commit yang sama tidak di-build ulang saat rerun, jadi host tidak di-restart untuk versi yang sama; input `force_images` di Run workflow memaksa build ulang. Tag yang tidak sama dengan `VERSION`, atau commit yang belum ada di `main`, menghentikan workflow dengan pesan yang menyebut sebabnya.
 
 Aset rilis bisa diunduh tanpa login karena repository publik:
 
 - aset yang namanya tetap, dari rilis terbaru: `https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/sdr-doa-docker` dan `https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/SHA256SUMS`;
-- tarball, yang namanya memuat versi: `https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v2.0.0/sdr-doa-ground-console-2.0.0-linux.tar.gz` (`latest/download/<aset>` juga bisa, asal versi di nama file memang versi terbaru).
+- tarball, yang namanya memuat versi: `https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v3.0.0/sdr-doa-ground-console-3.0.0-linux.tar.gz` (`latest/download/<aset>` juga bisa, asal versi di nama file memang versi terbaru).
 
-**Sekali setelah rilis pertama**: GHCR bisa membuat package baru sebagai private. Bila job `images` memberi peringatan bahwa image tidak bisa di-pull tanpa login, buka GitHub > profil > **Packages** > `sdr-doa-ground-console` > **Package settings** > **Change visibility** > **Public**, lalu lakukan hal yang sama untuk `sdr-doa-rdf-sdr-agent`. Sebelum itu `docker pull` dari komputer lain ditolak (`denied` atau `unauthorized`). Rilis berikutnya tidak perlu langkah ini lagi.
+**Sekali setelah rilis pertama**: GHCR bisa membuat package baru sebagai private. Bila job `images` memberi peringatan bahwa image tidak bisa di-pull tanpa login, buka GitHub > profil > **Packages** > `sdr-doa-ground-console` > **Package settings** > **Change visibility** > **Public**. Sebelum itu `docker pull` dari komputer lain ditolak (`denied` atau `unauthorized`). Rilis berikutnya tidak perlu langkah ini lagi.
 
 **Siapa yang bisa menerbitkan**: update otomatis memasang apa pun yang diterbitkan repository ini, di setiap host dalam sehari (timer Docker berjalan sebagai root). Jadi setiap orang dengan akses write ke repository, dan setiap token dengan `contents:write` atau `packages:write`, bisa menjangkau semua host itu: tag dari commit yang belum di-review menjalankan `release.yml` versi commit itu, dan pemeriksaan tag di dalam repository tidak bisa mencegahnya. Pengaturan sekali di GitHub yang disarankan:
 
 - akses write hanya untuk maintainer yang dipercaya, dengan 2FA;
 - branch ruleset pada `main` yang mewajibkan pull request yang sudah di-review;
 - tag ruleset pada `refs/tags/v*` yang membatasi create, update dan delete untuk pemilik saja. `GITHUB_TOKEN` bukan bypass actor, jadi langkah "Create the tag on main" pada Run workflow lalu ditolak; rilis dengan push tag sendiri, seperti yang disebut pesan error langkah itu;
-- di **Package settings > Manage Actions access** kedua package, izinkan hanya repository ini dan jangan tambahkan user lain.
+- di **Package settings > Manage Actions access** package itu, izinkan hanya repository ini dan jangan tambahkan user lain.
 
 Image atau aset yang ditandatangani (cosign keyless atau `attest-build-provenance`, lalu diverifikasi `sdr-doa-docker`) adalah langkah terpisah untuk nanti.
 
 ### Docker dari image GHCR (tanpa build, update otomatis)
 
-Setiap rilis GitHub (`v<VERSI>`) juga menerbitkan image publik `ghcr.io/sanadunt/sdr-doa-ground-console` (amd64, arm64) dan `ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent` (amd64, arm64, armv7). Image publik bisa di-pull tanpa login GitHub, jadi update cukup `docker pull`. Script `sdr-doa-docker` (aset rilis, juga ada di tarball console sebagai `packaging/docker/sdr-doa-docker`) mengurus pemasangan, update, rollback, dan timer update harian. Update hanya butuh Docker Engine dengan Compose v2 (tanpa git, curl, Python, atau login GitHub); unduhan pertama butuh `curl` atau `wget`.
+Setiap rilis GitHub (`v<VERSI>`) juga menerbitkan image publik `ghcr.io/sanadunt/sdr-doa-ground-console` (amd64, arm64). Image publik bisa di-pull tanpa login GitHub, jadi update cukup `docker pull`. Script `sdr-doa-docker` (aset rilis, juga ada di tarball console sebagai `packaging/docker/sdr-doa-docker`) mengurus pemasangan, update, rollback, dan timer update harian. Update hanya butuh Docker Engine dengan Compose v2 (tanpa git, curl, Python, atau login GitHub); unduhan pertama butuh `curl` atau `wget`.
 
 ```sh
 curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/sdr-doa-docker
@@ -670,15 +649,15 @@ sudo sdr-doa-docker rollback                   # kembali ke image sebelumnya
 
 Semua perintah untuk instalasi di `/opt` pakai `sudo`: `.env` di sana milik root dengan mode 0600, dan tanpa `sudo` script berhenti dengan "cannot read ... run with sudo".
 
-- **Kanal update**: `SDR_DOA_IMAGE_TAG` di `/opt/sdr-doa-ground-console/.env`. Bawaannya `2`, yaitu setiap rilis 2.x.y; `2.0` hanya 2.0.z; `2.0.0` tetap di rilis itu. Versi mayor baru hanya datang bila kanal diganti, misalnya `sudo sdr-doa-docker install --channel 3`. Port diatur dengan `--port` (`SDR_DOA_PORT`).
+- **Kanal update**: `SDR_DOA_IMAGE_TAG` di `/opt/sdr-doa-ground-console/.env`. Bawaannya `3`, yaitu setiap rilis 3.x.y; `3.0` hanya 3.0.z; `3.0.0` tetap di rilis itu. Versi mayor baru hanya datang bila kanal diganti, misalnya `sudo sdr-doa-docker install --channel 4`. Host yang masih di kanal `2` pindah ke 3.0.0 dengan `sdr-doa-docker` dari rilis 3.0.0: `sudo sh sdr-doa-docker install --channel 3` (`CHANGELOG.md`, runbook bagian 7.1). Port diatur dengan `--port` (`SDR_DOA_PORT`).
 - **Mengubah `.env`**: `update` hanya mengganti image. Perubahan `.env` diterapkan dengan `cd /opt/sdr-doa-ground-console && sudo docker compose up -d` (atau `sudo sdr-doa-docker install` lagi). Kata sandi admin sebaiknya diatur dengan `sdr-doa-set-admin-password` (lihat di bawah; disimpan di `/data/.env` di volume). Bila `SDR_DOA_ADMIN_PASSWORD` atau `SDR_DOA_SEED_*` tetap ditulis di `.env`, bungkus nilainya dengan tanda kutip tunggal (`SDR_DOA_ADMIN_PASSWORD='Xk9$q2!aB'`): docker compose mengganti `$nama` di nilai tanpa kutip atau berkutip ganda, sehingga console menerima kata sandi lain atau kosong (kosong menonaktifkan login admin). `install`, `update` dan `status` memberi peringatan (hanya nama variabel) bila ada `$` di luar kutip tunggal. Hanya nilai dari `.env` yang dipakai; nilai variabel itu di shell diabaikan.
 - **Update**: `update` mem-pull tag kanal. Bila image-nya berubah, container dibuat ulang lalu ditunggu sampai healthcheck `healthy` (paling lama 180 detik). Bila image itu gagal (unhealthy, berhenti, atau restart terus), image sebelumnya dipasang lagi dan image yang gagal dicatat di `.bad-images`, sehingga update otomatis melewatinya sampai ada image lain. Gagal karena hal lain (error `docker compose up`, disk penuh, host lambat sampai 180 detik habis) juga dikembalikan, tetapi tidak dicatat, jadi update berikutnya mencoba lagi. Image sebelumnya disimpan dengan tag `sdr-doa-previous`, yang lebih lama dihapus. Bila container dari image kanal ternyata tidak sehat (misalnya update terputus karena listrik padam), `update` berikutnya kembali ke `sdr-doa-previous`. Image yang versinya lebih lama dari yang sedang jalan dilewati update otomatis; `sudo sdr-doa-docker update` menanyakannya di terminal, dan `install --channel` memasangnya. `update --check` hanya memberi tahu apakah ada image baru; tanpa plugin `docker buildx`, `--check` mem-pull image untuk membandingkannya (container dan tag yang jalan tetap).
 - **Rekaman dan pindai Receiver**: selama Receiver merekam audio atau mengarsipkan pindai, update otomatis ditunda (`deferred: Receiver recording or scan active` di `update.log`) dan dicoba lagi pada jadwal berikutnya; setelah 7 hari tertunda terus, update tetap dijalankan. `sudo sdr-doa-docker update` di terminal menanyakannya dulu; tanpa terminal butuh `--yes`.
-- **Update otomatis**: `sudo sdr-doa-docker auto-update on --time 03:30` memasang `sdr-doa-docker-update.timer` (harian, ditambah acak sampai 15 menit, menyusul bila komputer mati pada jam itu); `auto-update off` dan `auto-update status`. Satu host hanya punya satu timer: `auto-update on` untuk instalasi kedua (misalnya agent di samping console) ditolak, kecuali dengan `--force`, yang memindahkan timer ke instalasi itu. Timer root hanya menjalankan salinan script di `/usr/local/bin` dan hanya untuk direktori yang dimiliki root dan tidak bisa ditulis user lain; untuk instalasi milik user (misalnya rootless Docker di `~/sdr-doa-ground-console`), `sdr-doa-docker auto-update on` tanpa sudo mencetak baris crontab user itu. Tanpa systemd, perintah itu mencetak baris cron. Setiap langkah tercatat di `update.log`. Container yang di-stop manual tidak dinyalakan oleh update otomatis.
+- **Update otomatis**: `sudo sdr-doa-docker auto-update on --time 03:30` memasang `sdr-doa-docker-update.timer` (harian, ditambah acak sampai 15 menit, menyusul bila komputer mati pada jam itu); `auto-update off` dan `auto-update status`. Satu host hanya punya satu timer: `auto-update on` untuk instalasi kedua ditolak, kecuali dengan `--force`, yang memindahkan timer ke instalasi itu. Timer root hanya menjalankan salinan script di `/usr/local/bin` dan hanya untuk direktori yang dimiliki root dan tidak bisa ditulis user lain; untuk instalasi milik user (misalnya rootless Docker di `~/sdr-doa-ground-console`), `sdr-doa-docker auto-update on` tanpa sudo mencetak baris crontab user itu. Tanpa systemd, perintah itu mencetak baris cron. Setiap langkah tercatat di `update.log`. Container yang di-stop manual tidak dinyalakan oleh update otomatis.
 - **Data**: nama project compose dan volume sama dengan `docker-compose.yml` (`sdr-doa-ground-console`, `sdr-doa-data`), jadi console yang sebelumnya di-build dari repository atau dari rilis tetap memakai datanya setelah pindah ke image GHCR. Pengaturan di `.env` lama (di sebelah `docker-compose.yml`) tidak ikut pindah: salin baris `SDR_DOA_ADMIN_PASSWORD`, `SDR_DOA_PORT` dan `SDR_DOA_SEED_*` dari sana ke `/opt/sdr-doa-ground-console/.env` (atau pakai `--port N`), lalu `cd /opt/sdr-doa-ground-console && sudo docker compose up -d`. Setelah itu jangan jalankan `docker compose` lagi di direktori lama: project-nya sama, jadi `docker compose up -d --build` di sana mengembalikan console ke build lokal.
 - **Kata sandi admin**: `cd /opt/sdr-doa-ground-console && sudo docker compose exec console sdr-doa-set-admin-password && sudo docker compose restart console`.
 - **Tanpa script**: `docker-compose.ghcr.yml` (di repository dan tarball console) berisi compose yang sama; `docker compose -f docker-compose.ghcr.yml pull` lalu `docker compose -f docker-compose.ghcr.yml up -d`, tanpa tunggu healthcheck dan rollback.
-- **Agent RDF-SDR**: `sudo sh sdr-doa-docker install --agent` memasang agent di `/opt/sdr-doa-agent` dengan pengaturan di `agent.env`; `--enable-config` me-mount `/home/doasdr/doasdr/_share` (`--share-dir`) dan menjalankan agent sebagai pemiliknya. Langkahnya ada di [Agent RDF-SDR](#agent-rdf-sdr-raspberry).
+- **Agent RDF-SDR dari versi 2**: `sdr-doa-docker` 3 hanya memasang console. Opsi `--agent` ditolak, dan direktori agent yang ditulis versi 2 (`/opt/sdr-doa-agent`) disebut tanpa dikelola; hentikan dengan `cd /opt/sdr-doa-agent && sudo docker compose down`.
 - **Script-nya sendiri** tidak meng-update dirinya. Untuk versi script yang lebih baru, unduh lagi `sdr-doa-docker` dari rilis terbaru dan jalankan `sudo sh sdr-doa-docker install` (pengaturan di `.env` tetap).
 
 ### Docker
@@ -687,8 +666,8 @@ Butuh Docker Engine dan Compose v2 di Linux. Console memakai `network_mode: host
 
 ```sh
 # dari rilis (tanpa Node.js)
-tar -xzf sdr-doa-ground-console-2.0.0-linux.tar.gz
-cd sdr-doa-ground-console-2.0.0-linux
+tar -xzf sdr-doa-ground-console-3.0.0-linux.tar.gz
+cd sdr-doa-ground-console-3.0.0-linux
 docker compose up -d --build
 
 # atau dari clone repository biasa (bukan worktree), build frontend di dalam image
@@ -710,11 +689,11 @@ Container berjalan sebagai uid 10001 dan `restart: unless-stopped` menyalakannya
 Butuh Python 3.9+ dengan modul `venv` (`sudo apt install python3-venv` di Debian/Ubuntu). Jalankan sebagai user desktop biasa, bukan root:
 
 ```sh
-curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v2.0.0/sdr-doa-ground-console-2.0.0-linux.tar.gz
-curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v2.0.0/SHA256SUMS
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v3.0.0/sdr-doa-ground-console-3.0.0-linux.tar.gz
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v3.0.0/SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS
-tar -xzf sdr-doa-ground-console-2.0.0-linux.tar.gz
-cd sdr-doa-ground-console-2.0.0-linux
+tar -xzf sdr-doa-ground-console-3.0.0-linux.tar.gz
+cd sdr-doa-ground-console-3.0.0-linux
 sh install.sh            # menanyakan kata sandi admin; Enter = default 123456
 sdr-doa-console auto-update on   # opsional: update otomatis setiap hari 03.45
 ```
@@ -732,13 +711,12 @@ sdr-doa-console info        versi dan lokasi file
 sdr-doa-console uninstall   hapus program; --purge juga menghapus data
 ```
 
-Upgrade: `sdr-doa-console update` mengambil rilis terbaru dengan versi mayor yang sama dari GitHub Releases tanpa login (repository publik), memeriksa SHA-256-nya, lalu menjalankan `install.sh` rilis itu dengan opsi instalasi sekarang. Bila versi baru tidak menjawab `/api/health` dalam 60 detik, program lama dikembalikan dan dijalankan lagi. `sdr-doa-console auto-update on` melakukannya setiap hari lewat systemd user timer (`sdr-doa-console update --auto`); selama Receiver merekam atau mengarsipkan pindai, update itu ditunda ke jadwal berikutnya, paling lama 7 hari. Instalasi dari tarball tanpa perintah `update` (semua instalasi sebelum rilis GitHub pertama) menjalankan sekali `sh install.sh` dari rilis baru; setelah itu `sdr-doa-console update` dan `auto-update on` tersedia. Cara manual tetap bisa: ekstrak rilis baru dan jalankan `sh install.sh` lagi. Program dan venv diganti; data, kata sandi, dan console yang sedang jalan dipertahankan. Rincian di `packaging/console/README.md`.
+Upgrade: `sdr-doa-console update` mengambil rilis terbaru dengan versi mayor yang sama dari GitHub Releases tanpa login (repository publik), memeriksa SHA-256-nya, lalu menjalankan `install.sh` rilis itu dengan opsi instalasi sekarang. Bila versi baru tidak menjawab `/api/health` dalam 60 detik, program lama dikembalikan dan dijalankan lagi. `sdr-doa-console auto-update on` melakukannya setiap hari lewat systemd user timer (`sdr-doa-console update --auto`); selama Receiver merekam atau mengarsipkan pindai, update itu ditunda ke jadwal berikutnya, paling lama 7 hari. Versi mayor baru tidak dipasang sendiri, juga oleh timer: `update --check` menyebutnya, dan setelah membaca `CHANGELOG.md` jalankan `sdr-doa-console update --allow-major` (dari 2.x ke 3.0.0 juga begitu). Instalasi dari tarball tanpa perintah `update` (semua instalasi sebelum rilis GitHub pertama) menjalankan sekali `sh install.sh` dari rilis baru; setelah itu `sdr-doa-console update` dan `auto-update on` tersedia. Cara manual tetap bisa: ekstrak rilis baru dan jalankan `sh install.sh` lagi. Program dan venv diganti; data, kata sandi, dan console yang sedang jalan dipertahankan. Rincian di `packaging/console/README.md`.
 
 ### Jalan di background dan saat boot
 
 - **Native**: console adalah systemd user service `sdr-doa-ground-console.service` (restart otomatis bila gagal). Installer menjalankan `loginctl enable-linger $USER` agar service mulai saat boot tanpa login; bila ditolak, jalankan sekali `sudo loginctl enable-linger $USER`. Cek dengan `systemctl --user status sdr-doa-ground-console` dan `loginctl show-user $USER -p Linger`. Dengan `--no-service`, atau tanpa systemd user session, console jalan di background sampai reboot berikutnya (`sdr-doa-console start` setelah login).
 - **Docker**: `restart: unless-stopped`, selama service Docker sendiri aktif saat boot.
-- **Agent RDF-SDR**: systemd system service `sdr-doa-agent.service`, enabled, atau container dengan `restart: unless-stopped` (lihat di bawah).
 
 ### Apa yang tersimpan dan di mana
 
@@ -781,39 +759,9 @@ Untuk tablet atau komputer lain di LAN yang hanya perlu melihat Dashboard, peta,
 - Firewall: buka port LAN hanya untuk jaringan LAN, misalnya `sudo ufw allow from 192.168.1.0/24 to any port 8788 proto tcp`. Port console jangan dibuka.
 - Cek dari komputer lain yang diizinkan: `curl http://<IP groundstation>:8788/api/health` menjawab `"ok": true`, `curl -o /dev/null -w '%{http_code}\n' http://<IP groundstation>:8788/api/receiver/settings` mencetak `403`, dan `curl http://<IP groundstation>:8788/api/mirror/receiver` menjawab `"ok": true` dengan `source_age_ms` di bawah 10000 selama Receiver groundstation terbuka. Langkah lengkap ada di `docs/RUNBOOK_INSTALL_UPDATE.md` bagian 6.2.
 
-## Agent RDF-SDR (Raspberry)
+## RDF-SDR (Raspberry)
 
-Agent bawaan repo ini membaca Data Out KrakenSDR dan publish `health`, `state` dan `config_reported` ke topik lama `sdr/v1/uav-01`, lalu menjawab patch di topik itu. Kontrol tidak lagi memakainya: Kontrol mengirim perintah ke RDF Node (`sdr/v2/uav-01`) yang dipasang di RDF-SDR dari repository RDF Node. Detail lengkap ada di `packaging/agent/README.md`.
-
-```sh
-tar -xzf sdr-doa-rdf-sdr-agent-2.0.0.tar.gz
-cd sdr-doa-rdf-sdr-agent-2.0.0
-sudo sh install.sh --dry-run --mqtt-host 127.0.0.1    # lihat dulu apa yang akan dilakukan
-sudo sh install.sh --mqtt-host 127.0.0.1              # pasang dan start (broker di RDF-SDR sendiri)
-systemctl status sdr-doa-agent
-journalctl -u sdr-doa-agent -f
-```
-
-- Agent berjalan sebagai service `sdr-doa-agent` (mulai saat boot, restart bila gagal) dengan user biasa: pemilik `settings.json` KrakenSDR, `doasdr`, atau user sistem baru `sdr-doa-agent`. Installer menolak user root.
-- Pengaturan ada di `/etc/sdr-doa-agent/agent.env` (`root:<grup service>`, 0640). Setelah mengubahnya: `sudo systemctl restart sdr-doa-agent`. Variabel lain bisa diset dengan `--set NAMA=NILAI`, misalnya `--set DOA_RATE=0`.
-- Secara bawaan agent menjawab setiap patch dengan `REMOTE_CONTROL_DISABLED`. `sudo sh install.sh --enable-config` mengizinkan patch di topik lama `sdr/v1/uav-01/cmd/config/patch` mengubah `settings.json`; `--disable-config` mematikannya lagi. Aktifkan hanya di broker dan jaringan yang dipercaya.
-- Agent memakai MQTT lewat TCP (default port 1883), bukan WebSocket. Console dan agent harus memakai broker yang sama. Broker di luar loopback wajib TLS dan username (`MQTT_TLS=1` atau `MQTT_CAFILE`, `MQTT_USERNAME`, dan `SDR_DOA_MQTT_PASSWORD` di `agent.env`; lihat `packaging/agent/README.md`).
-- Docker dari image GHCR (arm64 atau armv7, tanpa build, update otomatis tanpa login GitHub), sebagai pengganti service di atas, bukan bersamaan. Selama service native masih terpasang, script menolak memasang agent; hapus dulu dengan `sudo sh /opt/sdr-doa-agent/uninstall.sh` (pengaturan di `/etc/sdr-doa-agent/agent.env` tetap, salin nilainya ke `agent.env` yang baru):
-
-  ```sh
-  curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/sdr-doa-docker
-  curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/SHA256SUMS
-  # tanpa curl: wget dengan URL yang sama
-  sha256sum -c --ignore-missing SHA256SUMS
-  sudo sh sdr-doa-docker install --agent --auto-update     # /opt/sdr-doa-agent, update harian 03:30
-  sudoedit /opt/sdr-doa-agent/agent.env                     # MQTT_HOST, MQTT_PORT, dan lain-lain
-  cd /opt/sdr-doa-agent && sudo docker compose up -d        # terapkan agent.env yang diubah
-  sudo docker compose logs -f agent
-  ```
-
-  `--enable-config` mengizinkan patch di topik lama mengubah `settings.json`: script me-mount `/home/doasdr/doasdr/_share` (`--share-dir`) dan menjalankan agent sebagai pemilik direktori itu; `--disable-config` mematikannya lagi. `sdr-doa-docker update --dir /opt/sdr-doa-agent` dan `rollback` bekerja seperti pada console; image agent tidak punya healthcheck, jadi image baru dianggap gagal bila container berhenti atau restart dalam 20 detik pertama.
-- Docker yang di-build sendiri (juga arm64/armv7): salin `packaging/agent/agent.env.example` ke `agent.env`, edit, lalu `docker compose up -d --build` di folder rilis agent (atau `docker compose -f docker-compose.agent.yml up -d --build` di repository). Butuh Compose v2.24+. Project dan volume-nya sama dengan yang ditulis `sdr-doa-docker install --agent`, jadi state di volume `agent-state` tetap saat pindah ke image GHCR; salin isi `agent.env` lama ke `/opt/sdr-doa-agent/agent.env`.
-- Upgrade service: jalankan installer rilis baru lagi; `agent.env` dan state tetap. Hapus dengan `sudo sh /opt/sdr-doa-agent/uninstall.sh` (`--purge` juga menghapus pengaturan dan state).
+RDF-SDR menjalankan RDF Node edge dari repository `sanadunt/rdf-indicator-raspberry`, yang publish topik `sdr/v2/uav-01` dan menjawab perintah Kontrol. Console hanya mengikuti kontraknya (`docs/MQTT_KONTRAK.md`). Agent RDF-SDR yang dulu dibawa repository ini (tarball `sdr-doa-rdf-sdr-agent`, image `ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent`, `sdr-doa-docker install --agent`) dihapus di 3.0.0 karena memakai topik lama dan tidak terpasang di Raspberry. Instalasi lama dihentikan dengan `cd /opt/sdr-doa-agent && sudo docker compose down` (Docker) atau uninstaller dari tarball agent 2.x, `sudo sh /opt/sdr-doa-agent/uninstall.sh` (native); lihat `CHANGELOG.md`.
 
 ## Link T900/PPP di groundstation
 
@@ -863,7 +811,7 @@ $env:PYTHONDONTWRITEBYTECODE = "1"
 .\.venv\Scripts\python.exe tools\test_stage3.py
 ```
 
-`unittest discover` tidak menjalankan semua test Python karena banyak file test memakai fungsi `test_*` dan runner standalone. Jalankan script yang relevan ketika mengubah modul tertentu. Tes Node Receiver membutuhkan submodule `vendor/BrowSDR`. `tools/test_sdr_doa_mqtt_stdlib.py` membutuhkan broker staging di `127.0.0.1:18884`.
+`unittest discover` tidak menjalankan semua test Python karena banyak file test memakai fungsi `test_*` dan runner standalone. Jalankan script yang relevan ketika mengubah modul tertentu. Tes Node Receiver membutuhkan submodule `vendor/BrowSDR`. `tools/test_rdf_node_broker.py` membutuhkan broker staging di `127.0.0.1:18884` (`mosquitto -c tools/mqtt_stage4.conf`) dan dilewati tanpa broker.
 
 Suite static (`tools.test_ground_console_static`) melewati cek yang butuh build bila `frontend/dist/index.html` tidak ada. Bila `frontend/dist` ada dan submodule `vendor/BrowSDR` sudah diambil tetapi `frontend/dist/receiver` tidak ada, cek Receiver gagal (bukan dilewati) dan pesannya menyebut perintah build.
 
@@ -871,7 +819,7 @@ Suite static (`tools.test_ground_console_static`) melewati cek yang butuh build 
 
 ### Monitor MQTT ERROR: `paho-mqtt is not installed`
 
-Install `paho-mqtt==2.1.0` ke `.venv` yang sama dengan Python server, lalu restart console. Jangan mengandalkan Python system/Homebrew. `ModuleNotFoundError: No module named 'paho'` dari synthetic publisher atau tes MQTT punya penyebab yang sama.
+Install `paho-mqtt==2.1.0` ke `.venv` yang sama dengan Python server, lalu restart console. Jangan mengandalkan Python system/Homebrew. `ModuleNotFoundError: No module named 'paho'` dari tes MQTT punya penyebab yang sama.
 
 ### Console berhenti dengan `No module named 'zoneinfo'`
 
@@ -908,7 +856,7 @@ Tengah atau VFO diubah di halaman Receiver (mengetik Center atau VFO, menggeser 
 
 - Kirim nonaktif ("Kirim butuh state RDF-SDR lewat MQTT", "... revisi konfigurasi (state.cfg) RDF-SDR", "... telemetry/health yang segar dari RDF-SDR"), atau console menjawab `NODE_SESSION_UNAVAILABLE`, `CONFIG_REVISION_UNKNOWN`, `NODE_NOT_FRESH`: belum ada `state` RDF Node di broker yang sama, `state.cfg` masih kosong, atau `telemetry/health` lebih tua dari 8 detik. Periksa tampilan **RDF Node** di **Monitor Pesan**.
 - `TLS_REQUIRED_FOR_SETTINGS_REPORT` setelah **Baca settings**: koneksi RDF-SDR ke broker tidak memakai TLS, jadi RDF-SDR tidak mengirim `settings/reported`. Nilai diambil dari Data Out (cadangan) dan patch tetap bisa dikirim. Beri broker listener TLS untuk RDF-SDR; console tetap memakai listener biasa.
-- **Belum ada ACK** (sekitar 20 detik): RDF Node tidak menjawab di `sdr/v2/uav-01/ack/config`. RDF Node mati atau memakai broker lain. Agent bawaan repo ini tidak menjawab Kontrol.
+- **Belum ada ACK** (sekitar 20 detik): RDF Node tidak menjawab di `sdr/v2/uav-01/ack/config`. RDF Node mati atau memakai broker lain.
 - `Ditolak · REJECTED · CONFIG_REVISION_CONFLICT` atau `Ditolak · REJECTED · BUSY`: settings berubah oleh pengirim lain, atau RDF-SDR masih mengerjakan perintah lain, misalnya dari `rdf-ground.service`. Baca ulang nilai, tinjau, kirim lagi; pakai satu pengendali sekaligus.
 - `Ditolak · REJECTED · EXPIRED_OR_INVALID_DEADLINE`: jam host console lebih dari 1 detik di depan jam RDF-SDR, atau perintah tiba setelah 15 detik. Periksa NTP di kedua host.
 - `ACK · FAILED · CONFIG_TARGET_NOT_READY`: RDF Node belum punya target settings yang disetujui (`sudo rdf-node controls approve --settings` di RDF-SDR).
@@ -921,7 +869,7 @@ Package GHCR masih private (lihat [Rilis di GitHub](#rilis-di-github)), atau Doc
 
 ### Update dibatalkan dan versi lama jalan lagi
 
-Docker: `update.log` di direktori install (`/opt/sdr-doa-ground-console` atau `/opt/sdr-doa-agent`) menyebut sebabnya pada baris `FAILED`. Image yang gagal healthcheck dicatat di `.bad-images`, dan update otomatis melewatinya sampai ada image lain; `sudo sdr-doa-docker update` di terminal menawarkan untuk mencobanya lagi. Gagal karena hal lain (error compose, waktu habis) tidak dicatat dan dicoba lagi pada jadwal berikutnya. Baris `deferred:` berarti Receiver sedang merekam atau mengarsipkan pindai; `skipped: ... points to older` berarti tag kanal menunjuk versi yang lebih lama dari yang jalan. Native: `sdr-doa-console auto-update status` menampilkan hasil terakhir, `journalctl --user -u sdr-doa-console-update` lognya; rilis yang gagal dilewati sampai ada rilis yang lebih baru, dan `sdr-doa-console update --to <versi>` mencobanya lagi.
+Docker: `update.log` di direktori install (`/opt/sdr-doa-ground-console`) menyebut sebabnya pada baris `FAILED`. Image yang gagal healthcheck dicatat di `.bad-images`, dan update otomatis melewatinya sampai ada image lain; `sudo sdr-doa-docker update` di terminal menawarkan untuk mencobanya lagi. Gagal karena hal lain (error compose, waktu habis) tidak dicatat dan dicoba lagi pada jadwal berikutnya. Baris `deferred:` berarti Receiver sedang merekam atau mengarsipkan pindai; `skipped: ... points to older` berarti tag kanal menunjuk versi yang lebih lama dari yang jalan. Native: `sdr-doa-console auto-update status` menampilkan hasil terakhir, `journalctl --user -u sdr-doa-console-update` lognya; rilis yang gagal dilewati sampai ada rilis yang lebih baru, dan `sdr-doa-console update --to <versi>` mencobanya lagi.
 
 ### Halaman Receiver menampilkan "Receiver is not built"
 
