@@ -72,7 +72,7 @@ Tujuan UI:
 
 - Telemetry nyata melalui PPP/T900 belum dianggap lulus hanya karena adapter staging tersedia.
 - Publication gate live terakhir dilaporkan `DEGRADED/BLOCKED` pada dokumentasi baseline karena `daq_ok=false`, sinkronisasi IQ/sample-delay gagal, atau output DoA stale.
-- Kontrol mengirim patch konfigurasi nyata dan membaca ACK. Tes otomatisnya memakai fake monitor, client MQTT palsu, dan envelope yang dinilai kode edge RDF Node sendiri (`tools/fixtures/rdf-node/commands.json`); repo ini tidak membuktikan alur end-to-end dengan Raspberry nyata. `APPLIED` hanya membuktikan RDF Node menulis `settings.json` dan melihat bukti runtime; `PERSISTED_UNVERIFIED` dan `OUTCOME_UNKNOWN` bukan berhasil dan bukan gagal. ACK/read-back production dan deployment PPP/T900 belum dianggap lulus.
+- Kontrol mengirim patch konfigurasi nyata dan membaca ACK. Tes otomatisnya memakai fake monitor, client MQTT palsu, dan envelope yang dinilai kode edge RDF Node sendiri (`tools/fixtures/rdf-node/commands.<commit>.json`); repo ini tidak membuktikan alur end-to-end dengan Raspberry nyata. `APPLIED` hanya membuktikan RDF Node menulis `settings.json` dan melihat bukti runtime; `PERSISTED_UNVERIFIED` dan `OUTCOME_UNKNOWN` bukan berhasil dan bukan gagal. ACK/read-back production dan deployment PPP/T900 belum dianggap lulus.
 - Dokumen arsitektur MQTT menjelaskan desain target; cocokkan selalu dengan implementasi `tools/` dan test.
 - Tahap PPP/T900 synthetic end-to-end tertentu masih tercatat blocked/tergantung interface dan route environment.
 
@@ -440,7 +440,7 @@ Console tetap berjalan tanpa `paho-mqtt`, tetapi monitor MQTT tidak bisa tersamb
 
 - **Belum ada ACK** sekitar 20 detik setelah kirim: RDF Node di Raspberry tidak berjalan atau memakai broker lain. Agent RDF-SDR dari console 2.x memakai topik lama dan tidak menjawab Kontrol; hapus bila masih terpasang (runbook 10.3).
 - Kirim nonaktif, `NODE_SESSION_UNAVAILABLE`, `CONFIG_REVISION_UNKNOWN` atau `NODE_NOT_FRESH`: belum ada `state` RDF Node sejak monitor tersambung, `state.cfg` kosong, atau `telemetry/health` lebih tua dari 8 detik.
-- `TLS_REQUIRED_FOR_SETTINGS_REPORT` setelah **Baca settings**: RDF-SDR tersambung ke broker tanpa TLS, jadi tidak mengirim `settings/reported`; nilai diambil dari Data Out (cadangan).
+- `TLS_REQUIRED_FOR_SETTINGS_REPORT` setelah **Baca settings**: RDF-SDR masih RDF Node `8691ad0` dan tersambung ke broker tanpa TLS (atau permintaan lewat broker cadangan tanpa TLS), jadi tidak mengirim `settings/reported`; nilai diambil dari Data Out (cadangan). RDF Node `35984d8` dan sesudahnya menjawab lewat broker utama tanpa TLS.
 - `Ditolak · REJECTED · CONFIG_REVISION_CONFLICT` atau `BUSY`: pengirim lain (misalnya `rdf-ground.service`) mengubah settings atau sedang mengirim perintah. Baca ulang nilai lalu tinjau; satu pengendali sekaligus.
 - **Publish gagal** (PUBACK 128 ke atas): ACL broker tidak mengizinkan console publish ke `sdr/v2/uav-01/cmd/config/patch` atau `cmd/config/get`.
 - Monitor console tidak memakai TLS atau password, jadi broker yang mewajibkannya untuk semua klien tidak bisa dipakai console; pakai `tools/mqtt_stage4.conf` untuk uji lokal.
