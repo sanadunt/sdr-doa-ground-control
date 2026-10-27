@@ -165,7 +165,7 @@ describe('System Health ADC overdrive detail', () => {
 describe('System Health MQTT card', () => {
   it('names the admin config patch as the only publish path', () => {
     const monitor = { enabled: true, read_only: true, publish_enabled: false, connection: 'connected' } as unknown as MqttSnapshot;
-    const patch = (enabled: boolean) => ({ refreshIntervalsS: null, adminEnabled: true, adminDefaultPassword: false, configPatch: { enabled, requiresAdmin: true, topic: null, qos: 1, ttlMs: null, ranges: {} } });
+    const patch = (enabled: boolean) => ({ refreshIntervalsS: null, adminEnabled: true, adminDefaultPassword: false, configPatch: { enabled, requiresAdmin: true, topic: null, getTopic: null, ackTopic: null, settingsTopic: null, qos: 1, ttlMs: null, ranges: {}, gainTableDb: [] } });
     for (const lang of ['en', 'id'] as const) {
       const available = text(render(<SystemHealthPage snapshot={REFUSED} mqtt={monitor} localSnapshotFresh={false} capabilities={patch(true)} />, lang));
       expect(available).toContain(translate(lang, 'health.sub.publishAdminOnly'));

@@ -18,7 +18,6 @@ import {
   isLoopbackHost,
   mergeSavedConfigIntoDraft,
   normalizeConnectionDraft,
-  parseBaseRevision,
   parseDryRunChanges,
   patchKeyUnit,
   refreshIntervalOptions,
@@ -39,7 +38,7 @@ import { Card, FileButton, FormField, KeyValueGrid, Page, PageGrid, PageHeader, 
 import type { KeyValueItem, PageTone } from '../components/page';
 // Styled by pages/configuration.css, which main.tsx loads with the entry (no CSS in lazy chunks).
 
-// The allowlisted fields, shared with Kontrol (SI units on the wire, ranges, steps).
+// The edge's safe fields, shared with Kontrol (SI units on the wire, ranges, steps).
 const DRY_RUN_FIELDS = CONFIG_PATCH_FIELDS;
 /** config-reported carries the monitor connection and the values the dry-run placeholders show. */
 const REPORTED_POLL_MS = 3_000;
@@ -339,7 +338,6 @@ export function ConfigurationPage({
   const [logoFileName, setLogoFileName] = useState<string | null>(null);
   const [brandResult, setBrandResult] = useState<Result | null>(null);
   const [dryRunValues, setDryRunValues] = useState<Record<string, string>>({});
-  const [baseRevision, setBaseRevision] = useState('');
   const [dryRunErrors, setDryRunErrors] = useState<Record<string, Notice>>({});
   const [dryRunResult, setDryRunResult] = useState<Result | null>(null);
   const [dryRunData, setDryRunData] = useState<Record<string, unknown> | null>(null);
@@ -816,19 +814,17 @@ export function ConfigurationPage({
     setDryRunData(null);
     setDryRunResult(null);
     const changes = parseDryRunChanges(dryRunValues, DRY_RUN_FIELDS);
-    const revision = parseBaseRevision(baseRevision);
     const errors: Record<string, Notice> = {};
     if (!changes.ok && changes.error === 'config.dryRunNotNumber' && changes.vars?.field) errors[String(changes.vars.field)] = { key: changes.error, vars: changes.vars };
-    if (!revision.ok) errors.base_config_rev = { key: revision.error };
     setDryRunErrors(errors);
     if (!changes.ok && !Object.keys(errors).length) {
       setDryRunResult({ code: 'ERROR', tone: 'bad', message: { key: changes.error, vars: changes.vars } });
       return;
     }
-    if (!changes.ok || !revision.ok) return;
+    if (!changes.ok) return;
     setBusy('dry-run');
     try {
-      const result = await dryRunConfigPatch({ base_config_rev: revision.value, changes: changes.value });
+      const result = await dryRunConfigPatch({ changes: changes.value });
       if (!mountedRef.current) return;
       if (result.ok === true) {
         setDryRunData(result);
@@ -848,7 +844,9 @@ export function ConfigurationPage({
   const transportLabel = t('config.mqttTransport');
   const axisLabel = t('config.manualAxis');
   const resultItems: Array<KeyValueItem | null> = dryRunSummary ? [
-    dryRunSummary.baseConfigRev !== null ? { id: 'rev', label: 'base_config_rev', value: dryRunSummary.baseConfigRev } : null,
+    dryRunSummary.topic ? { id: 'topic', label: 'topic', value: dryRunSummary.topic } : null,
+    { id: 'sid', label: 'sid', value: dryRunSummary.sid ?? '—' },
+    { id: 'rev', label: 'base_rev', value: dryRunSummary.baseRev ?? '—' },
     ...dryRunSummary.changes.map((change): KeyValueItem => ({ id: change.key, label: change.key, value: `${numberFormat.format(change.value)} ${patchKeyUnit(change.key)}`.trim() })),
     dryRunSummary.ttlMs !== null ? { id: 'ttl', label: 'ttl', value: t('common.durationS', { value: numberFormat.format(dryRunSummary.ttlMs / 1000) }) } : null,
     dryRunSummary.transport ? { id: 'transport', label: 'transport', value: dryRunSummary.transport } : null,
@@ -1105,23 +1103,6 @@ export function ConfigurationPage({
                   </FormField>
                 );
               })}
-              <FormField label={t('config.baseRevision')} error={fieldError(dryRunErrors.base_config_rev)}>
-                <input
-                  type="number"
-                  inputMode="numeric"
-                  value={baseRevision}
-                  min={0}
-                  step={1}
-                  required
-                  aria-required="true"
-                  placeholder={reported?.baseConfigRev !== null && reported?.baseConfigRev !== undefined ? String(reported.baseConfigRev) : 'config_rev'}
-                  onChange={(event) => {
-                    setBaseRevision(event.target.value);
-                    setDryRunErrors((errors) => without(errors, 'base_config_rev'));
-                    setDryRunResult(null);
-                  }}
-                />
-              </FormField>
             </div>
             <div className="cfg-actions">
               <button className="ov-button is-primary" type="submit" disabled={busy !== null} aria-busy={busy === 'dry-run' || undefined}>{t('config.validate')}</button>

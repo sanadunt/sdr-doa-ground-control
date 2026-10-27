@@ -234,9 +234,10 @@ describe('Spectrum dock states', () => {
 
   it('enables Kirim ke RDF-SDR only for frequencies RDF-SDR accepts', () => {
     const inRange = dock(bridgeWith({ status: status() }));
-    expect(inRange).toContain('<button class="ov-button ov-spec-send ov-spec-wide" type="button" title="RX 433.920 MHz · VFO 433.925 MHz">');
+    // The listen VFO becomes both the centre and VFO0 (the RDF-SDR takes a centre change only with VFO0 equal).
+    expect(inRange).toContain('<button class="ov-button ov-spec-send ov-spec-wide" type="button" title="Tengah dan VFO 433.925 MHz">');
     const outOfRange = dock(bridgeWith({ status: status({ centerHz: 2_400_000_000, vfo: null }) }));
-    expect(outOfRange).toContain('<button class="ov-button ov-spec-send ov-spec-wide" type="button" disabled="" title="RDF-SDR menerima 24 s/d 1800 MHz">');
+    expect(outOfRange).toContain('<button class="ov-button ov-spec-send ov-spec-wide" type="button" disabled="" title="RDF-SDR menerima 24 s/d 1766 MHz">');
   });
 
   it('holds when there is no fresh node frequency to follow', () => {
@@ -263,7 +264,7 @@ describe('Spectrum dock states', () => {
     }), { snapshot: null });
     expect(markup).toContain('Tengah 145.500 MHz · span 2.0 MHz');
     expect(markup).toContain('aria-valuetext="145.510 MHz"');
-    expect(markup).toContain('title="RX 145.500 MHz · VFO 145.510 MHz"');
+    expect(markup).toContain('title="Tengah dan VFO 145.510 MHz"');
   });
 
   it('shows the Receiver\'s saved centre, read only, before the frame is mounted', () => {
@@ -468,7 +469,7 @@ function settings(overrides: Partial<SpectrumSettingsProps> = {}, lang: Lang = '
     mode: 'am',
     onModeChange: () => undefined,
     sendable: true,
-    sendTitle: 'RX 433.920 MHz · VFO 433.925 MHz',
+    sendTitle: 'Tengah dan VFO 433.925 MHz',
     onSend: () => undefined,
     db: { auto: true, minDb: -70, maxDb: 0 },
     dbEditable: true,
@@ -503,7 +504,7 @@ describe('Spectrum dock Atur column', () => {
     expect(narrow).toHaveLength(2);
     expect(narrow[0]).toMatch(/<label class="ov-spec-follow"><input type="checkbox" checked=""\/><span>Ikuti frekuensi node<\/span><\/label><select class="ov-listen-mode" aria-label="Modulasi"/);
     expect(narrow[0]).toMatch(/<option value="am" selected="">AM<\/option>/);
-    expect(narrow[1]).toMatch(/<button class="ov-button ov-spec-send is-wide" type="button" title="RX 433.920 MHz · VFO 433.925 MHz">/);
+    expect(narrow[1]).toMatch(/<button class="ov-button ov-spec-send is-wide" type="button" title="Tengah dan VFO 433.925 MHz">/);
     expect(settings({ sendable: false, sendTitle: 'x' })).toMatch(/<button class="ov-button ov-spec-send is-wide" type="button" disabled=""/);
   });
 

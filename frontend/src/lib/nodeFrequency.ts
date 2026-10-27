@@ -2,7 +2,7 @@
  * The SDR-DoA node's tuning, as the Overview spectrum dock follows it
  * ("Ikuti frekuensi node"). Read only from a fresh Data Out snapshot: the
  * centre is settings.json `center_freq` (MHz), the VFO is the CSV view's
- * `frequency_hz_normalized`, falling back to the centre. MQTT config_reported
+ * `frequency_hz_normalized`, falling back to the centre. MQTT settings/reported
  * is not used here; Kontrol reads that.
  */
 import type { TelemetrySnapshot } from '../types';

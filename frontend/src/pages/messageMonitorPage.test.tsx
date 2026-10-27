@@ -46,7 +46,7 @@ const SNAPSHOT = normalizeMqttSnapshot({
   },
 }, now);
 
-const CAPABILITIES_NO_PATCH = { refreshIntervalsS: null, adminEnabled: true, adminDefaultPassword: false, configPatch: { enabled: false, requiresAdmin: true, topic: null, qos: null, ttlMs: null, ranges: {} } };
+const CAPABILITIES_NO_PATCH = { refreshIntervalsS: null, adminEnabled: true, adminDefaultPassword: false, configPatch: { enabled: false, requiresAdmin: true, topic: null, getTopic: null, ackTopic: null, settingsTopic: null, qos: null, ttlMs: null, ranges: {}, gainTableDb: [] } };
 
 describe('MessageMonitorPage', () => {
   const markup = render(<MessageMonitorPage mqtt={SNAPSHOT} config={CONFIG} onMqttChanged={() => undefined} />);

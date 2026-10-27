@@ -5,7 +5,7 @@ The frontend keeps a hard-coded list of the error codes the backend can return
 an EN and ID message. The codes come from ground_console.py and, for the field
 rules, from rdf_node_commands.py. These tests fail when the backend starts
 returning a code the frontend does not know, or when the two disagree on the
-allowlisted fields.
+edge's safe fields, their ranges or the gain table.
 """
 
 from __future__ import annotations
@@ -18,11 +18,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-import sdr_doa_mqtt  # noqa: E402
+import rdf_node_commands  # noqa: E402
 
 GROUND_CONSOLE = (ROOT / "tools" / "ground_console.py").read_text(encoding="utf-8")
 RDF_NODE_COMMANDS = (ROOT / "tools" / "rdf_node_commands.py").read_text(encoding="utf-8")
 CONFIG_PATCH_TS = (ROOT / "frontend" / "src" / "lib" / "configPatch.ts").read_text(encoding="utf-8")
+CONTROL_DRAFT_TS = (ROOT / "frontend" / "src" / "lib" / "controlDraft.ts").read_text(encoding="utf-8")
 I18N_TS = (ROOT / "frontend" / "src" / "lib" / "i18n.ts").read_text(encoding="utf-8")
 
 # Login codes that the shared admin form maps through adminErrorKey instead of control.error.*.
@@ -65,9 +66,38 @@ class ConfigPatchContractTests(unittest.TestCase):
             key = f"'control.error.{code}'"
             self.assertEqual(I18N_TS.count(key), 2, f"{key} should appear once in EN and once in ID")
 
-    def test_field_allowlist_matches_contract(self) -> None:
-        keys = set(re.findall(r"'(center_frequency_hz|gain_db|vfo_frequency_hz|vfo_bandwidth_hz|vfo_squelch_db)'", CONFIG_PATCH_TS))
-        self.assertEqual(keys, set(sdr_doa_mqtt.CONFIG_RANGES))
+    def test_field_allowlist_matches_the_edge_fields(self) -> None:
+        match = re.search(r"CONFIG_PATCH_KEYS\s*=\s*\[(.*?)\]\s*as const", CONTROL_DRAFT_TS, re.S)
+        self.assertIsNotNone(match, "CONFIG_PATCH_KEYS not found in controlDraft.ts")
+        keys = tuple(re.findall(r"'([a-z0-9_]+)'", match.group(1)))
+        self.assertEqual(keys, rdf_node_commands.PATCH_FIELDS)
+        # The Kontrol fields name the same keys in the same order.
+        fields = tuple(re.findall(r"\{ key: '([a-z0-9_]+)'", CONFIG_PATCH_TS))
+        self.assertEqual(fields, rdf_node_commands.PATCH_FIELDS)
+
+    def test_field_ranges_and_integers_match_the_edge(self) -> None:
+        for key, (low, high) in rdf_node_commands.PATCH_RANGES.items():
+            row = re.search(r"\{ key: '" + key + r"'[^}]*\}", CONFIG_PATCH_TS)
+            self.assertIsNotNone(row, key)
+            text = row.group(0).replace("_", "")
+            self.assertRegex(text, rf"min: {int(low)}\b", key)
+            self.assertRegex(text, rf"max: {int(high)}\b", key)
+            whole = key in rdf_node_commands.INTEGER_FIELDS
+            self.assertIn(f"integer: {'true' if whole else 'false'}", text, key)
+
+    def test_gain_table_matches_the_edge(self) -> None:
+        match = re.search(r"GAIN_TABLE_DB: readonly number\[\] = \[(.*?)\];", CONFIG_PATCH_TS, re.S)
+        self.assertIsNotNone(match, "GAIN_TABLE_DB not found in configPatch.ts")
+        table = tuple(float(entry) for entry in re.findall(r"-?\d+(?:\.\d+)?", match.group(1)))
+        self.assertEqual(table, rdf_node_commands.GAIN_TABLE_DB)
+
+    def test_every_edge_error_message_exists_in_both_languages(self) -> None:
+        match = re.search(r"EDGE_ERROR_KEYS[^=]*=\s*\{(.*?)\};", CONFIG_PATCH_TS, re.S)
+        self.assertIsNotNone(match, "EDGE_ERROR_KEYS not found in configPatch.ts")
+        keys = set(re.findall(r"'(control\.(?:edge|error)\.[A-Z0-9_]+)'", match.group(1)))
+        self.assertGreaterEqual(len(keys), 10)
+        for key in keys:
+            self.assertEqual(I18N_TS.count(f"'{key}'"), 2, f"{key} should appear once in EN and once in ID")
 
 
 if __name__ == "__main__":
