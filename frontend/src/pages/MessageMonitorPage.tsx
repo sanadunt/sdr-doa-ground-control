@@ -246,6 +246,7 @@ function nodeColumns(t: Translate): Array<DataColumn<RdfNodeRow>> {
       render: (row) => {
         const parts: ReactNode[] = row.reasons.map((reason) => <Tag key={`reason-${reason}`}>{reason}</Tag>);
         if (row.summary.length) parts.push(<span key="summary" className="ms-summary">{summaryText(row.summary)}</span>);
+        if (row.withheld) parts.push(<span key="withheld" className="ms-sub">{t('monitor.v2Gated')}</span>);
         return parts.length ? <span className="ms-chips">{parts}</span> : EMPTY_CELL;
       },
     },

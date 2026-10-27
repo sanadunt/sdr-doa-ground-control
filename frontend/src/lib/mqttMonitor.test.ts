@@ -303,6 +303,48 @@ describe('RDF Node snapshot', () => {
     expect(health.summary).toContainEqual(['temp', '52.3']);
   });
 
+  it('shows a node part direction only while it is LIVE or UNVERIFIED', () => {
+    const live = rdfNodeRows(snapshot, READ_AT);
+    expect(live.find((row) => row.part === 'doa')).toMatchObject({ status: 'LIVE', withheld: false });
+    expect(live.find((row) => row.part === 'doa')!.summary).toContainEqual(['a', '160']);
+    expect(live.find((row) => row.part === 'angular')!.summary).toContainEqual(['peak_index', '200']);
+    expect(live.find((row) => row.part === 'angular_unverified')!.summary).toContainEqual(['raw_doa_deg', '200']);
+    const changed = apiSnapshot();
+    changed.node.doa.live = false;
+    changed.node.doa.reasons = ['SOURCE_STALE'];
+    changed.node.doa_unverified.stale = true;
+    const rows = rdfNodeRows(normalizeRdfNodeSnapshot(changed, READ_AT), READ_AT);
+    const doa = rows.find((row) => row.part === 'doa')!;
+    expect(doa).toMatchObject({ status: 'STALE', reasons: ['SOURCE_STALE'], withheld: true });
+    expect(doa.summary.map(([field]) => field)).not.toContain('a');
+    expect(doa.summary).toContainEqual(['f', '433920000']);
+    const raw = rows.find((row) => row.part === 'doa_unverified')!;
+    expect(raw).toMatchObject({ status: 'STALE', withheld: true });
+    expect(raw.summary.map(([field]) => field)).not.toContain('a');
+    // A read that is no longer renewed holds nothing back as LIVE or UNVERIFIED either.
+    for (const row of rdfNodeRows(snapshot, READ_AT + RDF_LOCAL_HOLD_MS + 1)) {
+      const fields = row.summary.map(([field]) => field);
+      if (['doa', 'doa_unverified', 'diagnostic_doa', 'angular', 'angular_unverified'].includes(row.part)) {
+        expect(row).toMatchObject({ status: 'STALE', withheld: true });
+        expect(fields.filter((field) => ['a', 'raw_doa_deg', 'peak_index'].includes(field))).toEqual([]);
+      } else {
+        expect(row.withheld).toBe(false);
+      }
+    }
+  });
+
+  it('keeps the edge ACK errors longer than 32 characters', () => {
+    const changed = apiSnapshot();
+    changed.node.acks = [
+      { topic: 'ack/config', status: 'FAILED', final: true, result: { error: 'CENTER_CHANGE_REQUIRES_VFO0_TARGET' } },
+      { topic: 'ack/operation', status: 'REJECTED', final: true, result: { error: 'DIAGNOSTIC_ANGULAR_SEQUENCE_EXHAUSTED_RESTART_AGENT' } },
+      { topic: 'ack/operation', status: 'FAILED', final: true, result: { error: 'X'.repeat(65) } },
+      { topic: 'ack/operation', status: 'FAILED', final: true, result: { error: 'not a code' } },
+    ];
+    expect(normalizeRdfNodeSnapshot(changed, READ_AT).node.acks.map((ack) => ack.error))
+      .toEqual(['CENTER_CHANGE_REQUIRES_VFO0_TARGET', 'DIAGNOSTIC_ANGULAR_SEQUENCE_EXHAUSTED_RESTART_AGENT', null, null]);
+  });
+
   it('names the field of an INVALID message', () => {
     const changed = apiSnapshot();
     changed.topics.capabilities = { status: 'INVALID', received_at_ms: NOW, qos: 1, retained: true, error: 'INVALID_FIELD', field: 'maintenance', payload: null };

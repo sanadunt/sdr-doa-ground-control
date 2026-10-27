@@ -349,7 +349,8 @@ export const RDF_NODE_V2_SUFFIXES = [
 ] as const;
 
 const RDF_STATUSES = new Set(['LIVE', 'UNVERIFIED', 'FRESH', 'CONTEXT', 'STALE', 'INCONSISTENT', 'IGNORED', 'INVALID', 'UNAVAILABLE']);
-const RDF_ERROR = /^[A-Z][A-Z0-9_]{0,31}$/u;
+/** As wide as the server's codes: the edge's own ACK errors run past 32 characters (CENTER_CHANGE_REQUIRES_VFO0_TARGET). */
+const RDF_ERROR = /^[A-Z][A-Z0-9_]{0,63}$/u;
 const RDF_FIELD = /^[a-z][a-z0-9_]{0,31}$/u;
 const RDF_REASON = /^[A-Z0-9_:-]{1,64}$/u;
 const RDF_ACK_STATUS = /^[A-Z][A-Z_]{0,31}$/u;
@@ -610,8 +611,15 @@ export interface RdfNodeRow {
   status: string;
   ageMs: number | null;
   reasons: string[];
+  /** Short field=value pairs; without the direction values of a DoA or angular part unless it is LIVE or UNVERIFIED. */
   summary: Array<[string, string]>;
+  /** Direction values exist but are not shown because the part is neither LIVE nor UNVERIFIED. */
+  withheld: boolean;
 }
+
+/** Node view parts that carry a direction, and the fields that hold it. */
+const RDF_DIRECTION_PARTS = new Set<RdfNodePartName>(['doa', 'doa_unverified', 'diagnostic_doa', 'angular', 'angular_unverified']);
+const RDF_DIRECTION_FIELDS = new Set(['a', 'raw_doa_deg', 'peak_index']);
 
 /** Display rows for the node view: only parts the server holds a value for. */
 export function rdfNodeRows(snapshot: RdfNodeSnapshot | null | undefined, nowLocalMs: number): RdfNodeRow[] {
@@ -622,12 +630,16 @@ export function rdfNodeRows(snapshot: RdfNodeSnapshot | null | undefined, nowLoc
     const value = snapshot.node.parts[part];
     if (!value) continue;
     const ageMs = value.received_at_ms !== null && snapshot.now_ms !== null ? Math.max(0, snapshot.now_ms - value.received_at_ms) + elapsed : null;
+    const status = heldStatus(value.status, elapsed);
+    const gated = RDF_DIRECTION_PARTS.has(part) && status !== 'LIVE' && status !== 'UNVERIFIED';
+    const fields = gated ? RDF_PART_FIELDS[part].filter((field) => !RDF_DIRECTION_FIELDS.has(field)) : RDF_PART_FIELDS[part];
     rows.push({
       part,
-      status: heldStatus(value.status, elapsed),
+      status,
       ageMs,
       reasons: value.reasons,
-      summary: rdfSummary(value.fields, RDF_PART_FIELDS[part]),
+      summary: rdfSummary(value.fields, fields),
+      withheld: gated && RDF_PART_FIELDS[part].some((field) => RDF_DIRECTION_FIELDS.has(field) && summaryValue(value.fields[field]) !== null),
     });
   }
   return rows;

@@ -204,6 +204,20 @@ describe('RdfNodeView', () => {
     expect(id).toContain('Sesi CONTEXT');
   });
 
+  it('hides the direction of a stale node part and keeps a long edge ACK error', () => {
+    type Fs = { readFileSync(file: URL, encoding: 'utf8'): string };
+    const { process } = globalThis as unknown as { process: { getBuiltinModule(id: 'node:fs'): Fs } };
+    const raw = process.getBuiltinModule('node:fs').readFileSync(new URL('../../../tools/fixtures/rdf-node/api-snapshot.json', import.meta.url), 'utf8');
+    const served = JSON.parse(raw) as Record<string, any>;
+    served.node.doa.live = false;
+    served.node.doa.reasons = ['SOURCE_STALE'];
+    served.node.acks = [{ topic: 'ack/config', status: 'FAILED', final: true, received_at_ms: served.now_ms, result: { error: 'CENTER_CHANGE_REQUIRES_VFO0_TARGET' } }];
+    const body = text(render(<RdfNodeView rdfNode={normalizeRdfNodeSnapshot(served, now)} rdfError={null} nowMs={now} />));
+    expect(body).toMatch(new RegExp(`DoA STALE \\d+ ms SOURCE_STALE f 433920000 · c [\\d.]+ · p [\\d.-]+ · rev 1 ${translate('en', 'monitor.v2Gated')}`));
+    expect(body).not.toMatch(/DoA STALE[^|]*\ba 160\b/);
+    expect(body).toMatch(/ack\/config FAILED FINAL \d+ ms CENTER_CHANGE_REQUIRES_VFO0_TARGET/);
+  });
+
   it('reports a failed read', () => {
     const body = text(render(<RdfNodeView rdfNode={null} rdfError={{ text: 'boom' }} nowMs={now} />, 'id'));
     expect(body).toContain(translate('id', 'monitor.v2ReadFailed', { error: 'boom' }));
