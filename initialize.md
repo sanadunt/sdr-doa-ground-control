@@ -20,20 +20,20 @@ Tujuan UI:
 - menguji renderer dengan data simulasi tanpa perangkat SDR;
 - mencoba perubahan konfigurasi secara lokal/dry-run;
 - melihat spektrum RadioSpectrum (HackRF) lewat Receiver, mendengar VFO, dan menala dari dasbor;
-- mengirim patch konfigurasi ke RDF-SDR (node Raspberry) hanya lewat Kontrol, dengan login admin, tinjauan, dan konfirmasi eksplisit; selain itu tidak ada command remote.
+- mengirim patch konfigurasi ke RDF-SDR (node Raspberry) hanya lewat Kontrol, dengan login admin, tinjauan, dan konfirmasi eksplisit, dan meminta settings RDF-SDR (`config.get`) dari Kontrol yang sama; selain itu tidak ada command remote.
 
 ### Batas keamanan dan interpretasi
 
 - Ground Console adalah **local/loopback console**.
 - Data Out dibaca melalui HTTP `GET` bounded; jangan mengubah read path menjadi remote mutation.
-- MQTT monitor hanya berlangganan dan tidak pernah publish sendiri. Satu-satunya publish console adalah patch konfigurasi dari Kontrol (`POST /api/mqtt/config-patch` ke `sdr/v1/uav-01/cmd/config/patch`). Aturannya jangan dilonggarkan:
+- MQTT monitor hanya berlangganan dan tidak pernah publish sendiri. Satu-satunya publish console adalah perintah RDF Node dari Kontrol dalam format edge (`docs/MQTT_KONTRAK.md` bagian 8): `config.patch` (`POST /api/mqtt/config-patch` ke `sdr/v2/uav-01/cmd/config/patch`) dan `config.get` (`POST /api/mqtt/config-get` ke `sdr/v2/uav-01/cmd/config/get`). Aturannya jangan dilonggarkan:
   - server hanya bind ke loopback, dan request wajib membawa header `Origin` same-origin loopback dengan port yang sama;
-  - wajib sesi admin, dan `confirm: true` hanya dikirim setelah langkah tinjauan di UI;
-  - allowlist field dan rentang `CONFIG_RANGES` diperiksa di server, dan `base_config_rev` yang ditinjau harus sama dengan revisi di server;
-  - QoS 1, tidak retained, kedaluwarsa 60 detik; hanya satu perintah yang boleh menunggu hasil; publish hanya saat monitor terhubung;
+  - wajib sesi admin, dan untuk patch `confirm: true` hanya dikirim setelah langkah tinjauan di UI;
+  - envelope dibuat server (`tools/rdf_node_commands.py`), field dan aturan edge diperiksa di server, patch butuh health RDF-SDR yang segar, dan `base_rev` yang ditinjau harus sama dengan `state.cfg` RDF-SDR;
+  - QoS 1, tidak retained, kedaluwarsa 15 detik; hanya satu patch yang boleh menunggu hasil; tidak ada kirim ulang otomatis; publish hanya saat monitor terhubung;
   - tidak ada MQTT di browser dan tidak ada credential MQTT di console.
 
-  Agent di Raspberry yang memutuskan menerapkan patch, lalu menjawab di `ack/config`. Console sendiri tidak pernah memublikasikan bearing DoA.
+  RDF Node di Raspberry yang memutuskan menerapkan patch, lalu menjawab di `ack/config`. Console sendiri tidak pernah memublikasikan bearing DoA.
 - Form Konfigurasi tetap local configuration atau dry-run. Jangan menambah jalur penulisan jarak jauh lain.
 - Raw secret, token, credential, raw settings sensitif, raw IQ, dan raw log tidak boleh diteruskan ke browser/MQTT.
 - Publication gate tetap eksplisit. Health/observability bukan berarti DoA siap dipublikasikan.
@@ -62,7 +62,7 @@ Tujuan UI:
 - Console membaca Data Out satu kali per interval refresh untuk semua penampil (`tools/data_out_reader.py`) dan memakai ulang `settings.json` paling lama 30 detik; umur data di browser dihitung sejak node dibaca.
 - Freshness expiry di renderer browser; snapshot stale tidak boleh terus ditampilkan sebagai data aktif. Refresh otomatis default 2 detik (pilihan 1, 2, 5, 10, 30 detik atau manual).
 - Receiver embedded (BrowSDR dari submodule `vendor/BrowSDR`, dengan overlay di `tools/browsdr_receiver_overlay/`) untuk spektrum, scan, rekaman audio, dan Records yang disimpan lokal. Panel Spektrum di Dashboard mengendalikan frame Receiver yang tersembunyi lewat bridge `postMessage` (Mulai/Berhenti, Dengar dengan modulasi, klik untuk menala, Ikuti frekuensi node, Skala dB RX, sample rate, LNA, VGA, +14 dB, mode RX | Spektrum untuk pindai lebar, dan Penanda).
-- Kontrol: patch konfigurasi MQTT yang dibatasi admin, dengan pelacakan ACK di server (`tools/config_command_tracker.py`).
+- Kontrol: perintah RDF Node yang dibatasi admin (`config.patch`, `config.get`), dengan pelacakan ACK dan `settings/reported` di server (`tools/config_command_tracker.py`).
 - Branding lokal dan konfigurasi console lokal.
 - Pengaturan tersimpan di server console: koneksi/MQTT/interval di `console.json`, branding, preferensi tampilan browser di `preferences.json` (`GET`/`PUT /api/preferences`, `tools/preferences_store.py`, `frontend/src/lib/preferenceStore.ts`), rekaman Receiver, dan `.env`. Start pertama membuat `console.json` dari `SDR_DOA_SEED_*`. `GET /api/health` untuk healthcheck; versi dari file `VERSION`.
 - Paket Linux: image Docker (`Dockerfile`, `Dockerfile.release`, `docker-compose*.yml`, network host), rilis tar (`tools/make_release.py`), installer console dengan systemd user service (`packaging/console/`), dan installer agent RDF-SDR dengan systemd service atau image ARM (`packaging/agent/`). Lihat QUICKSTART bagian Instalasi Linux.
@@ -71,7 +71,7 @@ Tujuan UI:
 
 - Telemetry nyata melalui PPP/T900 belum dianggap lulus hanya karena adapter staging tersedia.
 - Publication gate live terakhir dilaporkan `DEGRADED/BLOCKED` pada dokumentasi baseline karena `daq_ok=false`, sinkronisasi IQ/sample-delay gagal, atau output DoA stale.
-- Kontrol mengirim patch konfigurasi nyata dan membaca ACK. Tes otomatisnya memakai fake monitor dan client MQTT palsu; repo ini tidak membuktikan alur end-to-end dengan Raspberry nyata. Agent di Raspberry harus versi repo ini agar menjawab, dan `applied` hanya membuktikan `settings.json` sudah ditulis. ACK/read-back production dan deployment PPP/T900 belum dianggap lulus.
+- Kontrol mengirim patch konfigurasi nyata dan membaca ACK. Tes otomatisnya memakai fake monitor, client MQTT palsu, dan envelope yang dinilai kode edge RDF Node sendiri (`tools/fixtures/rdf-node/commands.json`); repo ini tidak membuktikan alur end-to-end dengan Raspberry nyata. `APPLIED` hanya membuktikan RDF Node menulis `settings.json` dan melihat bukti runtime; `PERSISTED_UNVERIFIED` dan `OUTCOME_UNKNOWN` bukan berhasil dan bukan gagal. ACK/read-back production dan deployment PPP/T900 belum dianggap lulus.
 - Dokumen arsitektur MQTT menjelaskan desain target; cocokkan selalu dengan implementasi `tools/` dan test.
 - Tahap PPP/T900 synthetic end-to-end tertentu masih tercatat blocked/tergantung interface dan route environment.
 
@@ -95,7 +95,7 @@ Ground Console Python (loopback)
         ├── /api/console-config
         ├── /api/branding, /api/admin/*
         ├── /api/mqtt, /api/mqtt/connect, /api/mqtt/rdf-node
-        ├── /api/mqtt/config-reported, /api/mqtt/config-patch[/<id>]   (Kontrol, admin)
+        ├── /api/mqtt/config-reported, /api/mqtt/config-patch[/<id>], /api/mqtt/config-get   (Kontrol, admin)
         ├── /api/dry-run/config-patch
         ├── /api/receiver/*   (SQLite + file audio di --data-dir)
         └── /receiver/        (build BrowSDR, static root terpisah)
@@ -115,9 +115,9 @@ React frontend
 Jalur Kontrol:
 
 ```text
-Kontrol (admin) → POST /api/mqtt/config-patch → monitor MQTT
-        → sdr/v1/uav-01/cmd/config/patch → agent di Raspberry
-        → ack/config → status perintah di server → Kontrol
+Kontrol (admin) → POST /api/mqtt/config-patch | config-get → envelope edge → monitor MQTT
+        → sdr/v2/uav-01/cmd/config/patch | cmd/config/get → RDF Node di Raspberry
+        → ack/config, settings/reported → status perintah di server → Kontrol
 ```
 
 Arsitektur target telemetry yang terdokumentasi:
@@ -140,7 +140,7 @@ MQTT adalah transport/contract, bukan pengganti DAQ, DSP, normalisasi, gate, ata
 | `tools/ground_console.py` | HTTP Ground Console, API lokal, static frontend serving, CSP, config/branding/admin lokal, route patch konfigurasi Kontrol |
 | `tools/config_command_tracker.py` | Status patch konfigurasi yang sudah di-publish (PUBACK, echo broker, ACK agent) |
 | `tools/sdr_doa_collector.py` | Collector read-only, parsing terbatas, redaction, freshness, candidate, gate |
-| `tools/sdr_doa_lan_agent.py` | Edge agent/LAN staging dan payload health/state/config; dengan `--publish` selalu berlangganan `cmd/config/patch`, dan tanpa `--enable-config` menolak patch dengan `REMOTE_CONTROL_DISABLED` |
+| `tools/sdr_doa_lan_agent.py` | Edge agent/LAN staging di topik lama `sdr/v1/uav-01` dan payload health/state/config; dengan `--publish` selalu berlangganan `cmd/config/patch` topik lama, dan tanpa `--enable-config` menolak patch dengan `REMOTE_CONTROL_DISABLED`. Kontrol tidak memakainya. |
 | `tools/sdr_doa_mqtt.py` | MQTT contract/adapter staging |
 | `tools/sdr_doa_mqtt_monitor.py` | MQTT monitor; berlangganan, dan hanya publish patch konfigurasi lewat `publish_config_patch`. Memerlukan `paho-mqtt` (tanpa paket ini monitor berstatus ERROR, console tetap jalan) |
 | `tools/rdf_node_mqtt_v2.py` | Parser kontrak MQTT RDF Node (`docs/MQTT_KONTRAK.md`), node view, dan snapshot untuk `/api/mqtt/rdf-node` |
@@ -172,7 +172,8 @@ MQTT adalah transport/contract, bukan pengganti DAQ, DSP, normalisasi, gate, ata
 | `frontend/src/lib/mqttMonitor.ts` | Normalisasi snapshot MQTT (`sdr/v1` dan RDF Node) dan redaksi record |
 | `frontend/src/pages/ReceiverPage.tsx` | Host iframe Receiver, sinkron tema/bahasa, penerusan shortcut, menyambungkan bridge ke frame |
 | `frontend/src/lib/receiverBridge.ts`, `receiverBridgeProtocol.ts` | Sisi console bridge Receiver; salinan protokol sisi frame ada di `tools/browsdr_receiver_overlay/src/client/app/console-bridge-protocol.ts` |
-| `frontend/src/lib/configPatch.ts` | Field, satuan, rentang, dan kode error patch konfigurasi untuk Kontrol |
+| `frontend/src/lib/configPatch.ts` | Field edge, satuan, rentang, tabel gain, hasil ACK, dan kode error perintah Kontrol |
+| `tools/rdf_node_commands.py`, `tools/config_command_tracker.py` | Envelope perintah RDF Node dan aturan field edge; status tiap perintah Kontrol di server |
 | `frontend/scripts/build-receiver.mjs` | Menjalankan builder Receiver untuk `npm run build:receiver` dan `build:all` |
 | `frontend/src/lib/simulation.ts` | Synthetic 360-bin snapshot, validation, randomization |
 | `frontend/src/lib/doaGeometry.ts` | Geometry bearing/lobe/heat/guides dari coordinate + vector + settings |
@@ -301,7 +302,7 @@ Dashboard adalah dasbor peta penuh. Langkah operator yang lebih rinci ada di `QU
 - **Klik untuk menala.** Klik trace atau waterfall untuk memindahkan tengah RX dan VFO ke frekuensi itu (dibulatkan 1 kHz); ←/→ menggeser 10 kHz, Shift+←/→ 100 kHz. Klik ini mematikan Ikuti frekuensi node. Tengah dan VFO dipegang Receiver dan sinkron dua arah: perubahan di halaman Receiver tampil di Spektrum dan juga mematikan Ikuti frekuensi node.
 - **Ikuti frekuensi node.** Selama Data Out segar, tengah RX mengikuti `center_freq` dari `settings.json` node dan VFO mengikuti frekuensi CSV DoA.
 - **Dengar dengan modulasi.** Dengar memutar audio VFO dengan modulasi yang dipilih (NFM bawaan, WFM, AM, USB, LSB, DSB, CW, RAW), dan menyalakan RX bila belum jalan. Tekan lagi untuk berhenti mendengar.
-- **Kirim ke RDF-SDR → Kontrol.** Tombol di header Spektrum hanya membuka Kontrol dengan draf frekuensi tengah dan VFO. Di Kontrol: buka kunci dengan kata sandi admin, ubah nilai, **Tinjau perubahan**, lalu **Kirim ke RDF-SDR**. Hasilnya `ACK · applied` (agent menulis `settings.json`), `Ditolak · KODE` (misalnya `REMOTE_CONTROL_DISABLED` bila agent tanpa `--enable-config`, atau `CONFIG_REVISION_CONFLICT`), **Belum ada ACK** setelah sekitar 65 detik, atau **Publish gagal** bila broker menolak.
+- **Kirim ke RDF-SDR → Kontrol.** Tombol di header Spektrum hanya membuka Kontrol dengan draf: frekuensi VFO yang didengar sebagai frekuensi tengah dan VFO 0. Di Kontrol: buka kunci dengan kata sandi admin, **Baca settings** bila perlu, ubah nilai, **Tinjau perubahan**, lalu **Kirim ke RDF-SDR**. Hasilnya `ACK · APPLIED` (satu-satunya berhasil), `ACK · PERSISTED_UNVERIFIED` atau `OUTCOME_UNKNOWN` (bukan berhasil dan bukan gagal), `Ditolak · REJECTED · KODE` (misalnya `CONFIG_REVISION_CONFLICT` atau `BUSY`), **Belum ada ACK** setelah sekitar 20 detik, atau **Publish gagal** bila broker menolak.
 - **Spektrum → Atur.** Kolom pengaturan Spektrum. Pada dock yang lebih sempit dari 1400 px, Ikuti frekuensi node, modulasi, dan Kirim ke RDF-SDR pindah dari header ke kolom ini. **Skala dB** (Auto atau Manual dengan min dan maks, −160 s/d 60 dB, selisih minimal 5 dB) sama dengan panel Skala dB di tab Dengar halaman Receiver dan sinkron dua arah; trace dan seluruh waterfall diwarnai ulang. Skala terakhir yang diketahui dock disimpan di console (`sdr-console-spectrum-dock-v1`). **Sample rate**, **LNA**, **VGA**, dan **+14 dB** adalah pengaturan Listener Receiver dan sinkron dua arah; gain berlaku langsung, sample rate memulai ulang RX yang sedang jalan (ditanyakan dulu bila rekaman VFO berjalan, ditolak selama pindai). Sebelum Receiver dimuat isian ini nonaktif dengan `—`.
 - **RX | Spektrum.** Sakelar setelah chip Spektrum memilih isi grafik dan apa yang dijalankan Mulai: RX (2 MHz di sekitar tengah RX) atau pindai lebar Receiver di rentangnya sendiri. Dock menampilkan mode yang sedang berjalan, termasuk pindai yang dimulai di halaman Receiver (chip `SCAN` dengan grafik hidup; `BUSY` hanya untuk dengar-pindai). Pada mode Spektrum, klik grafik menyimpan tengah dan VFO untuk RX berikutnya tanpa menghentikan pindai, dan Dengar menghentikan pindai lalu menjalankan RX. Di Atur, mode Spektrum menampilkan Skala dB pindai (Manual = Grafik min./maks. halaman Receiver, sinkron dua arah), Rentang dengan Pusatkan ke RX, Resolusi, dan Gain pindai; isian pindai terkunci selama pindai berjalan, sama seperti di halaman Receiver.
 - **Penanda.** Tombol setelah sakelar RX | Spektrum menyalakan mode menandai (tidak disimpan; mati setiap kali dock dibuka). Penandanya adalah daftar Penanda spektrum Receiver: tampil di dock (trace dan waterfall, kedua mode), di grafik Spektrum dan trace Dengar halaman Receiver, dan sinkron dua arah. Klik grafik menambah penanda, klik dekat penanda memilihnya (Hapus, Tala ke sini); Enter, `[` `]`, Delete, Ctrl+Z, dan Esc bekerja pada grafik. Menandai juga bisa selama pindai, dengan daya diukur dari pindai itu. Penanda tersimpan hanya bila marker set dipilih di halaman Receiver (tag **Belum disimpan** bila belum).
@@ -440,10 +441,11 @@ Console tetap berjalan tanpa `paho-mqtt`, tetapi monitor MQTT tidak bisa tersamb
 
 ### Kontrol tidak mendapat jawaban
 
-- **Belum ada ACK** sekitar 65 detik setelah kirim: agent tidak berjalan, memakai broker lain, atau versi lama yang hanya berlangganan `cmd/config/patch` bila `--enable-config` aktif.
-- `Ditolak · REMOTE_CONTROL_DISABLED`: agent versi repo ini berjalan dengan `--publish` tetapi tanpa `--enable-config`.
-- Kirim nonaktif atau `CONFIG_REVISION_UNKNOWN`: belum ada `config_reported` (atau `ack_config`/`state`) v1 sejak monitor tersambung. Agent baru mengirim `config_reported` setelah bisa membaca `settings.json` lewat Data Out.
-- **Publish gagal** (PUBACK 128 ke atas): ACL broker tidak mengizinkan console publish ke `cmd/config/patch`.
+- **Belum ada ACK** sekitar 20 detik setelah kirim: RDF Node di Raspberry tidak berjalan atau memakai broker lain. Agent bawaan repo ini memakai topik lama dan tidak menjawab Kontrol.
+- Kirim nonaktif, `NODE_SESSION_UNAVAILABLE`, `CONFIG_REVISION_UNKNOWN` atau `NODE_NOT_FRESH`: belum ada `state` RDF Node sejak monitor tersambung, `state.cfg` kosong, atau `telemetry/health` lebih tua dari 8 detik.
+- `TLS_REQUIRED_FOR_SETTINGS_REPORT` setelah **Baca settings**: RDF-SDR tersambung ke broker tanpa TLS, jadi tidak mengirim `settings/reported`; nilai diambil dari Data Out (cadangan).
+- `Ditolak · REJECTED · CONFIG_REVISION_CONFLICT` atau `BUSY`: pengirim lain (misalnya `rdf-ground.service`) mengubah settings atau sedang mengirim perintah. Baca ulang nilai lalu tinjau; satu pengendali sekaligus.
+- **Publish gagal** (PUBACK 128 ke atas): ACL broker tidak mengizinkan console publish ke `sdr/v2/uav-01/cmd/config/patch` atau `cmd/config/get`.
 - Broker `tools/mqtt_lan_stage.conf` mewajibkan TLS dan password, yang tidak dimiliki monitor console; pakai `tools/mqtt_stage4.conf` untuk uji lokal.
 
 ### Basemap MapLibre tidak muncul

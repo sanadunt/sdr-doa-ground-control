@@ -34,7 +34,7 @@ Konvensi:
 4. Menaruh kata sandi admin atau kata sandi MQTT di command line, di riwayat shell, di log, atau di pesan chat. Jadi **jangan** pakai `install.sh --password NILAI`, `echo "SDR_DOA_ADMIN_PASSWORD=..."`, atau `export SDR_DOA_MQTT_PASSWORD=...`. Jangan `cat` file `.env`, `agent.env`, atau variabel proxy yang mungkin memuat kredensial. Jangan juga jalankan perintah yang mencetak environment container atau compose yang sudah diinterpolasi: `docker inspect` tanpa `--format` yang memilih field tertentu (bukan `.Config.Env`), `docker compose config`, `docker compose exec ... env`/`printenv`, `cat /proc/*/environ`. Di agent Docker, `SDR_DOA_MQTT_PASSWORD` ada di environment container; di console Docker, `SDR_DOA_ADMIN_PASSWORD` juga ada di sana bila ditaruh di `DIR/.env` (misalnya setelah 5.6 E1).
 5. Meng-commit, mengunggah, atau menyalin `.env` / `agent.env` ke tempat lain selain yang disebut runbook ini.
 6. Menghapus data tanpa konfirmasi eksplisit manusia untuk perintah itu: `sdr-doa-console uninstall --purge`, `uninstall.sh --purge`, `docker compose down -v`, `docker volume rm`, menghapus direktori data atau `/data/console.json`.
-7. Mengaktifkan remote config di Raspberry (`--enable-config`, `ENABLE_CONFIG=1`) tanpa keputusan manusia. Dengan itu Kontrol di console bisa mengubah `settings.json` KrakenSDR.
+7. Mengaktifkan remote config di Raspberry tanpa keputusan manusia: `--enable-config`/`ENABLE_CONFIG=1` di agent bawaan repo ini (patch di topik lama `sdr/v1/uav-01/cmd/config/patch` lalu bisa mengubah `settings.json` KrakenSDR), atau gate RDF Node (`sudo rdf-node controls approve --settings` dan sejenisnya, di luar repository ini), yang membuat Kontrol console bisa mengubah `settings.json` lewat `sdr/v2/uav-01/cmd/config/patch`.
 8. Memakai opsi yang melewati pengaman tanpa persetujuan manusia: `--force`, `--allow-major`, `--yes` saat Receiver sedang merekam, `install --channel` ke versi lain, `rollback`.
 9. Menjalankan dua console di port yang sama, atau agent native dan agent Docker bersamaan (keduanya akan publish dan menjawab patch).
 10. Memberi `--base-url` atau `--mqtt-*` ke service, unit, atau entrypoint. Flag itu menimpa pengaturan tersimpan setiap start.
@@ -120,9 +120,16 @@ Nilai koneksi (Data Out, MQTT, refresh) hanya dipakai saat start pertama. Setela
 | Remote config | `ENABLE_CONFIG` / `--enable-config`, `--disable-config` | `0` (patch dijawab `REMOTE_CONTROL_DISABLED`) | Keputusan manusia (aturan 1.1.7). |
 | `settings.json` KrakenSDR | `SETTINGS_PATH` / `--settings-path` | `/home/doasdr/doasdr/_share/settings.json` | Docker memakai direktori `_share`: `--share-dir`, default `/home/doasdr/doasdr/_share`. |
 | User service | `--user` | native: pemilik `settings.json`, lalu `doasdr`, lalu user baru `sdr-doa-agent`; Docker: pemilik `--share-dir` | Tidak boleh root. |
-| Publish MQTT | `PUBLISH` / `--no-publish` | `1` | Kontrol butuh `1`. |
+| Publish MQTT | `PUBLISH` / `--no-publish` | `1` | Telemetry agent bawaan di topik lama. Kontrol tidak memakai agent ini; yang menjawab Kontrol adalah RDF Node di RDF-SDR. |
 
 Broker MQTT itu sendiri (misalnya mosquitto dengan listener TCP untuk agent dan WebSocket untuk console) tidak dipasang oleh repository ini. Tanyakan ke manusia di mana broker berjalan dan apakah ia menerima console tanpa TLS dan tanpa password.
+
+Untuk Kontrol, broker juga harus (keputusan manusia, di luar repository ini):
+
+- mengizinkan console (anonim, tanpa TLS) publish ke `sdr/v2/uav-01/cmd/config/patch` dan `sdr/v2/uav-01/cmd/config/get`;
+- punya listener TLS untuk koneksi RDF Node dari Raspberry. RDF Node mengirim `settings/reported` (jawaban `config.get`) hanya lewat koneksi TLS-nya sendiri ke broker; tanpa itu jawabannya `TLS_REQUIRED_FOR_SETTINGS_REPORT`, Kontrol memakai nilai Data Out (cadangan), dan patch tetap bisa dikirim. Console tetap memakai listener biasa.
+
+`rdf-ground.service` (RDF Node di groundstation) juga bisa mengirim perintah ke RDF-SDR. RDF-SDR mengerjakan satu perubahan sekaligus (`BUSY`), dan perubahan dari pengirim lain membuat rev dasar Kontrol usang. Tanyakan ke manusia siapa pengendalinya: satu console dengan Kontrol terbuka, atau `rdf-ground.service`, tidak keduanya sekaligus.
 
 ---
 
@@ -1209,14 +1216,14 @@ cd /opt/sdr-doa-agent && sudo docker compose ps && sudo docker compose logs --ta
 
 **Hasil**: `container:   running, health none, restarts 0, image 2.0.0 (<id>)`; container `Up`; log tanpa baris `run-agent:` dan tanpa `agent_error` yang berulang.
 
-Ujung ke ujung (di host console, setelah agent dan console memakai broker yang sama):
+Ujung ke ujung untuk Kontrol (di host console). Yang menjawab Kontrol adalah RDF Node di RDF-SDR (topik `sdr/v2/uav-01`), bukan agent bawaan di atas:
 
 ```sh
 curl -s --noproxy '*' http://127.0.0.1:8787/api/mqtt/config-reported \
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["broker"]["connection"], d["base_config_rev"], d["code"])'
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); n=d.get("node") or {}; s=d.get("settings") or {}; print(d["broker"]["connection"], n.get("sid"), d["base_rev"], n.get("health_fresh"), s.get("matches_state_cfg"), d["code"])'
 ```
 
-**Hasil**: `connected <angka atau teks revisi> None`. `base_config_rev` `None` berarti belum ada `config_reported` dari agent: agent mati, broker berbeda, atau agent belum bisa membaca `settings.json` lewat Data Out. Kontrol baru bisa Kirim setelah ini terisi.
+**Hasil**: `connected <8 digit hex> <angka> True <True atau None> None`. `sid` `None` berarti belum ada `state` RDF Node di broker yang sama; `base_rev` `None` berarti `state.cfg` RDF-SDR masih kosong; `health_fresh` `False` berarti `telemetry/health` lebih tua dari 8 detik. Kontrol baru bisa Kirim bila ketiganya terisi dan health segar. Kolom kelima `True` berarti `settings/reported` revisi sekarang sudah diterima (setelah **Baca settings** di Kontrol); `None` tidak menghalangi patch, tetapi tanpa listener TLS untuk RDF-SDR (2.3) nilainya tetap dari Data Out (cadangan).
 
 Opsional di Raspberry, bila `mosquitto-clients` ada: `mosquitto_sub -h 127.0.0.1 -p 1883 -t 'sdr/v1/uav-01/#' -v -C 3 -W 30` menampilkan pesan dari `sdr/v1/uav-01/telemetry/health`, `state` atau `config/reported`.
 
@@ -1296,10 +1303,13 @@ Satu blok singkat berisi:
 | Monitor MQTT `ERROR` `MQTT monitor dependency paho-mqtt is not installed` | venv console native rusak | Pasang ulang rilis yang sama: tulis versi terpasang (`sdr-doa-console info`) ke `~/sdr-doa-dl/release-version`, lalu B1 dan blok "Upgrade manual" di 7.2 (dengan opsi yang tercatat). |
 | Konfigurasi: `Pakai http://<host>:8081 dengan host dari daftar: ...` (`DATA_OUT_URL_NOT_ALLOWED`), atau console menolak start dengan `--base-url: the Data Out URL must be http://HOST:8081 with HOST in the Data Out host list (...)` | Host base URL tidak ada di daftar host Data Out (cadangan) | Tambahkan host di Konfigurasi → Koneksi & refresh, lalu Simpan bersama base URL. Docker sebelum start pertama: `SDR_DOA_SEED_DATA_OUT_HOSTS` (A2). |
 | Kesehatan Sistem: "`<nama>.local` tidak bisa di-resolve, juga lewat mDNS" (`... could not be resolved (system and mDNS); use an IP address`) | Resolver sistem dan satu query mDNS tidak menemukan nama itu | Node mati, beda segmen jaringan, atau multicast diblok. Firewall host (misalnya ufw) juga bisa membuang jawaban node: jawaban itu datang lewat unicast dari UDP port 5353 ke port acak console, dan firewall tidak menganggapnya balasan. Membukanya hanya dengan izin manusia, misalnya ufw: `sudo ufw allow proto udp from 192.168.100.0/24 port 5353` **(contoh)**. Tanpa itu, pakai IP node di base URL (8.1 langkah 6). |
-| Kontrol: Kirim nonaktif, `CONFIG_REVISION_UNKNOWN` | Belum ada `config_reported`/`ack_config`/`state` v1 dari agent di broker yang sama | 8.4 ujung ke ujung; agent harus bisa membaca `settings.json` lewat Data Out. |
-| Kontrol: "Belum ada ACK" (`no_ack`) sekitar 65 detik setelah Kirim | Tidak ada agent yang menjawab di `ack/config` | Agent mati, broker lain, atau agent lama. |
-| Kontrol: `Ditolak · REMOTE_CONTROL_DISABLED` | Agent tanpa `--enable-config` | Sesuai desain bila manusia memilih remote config mati. |
-| Kontrol: `publish_failed`, PUBACK ≥ 128 (135 "Not authorized") | ACL broker tidak mengizinkan console publish ke `sdr/v1/uav-01/cmd/config/patch` | Konfigurasi broker (di luar repository ini). |
+| Kontrol: Kirim nonaktif, `NODE_SESSION_UNAVAILABLE`, `NODE_NOT_FRESH`, `CONFIG_REVISION_UNKNOWN` | Belum ada `state` RDF Node, `telemetry/health` tidak segar, atau `state.cfg` kosong | 8.4 ujung ke ujung; RDF Node di RDF-SDR harus berjalan dan memakai broker yang sama (Monitor Pesan, tampilan RDF Node). |
+| Kontrol: "Belum ada ACK" (`no_ack`) sekitar 20 detik setelah Kirim | Tidak ada jawaban di `sdr/v2/uav-01/ack/config` | RDF Node mati, broker lain. Agent bawaan repo ini tidak menjawab Kontrol. |
+| Kontrol: `TLS_REQUIRED_FOR_SETTINGS_REPORT`, nilai "Data Out (cadangan)" | Koneksi RDF-SDR ke broker tanpa TLS | Listener TLS broker untuk RDF-SDR (2.3; keputusan manusia). Patch tetap bisa dikirim. |
+| Kontrol: `Ditolak · REJECTED · CONFIG_REVISION_CONFLICT` atau `BUSY` | Settings berubah oleh pengirim lain, atau RDF-SDR masih mengerjakan perintah lain (misalnya dari `rdf-ground.service`) | Baca ulang nilai, tinjau, kirim lagi. Satu pengendali sekaligus (2.3). |
+| Kontrol: `Ditolak · REJECTED · EXPIRED_OR_INVALID_DEADLINE` | Jam host console lebih dari 1 detik di depan jam RDF-SDR, atau perintah tiba setelah 15 detik | Periksa NTP di kedua host (laporkan ke manusia). |
+| Kontrol: `FAILED · CONFIG_TARGET_NOT_READY` | RDF Node belum punya target settings yang disetujui | Keputusan manusia (aturan 1.1.7): `sudo rdf-node controls approve --settings` di RDF-SDR. |
+| Kontrol: `publish_failed`, PUBACK ≥ 128 (135 "Not authorized") | ACL broker tidak mengizinkan console publish ke `sdr/v2/uav-01/cmd/config/patch` atau `cmd/config/get` | Konfigurasi broker (di luar repository ini). |
 | Rekaman: "Open the Receiver from this console." (403 `ORIGIN_REJECTED`) | Dibuka lewat port-forward yang mengubah host atau port | Tunnel dengan port yang sama (6.1). Dari mode LAN (6.2) Rekaman memang tidak tersedia. |
 | Basemap `BASEMAP UNAVAILABLE` / `BASEMAP PARTIAL` | Host tile tidak terjangkau dari host console | Log console `tiles <source>: upstream unavailable (...)`; 4.6, 4.7; cek `X-Tile-Cache` (8.1 langkah 7). Console Docker di jaringan yang keluar hanya lewat proxy tidak bisa mengambil tile (4.7): laporkan. |
 | Pengaturan tampak tidak tersimpan setelah restart | Console dijalankan dengan `--base-url`/`--mqtt-*` | Hapus flag itu dari perintah; ubah di Konfigurasi. |
@@ -1450,7 +1460,7 @@ Bila uninstall biasa sudah dijalankan dan manusia kemudian meminta data dihapus:
 | Data Out (dibaca console) | `http://<host>:8081`, `<host>` dari daftar `data_out_hosts` di `console.json` (default `doasdr.local`, `192.168.100.100`, `127.0.0.1`, `localhost`; paling banyak 16); default `http://doasdr.local:8081`. Nama `.local` yang tidak bisa diresolusi resolver sistem dicoba lewat satu query mDNS. |
 | MQTT console | default `10.90.0.1:9001`, `websockets`, path `/mqtt`; tanpa TLS dan kredensial |
 | MQTT agent | default `127.0.0.1:1883`, TCP, MQTT 3.1.1 |
-| Topik | `sdr/v1/uav-01/...`; patch Kontrol ke `sdr/v1/uav-01/cmd/config/patch`, ACK di `sdr/v1/uav-01/ack/config` |
+| Topik | RDF Node `sdr/v2/uav-01/...`: Kontrol ke `sdr/v2/uav-01/cmd/config/patch` dan `cmd/config/get` (QoS 1, 15 detik), ACK di `sdr/v2/uav-01/ack/config`, settings di `sdr/v2/uav-01/settings/reported`; agent bawaan di topik lama `sdr/v1/uav-01/...` |
 
 ### 11.3 URL, image, dan tag
 

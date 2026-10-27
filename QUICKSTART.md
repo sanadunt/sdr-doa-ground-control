@@ -278,31 +278,35 @@ Spektrum memakai RadioSpectrum yang sama dengan halaman Receiver, jadi butuh Chr
 
 ### Kirim ke RDF-SDR dan Kontrol
 
-Kontrol adalah satu-satunya cara console mengubah setelan di RDF-SDR. Console mengirim satu patch konfigurasi lewat MQTT ke `sdr/v1/uav-01/cmd/config/patch` (QoS 1, tidak retained, kedaluwarsa 60 detik). Agent di RDF-SDR yang memutuskan menerapkannya, lalu menjawab di `ack/config`.
+Kontrol adalah satu-satunya cara console mengubah setelan di RDF-SDR. Console mengirim perintah RDF Node dalam format edge (`docs/MQTT_KONTRAK.md` bagian 8): `config.patch` ke `sdr/v2/uav-01/cmd/config/patch` untuk mengubah nilai, dan `config.get` ke `sdr/v2/uav-01/cmd/config/get` untuk membaca settings. Keduanya QoS 1, tidak retained, kedaluwarsa 15 detik. RDF Node di RDF-SDR yang memutuskan menerapkannya, lalu menjawab di `ack/config`.
 
-1. **Kirim ke RDF-SDR** di header Spektrum (di **Atur** bila dock sempit) membuka Kontrol dengan draf: Frekuensi tengah diisi tengah RX dan Frekuensi VFO diisi VFO yang sedang didengar. Tombol ini belum mengirim apa pun, dan nonaktif bila frekuensi belum diketahui atau di luar 24–1800 MHz. Kontrol juga bisa dibuka dengan tombol panel **Kontrol**.
+1. **Kirim ke RDF-SDR** di header Spektrum (di **Atur** bila dock sempit) membuka Kontrol dengan draf: Frekuensi tengah dan Frekuensi VFO sama-sama diisi frekuensi VFO yang sedang didengar, karena RDF-SDR hanya menerima perubahan frekuensi tengah bersama VFO 0 di frekuensi yang sama. Tombol ini belum mengirim apa pun, dan nonaktif bila frekuensi belum diketahui atau di luar 24–1766 MHz. Kontrol juga bisa dibuka dengan tombol panel **Kontrol**.
 2. **Buka kunci.** Masukkan kata sandi admin lalu tekan **Buka kunci**. Sesinya sama dengan login admin di Konfigurasi dan berlaku 30 menit.
-3. **Ubah nilai.** Baris atas menampilkan broker, status koneksi, dan `rev dasar`, yaitu revisi konfigurasi terakhir yang dilaporkan RDF-SDR lewat MQTT. Ada lima field: Frekuensi tengah (MHz), Gain (dB), Frekuensi VFO (MHz), Bandwidth VFO (kHz), dan Squelch VFO (dB). Nilai awal diambil dari MQTT, lalu dari `settings.json` Data Out yang masih segar untuk field yang tidak dilaporkan MQTT (collector membaca `center_freq`, `uniform_gain`, `vfo_freq_0`, `vfo_bw_0` dan `vfo_squelch_0`). Field bertuliskan "tidak dilaporkan" bila tidak ada sumber yang membawa nilainya, atau Data Out sedang STALE. Field yang diubah ditandai "Diubah dari …", dan nilai di luar rentang diberi pesan di field itu; field lain tidak punya keterangan di bawahnya.
-4. **Tinjau perubahan** menampilkan nilai lama → baru dan "QoS 1 · kedaluwarsa 60 dtk · rev dasar N". Agent harus berjalan dengan `--enable-config` agar perubahan diterapkan. **Kembali** untuk mengedit lagi.
-5. **Kirim ke RDF-SDR** di layar tinjauan inilah yang benar-benar mengirim. Tombolnya nonaktif bila monitor MQTT belum terhubung atau rev dasar belum diketahui. Setelah terkirim, Kontrol menunggu jawaban dan memeriksa statusnya setiap detik. Hanya satu perintah yang boleh menunggu hasil pada satu waktu.
-6. Hasil:
-   - `ACK · applied`: agent menulis perubahan ke `settings.json` dan config rev naik. Ini belum membuktikan RDF-SDR memakai nilai baru; itu dicek oleh **Cek RDF-SDR** di bawah.
-   - `Ditolak · CONFIG_REVISION_CONFLICT`: rev dasar sudah usang. Tekan **Muat ulang nilai**, tinjau, lalu kirim lagi.
-   - `Ditolak · REMOTE_CONTROL_DISABLED`: agent berjalan tanpa `--enable-config`. Tidak ada yang berubah.
-   - `Ditolak` dengan kode lain, `expired`, atau `failed`: kodenya ditampilkan. `expired` biasanya berarti jam console dan RDF-SDR berselisih jauh.
-   - **Belum ada ACK** (sekitar 65 detik setelah kirim): tidak ada agent yang menjawab. Periksa bahwa agent berjalan dan memakai broker yang sama. Agent versi lama hanya berlangganan `cmd/config/patch` bila `--enable-config` aktif, sehingga tidak pernah menjawab.
+3. **Baca nilai.** Baris atas menampilkan topik, broker, status koneksi, `rev dasar` (yaitu `state.cfg` RDF-SDR), sesi RDF-SDR dengan status health (`FRESH` atau `STALE`), laporan `settings/reported` terakhir, dan sumber nilai. Setelah kunci dibuka, Kontrol mengirim `config.get` sekali bila belum ada laporan untuk revisi sekarang; **Baca settings** mengirimnya lagi (paling cepat sekali per detik). RDF-SDR menjawab dengan `settings/reported` hanya bila koneksinya sendiri ke broker memakai TLS. Tanpa TLS jawabannya `TLS_REQUIRED_FOR_SETTINGS_REPORT`, dan nilai diambil dari `settings.json` Data Out (cadangan) yang masih segar (collector membaca `center_freq`, `uniform_gain`, `vfo_freq_0`, `vfo_bw_0` dan `vfo_squelch_0`). Baris "Nilai: settings/reported", "Nilai: Data Out (cadangan)" atau "Nilai: tidak dilaporkan" menyebut sumbernya.
+4. **Ubah nilai.** Ada lima field: Frekuensi tengah (MHz), Gain (pilihan dari tabel gain RDF-SDR), Frekuensi VFO (MHz), Bandwidth VFO (kHz), dan Squelch VFO (dB). Frekuensi dan bandwidth dikirim dalam Hz bulat. Mengetik Frekuensi tengah ikut mengisi Frekuensi VFO dengan nilai sama ("Dikirim bersama frekuensi tengah"); VFO yang berbeda dari tengah yang diubah ditolak di field itu. Field bertuliskan "tidak dilaporkan" bila tidak ada sumber yang membawa nilainya. Field yang diubah ditandai "Diubah dari …", dan nilai di luar rentang diberi pesan di field itu; field lain tidak punya keterangan di bawahnya.
+5. **Tinjau perubahan** menampilkan nilai lama → baru dengan nama field edge (`center_frequency_hz`, `vfo0_frequency_hz`, ...) dan "QoS 1 · kedaluwarsa 15 dtk · rev dasar N". **Kembali** untuk mengedit lagi.
+6. **Kirim ke RDF-SDR** di layar tinjauan inilah yang benar-benar mengirim. Tombolnya nonaktif bila monitor MQTT belum terhubung, belum ada `state` RDF-SDR, rev dasar belum diketahui, atau health RDF-SDR tidak segar. Setelah terkirim, Kontrol menunggu jawaban, memeriksa statusnya setiap detik, dan menampilkan progresnya (misalnya `ACCEPTED`). Hanya satu patch yang boleh menunggu hasil pada satu waktu. Console tidak pernah mengirim ulang sendiri.
+7. Hasil:
+   - `ACK · APPLIED`: satu-satunya hasil berhasil. RDF-SDR menulis `settings.json` dan melihat bukti runtime untuk tiap field; config rev naik.
+   - `ACK · PERSISTED_UNVERIFIED` dan `ACK · OUTCOME_UNKNOWN` (biru): bukan berhasil dan bukan gagal. Yang pertama tersimpan tetapi buktinya belum lengkap; yang kedua tidak diketahui. Jangan kirim ulang; baca settings dulu dan lihat **Cek RDF-SDR**.
+   - **Tidak ada ACK akhir** (90 detik setelah kirim, hanya ada `ACCEPTED`): sama, hasilnya tidak diketahui.
+   - `Ditolak · REJECTED · CONFIG_REVISION_CONFLICT`: settings di RDF-SDR berubah setelah rev dasar dibaca. Tekan **Baca ulang nilai**, tinjau, lalu kirim lagi.
+   - `Ditolak · REJECTED · BUSY`: RDF-SDR masih mengerjakan perintah lain, mungkin dari `rdf-ground.service`. Kode lain (`EXPIRED`, `CANCELLED`, `FAILED`, atau penolakan lain) ditampilkan dengan pesannya. `EXPIRED_OR_INVALID_DEADLINE` biasanya berarti jam console dan RDF-SDR berselisih lebih dari 1 detik.
+   - **Belum ada ACK** (sekitar 20 detik setelah kirim): RDF-SDR tidak menjawab. Periksa bahwa RDF Node berjalan dan memakai broker yang sama.
    - **Publish gagal** (PUBACK 128 ke atas): broker menolak publish dari console, biasanya karena ACL.
-   - **Tidak terkirim · KODE**: console menolak sebelum publish. Contohnya `CONFIG_REVISION_STALE` (nilai berubah sejak ditinjau; nilai dimuat ulang, tinjau lagi), `MQTT_NOT_CONNECTED`, dan `COMMAND_IN_FLIGHT` (perintah lain masih menunggu hasil).
-7. **Cek RDF-SDR.** Setelah hasil akhir (semua kecuali **Publish gagal**), Kontrol membandingkan tiap field yang dikirim dengan nilai terbaru dari RDF-SDR. Tiap baris menampilkan Dikirim, Data Out dan MQTT, plus status:
+   - **Tidak terkirim · KODE**: console menolak sebelum publish. Contohnya `CONFIG_REVISION_STALE` (rev berubah sejak ditinjau; nilai dibaca ulang, tinjau lagi), `NODE_NOT_FRESH` (health RDF-SDR tidak segar), `MQTT_NOT_CONNECTED`, dan `COMMAND_IN_FLIGHT` (patch lain masih menunggu hasil).
+8. **Cek RDF-SDR.** Setelah hasil akhir (semua kecuali **Publish gagal**), Kontrol mengirim `config.get` dan membandingkan tiap field yang dikirim dengan nilai terbaru dari RDF-SDR. Tiap baris menampilkan Dikirim, MQTT (`settings/reported`) dan Data Out, plus status:
    - `CONFIRMED`: nilai RDF-SDR sama dengan yang dikirim (toleransi ±500 Hz untuk frekuensi, ±1 Hz untuk bandwidth, ±0,05 dB untuk gain dan squelch).
-   - `PENDING`: belum sama, atau belum ada data segar; masih ditunggu sampai 90 detik setelah hasil akhir. Kalau RDF-SDR menolak perintah (`rejected`, `conflict`, `expired`, `failed`), tidak ada masa tunggu: hasil cek langsung keluar.
+   - `PENDING`: belum sama, atau belum ada data segar; masih ditunggu sampai 90 detik setelah hasil akhir. Kalau RDF-SDR tidak menerapkan perintah (`REJECTED`, `CONFLICT`, `EXPIRED`, `FAILED`, `CANCELLED`), tidak ada masa tunggu: hasil cek langsung keluar.
    - `UNCHANGED`: setelah 90 detik (atau langsung, setelah penolakan) nilainya tetap belum sama.
    - `NOT REPORTED`: tidak ada sumber yang membawa field itu.
 
-   Data Out (`settings.json` dari pembacaan yang masih segar) yang menentukan. MQTT hanya dipakai bila Data Out tidak membawa field itu, dan hanya nilai yang diterima setelah perintah dikirim. Snapshot STALE dan data simulasi tidak dihitung. Ringkasan di atas baris, misalnya "RDF-SDR berubah · 2/2" atau "Belum berubah · 0/2", merangkum semuanya. **Cek ulang** membaca Data Out (termasuk `settings.json`) dan MQTT saat itu juga; pembacaan yang sama berjalan sekali saat perintah selesai. Karena console memakai ulang `settings.json` paling lama 30 detik, nilai Data Out hanya dihitung bila `settings.json` dibaca setelah perintah dikirim. Dengan interval refresh Manual atau lebih lama dari jendela segar, Data Out hanya terbaca saat **Cek ulang** atau Refresh ditekan.
-8. **Selesai** mengembalikan form ke nilai yang dilaporkan. **Kunci lagi** menutup sesi admin.
+   `settings/reported` yang diterima setelah perintah dikirim yang menentukan. Data Out (`settings.json` dari pembacaan yang masih segar) hanya dipakai bila laporan itu tidak ada. Snapshot STALE dan data simulasi tidak dihitung. Ringkasan di atas baris, misalnya "RDF-SDR berubah · 2/2" atau "Belum berubah · 0/2", merangkum semuanya. **Cek ulang** mengirim `config.get` dan membaca Data Out (termasuk `settings.json`) saat itu juga; pembacaan yang sama berjalan sekali saat perintah selesai. Karena console memakai ulang `settings.json` paling lama 30 detik, nilai Data Out hanya dihitung bila `settings.json` dibaca setelah perintah dikirim. Dengan interval refresh Manual atau lebih lama dari jendela segar, Data Out hanya terbaca saat **Cek ulang** atau Refresh ditekan.
+9. **Selesai** mengembalikan form ke nilai yang dilaporkan. **Kunci lagi** menutup sesi admin.
 
-Monitor MQTT console tidak memakai TLS, username, atau password. Kontrol hanya bekerja lewat broker yang menerima koneksi seperti itu dan mengizinkan console publish ke `cmd/config/patch`. Broker `tools/mqtt_lan_stage.conf` (TLS dan password) tidak bisa dipakai console.
+Monitor MQTT console tidak memakai TLS, username, atau password. Kontrol hanya bekerja lewat broker yang menerima koneksi seperti itu dan mengizinkan console publish ke `sdr/v2/uav-01/cmd/config/patch` dan `cmd/config/get`. Broker yang sama perlu listener TLS untuk RDF-SDR agar `settings/reported` dikirim; console tetap memakai listener biasa. Broker `tools/mqtt_lan_stage.conf` (TLS dan password) tidak bisa dipakai console.
+
+Satu operator, satu pengendali: `rdf-ground.service` di groundstation juga bisa mengirim perintah ke RDF-SDR. RDF-SDR mengerjakan satu perubahan sekaligus (`BUSY`), dan perubahan dari pengirim lain membuat rev dasar Kontrol usang (`CONFIG_REVISION_CONFLICT`). Pakai satu console dengan Kontrol terbuka, atau `rdf-ground.service`, tidak keduanya sekaligus.
 
 ### Polar dan Atur
 
@@ -401,7 +405,7 @@ Strip di top bar punya enam item, dari kiri ke kanan: DATA, DOA, PUBLIKASI, SNAP
 - **DOA** menyatakan apakah bearing dan vektor 360 bin bisa ditampilkan di Dashboard: `AVAILABLE`, atau `DEGRADED`, `CONFLICT`, `UNAVAILABLE`, `INCOMPLETE`, dan `STALE` dengan penyebab di tooltip. Sebelum pembacaan pertama nilainya `WAITING`. Ini keputusan yang sama yang dipakai readout, plot polar, dan peta.
 - **PUBLIKASI** (`DELIVERY` di bahasa Inggris) adalah gate publikasi dari collector: `READY` hanya bila semua pemeriksaan untuk memublikasikan bearing lolos, selain itu `BLOCKED`. Di Ground Console nilainya selalu `BLOCKED`, juga saat DATA dan DOA `AVAILABLE`; penyebabnya dijelaskan di bagian Kesehatan Sistem di bawah. Tooltip menyebut reason teratas beserta kodenya.
 - **SNAPSHOT** menyangkut pembacaan `/api/snapshot` itu sendiri: `CURRENT` selama 5 detik setelah console membaca node (termasuk pembacaan yang melaporkan UNAVAILABLE), lalu `STALE`; `ERROR` bila request terakhir gagal. Sebelum pembacaan pertama nilainya `LOADING` atau `WAITING`.
-- **MQTT** adalah koneksi monitor lokal. Monitor ini berlangganan dan tidak pernah publish sendiri; satu-satunya publish adalah patch konfigurasi yang dikonfirmasi admin di Kontrol. Nilainya `CONNECTED`, `CONNECTING`, `DISCONNECTED`, `ERROR`, atau `OFF` bila host MQTT tidak dikonfigurasi. `ERROR` juga muncul bila monitor tidak bisa dibuat (misalnya `paho-mqtt` tidak terpasang) atau console tidak bisa membaca status monitor; detailnya ada di tooltip.
+- **MQTT** adalah koneksi monitor lokal. Monitor ini berlangganan dan tidak pernah publish sendiri; satu-satunya publish adalah perintah Kontrol yang dibuka admin (patch yang dikonfirmasi, dan permintaan settings). Nilainya `CONNECTED`, `CONNECTING`, `DISCONNECTED`, `ERROR`, atau `OFF` bila host MQTT tidak dikonfigurasi. `ERROR` juga muncul bila monitor tidak bisa dibuat (misalnya `paho-mqtt` tidak terpasang) atau console tidak bisa membaca status monitor; detailnya ada di tooltip.
 - **SIM** bernilai `ON` selama simulasi aktif, yaitu saat Dashboard menampilkan data sintetis dari browser, dan `OFF` bila Dashboard memakai Data Out live. Item lain di strip tetap melaporkan data live, juga saat simulasi `ON`.
 
 Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
@@ -473,7 +477,7 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 - Enter di bagian mana pun men-submit bagian itu.
 - URL Data Out disimpan tanpa garis miring di akhir. Port MQTT harus bilangan bulat 1–65535.
 - **Transport MQTT** (WebSocket default, atau TCP) harus sama dengan listener broker. **Path WebSocket** (default `/mqtt`) hanya dipakai dengan WebSocket. Mengubah host, port, transport, atau path me-restart monitor dan mereset penghitungnya.
-- Dry-run config patch mewajibkan **Revisi konfigurasi dasar** (Base config revision), yaitu `config_rev` terakhir yang dilaporkan node. Dry-run hanya pratinjau dan tidak mengirim apa pun; perubahan nyata dikirim lewat Kontrol di Dashboard.
+- Dry-run config patch hanya meminta nilai field, dengan aturan yang sama seperti Kontrol. Hasilnya pratinjau envelope `config.patch` yang akan dikirim saat itu: topik, `sid` dan `base_rev` dari `state` RDF-SDR terakhir (`—` bila belum ada), field, dan masa berlaku 15 detik. Dry-run tidak mengirim apa pun; perubahan nyata dikirim lewat Kontrol di Dashboard.
 - Login admin di sini juga membuka Kontrol di Dashboard (sesi yang sama, 30 menit). Chip **PATCH** di bilah halaman bernilai `ADMIN ONLY`.
 - **Akses LAN** menyalakan tampilan LAN lihat-saja (lihat [Tampilan LAN](#tampilan-lan-lihat-saja)): **Lihat dari LAN**, **Port**, **Alamat bind**, **Klien yang diizinkan**, dan statusnya (`OPEN` dengan alamatnya, atau `CLOSED` dengan alasannya). Mengubahnya butuh admin; tanpa admin isian terkunci.
 - Logo PNG boleh grayscale, RGB, RGBA, atau palette, 8/16-bit, interlaced, maksimal 256 KiB dan 4096 × 4096 px. Logo diperiksa di browser sebelum di-stage.
@@ -509,7 +513,7 @@ Kode halaman, termasuk peta, diambil di latar belakang tidak lama setelah consol
 
 ## MQTT staging, opsional
 
-MQTT tidak diperlukan untuk peta, polar, Spektrum, atau simulasi; Kontrol membutuhkannya. Ground Console memakai satu koneksi ke broker yang dikonfigurasi. Koneksi itu berlangganan topik `sdr/v1/uav-01` dan topik RDF Node di `sdr/v2/uav-01` sekaligus, dan hanya publish patch konfigurasi ke `sdr/v1/uav-01` yang dikonfirmasi admin di Kontrol. `paho-mqtt` diperlukan untuk monitor MQTT, Kontrol, dan synthetic publisher.
+MQTT tidak diperlukan untuk peta, polar, Spektrum, atau simulasi; Kontrol membutuhkannya. Ground Console memakai satu koneksi ke broker yang dikonfigurasi. Koneksi itu berlangganan topik `sdr/v1/uav-01` dan topik RDF Node di `sdr/v2/uav-01` sekaligus, dan hanya publish perintah Kontrol (admin) ke `sdr/v2/uav-01/cmd/config/patch` dan `cmd/config/get`. `paho-mqtt` diperlukan untuk monitor MQTT, Kontrol, dan synthetic publisher.
 
 Koneksi MQTT default adalah `10.90.0.1:9001`, WebSocket, path `/mqtt`. Host menerima literal IPv4/IPv6 apa pun atau `localhost`, bukan nama DNS; masukkan IPv6 tanpa kurung siku. Ground Console membuka koneksi keluar ke broker, tetapi HTTP Ground Console tetap bind ke loopback. Monitor tidak punya opsi username, password, atau TLS untuk TCP maupun WebSocket, sehingga payload, termasuk patch dari Kontrol, melintas tanpa enkripsi. Gunakan hanya broker dan jaringan tepercaya; jangan kirim payload rahasia melalui koneksi ini. Karena itu console tidak bisa tersambung ke broker LAN `tools/mqtt_lan_stage.conf` yang mewajibkan TLS dan password.
 
@@ -567,13 +571,13 @@ Semua payload synthetic publisher membawa `source: "synthetic"` dan tampil denga
 
 ### Menguji Kontrol di broker staging
 
-Broker `tools/mqtt_stage4.conf` menerima koneksi anonim di loopback, jadi console bisa publish ke sana. Jalankan broker dan console seperti di atas, lalu jalankan agent dari repo ini di mesin yang sama dengan `--publish --enable-config --settings-path <file settings.json>` dan `--base-url` ke Data Out yang bisa dibaca. Agent baru mengirim `config_reported` setelah bisa membaca `settings.json` lewat Data Out; sebelum itu Kontrol menampilkan rev dasar "tidak diketahui" dan Kirim nonaktif. Tanpa `--enable-config`, setiap patch dijawab `REMOTE_CONTROL_DISABLED`. Synthetic publisher dengan `--keep-retained` mengisi rev dasar (dengan badge `SYNTHETIC`), tetapi tidak menjawab patch, sehingga hasilnya **Belum ada ACK**.
+Broker `tools/mqtt_stage4.conf` menerima koneksi anonim di loopback, jadi console bisa publish ke sana. Kontrol butuh RDF Node (edge) yang tersambung ke broker yang sama dan mengirim `state` dan `telemetry/health`; agent bawaan repo ini dan synthetic publisher memakai topik lama dan tidak menjawab Kontrol. Tanpa RDF Node, Kirim nonaktif ("Kirim butuh state RDF-SDR lewat MQTT"). Listener `mqtt_stage4.conf` tidak memakai TLS, jadi RDF Node menjawab **Baca settings** dengan `TLS_REQUIRED_FOR_SETTINGS_REPORT`. Tanpa perangkat, `tools/test_mqtt_config_patch.py` dan `tools/test_rdf_node_commands.py` menjalankan alur Kontrol dengan payload yang dinilai kode edge sendiri (`tools/fixtures/rdf-node/commands.json`).
 
 ### RDF Node
 
 Pastikan `paho-mqtt==2.1.0` terpasang di virtual environment yang sama dengan Ground Console; jika dependency tidak tersedia, status monitor melaporkan error tanpa mematikan Ground Console.
 
-Untuk RDF Node, console hanya membaca 12 filter di atas dan belum mengirim perintah ke `sdr/v2/uav-01/cmd/...`. Satu-satunya publish console masih patch ke `sdr/v1/uav-01/cmd/config/patch` dari Kontrol. Endpoint browser hanya `GET /api/mqtt/rdf-node`. RDF Node tidak punya `config/reported`, jadi Kontrol mengambil nilai VFO dari Data Out (cadangan).
+Untuk RDF Node, console berlangganan 12 filter di atas. Satu-satunya publish console adalah perintah Kontrol ke `sdr/v2/uav-01/cmd/config/patch` dan `cmd/config/get` (lihat [Kirim ke RDF-SDR dan Kontrol](#kirim-ke-rdf-sdr-dan-kontrol)). RDF Node tidak punya `config/reported`; Kontrol membaca nilai dari `settings/reported` (jawaban `config.get`, hanya bila RDF-SDR tersambung ke broker lewat TLS) atau dari Data Out (cadangan).
 
 Kontrak per topik (field wajib, QoS, retained, expiry, batas freshness, dan aturan status console) ada di `docs/MQTT_KONTRAK.md`, diambil dari edge commit `8691ad0` (rilis `1.0.0-20261013194717`). Field edge yang lebih baru, misalnya field PPP di `telemetry/health/detail`, diterima tetapi tidak wajib.
 
@@ -765,7 +769,7 @@ Untuk tablet atau komputer lain di LAN yang hanya perlu melihat Dashboard, peta,
 
 ## Agent RDF-SDR (Raspberry)
 
-Kontrol di console butuh edge agent di RDF-SDR: agent membaca Data Out KrakenSDR dan publish `health`, `state` dan `config_reported` ke MQTT, lalu menjawab patch dari Kontrol di `ack/config`. Detail lengkap ada di `packaging/agent/README.md`.
+Agent bawaan repo ini membaca Data Out KrakenSDR dan publish `health`, `state` dan `config_reported` ke topik lama `sdr/v1/uav-01`, lalu menjawab patch di topik itu. Kontrol tidak lagi memakainya: Kontrol mengirim perintah ke RDF Node (`sdr/v2/uav-01`) yang dipasang di RDF-SDR dari repository RDF Node. Detail lengkap ada di `packaging/agent/README.md`.
 
 ```sh
 tar -xzf sdr-doa-rdf-sdr-agent-2.0.0.tar.gz
@@ -778,7 +782,7 @@ journalctl -u sdr-doa-agent -f
 
 - Agent berjalan sebagai service `sdr-doa-agent` (mulai saat boot, restart bila gagal) dengan user biasa: pemilik `settings.json` KrakenSDR, `doasdr`, atau user sistem baru `sdr-doa-agent`. Installer menolak user root.
 - Pengaturan ada di `/etc/sdr-doa-agent/agent.env` (`root:<grup service>`, 0640). Setelah mengubahnya: `sudo systemctl restart sdr-doa-agent`. Variabel lain bisa diset dengan `--set NAMA=NILAI`, misalnya `--set DOA_RATE=0`.
-- Secara bawaan agent menjawab setiap patch dengan `REMOTE_CONTROL_DISABLED`. `sudo sh install.sh --enable-config` mengizinkan Kontrol mengubah `settings.json`; `--disable-config` mematikannya lagi. Aktifkan hanya di broker dan jaringan yang dipercaya.
+- Secara bawaan agent menjawab setiap patch dengan `REMOTE_CONTROL_DISABLED`. `sudo sh install.sh --enable-config` mengizinkan patch di topik lama `sdr/v1/uav-01/cmd/config/patch` mengubah `settings.json`; `--disable-config` mematikannya lagi. Aktifkan hanya di broker dan jaringan yang dipercaya.
 - Agent memakai MQTT lewat TCP (default port 1883), bukan WebSocket. Console dan agent harus memakai broker yang sama. Broker di luar loopback wajib TLS dan username (`MQTT_TLS=1` atau `MQTT_CAFILE`, `MQTT_USERNAME`, dan `SDR_DOA_MQTT_PASSWORD` di `agent.env`; lihat `packaging/agent/README.md`).
 - Docker dari image GHCR (arm64 atau armv7, tanpa build, update otomatis tanpa login GitHub), sebagai pengganti service di atas, bukan bersamaan. Selama service native masih terpasang, script menolak memasang agent; hapus dulu dengan `sudo sh /opt/sdr-doa-agent/uninstall.sh` (pengaturan di `/etc/sdr-doa-agent/agent.env` tetap, salin nilainya ke `agent.env` yang baru):
 
@@ -793,7 +797,7 @@ journalctl -u sdr-doa-agent -f
   sudo docker compose logs -f agent
   ```
 
-  `--enable-config` mengizinkan Kontrol mengubah `settings.json`: script me-mount `/home/doasdr/doasdr/_share` (`--share-dir`) dan menjalankan agent sebagai pemilik direktori itu; `--disable-config` mematikannya lagi. `sdr-doa-docker update --dir /opt/sdr-doa-agent` dan `rollback` bekerja seperti pada console; image agent tidak punya healthcheck, jadi image baru dianggap gagal bila container berhenti atau restart dalam 20 detik pertama.
+  `--enable-config` mengizinkan patch di topik lama mengubah `settings.json`: script me-mount `/home/doasdr/doasdr/_share` (`--share-dir`) dan menjalankan agent sebagai pemilik direktori itu; `--disable-config` mematikannya lagi. `sdr-doa-docker update --dir /opt/sdr-doa-agent` dan `rollback` bekerja seperti pada console; image agent tidak punya healthcheck, jadi image baru dianggap gagal bila container berhenti atau restart dalam 20 detik pertama.
 - Docker yang di-build sendiri (juga arm64/armv7): salin `packaging/agent/agent.env.example` ke `agent.env`, edit, lalu `docker compose up -d --build` di folder rilis agent (atau `docker compose -f docker-compose.agent.yml up -d --build` di repository). Butuh Compose v2.24+. Project dan volume-nya sama dengan yang ditulis `sdr-doa-docker install --agent`, jadi state di volume `agent-state` tetap saat pindah ke image GHCR; salin isi `agent.env` lama ke `/opt/sdr-doa-agent/agent.env`.
 - Upgrade service: jalankan installer rilis baru lagi; `agent.env` dan state tetap. Hapus dengan `sudo sh /opt/sdr-doa-agent/uninstall.sh` (`--purge` juga menghapus pengaturan dan state).
 
@@ -886,12 +890,15 @@ Tengah atau VFO diubah di halaman Receiver (mengetik Center atau VFO, menggeser 
 - **Penanda tidak tersimpan ke set**: penanda masuk daftar, tetapi penyimpanan ke set gagal; teks dalam kurung adalah pesan Receiver. Periksa console, lalu simpan set lagi di halaman Receiver.
 - **Di luar jangkauan penanda**: frekuensi perangkat (tanpa Freq Shift) harus 1–7250 MHz. **Batas penanda tercapai**: daftar sudah berisi 10 000 penanda. **Penanda sudah tidak ada**: penanda itu sudah dihapus di halaman Receiver.
 
-### Kontrol: Kirim nonaktif, `CONFIG_REVISION_UNKNOWN`, atau Belum ada ACK
+### Kontrol: Kirim nonaktif, `NODE_NOT_FRESH`, `TLS_REQUIRED_FOR_SETTINGS_REPORT`, atau Belum ada ACK
 
-- Kirim nonaktif dengan rev dasar "tidak diketahui": belum ada `config_reported`, `ack_config`, atau `state` v1 dari agent di broker yang sama. Periksa agent dan koneksi MQTT di **Monitor Pesan**.
-- **Belum ada ACK**: agent tidak menjawab dalam sekitar 65 detik. Agent tidak berjalan, memakai broker lain, atau versinya lama (hanya berlangganan `cmd/config/patch` dengan `--enable-config`).
-- `Ditolak · REMOTE_CONTROL_DISABLED`: agent berjalan tanpa `--enable-config`.
-- **Publish gagal**: ACL broker tidak mengizinkan console publish ke `sdr/v1/uav-01/cmd/config/patch`.
+- Kirim nonaktif ("Kirim butuh state RDF-SDR lewat MQTT", "... revisi konfigurasi (state.cfg) RDF-SDR", "... telemetry/health yang segar dari RDF-SDR"), atau console menjawab `NODE_SESSION_UNAVAILABLE`, `CONFIG_REVISION_UNKNOWN`, `NODE_NOT_FRESH`: belum ada `state` RDF Node di broker yang sama, `state.cfg` masih kosong, atau `telemetry/health` lebih tua dari 8 detik. Periksa tampilan **RDF Node** di **Monitor Pesan**.
+- `TLS_REQUIRED_FOR_SETTINGS_REPORT` setelah **Baca settings**: koneksi RDF-SDR ke broker tidak memakai TLS, jadi RDF-SDR tidak mengirim `settings/reported`. Nilai diambil dari Data Out (cadangan) dan patch tetap bisa dikirim. Beri broker listener TLS untuk RDF-SDR; console tetap memakai listener biasa.
+- **Belum ada ACK** (sekitar 20 detik): RDF Node tidak menjawab di `sdr/v2/uav-01/ack/config`. RDF Node mati atau memakai broker lain. Agent bawaan repo ini tidak menjawab Kontrol.
+- `Ditolak · REJECTED · CONFIG_REVISION_CONFLICT` atau `Ditolak · REJECTED · BUSY`: settings berubah oleh pengirim lain, atau RDF-SDR masih mengerjakan perintah lain, misalnya dari `rdf-ground.service`. Baca ulang nilai, tinjau, kirim lagi; pakai satu pengendali sekaligus.
+- `Ditolak · REJECTED · EXPIRED_OR_INVALID_DEADLINE`: jam host console lebih dari 1 detik di depan jam RDF-SDR, atau perintah tiba setelah 15 detik. Periksa NTP di kedua host.
+- `ACK · FAILED · CONFIG_TARGET_NOT_READY`: RDF Node belum punya target settings yang disetujui (`sudo rdf-node controls approve --settings` di RDF-SDR).
+- **Publish gagal**: ACL broker tidak mengizinkan console publish ke `sdr/v2/uav-01/cmd/config/patch` atau `cmd/config/get`.
 - Kontrol tidak bisa dibuka karena login admin nonaktif: `SDR_DOA_ADMIN_PASSWORD` diisi nilai kosong, atau `.env` tidak bisa dibaca. Isi kata sandi lalu restart console.
 
 ### `sdr-doa-docker`: pull ditolak (`denied`, `unauthorized`)
@@ -923,7 +930,7 @@ Gunakan Node LTS yang memenuhi requirement Vite. Node 22.12+ direkomendasikan ol
 
 ### Nilai `settings.json` terlambat atau tampil `REUSED`
 
-Console memakai ulang `settings.json` paling lama 30 detik (lihat [Refresh](#refresh)), jadi perubahan gain, bandwidth, squelch, atau offset kompas yang dibuat langsung di node bisa tampil hingga 30 detik kemudian. **Cek ulang** di Kontrol membaca `settings.json` saat itu juga. Refresh atau tab lain dalam 1 detik setelah pembacaan terakhir mendapat pembacaan yang sama, bukan pembacaan baru.
+Console memakai ulang `settings.json` paling lama 30 detik (lihat [Refresh](#refresh)), jadi perubahan gain, bandwidth, squelch, atau offset kompas yang dibuat langsung di node bisa tampil hingga 30 detik kemudian. **Cek ulang** di Kontrol membaca `settings.json` saat itu juga dan meminta `settings/reported` dari RDF-SDR. Refresh atau tab lain dalam 1 detik setelah pembacaan terakhir mendapat pembacaan yang sama, bukan pembacaan baru.
 
 ### Data Out UNAVAILABLE, ERROR, atau STALE
 
