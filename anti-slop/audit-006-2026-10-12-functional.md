@@ -613,7 +613,7 @@ Status verifikasi: semua 147 cluster dari putaran audit berstatus terkonfirmasi 
 - **medium** · MQTT monitor · terkonfirmasi · C020
 - Lokasi: `tools/ground_console.py:1904-1909`, `frontend/src/api.ts:252`, `frontend/src/pages/MessageMonitorPage.tsx:91`, `QUICKSTART.md:266-268`
 - Masalah: Backend subscribe ke filter `sdr/v2/uav-01/*` dan menyajikan `GET /api/mqtt/rdf-node`, tetapi tidak ada konsumen di `frontend/src`, `frontend/dist`, maupun legacy UI.
-- Dampak: Bila node memakai MQTT v2, operator melihat "CONNECTED", "RECEIVED 0", dan "No bounded subscriber events observed." sementara DoA, health, dan frame angular v2 yang valid sedang mengalir. Gate freshness, sesi, dan revisi v2 yang didokumentasikan tidak terlihat di mana pun.
+- Dampak: Bila node memakai kontrak RDF Node (root `sdr/v2`), operator melihat "CONNECTED", "RECEIVED 0", dan "No bounded subscriber events observed." sementara DoA, health, dan frame angular v2 yang valid sedang mengalir. Gate freshness, sesi, dan revisi v2 yang didokumentasikan tidak terlihat di mana pun.
 - Bukti: Publisher v2 lewat broker: UI `RECEIVED | 0`, sedangkan `fetch('/api/mqtt/rdf-node')` → `connection=ready`.
 - Perbaikan: Tambahkan panel v2 (normalizer dan type di `api.ts`/`types.ts`), atau perbaiki QUICKSTART agar menyatakan v2 hanya tersedia lewat API.
 
