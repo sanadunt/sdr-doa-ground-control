@@ -1,6 +1,6 @@
 # SDR-DoA edge agent di RDF-SDR (Raspberry)
 
-Agent membaca Data Out KrakenSDR di Raspberry (`http://127.0.0.1:8081`), lalu publish `health`, `state` dan `config_reported` ke MQTT (`sdr/v1/uav-01/...`). Kontrol di Ground Console butuh agent ini: tanpa `config_reported` rev dasar tidak diketahui dan tombol Kirim nonaktif. Agent hanya memakai standard library Python, jadi tidak perlu `pip`.
+Agent membaca Data Out KrakenSDR di Raspberry (`http://127.0.0.1:8081`), lalu publish `health`, `state` dan `config_reported` ke MQTT di topik lama `sdr/v1/uav-01/...`. Kontrol di Ground Console tidak lagi memakai agent ini: Kontrol mengirim perintah ke RDF Node (`sdr/v2/uav-01/cmd/config/...`) yang dipasang di RDF-SDR dari repository RDF Node, dan agent ini tidak menjawabnya. Agent hanya memakai standard library Python, jadi tidak perlu `pip`.
 
 Ada tiga cara memasang; pakai satu saja. Semuanya jalan di background, mulai saat boot, dan restart sendiri bila gagal. Hanya image GHCR yang di-update otomatis; service native di-upgrade dengan menjalankan installer rilis baru.
 
@@ -36,7 +36,7 @@ Pengaturan ada di `/etc/sdr-doa-agent/agent.env` (contoh lengkap: `packaging/age
 | `MQTT_HOST`, `MQTT_PORT` | `127.0.0.1`, `1883` | broker; agent memakai MQTT 3.1.1 lewat TCP, bukan WebSocket |
 | `MQTT_TLS`, `MQTT_CAFILE`, `MQTT_USERNAME`, `SDR_DOA_MQTT_PASSWORD` | kosong | broker non-loopback wajib TLS dan username |
 | `PUBLISH` | `1` | `0` = tanpa MQTT |
-| `ENABLE_CONFIG` | `0` | `1` = terapkan patch dari Kontrol ke `SETTINGS_PATH`; `0` = jawab `REMOTE_CONTROL_DISABLED` |
+| `ENABLE_CONFIG` | `0` | `1` = terapkan patch di `sdr/v1/uav-01/cmd/config/patch` ke `SETTINGS_PATH`; `0` = jawab `REMOTE_CONTROL_DISABLED` |
 | `SETTINGS_PATH` | `/home/doasdr/doasdr/_share/settings.json` | settings KrakenSDR |
 | `STATE_DIR` | `/var/lib/sdr-doa-agent` | state agent |
 | `CLOCK_SOURCE`, `AUTHORITY`, `HEALTH_INTERVAL`, `DOA_RATE`, `STATE_INTERVAL`, `POLL_INTERVAL`, `COLLECT_BUDGET` | kosong = default agent | tuning |
@@ -50,7 +50,7 @@ sudo sh /opt/sdr-doa-agent/uninstall.sh            # agent.env dan state tetap
 sudo sh /opt/sdr-doa-agent/uninstall.sh --purge    # hapus juga
 ```
 
-`ENABLE_CONFIG=1` berarti Kontrol di ground bisa mengubah `settings.json` KrakenSDR. Aktifkan hanya di broker dan jaringan yang dipercaya; console publish tanpa TLS atau password. Ubah dengan `sudo sh install.sh --enable-config` (atau `--disable-config`), bukan hanya lewat `agent.env`: service hanya boleh menulis direktori `settings.json` bila installer dijalankan dengan config aktif. Bila `ENABLE_CONFIG=1` tetapi user service tidak bisa menulis `settings.json`, agent berhenti dengan pesan di `journalctl -u sdr-doa-agent` (exit 78) dan tidak di-restart terus-menerus. Console dan agent harus memakai broker yang sama (atau bridge yang meneruskan `sdr/v1/uav-01/#`).
+`ENABLE_CONFIG=1` berarti patch di topik lama `sdr/v1/uav-01/cmd/config/patch` bisa mengubah `settings.json` KrakenSDR. Aktifkan hanya di broker dan jaringan yang dipercaya; console publish tanpa TLS atau password. Ubah dengan `sudo sh install.sh --enable-config` (atau `--disable-config`), bukan hanya lewat `agent.env`: service hanya boleh menulis direktori `settings.json` bila installer dijalankan dengan config aktif. Bila `ENABLE_CONFIG=1` tetapi user service tidak bisa menulis `settings.json`, agent berhenti dengan pesan di `journalctl -u sdr-doa-agent` (exit 78) dan tidak di-restart terus-menerus. Console dan agent harus memakai broker yang sama (atau bridge yang meneruskan `sdr/v1/uav-01/#`).
 
 ## Docker dari image GHCR (update otomatis)
 

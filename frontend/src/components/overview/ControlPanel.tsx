@@ -1,19 +1,23 @@
 import type { JSX, ReactNode } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ApiError, getAdminStatus, getConfigPatchStatus, getConfigReported, logoutAdmin, sendConfigPatch } from '../../api';
+import { ApiError, getAdminStatus, getConfigPatchStatus, getConfigReported, logoutAdmin, requestConfigGet, sendConfigPatch } from '../../api';
 import type { ConfigCommandStatus, ConfigReported, ConsoleCapabilities } from '../../api';
 import type { ConfigPatchChanges, ConfigPatchKey, ControlDraftRequest } from '../../lib/controlDraft';
 import {
   CONFIG_PATCH_ERROR_KEYS,
   CONFIG_PATCH_FIELDS,
+  GAIN_TABLE_DB,
   commandResultView,
   displayValue,
   draftFromReported,
+  draftWithCenter,
   fieldFor,
   isConfigPatchErrorCode,
   mergeIntoDraft,
   parseDraft,
+  plainNumber,
   rangeParts,
+  settingsReadView,
 } from '../../lib/configPatch';
 import type { CommandResultView, ConfigPatchRanges, DraftEvaluation, DraftValues, FieldEvaluation } from '../../lib/configPatch';
 import { VERIFY_WINDOW_MS, currentConfigValues, dataOutConfigValues, verifyConfigPatch } from '../../lib/configVerify';
@@ -31,7 +35,7 @@ export interface ControlPanelProps {
   /** Latest draft from the spectrum dock; a new `seq` means a new request. */
   controlDraftRequest: ControlDraftRequest | null;
   onClose: () => void;
-  /** Latest Data Out snapshot: current values the MQTT report lacks, and the read-back check. */
+  /** Latest Data Out snapshot: current values settings/reported lacks, and the read-back check. */
   snapshot?: TelemetrySnapshot | null;
   localSnapshotFresh?: boolean;
   /** Read Data Out now, settings.json included (App's refresh; must be stable). */
@@ -57,13 +61,15 @@ export interface ControlDone {
 /** What was sent, when it was issued (server clock) and when it became final (browser clock). */
 export interface ControlVerifyTarget { changes: ConfigPatchChanges; issuedAtMs: number | null; finalAtMs: number; windowMs?: number }
 
-/** Topic suffix shown before the server reports the full topic. */
+/** Topic suffixes shown before the server reports the full topics. */
 const PATCH_TOPIC_SUFFIX = 'cmd/config/patch';
 const ACK_TOPIC_SUFFIX = 'ack/config';
 const REPORTED_POLL_MS = 2_000;
 const STATUS_POLL_MS = 1_000;
-const DEFAULT_TTL_MS = 60_000;
-const COMMAND_ID_RE = /^[A-Za-z0-9_-]{1,64}$/u;
+const DEFAULT_TTL_MS = 15_000;
+const COMMAND_ID_RE = /^[A-Za-z0-9_.:-]{1,80}$/u;
+/** Refusals of a command that was not sent; the draft stays and the values are read again. */
+const RETRY_IN_FORM_CODES = new Set(['CONFIG_REVISION_STALE', 'CONFIG_REVISION_UNKNOWN', 'NODE_NOT_FRESH', 'NODE_SESSION_UNAVAILABLE']);
 
 // The spectrum dock's request that was already merged. Module scope, so a
 // panel opened again later does not replay an old request.
@@ -100,6 +106,9 @@ function fieldHint(t: Translate, evaluation: FieldEvaluation, ranges: ConfigPatc
   if (evaluation.problem === 'number') return { text: t('control.notNumber'), tone: 'error' };
   if (evaluation.problem === 'range') return { text: t('control.outOfRange', { range }), tone: 'error' };
   if (evaluation.problem === 'empty') return { text: t('control.required', { range }), tone: 'error' };
+  if (evaluation.problem === 'table') return { text: t('control.notInGainTable'), tone: 'error' };
+  if (evaluation.problem === 'centerVfo') return { text: t('control.vfoMustFollowCenter'), tone: 'error' };
+  if (evaluation.required) return { text: t('control.vfoFollowsCenter'), tone: 'changed' };
   if (evaluation.changed) {
     const from = evaluation.reported === null ? t('control.notReported') : displayValue(evaluation.field, evaluation.reported);
     return { text: t('control.changedFrom', { value: from }), tone: 'changed' };
@@ -118,6 +127,15 @@ export function reviewRows(t: Translate, fields: readonly FieldEvaluation[]): Co
   }));
 }
 
+/** Select options for a table field: every table value, and the current text when it is none of them. */
+function tableOptions(entry: FieldEvaluation, table: readonly number[]): Array<{ value: string; label: string }> {
+  const options = table.map((gain) => ({ value: plainNumber(gain), label: displayValue(entry.field, gain) }));
+  if (entry.text.trim() !== '' && !options.some((option) => option.value === entry.text)) {
+    options.unshift({ value: entry.text, label: entry.value === null ? entry.text : displayValue(entry.field, entry.value) });
+  }
+  return options;
+}
+
 const VERIFY_CHIPS: Record<VerifyStatus, { code: string; tone: string }> = {
   confirmed: { code: 'CONFIRMED', tone: 'good' },
   pending: { code: 'PENDING', tone: 'info' },
@@ -133,7 +151,7 @@ const VERIFY_VERDICTS: Record<VerifyVerdict, { key: MessageKey; tone: string }> 
   'not-reported': { key: 'verify.verdict.notReported', tone: 'neutral' },
 };
 
-/** Read-back after a final command: sent value, Data Out, MQTT and a status per field. */
+/** Read-back after a final command: sent value, settings/reported (MQTT), Data Out and a status per field. */
 export function VerifyList({ verification, onRecheck }: { verification: ConfigVerification; onRecheck?: () => void }): JSX.Element {
   const { t } = useI18n();
   const verdict = VERIFY_VERDICTS[verification.verdict];
@@ -152,8 +170,8 @@ export function VerifyList({ verification, onRecheck }: { verification: ConfigVe
               <div className="ov-verify-row"><span>{t(field.shortLabel)}</span><span className={`ov-tag tone-${chip.tone}`}>{chip.code}</span></div>
               <dl className="ov-verify-values">
                 <div><dt>{t('verify.sent')}</dt><dd className="ov-mono">{displayValue(field, row.sent)}</dd></div>
-                <div><dt>{t('verify.dataOut')}</dt><dd className="ov-mono">{displayValue(field, row.dataOut)}</dd></div>
                 <div><dt>{t('verify.mqtt')}</dt><dd className="ov-mono">{displayValue(field, row.mqtt)}</dd></div>
+                <div><dt>{t('verify.dataOut')}</dt><dd className="ov-mono">{displayValue(field, row.dataOut)}</dd></div>
               </dl>
             </li>
           );
@@ -162,6 +180,9 @@ export function VerifyList({ verification, onRecheck }: { verification: ConfigVe
     </section>
   );
 }
+
+/** Where the form's current values come from. */
+export type ControlValueSource = 'settings' | 'data-out' | 'none';
 
 export interface ControlPanelViewProps {
   capabilities: ConsoleCapabilities | null;
@@ -177,7 +198,12 @@ export interface ControlPanelViewProps {
   editError: ControlFailure | null;
   /** Read-back of the final command, when it was published. */
   verification?: ConfigVerification | null;
+  /** Where the current values come from (settings/reported, Data Out or neither). */
+  valueSource?: ControlValueSource;
+  /** A config.get the console refused, by its code. */
+  settingsError?: ControlFailure | null;
   onRecheck?: () => void;
+  onReadSettings?: () => void;
   onClose: () => void;
   onLock: () => void;
   onUnlocked: () => void;
@@ -204,7 +230,10 @@ export function ControlPanelView({
   done,
   editError,
   verification = null,
+  valueSource = 'none',
+  settingsError = null,
   onRecheck,
+  onReadSettings,
   onClose,
   onLock,
   onUnlocked,
@@ -219,8 +248,9 @@ export function ControlPanelView({
   const { t } = useI18n();
   const patch = capabilities?.configPatch ?? null;
   const ranges = patch?.ranges ?? null;
+  const gainTable = patch?.gainTableDb.length ? patch.gainTableDb : GAIN_TABLE_DB;
   const topic = patch?.topic ?? PATCH_TOPIC_SUFFIX;
-  const ackTopic = patch?.topic ? patch.topic.replace(/cmd\/config\/patch$/u, ACK_TOPIC_SUFFIX) : ACK_TOPIC_SUFFIX;
+  const ackTopic = patch?.ackTopic ?? ACK_TOPIC_SUFFIX;
   const ttlS = Math.round((patch?.ttlMs ?? DEFAULT_TTL_MS) / 1000);
   const qos = patch?.qos ?? 1;
   const unlocked = admin === 'unlocked';
@@ -228,13 +258,29 @@ export function ControlPanelView({
   const changeCount = Object.keys(evaluation.changes).length;
   const patchUnavailable = patch?.enabled === false || (reported !== null && !reported.available);
   const connected = reported?.broker.connection === 'connected';
-  const baseRev = reported?.baseConfigRev ?? null;
+  const node = reported?.node ?? null;
+  const baseRev = reported?.baseRev ?? null;
   const brokerText = reported?.broker.host ? `${reported.broker.host}${reported.broker.port ? `:${reported.broker.port}` : ''}` : '—';
-  const ageMs = reported?.reported?.ageMs ?? null;
+  const settings = reported?.settings ?? null;
+  const settingsRead = settingsReadView(reported?.settingsRequest);
+  const reading = settingsRead?.key === 'control.settings.reading';
   const reviewBlocked: MessageKey | null = !review ? null
     : patchUnavailable ? 'control.patchUnavailable'
-      : review.rev === null ? 'control.sendBlockedRev'
-        : !connected ? 'control.sendBlockedBroker' : null;
+      : !connected ? 'control.sendBlockedBroker'
+        : !node ? 'control.sendBlockedNode'
+          : review.rev === null ? 'control.sendBlockedRev'
+            : !node.healthFresh ? 'control.sendBlockedHealth' : null;
+
+  let settingsLine: ReactNode;
+  if (!settings) settingsLine = t('control.settingsNone');
+  else if (settings.matchesStateCfg) {
+    settingsLine = withSlots(t('control.settingsReported'), {
+      rev: settings.rev ?? '—',
+      age: settings.ageMs === null ? '—' : t('common.durationS', { value: Number((settings.ageMs / 1000).toFixed(1)) }),
+    });
+  } else {
+    settingsLine = withSlots(t('control.settingsOld'), { rev: settings.rev ?? '—', cfg: baseRev ?? t('control.revUnknown') });
+  }
 
   let body: ReactNode;
   if (!unlocked) {
@@ -249,12 +295,29 @@ export function ControlPanelView({
           <span className="ov-mono ov-control-topic">{topic}</span>
           <span>{withSlots(t('control.broker'), { broker: brokerText, connection: (reported?.broker.connection ?? 'unknown').toUpperCase(), rev: baseRev ?? t('control.revUnknown') })}</span>
           <span>
-            {reported?.reported
-              ? t('control.reportedAge', { age: ageMs === null ? '—' : t('common.durationS', { value: Number((ageMs / 1000).toFixed(1)) }) })
-              : t('control.reportedNone')}
-            {reported?.reported?.synthetic ? <> <span className="ov-tag tone-warn">SYNTHETIC</span></> : null}
+            {node
+              ? withSlots(t('control.node'), { sid: node.sid, health: node.healthFresh ? 'FRESH' : 'STALE' })
+              : t('control.nodeNone')}
           </span>
+          <span className="ov-control-settings">
+            <span>{settingsLine}</span>
+            {onReadSettings ? (
+              <button className="ov-button" type="button" disabled={!connected || !node || reading || patchUnavailable} onClick={onReadSettings}>
+                {t('control.readSettings')}
+              </button>
+            ) : null}
+          </span>
+          <span>{t(valueSource === 'settings' ? 'control.valuesSettings' : valueSource === 'data-out' ? 'control.valuesDataOut' : 'control.valuesNone')}</span>
         </div>
+        {settingsRead ? (
+          <p className={settingsRead.tone === 'info' ? 'ov-control-note' : settingsRead.tone === 'warn' ? 'ov-control-warn' : 'ov-control-error'} role="status">
+            {settingsRead.code ? <><span className="ov-mono">{settingsRead.code}</span> · </> : null}{t(settingsRead.key)}
+          </p>
+        ) : null}
+        {settingsError ? (
+          <p className="ov-control-error" role="alert"><span className="ov-mono">{settingsError.code}</span> · {noticeText(t, settingsError.message)}</p>
+        ) : null}
+        {node?.remoteConfigPatch === false ? <p className="ov-control-warn">{t('control.noSettingsTarget')}</p> : null}
         {reportedError ? <p className="ov-control-error" role="alert">{t('control.readFailed', { error: noticeText(t, reportedError) })}</p> : null}
         {patchUnavailable ? (
           <p className="ov-control-warn">{reported?.code && isConfigPatchErrorCode(reported.code) ? t(CONFIG_PATCH_ERROR_KEYS[reported.code]) : t('control.patchUnavailable')}</p>
@@ -272,19 +335,33 @@ export function ControlPanelView({
                   <div className="ov-control-field" key={entry.field.key}>
                     <label htmlFor={inputId}>{t(entry.field.shortLabel)}</label>
                     <div className={`ov-unit-input${hint?.tone === 'error' ? ' is-error' : hint?.tone === 'changed' ? ' is-changed' : ''}`}>
-                      <input
-                        id={inputId}
-                        type="text"
-                        inputMode="decimal"
-                        autoComplete="off"
-                        spellCheck={false}
-                        value={entry.text}
-                        disabled={!reported}
-                        aria-invalid={hint?.tone === 'error' ? true : undefined}
-                        aria-describedby={hintId}
-                        onChange={(event) => onDraftChange(entry.field.key, event.target.value)}
-                      />
-                      <span>{entry.field.unit}</span>
+                      {entry.field.table ? (
+                        <select
+                          id={inputId}
+                          value={entry.text}
+                          disabled={!reported}
+                          aria-invalid={hint?.tone === 'error' ? true : undefined}
+                          aria-describedby={hintId}
+                          onChange={(event) => onDraftChange(entry.field.key, event.target.value)}
+                        >
+                          {entry.text.trim() === '' ? <option value="">—</option> : null}
+                          {tableOptions(entry, gainTable).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                        </select>
+                      ) : (
+                        <input
+                          id={inputId}
+                          type="text"
+                          inputMode="decimal"
+                          autoComplete="off"
+                          spellCheck={false}
+                          value={entry.text}
+                          disabled={!reported}
+                          aria-invalid={hint?.tone === 'error' ? true : undefined}
+                          aria-describedby={hintId}
+                          onChange={(event) => onDraftChange(entry.field.key, event.target.value)}
+                        />
+                      )}
+                      {entry.field.table ? null : <span>{entry.field.unit}</span>}
                     </div>
                     {hint ? <small id={hintId} className={`ov-control-hint is-${hint.tone}`}>{hint.text}</small> : null}
                   </div>
@@ -325,7 +402,7 @@ export function ControlPanelView({
         {stage === 'sending' ? (
           <div className="ov-control-box" aria-live="polite">
             <span>{sending?.commandId ? withSlots(t('control.sending'), { topic: ackTopic, id: sending.commandId }) : t('control.posting')}</span>
-            {sending?.status ? <span className="ov-mono ov-control-state">{sending.status.state}</span> : null}
+            {sending?.status ? <span className="ov-mono ov-control-state">{sending.status.ack?.status ?? sending.status.state}</span> : null}
           </div>
         ) : null}
 
@@ -363,12 +440,21 @@ export function ControlPanelView({
   );
 }
 
+/** Where the values the form starts from come from. */
+export function controlValueSource(reported: ConfigReported | null, dataOut: Record<ConfigPatchKey, number | null>): ControlValueSource {
+  if (reported && Object.values(reported.valueSources).some((source) => source !== null)) return 'settings';
+  if (Object.values(dataOut).some((value) => value !== null)) return 'data-out';
+  return 'none';
+}
+
 /**
- * Kontrol: an admin-gated, explicitly confirmed sdr/v1 cmd/config/patch to
- * the RDF-SDR. Locked until admin unlock; then edit -> review -> sending
- * -> done. Nothing is published without the review step and the explicit
- * "Kirim ke RDF-SDR" press; the server checks Origin, admin, ranges and
- * the base revision again, and reports the edge agent's ACK by command id.
+ * Kontrol: an admin-gated, explicitly confirmed config.patch to the RDF-SDR
+ * in the edge's own format. Locked until admin unlock; then edit -> review
+ * -> sending -> done. Nothing is published without the review step and the
+ * explicit "Kirim ke RDF-SDR" press; the server checks Origin, admin, the
+ * edge's field rules, the node session, fresh health and the base revision
+ * again, and reports the edge's ACKs by command id. The current values come
+ * from settings/reported (after a config.get), else from fresh Data Out.
  */
 export function ControlPanel({ capabilities, controlDraftRequest, onClose, snapshot = null, localSnapshotFresh = false, onRefreshSnapshot }: ControlPanelProps): JSX.Element {
   const { t } = useI18n();
@@ -384,12 +470,17 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
   const [sending, setSending] = useState<ControlSending | null>(null);
   const [done, setDone] = useState<ControlDone | null>(null);
   const [editError, setEditError] = useState<ControlFailure | null>(null);
+  const [settingsError, setSettingsError] = useState<ControlFailure | null>(null);
   const [pendingDraft, setPendingDraft] = useState<ConfigPatchChanges | null>(null);
   const [, setVerifyTick] = useState(0);
   const mountedRef = useRef(true);
   const sendController = useRef<AbortController | null>(null);
+  const settingsController = useRef<AbortController | null>(null);
+  // One automatic config.get per unlock, when no settings report is current.
+  const autoReadRef = useRef(false);
 
   const ranges = capabilities?.configPatch?.ranges ?? null;
+  const gainTable = capabilities?.configPatch?.gainTableDb.length ? capabilities.configPatch.gainTableDb : GAIN_TABLE_DB;
   const ttlS = Math.round((capabilities?.configPatch?.ttlMs ?? DEFAULT_TTL_MS) / 1000);
 
   useEffect(() => {
@@ -397,6 +488,7 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
     return () => {
       mountedRef.current = false;
       sendController.current?.abort();
+      settingsController.current?.abort();
     };
   }, []);
 
@@ -420,7 +512,7 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
     setPendingDraft(controlDraftRequest.changes);
   }, [controlDraftRequest]);
 
-  // Reported values and the base revision, every 2 s while unlocked.
+  // Reported values, the node session and the base revision, every 2 s while unlocked.
   useEffect(() => {
     if (admin !== 'unlocked') return undefined;
     let stopped = false;
@@ -454,28 +546,66 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
     const controller = new AbortController();
     getConfigPatchStatus(undefined, controller.signal).then((latest) => {
       if (controller.signal.aborted || !latest || latest.final) return;
-      setSending((current) => current ?? { commandId: latest.commandId, count: Object.keys(latest.changes).length, baseRev: latest.baseConfigRev, status: latest });
+      setSending((current) => current ?? { commandId: latest.commandId, count: Object.keys(latest.changes).length, baseRev: latest.baseRev, status: latest });
       setStage((current) => (current === 'edit' || current === 'review' ? 'sending' : current));
     }).catch(() => undefined);
     return () => controller.abort();
   }, [admin]);
+
+  // config.get: the edge answers with settings/reported (only over a TLS link to the broker).
+  const readSettings = useCallback(() => {
+    settingsController.current?.abort();
+    const controller = new AbortController();
+    settingsController.current = controller;
+    setSettingsError(null);
+    requestConfigGet(controller.signal).then(() => {
+      if (!mountedRef.current || controller.signal.aborted) return;
+      setReloadTick((tick) => tick + 1);
+    }).catch((error: unknown) => {
+      if (!mountedRef.current || controller.signal.aborted || isAbort(error)) return;
+      if (error instanceof ApiError && error.status === 401) {
+        setAdmin('locked');
+        setAdminNotice({ key: 'control.error.ADMIN_REQUIRED' });
+        return;
+      }
+      setSettingsError(controlFailure(error));
+    }).finally(() => {
+      if (settingsController.current === controller) settingsController.current = null;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (admin !== 'unlocked') autoReadRef.current = false;
+  }, [admin]);
+
+  // Read the node's settings once after unlock when no report of its current revision is here.
+  useEffect(() => {
+    if (admin !== 'unlocked' || autoReadRef.current || !reported?.available || !reported.node) return;
+    if (reported.broker.connection !== 'connected' || reported.settings?.matchesStateCfg) return;
+    if (reported.settingsRequest && !reported.settingsRequest.final) return;
+    autoReadRef.current = true;
+    readSettings();
+  }, [admin, reported, readSettings]);
 
   const finish = useCallback((status: ConfigCommandStatus, count: number, baseRev: number | null) => {
     const view = commandResultView(status, count, baseRev, ttlS);
     // A publish the broker refused reached nothing; there is nothing to read back.
     // When the RDF-SDR answered that it did not apply the patch, read back once
     // without waiting for a change that will not come.
-    const refused = status.ack !== null && status.ack.status !== 'applied';
+    const refused = status.ack !== null && ['REJECTED', 'CONFLICT', 'EXPIRED', 'FAILED', 'CANCELLED'].includes(status.ack.status);
     const verify = status.state !== 'publish_failed' && Object.keys(status.changes).length
-      ? { changes: status.changes, issuedAtMs: status.issuedTsMs, finalAtMs: Date.now(), ...(refused ? { windowMs: 0 } : {}) }
+      ? { changes: status.changes, issuedAtMs: status.issuedMs, finalAtMs: Date.now(), ...(refused ? { windowMs: 0 } : {}) }
       : undefined;
     setDone({ view, error: null, commandId: status.commandId, restarted: status.monitorRestarted, verify });
     setStage('done');
     if (view.reload) setReloadTick((tick) => tick + 1);
-    // The console may reuse settings.json for a while; read it now so the
-    // read-back starts from the node's current values.
-    if (verify) onRefreshSnapshot?.();
-  }, [ttlS, onRefreshSnapshot]);
+    if (verify) {
+      // The new values arrive as settings/reported after a config.get, and
+      // the console may reuse settings.json for a while: read both now.
+      readSettings();
+      onRefreshSnapshot?.();
+    }
+  }, [ttlS, onRefreshSnapshot, readSettings]);
 
   // Command status, every second until it is final.
   const sendingId = stage === 'sending' ? sending?.commandId ?? null : null;
@@ -516,12 +646,13 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
     };
   }, [sendingId, sendingCount, sendingRev, finish]);
 
-  // MQTT first; a fresh Data Out snapshot fills what MQTT does not report.
+  // settings/reported first; a fresh Data Out snapshot fills what it does not carry.
   const dataOut = useMemo(() => dataOutConfigValues(snapshot, localSnapshotFresh), [snapshot, localSnapshotFresh]);
   const values = useMemo(() => (reported ? currentConfigValues(reported.values, dataOut) : null), [reported, dataOut]);
+  const valueSource = controlValueSource(reported, dataOut);
   const evaluation = useMemo(
-    () => parseDraft(CONFIG_PATCH_FIELDS, { ...(values ? draftFromReported(values) : {}), ...draft }, values ?? {}, ranges),
-    [draft, values, ranges],
+    () => parseDraft(CONFIG_PATCH_FIELDS, { ...(values ? draftFromReported(values) : {}), ...draft }, values ?? {}, ranges, gainTable),
+    [draft, values, ranges, gainTable],
   );
 
   const enterReview = useCallback((changes: ConfigPatchChanges, rev: number | null, fields: readonly FieldEvaluation[]) => {
@@ -537,11 +668,11 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
     setPendingDraft(null);
     setDraft(merged);
     const current = values ?? reported.values;
-    const next = parseDraft(CONFIG_PATCH_FIELDS, { ...draftFromReported(current), ...merged }, current, ranges);
+    const next = parseDraft(CONFIG_PATCH_FIELDS, { ...draftFromReported(current), ...merged }, current, ranges, gainTable);
     const publishable = reported.available && capabilities?.configPatch?.enabled !== false;
-    if (!next.invalid && Object.keys(next.changes).length && publishable) enterReview(next.changes, reported.baseConfigRev, next.fields);
+    if (!next.invalid && Object.keys(next.changes).length && publishable) enterReview(next.changes, reported.baseRev, next.fields);
     else setStage('edit');
-  }, [pendingDraft, admin, reported, values, stage, draft, ranges, enterReview, capabilities]);
+  }, [pendingDraft, admin, reported, values, stage, draft, ranges, gainTable, enterReview, capabilities]);
 
   const lock = () => {
     sendController.current?.abort();
@@ -556,7 +687,7 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
 
   const send = () => {
     const connected = reported?.broker.connection === 'connected';
-    if (!review || review.rev === null || !connected) return;
+    if (!review || review.rev === null || !connected || !reported?.node?.healthFresh) return;
     const reviewed = review;
     sendController.current?.abort();
     const controller = new AbortController();
@@ -564,9 +695,9 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
     const count = reviewed.rows.length;
     setSending({ commandId: null, count, baseRev: reviewed.rev, status: null });
     setStage('sending');
-    sendConfigPatch({ changes: reviewed.changes, base_config_rev: reviewed.rev as number, confirm: true }, controller.signal).then((accepted) => {
+    sendConfigPatch({ changes: reviewed.changes, base_rev: reviewed.rev as number, confirm: true }, controller.signal).then((accepted) => {
       if (!mountedRef.current || controller.signal.aborted) return;
-      setSending({ commandId: accepted.commandId, count, baseRev: accepted.baseConfigRev ?? reviewed.rev, status: null });
+      setSending({ commandId: accepted.commandId, count, baseRev: accepted.baseRev ?? reviewed.rev, status: null });
     }).catch((error: unknown) => {
       if (!mountedRef.current || controller.signal.aborted || isAbort(error)) return;
       const failure = controlFailure(error);
@@ -577,8 +708,8 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
         setStage('edit');
         return;
       }
-      if (failure.code === 'CONFIG_REVISION_STALE' || failure.code === 'CONFIG_REVISION_UNKNOWN') {
-        // The draft stays; the values and base revision are read again before a new review.
+      if (RETRY_IN_FORM_CODES.has(failure.code)) {
+        // Nothing was sent. The draft stays; the values, the node and the base revision are read again first.
         setReloadTick((tick) => tick + 1);
         setEditError(failure);
         setStage('edit');
@@ -607,8 +738,9 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
     : null;
   const recheck = useCallback(() => {
     onRefreshSnapshot?.();
+    readSettings();
     setReloadTick((tick) => tick + 1);
-  }, [onRefreshSnapshot]);
+  }, [onRefreshSnapshot, readSettings]);
 
   return (
     <ControlPanelView
@@ -624,12 +756,17 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
       done={done}
       editError={editError}
       verification={verification}
+      valueSource={valueSource}
+      settingsError={settingsError}
       onRecheck={recheck}
+      onReadSettings={readSettings}
       onClose={onClose}
       onLock={lock}
       onUnlocked={() => { setAdminNotice(null); setAdmin('unlocked'); }}
-      onDraftChange={(key, text) => setDraft((current) => ({ ...current, [key]: text }))}
-      onReview={() => { if (!evaluation.invalid && Object.keys(evaluation.changes).length) enterReview(evaluation.changes, reported?.baseConfigRev ?? null, evaluation.fields); }}
+      onDraftChange={(key, text) => setDraft((current) => (
+        key === 'center_frequency_hz' ? draftWithCenter(current, text, values ?? {}) : { ...current, [key]: text }
+      ))}
+      onReview={() => { if (!evaluation.invalid && Object.keys(evaluation.changes).length) enterReview(evaluation.changes, reported?.baseRev ?? null, evaluation.fields); }}
       onReset={() => { setDraft({}); setEditError(null); }}
       onSend={send}
       onBack={() => setStage('edit')}
@@ -641,6 +778,7 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
       }}
       onReload={() => {
         setDone(null);
+        readSettings();
         setReloadTick((tick) => tick + 1);
         setStage('edit');
       }}

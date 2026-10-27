@@ -106,19 +106,20 @@ describe('Configuration page', () => {
     }
   });
 
-  it('marks the base config revision as required without help prose (AUD-74)', () => {
+  it('asks for no base revision: the dry-run names the node state the console holds (AUD-74, #9)', () => {
     const markup = render();
     expect(markup).not.toContain('(optional)');
     expect(render({ lang: 'id' })).not.toContain('(opsional)');
-    expect(markup).toMatch(/<input type="number"[^>]*required=""[^>]*aria-required="true"/);
+    expect(markup).not.toMatch(/<input type="number"[^>]*required=""/);
+    expect(markup).not.toContain('base_config_rev');
+    expect(markup).not.toContain('placeholder="config_rev"');
   });
 
   it('puts the unit inside each dry-run field and the range in its placeholder until the node reports a value', () => {
     const markup = render();
-    expect(markup).toContain('placeholder="24000000…1800000000"');
+    expect(markup).toContain('placeholder="24000000…1766000000"');
     expect(markup.match(/<span class="pg-unit">Hz<\/span>/g)?.length).toBe(3);
     expect(markup.match(/<span class="pg-unit">dB<\/span>/g)?.length).toBe(2);
-    expect(markup).toContain('placeholder="config_rev"');
   });
 
   it('shows coordinates with 6 decimals and enables them only for a manual source', () => {

@@ -3,10 +3,10 @@
 | | |
 |---|---|
 | Status | Menunggu persetujuan |
-| Issue | #7 (parser console mengikuti kontrak edge), #8 (Dashboard memakai MQTT dulu, bagian 8) |
+| Issue | #7 (parser console mengikuti kontrak edge), #8 (Dashboard memakai MQTT dulu, bagian 8), #9 (perintah Kontrol dalam format edge, bagian 9) |
 | Keputusan | `docs/KEPUTUSAN_MQTT.md`: satu MQTT, root `sdr/v2/uav-01`, Data Out hanya cadangan |
-| Kode console | `tools/rdf_node_mqtt_v2.py` (parser dan store), `tools/sdr_doa_mqtt_monitor.py` (koneksi), `GET /api/mqtt/rdf-node`; `tools/telemetry_source.py` dan `tools/data_out_reader.py` (sumber `/api/snapshot`) |
-| Fixture | `tools/fixtures/rdf-node/`, dibuat oleh kode edge sendiri; `tools/fixtures/telemetry-source/`, jawaban `/api/snapshot` dari MQTT |
+| Kode console | `tools/rdf_node_mqtt_v2.py` (parser dan store), `tools/sdr_doa_mqtt_monitor.py` (koneksi dan publish perintah), `tools/rdf_node_commands.py` (envelope dan aturan field), `tools/config_command_tracker.py` (status perintah), `GET /api/mqtt/rdf-node`, rute Kontrol `/api/mqtt/config-*`; `tools/telemetry_source.py` dan `tools/data_out_reader.py` (sumber `/api/snapshot`) |
+| Fixture | `tools/fixtures/rdf-node/`, dibuat oleh kode edge sendiri (`commands.json`: perintah buatan console yang dinilai edge); `tools/fixtures/telemetry-source/`, jawaban `/api/snapshot` dari MQTT |
 
 Sumber: repo `sanadunt/rdf-indicator-raspberry`, folder `rdf-node/`: `docs/MQTT_TOPIC_SUMMARY.md`, `docs/PROTOCOL.md`, `docs/CONTROL.md`, `docs/MQTT_GROUND.md`, dan kode `src/rdf_node/ground.py`, `codec.py`, `control.py`, `agent.py`, `journal.py`, `source.py`. Acuan wajib: commit `8691ad000146111cd633e9e4fac600b5da53fd8c` (edge rilis `1.0.0-20261013194717`, yang terpasang di Raspberry). Tambahan dari HEAD `20713ff9f0580386cece39f9b12d1d24e47b9bb6` (2026-10-27) ada di bagian 7 dan bersifat opsional.
 
@@ -15,7 +15,7 @@ Sumber: repo `sanadunt/rdf-indicator-raspberry`, folder `rdf-node/`: `docs/MQTT_
 - Semua topik di bawah `sdr/v2/uav-01/`. MQTT 5, Clean Start, Session Expiry 0. Edge mengirim satu objek JSON compact UTF-8 per PUBLISH, termasuk Angular (360 nilai, tanpa RDF2, chunk, atau Base64).
 - Console subscribe ke 12 topik edge → ground dengan QoS 1, Retain As Published, Retain Handling 0, client id `groundconsole<hex>`. Console tidak memakai client id `uav-01-ground` milik `rdf-ground.service` dan tidak bergantung padanya.
 - `config/reported` bukan bagian kontrak. Console tidak subscribe, jadi nilai retained sisa di broker tidak dibaca dan tidak memberi revisi.
-- Console belum mengirim perintah ke `sdr/v2` (#9). Bagian 5 dan 6 mencatat kontraknya.
+- Console mengirim dua perintah, `config.patch` dan `config.get`, hanya dari panel Kontrol (admin, ditinjau, dikonfirmasi). Operasi lain di bagian 5 tidak dikirim. Bagian 5 dan 6 mencatat kontrak edge, bagian 8 dan 9 perilaku console.
 
 ## 2. Topik edge → ground
 
@@ -73,7 +73,7 @@ Untuk semua topik:
 | `settings/reported` | `t` ≤ 30 s lalu; permintaan tertunda berlaku 60 s (TTL perintah maks. 30 s + expiry 30 s) |
 | ACK | Expiry 30 s |
 
-## 5. Perintah ground → edge (untuk #9)
+## 5. Perintah ground → edge
 
 QoS 1, tidak retained, satu objek JSON per topik. Envelope:
 
@@ -197,3 +197,39 @@ Angka di link T900 PPP (~5,6 kB/s), tanpa header HTTP:
 | Data Out penuh, interval 2 s (sebelum #8) | `status.json` 650 B, `DOA_value.html` 2,3 kB, `doa.xml` 455 B tiap 2 s; `settings.json` 4,7 kB tiap 30 s | ~1,9 kB/s, sekitar sepertiga link |
 | Pembacaan ringan (MQTT segar) | `status.json`, `settings.json`, `doa.xml`, ~5,8 kB tiap 30 s | ~0,2 kB/s |
 | Telemetry MQTT (dikirim edge apa pun pilihan console), profile `balanced` | health 109 B/s, DoA ~106 B/s, Angular 2,4–2,9 kB tiap ≥ 4 s, detail 178 B tiap 10 s, doa.xml diagnostik 234 B tiap 3 s | ~1 kB/s |
+
+## 9. Perintah dari console (#9)
+
+Kontrol adalah satu-satunya jalur tulis console. Monitor tidak pernah publish sendiri; console tidak mengirim operasi selain dua di bawah, tidak mengirim ulang otomatis, dan tidak memakai `cmd/operation/get`.
+
+| | `config.patch` | `config.get` |
+|---|---|---|
+| Rute console | `POST /api/mqtt/config-patch` `{changes, base_rev, confirm: true}` | `POST /api/mqtt/config-get` `{}` |
+| Topik | `sdr/v2/uav-01/cmd/config/patch` | `sdr/v2/uav-01/cmd/config/get` |
+| Syarat di console | Origin loopback yang sama, cookie admin, `confirm`, field edge, monitor tersambung dengan semua SUBACK, `state` diterima, health segar, `base_rev` = `state.cfg`, tidak ada `config.patch` lain yang belum final | Origin loopback yang sama, cookie admin, monitor tersambung, `state` diterima; tidak ada `config.get` yang menunggu, paling cepat 1 s setelah yang terakhir |
+| Jawaban edge | `ACCEPTED` lalu satu ACK final di `ack/config` | `APPLIED` di `ack/config`, lalu `settings/reported` (hanya bila koneksi edge ke broker memakai TLS) |
+
+Envelope dibuat server (`rdf_node_commands.build_command`), tidak pernah browser: `v` 2, `id` `gc-` + 24 hex acak, `sid` dan `boot` dari `state` terakhir, `issued_ms` jam server console, `expires_ms` = `issued_ms` + 15000, `base_rev` `state.cfg`, `op` sesuai topik, dan untuk patch `changes` dengan urutan field edge. Publish QoS 1, tidak retained, `MessageExpiryInterval` 15 s, hanya saat monitor tersambung dan semua SUBACK masuk (paho tidak pernah menyimpan perintah untuk diputar ulang setelah reconnect).
+
+Aturan `changes` sama dengan helper edge (`helper.validate_changes`), dicek server sebelum publish dan dicek ulang oleh edge: hanya lima field bagian 5; frekuensi dan bandwidth bilangan bulat Hz; `gain_db` salah satu nilai tabel gain (toleransi 0,001 dB); perubahan `center_frequency_hz` wajib membawa `vfo0_frequency_hz` dengan nilai sama (`CENTER_CHANGE_REQUIRES_VFO0_TARGET`, `MVP_CENTER_MUST_EQUAL_VFO0`). Kode penolakan console memakai nama kode edge untuk aturan yang sama. Pemeriksaan `POST` berurutan dan kegagalan pertama yang dijawab: Origin (403 `ORIGIN_REJECTED`), admin (401 `ADMIN_REQUIRED`), bentuk body, `confirm`, field (400), monitor (409 `MQTT_MONITOR_DISABLED`, 503 `MQTT_DEPENDENCY_MISSING`, 503 `MQTT_NOT_CONNECTED`), sesi node (409 `NODE_SESSION_UNAVAILABLE`), lalu untuk patch health (409 `NODE_NOT_FRESH`), revisi (409 `CONFIG_REVISION_UNKNOWN`, `CONFIG_REVISION_STALE` dengan `current_base_rev`) dan perintah lain (409 `COMMAND_IN_FLIGHT`), untuk get permintaan tertunda (409 `SETTINGS_REQUEST_PENDING`) dan jarak 1 s (429 `CONFIG_GET_TOO_SOON`), terakhir publish (503 atau 502 `MQTT_PUBLISH_FAILED`).
+
+Status perintah di server (`GET /api/mqtt/config-patch/<id>`, 32 terakhir, diturunkan dari PUBACK, ACK, dan `settings/reported` dengan `id` itu):
+
+| State | Arti |
+|---|---|
+| `published`, `delivered` | Diserahkan ke broker; PUBACK < 128 |
+| `acknowledged` | ACK progres (`ACCEPTED`, `APPLYING`, `VERIFYING`), atau `config.get` `APPLIED` yang laporannya belum datang |
+| `acked` (final) | ACK final edge, apa pun isinya; status, `result.error`, `result.reason`, `revision` dan `proof` ikut di status |
+| `reported` (final) | `config.get` yang `settings/reported`-nya datang |
+| `publish_failed` (final) | Publish gagal atau PUBACK ≥ 128 |
+| `no_ack` (final) | Tidak ada ACK sampai `expires_ms` + 5 s (sekitar 20 s) |
+| `no_final_ack` (final) | Ada ACK progres tetapi tidak ada ACK final 90 s sejak `issued_ms`; hasil tidak diketahui |
+| `no_report` (final) | `config.get` `APPLIED` tanpa laporan dalam 60 s |
+
+ACK final yang terlambat tetap memperbarui `no_ack`, `no_final_ack` dan `no_report`. Monitor hanya mengikuti id yang ia publish; saat Reconnect atau simpan setelan MQTT mengganti monitor, server menyerahkan setiap perintah yang belum final ke monitor baru (`ConfigCommandTracker.hand_over()`, `MqttMonitor.adopt_rdf_node_commands()`), sehingga ACK dan `settings/reported`-nya tetap terbaca. Kontrol menampilkan `APPLIED` sebagai satu-satunya berhasil; `PERSISTED_UNVERIFIED`, `OUTCOME_UNKNOWN` dan `no_final_ack` bukan berhasil dan bukan gagal (baca settings dulu, jangan kirim ulang); `REJECTED`, `CONFLICT`, `EXPIRED`, `CANCELLED` dan `FAILED` menampilkan `result.error` edge. `CONFIG_REVISION_CONFLICT` berarti settings di RDF-SDR berubah setelah `base_rev` dibaca: baca ulang nilai, tinjau, lalu kirim.
+
+Nilai yang dipakai Kontrol: field aman `settings/reported` yang `rev`-nya sama dengan `state.cfg` (`matches_state_cfg`), lalu Data Out (cadangan) yang segar untuk field yang tidak dibawanya, selain itu "tidak dilaporkan". Kontrol mengirim `config.get` sekali setelah dibuka kuncinya (bila belum ada laporan revisi sekarang), dengan tombol "Baca settings", dan setelah setiap patch final. Edge mengirim `settings/reported` hanya bila koneksinya sendiri ke broker memakai TLS; tanpa itu jawabannya `REJECTED TLS_REQUIRED_FOR_SETTINGS_REPORT`, dan Kontrol memakai Data Out (cadangan). Console sendiri tetap tersambung tanpa TLS, jadi broker perlu listener TLS untuk edge di samping listener yang dipakai console. Pemeriksaan ulang setelah patch (`lib/configVerify.ts`) memakai `settings/reported` yang diterima setelah `issued_ms` dulu, lalu Data Out.
+
+Satu operator: `rdf-ground.service` (client `uav-01-ground`, `src/rdf_node/ground.py` edge) dapat mengirim perintah yang sama. Edge mengerjakan satu mutasi sekaligus (`BUSY`), satu permintaan settings sekaligus (`SETTINGS_REQUEST_PENDING`) dan membatasi `config.get` 1/s per aktor dan link (`REQUEST_RATE_LIMIT`). Patch dari pengirim lain mengubah `state.cfg`, sehingga patch yang sudah ditinjau di sini ditolak (`CONFIG_REVISION_STALE` di console atau `CONFIG_REVISION_CONFLICT` di edge). Laporan settings untuk permintaan pengirim lain diabaikan console (`IGNORED UNREQUESTED_SETTINGS_REPORT`). Jalankan satu pengendali sekaligus: satu console dengan Kontrol terbuka, atau `rdf-ground.service`.
+
+Fixture `tools/fixtures/rdf-node/commands.json` berisi envelope buatan console (`build_command`) beserta jawaban `CommandManager` dan helper edge 8691ad0 untuk setiap kasus (get, get tanpa TLS, retune, gain, VFO saja, bandwidth dan squelch `PERSISTED_UNVERIFIED`, `base_rev` basi, dan nilai yang ditolak console maupun edge). `tools/test_rdf_node_commands.py` membangun envelope yang sama dan menuntut byte yang sama, tanpa mengimpor kode edge saat runtime.

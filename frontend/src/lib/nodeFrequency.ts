@@ -3,7 +3,8 @@
  * ("Ikuti frekuensi node"). Read only from a fresh snapshot: the centre is
  * settings.json `center_freq` (MHz; over MQTT from the light Data Out read),
  * the VFO is the DoA view's `frequency_hz_normalized` (the CSV view, or the
- * LIVE MQTT DoA's `f`), falling back to the centre.
+ * LIVE MQTT DoA's `f`), falling back to the centre. MQTT settings/reported
+ * is not used here; Kontrol reads that.
  */
 import type { TelemetrySnapshot } from '../types';
 import { primaryCandidate } from './telemetry';

@@ -1,11 +1,12 @@
 /**
  * Did the RDF-SDR take a sent config patch? Each sent field is compared with
- * the latest Data Out settings.json first; MQTT is used for a field only when
- * a fresh Data Out snapshot does not carry it, and only with a value that
- * arrived after the command was issued. The console may reuse settings.json
- * for a while, so a copy read before the command was issued is not evidence
- * either. An ACK only says the edge agent wrote settings.json; this reads the
- * values back from the node.
+ * the node's settings/reported (MQTT) first, counted only when the report
+ * arrived after the command was issued and is of the node's current
+ * revision; a fresh Data Out settings.json (the fallback) is used for a
+ * field only when no such report carries it. The console may reuse
+ * settings.json for a while, so a copy read before the command was issued is
+ * not evidence either. An ACK says what the edge did; this reads the values
+ * back from the node.
  */
 import type { ConfigReported } from '../api';
 import type { TelemetrySnapshot } from '../types';
@@ -33,9 +34,9 @@ export const VERIFY_FIELD_RULES: Record<ConfigPatchKey, VerifyFieldRule> = {
   // center_freq is MHz in settings.json; its rounding can hide a few hundred Hz.
   center_frequency_hz: { dataOutKey: 'center_freq', scale: 1e6, tolerance: 500 },
   gain_db: { dataOutKey: 'uniform_gain', scale: 1, tolerance: 0.05 },
-  vfo_frequency_hz: { dataOutKey: 'vfo_freq_0', scale: 1, tolerance: 500 },
-  vfo_bandwidth_hz: { dataOutKey: 'vfo_bw_0', scale: 1, tolerance: 1 },
-  vfo_squelch_db: { dataOutKey: 'vfo_squelch_0', scale: 1, tolerance: 0.05 },
+  vfo0_frequency_hz: { dataOutKey: 'vfo_freq_0', scale: 1, tolerance: 500 },
+  vfo0_bandwidth_hz: { dataOutKey: 'vfo_bw_0', scale: 1, tolerance: 1 },
+  vfo0_squelch_db: { dataOutKey: 'vfo_squelch_0', scale: 1, tolerance: 0.05 },
 };
 
 export type ConfigValues = Record<ConfigPatchKey, number | null>;
@@ -67,7 +68,7 @@ export function dataOutConfigValues(snapshot: TelemetrySnapshot | null, fresh: b
   return fresh ? settingsValues(snapshot) : emptyValues();
 }
 
-/** Current values for the Kontrol form: MQTT first, then Data Out for what MQTT does not report. */
+/** Current values for the Kontrol form: settings/reported first, then Data Out for what it does not carry. */
 export function currentConfigValues(mqtt: Partial<Record<ConfigPatchKey, number | null>> | null | undefined, dataOut: ConfigValues): ConfigValues {
   const values = emptyValues();
   for (const key of CONFIG_PATCH_KEYS) {
@@ -80,7 +81,7 @@ export function currentConfigValues(mqtt: Partial<Record<ConfigPatchKey, number 
 export interface VerifyInput {
   /** What was sent, in SI units. */
   changes: ConfigPatchChanges;
-  /** Server time the command was issued; an MQTT value must arrive after it. */
+  /** Server time the command was issued; a settings/reported value must arrive after it. */
   issuedAtMs: number | null;
   /** When the command became final, on the clock of `nowMs`. */
   finalAtMs: number;
@@ -97,7 +98,7 @@ export interface VerifyField {
   sent: number;
   /** Fresh Data Out value in SI, else null. */
   dataOut: number | null;
-  /** MQTT value that arrived after the command was issued, else null. */
+  /** settings/reported value that arrived after the command was issued, else null. */
   mqtt: number | null;
   /** Source the status was decided on. */
   basis: VerifyBasis | null;
@@ -136,8 +137,8 @@ export function verifyConfigPatch(input: VerifyInput): ConfigVerification {
     const mqttValue = input.reported?.values[key] ?? null;
     const receivedAt = input.reported?.valueReceivedAtMs[key] ?? null;
     const mqtt = mqttValue !== null && input.issuedAtMs !== null && receivedAt !== null && receivedAt > input.issuedAtMs ? mqttValue : null;
-    const basis: VerifyBasis | null = dataOut !== null ? 'data-out' : mqtt !== null ? 'mqtt' : null;
-    const evidence = basis === 'data-out' ? dataOut : mqtt;
+    const basis: VerifyBasis | null = mqtt !== null ? 'mqtt' : dataOut !== null ? 'data-out' : null;
+    const evidence = basis === 'mqtt' ? mqtt : dataOut;
     let status: VerifyStatus;
     if (evidence !== null) status = matches(key, evidence, sent) ? 'confirmed' : open ? 'pending' : 'unchanged';
     else status = open && (mqttValue !== null || carried[key] !== null) ? 'pending' : 'not-reported';

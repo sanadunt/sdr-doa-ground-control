@@ -92,14 +92,6 @@ export function gpsInputErrorKey(latitudeInput: string, longitudeInput: string):
   return null;
 }
 
-/** base_config_rev is required by the sdr/v1 config_patch contract. */
-export function parseBaseRevision(input: string): FormResult<number> {
-  const text = input.trim();
-  if (!text) return { ok: false, error: 'config.baseRevisionRequired' };
-  if (!/^\d{1,15}$/u.test(text)) return { ok: false, error: 'config.baseRevisionInvalid' };
-  return { ok: true, value: Number(text) };
-}
-
 export function parseDryRunChanges(
   values: Record<string, string>,
   fields: ReadonlyArray<{ key: string; label: MessageKey }>,
@@ -194,7 +186,11 @@ export function activeSection(
 export interface DryRunSummary {
   validation: string | null;
   transport: string | null;
-  baseConfigRev: number | null;
+  /** The node's state.cfg the preview names, or null when no node state is known. */
+  baseRev: number | null;
+  /** The node session (state.sid) the preview names, or null. */
+  sid: string | null;
+  topic: string | null;
   /** Normalized changes in the order the server returned them. */
   changes: Array<{ key: string; value: number }>;
   ttlMs: number | null;
@@ -212,13 +208,17 @@ function shortText(value: unknown): string | null {
 export function summarizeDryRun(result: Record<string, unknown>): DryRunSummary {
   const command = recordOrNull(result.command);
   const changes = recordOrNull(command?.changes);
-  const issued = command?.issued_ts_ms;
-  const expires = command?.expires_ts_ms;
-  const rev = command?.base_config_rev;
+  const issued = command?.issued_ms;
+  const expires = command?.expires_ms;
+  const rev = command?.base_rev;
+  const sid = command?.sid;
+  const topic = result.topic;
   return {
     validation: shortText(result.validation),
     transport: shortText(result.transport),
-    baseConfigRev: typeof rev === 'number' && Number.isInteger(rev) && rev >= 0 ? rev : null,
+    baseRev: typeof rev === 'number' && Number.isInteger(rev) && rev >= 0 ? rev : null,
+    sid: typeof sid === 'string' && /^[0-9a-f]{8}$/u.test(sid) ? sid : null,
+    topic: typeof topic === 'string' && topic.length <= 128 && /^[\x21-\x7e]+$/u.test(topic) ? topic : null,
     changes: changes
       ? Object.entries(changes)
         .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]))
