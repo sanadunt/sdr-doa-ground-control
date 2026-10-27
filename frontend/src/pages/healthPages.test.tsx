@@ -342,6 +342,27 @@ describe('DoA Diagnostics layout', () => {
   });
 });
 
+describe('pages over an MQTT answer (issue #8)', () => {
+  const mqttAnswer = (name: string) => JSON.parse(readSource(`../../../tools/fixtures/telemetry-source/${name}`)) as TelemetrySnapshot;
+
+  it('lists the MQTT parts on DoA Diagnostics instead of the CSV and XML records', () => {
+    const page = text(render(<DoADiagnosticsPage snapshot={mqttAnswer('mqtt-unverified.json')} localSnapshotFresh />));
+    expect(page).toContain('MQTT DoA');
+    expect(page).toContain('DoA↔Angular');
+    expect(page).toContain('Angle mode theta_mirror');
+    expect(page).toContain('DoA ok=0 UNVERIFIED 160.0° 433.9200 MHz');
+    expect(page).toContain('SOURCE_UNVERIFIED ANGLE_UNVERIFIED');
+    expect(page).not.toContain('Native records');
+    expect(text(render(<DoADiagnosticsPage snapshot={mqttAnswer('mqtt-live.json')} localSnapshotFresh />, 'id'))).toContain('DoA MQTT');
+  });
+
+  it('shows the one MQTT view on System Health', () => {
+    const page = text(render(<SystemHealthPage snapshot={mqttAnswer('mqtt-live.json')} mqtt={null} mqttError={null} localSnapshotFresh capabilities={null} />));
+    expect(page).toMatch(/MQTT PRESENT/);
+    expect(page).not.toMatch(/CSV MISSING/);
+  });
+});
+
 /** Vitest blanks every CSS import, so the stylesheet is read from disk. */
 function readSource(path: string): string {
   type Fs = { readFileSync(file: URL, encoding: 'utf8'): string };

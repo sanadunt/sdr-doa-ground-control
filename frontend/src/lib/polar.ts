@@ -1,5 +1,6 @@
 import type { Candidate, CompassConfig, CompassResolution, ManualCompassOverride, PolarSettings, PolarView, TelemetrySnapshot } from '../types';
-import { candidate, nativeViewsReady, numberOrNull, polarDataReady } from './telemetry';
+import { nativeViewsReady, numberOrNull, polarDataReady, primaryCandidate } from './telemetry';
+import { isMqttSnapshot } from './telemetrySource';
 import type { Translate } from './i18n';
 import { formatDuration } from './healthView';
 import { settingsReadAtMs } from './snapshotRead';
@@ -295,7 +296,8 @@ export function polarView(
     Object.prototype.hasOwnProperty.call(settingsFields, 'compass_offset') ? settingsFields.compass_offset : previousSettings.compassOffset,
   );
   const settings = resolvedSettings ?? manualCompassSettings(manualCompassOverride) ?? liveSettings;
-  const csv = candidate(snapshot, 'csv');
+  // The CSV view of Data Out, or the MQTT view (LIVE DoA and its Angular frame).
+  const csv = primaryCandidate(snapshot);
   const canonicalAngle = numberOrNull(csv.canonical_angle_deg);
   const values = Array.isArray(csv.angular_power_db) && csv.angular_power_db.length === 360 && csv.angular_power_db.every((value) => typeof value === 'number' && Number.isFinite(value))
     ? csv.angular_power_db
@@ -508,10 +510,11 @@ export function polarMetadata(view: PolarView): {
 }
 
 export function polarSourceLabel(snapshot: TelemetrySnapshot | null | undefined, view: PolarView): string {
-  const csv = candidate(snapshot, 'csv');
-  if (!nativeViewsReady(snapshot) || !view.fresh) return 'Data Out · unavailable';
+  const csv = primaryCandidate(snapshot);
+  const source = isMqttSnapshot(snapshot) ? 'MQTT' : 'Data Out';
+  if (!nativeViewsReady(snapshot) || !view.fresh) return `${source} · unavailable`;
   const age = csv.freshness?.age_ms;
-  return `Data Out · ${view.settings.figType} display axis · ${age === null || age === undefined ? 'clock unverified' : `${(age / 1000).toFixed(1)} s`}`;
+  return `${source} · ${view.settings.figType} display axis · ${age === null || age === undefined ? 'clock unverified' : `${(age / 1000).toFixed(1)} s`}`;
 }
 
 export function canonicalLabel(view: PolarView): string {

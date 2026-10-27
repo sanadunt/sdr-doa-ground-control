@@ -192,6 +192,98 @@ def light_result(*, overdrive: str = "False", center_freq: float = 433.92, gps: 
 
 
 # ---------------------------------------------------------------------------
+# Answers shared with the frontend tests (tools/fixtures/telemetry-source/)
+
+SOURCE_FIXTURES = TOOLS_DIR / "fixtures" / "telemetry-source"
+FIXED_NOW = 1_793_070_140_000
+I18N = TOOLS_DIR.parent / "frontend" / "src" / "lib" / "i18n.ts"
+SOURCE_TS = TOOLS_DIR.parent / "frontend" / "src" / "lib" / "telemetrySource.ts"
+
+
+def fixed_light(*, reachable: bool = True) -> Dict[str, Any]:
+    """A light read 2 s before FIXED_NOW: a GPS fix, doa.xml with a position, or a refused node."""
+    at = FIXED_NOW - 2_000
+    status = json.loads(make_status(at).decode())
+    status["gps_status"] = "Fixed"
+    bodies = {
+        collector.PATH_STATUS: json.dumps(status).encode(),
+        collector.PATH_SETTINGS: json.dumps({
+            "center_freq": 433.92, "uniform_gain": 15.7, "vfo_freq_0": 433_920_000, "compass_offset": 12,
+            "doa_fig_type": "Compass", "en_remote_control": False,
+        }).encode(),
+        collector.PATH_XML: make_xml(at).replace(
+            b"<LATITUDE>0</LATITUDE><LONGITUDE>0</LONGITUDE>", b"<LATITUDE>-6.2</LATITUDE><LONGITUDE>106.8</LONGITUDE>",
+        ),
+    }
+
+    def fetcher(base_url: str, path: str, timeout: float, max_body: int) -> collector.FetchedResource:
+        if not reachable:
+            return collector.FetchedResource(path, base_url + path, False, None, None, b"", at,
+                                             error="connection refused", error_kind="connection_refused")
+        return collector.FetchedResource(path, base_url + path, True, 200, "application/json", bodies[path], at)
+
+    with patch.object(collector, "now_ms", lambda: at):
+        return collector.collect_light(BASE_URL, fetcher=fetcher, total_budget_s=4.0, monotonic_clock=lambda: 50.0)
+
+
+def fixture_answers() -> Dict[str, Dict[str, Any]]:
+    """The MQTT answers the frontend tests read, built at a fixed time."""
+    answers: Dict[str, Dict[str, Any]] = {}
+
+    def answer(edge: Edge, light: Optional[Dict[str, Any]], index: int) -> Dict[str, Any]:
+        built = ts.mqtt_snapshot(edge.view(), light, base_url=BASE_URL, light_age_ms=None if light is None else 2_000,
+                                 light_meta={"interval_s": 30.0, "reason": "light-first", "running": False, "error": None})
+        # The reader's own fields, with fixed values.
+        built["collection"].update({"id": f"0f1e2d3c-{index}", "collected_at_ms": FIXED_NOW, "age_ms": 0,
+                                    "shared": False, "refresh_seconds": 2, "console_base_url": BASE_URL})
+        return built
+
+    live = Edge(ManualMs(FIXED_NOW)).live()
+    # The edge also sends doa.xml every 3 s, and the Angular frame on the
+    # diagnostic topic while Bulk waits for a stable link: both UNVERIFIED.
+    live.diagnostic_doa()
+    live.angular(topic="telemetry/diagnostic/angular", q=1)
+    answers["mqtt-live.json"] = answer(live, fixed_light(), 1)
+    answers["mqtt-data-out-dead.json"] = answer(live, fixed_light(reachable=False), 2)
+    unverified = Edge(ManualMs(FIXED_NOW))
+    unverified.hello()
+    unverified.health()
+    unverified.doa(ok=0)
+    unverified.angular(flags=23)
+    answers["mqtt-unverified.json"] = answer(unverified, fixed_light(), 3)
+    return answers
+
+
+def write_source_fixtures() -> None:
+    """Rewrite tools/fixtures/telemetry-source/ after an intended change of the answer."""
+    SOURCE_FIXTURES.mkdir(parents=True, exist_ok=True)
+    for name, body in fixture_answers().items():
+        (SOURCE_FIXTURES / name).write_text(json.dumps(body, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+
+
+class SharedFixtureTests(unittest.TestCase):
+    def test_the_frontend_fixtures_are_what_the_server_builds(self) -> None:
+        for name, body in fixture_answers().items():
+            with self.subTest(name=name):
+                saved = json.loads((SOURCE_FIXTURES / name).read_text(encoding="utf-8"))
+                self.assertEqual(saved, json.loads(json.dumps(body)))
+
+    def test_every_source_and_gate_code_has_a_label_in_both_languages(self) -> None:
+        # The frontend names every code this module sends: the source reasons
+        # in its source.reason.* keys, the gate reasons in both gate tables.
+        i18n = I18N.read_text(encoding="utf-8")
+        source_ts = SOURCE_TS.read_text(encoding="utf-8")
+        for reason in ts.SOURCE_REASONS:
+            self.assertEqual(i18n.count(f"'source.reason.{reason}':"), 2, reason)
+            self.assertIn(f"'{reason}'", source_ts, reason)
+        id_table = i18n.split("const GATE_REASON_LABELS_ID", 1)[1].split("};", 1)[0]
+        en_table = i18n.split("const GATE_REASON_LABELS_EN_EXTRA", 1)[1].split("};", 1)[0]
+        for reason in ts.MQTT_GATE_REASONS:
+            self.assertIn(f"  {reason}:", id_table, reason)
+            self.assertIn(f"  {reason}:", en_table, reason)
+
+
+# ---------------------------------------------------------------------------
 # The decision
 
 

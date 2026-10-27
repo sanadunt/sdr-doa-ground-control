@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Branding, TelemetrySnapshot, Tone } from '../types';
 import { REFRESH_INTERVALS_S, candidateErrors, deriveDataState, toneFor } from '../lib/telemetry';
 import { actionableGateReasons, doaStatusTextKey, overviewDoaStatus, rankGateReasons } from '../lib/doaStatus';
+import { sourceBadge, sourceReasonKey } from '../lib/telemetrySource';
 import { shortcutAction } from '../lib/shortcuts';
 import { THEME_STORAGE_KEY, readPreference, writePreference } from '../lib/preferenceStore';
 import { LANGS, gateReasonLabel, useI18n } from '../lib/i18n';
@@ -129,6 +130,12 @@ export function ConsoleShell({
   // The same readiness decision Overview uses for the map, readout and polar plot.
   const doa = overviewDoaStatus(snapshot, localSnapshotFresh);
   const doaTitle = snapshot ? t(doaStatusTextKey(doa.reason)) : undefined;
+  // MQTT, Data Out (fallback) or none: where the console took this answer from,
+  // and for a fallback the cause (issue #8).
+  const source = sourceBadge(snapshot);
+  const sourceTitle = source && source.reasons.length > 0
+    ? source.reasons.map((reason) => `${reason} · ${t(sourceReasonKey(reason))}`).join('\n')
+    : undefined;
   const gate = String(snapshot?.publication_gate?.state ?? 'BLOCKED').toUpperCase();
   const gateReason = gate === 'READY' ? undefined : rankGateReasons(snapshot?.publication_gate?.reasons)[0];
   // Snapshot is about the read itself: a read that just completed is CURRENT even when it reports UNAVAILABLE.
@@ -279,7 +286,8 @@ export function ConsoleShell({
               <span className="topbar-read">{readLabel}</span>
             </div>
           ) : null}
-          <div className="telemetry-strip" role="group" aria-label={t('shell.runtimeStatus')}>
+          <div className={source ? 'telemetry-strip has-source' : 'telemetry-strip'} role="group" aria-label={t('shell.runtimeStatus')}>
+            {source ? <TelemetryItem label={t('status.source')} value={t(source.labelKey)} tone={source.tone} title={sourceTitle} /> : null}
             <TelemetryItem label={t('status.data')} value={dataState} tone={dataTone} title={dataTitle} />
             <TelemetryItem label={t('status.doa')} value={doa.code} tone={doa.tone} title={doaTitle} />
             <TelemetryItem label={t('status.delivery')} value={gate} tone={gate === 'READY' ? 'good' : 'warn'} title={gateReason ? `${gateReason} · ${gateReasonLabel(lang, gateReason)}` : undefined} />

@@ -30,7 +30,7 @@ import {
 } from '../lib/doaGeometry';
 import { geographicBearingForBin } from '../lib/polar';
 import { beamColorExpression, beamOpacityExpression, formatBearing, formatDistance, heatmapColorExpression, heatmapRadiusExpression } from '../lib/overlayPalette';
-import { candidate, numberOrNull } from '../lib/telemetry';
+import { numberOrNull, primaryCandidate } from '../lib/telemetry';
 import { useI18n } from '../lib/i18n';
 import type { MessageKey, Translate } from '../lib/i18n';
 import { coordinateSourceKey } from './DoaReadout';
@@ -250,7 +250,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const coordinateRef = useRef(stationCoordinate);
   coordinateRef.current = stationCoordinate;
 
-  const csv = candidate(snapshot ?? null, 'csv');
+  const csv = primaryCandidate(snapshot ?? null);
   const simulation = snapshot?.simulation === true;
   const values = doaReady && fresh && Array.isArray(csv.angular_power_db) && csv.angular_power_db.length === 360 ? csv.angular_power_db : null;
   const offset = Number.isFinite(compassOffset) ? compassOffset : 0;

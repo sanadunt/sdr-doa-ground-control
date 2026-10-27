@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import type { JSX, ReactNode } from 'react';
 import type { Candidate, TelemetrySnapshot } from '../types';
-import { candidate, formatNumber, nativeViewsReady } from '../lib/telemetry';
+import { candidate, formatNumber, nativeViewsReady, primaryCandidate } from '../lib/telemetry';
+import { isMqttSnapshot, mqttAngleMode, mqttDiagnosticRows } from '../lib/telemetrySource';
+import type { MqttDiagnosticRow } from '../lib/telemetrySource';
 import { gateReasonLabel, useI18n } from '../lib/i18n';
-import type { Translate } from '../lib/i18n';
+import type { MessageKey, Translate } from '../lib/i18n';
 import { actionableGateReasons, rankGateReasons } from '../lib/doaStatus';
 import {
   candidateIssue,
@@ -291,13 +293,54 @@ function EffectiveConfigCard({ snapshot }: { snapshot: TelemetrySnapshot | null 
   );
 }
 
+const MQTT_ROW_KEYS: Record<MqttDiagnosticRow['key'], MessageKey> = {
+  doa: 'diag.mqtt.doa',
+  angular: 'diag.mqtt.angular',
+  doa_unverified: 'diag.mqtt.doaUnverified',
+  diagnostic_doa: 'diag.mqtt.diagnosticDoa',
+  angular_unverified: 'diag.mqtt.angularUnverified',
+};
+
+/**
+ * The DoA of an MQTT answer, part by part: the LIVE DoA and Angular frame
+ * the Dashboard draws and the UNVERIFIED and diagnostic ones it never draws.
+ */
+function MqttDoaCard({ snapshot }: { snapshot: TelemetrySnapshot | null }): JSX.Element {
+  const { t } = useI18n();
+  const rows = mqttDiagnosticRows(snapshot);
+  const consistency = consistencyView(snapshot?.native_consistency);
+  const mode = mqttAngleMode(snapshot);
+  const columns: Array<DataColumn<MqttDiagnosticRow>> = [
+    { key: 'part', label: t('diag.mqtt.part'), render: (row) => t(MQTT_ROW_KEYS[row.key]), className: 'hd-field-cell' },
+    { key: 'state', label: t('diag.row.state'), render: (row) => <StatusChip code={row.status} tone={row.status === 'LIVE' ? 'good' : row.status === 'STALE' ? 'warn' : 'info'} /> },
+    { key: 'theta', label: t('diag.canonical'), numeric: true, render: (row) => degrees(row.thetaDeg) },
+    { key: 'frequency', label: t('diag.vfoFrequency'), numeric: true, render: (row) => row.frequencyHz === null ? 'N/A' : `${formatNumber(row.frequencyHz / 1e6, 4)} MHz` },
+    { key: 'age', label: t('diag.ageAtRead'), numeric: true, render: (row) => row.ageMs === null ? 'N/A' : formatDuration(t, row.ageMs) },
+    { key: 'reasons', label: t('diag.mqtt.reasons'), render: (row) => row.reasons.length ? <span className="pg-mono">{row.reasons.join(' ')}</span> : '—' },
+  ];
+  return (
+    <Card
+      title={t('diag.mqtt.title')}
+      chip={<StatusChip code={consistency.relation} tone={stateTone(consistency.relation)} title={consistency.angleChecked === false ? t('diag.angleNotChecked') : undefined} />}
+      span={7}
+      flush
+    >
+      <KeyValueGrid items={[{ id: 'angle', label: t('diag.mqtt.angleMode'), value: mode ?? 'N/A', tone: mode ? undefined : 'warn' }]} />
+      {rows.length
+        ? <DataTable columns={columns} rows={rows} rowKey={(row) => row.key} label={t('diag.mqtt.title')} stack={false} />
+        : <EmptyState label={t('polar.mqttNoDoa')} code="WAITING" />}
+    </Card>
+  );
+}
+
 export function DoADiagnosticsPage({ snapshot, localSnapshotFresh }: { snapshot: TelemetrySnapshot | null; localSnapshotFresh: boolean }): JSX.Element {
   const { t } = useI18n();
   const gateState = String(snapshot?.publication_gate?.state ?? 'BLOCKED').toUpperCase();
   const consistency = consistencyView(snapshot?.native_consistency);
-  const csv = candidate(snapshot, 'csv');
+  const mqtt = isMqttSnapshot(snapshot);
+  const csv = primaryCandidate(snapshot);
   const xml = candidate(snapshot, 'xml');
-  // θ₀ as the Dashboard reads it: the CSV view carries the vector.
+  // θ₀ as the Dashboard reads it: the CSV view (or the MQTT view) carries the vector.
   const theta = typeof csv.canonical_angle_deg === 'number' ? csv.canonical_angle_deg : typeof xml.canonical_angle_deg === 'number' ? xml.canonical_angle_deg : null;
   return (
     <Page className="hd-page">
@@ -306,7 +349,7 @@ export function DoADiagnosticsPage({ snapshot, localSnapshotFresh }: { snapshot:
         chips={<>
           <StatusChip label={t('status.delivery')} code={gateState} tone={gateState === 'READY' ? 'good' : 'warn'} />
           <span className="pg-chip"><span className="pg-chip-label">θ₀</span><Tag tone={theta === null ? 'neutral' : 'signal'}>{degrees(theta)}</Tag></span>
-          <StatusChip label="CSV↔XML" code={consistency.relation} tone={stateTone(consistency.relation)} />
+          <StatusChip label={mqtt ? 'DoA↔Angular' : 'CSV↔XML'} code={consistency.relation} tone={stateTone(consistency.relation)} />
           {consistency.frameRelation ? <StatusChip label={t('page.chip.frame')} code={consistency.frameRelation} /> : null}
         </>}
       />
@@ -316,7 +359,7 @@ export function DoADiagnosticsPage({ snapshot, localSnapshotFresh }: { snapshot:
           <GateCard snapshot={snapshot} />
           <CollectorCard snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} />
         </PageStack>
-        <NativeRecordsCard snapshot={snapshot} />
+        {mqtt ? <MqttDoaCard snapshot={snapshot} /> : <NativeRecordsCard snapshot={snapshot} />}
         <EffectiveConfigCard snapshot={snapshot} />
       </PageGrid>
     </Page>

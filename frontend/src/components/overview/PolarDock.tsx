@@ -3,6 +3,7 @@ import { useState } from 'react';
 import type { CompassConfig, PolarSettings, TelemetrySnapshot } from '../../types';
 import { bearingForView, formatDegrees, normalizeDegrees, polarView } from '../../lib/polar';
 import { overviewDoaStatus } from '../../lib/doaStatus';
+import { sourceBadge } from '../../lib/telemetrySource';
 import { halfPowerWidth } from '../../lib/doaGeometry';
 import { parseCompassOffsetInput, parseTypedNumber, validPolarHead, validPolarRange } from '../../lib/polarViewSettings';
 import type { PolarViewSettings } from '../../lib/polarViewSettings';
@@ -55,6 +56,8 @@ export function PolarDock({
   const { t } = useI18n();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const simulation = snapshot?.simulation === true;
+  const source = sourceBadge(snapshot);
+  const sourceLabel = source ? t(source.labelKey) : undefined;
   const status = overviewDoaStatus(snapshot, localSnapshotFresh);
   const polar = polarView(snapshot, settings, localSnapshotFresh, null, settings);
   const values = status.shown ? polar.values : null;
@@ -131,7 +134,7 @@ export function PolarDock({
       <div className="ov-polar-body">
         <div className="ov-polar-plot">
           <div className="ov-polar-frame">
-            <PolarPlot values={values} settings={settings} simulation={simulation} offsetSource={offsetSource} head={head} range={view.range} hideSettings compactCaption modeBar={false} />
+            <PolarPlot values={values} settings={settings} simulation={simulation} offsetSource={offsetSource} head={head} range={view.range} hideSettings compactCaption modeBar={false} sourceLabel={sourceLabel} />
           </div>
           <p className="ov-polar-footer">{footer}{manualOffset && compass ? <span className="is-manual"> · MANUAL</span> : null}</p>
         </div>

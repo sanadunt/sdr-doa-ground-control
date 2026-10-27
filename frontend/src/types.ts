@@ -133,8 +133,23 @@ export interface ResourceInfo {
   error_kind?: string;
 }
 
+/** Which source answered /api/snapshot and why (issue #8); values are unvalidated JSON. */
+export interface SnapshotSource {
+  [key: string]: unknown;
+  /** mqtt, data_out (the fallback) or none. */
+  kind?: string;
+  /** The first of `reasons`, or MQTT_FRESH for an MQTT answer. */
+  reason?: string;
+  /** Why MQTT is not the source, then DATA_OUT_UNAVAILABLE when Data Out failed too. */
+  reasons?: string[];
+  mqtt?: Record<string, unknown>;
+  data_out?: Record<string, unknown>;
+}
+
 export interface TelemetrySnapshot {
   [key: string]: unknown;
+  /** Absent from older servers, which always answered from Data Out. */
+  source?: SnapshotSource;
   schema_version?: number;
   collector?: Record<string, unknown>;
   observed_at_ms?: number;
@@ -149,6 +164,10 @@ export interface TelemetrySnapshot {
   authority?: AuthoritySnapshot;
   publication_gate?: PublicationGate;
   overall_state?: string;
+  /** MQTT answers: what MQTT carries besides the LIVE DoA (UNVERIFIED and diagnostic topics). */
+  mqtt?: Record<string, unknown>;
+  /** MQTT answers: the light Data Out read (status.json, settings.json, doa.xml) for what MQTT never carries. */
+  data_out_light?: Record<string, unknown>;
 }
 
 export type MqttTransport = 'tcp' | 'websockets';
