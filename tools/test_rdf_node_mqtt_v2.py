@@ -14,7 +14,9 @@ import struct
 import unittest
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
+from unittest.mock import patch
 
+from tools import rdf_node_mqtt_v2
 from tools.rdf_node_mqtt_v2 import (
     ACK_FINAL_STATUSES,
     ACK_STATUSES,
@@ -548,6 +550,40 @@ class AngularTests(unittest.TestCase):
         self.assertEqual(put(store, "telemetry/diagnostic/angular", self.frame("telemetry-diagnostic-angular.json"))["status"], "UNVERIFIED")
         self.assertIn("HEALTH_STALE", node(store)["angular_unverified"]["validation_reasons"])
 
+    def test_each_angular_topic_row_ages_by_its_own_frame(self) -> None:
+        """Both topics share the candidate; a row whose frame lost it still turns STALE after 10 s."""
+
+        def trust_only_every_4_s(store: RdfNodeV2Telemetry, first_q: int, until: int) -> None:
+            for step in range(1, until // 4000 + 1):
+                at = NOW + 4000 * step
+                put(store, "telemetry/health", obj("telemetry-health.json", q=first_q + step, t=at), at=at)
+                put(store, "telemetry/angular", self.frame("telemetry-angular.unverified.json", q=step, timestamp_ms=at), at=at)
+
+        # Start-up: a diagnostic frame while Bulk waits for a stable link, then trust-only Bulk.
+        store = session_store()
+        put(store, "telemetry/diagnostic/angular", self.frame("telemetry-diagnostic-angular.wait-stable.json"))
+        trust_only_every_4_s(store, 1, 60_000)
+        self.assertEqual(node(store, NOW + 60_000)["angular_unverified"]["topic"], "telemetry/angular")
+        self.assertEqual(topic(store, "telemetry/diagnostic/angular", NOW + 10_000)["status"], "UNVERIFIED")
+        entry = topic(store, "telemetry/diagnostic/angular", NOW + 10_001)
+        self.assertEqual((entry["status"], entry["error"]), ("STALE", "SOURCE_STALE"))
+        entry = topic(store, "telemetry/diagnostic/angular", NOW + 60_000)
+        self.assertEqual((entry["status"], entry["error"]), ("STALE", "SOURCE_STALE"))
+        self.assertEqual(topic(store, "telemetry/angular", NOW + 60_000)["status"], "UNVERIFIED")
+        # The reverse: trust-only Bulk, then only diagnostic frames once the DAQ turns unhealthy.
+        store = session_store()
+        put(store, "telemetry/angular", self.frame("telemetry-angular.unverified.json"))
+        for step in range(1, 6):
+            at = NOW + 6000 * step
+            put(store, "telemetry/diagnostic/angular",
+                self.frame("telemetry-diagnostic-angular.json", q=step, timestamp_ms=at), at=at)
+        self.assertEqual(node(store, NOW + 30_000)["angular_unverified"]["topic"], "telemetry/diagnostic/angular")
+        self.assertEqual(topic(store, "telemetry/angular", NOW + 10_000)["status"], "UNVERIFIED")
+        entry = topic(store, "telemetry/angular", NOW + 30_000)
+        self.assertEqual((entry["status"], entry["error"]), ("STALE", "SOURCE_STALE"))
+        self.assertEqual(topic(store, "telemetry/diagnostic/angular", NOW + 30_000)["status"], "UNVERIFIED")
+        self.assertEqual(topic(store, "telemetry/diagnostic/angular", NOW + 40_001)["status"], "STALE")
+
     def test_json_frame_shape(self) -> None:
         store = session_store()
         values = self.frame()["values"]
@@ -599,8 +635,10 @@ class SettingsReportTests(unittest.TestCase):
         saved = self.store.settings_report()
         self.assertEqual(saved["settings_json"], self.report["settings_json"])
         self.assertEqual(saved["settings"], json.loads(self.report["settings_json"]))
+        self.assertEqual((saved["rev"], saved["state_cfg"], saved["matches_state_cfg"]), (CFG, CFG, True))
         view = node(self.store)["settings"]
         self.assertEqual((view["id"], view["rev"], view["matches_state_cfg"]), (self.report["id"], CFG, True))
+        self.assertEqual(saved["safe_settings"], view["safe_settings"])
         self.assertEqual(view["safe_settings"], {
             "center_frequency_hz": 433920000, "gain_db": 15.7, "vfo0_frequency_hz": 433920000,
             "vfo0_bandwidth_hz": 12500, "vfo0_squelch_db": -80, "ant_arrangement": "UCA", "doa_method": "MUSIC",
@@ -618,7 +656,23 @@ class SettingsReportTests(unittest.TestCase):
         self.assertEqual(self.put(self.report)["status"], "FRESH")
         view = node(self.store)["settings"]
         self.assertEqual((view["matches_state_cfg"], view["safe_settings"]), (False, {}))
-        self.assertEqual(self.store.settings_report()["settings_json"], self.report["settings_json"])
+        saved = self.store.settings_report()
+        self.assertEqual(saved["settings_json"], self.report["settings_json"])
+        self.assertEqual((saved["matches_state_cfg"], saved["state_cfg"], saved["safe_settings"]), (False, CFG + 1, {}))
+
+    def test_a_later_revision_withdraws_the_safe_settings_on_every_read(self) -> None:
+        self.assertEqual(self.put(self.report)["status"], "FRESH")
+        self.assertEqual(self.store.settings_report()["safe_settings"]["center_frequency_hz"], 433920000)
+        # Another ground or the edge panel patches the node: state.cfg moves on, the session stays.
+        put(self.store, "state", obj("state.json", cfg=CFG + 1))
+        saved = self.store.settings_report()
+        self.assertEqual((saved["rev"], saved["state_cfg"], saved["matches_state_cfg"]), (CFG, CFG + 1, False))
+        self.assertEqual(saved["safe_settings"], {})
+        self.assertEqual(node(self.store)["settings"]["safe_settings"], {})
+        # The report is current again once state.cfg is back at its revision.
+        put(self.store, "state", obj("state.json", cfg=CFG))
+        self.assertTrue(self.store.settings_report()["matches_state_cfg"])
+        self.assertEqual(self.store.settings_report()["safe_settings"], node(self.store)["settings"]["safe_settings"])
 
     def test_only_a_pending_request_of_this_session_is_answered(self) -> None:
         other = RdfNodeV2Telemetry(NODE)
@@ -657,9 +711,19 @@ class SettingsReportTests(unittest.TestCase):
                               ({"settings_json": '{"a":1,"a":2}'}, "BAD_SETTINGS_JSON"),
                               ({"settings_json": '{"center_freq": "fast"}'}, "BAD_SETTINGS_JSON"),
                               ({"settings_json": {"center_freq": 1}}, "BAD_SETTINGS_JSON"),
+                              ({"settings_json": "\ud800" + self.report["settings_json"]}, "BAD_SETTINGS_JSON"),
+                              ({"settings_json": '{"station":"\\udc00"}'}, None),
+                              ({"settings_json": '{"x":' + "[" * 15 + "]" * 15 + "}"}, None),
+                              ({"settings_json": '{"x":' + "[" * 16 + "]" * 16 + "}"}, "BAD_SETTINGS_JSON"),
+                              ({"settings_json": '{"x":' + "[" * 600 + "]" * 600 + "}"}, "BAD_SETTINGS_JSON"),
                               ({"rev": None}, "INVALID_FIELD"), ({"id": ""}, "INVALID_FIELD")):
-            with self.subTest(change=change):
-                self.assertEqual(self.put(dict(self.report, **change))["error"], error)
+            with self.subTest(change=str(change)[:60]):
+                self.store.expect_settings_report(self.report["id"], NOW)
+                entry = self.put(dict(self.report, **change))
+                self.assertEqual((entry["status"], entry["error"]), ("FRESH" if error is None else "INVALID", error))
+                json.dumps(self.store.snapshot(NOW), allow_nan=False)
+                if error is None:
+                    self.assertIsNotNone(self.store.settings_report())
         self.assertEqual(self.put(self.report, retained=True)["error"], "BROKER_POLICY")
         padded = dict(self.report, settings_json=self.report["settings_json"] + " " * MAX_PAYLOAD_BYTES)
         self.assertEqual(self.put(padded)["error"], "PAYLOAD_TOO_LARGE")
@@ -847,6 +911,27 @@ class MessageRuleTests(unittest.TestCase):
         self.assertEqual(put(store, "telemetry/health", huge)["status"], "INVALID")
         big_float = dict(obj("telemetry-doa.ok1.json", t=NOW), p=10 ** 400)
         self.assertEqual(put(store, "telemetry/doa", big_float)["error"], "INVALID_FIELD")
+        # A lone surrogate in settings_json, with no config.get registered: the
+        # validator runs first, and the message is counted as invalid.
+        store = session_store()
+        report = obj("settings-reported.json")
+        entry = put(store, "settings/reported", dict(report, settings_json="\ud800" + report["settings_json"]))
+        self.assertEqual((entry["status"], entry["error"], entry.get("field")), ("INVALID", "BAD_SETTINGS_JSON", "settings_json"))
+        snapshot = store.snapshot(NOW)
+        self.assertEqual((snapshot["received"], snapshot["valid"], snapshot["invalid"]), (3, 2, 1))
+
+    def test_a_case_no_validator_names_is_still_one_invalid_message(self) -> None:
+        def broken(_data: Dict[str, Any]) -> Dict[str, Any]:
+            raise TypeError("unexpected")
+
+        store = session_store()
+        with patch.dict(rdf_node_mqtt_v2._VALIDATORS, {"telemetry/health": broken}):
+            entry = put(store, "telemetry/health", obj("telemetry-health.json", q=2, t=NOW))
+        self.assertEqual((entry["status"], entry["error"], entry["payload"]), ("INVALID", "MALFORMED_PAYLOAD", None))
+        snapshot = store.snapshot(NOW)
+        self.assertEqual(snapshot["valid"] + snapshot["invalid"] + snapshot["cleared"], snapshot["received"])
+        self.assertEqual(snapshot["invalid_counts"]["telemetry/health"], 1)
+        self.assertTrue(snapshot["node"]["health"]["fresh"])
 
     def test_mutated_edge_payloads_never_raise(self) -> None:
         rng = random.Random(7)
@@ -863,6 +948,8 @@ class MessageRuleTests(unittest.TestCase):
             meta = BY_FILE[name]
             store.ingest(f"sdr/v2/{NODE}/{meta['topic']}", bytes(data), qos=meta["qos"], retained=meta["retain"],
                          received_at_ms=NOW)
+            # The catch-all code means a validator met a case it does not name.
+            self.assertNotEqual(store.snapshot(NOW)["topics"][meta["topic"]]["error"], "MALFORMED_PAYLOAD")
         snapshot = store.snapshot(NOW)
         json.dumps(snapshot, allow_nan=False)
         self.assertEqual(snapshot["received"], len(HEALTHY_SEQUENCE) + 1500)

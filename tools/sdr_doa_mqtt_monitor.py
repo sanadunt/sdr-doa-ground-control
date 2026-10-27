@@ -805,7 +805,10 @@ class MqttMonitor:
             self._rdf_node.expect_settings_report(command_id, _now_ms())
 
     def rdf_node_settings_report(self) -> Optional[Dict[str, Any]]:
-        """The latest accepted settings/reported, with its exact settings.json text."""
+        """The latest accepted settings/reported, with its exact settings.json text.
+
+        ``safe_settings`` is empty unless ``matches_state_cfg`` (its ``rev`` is ``state.cfg``).
+        """
         with self._lock:
             return self._rdf_node.settings_report()
 

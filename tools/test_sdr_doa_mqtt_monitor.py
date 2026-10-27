@@ -589,6 +589,7 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self.assertEqual(snapshot["topics"]["settings/reported"]["status"], "FRESH")
         self.assertEqual((session["sid"], session["cfg"], session["health_fresh"]), (report["sid"], report["rev"], True))
         self.assertEqual(saved["settings_json"], report["settings_json"])
+        self.assertEqual((saved["matches_state_cfg"], saved["safe_settings"]["center_frequency_hz"]), (True, 433920000))
         self.assertEqual((ack["status"], ack["topic"]), ("APPLIED", "ack/config"))
         self.assertEqual(self.client.publish_calls, [])
 

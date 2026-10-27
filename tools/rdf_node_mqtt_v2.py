@@ -57,6 +57,9 @@ SETTINGS_FRESH_MS = 30_000
 ACK_FRESH_MS = 30_000
 # A config.get lives at most 30 s and its answer expires 30 s after it is sent.
 SETTINGS_REQUEST_TTL_MS = 60_000
+# KrakenSDR's settings.json is one flat object; deeper nesting is refused so
+# that no copy of the parsed object can run into the recursion limit.
+SETTINGS_JSON_MAX_DEPTH = 16
 MAX_SETTINGS_REQUESTS = 4
 MAX_ACKS = 32
 MAX_SESSIONS = 256
@@ -451,6 +454,23 @@ def safe_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _depth_within(value: Any, limit: int) -> bool:
+    """True when objects and arrays nest at most ``limit`` levels (iterative, no recursion)."""
+    stack: List[Tuple[Any, int]] = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict):
+            children: Any = item.values()
+        elif isinstance(item, list):
+            children = item
+        else:
+            continue
+        if depth > limit:
+            return False
+        stack.extend((child, depth + 1) for child in children)
+    return True
+
+
 def _validate_settings_report(data: Dict[str, Any]) -> Dict[str, Any]:
     if set(data) != SETTINGS_REPORT_FIELDS:
         raise _Invalid("BAD_SETTINGS_REPORT")
@@ -465,10 +485,11 @@ def _validate_settings_report(data: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(raw, str):
         raise _Invalid("BAD_SETTINGS_JSON", "settings_json")
     try:
+        # A lone surrogate escape (\ud800) is valid JSON but no UTF-8 text.
         parsed = _strict_json(raw.encode("utf-8"))
-    except _Invalid:
+    except (_Invalid, UnicodeEncodeError):
         raise _Invalid("BAD_SETTINGS_JSON", "settings_json") from None
-    if not isinstance(parsed, dict):
+    if not isinstance(parsed, dict) or not _depth_within(parsed, SETTINGS_JSON_MAX_DEPTH):
         raise _Invalid("BAD_SETTINGS_JSON", "settings_json")
     value["safe_settings"] = safe_settings(parsed)
     value["settings_json"] = raw
@@ -636,15 +657,25 @@ class RdfNodeV2Telemetry:
         self._settings_requests[command_id] = now_ms + SETTINGS_REQUEST_TTL_MS
 
     def settings_report(self) -> Optional[Dict[str, Any]]:
-        """The latest accepted settings report with its exact native text, server side only."""
+        """The latest accepted settings report with its exact native text, server side only.
+
+        ``settings_json`` and ``settings`` are the node's file at revision
+        ``rev``. As in ``node_view`` (and the edge's ``Ground.config_view``),
+        ``safe_settings`` is given only while ``rev`` equals ``state.cfg``
+        (``matches_state_cfg``); a later revision makes the report history,
+        not the node's current values.
+        """
         if self._settings is None:
             return None
         value = self._settings["value"]
+        cfg = self._session["payload"]["cfg"] if self._session else None
+        current = cfg is not None and value["rev"] == cfg
         return copy.deepcopy({
             "id": value["id"], "sid": value["sid"], "boot": value["boot"], "rev": value["rev"],
             "t": value["t"], "received_at_ms": self._settings["received_at_ms"],
             "settings_json": value["settings_json"], "settings": value["settings"],
-            "safe_settings": value["safe_settings"],
+            "state_cfg": cfg, "matches_state_cfg": current,
+            "safe_settings": value["safe_settings"] if current else {},
         })
 
     def ack(self, command_id: str) -> Optional[Dict[str, Any]]:
@@ -691,7 +722,14 @@ class RdfNodeV2Telemetry:
                 raise _Invalid("EMPTY_PAYLOAD")
             if len(payload) > MAX_PAYLOAD_BYTES:
                 raise _Invalid("PAYLOAD_TOO_LARGE")
-            value = _VALIDATORS[suffix](_object(payload))
+            try:
+                value = _VALIDATORS[suffix](_object(payload))
+            except _Invalid:
+                raise
+            except (ArithmeticError, LookupError, TypeError, ValueError, RecursionError):
+                # A case no validator names: still one INVALID message, never
+                # an exception that leaves it uncounted.
+                raise _Invalid("MALFORMED_PAYLOAD") from None
         except _Invalid as exc:
             self._invalid += 1
             self._invalid_counts[suffix] += 1
@@ -1088,11 +1126,14 @@ class RdfNodeV2Telemetry:
             decay("telemetry/diagnostic/doa", "STALE", "SOURCE_STALE")
         if topics["telemetry/angular"]["status"] == "LIVE" and node["angular"] and not node["angular"]["live"]:
             decay("telemetry/angular", "STALE", node["angular"]["reasons"][0])
-        unverified = node["angular_unverified"]
+        # Both Angular topics share one candidate in the node view, so each
+        # row ages by its own frame, whichever topic holds the candidate.
         for suffix in ("telemetry/angular", "telemetry/diagnostic/angular"):
-            if (topics[suffix]["status"] == "UNVERIFIED" and unverified is not None and
-                    unverified["topic"] == suffix and unverified["stale"]):
-                decay(suffix, "STALE", "SOURCE_STALE")
+            payload = topics[suffix]["payload"]
+            if topics[suffix]["status"] == "UNVERIFIED" and isinstance(payload, dict):
+                problem = _source_window(payload["timestamp_ms"], now_ms, ANGULAR_FRESH_MS)
+                if problem:
+                    decay(suffix, "STALE", "SOURCE_TIME_FUTURE" if problem == "SOURCE_TIME_FUTURE" else "SOURCE_STALE")
         session = node["session"]
         for suffix in ("capabilities", "availability"):
             payload = topics[suffix]["payload"]
