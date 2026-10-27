@@ -63,8 +63,9 @@ jobs:
         id: broker
         run: |
           # tools/mqtt_stage4.conf: anonymous, loopback only. Only
-          # test_sdr_doa_mqtt_stdlib.py needs it; without it that script is
-          # skipped with a warning and everything else still runs.
+          # tools/test_rdf_node_broker.py needs it (the monitor fed with the
+          # RDF Node's payloads through a real broker); without it those
+          # tests are skipped with a warning and everything else still runs.
           if sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends mosquitto; then
             mosquitto -c tools/mqtt_stage4.conf -d
             for _ in $(seq 1 50); do
@@ -75,7 +76,7 @@ jobs:
               sleep 0.2
             done
           fi
-          echo "::warning::No staging MQTT broker on 127.0.0.1:18884; tools/test_sdr_doa_mqtt_stdlib.py will be skipped"
+          echo "::warning::No staging MQTT broker on 127.0.0.1:18884; tools/test_rdf_node_broker.py will be skipped"
           echo "ready=false" >> "$GITHUB_OUTPUT"
 
       - name: npm ci
@@ -98,8 +99,6 @@ jobs:
         run: .venv/bin/python -m unittest discover -s tools -p 'test_*.py'
 
       - name: Python standalone test scripts
-        env:
-          BROKER_READY: ${{ steps.broker.outputs.ready }}
         run: |
           # unittest discover runs the files with a unittest.TestCase; the
           # others are assert scripts that run their test_* functions in __main__.
@@ -108,23 +107,8 @@ jobs:
             if grep -q 'unittest\.TestCase' "$script"; then
               continue
             fi
-            args=()
-            case "$script" in
-              tools/test_sdr_doa_mqtt_stdlib.py)
-                if [ "$BROKER_READY" != true ]; then
-                  echo "::warning file=$script::Skipped: no staging MQTT broker on 127.0.0.1:18884"
-                  continue
-                fi
-                ;;
-              tools/test_sdr_doa_mqtt.py)
-                # With a host and port it also runs its broker round trip.
-                if [ "$BROKER_READY" = true ]; then
-                  args=(127.0.0.1 18884)
-                fi
-                ;;
-            esac
-            echo "::group::$script ${args[*]}"
-            if ! .venv/bin/python "$script" "${args[@]}"; then
+            echo "::group::$script"
+            if ! .venv/bin/python "$script"; then
               echo "::error file=$script::$script failed"
               status=1
             fi

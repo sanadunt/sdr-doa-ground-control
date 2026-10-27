@@ -160,8 +160,9 @@ class WorkflowTextTests(unittest.TestCase):
             self.assertIn(command, text)
         # The standalone runner tells the two kinds of test files apart this way.
         self.assertIn("grep -q 'unittest\\.TestCase' \"$script\"", text)
-        self.assertIn("tools/test_sdr_doa_mqtt_stdlib.py)", text)
-        self.assertIn("::warning file=$script::Skipped", text)
+        # The broker serves the monitor's round trip through a real broker, which skips without it.
+        self.assertIn("tools/test_rdf_node_broker.py will be skipped", text)
+        self.assertNotIn("BROKER_READY", text)
 
     def test_release_checks_tag_and_assets(self):
         text = self.texts["release.yml"]
