@@ -5,8 +5,8 @@
 #   docker compose -f docker-compose.ghcr.yml up -d
 #   # open http://127.0.0.1:8787/ in Chromium or Chrome (WebUSB for the Receiver)
 #
-# The image tag is the update channel: 2 (the default) follows every 2.x.y
-# release, 2.0 only 2.0.z, 2.0.0 stays on that release. Set SDR_DOA_IMAGE_TAG
+# The image tag is the update channel: 3 (the default) follows every 3.x.y
+# release, 3.0 only 3.0.z, 3.0.0 stays on that release. Set SDR_DOA_IMAGE_TAG
 # and SDR_DOA_PORT in a .env file next to this file. Update by hand with the
 # same pull and up -d. packaging/docker/sdr-doa-docker (also a release asset)
 # writes this file for you and adds a health check after each update, a
@@ -22,7 +22,7 @@ name: sdr-doa-ground-console
 
 services:
   console:
-    image: ${SDR_DOA_IMAGE:-ghcr.io/sanadunt/sdr-doa-ground-console}:${SDR_DOA_IMAGE_TAG:-2}
+    image: ${SDR_DOA_IMAGE:-ghcr.io/sanadunt/sdr-doa-ground-console}:${SDR_DOA_IMAGE_TAG:-3}
     # The console binds 127.0.0.1 and refuses any other address. With the host
     # network that is this machine's own loopback, so http://127.0.0.1:8787/
     # works here and is not reachable from the LAN. A bridge network with

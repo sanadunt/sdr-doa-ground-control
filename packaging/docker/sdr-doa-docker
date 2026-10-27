@@ -16,7 +16,7 @@ set -eu
 
 PROG=sdr-doa-docker
 # The update channel of a new install: the major version of this release.
-DEFAULT_CHANNEL=2
+DEFAULT_CHANNEL=3
 CONSOLE_IMAGE=ghcr.io/sanadunt/sdr-doa-ground-console
 PREVIOUS_TAG=sdr-doa-previous
 DEFAULT_PORT=8787
@@ -90,8 +90,8 @@ Commands:
 install options:
   --dir DIR         install directory (default /opt/sdr-doa-ground-console as
                     root, else ~/sdr-doa-ground-console)
-  --channel TAG     image tag to follow: 2 (default) takes every 2.x.y release,
-                    2.0 only 2.0.z, 2.0.0 stays put, latest follows every
+  --channel TAG     image tag to follow: 3 (default) takes every 3.x.y release,
+                    3.0 only 3.0.z, 3.0.0 stays put, latest follows every
                     release including a new major version
   --port N          console port (default 8787; the console binds 127.0.0.1)
   --auto-update     also turn the daily update on (root)
@@ -122,7 +122,7 @@ replaces the image: apply an edit of .env with 'docker compose up -d' in DIR
 (SDR_DOA_ADMIN_PASSWORD='...'): docker compose replaces $name in unquoted and
 double-quoted values.
 A new major version arrives only when you change the channel, for example
-  sdr-doa-docker install --channel 3
+  sdr-doa-docker install --channel 4
 Admin password of the console (default 123456 until you set one); use sudo
 for an install in /opt:
   cd /opt/sdr-doa-ground-console
@@ -195,7 +195,7 @@ check_dir() {
 
 check_tag() {
   case $1 in
-    '' | *[!A-Za-z0-9_.-]* | [.-]*) usage_error "the channel must be an image tag such as 2, 2.0 or 2.0.0, got '$1'" ;;
+    '' | *[!A-Za-z0-9_.-]* | [.-]*) usage_error "the channel must be an image tag such as 3, 3.0 or 3.0.0, got '$1'" ;;
   esac
   [ "$1" != "$PREVIOUS_TAG" ] || usage_error "$PREVIOUS_TAG is the tag of the previous image, not a channel"
   [ "${#1}" -le 128 ] || usage_error "the channel '$1' is longer than 128 characters"
