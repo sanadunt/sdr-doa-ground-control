@@ -3,10 +3,10 @@
 | | |
 |---|---|
 | Status | Menunggu persetujuan |
-| Issue | #7 (parser console mengikuti kontrak edge) |
+| Issue | #7 (parser console mengikuti kontrak edge), #8 (Dashboard memakai MQTT dulu, bagian 8) |
 | Keputusan | `docs/KEPUTUSAN_MQTT.md`: satu MQTT, root `sdr/v2/uav-01`, Data Out hanya cadangan |
-| Kode console | `tools/rdf_node_mqtt_v2.py` (parser dan store), `tools/sdr_doa_mqtt_monitor.py` (koneksi), `GET /api/mqtt/rdf-node` |
-| Fixture | `tools/fixtures/rdf-node/`, dibuat oleh kode edge sendiri |
+| Kode console | `tools/rdf_node_mqtt_v2.py` (parser dan store), `tools/sdr_doa_mqtt_monitor.py` (koneksi), `GET /api/mqtt/rdf-node`; `tools/telemetry_source.py` dan `tools/data_out_reader.py` (sumber `/api/snapshot`) |
+| Fixture | `tools/fixtures/rdf-node/`, dibuat oleh kode edge sendiri; `tools/fixtures/telemetry-source/`, jawaban `/api/snapshot` dari MQTT |
 
 Sumber: repo `sanadunt/rdf-indicator-raspberry`, folder `rdf-node/`: `docs/MQTT_TOPIC_SUMMARY.md`, `docs/PROTOCOL.md`, `docs/CONTROL.md`, `docs/MQTT_GROUND.md`, dan kode `src/rdf_node/ground.py`, `codec.py`, `control.py`, `agent.py`, `journal.py`, `source.py`. Acuan wajib: commit `8691ad000146111cd633e9e4fac600b5da53fd8c` (edge rilis `1.0.0-20261013194717`, yang terpasang di Raspberry). Tambahan dari HEAD `20713ff9f0580386cece39f9b12d1d24e47b9bb6` (2026-10-27) ada di bagian 7 dan bersifat opsional.
 
@@ -118,3 +118,80 @@ Field: `v`, `sid`, `id`, `status`, `t`, `rev`, `result`. `config.*` dijawab di `
 - `ppp.restart`: setelah `PPP_RESTART_REQUESTED` edge mengirim ACK akhir `APPLIED` (`proof` `{ppp, peer, mqtt, cycled}`, `elapsed_ms`) atau `OUTCOME_UNKNOWN` (`phase`, `steps`, `elapsed_ms`, `reason`). Penolakan baru: `PPP_RESTART_IN_PROGRESS`, `PPP_RESTART_TOO_SOON`.
 - Record `operation.get` menambah `origin`, `summary`, `reason`.
 - Wire tidak berubah; hanya reconnect dan keepalive client edge.
+
+## 8. Dashboard: MQTT dulu, Data Out cadangan (#8)
+
+Kode: `tools/telemetry_source.py` (keputusan sumber dan jawaban dari MQTT), `DataOutReader.read_reason()` di `tools/data_out_reader.py` (kapan Data Out dibaca), `collect_light()` di `tools/sdr_doa_collector.py` (pembacaan ringan), `frontend/src/lib/telemetrySource.ts` (badge dan view DoA di browser). Contoh jawaban: `tools/fixtures/telemetry-source/`.
+
+### 8.1 Keputusan sumber
+
+Server memutuskan sekali per jawaban `/api/snapshot`:
+
+| Sumber | Syarat | Isi jawaban |
+|---|---|---|
+| `mqtt` | Store punya sesi `state`, dan `telemetry/health` dari `sid` itu diterima paling lama 8 s lalu dengan `daq=1`. Store hanya menerima health yang `q`-nya maju dan `t`-nya di jendela, dan `sid` baru membuang health lama, jadi "segar" sudah berarti `q` maju di sesi sekarang. MQTT tersambung saja tidak cukup. | Dari MQTT (8.2), ditambah pembacaan ringan Data Out (8.5) |
+| `data_out` | MQTT tidak segar | Pembacaan Data Out penuh, persis seperti sebelumnya |
+| `none` | MQTT tidak segar dan `status.json` Data Out tidak terbaca | Jawaban Data Out yang `UNAVAILABLE` |
+
+Jawaban membawa `source`: `kind`, `reason`, `reasons`, `mqtt` (`fresh`, `connection`, `sid`, `health_age_ms`, `health_daq`) dan `data_out` (`read`: `light` atau `full`, `available`, dan untuk MQTT `interval_s`, `age_ms`). Kode alasan:
+
+| Kode | Arti |
+|---|---|
+| `MQTT_FRESH` | Jawaban dari MQTT |
+| `MQTT_DISABLED` | Tidak ada monitor MQTT (host tidak diatur, `paho-mqtt` tidak ada, atau monitor berhenti) |
+| `MQTT_NO_SESSION` | Belum ada `state` |
+| `MQTT_NO_HEALTH` | Belum ada `telemetry/health` dari sesi ini |
+| `MQTT_HEALTH_STALE` | Health terakhir lebih tua dari 8 s |
+| `MQTT_DAQ_NOT_HEALTHY` | Health segar tetapi `daq` 0 atau 2; Data Out penuh lalu menunjukkan detail DAQ-nya |
+| `DATA_OUT_REQUESTED` | UI lama (`--legacy-ui`) meminta Data Out (`source=data_out`), karena ia hanya merender view CSV dan XML |
+| `DATA_OUT_UNAVAILABLE` | Data Out juga tidak terbaca (sumber `none`) |
+
+Ini menjawab pertanyaan terbuka 1 di `docs/KEPUTUSAN_MQTT.md`: MQTT tidak segar 8 s setelah health terakhir, batas health di kontrak (bagian 4). Di UI, chip **SUMBER** di strip status dan badge di HUD menampilkan `MQTT`, `Data Out (cadangan)` atau `tidak ada`; tooltip chip menyebut kode dan alasannya.
+
+### 8.2 Pemetaan ke TelemetrySnapshot
+
+Jawaban MQTT memakai bentuk TelemetrySnapshot yang sama, dengan satu view DoA `doa_candidates.mqtt` (tanpa `csv` dan `xml`). Bukti diambil dari kode edge commit 8691ad0 (`source.py`, `agent.py`, `config.py`); HEAD 20713ff tidak mengubah bagian ini.
+
+| Field snapshot | Dari MQTT | Bukti |
+|---|---|---|
+| `doa_candidates.mqtt.canonical_angle_deg` (θ₀) | `telemetry/doa` `ok=1` `a`: `a mod 360` bila `capabilities.angle` sesi ini `theta_mirror`, `(360 − a) mod 360` bila `csv_native`. Tanpa capabilities sesi ini atau nilai lain, θ₀ dikosongkan (`MQTT_ANGLE_CONVENTION_UNKNOWN`). | `Source.view`: `angle=(360-raw)%360` bila `angle_mode=='theta_mirror'`, selain itu `raw`; `raw` = kolom 1 DOA_value.html `% 360` (`parse_csv`). `capabilities.angle` = `source.angle_mode`, hanya `theta_mirror` atau `csv_native` (`validate_config`). Collector console: θ₀ view CSV = `(360 − kolom 1) mod 360` (`_canonicalize_native_angle`). |
+| `angular_power_db`, `angular_peak_index` | `telemetry/angular` `flags=63` `values`, hanya bila frame itu punya `frequency_hz` = `f` dan `revision` = `rev` DoA (`angular_pairing` `SAME_FRAME` atau `SAME_CONFIG`) | `parse_csv`: `values = row[17:]` dalam urutan file, sama persis dengan `angular_power_db` collector (grid θ₀, dB bergeser, tidak diubah) |
+| θ₀ frame Angular | `(360 − raw_doa_deg) mod 360`, tidak bergantung `angle_mode` | `_live_angular`: `raw_doa_deg = r['raw_doa_deg']` (kolom 1 `% 360`) |
+| `native_consistency` | DoA dibanding frame Angular-nya. `q` sama berarti satu record; dua θ₀ yang beda lebih dari 1° adalah `CONFLICT` (`MQTT_DOA_ANGULAR_CONFLICT`), jadi pemetaan sudut yang salah terlihat. `q` beda: `ADJACENT_FRAMES`/`OUT_OF_WINDOW`, sudut tidak dicek. Puncak vektor dibanding θ₀ frame itu sendiri: `ANGULAR_PEAK_ANGLE_MISMATCH` (3°). | `_schedule`: Angular LIVE dikirim hanya bila `r['q'] == d['q']`, dengan `q` record yang sama dengan DoA |
+| `frequency_hz_normalized` | `f` (Hz) | kolom 4 |
+| `confidence_metric_db` | `c` (PAPR dB native); `confidence` tetap `null` | kolom 2 |
+| `power_native_db` | `p`; `power_db` tetap `null`, ≤ −100 dB `POWER_FLOOR_LOSSY` | kolom 3 |
+| `timestamp_ms`, `freshness` | `t`; `fresh` = DoA LIVE di store (≤ 5 s sejak diterima, `t` ≤ 5 s, health segar `daq=1`); `age_ms` = yang lebih besar dari umur sejak diterima dan umur sumber; `max_age_ms` 5000 | kolom 0 |
+| `status.daq_health`, flag sync | `daq=1`: `PASS` dan ketiga flag sync `true`; detail health segar dipakai bila ada | `Source.view`: `healthy` = `status.json` segar, `daq_ok`, ketiga flag sync `true` (dan frame maju bila diwajibkan) |
+| `status.safe.daq_num_dropped_frames` | health `drop` | `dropped_frames` = `daq_num_dropped_frames` |
+| `node_progress` | `ADVANCING` (health `q` maju) | — |
+
+Tidak dipetakan, dibiarkan kosong: `data_frame_index`, SNR, ADC overdrive, posisi, dan field settings dari MQTT (MQTT tidak membawanya; yang ada datang dari pembacaan ringan, 8.5), serta `confidence` dan `power_db` yang belum dikalibrasi, sama seperti Data Out.
+
+### 8.3 UNVERIFIED tidak pernah menjadi DoA
+
+`telemetry/doa` `ok=0` (`a` adalah kolom 1 RAW, yaitu 360 − θ₀), Angular dengan `flags ≠ 63`, `telemetry/diagnostic/doa` (DOA doa.xml, yaitu θ₀) dan `telemetry/diagnostic/angular` hanya masuk blok `mqtt` jawaban, dengan θ₀ turunannya untuk diagnostik. Mereka tidak pernah mengisi `doa_candidates`: chip DOA menjadi `UNVERIFIED`, HUD menulis alasannya, dan bearing, kurva polar dan overlay peta tetap kosong. Diagnostik DoA menampilkannya di kartu **DoA MQTT**, Monitor Pesan di kartu Node.
+
+Akibatnya, dengan konfigurasi edge default (authority dan sudut belum diverifikasi, jadi edge hanya mengirim `ok=0` dan Angular `flags=23`), Dashboard tidak menampilkan bearing selama MQTT segar. Bearing baru tampil setelah edge memverifikasi sumber dan konvensi sudut. Profile stream `control` tidak mengirim Angular, sehingga DOA `INCOMPLETE` (vektor tidak ada); bearing perlu profile `balanced` atau `graph_u8`.
+
+### 8.4 Batas observasi
+
+Jawaban MQTT tetap `authority` `none`, `clock_source` `remote_unverified`, gate publikasi `BLOCKED` dengan `GROUND_CLOCK_UNVERIFIED`, `CANONICAL_ANGLE_NOT_CONFIGURED` dan `DOA_AUTHORITY_NOT_SELECTED`, dan `overall_state` tidak pernah `LIVE`. Urutan state: `DEGRADED` (ADC overdrive dari pembacaan ringan), `CONFLICT`, `STALE` (DoA LIVE sudah tua, atau tidak ada DoA saat ini), `INCOMPLETE` (θ₀ atau vektor tidak ada), lalu `UNVERIFIED`. Aturan freshness lokal browser sama dengan Data Out: jendela 5 s dari umur DoA, dan `collection.age_ms` jawaban MQTT selalu 0 karena dibangun dari store saat itu.
+
+### 8.5 Data Out selama MQTT segar: pembacaan ringan
+
+`DataOutReader.read_reason()` tidak menjalankan pembacaan penuh selama MQTT segar. Yang tidak pernah dibawa MQTT datang dari pembacaan ringan `status.json`, `settings.json` dan `doa.xml`:
+
+- **Field settings** untuk kartu node, ikuti-frekuensi, axis dan compass offset, dan read-back Kontrol (`settings.read_at_ms`).
+- **Posisi stasiun**: `LOCATION` doa.xml, bila `gps_status` di `status.json` adalah fix positif dan doa.xml segar terhadap `status.json` pada pembacaan itu. Posisi tidak ada di `status.json` maupun `settings.json`, jadi doa.xml (455 B) ikut dibaca. Pembacaan yang gagal tidak menghapus posisi yang dipegang peta.
+- **ADC overdrive dan SNR**, berlaku 65 s sejak dibaca.
+
+Jadwalnya: di latar belakang saat pertama, lalu paling sering tiap 30 s; segera bila `state.cfg` atau `sid` berubah (paling sering sekali per detik); dan untuk "Cek ulang" Kontrol (`fresh_settings`), yang menunggu hasilnya. Refresh (`R`) tidak membaca Data Out selama MQTT segar. Pembacaan ringan yang gagal baru diulang pada interval berikutnya. Tampilan LAN memakai jawaban yang sama. Begitu MQTT tidak segar, request berikutnya membaca Data Out penuh lagi.
+
+Angka di link T900 PPP (~5,6 kB/s), tanpa header HTTP:
+
+| Jalur | Isi | Rata-rata |
+|---|---|---|
+| Data Out penuh, interval 2 s (sebelum #8) | `status.json` 650 B, `DOA_value.html` 2,3 kB, `doa.xml` 455 B tiap 2 s; `settings.json` 4,7 kB tiap 30 s | ~1,9 kB/s, sekitar sepertiga link |
+| Pembacaan ringan (MQTT segar) | `status.json`, `settings.json`, `doa.xml`, ~5,8 kB tiap 30 s | ~0,2 kB/s |
+| Telemetry MQTT (dikirim edge apa pun pilihan console), profile `balanced` | health 109 B/s, DoA ~106 B/s, Angular 2,4–2,9 kB tiap ≥ 4 s, detail 178 B tiap 10 s, doa.xml diagnostik 234 B tiap 3 s | ~1 kB/s |
