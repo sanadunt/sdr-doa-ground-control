@@ -1,6 +1,6 @@
 import type { JSX, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode, Ref } from 'react';
 import { useEffect, useImperativeHandle, useRef } from 'react';
-import type { ReceiverBridge } from '../../lib/receiverBridge';
+import type { SpectrumFeed } from '../../lib/receiverBridge';
 import type { BridgeMarker, SpectrumFrame } from '../../lib/receiverBridgeProtocol';
 import type { DockMode } from '../../lib/spectrumDockSettings';
 import { PALETTE_STOPS } from '../../lib/overlayPalette';
@@ -179,7 +179,8 @@ export interface SpectrumCanvasHandle {
 }
 
 export interface SpectrumCanvasProps {
-  bridge: ReceiverBridge;
+  /** Where frames come from: the Receiver bridge, or the Receiver mirror in the LAN view. */
+  bridge: SpectrumFeed;
   /** RX frames or the wide scan's (Spektrum); frames of the other source are not drawn. */
   mode: DockMode;
   /** The trace is live (RX runs in RX mode, a scan runs in Spektrum mode); otherwise it is dimmed and covered by `overlay`. */
@@ -218,6 +219,8 @@ export interface SpectrumCanvasProps {
   onSelectMarker?: (id: string | null) => void;
   /** Delete/Backspace removes the picked marker; Ctrl/⌘+Z takes back the dock's last mark. */
   onMarkerKey?: (action: 'remove' | 'undo') => void;
+  /** View only (the Receiver mirror): no tuning, marking or keys; the hover readout stays. */
+  readOnly?: boolean;
 }
 
 const NO_MARKERS: readonly BridgeMarker[] = [];
@@ -240,6 +243,7 @@ const NO_MARKERS: readonly BridgeMarker[] = [];
 export function SpectrumCanvas({
   bridge, mode, live, fallbackView, centerHz, vfo, info, notice, overlay, tuneHz, onTune, dbRange, onAutoRange, handle,
   markers = NO_MARKERS, selectedMarkerId = null, pendingMarkHz = null, marking = false, onMark, onSelectMarker, onMarkerKey,
+  readOnly = false,
 }: SpectrumCanvasProps): JSX.Element {
   const { t } = useI18n();
   const traceRef = useRef<HTMLCanvasElement>(null);
@@ -525,8 +529,8 @@ export function SpectrumCanvas({
   };
 
   const onPointerDown = (event: ReactPointerEvent<HTMLElement>) => {
-    // A button in the stopped overlay is not a tune click.
-    if (event.button !== 0 || (event.target instanceof Element && event.target.closest('button, a'))) return;
+    // A button in the stopped overlay is not a tune click; a view-only canvas tunes nothing.
+    if (readOnly || event.button !== 0 || (event.target instanceof Element && event.target.closest('button, a'))) return;
     pointerRef.current = { x: event.clientX, y: event.clientY, id: event.pointerId };
   };
 
@@ -628,7 +632,7 @@ export function SpectrumCanvas({
   };
 
   const onKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
-    if (markerKey(event)) return;
+    if (readOnly || markerKey(event)) return;
     const direction = event.key === 'ArrowRight' || event.key === 'ArrowUp' ? 1 : event.key === 'ArrowLeft' || event.key === 'ArrowDown' ? -1 : 0;
     if (!direction || event.altKey || event.ctrlKey || event.metaKey) return;
     event.preventDefault();
@@ -655,19 +659,24 @@ export function SpectrumCanvas({
         <span className="ov-spec-peak" ref={peakRef} />
       </div>
       {notice ? <div className="ov-spec-notice" role="status">{notice}</div> : null}
-      <div className={`ov-spec-trace${live ? '' : ' is-stopped'}${marking ? ' is-marking' : ''}`} {...pointerHandlers}>
-        <canvas
-          ref={traceRef}
-          className="ov-spec-canvas"
-          tabIndex={0}
-          role="slider"
-          aria-label={t(marking ? 'spectrum.canvasAriaMarking' : mode === 'sweep' ? 'spectrum.canvasAriaSweep' : 'spectrum.canvasAria')}
-          aria-valuemin={1}
-          aria-valuemax={6000}
-          aria-valuenow={tuneHz === null ? undefined : Number((tuneHz / 1e6).toFixed(3))}
-          aria-valuetext={valueText}
-          onKeyDown={onKeyDown}
-        />
+      <div className={`ov-spec-trace${live ? '' : ' is-stopped'}${marking ? ' is-marking' : ''}${readOnly ? ' is-read-only' : ''}`} {...pointerHandlers}>
+        {readOnly ? (
+          // A picture of the mirrored spectrum: nothing to focus or tune.
+          <canvas ref={traceRef} className="ov-spec-canvas" role="img" aria-label={t('mirror.canvasAria')} />
+        ) : (
+          <canvas
+            ref={traceRef}
+            className="ov-spec-canvas"
+            tabIndex={0}
+            role="slider"
+            aria-label={t(marking ? 'spectrum.canvasAriaMarking' : mode === 'sweep' ? 'spectrum.canvasAriaSweep' : 'spectrum.canvasAria')}
+            aria-valuemin={1}
+            aria-valuemax={6000}
+            aria-valuenow={tuneHz === null ? undefined : Number((tuneHz / 1e6).toFixed(3))}
+            aria-valuetext={valueText}
+            onKeyDown={onKeyDown}
+          />
+        )}
         <span className="ov-spec-label is-top" ref={topLabelRef} aria-hidden="true" />
         <span className="ov-spec-label is-bottom" ref={bottomLabelRef} aria-hidden="true" />
         <span className="ov-spec-vfo" ref={vfoLabelRef} aria-hidden="true" hidden>VFO</span>
@@ -679,7 +688,7 @@ export function SpectrumCanvas({
           <span key={index}>{fallbackView ? ticks(fallbackView.startHz, fallbackView.stopHz, TICK_COUNT, tickDigits(mode, fallbackView, TICK_COUNT))[index]?.label ?? '—' : '—'}</span>
         ))}
       </div>
-      <canvas ref={waterfallRef} className={`ov-spec-waterfall${marking ? ' is-marking' : ''}`} aria-hidden="true" {...pointerHandlers} />
+      <canvas ref={waterfallRef} className={`ov-spec-waterfall${marking ? ' is-marking' : ''}${readOnly ? ' is-read-only' : ''}`} aria-hidden="true" {...pointerHandlers} />
     </div>
   );
 }

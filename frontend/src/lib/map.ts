@@ -1,5 +1,6 @@
 import type { Candidate, GpsConfig, GpsResolution, GpsSourceMode, ManualGpsOverride, MapCoordinate, TelemetrySnapshot } from '../types';
 import type { BasemapTone } from './basemaps';
+import { isMqttSnapshot, lightStatus, lightXml } from './telemetrySource';
 
 // Basemap health. The console's tile route tries the upstream hosts itself
 // (tools/tile_cache.py), so a style has one URL in the browser and hostCount
@@ -284,6 +285,14 @@ export interface HeldStation {
  */
 export function gpsReportsNoFix(snapshot: TelemetrySnapshot | null | undefined, localFresh: boolean): boolean {
   if (!localFresh || snapshot?.status?.available !== true) return false;
+  if (isMqttSnapshot(snapshot)) {
+    // Over MQTT only the light Data Out read knows the GPS state.
+    const status = lightStatus(snapshot);
+    if (!status) return false;
+    const safe = status.safe !== null && typeof status.safe === 'object' ? status.safe as Record<string, unknown> : {};
+    const light = safe.gps_status;
+    return typeof light !== 'string' || !GPS_POSITIVE_STATES.has(light.trim().toLowerCase());
+  }
   const raw = snapshot.status.safe?.gps_status;
   return typeof raw !== 'string' || !GPS_POSITIVE_STATES.has(raw.trim().toLowerCase());
 }
@@ -340,8 +349,22 @@ export function coordinateFromCandidate(candidate: Candidate | undefined, source
   return { latitude, longitude, source };
 }
 
+/**
+ * The station position of an MQTT answer: MQTT carries none, so it is the
+ * doa.xml LOCATION of the light Data Out read, while that read had a positive
+ * GPS fix and doa.xml was fresh against its status.json.
+ */
+function lightStationCoordinate(snapshot: TelemetrySnapshot): MapCoordinate | null {
+  const status = lightStatus(snapshot);
+  const safe = status?.safe !== null && typeof status?.safe === 'object' ? status.safe as Record<string, unknown> : {};
+  const gps = typeof safe.gps_status === 'string' ? safe.gps_status.trim().toLowerCase() : '';
+  if (!status || GPS_DISABLED_STATES.has(gps) || !GPS_POSITIVE_STATES.has(gps)) return null;
+  return coordinateFromCandidate(lightXml(snapshot) ?? undefined, 'XML');
+}
+
 export function resolveStationCoordinate(snapshot: TelemetrySnapshot | null | undefined): MapCoordinate | null {
   if (!snapshot || snapshot.status?.available !== true) return null;
+  if (isMqttSnapshot(snapshot)) return lightStationCoordinate(snapshot);
   const rawGpsStatus = snapshot.status.safe?.gps_status;
   if (typeof rawGpsStatus !== 'string') return null;
   const gpsStatus = rawGpsStatus.trim().toLowerCase();
@@ -361,6 +384,7 @@ export function resolveStationCoordinate(snapshot: TelemetrySnapshot | null | un
 }
 
 export function mapHasCoordinateConflict(snapshot: TelemetrySnapshot | null | undefined): boolean {
+  if (isMqttSnapshot(snapshot)) return false;
   const candidates = snapshot?.doa_candidates ?? {};
   const csv = coordinateFromCandidate(candidates.csv, 'CSV');
   const xml = coordinateFromCandidate(candidates.xml, 'XML');

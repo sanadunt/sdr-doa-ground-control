@@ -27,7 +27,7 @@ secrets/
 branding.json
 console.json
 preferences.json
-# docker-compose.agent.yml settings (may hold the MQTT password) and bind mounts
+# Settings of the removed RDF-SDR agent (may hold an MQTT password) and local bind mounts
 agent.env
 /data/
 /state/

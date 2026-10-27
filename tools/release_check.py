@@ -12,8 +12,8 @@ Subcommands:
 * ``assets``: checks that a release directory holds exactly the release
   assets, that ``SHA256SUMS`` covers each of them, and that the console
   tarball ships the same ``sdr-doa-docker`` as the standalone asset.
-* ``images``: writes the GHCR image names, the image reference of this
-  version, the OCI labels, the channel tags this version may take and
+* ``images``: writes the GHCR image name of the console, its reference for
+  this version, the OCI labels, the channel tags this version may take and
   whether it is the newest release.
 * ``channels``: the channel tags (``<MAJOR>.<MINOR>``, ``<MAJOR>``,
   ``latest``) this version may take, given the release tags that exist now.
@@ -22,6 +22,10 @@ Subcommands:
 * ``revision``: the ``org.opencontainers.image.revision`` label of an image,
   read from ``docker buildx imagetools inspect --format '{{json .Image}}'``
   on stdin.
+* ``notes``: the ``## <VERSION>`` section of ``CHANGELOG.md``, which the
+  release job puts on the GitHub Release page ahead of the generated notes,
+  so a new major's move (the Docker channel, ``update --allow-major``) is on
+  the page the native updater names. A version without a section fails.
 
 Standard library only; ``tag`` runs git. Nothing here touches the network.
 """
@@ -52,13 +56,13 @@ DOCKER_SCRIPT_ASSET = "sdr-doa-docker"
 DOCKER_SCRIPT_IN_CONSOLE = f"packaging/docker/{DOCKER_SCRIPT_ASSET}"
 REGISTRY = "ghcr.io"
 CONSOLE_IMAGE = "sdr-doa-ground-console"
-AGENT_IMAGE = "sdr-doa-rdf-sdr-agent"
 EVENTS = ("push", "workflow_dispatch")
 # Stricter than make_release.VERSION_RE: no leading zeros and no "+build"
 # part, because every release version is also a Docker image tag.
 RELEASE_VERSION_RE = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z][0-9A-Za-z.-]*))?$"
 )
+CHANGELOG_NAME = "CHANGELOG.md"
 _SHA256SUMS_LINE = re.compile(r"^([0-9a-f]{64}) [ *](\S+)$")
 
 
@@ -185,7 +189,6 @@ def release_assets(version: str) -> List[str]:
     parse_release_version(version)
     return [
         f"{make_release.console_release_name(version)}.tar.gz",
-        f"{make_release.agent_release_name(version)}.tar.gz",
         DOCKER_SCRIPT_ASSET,
         make_release.CHECKSUMS_NAME,
     ]
@@ -367,15 +370,61 @@ def channel_outputs(version: str, tags: Iterable[str]) -> Dict[str, str]:
 
 
 def image_outputs(owner: str, version: str, revision: str, source: str, tags: Iterable[str] = ()) -> Dict[str, str]:
-    """Image names, the <V> reference the build pushes, labels and the channels."""
-    outputs = {}
-    for key, image in (("console", CONSOLE_IMAGE), ("agent", AGENT_IMAGE)):
-        name = image_name(owner, image)
-        outputs[f"{key}_image"] = name
-        outputs[f"{key}_ref"] = f"{name}:{version}"
+    """The console image name, the <V> reference the build pushes, labels and the channels."""
+    name = image_name(owner, CONSOLE_IMAGE)
+    outputs = {"console_image": name, "console_ref": f"{name}:{version}"}
     outputs["labels"] = "\n".join(oci_labels(version, revision, source))
     outputs.update(channel_outputs(version, tags))
     return outputs
+
+
+def release_notes(changelog: str, version: str) -> str:
+    """The body of the ``## <version>`` section of a changelog, without its heading.
+
+    The section ends at the next level-2 heading; ``###`` headings and fenced
+    code inside it stay. A missing or empty section is an error, so a release
+    never goes out without the notes that say how a host moves to it.
+    """
+    heading = f"## {version}"
+    lines = changelog.splitlines()
+    start = None
+    fenced = False
+    for index, line in enumerate(lines):
+        if line.startswith("```"):
+            fenced = not fenced
+        if not fenced and line.rstrip() == heading:
+            start = index + 1
+            break
+    if start is None:
+        raise CheckError(f"{CHANGELOG_NAME} has no section '{heading}'; add the notes of this release there")
+    body = []
+    fenced = False
+    for line in lines[start:]:
+        if line.startswith("```"):
+            fenced = not fenced
+        if not fenced and line.startswith("## "):
+            break
+        body.append(line)
+    text = "\n".join(body).strip()
+    if not text:
+        raise CheckError(f"the section '{heading}' of {CHANGELOG_NAME} is empty")
+    return text + "\n"
+
+
+def write_release_notes(root: Path, version: str, output: Path) -> None:
+    """Write the notes of ``version`` from ``root/CHANGELOG.md`` to ``output``."""
+    parse_release_version(version)
+    path = root / CHANGELOG_NAME
+    try:
+        changelog = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise CheckError(f"cannot read {path}: {exc}") from None
+    notes = release_notes(changelog, version)
+    try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(notes, encoding="utf-8")
+    except OSError as exc:
+        raise CheckError(f"cannot write {output}: {exc}") from None
 
 
 def read_tags(path: Optional[str]) -> List[str]:
@@ -423,7 +472,7 @@ def _parser() -> argparse.ArgumentParser:
     assets.add_argument("--dir", type=Path, required=True)
     assets.add_argument("--version", required=True)
     tags_help = "release tags or refs that exist, one per line ('-' for stdin)"
-    images = commands.add_parser("images", help="image names, references, OCI labels and channels")
+    images = commands.add_parser("images", help="the image name, its reference, OCI labels and channels")
     images.add_argument("--owner", required=True, help="github.repository_owner")
     images.add_argument("--version", required=True)
     images.add_argument("--revision", required=True, help="full commit SHA")
@@ -433,6 +482,9 @@ def _parser() -> argparse.ArgumentParser:
     channels.add_argument("--version", required=True)
     channels.add_argument("--tags-file", required=True, help=tags_help)
     commands.add_parser("revision", help="the revision label of 'imagetools inspect --format {{json .Image}}' on stdin")
+    notes = commands.add_parser("notes", help=f"write the '## <VERSION>' section of {CHANGELOG_NAME}")
+    notes.add_argument("--version", required=True)
+    notes.add_argument("--output", type=Path, required=True, help="file the notes are written to")
     return parser
 
 
@@ -450,6 +502,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             write_outputs(image_outputs(args.owner, args.version, args.revision, args.source, tags), args.github_output)
         elif args.command == "channels":
             write_outputs(channel_outputs(args.version, read_tags(args.tags_file)), args.github_output)
+        elif args.command == "notes":
+            write_release_notes(args.root.resolve(), args.version, args.output)
+            print(f"notes: {args.output}", flush=True)
         else:
             print(image_revision(sys.stdin.read()), flush=True)
     except CheckError as exc:

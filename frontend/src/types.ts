@@ -77,6 +77,10 @@ export interface SettingsSnapshot {
   redacted?: boolean;
   fields?: Record<string, unknown>;
   raw_fields_omitted?: boolean;
+  /** settings.json was not read in this collection; a recent copy was reused. */
+  reused?: boolean;
+  /** Console clock (ms) when the settings.json used here was read. */
+  read_at_ms?: number | null;
 }
 
 export interface AuthoritySnapshot {
@@ -102,6 +106,23 @@ export interface CollectionInfo {
   budget_ms?: number | null;
   deadline_exceeded?: boolean;
   status_transport_failed?: boolean;
+  /** The shared Data Out read this answer came from; sent back as `seen`. */
+  id?: string;
+  /** Console clock (ms) when the collection completed. */
+  collected_at_ms?: number;
+  /** How long before this answer the collection completed. */
+  age_ms?: number;
+  /** The answer came from a collection another request started. */
+  shared?: boolean;
+  settings_reused?: boolean;
+  /** Age of the settings.json used, at the time of the answer. */
+  settings_age_ms?: number | null;
+  /** The console's saved refresh interval when the answer was sent; it sets how long one read is shared. */
+  refresh_seconds?: number | null;
+  /** The console's Data Out URL when the answer was sent; a page on another URL re-reads the config. */
+  console_base_url?: string | null;
+  /** How the Data Out host became an address: literal (IP in the URL), system, mdns, proxy (no address), or null. */
+  host_resolution?: { host?: string | null; method?: string | null; address?: string | null };
 }
 
 export interface ResourceInfo {
@@ -112,8 +133,23 @@ export interface ResourceInfo {
   error_kind?: string;
 }
 
+/** Which source answered /api/snapshot and why (issue #8); values are unvalidated JSON. */
+export interface SnapshotSource {
+  [key: string]: unknown;
+  /** mqtt, data_out (the fallback) or none. */
+  kind?: string;
+  /** The first of `reasons`, or MQTT_FRESH for an MQTT answer. */
+  reason?: string;
+  /** Why MQTT is not the source, then DATA_OUT_UNAVAILABLE when Data Out failed too. */
+  reasons?: string[];
+  mqtt?: Record<string, unknown>;
+  data_out?: Record<string, unknown>;
+}
+
 export interface TelemetrySnapshot {
   [key: string]: unknown;
+  /** Absent from older servers, which always answered from Data Out. */
+  source?: SnapshotSource;
   schema_version?: number;
   collector?: Record<string, unknown>;
   observed_at_ms?: number;
@@ -128,6 +164,10 @@ export interface TelemetrySnapshot {
   authority?: AuthoritySnapshot;
   publication_gate?: PublicationGate;
   overall_state?: string;
+  /** MQTT answers: what MQTT carries besides the LIVE DoA (UNVERIFIED and diagnostic topics). */
+  mqtt?: Record<string, unknown>;
+  /** MQTT answers: the light Data Out read (status.json, settings.json, doa.xml) for what MQTT never carries. */
+  data_out_light?: Record<string, unknown>;
 }
 
 export type MqttTransport = 'tcp' | 'websockets';
@@ -151,6 +191,8 @@ export interface ConsoleConfig {
   mqtt_transport?: MqttTransport;
   /** WebSocket path, used only with the websockets transport. */
   mqtt_ws_path?: string;
+  /** Hosts Data Out may be read from (port 8081); base_url's host is one of them. Absent from older servers. */
+  data_out_hosts?: string[];
   refresh_seconds: number;
 }
 
@@ -159,34 +201,7 @@ export interface Branding {
   logo_data_url: string;
 }
 
-/** Latest v1 message of one kind, after lib/mqttMonitor normalization. */
-export interface MqttEntry {
-  [key: string]: unknown;
-  kind?: string;
-  /** Server clock when the console received it. */
-  received_at_ms?: number;
-  /** Server-side receive age at snapshot time. */
-  age_ms?: number | null;
-  /** The payload's own ts_ms (edge clock). */
-  source_ts_ms?: number | null;
-  bytes?: number;
-  qos?: number;
-  /** True only for a broker replay from the retained store. */
-  retained?: boolean;
-  /** Decoded against the v1 contract (not the payload's own flags). */
-  valid?: boolean;
-  /** Zero-length publish: the retained value was removed. */
-  cleared?: boolean;
-  /** The payload's own boolean flags: valid, doa_valid, settings_valid. */
-  validity_flags?: Record<string, boolean>;
-  /** Payload source marker, e.g. "synthetic". */
-  source?: string;
-  latency_ms?: number | null;
-  /** Sanitized payload: identifiers and secrets are redacted. */
-  payload?: unknown;
-  error?: string;
-}
-
+/** GET /api/mqtt: the one MQTT status, after lib/mqttMonitor normalization. */
 export interface MqttSnapshot {
   [key: string]: unknown;
   enabled?: boolean;
@@ -196,36 +211,66 @@ export interface MqttSnapshot {
   port?: number;
   transport?: MqttTransport;
   ws_path?: string;
+  /** The RDF Node whose topics the monitor subscribes to, and their root (sdr/v2/<node>). */
+  node_id?: string;
+  root?: string;
   connection?: string;
   last_error?: string | null;
   /** Server clock when the snapshot was taken. */
   now_ms?: number;
   /** Browser clock when the snapshot was read; set by the API adapter for local ageing. */
   fetched_at_ms?: number;
+  /** Messages on the subscribed RDF Node topics, the same counts as /api/mqtt/rdf-node. */
   received?: number;
   valid?: number;
   invalid?: number;
+  /** Zero-length retained publishes that removed a value. */
   cleared?: number;
-  total_bytes?: number;
   last_received_at_ms?: number | null;
   last_age_ms?: number | null;
-  last_latency_ms?: number | null;
-  last_topic?: string | null;
-  last_by_kind?: Record<string, MqttEntry>;
-  kind_counts?: Record<string, number>;
 }
 
-/** One RDF Node v2 topic as reported by /api/mqtt/rdf-node, normalized. */
+/** One RDF Node topic as reported by /api/mqtt/rdf-node, normalized: the status of its latest message. */
 export interface RdfNodeTopic {
+  /** LIVE, UNVERIFIED, FRESH, CONTEXT, STALE, INCONSISTENT, IGNORED, INVALID or UNAVAILABLE. */
   status: string;
   received_at_ms: number | null;
   qos: number | null;
   retained: boolean | null;
   error: string | null;
+  /** The field that broke the contract, when the server named one. */
+  field: string | null;
   /** A zero-length retained publish removed the broker's value. */
   cleared: boolean;
   /** Bounded, sanitized fields only; the 360-bin angular values are dropped. */
   payload: Record<string, unknown> | null;
+}
+
+/** One part of the node view: the latest accepted value of that role, never a rejected message. */
+export interface RdfNodePart {
+  /** LIVE, UNVERIFIED, FRESH, CONTEXT, STALE or INCONSISTENT, derived from the server's view. */
+  status: string;
+  received_at_ms: number | null;
+  /** Why it is not LIVE, or why a candidate is UNVERIFIED (server codes). */
+  reasons: string[];
+  /** Bounded, sanitized display fields of the part. */
+  fields: Record<string, unknown>;
+}
+
+export interface RdfNodeAck {
+  topic: string;
+  status: string;
+  final: boolean;
+  received_at_ms: number | null;
+  error: string | null;
+}
+
+export interface RdfNodeView {
+  parts: Record<string, RdfNodePart | null>;
+  /** Newest first. */
+  acks: RdfNodeAck[];
+  /** config.get requests still waiting for settings/reported. */
+  settings_requests: number;
 }
 
 export interface RdfNodeSnapshot {
@@ -240,7 +285,9 @@ export interface RdfNodeSnapshot {
   invalid: number | null;
   last_received_at_ms: number | null;
   topic_counts: Record<string, number>;
+  invalid_counts: Record<string, number>;
   topics: Record<string, RdfNodeTopic>;
+  node: RdfNodeView;
 }
 
 export type GpsSourceMode = 'DATA_OUT' | 'MANUAL' | 'FALLBACK';

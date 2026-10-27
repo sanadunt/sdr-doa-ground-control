@@ -1,4 +1,4 @@
-import type { ConsoleConfig, MqttEntry, MqttSnapshot, MqttTarget, MqttTransport, RdfNodeSnapshot, RdfNodeTopic, Tone } from '../types';
+import type { ConsoleConfig, MqttSnapshot, MqttTarget, MqttTransport, RdfNodeAck, RdfNodePart, RdfNodeSnapshot, RdfNodeTopic, RdfNodeView, Tone } from '../types';
 
 type JsonObject = Record<string, unknown>;
 
@@ -77,6 +77,9 @@ const SECRET_KEY = /(pass(word)?|secret|token|api[_-]?key|private[_-]?key|creden
 // are not mistaken for an `id`.
 const IDENTIFIER_WORDS = new Set(['station', 'unit', 'hardware', 'serial', 'client', 'device', 'host', 'hostname', 'topic', 'id', 'uid', 'uuid']);
 const MAX_PAYLOAD_DEPTH = 6;
+/** The server's node id rule (rdf_node_mqtt_v2.py) and the topic root it reports, sdr/v2/<node>. */
+const NODE_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/u;
+const ROOT_PATTERN = /^sdr\/v2\/[A-Za-z0-9_-]{1,64}$/u;
 
 function lastKeyWord(key: string): string {
   const words = key.replace(/([a-z0-9])([A-Z])/gu, '$1 $2').split(/[\s_.-]+/u).filter(Boolean);
@@ -103,55 +106,10 @@ export function sanitizeMqttPayload(value: unknown, depth = 0): unknown {
   return output;
 }
 
-const KIND_PATTERN = /^[a-z][a-z0-9_]{0,31}$/u;
-const FLAG_PATTERN = /^[a-z][a-z0-9_]{0,31}$/u;
-const MAX_KINDS = 16;
-
-function normalizeKindCounts(value: unknown): Record<string, number> | undefined {
-  if (!isObject(value)) return undefined;
-  const output: Record<string, number> = {};
-  for (const [kind, entry] of Object.entries(value)) {
-    if (Object.keys(output).length >= MAX_KINDS) break;
-    const number = count(entry);
-    if (KIND_PATTERN.test(kind) && number !== undefined) output[kind] = number;
-  }
-  return output;
-}
-
-function normalizeEntry(kind: string, value: JsonObject, nowMs: number | null): MqttEntry {
-  const entry: MqttEntry = { kind };
-  const receivedAt = nonNegative(value.received_at_ms);
-  if (receivedAt !== null) entry.received_at_ms = receivedAt;
-  const age = nonNegative(value.age_ms);
-  entry.age_ms = age ?? (receivedAt !== null && nowMs !== null ? Math.max(0, nowMs - receivedAt) : null);
-  entry.source_ts_ms = nonNegative(value.source_ts_ms);
-  const bytes = count(value.bytes);
-  if (bytes !== undefined) entry.bytes = bytes;
-  const qos = count(value.qos);
-  if (qos !== undefined) entry.qos = qos;
-  entry.retained = value.retained === true;
-  entry.valid = value.valid === true;
-  if (value.cleared === true) entry.cleared = true;
-  if (isObject(value.validity_flags)) {
-    const flags: Record<string, boolean> = {};
-    for (const [name, flag] of Object.entries(value.validity_flags).slice(0, 8)) {
-      if (FLAG_PATTERN.test(name) && typeof flag === 'boolean') flags[name] = flag;
-    }
-    if (Object.keys(flags).length) entry.validity_flags = flags;
-  }
-  const source = text(value.source, 64);
-  if (source) entry.source = source;
-  entry.latency_ms = finite(value.latency_ms);
-  const error = text(value.error, 300);
-  if (error) entry.error = error;
-  if (value.payload !== undefined) entry.payload = sanitizeMqttPayload(value.payload);
-  return entry;
-}
-
 /**
- * Validate a /api/mqtt response. Unknown fields are dropped, numbers must be
- * finite, and payloads are sanitized here so redaction does not depend on
- * the renderer. `fetchedAtMs` is the browser clock at read time.
+ * Validate a /api/mqtt response: the one MQTT status (broker, connection and
+ * the message counts of the RDF Node topics). Unknown fields are dropped and
+ * numbers must be finite. `fetchedAtMs` is the browser clock at read time.
  */
 export function normalizeMqttSnapshot(value: unknown, fetchedAtMs: number): MqttSnapshot {
   if (!isObject(value)) throw new Error('MQTT response has an invalid shape');
@@ -165,43 +123,21 @@ export function normalizeMqttSnapshot(value: unknown, fetchedAtMs: number): Mqtt
   if (port !== undefined && port >= 1 && port <= 65535) snapshot.port = port;
   if (isMqttTransport(value.transport)) snapshot.transport = value.transport;
   if (isMqttWsPath(value.ws_path)) snapshot.ws_path = value.ws_path;
+  if (typeof value.node_id === 'string' && NODE_ID_PATTERN.test(value.node_id)) snapshot.node_id = value.node_id;
+  if (typeof value.root === 'string' && ROOT_PATTERN.test(value.root)) snapshot.root = value.root;
   const connection = text(value.connection, 32);
   if (connection) snapshot.connection = connection;
   snapshot.last_error = text(value.last_error, 300) ?? null;
   const nowMs = nonNegative(value.now_ms);
   if (nowMs !== null) snapshot.now_ms = nowMs;
-  for (const key of ['received', 'valid', 'invalid', 'cleared', 'total_bytes'] as const) {
+  for (const key of ['received', 'valid', 'invalid', 'cleared'] as const) {
     const number = count(value[key]);
     if (number !== undefined) snapshot[key] = number;
   }
   snapshot.last_received_at_ms = nonNegative(value.last_received_at_ms);
   snapshot.last_age_ms = nonNegative(value.last_age_ms);
-  snapshot.last_latency_ms = finite(value.last_latency_ms);
-  snapshot.last_topic = typeof value.last_topic === 'string' && value.last_topic ? value.last_topic.slice(0, 256) : null;
-  const kindCounts = normalizeKindCounts(value.kind_counts);
-  if (kindCounts) snapshot.kind_counts = kindCounts;
-  if (isObject(value.last_by_kind)) {
-    const entries: Record<string, MqttEntry> = {};
-    for (const [kind, entry] of Object.entries(value.last_by_kind)) {
-      if (Object.keys(entries).length >= MAX_KINDS) break;
-      if (KIND_PATTERN.test(kind) && isObject(entry)) entries[kind] = normalizeEntry(kind, entry, nowMs);
-    }
-    snapshot.last_by_kind = entries;
-  }
   return snapshot;
 }
-
-/** Display thresholds for the receive age of one kind; kinds without one are events or markers. */
-export const MQTT_KIND_STALE_AFTER_MS: Readonly<Record<string, number>> = {
-  doa: 5_000,
-  nav: 5_000,
-  health: 8_000,
-  // The edge agent re-publishes state and config every 30 s.
-  state: 65_000,
-  config_reported: 65_000,
-};
-
-const KIND_ORDER = ['doa', 'health', 'nav', 'state', 'config_reported', 'availability', 'ack_config', 'config_patch', 'unknown'];
 
 /** Time since this snapshot was read, on the browser clock. */
 export function elapsedSinceRead(fetchedAtMs: number | undefined, nowLocalMs: number): number {
@@ -214,144 +150,46 @@ export function lastMessageAgeMs(snapshot: MqttSnapshot | null | undefined, nowL
   return typeof age === 'number' ? age + elapsedSinceRead(snapshot?.fetched_at_ms, nowLocalMs) : null;
 }
 
-export type MqttContractState = 'VALID' | 'INVALID' | 'CLEARED';
-
-export interface MqttKindRow {
-  kind: string;
-  count: number | null;
-  contract: MqttContractState;
-  retained: boolean;
-  synthetic: boolean;
-  source: string | null;
-  flags: Array<{ name: string; value: boolean }>;
-  /** health.state from the payload (ONLINE, STALE, DEGRADED, UNAVAILABLE, ...). */
-  healthState: string | null;
-  /** health.reasons codes. */
-  reasons: string[];
-  availability: { online: boolean; reason: string | null } | null;
-  /** Receive age on the console, aged locally since the read. */
-  ageMs: number | null;
-  /** Payload ts_ms age (edge clock, may be skewed). Shown for broker replays. */
-  sourceAgeMs: number | null;
-  staleAfterMs: number | null;
-  stale: boolean;
-  bytes: number | null;
-  latencyMs: number | null;
-  error: string | null;
-}
-
-const REASON_CODE = /^[A-Z][A-Z0-9_]{0,63}$/u;
-
-function payloadRecord(entry: MqttEntry | undefined): JsonObject | null {
-  return isObject(entry?.payload) ? entry.payload : null;
-}
-
-/**
- * One row per observed kind with its count, contract and payload status,
- * and local age. A broker replay is judged by its payload age, because its
- * receive time only says when this console subscribed.
- */
-export function mqttKindRows(snapshot: MqttSnapshot | null | undefined, nowLocalMs: number): MqttKindRow[] {
-  const entries = snapshot?.last_by_kind ?? {};
-  const counts = snapshot?.kind_counts ?? {};
-  const kinds = [...new Set([...Object.keys(entries), ...Object.keys(counts)])].sort((left, right) => {
-    const a = KIND_ORDER.indexOf(left);
-    const b = KIND_ORDER.indexOf(right);
-    if (a !== b) return (a === -1 ? KIND_ORDER.length : a) - (b === -1 ? KIND_ORDER.length : b);
-    return left.localeCompare(right);
-  });
-  const elapsed = elapsedSinceRead(snapshot?.fetched_at_ms, nowLocalMs);
-  const nowMs = typeof snapshot?.now_ms === 'number' ? snapshot.now_ms : null;
-  return kinds.map((kind) => {
-    const entry = entries[kind];
-    const payload = payloadRecord(entry);
-    const contract: MqttContractState = entry?.cleared ? 'CLEARED' : entry?.valid ? 'VALID' : 'INVALID';
-    const ageMs = typeof entry?.age_ms === 'number' ? entry.age_ms + elapsed : null;
-    const sourceTs = entry?.source_ts_ms;
-    const sourceAgeMs = typeof sourceTs === 'number' && nowMs !== null ? nowMs - sourceTs + elapsed : null;
-    const staleAfterMs = MQTT_KIND_STALE_AFTER_MS[kind] ?? null;
-    const retained = entry?.retained === true;
-    let stale = false;
-    if (entry && contract !== 'CLEARED' && staleAfterMs !== null) {
-      stale = ageMs === null || ageMs > staleAfterMs
-        || (retained && (sourceAgeMs === null || sourceAgeMs > staleAfterMs));
-    }
-    const reasons = Array.isArray(payload?.reasons)
-      ? payload.reasons.filter((code): code is string => typeof code === 'string' && REASON_CODE.test(code)).slice(0, 16)
-      : [];
-    const healthState = kind === 'health' && typeof payload?.state === 'string' && REASON_CODE.test(payload.state) ? payload.state : null;
-    const availability = kind === 'availability' && typeof payload?.online === 'boolean'
-      ? { online: payload.online, reason: typeof payload.reason === 'string' && REASON_CODE.test(payload.reason) ? payload.reason : null }
-      : null;
-    const source = entry?.source ?? null;
-    return {
-      kind,
-      count: typeof counts[kind] === 'number' ? counts[kind] : null,
-      contract,
-      retained,
-      synthetic: source?.toLowerCase() === 'synthetic',
-      source,
-      flags: Object.entries(entry?.validity_flags ?? {}).map(([name, value]) => ({ name, value })),
-      healthState,
-      reasons,
-      availability,
-      ageMs,
-      sourceAgeMs,
-      staleAfterMs,
-      stale,
-      bytes: typeof entry?.bytes === 'number' ? entry.bytes : null,
-      latencyMs: typeof entry?.latency_ms === 'number' ? entry.latency_ms : null,
-      error: entry?.error ?? null,
-    };
-  });
-}
-
-export function healthStateTone(state: string): Tone {
-  if (state === 'ONLINE' || state === 'PASS') return 'good';
-  if (state === 'STALE' || state === 'DEGRADED' || state === 'UNAVAILABLE' || state === 'FAIL') return 'bad';
-  return 'warn';
-}
-
-/** Safe per-kind detail for the JSON view; payloads are already sanitized by the normalizer. */
-export function mqttDetailRecords(snapshot: MqttSnapshot | null | undefined): Record<string, unknown> {
-  const output: Record<string, unknown> = {};
-  for (const [kind, entry] of Object.entries(snapshot?.last_by_kind ?? {})) {
-    output[kind] = {
-      bytes: entry.bytes ?? 0,
-      qos: entry.qos ?? 0,
-      retained: entry.retained ?? false,
-      valid: entry.valid ?? false,
-      ...(entry.cleared ? { cleared: true } : {}),
-      ...(entry.validity_flags ? { validity_flags: entry.validity_flags } : {}),
-      ...(entry.source ? { source: entry.source } : {}),
-      latency_ms: entry.latency_ms ?? null,
-      ...(entry.error ? { error: entry.error } : {}),
-      payload: entry.payload,
-    };
-  }
-  return output;
-}
-
-/** RDF Node v2 topic suffixes, in the order the server subscribes to them. */
+/** RDF Node topic suffixes, in the order the server subscribes to them (docs/MQTT_KONTRAK.md). */
 export const RDF_NODE_V2_SUFFIXES = [
-  'telemetry/doa',
-  'telemetry/health',
-  'telemetry/health/detail',
-  'telemetry/angular',
   'state',
   'capabilities',
-  'config/reported',
   'availability',
+  'telemetry/health',
+  'telemetry/health/detail',
+  'telemetry/doa',
+  'telemetry/diagnostic/doa',
+  'telemetry/angular',
+  'telemetry/diagnostic/angular',
+  'settings/reported',
   'ack/config',
   'ack/operation',
 ] as const;
 
-const RDF_STATUSES = new Set(['FRESH', 'STALE', 'CONTEXT', 'INCONSISTENT', 'INVALID', 'UNAVAILABLE']);
-const RDF_ERROR = /^[A-Z][A-Z0-9_]{0,31}$/u;
+const RDF_STATUSES = new Set(['LIVE', 'UNVERIFIED', 'FRESH', 'CONTEXT', 'STALE', 'INCONSISTENT', 'IGNORED', 'INVALID', 'UNAVAILABLE']);
+/** As wide as the server's codes: the edge's own ACK errors run past 32 characters (CENTER_CHANGE_REQUIRES_VFO0_TARGET). */
+const RDF_ERROR = /^[A-Z][A-Z0-9_]{0,63}$/u;
+const RDF_FIELD = /^[a-z][a-z0-9_]{0,31}$/u;
+const RDF_REASON = /^[A-Z0-9_:-]{1,64}$/u;
+const RDF_ACK_STATUS = /^[A-Z][A-Z_]{0,31}$/u;
+const RDF_ANGULAR_SUFFIXES = new Set<string>(['telemetry/angular', 'telemetry/diagnostic/angular']);
 /** Fields shown for an angular frame; the 360 values stay on the server side of this view. */
-const RDF_ANGULAR_FIELDS = ['encoding', 'q', 'timestamp_ms', 'frequency_hz', 'revision', 'vfo', 'convention', 'raw_doa_deg', 'confidence_native_db'];
-/** A FRESH status is only trusted for this long after the read that reported it. */
+const RDF_ANGULAR_FIELDS = ['encoding', 'q', 'timestamp_ms', 'frequency_hz', 'revision', 'vfo', 'convention', 'flags', 'raw_doa_deg', 'confidence_native_db', 'peak_index', 'values_count'];
+/** A LIVE, UNVERIFIED or FRESH status is only trusted for this long after the read that reported it. */
 export const RDF_LOCAL_HOLD_MS = 5_000;
+const RDF_HELD_STATUSES = new Set(['LIVE', 'UNVERIFIED', 'FRESH']);
+const MAX_RDF_REASONS = 16;
+const MAX_RDF_ACKS = 8;
+
+function rdfReasons(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string' && RDF_REASON.test(item)).slice(0, MAX_RDF_REASONS);
+}
+
+function pickSanitized(raw: JsonObject, fields: readonly string[]): Record<string, unknown> {
+  const sanitized = sanitizeMqttPayload(Object.fromEntries(fields.filter((key) => key in raw).map((key) => [key, raw[key]])));
+  return isObject(sanitized) ? sanitized : {};
+}
 
 function normalizeRdfTopic(suffix: string, value: unknown): RdfNodeTopic {
   const record = isObject(value) ? value : {};
@@ -359,11 +197,12 @@ function normalizeRdfTopic(suffix: string, value: unknown): RdfNodeTopic {
   let payload: Record<string, unknown> | null = null;
   const raw = record.payload;
   if (isObject(raw)) {
-    const source = suffix === 'telemetry/angular'
-      ? Object.fromEntries(RDF_ANGULAR_FIELDS.filter((key) => key in raw).map((key) => [key, raw[key]]))
-      : raw;
-    const sanitized = sanitizeMqttPayload(source);
-    payload = isObject(sanitized) ? sanitized : null;
+    if (RDF_ANGULAR_SUFFIXES.has(suffix)) {
+      payload = pickSanitized(raw, RDF_ANGULAR_FIELDS);
+    } else {
+      const sanitized = sanitizeMqttPayload(raw);
+      payload = isObject(sanitized) ? sanitized : null;
+    }
   }
   const qos = count(record.qos);
   return {
@@ -372,22 +211,118 @@ function normalizeRdfTopic(suffix: string, value: unknown): RdfNodeTopic {
     qos: qos === undefined ? null : qos,
     retained: typeof record.retained === 'boolean' ? record.retained : null,
     error: typeof record.error === 'string' && RDF_ERROR.test(record.error) ? record.error : null,
+    field: typeof record.field === 'string' && RDF_FIELD.test(record.field) ? record.field : null,
     cleared: record.cleared === true,
     payload,
   };
 }
 
-/** Validate a /api/mqtt/rdf-node response. Missing topics read as UNAVAILABLE. */
+/** Parts of the server's node view, in display order, with the fields each shows. */
+export const RDF_NODE_PARTS = [
+  'session',
+  'health',
+  'detail',
+  'doa',
+  'doa_unverified',
+  'diagnostic_doa',
+  'angular',
+  'angular_unverified',
+  'capabilities',
+  'availability',
+  'settings',
+] as const;
+export type RdfNodePartName = typeof RDF_NODE_PARTS[number];
+
+const RDF_PART_FIELDS: Readonly<Record<RdfNodePartName, readonly string[]>> = {
+  session: ['sid', 'cfg', 'run', 'daq', 'profile', 'clock'],
+  health: ['run', 'daq', 'clk', 'temp', 'drop', 'age', 'rev'],
+  detail: ['usb', 'sync', 'cpu', 'mem', 'disk_free', 'throt', 'uv', 'tx', 'rx', 'ppp', 'peer', 'ppp_svc', 'ppp_restarts'],
+  doa: ['a', 'f', 'c', 'p', 'rev'],
+  doa_unverified: ['a', 'angle_reference', 'f', 'c', 'p', 'rev'],
+  diagnostic_doa: ['raw_doa_deg', 'frequency_mhz', 'source'],
+  angular: ['flags', 'raw_doa_deg', 'peak_index', 'frequency_hz', 'revision'],
+  angular_unverified: ['from', 'flags', 'raw_doa_deg', 'peak_index', 'frequency_hz', 'revision'],
+  capabilities: ['version', 'mode', 'remote_commands', 'remote_config_patch', 'remote_processing', 'remote_restart', 'remote_reboot', 'remote_shutdown', 'remote_ppp_restart'],
+  availability: ['online', 'reason'],
+  settings: ['rev', 'bytes', 'matches_state_cfg'],
+};
+
+/** The status a part shows, from the flags the server set on it. */
+function rdfPartStatus(name: RdfNodePartName, raw: JsonObject): string {
+  switch (name) {
+    case 'session':
+      return 'CONTEXT';
+    case 'health':
+      return raw.fresh === true ? 'FRESH' : 'STALE';
+    case 'detail':
+      return raw.stale === false ? 'FRESH' : 'STALE';
+    case 'doa':
+    case 'angular':
+      return raw.live === true ? 'LIVE' : 'STALE';
+    case 'doa_unverified':
+    case 'diagnostic_doa':
+    case 'angular_unverified':
+      return raw.stale === false ? 'UNVERIFIED' : 'STALE';
+    case 'capabilities':
+    case 'availability':
+      return raw.session_match === false ? 'INCONSISTENT' : 'CONTEXT';
+    case 'settings':
+      return 'CONTEXT';
+  }
+  return 'UNAVAILABLE';
+}
+
+function normalizeRdfPart(name: RdfNodePartName, value: unknown): RdfNodePart | null {
+  if (!isObject(value)) return null;
+  const reasons = rdfReasons(name === 'angular_unverified' || name === 'doa_unverified' || name === 'diagnostic_doa' ? value.validation_reasons : value.reasons);
+  if (name === 'settings' && value.matches_state_cfg === false) reasons.push('PREVIOUS_CONFIG');
+  const fields = pickSanitized(value, RDF_PART_FIELDS[name].filter((field) => field !== 'from'));
+  // The candidate's topic (a key the payload sanitizer hides), named after one of the two Angular topics only.
+  if (name === 'angular_unverified' && typeof value.topic === 'string' && RDF_ANGULAR_SUFFIXES.has(value.topic)) fields.from = value.topic;
+  return {
+    status: rdfPartStatus(name, value),
+    received_at_ms: nonNegative(value.received_at_ms),
+    reasons,
+    fields,
+  };
+}
+
+function normalizeRdfAck(value: unknown): RdfNodeAck | null {
+  if (!isObject(value)) return null;
+  const topic = value.topic === 'ack/config' || value.topic === 'ack/operation' ? value.topic : null;
+  const status = typeof value.status === 'string' && RDF_ACK_STATUS.test(value.status) ? value.status : null;
+  if (topic === null || status === null) return null;
+  const result = isObject(value.result) ? value.result : {};
+  const error = typeof result.error === 'string' && RDF_ERROR.test(result.error) ? result.error : null;
+  return { topic, status, final: value.final === true, received_at_ms: nonNegative(value.received_at_ms), error };
+}
+
+function normalizeRdfNodeView(value: unknown): RdfNodeView {
+  const record = isObject(value) ? value : {};
+  const parts: Record<string, RdfNodePart | null> = {};
+  for (const name of RDF_NODE_PARTS) parts[name] = normalizeRdfPart(name, record[name]);
+  const acks = Array.isArray(record.acks)
+    ? record.acks.slice(0, MAX_RDF_ACKS).map(normalizeRdfAck).filter((ack): ack is RdfNodeAck => ack !== null)
+    : [];
+  const requests = Array.isArray(record.settings_requests) ? record.settings_requests.length : 0;
+  return { parts, acks, settings_requests: requests };
+}
+
+/** Validate a /api/mqtt/rdf-node response. Missing topics read as UNAVAILABLE, missing node parts as null. */
 export function normalizeRdfNodeSnapshot(value: unknown, fetchedAtMs: number): RdfNodeSnapshot {
-  if (!isObject(value)) throw new Error('RDF Node v2 response has an invalid shape');
+  if (!isObject(value)) throw new Error('RDF Node response has an invalid shape');
   const topics = isObject(value.topics) ? value.topics : {};
   const topicCounts = isObject(value.topic_counts) ? value.topic_counts : {};
+  const invalidCounts = isObject(value.invalid_counts) ? value.invalid_counts : {};
   const normalizedTopics: Record<string, RdfNodeTopic> = {};
   const normalizedCounts: Record<string, number> = {};
+  const normalizedInvalid: Record<string, number> = {};
   for (const suffix of RDF_NODE_V2_SUFFIXES) {
     normalizedTopics[suffix] = normalizeRdfTopic(suffix, topics[suffix]);
     const number = count(topicCounts[suffix]);
     if (number !== undefined) normalizedCounts[suffix] = number;
+    const invalid = count(invalidCounts[suffix]);
+    if (invalid !== undefined) normalizedInvalid[suffix] = invalid;
   }
   return {
     enabled: value.enabled === true,
@@ -400,21 +335,24 @@ export function normalizeRdfNodeSnapshot(value: unknown, fetchedAtMs: number): R
     invalid: count(value.invalid) ?? null,
     last_received_at_ms: nonNegative(value.last_received_at_ms),
     topic_counts: normalizedCounts,
+    invalid_counts: normalizedInvalid,
     topics: normalizedTopics,
+    node: normalizeRdfNodeView(value.node),
   };
 }
 
 export interface RdfTopicRow {
   suffix: string;
   count: number | null;
-  /** Server status, downgraded from FRESH to STALE once the read is older than RDF_LOCAL_HOLD_MS. */
+  /** Server status; LIVE, UNVERIFIED and FRESH turn STALE once the read is older than RDF_LOCAL_HOLD_MS. */
   status: string;
   ageMs: number | null;
   retained: boolean | null;
   error: string | null;
-  /** Short field=value pairs; empty for DoA and angular unless they are FRESH. */
+  field: string | null;
+  /** Short field=value pairs; empty for DoA and angular unless they are LIVE or UNVERIFIED. */
   summary: Array<[string, string]>;
-  /** DoA or angular values exist but are not shown because the topic is not FRESH. */
+  /** DoA or angular values exist but are not shown because the topic is neither LIVE nor UNVERIFIED. */
   withheld: boolean;
 }
 
@@ -429,20 +367,39 @@ function summaryValue(value: unknown): string | null {
   return null;
 }
 
+/** Short field=value pairs of a record, in the given order. */
+export function rdfSummary(record: Record<string, unknown> | null | undefined, fields: readonly string[]): Array<[string, string]> {
+  const summary: Array<[string, string]> = [];
+  if (!record) return summary;
+  for (const field of fields) {
+    const value = summaryValue(record[field]);
+    if (value !== null) summary.push([field, value]);
+  }
+  return summary;
+}
+
 const RDF_SUMMARY_FIELDS: Readonly<Record<string, readonly string[]>> = {
-  'telemetry/doa': ['a', 'c', 'p', 'f', 'ok', 'rev'],
-  'telemetry/health': ['run', 'daq', 'drop', 'age', 'temp', 'clk', 'rev'],
-  'telemetry/health/detail': ['usb', 'sync', 'cpu', 'mem', 'disk_free', 'throt', 'uv'],
-  'telemetry/angular': ['encoding', 'raw_doa_deg', 'frequency_hz', 'revision'],
   state: ['run', 'daq', 'cfg', 'profile', 'clock'],
   capabilities: ['version', 'mode', 'angle', 'count', 'remote_commands'],
-  'config/reported': ['rev', 'proof'],
   availability: ['online', 'reason'],
+  'telemetry/health': ['run', 'daq', 'drop', 'age', 'temp', 'clk', 'rev'],
+  'telemetry/health/detail': ['usb', 'sync', 'cpu', 'mem', 'disk_free', 'throt', 'uv', 'ppp', 'peer', 'ppp_svc'],
+  'telemetry/doa': ['a', 'c', 'p', 'f', 'ok', 'rev'],
+  'telemetry/diagnostic/doa': ['raw_doa_deg', 'frequency_mhz'],
+  'telemetry/angular': ['flags', 'raw_doa_deg', 'frequency_hz', 'revision'],
+  'telemetry/diagnostic/angular': ['flags', 'raw_doa_deg', 'frequency_hz', 'revision'],
+  'settings/reported': ['rev', 'bytes'],
   'ack/config': ['status', 'rev'],
   'ack/operation': ['status', 'rev'],
 };
+/** Direction values are shown only for a message the console accepted. */
+const RDF_GATED_SUFFIXES = new Set<string>(['telemetry/doa', 'telemetry/diagnostic/doa', 'telemetry/angular', 'telemetry/diagnostic/angular']);
 
-/** Display rows for the v2 panel, with ages advanced on the browser clock since the read. */
+function heldStatus(status: string, elapsed: number): string {
+  return RDF_HELD_STATUSES.has(status) && elapsed > RDF_LOCAL_HOLD_MS ? 'STALE' : status;
+}
+
+/** Display rows for the topic table, with ages advanced on the browser clock since the read. */
 export function rdfTopicRows(snapshot: RdfNodeSnapshot | null | undefined, nowLocalMs: number): RdfTopicRow[] {
   const elapsed = elapsedSinceRead(snapshot?.fetched_at_ms, nowLocalMs);
   return RDF_NODE_V2_SUFFIXES.map((suffix) => {
@@ -450,17 +407,9 @@ export function rdfTopicRows(snapshot: RdfNodeSnapshot | null | undefined, nowLo
     const receivedAt = topic?.received_at_ms ?? null;
     const nowMs = snapshot?.now_ms ?? null;
     const ageMs = receivedAt !== null && nowMs !== null ? Math.max(0, nowMs - receivedAt) + elapsed : null;
-    const status = topic?.cleared ? 'CLEARED' : topic?.status === 'FRESH' && elapsed > RDF_LOCAL_HOLD_MS ? 'STALE' : topic?.status ?? 'UNAVAILABLE';
-    const gated = suffix === 'telemetry/doa' || suffix === 'telemetry/angular';
+    const status = topic?.cleared ? 'CLEARED' : heldStatus(topic?.status ?? 'UNAVAILABLE', elapsed);
     const payload = topic?.payload ?? null;
-    const summary: Array<[string, string]> = [];
-    const withheld = payload !== null && gated && status !== 'FRESH';
-    if (payload && !withheld) {
-      for (const field of RDF_SUMMARY_FIELDS[suffix] ?? []) {
-        const value = summaryValue(payload[field]);
-        if (value !== null) summary.push([field, value]);
-      }
-    }
+    const withheld = payload !== null && RDF_GATED_SUFFIXES.has(suffix) && status !== 'LIVE' && status !== 'UNVERIFIED';
     return {
       suffix,
       count: snapshot?.topic_counts[suffix] ?? null,
@@ -468,14 +417,79 @@ export function rdfTopicRows(snapshot: RdfNodeSnapshot | null | undefined, nowLo
       ageMs,
       retained: topic?.retained ?? null,
       error: topic?.error ?? null,
-      summary,
+      field: topic?.field ?? null,
+      summary: withheld ? [] : rdfSummary(payload, RDF_SUMMARY_FIELDS[suffix] ?? []),
       withheld,
     };
   });
 }
 
+export interface RdfNodeRow {
+  part: RdfNodePartName;
+  status: string;
+  ageMs: number | null;
+  reasons: string[];
+  /** Short field=value pairs; without the direction values of a DoA or angular part unless it is LIVE or UNVERIFIED. */
+  summary: Array<[string, string]>;
+  /** Direction values exist but are not shown because the part is neither LIVE nor UNVERIFIED. */
+  withheld: boolean;
+}
+
+/** Node view parts that carry a direction, and the fields that hold it. */
+const RDF_DIRECTION_PARTS = new Set<RdfNodePartName>(['doa', 'doa_unverified', 'diagnostic_doa', 'angular', 'angular_unverified']);
+const RDF_DIRECTION_FIELDS = new Set(['a', 'raw_doa_deg', 'peak_index']);
+
+/** Display rows for the node view: only parts the server holds a value for. */
+export function rdfNodeRows(snapshot: RdfNodeSnapshot | null | undefined, nowLocalMs: number): RdfNodeRow[] {
+  if (!snapshot) return [];
+  const elapsed = elapsedSinceRead(snapshot.fetched_at_ms, nowLocalMs);
+  const rows: RdfNodeRow[] = [];
+  for (const part of RDF_NODE_PARTS) {
+    const value = snapshot.node.parts[part];
+    if (!value) continue;
+    const ageMs = value.received_at_ms !== null && snapshot.now_ms !== null ? Math.max(0, snapshot.now_ms - value.received_at_ms) + elapsed : null;
+    const status = heldStatus(value.status, elapsed);
+    const gated = RDF_DIRECTION_PARTS.has(part) && status !== 'LIVE' && status !== 'UNVERIFIED';
+    const fields = gated ? RDF_PART_FIELDS[part].filter((field) => !RDF_DIRECTION_FIELDS.has(field)) : RDF_PART_FIELDS[part];
+    rows.push({
+      part,
+      status,
+      ageMs,
+      reasons: value.reasons,
+      summary: rdfSummary(value.fields, fields),
+      withheld: gated && RDF_PART_FIELDS[part].some((field) => RDF_DIRECTION_FIELDS.has(field) && summaryValue(value.fields[field]) !== null),
+    });
+  }
+  return rows;
+}
+
+export interface RdfAckRow extends RdfNodeAck {
+  ageMs: number | null;
+}
+
+export function rdfAckRows(snapshot: RdfNodeSnapshot | null | undefined, nowLocalMs: number): RdfAckRow[] {
+  if (!snapshot) return [];
+  const elapsed = elapsedSinceRead(snapshot.fetched_at_ms, nowLocalMs);
+  return snapshot.node.acks.map((ack) => ({
+    ...ack,
+    ageMs: ack.received_at_ms !== null && snapshot.now_ms !== null ? Math.max(0, snapshot.now_ms - ack.received_at_ms) + elapsed : null,
+  }));
+}
+
 export function rdfStatusTone(status: string): Tone {
-  if (status === 'FRESH') return 'good';
+  if (status === 'LIVE' || status === 'FRESH') return 'good';
+  if (status === 'UNVERIFIED') return 'warn';
   if (status === 'STALE' || status === 'INCONSISTENT' || status === 'INVALID') return 'bad';
+  return 'neutral';
+}
+
+const RDF_ACK_BAD = new Set(['FAILED', 'REJECTED', 'EXPIRED', 'CONFLICT']);
+const RDF_ACK_UNSURE = new Set(['PERSISTED_UNVERIFIED', 'OUTCOME_UNKNOWN', 'CANCELLED']);
+
+/** APPLIED is the only success; an unknown or unverified outcome is neither. */
+export function rdfAckTone(status: string): Tone {
+  if (status === 'APPLIED') return 'good';
+  if (RDF_ACK_BAD.has(status)) return 'bad';
+  if (RDF_ACK_UNSURE.has(status)) return 'warn';
   return 'neutral';
 }

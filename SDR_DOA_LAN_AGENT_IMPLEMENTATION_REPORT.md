@@ -1,5 +1,7 @@
 # Laporan Implementasi LAN Edge Agent SDR-DoA
 
+> Histori. Agent, klien MQTT stdlib dan test-nya yang dilaporkan di sini dihapus di 3.0.0 (`CHANGELOG.md`); RDF-SDR menjalankan RDF Node edge dari `sanadunt/rdf-indicator-raspberry`.
+
 ## 1. Status dan scope
 
 ```text

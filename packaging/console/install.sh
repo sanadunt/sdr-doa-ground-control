@@ -49,6 +49,9 @@ Usage: sh install.sh [options]
 First start only (the console writes console.json from these when it does
 not exist yet; change them later in Konfigurasi):
   --base-url URL         Data Out, e.g. http://192.168.100.100:8081
+  --data-out-hosts LIST  hosts Data Out may be read from, comma separated, e.g.
+                         rdf.local,192.168.100.100 (default doasdr.local,
+                         192.168.100.100,127.0.0.1,localhost); --base-url uses one
   --mqtt-host HOST       MQTT broker IPv4/IPv6 address or localhost
   --mqtt-port PORT
   --mqtt-transport T     websockets or tcp
@@ -113,8 +116,8 @@ parse_args() {
         ;;
     esac
     case $1 in
-      --prefix | --data-dir | --bin-dir | --port | --password | --base-url | --mqtt-host | --mqtt-port | \
-        --mqtt-transport | --mqtt-ws-path | --refresh-seconds)
+      --prefix | --data-dir | --bin-dir | --port | --password | --base-url | --data-out-hosts | --mqtt-host | \
+        --mqtt-port | --mqtt-transport | --mqtt-ws-path | --refresh-seconds)
         [ $# -ge 2 ] || die "$1 needs a value"
         ;;
     esac
@@ -129,6 +132,7 @@ parse_args() {
       --no-service) SERVICE_ON=0 ;;
       --no-desktop) DESKTOP_ON=0 ;;
       --base-url) seed BASE_URL "$2" "$1"; shift ;;
+      --data-out-hosts) seed DATA_OUT_HOSTS "$2" "$1"; shift ;;
       --mqtt-host) seed MQTT_HOST "$2" "$1"; shift ;;
       --mqtt-port) seed MQTT_PORT "$2" "$1"; shift ;;
       --mqtt-transport) seed MQTT_TRANSPORT "$2" "$1"; shift ;;

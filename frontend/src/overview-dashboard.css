@@ -196,6 +196,9 @@
 .ov-unit-input input { flex: 1 1 auto; min-width: 0; height: 42px; padding: 0 6px; border: 0; border-radius: 8px; background: transparent; color: var(--text); font-family: var(--mono); font-size: 13px; }
 .ov-unit-input input:disabled { cursor: not-allowed; }
 .ov-unit-input:has(input:disabled) { opacity: .55; }
+.ov-unit-input select { flex: 1 1 auto; min-width: 0; height: 42px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: var(--text); font-family: var(--mono); font-size: 13px; }
+.ov-unit-input select:disabled { cursor: not-allowed; }
+.ov-unit-input:has(select:disabled) { opacity: .55; }
 .ov-unit-input > span { padding-right: 8px; color: var(--subtle); }
 .ov-unit-input.is-error, .ov-db-input.is-error { border-color: var(--red); }
 .ov-w-80 { width: 80px; }
@@ -250,6 +253,8 @@
 .ov-button.ov-spec-mark[aria-pressed='true'] { border-color: var(--marker); background: color-mix(in srgb, var(--marker) 14%, transparent); }
 .ov-button.ov-spec-mark[aria-pressed='true'] svg { color: var(--marker); }
 .ov-spec-trace.is-marking, .ov-spec-waterfall.is-marking, .ov-spec-trace.is-marking .ov-spec-overlay { cursor: copy; }
+/* The Receiver mirror (LAN view): a picture only, nothing to tune. */
+.ov-spec-trace.is-read-only, .ov-spec-waterfall.is-read-only { cursor: default; }
 .ov-spec-mark-row { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
 .ov-spec-mark-readout { color: var(--text); font-family: var(--mono); font-size: 12px; }
 /* Between a phone and a full-width dock the label gives way to the icon and the count (still the button's name),
@@ -305,7 +310,7 @@
 .ov-spec-ticks { display: flex; flex: none; justify-content: space-between; height: 14px; color: var(--subtle); font-family: var(--mono); font-size: 10.5px; line-height: 14px; }
 .ov-spec-waterfall { display: block; flex: 1 1 0; width: 100%; min-height: 24px; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--bg); cursor: crosshair; }
 
-/* Kontrol (MQTT config patch) ------------------------------------------------ */
+/* Kontrol (RDF Node config.patch and config.get) ------------------------------- */
 .ov-control-body { display: flex; flex-direction: column; gap: 10px; }
 .ov-control-note { color: var(--subtle); }
 .ov-control-warn { color: var(--amber); font-size: 12px; }
@@ -314,6 +319,7 @@
 .ov-control-meta { display: flex; flex-direction: column; gap: 1px; color: var(--subtle); font-size: 11.5px; }
 .ov-control-meta .ov-mono, .ov-control-topic { color: var(--text); overflow-wrap: anywhere; }
 .ov-control-meta .ov-tag { margin-left: 4px; }
+.ov-control-settings { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; margin: 3px 0; }
 .ov-control-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; }
 .ov-control-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .ov-control-field label { color: var(--muted); font-size: 12px; }
@@ -338,6 +344,8 @@
 .ov-control-result > .ov-control-small { color: var(--subtle); }
 .ov-control-result.tone-ok { border-color: var(--green); background: color-mix(in srgb, var(--green) 8%, transparent); }
 .ov-control-result.tone-ok .ov-control-result-title { color: var(--green); }
+.ov-control-result.tone-info { border-color: var(--blue); background: color-mix(in srgb, var(--blue) 8%, transparent); }
+.ov-control-result.tone-info .ov-control-result-title { color: var(--blue); }
 .ov-control-result.tone-warn { border-color: var(--amber); background: color-mix(in srgb, var(--amber) 8%, transparent); }
 .ov-control-result.tone-warn .ov-control-result-title { color: var(--amber); }
 .ov-control-result.tone-err { border-color: var(--red); background: color-mix(in srgb, var(--red) 8%, transparent); }

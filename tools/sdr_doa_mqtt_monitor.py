@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """MQTT monitor for the Ground Console.
 
-It subscribes to a configured topic root and, on its own, never publishes. Its
-one publish path is ``publish_config_patch``: an explicit, admin-confirmed
-config patch that the console server hands it (QoS 1, never retained, only
-while connected). It never writes a Raspberry resource directly; the edge
-agent decides whether to apply the patch and answers on ``ack/config``.
+It subscribes to the RDF Node topics under ``sdr/v2/<node>/`` (the edge
+contract, ``docs/MQTT_KONTRAK.md``) and, on its own, never publishes. Its one
+publish path is ``publish_rdf_node_command``: a Kontrol command
+(``config.patch`` after the admin's review and confirmation, or the read-only
+``config.get``) that the console server builds and hands it, published to
+``sdr/v2/<node>/cmd/config/...`` at QoS 1, never retained and only while
+connected with every subscription acknowledged. It never writes a Raspberry
+resource directly; the RDF Node edge decides whether to apply the command and
+answers on ``ack/config``.
 """
 
 from __future__ import annotations
@@ -14,72 +18,33 @@ import math
 import secrets
 import threading
 import time
-from typing import Any, Dict, Mapping, Optional
+from collections import OrderedDict
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 import paho.mqtt.client as mqtt
 from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.properties import Properties
 
-import sdr_doa_mqtt as contract
-
 if __package__:
+    from . import rdf_node_commands as commands
     from .config_command_tracker import FINAL_ACK_STATUSES, MonitorPublishError
     from .rdf_node_mqtt_v2 import RDF_NODE_V2_SUFFIXES, RdfNodeV2Telemetry
 else:
+    import rdf_node_commands as commands
     from config_command_tracker import FINAL_ACK_STATUSES, MonitorPublishError
     from rdf_node_mqtt_v2 import RDF_NODE_V2_SUFFIXES, RdfNodeV2Telemetry
 
 
-KNOWN_SUFFIXES = {
-    "/telemetry/doa": "doa",
-    "/telemetry/nav": "nav",
-    "/telemetry/health": "health",
-    "/state": "state",
-    "/config/reported": "config_reported",
-    "/cmd/config/patch": "config_patch",
-    "/ack/config": "ack_config",
-    "/availability": "availability",
-}
-
-MAX_TRACKED_TOPICS = 128
-OTHER_TOPICS_KEY = "__other__"
-DECODED_KINDS = frozenset({
-    "doa", "nav", "health", "state", "config_reported", "config_patch", "ack_config",
-    "availability",
-})
-# Only these v1 kinds are published retained, so only here can a zero-length
-# publish be a retained clear. Elsewhere it is a malformed message.
-RETAINED_KINDS = frozenset({"state", "config_reported", "availability"})
-EMPTY_PAYLOAD_ERROR = "empty payload"
-VALIDITY_FLAG_FIELDS = ("valid", "doa_valid", "settings_valid")
 # Brokers must accept client ids of 1-23 alphanumeric characters. The random
 # suffix keeps two consoles on one broker from taking over each other's session.
 CLIENT_ID_PREFIX = "groundconsole"
 RECONNECT_MIN_DELAY_S = 1
 RECONNECT_MAX_DELAY_S = 10
-CONFIG_PATCH_SUFFIX = "/cmd/config/patch"
-# Bounded memory for the config-patch path: ACKs by command id, the commands
-# this client published, and PUBACKs that arrived before their mid was known.
-MAX_CONFIG_ACKS = 64
-MAX_CONFIG_PUBLISHES = 32
+# Bounded memory for the Kontrol command path: the commands this client
+# published (with their PUBACK, ACKs and settings report), and PUBACKs that
+# arrived before their mid was known.
+MAX_COMMAND_RECORDS = 32
 MAX_EARLY_PUBACKS = 16
-CONFIG_FIELDS = tuple(contract.CONFIG_RANGES)
-# RDF Node v2 reports the first VFO under its own key names. Only these VFO
-# values are reported anywhere; v1 config_reported has no VFO fields.
-V2_EFFECTIVE_KEYS = {
-    "center_frequency_hz": "center_frequency_hz",
-    "gain_db": "gain_db",
-    "vfo_frequency_hz": "vfo0_frequency_hz",
-    "vfo_bandwidth_hz": "vfo0_bandwidth_hz",
-    "vfo_squelch_db": "vfo0_squelch_db",
-}
-V1_REPORTED_FIELDS = ("center_frequency_hz", "gain_db")
-# A retained config report is a replay: its receive time says nothing about
-# when it was published. Its own timestamp is used instead when it is no more
-# than this far after receipt (the clocks are unverified) and not before
-# 2020-01-01T00:00:00Z (a Raspberry without an RTC that has not synced yet).
-REPORTED_SOURCE_TS_MAX_FUTURE_MS = 5_000
-REPORTED_SOURCE_TS_MIN_MS = 1_577_836_800_000
 
 
 def _now_ms() -> int:
@@ -99,47 +64,17 @@ def _subscription_failed(reason_code: Any) -> bool:
     return bool(failure) if failure is not None else _reason_value(reason_code) >= 128
 
 
-def _kind_for_topic(topic: str) -> Optional[str]:
-    for suffix, kind in KNOWN_SUFFIXES.items():
-        if topic.endswith(suffix):
-            return kind
-    return contract.kind_for_topic(topic)
-
-
-def _finite_number(value: Any) -> Optional[float]:
-    if type(value) is int:
-        return value
-    if type(value) is float and math.isfinite(value):
-        return value
-    return None
-
-
-def _reported_age(now_ms: int, received_at_ms: int, retained: bool, source_ts_ms: Any) -> Dict[str, Any]:
-    """Age fields of a config report.
-
-    A live report is as old as its receipt. A retained replay is aged from its
-    plausible source timestamp, and otherwise has no known age.
-    """
-    source = source_ts_ms if type(source_ts_ms) is int else None
-    if not retained:
-        return {"age_ms": max(0, now_ms - received_at_ms), "age_basis": "received", "source_ts_ms": source}
-    if source is not None and REPORTED_SOURCE_TS_MIN_MS <= source <= received_at_ms + REPORTED_SOURCE_TS_MAX_FUTURE_MS:
-        return {"age_ms": max(0, now_ms - source), "age_basis": "source_ts", "source_ts_ms": source}
-    return {"age_ms": None, "age_basis": None, "source_ts_ms": source}
-
-
 class MqttMonitor:
-    """One MQTT client for v1 metrics and RDF Node v2 telemetry.
+    """The console's one MQTT client, for the RDF Node topics (docs/MQTT_KONTRAK.md).
 
-    It subscribes only; ``publish_config_patch`` is the single publish path,
-    used for an explicit, admin-confirmed config patch.
+    It subscribes only; ``publish_rdf_node_command`` is the single publish
+    path, used for Kontrol's ``config.get`` and admin-confirmed ``config.patch``.
     """
 
     def __init__(
         self,
         host: str,
         port: int,
-        root: str = contract.TOPIC_ROOT,
         *,
         transport: str = "tcp",
         ws_path: str = "/mqtt",
@@ -151,17 +86,14 @@ class MqttMonitor:
             raise ValueError("MQTT username is required when a password is set")
         self.host = host
         self.port = int(port)
-        self.root = root.rstrip("/")
         self.transport = transport
         self.ws_path = ws_path
         self.username = username
         self.password = password
         self.client_id = CLIENT_ID_PREFIX + secrets.token_hex(5)
         self._rdf_node = RdfNodeV2Telemetry(node_id)
-        self._filters = (
-            self.root + "/#",
-            *(f"{self._rdf_node.prefix}{suffix}" for suffix in RDF_NODE_V2_SUFFIXES),
-        )
+        self._rdf_node.on_accepted = self._on_rdf_node_accepted
+        self._filters = tuple(f"{self._rdf_node.prefix}{suffix}" for suffix in RDF_NODE_V2_SUFFIXES)
         self._lock = threading.RLock()
         self._lifecycle_lock = threading.Lock()
         self._client: Any = None
@@ -173,25 +105,10 @@ class MqttMonitor:
         self._rdf_last_error: Optional[str] = None
         self._pending_subacks: Dict[int, tuple[str, ...]] = {}
         self._subscriptions_ready = False
-        self._received = 0
-        self._valid = 0
-        self._invalid = 0
-        self._cleared = 0
-        self._total_bytes = 0
-        self._last_received_at_ms: Optional[int] = None
-        self._last_latency_ms: Optional[int] = None
-        self._last_topic: Optional[str] = None
-        self._last_by_kind: Dict[str, Dict[str, Any]] = {}
-        self._topic_counts: Dict[str, int] = {}
-        self._kind_counts: Dict[str, int] = {}
-        # Config-patch observations. Kept apart from _last_by_kind so the
-        # Message Monitor snapshot keeps its exact shape.
-        self._message_seq = 0
-        self._v1_reported: Optional[Dict[str, Any]] = None
-        self._v1_state: Optional[Dict[str, Any]] = None
-        self._v1_last_ack: Optional[Dict[str, Any]] = None
-        self._config_acks: Dict[str, Dict[str, Any]] = {}
-        self._config_publishes: Dict[str, Dict[str, Any]] = {}
+        # Kontrol commands this client published, or took over from the
+        # monitor it replaced, by id: PUBACK, the edge's progress and final
+        # ACK, and a config.get's settings report.
+        self._commands: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         self._publish_mids: Dict[int, str] = {}
         self._early_pubacks: Dict[int, Dict[str, Any]] = {}
 
@@ -304,25 +221,15 @@ class MqttMonitor:
             self._pending_subacks.clear()
             self._subscriptions_ready = False
             try:
-                # v1 keeps Retain As Published off, so its retain flag marks a
-                # broker replay; v2 validation needs the publisher's flag.
-                v1_options = self._mqtt.SubscribeOptions(
-                    qos=1,
-                    noLocal=False,
-                    retainAsPublished=False,
-                    retainHandling=0,
-                )
-                v2_options = self._mqtt.SubscribeOptions(
+                # Retain As Published: the contract's validation needs the
+                # publisher's retain flag, not the broker's replay mark.
+                options = self._mqtt.SubscribeOptions(
                     qos=1,
                     noLocal=False,
                     retainAsPublished=True,
                     retainHandling=0,
                 )
-                v1_filter, *v2_filters = self._filters
-                subscriptions = [
-                    (v1_filter, v1_options),
-                    *((topic, v2_options) for topic in v2_filters),
-                ]
+                subscriptions = [(topic, options) for topic in self._filters]
                 rc, mid = client.subscribe(subscriptions)
                 if rc != getattr(self._mqtt, "MQTT_ERR_SUCCESS", 0):
                     self._set_error_locked("SUBSCRIBE_ERROR")
@@ -385,173 +292,52 @@ class MqttMonitor:
         with self._lock:
             if client is not self._client or not self._started or self._stopping:
                 return
-            if topic.startswith(self._rdf_node.prefix):
-                suffix = topic[len(self._rdf_node.prefix):]
-                if suffix not in RDF_NODE_V2_SUFFIXES:
-                    return
-                qos = getattr(message, "qos", None)
-                retained = getattr(message, "retain", None)
-                if type(qos) is not int or qos not in (0, 1) or type(retained) is not bool:
-                    return
-                properties = getattr(message, "properties", None)
-                expiry = getattr(properties, "MessageExpiryInterval", None) if properties else None
-                if type(expiry) is not int or expiry < 0:
-                    expiry = None
-                try:
-                    self._rdf_node.ingest(
-                        topic,
-                        payload,
-                        qos=qos,
-                        retained=retained,
-                        received_at_ms=received_at_ms,
-                        message_expiry_s=expiry,
-                    )
-                except Exception:
-                    return
+            if not topic.startswith(self._rdf_node.prefix):
+                return
+            suffix = topic[len(self._rdf_node.prefix):]
+            if suffix not in RDF_NODE_V2_SUFFIXES:
+                return
+            qos = getattr(message, "qos", None)
+            retained = getattr(message, "retain", None)
+            if type(qos) is not int or qos not in (0, 1) or type(retained) is not bool:
+                return
+            properties = getattr(message, "properties", None)
+            expiry = getattr(properties, "MessageExpiryInterval", None) if properties else None
+            if type(expiry) is not int or expiry < 0:
+                expiry = None
+            try:
+                self._rdf_node.ingest(
+                    topic,
+                    payload,
+                    qos=qos,
+                    retained=retained,
+                    received_at_ms=received_at_ms,
+                    message_expiry_s=expiry,
+                )
+            except Exception:
                 return
 
-            payload_bytes = payload
-            kind = _kind_for_topic(topic) or "unknown"
-            retained = bool(getattr(message, "retain", False))
-            decoded: Optional[Dict[str, Any]] = None
-            error: Optional[str] = None
-            valid = True
-            # A zero-length publish is how a publisher removes a retained
-            # value; the broker forwards it to live subscribers. It means "no
-            # current value", not a malformed message. The v1 filter hides the
-            # publisher's retain flag, so the contract's retain policy decides.
-            cleared = not payload_bytes and kind in RETAINED_KINDS
-            if cleared:
-                valid = False
-            elif not payload_bytes:
-                valid = False
-                error = EMPTY_PAYLOAD_ERROR
-            elif kind in DECODED_KINDS:
-                try:
-                    decoded = contract.decode_payload(kind, payload_bytes)
-                except (contract.ContractError, ValueError, TypeError) as exc:
-                    valid = False
-                    error = str(exc)
-            elif len(payload_bytes) > 16 * 1024:
-                valid = False
-                error = "payload exceeds monitor limit"
+    def _on_rdf_node_accepted(self, suffix: str, record: Dict[str, Any]) -> None:
+        """Keep the ACKs and the settings report of the commands this client sent or adopted.
 
-            source_ts = decoded.get("ts_ms") if decoded else None
-            if type(source_ts) is not int:
-                source_ts = None
-            # A retained replay's receive-minus-source time is its age, not
-            # transport latency. The availability will carries the session's
-            # connect time, so its receive time is no latency measure either.
-            latency_ms: Optional[int] = None
-            if source_ts is not None and not retained and kind != "availability":
-                latency_ms = received_at_ms - source_ts
-
-            self._received += 1
-            if cleared:
-                self._cleared += 1
-            elif valid:
-                self._valid += 1
-            else:
-                self._invalid += 1
-            self._total_bytes += len(payload_bytes)
-            self._last_received_at_ms = received_at_ms
-            if not retained and not cleared and kind != "availability":
-                self._last_latency_ms = latency_ms
-            self._last_topic = topic
-            self._kind_counts[kind] = self._kind_counts.get(kind, 0) + 1
-            if topic in self._topic_counts:
-                self._topic_counts[topic] += 1
-            elif len(self._topic_counts) < MAX_TRACKED_TOPICS - 1:
-                self._topic_counts[topic] = 1
-            else:
-                self._topic_counts[OTHER_TOPICS_KEY] = self._topic_counts.get(OTHER_TOPICS_KEY, 0) + 1
-            entry: Dict[str, Any] = {
-                "topic": topic,
-                "kind": kind,
-                "received_at_ms": received_at_ms,
-                "bytes": len(payload_bytes),
-                "qos": int(message.qos),
-                "retained": retained,
-                "valid": valid,
-                "latency_ms": latency_ms,
-                "source_ts_ms": source_ts,
-            }
-            if cleared:
-                entry["cleared"] = True
-            if decoded is not None:
-                entry["payload"] = decoded
-                source = decoded.get("source")
-                if isinstance(source, str) and source:
-                    entry["source"] = source[:contract.MAX_SOURCE_CHARS]
-                flags = {
-                    field: decoded[field]
-                    for field in VALIDITY_FLAG_FIELDS
-                    if isinstance(decoded.get(field), bool)
-                }
-                if flags:
-                    entry["validity_flags"] = flags
-            if error:
-                entry["error"] = error
-            self._last_by_kind[kind] = entry
-            self._observe_config_locked(kind, decoded, payload_bytes, cleared, retained, received_at_ms)
-
-    def _observe_config_locked(
-        self,
-        kind: str,
-        decoded: Optional[Dict[str, Any]],
-        payload_bytes: bytes,
-        cleared: bool,
-        retained: bool,
-        received_at_ms: int,
-    ) -> None:
-        """Keep what the config-patch path needs: revisions, ACKs, echoes."""
-        self._message_seq += 1
-        observed = {
-            "payload": decoded,
-            "received_at_ms": received_at_ms,
-            "retained": retained,
-            "seq": self._message_seq,
-        }
-        if kind == "config_reported":
-            if cleared:
-                self._v1_reported = None
-            elif decoded is not None:
-                self._v1_reported = observed
-        elif kind == "state":
-            if cleared:
-                self._v1_state = None
-            elif decoded is not None:
-                self._v1_state = observed
-        elif kind == "ack_config" and decoded is not None:
-            if not retained:
-                # A broker replay of a retained ACK has no place in time
-                # relative to config_reported, so it never moves the base.
-                self._v1_last_ack = observed
-            command_id = decoded.get("id")
-            if isinstance(command_id, str):
-                error = decoded.get("error") if isinstance(decoded.get("error"), Mapping) else {}
-                changed = decoded.get("changed_fields")
-                ack = {
-                    "status": decoded.get("status"),
-                    "config_rev": decoded.get("config_rev"),
-                    "readback_ok": decoded.get("readback_ok"),
-                    "error_code": error.get("code"),
-                    "current_config_rev": error.get("current_config_rev"),
-                    "changed_fields": list(changed) if isinstance(changed, list) else [],
-                    "received_at_ms": received_at_ms,
-                    "retained": retained,
-                }
-                previous = self._config_acks.pop(command_id, None)
-                if previous is not None and previous.get("status") in FINAL_ACK_STATUSES and ack["status"] not in FINAL_ACK_STATUSES:
-                    # A late progress ACK must not hide the final answer.
-                    ack = previous
-                self._config_acks[command_id] = ack
-                while len(self._config_acks) > MAX_CONFIG_ACKS:
-                    self._config_acks.pop(next(iter(self._config_acks)))
-        elif kind == "config_patch" and decoded is not None:
-            record = self._config_publishes.get(str(decoded.get("id")))
-            if record is not None and record["echoed_at_ms"] is None and record["raw"] == payload_bytes:
-                record["echoed_at_ms"] = received_at_ms
+        The store calls this, under ``_lock``, for every ACK and settings
+        report it accepted for the current node session.
+        """
+        command_id = record.get("id")
+        command = self._commands.get(command_id) if isinstance(command_id, str) else None
+        if command is None:
+            return
+        if suffix == commands.SETTINGS_SUFFIX:
+            if command["reported_at_ms"] is None:
+                command["reported_at_ms"] = record.get("received_at_ms")
+            return
+        ack = {key: record.get(key) for key in ("status", "t", "rev", "result", "received_at_ms")}
+        if record.get("status") in FINAL_ACK_STATUSES:
+            # The first final ACK is the answer; a later one never replaces it.
+            if command["final"] is None:
+                command["final"] = ack
+        elif command["final"] is None:
+            command["progress"] = ack
 
     def _on_publish(
         self,
@@ -562,7 +348,7 @@ class MqttMonitor:
         _properties: Any = None,
     ) -> None:
         """Record a PUBACK. paho calls this with its own message lock held,
-        which is why ``publish_config_patch`` never publishes under ``_lock``."""
+        which is why ``publish_rdf_node_command`` never publishes under ``_lock``."""
         if type(mid) is not int:
             return
         with self._lock:
@@ -570,7 +356,7 @@ class MqttMonitor:
                 return
             puback = {"received_at_ms": _now_ms(), "reason": _reason_value(reason_code)}
             command_id = self._publish_mids.pop(mid, None)
-            record = self._config_publishes.get(command_id) if command_id is not None else None
+            record = self._commands.get(command_id) if command_id is not None else None
             if record is not None:
                 record["puback"] = puback
                 return
@@ -588,26 +374,38 @@ class MqttMonitor:
             and self._subscriptions_ready
         )
 
-    def publish_config_patch(self, command: Mapping[str, Any]) -> Dict[str, Any]:
-        """Publish one validated config patch at QoS 1, never retained.
+    @property
+    def node_id(self) -> str:
+        return self._rdf_node.node_id
 
-        It publishes only while connected with every subscription
-        acknowledged, so paho does not hold a command back for a later
-        reconnect. The broker drops it after its TTL (MessageExpiryInterval),
-        and the edge agent rejects it after ``expires_ts_ms``.
+    def publish_rdf_node_command(self, command: Mapping[str, Any]) -> Dict[str, Any]:
+        """Publish one checked RDF Node command at QoS 1, never retained.
+
+        The topic follows the command's ``op`` (``cmd/config/get`` or
+        ``cmd/config/patch`` under ``sdr/v2/<node>/``). It publishes only
+        while connected with every subscription acknowledged, so paho does
+        not hold a command back for a later reconnect. The broker drops it
+        after its lifetime (MessageExpiryInterval), and the edge refuses it
+        after ``expires_ms``. For a ``config.get`` the store is told first to
+        accept the ``settings/reported`` with this id.
         """
-        payload = contract.validate_config_patch(command)
-        command_id = str(payload["id"])
-        raw = contract.compact_json(payload).encode("utf-8")
-        topic = self.root + CONFIG_PATCH_SUFFIX
-        ttl_ms = int(payload["expires_ts_ms"]) - int(payload["issued_ts_ms"])
+        try:
+            command = commands.validate_command(command)
+        except commands.CommandRefused as exc:
+            raise MonitorPublishError("MQTT_PUBLISH_FAILED", f"command refused: {exc.message}") from exc
+        command_id = str(command["id"])
+        raw = commands.encode_command(command)
+        topic = commands.command_topic(self._rdf_node.node_id, command["op"])
+        ttl_ms = int(command["expires_ms"]) - int(command["issued_ms"])
         with self._lock:
             if not self._publish_ready_locked():
                 raise MonitorPublishError("MQTT_NOT_CONNECTED", "MQTT monitor is not connected")
-            if command_id in self._config_publishes:
+            if command_id in self._commands:
                 raise MonitorPublishError("MQTT_PUBLISH_FAILED", "command id was already published")
             client = self._client
             mqtt_module = self._mqtt
+            if command["op"] == commands.OP_CONFIG_GET:
+                self._rdf_node.expect_settings_report(command_id, _now_ms(), sid=str(command["sid"]))
         success = int(getattr(mqtt_module, "MQTT_ERR_SUCCESS", 0))
         no_connection = int(getattr(mqtt_module, "MQTT_ERR_NO_CONN", 4))
         # Never under _lock: paho holds its message lock while it calls
@@ -619,7 +417,7 @@ class MqttMonitor:
             info = client.publish(
                 topic,
                 raw,
-                qos=contract.COMMAND_QOS,
+                qos=commands.COMMAND_QOS,
                 retain=False,
                 properties=properties,
             )
@@ -636,15 +434,18 @@ class MqttMonitor:
             if rc != no_connection:
                 raise MonitorPublishError("MQTT_PUBLISH_FAILED", f"MQTT publish returned rc={rc}")
             # paho kept the command for its next connection and it could not
-            # be withdrawn; track it so its ACK is still seen. Its TTL bounds
-            # how late it can be applied.
+            # be withdrawn; track it so its ACK is still seen. Its lifetime
+            # bounds how late the edge can act on it.
         with self._lock:
             record: Dict[str, Any] = {
+                "op": command["op"],
+                "adopted": False,
                 "mid": mid,
                 "published_at_ms": published_at_ms,
                 "puback": None,
-                "echoed_at_ms": None,
-                "raw": raw,
+                "progress": None,
+                "final": None,
+                "reported_at_ms": None,
             }
             if mid is not None:
                 early = self._early_pubacks.pop(mid, None)
@@ -654,13 +455,101 @@ class MqttMonitor:
                     record["puback"] = early
                 else:
                     self._publish_mids[mid] = command_id
-            self._config_publishes[command_id] = record
-            while len(self._config_publishes) > MAX_CONFIG_PUBLISHES:
-                oldest_id = next(iter(self._config_publishes))
-                oldest = self._config_publishes.pop(oldest_id)
-                if oldest.get("mid") is not None and self._publish_mids.get(oldest["mid"]) == oldest_id:
-                    self._publish_mids.pop(oldest["mid"], None)
+            self._keep_command_locked(command_id, record)
         return {"mid": mid, "rc": rc, "published_at_ms": published_at_ms, "topic": topic}
+
+    def _keep_command_locked(self, command_id: str, record: Dict[str, Any]) -> None:
+        self._commands[command_id] = record
+        while len(self._commands) > MAX_COMMAND_RECORDS:
+            victim = self._eviction_victim_locked(command_id)
+            if victim is None:
+                return
+            oldest = self._commands.pop(victim)
+            if oldest.get("mid") is not None and self._publish_mids.get(oldest["mid"]) == victim:
+                self._publish_mids.pop(oldest["mid"], None)
+
+    @staticmethod
+    def _command_done(record: Mapping[str, Any]) -> bool:
+        """The edge gave this command its answer: nothing more is waited for."""
+        puback = record.get("puback")
+        if isinstance(puback, Mapping) and type(puback.get("reason")) is int and puback["reason"] >= 128:
+            return True
+        final = record.get("final")
+        if not isinstance(final, Mapping):
+            return False
+        # An APPLIED config.get still waits for its settings report.
+        return not (record.get("op") == commands.OP_CONFIG_GET and final.get("status") == "APPLIED"
+                    and record.get("reported_at_ms") is None)
+
+    def _eviction_victim_locked(self, keep: str) -> Optional[str]:
+        """The record to drop beyond the bound: the oldest answered one first.
+
+        config.get and config.patch share the bound, so dropping by age alone
+        let a run of quick config.get commands push out a patch still waiting
+        for its final ACK, which then arrived unseen. Without an answered
+        record the oldest config.get goes, and only then the oldest of all.
+        """
+        candidates = [command_id for command_id in self._commands if command_id != keep]
+        for command_id in candidates:
+            if self._command_done(self._commands[command_id]):
+                return command_id
+        for command_id in candidates:
+            if self._commands[command_id].get("op") != commands.OP_CONFIG_PATCH:
+                return command_id
+        return candidates[0] if candidates else None
+
+    def adopt_rdf_node_commands(self, pending: Iterable[Mapping[str, Any]]) -> int:
+        """Follow commands a replaced monitor published and that are not final yet.
+
+        Each item names ``command_id``, ``op`` and the ``sid`` the command
+        carried. The edge answers on ``ack/config`` whichever client is
+        connected, so after a reconnect only this monitor can still see the
+        ACK, and the ``settings/reported`` of a ``config.get``. Nothing is
+        published; the PUBACK stays with the client that sent the command.
+        What the store already accepted for an id is taken at once. Returns
+        how many commands this monitor now follows.
+        """
+        adopted = 0
+        with self._lock:
+            now = _now_ms()
+            for item in list(pending)[:MAX_COMMAND_RECORDS]:
+                if not isinstance(item, Mapping):
+                    continue
+                command_id = item.get("command_id")
+                op = item.get("op")
+                sid = item.get("sid")
+                if not isinstance(command_id, str) or not commands.COMMAND_ID_RE.fullmatch(command_id):
+                    continue
+                if op not in (commands.OP_CONFIG_GET, commands.OP_CONFIG_PATCH):
+                    continue
+                if command_id in self._commands:
+                    continue
+                self._keep_command_locked(command_id, {
+                    "op": op,
+                    "adopted": True,
+                    "mid": None,
+                    "published_at_ms": None,
+                    "puback": None,
+                    "progress": None,
+                    "final": None,
+                    "reported_at_ms": None,
+                })
+                adopted += 1
+                ack = self._rdf_node.ack(command_id)
+                if ack is not None:
+                    self._on_rdf_node_accepted(str(ack.get("topic") or "ack/config"), ack)
+                report = self._rdf_node.settings_report()
+                if report is not None and report.get("id") == command_id:
+                    self._on_rdf_node_accepted(commands.SETTINGS_SUFFIX, report)
+                waiting = ack is None or not ack.get("final") or ack.get("status") == "APPLIED"
+                if op == commands.OP_CONFIG_GET and waiting and self._commands[command_id]["reported_at_ms"] is None:
+                    try:
+                        self._rdf_node.expect_settings_report(
+                            command_id, now, sid=sid if isinstance(sid, str) else None,
+                        )
+                    except ValueError:
+                        self._rdf_node.expect_settings_report(command_id, now)
+        return adopted
 
     @staticmethod
     def _drop_unsent(client: Any, mid: Optional[int]) -> bool:
@@ -680,16 +569,23 @@ class MqttMonitor:
         except Exception:
             return False
 
-    def config_command_observation(self, command_id: str) -> Dict[str, Any]:
-        """PUBACK, broker echo and ACK seen for one published command id."""
+    def rdf_node_command_observation(self, command_id: str) -> Dict[str, Any]:
+        """PUBACK, ACKs and settings report seen for one command id this client
+        published or adopted (``adopt_rdf_node_commands``); nothing for any other id."""
         with self._lock:
-            record = self._config_publishes.get(command_id)
-            ack = self._config_acks.get(command_id)
+            record = self._commands.get(command_id)
+            if record is None:
+                return {
+                    "published": False, "adopted": False,
+                    "puback": None, "progress": None, "final": None, "reported_at_ms": None,
+                }
             return {
-                "published": record is not None,
-                "puback": dict(record["puback"]) if record is not None and record["puback"] else None,
-                "echoed_at_ms": record["echoed_at_ms"] if record is not None else None,
-                "ack": dict(ack) if ack is not None else None,
+                "published": not record["adopted"],
+                "adopted": record["adopted"],
+                "puback": dict(record["puback"]) if record["puback"] else None,
+                "progress": dict(record["progress"]) if record["progress"] else None,
+                "final": dict(record["final"]) if record["final"] else None,
+                "reported_at_ms": record["reported_at_ms"],
             }
 
     def _connection_label_locked(self) -> str:
@@ -699,105 +595,33 @@ class MqttMonitor:
             return "connecting"
         return self._connection
 
-    def _base_revision_locked(self) -> tuple[Optional[int], Optional[str]]:
-        """The v1 revision a new patch must be based on (RDF v2 rev never is)."""
-        reported = self._v1_reported
-        if reported is not None:
-            revision: Optional[int] = reported["payload"].get("config_rev")
-            source = "config_reported"
-            ack = self._v1_last_ack
-            if ack is not None and ack["seq"] > reported["seq"]:
-                ack_payload = ack["payload"]
-                status = ack_payload.get("status")
-                ack_revision: Any = None
-                if status == "applied":
-                    ack_revision = ack_payload.get("config_rev")
-                elif status == "conflict" and isinstance(ack_payload.get("error"), Mapping):
-                    ack_revision = ack_payload["error"].get("current_config_rev")
-                if type(ack_revision) is int and ack_revision >= 0:
-                    revision, source = ack_revision, "ack"
-            if type(revision) is int:
-                return revision, source
-        state = self._v1_state
-        if state is not None and type(state["payload"].get("config_rev")) is int:
-            return state["payload"]["config_rev"], "state"
-        return None, None
+    def rdf_node_control_view(self) -> Dict[str, Any]:
+        """What Kontrol needs: connection, node session and the latest settings report.
 
-    def reported_config(self) -> Dict[str, Any]:
-        """Reported settings and the base revision for the Kontrol panel."""
+        The report keeps the node's exact ``settings_json`` text; the console
+        server passes on only its safe fields.
+        """
         with self._lock:
             now = _now_ms()
-            revision, revision_source = self._base_revision_locked()
-            values: Dict[str, Any] = {field: None for field in CONFIG_FIELDS}
-            sources: Dict[str, Optional[str]] = {field: None for field in CONFIG_FIELDS}
-            # When the message that carried each value arrived; Kontrol counts a
-            # value as evidence for a sent patch only when it arrived later.
-            value_received: Dict[str, Optional[int]] = {field: None for field in CONFIG_FIELDS}
-            v1 = self._v1_reported
-            if v1 is not None:
-                for field in V1_REPORTED_FIELDS:
-                    value = _finite_number(v1["payload"].get(field))
-                    if value is not None:
-                        values[field], sources[field] = value, "v1_config_reported"
-                        value_received[field] = int(v1["received_at_ms"])
-            v2_entry = self._rdf_node.config_reported_entry()
-            v2_payload = v2_entry.get("payload") if v2_entry.get("status") == "CONTEXT" else None
-            effective = v2_payload.get("effective") if isinstance(v2_payload, dict) else None
-            if not isinstance(effective, dict):
-                effective = None
-            if effective is not None:
-                received_effective = v2_entry.get("received_at_ms")
-                for field, key in V2_EFFECTIVE_KEYS.items():
-                    value = _finite_number(effective.get(key))
-                    if value is not None and values[field] is None:
-                        values[field], sources[field] = value, "v2_effective"
-                        value_received[field] = received_effective if type(received_effective) is int else None
-            reported: Optional[Dict[str, Any]] = None
-            if v1 is not None:
-                received = int(v1["received_at_ms"])
-                retained = bool(v1["retained"])
-                reported = {
-                    "config_rev": v1["payload"].get("config_rev"),
-                    "received_at_ms": received,
-                    **_reported_age(now, received, retained, v1["payload"].get("ts_ms")),
-                    "retained": retained,
-                    "synthetic": v1["payload"].get("source") == "synthetic",
-                    "source": "v1+v2" if effective is not None else "v1",
-                }
-            elif effective is not None:
-                received_v2 = v2_entry.get("received_at_ms")
-                retained_v2 = v2_entry.get("retained") is True
-                if type(received_v2) is int:
-                    age = _reported_age(now, received_v2, retained_v2, v2_payload.get("t"))
-                else:
-                    age = {"age_ms": None, "age_basis": None, "source_ts_ms": None}
-                reported = {
-                    "config_rev": None,
-                    "received_at_ms": received_v2 if type(received_v2) is int else None,
-                    **age,
-                    "retained": retained_v2,
-                    "synthetic": False,
-                    "source": "v2",
-                }
             return {
                 "available": True,
                 "connection": self._connection_label_locked(),
+                "node_id": self._rdf_node.node_id,
                 "now_ms": now,
-                "base_config_rev": revision,
-                "base_config_rev_source": revision_source,
-                "reported": reported,
-                "values": values,
-                "value_sources": sources,
-                "value_received_at_ms": value_received,
+                "session": self._rdf_node.session_view(now),
+                "settings": self._rdf_node.settings_report(),
             }
 
     def snapshot(self) -> Dict[str, Any]:
+        """The one MQTT status (``GET /api/mqtt``): broker, connection and message counts.
+
+        The counts are those of every subscribed RDF Node topic; per-topic
+        statuses are in ``rdf_node_snapshot``.
+        """
         with self._lock:
             now = _now_ms()
-            last_by_kind = {
-                kind: {**entry, "age_ms": max(0, now - int(entry["received_at_ms"]))}
-                for kind, entry in self._last_by_kind.items()
-            }
+            counters = self._rdf_node.counters()
+            last = counters["last_received_at_ms"]
             return {
                 "enabled": True,
                 "read_only": True,
@@ -806,48 +630,74 @@ class MqttMonitor:
                 "port": self.port,
                 "transport": self.transport,
                 "ws_path": self.ws_path,
-                "root": self.root,
+                "node_id": self._rdf_node.node_id,
+                "root": self._rdf_node.prefix.rstrip("/"),
                 "now_ms": now,
                 "connection": self._connection,
                 "last_error": self._last_error,
-                "received": self._received,
-                "valid": self._valid,
-                "invalid": self._invalid,
-                "cleared": self._cleared,
-                "total_bytes": self._total_bytes,
-                "last_received_at_ms": self._last_received_at_ms,
-                "last_age_ms": (
-                    None
-                    if self._last_received_at_ms is None
-                    else max(0, now - self._last_received_at_ms)
-                ),
-                "last_latency_ms": self._last_latency_ms,
-                "last_topic": self._last_topic,
-                "last_by_kind": last_by_kind,
-                "kind_counts": dict(self._kind_counts),
-                "topic_counts": dict(self._topic_counts),
+                **counters,
+                "last_age_ms": None if last is None else max(0, now - last),
             }
+
+    def rdf_node_session(self) -> Dict[str, Any]:
+        """The RDF Node session (``state.sid``, ``boot``, ``cfg``) and health freshness."""
+        with self._lock:
+            return self._rdf_node.session_view(_now_ms())
+
+    def expect_rdf_node_settings_report(self, command_id: str) -> None:
+        """Accept the settings/reported answer to a config.get the console sent."""
+        with self._lock:
+            self._rdf_node.expect_settings_report(command_id, _now_ms())
+
+    def rdf_node_settings_report(self) -> Optional[Dict[str, Any]]:
+        """The latest accepted settings/reported, with its exact settings.json text.
+
+        ``safe_settings`` is empty unless ``matches_state_cfg`` (its ``rev`` is ``state.cfg``).
+        """
+        with self._lock:
+            return self._rdf_node.settings_report()
+
+    def rdf_node_ack(self, command_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            return self._rdf_node.ack(command_id)
+
+    def _rdf_connection_locked(self) -> str:
+        if not self._started:
+            return "disabled"
+        if self._connection == "connected" and self._subscriptions_ready:
+            return "ready"
+        if self._connection in ("disconnected", "error"):
+            return self._connection
+        return "connecting"
 
     def rdf_node_snapshot(self) -> Dict[str, Any]:
         with self._lock:
-            if not self._started:
-                connection = "disabled"
-            elif self._connection == "connected" and self._subscriptions_ready:
-                connection = "ready"
-            elif self._connection == "disconnected":
-                connection = "disconnected"
-            elif self._connection == "error":
-                connection = "error"
-            else:
-                connection = "connecting"
             result = self._rdf_node.snapshot(_now_ms())
             result.update({
                 "enabled": self._started,
-                "connection": connection,
+                "connection": self._rdf_connection_locked(),
                 "node_id": self._rdf_node.node_id,
                 "last_error": self._rdf_last_error,
             })
             return result
+
+    def rdf_node_view(self) -> Optional[Dict[str, Any]]:
+        """The RDF Node view the Dashboard's telemetry source reads (issue #8).
+
+        The accepted values of the node (``RdfNodeV2Telemetry.node_view``,
+        with the LIVE Angular frame's 360 values) at one time, or None while
+        the monitor is stopped.
+        """
+        with self._lock:
+            if not self._started:
+                return None
+            now = _now_ms()
+            return {
+                "now_ms": now,
+                "connection": self._rdf_connection_locked(),
+                "node_id": self._rdf_node.node_id,
+                "node": self._rdf_node.node_view(now),
+            }
 
 
 __all__ = ["MqttMonitor"]

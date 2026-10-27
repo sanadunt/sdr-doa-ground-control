@@ -1,7 +1,10 @@
 import type { Branding, ConsoleConfig, MqttSnapshot, MqttTarget, RdfNodeSnapshot, TelemetrySnapshot } from './types';
 import { isMqttTransport, isMqttWsPath, normalizeMqttSnapshot, normalizeRdfNodeSnapshot } from './lib/mqttMonitor';
 import { CONFIG_PATCH_KEYS } from './lib/controlDraft';
+import { normalizeDataOutHostList } from './lib/dataOutHosts';
 import type { ConfigPatchKey } from './lib/controlDraft';
+import { isConsoleAccess } from './lib/access';
+import type { ConsoleAccess } from './lib/access';
 
 export const DEFAULT_API_TIMEOUT_MS = 10_000;
 
@@ -19,7 +22,7 @@ export class ApiError extends Error {
   readonly code: string | null;
   /** The message is the server's own error text, not the generic status fallback. */
   readonly serverMessage: boolean;
-  /** The parsed error body; untrusted, normalize before use (e.g. command_id, current_base_config_rev). */
+  /** The parsed error body; untrusted, normalize before use (e.g. command_id, current_base_rev). */
   readonly details: Readonly<Record<string, unknown>>;
 
   constructor(message: string, status: number, code: string | null, serverMessage = true, details: Record<string, unknown> = {}) {
@@ -183,7 +186,12 @@ export function normalizeConsoleConfig(value: unknown): ConsoleConfig {
     if (!isMqttWsPath(value.mqtt_ws_path)) throw new Error('console config response has an invalid MQTT WebSocket path');
     config.mqtt_ws_path = value.mqtt_ws_path;
   }
+  if (value.data_out_hosts !== undefined) config.data_out_hosts = normalizeDataOutHostList(value.data_out_hosts);
   return config;
+}
+
+function sameHosts(left: readonly string[], right: readonly string[] | undefined): boolean {
+  return right !== undefined && left.length === right.length && left.every((host, index) => host === right[index]);
 }
 
 function sameConfigValues(left: ConsoleConfig, right: ConsoleConfig): boolean {
@@ -193,6 +201,7 @@ function sameConfigValues(left: ConsoleConfig, right: ConsoleConfig): boolean {
     && left.refresh_seconds === right.refresh_seconds
     && (left.mqtt_transport === undefined || left.mqtt_transport === right.mqtt_transport)
     && (left.mqtt_ws_path === undefined || left.mqtt_ws_path === right.mqtt_ws_path)
+    && (left.data_out_hosts === undefined || sameHosts(left.data_out_hosts, right.data_out_hosts))
     && (left.version === undefined || left.version === right.version);
 }
 
@@ -238,8 +247,27 @@ export async function updateConsoleConfig(config: ConsoleConfig, signal?: AbortS
   return readback;
 }
 
-export async function getSnapshot(baseUrl: string, signal?: AbortSignal): Promise<TelemetrySnapshot> {
-  const url = `/api/snapshot?base_url=${encodeURIComponent(baseUrl)}`;
+/** How a snapshot read asks the console's shared Data Out read. */
+export interface SnapshotReadOptions {
+  /** The operator's Refresh: a new read once the last one is 1 s old. */
+  refresh?: boolean;
+  /** Kontrol's "Cek ulang": read settings.json too instead of its recent copy. */
+  freshSettings?: boolean;
+  /** Collection id this page already shows, so the next poll gets a new read. */
+  seen?: string | null;
+}
+
+/** /api/snapshot URL for a read; the console decides whether it reads Data Out. */
+export function snapshotUrl(baseUrl: string, options: SnapshotReadOptions = {}): string {
+  let url = `/api/snapshot?base_url=${encodeURIComponent(baseUrl)}`;
+  if (options.refresh || options.freshSettings) url += '&refresh=1';
+  if (options.freshSettings) url += '&fresh_settings=1';
+  if (options.seen) url += `&seen=${encodeURIComponent(options.seen)}`;
+  return url;
+}
+
+export async function getSnapshot(baseUrl: string, signal?: AbortSignal, options: SnapshotReadOptions = {}): Promise<TelemetrySnapshot> {
+  const url = snapshotUrl(baseUrl, options);
   const body = await requestJson<unknown>(url, {
     cache: 'no-store',
     credentials: 'same-origin',
@@ -299,7 +327,7 @@ export async function getMqtt(signal?: AbortSignal): Promise<MqttSnapshot> {
   return normalizeMqttSnapshot(body, Date.now());
 }
 
-/** RDF Node v2 telemetry from the same subscriber connection. */
+/** RDF Node MQTT state (topics and node view) from the same subscriber connection. */
 export async function getRdfNodeMqtt(signal?: AbortSignal): Promise<RdfNodeSnapshot> {
   const body = await requestJson<unknown>('/api/mqtt/rdf-node', {
     cache: 'no-store',
@@ -325,8 +353,8 @@ export async function connectMqtt(target: MqttTarget, signal?: AbortSignal): Pro
   return normalizeMqttSnapshot(body, Date.now());
 }
 
+/** Validate a config.patch as Kontrol would send it, without sending it. */
 export async function dryRunConfigPatch(payload: {
-  base_config_rev?: number;
   changes: Record<string, number>;
 }, signal?: AbortSignal): Promise<Record<string, unknown>> {
   const body = await requestJson<unknown>('/api/dry-run/config-patch', {
@@ -340,16 +368,21 @@ export async function dryRunConfigPatch(payload: {
 }
 
 export interface ConfigPatchCapability {
-  /** The server can publish an admin-confirmed cmd/config/patch over its MQTT connection. */
+  /** The server can publish Kontrol's RDF Node commands over its MQTT connection. */
   enabled: boolean;
   requiresAdmin: boolean;
-  /** Full MQTT topic, for display only. */
+  /** Full MQTT topics (cmd/config/patch, cmd/config/get, ack/config, settings/reported), for display only. */
   topic: string | null;
+  getTopic: string | null;
+  ackTopic: string | null;
+  settingsTopic: string | null;
   qos: number | null;
   /** Command lifetime the server sets, in ms. */
   ttlMs: number | null;
   /** Server-side [min, max] per field in SI units (Hz, dB). Missing fields fall back to the client copy. */
   ranges: Partial<Record<ConfigPatchKey, readonly [number, number]>>;
+  /** The edge's gain table; empty when not reported (the client copy applies). */
+  gainTableDb: number[];
 }
 
 export interface ConsoleCapabilities {
@@ -361,6 +394,125 @@ export interface ConsoleCapabilities {
   adminDefaultPassword: boolean | null;
   /** Config patch publishing, or null when the server does not report it. */
   configPatch: ConfigPatchCapability | null;
+  /** Which listener answered: the console's own ("local") or the LAN view; null when not reported. */
+  access?: ConsoleAccess | null;
+  /** State of the LAN view listener; null when not reported. */
+  lanAccess?: LanAccessBrief | null;
+}
+
+// ---------------------------------------------------------------------------
+// LAN view (lan_access): the opt-in, read-only second listener.
+// ---------------------------------------------------------------------------
+
+export const LAN_ACCESS_STATES = ['open', 'closed'] as const;
+export type LanAccessState = typeof LAN_ACCESS_STATES[number];
+/** Why the LAN view is closed (tools/lan_access.py CLOSED_*). */
+export const LAN_CLOSED_REASONS = ['DISABLED', 'ADMIN_PASSWORD_DEFAULT', 'ADMIN_DISABLED', 'PORT_CONFLICT', 'BIND_FAILED', 'STOPPED'] as const;
+export type LanClosedReason = typeof LAN_CLOSED_REASONS[number];
+/** Codes of POST /api/lan-access errors (tools/lan_access.py), each with an EN and ID message. */
+export const LAN_ACCESS_ERROR_CODES = ['ORIGIN_REJECTED', 'ADMIN_REQUIRED', 'LAN_ACCESS_INVALID', 'LAN_ADMIN_PASSWORD_DEFAULT', 'LAN_ACCESS_SAVE_FAILED'] as const;
+export type LanAccessErrorCode = typeof LAN_ACCESS_ERROR_CODES[number];
+/** Same bounds as tools/lan_access.py. */
+export const LAN_PORT_MIN = 1024;
+export const LAN_PORT_MAX = 65535;
+export const LAN_MAX_ALLOWED_CLIENTS = 32;
+
+/** The state /api/health and the LAN view's capabilities carry. */
+export interface LanAccessBrief {
+  enabled: boolean;
+  state: LanAccessState;
+  reason: LanClosedReason | null;
+}
+
+export interface LanAccessStatus extends LanAccessBrief {
+  /** errno name of a failed bind (EADDRINUSE, EADDRNOTAVAIL, ...). */
+  detail: string | null;
+  bind: string | null;
+  port: number | null;
+  /** host:port while open. */
+  address: string | null;
+  allowedClientCount: number | null;
+}
+
+export interface LanAccessSettings {
+  enabled: boolean;
+  port: number;
+  bind: string;
+  allowedClients: string[];
+}
+
+export interface LanAccessView {
+  config: LanAccessSettings;
+  status: LanAccessStatus;
+}
+
+function oneOf<T extends string>(values: readonly T[], value: unknown): T | null {
+  return typeof value === 'string' && (values as readonly string[]).includes(value) ? value as T : null;
+}
+
+function shortText(value: unknown, maxChars: number): string | null {
+  return typeof value === 'string' && value.length > 0 && value.length <= maxChars && /^[\x21-\x7e]+$/u.test(value) ? value : null;
+}
+
+function lanPort(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= LAN_PORT_MAX ? value : null;
+}
+
+export function normalizeLanAccessBrief(value: unknown): LanAccessBrief | null {
+  if (!isObject(value)) return null;
+  const state = oneOf(LAN_ACCESS_STATES, value.state);
+  if (state === null || typeof value.enabled !== 'boolean') return null;
+  return { enabled: value.enabled, state, reason: state === 'open' ? null : oneOf(LAN_CLOSED_REASONS, value.reason) };
+}
+
+export function normalizeLanAccessStatus(value: unknown): LanAccessStatus | null {
+  const brief = normalizeLanAccessBrief(value);
+  if (!brief || !isObject(value)) return null;
+  const count = value.allowed_client_count;
+  return {
+    ...brief,
+    detail: shortText(value.detail, 32),
+    bind: shortText(value.bind, 64),
+    port: lanPort(value.port),
+    address: brief.state === 'open' ? shortText(value.address, 80) : null,
+    allowedClientCount: typeof count === 'number' && Number.isInteger(count) && count >= 0 && count <= LAN_MAX_ALLOWED_CLIENTS ? count : null,
+  };
+}
+
+export function normalizeLanAccessView(value: unknown): LanAccessView {
+  if (!isObject(value) || !isObject(value.config)) throw new Error('lan-access response has an invalid shape');
+  const config = value.config;
+  const port = lanPort(config.port);
+  const bind = shortText(config.bind, 64);
+  const clients = Array.isArray(config.allowed_clients) ? config.allowed_clients : null;
+  const status = normalizeLanAccessStatus(value.status);
+  if (typeof config.enabled !== 'boolean' || port === null || bind === null || clients === null || status === null
+    || clients.length > LAN_MAX_ALLOWED_CLIENTS || !clients.every((entry) => shortText(entry, 64) !== null)) {
+    throw new Error('lan-access response has an invalid shape');
+  }
+  return { config: { enabled: config.enabled, port, bind, allowedClients: clients as string[] }, status };
+}
+
+/** GET /api/lan-access: the saved setting and the listener's state (no admin needed). */
+export async function getLanAccess(signal?: AbortSignal): Promise<LanAccessView> {
+  const body = await requestJson<unknown>('/api/lan-access', { cache: 'no-store', credentials: 'same-origin' }, signal);
+  return normalizeLanAccessView(body);
+}
+
+/** POST /api/lan-access (admin): save and apply; the answer carries the new state. */
+export async function updateLanAccess(settings: LanAccessSettings, signal?: AbortSignal): Promise<LanAccessView> {
+  const body = await requestJson<unknown>('/api/lan-access', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({
+      enabled: settings.enabled,
+      port: settings.port,
+      bind: settings.bind,
+      allowed_clients: settings.allowedClients,
+    }),
+  }, signal);
+  return normalizeLanAccessView(body);
 }
 
 function normalizeTopic(value: unknown): string | null {
@@ -380,14 +532,21 @@ function normalizeConfigPatchCapability(value: unknown): ConfigPatchCapability |
   }
   const qos = value.qos === 0 || value.qos === 1 || value.qos === 2 ? value.qos : null;
   const ttlMs = finiteNumber(value.ttl_ms) && Number.isInteger(value.ttl_ms) && value.ttl_ms > 0 && value.ttl_ms <= 600_000 ? value.ttl_ms : null;
+  const gains = Array.isArray(value.gain_table_db)
+    ? value.gain_table_db.filter((entry): entry is number => finiteNumber(entry) && entry >= -10 && entry <= 100).slice(0, 64)
+    : [];
   return {
     enabled: value.enabled === true,
     // Anything but an explicit false keeps the admin requirement.
     requiresAdmin: value.requires_admin !== false,
     topic: normalizeTopic(value.topic),
+    getTopic: normalizeTopic(value.get_topic),
+    ackTopic: normalizeTopic(value.ack_topic),
+    settingsTopic: normalizeTopic(value.settings_topic),
     qos,
     ttlMs,
     ranges,
+    gainTableDb: gains,
   };
 }
 
@@ -401,6 +560,8 @@ export function normalizeCapabilities(value: unknown): ConsoleCapabilities {
     adminEnabled: typeof record.admin_enabled === 'boolean' ? record.admin_enabled : null,
     adminDefaultPassword: typeof record.admin_default_password === 'boolean' ? record.admin_default_password : null,
     configPatch: normalizeConfigPatchCapability(record.config_patch),
+    access: isConsoleAccess(record.access) ? record.access : null,
+    lanAccess: normalizeLanAccessBrief(record.lan_access),
   };
 }
 
@@ -413,20 +574,22 @@ export async function getCapabilities(signal?: AbortSignal): Promise<ConsoleCapa
 }
 
 // ---------------------------------------------------------------------------
-// Kontrol: reported config, admin-confirmed config patch, command status.
+// Kontrol: the node's reported values, the RDF Node commands, their status.
 // ---------------------------------------------------------------------------
 
-const COMMAND_ID_RE = /^[A-Za-z0-9_-]{1,64}$/u;
+const COMMAND_ID_RE = /^[A-Za-z0-9_.:-]{1,80}$/u;
 const CODE_RE = /^[A-Z][A-Z0-9_]{0,63}$/u;
-const REVISION_SOURCES = ['config_reported', 'ack', 'state'] as const;
-const VALUE_SOURCES = ['v1_config_reported', 'v2_effective'] as const;
-const REPORTED_SOURCES = ['v1', 'v2', 'v1+v2'] as const;
-export const CONFIG_COMMAND_STATES = ['published', 'delivered', 'acknowledged', 'acked', 'publish_failed', 'no_ack'] as const;
-const FINAL_COMMAND_STATES: ReadonlySet<string> = new Set(['acked', 'publish_failed', 'no_ack']);
+const SESSION_ID_RE = /^[0-9a-f]{8}$/u;
+const VALUE_SOURCES = ['settings_reported'] as const;
+export const CONFIG_COMMAND_STATES = [
+  'published', 'delivered', 'acknowledged', 'acked', 'reported', 'publish_failed', 'no_ack', 'no_final_ack', 'no_report',
+] as const;
+const FINAL_COMMAND_STATES: ReadonlySet<string> = new Set(['acked', 'reported', 'publish_failed', 'no_ack', 'no_final_ack', 'no_report']);
+const COMMAND_OPS = ['config.patch', 'config.get'] as const;
 
-export type ConfigRevisionSource = typeof REVISION_SOURCES[number];
 export type ConfigValueSource = typeof VALUE_SOURCES[number];
 export type ConfigCommandState = typeof CONFIG_COMMAND_STATES[number];
+export type ConfigCommandOp = typeof COMMAND_OPS[number];
 
 function oneOfValues<T extends string>(values: readonly T[], value: unknown): value is T {
   return typeof value === 'string' && (values as readonly string[]).includes(value);
@@ -452,6 +615,10 @@ function codeOrNull(value: unknown): string | null {
   return typeof value === 'string' && CODE_RE.test(value) ? value : null;
 }
 
+function booleanOrNull(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
 function patchValues<T>(input: unknown, pick: (value: unknown) => T | null): Record<ConfigPatchKey, T | null> {
   const record = isObject(input) ? input : {};
   const values = {} as Record<ConfigPatchKey, T | null>;
@@ -467,35 +634,78 @@ export interface ConfigReportedBroker {
   connection: string;
 }
 
+/** The RDF Node session a command names (`state`), as Kontrol shows it. */
+export interface ConfigNodeView {
+  sid: string;
+  /** `state.cfg`: the revision a config.patch must name as base_rev. */
+  cfg: number | null;
+  /** A telemetry/health arrived within 8 s; a config.patch needs it. */
+  healthFresh: boolean;
+  healthAgeMs: number | null;
+  remoteCommands: boolean | null;
+  /** False when the node reports no settings target: a patch would fail. */
+  remoteConfigPatch: boolean | null;
+}
+
+/** The latest settings/reported, without its settings.json text. */
+export interface ConfigSettingsReport {
+  id: string;
+  rev: number | null;
+  receivedAtMs: number | null;
+  ageMs: number | null;
+  /** Its rev is the node's state.cfg; only then are its values the node's. */
+  matchesStateCfg: boolean;
+}
+
 export interface ConfigReported {
   available: boolean;
   /** MQTT_MONITOR_DISABLED or MQTT_DEPENDENCY_MISSING when unavailable. */
   code: string | null;
   nowMs: number | null;
   broker: ConfigReportedBroker;
-  /** The revision a patch must name; chosen by the server from v1 MQTT. */
-  baseConfigRev: number | null;
-  baseConfigRevSource: ConfigRevisionSource | null;
-  reported: {
-    configRev: number | null;
-    receivedAtMs: number | null;
-    ageMs: number | null;
-    retained: boolean;
-    synthetic: boolean;
-    source: string | null;
-  } | null;
+  node: ConfigNodeView | null;
+  /** The revision a patch must name: the node's state.cfg. */
+  baseRev: number | null;
+  settings: ConfigSettingsReport | null;
+  /** Values from a settings/reported of the current revision; null otherwise. */
   values: Record<ConfigPatchKey, number | null>;
   valueSources: Record<ConfigPatchKey, ConfigValueSource | null>;
-  /** Server time the message carrying each value arrived; null when unknown. */
+  /** Server time the report carrying each value arrived; null when unknown. */
   valueReceivedAtMs: Record<ConfigPatchKey, number | null>;
   pendingCommandId: string | null;
+  /** The latest config.get this console sent. */
+  settingsRequest: ConfigCommandStatus | null;
+}
+
+function normalizeNode(value: unknown): ConfigNodeView | null {
+  if (!isObject(value) || typeof value.sid !== 'string' || !SESSION_ID_RE.test(value.sid)) return null;
+  return {
+    sid: value.sid,
+    cfg: integerOrNull(value.cfg, 0),
+    healthFresh: value.health_fresh === true,
+    healthAgeMs: integerOrNull(value.health_age_ms, 0),
+    remoteCommands: booleanOrNull(value.remote_commands),
+    remoteConfigPatch: booleanOrNull(value.remote_config_patch),
+  };
+}
+
+function normalizeSettings(value: unknown): ConfigSettingsReport | null {
+  if (!isObject(value)) return null;
+  const id = commandIdOrNull(value.id);
+  if (!id) return null;
+  return {
+    id,
+    rev: integerOrNull(value.rev, 0),
+    receivedAtMs: integerOrNull(value.received_at_ms, 0),
+    ageMs: integerOrNull(value.age_ms, 0),
+    matchesStateCfg: value.matches_state_cfg === true,
+  };
 }
 
 export function normalizeConfigReported(value: unknown): ConfigReported {
   if (!isObject(value)) throw new Error('config-reported response has an invalid shape');
   const broker = isObject(value.broker) ? value.broker : {};
-  const reported = isObject(value.reported) ? value.reported : null;
-  const baseConfigRev = integerOrNull(value.base_config_rev, 0);
+  const node = normalizeNode(value.node);
   return {
     available: value.available === true,
     code: codeOrNull(value.code),
@@ -506,24 +716,19 @@ export function normalizeConfigReported(value: unknown): ConfigReported {
       transport: boundedString(broker.transport, 32),
       connection: boundedString(broker.connection, 32) ?? 'unknown',
     },
-    baseConfigRev,
-    baseConfigRevSource: baseConfigRev !== null && oneOfValues(REVISION_SOURCES, value.base_config_rev_source) ? value.base_config_rev_source : null,
-    reported: reported ? {
-      configRev: integerOrNull(reported.config_rev, 0),
-      receivedAtMs: integerOrNull(reported.received_at_ms, 0),
-      ageMs: integerOrNull(reported.age_ms, 0),
-      retained: reported.retained === true,
-      synthetic: reported.synthetic === true,
-      source: oneOfValues(REPORTED_SOURCES, reported.source) ? reported.source : null,
-    } : null,
+    node,
+    // The base revision is the node's; without a node there is none.
+    baseRev: node ? integerOrNull(value.base_rev, 0) : null,
+    settings: normalizeSettings(value.settings),
     values: patchValues(value.values, finiteOrNull),
     valueSources: patchValues(value.value_sources, (entry) => (oneOfValues(VALUE_SOURCES, entry) ? entry : null)),
     valueReceivedAtMs: patchValues(value.value_received_at_ms, (entry) => integerOrNull(entry, 0)),
     pendingCommandId: commandIdOrNull(value.pending_command_id),
+    settingsRequest: normalizeConfigCommandStatus(value.settings_request),
   };
 }
 
-/** What the Raspberry reported over MQTT, and the base revision the next patch must name. No admin needed. */
+/** What the node reported over MQTT, and the base revision the next patch must name. No admin needed. */
 export async function getConfigReported(signal?: AbortSignal): Promise<ConfigReported> {
   const body = await requestJson<unknown>('/api/mqtt/config-reported', {
     cache: 'no-store',
@@ -534,19 +739,21 @@ export async function getConfigReported(signal?: AbortSignal): Promise<ConfigRep
 
 export interface ConfigPatchRequest {
   changes: Partial<Record<ConfigPatchKey, number>>;
-  base_config_rev: number;
+  /** The node's state.cfg the operator reviewed. */
+  base_rev: number;
   /** Always true: the operator reviewed the change in Kontrol. */
   confirm: true;
 }
 
-export interface ConfigPatchAccepted {
+export interface ConfigCommandAccepted {
   commandId: string;
+  op: ConfigCommandOp;
   state: ConfigCommandState;
   topic: string | null;
   qos: number | null;
-  baseConfigRev: number | null;
-  issuedTsMs: number | null;
-  expiresTsMs: number | null;
+  baseRev: number | null;
+  issuedMs: number | null;
+  expiresMs: number | null;
   ttlMs: number | null;
   changes: Partial<Record<ConfigPatchKey, number>>;
 }
@@ -561,74 +768,111 @@ function patchChanges(value: unknown): Partial<Record<ConfigPatchKey, number>> {
   return changes;
 }
 
-export function normalizeConfigPatchAccepted(value: unknown): ConfigPatchAccepted {
+export function normalizeConfigCommandAccepted(value: unknown): ConfigCommandAccepted {
   const commandId = isObject(value) ? commandIdOrNull(value.command_id) : null;
-  if (!isObject(value) || value.ok !== true || !commandId) throw new Error('config-patch response has an invalid shape');
+  if (!isObject(value) || value.ok !== true || !commandId) throw new Error('command response has an invalid shape');
   return {
     commandId,
+    op: oneOfValues(COMMAND_OPS, value.op) ? value.op : 'config.patch',
     state: oneOfValues(CONFIG_COMMAND_STATES, value.state) ? value.state : 'published',
     topic: normalizeTopic(value.topic),
     qos: value.qos === 0 || value.qos === 1 || value.qos === 2 ? value.qos : null,
-    baseConfigRev: integerOrNull(value.base_config_rev, 0),
-    issuedTsMs: integerOrNull(value.issued_ts_ms, 0),
-    expiresTsMs: integerOrNull(value.expires_ts_ms, 0),
+    baseRev: integerOrNull(value.base_rev, 0),
+    issuedMs: integerOrNull(value.issued_ms, 0),
+    expiresMs: integerOrNull(value.expires_ms, 0),
     ttlMs: integerOrNull(value.ttl_ms, 1),
     changes: patchChanges(value.changes),
   };
 }
 
 /**
- * Publish an admin-confirmed config patch through the console's MQTT
+ * Publish an admin-confirmed config.patch through the console's MQTT
  * connection. The browser sends its Origin and the admin cookie; the server
- * checks both, the allowlist, the ranges and the base revision again.
+ * checks both, the edge's field rules, the node session and health, and the
+ * base revision again.
  */
-export async function sendConfigPatch(request: ConfigPatchRequest, signal?: AbortSignal): Promise<ConfigPatchAccepted> {
+export async function sendConfigPatch(request: ConfigPatchRequest, signal?: AbortSignal): Promise<ConfigCommandAccepted> {
   const body = await requestJson<unknown>('/api/mqtt/config-patch', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'same-origin',
     cache: 'no-store',
-    body: JSON.stringify({ changes: patchChanges(request.changes), base_config_rev: request.base_config_rev, confirm: true }),
+    body: JSON.stringify({ changes: patchChanges(request.changes), base_rev: request.base_rev, confirm: true }),
   }, signal);
-  return normalizeConfigPatchAccepted(body);
+  return normalizeConfigCommandAccepted(body);
 }
 
+/**
+ * Ask the node for its settings (config.get). The answer comes as
+ * settings/reported, which the edge sends only over a TLS connection to the
+ * broker; GET /api/mqtt/config-reported shows its state.
+ */
+export async function requestConfigGet(signal?: AbortSignal): Promise<ConfigCommandAccepted> {
+  const body = await requestJson<unknown>('/api/mqtt/config-get', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    cache: 'no-store',
+    body: '{}',
+  }, signal);
+  return normalizeConfigCommandAccepted(body);
+}
+
+/** An edge ACK as Kontrol shows it. */
 export interface ConfigCommandAck {
+  /** The edge's status: ACCEPTED, APPLYING, VERIFYING, APPLIED, PERSISTED_UNVERIFIED, ... */
   status: string;
-  configRev: number | null;
-  readbackOk: boolean | null;
-  errorCode: string | null;
-  currentConfigRev: number | null;
-  changedFields: string[];
+  final: boolean;
+  /** result.error, a code such as CONFIG_REVISION_CONFLICT. */
+  error: string | null;
+  /** result.reason, such as NATIVE_RUNTIME_EVIDENCE_INCOMPLETE. */
+  reason: string | null;
+  revision: number | null;
+  /** config.patch: field -> evidence (FRESH_DAQ_RF_CENTER, ...); config.get: one word. */
+  proof: Partial<Record<ConfigPatchKey, string>> | string | null;
+  persisted: boolean | null;
   receivedAtMs: number | null;
 }
 
 export interface ConfigCommandStatus {
   commandId: string;
+  op: ConfigCommandOp;
   state: ConfigCommandState;
   final: boolean;
   nowMs: number | null;
-  issuedTsMs: number | null;
-  expiresTsMs: number | null;
-  baseConfigRev: number | null;
+  issuedMs: number | null;
+  expiresMs: number | null;
+  baseRev: number | null;
   changes: Partial<Record<ConfigPatchKey, number>>;
   pubackReason: number | null;
-  echoed: boolean;
   monitorRestarted: boolean;
   ack: ConfigCommandAck | null;
+  settingsReportedAtMs: number | null;
+}
+
+function normalizeProof(value: unknown): ConfigCommandAck['proof'] {
+  if (typeof value === 'string') return codeOrNull(value.toUpperCase()) ? value : null;
+  if (!isObject(value)) return null;
+  const proof: Partial<Record<ConfigPatchKey, string>> = {};
+  for (const key of CONFIG_PATCH_KEYS) {
+    const entry = codeOrNull(value[key]);
+    if (entry) proof[key] = entry;
+  }
+  return proof;
 }
 
 function normalizeAck(value: unknown): ConfigCommandAck | null {
   if (!isObject(value)) return null;
-  const status = typeof value.status === 'string' && /^[a-z_]{1,32}$/u.test(value.status) ? value.status : null;
+  const status = codeOrNull(value.status);
   if (!status) return null;
   return {
     status,
-    configRev: integerOrNull(value.config_rev, 0),
-    readbackOk: typeof value.readback_ok === 'boolean' ? value.readback_ok : null,
-    errorCode: codeOrNull(value.error_code),
-    currentConfigRev: integerOrNull(value.current_config_rev, 0),
-    changedFields: Array.isArray(value.changed_fields) ? value.changed_fields.filter((entry): entry is string => typeof entry === 'string' && entry.length <= 64).slice(0, 16) : [],
+    final: value.final === true,
+    error: codeOrNull(value.error),
+    reason: codeOrNull(value.reason),
+    revision: integerOrNull(value.revision, 0),
+    proof: normalizeProof(value.proof),
+    persisted: booleanOrNull(value.persisted),
     receivedAtMs: integerOrNull(value.received_at_ms, 0),
   };
 }
@@ -639,24 +883,25 @@ export function normalizeConfigCommandStatus(value: unknown): ConfigCommandStatu
   if (!commandId || !oneOfValues(CONFIG_COMMAND_STATES, value.state)) return null;
   return {
     commandId,
+    op: oneOfValues(COMMAND_OPS, value.op) ? value.op : 'config.patch',
     state: value.state,
     // The state decides; a final flag that disagrees with it is ignored.
     final: FINAL_COMMAND_STATES.has(value.state),
     nowMs: finiteOrNull(value.now_ms),
-    issuedTsMs: integerOrNull(value.issued_ts_ms, 0),
-    expiresTsMs: integerOrNull(value.expires_ts_ms, 0),
-    baseConfigRev: integerOrNull(value.base_config_rev, 0),
+    issuedMs: integerOrNull(value.issued_ms, 0),
+    expiresMs: integerOrNull(value.expires_ms, 0),
+    baseRev: integerOrNull(value.base_rev, 0),
     changes: patchChanges(value.changes),
     pubackReason: integerOrNull(value.puback_reason, 0),
-    echoed: value.echoed === true,
     monitorRestarted: value.monitor_restarted === true,
     ack: normalizeAck(value.ack),
+    settingsReportedAtMs: integerOrNull(value.settings_reported_at_ms, 0),
   };
 }
 
 /**
- * Status of one published config patch, or with no id the latest one the
- * console published (null when there is none), so a reload can resume.
+ * Status of one command this console published, or with no id the latest
+ * config.patch (null when there is none), so a reload can resume.
  */
 export async function getConfigPatchStatus(commandId?: string, signal?: AbortSignal): Promise<ConfigCommandStatus | null> {
   if (commandId !== undefined && !COMMAND_ID_RE.test(commandId)) throw new Error('invalid command id');

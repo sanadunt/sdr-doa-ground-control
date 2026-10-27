@@ -18,7 +18,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: sdr-doa-ground-console:2.0.0
+    image: sdr-doa-ground-console:3.0.0
     # The console binds 127.0.0.1 and refuses any other address. With the host
     # network that is this machine's own loopback, so http://127.0.0.1:8787/
     # works here and is not reachable from the LAN. A bridge network with
@@ -42,6 +42,7 @@ services:
       - SDR_DOA_ADMIN_PASSWORD
       # First start only: the console writes /data/console.json from these and
       # ignores them once that file exists. Change settings in the UI later.
+      - SDR_DOA_SEED_DATA_OUT_HOSTS
       - SDR_DOA_SEED_BASE_URL
       - SDR_DOA_SEED_MQTT_HOST
       - SDR_DOA_SEED_MQTT_PORT

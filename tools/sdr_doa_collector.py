@@ -14,10 +14,13 @@ import argparse
 import csv
 import dataclasses
 import errno
+import functools
 import http.client
 import io
+import ipaddress
 import json
 import math
+import re
 import socket
 import sys
 import threading
@@ -28,7 +31,7 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 SCHEMA_VERSION = 1
 DEFAULT_TIMEOUT_SECONDS = 5.0
@@ -64,13 +67,40 @@ CSV_XML_FREQUENCY_MATCH_HZ = 1_000
 XML_POWER_CLIP_FLOOR = 0.0
 CSV_POWER_FLOOR_DB = -100.0
 NODE_PROGRESS_COUNTERS = ("timestamp_ms", "uptime_ms", "data_frame_index")
+# settings.json is about 4.7 kB of the ~8 kB one collection reads. With a
+# SettingsCache a collection reuses the last good copy for at most this long
+# (see SettingsCache for what makes it read the file again sooner).
+SETTINGS_REUSE_MAX_MS = 30_000
+# status.json fields that follow the node's settings: when one of them
+# changes, the cached settings.json is not reused.
+SETTINGS_STATUS_FIELDS = (
+    "station_id",
+    "hardware_id",
+    "unit_id",
+    "software_version",
+    "software_git_short_hash",
+)
+SETTINGS_DAQ_FIELDS = ("sampling_frequency_hz", "bandwidth_hz", "decimated_bandwidth_hz", "buffer_size_ms")
 TRANSPORT_ERROR_KINDS = frozenset({"timeout", "connection_refused", "unreachable"})
-DEFAULT_ALLOWED_DATA_HOSTS = frozenset({
-    "doasdr.local",
-    "192.168.100.100",
-    "127.0.0.1",
-    "localhost",
-})
+# Data Out answers on this port only; the hosts are a saved console setting
+# (console.json data_out_hosts), these four are its default.
+DATA_OUT_PORT = 8081
+DEFAULT_DATA_OUT_HOSTS: Tuple[str, ...] = ("doasdr.local", "192.168.100.100", "127.0.0.1", "localhost")
+DEFAULT_ALLOWED_DATA_HOSTS = frozenset(DEFAULT_DATA_OUT_HOSTS)
+MAX_DATA_OUT_HOSTS = 16
+# Error codes of the Data Out address rules; the console sends them with
+# the hosts and the port, and the Configuration page translates them.
+DATA_OUT_HOST_INVALID = "DATA_OUT_HOST_INVALID"
+DATA_OUT_HOSTS_EMPTY = "DATA_OUT_HOSTS_EMPTY"
+DATA_OUT_HOSTS_TOO_MANY = "DATA_OUT_HOSTS_TOO_MANY"
+DATA_OUT_HOST_IN_USE = "DATA_OUT_HOST_IN_USE"
+DATA_OUT_URL_NOT_ALLOWED = "DATA_OUT_URL_NOT_ALLOWED"
+_DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_ASCII_SPACE = " \t\n\r\x0b\x0c"
+_IPV6_CHARS_RE = re.compile(r"[0-9A-Fa-f:]+")
+# http://NETLOC with no path or "/"; NETLOC is checked further on its own.
+_DATA_OUT_URL_RE = re.compile(r"[Hh][Tt][Tt][Pp]://([^/]*)/?")
+_IPV4_RE = re.compile(r"(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}")
 
 PATH_STATUS = "/status.json"
 PATH_SETTINGS = "/settings.json"
@@ -157,6 +187,152 @@ class CollectorError(ValueError):
     """Raised when a resource body violates the expected bounded schema."""
 
 
+class DataOutHostError(ValueError):
+    """A Data Out host list or URL that breaks the address rules.
+
+    ``code`` is one of the DATA_OUT_* codes. ``hosts`` is the list a URL was
+    checked against, so the message and the console's answer can name it
+    together with the port.
+    """
+
+    def __init__(self, code: str, message: str, *, host: Optional[str] = None, hosts: Sequence[str] = ()) -> None:
+        super().__init__(message)
+        self.code = code
+        self.host = host
+        self.hosts = tuple(hosts)
+
+
+def normalize_data_out_host(value: Any) -> str:
+    """Return one Data Out host in its saved form, or raise DataOutHostError.
+
+    A host is a DNS name (RFC 1123 labels of letters, digits and inner
+    hyphens, lowercased, one trailing dot removed) or an IPv4 or IPv6 address
+    (IPv6 may be in brackets; saved in its compressed form). A name whose
+    last label is all digits must be a dotted-quad IPv4 address without
+    leading zeros. Wildcards, schemes, ports, paths, userinfo, IPv6 zone ids,
+    IPv4-in-IPv6 notation, IPv4-mapped addresses (``::ffff:0:0/96``; the
+    IPv4 address is the host to list) and the unspecified address are
+    refused.
+    frontend/src/lib/dataOutHosts.ts applies the same rules; the cases in
+    tools/fixtures/data_out_hosts.json pin both.
+    """
+    if not isinstance(value, str):
+        raise DataOutHostError(DATA_OUT_HOST_INVALID, "a Data Out host must be text")
+    text = value.strip(_ASCII_SPACE)
+    shown = text[:80]
+
+    def invalid() -> DataOutHostError:
+        return DataOutHostError(DATA_OUT_HOST_INVALID, f"{shown!r} is not a host name or IP address", host=shown)
+
+    if not text or len(text) > 255 or not text.isascii():
+        raise invalid()
+    bracketed = text.startswith("[") and text.endswith("]")
+    candidate = text[1:-1] if bracketed else text
+    if ":" in candidate:
+        if _IPV6_CHARS_RE.fullmatch(candidate) is None:
+            raise invalid()
+        try:
+            address = ipaddress.IPv6Address(candidate)
+        except ValueError:
+            raise invalid() from None
+        # Some Python releases write a mapped address's compressed form as a
+        # dotted quad, which neither this function nor dataOutHosts.ts reads
+        # back, so a saved list would break the next load.
+        if address.is_unspecified or address.ipv4_mapped is not None:
+            raise invalid()
+        return address.compressed
+    if bracketed:
+        raise invalid()
+    name = candidate.lower()
+    if name.endswith("."):
+        name = name[:-1]
+    labels = name.split(".")
+    if labels[-1].isdigit():
+        if _IPV4_RE.fullmatch(name) is None or name == "0.0.0.0":
+            raise invalid()
+        return name
+    if len(name) > 253 or not all(_DNS_LABEL_RE.fullmatch(label) for label in labels):
+        raise invalid()
+    return name
+
+
+def data_out_host_key(value: Any) -> Optional[str]:
+    """The saved form of a host for comparison, or None when it is not a valid host."""
+    try:
+        return normalize_data_out_host(value)
+    except DataOutHostError:
+        return None
+
+
+def normalize_data_out_hosts(values: Any) -> List[str]:
+    """Validate a Data Out host list: 1..MAX_DATA_OUT_HOSTS hosts, duplicates removed, order kept."""
+    if not isinstance(values, (list, tuple)):
+        raise DataOutHostError(DATA_OUT_HOST_INVALID, "data_out_hosts must be a list of host names or IP addresses")
+    if len(values) > 4 * MAX_DATA_OUT_HOSTS:
+        raise DataOutHostError(DATA_OUT_HOSTS_TOO_MANY, f"data_out_hosts allows at most {MAX_DATA_OUT_HOSTS} hosts")
+    hosts: List[str] = []
+    for value in values:
+        host = normalize_data_out_host(value)
+        if host not in hosts:
+            hosts.append(host)
+    if not hosts:
+        raise DataOutHostError(DATA_OUT_HOSTS_EMPTY, "data_out_hosts needs at least one host")
+    if len(hosts) > MAX_DATA_OUT_HOSTS:
+        raise DataOutHostError(DATA_OUT_HOSTS_TOO_MANY, f"data_out_hosts allows at most {MAX_DATA_OUT_HOSTS} hosts")
+    return hosts
+
+
+def data_out_url_host(base_url: Any) -> Optional[str]:
+    """The host of ``http://HOST[:8081][/]`` in its saved form, or None for any other URL.
+
+    The URL is printable ASCII without spaces, userinfo, query, fragment or a
+    path other than "/"; the port, when given, is exactly 8081. An IPv6 host
+    is in brackets.
+    """
+    if not isinstance(base_url, str) or not base_url or not base_url.isascii():
+        return None
+    if any(ord(char) <= 32 or ord(char) == 127 for char in base_url) or "?" in base_url or "#" in base_url:
+        return None
+    match = _DATA_OUT_URL_RE.fullmatch(base_url)
+    if match is None:
+        return None
+    netloc = match.group(1)
+    if "@" in netloc:
+        return None
+    if netloc.startswith("["):
+        host, closed, rest = netloc[1:].partition("]")
+        if not closed or ":" not in host or (rest and not rest.startswith(":")):
+            return None
+        port: Optional[str] = rest[1:] if rest else None
+    else:
+        host, colon, port_text = netloc.partition(":")
+        port = port_text if colon else None
+    if port is not None and port != str(DATA_OUT_PORT):
+        return None
+    return data_out_host_key(host)
+
+
+def data_out_url_message(hosts: Iterable[str]) -> str:
+    """The rule a Data Out URL breaks, naming the allowed hosts and the port."""
+    return (
+        f"the Data Out URL must be http://HOST:{DATA_OUT_PORT} with HOST in the Data Out host list "
+        f"({', '.join(hosts)})"
+    )
+
+
+def check_data_out_url(base_url: Any, hosts: Iterable[str]) -> str:
+    """Return ``base_url`` without a trailing slash, or raise DataOutHostError.
+
+    The URL must be plain http on port 8081 (or no port), without userinfo,
+    path, query or fragment, and its host must be in ``hosts``.
+    """
+    allowed = [key for key in (data_out_host_key(host) for host in hosts) if key is not None]
+    host = data_out_url_host(base_url)
+    if host is None or host not in allowed:
+        raise DataOutHostError(DATA_OUT_URL_NOT_ALLOWED, data_out_url_message(allowed), host=host, hosts=allowed)
+    return str(base_url).rstrip("/")
+
+
 @dataclass(frozen=True)
 class FetchedResource:
     path: str
@@ -170,6 +346,12 @@ class FetchedResource:
     error_kind: Optional[str] = None
     elapsed_ms: Optional[int] = None
     attempts: int = 1
+    # How the host became an address: "literal" (an IP address), "system"
+    # (the system resolver, address of the connected peer), "mdns", or
+    # "proxy" (an environment proxy took the request and resolved the name;
+    # no address, since the peer is the proxy).
+    resolved_via: Optional[str] = None
+    resolved_address: Optional[str] = None
 
     def metadata(self) -> Dict[str, Any]:
         result: Dict[str, Any] = {
@@ -323,22 +505,74 @@ def _redact_url(url: Any) -> str:
         return "<invalid-url>"
 
 
-def _validate_base_url(base_url: str, allowed_hosts: Set[str]) -> str:
+def _validate_base_url(base_url: str, allowed_hosts: Iterable[str]) -> str:
     if not isinstance(base_url, str) or not base_url:
         raise ValueError("base_url must be a non-empty string")
-    parsed = urllib.parse.urlsplit(base_url)
-    if parsed.scheme != "http":
-        raise ValueError("base_url must use http")
-    if parsed.username or parsed.password:
-        raise ValueError("base_url userinfo is not allowed")
-    if parsed.query or parsed.fragment or not parsed.hostname:
-        raise ValueError("base_url must not contain query/fragment and must have a host")
-    hostname = parsed.hostname.lower().rstrip(".")
-    if hostname not in {item.lower().rstrip(".") for item in allowed_hosts}:
-        raise ValueError("base_url host is not allowlisted")
-    if parsed.port not in (None, 8081):
-        raise ValueError("base_url port is not allowlisted")
-    return base_url.rstrip("/")
+    return check_data_out_url(base_url, allowed_hosts)
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """An HTTP connection to a fixed address; the URL and the Host header keep the name."""
+
+    def __init__(self, host: str, *args: Any, pinned_address: str, **kwargs: Any) -> None:
+        super().__init__(host, *args, **kwargs)
+
+        def connect_pinned(address: Tuple[str, int], timeout: Any, source_address: Any) -> socket.socket:
+            return socket.create_connection((pinned_address, address[1]), timeout, source_address)
+
+        self._create_connection = connect_pinned
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    """Replaces the opener's HTTP handler so the connect goes to an mDNS address."""
+
+    def __init__(self, address: str) -> None:
+        super().__init__()
+        self._address = address
+
+    def http_open(self, req: Any) -> Any:
+        return self.do_open(functools.partial(_PinnedHTTPConnection, pinned_address=self._address), req)
+
+
+class _HostNotResolved(Exception):
+    """The system resolver could not resolve a host that mDNS may answer."""
+
+
+def _is_ip_literal(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def _goes_direct(request: urllib.request.Request) -> bool:
+    """True when the opener's environment proxy does not take this request.
+
+    Through a proxy, the proxy resolves the name; mDNS is only for direct
+    connections, so the proxy behaviour stays exactly as it was.
+    """
+    if not urllib.request.getproxies().get(request.type):
+        return True
+    return bool(urllib.request.proxy_bypass(request.host))
+
+
+def _name_resolution_failed(exc: BaseException) -> bool:
+    reason: Any = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    return isinstance(reason, socket.gaierror)
+
+
+def _peer_address(response: Any) -> Optional[str]:
+    """Address of the connected peer of a response (or of an HTTPError's response)."""
+    for candidate in (response, getattr(response, "fp", None)):
+        sock = getattr(getattr(getattr(candidate, "fp", None), "raw", None), "_sock", None)
+        if sock is None:
+            continue
+        try:
+            return str(sock.getpeername()[0])
+        except (OSError, IndexError, TypeError):
+            return None
+    return None
 
 
 def fetch_resource(
@@ -346,17 +580,28 @@ def fetch_resource(
     path: str,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
-    allowed_hosts: Optional[Set[str]] = None,
+    allowed_hosts: Optional[Iterable[str]] = None,
+    mdns_resolver: Any = None,
 ) -> FetchedResource:
     """Fetch one known resource with a bounded read-only GET.
 
     ``timeout_seconds`` bounds every socket operation, and the body read as a
     whole, so a server that trickles body bytes cannot hold the read open.
     The status line and headers are bounded per socket operation only.
+
+    ``allowed_hosts`` is the Data Out host list (default: the four default
+    hosts); the port is always 8081. ``mdns_resolver`` (an
+    ``mdns_resolver.MdnsResolver``, which the console passes) answers a
+    ``.local`` host that the system resolver cannot, for a request that goes
+    to Data Out directly rather than through a proxy. It is asked only after
+    the system resolver failed for the host; while it caches an address for
+    the host, the request connects there at once. Either way the URL and the
+    Host header keep the name, and every other rule stays: no redirects, the
+    size and time bounds, the path allowlist.
     """
-    allowed = DEFAULT_ALLOWED_DATA_HOSTS if allowed_hosts is None else allowed_hosts
+    allowed = DEFAULT_DATA_OUT_HOSTS if allowed_hosts is None else allowed_hosts
     try:
-        safe_base = _validate_base_url(base_url, set(allowed))
+        safe_base = _validate_base_url(base_url, allowed)
     except ValueError as exc:
         return FetchedResource(
             path, str(base_url), False, None, None, b"", now_ms(), str(exc), error_kind="invalid_target", elapsed_ms=0
@@ -373,9 +618,20 @@ def fetch_resource(
         method="GET",
         headers={"Accept": "application/json, application/xml, text/plain, */*"},
     )
-    opener = urllib.request.build_opener(_NoRedirectHandler)
+    host = (urllib.parse.urlsplit(safe_base).hostname or "").lower().rstrip(".")
+    literal = _is_ip_literal(host)
+    direct = _goes_direct(request)
+    mdns = mdns_resolver if (
+        mdns_resolver is not None and not literal and host.endswith(".local") and direct
+    ) else None
 
-    def failure(error: str, kind: str, http_status: Optional[int] = None) -> FetchedResource:
+    def failure(
+        error: str,
+        kind: str,
+        http_status: Optional[int] = None,
+        via: Optional[str] = None,
+        address: Optional[str] = None,
+    ) -> FetchedResource:
         return FetchedResource(
             path=path,
             url=url,
@@ -387,10 +643,56 @@ def fetch_resource(
             error=error,
             error_kind=kind,
             elapsed_ms=_elapsed_ms(started),
+            resolved_via=via,
+            resolved_address=address,
         )
 
-    try:
-        with opener.open(request, timeout=budget) as response:
+    def attempt(pinned: Optional[str]) -> FetchedResource:
+        if pinned is not None:
+            opener = urllib.request.build_opener(_NoRedirectHandler, _PinnedHTTPHandler(pinned))
+            via: Optional[str] = "mdns"
+            known: Optional[str] = pinned
+        else:
+            opener = urllib.request.build_opener(_NoRedirectHandler)
+            # None until a response names the peer; through a proxy the peer
+            # is the proxy, not the Data Out host.
+            via = "literal" if literal else (None if direct else "proxy")
+            known = host if literal else None
+        remaining = request_deadline - time.monotonic()
+        if remaining <= 0:
+            return failure("timed out", "timeout", via=via, address=known)
+        try:
+            return read(opener, remaining, via, known)
+        except urllib.error.HTTPError as exc:
+            # HTTPError is a URLError subclass; keep the status code instead of
+            # reporting a 404 like a refused connection.
+            if via is None:
+                via, known = "system", _peer_address(exc)
+            try:
+                code: Optional[int] = int(exc.code)
+            except (TypeError, ValueError):
+                code = None
+            try:
+                exc.close()
+            except Exception:
+                pass
+            return failure(f"HTTP {code}" if code is not None else "HTTP error", "http_status", code, via, known)
+        except CollectorError as exc:
+            message = str(exc)
+            return failure(message, "redirect" if "redirect" in message else "body_too_large", via=via, address=known)
+        except http.client.HTTPException as exc:
+            # BadStatusLine, LineTooLong and IncompleteRead are not OSError.
+            return failure(f"invalid HTTP response ({type(exc).__name__})", "protocol", via=via, address=known)
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            if pinned is None and mdns is not None and _name_resolution_failed(exc):
+                raise _HostNotResolved() from None
+            message, kind = _transport_error(exc)
+            return failure(message, kind, via=via, address=known)
+
+    def read(opener: Any, timeout: float, via: Optional[str], known: Optional[str]) -> FetchedResource:
+        with opener.open(request, timeout=timeout) as response:
+            if via is None:
+                via, known = "system", _peer_address(response)
             status = getattr(response, "status", None) or response.getcode()
             content_type = response.headers.get("Content-Type")
             content_length = response.headers.get("Content-Length")
@@ -427,28 +729,23 @@ def fetch_resource(
                 body=b"".join(chunks),
                 retrieved_at_ms=retrieved_at_ms,
                 elapsed_ms=_elapsed_ms(started),
+                resolved_via=via,
+                resolved_address=known,
             )
-    except urllib.error.HTTPError as exc:
-        # HTTPError is a URLError subclass; keep the status code instead of
-        # reporting a 404 like a refused connection.
-        try:
-            code: Optional[int] = int(exc.code)
-        except (TypeError, ValueError):
-            code = None
-        try:
-            exc.close()
-        except Exception:
-            pass
-        return failure(f"HTTP {code}" if code is not None else "HTTP error", "http_status", code)
-    except CollectorError as exc:
-        message = str(exc)
-        return failure(message, "redirect" if "redirect" in message else "body_too_large")
-    except http.client.HTTPException as exc:
-        # BadStatusLine, LineTooLong and IncompleteRead are not OSError.
-        return failure(f"invalid HTTP response ({type(exc).__name__})", "protocol")
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        message, kind = _transport_error(exc)
-        return failure(message, kind)
+
+    if mdns is not None:
+        cached = mdns.cached(host)
+        if cached is not None:
+            return attempt(cached)
+    try:
+        return attempt(None)
+    except _HostNotResolved:
+        pass
+    remaining = request_deadline - time.monotonic()
+    address = mdns.resolve(host, remaining) if mdns is not None and remaining > 0 else None
+    if address is None:
+        return failure(f"{host} could not be resolved (system and mDNS); use an IP address", "unreachable")
+    return attempt(address)
 
 
 def _limit_socket_timeout(response: Any, remaining_seconds: float) -> None:
@@ -1172,6 +1469,130 @@ def _untracked_progress(state: str, max_stall_ms: int) -> Dict[str, Any]:
     }
 
 
+def _settings_status_signature(status: Mapping[str, Any]) -> Tuple[Any, ...]:
+    """The status.json values that change when the node's settings change."""
+    safe = status.get("safe") if isinstance(status.get("safe"), Mapping) else {}
+    daq_status = safe.get("daq_status") if isinstance(safe.get("daq_status"), Mapping) else {}
+    return tuple(safe.get(name) for name in SETTINGS_STATUS_FIELDS) + tuple(
+        daq_status.get(name) for name in SETTINGS_DAQ_FIELDS
+    )
+
+
+def _status_uptime(status: Mapping[str, Any]) -> Optional[int]:
+    safe = status.get("safe") if isinstance(status.get("safe"), Mapping) else {}
+    value = safe.get("uptime_ms")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _settings_view_signature(
+    csv_candidate: Mapping[str, Any],
+    xml_candidate: Mapping[str, Any],
+) -> Tuple[Optional[Tuple[Any, ...]], Optional[Tuple[Any, ...]]]:
+    """What the DoA views show of the settings: VFO frequencies, array and station.
+
+    A part is None when that view was not read or did not parse, so it tells
+    nothing about the settings.
+    """
+    csv_part: Optional[Tuple[Any, ...]] = None
+    frequencies: List[int] = []
+    if csv_candidate.get("available") is True and isinstance(csv_candidate.get("frequency_hz"), int):
+        frequencies.append(int(csv_candidate["frequency_hz"]))
+    for row in csv_candidate.get("additional_vfo_rows") or []:
+        if isinstance(row, Mapping) and isinstance(row.get("frequency_hz"), int):
+            frequencies.append(int(row["frequency_hz"]))
+    if frequencies:
+        csv_part = (
+            tuple(sorted(frequencies)),
+            csv_candidate.get("array_type") if csv_candidate.get("available") is True else None,
+            csv_candidate.get("station_id") if csv_candidate.get("available") is True else None,
+        )
+    xml_part: Optional[Tuple[Any, ...]] = None
+    if xml_candidate.get("available") is True:
+        xml_part = (xml_candidate.get("frequency_mhz"), xml_candidate.get("station_id"))
+    return csv_part, xml_part
+
+
+@dataclass
+class CachedSettings:
+    """One good settings.json read and what the node showed at that time."""
+
+    resource: "FetchedResource"
+    settings: Dict[str, Any]
+    read_monotonic: float
+    status_signature: Tuple[Any, ...]
+    uptime_ms: Optional[int]
+    view_signature: Tuple[Optional[Tuple[Any, ...]], Optional[Tuple[Any, ...]]]
+
+
+class SettingsCache:
+    """Remember the last good settings.json per node so a collection can skip it.
+
+    A collection reuses the cached copy only while it is younger than
+    ``max_age_ms`` (30 s by default), status.json was read and parsed in the
+    same collection, the node has not restarted (``uptime_ms`` did not go
+    back) and the status.json values that follow the settings (station,
+    hardware, unit, software and the DAQ sample rate and bandwidths) are
+    unchanged. When the CSV or XML view of the same collection then shows a
+    VFO frequency, VFO count, array or station other than the one seen with the
+    cached copy, the collection reads settings.json after all. The cache lives
+    in memory, so the first collection after a restart always reads the file.
+    """
+
+    def __init__(self, max_age_ms: int = SETTINGS_REUSE_MAX_MS, max_keys: int = 16) -> None:
+        if isinstance(max_age_ms, bool) or not isinstance(max_age_ms, int) or max_age_ms < 0:
+            raise ValueError("max_age_ms must be a non-negative integer")
+        self.max_age_ms = max_age_ms
+        self._lock = threading.Lock()
+        self._entries: "OrderedDict[str, CachedSettings]" = OrderedDict()
+        self._max_keys = max(1, int(max_keys))
+
+    def reusable(self, key: str, status: Mapping[str, Any], now_monotonic: float) -> Optional[CachedSettings]:
+        """The cached copy when the status.json just read allows reusing it."""
+        if status.get("available") is not True:
+            return None
+        with self._lock:
+            entry = self._entries.get(key)
+        if entry is None:
+            return None
+        age_ms = (now_monotonic - entry.read_monotonic) * 1000.0
+        if not 0 <= age_ms < self.max_age_ms:
+            return None
+        uptime = _status_uptime(status)
+        if entry.uptime_ms is not None and (uptime is None or uptime < entry.uptime_ms):
+            return None
+        if _settings_status_signature(status) != entry.status_signature:
+            return None
+        return entry
+
+    @staticmethod
+    def views_changed(entry: CachedSettings, view_signature: Tuple[Optional[Tuple[Any, ...]], Optional[Tuple[Any, ...]]]) -> bool:
+        """True when a DoA view read now shows other settings than it did with ``entry``."""
+        return any(current is not None and current != cached for current, cached in zip(view_signature, entry.view_signature))
+
+    def store(
+        self,
+        key: str,
+        resource: "FetchedResource",
+        settings: Mapping[str, Any],
+        read_monotonic: float,
+        status: Mapping[str, Any],
+        view_signature: Tuple[Optional[Tuple[Any, ...]], Optional[Tuple[Any, ...]]],
+    ) -> None:
+        entry = CachedSettings(
+            resource=resource,
+            settings=json.loads(json.dumps(settings)),
+            read_monotonic=read_monotonic,
+            status_signature=_settings_status_signature(status),
+            uptime_ms=_status_uptime(status),
+            view_signature=view_signature,
+        )
+        with self._lock:
+            self._entries.pop(key, None)
+            self._entries[key] = entry
+            while len(self._entries) > self._max_keys:
+                self._entries.popitem(last=False)
+
+
 class _Worker:
     """Run one read in a daemon thread so a deadline can abandon it."""
 
@@ -1369,6 +1790,27 @@ def _signal_quality(status: Mapping[str, Any], candidates: Mapping[str, Mapping[
     }
 
 
+def _host_resolution(base_url: str, resources: Iterable[FetchedResource]) -> Dict[str, Any]:
+    """How the Data Out host became an address in this collection.
+
+    ``method`` is "literal" (the URL holds an IP address), "system" (the
+    system resolver; ``address`` is the connected peer), "mdns" (the
+    one-shot mDNS fallback for a .local name), "proxy" (an environment proxy
+    took the request and resolved the name; ``address`` is None, because the
+    connected peer is the proxy) or None when no read got that far. The
+    first resource that knows it decides (status.json is read first).
+    """
+    try:
+        host: Optional[str] = (urllib.parse.urlsplit(str(base_url)).hostname or "").lower().rstrip(".") or None
+    except ValueError:
+        host = None
+    for resource in resources:
+        via = getattr(resource, "resolved_via", None)
+        if via:
+            return {"host": host, "method": via, "address": getattr(resource, "resolved_address", None)}
+    return {"host": host, "method": None, "address": None}
+
+
 def collect(
     base_url: str,
     authority: str = "none",
@@ -1387,15 +1829,25 @@ def collect(
     total_budget_s: Optional[float] = None,
     progress_tracker: Optional[NodeProgressTracker] = None,
     monotonic_clock: Callable[[], float] = time.monotonic,
+    settings_cache: Optional[SettingsCache] = None,
+    fresh_settings: bool = False,
+    allowed_hosts: Optional[Iterable[str]] = None,
+    mdns_resolver: Any = None,
 ) -> Dict[str, Any]:
     """Read the four Data Out resources once and assess them.
 
     ``total_budget_s`` bounds the whole collection; a read still running when
     it expires is reported as unavailable instead of holding the caller.
     ``progress_tracker`` remembers node counters across calls so a frozen
-    node is detected (``NODE_CLOCK_STALLED``). ``monotonic_clock`` measures
-    Ground elapsed time for ages and progress; it exists for deterministic
-    tests and does not affect the deadline.
+    node is detected (``NODE_CLOCK_STALLED``). ``settings_cache`` lets a
+    collection reuse a recent settings.json instead of reading it again (see
+    ``SettingsCache``); ``fresh_settings`` reads it regardless. The snapshot
+    says which happened (``settings.reused``, ``collection.settings_age_ms``).
+    ``monotonic_clock`` measures Ground elapsed time for ages, progress and the
+    settings reuse; it exists for deterministic tests and does not affect the
+    deadline. ``allowed_hosts`` (the saved Data Out host list) and
+    ``mdns_resolver`` go to ``fetch_resource`` when it is the fetcher;
+    ``collection.host_resolution`` reports how the host became an address.
     """
     if authority not in {"none", "csv", "xml"}:
         raise ValueError("authority must be one of: none, csv, xml")
@@ -1409,6 +1861,8 @@ def collect(
             or not 0 < total_budget_s <= MAX_TOTAL_BUDGET_SECONDS
         ):
             raise ValueError(f"total_budget_s must be within (0, {MAX_TOTAL_BUDGET_SECONDS:g}]")
+    if fetcher is fetch_resource and (allowed_hosts is not None or mdns_resolver is not None):
+        fetcher = functools.partial(fetch_resource, allowed_hosts=allowed_hosts, mdns_resolver=mdns_resolver)
     started_real = time.monotonic()
     started_mono = monotonic_clock()
     deadline = started_real + float(total_budget_s) if total_budget_s is not None else None
@@ -1479,6 +1933,12 @@ def collect(
         status_first_seen_mono = changed_at.get("timestamp_ms", status_started_mono)
     node_stalled = node_progress.get("stalled") is True
 
+    settings_key = _redact_url(base_url)
+    cached_settings: Optional[CachedSettings] = None
+    if settings_cache is not None and not fresh_settings and not status_transport_failed:
+        cached_settings = settings_cache.reusable(settings_key, status, monotonic_clock())
+
+    reads_started_mono = monotonic_clock()
     if status_transport_failed:
         skipped = "skipped: status.json transport failure"
         first_reads = {
@@ -1486,21 +1946,34 @@ def collect(
             for path in (PATH_SETTINGS, PATH_CSV, PATH_XML)
         }
     else:
-        first_reads = read_all({
-            PATH_SETTINGS: reader(PATH_SETTINGS, parse_settings),
-            PATH_CSV: reader(PATH_CSV, parse_csv_rows_wrapper),
-            PATH_XML: reader(PATH_XML, parse_xml_wrapper),
-        })
+        reads: Dict[str, Callable[[], Any]] = {}
+        if cached_settings is None:
+            reads[PATH_SETTINGS] = reader(PATH_SETTINGS, parse_settings)
+        reads[PATH_CSV] = reader(PATH_CSV, parse_csv_rows_wrapper)
+        reads[PATH_XML] = reader(PATH_XML, parse_xml_wrapper)
+        first_reads = read_all(reads)
 
-    settings_resource, settings = first_reads[PATH_SETTINGS]
-    resources[PATH_SETTINGS] = settings_resource
-    if not settings or settings.get("available") is not True:
-        settings = {
-            "available": False,
-            "redacted": True,
-            "error": (settings or {}).get("error", "settings parse failed"),
-            "raw_fields_omitted": True,
-        }
+    def settings_view(read: Tuple[FetchedResource, Optional[Dict[str, Any]]]) -> Tuple[FetchedResource, Dict[str, Any]]:
+        resource, parsed = read
+        if not parsed or parsed.get("available") is not True:
+            return resource, {
+                "available": False,
+                "redacted": True,
+                "error": (parsed or {}).get("error", "settings parse failed"),
+                "raw_fields_omitted": True,
+            }
+        return resource, parsed
+
+    settings_reused = False
+    settings_read_mono: Optional[float] = None
+    if cached_settings is not None:
+        settings_resource = cached_settings.resource
+        settings = json.loads(json.dumps(cached_settings.settings))
+        settings_reused = True
+        settings_read_mono = cached_settings.read_monotonic
+    else:
+        settings_resource, settings = settings_view(first_reads[PATH_SETTINGS])
+        settings_read_mono = reads_started_mono
 
     def native_pair(
         csv_read: Tuple[FetchedResource, Optional[Dict[str, Any]]],
@@ -1545,10 +2018,40 @@ def collect(
     resources[PATH_CSV] = csv_resource
     resources[PATH_XML] = xml_resource
 
+    # A DoA view that shows another VFO, array or station than it did with the
+    # cached settings means the settings changed: read them after all.
+    view_signature = _settings_view_signature(csv_candidate, xml_candidate)
+    if cached_settings is not None and SettingsCache.views_changed(cached_settings, view_signature):
+        settings_read_mono = monotonic_clock()
+        settings_resource, settings = settings_view(
+            read_all({PATH_SETTINGS: reader(PATH_SETTINGS, parse_settings)})[PATH_SETTINGS]
+        )
+        settings_reused = False
+    resources[PATH_SETTINGS] = settings_resource
+    if (
+        settings_cache is not None
+        and not settings_reused
+        and status_available
+        and settings.get("available") is True
+        and settings_read_mono is not None
+    ):
+        settings_cache.store(settings_key, settings_resource, settings, settings_read_mono, status, view_signature)
+
     completed_mono = monotonic_clock()
     completed_at_ms = now_ms()
     elapsed_ms = max(0, int(round((completed_mono - started_mono) * 1000)))
     deadline_exceeded = any(getattr(resource, "error_kind", None) == "deadline" for resource in resources.values())
+    # How old the settings in this snapshot are when it completes; a reused
+    # copy keeps the time of the read it came from.
+    settings_age_ms: Optional[int] = None
+    if settings.get("available") is True and settings_read_mono is not None:
+        settings_age_ms = max(0, int(round((completed_mono - settings_read_mono) * 1000)))
+    resource_metadata: Dict[str, Dict[str, Any]] = {}
+    for path in (PATH_STATUS, PATH_SETTINGS, PATH_CSV, PATH_XML):
+        if path in resources:
+            resource_metadata[path] = resources[path].metadata()
+    if settings_reused:
+        resource_metadata[PATH_SETTINGS]["reused"] = True
 
     # DoA and status timestamps originate from the same Raspberry clock, so
     # their difference stays meaningful on Ground without clock sync. The
@@ -1777,13 +2280,20 @@ def collect(
             "deadline_exceeded": deadline_exceeded,
             "pair_reads": pair_reads,
             "status_transport_failed": status_transport_failed,
+            "settings_reused": settings_reused,
+            "settings_age_ms": settings_age_ms,
+            "host_resolution": _host_resolution(base_url, resources.values()),
         },
-        "resources": {path: resource.metadata() for path, resource in resources.items()},
+        "resources": resource_metadata,
         "status": {
             **status,
             "freshness": status_age,
         },
-        "settings": settings,
+        "settings": {
+            **settings,
+            "reused": settings_reused,
+            "read_at_ms": settings_resource.retrieved_at_ms if settings.get("available") is True else None,
+        },
         "doa_candidates": candidates,
         "authority": {
             "selected": authority if authority != "none" else None,
@@ -1803,13 +2313,233 @@ def collect(
     }
 
 
+def collect_light(
+    base_url: str,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
+    status_max_age_ms: int = DEFAULT_STATUS_MAX_AGE_MS,
+    doa_max_age_ms: int = DEFAULT_DOA_MAX_AGE_MS,
+    max_future_skew_ms: int = DEFAULT_MAX_FUTURE_SKEW_MS,
+    fetcher: Any = fetch_resource,
+    parse_attempts: int = 3,
+    retry_delay_seconds: float = 0.05,
+    *,
+    total_budget_s: Optional[float] = None,
+    monotonic_clock: Callable[[], float] = time.monotonic,
+    settings_cache: Optional[SettingsCache] = None,
+    fresh_settings: bool = False,
+    allowed_hosts: Optional[Iterable[str]] = None,
+    mdns_resolver: Any = None,
+) -> Dict[str, Any]:
+    """Read what MQTT never carries: status.json, settings.json and doa.xml.
+
+    While MQTT is fresh (issue #8) the console reads no DOA_value.html and runs
+    no DoA gates on Data Out: the DoA comes over MQTT. This light read keeps
+    only the values the edge does not publish: the station position (doa.xml
+    LOCATION with status.json ``gps_status``), the settings fields the node
+    card, follow-node, the compass and Kontrol's read-back use, and the ADC
+    overdrive and SNR. It applies the same fetch rules as ``collect`` (host
+    list, timeouts, body limit, budget, no retry after a transport failure, the
+    settings.json reuse of ``settings_cache``, read after all when doa.xml
+    shows another VFO frequency or station than with the cached copy), reads
+    doa.xml only when
+    status.json was read, and ages doa.xml from the status.json timestamp, the
+    same node clock. About 5.8 kB, against about 8 kB for a full collection.
+    """
+    if total_budget_s is not None:
+        if (
+            isinstance(total_budget_s, bool)
+            or not isinstance(total_budget_s, (int, float))
+            or not math.isfinite(total_budget_s)
+            or not 0 < total_budget_s <= MAX_TOTAL_BUDGET_SECONDS
+        ):
+            raise ValueError(f"total_budget_s must be within (0, {MAX_TOTAL_BUDGET_SECONDS:g}]")
+    if fetcher is fetch_resource and (allowed_hosts is not None or mdns_resolver is not None):
+        fetcher = functools.partial(fetch_resource, allowed_hosts=allowed_hosts, mdns_resolver=mdns_resolver)
+    started_mono = monotonic_clock()
+    deadline = time.monotonic() + float(total_budget_s) if total_budget_s is not None else None
+    observed_at_ms = now_ms()
+
+    def reader(path: str, parser: Any) -> Callable[[], Tuple[FetchedResource, Optional[Dict[str, Any]]]]:
+        def read() -> Tuple[FetchedResource, Optional[Dict[str, Any]]]:
+            return fetch_and_parse_with_retry(
+                base_url, path, parser, timeout_seconds, max_body_bytes,
+                attempts=parse_attempts, retry_delay_seconds=retry_delay_seconds, fetcher=fetcher, deadline=deadline,
+            )
+        return read
+
+    def read_all(reads: Mapping[str, Callable[[], Any]]) -> Dict[str, Tuple[FetchedResource, Optional[Dict[str, Any]]]]:
+        completed: Dict[str, Tuple[FetchedResource, Optional[Dict[str, Any]]]] = {}
+        for path, result in _run_reads(reads, deadline).items():
+            if result is None:
+                resource = _not_fetched(base_url, path, "collection deadline exceeded", "deadline")
+                completed[path] = (resource, {"available": False, "error": "collection deadline exceeded"})
+            else:
+                completed[path] = result
+        return completed
+
+    def parse_xml_wrapper(resource: FetchedResource) -> Dict[str, Any]:
+        return parse_xml_doa(resource, observed_at_ms, doa_max_age_ms, max_future_skew_ms)
+
+    resources: Dict[str, FetchedResource] = {}
+    status_started_mono = monotonic_clock()
+    status_resource, status = read_all({PATH_STATUS: reader(PATH_STATUS, parse_status)})[PATH_STATUS]
+    resources[PATH_STATUS] = status_resource
+    if not status or status.get("available") is not True:
+        status = {"available": False, "error": (status or {}).get("error", "status parse failed")}
+    status_available = bool(status.get("available"))
+    status_transport_failed = getattr(status_resource, "error_kind", None) in TRANSPORT_ERROR_KINDS
+
+    settings_key = _redact_url(base_url)
+    cached_settings: Optional[CachedSettings] = None
+    if settings_cache is not None and not fresh_settings and not status_transport_failed:
+        cached_settings = settings_cache.reusable(settings_key, status, monotonic_clock())
+    reads_started_mono = monotonic_clock()
+    if status_transport_failed:
+        skipped = "skipped: status.json transport failure"
+        reads_done = {
+            path: (_not_fetched(base_url, path, skipped, "skipped"), {"available": False, "error": skipped})
+            for path in (PATH_SETTINGS, PATH_XML)
+        }
+    else:
+        reads: Dict[str, Callable[[], Any]] = {PATH_XML: reader(PATH_XML, parse_xml_wrapper)}
+        if cached_settings is None:
+            reads[PATH_SETTINGS] = reader(PATH_SETTINGS, parse_settings)
+        reads_done = read_all(reads)
+
+    xml_resource, xml_parsed = reads_done[PATH_XML]
+    xml_signature = _settings_view_signature({}, xml_parsed if xml_parsed and xml_parsed.get("available") is True else {})
+    if cached_settings is not None and SettingsCache.views_changed(cached_settings, xml_signature):
+        # doa.xml shows another VFO frequency or station than it did with the
+        # cached copy: the settings changed, so read them after all, as
+        # collect() does.
+        cached_settings = None
+        reads_started_mono = monotonic_clock()
+        reads_done[PATH_SETTINGS] = read_all({PATH_SETTINGS: reader(PATH_SETTINGS, parse_settings)})[PATH_SETTINGS]
+
+    settings_reused = cached_settings is not None
+    settings_read_mono: Optional[float] = None
+    if cached_settings is not None:
+        settings_resource = cached_settings.resource
+        settings = json.loads(json.dumps(cached_settings.settings))
+        settings_read_mono = cached_settings.read_monotonic
+    else:
+        settings_resource, parsed_settings = reads_done[PATH_SETTINGS]
+        if not parsed_settings or parsed_settings.get("available") is not True:
+            settings = {
+                "available": False,
+                "redacted": True,
+                "error": (parsed_settings or {}).get("error", "settings parse failed"),
+                "raw_fields_omitted": True,
+            }
+        else:
+            settings = parsed_settings
+            settings_read_mono = reads_started_mono
+    resources[PATH_SETTINGS] = settings_resource
+
+    resources[PATH_XML] = xml_resource
+    if not xml_parsed or xml_parsed.get("available") is not True:
+        xml_candidate = _unavailable(xml_resource)
+        xml_candidate["error"] = (xml_parsed or {}).get("error") or xml_candidate.get("error") or "XML parse failed"
+    else:
+        xml_candidate = dict(xml_parsed)
+
+    if settings_cache is not None and not settings_reused and status_available and settings.get("available") is True:
+        settings_cache.store(
+            settings_key, settings_resource, settings, reads_started_mono, status,
+            _settings_view_signature({}, xml_candidate),
+        )
+
+    completed_mono = monotonic_clock()
+    completed_at_ms = now_ms()
+    # Without a progress tracker the node's "now" is the status timestamp plus
+    # the Ground time since it was read, as in collect().
+    if status_available and isinstance(xml_candidate.get("timestamp_ms"), int):
+        ground_elapsed_ms = max(0, int(round((completed_mono - status_started_mono) * 1000)))
+        freshness = _age_assessment(
+            xml_candidate["timestamp_ms"],
+            int(status["safe"]["timestamp_ms"]) + ground_elapsed_ms,
+            doa_max_age_ms,
+            max_future_skew_ms,
+            "status_timestamp_ms",
+            True,
+        )
+        freshness["ground_elapsed_ms"] = ground_elapsed_ms
+        freshness["status_timestamp_ms"] = status["safe"]["timestamp_ms"]
+        xml_candidate["freshness"] = freshness
+    elif xml_candidate.get("available") is True:
+        xml_candidate["freshness"] = _age_assessment(
+            xml_candidate["timestamp_ms"], completed_at_ms, doa_max_age_ms, max_future_skew_ms, "local_observed_at", False,
+        )
+    if xml_candidate.get("available") is True:
+        try:
+            xml_candidate = normalize_doa_candidate(xml_candidate)
+        except CollectorError as exc:
+            xml_candidate["units_valid"] = False
+            xml_candidate["normalization_error"] = type(exc).__name__
+            xml_candidate["normalization_error_detail"] = str(exc)
+
+    status_age: Optional[Dict[str, Any]] = None
+    if status_available:
+        status_age = _age_assessment(
+            status["safe"]["timestamp_ms"], observed_at_ms, status_max_age_ms, max_future_skew_ms, "ground_observed_at", False,
+        )
+    settings_age_ms: Optional[int] = None
+    if settings.get("available") is True and settings_read_mono is not None:
+        settings_age_ms = max(0, int(round((completed_mono - settings_read_mono) * 1000)))
+    resource_metadata = {path: resources[path].metadata() for path in (PATH_STATUS, PATH_SETTINGS, PATH_XML)}
+    if settings_reused:
+        resource_metadata[PATH_SETTINGS]["reused"] = True
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "collector": {
+            "mode": "read_only",
+            "read": "light",
+            "base_url": base_url.rstrip("/"),
+            "mqtt_publish": False,
+            "raw_settings_omitted": True,
+        },
+        "observed_at_ms": observed_at_ms,
+        "completed_at_ms": completed_at_ms,
+        "collection": {
+            "read": "light",
+            "elapsed_ms": max(0, int(round((completed_mono - started_mono) * 1000))),
+            "budget_ms": int(round(float(total_budget_s) * 1000)) if total_budget_s is not None else None,
+            "deadline_exceeded": any(getattr(resource, "error_kind", None) == "deadline" for resource in resources.values()),
+            "status_transport_failed": status_transport_failed,
+            "settings_reused": settings_reused,
+            "settings_age_ms": settings_age_ms,
+            "host_resolution": _host_resolution(base_url, resources.values()),
+        },
+        "resources": resource_metadata,
+        "status": {**status, "freshness": status_age},
+        "settings": {
+            **settings,
+            "reused": settings_reused,
+            "read_at_ms": settings_resource.retrieved_at_ms if settings.get("available") is True else None,
+        },
+        "xml": xml_candidate,
+        "signal_quality": _signal_quality(status, {"xml": xml_candidate}),
+    }
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read-only SDR-DoA Data Out collector")
-    allowed = ", ".join(sorted(DEFAULT_ALLOWED_DATA_HOSTS))
+    allowed = ", ".join(DEFAULT_DATA_OUT_HOSTS)
     parser.add_argument(
         "--base-url",
         required=True,
-        help=f"Data Out base URL on port 8081, for example http://192.168.100.100:8081 (allowed hosts: {allowed})",
+        help=(
+            f"Data Out base URL on port {DATA_OUT_PORT}, for example http://192.168.100.100:{DATA_OUT_PORT} "
+            f"(default hosts: {allowed})"
+        ),
+    )
+    parser.add_argument(
+        "--data-out-host",
+        action="append",
+        default=None,
+        metavar="HOST",
+        help=f"allow this Data Out host instead of the defaults (repeatable, at most {MAX_DATA_OUT_HOSTS})",
     )
     parser.add_argument("--authority", choices=("none", "csv", "xml"), default="none")
     parser.add_argument(
@@ -1830,6 +2560,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
+        hosts = normalize_data_out_hosts(args.data_out_host) if args.data_out_host else None
         result = collect(
             base_url=args.base_url,
             authority=args.authority,
@@ -1840,6 +2571,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             doa_max_age_ms=args.doa_max_age_ms,
             max_future_skew_ms=args.max_future_skew_ms,
             total_budget_s=args.total_budget,
+            allowed_hosts=hosts,
         )
         print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))
         return 0

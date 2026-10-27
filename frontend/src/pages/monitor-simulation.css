@@ -1,43 +1,15 @@
 /* Message Monitor and Simulation: the pieces the page kit does not cover
-   (chip cells, the record picker, the lobe preview). Colours come from the
+   (chip cells, the lobe preview). Colours come from the
    console tokens only. */
 
 /* Table cells ------------------------------------------------------------- */
 /* Chips and short values in one cell; they wrap instead of widening the row. */
 .ms-chips { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; }
-.ms-chips.is-end { justify-content: flex-end; }
-/* A value with a second, subtle line under it (a retained message's source age). */
-.ms-stack { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; }
-.ms-stack.is-end { align-items: flex-end; }
-.ms-code { color: var(--text); font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
 .ms-sub { color: var(--subtle); font-family: var(--mono); font-size: 11.5px; font-weight: 400; white-space: nowrap; }
-.ms-cell-error { color: var(--red); font-size: 11.5px; line-height: 1.35; overflow-wrap: anywhere; }
 .ms-summary { color: var(--muted); font-family: var(--mono); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
 
 /* A cell with nothing to show. */
 .ms-empty { color: var(--subtle); }
-
-/* Connection card: next to the kinds table at 1280 px and up; below that it spans the row with two key/value columns. */
-@media (max-width: 1279px) {
-  .pg-grid > .ms-conn { grid-column: 1 / -1; }
-}
-@media (min-width: 601px) and (max-width: 1279px) {
-  .ms-conn .pg-kv-1 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-
-/* Kind picker in the record card head: 36 px with a mouse, 44 px for touch, like the head buttons. */
-.ms-select { display: inline-flex; min-width: 0; }
-.ms-select select { height: 36px; min-width: 132px; max-width: 220px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--pg-field-bg); color: var(--text); cursor: pointer; font-family: var(--mono); font-size: 12.5px; }
-.ms-select select:hover { border-color: var(--accent); }
-.ms-select option { background: var(--surface); color: var(--text); }
-@media (pointer: coarse), (any-pointer: coarse), (max-width: 639px) {
-  .ms-select select { height: 44px; }
-}
-
-/* Decoded payload under the record fields; long payloads scroll inside the card. */
-.ms-payload { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.ms-payload > .pg-kv { max-height: 320px; overflow-y: auto; overscroll-behavior: contain; }
-.ms-payload-empty { color: var(--subtle); font-family: var(--mono); font-size: 12.5px; }
 
 /* Simulation ---------------------------------------------------------------- */
 .ms-switches { display: flex; flex-direction: column; }
@@ -64,12 +36,10 @@
 .ms-preview-centre { fill: var(--text); }
 
 @media (max-width: 600px) {
-  /* Page bar: the protocol switch on its own row, the two actions sharing the next. */
-  .ms-page .pg-bar-actions > .pg-seg { flex: 1 1 100%; }
-  .ms-page .pg-bar-actions > .pg-seg button { flex: 1 1 0; }
+  /* Page bar: the two actions share one row. */
   .ms-page .pg-bar-actions > .ov-button { flex: 1 1 0; min-width: 0; }
-  /* Stacked table rows: the kind or topic heads the row; cells keep their chips on the right; empty cells drop out. */
-  .ms-page .pg-table.is-stack .ms-chips, .ms-page .pg-table.is-stack .ms-stack { justify-content: flex-end; align-items: flex-end; }
+  /* Stacked table rows: the topic or part heads the row; cells keep their chips on the right; empty cells drop out. */
+  .ms-page .pg-table.is-stack .ms-chips { justify-content: flex-end; align-items: flex-end; }
   .ms-page .pg-table.is-stack td:first-child { justify-content: flex-start; padding-bottom: 4px; }
   .ms-page .pg-table.is-stack td:first-child::before { display: none; }
   .ms-page .pg-table.is-stack td:first-child .ms-chips { justify-content: flex-start; }

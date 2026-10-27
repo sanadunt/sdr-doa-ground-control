@@ -1,9 +1,11 @@
 import type { JSX } from 'react';
 import type { MapCoordinate, PolarSettings, TelemetrySnapshot, Tone } from '../types';
-import { candidate, numberOrNull } from '../lib/telemetry';
+import { numberOrNull, primaryCandidate } from '../lib/telemetry';
 import { bearingForView, formatDegrees, polarView } from '../lib/polar';
 import { doaStatusTextKey, overviewDoaStatus } from '../lib/doaStatus';
 import { useI18n } from '../lib/i18n';
+import { ageAtAnswerMs } from '../lib/snapshotRead';
+import { sourceBadge } from '../lib/telemetrySource';
 import type { MessageKey } from '../lib/i18n';
 
 export function coordinateSourceKey(source: MapCoordinate['source'] | undefined): MessageKey {
@@ -48,11 +50,14 @@ export function DoaReadout({
   const status = overviewDoaStatus(snapshot, localSnapshotFresh);
   const statusText = t(doaStatusTextKey(status.reason));
   const bearing = status.shown ? bearingForView(view) : null;
-  const csv = candidate(snapshot, 'csv');
+  // The CSV view of Data Out, or the MQTT view; the badge says which source.
+  const csv = primaryCandidate(snapshot);
+  const source = sourceBadge(snapshot);
   const rawAge = numberOrNull(csv.freshness?.age_ms);
-  const ageMs = rawAge !== null && rawAge >= 0 ? rawAge : null;
+  // The DoA age when this page got the answer: a shared read's own age counts.
+  const ageMs = ageAtAnswerMs(rawAge !== null && rawAge >= 0 ? rawAge : null, snapshot);
   const bearingTone: Tone = status.shown ? (status.code === 'DEGRADED' || !offsetVerified ? 'warn' : 'good') : status.code === 'WAITING' ? 'neutral' : 'warn';
-  // The age is the collector's value at the last read and does not grow, so
+  // The age is the value when the last answer arrived and does not grow, so
   // once the local window has closed (or the source itself is stale) it is
   // marked STALE instead of reading as current. Without an age (Data Out
   // unreachable) there is nothing to mark.
@@ -75,6 +80,7 @@ export function DoaReadout({
       <div className="ov-hud-head">
         <span className="ov-eyebrow">{t('readout.bearing')}</span>
         {simulation ? <span className="ov-tag tone-warn">{t('readout.simulation')}</span> : null}
+        {source ? <span className={`ov-tag tone-${source.tone}`}>{t(source.labelKey)}</span> : null}
         <span className={ageStale ? 'ov-hud-age is-warn' : 'ov-hud-age'} title={ageTitle}>{t('hud.age', { age })}</span>
       </div>
       <div className="ov-hud-bearing" title={frameDetail ?? undefined}>

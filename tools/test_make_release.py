@@ -1,7 +1,7 @@
 """Tests for tools/make_release.py and the packaging scripts it ships.
 
-The release tests build both tarballs from this repository into a temporary
-directory with --skip-build and a fake frontend dist, so they need neither
+The release tests build the console tarball from this repository into a
+temporary directory with --skip-build and a fake frontend dist, so they need neither
 Node.js nor the BrowSDR submodule. The script tests run the shell scripts
 with sh in temporary roots; nothing touches systemd, users or the network.
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import re
 import shutil
@@ -31,29 +32,47 @@ EPOCH = 1_700_000_000
 CONSOLE_MODULES = {
     "ground_console.py",
     "config_command_tracker.py",
+    "data_out_reader.py",
+    "mdns_resolver.py",
+    "lan_access.py",
     "preferences_store.py",
+    "rdf_node_commands.py",
     "rdf_node_mqtt_v2.py",
     "receiver_archive.py",
+    "receiver_mirror.py",
     "receiver_record_store.py",
     "sdr_doa_collector.py",
-    "sdr_doa_mqtt.py",
     "sdr_doa_mqtt_monitor.py",
+    "telemetry_source.py",
     "tile_cache.py",
 }
-AGENT_MODULES = {"sdr_doa_lan_agent.py", "sdr_doa_collector.py", "sdr_doa_mqtt.py", "sdr_doa_mqtt_stdlib.py"}
 SHELL_SCRIPTS = (
-    "packaging/agent/install-agent.sh",
-    "packaging/agent/uninstall-agent.sh",
-    "packaging/agent/run-agent.sh",
     "packaging/console/install.sh",
     "packaging/console/sdr-doa-console",
     "packaging/docker/console-entrypoint.sh",
     "packaging/docker/check-build-context.sh",
     "packaging/docker/sdr-doa-docker",
+    "packaging/ground-link/install.sh",
+    "packaging/ground-link/uninstall.sh",
+    "packaging/ground-link/t900-ground-diag",
+    "packaging/ground-link/t900-ground-watchdog",
+    "packaging/ground-link/t900-link",
+    "packaging/receiver-engine/trial-receiver-engine.sh",
 )
+# The groundstation's T900 link tools ship in the console release only.
+GROUND_LINK_EXECUTABLES = {
+    "packaging/ground-link/install.sh",
+    "packaging/ground-link/uninstall.sh",
+    "packaging/ground-link/t900-ground-diag",
+    "packaging/ground-link/t900-ground-watchdog",
+    "packaging/ground-link/t900-link",
+}
+# The phase 0 Receiver engine trial (issue #15): run by hand on the
+# groundstation, never shipped or installed.
+RECEIVER_ENGINE_KIT = "packaging/receiver-engine"
 # Every compose file at the repository root; the policy tests cover each one.
 COMPOSE_FILES = tuple(sorted(path.name for path in ROOT.glob("docker-compose*.yml")))
-# Compose files of the console (the rest is the agent's).
+# Every compose file runs the console; the Raspberry runs the RDF Node edge, which this repository does not ship.
 CONSOLE_COMPOSE_FILES = ("docker-compose.yml", "docker-compose.release.yml", "docker-compose.ghcr.yml")
 
 
@@ -109,9 +128,8 @@ class ReleaseBuildTests(unittest.TestCase):
                         epoch=EPOCH,
                     )
                 )
-        cls.console_tar, cls.agent_tar, cls.docker_script, cls.checksums = cls.outputs[0]
+        cls.console_tar, cls.docker_script, cls.checksums = cls.outputs[0]
         cls.console_top = make_release.console_release_name(cls.version)
-        cls.agent_top = make_release.agent_release_name(cls.version)
 
     @classmethod
     def tearDownClass(cls):
@@ -124,14 +142,13 @@ class ReleaseBuildTests(unittest.TestCase):
     def test_output_names_follow_version(self):
         self.assertRegex(self.version, make_release.VERSION_RE)
         self.assertEqual(self.console_tar.name, f"sdr-doa-ground-console-{self.version}-linux.tar.gz")
-        self.assertEqual(self.agent_tar.name, f"sdr-doa-rdf-sdr-agent-{self.version}.tar.gz")
         self.assertEqual(self.docker_script.name, "sdr-doa-docker")
         self.assertEqual(self.checksums.name, "SHA256SUMS")
 
     def test_sha256sums_match_assets(self):
         lines = self.checksums.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(len(lines), 3)
-        assets = sorted([self.console_tar, self.agent_tar, self.docker_script], key=lambda p: p.name)
+        self.assertEqual(len(lines), 2)
+        assets = sorted([self.console_tar, self.docker_script], key=lambda p: p.name)
         for line, asset in zip(lines, assets):
             digest, name = re.fullmatch(r"([0-9a-f]{64})  (\S+)", line).groups()
             self.assertEqual(name, asset.name)
@@ -150,7 +167,7 @@ class ReleaseBuildTests(unittest.TestCase):
             self.assertEqual(first.read_bytes(), second.read_bytes(), first.name)
 
     def test_entries_are_normalized_and_sorted(self):
-        for tarball, top in ((self.console_tar, self.console_top), (self.agent_tar, self.agent_top)):
+        for tarball, top in ((self.console_tar, self.console_top),):
             members = tar_members(tarball)
             names = [member.name for member in members]
             self.assertEqual(names[0], top)
@@ -204,28 +221,28 @@ class ReleaseBuildTests(unittest.TestCase):
         compose = tar_read(self.console_tar, f"{self.console_top}/docker-compose.yml").decode()
         self.assertIn("dockerfile: Dockerfile.release", compose)
 
-    def test_agent_tarball_contents(self):
-        names = self.names(self.agent_tar, self.agent_top)
-        tools = {name.split("/", 1)[1] for name in names if name.startswith("tools/")}
-        self.assertEqual(tools, AGENT_MODULES)
-        for required in (
-            "VERSION",
-            "MANIFEST.sha256",
-            "README.md",
-            "install.sh",
-            "Dockerfile.agent",
-            "docker-compose.yml",
-            "packaging/agent/run-agent.sh",
-            "packaging/agent/uninstall-agent.sh",
-            "packaging/agent/sdr-doa-agent.service.in",
-            "packaging/agent/agent.env.example",
-        ):
-            self.assertIn(required, names)
-        compose = tar_read(self.agent_tar, f"{self.agent_top}/docker-compose.yml").decode()
-        self.assertIn("dockerfile: Dockerfile.agent", compose)
+    def test_console_release_ships_every_ground_link_file(self):
+        names = self.names(self.console_tar, self.console_top)
+        shipped = {name for name in names if name.startswith("packaging/ground-link/")}
+        on_disk = {f"packaging/ground-link/{path.name}" for path in (ROOT / "packaging/ground-link").iterdir()}
+        self.assertEqual(shipped, on_disk, "a new file in packaging/ground-link needs GROUND_LINK_FILES")
+        modes = {member.name[len(self.console_top) + 1:]: member.mode for member in tar_members(self.console_tar)}
+        for name in shipped:
+            self.assertEqual(modes[name], 0o755 if name in GROUND_LINK_EXECUTABLES else 0o644, name)
+        self.assertEqual({name for name in shipped if os.access(ROOT / name, os.X_OK)}, GROUND_LINK_EXECUTABLES)
+        # Host tooling: never in the installed console, so never in its image.
+        app = {entry.arcname for entry in make_release.console_app_entries(ROOT, self.dist)}
+        self.assertFalse({name for name in app if name.startswith("packaging/ground-link/")})
+        self.assertNotIn("ground-link", (ROOT / "Dockerfile.release").read_text(encoding="utf-8"))
+
+    def test_the_old_topic_path_and_the_agent_never_ship(self):
+        names = self.names(self.console_tar, self.console_top)
+        for gone in ("sdr_doa_lan_agent.py", "sdr_doa_mqtt.py", "sdr_doa_mqtt_stdlib.py", "synthetic_mqtt_publisher.py"):
+            self.assertNotIn(f"tools/{gone}", names)
+        self.assertFalse({name for name in names if "agent" in name.split("/")[-1]}, "the console release ships no agent")
 
     def test_nothing_private_or_generated_ships(self):
-        for tarball in (self.console_tar, self.agent_tar):
+        for tarball in (self.console_tar,):
             for member in tar_members(tarball):
                 parts = member.name.split("/")
                 base = parts[-1]
@@ -233,6 +250,7 @@ class ReleaseBuildTests(unittest.TestCase):
                 self.assertFalse(base.startswith("test_") or base.endswith((".pyc", ".pyo")), member.name)
                 for forbidden in ("node_modules", "__pycache__", "fixtures", ".git", ".venv"):
                     self.assertNotIn(forbidden, parts, member.name)
+                self.assertNotIn("receiver-engine", parts, member.name)
 
     def test_executables(self):
         executables = {
@@ -240,9 +258,6 @@ class ReleaseBuildTests(unittest.TestCase):
             for name in ("install.sh", "packaging/console/sdr-doa-console", "packaging/console/set_admin_password.py",
                          "packaging/console/update_release.py", "packaging/docker/console-entrypoint.sh",
                          "packaging/docker/sdr-doa-docker")
-        } | {
-            (self.agent_tar, f"{self.agent_top}/{name}")
-            for name in ("install.sh", "packaging/agent/run-agent.sh", "packaging/agent/uninstall-agent.sh")
         }
         for tarball, name in executables:
             modes = {member.name: member.mode for member in tar_members(tarball)}
@@ -251,7 +266,7 @@ class ReleaseBuildTests(unittest.TestCase):
         self.assertEqual(modes[f"{self.console_top}/tools/ground_console.py"], 0o644)
 
     def test_manifest_covers_every_file(self):
-        for tarball, top in ((self.console_tar, self.console_top), (self.agent_tar, self.agent_top)):
+        for tarball, top in ((self.console_tar, self.console_top),):
             with tarfile.open(tarball, "r:gz") as archive:
                 files = {
                     member.name[len(top) + 1:]: archive.extractfile(member).read()
@@ -280,12 +295,6 @@ class ReleaseBuildTests(unittest.TestCase):
         self.assertFalse((target / "install.sh").exists(), "the app tree holds no installer")
         with self.assertRaises(make_release.ReleaseError):
             make_release.stage_tree(make_release.console_app_entries(ROOT, self.dist), target)
-
-    def test_stage_agent_tree(self):
-        target = self.tmp / "stage-agent"
-        make_release.stage_tree(make_release.agent_app_entries(ROOT), target)
-        self.assertEqual({path.name for path in (target / "tools").iterdir()}, AGENT_MODULES)
-        self.assertTrue((target / "packaging/agent/run-agent.sh").stat().st_mode & stat.S_IXUSR)
 
     def test_dist_without_receiver_is_refused(self):
         dist = self.tmp / "no-receiver"
@@ -318,7 +327,7 @@ class ReleaseBuildTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         printed = [Path(line) for line in result.stdout.splitlines()]
         self.assertEqual([path.name for path in printed],
-                         [self.console_tar.name, self.agent_tar.name, "sdr-doa-docker", "SHA256SUMS"])
+                         [self.console_tar.name, "sdr-doa-docker", "SHA256SUMS"])
         self.assertEqual((out / self.console_tar.name).read_bytes(), self.console_tar.read_bytes())
         if shutil.which("sha256sum"):
             check = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=out, capture_output=True, text=True)
@@ -352,7 +361,7 @@ class ReleaseHelperTests(unittest.TestCase):
 
     def test_repository_entry_points(self):
         self.assertTrue(CONSOLE_MODULES <= set(make_release.runtime_modules(make_release.CONSOLE_ENTRY)))
-        self.assertEqual(set(make_release.runtime_modules(make_release.AGENT_ENTRY)), AGENT_MODULES)
+        self.assertFalse(hasattr(make_release, "AGENT_ENTRY"))
 
     def test_check_clean_reports_changes(self):
         def fake_git(root, *args):
@@ -394,18 +403,11 @@ class DockerAndComposeTests(unittest.TestCase):
     def read(self, name: str) -> str:
         return (ROOT / name).read_text(encoding="utf-8")
 
-    def test_dockerfile_agent_copies_the_agent_closure(self):
-        copies = re.findall(r"^COPY (tools/\S+(?: tools/\S+)*) /opt/sdr-doa-agent/tools/$", self.read("Dockerfile.agent"), re.M)
-        self.assertEqual(len(copies), 1)
-        self.assertEqual({path.split("/", 1)[1] for path in copies[0].split()}, AGENT_MODULES)
-        self.assertNotRegex(self.read("Dockerfile.agent"), r"(?m)^RUN ", "the agent image must cross-build without emulation")
-
     def test_compose_tags_follow_version(self):
         version = make_release.read_version(ROOT)
-        for name in ("docker-compose.yml", "docker-compose.release.yml", "docker-compose.agent.yml"):
+        for name in ("docker-compose.yml", "docker-compose.release.yml"):
             tags = re.findall(r"^\s+image: \S+:(\S+)$", self.read(name), re.M)
             self.assertEqual(tags, [version], name)
-        self.assertIn(f"sdr-doa-agent:{version}", self.read("Dockerfile.agent"))
         # The GHCR compose follows the major version's channel by default.
         major = version.split(".")[0]
         images = re.findall(r"(?m)^    image: (\S+)$", self.read("docker-compose.ghcr.yml"))
@@ -415,7 +417,7 @@ class DockerAndComposeTests(unittest.TestCase):
     def test_every_compose_file_is_covered(self):
         self.assertEqual(
             set(COMPOSE_FILES),
-            {"docker-compose.yml", "docker-compose.release.yml", "docker-compose.agent.yml", "docker-compose.ghcr.yml"},
+            {"docker-compose.yml", "docker-compose.release.yml", "docker-compose.ghcr.yml"},
             "a new compose file needs its place in these policy tests",
         )
 
@@ -427,6 +429,8 @@ class DockerAndComposeTests(unittest.TestCase):
             self.assertNotRegex(text, r"(?m)^\s+ports:", name)
             # An empty value would disable admin login; pass-through stays unset when not given.
             self.assertNotRegex(text, r"(?m)^\s+(- )?SDR_DOA_ADMIN_PASSWORD[=:]", name)
+        self.assertEqual(set(CONSOLE_COMPOSE_FILES), set(COMPOSE_FILES))
+        self.assertFalse((ROOT / "Dockerfile.agent").exists())
         for name in CONSOLE_COMPOSE_FILES:
             self.assertRegex(self.read(name), r"(?m)^name: sdr-doa-ground-console$", name)
             self.assertRegex(self.read(name), r"(?m)^      - SDR_DOA_ADMIN_PASSWORD$", name)
@@ -461,7 +465,7 @@ class DockerAndComposeTests(unittest.TestCase):
 
     def test_dockerignore_keeps_secrets_and_the_submodule_metadata(self):
         lines = self.read(".dockerignore").splitlines()
-        for pattern in (".env", ".git", "!.git/modules/vendor/BrowSDR", "**/node_modules", "frontend/dist", "data", "agent.env"):
+        for pattern in (".env", ".git", "!.git/modules/vendor/BrowSDR", "**/node_modules", "frontend/dist", "data"):
             self.assertIn(pattern, lines)
         self.assertNotIn("vendor", lines)
 
@@ -480,190 +484,40 @@ class PackagingScriptTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, f"{shell} -n {script}: {result.stderr}")
             self.assertTrue(os.access(ROOT / script, os.X_OK), f"{script} is not executable")
 
-    def run_agent(self, env: dict, *args: str) -> subprocess.CompletedProcess:
-        environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "SDR_DOA_AGENT_PRINT_COMMAND": "1", **env}
-        return subprocess.run(
-            [_sh(), str(ROOT / "packaging/agent/run-agent.sh"), *args],
-            capture_output=True,
-            text=True,
-            env=environment,
-        )
-
-    def test_run_agent_builds_flags_from_agent_env(self):
-        result = self.run_agent(
-            {
-                "BASE_URL": "http://127.0.0.1:8081",
-                "MQTT_HOST": "10.90.0.2",
-                "MQTT_PORT": "8883",
-                "MQTT_CAFILE": "/etc/ca.crt",
-                "MQTT_USERNAME": "agent",
-                "PUBLISH": "1",
-                "ENABLE_CONFIG": "1",
-                "SETTINGS_PATH": "/srv/_share/settings.json",
-                "STATE_DIR": "/var/lib/x",
-                "DOA_RATE": "0",
-            },
-            "--once",
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        words = result.stdout.split()
-        self.assertTrue(words[1].endswith("tools/sdr_doa_lan_agent.py"))
-        command = " ".join(words[2:])
-        for expected in (
-            "--base-url http://127.0.0.1:8081",
-            "--mqtt-host 10.90.0.2 --mqtt-port 8883",
-            "--state-dir /var/lib/x",
-            "--mqtt-cafile /etc/ca.crt",
-            "--mqtt-username agent",
-            "--publish",
-            "--enable-config",
-            "--settings-path /srv/_share/settings.json",
-            "--doa-rate 0",
+    def test_receiver_engine_kit_is_not_wired_into_any_installer(self):
+        kit = ROOT / RECEIVER_ENGINE_KIT
+        policy = json.loads((kit / "sdr-doa-receiver-engine.json").read_text(encoding="utf-8"))
+        self.assertEqual(policy, {"WebUsbAllowDevicesForUrls": [{
+            "devices": [{"vendor_id": 0x1D50, "product_id": 0x6089}],
+            "urls": ["http://127.0.0.1:8787"],
+        }]})
+        for path in (
+            "packaging/console/install.sh",
+            "packaging/console/sdr-doa-console",
+            "packaging/docker/sdr-doa-docker",
+            "packaging/docker/console-entrypoint.sh",
+            "tools/make_release.py",
+            "Dockerfile",
+            "Dockerfile.release",
         ):
-            self.assertIn(expected, command)
-        self.assertNotIn("--mqtt-tls", command)
-        self.assertEqual(words[-1], "--once", "explicit arguments come after the generated flags")
-
-    def test_run_agent_defaults_and_errors(self):
-        result = self.run_agent({})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("--publish", result.stdout)
-        self.assertNotIn("--enable-config", result.stdout)
-        self.assertIn("--mqtt-host 127.0.0.1 --mqtt-port 1883", result.stdout)
-        self.assertNotIn("--publish", self.run_agent({"PUBLISH": "0"}).stdout)
-        missing = self.run_agent({"ENABLE_CONFIG": "1"})
-        self.assertEqual(missing.returncode, 78)
-        self.assertIn("SETTINGS_PATH", missing.stderr)
-        self.assertEqual(self.run_agent({"PUBLISH": "maybe"}).returncode, 78)
-
-    def test_agent_runner_accepts_its_own_flags(self):
-        """Every flag run-agent can emit exists in sdr_doa_lan_agent.py."""
-        sys.path.insert(0, str(ROOT / "tools"))
-        import sdr_doa_lan_agent
-
-        known = set()
-        for action in sdr_doa_lan_agent._build_parser()._actions:
-            known.update(action.option_strings)
-        emitted = set(re.findall(r'set -- "\$@" (--[a-z-]+)', (ROOT / "packaging/agent/run-agent.sh").read_text()))
-        emitted |= set(re.findall(r'"\$@" --[a-z-]+ "[^"]*" (--[a-z-]+)', (ROOT / "packaging/agent/run-agent.sh").read_text()))
-        self.assertTrue(emitted)
-        self.assertEqual(emitted - known, set())
-
-    def test_install_agent_into_a_root_and_uninstall(self):
-        with tempfile.TemporaryDirectory(prefix="agent-root-") as tmp:
-            root = Path(tmp)
-            env = {**os.environ, "SDR_DOA_MQTT_PASSWORD": "p4ss"}
-            result = subprocess.run(
-                [_sh(), str(ROOT / "packaging/agent/install-agent.sh"), "--root", str(root), "--user", "nobody",
-                 "--mqtt-host", "10.90.0.2", "--mqtt-port=8883", "--mqtt-tls", "--mqtt-username", "agent", "--enable-config",
-                 "--set", "DOA_RATE=0", "--set=HEALTH_INTERVAL=2"],
-                capture_output=True, text=True, env=env,
-            )
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            prefix = root / "opt/sdr-doa-agent"
-            self.assertEqual({path.name for path in (prefix / "tools").iterdir()}, AGENT_MODULES)
-            self.assertTrue(os.access(prefix / "bin/run-agent", os.X_OK))
-            self.assertTrue((prefix / "uninstall.sh").is_file())
-            agent_env = root / "etc/sdr-doa-agent/agent.env"
-            self.assertEqual(stat.S_IMODE(agent_env.stat().st_mode), 0o640)
-            values = dict(line.split("=", 1) for line in agent_env.read_text().splitlines() if line and not line.startswith("#"))
-            self.assertEqual(values["MQTT_HOST"], "10.90.0.2")
-            self.assertEqual(values["MQTT_PORT"], "8883")
-            self.assertEqual(values["MQTT_TLS"], "1")
-            self.assertEqual(values["ENABLE_CONFIG"], "1")
-            self.assertEqual(values["PUBLISH"], "1")
-            self.assertEqual(values["SDR_DOA_MQTT_PASSWORD"], "p4ss")
-            self.assertEqual(values["STATE_DIR"], "/var/lib/sdr-doa-agent")
-            self.assertEqual(values["BASE_URL"], "http://127.0.0.1:8081")
-            self.assertEqual(values["DOA_RATE"], "0")
-            self.assertEqual(values["HEALTH_INTERVAL"], "2")
-            unit_path = root / "etc/systemd/system/sdr-doa-agent.service"
-            unit = unit_path.read_text()
-            self.assertIn("ExecStart=/opt/sdr-doa-agent/bin/run-agent", unit)
-            self.assertIn("EnvironmentFile=/etc/sdr-doa-agent/agent.env", unit)
-            self.assertIn("User=nobody", unit)
-            self.assertIn("ReadWritePaths=-/home/doasdr/doasdr/_share", unit)
-            self.assertIn("Restart=on-failure", unit)
-            self.assertIn("WantedBy=multi-user.target", unit)
-            self.assertNotRegex(unit, r"@[A-Z_]+@")
-            self.assertTrue((root / "var/lib/sdr-doa-agent").is_dir())
-            self.assertNotIn("p4ss", result.stdout + result.stderr)
-
-            # Upgrade: agent.env is kept, only given flags change.
-            agent_env.write_text(agent_env.read_text().replace("BASE_URL=http://127.0.0.1:8081", "BASE_URL=http://127.0.0.1:9999"))
-            again = subprocess.run(
-                [_sh(), str(ROOT / "packaging/agent/install-agent.sh"), "--root", str(root), "--user", "nobody", "--disable-config"],
-                capture_output=True, text=True, env={k: v for k, v in os.environ.items() if k != "SDR_DOA_MQTT_PASSWORD"},
-            )
-            self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
-            values = dict(line.split("=", 1) for line in agent_env.read_text().splitlines() if line and not line.startswith("#"))
-            self.assertEqual(values["BASE_URL"], "http://127.0.0.1:9999")
-            self.assertEqual(values["ENABLE_CONFIG"], "0")
-            self.assertEqual(values["MQTT_HOST"], "10.90.0.2")
-            self.assertEqual(values["SDR_DOA_MQTT_PASSWORD"], "p4ss")
-            self.assertEqual(values["DOA_RATE"], "0")
-            unit = unit_path.read_text()
-            self.assertNotRegex(unit, r"(?m)^ReadWritePaths=-/home/doasdr", "settings stay read-only without config")
-            self.assertIn("ReadWritePaths=/var/lib/sdr-doa-agent", unit)
-
-            removed = subprocess.run(
-                [_sh(), str(prefix / "uninstall.sh"), "--root", str(root)], capture_output=True, text=True
-            )
-            self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
-            self.assertFalse(prefix.exists())
-            self.assertFalse((root / "etc/systemd/system/sdr-doa-agent.service").exists())
-            self.assertTrue(agent_env.is_file(), "agent.env stays without --purge")
-
-    def test_install_agent_dry_run_changes_nothing(self):
-        with tempfile.TemporaryDirectory(prefix="agent-dry-") as tmp:
-            result = subprocess.run(
-                [_sh(), str(ROOT / "packaging/agent/install-agent.sh"), "--dry-run", "--user", "nobody",
-                 "--prefix", f"{tmp}/opt", "--config-dir", f"{tmp}/etc", "--state-dir", f"{tmp}/state"],
-                capture_output=True, text=True,
-            )
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(list(Path(tmp).iterdir()), [])
-        self.assertIn("would run: systemctl enable sdr-doa-agent.service", result.stdout)
-        self.assertIn("PUBLISH=1", result.stdout)
-        self.assertIn("ENABLE_CONFIG=0", result.stdout)
-        self.assertIn("tools/sdr_doa_lan_agent.py --base-url http://127.0.0.1:8081", result.stdout)
-        self.assertIn("Dry run: nothing was changed.", result.stdout)
-
-    def test_install_agent_set_only_takes_known_variables(self):
-        for value, message in (("NOPE=1", "does not know NOPE"), ("STATE_DIR=/x", "--state-dir"),
-                               ("SDR_DOA_MQTT_PASSWORD=x", "SDR_DOA_MQTT_PASSWORD"), ("DOA_RATE", "NAME=VALUE")):
-            result = subprocess.run(
-                [_sh(), str(ROOT / "packaging/agent/install-agent.sh"), "--dry-run", "--set", value],
-                capture_output=True, text=True,
-            )
-            self.assertNotEqual(result.returncode, 0, value)
-            self.assertIn(message, result.stderr, value)
-
-    def test_run_agent_stops_when_config_cannot_write_settings(self):
-        with tempfile.TemporaryDirectory(prefix="agent-settings-") as tmp:
-            settings = Path(tmp) / "missing" / "settings.json"
-            env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "ENABLE_CONFIG": "1", "SETTINGS_PATH": str(settings),
-                   "PUBLISH": "1", "SDR_DOA_AGENT_PYTHON": "/bin/false"}
-            result = subprocess.run([_sh(), str(ROOT / "packaging/agent/run-agent.sh")], capture_output=True, text=True, env=env)
-        self.assertEqual(result.returncode, 78, result.stderr)
-        self.assertIn("cannot write", result.stderr)
-        self.assertIn("--enable-config", result.stderr)
-
-    def test_install_agent_refuses_a_root_service_user(self):
-        result = subprocess.run(
-            [_sh(), str(ROOT / "packaging/agent/install-agent.sh"), "--dry-run", "--user", "root"],
+            self.assertNotIn("receiver-engine", (ROOT / path).read_text(encoding="utf-8"), path)
+        script = kit / "trial-receiver-engine.sh"
+        dry = subprocess.run(
+            [_sh(), str(script), "--dry-run", "--browser", "/usr/bin/chromium", "--headless"],
             capture_output=True, text=True,
         )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must not run as root", result.stderr)
-
-    def test_install_agent_rejects_unsafe_values(self):
-        result = subprocess.run(
-            [_sh(), str(ROOT / "packaging/agent/install-agent.sh"), "--dry-run", "--mqtt-host", "1.2.3.4; rm"],
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn("--user-data-dir=PROFILE", dry.stdout)
+        self.assertIn("--headless=new", dry.stdout)
+        self.assertIn("http://127.0.0.1:8787/#/receiver", dry.stdout)
+        self.assertNotIn("remote-debugging", dry.stdout)
+        self.assertNotIn("no-sandbox", dry.stdout)
+        refused = subprocess.run(
+            [_sh(), str(script), "--dry-run", "--browser", "/usr/bin/chromium", "--url", "http://localhost:8787/"],
             capture_output=True, text=True,
         )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must not contain", result.stderr)
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("origin the WebUSB policy names", refused.stderr)
 
     def test_console_entrypoint(self):
         with tempfile.TemporaryDirectory(prefix="entrypoint-") as tmp:

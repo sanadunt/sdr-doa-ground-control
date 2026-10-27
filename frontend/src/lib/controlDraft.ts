@@ -4,8 +4,11 @@
  * until the operator unlocks admin, reviews the change and confirms it there.
  */
 
-/** Fields of the sdr/v1 cmd/config/patch allowlist, in SI units (Hz, dB). */
-export const CONFIG_PATCH_KEYS = ['center_frequency_hz', 'gain_db', 'vfo_frequency_hz', 'vfo_bandwidth_hz', 'vfo_squelch_db'] as const;
+/**
+ * The RDF Node edge's safe fields for config.patch, in its own order and SI
+ * units (Hz, dB); tools/rdf_node_commands.py PATCH_FIELDS.
+ */
+export const CONFIG_PATCH_KEYS = ['center_frequency_hz', 'gain_db', 'vfo0_frequency_hz', 'vfo0_bandwidth_hz', 'vfo0_squelch_db'] as const;
 
 export type ConfigPatchKey = typeof CONFIG_PATCH_KEYS[number];
 

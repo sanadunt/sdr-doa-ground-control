@@ -1,11 +1,13 @@
 /**
  * The SDR-DoA node's tuning, as the Overview spectrum dock follows it
- * ("Ikuti frekuensi node"). Read only from a fresh Data Out snapshot: the
- * centre is settings.json `center_freq` (MHz), the VFO is the CSV view's
- * `frequency_hz_normalized`, falling back to the centre. MQTT config_reported
+ * ("Ikuti frekuensi node"). Read only from a fresh snapshot: the centre is
+ * settings.json `center_freq` (MHz; over MQTT from the light Data Out read),
+ * the VFO is the DoA view's `frequency_hz_normalized` (the CSV view, or the
+ * LIVE MQTT DoA's `f`), falling back to the centre. MQTT settings/reported
  * is not used here; Kontrol reads that.
  */
 import type { TelemetrySnapshot } from '../types';
+import { primaryCandidate } from './telemetry';
 
 export interface NodeFrequencies {
   centerHz: number;
@@ -38,8 +40,8 @@ export function nodeFrequencies(snapshot: TelemetrySnapshot | null, localFresh: 
   const centerMhz = fields && typeof fields === 'object' ? numeric((fields as Record<string, unknown>).center_freq) : null;
   const centerHz = validHz(centerMhz === null ? null : centerMhz * 1e6);
   if (centerHz === null) return null;
-  const csv = snapshot.doa_candidates?.csv;
-  const vfoHz = csv && csv.available !== false ? validHz(numeric(csv.frequency_hz_normalized)) : null;
+  const view = primaryCandidate(snapshot);
+  const vfoHz = view.available !== false ? validHz(numeric(view.frequency_hz_normalized)) : null;
   return { centerHz, vfoHz: vfoHz ?? centerHz };
 }
 

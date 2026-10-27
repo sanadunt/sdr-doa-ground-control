@@ -42,12 +42,10 @@ PINNED_USES = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)
 VERSION_COMMENT = re.compile(r"#\s*v[0-9]+(?:\.[0-9]+){0,2}\s*$")
 CONTRACT_ASSETS = [
     "sdr-doa-ground-console-2.0.0-linux.tar.gz",
-    "sdr-doa-rdf-sdr-agent-2.0.0.tar.gz",
     "sdr-doa-docker",
     "SHA256SUMS",
 ]
 CONSOLE_PLATFORMS = "linux/amd64,linux/arm64"
-AGENT_PLATFORMS = "linux/amd64,linux/arm64,linux/arm/v7"
 SHA_A = "a" * 40
 
 
@@ -162,8 +160,9 @@ class WorkflowTextTests(unittest.TestCase):
             self.assertIn(command, text)
         # The standalone runner tells the two kinds of test files apart this way.
         self.assertIn("grep -q 'unittest\\.TestCase' \"$script\"", text)
-        self.assertIn("tools/test_sdr_doa_mqtt_stdlib.py)", text)
-        self.assertIn("::warning file=$script::Skipped", text)
+        # The broker serves the monitor's round trip through a real broker, which skips without it.
+        self.assertIn("tools/test_rdf_node_broker.py will be skipped", text)
+        self.assertNotIn("BROKER_READY", text)
 
     def test_release_checks_tag_and_assets(self):
         text = self.texts["release.yml"]
@@ -174,6 +173,8 @@ class WorkflowTextTests(unittest.TestCase):
             "tools/make_release.py --with-wheels",
             "--verify-tag",
             "--generate-notes",
+            "--notes-file notes/NOTES.md",
+            'tools/release_check.py notes --version "$VERSION" --output dist/release-notes/NOTES.md',
             "--clobber",
             "--prerelease",
             'SDR-DoA Ground Console $VERSION',
@@ -200,13 +201,14 @@ class WorkflowTextTests(unittest.TestCase):
             self.assertIn(snippet, text)
         for asset in (
             'release/sdr-doa-ground-console-${VERSION}-linux.tar.gz',
-            'release/sdr-doa-rdf-sdr-agent-${VERSION}.tar.gz',
             'release/sdr-doa-docker',
             'release/SHA256SUMS',
         ):
             self.assertIn(f'"{asset}"', text)
         self.assertEqual(text.count("platforms: linux/amd64,linux/arm64\n"), 1)
-        self.assertEqual(text.count(f"platforms: {AGENT_PLATFORMS}\n"), 1)
+        # One image: the console. The Raspberry runs the RDF Node edge, which no job builds.
+        self.assertNotIn("agent", text.lower())
+        self.assertNotIn("arm/v7", text)
 
     def test_third_party_images_are_pinned_to_a_digest(self):
         # The images job holds packages: write; what it runs privileged or
@@ -216,7 +218,7 @@ class WorkflowTextTests(unittest.TestCase):
         self.assertRegex(text, r"(?m)^\s+image: docker\.io/tonistiigi/binfmt:[\w.-]+" + digest + "$")
         self.assertRegex(text, r"(?m)^\s+driver-opts: image=moby/buildkit:v[\w.-]+" + digest + "$")
         self.assertRegex(text, r"(?m)^\s+PYTHON_IMAGE: python:3\.12-slim-bookworm" + digest + "$")
-        self.assertEqual(text.count("build-args: PYTHON_IMAGE=${{ env.PYTHON_IMAGE }}"), 2)
+        self.assertEqual(text.count("build-args: PYTHON_IMAGE=${{ env.PYTHON_IMAGE }}"), 1)
 
     def test_dependabot_updates_the_actions(self):
         text = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
@@ -350,10 +352,20 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertLess(names.index("tag"), next(i for i, s in enumerate(build["steps"]) if "make_release.py" in s.get("run", "")))
         tag_step = build["steps"][names.index("tag")]
         self.assertEqual(tag_step["env"], {"EVENT_NAME": "${{ github.event_name }}", "GIT_REF": "${{ github.ref }}"})
-        (upload,) = steps_using(build, "actions/upload-artifact")
-        self.assertEqual(upload["with"]["path"], "dist/release/")
-        self.assertEqual(upload["with"]["if-no-files-found"], "error")
-        for output in ("version", "tag", "sha", "create_tag", "prerelease", "newest", "console_ref", "agent_ref", "labels"):
+        uploads = {step["with"]["name"]: step for step in steps_using(build, "actions/upload-artifact")}
+        self.assertEqual(sorted(uploads), ["release-assets", "release-notes"])
+        self.assertEqual(uploads["release-assets"]["with"]["path"], "dist/release/")
+        # The notes stay out of dist/release, which holds exactly the assets.
+        self.assertEqual(uploads["release-notes"]["with"]["path"], "dist/release-notes/")
+        for upload in uploads.values():
+            self.assertEqual(upload["with"]["if-no-files-found"], "error")
+        # The notes are written before the long build, so a missing section fails early.
+        notes_index = next(i for i, s in enumerate(build["steps"]) if "release_check.py notes" in s.get("run", ""))
+        build_index = next(i for i, s in enumerate(build["steps"]) if "make_release.py" in s.get("run", ""))
+        self.assertLess(names.index("tag"), notes_index)
+        self.assertLess(notes_index, build_index)
+        self.assertEqual(build["steps"][notes_index]["env"], {"VERSION": "${{ steps.tag.outputs.version }}"})
+        for output in ("version", "tag", "sha", "create_tag", "prerelease", "newest", "console_image", "console_ref", "labels"):
             self.assertIn(output, build["outputs"])
         images = build["steps"][names.index("images")]
         self.assertIn("git tag -l 'v*' |", images["run"])
@@ -361,8 +373,8 @@ class WorkflowStructureTests(unittest.TestCase):
 
     def test_release_job(self):
         release = self.release["jobs"]["release"]
-        (download,) = steps_using(release, "actions/download-artifact")
-        self.assertEqual(download["with"]["name"], "release-assets")
+        downloads = {step["with"]["name"]: step["with"]["path"] for step in steps_using(release, "actions/download-artifact")}
+        self.assertEqual(downloads, {"release-assets": "release", "release-notes": "notes"})
         create_tag = next(step for step in release["steps"] if "git/refs" in step.get("run", ""))
         self.assertEqual(create_tag["if"], "needs.build.outputs.create_tag == 'true'")
         script = create_tag["run"]
@@ -376,6 +388,8 @@ class WorkflowStructureTests(unittest.TestCase):
         script = publish["run"]
         self.assertIn('gh release upload "$TAG" "${assets[@]}" --clobber', script)
         self.assertIn('--title "SDR-DoA Ground Console $VERSION"', script)
+        # The CHANGELOG.md section is the release page's text, ahead of the generated list.
+        self.assertIn("flags=(--verify-tag --notes-file notes/NOTES.md --generate-notes", script)
         self.assertIn('if [ "$PRERELEASE" = true ]', script)
         self.assertIn('elif [ "$NEWEST" != true ]', script)
         self.assertIn("flags+=(--latest=false)", script)
@@ -389,6 +403,7 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertEqual(len(steps_using(images, "docker/setup-buildx-action")), 1)
         (qemu,) = steps_using(images, "docker/setup-qemu-action")
         self.assertRegex(qemu["with"]["image"], r"^docker\.io/tonistiigi/binfmt:[\w.-]+@sha256:[0-9a-f]{64}$")
+        self.assertEqual(qemu["with"]["platforms"], "arm64")
         (buildx,) = steps_using(images, "docker/setup-buildx-action")
         self.assertRegex(buildx["with"]["driver-opts"], r"^image=moby/buildkit:v[\w.-]+@sha256:[0-9a-f]{64}$")
         self.assertRegex(images["env"]["PYTHON_IMAGE"], r"^python:3\.12-slim-bookworm@sha256:[0-9a-f]{64}$")
@@ -397,22 +412,16 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertEqual(checkout["with"]["sparse-checkout"], "tools")
         self.assertEqual(checkout["with"]["path"], "src")
         self.assertIs(checkout["with"]["persist-credentials"], False)
-        console, agent = steps_using(images, "docker/build-push-action")
+        (console,) = steps_using(images, "docker/build-push-action")
         self.assertTrue(console["with"]["file"].endswith("/Dockerfile.release"))
         self.assertEqual(console["with"]["context"], "${{ steps.unpack.outputs.console_dir }}")
         self.assertEqual(console["with"]["platforms"], CONSOLE_PLATFORMS)
         # Only <V>; the channel tags are pointed at it afterwards.
         self.assertEqual(console["with"]["tags"], "${{ needs.build.outputs.console_ref }}")
         self.assertEqual(console["if"], "steps.existing.outputs.console == 'build'")
-        self.assertTrue(agent["with"]["file"].endswith("/Dockerfile.agent"))
-        self.assertEqual(agent["with"]["context"], "${{ steps.unpack.outputs.agent_dir }}")
-        self.assertEqual(agent["with"]["platforms"], AGENT_PLATFORMS)
-        self.assertEqual(agent["with"]["tags"], "${{ needs.build.outputs.agent_ref }}")
-        self.assertEqual(agent["if"], "steps.existing.outputs.agent == 'build'")
-        for step in (console, agent):
-            self.assertIs(step["with"]["push"], True)
-            self.assertEqual(step["with"]["labels"], "${{ needs.build.outputs.labels }}")
-            self.assertEqual(step["with"]["build-args"], "PYTHON_IMAGE=${{ env.PYTHON_IMAGE }}")
+        self.assertIs(console["with"]["push"], True)
+        self.assertEqual(console["with"]["labels"], "${{ needs.build.outputs.labels }}")
+        self.assertEqual(console["with"]["build-args"], "PYTHON_IMAGE=${{ env.PYTHON_IMAGE }}")
         existing = next(step for step in images["steps"] if step.get("id") == "existing")
         self.assertEqual(existing["env"]["FORCE_IMAGES"], "${{ inputs.force_images && 'true' || 'false' }}")
         self.assertIn('if [ "$revision" != "$SHA" ]', existing["run"])
@@ -420,14 +429,13 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertNotIn("${{", images["steps"][channels]["run"])
         unpack = next(step for step in images["steps"] if step.get("id") == "unpack")
         self.assertIn("sha256sum -c SHA256SUMS", unpack["run"])
-        self.assertEqual(unpack["run"].count("MANIFEST.sha256"), 2)
+        self.assertEqual(unpack["run"].count("MANIFEST.sha256"), 1)
         names = [step.get("name", "") for step in images["steps"]]
         logout = next(i for i, step in enumerate(images["steps"]) if step.get("run") == "docker logout ghcr.io")
         check = next(i for i, step in enumerate(images["steps"]) if "docker manifest inspect" in step.get("run", ""))
         self.assertLess(names.index("Log in to ghcr.io"), names.index(existing["name"]))
         self.assertLess(names.index(existing["name"]), names.index(console["name"]))
         self.assertLess(names.index(console["name"]), channels)
-        self.assertLess(names.index(agent["name"]), channels)
         self.assertLess(channels, logout)
         self.assertLess(logout, check)
         self.assertIn("::warning::", images["steps"][check]["run"])
@@ -527,9 +535,8 @@ class VersionTests(unittest.TestCase):
             "Sanadunt", "2.0.0", SHA_A, "https://github.com/sanadunt/sdr-doa-ground-control"
         )
         self.assertEqual(outputs["console_image"], "ghcr.io/sanadunt/sdr-doa-ground-console")
-        self.assertEqual(outputs["agent_image"], "ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent")
         self.assertEqual(outputs["console_ref"], "ghcr.io/sanadunt/sdr-doa-ground-console:2.0.0")
-        self.assertEqual(outputs["agent_ref"], "ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent:2.0.0")
+        self.assertEqual(sorted(key for key in outputs if key.endswith(("_image", "_ref"))), ["console_image", "console_ref"])
         self.assertEqual((outputs["channels"], outputs["newest"]), ("2.0 2 latest", "true"))
         backport = release_check.image_outputs(
             "sanadunt", "2.0.1", SHA_A, "https://github.com/sanadunt/sdr-doa-ground-control", ["v2.1.0"]
@@ -587,10 +594,8 @@ class AssetCheckTests(unittest.TestCase):
         self.dir.mkdir()
         console_top = make_release.console_release_name(self.VERSION)
         write_tarball(self.dir / f"{console_top}.tar.gz", console_top, {"VERSION": b"2.0.0\n", "packaging/docker/sdr-doa-docker": self.SCRIPT})
-        agent_top = make_release.agent_release_name(self.VERSION)
-        write_tarball(self.dir / f"{agent_top}.tar.gz", agent_top, {"VERSION": b"2.0.0\n"})
         (self.dir / "sdr-doa-docker").write_bytes(self.SCRIPT)
-        write_sums(self.dir, CONTRACT_ASSETS[:3])
+        write_sums(self.dir, CONTRACT_ASSETS[:2])
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -619,7 +624,7 @@ class AssetCheckTests(unittest.TestCase):
         self.assertRefused("sdr-doa-docker does not match its SHA256SUMS line")
 
     def test_sums_must_cover_every_asset(self):
-        write_sums(self.dir, CONTRACT_ASSETS[:2])
+        write_sums(self.dir, CONTRACT_ASSETS[:1])
         self.assertRefused("SHA256SUMS lists")
 
     def test_malformed_sums(self):
@@ -629,10 +634,10 @@ class AssetCheckTests(unittest.TestCase):
     def test_console_tarball_must_ship_the_same_script(self):
         console_top = make_release.console_release_name(self.VERSION)
         write_tarball(self.dir / f"{console_top}.tar.gz", console_top, {"VERSION": b"2.0.0\n"})
-        write_sums(self.dir, CONTRACT_ASSETS[:3])
+        write_sums(self.dir, CONTRACT_ASSETS[:2])
         self.assertRefused("does not ship packaging/docker/sdr-doa-docker")
         write_tarball(self.dir / f"{console_top}.tar.gz", console_top, {"packaging/docker/sdr-doa-docker": b"other"})
-        write_sums(self.dir, CONTRACT_ASSETS[:3])
+        write_sums(self.dir, CONTRACT_ASSETS[:2])
         self.assertRefused("differs from the sdr-doa-docker asset")
 
     def test_command_line_prints_the_assets(self):
@@ -848,7 +853,8 @@ class CrossTrackContractTests(unittest.TestCase):
 
     def test_docker_script_pulls_the_images_the_workflow_pushes(self):
         self.assertEqual(self.script_value("CONSOLE_IMAGE"), release_check.image_name(self.owner, release_check.CONSOLE_IMAGE))
-        self.assertEqual(self.script_value("AGENT_IMAGE"), release_check.image_name(self.owner, release_check.AGENT_IMAGE))
+        # The script installs the console only; the Raspberry runs the RDF Node edge.
+        self.assertNotRegex(self.script, r"(?m)^AGENT_IMAGE=")
         # Its default channel is the major of this VERSION, which every stable
         # release of that major moves (a prerelease VERSION moves none).
         self.assertEqual(self.script_value("DEFAULT_CHANNEL"), str(release_check.parse_release_version(self.version)[0]))
@@ -869,7 +875,7 @@ class CrossTrackContractTests(unittest.TestCase):
 
     def test_repository_url_is_the_same_everywhere(self):
         url = f"https://github.com/{self.REPOSITORY}"
-        for name in ("Dockerfile", "Dockerfile.release", "Dockerfile.agent"):
+        for name in ("Dockerfile", "Dockerfile.release"):
             sources = re.findall(r'org\.opencontainers\.image\.source="([^"]+)"', (ROOT / name).read_text(encoding="utf-8"))
             self.assertEqual(sources, [url], name)
         quickstart = (ROOT / "QUICKSTART.md").read_text(encoding="utf-8")
@@ -888,33 +894,25 @@ class CrossTrackContractTests(unittest.TestCase):
                     ROOT, output_dir=out, dist_dir=dist, skip_build=True, allow_dirty=True, epoch=1_700_000_000
                 )
             self.assertEqual([path.name for path in paths], release_check.release_assets(self.version))
-            members = {}
-            for path, top in (
-                (paths[0], make_release.console_release_name(self.version)),
-                (paths[1], make_release.agent_release_name(self.version)),
-            ):
-                with tarfile.open(path, "r:gz") as archive:
-                    names = archive.getnames()
-                self.assertTrue(all(name == top or name.startswith(top + "/") for name in names), path.name)
-                members[path.name] = {name[len(top) + 1:] for name in names if name != top}
-        console, agent = members[paths[0].name], members[paths[1].name]
+            top = make_release.console_release_name(self.version)
+            with tarfile.open(paths[0], "r:gz") as archive:
+                names = archive.getnames()
+            self.assertTrue(all(name == top or name.startswith(top + "/") for name in names), paths[0].name)
+            console = {name[len(top) + 1:] for name in names if name != top}
         for required in (
             "install.sh", "VERSION", make_release.MANIFEST_NAME, "Dockerfile.release", "docker-compose.yml",
             "docker-compose.ghcr.yml", release_check.DOCKER_SCRIPT_IN_CONSOLE, "packaging/console/update_release.py",
             "packaging/docker/healthcheck.py", "packaging/docker/console-entrypoint.sh",
         ):
             self.assertIn(required, console)
-        for required in ("install.sh", "VERSION", make_release.MANIFEST_NAME, "Dockerfile.agent", "docker-compose.yml"):
-            self.assertIn(required, agent)
-        # release.yml builds each image with the tarball's own Dockerfile and
+        # release.yml builds the image with the tarball's own Dockerfile and
         # the unpacked tarball as the context, so every COPY source must be in it.
-        for tree, dockerfile in ((console, "Dockerfile.release"), (agent, "Dockerfile.agent")):
-            for source in _dockerfile_copy_sources((ROOT / dockerfile).read_text(encoding="utf-8")):
-                source = source.rstrip("/")
-                self.assertTrue(
-                    source in tree or any(name.startswith(source + "/") for name in tree),
-                    f"{dockerfile} copies {source}, which its tarball does not hold",
-                )
+        for source in _dockerfile_copy_sources((ROOT / "Dockerfile.release").read_text(encoding="utf-8")):
+            source = source.rstrip("/")
+            self.assertTrue(
+                source in console or any(name.startswith(source + "/") for name in console),
+                f"Dockerfile.release copies {source}, which the console tarball does not hold",
+            )
 
 
 class OutputFormatTests(unittest.TestCase):
@@ -944,7 +942,7 @@ class OutputFormatTests(unittest.TestCase):
                 key, value = line.split("=", 1)
                 values[key] = value
         self.assertEqual(values["console_image"], "ghcr.io/sanadunt/sdr-doa-ground-console")
-        self.assertEqual(values["agent_ref"], "ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent:2.0.0")
+        self.assertEqual(values["console_ref"], "ghcr.io/sanadunt/sdr-doa-ground-console:2.0.0")
         self.assertEqual((values["channels"], values["newest"]), ("2.0 2 latest", "true"))
         self.assertEqual(len(values["labels"]), 3)
 
@@ -965,6 +963,49 @@ class OutputFormatTests(unittest.TestCase):
                 code = release_check.main(["channels", "--version", "2.0.3", "--tags-file", str(Path(tmp) / "missing")])
             self.assertEqual(code, 1)
             self.assertIn("::error::cannot read the tag list", refused.getvalue())
+
+    def test_notes_command_writes_the_changelog_section(self):
+        changelog = (
+            "# Catatan perubahan\n\nIntro.\n\n## 3.1.0\n\nNewer.\n\n## 3.0.0\n\nMajor.\n\n### Pindah ke 3.0.0\n\n"
+            "```sh\n## not a heading inside a fence\nsudo sh sdr-doa-docker install --channel 3\n```\n\n"
+            "## 2.0.0\n\nOld.\n"
+        )
+        with tempfile.TemporaryDirectory(prefix="test-release-notes-") as tmp:
+            root = Path(tmp)
+            (root / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
+            output = root / "out" / "NOTES.md"
+            with redirect_stdout(io.StringIO()):
+                code = release_check.main(["--root", str(root), "notes", "--version", "3.0.0", "--output", str(output)])
+            self.assertEqual(code, 0)
+            notes = output.read_text(encoding="utf-8")
+            self.assertTrue(notes.startswith("Major.\n"))
+            self.assertIn("### Pindah ke 3.0.0", notes)
+            self.assertIn("## not a heading inside a fence\nsudo sh sdr-doa-docker install --channel 3\n```\n", notes)
+            self.assertNotIn("Old.", notes)
+            self.assertNotIn("Newer.", notes)
+            for version, message in (
+                ("3.0.1", "has no section '## 3.0.1'"),
+                ("3.0", "is not a release version"),
+            ):
+                with redirect_stdout(io.StringIO()) as refused:
+                    code = release_check.main(["--root", str(root), "notes", "--version", version, "--output", str(output)])
+                self.assertEqual(code, 1)
+                self.assertIn(message, refused.getvalue())
+            (root / "CHANGELOG.md").write_text("## 3.0.0\n\n## 2.0.0\n\nOld.\n", encoding="utf-8")
+            with redirect_stdout(io.StringIO()) as refused:
+                code = release_check.main(["--root", str(root), "notes", "--version", "3.0.0", "--output", str(output)])
+            self.assertEqual(code, 1)
+            self.assertIn("is empty", refused.getvalue())
+
+    def test_repository_version_has_release_notes(self):
+        # Checked on every push, so a VERSION bump without its notes fails before the tag.
+        version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        notes = release_check.release_notes((ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), version)
+        if release_check.parse_release_version(version)[1:3] == (0, 0):
+            # A new major says how a host moves to it: the Docker channel and the native updater.
+            major = version.split(".", 1)[0]
+            self.assertIn(f"--channel {major}", notes)
+            self.assertIn("update --allow-major", notes)
 
     def test_revision_command_reads_stdin(self):
         payload = '{"architecture": "amd64", "config": {"Labels": {"org.opencontainers.image.revision": "%s"}}}' % SHA_A

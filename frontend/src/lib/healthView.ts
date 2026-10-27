@@ -1,6 +1,7 @@
 import type { Candidate, Freshness, NativeConsistency, TelemetrySnapshot, Tone } from '../types';
 import type { MessageKey, Translate } from './i18n';
-import { candidate, toneFor } from './telemetry';
+import { candidate, sourceViewNames, toneFor } from './telemetry';
+import { settingsAgeMs } from './snapshotRead';
 
 /** The four bounded GETs the collector makes, in the order it reads them. */
 export const DATA_OUT_RESOURCE_PATHS = ['/status.json', '/settings.json', '/DOA_value.html', '/doa.xml'] as const;
@@ -71,6 +72,10 @@ export interface ResourceRow {
   errorKind: ResourceErrorKind | null;
   elapsedMs: number | null;
   attempts: number | null;
+  /** Not read in this collection: the console reused a recent copy (settings.json). */
+  reused: boolean;
+  /** Age of a reused copy when the snapshot was answered, else null. */
+  reusedAgeMs: number | null;
 }
 
 /** Per-resource read results, normalized from the untrusted snapshot. */
@@ -80,6 +85,7 @@ export function resourceRows(snapshot: TelemetrySnapshot | null | undefined): Re
     const entry = record(resources?.[path]);
     const status = finite(entry?.http_status);
     const attempts = nonNegative(entry?.attempts);
+    const reused = entry?.reused === true;
     return {
       path,
       ok: bool(entry?.ok),
@@ -88,6 +94,8 @@ export function resourceRows(snapshot: TelemetrySnapshot | null | undefined): Re
       errorKind: code(entry?.error_kind, RESOURCE_ERROR_KINDS) as ResourceErrorKind | null,
       elapsedMs: nonNegative(entry?.elapsed_ms),
       attempts: attempts !== null && Number.isInteger(attempts) ? attempts : null,
+      reused,
+      reusedAgeMs: reused && path === '/settings.json' ? settingsAgeMs(snapshot) : null,
     };
   });
 }
@@ -134,12 +142,29 @@ export function nodeStatus(snapshot: TelemetrySnapshot | null | undefined): { st
 // ---------------------------------------------------------------------------
 // Collection, node progress and signal quality (collector contract §4)
 
+/** How the collector reached the Data Out host: through the system resolver or the one-shot mDNS fallback (#12). */
+export interface HostResolutionView {
+  method: 'system' | 'mdns';
+  address: string;
+}
+
 export interface CollectionView {
   elapsedMs: number | null;
   budgetMs: number | null;
   deadlineExceeded: boolean;
   statusTransportFailed: boolean;
   pairReads: number | null;
+  /** Null for an IP address in the URL, a read through a proxy, or when no read reached the host. */
+  resolution: HostResolutionView | null;
+}
+
+function hostResolution(value: unknown): HostResolutionView | null {
+  const resolution = record(value);
+  const method = resolution?.method;
+  const address = resolution?.address;
+  if ((method !== 'system' && method !== 'mdns') || typeof address !== 'string') return null;
+  // An IPv4 or IPv6 address as the collector reports it, nothing else.
+  return /^[0-9A-Fa-f.:]{2,45}$/u.test(address) ? { method, address } : null;
 }
 
 export function collectionView(snapshot: TelemetrySnapshot | null | undefined): CollectionView | null {
@@ -151,6 +176,7 @@ export function collectionView(snapshot: TelemetrySnapshot | null | undefined): 
     deadlineExceeded: collection.deadline_exceeded === true,
     statusTransportFailed: collection.status_transport_failed === true,
     pairReads: nonNegative(collection.pair_reads),
+    resolution: hostResolution(collection.host_resolution),
   };
 }
 
@@ -319,7 +345,7 @@ export function peakConsistency(item: Candidate): { distanceDeg: number | null; 
 
 function freshAtRead(snapshot: TelemetrySnapshot): boolean {
   if (snapshot.status?.available !== true) return false;
-  return (['csv', 'xml'] as const).some((name) => {
+  return sourceViewNames(snapshot).some((name) => {
     const item = candidate(snapshot, name);
     return item.available === true && item.freshness?.fresh === true;
   });
@@ -383,6 +409,7 @@ export function errorKindKey(kind: ResourceErrorKind | null): MessageKey {
 const GATE_CHECK_KEYS: Record<string, MessageKey> = {
   status_available: 'diag.check.status_available',
   status_fresh: 'diag.check.status_fresh',
+  mqtt_health_fresh: 'diag.check.mqtt_health_fresh',
   daq_healthy: 'diag.check.daq_healthy',
   adc_not_overdriven: 'diag.check.adc_not_overdriven',
   node_not_stalled: 'diag.check.node_not_stalled',
@@ -395,6 +422,7 @@ const GATE_CHECK_KEYS: Record<string, MessageKey> = {
   native_views_consistent: 'diag.check.native_views_consistent',
   angular_peak_consistent: 'diag.check.angular_peak_consistent',
   native_angle_checked: 'diag.check.native_angle_checked',
+  angular_vector_live: 'diag.check.angular_vector_live',
 };
 
 /** i18n key for a known publication-gate check, or null for an unknown one. */
@@ -529,6 +557,7 @@ const COLLECTOR_ERRORS: ReadonlyArray<[RegExp, (match: RegExpMatchArray) => [Mes
   [/^connection refused$/, () => ['health.error.connectionRefused']],
   [/^timed out$/, () => ['health.error.timedOut']],
   [/^host name resolution failed$/, () => ['health.error.dnsFailed']],
+  [/^([a-z0-9.-]{1,253}\.local) could not be resolved \(system and mDNS\); use an IP address$/, (match) => ['health.error.localNameFailed', { host: match[1] }]],
   [/^host unreachable$/, () => ['health.error.hostUnreachable']],
   [/^network error( \(\w+\))?$/, () => ['health.error.network']],
   [/^HTTP (\d{3})$/, (match) => ['health.error.httpStatus', { code: match[1] }]],

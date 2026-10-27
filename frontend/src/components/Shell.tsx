@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Branding, TelemetrySnapshot, Tone } from '../types';
 import { REFRESH_INTERVALS_S, candidateErrors, deriveDataState, toneFor } from '../lib/telemetry';
 import { actionableGateReasons, doaStatusTextKey, overviewDoaStatus, rankGateReasons } from '../lib/doaStatus';
+import { sourceBadge, sourceReasonKey } from '../lib/telemetrySource';
 import { shortcutAction } from '../lib/shortcuts';
 import { THEME_STORAGE_KEY, readPreference, writePreference } from '../lib/preferenceStore';
 import { LANGS, gateReasonLabel, useI18n } from '../lib/i18n';
@@ -10,6 +11,7 @@ import type { MessageKey, Translate } from '../lib/i18n';
 import { Icon } from './ui';
 import { ROUTES, routeFromHash, routeHash } from '../lib/routes';
 import type { RouteName } from '../lib/routes';
+import type { ConsoleAccess } from '../lib/access';
 import { PageReadAgeContext } from './page/pageContext';
 
 export { ROUTES, routeShortcut } from '../lib/routes';
@@ -85,6 +87,7 @@ export function ConsoleShell({
   refreshError = null,
   onRefreshSecondsChange,
   toolbar,
+  access = 'local',
   children,
 }: {
   route: RouteName;
@@ -112,6 +115,8 @@ export function ConsoleShell({
   onRefreshSecondsChange?: (seconds: number) => void;
   /** Page tools in the top bar; App fills it on Overview only. */
   toolbar?: ReactNode;
+  /** The LAN view ("lan-view") shows a VIEW ONLY chip, and its Receiver route is an ordinary page without the frame. */
+  access?: ConsoleAccess;
   children: ReactNode;
 }): JSX.Element {
   const { lang, setLang, t } = useI18n();
@@ -125,6 +130,12 @@ export function ConsoleShell({
   // The same readiness decision Overview uses for the map, readout and polar plot.
   const doa = overviewDoaStatus(snapshot, localSnapshotFresh);
   const doaTitle = snapshot ? t(doaStatusTextKey(doa.reason)) : undefined;
+  // MQTT, Data Out (fallback) or none: where the console took this answer from,
+  // and for a fallback the cause (issue #8).
+  const source = sourceBadge(snapshot);
+  const sourceTitle = source && source.reasons.length > 0
+    ? source.reasons.map((reason) => `${reason} · ${t(sourceReasonKey(reason))}`).join('\n')
+    : undefined;
   const gate = String(snapshot?.publication_gate?.state ?? 'BLOCKED').toUpperCase();
   const gateReason = gate === 'READY' ? undefined : rankGateReasons(snapshot?.publication_gate?.reasons)[0];
   // Snapshot is about the read itself: a read that just completed is CURRENT even when it reports UNAVAILABLE.
@@ -136,6 +147,9 @@ export function ConsoleShell({
   const mqttTitle = mqttError ? t('app.mqttReadFailed', { error: mqttError }) : undefined;
   const readLabel = loading ? t('shell.reading') : lastReadAgeMs === null ? t('shell.noRead') : t('shell.lastRead', { age: formatElapsed(t, lastReadAgeMs) });
   const overview = route === 'overview';
+  const viewOnly = access === 'lan-view';
+  // The Receiver frame's full-bleed layout; the LAN view shows an ordinary page there.
+  const receiverFrame = route === 'receiver' && !viewOnly;
 
   // The page menu is a popover at every width. It stays in the DOM while
   // closed (hidden), so the routes and their keys are part of the markup.
@@ -205,7 +219,8 @@ export function ConsoleShell({
   const shellClass = [
     'console-shell',
     overview ? 'is-overview' : '',
-    route === 'receiver' ? 'is-receiver' : '',
+    receiverFrame ? 'is-receiver' : '',
+    viewOnly ? 'is-view-only' : '',
     menuOpen ? 'menu-open' : '',
   ].filter(Boolean).join(' ');
   const routeLabel = t(`route.${route}` as MessageKey);
@@ -254,7 +269,7 @@ export function ConsoleShell({
           <button className="page-menu-theme" type="button" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} aria-label={themeLabel} title={themeLabel}>
             <Icon name={theme === 'dark' ? 'sun' : 'moon'} /><span>{t('shell.theme')}</span>
           </button>
-          <div className="local-chip"><Icon name="lock" /><span>{t('shell.readOnly')}</span></div>
+          <div className="local-chip"><Icon name="lock" /><span>{viewOnly ? t('shell.viewOnly') : t('shell.readOnly')}</span></div>
         </div>
       </div>
       <div className="console-main">
@@ -271,7 +286,8 @@ export function ConsoleShell({
               <span className="topbar-read">{readLabel}</span>
             </div>
           ) : null}
-          <div className="telemetry-strip" role="group" aria-label={t('shell.runtimeStatus')}>
+          <div className={source ? 'telemetry-strip has-source' : 'telemetry-strip'} role="group" aria-label={t('shell.runtimeStatus')}>
+            {source ? <TelemetryItem label={t('status.source')} value={t(source.labelKey)} tone={source.tone} title={sourceTitle} /> : null}
             <TelemetryItem label={t('status.data')} value={dataState} tone={dataTone} title={dataTitle} />
             <TelemetryItem label={t('status.doa')} value={doa.code} tone={doa.tone} title={doaTitle} />
             <TelemetryItem label={t('status.delivery')} value={gate} tone={gate === 'READY' ? 'good' : 'warn'} title={gateReason ? `${gateReason} · ${gateReasonLabel(lang, gateReason)}` : undefined} />
@@ -282,6 +298,7 @@ export function ConsoleShell({
           <span className="topbar-spacer" aria-hidden="true" />
           {toolbar ? <div className="topbar-toolbar">{toolbar}</div> : null}
           <div className="topbar-tools">
+            {viewOnly ? <span className="ov-chip tone-info view-only-chip">{t('shell.viewOnly')}</span> : null}
             <button className={`icon-button refresh-button${loading ? ' is-loading' : ''}`} type="button" onClick={onRefresh} aria-busy={loading} aria-label={t('shell.refresh')} aria-keyshortcuts="R" title={t('shell.refreshShortcut')}>
               <Icon name="refresh" />
             </button>
@@ -324,7 +341,7 @@ export function ConsoleShell({
           </div>
         </header>
         {readError ? <div className="read-error-banner" role="alert"><i aria-hidden="true" /><span>{t('shell.snapshotError', { error: readError })}</span></div> : null}
-        <main id="console-content" tabIndex={-1} aria-label={overview ? routeLabel : undefined} className={`page-content ${overview ? 'page-content-overview' : route === 'receiver' ? 'page-content-receiver' : ''}`}>
+        <main id="console-content" tabIndex={-1} aria-label={overview ? routeLabel : undefined} className={`page-content ${overview ? 'page-content-overview' : receiverFrame ? 'page-content-receiver' : ''}`}>
           <PageReadAgeContext.Provider value={overview ? null : readLabel}>{children}</PageReadAgeContext.Provider>
         </main>
       </div>

@@ -52,7 +52,7 @@ tools/fixtures/
 
 Fixture valid/stale/unhealthy/malformed/nonfinite/missing-status/conflict/partial dan Ground Console lokal sudah dibuat serta diuji. Console hanya read-only untuk data dan dry-run untuk settings; belum ada command nyata ke Raspberry.
 
-Tahap 4 synthetic MQTT:
+Tahap 4 synthetic MQTT (file contract, publisher, dan test-nya dihapus di 3.0.0, `CHANGELOG.md`; monitor kini hanya membaca RDF Node):
 
 ```text
 SDR_DOA_STAGE4_SYNTHETIC_MQTT_REPORT.md
@@ -65,7 +65,7 @@ tools/mqtt_stage4.conf
 
 Contract MQTT, broker loopback, QoS/retain, reconnect, latest-value-wins, pengukuran payload, dan panel monitor MQTT di Ground Console sudah diuji hanya dengan data synthetic. Broker produksi, Raspberry, T900, dan PPP tidak disentuh.
 
-Implementasi LAN edge agent staging:
+Implementasi LAN edge agent staging (dihapus di 3.0.0, `CHANGELOG.md`; RDF-SDR menjalankan RDF Node edge):
 
 ```text
 SDR_DOA_LAN_AGENT_IMPLEMENTATION_REPORT.md

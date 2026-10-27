@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError, normalizeCapabilities } from '../api';
-import { activeSection, adminErrorKey, atPageBottom, coordinateText, gpsErrorField, gpsInputErrorKey, isLoopbackHost, mergeSavedConfigIntoDraft, normalizeConnectionDraft, parseBaseRevision, parseDryRunChanges, patchKeyUnit, refreshIntervalOptions, refreshWarningKey, summarizeDryRun } from './configForm';
+import { activeSection, adminErrorKey, atPageBottom, coordinateText, gpsErrorField, gpsInputErrorKey, isLoopbackHost, mergeSavedConfigIntoDraft, normalizeConnectionDraft, parseDryRunChanges, patchKeyUnit, refreshIntervalOptions, refreshWarningKey, summarizeDryRun } from './configForm';
 import { manualGpsOverrideFromInput } from './map';
 import type { ConsoleConfig } from '../types';
 
@@ -57,8 +57,8 @@ describe('refresh intervals (AUD-24)', () => {
   });
 
   it('normalizes /api/capabilities defensively', () => {
-    expect(normalizeCapabilities({ refresh_intervals_s: [30, 0, 2, 2, 1, -1, 1.5, '5', 99999], admin_enabled: false })).toEqual({ refreshIntervalsS: [0, 1, 2, 30], adminEnabled: false, adminDefaultPassword: null, configPatch: null });
-    expect(normalizeCapabilities('nope')).toEqual({ refreshIntervalsS: null, adminEnabled: null, adminDefaultPassword: null, configPatch: null });
+    expect(normalizeCapabilities({ refresh_intervals_s: [30, 0, 2, 2, 1, -1, 1.5, '5', 99999], admin_enabled: false })).toEqual({ refreshIntervalsS: [0, 1, 2, 30], adminEnabled: false, adminDefaultPassword: null, configPatch: null, access: null, lanAccess: null });
+    expect(normalizeCapabilities('nope')).toEqual({ refreshIntervalsS: null, adminEnabled: null, adminDefaultPassword: null, configPatch: null, access: null, lanAccess: null });
   });
 
   it('reads the default-password flag and the config patch block without trusting its shape', () => {
@@ -68,23 +68,31 @@ describe('refresh intervals (AUD-24)', () => {
       config_patch: {
         enabled: true,
         requires_admin: true,
-        topic: 'sdr/v1/uav-01/cmd/config/patch',
+        topic: 'sdr/v2/uav-01/cmd/config/patch',
+        get_topic: 'sdr/v2/uav-01/cmd/config/get',
+        ack_topic: 'sdr/v2/uav-01/ack/config',
+        settings_topic: 'sdr/v2/uav-01/settings/reported',
         qos: 1,
-        ttl_ms: 60000,
-        ranges: { center_frequency_hz: [24000000, 1800000000], gain_db: [60, -100], vfo_squelch_db: [-200, 'x'], unknown_field: [0, 1] },
+        ttl_ms: 15000,
+        ranges: { center_frequency_hz: [24000000, 1766000000], gain_db: [60, -100], vfo0_squelch_db: [-200, 'x'], vfo_squelch_db: [-200, 50], unknown_field: [0, 1] },
+        gain_table_db: [0, 15.7, 'x', 49.6, 1e9],
       },
     });
     expect(capabilities.adminDefaultPassword).toBe(true);
     expect(capabilities.configPatch).toEqual({
       enabled: true,
       requiresAdmin: true,
-      topic: 'sdr/v1/uav-01/cmd/config/patch',
+      topic: 'sdr/v2/uav-01/cmd/config/patch',
+      getTopic: 'sdr/v2/uav-01/cmd/config/get',
+      ackTopic: 'sdr/v2/uav-01/ack/config',
+      settingsTopic: 'sdr/v2/uav-01/settings/reported',
       qos: 1,
-      ttlMs: 60000,
-      ranges: { center_frequency_hz: [24000000, 1800000000] },
+      ttlMs: 15000,
+      ranges: { center_frequency_hz: [24000000, 1766000000] },
+      gainTableDb: [0, 15.7, 49.6],
     });
-    const hostile = normalizeCapabilities({ config_patch: { enabled: 'yes', requires_admin: 0, topic: 'sdr/#', qos: 7, ttl_ms: 1e9 } }).configPatch;
-    expect(hostile).toEqual({ enabled: false, requiresAdmin: true, topic: null, qos: null, ttlMs: null, ranges: {} });
+    const hostile = normalizeCapabilities({ config_patch: { enabled: 'yes', requires_admin: 0, topic: 'sdr/#', get_topic: 'sdr/+/x', qos: 7, ttl_ms: 1e9, gain_table_db: 'all' } }).configPatch;
+    expect(hostile).toEqual({ enabled: false, requiresAdmin: true, topic: null, getTopic: null, ackTopic: null, settingsTopic: null, qos: null, ttlMs: null, ranges: {}, gainTableDb: [] });
   });
 });
 
@@ -106,16 +114,9 @@ describe('manual GPS messages (AUD-99)', () => {
 });
 
 describe('dry-run form (AUD-74)', () => {
-  it('requires a non-negative integer base revision', () => {
-    expect(parseBaseRevision('')).toEqual({ ok: false, error: 'config.baseRevisionRequired' });
-    expect(parseBaseRevision('-1')).toEqual({ ok: false, error: 'config.baseRevisionInvalid' });
-    expect(parseBaseRevision('1.5')).toEqual({ ok: false, error: 'config.baseRevisionInvalid' });
-    expect(parseBaseRevision(' 42 ')).toEqual({ ok: true, value: 42 });
-  });
-
   it('sends only filled numeric fields and names a non-numeric one', () => {
-    const fields = [{ key: 'gain_db', label: 'config.field.gain' as const }, { key: 'vfo_squelch_db', label: 'config.field.squelch' as const }];
-    expect(parseDryRunChanges({ gain_db: '12.5', vfo_squelch_db: '' }, fields)).toEqual({ ok: true, value: { gain_db: 12.5 } });
+    const fields = [{ key: 'gain_db', label: 'config.field.gain' as const }, { key: 'vfo0_squelch_db', label: 'config.field.squelch' as const }];
+    expect(parseDryRunChanges({ gain_db: '12.5', vfo0_squelch_db: '' }, fields)).toEqual({ ok: true, value: { gain_db: 12.5 } });
     expect(parseDryRunChanges({}, fields)).toEqual({ ok: false, error: 'config.dryRunEmpty' });
     expect(parseDryRunChanges({ gain_db: 'loud' }, fields)).toEqual({ ok: false, error: 'config.dryRunNotNumber', vars: { field: 'gain_db' } });
   });
@@ -209,17 +210,22 @@ describe('Configuration page helpers', () => {
       ok: true,
       validation: 'passed',
       transport: 'none',
-      command: { base_config_rev: 12, issued_ts_ms: 1000, expires_ts_ms: 61000, changes: { center_frequency_hz: 433920000, gain_db: 12.5, bad: 'x', inf: Number.POSITIVE_INFINITY } },
+      topic: 'sdr/v2/uav-01/cmd/config/patch',
+      command: { v: 2, op: 'config.patch', sid: '0a1b2c3d', base_rev: 12, issued_ms: 1000, expires_ms: 16000, changes: { center_frequency_hz: 433920000, gain_db: 12.5, bad: 'x', inf: Number.POSITIVE_INFINITY } },
     })).toEqual({
       validation: 'passed',
       transport: 'none',
-      baseConfigRev: 12,
+      baseRev: 12,
+      sid: '0a1b2c3d',
+      topic: 'sdr/v2/uav-01/cmd/config/patch',
       changes: [{ key: 'center_frequency_hz', value: 433920000 }, { key: 'gain_db', value: 12.5 }],
-      ttlMs: 60000,
+      ttlMs: 15000,
     });
-    expect(summarizeDryRun({ command: 'x' })).toEqual({ validation: null, transport: null, baseConfigRev: null, changes: [], ttlMs: null });
-    expect(patchKeyUnit('vfo_bandwidth_hz')).toBe('Hz');
-    expect(patchKeyUnit('vfo_squelch_db')).toBe('dB');
+    // No node session yet: the preview has base_rev and sid null.
+    expect(summarizeDryRun({ topic: 'sdr/#\n', command: { base_rev: null, sid: 'NOT-HEX', changes: {} } })).toEqual({ validation: null, transport: null, baseRev: null, sid: null, topic: null, changes: [], ttlMs: null });
+    expect(summarizeDryRun({ command: 'x' })).toEqual({ validation: null, transport: null, baseRev: null, sid: null, topic: null, changes: [], ttlMs: null });
+    expect(patchKeyUnit('vfo0_bandwidth_hz')).toBe('Hz');
+    expect(patchKeyUnit('vfo0_squelch_db')).toBe('dB');
     expect(patchKeyUnit('other')).toBe('');
   });
 });

@@ -1,0 +1,16 @@
+# Written by the t900-ground-link installer (packaging/ground-link/install.sh).
+# Started on demand by an operator (t900-link usb-reset); the polkit rule
+# 50-t900-ground-link.rules lets the operator user start it without a password.
+[Unit]
+Description=Re-enumerate the T900 USB device and restart @PPP_SERVICE@
+Documentation=file://@SHARE_DIR@/README.md
+
+[Service]
+Type=oneshot
+ExecStart=@SBIN_DIR@/t900-ground-watchdog usb-reset
+SyslogIdentifier=t900-ground-watchdog
+StateDirectory=t900-ground-link
+StateDirectoryMode=0755
+TimeoutStartSec=10min
+NoNewPrivileges=yes
+PrivateTmp=yes

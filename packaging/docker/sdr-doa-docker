@@ -1,7 +1,6 @@
 #!/bin/sh
-# sdr-doa-docker: install, update and roll back the SDR-DoA Ground Console (or
-# the RDF-SDR edge agent) on a Linux Docker host from the public images on
-# GHCR. An update needs only docker with compose: no GitHub login, git, curl
+# sdr-doa-docker: install, update and roll back the SDR-DoA Ground Console on
+# a Linux Docker host from its public image on GHCR. An update needs only docker with compose: no GitHub login, git, curl
 # or Python. It pulls the channel tag (default: the major version), waits for
 # the container to report healthy, and puts the previous image back when the
 # new one fails.
@@ -17,13 +16,11 @@ set -eu
 
 PROG=sdr-doa-docker
 # The update channel of a new install: the major version of this release.
-DEFAULT_CHANNEL=2
+DEFAULT_CHANNEL=3
 CONSOLE_IMAGE=ghcr.io/sanadunt/sdr-doa-ground-console
-AGENT_IMAGE=ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent
 PREVIOUS_TAG=sdr-doa-previous
 DEFAULT_PORT=8787
 DEFAULT_TIME=03:30
-DEFAULT_SHARE_DIR=/home/doasdr/doasdr/_share
 UNIT_NAME=sdr-doa-docker-update
 MARKER='# Written by sdr-doa-docker'
 LOG_KEEP=500
@@ -39,13 +36,12 @@ SYSTEMCTL=${SDR_DOA_SYSTEMCTL:-systemctl}
 SYSTEMD_DIR=${SDR_DOA_SYSTEMD_DIR:-/etc/systemd/system}
 HEALTH_TIMEOUT=${SDR_DOA_HEALTH_TIMEOUT:-180}
 HEALTH_INTERVAL=${SDR_DOA_HEALTH_INTERVAL:-2}
-AGENT_SETTLE=${SDR_DOA_AGENT_SETTLE:-20}
+SETTLE=${SDR_DOA_SETTLE:-20}
 # Owner that root's timer accepts for DIR and the script besides uid 0; only
 # tests that fake root as another user set it.
 ROOT_UID=${SDR_DOA_ROOT_UID:-0}
 
 DIR=
-VARIANT=console
 PROJECT=sdr-doa-ground-console
 SERVICE=console
 DEFAULT_IMAGE=$CONSOLE_IMAGE
@@ -70,14 +66,15 @@ CID=
 C_STATUS=
 C_HEALTH=
 UPDATE_YES=0
+# An RDF-SDR agent install of sdr-doa-docker 2: version 3 manages the console only.
+AGENT_GONE="this directory holds the RDF-SDR agent install of $PROG 2, which $PROG 3 no longer manages (the Raspberry runs the RDF Node edge); stop it with 'docker compose down' in that directory"
 
 usage() {
   cat <<'EOF'
 Usage: sdr-doa-docker COMMAND [options]
 
-Runs the SDR-DoA Ground Console (or, with --agent, the RDF-SDR edge agent)
-from its public GHCR image with docker compose, and keeps it up to date
-without a GitHub login.
+Runs the SDR-DoA Ground Console from its public GHCR image with docker
+compose, and keeps it up to date without a GitHub login.
 
 Commands:
   install       write DIR/compose.yml and DIR/.env, pull, start, wait healthy
@@ -92,29 +89,19 @@ Commands:
 
 install options:
   --dir DIR         install directory (default /opt/sdr-doa-ground-console as
-                    root, else ~/sdr-doa-ground-console; with --agent
-                    /opt/sdr-doa-agent or ~/sdr-doa-agent)
-  --channel TAG     image tag to follow: 2 (default) takes every 2.x.y release,
-                    2.0 only 2.0.z, 2.0.0 stays put, latest follows every
+                    root, else ~/sdr-doa-ground-console)
+  --channel TAG     image tag to follow: 3 (default) takes every 3.x.y release,
+                    3.0 only 3.0.z, 3.0.0 stays put, latest follows every
                     release including a new major version
   --port N          console port (default 8787; the console binds 127.0.0.1)
-  --agent           install the RDF-SDR edge agent instead of the console
-  --enable-config   (agent) let Kontrol write settings.json: mounts --share-dir
-                    and runs the agent as its owner, state in DIR/state
-  --disable-config  (agent) answer config patches with REMOTE_CONTROL_DISABLED
-  --share-dir PATH  (agent) KrakenSDR _share directory
-                    (default /home/doasdr/doasdr/_share)
-  --user UID:GID    (agent) user for --enable-config (default: owner of
-                    --share-dir; never root)
   --auto-update     also turn the daily update on (root)
   --time HH:MM      time of the daily update (default 03:30, local time)
-  --force           replace a compose.yml that sdr-doa-docker did not write;
-                    (agent) install although the native agent service is
-                    installed, which must then be stopped
+  --force           replace a compose.yml that sdr-doa-docker did not write
+                    (never the RDF-SDR agent install of sdr-doa-docker 2)
 
 update options:
-  --dir DIR         install directory (default: the console install, else the
-                    agent install, in the home directory or /opt)
+  --dir DIR         install directory (default: the console install in the
+                    home directory or /opt)
   --check           only report whether the channel has a different image;
                     without the docker buildx plugin it pulls the image to
                     compare (the running container and the tag stay as they
@@ -129,28 +116,28 @@ update options:
 rollback, status and auto-update take --dir DIR; auto-update on takes
 --time HH:MM and --force (move the timer from another install to this one).
 
-A re-run of install keeps .env and agent.env; only the options given change.
-update only replaces the image: apply an edit of .env or agent.env with
-'docker compose up -d' in DIR (or a re-run of install). In both files wrap a
-value with a $ in single quotes (SDR_DOA_ADMIN_PASSWORD='...'): docker
-compose replaces $name in unquoted and double-quoted values.
+A re-run of install keeps .env; only the options given change. update only
+replaces the image: apply an edit of .env with 'docker compose up -d' in DIR
+(or a re-run of install). Wrap a value with a $ in single quotes there
+(SDR_DOA_ADMIN_PASSWORD='...'): docker compose replaces $name in unquoted and
+double-quoted values.
 A new major version arrives only when you change the channel, for example
-  sdr-doa-docker install --channel 3
+  sdr-doa-docker install --channel 4
 Admin password of the console (default 123456 until you set one); use sudo
 for an install in /opt:
   cd /opt/sdr-doa-ground-console
   sudo docker compose exec console sdr-doa-set-admin-password
   sudo docker compose restart console
 
-Files in DIR: compose.yml and .env (written by install), agent.env (agent
-settings), update.log (one line per step), .bad-images (images that failed
-their health check; auto-update skips them until a different image appears).
+Files in DIR: compose.yml and .env (written by install), update.log (one
+line per step), .bad-images (images that failed their health check;
+auto-update skips them until a different image appears).
 
 Environment overrides (tests and special setups): SDR_DOA_DOCKER (docker
 binary), SDR_DOA_SYSTEMD_DIR (unit directory, implies systemd),
 SDR_DOA_SYSTEMCTL, SDR_DOA_BIN_DIR (where install copies this script),
 SDR_DOA_HEALTH_TIMEOUT (seconds, default 180), SDR_DOA_HEALTH_INTERVAL
-(seconds between checks, default 2), SDR_DOA_AGENT_SETTLE (seconds an image
+(seconds between checks, default 2), SDR_DOA_SETTLE (seconds an image
 without a health check must run without restarting, default 20),
 SDR_DOA_ROOT_UID (tests only: another owner root's timer accepts).
 EOF
@@ -208,7 +195,7 @@ check_dir() {
 
 check_tag() {
   case $1 in
-    '' | *[!A-Za-z0-9_.-]* | [.-]*) usage_error "the channel must be an image tag such as 2, 2.0 or 2.0.0, got '$1'" ;;
+    '' | *[!A-Za-z0-9_.-]* | [.-]*) usage_error "the channel must be an image tag such as 3, 3.0 or 3.0.0, got '$1'" ;;
   esac
   [ "$1" != "$PREVIOUS_TAG" ] || usage_error "$PREVIOUS_TAG is the tag of the previous image, not a channel"
   [ "${#1}" -le 128 ] || usage_error "the channel '$1' is longer than 128 characters"
@@ -252,20 +239,18 @@ need_home() {
 }
 
 default_dir() {
-  if is_root; then dd_base=/opt; else dd_base=$HOME; fi
-  if [ "$1" = agent ]; then printf '%s/sdr-doa-agent' "$dd_base"; else printf '%s/sdr-doa-ground-console' "$dd_base"; fi
+  if is_root; then printf '/opt/sdr-doa-ground-console'; else printf '%s/sdr-doa-ground-console' "$HOME"; fi
 }
 
-# DIR for update, rollback, status and auto-update: --dir, else the console
-# default, else the agent default when only that one exists.
+# DIR for update, rollback, status and auto-update: --dir, else the default.
 resolve_dir() {
   if [ -n "$1" ]; then
     DIR=$(absolute "$1")
   else
     need_home
-    DIR=$(default_dir console)
+    DIR=$(default_dir)
     # A user also finds the root install in /opt (status, update --check).
-    for rd_candidate in "$DIR" "$(default_dir agent)" /opt/sdr-doa-ground-console /opt/sdr-doa-agent; do
+    for rd_candidate in "$DIR" /opt/sdr-doa-ground-console; do
       if [ -f "$rd_candidate/compose.yml" ]; then
         DIR=$rd_candidate
         break
@@ -276,20 +261,8 @@ resolve_dir() {
   check_dir "$DIR"
 }
 
-set_variant() {
-  VARIANT=$1
-  if [ "$VARIANT" = agent ]; then
-    PROJECT=sdr-doa-agent
-    SERVICE=agent
-    DEFAULT_IMAGE=$AGENT_IMAGE
-  else
-    PROJECT=sdr-doa-ground-console
-    SERVICE=console
-    DEFAULT_IMAGE=$CONSOLE_IMAGE
-  fi
-}
-
-# console, agent, or empty for a compose file this script did not write.
+# console, agent (the RDF-SDR agent install of sdr-doa-docker 2), or empty
+# for a compose file this script did not write.
 variant_of() {
   vo_first=$(head -n 1 "$1" 2>/dev/null || true)
   case $vo_first in
@@ -353,8 +326,8 @@ need_readable() {
 # takes them only from DIR/.env.
 read_env() {
   need_readable "$DIR/.env"
-  unset SDR_DOA_ADMIN_PASSWORD SDR_DOA_SEED_BASE_URL SDR_DOA_SEED_MQTT_HOST SDR_DOA_SEED_MQTT_PORT \
-    SDR_DOA_SEED_MQTT_TRANSPORT SDR_DOA_SEED_MQTT_WS_PATH SDR_DOA_SEED_REFRESH_SECONDS
+  unset SDR_DOA_ADMIN_PASSWORD SDR_DOA_SEED_DATA_OUT_HOSTS SDR_DOA_SEED_BASE_URL SDR_DOA_SEED_MQTT_HOST \
+    SDR_DOA_SEED_MQTT_PORT SDR_DOA_SEED_MQTT_TRANSPORT SDR_DOA_SEED_MQTT_WS_PATH SDR_DOA_SEED_REFRESH_SECONDS
   IMAGE=$(env_get "$DIR/.env" SDR_DOA_IMAGE)
   [ -n "$IMAGE" ] || IMAGE=$DEFAULT_IMAGE
   CHANNEL=$(env_get "$DIR/.env" SDR_DOA_IMAGE_TAG)
@@ -396,13 +369,8 @@ dollar_keys() {
 # replaces $name in unquoted and double-quoted values of .env and env_file.
 # Names only, never a value.
 warn_dollars() {
-  if [ "$VARIANT" = agent ]; then
-    wd_list="$DIR/agent.env|[A-Za-z_][A-Za-z0-9_]*"
-  else
-    wd_list="$DIR/.env|SDR_DOA_ADMIN_PASSWORD|SDR_DOA_SEED_[A-Z_]+"
-  fi
-  wd_file=${wd_list%%|*}
-  for wd_key in $(dollar_keys "$wd_file" "${wd_list#*|}"); do
+  wd_file=$DIR/.env
+  for wd_key in $(dollar_keys "$wd_file" 'SDR_DOA_ADMIN_PASSWORD|SDR_DOA_SEED_[A-Z_]+'); do
     "${1:-log}" "warning: $wd_key in $wd_file has a \$ outside single quotes; docker compose replaces \$name there, so the container gets another value. Write it as $wd_key='...'"
   done
 }
@@ -411,7 +379,7 @@ load_install() {
   [ -f "$DIR/compose.yml" ] || die "no $PROG install in $DIR; run '$PROG install' first, or pass --dir"
   li_variant=$(variant_of "$DIR/compose.yml")
   [ -n "$li_variant" ] || die "$DIR/compose.yml was not written by $PROG"
-  set_variant "$li_variant"
+  [ "$li_variant" = console ] || die "$AGENT_GONE"
   read_env
 }
 
@@ -510,7 +478,7 @@ find_current() {
 }
 
 # wait_healthy IMAGE_ID: 0 once the container reports healthy (or, for an
-# image without a health check, runs AGENT_SETTLE seconds without
+# image without a health check, runs SETTLE seconds without
 # restarting); otherwise 1 with the cause in REASON. IMAGE_FAULT=1 when the
 # image itself failed (unhealthy, exited, restarting); a missing container or
 # a timeout on a slow host does not show that.
@@ -554,7 +522,7 @@ EOF
             ;;
           none)
             [ -n "$wh_since" ] || wh_since=$(now)
-            if [ $(($(now) - wh_since)) -ge "$AGENT_SETTLE" ]; then return 0; fi
+            if [ $(($(now) - wh_since)) -ge "$SETTLE" ]; then return 0; fi
             ;;
         esac
         ;;
@@ -773,7 +741,7 @@ check_older() {
 # Whether the console's Receiver records or archives a scan right now. An
 # image whose health check does not know --busy answers neither word.
 receiver_busy() {
-  [ "$VARIANT" = console ] && [ -n "$CID" ] && [ "$C_STATUS" = running ] || return 1
+  [ -n "$CID" ] && [ "$C_STATUS" = running ] || return 1
   rb_out=$("$DOCKER" exec "$CID" python "$HEALTHCHECK_PATH" --busy 2>/dev/null) || return 1
   [ "$rb_out" = busy ]
 }
@@ -989,6 +957,7 @@ services:
       #   docker compose restart console
       - SDR_DOA_ADMIN_PASSWORD
       # First start only: the console writes /data/console.json from these.
+      - SDR_DOA_SEED_DATA_OUT_HOSTS
       - SDR_DOA_SEED_BASE_URL
       - SDR_DOA_SEED_MQTT_HOST
       - SDR_DOA_SEED_MQTT_PORT
@@ -1003,90 +972,6 @@ volumes:
 EOF
 }
 
-# agent_compose CONFIG SHARE_DIR USER
-agent_compose() {
-  cat <<EOF
-$MARKER (agent). '$PROG install --agent' rewrites this file;
-# agent settings go in agent.env, the image channel in .env.
-name: sdr-doa-agent
-
-services:
-  agent:
-    image: \${SDR_DOA_IMAGE:-$AGENT_IMAGE}:\${SDR_DOA_IMAGE_TAG:-$DEFAULT_CHANNEL}
-    # 127.0.0.1 must be the Raspberry itself: Data Out on 8081 and a local broker.
-    network_mode: host
-    restart: unless-stopped
-    env_file:
-      - agent.env
-    environment:
-      # Paths inside the container; they win over agent.env.
-      STATE_DIR: /state
-      SETTINGS_PATH: /krakensdr/_share/settings.json
-EOF
-  if [ "$1" = 1 ]; then
-    cat <<EOF
-    # ENABLE_CONFIG=1: the agent writes settings.json as the owner of the
-    # KrakenSDR _share directory ($PROG install --agent --enable-config).
-    user: "$3"
-    volumes:
-      - ./state:/state
-      - $2:/krakensdr/_share
-EOF
-  else
-    cat <<EOF
-    volumes:
-      - agent-state:/state
-EOF
-  fi
-  cat <<EOF
-
-volumes:
-  agent-state:
-EOF
-}
-
-# The defaults of packaging/agent/agent.env.example for a container.
-agent_env_template() {
-  cat <<'EOF'
-# Settings of the SDR-DoA edge agent in Docker (sdr-doa-docker install --agent).
-# Apply a change with docker compose up -d in this directory (sdr-doa-docker
-# update only replaces the image). STATE_DIR and SETTINGS_PATH are set by
-# compose.yml. Keep this file mode 0600: it may hold the MQTT password. Empty
-# values use the agent's defaults. Wrap a value with a $ in single quotes
-# (SDR_DOA_MQTT_PASSWORD='...'): docker compose replaces $name in other values.
-
-# KrakenSDR Data Out on this Raspberry.
-BASE_URL=http://127.0.0.1:8081
-
-# MQTT broker. The agent speaks MQTT 3.1.1 over TCP, not WebSocket. A broker
-# that is not on loopback needs TLS (MQTT_TLS=1, or a CA file in MQTT_CAFILE)
-# and a username; the password goes in SDR_DOA_MQTT_PASSWORD.
-MQTT_HOST=127.0.0.1
-MQTT_PORT=1883
-MQTT_TLS=0
-MQTT_CAFILE=
-MQTT_USERNAME=
-SDR_DOA_MQTT_PASSWORD=
-
-# 1: publish health, state and config_reported (Kontrol needs them). 0: no MQTT.
-PUBLISH=1
-# 1: apply Kontrol config patches to settings.json (needs PUBLISH=1 and the
-# mount from sdr-doa-docker install --agent --enable-config).
-# 0: answer every patch with REMOTE_CONTROL_DISABLED.
-ENABLE_CONFIG=0
-
-# Optional tuning. CLOCK_SOURCE: local or remote_unverified.
-# AUTHORITY: none, csv or xml (with none the agent publishes no DoA).
-CLOCK_SOURCE=local
-AUTHORITY=
-HEALTH_INTERVAL=
-DOA_RATE=
-STATE_INTERVAL=
-POLL_INTERVAL=
-COLLECT_BUDGET=
-EOF
-}
-
 env_header() {
   cat <<EOF
 # Settings of the $PROG install in this directory, read by docker compose
@@ -1095,9 +980,6 @@ env_header() {
 # Change it with
 #   $PROG install --channel TAG
 # Keep this file mode 0600.
-EOF
-  if [ "$VARIANT" = console ]; then
-    cat <<EOF
 # Admin password: set it with
 #   docker compose exec console sdr-doa-set-admin-password
 # (it is kept in /data/.env in the volume). If SDR_DOA_ADMIN_PASSWORD or a
@@ -1106,7 +988,6 @@ EOF
 # values. Apply a change of this file with docker compose up -d here (or a
 # re-run of install); $PROG update only replaces the image.
 EOF
-  fi
 }
 
 # --- auto-update ----------------------------------------------------------------
@@ -1337,80 +1218,13 @@ install_self() {
   esac
 }
 
-# Agent --enable-config: the owner (UID:GID) of the share directory.
-share_owner() {
-  so_line=$(ls -nd "$1" 2>/dev/null) || return 1
-  printf '%s' "$so_line" | awk '{ print $3 ":" $4 }'
-}
-
-agent_setup() {
-  ag_config=$1
-  ag_share=$2
-  ag_user=$3
-  if [ ! -f "$DIR/agent.env" ]; then
-    agent_env_template | write_file "$DIR/agent.env" 0600
-    log "wrote $DIR/agent.env with the defaults; edit it, then run '$COMPOSE_HINT up -d' in $DIR"
-  fi
-  case $ag_config in
-    enable)
-      [ -n "$ag_share" ] || ag_share=$(env_get "$DIR/.env" SDR_DOA_AGENT_SHARE_DIR)
-      [ -n "$ag_share" ] || ag_share=$DEFAULT_SHARE_DIR
-      check_dir "$ag_share"
-      [ -d "$ag_share" ] || die "--share-dir $ag_share is not a directory (the KrakenSDR _share directory)"
-      if [ -z "$ag_user" ]; then ag_user=$(share_owner "$ag_share") || die "cannot read the owner of $ag_share"; fi
-      case $ag_user in
-        *:*) ;;
-        *)
-          id "$ag_user" >/dev/null 2>&1 || usage_error "--user $ag_user: no such user"
-          ag_user=$(id -u "$ag_user"):$(id -g "$ag_user")
-          ;;
-      esac
-      case $ag_user in
-        '' | *[!0-9:]* | *:*:* | :* | *:) usage_error "--user must be UID:GID or a user name, got '$ag_user'" ;;
-      esac
-      [ "${ag_user%%:*}" != 0 ] || die "the agent must not run as root; pick the owner of settings.json with --user"
-      mkdir -p "$DIR/state"
-      if [ "$(share_owner "$DIR/state")" != "$ag_user" ]; then
-        chown "$ag_user" "$DIR/state" || die "cannot give $DIR/state to $ag_user (run as root)"
-      fi
-      chmod 0700 "$DIR/state"
-      env_set "$DIR/.env" SDR_DOA_AGENT_CONFIG 1
-      env_set "$DIR/.env" SDR_DOA_AGENT_SHARE_DIR "$ag_share"
-      env_set "$DIR/.env" SDR_DOA_AGENT_USER "$ag_user"
-      env_set "$DIR/agent.env" ENABLE_CONFIG 1
-      env_set "$DIR/agent.env" PUBLISH 1
-      log "config patches on: $ag_share mounted, agent runs as $ag_user, state in $DIR/state"
-      ;;
-    disable)
-      env_set "$DIR/.env" SDR_DOA_AGENT_CONFIG 0
-      env_set "$DIR/agent.env" ENABLE_CONFIG 0
-      log "config patches off: the agent answers them with REMOTE_CONTROL_DISABLED"
-      ;;
-  esac
-  if [ "$(env_get "$DIR/.env" SDR_DOA_AGENT_CONFIG)" = 1 ]; then
-    ag_share=$(env_get "$DIR/.env" SDR_DOA_AGENT_SHARE_DIR)
-    ag_user=$(env_get "$DIR/.env" SDR_DOA_AGENT_USER)
-    check_dir "$ag_share"
-    case $ag_user in
-      '' | *[!0-9:]* | 0:*) die "SDR_DOA_AGENT_USER in $DIR/.env must be a non-root UID:GID" ;;
-    esac
-    agent_compose 1 "$ag_share" "$ag_user" | write_file "$DIR/compose.yml" 0644
-  else
-    agent_compose 0 '' '' | write_file "$DIR/compose.yml" 0644
-  fi
-}
-
 cmd_install() {
   in_dir=
   in_channel=
   in_port=
-  in_agent=0
   in_auto=0
   in_time=
   in_force=0
-  in_config=
-  in_share=
-  in_user=
   while [ $# -gt 0 ]; do
     case $1 in
       --*=*)
@@ -1425,11 +1239,9 @@ cmd_install() {
       --dir) need_value "$@"; in_dir=$2; shift ;;
       --channel) need_value "$@"; in_channel=$2; shift ;;
       --port) need_value "$@"; in_port=$2; shift ;;
-      --agent) in_agent=1 ;;
-      --enable-config) in_config=enable ;;
-      --disable-config) in_config=disable ;;
-      --share-dir) need_value "$@"; in_share=$2; shift ;;
-      --user) need_value "$@"; in_user=$2; shift ;;
+      --agent | --enable-config | --disable-config | --share-dir | --user)
+        usage_error "$1 was an RDF-SDR agent option; $PROG 3 installs the console only (the Raspberry runs the RDF Node edge)"
+        ;;
       --auto-update) in_auto=1 ;;
       --time) need_value "$@"; in_time=$2; shift ;;
       --force) in_force=1 ;;
@@ -1438,19 +1250,12 @@ cmd_install() {
     esac
     shift
   done
-  if [ "$in_agent" = 1 ]; then
-    [ -z "$in_port" ] || usage_error "--port is a console option"
-    set_variant agent
-  else
-    if [ -n "$in_config$in_share$in_user" ]; then usage_error "--enable-config, --disable-config, --share-dir and --user need --agent"; fi
-    set_variant console
-  fi
   [ -z "$in_channel" ] || check_tag "$in_channel"
   [ -z "$in_port" ] || check_port "$in_port"
   [ -z "$in_time" ] || check_time "$in_time"
   if [ -n "$in_time" ] && [ "$in_auto" != 1 ]; then usage_error "--time needs --auto-update"; fi
   need_home
-  if [ -n "$in_dir" ]; then DIR=$(absolute "$in_dir"); else DIR=$(default_dir "$VARIANT"); fi
+  if [ -n "$in_dir" ]; then DIR=$(absolute "$in_dir"); else DIR=$(default_dir); fi
   DIR=${DIR%/}
   check_dir "$DIR"
   # Root's timer: checked before anything is written (auto_update_on checks again).
@@ -1465,22 +1270,16 @@ cmd_install() {
       exit 2
     fi
   fi
-  # The native agent (packaging/agent/install-agent.sh) uses /opt/sdr-doa-agent
-  # and a system unit; two agents would both publish and answer config patches.
-  if [ "$VARIANT" = agent ] && [ "$in_force" != 1 ]; then
-    if [ -f "$DIR/install-info" ] || [ -f "$SYSTEMD_DIR/sdr-doa-agent.service" ]; then
-      die "the native RDF-SDR agent service (install-agent.sh) is installed, and two agents must not run at once; remove it first with 'sudo sh /opt/sdr-doa-agent/uninstall.sh' (agent.env and state stay), or pass --force"
-    fi
-  fi
-
   check_docker
   detect_compose
-  if [ -e "$DIR/compose.yml" ] && [ "$in_force" != 1 ]; then
+  if [ -e "$DIR/compose.yml" ]; then
     in_old=$(variant_of "$DIR/compose.yml")
-    if [ -z "$in_old" ]; then
+    # Not even with --force: writing the console's compose over the agent's
+    # would leave the agent project running with no file left to stop it.
+    if [ "$in_old" = agent ]; then
+      die "$AGENT_GONE; to put the console there, run that first and then move compose.yml away (--force does not replace it)"
+    elif [ -z "$in_old" ] && [ "$in_force" != 1 ]; then
       die "$DIR/compose.yml was not written by $PROG; move it away or pass --force"
-    elif [ "$in_old" != "$VARIANT" ]; then
-      die "$DIR holds the $in_old install; pick another --dir or pass --force"
     fi
   fi
   mkdir -p "$DIR"
@@ -1490,29 +1289,23 @@ cmd_install() {
   need_readable "$DIR/.env"
 
   if [ ! -f "$DIR/.env" ]; then env_header | write_file "$DIR/.env" 0600; fi
-  # A custom image stays; the default of the other variant (--force) does not.
+  # A custom image stays; the agent image an install of sdr-doa-docker 2 left in .env does not.
   case $(env_get "$DIR/.env" SDR_DOA_IMAGE) in
-    '' | "$CONSOLE_IMAGE" | "$AGENT_IMAGE") env_set "$DIR/.env" SDR_DOA_IMAGE "$DEFAULT_IMAGE" ;;
+    '' | "$CONSOLE_IMAGE" | */sdr-doa-rdf-sdr-agent) env_set "$DIR/.env" SDR_DOA_IMAGE "$DEFAULT_IMAGE" ;;
   esac
   if [ -n "$in_channel" ]; then
     env_set "$DIR/.env" SDR_DOA_IMAGE_TAG "$in_channel"
   elif [ -z "$(env_get "$DIR/.env" SDR_DOA_IMAGE_TAG)" ]; then
     env_set "$DIR/.env" SDR_DOA_IMAGE_TAG "$DEFAULT_CHANNEL"
   fi
-  if [ "$VARIANT" = console ]; then
-    if [ -n "$in_port" ]; then
-      env_set "$DIR/.env" SDR_DOA_PORT "$in_port"
-    elif [ -z "$(env_get "$DIR/.env" SDR_DOA_PORT)" ]; then
-      env_set "$DIR/.env" SDR_DOA_PORT "$DEFAULT_PORT"
-    fi
+  if [ -n "$in_port" ]; then
+    env_set "$DIR/.env" SDR_DOA_PORT "$in_port"
+  elif [ -z "$(env_get "$DIR/.env" SDR_DOA_PORT)" ]; then
+    env_set "$DIR/.env" SDR_DOA_PORT "$DEFAULT_PORT"
   fi
   chmod 600 "$DIR/.env"
   read_env
-  if [ "$VARIANT" = agent ]; then
-    agent_setup "$in_config" "$in_share" "$in_user"
-  else
-    console_compose | write_file "$DIR/compose.yml" 0644
-  fi
+  console_compose | write_file "$DIR/compose.yml" 0644
   log "wrote $DIR/compose.yml and $DIR/.env (channel $CHANNEL)"
   warn_dollars
   install_self
@@ -1527,17 +1320,12 @@ cmd_install() {
   say ""
   # .env is root's (0600) in a root install, so its commands need sudo.
   if is_root; then in_sudo='sudo '; else in_sudo=; fi
-  if [ "$VARIANT" = console ]; then
-    say "The Ground Console runs from $REF."
-    say "Open http://127.0.0.1:$PORT/ in Chromium or Chrome on this computer."
-    say "Set the admin password (default 123456 until you do):"
-    say "  cd $DIR"
-    say "  $in_sudo$COMPOSE_HINT exec console sdr-doa-set-admin-password"
-    say "  $in_sudo$COMPOSE_HINT restart console"
-  else
-    say "The RDF-SDR agent runs from $REF; settings in $DIR/agent.env."
-    say "Logs: cd $DIR && $in_sudo$COMPOSE_HINT logs -f agent"
-  fi
+  say "The Ground Console runs from $REF."
+  say "Open http://127.0.0.1:$PORT/ in Chromium or Chrome on this computer."
+  say "Set the admin password (default 123456 until you do):"
+  say "  cd $DIR"
+  say "  $in_sudo$COMPOSE_HINT exec console sdr-doa-set-admin-password"
+  say "  $in_sudo$COMPOSE_HINT restart console"
   if [ "$in_auto" = 1 ]; then
     if [ "$in_force" = 1 ]; then auto_update_on "${in_time:-$DEFAULT_TIME}" force; else auto_update_on "${in_time:-$DEFAULT_TIME}"; fi
   elif is_root; then
@@ -1683,7 +1471,7 @@ cmd_status() {
   done
   resolve_dir "$st_dir"
   load_install
-  say "install:     $DIR ($VARIANT, compose project $PROJECT)"
+  say "install:     $DIR (compose project $PROJECT)"
   say "image:       $REF"
   if command -v "$DOCKER" >/dev/null 2>&1 && "$DOCKER" info >/dev/null 2>&1; then
     find_current
@@ -1724,13 +1512,13 @@ EOF
   else
     say "last update: none"
   fi
-  if [ "$VARIANT" = console ]; then say "URL:         http://127.0.0.1:$PORT/"; fi
+  say "URL:         http://127.0.0.1:$PORT/"
   warn_dollars say
 }
 
 check_number SDR_DOA_HEALTH_TIMEOUT "$HEALTH_TIMEOUT"
 check_number SDR_DOA_HEALTH_INTERVAL "$HEALTH_INTERVAL"
-check_number SDR_DOA_AGENT_SETTLE "$AGENT_SETTLE"
+check_number SDR_DOA_SETTLE "$SETTLE"
 
 command=${1:-help}
 [ $# -eq 0 ] || shift

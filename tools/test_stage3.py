@@ -201,11 +201,11 @@ def test_conflicting_native_views_are_quarantined() -> None:
 def test_dry_run_settings_validation_has_no_apply_path() -> None:
     result = ground_console.validate_config_patch(
         {
-            "base_config_rev": 7,
             "changes": {
                 "center_frequency_hz": 433_920_000,
-                "gain_db": 24,
-                "vfo_bandwidth_hz": 12_500,
+                "vfo0_frequency_hz": 433_920_000,
+                "gain_db": 20.7,
+                "vfo0_bandwidth_hz": 12_500,
             },
         },
         now_ms=1_000,
@@ -213,12 +213,14 @@ def test_dry_run_settings_validation_has_no_apply_path() -> None:
     assert result["dry_run"] is True
     assert result["transport"] == "none"
     assert result["applied"] is False
-    assert result["command"]["expires_ts_ms"] == 11_000
+    assert result["command"]["expires_ms"] == 16_000
 
     for payload in (
         {"changes": {"external_url": "http://not-allowed"}},
         {"changes": {"gain_db": 999}},
         {"changes": {"gain_db": "NaN"}},
+        {"changes": {"gain_db": 24}},
+        {"changes": {"center_frequency_hz": 433_920_000}},
     ):
         try:
             ground_console.validate_config_patch(payload, now_ms=1_000)
@@ -321,7 +323,7 @@ def _http_smoke_and_target_allowlist(base: str) -> None:
 
     request = urllib.request.Request(
         base + "/api/dry-run/config-patch",
-        data=json.dumps({"base_config_rev": 3, "changes": {"gain_db": 24}}).encode("utf-8"),
+        data=json.dumps({"changes": {"gain_db": 20.7}}).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
@@ -329,22 +331,24 @@ def _http_smoke_and_target_allowlist(base: str) -> None:
     assert dry_run["dry_run"] is True
     assert dry_run["applied"] is False
     assert dry_run["transport"] == "none"
-    assert dry_run["command"]["base_config_rev"] == 3
+    # No MQTT monitor here, so no node session to name.
+    assert dry_run["session_known"] is False
+    assert dry_run["command"]["base_rev"] is None
 
-    missing_revision = urllib.request.Request(
+    off_table = urllib.request.Request(
         base + "/api/dry-run/config-patch",
         data=json.dumps({"changes": {"gain_db": 24}}).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
     try:
-        urllib.request.urlopen(missing_revision, timeout=2)
+        urllib.request.urlopen(off_table, timeout=2)
     except urllib.error.HTTPError as exc:
         assert exc.code == 400
         body = json.loads(exc.read().decode("utf-8"))
-        assert body["ok"] is False and "base_config_rev" in body["error"]
+        assert body["ok"] is False and "GAIN_NOT_IN_APPROVED_TABLE" in body["error"]
     else:
-        raise AssertionError("dry-run accepted a patch the edge agent would drop")
+        raise AssertionError("dry-run accepted a gain the edge's helper refuses")
 
     external = base + "/api/snapshot?base_url=http%3A%2F%2Fexample.com%3A8081"
     try:
@@ -447,11 +451,11 @@ def test_branding_validation_and_console_config_reload() -> None:
     print("PASS branding validation and console config reload")
 
 
-def test_mqtt_topic_map_is_bounded() -> None:
+def test_mqtt_status_counts_only_the_node_topics() -> None:
     try:
         from sdr_doa_mqtt_monitor import MqttMonitor
     except ModuleNotFoundError:
-        print("SKIP MQTT topic bound; paho-mqtt unavailable")
+        print("SKIP MQTT status bound; paho-mqtt unavailable")
         return
 
     class Message:
@@ -467,11 +471,16 @@ def test_mqtt_topic_map_is_bounded() -> None:
     monitor._client = client
     monitor._started = True
     for index in range(300):
-        monitor._on_message(client, None, Message(f"sdr/v1/uav-01/unknown/{index}"))
-    counts = monitor.snapshot()["topic_counts"]
-    assert len(counts) <= 128
-    assert counts.get("__other__", 0) > 0
-    print("PASS MQTT topic map is bounded")
+        monitor._on_message(client, None, Message(f"sdr/legacy/uav-01/unknown/{index}"))
+        monitor._on_message(client, None, Message(f"sdr/v2/uav-01/unknown/{index}"))
+    status = monitor.snapshot()
+    assert (status["received"], status["valid"], status["invalid"]) == (0, 0, 0)
+    assert "topic_counts" not in status
+    monitor._on_message(client, None, Message("sdr/v2/uav-01/telemetry/health"))
+    status = monitor.snapshot()
+    assert (status["received"], status["invalid"]) == (1, 1)
+    assert set(monitor.rdf_node_snapshot()["topic_counts"]) <= set(monitor._rdf_node._counts)
+    print("PASS MQTT status counts only the node topics")
 
 
 def test_local_mqtt_restore_transition() -> None:
@@ -685,28 +694,31 @@ def test_fixture_vectors_follow_upstream_peak_convention() -> None:
     assert "ANGULAR_PEAK_ANGLE_MISMATCH" in mismatch["publication_gate"]["reasons"]
 
 
-def test_dry_run_uses_the_mqtt_contract_validator() -> None:
-    """AUD-74: a passed preview is an envelope the edge agent would accept."""
-    import sdr_doa_mqtt
+def test_dry_run_uses_the_edge_command_validator() -> None:
+    """AUD-74: a passed preview is the config.patch envelope Kontrol would send the edge."""
+    import rdf_node_commands
 
+    session = {"sid": "7a8b9c0d", "boot": "10aa2345-6789-4abc-9def-1234567890ab", "cfg": 0}
     result = ground_console.validate_config_patch(
-        {"base_config_rev": 0, "changes": {"center_frequency_hz": 433_920_000, "gain_db": 24.12345}},
-        now_ms=5_000,
+        {"changes": {"center_frequency_hz": 433_920_000.0, "vfo0_frequency_hz": 433_920_000, "gain_db": 20.7004}},
+        now_ms=1_790_000_000_000,
+        session=session,
     )
     assert result["validation"] == "passed"
-    assert result["contract"] == "sdr/v1 config_patch"
+    assert result["contract"] == "RDF Node config.patch"
+    assert result["topic"] == "sdr/v2/uav-01/cmd/config/patch"
     command = result["command"]
-    assert command["base_config_rev"] == 0
-    assert command["changes"]["gain_db"] == 24.123
-    sdr_doa_mqtt.validate_config_patch(command, now_ms=5_000)
+    assert (command["sid"], command["boot"], command["base_rev"]) == (session["sid"], session["boot"], 0)
+    assert command["changes"] == {"center_frequency_hz": 433_920_000, "gain_db": 20.7, "vfo0_frequency_hz": 433_920_000}
+    rdf_node_commands.validate_command(command, now_ms=1_790_000_000_000)
     for payload in (
         {"changes": {"gain_db": 24}},
-        {"base_config_rev": None, "changes": {"gain_db": 24}},
-        {"base_config_rev": -1, "changes": {"gain_db": 24}},
-        {"base_config_rev": 1.5, "changes": {"gain_db": 24}},
-        {"base_config_rev": "7", "changes": {"gain_db": 24}},
-        {"base_config_rev": 7, "changes": {"gain_db": "24"}},
-        {"base_config_rev": 7, "changes": {"gain_db": True}},
+        {"base_config_rev": 7, "changes": {"gain_db": 20.7}},
+        {"base_rev": 7, "changes": {"gain_db": 20.7}},
+        {"changes": {"gain_db": "20.7"}},
+        {"changes": {"gain_db": True}},
+        {"changes": {"vfo_frequency_hz": 433_920_000}},
+        {"changes": {"center_frequency_hz": 433_920_000, "vfo0_frequency_hz": 433_930_000}},
     ):
         try:
             ground_console.validate_config_patch(payload, now_ms=5_000)
@@ -748,7 +760,16 @@ def test_snapshot_requests_share_one_collection() -> None:
     assert len(calls) == 1, len(calls)
     assert calls[0]["total_budget_s"] == ground_console.SNAPSHOT_TOTAL_BUDGET_S
     assert isinstance(calls[0]["progress_tracker"], collector.NodeProgressTracker)
+    assert isinstance(calls[0]["settings_cache"], collector.SettingsCache)
+    assert calls[0]["fresh_settings"] is False
+    collections = [result.pop("collection") for result in results]
+    # No MQTT monitor and no status.json in the fixture: every answer names no source (#8).
+    sources = [result.pop("source") for result in results]
+    assert [(entry["kind"], entry["reasons"]) for entry in sources] == [("none", ["MQTT_DISABLED", "DATA_OUT_UNAVAILABLE"])] * 5, sources
     assert results == [{"overall_state": "FIXTURE", "call": 1}] * 5, results
+    # One request started the collection; the other four shared it (#13).
+    assert len({entry["id"] for entry in collections}) == 1, collections
+    assert sorted(entry["shared"] for entry in collections) == [False, True, True, True, True], collections
 
 
 def test_snapshot_reports_malformed_http_as_json() -> None:
@@ -772,6 +793,9 @@ def test_snapshot_tracks_node_progress_across_requests() -> None:
         return collector.collect(fetcher=fetcher, monotonic_clock=lambda: clock[0], **kwargs)
 
     with mock.patch.object(ground_console, "collect", side_effect=frozen_collect), isolated_server(serve=True) as server:
+        # The shared Data Out read (#13) keeps a collection for the refresh
+        # interval; on the same clock the second request is 11 s later.
+        server.data_out.clock = lambda: clock[0]
         base = f"http://127.0.0.1:{server.server_address[1]}"
         first = get_json(base + "/api/snapshot")
         assert first["node_progress"]["state"] == "FIRST_SAMPLE"
@@ -894,11 +918,95 @@ def test_legacy_ui_bounds_requests_and_expires_locally() -> None:
     assert '<option value="1">Every 1 second</option><option value="2">Every 2 seconds</option>' in html
 
 
-def test_legacy_ui_reads_cleared_mqtt_entries_and_new_gate_reasons() -> None:
-    """A retained clear (valid:false, cleared:true) is CLEARED, not INVALID, on the legacy page."""
+def test_legacy_ui_follows_the_shared_data_out_read() -> None:
+    """#13: Refresh asks for a new read, reads name the shown one, ages count the shared read."""
     html = ground_console.HTML
-    assert "function mqttContract(entry) { return entry.cleared===true?'CLEARED':(entry.valid===true?'VALID':'INVALID'); }" in html
+    assert "$('refresh').addEventListener('click',()=>refresh({manual:true}));" in html
+    assert "await refresh({manual:true}); }" in html, "Apply & refresh is the operator's read too"
+    assert "(manual?'&refresh=1':'')+(state.collectionId?'&seen='+encodeURIComponent(state.collectionId):'')" in html
+    assert "render(data); scheduleLocalExpiry(data); followConsoleInterval(data);" in html
+    assert "const maxAge=validAges?Math.max(...ages)+servedAgeMs(snapshot):null;" in html
+    # The interval select is saved with Apply like the other connection fields.
+    assert "$('refresh-interval').addEventListener('change'" not in html
+    assert "setAuto(state.autoTimer?0:(state.consoleSeconds>0?state.consoleSeconds:2))" in html
+    node = shutil.which("node")
+    if node is None:
+        print("SKIP test_legacy_ui_follows_the_shared_data_out_read (node part): node not found")
+        return
+    sources = []
+    for name in ("localExpiryMs", "servedAgeMs", "followConsoleInterval"):
+        start = html.index(f"function {name}(")
+        end = html.index("\n}", start) + 2 if name == "localExpiryMs" else html.index("\n", start)
+        sources.append(html[start:end])
+    script = "\n".join(sources) + r"""
+const calls = [];
+const state = { autoTimer: 1, autoSeconds: 2, consoleSeconds: 2 };
+function setAuto(seconds, readNow) { calls.push([seconds, readNow]); state.autoSeconds = seconds; }
+const live = (age, served) => ({ status: { available: true }, collection: { age_ms: served },
+  doa_candidates: { csv: { freshness: { fresh: true, age_ms: age, max_age_ms: 5000 } } } });
+const expiry = [localExpiryMs(live(400, 0)), localExpiryMs(live(400, 3500)), localExpiryMs(live(400, 9000)),
+  servedAgeMs(live(0, 1e9)), servedAgeMs(live(0, -5)), servedAgeMs({})];
+followConsoleInterval({ collection: { refresh_seconds: 30 } });
+followConsoleInterval({ collection: { refresh_seconds: 30 } });
+followConsoleInterval({ collection: { refresh_seconds: 0 } });
+const afterManual = state.consoleSeconds;
+followConsoleInterval({ collection: { refresh_seconds: 'x' } });
+state.autoTimer = null;
+followConsoleInterval({ collection: { refresh_seconds: 5 } });
+process.stdout.write(JSON.stringify({ expiry, calls, afterManual, consoleSeconds: state.consoleSeconds }));
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=20, check=True)
+    out = json.loads(result.stdout)
+    # The time the answer waited on the console comes off the DoA window; the bound is the React one.
+    assert out["expiry"] == [4600, 1100, 0, 120000, 0, 0], out
+    # A running auto-refresh moves to the console's interval once, without an extra read;
+    # manual mode on the console and a stopped auto-refresh leave the timer alone.
+    assert out["calls"] == [[30, False]], out
+    assert out["afterManual"] == 0 and out["consoleSeconds"] == 5, out
+
+
+def test_legacy_ui_follows_the_console_data_out_url() -> None:
+    """#11/#13 review: a legacy page on the old URL follows the URL the console reads."""
+    html = ground_console.HTML
+    assert "followConsoleInterval(data); followConsoleUrl(data.collection?.console_base_url); }" in html
+    assert "if(data.code==='DATA_OUT_URL_NOT_ALLOWED') followSavedUrl();" in html
+    node = shutil.which("node")
+    if node is None:
+        print("SKIP test_legacy_ui_follows_the_console_data_out_url (node part): node not found")
+        return
+    start = html.index("function followConsoleUrl(")
+    script = html[start:html.index("\n", start)] + r"""
+const reads = [];
+const fields = { 'data-url': { value: '' }, 'source-url': { textContent: '' } };
+const $ = (id) => fields[id];
+const state = { dataUrl: 'http://doasdr.local:8081', collectionId: '0badc0de-4' };
+function refresh() { reads.push(state.dataUrl); }
+function setTimeout(fn) { fn(); }
+const results = [
+  followConsoleUrl('http://doasdr.local:8081'),
+  followConsoleUrl('http://doasdr.local:8081/'),
+  followConsoleUrl(undefined), followConsoleUrl(''), followConsoleUrl(8081),
+  followConsoleUrl('http://192.168.100.100:8081/'),
+  followConsoleUrl('http://192.168.100.100:8081'),
+];
+process.stdout.write(JSON.stringify({ results, reads, state, fields }));
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=20, check=True)
+    out = json.loads(result.stdout)
+    # Only another URL switches the page, once, with one read of the new URL.
+    assert out["results"] == [False, False, False, False, False, True, False], out
+    assert out["reads"] == ["http://192.168.100.100:8081"], out
+    assert out["state"] == {"dataUrl": "http://192.168.100.100:8081", "collectionId": None}, out
+    assert out["fields"]["data-url"]["value"] == "http://192.168.100.100:8081", out
+    assert out["fields"]["source-url"]["textContent"] == "http://192.168.100.100:8081", out
+
+
+def test_legacy_ui_reads_the_mqtt_status_and_new_gate_reasons() -> None:
+    """The legacy page shows the one MQTT status: counts, retained clears, no per-kind rows."""
+    html = ground_console.HTML
     assert "['Retained clears',esc(cleared)]" in html
+    assert "['Topics',esc(data.root?`${data.root}/…`:'—')]" in html
+    assert "last_by_kind" not in html
     assert "cleared=mqttCount(data?.cleared)" in html
     for reason in ("NODE_CLOCK_STALLED", "ADC_OVERDRIVE", "NATIVE_ANGLE_INVALID", "NATIVE_ANGLE_UNCHECKED"):
         assert f"  {reason}:'" in html, reason

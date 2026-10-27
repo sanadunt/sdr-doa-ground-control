@@ -1,4 +1,4 @@
-# Build context of Dockerfile (console from source) and Dockerfile.agent.
+# Build context of Dockerfile (the console from source).
 # Patterns are anchored at the repository root, so vendor/BrowSDR keeps every
 # tracked file: the Receiver builder refuses a submodule with missing files.
 
@@ -32,7 +32,6 @@ secrets
 .sdr-doa-edge
 data
 state
-agent.env
 console.json
 branding.json
 preferences.json

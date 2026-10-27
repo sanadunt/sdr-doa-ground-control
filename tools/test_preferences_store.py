@@ -235,6 +235,17 @@ class PreferencesStoreTests(unittest.TestCase):
         self.assertEqual(len(frontend), len(set(frontend)))
         self.assertEqual(set(frontend), set(PREFERENCE_KEYS))
 
+    def test_the_lan_view_gets_only_its_own_keys(self) -> None:
+        self.assertLess(set(preferences_store.LAN_VIEW_PREFERENCE_KEYS), set(PREFERENCE_KEYS))
+        for key in ("SDRSetting", "ReceiverSweepSettings", "sdr-web-bookmarks"):
+            self.assertNotIn(key, preferences_store.LAN_VIEW_PREFERENCE_KEYS)
+        store = self.store()
+        store.update({"values": {"sdr-console-theme": "light", "sdr-web-bookmarks": "[]", "SDRSetting": "{}"}})
+        lan_view = store.lan_view_snapshot()
+        self.assertEqual(lan_view["values"], {"sdr-console-theme": "light"})
+        self.assertEqual(lan_view["updated_at_ms"], store.snapshot()["updated_at_ms"])
+        self.assertEqual(len(store.snapshot()["values"]), 3)
+
     def test_every_key_is_a_storage_key_in_the_sources(self) -> None:
         roots = [PROJECT_ROOT / "frontend" / "src", PROJECT_ROOT / "tools" / "browsdr_receiver_overlay" / "src"]
         texts = []
@@ -397,7 +408,12 @@ class PreferencesHttpTests(unittest.TestCase):
         console = self.harness()
         console.server.version = "2.0.0"
         status, body = console.request("GET", "/api/health", origin=None)
-        self.assertEqual((status, body), (200, {"ok": True, "version": "2.0.0", "receiver_busy": False}))
+        self.assertEqual((status, body), (200, {
+            "ok": True,
+            "version": "2.0.0",
+            "receiver_busy": False,
+            "lan_access": {"enabled": False, "state": "closed", "reason": "DISABLED"},
+        }))
         status, capabilities = console.request("GET", "/api/capabilities", origin=None)
         self.assertEqual(status, 200)
         self.assertEqual(capabilities["version"], "2.0.0")
@@ -547,11 +563,14 @@ class SeedTests(unittest.TestCase):
         expected = {
             "version": 1,
             "base_url": "http://192.168.100.100:8081",
+            "data_out_hosts": ["doasdr.local", "192.168.100.100", "127.0.0.1", "localhost"],
             "mqtt_host": "127.0.0.1",
             "mqtt_port": 18884,
             "mqtt_transport": "tcp",
             "mqtt_ws_path": "/ws",
             "refresh_seconds": 5,
+            # The LAN view has no seed: it starts off, for nobody.
+            "lan_access": {"enabled": False, "port": 8788, "bind": "0.0.0.0", "allowed_clients": []},
         }
         self.assertEqual(config, expected)
         self.assertEqual(self.saved(), expected)
@@ -719,6 +738,51 @@ class MainWiringTests(unittest.TestCase):
         saved = json.loads((self.root / "data" / "console.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["base_url"], "http://doasdr.local:8081")
         self.assertEqual(server.get_config()["base_url"], "http://192.168.100.100:8081")
+
+    def saved_file(self) -> Dict[str, Any]:
+        return json.loads((self.root / "data" / "console.json").read_text(encoding="utf-8"))
+
+    def test_a_lan_access_save_never_writes_the_cli_overrides(self) -> None:
+        server = self.run_main("--base-url", "http://192.168.100.100:8081", "--mqtt-host", "127.0.0.1")
+        result = server.set_lan_access({"enabled": False, "port": 8799})
+        self.assertEqual(result["config"]["port"], 8799)
+        saved = self.saved_file()
+        self.assertEqual((saved["base_url"], saved["mqtt_host"]), ("http://doasdr.local:8081", "10.90.0.1"))
+        self.assertEqual(saved["lan_access"]["port"], 8799)
+        active = server.get_config()
+        self.assertEqual((active["base_url"], active["mqtt_host"]), ("http://192.168.100.100:8081", "127.0.0.1"))
+        self.assertEqual(active["lan_access"]["port"], 8799)
+
+    def test_a_console_config_save_writes_only_the_fields_it_changes(self) -> None:
+        server = self.run_main("--base-url", "http://192.168.100.100:8081", "--mqtt-host", "127.0.0.1")
+        # The top bar's interval select sends the whole config it shows.
+        server.apply_config({**server.get_config(), "refresh_seconds": 5})
+        saved = self.saved_file()
+        self.assertEqual(
+            (saved["base_url"], saved["mqtt_host"], saved["refresh_seconds"]),
+            ("http://doasdr.local:8081", "10.90.0.1", 5),
+        )
+        self.assertEqual(server.get_config()["base_url"], "http://192.168.100.100:8081")
+        # A changed field is saved and ends that flag's override; the other stays.
+        server.update_config({**server.get_config(), "base_url": "http://127.0.0.1:8081"})
+        saved = self.saved_file()
+        self.assertEqual((saved["base_url"], saved["mqtt_host"]), ("http://127.0.0.1:8081", "10.90.0.1"))
+        active = server.get_config()
+        self.assertEqual((active["base_url"], active["mqtt_host"]), ("http://127.0.0.1:8081", "127.0.0.1"))
+        server.apply_config({**server.get_config(), "refresh_seconds": 2})
+        self.assertEqual(self.saved_file()["base_url"], "http://127.0.0.1:8081")
+
+    def test_dropping_the_saved_urls_host_saves_the_url_in_use(self) -> None:
+        server = self.run_main("--base-url", "http://192.168.100.100:8081")
+        server.apply_config({**server.get_config(), "data_out_hosts": ["192.168.100.100", "127.0.0.1"]})
+        saved = self.saved_file()
+        self.assertEqual(saved["data_out_hosts"], ["192.168.100.100", "127.0.0.1"])
+        self.assertEqual(saved["base_url"], "http://192.168.100.100:8081")
+        # The console loads the file it wrote.
+        self.assertEqual(
+            ground_console._load_console_config(self.root / "data" / "console.json")["base_url"],
+            "http://192.168.100.100:8081",
+        )
 
 
 if __name__ == "__main__":

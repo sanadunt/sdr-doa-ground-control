@@ -144,9 +144,11 @@ export interface PolarPlotProps {
   compactCaption?: boolean;
   /** Show the Plotly modebar (download, zoom, hover). */
   modeBar?: boolean;
+  /** Where the live curve came from (MQTT or Data Out), for the plot's accessible name. */
+  sourceLabel?: string;
 }
 
-export function PolarPlot({ values, settings, simulation, offsetSource, head: headProp, range: rangeProp, hideSettings = false, compactCaption = false, modeBar = true }: PolarPlotProps) {
+export function PolarPlot({ values, settings, simulation, offsetSource, head: headProp, range: rangeProp, hideSettings = false, compactCaption = false, modeBar = true, sourceLabel }: PolarPlotProps) {
   const { lang, t } = useI18n();
   const loadFailedText = useRef('');
   loadFailedText.current = t('polar.loadFailed');
@@ -267,7 +269,7 @@ export function PolarPlot({ values, settings, simulation, offsetSource, head: he
     : t('polar.captionPolar', { head, mode, low: dbLabel(low), high: dbLabel(high) });
   const syncAutoRange = () => setDraft(current => ({ ...current, min: String(autoLow), max: String(autoHigh) }));
   return <>
-    <div ref={host} className="plotly-polar" role="img" aria-label={t('polar.plotAria', { source: simulation ? t('polar.sourceSimulation') : t('polar.sourceLive'), fig: settings.figType })} />
+    <div ref={host} className="plotly-polar" role="img" aria-label={t('polar.plotAria', { source: simulation ? t('polar.sourceSimulation') : sourceLabel ?? t('polar.sourceLive'), fig: settings.figType })} />
     <div className={compactCaption ? 'polar-axis-caption visually-hidden' : 'polar-axis-caption'}>{caption}</div>
     {hideSettings ? null : <details className="plot-settings" onToggle={event => { if (event.currentTarget.open && !controls.manual) syncAutoRange(); }}>
       <summary>{t('polar.settings')}</summary>

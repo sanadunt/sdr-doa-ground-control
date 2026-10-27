@@ -1,5 +1,7 @@
 # Laporan Tahap 4 — Synthetic MQTT dan Monitor Ground Console
 
+> Histori. `sdr_doa_mqtt.py`, penerbit sintetis dan test-nya dihapus di 3.0.0 (`CHANGELOG.md`); monitor console kini hanya berlangganan topik RDF Node, dan uji broker memakai `tools/test_rdf_node_broker.py`.
+
 ## 1. Status dan batasan
 
 ```text
@@ -32,13 +34,15 @@ tools/sdr_doa_mqtt.py
 
 ## 3. Topic yang diuji
 
+> Catatan 3.0.0: topik di bawah adalah topik lama, yang dihapus dari console di 3.0.0 (`CHANGELOG.md`, `docs/KEPUTUSAN_MQTT.md`) dan ditulis di sini sebagai `<topik lama>`. Kontrak yang berlaku adalah RDF Node edge dengan root `sdr/v2/uav-01` (`docs/MQTT_KONTRAK.md`).
+
 ```text
-sdr/v1/uav-01/telemetry/doa
-sdr/v1/uav-01/telemetry/nav
-sdr/v1/uav-01/telemetry/health
-sdr/v1/uav-01/state
-sdr/v1/uav-01/config/reported
-sdr/v1/uav-01/cmd/config/patch
+<topik lama>/telemetry/doa
+<topik lama>/telemetry/nav
+<topik lama>/telemetry/health
+<topik lama>/state
+<topik lama>/config/reported
+<topik lama>/cmd/config/patch
 ```
 
 Policy yang diuji:

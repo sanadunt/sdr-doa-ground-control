@@ -97,6 +97,13 @@ describe('Overview dashboard', () => {
     }
   });
 
+  // #13 review: an answer from a shared read 3.5 s old showed the DoA as 0.2 s old.
+  it('counts the age of a shared read in the HUD age', () => {
+    const answer = snapshot({ overall_state: 'UNVERIFIED', collection: { id: '0badc0de-3', age_ms: 3_500, shared: true } });
+    expect(dashboard(answer)).toContain('<span class="ov-hud-age">age 3.7 s</span>');
+    expect(dashboard(answer, { localSnapshotFresh: false })).toContain('<span class="ov-hud-age is-warn">age 3.7 s · STALE</span>');
+  });
+
   it('keeps an UNAVAILABLE or CONFLICT node chip and an unknown age unmarked after local expiry', () => {
     const unreachable = dashboard(snapshot({ overall_state: 'UNAVAILABLE', status: { available: false }, doa_candidates: {} }), { localSnapshotFresh: false });
     expect(unreachable).toContain('<span class="ov-chip tone-bad">UNAVAILABLE</span>');

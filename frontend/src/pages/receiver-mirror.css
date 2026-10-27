@@ -1,0 +1,9 @@
+/* Receiver route in the LAN view (pages/ReceiverMirrorPage.tsx): the
+   mirrored spectrum is the Dashboard dock's own trace and waterfall
+   (.ov-spectrum, overview-dashboard.css) inside a page-kit card, so it only
+   needs a height here. Colours come from the console tokens. */
+.rx-mirror-spectrum-body { padding: 0; }
+.rx-mirror-spectrum { height: clamp(320px, 52vh, 560px); border-left: 0; }
+@media (max-width: 600px) {
+  .rx-mirror-spectrum { height: 360px; }
+}

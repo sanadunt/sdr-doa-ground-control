@@ -4,15 +4,16 @@ import { DICTIONARIES, I18nContext, translate } from '../lib/i18n';
 import type { Lang } from '../lib/i18n';
 import { DEFAULT_GPS_CONFIG } from '../lib/map';
 import { DEFAULT_COMPASS_CONFIG } from '../lib/polar';
-import type { CompassConfig, ConsoleConfig, GpsConfig } from '../types';
+import type { CompassConfig, ConsoleConfig, GpsConfig, MqttSnapshot } from '../types';
 import { ConfigurationPage } from './ConfigurationPage';
 
-function render({ lang = 'en', refreshSeconds = 10, gps = DEFAULT_GPS_CONFIG, compass = DEFAULT_COMPASS_CONFIG, config = {} }: {
+function render({ lang = 'en', refreshSeconds = 10, gps = DEFAULT_GPS_CONFIG, compass = DEFAULT_COMPASS_CONFIG, config = {}, mqtt = null }: {
   lang?: Lang;
   refreshSeconds?: number;
   gps?: GpsConfig;
   compass?: CompassConfig;
   config?: Partial<ConsoleConfig>;
+  mqtt?: MqttSnapshot | null;
 } = {}): string {
   return renderToStaticMarkup(
     <I18nContext.Provider value={{ lang, setLang: () => undefined, t: (key, vars) => translate(lang, key, vars) }}>
@@ -25,6 +26,7 @@ function render({ lang = 'en', refreshSeconds = 10, gps = DEFAULT_GPS_CONFIG, co
         onCompassConfigChanged={() => undefined}
         onConfigSaved={async () => undefined}
         onBrandingChanged={() => undefined}
+        mqtt={mqtt}
       />
     </I18nContext.Provider>,
   );
@@ -40,16 +42,16 @@ function readSource(path: string): string {
 describe('Configuration page', () => {
   it('wraps each section in a form so Enter submits it (AUD-106)', () => {
     const markup = render();
-    // connection, GPS, Compass, MQTT, admin login, dry-run
-    expect(markup.match(/<form\b/g)?.length).toBe(6);
-    expect(markup.match(/type="submit"/g)?.length).toBe(6);
+    // connection, MQTT, LAN access, GPS, Compass, admin login, dry-run
+    expect(markup.match(/<form\b/g)?.length).toBe(7);
+    expect(markup.match(/type="submit"/g)?.length).toBe(7);
     expect(markup).toContain('aria-label="Restore GPS defaults"');
     expect(markup).toContain('aria-label="Restore Compass defaults"');
   });
 
   it('lays the cards out in the section index order', () => {
     const markup = render();
-    const ids = ['connection-settings', 'mqtt-settings', 'navigation-settings', 'branding-settings', 'dry-run-settings'];
+    const ids = ['connection-settings', 'mqtt-settings', 'lan-settings', 'navigation-settings', 'branding-settings', 'dry-run-settings'];
     const cardOrder = ids.map((id) => markup.indexOf(`<section id="${id}"`));
     expect(cardOrder.every((index) => index > 0)).toBe(true);
     expect([...cardOrder].sort((a, b) => a - b)).toEqual(cardOrder);
@@ -78,7 +80,8 @@ describe('Configuration page', () => {
     // Only 1024–1279 px dissolves the columns into the grid (Connection beside MQTT, GPS & Compass and Branding on full rows).
     const contents = css.match(/@media \(min-width: 1024px\) and \(max-width: 1279px\) \{\s*\.cfg-grid > \.pg-stack \{ display: contents; \}\s*\}/g);
     expect(contents).toHaveLength(1);
-    expect(css.match(/display: contents/g)).toHaveLength(1);
+    // The other display: contents is the field group that only carries `disabled`.
+    expect(css.replace(/\.cfg-fieldset \{[^}]*\}/, '').match(/display: contents/g)).toHaveLength(1);
   });
 
   it('offers the refresh intervals as one segmented control and warns about a 10 s interval (AUD-24)', () => {
@@ -90,7 +93,8 @@ describe('Configuration page', () => {
 
   it('warns about a 5 s interval too, since the window counts from the data age, and not at 2 s', () => {
     expect(render({ refreshSeconds: 5 })).toContain('so at 5 s or longer the bearing and polar curve clear between reads');
-    expect(render({ refreshSeconds: 2 })).not.toContain('cfg-warn');
+    const connection = (markup: string) => markup.match(/<section id="connection-settings"[\s\S]*?<\/section>/)?.[0] ?? '';
+    expect(connection(render({ refreshSeconds: 2 }))).not.toContain('cfg-warn');
     expect(render({ refreshSeconds: 0 })).toContain(translate('en', 'config.refreshManualWarning'));
   });
 
@@ -104,19 +108,20 @@ describe('Configuration page', () => {
     }
   });
 
-  it('marks the base config revision as required without help prose (AUD-74)', () => {
+  it('asks for no base revision: the dry-run names the node state the console holds (AUD-74, #9)', () => {
     const markup = render();
     expect(markup).not.toContain('(optional)');
     expect(render({ lang: 'id' })).not.toContain('(opsional)');
-    expect(markup).toMatch(/<input type="number"[^>]*required=""[^>]*aria-required="true"/);
+    expect(markup).not.toMatch(/<input type="number"[^>]*required=""/);
+    expect(markup).not.toContain('base_config_rev');
+    expect(markup).not.toContain('placeholder="config_rev"');
   });
 
   it('puts the unit inside each dry-run field and the range in its placeholder until the node reports a value', () => {
     const markup = render();
-    expect(markup).toContain('placeholder="24000000…1800000000"');
+    expect(markup).toContain('placeholder="24000000…1766000000"');
     expect(markup.match(/<span class="pg-unit">Hz<\/span>/g)?.length).toBe(3);
     expect(markup.match(/<span class="pg-unit">dB<\/span>/g)?.length).toBe(2);
-    expect(markup).toContain('placeholder="config_rev"');
   });
 
   it('shows coordinates with 6 decimals and enables them only for a manual source', () => {
@@ -143,10 +148,58 @@ describe('Configuration page', () => {
     for (const lang of ['en', 'id'] as const) expect(render({ lang })).toContain('placeholder="IPv4 · IPv6 · localhost"');
   });
 
+  it('counts the one MQTT in its card: the messages of the node topics and the last one\'s age', () => {
+    const card = (markup: string) => markup.match(/<section[^>]*id="mqtt-settings"[\s\S]*?<\/section>/)?.[0] ?? '';
+    const now = Date.now();
+    const mqtt: MqttSnapshot = { enabled: true, connection: 'connected', received: 1_204, valid: 1_201, invalid: 3, last_age_ms: 2_000, fetched_at_ms: now };
+    const en = card(render({ mqtt }));
+    expect(en).toContain(`<dt>${translate('en', 'config.mqttMessages')}</dt>`);
+    expect(en).toMatch(/1,204 · 3 invalid/);
+    expect(en).toContain(`<dt>${translate('en', 'config.mqttLast')}</dt>`);
+    expect(card(render({ lang: 'id', mqtt: { ...mqtt, invalid: 0 } }))).toMatch(/<dd[^>]*>1\.204<\/dd>/);
+    // Before the first read the counter shows no number rather than 0.
+    expect(card(render())).toMatch(new RegExp(`<dt>${translate('en', 'config.mqttMessages')}</dt><dd[^>]*>—</dd>`));
+  });
+
   it('warns about a monitor without TLS only for a host off this machine', () => {
     expect(render({ config: { mqtt_host: '127.0.0.1' } })).not.toContain('NO TLS');
     expect(render()).not.toContain('NO TLS');
     expect(render({ config: { mqtt_host: '10.90.0.1' } })).toContain(translate('en', 'config.mqttNoCredentials'));
+  });
+
+  it('edits the Data Out host list in the Connection card, keeping the URL host', () => {
+    for (const lang of ['en', 'id'] as const) {
+      const markup = render({ lang, config: { base_url: 'http://rdf.local:8081', data_out_hosts: ['rdf.local', '192.168.100.100', 'fd00::1'] } });
+      const card = markup.match(/<section id="connection-settings"[\s\S]*?<\/section>/)?.[0] ?? '';
+      expect(card).toContain(`>${translate(lang, 'config.dataOutHosts')}</span>`);
+      const pills = [...card.matchAll(/<li class="cfg-host"><span class="cfg-host-name">([^<]+)<\/span><button class="cfg-host-remove" type="button" aria-label="([^"]+)"( disabled="")?/g)];
+      expect(pills.map((pill) => pill[1])).toEqual(['rdf.local', '192.168.100.100', 'fd00::1']);
+      expect(pills.map((pill) => pill[2])).toEqual(['rdf.local', '192.168.100.100', 'fd00::1'].map((host) => translate(lang, 'config.dataOutHostRemove', { host })));
+      // The host of the URL in the field cannot be removed; the others can.
+      expect(pills.map((pill) => Boolean(pill[3]))).toEqual([true, false, false]);
+      // The URL suggestions follow the list, an IPv6 host in brackets.
+      expect(card).toContain('<option value="http://rdf.local:8081"></option><option value="http://192.168.100.100:8081"></option><option value="http://[fd00::1]:8081"></option>');
+      expect(card).toContain(`>${translate(lang, 'config.dataOutHostNew')}</span>`);
+      expect(card).toContain('placeholder="rdf.local · 192.168.1.20"');
+      expect(card).toMatch(new RegExp(`<button class="ov-button" type="button" disabled="">${translate(lang, 'config.dataOutHostAdd')}</button>`));
+      // Host editing never submits the card: only Save is a submit button.
+      expect(card.match(/type="submit"/g)).toHaveLength(1);
+      expect(card).not.toContain(' title=');
+    }
+  });
+
+  it('shows the default hosts for a server that reports no list', () => {
+    const card = render().match(/<section id="connection-settings"[\s\S]*?<\/section>/)?.[0] ?? '';
+    expect([...card.matchAll(/<span class="cfg-host-name">([^<]+)<\/span>/g)].map((match) => match[1])).toEqual(['doasdr.local', '192.168.100.100', '127.0.0.1', 'localhost']);
+  });
+
+  it('styles the host pills as 44 px targets with console tokens only', () => {
+    const css = readSource('./configuration.css');
+    const rules = css.slice(css.indexOf('.cfg-host-list'), css.indexOf('.cfg-host-add > .cfg-grow'));
+    expect(rules).toMatch(/\.cfg-host \{[^}]*height: 44px;/);
+    expect(rules).toMatch(/\.cfg-host-remove \{[^}]*width: 44px;/);
+    expect(rules).not.toMatch(/#[0-9a-f]{3,8}\b|rgb\(/i);
+    expect(css).toMatch(/\.cfg-form\.cfg-conn-form > \.cfg-actions, \.cfg-form\.cfg-conn-form > \.cfg-hosts \{ grid-column: 1 \/ -1; \}/);
   });
 
   it('carries no help prose (no-helper-prose rule)', () => {

@@ -1,4 +1,5 @@
 import { ApiError } from '../api';
+import { isLoopbackHost } from './access';
 import type { MessageKey } from './i18n';
 import { REFRESH_INTERVALS_S } from './telemetry';
 
@@ -91,14 +92,6 @@ export function gpsInputErrorKey(latitudeInput: string, longitudeInput: string):
   return null;
 }
 
-/** base_config_rev is required by the sdr/v1 config_patch contract. */
-export function parseBaseRevision(input: string): FormResult<number> {
-  const text = input.trim();
-  if (!text) return { ok: false, error: 'config.baseRevisionRequired' };
-  if (!/^\d{1,15}$/u.test(text)) return { ok: false, error: 'config.baseRevisionInvalid' };
-  return { ok: true, value: Number(text) };
-}
-
 export function parseDryRunChanges(
   values: Record<string, string>,
   fields: ReadonlyArray<{ key: string; label: MessageKey }>,
@@ -141,17 +134,8 @@ export function gpsErrorField(key: MessageKey): 'lat' | 'lon' {
   return key === 'config.gpsLonNumber' || key === 'config.gpsLonRange' ? 'lon' : 'lat';
 }
 
-/**
- * True for a host that stays on this machine: localhost, 127.0.0.0/8 or ::1
- * (also in brackets). The no-TLS warning shows only for other hosts.
- */
-export function isLoopbackHost(input: string): boolean {
-  const host = input.trim().toLowerCase().replace(/^\[(.*)\]$/u, '$1');
-  if (!host) return false;
-  if (host === 'localhost' || host === '::1' || host === '0:0:0:0:0:0:0:1') return true;
-  const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(host);
-  return Boolean(octets && Number(octets[1]) === 127 && octets.slice(2).every((part) => Number(part) <= 255));
-}
+// The no-TLS warning shows only for a host that is not loopback; the LAN view uses the same test.
+export { isLoopbackHost };
 
 /**
  * Whether the index treats the page as scrolled to its end. A page that fits
@@ -202,7 +186,11 @@ export function activeSection(
 export interface DryRunSummary {
   validation: string | null;
   transport: string | null;
-  baseConfigRev: number | null;
+  /** The node's state.cfg the preview names, or null when no node state is known. */
+  baseRev: number | null;
+  /** The node session (state.sid) the preview names, or null. */
+  sid: string | null;
+  topic: string | null;
   /** Normalized changes in the order the server returned them. */
   changes: Array<{ key: string; value: number }>;
   ttlMs: number | null;
@@ -220,13 +208,17 @@ function shortText(value: unknown): string | null {
 export function summarizeDryRun(result: Record<string, unknown>): DryRunSummary {
   const command = recordOrNull(result.command);
   const changes = recordOrNull(command?.changes);
-  const issued = command?.issued_ts_ms;
-  const expires = command?.expires_ts_ms;
-  const rev = command?.base_config_rev;
+  const issued = command?.issued_ms;
+  const expires = command?.expires_ms;
+  const rev = command?.base_rev;
+  const sid = command?.sid;
+  const topic = result.topic;
   return {
     validation: shortText(result.validation),
     transport: shortText(result.transport),
-    baseConfigRev: typeof rev === 'number' && Number.isInteger(rev) && rev >= 0 ? rev : null,
+    baseRev: typeof rev === 'number' && Number.isInteger(rev) && rev >= 0 ? rev : null,
+    sid: typeof sid === 'string' && /^[0-9a-f]{8}$/u.test(sid) ? sid : null,
+    topic: typeof topic === 'string' && topic.length <= 128 && /^[\x21-\x7e]+$/u.test(topic) ? topic : null,
     changes: changes
       ? Object.entries(changes)
         .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]))

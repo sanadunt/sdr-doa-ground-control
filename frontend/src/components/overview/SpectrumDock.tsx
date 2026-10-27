@@ -780,22 +780,27 @@ export function SpectrumDock({
   const manualMax = shownDb.auto ? null : shownDb.maxDb;
   const dbRange = useMemo(() => (manualMin === null || manualMax === null ? null : { min: manualMin, max: manualMax }), [manualMin, manualMax]);
 
-  // "Kirim ke RDF-SDR": the RX centre and listen VFO as a Kontrol draft.
+  // "Kirim ke RDF-SDR": the listen VFO as a Kontrol draft. The RDF-SDR takes a
+  // centre change only with VFO0 at the same frequency, so the frequency the
+  // operator listens to becomes both.
   const ranges = capabilities?.configPatch?.ranges ?? null;
   const rxCenterHz = shownCenter ?? target?.centerHz ?? null;
-  const rxVfoHz = shownVfo ?? target?.vfoHz ?? rxCenterHz;
-  const sendable = rxCenterHz !== null && rxVfoHz !== null
-    && inFieldRange('center_frequency_hz', rxCenterHz, ranges) && inFieldRange('vfo_frequency_hz', rxVfoHz, ranges);
+  // The Receiver's own tuning when it reports one (its VFO, else its centre), else the dock's target.
+  const rxVfoHz = shownCenter !== null || shownVfo !== null
+    ? shownVfo ?? shownCenter
+    : target?.vfoHz ?? target?.centerHz ?? null;
+  const sendable = rxVfoHz !== null
+    && inFieldRange('center_frequency_hz', rxVfoHz, ranges) && inFieldRange('vfo0_frequency_hz', rxVfoHz, ranges);
   const [rangeMin, rangeMax] = fieldRange(fieldFor('center_frequency_hz'), ranges);
-  const sendTitle = rxCenterHz === null
+  const sendTitle = rxVfoHz === null
     ? t('spectrum.sendNoFrequency')
     : sendable
-      ? t('spectrum.sendTitle', { center: formatMhz(rxCenterHz, 3), vfo: formatMhz(rxVfoHz, 3) })
+      ? t('spectrum.sendTitle', { vfo: formatMhz(rxVfoHz, 3) })
       : t('spectrum.sendOutOfRange', { min: formatMhz(rangeMin, 0), max: formatMhz(rangeMax, 0) });
   const sendDraft = () => {
-    if (!sendable || rxCenterHz === null || rxVfoHz === null) return;
+    if (!sendable || rxVfoHz === null) return;
     onPanelsChange({ ...panels, control: true });
-    onControlDraftRequest({ center_frequency_hz: rxCenterHz, vfo_frequency_hz: rxVfoHz });
+    onControlDraftRequest({ center_frequency_hz: rxVfoHz, vfo0_frequency_hz: rxVfoHz });
   };
 
   const sampleRate = live?.sampleRateHz ?? null;

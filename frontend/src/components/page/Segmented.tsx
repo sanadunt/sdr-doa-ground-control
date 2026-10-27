@@ -10,7 +10,7 @@ export interface SegmentedOption<V extends string | number> {
 
 /**
  * The Dashboard's ov-seg switch: 44 px buttons with aria-pressed in a group.
- * For 2–4 options that fit (GPS source, Compass|Polar, WS|TCP, sdr/v1|RDF v2).
+ * For 2–4 options that fit (GPS source, Compass|Polar, WS|TCP, RX|Spektrum).
  */
 export function Segmented<V extends string | number>({ options, value, onChange, label, disabled = false, compact = false, className }: {
   options: ReadonlyArray<SegmentedOption<V>>;

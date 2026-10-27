@@ -635,9 +635,10 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         config_patch = capabilities["config_patch"]
         self.assertIs(config_patch["enabled"], False, "no MQTT monitor means no publish path")
         self.assertIs(config_patch["requires_admin"], True)
-        self.assertEqual(config_patch["topic"], "sdr/v1/uav-01/cmd/config/patch")
-        self.assertEqual((config_patch["qos"], config_patch["ttl_ms"]), (1, 60_000))
-        self.assertEqual(config_patch["ranges"]["center_frequency_hz"], [24_000_000, 1_800_000_000])
+        self.assertEqual(config_patch["topic"], "sdr/v2/uav-01/cmd/config/patch")
+        self.assertEqual(config_patch["get_topic"], "sdr/v2/uav-01/cmd/config/get")
+        self.assertEqual((config_patch["qos"], config_patch["ttl_ms"]), (1, 15_000))
+        self.assertEqual(config_patch["ranges"]["center_frequency_hz"], [24_000_000, 1_766_000_000])
 
         self.assertEqual(config_result.status, 200)
         config = _decode_json(self, config_result, "console config")
@@ -654,7 +655,21 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         )
 
         self.assertEqual(snapshot_result.status, 200)
-        self.assertEqual(_decode_json(self, snapshot_result, "snapshot"), fixture_snapshot)
+        snapshot = _decode_json(self, snapshot_result, "snapshot")
+        # The shared Data Out read adds its reuse facts to the collection block.
+        collection = snapshot.pop("collection")
+        # Without a monitor the answer comes from Data Out (issue #8); this
+        # fixture has no readable status.json, so there is no source at all.
+        source = snapshot.pop("source")
+        self.assertEqual((source["kind"], source["reasons"]), ("none", ["MQTT_DISABLED", "DATA_OUT_UNAVAILABLE"]))
+        self.assertEqual(snapshot, fixture_snapshot)
+        self.assertEqual(
+            sorted(collection),
+            ["age_ms", "collected_at_ms", "console_base_url", "id", "refresh_seconds", "settings_reused", "shared"],
+        )
+        self.assertEqual(collection["refresh_seconds"], config["refresh_seconds"])
+        self.assertEqual(collection["console_base_url"], config["base_url"])
+        self.assertIs(collection["shared"], False)
         self.assertEqual(len(collect_calls), 1, "snapshot test must use only the local fixture collector")
 
         self.assertEqual(missing_result.status, 404)

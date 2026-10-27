@@ -3,14 +3,23 @@
 
 The console keeps a narrow boundary:
 
-* it performs bounded read-only GETs through ``sdr_doa_collector``;
+* ``/api/snapshot`` answers from MQTT while the RDF Node's health is fresh
+  (``telemetry_source``), with a light Data Out read for what MQTT never
+  carries, and otherwise from Data Out (the fallback): bounded read-only GETs
+  through ``sdr_doa_collector``, one collection per refresh interval for
+  every viewer together (``data_out_reader``);
 * an optional MQTT monitor subscribes to its configured broker;
-* its one remote write is ``POST /api/mqtt/config-patch``: an admin-gated,
-  explicitly confirmed config patch published once at QoS 1 (never retained,
-  60 s TTL) to ``cmd/config/patch``. It needs a same-origin loopback request,
-  the admin cookie, ``confirm: true``, values inside the contract ranges and
-  the base revision the operator reviewed. The edge agent decides whether to
-  apply it and answers on ``ack/config``;
+* its one remote write is Kontrol's: ``POST /api/mqtt/config-patch``, an
+  admin-gated, explicitly confirmed ``config.patch`` in the RDF Node edge's
+  envelope (``rdf_node_commands``), published once at QoS 1 (never retained,
+  15 s lifetime) to ``sdr/v2/<node>/cmd/config/patch``. It needs a
+  same-origin loopback request, the admin cookie, ``confirm: true``, the
+  edge's safe fields within its rules, a node session (``state``), fresh
+  ``telemetry/health`` and the base revision (``state.cfg``) the operator
+  reviewed. ``POST /api/mqtt/config-get`` sends the read-only ``config.get``
+  with the same Origin and admin gates, so the edge answers with
+  ``settings/reported``. The edge decides whether to apply a patch and
+  answers on ``ack/config``;
 * the settings form's ``/api/dry-run/config-patch`` only validates a preview;
 * local admin settings also change this console's branding;
 * ``/api/preferences`` keeps the operator's browser preferences (theme,
@@ -28,6 +37,16 @@ The console keeps a narrow boundary:
   runs in its own thread. Every Receiver GET must come from this console's
   own pages (Sec-Fetch-Site and a loopback Host on this port); every POST
   and DELETE needs the same-origin loopback Origin.
+
+The console listens on loopback only. The one exception is the opt-in LAN
+view (``lan_access`` in ``--config-path``, changed by an admin through
+``POST /api/lan-access``): a second listener in this process that serves the
+built UI and a read-only list of API routes to the client addresses the
+operator allowed. It stays closed while the default admin password is in use
+or admin login is disabled; ``lan_access.py`` holds its rules. While it is
+open, the groundstation page that runs the Receiver publishes its state and
+spectrum to ``POST /api/mirror/receiver`` and the LAN view reads them back
+from ``GET /api/mirror/receiver`` (``receiver_mirror.py``, memory only).
 
 Admin login uses ``SDR_DOA_ADMIN_PASSWORD`` from the environment or the
 ``--env-file`` (default: the repository ``.env``). When the variable is absent
@@ -54,6 +73,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import hmac
 import http.client
 import ipaddress
@@ -64,6 +84,7 @@ import re
 import secrets
 import signal
 import socket
+import socketserver
 import sqlite3
 import tempfile
 import threading
@@ -79,10 +100,27 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urlsplit
 
-import sdr_doa_mqtt
+import lan_access as lan
+import rdf_node_commands as cmds
 from config_command_tracker import ConfigCommandTracker, MonitorPublishError
-from sdr_doa_collector import CollectorError, DEFAULT_ALLOWED_DATA_HOSTS, NodeProgressTracker, collect
+from data_out_reader import DataOutReader, SnapshotRequest, valid_collection_id
+from mdns_resolver import MdnsResolver
+from sdr_doa_collector import (
+    DATA_OUT_HOST_IN_USE,
+    DATA_OUT_PORT,
+    DEFAULT_DATA_OUT_HOSTS,
+    CollectorError,
+    DataOutHostError,
+    NodeProgressTracker,
+    SettingsCache,
+    check_data_out_url,
+    collect,
+    collect_light,
+    data_out_url_host,
+    normalize_data_out_hosts,
+)
 import receiver_archive as ra
+import receiver_mirror as rm
 from receiver_archive import ArchiveError
 from receiver_record_store import (
     DEFAULT_DATA_DIR,
@@ -264,20 +302,22 @@ def _admin_password_from_sources(
     return DEFAULT_ADMIN_PASSWORD
 
 
-# HTTP Data Out is the local-LAN path. PPP is reserved for MQTT transport;
-# keeping this set identical to the collector prevents a UI-only route from
-# advertising a target that the actual GET collector will reject.
-ALLOWED_DATA_HOSTS = frozenset(DEFAULT_ALLOWED_DATA_HOSTS)
+# HTTP Data Out (the fallback) is read from a host in the saved host list,
+# console.json data_out_hosts (default DEFAULT_DATA_OUT_HOSTS), on port 8081
+# only. Every check here and the collector itself get that same list, so the
+# console never accepts a URL the collector would refuse to read.
 DEFAULT_BIND = "127.0.0.1"
 DEFAULT_PORT = 8787
-DEFAULT_COMMAND_TTL_MS = 10_000
-# Config patches the console really publishes. Longer than the dry-run TTL to
-# tolerate the unverified clock difference between console and Raspberry, and
-# well under the contract's MAX_CONFIG_TTL_MS.
-CONFIG_COMMAND_TTL_MS = 60_000
+# Kontrol's RDF Node commands live 15 s (rdf_node_commands.COMMAND_TTL_MS, the
+# edge's Ground default; the edge accepts at most 30 s).
 MAX_CONFIG_PATCH_REQUEST_BYTES = 4096
-CONFIG_PATCH_REQUEST_KEYS = frozenset({"changes", "base_config_rev", "confirm"})
-_COMMAND_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+CONFIG_PATCH_REQUEST_KEYS = frozenset({"changes", "base_rev", "confirm"})
+# The edge refuses a second config.get from the same link within 1 s.
+CONFIG_GET_MIN_INTERVAL_MS = 1_000
+# Status lookups take any id the edge accepts; the console's own are gc-<hex>.
+_COMMAND_ID_RE = cmds.COMMAND_ID_RE
+# The node Kontrol commands when no MQTT monitor exists yet.
+DEFAULT_RDF_NODE_ID = "uav-01"
 DEFAULT_APP_NAME = "SDR-DoA Ground Console"
 DEFAULT_BRANDING_PATH = Path.home() / ".config" / "sdr-doa-ground-console" / "branding.json"
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "sdr-doa-ground-console" / "console.json"
@@ -294,12 +334,14 @@ ADMIN_SESSION_TTL_SECONDS = 30 * 60
 # State-changing POSTs that need a same-origin loopback Origin before their
 # body is read. Login and logout are here so a cross-site page cannot feed the
 # failed-login throttle; console-config and mqtt/connect replace the MQTT
-# monitor, which is also the config-patch publish channel; preferences would
-# otherwise let any page rewrite the operator's saved view.
+# monitor, which is also the config-patch publish channel; lan-access opens a
+# listener on the LAN; preferences would otherwise let any page rewrite the
+# operator's saved view.
 SAME_ORIGIN_POST_PATHS = frozenset({
     "/api/admin/login",
     "/api/admin/logout",
     "/api/console-config",
+    "/api/lan-access",
     "/api/mqtt/connect",
     "/api/preferences",
 })
@@ -335,30 +377,6 @@ DEFAULT_MQTT_WS_PATH = "/mqtt"
 _MQTT_WS_PATH_RE = re.compile(r"/[A-Za-z0-9._~/-]{0,127}")
 _MQTT_PORT_QUERY_RE = re.compile(r"[0-9]{1,5}")
 MQTT_DEPENDENCY_ERROR = "MQTT monitor dependency paho-mqtt is not installed"
-
-
-# This is deliberately narrower than the full settings document. The ordinary
-# telemetry control path must not change DAQ topology, calibration, endpoints,
-# credentials, or system lifecycle.
-# The dry-run preview validates with the MQTT contract, so its allowlist is
-# the contract's own range table.
-CONFIG_ALLOWLIST = dict(sdr_doa_mqtt.CONFIG_RANGES)
-
-
-def _is_allowed_base_url(value: str) -> bool:
-    if not isinstance(value, str):
-        return False
-    parsed = urlsplit(value)
-    if parsed.scheme != "http" or parsed.username or parsed.password:
-        return False
-    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
-        return False
-    hostname = (parsed.hostname or "").lower().rstrip(".")
-    try:
-        port = parsed.port
-    except ValueError:
-        return False
-    return hostname in {item.lower().rstrip(".") for item in ALLOWED_DATA_HOSTS} and port in (None, 8081)
 
 
 def _is_allowed_mqtt_host(value: str) -> bool:
@@ -431,14 +449,8 @@ class _UnavailableMqttMonitor:
             "valid": 0,
             "invalid": 0,
             "cleared": 0,
-            "total_bytes": 0,
             "last_received_at_ms": None,
             "last_age_ms": None,
-            "last_latency_ms": None,
-            "last_topic": None,
-            "last_by_kind": {},
-            "kind_counts": {},
-            "topic_counts": {},
         }
 
     def rdf_node_snapshot(self) -> Dict[str, Any]:
@@ -446,34 +458,32 @@ class _UnavailableMqttMonitor:
         snapshot.update({"enabled": True, "connection": "error", "last_error": "DEPENDENCY_MISSING"})
         return snapshot
 
-    def publish_config_patch(self, _command: Any) -> Dict[str, Any]:
+    def publish_rdf_node_command(self, _command: Any) -> Dict[str, Any]:
         raise MonitorPublishError("MQTT_DEPENDENCY_MISSING", self.error)
 
-    def reported_config(self) -> Dict[str, Any]:
+    def rdf_node_control_view(self) -> Dict[str, Any]:
         return {"available": False}
 
-    def config_command_observation(self, _command_id: str) -> Dict[str, Any]:
-        return {"published": False, "puback": None, "echoed_at_ms": None, "ack": None}
+    def rdf_node_command_observation(self, _command_id: str) -> Dict[str, Any]:
+        return {"published": False, "puback": None, "progress": None, "final": None, "reported_at_ms": None}
 
 
 def _monitor_can_publish(monitor: Any) -> bool:
-    """True for a real monitor that offers the config-patch publish path."""
+    """True for a real monitor that offers the Kontrol command publish path."""
     return (
         monitor is not None
         and not isinstance(monitor, _UnavailableMqttMonitor)
-        and callable(getattr(monitor, "publish_config_patch", None))
+        and callable(getattr(monitor, "publish_rdf_node_command", None))
     )
 
 
-def _plain_number(value: float) -> Any:
-    return int(value) if float(value).is_integer() else value
+def _monitor_node_id(monitor: Any) -> str:
+    node_id = getattr(monitor, "node_id", None) if monitor is not None else None
+    return node_id if isinstance(node_id, str) and node_id else DEFAULT_RDF_NODE_ID
 
 
 def _config_patch_ranges() -> Dict[str, List[Any]]:
-    return {
-        field: [_plain_number(low), _plain_number(high)]
-        for field, (low, high) in sdr_doa_mqtt.CONFIG_RANGES.items()
-    }
+    return cmds.ranges_view()
 
 
 class ConfigPatchRejected(Exception):
@@ -491,67 +501,40 @@ class ConfigPatchRejected(Exception):
 
 
 def _parse_config_patch_request(payload: Any) -> Tuple[Dict[str, Any], Optional[int]]:
-    """Checks 3-5 of the config-patch contract; the first failure wins."""
+    """Request shape, confirm and the edge's field rules; the first failure wins."""
     if (
         not isinstance(payload, dict)
         or "changes" not in payload
-        or "base_config_rev" not in payload
+        or "base_rev" not in payload
         or set(payload) - CONFIG_PATCH_REQUEST_KEYS
     ):
         raise ConfigPatchRejected(
             HTTPStatus.BAD_REQUEST,
             "INVALID_REQUEST",
-            "request must be a JSON object with changes, base_config_rev and confirm only",
+            "request must be a JSON object with changes, base_rev and confirm only",
         )
     changes = payload["changes"]
-    base_config_rev = payload["base_config_rev"]
+    base_rev = payload["base_rev"]
     if not isinstance(changes, dict):
         raise ConfigPatchRejected(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "changes must be a JSON object")
-    if base_config_rev is not None and (
-        isinstance(base_config_rev, bool) or not isinstance(base_config_rev, int) or base_config_rev < 0
-    ):
+    if base_rev is not None and (isinstance(base_rev, bool) or not isinstance(base_rev, int) or base_rev < 0):
         raise ConfigPatchRejected(
-            HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "base_config_rev must be a non-negative integer or null",
+            HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "base_rev must be a non-negative integer or null",
         )
     if payload.get("confirm") is not True:
         raise ConfigPatchRejected(
             HTTPStatus.BAD_REQUEST, "CONFIRM_REQUIRED", "confirm must be true after the change has been reviewed",
         )
-    if not changes:
-        raise ConfigPatchRejected(HTTPStatus.BAD_REQUEST, "EMPTY_CHANGES", "changes must contain at least one field")
-    unknown = sorted(set(changes) - set(CONFIG_ALLOWLIST))
-    if unknown:
-        raise ConfigPatchRejected(
-            HTTPStatus.BAD_REQUEST,
-            "FIELD_NOT_ALLOWED",
-            "fields not allowed: " + ", ".join(unknown),
-            fields=unknown,
-        )
-    for field, value in changes.items():
-        low, high = CONFIG_ALLOWLIST[field]
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or (isinstance(value, float) and not math.isfinite(value))
-            or not low <= value <= high
-        ):
-            raise ConfigPatchRejected(
-                HTTPStatus.BAD_REQUEST,
-                "VALUE_OUT_OF_RANGE",
-                f"{field} must be a finite number from {low:g} to {high:g}",
-                field=field,
-                range=[_plain_number(low), _plain_number(high)],
-            )
-    return dict(changes), base_config_rev
+    try:
+        normalized = cmds.validate_patch_changes(changes)
+    except cmds.CommandRefused as refused:
+        raise ConfigPatchRejected(HTTPStatus.BAD_REQUEST, refused.code, refused.message, **refused.extra) from refused
+    return normalized, base_rev
 
 
-_REPORTED_VALUE_SOURCES = frozenset({"v1_config_reported", "v2_effective"})
-_BASE_REVISION_SOURCES = frozenset({"config_reported", "ack", "state"})
-
-
-def _monitor_reported_config(monitor: Any) -> Optional[Dict[str, Any]]:
-    """The monitor's reported_config(), or None when it has none or fails."""
-    reader = getattr(monitor, "reported_config", None)
+def _monitor_control_view(monitor: Any) -> Optional[Dict[str, Any]]:
+    """The monitor's rdf_node_control_view(), or None when it has none or fails."""
+    reader = getattr(monitor, "rdf_node_control_view", None)
     if monitor is None or not callable(reader):
         return None
     try:
@@ -569,55 +552,55 @@ def _finite_or_none(value: Any) -> Any:
     return value
 
 
-def _normalize_reported(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Keep only the documented, well-typed fields of reported_config()."""
-    values_in = data.get("values") if isinstance(data.get("values"), dict) else {}
-    sources_in = data.get("value_sources") if isinstance(data.get("value_sources"), dict) else {}
-    values = {field: _finite_or_none(values_in.get(field)) for field in CONFIG_ALLOWLIST}
-    sources = {
-        field: sources_in.get(field) if values[field] is not None and sources_in.get(field) in _REPORTED_VALUE_SOURCES else None
-        for field in CONFIG_ALLOWLIST
-    }
-    received_in = data.get("value_received_at_ms") if isinstance(data.get("value_received_at_ms"), dict) else {}
-    received = {
-        field: received_in.get(field) if values[field] is not None and type(received_in.get(field)) is int and received_in.get(field) >= 0 else None
-        for field in CONFIG_ALLOWLIST
-    }
-    revision = data.get("base_config_rev")
-    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
-        revision = None
-    revision_source = data.get("base_config_rev_source") if revision is not None else None
-    if revision_source not in _BASE_REVISION_SOURCES:
-        revision_source = None
-    reported_in = data.get("reported")
-    reported: Optional[Dict[str, Any]] = None
-    if isinstance(reported_in, dict):
-        def optional_int(key: str) -> Optional[int]:
-            value = reported_in.get(key)
-            return value if type(value) is int else None
+def _int_or_none(value: Any, minimum: int = 0) -> Optional[int]:
+    return value if type(value) is int and value >= minimum else None
 
-        # A retained replay is aged from its source timestamp (age_basis
-        # "source_ts"), or has no age; see sdr_doa_mqtt_monitor._reported_age.
-        age_basis = reported_in.get("age_basis")
-        reported = {
-            "config_rev": optional_int("config_rev"),
-            "received_at_ms": optional_int("received_at_ms"),
-            "source_ts_ms": optional_int("source_ts_ms"),
-            "age_ms": optional_int("age_ms"),
-            "age_basis": age_basis if age_basis in {"received", "source_ts"} else None,
-            "retained": reported_in.get("retained") is True,
-            "synthetic": reported_in.get("synthetic") is True,
-            "source": reported_in.get("source") if reported_in.get("source") in {"v1", "v2", "v1+v2"} else None,
-        }
-    connection = data.get("connection")
+
+def _session_or_none(view: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The node session a command can name: known, with a sid and a boot."""
+    session = view.get("session")
+    if not isinstance(session, dict) or session.get("known") is not True:
+        return None
+    if not isinstance(session.get("sid"), str) or not isinstance(session.get("boot"), str):
+        return None
+    return session
+
+
+def _node_view(session: Optional[Dict[str, Any]], now_ms: int) -> Optional[Dict[str, Any]]:
+    """What Kontrol shows of the node session; never the boot or instance ids."""
+    if session is None:
+        return None
+    received = _int_or_none(session.get("health_received_at_ms"))
+    capabilities = session.get("capabilities") if isinstance(session.get("capabilities"), dict) else {}
+
+    def flag(name: str) -> Optional[bool]:
+        value = capabilities.get(name)
+        return value if isinstance(value, bool) else None
+
     return {
-        "connection": connection if isinstance(connection, str) and connection else "unknown",
-        "base_config_rev": revision,
-        "base_config_rev_source": revision_source,
-        "reported": reported,
-        "values": values,
-        "value_sources": sources,
-        "value_received_at_ms": received,
+        "sid": session["sid"],
+        "cfg": _int_or_none(session.get("cfg")),
+        "health_fresh": session.get("health_fresh") is True,
+        "health_age_ms": None if received is None else max(0, now_ms - received),
+        "remote_commands": flag("remote_commands"),
+        "remote_config_patch": flag("remote_config_patch"),
+    }
+
+
+def _settings_view(report: Any, now_ms: int) -> Optional[Dict[str, Any]]:
+    """The latest settings/reported without its native text; safe values only while current."""
+    if not isinstance(report, dict) or not isinstance(report.get("id"), str):
+        return None
+    received = _int_or_none(report.get("received_at_ms"))
+    current = report.get("matches_state_cfg") is True
+    safe = report.get("safe_settings") if current and isinstance(report.get("safe_settings"), dict) else {}
+    return {
+        "id": report["id"],
+        "rev": _int_or_none(report.get("rev")),
+        "received_at_ms": received,
+        "age_ms": None if received is None else max(0, now_ms - received),
+        "matches_state_cfg": current,
+        "values": {field: _finite_or_none(safe.get(field)) for field in cmds.PATCH_FIELDS},
     }
 
 
@@ -661,16 +644,48 @@ def _default_console_config(
     *,
     mqtt_transport: str = "websockets",
     mqtt_ws_path: str = DEFAULT_MQTT_WS_PATH,
+    data_out_hosts: Optional[Sequence[str]] = None,
+    lan_access: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     return {
         "version": CONSOLE_CONFIG_VERSION,
         "base_url": base_url,
+        # Hosts Data Out may be read from (port 8081); base_url's host is one of them.
+        "data_out_hosts": list(DEFAULT_DATA_OUT_HOSTS if data_out_hosts is None else data_out_hosts),
         "mqtt_host": mqtt_host,
         "mqtt_port": int(mqtt_port),
         "mqtt_transport": mqtt_transport,
         "mqtt_ws_path": mqtt_ws_path,
         "refresh_seconds": int(refresh_seconds),
+        # The opt-in LAN view (lan_access.py). It is saved here with the
+        # rest, but only POST /api/lan-access (admin) changes it, and the
+        # console-config routes never show it.
+        "lan_access": dict(lan_access) if lan_access is not None else lan.default_settings(),
     }
+
+
+def _public_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """The console config as /api/console-config shows it: without lan_access."""
+    return {key: value for key, value in config.items() if key != "lan_access"}
+
+
+def _snapshot_request(
+    query: Dict[str, List[str]], *, fresh_settings: bool = True, refresh: bool = True, data_out_only: bool = True
+) -> SnapshotRequest:
+    """The read flags of one /api/snapshot query (data_out_reader.py).
+
+    refresh=1 is the operator's Refresh and fresh_settings=1 Kontrol's "Cek
+    ulang" (both read again only when the last read is 1 s old); seen is the
+    collection id the viewer already shows; source=data_out (the legacy UI)
+    reads Data Out even while MQTT is fresh. ``fresh_settings=False``,
+    ``refresh=False`` and ``data_out_only=False`` ignore those flags.
+    """
+    return SnapshotRequest(
+        refresh=refresh and query.get("refresh", [""])[0] == "1",
+        fresh_settings=fresh_settings and query.get("fresh_settings", [""])[0] == "1",
+        seen=valid_collection_id(query.get("seen", [""])[0]),
+        data_out_only=data_out_only and query.get("source", [""])[0] == "data_out",
+    )
 
 
 def _config_integer(value: Any, field: str) -> int:
@@ -688,13 +703,37 @@ def _config_integer(value: Any, field: str) -> int:
     raise ValueError(f"{field} must be an integer")
 
 
+def _validate_data_out(payload: Dict[str, Any], defaults: Dict[str, Any]) -> Tuple[str, List[str]]:
+    """Return the Data Out URL and host list, or raise DataOutHostError.
+
+    The list is checked first, then the URL against it. A list that drops the
+    host of an unchanged URL is DATA_OUT_HOST_IN_USE; a URL whose host is not
+    in the list is DATA_OUT_URL_NOT_ALLOWED. Both errors carry the list.
+    """
+    hosts = normalize_data_out_hosts(
+        payload.get("data_out_hosts", defaults.get("data_out_hosts", list(DEFAULT_DATA_OUT_HOSTS)))
+    )
+    base_url = payload.get("base_url", defaults["base_url"])
+    url_host = data_out_url_host(base_url)
+    if url_host is not None and url_host in hosts:
+        return str(base_url).rstrip("/"), hosts
+    previous = data_out_url_host(defaults.get("base_url"))
+    if "data_out_hosts" in payload and url_host is not None and url_host == previous:
+        raise DataOutHostError(
+            DATA_OUT_HOST_IN_USE,
+            f"data_out_hosts must keep {url_host}, the host of the Data Out URL "
+            f"({', '.join(hosts)} given; port {DATA_OUT_PORT})",
+            host=url_host,
+            hosts=hosts,
+        )
+    return check_data_out_url(base_url, hosts), hosts
+
+
 def _validate_console_config(payload: Any, fallback: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     defaults = dict(fallback or _default_console_config())
     if not isinstance(payload, dict):
         raise ValueError("console config must be a JSON object")
-    base_url = payload.get("base_url", defaults["base_url"])
-    if not _is_allowed_base_url(base_url):
-        raise ValueError("base_url is outside the local SDR-DoA allowlist")
+    base_url, data_out_hosts = _validate_data_out(payload, defaults)
     mqtt_host = payload.get("mqtt_host", defaults["mqtt_host"])
     if mqtt_host is None:
         mqtt_host = ""
@@ -712,13 +751,19 @@ def _validate_console_config(payload: Any, fallback: Optional[Dict[str, Any]] = 
     refresh_seconds = _config_integer(payload.get("refresh_seconds", defaults["refresh_seconds"]), "refresh_seconds")
     if refresh_seconds not in ALLOWED_REFRESH_INTERVALS:
         raise ValueError("refresh_seconds is not an allowed interval")
+    fallback_lan = defaults.get("lan_access")
+    if not isinstance(fallback_lan, dict):
+        fallback_lan = lan.default_settings()
+    lan_access = lan.validate_settings(payload.get("lan_access", fallback_lan), fallback_lan)
     return _default_console_config(
-        base_url.rstrip("/"),
+        base_url,
         mqtt_host.strip(),
         mqtt_port,
         refresh_seconds,
         mqtt_transport=mqtt_transport,
         mqtt_ws_path=mqtt_ws_path,
+        data_out_hosts=data_out_hosts,
+        lan_access=lan_access,
     )
 
 
@@ -799,7 +844,27 @@ def _load_console_config(
         pass
     accepted: Dict[str, Any] = {}
     rejected: List[str] = []
-    for field in sorted(key for key in payload if key in defaults and key != "version"):
+    # The URL is checked against the host list, so the two are taken
+    # together first; failing that, the list on its own (with the default
+    # URL), then the URL against whichever list was kept.
+    data_out = {field: payload[field] for field in DATA_OUT_FIELDS if field in payload}
+    try:
+        _validate_console_config(data_out, defaults)
+        accepted.update(data_out)
+    except (ValueError, TypeError):
+        if "data_out_hosts" in data_out:
+            try:
+                _validate_console_config({"data_out_hosts": data_out["data_out_hosts"]}, defaults)
+                accepted["data_out_hosts"] = data_out["data_out_hosts"]
+            except (ValueError, TypeError):
+                rejected.append("data_out_hosts")
+        if "base_url" in data_out:
+            try:
+                _validate_console_config({**accepted, "base_url": data_out["base_url"]}, defaults)
+                accepted["base_url"] = data_out["base_url"]
+            except (ValueError, TypeError):
+                rejected.append("base_url")
+    for field in sorted(key for key in payload if key in defaults and key not in ("version", *DATA_OUT_FIELDS)):
         try:
             _validate_console_config({field: payload[field]}, defaults)
         except (ValueError, TypeError):
@@ -819,6 +884,8 @@ def _load_console_config(
 
 # Connection fields that a command-line flag of the same name can set.
 CLI_CONFIG_FIELDS = ("base_url", "mqtt_host", "mqtt_port", "mqtt_transport", "mqtt_ws_path")
+# Validated together: base_url's host must be in data_out_hosts.
+DATA_OUT_FIELDS = ("data_out_hosts", "base_url")
 
 
 def _explicit_cli_options(argv: Optional[Sequence[str]]) -> Set[str]:
@@ -855,8 +922,11 @@ def _apply_cli_overrides(
 
 # First-start seed for console.json: environment variable, config field and
 # whether the value is an integer. Read from the process environment first,
-# then the env file; validated like a saved config.
+# then the env file; validated like a saved config. The host list is comma
+# separated and replaces the default list; base_url is checked against the
+# list that applies (seeded or default).
 SEED_ENV_FIELDS: Tuple[Tuple[str, str, bool], ...] = (
+    ("SDR_DOA_SEED_DATA_OUT_HOSTS", "data_out_hosts", False),
     ("SDR_DOA_SEED_BASE_URL", "base_url", False),
     ("SDR_DOA_SEED_MQTT_HOST", "mqtt_host", False),
     ("SDR_DOA_SEED_MQTT_PORT", "mqtt_port", True),
@@ -883,6 +953,7 @@ def _seed_console_config(
     fallback = dotenv_values or {}
     defaults = _default_console_config()
     accepted: Dict[str, Any] = {}
+    seeded_hosts: Optional[str] = None
     for variable, field, integer in SEED_ENV_FIELDS:
         raw = source.get(variable)
         if raw is None or not raw.strip():
@@ -891,6 +962,29 @@ def _seed_console_config(
             continue
         text = raw.strip()
         value: Any = text
+        if field == "data_out_hosts":
+            value = [part.strip() for part in text.split(",")]
+            # On its own the list is checked with base_url left out, so a
+            # list without the default URL's host waits for the URL seed.
+            try:
+                normalize_data_out_hosts(value)
+            except DataOutHostError:
+                log(f"{variable} is not a valid {field}; ignored")
+                continue
+            accepted[field] = value
+            seeded_hosts = variable
+            continue
+        if field == "base_url":
+            try:
+                _validate_data_out({**accepted, field: value}, defaults)
+            except (ValueError, TypeError):
+                if data_out_url_host(value) is not None:
+                    log(f"{variable} names a host outside the Data Out host list; ignored")
+                else:
+                    log(f"{variable} is not a valid {field}; ignored")
+                continue
+            accepted[field] = value
+            continue
         if integer:
             if _SEED_INTEGER_RE.fullmatch(text) is None:
                 log(f"{variable} is not a valid {field}; ignored")
@@ -902,6 +996,13 @@ def _seed_console_config(
             log(f"{variable} is not a valid {field}; ignored")
             continue
         accepted[field] = value
+    if seeded_hosts is not None and "base_url" not in accepted:
+        try:
+            _validate_data_out({"data_out_hosts": accepted["data_out_hosts"]}, defaults)
+        except (ValueError, TypeError):
+            # The list would leave the default Data Out URL outside it.
+            log(f"{seeded_hosts} does not include the host of the Data Out URL; ignored")
+            del accepted["data_out_hosts"]
     return _validate_console_config(accepted, defaults)
 
 
@@ -1810,7 +1911,7 @@ pre { max-height: 260px; overflow: auto; margin: 8px 0 0; padding: 9px; border: 
 
       <article class="panel">
         <header class="panel-head"><div class="panel-title"><span class="panel-index">M</span><div><p class="panel-kicker">MESSAGE MONITOR</p><h2>MQTT subscriber</h2></div></div><span class="panel-code">NO PUBLISH</span></header>
-        <div class="panel-body table-wrap"><table class="data-table"><tbody id="mqtt-rows"></tbody></table><details><summary>Last payload by stream</summary><pre id="mqtt-last">Monitor is disabled.</pre></details></div>
+        <div class="panel-body table-wrap"><table class="data-table"><tbody id="mqtt-rows"></tbody></table><details><summary>MQTT status</summary><pre id="mqtt-last">Monitor is disabled.</pre></details></div>
       </article>
     </aside>
   </div>
@@ -1840,7 +1941,7 @@ pre { max-height: 260px; overflow: auto; margin: 8px 0 0; padding: 9px; border: 
 const initialConfig = __CONSOLE_CONFIG_JSON__;
 const $ = (id) => document.getElementById(id);
 if (initialConfig && initialConfig.refresh_seconds !== undefined) $('refresh-interval').value = String(initialConfig.refresh_seconds);
-const state = { dataUrl: $('data-url').value, autoTimer: null, branding: null, pendingLogo: null, refreshSequence: 0, mqttSequence: 0, refreshController: null, expiryTimer: null, snapshot: null, polar: { values: null, angle: null, fresh: false, figType: 'Compass', compassOffset: 0, localAxis: true } };
+const state = { dataUrl: $('data-url').value, autoTimer: null, autoSeconds: 0, collectionId: null, consoleSeconds: Number(initialConfig?.refresh_seconds)||0, branding: null, pendingLogo: null, refreshSequence: 0, mqttSequence: 0, refreshController: null, expiryTimer: null, snapshot: null, polar: { values: null, angle: null, fresh: false, figType: 'Compass', compassOffset: 0, localAxis: true } };
 function esc(value) { return String(value ?? '—').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;'); }
 function kind(value) { const s=String(value||'').toUpperCase(); return s==='LIVE'||s==='PASS'||s==='READY'||s==='CONNECTED'?'good':(s==='DEGRADED'||s==='STALE'||s==='BLOCKED'||s==='FAIL'||s==='ERROR'?'bad':'warn'); }
 function pill(value) { const cls=kind(value); return `<span class="chip ${cls==='good'?'safe':(cls==='bad'?'bad':'warn')}">${esc(value)}</span>`; }
@@ -1889,10 +1990,6 @@ async function loadBranding() { try { const r=await fetch('/api/branding',{cache
 function setHealthCard(id, value, detail, tone='') { const card=$(id)?.closest('.health-card'); if(!card) return; $(id).textContent=value; $(id).className=''; card.className=`health-card ${tone}`; const detailNode=$(id+'-detail'); if(detailNode) detailNode.textContent=detail; }
 function mqttCount(value) { return Number.isInteger(value)&&value>=0?value:0; }
 function mqttMs(value) { return Number.isFinite(value)?`${value} ms`:'—'; }
-// A zero-length publish removes a retained value: the entry has cleared:true and
-// valid:false, which means "no current value", not an invalid message.
-function mqttContract(entry) { return entry.cleared===true?'CLEARED':(entry.valid===true?'VALID':'INVALID'); }
-function contractPill(state) { return `<span class="chip ${state==='VALID'?'safe':(state==='INVALID'?'bad':'warn')}">${esc(state)}</span>`; }
 function mqttTransport(data) { return data.transport==='tcp'?'MQTT over TCP':(data.transport==='websockets'?`MQTT over WebSocket ${data.ws_path||'/mqtt'}`:'—'); }
 function renderMqtt(data) {
   const enabled=Boolean(data&&data.enabled); const connection=data?.connection||'off';
@@ -1901,14 +1998,10 @@ function renderMqtt(data) {
   $('mqtt-detail').textContent=enabled?`${data.host}:${data.port} · ${valid} valid · ${invalid} invalid${cleared?` · ${cleared} cleared`:''}`:'subscriber-only / off';
   setHealthCard('health-mqtt', enabled?connection.toUpperCase():'OFF', enabled?'subscriber-only · '+valid+' valid':'subscriber-only', enabled&&connection==='connected'?'good':(enabled?'warn':''));
   if(!enabled){ $('mqtt-rows').innerHTML=rows([['Mode','OFF'],['Publish',pill('disabled')]]); $('mqtt-last').textContent='MQTT monitor is not enabled.'; return; }
-  const byKind=data.last_by_kind&&typeof data.last_by_kind==='object'&&!Array.isArray(data.last_by_kind)?data.last_by_kind:{};
-  const entries=Object.entries(byKind).filter(([,entry])=>entry&&typeof entry==='object');
-  const kindRows=entries.map(([name,entry])=>[`Latest ${name}`,`${contractPill(mqttContract(entry))}${entry.retained===true?' <span class="muted">retained</span>':''} <span class="muted">${esc(Number.isFinite(entry.age_ms)?`${entry.age_ms} ms ago`:'')}</span>`]);
   $('mqtt-rows').innerHTML=rows([
-    ['Connection',pill(connection)],['Transport',esc(mqttTransport(data))],['Messages',esc(mqttCount(data.received))],['Valid / invalid',esc(`${valid} / ${invalid}`)],['Retained clears',esc(cleared)],['Bytes',esc(mqttCount(data.total_bytes))],['Last latency',esc(mqttMs(data.last_latency_ms))],['Last age',esc(mqttMs(data.last_age_ms))],['Last topic',esc(data.last_topic||'—')],...kindRows,['Publish',pill('false')]
+    ['Connection',pill(connection)],['Transport',esc(mqttTransport(data))],['Topics',esc(data.root?`${data.root}/…`:'—')],['Messages',esc(mqttCount(data.received))],['Valid / invalid',esc(`${valid} / ${invalid}`)],['Retained clears',esc(cleared)],['Last age',esc(mqttMs(data.last_age_ms))],['Publish',pill('false')]
   ]);
-  const records=Object.fromEntries(Object.entries(byKind).map(([name,entry])=>[name,entry&&typeof entry==='object'&&entry.cleared===true?{kind:entry.kind,cleared:true,retained:entry.retained,received_at_ms:entry.received_at_ms,age_ms:entry.age_ms}:entry]));
-  $('mqtt-last').textContent=JSON.stringify(records,null,2);
+  $('mqtt-last').textContent=JSON.stringify({connection,last_error:data.last_error??null,received:mqttCount(data.received),valid,invalid,cleared,last_age_ms:data.last_age_ms??null},null,2);
 }
 // Mirrors frontend/src/lib/polar.ts: Polar is theta_0 counter-clockwise (KrakenSDR Polar plot); Linear has no polar axis, so its compass_offset gets a local Compass axis.
 function polarSettings(figType, compassOffset) { const requested=String(figType??'').trim().toLowerCase(); const numeric=typeof compassOffset==='number'?compassOffset:(typeof compassOffset==='string'&&compassOffset.trim()!==''?Number(compassOffset.trim()):NaN); return { figType:requested==='polar'?'Polar':'Compass', compassOffset:Number.isFinite(numeric)?numeric:0, localAxis:requested!=='polar'&&requested!=='compass' }; }
@@ -1991,9 +2084,9 @@ function setSnapshotUnavailable(reason='snapshot unavailable') {
 function render(snapshot) {
   state.snapshot=snapshot; const gate=snapshot.publication_gate||{}; const status=snapshot.status||{}; const safe=status.safe||{}; const csv=(snapshot.doa_candidates||{}).csv||{}; const xml=(snapshot.doa_candidates||{}).xml||{}; const consistency=snapshot.native_consistency||{}; const authority=snapshot.authority||{};
   const overall=snapshot.overall_state||'UNKNOWN'; $('overall').textContent=overall; $('overall').className=`metric-value ${kind(overall)}`; $('system-state').textContent=overall; $('system-state').className=kind(overall); $('overall-detail').textContent=`DAQ ${status.daq_health||'—'} · native DoA ${csv.native_metrics_state||'—'} · delivery ${gate.state||'—'}`;
-  const readAt=new Date(); $('last-read-chip').textContent=readAt.toISOString().slice(11,19)+'Z'; $('source-url').textContent=snapshot.collector?.base_url||state.dataUrl;
+  const collectedAt=Number(snapshot.collection?.collected_at_ms); const readAt=new Date(Number.isFinite(collectedAt)&&collectedAt>0?collectedAt:Date.now()); $('last-read-chip').textContent=readAt.toISOString().slice(11,19)+'Z'; $('source-url').textContent=snapshot.collector?.base_url||state.dataUrl;
   const daq=status.daq_health||'UNKNOWN'; const daqTop=safe.daq_status||{}; const syncFlags=[daqTop.frame_sync,daqTop.sample_delay_sync,daqTop.iq_sync]; const syncPassed=syncFlags.filter(value=>value===true).length; $('daq').textContent=daq; $('daq').className=`metric-value ${kind(daq)}`; $('daq-detail').textContent=`frame #${daqTop.data_frame_index??'—'} · sync ${syncPassed}/3`;
-  const freshnessItems=[csv.freshness,xml.freshness].filter(Boolean); const ages=freshnessItems.map(x=>x.age_ms); const validAges=ages.length===2&&ages.every(x=>typeof x==='number'&&Number.isFinite(x)&&x>=0); const maxAge=validAges?Math.max(...ages):null; const freshnessOk=validAges&&freshnessItems.every(x=>x.fresh===true); $('doa-age').textContent=maxAge===null?'—':`${(Number(maxAge)/1000).toFixed(1)} s`; $('doa-age').className=`metric-value ${freshnessOk&&maxAge<=5000?'good':'bad'}`; const relation=consistency.conflict===true?'CONFLICT':(consistency.comparable===true?(typeof consistency.circular_distance_deg==='number'&&consistency.circular_distance_deg<=3?'EQUAL':'DIFFERENT'):'NOT COMPARABLE'); $('doa-detail').textContent=`CSV ${formatNumber(csv.canonical_angle_deg,1)}° / XML ${formatNumber(xml.canonical_angle_deg,1)}° · ${relation}`;
+  const freshnessItems=[csv.freshness,xml.freshness].filter(Boolean); const ages=freshnessItems.map(x=>x.age_ms); const validAges=ages.length===2&&ages.every(x=>typeof x==='number'&&Number.isFinite(x)&&x>=0); const maxAge=validAges?Math.max(...ages)+servedAgeMs(snapshot):null; const freshnessOk=validAges&&freshnessItems.every(x=>x.fresh===true); $('doa-age').textContent=maxAge===null?'—':`${(Number(maxAge)/1000).toFixed(1)} s`; $('doa-age').className=`metric-value ${freshnessOk&&maxAge<=5000?'good':'bad'}`; const relation=consistency.conflict===true?'CONFLICT':(consistency.comparable===true?(typeof consistency.circular_distance_deg==='number'&&consistency.circular_distance_deg<=3?'EQUAL':'DIFFERENT'):'NOT COMPARABLE'); $('doa-detail').textContent=`CSV ${formatNumber(csv.canonical_angle_deg,1)}° / XML ${formatNumber(xml.canonical_angle_deg,1)}° · ${relation}`;
   const drops=safe.daq_num_dropped_frames; $('drops').textContent=drops===undefined?'—':drops; $('drops').className=`metric-value ${drops===0?'good':'warn'}`; $('drops-detail').textContent='status.json counter';
   const dataAvailable=Boolean(csv.available&&xml.available&&csv.freshness?.fresh&&xml.freshness?.fresh&&consistency.comparable===true&&consistency.conflict!==true); const gateState=String(gate.state||'BLOCKED').toUpperCase(); $('delivery-summary').textContent=gateState; $('delivery-summary').className=`metric-value ${kind(gateState)}`; $('delivery-state').textContent=gateState; $('delivery-state').className=kind(gateState); $('delivery-detail').textContent=gateState==='READY'?'delivery ready':'publish held'; $('gate-title').textContent=gateState; $('gate-pill').innerHTML=pill(gateState); $('gate-banner').className=`gate-banner ${gateState==='READY'?'good':''}`; $('gate-copy').textContent=gateState==='READY'?'Delivery gate is ready.':(dataAvailable?'DoA data is observable; delivery remains held by the publication gate.':'DoA data is not sufficiently fresh or consistent for usable delivery.');
   renderPolar(snapshot,csv,dataAvailable); renderMap(snapshot,csv,xml); renderHealthCards(snapshot,csv,xml,consistency); renderEvents(snapshot,gate,consistency);
@@ -2005,29 +2098,37 @@ function render(snapshot) {
   const settings=snapshot.settings||{}; const sf=settings.fields||{}; $('settings-rows').innerHTML=Object.keys(sf).sort().map(key=>[key,safeValue(sf[key])]).map(([key,value])=>`<tr><th>${esc(key)}</th><td>${value}</td></tr>`).join('')||'<tr><td colspan="2">Not available</td></tr>';
   setReadStatus(`Snapshot read successfully · ${readAt.toISOString().slice(11,19)}Z`,'good');
 }
-async function refreshMqtt() { const sequence=++state.mqttSequence; try { const r=await fetch('/api/mqtt',{cache:'no-store'}); const payload=await r.json(); if(sequence!==state.mqttSequence) return; renderMqtt(payload); } catch(e) { if(sequence!==state.mqttSequence) return; renderMqtt({enabled:true,connection:'error',host:'?',port:'?',received:0,valid:0,invalid:0,total_bytes:0,last_latency_ms:null,last_age_ms:null,last_topic:null,last_by_kind:{error:'monitor unavailable'}}); } }
+async function refreshMqtt() { const sequence=++state.mqttSequence; try { const r=await fetch('/api/mqtt',{cache:'no-store'}); const payload=await r.json(); if(sequence!==state.mqttSequence) return; renderMqtt(payload); } catch(e) { if(sequence!==state.mqttSequence) return; renderMqtt({enabled:true,connection:'error',last_error:'monitor unavailable',host:'?',port:'?',received:0,valid:0,invalid:0,cleared:0,last_age_ms:null}); } }
 const REQUEST_TIMEOUT_MS=8000;
 function localExpiryMs(snapshot) {
   // Same rule as the React console: the read keeps only the time still left in the collector's freshness window.
   if(snapshot?.status?.available!==true) return 0; const windows=[];
   for(const candidate of Object.values(snapshot.doa_candidates||{})){ const f=candidate?.freshness; if(!f||typeof f!=='object'||f.freshness_known===false) continue; if(f.fresh!==true) return 0; const maxAge=Number(f.max_age_ms); const age=Number(f.age_ms); if(!Number.isFinite(maxAge)||!Number.isFinite(age)||age<0) return 0; windows.push(maxAge-age); }
-  return windows.length?Math.max(0,Math.min(...windows)):5000;
+  // A shared read can be older than the answer (collection.age_ms); that time counts too.
+  const waited=servedAgeMs(snapshot);
+  return windows.length?Math.max(0,Math.min(...windows)-waited):Math.max(0,5000-waited);
 }
+// How long before the answer its shared Data Out read completed, as the React console bounds it.
+function servedAgeMs(snapshot) { const served=Number(snapshot?.collection?.age_ms); return Number.isFinite(served)&&served>0?Math.min(served,120000):0; }
+// A running auto-refresh follows the console's saved interval, which every answer reports, so this page polls when the console reads Data Out.
+function followConsoleUrl(url) { if(typeof url!=='string'||!url||url.length>512) return false; url=url.replace(/\/+$/,''); if(url===state.dataUrl) return false; state.dataUrl=url; state.collectionId=null; $('data-url').value=url; $('source-url').textContent=url; setTimeout(()=>refresh(),0); return true; }
+async function followSavedUrl() { try { const r=await fetch('/api/console-config',{cache:'no-store'}); if(r.ok) followConsoleUrl((await r.json())?.base_url); } catch(e) {} }
+function followConsoleInterval(snapshot) { const seconds=snapshot?.collection?.refresh_seconds; if(!Number.isInteger(seconds)||seconds<0) return; state.consoleSeconds=seconds; if(state.autoTimer&&seconds>0&&seconds!==state.autoSeconds) setAuto(seconds,false); }
 function scheduleLocalExpiry(snapshot) { if(state.expiryTimer){ clearTimeout(state.expiryTimer); state.expiryTimer=null; } const remaining=localExpiryMs(snapshot); if(remaining<=0) return; state.expiryTimer=setTimeout(()=>{ state.expiryTimer=null; if(state.snapshot!==snapshot) return; setSnapshotUnavailable('local freshness window expired; awaiting a new Data Out read'); setReadStatus('Data expired locally · awaiting a new read','bad'); },remaining); }
 async function refresh(options) {
-  const auto=options?.auto===true; if(auto&&state.refreshController) return;
+  const auto=options?.auto===true; const manual=options?.manual===true; if(auto&&state.refreshController) return;
   const sequence=++state.refreshSequence; if(state.refreshController) state.refreshController.abort(); const controller=typeof AbortController==='function'?new AbortController():null; state.refreshController=controller; const button=$('refresh'); button.disabled=true; setReadStatus('Reading Data Out…');
   let timedOut=false; const timer=controller?setTimeout(()=>{ timedOut=true; controller.abort(); },REQUEST_TIMEOUT_MS):null;
-  try { const url='/api/snapshot?base_url='+encodeURIComponent(state.dataUrl); const init={cache:'no-store'}; if(controller) init.signal=controller.signal; const response=await fetch(url,init); const data=await response.json(); if(sequence!==state.refreshSequence) return; if(!response.ok) throw new Error(data.error||'snapshot failed'); render(data); scheduleLocalExpiry(data); }
+  try { const url='/api/snapshot?source=data_out&base_url='+encodeURIComponent(state.dataUrl)+(manual?'&refresh=1':'')+(state.collectionId?'&seen='+encodeURIComponent(state.collectionId):''); const init={cache:'no-store'}; if(controller) init.signal=controller.signal; const response=await fetch(url,init); const data=await response.json(); if(sequence!==state.refreshSequence) return; if(!response.ok){ if(data.code==='DATA_OUT_URL_NOT_ALLOWED') followSavedUrl(); throw new Error(data.error||'snapshot failed'); } const id=data.collection?.id; state.collectionId=typeof id==='string'&&/^[0-9a-f]{8}-[0-9]{1,12}$/.test(id)?id:null; render(data); scheduleLocalExpiry(data); followConsoleInterval(data); followConsoleUrl(data.collection?.console_base_url); }
   catch(error) { if(sequence!==state.refreshSequence||(error?.name==='AbortError'&&!timedOut)) return; const message=timedOut?`request timed out after ${REQUEST_TIMEOUT_MS/1000} s`:(error?.message||'snapshot failed'); setSnapshotUnavailable(message); setReadStatus('Read error: '+message,'bad'); }
   finally { if(timer) clearTimeout(timer); if(sequence===state.refreshSequence){ button.disabled=false; if(state.refreshController===controller) state.refreshController=null; } }
   if(sequence===state.refreshSequence) refreshMqtt();
 }
-function setAuto(seconds) { if(state.autoTimer){ clearInterval(state.autoTimer); state.autoTimer=null; } const interval=Number(seconds||0); $('refresh-interval').value=String(interval); if(interval>0){ refresh(); state.autoTimer=setInterval(()=>refresh({auto:true}),interval*1000); $('auto-refresh').textContent=`Auto: ${interval}s`; } else $('auto-refresh').textContent='Auto: off'; }
+function setAuto(seconds,readNow=true) { if(state.autoTimer){ clearInterval(state.autoTimer); state.autoTimer=null; } const interval=Number(seconds||0); state.autoSeconds=interval; $('refresh-interval').value=String(interval); if(interval>0){ if(readNow) refresh(); state.autoTimer=setInterval(()=>refresh({auto:true}),interval*1000); $('auto-refresh').textContent=`Auto: ${interval}s`; } else $('auto-refresh').textContent='Auto: off'; }
 function openSettings(tab='connection') { $('settings-modal').hidden=false; selectTab(tab); }
 function closeSettings() { $('settings-modal').hidden=true; }
 function selectTab(name) { document.querySelectorAll('.tab').forEach(button=>button.classList.toggle('active',button.dataset.tab===name)); document.querySelectorAll('.tab-panel').forEach(panel=>panel.hidden=panel.id!==`tab-${name}`); }
-async function applyConnection() { const url=$('data-url').value.trim(); const mqttHost=$('mqtt-host').value.trim(); const mqttPort=Number($('mqtt-port').value||9001); const refreshSeconds=Number($('refresh-interval').value||0); if(!url){ setStatus('connection-status','URL is empty.','bad'); return; } try { const r=await fetch('/api/console-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_url:url,mqtt_host:mqttHost,mqtt_port:mqttPort,refresh_seconds:refreshSeconds})}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'configuration rejected'); state.dataUrl=data.base_url; $('source-url').textContent=data.base_url; setAuto(data.refresh_seconds); setStatus('connection-status','Configuration saved locally in Ground Console.','good'); await refresh(); } catch(e) { setStatus('connection-status',e.message,'bad'); } }
+async function applyConnection() { const url=$('data-url').value.trim(); const mqttHost=$('mqtt-host').value.trim(); const mqttPort=Number($('mqtt-port').value||9001); const refreshSeconds=Number($('refresh-interval').value||0); if(!url){ setStatus('connection-status','URL is empty.','bad'); return; } try { const r=await fetch('/api/console-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_url:url,mqtt_host:mqttHost,mqtt_port:mqttPort,refresh_seconds:refreshSeconds})}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'configuration rejected'); state.dataUrl=data.base_url; $('source-url').textContent=data.base_url; state.consoleSeconds=Number(data.refresh_seconds)||0; setAuto(data.refresh_seconds); setStatus('connection-status','Configuration saved locally in Ground Console.','good'); await refresh({manual:true}); } catch(e) { setStatus('connection-status',e.message,'bad'); } }
 async function connectMqtt() { const host=$('mqtt-host').value.trim(); const port=Number($('mqtt-port').value||9001); if(!host){ setStatus('connection-status','Enter an MQTT broker IP address or localhost first.','bad'); return; } try { const r=await fetch(`/api/mqtt/connect?host=${encodeURIComponent(host)}&port=${encodeURIComponent(port)}`,{method:'POST'}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'MQTT monitor failed'); renderMqtt(data); setStatus('connection-status','MQTT monitor connected; this view only subscribes.','good'); setTimeout(refreshMqtt,700); } catch(e) { setStatus('connection-status',e.message,'bad'); } }
 async function adminLogin() { const password=$('admin-password').value; try { const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password})}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'login failed'); $('admin-login-box').hidden=true; $('admin-workspace').hidden=false; $('admin-password').value=''; setStatus('brand-status','Admin active.','good'); renderBranding(state.branding); } catch(e) { setStatus('admin-login-status',e.message,'bad'); } }
 async function adminLogout() { await fetch('/api/admin/logout',{method:'POST'}); $('admin-login-box').hidden=false; $('admin-workspace').hidden=true; setStatus('admin-login-status','Admin session closed.',''); }
@@ -2035,7 +2136,7 @@ function readLogo(file) { if(!file) return; if(file.size>256*1024){ setStatus('b
 function resetLogo() { state.pendingLogo=''; $('brand-logo').value=''; $('brand-preview').hidden=true; $('preview-placeholder').hidden=false; setStatus('brand-status','Logo will be removed when saved.',''); }
 async function saveBranding() { const appName=$('brand-name').value.trim(); const logo=state.pendingLogo===null?(state.branding?.logo_data_url||''):state.pendingLogo; try { const r=await fetch('/api/admin/branding',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({app_name:appName,logo_data_url:logo})}); const data=await r.json(); if(!r.ok) throw new Error(data.error||'branding save failed'); state.pendingLogo=null; const verify=await fetch('/api/branding',{cache:'no-store'}); const verified=await verify.json(); if(!verify.ok) throw new Error(verified.error||'branding read-back failed'); renderBranding(verified); setStatus('brand-status','Branding saved and verified from Ground Console local storage.','good'); } catch(e) { setStatus('brand-status',e.message,'bad'); } }
 document.querySelectorAll('[data-nav]').forEach(item=>item.addEventListener('click',()=>{ document.querySelectorAll('.nav-item').forEach(nav=>nav.classList.toggle('active',nav===item)); document.querySelectorAll('.nav-item').forEach(nav=>nav.removeAttribute('aria-current')); item.setAttribute('aria-current','page'); }));
-$('refresh').addEventListener('click',refresh); $('auto-refresh').addEventListener('click',()=>setAuto(state.autoTimer?0:2)); $('settings-open').addEventListener('click',()=>openSettings('connection')); $('settings-close').addEventListener('click',closeSettings); document.querySelector('[data-close-settings]').addEventListener('click',closeSettings); document.querySelectorAll('.tab').forEach(button=>button.addEventListener('click',()=>selectTab(button.dataset.tab))); $('apply-connection').addEventListener('click',applyConnection); $('monitor-connect').addEventListener('click',connectMqtt); $('admin-login').addEventListener('click',adminLogin); $('admin-logout').addEventListener('click',adminLogout); $('brand-logo').addEventListener('change',event=>readLogo(event.target.files[0])); $('brand-reset-logo').addEventListener('click',resetLogo); $('brand-save').addEventListener('click',saveBranding); $('refresh-interval').addEventListener('change',event=>setAuto(event.target.value)); document.addEventListener('keydown',event=>{if(event.key==='Escape')closeSettings();});
+$('refresh').addEventListener('click',()=>refresh({manual:true})); $('auto-refresh').addEventListener('click',()=>setAuto(state.autoTimer?0:(state.consoleSeconds>0?state.consoleSeconds:2))); $('settings-open').addEventListener('click',()=>openSettings('connection')); $('settings-close').addEventListener('click',closeSettings); document.querySelector('[data-close-settings]').addEventListener('click',closeSettings); document.querySelectorAll('.tab').forEach(button=>button.addEventListener('click',()=>selectTab(button.dataset.tab))); $('apply-connection').addEventListener('click',applyConnection); $('monitor-connect').addEventListener('click',connectMqtt); $('admin-login').addEventListener('click',adminLogin); $('admin-logout').addEventListener('click',adminLogout); $('brand-logo').addEventListener('change',event=>readLogo(event.target.files[0])); $('brand-reset-logo').addEventListener('click',resetLogo); $('brand-save').addEventListener('click',saveBranding); document.addEventListener('keydown',event=>{if(event.key==='Escape')closeSettings();});
 window.addEventListener('resize',()=>drawPolar(state.polar.values,state.polar.angle,state.polar.fresh,state.polar.figType,state.polar.compassOffset),{passive:true});
 renderClock(); setInterval(renderClock,1000); loadBranding(); if (initialConfig && initialConfig.refresh_seconds > 0) setAuto(initialConfig.refresh_seconds); else refresh();
 </script>
@@ -2044,45 +2145,64 @@ renderClock(); setInterval(renderClock,1000); loadBranding(); if (initialConfig 
 """
 
 
-def validate_config_patch(payload: Any, now_ms: Optional[int] = None) -> Dict[str, Any]:
-    """Validate a narrow settings patch without applying or transmitting it.
+def validate_config_patch(
+    payload: Any,
+    now_ms: Optional[int] = None,
+    session: Optional[Dict[str, Any]] = None,
+    node_id: str = DEFAULT_RDF_NODE_ID,
+) -> Dict[str, Any]:
+    """Validate a settings patch as Kontrol would send it, without sending it.
 
-    The preview is built and checked by the shared MQTT contract, so
-    "passed" means the edge agent would accept the same envelope. The agent
-    drops a config_patch without base_config_rev, so the preview requires it.
+    The changes go through the RDF Node edge's own field rules
+    (rdf_node_commands), and the preview is the config.patch envelope Kontrol
+    would publish now: sid, boot and base_rev come from the node's latest
+    state when the MQTT monitor has one (``session_known``), else they are
+    null. Nothing is published, posted or written.
     """
     if not isinstance(payload, dict):
         raise ValueError("request must be a JSON object")
-    changes = payload.get("changes")
-    if not isinstance(changes, dict) or not changes:
-        raise ValueError("changes must be a non-empty object")
-    unknown = sorted(set(changes) - set(CONFIG_ALLOWLIST))
-    if unknown:
-        raise ValueError("fields not allowed: " + ", ".join(unknown))
-    if payload.get("base_config_rev") is None:
-        raise ValueError(
-            "base_config_rev is required: the edge agent rejects a config_patch without the revision it is based on"
-        )
-
+    if set(payload) - {"changes"}:
+        raise ValueError("only changes is accepted; sid, boot and base_rev come from the node's state")
+    try:
+        changes = cmds.validate_patch_changes(payload.get("changes"))
+    except cmds.CommandRefused as refused:
+        raise ValueError(f"{refused.code}: {refused.message}") from refused
     issued = int(time.time() * 1000) if now_ms is None else int(now_ms)
-    command = sdr_doa_mqtt.build_config_patch(
+    known = session is not None
+    command = cmds.build_command(
+        cmds.OP_CONFIG_PATCH,
         command_id="dryrun-" + uuid.uuid4().hex[:12],
-        base_config_rev=payload["base_config_rev"],
+        sid=session["sid"] if session else None,
+        boot=session["boot"] if session else None,
+        base_rev=_int_or_none(session.get("cfg")) if session else None,
+        issued_ms=issued,
         changes=changes,
-        issued_ts_ms=issued,
-        expires_ts_ms=issued + DEFAULT_COMMAND_TTL_MS,
     )
-    sdr_doa_mqtt.validate_config_patch(command, now_ms=issued)
+    if known and command["base_rev"] is not None:
+        try:
+            cmds.validate_command(command, now_ms=issued)
+        except cmds.CommandRefused as refused:
+            raise ValueError(f"{refused.code}: {refused.message}") from refused
     return {
         "dry_run": True,
         "transport": "none",
         "applied": False,
         "ok": True,
         "validation": "passed",
-        "contract": "sdr/v1 config_patch",
+        "contract": "RDF Node config.patch",
+        "topic": cmds.command_topic(node_id, cmds.OP_CONFIG_PATCH),
+        "session_known": known,
         "command": command,
         "note": "Preview only; no MQTT, HTTP POST, file write, or RDF-SDR mutation was performed.",
     }
+
+
+def _header_values(headers: Any, name: str) -> List[str]:
+    """Every value of one request header; none for an HTTP/0.9 request (Python 3.13 leaves a plain dict)."""
+    get_all = getattr(headers, "get_all", None)
+    if not callable(get_all):
+        return []
+    return [str(value) for value in get_all(name) or []]
 
 
 class ConsoleHandler(BaseHTTPRequestHandler):
@@ -2110,6 +2230,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         # neither is a 504 for an uncached tile while the upstream is down: the
         # tile cache logs that outage once, when it starts and when it ends.
         if path.startswith(TILE_ROUTE_PREFIX) and status in {"200", "504"}:
+            return
+        # The Receiver mirror is posted and polled several times a second. A
+        # served answer and a rate refusal are not logged (the mirror counts
+        # refusals); every other refusal is.
+        if path == rm.ROUTE and status in {"200", "429"}:
             return
         super().log_request(code, size)
 
@@ -2245,7 +2370,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
         if site not in ("", "none", "same-origin"):
             return False
-        hosts = self.headers.get_all("Host") or []
+        hosts = _header_values(self.headers, "Host")
         if len(hosts) != 1:
             return False
         host = hosts[0].strip()
@@ -2950,6 +3075,83 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(result.body)
 
+    def _capabilities_body(self) -> Dict[str, Any]:
+        """Body of GET /api/capabilities on the loopback listener."""
+        monitor = self.console_server.mqtt_monitor
+        node_id = _monitor_node_id(monitor)
+        return {
+            # The console has one publish path, Kontrol's RDF Node commands
+            # below (the admin-gated config.patch and its read-only
+            # config.get). It never POSTs to the Raspberry or applies
+            # settings itself; the edge does.
+            "read_only": False,
+            "mqtt_publish": True,
+            "remote_post": False,
+            "config_apply": False,
+            "mqtt_monitor": monitor is not None,
+            "admin_branding": True,
+            "admin_auth_required": True,
+            "admin_enabled": bool(ADMIN_PASSWORD),
+            "admin_default_password": ADMIN_PASSWORD == DEFAULT_ADMIN_PASSWORD,
+            "config_allowlist": list(cmds.PATCH_FIELDS),
+            "config_patch": {
+                "enabled": _monitor_can_publish(monitor),
+                "requires_admin": True,
+                "topic": cmds.command_topic(node_id, cmds.OP_CONFIG_PATCH),
+                "get_topic": cmds.command_topic(node_id, cmds.OP_CONFIG_GET),
+                "ack_topic": f"sdr/v2/{node_id}/{cmds.ACK_SUFFIX}",
+                "settings_topic": f"sdr/v2/{node_id}/{cmds.SETTINGS_SUFFIX}",
+                "qos": cmds.COMMAND_QOS,
+                "ttl_ms": cmds.COMMAND_TTL_MS,
+                "ranges": _config_patch_ranges(),
+                "gain_table_db": list(cmds.GAIN_TABLE_DB),
+                "requires_fresh_health": True,
+            },
+            "refresh_intervals_s": sorted(ALLOWED_REFRESH_INTERVALS),
+            "snapshot_budget_ms": int(SNAPSHOT_TOTAL_BUDGET_S * 1000),
+            # Browser preferences are kept on this host (/api/preferences).
+            "preferences": True,
+            "version": self.console_server.version,
+            # Which listener answered: "local" here, "lan-view" on the LAN
+            # view (LanConsoleHandler), and the LAN view's state.
+            "access": lan.ACCESS_LOCAL,
+            "lan_access": self.console_server.lan.status(),
+        }
+
+    def _health_body(self) -> Dict[str, Any]:
+        """Body of GET /api/health.
+
+        For container and service health checks: no Data Out read, no broker
+        call, no file access. receiver_busy tells the updaters to wait while
+        the Receiver records or archives a scan; lan_access says whether the
+        LAN view is open and, when it is enabled but closed, why.
+        """
+        return {
+            "ok": True,
+            "version": self.console_server.version,
+            "receiver_busy": self.console_server.receiver_activity.busy(),
+            "lan_access": self.console_server.lan.brief_status(),
+        }
+
+    def _send_snapshot(self, base_url: str, request: SnapshotRequest) -> None:
+        try:
+            snapshot = self.console_server.collect_snapshot(base_url, request)
+        except (CollectorError, ValueError, OSError, http.client.HTTPException) as exc:
+            self._send_json({"error": str(exc) or type(exc).__name__, "read_only": True}, HTTPStatus.BAD_GATEWAY)
+            return
+        self._send_json(snapshot)
+
+    def _send_lan_error(self, status: int, code: str, message: str, **extra: Any) -> None:
+        # LAN view and /api/lan-access codes go through this helper, never the
+        # Kontrol error helper, so the config-patch code contract does not
+        # count them.
+        self._send_json({**extra, "ok": False, "code": code, "error": message}, status)
+
+    # The Receiver's read rule also guards GET /api/lan-access: this
+    # console's own pages only (Sec-Fetch-Site, a loopback Host on this port).
+    def _local_read_is_allowed(self) -> bool:
+        return self._receiver_read_is_allowed()
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
         if parsed.path.startswith("/api/receiver/") and self._receiver_get(parsed):
@@ -2968,7 +3170,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             body = body.replace("__MQTT_HOST__", escape(config["mqtt_host"], quote=True))
             body = body.replace("__MQTT_PORT__", str(config["mqtt_port"]))
             body = body.replace("__REFRESH_SECONDS__", str(config["refresh_seconds"]))
-            body = body.replace("__CONSOLE_CONFIG_JSON__", _safe_config_json(config))
+            body = body.replace("__CONSOLE_CONFIG_JSON__", _safe_config_json(_public_config(config)))
             body = body.replace("__APP_NAME__", escape(branding["app_name"], quote=True))
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -2980,14 +3182,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self.wfile.write(body.encode("utf-8"))
             return
         if parsed.path == "/api/health":
-            # For container and service health checks: no Data Out read, no
-            # broker call, no file access. receiver_busy tells the updaters to
-            # wait while the Receiver records or archives a scan.
-            self._send_json({
-                "ok": True,
-                "version": self.console_server.version,
-                "receiver_busy": self.console_server.receiver_activity.busy(),
-            })
+            self._send_json(self._health_body())
             return
         if parsed.path == "/api/preferences":
             self._send_json(self.console_server.preferences.snapshot())
@@ -3001,52 +3196,31 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/snapshot":
             query = parse_qs(parsed.query, keep_blank_values=False)
             base_url = query.get("base_url", [self.console_server.base_url])[0]
-            if not _is_allowed_base_url(base_url):
-                self._send_json(
-                    {"error": "base_url is outside the local SDR-DoA allowlist", "read_only": True},
-                    HTTPStatus.BAD_REQUEST,
-                )
-                return
             try:
-                snapshot = self.console_server.collect_snapshot(base_url)
-            except (CollectorError, ValueError, OSError, http.client.HTTPException) as exc:
-                self._send_json({"error": str(exc) or type(exc).__name__, "read_only": True}, HTTPStatus.BAD_GATEWAY)
+                check_data_out_url(base_url, self.console_server.data_out_hosts)
+            except DataOutHostError as exc:
+                self._send_data_out_error(exc)
                 return
-            self._send_json(snapshot)
+            self._send_snapshot(base_url, _snapshot_request(query))
             return
         if parsed.path == "/api/capabilities":
-            monitor = self.console_server.mqtt_monitor
-            self._send_json({
-                # The console has one publish path, the admin-gated config
-                # patch below. It never POSTs to the Raspberry or applies
-                # settings itself; the edge agent does.
-                "read_only": False,
-                "mqtt_publish": True,
-                "remote_post": False,
-                "config_apply": False,
-                "mqtt_monitor": monitor is not None,
-                "admin_branding": True,
-                "admin_auth_required": True,
-                "admin_enabled": bool(ADMIN_PASSWORD),
-                "admin_default_password": ADMIN_PASSWORD == DEFAULT_ADMIN_PASSWORD,
-                "config_allowlist": sorted(CONFIG_ALLOWLIST),
-                "config_patch": {
-                    "enabled": _monitor_can_publish(monitor),
-                    "requires_admin": True,
-                    "topic": sdr_doa_mqtt.TOPICS["config_patch"],
-                    "qos": sdr_doa_mqtt.COMMAND_QOS,
-                    "ttl_ms": CONFIG_COMMAND_TTL_MS,
-                    "ranges": _config_patch_ranges(),
-                },
-                "refresh_intervals_s": sorted(ALLOWED_REFRESH_INTERVALS),
-                "snapshot_budget_ms": int(SNAPSHOT_TOTAL_BUDGET_S * 1000),
-                # Browser preferences are kept on this host (/api/preferences).
-                "preferences": True,
-                "version": self.console_server.version,
-            })
+            self._send_json(self._capabilities_body())
             return
         if parsed.path == "/api/console-config":
-            self._send_json(self.console_server.get_config())
+            self._send_json(_public_config(self.console_server.get_config()))
+            return
+        if parsed.path == "/api/lan-access":
+            # Readable from this console's own pages without admin (the
+            # Configuration card); changing it needs admin (POST).
+            if not self._local_read_is_allowed():
+                self._send_lan_error(
+                    HTTPStatus.FORBIDDEN, lan.ORIGIN_REJECTED, "/api/lan-access is read from this console's own pages only",
+                )
+                return
+            self._send_json(self.console_server.lan_access_view())
+            return
+        if parsed.path == rm.ROUTE:
+            self._get_mirror()
             return
         if parsed.path == "/api/mqtt":
             monitor = self.console_server.mqtt_monitor
@@ -3072,7 +3246,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             command_id = parsed.path[len("/api/mqtt/config-patch/"):]
             if _COMMAND_ID_RE.fullmatch(command_id) is None:
                 self._send_config_patch_error(
-                    HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "command id must match [A-Za-z0-9_-]{1,64}",
+                    HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "command id must match [A-Za-z0-9_.:-]{1,80}",
                 )
                 return
             status = self.console_server.config_commands.status(command_id, self.console_server.mqtt_monitor)
@@ -3084,6 +3258,21 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._send_json(status)
             return
         self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+    def _send_data_out_error(self, exc: DataOutHostError) -> None:
+        # The code is a variable, so the Kontrol error-code contract does not
+        # count these; the Configuration page translates them with the list.
+        body: Dict[str, Any] = {
+            "ok": False,
+            "code": exc.code,
+            "error": str(exc),
+            "read_only": True,
+            "data_out_hosts": list(exc.hosts),
+            "port": DATA_OUT_PORT,
+        }
+        if exc.host:
+            body["host"] = exc.host
+        self._send_json(body, HTTPStatus.BAD_REQUEST)
 
     def _send_preferences_error(self, status: int, code: str, message: str) -> None:
         # Same body shape as the config-patch errors; the browser sync only
@@ -3118,6 +3307,105 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"ok": True, **snapshot})
 
+    def _send_mirror_error(self, code: str, message: str) -> None:
+        # Mirror codes go through this helper, never the Kontrol error helper,
+        # so the config-patch code contract does not count them.
+        self._send_json({"ok": False, "code": code, "error": message}, rm.ERROR_CODES_HTTP[code])
+
+    def _discard_body(self, max_bytes: int) -> None:
+        """Read and drop a refused request's body up to ``max_bytes``, so the client sees the answer, not a reset."""
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            return
+        if 0 < length <= max_bytes:
+            try:
+                self.rfile.read(length)
+            except OSError:
+                pass
+
+    def _mirror_read_is_allowed(self) -> bool:
+        """GET /api/mirror/receiver on this listener: the Receiver's read rule.
+
+        The mirror carries what the Receiver shows (frequencies, mode, gains,
+        recording, the spectrum), so it is read like /api/receiver/*: one
+        loopback Host on this port, which stops a DNS rebinding page, and no
+        other site or localhost port. LanConsoleHandler has its own rule.
+        """
+        return self._receiver_read_is_allowed()
+
+    def _get_mirror(self) -> None:
+        """GET /api/mirror/receiver (both listeners): the latest mirrored state and frame with their ages."""
+        if not self._mirror_read_is_allowed():
+            self._send_mirror_error(rm.ORIGIN_REJECTED, "the Receiver mirror is read by this console's pages only")
+            return
+        self._send_json(self.console_server.receiver_mirror.view())
+
+    def _post_mirror(self) -> None:
+        """POST /api/mirror/receiver: the kiosk page publishes its Receiver's state and latest frame.
+
+        In order: the same-origin loopback Origin (403), the body length
+        (413), the rate (429), an open LAN view (409), then the schema (400).
+        A body of at most MAX_BODY_BYTES is read before every answer, also a
+        refusal, so the client reads its answer rather than a reset.
+        """
+        mirror = self.console_server.receiver_mirror
+        if not self._same_origin_loopback_request():
+            self._discard_body(rm.MAX_BODY_BYTES)
+            self._send_mirror_error(rm.ORIGIN_REJECTED, f"{rm.ROUTE} requires a same-origin loopback request")
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            length = -1
+        if length > rm.MAX_BODY_BYTES:
+            self.close_connection = True
+            self._discard_body(lan.MAX_DISCARDED_BODY_BYTES)
+            self._send_mirror_error(rm.MIRROR_TOO_LARGE, f"the body must be at most {rm.MAX_BODY_BYTES} bytes")
+            return
+        if length < 1:
+            self._send_mirror_error(rm.MIRROR_INVALID, "the body must be JSON with a Content-Length")
+            return
+        raw = self.rfile.read(length)
+        if not mirror.admit():
+            self._send_mirror_error(rm.MIRROR_RATE_LIMITED, f"at most {rm.MAX_POSTS_PER_S} posts a second")
+            return
+        # is_open() waits while the LAN view is being opened, moved or closed.
+        if not self.console_server.lan.is_open():
+            self._send_mirror_error(rm.MIRROR_LAN_CLOSED, rm.LAN_CLOSED_MESSAGE)
+            return
+        try:
+            if len(raw) != length:
+                raise rm.MirrorRejected(rm.MIRROR_INVALID, "the body is incomplete")
+            source, state, frame = rm.decode_publish(raw)
+            # Refused as MIRROR_LAN_CLOSED when the LAN view closed since the check above.
+            result = mirror.publish(source, state, frame)
+        except rm.MirrorRejected as exc:
+            self._send_mirror_error(exc.code, exc.message)
+            return
+        self._send_json({"ok": True, **result})
+
+    def _post_lan_access(self) -> None:
+        """POST /api/lan-access: change the LAN view and open, move or close it at once.
+
+        The same-origin loopback Origin was checked before (SAME_ORIGIN_POST_PATHS);
+        then admin, the body, the settings, the admin password rule, the save.
+        """
+        if not self._is_admin():
+            self._send_lan_error(HTTPStatus.UNAUTHORIZED, lan.ADMIN_REQUIRED, "admin authentication required")
+            return
+        try:
+            payload = self._read_json(4096)
+        except ValueError as exc:
+            self._send_lan_error(HTTPStatus.BAD_REQUEST, lan.LAN_ACCESS_INVALID, str(exc))
+            return
+        try:
+            body = self.console_server.set_lan_access(payload)
+        except LanAccessRejected as exc:
+            self._send_lan_error(exc.status, exc.code, exc.message)
+            return
+        self._send_json({"ok": True, **body})
+
     def do_PUT(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
         if parsed.path == "/api/preferences":
@@ -3131,6 +3419,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._send_archive_error(HTTPStatus.FORBIDDEN, ra.ORIGIN_REJECTED, ra.MUTATION_REJECTED_MESSAGE)
             return
         if parsed.path.startswith("/api/receiver/") and self._receiver_post(parsed):
+            return
+        if parsed.path == rm.ROUTE:
+            self._post_mirror()
             return
         if parsed.path in SAME_ORIGIN_POST_PATHS and not self._same_origin_loopback_request():
             # Rejected before the body is read, the login throttle or any
@@ -3151,11 +3442,20 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 payload = self._read_json(16 * 1024)
                 if not isinstance(payload, dict):
                     raise ValueError("request must be a JSON object")
+                if "lan_access" in payload:
+                    # No admin is needed here, so the LAN view never changes
+                    # through this route.
+                    raise ValueError("lan_access is changed through POST /api/lan-access (admin)")
                 current = self.console_server.get_config()
                 config = self.console_server.apply_config({**current, **payload})
-                self._send_json(config)
+                self._send_json(_public_config(config))
+            except DataOutHostError as exc:
+                self._send_data_out_error(exc)
             except (ValueError, OSError) as exc:
                 self._send_json({"ok": False, "error": str(exc), "read_only": True}, HTTPStatus.BAD_REQUEST)
+            return
+        if parsed.path == "/api/lan-access":
+            self._post_lan_access()
             return
         if parsed.path == "/api/admin/login":
             try:
@@ -3225,13 +3525,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             except (ValueError, OSError) as exc:
                 self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
-        if parsed.path == "/api/mqtt/config-patch":
-            # Checks 1-2 run before the body is read; 3-10 live on the server.
+        if parsed.path in ("/api/mqtt/config-patch", "/api/mqtt/config-get"):
+            # Kontrol's RDF Node commands. Origin and admin are checked before
+            # the body is read; the other checks live on the server.
             if not self._same_origin_loopback_request():
                 self._send_config_patch_error(
                     HTTPStatus.FORBIDDEN,
                     "ORIGIN_REJECTED",
-                    "config patch requires a same-origin loopback request",
+                    "Kontrol commands require a same-origin loopback request",
                 )
                 return
             if not self._is_admin():
@@ -3244,7 +3545,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self._send_config_patch_error(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", str(exc))
                 return
-            status, body = self.console_server.submit_config_patch(payload)
+            if parsed.path == "/api/mqtt/config-patch":
+                status, body = self.console_server.submit_config_patch(payload)
+            else:
+                status, body = self.console_server.submit_config_get(payload)
             self._send_json(body, status)
             return
         if parsed.path == "/api/mqtt/connect":
@@ -3284,7 +3588,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = self._read_json()
-            result = validate_config_patch(payload)
+            monitor = self.console_server.mqtt_monitor
+            view = _monitor_control_view(monitor) if _monitor_can_publish(monitor) else None
+            result = validate_config_patch(
+                payload,
+                session=_session_or_none(view) if view and view.get("available") is True else None,
+                node_id=_monitor_node_id(monitor),
+            )
             self._send_json(result)
         except ValueError as exc:
             self._send_json(
@@ -3303,11 +3613,509 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
 
-class _Flight:
-    def __init__(self) -> None:
-        self.done = threading.Event()
-        self.result: Any = None
-        self.error: Optional[BaseException] = None
+class LanAccessRejected(Exception):
+    """A refused POST /api/lan-access: HTTP status, code and message."""
+
+    def __init__(self, status: int, code: str, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.message = message
+
+
+class _HeadBody:
+    """wfile of a HEAD request: the status line and headers go out, the body does not."""
+
+    def __init__(self, raw: Any) -> None:
+        self.raw = raw
+        self.headers_sent = False
+
+    def write(self, data: bytes) -> int:
+        if self.headers_sent:
+            return len(data)
+        return self.raw.write(data)
+
+    def flush(self) -> None:
+        self.raw.flush()
+
+
+class LanConsoleHandler(ConsoleHandler):
+    """One request of an allowed client on the LAN view listener; lan_access.py holds the rules.
+
+    LanViewServer has admitted the client address already (any other gets a
+    bare 403 from the accept thread). In order: an HTTP/0.9 request, which
+    has no Host (403 ORIGIN_REJECTED), the method (GET and HEAD only, else
+    405 LAN_READ_ONLY), Host and Sec-Fetch-Site (403 ORIGIN_REJECTED), then
+    the path: the built UI and a fixed list of read-only API routes, else 403
+    LAN_READ_ONLY. The request line and headers must arrive within
+    lan.REQUEST_DEADLINE_S. An admin cookie is never read here.
+    """
+
+    timeout = lan.REQUEST_TIMEOUT_S
+
+    @property
+    def console_server(self) -> "GroundConsoleServer":
+        return self.server.console  # type: ignore[attr-defined,no-any-return]
+
+    def setup(self) -> None:
+        super().setup()
+        # Every read of this connection ends by one deadline, so a client
+        # that sends its request a byte at a time cannot keep the thread.
+        buffered = self.rfile
+        self.rfile = lan.request_reader(
+            self.connection,
+            deadline_s=self.server.request_deadline_s,  # type: ignore[attr-defined]
+            timeout_s=lan.REQUEST_TIMEOUT_S,
+        )
+        buffered.close()
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        print(f"[ground-console] lan {self.client_address[0]} " + (fmt % args), flush=True)
+
+    def _discard_small_body(self) -> None:
+        """Read and drop a small body of a refused write, so the client sees the answer, not a reset."""
+        headers = getattr(self, "headers", None)
+        if headers is None or (headers.get("Expect") or "").strip().lower() == "100-continue":
+            return
+        try:
+            length = int(headers.get("Content-Length") or "0")
+        except ValueError:
+            return
+        if 0 < length <= lan.MAX_DISCARDED_BODY_BYTES:
+            try:
+                self.rfile.read(length)
+            except OSError:
+                pass
+
+    def _refuse_method(self) -> None:
+        # The connection closes after the answer; a large body is never read.
+        self.close_connection = True
+        self._discard_small_body()
+        self._send_json(
+            {"ok": False, "code": lan.LAN_READ_ONLY, "error": "the LAN view is read only"},
+            HTTPStatus.METHOD_NOT_ALLOWED,
+            headers={"Allow": ", ".join(lan.READ_METHODS)},
+        )
+
+    def handle_expect_100(self) -> bool:
+        if self.command not in lan.READ_METHODS:
+            return True  # refused right after, without a 100 Continue
+        return super().handle_expect_100()
+
+    def parse_request(self) -> bool:
+        if not super().parse_request():
+            return False
+        host_message = "the LAN view answers a Host that is an IP address, this host's name or <host name>.local, on its own port"
+        if self.request_version == "HTTP/0.9":
+            # No headers, so no Host (Python 3.13 leaves self.headers a plain
+            # dict). Answered with a status line, which HTTP/0.9 leaves out.
+            self.request_version = "HTTP/1.0"
+            message = host_message
+        elif self.command not in lan.READ_METHODS:
+            self._refuse_method()
+            return False
+        elif not lan.host_allowed(
+            _header_values(self.headers, "Host"),
+            self.server.server_address[1],
+            self.server.own_names,  # type: ignore[attr-defined]
+        ):
+            message = host_message
+        elif not lan.fetch_site_allowed(self.headers.get("Sec-Fetch-Site")):
+            message = "the LAN view refuses cross-site requests"
+        else:
+            return True
+        self.close_connection = True
+        self._send_lan_error(HTTPStatus.FORBIDDEN, lan.ORIGIN_REJECTED, message)
+        return False
+
+    def end_headers(self) -> None:
+        super().end_headers()
+        if isinstance(self.wfile, _HeadBody):
+            self.wfile.headers_sent = True
+
+    def _admin_token(self) -> str:
+        return ""
+
+    def _is_admin(self) -> bool:
+        return False
+
+    def _mirror_read_is_allowed(self) -> bool:
+        # The LAN view's own Host rule (an IP literal or this machine's own
+        # names, on this port) and no cross-site request; parse_request
+        # refused anything else already, this repeats it next to the route.
+        return lan.host_allowed(
+            _header_values(self.headers, "Host"),
+            self.server.server_address[1],
+            self.server.own_names,  # type: ignore[attr-defined]
+        ) and lan.fetch_site_allowed(self.headers.get("Sec-Fetch-Site"))
+
+    def _capabilities_body(self) -> Dict[str, Any]:
+        body = super()._capabilities_body()
+        body.update({
+            # Nothing is written from the LAN: no admin, no Kontrol, no
+            # preference writes, no Receiver.
+            "read_only": True,
+            "mqtt_publish": False,
+            "admin_branding": False,
+            "admin_enabled": False,
+            "admin_default_password": False,
+            "config_patch": {**body["config_patch"], "enabled": False},
+            "preferences_read_only": True,
+            "access": lan.ACCESS_LAN_VIEW,
+            "lan_access": self.console_server.lan.brief_status(),
+        })
+        return body
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        raw = self.wfile
+        self.wfile = _HeadBody(raw)
+        try:
+            self.do_GET()
+        finally:
+            self.wfile = raw
+
+    def do_GET(self) -> None:  # noqa: N802
+        parsed = urlsplit(self.path)
+        route = lan.lan_route(parsed.path)
+        if route is None:
+            self._send_lan_error(HTTPStatus.FORBIDDEN, lan.LAN_READ_ONLY, "the LAN view answers the console's read-only pages only")
+            return
+        if route == lan.ROUTE_UI:
+            # The built UI only, never the legacy page or /receiver/.
+            self._send_frontend(parsed.path)
+            return
+        if route == lan.ROUTE_TILE:
+            self._send_tile(parsed.path)
+            return
+        if route == "/api/snapshot":
+            # Only the configured Data Out; a base_url in the query is ignored.
+            # seen shares the read like a loopback viewer. refresh is ignored,
+            # so LAN clients never read Data Out more often than the saved
+            # interval over the radio link; fresh_settings is Kontrol's, which
+            # the LAN view does not have.
+            query = parse_qs(parsed.query, keep_blank_values=False)
+            self._send_snapshot(
+                self.console_server.base_url,
+                _snapshot_request(query, fresh_settings=False, refresh=False, data_out_only=False),
+            )
+            return
+        if route == "/api/preferences":
+            # Read only: the page keeps its own changes in this browser. Only
+            # the keys the LAN view's screens read; the Receiver's settings and
+            # bookmarks stay on this host, like every /api/receiver/* route.
+            self._send_json({**self.console_server.preferences.lan_view_snapshot(), "read_only": True})
+            return
+        if route == "/api/admin/status":
+            self._send_json({"authenticated": False})
+            return
+        # health, capabilities, console-config, mqtt, mqtt/rdf-node, branding,
+        # mirror/receiver: the loopback listener's answer (capabilities through
+        # the override).
+        super().do_GET()
+
+    def do_POST(self) -> None:  # noqa: N802
+        self._refuse_method()
+
+    do_PUT = do_POST
+    do_DELETE = do_POST
+
+
+class LanViewServer(ThreadingHTTPServer):
+    """The LAN view listener: a second socket of the same console.
+
+    Admission is decided on the accept thread, before a handler thread
+    exists: a client address outside allowed_clients gets the bare 403 there
+    without its request being read, and an allowed client finds at most
+    lan.MAX_CONNECTIONS requests running (a bare 503 beyond). So the LAN
+    costs the console at most that many threads and lan.ANSWERED_MAX_SOCKETS
+    answered sockets, whatever other hosts send.
+    """
+
+    daemon_threads = True
+    # Closing (a move, disable or console stop) does not wait for requests
+    # in flight; they end on their own.
+    block_on_close = False
+
+    def __init__(
+        self,
+        console: "GroundConsoleServer",
+        address: Tuple[str, int],
+        allowed: Sequence[lan.Network],
+        refusals: lan.RefusalLog,
+    ) -> None:
+        self.console = console
+        self.allowed = tuple(allowed)
+        self.own_names = lan.own_host_names()
+        self.refusals = refusals
+        # Set before the bind, whose failure calls server_close.
+        self.answered = lan.AnsweredSockets(
+            max_sockets=lan.ANSWERED_MAX_SOCKETS, linger_s=lan.ANSWERED_LINGER_S, max_bytes=lan.ANSWERED_MAX_BYTES,
+        )
+        self.max_connections = lan.MAX_CONNECTIONS
+        self.request_deadline_s = lan.REQUEST_DEADLINE_S
+        self._slots = threading.BoundedSemaphore(self.max_connections)
+        self._busy_logged_at: Optional[float] = None
+        self.address_family = socket.AF_INET6 if ":" in address[0] else socket.AF_INET
+        super().__init__(address, LanConsoleHandler)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        address = str(client_address[0])
+        if not self.admits(address):
+            self.refusals.note(address)
+            self.answered.answer(request, lan.REFUSED_ANSWER)
+            return
+        if not self._slots.acquire(blocking=False):
+            self._note_busy(address)
+            self.answered.answer(request, lan.BUSY_ANSWER)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            # The thread did not start (it releases the slot when it ends).
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+    def _note_busy(self, address: str) -> None:
+        now = time.monotonic()
+        if self._busy_logged_at is not None and now - self._busy_logged_at < lan.REFUSAL_LOG_INTERVAL_S:
+            return
+        self._busy_logged_at = now
+        print(
+            f"[ground-console] LAN view busy: {self.max_connections} requests open, "
+            f"answered {address} with 503 (logged once a minute)",
+            flush=True,
+        )
+
+    def service_actions(self) -> None:
+        # serve_forever calls this at least every poll interval (0.5 s).
+        super().service_actions()
+        self.answered.sweep()
+
+    def server_close(self) -> None:
+        try:
+            super().server_close()
+        finally:
+            self.answered.close()
+
+    def server_bind(self) -> None:
+        if self.address_family == socket.AF_INET6:
+            # "::" also takes IPv4 clients (as IPv4-mapped peers); a literal
+            # IPv6 address takes only its own family.
+            try:
+                self.socket.setsockopt(
+                    socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0 if self.server_address[0] == "::" else 1,
+                )
+            except (AttributeError, OSError):
+                pass
+        # HTTPServer.server_bind would also resolve a host name (getfqdn),
+        # which can wait on DNS inside a request that applies the setting.
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = port
+
+    def admits(self, address: Any) -> bool:
+        return lan.client_allowed(self.allowed, address)
+
+
+# A bind that fails because the address is not on this host yet (a literal
+# LAN address the network brings up after the console started at boot) or the
+# port is still held is tried again while the setting stays enabled: after
+# these delays, the last one repeating. Other errors stay closed until a save.
+LAN_BIND_RETRY_ERRNOS = frozenset({errno.EADDRNOTAVAIL, errno.EADDRINUSE})
+LAN_BIND_RETRY_DELAYS_S: Tuple[float, ...] = (5.0, 10.0, 20.0, 40.0, 60.0)
+
+
+class LanAccessManager:
+    """Opens, moves and closes the LAN view listener of one console."""
+
+    def __init__(self, console: "GroundConsoleServer") -> None:
+        self.console = console
+        self._lock = threading.RLock()
+        self._server: Optional[LanViewServer] = None
+        self._thread: Optional[threading.Thread] = None
+        self._settings: Dict[str, Any] = lan.default_settings()
+        self._reason: Optional[str] = lan.CLOSED_DISABLED
+        self._detail: Optional[str] = None
+        self.refusals = lan.RefusalLog(lambda message: print(f"[ground-console] {message}", flush=True))
+        # Bind retries: every apply() and close() starts a new generation,
+        # which a pending retry of an older one ignores.
+        self.retry_delays_s: Sequence[float] = LAN_BIND_RETRY_DELAYS_S
+        self._generation = 0
+        self._retry_timer: Optional[threading.Timer] = None
+        self._retry_attempt = 0
+        self._allowed_networks: List[lan.Network] = []
+
+    def _closed_reason(self, settings: Dict[str, Any]) -> Optional[str]:
+        if not settings.get("enabled"):
+            return lan.CLOSED_DISABLED
+        if not ADMIN_PASSWORD:
+            return lan.CLOSED_ADMIN_DISABLED
+        if ADMIN_PASSWORD == DEFAULT_ADMIN_PASSWORD:
+            return lan.CLOSED_ADMIN_PASSWORD_DEFAULT
+        if settings.get("port") == self.console.server_address[1]:
+            return lan.CLOSED_PORT_CONFLICT
+        return None
+
+    def apply(self, settings: Dict[str, Any], *, allowed: Optional[Sequence[lan.Network]] = None) -> Dict[str, Any]:
+        """Close the listener, then open it again for these settings when they allow it.
+
+        ``settings`` is a validated lan_access block. ``allowed`` replaces the
+        parsed allowed_clients; only tests pass it, to admit a loopback client.
+        """
+        with self._lock:
+            self._new_generation_locked()
+            self._close_locked()
+            self._settings = dict(settings)
+            self._detail = None
+            reason = self._closed_reason(settings)
+            if reason is not None:
+                self._reason = reason
+                if reason != lan.CLOSED_DISABLED:
+                    _log_warning(f"lan_access is enabled but the LAN view stays closed: {lan.CLOSED_REASON_TEXT[reason]}")
+                return self.status()
+            self._allowed_networks = list(allowed) if allowed is not None else lan.networks(settings)
+            return self._open_locked()
+
+    def _open_locked(self) -> Dict[str, Any]:
+        settings = self._settings
+        allowed_networks = self._allowed_networks
+        retry = self._retry_attempt > 0
+        try:
+            server = LanViewServer(self.console, (str(settings["bind"]), int(settings["port"])), allowed_networks, self.refusals)
+        except OSError as exc:
+            detail = (errno.errorcode.get(exc.errno) if exc.errno else None) or type(exc).__name__
+            retryable = exc.errno in LAN_BIND_RETRY_ERRNOS
+            if not retry or detail != self._detail:
+                _log_warning(
+                    f"the LAN view could not bind {settings['bind']}:{settings['port']} ({detail}); "
+                    + ("it stays closed and the bind is tried again" if retryable else "it stays closed")
+                )
+            self._reason = lan.CLOSED_BIND_FAILED
+            self._detail = detail
+            if retryable:
+                self._schedule_retry_locked()
+            return self.status()
+        self._retry_attempt = 0
+        thread = threading.Thread(target=server.serve_forever, name="lan-view", daemon=True)
+        thread.start()
+        self._server = server
+        self._thread = thread
+        self._reason = None
+        self._mirror_open(True)
+        status = self.status()
+        print(
+            f"[ground-console] LAN view (read only) open on http://{status['address']}/ "
+            f"for {len(allowed_networks)} allowed client entr{'y' if len(allowed_networks) == 1 else 'ies'}"
+            + (" after a failed bind" if retry else ""),
+            flush=True,
+        )
+        return status
+
+    def _new_generation_locked(self) -> None:
+        """Forget a pending bind retry; apply() and close() start afresh."""
+        self._generation += 1
+        self._retry_attempt = 0
+        timer, self._retry_timer = self._retry_timer, None
+        if timer is not None:
+            timer.cancel()
+
+    def _schedule_retry_locked(self) -> None:
+        delays = list(self.retry_delays_s) or list(LAN_BIND_RETRY_DELAYS_S)
+        delay = delays[min(self._retry_attempt, len(delays) - 1)]
+        self._retry_attempt += 1
+        timer = threading.Timer(delay, self._retry_bind, args=(self._generation,))
+        timer.daemon = True
+        timer.name = "lan-view-bind-retry"
+        self._retry_timer = timer
+        timer.start()
+
+    def _retry_bind(self, generation: int) -> None:
+        with self._lock:
+            # A save or a stop in between owns the listener now.
+            if generation != self._generation or self._server is not None:
+                return
+            self._retry_timer = None
+            self._open_locked()
+
+    def retry_pending(self) -> bool:
+        """A failed bind waits to be tried again."""
+        with self._lock:
+            return self._retry_timer is not None
+
+    def _close_locked(self) -> None:
+        server, thread = self._server, self._thread
+        self._server = None
+        self._thread = None
+        if server is None:
+            return
+        # Nothing mirrored outlives the LAN view it was published for: the
+        # mirror refuses posts and forgets what it holds before the listener
+        # stops, also a POST that found the view open a moment ago.
+        self._mirror_open(False)
+        try:
+            server.shutdown()
+        finally:
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=5)
+        print("[ground-console] LAN view closed", flush=True)
+
+    def _mirror_open(self, opened: bool) -> None:
+        mirror = getattr(self.console, "receiver_mirror", None)
+        if mirror is None:
+            return
+        if opened:
+            mirror.open()
+        else:
+            mirror.close()
+
+    def is_open(self) -> bool:
+        """The listener is open (the Receiver mirror is published only then)."""
+        with self._lock:
+            return self._server is not None
+
+    def close(self) -> None:
+        """Close the listener for good (console stop)."""
+        with self._lock:
+            retrying = self._retry_timer is not None
+            self._new_generation_locked()
+            was_open = self._server is not None
+            self._close_locked()
+            if was_open or retrying:
+                self._reason = lan.CLOSED_STOPPED
+                self._detail = None
+
+    def status(self) -> Dict[str, Any]:
+        """The LAN view's state for /api/lan-access and the loopback capabilities."""
+        with self._lock:
+            server = self._server
+            settings = self._settings
+            address = None
+            if server is not None:
+                host, port = server.server_address[:2]
+                address = f"[{host}]:{port}" if ":" in str(host) else f"{host}:{port}"
+            return {
+                "enabled": bool(settings.get("enabled")),
+                "state": lan.STATE_OPEN if server is not None else lan.STATE_CLOSED,
+                "reason": None if server is not None else self._reason,
+                "detail": None if server is not None else self._detail,
+                "bind": settings.get("bind"),
+                "port": settings.get("port"),
+                "address": address,
+                "allowed_client_count": len(settings.get("allowed_clients") or []),
+            }
+
+    def brief_status(self) -> Dict[str, Any]:
+        """The state without addresses, for /api/health and the LAN view's capabilities."""
+        full = self.status()
+        return {key: full[key] for key in ("enabled", "state", "reason")}
 
 
 # /api/health reports receiver_busy while the Receiver writes records, so the
@@ -3347,38 +4155,6 @@ class ReceiverActivity:
             return bool(self._open) and age < RECEIVER_BUSY_OPEN_S
 
 
-class _SingleFlight:
-    """Run at most one call per key; concurrent callers wait for its result."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._flights: Dict[str, _Flight] = {}
-
-    def run(self, key: str, produce: Callable[[], Any], wait_timeout_s: float) -> Any:
-        with self._lock:
-            flight = self._flights.get(key)
-            leader = flight is None
-            if flight is None:
-                flight = _Flight()
-                self._flights[key] = flight
-        if not leader:
-            if not flight.done.wait(wait_timeout_s):
-                raise CollectorError("snapshot collection is still in progress")
-            if flight.error is not None:
-                raise CollectorError(str(flight.error) or type(flight.error).__name__)
-            return flight.result
-        try:
-            flight.result = produce()
-            return flight.result
-        except BaseException as exc:
-            flight.error = exc
-            raise
-        finally:
-            with self._lock:
-                self._flights.pop(key, None)
-            flight.done.set()
-
-
 class GroundConsoleServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -3398,15 +4174,22 @@ class GroundConsoleServer(ThreadingHTTPServer):
         tile_sources: Optional[Dict[str, TileSource]] = None,
         retention_interval_s: float = ra.RETENTION_INTERVAL_S,
         retention_start_delay_s: float = ra.RETENTION_START_DELAY_S,
+        data_out_fetcher: Optional[Callable[..., Any]] = None,
+        saved_config: Optional[Dict[str, Any]] = None,
     ):
         self.frontend_dir = Path(frontend_dir).resolve() if frontend_dir is not None else None
         if not _is_loopback_bind(address[0]):
             raise ValueError("Ground Console must bind to loopback; admin branding is local-only")
-        if not _is_allowed_base_url(base_url):
-            raise ValueError("base_url is outside the local SDR-DoA allowlist")
+        if not isinstance(base_url, str):
+            raise ValueError("base_url must be a string")
         self.config_path = Path(config_path).expanduser() if config_path else DEFAULT_CONFIG_PATH
         fallback = _default_console_config(base_url.rstrip("/"), refresh_seconds=DEFAULT_REFRESH_SECONDS)
         self._config = _validate_console_config(config, fallback) if config is not None else _load_console_config(self.config_path, fallback)
+        # base_url is the fallback URL; it has to be in the host list in use.
+        check_data_out_url(base_url, self._config["data_out_hosts"])
+        # One-shot mDNS for a .local Data Out host the system resolver cannot
+        # answer (the Docker image has no nss-mdns). Tests replace it.
+        self.mdns_resolver: Any = MdnsResolver()
         self._config_lock = threading.RLock()
         self.mqtt_monitor = mqtt_monitor
         if mqtt_monitor is not None:
@@ -3418,6 +4201,13 @@ class GroundConsoleServer(ThreadingHTTPServer):
             ws_path = getattr(mqtt_monitor, "ws_path", None)
             if _is_allowed_mqtt_ws_path(ws_path):
                 self._config["mqtt_ws_path"] = ws_path
+        # console.json as saved, without the --base-url/--mqtt-* flags main()
+        # merged into ``config`` for this run. A save writes only the fields
+        # it changes into this copy (_saved_copy_locked), so a flag never
+        # reaches the file. Without it the active config is the saved one.
+        self._saved_config = (
+            _validate_console_config(saved_config, self._config) if saved_config is not None else dict(self._config)
+        )
         self.branding_path = Path(branding_path).expanduser() if branding_path else DEFAULT_BRANDING_PATH
         self._branding_lock = threading.RLock()
         self._branding = _load_branding(self.branding_path)
@@ -3457,15 +4247,30 @@ class GroundConsoleServer(ThreadingHTTPServer):
         self.monotonic: Callable[[], float] = time.monotonic
         self._login_failures: List[float] = []
         self._login_locked_until = 0.0
-        # Wall clock for config-patch issue and expiry times; tests may
+        # Wall clock for Kontrol command issue and expiry times; tests may
         # replace it to step past a command's expiry.
         self.clock_ms: Callable[[], int] = lambda: int(time.time() * 1000)
         self.config_commands = ConfigCommandTracker(clock_ms=lambda: self.clock_ms())
-        # One config patch is checked and published at a time, so two
+        # One Kontrol command is checked and published at a time, so two
         # requests cannot both pass the in-flight check.
         self._config_patch_lock = threading.Lock()
         self.node_progress = NodeProgressTracker()
-        self._snapshot_flights = _SingleFlight()
+        # One Data Out read serves every viewer (data_out_reader.py); the
+        # collector reuses settings.json through settings_cache.
+        # data_out_fetcher replaces the HTTP GETs only for tests (a loopback
+        # fake node); the command line cannot set it.
+        self.settings_cache = SettingsCache()
+        self._data_out_fetcher = data_out_fetcher
+        # MQTT first (issue #8): while the RDF Node's health is fresh the
+        # answers come from the monitor and only a light Data Out read runs.
+        self.data_out = DataOutReader(
+            self._collect_data_out,
+            refresh_seconds=lambda: self._config.get("refresh_seconds"),
+            wait_timeout_s=SNAPSHOT_TOTAL_BUDGET_S + SNAPSHOT_WAIT_GRACE_S,
+            console_base_url=lambda: self._config.get("base_url"),
+            collect_light=self._collect_light_data_out,
+            mqtt_view=self._mqtt_view,
+        )
         self.receiver_store = ReceiverRecordStore(
             receiver_data_dir if receiver_data_dir is not None else DEFAULT_DATA_DIR,
             log=lambda message: print(message, flush=True),
@@ -3476,6 +4281,15 @@ class GroundConsoleServer(ThreadingHTTPServer):
         self.archive_exports = ra.ArchiveExports()
         self.archive_export_slots = threading.BoundedSemaphore(ra.EXPORT_SLOTS)
         self._retention_scheduler: Optional[ra.RetentionScheduler] = None
+        # The Receiver mirror (receiver_mirror.py): the kiosk page's latest
+        # Receiver state and frame for the LAN view, in memory only.
+        self.receiver_mirror = rm.ReceiverMirror()
+        # The opt-in LAN view: a second listener of this process
+        # (lan_access.py). It opens below, once this loopback socket is bound.
+        self.lan = LanAccessManager(self)
+        # One lan_access change is saved and applied at a time, so the saved
+        # setting and the open listener always agree.
+        self._lan_apply_lock = threading.Lock()
         super().__init__(address, ConsoleHandler)
         # Only once the socket is bound: a failed bind leaves no thread. The
         # first pass waits, so it never delays the first answer or the
@@ -3487,6 +4301,9 @@ class GroundConsoleServer(ThreadingHTTPServer):
             log=lambda message: print(message, flush=True),
         )
         self._retention_scheduler.start()
+        # An enabled LAN view opens now, unless the admin password is the
+        # default or admin login is disabled; the status and the log say why.
+        self.lan.apply(self._config["lan_access"])
 
     def run_retention(self) -> Optional[Dict[str, Any]]:
         """One background retention pass (no time budget beyond the per-pass item bound)."""
@@ -3504,6 +4321,10 @@ class GroundConsoleServer(ThreadingHTTPServer):
 
     def server_close(self) -> None:
         try:
+            # The LAN view closes with the console (server_close, SIGTERM).
+            lan_manager = getattr(self, "lan", None)
+            if lan_manager is not None:
+                lan_manager.close()
             # The scheduler stops before the store closes. TCPServer calls this
             # on a failed bind too, before the scheduler exists.
             scheduler = getattr(self, "_retention_scheduler", None)
@@ -3515,28 +4336,65 @@ class GroundConsoleServer(ThreadingHTTPServer):
         finally:
             super().server_close()
 
-    def collect_snapshot(self, base_url: str) -> Dict[str, Any]:
-        """Collect once per base_url at a time; concurrent callers share it.
+    def collect_snapshot(self, base_url: str, request: Optional[SnapshotRequest] = None) -> Dict[str, Any]:
+        """Answer /api/snapshot: from MQTT while it is fresh, else Data Out.
 
-        Each browser tick used to start its own collection while earlier ones
-        still waited on a slow node, piling up threads and GETs. Requests that
-        arrive during a collection now receive that collection's result.
+        While MQTT is fresh only a light Data Out read runs (at most every
+        30 s); otherwise every viewer gets the last collection while it is
+        younger than the reuse window (the saved refresh interval, at least
+        1 s) and concurrent misses share one collection. See
+        data_out_reader.py and telemetry_source.py.
         """
-        return self._snapshot_flights.run(
-            base_url.rstrip("/"),
-            lambda: collect(
-                base_url=base_url,
-                authority="none",
-                clock_source="remote_unverified",
-                total_budget_s=SNAPSHOT_TOTAL_BUDGET_S,
-                progress_tracker=self.node_progress,
-            ),
-            SNAPSHOT_TOTAL_BUDGET_S + SNAPSHOT_WAIT_GRACE_S,
+        return self.data_out.snapshot(base_url, request or SnapshotRequest())
+
+    def _mqtt_view(self) -> Optional[Dict[str, Any]]:
+        """The monitor's RDF Node view for the telemetry source, or None without one."""
+        reader = getattr(self.mqtt_monitor, "rdf_node_view", None)
+        if reader is None:
+            return None
+        view = reader()
+        return view if isinstance(view, dict) else None
+
+    def _collect_light_data_out(self, base_url: str, fresh_settings: bool) -> Dict[str, Any]:
+        """status.json, settings.json and doa.xml while MQTT carries the DoA."""
+        options: Dict[str, Any] = {}
+        if self._data_out_fetcher is not None:
+            options["fetcher"] = self._data_out_fetcher
+        return collect_light(
+            base_url=base_url,
+            total_budget_s=SNAPSHOT_TOTAL_BUDGET_S,
+            settings_cache=self.settings_cache,
+            fresh_settings=fresh_settings,
+            allowed_hosts=self.data_out_hosts,
+            mdns_resolver=self.mdns_resolver,
+            **options,
+        )
+
+    def _collect_data_out(self, base_url: str, fresh_settings: bool) -> Dict[str, Any]:
+        options: Dict[str, Any] = {}
+        if self._data_out_fetcher is not None:
+            options["fetcher"] = self._data_out_fetcher
+        return collect(
+            base_url=base_url,
+            authority="none",
+            clock_source="remote_unverified",
+            total_budget_s=SNAPSHOT_TOTAL_BUDGET_S,
+            progress_tracker=self.node_progress,
+            settings_cache=self.settings_cache,
+            fresh_settings=fresh_settings,
+            allowed_hosts=self.data_out_hosts,
+            mdns_resolver=self.mdns_resolver,
+            **options,
         )
 
     @property
     def base_url(self) -> str:
         return str(self._config["base_url"])
+
+    @property
+    def data_out_hosts(self) -> List[str]:
+        with self._config_lock:
+            return list(self._config["data_out_hosts"])
 
     def get_config(self) -> Dict[str, Any]:
         with self._config_lock:
@@ -3544,10 +4402,80 @@ class GroundConsoleServer(ThreadingHTTPServer):
 
     def update_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         with self._config_lock:
-            normalized = _validate_console_config(config, self._config)
-            _save_console_config(self.config_path, normalized)
+            # lan_access changes only through set_lan_access().
+            normalized = _validate_console_config({**config, "lan_access": self._config["lan_access"]}, self._config)
+            saved = self._saved_copy_locked(normalized)
+            _save_console_config(self.config_path, saved)
+            self._saved_config = saved
             self._config = normalized
             return dict(self._config)
+
+    def _saved_copy_locked(self, active: Dict[str, Any]) -> Dict[str, Any]:
+        """Return console.json for the new active config ``active``.
+
+        Only the fields ``active`` changes go into the saved copy; a field it
+        leaves alone keeps its saved value, so a --base-url or --mqtt-* flag of
+        this run is never written by a save of another field (the LAN access
+        card, the refresh interval, the MQTT form). A field the save does
+        change is saved as given and ends that flag's override. When the host
+        list no longer has the saved Data Out URL's host, the URL in use is
+        saved with it, the only one that fits the list.
+        """
+        saved = dict(self._saved_config)
+        for field, value in active.items():
+            if value != self._config.get(field):
+                saved[field] = value
+        try:
+            return _validate_console_config(saved, self._saved_config)
+        except DataOutHostError:
+            _log_warning(
+                f"the saved Data Out URL {self._saved_config['base_url']} has no host in the new list; "
+                f"saving the URL in use, {active['base_url']}"
+            )
+            saved["base_url"] = active["base_url"]
+            return _validate_console_config(saved, self._saved_config)
+
+    def lan_access_view(self) -> Dict[str, Any]:
+        """Body of GET /api/lan-access: the saved setting and the listener's state."""
+        with self._config_lock:
+            settings = dict(self._config["lan_access"])
+        return {"config": settings, "status": self.lan.status()}
+
+    def set_lan_access(self, payload: Any) -> Dict[str, Any]:
+        """Validate, save and apply a lan_access change (POST /api/lan-access).
+
+        Fields the payload leaves out keep their saved value. Enabling is
+        refused while the default admin password is in use. The listener
+        opens, moves or closes at once; a bind that fails leaves it closed
+        with the reason in the returned status.
+        """
+        with self._lan_apply_lock:
+            with self._config_lock:
+                current = self._config["lan_access"]
+                try:
+                    settings = lan.validate_settings(payload, current, console_port=self.server_address[1])
+                except ValueError as exc:
+                    raise LanAccessRejected(HTTPStatus.BAD_REQUEST, lan.LAN_ACCESS_INVALID, str(exc)) from exc
+                if settings["enabled"] and ADMIN_PASSWORD == DEFAULT_ADMIN_PASSWORD:
+                    raise LanAccessRejected(
+                        HTTPStatus.CONFLICT,
+                        lan.LAN_ADMIN_PASSWORD_DEFAULT,
+                        "the LAN view stays off while the default admin password is in use; set SDR_DOA_ADMIN_PASSWORD and restart the console",
+                    )
+                config = {**self._config, "lan_access": settings}
+                saved = self._saved_copy_locked(config)
+                try:
+                    _save_console_config(self.config_path, saved)
+                except OSError as exc:
+                    raise LanAccessRejected(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        lan.LAN_ACCESS_SAVE_FAILED,
+                        f"lan_access could not be saved ({type(exc).__name__})",
+                    ) from exc
+                self._saved_config = saved
+                self._config = config
+            status = self.lan.apply(settings)
+        return {"config": dict(settings), "status": status}
 
     def apply_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """Persist local console config and reconcile its local MQTT monitor."""
@@ -3567,7 +4495,9 @@ class GroundConsoleServer(ThreadingHTTPServer):
         retired: Optional[Any] = None
         try:
             with self._config_lock:
-                normalized = _validate_console_config(config, self._config)
+                # lan_access changes only through set_lan_access(); a config
+                # read before a concurrent change must not put the old one back.
+                normalized = _validate_console_config({**config, "lan_access": self._config["lan_access"]}, self._config)
                 old_connection = _mqtt_connection(self._config)
                 new_connection = _mqtt_connection(normalized)
                 new_host = new_connection[0]
@@ -3576,18 +4506,28 @@ class GroundConsoleServer(ThreadingHTTPServer):
                     or old_connection != new_connection
                     or bool(new_host) != (self.mqtt_monitor is not None)
                 )
+                saved = self._saved_copy_locked(normalized)
                 replacement = None
                 if monitor_changed and new_host:
                     replacement = _new_mqtt_monitor(*new_connection)
+                    # Before start(), so no ACK or settings report of a
+                    # pending command reaches the new client unasked.
+                    self.config_commands.hand_over(self.mqtt_monitor, replacement)
                     replacement.start()
                 try:
-                    _save_console_config(self.config_path, normalized)
+                    _save_console_config(self.config_path, saved)
                 except Exception:
                     retired = replacement
                     raise
                 if monitor_changed:
-                    retired = self.mqtt_monitor
-                    self.mqtt_monitor = replacement
+                    # Again under the command lock, for a command published
+                    # since: none can slip in before the swap. The ACKs of a
+                    # pending command reach only the new client.
+                    with self._config_patch_lock:
+                        self.config_commands.hand_over(self.mqtt_monitor, replacement)
+                        retired = self.mqtt_monitor
+                        self.mqtt_monitor = replacement
+                self._saved_config = saved
                 self._config = normalized
                 return dict(self._config), self.mqtt_monitor
         finally:
@@ -3673,117 +4613,178 @@ class GroundConsoleServer(ThreadingHTTPServer):
                 self._admin_sessions.pop(token, None)
 
     def config_reported(self) -> Dict[str, Any]:
-        """Body of GET /api/mqtt/config-reported; always a 200 payload."""
+        """Body of GET /api/mqtt/config-reported; always a 200 payload.
+
+        Kontrol's view of the node: the MQTT connection, the node session
+        (``state.sid``, ``state.cfg`` as ``base_rev``, health freshness), the
+        latest ``settings/reported`` (its safe values only while its ``rev``
+        is ``state.cfg``), the patch in flight and the latest ``config.get``.
+        """
         monitor = self.mqtt_monitor
         config = self.get_config()
-        empty = {field: None for field in CONFIG_ALLOWLIST}
+        now = self.clock_ms()
+        empty = {field: None for field in cmds.PATCH_FIELDS}
         body: Dict[str, Any] = {
             "available": False,
             "code": None,
-            "now_ms": self.clock_ms(),
+            "now_ms": now,
             "broker": {
                 "host": getattr(monitor, "host", None) if monitor is not None else (config.get("mqtt_host") or None),
                 "port": getattr(monitor, "port", None) if monitor is not None else config.get("mqtt_port"),
                 "transport": getattr(monitor, "transport", None) if monitor is not None else config.get("mqtt_transport"),
                 "connection": "disabled",
             },
-            "base_config_rev": None,
-            "base_config_rev_source": None,
-            "reported": None,
+            "node": None,
+            "base_rev": None,
+            "settings": None,
             "values": dict(empty),
             "value_sources": dict(empty),
             "value_received_at_ms": dict(empty),
             "pending_command_id": self.config_commands.in_flight(monitor),
+            "settings_request": self.config_commands.latest(monitor, op=cmds.OP_CONFIG_GET),
         }
         if monitor is None:
             body["code"] = "MQTT_MONITOR_DISABLED"
             return body
-        data = _monitor_reported_config(monitor) if _monitor_can_publish(monitor) else None
-        if data is None or data.get("available") is not True:
+        view = _monitor_control_view(monitor) if _monitor_can_publish(monitor) else None
+        if view is None or view.get("available") is not True:
             body["code"] = "MQTT_DEPENDENCY_MISSING"
             body["broker"]["connection"] = "error"
             return body
-        normalized = _normalize_reported(data)
-        body["broker"]["connection"] = normalized.pop("connection")
-        body.update(normalized)
-        body["available"] = True
+        connection = view.get("connection")
+        body["broker"]["connection"] = connection if isinstance(connection, str) and connection else "unknown"
+        view_now = _int_or_none(view.get("now_ms")) or now
+        session = _session_or_none(view)
+        node = _node_view(session, view_now)
+        settings = _settings_view(view.get("settings"), view_now)
+        body.update(available=True, node=node, base_rev=None if node is None else node["cfg"], settings=settings)
+        if settings is not None and settings["matches_state_cfg"]:
+            for field, value in settings["values"].items():
+                if value is not None:
+                    body["values"][field] = value
+                    body["value_sources"][field] = "settings_reported"
+                    body["value_received_at_ms"][field] = settings["received_at_ms"]
         return body
 
     def submit_config_patch(self, payload: Any) -> Tuple[int, Dict[str, Any]]:
-        """Checks 3-10 of POST /api/mqtt/config-patch; returns (status, body).
-
-        The caller has already checked the Origin and the admin cookie.
-        """
+        """POST /api/mqtt/config-patch after Origin and admin; returns (status, body)."""
         try:
-            changes, requested_revision = _parse_config_patch_request(payload)
+            changes, requested_rev = _parse_config_patch_request(payload)
             with self._config_patch_lock:
-                return self._publish_config_patch_locked(changes, requested_revision)
+                return self._publish_command_locked(cmds.OP_CONFIG_PATCH, changes=changes, requested_rev=requested_rev)
         except ConfigPatchRejected as rejected:
             return rejected.status, rejected.body()
 
-    def _publish_config_patch_locked(
+    def submit_config_get(self, payload: Any) -> Tuple[int, Dict[str, Any]]:
+        """POST /api/mqtt/config-get after Origin and admin; returns (status, body)."""
+        try:
+            if not isinstance(payload, dict) or payload:
+                raise ConfigPatchRejected(
+                    HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "request must be an empty JSON object",
+                )
+            with self._config_patch_lock:
+                return self._publish_command_locked(cmds.OP_CONFIG_GET)
+        except ConfigPatchRejected as rejected:
+            return rejected.status, rejected.body()
+
+    def _publish_command_locked(
         self,
-        changes: Dict[str, Any],
-        requested_revision: Optional[int],
+        op: str,
+        *,
+        changes: Optional[Dict[str, Any]] = None,
+        requested_rev: Optional[int] = None,
     ) -> Tuple[int, Dict[str, Any]]:
+        """The monitor, node and in-flight checks, then the publish; the first failure wins."""
         monitor = self.mqtt_monitor
         if monitor is None:
             raise ConfigPatchRejected(
                 HTTPStatus.CONFLICT, "MQTT_MONITOR_DISABLED", "the MQTT monitor is off; set an MQTT host first",
             )
-        reported = _monitor_reported_config(monitor) if _monitor_can_publish(monitor) else None
-        if reported is None or reported.get("available") is not True:
+        view = _monitor_control_view(monitor) if _monitor_can_publish(monitor) else None
+        if view is None or view.get("available") is not True:
             raise ConfigPatchRejected(
                 HTTPStatus.SERVICE_UNAVAILABLE, "MQTT_DEPENDENCY_MISSING", MQTT_DEPENDENCY_ERROR,
             )
-        current = _normalize_reported(reported)
-        if current["connection"] != "connected":
+        if view.get("connection") != "connected":
             raise ConfigPatchRejected(
                 HTTPStatus.SERVICE_UNAVAILABLE,
                 "MQTT_NOT_CONNECTED",
                 "the MQTT monitor is not connected with its subscriptions acknowledged",
             )
-        base_revision = current["base_config_rev"]
-        if base_revision is None:
+        session = _session_or_none(view)
+        if session is None:
             raise ConfigPatchRejected(
                 HTTPStatus.CONFLICT,
-                "CONFIG_REVISION_UNKNOWN",
-                "no config revision has been reported on MQTT yet",
+                "NODE_SESSION_UNAVAILABLE",
+                "no RDF Node state (sid, boot) has been received; a command must name the node session",
             )
-        if requested_revision != base_revision:
-            raise ConfigPatchRejected(
-                HTTPStatus.CONFLICT,
-                "CONFIG_REVISION_STALE",
-                "the reviewed base revision is no longer current; reload the reported values",
-                current_base_config_rev=base_revision,
-            )
-        pending = self.config_commands.in_flight(monitor)
-        if pending is not None:
-            raise ConfigPatchRejected(
-                HTTPStatus.CONFLICT,
-                "COMMAND_IN_FLIGHT",
-                "another config patch is still waiting for its result",
-                command_id=pending,
-            )
+        base_rev = _int_or_none(session.get("cfg"))
+        if op == cmds.OP_CONFIG_PATCH:
+            if session.get("health_fresh") is not True:
+                raise ConfigPatchRejected(
+                    HTTPStatus.CONFLICT,
+                    "NODE_NOT_FRESH",
+                    "the RDF Node sent no fresh telemetry/health; a config patch needs a live node",
+                )
+            if base_rev is None:
+                raise ConfigPatchRejected(
+                    HTTPStatus.CONFLICT,
+                    "CONFIG_REVISION_UNKNOWN",
+                    "the RDF Node state carries no config revision (state.cfg) yet",
+                )
+            if requested_rev != base_rev:
+                raise ConfigPatchRejected(
+                    HTTPStatus.CONFLICT,
+                    "CONFIG_REVISION_STALE",
+                    "the reviewed base revision is no longer the node's; read the values again",
+                    current_base_rev=base_rev,
+                )
+            pending = self.config_commands.in_flight(monitor, cmds.OP_CONFIG_PATCH)
+            if pending is not None:
+                raise ConfigPatchRejected(
+                    HTTPStatus.CONFLICT,
+                    "COMMAND_IN_FLIGHT",
+                    "another config patch is still waiting for its result",
+                    command_id=pending,
+                )
+        else:
+            pending = self.config_commands.in_flight(monitor, cmds.OP_CONFIG_GET)
+            if pending is not None:
+                raise ConfigPatchRejected(
+                    HTTPStatus.CONFLICT,
+                    "SETTINGS_REQUEST_PENDING",
+                    "the last settings request is still waiting for its answer",
+                    command_id=pending,
+                )
+            last = self.config_commands.last_issued_at(cmds.OP_CONFIG_GET)
+            if last is not None and self.clock_ms() - last < CONFIG_GET_MIN_INTERVAL_MS:
+                raise ConfigPatchRejected(
+                    HTTPStatus.TOO_MANY_REQUESTS,
+                    "CONFIG_GET_TOO_SOON",
+                    "the RDF Node answers at most one settings request a second",
+                )
         issued = int(self.clock_ms())
+        command = cmds.build_command(
+            op,
+            command_id=cmds.new_command_id(),
+            sid=session["sid"],
+            boot=session["boot"],
+            base_rev=base_rev,
+            issued_ms=issued,
+            changes=changes,
+        )
         try:
-            command = sdr_doa_mqtt.build_config_patch(
-                command_id="gc-" + uuid.uuid4().hex[:24],
-                base_config_rev=base_revision,
-                changes=changes,
-                issued_ts_ms=issued,
-                expires_ts_ms=issued + CONFIG_COMMAND_TTL_MS,
-            )
-            sdr_doa_mqtt.validate_config_patch(command, now_ms=issued)
-        except sdr_doa_mqtt.ContractError as exc:
-            raise ConfigPatchRejected(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", str(exc)) from exc
+            cmds.validate_command(command, now_ms=issued)
+        except cmds.CommandRefused as refused:
+            raise ConfigPatchRejected(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", refused.message) from refused
+        topic = cmds.command_topic(_monitor_node_id(monitor), op)
         try:
-            result = monitor.publish_config_patch(command)
+            result = monitor.publish_rdf_node_command(command)
         except Exception as exc:
             # Match on the code, not the class: the monitor module may be
             # loaded under another package name than this one.
             code = getattr(exc, "code", None)
-            self.config_commands.record(command, monitor, publish_failed=True)
+            self.config_commands.record(command, monitor, topic=topic, publish_failed=True)
             if code in {"MQTT_NOT_CONNECTED", "MQTT_DEPENDENCY_MISSING"}:
                 raise ConfigPatchRejected(
                     HTTPStatus.SERVICE_UNAVAILABLE, code, str(exc) or code, command_id=command["id"],
@@ -3795,23 +4796,27 @@ class GroundConsoleServer(ThreadingHTTPServer):
                 command_id=command["id"],
             ) from exc
         published_at = result.get("published_at_ms") if isinstance(result, dict) else None
+        published_topic = result.get("topic") if isinstance(result, dict) else None
+        if isinstance(published_topic, str):
+            topic = published_topic
         self.config_commands.record(
             command,
             monitor,
+            topic=topic,
             published_at_ms=published_at if type(published_at) is int else issued,
         )
-        topic = result.get("topic") if isinstance(result, dict) else None
         return HTTPStatus.ACCEPTED, {
             "ok": True,
             "command_id": command["id"],
+            "op": op,
             "state": "published",
-            "topic": topic if isinstance(topic, str) else sdr_doa_mqtt.TOPICS["config_patch"],
-            "qos": sdr_doa_mqtt.COMMAND_QOS,
-            "base_config_rev": command["base_config_rev"],
-            "issued_ts_ms": command["issued_ts_ms"],
-            "expires_ts_ms": command["expires_ts_ms"],
-            "ttl_ms": CONFIG_COMMAND_TTL_MS,
-            "changes": dict(command["changes"]),
+            "topic": topic,
+            "qos": cmds.COMMAND_QOS,
+            "base_rev": command["base_rev"],
+            "issued_ms": command["issued_ms"],
+            "expires_ms": command["expires_ms"],
+            "ttl_ms": cmds.COMMAND_TTL_MS,
+            "changes": dict(command.get("changes") or {}),
         }
 
     def enable_mqtt_monitor(
@@ -3835,10 +4840,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Local SDR-DoA Ground Console: read-only Data Out, an MQTT monitor, "
-            "and one admin-confirmed config-patch publish"
+            "and Kontrol's admin-confirmed RDF Node config patch"
         )
     )
-    parser.add_argument("--base-url", default="http://doasdr.local:8081", help="SDR-DoA Data Out base URL")
+    parser.add_argument(
+        "--base-url",
+        default="http://doasdr.local:8081",
+        help="SDR-DoA Data Out base URL for this run (port 8081, a host in the saved Data Out host list)",
+    )
     parser.add_argument("--legacy-ui", action="store_true", help="use the previous embedded UI instead of the frontend build")
     parser.add_argument("--bind", default=DEFAULT_BIND, help="local bind address")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="local console port")
@@ -3902,8 +4911,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit("--mqtt-port must be between 1 and 65535")
     if not _is_allowed_mqtt_ws_path(args.mqtt_ws_path):
         raise SystemExit("--mqtt-ws-path must start with / and use only letters, digits, and ._~/-")
-    if not _is_allowed_base_url(args.base_url):
-        raise SystemExit("--base-url is outside the local SDR-DoA allowlist")
     if not (0 <= args.tile_cache_max_mb <= MAX_TILE_CACHE_MB):
         raise SystemExit(f"--tile-cache-max-mb must be between 0 and {MAX_TILE_CACHE_MB}")
     env_path = Path(args.env_file).expanduser()
@@ -3918,8 +4925,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     config_path = Path(args.config_path).expanduser()
     # Saved settings first (seeded and saved on the first start); a typed
     # --base-url or --mqtt-* flag then overrides them for this run only.
-    config = _initial_console_config(config_path, dotenv_values=env_values)
-    config = _apply_cli_overrides(config, args, _explicit_cli_options(argv))
+    saved_config = _initial_console_config(config_path, dotenv_values=env_values)
+    try:
+        # A typed --base-url is checked against the saved host list (on a
+        # first start the one just seeded, which is the defaults without a seed).
+        config = _apply_cli_overrides(saved_config, args, _explicit_cli_options(argv))
+    except DataOutHostError as exc:
+        raise SystemExit(f"--base-url: {exc}; the list is data_out_hosts in {config_path} (Konfigurasi)") from None
     monitor = _new_mqtt_monitor(*_mqtt_connection(config)) if config["mqtt_host"] else None
     if isinstance(monitor, _UnavailableMqttMonitor):
         print(f"MQTT monitor unavailable: {monitor.error}", flush=True)
@@ -3937,6 +4949,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         preferences_path=str(Path(args.preferences_path).expanduser()),
         tile_cache_dir=Path(args.tile_cache_dir).expanduser(),
         tile_cache_max_mb=args.tile_cache_max_mb,
+        saved_config=saved_config,
     )
     print(f"Ground Console: http://{args.bind}:{args.port}/", flush=True)
     print(f"Version: {server.version}", flush=True)

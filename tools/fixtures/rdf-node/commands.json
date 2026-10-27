@@ -1,0 +1,483 @@
+{
+  "edge_version": "1.0.0",
+  "node_id": "uav-01",
+  "session": {
+    "state": "{\"v\":2,\"sid\":\"e2fe561d\",\"boot\":\"2c7c26a5-a909-4987-8d87-e66b1c6ac4e7\",\"instance\":\"7387f9f7-ce5d-4097-aca0-537c5dbe23e3\",\"t\":1793074995580,\"run\":\"RUNNING\",\"daq\":true,\"cfg\":1,\"profile\":\"balanced\",\"clock\":\"SYNCED\"}",
+    "health": "{\"v\":2,\"sid\":\"e2fe561d\",\"q\":1,\"t\":1793074995580,\"run\":1,\"daq\":1,\"drop\":2,\"age\":6,\"temp\":52.3,\"clk\":1,\"rev\":1}"
+  },
+  "cases": [
+    {
+      "name": "config-get",
+      "note": "settings read over a TLS link: APPLIED, then settings/reported",
+      "op": "config.get",
+      "changes": null,
+      "console": {
+        "accepted": true,
+        "code": null,
+        "topic": "sdr/v2/uav-01/cmd/config/get",
+        "qos": 1,
+        "retain": false,
+        "payload": "{\"v\":2,\"id\":\"gc-000000000000000000000001\",\"sid\":\"e2fe561d\",\"boot\":\"2c7c26a5-a909-4987-8d87-e66b1c6ac4e7\",\"issued_ms\":1793074995580,\"expires_ms\":1793075010580,\"base_rev\":1,\"op\":\"config.get\"}"
+      },
+      "edge": {
+        "acks": [
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-000000000000000000000001\",\"status\":\"APPLIED\",\"t\":1793074995581,\"rev\":1,\"result\":{\"revision\":1,\"proof\":\"source_correlated\"}}"
+          }
+        ],
+        "settings_reported": "{\"v\":2,\"sid\":\"e2fe561d\",\"boot\":\"2c7c26a5-a909-4987-8d87-e66b1c6ac4e7\",\"id\":\"gc-000000000000000000000001\",\"rev\":1,\"t\":1793074995580,\"settings_json\":\"{\\n  \\\"center_freq\\\": 433.92,\\n  \\\"uniform_gain\\\": 15.7,\\n  \\\"data_interface\\\": \\\"shmem\\\",\\n  \\\"en_doa\\\": true,\\n  \\\"doa_method\\\": \\\"MUSIC\\\",\\n  \\\"doa_decorrelation_method\\\": \\\"Off\\\",\\n  \\\"ant_arrangement\\\": \\\"UCA\\\",\\n  \\\"ant_spacing_meters\\\": 0.21,\\n  \\\"active_vfos\\\": 1,\\n  \\\"output_vfo\\\": 0,\\n  \\\"vfo_mode\\\": \\\"Standard\\\",\\n  \\\"vfo_freq_0\\\": 433920000,\\n  \\\"vfo_bw_0\\\": 12500,\\n  \\\"vfo_squelch_0\\\": -80,\\n  \\\"doa_fig_type\\\": \\\"Compass\\\",\\n  \\\"compass_offset\\\": 0,\\n  \\\"location_source\\\": \\\"None\\\",\\n  \\\"latitude\\\": 0.0,\\n  \\\"longitude\\\": 0.0,\\n  \\\"station_id\\\": \\\"fixture-station\\\",\\n  \\\"en_remote_control\\\": false\\n}\\n\"}"
+      }
+    },
+    {
+      "name": "config-get-tls-off",
+      "note": "the edge's link to the broker is not TLS",
+      "op": "config.get",
+      "changes": null,
+      "console": {
+        "accepted": true,
+        "code": null,
+        "topic": "sdr/v2/uav-01/cmd/config/get",
+        "qos": 1,
+        "retain": false,
+        "payload": "{\"v\":2,\"id\":\"gc-000000000000000000000002\",\"sid\":\"e2fe561d\",\"boot\":\"2c7c26a5-a909-4987-8d87-e66b1c6ac4e7\",\"issued_ms\":1793074995582,\"expires_ms\":1793075010582,\"base_rev\":1,\"op\":\"config.get\"}"
+      },
+      "edge": {
+        "acks": [
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-000000000000000000000002\",\"status\":\"REJECTED\",\"t\":1793074995582,\"rev\":1,\"result\":{\"error\":\"TLS_REQUIRED_FOR_SETTINGS_REPORT\"}}"
+          }
+        ],
+        "settings_reported": null
+      }
+    },
+    {
+      "name": "retune",
+      "note": "centre and VFO0 together; fresh DAQ centre and DoA frequency prove both",
+      "op": "config.patch",
+      "changes": {
+        "center_frequency_hz": 434000000,
+        "vfo0_frequency_hz": 434000000
+      },
+      "console": {
+        "accepted": true,
+        "code": null,
+        "topic": "sdr/v2/uav-01/cmd/config/patch",
+        "qos": 1,
+        "retain": false,
+        "payload": "{\"v\":2,\"id\":\"gc-000000000000000000000003\",\"sid\":\"e2fe561d\",\"boot\":\"2c7c26a5-a909-4987-8d87-e66b1c6ac4e7\",\"issued_ms\":1793074995583,\"expires_ms\":1793075010583,\"base_rev\":1,\"op\":\"config.patch\",\"changes\":{\"center_frequency_hz\":434000000,\"vfo0_frequency_hz\":434000000}}"
+      },
+      "edge": {
+        "acks": [
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-000000000000000000000003\",\"status\":\"ACCEPTED\",\"t\":1793074995584,\"rev\":1,\"result\":{}}"
+          },
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-000000000000000000000003\",\"status\":\"APPLIED\",\"t\":1793074995787,\"rev\":2,\"result\":{\"revision\":2,\"proof\":{\"center_frequency_hz\":\"FRESH_DAQ_RF_CENTER\",\"vfo0_frequency_hz\":\"FRESH_DOA_FREQUENCY\"},\"persisted\":true}}"
+          }
+        ],
+        "settings_reported": null
+      }
+    },
+    {
+      "name": "gain",
+      "note": "a gain table value; fresh DAQ gain proves it",
+      "op": "config.patch",
+      "changes": {
+        "gain_db": 20.7
+      },
+      "console": {
+        "accepted": true,
+        "code": null,
+        "topic": "sdr/v2/uav-01/cmd/config/patch",
+        "qos": 1,
+        "retain": false,
+        "payload": "{\"v\":2,\"id\":\"gc-000000000000000000000004\",\"sid\":\"e2fe561d\",\"boot\":\"2c7c26a5-a909-4987-8d87-e66b1c6ac4e7\",\"issued_ms\":1793074995835,\"expires_ms\":1793075010835,\"base_rev\":2,\"op\":\"config.patch\",\"changes\":{\"gain_db\":20.7}}"
+      },
+      "edge": {
+        "acks": [
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-000000000000000000000004\",\"status\":\"ACCEPTED\",\"t\":1793074995837,\"rev\":2,\"result\":{}}"
+          },
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-000000000000000000000004\",\"status\":\"APPLIED\",\"t\":1793074996041,\"rev\":3,\"result\":{\"revision\":3,\"proof\":{\"gain_db\":\"FRESH_DAQ_GAIN\"},\"persisted\":true}}"
+          }
+        ],
+        "settings_reported": null
+      }
+    },
+    {
+      "name": "vfo-only",
+      "note": "VFO0 alone inside the band; a fresh DoA frequency proves it",
+      "op": "config.patch",
+      "changes": {
+        "vfo0_frequency_hz": 434010000
+      },
+      "console": {
+        "accepted": true,
+        "code": null,
+        "topic": "sdr/v2/uav-01/cmd/config/patch",
+        "qos": 1,
+        "retain": false,
+        "payload": "{\"v\":2,\"id\":\"gc-000000000000000000000005\",\"sid\":\"e2fe561d\",\"boot\":\"2c7c26a5-a909-4987-8d87-e66b1c6ac4e7\",\"issued_ms\":1793074996088,\"expires_ms\":1793075011088,\"base_rev\":3,\"op\":\"config.patch\",\"changes\":{\"vfo0_frequency_hz\":434010000}}"
+      },
+      "edge": {
+        "acks": [
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-000000000000000000000005\",\"status\":\"ACCEPTED\",\"t\":1793074996089,\"rev\":3,\"result\":{}}"
+          },
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-000000000000000000000005\",\"status\":\"APPLIED\",\"t\":1793074996293,\"rev\":4,\"result\":{\"revision\":4,\"proof\":{\"vfo0_frequency_hz\":\"FRESH_DOA_FREQUENCY\"},\"persisted\":true}}"
+          }
+        ],
+        "settings_reported": null
+      }
+    },
+    {
+      "name": "bandwidth-squelch",
+      "note": "no runtime evidence exists for these fields",
+      "op": "config.patch",
+      "changes": {
+        "vfo0_bandwidth_hz": 25000,
+        "vfo0_squelch_db": -70
+      },
+      "console": {
+        "accepted": true,
+        "code": null,
+        "topic": "sdr/v2/uav-01/cmd/config/patch",
+        "qos": 1,
+        "retain": false,
+        "payload": "{\"v\":2,\"id\":\"gc-000000000000000000000006\",\"sid\":\"e2fe561d\",\"boot\":\"2c7c26a5-a909-4987-8d87-e66b1c6ac4e7\",\"issued_ms\":1793074996340,\"expires_ms\":1793075011340,\"base_rev\":4,\"op\":\"config.patch\",\"changes\":{\"vfo0_bandwidth_hz\":25000,\"vfo0_squelch_db\":-70}}"
+      },
+      "edge": {
+        "acks": [
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-000000000000000000000006\",\"status\":\"ACCEPTED\",\"t\":1793074996342,\"rev\":4,\"result\":{}}"
+          },
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-000000000000000000000006\",\"status\":\"PERSISTED_UNVERIFIED\",\"t\":1793074998347,\"rev\":5,\"result\":{\"revision\":5,\"persisted\":true,\"proof\":{},\"reason\":\"NATIVE_RUNTIME_EVIDENCE_INCOMPLETE\"}}"
+          }
+        ],
+        "settings_reported": null
+      }
+    },
+    {
+      "name": "stale-base-rev",
+      "note": "base_rev of the previous revision (another writer changed the settings)",
+      "op": "config.patch",
+      "changes": {
+        "gain_db": 15.7
+      },
+      "console": {
+        "accepted": true,
+        "code": null,
+        "topic": "sdr/v2/uav-01/cmd/config/patch",
+        "qos": 1,
+        "retain": false,
+        "payload": "{\"v\":2,\"id\":\"gc-000000000000000000000007\",\"sid\":\"e2fe561d\",\"boot\":\"2c7c26a5-a909-4987-8d87-e66b1c6ac4e7\",\"issued_ms\":1793074998398,\"expires_ms\":1793075013398,\"base_rev\":4,\"op\":\"config.patch\",\"changes\":{\"gain_db\":15.7}}"
+      },
+      "edge": {
+        "acks": [
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-000000000000000000000007\",\"status\":\"REJECTED\",\"t\":1793074998398,\"rev\":5,\"result\":{\"error\":\"CONFIG_REVISION_CONFLICT\"}}"
+          }
+        ],
+        "settings_reported": null
+      }
+    },
+    {
+      "name": "center-without-vfo0",
+      "note": "refused by the console; the edge's helper refuses it too",
+      "op": "config.patch",
+      "changes": {
+        "center_frequency_hz": 433000000
+      },
+      "console": {
+        "accepted": false,
+        "code": "CENTER_CHANGE_REQUIRES_VFO0_TARGET",
+        "topic": "sdr/v2/uav-01/cmd/config/patch",
+        "qos": 1,
+        "retain": false,
+        "payload": "{\"v\":2,\"id\":\"gc-000000000000000000000008\",\"sid\":\"e2fe561d\",\"boot\":\"2c7c26a5-a909-4987-8d87-e66b1c6ac4e7\",\"issued_ms\":1793074998399,\"expires_ms\":1793075013399,\"base_rev\":5,\"op\":\"config.patch\",\"changes\":{\"center_frequency_hz\":433000000}}"
+      },
+      "edge": {
+        "acks": [
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-000000000000000000000008\",\"status\":\"ACCEPTED\",\"t\":1793074998400,\"rev\":5,\"result\":{}}"
+          },
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-000000000000000000000008\",\"status\":\"FAILED\",\"t\":1793074998402,\"rev\":5,\"result\":{\"error\":\"CENTER_CHANGE_REQUIRES_VFO0_TARGET\"}}"
+          }
+        ],
+        "settings_reported": null
+      }
+    },
+    {
+      "name": "center-not-vfo0",
+      "note": "refused by the console; the edge's helper refuses it too",
+      "op": "config.patch",
+      "changes": {
+        "center_frequency_hz": 433000000,
+        "vfo0_frequency_hz": 433010000
+      },
+      "console": {
+        "accepted": false,
+        "code": "MVP_CENTER_MUST_EQUAL_VFO0",
+        "topic": "sdr/v2/uav-01/cmd/config/patch",
+        "qos": 1,
+        "retain": false,
+        "payload": "{\"v\":2,\"id\":\"gc-000000000000000000000009\",\"sid\":\"e2fe561d\",\"boot\":\"2c7c26a5-a909-4987-8d87-e66b1c6ac4e7\",\"issued_ms\":1793074998451,\"expires_ms\":1793075013451,\"base_rev\":5,\"op\":\"config.patch\",\"changes\":{\"center_frequency_hz\":433000000,\"vfo0_frequency_hz\":433010000}}"
+      },
+      "edge": {
+        "acks": [
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-000000000000000000000009\",\"status\":\"ACCEPTED\",\"t\":1793074998452,\"rev\":5,\"result\":{}}"
+          },
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-000000000000000000000009\",\"status\":\"FAILED\",\"t\":1793074998453,\"rev\":5,\"result\":{\"error\":\"MVP_CENTER_MUST_EQUAL_VFO0\"}}"
+          }
+        ],
+        "settings_reported": null
+      }
+    },
+    {
+      "name": "gain-not-in-table",
+      "note": "refused by the console; the edge's helper refuses it too",
+      "op": "config.patch",
+      "changes": {
+        "gain_db": 20.0
+      },
+      "console": {
+        "accepted": false,
+        "code": "GAIN_NOT_IN_APPROVED_TABLE",
+        "topic": "sdr/v2/uav-01/cmd/config/patch",
+        "qos": 1,
+        "retain": false,
+        "payload": "{\"v\":2,\"id\":\"gc-00000000000000000000000a\",\"sid\":\"e2fe561d\",\"boot\":\"2c7c26a5-a909-4987-8d87-e66b1c6ac4e7\",\"issued_ms\":1793074998502,\"expires_ms\":1793075013502,\"base_rev\":5,\"op\":\"config.patch\",\"changes\":{\"gain_db\":20.0}}"
+      },
+      "edge": {
+        "acks": [
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-00000000000000000000000a\",\"status\":\"ACCEPTED\",\"t\":1793074998503,\"rev\":5,\"result\":{}}"
+          },
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-00000000000000000000000a\",\"status\":\"FAILED\",\"t\":1793074998505,\"rev\":5,\"result\":{\"error\":\"GAIN_NOT_IN_APPROVED_TABLE\"}}"
+          }
+        ],
+        "settings_reported": null
+      }
+    },
+    {
+      "name": "frequency-too-high",
+      "note": "refused by the console; the edge's helper refuses it too",
+      "op": "config.patch",
+      "changes": {
+        "center_frequency_hz": 1800000000,
+        "vfo0_frequency_hz": 1800000000
+      },
+      "console": {
+        "accepted": false,
+        "code": "VALUE_OUT_OF_RANGE",
+        "topic": "sdr/v2/uav-01/cmd/config/patch",
+        "qos": 1,
+        "retain": false,
+        "payload": "{\"v\":2,\"id\":\"gc-00000000000000000000000b\",\"sid\":\"e2fe561d\",\"boot\":\"2c7c26a5-a909-4987-8d87-e66b1c6ac4e7\",\"issued_ms\":1793074998554,\"expires_ms\":1793075013554,\"base_rev\":5,\"op\":\"config.patch\",\"changes\":{\"center_frequency_hz\":1800000000,\"vfo0_frequency_hz\":1800000000}}"
+      },
+      "edge": {
+        "acks": [
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-00000000000000000000000b\",\"status\":\"ACCEPTED\",\"t\":1793074998555,\"rev\":5,\"result\":{}}"
+          },
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-00000000000000000000000b\",\"status\":\"FAILED\",\"t\":1793074998559,\"rev\":5,\"result\":{\"error\":\"INTEGER_OUT_OF_RANGE\"}}"
+          }
+        ],
+        "settings_reported": null
+      }
+    },
+    {
+      "name": "frequency-fraction",
+      "note": "refused by the console; the edge's helper refuses it too",
+      "op": "config.patch",
+      "changes": {
+        "vfo0_frequency_hz": 434000000.5
+      },
+      "console": {
+        "accepted": false,
+        "code": "VALUE_OUT_OF_RANGE",
+        "topic": "sdr/v2/uav-01/cmd/config/patch",
+        "qos": 1,
+        "retain": false,
+        "payload": "{\"v\":2,\"id\":\"gc-00000000000000000000000c\",\"sid\":\"e2fe561d\",\"boot\":\"2c7c26a5-a909-4987-8d87-e66b1c6ac4e7\",\"issued_ms\":1793074998606,\"expires_ms\":1793075013606,\"base_rev\":5,\"op\":\"config.patch\",\"changes\":{\"vfo0_frequency_hz\":434000000.5}}"
+      },
+      "edge": {
+        "acks": [
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-00000000000000000000000c\",\"status\":\"ACCEPTED\",\"t\":1793074998607,\"rev\":5,\"result\":{}}"
+          },
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-00000000000000000000000c\",\"status\":\"FAILED\",\"t\":1793074998609,\"rev\":5,\"result\":{\"error\":\"INTEGER_OUT_OF_RANGE\"}}"
+          }
+        ],
+        "settings_reported": null
+      }
+    },
+    {
+      "name": "bandwidth-too-wide",
+      "note": "refused by the console; the edge's helper refuses it too",
+      "op": "config.patch",
+      "changes": {
+        "vfo0_bandwidth_hz": 2500000
+      },
+      "console": {
+        "accepted": false,
+        "code": "VALUE_OUT_OF_RANGE",
+        "topic": "sdr/v2/uav-01/cmd/config/patch",
+        "qos": 1,
+        "retain": false,
+        "payload": "{\"v\":2,\"id\":\"gc-00000000000000000000000d\",\"sid\":\"e2fe561d\",\"boot\":\"2c7c26a5-a909-4987-8d87-e66b1c6ac4e7\",\"issued_ms\":1793074998658,\"expires_ms\":1793075013658,\"base_rev\":5,\"op\":\"config.patch\",\"changes\":{\"vfo0_bandwidth_hz\":2500000}}"
+      },
+      "edge": {
+        "acks": [
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-00000000000000000000000d\",\"status\":\"ACCEPTED\",\"t\":1793074998659,\"rev\":5,\"result\":{}}"
+          },
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-00000000000000000000000d\",\"status\":\"FAILED\",\"t\":1793074998662,\"rev\":5,\"result\":{\"error\":\"INTEGER_OUT_OF_RANGE\"}}"
+          }
+        ],
+        "settings_reported": null
+      }
+    },
+    {
+      "name": "squelch-too-high",
+      "note": "refused by the console; the edge's helper refuses it too",
+      "op": "config.patch",
+      "changes": {
+        "vfo0_squelch_db": 60
+      },
+      "console": {
+        "accepted": false,
+        "code": "VALUE_OUT_OF_RANGE",
+        "topic": "sdr/v2/uav-01/cmd/config/patch",
+        "qos": 1,
+        "retain": false,
+        "payload": "{\"v\":2,\"id\":\"gc-00000000000000000000000e\",\"sid\":\"e2fe561d\",\"boot\":\"2c7c26a5-a909-4987-8d87-e66b1c6ac4e7\",\"issued_ms\":1793074998710,\"expires_ms\":1793075013710,\"base_rev\":5,\"op\":\"config.patch\",\"changes\":{\"vfo0_squelch_db\":60}}"
+      },
+      "edge": {
+        "acks": [
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-00000000000000000000000e\",\"status\":\"ACCEPTED\",\"t\":1793074998711,\"rev\":5,\"result\":{}}"
+          },
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-00000000000000000000000e\",\"status\":\"FAILED\",\"t\":1793074998714,\"rev\":5,\"result\":{\"error\":\"NUMBER_OUT_OF_RANGE\"}}"
+          }
+        ],
+        "settings_reported": null
+      }
+    },
+    {
+      "name": "old-field-name",
+      "note": "the console's former name; refused by both",
+      "op": "config.patch",
+      "changes": {
+        "vfo_frequency_hz": 434000000
+      },
+      "console": {
+        "accepted": false,
+        "code": "FIELD_NOT_ALLOWED",
+        "topic": "sdr/v2/uav-01/cmd/config/patch",
+        "qos": 1,
+        "retain": false,
+        "payload": "{\"v\":2,\"id\":\"gc-00000000000000000000000f\",\"sid\":\"e2fe561d\",\"boot\":\"2c7c26a5-a909-4987-8d87-e66b1c6ac4e7\",\"issued_ms\":1793074998762,\"expires_ms\":1793075013762,\"base_rev\":5,\"op\":\"config.patch\",\"changes\":{\"vfo_frequency_hz\":434000000}}"
+      },
+      "edge": {
+        "acks": [
+          {
+            "qos": 1,
+            "retain": false,
+            "expiry_s": 30,
+            "payload": "{\"v\":2,\"sid\":\"e2fe561d\",\"id\":\"gc-00000000000000000000000f\",\"status\":\"REJECTED\",\"t\":1793074998762,\"rev\":5,\"result\":{\"error\":\"INVALID_PATCH\"}}"
+          }
+        ],
+        "settings_reported": null
+      }
+    }
+  ],
+  "edge_commit": "8691ad0",
+  "generated_at_ms": 1793074998917
+}

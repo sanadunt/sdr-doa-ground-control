@@ -2,8 +2,10 @@
 
 ## Status
 
+> Usang sejak 3.0.0 (`CHANGELOG.md`): agent edge staging, klien MQTT stdlib, konfigurasi broker LAN dan contoh ACL yang dipakai rencana ini dihapus dari repository, dan topik lamanya (ditulis `<topik lama>`) tidak lagi dibaca console. RDF-SDR kini menjalankan RDF Node edge dari `sanadunt/rdf-indicator-raspberry`. Rencana ini disimpan sebagai histori dan tidak untuk dijalankan.
+
 ```text
-Status : PLAN ONLY / NOT EXECUTED
+Status : USANG / PLAN ONLY / NOT EXECUTED
 Target : Raspberry doasdr melalui LAN
 PPP    : tidak termasuk
 DoA    : disabled (--doa-rate 0)
@@ -43,7 +45,7 @@ Config : disabled (tanpa --enable-config)
 
    ```sh
    mosquitto_sub -h 192.168.100.173 -p 18885 --cafile /etc/mosquitto/certs/sdr-doa-lan-ca.crt \
-     -u sdr-doa-observer -t 'sdr/v1/uav-01/#' -v
+     -u sdr-doa-observer -t '<topik lama>/#' -v
    ```
 
    Password observer ditulis di `~/.config/mosquitto_sub` (satu opsi per baris, `-P <password>`, mode 0600), jadi tidak muncul di command line. Amati juga service SDR, port 8080/8081, dan file `_share`. `health.state` bernilai `ONLINE`, `STALE`, `DEGRADED`, atau `UNAVAILABLE` dengan kode di `health.reasons`; `doa_valid` tetap `false` karena DoA dinonaktifkan. Agent membaca Data Out sesuai jadwal health (sekitar 2 GET/s dengan `--health-interval 1` dan tanpa authority), dan satu koleksi dibatasi `--collect-budget`.

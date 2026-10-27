@@ -1,4 +1,4 @@
-> Arsip audit-006. Bagian 1–6 di bawah adalah teks laporan audit fungsional 2026-10-12 yang disalin utuh, termasuk nomor baris dan commit (`c474aa8`) yang dirujuknya. Bagian 7 ditambahkan 2026-10-13 dan mencatat status perbaikan per temuan.
+> Arsip audit-006. Bagian 1–6 di bawah adalah teks laporan audit fungsional 2026-10-12 yang disalin utuh, termasuk nomor baris dan commit (`c474aa8`) yang dirujuknya. Bagian 7 ditambahkan 2026-10-13 dan mencatat status perbaikan per temuan. Di 3.0.0 (`CHANGELOG.md`) string topik lama ditulis sebagai `<topik lama>`, dan monitor topik lama, agent edge staging, klien MQTT stdlib serta penerbit sintetis yang dirujuk beberapa temuan dihapus dari repository.
 
 # Laporan Audit Fungsional SDR-DoA Ground Console
 
@@ -569,7 +569,7 @@ Status verifikasi: semua 147 cluster dari putaran audit berstatus terkonfirmasi 
 - Lokasi: `frontend/src/pages/MessageMonitorPage.tsx:94`, `tools/sdr_doa_mqtt_monitor.py:336-341`, `tools/sdr_doa_mqtt_monitor.py:383`
 - Masalah: Backend menghitung `topic_counts` per topic lengkap, sedangkan UI mencarinya per kind (`topic_counts[kind]`). Kuncinya tidak pernah cocok.
 - Dampak: Hitungan per jenis pesan, tujuan utama panel Kind counters, tidak pernah tampil, sehingga operator tidak bisa melihat laju atau stream mana yang datang.
-- Bukti: Baris `doa | N/A | VALID …` sementara `/api/mqtt` berisi `{"sdr/v1/uav-01/telemetry/doa": 4, …}`.
+- Bukti: Baris `doa | N/A | VALID …` sementara `/api/mqtt` berisi `{"<topik lama>/telemetry/doa": 4, …}`.
 - Perbaikan: Ekspos `kind_counts` dari backend, atau agregasikan per `_kind_for_topic` sebelum dirender.
 
 #### AUD-46 — Tampilan record terdekode meredaksi flag `valid`/`doa_valid`/`settings_valid`, sementara baris menampilkan badge VALID hijau
@@ -613,7 +613,7 @@ Status verifikasi: semua 147 cluster dari putaran audit berstatus terkonfirmasi 
 - **medium** · MQTT monitor · terkonfirmasi · C020
 - Lokasi: `tools/ground_console.py:1904-1909`, `frontend/src/api.ts:252`, `frontend/src/pages/MessageMonitorPage.tsx:91`, `QUICKSTART.md:266-268`
 - Masalah: Backend subscribe ke filter `sdr/v2/uav-01/*` dan menyajikan `GET /api/mqtt/rdf-node`, tetapi tidak ada konsumen di `frontend/src`, `frontend/dist`, maupun legacy UI.
-- Dampak: Bila node memakai MQTT v2, operator melihat "CONNECTED", "RECEIVED 0", dan "No bounded subscriber events observed." sementara DoA, health, dan frame angular v2 yang valid sedang mengalir. Gate freshness, sesi, dan revisi v2 yang didokumentasikan tidak terlihat di mana pun.
+- Dampak: Bila node memakai kontrak RDF Node (root `sdr/v2`), operator melihat "CONNECTED", "RECEIVED 0", dan "No bounded subscriber events observed." sementara DoA, health, dan frame angular v2 yang valid sedang mengalir. Gate freshness, sesi, dan revisi v2 yang didokumentasikan tidak terlihat di mana pun.
 - Bukti: Publisher v2 lewat broker: UI `RECEIVED | 0`, sedangkan `fetch('/api/mqtt/rdf-node')` → `connection=ready`.
 - Perbaikan: Tambahkan panel v2 (normalizer dan type di `api.ts`/`types.ts`), atau perbaiki QUICKSTART agar menyatakan v2 hanya tersedia lewat API.
 

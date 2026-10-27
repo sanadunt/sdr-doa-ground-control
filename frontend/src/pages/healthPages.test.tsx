@@ -109,8 +109,11 @@ describe('System Health layout', () => {
     expect(page).toContain('RDF-SDR VALID');
     expect(page).toContain('Progress ADVANCING Frame index 351 Dropped frames 0 Sync flags frame delay IQ Noise source OFF GPS status Disabled');
     expect(page).toContain('124 ms / 4.0 s');
+    // A .local host found by the mDNS fallback names the address it led to (#12).
+    const mdns = { ...VALID, collection: { ...VALID.collection, host_resolution: { host: 'doasdr.local', method: 'mdns', address: '192.168.100.100' } } } as unknown as TelemetrySnapshot;
+    expect(text(render(<SystemHealthPage snapshot={mdns} mqtt={monitor} localSnapshotFresh />))).toContain('mDNS 192.168.100.100 · 124 ms / 4.0 s');
     expect(page).toContain('DoA views PRESENT View State Age at read CSV PRESENT 0.1 s XML PRESENT 0.1 s');
-    expect(page).toContain('MQTT monitor CONNECTED Broker 10.90.0.1:9001 Transport WS /mqtt Publish Admin config patch only');
+    expect(page).toContain('MQTT CONNECTED Broker 10.90.0.1:9001 Transport WS /mqtt Publish Admin config patch only');
     expect(page).toContain('Messages 1,204 Invalid 0');
     // No Detail column, notices, summary sentences or the old subsystem list on a healthy read.
     expect(page).not.toContain('Detail');
@@ -162,7 +165,7 @@ describe('System Health ADC overdrive detail', () => {
 describe('System Health MQTT card', () => {
   it('names the admin config patch as the only publish path', () => {
     const monitor = { enabled: true, read_only: true, publish_enabled: false, connection: 'connected' } as unknown as MqttSnapshot;
-    const patch = (enabled: boolean) => ({ refreshIntervalsS: null, adminEnabled: true, adminDefaultPassword: false, configPatch: { enabled, requiresAdmin: true, topic: null, qos: 1, ttlMs: null, ranges: {} } });
+    const patch = (enabled: boolean) => ({ refreshIntervalsS: null, adminEnabled: true, adminDefaultPassword: false, configPatch: { enabled, requiresAdmin: true, topic: null, getTopic: null, ackTopic: null, settingsTopic: null, qos: 1, ttlMs: null, ranges: {}, gainTableDb: [] } });
     for (const lang of ['en', 'id'] as const) {
       const available = text(render(<SystemHealthPage snapshot={REFUSED} mqtt={monitor} localSnapshotFresh={false} capabilities={patch(true)} />, lang));
       expect(available).toContain(translate(lang, 'health.sub.publishAdminOnly'));
@@ -213,6 +216,17 @@ describe('System Health shows why Data Out failed (AUD-27, AUD-101)', () => {
     expect(page).toMatch(/Resource Result Time \/status\.json HTTP 200/);
   });
 
+  // #13: settings.json was not read in this collection; the console reused it.
+  it('shows a reused settings.json as REUSED with its age', () => {
+    const reused = {
+      ...VALID,
+      resources: { ...OK_RESOURCES, '/settings.json': { ...OK_RESOURCES['/settings.json'], reused: true } },
+      collection: { elapsed_ms: 30, budget_ms: 4000, settings_reused: true, settings_age_ms: 12_000 },
+    } as unknown as TelemetrySnapshot;
+    expect(text(render(<SystemHealthPage snapshot={reused} mqtt={null} localSnapshotFresh />))).toMatch(/\/settings\.json REUSED 12\.0 s old/);
+    expect(text(render(<SystemHealthPage snapshot={reused} mqtt={null} localSnapshotFresh />, 'id'))).toMatch(/\/settings\.json REUSED umur 12\.0 dtk/);
+  });
+
   it('does not call unchanged counters advancing', () => {
     const unchanged = { ...MALFORMED, node_progress: { state: 'UNCHANGED', stalled: false, stalled_counters: [], changed_counters: [], unchanged_for_ms: { timestamp_ms: 4000, uptime_ms: 4000 }, regressed_counters: [], max_stall_ms: 10000, samples: 3 } } as unknown as TelemetrySnapshot;
     const markup = render(<SystemHealthPage snapshot={unchanged} mqtt={null} localSnapshotFresh={false} />);
@@ -260,7 +274,7 @@ describe('DoA Diagnostics', () => {
     expect(page).toContain('NOT CHECKED');
     expect(page).toContain('ADJACENT_FRAMES');
     expect(page).toContain('Node status counters stopped advancing');
-    expect(page).toContain('CSV vector peak does not match θ₀');
+    expect(page).toContain('Vector peak does not match θ₀');
     expect(page).toContain('ADC not overdriven');
     // Actionable reasons come before the standing clock reason.
     expect(page.indexOf('Node status counters stopped advancing')).toBeLessThan(page.indexOf('Ground and node clocks are not verified'));
@@ -325,6 +339,27 @@ describe('DoA Diagnostics layout', () => {
     expect(page).toContain('Native records EQUAL Field CSV XML');
     expect(page).toContain('Collector Authority NONE Angle readiness NOT CONFIGURED Native views FRESH / COMPARABLE Settings source REDACTED FIELDS local_snapshot_fresh true');
     expect(page).not.toMatch(/collector conversion|Contract mapping: |within freshness window/);
+  });
+});
+
+describe('pages over an MQTT answer (issue #8)', () => {
+  const mqttAnswer = (name: string) => JSON.parse(readSource(`../../../tools/fixtures/telemetry-source/${name}`)) as TelemetrySnapshot;
+
+  it('lists the MQTT parts on DoA Diagnostics instead of the CSV and XML records', () => {
+    const page = text(render(<DoADiagnosticsPage snapshot={mqttAnswer('mqtt-unverified.json')} localSnapshotFresh />));
+    expect(page).toContain('MQTT DoA');
+    expect(page).toContain('DoA↔Angular');
+    expect(page).toContain('Angle mode theta_mirror');
+    expect(page).toContain('DoA ok=0 UNVERIFIED 160.0° 433.9200 MHz');
+    expect(page).toContain('SOURCE_UNVERIFIED ANGLE_UNVERIFIED');
+    expect(page).not.toContain('Native records');
+    expect(text(render(<DoADiagnosticsPage snapshot={mqttAnswer('mqtt-live.json')} localSnapshotFresh />, 'id'))).toContain('DoA MQTT');
+  });
+
+  it('shows the one MQTT view on System Health', () => {
+    const page = text(render(<SystemHealthPage snapshot={mqttAnswer('mqtt-live.json')} mqtt={null} mqttError={null} localSnapshotFresh capabilities={null} />));
+    expect(page).toMatch(/MQTT PRESENT/);
+    expect(page).not.toMatch(/CSV MISSING/);
   });
 });
 

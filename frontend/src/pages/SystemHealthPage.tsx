@@ -4,6 +4,7 @@ import type { ConsoleCapabilities } from '../api';
 import { configPatchPublishable } from '../lib/configPatch';
 import { lastMessageAgeMs } from '../lib/mqttMonitor';
 import { candidate, formatNumber, numberOrNull, syncCount, toneFor } from '../lib/telemetry';
+import { isMqttSnapshot } from '../lib/telemetrySource';
 import { useI18n } from '../lib/i18n';
 import type { Translate } from '../lib/i18n';
 import {
@@ -74,12 +75,14 @@ function overdriveNotice(t: Translate, quality: SignalQualityView): string {
 }
 
 function resourceResult(t: Translate, row: ResourceRow): { label: string; tone: Tone } {
+  if (row.reused && row.ok === true) return { label: 'REUSED', tone: 'neutral' };
   if (row.ok === true) return { label: row.httpStatus === null ? 'OK' : `HTTP ${row.httpStatus}`, tone: 'good' };
   if (row.ok === false) return { label: t(errorKindKey(row.errorKind)), tone: row.errorKind === 'skipped' ? 'warn' : 'bad' };
   return { label: 'N/A', tone: 'neutral' };
 }
 
 function resourceTime(t: Translate, row: ResourceRow): string {
+  if (row.reused) return row.reusedAgeMs === null ? 'N/A' : t('health.res.age', { age: formatDuration(t, row.reusedAgeMs) });
   const time = row.elapsedMs === null ? null : formatDuration(t, row.elapsedMs);
   const retried = row.attempts !== null && row.attempts > 1;
   if (time !== null && retried) return t('health.res.attempts', { time, count: row.attempts ?? 0 });
@@ -118,11 +121,16 @@ function DataOutCard({ snapshot }: { snapshot: TelemetrySnapshot | null }): JSX.
   const timing = collection && collection.elapsedMs !== null
     ? `${formatDuration(t, collection.elapsedMs)}${collection.budgetMs !== null ? ` / ${formatDuration(t, collection.budgetMs)}` : ''}`
     : null;
+  // The address the host name led to; "mDNS" marks the fallback for a .local name.
+  const resolved = collection?.resolution
+    ? `${collection.resolution.method === 'mdns' ? 'mDNS ' : ''}${collection.resolution.address}`
+    : null;
+  const meta = [resolved, timing].filter(Boolean).join(' · ');
   return (
     <Card
       title="Data Out"
       chip={<StatusChip code={http.state} title={baseUrl ?? undefined} />}
-      actions={timing ? <span className="pg-card-meta">{timing}</span> : null}
+      actions={meta ? <span className="pg-card-meta">{meta}</span> : null}
       flush
     >
       {collection?.deadlineExceeded || collection?.statusTransportFailed ? (
@@ -138,7 +146,7 @@ function DataOutCard({ snapshot }: { snapshot: TelemetrySnapshot | null }): JSX.
   );
 }
 
-type ViewRow = { name: 'CSV' | 'XML'; item: Candidate };
+type ViewRow = { name: 'CSV' | 'XML' | 'MQTT'; item: Candidate };
 
 function viewState(item: Candidate): string {
   if (item.available !== true) return 'MISSING';
@@ -147,12 +155,15 @@ function viewState(item: Candidate): string {
 
 function DoaViewsCard({ snapshot }: { snapshot: TelemetrySnapshot | null }): JSX.Element {
   const { t } = useI18n();
-  const rows: ViewRow[] = [{ name: 'CSV', item: candidate(snapshot, 'csv') }, { name: 'XML', item: candidate(snapshot, 'xml') }];
+  // Data Out has a CSV and an XML view; an MQTT answer has its one view (issue #8).
+  const rows: ViewRow[] = isMqttSnapshot(snapshot)
+    ? [{ name: 'MQTT', item: candidate(snapshot, 'mqtt') }]
+    : [{ name: 'CSV', item: candidate(snapshot, 'csv') }, { name: 'XML', item: candidate(snapshot, 'xml') }];
   const present = rows.filter((row) => row.item.available === true).length;
   const state = !snapshot ? 'WAITING'
     : snapshot.native_consistency?.conflict ? 'CONFLICT'
       : present === 0 ? 'MISSING'
-        : present === 1 ? 'INCOMPLETE'
+        : present < rows.length ? 'INCOMPLETE'
           : rows.some((row) => candidateIssue(row.item).quarantined) ? 'INVALID' : 'PRESENT';
   const issues = rows.some((row) => {
     const issue = candidateIssue(row.item);

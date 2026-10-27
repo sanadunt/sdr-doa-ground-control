@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Linux release tarballs of the Ground Console and the RDF-SDR agent.
+"""Build the Linux release tarball of the Ground Console.
 
 Writes, in ``dist/release`` by default:
 
@@ -7,26 +7,27 @@ Writes, in ``dist/release`` by default:
   (``frontend/dist`` with the embedded Receiver), the console's runtime Python
   modules, the native installer, ``Dockerfile.release`` with its compose file,
   ``docker-compose.ghcr.yml``, the Docker host script
-  ``packaging/docker/sdr-doa-docker``, ``QUICKSTART.md`` and the user manual
-  PDF;
-* ``sdr-doa-rdf-sdr-agent-<VERSION>.tar.gz``: the edge agent's runtime
-  modules, its installer and systemd unit, and ``Dockerfile.agent``;
+  ``packaging/docker/sdr-doa-docker``, the groundstation's T900 link tools
+  ``packaging/ground-link`` (with their own installer), ``QUICKSTART.md`` and
+  the user manual PDF;
 * ``sdr-doa-docker``: the Docker host script on its own (install, update and
-  roll back the GHCR images), a release asset next to the tarballs;
-* ``SHA256SUMS`` for the three, in ``sha256sum -c`` format.
+  roll back the GHCR image), a release asset next to the tarball;
+* ``SHA256SUMS`` for the two, in ``sha256sum -c`` format.
 
-The runtime modules are the import closure of each entry point inside
-``tools/``, so tests, fixtures and staging tools never ship. Every tree also
-carries ``MANIFEST.sha256``, which the installers check. The archives are
+The Raspberry runs the RDF Node edge, which this repository does not ship.
+
+The runtime modules are the import closure of the console's entry point
+inside ``tools/``, so tests, fixtures and staging tools never ship. The tree
+also carries ``MANIFEST.sha256``, which the installer checks. The archives are
 deterministic: sorted entries, root owner, fixed modes, one mtime
 (``SOURCE_DATE_EPOCH``, else the last commit time) and a gzip header without
 a name or time.
 
 Without ``--skip-build`` the script runs ``npm ci`` and ``npm run build:all``
 in ``frontend/`` first, which needs Node.js and the ``vendor/BrowSDR``
-submodule. ``--stage-console`` and ``--stage-agent`` only copy the runtime
-tree into a directory; the Docker build and the installers use them when they
-run from a repository checkout.
+submodule. ``--stage-console`` only copies the runtime tree into a directory;
+the Docker build and the installer use it when they run from a repository
+checkout.
 """
 
 from __future__ import annotations
@@ -50,7 +51,6 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "dist" / "release"
 CONSOLE_ENTRY = "ground_console"
-AGENT_ENTRY = "sdr_doa_lan_agent"
 MANIFEST_NAME = "MANIFEST.sha256"
 CHECKSUMS_NAME = "SHA256SUMS"
 # The Docker host script: in the console tarball and a standalone asset.
@@ -66,6 +66,26 @@ _SKIP_NAMES = frozenset({"node_modules", "__pycache__", ".git", ".DS_Store"})
 _SKIP_SUFFIXES = (".pyc", ".pyo")
 
 # (published path, source path relative to the repository, executable)
+# Host tooling for the T900 PPP link of the groundstation: shipped in the
+# console release for its own installer, never in the console app tree or
+# image (the console has no control over the host).
+GROUND_LINK_DIR = "packaging/ground-link"
+GROUND_LINK_FILES = tuple(
+    (f"{GROUND_LINK_DIR}/{name}", f"{GROUND_LINK_DIR}/{name}", executable)
+    for name, executable in (
+        ("README.md", False),
+        ("install.sh", True),
+        ("uninstall.sh", True),
+        ("t900-ground-diag", True),
+        ("t900-ground-watchdog", True),
+        ("t900-link", True),
+        ("link.conf.example", False),
+        ("t900-ground-watchdog.service.in", False),
+        ("t900-ground-watchdog.timer", False),
+        ("t900-ground-usbreset.service.in", False),
+        ("50-t900-ground-link.rules.in", False),
+    )
+)
 CONSOLE_APP_FILES = (
     ("packaging/console/requirements.txt", "packaging/console/requirements.txt", False),
     ("packaging/console/set_admin_password.py", "packaging/console/set_admin_password.py", True),
@@ -87,19 +107,7 @@ CONSOLE_RELEASE_FILES = (
     (".env.example", ".env.example", False),
     ("QUICKSTART.md", "QUICKSTART.md", False),
     (MANUAL_PDF, MANUAL_PDF, False),
-)
-AGENT_APP_FILES = (
-    ("packaging/agent/run-agent.sh", "packaging/agent/run-agent.sh", True),
-)
-AGENT_RELEASE_FILES = (
-    ("install.sh", "packaging/agent/install-agent.sh", True),
-    ("README.md", "packaging/agent/README.md", False),
-    ("packaging/agent/uninstall-agent.sh", "packaging/agent/uninstall-agent.sh", True),
-    ("packaging/agent/sdr-doa-agent.service.in", "packaging/agent/sdr-doa-agent.service.in", False),
-    ("packaging/agent/agent.env.example", "packaging/agent/agent.env.example", False),
-    ("Dockerfile.agent", "Dockerfile.agent", False),
-    ("docker-compose.yml", "docker-compose.agent.yml", False),
-)
+) + GROUND_LINK_FILES
 # Inputs of a full build; a dirty copy would leak into frontend/dist.
 BUILD_INPUTS = (
     "frontend/index.html",
@@ -148,10 +156,6 @@ def read_version(root: Path = PROJECT_ROOT) -> str:
 
 def console_release_name(version: str) -> str:
     return f"sdr-doa-ground-console-{version}-linux"
-
-
-def agent_release_name(version: str) -> str:
-    return f"sdr-doa-rdf-sdr-agent-{version}"
 
 
 def _imported_names(path: Path) -> Set[str]:
@@ -250,13 +254,6 @@ def console_app_entries(root: Path, dist_dir: Path) -> List[Entry]:
     return entries
 
 
-def agent_app_entries(root: Path) -> List[Entry]:
-    entries = [Entry("VERSION", data=f"{read_version(root)}\n".encode())]
-    entries += _module_entries(root, AGENT_ENTRY)
-    entries += _file_entries(root, AGENT_APP_FILES)
-    return entries
-
-
 def console_release_entries(root: Path, dist_dir: Path, wheels: Sequence[Path] = ()) -> List[Entry]:
     entries = console_app_entries(root, dist_dir) + _file_entries(root, CONSOLE_RELEASE_FILES)
     license_path = root / BROWSDR_LICENSE
@@ -268,10 +265,6 @@ def console_release_entries(root: Path, dist_dir: Path, wheels: Sequence[Path] =
     entries.append(Entry("wheels", is_dir=True))
     entries += [Entry(f"wheels/{wheel.name}", source=wheel) for wheel in sorted(wheels)]
     return _with_manifest(entries)
-
-
-def agent_release_entries(root: Path) -> List[Entry]:
-    return _with_manifest(agent_app_entries(root) + _file_entries(root, AGENT_RELEASE_FILES))
 
 
 def _with_manifest(entries: List[Entry]) -> List[Entry]:
@@ -480,7 +473,7 @@ def build_release(
     with_wheels: bool = False,
     epoch: Optional[int] = None,
 ) -> List[Path]:
-    """Build both tarballs, the standalone Docker script and SHA256SUMS; returns their paths."""
+    """Build the console tarball, the standalone Docker script and SHA256SUMS; returns their paths."""
     root = root.resolve()
     version = read_version(root)
     dist = (dist_dir or root / "frontend" / "dist").resolve()
@@ -494,15 +487,12 @@ def build_release(
     with tempfile.TemporaryDirectory(prefix="sdr-doa-wheels-") as wheel_dir:
         wheels = download_wheels(root, Path(wheel_dir)) if with_wheels else []
         console = console_release_entries(root, dist, wheels)
-        agent = agent_release_entries(root)
         if not allow_dirty:
-            check_clean(root, _release_input_paths(root, console + agent, dist))
+            check_clean(root, _release_input_paths(root, console, dist))
         output_dir = output_dir.resolve()
         console_name = console_release_name(version)
-        agent_name = agent_release_name(version)
         assets = [
             write_tarball(console, console_name, output_dir / f"{console_name}.tar.gz", mtime),
-            write_tarball(agent, agent_name, output_dir / f"{agent_name}.tar.gz", mtime),
             write_asset(root / DOCKER_SCRIPT, output_dir / DOCKER_SCRIPT_ASSET, executable=True),
         ]
     checksums = write_checksums(assets, output_dir / CHECKSUMS_NAME)
@@ -510,16 +500,14 @@ def build_release(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Build the Ground Console and RDF-SDR agent release tarballs.")
+    parser = argparse.ArgumentParser(description="Build the Ground Console release tarball.")
     parser.add_argument("--skip-build", action="store_true", help="use the existing frontend/dist instead of npm ci + npm run build:all")
     parser.add_argument("--dist-dir", type=Path, help="prebuilt frontend dist to package (with --skip-build or --stage-console)")
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="where the tarballs go (default: dist/release)")
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="where the release assets go (default: dist/release)")
     parser.add_argument("--allow-dirty", action="store_true", help="skip the clean-tree check of the release inputs")
     parser.add_argument("--with-wheels", action="store_true", help="bundle the pure-Python wheels of requirements.txt for offline installs")
     parser.add_argument("--source-date-epoch", type=int, help="mtime of every archive entry (default: SOURCE_DATE_EPOCH or the last commit)")
-    stage = parser.add_mutually_exclusive_group()
-    stage.add_argument("--stage-console", type=Path, metavar="DIR", help="only copy the console runtime tree into DIR")
-    stage.add_argument("--stage-agent", type=Path, metavar="DIR", help="only copy the agent runtime tree into DIR")
+    parser.add_argument("--stage-console", type=Path, metavar="DIR", help="only copy the console runtime tree into DIR")
     return parser
 
 
@@ -530,10 +518,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             dist = (args.dist_dir or PROJECT_ROOT / "frontend" / "dist").resolve()
             path = stage_tree(console_app_entries(PROJECT_ROOT, dist), args.stage_console)
             print(f"Console runtime staged in {path}", flush=True)
-            return 0
-        if args.stage_agent is not None:
-            path = stage_tree(agent_app_entries(PROJECT_ROOT), args.stage_agent)
-            print(f"Agent runtime staged in {path}", flush=True)
             return 0
         outputs = build_release(
             PROJECT_ROOT,

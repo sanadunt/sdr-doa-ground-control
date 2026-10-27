@@ -1,4 +1,4 @@
-"""Tests for the single MQTT client that observes v1 and RDF Node v2."""
+"""Tests for the console's one MQTT client: the RDF Node topics, its status and Kontrol's publish."""
 from __future__ import annotations
 
 import http.client
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from tools import sdr_doa_mqtt as contract
+from tools import rdf_node_commands as commands
 from tools.rdf_node_mqtt_v2 import RDF_NODE_V2_SUFFIXES
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -161,7 +161,6 @@ def load_monitor(paho: types.ModuleType) -> types.ModuleType:
         "paho.mqtt.client": client_module,
         "paho.mqtt.packettypes": mqtt.packettypes,
         "paho.mqtt.properties": mqtt.properties,
-        "sdr_doa_mqtt": contract,
     }):
         module = importlib.import_module("tools.sdr_doa_mqtt_monitor")
         return importlib.reload(module)
@@ -206,7 +205,7 @@ class SharedMqttMonitorTests(unittest.TestCase):
         answers = codes if codes is not None else successful_codes(count)
         self.client.on_subscribe(self.client, None, self.client.mid, answers, None)
 
-    def test_one_websocket_client_subscribes_to_v1_and_default_v2_prefix(self) -> None:
+    def test_one_websocket_client_subscribes_to_the_rdf_node_topics_only(self) -> None:
         self.client = self._start()
         self.client.on_connect(self.client, None, {}, types.SimpleNamespace(value=0, is_failure=False), None)
 
@@ -217,70 +216,54 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self.assertEqual(self.client.kwargs.get("protocol"), 5)
         self.assertEqual(self.client.kwargs.get("transport"), "websockets")
         self.assertIn(("ws_set_options", (), {"path": "/mqtt"}), self.client.calls)
-        v2_filters = {f"sdr/v2/{NODE}/{suffix}" for suffix in RDF_NODE_V2_SUFFIXES}
-        v1_filter = f"{contract.TOPIC_ROOT}/#"
-        expected = {v1_filter, *v2_filters}
-        self.assertEqual({topic for topic, _options in self.client.subscriptions}, expected)
-        self.assertEqual(len(self.client.subscriptions), len(expected))
+        expected = [f"sdr/v2/{NODE}/{suffix}" for suffix in RDF_NODE_V2_SUFFIXES]
+        self.assertEqual([topic for topic, _options in self.client.subscriptions], expected)
         for topic, options in self.client.subscriptions:
             self.assertEqual(options.qos, 1)
-            # v1 retain marks a broker replay; v2 needs the publisher's flag.
-            self.assertIs(options.retainAsPublished, topic in v2_filters)
+            # The contract's validation needs the publisher's retain flag.
+            self.assertIs(options.retainAsPublished, True)
             self.assertEqual(options.retainHandling, 0)
+            self.assertNotIn("#", topic)
         self.assertEqual(self.monitor.rdf_node_snapshot()["connection"], "connecting")
+        self.assertEqual(self.monitor.snapshot()["connection"], "connecting")
 
         self.acknowledge()
         self.assertEqual(self.monitor.rdf_node_snapshot()["connection"], "ready")
+        self.assertEqual(self.monitor.snapshot()["connection"], "connected")
 
-    def test_v1_and_v2_messages_use_only_their_schema_specific_snapshots(self) -> None:
+    def test_status_counts_the_rdf_node_topics_and_nothing_else(self) -> None:
         self.client = self._start()
         self.client.on_connect(self.client, None, {}, types.SimpleNamespace(value=0, is_failure=False), None)
         self.acknowledge()
-        now_ms = int(time.time() * 1000)
-        v1_health = contract.build_health(
-            ts_ms=now_ms, state="PASS", daq_ok=True, dropped_frames=0,
-            gps_status="Disabled", doa_valid=False, doa_age_ms=None,
-            frame_sync=True, sample_delay_sync=True, iq_sync=True,
-        )
-        self.client.on_message(
-            self.client, None,
-            message(contract.TOPICS["health"], contract.compact_json(v1_health).encode("utf-8"), 0, False),
-        )
-        v2_availability = json.dumps({
-            "v": 2, "sid": "7a8b9c0d", "online": True, "t": now_ms,
-        }).encode("utf-8")
-        self.client.on_message(
-            self.client, None,
-            message(f"sdr/v2/{NODE}/availability", v2_availability, 1, True),
-        )
+        clock = [1_700_000_000_000]
+        availability = json.dumps({"v": 2, "sid": "7a8b9c0d", "online": True, "t": clock[0]}).encode("utf-8")
+        with patch.object(self.module, "_now_ms", lambda: clock[0]):
+            self.client.on_message(self.client, None, message(f"sdr/v2/{NODE}/availability", availability, 1, True))
+            # A topic outside the subscribed node topics is neither counted nor stored.
+            for topic in ("sdr/legacy/uav-01/telemetry/health", f"sdr/v2/{NODE}/config/reported",
+                          f"sdr/v2/{NODE}/cmd/config/patch", "sdr/v2/uav-02/availability"):
+                self.client.on_message(self.client, None, message(topic, availability, 1, False))
+            clock[0] += 1_500
+            self.client.on_message(self.client, None, message(
+                f"sdr/v2/{NODE}/availability", b'{"v":1,"sid":"7a8b9c0d","online":true,"t":1}', 1, True,
+            ))
+            clock[0] += 2_000
+            status = self.monitor.snapshot()
+            rdf = self.monitor.rdf_node_snapshot()
 
-        v1_snapshot = self.monitor.snapshot()
-        v2_snapshot = self.monitor.rdf_node_snapshot()
-        self.assertEqual((v1_snapshot["received"], v1_snapshot["valid"], v1_snapshot["invalid"]), (1, 1, 0))
-        self.assertEqual((v2_snapshot["received"], v2_snapshot["valid"], v2_snapshot["invalid"]), (1, 1, 0))
-        self.assertEqual(v2_snapshot["topics"]["availability"]["status"], "CONTEXT")
-        self.assertEqual(v2_snapshot["topic_counts"]["availability"], 1)
-
-        self.client.on_message(
-            self.client, None,
-            message(contract.TOPICS["health"], b'{"v":2}', 0, False),
+        self.assertEqual((status["received"], status["valid"], status["invalid"], status["cleared"]), (2, 1, 1, 0))
+        self.assertEqual(
+            {key: status[key] for key in ("received", "valid", "invalid", "cleared", "last_received_at_ms")},
+            {key: rdf[key] for key in ("received", "valid", "invalid", "cleared", "last_received_at_ms")},
         )
-        self.client.on_message(
-            self.client, None,
-            message(
-                f"sdr/v2/{NODE}/availability",
-                b'{"v":1,"sid":"7a8b9c0d","online":true,"t":1}',
-                1,
-                True,
-            ),
-        )
-
-        v1_snapshot = self.monitor.snapshot()
-        v2_snapshot = self.monitor.rdf_node_snapshot()
-        self.assertEqual((v1_snapshot["received"], v1_snapshot["valid"], v1_snapshot["invalid"]), (2, 1, 1))
-        self.assertEqual((v2_snapshot["received"], v2_snapshot["valid"], v2_snapshot["invalid"]), (2, 1, 1))
-        self.assertEqual(v2_snapshot["topics"]["availability"]["status"], "INVALID")
-        self.assertEqual(v2_snapshot["topic_counts"]["availability"], 2)
+        self.assertEqual((status["last_received_at_ms"], status["last_age_ms"]), (clock[0] - 2_000, 2_000))
+        self.assertEqual((status["node_id"], status["root"]), (NODE, f"sdr/v2/{NODE}"))
+        self.assertEqual((status["read_only"], status["publish_enabled"]), (True, False))
+        self.assertEqual(rdf["topics"]["availability"]["status"], "INVALID")
+        self.assertEqual(rdf["topic_counts"]["availability"], 2)
+        # The status holds no per-topic or per-message detail; that is rdf_node_snapshot's.
+        for key in ("last_by_kind", "kind_counts", "topic_counts", "last_topic", "total_bytes", "last_latency_ms"):
+            self.assertNotIn(key, status)
         self.assertEqual(self.client.publish_calls, [])
 
     def test_client_construction_failure_surfaces_shared_connection_error(self) -> None:
@@ -322,24 +305,6 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self.client.on_connect(self.client, None, {}, types.SimpleNamespace(value=0, is_failure=False), None)
         self.acknowledge()
 
-    def _send(self, kind: str, payload: object, *, retained: bool = False, qos: int = 0) -> None:
-        raw = payload if isinstance(payload, bytes) else contract.compact_json(payload).encode("utf-8")
-        self.client.on_message(self.client, None, message(contract.TOPICS[kind], raw, qos, retained))
-
-    @staticmethod
-    def _doa(ts_ms: int, *, valid: bool = True) -> dict:
-        return contract.build_doa(
-            seq=1, ts_ms=ts_ms, relative_doa_deg=137.4, confidence=0.9,
-            power_db=-54.2, frequency_hz=433_920_000, processing_ms=12, valid=valid,
-        )
-
-    @staticmethod
-    def _health(ts_ms: int, *, doa_valid: bool = True) -> dict:
-        return contract.build_health(
-            ts_ms=ts_ms, state="PASS", daq_ok=True, dropped_frames=0,
-            gps_status="Disabled", doa_valid=doa_valid, doa_age_ms=None,
-        )
-
     def test_each_monitor_uses_a_unique_bounded_client_id(self) -> None:
         other = self.module.MqttMonitor("10.90.0.1", 9001)
         self.monitor.start()
@@ -365,138 +330,6 @@ class SharedMqttMonitorTests(unittest.TestCase):
         tcp = self.module.MqttMonitor("127.0.0.1", 1883, transport="tcp").snapshot()
         self.assertEqual(tcp["transport"], "tcp")
 
-    def test_kind_counts_are_keyed_by_kind(self) -> None:
-        self._connected()
-        now_ms = int(time.time() * 1000)
-        self._send("doa", self._doa(now_ms))
-        self._send("doa", self._doa(now_ms))
-        self._send("health", self._health(now_ms))
-        self.client.on_message(
-            self.client, None, message(f"{contract.TOPIC_ROOT}/telemetry/angular", b"x", 0, False),
-        )
-        snapshot = self.monitor.snapshot()
-        self.assertEqual(snapshot["kind_counts"], {"doa": 2, "health": 1, "unknown": 1})
-        self.assertEqual(set(snapshot["kind_counts"]), set(snapshot["last_by_kind"]))
-        self.assertEqual(snapshot["topic_counts"][contract.TOPICS["doa"]], 2)
-
-    def test_each_kind_reports_its_own_age(self) -> None:
-        self._connected()
-        clock = [1_700_000_000_000]
-        with patch.object(self.module, "_now_ms", lambda: clock[0]):
-            self._send("doa", self._doa(clock[0]))
-            for _ in range(600):
-                clock[0] += 1000
-                self._send("health", self._health(clock[0]))
-            snapshot = self.monitor.snapshot()
-        self.assertEqual(snapshot["now_ms"], clock[0])
-        self.assertEqual(snapshot["last_age_ms"], 0)
-        doa = snapshot["last_by_kind"]["doa"]
-        self.assertEqual(doa["age_ms"], 600_000)
-        self.assertEqual(doa["source_ts_ms"], clock[0] - 600_000)
-        self.assertEqual(snapshot["last_by_kind"]["health"]["age_ms"], 0)
-        self.assertNotIn("age_ms", self.monitor._last_by_kind["doa"])
-
-    def test_retained_replay_reports_age_not_latency(self) -> None:
-        self._connected()
-        clock = [1_700_000_000_000]
-        state = contract.build_state(
-            ts_ms=clock[0] - 7_200_000, config_rev=3, running=True, frequency_hz=433_920_000,
-            gain_db=10.0, array="UCA", method="MUSIC", active_vfos=1,
-        )
-        with patch.object(self.module, "_now_ms", lambda: clock[0]):
-            self._send("doa", self._doa(clock[0] - 25))
-            self._send("state", state, retained=True, qos=1)
-            snapshot = self.monitor.snapshot()
-            replay = snapshot["last_by_kind"]["state"]
-            self.assertIs(replay["retained"], True)
-            self.assertIsNone(replay["latency_ms"])
-            self.assertEqual(clock[0] - replay["source_ts_ms"], 7_200_000)
-            self.assertEqual(snapshot["last_latency_ms"], 25)
-
-            clock[0] += 1000
-            self._send("state", {**state, "ts_ms": clock[0] - 40}, retained=False, qos=1)
-            snapshot = self.monitor.snapshot()
-        self.assertEqual(snapshot["last_by_kind"]["state"]["latency_ms"], 40)
-        self.assertEqual(snapshot["last_latency_ms"], 40)
-
-    def test_config_ack_is_decoded_against_the_contract(self) -> None:
-        self._connected()
-        now_ms = int(time.time() * 1000)
-        self._send("ack_config", b"not json at all")
-        entry = self.monitor.snapshot()["last_by_kind"]["ack_config"]
-        self.assertIs(entry["valid"], False)
-        self.assertIn("invalid JSON", entry["error"])
-
-        ack = contract.build_config_ack(
-            command_id="cmd-1", status="rejected", ts_ms=now_ms, config_rev=7,
-            readback_ok=False, error={"code": "CONFIG_CONFLICT", "current_config_rev": 8},
-        )
-        self._send("ack_config", ack, qos=1)
-        snapshot = self.monitor.snapshot()
-        entry = snapshot["last_by_kind"]["ack_config"]
-        self.assertIs(entry["valid"], True)
-        self.assertEqual(entry["payload"]["status"], "rejected")
-        self.assertEqual(entry["payload"]["error"]["code"], ack["error"]["code"])
-        self.assertEqual(entry["payload"]["config_rev"], 7)
-        self.assertEqual((snapshot["valid"], snapshot["invalid"]), (1, 1))
-
-    def test_payload_validity_flags_are_reported_beside_contract_validity(self) -> None:
-        self._connected()
-        now_ms = int(time.time() * 1000)
-        self._send("doa", self._doa(now_ms, valid=False))
-        self._send("health", {**self._health(now_ms, doa_valid=False), "settings_valid": True})
-        snapshot = self.monitor.snapshot()
-        doa = snapshot["last_by_kind"]["doa"]
-        self.assertIs(doa["valid"], True)
-        self.assertEqual(doa["validity_flags"], {"valid": False})
-        health = snapshot["last_by_kind"]["health"]
-        self.assertEqual(health["validity_flags"], {"doa_valid": False, "settings_valid": True})
-        self._send("doa", b"{}")
-        self.assertNotIn("validity_flags", self.monitor.snapshot()["last_by_kind"]["doa"])
-
-    def test_retained_clear_is_counted_as_cleared_not_invalid(self) -> None:
-        self._connected()
-        now_ms = int(time.time() * 1000)
-        state = contract.build_state(
-            ts_ms=now_ms, config_rev=3, running=True, frequency_hz=433_920_000,
-            gain_db=10.0, array="UCA", method="MUSIC", active_vfos=1, source="synthetic",
-        )
-        self._send("state", state, retained=True, qos=1)
-        self._send("state", b"", qos=1)
-        self._send("config_reported", b"", qos=1)
-        snapshot = self.monitor.snapshot()
-        self.assertEqual(
-            (snapshot["received"], snapshot["valid"], snapshot["invalid"], snapshot["cleared"]),
-            (3, 1, 0, 2),
-        )
-        entry = snapshot["last_by_kind"]["state"]
-        self.assertIs(entry["cleared"], True)
-        self.assertIs(entry["valid"], False)
-        self.assertNotIn("payload", entry)
-        self.assertNotIn("source", entry)
-        self.assertNotIn("error", entry)
-        self.assertEqual((entry["bytes"], entry["latency_ms"], entry["source_ts_ms"]), (0, None, None))
-        self.assertEqual(snapshot["kind_counts"], {"state": 2, "config_reported": 1})
-
-    def test_empty_publish_on_a_non_retained_topic_is_invalid_not_cleared(self) -> None:
-        self._connected()
-        self._send("doa", b"")
-        self._send("health", b"")
-        self._send("ack_config", b"", qos=1)
-        self._send("availability", b"", qos=1)
-        snapshot = self.monitor.snapshot()
-        self.assertEqual(
-            (snapshot["received"], snapshot["valid"], snapshot["invalid"], snapshot["cleared"]),
-            (4, 0, 3, 1),
-        )
-        doa = snapshot["last_by_kind"]["doa"]
-        self.assertNotIn("cleared", doa)
-        self.assertIs(doa["valid"], False)
-        self.assertEqual(doa["error"], "empty payload")
-        self.assertEqual((doa["bytes"], doa["latency_ms"], doa["source_ts_ms"]), (0, None, None))
-        self.assertEqual(snapshot["last_by_kind"]["ack_config"]["error"], "empty payload")
-        self.assertIs(snapshot["last_by_kind"]["availability"]["cleared"], True)
-
     def test_v2_retained_clear_clears_the_topic_without_counting_invalid(self) -> None:
         self._connected()
         topic = f"sdr/v2/{NODE}/availability"
@@ -511,143 +344,185 @@ class SharedMqttMonitorTests(unittest.TestCase):
         )
         entry = snapshot["topics"]["availability"]
         self.assertEqual((entry["status"], entry["error"], entry["payload"]), ("UNAVAILABLE", "RETAINED_CLEARED", None))
-        self.assertEqual(self.monitor.snapshot()["received"], 0)
+        status = self.monitor.snapshot()
+        self.assertEqual((status["received"], status["valid"], status["invalid"], status["cleared"]), (2, 1, 0, 1))
 
-    def test_source_marker_and_health_reasons_are_reported(self) -> None:
+    def test_edge_payloads_reach_the_rdf_node_view_through_the_shared_connection(self) -> None:
+        fixtures = TOOLS_DIR / "fixtures" / "rdf-node"
+        manifest = json.loads((fixtures / "manifest.json").read_text(encoding="utf-8"))
+        by_file = {entry["file"]: entry for entry in manifest["fixtures"]}
         self._connected()
-        now_ms = int(time.time() * 1000)
-        doa = contract.build_doa(
-            seq=1, ts_ms=now_ms, relative_doa_deg=137.4, confidence=0.9, power_db=-54.2,
-            frequency_hz=433_920_000, processing_ms=12, valid=True, source="synthetic",
-        )
-        self._send("doa", doa)
-        health = contract.build_health(
-            ts_ms=now_ms, state="STALE", daq_ok=True, dropped_frames=0, gps_status="Disabled",
-            doa_valid=False, doa_age_ms=None, reasons=["STATUS_STALE", "NODE_CLOCK_STALLED"],
-        )
-        self._send("health", health)
-        last = self.monitor.snapshot()["last_by_kind"]
-        self.assertEqual(last["doa"]["source"], "synthetic")
-        self.assertNotIn("source", last["health"])
-        self.assertEqual(last["health"]["payload"]["reasons"], ["STATUS_STALE", "NODE_CLOCK_STALLED"])
-        self.assertEqual(last["health"]["payload"]["state"], "STALE")
+        # state is the first filter, so its retained value comes first.
+        self.assertEqual(self.client.subscriptions[0][0], f"sdr/v2/{NODE}/state")
+        clock = [manifest["generated_at_ms"]]
 
-    def test_availability_is_decoded_and_its_will_time_is_not_latency(self) -> None:
-        self._connected()
-        clock = [1_700_000_000_000]
+        def deliver(name: str) -> None:
+            entry = by_file[name]
+            self.client.on_message(self.client, None, message(
+                f"sdr/v2/{NODE}/{entry['topic']}", (fixtures / name).read_bytes(), entry["qos"], entry["retain"],
+            ))
+
         with patch.object(self.module, "_now_ms", lambda: clock[0]):
-            self._send("doa", self._doa(clock[0] - 30))
-            will = contract.build_availability(
-                ts_ms=clock[0] - 3_600_000, online=False, reason="CONNECTION_LOST",
-            )
-            self._send("availability", will, qos=1)
-            snapshot = self.monitor.snapshot()
-        entry = snapshot["last_by_kind"]["availability"]
-        self.assertIs(entry["valid"], True)
-        self.assertEqual(entry["payload"]["online"], False)
-        self.assertEqual(entry["payload"]["reason"], "CONNECTION_LOST")
-        self.assertIsNone(entry["latency_ms"])
-        self.assertEqual(snapshot["last_latency_ms"], 30)
-        self.assertEqual(snapshot["kind_counts"]["availability"], 1)
-        self._send("availability", b'{"v":1,"ts_ms":1}', qos=1)
-        self.assertIs(self.monitor.snapshot()["last_by_kind"]["availability"]["valid"], False)
+            for name in ("state.json", "capabilities.json", "telemetry-health.json", "telemetry-doa.ok1.json",
+                         "telemetry-angular.live.json", "ack-config.config-get-applied.json"):
+                deliver(name)
+            report = json.loads((fixtures / "settings-reported.json").read_bytes())
+            deliver("settings-reported.json")
+            self.assertIsNone(self.monitor.rdf_node_settings_report())
+            self.monitor.expect_rdf_node_settings_report(report["id"])
+            deliver("settings-reported.json")
+            snapshot = self.monitor.rdf_node_snapshot()
+            session = self.monitor.rdf_node_session()
+            saved = self.monitor.rdf_node_settings_report()
+            ack = self.monitor.rdf_node_ack(report["id"])
+        self.assertEqual(snapshot["connection"], "ready")
+        self.assertEqual(snapshot["invalid"], 0)
+        self.assertEqual(snapshot["topics"]["telemetry/doa"]["status"], "LIVE")
+        self.assertEqual(snapshot["topics"]["telemetry/angular"]["status"], "LIVE")
+        self.assertTrue(snapshot["node"]["angular"]["live"])
+        self.assertEqual(snapshot["topics"]["settings/reported"]["status"], "FRESH")
+        self.assertEqual((session["sid"], session["cfg"], session["health_fresh"]), (report["sid"], report["rev"], True))
+        self.assertEqual(saved["settings_json"], report["settings_json"])
+        self.assertEqual((saved["matches_state_cfg"], saved["safe_settings"]["center_frequency_hz"]), (True, 433920000))
+        self.assertEqual((ack["status"], ack["topic"]), ("APPLIED", "ack/config"))
+        self.assertEqual(self.client.publish_calls, [])
 
     def test_rdf_node_snapshot_reports_server_time(self) -> None:
         clock = [1_700_000_000_000]
         with patch.object(self.module, "_now_ms", lambda: clock[0]):
             self.assertEqual(self.monitor.rdf_node_snapshot()["now_ms"], clock[0])
 
-    # -- config-patch publish path ------------------------------------------
+    def test_rdf_node_view_feeds_the_telemetry_source(self) -> None:
+        # Issue #8: the Dashboard's source reads the node view with the LIVE
+        # Angular values, and nothing while the monitor is stopped.
+        self.assertIsNone(self.monitor.rdf_node_view())
+        fixtures = TOOLS_DIR / "fixtures" / "rdf-node"
+        manifest = json.loads((fixtures / "manifest.json").read_text(encoding="utf-8"))
+        by_file = {entry["file"]: entry for entry in manifest["fixtures"]}
+        self._connected()
+        with patch.object(self.module, "_now_ms", lambda: manifest["generated_at_ms"]):
+            for name in ("state.json", "telemetry-health.json", "telemetry-doa.ok1.json", "telemetry-angular.live.json"):
+                entry = by_file[name]
+                self.client.on_message(self.client, None, message(
+                    f"sdr/v2/{NODE}/{entry['topic']}", (fixtures / name).read_bytes(), entry["qos"], entry["retain"],
+                ))
+            view = self.monitor.rdf_node_view()
+        self.assertEqual((view["connection"], view["node_id"], view["now_ms"]), ("ready", NODE, manifest["generated_at_ms"]))
+        self.assertTrue(view["node"]["health"]["fresh"])
+        self.assertTrue(view["node"]["doa"]["live"])
+        self.assertEqual(len(view["node"]["angular"]["values"]), 360)
+        self.monitor.stop()
+        self.assertIsNone(self.monitor.rdf_node_view())
 
-    @staticmethod
-    def _patch_command(command_id: str = "gc-test-1", *, base: int = 7, ttl_ms: int = 60_000) -> dict:
-        issued = int(time.time() * 1000)
-        return contract.build_config_patch(
-            command_id=command_id,
-            base_config_rev=base,
-            changes={"center_frequency_hz": 433_920_000, "gain_db": 24.5},
-            issued_ts_ms=issued,
-            expires_ts_ms=issued + ttl_ms,
+    # -- Kontrol command publish path ----------------------------------------
+
+    COMMANDS = json.loads((TOOLS_DIR / "fixtures" / "rdf-node" / "commands.json").read_text(encoding="utf-8"))
+
+    def _rdf(self, suffix: str, payload: object, *, qos: int = 1, retained: bool = False) -> None:
+        raw = payload if isinstance(payload, bytes) else json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        self.client.on_message(self.client, None, message(f"sdr/v2/{NODE}/{suffix}", raw, qos, retained))
+
+    def _node_state(self) -> dict:
+        state = json.loads(self.COMMANDS["session"]["state"])
+        self._rdf("state", self.COMMANDS["session"]["state"].encode("utf-8"), retained=True)
+        return state
+
+    def _command(self, command_id: str = "gc-test-1", *, op: str = "config.patch", changes: dict | None = None,
+                 ttl_ms: int = 15_000) -> dict:
+        state = json.loads(self.COMMANDS["session"]["state"])
+        return commands.build_command(
+            op, command_id=command_id, sid=state["sid"], boot=state["boot"], base_rev=state["cfg"],
+            issued_ms=int(time.time() * 1000), ttl_ms=ttl_ms,
+            changes=commands.validate_patch_changes(changes or {"gain_db": 20.7}) if op == "config.patch" else None,
         )
 
-    @staticmethod
-    def _ack(command_id: str, status: str, *, config_rev: int, error: dict | None = None) -> dict:
-        return contract.build_config_ack(
-            command_id=command_id,
-            status=status,
-            ts_ms=int(time.time() * 1000),
-            config_rev=config_rev,
-            readback_ok=status == "applied",
-            error=error,
-            changed_fields=["center_frequency_hz"] if status == "applied" else None,
-        )
+    def _edge_ack(self, command_id: str, status: str, result: dict | None = None) -> dict:
+        state = json.loads(self.COMMANDS["session"]["state"])
+        return {"v": 2, "sid": state["sid"], "id": command_id, "status": status, "t": int(time.time() * 1000),
+                "rev": state["cfg"], "result": result or {}}
 
-    def test_publish_config_patch_publishes_once_at_qos1_without_retain(self) -> None:
+    def test_publish_rdf_node_command_publishes_once_at_qos1_without_retain(self) -> None:
         self._connected()
         self.assertEqual(self.client.on_publish, self.monitor._on_publish)
-        command = self._patch_command()
-        result = self.monitor.publish_config_patch(command)
+        command = self._command()
+        result = self.monitor.publish_rdf_node_command(command)
 
         self.assertEqual(len(self.client.publish_calls), 1)
         (topic, raw), options = self.client.publish_calls[0]
-        self.assertEqual(topic, contract.TOPICS["config_patch"])
-        self.assertEqual(json.loads(raw.decode("utf-8")), command)
-        contract.validate_config_patch(json.loads(raw.decode("utf-8")))
+        self.assertEqual(topic, f"sdr/v2/{NODE}/cmd/config/patch")
+        self.assertEqual(raw, commands.encode_command(command))
         self.assertEqual(options["qos"], 1)
         self.assertIs(options["retain"], False)
-        # The broker drops the command after its TTL even if paho replays it.
-        self.assertEqual(options["properties"].MessageExpiryInterval, 60)
+        # The broker drops the command after its lifetime even if paho replays it.
+        self.assertEqual(options["properties"].MessageExpiryInterval, 15)
         # The fake returns None like a paho without MQTTMessageInfo: rc 0, no mid.
-        self.assertEqual((result["rc"], result["mid"]), (0, None))
-        self.assertEqual(result["topic"], contract.TOPICS["config_patch"])
-        observation = self.monitor.config_command_observation(command["id"])
-        self.assertIs(observation["published"], True)
-        self.assertIsNone(observation["puback"])
+        self.assertEqual((result["rc"], result["mid"], result["topic"]), (0, None, topic))
+        observation = self.monitor.rdf_node_command_observation(command["id"])
+        self.assertEqual(observation, {
+            "published": True, "adopted": False, "puback": None, "progress": None, "final": None, "reported_at_ms": None,
+        })
         # The Message Monitor snapshot keeps saying the monitor never publishes on its own.
         snapshot = self.monitor.snapshot()
         self.assertIs(snapshot["read_only"], True)
         self.assertIs(snapshot["publish_enabled"], False)
 
         with self.assertRaises(Exception) as repeated:
-            self.monitor.publish_config_patch(command)
+            self.monitor.publish_rdf_node_command(command)
         self.assertEqual(getattr(repeated.exception, "code", None), "MQTT_PUBLISH_FAILED")
-        self.assertEqual(len(self.client.publish_calls), 1)
+        self.monitor.publish_rdf_node_command(self._command("gc-get-1", op="config.get"))
+        self.assertEqual(self.client.publish_calls[1][0][0], f"sdr/v2/{NODE}/cmd/config/get")
+        self.assertEqual(len(self.client.publish_calls), 2)
 
-    def test_publish_config_patch_requires_a_ready_connection(self) -> None:
-        command = self._patch_command()
+    def test_publish_refuses_a_command_the_edge_would_refuse(self) -> None:
+        self._connected()
+        good = self._command()
+        for bad in (
+            dict(good, expires_ms=good["issued_ms"] + 30_001),
+            dict(good, sid=None),
+            dict(good, base_rev=None),
+            dict(good, changes={"center_frequency_hz": 434_000_000}),
+            dict(good, op="stream.set"),
+            dict(good, extra=1),
+        ):
+            with self.subTest(command=bad), self.assertRaises(Exception) as raised:
+                self.monitor.publish_rdf_node_command(bad)
+            self.assertEqual(getattr(raised.exception, "code", None), "MQTT_PUBLISH_FAILED")
+        self.assertEqual(self.client.publish_calls, [])
+
+    def test_publish_requires_a_ready_connection(self) -> None:
+        command = self._command()
         with self.assertRaises(Exception) as before_start:
-            self.monitor.publish_config_patch(command)
+            self.monitor.publish_rdf_node_command(command)
         self.assertEqual(getattr(before_start.exception, "code", None), "MQTT_NOT_CONNECTED")
 
         self.client = self._start()
         self.client.on_connect(self.client, None, {}, types.SimpleNamespace(value=0, is_failure=False), None)
         with self.assertRaises(Exception) as before_suback:
-            self.monitor.publish_config_patch(command)
+            self.monitor.publish_rdf_node_command(command)
         self.assertEqual(getattr(before_suback.exception, "code", None), "MQTT_NOT_CONNECTED")
 
         self.acknowledge()
         self.client.on_disconnect(self.client, None, None, types.SimpleNamespace(value=0), None)
         with self.assertRaises(Exception) as after_disconnect:
-            self.monitor.publish_config_patch(command)
+            self.monitor.publish_rdf_node_command(command)
         self.assertEqual(getattr(after_disconnect.exception, "code", None), "MQTT_NOT_CONNECTED")
         self.assertEqual(self.client.publish_calls, [])
 
     def test_puback_is_correlated_even_when_it_beats_the_publish_return(self) -> None:
         self._connected()
         self.client.publish_rc = 0
-        first = self._patch_command("gc-first")
-        result = self.monitor.publish_config_patch(first)
+        result = self.monitor.publish_rdf_node_command(self._command("gc-first"))
         self.assertIsInstance(result["mid"], int)
-        self.assertIsNone(self.monitor.config_command_observation("gc-first")["puback"])
+        self.assertIsNone(self.monitor.rdf_node_command_observation("gc-first")["puback"])
         self.client.on_publish(self.client, None, result["mid"], types.SimpleNamespace(value=0), None)
-        self.assertEqual(self.monitor.config_command_observation("gc-first")["puback"]["reason"], 0)
+        self.assertEqual(self.monitor.rdf_node_command_observation("gc-first")["puback"]["reason"], 0)
 
         # The PUBACK arrives on paho's thread before publish() has returned.
         self.client.publish_hook = lambda mid: self.client.on_publish(
             self.client, None, mid, types.SimpleNamespace(value=135, is_failure=True), None,
         )
-        self.monitor.publish_config_patch(self._patch_command("gc-second"))
-        self.assertEqual(self.monitor.config_command_observation("gc-second")["puback"]["reason"], 135)
+        self.monitor.publish_rdf_node_command(self._command("gc-second"))
+        self.assertEqual(self.monitor.rdf_node_command_observation("gc-second")["puback"]["reason"], 135)
         # A PUBACK from a retired client is ignored.
         other = self.Client("retired")
         self.monitor._on_publish(other, None, result["mid"], types.SimpleNamespace(value=0), None)
@@ -657,224 +532,208 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self._connected()
         self.client.publish_rc = self.module.mqtt.MQTT_ERR_NO_CONN
         with self.assertRaises(Exception) as raised:
-            self.monitor.publish_config_patch(self._patch_command("gc-raced"))
+            self.monitor.publish_rdf_node_command(self._command("gc-raced"))
         self.assertEqual(getattr(raised.exception, "code", None), "MQTT_NOT_CONNECTED")
         # Nothing stays queued for a replay after the next reconnect.
         self.assertEqual(self.client._out_messages, {})
-        self.assertIs(self.monitor.config_command_observation("gc-raced")["published"], False)
+        self.assertIs(self.monitor.rdf_node_command_observation("gc-raced")["published"], False)
 
-    def test_config_acks_are_captured_by_id_and_bounded(self) -> None:
+    def test_acks_of_published_commands_are_kept_by_id_and_bounded(self) -> None:
         self._connected()
-        keys_before = set(self.monitor.snapshot()["last_by_kind"])
-        total = self.module.MAX_CONFIG_ACKS + 6
-        for index in range(total):
-            self._send("ack_config", self._ack(f"cmd-{index}", "rejected", config_rev=3,
-                                               error={"code": "REMOTE_CONTROL_DISABLED"}), qos=1)
-        self.assertEqual(len(self.monitor._config_acks), self.module.MAX_CONFIG_ACKS)
-        self.assertIsNone(self.monitor.config_command_observation("cmd-0")["ack"])
-        last = self.monitor.config_command_observation(f"cmd-{total - 1}")["ack"]
-        self.assertEqual((last["status"], last["error_code"]), ("rejected", "REMOTE_CONTROL_DISABLED"))
-        self.assertIsInstance(last["received_at_ms"], int)
-        # The ACK store lives beside the Message Monitor data, not inside it.
-        self.assertEqual(set(self.monitor.snapshot()["last_by_kind"]) - keys_before, {"ack_config"})
+        self._node_state()
+        self.monitor.publish_rdf_node_command(self._command("gc-ours"))
+        # ACKs of commands this client did not send (rdf-ground.service, say) are not followed.
+        self._rdf("ack/config", self._edge_ack("ground-0123456789abcdef0123", "APPLIED"))
+        self.assertNotIn("ground-0123456789abcdef0123", self.monitor._commands)
+        self._rdf("ack/config", self._edge_ack("gc-ours", "ACCEPTED"))
+        observed = self.monitor.rdf_node_command_observation("gc-ours")
+        self.assertEqual((observed["progress"]["status"], observed["final"]), ("ACCEPTED", None))
+        self._rdf("ack/config", self._edge_ack("gc-ours", "PERSISTED_UNVERIFIED", {
+            "revision": 3, "persisted": True, "proof": {}, "reason": "NATIVE_RUNTIME_EVIDENCE_INCOMPLETE"}))
+        final = self.monitor.rdf_node_command_observation("gc-ours")["final"]
+        self.assertEqual((final["status"], final["result"]["reason"]), ("PERSISTED_UNVERIFIED", "NATIVE_RUNTIME_EVIDENCE_INCOMPLETE"))
+        self.assertIsInstance(final["received_at_ms"], int)
+        # A later ACK for the same id never replaces the final answer.
+        self._rdf("ack/config", self._edge_ack("gc-ours", "APPLIED"))
+        self.assertEqual(self.monitor.rdf_node_command_observation("gc-ours")["final"]["status"], "PERSISTED_UNVERIFIED")
+        # An ACK of another node session is not counted.
+        foreign = dict(self._edge_ack("gc-ours", "FAILED"), sid="0badc0de")
+        self.monitor.publish_rdf_node_command(self._command("gc-other"))
+        self._rdf("ack/config", dict(foreign, id="gc-other"))
+        self.assertIsNone(self.monitor.rdf_node_command_observation("gc-other")["final"])
 
-        # A late progress ACK never hides the final answer for the same id.
-        self._send("ack_config", self._ack("cmd-final", "applied", config_rev=4), qos=1)
-        self._send("ack_config", self._ack("cmd-final", "received", config_rev=4), qos=1)
-        final = self.monitor.config_command_observation("cmd-final")["ack"]
-        self.assertEqual((final["status"], final["config_rev"], final["changed_fields"]),
-                         ("applied", 4, ["center_frequency_hz"]))
+        for index in range(self.module.MAX_COMMAND_RECORDS + 3):
+            self.monitor.publish_rdf_node_command(self._command(f"gc-bulk-{index}"))
+        self.assertEqual(len(self.monitor._commands), self.module.MAX_COMMAND_RECORDS)
+        self.assertIs(self.monitor.rdf_node_command_observation("gc-ours")["published"], False)
 
-    def test_broker_echo_of_the_published_command_is_flagged(self) -> None:
+    def test_answered_config_gets_never_push_out_a_waiting_patch(self) -> None:
+        # A patch the edge ACCEPTED waits up to 90 s for its final ACK while
+        # Kontrol may send a config.get every second, each answered at once.
         self._connected()
-        command = self._patch_command("gc-echo")
-        self.monitor.publish_config_patch(command)
-        (_topic, raw), _options = self.client.publish_calls[0]
-        tampered = dict(command, changes={"gain_db": 10})
-        self._send("config_patch", tampered, qos=1)
-        self.assertIsNone(self.monitor.config_command_observation("gc-echo")["echoed_at_ms"])
-        self._send("config_patch", raw, qos=1)
-        self.assertIsInstance(self.monitor.config_command_observation("gc-echo")["echoed_at_ms"], int)
+        self._node_state()
+        self.monitor.publish_rdf_node_command(self._command("gc-patch"))
+        self._rdf("ack/config", self._edge_ack("gc-patch", "ACCEPTED"))
+        for index in range(self.module.MAX_COMMAND_RECORDS + 5):
+            command_id = f"gc-get-{index}"
+            self.monitor.publish_rdf_node_command(self._command(command_id, op="config.get"))
+            self._rdf("ack/config", self._edge_ack(command_id, "REJECTED", {"error": "TLS_REQUIRED_FOR_SETTINGS_REPORT"}))
+        self.assertEqual(len(self.monitor._commands), self.module.MAX_COMMAND_RECORDS)
+        self.assertIs(self.monitor.rdf_node_command_observation("gc-patch")["published"], True)
+        self.assertIs(self.monitor.rdf_node_command_observation("gc-get-0")["published"], False)
+        # Its final ACK is still seen.
+        self._rdf("ack/config", self._edge_ack("gc-patch", "APPLIED", {"revision": 3, "persisted": True, "proof": {}}))
+        self.assertEqual(self.monitor.rdf_node_command_observation("gc-patch")["final"]["status"], "APPLIED")
+        # Answered now, it ages out like the others.
+        self.monitor.publish_rdf_node_command(self._command("gc-get-last", op="config.get"))
+        self.assertIs(self.monitor.rdf_node_command_observation("gc-patch")["published"], False)
 
-    def test_reported_config_selects_the_v1_base_revision(self) -> None:
+    def test_config_get_accepts_only_its_own_settings_report(self) -> None:
         self._connected()
-        now = int(time.time() * 1000)
-        reported = self.monitor.reported_config()
-        self.assertEqual((reported["base_config_rev"], reported["base_config_rev_source"]), (None, None))
-        self.assertIsNone(reported["reported"])
-        self.assertEqual(reported["connection"], "connected")
-        self.assertEqual(set(reported["values"]), set(contract.CONFIG_RANGES))
-
-        def state(rev: int) -> dict:
-            return contract.build_state(
-                ts_ms=now, config_rev=rev, running=True, frequency_hz=433_920_000,
-                gain_db=10.0, array="UCA", method="MUSIC", active_vfos=1,
-            )
-
-        def config(rev: int, source: str | None = None) -> dict:
-            return contract.build_config_reported(
-                ts_ms=now, config_rev=rev, center_frequency_hz=416_588_000, gain_db=15.5,
-                array="UCA", method="MUSIC", active_vfos=1, source=source,
-            )
-
-        def base() -> tuple:
-            data = self.monitor.reported_config()
-            return data["base_config_rev"], data["base_config_rev_source"]
-
-        self._send("state", state(5), retained=True, qos=1)
-        self.assertEqual(base(), (5, "state"))
-        self._send("config_reported", config(7), retained=True, qos=1)
-        self.assertEqual(base(), (7, "config_reported"))
-        self._send("ack_config", self._ack("a1", "applied", config_rev=8), qos=1)
-        self.assertEqual(base(), (8, "ack"))
-        self._send("ack_config", self._ack("a2", "conflict", config_rev=9,
-                                           error={"code": "CONFIG_REVISION_CONFLICT", "current_config_rev": 9}), qos=1)
-        self.assertEqual(base(), (9, "ack"))
-        # A retained ACK replay has no order relative to config_reported.
-        self._send("ack_config", self._ack("old", "applied", config_rev=99), retained=True, qos=1)
-        self.assertEqual(base(), (9, "ack"))
-        # Rejections carry the agent's revision only incidentally; they never move the base.
-        self._send("config_reported", config(10), qos=1)
-        self._send("ack_config", self._ack("a3", "rejected", config_rev=0,
-                                           error={"code": "REMOTE_CONTROL_DISABLED"}), qos=1)
-        self.assertEqual(base(), (10, "config_reported"))
-        # A retained clear of config_reported falls back to state.
-        self._send("config_reported", b"", qos=1)
-        self.assertEqual(base(), (5, "state"))
-        self._send("state", b"", qos=1)
-        self.assertEqual(base(), (None, None))
-
-        self._send("config_reported", config(11, source="synthetic"), retained=True, qos=1)
-        data = self.monitor.reported_config()
-        self.assertEqual(data["reported"]["config_rev"], 11)
-        self.assertIs(data["reported"]["synthetic"], True)
-        self.assertIs(data["reported"]["retained"], True)
-        self.assertEqual(data["reported"]["source"], "v1")
-        self.assertEqual(data["values"]["center_frequency_hz"], 416_588_000)
-        self.assertEqual(data["values"]["gain_db"], 15.5)
-        self.assertEqual(data["value_sources"]["center_frequency_hz"], "v1_config_reported")
-        self.assertIsNone(data["values"]["vfo_frequency_hz"])
-        self.assertIsNone(data["value_sources"]["vfo_frequency_hz"])
-
-    def test_retained_config_report_is_aged_from_its_own_timestamp(self) -> None:
-        self._connected()
-        published = 1_760_000_000_000
-        clock = [published + 3 * 3_600_000]
-
-        def config(ts_ms: int, rev: int = 42) -> dict:
-            return contract.build_config_reported(
-                ts_ms=ts_ms, config_rev=rev, center_frequency_hz=416_588_000, gain_db=15.5,
-                array="UCA", method="MUSIC", active_vfos=1,
-            )
-
-        def reported() -> dict:
-            return self.monitor.reported_config()["reported"]
-
+        case = next(item for item in self.COMMANDS["cases"] if item["name"] == "config-get")
+        report = json.loads(case["edge"]["settings_reported"])
+        clock = [report["t"]]
         with patch.object(self.module, "_now_ms", lambda: clock[0]):
-            # The broker replays a report the agent published three hours ago.
-            self._send("config_reported", config(published), retained=True, qos=1)
-            clock[0] += 400
-            replay = reported()
-            self.assertIs(replay["retained"], True)
-            self.assertEqual(
-                (replay["age_ms"], replay["age_basis"], replay["source_ts_ms"]),
-                (3 * 3_600_000 + 400, "source_ts", published),
+            state = self._node_state()
+            # Unrequested: the store ignores it.
+            self._rdf("settings/reported", dict(report, id="gc-get-1"))
+            self.assertIsNone(self.monitor.rdf_node_control_view()["settings"])
+            command = commands.build_command(
+                "config.get", command_id="gc-get-1", sid=state["sid"], boot=state["boot"], base_rev=state["cfg"],
+                issued_ms=clock[0],
             )
-            # A small clock lead on the Raspberry is tolerated (age 0); a large
-            # one, or an unsynced pre-2020 clock, leaves the age unknown.
-            received = clock[0]
-            for ts_ms, expected in (
-                (received + 4_000, (0, "source_ts")),
-                (received + 6_000, (None, None)),
-                (86_400_000, (None, None)),
-            ):
-                self._send("config_reported", config(ts_ms), retained=True, qos=1)
-                entry = reported()
-                self.assertEqual((entry["age_ms"], entry["age_basis"], entry["source_ts_ms"]), (*expected, ts_ms))
-            # A live report is aged from its receipt, whatever its timestamp says.
-            self._send("config_reported", config(published, rev=43), qos=1)
-            clock[0] += 1_500
-            live = reported()
-            self.assertIs(live["retained"], False)
-            self.assertEqual((live["age_ms"], live["age_basis"], live["config_rev"]), (1_500, "received", 43))
+            self.monitor.publish_rdf_node_command(command)
+            self._rdf("ack/config", self._edge_ack("gc-get-1", "APPLIED", {"revision": state["cfg"], "proof": "source_correlated"}))
+            self._rdf("settings/reported", dict(report, id="gc-get-1"))
+            view = self.monitor.rdf_node_control_view()
+        observed = self.monitor.rdf_node_command_observation("gc-get-1")
+        self.assertEqual((observed["final"]["status"], observed["reported_at_ms"]), ("APPLIED", clock[0]))
+        self.assertEqual(view["connection"], "connected")
+        self.assertEqual(view["node_id"], NODE)
+        self.assertEqual((view["session"]["sid"], view["session"]["cfg"]), (state["sid"], state["cfg"]))
+        self.assertEqual(view["settings"]["id"], "gc-get-1")
+        self.assertIs(view["settings"]["matches_state_cfg"], True)
+        self.assertEqual(view["settings"]["safe_settings"]["vfo0_frequency_hz"], 433_920_000)
+        self.assertEqual(view["settings"]["settings_json"], report["settings_json"])
 
-            # RDF v2 config/reported follows the same rule with its "t" field.
-            self._send("config_reported", b"", qos=1)
-            v2 = json.dumps({
-                "v": 2, "sid": "7a8b9c0d", "rev": 3, "t": published, "proof": "unverified", "digest": "abc",
-                "effective": {"center_frequency_hz": 433_000_000, "gain_db": 20.5},
-            }).encode("utf-8")
-            self.client.on_message(self.client, None, message(f"sdr/v2/{NODE}/config/reported", v2, 1, True))
-            v2_reported = reported()
-            self.assertEqual(v2_reported["source"], "v2")
-            self.assertEqual(
-                (v2_reported["retained"], v2_reported["age_ms"], v2_reported["age_basis"]),
-                (True, clock[0] - published, "source_ts"),
+    def test_a_replacement_monitor_follows_the_pending_commands(self) -> None:
+        # Reconnect or an MQTT settings save replaces the monitor while a patch
+        # and a config.get wait. Their ACKs and the settings report reach only
+        # the new client, so the server hands the pending ids over first.
+        from config_command_tracker import ConfigCommandTracker
+
+        case = next(item for item in self.COMMANDS["cases"] if item["name"] == "config-get")
+        report = json.loads(case["edge"]["settings_reported"])
+        clock = [report["t"]]
+        tracker = ConfigCommandTracker(clock_ms=lambda: clock[0])
+        with patch.object(self.module, "_now_ms", lambda: clock[0]):
+            self._connected()
+            state = self._node_state()
+            session = {"sid": state["sid"], "boot": state["boot"], "base_rev": state["cfg"], "issued_ms": clock[0]}
+            patch_command = commands.build_command(
+                "config.patch", command_id="gc-restart-1", changes=commands.validate_patch_changes({"gain_db": 20.7}),
+                **session,
             )
+            get_command = commands.build_command("config.get", command_id="gc-restart-get", **session)
+            done_command = commands.build_command(
+                "config.patch", command_id="gc-restart-done", changes=commands.validate_patch_changes({"gain_db": 15.7}),
+                **session,
+            )
+            for command in (patch_command, get_command, done_command):
+                self.monitor.publish_rdf_node_command(command)
+                tracker.record(command, self.monitor, published_at_ms=clock[0])
+            self._rdf("ack/config", self._edge_ack("gc-restart-done", "APPLIED"))
+            self.assertEqual(tracker.status("gc-restart-done", self.monitor)["state"], "acked")
 
-    def test_reported_config_takes_vfo_values_only_from_rdf_v2_effective(self) -> None:
+            replacement = self.module.MqttMonitor("10.90.0.1", 9001, transport="websockets", ws_path="/mqtt")
+            # Only the two commands that are not final move over.
+            self.assertEqual(tracker.hand_over(self.monitor, replacement), 2)
+            self.assertEqual(tracker.hand_over(self.monitor, replacement), 0)
+            self.assertEqual(
+                {key: replacement.rdf_node_command_observation(key)["adopted"] for key in
+                 ("gc-restart-1", "gc-restart-get", "gc-restart-done")},
+                {"gc-restart-1": True, "gc-restart-get": True, "gc-restart-done": False},
+            )
+            retired, self.monitor = self.monitor, replacement
+            self._connected()
+            retired.stop()
+            # The new client's first state of the same session keeps the
+            # adopted settings request.
+            self._node_state()
+            self._rdf("ack/config", self._edge_ack("gc-restart-1", "ACCEPTED"))
+            waiting = tracker.status("gc-restart-1", replacement)
+            self.assertEqual((waiting["state"], waiting["monitor_restarted"], waiting["ack"]["status"]),
+                             ("acknowledged", True, "ACCEPTED"))
+            self._rdf("ack/config", self._edge_ack("gc-restart-1", "APPLIED", {"revision": 43, "persisted": True}))
+            self._rdf("ack/config", self._edge_ack("gc-restart-get", "APPLIED", {"revision": state["cfg"], "proof": "runtime"}))
+            self._rdf("settings/reported", dict(report, id="gc-restart-get"))
+            applied = tracker.status("gc-restart-1", replacement)
+            reported = tracker.status("gc-restart-get", replacement)
+            view = replacement.rdf_node_control_view()
+        self.assertEqual((applied["state"], applied["ack"]["status"], applied["ack"]["revision"]), ("acked", "APPLIED", 43))
+        self.assertEqual((reported["state"], reported["settings_reported_at_ms"]), ("reported", clock[0]))
+        self.assertEqual(view["settings"]["id"], "gc-restart-get")
+        # The replacement never published anything itself.
+        self.assertEqual(self.client.publish_calls, [])
+        observed = replacement.rdf_node_command_observation("gc-restart-1")
+        self.assertEqual((observed["published"], observed["adopted"], observed["puback"]), (False, True, None))
+
+    def test_adopting_takes_what_the_store_already_accepted(self) -> None:
         self._connected()
-        now = int(time.time() * 1000)
-        v2 = json.dumps({
-            "v": 2, "sid": "7a8b9c0d", "rev": 3, "t": now, "proof": "unverified", "digest": "abc",
-            "effective": {
-                "center_frequency_hz": 433_000_000, "gain_db": 20.5,
-                "vfo0_frequency_hz": 433_900_000, "vfo0_bandwidth_hz": 12_500, "vfo0_squelch_db": -80.0,
-            },
-        }).encode("utf-8")
-        self.client.on_message(self.client, None, message(f"sdr/v2/{NODE}/config/reported", v2, 1, True))
-        data = self.monitor.reported_config()
-        # RDF v2 rev is display-only, never a base revision.
-        self.assertEqual((data["base_config_rev"], data["base_config_rev_source"]), (None, None))
-        self.assertEqual(data["reported"]["source"], "v2")
-        self.assertIsNone(data["reported"]["config_rev"])
-        self.assertEqual(data["values"]["vfo_frequency_hz"], 433_900_000)
-        self.assertEqual(data["values"]["vfo_bandwidth_hz"], 12_500)
-        self.assertEqual(data["values"]["vfo_squelch_db"], -80.0)
-        self.assertEqual(data["values"]["center_frequency_hz"], 433_000_000)
-        self.assertEqual(data["value_sources"]["vfo_frequency_hz"], "v2_effective")
-        self.assertEqual(data["value_sources"]["center_frequency_hz"], "v2_effective")
-
-        v1 = contract.build_config_reported(
-            ts_ms=now, config_rev=4, center_frequency_hz=416_588_000, gain_db=15.5,
-            array="UCA", method="MUSIC", active_vfos=1,
-        )
-        self._send("config_reported", v1, retained=True, qos=1)
-        data = self.monitor.reported_config()
-        self.assertEqual(data["reported"]["source"], "v1+v2")
-        self.assertEqual((data["base_config_rev"], data["base_config_rev_source"]), (4, "config_reported"))
-        self.assertEqual(data["values"]["center_frequency_hz"], 416_588_000)
-        self.assertEqual(data["value_sources"]["center_frequency_hz"], "v1_config_reported")
-        self.assertEqual(data["value_sources"]["vfo_bandwidth_hz"], "v2_effective")
+        self._node_state()
+        # The edge answered before the hand-over reached this monitor.
+        self._rdf("ack/config", self._edge_ack("gc-early", "REJECTED", {"error": "CONFIG_REVISION_CONFLICT"}))
+        self.assertIsNone(self.monitor.rdf_node_command_observation("gc-early")["final"])
+        taken = self.monitor.adopt_rdf_node_commands([
+            {"command_id": "gc-early", "op": "config.patch", "sid": "7a8b9c0d"},
+            {"command_id": "bad id", "op": "config.patch", "sid": None},
+            {"command_id": "gc-op", "op": "stream.set", "sid": None},
+            "not a mapping",
+        ])
+        self.assertEqual(taken, 1)
+        final = self.monitor.rdf_node_command_observation("gc-early")["final"]
+        self.assertEqual((final["status"], final["result"]["error"]), ("REJECTED", "CONFIG_REVISION_CONFLICT"))
+        self.assertEqual(self.monitor.adopt_rdf_node_commands([{"command_id": "gc-early", "op": "config.patch"}]), 0)
         self.assertEqual(self.client.publish_calls, [])
 
-    def test_reported_config_keeps_the_receipt_time_of_each_value(self) -> None:
+    def test_control_view_follows_the_connection_and_the_session(self) -> None:
+        self.assertEqual(self.monitor.rdf_node_control_view()["connection"], "disabled")
         self._connected()
-        clock = [1_760_000_000_000]
-        v2 = json.dumps({
-            "v": 2, "sid": "7a8b9c0d", "rev": 3, "t": clock[0], "proof": "unverified", "digest": "abc",
-            "effective": {"vfo0_frequency_hz": 433_900_000, "vfo0_bandwidth_hz": 12_500, "gain_db": 20.5},
-        }).encode("utf-8")
-        v1 = contract.build_config_reported(
-            ts_ms=clock[0], config_rev=4, center_frequency_hz=416_588_000, gain_db=15.5,
-            array="UCA", method="MUSIC", active_vfos=1,
+        view = self.monitor.rdf_node_control_view()
+        self.assertEqual((view["available"], view["connection"]), (True, "connected"))
+        self.assertIs(view["session"]["known"], False)
+        self.assertIsNone(view["settings"])
+        state = self._node_state()
+        capabilities = json.loads((TOOLS_DIR / "fixtures" / "rdf-node" / "capabilities.json").read_text(encoding="utf-8"))
+        # Capabilities of another session are not the node's.
+        self._rdf("capabilities", capabilities, retained=True)
+        self.assertIsNone(self.monitor.rdf_node_control_view()["session"]["capabilities"])
+        self._rdf("capabilities", dict(capabilities, sid=state["sid"], boot=state["boot"]), retained=True)
+        self.assertEqual(
+            self.monitor.rdf_node_control_view()["session"]["capabilities"],
+            {"remote_commands": capabilities["remote_commands"], "remote_config_patch": capabilities["remote_config_patch"],
+             "config_patch": capabilities["config_patch"]},
         )
-        with patch.object(self.module, "_now_ms", lambda: clock[0]):
-            self.client.on_message(self.client, None, message(f"sdr/v2/{NODE}/config/reported", v2, 1, True))
-            v2_at = clock[0]
-            clock[0] += 3_000
-            self._send("config_reported", v1, qos=1)
-            v1_at = clock[0]
-            clock[0] += 500
-            data = self.monitor.reported_config()
-        received = data["value_received_at_ms"]
-        # Each value carries the receipt time of the message it came from.
-        self.assertEqual(received["center_frequency_hz"], v1_at)
-        self.assertEqual(received["gain_db"], v1_at)
-        self.assertEqual(received["vfo_frequency_hz"], v2_at)
-        self.assertEqual(received["vfo_bandwidth_hz"], v2_at)
-        self.assertIsNone(received["vfo_squelch_db"])
-        self.assertEqual(data["reported"]["received_at_ms"], v1_at)
+
+    def test_retired_rdf_node_config_reported_is_not_read(self) -> None:
+        # The RDF Node edge has no config/reported. A retained leftover on the
+        # broker is not subscribed, so it is neither counted nor a value source.
+        self._connected()
+        self.assertNotIn(f"sdr/v2/{NODE}/config/reported", {topic for topic, _options in self.client.subscriptions})
+        now = int(time.time() * 1000)
+        leftover = json.dumps({
+            "v": 2, "sid": "7a8b9c0d", "rev": 3, "t": now, "proof": "unverified", "digest": "abc",
+            "effective": {"center_frequency_hz": 433_000_000, "vfo0_frequency_hz": 433_900_000},
+        }).encode("utf-8")
+        self.client.on_message(self.client, None, message(f"sdr/v2/{NODE}/config/reported", leftover, 1, True))
+        view = self.monitor.rdf_node_control_view()
+        self.assertIs(view["session"]["known"], False)
+        self.assertIsNone(view["settings"])
+        snapshot = self.monitor.rdf_node_snapshot()
+        self.assertEqual((snapshot["received"], snapshot["invalid"]), (0, 0))
+        self.assertNotIn("config/reported", snapshot["topics"])
+        self.assertIsNone(snapshot["node"]["session"])
+        self.assertEqual(self.client.publish_calls, [])
 
 
 class GroundConsoleMqttApplyTests(unittest.TestCase):
