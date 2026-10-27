@@ -128,7 +128,8 @@ export function doaStatusTextKey(reason: DoaStatusReason): MessageKey {
 // Reasons that hold on every console read (the clock is never verified and the
 // authority/unit contracts are not configured) go last so the summary shows
 // the reason an operator can act on. NATIVE_ANGLE_UNCHECKED comes and goes
-// with read timing (CSV and XML from adjacent frames) and needs no action.
+// with read timing (CSV and XML from adjacent frames, or an MQTT DoA newer
+// than its Angular frame) and needs no action.
 const STANDING_GATE_REASONS = [
   'POWER_FLOOR_LOSSY',
   'POWER_MAPPING_UNVERIFIED',

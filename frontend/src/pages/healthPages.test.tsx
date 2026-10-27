@@ -274,7 +274,7 @@ describe('DoA Diagnostics', () => {
     expect(page).toContain('NOT CHECKED');
     expect(page).toContain('ADJACENT_FRAMES');
     expect(page).toContain('Node status counters stopped advancing');
-    expect(page).toContain('CSV vector peak does not match θ₀');
+    expect(page).toContain('Vector peak does not match θ₀');
     expect(page).toContain('ADC not overdriven');
     // Actionable reasons come before the standing clock reason.
     expect(page.indexOf('Node status counters stopped advancing')).toBeLessThan(page.indexOf('Ground and node clocks are not verified'));

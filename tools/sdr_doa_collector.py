@@ -2340,7 +2340,9 @@ def collect_light(
     card, follow-node, the compass and Kontrol's read-back use, and the ADC
     overdrive and SNR. It applies the same fetch rules as ``collect`` (host
     list, timeouts, body limit, budget, no retry after a transport failure, the
-    settings.json reuse of ``settings_cache``), reads doa.xml only when
+    settings.json reuse of ``settings_cache``, read after all when doa.xml
+    shows another VFO frequency or station than with the cached copy), reads
+    doa.xml only when
     status.json was read, and ages doa.xml from the status.json timestamp, the
     same node clock. About 5.8 kB, against about 8 kB for a full collection.
     """
@@ -2405,6 +2407,16 @@ def collect_light(
             reads[PATH_SETTINGS] = reader(PATH_SETTINGS, parse_settings)
         reads_done = read_all(reads)
 
+    xml_resource, xml_parsed = reads_done[PATH_XML]
+    xml_signature = _settings_view_signature({}, xml_parsed if xml_parsed and xml_parsed.get("available") is True else {})
+    if cached_settings is not None and SettingsCache.views_changed(cached_settings, xml_signature):
+        # doa.xml shows another VFO frequency or station than it did with the
+        # cached copy: the settings changed, so read them after all, as
+        # collect() does.
+        cached_settings = None
+        reads_started_mono = monotonic_clock()
+        reads_done[PATH_SETTINGS] = read_all({PATH_SETTINGS: reader(PATH_SETTINGS, parse_settings)})[PATH_SETTINGS]
+
     settings_reused = cached_settings is not None
     settings_read_mono: Optional[float] = None
     if cached_settings is not None:
@@ -2425,7 +2437,6 @@ def collect_light(
             settings_read_mono = reads_started_mono
     resources[PATH_SETTINGS] = settings_resource
 
-    xml_resource, xml_parsed = reads_done[PATH_XML]
     resources[PATH_XML] = xml_resource
     if not xml_parsed or xml_parsed.get("available") is not True:
         xml_candidate = _unavailable(xml_resource)

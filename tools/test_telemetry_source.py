@@ -483,6 +483,42 @@ class MqttSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["native_consistency"]["angle_checked"], False)
         self.assertEqual(snapshot["native_consistency"]["frame_relation"], "ADJACENT_FRAMES")
         self.assertEqual(snapshot["doa_candidates"]["mqtt"]["canonical_angle_deg"], 162.0)
+        # The peak is checked against the theta_0 drawn with it, the DoA's.
+        self.assertEqual(snapshot["doa_candidates"]["mqtt"]["angular_peak_angle_distance_deg"], 2.0)
+        self.assertIn("NATIVE_ANGLE_UNCHECKED", snapshot["publication_gate"]["reasons"])
+        self.assertEqual(snapshot["overall_state"], "UNVERIFIED")
+
+    def test_an_older_frame_pointing_elsewhere_gives_no_vector(self) -> None:
+        # The edge sends Angular every 4 s and DoA every second: the newest DoA
+        # usually belongs to a later record than the newest Angular frame.
+        self.edge.hello()
+        self.edge.health()
+        self.edge.doa(100.0)
+        self.edge.angular(100.0)
+        for theta in (110.0, 120.0, 130.0):
+            self.clock.now += 1_000
+            self.edge.health()
+            self.edge.doa(theta)
+        snapshot = build(self.edge)
+        view = snapshot["doa_candidates"]["mqtt"]
+        self.assertEqual(view["canonical_angle_deg"], 130.0)
+        self.assertEqual(view["angular_pairing"], "PEAK_MOVED")
+        self.assertEqual(view["angular_frame"]["doa_peak_distance_deg"], 30.0)
+        self.assertEqual(snapshot["mqtt"]["angular"]["pairing"], "PEAK_MOVED")
+        # No curve, lobe or display peak from the frame, so the bearing is not
+        # drawn under a curve that points 30 degrees away.
+        self.assertNotIn("angular_power_db", view)
+        self.assertNotIn("angular_peak_index", view)
+        self.assertEqual(snapshot["native_consistency"]["frame_relation"], "INCOMPLETE")
+        self.assertEqual(snapshot["overall_state"], "INCOMPLETE")
+        self.assertIn("MQTT_ANGULAR_UNAVAILABLE", snapshot["publication_gate"]["reasons"])
+        # The next frame of the current record gives it back, checked as one record.
+        self.edge.angular(130.0)
+        snapshot = build(self.edge)
+        self.assertEqual(snapshot["doa_candidates"]["mqtt"]["angular_pairing"], "SAME_FRAME")
+        self.assertEqual(snapshot["doa_candidates"]["mqtt"]["angular_peak_index"], 130)
+        self.assertEqual(snapshot["overall_state"], "UNVERIFIED")
+        self.assertNotIn("NATIVE_ANGLE_UNCHECKED", snapshot["publication_gate"]["reasons"])
 
     def test_an_old_doa_is_stale(self) -> None:
         self.edge.live()
@@ -511,6 +547,23 @@ class MqttSnapshotTests(unittest.TestCase):
         old = build(self.edge, light_result(overdrive="True"), light_age_ms=ts.LIGHT_VALUES_MAX_AGE_MS + 1)
         self.assertEqual(old["overall_state"], "UNVERIFIED")
         self.assertIsNone(old["publication_gate"]["checks"]["adc_not_overdriven"])
+        # Nor anything else of it: settings, gps_status, position and resources
+        # answer as not read, so an old centre or LOCATION never looks current.
+        old = build(self.edge, light_result(gps="Fixed"), light_age_ms=ts.LIGHT_VALUES_MAX_AGE_MS + 1)
+        self.assertIs(old["settings"]["available"], False)
+        self.assertEqual(old["settings"]["error"], "last settings.json read is too old")
+        self.assertNotIn("gps_status", old["status"]["safe"])
+        self.assertIsNone(old["data_out_light"]["xml"])
+        self.assertIsNone(old["data_out_light"]["status"])
+        self.assertEqual(old["data_out_light"]["resources"], {})
+        self.assertEqual(old["resources"], {})
+        self.assertIs(old["data_out_light"]["expired"], True)
+        self.assertEqual(old["data_out_light"]["age_ms"], ts.LIGHT_VALUES_MAX_AGE_MS + 1)
+        self.assertIs(old["source"]["data_out"]["available"], False)
+        self.assertIsNone(old["collection"]["settings_age_ms"])
+        current = build(self.edge, light_result(gps="Fixed"), light_age_ms=ts.LIGHT_VALUES_MAX_AGE_MS)
+        self.assertIs(current["data_out_light"]["expired"], False)
+        self.assertEqual(current["settings"]["fields"]["center_freq"], 433.92)
 
     def test_with_source_marks_data_out_answers(self) -> None:
         answer = ts.with_source({"status": {"available": True}}, None, ["MQTT_HEALTH_STALE"])
@@ -550,6 +603,38 @@ class CollectLightTests(unittest.TestCase):
         gets.clear()
         collector.collect_light(BASE_URL, fetcher=fetcher, settings_cache=cache, fresh_settings=True, total_budget_s=4.0)
         self.assertIn(collector.PATH_SETTINGS, gets)
+
+    def test_a_retune_shown_by_doa_xml_reads_settings_again(self) -> None:
+        gets: List[str] = []
+        now = collector.now_ms()
+        bodies = {
+            collector.PATH_STATUS: make_status(now),
+            collector.PATH_SETTINGS: json.dumps({"center_freq": 416.588}).encode(),
+            collector.PATH_XML: make_xml(now),
+        }
+
+        def fetcher(base_url: str, path: str, timeout: float, max_body: int) -> collector.FetchedResource:
+            gets.append(path)
+            return collector.FetchedResource(path, base_url + path, True, 200, None, bodies[path], collector.now_ms())
+
+        cache = collector.SettingsCache()
+        first = collector.collect_light(BASE_URL, fetcher=fetcher, settings_cache=cache, total_budget_s=4.0)
+        self.assertEqual(first["settings"]["fields"]["center_freq"], 416.588)
+        # The node is retuned: settings.json and doa.xml FREQUENCY move, the
+        # status.json values the cache checks do not.
+        bodies[collector.PATH_SETTINGS] = json.dumps({"center_freq": 433.92}).encode()
+        bodies[collector.PATH_XML] = make_xml(now, frequency_mhz="433.92")
+        gets.clear()
+        second = collector.collect_light(BASE_URL, fetcher=fetcher, settings_cache=cache, total_budget_s=4.0)
+        self.assertEqual(second["xml"]["frequency_mhz"], 433.92)
+        self.assertEqual(second["settings"]["fields"]["center_freq"], 433.92)
+        self.assertIs(second["settings"]["reused"], False)
+        self.assertEqual(gets.count(collector.PATH_SETTINGS), 1)
+        # The new copy is cached with the new view: the next read reuses it.
+        gets.clear()
+        third = collector.collect_light(BASE_URL, fetcher=fetcher, settings_cache=cache, total_budget_s=4.0)
+        self.assertNotIn(collector.PATH_SETTINGS, gets)
+        self.assertEqual(third["settings"]["fields"]["center_freq"], 433.92)
 
     def test_an_unreachable_node_costs_one_get(self) -> None:
         gets: List[str] = []
@@ -673,6 +758,8 @@ class ReaderTests(unittest.TestCase):
         answer = self.reader.snapshot(BASE_URL)
         self.assertEqual(len(self.light.calls), 2)
         self.assertEqual(answer["data_out_light"]["reason"], "light-config")
+        # It reads settings.json, never the copy from before the change.
+        self.assertEqual(self.light.calls, [(BASE_URL, False), (BASE_URL, True)])
         self.advance(2.0)
         self.keep_alive()
         self.reader.snapshot(BASE_URL)
@@ -736,6 +823,33 @@ class ReaderTests(unittest.TestCase):
             self.keep_alive()
             self.reader.snapshot(BASE_URL)
         self.assertEqual(len(self.light.calls), 1)
+
+    def test_a_light_read_from_before_a_fallback_is_not_current(self) -> None:
+        pending: List[Callable[[], None]] = []
+        self.reader = DataOutReader(
+            self.full, lambda: 2, wait_timeout_s=5.0, clock=self.clock, wall_ms=lambda: 9_000_000,
+            console_base_url=lambda: BASE_URL, collect_light=self.light, mqtt_view=self.current_view,
+            run_background=pending.append,
+        )
+        self.edge.live()
+        self.reader.snapshot(BASE_URL)
+        pending.pop()()
+        answer = self.reader.snapshot(BASE_URL)
+        self.assertIs(answer["settings"]["available"], True)
+        # An hour on Data Out, then MQTT is fresh again.
+        self.advance(3_600.0)
+        self.assertEqual(self.reader.snapshot(BASE_URL)["source"]["kind"], "data_out")
+        self.keep_alive()
+        answer = self.reader.snapshot(BASE_URL)
+        self.assertEqual(answer["source"]["kind"], "mqtt")
+        self.assertIs(answer["settings"]["available"], False)
+        self.assertIs(answer["data_out_light"]["expired"], True)
+        self.assertIs(answer["data_out_light"]["running"], True)
+        self.assertIsNone(answer["data_out_light"]["xml"])
+        pending.pop()()
+        answer = self.reader.snapshot(BASE_URL)
+        self.assertIs(answer["data_out_light"]["expired"], False)
+        self.assertEqual(answer["settings"]["fields"]["center_freq"], 433.92 + 2)
 
     def test_answers_carry_the_read_facts(self) -> None:
         self.edge.live()

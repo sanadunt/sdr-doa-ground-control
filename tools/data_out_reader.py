@@ -294,7 +294,10 @@ class DataOutReader:
                     reason = self.read_reason(last, request, age_s, self.window_s(), mqtt=mark)
                     if reason is not None:
                         self._count += 1
-                        running = _Collection(f"{self._boot}-{self._count}", now, request.fresh_settings, mark, reason)
+                        # A new session or state.cfg means the node's settings
+                        # changed: read settings.json instead of reusing it.
+                        force = request.fresh_settings or reason == "light-config"
+                        running = _Collection(f"{self._boot}-{self._count}", now, force, mark, reason)
                         target.light_running = running
                         start = running
                 if request.fresh_settings:

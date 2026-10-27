@@ -37,13 +37,20 @@ The mapping, with its evidence in the edge's code (commit 8691ad0):
   the two; otherwise the angle is left out.
 - ``q`` of a LIVE Angular frame is the ``q`` of the DoA record it belongs to
   (``agent._live_angular`` sends it only when ``r['q'] == d['q']``), so a
-  same-``q`` pair is one frame and its two angles must agree.
+  same-``q`` pair is one frame and its two angles must agree. The edge sends
+  DoA more often than Angular (profile ``balanced``: 1 s against 4 s), so the
+  newest DoA is usually newer than the newest Angular frame. Such a frame
+  still gives the DoA its vector only while the vector's peak is within 3
+  degrees of that DoA's theta_0, so the bearing and the curve drawn from them
+  never point apart; otherwise it is ``PEAK_MOVED`` and the DoA has no vector
+  until the next frame.
 - ``daq=1`` in health means status.json was fresh with ``daq_ok`` and all
   three sync flags true (``source.Source.view``), so the DAQ state is PASS.
 
 MQTT never carries the station position, the settings fields or the ADC
 overdrive; the light Data Out read (``sdr_doa_collector.collect_light``)
-does, and ``DataOutReader`` decides when it runs.
+does, and ``DataOutReader`` decides when it runs. All of it counts for
+``LIGHT_VALUES_MAX_AGE_MS`` after the read and is left out once older.
 """
 
 from __future__ import annotations
@@ -99,10 +106,13 @@ SYNC_FLAGS = ("frame_sync", "sample_delay_sync", "iq_sync")
 DAQ_HEALTH = {1: "PASS", 0: "FAIL", 2: "UNKNOWN"}
 
 # How a LIVE Angular frame relates to the LIVE DoA. Only the first two give
-# the DoA its vector: the same record, or the same VFO frequency and config
-# revision.
+# the DoA its vector: the same record, or an older record of the same VFO
+# frequency and config revision whose vector peak is within
+# ANGULAR_PEAK_ANGLE_TOLERANCE_DEG of the DoA's theta_0. PEAK_MOVED is such an
+# older record whose peak is further away: the direction moved since.
 PAIR_SAME_FRAME = "SAME_FRAME"
 PAIR_SAME_CONFIG = "SAME_CONFIG"
+PAIR_PEAK_MOVED = "PEAK_MOVED"
 PAIR_OTHER_FREQUENCY = "OTHER_FREQUENCY"
 PAIR_OTHER_REVISION = "OTHER_REVISION"
 PAIR_NOT_LIVE = "NOT_LIVE"
@@ -112,8 +122,9 @@ PAIRED = (PAIR_SAME_FRAME, PAIR_SAME_CONFIG)
 # The light read runs at most this often while MQTT is fresh, unless the
 # node's config revision changes or Kontrol asks for settings.json.
 LIGHT_READ_INTERVAL_S = 30.0
-# The light read's ADC overdrive and SNR count for this long after the read:
-# two intervals and a read budget. Older, they are unknown.
+# Everything of the light read (settings, position, gps_status, ADC overdrive
+# and SNR) counts for this long after the read: two intervals and a read
+# budget. Older, it answers as not read.
 LIGHT_VALUES_MAX_AGE_MS = 65_000
 
 
@@ -329,13 +340,26 @@ def _doa_candidate(node: Mapping[str, Any], convention: Optional[str]) -> Dict[s
 
     angular = _record(node.get("angular"))
     pairing = angular_pairing(doa, angular)
-    candidate["angular_pairing"] = pairing
-    if angular is not None:
-        candidate["angular_frame"] = _angular_meta(angular, pairing)
     values = angular.get("values") if angular is not None else None
+    vector: Optional[List[float]] = None
+    peak_index = 0
+    doa_peak_distance: Optional[float] = None
     if pairing in PAIRED and isinstance(values, list) and len(values) == 360:
         vector = [float(value) for value in values]
         peak_index = max(range(360), key=vector.__getitem__)
+        if theta is not None:
+            doa_peak_distance = _circular_distance(float(peak_index), theta)
+        if (pairing == PAIR_SAME_CONFIG and doa_peak_distance is not None
+                and doa_peak_distance > ANGULAR_PEAK_ANGLE_TOLERANCE_DEG):
+            # An older record whose direction is not this DoA's: drawing its
+            # curve under this bearing would show two directions at once.
+            pairing = PAIR_PEAK_MOVED
+            vector = None
+    candidate["angular_pairing"] = pairing
+    if angular is not None:
+        candidate["angular_frame"] = _angular_meta(angular, pairing)
+        candidate["angular_frame"]["doa_peak_distance_deg"] = doa_peak_distance
+    if vector is not None:
         peak = vector[peak_index]
         candidate.update({
             "angular_bins": 360,
@@ -350,9 +374,10 @@ def _doa_candidate(node: Mapping[str, Any], convention: Optional[str]) -> Dict[s
             "angular_power_shifted": True,
             "angular_values_local_only": True,
         })
-        # The frame's own peak against its own theta_0: always one record.
-        frame_theta = theta0_from_angular(angular.get("raw_doa_deg"))
-        distance = None if frame_theta is None else _circular_distance(float(peak_index), frame_theta)
+        # The peak against the theta_0 drawn with it: the DoA's, or the
+        # frame's own while the DoA's angle is unknown (nothing is drawn then).
+        drawn_theta = theta if theta is not None else theta0_from_angular((angular or {}).get("raw_doa_deg"))
+        distance = None if drawn_theta is None else _circular_distance(float(peak_index), drawn_theta)
         candidate.update({
             "angular_peak_angle_distance_deg": distance,
             "angular_peak_angle_consistent": None if distance is None else distance <= ANGULAR_PEAK_ANGLE_TOLERANCE_DEG,
@@ -494,7 +519,7 @@ def _signal_quality(light: Optional[Mapping[str, Any]], candidate: Mapping[str, 
     return quality
 
 
-def _diagnostics(node: Mapping[str, Any], convention: Optional[str]) -> Dict[str, Any]:
+def _diagnostics(node: Mapping[str, Any], convention: Optional[str], pairing: Optional[str] = None) -> Dict[str, Any]:
     """What MQTT carries besides the LIVE DoA: kept visible, never a valid DoA."""
     def pick(record: Optional[Mapping[str, Any]], keys: Tuple[str, ...]) -> Optional[Dict[str, Any]]:
         if record is None:
@@ -537,7 +562,7 @@ def _diagnostics(node: Mapping[str, Any], convention: Optional[str]) -> Dict[str
         "capabilities": pick(capabilities, ("angle", "native_axis", "count", "profiles", "version", "session_match")),
         "angle_convention": convention,
         "doa": pick(doa, ("q", "t", "f", "rev", "live", "reasons", "received_at_ms", "age_ms", "source_age_ms")),
-        "angular": None if angular is None else _angular_meta(angular, angular_pairing(doa, angular)),
+        "angular": None if angular is None else _angular_meta(angular, pairing or angular_pairing(doa, angular)),
         "doa_unverified": unverified,
         "diagnostic_doa": diagnostic_doa,
         "angular_unverified": angular_unverified,
@@ -554,6 +579,9 @@ def _overall_and_gate(
     fresh = parsed and (_record(candidate.get("freshness")) or {}).get("fresh") is True
     vector = "angular_power_db" in candidate
     conflict = consistency.get("conflict") is True
+    # A vector from an older record (SAME_CONFIG): the two angles were not one
+    # record's, so the angle mapping was not cross-checked on this pair.
+    angle_unchecked = consistency.get("comparable") is True and consistency.get("angle_checked") is not True
     peak_consistent = candidate.get("angular_peak_angle_consistent")
     unverified = _record(diagnostics.get("doa_unverified"))
     unverified_current = unverified is not None and unverified.get("stale") is not True
@@ -572,6 +600,8 @@ def _overall_and_gate(
             reasons.append(MQTT_ANGULAR_UNAVAILABLE)
     if conflict:
         reasons.append(MQTT_DOA_ANGULAR_CONFLICT)
+    if angle_unchecked:
+        reasons.append("NATIVE_ANGLE_UNCHECKED")
     if peak_consistent is False:
         reasons.append("ANGULAR_PEAK_ANGLE_MISMATCH")
     reasons.extend(["CANONICAL_ANGLE_NOT_CONFIGURED", "DOA_AUTHORITY_NOT_SELECTED"])
@@ -623,7 +653,7 @@ def mqtt_snapshot(
     convention = angle_convention(node)
     candidate = _doa_candidate(node, convention)
     consistency = _consistency(candidate)
-    diagnostics = _diagnostics(node, convention)
+    diagnostics = _diagnostics(node, convention, candidate.get("angular_pairing"))
     current_light = _light_current(light, light_age_ms)
     quality = _signal_quality(current_light, candidate)
     overdrive = quality.get("adc_overdrive")
@@ -631,13 +661,17 @@ def mqtt_snapshot(
     health = _record(node.get("health")) or {}
 
     settings: Dict[str, Any]
-    light_settings = _record((light or {}).get("settings"))
+    # Everything of the light read follows one age rule: older than
+    # LIGHT_VALUES_MAX_AGE_MS (a read from before MQTT went stale or a long
+    # failed run), it answers as not read rather than as current.
+    expired = light is not None and current_light is None
+    light_settings = _record((current_light or {}).get("settings"))
     if light_settings is not None:
         settings = copy.deepcopy(light_settings)
     else:
         settings = {"available": False, "redacted": True, "raw_fields_omitted": True, "reused": False, "read_at_ms": None,
-                    "error": "settings.json not read yet"}
-    light_collection = _record((light or {}).get("collection")) or {}
+                    "error": "last settings.json read is too old" if expired else "settings.json not read yet"}
+    light_collection = _record((current_light or {}).get("collection")) or {}
     settings_age = _int(light_collection.get("settings_age_ms"))
     if settings_age is not None and light_age_ms is not None:
         settings_age += light_age_ms
@@ -645,10 +679,12 @@ def mqtt_snapshot(
     data_out_light = {
         **dict(light_meta),
         "age_ms": light_age_ms,
+        "max_age_ms": LIGHT_VALUES_MAX_AGE_MS,
+        "expired": expired,
         "read_at_ms": _int((light or {}).get("completed_at_ms")),
-        "status": copy.deepcopy(_record((light or {}).get("status"))),
-        "xml": copy.deepcopy(_record((light or {}).get("xml"))),
-        "resources": copy.deepcopy(_record((light or {}).get("resources")) or {}),
+        "status": copy.deepcopy(_record((current_light or {}).get("status"))),
+        "xml": copy.deepcopy(_record((current_light or {}).get("xml"))),
+        "resources": copy.deepcopy(_record((current_light or {}).get("resources")) or {}),
         "host_resolution": copy.deepcopy(light_collection.get("host_resolution")),
     }
     return {
@@ -660,7 +696,7 @@ def mqtt_snapshot(
             "mqtt": mqtt_summary(view, True),
             "data_out": {
                 "read": "light",
-                "available": (_record((light or {}).get("status")) or {}).get("available") is True,
+                "available": (_record((current_light or {}).get("status")) or {}).get("available") is True,
                 "interval_s": light_meta.get("interval_s"),
                 "age_ms": light_age_ms,
             },
@@ -689,8 +725,8 @@ def mqtt_snapshot(
             "settings_age_ms": settings_age,
             "host_resolution": copy.deepcopy(light_collection.get("host_resolution")),
         },
-        "resources": copy.deepcopy(_record((light or {}).get("resources")) or {}),
-        "status": _status(node, light),
+        "resources": copy.deepcopy(_record((current_light or {}).get("resources")) or {}),
+        "status": _status(node, current_light),
         "settings": settings,
         "doa_candidates": {SOURCE_MQTT: candidate},
         "authority": {
