@@ -201,11 +201,11 @@ def test_conflicting_native_views_are_quarantined() -> None:
 def test_dry_run_settings_validation_has_no_apply_path() -> None:
     result = ground_console.validate_config_patch(
         {
-            "base_config_rev": 7,
             "changes": {
                 "center_frequency_hz": 433_920_000,
-                "gain_db": 24,
-                "vfo_bandwidth_hz": 12_500,
+                "vfo0_frequency_hz": 433_920_000,
+                "gain_db": 20.7,
+                "vfo0_bandwidth_hz": 12_500,
             },
         },
         now_ms=1_000,
@@ -213,12 +213,14 @@ def test_dry_run_settings_validation_has_no_apply_path() -> None:
     assert result["dry_run"] is True
     assert result["transport"] == "none"
     assert result["applied"] is False
-    assert result["command"]["expires_ts_ms"] == 11_000
+    assert result["command"]["expires_ms"] == 16_000
 
     for payload in (
         {"changes": {"external_url": "http://not-allowed"}},
         {"changes": {"gain_db": 999}},
         {"changes": {"gain_db": "NaN"}},
+        {"changes": {"gain_db": 24}},
+        {"changes": {"center_frequency_hz": 433_920_000}},
     ):
         try:
             ground_console.validate_config_patch(payload, now_ms=1_000)
@@ -321,7 +323,7 @@ def _http_smoke_and_target_allowlist(base: str) -> None:
 
     request = urllib.request.Request(
         base + "/api/dry-run/config-patch",
-        data=json.dumps({"base_config_rev": 3, "changes": {"gain_db": 24}}).encode("utf-8"),
+        data=json.dumps({"changes": {"gain_db": 20.7}}).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
@@ -329,22 +331,24 @@ def _http_smoke_and_target_allowlist(base: str) -> None:
     assert dry_run["dry_run"] is True
     assert dry_run["applied"] is False
     assert dry_run["transport"] == "none"
-    assert dry_run["command"]["base_config_rev"] == 3
+    # No MQTT monitor here, so no node session to name.
+    assert dry_run["session_known"] is False
+    assert dry_run["command"]["base_rev"] is None
 
-    missing_revision = urllib.request.Request(
+    off_table = urllib.request.Request(
         base + "/api/dry-run/config-patch",
         data=json.dumps({"changes": {"gain_db": 24}}).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
     try:
-        urllib.request.urlopen(missing_revision, timeout=2)
+        urllib.request.urlopen(off_table, timeout=2)
     except urllib.error.HTTPError as exc:
         assert exc.code == 400
         body = json.loads(exc.read().decode("utf-8"))
-        assert body["ok"] is False and "base_config_rev" in body["error"]
+        assert body["ok"] is False and "GAIN_NOT_IN_APPROVED_TABLE" in body["error"]
     else:
-        raise AssertionError("dry-run accepted a patch the edge agent would drop")
+        raise AssertionError("dry-run accepted a gain the edge's helper refuses")
 
     external = base + "/api/snapshot?base_url=http%3A%2F%2Fexample.com%3A8081"
     try:
@@ -685,28 +689,31 @@ def test_fixture_vectors_follow_upstream_peak_convention() -> None:
     assert "ANGULAR_PEAK_ANGLE_MISMATCH" in mismatch["publication_gate"]["reasons"]
 
 
-def test_dry_run_uses_the_mqtt_contract_validator() -> None:
-    """AUD-74: a passed preview is an envelope the edge agent would accept."""
-    import sdr_doa_mqtt
+def test_dry_run_uses_the_edge_command_validator() -> None:
+    """AUD-74: a passed preview is the config.patch envelope Kontrol would send the edge."""
+    import rdf_node_commands
 
+    session = {"sid": "7a8b9c0d", "boot": "10aa2345-6789-4abc-9def-1234567890ab", "cfg": 0}
     result = ground_console.validate_config_patch(
-        {"base_config_rev": 0, "changes": {"center_frequency_hz": 433_920_000, "gain_db": 24.12345}},
-        now_ms=5_000,
+        {"changes": {"center_frequency_hz": 433_920_000.0, "vfo0_frequency_hz": 433_920_000, "gain_db": 20.7004}},
+        now_ms=1_790_000_000_000,
+        session=session,
     )
     assert result["validation"] == "passed"
-    assert result["contract"] == "sdr/v1 config_patch"
+    assert result["contract"] == "RDF Node config.patch"
+    assert result["topic"] == "sdr/v2/uav-01/cmd/config/patch"
     command = result["command"]
-    assert command["base_config_rev"] == 0
-    assert command["changes"]["gain_db"] == 24.123
-    sdr_doa_mqtt.validate_config_patch(command, now_ms=5_000)
+    assert (command["sid"], command["boot"], command["base_rev"]) == (session["sid"], session["boot"], 0)
+    assert command["changes"] == {"center_frequency_hz": 433_920_000, "gain_db": 20.7, "vfo0_frequency_hz": 433_920_000}
+    rdf_node_commands.validate_command(command, now_ms=1_790_000_000_000)
     for payload in (
         {"changes": {"gain_db": 24}},
-        {"base_config_rev": None, "changes": {"gain_db": 24}},
-        {"base_config_rev": -1, "changes": {"gain_db": 24}},
-        {"base_config_rev": 1.5, "changes": {"gain_db": 24}},
-        {"base_config_rev": "7", "changes": {"gain_db": 24}},
-        {"base_config_rev": 7, "changes": {"gain_db": "24"}},
-        {"base_config_rev": 7, "changes": {"gain_db": True}},
+        {"base_config_rev": 7, "changes": {"gain_db": 20.7}},
+        {"base_rev": 7, "changes": {"gain_db": 20.7}},
+        {"changes": {"gain_db": "20.7"}},
+        {"changes": {"gain_db": True}},
+        {"changes": {"vfo_frequency_hz": 433_920_000}},
+        {"changes": {"center_frequency_hz": 433_920_000, "vfo0_frequency_hz": 433_930_000}},
     ):
         try:
             ground_console.validate_config_patch(payload, now_ms=5_000)

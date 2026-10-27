@@ -1,9 +1,11 @@
-"""Contract between the Kontrol panel and the config-patch API.
+"""Contract between the Kontrol panel and its command API.
 
 The frontend keeps a hard-coded list of the error codes the backend can return
 (frontend/src/lib/configPatch.ts CONFIG_PATCH_ERROR_CODES) so that each one has
-an EN and ID message. These tests fail when the backend starts returning a code
-the frontend does not know, or when the two disagree on the allowlisted fields.
+an EN and ID message. The codes come from ground_console.py and, for the field
+rules, from rdf_node_commands.py. These tests fail when the backend starts
+returning a code the frontend does not know, or when the two disagree on the
+allowlisted fields.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import sdr_doa_mqtt  # noqa: E402
 
 GROUND_CONSOLE = (ROOT / "tools" / "ground_console.py").read_text(encoding="utf-8")
+RDF_NODE_COMMANDS = (ROOT / "tools" / "rdf_node_commands.py").read_text(encoding="utf-8")
 CONFIG_PATCH_TS = (ROOT / "frontend" / "src" / "lib" / "configPatch.ts").read_text(encoding="utf-8")
 I18N_TS = (ROOT / "frontend" / "src" / "lib" / "i18n.ts").read_text(encoding="utf-8")
 
@@ -42,6 +45,9 @@ def _backend_config_patch_codes() -> set[str]:
         codes.add(literal.group(1))
     for raised in re.finditer(r"MonitorPublishError\(\s*\"([A-Z][A-Z0-9_]+)\"", GROUND_CONSOLE):
         codes.add(raised.group(1))
+    # The edge's field rules raise CommandRefused("CODE", ...); the server passes the code on.
+    for refused in re.finditer(r"CommandRefused\(\s*\"([A-Z][A-Z0-9_]+)\"", RDF_NODE_COMMANDS):
+        codes.add(refused.group(1))
     return codes
 
 
@@ -49,6 +55,8 @@ class ConfigPatchContractTests(unittest.TestCase):
     def test_backend_codes_are_known_to_the_frontend(self) -> None:
         backend = _backend_config_patch_codes()
         self.assertGreaterEqual(len(backend), 10, "code extraction from ground_console.py found too little")
+        for code in ("NODE_NOT_FRESH", "SETTINGS_REQUEST_PENDING", "GAIN_NOT_IN_APPROVED_TABLE", "MVP_CENTER_MUST_EQUAL_VFO0"):
+            self.assertIn(code, backend, "code extraction missed a known code")
         missing = backend - _frontend_error_codes() - LOGIN_ONLY_CODES
         self.assertFalse(missing, f"backend codes without a frontend message: {sorted(missing)}")
 

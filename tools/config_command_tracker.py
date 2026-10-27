@@ -1,11 +1,34 @@
 #!/usr/bin/env python3
-"""Server-side state of the config patches the Ground Console published.
+"""Server-side state of the RDF Node commands Kontrol published.
 
-The browser cannot correlate an ``ack/config`` with its command: the Message
-Monitor redacts payload keys that end in ``id``. The console server therefore
-remembers what it published and derives each command's state from what the
-MQTT monitor observed for that id (PUBACK, the broker echo, the edge agent's
-ACK).
+Kontrol sends ``config.patch`` and ``config.get`` to the RDF Node edge
+(``tools/rdf_node_commands.py``). The console server remembers each command it
+published and derives its state from what the MQTT monitor observed for that
+id: the broker's PUBACK, the edge's ACKs on ``ack/config`` and, for a
+``config.get``, the ``settings/reported`` answer. The browser only polls the
+state; it never sees the payload ids it would need to match ACKs itself.
+
+States (``COMMAND_STATES``):
+
+* ``published``: handed to the broker, no PUBACK yet;
+* ``delivered``: the broker answered PUBACK below 128;
+* ``acknowledged``: a progress ACK (``ACCEPTED``, ``APPLYING``, ``VERIFYING``),
+  or a ``config.get`` the edge answered ``APPLIED`` whose settings report has
+  not arrived yet;
+* ``acked`` (final): the edge's final ACK, whatever it says (``APPLIED``,
+  ``PERSISTED_UNVERIFIED``, ``OUTCOME_UNKNOWN``, ``REJECTED``, ``CONFLICT``,
+  ``EXPIRED``, ``FAILED``, ``CANCELLED``); the ACK itself is in the status;
+* ``reported`` (final): a ``config.get`` whose ``settings/reported`` arrived;
+* ``publish_failed`` (final): the publish failed or the PUBACK was 128 or above;
+* ``no_ack`` (final): no ACK at all by ``expires_ms`` plus ``NO_ACK_GRACE_MS``;
+* ``no_final_ack`` (final): the edge acknowledged the command but sent no final
+  ACK within ``FINAL_ACK_WAIT_MS`` of issuing it; its outcome is unknown;
+* ``no_report`` (final): a ``config.get`` answered ``APPLIED`` without a
+  settings report within ``SETTINGS_REPORT_WAIT_MS``.
+
+A final state stays final; a late final ACK (or a late report) still upgrades
+``no_ack``, ``no_final_ack`` and ``no_report``, because it is more information.
+Nothing here retries a command or sends another one.
 
 This module has no paho dependency, so the console can import it, and raise
 ``MonitorPublishError``, when paho-mqtt is not installed.
@@ -18,23 +41,40 @@ import time
 import weakref
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
-# How long after a command's expiry the console waits for a final ACK before
-# it reports ``no_ack``. The edge agent rejects an expired command itself, so
-# this only covers ACK transport delay.
+# How long after a command's expiry the console waits for a first ACK. The
+# edge refuses an expired command itself, so this only covers ACK transport.
 NO_ACK_GRACE_MS = 5_000
+# After a progress ACK the edge may verify for up to its verify_seconds (at
+# most 60 s, default 12 s) behind an 8 s helper call before its final ACK.
+FINAL_ACK_WAIT_MS = 90_000
+# The edge keeps one settings request; the console keeps its id for 60 s
+# (command TTL at most 30 s plus the report's 30 s expiry).
+SETTINGS_REPORT_WAIT_MS = 60_000
 MAX_TRACKED_COMMANDS = 32
 
-FINAL_ACK_STATUSES = frozenset({"applied", "rejected", "conflict", "expired", "failed"})
-PROGRESS_ACK_STATUSES = frozenset({"received", "applying"})
-FINAL_STATES = frozenset({"acked", "publish_failed", "no_ack"})
-COMMAND_STATES = ("published", "delivered", "acknowledged", "acked", "publish_failed", "no_ack")
+FINAL_ACK_STATUSES = frozenset({
+    "APPLIED", "FAILED", "REJECTED", "EXPIRED", "CONFLICT", "PERSISTED_UNVERIFIED", "OUTCOME_UNKNOWN", "CANCELLED",
+})
+PROGRESS_ACK_STATUSES = frozenset({
+    "ACCEPTED", "APPLYING", "VERIFYING", "REBOOT_SCHEDULED", "SHUTDOWN_SCHEDULED", "PPP_RESTART_REQUESTED",
+})
+COMMAND_STATES = (
+    "published", "delivered", "acknowledged", "acked", "reported",
+    "publish_failed", "no_ack", "no_final_ack", "no_report",
+)
+FINAL_STATES = frozenset({"acked", "reported", "publish_failed", "no_ack", "no_final_ack", "no_report"})
+# Final states a later observation may still replace with a better one.
+_TIMEOUT_STATES = frozenset({"no_ack", "no_final_ack", "no_report"})
 # MQTT v5 reason codes of 128 and above are failures (PUBACK "Not authorized"
 # is 135, for example).
 PUBACK_FAILURE_REASON = 128
 
+OP_CONFIG_GET = "config.get"
+OP_CONFIG_PATCH = "config.patch"
+
 
 class MonitorPublishError(RuntimeError):
-    """A config patch could not be handed to the broker.
+    """A command could not be handed to the broker.
 
     ``code`` is one of ``MQTT_NOT_CONNECTED``, ``MQTT_DEPENDENCY_MISSING`` or
     ``MQTT_PUBLISH_FAILED``. Callers match on ``code`` rather than on the class,
@@ -54,9 +94,9 @@ def _monitor_reference(monitor: Any, *, strong: bool = False) -> Callable[[], An
     """Remember which monitor published a command.
 
     While the command is not final the reference is strong: after a reconnect
-    the stopped publisher may still hold a PUBACK, echo or final ACK that has
-    not been polled yet. At most MAX_TRACKED_COMMANDS entries hold one. A
-    final command keeps only a weak reference, so a stopped monitor is freed.
+    the stopped publisher may still hold a PUBACK or ACK that has not been
+    polled yet. At most MAX_TRACKED_COMMANDS entries hold one. A final command
+    keeps only a weak reference, so a stopped monitor is freed.
     """
     if monitor is None:
         return lambda: None
@@ -69,12 +109,27 @@ def _monitor_reference(monitor: Any, *, strong: bool = False) -> Callable[[], An
 
 
 def _empty_observation() -> Dict[str, Any]:
-    return {"puback": None, "echoed_at_ms": None, "ack": None}
+    return {"puback": None, "progress": None, "final": None, "reported_at_ms": None}
+
+
+def _ack_or_none(value: Any, final: bool) -> Optional[Dict[str, Any]]:
+    if not isinstance(value, Mapping) or not isinstance(value.get("status"), str):
+        return None
+    if (value["status"] in FINAL_ACK_STATUSES) is not final:
+        return None
+    result = value.get("result")
+    return {
+        "status": value["status"],
+        "t": value.get("t") if type(value.get("t")) is int else None,
+        "rev": value.get("rev") if type(value.get("rev")) is int else None,
+        "result": dict(result) if isinstance(result, Mapping) else {},
+        "received_at_ms": value.get("received_at_ms") if type(value.get("received_at_ms")) is int else None,
+    }
 
 
 def _observe(monitor: Any, command_id: str) -> Dict[str, Any]:
     """Read one monitor's observation for a command, tolerating any failure."""
-    reader = getattr(monitor, "config_command_observation", None)
+    reader = getattr(monitor, "rdf_node_command_observation", None)
     if monitor is None or not callable(reader):
         return _empty_observation()
     try:
@@ -91,17 +146,45 @@ def _observe(monitor: Any, command_id: str) -> Dict[str, Any]:
             "reason": puback["reason"],
             "received_at_ms": received if type(received) is int else None,
         }
-    echoed = observed.get("echoed_at_ms")
-    if type(echoed) is int:
-        result["echoed_at_ms"] = echoed
-    ack = observed.get("ack")
-    if isinstance(ack, Mapping) and isinstance(ack.get("status"), str):
-        result["ack"] = dict(ack)
+    result["progress"] = _ack_or_none(observed.get("progress"), final=False)
+    result["final"] = _ack_or_none(observed.get("final"), final=True)
+    reported = observed.get("reported_at_ms")
+    if type(reported) is int:
+        result["reported_at_ms"] = reported
     return result
 
 
+def _text(value: Any, limit: int = 64) -> Optional[str]:
+    return value if isinstance(value, str) and 0 < len(value) <= limit else None
+
+
+def public_ack(ack: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """What Kontrol shows of an ACK: status, error, reason, revision, proof."""
+    if ack is None:
+        return None
+    result = ack.get("result") if isinstance(ack.get("result"), Mapping) else {}
+    revision = result.get("revision")
+    proof = result.get("proof")
+    persisted = result.get("persisted")
+    return {
+        "status": ack["status"],
+        "final": ack["status"] in FINAL_ACK_STATUSES,
+        "error": _text(result.get("error")),
+        "reason": _text(result.get("reason")),
+        "revision": revision if type(revision) is int else ack.get("rev"),
+        # config.patch: field -> FRESH_* evidence; config.get: "runtime", "persisted_unverified", ...
+        "proof": (
+            {str(key): value for key, value in proof.items() if isinstance(key, str) and _text(value)}
+            if isinstance(proof, Mapping) else _text(proof)
+        ),
+        "persisted": persisted if isinstance(persisted, bool) else None,
+        "t": ack.get("t"),
+        "received_at_ms": ack.get("received_at_ms"),
+    }
+
+
 class ConfigCommandTracker:
-    """Bounded, thread-safe record of published config patches."""
+    """Bounded, thread-safe record of the commands this console published."""
 
     def __init__(
         self,
@@ -122,17 +205,21 @@ class ConfigCommandTracker:
         command: Mapping[str, Any],
         monitor: Any,
         *,
+        topic: Optional[str] = None,
         published_at_ms: Optional[int] = None,
         publish_failed: bool = False,
     ) -> None:
-        """Remember a command handed to ``monitor`` (or refused by it)."""
+        """Remember a command envelope handed to ``monitor`` (or refused by it)."""
         command_id = str(command["id"])
         changes = command.get("changes")
+        base_rev = command.get("base_rev")
         entry = {
             "command_id": command_id,
-            "issued_ts_ms": int(command["issued_ts_ms"]),
-            "expires_ts_ms": int(command["expires_ts_ms"]),
-            "base_config_rev": int(command["base_config_rev"]),
+            "op": str(command["op"]),
+            "topic": topic,
+            "issued_ms": int(command["issued_ms"]),
+            "expires_ms": int(command["expires_ms"]),
+            "base_rev": base_rev if type(base_rev) is int else None,
             "changes": dict(changes) if isinstance(changes, Mapping) else {},
             "published_at_ms": published_at_ms if published_at_ms is not None else self.now_ms(),
             "monitor": _monitor_reference(monitor, strong=not publish_failed),
@@ -153,24 +240,32 @@ class ConfigCommandTracker:
                 return None
             return self._status_locked(entry, current_monitor, self.now_ms())
 
-    def latest(self, current_monitor: Any) -> Optional[Dict[str, Any]]:
+    def latest(self, current_monitor: Any, op: Optional[str] = OP_CONFIG_PATCH) -> Optional[Dict[str, Any]]:
+        """The newest command of ``op`` (any op with None), or None."""
         with self._lock:
-            if not self._entries:
-                return None
-            entry = self._entries[next(reversed(self._entries))]
-            return self._status_locked(entry, current_monitor, self.now_ms())
+            for entry in reversed(list(self._entries.values())):
+                if op is None or entry["op"] == op:
+                    return self._status_locked(entry, current_monitor, self.now_ms())
+        return None
 
-    def in_flight(self, current_monitor: Any, now_ms: Optional[int] = None) -> Optional[str]:
-        """Return the id of a command that is neither final nor expired."""
+    def in_flight(self, current_monitor: Any, op: str = OP_CONFIG_PATCH, now_ms: Optional[int] = None) -> Optional[str]:
+        """The id of a command of ``op`` that is not final yet, or None."""
         now = self.now_ms() if now_ms is None else int(now_ms)
         with self._lock:
             for entry in reversed(list(self._entries.values())):
-                if now > entry["expires_ts_ms"]:
+                if entry["op"] != op:
                     continue
                 status = self._status_locked(entry, current_monitor, now)
                 if not status["final"]:
                     return entry["command_id"]
         return None
+
+    def last_issued_at(self, op: str) -> Optional[int]:
+        """When the newest command of ``op`` that reached the broker was issued (tracker clock)."""
+        with self._lock:
+            times = [entry["issued_ms"] for entry in self._entries.values()
+                     if entry["op"] == op and not entry["publish_failed"]]
+        return max(times) if times else None
 
     def ids(self) -> List[str]:
         with self._lock:
@@ -183,91 +278,84 @@ class ConfigCommandTracker:
         restarted = publisher is None or publisher is not current_monitor
         sources = [current_monitor]
         if restarted and publisher is not None:
-            # PUBACK and echo were seen by the publishing client; the ACK may
-            # arrive on either, so the current monitor is consulted first.
+            # The PUBACK was seen by the publishing client; an ACK may arrive
+            # on either, so the current monitor is consulted first.
             sources.append(publisher)
         observed = entry["observed"]
         for monitor in sources:
             fresh = _observe(monitor, entry["command_id"])
             if observed["puback"] is None and fresh["puback"] is not None:
                 observed["puback"] = fresh["puback"]
-            if observed["echoed_at_ms"] is None and fresh["echoed_at_ms"] is not None:
-                observed["echoed_at_ms"] = fresh["echoed_at_ms"]
-            ack = fresh["ack"]
-            if ack is not None and not self._ack_is_final(observed["ack"]):
-                # A progress ACK from the current monitor replaces an older
-                # one; the retired monitor only fills a gap or adds a final.
-                if self._ack_is_final(ack) or observed["ack"] is None or monitor is current_monitor:
-                    observed["ack"] = ack
+            if observed["final"] is None and fresh["final"] is not None:
+                observed["final"] = fresh["final"]
+            if fresh["progress"] is not None and (observed["progress"] is None or monitor is current_monitor):
+                observed["progress"] = fresh["progress"]
+            if observed["reported_at_ms"] is None and fresh["reported_at_ms"] is not None:
+                observed["reported_at_ms"] = fresh["reported_at_ms"]
         return restarted
 
-    @staticmethod
-    def _ack_is_final(ack: Optional[Mapping[str, Any]]) -> bool:
-        return isinstance(ack, Mapping) and ack.get("status") in FINAL_ACK_STATUSES
+    def _derive_locked(self, entry: Dict[str, Any], now: int) -> str:
+        observed = entry["observed"]
+        puback = observed["puback"]
+        final = observed["final"]
+        if entry["publish_failed"] or (puback is not None and puback["reason"] >= PUBACK_FAILURE_REASON):
+            return "publish_failed"
+        if final is not None:
+            if entry["op"] == OP_CONFIG_GET and final["status"] == "APPLIED":
+                if observed["reported_at_ms"] is not None:
+                    return "reported"
+                if now > entry["issued_ms"] + SETTINGS_REPORT_WAIT_MS:
+                    return "no_report"
+                return "acknowledged"
+            return "acked"
+        if observed["progress"] is not None:
+            return "no_final_ack" if now > entry["issued_ms"] + FINAL_ACK_WAIT_MS else "acknowledged"
+        if now > entry["expires_ms"] + NO_ACK_GRACE_MS:
+            return "no_ack"
+        return "delivered" if puback is not None else "published"
 
     def _status_locked(self, entry: Dict[str, Any], current_monitor: Any, now: int) -> Dict[str, Any]:
         restarted = self._merge_observations_locked(entry, current_monitor)
+        state = self._derive_locked(entry, now)
+        previous = entry["final_state"]
+        # A final state never goes back to a waiting one; a timeout may still
+        # give way to the answer that arrived late.
+        if previous is not None and (state not in FINAL_STATES or previous not in _TIMEOUT_STATES):
+            state = previous
+        if state in FINAL_STATES and previous is None:
+            entry["monitor"] = _monitor_reference(entry["monitor"]())
+        if state in FINAL_STATES:
+            entry["final_state"] = state
         observed = entry["observed"]
-        puback = observed["puback"]
-        ack = observed["ack"]
-        state = entry["final_state"]
-        # A final state stays final. The one upgrade is a late final ACK after
-        # no_ack, which is more information and still final.
-        if state is None or (state == "no_ack" and self._ack_is_final(ack)):
-            if entry["publish_failed"]:
-                state = "publish_failed"
-            elif puback is not None and puback["reason"] >= PUBACK_FAILURE_REASON:
-                state = "publish_failed"
-            elif self._ack_is_final(ack):
-                state = "acked"
-            elif now > entry["expires_ts_ms"] + NO_ACK_GRACE_MS:
-                state = "no_ack"
-            elif ack is not None and ack.get("status") in PROGRESS_ACK_STATUSES:
-                state = "acknowledged"
-            elif puback is not None:
-                state = "delivered"
-            else:
-                state = "published"
-            if state in FINAL_STATES:
-                if entry["final_state"] is None:
-                    entry["monitor"] = _monitor_reference(entry["monitor"]())
-                entry["final_state"] = state
+        ack = observed["final"] or observed["progress"]
         return {
             "command_id": entry["command_id"],
+            "op": entry["op"],
+            "topic": entry["topic"],
             "state": state,
             "final": state in FINAL_STATES,
             "now_ms": now,
-            "issued_ts_ms": entry["issued_ts_ms"],
-            "expires_ts_ms": entry["expires_ts_ms"],
+            "issued_ms": entry["issued_ms"],
+            "expires_ms": entry["expires_ms"],
             "published_at_ms": entry["published_at_ms"],
-            "base_config_rev": entry["base_config_rev"],
+            "base_rev": entry["base_rev"],
             "changes": dict(entry["changes"]),
-            "puback_reason": None if puback is None else puback["reason"],
-            "echoed": observed["echoed_at_ms"] is not None,
+            "puback_reason": None if observed["puback"] is None else observed["puback"]["reason"],
             "monitor_restarted": restarted,
-            "ack": None if ack is None else _public_ack(ack),
+            "ack": public_ack(ack),
+            "settings_reported_at_ms": observed["reported_at_ms"],
         }
-
-
-def _public_ack(ack: Mapping[str, Any]) -> Dict[str, Any]:
-    changed = ack.get("changed_fields")
-    return {
-        "status": ack.get("status"),
-        "config_rev": ack.get("config_rev") if type(ack.get("config_rev")) is int else None,
-        "readback_ok": ack.get("readback_ok") if isinstance(ack.get("readback_ok"), bool) else None,
-        "error_code": ack.get("error_code") if isinstance(ack.get("error_code"), str) else None,
-        "current_config_rev": (
-            ack.get("current_config_rev") if type(ack.get("current_config_rev")) is int else None
-        ),
-        "changed_fields": [field for field in changed if isinstance(field, str)] if isinstance(changed, list) else [],
-        "received_at_ms": ack.get("received_at_ms") if type(ack.get("received_at_ms")) is int else None,
-    }
 
 
 __all__ = [
     "COMMAND_STATES",
     "ConfigCommandTracker",
     "FINAL_ACK_STATUSES",
+    "FINAL_ACK_WAIT_MS",
+    "FINAL_STATES",
     "MonitorPublishError",
     "NO_ACK_GRACE_MS",
+    "PROGRESS_ACK_STATUSES",
+    "SETTINGS_REPORT_WAIT_MS",
+    "public_ack",
 ]

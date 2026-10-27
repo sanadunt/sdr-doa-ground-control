@@ -7,12 +7,17 @@ The console keeps a narrow boundary:
   collection per refresh interval for every viewer together
   (``data_out_reader``);
 * an optional MQTT monitor subscribes to its configured broker;
-* its one remote write is ``POST /api/mqtt/config-patch``: an admin-gated,
-  explicitly confirmed config patch published once at QoS 1 (never retained,
-  60 s TTL) to ``cmd/config/patch``. It needs a same-origin loopback request,
-  the admin cookie, ``confirm: true``, values inside the contract ranges and
-  the base revision the operator reviewed. The edge agent decides whether to
-  apply it and answers on ``ack/config``;
+* its one remote write is Kontrol's: ``POST /api/mqtt/config-patch``, an
+  admin-gated, explicitly confirmed ``config.patch`` in the RDF Node edge's
+  envelope (``rdf_node_commands``), published once at QoS 1 (never retained,
+  15 s lifetime) to ``sdr/v2/<node>/cmd/config/patch``. It needs a
+  same-origin loopback request, the admin cookie, ``confirm: true``, the
+  edge's safe fields within its rules, a node session (``state``), fresh
+  ``telemetry/health`` and the base revision (``state.cfg``) the operator
+  reviewed. ``POST /api/mqtt/config-get`` sends the read-only ``config.get``
+  with the same Origin and admin gates, so the edge answers with
+  ``settings/reported``. The edge decides whether to apply a patch and
+  answers on ``ack/config``;
 * the settings form's ``/api/dry-run/config-patch`` only validates a preview;
 * local admin settings also change this console's branding;
 * ``/api/preferences`` keeps the operator's browser preferences (theme,
@@ -94,7 +99,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 import lan_access as lan
-import sdr_doa_mqtt
+import rdf_node_commands as cmds
 from config_command_tracker import ConfigCommandTracker, MonitorPublishError
 from data_out_reader import DataOutReader, SnapshotRequest, valid_collection_id
 from mdns_resolver import MdnsResolver
@@ -300,14 +305,16 @@ def _admin_password_from_sources(
 # console never accepts a URL the collector would refuse to read.
 DEFAULT_BIND = "127.0.0.1"
 DEFAULT_PORT = 8787
-DEFAULT_COMMAND_TTL_MS = 10_000
-# Config patches the console really publishes. Longer than the dry-run TTL to
-# tolerate the unverified clock difference between console and Raspberry, and
-# well under the contract's MAX_CONFIG_TTL_MS.
-CONFIG_COMMAND_TTL_MS = 60_000
+# Kontrol's RDF Node commands live 15 s (rdf_node_commands.COMMAND_TTL_MS, the
+# edge's Ground default; the edge accepts at most 30 s).
 MAX_CONFIG_PATCH_REQUEST_BYTES = 4096
-CONFIG_PATCH_REQUEST_KEYS = frozenset({"changes", "base_config_rev", "confirm"})
-_COMMAND_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+CONFIG_PATCH_REQUEST_KEYS = frozenset({"changes", "base_rev", "confirm"})
+# The edge refuses a second config.get from the same link within 1 s.
+CONFIG_GET_MIN_INTERVAL_MS = 1_000
+# Status lookups take any id the edge accepts; the console's own are gc-<hex>.
+_COMMAND_ID_RE = cmds.COMMAND_ID_RE
+# The node Kontrol commands when no MQTT monitor exists yet.
+DEFAULT_RDF_NODE_ID = "uav-01"
 DEFAULT_APP_NAME = "SDR-DoA Ground Console"
 DEFAULT_BRANDING_PATH = Path.home() / ".config" / "sdr-doa-ground-console" / "branding.json"
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "sdr-doa-ground-console" / "console.json"
@@ -367,14 +374,6 @@ DEFAULT_MQTT_WS_PATH = "/mqtt"
 _MQTT_WS_PATH_RE = re.compile(r"/[A-Za-z0-9._~/-]{0,127}")
 _MQTT_PORT_QUERY_RE = re.compile(r"[0-9]{1,5}")
 MQTT_DEPENDENCY_ERROR = "MQTT monitor dependency paho-mqtt is not installed"
-
-
-# This is deliberately narrower than the full settings document. The ordinary
-# telemetry control path must not change DAQ topology, calibration, endpoints,
-# credentials, or system lifecycle.
-# The dry-run preview validates with the MQTT contract, so its allowlist is
-# the contract's own range table.
-CONFIG_ALLOWLIST = dict(sdr_doa_mqtt.CONFIG_RANGES)
 
 
 def _is_allowed_mqtt_host(value: str) -> bool:
@@ -462,34 +461,32 @@ class _UnavailableMqttMonitor:
         snapshot.update({"enabled": True, "connection": "error", "last_error": "DEPENDENCY_MISSING"})
         return snapshot
 
-    def publish_config_patch(self, _command: Any) -> Dict[str, Any]:
+    def publish_rdf_node_command(self, _command: Any) -> Dict[str, Any]:
         raise MonitorPublishError("MQTT_DEPENDENCY_MISSING", self.error)
 
-    def reported_config(self) -> Dict[str, Any]:
+    def rdf_node_control_view(self) -> Dict[str, Any]:
         return {"available": False}
 
-    def config_command_observation(self, _command_id: str) -> Dict[str, Any]:
-        return {"published": False, "puback": None, "echoed_at_ms": None, "ack": None}
+    def rdf_node_command_observation(self, _command_id: str) -> Dict[str, Any]:
+        return {"published": False, "puback": None, "progress": None, "final": None, "reported_at_ms": None}
 
 
 def _monitor_can_publish(monitor: Any) -> bool:
-    """True for a real monitor that offers the config-patch publish path."""
+    """True for a real monitor that offers the Kontrol command publish path."""
     return (
         monitor is not None
         and not isinstance(monitor, _UnavailableMqttMonitor)
-        and callable(getattr(monitor, "publish_config_patch", None))
+        and callable(getattr(monitor, "publish_rdf_node_command", None))
     )
 
 
-def _plain_number(value: float) -> Any:
-    return int(value) if float(value).is_integer() else value
+def _monitor_node_id(monitor: Any) -> str:
+    node_id = getattr(monitor, "node_id", None) if monitor is not None else None
+    return node_id if isinstance(node_id, str) and node_id else DEFAULT_RDF_NODE_ID
 
 
 def _config_patch_ranges() -> Dict[str, List[Any]]:
-    return {
-        field: [_plain_number(low), _plain_number(high)]
-        for field, (low, high) in sdr_doa_mqtt.CONFIG_RANGES.items()
-    }
+    return cmds.ranges_view()
 
 
 class ConfigPatchRejected(Exception):
@@ -507,67 +504,40 @@ class ConfigPatchRejected(Exception):
 
 
 def _parse_config_patch_request(payload: Any) -> Tuple[Dict[str, Any], Optional[int]]:
-    """Checks 3-5 of the config-patch contract; the first failure wins."""
+    """Request shape, confirm and the edge's field rules; the first failure wins."""
     if (
         not isinstance(payload, dict)
         or "changes" not in payload
-        or "base_config_rev" not in payload
+        or "base_rev" not in payload
         or set(payload) - CONFIG_PATCH_REQUEST_KEYS
     ):
         raise ConfigPatchRejected(
             HTTPStatus.BAD_REQUEST,
             "INVALID_REQUEST",
-            "request must be a JSON object with changes, base_config_rev and confirm only",
+            "request must be a JSON object with changes, base_rev and confirm only",
         )
     changes = payload["changes"]
-    base_config_rev = payload["base_config_rev"]
+    base_rev = payload["base_rev"]
     if not isinstance(changes, dict):
         raise ConfigPatchRejected(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "changes must be a JSON object")
-    if base_config_rev is not None and (
-        isinstance(base_config_rev, bool) or not isinstance(base_config_rev, int) or base_config_rev < 0
-    ):
+    if base_rev is not None and (isinstance(base_rev, bool) or not isinstance(base_rev, int) or base_rev < 0):
         raise ConfigPatchRejected(
-            HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "base_config_rev must be a non-negative integer or null",
+            HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "base_rev must be a non-negative integer or null",
         )
     if payload.get("confirm") is not True:
         raise ConfigPatchRejected(
             HTTPStatus.BAD_REQUEST, "CONFIRM_REQUIRED", "confirm must be true after the change has been reviewed",
         )
-    if not changes:
-        raise ConfigPatchRejected(HTTPStatus.BAD_REQUEST, "EMPTY_CHANGES", "changes must contain at least one field")
-    unknown = sorted(set(changes) - set(CONFIG_ALLOWLIST))
-    if unknown:
-        raise ConfigPatchRejected(
-            HTTPStatus.BAD_REQUEST,
-            "FIELD_NOT_ALLOWED",
-            "fields not allowed: " + ", ".join(unknown),
-            fields=unknown,
-        )
-    for field, value in changes.items():
-        low, high = CONFIG_ALLOWLIST[field]
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or (isinstance(value, float) and not math.isfinite(value))
-            or not low <= value <= high
-        ):
-            raise ConfigPatchRejected(
-                HTTPStatus.BAD_REQUEST,
-                "VALUE_OUT_OF_RANGE",
-                f"{field} must be a finite number from {low:g} to {high:g}",
-                field=field,
-                range=[_plain_number(low), _plain_number(high)],
-            )
-    return dict(changes), base_config_rev
+    try:
+        normalized = cmds.validate_patch_changes(changes)
+    except cmds.CommandRefused as refused:
+        raise ConfigPatchRejected(HTTPStatus.BAD_REQUEST, refused.code, refused.message, **refused.extra) from refused
+    return normalized, base_rev
 
 
-_REPORTED_VALUE_SOURCES = frozenset({"v1_config_reported", "v2_effective"})
-_BASE_REVISION_SOURCES = frozenset({"config_reported", "ack", "state"})
-
-
-def _monitor_reported_config(monitor: Any) -> Optional[Dict[str, Any]]:
-    """The monitor's reported_config(), or None when it has none or fails."""
-    reader = getattr(monitor, "reported_config", None)
+def _monitor_control_view(monitor: Any) -> Optional[Dict[str, Any]]:
+    """The monitor's rdf_node_control_view(), or None when it has none or fails."""
+    reader = getattr(monitor, "rdf_node_control_view", None)
     if monitor is None or not callable(reader):
         return None
     try:
@@ -585,55 +555,55 @@ def _finite_or_none(value: Any) -> Any:
     return value
 
 
-def _normalize_reported(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Keep only the documented, well-typed fields of reported_config()."""
-    values_in = data.get("values") if isinstance(data.get("values"), dict) else {}
-    sources_in = data.get("value_sources") if isinstance(data.get("value_sources"), dict) else {}
-    values = {field: _finite_or_none(values_in.get(field)) for field in CONFIG_ALLOWLIST}
-    sources = {
-        field: sources_in.get(field) if values[field] is not None and sources_in.get(field) in _REPORTED_VALUE_SOURCES else None
-        for field in CONFIG_ALLOWLIST
-    }
-    received_in = data.get("value_received_at_ms") if isinstance(data.get("value_received_at_ms"), dict) else {}
-    received = {
-        field: received_in.get(field) if values[field] is not None and type(received_in.get(field)) is int and received_in.get(field) >= 0 else None
-        for field in CONFIG_ALLOWLIST
-    }
-    revision = data.get("base_config_rev")
-    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
-        revision = None
-    revision_source = data.get("base_config_rev_source") if revision is not None else None
-    if revision_source not in _BASE_REVISION_SOURCES:
-        revision_source = None
-    reported_in = data.get("reported")
-    reported: Optional[Dict[str, Any]] = None
-    if isinstance(reported_in, dict):
-        def optional_int(key: str) -> Optional[int]:
-            value = reported_in.get(key)
-            return value if type(value) is int else None
+def _int_or_none(value: Any, minimum: int = 0) -> Optional[int]:
+    return value if type(value) is int and value >= minimum else None
 
-        # A retained replay is aged from its source timestamp (age_basis
-        # "source_ts"), or has no age; see sdr_doa_mqtt_monitor._reported_age.
-        age_basis = reported_in.get("age_basis")
-        reported = {
-            "config_rev": optional_int("config_rev"),
-            "received_at_ms": optional_int("received_at_ms"),
-            "source_ts_ms": optional_int("source_ts_ms"),
-            "age_ms": optional_int("age_ms"),
-            "age_basis": age_basis if age_basis in {"received", "source_ts"} else None,
-            "retained": reported_in.get("retained") is True,
-            "synthetic": reported_in.get("synthetic") is True,
-            "source": reported_in.get("source") if reported_in.get("source") in {"v1", "v2", "v1+v2"} else None,
-        }
-    connection = data.get("connection")
+
+def _session_or_none(view: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The node session a command can name: known, with a sid and a boot."""
+    session = view.get("session")
+    if not isinstance(session, dict) or session.get("known") is not True:
+        return None
+    if not isinstance(session.get("sid"), str) or not isinstance(session.get("boot"), str):
+        return None
+    return session
+
+
+def _node_view(session: Optional[Dict[str, Any]], now_ms: int) -> Optional[Dict[str, Any]]:
+    """What Kontrol shows of the node session; never the boot or instance ids."""
+    if session is None:
+        return None
+    received = _int_or_none(session.get("health_received_at_ms"))
+    capabilities = session.get("capabilities") if isinstance(session.get("capabilities"), dict) else {}
+
+    def flag(name: str) -> Optional[bool]:
+        value = capabilities.get(name)
+        return value if isinstance(value, bool) else None
+
     return {
-        "connection": connection if isinstance(connection, str) and connection else "unknown",
-        "base_config_rev": revision,
-        "base_config_rev_source": revision_source,
-        "reported": reported,
-        "values": values,
-        "value_sources": sources,
-        "value_received_at_ms": received,
+        "sid": session["sid"],
+        "cfg": _int_or_none(session.get("cfg")),
+        "health_fresh": session.get("health_fresh") is True,
+        "health_age_ms": None if received is None else max(0, now_ms - received),
+        "remote_commands": flag("remote_commands"),
+        "remote_config_patch": flag("remote_config_patch"),
+    }
+
+
+def _settings_view(report: Any, now_ms: int) -> Optional[Dict[str, Any]]:
+    """The latest settings/reported without its native text; safe values only while current."""
+    if not isinstance(report, dict) or not isinstance(report.get("id"), str):
+        return None
+    received = _int_or_none(report.get("received_at_ms"))
+    current = report.get("matches_state_cfg") is True
+    safe = report.get("safe_settings") if current and isinstance(report.get("safe_settings"), dict) else {}
+    return {
+        "id": report["id"],
+        "rev": _int_or_none(report.get("rev")),
+        "received_at_ms": received,
+        "age_ms": None if received is None else max(0, now_ms - received),
+        "matches_state_cfg": current,
+        "values": {field: _finite_or_none(safe.get(field)) for field in cmds.PATCH_FIELDS},
     }
 
 
@@ -2184,42 +2154,53 @@ renderClock(); setInterval(renderClock,1000); loadBranding(); if (initialConfig 
 """
 
 
-def validate_config_patch(payload: Any, now_ms: Optional[int] = None) -> Dict[str, Any]:
-    """Validate a narrow settings patch without applying or transmitting it.
+def validate_config_patch(
+    payload: Any,
+    now_ms: Optional[int] = None,
+    session: Optional[Dict[str, Any]] = None,
+    node_id: str = DEFAULT_RDF_NODE_ID,
+) -> Dict[str, Any]:
+    """Validate a settings patch as Kontrol would send it, without sending it.
 
-    The preview is built and checked by the shared MQTT contract, so
-    "passed" means the edge agent would accept the same envelope. The agent
-    drops a config_patch without base_config_rev, so the preview requires it.
+    The changes go through the RDF Node edge's own field rules
+    (rdf_node_commands), and the preview is the config.patch envelope Kontrol
+    would publish now: sid, boot and base_rev come from the node's latest
+    state when the MQTT monitor has one (``session_known``), else they are
+    null. Nothing is published, posted or written.
     """
     if not isinstance(payload, dict):
         raise ValueError("request must be a JSON object")
-    changes = payload.get("changes")
-    if not isinstance(changes, dict) or not changes:
-        raise ValueError("changes must be a non-empty object")
-    unknown = sorted(set(changes) - set(CONFIG_ALLOWLIST))
-    if unknown:
-        raise ValueError("fields not allowed: " + ", ".join(unknown))
-    if payload.get("base_config_rev") is None:
-        raise ValueError(
-            "base_config_rev is required: the edge agent rejects a config_patch without the revision it is based on"
-        )
-
+    if set(payload) - {"changes"}:
+        raise ValueError("only changes is accepted; sid, boot and base_rev come from the node's state")
+    try:
+        changes = cmds.validate_patch_changes(payload.get("changes"))
+    except cmds.CommandRefused as refused:
+        raise ValueError(f"{refused.code}: {refused.message}") from refused
     issued = int(time.time() * 1000) if now_ms is None else int(now_ms)
-    command = sdr_doa_mqtt.build_config_patch(
+    known = session is not None
+    command = cmds.build_command(
+        cmds.OP_CONFIG_PATCH,
         command_id="dryrun-" + uuid.uuid4().hex[:12],
-        base_config_rev=payload["base_config_rev"],
+        sid=session["sid"] if session else None,
+        boot=session["boot"] if session else None,
+        base_rev=_int_or_none(session.get("cfg")) if session else None,
+        issued_ms=issued,
         changes=changes,
-        issued_ts_ms=issued,
-        expires_ts_ms=issued + DEFAULT_COMMAND_TTL_MS,
     )
-    sdr_doa_mqtt.validate_config_patch(command, now_ms=issued)
+    if known and command["base_rev"] is not None:
+        try:
+            cmds.validate_command(command, now_ms=issued)
+        except cmds.CommandRefused as refused:
+            raise ValueError(f"{refused.code}: {refused.message}") from refused
     return {
         "dry_run": True,
         "transport": "none",
         "applied": False,
         "ok": True,
         "validation": "passed",
-        "contract": "sdr/v1 config_patch",
+        "contract": "RDF Node config.patch",
+        "topic": cmds.command_topic(node_id, cmds.OP_CONFIG_PATCH),
+        "session_known": known,
         "command": command,
         "note": "Preview only; no MQTT, HTTP POST, file write, or RDF-SDR mutation was performed.",
     }
@@ -3106,10 +3087,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def _capabilities_body(self) -> Dict[str, Any]:
         """Body of GET /api/capabilities on the loopback listener."""
         monitor = self.console_server.mqtt_monitor
+        node_id = _monitor_node_id(monitor)
         return {
-            # The console has one publish path, the admin-gated config
-            # patch below. It never POSTs to the Raspberry or applies
-            # settings itself; the edge agent does.
+            # The console has one publish path, Kontrol's RDF Node commands
+            # below (the admin-gated config.patch and its read-only
+            # config.get). It never POSTs to the Raspberry or applies
+            # settings itself; the edge does.
             "read_only": False,
             "mqtt_publish": True,
             "remote_post": False,
@@ -3119,14 +3102,19 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             "admin_auth_required": True,
             "admin_enabled": bool(ADMIN_PASSWORD),
             "admin_default_password": ADMIN_PASSWORD == DEFAULT_ADMIN_PASSWORD,
-            "config_allowlist": sorted(CONFIG_ALLOWLIST),
+            "config_allowlist": list(cmds.PATCH_FIELDS),
             "config_patch": {
                 "enabled": _monitor_can_publish(monitor),
                 "requires_admin": True,
-                "topic": sdr_doa_mqtt.TOPICS["config_patch"],
-                "qos": sdr_doa_mqtt.COMMAND_QOS,
-                "ttl_ms": CONFIG_COMMAND_TTL_MS,
+                "topic": cmds.command_topic(node_id, cmds.OP_CONFIG_PATCH),
+                "get_topic": cmds.command_topic(node_id, cmds.OP_CONFIG_GET),
+                "ack_topic": f"sdr/v2/{node_id}/{cmds.ACK_SUFFIX}",
+                "settings_topic": f"sdr/v2/{node_id}/{cmds.SETTINGS_SUFFIX}",
+                "qos": cmds.COMMAND_QOS,
+                "ttl_ms": cmds.COMMAND_TTL_MS,
                 "ranges": _config_patch_ranges(),
+                "gain_table_db": list(cmds.GAIN_TABLE_DB),
+                "requires_fresh_health": True,
             },
             "refresh_intervals_s": sorted(ALLOWED_REFRESH_INTERVALS),
             "snapshot_budget_ms": int(SNAPSHOT_TOTAL_BUDGET_S * 1000),
@@ -3267,7 +3255,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             command_id = parsed.path[len("/api/mqtt/config-patch/"):]
             if _COMMAND_ID_RE.fullmatch(command_id) is None:
                 self._send_config_patch_error(
-                    HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "command id must match [A-Za-z0-9_-]{1,64}",
+                    HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "command id must match [A-Za-z0-9_.:-]{1,80}",
                 )
                 return
             status = self.console_server.config_commands.status(command_id, self.console_server.mqtt_monitor)
@@ -3546,13 +3534,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             except (ValueError, OSError) as exc:
                 self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
-        if parsed.path == "/api/mqtt/config-patch":
-            # Checks 1-2 run before the body is read; 3-10 live on the server.
+        if parsed.path in ("/api/mqtt/config-patch", "/api/mqtt/config-get"):
+            # Kontrol's RDF Node commands. Origin and admin are checked before
+            # the body is read; the other checks live on the server.
             if not self._same_origin_loopback_request():
                 self._send_config_patch_error(
                     HTTPStatus.FORBIDDEN,
                     "ORIGIN_REJECTED",
-                    "config patch requires a same-origin loopback request",
+                    "Kontrol commands require a same-origin loopback request",
                 )
                 return
             if not self._is_admin():
@@ -3565,7 +3554,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self._send_config_patch_error(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", str(exc))
                 return
-            status, body = self.console_server.submit_config_patch(payload)
+            if parsed.path == "/api/mqtt/config-patch":
+                status, body = self.console_server.submit_config_patch(payload)
+            else:
+                status, body = self.console_server.submit_config_get(payload)
             self._send_json(body, status)
             return
         if parsed.path == "/api/mqtt/connect":
@@ -3605,7 +3597,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = self._read_json()
-            result = validate_config_patch(payload)
+            monitor = self.console_server.mqtt_monitor
+            view = _monitor_control_view(monitor) if _monitor_can_publish(monitor) else None
+            result = validate_config_patch(
+                payload,
+                session=_session_or_none(view) if view and view.get("available") is True else None,
+                node_id=_monitor_node_id(monitor),
+            )
             self._send_json(result)
         except ValueError as exc:
             self._send_json(
@@ -4258,11 +4256,11 @@ class GroundConsoleServer(ThreadingHTTPServer):
         self.monotonic: Callable[[], float] = time.monotonic
         self._login_failures: List[float] = []
         self._login_locked_until = 0.0
-        # Wall clock for config-patch issue and expiry times; tests may
+        # Wall clock for Kontrol command issue and expiry times; tests may
         # replace it to step past a command's expiry.
         self.clock_ms: Callable[[], int] = lambda: int(time.time() * 1000)
         self.config_commands = ConfigCommandTracker(clock_ms=lambda: self.clock_ms())
-        # One config patch is checked and published at a time, so two
+        # One Kontrol command is checked and published at a time, so two
         # requests cannot both pass the in-flight check.
         self._config_patch_lock = threading.Lock()
         self.node_progress = NodeProgressTracker()
@@ -4587,117 +4585,178 @@ class GroundConsoleServer(ThreadingHTTPServer):
                 self._admin_sessions.pop(token, None)
 
     def config_reported(self) -> Dict[str, Any]:
-        """Body of GET /api/mqtt/config-reported; always a 200 payload."""
+        """Body of GET /api/mqtt/config-reported; always a 200 payload.
+
+        Kontrol's view of the node: the MQTT connection, the node session
+        (``state.sid``, ``state.cfg`` as ``base_rev``, health freshness), the
+        latest ``settings/reported`` (its safe values only while its ``rev``
+        is ``state.cfg``), the patch in flight and the latest ``config.get``.
+        """
         monitor = self.mqtt_monitor
         config = self.get_config()
-        empty = {field: None for field in CONFIG_ALLOWLIST}
+        now = self.clock_ms()
+        empty = {field: None for field in cmds.PATCH_FIELDS}
         body: Dict[str, Any] = {
             "available": False,
             "code": None,
-            "now_ms": self.clock_ms(),
+            "now_ms": now,
             "broker": {
                 "host": getattr(monitor, "host", None) if monitor is not None else (config.get("mqtt_host") or None),
                 "port": getattr(monitor, "port", None) if monitor is not None else config.get("mqtt_port"),
                 "transport": getattr(monitor, "transport", None) if monitor is not None else config.get("mqtt_transport"),
                 "connection": "disabled",
             },
-            "base_config_rev": None,
-            "base_config_rev_source": None,
-            "reported": None,
+            "node": None,
+            "base_rev": None,
+            "settings": None,
             "values": dict(empty),
             "value_sources": dict(empty),
             "value_received_at_ms": dict(empty),
             "pending_command_id": self.config_commands.in_flight(monitor),
+            "settings_request": self.config_commands.latest(monitor, op=cmds.OP_CONFIG_GET),
         }
         if monitor is None:
             body["code"] = "MQTT_MONITOR_DISABLED"
             return body
-        data = _monitor_reported_config(monitor) if _monitor_can_publish(monitor) else None
-        if data is None or data.get("available") is not True:
+        view = _monitor_control_view(monitor) if _monitor_can_publish(monitor) else None
+        if view is None or view.get("available") is not True:
             body["code"] = "MQTT_DEPENDENCY_MISSING"
             body["broker"]["connection"] = "error"
             return body
-        normalized = _normalize_reported(data)
-        body["broker"]["connection"] = normalized.pop("connection")
-        body.update(normalized)
-        body["available"] = True
+        connection = view.get("connection")
+        body["broker"]["connection"] = connection if isinstance(connection, str) and connection else "unknown"
+        view_now = _int_or_none(view.get("now_ms")) or now
+        session = _session_or_none(view)
+        node = _node_view(session, view_now)
+        settings = _settings_view(view.get("settings"), view_now)
+        body.update(available=True, node=node, base_rev=None if node is None else node["cfg"], settings=settings)
+        if settings is not None and settings["matches_state_cfg"]:
+            for field, value in settings["values"].items():
+                if value is not None:
+                    body["values"][field] = value
+                    body["value_sources"][field] = "settings_reported"
+                    body["value_received_at_ms"][field] = settings["received_at_ms"]
         return body
 
     def submit_config_patch(self, payload: Any) -> Tuple[int, Dict[str, Any]]:
-        """Checks 3-10 of POST /api/mqtt/config-patch; returns (status, body).
-
-        The caller has already checked the Origin and the admin cookie.
-        """
+        """POST /api/mqtt/config-patch after Origin and admin; returns (status, body)."""
         try:
-            changes, requested_revision = _parse_config_patch_request(payload)
+            changes, requested_rev = _parse_config_patch_request(payload)
             with self._config_patch_lock:
-                return self._publish_config_patch_locked(changes, requested_revision)
+                return self._publish_command_locked(cmds.OP_CONFIG_PATCH, changes=changes, requested_rev=requested_rev)
         except ConfigPatchRejected as rejected:
             return rejected.status, rejected.body()
 
-    def _publish_config_patch_locked(
+    def submit_config_get(self, payload: Any) -> Tuple[int, Dict[str, Any]]:
+        """POST /api/mqtt/config-get after Origin and admin; returns (status, body)."""
+        try:
+            if not isinstance(payload, dict) or payload:
+                raise ConfigPatchRejected(
+                    HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "request must be an empty JSON object",
+                )
+            with self._config_patch_lock:
+                return self._publish_command_locked(cmds.OP_CONFIG_GET)
+        except ConfigPatchRejected as rejected:
+            return rejected.status, rejected.body()
+
+    def _publish_command_locked(
         self,
-        changes: Dict[str, Any],
-        requested_revision: Optional[int],
+        op: str,
+        *,
+        changes: Optional[Dict[str, Any]] = None,
+        requested_rev: Optional[int] = None,
     ) -> Tuple[int, Dict[str, Any]]:
+        """The monitor, node and in-flight checks, then the publish; the first failure wins."""
         monitor = self.mqtt_monitor
         if monitor is None:
             raise ConfigPatchRejected(
                 HTTPStatus.CONFLICT, "MQTT_MONITOR_DISABLED", "the MQTT monitor is off; set an MQTT host first",
             )
-        reported = _monitor_reported_config(monitor) if _monitor_can_publish(monitor) else None
-        if reported is None or reported.get("available") is not True:
+        view = _monitor_control_view(monitor) if _monitor_can_publish(monitor) else None
+        if view is None or view.get("available") is not True:
             raise ConfigPatchRejected(
                 HTTPStatus.SERVICE_UNAVAILABLE, "MQTT_DEPENDENCY_MISSING", MQTT_DEPENDENCY_ERROR,
             )
-        current = _normalize_reported(reported)
-        if current["connection"] != "connected":
+        if view.get("connection") != "connected":
             raise ConfigPatchRejected(
                 HTTPStatus.SERVICE_UNAVAILABLE,
                 "MQTT_NOT_CONNECTED",
                 "the MQTT monitor is not connected with its subscriptions acknowledged",
             )
-        base_revision = current["base_config_rev"]
-        if base_revision is None:
+        session = _session_or_none(view)
+        if session is None:
             raise ConfigPatchRejected(
                 HTTPStatus.CONFLICT,
-                "CONFIG_REVISION_UNKNOWN",
-                "no config revision has been reported on MQTT yet",
+                "NODE_SESSION_UNAVAILABLE",
+                "no RDF Node state (sid, boot) has been received; a command must name the node session",
             )
-        if requested_revision != base_revision:
-            raise ConfigPatchRejected(
-                HTTPStatus.CONFLICT,
-                "CONFIG_REVISION_STALE",
-                "the reviewed base revision is no longer current; reload the reported values",
-                current_base_config_rev=base_revision,
-            )
-        pending = self.config_commands.in_flight(monitor)
-        if pending is not None:
-            raise ConfigPatchRejected(
-                HTTPStatus.CONFLICT,
-                "COMMAND_IN_FLIGHT",
-                "another config patch is still waiting for its result",
-                command_id=pending,
-            )
+        base_rev = _int_or_none(session.get("cfg"))
+        if op == cmds.OP_CONFIG_PATCH:
+            if session.get("health_fresh") is not True:
+                raise ConfigPatchRejected(
+                    HTTPStatus.CONFLICT,
+                    "NODE_NOT_FRESH",
+                    "the RDF Node sent no fresh telemetry/health; a config patch needs a live node",
+                )
+            if base_rev is None:
+                raise ConfigPatchRejected(
+                    HTTPStatus.CONFLICT,
+                    "CONFIG_REVISION_UNKNOWN",
+                    "the RDF Node state carries no config revision (state.cfg) yet",
+                )
+            if requested_rev != base_rev:
+                raise ConfigPatchRejected(
+                    HTTPStatus.CONFLICT,
+                    "CONFIG_REVISION_STALE",
+                    "the reviewed base revision is no longer the node's; read the values again",
+                    current_base_rev=base_rev,
+                )
+            pending = self.config_commands.in_flight(monitor, cmds.OP_CONFIG_PATCH)
+            if pending is not None:
+                raise ConfigPatchRejected(
+                    HTTPStatus.CONFLICT,
+                    "COMMAND_IN_FLIGHT",
+                    "another config patch is still waiting for its result",
+                    command_id=pending,
+                )
+        else:
+            pending = self.config_commands.in_flight(monitor, cmds.OP_CONFIG_GET)
+            if pending is not None:
+                raise ConfigPatchRejected(
+                    HTTPStatus.CONFLICT,
+                    "SETTINGS_REQUEST_PENDING",
+                    "the last settings request is still waiting for its answer",
+                    command_id=pending,
+                )
+            last = self.config_commands.last_issued_at(cmds.OP_CONFIG_GET)
+            if last is not None and self.clock_ms() - last < CONFIG_GET_MIN_INTERVAL_MS:
+                raise ConfigPatchRejected(
+                    HTTPStatus.TOO_MANY_REQUESTS,
+                    "CONFIG_GET_TOO_SOON",
+                    "the RDF Node answers at most one settings request a second",
+                )
         issued = int(self.clock_ms())
+        command = cmds.build_command(
+            op,
+            command_id=cmds.new_command_id(),
+            sid=session["sid"],
+            boot=session["boot"],
+            base_rev=base_rev,
+            issued_ms=issued,
+            changes=changes,
+        )
         try:
-            command = sdr_doa_mqtt.build_config_patch(
-                command_id="gc-" + uuid.uuid4().hex[:24],
-                base_config_rev=base_revision,
-                changes=changes,
-                issued_ts_ms=issued,
-                expires_ts_ms=issued + CONFIG_COMMAND_TTL_MS,
-            )
-            sdr_doa_mqtt.validate_config_patch(command, now_ms=issued)
-        except sdr_doa_mqtt.ContractError as exc:
-            raise ConfigPatchRejected(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", str(exc)) from exc
+            cmds.validate_command(command, now_ms=issued)
+        except cmds.CommandRefused as refused:
+            raise ConfigPatchRejected(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", refused.message) from refused
+        topic = cmds.command_topic(_monitor_node_id(monitor), op)
         try:
-            result = monitor.publish_config_patch(command)
+            result = monitor.publish_rdf_node_command(command)
         except Exception as exc:
             # Match on the code, not the class: the monitor module may be
             # loaded under another package name than this one.
             code = getattr(exc, "code", None)
-            self.config_commands.record(command, monitor, publish_failed=True)
+            self.config_commands.record(command, monitor, topic=topic, publish_failed=True)
             if code in {"MQTT_NOT_CONNECTED", "MQTT_DEPENDENCY_MISSING"}:
                 raise ConfigPatchRejected(
                     HTTPStatus.SERVICE_UNAVAILABLE, code, str(exc) or code, command_id=command["id"],
@@ -4709,23 +4768,27 @@ class GroundConsoleServer(ThreadingHTTPServer):
                 command_id=command["id"],
             ) from exc
         published_at = result.get("published_at_ms") if isinstance(result, dict) else None
+        published_topic = result.get("topic") if isinstance(result, dict) else None
+        if isinstance(published_topic, str):
+            topic = published_topic
         self.config_commands.record(
             command,
             monitor,
+            topic=topic,
             published_at_ms=published_at if type(published_at) is int else issued,
         )
-        topic = result.get("topic") if isinstance(result, dict) else None
         return HTTPStatus.ACCEPTED, {
             "ok": True,
             "command_id": command["id"],
+            "op": op,
             "state": "published",
-            "topic": topic if isinstance(topic, str) else sdr_doa_mqtt.TOPICS["config_patch"],
-            "qos": sdr_doa_mqtt.COMMAND_QOS,
-            "base_config_rev": command["base_config_rev"],
-            "issued_ts_ms": command["issued_ts_ms"],
-            "expires_ts_ms": command["expires_ts_ms"],
-            "ttl_ms": CONFIG_COMMAND_TTL_MS,
-            "changes": dict(command["changes"]),
+            "topic": topic,
+            "qos": cmds.COMMAND_QOS,
+            "base_rev": command["base_rev"],
+            "issued_ms": command["issued_ms"],
+            "expires_ms": command["expires_ms"],
+            "ttl_ms": cmds.COMMAND_TTL_MS,
+            "changes": dict(command.get("changes") or {}),
         }
 
     def enable_mqtt_monitor(
@@ -4749,7 +4812,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Local SDR-DoA Ground Console: read-only Data Out, an MQTT monitor, "
-            "and one admin-confirmed config-patch publish"
+            "and Kontrol's admin-confirmed RDF Node config patch"
         )
     )
     parser.add_argument(

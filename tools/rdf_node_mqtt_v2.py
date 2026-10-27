@@ -600,6 +600,9 @@ class RdfNodeV2Telemetry:
         self._availability: Optional[Dict[str, Any]] = None
         self._acks: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         self._settings_requests: Dict[str, int] = {}
+        # Called with (suffix, record) for every ACK and settings report this
+        # store accepts; the monitor uses it to follow the commands it sent.
+        self.on_accepted: Optional[Callable[[str, Dict[str, Any]], None]] = None
         self._reset_session()
 
     @staticmethod
@@ -642,7 +645,17 @@ class RdfNodeV2Telemetry:
             "health_q": health["payload"]["q"] if health else None,
             "health_t": health["payload"]["t"] if health else None,
             "health_received_at_ms": health["received_at_ms"] if health else None,
+            "capabilities": self._session_capabilities(),
         }
+
+    def _session_capabilities(self) -> Optional[Dict[str, bool]]:
+        """The command flags of ``capabilities``, only when it belongs to the current session."""
+        if self._capabilities is None or self._session is None:
+            return None
+        payload = self._capabilities["payload"]
+        if payload["sid"] != self._session["payload"]["sid"]:
+            return None
+        return {flag: payload[flag] for flag in ("remote_commands", "remote_config_patch", "config_patch")}
 
     def expect_settings_report(self, command_id: str, now_ms: int) -> None:
         """Accept the ``settings/reported`` answer to a ``config.get`` with this id."""
@@ -931,6 +944,7 @@ class RdfNodeV2Telemetry:
         del self._settings_requests[value["id"]]
         self._settings = {"value": value, "received_at_ms": at}
         self._mark(suffix, entry, "FRESH", value)
+        self._notify(suffix, {"id": value["id"], "rev": value["rev"], "t": value["t"], "received_at_ms": at})
 
     def _on_ack(self, suffix: str, value: Dict[str, Any], entry: Dict[str, Any], at: int) -> None:
         if not self._bound(suffix, value, entry):
@@ -952,6 +966,17 @@ class RdfNodeV2Telemetry:
         if suffix == "ack/config" and final and status != "APPLIED":
             self._settings_requests.pop(value["id"], None)
         self._mark(suffix, entry, "FRESH", value)
+        self._notify(suffix, self._acks[value["id"]])
+
+    def _notify(self, suffix: str, record: Dict[str, Any]) -> None:
+        listener = self.on_accepted
+        if listener is None:
+            return
+        try:
+            listener(suffix, copy.deepcopy(record))
+        except Exception:
+            # A listener's failure never changes what the store accepted.
+            pass
 
     # -- views ----------------------------------------------------------------
 
