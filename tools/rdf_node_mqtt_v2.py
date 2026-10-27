@@ -599,7 +599,8 @@ class RdfNodeV2Telemetry:
         self._capabilities: Optional[Dict[str, Any]] = None
         self._availability: Optional[Dict[str, Any]] = None
         self._acks: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
-        self._settings_requests: Dict[str, int] = {}
+        # config.get id -> (expiry, sid the command named or None).
+        self._settings_requests: Dict[str, Tuple[int, Optional[str]]] = {}
         # Called with (suffix, record) for every ACK and settings report this
         # store accepts; the monitor uses it to follow the commands it sent.
         self.on_accepted: Optional[Callable[[str, Dict[str, Any]], None]] = None
@@ -657,17 +658,24 @@ class RdfNodeV2Telemetry:
             return None
         return {flag: payload[flag] for flag in ("remote_commands", "remote_config_patch", "config_patch")}
 
-    def expect_settings_report(self, command_id: str, now_ms: int) -> None:
-        """Accept the ``settings/reported`` answer to a ``config.get`` with this id."""
+    def expect_settings_report(self, command_id: str, now_ms: int, sid: Optional[str] = None) -> None:
+        """Accept the ``settings/reported`` answer to a ``config.get`` with this id.
+
+        ``sid`` is the session the command named. Such a request survives the
+        store's first ``state`` of that session, so a new monitor that takes
+        over a pending ``config.get`` before it has seen ``state`` keeps it.
+        """
         if not isinstance(command_id, str) or not COMMAND_ID_RE.fullmatch(command_id):
             raise ValueError("invalid command id")
         if type(now_ms) is not int or now_ms < 0:
             raise ValueError("invalid time")
+        if sid is not None and (not isinstance(sid, str) or not _SID_RE.fullmatch(sid)):
+            raise ValueError("invalid sid")
         self._expire_settings_requests(now_ms)
         self._settings_requests.pop(command_id, None)
         while len(self._settings_requests) >= MAX_SETTINGS_REQUESTS:
             del self._settings_requests[next(iter(self._settings_requests))]
-        self._settings_requests[command_id] = now_ms + SETTINGS_REQUEST_TTL_MS
+        self._settings_requests[command_id] = (now_ms + SETTINGS_REQUEST_TTL_MS, sid)
 
     def settings_report(self) -> Optional[Dict[str, Any]]:
         """The latest accepted settings report with its exact native text, server side only.
@@ -817,7 +825,9 @@ class RdfNodeV2Telemetry:
                 self._identities.clear()
             self._identities[sid] = identity
         if self._session is None or self._session["payload"]["sid"] != sid:
+            kept = {key: request for key, request in self._settings_requests.items() if request[1] == sid}
             self._reset_session()
+            self._settings_requests.update(kept)
         self._session = {"payload": value, "received_at_ms": at}
         self._mark(suffix, entry, "CONTEXT", value)
 
@@ -923,7 +933,7 @@ class RdfNodeV2Telemetry:
             self._mark(suffix, entry, "UNVERIFIED", value)
 
     def _expire_settings_requests(self, now_ms: int) -> None:
-        for command_id, expires_at in list(self._settings_requests.items()):
+        for command_id, (expires_at, _sid) in list(self._settings_requests.items()):
             if now_ms > expires_at:
                 del self._settings_requests[command_id]
 

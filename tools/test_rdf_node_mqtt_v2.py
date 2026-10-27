@@ -685,6 +685,23 @@ class SettingsReportTests(unittest.TestCase):
         self.assertEqual(self.put(dict(self.report, t=NOW + 1_001))["error"], "SOURCE_TIME_FUTURE")
         self.assertIsNone(self.store.settings_report())
 
+    def test_a_request_naming_its_session_survives_that_sessions_first_state(self) -> None:
+        # A monitor that took over a pending config.get has seen no state yet.
+        sid = obj("state.json")["sid"]
+        fresh = RdfNodeV2Telemetry(NODE)
+        fresh.expect_settings_report(self.report["id"], NOW, sid=sid)
+        fresh.expect_settings_report("g01-unbound", NOW)
+        fresh.expect_settings_report("g01-other", NOW, sid="01020304")
+        feed(fresh, "state.json")
+        self.assertEqual(node(fresh)["settings_requests"], [self.report["id"]])
+        self.assertEqual(put(fresh, "settings/reported", self.report)["status"], "FRESH")
+        # A new session still forgets it.
+        fresh.expect_settings_report(self.report["id"], NOW, sid=sid)
+        put(fresh, "state", obj("state.json", sid="01020304"))
+        self.assertEqual(node(fresh)["settings_requests"], [])
+        with self.assertRaises(ValueError):
+            fresh.expect_settings_report(self.report["id"], NOW, sid="not-a-sid")
+
     def test_request_expires_or_ends_with_a_failed_ack(self) -> None:
         late = NOW + 60_001
         self.assertEqual(put(self.store, "settings/reported", self.report, at=late)["error"], "UNREQUESTED_SETTINGS_REPORT")

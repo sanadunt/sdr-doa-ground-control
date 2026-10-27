@@ -18,7 +18,7 @@ import secrets
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 import paho.mqtt.client as mqtt
 from paho.mqtt.packettypes import PacketTypes
@@ -151,8 +151,9 @@ class MqttMonitor:
         self._last_by_kind: Dict[str, Dict[str, Any]] = {}
         self._topic_counts: Dict[str, int] = {}
         self._kind_counts: Dict[str, int] = {}
-        # Kontrol commands this client published, by id: PUBACK, the edge's
-        # progress and final ACK, and a config.get's settings report.
+        # Kontrol commands this client published, or took over from the
+        # monitor it replaced, by id: PUBACK, the edge's progress and final
+        # ACK, and a config.get's settings report.
         self._commands: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         self._publish_mids: Dict[int, str] = {}
         self._early_pubacks: Dict[int, Dict[str, Any]] = {}
@@ -457,7 +458,7 @@ class MqttMonitor:
             self._last_by_kind[kind] = entry
 
     def _on_rdf_node_accepted(self, suffix: str, record: Dict[str, Any]) -> None:
-        """Keep the ACKs and the settings report of the commands this client sent.
+        """Keep the ACKs and the settings report of the commands this client sent or adopted.
 
         The store calls this, under ``_lock``, for every ACK and settings
         report it accepted for the current node session.
@@ -544,7 +545,7 @@ class MqttMonitor:
             client = self._client
             mqtt_module = self._mqtt
             if command["op"] == commands.OP_CONFIG_GET:
-                self._rdf_node.expect_settings_report(command_id, _now_ms())
+                self._rdf_node.expect_settings_report(command_id, _now_ms(), sid=str(command["sid"]))
         success = int(getattr(mqtt_module, "MQTT_ERR_SUCCESS", 0))
         no_connection = int(getattr(mqtt_module, "MQTT_ERR_NO_CONN", 4))
         # Never under _lock: paho holds its message lock while it calls
@@ -578,6 +579,7 @@ class MqttMonitor:
         with self._lock:
             record: Dict[str, Any] = {
                 "op": command["op"],
+                "adopted": False,
                 "mid": mid,
                 "published_at_ms": published_at_ms,
                 "puback": None,
@@ -593,12 +595,68 @@ class MqttMonitor:
                     record["puback"] = early
                 else:
                     self._publish_mids[mid] = command_id
-            self._commands[command_id] = record
-            while len(self._commands) > MAX_COMMAND_RECORDS:
-                oldest_id, oldest = self._commands.popitem(last=False)
-                if oldest.get("mid") is not None and self._publish_mids.get(oldest["mid"]) == oldest_id:
-                    self._publish_mids.pop(oldest["mid"], None)
+            self._keep_command_locked(command_id, record)
         return {"mid": mid, "rc": rc, "published_at_ms": published_at_ms, "topic": topic}
+
+    def _keep_command_locked(self, command_id: str, record: Dict[str, Any]) -> None:
+        self._commands[command_id] = record
+        while len(self._commands) > MAX_COMMAND_RECORDS:
+            oldest_id, oldest = self._commands.popitem(last=False)
+            if oldest.get("mid") is not None and self._publish_mids.get(oldest["mid"]) == oldest_id:
+                self._publish_mids.pop(oldest["mid"], None)
+
+    def adopt_rdf_node_commands(self, pending: Iterable[Mapping[str, Any]]) -> int:
+        """Follow commands a replaced monitor published and that are not final yet.
+
+        Each item names ``command_id``, ``op`` and the ``sid`` the command
+        carried. The edge answers on ``ack/config`` whichever client is
+        connected, so after a reconnect only this monitor can still see the
+        ACK, and the ``settings/reported`` of a ``config.get``. Nothing is
+        published; the PUBACK stays with the client that sent the command.
+        What the store already accepted for an id is taken at once. Returns
+        how many commands this monitor now follows.
+        """
+        adopted = 0
+        with self._lock:
+            now = _now_ms()
+            for item in list(pending)[:MAX_COMMAND_RECORDS]:
+                if not isinstance(item, Mapping):
+                    continue
+                command_id = item.get("command_id")
+                op = item.get("op")
+                sid = item.get("sid")
+                if not isinstance(command_id, str) or not commands.COMMAND_ID_RE.fullmatch(command_id):
+                    continue
+                if op not in (commands.OP_CONFIG_GET, commands.OP_CONFIG_PATCH):
+                    continue
+                if command_id in self._commands:
+                    continue
+                self._keep_command_locked(command_id, {
+                    "op": op,
+                    "adopted": True,
+                    "mid": None,
+                    "published_at_ms": None,
+                    "puback": None,
+                    "progress": None,
+                    "final": None,
+                    "reported_at_ms": None,
+                })
+                adopted += 1
+                ack = self._rdf_node.ack(command_id)
+                if ack is not None:
+                    self._on_rdf_node_accepted(str(ack.get("topic") or "ack/config"), ack)
+                report = self._rdf_node.settings_report()
+                if report is not None and report.get("id") == command_id:
+                    self._on_rdf_node_accepted(commands.SETTINGS_SUFFIX, report)
+                waiting = ack is None or not ack.get("final") or ack.get("status") == "APPLIED"
+                if op == commands.OP_CONFIG_GET and waiting and self._commands[command_id]["reported_at_ms"] is None:
+                    try:
+                        self._rdf_node.expect_settings_report(
+                            command_id, now, sid=sid if isinstance(sid, str) else None,
+                        )
+                    except ValueError:
+                        self._rdf_node.expect_settings_report(command_id, now)
+        return adopted
 
     @staticmethod
     def _drop_unsent(client: Any, mid: Optional[int]) -> bool:
@@ -619,13 +677,18 @@ class MqttMonitor:
             return False
 
     def rdf_node_command_observation(self, command_id: str) -> Dict[str, Any]:
-        """PUBACK, ACKs and settings report seen for one command id this client published."""
+        """PUBACK, ACKs and settings report seen for one command id this client
+        published or adopted (``adopt_rdf_node_commands``); nothing for any other id."""
         with self._lock:
             record = self._commands.get(command_id)
             if record is None:
-                return {"published": False, "puback": None, "progress": None, "final": None, "reported_at_ms": None}
+                return {
+                    "published": False, "adopted": False,
+                    "puback": None, "progress": None, "final": None, "reported_at_ms": None,
+                }
             return {
-                "published": True,
+                "published": not record["adopted"],
+                "adopted": record["adopted"],
                 "puback": dict(record["puback"]) if record["puback"] else None,
                 "progress": dict(record["progress"]) if record["progress"] else None,
                 "final": dict(record["final"]) if record["final"] else None,

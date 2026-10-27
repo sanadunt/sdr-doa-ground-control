@@ -94,6 +94,7 @@ class FakeMonitor:
         self.published: list[Dict[str, Any]] = []
         self.publish_error: Optional[BaseException] = None
         self.observations: Dict[str, Dict[str, Any]] = {}
+        self.adopted: list[Dict[str, Any]] = []
 
     def start(self) -> None:
         return None
@@ -129,10 +130,20 @@ class FakeMonitor:
             "topic": cmds.command_topic(self.node_id, command["op"]),
         }
 
+    def adopt_rdf_node_commands(self, pending: Any) -> int:
+        known = {item["id"] for item in self.published} | {item["command_id"] for item in self.adopted}
+        fresh = [dict(item) for item in pending if item["command_id"] not in known]
+        self.adopted.extend(fresh)
+        return len(fresh)
+
     def rdf_node_command_observation(self, command_id: str) -> Dict[str, Any]:
+        # As the real monitor: only ids this monitor published or adopted.
         published = any(item["id"] == command_id for item in self.published)
-        observed = {"published": published, "puback": None, "progress": None, "final": None, "reported_at_ms": None}
-        observed.update(self.observations.get(command_id, {}))
+        adopted = any(item["command_id"] == command_id for item in self.adopted)
+        observed = {"published": published, "adopted": adopted, "puback": None, "progress": None, "final": None,
+                    "reported_at_ms": None}
+        if published or adopted:
+            observed.update(self.observations.get(command_id, {}))
         return observed
 
     def puback(self, command_id: str, reason: int = 0) -> None:
@@ -708,10 +719,14 @@ class ConfigPatchServerTests(unittest.TestCase):
         self.assertEqual((rejected["state"], rejected["puback_reason"]), ("publish_failed", 135))
 
     def replace_monitor(self) -> Tuple[FakeMonitor, "weakref.ReferenceType[FakeMonitor]"]:
-        """Swap in a new monitor and drop the test's own reference to the old one."""
+        """Reconnect as Message Monitor does and drop the test's own reference to the old monitor."""
         retired = weakref.ref(self.monitor)
-        replacement = FakeMonitor()
-        self.server.mqtt_monitor = replacement
+        with patch.object(ground_console, "_new_mqtt_monitor", lambda *_args: FakeMonitor()):
+            status, _headers, body = self.request("POST", "/api/mqtt/connect?host=127.0.0.1&port=1883&transport=tcp")
+        self.assertEqual(status, 200, body)
+        replacement = self.server.mqtt_monitor
+        self.assertIsInstance(replacement, FakeMonitor)
+        self.assertIsNot(replacement, retired())
         del self.monitor
         gc.collect()
         return replacement, retired
@@ -722,6 +737,8 @@ class ConfigPatchServerTests(unittest.TestCase):
         command_id = sent["command_id"]
         self.monitor.puback(command_id, 0)
         replacement, retired = self.replace_monitor()
+        # The new monitor follows the pending command; only it hears the edge now.
+        self.assertEqual([item["command_id"] for item in replacement.adopted], [command_id])
         # Only the tracker holds the stopped publisher now, as in production.
         self.assertIsNotNone(retired())
         restarted = self.status_of(command_id)
@@ -751,6 +768,26 @@ class ConfigPatchServerTests(unittest.TestCase):
         self.assertEqual(self.status_of(command_id)["state"], "acked")
         gc.collect()
         self.assertIsNone(retired())
+
+    def test_a_pending_config_get_gets_its_report_after_a_reconnect(self) -> None:
+        cookie = self.admin_cookie()
+        _status, sent = self.send_get(cookie=cookie)
+        command_id = sent["command_id"]
+        replacement, _retired = self.replace_monitor()
+        self.assertEqual(replacement.adopted, [{"command_id": command_id, "op": "config.get", "sid": STATE["sid"]}])
+        replacement.ack(command_id, "APPLIED", rev=42, result={"revision": 42, "proof": "runtime"})
+        self.assertEqual(self.status_of(command_id)["state"], "acknowledged")
+        replacement.report(command_id)
+        reported = self.status_of(command_id)
+        self.assertEqual((reported["state"], reported["monitor_restarted"]), ("reported", True))
+
+    def test_a_final_command_is_not_handed_over(self) -> None:
+        cookie = self.admin_cookie()
+        _status, sent = self.send_patch(self.patch_body(), cookie=cookie)
+        self.monitor.ack(sent["command_id"], "REJECTED", result={"error": "CONFIG_REVISION_CONFLICT"})
+        self.assertEqual(self.status_of(sent["command_id"])["state"], "acked")
+        replacement, _retired = self.replace_monitor()
+        self.assertEqual(replacement.adopted, [])
 
     def test_status_routes_validate_the_id(self) -> None:
         _status, _headers, latest = self.request("GET", "/api/mqtt/config-patch")

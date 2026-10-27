@@ -213,9 +213,11 @@ class ConfigCommandTracker:
         command_id = str(command["id"])
         changes = command.get("changes")
         base_rev = command.get("base_rev")
+        sid = command.get("sid")
         entry = {
             "command_id": command_id,
             "op": str(command["op"]),
+            "sid": sid if isinstance(sid, str) else None,
             "topic": topic,
             "issued_ms": int(command["issued_ms"]),
             "expires_ms": int(command["expires_ms"]),
@@ -266,6 +268,34 @@ class ConfigCommandTracker:
             times = [entry["issued_ms"] for entry in self._entries.values()
                      if entry["op"] == op and not entry["publish_failed"]]
         return max(times) if times else None
+
+    def hand_over(self, current_monitor: Any, replacement: Any) -> int:
+        """Have ``replacement`` follow every command that is not final yet.
+
+        Called before the server swaps in a new monitor. The edge's ACKs, and
+        a ``config.get``'s settings report, reach only the client that is
+        connected, and a monitor follows only ids it published or adopted, so
+        without this a reconnect would leave a pending command to time out.
+        Returns how many the replacement took; a monitor without the method
+        (no paho) takes none.
+        """
+        adopt = getattr(replacement, "adopt_rdf_node_commands", None)
+        if replacement is None or not callable(adopt):
+            return 0
+        now = self.now_ms()
+        with self._lock:
+            pending = [
+                {"command_id": entry["command_id"], "op": entry["op"], "sid": entry["sid"]}
+                for entry in self._entries.values()
+                if not entry["publish_failed"] and not self._status_locked(entry, current_monitor, now)["final"]
+            ]
+        if not pending:
+            return 0
+        try:
+            taken = adopt(pending)
+        except Exception:
+            return 0
+        return taken if type(taken) is int else 0
 
     def ids(self) -> List[str]:
         with self._lock:

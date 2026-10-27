@@ -4490,6 +4490,9 @@ class GroundConsoleServer(ThreadingHTTPServer):
                 replacement = None
                 if monitor_changed and new_host:
                     replacement = _new_mqtt_monitor(*new_connection)
+                    # Before start(), so no ACK or settings report of a
+                    # pending command reaches the new client unasked.
+                    self.config_commands.hand_over(self.mqtt_monitor, replacement)
                     replacement.start()
                 try:
                     _save_console_config(self.config_path, saved)
@@ -4497,8 +4500,13 @@ class GroundConsoleServer(ThreadingHTTPServer):
                     retired = replacement
                     raise
                 if monitor_changed:
-                    retired = self.mqtt_monitor
-                    self.mqtt_monitor = replacement
+                    # Again under the command lock, for a command published
+                    # since: none can slip in before the swap. The ACKs of a
+                    # pending command reach only the new client.
+                    with self._config_patch_lock:
+                        self.config_commands.hand_over(self.mqtt_monitor, replacement)
+                        retired = self.mqtt_monitor
+                        self.mqtt_monitor = replacement
                 self._saved_config = saved
                 self._config = normalized
                 return dict(self._config), self.mqtt_monitor

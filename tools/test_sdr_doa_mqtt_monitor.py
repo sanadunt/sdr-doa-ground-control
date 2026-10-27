@@ -643,7 +643,9 @@ class SharedMqttMonitorTests(unittest.TestCase):
         # The fake returns None like a paho without MQTTMessageInfo: rc 0, no mid.
         self.assertEqual((result["rc"], result["mid"], result["topic"]), (0, None, topic))
         observation = self.monitor.rdf_node_command_observation(command["id"])
-        self.assertEqual(observation, {"published": True, "puback": None, "progress": None, "final": None, "reported_at_ms": None})
+        self.assertEqual(observation, {
+            "published": True, "adopted": False, "puback": None, "progress": None, "final": None, "reported_at_ms": None,
+        })
         # The Message Monitor snapshot keeps saying the monitor never publishes on its own.
         snapshot = self.monitor.snapshot()
         self.assertIs(snapshot["read_only"], True)
@@ -777,6 +779,86 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self.assertIs(view["settings"]["matches_state_cfg"], True)
         self.assertEqual(view["settings"]["safe_settings"]["vfo0_frequency_hz"], 433_920_000)
         self.assertEqual(view["settings"]["settings_json"], report["settings_json"])
+
+    def test_a_replacement_monitor_follows_the_pending_commands(self) -> None:
+        # Reconnect or an MQTT settings save replaces the monitor while a patch
+        # and a config.get wait. Their ACKs and the settings report reach only
+        # the new client, so the server hands the pending ids over first.
+        from config_command_tracker import ConfigCommandTracker
+
+        case = next(item for item in self.COMMANDS["cases"] if item["name"] == "config-get")
+        report = json.loads(case["edge"]["settings_reported"])
+        clock = [report["t"]]
+        tracker = ConfigCommandTracker(clock_ms=lambda: clock[0])
+        with patch.object(self.module, "_now_ms", lambda: clock[0]):
+            self._connected()
+            state = self._node_state()
+            session = {"sid": state["sid"], "boot": state["boot"], "base_rev": state["cfg"], "issued_ms": clock[0]}
+            patch_command = commands.build_command(
+                "config.patch", command_id="gc-restart-1", changes=commands.validate_patch_changes({"gain_db": 20.7}),
+                **session,
+            )
+            get_command = commands.build_command("config.get", command_id="gc-restart-get", **session)
+            done_command = commands.build_command(
+                "config.patch", command_id="gc-restart-done", changes=commands.validate_patch_changes({"gain_db": 15.7}),
+                **session,
+            )
+            for command in (patch_command, get_command, done_command):
+                self.monitor.publish_rdf_node_command(command)
+                tracker.record(command, self.monitor, published_at_ms=clock[0])
+            self._rdf("ack/config", self._edge_ack("gc-restart-done", "APPLIED"))
+            self.assertEqual(tracker.status("gc-restart-done", self.monitor)["state"], "acked")
+
+            replacement = self.module.MqttMonitor("10.90.0.1", 9001, transport="websockets", ws_path="/mqtt")
+            # Only the two commands that are not final move over.
+            self.assertEqual(tracker.hand_over(self.monitor, replacement), 2)
+            self.assertEqual(tracker.hand_over(self.monitor, replacement), 0)
+            self.assertEqual(
+                {key: replacement.rdf_node_command_observation(key)["adopted"] for key in
+                 ("gc-restart-1", "gc-restart-get", "gc-restart-done")},
+                {"gc-restart-1": True, "gc-restart-get": True, "gc-restart-done": False},
+            )
+            retired, self.monitor = self.monitor, replacement
+            self._connected()
+            retired.stop()
+            # The new client's first state of the same session keeps the
+            # adopted settings request.
+            self._node_state()
+            self._rdf("ack/config", self._edge_ack("gc-restart-1", "ACCEPTED"))
+            waiting = tracker.status("gc-restart-1", replacement)
+            self.assertEqual((waiting["state"], waiting["monitor_restarted"], waiting["ack"]["status"]),
+                             ("acknowledged", True, "ACCEPTED"))
+            self._rdf("ack/config", self._edge_ack("gc-restart-1", "APPLIED", {"revision": 43, "persisted": True}))
+            self._rdf("ack/config", self._edge_ack("gc-restart-get", "APPLIED", {"revision": state["cfg"], "proof": "runtime"}))
+            self._rdf("settings/reported", dict(report, id="gc-restart-get"))
+            applied = tracker.status("gc-restart-1", replacement)
+            reported = tracker.status("gc-restart-get", replacement)
+            view = replacement.rdf_node_control_view()
+        self.assertEqual((applied["state"], applied["ack"]["status"], applied["ack"]["revision"]), ("acked", "APPLIED", 43))
+        self.assertEqual((reported["state"], reported["settings_reported_at_ms"]), ("reported", clock[0]))
+        self.assertEqual(view["settings"]["id"], "gc-restart-get")
+        # The replacement never published anything itself.
+        self.assertEqual(self.client.publish_calls, [])
+        observed = replacement.rdf_node_command_observation("gc-restart-1")
+        self.assertEqual((observed["published"], observed["adopted"], observed["puback"]), (False, True, None))
+
+    def test_adopting_takes_what_the_store_already_accepted(self) -> None:
+        self._connected()
+        self._node_state()
+        # The edge answered before the hand-over reached this monitor.
+        self._rdf("ack/config", self._edge_ack("gc-early", "REJECTED", {"error": "CONFIG_REVISION_CONFLICT"}))
+        self.assertIsNone(self.monitor.rdf_node_command_observation("gc-early")["final"])
+        taken = self.monitor.adopt_rdf_node_commands([
+            {"command_id": "gc-early", "op": "config.patch", "sid": "7a8b9c0d"},
+            {"command_id": "bad id", "op": "config.patch", "sid": None},
+            {"command_id": "gc-op", "op": "stream.set", "sid": None},
+            "not a mapping",
+        ])
+        self.assertEqual(taken, 1)
+        final = self.monitor.rdf_node_command_observation("gc-early")["final"]
+        self.assertEqual((final["status"], final["result"]["error"]), ("REJECTED", "CONFIG_REVISION_CONFLICT"))
+        self.assertEqual(self.monitor.adopt_rdf_node_commands([{"command_id": "gc-early", "op": "config.patch"}]), 0)
+        self.assertEqual(self.client.publish_calls, [])
 
     def test_control_view_follows_the_connection_and_the_session(self) -> None:
         self.assertEqual(self.monitor.rdf_node_control_view()["connection"], "disabled")
