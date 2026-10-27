@@ -57,7 +57,7 @@ Tujuan UI:
 - Overlay settings tersimpan lokal. Panel Lapisan berisi tujuh sakelar layer dan opasitas overlay, dan bagian Lanjutan berisi kontrol advanced untuk jarak/radius, min/max dB, threshold, contrast/intensity, radial samples, distance falloff, opacity, blur, guide interval, dan palette.
 - Marker station interaktif dan dapat membuka popup detail.
 - Tab `Simulasi`: lokasi, sudut DoA, lebar lobe, randomize manual, randomize otomatis.
-- Halaman System Health (termasuk tabel pembacaan per resource), DoA Diagnostics, Configuration, dan Message Monitor (sdr/v1 plus tampilan RDF Node).
+- Halaman System Health (termasuk tabel pembacaan per resource), DoA Diagnostics, Configuration, dan Message Monitor (MQTT: tampilan RDF Node dan kartu koneksi, tanpa sakelar keluarga topik).
 - Collector mendeteksi node beku (`NODE_CLOCK_STALLED`), membatasi satu koleksi dengan anggaran waktu (4 detik untuk `/api/snapshot`), dan membandingkan sudut CSV/XML hanya untuk pasangan dari frame yang sama.
 - Console membaca Data Out satu kali per interval refresh untuk semua penampil (`tools/data_out_reader.py`) dan memakai ulang `settings.json` paling lama 30 detik; umur data di browser dihitung sejak node dibaca.
 - MQTT dulu, Data Out cadangan (`tools/telemetry_source.py`, `docs/MQTT_KONTRAK.md` bagian 8): selama health RDF Node lewat MQTT segar (8 detik, `daq=1`) jawaban `/api/snapshot` dibangun dari DoA LIVE dan Angular LIVE MQTT, Data Out hanya dibaca ringan (`status.json`, `settings.json`, `doa.xml`) tiap 30 detik, dan chip SUMBER di strip status serta badge di HUD menyebut sumbernya. DoA yang UNVERIFIED tidak pernah tampil sebagai bearing.
@@ -66,7 +66,7 @@ Tujuan UI:
 - Kontrol: perintah RDF Node yang dibatasi admin (`config.patch`, `config.get`), dengan pelacakan ACK dan `settings/reported` di server (`tools/config_command_tracker.py`).
 - Branding lokal dan konfigurasi console lokal.
 - Pengaturan tersimpan di server console: koneksi/MQTT/interval di `console.json`, branding, preferensi tampilan browser di `preferences.json` (`GET`/`PUT /api/preferences`, `tools/preferences_store.py`, `frontend/src/lib/preferenceStore.ts`), rekaman Receiver, dan `.env`. Start pertama membuat `console.json` dari `SDR_DOA_SEED_*`. `GET /api/health` untuk healthcheck; versi dari file `VERSION`.
-- Paket Linux: image Docker (`Dockerfile`, `Dockerfile.release`, `docker-compose*.yml`, network host), rilis tar (`tools/make_release.py`), installer console dengan systemd user service (`packaging/console/`), dan installer agent RDF-SDR dengan systemd service atau image ARM (`packaging/agent/`). Lihat QUICKSTART bagian Instalasi Linux.
+- Paket Linux: image Docker (`Dockerfile`, `Dockerfile.release`, `docker-compose*.yml`, network host), rilis tar (`tools/make_release.py`), dan installer console dengan systemd user service (`packaging/console/`). Sejak 3.0.0 repository ini tidak lagi membawa agent RDF-SDR; Raspberry menjalankan RDF Node edge dari `sanadunt/rdf-indicator-raspberry` (`CHANGELOG.md`). Lihat QUICKSTART bagian Instalasi Linux.
 
 ### Staging/rancangan—jangan dianggap production
 
@@ -86,7 +86,7 @@ SDR-DoA / DAQ / DSP pada Raspberry
         ├── Data Out HTTP / file output lokal
         │       status, CSV, XML, settings
         │
-        └── Edge agent staging / MQTT adapter
+        └── RDF Node edge (repo sanadunt/rdf-indicator-raspberry) / MQTT sdr/v2/uav-01
                  │ health + freshness + authority + redaction
                  ▼
 Ground Console Python (loopback)
@@ -141,19 +141,15 @@ MQTT adalah transport/contract, bukan pengganti DAQ, DSP, normalisasi, gate, ata
 | `tools/ground_console.py` | HTTP Ground Console, API lokal, static frontend serving, CSP, config/branding/admin lokal, route perintah Kontrol (`config.patch`, `config.get`) |
 | `tools/sdr_doa_collector.py` | Collector read-only, parsing terbatas, redaction, freshness, candidate, gate |
 | `tools/telemetry_source.py`, `tools/data_out_reader.py` | Sumber `/api/snapshot`: MQTT dulu, Data Out (cadangan) bila MQTT tidak segar; satu pembacaan Data Out bersama untuk semua penampil |
-| `tools/sdr_doa_lan_agent.py` | Edge agent/LAN staging di topik lama `sdr/v1/uav-01` dan payload health/state/config; dengan `--publish` selalu berlangganan `cmd/config/patch` topik lama, dan tanpa `--enable-config` menolak patch dengan `REMOTE_CONTROL_DISABLED`. Kontrol tidak memakainya. |
-| `tools/sdr_doa_mqtt.py` | MQTT contract/adapter staging |
 | `tools/sdr_doa_mqtt_monitor.py` | MQTT monitor; berlangganan, dan hanya publish perintah RDF Node dari Kontrol lewat `publish_rdf_node_command`. Memerlukan `paho-mqtt` (tanpa paket ini monitor berstatus ERROR, console tetap jalan) |
 | `tools/rdf_node_mqtt_v2.py` | Parser kontrak MQTT RDF Node (`docs/MQTT_KONTRAK.md`), node view, dan snapshot untuk `/api/mqtt/rdf-node` |
 | `tools/receiver_record_store.py` | Store SQLite dan file audio Receiver di bawah `--data-dir` |
 | `tools/preferences_store.py` | Salinan preferensi browser di server (allowlist key, batas ukuran, tulis atomik) untuk `/api/preferences` |
 | `tools/tile_cache.py` | Cache tile basemap untuk `/api/tiles`: upstream tetap (HTTPS, maksimal dua host per sumber), cache disk LRU, sajian stale saat offline |
-| `tools/make_release.py` | Membuat tarball rilis console dan agent beserta `SHA256SUMS`; juga `--stage-console`/`--stage-agent` untuk Docker dan installer |
-| `packaging/`, `Dockerfile*`, `docker-compose*.yml`, `VERSION` | Docker, installer native, systemd unit, dan versi rilis |
+| `tools/make_release.py` | Membuat tarball rilis console, `sdr-doa-docker`, dan `SHA256SUMS`; juga `--stage-console` untuk Docker dan installer |
+| `packaging/`, `Dockerfile*`, `docker-compose*.yml`, `VERSION`, `CHANGELOG.md` | Docker, installer native, systemd unit, versi rilis, dan catatan tiap rilis |
 | `tools/build_browsdr_receiver.py` | Builder Receiver: salin submodule, terapkan overlay, `npm ci` + build, tulis `frontend/dist/receiver` |
 | `tools/browsdr_receiver_overlay/` | Perubahan lokal Receiver yang diterapkan saat build; `vendor/BrowSDR` tidak diedit |
-| `tools/sdr_doa_mqtt_stdlib.py` | Jalur MQTT stdlib/staging alternatif |
-| `tools/synthetic_mqtt_publisher.py` | Publisher synthetic untuk test/staging; bukan production telemetry |
 | `tools/fixtures/` | Fixture valid, stale, unhealthy, malformed, missing-status, conflict, partial, nonfinite, dan peak-mismatch |
 
 ### Frontend
@@ -170,7 +166,7 @@ MQTT adalah transport/contract, bukan pengganti DAQ, DSP, normalisasi, gate, ata
 | `frontend/src/components/PolarPlot.tsx` | Plotly polar/compass renderer, camera state, head-up, manual dB range |
 | `frontend/src/lib/telemetry.ts` | Candidate selection, data state, formatting, gate helpers |
 | `frontend/src/lib/doaStatus.ts` | Predikat kesiapan DoA bersama untuk readout, polar, dan peta |
-| `frontend/src/lib/mqttMonitor.ts` | Normalisasi snapshot MQTT (`sdr/v1` dan RDF Node) dan redaksi record |
+| `frontend/src/lib/mqttMonitor.ts` | Normalisasi status MQTT (`/api/mqtt`: koneksi, root topik, hitungan pesan) dan snapshot RDF Node |
 | `frontend/src/pages/ReceiverPage.tsx` | Host iframe Receiver, sinkron tema/bahasa, penerusan shortcut, menyambungkan bridge ke frame |
 | `frontend/src/lib/receiverBridge.ts`, `receiverBridgeProtocol.ts` | Sisi console bridge Receiver; salinan protokol sisi frame ada di `tools/browsdr_receiver_overlay/src/client/app/console-bridge-protocol.ts` |
 | `frontend/src/lib/configPatch.ts` | Field edge, satuan, rentang, tabel gain, hasil ACK, dan kode error perintah Kontrol |
@@ -430,7 +426,7 @@ Untuk perubahan UI, validasi browser bila tersedia: hard refresh production buil
 
 ### Monitor MQTT ERROR: `paho-mqtt is not installed`
 
-Console tetap berjalan tanpa `paho-mqtt`, tetapi monitor MQTT tidak bisa tersambung. Jalankan dengan `.venv` project dan install `paho-mqtt==2.1.0` di environment tersebut. `ModuleNotFoundError: No module named 'paho'` dari synthetic publisher atau tes MQTT punya penyebab yang sama.
+Console tetap berjalan tanpa `paho-mqtt`, tetapi monitor MQTT tidak bisa tersambung. Jalankan dengan `.venv` project dan install `paho-mqtt==2.1.0` di environment tersebut. `ModuleNotFoundError: No module named 'paho'` dari tes MQTT punya penyebab yang sama.
 
 ### Receiver menampilkan "Receiver is not built"
 
@@ -442,12 +438,12 @@ Console tetap berjalan tanpa `paho-mqtt`, tetapi monitor MQTT tidak bisa tersamb
 
 ### Kontrol tidak mendapat jawaban
 
-- **Belum ada ACK** sekitar 20 detik setelah kirim: RDF Node di Raspberry tidak berjalan atau memakai broker lain. Agent bawaan repo ini memakai topik lama dan tidak menjawab Kontrol.
+- **Belum ada ACK** sekitar 20 detik setelah kirim: RDF Node di Raspberry tidak berjalan atau memakai broker lain. Agent RDF-SDR dari console 2.x memakai topik lama dan tidak menjawab Kontrol; hapus bila masih terpasang (runbook 10.3).
 - Kirim nonaktif, `NODE_SESSION_UNAVAILABLE`, `CONFIG_REVISION_UNKNOWN` atau `NODE_NOT_FRESH`: belum ada `state` RDF Node sejak monitor tersambung, `state.cfg` kosong, atau `telemetry/health` lebih tua dari 8 detik.
 - `TLS_REQUIRED_FOR_SETTINGS_REPORT` setelah **Baca settings**: RDF-SDR tersambung ke broker tanpa TLS, jadi tidak mengirim `settings/reported`; nilai diambil dari Data Out (cadangan).
 - `Ditolak · REJECTED · CONFIG_REVISION_CONFLICT` atau `BUSY`: pengirim lain (misalnya `rdf-ground.service`) mengubah settings atau sedang mengirim perintah. Baca ulang nilai lalu tinjau; satu pengendali sekaligus.
 - **Publish gagal** (PUBACK 128 ke atas): ACL broker tidak mengizinkan console publish ke `sdr/v2/uav-01/cmd/config/patch` atau `cmd/config/get`.
-- Broker `tools/mqtt_lan_stage.conf` mewajibkan TLS dan password, yang tidak dimiliki monitor console; pakai `tools/mqtt_stage4.conf` untuk uji lokal.
+- Monitor console tidak memakai TLS atau password, jadi broker yang mewajibkannya untuk semua klien tidak bisa dipakai console; pakai `tools/mqtt_stage4.conf` untuk uji lokal.
 
 ### Basemap MapLibre tidak muncul
 

@@ -26,7 +26,7 @@ function durationTile(t: Translate, ms: number | null): { value: string; unit?: 
 
 /** The RDF Node topic view has no App-level poll; this page reads it while it is open. */
 const RDF_NODE_POLL_MS = 2_000;
-/** Local clock tick for per-kind ages between reads. */
+/** Local clock tick for the topic ages between reads. */
 const AGE_TICK_MS = 1_000;
 /** A confirmation (metrics reloaded, monitor restarted) clears itself after this long. */
 const CONFIRMATION_MS = 6_000;

@@ -22,7 +22,7 @@ Tidak ada lagi pembahasan "v1" atau "v2". Angka `v2` di nama topik dan di nama f
 ## Latar belakang
 
 - Raspberry hanya publish dan menerima perintah di `sdr/v2/uav-01/...` (RDF Node edge, rilis `1.0.0-20261013194717`). Agent RDF-SDR bawaan repo console tidak terpasang di Raspberry.
-- Console v2.0.0 memakai dua keluarga topik sekaligus. Monitor, Kontrol, dan agent bawaannya masih memakai topik lama `sdr/v1/uav-01`, yang tidak dipakai Raspberry. Akibatnya:
+- Console v2.0.0 memakai dua keluarga topik sekaligus. Monitor, Kontrol, dan agent bawaannya masih memakai topik lama (keluarga topik versi 1 di bawah `sdr/`), yang tidak dipakai Raspberry. Akibatnya:
   - kartu MQTT di Konfigurasi menunjukkan 0 pesan walaupun ribuan pesan masuk;
   - Kontrol mengirim ke topik yang tidak didengar Raspberry, dan tombol Send terkunci ("Send needs a config revision reported over MQTT");
   - Dashboard tidak memakai MQTT sama sekali dan bergantung penuh pada Data Out.
@@ -46,7 +46,7 @@ Tidak ada lagi pembahasan "v1" atau "v2". Angka `v2` di nama topik dan di nama f
 
 ## Yang dihapus dari console
 
-Daftar ini dari tag `v2.0.0`. Pastikan lagi saat implementasi.
+Daftar ini dari tag `v2.0.0`. Semua bagian di bawah sudah dihapus atau diganti di 3.0.0 (`CHANGELOG.md`); test topik lama diganti `tools/test_rdf_node_broker.py`, yang memakai payload edge dari `tools/fixtures/rdf-node`.
 
 | Bagian | File |
 |---|---|

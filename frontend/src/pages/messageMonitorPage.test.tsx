@@ -58,7 +58,7 @@ describe('MessageMonitorPage', () => {
   it('has one MQTT view: no topic-family switch, the RDF Node topics shown at once', () => {
     expect(markup).not.toContain('pg-seg');
     expect(markup).not.toContain('aria-pressed="true"');
-    expect(body).not.toContain('sdr/v1');
+    expect(new Set(body.match(/sdr\/v\d+\//g) ?? [])).toEqual(new Set(['sdr/v2/']));
     expect(body).toContain(translate('en', 'monitor.v2Loading'));
     expect(body).toContain(`${translate('en', 'monitor.v2Subscription')} N/A`);
   });
