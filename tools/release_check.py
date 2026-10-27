@@ -12,8 +12,8 @@ Subcommands:
 * ``assets``: checks that a release directory holds exactly the release
   assets, that ``SHA256SUMS`` covers each of them, and that the console
   tarball ships the same ``sdr-doa-docker`` as the standalone asset.
-* ``images``: writes the GHCR image names, the image reference of this
-  version, the OCI labels, the channel tags this version may take and
+* ``images``: writes the GHCR image name of the console, its reference for
+  this version, the OCI labels, the channel tags this version may take and
   whether it is the newest release.
 * ``channels``: the channel tags (``<MAJOR>.<MINOR>``, ``<MAJOR>``,
   ``latest``) this version may take, given the release tags that exist now.
@@ -52,7 +52,6 @@ DOCKER_SCRIPT_ASSET = "sdr-doa-docker"
 DOCKER_SCRIPT_IN_CONSOLE = f"packaging/docker/{DOCKER_SCRIPT_ASSET}"
 REGISTRY = "ghcr.io"
 CONSOLE_IMAGE = "sdr-doa-ground-console"
-AGENT_IMAGE = "sdr-doa-rdf-sdr-agent"
 EVENTS = ("push", "workflow_dispatch")
 # Stricter than make_release.VERSION_RE: no leading zeros and no "+build"
 # part, because every release version is also a Docker image tag.
@@ -185,7 +184,6 @@ def release_assets(version: str) -> List[str]:
     parse_release_version(version)
     return [
         f"{make_release.console_release_name(version)}.tar.gz",
-        f"{make_release.agent_release_name(version)}.tar.gz",
         DOCKER_SCRIPT_ASSET,
         make_release.CHECKSUMS_NAME,
     ]
@@ -367,12 +365,9 @@ def channel_outputs(version: str, tags: Iterable[str]) -> Dict[str, str]:
 
 
 def image_outputs(owner: str, version: str, revision: str, source: str, tags: Iterable[str] = ()) -> Dict[str, str]:
-    """Image names, the <V> reference the build pushes, labels and the channels."""
-    outputs = {}
-    for key, image in (("console", CONSOLE_IMAGE), ("agent", AGENT_IMAGE)):
-        name = image_name(owner, image)
-        outputs[f"{key}_image"] = name
-        outputs[f"{key}_ref"] = f"{name}:{version}"
+    """The console image name, the <V> reference the build pushes, labels and the channels."""
+    name = image_name(owner, CONSOLE_IMAGE)
+    outputs = {"console_image": name, "console_ref": f"{name}:{version}"}
     outputs["labels"] = "\n".join(oci_labels(version, revision, source))
     outputs.update(channel_outputs(version, tags))
     return outputs
@@ -423,7 +418,7 @@ def _parser() -> argparse.ArgumentParser:
     assets.add_argument("--dir", type=Path, required=True)
     assets.add_argument("--version", required=True)
     tags_help = "release tags or refs that exist, one per line ('-' for stdin)"
-    images = commands.add_parser("images", help="image names, references, OCI labels and channels")
+    images = commands.add_parser("images", help="the image name, its reference, OCI labels and channels")
     images.add_argument("--owner", required=True, help="github.repository_owner")
     images.add_argument("--version", required=True)
     images.add_argument("--revision", required=True, help="full commit SHA")

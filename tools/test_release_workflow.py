@@ -42,12 +42,10 @@ PINNED_USES = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)
 VERSION_COMMENT = re.compile(r"#\s*v[0-9]+(?:\.[0-9]+){0,2}\s*$")
 CONTRACT_ASSETS = [
     "sdr-doa-ground-console-2.0.0-linux.tar.gz",
-    "sdr-doa-rdf-sdr-agent-2.0.0.tar.gz",
     "sdr-doa-docker",
     "SHA256SUMS",
 ]
 CONSOLE_PLATFORMS = "linux/amd64,linux/arm64"
-AGENT_PLATFORMS = "linux/amd64,linux/arm64,linux/arm/v7"
 SHA_A = "a" * 40
 
 
@@ -200,13 +198,14 @@ class WorkflowTextTests(unittest.TestCase):
             self.assertIn(snippet, text)
         for asset in (
             'release/sdr-doa-ground-console-${VERSION}-linux.tar.gz',
-            'release/sdr-doa-rdf-sdr-agent-${VERSION}.tar.gz',
             'release/sdr-doa-docker',
             'release/SHA256SUMS',
         ):
             self.assertIn(f'"{asset}"', text)
         self.assertEqual(text.count("platforms: linux/amd64,linux/arm64\n"), 1)
-        self.assertEqual(text.count(f"platforms: {AGENT_PLATFORMS}\n"), 1)
+        # One image: the console. The Raspberry runs the RDF Node edge, which no job builds.
+        self.assertNotIn("agent", text.lower())
+        self.assertNotIn("arm/v7", text)
 
     def test_third_party_images_are_pinned_to_a_digest(self):
         # The images job holds packages: write; what it runs privileged or
@@ -216,7 +215,7 @@ class WorkflowTextTests(unittest.TestCase):
         self.assertRegex(text, r"(?m)^\s+image: docker\.io/tonistiigi/binfmt:[\w.-]+" + digest + "$")
         self.assertRegex(text, r"(?m)^\s+driver-opts: image=moby/buildkit:v[\w.-]+" + digest + "$")
         self.assertRegex(text, r"(?m)^\s+PYTHON_IMAGE: python:3\.12-slim-bookworm" + digest + "$")
-        self.assertEqual(text.count("build-args: PYTHON_IMAGE=${{ env.PYTHON_IMAGE }}"), 2)
+        self.assertEqual(text.count("build-args: PYTHON_IMAGE=${{ env.PYTHON_IMAGE }}"), 1)
 
     def test_dependabot_updates_the_actions(self):
         text = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
@@ -353,7 +352,7 @@ class WorkflowStructureTests(unittest.TestCase):
         (upload,) = steps_using(build, "actions/upload-artifact")
         self.assertEqual(upload["with"]["path"], "dist/release/")
         self.assertEqual(upload["with"]["if-no-files-found"], "error")
-        for output in ("version", "tag", "sha", "create_tag", "prerelease", "newest", "console_ref", "agent_ref", "labels"):
+        for output in ("version", "tag", "sha", "create_tag", "prerelease", "newest", "console_image", "console_ref", "labels"):
             self.assertIn(output, build["outputs"])
         images = build["steps"][names.index("images")]
         self.assertIn("git tag -l 'v*' |", images["run"])
@@ -389,6 +388,7 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertEqual(len(steps_using(images, "docker/setup-buildx-action")), 1)
         (qemu,) = steps_using(images, "docker/setup-qemu-action")
         self.assertRegex(qemu["with"]["image"], r"^docker\.io/tonistiigi/binfmt:[\w.-]+@sha256:[0-9a-f]{64}$")
+        self.assertEqual(qemu["with"]["platforms"], "arm64")
         (buildx,) = steps_using(images, "docker/setup-buildx-action")
         self.assertRegex(buildx["with"]["driver-opts"], r"^image=moby/buildkit:v[\w.-]+@sha256:[0-9a-f]{64}$")
         self.assertRegex(images["env"]["PYTHON_IMAGE"], r"^python:3\.12-slim-bookworm@sha256:[0-9a-f]{64}$")
@@ -397,22 +397,16 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertEqual(checkout["with"]["sparse-checkout"], "tools")
         self.assertEqual(checkout["with"]["path"], "src")
         self.assertIs(checkout["with"]["persist-credentials"], False)
-        console, agent = steps_using(images, "docker/build-push-action")
+        (console,) = steps_using(images, "docker/build-push-action")
         self.assertTrue(console["with"]["file"].endswith("/Dockerfile.release"))
         self.assertEqual(console["with"]["context"], "${{ steps.unpack.outputs.console_dir }}")
         self.assertEqual(console["with"]["platforms"], CONSOLE_PLATFORMS)
         # Only <V>; the channel tags are pointed at it afterwards.
         self.assertEqual(console["with"]["tags"], "${{ needs.build.outputs.console_ref }}")
         self.assertEqual(console["if"], "steps.existing.outputs.console == 'build'")
-        self.assertTrue(agent["with"]["file"].endswith("/Dockerfile.agent"))
-        self.assertEqual(agent["with"]["context"], "${{ steps.unpack.outputs.agent_dir }}")
-        self.assertEqual(agent["with"]["platforms"], AGENT_PLATFORMS)
-        self.assertEqual(agent["with"]["tags"], "${{ needs.build.outputs.agent_ref }}")
-        self.assertEqual(agent["if"], "steps.existing.outputs.agent == 'build'")
-        for step in (console, agent):
-            self.assertIs(step["with"]["push"], True)
-            self.assertEqual(step["with"]["labels"], "${{ needs.build.outputs.labels }}")
-            self.assertEqual(step["with"]["build-args"], "PYTHON_IMAGE=${{ env.PYTHON_IMAGE }}")
+        self.assertIs(console["with"]["push"], True)
+        self.assertEqual(console["with"]["labels"], "${{ needs.build.outputs.labels }}")
+        self.assertEqual(console["with"]["build-args"], "PYTHON_IMAGE=${{ env.PYTHON_IMAGE }}")
         existing = next(step for step in images["steps"] if step.get("id") == "existing")
         self.assertEqual(existing["env"]["FORCE_IMAGES"], "${{ inputs.force_images && 'true' || 'false' }}")
         self.assertIn('if [ "$revision" != "$SHA" ]', existing["run"])
@@ -420,14 +414,13 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertNotIn("${{", images["steps"][channels]["run"])
         unpack = next(step for step in images["steps"] if step.get("id") == "unpack")
         self.assertIn("sha256sum -c SHA256SUMS", unpack["run"])
-        self.assertEqual(unpack["run"].count("MANIFEST.sha256"), 2)
+        self.assertEqual(unpack["run"].count("MANIFEST.sha256"), 1)
         names = [step.get("name", "") for step in images["steps"]]
         logout = next(i for i, step in enumerate(images["steps"]) if step.get("run") == "docker logout ghcr.io")
         check = next(i for i, step in enumerate(images["steps"]) if "docker manifest inspect" in step.get("run", ""))
         self.assertLess(names.index("Log in to ghcr.io"), names.index(existing["name"]))
         self.assertLess(names.index(existing["name"]), names.index(console["name"]))
         self.assertLess(names.index(console["name"]), channels)
-        self.assertLess(names.index(agent["name"]), channels)
         self.assertLess(channels, logout)
         self.assertLess(logout, check)
         self.assertIn("::warning::", images["steps"][check]["run"])
@@ -527,9 +520,8 @@ class VersionTests(unittest.TestCase):
             "Sanadunt", "2.0.0", SHA_A, "https://github.com/sanadunt/sdr-doa-ground-control"
         )
         self.assertEqual(outputs["console_image"], "ghcr.io/sanadunt/sdr-doa-ground-console")
-        self.assertEqual(outputs["agent_image"], "ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent")
         self.assertEqual(outputs["console_ref"], "ghcr.io/sanadunt/sdr-doa-ground-console:2.0.0")
-        self.assertEqual(outputs["agent_ref"], "ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent:2.0.0")
+        self.assertEqual(sorted(key for key in outputs if key.endswith(("_image", "_ref"))), ["console_image", "console_ref"])
         self.assertEqual((outputs["channels"], outputs["newest"]), ("2.0 2 latest", "true"))
         backport = release_check.image_outputs(
             "sanadunt", "2.0.1", SHA_A, "https://github.com/sanadunt/sdr-doa-ground-control", ["v2.1.0"]
@@ -587,10 +579,8 @@ class AssetCheckTests(unittest.TestCase):
         self.dir.mkdir()
         console_top = make_release.console_release_name(self.VERSION)
         write_tarball(self.dir / f"{console_top}.tar.gz", console_top, {"VERSION": b"2.0.0\n", "packaging/docker/sdr-doa-docker": self.SCRIPT})
-        agent_top = make_release.agent_release_name(self.VERSION)
-        write_tarball(self.dir / f"{agent_top}.tar.gz", agent_top, {"VERSION": b"2.0.0\n"})
         (self.dir / "sdr-doa-docker").write_bytes(self.SCRIPT)
-        write_sums(self.dir, CONTRACT_ASSETS[:3])
+        write_sums(self.dir, CONTRACT_ASSETS[:2])
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -619,7 +609,7 @@ class AssetCheckTests(unittest.TestCase):
         self.assertRefused("sdr-doa-docker does not match its SHA256SUMS line")
 
     def test_sums_must_cover_every_asset(self):
-        write_sums(self.dir, CONTRACT_ASSETS[:2])
+        write_sums(self.dir, CONTRACT_ASSETS[:1])
         self.assertRefused("SHA256SUMS lists")
 
     def test_malformed_sums(self):
@@ -629,10 +619,10 @@ class AssetCheckTests(unittest.TestCase):
     def test_console_tarball_must_ship_the_same_script(self):
         console_top = make_release.console_release_name(self.VERSION)
         write_tarball(self.dir / f"{console_top}.tar.gz", console_top, {"VERSION": b"2.0.0\n"})
-        write_sums(self.dir, CONTRACT_ASSETS[:3])
+        write_sums(self.dir, CONTRACT_ASSETS[:2])
         self.assertRefused("does not ship packaging/docker/sdr-doa-docker")
         write_tarball(self.dir / f"{console_top}.tar.gz", console_top, {"packaging/docker/sdr-doa-docker": b"other"})
-        write_sums(self.dir, CONTRACT_ASSETS[:3])
+        write_sums(self.dir, CONTRACT_ASSETS[:2])
         self.assertRefused("differs from the sdr-doa-docker asset")
 
     def test_command_line_prints_the_assets(self):
@@ -848,7 +838,8 @@ class CrossTrackContractTests(unittest.TestCase):
 
     def test_docker_script_pulls_the_images_the_workflow_pushes(self):
         self.assertEqual(self.script_value("CONSOLE_IMAGE"), release_check.image_name(self.owner, release_check.CONSOLE_IMAGE))
-        self.assertEqual(self.script_value("AGENT_IMAGE"), release_check.image_name(self.owner, release_check.AGENT_IMAGE))
+        # The script installs the console only; the Raspberry runs the RDF Node edge.
+        self.assertNotRegex(self.script, r"(?m)^AGENT_IMAGE=")
         # Its default channel is the major of this VERSION, which every stable
         # release of that major moves (a prerelease VERSION moves none).
         self.assertEqual(self.script_value("DEFAULT_CHANNEL"), str(release_check.parse_release_version(self.version)[0]))
@@ -869,7 +860,7 @@ class CrossTrackContractTests(unittest.TestCase):
 
     def test_repository_url_is_the_same_everywhere(self):
         url = f"https://github.com/{self.REPOSITORY}"
-        for name in ("Dockerfile", "Dockerfile.release", "Dockerfile.agent"):
+        for name in ("Dockerfile", "Dockerfile.release"):
             sources = re.findall(r'org\.opencontainers\.image\.source="([^"]+)"', (ROOT / name).read_text(encoding="utf-8"))
             self.assertEqual(sources, [url], name)
         quickstart = (ROOT / "QUICKSTART.md").read_text(encoding="utf-8")
@@ -888,33 +879,25 @@ class CrossTrackContractTests(unittest.TestCase):
                     ROOT, output_dir=out, dist_dir=dist, skip_build=True, allow_dirty=True, epoch=1_700_000_000
                 )
             self.assertEqual([path.name for path in paths], release_check.release_assets(self.version))
-            members = {}
-            for path, top in (
-                (paths[0], make_release.console_release_name(self.version)),
-                (paths[1], make_release.agent_release_name(self.version)),
-            ):
-                with tarfile.open(path, "r:gz") as archive:
-                    names = archive.getnames()
-                self.assertTrue(all(name == top or name.startswith(top + "/") for name in names), path.name)
-                members[path.name] = {name[len(top) + 1:] for name in names if name != top}
-        console, agent = members[paths[0].name], members[paths[1].name]
+            top = make_release.console_release_name(self.version)
+            with tarfile.open(paths[0], "r:gz") as archive:
+                names = archive.getnames()
+            self.assertTrue(all(name == top or name.startswith(top + "/") for name in names), paths[0].name)
+            console = {name[len(top) + 1:] for name in names if name != top}
         for required in (
             "install.sh", "VERSION", make_release.MANIFEST_NAME, "Dockerfile.release", "docker-compose.yml",
             "docker-compose.ghcr.yml", release_check.DOCKER_SCRIPT_IN_CONSOLE, "packaging/console/update_release.py",
             "packaging/docker/healthcheck.py", "packaging/docker/console-entrypoint.sh",
         ):
             self.assertIn(required, console)
-        for required in ("install.sh", "VERSION", make_release.MANIFEST_NAME, "Dockerfile.agent", "docker-compose.yml"):
-            self.assertIn(required, agent)
-        # release.yml builds each image with the tarball's own Dockerfile and
+        # release.yml builds the image with the tarball's own Dockerfile and
         # the unpacked tarball as the context, so every COPY source must be in it.
-        for tree, dockerfile in ((console, "Dockerfile.release"), (agent, "Dockerfile.agent")):
-            for source in _dockerfile_copy_sources((ROOT / dockerfile).read_text(encoding="utf-8")):
-                source = source.rstrip("/")
-                self.assertTrue(
-                    source in tree or any(name.startswith(source + "/") for name in tree),
-                    f"{dockerfile} copies {source}, which its tarball does not hold",
-                )
+        for source in _dockerfile_copy_sources((ROOT / "Dockerfile.release").read_text(encoding="utf-8")):
+            source = source.rstrip("/")
+            self.assertTrue(
+                source in console or any(name.startswith(source + "/") for name in console),
+                f"Dockerfile.release copies {source}, which the console tarball does not hold",
+            )
 
 
 class OutputFormatTests(unittest.TestCase):
@@ -944,7 +927,7 @@ class OutputFormatTests(unittest.TestCase):
                 key, value = line.split("=", 1)
                 values[key] = value
         self.assertEqual(values["console_image"], "ghcr.io/sanadunt/sdr-doa-ground-console")
-        self.assertEqual(values["agent_ref"], "ghcr.io/sanadunt/sdr-doa-rdf-sdr-agent:2.0.0")
+        self.assertEqual(values["console_ref"], "ghcr.io/sanadunt/sdr-doa-ground-console:2.0.0")
         self.assertEqual((values["channels"], values["newest"]), ("2.0 2 latest", "true"))
         self.assertEqual(len(values["labels"]), 3)
 
