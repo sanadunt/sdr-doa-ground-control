@@ -1,4 +1,4 @@
-"""Tests for the single MQTT client that observes v1 and RDF Node v2."""
+"""Tests for the single MQTT client that observes sdr/v1 and the RDF Node topics."""
 from __future__ import annotations
 
 import http.client
@@ -552,6 +552,46 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self._send("availability", b'{"v":1,"ts_ms":1}', qos=1)
         self.assertIs(self.monitor.snapshot()["last_by_kind"]["availability"]["valid"], False)
 
+    def test_edge_payloads_reach_the_rdf_node_view_through_the_shared_connection(self) -> None:
+        fixtures = TOOLS_DIR / "fixtures" / "rdf-node"
+        manifest = json.loads((fixtures / "manifest.json").read_text(encoding="utf-8"))
+        by_file = {entry["file"]: entry for entry in manifest["fixtures"]}
+        self._connected()
+        # state is the first RDF Node filter, so its retained value comes first.
+        v2_topics = [topic for topic, _options in self.client.subscriptions if topic.startswith("sdr/v2/")]
+        self.assertEqual(v2_topics[0], f"sdr/v2/{NODE}/state")
+        clock = [manifest["generated_at_ms"]]
+
+        def deliver(name: str) -> None:
+            entry = by_file[name]
+            self.client.on_message(self.client, None, message(
+                f"sdr/v2/{NODE}/{entry['topic']}", (fixtures / name).read_bytes(), entry["qos"], entry["retain"],
+            ))
+
+        with patch.object(self.module, "_now_ms", lambda: clock[0]):
+            for name in ("state.json", "capabilities.json", "telemetry-health.json", "telemetry-doa.ok1.json",
+                         "telemetry-angular.live.json", "ack-config.config-get-applied.json"):
+                deliver(name)
+            report = json.loads((fixtures / "settings-reported.json").read_bytes())
+            deliver("settings-reported.json")
+            self.assertIsNone(self.monitor.rdf_node_settings_report())
+            self.monitor.expect_rdf_node_settings_report(report["id"])
+            deliver("settings-reported.json")
+            snapshot = self.monitor.rdf_node_snapshot()
+            session = self.monitor.rdf_node_session()
+            saved = self.monitor.rdf_node_settings_report()
+            ack = self.monitor.rdf_node_ack(report["id"])
+        self.assertEqual(snapshot["connection"], "ready")
+        self.assertEqual(snapshot["invalid"], 0)
+        self.assertEqual(snapshot["topics"]["telemetry/doa"]["status"], "LIVE")
+        self.assertEqual(snapshot["topics"]["telemetry/angular"]["status"], "LIVE")
+        self.assertTrue(snapshot["node"]["angular"]["live"])
+        self.assertEqual(snapshot["topics"]["settings/reported"]["status"], "FRESH")
+        self.assertEqual((session["sid"], session["cfg"], session["health_fresh"]), (report["sid"], report["rev"], True))
+        self.assertEqual(saved["settings_json"], report["settings_json"])
+        self.assertEqual((ack["status"], ack["topic"]), ("APPLIED", "ack/config"))
+        self.assertEqual(self.client.publish_calls, [])
+
     def test_rdf_node_snapshot_reports_server_time(self) -> None:
         clock = [1_700_000_000_000]
         with patch.object(self.module, "_now_ms", lambda: clock[0]):
@@ -798,42 +838,25 @@ class SharedMqttMonitorTests(unittest.TestCase):
             self.assertIs(live["retained"], False)
             self.assertEqual((live["age_ms"], live["age_basis"], live["config_rev"]), (1_500, "received", 43))
 
-            # RDF v2 config/reported follows the same rule with its "t" field.
-            self._send("config_reported", b"", qos=1)
-            v2 = json.dumps({
-                "v": 2, "sid": "7a8b9c0d", "rev": 3, "t": published, "proof": "unverified", "digest": "abc",
-                "effective": {"center_frequency_hz": 433_000_000, "gain_db": 20.5},
-            }).encode("utf-8")
-            self.client.on_message(self.client, None, message(f"sdr/v2/{NODE}/config/reported", v2, 1, True))
-            v2_reported = reported()
-            self.assertEqual(v2_reported["source"], "v2")
-            self.assertEqual(
-                (v2_reported["retained"], v2_reported["age_ms"], v2_reported["age_basis"]),
-                (True, clock[0] - published, "source_ts"),
-            )
-
-    def test_reported_config_takes_vfo_values_only_from_rdf_v2_effective(self) -> None:
+    def test_retired_rdf_node_config_reported_is_not_read(self) -> None:
+        # The RDF Node edge has no config/reported. A retained leftover on the
+        # broker is not subscribed, so it is neither counted nor a value source.
         self._connected()
+        self.assertNotIn(f"sdr/v2/{NODE}/config/reported", {topic for topic, _options in self.client.subscriptions})
         now = int(time.time() * 1000)
-        v2 = json.dumps({
+        leftover = json.dumps({
             "v": 2, "sid": "7a8b9c0d", "rev": 3, "t": now, "proof": "unverified", "digest": "abc",
-            "effective": {
-                "center_frequency_hz": 433_000_000, "gain_db": 20.5,
-                "vfo0_frequency_hz": 433_900_000, "vfo0_bandwidth_hz": 12_500, "vfo0_squelch_db": -80.0,
-            },
+            "effective": {"center_frequency_hz": 433_000_000, "vfo0_frequency_hz": 433_900_000},
         }).encode("utf-8")
-        self.client.on_message(self.client, None, message(f"sdr/v2/{NODE}/config/reported", v2, 1, True))
+        self.client.on_message(self.client, None, message(f"sdr/v2/{NODE}/config/reported", leftover, 1, True))
         data = self.monitor.reported_config()
-        # RDF v2 rev is display-only, never a base revision.
+        self.assertIsNone(data["reported"])
         self.assertEqual((data["base_config_rev"], data["base_config_rev_source"]), (None, None))
-        self.assertEqual(data["reported"]["source"], "v2")
-        self.assertIsNone(data["reported"]["config_rev"])
-        self.assertEqual(data["values"]["vfo_frequency_hz"], 433_900_000)
-        self.assertEqual(data["values"]["vfo_bandwidth_hz"], 12_500)
-        self.assertEqual(data["values"]["vfo_squelch_db"], -80.0)
-        self.assertEqual(data["values"]["center_frequency_hz"], 433_000_000)
-        self.assertEqual(data["value_sources"]["vfo_frequency_hz"], "v2_effective")
-        self.assertEqual(data["value_sources"]["center_frequency_hz"], "v2_effective")
+        self.assertEqual(set(data["values"].values()), {None})
+        snapshot = self.monitor.rdf_node_snapshot()
+        self.assertEqual((snapshot["received"], snapshot["invalid"]), (0, 0))
+        self.assertNotIn("config/reported", snapshot["topics"])
+        self.assertIsNone(snapshot["node"]["session"])
 
         v1 = contract.build_config_reported(
             ts_ms=now, config_rev=4, center_frequency_hz=416_588_000, gain_db=15.5,
@@ -841,27 +864,20 @@ class SharedMqttMonitorTests(unittest.TestCase):
         )
         self._send("config_reported", v1, retained=True, qos=1)
         data = self.monitor.reported_config()
-        self.assertEqual(data["reported"]["source"], "v1+v2")
+        self.assertEqual(data["reported"]["source"], "v1")
         self.assertEqual((data["base_config_rev"], data["base_config_rev_source"]), (4, "config_reported"))
-        self.assertEqual(data["values"]["center_frequency_hz"], 416_588_000)
         self.assertEqual(data["value_sources"]["center_frequency_hz"], "v1_config_reported")
-        self.assertEqual(data["value_sources"]["vfo_bandwidth_hz"], "v2_effective")
+        self.assertIsNone(data["values"]["vfo_frequency_hz"])
         self.assertEqual(self.client.publish_calls, [])
 
     def test_reported_config_keeps_the_receipt_time_of_each_value(self) -> None:
         self._connected()
         clock = [1_760_000_000_000]
-        v2 = json.dumps({
-            "v": 2, "sid": "7a8b9c0d", "rev": 3, "t": clock[0], "proof": "unverified", "digest": "abc",
-            "effective": {"vfo0_frequency_hz": 433_900_000, "vfo0_bandwidth_hz": 12_500, "gain_db": 20.5},
-        }).encode("utf-8")
         v1 = contract.build_config_reported(
             ts_ms=clock[0], config_rev=4, center_frequency_hz=416_588_000, gain_db=15.5,
             array="UCA", method="MUSIC", active_vfos=1,
         )
         with patch.object(self.module, "_now_ms", lambda: clock[0]):
-            self.client.on_message(self.client, None, message(f"sdr/v2/{NODE}/config/reported", v2, 1, True))
-            v2_at = clock[0]
             clock[0] += 3_000
             self._send("config_reported", v1, qos=1)
             v1_at = clock[0]
@@ -871,8 +887,7 @@ class SharedMqttMonitorTests(unittest.TestCase):
         # Each value carries the receipt time of the message it came from.
         self.assertEqual(received["center_frequency_hz"], v1_at)
         self.assertEqual(received["gain_db"], v1_at)
-        self.assertEqual(received["vfo_frequency_hz"], v2_at)
-        self.assertEqual(received["vfo_bandwidth_hz"], v2_at)
+        self.assertIsNone(received["vfo_frequency_hz"])
         self.assertIsNone(received["vfo_squelch_db"])
         self.assertEqual(data["reported"]["received_at_ms"], v1_at)
 

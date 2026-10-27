@@ -31,6 +31,14 @@ Script membuat `Agent` di atas folder share KrakenSDR sementara (`settings.json`
 - `ppp.restart` memakai jawaban helper `{"requested": true, "service": "t900-ppp.service"}`, satu-satunya jawaban yang diterima `control.py`;
 - `service.restart` tanpa socket helper, sehingga hasilnya `OUTCOME_UNKNOWN`.
 
+## Snapshot console
+
+`api-snapshot.json` bukan payload edge: ini body `GET /api/mqtt/rdf-node` yang dihasilkan `tools/rdf_node_mqtt_v2.py` setelah edge yang sehat mengirim fixture di bawah. `tools/test_rdf_node_mqtt_v2.py` gagal bila body itu tidak sama lagi dengan yang dilayani store, dan Vitest Monitor Pesan membacanya. Setelah bentuknya sengaja diubah, tulis ulang dengan:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -c "import tools.test_rdf_node_mqtt_v2 as t; t.write_api_snapshot()"
+```
+
 ## Isi
 
 | File | Topik | Varian |
