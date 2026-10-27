@@ -140,6 +140,7 @@ MQTT adalah transport/contract, bukan pengganti DAQ, DSP, normalisasi, gate, ata
 |---|---|
 | `tools/ground_console.py` | HTTP Ground Console, API lokal, static frontend serving, CSP, config/branding/admin lokal, route perintah Kontrol (`config.patch`, `config.get`) |
 | `tools/sdr_doa_collector.py` | Collector read-only, parsing terbatas, redaction, freshness, candidate, gate |
+| `tools/telemetry_source.py`, `tools/data_out_reader.py` | Sumber `/api/snapshot`: MQTT dulu, Data Out (cadangan) bila MQTT tidak segar; satu pembacaan Data Out bersama untuk semua penampil |
 | `tools/sdr_doa_lan_agent.py` | Edge agent/LAN staging di topik lama `sdr/v1/uav-01` dan payload health/state/config; dengan `--publish` selalu berlangganan `cmd/config/patch` topik lama, dan tanpa `--enable-config` menolak patch dengan `REMOTE_CONTROL_DISABLED`. Kontrol tidak memakainya. |
 | `tools/sdr_doa_mqtt.py` | MQTT contract/adapter staging |
 | `tools/sdr_doa_mqtt_monitor.py` | MQTT monitor; berlangganan, dan hanya publish perintah RDF Node dari Kontrol lewat `publish_rdf_node_command`. Memerlukan `paho-mqtt` (tanpa paket ini monitor berstatus ERROR, console tetap jalan) |
