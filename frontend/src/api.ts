@@ -327,7 +327,7 @@ export async function getMqtt(signal?: AbortSignal): Promise<MqttSnapshot> {
   return normalizeMqttSnapshot(body, Date.now());
 }
 
-/** RDF Node v2 telemetry from the same subscriber connection. */
+/** RDF Node MQTT state (topics and node view) from the same subscriber connection. */
 export async function getRdfNodeMqtt(signal?: AbortSignal): Promise<RdfNodeSnapshot> {
   const body = await requestJson<unknown>('/api/mqtt/rdf-node', {
     cache: 'no-store',
