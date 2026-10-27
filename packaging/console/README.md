@@ -28,15 +28,15 @@ Data realtime (snapshot DoA, MQTT, spektrum) tidak disimpan; itu diperbarui teru
 ## Native
 
 ```sh
-curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v2.0.0/sdr-doa-ground-console-2.0.0-linux.tar.gz
-curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v2.0.0/SHA256SUMS
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v3.0.0/sdr-doa-ground-console-3.0.0-linux.tar.gz
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v3.0.0/SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS
-tar -xzf sdr-doa-ground-console-2.0.0-linux.tar.gz
-cd sdr-doa-ground-console-2.0.0-linux
+tar -xzf sdr-doa-ground-console-3.0.0-linux.tar.gz
+cd sdr-doa-ground-console-3.0.0-linux
 sh install.sh
 ```
 
-Ganti `2.0.0` dengan versi di halaman Releases. Setelah terpasang, versi berikutnya datang lewat `sdr-doa-console update` (bagian "Update dari GitHub Releases").
+Ganti `3.0.0` dengan versi di halaman Releases. Setelah terpasang, versi berikutnya datang lewat `sdr-doa-console update` (bagian "Update dari GitHub Releases").
 
 Installer memeriksa file rilis terhadap `MANIFEST.sha256`, membuat venv berisi `paho-mqtt` dan `tzdata` (dari folder `wheels/` bila ada, selain itu dari PyPI), lalu menanyakan kata sandi admin: ketik sendiri, ketik `random` untuk dibuatkan, atau tekan Enter untuk memakai default `123456` (akan muncul peringatan). Setelah itu console langsung jalan dan dibuka dengan `sdr-doa-console open` atau menu **SDR-DoA Ground Console**.
 
@@ -102,7 +102,7 @@ sdr-doa-console update --allow-major izinkan versi mayor baru (baca catatan rili
 
 Tidak perlu akun atau token GitHub: repository publik, jadi daftar rilis dan file rilis bisa diambil tanpa login. Token di environment (`GITHUB_TOKEN`) tidak pernah dikirim. Updater memakai proxy dari environment (`HTTPS_PROXY`, `NO_PROXY`). Urutannya:
 
-1. baca rilis terbaru; prerelease tidak pernah dipilih, dan versi mayor lain (misalnya 3.x saat 2.x terpasang) hanya dengan `--allow-major`;
+1. baca rilis terbaru; prerelease tidak pernah dipilih, dan versi mayor lain (misalnya 3.x saat 2.x terpasang) hanya dengan `--allow-major`, juga bagi timer harian (dari 2.x ke 3.0.0: `sdr-doa-console update --allow-major`, setelah membaca `CHANGELOG.md`);
 2. unduh `SHA256SUMS` dan `sdr-doa-ground-console-<versi>-linux.tar.gz`, cocokkan SHA-256, ekstrak hanya file dan folder di dalam folder rilis, lalu cocokkan `MANIFEST.sha256`. Tidak ada isi unduhan yang dijalankan sebelum hash cocok;
 3. salin program sekarang (dengan venv, perintah `sdr-doa-console`, service, dan menu) ke `app.previous`;
 4. jalankan `install.sh` rilis baru dengan opsi instalasi sekarang. `install.sh` mencatat opsinya di `app/install-options` (`--prefix`, `--data-dir`, `--bin-dir`, `--port`, `--no-service`, `--no-desktop`); kata sandi dan nilai awal tidak pernah dicatat;
@@ -138,7 +138,7 @@ sudo sdr-doa-docker auto-update off
 cd /opt/sdr-doa-ground-console && sudo docker compose exec console sdr-doa-set-admin-password && sudo docker compose restart console
 ```
 
-Semua perintah untuk instalasi di `/opt` pakai `sudo`, karena `.env` di sana milik root (0600). Kanal update adalah `SDR_DOA_IMAGE_TAG` di `/opt/sdr-doa-ground-console/.env` (bawaan `2`: setiap rilis 2.x.y; `2.0` hanya 2.0.z; versi mayor baru hanya dengan `install --channel 3`). Image baru yang tidak `healthy` dalam 180 detik diganti lagi dengan image sebelumnya (tag `sdr-doa-previous`); bila image itu sendiri gagal (unhealthy, berhenti, restart terus) ia dicatat di `.bad-images` dan update otomatis melewatinya. Image yang lebih lama dari yang jalan juga dilewati update otomatis, dan selama Receiver merekam atau mengarsipkan pindai update otomatis ditunda (paling lama 7 hari). Tanpa plugin `docker buildx`, `update --check` mem-pull image untuk membandingkannya (container dan tag yang jalan tetap). Setiap langkah tercatat di `update.log`. Satu host punya satu timer update (`auto-update on --force` memindahkannya), dan timer root hanya untuk direktori milik root; instalasi milik user mendapat baris crontab dari `sdr-doa-docker auto-update on` tanpa sudo.
+Semua perintah untuk instalasi di `/opt` pakai `sudo`, karena `.env` di sana milik root (0600). Kanal update adalah `SDR_DOA_IMAGE_TAG` di `/opt/sdr-doa-ground-console/.env` (bawaan `3`: setiap rilis 3.x.y; `3.0` hanya 3.0.z; versi mayor baru hanya dengan `install --channel 4`; host di kanal `2` pindah ke 3.0.0 dengan `sdr-doa-docker` dari rilis 3.0.0 dan `install --channel 3`, lihat `CHANGELOG.md`). Image baru yang tidak `healthy` dalam 180 detik diganti lagi dengan image sebelumnya (tag `sdr-doa-previous`); bila image itu sendiri gagal (unhealthy, berhenti, restart terus) ia dicatat di `.bad-images` dan update otomatis melewatinya. Image yang lebih lama dari yang jalan juga dilewati update otomatis, dan selama Receiver merekam atau mengarsipkan pindai update otomatis ditunda (paling lama 7 hari). Tanpa plugin `docker buildx`, `update --check` mem-pull image untuk membandingkannya (container dan tag yang jalan tetap). Setiap langkah tercatat di `update.log`. Satu host punya satu timer update (`auto-update on --force` memindahkannya), dan timer root hanya untuk direktori milik root; instalasi milik user mendapat baris crontab dari `sdr-doa-docker auto-update on` tanpa sudo.
 
 `update` hanya mengganti image: perubahan `.env` (port, kata sandi, nilai awal) diterapkan dengan `cd /opt/sdr-doa-ground-console && sudo docker compose up -d` atau `sudo sdr-doa-docker install` lagi. Nilai `SDR_DOA_ADMIN_PASSWORD` atau `SDR_DOA_SEED_*` yang memuat `$` ditulis dalam kutip tunggal (`SDR_DOA_ADMIN_PASSWORD='Xk9$q2!aB'`), karena docker compose mengganti `$nama` di nilai tanpa kutip atau berkutip ganda; script memberi peringatan bila tidak.
 
@@ -149,8 +149,8 @@ Pindah dari image yang di-build sendiri: nama project compose dan volume sama de
 Dari rilis (tidak perlu Node.js):
 
 ```sh
-tar -xzf sdr-doa-ground-console-2.0.0-linux.tar.gz
-cd sdr-doa-ground-console-2.0.0-linux
+tar -xzf sdr-doa-ground-console-3.0.0-linux.tar.gz
+cd sdr-doa-ground-console-3.0.0-linux
 docker compose up -d --build
 ```
 
