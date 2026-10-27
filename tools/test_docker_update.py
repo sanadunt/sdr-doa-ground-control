@@ -605,7 +605,7 @@ class InstallTests(DockerScriptTestCase):
     def test_an_agent_install_of_version_2_is_named_not_managed(self):
         self.write_old_agent_install()
         compose = (self.dir / "compose.yml").read_text()
-        for args in (("update",), ("status",), ("rollback",), ("install",)):
+        for args in (("update",), ("status",), ("rollback",), ("install",), ("install", "--force")):
             result = self.h.run(*args, "--dir", str(self.dir))
             self.assertEqual(result.returncode, 1, (args, result.stdout, result.stderr))
             self.assertIn("RDF-SDR agent install of sdr-doa-docker 2", result.stderr, args)
@@ -613,8 +613,15 @@ class InstallTests(DockerScriptTestCase):
         self.assertEqual((self.dir / "compose.yml").read_text(), compose)
         # Nothing pulled, started or stopped.
         self.assertEqual([argv for argv in self.h.argvs() if argv[:1] in (["pull"], ["stop"]) or "up" in argv[:3] and "--help" not in argv], [])
-        # --force puts the console there, with the console image.
-        self.install("--force", "--channel", CHANNEL)
+        # --force does not write the console's compose over the agent's: the agent
+        # project would keep running with no file left to stop it.
+        result = self.h.run("install", "--force", "--dir", str(self.dir))
+        self.assertIn("--force does not replace it", result.stderr)
+        self.assertIn("move compose.yml away", result.stderr)
+        # Once the agent is down and its compose.yml moved away, the console goes
+        # there, with the console image instead of the agent image left in .env.
+        (self.dir / "compose.yml").rename(self.dir / "compose.yml.agent")
+        self.install("--channel", CHANNEL)
         text = (self.dir / "compose.yml").read_text()
         self.assertTrue(text.startswith(f"{MARKER} (console)."))
         values = read_env_file(self.dir / ".env")

@@ -96,8 +96,8 @@ install options:
   --port N          console port (default 8787; the console binds 127.0.0.1)
   --auto-update     also turn the daily update on (root)
   --time HH:MM      time of the daily update (default 03:30, local time)
-  --force           replace a compose.yml that sdr-doa-docker did not write,
-                    or the RDF-SDR agent install of sdr-doa-docker 2
+  --force           replace a compose.yml that sdr-doa-docker did not write
+                    (never the RDF-SDR agent install of sdr-doa-docker 2)
 
 update options:
   --dir DIR         install directory (default: the console install in the
@@ -1272,12 +1272,14 @@ cmd_install() {
   fi
   check_docker
   detect_compose
-  if [ -e "$DIR/compose.yml" ] && [ "$in_force" != 1 ]; then
+  if [ -e "$DIR/compose.yml" ]; then
     in_old=$(variant_of "$DIR/compose.yml")
-    if [ -z "$in_old" ]; then
+    # Not even with --force: writing the console's compose over the agent's
+    # would leave the agent project running with no file left to stop it.
+    if [ "$in_old" = agent ]; then
+      die "$AGENT_GONE; to put the console there, run that first and then move compose.yml away (--force does not replace it)"
+    elif [ -z "$in_old" ] && [ "$in_force" != 1 ]; then
       die "$DIR/compose.yml was not written by $PROG; move it away or pass --force"
-    elif [ "$in_old" != console ]; then
-      die "$AGENT_GONE, or pass --force to put the console there"
     fi
   fi
   mkdir -p "$DIR"
@@ -1287,7 +1289,7 @@ cmd_install() {
   need_readable "$DIR/.env"
 
   if [ ! -f "$DIR/.env" ]; then env_header | write_file "$DIR/.env" 0600; fi
-  # A custom image stays; the agent image of an install of sdr-doa-docker 2 (--force) does not.
+  # A custom image stays; the agent image an install of sdr-doa-docker 2 left in .env does not.
   case $(env_get "$DIR/.env" SDR_DOA_IMAGE) in
     '' | "$CONSOLE_IMAGE" | */sdr-doa-rdf-sdr-agent) env_set "$DIR/.env" SDR_DOA_IMAGE "$DEFAULT_IMAGE" ;;
   esac
