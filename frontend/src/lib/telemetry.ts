@@ -6,6 +6,7 @@ import type {
   TelemetrySnapshot,
   Tone,
 } from '../types';
+import { isMqttSnapshot, mqttDoaUnverified } from './telemetrySource';
 
 export const DEFAULT_CONSOLE_CONFIG = {
   base_url: 'http://doasdr.local:8081',
@@ -18,8 +19,26 @@ export const DEFAULT_CONSOLE_CONFIG = {
 /** Refresh intervals accepted by /api/console-config, in seconds (0 = manual). */
 export const REFRESH_INTERVALS_S: readonly number[] = [0, 1, 2, 5, 10, 30];
 
-export function candidate(snapshot: TelemetrySnapshot | null | undefined, name: 'csv' | 'xml'): Candidate {
+export type CandidateName = 'csv' | 'xml' | 'mqtt';
+
+export function candidate(snapshot: TelemetrySnapshot | null | undefined, name: CandidateName): Candidate {
   return snapshot?.doa_candidates?.[name] ?? {};
+}
+
+/**
+ * The DoA views the answer's source carries: the CSV and XML views of Data
+ * Out, or the one MQTT view (issue #8; telemetrySource.ts).
+ */
+export function sourceViewNames(snapshot: TelemetrySnapshot | null | undefined): CandidateName[] {
+  return isMqttSnapshot(snapshot) ? ['mqtt'] : ['csv', 'xml'];
+}
+
+/**
+ * The view that carries the angle, the 360-bin vector and the VFO frequency:
+ * the CSV view of Data Out, or the MQTT view.
+ */
+export function primaryCandidate(snapshot: TelemetrySnapshot | null | undefined): Candidate {
+  return candidate(snapshot, isMqttSnapshot(snapshot) ? 'mqtt' : 'csv');
 }
 
 export function numberOrNull(value: unknown): number | null {
@@ -56,7 +75,15 @@ export function completeVector(value: Candidate | undefined): value is Candidate
     && value.angular_power_db.every((entry) => typeof entry === 'number' && Number.isFinite(entry));
 }
 
+/**
+ * The DoA views are fresh and agree. Data Out: a fresh, comparable pair of
+ * CSV and XML views without a conflict. MQTT: a fresh LIVE DoA whose Angular
+ * frame does not contradict it (the server checks a same-frame pair).
+ */
 export function nativeViewsReady(snapshot: TelemetrySnapshot | null | undefined): boolean {
+  if (isMqttSnapshot(snapshot)) {
+    return freshCandidate(candidate(snapshot, 'mqtt')) && snapshot?.native_consistency?.conflict !== true;
+  }
   const csv = candidate(snapshot, 'csv');
   const xml = candidate(snapshot, 'xml');
   const consistency = snapshot?.native_consistency;
@@ -67,8 +94,7 @@ export function nativeViewsReady(snapshot: TelemetrySnapshot | null | undefined)
 }
 
 export function polarDataReady(snapshot: TelemetrySnapshot | null | undefined): boolean {
-  const csv = candidate(snapshot, 'csv');
-  return nativeViewsReady(snapshot) && completeVector(csv);
+  return nativeViewsReady(snapshot) && completeVector(primaryCandidate(snapshot));
 }
 
 /**
@@ -103,13 +129,13 @@ export function nodeStalled(snapshot: TelemetrySnapshot | null | undefined): boo
   if (!snapshot) return false;
   const progress = snapshot.node_progress;
   if (progress !== null && typeof progress === 'object' && progress.stalled === true) return true;
-  return [candidate(snapshot, 'csv'), candidate(snapshot, 'xml')].some((value) => value.freshness?.node_stalled === true);
+  return sourceViewNames(snapshot).some((name) => candidate(snapshot, name).freshness?.node_stalled === true);
 }
 
 /** Error text of each DoA view that could not be used, e.g. 'XML: HTTP 404', bounded for a tooltip. */
 export function candidateErrors(snapshot: TelemetrySnapshot | null | undefined): string[] {
   const errors: string[] = [];
-  for (const name of ['csv', 'xml'] as const) {
+  for (const name of sourceViewNames(snapshot)) {
     const view = candidate(snapshot, name);
     const detail = view.available === true ? view.normalization_error_detail : view.error;
     if (!parsedCandidate(view) && typeof detail === 'string' && detail.trim()) {
@@ -140,8 +166,15 @@ export function deriveDataState(snapshot: TelemetrySnapshot | null | undefined, 
   if (!snapshot) return 'LOADING';
   if (snapshot.status?.available !== true) return 'UNAVAILABLE';
   if (daqSyncState(snapshot) !== 'PASS' || adcOverdriven(snapshot)) return 'DEGRADED';
-  const views = [candidate(snapshot, 'csv'), candidate(snapshot, 'xml')];
+  const views = sourceViewNames(snapshot).map((name) => candidate(snapshot, name));
   const parsed = views.filter(parsedCandidate);
+  if (parsed.length === 0 && isMqttSnapshot(snapshot)) {
+    // MQTT carries data but no LIVE DoA with a known angle: an angle mode the
+    // console cannot map, an UNVERIFIED DoA (the DoA chip says so), or none.
+    if (views[0].available === true) return 'INCOMPLETE';
+    if (mqttDoaUnverified(snapshot)) return localFresh ? 'AVAILABLE' : 'STALE';
+    return 'STALE';
+  }
   if (parsed.length === 0) return doaReadsFailed(snapshot) ? 'UNAVAILABLE' : 'INVALID';
   if (snapshot.native_consistency?.conflict === true) return 'CONFLICT';
   if (nodeStalled(snapshot) || !parsed.some(freshCandidate)) return 'STALE';

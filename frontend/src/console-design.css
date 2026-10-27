@@ -133,6 +133,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   .topbar-spacer { display: none; }
   .topbar-tools { grid-area: tools; justify-self: end; }
   .telemetry-strip { grid-area: chips; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); height: auto; overflow: visible; }
+  /* The Source chip (issue #8) comes first once the console names a source. */
+  .telemetry-strip.has-source { grid-template-columns: repeat(7, minmax(0, 1fr)); }
   .telemetry-item { min-width: 0; padding: 4px 8px; }
   .telemetry-value { overflow: hidden; text-overflow: ellipsis; }
   .topbar-toolbar { grid-area: toolbar; }
@@ -145,6 +147,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   .telemetry-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .telemetry-item:nth-child(4) { border-left: 0; }
   .telemetry-item:nth-child(n+4) { border-top: 1px solid var(--line-soft); }
+  /* With the Source chip: it takes the first row, the other six two rows of three. */
+  .telemetry-strip.has-source { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .telemetry-strip.has-source .telemetry-item:first-child { grid-column: 1 / -1; }
+  .telemetry-strip.has-source .telemetry-item:nth-child(4) { border-left: 1px solid var(--line-soft); }
+  .telemetry-strip.has-source .telemetry-item:is(:nth-child(2), :nth-child(5)) { border-left: 0; }
+  .telemetry-strip.has-source .telemetry-item:nth-child(n+2) { border-top: 1px solid var(--line-soft); }
   .topbar-read { font-size: 10.5px; }
   /* The LAN view's interval select only shows the console's value; on a phone its
      place goes to the VIEW ONLY chip, so the first row still fits. */

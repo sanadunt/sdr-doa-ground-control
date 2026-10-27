@@ -4,6 +4,7 @@ import type { ConsoleCapabilities } from '../api';
 import { configPatchPublishable } from '../lib/configPatch';
 import { lastMessageAgeMs } from '../lib/mqttMonitor';
 import { candidate, formatNumber, numberOrNull, syncCount, toneFor } from '../lib/telemetry';
+import { isMqttSnapshot } from '../lib/telemetrySource';
 import { useI18n } from '../lib/i18n';
 import type { Translate } from '../lib/i18n';
 import {
@@ -145,7 +146,7 @@ function DataOutCard({ snapshot }: { snapshot: TelemetrySnapshot | null }): JSX.
   );
 }
 
-type ViewRow = { name: 'CSV' | 'XML'; item: Candidate };
+type ViewRow = { name: 'CSV' | 'XML' | 'MQTT'; item: Candidate };
 
 function viewState(item: Candidate): string {
   if (item.available !== true) return 'MISSING';
@@ -154,12 +155,15 @@ function viewState(item: Candidate): string {
 
 function DoaViewsCard({ snapshot }: { snapshot: TelemetrySnapshot | null }): JSX.Element {
   const { t } = useI18n();
-  const rows: ViewRow[] = [{ name: 'CSV', item: candidate(snapshot, 'csv') }, { name: 'XML', item: candidate(snapshot, 'xml') }];
+  // Data Out has a CSV and an XML view; an MQTT answer has its one view (issue #8).
+  const rows: ViewRow[] = isMqttSnapshot(snapshot)
+    ? [{ name: 'MQTT', item: candidate(snapshot, 'mqtt') }]
+    : [{ name: 'CSV', item: candidate(snapshot, 'csv') }, { name: 'XML', item: candidate(snapshot, 'xml') }];
   const present = rows.filter((row) => row.item.available === true).length;
   const state = !snapshot ? 'WAITING'
     : snapshot.native_consistency?.conflict ? 'CONFLICT'
       : present === 0 ? 'MISSING'
-        : present === 1 ? 'INCOMPLETE'
+        : present < rows.length ? 'INCOMPLETE'
           : rows.some((row) => candidateIssue(row.item).quarantined) ? 'INVALID' : 'PRESENT';
   const issues = rows.some((row) => {
     const issue = candidateIssue(row.item);

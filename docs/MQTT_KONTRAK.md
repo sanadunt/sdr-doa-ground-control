@@ -1,0 +1,199 @@
+# Kontrak MQTT RDF Node untuk Ground Console
+
+| | |
+|---|---|
+| Status | Menunggu persetujuan |
+| Issue | #7 (parser console mengikuti kontrak edge), #8 (Dashboard memakai MQTT dulu, bagian 8) |
+| Keputusan | `docs/KEPUTUSAN_MQTT.md`: satu MQTT, root `sdr/v2/uav-01`, Data Out hanya cadangan |
+| Kode console | `tools/rdf_node_mqtt_v2.py` (parser dan store), `tools/sdr_doa_mqtt_monitor.py` (koneksi), `GET /api/mqtt/rdf-node`; `tools/telemetry_source.py` dan `tools/data_out_reader.py` (sumber `/api/snapshot`) |
+| Fixture | `tools/fixtures/rdf-node/`, dibuat oleh kode edge sendiri; `tools/fixtures/telemetry-source/`, jawaban `/api/snapshot` dari MQTT |
+
+Sumber: repo `sanadunt/rdf-indicator-raspberry`, folder `rdf-node/`: `docs/MQTT_TOPIC_SUMMARY.md`, `docs/PROTOCOL.md`, `docs/CONTROL.md`, `docs/MQTT_GROUND.md`, dan kode `src/rdf_node/ground.py`, `codec.py`, `control.py`, `agent.py`, `journal.py`, `source.py`. Acuan wajib: commit `8691ad000146111cd633e9e4fac600b5da53fd8c` (edge rilis `1.0.0-20261013194717`, yang terpasang di Raspberry). Tambahan dari HEAD `20713ff9f0580386cece39f9b12d1d24e47b9bb6` (2026-10-27) ada di bagian 7 dan bersifat opsional.
+
+## 1. Ringkas
+
+- Semua topik di bawah `sdr/v2/uav-01/`. MQTT 5, Clean Start, Session Expiry 0. Edge mengirim satu objek JSON compact UTF-8 per PUBLISH, termasuk Angular (360 nilai, tanpa RDF2, chunk, atau Base64).
+- Console subscribe ke 12 topik edge → ground dengan QoS 1, Retain As Published, Retain Handling 0, client id `groundconsole<hex>`. Console tidak memakai client id `uav-01-ground` milik `rdf-ground.service` dan tidak bergantung padanya.
+- `config/reported` bukan bagian kontrak. Console tidak subscribe, jadi nilai retained sisa di broker tidak dibaca dan tidak memberi revisi.
+- Console belum mengirim perintah ke `sdr/v2` (#9). Bagian 5 dan 6 mencatat kontraknya.
+
+## 2. Topik edge → ground
+
+| Topik | QoS | Retained | Interval / expiry | Contoh | Field wajib (8691ad0) |
+|---|---:|---|---|---:|---|
+| `state` | 1 | ya | saat berubah, paling lambat 60 s | 211 B | `v`=2, `sid`, `boot`, `instance`, `t`, `run` (`RUNNING`, `STOPPED`, `STARTING`, `STOPPING`, `ERROR`, `UNKNOWN`), `daq` (bool), `cfg` (int ≥ 0 atau null), `profile`, `clock` (`SYNCED`, `UNTRUSTED`, `DEMO`) |
+| `capabilities` | 1 | ya | saat koneksi Control baru | 593 B | `v`, `sid`, `boot`, `instance`, `version`, `mode`, `codecs` (list teks), `angle`, `native_axis` (int), `count` (int), `profiles` (list teks), `scope`, dan bool `helper_available`, `remote_commands`, `remote_config_patch`, `remote_processing`, `remote_restart`, `remote_reboot`, `remote_shutdown`, `remote_ppp_restart`, `config_patch`, `processing`, `restart`, `reboot`, `shutdown`, `ppp_restart`. Tanpa `t`, tanpa `maintenance`. |
+| `availability` | 1 | ya | online saat Control siap; Last Will saat koneksi putus | 56 / 66 B | `v`, `sid`, `online` (bool); `t` wajib saat online; `reason` (teks) saat offline |
+| `telemetry/health` | 0 | tidak | 1 s; expiry 5 s | 109 B | `v`, `sid`, `q`, `t`, `run` (0 stop, 1 jalan, 2 mulai, 3 berhenti, 4 error, 255 tidak diketahui), `daq` (0 turun, 1 sehat, 2 tidak diketahui), `clk` (0, 1), `drop`, `age` (int ≥ 0 atau null), `temp` (angka atau null), `rev` (int atau null) |
+| `telemetry/health/detail` | 0 | tidak | 10 s; expiry 15 s | 178 B | `v`, `sid`, `t`, `usb` (int atau null), `sync` (3 × bool atau null), `cpu`, `mem`, `disk_free` (0..100 atau null), `throt`, `uv` (bool atau null), `tx`, `rx` (kbit/s ≥ 0 atau null), `adrop`, `parse` (int ≥ 0) |
+| `telemetry/doa` | 0 | tidak | maks. 1/s; expiry 3 s | 106 / 213 B | `v`, `sid`, `q`, `t` (waktu sumber), `f` (Hz), `a` (0..360), `c` (dB native, ±327,67), `p` (±1e6), `rev` (int atau null), `ok` (0, 1). Bila `ok=0` juga `trust`=`UNVERIFIED`, `angle_reference`=`RAW`, `validation_reasons` (1–2 dari `SOURCE_UNVERIFIED`, `ANGLE_UNVERIFIED`); `a` adalah sudut RAW. |
+| `telemetry/diagnostic/doa` | 0 | tidak | 3 s selama `doa.xml` ada; expiry 3 s | 234 B | `v`, `sid`, `q`, `source`=`doa.xml`, `source_timestamp_ms`, `observed_timestamp_ms`, `raw_doa_deg` (0..360), `frequency_mhz` (0,001..5000), `trust`=`UNVERIFIED`, `validation_reasons` (1–32 kode `[A-Z0-9_:-]{1,64}`, termasuk `DIAGNOSTIC_UNVERIFIED`) |
+| `telemetry/angular` | 0 | tidak | `balanced` ≥ 4 s, `graph_u8` ≥ 2 s, `control` tidak dikirim; expiry 3 s | 2,4–2,9 kB | `v`=2, `encoding`=`json`, `sid`, `q`, `timestamp_ms`, `frequency_hz` (1..2³²−1), `revision` (null atau 0..2³²−2), `vfo` (0..15), `convention` (0, 1), `flags` (0..63), `raw_doa_deg` (null atau 0..360), `confidence_native_db` (null atau ±327,67), `values` (tepat 360 angka, masing-masing ±1e8, urutan index native) |
+| `telemetry/diagnostic/angular` | 0 | tidak | ≥ 6 s saat sumber gagal gate, ≥ 30 s saat Bulk terblokir; expiry 3 s | 2,4–2,9 kB | sama dengan `telemetry/angular` |
+| `settings/reported` | 1 | tidak | hanya setelah `cmd/config/get`, hanya lewat broker TLS; expiry 30 s | ≤ 8192 B | tepat `v`, `sid`, `boot`, `id`, `rev` (int ≥ 0), `t`, `settings_json` (teks UTF-8 persis `settings.json`) |
+| `ack/config` | 1 | tidak | progres dan hasil `config.*`; expiry 30 s | 140–150 B | `v`, `sid`, `id`, `status`, `t`, `rev` (int atau null), `result` (objek) |
+| `ack/operation` | 1 | tidak | progres dan hasil operasi lain; expiry 30 s | 106–270 B | sama dengan `ack/config` |
+
+Tipe umum: `sid` 8 digit hex huruf kecil; `q` integer 1..2³²−1, berurutan per jenis data; `t`, `timestamp_ms`, `source_timestamp_ms`, `observed_timestamp_ms` integer ms Unix 13 digit; `boot` dan `instance` teks token (UUID di edge). Field yang tidak dikenal diabaikan, supaya edge yang lebih baru boleh menambah field, kecuali di `settings/reported` yang harus tepat tujuh field.
+
+## 3. Aturan validasi console
+
+Status yang dipakai console per topik: `LIVE`, `UNVERIFIED`, `FRESH`, `CONTEXT`, `STALE`, `INCONSISTENT`, `IGNORED`, `INVALID`, `UNAVAILABLE` (retained yang dihapus: `CLEARED`). Hanya `INVALID` yang menaikkan hitungan invalid.
+
+Untuk semua topik:
+
+- Payload paling besar 8192 byte (edge menolak publish di atas itu di `Client.offer`; `settings/reported` punya batas yang sama). Selebihnya `INVALID PAYLOAD_TOO_LARGE`.
+- JSON ketat: objek, UTF-8, tanpa `NaN`/`Infinity`, tanpa key ganda; integer harus integer JSON dan bukan `true`/`false`. Selebihnya `INVALID` dengan kode dan nama field. Kasus yang tidak bernama di validator tetap satu pesan `INVALID MALFORMED_PAYLOAD`, tidak pernah pesan yang tidak terhitung.
+- QoS dan retain harus sama dengan tabel bagian 2; selebihnya `INVALID BROKER_POLICY`. Payload kosong yang retained menghapus nilai retained (`CLEARED`) beserta nilai yang dibawa topik itu.
+- Sesi: `state` menentukan `sid`, `boot`, `instance`, `cfg`. Telemetry, `settings/reported`, dan ACK sebelum ada `state` → `IGNORED NO_SESSION`; dari `sid` lain → `INCONSISTENT SESSION_MISMATCH`. `state` dengan `sid` baru membuang cache sesi lama (health, detail, DoA, diagnostik, Angular, settings, urutan `q`). `sid` lama dengan `boot` atau `instance` lain → `INCONSISTENT SESSION_ALIAS_COLLISION`.
+- `q` harus maju per jenis data: health, DoA `ok=1`, DoA `ok=0`, diagnostic DoA, Angular LIVE, Angular trust-only, diagnostic Angular. Yang tidak maju → `IGNORED SEQUENCE_NOT_ADVANCING`.
+- `rev`/`revision` adalah metadata dan bukan syarat kesamaan, kecuali untuk DoA `ok=0`.
+
+| Topik | Diterima sebagai | Ditolak atau ditahan |
+|---|---|---|
+| `state`, `capabilities`, `availability` | `CONTEXT`; bukan heartbeat | `capabilities` dan `availability` dari `sid` lain → `INCONSISTENT SESSION_MISMATCH` |
+| `telemetry/health` | `FRESH`, segar 8 s sejak diterima | `t` lebih dari 8 s lalu atau lebih dari 1 s di depan → `STALE` |
+| `telemetry/health/detail` | `FRESH` 15 s sejak diterima; tidak pernah menjadi gate | — |
+| `telemetry/doa` `ok=1` | `LIVE` bila `t` ≤ 5 s lalu dan ≤ 1 s di depan, dan health segar dengan `daq=1`. Tetap `LIVE` selama DoA ≤ 5 s sejak diterima, `t` ≤ 5 s, dan health segar dengan `daq=1`. | `t` di luar jendela → `STALE`; tanpa health segar `daq=1` → `INCONSISTENT DOA_WITHOUT_HEALTH` |
+| `telemetry/doa` `ok=0` | `UNVERIFIED`, tidak pernah `LIVE`, tidak mengisi deteksi; basi 5 s sejak diterima | `rev` ≠ `state.cfg` (bila `cfg` diketahui) → `INCONSISTENT REVISION_MISMATCH`; tanpa health segar `daq=1` → `INCONSISTENT DOA_WITHOUT_HEALTH` |
+| `telemetry/diagnostic/doa` | `UNVERIFIED`, terpisah dari deteksi; basi 5 s sejak diterima | `source_timestamp_ms` mundur → `INCONSISTENT SOURCE_TIME_REGRESSED` |
+| `telemetry/angular` | `flags = 63`: `LIVE`. `flags & 23 = 23` tetapi bukan 63: `UNVERIFIED`, disimpan di jalur diagnostik; baris topiknya `STALE` bila umur sumbernya > 10 s. `LIVE` bertahan selama umur sumber ≤ 10 s, health segar, `daq=1`, dan `run=1`. | `flags & 23 ≠ 23` → `INVALID ANGULAR_EVIDENCE_INCOMPLETE`; `timestamp_ms` lebih dari 10 s lalu atau lebih dari 1 s di depan → `STALE`; tanpa health segar `daq=1` → `INCONSISTENT ANGULAR_WITHOUT_HEALTH` |
+| `telemetry/diagnostic/angular` | Selalu `UNVERIFIED`, disimpan walau basi, tidak pernah mengisi Angular LIVE; `STALE` bila umur sumber > 10 s. Kedua topik Angular berbagi satu kandidat diagnostik (seperti Ground edge), tetapi baris tiap topik menjadi `STALE` menurut frame terakhirnya sendiri, juga setelah kandidat diganti topik lain. Alasan dari bit flags yang hilang, umur, health, dan revisi (`PREVIOUS_CONFIG`). | — |
+| `settings/reported` | `FRESH` bila `id` cocok dengan permintaan `config.get` yang tertunda, `sid` dan `boot` sama dengan `state`, `t` ≤ 30 s lalu dan ≤ 1 s di depan, dan `settings_json` adalah teks UTF-8 berisi objek JSON dengan sarang paling dalam 16 tingkat (`settings.json` KrakenSDR satu objek datar). Teks disimpan persis di server; field aman diturunkan seperti `source.safe_settings` edge dan hanya diberikan, di tampilan node maupun di `settings_report()` server, selama `rev` = `state.cfg` (`matches_state_cfg`). | Tanpa permintaan yang cocok → `IGNORED UNREQUESTED_SETTINGS_REPORT`; field kurang atau lebih → `INVALID BAD_SETTINGS_REPORT`; `settings_json` bukan objek, bukan UTF-8 (surrogate tunggal `\ud800`) atau terlalu dalam → `INVALID BAD_SETTINGS_JSON` |
+| `ack/config`, `ack/operation` | `FRESH` 30 s sejak diterima; disimpan per `id` (32 terakhir). `challenge` di `result` tidak pernah disimpan. | `status` di luar 14 status jurnal → `INVALID UNKNOWN_ACK_STATUS`; ACK belum final setelah ACK final dengan `id` sama → `IGNORED ACK_AFTER_FINAL` |
+
+## 4. Angka freshness
+
+| Data | Batas |
+|---|---|
+| Health | Segar sampai 8 s sejak diterima, `t` saat diterima ≤ 8 s lalu dan ≤ 1 s di depan, `q` maju. MQTT tersambung atau `state.daq` bukan pengganti health. |
+| DoA (`telemetry/doa`) | `t` ≤ 5 s lalu dan ≤ 1 s di depan |
+| Angular | Umur sumber `timestamp_ms` ≤ 10 s dan ≤ 1 s di depan |
+| Flags Angular | Bit 0 parsed (1), bit 1 jam dan sumber segar (2), bit 2 DAQ sehat (4), bit 3 konvensi sudut (8), bit 4 atribusi config (16), bit 5 authority sumber (32). Mask integritas 23, LIVE hanya 63. |
+| `settings/reported` | `t` ≤ 30 s lalu; permintaan tertunda berlaku 60 s (TTL perintah maks. 30 s + expiry 30 s) |
+| ACK | Expiry 30 s |
+
+## 5. Perintah ground → edge (untuk #9)
+
+QoS 1, tidak retained, satu objek JSON per topik. Envelope:
+
+| Field | Aturan edge |
+|---|---|
+| `v` | 2 |
+| `id` | `[A-Za-z0-9_.:-]{1,80}`. `id` sama dengan payload sama mengembalikan hasil jurnal; payload lain → `COMMAND_ID_CONFLICT`. |
+| `sid`, `boot` | Dari `state` terakhir; selain itu `SESSION_MISMATCH` |
+| `issued_ms`, `expires_ms` | `expires_ms` > sekarang, `issued_ms` ≤ sekarang + 1 s, 0 < `expires_ms` − `issued_ms` ≤ 30000 (default 15000) |
+| `base_rev` | `state.cfg`; untuk mutasi harus sama dengan revisi edge (`CONFIG_REVISION_CONFLICT`) |
+| `op` | Harus cocok dengan topik |
+| field operasi | `changes`, `desired`, `profile`, `target_id`, `prepare_id`, `challenge` sesuai `op`; field lain ditolak |
+
+| Topik | `op` | Field tambahan |
+|---|---|---|
+| `cmd/config/get` | `config.get` | — (jawaban di `settings/reported`; perlu MQTT siap dan sesi, bukan health segar; maks. 1/s) |
+| `cmd/config/patch` | `config.patch` | `changes`: `center_frequency_hz` dan `vfo0_frequency_hz` (24 000 000..1 766 000 000 Hz, keduanya sama), `vfo0_bandwidth_hz` (100..2 400 000), `gain_db` (−10..100, nilai tabel gain), `vfo0_squelch_db` (−200..50) |
+| `cmd/processing/set` | `processing.set` | `desired`: `RUNNING` atau `STOPPED` |
+| `cmd/service/restart` | `service.restart` | — |
+| `cmd/service/ppp/restart` | `ppp.restart` | — |
+| `cmd/system/reboot/prepare`, `cmd/system/shutdown/prepare` | `system.reboot.prepare`, `system.shutdown.prepare` | — (ACK membawa `prepare_id`, `challenge`, `valid_seconds` 30) |
+| `cmd/system/reboot/execute`, `cmd/system/shutdown/execute` | `system.reboot.execute`, `system.shutdown.execute` | `prepare_id`, `challenge` |
+| `cmd/operation/get` | `operation.get` | `target_id` (maks. 1/s) |
+| `cmd/stream/set` | `stream.set` | `profile`: `control`, `balanced`, `graph_u8` |
+
+Semua operasi selain `config.get` memerlukan health segar di sisi ground. Edge menolak perintah retained.
+
+## 6. ACK
+
+Field: `v`, `sid`, `id`, `status`, `t`, `rev`, `result`. `config.*` dijawab di `ack/config`, operasi lain di `ack/operation`. Satu perintah dapat menghasilkan beberapa ACK.
+
+| Status | Final |
+|---|---|
+| `ACCEPTED`, `APPLYING`, `VERIFYING`, `REBOOT_SCHEDULED`, `SHUTDOWN_SCHEDULED`, `PPP_RESTART_REQUESTED` | tidak |
+| `APPLIED`, `FAILED`, `REJECTED`, `EXPIRED`, `CONFLICT`, `PERSISTED_UNVERIFIED`, `OUTCOME_UNKNOWN`, `CANCELLED` | ya |
+
+`PERSISTED_UNVERIFIED` (tersimpan, bukti runtime belum lengkap) dan `OUTCOME_UNKNOWN` (hasil tidak diketahui) bukan berhasil dan bukan gagal. `SHUTDOWN_SCHEDULED` bukan bukti host mati. `PPP_RESTART_REQUESTED` hanya bukti systemd menerima permintaan. Penolakan berisi `result.error`. `result.challenge` dari `prepare` tidak pernah dicatat atau ditampilkan.
+
+## 7. Tambahan di HEAD (20713ff), opsional di console
+
+- `telemetry/health/detail`: `ppp` (`UP`, `DOWN`), `peer` (`REPLY`, `NO_REPLY`, `NO_INTERFACE`, `ERROR`, `UNKNOWN`), `ppp_svc` (`ActiveState` `t900-ppp.service` huruf besar, `NOT_LOADED`, atau `UNKNOWN`), `ppp_restarts` (int atau null). Edge 8691ad0 tidak mengirimnya.
+- `ppp.restart`: setelah `PPP_RESTART_REQUESTED` edge mengirim ACK akhir `APPLIED` (`proof` `{ppp, peer, mqtt, cycled}`, `elapsed_ms`) atau `OUTCOME_UNKNOWN` (`phase`, `steps`, `elapsed_ms`, `reason`). Penolakan baru: `PPP_RESTART_IN_PROGRESS`, `PPP_RESTART_TOO_SOON`.
+- Record `operation.get` menambah `origin`, `summary`, `reason`.
+- Wire tidak berubah; hanya reconnect dan keepalive client edge.
+
+## 8. Dashboard: MQTT dulu, Data Out cadangan (#8)
+
+Kode: `tools/telemetry_source.py` (keputusan sumber dan jawaban dari MQTT), `DataOutReader.read_reason()` di `tools/data_out_reader.py` (kapan Data Out dibaca), `collect_light()` di `tools/sdr_doa_collector.py` (pembacaan ringan), `frontend/src/lib/telemetrySource.ts` (badge dan view DoA di browser). Contoh jawaban: `tools/fixtures/telemetry-source/`.
+
+### 8.1 Keputusan sumber
+
+Server memutuskan sekali per jawaban `/api/snapshot`:
+
+| Sumber | Syarat | Isi jawaban |
+|---|---|---|
+| `mqtt` | Store punya sesi `state`, dan `telemetry/health` dari `sid` itu diterima paling lama 8 s lalu dengan `daq=1`. Store hanya menerima health yang `q`-nya maju dan `t`-nya di jendela, dan `sid` baru membuang health lama, jadi "segar" sudah berarti `q` maju di sesi sekarang. MQTT tersambung saja tidak cukup. | Dari MQTT (8.2), ditambah pembacaan ringan Data Out (8.5) |
+| `data_out` | MQTT tidak segar | Pembacaan Data Out penuh, persis seperti sebelumnya |
+| `none` | MQTT tidak segar dan `status.json` Data Out tidak terbaca | Jawaban Data Out yang `UNAVAILABLE` |
+
+Jawaban membawa `source`: `kind`, `reason`, `reasons`, `mqtt` (`fresh`, `connection`, `sid`, `health_age_ms`, `health_daq`) dan `data_out` (`read`: `light` atau `full`, `available`, dan untuk MQTT `interval_s`, `age_ms`). Kode alasan:
+
+| Kode | Arti |
+|---|---|
+| `MQTT_FRESH` | Jawaban dari MQTT |
+| `MQTT_DISABLED` | Tidak ada monitor MQTT (host tidak diatur, `paho-mqtt` tidak ada, atau monitor berhenti) |
+| `MQTT_NO_SESSION` | Belum ada `state` |
+| `MQTT_NO_HEALTH` | Belum ada `telemetry/health` dari sesi ini |
+| `MQTT_HEALTH_STALE` | Health terakhir lebih tua dari 8 s |
+| `MQTT_DAQ_NOT_HEALTHY` | Health segar tetapi `daq` 0 atau 2; Data Out penuh lalu menunjukkan detail DAQ-nya |
+| `DATA_OUT_REQUESTED` | UI lama (`--legacy-ui`) meminta Data Out (`source=data_out`), karena ia hanya merender view CSV dan XML |
+| `DATA_OUT_UNAVAILABLE` | Data Out juga tidak terbaca (sumber `none`) |
+
+Ini menjawab pertanyaan terbuka 1 di `docs/KEPUTUSAN_MQTT.md`: MQTT tidak segar 8 s setelah health terakhir, batas health di kontrak (bagian 4). Di UI, chip **SUMBER** di strip status dan badge di HUD menampilkan `MQTT`, `Data Out (cadangan)` atau `tidak ada`; tooltip chip menyebut kode dan alasannya.
+
+### 8.2 Pemetaan ke TelemetrySnapshot
+
+Jawaban MQTT memakai bentuk TelemetrySnapshot yang sama, dengan satu view DoA `doa_candidates.mqtt` (tanpa `csv` dan `xml`). Bukti diambil dari kode edge commit 8691ad0 (`source.py`, `agent.py`, `config.py`); HEAD 20713ff tidak mengubah bagian ini.
+
+| Field snapshot | Dari MQTT | Bukti |
+|---|---|---|
+| `doa_candidates.mqtt.canonical_angle_deg` (θ₀) | `telemetry/doa` `ok=1` `a`: `a mod 360` bila `capabilities.angle` sesi ini `theta_mirror`, `(360 − a) mod 360` bila `csv_native`. Tanpa capabilities sesi ini atau nilai lain, θ₀ dikosongkan (`MQTT_ANGLE_CONVENTION_UNKNOWN`). | `Source.view`: `angle=(360-raw)%360` bila `angle_mode=='theta_mirror'`, selain itu `raw`; `raw` = kolom 1 DOA_value.html `% 360` (`parse_csv`). `capabilities.angle` = `source.angle_mode`, hanya `theta_mirror` atau `csv_native` (`validate_config`). Collector console: θ₀ view CSV = `(360 − kolom 1) mod 360` (`_canonicalize_native_angle`). |
+| `angular_power_db`, `angular_peak_index` | `telemetry/angular` `flags=63` `values`, hanya bila frame itu punya `frequency_hz` = `f` dan `revision` = `rev` DoA: `angular_pairing` `SAME_FRAME` (`q` sama), atau `SAME_CONFIG` (`q` lebih lama) selama puncak vektornya paling jauh 3° dari θ₀ DoA. Lebih jauh: `PEAK_MOVED`, DoA tanpa vektor (`MQTT_ANGULAR_UNAVAILABLE`, `INCOMPLETE`) sampai frame berikutnya, karena arahnya sudah berpindah dan bearing dengan kurva frame lama akan menunjuk dua arah. Edge mengirim DoA lebih sering dari Angular (profile `balanced`: 1 s dan 4 s, `config.py` `PROFILES`), jadi DoA terbaru biasanya dari record yang lebih baru | `parse_csv`: `values = row[17:]` dalam urutan file, sama persis dengan `angular_power_db` collector (grid θ₀, dB bergeser, tidak diubah) |
+| θ₀ frame Angular | `(360 − raw_doa_deg) mod 360`, tidak bergantung `angle_mode` | `_live_angular`: `raw_doa_deg = r['raw_doa_deg']` (kolom 1 `% 360`) |
+| `native_consistency` | DoA dibanding frame Angular-nya. `q` sama berarti satu record; dua θ₀ yang beda lebih dari 1° adalah `CONFLICT` (`MQTT_DOA_ANGULAR_CONFLICT`), jadi pemetaan sudut yang salah terlihat. `q` beda: `ADJACENT_FRAMES`/`OUT_OF_WINDOW`, pemetaan sudut tidak dicek pada pasangan itu (`NATIVE_ANGLE_UNCHECKED`, seperti CSV dan XML dari frame berbeda). Puncak vektor dibanding θ₀ yang digambar bersamanya, yaitu θ₀ DoA (θ₀ frame bila sudut DoA tidak diketahui): `ANGULAR_PEAK_ANGLE_MISMATCH` (3°). | `_schedule`: Angular LIVE dikirim hanya bila `r['q'] == d['q']`, dengan `q` record yang sama dengan DoA |
+| `frequency_hz_normalized` | `f` (Hz) | kolom 4 |
+| `confidence_metric_db` | `c` (PAPR dB native); `confidence` tetap `null` | kolom 2 |
+| `power_native_db` | `p`; `power_db` tetap `null`, ≤ −100 dB `POWER_FLOOR_LOSSY` | kolom 3 |
+| `timestamp_ms`, `freshness` | `t`; `fresh` = DoA LIVE di store (≤ 5 s sejak diterima, `t` ≤ 5 s, health segar `daq=1`); `age_ms` = yang lebih besar dari umur sejak diterima dan umur sumber; `max_age_ms` 5000 | kolom 0 |
+| `status.daq_health`, flag sync | `daq=1`: `PASS` dan ketiga flag sync `true`; detail health segar dipakai bila ada | `Source.view`: `healthy` = `status.json` segar, `daq_ok`, ketiga flag sync `true` (dan frame maju bila diwajibkan) |
+| `status.safe.daq_num_dropped_frames` | health `drop` | `dropped_frames` = `daq_num_dropped_frames` |
+| `node_progress` | `ADVANCING` (health `q` maju) | — |
+
+Tidak dipetakan, dibiarkan kosong: `data_frame_index`, SNR, ADC overdrive, posisi, dan field settings dari MQTT (MQTT tidak membawanya; yang ada datang dari pembacaan ringan, 8.5), serta `confidence` dan `power_db` yang belum dikalibrasi, sama seperti Data Out.
+
+### 8.3 UNVERIFIED tidak pernah menjadi DoA
+
+`telemetry/doa` `ok=0` (`a` adalah kolom 1 RAW, yaitu 360 − θ₀), Angular dengan `flags ≠ 63`, `telemetry/diagnostic/doa` (DOA doa.xml, yaitu θ₀) dan `telemetry/diagnostic/angular` hanya masuk blok `mqtt` jawaban, dengan θ₀ turunannya untuk diagnostik. Mereka tidak pernah mengisi `doa_candidates`: chip DOA menjadi `UNVERIFIED`, HUD menulis alasannya, dan bearing, kurva polar dan overlay peta tetap kosong. Diagnostik DoA menampilkannya di kartu **DoA MQTT**, Monitor Pesan di kartu Node.
+
+Akibatnya, dengan konfigurasi edge default (authority dan sudut belum diverifikasi, jadi edge hanya mengirim `ok=0` dan Angular `flags=23`), Dashboard tidak menampilkan bearing selama MQTT segar. Bearing baru tampil setelah edge memverifikasi sumber dan konvensi sudut. Profile stream `control` tidak mengirim Angular, sehingga DOA `INCOMPLETE` (vektor tidak ada); bearing perlu profile `balanced` atau `graph_u8`.
+
+### 8.4 Batas observasi
+
+Jawaban MQTT tetap `authority` `none`, `clock_source` `remote_unverified`, gate publikasi `BLOCKED` dengan `GROUND_CLOCK_UNVERIFIED`, `CANONICAL_ANGLE_NOT_CONFIGURED` dan `DOA_AUTHORITY_NOT_SELECTED`, dan `overall_state` tidak pernah `LIVE`. Urutan state: `DEGRADED` (ADC overdrive dari pembacaan ringan), `CONFLICT`, `STALE` (DoA LIVE sudah tua, atau tidak ada DoA saat ini), `INCOMPLETE` (θ₀ atau vektor tidak ada), lalu `UNVERIFIED`. Aturan freshness lokal browser sama dengan Data Out: jendela 5 s dari umur DoA, dan `collection.age_ms` jawaban MQTT selalu 0 karena dibangun dari store saat itu.
+
+### 8.5 Data Out selama MQTT segar: pembacaan ringan
+
+`DataOutReader.read_reason()` tidak menjalankan pembacaan penuh selama MQTT segar. Yang tidak pernah dibawa MQTT datang dari pembacaan ringan `status.json`, `settings.json` dan `doa.xml`:
+
+- **Field settings** untuk kartu node, ikuti-frekuensi, axis dan compass offset, dan read-back Kontrol (`settings.read_at_ms`).
+- **Posisi stasiun**: `LOCATION` doa.xml, bila `gps_status` di `status.json` adalah fix positif dan doa.xml segar terhadap `status.json` pada pembacaan itu. Posisi tidak ada di `status.json` maupun `settings.json`, jadi doa.xml (455 B) ikut dibaca. Pembacaan yang gagal tidak menghapus posisi yang dipegang peta.
+- **ADC overdrive dan SNR**.
+
+Semua hasil pembacaan ringan (settings, `gps_status`, posisi, ADC overdrive dan SNR, `resources`) berlaku 65 s sejak dibaca (`LIGHT_VALUES_MAX_AGE_MS`, dua interval ditambah budget baca). Yang lebih tua, misalnya dari sebelum MQTT basi dan console memakai Data Out penuh, dijawab sebagai belum dibaca (`data_out_light.expired`, `settings.available` false) sampai pembacaan berikutnya, yang saat itu sudah berjalan, selesai.
+
+Jadwalnya: di latar belakang saat pertama, lalu paling sering tiap 30 s; segera bila `state.cfg` atau `sid` berubah (paling sering sekali per detik, dan `settings.json` dibaca ulang, bukan dipakai dari cache); dan untuk "Cek ulang" Kontrol (`fresh_settings`), yang menunggu hasilnya. Refresh (`R`) tidak membaca Data Out selama MQTT segar. Pembacaan ringan yang gagal baru diulang pada interval berikutnya. Tampilan LAN memakai jawaban yang sama. Begitu MQTT tidak segar, request berikutnya membaca Data Out penuh lagi.
+
+Angka di link T900 PPP (~5,6 kB/s), tanpa header HTTP:
+
+| Jalur | Isi | Rata-rata |
+|---|---|---|
+| Data Out penuh, interval 2 s (sebelum #8) | `status.json` 650 B, `DOA_value.html` 2,3 kB, `doa.xml` 455 B tiap 2 s; `settings.json` 4,7 kB tiap 30 s | ~1,9 kB/s, sekitar sepertiga link |
+| Pembacaan ringan (MQTT segar) | `status.json`, `settings.json`, `doa.xml`, ~5,8 kB tiap 30 s | ~0,2 kB/s |
+| Telemetry MQTT (dikirim edge apa pun pilihan console), profile `balanced` | health 109 B/s, DoA ~106 B/s, Angular 2,4–2,9 kB tiap ≥ 4 s, detail 178 B tiap 10 s, doa.xml diagnostik 234 B tiap 3 s | ~1 kB/s |

@@ -74,6 +74,6 @@ Daftar ini dari tag `v2.0.0`. Pastikan lagi saat implementasi.
 
 ## Pertanyaan yang masih terbuka
 
-1. Berapa detik MQTT dianggap tidak segar sebelum beralih ke Data Out.
+1. Berapa detik MQTT dianggap tidak segar sebelum beralih ke Data Out. Dijawab di #8: 8 detik setelah `telemetry/health` terakhir yang `daq=1` (batas health di kontrak), lihat `docs/MQTT_KONTRAK.md` bagian 8.
 2. Perintah operasi mana yang ikut di Kontrol tahap pertama (restart SDR, restart PPP, reboot, shutdown).
 3. Sertifikat TLS broker: CA lokal sendiri atau sertifikat lain. Edge memakai store CA sistem, kecuali `ca_file` diatur.

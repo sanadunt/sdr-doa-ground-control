@@ -92,8 +92,8 @@ describe('MessageMonitorPage', () => {
     expect(translate('id', 'monitor.requested')).toBe('Monitor dimulai ulang.');
   });
 
-  it('switches between sdr/v1 and RDF Node v2 and shows only the selected one', () => {
-    expect(markup).toMatch(/<button type="button" aria-pressed="true">sdr\/v1<\/button><button type="button" aria-pressed="false">RDF Node v2<\/button>/);
+  it('switches between sdr/v1 and RDF Node and shows only the selected one', () => {
+    expect(markup).toMatch(/<button type="button" aria-pressed="true">sdr\/v1<\/button><button type="button" aria-pressed="false">RDF Node<\/button>/);
     expect(body).not.toContain('telemetry/doa');
     const v2 = text(render(<MessageMonitorPage mqtt={SNAPSHOT} config={CONFIG} onMqttChanged={() => undefined} initialProtocol="v2" />));
     expect(v2).toContain(translate('en', 'monitor.v2Loading'));
@@ -175,8 +175,47 @@ describe('RdfNodeView', () => {
     expect(body).toContain('run RUNNING · daq OK');
     expect(body).toContain('availability 1 CONTEXT');
     expect(body).not.toContain('telemetry/doa');
-    expect(body).toContain(translate('en', 'monitor.v2ShowEmpty', { count: 8 }));
+    expect(body).toContain(translate('en', 'monitor.v2ShowEmpty', { count: 10 }));
     expect(markup).toContain('aria-pressed="false"');
+  });
+
+  it('shows the node view, the last ACKs and why a message was refused', () => {
+    // The body tools/rdf_node_mqtt_v2.py serves after a healthy edge (tools/fixtures/rdf-node/).
+    type Fs = { readFileSync(file: URL, encoding: 'utf8'): string };
+    const { process } = globalThis as unknown as { process: { getBuiltinModule(id: 'node:fs'): Fs } };
+    const raw = process.getBuiltinModule('node:fs').readFileSync(new URL('../../../tools/fixtures/rdf-node/api-snapshot.json', import.meta.url), 'utf8');
+    const served = JSON.parse(raw) as Record<string, any>;
+    served.topics.capabilities = { status: 'INVALID', received_at_ms: served.now_ms, qos: 1, retained: true, error: 'INVALID_FIELD', field: 'maintenance', payload: null };
+    const snapshot = normalizeRdfNodeSnapshot(served, now);
+    const markup = render(<RdfNodeView rdfNode={snapshot} rdfError={null} nowMs={now} />);
+    const body = text(markup);
+    expect(body).toContain(translate('en', 'monitor.rdfNode'));
+    expect(body).toMatch(/Angular LIVE \d+ ms flags 63 · raw_doa_deg 200 · peak_index 200/);
+    expect(body).toMatch(/DoA RAW UNVERIFIED \d+ ms SOURCE_UNVERIFIED ANGLE_UNVERIFIED a 200 · angle_reference RAW/);
+    expect(body).toContain('Angular candidate UNVERIFIED');
+    expect(body).toMatch(/Settings CONTEXT \d+ ms rev 1 · bytes \d+ · matches_state_cfg true/);
+    expect(body).toContain(`${translate('en', 'monitor.rdfAcks')} 3`);
+    expect(body).toMatch(/ack\/operation OUTCOME_UNKNOWN FINAL \d+ ms FILENOTFOUNDERROR/);
+    expect(body).toContain('capabilities 1 INVALID');
+    expect(body).toContain('INVALID_FIELD maintenance');
+    expect(markup).not.toContain('settings_json');
+    const id = text(render(<RdfNodeView rdfNode={snapshot} rdfError={null} nowMs={now} />, 'id'));
+    expect(id).toContain('Kandidat Angular UNVERIFIED');
+    expect(id).toContain('Sesi CONTEXT');
+  });
+
+  it('hides the direction of a stale node part and keeps a long edge ACK error', () => {
+    type Fs = { readFileSync(file: URL, encoding: 'utf8'): string };
+    const { process } = globalThis as unknown as { process: { getBuiltinModule(id: 'node:fs'): Fs } };
+    const raw = process.getBuiltinModule('node:fs').readFileSync(new URL('../../../tools/fixtures/rdf-node/api-snapshot.json', import.meta.url), 'utf8');
+    const served = JSON.parse(raw) as Record<string, any>;
+    served.node.doa.live = false;
+    served.node.doa.reasons = ['SOURCE_STALE'];
+    served.node.acks = [{ topic: 'ack/config', status: 'FAILED', final: true, received_at_ms: served.now_ms, result: { error: 'CENTER_CHANGE_REQUIRES_VFO0_TARGET' } }];
+    const body = text(render(<RdfNodeView rdfNode={normalizeRdfNodeSnapshot(served, now)} rdfError={null} nowMs={now} />));
+    expect(body).toMatch(new RegExp(`DoA STALE \\d+ ms SOURCE_STALE f 433920000 · c [\\d.]+ · p [\\d.-]+ · rev 1 ${translate('en', 'monitor.v2Gated')}`));
+    expect(body).not.toMatch(/DoA STALE[^|]*\ba 160\b/);
+    expect(body).toMatch(/ack\/config FAILED FINAL \d+ ms CENTER_CHANGE_REQUIRES_VFO0_TARGET/);
   });
 
   it('reports a failed read', () => {

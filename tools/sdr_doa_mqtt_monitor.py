@@ -64,15 +64,6 @@ MAX_CONFIG_ACKS = 64
 MAX_CONFIG_PUBLISHES = 32
 MAX_EARLY_PUBACKS = 16
 CONFIG_FIELDS = tuple(contract.CONFIG_RANGES)
-# RDF Node v2 reports the first VFO under its own key names. Only these VFO
-# values are reported anywhere; v1 config_reported has no VFO fields.
-V2_EFFECTIVE_KEYS = {
-    "center_frequency_hz": "center_frequency_hz",
-    "gain_db": "gain_db",
-    "vfo_frequency_hz": "vfo0_frequency_hz",
-    "vfo_bandwidth_hz": "vfo0_bandwidth_hz",
-    "vfo_squelch_db": "vfo0_squelch_db",
-}
 V1_REPORTED_FIELDS = ("center_frequency_hz", "gain_db")
 # A retained config report is a replay: its receive time says nothing about
 # when it was published. Its own timestamp is used instead when it is no more
@@ -129,7 +120,7 @@ def _reported_age(now_ms: int, received_at_ms: int, retained: bool, source_ts_ms
 
 
 class MqttMonitor:
-    """One MQTT client for v1 metrics and RDF Node v2 telemetry.
+    """One MQTT client for sdr/v1 metrics and the RDF Node topics (docs/MQTT_KONTRAK.md).
 
     It subscribes only; ``publish_config_patch`` is the single publish path,
     used for an explicit, admin-confirmed config patch.
@@ -740,18 +731,8 @@ class MqttMonitor:
                     if value is not None:
                         values[field], sources[field] = value, "v1_config_reported"
                         value_received[field] = int(v1["received_at_ms"])
-            v2_entry = self._rdf_node.config_reported_entry()
-            v2_payload = v2_entry.get("payload") if v2_entry.get("status") == "CONTEXT" else None
-            effective = v2_payload.get("effective") if isinstance(v2_payload, dict) else None
-            if not isinstance(effective, dict):
-                effective = None
-            if effective is not None:
-                received_effective = v2_entry.get("received_at_ms")
-                for field, key in V2_EFFECTIVE_KEYS.items():
-                    value = _finite_number(effective.get(key))
-                    if value is not None and values[field] is None:
-                        values[field], sources[field] = value, "v2_effective"
-                        value_received[field] = received_effective if type(received_effective) is int else None
+            # The RDF Node edge has no config/reported; its settings arrive only
+            # as settings/reported after a config.get, which Kontrol does not send.
             reported: Optional[Dict[str, Any]] = None
             if v1 is not None:
                 received = int(v1["received_at_ms"])
@@ -762,22 +743,7 @@ class MqttMonitor:
                     **_reported_age(now, received, retained, v1["payload"].get("ts_ms")),
                     "retained": retained,
                     "synthetic": v1["payload"].get("source") == "synthetic",
-                    "source": "v1+v2" if effective is not None else "v1",
-                }
-            elif effective is not None:
-                received_v2 = v2_entry.get("received_at_ms")
-                retained_v2 = v2_entry.get("retained") is True
-                if type(received_v2) is int:
-                    age = _reported_age(now, received_v2, retained_v2, v2_payload.get("t"))
-                else:
-                    age = {"age_ms": None, "age_basis": None, "source_ts_ms": None}
-                reported = {
-                    "config_rev": None,
-                    "received_at_ms": received_v2 if type(received_v2) is int else None,
-                    **age,
-                    "retained": retained_v2,
-                    "synthetic": False,
-                    "source": "v2",
+                    "source": "v1",
                 }
             return {
                 "available": True,
@@ -828,26 +794,65 @@ class MqttMonitor:
                 "topic_counts": dict(self._topic_counts),
             }
 
+    def rdf_node_session(self) -> Dict[str, Any]:
+        """The RDF Node session (``state.sid``, ``boot``, ``cfg``) and health freshness."""
+        with self._lock:
+            return self._rdf_node.session_view(_now_ms())
+
+    def expect_rdf_node_settings_report(self, command_id: str) -> None:
+        """Accept the settings/reported answer to a config.get the console sent."""
+        with self._lock:
+            self._rdf_node.expect_settings_report(command_id, _now_ms())
+
+    def rdf_node_settings_report(self) -> Optional[Dict[str, Any]]:
+        """The latest accepted settings/reported, with its exact settings.json text.
+
+        ``safe_settings`` is empty unless ``matches_state_cfg`` (its ``rev`` is ``state.cfg``).
+        """
+        with self._lock:
+            return self._rdf_node.settings_report()
+
+    def rdf_node_ack(self, command_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            return self._rdf_node.ack(command_id)
+
+    def _rdf_connection_locked(self) -> str:
+        if not self._started:
+            return "disabled"
+        if self._connection == "connected" and self._subscriptions_ready:
+            return "ready"
+        if self._connection in ("disconnected", "error"):
+            return self._connection
+        return "connecting"
+
     def rdf_node_snapshot(self) -> Dict[str, Any]:
         with self._lock:
-            if not self._started:
-                connection = "disabled"
-            elif self._connection == "connected" and self._subscriptions_ready:
-                connection = "ready"
-            elif self._connection == "disconnected":
-                connection = "disconnected"
-            elif self._connection == "error":
-                connection = "error"
-            else:
-                connection = "connecting"
             result = self._rdf_node.snapshot(_now_ms())
             result.update({
                 "enabled": self._started,
-                "connection": connection,
+                "connection": self._rdf_connection_locked(),
                 "node_id": self._rdf_node.node_id,
                 "last_error": self._rdf_last_error,
             })
             return result
+
+    def rdf_node_view(self) -> Optional[Dict[str, Any]]:
+        """The RDF Node view the Dashboard's telemetry source reads (issue #8).
+
+        The accepted values of the node (``RdfNodeV2Telemetry.node_view``,
+        with the LIVE Angular frame's 360 values) at one time, or None while
+        the monitor is stopped.
+        """
+        with self._lock:
+            if not self._started:
+                return None
+            now = _now_ms()
+            return {
+                "now_ms": now,
+                "connection": self._rdf_connection_locked(),
+                "node_id": self._rdf_node.node_id,
+                "node": self._rdf_node.node_view(now),
+            }
 
 
 __all__ = ["MqttMonitor"]

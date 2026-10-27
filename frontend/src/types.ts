@@ -133,8 +133,23 @@ export interface ResourceInfo {
   error_kind?: string;
 }
 
+/** Which source answered /api/snapshot and why (issue #8); values are unvalidated JSON. */
+export interface SnapshotSource {
+  [key: string]: unknown;
+  /** mqtt, data_out (the fallback) or none. */
+  kind?: string;
+  /** The first of `reasons`, or MQTT_FRESH for an MQTT answer. */
+  reason?: string;
+  /** Why MQTT is not the source, then DATA_OUT_UNAVAILABLE when Data Out failed too. */
+  reasons?: string[];
+  mqtt?: Record<string, unknown>;
+  data_out?: Record<string, unknown>;
+}
+
 export interface TelemetrySnapshot {
   [key: string]: unknown;
+  /** Absent from older servers, which always answered from Data Out. */
+  source?: SnapshotSource;
   schema_version?: number;
   collector?: Record<string, unknown>;
   observed_at_ms?: number;
@@ -149,6 +164,10 @@ export interface TelemetrySnapshot {
   authority?: AuthoritySnapshot;
   publication_gate?: PublicationGate;
   overall_state?: string;
+  /** MQTT answers: what MQTT carries besides the LIVE DoA (UNVERIFIED and diagnostic topics). */
+  mqtt?: Record<string, unknown>;
+  /** MQTT answers: the light Data Out read (status.json, settings.json, doa.xml) for what MQTT never carries. */
+  data_out_light?: Record<string, unknown>;
 }
 
 export type MqttTransport = 'tcp' | 'websockets';
@@ -238,17 +257,47 @@ export interface MqttSnapshot {
   kind_counts?: Record<string, number>;
 }
 
-/** One RDF Node v2 topic as reported by /api/mqtt/rdf-node, normalized. */
+/** One RDF Node topic as reported by /api/mqtt/rdf-node, normalized: the status of its latest message. */
 export interface RdfNodeTopic {
+  /** LIVE, UNVERIFIED, FRESH, CONTEXT, STALE, INCONSISTENT, IGNORED, INVALID or UNAVAILABLE. */
   status: string;
   received_at_ms: number | null;
   qos: number | null;
   retained: boolean | null;
   error: string | null;
+  /** The field that broke the contract, when the server named one. */
+  field: string | null;
   /** A zero-length retained publish removed the broker's value. */
   cleared: boolean;
   /** Bounded, sanitized fields only; the 360-bin angular values are dropped. */
   payload: Record<string, unknown> | null;
+}
+
+/** One part of the node view: the latest accepted value of that role, never a rejected message. */
+export interface RdfNodePart {
+  /** LIVE, UNVERIFIED, FRESH, CONTEXT, STALE or INCONSISTENT, derived from the server's view. */
+  status: string;
+  received_at_ms: number | null;
+  /** Why it is not LIVE, or why a candidate is UNVERIFIED (server codes). */
+  reasons: string[];
+  /** Bounded, sanitized display fields of the part. */
+  fields: Record<string, unknown>;
+}
+
+export interface RdfNodeAck {
+  topic: string;
+  status: string;
+  final: boolean;
+  received_at_ms: number | null;
+  error: string | null;
+}
+
+export interface RdfNodeView {
+  parts: Record<string, RdfNodePart | null>;
+  /** Newest first. */
+  acks: RdfNodeAck[];
+  /** config.get requests still waiting for settings/reported. */
+  settings_requests: number;
 }
 
 export interface RdfNodeSnapshot {
@@ -263,7 +312,9 @@ export interface RdfNodeSnapshot {
   invalid: number | null;
   last_received_at_ms: number | null;
   topic_counts: Record<string, number>;
+  invalid_counts: Record<string, number>;
   topics: Record<string, RdfNodeTopic>;
+  node: RdfNodeView;
 }
 
 export type GpsSourceMode = 'DATA_OUT' | 'MANUAL' | 'FALLBACK';

@@ -315,7 +315,7 @@ sudo -n true 2>/dev/null && echo "sudo ok" || echo "SUDO NEEDS PASSWORD"
 
 ### 4.10 Data Out dan broker MQTT
 
-Dua titik yang dipakai program setelah terpasang. Masalah di sini bukan kegagalan instalasi, tetapi lebih mudah dibedakan sebelum instalasi daripada di 8.1/8.4.
+Dua titik yang dipakai program setelah terpasang. Dashboard console memakai MQTT bila segar dan Data Out sebagai cadangan, jadi keduanya perlu diperiksa. Masalah di sini bukan kegagalan instalasi, tetapi lebih mudah dibedakan sebelum instalasi daripada di 8.1/8.4.
 
 ```sh
 curl -s --noproxy '*' --max-time 5 -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8081/status.json
@@ -1127,16 +1127,23 @@ curl -s --noproxy '*' http://127.0.0.1:8787/api/mqtt | python3 -c 'import json,s
 **Hasil**: `connected None`. `connecting`/`error` dengan pesan: broker tidak terjangkau atau menolak. Laporkan; console tetap jalan tanpa MQTT.
 
 ```sh
-# 6. Data Out (butuh sampai 4 detik)
-curl -s --noproxy '*' --max-time 10 http://127.0.0.1:8787/api/snapshot | python3 -c 'import json,sys; print(json.load(sys.stdin).get("overall_state"))'
+# 6. Sumber data Dashboard dan Data Out (butuh sampai 4 detik; jalankan dua kali)
+curl -s --noproxy '*' --max-time 10 http://127.0.0.1:8787/api/snapshot | python3 -c 'import json,sys; d=json.load(sys.stdin); s=d.get("source") or {}; print(s.get("kind"), s.get("reason"), (s.get("data_out") or {}).get("available"), d.get("overall_state"))'
 ```
-**Hasil**: `UNVERIFIED` bila Data Out terjangkau dan sehat (console memang tidak pernah melaporkan `LIVE`). `UNAVAILABLE`: Data Out tidak terjangkau dari host ini (cek 4.10; console native di belakang proxy: `NO_PROXY`, 4.7). `STALE`, `DEGRADED`, dan seterusnya: data terbaca tetapi ada masalah di node. Ini bukan kegagalan instalasi; laporkan.
+**Hasil**: empat nilai: sumber, alasannya, apakah `status.json` Data Out terbaca, dan state. Console memang tidak pernah melaporkan `LIVE`.
+
+- `mqtt MQTT_FRESH True UNVERIFIED`: MQTT segar (health RDF Node `daq=1` dalam 8 detik terakhir) dan Data Out terjangkau. Selama MQTT segar Data Out hanya dibaca ringan tiap 30 detik di latar belakang, jadi percobaan pertama setelah start bisa `False`; ulangi perintahnya. `INCOMPLETE` atau `STALE` di sini: DoA LIVE dari RDF-SDR belum ada atau sudah tua (konfigurasi edge, `QUICKSTART.md` "Sumber data Dashboard"); laporkan.
+- `data_out MQTT_... True UNVERIFIED`: MQTT tidak segar, Dashboard memakai Data Out (cadangan). Alasannya: `MQTT_DISABLED` (broker belum diisi atau monitor mati), `MQTT_NO_SESSION`/`MQTT_NO_HEALTH`/`MQTT_HEALTH_STALE` (belum atau tidak lagi ada pesan RDF Node; cek langkah 5 dan Monitor Pesan), `MQTT_DAQ_NOT_HEALTHY` (DAQ node tidak sehat). Bukan kegagalan instalasi bila manusia memang belum memakai MQTT.
+- `none ... False UNAVAILABLE`: MQTT tidak segar dan Data Out tidak terjangkau dari host ini (cek 4.10; console native di belakang proxy: `NO_PROXY`, 4.7).
+- `STALE`, `DEGRADED`, dan seterusnya dengan `data_out`: data terbaca tetapi ada masalah di node. Ini bukan kegagalan instalasi; laporkan.
 
 Nama `.local` di Docker: resolver sistem container tidak bisa meresolusi mDNS (tidak ada nss-mdns), jadi console mengirim sendiri query mDNS, sekali lewat setiap interface jaringan yang aktif dan punya alamat IPv4 (juga di LAN tanpa default route; paling lama sekitar 1 detik), lalu menyambung ke alamat itu dengan header `Host` tetap nama aslinya. Lihat bagaimana host teresolusi:
 
 ```sh
-curl -s --noproxy '*' --max-time 10 http://127.0.0.1:8787/api/snapshot | python3 -c 'import json,sys; d=json.load(sys.stdin); r=d["collection"]["host_resolution"]; print(r["method"], r["address"], d["resources"]["/status.json"].get("error"))'
+curl -s --noproxy '*' --max-time 10 http://127.0.0.1:8787/api/snapshot | python3 -c 'import json,sys; d=json.load(sys.stdin); r=d["collection"].get("host_resolution") or {}; print(r.get("method"), r.get("address"), (d.get("resources") or {}).get("/status.json", {}).get("error"))'
 ```
+Saat sumbernya MQTT, nilai ini dari pembacaan ringan Data Out terakhir; `None None None` berarti pembacaan itu belum selesai, ulangi beberapa detik kemudian.
+
 **Hasil**: `mdns <IP> None` (lewat fallback mDNS), `system <IP> None` (resolver sistem), `literal <IP> None` (base URL berisi IP), atau `proxy None None` (dibaca lewat proxy lingkungan, jadi alamat node tidak diketahui console; agar dibaca langsung, isi `NO_PROXY`, 4.7). `None None doasdr.local could not be resolved (system and mDNS); use an IP address`: nama itu tidak teresolusi, juga lewat mDNS (node mati, beda segmen jaringan, multicast diblok, atau firewall host membuang jawabannya; bagian 9). Minta manusia memilih IP Data Out, lalu ubah base URL (dan daftar host bila IP itu belum ada) di halaman Konfigurasi.
 
 ```sh
@@ -1229,6 +1236,7 @@ Satu blok singkat berisi:
 - agent: user service (`install-info` `AGENT_USER` atau `agent runs as`), `ENABLE_CONFIG`, status kata sandi MQTT (terisi/kosong, tanpa nilainya);
 - status kata sandi admin (`set`/`default`/`disabled`), tanpa nilainya;
 - mode LAN lihat-saja (6.2): mati, atau terbuka di alamat mana dan untuk klien mana, dan siapa yang mengatur firewall-nya;
+- sumber data Dashboard dari 8.1 langkah 6 (`mqtt` atau `data_out`, dengan alasannya);
 - hasil 8.1–8.4 (yang lolos, yang tidak, dan yang belum bisa diperiksa);
 - sisa pekerjaan untuk manusia: kata sandi, lingering, proxy, keputusan `ENABLE_CONFIG`, tunnel SSH, baris crontab.
 
@@ -1302,6 +1310,8 @@ Satu blok singkat berisi:
 | Kontrol: `publish_failed`, PUBACK ≥ 128 (135 "Not authorized") | ACL broker tidak mengizinkan console publish ke `sdr/v1/uav-01/cmd/config/patch` | Konfigurasi broker (di luar repository ini). |
 | Rekaman: "Open the Receiver from this console." (403 `ORIGIN_REJECTED`) | Dibuka lewat port-forward yang mengubah host atau port | Tunnel dengan port yang sama (6.1). Dari mode LAN (6.2) Rekaman memang tidak tersedia. |
 | Basemap `BASEMAP UNAVAILABLE` / `BASEMAP PARTIAL` | Host tile tidak terjangkau dari host console | Log console `tiles <source>: upstream unavailable (...)`; 4.6, 4.7; cek `X-Tile-Cache` (8.1 langkah 7). Console Docker di jaringan yang keluar hanya lewat proxy tidak bisa mengambil tile (4.7): laporkan. |
+| Chip SUMBER di strip status `Data Out (cadangan)` walaupun monitor MQTT `connected` | MQTT tidak segar; tooltip chip dan `source.reason` di `/api/snapshot` (8.1 langkah 6) menyebut sebabnya | `MQTT_NO_SESSION`: belum ada `state` RDF Node di broker ini (edge belum publish, atau broker lain). `MQTT_NO_HEALTH`/`MQTT_HEALTH_STALE`: tidak ada `telemetry/health` dalam 8 detik (edge berhenti, link putus, atau health ditolak; lihat tabel topik di Monitor Pesan). `MQTT_DAQ_NOT_HEALTHY`: DAQ node tidak sehat, detailnya di Data Out. Laporkan; Dashboard tetap jalan dari Data Out. |
+| Chip SUMBER `MQTT`, chip DOA `UNVERIFIED`, tanpa bearing | RDF-SDR hanya mengirim DoA `ok=0` dan Angular `flags` selain 63 (konfigurasi edge default: authority dan sudut belum diverifikasi) | Sesuai desain: nilai yang belum diverifikasi hanya tampil di Diagnostik DoA dan Monitor Pesan. Verifikasi di edge keputusan manusia; laporkan. DOA `INCOMPLETE` dengan `MQTT_ANGULAR_UNAVAILABLE`: profile stream edge `control` (tanpa Angular). |
 | Pengaturan tampak tidak tersimpan setelah restart | Console dijalankan dengan `--base-url`/`--mqtt-*` | Hapus flag itu dari perintah; ubah di Konfigurasi. |
 | Data Out tidak terjangkau dan MQTT tanpa pesan dari RDF-SDR; journal `t900-ground-ppp.service` berisi `LCP: timeout` | Link PPP lewat T900 ke RDF-SDR putus (di luar console) | Bila `packaging/ground-link` terpasang: `sudo t900-ground-diag -o /tmp` dan `t900-link status`, lalu laporkan. Prosedur insiden di `packaging/ground-link/README.md` (restart, usbreset, cabut-colok) hanya dengan izin manusia. |
 | UI lama setelah update | Halaman lama masih di browser | Muat ulang halaman. |

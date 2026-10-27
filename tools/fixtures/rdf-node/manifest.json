@@ -1,0 +1,266 @@
+{
+  "edge_commit": "8691ad0",
+  "fixtures": [
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 30,
+      "file": "ack-config.config-get-applied.json",
+      "note": "config.get accepted and answered",
+      "qos": 1,
+      "retain": false,
+      "topic": "ack/config"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 30,
+      "file": "ack-config.config-patch-rejected.json",
+      "note": "config.patch with a base_rev that is not the current revision",
+      "qos": 1,
+      "retain": false,
+      "topic": "ack/config"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 30,
+      "file": "ack-operation.operation-get.json",
+      "note": "public record of the stream.set above",
+      "qos": 1,
+      "retain": false,
+      "topic": "ack/operation"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 30,
+      "file": "ack-operation.ppp-restart-requested.json",
+      "note": "systemd accepted the restart (helper answer stubbed)",
+      "qos": 1,
+      "retain": false,
+      "topic": "ack/operation"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 30,
+      "file": "ack-operation.reboot-prepare-applied.json",
+      "note": "real helper Controller: result carries the one-time challenge",
+      "qos": 1,
+      "retain": false,
+      "topic": "ack/operation"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 30,
+      "file": "ack-operation.service-restart-unknown.json",
+      "note": "no root helper socket: OUTCOME_UNKNOWN",
+      "qos": 1,
+      "retain": false,
+      "topic": "ack/operation"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 30,
+      "file": "ack-operation.stream-set-accepted.json",
+      "note": "stream.set queued",
+      "qos": 1,
+      "retain": false,
+      "topic": "ack/operation"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 30,
+      "file": "ack-operation.stream-set-applied.json",
+      "note": "stream.set done",
+      "qos": 1,
+      "retain": false,
+      "topic": "ack/operation"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": null,
+      "file": "availability.offline-will.json",
+      "note": "Last Will in CONNECT, published by the broker when the connection is lost",
+      "qos": 1,
+      "retain": true,
+      "topic": "availability"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": null,
+      "file": "availability.online.json",
+      "note": "Control ready, retained online",
+      "qos": 1,
+      "retain": true,
+      "topic": "availability"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": null,
+      "file": "capabilities.json",
+      "note": "Control connection generation changed",
+      "qos": 1,
+      "retain": true,
+      "topic": "capabilities"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 30,
+      "file": "settings-reported.json",
+      "note": "answer to that config.get (TLS link)",
+      "qos": 1,
+      "retain": false,
+      "topic": "settings/reported"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": null,
+      "file": "state.json",
+      "note": "first state of the session",
+      "qos": 1,
+      "retain": true,
+      "topic": "state"
+    },
+    {
+      "edge_commit": "20713ff",
+      "edge_version": "1.0.0",
+      "expiry_s": null,
+      "file": "state.ppp-session.json",
+      "note": "state of the session that sent the PPP detail",
+      "qos": 1,
+      "retain": true,
+      "topic": "state"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 3,
+      "file": "telemetry-angular.live.json",
+      "note": "flags 63 on the Bulk client",
+      "qos": 0,
+      "retain": false,
+      "topic": "telemetry/angular"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 3,
+      "file": "telemetry-angular.unverified.json",
+      "note": "flags 23: convention and authority bits missing",
+      "qos": 0,
+      "retain": false,
+      "topic": "telemetry/angular"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 3,
+      "file": "telemetry-diagnostic-angular.json",
+      "note": "source not eligible: DAQ bit missing",
+      "qos": 0,
+      "retain": false,
+      "topic": "telemetry/diagnostic/angular"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 3,
+      "file": "telemetry-diagnostic-angular.wait-stable.json",
+      "note": "source valid, Bulk still waiting for a stable link after the connect (flags 63, still UNVERIFIED)",
+      "qos": 0,
+      "retain": false,
+      "topic": "telemetry/diagnostic/angular"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 3,
+      "file": "telemetry-diagnostic-doa.degraded.json",
+      "note": "doa.xml read while DAQ is not healthy",
+      "qos": 0,
+      "retain": false,
+      "topic": "telemetry/diagnostic/doa"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 3,
+      "file": "telemetry-diagnostic-doa.json",
+      "note": "doa.xml read while the DoA gate passes",
+      "qos": 0,
+      "retain": false,
+      "topic": "telemetry/diagnostic/doa"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 3,
+      "file": "telemetry-doa.ok0.json",
+      "note": "authority and angle not verified (edge default): ok=0, raw angle",
+      "qos": 0,
+      "retain": false,
+      "topic": "telemetry/doa"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 3,
+      "file": "telemetry-doa.ok1.json",
+      "note": "authority and angle verified: ok=1, relative angle (theta_mirror)",
+      "qos": 0,
+      "retain": false,
+      "topic": "telemetry/doa"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 15,
+      "file": "telemetry-health-detail.json",
+      "note": "fields of 8691ad0, no PPP fields",
+      "qos": 0,
+      "retain": false,
+      "topic": "telemetry/health/detail"
+    },
+    {
+      "edge_commit": "20713ff",
+      "edge_version": "1.0.0",
+      "expiry_s": 15,
+      "file": "telemetry-health-detail.ppp.json",
+      "note": "newer edge: PPP fields ppp, peer, ppp_svc, ppp_restarts",
+      "qos": 0,
+      "retain": false,
+      "topic": "telemetry/health/detail"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 5,
+      "file": "telemetry-health.daq-degraded.json",
+      "note": "daq=0",
+      "qos": 0,
+      "retain": false,
+      "topic": "telemetry/health"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "expiry_s": 5,
+      "file": "telemetry-health.json",
+      "note": "run=1, daq=1",
+      "qos": 0,
+      "retain": false,
+      "topic": "telemetry/health"
+    }
+  ],
+  "generated_at_ms": 1793070140089
+}

@@ -8,10 +8,10 @@ import { toneFor } from '../lib/telemetry';
 import { formatDuration } from '../lib/healthView';
 import { errorNotice, noticeText } from '../lib/errorNotice';
 import type { Notice } from '../lib/errorNotice';
-import { healthStateTone, lastMessageAgeMs, mqttDetailRecords, mqttKindRows, mqttTargetFromConfig, rdfStatusTone, rdfTopicRows } from '../lib/mqttMonitor';
-import type { MqttKindRow, RdfTopicRow } from '../lib/mqttMonitor';
+import { healthStateTone, lastMessageAgeMs, mqttDetailRecords, mqttKindRows, mqttTargetFromConfig, rdfAckRows, rdfAckTone, rdfNodeRows, rdfStatusTone, rdfTopicRows } from '../lib/mqttMonitor';
+import type { MqttKindRow, RdfAckRow, RdfNodeRow, RdfTopicRow } from '../lib/mqttMonitor';
 import { gateReasonLabel, useI18n } from '../lib/i18n';
-import type { Lang, Translate } from '../lib/i18n';
+import type { Lang, MessageKey, Translate } from '../lib/i18n';
 import { Icon } from '../components/ui';
 import { Card, DataTable, EmptyState, KeyValueGrid, Page, PageGrid, PageHeader, PageNotice, Segmented, StatRow, StatTile, StatusChip, Tag } from '../components/page';
 import type { DataColumn, KeyValueItem } from '../components/page';
@@ -44,7 +44,7 @@ type MessageMonitorPageProps = {
   onReconnectMqtt?: (target: MqttTarget) => Promise<void>;
   /** Server capabilities; say whether Kontrol can send a config patch over this connection. */
   capabilities?: ConsoleCapabilities | null;
-  /** The view shown first (sdr/v1 by default); RDF Node v2 is polled only while it is shown. */
+  /** The view shown first (sdr/v1 by default); RDF Node is polled only while it is shown. */
   initialProtocol?: MonitorProtocol;
   /** The LAN view: no Reconnect, which replaces the console's monitor. */
   readOnly?: boolean;
@@ -222,12 +222,52 @@ function rdfColumns(t: Translate, count: (value: number | null | undefined) => s
       label: t('monitor.col.detail'),
       render: (row) => {
         const parts: ReactNode[] = [];
-        if (row.error) parts.push(<Tag key="error" tone="bad">{row.error}</Tag>);
-        if (row.summary.length) parts.push(<span key="summary" className="ms-summary">{row.summary.map(([field, value]) => `${field} ${value}`).join(' · ')}</span>);
+        if (row.error) parts.push(<Tag key="error" tone={row.status === 'IGNORED' ? 'neutral' : 'bad'}>{row.field ? `${row.error} ${row.field}` : row.error}</Tag>);
+        if (row.summary.length) parts.push(<span key="summary" className="ms-summary">{summaryText(row.summary)}</span>);
         if (row.withheld) parts.push(<span key="withheld" className="ms-sub">{t('monitor.v2Gated')}</span>);
         return parts.length ? <span className="ms-chips">{parts}</span> : EMPTY_CELL;
       },
     },
+  ];
+}
+
+function summaryText(summary: Array<[string, string]>): string {
+  return summary.map(([field, value]) => `${field} ${value}`).join(' · ');
+}
+
+function nodeColumns(t: Translate): Array<DataColumn<RdfNodeRow>> {
+  return [
+    { key: 'part', label: t('monitor.col.part'), render: (row) => t(`monitor.part.${row.part}` as MessageKey) },
+    { key: 'status', label: t('monitor.col.status'), render: (row) => <StatusChip code={row.status} tone={rdfStatusTone(row.status)} /> },
+    { key: 'age', label: t('monitor.col.age'), numeric: true, render: (row) => (row.ageMs === null ? 'N/A' : formatDuration(t, row.ageMs)) },
+    {
+      key: 'detail',
+      label: t('monitor.col.detail'),
+      render: (row) => {
+        const parts: ReactNode[] = row.reasons.map((reason) => <Tag key={`reason-${reason}`}>{reason}</Tag>);
+        if (row.summary.length) parts.push(<span key="summary" className="ms-summary">{summaryText(row.summary)}</span>);
+        if (row.withheld) parts.push(<span key="withheld" className="ms-sub">{t('monitor.v2Gated')}</span>);
+        return parts.length ? <span className="ms-chips">{parts}</span> : EMPTY_CELL;
+      },
+    },
+  ];
+}
+
+function ackColumns(t: Translate): Array<DataColumn<RdfAckRow>> {
+  return [
+    { key: 'topic', label: t('monitor.col.topic'), code: true, render: (row) => row.topic },
+    {
+      key: 'status',
+      label: t('monitor.col.status'),
+      render: (row) => (
+        <span className="ms-chips">
+          <StatusChip code={row.status} tone={rdfAckTone(row.status)} />
+          {row.final ? <Tag>FINAL</Tag> : null}
+        </span>
+      ),
+    },
+    { key: 'age', label: t('monitor.col.age'), numeric: true, render: (row) => (row.ageMs === null ? 'N/A' : formatDuration(t, row.ageMs)) },
+    { key: 'detail', label: t('monitor.col.detail'), render: (row) => (row.error ? <Tag tone="bad">{row.error}</Tag> : EMPTY_CELL) },
   ];
 }
 
@@ -236,12 +276,14 @@ function topicHasData(row: RdfTopicRow): boolean {
   return (row.count ?? 0) > 0 || row.status !== 'UNAVAILABLE';
 }
 
-/** RDF Node v2: counters, subscription state and one row per subscribed topic. */
+/** RDF Node: counters, subscription state, the node view, the last ACKs and one row per subscribed topic. */
 export function RdfNodeView({ rdfNode, rdfError, nowMs }: { rdfNode: RdfNodeSnapshot | null; rdfError: Notice | null; nowMs: number }): ReactElement {
   const { t, lang } = useI18n();
   const count = useCountFormat(lang);
   const [showEmpty, setShowEmpty] = useState(false);
   const rows = rdfTopicRows(rdfNode, nowMs);
+  const nodeRows = rdfNodeRows(rdfNode, nowMs);
+  const ackRows = rdfAckRows(rdfNode, nowMs);
   const connection = rdfError ? 'ERROR' : rdfNode ? rdfNode.connection.toUpperCase() : 'N/A';
   const lastAge = rdfNode?.last_received_at_ms != null && rdfNode.now_ms !== null
     ? Math.max(0, rdfNode.now_ms - rdfNode.last_received_at_ms) + Math.max(0, nowMs - rdfNode.fetched_at_ms)
@@ -254,7 +296,7 @@ export function RdfNodeView({ rdfNode, rdfError, nowMs }: { rdfNode: RdfNodeSnap
     <>
       {rdfError ? <PageNotice tone="bad" title="ERROR">{t('monitor.v2ReadFailed', { error: noticeText(t, rdfError) })}</PageNotice> : null}
       <Card flush>
-        <StatRow label="RDF Node v2">
+        <StatRow label="RDF Node">
           <StatTile label={t('monitor.v2Subscription')} value={connection} tone={connectionTone(connection)} sub={rdfNode?.last_error ?? undefined} title={rdfNode?.last_error ?? undefined} />
           <StatTile label={t('monitor.received')} value={count(rdfNode?.received)} />
           <StatTile label={t('monitor.valid')} value={count(rdfNode?.valid)} tone={(rdfNode?.valid ?? 0) > 0 ? 'good' : undefined} />
@@ -262,6 +304,18 @@ export function RdfNodeView({ rdfNode, rdfError, nowMs }: { rdfNode: RdfNodeSnap
           <StatTile label={t('monitor.lastAge')} {...durationTile(t, lastAge)} />
         </StatRow>
       </Card>
+      {rdfNode ? (
+        <Card title={t('monitor.rdfNode')} flush>
+          {nodeRows.length
+            ? <DataTable columns={nodeColumns(t)} rows={nodeRows} rowKey={(row) => row.part} className="ms-node" label={t('monitor.rdfNode')} minWidth="720px" />
+            : <EmptyState label={t('monitor.rdfNodeEmpty')} />}
+        </Card>
+      ) : null}
+      {ackRows.length ? (
+        <Card title={t('monitor.rdfAcks')} chip={<Tag>{count(ackRows.length)}</Tag>} flush>
+          <DataTable columns={ackColumns(t)} rows={ackRows} rowKey={(_row, index) => String(index)} className="ms-acks" label={t('monitor.rdfAcks')} minWidth="560px" />
+        </Card>
+      ) : null}
       <Card
         title={t('monitor.v2Topics')}
         chip={rdfNode ? <Tag>{`${withData.length} / ${rows.length}`}</Tag> : null}
@@ -357,7 +411,7 @@ export function MessageMonitorPage({
     }
   }, []);
 
-  // RDF Node v2 is read only while its view is shown.
+  // RDF Node is read only while its view is shown.
   useEffect(() => {
     if (protocol !== 'v2') return undefined;
     void readRdfNode();
@@ -459,7 +513,7 @@ export function MessageMonitorPage({
             label={t('monitor.protocol')}
             value={protocol}
             onChange={setProtocol}
-            options={[{ value: 'v1', label: 'sdr/v1' }, { value: 'v2', label: 'RDF Node v2' }]}
+            options={[{ value: 'v1', label: 'sdr/v1' }, { value: 'v2', label: 'RDF Node' }]}
           />
           <button className="ov-button" type="button" disabled={busy} onClick={refresh}><Icon name="refresh" />{t('monitor.refresh')}</button>
           {readOnly ? null : <button className="ov-button" type="button" disabled={busy} onClick={reconnect}>{t('monitor.reconnect')}</button>}

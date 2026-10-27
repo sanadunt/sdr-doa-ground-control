@@ -10,7 +10,7 @@ Bahasa kerja project: Bahasa Indonesia. Nama file, identifier, endpoint, schema,
 
 Semua path dan perintah di dokumen ini relatif terhadap root repository (checkout `sdr-doa-ground-control`). Catatan historis lain di repo kadang masih memakai path `/Users/mac/...` dari mesin lain.
 
-Project ini adalah **Ground Console lokal** untuk observasi SDR-DoA yang berjalan pada Raspberry Pi/UAV. Sistem membaca Data Out SDR-DoA, memvalidasi freshness/health/consistency, menampilkan native CSV/XML secara terpisah, dan menyediakan monitor MQTT yang berlangganan. Satu-satunya penulisan jarak jauh adalah patch konfigurasi yang ditinjau dan dikonfirmasi admin di panel Kontrol.
+Project ini adalah **Ground Console lokal** untuk observasi SDR-DoA yang berjalan pada Raspberry Pi/UAV. Dashboard memakai MQTT RDF Node selama segar dan Data Out SDR-DoA sebagai cadangan; sistem memvalidasi freshness/health/consistency, menampilkan native CSV/XML secara terpisah, dan menyediakan monitor MQTT yang berlangganan. Satu-satunya penulisan jarak jauh adalah patch konfigurasi yang ditinjau dan dikonfirmasi admin di panel Kontrol.
 
 Tujuan UI:
 
@@ -57,9 +57,10 @@ Tujuan UI:
 - Overlay settings tersimpan lokal. Panel Lapisan berisi tujuh sakelar layer dan opasitas overlay, dan bagian Lanjutan berisi kontrol advanced untuk jarak/radius, min/max dB, threshold, contrast/intensity, radial samples, distance falloff, opacity, blur, guide interval, dan palette.
 - Marker station interaktif dan dapat membuka popup detail.
 - Tab `Simulasi`: lokasi, sudut DoA, lebar lobe, randomize manual, randomize otomatis.
-- Halaman System Health (termasuk tabel pembacaan per resource), DoA Diagnostics, Configuration, dan Message Monitor (sdr/v1 plus panel RDF Node v2).
+- Halaman System Health (termasuk tabel pembacaan per resource), DoA Diagnostics, Configuration, dan Message Monitor (sdr/v1 plus tampilan RDF Node).
 - Collector mendeteksi node beku (`NODE_CLOCK_STALLED`), membatasi satu koleksi dengan anggaran waktu (4 detik untuk `/api/snapshot`), dan membandingkan sudut CSV/XML hanya untuk pasangan dari frame yang sama.
 - Console membaca Data Out satu kali per interval refresh untuk semua penampil (`tools/data_out_reader.py`) dan memakai ulang `settings.json` paling lama 30 detik; umur data di browser dihitung sejak node dibaca.
+- MQTT dulu, Data Out cadangan (`tools/telemetry_source.py`, `docs/MQTT_KONTRAK.md` bagian 8): selama health RDF Node lewat MQTT segar (8 detik, `daq=1`) jawaban `/api/snapshot` dibangun dari DoA LIVE dan Angular LIVE MQTT, Data Out hanya dibaca ringan (`status.json`, `settings.json`, `doa.xml`) tiap 30 detik, dan chip SUMBER di strip status serta badge di HUD menyebut sumbernya. DoA yang UNVERIFIED tidak pernah tampil sebagai bearing.
 - Freshness expiry di renderer browser; snapshot stale tidak boleh terus ditampilkan sebagai data aktif. Refresh otomatis default 2 detik (pilihan 1, 2, 5, 10, 30 detik atau manual).
 - Receiver embedded (BrowSDR dari submodule `vendor/BrowSDR`, dengan overlay di `tools/browsdr_receiver_overlay/`) untuk spektrum, scan, rekaman audio, dan Records yang disimpan lokal. Panel Spektrum di Dashboard mengendalikan frame Receiver yang tersembunyi lewat bridge `postMessage` (Mulai/Berhenti, Dengar dengan modulasi, klik untuk menala, Ikuti frekuensi node, Skala dB RX, sample rate, LNA, VGA, +14 dB, mode RX | Spektrum untuk pindai lebar, dan Penanda).
 - Kontrol: patch konfigurasi MQTT yang dibatasi admin, dengan pelacakan ACK di server (`tools/config_command_tracker.py`).
@@ -143,7 +144,7 @@ MQTT adalah transport/contract, bukan pengganti DAQ, DSP, normalisasi, gate, ata
 | `tools/sdr_doa_lan_agent.py` | Edge agent/LAN staging dan payload health/state/config; dengan `--publish` selalu berlangganan `cmd/config/patch`, dan tanpa `--enable-config` menolak patch dengan `REMOTE_CONTROL_DISABLED` |
 | `tools/sdr_doa_mqtt.py` | MQTT contract/adapter staging |
 | `tools/sdr_doa_mqtt_monitor.py` | MQTT monitor; berlangganan, dan hanya publish patch konfigurasi lewat `publish_config_patch`. Memerlukan `paho-mqtt` (tanpa paket ini monitor berstatus ERROR, console tetap jalan) |
-| `tools/rdf_node_mqtt_v2.py` | Parser dan snapshot RDF Node v2 untuk `/api/mqtt/rdf-node` |
+| `tools/rdf_node_mqtt_v2.py` | Parser kontrak MQTT RDF Node (`docs/MQTT_KONTRAK.md`), node view, dan snapshot untuk `/api/mqtt/rdf-node` |
 | `tools/receiver_record_store.py` | Store SQLite dan file audio Receiver di bawah `--data-dir` |
 | `tools/preferences_store.py` | Salinan preferensi browser di server (allowlist key, batas ukuran, tulis atomik) untuk `/api/preferences` |
 | `tools/tile_cache.py` | Cache tile basemap untuk `/api/tiles`: upstream tetap (HTTPS, maksimal dua host per sumber), cache disk LRU, sajian stale saat offline |
@@ -169,7 +170,7 @@ MQTT adalah transport/contract, bukan pengganti DAQ, DSP, normalisasi, gate, ata
 | `frontend/src/components/PolarPlot.tsx` | Plotly polar/compass renderer, camera state, head-up, manual dB range |
 | `frontend/src/lib/telemetry.ts` | Candidate selection, data state, formatting, gate helpers |
 | `frontend/src/lib/doaStatus.ts` | Predikat kesiapan DoA bersama untuk readout, polar, dan peta |
-| `frontend/src/lib/mqttMonitor.ts` | Normalisasi snapshot MQTT v1/v2 dan redaksi record |
+| `frontend/src/lib/mqttMonitor.ts` | Normalisasi snapshot MQTT (`sdr/v1` dan RDF Node) dan redaksi record |
 | `frontend/src/pages/ReceiverPage.tsx` | Host iframe Receiver, sinkron tema/bahasa, penerusan shortcut, menyambungkan bridge ke frame |
 | `frontend/src/lib/receiverBridge.ts`, `receiverBridgeProtocol.ts` | Sisi console bridge Receiver; salinan protokol sisi frame ada di `tools/browsdr_receiver_overlay/src/client/app/console-bridge-protocol.ts` |
 | `frontend/src/lib/configPatch.ts` | Field, satuan, rentang, dan kode error patch konfigurasi untuk Kontrol |
@@ -299,7 +300,7 @@ Dashboard adalah dasbor peta penuh. Langkah operator yang lebih rinci ada di `QU
 - **Panel.** Tombol Lapisan, Polar, Spektrum, dan Kontrol di top bar menampilkan atau menyembunyikan panel. Secara bawaan Polar dan Spektrum aktif. Pilihan panel disimpan di console (`/api/preferences`), jadi ikut ke browser lain.
 - **Mulai/Berhenti.** Mulai memuat Receiver tersembunyi (saat pertama kali), menyambungkan RadioSpectrum yang sudah dipasangkan ke browser ini, dan menjalankan RX tanpa suara. Spektrum menampilkan 2 MHz di sekitar tengah RX. RadioSpectrum yang belum pernah dipasangkan (`NEEDS_PAIRING`) dipasangkan sekali di halaman Receiver (tombol `2`). Berhenti menghentikan RX.
 - **Klik untuk menala.** Klik trace atau waterfall untuk memindahkan tengah RX dan VFO ke frekuensi itu (dibulatkan 1 kHz); ←/→ menggeser 10 kHz, Shift+←/→ 100 kHz. Klik ini mematikan Ikuti frekuensi node. Tengah dan VFO dipegang Receiver dan sinkron dua arah: perubahan di halaman Receiver tampil di Spektrum dan juga mematikan Ikuti frekuensi node.
-- **Ikuti frekuensi node.** Selama Data Out segar, tengah RX mengikuti `center_freq` dari `settings.json` node dan VFO mengikuti frekuensi CSV DoA.
+- **Ikuti frekuensi node.** Selama data node segar, tengah RX mengikuti `center_freq` dari `settings.json` node dan VFO mengikuti frekuensi DoA (CSV Data Out, atau DoA LIVE lewat MQTT).
 - **Dengar dengan modulasi.** Dengar memutar audio VFO dengan modulasi yang dipilih (NFM bawaan, WFM, AM, USB, LSB, DSB, CW, RAW), dan menyalakan RX bila belum jalan. Tekan lagi untuk berhenti mendengar.
 - **Kirim ke RDF-SDR → Kontrol.** Tombol di header Spektrum hanya membuka Kontrol dengan draf frekuensi tengah dan VFO. Di Kontrol: buka kunci dengan kata sandi admin, ubah nilai, **Tinjau perubahan**, lalu **Kirim ke RDF-SDR**. Hasilnya `ACK · applied` (agent menulis `settings.json`), `Ditolak · KODE` (misalnya `REMOTE_CONTROL_DISABLED` bila agent tanpa `--enable-config`, atau `CONFIG_REVISION_CONFLICT`), **Belum ada ACK** setelah sekitar 65 detik, atau **Publish gagal** bila broker menolak.
 - **Spektrum → Atur.** Kolom pengaturan Spektrum. Pada dock yang lebih sempit dari 1400 px, Ikuti frekuensi node, modulasi, dan Kirim ke RDF-SDR pindah dari header ke kolom ini. **Skala dB** (Auto atau Manual dengan min dan maks, −160 s/d 60 dB, selisih minimal 5 dB) sama dengan panel Skala dB di tab Dengar halaman Receiver dan sinkron dua arah; trace dan seluruh waterfall diwarnai ulang. Skala terakhir yang diketahui dock disimpan di console (`sdr-console-spectrum-dock-v1`). **Sample rate**, **LNA**, **VGA**, dan **+14 dB** adalah pengaturan Listener Receiver dan sinkron dua arah; gain berlaku langsung, sample rate memulai ulang RX yang sedang jalan (ditanyakan dulu bila rekaman VFO berjalan, ditolak selama pindai). Sebelum Receiver dimuat isian ini nonaktif dengan `—`.

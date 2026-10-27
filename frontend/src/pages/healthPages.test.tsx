@@ -274,7 +274,7 @@ describe('DoA Diagnostics', () => {
     expect(page).toContain('NOT CHECKED');
     expect(page).toContain('ADJACENT_FRAMES');
     expect(page).toContain('Node status counters stopped advancing');
-    expect(page).toContain('CSV vector peak does not match θ₀');
+    expect(page).toContain('Vector peak does not match θ₀');
     expect(page).toContain('ADC not overdriven');
     // Actionable reasons come before the standing clock reason.
     expect(page.indexOf('Node status counters stopped advancing')).toBeLessThan(page.indexOf('Ground and node clocks are not verified'));
@@ -339,6 +339,27 @@ describe('DoA Diagnostics layout', () => {
     expect(page).toContain('Native records EQUAL Field CSV XML');
     expect(page).toContain('Collector Authority NONE Angle readiness NOT CONFIGURED Native views FRESH / COMPARABLE Settings source REDACTED FIELDS local_snapshot_fresh true');
     expect(page).not.toMatch(/collector conversion|Contract mapping: |within freshness window/);
+  });
+});
+
+describe('pages over an MQTT answer (issue #8)', () => {
+  const mqttAnswer = (name: string) => JSON.parse(readSource(`../../../tools/fixtures/telemetry-source/${name}`)) as TelemetrySnapshot;
+
+  it('lists the MQTT parts on DoA Diagnostics instead of the CSV and XML records', () => {
+    const page = text(render(<DoADiagnosticsPage snapshot={mqttAnswer('mqtt-unverified.json')} localSnapshotFresh />));
+    expect(page).toContain('MQTT DoA');
+    expect(page).toContain('DoA↔Angular');
+    expect(page).toContain('Angle mode theta_mirror');
+    expect(page).toContain('DoA ok=0 UNVERIFIED 160.0° 433.9200 MHz');
+    expect(page).toContain('SOURCE_UNVERIFIED ANGLE_UNVERIFIED');
+    expect(page).not.toContain('Native records');
+    expect(text(render(<DoADiagnosticsPage snapshot={mqttAnswer('mqtt-live.json')} localSnapshotFresh />, 'id'))).toContain('DoA MQTT');
+  });
+
+  it('shows the one MQTT view on System Health', () => {
+    const page = text(render(<SystemHealthPage snapshot={mqttAnswer('mqtt-live.json')} mqtt={null} mqttError={null} localSnapshotFresh capabilities={null} />));
+    expect(page).toMatch(/MQTT PRESENT/);
+    expect(page).not.toMatch(/CSV MISSING/);
   });
 });
 

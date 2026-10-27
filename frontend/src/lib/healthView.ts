@@ -1,6 +1,6 @@
 import type { Candidate, Freshness, NativeConsistency, TelemetrySnapshot, Tone } from '../types';
 import type { MessageKey, Translate } from './i18n';
-import { candidate, toneFor } from './telemetry';
+import { candidate, sourceViewNames, toneFor } from './telemetry';
 import { settingsAgeMs } from './snapshotRead';
 
 /** The four bounded GETs the collector makes, in the order it reads them. */
@@ -345,7 +345,7 @@ export function peakConsistency(item: Candidate): { distanceDeg: number | null; 
 
 function freshAtRead(snapshot: TelemetrySnapshot): boolean {
   if (snapshot.status?.available !== true) return false;
-  return (['csv', 'xml'] as const).some((name) => {
+  return sourceViewNames(snapshot).some((name) => {
     const item = candidate(snapshot, name);
     return item.available === true && item.freshness?.fresh === true;
   });
@@ -409,6 +409,7 @@ export function errorKindKey(kind: ResourceErrorKind | null): MessageKey {
 const GATE_CHECK_KEYS: Record<string, MessageKey> = {
   status_available: 'diag.check.status_available',
   status_fresh: 'diag.check.status_fresh',
+  mqtt_health_fresh: 'diag.check.mqtt_health_fresh',
   daq_healthy: 'diag.check.daq_healthy',
   adc_not_overdriven: 'diag.check.adc_not_overdriven',
   node_not_stalled: 'diag.check.node_not_stalled',
@@ -421,6 +422,7 @@ const GATE_CHECK_KEYS: Record<string, MessageKey> = {
   native_views_consistent: 'diag.check.native_views_consistent',
   angular_peak_consistent: 'diag.check.angular_peak_consistent',
   native_angle_checked: 'diag.check.native_angle_checked',
+  angular_vector_live: 'diag.check.angular_vector_live',
 };
 
 /** i18n key for a known publication-gate check, or null for an unknown one. */

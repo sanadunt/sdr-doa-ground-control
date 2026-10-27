@@ -21,7 +21,7 @@ import type { ConfigPatchChanges, ControlDraftRequest } from '../lib/controlDraf
 import type { ReceiverBridge } from '../lib/receiverBridge';
 import { ZERO_INSETS, computeMapInsets, sameInsets } from '../lib/mapInsets';
 import type { MapInsets } from '../lib/mapInsets';
-import { candidate } from '../lib/telemetry';
+import { primaryCandidate } from '../lib/telemetry';
 import { useI18n } from '../lib/i18n';
 import { DoaReadout } from '../components/DoaReadout';
 import { LoadErrorBoundary } from '../components/LoadErrorBoundary';
@@ -163,7 +163,7 @@ function OverviewPageView({
     setBasemapId(valid);
     saveBasemapId(valid);
   }, []);
-  const csv = candidate(snapshot, 'csv');
+  const csv = primaryCandidate(snapshot);
   const overlayValues = doa.shown && localSnapshotFresh && Array.isArray(csv.angular_power_db) && csv.angular_power_db.length === 360 ? csv.angular_power_db : null;
   const isSimulation = snapshot?.simulation === true;
   const overlayScale = useMemo(() => effectiveDbScale(overlayValues, overlaySettings, isSimulation), [overlayValues, overlaySettings, isSimulation]);

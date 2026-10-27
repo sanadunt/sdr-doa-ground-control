@@ -751,6 +751,9 @@ def test_snapshot_requests_share_one_collection() -> None:
     assert isinstance(calls[0]["settings_cache"], collector.SettingsCache)
     assert calls[0]["fresh_settings"] is False
     collections = [result.pop("collection") for result in results]
+    # No MQTT monitor and no status.json in the fixture: every answer names no source (#8).
+    sources = [result.pop("source") for result in results]
+    assert [(entry["kind"], entry["reasons"]) for entry in sources] == [("none", ["MQTT_DISABLED", "DATA_OUT_UNAVAILABLE"])] * 5, sources
     assert results == [{"overall_state": "FIXTURE", "call": 1}] * 5, results
     # One request started the collection; the other four shared it (#13).
     assert len({entry["id"] for entry in collections}) == 1, collections

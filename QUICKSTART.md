@@ -264,7 +264,7 @@ Spektrum memakai RadioSpectrum yang sama dengan halaman Receiver, jadi butuh Chr
 - **RadioSpectrum pertama kali.** Bila chip menampilkan `NEEDS_PAIRING`, tekan **Buka Receiver (2)**, sambungkan RadioSpectrum lewat **Connect Device** di halaman Receiver, kembali ke Dashboard, lalu tekan **Mulai**. Pemilih USB milik browser tetap menampilkan nama produk USB perangkat (misalnya HackRF One); nama itu berasal dari perangkat dan tidak bisa diganti console. `NEEDS_DEVICE_CHOICE` berarti lebih dari satu RadioSpectrum sudah dipasangkan; pilih satu di halaman Receiver. Izin WebUSB berlaku per alamat, jadi `localhost:8787` dan `127.0.0.1:8787` dipasangkan masing-masing.
 - **Klik untuk menala.** Klik trace atau waterfall untuk memindahkan tengah RX dan VFO ke frekuensi itu (dibulatkan ke 1 kHz). Klik ini mematikan **Ikuti frekuensi node**. Saat **Penanda** aktif, klik menambah penanda, bukan menala. Dengan keyboard, fokuskan grafik lalu tekan ←/→ untuk langkah 10 kHz, atau Shift+←/→ untuk 100 kHz; menahan tombol melangkah dari frekuensi yang tampil, jadi tidak ada langkah yang hilang. Arahkan kursor ke grafik untuk membaca frekuensi dan level. VFO lalu berada tepat di tengah RX, tempat spike DC RadioSpectrum muncul. Bila Receiver menolak tuning itu (misalnya `SWEEP_BUSY`), grafik kembali ke frekuensi Receiver.
 - **Sinkron dengan halaman Receiver.** Tengah RX dan VFO dipegang Receiver. Perubahan di halaman Receiver (misalnya Center 100 → 150 MHz) tampil di Spektrum dalam sekitar 150 ms, juga bila Anda baru kembali dari halaman Receiver. Klik atau ←/→ di Spektrum langsung mengubah Center dan VFO di halaman Receiver; sampai radio benar-benar pindah frekuensi (Receiver menunggu sekitar 200 ms), spektrum lama tetap digambar di frekuensinya sendiri. Mengubah tengah atau VFO di halaman Receiver, termasuk memanggil bookmark atau selesai dengar-pindai, mematikan **Ikuti frekuensi node**, sama seperti klik di grafik; centang lagi untuk kembali ke frekuensi node. Modulasi yang dipilih di halaman Receiver juga menjadi modulasi untuk Mulai berikutnya. Setelah console dimuat ulang dan sebelum Receiver dimuat, grafik menampilkan tengah dan VFO terakhir yang disimpan Receiver bila Ikuti frekuensi node tidak sedang menunjuk node; nilai itu hanya tampilan, Mulai tetap memakai setelan Receiver.
-- **Ikuti frekuensi node** (aktif bawaan). Selama Data Out segar, tengah RX mengikuti `center_freq` dari `settings.json` node dan VFO mengikuti frekuensi baris CSV DoA. Receiver ditala ulang bila frekuensi node bergeser lebih dari 1 kHz; mengganti Sample rate (di dock atau di halaman Receiver) tidak menala ulang. Tanpa Data Out segar, tuning saat ini dipertahankan. Bila Receiver memakai Freq Shift, muncul tag `UPCONVERTER`; frekuensi node dipakai tanpa shift itu, jadi set Freq Shift ke 0 agar RadioSpectrum benar-benar menala ke frekuensi node.
+- **Ikuti frekuensi node** (aktif bawaan). Selama data node segar, tengah RX mengikuti `center_freq` dari `settings.json` node (lewat MQTT: dari pembacaan ringan Data Out) dan VFO mengikuti frekuensi DoA (baris CSV Data Out, atau DoA LIVE lewat MQTT). Receiver ditala ulang bila frekuensi node bergeser lebih dari 1 kHz; mengganti Sample rate (di dock atau di halaman Receiver) tidak menala ulang. Tanpa Data Out segar, tuning saat ini dipertahankan. Bila Receiver memakai Freq Shift, muncul tag `UPCONVERTER`; frekuensi node dipakai tanpa shift itu, jadi set Freq Shift ke 0 agar RadioSpectrum benar-benar menala ke frekuensi node.
 - **Dengar** memutar audio VFO di browser ini dengan modulasi yang dipilih di sebelahnya (di **Atur** bila dock sempit): NFM (bawaan), WFM, AM, USB, LSB, DSB, CW, atau RAW. Bila RX belum jalan, Dengar sekaligus menyalakannya. Mengganti modulasi langsung berlaku dan diingat browser. Tekan Dengar lagi untuk berhenti mendengar. Bila browser memblokir audio, tekan Dengar sekali lagi.
 - **RX | Spektrum** (sakelar setelah chip) memilih isi grafik dan apa yang dijalankan **Mulai**: **RX** (2 MHz di sekitar tengah RX) atau **Spektrum** (pindai lebar Receiver di rentangnya sendiri). Selama tidak ada yang berjalan, sakelar hanya memilih mode dan tidak memuat Receiver. Dock selalu menampilkan mode yang sedang berjalan: pindai yang dimulai di halaman Receiver tampil sebagai Spektrum dengan grafik hidup.
 - **Mode Spektrum.** **Mulai** menjalankan pindai lebar dengan rentang dan pengaturan pindai Receiver (bawaan 100–1000 MHz), **Berhenti** menghentikannya tanpa menyalakan RX. Chip `SCAN` berarti pindai berjalan, `…` berarti pindai sedang dimulai atau dihentikan, `SCAN OFF` berarti berhenti. Dengan `?mock=1` pindai memakai sumber simulasi dan header menampilkan tag `SIM` selama pindai itu berjalan. Baris info menampilkan rentang, RBW, LNA, dan VGA pindai. Klik atau ←/→ pada grafik menyimpan tengah dan VFO untuk RX berikutnya (pada bin terkuat di dekat klik; langkah ←/→ 1/200 rentang, minimal 10 kHz) dan mematikan **Ikuti frekuensi node**; pindai tetap berjalan. **Dengar** menghentikan pindai lalu menjalankan RX dan memutar audio. Pindah ke **RX** saat pindai berjalan menghentikan pindai dan menjalankan RX; pindah ke **Spektrum** saat RX berjalan memulai pindai. Pindai menghentikan RX, jadi bila rekaman audio VFO sedang berjalan console menanyakan dulu karena rekaman itu berakhir.
@@ -384,9 +384,10 @@ Collector tetap read-only dan hanya memakai HTTP GET.
 
 ### Strip status
 
-Strip di top bar punya enam item, dari kiri ke kanan: DATA, DOA, PUBLIKASI, SNAPSHOT, MQTT, dan SIM. Arahkan kursor ke sebuah item untuk melihat apa yang dilaporkannya; detail status saat ini, misalnya penyebab sebuah masalah, tampil di baris berikutnya.
+Strip di top bar punya tujuh item, dari kiri ke kanan: SUMBER, DATA, DOA, PUBLIKASI, SNAPSHOT, MQTT, dan SIM. Arahkan kursor ke sebuah item untuk melihat apa yang dilaporkannya; detail status saat ini, misalnya penyebab sebuah masalah, tampil di baris berikutnya.
 
-- **DATA** mengklasifikasikan isi pembacaan Data Out terakhir:
+- **SUMBER** (`SOURCE` di bahasa Inggris) menyebut dari mana console mengambil jawaban terakhir (lihat [Sumber data Dashboard](#sumber-data-dashboard)): `MQTT` (hijau), `Data Out (cadangan)` (amber) bila MQTT tidak segar, atau `tidak ada` (merah) bila Data Out juga tidak terbaca. Tooltip-nya menyebut kode dan alasan, misalnya `MQTT_HEALTH_STALE · Health MQTT lebih tua dari 8 dtk`. Chip ini muncul setelah jawaban pertama console.
+- **DATA** mengklasifikasikan isi jawaban terakhir (MQTT atau Data Out):
   - `LOADING`: belum ada pembacaan yang selesai.
   - `ERROR`: request ke console gagal.
   - `UNAVAILABLE`: `status.json` tidak terbaca, atau kedua file DoA tidak bisa diambil.
@@ -398,16 +399,17 @@ Strip di top bar punya enam item, dari kiri ke kanan: DATA, DOA, PUBLIKASI, SNAP
   - `AVAILABLE`: data node terbaca, segar, dan konsisten.
 
   Untuk status selain `AVAILABLE`, tooltip DATA menyebut gate reason utama dan error per view (misalnya "XML: HTTP 404").
-- **DOA** menyatakan apakah bearing dan vektor 360 bin bisa ditampilkan di Dashboard: `AVAILABLE`, atau `DEGRADED`, `CONFLICT`, `UNAVAILABLE`, `INCOMPLETE`, dan `STALE` dengan penyebab di tooltip. Sebelum pembacaan pertama nilainya `WAITING`. Ini keputusan yang sama yang dipakai readout, plot polar, dan peta.
+- **DOA** menyatakan apakah bearing dan vektor 360 bin bisa ditampilkan di Dashboard: `AVAILABLE`, atau `DEGRADED`, `CONFLICT`, `UNAVAILABLE`, `INCOMPLETE`, `STALE`, dan `UNVERIFIED` (DoA lewat MQTT yang belum diverifikasi RDF-SDR) dengan penyebab di tooltip. Sebelum pembacaan pertama nilainya `WAITING`. Ini keputusan yang sama yang dipakai readout, plot polar, dan peta.
 - **PUBLIKASI** (`DELIVERY` di bahasa Inggris) adalah gate publikasi dari collector: `READY` hanya bila semua pemeriksaan untuk memublikasikan bearing lolos, selain itu `BLOCKED`. Di Ground Console nilainya selalu `BLOCKED`, juga saat DATA dan DOA `AVAILABLE`; penyebabnya dijelaskan di bagian Kesehatan Sistem di bawah. Tooltip menyebut reason teratas beserta kodenya.
 - **SNAPSHOT** menyangkut pembacaan `/api/snapshot` itu sendiri: `CURRENT` selama 5 detik setelah console membaca node (termasuk pembacaan yang melaporkan UNAVAILABLE), lalu `STALE`; `ERROR` bila request terakhir gagal. Sebelum pembacaan pertama nilainya `LOADING` atau `WAITING`.
 - **MQTT** adalah koneksi monitor lokal. Monitor ini berlangganan dan tidak pernah publish sendiri; satu-satunya publish adalah patch konfigurasi yang dikonfirmasi admin di Kontrol. Nilainya `CONNECTED`, `CONNECTING`, `DISCONNECTED`, `ERROR`, atau `OFF` bila host MQTT tidak dikonfigurasi. `ERROR` juga muncul bila monitor tidak bisa dibuat (misalnya `paho-mqtt` tidak terpasang) atau console tidak bisa membaca status monitor; detailnya ada di tooltip.
-- **SIM** bernilai `ON` selama simulasi aktif, yaitu saat Dashboard menampilkan data sintetis dari browser, dan `OFF` bila Dashboard memakai Data Out live. Item lain di strip tetap melaporkan data live, juga saat simulasi `ON`.
+- **SIM** bernilai `ON` selama simulasi aktif, yaitu saat Dashboard menampilkan data sintetis dari browser, dan `OFF` bila Dashboard memakai data live (MQTT atau Data Out). Item lain di strip tetap melaporkan data live, juga saat simulasi `ON`.
 
 Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 
 ### Refresh
 
+- Selama MQTT segar, Dashboard memakai MQTT dan console tidak membaca Data Out penuh; interval refresh hanya mengatur seberapa sering halaman mengambil jawaban dari console (lihat [Sumber data Dashboard](#sumber-data-dashboard)). Butir tentang pembacaan Data Out di bawah ini berlaku saat Data Out (cadangan) yang menjawab.
 - Pilihan interval: Manual, 1, 2, 5, 10, dan 30 detik. Instalasi baru memakai 2 detik. Interval bisa diganti di select samping tombol refresh di top bar atau di **Konfigurasi → Koneksi**; keduanya menyimpan ke konfigurasi console. Halaman yang sudah terbuka di PC atau tablet lain mengikuti interval baru itu pada jawaban berikutnya, termasuk select di top bar-nya.
 - Console membaca Data Out satu kali per interval untuk semua penampil. PC atau tablet lain yang membuka console mendapat hasil pembacaan yang sama, jadi jumlah penampil tidak menambah beban ke node atau link PPP. Pembacaan dipakai bersama selama interval refresh (minimal 1 detik) sejak node dibaca. Halaman yang dibuka menyesuaikan jadwal poll-nya dengan pembacaan bersama itu, juga poll pertamanya, sehingga halaman yang baru dibuka langsung meminta pembacaan berikutnya saat jatuh tempo.
 - `settings.json` (4,7 kB dari sekitar 8 kB satu pembacaan) dipakai ulang paling lama 30 detik. File itu dibaca lagi lebih cepat bila node restart, bila nilai `status.json` yang mengikuti pengaturan berubah, atau bila CSV/XML DoA menunjukkan frekuensi VFO, jumlah VFO, susunan antena, atau station lain. Setelah console di-restart, pembacaan pertama selalu membaca `settings.json`.
@@ -418,9 +420,21 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 - Tombol Refresh dan tombol `R` tetap bisa dipakai saat pembacaan berjalan; keduanya menunggu pembacaan itu lalu meminta pembacaan baru. Console membaca node lagi hanya bila pembacaan terakhir sudah berumur minimal 1 detik; sebelum itu Refresh mendapat pembacaan yang sama.
 - Data Out yang tidak terjangkau atau macet tampil `UNAVAILABLE` dalam sekitar 4 detik.
 
+### Sumber data Dashboard
+
+Dashboard, peta, polar, readout DoA, dan chip DATA/DOA memakai **MQTT** dulu dan **Data Out (cadangan)** hanya bila MQTT tidak segar. Console memutuskannya di server untuk setiap jawaban `/api/snapshot`; kontrak lengkapnya di `docs/MQTT_KONTRAK.md` bagian 8.
+
+- **MQTT segar** berarti `telemetry/health` RDF Node dari sesi `state` sekarang diterima paling lama 8 detik lalu, dengan `q` yang maju dan `daq=1`. MQTT tersambung saja tidak cukup. Health dengan `daq` 0 atau 2 membuat console beralih ke Data Out, yang lalu menunjukkan detail DAQ-nya.
+- **Dari MQTT**: θ₀, frekuensi, PAPR, dan power dari `telemetry/doa` `ok=1` (LIVE), vektor 360 bin dari `telemetry/angular` `flags=63` (LIVE) dengan frekuensi dan revisi yang sama, dan status DAQ dari health. Frame Angular dari record yang lebih lama (edge mengirim DoA tiap 1 detik, Angular tiap 4 detik) hanya dipakai selama puncaknya paling jauh 3° dari θ₀ DoA terbaru; lebih jauh, DOA `INCOMPLETE` sampai frame berikutnya, jadi bearing dan kurva tidak pernah menunjuk ke arah berbeda. θ₀ hanya dihitung bila `capabilities.angle` sesi ini `theta_mirror` atau `csv_native`.
+- **DoA UNVERIFIED tidak pernah tampil sebagai bearing.** `ok=0`, Angular `flags` selain 63, dan kedua topik diagnostik membuat chip DOA `UNVERIFIED` dan HUD menulis "DoA lewat MQTT UNVERIFIED di RDF-SDR"; nilainya tetap terlihat di **Diagnostik DoA** (kartu DoA MQTT) dan **Monitor Pesan**. Dengan konfigurasi edge default (authority dan sudut belum diverifikasi) Dashboard tidak menampilkan bearing selama MQTT segar. Profile stream `control` tidak mengirim Angular, sehingga DOA `INCOMPLETE`; pakai `balanced` atau `graph_u8`.
+- **Yang tidak dibawa MQTT** (posisi stasiun dari `doa.xml`, field `settings.json` untuk kartu node, ikuti-frekuensi, compass offset dan read-back Kontrol, serta ADC overdrive dan SNR) datang dari pembacaan ringan Data Out: `status.json`, `settings.json`, dan `doa.xml`, sekitar 5,8 kB tiap 30 detik (~0,2 kB/s), dibanding ~1,9 kB/s untuk Data Out penuh dengan interval 2 detik di link T900 (~5,6 kB/s). Pembacaan ringan juga jalan segera bila revisi konfigurasi node (`state.cfg`) berubah (lalu `settings.json` dibaca ulang, bukan salinan lama), dan saat Kontrol menekan **Cek ulang**. Hasilnya berlaku 65 detik; yang lebih tua (misalnya dari sebelum MQTT sempat basi) dianggap belum dibaca. Tombol Refresh (`R`) tidak membaca Data Out selama MQTT segar.
+- **Data Out mati, MQTT sehat**: bearing tetap tampil dengan badge `MQTT`; kartu node tanpa frekuensi dan gain, compass offset memakai nilai Data Out terakhir yang diketahui (paling lama 90 detik, setelah itu "diasumsikan"), dan peta mempertahankan posisi terakhir.
+- **MQTT basi, Data Out sehat**: jawaban berikutnya dibaca penuh dari Data Out dengan badge `Data Out (cadangan)`, persis seperti sebelum ada MQTT. Tidak keduanya: `tidak ada`.
+- Gate publikasi tetap `BLOCKED` dan state tidak pernah `LIVE` dengan kedua sumber.
+
 ### Dashboard
 
-- **Bearing dari utara** adalah bearing geografis searah jarum jam: (360 − θ₀ + compass_offset) mod 360. θ₀ mentah dari Data Out (sudut array berlawanan jarum jam) tampil di bawahnya di HUD, bersama Puncak (display peak), umur data, dan offset beserta sumbernya:
+- **Bearing dari utara** adalah bearing geografis searah jarum jam: (360 − θ₀ + compass_offset) mod 360. θ₀ mentah dari MQTT atau Data Out (sudut array berlawanan jarum jam) tampil di bawahnya di HUD, bersama Puncak (display peak), umur data, dan offset beserta sumbernya; badge di HUD menyebut sumber datanya (`MQTT` atau `Data Out (cadangan)`):
   - `DATA_OUT`;
   - `DATA_OUT · LOCAL AXIS` bila plot KrakenSDR bertipe Linear;
   - `MANUAL`;
@@ -482,7 +496,7 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 
 ### Monitor Pesan
 
-- Bilah halaman menampilkan chip koneksi, tag transport (`TCP` atau `WS`), `SYNTHETIC` bila ada payload sintetis, sakelar sdr/v1 | RDF Node v2, **Muat ulang**, dan **Sambungkan ulang**. Kartu **Koneksi** menampilkan broker, transport (`TCP` atau `WS /path`), topik terakhir (disamarkan), dan publish.
+- Bilah halaman menampilkan chip koneksi, tag transport (`TCP` atau `WS`), `SYNTHETIC` bila ada payload sintetis, sakelar sdr/v1 | RDF Node, **Muat ulang**, dan **Sambungkan ulang**. Kartu **Koneksi** menampilkan broker, transport (`TCP` atau `WS /path`), topik terakhir (disamarkan), dan publish.
 - Baris metrik: Diterima, Valid, Tidak valid, Byte, Latensi terakhir, Pesan terakhir. Latensi terakhir hanya menghitung pesan live. Di ponsel baris ini dua kolom.
 - Tabel per kind:
   - **Count** adalah jumlah pesan per kind sejak monitor start.
@@ -494,7 +508,7 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 - **Sambungkan ulang** selalu membuka sesi subscriber baru dengan pengaturan broker tersimpan; penghitung dan record terakhir mulai dari nol. Tanpa tombol ini, monitor mencoba lagi sendiri dalam sekitar 10 detik.
 - Client id MQTT sekarang `groundconsole` plus 10 karakter hex acak per monitor, sehingga dua console bisa memakai satu broker. ACL atau log broker yang memakai id lama `ground-console-monitor` perlu diperbarui.
 - Status MQTT diperbarui sendiri setiap 2 detik di Monitor Pesan dan Kesehatan Sistem, dan setiap 5 detik di halaman lain.
-- Panel **Telemetri RDF Node v2** dijelaskan di bagian MQTT di bawah.
+- Tampilan **RDF Node** dijelaskan di bagian [RDF Node](#rdf-node) di bawah.
 
 ### Shortcut keyboard
 
@@ -509,11 +523,11 @@ Kode halaman, termasuk peta, diambil di latar belakang tidak lama setelah consol
 
 ## MQTT staging, opsional
 
-MQTT tidak diperlukan untuk peta, polar, Spektrum, atau simulasi; Kontrol membutuhkannya. Ground Console memakai satu koneksi ke broker yang dikonfigurasi. Koneksi itu berlangganan topic v1 dan RDF Node v2 sekaligus, dan hanya publish patch konfigurasi v1 yang dikonfirmasi admin di Kontrol. `paho-mqtt` diperlukan untuk monitor MQTT, Kontrol, dan synthetic publisher.
+MQTT adalah sumber utama Dashboard, peta, dan polar; tanpa MQTT yang segar console memakai Data Out (cadangan), lihat [Sumber data Dashboard](#sumber-data-dashboard). Spektrum dan simulasi tidak memerlukan MQTT; Kontrol membutuhkannya. Ground Console memakai satu koneksi ke broker yang dikonfigurasi. Koneksi itu berlangganan topik `sdr/v1/uav-01` dan topik RDF Node di `sdr/v2/uav-01` sekaligus, dan hanya publish patch konfigurasi ke `sdr/v1/uav-01` yang dikonfirmasi admin di Kontrol. `paho-mqtt` diperlukan untuk monitor MQTT, Kontrol, dan synthetic publisher.
 
 Koneksi MQTT default adalah `10.90.0.1:9001`, WebSocket, path `/mqtt`. Host menerima literal IPv4/IPv6 apa pun atau `localhost`, bukan nama DNS; masukkan IPv6 tanpa kurung siku. Ground Console membuka koneksi keluar ke broker, tetapi HTTP Ground Console tetap bind ke loopback. Monitor tidak punya opsi username, password, atau TLS untuk TCP maupun WebSocket, sehingga payload, termasuk patch dari Kontrol, melintas tanpa enkripsi. Gunakan hanya broker dan jaringan tepercaya; jangan kirim payload rahasia melalui koneksi ini. Karena itu console tidak bisa tersambung ke broker LAN `tools/mqtt_lan_stage.conf` yang mewajibkan TLS dan password.
 
-Monitor memakai MQTTv5 dan satu konfigurasi broker bersama: host, port, transport, dan WebSocket path berlaku untuk kedua keluarga topic. Filter v1 adalah `sdr/v1/uav-01/#`; RDF Node v2 memakai prefix `sdr/v2/uav-01/` dan sepuluh suffix: `telemetry/doa`, `telemetry/health`, `telemetry/health/detail`, `telemetry/angular`, `state`, `capabilities`, `config/reported`, `availability`, `ack/config`, dan `ack/operation`. Status `READY` menunggu SUBACK berhasil untuk seluruh filter bersama. Parser dan snapshot v1/v2 tetap terpisah agar validasi satu schema tidak mengubah statistik schema lain.
+Monitor memakai MQTTv5 dan satu konfigurasi broker bersama: host, port, transport, dan WebSocket path berlaku untuk kedua root topik. Filter `sdr/v1/uav-01/#` tetap ada sampai jalur lama dihapus; RDF Node memakai prefix `sdr/v2/uav-01/` dan 12 suffix dari kontrak edge (`docs/MQTT_KONTRAK.md`): `state`, `capabilities`, `availability`, `telemetry/health`, `telemetry/health/detail`, `telemetry/doa`, `telemetry/diagnostic/doa`, `telemetry/angular`, `telemetry/diagnostic/angular`, `settings/reported`, `ack/config`, dan `ack/operation`. `config/reported` bukan bagian kontrak dan tidak di-subscribe, jadi nilai retained sisa di broker tidak dibaca. Status `READY` menunggu SUBACK berhasil untuk seluruh filter bersama. Parser dan snapshot kedua root tetap terpisah agar validasi satu schema tidak mengubah statistik schema lain.
 
 Konfigurasi lama `rdf_node_mqtt` tidak digunakan atau dimigrasikan; field itu hilang saat konfigurasi disimpan berikutnya. Atur endpoint kedua keluarga topic melalui **Konfigurasi → MQTT**.
 
@@ -569,19 +583,24 @@ Semua payload synthetic publisher membawa `source: "synthetic"` dan tampil denga
 
 Broker `tools/mqtt_stage4.conf` menerima koneksi anonim di loopback, jadi console bisa publish ke sana. Jalankan broker dan console seperti di atas, lalu jalankan agent dari repo ini di mesin yang sama dengan `--publish --enable-config --settings-path <file settings.json>` dan `--base-url` ke Data Out yang bisa dibaca. Agent baru mengirim `config_reported` setelah bisa membaca `settings.json` lewat Data Out; sebelum itu Kontrol menampilkan rev dasar "tidak diketahui" dan Kirim nonaktif. Tanpa `--enable-config`, setiap patch dijawab `REMOTE_CONTROL_DISABLED`. Synthetic publisher dengan `--keep-retained` mengisi rev dasar (dengan badge `SYNTHETIC`), tetapi tidak menjawab patch, sehingga hasilnya **Belum ada ACK**.
 
-### RDF Node v2 telemetry
+### RDF Node
 
 Pastikan `paho-mqtt==2.1.0` terpasang di virtual environment yang sama dengan Ground Console; jika dependency tidak tersedia, status monitor melaporkan error tanpa mematikan Ground Console.
 
-Untuk RDF Node v2, console hanya membaca sepuluh filter di atas dan tidak mengirim command v2. Satu-satunya publish console adalah patch v1 ke `sdr/v1/uav-01/cmd/config/patch` dari Kontrol. Endpoint browser v2 hanya `GET /api/mqtt/rdf-node`; Kontrol memakai nilai VFO dari `config/reported` v2 bila tersedia.
+Untuk RDF Node, console hanya membaca 12 filter di atas dan belum mengirim perintah ke `sdr/v2/uav-01/cmd/...`. Satu-satunya publish console masih patch ke `sdr/v1/uav-01/cmd/config/patch` dari Kontrol. Endpoint browser hanya `GET /api/mqtt/rdf-node`. RDF Node tidak punya `config/reported`, jadi Kontrol mengambil nilai VFO dari Data Out (cadangan).
 
-Panel **Telemetri RDF Node v2** ada di halaman Monitor Pesan:
+Kontrak per topik (field wajib, QoS, retained, expiry, batas freshness, dan aturan status console) ada di `docs/MQTT_KONTRAK.md`, diambil dari edge commit `8691ad0` (rilis `1.0.0-20261013194717`). Field edge yang lebih baru, misalnya field PPP di `telemetry/health/detail`, diterima tetapi tidak wajib.
 
-- Panel memakai koneksi broker yang sama dengan v1, tetapi penghitungnya terpisah. Panel dibaca setiap 2 detik hanya selama halaman Monitor Pesan terbuka.
+Tampilan **RDF Node** ada di halaman Monitor Pesan:
+
+- Memakai koneksi broker yang sama dengan `sdr/v1`, tetapi penghitungnya terpisah. Dibaca setiap 2 detik hanya selama tampilan ini terbuka.
 - `READY` berarti seluruh SUBACK untuk filter bersama berhasil, bukan DAQ sehat. Availability adalah petunjuk koneksi, bukan health.
-- Per topic tampil count, status (`FRESH`, `STALE`, `CONTEXT`, `INCONSISTENT`, `INVALID`, atau `UNAVAILABLE` bila belum pernah diterima), umur, RETAINED/LIVE, dan ringkasan field. Nilai retained yang dihapus publisher (pesan retained kosong) tampil `UNAVAILABLE`.
-- Nilai DoA dan Angular hanya tampil selama `FRESH`. `FRESH` menjadi `STALE` bila halaman tidak membaca state v2 baru selama 5 detik.
-- Untuk menerima Angular live, atur `require_ground_receipt_for_bulk=false` secara terpisah pada Edge. MQTT v2 tidak mengubah HTTP Data Out, publication gate, atau simulasi Dashboard.
+- Kartu **Node** berisi nilai terakhir yang diterima, per bagian: Sesi (`sid`, `cfg`, run, profile, clock dari `state`), Health (segar 8 detik), Detail health, DoA (`LIVE` hanya untuk `ok=1` dengan health segar `daq=1`), DoA RAW (`ok=0`, selalu `UNVERIFIED`), DoA doa.xml (diagnostik), Angular (`LIVE` hanya untuk `flags=63`), Kandidat Angular (trust-only atau diagnostik, `UNVERIFIED`, dengan alasannya), Kapabilitas, Ketersediaan, dan Settings (hanya setelah `config.get`; teks `settings.json` tetap di server). Pesan yang ditolak tidak pernah masuk kartu ini.
+- Kartu **ACK** menampilkan ACK terakhir per perintah dengan status jurnal edge, tag `FINAL`, dan kode error edge (sampai 64 karakter, misalnya `CENTER_CHANGE_REQUIRES_VFO0_TARGET`). `challenge` dari ACK prepare tidak disimpan.
+- Tabel topik menampilkan count, status pesan terakhir (`LIVE`, `UNVERIFIED`, `FRESH`, `CONTEXT`, `STALE`, `INCONSISTENT`, `IGNORED`, `INVALID`, `UNAVAILABLE` bila belum pernah diterima, atau `CLEARED` bila publisher menghapus nilai retained), umur, RETAINED/LIVE, ringkasan field, dan kode penolakan beserta nama field (misalnya `INVALID_FIELD a`).
+- Nilai arah DoA dan Angular (`a`, `raw_doa_deg`, `peak_index`), di tabel topik maupun kartu Node, hanya tampil selama `LIVE` atau `UNVERIFIED`; selain itu tertulis "nilai disembunyikan". Tiap topik Angular menjadi `STALE` 10 detik setelah waktu sumber frame terakhirnya sendiri. `LIVE`, `UNVERIFIED`, dan `FRESH` menjadi `STALE` bila halaman tidak membaca state baru selama 5 detik.
+- `IGNORED NO_SESSION` berarti `state` belum diterima; edge mengirimnya retained dan paling lambat tiap 60 detik. `STALE SOURCE_TIMESTAMP_NOT_FRESH` di semua telemetry biasanya berarti jam Raspberry dan groundstation berbeda lebih dari batasnya; periksa sinkronisasi jam.
+- Dashboard memakai DoA LIVE, Angular LIVE, dan health dari sini selama MQTT segar (lihat [Sumber data Dashboard](#sumber-data-dashboard)); publication gate dan simulasi Dashboard tidak berubah.
 
 Broker TLS, PPP/T900, dan MQTT production tidak disiapkan oleh quickstart ini. Contoh payload dan fixture lokal bukan bukti kompatibilitas perangkat atau acceptance hardware.
 
