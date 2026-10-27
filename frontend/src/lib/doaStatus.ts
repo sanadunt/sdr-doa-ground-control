@@ -1,6 +1,6 @@
 import type { Candidate, TelemetrySnapshot, Tone } from '../types';
 import type { MessageKey } from './i18n';
-import { adcOverdriven, candidate, completeVector, daqFailed, daqUnknown, doaDataReady, freshCandidate, nativeViewsReady, nodeStalled, parsedCandidate } from './telemetry';
+import { adcOverdriveUnknown, adcOverdriven, candidate, completeVector, daqFailed, daqUnknown, doaDataReady, freshCandidate, nativeViewsReady, nodeStalled, parsedCandidate } from './telemetry';
 import { isMqttSnapshot, mqttDoaUnverified } from './telemetrySource';
 
 /** Why the DoA curve and bearing are, or are not, shown. */
@@ -11,6 +11,7 @@ export type DoaStatusReason =
   | 'daqDegraded'
   | 'daqUnknown'
   | 'adcOverdrive'
+  | 'adcUnknown'
   | 'conflict'
   | 'statusUnavailable'
   | 'viewMissing'
@@ -54,7 +55,9 @@ export function doaDrawable(snapshot: TelemetrySnapshot | null | undefined, loca
  *
  * A live record from a DAQ that is not synchronized or whose sync state is
  * unknown, or from an overdriven ADC, is not shown: the array phases may not
- * be coherent, so a drawn bearing would look meaningful when it is not.
+ * be coherent, so a drawn bearing would look meaningful when it is not. An
+ * MQTT answer whose overdrive is unknown (no light Data Out read in 65 s) is
+ * shown as DEGRADED with that cause.
  */
 export function doaStatus(snapshot: TelemetrySnapshot | null | undefined, localFresh: boolean, drawable: boolean): DoaStatus {
   if (!snapshot) return { code: 'WAITING', tone: 'neutral', reason: 'waiting', shown: false };
@@ -69,7 +72,12 @@ export function doaStatus(snapshot: TelemetrySnapshot | null | undefined, localF
   if (daqFailed(snapshot)) return blocked('DEGRADED', 'daqDegraded');
   if (daqUnknown(snapshot)) return blocked('DEGRADED', 'daqUnknown');
   if (adcOverdriven(snapshot)) return blocked('DEGRADED', 'adcOverdrive');
-  if (drawable && localFresh) return { code: 'AVAILABLE', tone: 'good', reason: 'available', shown: true };
+  if (drawable && localFresh) {
+    // MQTT stays the source while Data Out is unreachable, so an unknown
+    // overdrive does not hide the bearing; it is shown DEGRADED with the cause.
+    if (adcOverdriveUnknown(snapshot)) return { code: 'DEGRADED', tone: 'warn', reason: 'adcUnknown', shown: true };
+    return { code: 'AVAILABLE', tone: 'good', reason: 'available', shown: true };
+  }
   if (isMqttSnapshot(snapshot)) {
     // One view from MQTT: the LIVE DoA (ok=1), shown with or without its
     // Angular frame. An UNVERIFIED DoA (ok=0) is a diagnostic and never shown.
@@ -108,6 +116,7 @@ const STATUS_TEXT: Record<DoaStatusReason, MessageKey> = {
   daqDegraded: 'polar.daqDegraded',
   daqUnknown: 'polar.daqUnknown',
   adcOverdrive: 'polar.adcOverdrive',
+  adcUnknown: 'polar.adcUnknown',
   conflict: 'polar.conflict',
   statusUnavailable: 'polar.statusUnavailable',
   viewMissing: 'polar.viewMissing',
@@ -152,6 +161,7 @@ const ACTIONABLE_GATE_REASONS = [
   'MQTT_DOA_ANGULAR_CONFLICT',
   'DAQ_HEALTH_GATE_FAILED',
   'ADC_OVERDRIVE',
+  'ADC_OVERDRIVE_UNKNOWN',
   'COLLECTION_DEADLINE_EXCEEDED',
   'NO_VALID_DOA_CANDIDATE',
   'MQTT_NO_DOA',

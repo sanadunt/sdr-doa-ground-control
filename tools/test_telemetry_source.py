@@ -371,7 +371,9 @@ class MqttSnapshotTests(unittest.TestCase):
         # The observation boundary holds: never LIVE, never READY.
         self.assertEqual(snapshot["overall_state"], "UNVERIFIED")
         self.assertEqual(snapshot["publication_gate"]["state"], "BLOCKED")
-        self.assertEqual(snapshot["publication_gate"]["reasons"], ["GROUND_CLOCK_UNVERIFIED", *STANDING])
+        # Without a light read the ADC overdrive is unknown, and the gate says so.
+        self.assertEqual(snapshot["publication_gate"]["reasons"], ["GROUND_CLOCK_UNVERIFIED", "ADC_OVERDRIVE_UNKNOWN", *STANDING])
+        self.assertIsNone(snapshot["publication_gate"]["checks"]["adc_not_overdriven"])
         self.assertEqual(snapshot["authority"]["selected"], None)
         self.assertEqual(snapshot["collector"]["clock_source"], "remote_unverified")
         self.assertEqual(snapshot["collector"]["authority_config"], "none")
@@ -569,15 +571,19 @@ class MqttSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["data_out_light"]["xml"]["available"], True)
         self.assertEqual(snapshot["data_out_light"]["age_ms"], 2_000)
         self.assertEqual(snapshot["signal_quality"]["adc_overdrive"], False)
+        self.assertNotIn("ADC_OVERDRIVE_UNKNOWN", snapshot["publication_gate"]["reasons"])
         self.assertEqual(snapshot["collection"]["settings_reused"], False)
         self.assertGreaterEqual(snapshot["collection"]["settings_age_ms"], 2_000)
         overdriven = build(self.edge, light_result(overdrive="True"), light_age_ms=2_000)
         self.assertEqual(overdriven["overall_state"], "DEGRADED")
         self.assertIs(overdriven["publication_gate"]["checks"]["adc_not_overdriven"], False)
-        # An old light read no longer decides the overdrive.
+        self.assertIn("ADC_OVERDRIVE", overdriven["publication_gate"]["reasons"])
+        self.assertNotIn("ADC_OVERDRIVE_UNKNOWN", overdriven["publication_gate"]["reasons"])
+        # An old light read no longer decides the overdrive: it is unknown.
         old = build(self.edge, light_result(overdrive="True"), light_age_ms=ts.LIGHT_VALUES_MAX_AGE_MS + 1)
         self.assertEqual(old["overall_state"], "UNVERIFIED")
         self.assertIsNone(old["publication_gate"]["checks"]["adc_not_overdriven"])
+        self.assertIn("ADC_OVERDRIVE_UNKNOWN", old["publication_gate"]["reasons"])
         # Nor anything else of it: settings, gps_status, position and resources
         # answer as not read, so an old centre or LOCATION never looks current.
         old = build(self.edge, light_result(gps="Fixed"), light_age_ms=ts.LIGHT_VALUES_MAX_AGE_MS + 1)

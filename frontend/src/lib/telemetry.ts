@@ -136,6 +136,16 @@ export function adcOverdriven(snapshot: TelemetrySnapshot | null | undefined): b
   return snapshot?.publication_gate?.checks?.adc_not_overdriven === false;
 }
 
+/**
+ * An MQTT answer without a current light Data Out read: MQTT never carries
+ * the ADC overdrive and the edge's ok=1 does not weigh it, so the console
+ * cannot rule it out (ADC_OVERDRIVE_UNKNOWN). A Data Out answer reads it on
+ * every collection.
+ */
+export function adcOverdriveUnknown(snapshot: TelemetrySnapshot | null | undefined): boolean {
+  return isMqttSnapshot(snapshot) && typeof snapshot?.publication_gate?.checks?.adc_not_overdriven !== 'boolean';
+}
+
 /** The collector saw the node's status timestamp, uptime or frame index stop advancing. */
 export function nodeStalled(snapshot: TelemetrySnapshot | null | undefined): boolean {
   if (!snapshot) return false;

@@ -207,8 +207,23 @@ describe('MQTT first, Data Out as the fallback', () => {
   it('keeps showing the DoA with the MQTT badge when Data Out is dead', () => {
     const snapshot = answer('mqtt-data-out-dead.json');
     expect(snapshot.data_out_light?.status).toMatchObject({ available: false });
-    expect(overviewDoaStatus(snapshot, true)).toMatchObject({ code: 'AVAILABLE', shown: true });
+    // MQTT never carries the ADC overdrive: without a light read it is
+    // unknown, so the bearing is shown DEGRADED with that cause.
+    expect(snapshot.publication_gate?.reasons).toContain('ADC_OVERDRIVE_UNKNOWN');
+    expect(overviewDoaStatus(snapshot, true)).toMatchObject({ code: 'DEGRADED', reason: 'adcUnknown', shown: true });
     expect(strip(snapshot).Source.value).toBe('MQTT');
+    expect(strip(snapshot).DoA.value).toBe('DEGRADED');
+    for (const lang of ['en', 'id'] as const) {
+      const markup = hud(snapshot, lang);
+      expect(markup).toContain('212.0');
+      expect(markup).toContain(`<p class="ov-hud-held">${translate(lang, 'polar.adcUnknown')}</p>`);
+      expect(gateReasonLabel(lang, 'ADC_OVERDRIVE_UNKNOWN')).not.toBe('ADC_OVERDRIVE_UNKNOWN');
+    }
+    expect(actionableGateReasons(snapshot.publication_gate!.reasons)[0]).toBe('ADC_OVERDRIVE_UNKNOWN');
+    // With a current light read the overdrive is known and the DoA is AVAILABLE.
+    expect(overviewDoaStatus(answer('mqtt-live.json'), true)).toMatchObject({ code: 'AVAILABLE', shown: true });
+    // A Data Out answer without an overdrive verdict is unchanged.
+    expect(overviewDoaStatus(dataOut(), true)).toMatchObject({ code: 'AVAILABLE', shown: true });
     expect(hud(snapshot)).toContain('<span class="ov-tag tone-good">MQTT</span>');
     // No settings and no position, but no "no fix" either: a held position stays.
     expect(nodeFrequencies(snapshot, true)).toBeNull();

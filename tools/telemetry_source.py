@@ -61,7 +61,11 @@ The mapping, with its evidence in the edge's code (commit 8691ad0):
 MQTT never carries the station position, the settings fields or the ADC
 overdrive; the light Data Out read (``sdr_doa_collector.collect_light``)
 does, and ``DataOutReader`` decides when it runs. All of it counts for
-``LIGHT_VALUES_MAX_AGE_MS`` after the read and is left out once older.
+``LIGHT_VALUES_MAX_AGE_MS`` after the read and is left out once older. So
+the overdrive verdict is at most one light interval (30 s) old; without a
+current read (not read yet, failed, expired) it is unknown and the gate says
+``ADC_OVERDRIVE_UNKNOWN``, which the Dashboard shows as DEGRADED with the
+bearing still drawn: MQTT stays the source while Data Out is unreachable.
 """
 
 from __future__ import annotations
@@ -106,8 +110,13 @@ MQTT_DOA_UNVERIFIED = "MQTT_DOA_UNVERIFIED"
 MQTT_ANGLE_CONVENTION_UNKNOWN = "MQTT_ANGLE_CONVENTION_UNKNOWN"
 MQTT_ANGULAR_UNAVAILABLE = "MQTT_ANGULAR_UNAVAILABLE"
 MQTT_DOA_ANGULAR_CONFLICT = "MQTT_DOA_ANGULAR_CONFLICT"
+# MQTT never carries the ADC overdrive and the edge's ok=1 does not weigh it
+# (source.view at 8691ad0 has no overdrive reason): without a current light
+# read the console cannot say the record is not from an overdriven ADC.
+ADC_OVERDRIVE_UNKNOWN = "ADC_OVERDRIVE_UNKNOWN"
 MQTT_GATE_REASONS = (
     MQTT_NO_DOA, MQTT_DOA_UNVERIFIED, MQTT_ANGLE_CONVENTION_UNKNOWN, MQTT_ANGULAR_UNAVAILABLE, MQTT_DOA_ANGULAR_CONFLICT,
+    ADC_OVERDRIVE_UNKNOWN,
 )
 
 # capabilities.angle values of the edge (config.validate_config).
@@ -600,6 +609,8 @@ def _overall_and_gate(
     reasons: List[str] = ["GROUND_CLOCK_UNVERIFIED"]
     if overdrive is True:
         reasons.append("ADC_OVERDRIVE")
+    elif overdrive is None:
+        reasons.append(ADC_OVERDRIVE_UNKNOWN)
     if candidate.get("available") is not True:
         reasons.append(MQTT_DOA_UNVERIFIED if unverified_current else MQTT_NO_DOA)
     else:
