@@ -1,4 +1,4 @@
-> Arsip audit-006. Bagian 1–6 di bawah adalah teks laporan audit fungsional 2026-10-12 yang disalin utuh, termasuk nomor baris dan commit (`c474aa8`) yang dirujuknya. Bagian 7 ditambahkan 2026-10-13 dan mencatat status perbaikan per temuan.
+> Arsip audit-006. Bagian 1–6 di bawah adalah teks laporan audit fungsional 2026-10-12 yang disalin utuh, termasuk nomor baris dan commit (`c474aa8`) yang dirujuknya. Bagian 7 ditambahkan 2026-10-13 dan mencatat status perbaikan per temuan. Di 3.0.0 (`CHANGELOG.md`) string topik lama ditulis sebagai `<topik lama>`, dan monitor topik lama, agent edge staging, klien MQTT stdlib serta penerbit sintetis yang dirujuk beberapa temuan dihapus dari repository.
 
 # Laporan Audit Fungsional SDR-DoA Ground Console
 
@@ -569,7 +569,7 @@ Status verifikasi: semua 147 cluster dari putaran audit berstatus terkonfirmasi 
 - Lokasi: `frontend/src/pages/MessageMonitorPage.tsx:94`, `tools/sdr_doa_mqtt_monitor.py:336-341`, `tools/sdr_doa_mqtt_monitor.py:383`
 - Masalah: Backend menghitung `topic_counts` per topic lengkap, sedangkan UI mencarinya per kind (`topic_counts[kind]`). Kuncinya tidak pernah cocok.
 - Dampak: Hitungan per jenis pesan, tujuan utama panel Kind counters, tidak pernah tampil, sehingga operator tidak bisa melihat laju atau stream mana yang datang.
-- Bukti: Baris `doa | N/A | VALID …` sementara `/api/mqtt` berisi `{"sdr/v1/uav-01/telemetry/doa": 4, …}`.
+- Bukti: Baris `doa | N/A | VALID …` sementara `/api/mqtt` berisi `{"<topik lama>/telemetry/doa": 4, …}`.
 - Perbaikan: Ekspos `kind_counts` dari backend, atau agregasikan per `_kind_for_topic` sebelum dirender.
 
 #### AUD-46 — Tampilan record terdekode meredaksi flag `valid`/`doa_valid`/`settings_valid`, sementara baris menampilkan badge VALID hijau

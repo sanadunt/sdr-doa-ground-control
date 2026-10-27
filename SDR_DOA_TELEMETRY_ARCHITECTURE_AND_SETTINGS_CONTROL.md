@@ -381,18 +381,20 @@ Jangan mengirim 360 angular values pada setiap frame. Frequency spectrum dan ang
 
 Gunakan namespace versioned dan identitas UAV yang stabil:
 
+> Catatan 3.0.0: topik di bawah adalah topik lama, yang dihapus dari console di 3.0.0 (`CHANGELOG.md`, `docs/KEPUTUSAN_MQTT.md`) dan ditulis di sini sebagai `<topik lama>`. Kontrak yang berlaku adalah RDF Node edge dengan root `sdr/v2/uav-01` (`docs/MQTT_KONTRAK.md`).
+
 ```text
-sdr/v1/uav-01/telemetry/doa
-sdr/v1/uav-01/telemetry/nav
-sdr/v1/uav-01/telemetry/health
-sdr/v1/uav-01/telemetry/angular
-sdr/v1/uav-01/telemetry/spectrum
-sdr/v1/uav-01/state
-sdr/v1/uav-01/config/reported
-sdr/v1/uav-01/cmd/config/patch
-sdr/v1/uav-01/cmd/config/get
-sdr/v1/uav-01/ack/config
-sdr/v1/uav-01/ack/request
+<topik lama>/telemetry/doa
+<topik lama>/telemetry/nav
+<topik lama>/telemetry/health
+<topik lama>/telemetry/angular
+<topik lama>/telemetry/spectrum
+<topik lama>/state
+<topik lama>/config/reported
+<topik lama>/cmd/config/patch
+<topik lama>/cmd/config/get
+<topik lama>/ack/config
+<topik lama>/ack/request
 ```
 
 ### QoS dan retain

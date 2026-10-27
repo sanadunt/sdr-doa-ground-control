@@ -142,18 +142,20 @@ default OFF
 
 Namespace dapat memakai versioning sejak awal:
 
+> Catatan 3.0.0: topik di bawah adalah topik lama, yang dihapus dari console di 3.0.0 (`CHANGELOG.md`, `docs/KEPUTUSAN_MQTT.md`) dan ditulis di sini sebagai `<topik lama>`. Kontrak yang berlaku adalah RDF Node edge dengan root `sdr/v2/uav-01` (`docs/MQTT_KONTRAK.md`).
+
 ```text
-sdr/v1/uav-01/telemetry/doa
-sdr/v1/uav-01/telemetry/nav
-sdr/v1/uav-01/telemetry/health
-sdr/v1/uav-01/state
-sdr/v1/uav-01/telemetry/doa360
-sdr/v1/uav-01/telemetry/spectrum
-sdr/v1/uav-01/cmd/#
-sdr/v1/uav-01/ack/#
+<topik lama>/telemetry/doa
+<topik lama>/telemetry/nav
+<topik lama>/telemetry/health
+<topik lama>/state
+<topik lama>/telemetry/doa360
+<topik lama>/telemetry/spectrum
+<topik lama>/cmd/#
+<topik lama>/ack/#
 ```
 
-Jika ingin menjaga topic yang sudah ada di dokumentasi, alias tanpa `/v1/uav-01` dapat dipakai selama schema version tetap ada di payload. Jangan mengirim identitas station berulang pada telemetry cepat jika identitas sudah terwakili oleh topic.
+Jika ingin menjaga topic yang sudah ada di dokumentasi, alias tanpa versi dan id UAV dapat dipakai selama schema version tetap ada di payload. Jangan mengirim identitas station berulang pada telemetry cepat jika identitas sudah terwakili oleh topic.
 
 ### 4.1 DoA compact JSON — default prototype
 
