@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Kontrol's RDF Node commands: envelope, field rules and command states.
 
-``tools/fixtures/rdf-node/commands.json`` was written by
+``tools/fixtures/rdf-node/commands.<commit>.json`` were written by
 ``tools/fixtures/rdf-node/make_fixtures.py --set commands``: every
-``config.get`` and ``config.patch`` envelope in it was built by
+``config.get`` and ``config.patch`` envelope in them was built by
 ``rdf_node_commands`` and handed to the RDF Node edge's own
-``CommandManager.submit`` (commit 8691ad0) on the topic the console publishes
-to, with the edge's root helper writing a scratch ``settings.json``; the ACKs
-and settings report are what the edge answered. These tests rebuild each
+``CommandManager.submit`` on the topic the console publishes to, with the
+edge's root helper writing a scratch ``settings.json``; the ACKs and settings
+report are what the edge answered. ``8691ad0`` is the release installed on the
+Raspberry, which answers ``config.get`` only over TLS; ``35984d8`` also answers
+it over a plaintext link to the primary broker. The console sends the same
+bytes to both. These tests rebuild each
 envelope from the same inputs and require the same bytes, so a change to the
 builder fails here until the edge has judged the new envelope again (the
 console never imports edge code). They also check that every case the console
@@ -39,7 +42,17 @@ from config_command_tracker import (  # noqa: E402
 from rdf_node_mqtt_v2 import ACK_FINAL_STATUSES, RdfNodeV2Telemetry  # noqa: E402
 
 FIXTURES = TOOLS_DIR / "fixtures" / "rdf-node"
-COMMANDS = json.loads((FIXTURES / "commands.json").read_text(encoding="utf-8"))
+EDGE_SETS = {
+    commit: json.loads((FIXTURES / f"commands.{commit}.json").read_text(encoding="utf-8"))
+    for commit in ("8691ad0", "35984d8")
+}
+# The installed edge release; the tracker tests below drive its ACKs.
+COMMANDS = EDGE_SETS["8691ad0"]
+# config.get over a plaintext link to the primary broker, by edge commit.
+PLAINTEXT_CONFIG_GET = {
+    "8691ad0": ("REJECTED", "TLS_REQUIRED_FOR_SETTINGS_REPORT"),
+    "35984d8": ("APPLIED", None),
+}
 CASES = {case["name"]: case for case in COMMANDS["cases"]}
 NODE = COMMANDS["node_id"]
 STATE = json.loads(COMMANDS["session"]["state"])
@@ -59,54 +72,70 @@ def rebuild(case: Dict[str, Any]) -> bytes:
 
 
 class EdgeJudgedEnvelopeTests(unittest.TestCase):
-    def test_fixture_comes_from_the_installed_edge_release(self) -> None:
-        self.assertEqual(COMMANDS["edge_commit"], "8691ad0")
+    def test_fixtures_come_from_the_installed_release_and_the_newer_edge(self) -> None:
+        for commit, fixture in EDGE_SETS.items():
+            with self.subTest(edge=commit):
+                self.assertEqual(fixture["edge_commit"], commit)
+                self.assertEqual(fixture["node_id"], "uav-01")
+                self.assertEqual([case["name"] for case in fixture["cases"]], [case["name"] for case in COMMANDS["cases"]])
         self.assertEqual(NODE, "uav-01")
         self.assertGreaterEqual(len(CASES), 15)
 
     def test_every_envelope_the_console_sends_is_the_one_the_edge_judged(self) -> None:
-        accepted = [case for case in COMMANDS["cases"] if case["console"]["accepted"]]
-        self.assertEqual({case["op"] for case in accepted}, {cmds.OP_CONFIG_GET, cmds.OP_CONFIG_PATCH})
-        for case in accepted:
-            with self.subTest(case=case["name"]):
-                self.assertEqual(rebuild(case), case["console"]["payload"].encode("utf-8"))
-                self.assertEqual(case["console"]["topic"], cmds.command_topic(NODE, case["op"]))
-                self.assertEqual((case["console"]["qos"], case["console"]["retain"]), (1, False))
-                sent = json.loads(case["console"]["payload"])
-                self.assertEqual(sent["expires_ms"] - sent["issued_ms"], cmds.COMMAND_TTL_MS)
-                self.assertEqual((sent["sid"], sent["boot"]), (SESSION["sid"], SESSION["boot"]))
+        for commit, fixture in EDGE_SETS.items():
+            state = json.loads(fixture["session"]["state"])
+            accepted = [case for case in fixture["cases"] if case["console"]["accepted"]]
+            self.assertEqual({case["op"] for case in accepted}, {cmds.OP_CONFIG_GET, cmds.OP_CONFIG_PATCH})
+            for case in accepted:
+                with self.subTest(edge=commit, case=case["name"]):
+                    self.assertEqual(rebuild(case), case["console"]["payload"].encode("utf-8"))
+                    self.assertEqual(case["console"]["topic"], cmds.command_topic(NODE, case["op"]))
+                    self.assertEqual((case["console"]["qos"], case["console"]["retain"]), (1, False))
+                    sent = json.loads(case["console"]["payload"])
+                    self.assertEqual(sent["expires_ms"] - sent["issued_ms"], cmds.COMMAND_TTL_MS)
+                    self.assertEqual((sent["sid"], sent["boot"]), (state["sid"], state["boot"]))
 
     def test_the_edge_accepted_what_the_console_accepts(self) -> None:
-        expected = {
-            "config-get": ("APPLIED", None),
-            "config-get-tls-off": ("REJECTED", "TLS_REQUIRED_FOR_SETTINGS_REPORT"),
-            "retune": ("APPLIED", None),
-            "gain": ("APPLIED", None),
-            "vfo-only": ("APPLIED", None),
-            "bandwidth-squelch": ("PERSISTED_UNVERIFIED", None),
-            # The console's own base_rev check would refuse it; the edge does too.
-            "stale-base-rev": ("REJECTED", "CONFIG_REVISION_CONFLICT"),
-        }
-        for name, (status, error) in expected.items():
-            with self.subTest(case=name):
-                case = CASES[name]
-                self.assertIs(case["console"]["accepted"], True)
-                final = json.loads(case["edge"]["acks"][-1]["payload"])
-                self.assertEqual((final["status"], final["result"].get("error")), (status, error))
-                for ack in case["edge"]["acks"]:
-                    self.assertEqual((ack["qos"], ack["retain"], ack["expiry_s"]), (1, False, 30))
-                    self.assertEqual(json.loads(ack["payload"])["id"], json.loads(case["console"]["payload"])["id"])
-        retune = json.loads(CASES["retune"]["edge"]["acks"][-1]["payload"])
-        self.assertEqual(retune["result"]["proof"], {
-            "center_frequency_hz": "FRESH_DAQ_RF_CENTER", "vfo0_frequency_hz": "FRESH_DOA_FREQUENCY",
-        })
-        # A patch is ACCEPTED first; APPLYING and VERIFYING stay in the edge's journal.
-        self.assertEqual(
-            [json.loads(ack["payload"])["status"] for ack in CASES["retune"]["edge"]["acks"]], ["ACCEPTED", "APPLIED"],
-        )
-        report = json.loads(CASES["config-get"]["edge"]["settings_reported"])
-        self.assertEqual(report["id"], json.loads(CASES["config-get"]["console"]["payload"])["id"])
-        self.assertIsNone(CASES["config-get-tls-off"]["edge"]["settings_reported"])
+        for commit, fixture in EDGE_SETS.items():
+            cases = {case["name"]: case for case in fixture["cases"]}
+            expected = {
+                "config-get": ("APPLIED", None),
+                "config-get-tls-off": PLAINTEXT_CONFIG_GET[commit],
+                "retune": ("APPLIED", None),
+                "gain": ("APPLIED", None),
+                "vfo-only": ("APPLIED", None),
+                "bandwidth-squelch": ("PERSISTED_UNVERIFIED", None),
+                # The console's own base_rev check would refuse it; the edge does too.
+                "stale-base-rev": ("REJECTED", "CONFIG_REVISION_CONFLICT"),
+            }
+            for name, (status, error) in expected.items():
+                with self.subTest(edge=commit, case=name):
+                    case = cases[name]
+                    self.assertIs(case["console"]["accepted"], True)
+                    final = json.loads(case["edge"]["acks"][-1]["payload"])
+                    self.assertEqual((final["status"], final["result"].get("error")), (status, error))
+                    for ack in case["edge"]["acks"]:
+                        self.assertEqual((ack["qos"], ack["retain"], ack["expiry_s"]), (1, False, 30))
+                        self.assertEqual(json.loads(ack["payload"])["id"], json.loads(case["console"]["payload"])["id"])
+            with self.subTest(edge=commit, case="retune proof"):
+                retune = json.loads(cases["retune"]["edge"]["acks"][-1]["payload"])
+                self.assertEqual(retune["result"]["proof"], {
+                    "center_frequency_hz": "FRESH_DAQ_RF_CENTER", "vfo0_frequency_hz": "FRESH_DOA_FREQUENCY",
+                })
+                # A patch is ACCEPTED first; APPLYING and VERIFYING stay in the edge's journal.
+                self.assertEqual(
+                    [json.loads(ack["payload"])["status"] for ack in cases["retune"]["edge"]["acks"]],
+                    ["ACCEPTED", "APPLIED"],
+                )
+            for name in ("config-get", "config-get-tls-off"):
+                with self.subTest(edge=commit, case=name + " report"):
+                    raw_report = cases[name]["edge"]["settings_reported"]
+                    if PLAINTEXT_CONFIG_GET[commit][0] != "APPLIED" and name == "config-get-tls-off":
+                        self.assertIsNone(raw_report)
+                        continue
+                    report = json.loads(raw_report)
+                    self.assertEqual(report["id"], json.loads(cases[name]["console"]["payload"])["id"])
+                    self.assertEqual(set(report), {"v", "sid", "boot", "id", "rev", "t", "settings_json"})
 
     def test_cases_the_console_refuses_are_refused_by_the_edge_for_the_same_rule(self) -> None:
         # The console's code, then what the edge's helper or submit() answered.
@@ -120,17 +149,19 @@ class EdgeJudgedEnvelopeTests(unittest.TestCase):
             "squelch-too-high": ("VALUE_OUT_OF_RANGE", "FAILED", "NUMBER_OUT_OF_RANGE"),
             "old-field-name": ("FIELD_NOT_ALLOWED", "REJECTED", "INVALID_PATCH"),
         }
-        refused = {case["name"] for case in COMMANDS["cases"] if not case["console"]["accepted"]}
-        self.assertEqual(refused, set(expected))
-        for name, (code, status, error) in expected.items():
-            with self.subTest(case=name):
-                case = CASES[name]
-                with self.assertRaises(cmds.CommandRefused) as raised:
-                    cmds.validate_patch_changes(case["changes"])
-                self.assertEqual(raised.exception.code, code)
-                self.assertEqual(case["console"]["code"], code)
-                final = json.loads(case["edge"]["acks"][-1]["payload"])
-                self.assertEqual((final["status"], final["result"].get("error")), (status, error))
+        for commit, fixture in EDGE_SETS.items():
+            cases = {case["name"]: case for case in fixture["cases"]}
+            refused = {case["name"] for case in fixture["cases"] if not case["console"]["accepted"]}
+            self.assertEqual(refused, set(expected))
+            for name, (code, status, error) in expected.items():
+                with self.subTest(edge=commit, case=name):
+                    case = cases[name]
+                    with self.assertRaises(cmds.CommandRefused) as raised:
+                        cmds.validate_patch_changes(case["changes"])
+                    self.assertEqual(raised.exception.code, code)
+                    self.assertEqual(case["console"]["code"], code)
+                    final = json.loads(case["edge"]["acks"][-1]["payload"])
+                    self.assertEqual((final["status"], final["result"].get("error")), (status, error))
 
 
 class EnvelopeTests(unittest.TestCase):
@@ -253,12 +284,12 @@ class EnvelopeTests(unittest.TestCase):
 class FakeObservingMonitor:
     """Feeds the edge's ACKs through the real store, as the MQTT monitor does."""
 
-    def __init__(self) -> None:
+    def __init__(self, fixture: Dict[str, Any] = COMMANDS) -> None:
         self.store = RdfNodeV2Telemetry(NODE)
         self.store.on_accepted = self.accepted
         self.records: Dict[str, Dict[str, Any]] = {}
-        self.clock = STATE["t"]
-        self.store.ingest(f"sdr/v2/{NODE}/state", COMMANDS["session"]["state"].encode(), qos=1, retained=True,
+        self.clock = json.loads(fixture["session"]["state"])["t"]
+        self.store.ingest(f"sdr/v2/{NODE}/state", fixture["session"]["state"].encode(), qos=1, retained=True,
                           received_at_ms=self.clock)
 
     def published(self, command_id: str) -> None:
@@ -411,6 +442,33 @@ class TrackerTests(unittest.TestCase):
         self.monitor.deliver("ack/config", json.dumps(dict(json.loads(applied["payload"]), id=silent_copy["id"])))
         self.clock[0] = silent_copy["issued_ms"] + SETTINGS_REPORT_WAIT_MS + 1
         self.assertEqual(self.status(silent_copy["id"])["state"], "no_report")
+
+    def test_config_get_over_a_plaintext_primary_link_by_edge_commit(self) -> None:
+        # 8691ad0 (installed) refuses it, so Kontrol keeps the Data Out values;
+        # 35984d8 answers with settings/reported, which Kontrol then uses.
+        for commit, fixture in EDGE_SETS.items():
+            with self.subTest(edge=commit):
+                monitor = FakeObservingMonitor(fixture)
+                tracker = ConfigCommandTracker(clock_ms=lambda: monitor.clock)
+                case = {item["name"]: item for item in fixture["cases"]}["config-get-tls-off"]
+                command = json.loads(case["console"]["payload"])
+                monitor.published(command["id"])
+                tracker.record(command, monitor, topic=case["console"]["topic"], published_at_ms=command["issued_ms"])
+                monitor.store.expect_settings_report(command["id"], monitor.clock)
+                for ack in case["edge"]["acks"]:
+                    monitor.deliver("ack/config", ack["payload"])
+                if case["edge"]["settings_reported"] is not None:
+                    monitor.deliver("settings/reported", case["edge"]["settings_reported"])
+                done = tracker.status(command["id"], monitor)
+                report = monitor.store.settings_report()
+                if PLAINTEXT_CONFIG_GET[commit][0] == "APPLIED":
+                    self.assertEqual((done["state"], done["final"], done["ack"]["status"]), ("reported", True, "APPLIED"))
+                    self.assertEqual(report["id"], command["id"])
+                    self.assertIs(report["matches_state_cfg"], True)
+                    self.assertTrue(report["safe_settings"])
+                else:
+                    self.assertEqual((done["state"], done["ack"]["error"]), ("acked", "TLS_REQUIRED_FOR_SETTINGS_REPORT"))
+                    self.assertIsNone(report)
 
     def test_publish_failures_and_failed_pubacks(self) -> None:
         command = json.loads(CASES["gain"]["console"]["payload"])

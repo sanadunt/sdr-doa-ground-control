@@ -7,7 +7,7 @@ dry-run preview, the capabilities flags, the admin password default and the
 login throttle. Every server runs on loopback with temporary state and a fake
 monitor, so no broker or Raspberry is contacted. The end-to-end tests drive
 the real MqttMonitor through the fake paho client of test_sdr_doa_mqtt_monitor
-with the edge's own payloads from tools/fixtures/rdf-node/commands.json.
+with the edge's own payloads from tools/fixtures/rdf-node/commands.<commit>.json.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ from config_command_tracker import FINAL_ACK_WAIT_MS, NO_ACK_GRACE_MS, SETTINGS_
 
 BASE_URL = "http://doasdr.local:8081"
 PASSWORD = "config-patch-test-password"
-COMMANDS = json.loads((TOOLS_DIR / "fixtures" / "rdf-node" / "commands.json").read_text(encoding="utf-8"))
+COMMANDS = json.loads((TOOLS_DIR / "fixtures" / "rdf-node" / "commands.8691ad0.json").read_text(encoding="utf-8"))
 CASES = {case["name"]: case for case in COMMANDS["cases"]}
 STATE = json.loads(COMMANDS["session"]["state"])
 NODE = COMMANDS["node_id"]
@@ -1019,7 +1019,8 @@ class ConfigPatchServerTests(unittest.TestCase):
 class RealMonitorEndToEndTests(unittest.TestCase):
     """The real MqttMonitor behind the HTTP routes, with a fake paho client.
 
-    The node's messages are the edge's own (commands.json), with the id of
+    The node's messages are the edge's own (commands.8691ad0.json, and
+    commands.35984d8.json for the newer edge's plaintext config.get), with the id of
     the command this console published put in, and fresh times.
     """
 
@@ -1141,6 +1142,45 @@ class RealMonitorEndToEndTests(unittest.TestCase):
         self.deliver("settings/reported", other)
         self.assertEqual(self.request("GET", "/api/mqtt/config-reported")[2]["settings"]["id"], command["id"])
 
+    def plaintext_config_get(self, commit: str) -> Dict[str, Any]:
+        """config.get over a plaintext link to the primary broker, answered as edge ``commit`` did."""
+        fixture = json.loads((TOOLS_DIR / "fixtures" / "rdf-node" / f"commands.{commit}.json").read_text(encoding="utf-8"))
+        state = json.loads(fixture["session"]["state"])
+        case = {item["name"]: item for item in fixture["cases"]}["config-get-tls-off"]
+        cookie = self.cookie()
+        self.deliver("state", fixture["session"]["state"].encode("utf-8"), retained=True)
+        status, _headers, sent = self.request("POST", "/api/mqtt/config-get", {}, cookie=cookie)
+        self.assertEqual(status, 202, sent)
+        command = json.loads(self.client.publish_calls[-1][0][1].decode("utf-8"))
+        self.assertEqual((command["sid"], command["base_rev"]), (state["sid"], state["cfg"]))
+        self.client.on_publish(self.client, None, self.client.mid, types.SimpleNamespace(value=0), None)
+        for ack in case["edge"]["acks"]:
+            self.deliver("ack/config", dict(json.loads(ack["payload"]), id=command["id"], t=_now_ms()))
+        if case["edge"]["settings_reported"] is not None:
+            report = dict(json.loads(case["edge"]["settings_reported"]), id=command["id"], t=_now_ms())
+            self.deliver("settings/reported", report)
+        reported = self.request("GET", "/api/mqtt/config-reported")[2]
+        self.assertEqual(reported["base_rev"], state["cfg"])
+        return reported
+
+    def test_a_newer_edge_answers_config_get_over_plaintext_and_kontrol_uses_mqtt(self) -> None:
+        reported = self.plaintext_config_get("35984d8")
+        self.assertEqual((reported["settings_request"]["state"], reported["settings_request"]["ack"]["status"]),
+                         ("reported", "APPLIED"))
+        self.assertIs(reported["settings"]["matches_state_cfg"], True)
+        self.assertEqual(reported["values"]["center_frequency_hz"], 433_920_000)
+        self.assertEqual(set(reported["value_sources"].values()), {"settings_reported"})
+
+    def test_the_installed_edge_refuses_config_get_over_plaintext_and_kontrol_keeps_data_out(self) -> None:
+        reported = self.plaintext_config_get("8691ad0")
+        request = reported["settings_request"]
+        self.assertEqual((request["state"], request["ack"]["status"], request["ack"]["error"]),
+                         ("acked", "REJECTED", "TLS_REQUIRED_FOR_SETTINGS_REPORT"))
+        self.assertIsNone(reported["settings"])
+        # No MQTT value at all: the browser falls back to Data Out's settings.fields.
+        self.assertEqual(set(reported["values"].values()), {None})
+        self.assertEqual(set(reported["value_sources"].values()), {None})
+
     def test_config_patch_round_trip_with_the_edge_answers(self) -> None:
         cookie = self.cookie()
         self.fresh_state()
@@ -1164,7 +1204,7 @@ class RealMonitorEndToEndTests(unittest.TestCase):
         self.assertEqual((options["qos"], options["retain"]), (1, False))
         self.assertEqual(options["properties"].MessageExpiryInterval, 15)
         command = json.loads(raw.decode("utf-8"))
-        # Byte for byte the envelope shape the edge accepted in commands.json.
+        # Byte for byte the envelope shape the edge accepted in commands.8691ad0.json.
         judged = json.loads(CASES["retune"]["console"]["payload"])
         self.assertEqual(list(command), list(judged))
         self.assertEqual(command["changes"], judged["changes"])

@@ -13,20 +13,29 @@ edge's own tests do.
     python3 make_fixtures.py --edge SCRATCH/rdf-node --commit 8691ad0 --set full
     python3 make_fixtures.py --edge SCRATCH-HEAD/rdf-node --commit 20713ff --set detail-ppp
     python3 make_fixtures.py --edge SCRATCH/rdf-node --commit 8691ad0 --set commands
+    python3 make_fixtures.py --edge SCRATCH-NEW/rdf-node --commit 35984d8 --set commands
+    python3 make_fixtures.py --edge SCRATCH-NEW/rdf-node --commit 35984d8 --set compat
 
 The first command writes every topic; the second adds the newer
 ``telemetry/health/detail`` with the PPP fields and the ``state`` of its own
 session. ``manifest.json`` lists each file with its topic, QoS, retain flag and
 expiry as the agent offered it.
 
-The third writes ``commands.json``: Kontrol's ``config.get`` and
+The third writes ``commands.<commit>.json``: Kontrol's ``config.get`` and
 ``config.patch`` envelopes, built by the console's own
 ``tools/rdf_node_commands.py``, each handed to the edge's real
 ``CommandManager.submit`` (on the topic the console publishes to) with the
 edge's real root helper ``Controller`` writing the scratch ``settings.json``,
 and every ACK and settings report the edge answered with. Cases the console
 refuses itself are built without its checks, so the file also records that
-the edge refuses them for the same reason.
+the edge refuses them for the same reason. Run it once per edge commit: an
+edge before 35984d8 refuses ``config.get`` over a plaintext link to the primary
+broker (``TLS_REQUIRED_FOR_SETTINGS_REPORT``), 35984d8 and later answer it.
+
+``--set compat`` writes ``compat.<commit>.json``: one session of that edge in
+the order a broker delivers it to a new subscriber (retained context first,
+then the live topics and a plaintext ``config.get`` with its answer). Both
+kinds are listed under ``sets`` in ``manifest.json``.
 """
 
 from __future__ import annotations
@@ -475,8 +484,17 @@ def commands_set(run: Run) -> dict:
     send("config-get", cmds.OP_CONFIG_GET, None, "settings read over a TLS link: APPLIED, then settings/reported",
          expect=("APPLIED", None))
     agent.cfg["mqtt"]["tls"] = False
-    send("config-get-tls-off", cmds.OP_CONFIG_GET, None, "the edge's link to the broker is not TLS",
-         expect=("REJECTED", "TLS_REQUIRED_FOR_SETTINGS_REPORT"))
+    if hasattr(agent, "settings_report_allowed"):
+        # 35984d8 and later: the primary broker's link is the operator's choice, plaintext included.
+        send("config-get-tls-off", cmds.OP_CONFIG_GET, None,
+             "plaintext link to the primary broker (PPP/T900): APPLIED, then settings/reported",
+             expect=("APPLIED", None))
+        if cases[-1]["edge"]["settings_reported"] is None:
+            raise SystemExit("config-get-tls-off: APPLIED without a settings/reported")
+    else:
+        send("config-get-tls-off", cmds.OP_CONFIG_GET, None,
+             "plaintext link to the primary broker: this edge answers only over TLS",
+             expect=("REJECTED", "TLS_REQUIRED_FOR_SETTINGS_REPORT"))
     agent.cfg["mqtt"]["tls"] = True
     send("retune", cmds.OP_CONFIG_PATCH, {"center_frequency_hz": 434000000, "vfo0_frequency_hz": 434000000},
          "centre and VFO0 together; fresh DAQ centre and DoA frequency prove both", expect=("APPLIED", None))
@@ -533,11 +551,66 @@ def detail_ppp_set(run: Run) -> list:
     ]
 
 
+def compat_set(run: Run) -> dict:
+    """One session of a newer edge, in the order a broker delivers it to a new subscriber.
+
+    The retained context (``state``, ``capabilities``, ``availability``) comes first,
+    then the live topics: health and its detail, DoA ``ok=1`` with an angle above
+    180 degrees, DoA ``ok=0``, Angular and its diagnostic, and a ``config.get``
+    asked over a plaintext link to the primary broker with its ``ack/config`` and
+    ``settings/reported``.
+    """
+    agent = run.agent
+    messages = []
+
+    def add(offer: dict, note: str) -> None:
+        messages.append({"suffix": offer["suffix"], "qos": offer["qos"], "retain": offer["retain"],
+                         "expiry_s": offer["expiry"], "note": note, "payload": offer["data"].decode("utf-8")})
+
+    run.raw_doa = 10.0
+    run.refresh(verified=True)
+    live = run.schedule_once(hello=True)
+    for suffix, note in (("state", "retained session"), ("capabilities", "retained"),
+                         ("availability", "retained online")):
+        add(_pick(live, suffix), note)
+    add(_pick(live, "telemetry/health"), "run=1, daq=1")
+    add(_pick(live, "telemetry/health/detail"), "with ppp, peer, ppp_svc and ppp_restarts")
+    add(_pick(live, "telemetry/doa"), "ok=1, raw 10 degrees, so a=350 (theta_mirror)")
+    add(_pick(live, "telemetry/diagnostic/doa"), "doa.xml read while the DoA gate passes")
+    bulk = run.schedule_once()
+    add(_pick(bulk, "telemetry/angular"), "flags 63, 360 values")
+    run.refresh(daq_ok=False, verified=True)
+    degraded = run.schedule_once()
+    add(_pick(degraded, "telemetry/diagnostic/angular"), "source not eligible: DAQ bit missing")
+    run.refresh(daq_ok=True, verified=False)
+    trust_only = run.schedule_once()
+    add(_pick(trust_only, "telemetry/doa"), "ok=0, raw angle, validation_reasons")
+    agent.cfg["mqtt"]["tls"] = False
+    acks = run.command("config.get")
+    ack = _pick(acks, "ack/config")
+    if json.loads(ack["data"])["status"] != "APPLIED":
+        raise SystemExit(f"config.get over plaintext: {ack['data']!r}")
+    add(ack, "config.get over a plaintext link to the primary broker: APPLIED")
+    add(_pick(run.schedule_once(), "settings/reported"), "answer to that config.get, plaintext link")
+    agent.cfg["mqtt"]["tls"] = True
+    return {"edge_version": run.version, "node_id": agent.cfg["node_id"], "messages": messages}
+
+
+def _record_set(out: Path, name: str, kind: str, commit: str, version: str) -> None:
+    """List a commands or compat file under ``sets`` in manifest.json; the per-topic list stays as it is."""
+    manifest_path = out / "manifest.json"
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {"fixtures": []}
+    sets = [entry for entry in manifest.get("sets", []) if entry["file"] != name]
+    sets.append({"file": name, "kind": kind, "edge_commit": commit, "edge_version": version})
+    manifest["sets"] = sorted(sets, key=lambda entry: entry["file"])
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--edge", required=True, type=Path, help="rdf-node directory of an RDF Node checkout")
     parser.add_argument("--commit", required=True, help="the commit that checkout was taken from")
-    parser.add_argument("--set", required=True, choices=("full", "detail-ppp", "commands"))
+    parser.add_argument("--set", required=True, choices=("full", "detail-ppp", "commands", "compat"))
     parser.add_argument("--out", type=Path, default=HERE)
     args = parser.parse_args()
     with tempfile.TemporaryDirectory() as tmp:
@@ -547,8 +620,20 @@ def main() -> int:
             run.agent.commands.stop()
             run.agent.journal.close()
             result.update(edge_commit=args.commit, generated_at_ms=int(time.time() * 1000))
-            (args.out / "commands.json").write_text(json.dumps(result, indent=2) + "\n")
-            print(f"wrote {len(result['cases'])} command cases to {args.out / 'commands.json'}")
+            path = args.out / f"commands.{args.commit}.json"
+            path.write_text(json.dumps(result, indent=2) + "\n")
+            _record_set(args.out, path.name, "commands", args.commit, run.version)
+            print(f"wrote {len(result['cases'])} command cases to {path}")
+            return 0
+        if args.set == "compat":
+            result = compat_set(run)
+            run.agent.commands.stop()
+            run.agent.journal.close()
+            result.update(edge_commit=args.commit, generated_at_ms=int(time.time() * 1000))
+            path = args.out / f"compat.{args.commit}.json"
+            path.write_text(json.dumps(result, indent=2) + "\n")
+            _record_set(args.out, path.name, "compat", args.commit, run.version)
+            print(f"wrote {len(result['messages'])} messages to {path}")
             return 0
         fixtures = full_set(run) if args.set == "full" else detail_ppp_set(run)
         run.agent.commands.stop()

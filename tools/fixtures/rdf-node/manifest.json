@@ -262,5 +262,25 @@
       "topic": "telemetry/health"
     }
   ],
-  "generated_at_ms": 1793070140089
+  "generated_at_ms": 1793070140089,
+  "sets": [
+    {
+      "edge_commit": "35984d8",
+      "edge_version": "1.0.0",
+      "file": "commands.35984d8.json",
+      "kind": "commands"
+    },
+    {
+      "edge_commit": "8691ad0",
+      "edge_version": "1.0.0",
+      "file": "commands.8691ad0.json",
+      "kind": "commands"
+    },
+    {
+      "edge_commit": "35984d8",
+      "edge_version": "1.0.0",
+      "file": "compat.35984d8.json",
+      "kind": "compat"
+    }
+  ]
 }
