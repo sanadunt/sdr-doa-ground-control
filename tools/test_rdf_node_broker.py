@@ -31,7 +31,7 @@ if str(TOOLS_DIR) not in sys.path:
 FIXTURES = TOOLS_DIR / "fixtures" / "rdf-node"
 MANIFEST = json.loads((FIXTURES / "manifest.json").read_text(encoding="utf-8"))
 BY_FILE = {entry["file"]: entry for entry in MANIFEST["fixtures"]}
-COMMANDS = json.loads((FIXTURES / "commands.json").read_text(encoding="utf-8"))
+COMMANDS = json.loads((FIXTURES / "commands.8691ad0.json").read_text(encoding="utf-8"))
 WAIT_S = 10.0
 
 try:

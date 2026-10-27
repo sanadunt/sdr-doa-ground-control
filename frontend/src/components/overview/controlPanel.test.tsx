@@ -168,6 +168,29 @@ describe('Kontrol unlocked', () => {
     expect(controlValueSource(null, empty)).toBe('none');
   });
 
+  it('takes the values from settings/reported, or from Data Out when an older RDF-SDR refuses config.get', () => {
+    // Data Out (fallback) carries other values than the node's settings/reported.
+    const snapshot = { settings: { available: true, fields: { center_freq: 433.92, uniform_gain: 20.7 } } };
+    const dataOut = dataOutConfigValues(snapshot, true);
+    // RDF Node 35984d8 and later: config.get over a plaintext link to the main broker is answered.
+    const answered = normalizeConfigReported(reportedBody({
+      settings_request: { command_id: 'gc-get-6', op: 'config.get', state: 'reported', changes: {},
+        ack: { status: 'APPLIED', final: true, error: null, reason: null, revision: 42 } },
+    }));
+    expect(controlValueSource(answered, dataOut)).toBe('settings');
+    expect(currentConfigValues(answered.values, dataOut)).toMatchObject({ center_frequency_hz: 416_588_000, gain_db: 15.7 });
+    expect(answered.baseRev).toBe(42);
+    // RDF Node 8691ad0 (installed): REJECTED TLS_REQUIRED_FOR_SETTINGS_REPORT, no MQTT values.
+    const refused = normalizeConfigReported(reportedBody({
+      settings: null, values: {}, value_sources: {}, value_received_at_ms: {},
+      settings_request: { command_id: 'gc-get-7', op: 'config.get', state: 'acked', changes: {},
+        ack: { status: 'REJECTED', final: true, error: 'TLS_REQUIRED_FOR_SETTINGS_REPORT', reason: null, revision: null } },
+    }));
+    expect(controlValueSource(refused, dataOut)).toBe('data-out');
+    expect(currentConfigValues(refused.values, dataOut)).toMatchObject({ center_frequency_hz: 433_920_000, gain_db: 20.7 });
+    expect(refused.baseRev).toBe(42);
+  });
+
   it('shows a settings report of an older revision and no report at all', () => {
     const old = normalizeConfigReported(reportedBody({ base_rev: 43, node: { ...NODE, cfg: 43 }, settings: { id: 'gc-get-1', rev: 42, received_at_ms: SETTINGS_AT, age_ms: 30_000, matches_state_cfg: false }, values: {}, value_sources: {}, value_received_at_ms: {} }));
     expect(view({ reported: old, evaluation: evaluate({}, old) })).toContain('settings/reported rev <span class="ov-mono">42</span> · rev node <span class="ov-mono">43</span>');
@@ -188,7 +211,7 @@ describe('Kontrol unlocked', () => {
       },
     }));
     const tlsMarkup = view({ reported: tls, valueSource: 'data-out' }, 'en');
-    expect(tlsMarkup).toContain('<p class="ov-control-warn" role="status"><span class="ov-mono">TLS_REQUIRED_FOR_SETTINGS_REPORT</span> · RDF-SDR sends its settings only over a TLS connection to the broker. Until the broker has TLS, the values come from Data Out (fallback).</p>');
+    expect(tlsMarkup).toContain('<p class="ov-control-warn" role="status"><span class="ov-mono">TLS_REQUIRED_FOR_SETTINGS_REPORT</span> · RDF-SDR does not send its settings without TLS on this broker (a backup broker, or an older RDF-SDR on the main broker). The values come from Data Out (fallback) until RDF-SDR is updated or this link uses TLS.</p>');
     expect(tlsMarkup).toContain('Values: Data Out (fallback)');
     const noAck = normalizeConfigReported(reportedBody({ settings_request: { command_id: 'gc-get-4', op: 'config.get', state: 'no_ack', changes: {} } }));
     expect(view({ reported: noAck })).toContain('<span class="ov-mono">NO ACK</span> · RDF-SDR tidak menjawab permintaan settings.');

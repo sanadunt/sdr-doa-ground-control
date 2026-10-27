@@ -40,7 +40,7 @@ Tidak ada lagi pembahasan "v1" atau "v2". Angka `v2` di nama topik dan di nama f
 
 ## Syarat supaya keputusan ini jalan
 
-- **Broker groundstation memakai TLS untuk koneksi dari Raspberry.** Edge hanya mengirim `settings/reported` lewat broker TLS (dokumen edge: "TLS wajib"). Console tetap tersambung lewat listener loopback biasa di groundstation.
+- **TLS untuk koneksi dari Raspberry tidak wajib lagi di broker utama.** Edge `8691ad0` (terpasang) hanya mengirim `settings/reported` lewat broker TLS; edge `35984d8` dan sesudahnya (PR `sanadunt/rdf-indicator-raspberry#5`) menjawab `config.get` lewat broker utama juga tanpa TLS, karena link PPP/T900 privat sudah dipercaya untuk telemetri dan `config.patch`. Sampai Raspberry memakai edge itu, Kontrol mengambil nilai dari Data Out (cadangan). Broker cadangan edge tetap butuh TLS untuk laporan settings. Console tetap tersambung lewat listener loopback biasa di groundstation.
 - **Versi RDF Node di groundstation disamakan dengan Raspberry.** Saat ini ground `1.0.0-20261006185856`, edge `1.0.0-20261013194717`.
 - **Peran `rdf-ground.service` ditegaskan** (penerima dan receipt), supaya tidak bertabrakan dengan console di broker yang sama.
 
@@ -69,11 +69,11 @@ Daftar ini dari tag `v2.0.0`. Semua bagian di bawah sudah dihapus atau diganti d
 2. Parser console mengikuti kontrak edge.
 3. Dashboard memakai MQTT, dengan Data Out sebagai cadangan.
 4. Kontrol memakai format perintah edge.
-5. Broker groundstation: TLS untuk Raspberry, listener dibatasi, dan akun per peran.
+5. Broker groundstation: listener dibatasi dan akun per peran; TLS untuk Raspberry hanya selama edge masih `8691ad0` dan nilai settings harus lewat MQTT.
 6. Hapus jalur lama, perbarui dokumentasi, lalu rilis 3.0.0.
 
 ## Pertanyaan yang masih terbuka
 
 1. Berapa detik MQTT dianggap tidak segar sebelum beralih ke Data Out. Dijawab di #8: 8 detik setelah `telemetry/health` terakhir yang `daq=1` (batas health di kontrak), lihat `docs/MQTT_KONTRAK.md` bagian 8.
 2. Perintah operasi mana yang ikut di Kontrol tahap pertama (restart SDR, restart PPP, reboot, shutdown).
-3. Sertifikat TLS broker: CA lokal sendiri atau sertifikat lain. Edge memakai store CA sistem, kecuali `ca_file` diatur.
+3. Sertifikat TLS broker (hanya bila TLS tetap dipakai, misalnya untuk broker cadangan): CA lokal sendiri atau sertifikat lain. Edge memakai store CA sistem, kecuali `ca_file` diatur.

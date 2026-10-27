@@ -284,6 +284,67 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(put(store, "telemetry/doa", obj("telemetry-doa.ok1.json", q=55, t=NOW, rev=None))["status"], "LIVE")
 
 
+COMPAT = json.loads((FIXTURES / "compat.35984d8.json").read_text(encoding="utf-8"))
+
+
+class NewerEdgeCompatTests(unittest.TestCase):
+    """One session of edge 35984d8 (compat.35984d8.json), in a broker's delivery order."""
+
+    def test_every_message_of_the_newer_edge_is_accepted(self) -> None:
+        self.assertEqual((COMPAT["edge_commit"], COMPAT["node_id"]), ("35984d8", NODE))
+        self.assertIn({"file": "compat.35984d8.json", "kind": "compat", "edge_commit": "35984d8",
+                       "edge_version": COMPAT["edge_version"]}, MANIFEST["sets"])
+        at = COMPAT["generated_at_ms"]
+        messages = COMPAT["messages"]
+        # Retained context first, as a broker hands it to a new subscriber.
+        self.assertEqual([m["suffix"] for m in messages[:3]], ["state", "capabilities", "availability"])
+        self.assertTrue(all(m["retain"] for m in messages[:3]))
+        store = RdfNodeV2Telemetry(NODE)
+        expected = {
+            "state": "CONTEXT", "capabilities": "CONTEXT", "availability": "CONTEXT",
+            "telemetry/health": "FRESH", "telemetry/health/detail": "FRESH",
+            "telemetry/diagnostic/doa": "UNVERIFIED", "telemetry/angular": "LIVE",
+            "telemetry/diagnostic/angular": "UNVERIFIED", "ack/config": "FRESH", "settings/reported": "FRESH",
+        }
+        seen = []
+        for message in messages:
+            suffix = message["suffix"]
+            payload = message["payload"].encode("utf-8")
+            self.assertLessEqual(len(payload), MAX_PAYLOAD_BYTES)
+            self.assertEqual((message["qos"], message["retain"]), POLICY[suffix])
+            body = json.loads(payload)
+            if suffix == "ack/config":
+                # Kontrol registers its config.get before the publish.
+                store.expect_settings_report(body["id"], at)
+            store.ingest(f"sdr/v2/{NODE}/{suffix}", payload, qos=message["qos"], retained=message["retain"],
+                         received_at_ms=at, message_expiry_s=message["expiry_s"])
+            entry = topic(store, suffix, at)
+            with self.subTest(topic=suffix, note=message["note"]):
+                if suffix == "telemetry/doa":
+                    self.assertEqual(entry["status"], "LIVE" if body["ok"] == 1 else "UNVERIFIED")
+                else:
+                    self.assertEqual(entry["status"], expected[suffix])
+            seen.append((suffix, entry["status"]))
+        self.assertEqual({suffix for suffix, _status in seen}, set(expected) | {"telemetry/doa"})
+        snapshot = store.snapshot(at)
+        self.assertEqual((snapshot["invalid"], snapshot["valid"]), (0, snapshot["received"]))
+        self.assertEqual(snapshot["received"], len(messages))
+        view = node(store, at)
+        # ok=1 with an angle above 180 degrees is a LIVE DoA.
+        self.assertTrue(view["doa"]["live"])
+        self.assertEqual((view["doa"]["a"], view["doa"]["ok"]), (350.0, 1))
+        ok0 = json.loads([m for m in messages if m["suffix"] == "telemetry/doa"][-1]["payload"])
+        self.assertEqual((ok0["ok"], ok0["validation_reasons"]), (0, ["SOURCE_UNVERIFIED", "ANGLE_UNVERIFIED"]))
+        detail = json.loads([m for m in messages if m["suffix"] == "telemetry/health/detail"][0]["payload"])
+        self.assertTrue({"ppp", "peer", "ppp_svc", "ppp_restarts"} <= set(detail))
+        angular = json.loads([m for m in messages if m["suffix"] == "telemetry/angular"][0]["payload"])
+        self.assertEqual((angular["flags"], len(angular["values"])), (63, 360))
+        # The settings report a plaintext link now carries reaches Kontrol.
+        report = store.settings_report()
+        self.assertIs(report["matches_state_cfg"], True)
+        self.assertEqual(report["safe_settings"]["center_frequency_hz"], 433_920_000)
+
+
 class SessionTests(unittest.TestCase):
     def test_telemetry_before_state_is_ignored(self) -> None:
         store = RdfNodeV2Telemetry(NODE)

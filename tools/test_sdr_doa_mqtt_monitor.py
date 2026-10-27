@@ -416,7 +416,7 @@ class SharedMqttMonitorTests(unittest.TestCase):
 
     # -- Kontrol command publish path ----------------------------------------
 
-    COMMANDS = json.loads((TOOLS_DIR / "fixtures" / "rdf-node" / "commands.json").read_text(encoding="utf-8"))
+    COMMANDS = json.loads((TOOLS_DIR / "fixtures" / "rdf-node" / "commands.8691ad0.json").read_text(encoding="utf-8"))
 
     def _rdf(self, suffix: str, payload: object, *, qos: int = 1, retained: bool = False) -> None:
         raw = payload if isinstance(payload, bytes) else json.dumps(payload, separators=(",", ":")).encode("utf-8")
