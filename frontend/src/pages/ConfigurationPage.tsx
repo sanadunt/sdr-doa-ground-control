@@ -1,6 +1,6 @@
 import type { FormEvent, JSX, KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
-import type { Branding, CompassConfig, ConsoleConfig, GpsConfig, MqttTransport, PolarSettings } from '../types';
+import type { Branding, CompassConfig, ConsoleConfig, GpsConfig, MqttSnapshot, MqttTransport, PolarSettings } from '../types';
 import { ApiError, LAN_MAX_ALLOWED_CLIENTS, connectMqtt, dryRunConfigPatch, getAdminStatus, getBranding, getCapabilities, getConfigReported, getLanAccess, loginAdmin, logoutAdmin, saveBranding, updateConsoleConfig, updateLanAccess } from '../api';
 import type { ConfigReported, ConsoleCapabilities, LanAccessView } from '../api';
 import { lanDraftDirty, lanDraftFrom, lanErrorKey, lanReasonKey, lanSettingsFromDraft, lanStateChip, parseLanClients } from '../lib/lanAccessForm';
@@ -27,7 +27,8 @@ import {
 import { DATA_OUT_PORT, DEFAULT_DATA_OUT_HOSTS, addDataOutHost, checkDataOutDraft, dataOutErrorNotice, dataOutUrlHost } from '../lib/dataOutHosts';
 import { MAX_LOGO_BYTES, pngDataUrl, pngLogoErrorKey, validatePngLogo } from '../lib/pngLogo';
 import { CONFIG_PATCH_FIELDS, configPatchPublishable, fieldRange, plainNumber } from '../lib/configPatch';
-import { DEFAULT_MQTT_TRANSPORT, DEFAULT_MQTT_WS_PATH, mqttTargetFromConfig, mqttTransportFields } from '../lib/mqttMonitor';
+import { DEFAULT_MQTT_TRANSPORT, DEFAULT_MQTT_WS_PATH, lastMessageAgeMs, mqttTargetFromConfig, mqttTransportFields } from '../lib/mqttMonitor';
+import { formatCount, formatDuration } from '../lib/healthView';
 import { MAX_COMPASS_OFFSET_DEG, saveCompassConfig, saveGpsConfig } from '../lib/sourceConfigStorage';
 import { errorNotice, noticeText } from '../lib/errorNotice';
 import type { Notice } from '../lib/errorNotice';
@@ -283,6 +284,7 @@ export function ConfigurationPage({
   onCompassConfigChanged,
   onConfigSaved,
   onBrandingChanged,
+  mqtt = null,
   readOnly = false,
 }: {
   config: ConsoleConfig;
@@ -293,6 +295,8 @@ export function ConfigurationPage({
   onCompassConfigChanged: (next: CompassConfig) => void;
   onConfigSaved: (config: ConsoleConfig) => Promise<void>;
   onBrandingChanged: (branding: Branding) => void;
+  /** The one MQTT status (GET /api/mqtt, App's poll): its message count shows in the MQTT card. */
+  mqtt?: MqttSnapshot | null;
   /**
    * The LAN view: the console's settings show without Save, admin unlock,
    * LAN access or dry-run. GPS and Compass stay this browser's own choice.
@@ -512,6 +516,18 @@ export function ConfigurationPage({
   const adminTone: Tone = adminAuthenticated ? 'good' : adminDisabled || admin === 'checking' ? 'neutral' : 'warn';
   const mqttCode = reportedFailed ? 'ERROR' : reported ? reported.broker.connection.toUpperCase() : 'UNKNOWN';
   const mqttTitle = reported?.code ?? undefined;
+  const mqttReceived = typeof mqtt?.received === 'number' ? mqtt.received : null;
+  const mqttInvalid = typeof mqtt?.invalid === 'number' ? mqtt.invalid : null;
+  const mqttLastAge = lastMessageAgeMs(mqtt, Date.now());
+  const mqttCounterItems: KeyValueItem[] = [
+    {
+      id: 'messages',
+      label: t('config.mqttMessages'),
+      value: mqttReceived === null ? '—' : mqttInvalid ? `${formatCount(lang, mqttReceived)} · ${t('config.mqttInvalid', { count: formatCount(lang, mqttInvalid) })}` : formatCount(lang, mqttReceived),
+      tone: mqttInvalid ? 'warn' : undefined,
+    },
+    { id: 'last', label: t('config.mqttLast'), value: mqttLastAge === null ? '—' : formatDuration(t, mqttLastAge) },
+  ];
   const transport: MqttTransport = connection.mqtt_transport ?? DEFAULT_MQTT_TRANSPORT;
   const savedTransport: MqttTransport = saved.mqtt_transport ?? DEFAULT_MQTT_TRANSPORT;
   const wsPath = connection.mqtt_ws_path ?? DEFAULT_MQTT_WS_PATH;
@@ -938,6 +954,7 @@ export function ConfigurationPage({
           </Card>
 
           <Card id="mqtt-settings" span={6} className="cfg-section" title={t('config.mqttTitle')} chip={readOnly ? undefined : <StatusChip code={mqttCode} tone={connectionTone(mqttCode)} title={mqttTitle} />}>
+            <KeyValueGrid columns={2} label={t('config.mqttTitle')} items={mqttCounterItems} />
             <form className="cfg-form" noValidate onSubmit={submitWith(() => { if (!busy && !readOnly) void saveMqtt(); })}>
               <fieldset className="cfg-fieldset" disabled={readOnly}>
               <div className="cfg-row">

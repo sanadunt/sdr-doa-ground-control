@@ -2,8 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   isRedactedPayloadKey,
   lastMessageAgeMs,
-  mqttDetailRecords,
-  mqttKindRows,
   mqttTargetFromConfig,
   mqttTransportFields,
   normalizeMqttSnapshot,
@@ -22,7 +20,7 @@ import { mqttConnectPath, normalizeConsoleConfig } from '../api';
 const NOW = 1_790_668_800_000;
 const READ_AT = 5_000_000;
 
-// Shape of GET /api/mqtt from tools/sdr_doa_mqtt_monitor.py.
+// Shape of GET /api/mqtt from tools/sdr_doa_mqtt_monitor.py: the one MQTT status.
 function monitorBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     enabled: true,
@@ -32,43 +30,17 @@ function monitorBody(overrides: Record<string, unknown> = {}): Record<string, un
     port: 18884,
     transport: 'tcp',
     ws_path: '/mqtt',
-    root: 'sdr/v1/uav-01',
+    node_id: 'uav-01',
+    root: 'sdr/v2/uav-01',
     now_ms: NOW,
     connection: 'connected',
     last_error: null,
-    received: 607,
-    valid: 605,
-    invalid: 0,
-    cleared: 2,
-    total_bytes: 90_000,
-    last_received_at_ms: NOW,
-    last_age_ms: 0,
-    last_latency_ms: 12,
-    last_topic: 'sdr/v1/uav-01/telemetry/health',
-    kind_counts: { doa: 1, health: 600, state: 3, availability: 1 },
-    topic_counts: { 'sdr/v1/uav-01/telemetry/doa': 1 },
-    last_by_kind: {
-      doa: {
-        topic: 'sdr/v1/uav-01/telemetry/doa', kind: 'doa', received_at_ms: NOW - 600_000, age_ms: 600_000,
-        bytes: 180, qos: 0, retained: false, valid: true, latency_ms: 0, source_ts_ms: NOW - 600_000,
-        validity_flags: { valid: false }, source: 'synthetic',
-        payload: { v: 1, ts_ms: NOW - 600_000, seq: 1, valid: false, relative_doa_deg: 137.4, source: 'synthetic' },
-      },
-      health: {
-        kind: 'health', received_at_ms: NOW, age_ms: 0, bytes: 220, qos: 0, retained: false, valid: true,
-        latency_ms: 12, source_ts_ms: NOW - 12, validity_flags: { doa_valid: false, settings_valid: true },
-        payload: { v: 1, ts_ms: NOW - 12, state: 'STALE', doa_valid: false, settings_valid: true, reasons: ['STATUS_STALE', 'NODE_CLOCK_STALLED', 'bad code'] },
-      },
-      state: {
-        kind: 'state', received_at_ms: NOW - 1_000, age_ms: 1_000, bytes: 0, qos: 1, retained: false, valid: false,
-        cleared: true, latency_ms: null, source_ts_ms: null,
-      },
-      availability: {
-        kind: 'availability', received_at_ms: NOW - 2_000, age_ms: 2_000, bytes: 60, qos: 1, retained: true, valid: true,
-        latency_ms: null, source_ts_ms: NOW - 3_600_000,
-        payload: { v: 1, ts_ms: NOW - 3_600_000, online: false, reason: 'CONNECTION_LOST' },
-      },
-    },
+    received: 1_204,
+    valid: 1_200,
+    invalid: 3,
+    cleared: 1,
+    last_received_at_ms: NOW - 400,
+    last_age_ms: 400,
     ...overrides,
   };
 }
@@ -109,85 +81,59 @@ describe('normalizeMqttSnapshot', () => {
       last_error: null,
       last_received_at_ms: null,
       last_age_ms: null,
-      last_latency_ms: null,
-      last_topic: null,
     });
   });
 
-  it('validates fields and sanitizes payloads', () => {
+  it('reads the one status: broker, node topics and their message counts', () => {
+    expect(normalizeMqttSnapshot(monitorBody(), READ_AT)).toEqual({
+      fetched_at_ms: READ_AT,
+      enabled: true,
+      read_only: true,
+      publish_enabled: false,
+      host: '127.0.0.1',
+      port: 18884,
+      transport: 'tcp',
+      ws_path: '/mqtt',
+      node_id: 'uav-01',
+      root: 'sdr/v2/uav-01',
+      now_ms: NOW,
+      connection: 'connected',
+      last_error: null,
+      received: 1_204,
+      valid: 1_200,
+      invalid: 3,
+      cleared: 1,
+      last_received_at_ms: NOW - 400,
+      last_age_ms: 400,
+    });
+  });
+
+  it('validates fields and drops what the status does not carry', () => {
     const snapshot = normalizeMqttSnapshot(monitorBody({
       transport: 'udp',
       ws_path: '/mqtt?x=1',
       received: -1,
-      kind_counts: { doa: 1, health: 1.5, 'Bad Kind': 3 },
+      invalid: 1.5,
+      root: 'sdr/other/uav-01',
+      node_id: 'bad node',
+      last_by_kind: { doa: { valid: true } },
+      kind_counts: { doa: 1 },
+      last_topic: 'sdr/v2/uav-01/telemetry/doa',
     }), READ_AT);
     expect(snapshot.transport).toBeUndefined();
     expect(snapshot.ws_path).toBeUndefined();
     expect(snapshot.received).toBeUndefined();
-    expect(snapshot.kind_counts).toEqual({ doa: 1 });
-    const doa = snapshot.last_by_kind?.doa;
-    expect(doa?.validity_flags).toEqual({ valid: false });
-    expect((doa?.payload as Record<string, unknown>).valid).toBe(false);
-    expect(doa).not.toHaveProperty('topic');
-    expect(snapshot.fetched_at_ms).toBe(READ_AT);
+    expect(snapshot.invalid).toBeUndefined();
+    expect(snapshot.root).toBeUndefined();
+    expect(snapshot.node_id).toBeUndefined();
+    for (const key of ['last_by_kind', 'kind_counts', 'last_topic']) expect(snapshot).not.toHaveProperty(key);
   });
 
-  it('derives an entry age from the server clock when age_ms is missing', () => {
-    const body = monitorBody();
-    const entries = body.last_by_kind as Record<string, Record<string, unknown>>;
-    delete entries.doa.age_ms;
-    expect(normalizeMqttSnapshot(body, READ_AT).last_by_kind?.doa.age_ms).toBe(600_000);
-  });
-});
-
-describe('mqttKindRows', () => {
-  const snapshot = normalizeMqttSnapshot(monitorBody(), READ_AT);
-  const rows = mqttKindRows(snapshot, READ_AT);
-  const row = (kind: string) => rows.find((item) => item.kind === kind)!;
-
-  it('reads the count per kind, not per topic', () => {
-    expect(row('doa').count).toBe(1);
-    expect(row('health').count).toBe(600);
-    expect(rows.map((item) => item.kind)).toEqual(['doa', 'health', 'state', 'availability']);
-  });
-
-  it('marks an old DoA stale even while health keeps arriving', () => {
-    expect(row('doa')).toMatchObject({ contract: 'VALID', ageMs: 600_000, stale: true, synthetic: true });
-    expect(row('doa').flags).toEqual([{ name: 'valid', value: false }]);
-    expect(row('health')).toMatchObject({ ageMs: 0, stale: false, healthState: 'STALE' });
-    expect(row('health').reasons).toEqual(['STATUS_STALE', 'NODE_CLOCK_STALLED']);
-    expect(lastMessageAgeMs(snapshot, READ_AT)).toBe(0);
-  });
-
-  it('ages records locally between reads', () => {
-    const later = mqttKindRows(snapshot, READ_AT + 9_000);
-    expect(later.find((item) => item.kind === 'health')).toMatchObject({ ageMs: 9_000, stale: true });
-    expect(lastMessageAgeMs(snapshot, READ_AT + 9_000)).toBe(9_000);
-  });
-
-  it('shows a retained clear as CLEARED, never stale or invalid', () => {
-    expect(row('state')).toMatchObject({ contract: 'CLEARED', stale: false, bytes: 0 });
-  });
-
-  it('reports availability and judges a broker replay by its own timestamp', () => {
-    expect(row('availability').availability).toEqual({ online: false, reason: 'CONNECTION_LOST' });
-    expect(row('availability')).toMatchObject({ retained: true, sourceAgeMs: 3_600_000, stale: false });
-    const replay = normalizeMqttSnapshot(monitorBody({
-      last_by_kind: {
-        state: { kind: 'state', received_at_ms: NOW, age_ms: 0, retained: true, valid: true, source_ts_ms: NOW - 7_200_000, payload: { v: 1 } },
-        config_reported: { kind: 'config_reported', received_at_ms: NOW, age_ms: 0, retained: true, valid: true, source_ts_ms: null },
-      },
-    }), READ_AT);
-    const replayRows = mqttKindRows(replay, READ_AT);
-    expect(replayRows.find((item) => item.kind === 'state')).toMatchObject({ ageMs: 0, sourceAgeMs: 7_200_000, stale: true });
-    expect(replayRows.find((item) => item.kind === 'config_reported')).toMatchObject({ sourceAgeMs: null, stale: true });
-  });
-
-  it('builds the JSON detail from sanitized entries only', () => {
-    const detail = mqttDetailRecords(snapshot) as Record<string, Record<string, unknown>>;
-    expect(detail.doa.validity_flags).toEqual({ valid: false });
-    expect(detail.state.cleared).toBe(true);
-    expect(JSON.stringify(detail)).not.toContain('sdr/v1/uav-01');
+  it('ages the last message locally between reads', () => {
+    const snapshot = normalizeMqttSnapshot(monitorBody(), READ_AT);
+    expect(lastMessageAgeMs(snapshot, READ_AT)).toBe(400);
+    expect(lastMessageAgeMs(snapshot, READ_AT + 9_000)).toBe(9_400);
+    expect(lastMessageAgeMs(normalizeMqttSnapshot(monitorBody({ last_age_ms: null }), READ_AT), READ_AT)).toBeNull();
   });
 });
 

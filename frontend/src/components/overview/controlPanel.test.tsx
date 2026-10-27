@@ -136,7 +136,8 @@ describe('Kontrol unlocked', () => {
     expect(markup).toContain('>ADMIN</span>');
     expect(markup).toContain('aria-label="Kunci lagi"');
     expect(markup).toContain('sdr/v2/uav-01/cmd/config/patch');
-    expect(markup).not.toContain('sdr/v1');
+    // Only the edge contract's root: no other topic family.
+    expect(markup.match(/sdr\/v\d+\//g) ?? []).toEqual(['sdr/v2/']);
     expect(markup).toContain('Broker <span class="ov-mono">10.90.0.1:9001</span> · <span class="ov-mono">CONNECTED</span> · rev dasar <span class="ov-mono">42</span>');
     expect(markup).toContain('RDF-SDR <span class="ov-mono">0a1b2c3d</span> · health <span class="ov-mono">FRESH</span>');
     expect(markup).toContain('settings/reported rev <span class="ov-mono">42</span> · <span class="ov-mono">1.2 dtk</span> lalu');

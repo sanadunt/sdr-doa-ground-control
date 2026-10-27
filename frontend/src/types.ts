@@ -201,34 +201,7 @@ export interface Branding {
   logo_data_url: string;
 }
 
-/** Latest v1 message of one kind, after lib/mqttMonitor normalization. */
-export interface MqttEntry {
-  [key: string]: unknown;
-  kind?: string;
-  /** Server clock when the console received it. */
-  received_at_ms?: number;
-  /** Server-side receive age at snapshot time. */
-  age_ms?: number | null;
-  /** The payload's own ts_ms (edge clock). */
-  source_ts_ms?: number | null;
-  bytes?: number;
-  qos?: number;
-  /** True only for a broker replay from the retained store. */
-  retained?: boolean;
-  /** Decoded against the v1 contract (not the payload's own flags). */
-  valid?: boolean;
-  /** Zero-length publish: the retained value was removed. */
-  cleared?: boolean;
-  /** The payload's own boolean flags: valid, doa_valid, settings_valid. */
-  validity_flags?: Record<string, boolean>;
-  /** Payload source marker, e.g. "synthetic". */
-  source?: string;
-  latency_ms?: number | null;
-  /** Sanitized payload: identifiers and secrets are redacted. */
-  payload?: unknown;
-  error?: string;
-}
-
+/** GET /api/mqtt: the one MQTT status, after lib/mqttMonitor normalization. */
 export interface MqttSnapshot {
   [key: string]: unknown;
   enabled?: boolean;
@@ -238,23 +211,23 @@ export interface MqttSnapshot {
   port?: number;
   transport?: MqttTransport;
   ws_path?: string;
+  /** The RDF Node whose topics the monitor subscribes to, and their root (sdr/v2/<node>). */
+  node_id?: string;
+  root?: string;
   connection?: string;
   last_error?: string | null;
   /** Server clock when the snapshot was taken. */
   now_ms?: number;
   /** Browser clock when the snapshot was read; set by the API adapter for local ageing. */
   fetched_at_ms?: number;
+  /** Messages on the subscribed RDF Node topics, the same counts as /api/mqtt/rdf-node. */
   received?: number;
   valid?: number;
   invalid?: number;
+  /** Zero-length retained publishes that removed a value. */
   cleared?: number;
-  total_bytes?: number;
   last_received_at_ms?: number | null;
   last_age_ms?: number | null;
-  last_latency_ms?: number | null;
-  last_topic?: string | null;
-  last_by_kind?: Record<string, MqttEntry>;
-  kind_counts?: Record<string, number>;
 }
 
 /** One RDF Node topic as reported by /api/mqtt/rdf-node, normalized: the status of its latest message. */

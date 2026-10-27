@@ -4,15 +4,16 @@ import { DICTIONARIES, I18nContext, translate } from '../lib/i18n';
 import type { Lang } from '../lib/i18n';
 import { DEFAULT_GPS_CONFIG } from '../lib/map';
 import { DEFAULT_COMPASS_CONFIG } from '../lib/polar';
-import type { CompassConfig, ConsoleConfig, GpsConfig } from '../types';
+import type { CompassConfig, ConsoleConfig, GpsConfig, MqttSnapshot } from '../types';
 import { ConfigurationPage } from './ConfigurationPage';
 
-function render({ lang = 'en', refreshSeconds = 10, gps = DEFAULT_GPS_CONFIG, compass = DEFAULT_COMPASS_CONFIG, config = {} }: {
+function render({ lang = 'en', refreshSeconds = 10, gps = DEFAULT_GPS_CONFIG, compass = DEFAULT_COMPASS_CONFIG, config = {}, mqtt = null }: {
   lang?: Lang;
   refreshSeconds?: number;
   gps?: GpsConfig;
   compass?: CompassConfig;
   config?: Partial<ConsoleConfig>;
+  mqtt?: MqttSnapshot | null;
 } = {}): string {
   return renderToStaticMarkup(
     <I18nContext.Provider value={{ lang, setLang: () => undefined, t: (key, vars) => translate(lang, key, vars) }}>
@@ -25,6 +26,7 @@ function render({ lang = 'en', refreshSeconds = 10, gps = DEFAULT_GPS_CONFIG, co
         onCompassConfigChanged={() => undefined}
         onConfigSaved={async () => undefined}
         onBrandingChanged={() => undefined}
+        mqtt={mqtt}
       />
     </I18nContext.Provider>,
   );
@@ -144,6 +146,19 @@ describe('Configuration page', () => {
 
   it('lists the accepted MQTT host forms in the placeholder without a sentence', () => {
     for (const lang of ['en', 'id'] as const) expect(render({ lang })).toContain('placeholder="IPv4 · IPv6 · localhost"');
+  });
+
+  it('counts the one MQTT in its card: the messages of the node topics and the last one\'s age', () => {
+    const card = (markup: string) => markup.match(/<section[^>]*id="mqtt-settings"[\s\S]*?<\/section>/)?.[0] ?? '';
+    const now = Date.now();
+    const mqtt: MqttSnapshot = { enabled: true, connection: 'connected', received: 1_204, valid: 1_201, invalid: 3, last_age_ms: 2_000, fetched_at_ms: now };
+    const en = card(render({ mqtt }));
+    expect(en).toContain(`<dt>${translate('en', 'config.mqttMessages')}</dt>`);
+    expect(en).toMatch(/1,204 · 3 invalid/);
+    expect(en).toContain(`<dt>${translate('en', 'config.mqttLast')}</dt>`);
+    expect(card(render({ lang: 'id', mqtt: { ...mqtt, invalid: 0 } }))).toMatch(/<dd[^>]*>1\.204<\/dd>/);
+    // Before the first read the counter shows no number rather than 0.
+    expect(card(render())).toMatch(new RegExp(`<dt>${translate('en', 'config.mqttMessages')}</dt><dd[^>]*>—</dd>`));
   });
 
   it('warns about a monitor without TLS only for a host off this machine', () => {

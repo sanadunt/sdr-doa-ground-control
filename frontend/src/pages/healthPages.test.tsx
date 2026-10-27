@@ -113,7 +113,7 @@ describe('System Health layout', () => {
     const mdns = { ...VALID, collection: { ...VALID.collection, host_resolution: { host: 'doasdr.local', method: 'mdns', address: '192.168.100.100' } } } as unknown as TelemetrySnapshot;
     expect(text(render(<SystemHealthPage snapshot={mdns} mqtt={monitor} localSnapshotFresh />))).toContain('mDNS 192.168.100.100 · 124 ms / 4.0 s');
     expect(page).toContain('DoA views PRESENT View State Age at read CSV PRESENT 0.1 s XML PRESENT 0.1 s');
-    expect(page).toContain('MQTT monitor CONNECTED Broker 10.90.0.1:9001 Transport WS /mqtt Publish Admin config patch only');
+    expect(page).toContain('MQTT CONNECTED Broker 10.90.0.1:9001 Transport WS /mqtt Publish Admin config patch only');
     expect(page).toContain('Messages 1,204 Invalid 0');
     // No Detail column, notices, summary sentences or the old subsystem list on a healthy read.
     expect(page).not.toContain('Detail');

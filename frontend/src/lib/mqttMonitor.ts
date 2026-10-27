@@ -1,4 +1,4 @@
-import type { ConsoleConfig, MqttEntry, MqttSnapshot, MqttTarget, MqttTransport, RdfNodeAck, RdfNodePart, RdfNodeSnapshot, RdfNodeTopic, RdfNodeView, Tone } from '../types';
+import type { ConsoleConfig, MqttSnapshot, MqttTarget, MqttTransport, RdfNodeAck, RdfNodePart, RdfNodeSnapshot, RdfNodeTopic, RdfNodeView, Tone } from '../types';
 
 type JsonObject = Record<string, unknown>;
 
@@ -77,6 +77,9 @@ const SECRET_KEY = /(pass(word)?|secret|token|api[_-]?key|private[_-]?key|creden
 // are not mistaken for an `id`.
 const IDENTIFIER_WORDS = new Set(['station', 'unit', 'hardware', 'serial', 'client', 'device', 'host', 'hostname', 'topic', 'id', 'uid', 'uuid']);
 const MAX_PAYLOAD_DEPTH = 6;
+/** The server's node id rule (rdf_node_mqtt_v2.py) and the topic root it reports, sdr/v2/<node>. */
+const NODE_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/u;
+const ROOT_PATTERN = /^sdr\/v2\/[A-Za-z0-9_-]{1,64}$/u;
 
 function lastKeyWord(key: string): string {
   const words = key.replace(/([a-z0-9])([A-Z])/gu, '$1 $2').split(/[\s_.-]+/u).filter(Boolean);
@@ -103,55 +106,10 @@ export function sanitizeMqttPayload(value: unknown, depth = 0): unknown {
   return output;
 }
 
-const KIND_PATTERN = /^[a-z][a-z0-9_]{0,31}$/u;
-const FLAG_PATTERN = /^[a-z][a-z0-9_]{0,31}$/u;
-const MAX_KINDS = 16;
-
-function normalizeKindCounts(value: unknown): Record<string, number> | undefined {
-  if (!isObject(value)) return undefined;
-  const output: Record<string, number> = {};
-  for (const [kind, entry] of Object.entries(value)) {
-    if (Object.keys(output).length >= MAX_KINDS) break;
-    const number = count(entry);
-    if (KIND_PATTERN.test(kind) && number !== undefined) output[kind] = number;
-  }
-  return output;
-}
-
-function normalizeEntry(kind: string, value: JsonObject, nowMs: number | null): MqttEntry {
-  const entry: MqttEntry = { kind };
-  const receivedAt = nonNegative(value.received_at_ms);
-  if (receivedAt !== null) entry.received_at_ms = receivedAt;
-  const age = nonNegative(value.age_ms);
-  entry.age_ms = age ?? (receivedAt !== null && nowMs !== null ? Math.max(0, nowMs - receivedAt) : null);
-  entry.source_ts_ms = nonNegative(value.source_ts_ms);
-  const bytes = count(value.bytes);
-  if (bytes !== undefined) entry.bytes = bytes;
-  const qos = count(value.qos);
-  if (qos !== undefined) entry.qos = qos;
-  entry.retained = value.retained === true;
-  entry.valid = value.valid === true;
-  if (value.cleared === true) entry.cleared = true;
-  if (isObject(value.validity_flags)) {
-    const flags: Record<string, boolean> = {};
-    for (const [name, flag] of Object.entries(value.validity_flags).slice(0, 8)) {
-      if (FLAG_PATTERN.test(name) && typeof flag === 'boolean') flags[name] = flag;
-    }
-    if (Object.keys(flags).length) entry.validity_flags = flags;
-  }
-  const source = text(value.source, 64);
-  if (source) entry.source = source;
-  entry.latency_ms = finite(value.latency_ms);
-  const error = text(value.error, 300);
-  if (error) entry.error = error;
-  if (value.payload !== undefined) entry.payload = sanitizeMqttPayload(value.payload);
-  return entry;
-}
-
 /**
- * Validate a /api/mqtt response. Unknown fields are dropped, numbers must be
- * finite, and payloads are sanitized here so redaction does not depend on
- * the renderer. `fetchedAtMs` is the browser clock at read time.
+ * Validate a /api/mqtt response: the one MQTT status (broker, connection and
+ * the message counts of the RDF Node topics). Unknown fields are dropped and
+ * numbers must be finite. `fetchedAtMs` is the browser clock at read time.
  */
 export function normalizeMqttSnapshot(value: unknown, fetchedAtMs: number): MqttSnapshot {
   if (!isObject(value)) throw new Error('MQTT response has an invalid shape');
@@ -165,43 +123,21 @@ export function normalizeMqttSnapshot(value: unknown, fetchedAtMs: number): Mqtt
   if (port !== undefined && port >= 1 && port <= 65535) snapshot.port = port;
   if (isMqttTransport(value.transport)) snapshot.transport = value.transport;
   if (isMqttWsPath(value.ws_path)) snapshot.ws_path = value.ws_path;
+  if (typeof value.node_id === 'string' && NODE_ID_PATTERN.test(value.node_id)) snapshot.node_id = value.node_id;
+  if (typeof value.root === 'string' && ROOT_PATTERN.test(value.root)) snapshot.root = value.root;
   const connection = text(value.connection, 32);
   if (connection) snapshot.connection = connection;
   snapshot.last_error = text(value.last_error, 300) ?? null;
   const nowMs = nonNegative(value.now_ms);
   if (nowMs !== null) snapshot.now_ms = nowMs;
-  for (const key of ['received', 'valid', 'invalid', 'cleared', 'total_bytes'] as const) {
+  for (const key of ['received', 'valid', 'invalid', 'cleared'] as const) {
     const number = count(value[key]);
     if (number !== undefined) snapshot[key] = number;
   }
   snapshot.last_received_at_ms = nonNegative(value.last_received_at_ms);
   snapshot.last_age_ms = nonNegative(value.last_age_ms);
-  snapshot.last_latency_ms = finite(value.last_latency_ms);
-  snapshot.last_topic = typeof value.last_topic === 'string' && value.last_topic ? value.last_topic.slice(0, 256) : null;
-  const kindCounts = normalizeKindCounts(value.kind_counts);
-  if (kindCounts) snapshot.kind_counts = kindCounts;
-  if (isObject(value.last_by_kind)) {
-    const entries: Record<string, MqttEntry> = {};
-    for (const [kind, entry] of Object.entries(value.last_by_kind)) {
-      if (Object.keys(entries).length >= MAX_KINDS) break;
-      if (KIND_PATTERN.test(kind) && isObject(entry)) entries[kind] = normalizeEntry(kind, entry, nowMs);
-    }
-    snapshot.last_by_kind = entries;
-  }
   return snapshot;
 }
-
-/** Display thresholds for the receive age of one kind; kinds without one are events or markers. */
-export const MQTT_KIND_STALE_AFTER_MS: Readonly<Record<string, number>> = {
-  doa: 5_000,
-  nav: 5_000,
-  health: 8_000,
-  // The edge agent re-publishes state and config every 30 s.
-  state: 65_000,
-  config_reported: 65_000,
-};
-
-const KIND_ORDER = ['doa', 'health', 'nav', 'state', 'config_reported', 'availability', 'ack_config', 'config_patch', 'unknown'];
 
 /** Time since this snapshot was read, on the browser clock. */
 export function elapsedSinceRead(fetchedAtMs: number | undefined, nowLocalMs: number): number {
@@ -212,124 +148,6 @@ export function elapsedSinceRead(fetchedAtMs: number | undefined, nowLocalMs: nu
 export function lastMessageAgeMs(snapshot: MqttSnapshot | null | undefined, nowLocalMs: number): number | null {
   const age = snapshot?.last_age_ms;
   return typeof age === 'number' ? age + elapsedSinceRead(snapshot?.fetched_at_ms, nowLocalMs) : null;
-}
-
-export type MqttContractState = 'VALID' | 'INVALID' | 'CLEARED';
-
-export interface MqttKindRow {
-  kind: string;
-  count: number | null;
-  contract: MqttContractState;
-  retained: boolean;
-  synthetic: boolean;
-  source: string | null;
-  flags: Array<{ name: string; value: boolean }>;
-  /** health.state from the payload (ONLINE, STALE, DEGRADED, UNAVAILABLE, ...). */
-  healthState: string | null;
-  /** health.reasons codes. */
-  reasons: string[];
-  availability: { online: boolean; reason: string | null } | null;
-  /** Receive age on the console, aged locally since the read. */
-  ageMs: number | null;
-  /** Payload ts_ms age (edge clock, may be skewed). Shown for broker replays. */
-  sourceAgeMs: number | null;
-  staleAfterMs: number | null;
-  stale: boolean;
-  bytes: number | null;
-  latencyMs: number | null;
-  error: string | null;
-}
-
-const REASON_CODE = /^[A-Z][A-Z0-9_]{0,63}$/u;
-
-function payloadRecord(entry: MqttEntry | undefined): JsonObject | null {
-  return isObject(entry?.payload) ? entry.payload : null;
-}
-
-/**
- * One row per observed kind with its count, contract and payload status,
- * and local age. A broker replay is judged by its payload age, because its
- * receive time only says when this console subscribed.
- */
-export function mqttKindRows(snapshot: MqttSnapshot | null | undefined, nowLocalMs: number): MqttKindRow[] {
-  const entries = snapshot?.last_by_kind ?? {};
-  const counts = snapshot?.kind_counts ?? {};
-  const kinds = [...new Set([...Object.keys(entries), ...Object.keys(counts)])].sort((left, right) => {
-    const a = KIND_ORDER.indexOf(left);
-    const b = KIND_ORDER.indexOf(right);
-    if (a !== b) return (a === -1 ? KIND_ORDER.length : a) - (b === -1 ? KIND_ORDER.length : b);
-    return left.localeCompare(right);
-  });
-  const elapsed = elapsedSinceRead(snapshot?.fetched_at_ms, nowLocalMs);
-  const nowMs = typeof snapshot?.now_ms === 'number' ? snapshot.now_ms : null;
-  return kinds.map((kind) => {
-    const entry = entries[kind];
-    const payload = payloadRecord(entry);
-    const contract: MqttContractState = entry?.cleared ? 'CLEARED' : entry?.valid ? 'VALID' : 'INVALID';
-    const ageMs = typeof entry?.age_ms === 'number' ? entry.age_ms + elapsed : null;
-    const sourceTs = entry?.source_ts_ms;
-    const sourceAgeMs = typeof sourceTs === 'number' && nowMs !== null ? nowMs - sourceTs + elapsed : null;
-    const staleAfterMs = MQTT_KIND_STALE_AFTER_MS[kind] ?? null;
-    const retained = entry?.retained === true;
-    let stale = false;
-    if (entry && contract !== 'CLEARED' && staleAfterMs !== null) {
-      stale = ageMs === null || ageMs > staleAfterMs
-        || (retained && (sourceAgeMs === null || sourceAgeMs > staleAfterMs));
-    }
-    const reasons = Array.isArray(payload?.reasons)
-      ? payload.reasons.filter((code): code is string => typeof code === 'string' && REASON_CODE.test(code)).slice(0, 16)
-      : [];
-    const healthState = kind === 'health' && typeof payload?.state === 'string' && REASON_CODE.test(payload.state) ? payload.state : null;
-    const availability = kind === 'availability' && typeof payload?.online === 'boolean'
-      ? { online: payload.online, reason: typeof payload.reason === 'string' && REASON_CODE.test(payload.reason) ? payload.reason : null }
-      : null;
-    const source = entry?.source ?? null;
-    return {
-      kind,
-      count: typeof counts[kind] === 'number' ? counts[kind] : null,
-      contract,
-      retained,
-      synthetic: source?.toLowerCase() === 'synthetic',
-      source,
-      flags: Object.entries(entry?.validity_flags ?? {}).map(([name, value]) => ({ name, value })),
-      healthState,
-      reasons,
-      availability,
-      ageMs,
-      sourceAgeMs,
-      staleAfterMs,
-      stale,
-      bytes: typeof entry?.bytes === 'number' ? entry.bytes : null,
-      latencyMs: typeof entry?.latency_ms === 'number' ? entry.latency_ms : null,
-      error: entry?.error ?? null,
-    };
-  });
-}
-
-export function healthStateTone(state: string): Tone {
-  if (state === 'ONLINE' || state === 'PASS') return 'good';
-  if (state === 'STALE' || state === 'DEGRADED' || state === 'UNAVAILABLE' || state === 'FAIL') return 'bad';
-  return 'warn';
-}
-
-/** Safe per-kind detail for the JSON view; payloads are already sanitized by the normalizer. */
-export function mqttDetailRecords(snapshot: MqttSnapshot | null | undefined): Record<string, unknown> {
-  const output: Record<string, unknown> = {};
-  for (const [kind, entry] of Object.entries(snapshot?.last_by_kind ?? {})) {
-    output[kind] = {
-      bytes: entry.bytes ?? 0,
-      qos: entry.qos ?? 0,
-      retained: entry.retained ?? false,
-      valid: entry.valid ?? false,
-      ...(entry.cleared ? { cleared: true } : {}),
-      ...(entry.validity_flags ? { validity_flags: entry.validity_flags } : {}),
-      ...(entry.source ? { source: entry.source } : {}),
-      latency_ms: entry.latency_ms ?? null,
-      ...(entry.error ? { error: entry.error } : {}),
-      payload: entry.payload,
-    };
-  }
-  return output;
 }
 
 /** RDF Node topic suffixes, in the order the server subscribes to them (docs/MQTT_KONTRAK.md). */
