@@ -482,7 +482,7 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 
 ### Monitor Pesan
 
-- Bilah halaman menampilkan chip koneksi, tag transport (`TCP` atau `WS`), `SYNTHETIC` bila ada payload sintetis, sakelar sdr/v1 | RDF Node v2, **Muat ulang**, dan **Sambungkan ulang**. Kartu **Koneksi** menampilkan broker, transport (`TCP` atau `WS /path`), topik terakhir (disamarkan), dan publish.
+- Bilah halaman menampilkan chip koneksi, tag transport (`TCP` atau `WS`), `SYNTHETIC` bila ada payload sintetis, sakelar sdr/v1 | RDF Node, **Muat ulang**, dan **Sambungkan ulang**. Kartu **Koneksi** menampilkan broker, transport (`TCP` atau `WS /path`), topik terakhir (disamarkan), dan publish.
 - Baris metrik: Diterima, Valid, Tidak valid, Byte, Latensi terakhir, Pesan terakhir. Latensi terakhir hanya menghitung pesan live. Di ponsel baris ini dua kolom.
 - Tabel per kind:
   - **Count** adalah jumlah pesan per kind sejak monitor start.
@@ -494,7 +494,7 @@ Bila pembacaan gagal, penyebabnya juga ditulis di banner di bawah strip.
 - **Sambungkan ulang** selalu membuka sesi subscriber baru dengan pengaturan broker tersimpan; penghitung dan record terakhir mulai dari nol. Tanpa tombol ini, monitor mencoba lagi sendiri dalam sekitar 10 detik.
 - Client id MQTT sekarang `groundconsole` plus 10 karakter hex acak per monitor, sehingga dua console bisa memakai satu broker. ACL atau log broker yang memakai id lama `ground-console-monitor` perlu diperbarui.
 - Status MQTT diperbarui sendiri setiap 2 detik di Monitor Pesan dan Kesehatan Sistem, dan setiap 5 detik di halaman lain.
-- Panel **Telemetri RDF Node v2** dijelaskan di bagian MQTT di bawah.
+- Tampilan **RDF Node** dijelaskan di bagian [RDF Node](#rdf-node) di bawah.
 
 ### Shortcut keyboard
 
@@ -509,11 +509,11 @@ Kode halaman, termasuk peta, diambil di latar belakang tidak lama setelah consol
 
 ## MQTT staging, opsional
 
-MQTT tidak diperlukan untuk peta, polar, Spektrum, atau simulasi; Kontrol membutuhkannya. Ground Console memakai satu koneksi ke broker yang dikonfigurasi. Koneksi itu berlangganan topic v1 dan RDF Node v2 sekaligus, dan hanya publish patch konfigurasi v1 yang dikonfirmasi admin di Kontrol. `paho-mqtt` diperlukan untuk monitor MQTT, Kontrol, dan synthetic publisher.
+MQTT tidak diperlukan untuk peta, polar, Spektrum, atau simulasi; Kontrol membutuhkannya. Ground Console memakai satu koneksi ke broker yang dikonfigurasi. Koneksi itu berlangganan topik `sdr/v1/uav-01` dan topik RDF Node di `sdr/v2/uav-01` sekaligus, dan hanya publish patch konfigurasi ke `sdr/v1/uav-01` yang dikonfirmasi admin di Kontrol. `paho-mqtt` diperlukan untuk monitor MQTT, Kontrol, dan synthetic publisher.
 
 Koneksi MQTT default adalah `10.90.0.1:9001`, WebSocket, path `/mqtt`. Host menerima literal IPv4/IPv6 apa pun atau `localhost`, bukan nama DNS; masukkan IPv6 tanpa kurung siku. Ground Console membuka koneksi keluar ke broker, tetapi HTTP Ground Console tetap bind ke loopback. Monitor tidak punya opsi username, password, atau TLS untuk TCP maupun WebSocket, sehingga payload, termasuk patch dari Kontrol, melintas tanpa enkripsi. Gunakan hanya broker dan jaringan tepercaya; jangan kirim payload rahasia melalui koneksi ini. Karena itu console tidak bisa tersambung ke broker LAN `tools/mqtt_lan_stage.conf` yang mewajibkan TLS dan password.
 
-Monitor memakai MQTTv5 dan satu konfigurasi broker bersama: host, port, transport, dan WebSocket path berlaku untuk kedua keluarga topic. Filter v1 adalah `sdr/v1/uav-01/#`; RDF Node v2 memakai prefix `sdr/v2/uav-01/` dan sepuluh suffix: `telemetry/doa`, `telemetry/health`, `telemetry/health/detail`, `telemetry/angular`, `state`, `capabilities`, `config/reported`, `availability`, `ack/config`, dan `ack/operation`. Status `READY` menunggu SUBACK berhasil untuk seluruh filter bersama. Parser dan snapshot v1/v2 tetap terpisah agar validasi satu schema tidak mengubah statistik schema lain.
+Monitor memakai MQTTv5 dan satu konfigurasi broker bersama: host, port, transport, dan WebSocket path berlaku untuk kedua root topik. Filter `sdr/v1/uav-01/#` tetap ada sampai jalur lama dihapus; RDF Node memakai prefix `sdr/v2/uav-01/` dan 12 suffix dari kontrak edge (`docs/MQTT_KONTRAK.md`): `state`, `capabilities`, `availability`, `telemetry/health`, `telemetry/health/detail`, `telemetry/doa`, `telemetry/diagnostic/doa`, `telemetry/angular`, `telemetry/diagnostic/angular`, `settings/reported`, `ack/config`, dan `ack/operation`. `config/reported` bukan bagian kontrak dan tidak di-subscribe, jadi nilai retained sisa di broker tidak dibaca. Status `READY` menunggu SUBACK berhasil untuk seluruh filter bersama. Parser dan snapshot kedua root tetap terpisah agar validasi satu schema tidak mengubah statistik schema lain.
 
 Konfigurasi lama `rdf_node_mqtt` tidak digunakan atau dimigrasikan; field itu hilang saat konfigurasi disimpan berikutnya. Atur endpoint kedua keluarga topic melalui **Konfigurasi → MQTT**.
 
@@ -569,19 +569,24 @@ Semua payload synthetic publisher membawa `source: "synthetic"` dan tampil denga
 
 Broker `tools/mqtt_stage4.conf` menerima koneksi anonim di loopback, jadi console bisa publish ke sana. Jalankan broker dan console seperti di atas, lalu jalankan agent dari repo ini di mesin yang sama dengan `--publish --enable-config --settings-path <file settings.json>` dan `--base-url` ke Data Out yang bisa dibaca. Agent baru mengirim `config_reported` setelah bisa membaca `settings.json` lewat Data Out; sebelum itu Kontrol menampilkan rev dasar "tidak diketahui" dan Kirim nonaktif. Tanpa `--enable-config`, setiap patch dijawab `REMOTE_CONTROL_DISABLED`. Synthetic publisher dengan `--keep-retained` mengisi rev dasar (dengan badge `SYNTHETIC`), tetapi tidak menjawab patch, sehingga hasilnya **Belum ada ACK**.
 
-### RDF Node v2 telemetry
+### RDF Node
 
 Pastikan `paho-mqtt==2.1.0` terpasang di virtual environment yang sama dengan Ground Console; jika dependency tidak tersedia, status monitor melaporkan error tanpa mematikan Ground Console.
 
-Untuk RDF Node v2, console hanya membaca sepuluh filter di atas dan tidak mengirim command v2. Satu-satunya publish console adalah patch v1 ke `sdr/v1/uav-01/cmd/config/patch` dari Kontrol. Endpoint browser v2 hanya `GET /api/mqtt/rdf-node`; Kontrol memakai nilai VFO dari `config/reported` v2 bila tersedia.
+Untuk RDF Node, console hanya membaca 12 filter di atas dan belum mengirim perintah ke `sdr/v2/uav-01/cmd/...`. Satu-satunya publish console masih patch ke `sdr/v1/uav-01/cmd/config/patch` dari Kontrol. Endpoint browser hanya `GET /api/mqtt/rdf-node`. RDF Node tidak punya `config/reported`, jadi Kontrol mengambil nilai VFO dari Data Out (cadangan).
 
-Panel **Telemetri RDF Node v2** ada di halaman Monitor Pesan:
+Kontrak per topik (field wajib, QoS, retained, expiry, batas freshness, dan aturan status console) ada di `docs/MQTT_KONTRAK.md`, diambil dari edge commit `8691ad0` (rilis `1.0.0-20261013194717`). Field edge yang lebih baru, misalnya field PPP di `telemetry/health/detail`, diterima tetapi tidak wajib.
 
-- Panel memakai koneksi broker yang sama dengan v1, tetapi penghitungnya terpisah. Panel dibaca setiap 2 detik hanya selama halaman Monitor Pesan terbuka.
+Tampilan **RDF Node** ada di halaman Monitor Pesan:
+
+- Memakai koneksi broker yang sama dengan `sdr/v1`, tetapi penghitungnya terpisah. Dibaca setiap 2 detik hanya selama tampilan ini terbuka.
 - `READY` berarti seluruh SUBACK untuk filter bersama berhasil, bukan DAQ sehat. Availability adalah petunjuk koneksi, bukan health.
-- Per topic tampil count, status (`FRESH`, `STALE`, `CONTEXT`, `INCONSISTENT`, `INVALID`, atau `UNAVAILABLE` bila belum pernah diterima), umur, RETAINED/LIVE, dan ringkasan field. Nilai retained yang dihapus publisher (pesan retained kosong) tampil `UNAVAILABLE`.
-- Nilai DoA dan Angular hanya tampil selama `FRESH`. `FRESH` menjadi `STALE` bila halaman tidak membaca state v2 baru selama 5 detik.
-- Untuk menerima Angular live, atur `require_ground_receipt_for_bulk=false` secara terpisah pada Edge. MQTT v2 tidak mengubah HTTP Data Out, publication gate, atau simulasi Dashboard.
+- Kartu **Node** berisi nilai terakhir yang diterima, per bagian: Sesi (`sid`, `cfg`, run, profile, clock dari `state`), Health (segar 8 detik), Detail health, DoA (`LIVE` hanya untuk `ok=1` dengan health segar `daq=1`), DoA RAW (`ok=0`, selalu `UNVERIFIED`), DoA doa.xml (diagnostik), Angular (`LIVE` hanya untuk `flags=63`), Kandidat Angular (trust-only atau diagnostik, `UNVERIFIED`, dengan alasannya), Kapabilitas, Ketersediaan, dan Settings (hanya setelah `config.get`; teks `settings.json` tetap di server). Pesan yang ditolak tidak pernah masuk kartu ini.
+- Kartu **ACK** menampilkan ACK terakhir per perintah dengan status jurnal edge dan tag `FINAL`. `challenge` dari ACK prepare tidak disimpan.
+- Tabel topik menampilkan count, status pesan terakhir (`LIVE`, `UNVERIFIED`, `FRESH`, `CONTEXT`, `STALE`, `INCONSISTENT`, `IGNORED`, `INVALID`, `UNAVAILABLE` bila belum pernah diterima, atau `CLEARED` bila publisher menghapus nilai retained), umur, RETAINED/LIVE, ringkasan field, dan kode penolakan beserta nama field (misalnya `INVALID_FIELD a`).
+- Nilai arah DoA dan Angular hanya tampil selama `LIVE` atau `UNVERIFIED`. `LIVE`, `UNVERIFIED`, dan `FRESH` menjadi `STALE` bila halaman tidak membaca state baru selama 5 detik.
+- `IGNORED NO_SESSION` berarti `state` belum diterima; edge mengirimnya retained dan paling lambat tiap 60 detik. `STALE SOURCE_TIMESTAMP_NOT_FRESH` di semua telemetry biasanya berarti jam Raspberry dan groundstation berbeda lebih dari batasnya; periksa sinkronisasi jam.
+- Data ini belum dipakai Dashboard: HTTP Data Out, publication gate, dan simulasi Dashboard tidak berubah.
 
 Broker TLS, PPP/T900, dan MQTT production tidak disiapkan oleh quickstart ini. Contoh payload dan fixture lokal bukan bukti kompatibilitas perangkat atau acceptance hardware.
 

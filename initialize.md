@@ -57,7 +57,7 @@ Tujuan UI:
 - Overlay settings tersimpan lokal. Panel Lapisan berisi tujuh sakelar layer dan opasitas overlay, dan bagian Lanjutan berisi kontrol advanced untuk jarak/radius, min/max dB, threshold, contrast/intensity, radial samples, distance falloff, opacity, blur, guide interval, dan palette.
 - Marker station interaktif dan dapat membuka popup detail.
 - Tab `Simulasi`: lokasi, sudut DoA, lebar lobe, randomize manual, randomize otomatis.
-- Halaman System Health (termasuk tabel pembacaan per resource), DoA Diagnostics, Configuration, dan Message Monitor (sdr/v1 plus panel RDF Node v2).
+- Halaman System Health (termasuk tabel pembacaan per resource), DoA Diagnostics, Configuration, dan Message Monitor (sdr/v1 plus tampilan RDF Node).
 - Collector mendeteksi node beku (`NODE_CLOCK_STALLED`), membatasi satu koleksi dengan anggaran waktu (4 detik untuk `/api/snapshot`), dan membandingkan sudut CSV/XML hanya untuk pasangan dari frame yang sama.
 - Console membaca Data Out satu kali per interval refresh untuk semua penampil (`tools/data_out_reader.py`) dan memakai ulang `settings.json` paling lama 30 detik; umur data di browser dihitung sejak node dibaca.
 - Freshness expiry di renderer browser; snapshot stale tidak boleh terus ditampilkan sebagai data aktif. Refresh otomatis default 2 detik (pilihan 1, 2, 5, 10, 30 detik atau manual).
@@ -143,7 +143,7 @@ MQTT adalah transport/contract, bukan pengganti DAQ, DSP, normalisasi, gate, ata
 | `tools/sdr_doa_lan_agent.py` | Edge agent/LAN staging dan payload health/state/config; dengan `--publish` selalu berlangganan `cmd/config/patch`, dan tanpa `--enable-config` menolak patch dengan `REMOTE_CONTROL_DISABLED` |
 | `tools/sdr_doa_mqtt.py` | MQTT contract/adapter staging |
 | `tools/sdr_doa_mqtt_monitor.py` | MQTT monitor; berlangganan, dan hanya publish patch konfigurasi lewat `publish_config_patch`. Memerlukan `paho-mqtt` (tanpa paket ini monitor berstatus ERROR, console tetap jalan) |
-| `tools/rdf_node_mqtt_v2.py` | Parser dan snapshot RDF Node v2 untuk `/api/mqtt/rdf-node` |
+| `tools/rdf_node_mqtt_v2.py` | Parser kontrak MQTT RDF Node (`docs/MQTT_KONTRAK.md`), node view, dan snapshot untuk `/api/mqtt/rdf-node` |
 | `tools/receiver_record_store.py` | Store SQLite dan file audio Receiver di bawah `--data-dir` |
 | `tools/preferences_store.py` | Salinan preferensi browser di server (allowlist key, batas ukuran, tulis atomik) untuk `/api/preferences` |
 | `tools/tile_cache.py` | Cache tile basemap untuk `/api/tiles`: upstream tetap (HTTPS, maksimal dua host per sumber), cache disk LRU, sajian stale saat offline |
@@ -169,7 +169,7 @@ MQTT adalah transport/contract, bukan pengganti DAQ, DSP, normalisasi, gate, ata
 | `frontend/src/components/PolarPlot.tsx` | Plotly polar/compass renderer, camera state, head-up, manual dB range |
 | `frontend/src/lib/telemetry.ts` | Candidate selection, data state, formatting, gate helpers |
 | `frontend/src/lib/doaStatus.ts` | Predikat kesiapan DoA bersama untuk readout, polar, dan peta |
-| `frontend/src/lib/mqttMonitor.ts` | Normalisasi snapshot MQTT v1/v2 dan redaksi record |
+| `frontend/src/lib/mqttMonitor.ts` | Normalisasi snapshot MQTT (`sdr/v1` dan RDF Node) dan redaksi record |
 | `frontend/src/pages/ReceiverPage.tsx` | Host iframe Receiver, sinkron tema/bahasa, penerusan shortcut, menyambungkan bridge ke frame |
 | `frontend/src/lib/receiverBridge.ts`, `receiverBridgeProtocol.ts` | Sisi console bridge Receiver; salinan protokol sisi frame ada di `tools/browsdr_receiver_overlay/src/client/app/console-bridge-protocol.ts` |
 | `frontend/src/lib/configPatch.ts` | Field, satuan, rentang, dan kode error patch konfigurasi untuk Kontrol |
