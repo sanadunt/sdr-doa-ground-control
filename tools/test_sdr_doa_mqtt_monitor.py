@@ -1,4 +1,4 @@
-"""Tests for the single MQTT client that observes sdr/v1 and the RDF Node topics."""
+"""Tests for the console's one MQTT client: the RDF Node topics, its status and Kontrol's publish."""
 from __future__ import annotations
 
 import http.client
@@ -17,7 +17,6 @@ from typing import Any
 from unittest.mock import patch
 
 from tools import rdf_node_commands as commands
-from tools import sdr_doa_mqtt as contract
 from tools.rdf_node_mqtt_v2 import RDF_NODE_V2_SUFFIXES
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -162,7 +161,6 @@ def load_monitor(paho: types.ModuleType) -> types.ModuleType:
         "paho.mqtt.client": client_module,
         "paho.mqtt.packettypes": mqtt.packettypes,
         "paho.mqtt.properties": mqtt.properties,
-        "sdr_doa_mqtt": contract,
     }):
         module = importlib.import_module("tools.sdr_doa_mqtt_monitor")
         return importlib.reload(module)
@@ -207,7 +205,7 @@ class SharedMqttMonitorTests(unittest.TestCase):
         answers = codes if codes is not None else successful_codes(count)
         self.client.on_subscribe(self.client, None, self.client.mid, answers, None)
 
-    def test_one_websocket_client_subscribes_to_v1_and_default_v2_prefix(self) -> None:
+    def test_one_websocket_client_subscribes_to_the_rdf_node_topics_only(self) -> None:
         self.client = self._start()
         self.client.on_connect(self.client, None, {}, types.SimpleNamespace(value=0, is_failure=False), None)
 
@@ -218,70 +216,54 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self.assertEqual(self.client.kwargs.get("protocol"), 5)
         self.assertEqual(self.client.kwargs.get("transport"), "websockets")
         self.assertIn(("ws_set_options", (), {"path": "/mqtt"}), self.client.calls)
-        v2_filters = {f"sdr/v2/{NODE}/{suffix}" for suffix in RDF_NODE_V2_SUFFIXES}
-        v1_filter = f"{contract.TOPIC_ROOT}/#"
-        expected = {v1_filter, *v2_filters}
-        self.assertEqual({topic for topic, _options in self.client.subscriptions}, expected)
-        self.assertEqual(len(self.client.subscriptions), len(expected))
+        expected = [f"sdr/v2/{NODE}/{suffix}" for suffix in RDF_NODE_V2_SUFFIXES]
+        self.assertEqual([topic for topic, _options in self.client.subscriptions], expected)
         for topic, options in self.client.subscriptions:
             self.assertEqual(options.qos, 1)
-            # v1 retain marks a broker replay; v2 needs the publisher's flag.
-            self.assertIs(options.retainAsPublished, topic in v2_filters)
+            # The contract's validation needs the publisher's retain flag.
+            self.assertIs(options.retainAsPublished, True)
             self.assertEqual(options.retainHandling, 0)
+            self.assertNotIn("#", topic)
         self.assertEqual(self.monitor.rdf_node_snapshot()["connection"], "connecting")
+        self.assertEqual(self.monitor.snapshot()["connection"], "connecting")
 
         self.acknowledge()
         self.assertEqual(self.monitor.rdf_node_snapshot()["connection"], "ready")
+        self.assertEqual(self.monitor.snapshot()["connection"], "connected")
 
-    def test_v1_and_v2_messages_use_only_their_schema_specific_snapshots(self) -> None:
+    def test_status_counts_the_rdf_node_topics_and_nothing_else(self) -> None:
         self.client = self._start()
         self.client.on_connect(self.client, None, {}, types.SimpleNamespace(value=0, is_failure=False), None)
         self.acknowledge()
-        now_ms = int(time.time() * 1000)
-        v1_health = contract.build_health(
-            ts_ms=now_ms, state="PASS", daq_ok=True, dropped_frames=0,
-            gps_status="Disabled", doa_valid=False, doa_age_ms=None,
-            frame_sync=True, sample_delay_sync=True, iq_sync=True,
-        )
-        self.client.on_message(
-            self.client, None,
-            message(contract.TOPICS["health"], contract.compact_json(v1_health).encode("utf-8"), 0, False),
-        )
-        v2_availability = json.dumps({
-            "v": 2, "sid": "7a8b9c0d", "online": True, "t": now_ms,
-        }).encode("utf-8")
-        self.client.on_message(
-            self.client, None,
-            message(f"sdr/v2/{NODE}/availability", v2_availability, 1, True),
-        )
+        clock = [1_700_000_000_000]
+        availability = json.dumps({"v": 2, "sid": "7a8b9c0d", "online": True, "t": clock[0]}).encode("utf-8")
+        with patch.object(self.module, "_now_ms", lambda: clock[0]):
+            self.client.on_message(self.client, None, message(f"sdr/v2/{NODE}/availability", availability, 1, True))
+            # A topic outside the subscribed node topics is neither counted nor stored.
+            for topic in ("sdr/legacy/uav-01/telemetry/health", f"sdr/v2/{NODE}/config/reported",
+                          f"sdr/v2/{NODE}/cmd/config/patch", "sdr/v2/uav-02/availability"):
+                self.client.on_message(self.client, None, message(topic, availability, 1, False))
+            clock[0] += 1_500
+            self.client.on_message(self.client, None, message(
+                f"sdr/v2/{NODE}/availability", b'{"v":1,"sid":"7a8b9c0d","online":true,"t":1}', 1, True,
+            ))
+            clock[0] += 2_000
+            status = self.monitor.snapshot()
+            rdf = self.monitor.rdf_node_snapshot()
 
-        v1_snapshot = self.monitor.snapshot()
-        v2_snapshot = self.monitor.rdf_node_snapshot()
-        self.assertEqual((v1_snapshot["received"], v1_snapshot["valid"], v1_snapshot["invalid"]), (1, 1, 0))
-        self.assertEqual((v2_snapshot["received"], v2_snapshot["valid"], v2_snapshot["invalid"]), (1, 1, 0))
-        self.assertEqual(v2_snapshot["topics"]["availability"]["status"], "CONTEXT")
-        self.assertEqual(v2_snapshot["topic_counts"]["availability"], 1)
-
-        self.client.on_message(
-            self.client, None,
-            message(contract.TOPICS["health"], b'{"v":2}', 0, False),
+        self.assertEqual((status["received"], status["valid"], status["invalid"], status["cleared"]), (2, 1, 1, 0))
+        self.assertEqual(
+            {key: status[key] for key in ("received", "valid", "invalid", "cleared", "last_received_at_ms")},
+            {key: rdf[key] for key in ("received", "valid", "invalid", "cleared", "last_received_at_ms")},
         )
-        self.client.on_message(
-            self.client, None,
-            message(
-                f"sdr/v2/{NODE}/availability",
-                b'{"v":1,"sid":"7a8b9c0d","online":true,"t":1}',
-                1,
-                True,
-            ),
-        )
-
-        v1_snapshot = self.monitor.snapshot()
-        v2_snapshot = self.monitor.rdf_node_snapshot()
-        self.assertEqual((v1_snapshot["received"], v1_snapshot["valid"], v1_snapshot["invalid"]), (2, 1, 1))
-        self.assertEqual((v2_snapshot["received"], v2_snapshot["valid"], v2_snapshot["invalid"]), (2, 1, 1))
-        self.assertEqual(v2_snapshot["topics"]["availability"]["status"], "INVALID")
-        self.assertEqual(v2_snapshot["topic_counts"]["availability"], 2)
+        self.assertEqual((status["last_received_at_ms"], status["last_age_ms"]), (clock[0] - 2_000, 2_000))
+        self.assertEqual((status["node_id"], status["root"]), (NODE, f"sdr/v2/{NODE}"))
+        self.assertEqual((status["read_only"], status["publish_enabled"]), (True, False))
+        self.assertEqual(rdf["topics"]["availability"]["status"], "INVALID")
+        self.assertEqual(rdf["topic_counts"]["availability"], 2)
+        # The status holds no per-topic or per-message detail; that is rdf_node_snapshot's.
+        for key in ("last_by_kind", "kind_counts", "topic_counts", "last_topic", "total_bytes", "last_latency_ms"):
+            self.assertNotIn(key, status)
         self.assertEqual(self.client.publish_calls, [])
 
     def test_client_construction_failure_surfaces_shared_connection_error(self) -> None:
@@ -323,24 +305,6 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self.client.on_connect(self.client, None, {}, types.SimpleNamespace(value=0, is_failure=False), None)
         self.acknowledge()
 
-    def _send(self, kind: str, payload: object, *, retained: bool = False, qos: int = 0) -> None:
-        raw = payload if isinstance(payload, bytes) else contract.compact_json(payload).encode("utf-8")
-        self.client.on_message(self.client, None, message(contract.TOPICS[kind], raw, qos, retained))
-
-    @staticmethod
-    def _doa(ts_ms: int, *, valid: bool = True) -> dict:
-        return contract.build_doa(
-            seq=1, ts_ms=ts_ms, relative_doa_deg=137.4, confidence=0.9,
-            power_db=-54.2, frequency_hz=433_920_000, processing_ms=12, valid=valid,
-        )
-
-    @staticmethod
-    def _health(ts_ms: int, *, doa_valid: bool = True) -> dict:
-        return contract.build_health(
-            ts_ms=ts_ms, state="PASS", daq_ok=True, dropped_frames=0,
-            gps_status="Disabled", doa_valid=doa_valid, doa_age_ms=None,
-        )
-
     def test_each_monitor_uses_a_unique_bounded_client_id(self) -> None:
         other = self.module.MqttMonitor("10.90.0.1", 9001)
         self.monitor.start()
@@ -366,138 +330,6 @@ class SharedMqttMonitorTests(unittest.TestCase):
         tcp = self.module.MqttMonitor("127.0.0.1", 1883, transport="tcp").snapshot()
         self.assertEqual(tcp["transport"], "tcp")
 
-    def test_kind_counts_are_keyed_by_kind(self) -> None:
-        self._connected()
-        now_ms = int(time.time() * 1000)
-        self._send("doa", self._doa(now_ms))
-        self._send("doa", self._doa(now_ms))
-        self._send("health", self._health(now_ms))
-        self.client.on_message(
-            self.client, None, message(f"{contract.TOPIC_ROOT}/telemetry/angular", b"x", 0, False),
-        )
-        snapshot = self.monitor.snapshot()
-        self.assertEqual(snapshot["kind_counts"], {"doa": 2, "health": 1, "unknown": 1})
-        self.assertEqual(set(snapshot["kind_counts"]), set(snapshot["last_by_kind"]))
-        self.assertEqual(snapshot["topic_counts"][contract.TOPICS["doa"]], 2)
-
-    def test_each_kind_reports_its_own_age(self) -> None:
-        self._connected()
-        clock = [1_700_000_000_000]
-        with patch.object(self.module, "_now_ms", lambda: clock[0]):
-            self._send("doa", self._doa(clock[0]))
-            for _ in range(600):
-                clock[0] += 1000
-                self._send("health", self._health(clock[0]))
-            snapshot = self.monitor.snapshot()
-        self.assertEqual(snapshot["now_ms"], clock[0])
-        self.assertEqual(snapshot["last_age_ms"], 0)
-        doa = snapshot["last_by_kind"]["doa"]
-        self.assertEqual(doa["age_ms"], 600_000)
-        self.assertEqual(doa["source_ts_ms"], clock[0] - 600_000)
-        self.assertEqual(snapshot["last_by_kind"]["health"]["age_ms"], 0)
-        self.assertNotIn("age_ms", self.monitor._last_by_kind["doa"])
-
-    def test_retained_replay_reports_age_not_latency(self) -> None:
-        self._connected()
-        clock = [1_700_000_000_000]
-        state = contract.build_state(
-            ts_ms=clock[0] - 7_200_000, config_rev=3, running=True, frequency_hz=433_920_000,
-            gain_db=10.0, array="UCA", method="MUSIC", active_vfos=1,
-        )
-        with patch.object(self.module, "_now_ms", lambda: clock[0]):
-            self._send("doa", self._doa(clock[0] - 25))
-            self._send("state", state, retained=True, qos=1)
-            snapshot = self.monitor.snapshot()
-            replay = snapshot["last_by_kind"]["state"]
-            self.assertIs(replay["retained"], True)
-            self.assertIsNone(replay["latency_ms"])
-            self.assertEqual(clock[0] - replay["source_ts_ms"], 7_200_000)
-            self.assertEqual(snapshot["last_latency_ms"], 25)
-
-            clock[0] += 1000
-            self._send("state", {**state, "ts_ms": clock[0] - 40}, retained=False, qos=1)
-            snapshot = self.monitor.snapshot()
-        self.assertEqual(snapshot["last_by_kind"]["state"]["latency_ms"], 40)
-        self.assertEqual(snapshot["last_latency_ms"], 40)
-
-    def test_config_ack_is_decoded_against_the_contract(self) -> None:
-        self._connected()
-        now_ms = int(time.time() * 1000)
-        self._send("ack_config", b"not json at all")
-        entry = self.monitor.snapshot()["last_by_kind"]["ack_config"]
-        self.assertIs(entry["valid"], False)
-        self.assertIn("invalid JSON", entry["error"])
-
-        ack = contract.build_config_ack(
-            command_id="cmd-1", status="rejected", ts_ms=now_ms, config_rev=7,
-            readback_ok=False, error={"code": "CONFIG_CONFLICT", "current_config_rev": 8},
-        )
-        self._send("ack_config", ack, qos=1)
-        snapshot = self.monitor.snapshot()
-        entry = snapshot["last_by_kind"]["ack_config"]
-        self.assertIs(entry["valid"], True)
-        self.assertEqual(entry["payload"]["status"], "rejected")
-        self.assertEqual(entry["payload"]["error"]["code"], ack["error"]["code"])
-        self.assertEqual(entry["payload"]["config_rev"], 7)
-        self.assertEqual((snapshot["valid"], snapshot["invalid"]), (1, 1))
-
-    def test_payload_validity_flags_are_reported_beside_contract_validity(self) -> None:
-        self._connected()
-        now_ms = int(time.time() * 1000)
-        self._send("doa", self._doa(now_ms, valid=False))
-        self._send("health", {**self._health(now_ms, doa_valid=False), "settings_valid": True})
-        snapshot = self.monitor.snapshot()
-        doa = snapshot["last_by_kind"]["doa"]
-        self.assertIs(doa["valid"], True)
-        self.assertEqual(doa["validity_flags"], {"valid": False})
-        health = snapshot["last_by_kind"]["health"]
-        self.assertEqual(health["validity_flags"], {"doa_valid": False, "settings_valid": True})
-        self._send("doa", b"{}")
-        self.assertNotIn("validity_flags", self.monitor.snapshot()["last_by_kind"]["doa"])
-
-    def test_retained_clear_is_counted_as_cleared_not_invalid(self) -> None:
-        self._connected()
-        now_ms = int(time.time() * 1000)
-        state = contract.build_state(
-            ts_ms=now_ms, config_rev=3, running=True, frequency_hz=433_920_000,
-            gain_db=10.0, array="UCA", method="MUSIC", active_vfos=1, source="synthetic",
-        )
-        self._send("state", state, retained=True, qos=1)
-        self._send("state", b"", qos=1)
-        self._send("config_reported", b"", qos=1)
-        snapshot = self.monitor.snapshot()
-        self.assertEqual(
-            (snapshot["received"], snapshot["valid"], snapshot["invalid"], snapshot["cleared"]),
-            (3, 1, 0, 2),
-        )
-        entry = snapshot["last_by_kind"]["state"]
-        self.assertIs(entry["cleared"], True)
-        self.assertIs(entry["valid"], False)
-        self.assertNotIn("payload", entry)
-        self.assertNotIn("source", entry)
-        self.assertNotIn("error", entry)
-        self.assertEqual((entry["bytes"], entry["latency_ms"], entry["source_ts_ms"]), (0, None, None))
-        self.assertEqual(snapshot["kind_counts"], {"state": 2, "config_reported": 1})
-
-    def test_empty_publish_on_a_non_retained_topic_is_invalid_not_cleared(self) -> None:
-        self._connected()
-        self._send("doa", b"")
-        self._send("health", b"")
-        self._send("ack_config", b"", qos=1)
-        self._send("availability", b"", qos=1)
-        snapshot = self.monitor.snapshot()
-        self.assertEqual(
-            (snapshot["received"], snapshot["valid"], snapshot["invalid"], snapshot["cleared"]),
-            (4, 0, 3, 1),
-        )
-        doa = snapshot["last_by_kind"]["doa"]
-        self.assertNotIn("cleared", doa)
-        self.assertIs(doa["valid"], False)
-        self.assertEqual(doa["error"], "empty payload")
-        self.assertEqual((doa["bytes"], doa["latency_ms"], doa["source_ts_ms"]), (0, None, None))
-        self.assertEqual(snapshot["last_by_kind"]["ack_config"]["error"], "empty payload")
-        self.assertIs(snapshot["last_by_kind"]["availability"]["cleared"], True)
-
     def test_v2_retained_clear_clears_the_topic_without_counting_invalid(self) -> None:
         self._connected()
         topic = f"sdr/v2/{NODE}/availability"
@@ -512,55 +344,16 @@ class SharedMqttMonitorTests(unittest.TestCase):
         )
         entry = snapshot["topics"]["availability"]
         self.assertEqual((entry["status"], entry["error"], entry["payload"]), ("UNAVAILABLE", "RETAINED_CLEARED", None))
-        self.assertEqual(self.monitor.snapshot()["received"], 0)
-
-    def test_source_marker_and_health_reasons_are_reported(self) -> None:
-        self._connected()
-        now_ms = int(time.time() * 1000)
-        doa = contract.build_doa(
-            seq=1, ts_ms=now_ms, relative_doa_deg=137.4, confidence=0.9, power_db=-54.2,
-            frequency_hz=433_920_000, processing_ms=12, valid=True, source="synthetic",
-        )
-        self._send("doa", doa)
-        health = contract.build_health(
-            ts_ms=now_ms, state="STALE", daq_ok=True, dropped_frames=0, gps_status="Disabled",
-            doa_valid=False, doa_age_ms=None, reasons=["STATUS_STALE", "NODE_CLOCK_STALLED"],
-        )
-        self._send("health", health)
-        last = self.monitor.snapshot()["last_by_kind"]
-        self.assertEqual(last["doa"]["source"], "synthetic")
-        self.assertNotIn("source", last["health"])
-        self.assertEqual(last["health"]["payload"]["reasons"], ["STATUS_STALE", "NODE_CLOCK_STALLED"])
-        self.assertEqual(last["health"]["payload"]["state"], "STALE")
-
-    def test_availability_is_decoded_and_its_will_time_is_not_latency(self) -> None:
-        self._connected()
-        clock = [1_700_000_000_000]
-        with patch.object(self.module, "_now_ms", lambda: clock[0]):
-            self._send("doa", self._doa(clock[0] - 30))
-            will = contract.build_availability(
-                ts_ms=clock[0] - 3_600_000, online=False, reason="CONNECTION_LOST",
-            )
-            self._send("availability", will, qos=1)
-            snapshot = self.monitor.snapshot()
-        entry = snapshot["last_by_kind"]["availability"]
-        self.assertIs(entry["valid"], True)
-        self.assertEqual(entry["payload"]["online"], False)
-        self.assertEqual(entry["payload"]["reason"], "CONNECTION_LOST")
-        self.assertIsNone(entry["latency_ms"])
-        self.assertEqual(snapshot["last_latency_ms"], 30)
-        self.assertEqual(snapshot["kind_counts"]["availability"], 1)
-        self._send("availability", b'{"v":1,"ts_ms":1}', qos=1)
-        self.assertIs(self.monitor.snapshot()["last_by_kind"]["availability"]["valid"], False)
+        status = self.monitor.snapshot()
+        self.assertEqual((status["received"], status["valid"], status["invalid"], status["cleared"]), (2, 1, 0, 1))
 
     def test_edge_payloads_reach_the_rdf_node_view_through_the_shared_connection(self) -> None:
         fixtures = TOOLS_DIR / "fixtures" / "rdf-node"
         manifest = json.loads((fixtures / "manifest.json").read_text(encoding="utf-8"))
         by_file = {entry["file"]: entry for entry in manifest["fixtures"]}
         self._connected()
-        # state is the first RDF Node filter, so its retained value comes first.
-        v2_topics = [topic for topic, _options in self.client.subscriptions if topic.startswith("sdr/v2/")]
-        self.assertEqual(v2_topics[0], f"sdr/v2/{NODE}/state")
+        # state is the first filter, so its retained value comes first.
+        self.assertEqual(self.client.subscriptions[0][0], f"sdr/v2/{NODE}/state")
         clock = [manifest["generated_at_ms"]]
 
         def deliver(name: str) -> None:

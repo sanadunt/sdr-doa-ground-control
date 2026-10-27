@@ -1133,6 +1133,16 @@ class RdfNodeV2Telemetry:
             "acks": [copy.deepcopy(record) for record in reversed(self._acks.values())],
         }
 
+    def counters(self) -> Dict[str, Any]:
+        """Message counts of every subscribed topic, for the one MQTT status (``/api/mqtt``)."""
+        return {
+            "received": self._received,
+            "valid": self._valid,
+            "invalid": self._invalid,
+            "cleared": self._cleared,
+            "last_received_at_ms": self._last_received,
+        }
+
     def snapshot(self, now_ms: int) -> Dict[str, Any]:
         if type(now_ms) is not int or now_ms < 0:
             raise ValueError("invalid snapshot time")
@@ -1178,11 +1188,7 @@ class RdfNodeV2Telemetry:
         return {
             "node_id": self.node_id,
             "now_ms": now_ms,
-            "received": self._received,
-            "valid": self._valid,
-            "invalid": self._invalid,
-            "cleared": self._cleared,
-            "last_received_at_ms": self._last_received,
+            **self.counters(),
             "topic_counts": dict(self._counts),
             "invalid_counts": dict(self._invalid_counts),
             "topics": topics,

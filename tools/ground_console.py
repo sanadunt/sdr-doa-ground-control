@@ -449,14 +449,8 @@ class _UnavailableMqttMonitor:
             "valid": 0,
             "invalid": 0,
             "cleared": 0,
-            "total_bytes": 0,
             "last_received_at_ms": None,
             "last_age_ms": None,
-            "last_latency_ms": None,
-            "last_topic": None,
-            "last_by_kind": {},
-            "kind_counts": {},
-            "topic_counts": {},
         }
 
     def rdf_node_snapshot(self) -> Dict[str, Any]:
@@ -1917,7 +1911,7 @@ pre { max-height: 260px; overflow: auto; margin: 8px 0 0; padding: 9px; border: 
 
       <article class="panel">
         <header class="panel-head"><div class="panel-title"><span class="panel-index">M</span><div><p class="panel-kicker">MESSAGE MONITOR</p><h2>MQTT subscriber</h2></div></div><span class="panel-code">NO PUBLISH</span></header>
-        <div class="panel-body table-wrap"><table class="data-table"><tbody id="mqtt-rows"></tbody></table><details><summary>Last payload by stream</summary><pre id="mqtt-last">Monitor is disabled.</pre></details></div>
+        <div class="panel-body table-wrap"><table class="data-table"><tbody id="mqtt-rows"></tbody></table><details><summary>MQTT status</summary><pre id="mqtt-last">Monitor is disabled.</pre></details></div>
       </article>
     </aside>
   </div>
@@ -1996,10 +1990,6 @@ async function loadBranding() { try { const r=await fetch('/api/branding',{cache
 function setHealthCard(id, value, detail, tone='') { const card=$(id)?.closest('.health-card'); if(!card) return; $(id).textContent=value; $(id).className=''; card.className=`health-card ${tone}`; const detailNode=$(id+'-detail'); if(detailNode) detailNode.textContent=detail; }
 function mqttCount(value) { return Number.isInteger(value)&&value>=0?value:0; }
 function mqttMs(value) { return Number.isFinite(value)?`${value} ms`:'—'; }
-// A zero-length publish removes a retained value: the entry has cleared:true and
-// valid:false, which means "no current value", not an invalid message.
-function mqttContract(entry) { return entry.cleared===true?'CLEARED':(entry.valid===true?'VALID':'INVALID'); }
-function contractPill(state) { return `<span class="chip ${state==='VALID'?'safe':(state==='INVALID'?'bad':'warn')}">${esc(state)}</span>`; }
 function mqttTransport(data) { return data.transport==='tcp'?'MQTT over TCP':(data.transport==='websockets'?`MQTT over WebSocket ${data.ws_path||'/mqtt'}`:'—'); }
 function renderMqtt(data) {
   const enabled=Boolean(data&&data.enabled); const connection=data?.connection||'off';
@@ -2008,14 +1998,10 @@ function renderMqtt(data) {
   $('mqtt-detail').textContent=enabled?`${data.host}:${data.port} · ${valid} valid · ${invalid} invalid${cleared?` · ${cleared} cleared`:''}`:'subscriber-only / off';
   setHealthCard('health-mqtt', enabled?connection.toUpperCase():'OFF', enabled?'subscriber-only · '+valid+' valid':'subscriber-only', enabled&&connection==='connected'?'good':(enabled?'warn':''));
   if(!enabled){ $('mqtt-rows').innerHTML=rows([['Mode','OFF'],['Publish',pill('disabled')]]); $('mqtt-last').textContent='MQTT monitor is not enabled.'; return; }
-  const byKind=data.last_by_kind&&typeof data.last_by_kind==='object'&&!Array.isArray(data.last_by_kind)?data.last_by_kind:{};
-  const entries=Object.entries(byKind).filter(([,entry])=>entry&&typeof entry==='object');
-  const kindRows=entries.map(([name,entry])=>[`Latest ${name}`,`${contractPill(mqttContract(entry))}${entry.retained===true?' <span class="muted">retained</span>':''} <span class="muted">${esc(Number.isFinite(entry.age_ms)?`${entry.age_ms} ms ago`:'')}</span>`]);
   $('mqtt-rows').innerHTML=rows([
-    ['Connection',pill(connection)],['Transport',esc(mqttTransport(data))],['Messages',esc(mqttCount(data.received))],['Valid / invalid',esc(`${valid} / ${invalid}`)],['Retained clears',esc(cleared)],['Bytes',esc(mqttCount(data.total_bytes))],['Last latency',esc(mqttMs(data.last_latency_ms))],['Last age',esc(mqttMs(data.last_age_ms))],['Last topic',esc(data.last_topic||'—')],...kindRows,['Publish',pill('false')]
+    ['Connection',pill(connection)],['Transport',esc(mqttTransport(data))],['Topics',esc(data.root?`${data.root}/…`:'—')],['Messages',esc(mqttCount(data.received))],['Valid / invalid',esc(`${valid} / ${invalid}`)],['Retained clears',esc(cleared)],['Last age',esc(mqttMs(data.last_age_ms))],['Publish',pill('false')]
   ]);
-  const records=Object.fromEntries(Object.entries(byKind).map(([name,entry])=>[name,entry&&typeof entry==='object'&&entry.cleared===true?{kind:entry.kind,cleared:true,retained:entry.retained,received_at_ms:entry.received_at_ms,age_ms:entry.age_ms}:entry]));
-  $('mqtt-last').textContent=JSON.stringify(records,null,2);
+  $('mqtt-last').textContent=JSON.stringify({connection,last_error:data.last_error??null,received:mqttCount(data.received),valid,invalid,cleared,last_age_ms:data.last_age_ms??null},null,2);
 }
 // Mirrors frontend/src/lib/polar.ts: Polar is theta_0 counter-clockwise (KrakenSDR Polar plot); Linear has no polar axis, so its compass_offset gets a local Compass axis.
 function polarSettings(figType, compassOffset) { const requested=String(figType??'').trim().toLowerCase(); const numeric=typeof compassOffset==='number'?compassOffset:(typeof compassOffset==='string'&&compassOffset.trim()!==''?Number(compassOffset.trim()):NaN); return { figType:requested==='polar'?'Polar':'Compass', compassOffset:Number.isFinite(numeric)?numeric:0, localAxis:requested!=='polar'&&requested!=='compass' }; }
@@ -2112,7 +2098,7 @@ function render(snapshot) {
   const settings=snapshot.settings||{}; const sf=settings.fields||{}; $('settings-rows').innerHTML=Object.keys(sf).sort().map(key=>[key,safeValue(sf[key])]).map(([key,value])=>`<tr><th>${esc(key)}</th><td>${value}</td></tr>`).join('')||'<tr><td colspan="2">Not available</td></tr>';
   setReadStatus(`Snapshot read successfully · ${readAt.toISOString().slice(11,19)}Z`,'good');
 }
-async function refreshMqtt() { const sequence=++state.mqttSequence; try { const r=await fetch('/api/mqtt',{cache:'no-store'}); const payload=await r.json(); if(sequence!==state.mqttSequence) return; renderMqtt(payload); } catch(e) { if(sequence!==state.mqttSequence) return; renderMqtt({enabled:true,connection:'error',host:'?',port:'?',received:0,valid:0,invalid:0,total_bytes:0,last_latency_ms:null,last_age_ms:null,last_topic:null,last_by_kind:{error:'monitor unavailable'}}); } }
+async function refreshMqtt() { const sequence=++state.mqttSequence; try { const r=await fetch('/api/mqtt',{cache:'no-store'}); const payload=await r.json(); if(sequence!==state.mqttSequence) return; renderMqtt(payload); } catch(e) { if(sequence!==state.mqttSequence) return; renderMqtt({enabled:true,connection:'error',last_error:'monitor unavailable',host:'?',port:'?',received:0,valid:0,invalid:0,cleared:0,last_age_ms:null}); } }
 const REQUEST_TIMEOUT_MS=8000;
 function localExpiryMs(snapshot) {
   // Same rule as the React console: the read keeps only the time still left in the collector's freshness window.

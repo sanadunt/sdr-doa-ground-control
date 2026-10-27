@@ -451,11 +451,11 @@ def test_branding_validation_and_console_config_reload() -> None:
     print("PASS branding validation and console config reload")
 
 
-def test_mqtt_topic_map_is_bounded() -> None:
+def test_mqtt_status_counts_only_the_node_topics() -> None:
     try:
         from sdr_doa_mqtt_monitor import MqttMonitor
     except ModuleNotFoundError:
-        print("SKIP MQTT topic bound; paho-mqtt unavailable")
+        print("SKIP MQTT status bound; paho-mqtt unavailable")
         return
 
     class Message:
@@ -471,11 +471,16 @@ def test_mqtt_topic_map_is_bounded() -> None:
     monitor._client = client
     monitor._started = True
     for index in range(300):
-        monitor._on_message(client, None, Message(f"sdr/v1/uav-01/unknown/{index}"))
-    counts = monitor.snapshot()["topic_counts"]
-    assert len(counts) <= 128
-    assert counts.get("__other__", 0) > 0
-    print("PASS MQTT topic map is bounded")
+        monitor._on_message(client, None, Message(f"sdr/legacy/uav-01/unknown/{index}"))
+        monitor._on_message(client, None, Message(f"sdr/v2/uav-01/unknown/{index}"))
+    status = monitor.snapshot()
+    assert (status["received"], status["valid"], status["invalid"]) == (0, 0, 0)
+    assert "topic_counts" not in status
+    monitor._on_message(client, None, Message("sdr/v2/uav-01/telemetry/health"))
+    status = monitor.snapshot()
+    assert (status["received"], status["invalid"]) == (1, 1)
+    assert set(monitor.rdf_node_snapshot()["topic_counts"]) <= set(monitor._rdf_node._counts)
+    print("PASS MQTT status counts only the node topics")
 
 
 def test_local_mqtt_restore_transition() -> None:
@@ -996,11 +1001,12 @@ process.stdout.write(JSON.stringify({ results, reads, state, fields }));
     assert out["fields"]["source-url"]["textContent"] == "http://192.168.100.100:8081", out
 
 
-def test_legacy_ui_reads_cleared_mqtt_entries_and_new_gate_reasons() -> None:
-    """A retained clear (valid:false, cleared:true) is CLEARED, not INVALID, on the legacy page."""
+def test_legacy_ui_reads_the_mqtt_status_and_new_gate_reasons() -> None:
+    """The legacy page shows the one MQTT status: counts, retained clears, no per-kind rows."""
     html = ground_console.HTML
-    assert "function mqttContract(entry) { return entry.cleared===true?'CLEARED':(entry.valid===true?'VALID':'INVALID'); }" in html
     assert "['Retained clears',esc(cleared)]" in html
+    assert "['Topics',esc(data.root?`${data.root}/…`:'—')]" in html
+    assert "last_by_kind" not in html
     assert "cleared=mqttCount(data?.cleared)" in html
     for reason in ("NODE_CLOCK_STALLED", "ADC_OVERDRIVE", "NATIVE_ANGLE_INVALID", "NATIVE_ANGLE_UNCHECKED"):
         assert f"  {reason}:'" in html, reason

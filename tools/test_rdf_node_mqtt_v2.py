@@ -826,7 +826,7 @@ class MessageRuleTests(unittest.TestCase):
         store = RdfNodeV2Telemetry(NODE)
         for path in (f"sdr/v2/{NODE}/telemetry/health/extra", "sdr/v2/other/telemetry/health",
                      f"sdr/demo/v2/{NODE}/telemetry/health", f"sdr/v2/{NODE}/config/reported",
-                     f"sdr/v1/{NODE}/telemetry/health", f"sdr/v2/{NODE}/cmd/config/get"):
+                     f"sdr/v3/{NODE}/telemetry/health", f"sdr/v2/{NODE}/cmd/config/get"):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 store.ingest(path, raw("telemetry-health.json"), qos=0, retained=False, received_at_ms=NOW)
         self.assertEqual(store.snapshot(NOW)["received"], 0)
