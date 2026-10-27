@@ -224,7 +224,7 @@ Envelope dibuat server (`rdf_node_commands.build_command`), tidak pernah browser
 
 Aturan `changes` sama dengan helper edge (`helper.validate_changes`), dicek server sebelum publish dan dicek ulang oleh edge: hanya lima field bagian 5; frekuensi dan bandwidth bilangan bulat Hz; `gain_db` salah satu nilai tabel gain (toleransi 0,001 dB); perubahan `center_frequency_hz` wajib membawa `vfo0_frequency_hz` dengan nilai sama (`CENTER_CHANGE_REQUIRES_VFO0_TARGET`, `MVP_CENTER_MUST_EQUAL_VFO0`). Kode penolakan console memakai nama kode edge untuk aturan yang sama. Pemeriksaan `POST` berurutan dan kegagalan pertama yang dijawab: Origin (403 `ORIGIN_REJECTED`), admin (401 `ADMIN_REQUIRED`), bentuk body, `confirm`, field (400), monitor (409 `MQTT_MONITOR_DISABLED`, 503 `MQTT_DEPENDENCY_MISSING`, 503 `MQTT_NOT_CONNECTED`), sesi node (409 `NODE_SESSION_UNAVAILABLE`), lalu untuk patch health (409 `NODE_NOT_FRESH`), revisi (409 `CONFIG_REVISION_UNKNOWN`, `CONFIG_REVISION_STALE` dengan `current_base_rev`) dan perintah lain (409 `COMMAND_IN_FLIGHT`), untuk get permintaan tertunda (409 `SETTINGS_REQUEST_PENDING`) dan jarak 1 s (429 `CONFIG_GET_TOO_SOON`), terakhir publish (503 atau 502 `MQTT_PUBLISH_FAILED`).
 
-Status perintah di server (`GET /api/mqtt/config-patch/<id>`, 32 terakhir, diturunkan dari PUBACK, ACK, dan `settings/reported` dengan `id` itu):
+Status perintah di server (`GET /api/mqtt/config-patch/<id>`, 32 terakhir; `config.get` dan `config.patch` berbagi batas itu, jadi yang dibuang adalah yang final paling tua, tidak pernah perintah yang belum final, sehingga `config.get` beruntun tidak menggeser patch yang menunggu ACK final; diturunkan dari PUBACK, ACK, dan `settings/reported` dengan `id` itu):
 
 | State | Arti |
 |---|---|

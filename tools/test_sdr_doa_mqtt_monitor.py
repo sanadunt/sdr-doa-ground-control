@@ -567,6 +567,27 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self.assertEqual(len(self.monitor._commands), self.module.MAX_COMMAND_RECORDS)
         self.assertIs(self.monitor.rdf_node_command_observation("gc-ours")["published"], False)
 
+    def test_answered_config_gets_never_push_out_a_waiting_patch(self) -> None:
+        # A patch the edge ACCEPTED waits up to 90 s for its final ACK while
+        # Kontrol may send a config.get every second, each answered at once.
+        self._connected()
+        self._node_state()
+        self.monitor.publish_rdf_node_command(self._command("gc-patch"))
+        self._rdf("ack/config", self._edge_ack("gc-patch", "ACCEPTED"))
+        for index in range(self.module.MAX_COMMAND_RECORDS + 5):
+            command_id = f"gc-get-{index}"
+            self.monitor.publish_rdf_node_command(self._command(command_id, op="config.get"))
+            self._rdf("ack/config", self._edge_ack(command_id, "REJECTED", {"error": "TLS_REQUIRED_FOR_SETTINGS_REPORT"}))
+        self.assertEqual(len(self.monitor._commands), self.module.MAX_COMMAND_RECORDS)
+        self.assertIs(self.monitor.rdf_node_command_observation("gc-patch")["published"], True)
+        self.assertIs(self.monitor.rdf_node_command_observation("gc-get-0")["published"], False)
+        # Its final ACK is still seen.
+        self._rdf("ack/config", self._edge_ack("gc-patch", "APPLIED", {"revision": 3, "persisted": True, "proof": {}}))
+        self.assertEqual(self.monitor.rdf_node_command_observation("gc-patch")["final"]["status"], "APPLIED")
+        # Answered now, it ages out like the others.
+        self.monitor.publish_rdf_node_command(self._command("gc-get-last", op="config.get"))
+        self.assertIs(self.monitor.rdf_node_command_observation("gc-patch")["published"], False)
+
     def test_config_get_accepts_only_its_own_settings_report(self) -> None:
         self._connected()
         case = next(item for item in self.COMMANDS["cases"] if item["name"] == "config-get")

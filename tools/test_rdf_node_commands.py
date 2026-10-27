@@ -31,6 +31,7 @@ import rdf_node_commands as cmds  # noqa: E402
 from config_command_tracker import (  # noqa: E402
     FINAL_ACK_STATUSES,
     FINAL_ACK_WAIT_MS,
+    MAX_TRACKED_COMMANDS,
     NO_ACK_GRACE_MS,
     SETTINGS_REPORT_WAIT_MS,
     ConfigCommandTracker,
@@ -426,9 +427,43 @@ class TrackerTests(unittest.TestCase):
         tracker = ConfigCommandTracker(clock_ms=lambda: self.clock[0], max_entries=3)
         command = json.loads(CASES["gain"]["console"]["payload"])
         for index in range(5):
-            tracker.record(dict(command, id=f"gc-{index:024x}"), self.monitor, published_at_ms=1)
+            tracker.record(dict(command, id=f"gc-{index:024x}"), self.monitor, published_at_ms=1, publish_failed=True)
         self.assertEqual(tracker.ids(), [f"gc-{index:024x}" for index in (2, 3, 4)])
         self.assertIsNone(tracker.status("gc-" + "0" * 24, self.monitor))
+
+    def test_config_gets_never_push_out_a_pending_patch(self) -> None:
+        # A patch the edge ACCEPTED may wait FINAL_ACK_WAIT_MS (90 s) for its
+        # final ACK. config.get commands share the bounded list and may come
+        # once a second, each final at once (TLS_REQUIRED_FOR_SETTINGS_REPORT
+        # on a plaintext link): they must never evict the pending patch.
+        patch_command = self.send("gain")
+        accepted, applied = CASES["gain"]["edge"]["acks"]
+        self.monitor.deliver("ack/config", accepted["payload"])
+        get_command = json.loads(CASES["config-get-tls-off"]["console"]["payload"])
+        [rejected] = CASES["config-get-tls-off"]["edge"]["acks"]
+        gets = []
+        for index in range(MAX_TRACKED_COMMANDS + 8):
+            self.clock[0] += 1_100
+            command_id = f"gc-{0xb0000 + index:024x}"
+            self.monitor.published(command_id)
+            self.tracker.record(dict(get_command, id=command_id), self.monitor, published_at_ms=self.clock[0])
+            self.monitor.deliver("ack/config", json.dumps(dict(json.loads(rejected["payload"]), id=command_id)))
+            self.assertTrue(self.status(command_id)["final"])
+            gets.append(command_id)
+            self.assertEqual(self.tracker.in_flight(self.monitor), patch_command["id"], index)
+        self.assertLess(self.clock[0], patch_command["issued_ms"] + FINAL_ACK_WAIT_MS)
+        self.assertEqual(len(self.tracker.ids()), MAX_TRACKED_COMMANDS)
+        self.assertIn(patch_command["id"], self.tracker.ids())
+        self.assertEqual(self.tracker.ids()[1:], gets[-(MAX_TRACKED_COMMANDS - 1):])
+        self.assertEqual(self.status(patch_command["id"])["state"], "acknowledged")
+        # Once it is final it ages out like any other.
+        self.monitor.deliver("ack/config", applied["payload"])
+        self.assertEqual(self.status(patch_command["id"])["state"], "acked")
+        self.clock[0] += 1_100
+        self.monitor.published("gc-" + "a" * 24)
+        self.tracker.record(dict(get_command, id="gc-" + "a" * 24), self.monitor, published_at_ms=self.clock[0])
+        self.assertNotIn(patch_command["id"], self.tracker.ids())
+        self.assertIsNone(self.tracker.in_flight(self.monitor))
 
     def test_ack_from_another_session_is_never_counted(self) -> None:
         command = self.send("retune")

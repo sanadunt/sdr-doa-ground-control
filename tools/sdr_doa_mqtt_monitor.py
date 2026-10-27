@@ -461,9 +461,42 @@ class MqttMonitor:
     def _keep_command_locked(self, command_id: str, record: Dict[str, Any]) -> None:
         self._commands[command_id] = record
         while len(self._commands) > MAX_COMMAND_RECORDS:
-            oldest_id, oldest = self._commands.popitem(last=False)
-            if oldest.get("mid") is not None and self._publish_mids.get(oldest["mid"]) == oldest_id:
+            victim = self._eviction_victim_locked(command_id)
+            if victim is None:
+                return
+            oldest = self._commands.pop(victim)
+            if oldest.get("mid") is not None and self._publish_mids.get(oldest["mid"]) == victim:
                 self._publish_mids.pop(oldest["mid"], None)
+
+    @staticmethod
+    def _command_done(record: Mapping[str, Any]) -> bool:
+        """The edge gave this command its answer: nothing more is waited for."""
+        puback = record.get("puback")
+        if isinstance(puback, Mapping) and type(puback.get("reason")) is int and puback["reason"] >= 128:
+            return True
+        final = record.get("final")
+        if not isinstance(final, Mapping):
+            return False
+        # An APPLIED config.get still waits for its settings report.
+        return not (record.get("op") == commands.OP_CONFIG_GET and final.get("status") == "APPLIED"
+                    and record.get("reported_at_ms") is None)
+
+    def _eviction_victim_locked(self, keep: str) -> Optional[str]:
+        """The record to drop beyond the bound: the oldest answered one first.
+
+        config.get and config.patch share the bound, so dropping by age alone
+        let a run of quick config.get commands push out a patch still waiting
+        for its final ACK, which then arrived unseen. Without an answered
+        record the oldest config.get goes, and only then the oldest of all.
+        """
+        candidates = [command_id for command_id in self._commands if command_id != keep]
+        for command_id in candidates:
+            if self._command_done(self._commands[command_id]):
+                return command_id
+        for command_id in candidates:
+            if self._commands[command_id].get("op") != commands.OP_CONFIG_PATCH:
+                return command_id
+        return candidates[0] if candidates else None
 
     def adopt_rdf_node_commands(self, pending: Iterable[Mapping[str, Any]]) -> int:
         """Follow commands a replaced monitor published and that are not final yet.

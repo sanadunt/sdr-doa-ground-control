@@ -232,8 +232,29 @@ class ConfigCommandTracker:
         with self._lock:
             self._entries.pop(command_id, None)
             self._entries[command_id] = entry
-            while len(self._entries) > self._max_entries:
-                self._entries.pop(next(iter(self._entries)))
+            self._evict_locked(command_id, monitor)
+
+    def _evict_locked(self, keep: str, monitor: Any) -> None:
+        """Drop the oldest final commands beyond the bound, never one that is not final.
+
+        config.get and config.patch share the list, so evicting by age alone
+        let a run of quick config.get commands push out a config.patch still
+        waiting for its final ACK: in_flight() would miss it, a second patch
+        would pass COMMAND_IN_FLIGHT and its status would answer 404. A
+        command that is not final stays; the server's guards keep those few
+        (one patch, one get), and each turns final by its own timeout, after
+        which a later record() drops it.
+        """
+        excess = len(self._entries) - self._max_entries
+        if excess <= 0:
+            return
+        now = self.now_ms()
+        final_ids = [
+            command_id for command_id, entry in self._entries.items()
+            if command_id != keep and self._status_locked(entry, monitor, now)["final"]
+        ]
+        for command_id in final_ids[:excess]:
+            self._entries.pop(command_id, None)
 
     def status(self, command_id: str, current_monitor: Any) -> Optional[Dict[str, Any]]:
         with self._lock:
