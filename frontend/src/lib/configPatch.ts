@@ -342,16 +342,31 @@ export function edgeErrorKey(code: string | null | undefined): MessageKey | null
   return code && Object.prototype.hasOwnProperty.call(EDGE_ERROR_KEYS, code) ? EDGE_ERROR_KEYS[code] : null;
 }
 
+/**
+ * The edge puts the class name of an exception its settings helper raised
+ * in `result.error`, upper-cased (OSERROR, FILENOTFOUNDERROR,
+ * PERMISSIONERROR, TIMEOUTEXPIRED...). Such a code means the helper on the
+ * Raspberry could not run, not that the values were refused.
+ */
+export function edgeHelperFault(code: string | null | undefined): boolean {
+  return typeof code === 'string' && /^(?:[A-Z][A-Z0-9]*ERROR|TIMEOUTEXPIRED|CALLEDPROCESSERROR)$/u.test(code);
+}
+
 /** `info`: neither success nor failure (PERSISTED_UNVERIFIED, OUTCOME_UNKNOWN, no final ACK). */
 export type ResultTone = 'ok' | 'info' | 'warn' | 'err';
 
 /** How a final command status reads in Kontrol; all text is chosen by key. */
 export interface CommandResultView {
   tone: ResultTone;
+  /** The outcome in the operator's words. */
   title: { key: MessageKey; vars?: Record<string, string | number> };
   body: { key: MessageKey; vars?: Record<string, string | number> };
+  /** The raw codes (the edge's status and error, a PUBACK reason), shown under the result. */
+  code: string | null;
   /** The values on the node changed or may have; read them again. */
   reload: boolean;
+  /** The node's settings changed after the base revision was read: the same change can be reviewed again on the new one. */
+  rebase?: boolean;
 }
 
 /** Minimal view of a command status, as normalized by api.ts. */
@@ -378,6 +393,7 @@ export function commandResultView(status: CommandStatusLike, changeCount: number
       tone: 'err',
       title: { key: 'control.result.publishFailedTitle' },
       body: { key: 'control.result.publishFailed', vars: { reason: status.pubackReason === null ? '—' : status.pubackReason } },
+      code: status.pubackReason === null ? null : `PUBACK ${status.pubackReason}`,
       reload: false,
     };
   }
@@ -386,67 +402,60 @@ export function commandResultView(status: CommandStatusLike, changeCount: number
       tone: 'info',
       title: { key: 'control.result.noFinalAckTitle' },
       body: { key: 'control.result.noFinalAck', vars: { status: ack?.status ?? 'ACCEPTED' } },
+      code: ack?.status ?? null,
       reload: true,
     };
   }
   if (status.state === 'no_ack' || !ack) {
-    return { tone: 'err', title: { key: 'control.result.noAckTitle' }, body: { key: 'control.result.noAck', vars: { ttl: ttlS } }, reload: false };
+    return { tone: 'err', title: { key: 'control.result.noAckTitle' }, body: { key: 'control.result.noAck', vars: { ttl: ttlS } }, code: 'NO ACK', reload: false };
   }
   const code = ack.error ?? ack.reason;
+  const raw = withCode(ack.status, code);
   const rev = ack.revision ?? '—';
+  const helper = edgeHelperFault(ack.error);
   if (ack.status === 'APPLIED') {
-    return {
-      tone: 'ok',
-      title: { key: 'control.result.ackTitle', vars: { status: 'APPLIED' } },
-      body: { key: 'control.result.applied', vars: { count: changeCount, rev } },
-      reload: true,
-    };
+    return { tone: 'ok', title: { key: 'control.result.title.applied' }, body: { key: 'control.result.applied', vars: { count: changeCount, rev } }, code: raw, reload: true };
   }
   if (ack.status === 'PERSISTED_UNVERIFIED') {
-    return {
-      tone: 'info',
-      title: { key: 'control.result.ackTitle', vars: { status: withCode('PERSISTED_UNVERIFIED', ack.reason) } },
-      body: { key: 'control.result.persistedUnverified', vars: { rev } },
-      reload: true,
-    };
+    return { tone: 'info', title: { key: 'control.result.title.persisted' }, body: { key: 'control.result.persistedUnverified', vars: { rev } }, code: raw, reload: true };
   }
   if (ack.status === 'OUTCOME_UNKNOWN') {
-    return {
-      tone: 'info',
-      title: { key: 'control.result.ackTitle', vars: { status: withCode('OUTCOME_UNKNOWN', code) } },
-      body: { key: 'control.result.outcomeUnknown' },
-      reload: true,
-    };
+    // Name the likely cause: the helper did not run, or the link dropped while applying.
+    const body: MessageKey = helper ? 'control.result.outcomeUnknownHelper'
+      : ack.reason === 'CONNECTION_LOST' ? 'control.result.outcomeUnknownLink' : 'control.result.outcomeUnknown';
+    return { tone: 'info', title: { key: 'control.result.title.unknown' }, body: { key: body, vars: { code: code ?? '—' } }, code: raw, reload: true };
   }
   if (ack.error === 'CONFIG_REVISION_CONFLICT' || (ack.status === 'CONFLICT' && !ack.error)) {
     return {
       tone: 'warn',
-      title: { key: 'control.result.rejectedTitle', vars: { code: withCode(ack.status, 'CONFIG_REVISION_CONFLICT') } },
+      title: { key: 'control.result.title.conflict' },
       body: { key: 'control.result.conflict', vars: { rev: baseRev ?? '—' } },
+      code: withCode(ack.status, 'CONFIG_REVISION_CONFLICT'),
       reload: true,
+      rebase: true,
     };
   }
   const edgeKey = edgeErrorKey(code);
   if (ack.status === 'REJECTED' || ack.status === 'CONFLICT') {
-    return {
-      tone: 'warn',
-      title: { key: 'control.result.rejectedTitle', vars: { code: withCode(ack.status, code) } },
-      body: { key: edgeKey ?? 'control.result.rejected' },
-      reload: false,
-    };
+    return { tone: 'warn', title: { key: 'control.result.title.rejected' }, body: { key: edgeKey ?? 'control.result.rejected' }, code: raw, reload: false };
   }
   if (ack.status === 'EXPIRED') {
-    return { tone: 'warn', title: { key: 'control.result.ackTitle', vars: { status: withCode('EXPIRED', code) } }, body: { key: 'control.result.expired' }, reload: false };
+    return { tone: 'warn', title: { key: 'control.result.title.expired' }, body: { key: 'control.result.expired' }, code: raw, reload: false };
   }
   if (ack.status === 'CANCELLED') {
-    return { tone: 'warn', title: { key: 'control.result.ackTitle', vars: { status: withCode('CANCELLED', code) } }, body: { key: 'control.result.cancelled' }, reload: true };
+    return { tone: 'warn', title: { key: 'control.result.title.cancelled' }, body: { key: 'control.result.cancelled' }, code: raw, reload: true };
   }
-  return {
-    tone: 'err',
-    title: { key: 'control.result.ackTitle', vars: { status: withCode(ack.status, code) } },
-    body: { key: edgeKey ?? 'control.result.failed' },
-    reload: true,
-  };
+  if (ack.status === 'FAILED') {
+    return {
+      tone: 'err',
+      title: { key: 'control.result.title.failed' },
+      body: helper ? { key: 'control.result.failedHelper', vars: { code: code ?? '—' } } : { key: edgeKey ?? 'control.result.failed' },
+      code: raw,
+      reload: true,
+    };
+  }
+  // A status this console does not know: not a success; show the code as the edge sent it.
+  return { tone: 'info', title: { key: 'control.result.ackTitle', vars: { status: ack.status } }, body: { key: 'control.result.outcomeUnknown', vars: { code: code ?? '—' } }, code: raw, reload: true };
 }
 
 /** What Kontrol shows about the latest config.get, or null when there is nothing to say. */
@@ -475,7 +484,7 @@ export function settingsReadView(status: CommandStatusLike | null | undefined): 
       return { tone: 'warn', code: 'NO REPORT', key: 'control.settings.noReport' };
     default: {
       const code = status.ack?.error ?? status.ack?.reason ?? status.ack?.status ?? null;
-      return { tone: 'warn', code, key: edgeErrorKey(code) ?? 'control.settings.refused' };
+      return { tone: 'warn', code, key: edgeErrorKey(code) ?? (edgeHelperFault(code) ? 'control.settings.helper' : 'control.settings.refused') };
     }
   }
 }

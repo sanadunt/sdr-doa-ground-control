@@ -9,7 +9,7 @@ import type { CommandStatusLike, DraftValues } from '../../lib/configPatch';
 import { currentConfigValues, dataOutConfigValues, verifyConfigPatch } from '../../lib/configVerify';
 import type { VerifyInput } from '../../lib/configVerify';
 import type { TelemetrySnapshot } from '../../types';
-import { ControlPanel, ControlPanelView, controlFailure, controlValueSource, reviewRows } from './ControlPanel';
+import { ControlPanel, ControlPanelView, controlFailure, controlValueSource, rebaseOutcome, reviewRows } from './ControlPanel';
 import type { ControlPanelViewProps } from './ControlPanel';
 
 const CAPABILITIES = normalizeCapabilities({
@@ -283,7 +283,7 @@ describe('Kontrol review and send', () => {
     expect(view({ stage: 'review', review, evaluation, reported: disconnected })).toMatch(/Kirim butuh monitor MQTT yang terhubung[\s\S]*is-send is-wide" type="button" disabled=""/);
     const noNode = normalizeConfigReported(reportedBody({ node: null }));
     expect(view({ stage: 'review', review, evaluation, reported: noNode })).toContain('Kirim butuh state RDF-SDR lewat MQTT.');
-    expect(view({ stage: 'review', review: { ...review, rev: null }, evaluation })).toContain('Kirim butuh revisi konfigurasi (state.cfg) RDF-SDR.');
+    expect(view({ stage: 'review', review: { ...review, rev: null }, evaluation })).toContain('RDF-SDR belum melaporkan revisi settings (state.cfg).');
     const stale = normalizeConfigReported(reportedBody({ node: { ...NODE, health_fresh: false, health_age_ms: 20_000 } }));
     const staleMarkup = view({ stage: 'review', review, evaluation, reported: stale });
     expect(staleMarkup).toContain('Kirim butuh telemetry/health yang segar dari RDF-SDR.');
@@ -292,6 +292,67 @@ describe('Kontrol review and send', () => {
     const blocked = view({ stage: 'review', review, evaluation, capabilities: noPublish });
     expect(blocked).toContain('Patch konfigurasi tidak tersedia: monitor MQTT mati atau paho-mqtt belum terpasang.');
     expect(blocked).toMatch(/is-send is-wide" type="button" disabled=""/);
+  });
+
+  it('keeps Send usable with remote_config_patch false, after a second confirmation', () => {
+    const reported = normalizeConfigReported(reportedBody({ node: { ...NODE, remote_config_patch: false } }));
+    const unconfirmed = view({ stage: 'review', review, evaluation, reported });
+    expect(unconfirmed).toContain(t('control.capabilityWarn'));
+    expect(unconfirmed).toContain(`<input type="checkbox"/><span>${t('control.capabilityConfirm')}</span>`);
+    expect(unconfirmed).toContain(t('control.sendBlockedCapability'));
+    expect(unconfirmed).toMatch(/is-send is-wide" type="button" disabled=""/);
+    const confirmed = view({ stage: 'review', review, evaluation, reported, capabilityConfirmed: true });
+    expect(confirmed).toContain('<input type="checkbox" checked=""/>');
+    expect(confirmed).not.toContain(t('control.sendBlockedCapability'));
+    expect(confirmed).toMatch(/<button class="ov-button is-send is-wide" type="button"><svg/);
+    // A node with a settings target needs no confirmation.
+    expect(view({ stage: 'review', review, evaluation })).not.toContain(t('control.capabilityConfirm'));
+  });
+
+  it('brings the review back after a revision change, for one more Send', () => {
+    const reading = view({ stage: 'review', review, evaluation, rebasing: true });
+    expect(reading).toContain(t('control.rebaseReading'));
+    expect(reading).toMatch(/is-send is-wide" type="button" disabled=""/);
+    expect(view({ stage: 'review', review: null, evaluation, rebasing: true })).toContain(t('control.rebaseReading'));
+    const moved = view({ stage: 'review', review: { ...review, rev: 43 }, evaluation, rebaseNotice: { kind: 'moved', from: 42, to: 43 } });
+    expect(moved).toContain(t('control.rebased', { from: 42, to: 43 }));
+    expect(moved).toMatch(/<button class="ov-button is-send is-wide" type="button"><svg/);
+    // An unknown revision asks for the settings instead of locking the panel.
+    expect(view({ stage: 'review', review: { ...review, rev: null }, evaluation, rebaseNotice: { kind: 'moved', from: null, to: 43 } })).toContain(t('control.sendBlockedRev'));
+  });
+
+  it('rebuilds the same change on the new revision from the values reported now', () => {
+    const rebase = { changes: review.changes, fromRev: 42, startedAtMs: 1_000 };
+    const at43 = normalizeConfigReported(reportedBody({ base_rev: 43, node: { ...NODE, cfg: 43 } }));
+    // No revision yet, or the same one shortly after: wait.
+    expect(rebaseOutcome(rebase, normalizeConfigReported(reportedBody({ base_rev: null })), null, null, [15.7], t, 2_000)).toEqual({ kind: 'wait' });
+    expect(rebaseOutcome(rebase, REPORTED, null, null, [15.7], t, 2_000)).toEqual({ kind: 'wait' });
+    const moved = rebaseOutcome(rebase, at43, null, CAPABILITIES.configPatch?.ranges ?? null, [15.7], t, 2_000);
+    expect(moved.kind).toBe('review');
+    if (moved.kind === 'review') {
+      expect(moved.review.rev).toBe(43);
+      expect(moved.review.changes).toEqual(review.changes);
+      expect(moved.notice).toEqual({ kind: 'moved', from: 42, to: 43 });
+    }
+    // The same revision after the settle time is reviewed on it too.
+    expect(rebaseOutcome(rebase, REPORTED, null, CAPABILITIES.configPatch?.ranges ?? null, [15.7], t, 8_000).kind).toBe('review');
+    // A node that already has the values leaves nothing to send.
+    const already = normalizeConfigReported(reportedBody({ base_rev: 43, values: { ...(reportedBody().values as object), center_frequency_hz: 433_920_000, vfo0_frequency_hz: 433_920_000 } }));
+    expect(rebaseOutcome(rebase, already, null, CAPABILITIES.configPatch?.ranges ?? null, [15.7], t, 2_000).kind).toBe('same');
+    // An unknown revision before the review is reviewed once the revision arrives.
+    expect(rebaseOutcome({ ...rebase, fromRev: null }, REPORTED, null, CAPABILITIES.configPatch?.ranges ?? null, [15.7], t, 2_000)).toMatchObject({ kind: 'review', notice: { from: null, to: 42 } });
+  });
+
+  it('offers to review a rejected change again on the new revision', () => {
+    const conflict = commandResultView({ state: 'acked', ack: { status: 'REJECTED', error: 'CONFIG_REVISION_CONFLICT', reason: null, revision: null }, pubackReason: null }, 2, 42, 15);
+    const markup = view({
+      stage: 'done',
+      done: { view: conflict, error: null, commandId: 'gc-0123', restarted: false, rebase: { changes: review.changes, fromRev: 42 } },
+      onRebase: () => undefined,
+    });
+    expect(markup).toContain(`<button class="ov-button is-primary is-wide" type="button">${t('control.rebaseAction')}</button>`);
+    expect(markup).not.toContain(`>${t('control.reload')}</button>`);
+    expect(markup).toContain('Kode: REJECTED · CONFIG_REVISION_CONFLICT');
   });
 
   it('shows the command id and the edge progress while waiting for the result', () => {
@@ -317,7 +378,8 @@ describe('Kontrol results', () => {
   it('reports APPLIED as the only success', () => {
     const markup = view({ stage: 'done', done: done('acked', ack('APPLIED')) });
     expect(markup).toContain('ov-control-result tone-ok');
-    expect(markup).toContain('ACK · APPLIED');
+    expect(markup).toContain('ov-control-result-title">Diterapkan<');
+    expect(markup).toContain('Kode: APPLIED');
     expect(markup).toContain('RDF-SDR menerapkan 2 perubahan dan melihatnya berlaku. Config rev sekarang 43.');
     expect(markup).toContain('>Selesai</button>');
     expect(markup).not.toContain('Baca ulang nilai');
@@ -326,12 +388,14 @@ describe('Kontrol results', () => {
   it('keeps PERSISTED_UNVERIFIED, OUTCOME_UNKNOWN and a missing final ACK apart from success and failure', () => {
     const persisted = view({ stage: 'done', done: done('acked', ack('PERSISTED_UNVERIFIED', null, 'NATIVE_RUNTIME_EVIDENCE_INCOMPLETE')) });
     expect(persisted).toContain('ov-control-result tone-info');
-    expect(persisted).toContain('ACK · PERSISTED_UNVERIFIED · NATIVE_RUNTIME_EVIDENCE_INCOMPLETE');
+    expect(persisted).toContain('Tersimpan, belum terbukti');
+    expect(persisted).toContain('Kode: PERSISTED_UNVERIFIED · NATIVE_RUNTIME_EVIDENCE_INCOMPLETE');
     expect(persisted).toContain('Tersimpan di settings.json (rev 43)');
     expect(persisted).toContain('>Baca ulang nilai</button>');
     const unknown = view({ stage: 'done', done: done('acked', ack('OUTCOME_UNKNOWN', 'HELPER_TIMEOUT')) });
     expect(unknown).toContain('ov-control-result tone-info');
-    expect(unknown).toContain('ACK · OUTCOME_UNKNOWN · HELPER_TIMEOUT');
+    expect(unknown).toContain('Hasil tidak diketahui');
+    expect(unknown).toContain('Kode: OUTCOME_UNKNOWN · HELPER_TIMEOUT');
     expect(unknown).toContain('Jangan kirim ulang; baca settings dulu.');
     const noFinal = view({ stage: 'done', done: done('no_final_ack', { status: 'ACCEPTED', error: null, reason: null, revision: null }) });
     expect(noFinal).toContain('ov-control-result tone-info');
@@ -342,29 +406,45 @@ describe('Kontrol results', () => {
   it('reports a stale base revision with what to do', () => {
     const conflict = view({ stage: 'done', done: done('acked', ack('REJECTED', 'CONFIG_REVISION_CONFLICT')) });
     expect(conflict).toContain('ov-control-result tone-warn');
-    expect(conflict).toContain('Ditolak · REJECTED · CONFIG_REVISION_CONFLICT');
+    expect(conflict).toContain('Tidak diterapkan: settings berubah');
+    expect(conflict).toContain('Kode: REJECTED · CONFIG_REVISION_CONFLICT');
     expect(conflict).toContain('Settings di RDF-SDR berubah setelah rev dasar 42 dibaca. Tidak ada yang diubah. Baca ulang nilai, tinjau, lalu kirim.');
     expect(conflict).toContain('>Baca ulang nilai</button>');
     const external = view({ stage: 'done', done: done('acked', ack('CONFLICT', 'EXTERNAL_WRITER_CONFLICT')) }, 'en');
-    expect(external).toContain('Rejected · CONFLICT · EXTERNAL_WRITER_CONFLICT');
+    expect(external).toContain('Rejected by RDF-SDR');
+    expect(external).toContain('Code: CONFLICT · EXTERNAL_WRITER_CONFLICT');
     expect(external).toContain('settings.json changed on RDF-SDR during the write');
   });
 
   it('shows the edge error code of a refusal, an expiry, a cancel and a failure', () => {
     const tls = view({ stage: 'done', done: done('acked', ack('REJECTED', 'BUSY')) });
-    expect(tls).toContain('Ditolak · REJECTED · BUSY');
+    expect(tls).toContain('Ditolak RDF-SDR');
+    expect(tls).toContain('Kode: REJECTED · BUSY');
     expect(tls).toContain('rdf-ground.service');
     const unknownCode = view({ stage: 'done', done: done('acked', ack('REJECTED', 'SOMETHING_NEW')) });
-    expect(unknownCode).toContain('Ditolak · REJECTED · SOMETHING_NEW');
+    expect(unknownCode).toContain('Kode: REJECTED · SOMETHING_NEW');
     expect(unknownCode).toContain('RDF-SDR menolak perubahan. Tidak ada yang diubah.');
     const expired = view({ stage: 'done', done: done('acked', ack('EXPIRED', 'EXPIRED_OR_INVALID_DEADLINE')) });
-    expect(expired).toContain('ACK · EXPIRED · EXPIRED_OR_INVALID_DEADLINE');
+    expect(expired).toContain('Kedaluwarsa sebelum diterapkan');
+    expect(expired).toContain('Kode: EXPIRED · EXPIRED_OR_INVALID_DEADLINE');
     expect(expired).toContain('Perintah kedaluwarsa sebelum RDF-SDR menerapkannya.');
     expect(view({ stage: 'done', done: done('acked', ack('CANCELLED')) })).toContain('Perintah dibatalkan di RDF-SDR.');
     const failed = view({ stage: 'done', done: done('acked', ack('FAILED', 'GAIN_NOT_IN_APPROVED_TABLE')) });
     expect(failed).toContain('ov-control-result tone-err');
-    expect(failed).toContain('ACK · FAILED · GAIN_NOT_IN_APPROVED_TABLE');
+    expect(failed).toContain('Gagal di RDF-SDR');
+    expect(failed).toContain('Kode: FAILED · GAIN_NOT_IN_APPROVED_TABLE');
     expect(failed).toContain('RDF-SDR hanya menerima nilai dari tabel gain-nya.');
+  });
+
+  it('names the missing helper on the RDF-SDR for an exception code, with the raw code', () => {
+    for (const lang of ['id', 'en'] as const) {
+      const unknown = view({ stage: 'done', done: done('acked', ack('OUTCOME_UNKNOWN', 'OSERROR')) }, lang);
+      expect(unknown).toContain(translate(lang, 'control.result.title.unknown'));
+      expect(unknown).toContain(translate(lang, 'control.result.outcomeUnknownHelper', { code: 'OSERROR' }));
+      expect(unknown).toContain(translate(lang, 'control.result.code', { code: 'OUTCOME_UNKNOWN · OSERROR' }));
+      const failed = view({ stage: 'done', done: done('acked', ack('FAILED', 'FILENOTFOUNDERROR')) }, lang);
+      expect(failed).toContain(translate(lang, 'control.result.failedHelper', { code: 'FILENOTFOUNDERROR' }));
+    }
   });
 
   it('reports no ACK and a refused publish', () => {
@@ -385,7 +465,7 @@ describe('Kontrol results', () => {
   });
 
   it('shows a stale revision and a stale node in the form', () => {
-    expect(view({ editError: { code: 'CONFIG_REVISION_STALE', message: { key: 'control.error.CONFIG_REVISION_STALE' } } })).toContain('Revisi konfigurasi RDF-SDR berubah sejak ditinjau.');
+    expect(view({ editError: { code: 'CONFIG_REVISION_STALE', message: { key: 'control.error.CONFIG_REVISION_STALE' } } })).toContain('Revisi settings RDF-SDR berubah sejak ditinjau.');
     expect(view({ editError: { code: 'NODE_NOT_FRESH', message: { key: 'control.error.NODE_NOT_FRESH' } } })).toContain('RDF-SDR tidak mengirim telemetry/health yang segar.');
   });
 });
