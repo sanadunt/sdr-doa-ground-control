@@ -140,6 +140,18 @@ class _Collection:
         return isinstance(collection, dict) and collection.get("settings_reused") is True
 
 
+def _light_read_status(light: _Collection) -> bool:
+    """Whether a light read got status.json, the read its other values hang on."""
+    status = (light.result or {}).get("status") if light.error is None else None
+    return isinstance(status, dict) and status.get("available") is True
+
+
+def _light_status_error(light: _Collection) -> str:
+    status = (light.result or {}).get("status")
+    error = status.get("error") if isinstance(status, dict) else None
+    return str(error) if error else "status.json not read"
+
+
 def _console_url(value: Any) -> Optional[str]:
     return value.rstrip("/") if isinstance(value, str) and value else None
 
@@ -153,6 +165,11 @@ class _Target:
         # The light reads that run while MQTT is fresh.
         self.light: Optional[_Collection] = None
         self.light_running: Optional[_Collection] = None
+        # The last light read that read status.json. A later read that
+        # fails leaves its values in use until they are too old
+        # (telemetry_source.LIGHT_VALUES_MAX_AGE_MS), so one failed GET over
+        # the T900 link does not blank the position and the settings.
+        self.light_good: Optional[_Collection] = None
 
 
 class DataOutReader:
@@ -336,12 +353,15 @@ class DataOutReader:
                 if target.light_running is running:
                     target.light_running = None
                 target.light = running
+                if _light_read_status(running):
+                    target.light_good = running
             running.done.set()
 
     def _mqtt_answer(self, base_url: str, key: str, view: Mapping[str, Any]) -> Dict[str, Any]:
         with self._lock:
             target = self._target_locked(key)
             light = target.light
+            good = target.light_good
             running = target.light_running is not None
             self._count += 1
             answer_id = f"{self._boot}-{self._count}"
@@ -349,18 +369,26 @@ class DataOutReader:
         result: Optional[Dict[str, Any]] = None
         age_ms: Optional[int] = None
         error: Optional[str] = None
+        kept_previous = False
         if light is not None:
             if light.error is not None:
                 error = str(light.error) or type(light.error).__name__
-            else:
-                result = light.result
-            if light.completed is not None:
-                age_ms = max(0, int(round((now - light.completed) * 1000)))
+            elif not _light_read_status(light):
+                error = _light_status_error(light)
+            used = light
+            if light is not good and good is not None:
+                used = good
+                kept_previous = True
+            if used.error is None:
+                result = used.result
+            if used.completed is not None:
+                age_ms = max(0, int(round((now - used.completed) * 1000)))
         meta = {
             "interval_s": self._light_interval_s,
             "reason": light.reason if light is not None else None,
             "running": running,
             "error": error,
+            "kept_previous": kept_previous,
         }
         answer = ts.mqtt_snapshot(
             view, result, base_url=base_url, light_age_ms=age_ms if result is not None else None, light_meta=meta,

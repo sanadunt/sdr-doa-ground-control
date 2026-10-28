@@ -233,13 +233,19 @@ class FixtureTests(unittest.TestCase):
         self.assertIs(node(store)["capabilities"]["session_match"], True)
         # An older edge's maintenance flag is still read when it is a boolean.
         self.assertEqual(put(store, "capabilities", obj("capabilities.json", maintenance=False))["status"], "CONTEXT")
-        for change in ({"maintenance": "no"}, {"remote_ppp_restart": 1}, {"codecs": "json"}):
+        for change in ({"maintenance": "no"}, {"codecs": "json"}):
             with self.subTest(change=change):
                 self.assertEqual(put(store, "capabilities", obj("capabilities.json", **change))["status"], "INVALID")
+        # 0/1 reads as a boolean, with a note.
+        entry = put(store, "capabilities", obj("capabilities.json", remote_ppp_restart=1))
+        self.assertEqual((entry["status"], entry["payload"]["remote_ppp_restart"]), ("CONTEXT", True))
+        self.assertEqual(entry["payload"]["notes"], ["COERCED:remote_ppp_restart"])
+        # A flag the edge left out grants nothing.
         missing = obj("capabilities.json")
         del missing["remote_shutdown"]
         entry = put(store, "capabilities", missing)
-        self.assertEqual((entry["status"], entry["error"], entry["field"]), ("INVALID", "MISSING_FIELD", "remote_shutdown"))
+        self.assertEqual((entry["status"], entry["payload"]["remote_shutdown"]), ("CONTEXT", False))
+        self.assertEqual(entry["payload"]["notes"], ["DEFAULTED:remote_shutdown"])
 
     def test_availability_and_its_last_will(self) -> None:
         store = RdfNodeV2Telemetry(NODE)
@@ -260,9 +266,13 @@ class FixtureTests(unittest.TestCase):
         detail = node(store)["detail"]
         self.assertEqual((detail["ppp"], detail["peer"], detail["ppp_svc"], detail["ppp_restarts"]), ("UP", "REPLY", "ACTIVE", 0))
         self.assertEqual(put(store, "telemetry/health/detail", obj("telemetry-health-detail.ppp.json", ppp=None))["status"], "FRESH")
-        for change in ({"ppp": "up"}, {"ppp_restarts": -1}, {"peer": 5}):
+        self.assertEqual(put(store, "telemetry/health/detail", obj("telemetry-health-detail.ppp.json", ppp_restarts=-1))["status"], "INVALID")
+        # The PPP texts are shown as sent (a lower-case or numeric value is no reject).
+        for change, shown in (({"ppp": "up"}, "up"), ({"peer": 5}, "5")):
             with self.subTest(change=change):
-                self.assertEqual(put(store, "telemetry/health/detail", obj("telemetry-health-detail.ppp.json", **change))["status"], "INVALID")
+                entry = put(store, "telemetry/health/detail", obj("telemetry-health-detail.ppp.json", **change))
+                self.assertEqual(entry["status"], "FRESH")
+                self.assertEqual(entry["payload"][next(iter(change))], shown)
         # The detail of 8691ad0 has none of them.
         store = RdfNodeV2Telemetry(NODE)
         feed(store, "state.json")
@@ -417,7 +427,10 @@ class HealthTests(unittest.TestCase):
                 store = session_store(health=False)
                 entry = put(store, "telemetry/health", obj("telemetry-health.json", t=NOW + offset))
                 self.assertEqual((entry["status"], entry["error"]), (status, error))
-                self.assertEqual(node(store)["health"] is not None, status == "FRESH")
+                # Health outside its window is kept and shown, but it is never fresh.
+                self.assertIsNotNone(node(store)["health"])
+                self.assertEqual(node(store)["health"]["fresh"], status == "FRESH")
+                self.assertEqual(store.session_view(NOW)["health_fresh"], status == "FRESH")
 
     def test_fresh_for_eight_seconds_after_receipt(self) -> None:
         store = session_store()
@@ -443,11 +456,19 @@ class HealthTests(unittest.TestCase):
         q = 10
         nulls = {"drop": None, "age": None, "temp": None, "rev": None}
         self.assertEqual(put(store, "telemetry/health", obj("telemetry-health.json", q=q, t=NOW, **nulls))["status"], "FRESH")
-        for change in ({"daq": 3}, {"run": 5}, {"run": "1"}, {"clk": True}, {"drop": -1}, {"temp": 1e6},
+        for change in ({"daq": 3}, {"run": 5}, {"run": "x"}, {"clk": 2}, {"drop": -1}, {"temp": 1e6},
                        {"q": True}, {"t": 1_000}, {"rev": 1.5}):
             q += 1
             with self.subTest(change=change):
                 self.assertEqual(put(store, "telemetry/health", obj("telemetry-health.json", **{"q": q, "t": NOW, **change}))["status"], "INVALID")
+        # Variations that keep their meaning are read, with a note.
+        for change, field in (({"run": "1"}, "run"), ({"clk": True}, "clk"), ({"q": None}, "q")):
+            q += 2
+            if field == "q":
+                change = {"q": float(q)}
+            with self.subTest(change=change):
+                entry = put(store, "telemetry/health", obj("telemetry-health.json", **{"q": q, "t": NOW, **change}))
+                self.assertEqual((entry["status"], entry["payload"]["notes"]), ("FRESH", [f"COERCED:{field}"]))
         degraded = put(store, "telemetry/health", obj("telemetry-health.daq-degraded.json", q=q + 1, t=NOW))
         self.assertEqual(degraded["status"], "FRESH")
         self.assertEqual(store.session_view(NOW)["health_daq"], 0)
@@ -459,10 +480,16 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(topic(store, "telemetry/health/detail", NOW + 15001)["status"], "STALE")
         self.assertTrue(node(store, NOW + 15001)["detail"]["stale"])
         self.assertEqual(feed(store, "telemetry-doa.ok1.json")["error"], "DOA_WITHOUT_HEALTH")
-        for change in ({"sync": [True, True]}, {"sync": None}, {"cpu": -0.1}, {"cpu": "50"}, {"mem": 101},
-                       {"disk_free": -1}, {"adrop": None}, {"throt": 0}):
+        for change in ({"sync": [True, True]}, {"cpu": -0.1}, {"cpu": "busy"}, {"mem": 101}, {"disk_free": -1}, {"throt": 2}):
             with self.subTest(change=change):
                 self.assertEqual(put(store, "telemetry/health/detail", obj("telemetry-health-detail.json", **change))["status"], "INVALID")
+        # Values that keep their meaning are read, with a note.
+        for change, field, value in (({"sync": None}, "sync", [None, None, None]), ({"cpu": "50"}, "cpu", 50.0),
+                                     ({"adrop": None}, "adrop", None), ({"throt": 0}, "throt", False),
+                                     ({"sync": [1, 0, None]}, "sync", [True, False, None])):
+            with self.subTest(change=change):
+                entry = put(store, "telemetry/health/detail", obj("telemetry-health-detail.json", **change))
+                self.assertEqual((entry["status"], entry["payload"][field]), ("FRESH", value))
         # The edge's cpu has no clamp: an iowait counter that steps back on a
         # busy Pi gives a little over 100 (monitor.probe), still the edge's value.
         for cpu in (100.4, 0, None):
@@ -507,22 +534,29 @@ class DoaTests(unittest.TestCase):
     def test_unverified_variant(self) -> None:
         store = session_store()
         self.assertEqual(feed(store, "telemetry-doa.ok0.json")["status"], "UNVERIFIED")
+        # Another revision is metadata: kept, with a note.
         entry = put(store, "telemetry/doa", obj("telemetry-doa.ok0.json", q=10, t=NOW, rev=CFG + 1))
-        self.assertEqual((entry["status"], entry["error"]), ("INCONSISTENT", "REVISION_MISMATCH"))
+        self.assertEqual((entry["status"], entry["payload"]["notes"]), ("UNVERIFIED", ["REVISION_MISMATCH"]))
         # Without a known state.cfg the revision cannot be compared.
         unknown = RdfNodeV2Telemetry(NODE)
         put(unknown, "state", obj("state.json", cfg=None))
         put(unknown, "telemetry/health", obj("telemetry-health.json", t=NOW))
         self.assertEqual(put(unknown, "telemetry/doa", obj("telemetry-doa.ok0.json", t=NOW, rev=77))["status"], "UNVERIFIED")
-        bad = (
-            {"trust": "VERIFIED"}, {"angle_reference": "RELATIVE"}, {"validation_reasons": []},
-            {"validation_reasons": ["SOURCE_UNVERIFIED", "SOURCE_UNVERIFIED"]},
-            {"validation_reasons": ["NO_FRESH_DOA"]}, {"validation_reasons": "SOURCE_UNVERIFIED"},
+        # ok=0 is UNVERIFIED and RAW whatever its labels say; odd labels are notes.
+        labelled = (
+            ({"trust": "VERIFIED"}, ["UNEXPECTED_VALUE:trust"], ["SOURCE_UNVERIFIED", "ANGLE_UNVERIFIED"]),
+            ({"angle_reference": "RELATIVE"}, ["UNEXPECTED_VALUE:angle_reference"], ["SOURCE_UNVERIFIED", "ANGLE_UNVERIFIED"]),
+            ({"validation_reasons": []}, None, []),
+            ({"validation_reasons": ["SOURCE_UNVERIFIED", "SOURCE_UNVERIFIED"]}, ["DROPPED_ITEMS:validation_reasons"], ["SOURCE_UNVERIFIED"]),
+            ({"validation_reasons": ["NO_FRESH_DOA"]}, None, ["NO_FRESH_DOA"]),
+            ({"validation_reasons": "SOURCE_UNVERIFIED"}, ["INVALID_FIELD:validation_reasons"], []),
         )
-        for q, change in enumerate(bad, start=20):
+        for q, (change, notes, reasons) in enumerate(labelled, start=20):
             with self.subTest(change=change):
                 entry = put(store, "telemetry/doa", obj("telemetry-doa.ok0.json", q=q, t=NOW, **change))
-                self.assertEqual((entry["status"], entry["error"]), ("INVALID", "BAD_UNVERIFIED_DOA"))
+                self.assertEqual(entry["status"], "UNVERIFIED")
+                self.assertEqual(entry["payload"].get("notes"), notes)
+                self.assertEqual((entry["payload"]["trust"], entry["payload"]["validation_reasons"]), ("UNVERIFIED", reasons))
         self.assertEqual(put(store, "telemetry/doa", obj("telemetry-doa.ok1.json", t=NOW, ok=2))["status"], "INVALID")
         self.assertEqual(put(store, "telemetry/doa", obj("telemetry-doa.ok0.json", q=40, t=NOW))["status"], "UNVERIFIED")
         self.assertEqual(topic(store, "telemetry/doa", NOW + 5000)["status"], "UNVERIFIED")
@@ -547,10 +581,13 @@ class DoaTests(unittest.TestCase):
         self.assertEqual((entry["status"], entry["error"]), ("INCONSISTENT", "SOURCE_TIME_REGRESSED"))
         self.assertEqual(put(store, "telemetry/diagnostic/doa", obj("telemetry-diagnostic-doa.json", q=6))["status"], "UNVERIFIED")
         self.assertEqual(topic(store, "telemetry/diagnostic/doa", NOW + 5001)["status"], "STALE")
-        for change in ({"validation_reasons": ["EMPTY_CSV"]}, {"source": "DOA_value.html"}, {"trust": "VERIFIED"},
-                       {"frequency_mhz": 0}, {"validation_reasons": ["bad reason"]}):
+        self.assertEqual(put(store, "telemetry/diagnostic/doa", obj("telemetry-diagnostic-doa.json", q=9, frequency_mhz=0))["status"], "INVALID")
+        # Other labels and reason codes stay UNVERIFIED with a note.
+        for q, change in enumerate(({"validation_reasons": ["EMPTY_CSV"]}, {"source": "DOA_value.html"}, {"trust": "VERIFIED"},
+                                    {"validation_reasons": ["bad reason"]}), start=10):
             with self.subTest(change=change):
-                self.assertEqual(put(store, "telemetry/diagnostic/doa", obj("telemetry-diagnostic-doa.json", q=9, **change))["status"], "INVALID")
+                entry = put(store, "telemetry/diagnostic/doa", obj("telemetry-diagnostic-doa.json", q=q, **change))
+                self.assertEqual((entry["status"], entry["payload"]["trust"]), ("UNVERIFIED", "UNVERIFIED"))
 
 
 class AngularTests(unittest.TestCase):
@@ -563,11 +600,14 @@ class AngularTests(unittest.TestCase):
                 store = session_store()
                 self.assertEqual(put(store, "telemetry/angular", self.frame(flags=flags))["status"], status)
                 self.assertEqual(node(store)["angular"] is not None, status == "LIVE")
+        # Without the integrity bits (23) the frame is kept UNVERIFIED with a note, never LIVE.
         for flags in (0, 27, 19, 59, 62):
             with self.subTest(flags=flags):
                 store = session_store()
                 entry = put(store, "telemetry/angular", self.frame(flags=flags))
-                self.assertEqual((entry["status"], entry["error"]), ("INVALID", "ANGULAR_EVIDENCE_INCOMPLETE"))
+                self.assertEqual((entry["status"], entry["payload"]["notes"]), ("UNVERIFIED", ["EVIDENCE_INCOMPLETE:flags"]))
+                self.assertIsNone(node(store)["angular"])
+                self.assertEqual(node(store)["angular_unverified"]["flags"], flags)
 
     def test_source_age_window(self) -> None:
         for offset, status in ((-10000, "LIVE"), (-10001, "STALE"), (1000, "LIVE"), (1001, "STALE")):
@@ -657,8 +697,8 @@ class AngularTests(unittest.TestCase):
         store = session_store()
         values = self.frame()["values"]
         cases = (
-            ({"encoding": "q16"}, "BAD_ANGULAR_JSON"),
-            ({"v": 1}, "BAD_ANGULAR_JSON"),
+            ({"encoding": "q16"}, "ENCODING_UNSUPPORTED"),
+            ({"v": 1}, "INVALID_VERSION"),
             ({"values": values[:359]}, "EXPECTED_360_SAMPLES"),
             ({"values": values + [0.0]}, "EXPECTED_360_SAMPLES"),
             ({"values": "AAAA"}, "EXPECTED_360_SAMPLES"),
@@ -675,9 +715,15 @@ class AngularTests(unittest.TestCase):
         for change, error in cases:
             with self.subTest(change=str(change)[:40]):
                 self.assertEqual(put(store, "telemetry/angular", self.frame(**change))["error"], error)
-        missing = self.frame()
+        # A nullable field left out reads as null; a core one is still required.
+        missing = self.frame(q=900)
         del missing["confidence_native_db"]
-        self.assertEqual(put(store, "telemetry/angular", missing)["error"], "MISSING_FIELD")
+        entry = put(store, "telemetry/angular", missing)
+        self.assertEqual((entry["status"], entry["payload"]["notes"]), ("LIVE", ["MISSING_FIELD:confidence_native_db"]))
+        self.assertIsNone(entry["payload"]["confidence_native_db"])
+        core = self.frame(q=901)
+        del core["frequency_hz"]
+        self.assertEqual((put(store, "telemetry/angular", core)["error"]), "MISSING_FIELD")
 
     def test_the_retired_binary_chunks_are_rejected(self) -> None:
         store = session_store()
@@ -787,15 +833,19 @@ class SettingsReportTests(unittest.TestCase):
         self.assertEqual(node(store)["settings_requests"], ["g01-2", "g01-3", "g01-4", "g01-5"])
 
     def test_shape(self) -> None:
+        # An extra field is ignored; every field of the contract must be there.
         extra = dict(self.report, proof="x")
-        self.assertEqual(self.put(extra)["error"], "BAD_SETTINGS_REPORT")
+        entry = self.put(extra)
+        self.assertEqual(entry["status"], "FRESH")
+        self.assertNotIn("proof", entry["payload"])
         missing = dict(self.report)
         del missing["boot"]
-        self.assertEqual(self.put(missing)["error"], "BAD_SETTINGS_REPORT")
+        self.store.expect_settings_report(self.report["id"], NOW)
+        self.assertEqual((self.put(missing)["error"], self.put(missing).get("field")), ("MISSING_FIELD", "boot"))
         for change, error in (({"settings_json": "[1,2]"}, "BAD_SETTINGS_JSON"), ({"settings_json": "{"}, "BAD_SETTINGS_JSON"),
                               ({"settings_json": '{"center_freq": NaN}'}, "BAD_SETTINGS_JSON"),
                               ({"settings_json": '{"a":1,"a":2}'}, "BAD_SETTINGS_JSON"),
-                              ({"settings_json": '{"center_freq": "fast"}'}, "BAD_SETTINGS_JSON"),
+                              ({"settings_json": '{"center_freq": "fast"}'}, None),
                               ({"settings_json": {"center_freq": 1}}, "BAD_SETTINGS_JSON"),
                               ({"settings_json": "\ud800" + self.report["settings_json"]}, "BAD_SETTINGS_JSON"),
                               ({"settings_json": '{"station":"\\udc00"}'}, None),
@@ -810,10 +860,21 @@ class SettingsReportTests(unittest.TestCase):
                 json.dumps(self.store.snapshot(NOW), allow_nan=False)
                 if error is None:
                     self.assertIsNotNone(self.store.settings_report())
-        self.assertEqual(self.put(self.report, retained=True)["error"], "BROKER_POLICY")
         padded = dict(self.report, settings_json=self.report["settings_json"] + " " * MAX_PAYLOAD_BYTES)
         self.assertEqual(self.put(padded)["error"], "PAYLOAD_TOO_LARGE")
-        self.assertEqual(self.put(self.report)["status"], "FRESH")
+        # A retained copy (another broker's policy) is read, with a note.
+        self.store.expect_settings_report(self.report["id"], NOW)
+        entry = self.put(self.report, retained=True)
+        self.assertEqual((entry["status"], entry["payload"]["notes"]), ("FRESH", ["BROKER_POLICY"]))
+
+    def test_one_unreadable_safe_value_leaves_only_that_field_out(self) -> None:
+        parsed = json.loads(self.report["settings_json"])
+        parsed["center_freq"] = "fast"
+        entry = self.put(dict(self.report, settings_json=json.dumps(parsed)))
+        self.assertEqual((entry["status"], entry["payload"]["notes"]), ("FRESH", ["DROPPED_FIELD:center_frequency_hz"]))
+        safe = self.store.settings_report()["safe_settings"]
+        self.assertNotIn("center_frequency_hz", safe)
+        self.assertIn("gain_db", safe)
 
 
 class AckTests(unittest.TestCase):
@@ -869,10 +930,14 @@ class AckTests(unittest.TestCase):
                 entry = put(store, "ack/operation", obj("ack-operation.stream-set-accepted.json", id=f"op.{status}:1", status=status))
                 self.assertEqual(entry["status"], "FRESH")
                 self.assertEqual(store.ack(f"op.{status}:1")["final"], status in ACK_FINAL_STATUSES)
-        for status, error in (("DONE", "UNKNOWN_ACK_STATUS"), ("applied", "INVALID_FIELD"), (5, "INVALID_FIELD")):
+        for status, error in (("applied", "INVALID_FIELD"), (5, "INVALID_FIELD")):
             with self.subTest(status=status):
                 entry = put(store, "ack/operation", obj("ack-operation.stream-set-accepted.json", status=status))
                 self.assertEqual((entry["status"], entry["error"]), ("INVALID", error))
+        # A status this console does not know is kept as progress, never as a result.
+        entry = put(store, "ack/operation", obj("ack-operation.stream-set-accepted.json", id="op.done:1", status="DONE"))
+        self.assertEqual((entry["status"], entry["payload"]["notes"]), ("FRESH", ["UNKNOWN_STATUS:status"]))
+        self.assertIs(store.ack("op.done:1")["final"], False)
         ack = obj("ack-operation.stream-set-accepted.json", id="g01-order")
         put(store, "ack/operation", dict(ack, status="APPLIED"))
         entry = put(store, "ack/operation", dict(ack, status="APPLYING"))
@@ -914,8 +979,10 @@ class MessageRuleTests(unittest.TestCase):
                 with self.subTest(suffix=suffix, qos=wrong_qos, retained=wrong_retained):
                     store = session_store()
                     entry = put(store, suffix, raw(name), qos=wrong_qos, retained=wrong_retained)
-                    self.assertEqual((entry["status"], entry["error"]), ("INVALID", "BROKER_POLICY"))
-                    self.assertEqual(store.snapshot(NOW)["invalid_counts"][suffix], 1)
+                    # Another QoS or retain flag (a bridge, another publisher) is labelled, not refused.
+                    self.assertNotEqual(entry["status"], "INVALID")
+                    self.assertIn("BROKER_POLICY", entry["payload"]["notes"])
+                    self.assertEqual(store.snapshot(NOW)["invalid_counts"][suffix], 0)
 
     def test_retained_clear_removes_the_value_and_is_not_invalid(self) -> None:
         for suffix in RDF_NODE_V2_SUFFIXES:
@@ -949,7 +1016,7 @@ class MessageRuleTests(unittest.TestCase):
         self.assertEqual((entry["status"], entry["error"]), ("INVALID", "EMPTY_PAYLOAD"))
         self.assertNotIn("cleared", entry)
         entry = put(store, "state", b"", retained=False)
-        self.assertEqual((entry["status"], entry["error"]), ("INVALID", "BROKER_POLICY"))
+        self.assertEqual((entry["status"], entry["error"]), ("INVALID", "EMPTY_PAYLOAD"))
 
     def test_unknown_fields_are_ignored_and_not_shown(self) -> None:
         store = session_store()
@@ -1040,6 +1107,100 @@ class MessageRuleTests(unittest.TestCase):
         json.dumps(snapshot, allow_nan=False)
         self.assertEqual(snapshot["received"], len(HEALTHY_SEQUENCE) + 1500)
         self.assertEqual(snapshot["valid"] + snapshot["invalid"] + snapshot["cleared"], snapshot["received"])
+
+
+class LenientReadingTests(unittest.TestCase):
+    """Data keeps flowing: variations are read and labelled, only unreadable data is INVALID."""
+
+    def test_nullable_fields_left_out_read_as_null(self) -> None:
+        store = session_store()
+        health = obj("telemetry-health.json", q=50, t=NOW)
+        for key in ("drop", "age", "temp", "rev"):
+            del health[key]
+        entry = put(store, "telemetry/health", health)
+        self.assertEqual(entry["status"], "FRESH")
+        self.assertEqual(sorted(entry["payload"]["notes"]),
+                         ["MISSING_FIELD:age", "MISSING_FIELD:drop", "MISSING_FIELD:rev", "MISSING_FIELD:temp"])
+        self.assertEqual([node(store)["health"][key] for key in ("drop", "age", "temp", "rev")], [None] * 4)
+        doa = obj("telemetry-doa.ok1.json", t=NOW)
+        del doa["rev"]
+        entry = put(store, "telemetry/doa", doa)
+        self.assertEqual((entry["status"], entry["payload"]["notes"]), ("LIVE", ["MISSING_FIELD:rev"]))
+        state = obj("state.json")
+        del state["cfg"]
+        entry = put(RdfNodeV2Telemetry(NODE), "state", state)
+        self.assertEqual((entry["status"], entry["payload"]["cfg"]), ("CONTEXT", None))
+
+    def test_core_fields_are_still_required(self) -> None:
+        store = session_store()
+        for key in ("q", "t", "a", "f", "ok"):
+            with self.subTest(key=key):
+                doa = obj("telemetry-doa.ok1.json", q=60, t=NOW)
+                del doa[key]
+                entry = put(store, "telemetry/doa", doa)
+                self.assertEqual((entry["status"], entry["error"], entry.get("field")), ("INVALID", "MISSING_FIELD", key))
+
+    def test_times_in_seconds_and_float_milliseconds(self) -> None:
+        store = session_store(health=False)
+        entry = put(store, "telemetry/health", obj("telemetry-health.json", t=NOW / 1000))
+        self.assertEqual((entry["status"], entry["payload"]["notes"]), ("FRESH", ["TIME_SECONDS:t"]))
+        self.assertEqual(entry["payload"]["t"], NOW)
+        entry = put(store, "telemetry/health", obj("telemetry-health.json", q=2, t=float(NOW) + 0.4))
+        self.assertEqual((entry["payload"]["t"], entry["payload"]["notes"]), (NOW, ["COERCED:t"]))
+
+    def test_a_source_outside_its_window_is_kept_and_never_live(self) -> None:
+        store = session_store()
+        entry = put(store, "telemetry/doa", obj("telemetry-doa.ok1.json", t=NOW - 60_000))
+        self.assertEqual((entry["status"], entry["error"]), ("STALE", "SOURCE_TIMESTAMP_NOT_FRESH"))
+        doa = node(store)["doa"]
+        self.assertIsNotNone(doa)
+        self.assertIs(doa["live"], False)
+        self.assertIn("SOURCE_STALE", doa["reasons"])
+        self.assertEqual(doa["source_age_ms"], 60_000)
+        entry = put(store, "telemetry/angular", obj("telemetry-angular.live.json", timestamp_ms=NOW - 60_000))
+        self.assertEqual(entry["status"], "STALE")
+        self.assertIs(node(store)["angular"]["live"], False)
+
+    def test_doa_without_fresh_health_is_kept_with_its_reason(self) -> None:
+        store = session_store(health=False)
+        entry = put(store, "telemetry/doa", obj("telemetry-doa.ok1.json", t=NOW))
+        self.assertEqual((entry["status"], entry["error"]), ("INCONSISTENT", "DOA_WITHOUT_HEALTH"))
+        self.assertEqual(node(store)["doa"]["reasons"][0], "DOA_WITHOUT_HEALTH")
+        # Health that comes later does not make that DoA LIVE; the next one is.
+        put(store, "telemetry/health", obj("telemetry-health.json", t=NOW))
+        self.assertIs(node(store)["doa"]["live"], False)
+        self.assertEqual(put(store, "telemetry/doa", obj("telemetry-doa.ok1.json", q=99, t=NOW))["status"], "LIVE")
+        self.assertIs(node(store)["doa"]["live"], True)
+        entry = put(session_store(health=False), "telemetry/doa", obj("telemetry-doa.ok0.json", t=NOW))
+        self.assertEqual(entry["error"], "DOA_WITHOUT_HEALTH")
+
+    def test_stale_health_never_makes_doa_live(self) -> None:
+        store = session_store(health=False)
+        put(store, "telemetry/health", obj("telemetry-health.json", t=NOW - 60_000))
+        self.assertFalse(store.session_view(NOW)["health_fresh"])
+        self.assertEqual(put(store, "telemetry/doa", obj("telemetry-doa.ok1.json", t=NOW))["error"], "DOA_WITHOUT_HEALTH")
+        self.assertIs(node(store)["doa"]["live"], False)
+
+    def test_a_sequence_that_starts_again_is_accepted(self) -> None:
+        store = session_store(health=False)
+        put(store, "telemetry/health", obj("telemetry-health.json", q=5000, t=NOW))
+        self.assertEqual(put(store, "telemetry/health", obj("telemetry-health.json", q=4500, t=NOW))["error"],
+                         "SEQUENCE_NOT_ADVANCING")
+        entry = put(store, "telemetry/health", obj("telemetry-health.json", q=3, t=NOW))
+        self.assertEqual((entry["status"], entry["payload"]["notes"]), ("FRESH", ["SEQUENCE_RESET"]))
+
+    def test_unreadable_data_stays_invalid_with_its_reason(self) -> None:
+        store = session_store()
+        for payload, error in ((b"not json", "MALFORMED_JSON"), (b"[1]", "INVALID_ENVELOPE"),
+                               (json.dumps(obj("telemetry-health.json", sid="")).encode(), "INVALID_SESSION_ID"),
+                               (json.dumps(obj("telemetry-health.json", v=3)).encode(), "INVALID_VERSION")):
+            with self.subTest(error=error):
+                self.assertEqual(put(store, "telemetry/health", payload)["error"], error)
+
+    def test_broker_expiry_out_of_range_is_ignored(self) -> None:
+        store = session_store()
+        entry = put(store, "telemetry/health", obj("telemetry-health.json", q=70, t=NOW), expiry=2**40)
+        self.assertEqual((entry["status"], entry["expiry_s"]), ("FRESH", None))
 
 
 class ViewTests(unittest.TestCase):

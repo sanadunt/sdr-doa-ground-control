@@ -786,11 +786,130 @@ def test_multi_vfo_csv_selects_the_row_matching_xml():
 
     unmatched = fake_collection(make_status(), rows.encode(), make_xml(frequency_mhz="145.000"))
     csv_unmatched = unmatched["doa_candidates"]["csv"]
-    assert csv_unmatched["available"] is False
-    assert "multi-VFO" in csv_unmatched["error"]
+    # Without a matching XML frequency the VFO 0 row is still shown, labelled.
+    assert csv_unmatched["available"] is True
+    assert csv_unmatched["csv_row_index"] == 0
+    assert csv_unmatched["csv_row_selection"] == "first_row_unconfirmed"
+    assert "multi-VFO" in csv_unmatched["csv_row_selection_detail"]
     assert csv_unmatched["csv_rows_total"] == 2
-    assert "CSV_VIEW_UNAVAILABLE" in unmatched["publication_gate"]["reasons"]
-    assert unmatched["overall_state"] == "INCOMPLETE"
+    assert [row["row_index"] for row in csv_unmatched["additional_vfo_rows"]] == [1]
+    assert "CSV_VFO_ROW_UNCONFIRMED" in unmatched["publication_gate"]["reasons"]
+    assert "CSV_VIEW_UNAVAILABLE" not in unmatched["publication_gate"]["reasons"]
+
+
+def test_status_booleans_read_as_0_and_1_with_a_label():
+    """Lenient reading: a node that writes 0/1 for its flags is still read."""
+    payload = json.loads(make_status().decode())
+    payload["daq_ok"] = 1
+    payload["daq_status"].update({"frame_sync": 1, "sample_delay_sync": "true", "iq_sync": 1, "adc_overdrive": 0})
+    result = fake_collection(json.dumps(payload).encode(), make_csv(), make_xml())
+    status = result["status"]
+    assert status["available"] is True
+    assert status["daq_health"] == "PASS"
+    assert status["safe"]["daq_status"]["adc_overdrive"] is False
+    assert "daq_status.adc_overdrive" in status["coerced_fields"]
+    assert "daq_ok" in status["coerced_fields"]
+    assert "partial_fields" not in status
+    assert result["signal_quality"]["adc_overdrive"] is False
+    assert result["publication_gate"]["checks"]["adc_not_overdriven"] is True
+
+
+def test_status_field_of_the_wrong_type_leaves_only_that_field_out():
+    payload = json.loads(make_status().decode())
+    payload["uptime_ms"] = "soon"
+    payload["daq_status"]["data_frame_index"] = "x"
+    result = fake_collection(json.dumps(payload).encode(), make_csv(), make_xml())
+    status = result["status"]
+    assert status["available"] is True
+    assert status["daq_health"] == "PASS"
+    assert "uptime_ms" not in status["safe"]
+    assert status["partial_fields"] == ["daq_status.data_frame_index", "uptime_ms"]
+    assert status["safe"]["station_id"] == "TEST"
+
+
+def test_status_without_daq_fields_is_unknown_not_failed():
+    payload = json.loads(make_status().decode())
+    del payload["daq_ok"]
+    payload["daq_status"] = "not an object"
+    result = fake_collection(json.dumps(payload).encode(), make_csv(), make_xml())
+    status = result["status"]
+    assert status["available"] is True
+    assert status["daq_health"] == "UNKNOWN"
+    assert {"daq_ok", "daq_status"} <= set(status["partial_fields"])
+    reasons = result["publication_gate"]["reasons"]
+    assert "DAQ_HEALTH_UNKNOWN" in reasons
+    assert "DAQ_HEALTH_GATE_FAILED" not in reasons
+    assert result["overall_state"] != "DEGRADED"
+    # The XML view still reports the overdrive, so it is known.
+    assert result["signal_quality"]["adc_overdrive"] is False
+
+
+def test_status_without_a_timestamp_is_still_refused():
+    payload = json.loads(make_status().decode())
+    del payload["timestamp_ms"]
+    result = fake_collection(json.dumps(payload).encode(), make_csv(), make_xml())
+    assert result["status"]["available"] is False
+    assert "STATUS_UNAVAILABLE_OR_INVALID" in result["publication_gate"]["reasons"]
+
+
+def test_csv_descriptive_column_that_is_empty_reads_as_null():
+    row = csv_row(frequency_hz="", power_raw="n/a").split(",")
+    row[2] = ""
+    row[8] = "north"
+    result = fake_collection(make_status(), (",".join(row) + "\n").encode(), make_xml())
+    csv_candidate = result["doa_candidates"]["csv"]
+    assert csv_candidate["available"] is True
+    assert csv_candidate["canonical_angle_deg"] == 211.0
+    assert csv_candidate["frequency_hz"] is None
+    assert csv_candidate["frequency_hz_normalized"] is None
+    assert csv_candidate["power_raw"] is None
+    assert csv_candidate["latitude"] is None
+    assert set(csv_candidate["missing_fields"]) == {
+        "csv.frequency_hz", "csv.power_raw", "csv.confidence_raw", "csv.latitude",
+    }
+    assert "NATIVE_FIELDS_MISSING" in csv_candidate["unit_reasons"]
+    assert csv_candidate["angular_bins"] == 360
+
+
+def test_csv_without_an_angle_or_vector_is_still_refused():
+    row = csv_row().split(",")
+    row[1] = ""
+    result = fake_collection(make_status(), (",".join(row) + "\n").encode(), make_xml())
+    assert result["doa_candidates"]["csv"]["available"] is False
+    short = fake_collection(make_status(), make_csv(columns=200), make_xml())
+    assert short["doa_candidates"]["csv"]["available"] is False
+
+
+def test_xml_with_only_time_and_doa_is_read_with_labels():
+    xml = b"<DATA><TIME>100000</TIME><DOA>211.0</DOA></DATA>"
+    result = fake_collection(make_status(), make_csv(), xml)
+    xml_candidate = result["doa_candidates"]["xml"]
+    assert xml_candidate["available"] is True
+    assert xml_candidate["canonical_angle_deg"] == 211.0
+    assert xml_candidate["adc_overdrive_active"] is None
+    assert xml_candidate["frequency_mhz"] is None
+    assert xml_candidate["frequency_hz_normalized"] is None
+    assert "xml.ADC_OVERDRIVE" in xml_candidate["missing_fields"]
+    assert "xml.FREQUENCY" in xml_candidate["missing_fields"]
+    # status.json still reports the overdrive.
+    assert result["signal_quality"]["adc_overdrive"] is False
+    assert result["native_consistency"]["conflict"] is False
+
+
+def test_overdrive_reported_nowhere_is_unknown_not_a_pass():
+    payload = json.loads(make_status().decode())
+    del payload["daq_status"]["adc_overdrive"]
+    xml = b"<DATA><TIME>100000</TIME><DOA>211.0</DOA></DATA>"
+    result = fake_collection(json.dumps(payload).encode(), make_csv(), xml)
+    assert result["signal_quality"]["adc_overdrive"] is None
+    assert result["publication_gate"]["checks"]["adc_not_overdriven"] is None
+    assert "ADC_OVERDRIVE_UNKNOWN" in result["publication_gate"]["reasons"]
+    assert "ADC_OVERDRIVE" not in result["publication_gate"]["reasons"]
+
+
+def test_xml_without_time_is_still_refused():
+    result = fake_collection(make_status(), make_csv(), b"<DATA><DOA>211.0</DOA></DATA>")
+    assert result["doa_candidates"]["xml"]["available"] is False
 
 
 def test_kerberos_xml_in_csv_view_is_explained():
