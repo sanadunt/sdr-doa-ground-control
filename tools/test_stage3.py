@@ -185,8 +185,14 @@ def test_malformed_nonfinite_partial_and_missing_status_are_rejected() -> None:
     assert partial["doa_candidates"]["csv"]["available"] is False
     assert partial["doa_candidates"]["xml"]["available"] is False
 
+    # A status.json with its timestamp but no DAQ fields is still read: the
+    # missing fields are labelled and the DAQ health is unknown, not failed.
     missing = disk_collection("missing-status")
-    assert missing["status"]["available"] is False
+    assert missing["status"]["available"] is True
+    assert missing["status"]["daq_health"] == "UNKNOWN"
+    assert "daq_ok" in missing["status"]["partial_fields"]
+    assert "DAQ_HEALTH_UNKNOWN" in missing["publication_gate"]["reasons"]
+    assert "DAQ_HEALTH_GATE_FAILED" not in missing["publication_gate"]["reasons"]
     assert missing["publication_gate"]["state"] == "BLOCKED"
 
 

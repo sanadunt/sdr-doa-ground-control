@@ -441,6 +441,18 @@ def _finite_int(value: Any, field: str) -> int:
     return int(parsed)
 
 
+def _optional_number(value: Any, field: str, missing: List[str], integer: bool = False) -> Optional[float]:
+    """Read a descriptive DoA field; a missing or unreadable one is null and named."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        missing.append(field)
+        return None
+    try:
+        return _finite_int(value, field) if integer else _finite_float(value, field)
+    except CollectorError:
+        missing.append(field)
+        return None
+
+
 def _required_text(value: Any, field: str) -> str:
     if value is None:
         raise CollectorError(f"{field} is missing")
@@ -826,41 +838,89 @@ def fetch_and_parse_with_retry(
     return last_resource, {"available": False, "error": "resource parse failed"}
 
 
+STATUS_BOOLEAN_FIELDS = frozenset({"frame_sync", "sample_delay_sync", "iq_sync", "noise_source_enabled", "adc_overdrive"})
+_BOOLEAN_TEXT = {"0": False, "1": True, "false": False, "true": True}
+
+
+def _lenient_bool(value: Any) -> Optional[bool]:
+    """A JSON boolean, 0/1 or "true"/"false"; None when it is none of them."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str) and value.strip().lower() in _BOOLEAN_TEXT:
+        return _BOOLEAN_TEXT[value.strip().lower()]
+    return None
+
+
 def parse_status(resource: FetchedResource) -> Dict[str, Any]:
+    """status.json, read field by field.
+
+    Only a body that is not a JSON object, or a missing or unreadable
+    ``timestamp_ms`` (every freshness rule counts from it), refuses the
+    resource. Any other field of the wrong type reads as missing and is named
+    in ``partial_fields``; 0/1 reads as a boolean (``coerced_fields``).
+    """
     source = _parse_json_body(resource)
     timestamp_ms = _finite_int(source.get("timestamp_ms"), "status.timestamp_ms")
-    if not isinstance(source.get("daq_ok"), bool):
-        raise CollectorError("status.daq_ok must be boolean")
-    dropped = _finite_int(source.get("daq_num_dropped_frames"), "status.daq_num_dropped_frames")
-    if dropped < 0:
-        raise CollectorError("status.daq_num_dropped_frames must be non-negative")
+    partial: List[str] = []
+    coerced: List[str] = []
+
+    def boolean(value: Any, name: str) -> Optional[bool]:
+        parsed = _lenient_bool(value)
+        if parsed is None:
+            partial.append(name)
+        elif not isinstance(value, bool):
+            coerced.append(name)
+        return parsed
+
+    def integer(value: Any, name: str, minimum: Optional[int] = None) -> Optional[int]:
+        try:
+            parsed = _finite_int(value, name)
+        except CollectorError:
+            partial.append(name)
+            return None
+        if minimum is not None and parsed < minimum:
+            partial.append(name)
+            return None
+        return parsed
+
+    daq_ok = boolean(source.get("daq_ok"), "daq_ok") if "daq_ok" in source else None
+    if "daq_ok" not in source:
+        partial.append("daq_ok")
 
     daq_source = source.get("daq_status")
     if daq_source is None:
         daq_source = {}
     if not isinstance(daq_source, dict):
-        raise CollectorError("status.daq_status must be an object")
+        partial.append("daq_status")
+        daq_source = {}
 
     daq_status: Dict[str, Any] = {}
     for field in DAQ_STATUS_FIELDS:
         if field not in daq_source:
             continue
         value = daq_source[field]
-        if field in {"frame_sync", "sample_delay_sync", "iq_sync", "noise_source_enabled", "adc_overdrive"}:
-            if not isinstance(value, bool):
-                raise CollectorError(f"status.daq_status.{field} must be boolean")
-            daq_status[field] = value
+        name = f"daq_status.{field}"
+        if field in STATUS_BOOLEAN_FIELDS:
+            parsed: Any = boolean(value, name)
         elif field == "buffer_size_ms":
-            daq_status[field] = _finite_float(value, f"status.daq_status.{field}")
+            try:
+                parsed = _finite_float(value, name)
+            except CollectorError:
+                partial.append(name)
+                parsed = None
         else:
-            daq_status[field] = _finite_int(value, f"status.daq_status.{field}")
+            parsed = integer(value, name)
+        if parsed is not None:
+            daq_status[field] = parsed
 
     sync_fields = ("frame_sync", "sample_delay_sync", "iq_sync")
     failed_flags = [field for field in sync_fields if daq_status.get(field) is False]
     missing_flags = [field for field in sync_fields if field not in daq_status]
-    if source["daq_ok"] is False or failed_flags:
+    if daq_ok is False or failed_flags:
         daq_health = "FAIL"
-    elif missing_flags:
+    elif missing_flags or daq_ok is None:
         daq_health = "UNKNOWN"
     else:
         daq_health = "PASS"
@@ -869,22 +929,37 @@ def parse_status(resource: FetchedResource) -> Dict[str, Any]:
     for field in STATUS_FIELDS:
         if field == "daq_status":
             safe[field] = daq_status
+        elif field == "timestamp_ms":
+            safe[field] = timestamp_ms
         elif field in source:
             value = source[field]
-            if field in {"timestamp_ms", "unit_id", "uptime_ms", "daq_num_dropped_frames"}:
-                safe[field] = _finite_int(value, f"status.{field}")
+            if field in {"uptime_ms", "daq_num_dropped_frames"}:
+                parsed = integer(value, field, minimum=0)
+                if parsed is not None:
+                    safe[field] = parsed
+            elif field == "unit_id":
+                # A text unit id ("UAV-01") is kept as text.
+                safe[field] = value if isinstance(value, int) and not isinstance(value, bool) else (
+                    None if value is None else str(value))
             elif field in {"station_id", "hardware_id", "host_os_type", "host_os_version", "host_os_architecture", "software_version", "software_git_short_hash", "gps_status"}:
                 safe[field] = None if value is None else str(value)
             elif field == "daq_ok":
-                safe[field] = bool(value)
+                safe[field] = daq_ok
+    if "daq_num_dropped_frames" not in source:
+        partial.append("daq_num_dropped_frames")
 
-    return {
+    result: Dict[str, Any] = {
         "available": True,
         "safe": safe,
         "daq_health": daq_health,
         "failed_sync_flags": failed_flags,
         "missing_sync_flags": missing_flags,
     }
+    if partial:
+        result["partial_fields"] = sorted(set(partial))
+    if coerced:
+        result["coerced_fields"] = sorted(set(coerced))
+    return result
 
 
 def parse_settings(resource: FetchedResource) -> Dict[str, Any]:
@@ -999,7 +1074,11 @@ def _csv_row_candidate(
     peak_index = max(range(len(angular_values)), key=angular_values.__getitem__)
     angular_peak_value = angular_values[peak_index]
     angular_power_db = list(angular_values)
-    return {
+    # Only the time, the angle and the vector make a record. A descriptive
+    # column the node left empty or wrote unreadably reads as null and is
+    # named in ``missing_fields``, so one bad column never hides the bearing.
+    missing: List[str] = []
+    candidate = {
         "available": True,
         "source_format": "csv",
         "path": resource.path,
@@ -1014,17 +1093,17 @@ def _csv_row_candidate(
         ),
         "doa_raw_deg": _finite_float(row[1], "csv.doa_raw_deg"),
         "angle_convention": "csv_360_minus_theta",
-        "confidence_raw": _finite_float(row[2], "csv.confidence_raw"),
-        "power_raw": _finite_float(row[3], "csv.power_raw"),
-        "frequency_hz": _finite_int(row[4], "csv.frequency_hz"),
+        "confidence_raw": _optional_number(row[2], "csv.confidence_raw", missing),
+        "power_raw": _optional_number(row[3], "csv.power_raw", missing),
+        "frequency_hz": _optional_number(row[4], "csv.frequency_hz", missing, integer=True),
         "array_type": row[5].strip(),
-        "acquisition_frame_latency_ms": _finite_float(row[6], "csv.acquisition_frame_latency_ms"),
+        "acquisition_frame_latency_ms": _optional_number(row[6], "csv.acquisition_frame_latency_ms", missing),
         "station_id": row[CSV_STATION_INDEX].strip(),
         "csv_row_index": row_index,
-        "latitude": _finite_float(row[8], "csv.latitude"),
-        "longitude": _finite_float(row[9], "csv.longitude"),
-        "gps_heading": _finite_float(row[10], "csv.gps_heading"),
-        "compass_heading": _finite_float(row[11], "csv.compass_heading"),
+        "latitude": _optional_number(row[8], "csv.latitude", missing),
+        "longitude": _optional_number(row[9], "csv.longitude", missing),
+        "gps_heading": _optional_number(row[10], "csv.gps_heading", missing),
+        "compass_heading": _optional_number(row[11], "csv.compass_heading", missing),
         "heading_source": row[12].strip(),
         "reserved_fields": row[13:17],
         "angular_bins": len(angular_values),
@@ -1040,6 +1119,9 @@ def _csv_row_candidate(
         "angular_power_shifted": True,
         "angular_values_local_only": True,
     }
+    if missing:
+        candidate["missing_fields"] = missing
+    return candidate
 
 
 def _xml_text(root: ET.Element, path: str, required: bool = True) -> Optional[str]:
@@ -1067,10 +1149,25 @@ def parse_xml_doa(
         raise CollectorError(f"expected XML root DATA, found {root.tag}")
 
     timestamp_ms = _finite_int(_xml_text(root, "TIME"), "xml.TIME")
-    overdrive_text = _required_text(_xml_text(root, "ADC_OVERDRIVE"), "xml.ADC_OVERDRIVE")
-    overdrive_active, overdrive_mask = _parse_overdrive_text(overdrive_text)
+    # TIME and DOA make a record; every other element is descriptive and
+    # reads as null, named in ``missing_fields``, when absent or unreadable.
+    # A missing ADC_OVERDRIVE is an unknown overdrive, never a pass.
+    missing: List[str] = []
+    overdrive_text = _xml_text(root, "ADC_OVERDRIVE", required=False) or None
+    overdrive_active: Optional[bool] = None
+    overdrive_mask: Optional[int] = None
+    if overdrive_text is None:
+        missing.append("xml.ADC_OVERDRIVE")
+    else:
+        overdrive_active, overdrive_mask = _parse_overdrive_text(overdrive_text)
+        if overdrive_active is None:
+            missing.append("xml.ADC_OVERDRIVE")
     station_id = _xml_text(root, "STATION_ID", required=False)
-    return {
+
+    def number(path: str, integer: bool = False) -> Optional[float]:
+        return _optional_number(_xml_text(root, path, required=False), f"xml.{path}", missing, integer)
+
+    candidate = {
         "available": True,
         "source_format": "xml",
         "path": resource.path,
@@ -1085,26 +1182,29 @@ def parse_xml_doa(
         ),
         "doa_raw_deg": _finite_float(_xml_text(root, "DOA"), "xml.DOA"),
         "angle_convention": "xml_raw_theta",
-        "confidence_raw_percent": _finite_float(_xml_text(root, "CONF"), "xml.CONF"),
-        "power_transformed_raw": _finite_float(_xml_text(root, "PWR"), "xml.PWR"),
-        "frequency_mhz": _finite_float(_xml_text(root, "FREQUENCY"), "xml.FREQUENCY"),
+        "confidence_raw_percent": number("CONF"),
+        "power_transformed_raw": number("PWR"),
+        "frequency_mhz": number("FREQUENCY"),
         # The station ID is descriptive only; an empty one must not discard
         # an otherwise valid record.
         "station_id": station_id or None,
-        "gps_time": _finite_int(_xml_text(root, "GPS_TIME"), "xml.GPS_TIME"),
-        "latitude": _finite_float(_xml_text(root, "LOCATION/LATITUDE"), "xml.LOCATION/LATITUDE"),
-        "longitude": _finite_float(_xml_text(root, "LOCATION/LONGITUDE"), "xml.LOCATION/LONGITUDE"),
-        "heading": _finite_float(_xml_text(root, "LOCATION/HEADING"), "xml.LOCATION/HEADING"),
-        "speed": _finite_float(_xml_text(root, "LOCATION/SPEED"), "xml.LOCATION/SPEED"),
-        "acquisition_frame_latency_ms": _finite_float(_xml_text(root, "LATENCY"), "xml.LATENCY"),
-        "processing_time_ms": _finite_float(_xml_text(root, "PROCESSING_TIME"), "xml.PROCESSING_TIME"),
+        "gps_time": number("GPS_TIME", integer=True),
+        "latitude": number("LOCATION/LATITUDE"),
+        "longitude": number("LOCATION/LONGITUDE"),
+        "heading": number("LOCATION/HEADING"),
+        "speed": number("LOCATION/SPEED"),
+        "acquisition_frame_latency_ms": number("LATENCY"),
+        "processing_time_ms": number("PROCESSING_TIME"),
         "adc_overdrive": overdrive_text,
         "adc_overdrive_active": overdrive_active,
         "adc_overdrive_channel_mask": overdrive_mask,
-        "correlated_sources": _finite_int(_xml_text(root, "NUM_CORRELATED_SOURCES"), "xml.NUM_CORRELATED_SOURCES"),
-        "snr_db": _finite_float(_xml_text(root, "SNR_DB"), "xml.SNR_DB"),
+        "correlated_sources": number("NUM_CORRELATED_SOURCES", integer=True),
+        "snr_db": number("SNR_DB"),
         "snr_unit": "dB_native_unverified",
     }
+    if missing:
+        candidate["missing_fields"] = missing
+    return candidate
 
 
 def _parse_overdrive_text(text: str) -> Tuple[Optional[bool], Optional[int]]:
@@ -1182,7 +1282,7 @@ def normalize_doa_candidate(
     raw_angle = _finite_float(candidate.get("doa_raw_deg"), "candidate.doa_raw_deg")
     result["canonical_angle_deg"] = _canonicalize_native_angle(candidate)
     result["canonical_angle_convention"] = "upstream_theta_0"
-    confidence_metric_db: float
+    confidence_metric_db: Optional[float]
     confidence_metric_valid: bool
     frequency_valid: bool
     power_native_db: Optional[float]
@@ -1190,14 +1290,15 @@ def normalize_doa_candidate(
     power_mapping_lossy = False
 
     if candidate.get("source_format") == "csv":
-        confidence_metric_db = _finite_float(candidate.get("confidence_raw"), "csv.confidence_raw")
-        confidence_metric_valid = math.isfinite(confidence_metric_db) and confidence_metric_db >= 0.0
-        frequency_hz = _finite_int(candidate.get("frequency_hz"), "csv.frequency_hz")
-        power_native_db = _finite_float(candidate.get("power_raw"), "csv.power_raw")
-        frequency_valid = 0 < frequency_hz <= 6_000_000_000
+        confidence_metric_db = _finite_or_none(candidate.get("confidence_raw"))
+        confidence_metric_valid = confidence_metric_db is not None and confidence_metric_db >= 0.0
+        raw_frequency = candidate.get("frequency_hz")
+        frequency_hz = raw_frequency if isinstance(raw_frequency, int) and not isinstance(raw_frequency, bool) else None
+        power_native_db = _finite_or_none(candidate.get("power_raw"))
+        frequency_valid = frequency_hz is not None and 0 < frequency_hz <= 6_000_000_000
         # A value at the CSV floor is clipped and does not identify the power.
-        power_mapping_lossy = power_native_db <= CSV_POWER_FLOOR_DB
-        power_native_valid = math.isfinite(power_native_db) and not power_mapping_lossy
+        power_mapping_lossy = power_native_db is not None and power_native_db <= CSV_POWER_FLOOR_DB
+        power_native_valid = power_native_db is not None and not power_mapping_lossy
         peak_distance: Optional[float] = None
         peak_consistent: Optional[bool] = None
         peak_index = candidate.get("angular_peak_index")
@@ -1235,19 +1336,19 @@ def normalize_doa_candidate(
             }
         )
     elif candidate.get("source_format") == "xml":
-        confidence_raw = _finite_float(candidate.get("confidence_raw_percent"), "xml.CONF")
-        frequency_mhz = _finite_float(candidate.get("frequency_mhz"), "xml.FREQUENCY")
-        transformed_power = _finite_float(candidate.get("power_transformed_raw"), "xml.PWR")
-        confidence_metric_db = confidence_raw / 100.0
-        confidence_metric_valid = math.isfinite(confidence_metric_db) and confidence_metric_db >= 0.0
-        frequency_valid = 0.0 < frequency_mhz <= 6_000.0
+        confidence_raw = _finite_or_none(candidate.get("confidence_raw_percent"))
+        frequency_mhz = _finite_or_none(candidate.get("frequency_mhz"))
+        transformed_power = _finite_or_none(candidate.get("power_transformed_raw"))
+        confidence_metric_db = None if confidence_raw is None else confidence_raw / 100.0
+        confidence_metric_valid = confidence_metric_db is not None and confidence_metric_db >= 0.0
+        frequency_valid = frequency_mhz is not None and 0.0 < frequency_mhz <= 6_000.0
         # Upstream writes max(0, native_power_db + 100). A transformed value
         # at the floor is clipped and cannot be inverted precisely; values above
         # the floor can be represented as a traceable native estimate, not yet a
         # calibrated MQTT dB.
-        power_mapping_lossy = transformed_power <= XML_POWER_CLIP_FLOOR
-        power_native_db = transformed_power - 100.0
-        power_native_valid = math.isfinite(power_native_db) and not power_mapping_lossy
+        power_mapping_lossy = transformed_power is not None and transformed_power <= XML_POWER_CLIP_FLOOR
+        power_native_db = None if transformed_power is None else transformed_power - 100.0
+        power_native_valid = power_native_db is not None and not power_mapping_lossy
         result.update(
             {
                 "confidence": None,
@@ -1258,7 +1359,7 @@ def normalize_doa_candidate(
                 "confidence_valid": False,
                 "confidence_contract_valid": False,
                 "confidence_mapping_ready": False,
-                "frequency_hz_normalized": int(round(frequency_mhz * 1_000_000.0)),
+                "frequency_hz_normalized": None if frequency_mhz is None else int(round(frequency_mhz * 1_000_000.0)),
                 "frequency_unit": "MHz_to_Hz",
                 "frequency_valid": frequency_valid,
                 "power_db": power_native_db if power_mapping_ready and power_native_valid else None,
@@ -1288,6 +1389,8 @@ def normalize_doa_candidate(
         )
     if power_mapping_lossy:
         unit_reasons.append("POWER_FLOOR_LOSSY")
+    if candidate.get("missing_fields"):
+        unit_reasons.append("NATIVE_FIELDS_MISSING")
     result["unit_reasons"] = unit_reasons
     result["native_metrics_valid"] = bool(confidence_metric_valid and frequency_valid and power_native_valid)
     result["native_metrics_state"] = "READY" if result["native_metrics_valid"] else "NOT_READY"
@@ -1689,20 +1792,22 @@ def _select_csv_row(
                 if isinstance(row.get("frequency_hz"), int)
                 and abs(int(row["frequency_hz"]) - xml_hz) <= CSV_XML_FREQUENCY_MATCH_HZ
             ]
-        if len(matches) != 1:
+        if len(matches) == 1:
+            selected = dict(matches[0])
+            selection = "matched_xml_frequency"
+        else:
+            # Without one XML match the first row (VFO 0) is still shown,
+            # labelled as unconfirmed, instead of hiding every row.
             if xml_hz is None:
                 detail = "the XML view is unavailable to select one"
             elif not matches:
                 detail = "none matches the XML frequency"
             else:
                 detail = "several match the XML frequency"
-            candidate = _unavailable(resource)
-            candidate["error"] = f"{len(rows)} CSV rows (multi-VFO output); {detail}"
-            candidate["csv_rows_total"] = len(rows)
-            candidate["additional_vfo_rows"] = summaries
-            return candidate
-        selected = dict(matches[0])
-        selection = "matched_xml_frequency"
+            pool = matches or rows
+            selected = dict(pool[0])
+            selection = "first_row_unconfirmed"
+            selected["csv_row_selection_detail"] = f"{len(rows)} CSV rows (multi-VFO output); {detail}"
     selected["csv_rows_total"] = len(rows)
     selected["csv_row_selection"] = selection
     selected["additional_vfo_rows"] = [
@@ -2154,8 +2259,13 @@ def collect(
         )
     status_fresh = bool(status_age and status_age["fresh"] is True)
     daq_healthy = status.get("daq_health") == "PASS"
+    # A DAQ the status does not describe (flags missing) is unknown, not failed:
+    # labelled, and it blocks publication, but it does not degrade the data.
+    daq_failed = status_available and status.get("daq_health") == "FAIL"
+    daq_unknown = status_available and status.get("daq_health") == "UNKNOWN"
     signal_quality = _signal_quality(status, candidates)
     adc_overdriven = signal_quality["adc_overdrive"] is True
+    adc_unknown = status_available and signal_quality["adc_overdrive"] is None
     csv_view = candidates.get("csv", {})
     angular_peak_consistent = not (
         csv_view.get("available") is True and csv_view.get("angular_peak_angle_consistent") is False
@@ -2180,7 +2290,7 @@ def collect(
         "status_available": status_available,
         "status_fresh": status_fresh if clock_source == "local" else None,
         "daq_healthy": daq_healthy,
-        "adc_not_overdriven": not adc_overdriven,
+        "adc_not_overdriven": None if adc_unknown else not adc_overdriven,
         "node_not_stalled": not node_stalled,
         "doa_candidate_parsed": bool(parsed_candidates),
         "doa_candidate_fresh": bool(fresh_candidates),
@@ -2200,7 +2310,7 @@ def collect(
 
     if not status_available:
         overall_state = "UNAVAILABLE"
-    elif not daq_healthy or adc_overdriven:
+    elif daq_failed or adc_overdriven:
         overall_state = "DEGRADED"
     elif not parsed_candidates:
         overall_state = "INVALID"
@@ -2209,6 +2319,8 @@ def collect(
     elif not fresh_candidates:
         overall_state = "STALE"
     elif native_consistency.get("comparable") is not True:
+        # One view missing, or two that could not be compared: the data that
+        # was read is kept and labelled, the state says it is partial.
         overall_state = "INCOMPLETE"
     elif authority == "none":
         overall_state = "UNVERIFIED"
@@ -2228,10 +2340,14 @@ def collect(
         reasons.append("GROUND_CLOCK_UNVERIFIED")
     if node_stalled:
         reasons.append("NODE_CLOCK_STALLED")
-    if status_available and not daq_healthy:
+    if daq_failed:
         reasons.append("DAQ_HEALTH_GATE_FAILED")
+    if daq_unknown:
+        reasons.append("DAQ_HEALTH_UNKNOWN")
     if adc_overdriven:
         reasons.append("ADC_OVERDRIVE")
+    if adc_unknown:
+        reasons.append("ADC_OVERDRIVE_UNKNOWN")
     if not parsed_candidates:
         reasons.append("NO_VALID_DOA_CANDIDATE")
     elif not fresh_candidates and doa_freshness_known:
@@ -2239,6 +2355,8 @@ def collect(
     if parsed_candidates:
         if candidates.get("csv", {}).get("available") is not True:
             reasons.append("CSV_VIEW_UNAVAILABLE")
+        elif candidates.get("csv", {}).get("csv_row_selection") == "first_row_unconfirmed":
+            reasons.append("CSV_VFO_ROW_UNCONFIRMED")
         if candidates.get("xml", {}).get("available") is not True:
             reasons.append("XML_VIEW_UNAVAILABLE")
     if not canonical_angle_ready:

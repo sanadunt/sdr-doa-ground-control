@@ -11,9 +11,20 @@ requested ``settings/reported``.
 
 The store never publishes. ``expect_settings_report`` only registers the id of
 a ``config.get`` the console sent, so that the answer to it is accepted.
+
+Reading is lenient where the data stays meaningful: unknown fields are
+ignored, an optional (nullable) field that is missing reads as null, 0/1 reads
+as a boolean, an integral float or digit string as an integer, and a time in
+seconds as milliseconds. Each such repair is a note (``CODE:field``) on the
+topic entry and in the accepted payload, so the operator sees it. Only data
+that cannot be read (not JSON, not an object, empty or malformed sid, another
+protocol version, oversize, a core field missing) is INVALID. A message outside
+its freshness window, without fresh health or with another revision is kept
+and labelled; LIVE keeps its edge rules.
 """
 from __future__ import annotations
 
+import contextvars
 import copy
 import json
 import math
@@ -90,6 +101,12 @@ CAPABILITY_FLAGS = (
     "reboot", "shutdown", "ppp_restart",
 )
 SETTINGS_REPORT_FIELDS = frozenset({"v", "sid", "boot", "id", "rev", "t", "settings_json"})
+# A sequence number this far below the last accepted one means the edge counted
+# from the start again within the same session; it is accepted with a note.
+SEQUENCE_RESET_GAP = 1000
+# Notes longer lists are cut to this many.
+MAX_NOTES = 16
+
 # Top-level ACK result keys the edge writes (control.py, helper.py, journal.py).
 # A one-time ``challenge`` is never kept.
 ACK_RESULT_KEYS = frozenset({
@@ -173,25 +190,63 @@ def _object(raw: bytes) -> Dict[str, Any]:
     return value
 
 
-def _present(data: Dict[str, Any], key: str) -> Any:
+_NOTES: "contextvars.ContextVar[Optional[List[str]]]" = contextvars.ContextVar("rdf_node_notes", default=None)
+_DIGITS_RE = re.compile(r"^-?[0-9]{1,19}$")
+
+
+def _note(code: str, key: Optional[str] = None) -> None:
+    """Record a repair the reader made, as ``CODE`` or ``CODE:field``."""
+    notes = _NOTES.get()
+    if notes is None:
+        return
+    text = code if key is None else f"{code}:{key}"
+    if text not in notes and len(notes) < MAX_NOTES:
+        notes.append(text)
+
+
+def _present(data: Dict[str, Any], key: str, *, nullable: bool = False) -> Any:
+    """The value of ``key``; a missing nullable field reads as null with a note."""
     if key not in data:
+        if nullable:
+            _note("MISSING_FIELD", key)
+            return None
         raise _Invalid("MISSING_FIELD", key)
     return data[key]
 
 
+def _as_int(value: Any, key: str) -> Any:
+    """An integral float or a digit string as an int (noted); anything else unchanged."""
+    if type(value) is float and math.isfinite(value) and value.is_integer():
+        _note("COERCED", key)
+        return int(value)
+    if isinstance(value, str) and _DIGITS_RE.fullmatch(value):
+        _note("COERCED", key)
+        return int(value)
+    return value
+
+
 def _int(data: Dict[str, Any], key: str, low: int, high: int, *, nullable: bool = False) -> Optional[int]:
-    value = _present(data, key)
+    value = _present(data, key, nullable=nullable)
     if value is None and nullable:
         return None
+    value = _as_int(value, key)
     if type(value) is not int or not low <= value <= high:
         raise _Invalid("INVALID_FIELD", key)
     return value
 
 
 def _number(data: Dict[str, Any], key: str, low: float, high: float, *, nullable: bool = False) -> Any:
-    value = _present(data, key)
+    value = _present(data, key, nullable=nullable)
     if value is None and nullable:
         return None
+    if isinstance(value, str):
+        try:
+            number = float(value)
+        except ValueError:
+            raise _Invalid("INVALID_FIELD", key) from None
+        if math.isfinite(number):
+            _note("COERCED", key)
+            value = number
     if not _finite_in(value, low, high):
         raise _Invalid("INVALID_FIELD", key)
     return value
@@ -204,17 +259,32 @@ def _finite_in(value: Any, low: float, high: float) -> bool:
     return type(value) is float and math.isfinite(value) and low <= value <= high
 
 
+_BOOL_TEXT = {"0": False, "1": True, "false": False, "true": True}
+
+
+def _as_bool(value: Any, key: str) -> Any:
+    """0/1 (number or text) and "true"/"false" as a boolean (noted); anything else unchanged."""
+    if type(value) in (int, float) and value in (0, 1):
+        _note("COERCED", key)
+        return bool(value)
+    if isinstance(value, str) and value.strip().lower() in _BOOL_TEXT:
+        _note("COERCED", key)
+        return _BOOL_TEXT[value.strip().lower()]
+    return value
+
+
 def _bool(data: Dict[str, Any], key: str, *, nullable: bool = False) -> Optional[bool]:
-    value = _present(data, key)
+    value = _present(data, key, nullable=nullable)
     if value is None and nullable:
         return None
+    value = _as_bool(value, key)
     if type(value) is not bool:
         raise _Invalid("INVALID_FIELD", key)
     return value
 
 
 def _text(data: Dict[str, Any], key: str, pattern: "re.Pattern[str]", *, nullable: bool = False) -> Optional[str]:
-    value = _present(data, key)
+    value = _present(data, key, nullable=nullable)
     if value is None and nullable:
         return None
     if not isinstance(value, str) or not pattern.fullmatch(value):
@@ -224,23 +294,62 @@ def _text(data: Dict[str, Any], key: str, pattern: "re.Pattern[str]", *, nullabl
 
 def _choice(data: Dict[str, Any], key: str, choices: frozenset) -> Any:
     value = _present(data, key)
+    if any(type(item) is int for item in choices):
+        if type(value) is bool:
+            _note("COERCED", key)
+            value = int(value)
+        else:
+            value = _as_int(value, key)
     if type(value) not in (int, str) or value not in choices:
         raise _Invalid("INVALID_FIELD", key)
     return value
 
 
 def _epoch(data: Dict[str, Any], key: str) -> int:
-    value = _int(data, key, _EPOCH_MS_MIN, _EPOCH_MS_MAX)
-    assert value is not None
+    """Epoch milliseconds; whole or fractional seconds and float milliseconds are converted (noted)."""
+    value = _present(data, key)
+    if isinstance(value, str):
+        try:
+            value = float(value)
+        except ValueError:
+            raise _Invalid("INVALID_FIELD", key) from None
+        _note("COERCED", key)
+    if type(value) in (int, float) and math.isfinite(value):
+        if _EPOCH_MS_MIN // 1000 <= value <= _EPOCH_MS_MAX // 1000:
+            _note("TIME_SECONDS", key)
+            value = int(round(value * 1000))
+        elif type(value) is float:
+            _note("COERCED", key)
+            value = int(round(value))
+    if type(value) is not int or not _EPOCH_MS_MIN <= value <= _EPOCH_MS_MAX:
+        raise _Invalid("INVALID_FIELD", key)
     return value
 
 
 def _words(data: Dict[str, Any], key: str, limit: int) -> List[str]:
-    value = _present(data, key)
-    if (not isinstance(value, list) or len(value) > limit or
-            any(not isinstance(item, str) or not _WORD_RE.fullmatch(item) for item in value)):
+    """A list of words; a missing list is empty and items that are not words are dropped (noted)."""
+    value = _present(data, key, nullable=True)
+    if value is None:
+        return []
+    if not isinstance(value, list):
         raise _Invalid("INVALID_FIELD", key)
-    return list(value)
+    words = [item for item in value if isinstance(item, str) and _WORD_RE.fullmatch(item)]
+    if len(words) != len(value) or len(words) > limit:
+        _note("DROPPED_ITEMS", key)
+    return words[:limit]
+
+
+def _free_text(value: Any, key: str, limit: int = 64) -> Optional[str]:
+    """Printable text cut to ``limit`` characters (noted when changed), or None."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        _note("COERCED", key)
+        value = str(value)
+    cleaned = "".join(char for char in value if char.isprintable())[:limit]
+    if cleaned != value:
+        _note("TRIMMED", key)
+    return cleaned
 
 
 def _envelope(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -273,17 +382,23 @@ def _validate_capabilities(data: Dict[str, Any]) -> Dict[str, Any]:
     if "t" in data:
         value["t"] = _epoch(data, "t")
     value.update(
-        version=_text(data, "version", _WORD_RE),
-        mode=_text(data, "mode", _WORD_RE),
+        version=_text(data, "version", _WORD_RE, nullable=True),
+        mode=_text(data, "mode", _WORD_RE, nullable=True),
         codecs=_words(data, "codecs", 16),
-        angle=_text(data, "angle", _WORD_RE),
-        native_axis=_int(data, "native_axis", -128, 127),
-        count=_int(data, "count", 1, 4096),
+        # A missing angle convention is "unknown" downstream (no θ₀), not a reject.
+        angle=_text(data, "angle", _WORD_RE, nullable=True),
+        native_axis=_int(data, "native_axis", -128, 127, nullable=True),
+        count=_int(data, "count", 1, 4096, nullable=True),
         profiles=_words(data, "profiles", 16),
-        scope=_text(data, "scope", _WORD_RE),
+        scope=_text(data, "scope", _WORD_RE, nullable=True),
     )
     for flag in CAPABILITY_FLAGS:
-        value[flag] = _bool(data, flag)
+        # A flag the edge did not send grants nothing: it reads as false.
+        if flag in data:
+            value[flag] = _bool(data, flag)
+        else:
+            _note("DEFAULTED", flag)
+            value[flag] = False
     # Edges before 1.0.0-20261013 published it; it is no longer required.
     if "maintenance" in data:
         value["maintenance"] = _bool(data, "maintenance")
@@ -297,7 +412,7 @@ def _validate_availability(data: Dict[str, Any]) -> Dict[str, Any]:
     if value["online"] or "t" in data:
         value["t"] = _epoch(data, "t")
     if "reason" in data:
-        value["reason"] = _text(data, "reason", _CODE_RE)
+        value["reason"] = _free_text(data["reason"], "reason")
     return value
 
 
@@ -320,10 +435,15 @@ def _validate_health(data: Dict[str, Any]) -> Dict[str, Any]:
 def _validate_detail(data: Dict[str, Any]) -> Dict[str, Any]:
     value = _envelope(data)
     value.update(t=_epoch(data, "t"), usb=_int(data, "usb", 0, 1000, nullable=True))
-    sync = _present(data, "sync")
-    if not isinstance(sync, list) or len(sync) != 3 or any(item is not None and type(item) is not bool for item in sync):
+    sync = _present(data, "sync", nullable=True)
+    if sync is None:
+        sync = [None, None, None]
+    if not isinstance(sync, list) or len(sync) != 3:
         raise _Invalid("INVALID_FIELD", "sync")
-    value["sync"] = list(sync)
+    sync = [None if item is None else _as_bool(item, "sync") for item in sync]
+    if any(item is not None and type(item) is not bool for item in sync):
+        raise _Invalid("INVALID_FIELD", "sync")
+    value["sync"] = sync
     # The edge computes cpu from /proc/stat idle+iowait without a clamp
     # (monitor.probe), and iowait may step back, so a busy Pi can report a
     # little over 100. Any finite value >= 0 is the edge's; mem and disk_free
@@ -336,11 +456,11 @@ def _validate_detail(data: Dict[str, Any]) -> Dict[str, Any]:
     for key in ("tx", "rx"):
         value[key] = _number(data, key, 0, 1e9, nullable=True)
     for key in ("adrop", "parse"):
-        value[key] = _int(data, key, 0, _COUNT_MAX)
+        value[key] = _int(data, key, 0, _COUNT_MAX, nullable=True)
     # PPP link fields of newer edges (after 8691ad0); absent from older ones.
     for key in ("ppp", "peer", "ppp_svc"):
         if key in data:
-            value[key] = _text(data, key, _CODE_RE, nullable=True)
+            value[key] = _free_text(data[key], key)
     if "ppp_restarts" in data:
         value["ppp_restarts"] = _int(data, "ppp_restarts", 0, _COUNT_MAX, nullable=True)
     return value
@@ -359,48 +479,56 @@ def _validate_doa(data: Dict[str, Any]) -> Dict[str, Any]:
         ok=_choice(data, "ok", frozenset({0, 1})),
     )
     if value["ok"] == 0:
-        reasons = data.get("validation_reasons")
+        # ok=0 is UNVERIFIED and RAW whatever the labels say; other labels or
+        # reason codes are kept as notes, not refused.
         if data.get("trust") != "UNVERIFIED":
-            raise _Invalid("BAD_UNVERIFIED_DOA", "trust")
+            _note("UNEXPECTED_VALUE", "trust")
         if data.get("angle_reference") != "RAW":
-            raise _Invalid("BAD_UNVERIFIED_DOA", "angle_reference")
-        if (not isinstance(reasons, list) or not 1 <= len(reasons) <= 2 or
-                any(not isinstance(item, str) or item not in UNVERIFIED_DOA_REASONS for item in reasons) or
-                len(set(reasons)) != len(reasons)):
-            raise _Invalid("BAD_UNVERIFIED_DOA", "validation_reasons")
-        value.update(trust="UNVERIFIED", angle_reference="RAW", validation_reasons=list(reasons))
+            _note("UNEXPECTED_VALUE", "angle_reference")
+        value.update(trust="UNVERIFIED", angle_reference="RAW",
+                     validation_reasons=_reasons(data.get("validation_reasons"), "validation_reasons", 32))
     return value
+
+
+def _reasons(value: Any, key: str, limit: int) -> List[str]:
+    """Reason codes as a list; codes that are not codes are dropped (noted)."""
+    if not isinstance(value, list):
+        _note("MISSING_FIELD" if value is None else "INVALID_FIELD", key)
+        return []
+    kept: List[str] = []
+    for item in value:
+        if isinstance(item, str) and _REASON_RE.fullmatch(item) and item not in kept:
+            kept.append(item)
+    if len(kept) != len(value) or len(kept) > limit:
+        _note("DROPPED_ITEMS", key)
+    return kept[:limit]
 
 
 def _validate_diagnostic_doa(data: Dict[str, Any]) -> Dict[str, Any]:
     value = _envelope(data)
     value["q"] = _int(data, "q", 1, _U32)
     if data.get("source") != "doa.xml":
-        raise _Invalid("BAD_DIAGNOSTIC_DOA", "source")
+        _note("UNEXPECTED_VALUE", "source")
     value.update(
-        source="doa.xml",
+        source=_free_text(data.get("source"), "source") or "doa.xml",
         source_timestamp_ms=_epoch(data, "source_timestamp_ms"),
         observed_timestamp_ms=_epoch(data, "observed_timestamp_ms"),
         raw_doa_deg=_number(data, "raw_doa_deg", 0, 360),
         frequency_mhz=_number(data, "frequency_mhz", 0.001, 5000),
     )
     if data.get("trust") != "UNVERIFIED":
-        raise _Invalid("BAD_DIAGNOSTIC_DOA", "trust")
-    reasons = data.get("validation_reasons")
-    if (not isinstance(reasons, list) or not 1 <= len(reasons) <= 32 or
-            any(not isinstance(item, str) or not _REASON_RE.fullmatch(item) for item in reasons) or
-            "DIAGNOSTIC_UNVERIFIED" not in reasons):
-        raise _Invalid("BAD_DIAGNOSTIC_DOA", "validation_reasons")
-    value.update(trust="UNVERIFIED", validation_reasons=list(reasons))
+        _note("UNEXPECTED_VALUE", "trust")
+    value.update(trust="UNVERIFIED", validation_reasons=_reasons(data.get("validation_reasons"), "validation_reasons", 32))
     return value
 
 
 def _validate_angular_frame(data: Dict[str, Any]) -> Dict[str, Any]:
-    """One Angular JSON frame, as codec.decode() checks it."""
-    if type(data.get("v")) is not int or data["v"] != 2:
-        raise _Invalid("BAD_ANGULAR_JSON", "v")
-    if data.get("encoding") != "json":
-        raise _Invalid("BAD_ANGULAR_JSON", "encoding")
+    """One Angular JSON frame; the edge sends no other encoding (RDF2 is retired)."""
+    encoding = data.get("encoding", "json")
+    if "encoding" not in data:
+        _note("MISSING_FIELD", "encoding")
+    if encoding != "json":
+        raise _Invalid("ENCODING_UNSUPPORTED", "encoding")
     value = _envelope(data)
     value.update(
         encoding="json",
@@ -426,9 +554,10 @@ def _validate_angular_frame(data: Dict[str, Any]) -> Dict[str, Any]:
 
 def _validate_angular(data: Dict[str, Any]) -> Dict[str, Any]:
     value = _validate_angular_frame(data)
-    # Missing parse, freshness, DAQ or config evidence is a reject, not a downgrade.
+    # Missing parse, freshness, DAQ or config evidence makes the frame
+    # UNVERIFIED (the store keeps it apart from LIVE), not a reject.
     if value["flags"] & FLAGS_INTEGRITY != FLAGS_INTEGRITY:
-        raise _Invalid("ANGULAR_EVIDENCE_INCOMPLETE", "flags")
+        _note("EVIDENCE_INCOMPLETE", "flags")
     return value
 
 
@@ -450,7 +579,9 @@ def safe_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
             try:
                 number = _edge_finite(settings[key], -1e6, 5e9) * scale
             except (TypeError, ValueError, OverflowError):
-                raise _Invalid("BAD_SETTINGS_JSON", "settings_json") from None
+                # One unreadable value leaves only that field out.
+                _note("DROPPED_FIELD", name)
+                continue
             result[name] = int(round(number)) if name.endswith("_hz") else number
     for key in SAFE_SETTINGS_SCALARS:
         item = settings.get(key)
@@ -477,8 +608,9 @@ def _depth_within(value: Any, limit: int) -> bool:
 
 
 def _validate_settings_report(data: Dict[str, Any]) -> Dict[str, Any]:
-    if set(data) != SETTINGS_REPORT_FIELDS:
-        raise _Invalid("BAD_SETTINGS_REPORT")
+    # Extra fields are ignored; every field of the contract must be there.
+    for key in sorted(SETTINGS_REPORT_FIELDS):
+        _present(data, key)
     value = _envelope(data)
     value.update(
         boot=_text(data, "boot", _IDENTITY_RE),
@@ -530,7 +662,8 @@ def _validate_ack(data: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(status, str) or not _CODE_RE.fullmatch(status):
         raise _Invalid("INVALID_FIELD", "status")
     if status not in ACK_STATUSES:
-        raise _Invalid("UNKNOWN_ACK_STATUS", "status")
+        # A status this console does not know is kept as progress, never as a result.
+        _note("UNKNOWN_STATUS", "status")
     value.update(status=status, t=_epoch(data, "t"), rev=_int(data, "rev", 0, _U32, nullable=True))
     result = _present(data, "result")
     if not isinstance(result, dict):
@@ -553,6 +686,13 @@ _VALIDATORS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
     "ack/config": _validate_ack,
     "ack/operation": _validate_ack,
 }
+
+
+def _add_note(value: Dict[str, Any], note: str) -> None:
+    """Add a note to an accepted payload after validation."""
+    notes = value.setdefault("notes", [])
+    if note not in notes and len(notes) < MAX_NOTES:
+        notes.append(note)
 
 
 def _source_window(source_ms: int, at_ms: int, max_age_ms: int) -> Optional[str]:
@@ -582,6 +722,8 @@ def _public_payload(suffix: str, value: Dict[str, Any]) -> Dict[str, Any]:
     if suffix == "settings/reported":
         shown = {key: value[key] for key in ("v", "sid", "boot", "id", "rev", "t")}
         shown["bytes"] = len(value["settings_json"].encode("utf-8"))
+        if value.get("notes"):
+            shown["notes"] = list(value["notes"])
         return shown
     return dict(value)
 
@@ -722,7 +864,8 @@ class RdfNodeV2Telemetry:
                 type(received_at_ms) is not int or received_at_ms < 0):
             raise ValueError("invalid broker metadata")
         if message_expiry_s is not None and (type(message_expiry_s) is not int or not 0 <= message_expiry_s <= _U32):
-            raise ValueError("invalid message expiry")
+            # A broker property outside MQTT's range says nothing about the payload.
+            message_expiry_s = None
         if not isinstance(payload, bytes):
             raise ValueError("payload must be bytes")
         self._received += 1
@@ -741,9 +884,13 @@ class RdfNodeV2Telemetry:
             self._topics[suffix] = entry
             entry.update(error="RETAINED_CLEARED", cleared=True)
             return
+        notes: List[str] = []
+        token = _NOTES.set(notes)
         try:
+            # QoS and retain other than the edge's (a bridge without Retain As
+            # Published, another publisher) are labelled, not refused.
             if qos != (0 if suffix.startswith("telemetry/") else 1) or retained != (suffix in RETAINED_SUFFIXES):
-                raise _Invalid("BROKER_POLICY")
+                _note("BROKER_POLICY")
             if not payload:
                 raise _Invalid("EMPTY_PAYLOAD")
             if len(payload) > MAX_PAYLOAD_BYTES:
@@ -757,12 +904,16 @@ class RdfNodeV2Telemetry:
                 # an exception that leaves it uncounted.
                 raise _Invalid("MALFORMED_PAYLOAD") from None
         except _Invalid as exc:
+            _NOTES.reset(token)
             self._invalid += 1
             self._invalid_counts[suffix] += 1
             entry.update(status="INVALID", error=exc.code)
             if exc.field is not None and _FIELD_RE.fullmatch(exc.field):
                 entry["field"] = exc.field
             return
+        _NOTES.reset(token)
+        if notes:
+            value["notes"] = list(notes)
         self._valid += 1
         _HANDLERS[suffix](self, suffix, value, entry, received_at_ms)
 
@@ -807,13 +958,20 @@ class RdfNodeV2Telemetry:
         return True
 
     def _advanced(self, kind: str, suffix: str, value: Dict[str, Any], entry: Dict[str, Any]) -> bool:
-        if value["q"] <= self._seq.get(kind, 0):
-            self._mark(suffix, entry, "IGNORED", value, "SEQUENCE_NOT_ADVANCING")
-            return False
-        return True
+        last = self._seq.get(kind, 0)
+        if value["q"] > last:
+            return True
+        if last - value["q"] >= SEQUENCE_RESET_GAP:
+            # The edge counted from the start again within the same session.
+            _add_note(value, "SEQUENCE_RESET")
+            return True
+        self._mark(suffix, entry, "IGNORED", value, "SEQUENCE_NOT_ADVANCING")
+        return False
 
     def _health_fresh(self, at_ms: int) -> bool:
-        return self._health is not None and _within(at_ms, self._health["received_at_ms"], HEALTH_FRESH_MS)
+        """Health received at most 8 s ago whose own time was inside its window when it came."""
+        return (self._health is not None and self._health.get("in_window", True) and
+                _within(at_ms, self._health["received_at_ms"], HEALTH_FRESH_MS))
 
     def _health_ok(self, at_ms: int) -> bool:
         return self._health_fresh(at_ms) and self._health is not None and self._health["payload"]["daq"] == 1
@@ -847,15 +1005,17 @@ class RdfNodeV2Telemetry:
     def _on_health(self, suffix: str, value: Dict[str, Any], entry: Dict[str, Any], at: int) -> None:
         if not self._bound(suffix, value, entry):
             return
-        problem = _source_window(value["t"], at, HEALTH_FRESH_MS)
-        if problem:
-            self._mark(suffix, entry, "STALE", value, problem)
-            return
         if not self._advanced("health", suffix, value, entry):
             return
+        problem = _source_window(value["t"], at, HEALTH_FRESH_MS)
         self._seq["health"] = value["q"]
-        self._health = {"payload": value, "received_at_ms": at}
-        self._mark(suffix, entry, "FRESH", value)
+        # Health outside its window is kept and shown, but it never makes
+        # health fresh, so it never lets DoA or Angular become LIVE.
+        self._health = {"payload": value, "received_at_ms": at, "in_window": problem is None}
+        if problem:
+            self._mark(suffix, entry, "STALE", value, problem)
+        else:
+            self._mark(suffix, entry, "FRESH", value)
 
     def _on_detail(self, suffix: str, value: Dict[str, Any], entry: Dict[str, Any], at: int) -> None:
         if not self._bound(suffix, value, entry):
@@ -866,29 +1026,34 @@ class RdfNodeV2Telemetry:
     def _on_doa(self, suffix: str, value: Dict[str, Any], entry: Dict[str, Any], at: int) -> None:
         if not self._bound(suffix, value, entry):
             return
-        problem = _source_window(value["t"], at, DOA_FRESH_MS)
-        if problem:
-            self._mark(suffix, entry, "STALE", value, problem)
-            return
         live = value["ok"] == 1
         kind = "doa" if live else "doa_unverified"
         if not self._advanced(kind, suffix, value, entry):
             return
+        # Every DoA is kept; what was wrong when it came is a reason that
+        # keeps it from being LIVE, shown with it instead of dropping it.
+        problems: List[str] = []
+        window = _source_window(value["t"], at, DOA_FRESH_MS)
+        if window:
+            problems.append(window)
         if not live:
             cfg = self._session["payload"]["cfg"] if self._session else None
             if cfg is not None and value["rev"] != cfg:
-                self._mark(suffix, entry, "INCONSISTENT", value, "REVISION_MISMATCH")
-                return
+                _add_note(value, "REVISION_MISMATCH")
         if not self._health_ok(at):
-            self._mark(suffix, entry, "INCONSISTENT", value, "DOA_WITHOUT_HEALTH")
-            return
+            problems.append("DOA_WITHOUT_HEALTH")
         self._seq[kind] = value["q"]
+        record = {"payload": value, "received_at_ms": at, "receipt_reasons": problems}
         if live:
-            self._doa = {"payload": value, "received_at_ms": at}
-            self._mark(suffix, entry, "LIVE", value)
+            self._doa = record
         else:
-            self._doa_unverified = {"payload": value, "received_at_ms": at}
-            self._mark(suffix, entry, "UNVERIFIED", value)
+            self._doa_unverified = record
+        if window:
+            self._mark(suffix, entry, "STALE", value, window)
+        elif problems:
+            self._mark(suffix, entry, "INCONSISTENT", value, problems[0])
+        else:
+            self._mark(suffix, entry, "LIVE" if live else "UNVERIFIED", value)
 
     def _on_diagnostic_doa(self, suffix: str, value: Dict[str, Any], entry: Dict[str, Any], at: int) -> None:
         if not self._bound(suffix, value, entry) or not self._advanced("diagnostic_doa", suffix, value, entry):
@@ -904,26 +1069,29 @@ class RdfNodeV2Telemetry:
     def _on_angular(self, suffix: str, value: Dict[str, Any], entry: Dict[str, Any], at: int) -> None:
         if not self._bound(suffix, value, entry):
             return
-        problem = _source_window(value["timestamp_ms"], at, ANGULAR_FRESH_MS)
-        if problem:
-            self._mark(suffix, entry, "STALE", value, problem)
-            return
-        if not self._health_ok(at):
-            self._mark(suffix, entry, "INCONSISTENT", value, "ANGULAR_WITHOUT_HEALTH")
-            return
         live = value["flags"] == FLAGS_ALL
         kind = "angular" if live else "angular_unverified"
         if not self._advanced(kind, suffix, value, entry):
             return
+        problems: List[str] = []
+        window = _source_window(value["timestamp_ms"], at, ANGULAR_FRESH_MS)
+        if window:
+            problems.append(window)
+        if not self._health_ok(at):
+            problems.append("ANGULAR_WITHOUT_HEALTH")
         self._seq[kind] = value["q"]
         if live:
-            self._angular = {"payload": value, "received_at_ms": at}
-            self._mark(suffix, entry, "LIVE", value)
+            self._angular = {"payload": value, "received_at_ms": at, "receipt_reasons": problems}
         else:
             # Convention or authority evidence is missing: trust-only, kept
             # with the diagnostic candidate and never LIVE.
             self._angular_unverified = {"payload": value, "received_at_ms": at, "topic": suffix}
-            self._mark(suffix, entry, "UNVERIFIED", value)
+        if window:
+            self._mark(suffix, entry, "STALE", value, window)
+        elif problems:
+            self._mark(suffix, entry, "INCONSISTENT", value, problems[0])
+        else:
+            self._mark(suffix, entry, "LIVE" if live else "UNVERIFIED", value)
 
     def _on_diagnostic_angular(self, suffix: str, value: Dict[str, Any], entry: Dict[str, Any], at: int) -> None:
         if not self._bound(suffix, value, entry) or not self._advanced("diagnostic_angular", suffix, value, entry):
@@ -997,7 +1165,8 @@ class RdfNodeV2Telemetry:
 
     def _doa_reasons(self, now_ms: int) -> List[str]:
         assert self._doa is not None
-        reasons: List[str] = []
+        reasons: List[str] = [reason for reason in self._doa.get("receipt_reasons", ())
+                              if reason == "DOA_WITHOUT_HEALTH"]
         t = self._doa["payload"]["t"]
         if t > now_ms + FUTURE_TOLERANCE_MS:
             reasons.append("SOURCE_TIME_FUTURE")
@@ -1011,7 +1180,8 @@ class RdfNodeV2Telemetry:
 
     def _angular_reasons(self, now_ms: int) -> List[str]:
         assert self._angular is not None
-        reasons: List[str] = []
+        reasons: List[str] = [reason for reason in self._angular.get("receipt_reasons", ())
+                              if reason == "ANGULAR_WITHOUT_HEALTH"]
         problem = _source_window(self._angular["payload"]["timestamp_ms"], now_ms, ANGULAR_FRESH_MS)
         if problem:
             reasons.append("SOURCE_TIME_FUTURE" if problem == "SOURCE_TIME_FUTURE" else "SOURCE_STALE")
@@ -1080,10 +1250,13 @@ class RdfNodeV2Telemetry:
             doa = timed(self._doa, source_age_ms=_age(now_ms, self._doa["payload"]["t"]), live=not reasons, reasons=reasons)
         doa_unverified = None
         if self._doa_unverified is not None:
+            unverified_t = self._doa_unverified["payload"]["t"]
             doa_unverified = timed(
                 self._doa_unverified,
-                source_age_ms=_age(now_ms, self._doa_unverified["payload"]["t"]),
-                stale=not _within(now_ms, self._doa_unverified["received_at_ms"], UNVERIFIED_DOA_FRESH_MS),
+                source_age_ms=_age(now_ms, unverified_t),
+                stale=(not _within(now_ms, self._doa_unverified["received_at_ms"], UNVERIFIED_DOA_FRESH_MS) or
+                       _source_window(unverified_t, now_ms, UNVERIFIED_DOA_FRESH_MS) is not None),
+                reasons=list(self._doa_unverified.get("receipt_reasons", ())),
             )
         diagnostic_doa = None
         if self._diagnostic_doa is not None:

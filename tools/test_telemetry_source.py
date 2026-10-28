@@ -861,6 +861,39 @@ class ReaderTests(unittest.TestCase):
             self.reader.snapshot(BASE_URL)
         self.assertEqual(len(self.light.calls), 1)
 
+    def test_a_failed_light_read_keeps_the_last_good_values_while_they_count(self) -> None:
+        self.edge.live()
+        first = self.reader.snapshot(BASE_URL)
+        self.assertEqual(first["settings"]["fields"]["center_freq"], 433.92 + 1)
+        self.assertIs(first["data_out_light"]["kept_previous"], False)
+        self.light.error = collector.CollectorError("timed out")
+        for _ in range(16):
+            self.advance(2.0)
+            self.keep_alive()
+            answer = self.reader.snapshot(BASE_URL)
+        # The read at 30 s failed; the values of the read at 0 s still count.
+        self.assertEqual(len(self.light.calls), 2)
+        self.assertEqual(answer["data_out_light"]["error"], "timed out")
+        self.assertIs(answer["data_out_light"]["kept_previous"], True)
+        self.assertIs(answer["data_out_light"]["expired"], False)
+        self.assertEqual(answer["settings"]["fields"]["center_freq"], 433.92 + 1)
+        # Past 65 s they answer as not read.
+        for _ in range(20):
+            self.advance(2.0)
+            self.keep_alive()
+            answer = self.reader.snapshot(BASE_URL)
+        self.assertIs(answer["data_out_light"]["expired"], True)
+        self.assertIs(answer["settings"]["available"], False)
+        # A good read replaces them again.
+        self.light.error = None
+        for _ in range(16):
+            self.advance(2.0)
+            self.keep_alive()
+            answer = self.reader.snapshot(BASE_URL)
+        self.assertIs(answer["data_out_light"]["kept_previous"], False)
+        self.assertIsNone(answer["data_out_light"]["error"])
+        self.assertIs(answer["settings"]["available"], True)
+
     def test_a_light_read_from_before_a_fallback_is_not_current(self) -> None:
         pending: List[Callable[[], None]] = []
         self.reader = DataOutReader(
