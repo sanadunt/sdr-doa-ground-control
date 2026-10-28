@@ -40,7 +40,9 @@ describe('DoA view status names the actual cause', () => {
     ['healthy record', snapshot(), true, 'AVAILABLE', 'available'],
     ['CSV/XML conflict', snapshot({ native_consistency: { comparable: true, conflict: true } }), true, 'CONFLICT', 'conflict'],
     ['status.json read error', snapshot({ status: { available: false } }), false, 'UNAVAILABLE', 'statusUnavailable'],
-    ['missing XML view', snapshot({}, candidate(), candidate({ available: false })), true, 'INCOMPLETE', 'viewMissing'],
+    // The CSV view alone is drawn, labelled partial (doa.xml missing).
+    ['missing XML view', snapshot({}, candidate(), candidate({ available: false })), true, 'PARTIAL', 'partial'],
+    ['missing CSV view', snapshot({}, candidate({ available: false }), candidate()), true, 'INCOMPLETE', 'viewMissing'],
     ['record stale at the source', snapshot({}, candidate({ freshness: { fresh: false, age_ms: 6000 } })), false, 'STALE', 'sourceStale'],
     ['frozen node', snapshot({ node_progress: { stalled: true } }, candidate({ freshness: { fresh: false, age_ms: 20000, node_stalled: true } })), false, 'STALE', 'nodeStalled'],
     ['views not comparable', snapshot({ native_consistency: { comparable: false, conflict: false } }), true, 'INCOMPLETE', 'notComparable'],
@@ -51,7 +53,7 @@ describe('DoA view status names the actual cause', () => {
     const status = statusOf(value, localFresh);
     expect(status.code).toBe(code);
     expect(status.reason).toBe(reason);
-    expect(status.shown).toBe(code === 'AVAILABLE');
+    expect(status.shown).toBe(code === 'AVAILABLE' || code === 'PARTIAL');
   });
 
   it('hides a fresh curve when the DAQ is not synchronized', () => {
@@ -109,7 +111,8 @@ describe('shared Overview readiness predicate', () => {
     ['DAQ state not reported', snapshot({ status: { available: true } }), true, false],
     ['ADC overdrive', snapshot({ publication_gate: { state: 'BLOCKED', checks: { adc_not_overdriven: false }, reasons: [] } }), true, false],
     ['CSV/XML conflict', snapshot({ native_consistency: { comparable: true, conflict: true } }), true, false],
-    ['XML view missing', snapshot({}, candidate(), candidate({ available: false })), true, false],
+    ['XML view missing (CSV alone, partial)', snapshot({}, candidate(), candidate({ available: false })), true, true],
+    ['CSV view missing', snapshot({}, candidate({ available: false }), candidate()), true, false],
     ['node stalled', snapshot({ node_progress: { stalled: true } }, candidate({ freshness: { fresh: false, age_ms: 9000, node_stalled: true } }), candidate({ freshness: { fresh: false, age_ms: 9000, node_stalled: true } })), true, false],
     ['no canonical angle', snapshot({}, candidate({ canonical_angle_deg: undefined, angular_peak_index: 60 })), true, false],
     ['non-finite canonical angle', snapshot({}, candidate({ canonical_angle_deg: Number.NaN })), true, false],
@@ -117,7 +120,7 @@ describe('shared Overview readiness predicate', () => {
   ] as Array<[string, TelemetrySnapshot, boolean, boolean]>)('%s', (_label, value, localFresh, shown) => {
     const status = overviewDoaStatus(value, localFresh);
     expect(status.shown).toBe(shown);
-    expect(status.code === 'AVAILABLE').toBe(shown);
+    expect(status.code === 'AVAILABLE' || status.code === 'PARTIAL').toBe(shown);
     // The renderer's own freshness agrees with the data half of the predicate.
     expect(doaDrawable(value, localFresh)).toBe(polarView(value, undefined, localFresh).fresh);
   });

@@ -1,6 +1,6 @@
 import type { Candidate, TelemetrySnapshot, Tone } from '../types';
 import type { MessageKey } from './i18n';
-import { adcOverdriveUnknown, adcOverdriven, candidate, completeVector, daqFailed, daqUnknown, doaDataReady, freshCandidate, nativeViewsReady, nodeStalled, parsedCandidate } from './telemetry';
+import { adcOverdriveUnknown, adcOverdriven, candidate, completeVector, daqFailed, daqUnknown, doaDataReady, freshCandidate, nativeViewsReady, nodeStalled, numberOrNull, parsedCandidate, partialCsvReady, sourceViewNames } from './telemetry';
 import { isMqttSnapshot, mqttDoaUnverified } from './telemetrySource';
 
 /** Why the DoA curve and bearing are, or are not, shown. */
@@ -8,6 +8,7 @@ export type DoaStatusReason =
   | 'waiting'
   | 'simulation'
   | 'available'
+  | 'partial'
   | 'daqDegraded'
   | 'daqUnknown'
   | 'adcOverdrive'
@@ -26,7 +27,7 @@ export type DoaStatusReason =
 
 export interface DoaStatus {
   /** Untranslated status code for badges. */
-  code: 'WAITING' | 'SIMULATION' | 'AVAILABLE' | 'DEGRADED' | 'CONFLICT' | 'UNAVAILABLE' | 'INCOMPLETE' | 'STALE' | 'UNVERIFIED';
+  code: 'WAITING' | 'SIMULATION' | 'AVAILABLE' | 'PARTIAL' | 'DEGRADED' | 'CONFLICT' | 'UNAVAILABLE' | 'INCOMPLETE' | 'STALE' | 'UNVERIFIED';
   tone: Tone;
   reason: DoaStatusReason;
   /** The curve and bearing are drawn. */
@@ -76,6 +77,8 @@ export function doaStatus(snapshot: TelemetrySnapshot | null | undefined, localF
     // MQTT stays the source while Data Out is unreachable, so an unknown
     // overdrive does not hide the bearing; it is shown DEGRADED with the cause.
     if (adcOverdriveUnknown(snapshot)) return { code: 'DEGRADED', tone: 'warn', reason: 'adcUnknown', shown: true };
+    // Data Out without doa.xml: the CSV view alone, drawn and labelled partial.
+    if (partialCsvReady(snapshot)) return { code: 'PARTIAL', tone: 'warn', reason: 'partial', shown: true };
     return { code: 'AVAILABLE', tone: 'good', reason: 'available', shown: true };
   }
   if (isMqttSnapshot(snapshot)) {
@@ -109,10 +112,46 @@ export function overviewDoaStatus(snapshot: TelemetrySnapshot | null | undefined
   return doaStatus(snapshot, localFresh, doaDrawable(snapshot, localFresh));
 }
 
+// Held reasons whose last angle is still worth showing, dimmed and marked NOT
+// VALID (BELUM VALID): the record is old, unverified at the edge, or the DAQ
+// state is unknown. A conflict, a failed DAQ sync or an overdriven ADC have no
+// angle that means anything, so they stay hidden.
+const PROVISIONAL_REASONS: ReadonlySet<DoaStatusReason> = new Set<DoaStatusReason>([
+  'mqttUnverified',
+  'mqttNoDoa',
+  'sourceStale',
+  'localExpired',
+  'nodeStalled',
+  'daqUnknown',
+  'statusUnavailable',
+  'notComparable',
+  'vectorIncomplete',
+  'viewMissing',
+]);
+
+/**
+ * theta_0 of a DoA that is not valid but still readable, for the dimmed
+ * bearing on the HUD and the dashed grey line on the map; null while the DoA
+ * is shown, or when nothing readable is left. MQTT: the LIVE view's angle,
+ * else the UNVERIFIED (ok=0) one. Data Out: the CSV view, else XML.
+ */
+export function provisionalTheta(snapshot: TelemetrySnapshot | null | undefined, status: DoaStatus): number | null {
+  if (!snapshot || snapshot.simulation === true || status.shown || !PROVISIONAL_REASONS.has(status.reason)) return null;
+  for (const name of sourceViewNames(snapshot)) {
+    const view = candidate(snapshot, name);
+    if (parsedCandidate(view)) return numberOrNull(view.canonical_angle_deg);
+  }
+  const unverified = snapshot.mqtt?.doa_unverified;
+  return unverified !== null && typeof unverified === 'object'
+    ? numberOrNull((unverified as Record<string, unknown>).canonical_angle_deg)
+    : null;
+}
+
 const STATUS_TEXT: Record<DoaStatusReason, MessageKey> = {
   waiting: 'polar.waiting',
   simulation: 'polar.simulation',
   available: 'polar.available',
+  partial: 'polar.partial',
   daqDegraded: 'polar.daqDegraded',
   daqUnknown: 'polar.daqUnknown',
   adcOverdrive: 'polar.adcOverdrive',

@@ -91,7 +91,10 @@ describe('Overview dashboard', () => {
     expect(fresh).toContain('<span class="ov-chip tone-info">UNVERIFIED</span>');
     for (const lang of ['en', 'id'] as const) {
       const expired = dashboard(snapshot({ overall_state: 'UNVERIFIED' }), { localSnapshotFresh: false }, lang);
-      expect(expired).toContain(`<span class="ov-hud-age is-warn">${translate(lang, 'hud.age', { age: `${translate(lang, 'common.durationS', { value: '0.2' })} · STALE` })}</span>`);
+      // The last bearing stays, dimmed; its STALE tag carries the age, which the age line does not repeat.
+      const age = translate(lang, 'common.durationS', { value: '0.2' });
+      expect(expired).toContain(`<span class="ov-tag tone-neutral">${translate(lang, 'polar.staleTag', { age })}</span>`);
+      expect(expired).toContain(`<span class="ov-hud-age is-warn">${translate(lang, 'hud.age', { age })}</span>`);
       expect(expired).toContain('<span class="ov-chip tone-warn">STALE</span>');
       expect(expired).not.toContain('UNVERIFIED');
     }
@@ -101,7 +104,9 @@ describe('Overview dashboard', () => {
   it('counts the age of a shared read in the HUD age', () => {
     const answer = snapshot({ overall_state: 'UNVERIFIED', collection: { id: '0badc0de-3', age_ms: 3_500, shared: true } });
     expect(dashboard(answer)).toContain('<span class="ov-hud-age">age 3.7 s</span>');
-    expect(dashboard(answer, { localSnapshotFresh: false })).toContain('<span class="ov-hud-age is-warn">age 3.7 s · STALE</span>');
+    const expired = dashboard(answer, { localSnapshotFresh: false });
+    expect(expired).toContain('<span class="ov-tag tone-neutral">STALE 3.7 s</span>');
+    expect(expired).toContain('<span class="ov-hud-age is-warn">age 3.7 s</span>');
   });
 
   it('keeps an UNAVAILABLE or CONFLICT node chip and an unknown age unmarked after local expiry', () => {

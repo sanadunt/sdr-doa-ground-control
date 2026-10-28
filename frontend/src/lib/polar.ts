@@ -1,5 +1,5 @@
 import type { Candidate, CompassConfig, CompassResolution, ManualCompassOverride, PolarSettings, PolarView, TelemetrySnapshot } from '../types';
-import { nativeViewsReady, numberOrNull, polarDataReady, primaryCandidate } from './telemetry';
+import { curveDataReady, nativeViewsReady, numberOrNull, partialCsvReady, primaryCandidate } from './telemetry';
 import { isMqttSnapshot } from './telemetrySource';
 import type { Translate } from './i18n';
 import { formatDuration } from './healthView';
@@ -302,7 +302,7 @@ export function polarView(
   const values = Array.isArray(csv.angular_power_db) && csv.angular_power_db.length === 360 && csv.angular_power_db.every((value) => typeof value === 'number' && Number.isFinite(value))
     ? csv.angular_power_db
     : null;
-  const fresh = localFresh && polarDataReady(snapshot) && canonicalAngle !== null && Boolean(values);
+  const fresh = localFresh && curveDataReady(snapshot) && canonicalAngle !== null && Boolean(values);
   if (!fresh || !values) {
     return {
       settings,
@@ -512,7 +512,7 @@ export function polarMetadata(view: PolarView): {
 export function polarSourceLabel(snapshot: TelemetrySnapshot | null | undefined, view: PolarView): string {
   const csv = primaryCandidate(snapshot);
   const source = isMqttSnapshot(snapshot) ? 'MQTT' : 'Data Out';
-  if (!nativeViewsReady(snapshot) || !view.fresh) return `${source} · unavailable`;
+  if (!(nativeViewsReady(snapshot) || partialCsvReady(snapshot)) || !view.fresh) return `${source} · unavailable`;
   const age = csv.freshness?.age_ms;
   return `${source} · ${view.settings.figType} display axis · ${age === null || age === undefined ? 'clock unverified' : `${(age / 1000).toFixed(1)} s`}`;
 }

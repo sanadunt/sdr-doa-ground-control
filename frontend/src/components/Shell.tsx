@@ -2,7 +2,7 @@ import type { FocusEvent, JSX, ReactNode } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Branding, TelemetrySnapshot, Tone } from '../types';
 import { REFRESH_INTERVALS_S, candidateErrors, deriveDataState, toneFor } from '../lib/telemetry';
-import { actionableGateReasons, doaStatusTextKey, overviewDoaStatus, rankGateReasons } from '../lib/doaStatus';
+import { actionableGateReasons, doaStatusTextKey, overviewDoaStatus } from '../lib/doaStatus';
 import { sourceBadge, sourceReasonKey } from '../lib/telemetrySource';
 import { shortcutAction } from '../lib/shortcuts';
 import { THEME_STORAGE_KEY, readPreference, writePreference } from '../lib/preferenceStore';
@@ -13,6 +13,7 @@ import { ROUTES, routeFromHash, routeHash } from '../lib/routes';
 import type { RouteName } from '../lib/routes';
 import type { ConsoleAccess } from '../lib/access';
 import { PageReadAgeContext } from './page/pageContext';
+import { DeliveryChecklist } from './DeliveryChecklist';
 
 export { ROUTES, routeShortcut } from '../lib/routes';
 export type { RouteName } from '../lib/routes';
@@ -136,8 +137,6 @@ export function ConsoleShell({
   const sourceTitle = source && source.reasons.length > 0
     ? source.reasons.map((reason) => `${reason} · ${t(sourceReasonKey(reason))}`).join('\n')
     : undefined;
-  const gate = String(snapshot?.publication_gate?.state ?? 'BLOCKED').toUpperCase();
-  const gateReason = gate === 'READY' ? undefined : rankGateReasons(snapshot?.publication_gate?.reasons)[0];
   // Snapshot is about the read itself: a read that just completed is CURRENT even when it reports UNAVAILABLE.
   const readCurrent = snapshot !== null && lastReadAgeMs !== null && lastReadAgeMs <= SNAPSHOT_CURRENT_MS;
   const snapshotState = readError ? 'ERROR' : readCurrent ? 'CURRENT' : snapshot ? 'STALE' : loading ? 'LOADING' : 'WAITING';
@@ -290,7 +289,7 @@ export function ConsoleShell({
             {source ? <TelemetryItem label={t('status.source')} value={t(source.labelKey)} tone={source.tone} title={sourceTitle} /> : null}
             <TelemetryItem label={t('status.data')} value={dataState} tone={dataTone} title={dataTitle} />
             <TelemetryItem label={t('status.doa')} value={doa.code} tone={doa.tone} title={doaTitle} />
-            <TelemetryItem label={t('status.delivery')} value={gate} tone={gate === 'READY' ? 'good' : 'warn'} title={gateReason ? `${gateReason} · ${gateReasonLabel(lang, gateReason)}` : undefined} />
+            <DeliveryChecklist snapshot={snapshot} />
             <TelemetryItem label={t('status.snapshot')} value={snapshotState} tone={snapshotTone} title={readError ? t('shell.snapshotError', { error: readError }) : undefined} live />
             <TelemetryItem label={t('status.mqtt')} value={mqttState} tone={mqttTone} title={mqttTitle} />
             <TelemetryItem label={t('status.sim')} value={simulationEnabled ? 'ON' : 'OFF'} tone={simulationEnabled ? 'warn' : 'neutral'} />

@@ -116,6 +116,9 @@
 .ov-hud-bearing small { margin-left: 1px; font-size: .6em; }
 .readout-warn .ov-hud-bearing { color: var(--amber); }
 .readout-neutral .ov-hud-bearing { color: var(--subtle); }
+/* A held DoA that is still readable: its last bearing, dimmed, beside the NOT VALID tag. */
+.ov-hud-bearing.is-provisional, .readout-warn .ov-hud-bearing.is-provisional { color: var(--subtle); opacity: .72; }
+.ov-hud-grid.is-provisional b { color: var(--subtle); }
 .readout-empty { color: var(--subtle); }
 .ov-hud-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; color: var(--subtle); font-size: 11.5px; }
 .ov-hud-grid b, .ov-hud-offset b, .ov-node-foot b { color: var(--text); font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
@@ -180,6 +183,8 @@
 .ov-polar-body { display: flex; flex: 1 1 auto; min-height: 0; }
 .ov-polar-plot { display: flex; flex: none; flex-direction: column; align-items: center; gap: 2px; width: 284px; min-height: 0; padding-top: 2px; }
 .ov-polar-frame { display: flex; flex: 1 1 auto; flex-direction: column; width: 100%; min-height: 0; }
+/* The last curve, held while no new one arrives; the footer says since when. */
+.ov-polar-frame.is-held { opacity: .62; }
 .ov-polar .plotly-polar { flex: 1 1 auto; height: 100%; min-height: 0; }
 .ov-polar-footer { max-width: 100%; margin: 0; padding: 0 8px 6px; overflow: hidden; color: var(--muted); font-family: var(--mono); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .ov-polar-settings { display: flex; flex: none; flex-direction: column; gap: 6px; width: 337px; min-height: 0; overflow-y: auto; padding: 4px 12px 8px; border-left: 1px solid var(--line-soft); }

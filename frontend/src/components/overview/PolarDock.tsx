@@ -20,6 +20,31 @@ function dbText(value: number): string {
   return String(Number(value.toFixed(2)));
 }
 
+/** The last curve the dock drew, with the browser time it arrived. */
+export interface HeldCurve {
+  values: number[];
+  atMs: number;
+}
+
+// Module scope keeps it across route changes, like the map's last station fix.
+let lastCurve: HeldCurve | null = null;
+
+/**
+ * The curve to draw: the current one, remembered with the time it arrived,
+ * or, while there is none (stale data, no Angular frame), the last one, so
+ * the plot never empties; the dock then says it has no update. Simulation
+ * curves are drawn but never remembered.
+ */
+export function heldCurve(previous: HeldCurve | null, current: number[] | null, simulation: boolean, nowMs: number): { draw: number[] | null; held: HeldCurve | null; memory: HeldCurve | null } {
+  if (current) {
+    if (simulation) return { draw: current, held: null, memory: previous };
+    const memory = previous?.values === current ? previous : { values: current, atMs: nowMs };
+    return { draw: current, held: null, memory };
+  }
+  if (simulation || !previous) return { draw: null, held: null, memory: previous };
+  return { draw: previous.values, held: previous, memory: previous };
+}
+
 const parseHead = (text: string): number | null => {
   const value = parseTypedNumber(text);
   return value !== null && validPolarHead(value) ? value : null;
@@ -53,14 +78,17 @@ export function PolarDock({
   view: PolarViewSettings;
   onViewChange: (next: PolarViewSettings) => void;
 }): JSX.Element {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const simulation = snapshot?.simulation === true;
   const source = sourceBadge(snapshot);
   const sourceLabel = source ? t(source.labelKey) : undefined;
   const status = overviewDoaStatus(snapshot, localSnapshotFresh);
   const polar = polarView(snapshot, settings, localSnapshotFresh, null, settings);
-  const values = status.shown ? polar.values : null;
+  const curve = heldCurve(lastCurve, status.shown ? polar.values : null, snapshot?.simulation === true, Date.now());
+  lastCurve = curve.memory;
+  const values = curve.draw;
+  const heldAt = curve.held ? new Date(curve.held.atMs).toLocaleTimeString(lang === 'id' ? 'id-ID' : 'en-GB', { hour12: false }) : null;
   const width = values ? halfPowerWidth(values) : null;
   const widthText = width ? `${width.widthDeg}°` : t('common.na');
   const head = validPolarHead(view.head) ? view.head : 0;
@@ -71,7 +99,9 @@ export function PolarDock({
   const bearing = status.shown ? bearingForView(polar) : null;
   const [autoLow, autoHigh] = radialDomain(values, simulation);
 
-  const footer = status.shown && polar.canonicalAngle !== null
+  // A held curve says since when; the dock is narrow, so that replaces the waiting text.
+  const footer = heldAt ? t('polarDock.heldCurve', { time: heldAt })
+    : status.shown && polar.canonicalAngle !== null
     ? compass
       ? t('polarDock.footer', { peak: polar.displayPeak === null ? '—' : formatDegrees(polar.displayPeak, 1), width: widthText, head: headLabel })
       : t('polarDock.footerPolar', { theta: formatDegrees(polar.canonicalAngle, 1), width: widthText, head: headLabel })
@@ -133,10 +163,10 @@ export function PolarDock({
       </div>
       <div className="ov-polar-body">
         <div className="ov-polar-plot">
-          <div className="ov-polar-frame">
+          <div className={heldAt ? 'ov-polar-frame is-held' : 'ov-polar-frame'}>
             <PolarPlot values={values} settings={settings} simulation={simulation} offsetSource={offsetSource} head={head} range={view.range} hideSettings compactCaption modeBar={false} sourceLabel={sourceLabel} />
           </div>
-          <p className="ov-polar-footer">{footer}{status.shown && !values ? <span className="is-warn"> · {t('polarDock.noCurve')}</span> : null}{manualOffset && compass ? <span className="is-manual"> · MANUAL</span> : null}</p>
+          <p className={heldAt ? 'ov-polar-footer is-warn' : 'ov-polar-footer'}>{footer}{!heldAt && status.shown && !values ? <span className="is-warn"> · {t('polarDock.noCurve')}</span> : null}{manualOffset && compass ? <span className="is-manual"> · MANUAL</span> : null}</p>
         </div>
         {settingsOpen ? (
           <div id="polar-settings" className="ov-polar-settings" role="group" aria-label={t('polarDock.settingsRegion')}>

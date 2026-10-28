@@ -4,10 +4,12 @@ import type { ConsoleCapabilities } from '../api';
 import type { CompassConfig, GpsConfig, MapCoordinate, PolarSettings, TelemetrySnapshot } from '../types';
 import type { SimulationSettings } from '../lib/simulation';
 import { gpsReportsNoFix, holdStationCoordinate, resolveGpsSource } from '../lib/map';
-import { doaStatusTextKey, overviewDoaStatus } from '../lib/doaStatus';
+import { doaStatusTextKey, overviewDoaStatus, provisionalTheta } from '../lib/doaStatus';
 import { lazyWithRetry } from '../lib/lazyRetry';
 import { compassOffsetSourceLabel, polarSettings, rememberDataOutCompass, resolveCompassSource } from '../lib/polar';
-import type { DataOutCompassSettings } from '../lib/polar';
+import type { CompassSourceCode, DataOutCompassSettings } from '../lib/polar';
+import { revealSection } from '../lib/revealSection';
+import type { MessageKey } from '../lib/i18n';
 import { effectiveDbScale } from '../lib/doaGeometry';
 import type { DoaOverlaySettings } from '../lib/doaGeometry';
 import { loadOverlaySettings, saveOverlaySettings, validateOverlaySettings } from '../lib/mapOverlaySettings';
@@ -55,6 +57,14 @@ let dataOutCompassMemory: DataOutCompassSettings | null = null;
 let lastLiveStation: MapCoordinate | null = null;
 
 const noop = (): void => undefined;
+
+/** Why the compass offset in use is not verified, for the map's REFERENCE notice. */
+export function compassCauseKey(code: CompassSourceCode): MessageKey | null {
+  if (code === 'FALLBACK') return 'map.orientationFallback';
+  if (code === 'DATA_OUT_LOCAL_OFFSET') return 'map.orientationNoOffset';
+  if (code === 'DATA_OUT_UNAVAILABLE') return 'map.orientationNotRead';
+  return null;
+}
 
 /**
  * Dashboard wiring from App. Every value must be stable across the 500 ms
@@ -129,6 +139,13 @@ function OverviewPageView({
   const offsetSource = simulation ? 'SIMULATION' : compassOffsetSourceLabel(compass, t);
   const offsetVerified = simulation ? true : compass.offsetVerified;
   const offsetManual = !simulation && compass.code === 'MANUAL';
+  const causeKey = simulation ? null : compassCauseKey(compass.code);
+  const orientationCause = causeKey ? t(causeKey) : undefined;
+  // The REFERENCE notice opens Configuration at GPS & Compass.
+  const openCompassSettings = useCallback(() => {
+    onNavigate('configuration');
+    revealSection('navigation-settings');
+  }, [onNavigate]);
   const heldLatitude = station?.held ? station.coordinate?.latitude : undefined;
   const heldLongitude = station?.held ? station.coordinate?.longitude : undefined;
   const readoutCoordinate = useMemo<MapCoordinate | null>(
@@ -220,6 +237,9 @@ function OverviewPageView({
               doaReady={doa.shown}
               doaHeldCode={doa.shown ? undefined : doa.code}
               doaHeldText={doa.shown ? undefined : t(doaStatusTextKey(doa.reason))}
+              provisionalTheta={provisionalTheta(snapshot, doa)}
+              orientationCause={orientationCause}
+              onOpenCompassSettings={openCompassSettings}
               overlaySettings={overlaySettings}
               insets={insets}
               basemapId={basemapId}
