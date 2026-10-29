@@ -2,6 +2,59 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.1.0
+
+Rilis minor: tidak ada yang dihapus. Console kini mengikuti prinsip data di `docs/PRINSIP_DATA.md`: data tetap mengalir, dibaca dengan longgar, diberi label alih-alih ditolak, dan kegagalan tampil dalam bahasa operator. Kanal `3` dan timer update memasangnya sendiri.
+
+### Pembacaan
+
+- **MQTT** (`tools/rdf_node_mqtt_v2.py`):
+  - Hanya pesan yang tidak terbaca yang `INVALID`, dengan kodenya: bukan JSON, bukan objek, `sid` kosong atau rusak, `v` lain, terlalu besar, field inti hilang, atau encoding Angular selain `json`.
+  - Variasi lain diterima dengan catatan `KODE:field` yang terlihat di Monitor Pesan: angka sebagai teks, boolean `0`/`1`, waktu dalam detik, field opsional yang hilang, QoS atau retain lain, status ACK yang tidak dikenal, bukti Angular yang tidak lengkap, dan penghitung `q` yang mulai ulang.
+  - Health, DoA dan Angular di luar jendela waktunya atau tanpa health tetap disimpan sebagai `STALE` atau `INCONSISTENT`. Aturan `LIVE` tidak berubah.
+- **Data Out (cadangan)**:
+  - status.json cukup punya `timestamp_ms`. Field DAQ yang hilang membuat DAQ `UNKNOWN` (`DAQ_HEALTH_UNKNOWN`), bukan `FAIL`. Overdrive yang tidak dilaporkan di mana pun "tidak diketahui" (`ADC_OVERDRIVE_UNKNOWN`), bukan lolos.
+  - CSV dan XML hanya mewajibkan waktu, sudut dan vektor 360 bin. Kolom lain menjadi null.
+  - CSV multi-VFO tanpa satu frekuensi XML yang cocok memakai baris VFO 0 (`CSV_VFO_ROW_UNCONFIRMED`).
+  - Light read yang gagal tidak menghapus nilai light read baik terakhir selama nilainya masih berlaku (65 detik).
+
+### Tampilan
+
+- **DoA belum valid tetap tampil.** Ini berlaku untuk DoA ok=0, rekaman basi, node macet, dan DAQ yang tidak diketahui.
+  - Di HUD, bearing terakhirnya redup dengan label **BELUM VALID** atau **BASI N dtk**.
+  - Di peta, garisnya putus-putus abu-abu berlabel BELUM VALID.
+  - Konflik CSV/XML, DAQ gagal, dan ADC overdrive tetap disembunyikan.
+- **Data Out tanpa doa.xml** menggambar tampilan CSV saja dengan status DoA `PARTIAL` dan label **SEBAGIAN**.
+- **Kurva polar** terakhir tetap tampil redup dengan "Belum ada update · terakhir HH.MM.SS".
+- **Chip Publikasi** berisi **PERLU DISIAPKAN** bila yang menahan hanya pengaturan, atau **ADA MASALAH** bila datanya bermasalah. Klik chip untuk membuka checklist alasan dan pemeriksaan gate.
+- **DoA Diagnostics** menulis "Sumber: MQTT · Data Out (cadangan) tidak dipakai" di kartu DoA MQTT.
+- **Banner REFERENSI kompas** di peta menyebut penyebabnya dan punya tombol ke Konfigurasi → GPS & Kompas.
+
+### Kontrol
+
+- **Revisi berubah tidak lagi mengunci Kontrol.** Ini berlaku untuk `CONFIG_REVISION_STALE`, `CONFIG_REVISION_UNKNOWN`, `state.cfg` yang berubah saat meninjau, dan `CONFIG_REVISION_CONFLICT` dari RDF-SDR. Console meminta settings, membaca ulang nilai, dan menampilkan lagi perubahan yang sama di revisi baru. Satu kali Kirim mengonfirmasinya.
+- **`config.get` dikirim sendiri** sekali per sesi dan revisi RDF-SDR, juga saat `state.cfg` belum ada.
+- **`remote_config_patch false`**: Kirim tetap bisa dipakai setelah peringatan dan konfirmasi kedua.
+- **Hasil ACK dalam bahasa operator** (Diterapkan, Tersimpan belum terbukti, Hasil tidak diketahui, Ditolak RDF-SDR, ...), dengan kode mentahnya di baris "Kode: …".
+  - `OSERROR`, `FILENOTFOUNDERROR`, `PERMISSIONERROR` dan `TIMEOUTEXPIRED` menyebut helper settings di RDF-SDR sebagai penyebab yang mungkin.
+  - `CONNECTION_LOST` menyebut link yang putus.
+- **Tidak berubah**: login admin, tinjauan, batas nilai, expiry 15 detik, bind `127.0.0.1`, dan mode LAN lihat-saja.
+
+### Dokumen
+
+- `docs/PRINSIP_DATA.md` (baru).
+- Aturan validasi di `docs/MQTT_KONTRAK.md` bagian 3.
+- `QUICKSTART.md`.
+- Runbook bagian 7.4: langkah sekali untuk merapikan groundstation lama, yaitu mode LAN lihat-saja menggantikan forward `socat`, Data Out langsung ke IP RDF-SDR, kanal `3` dengan auto-update, dan hapus retained `sdr/v2/uav-01/config/reported` yang basi.
+
+### Pindah ke 3.1.0
+
+Update biasa:
+- Docker: `sudo /usr/local/bin/sdr-doa-docker update --dir /opt/sdr-doa-ground-console`, atau tunggu timer harian.
+- Native: `sdr-doa-console update`.
+
+Data, pengaturan, dan kata sandi tetap. Groundstation yang masih memakai forward sementara: jalankan runbook 7.4 setelah update.
+
 ## 3.0.0
 
 Rilis mayor karena fitur dihapus: sistem kini memakai satu MQTT, yaitu kontrak RDF Node edge (keputusan di `docs/KEPUTUSAN_MQTT.md`, kontrak di `docs/MQTT_KONTRAK.md`). Kanal update `2` tidak memasang rilis ini sendiri; cara pindah ada di bagian terakhir.

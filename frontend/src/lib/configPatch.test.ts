@@ -10,6 +10,7 @@ import {
   draftFromReported,
   draftWithCenter,
   edgeErrorKey,
+  edgeHelperFault,
   fieldFor,
   gainTableValue,
   inFieldRange,
@@ -169,46 +170,66 @@ describe('commandResultView', () => {
 
   it('reports APPLIED with the new revision as the only success', () => {
     const view = commandResultView(status('acked', ack({})), 2, 42, 15);
-    expect(view).toEqual({ tone: 'ok', title: { key: 'control.result.ackTitle', vars: { status: 'APPLIED' } }, body: { key: 'control.result.applied', vars: { count: 2, rev: 43 } }, reload: true });
+    expect(view).toEqual({ tone: 'ok', title: { key: 'control.result.title.applied' }, body: { key: 'control.result.applied', vars: { count: 2, rev: 43 } }, code: 'APPLIED', reload: true });
   });
 
   it('keeps PERSISTED_UNVERIFIED, OUTCOME_UNKNOWN and a missing final ACK apart from success and failure', () => {
     const persisted = commandResultView(status('acked', ack({ status: 'PERSISTED_UNVERIFIED', reason: 'NATIVE_RUNTIME_EVIDENCE_INCOMPLETE' })), 2, 42, 15);
     expect(persisted).toEqual({
       tone: 'info',
-      title: { key: 'control.result.ackTitle', vars: { status: 'PERSISTED_UNVERIFIED · NATIVE_RUNTIME_EVIDENCE_INCOMPLETE' } },
+      title: { key: 'control.result.title.persisted' },
       body: { key: 'control.result.persistedUnverified', vars: { rev: 43 } },
+      code: 'PERSISTED_UNVERIFIED · NATIVE_RUNTIME_EVIDENCE_INCOMPLETE',
       reload: true,
     });
     const unknown = commandResultView(status('acked', ack({ status: 'OUTCOME_UNKNOWN', error: 'HELPER_CLOSED', revision: null })), 1, 42, 15);
-    expect(unknown).toMatchObject({ tone: 'info', title: { vars: { status: 'OUTCOME_UNKNOWN · HELPER_CLOSED' } }, body: { key: 'control.result.outcomeUnknown' }, reload: true });
+    expect(unknown).toMatchObject({ tone: 'info', title: { key: 'control.result.title.unknown' }, body: { key: 'control.result.outcomeUnknown' }, code: 'OUTCOME_UNKNOWN · HELPER_CLOSED', reload: true });
     const lost = commandResultView(status('no_final_ack', ack({ status: 'ACCEPTED', revision: null })), 1, 42, 15);
-    expect(lost).toEqual({ tone: 'info', title: { key: 'control.result.noFinalAckTitle' }, body: { key: 'control.result.noFinalAck', vars: { status: 'ACCEPTED' } }, reload: true });
+    expect(lost).toEqual({ tone: 'info', title: { key: 'control.result.noFinalAckTitle' }, body: { key: 'control.result.noFinalAck', vars: { status: 'ACCEPTED' } }, code: 'ACCEPTED', reload: true });
   });
 
   it('explains a stale base revision and asks to read the values again', () => {
     for (const conflict of [ack({ status: 'REJECTED', error: 'CONFIG_REVISION_CONFLICT' }), ack({ status: 'CONFLICT' })]) {
       const view = commandResultView(status('acked', conflict), 1, 42, 15);
       expect(view.tone).toBe('warn');
-      expect(view.title).toEqual({ key: 'control.result.rejectedTitle', vars: { code: `${conflict.status} · CONFIG_REVISION_CONFLICT` } });
+      expect(view.title).toEqual({ key: 'control.result.title.conflict' });
+      expect(view.code).toBe(`${conflict.status} · CONFIG_REVISION_CONFLICT`);
       expect(view.body).toEqual({ key: 'control.result.conflict', vars: { rev: 42 } });
       expect(view.reload).toBe(true);
+      // The same change can be reviewed again on the new revision.
+      expect(view.rebase).toBe(true);
     }
   });
 
   it('shows the edge code of rejections, expiries, cancels and failures', () => {
     expect(commandResultView(status('acked', ack({ status: 'REJECTED', error: 'BUSY' })), 1, 42, 15)).toMatchObject({
-      tone: 'warn', title: { key: 'control.result.rejectedTitle', vars: { code: 'REJECTED · BUSY' } }, body: { key: 'control.edge.BUSY' }, reload: false,
+      tone: 'warn', title: { key: 'control.result.title.rejected' }, body: { key: 'control.edge.BUSY' }, code: 'REJECTED · BUSY', reload: false,
     });
     expect(commandResultView(status('acked', ack({ status: 'REJECTED', error: 'NEW_EDGE_CODE' })), 1, 42, 15).body).toEqual({ key: 'control.result.rejected' });
     expect(commandResultView(status('acked', ack({ status: 'EXPIRED', error: 'EXPIRED_OR_INVALID_DEADLINE' })), 1, 42, 15)).toMatchObject({
-      tone: 'warn', title: { vars: { status: 'EXPIRED · EXPIRED_OR_INVALID_DEADLINE' } }, body: { key: 'control.result.expired' },
+      tone: 'warn', title: { key: 'control.result.title.expired' }, code: 'EXPIRED · EXPIRED_OR_INVALID_DEADLINE', body: { key: 'control.result.expired' },
     });
     expect(commandResultView(status('acked', ack({ status: 'CANCELLED' })), 1, 42, 15)).toMatchObject({ tone: 'warn', body: { key: 'control.result.cancelled' } });
     expect(commandResultView(status('acked', ack({ status: 'FAILED', error: 'GAIN_NOT_IN_APPROVED_TABLE' })), 1, 42, 15)).toMatchObject({
-      tone: 'err', title: { vars: { status: 'FAILED · GAIN_NOT_IN_APPROVED_TABLE' } }, body: { key: 'control.error.GAIN_NOT_IN_APPROVED_TABLE' }, reload: true,
+      tone: 'err', title: { key: 'control.result.title.failed' }, code: 'FAILED · GAIN_NOT_IN_APPROVED_TABLE', body: { key: 'control.error.GAIN_NOT_IN_APPROVED_TABLE' }, reload: true,
     });
-    expect(commandResultView(status('acked', ack({ status: 'FAILED', error: 'APPLY_ERROR' })), 1, 42, 15).body).toEqual({ key: 'control.result.failed' });
+    expect(commandResultView(status('acked', ack({ status: 'FAILED', error: 'APPLY_FAULT' })), 1, 42, 15).body).toEqual({ key: 'control.result.failed' });
+  });
+
+  it('names the settings helper as the likely cause of an exception code', () => {
+    for (const code of ['OSERROR', 'FILENOTFOUNDERROR', 'PERMISSIONERROR', 'TIMEOUTEXPIRED']) {
+      expect(edgeHelperFault(code)).toBe(true);
+      const unknown = commandResultView(status('acked', ack({ status: 'OUTCOME_UNKNOWN', error: code, revision: null })), 1, 42, 15);
+      expect(unknown).toMatchObject({ tone: 'info', title: { key: 'control.result.title.unknown' }, body: { key: 'control.result.outcomeUnknownHelper', vars: { code } }, code: `OUTCOME_UNKNOWN · ${code}` });
+      const failed = commandResultView(status('acked', ack({ status: 'FAILED', error: code })), 1, 42, 15);
+      expect(failed).toMatchObject({ tone: 'err', body: { key: 'control.result.failedHelper', vars: { code } }, code: `FAILED · ${code}` });
+    }
+    for (const code of ['BUSY', 'CONFIG_REVISION_CONFLICT', 'ERRORS', null]) expect(edgeHelperFault(code)).toBe(false);
+    // A link that dropped while applying is named too.
+    expect(commandResultView(status('acked', ack({ status: 'OUTCOME_UNKNOWN', reason: 'CONNECTION_LOST', revision: null })), 1, 42, 15).body)
+      .toEqual({ key: 'control.result.outcomeUnknownLink', vars: { code: 'CONNECTION_LOST' } });
+    // An unknown final status is not a success and shows its code.
+    expect(commandResultView(status('acked', ack({ status: 'SOMETHING_NEW' })), 1, 42, 15)).toMatchObject({ tone: 'info', code: 'SOMETHING_NEW' });
   });
 
   it('has its own messages for no ACK and a refused publish', () => {

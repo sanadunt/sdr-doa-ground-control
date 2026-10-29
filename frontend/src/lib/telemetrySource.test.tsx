@@ -261,7 +261,10 @@ describe('MQTT first, Data Out as the fallback', () => {
     const snapshot = staleMqtt();
     expect(overviewDoaStatus(snapshot, true)).toMatchObject({ code: 'STALE', reason: 'sourceStale', shown: false });
     expect(deriveDataState(snapshot, false, true)).toBe('STALE');
-    expect(hud(snapshot)).not.toContain('212.0');
+    // Its last bearing stays, dimmed and marked STALE with its age, never as a current one.
+    const markup = hud(snapshot);
+    expect(markup).toContain('<div class="ov-hud-bearing is-provisional">212.0');
+    expect(markup).toContain(`>${translate('en', 'polar.staleTag', { age: '6.0 s' })}<`);
     // A fresh answer expires locally like a Data Out one: 5 s from the DoA.
     const fresh = answer('mqtt-live.json');
     expect(localSnapshotFresh(fresh, 1_000, 5_900)).toBe(true);
@@ -284,7 +287,9 @@ describe('MQTT first, Data Out as the fallback', () => {
     expect(mqttAngleMode(snapshot)).toBe('theta_mirror');
     const markup = hud(snapshot);
     expect(markup).toContain(translate('en', 'polar.mqttUnverified'));
-    expect(markup).not.toContain('212.0');
+    // The ok=0 angle is shown dimmed and NOT VALID; the polar curve stays empty.
+    expect(markup).toContain('<div class="ov-hud-bearing is-provisional">212.0');
+    expect(markup).toContain(`>${translate('en', 'polar.notValid')}<`);
     expect(strip(snapshot).DoA.value).toBe('UNVERIFIED');
   });
 

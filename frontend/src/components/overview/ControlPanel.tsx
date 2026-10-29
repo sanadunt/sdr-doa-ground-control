@@ -57,7 +57,13 @@ export interface ControlDone {
   restarted: boolean;
   /** A published command to read back from the RDF-SDR. */
   verify?: ControlVerifyTarget;
+  /** The change and its base revision, to review again when the node's settings changed (CONFIG_REVISION_CONFLICT). */
+  rebase?: { changes: ConfigPatchChanges; fromRev: number | null };
 }
+/** After a revision change: the reviewed change waits for the new revision, then comes back for one more Send. */
+export interface ControlRebase { changes: ConfigPatchChanges; fromRev: number | null; startedAtMs: number }
+/** What the review says after a rebase: the revision moved, or the node already has the values. */
+export type ControlRebaseNotice = { kind: 'moved'; from: number | null; to: number } | { kind: 'same' };
 /** What was sent, when it was issued (server clock) and when it became final (browser clock). */
 export interface ControlVerifyTarget { changes: ConfigPatchChanges; issuedAtMs: number | null; finalAtMs: number; windowMs?: number }
 
@@ -69,7 +75,11 @@ const STATUS_POLL_MS = 1_000;
 const DEFAULT_TTL_MS = 15_000;
 const COMMAND_ID_RE = /^[A-Za-z0-9_.:-]{1,80}$/u;
 /** Refusals of a command that was not sent; the draft stays and the values are read again. */
-const RETRY_IN_FORM_CODES = new Set(['CONFIG_REVISION_STALE', 'CONFIG_REVISION_UNKNOWN', 'NODE_NOT_FRESH', 'NODE_SESSION_UNAVAILABLE']);
+const RETRY_IN_FORM_CODES = new Set(['NODE_NOT_FRESH', 'NODE_SESSION_UNAVAILABLE']);
+/** Refusals about the base revision: the reviewed change is reviewed again on the new revision. */
+const REBASE_CODES = new Set(['CONFIG_REVISION_STALE', 'CONFIG_REVISION_UNKNOWN']);
+/** A rebase builds the review on the revision in use once it has waited this long for a different one. */
+const REBASE_SETTLE_MS = 6_000;
 
 // The spectrum dock's request that was already merged. Module scope, so a
 // panel opened again later does not replay an old request.
@@ -202,6 +212,13 @@ export interface ControlPanelViewProps {
   valueSource?: ControlValueSource;
   /** A config.get the console refused, by its code. */
   settingsError?: ControlFailure | null;
+  /** The reviewed change waits for the node's new revision. */
+  rebasing?: boolean;
+  rebaseNotice?: ControlRebaseNotice | null;
+  /** The operator confirmed sending although the node reports remote_config_patch false. */
+  capabilityConfirmed?: boolean;
+  onCapabilityConfirm?: (confirmed: boolean) => void;
+  onRebase?: () => void;
   onRecheck?: () => void;
   onReadSettings?: () => void;
   onClose: () => void;
@@ -232,6 +249,11 @@ export function ControlPanelView({
   verification = null,
   valueSource = 'none',
   settingsError = null,
+  rebasing = false,
+  rebaseNotice = null,
+  capabilityConfirmed = false,
+  onCapabilityConfirm,
+  onRebase,
   onRecheck,
   onReadSettings,
   onClose,
@@ -264,12 +286,16 @@ export function ControlPanelView({
   const settings = reported?.settings ?? null;
   const settingsRead = settingsReadView(reported?.settingsRequest);
   const reading = settingsRead?.key === 'control.settings.reading';
+  // remote_config_patch false: Send stays usable, after an explicit second confirmation.
+  const capabilityWarning = node?.remoteConfigPatch === false;
   const reviewBlocked: MessageKey | null = !review ? null
     : patchUnavailable ? 'control.patchUnavailable'
       : !connected ? 'control.sendBlockedBroker'
         : !node ? 'control.sendBlockedNode'
-          : review.rev === null ? 'control.sendBlockedRev'
-            : !node.healthFresh ? 'control.sendBlockedHealth' : null;
+          : rebasing ? 'control.rebaseReading'
+            : review.rev === null ? 'control.sendBlockedRev'
+              : !node.healthFresh ? 'control.sendBlockedHealth'
+                : capabilityWarning && !capabilityConfirmed ? 'control.sendBlockedCapability' : null;
 
   let settingsLine: ReactNode;
   if (!settings) settingsLine = t('control.settingsNone');
@@ -317,7 +343,7 @@ export function ControlPanelView({
         {settingsError ? (
           <p className="ov-control-error" role="alert"><span className="ov-mono">{settingsError.code}</span> · {noticeText(t, settingsError.message)}</p>
         ) : null}
-        {node?.remoteConfigPatch === false ? <p className="ov-control-warn">{t('control.noSettingsTarget')}</p> : null}
+        {node?.remoteConfigPatch === false && stage !== 'review' ? <p className="ov-control-warn">{t('control.noSettingsTarget')}</p> : null}
         {reportedError ? <p className="ov-control-error" role="alert">{t('control.readFailed', { error: noticeText(t, reportedError) })}</p> : null}
         {patchUnavailable ? (
           <p className="ov-control-warn">{reported?.code && isConfigPatchErrorCode(reported.code) ? t(CONFIG_PATCH_ERROR_KEYS[reported.code]) : t('control.patchUnavailable')}</p>
@@ -376,6 +402,8 @@ export function ControlPanelView({
           </>
         ) : null}
 
+        {stage === 'review' && !review && rebasing ? <p className="ov-control-note" role="status">{t('control.rebaseReading')}</p> : null}
+
         {stage === 'review' && review ? (
           <>
             <div className="ov-control-review">
@@ -388,8 +416,24 @@ export function ControlPanelView({
               ))}
               <span className="ov-control-review-meta">{t('control.reviewMeta', { qos, ttl: ttlS, rev: review.rev ?? t('control.revUnknown') })}</span>
             </div>
+            {rebaseNotice ? (
+              <p className="ov-control-note" role="status">
+                {rebaseNotice.kind === 'moved'
+                  ? t('control.rebased', { from: rebaseNotice.from ?? t('control.revUnknown'), to: rebaseNotice.to })
+                  : t('control.rebaseSame')}
+              </p>
+            ) : null}
+            {capabilityWarning ? (
+              <div className="ov-control-warn ov-control-confirm" role="note">
+                <span>{t('control.capabilityWarn')}</span>
+                <label>
+                  <input type="checkbox" checked={capabilityConfirmed} onChange={(event) => onCapabilityConfirm?.(event.target.checked)} />
+                  <span>{t('control.capabilityConfirm')}</span>
+                </label>
+              </div>
+            ) : null}
             {/* An unavailable publish path is already named above the form. */}
-            {reviewBlocked && !patchUnavailable ? <p className="ov-control-warn">{t(reviewBlocked)}</p> : null}
+            {reviewBlocked && !patchUnavailable ? <p className="ov-control-warn" role={reviewBlocked === 'control.rebaseReading' ? 'status' : undefined}>{t(reviewBlocked)}</p> : null}
             <div className="ov-control-actions">
               <button className="ov-button is-send is-wide" type="button" disabled={reviewBlocked !== null} onClick={onSend}>
                 <Icon name="send" /><span>{t('control.send')}</span>
@@ -414,12 +458,17 @@ export function ControlPanelView({
               </span>
               <span>{done.view ? t(done.view.body.key, done.view.body.vars) : done.error ? noticeText(t, done.error.message) : ''}</span>
               {done.restarted ? <span className="ov-control-small">{t('control.result.restarted')}</span> : null}
+              {/* The raw codes stay visible under the operator's words. */}
+              {done.view?.code ? <span className="ov-mono ov-control-small">{t('control.result.code', { code: done.view.code })}</span> : null}
               {done.commandId ? <span className="ov-mono ov-control-small">{done.commandId}</span> : null}
             </div>
             {verification ? <VerifyList verification={verification} onRecheck={onRecheck} /> : null}
             <div className="ov-control-actions">
-              <button className="ov-button is-wide" type="button" onClick={onDone}>{t('control.done')}</button>
-              {done.view?.reload && done.view.tone !== 'ok' ? <button className="ov-button" type="button" onClick={onReload}>{t('control.reload')}</button> : null}
+              {done.view?.rebase && done.rebase && onRebase
+                ? <button className="ov-button is-primary is-wide" type="button" onClick={onRebase}>{t('control.rebaseAction')}</button>
+                : null}
+              <button className={done.view?.rebase && done.rebase && onRebase ? 'ov-button' : 'ov-button is-wide'} type="button" onClick={onDone}>{t('control.done')}</button>
+              {done.view?.reload && done.view.tone !== 'ok' && !(done.view.rebase && done.rebase && onRebase) ? <button className="ov-button" type="button" onClick={onReload}>{t('control.reload')}</button> : null}
             </div>
           </>
         ) : null}
@@ -438,6 +487,43 @@ export function ControlPanelView({
       <div className="ov-control-body">{body}</div>
     </section>
   );
+}
+
+/** What a rebase does with the latest reported values. */
+export type RebaseOutcome =
+  | { kind: 'wait' }
+  | { kind: 'review'; draft: DraftValues; review: ControlReview; notice: ControlRebaseNotice }
+  | { kind: 'same'; draft: DraftValues }
+  | { kind: 'invalid'; draft: DraftValues };
+
+/**
+ * Wait until the node reports a revision (a different one than the change was
+ * reviewed on, or the same after REBASE_SETTLE_MS), then rebuild the review
+ * of the same change from the values reported now. A change the node already
+ * has is 'same'; one the new values make invalid goes back to the form.
+ */
+export function rebaseOutcome(
+  rebase: ControlRebase,
+  reported: ConfigReported | null,
+  values: Record<ConfigPatchKey, number | null> | null,
+  ranges: ConfigPatchRanges | null,
+  gainTable: readonly number[],
+  t: Translate,
+  nowMs: number,
+): RebaseOutcome {
+  if (!reported || reported.baseRev === null) return { kind: 'wait' };
+  if (reported.baseRev === rebase.fromRev && nowMs - rebase.startedAtMs < REBASE_SETTLE_MS) return { kind: 'wait' };
+  const draft = mergeIntoDraft({}, rebase.changes);
+  const current = values ?? reported.values;
+  const next = parseDraft(CONFIG_PATCH_FIELDS, { ...draftFromReported(current), ...draft }, current, ranges, gainTable);
+  if (next.invalid) return { kind: 'invalid', draft };
+  if (!Object.keys(next.changes).length) return { kind: 'same', draft };
+  return {
+    kind: 'review',
+    draft,
+    review: { changes: next.changes, rev: reported.baseRev, rows: reviewRows(t, next.fields) },
+    notice: { kind: 'moved', from: rebase.fromRev, to: reported.baseRev },
+  };
 }
 
 /** Where the values the form starts from come from. */
@@ -472,12 +558,15 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
   const [editError, setEditError] = useState<ControlFailure | null>(null);
   const [settingsError, setSettingsError] = useState<ControlFailure | null>(null);
   const [pendingDraft, setPendingDraft] = useState<ConfigPatchChanges | null>(null);
+  const [rebase, setRebase] = useState<ControlRebase | null>(null);
+  const [rebaseNotice, setRebaseNotice] = useState<ControlRebaseNotice | null>(null);
+  const [capabilityConfirmed, setCapabilityConfirmed] = useState(false);
   const [, setVerifyTick] = useState(0);
   const mountedRef = useRef(true);
   const sendController = useRef<AbortController | null>(null);
   const settingsController = useRef<AbortController | null>(null);
-  // One automatic config.get per unlock, when no settings report is current.
-  const autoReadRef = useRef(false);
+  // One automatic config.get per node session and revision (sid:cfg), when no settings report of it is here.
+  const autoReadRef = useRef<string | null>(null);
 
   const ranges = capabilities?.configPatch?.ranges ?? null;
   const gainTable = capabilities?.configPatch?.gainTableDb.length ? capabilities.configPatch.gainTableDb : GAIN_TABLE_DB;
@@ -575,15 +664,19 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
   }, []);
 
   useEffect(() => {
-    if (admin !== 'unlocked') autoReadRef.current = false;
+    if (admin !== 'unlocked') autoReadRef.current = null;
   }, [admin]);
 
-  // Read the node's settings once after unlock when no report of its current revision is here.
+  // Read the node's settings when no report of its current revision is here: once per
+  // session and revision, so an unknown revision (state.cfg null) or a new one is asked
+  // for at once instead of locking Send.
   useEffect(() => {
-    if (admin !== 'unlocked' || autoReadRef.current || !reported?.available || !reported.node) return;
+    if (admin !== 'unlocked' || !reported?.available || !reported.node) return;
+    const key = `${reported.node.sid}:${reported.baseRev ?? 'null'}`;
+    if (autoReadRef.current === key) return;
     if (reported.broker.connection !== 'connected' || reported.settings?.matchesStateCfg) return;
     if (reported.settingsRequest && !reported.settingsRequest.final) return;
-    autoReadRef.current = true;
+    autoReadRef.current = key;
     readSettings();
   }, [admin, reported, readSettings]);
 
@@ -596,7 +689,8 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
     const verify = status.state !== 'publish_failed' && Object.keys(status.changes).length
       ? { changes: status.changes, issuedAtMs: status.issuedMs, finalAtMs: Date.now(), ...(refused ? { windowMs: 0 } : {}) }
       : undefined;
-    setDone({ view, error: null, commandId: status.commandId, restarted: status.monitorRestarted, verify });
+    const rebaseTarget = view.rebase && Object.keys(status.changes).length ? { changes: status.changes, fromRev: baseRev } : undefined;
+    setDone({ view, error: null, commandId: status.commandId, restarted: status.monitorRestarted, verify, rebase: rebaseTarget });
     setStage('done');
     if (view.reload) setReloadTick((tick) => tick + 1);
     if (verify) {
@@ -658,8 +752,49 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
   const enterReview = useCallback((changes: ConfigPatchChanges, rev: number | null, fields: readonly FieldEvaluation[]) => {
     setReview({ changes, rev, rows: reviewRows(t, fields) });
     setEditError(null);
+    setRebaseNotice(null);
+    setCapabilityConfirmed(false);
     setStage('review');
   }, [t]);
+
+  // A revision change: ask the node for its settings and read the values again; the
+  // effect below brings the same change back for review on the new revision.
+  const startRebase = useCallback((changes: ConfigPatchChanges, fromRev: number | null) => {
+    setRebase({ changes, fromRev, startedAtMs: Date.now() });
+    setRebaseNotice(null);
+    readSettings();
+    setReloadTick((tick) => tick + 1);
+  }, [readSettings]);
+
+  // While reviewing, a newer revision of the node starts the same rebase before Send is pressed.
+  useEffect(() => {
+    if (stage !== 'review' || !review || rebase || !reported) return;
+    if (reported.baseRev !== null && reported.baseRev !== review.rev) startRebase(review.changes, review.rev);
+  }, [stage, review, rebase, reported, startRebase]);
+
+  // Once the node reports a revision (a different one, or the same after REBASE_SETTLE_MS),
+  // rebuild the review from the values now reported. Nothing is sent: Send stays the
+  // operator's one explicit confirmation.
+  useEffect(() => {
+    if (!rebase) return;
+    const outcome = rebaseOutcome(rebase, reported, values, ranges, gainTable, t, Date.now());
+    if (outcome.kind === 'wait') return;
+    setRebase(null);
+    setDraft(outcome.draft);
+    setDone(null);
+    if (outcome.kind === 'review') {
+      setReview(outcome.review);
+      setEditError(null);
+      setCapabilityConfirmed(false);
+      setRebaseNotice(outcome.notice);
+      setStage('review');
+      return;
+    }
+    setReview(null);
+    setRebaseNotice(null);
+    if (outcome.kind === 'same') setEditError({ code: 'NO_CHANGE', message: { key: 'control.rebaseSame' } });
+    setStage('edit');
+  }, [rebase, reported, values, ranges, gainTable, t]);
 
   // Merge a waiting dock request once Kontrol is unlocked and has the reported values.
   useEffect(() => {
@@ -687,7 +822,8 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
 
   const send = () => {
     const connected = reported?.broker.connection === 'connected';
-    if (!review || review.rev === null || !connected || !reported?.node?.healthFresh) return;
+    if (!review || review.rev === null || rebase || !connected || !reported?.node?.healthFresh) return;
+    if (reported.node.remoteConfigPatch === false && !capabilityConfirmed) return;
     const reviewed = review;
     sendController.current?.abort();
     const controller = new AbortController();
@@ -706,6 +842,12 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
         setAdmin('locked');
         setAdminNotice({ key: 'control.error.ADMIN_REQUIRED' });
         setStage('edit');
+        return;
+      }
+      if (REBASE_CODES.has(failure.code)) {
+        // Nothing was sent. The review stays and waits for the node's revision, then comes back.
+        setStage('review');
+        startRebase(reviewed.changes, reviewed.rev);
         return;
       }
       if (RETRY_IN_FORM_CODES.has(failure.code)) {
@@ -758,6 +900,11 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
       verification={verification}
       valueSource={valueSource}
       settingsError={settingsError}
+      rebasing={rebase !== null}
+      rebaseNotice={rebaseNotice}
+      capabilityConfirmed={capabilityConfirmed}
+      onCapabilityConfirm={setCapabilityConfirmed}
+      onRebase={() => { if (done?.rebase) { setStage('review'); setReview(null); startRebase(done.rebase.changes, done.rebase.fromRev); } }}
       onRecheck={recheck}
       onReadSettings={readSettings}
       onClose={onClose}

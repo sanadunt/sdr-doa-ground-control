@@ -209,12 +209,16 @@ describe('status strip tooltips', () => {
   );
 
   it.each(['en', 'id'] as const)('names only a current cause, without help text, in %s', (lang) => {
-    const items = [...render(lang).matchAll(/<span class="telemetry-item[^"]*"([^>]*)>/g)].map((match) => match[1]);
+    const markup = render(lang);
+    const items = [...markup.matchAll(/<(?:span|button) class="telemetry-item[^"]*"([^>]*)>/g)].map((match) => match[1]);
     expect(items).toHaveLength(6);
     const titles = items.map((attributes) => attributes.match(/title="([^"]*)"/)?.[1] ?? null);
-    // Data and Snapshot are healthy and MQTT and Sim have nothing to report; DoA and Delivery name their state.
+    // Data and Snapshot are healthy and MQTT and Sim have nothing to report; DoA names its state.
     expect(titles[0]).toBeNull();
-    expect(titles[2]).toBe(`GROUND_CLOCK_UNVERIFIED · ${gateReasonLabel(lang, 'GROUND_CLOCK_UNVERIFIED')}`.replace(/'/g, '&#x27;'));
+    // Delivery opens its checklist instead of a tooltip, and waits only on setup here.
+    expect(titles[2]).toBeNull();
+    expect(items[2]).toContain('aria-controls="delivery-checklist"');
+    expect(markup).toContain(translate(lang, 'delivery.setup'));
     expect(titles.slice(3)).toEqual([null, null, null]);
   });
 });

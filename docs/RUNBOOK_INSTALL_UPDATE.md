@@ -8,7 +8,7 @@ Ditulis untuk dijalankan langkah demi langkah oleh AI agent yang punya shell di 
 
 | | |
 |---|---|
-| Diperiksa terhadap | rilis `v3.0.0` (dari `v2.0.0` ke `v3.0.0`: `CHANGELOG.md`) |
+| Diperiksa terhadap | rilis `v3.1.0` (dari `v2.0.0` ke `v3.0.0`: `CHANGELOG.md`; dari `v3.0.0` ke `v3.1.0`: update biasa, lalu 7.4) |
 | Rilis berikutnya | perintahnya sama; hanya nomor versi di nama tarball yang berubah (lihat langkah 5.1) |
 | URL tetap file ini | `https://raw.githubusercontent.com/sanadunt/sdr-doa-ground-control/main/docs/RUNBOOK_INSTALL_UPDATE.md` (berlaku setelah file ini masuk `main`; sebelum itu pakai salinan yang diberikan manusia) |
 | Repository | `https://github.com/sanadunt/sdr-doa-ground-control` (publik, tanpa login) |
@@ -136,6 +136,7 @@ Sudah ada instalasi lama?
 │   docker-compose.ghcr.yml tanpa script)                      ──> 5.4 E1
 ├── console native tanpa perintah "update"                      ──> 5.4 E2
 ├── console 2.x (kanal 2, atau native 2.x)                      ──> 7.1 / 7.2 (pindah ke 3.0.0)
+├── console 3.0.x, groundstation dengan forward socat sementara ──> 7.1 / 7.2, lalu 7.4
 └── agent RDF-SDR dari console 2.x (/opt/sdr-doa-agent)         ──> 10.3
 ```
 
@@ -329,7 +330,7 @@ V=$(curl -fsSI https://github.com/sanadunt/sdr-doa-ground-control/releases/lates
 [ -n "$V" ] && printf '%s\n' "$V" >~/sdr-doa-dl/release-version && cat ~/sdr-doa-dl/release-version
 ```
 
-**Periksa**: mencetak versi, misalnya `3.0.0`. Kosong: ulangi 4.6. Hanya bila manusia meminta versi tertentu: `printf '%s\n' X.Y.Z >~/sdr-doa-dl/release-version`.
+**Periksa**: mencetak versi, misalnya `3.1.0`. Kosong: ulangi 4.6. Hanya bila manusia meminta versi tertentu: `printf '%s\n' X.Y.Z >~/sdr-doa-dl/release-version`.
 
 Setiap blok yang memakai versi membacanya lagi dengan `V=$(cat ~/sdr-doa-dl/release-version)`, jadi semua jalur memasang versi yang sama walaupun rilis baru terbit di tengah instalasi. Untuk update di kemudian hari, jalankan blok ini lagi.
 
@@ -430,7 +431,7 @@ Opsi lain bila diminta manusia: `--port N` (default `8787`), `--channel TAG` (de
 - kode keluar 0;
 - baris `install: wrote /opt/sdr-doa-ground-console/compose.yml and /opt/sdr-doa-ground-console/.env (channel 3)`;
 - baris `install: installed /usr/local/bin/sdr-doa-docker`;
-- baris `install: OK: console runs 3.0.0 (<id 12 hex>) and is healthy`;
+- baris `install: OK: console runs 3.1.0 (<id 12 hex>) and is healthy`;
 - teks `The Ground Console runs from ghcr.io/sanadunt/sdr-doa-ground-console:3.`;
 - dengan `--auto-update`: `auto-update on: daily at 03:30 (local time, up to 15 min later) for /opt/sdr-doa-ground-console`.
 
@@ -527,7 +528,7 @@ Nilai koneksi **(contoh)**; buang flag yang tidak diisi manusia. Nilai tidak bol
 **Periksa**:
 - kode keluar 0;
 - `Checking the release files` (cocok dengan `MANIFEST.sha256`);
-- `Installing the SDR-DoA Ground Console 3.0.0 into /home/<user>/.local/share/sdr-doa-ground-console/app`;
+- `Installing the SDR-DoA Ground Console 3.1.0 into /home/<user>/.local/share/sdr-doa-ground-console/app`;
 - `Installing paho-mqtt and tzdata`;
 - `warning: the admin password is the default 123456; set your own with: sdr-doa-console password` (wajar sampai B3);
 - `The console runs in the background and starts at boot: http://127.0.0.1:8787/`.
@@ -748,7 +749,7 @@ sudo /usr/local/bin/sdr-doa-docker status --dir /opt/sdr-doa-ground-console
 
 **Periksa**:
 - `/api/health` berisi `"receiver_busy": false`. Bila `true`: Receiver sedang merekam atau mengarsipkan pindai; tanya manusia dulu.
-- `--check` mencetak `up to date: console runs 3.0.0 (<id>), the image of ghcr.io/sanadunt/sdr-doa-ground-console:3` (tidak ada yang perlu dilakukan) atau `update available: ...`.
+- `--check` mencetak `up to date: console runs 3.1.0 (<id>), the image of ghcr.io/sanadunt/sdr-doa-ground-console:3` (tidak ada yang perlu dilakukan) atau `update available: ...`.
 - `update --auto` tanpa pertanyaan: melewati image yang lebih lama dari yang jalan atau yang pernah gagal, dan menunda selama Receiver sibuk. Setiap baris diawali waktu UTC. Hasil yang diharapkan salah satu dari:
   - `update --auto: up to date: console runs ...`;
   - `update --auto: new image: <baru>, running <lama>`, `starting <baru>`, `OK: console runs <baru> and is healthy`;
@@ -813,8 +814,8 @@ curl -s --noproxy '*' http://127.0.0.1:8787/api/health; echo
 ```
 
 **Periksa**:
-- `--check` mencetak `3.0.0 is installed and current`, atau `<terpasang> is installed; <baru> (<tanggal>) is available: <url>` dan `Update with: sdr-doa-console update`.
-- `update --auto` tanpa rilis baru mencetak `3.0.0 is installed and current` (exit 0).
+- `--check` mencetak `3.1.0 is installed and current`, atau `<terpasang> is installed; <baru> (<tanggal>) is available: <url>` dan `Update with: sdr-doa-console update`.
+- `update --auto` tanpa rilis baru mencetak `3.1.0 is installed and current` (exit 0).
 - Versi mayor baru (misalnya 2.x terpasang, 3.0.0 terbit): `--check` dan `--auto` hanya mencetak `<terpasang> is installed; <baru> changes the major version. Read its release notes at <url>, then run: sdr-doa-console update --allow-major` (exit 0, tidak memasang apa pun). Pindah hanya setelah manusia membaca `CHANGELOG.md`: `~/.local/bin/sdr-doa-console update --allow-major --yes` (perintah panjang, 1.3). Sesudahnya timer mengikuti rilis 3.x.
 - `update --auto` dengan rilis baru (tanpa pertanyaan; perintah panjang, 1.3) mencetak `Installed: ...`, `Release: ...`, `Checked <tarball> against SHA256SUMS`, `Unpacked and checked against MANIFEST.sha256`, `Saved the current program as .../app.previous`, `Running install.sh --yes --prefix=... --data-dir=... --bin-dir=... --port=...`, `Waiting for <baru> to answer on http://127.0.0.1:8787/ (up to 60 s)`, dan diakhiri `Updated the Ground Console from <lama> to <baru>.`, exit 0.
 - Receiver sibuk: `deferred: Receiver recording or scan active; <baru> is installed on a later run` (exit 0). Tanya manusia.
@@ -860,6 +861,95 @@ Path `install-options` ada di bawah `Program:` dari `sdr-doa-console info` (defa
 - Update me-restart console satu kali. Sesi Receiver yang tertinggal terbuka ditutup setelah 2 menit tanpa aktivitas dan tampil `INTERRUPTED` di Rekaman.
 - Muat ulang halaman console di browser setelah update agar memakai frontend baru. RX, pindai dan rekaman di frame Receiver berjalan sampai halaman console dimuat ulang, jadi reload juga menghentikannya; tekan Mulai lagi sesudahnya.
 - Saran untuk agent: update manual hanya saat `receiver_busy` bernilai `false`, atau setelah manusia setuju.
+
+
+### 7.4 Merapikan groundstation lama (sekali, setelah 3.1.0 terpasang)
+
+Langkah ini merapikan sisa pemasangan sementara di groundstation yang dibuat sebelum 3.x. Jalankan **hanya oleh atau dengan izin manusia**, dan hanya setelah RDF-SDR, link T900/PPP, dan broker menyala. Tidak ada `pkill`/`killall` (aturan 1.1.12); service dihentikan lewat `systemctl`. Setiap langkah berdiri sendiri. Bila hasil **Periksa** tidak sesuai, berhenti dan tanya manusia.
+
+**1. Kanal 3 dan auto-update.**
+
+Docker:
+
+```sh
+sudo /usr/local/bin/sdr-doa-docker status --dir /opt/sdr-doa-ground-console
+sudo /usr/local/bin/sdr-doa-docker auto-update status
+```
+
+**Periksa**: `image:` berakhir dengan `:3`, dan timer menyala. Bila kanalnya lain, ikuti 7.1 "Kanal dan versi mayor baru" dengan `install --channel 3`. Bila timer mati: `sudo /usr/local/bin/sdr-doa-docker auto-update on`. Lalu update ke 3.1.0 dengan 7.1 (`update --auto`).
+
+Native:
+
+```sh
+~/.local/bin/sdr-doa-console auto-update status
+```
+
+**Periksa**: timer menyala. Bila mati: `~/.local/bin/sdr-doa-console auto-update on`. Lalu update ke 3.1.0 dengan 7.2.
+
+Sesudahnya `curl -s --noproxy '*' http://127.0.0.1:8787/api/health; echo` berisi `"version": "3.1.0"`.
+
+**2. Ganti forward LAN sementara (`sdr-doa-console-lan`, `socat 0.0.0.0:8788`) dengan mode LAN lihat-saja.**
+
+Forward itu meneruskan semua permintaan ke console, termasuk login admin dan Kontrol, sedangkan mode LAN lihat-saja hanya menjawab baca-saja (6.2). Cari dulu apakah unitnya unit sistem atau unit user:
+
+```sh
+systemctl status sdr-doa-console-lan --no-pager
+systemctl --user status sdr-doa-console-lan --no-pager
+ss -ltnp 'sport = :8788'
+```
+
+Hentikan dan nonaktifkan yang ada (salah satu):
+
+```sh
+sudo systemctl disable --now sdr-doa-console-lan
+systemctl --user disable --now sdr-doa-console-lan
+```
+
+**Periksa**: `ss -ltnp 'sport = :8788'` tidak menampilkan `socat`. Lalu nyalakan mode LAN lihat-saja dengan 6.2, "Menyalakan" langkah 2–3 (kata sandi admin sendiri, port `8788`, klien yang diizinkan dari manusia), dan verifikasi seperti di 6.2. File unit forward boleh dibiarkan; yang penting nonaktif.
+
+**3. Data Out (cadangan) langsung ke IP RDF-SDR, tanpa forward `sdr-doa-dataout-forward`.**
+
+Forward sementara itu (`socat 127.0.0.1:8081 -> rdf.local:8081`) dibuat karena console belum bisa memakai host lain. Sekarang alamat Data Out diatur di Konfigurasi. Cari alamat RDF-SDR di link PPP dari groundstation:
+
+```sh
+ip -4 addr show ppp0
+```
+
+**Periksa**: baris `inet <alamat groundstation> peer <IP RDF-SDR>/32`. `<IP RDF-SDR>` adalah alamat setelah `peer`. Pastikan Data Out menjawab di alamat itu:
+
+```sh
+curl -s --noproxy '*' --max-time 5 "http://<IP RDF-SDR>:8081/status.json" | head -c 200; echo
+```
+
+Hasilnya harus JSON dengan `timestamp_ms`. Lalu, di browser groundstation dengan admin terbuka: **Konfigurasi → Koneksi & refresh**. Tambahkan `<IP RDF-SDR>` di **Host Data Out (cadangan)**, isi **Base URL Data Out** dengan `http://<IP RDF-SDR>:8081`, dan tekan **Simpan**.
+
+**Periksa**: `curl -s --noproxy '*' http://127.0.0.1:8787/api/console-config; echo` berisi `"base_url": "http://<IP RDF-SDR>:8081"` dan IP itu di `data_out_hosts`. Kartu Data Out di Kesehatan Sistem tidak menampilkan error. Baru setelah itu hentikan forward-nya (salah satu):
+
+```sh
+systemctl status sdr-doa-dataout-forward --no-pager
+systemctl --user status sdr-doa-dataout-forward --no-pager
+sudo systemctl disable --now sdr-doa-dataout-forward
+systemctl --user disable --now sdr-doa-dataout-forward
+```
+
+**Periksa**: `ss -ltnp 'sport = :8081'` tidak menampilkan `socat`, dan setelah satu interval refresh kartu Data Out masih tanpa error. Bila error, kembalikan Base URL lama di Konfigurasi dan tanya manusia.
+
+**4. Hapus pesan retained basi `sdr/v2/uav-01/config/reported`.**
+
+Topik ini bukan bagian kontrak sejak 3.0.0 (console tidak berlangganan lagi). Broker masih menyimpan satu pesan retained lama dari `sid` `59394bcd`, `rev` 207, yang bisa membingungkan klien lain. Pakai listener TCP broker groundstation yang tanpa TLS dan kredensial. Port **(contoh)** `1883`; port WebSocket console (`9001`) tidak dipakai `mosquitto_pub`. Lihat dulu isinya:
+
+```sh
+mosquitto_sub -h 127.0.0.1 -p 1883 -t 'sdr/v2/uav-01/config/reported' -v -C 1 -W 5
+```
+
+**Periksa**: satu baris berisi `"sid":"59394bcd"` dan `"rev":207`. Bila isinya lain, atau `sid`-nya sesi RDF-SDR sekarang, berhenti dan tanya manusia. Bila sesuai, kirim payload kosong yang retained, yang menghapus pesan itu:
+
+```sh
+mosquitto_pub -h 127.0.0.1 -p 1883 -t 'sdr/v2/uav-01/config/reported' -r -n
+mosquitto_sub -h 127.0.0.1 -p 1883 -t 'sdr/v2/uav-01/config/reported' -v -C 1 -W 5; echo "rc=$?"
+```
+
+**Periksa**: `mosquitto_sub` kedua tidak mencetak apa pun dan berhenti setelah 5 detik karena waktu habis (`rc` bukan 0). Bila `mosquitto_pub` ditolak (ACL broker), jalankan dengan pengguna atau listener yang diizinkan menulis topik itu, dengan izin manusia.
 
 ---
 

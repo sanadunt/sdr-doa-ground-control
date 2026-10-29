@@ -1,8 +1,8 @@
 import type { JSX } from 'react';
 import type { MapCoordinate, PolarSettings, TelemetrySnapshot, Tone } from '../types';
-import { numberOrNull, primaryCandidate } from '../lib/telemetry';
-import { bearingForView, formatDegrees, polarView } from '../lib/polar';
-import { doaStatusTextKey, overviewDoaStatus } from '../lib/doaStatus';
+import { numberOrNull, partialCsvReady, primaryCandidate } from '../lib/telemetry';
+import { bearingForView, formatDegrees, geographicBearingForBin, polarView } from '../lib/polar';
+import { doaStatusTextKey, overviewDoaStatus, provisionalTheta } from '../lib/doaStatus';
 import { useI18n } from '../lib/i18n';
 import { ageAtAnswerMs } from '../lib/snapshotRead';
 import { sourceBadge } from '../lib/telemetrySource';
@@ -23,8 +23,9 @@ function formatOffset(offset: number): string {
  * Compact bearing HUD over the map. The primary value is the geographic
  * north-clockwise bearing derived from theta_0 and the compass offset; theta_0
  * stays visible beside it, and so does the plotted display peak, because the
- * two are not guaranteed to agree. Nothing is shown unless
- * overviewDoaStatus() says the DoA may be shown.
+ * two are not guaranteed to agree. A DoA overviewDoaStatus() does not show
+ * but that is still readable (old, ok=0, DAQ unknown) keeps its bearing,
+ * dimmed and marked NOT VALID, with the reason it is held.
  */
 export function DoaReadout({
   snapshot,
@@ -50,6 +51,9 @@ export function DoaReadout({
   const status = overviewDoaStatus(snapshot, localSnapshotFresh);
   const statusText = t(doaStatusTextKey(status.reason));
   const bearing = status.shown ? bearingForView(view) : null;
+  const heldTheta = provisionalTheta(snapshot, status);
+  const heldBearing = heldTheta === null ? null : geographicBearingForBin(heldTheta, settings.compassOffset);
+  const partial = status.shown && partialCsvReady(snapshot);
   // The CSV view of Data Out, or the MQTT view; the badge says which source.
   const csv = primaryCandidate(snapshot);
   const source = sourceBadge(snapshot);
@@ -63,7 +67,12 @@ export function DoaReadout({
   // unreachable) there is nothing to mark.
   const ageStale = !simulation && ageMs !== null && (!localSnapshotFresh || status.code === 'STALE');
   const ageValue = simulation ? 'SIM' : ageMs !== null ? t('common.durationS', { value: (ageMs / 1000).toFixed(1) }) : '—';
-  const age = ageStale ? `${ageValue} · STALE` : ageValue;
+  // A held bearing is old (STALE N s) or not valid at all (ok=0, DAQ unknown).
+  const heldOld = status.reason === 'sourceStale' || status.reason === 'localExpired' || status.reason === 'nodeStalled';
+  const staleTag = heldBearing !== null && heldOld && ageMs !== null && !simulation;
+  const heldTag = heldBearing === null ? null : staleTag ? t('polar.staleTag', { age: ageValue }) : t('polar.notValid');
+  // The STALE tag already carries the age; the age line does not repeat it.
+  const age = ageStale && !staleTag ? `${ageValue} · STALE` : ageValue;
   const ageTitle = !simulation && snapshot && ageMs === null && csv.available === true ? t('readout.clockUnverified') : undefined;
   const frameDetail = bearing !== null && view.canonicalAngle !== null
     ? t(offsetVerified ? 'readout.bearingDetail' : 'readout.bearingDetailAssumed', {
@@ -81,10 +90,14 @@ export function DoaReadout({
         <span className="ov-eyebrow">{t('readout.bearing')}</span>
         {simulation ? <span className="ov-tag tone-warn">{t('readout.simulation')}</span> : null}
         {source ? <span className={`ov-tag tone-${source.tone}`}>{t(source.labelKey)}</span> : null}
+        {partial ? <span className="ov-tag tone-warn">{t('polar.partialTag')}</span> : null}
+        {heldTag ? <span className="ov-tag tone-neutral">{heldTag}</span> : null}
         <span className={ageStale ? 'ov-hud-age is-warn' : 'ov-hud-age'} title={ageTitle}>{t('hud.age', { age })}</span>
       </div>
-      <div className="ov-hud-bearing" title={frameDetail ?? undefined}>
-        {bearing !== null ? <>{formatDegrees(bearing, 1)}<small>°</small></> : <span className="readout-empty">—</span>}
+      <div className={heldBearing !== null ? 'ov-hud-bearing is-provisional' : 'ov-hud-bearing'} title={frameDetail ?? undefined}>
+        {bearing !== null ? <>{formatDegrees(bearing, 1)}<small>°</small></>
+          : heldBearing !== null ? <>{formatDegrees(heldBearing, 1)}<small>°</small></>
+            : <span className="readout-empty">—</span>}
       </div>
       {status.shown ? (
         <>
@@ -95,9 +108,18 @@ export function DoaReadout({
           <div className="ov-hud-offset">
             {t('hud.offset')} <b>{formatOffset(settings.compassOffset)}°</b> · <span className={offsetManual ? 'is-manual' : offsetVerified ? undefined : 'is-warn'}>{offsetSource}</span>
           </div>
-          {status.code === 'DEGRADED' ? <p className="ov-hud-held">{statusText}</p> : null}
+          {status.code === 'DEGRADED' || status.code === 'PARTIAL' ? <p className="ov-hud-held">{statusText}</p> : null}
         </>
-      ) : <p className="ov-hud-held" role="status">{statusText}</p>}
+      ) : (
+        <>
+          {heldTheta !== null ? (
+            <div className="ov-hud-grid is-provisional">
+              <span>{t('hud.theta')} <b>{formatDegrees(heldTheta, 1)}°</b></span>
+            </div>
+          ) : null}
+          <p className="ov-hud-held" role="status">{statusText}</p>
+        </>
+      )}
     </section>
   );
 }

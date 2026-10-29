@@ -66,7 +66,7 @@ const BASEMAP_CHECK_MS = 20_000;
 const BASEMAP_RETRY_MS = 60_000;
 // The console's tile route tries each upstream's hosts; the browser has one URL per source.
 const BASEMAP_HOSTS = 1;
-const SOURCE_IDS = ['doa-station', 'doa-beam', 'doa-heat', 'doa-rings', 'doa-guides', 'doa-lobe', 'doa-edges', 'doa-bearing'] as const;
+const SOURCE_IDS = ['doa-station', 'doa-beam', 'doa-heat', 'doa-rings', 'doa-guides', 'doa-lobe', 'doa-edges', 'doa-bearing', 'doa-provisional'] as const;
 type SourceId = typeof SOURCE_IDS[number];
 const SOURCE_ID_SET: ReadonlySet<string> = new Set(SOURCE_IDS);
 const EMPTY: OverlayFeatureCollection = { type: 'FeatureCollection', features: [] };
@@ -79,6 +79,7 @@ const LINE_LAYER_OPACITY: ReadonlyArray<[string, 'line-opacity', number]> = [
   ['doa-edges', 'line-opacity', .75],
   ['doa-bearing-casing', 'line-opacity', .85],
   ['doa-bearing', 'line-opacity', .95],
+  ['doa-provisional', 'line-opacity', .9],
 ];
 
 interface CameraMemory {
@@ -201,6 +202,12 @@ export interface TacticalMapProps {
   doaHeldCode?: string;
   /** Translated cause while doaReady is false; the map names it instead of a generic vector notice. */
   doaHeldText?: string;
+  /** theta_0 of a held DoA that is still readable; drawn as a dashed grey line marked NOT VALID. */
+  provisionalTheta?: number | null;
+  /** Translated cause of an unverified compass offset, named in the REFERENCE notice. */
+  orientationCause?: string;
+  /** Opens Configuration → GPS & Compass from the REFERENCE notice. */
+  onOpenCompassSettings?: () => void;
   /** Overlay layers, opacity and scale; owned and persisted by the Overview page (Layers panel). */
   overlaySettings?: DoaOverlaySettings;
   /** Space the floating dashboard panels take from the map; it moves the framing, not the canvas. */
@@ -211,7 +218,7 @@ export interface TacticalMapProps {
   onBasemapSelect?: (id: BasemapId) => void;
 }
 
-function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect }: TacticalMapProps): JSX.Element {
+function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, provisionalTheta = null, orientationCause, onOpenCompassSettings, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect }: TacticalMapProps): JSX.Element {
   const { t, lang } = useI18n();
   const hostRef = useRef<HTMLDivElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -260,13 +267,14 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   // bearing line stays, the beam, lobe and edges need the vector.
   const theta = doaReady && fresh && (values || isMqttSnapshot(snapshot)) ? numberOrNull(csv.canonical_angle_deg) : null;
   const bearing = theta === null ? null : geographicBearingForBin(theta, offset);
+  const provisionalBearing = !doaReady && provisionalTheta !== null && Number.isFinite(provisionalTheta) ? geographicBearingForBin(provisionalTheta, offset) : null;
   // Only the scale fields matter here; depending on all of g would rebuild geometry on paint-only changes.
   const scale = useMemo(() => effectiveDbScale(values, g, simulation), [values, simulation, g.dbScale, g.minDb, g.maxDb, g.thresholdDb]);
   const saturation = useMemo(() => saturatedFraction(values, scale.maxDb), [values, scale.maxDb]);
 
   const geometry = useMemo<OverlayGeometry>(() => {
     const data: Record<SourceId, OverlayFeatureCollection> = {
-      'doa-station': pointFeature(stationCoordinate), 'doa-beam': EMPTY, 'doa-heat': EMPTY, 'doa-rings': EMPTY, 'doa-guides': EMPTY, 'doa-lobe': EMPTY, 'doa-edges': EMPTY, 'doa-bearing': EMPTY,
+      'doa-station': pointFeature(stationCoordinate), 'doa-beam': EMPTY, 'doa-heat': EMPTY, 'doa-rings': EMPTY, 'doa-guides': EMPTY, 'doa-lobe': EMPTY, 'doa-edges': EMPTY, 'doa-bearing': EMPTY, 'doa-provisional': EMPTY,
     };
     if (!stationCoordinate) return { data, rings: [], halfPower: null };
     // Rings and guides are a ground-distance and orientation reference; they do not depend on DoA data.
@@ -276,6 +284,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     const draw: DoaOverlaySettings = { ...g, minDb: scale.minDb, maxDb: scale.maxDb, thresholdDb: scale.thresholdDb };
     if (!values) {
       if (g.bearingVisible && bearing !== null) data['doa-bearing'] = { type: 'FeatureCollection', features: [bearingFeature(stationCoordinate, bearing, draw)] };
+      if (g.bearingVisible && provisionalBearing !== null) data['doa-provisional'] = { type: 'FeatureCollection', features: [bearingFeature(stationCoordinate, provisionalBearing, draw)] };
       return { data, rings: ringSet?.rings ?? [], halfPower: null };
     }
     if (draw.maxDb <= draw.minDb) return { data, rings: ringSet?.rings ?? [], halfPower: null };
@@ -287,8 +296,9 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     if (g.edgesVisible) data['doa-edges'] = edgeFeatures(stationCoordinate, halfPower, draw, offset);
     return { data, rings: ringSet?.rings ?? [], halfPower };
     // Paint-only settings (palette, opacity, intensity, blur) are intentionally not dependencies.
-  }, [stationCoordinate, values, bearing, offset, scale, g.ringsVisible, g.guidesVisible, g.guideInterval, g.heatmapVisible, g.heatStyle, g.lobeVisible, g.bearingVisible, g.edgesVisible, g.maxDistanceM, g.lobeDistanceM, g.contrast, g.radialSamples, g.distanceFalloff]);
+  }, [stationCoordinate, values, bearing, provisionalBearing, offset, scale, g.ringsVisible, g.guidesVisible, g.guideInterval, g.heatmapVisible, g.heatStyle, g.lobeVisible, g.bearingVisible, g.edgesVisible, g.maxDistanceM, g.lobeDistanceM, g.contrast, g.radialSamples, g.distanceFalloff]);
   const bearingDrawn = geometry.data['doa-bearing'].features.length > 0;
+  const provisionalDrawn = geometry.data['doa-provisional'].features.length > 0;
 
   // Frame below the notices (basemap unavailable, overlay held...) so they never
   // cover the north label, and above the map controls so they never cover the south one.
@@ -363,6 +373,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
           { id: 'doa-edges', type: 'line', source: 'doa-edges', paint: { 'line-color': '#e0603a', 'line-opacity': .75, 'line-width': 1.5, 'line-dasharray': [1, 2] } },
           { id: 'doa-bearing-casing', type: 'line', source: 'doa-bearing', layout: { 'line-cap': 'round' }, paint: { 'line-color': '#ffffff', 'line-opacity': .85, 'line-width': 6 } },
           { id: 'doa-bearing', type: 'line', source: 'doa-bearing', layout: { 'line-cap': 'round' }, paint: { 'line-color': '#e0603a', 'line-opacity': .95, 'line-width': 3 } },
+          // A held DoA that is still readable: grey and dashed, never the bearing colour.
+          { id: 'doa-provisional', type: 'line', source: 'doa-provisional', paint: { 'line-color': '#8d99a6', 'line-opacity': .9, 'line-width': 3, 'line-dasharray': [2, 1.5] } },
           { id: 'doa-station-halo', type: 'circle', source: 'doa-station', paint: { 'circle-radius': 12, 'circle-color': '#182027', 'circle-opacity': .8 } },
           { id: 'doa-station', type: 'circle', source: 'doa-station', paint: { 'circle-radius': 6, 'circle-color': '#ebbc70', 'circle-stroke-color': '#15181b', 'circle-stroke-width': 2 } },
         ] },
@@ -626,6 +638,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     setVisibility('doa-edges', settings.edgesVisible);
     setVisibility('doa-bearing-casing', settings.bearingVisible);
     setVisibility('doa-bearing', settings.bearingVisible);
+    setVisibility('doa-provisional', settings.bearingVisible);
     // Overlay opacity scales every DoA layer; the station marker stays opaque.
     const fade = settings.overlayOpacity;
     map.setPaintProperty('doa-beam', 'fill-color', beamColorExpression(settings.heatPalette));
@@ -698,8 +711,9 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       for (const [key, angle] of CARDINALS) add(destination(stationCoordinate, angle, outer), 'doa-cardinal-label', t(key));
     }
     if (bearingDrawn && bearing !== null) add(destination(stationCoordinate, bearing, g.maxDistanceM * 1.1), 'doa-bearing-label', `${formatBearing(bearing, 1)}°`);
+    if (provisionalDrawn && provisionalBearing !== null) add(destination(stationCoordinate, provisionalBearing, g.maxDistanceM * 1.1), 'doa-bearing-label is-provisional', `${t('polar.notValid')} · ${formatBearing(provisionalBearing, 1)}°`);
     return () => { for (const marker of markers) marker.remove(); };
-  }, [styleReady, stationCoordinate, geometry.rings, bearing, bearingDrawn, g.ringsVisible, g.guidesVisible, g.labelsVisible, g.maxDistanceM, t]);
+  }, [styleReady, stationCoordinate, geometry.rings, bearing, bearingDrawn, provisionalBearing, provisionalDrawn, g.ringsVisible, g.guidesVisible, g.labelsVisible, g.maxDistanceM, t]);
 
   // Hover (or tap) readout: geographic bearing, its theta_0 bin and shifted dB value, and ground distance from the station.
   useEffect(() => {
@@ -795,6 +809,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       }
       if (settings.edgesVisible) strokeLines(geometry.data['doa-edges'], darkBackground ? 'rgba(255,138,92,.8)' : 'rgba(224,96,58,.75)', darkBackground ? 2 : 1.5, [2, 4]);
       if (settings.bearingVisible) strokeLines(geometry.data['doa-bearing'], '#e0603a', 3, [9, 5]);
+      if (settings.bearingVisible) strokeLines(geometry.data['doa-provisional'], darkBackground ? 'rgba(170,182,194,.9)' : 'rgba(96,108,120,.9)', 3, [6, 5]);
       // The station marker stays opaque, as on the map.
       context.globalAlpha = 1;
       const origin = project([stationCoordinate.longitude, stationCoordinate.latitude]);
@@ -815,6 +830,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
         if (settings.guidesVisible) for (const [key, angle] of CARDINALS) label(destination(stationCoordinate, angle, outer), t(key), 'rgba(17,23,30,.82)');
         const bearingLine = geometry.data['doa-bearing'].features.length > 0;
         if (settings.bearingVisible && bearingLine && bearing !== null) label(destination(stationCoordinate, bearing, settings.maxDistanceM * 1.1), `${formatBearing(bearing, 1)}°`, '#11171e');
+        const provisionalLine = geometry.data['doa-provisional'].features.length > 0;
+        if (settings.bearingVisible && provisionalLine && provisionalBearing !== null) label(destination(stationCoordinate, provisionalBearing, settings.maxDistanceM * 1.1), `${t('polar.notValid')} · ${formatBearing(provisionalBearing, 1)}°`, '#5b6670');
         context.restore();
       }
     };
@@ -831,7 +848,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       map?.off('resize', schedule);
       canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
     };
-  }, [fallbackActive, mapState, theme, tilesLoaded, tone, styleReady, stationCoordinate, geometry, bearing, settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.edgesVisible, settings.bearingVisible, settings.labelsVisible, settings.overlayOpacity, settings.lobeOpacity, settings.maxDistanceM, settings.lobeDistanceM, t]);
+  }, [fallbackActive, mapState, theme, tilesLoaded, tone, styleReady, stationCoordinate, geometry, bearing, provisionalBearing, settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.edgesVisible, settings.bearingVisible, settings.labelsVisible, settings.overlayOpacity, settings.lobeOpacity, settings.maxDistanceM, settings.lobeDistanceM, t]);
 
   const reducedMotion = prefersReducedMotion;
   const resetView = () => {
@@ -858,7 +875,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const dataLabel = values
     ? t('map.vectorReady', { bearing: bearing === null ? t('map.bearingUnavailable') : t('map.bearingReference', { deg: formatBearing(bearing, 0) }) })
     : bearingOnly ? t('map.bearingOnly', { deg: formatBearing(bearing, 0) })
-      : held && doaHeldCode ? t('map.doaHeld', { code: doaHeldCode }) : t('map.noVector');
+      : provisionalBearing !== null ? t('map.provisional', { deg: formatBearing(provisionalBearing, 0) })
+        : held && doaHeldCode ? t('map.doaHeld', { code: doaHeldCode }) : t('map.noVector');
   const notices: string[] = [];
   if (mapState === 'no-webgl') notices.push(t('map.noWebgl'));
   if (mapState === 'gl-lost') notices.push(t('map.glLost'));
@@ -866,7 +884,10 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   if (mapState === 'error') notices.push(t('map.rendererError'));
   if (basemapStatus && mapState !== 'no-webgl') notices.push(t(basemapStatus === 'partial' ? 'map.basemapPartial' : 'map.basemapUnavailable', { style: t(BASEMAPS[activeBasemap].labelKey) }));
   if (stationCoordinate && !values && !bearingOnly) notices.push(held ? t('map.overlayHeld', { reason: doaHeldText }) : t('map.overlayCleared'));
-  if ((values || bearingOnly) && !orientationVerified) notices.push(t('map.orientationReference', { offset: Number(offset.toFixed(1)) }));
+  // The compass notice names its cause and links to the setting that fixes it.
+  const orientationNotice = (values || bearingOnly || provisionalBearing !== null) && !orientationVerified
+    ? t('map.orientationReference', { cause: orientationCause ?? t('map.orientationNotReported'), offset: Number(offset.toFixed(1)) })
+    : null;
   // The credit follows the style the map draws; Plain draws no tiles and needs none.
   const attribution = BASEMAPS[activeBasemap].attribution;
   // DOM labels fade with the overlay through this custom property.
@@ -879,7 +900,15 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
         <div className="map-frame" role="application" aria-label={t('map.appAria')} tabIndex={-1} style={frameStyle}>
           <div className="maplibre-host" ref={hostRef} />
           <canvas ref={overlayCanvasRef} className="doa-overlay-canvas" aria-hidden="true" hidden={!fallbackActive} />
-          <div className="map-notices" ref={noticesRef} style={noticeStyle}>{notices.map((notice) => <div key={notice} className="map-data-chip" role="status">{notice}</div>)}</div>
+          <div className="map-notices" ref={noticesRef} style={noticeStyle}>
+            {notices.map((notice) => <div key={notice} className="map-data-chip" role="status">{notice}</div>)}
+            {orientationNotice ? (
+              <div className="map-data-chip has-action" role="status">
+                <span>{orientationNotice}</span>
+                {onOpenCompassSettings ? <button type="button" className="map-chip-action" onClick={onOpenCompassSettings}>{t('map.compassSettings')}</button> : null}
+              </div>
+            ) : null}
+          </div>
           {!stationCoordinate ? <div className="map-empty-wrap"><EmptyState label={t('map.unavailable')} detail={t('map.unavailableDetail')} tone="warn" /></div> : null}
         </div>
         {mapState !== 'no-webgl' ? (

@@ -325,7 +325,10 @@ function MqttDoaCard({ snapshot }: { snapshot: TelemetrySnapshot | null }): JSX.
       span={7}
       flush
     >
-      <KeyValueGrid items={[{ id: 'angle', label: t('diag.mqtt.angleMode'), value: mode ?? 'N/A', tone: mode ? undefined : 'warn' }]} />
+      <KeyValueGrid items={[
+        { id: 'source', label: t('diag.mqtt.source'), value: t('diag.mqtt.sourceValue') },
+        { id: 'angle', label: t('diag.mqtt.angleMode'), value: mode ?? 'N/A', tone: mode ? undefined : 'warn' },
+      ]} />
       {rows.length
         ? <DataTable columns={columns} rows={rows} rowKey={(row) => row.key} label={t('diag.mqtt.title')} stack={false} />
         : <EmptyState label={t('polar.mqttNoDoa')} code="WAITING" />}

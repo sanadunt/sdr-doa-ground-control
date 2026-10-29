@@ -99,6 +99,25 @@ export function polarDataReady(snapshot: TelemetrySnapshot | null | undefined): 
 }
 
 /**
+ * A Data Out answer whose doa.xml view is missing while the CSV view is fresh
+ * with its 360-bin vector. The CSV view alone carries the angle and the curve,
+ * so it is drawn, labelled as partial: nothing cross-checks it against XML.
+ */
+export function partialCsvReady(snapshot: TelemetrySnapshot | null | undefined): boolean {
+  if (!snapshot || isMqttSnapshot(snapshot)) return false;
+  const csv = candidate(snapshot, 'csv');
+  return candidate(snapshot, 'xml').available !== true
+    && freshCandidate(csv)
+    && completeVector(csv)
+    && snapshot.native_consistency?.conflict !== true;
+}
+
+/** The curve may be drawn: both views ready, or the CSV view alone (partialCsvReady). */
+export function curveDataReady(snapshot: TelemetrySnapshot | null | undefined): boolean {
+  return polarDataReady(snapshot) || partialCsvReady(snapshot);
+}
+
+/**
  * The DoA (theta_0 and the bearing) may be drawn. Data Out needs the curve
  * too. A LIVE MQTT DoA is a detection by itself, as for the edge's own
  * Ground: the edge sends its Angular frame far less often than the DoA
@@ -106,7 +125,7 @@ export function polarDataReady(snapshot: TelemetrySnapshot | null | undefined): 
  * profile control), so between frames the bearing is shown without a curve.
  */
 export function doaDataReady(snapshot: TelemetrySnapshot | null | undefined): boolean {
-  return isMqttSnapshot(snapshot) ? nativeViewsReady(snapshot) : polarDataReady(snapshot);
+  return isMqttSnapshot(snapshot) ? nativeViewsReady(snapshot) : curveDataReady(snapshot);
 }
 
 /**
@@ -143,7 +162,9 @@ export function adcOverdriven(snapshot: TelemetrySnapshot | null | undefined): b
  * every collection.
  */
 export function adcOverdriveUnknown(snapshot: TelemetrySnapshot | null | undefined): boolean {
-  return isMqttSnapshot(snapshot) && typeof snapshot?.publication_gate?.checks?.adc_not_overdriven !== 'boolean';
+  const check = snapshot?.publication_gate?.checks?.adc_not_overdriven;
+  // Data Out says so with null: neither status.json nor doa.xml reported it.
+  return isMqttSnapshot(snapshot) ? typeof check !== 'boolean' : snapshot?.status?.available === true && check === null;
 }
 
 /** The collector saw the node's status timestamp, uptime or frame index stop advancing. */

@@ -100,6 +100,31 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .tone-good .telemetry-value { color: var(--green); }
 .tone-warn .telemetry-value { color: var(--amber); }
 .tone-bad .telemetry-value { color: var(--red); }
+/* Delivery opens its checklist; it keeps the look of the other cells. */
+.telemetry-button { min-height: 44px; margin: 0; border-top: 0; border-right: 0; border-bottom: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; text-align: left; }
+.telemetry-button:hover .telemetry-key, .telemetry-button[aria-expanded='true'] .telemetry-key { color: var(--text); }
+.telemetry-button:focus-visible { outline-offset: -2px; }
+.delivery-backdrop { position: fixed; inset: 0; z-index: 59; }
+.delivery-panel { position: fixed; z-index: 60; max-height: min(70vh, 560px); overflow-y: auto; padding: 10px 12px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: 0 10px 28px rgba(0, 0, 0, .35); color: var(--text); font-size: 12.5px; }
+.delivery-panel:focus { outline: none; }
+.delivery-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.delivery-head h3 { margin: 0; font-size: 13px; }
+.delivery-head h3 span { margin-left: 6px; font-family: var(--mono); font-size: 12px; }
+.delivery-head h3 .tone-warn { color: var(--amber); }
+.delivery-head h3 .tone-good { color: var(--green); }
+.delivery-head h3 .tone-neutral { color: var(--muted); }
+.delivery-panel section { margin-top: 10px; }
+.delivery-panel h4 { margin: 0 0 4px; color: var(--subtle); font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; }
+.delivery-panel h4.is-warn { color: var(--amber); }
+.delivery-panel h5 { margin: 6px 0 2px; color: var(--muted); font-size: 11px; font-weight: 600; }
+.delivery-reasons, .delivery-checks { margin: 0; padding: 0; list-style: none; }
+.delivery-reasons li { display: flex; flex-direction: column; gap: 1px; padding: 3px 0; }
+.delivery-reasons code { color: var(--subtle); font-family: var(--mono); font-size: 10.5px; overflow-wrap: anywhere; }
+.delivery-checks li { display: grid; grid-template-columns: 16px 1fr; gap: 6px; padding: 2px 0; }
+.delivery-mark { font-family: var(--mono); font-weight: 700; text-align: center; }
+.delivery-checks .is-pass .delivery-mark { color: var(--green); }
+.delivery-checks .is-fail .delivery-mark { color: var(--amber); }
+.delivery-checks .is-unknown .delivery-mark { color: var(--subtle); }
 .topbar-toolbar { display: flex; flex: none; align-items: center; }
 .topbar-tools { display: flex; flex: none; align-items: center; gap: 8px; }
 .lang-switch { display: inline-flex; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; }
@@ -455,12 +480,17 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 /* The dark-theme map background is close to the label colour; an outline keeps the circle visible. */
 :root:not([data-theme='light']) .doa-cardinal-label { box-shadow: 0 0 0 1px rgba(230, 237, 243, .45); }
 .doa-bearing-label { padding: 4px 7px; border: 1px solid #e0603a; border-radius: 4px; background: #11171e; color: #ffffff; font-size: 12px; font-weight: 700; box-shadow: 0 2px 8px rgba(0, 0, 0, .35); }
+.doa-bearing-label.is-provisional { border: 1px dashed #8d99a6; background: #3b434b; color: #e6eaee; }
 .doa-hover-popup .maplibregl-popup-content { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); box-shadow: 0 6px 18px rgba(0, 0, 0, .3); pointer-events: none; }
 .doa-hover-popup { pointer-events: none; }
 .doa-hover-popup strong { font-family: var(--mono); font-size: 12.5px; }
 .doa-hover-popup span { color: var(--muted); font-family: var(--mono); font-size: 11.5px; }
 .doa-hover-popup .maplibregl-popup-tip { border-top-color: var(--surface); border-bottom-color: var(--surface); }
 .map-notices { position: absolute; top: 58px; left: 10px; z-index: 20; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; max-width: calc(100% - 80px); pointer-events: none; }
+/* A notice with an action takes clicks; the rest of the notice column lets them through to the map. */
+.map-data-chip.has-action { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px 10px; pointer-events: auto; }
+.map-chip-action { min-height: 44px; padding: 0 10px; border: 1px solid currentColor; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; font: inherit; font-weight: 700; text-decoration: underline; }
+.map-chip-action:hover { background: color-mix(in srgb, var(--amber) 14%, transparent); }
 .map-data-chip { max-width: 100%; padding: 5px 9px; border: 1px solid color-mix(in srgb, var(--amber) 55%, transparent); border-radius: 5px; background: color-mix(in srgb, var(--surface) 94%, transparent); color: var(--amber); font-family: var(--mono); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
 .map-overlay-legend { display: flex; flex-direction: column; gap: 6px; max-width: none; }
 .legend-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
