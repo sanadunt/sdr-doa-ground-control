@@ -16,6 +16,7 @@ import {
   axisFor,
   binAt,
   contentBoxX,
+  createFrameGate,
   dbToByte,
   formatDb,
   formatMhz,
@@ -35,7 +36,7 @@ import {
   waterfallNeedsReset,
   xAtFreq,
 } from '../../lib/spectrumView';
-import type { DbRange, FrequencyAxis, WaterfallSource } from '../../lib/spectrumView';
+import type { DbRange, FrameGate, FrequencyAxis, WaterfallSource } from '../../lib/spectrumView';
 import { useI18n } from '../../lib/i18n';
 
 const TICK_COUNT = 5;
@@ -257,6 +258,10 @@ export function SpectrumCanvas({
   const hoverRef = useRef<HTMLSpanElement>(null);
   const ticksRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<SpectrumFrame | null>(null);
+  const gateRef = useRef<FrameGate | null>(null);
+  if (!gateRef.current) gateRef.current = createFrameGate();
+  // Takes a frame into the trace, the range, the waterfall and the peak; set while subscribed.
+  const ingestRef = useRef<((frame: SpectrumFrame) => void) | null>(null);
   // The automatic range follows every frame, also in Manual, so Auto takes over without a jump.
   const autoRef = useRef<DbRange | null>(null);
   // The range drawn: dbRange, or the automatic one.
@@ -417,9 +422,7 @@ export function SpectrumCanvas({
     const schedule = () => {
       if (!scheduled) scheduled = window.requestAnimationFrame(() => { scheduled = 0; drawRef.current(); });
     };
-    const unsubscribe = bridge.onSpectrum((frame) => {
-      // An RX frame in Spektrum mode or a scan frame in RX mode (the other mode just ended) is not drawn.
-      if (frame.source !== props.current.mode) return;
+    const ingest = (frame: SpectrumFrame) => {
       frameRef.current = frame;
       autoRef.current = autoDbRange(frame.bins, autoRef.current);
       const range = props.current.dbRange ?? autoRef.current;
@@ -452,9 +455,15 @@ export function SpectrumCanvas({
       // Shown by the next draw.
       peakTextRef.current = peak ? props.current.t('spectrum.peak', { db: formatDb(peak.db, 1), freq: formatMhz(peak.hz, digits) }) : '';
       schedule();
+    };
+    ingestRef.current = ingest;
+    const unsubscribe = bridge.onSpectrum((frame) => {
+      const taken = gateRef.current?.offer(frame, props.current.mode) ?? null;
+      if (taken) ingest(taken);
     });
     return () => {
       unsubscribe();
+      ingestRef.current = null;
       window.cancelAnimationFrame(scheduled);
     };
   }, [bridge]);
@@ -499,6 +508,12 @@ export function SpectrumCanvas({
     const fall = waterfallRef.current;
     fall?.getContext('2d')?.clearRect(0, 0, fall.width, fall.height);
   }, [mode]);
+
+  // After every render, once the switch above has dropped the other mode's trace (FrameGate).
+  useEffect(() => {
+    const frame = gateRef.current?.settle(mode) ?? null;
+    if (frame) ingestRef.current?.(frame);
+  });
 
   // A stopped radio or scan, a new VFO, a retune or a marker change redraws without waiting for a frame.
   useEffect(() => {

@@ -301,6 +301,37 @@ export function waterfallNeedsReset(previous: WaterfallSource | null, frame: Wat
   return frame.source === 'sweep' && (previous.startHz !== frame.startHz || previous.stopHz !== frame.stopHz);
 }
 
+/**
+ * Which frames the dock's canvas draws: those of the mode it shows. A frame of
+ * the other mode waits for the next render instead of being dropped at once: a
+ * source that changes its state and sends the first frame of the new mode in
+ * one step (the LAN view's mirror feed) reaches the canvas before React has
+ * rendered that mode. The next render draws it when it shows the frame's mode
+ * and drops it otherwise, as a late frame of a mode that just ended.
+ */
+export interface FrameGate {
+  /** A frame as it arrives: the frame to draw now, or null (held for the next render). */
+  offer(frame: SpectrumFrame, mode: DockMode): SpectrumFrame | null;
+  /** After a render: the held frame when it is of the mode this render shows, or null. Lets go of it either way. */
+  settle(mode: DockMode): SpectrumFrame | null;
+}
+
+export function createFrameGate(): FrameGate {
+  let held: SpectrumFrame | null = null;
+  return {
+    offer(frame, mode) {
+      // A newer frame replaces a held one; one of the mode shown is drawn now.
+      held = frame.source === mode ? null : frame;
+      return held ? null : frame;
+    },
+    settle(mode) {
+      const frame = held;
+      held = null;
+      return frame && frame.source === mode ? frame : null;
+    },
+  };
+}
+
 /** Map a power to 0..255 on a dB range. */
 export function dbToByte(db: number, range: DbRange): number {
   if (!Number.isFinite(db) || !(range.max > range.min)) return 0;

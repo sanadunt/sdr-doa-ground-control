@@ -8,6 +8,7 @@ import {
   decodeBins,
   encodeBins,
   mirrorFrameFromSpectrum,
+  mirrorGainsInUse,
   mirrorStateFromStatus,
   mirrorStateKey,
   mirrorView,
@@ -55,7 +56,7 @@ function receiverStatus(overrides: Partial<ReceiverStatus> = {}): ReceiverStatus
     sampleRatesHz: [],
     sweep: {
       phase: 'idle', source: 'native', startHz: 400_000_000, stopHz: 500_000_000, fftSize: 4096, resolutionHz: 4882.8125,
-      lnaDb: 16, vgaDb: 20, amp: false, displayMinDb: -110, displayMaxDb: -20, view: 'max',
+      lnaDb: 24, vgaDb: 30, amp: true, displayMinDb: -110, displayMaxDb: -20, view: 'max',
     },
     ...overrides,
   };
@@ -174,6 +175,41 @@ describe('mirror state', () => {
     expect(mirrorStateFromStatus(receiverStatus({ tMs: null, sampleRateHz: null }), 1, 77)).toMatchObject({ t_ms: 77, sample_rate_hz: null, span_hz: null });
   });
 
+  it('carries the scan\'s own gains apart from the RX gains', () => {
+    const state = mirrorStateFromStatus(receiverStatus(), 1, 0);
+    expect(state.gains).toEqual({ lna_db: 16, vga_db: 20, amp: false });
+    expect(state.scan?.gains).toEqual({ lna_db: 24, vga_db: 30, amp: true });
+    const sweep = receiverStatus().sweep;
+    const odd = mirrorStateFromStatus(receiverStatus({ sweep: sweep && { ...sweep, lnaDb: null, vgaDb: Number.NaN, amp: false } }), 1, 0);
+    expect(odd.scan?.gains).toEqual({ lna_db: null, vga_db: null, amp: false });
+    // A change of the scan's gains alone is a state change.
+    expect(mirrorStateKey(mirrorStateFromStatus(receiverStatus({ sweep: sweep && { ...sweep, lnaDb: 32 } }), 1, 0))).not.toBe(mirrorStateKey(state));
+  });
+
+  it('reads the scan\'s gains back, and none from a page that sends none', () => {
+    const fixture = readFixture();
+    const scan = fixture.state.scan as NonNullable<MirrorState['scan']>;
+    const { gains: _gains, ...older } = scan;
+    expect(normalizeMirrorState({ ...fixture.state, scan: older })?.scan).toEqual({ ...older, gains: null });
+    expect(normalizeMirrorState({ ...fixture.state, scan: { ...scan, gains: { lna_db: 500, vga_db: 30, amp: true } } })?.scan?.gains).toEqual({ lna_db: null, vga_db: 30, amp: true });
+    expect(normalizeMirrorState({ ...fixture.state, scan: { ...scan, gains: { lna_db: 24, vga_db: 30, amp: 1 } } })?.scan?.gains).toBeNull();
+  });
+
+  it('names the gains in use: the scan\'s while a scan starts, runs or stops, otherwise the RX gains', () => {
+    const fixture = readFixture();
+    const rx = fixture.state.gains;
+    const scan = fixture.state.scan as NonNullable<MirrorState['scan']>;
+    const at = (busy: MirrorState['busy'], phase: NonNullable<MirrorState['scan']>['phase'], gains = scan.gains) => mirrorGainsInUse({ ...fixture.state, busy, scan: { ...scan, phase, gains } });
+    expect(at('none', 'idle')).toEqual({ scan: false, gains: rx });
+    for (const phase of ['starting', 'active', 'stopping'] as const) expect(at('sweep', phase)).toEqual({ scan: true, gains: scan.gains });
+    // A scan listen plays through RX with the RX gains.
+    expect(at('scan-listen', 'idle')).toEqual({ scan: false, gains: rx });
+    // An older page sends no scan gains: unknown, never the RX gains in their place.
+    expect(at('sweep', 'active', null)).toEqual({ scan: true, gains: null });
+    expect(mirrorGainsInUse({ ...fixture.state, scan: null })).toEqual({ scan: false, gains: rx });
+    expect(mirrorGainsInUse(null)).toEqual({ scan: false, gains: null });
+  });
+
   it('changes its key only when something but rev and time changes', () => {
     const one = mirrorStateFromStatus(receiverStatus(), 1, 0);
     const two = mirrorStateFromStatus(receiverStatus({ tMs: 5, seq: 9 }), 2, 10);
@@ -262,16 +298,16 @@ describe('mirror view (stale rules)', () => {
   it('follows a scan: live SCAN, … while it starts or stops, SCAN OFF after', () => {
     const fixture = readFixture();
     const sweepFrame = { ...(fixture.frame as MirrorFrame), kind: 'sweep' as const };
-    const scan = (phase: 'starting' | 'active' | 'stopping') => answer({ frame: sweepFrame }, { busy: 'sweep', running: false, scan: { phase, start_hz: 400_000_000, stop_hz: 500_000_000, resolution_hz: 4882.8125 } });
+    const scan = (phase: 'starting' | 'active' | 'stopping') => answer({ frame: sweepFrame }, { busy: 'sweep', running: false, scan: { phase, start_hz: 400_000_000, stop_hz: 500_000_000, resolution_hz: 4882.8125, gains: null } });
     expect(at(scan('active'), 0)).toMatchObject({ phase: 'live', chip: 'SCAN', mode: 'sweep', live: true });
     expect(at(scan('starting'), 0)).toMatchObject({ phase: 'changing', chip: '…', message: 'spectrum.sweepStarting' });
     expect(at(scan('stopping'), 0)).toMatchObject({ phase: 'changing', message: 'spectrum.sweepStopping' });
     // An RX frame while the Receiver scans is not this mode's frame.
-    expect(at(answer({}, { busy: 'sweep', scan: { phase: 'active', start_hz: 1, stop_hz: 2, resolution_hz: null } }), 0)).toMatchObject({ phase: 'stale', message: 'mirror.noFrame' });
+    expect(at(answer({}, { busy: 'sweep', scan: { phase: 'active', start_hz: 1, stop_hz: 2, resolution_hz: null, gains: null } }), 0)).toMatchObject({ phase: 'stale', message: 'mirror.noFrame' });
     expect(at(answer({}, { busy: 'scan-listen' }), 0)).toMatchObject({ phase: 'live', chip: 'BUSY', tone: 'warn', message: 'spectrum.scanListenBusy' });
     // #15 review: once the scan stopped the bridge reports busy 'none'; the
     // last frame is the scan's, so the mirror stays in Spektrum with SCAN OFF.
-    const stopped = answer({ frame: sweepFrame, frameAgeMs: 60_000 }, { busy: 'none', running: false, scan: { phase: 'idle', start_hz: 400_000_000, stop_hz: 500_000_000, resolution_hz: 4882.8125 } });
+    const stopped = answer({ frame: sweepFrame, frameAgeMs: 60_000 }, { busy: 'none', running: false, scan: { phase: 'idle', start_hz: 400_000_000, stop_hz: 500_000_000, resolution_hz: 4882.8125, gains: null } });
     expect(at(stopped, 0)).toMatchObject({ phase: 'stopped', chip: 'SCAN OFF', mode: 'sweep', tone: 'neutral', live: false, stoppable: false, message: null });
     // An RX frame, no frame, or RX running again: RX.
     expect(at(answer({ frameAgeMs: 60_000 }, { busy: 'none', running: false }), 0)).toMatchObject({ chip: 'RX OFF', mode: 'rx' });
@@ -284,7 +320,7 @@ describe('mirror view (stale rules)', () => {
   it('shows Stop from the last state, as the groundstation dock does, also while STALE or the source is lost', () => {
     const fixture = readFixture();
     const sweepFrame = { ...(fixture.frame as MirrorFrame), kind: 'sweep' as const };
-    const scan = (phase: 'starting' | 'active' | 'stopping') => answer({ frame: sweepFrame }, { busy: 'sweep', running: false, scan: { phase, start_hz: 400_000_000, stop_hz: 500_000_000, resolution_hz: 4882.8125 } });
+    const scan = (phase: 'starting' | 'active' | 'stopping') => answer({ frame: sweepFrame }, { busy: 'sweep', running: false, scan: { phase, start_hz: 400_000_000, stop_hz: 500_000_000, resolution_hz: 4882.8125, gains: null } });
     for (const [elapsed, phase] of [[0, 'live'], [5_000, 'stale'], [20_000, 'lost']] as const) {
       expect(at(scan('active'), elapsed)).toMatchObject({ phase, mode: 'sweep', stoppable: true });
       expect(at(answer(), elapsed)).toMatchObject({ phase, mode: 'rx', stoppable: true });

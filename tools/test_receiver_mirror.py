@@ -80,7 +80,13 @@ def _state(rev: int = 1) -> Dict[str, Any]:
             "squelch_enabled": False,
             "squelch_db": -60.5,
         },
-        "scan": {"phase": "idle", "start_hz": 400_000_000, "stop_hz": 500_000_000, "resolution_hz": 4882.8125},
+        "scan": {
+            "phase": "idle",
+            "start_hz": 400_000_000,
+            "stop_hz": 500_000_000,
+            "resolution_hz": 4882.8125,
+            "gains": {"lna_db": 24, "vga_db": 30, "amp": True},
+        },
         "error": None,
     }
 
@@ -146,6 +152,23 @@ class MirrorSchemaTests(unittest.TestCase):
         frame = {**_frame(count=16), "kind": "sweep", "db_min": -200, "db_max": -199}
         self.assertEqual(rm.parse_publish({**body, "frame": frame})[2]["bin_count"], 16)
 
+    def test_the_scan_carries_its_own_gains(self) -> None:
+        body = _publish(frame=False)
+        state = rm.parse_publish(copy.deepcopy(body))[1]
+        self.assertEqual(state["scan"]["gains"], {"lna_db": 24, "vga_db": 30, "amp": True})
+        self.assertEqual(state["gains"], {"lna_db": 16, "vga_db": 20, "amp": False})
+        body["state"]["scan"]["gains"] = {"lna_db": None, "vga_db": None, "amp": False}
+        self.assertEqual(rm.parse_publish(copy.deepcopy(body))[1]["scan"]["gains"], {"lna_db": None, "vga_db": None, "amp": False})
+        # A groundstation page loaded before the scan's gains were mirrored still
+        # publishes; its scan reads as gains unknown (null), never the RX gains.
+        for older in (None, "absent"):
+            with self.subTest(older=older):
+                if older == "absent":
+                    del body["state"]["scan"]["gains"]
+                else:
+                    body["state"]["scan"]["gains"] = None
+                self.assertIsNone(rm.parse_publish(copy.deepcopy(body))[1]["scan"]["gains"])
+
     def test_every_bad_field_is_refused_whole(self) -> None:
         def mutate(path: Tuple[Any, ...], value: Any, *, delete: bool = False) -> Dict[str, Any]:
             body = _publish()
@@ -184,6 +207,12 @@ class MirrorSchemaTests(unittest.TestCase):
             ("vfo field missing", mutate(("state", "vfo", "squelch_db"), None, delete=True)),
             ("scan reversed", mutate(("state", "scan", "stop_hz"), 300_000_000)),
             ("unknown scan phase", mutate(("state", "scan", "phase"), "done")),
+            ("scan gain above the limit", mutate(("state", "scan", "gains", "lna_db"), 500)),
+            ("scan VGA below zero", mutate(("state", "scan", "gains", "vga_db"), -2)),
+            ("scan amp as a number", mutate(("state", "scan", "gains", "amp"), 1)),
+            ("extra scan gain field", mutate(("state", "scan", "gains", "if_db"), 10)),
+            ("scan gain field missing", mutate(("state", "scan", "gains", "amp"), None, delete=True)),
+            ("scan gains as a list", mutate(("state", "scan", "gains"), [24, 30, True])),
             ("unknown frame kind", mutate(("frame", "kind"), "audio")),
             ("frame reversed", mutate(("frame", "stop_hz"), 432_000_000)),
             ("centre outside the frame", mutate(("frame", "center_hz"), 500_000_000)),
@@ -201,6 +230,7 @@ class MirrorSchemaTests(unittest.TestCase):
             ("VGA beyond a float", mutate(("state", "gains", "vga_db"), 10 ** 400)),
             ("squelch beyond a float", mutate(("state", "vfo", "squelch_db"), -(10 ** 400))),
             ("resolution beyond a float", mutate(("state", "scan", "resolution_hz"), 10 ** 400)),
+            ("scan gain beyond a float", mutate(("state", "scan", "gains", "lna_db"), 10 ** 400)),
             ("dB floor beyond a float", mutate(("frame", "db_min"), -(10 ** 400))),
             ("dB ceiling beyond a float", mutate(("frame", "db_max"), 10 ** 400)),
             ("centre beyond a float", mutate(("state", "center_hz"), 10 ** 400)),

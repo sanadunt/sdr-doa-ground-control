@@ -55,12 +55,16 @@ export function mirrorInfoText(t: Translate, view: MirrorView): string {
   const age = t('mirror.frameAge', { age: mirrorAge(t, view.frameAgeMs) });
   if (!state) return age;
   if (view.mode === 'sweep') {
+    // The scan's own gains, as the groundstation dock shows them; never the RX gains.
     const rbw = state.scan?.resolution_hz;
-    return `${t('mirror.infoSweep', {
+    const gains = state.scan?.gains ?? null;
+    return `${t('spectrum.infoSweep', {
       start: formatMhzTrim(state.scan?.start_hz ?? null),
       stop: formatMhzTrim(state.scan?.stop_hz ?? null),
       rbw: typeof rbw === 'number' ? (rbw / 1e3).toFixed(2) : '—',
-    })} · ${age}`;
+      lna: gainText(gains?.lna_db),
+      vga: gainText(gains?.vga_db),
+    })}${gains?.amp ? ` · ${t('spectrum.amp')}` : ''} · ${age}`;
   }
   const span = state.span_hz ?? 2_000_000;
   return `${t('spectrum.info', {

@@ -67,9 +67,9 @@ Semua frekuensi dalam Hz integer **frekuensi tampilan** (Freq Shift sudah ditamb
 | `sample_rate_hz` | integer 1..100 000 000 atau null | Sample rate RX. |
 | `span_hz` | integer atau null | Lebar frame RX: min(2 MHz, sample rate). |
 | `frequency_shift_hz` | integer | Freq Shift (upconverter); bisa negatif. |
-| `gains` | `{lna_db, vga_db, amp}` | Gain RX (dB atau null, amp boolean). |
+| `gains` | `{lna_db, vga_db, amp}` | Gain RX (dB atau null, amp boolean). Pindai lebar memakai gain-nya sendiri, `scan.gains`. |
 | `vfo` | objek atau null | VFO aktif: `index` (0..63), `enabled`, `mode` (`nfm`, `wfm`, `am`, `usb`, `lsb`, `dsb`, `cw`, `raw` atau null), `frequency_hz`, `bandwidth_hz`, `squelch_enabled`, `squelch_db`. |
-| `scan` | objek atau null | Pindai lebar: `phase` (`idle`, `starting`, `active`, `stopping`), `start_hz`, `stop_hz`, `resolution_hz`. |
+| `scan` | objek atau null | Pindai lebar: `phase` (`idle`, `starting`, `active`, `stopping`), `start_hz`, `stop_hz`, `resolution_hz`, dan `gains` (`{lna_db, vga_db, amp}` seperti gain RX, atau null): LNA, VGA dan +14 dB milik pindai sendiri. `gains` boleh tidak ada (halaman groundstation yang dimuat sebelum field ini ada) dan disimpan sebagai null, supaya halaman itu tetap mengirim sampai dimuat ulang. |
 | `error` | `USB_LOST`, `RX_ERROR`, `NO_WEBUSB` atau null | Kode error status Receiver. |
 
 Tidak ada nama perangkat, teks notice, atau teks bebas lain di state.
@@ -109,7 +109,8 @@ Hanya dari halaman console sendiri. Body:
             "frequency_shift_hz": 0, "gains": {"lna_db": 16, "vga_db": 20, "amp": false},
             "vfo": {"index": 0, "enabled": true, "mode": "nfm", "frequency_hz": 433925000, "bandwidth_hz": 12500,
                     "squelch_enabled": false, "squelch_db": -60.5},
-            "scan": {"phase": "idle", "start_hz": 400000000, "stop_hz": 500000000, "resolution_hz": 4882.8125},
+            "scan": {"phase": "idle", "start_hz": 400000000, "stop_hz": 500000000, "resolution_hz": 4882.8125,
+                     "gains": {"lna_db": 24, "vga_db": 30, "amp": true}},
             "error": null},
   "frame": {"seq": 7, "t_ms": 1761000000007, "kind": "rx", "center_hz": 433920000, "start_hz": 432920000,
             "stop_hz": 434920000, "bin_count": 512, "db_min": -120, "db_max": -20, "bins": "…684 karakter…"}
@@ -182,7 +183,9 @@ Aturan basi (`mirrorView()` di `lib/receiverMirror.ts`, berurutan):
 | Pindai mulai atau berhenti | `scan.phase` `starting` atau `stopping` | `…` |
 | Berhenti | RX tidak berjalan dan tidak memindai | `SCAN OFF` (mode Spektrum) bila frame terakhir dari pindai, selain itu `RX OFF` |
 
-RX yang berhenti bukan basi: tidak ada frame yang diharapkan, chip `RX OFF`, dan jejak terakhir tetap tergambar redup. Setelah pindai berhenti, bridge melaporkan `busy: "none"` dan `scan.phase: "idle"`; penampil mengambil mode dari frame terakhir, jadi jejak pindai yang redup tetap di mode Spektrum dengan chip `SCAN OFF`, seperti dock groundstation.
+RX yang berhenti bukan basi: tidak ada frame yang diharapkan, chip `RX OFF`, dan jejak terakhir tetap tergambar redup. Setelah pindai berhenti, bridge melaporkan `busy: "none"` dan `scan.phase: "idle"`; penampil mengambil mode dari frame terakhir, jadi jejak pindai yang redup tetap di mode Spektrum dengan chip `SCAN OFF`, seperti dock groundstation. Penampil yang baru dibuka setelah pindai berhenti juga menggambar frame pindai terakhir itu: canvas menahan frame mode lain sampai render berikutnya (`createFrameGate()` di `lib/spectrumView.ts`) dan menggambarnya bila render itu sudah di mode frame tersebut, jadi frame pertama mode baru tidak hilang.
+
+Selama pindai `starting`, `active` atau `stopping`, baris LNA, VGA dan +14 dB di rute Receiver menampilkan gain pindai (`scan.gains`, berlabel "· pindai"), dan baris info dock di mode Spektrum menampilkan gain yang sama seperti dock groundstation; gain RX tidak pernah ditampilkan sebagai gain pindai. Bila halaman groundstation tidak mengirim `scan.gains`, nilainya `—`.
 
 Tombol Mulai/Berhenti dock MIRROR (nonaktif) mengikuti state terakhir seperti dock groundstation, bukan umur frame: Berhenti selama pindai `starting` atau `active` dan selama RX berjalan di luar scan listen, juga saat chip `STALE` atau **SUMBER PUTUS**; kesegaran hanya ditunjukkan chip.
 

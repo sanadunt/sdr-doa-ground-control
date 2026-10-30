@@ -177,12 +177,12 @@ def _source(value: Any) -> Dict[str, Any]:
     }
 
 
-def _gains(value: Any) -> Dict[str, Any]:
-    raw = _object(value, "state.gains", frozenset({"lna_db", "vga_db", "amp"}))
+def _gains(value: Any, field: str = "state.gains") -> Dict[str, Any]:
+    raw = _object(value, field, frozenset({"lna_db", "vga_db", "amp"}))
     return {
-        "lna_db": _number(raw["lna_db"], "state.gains.lna_db", 0, MAX_GAIN_DB, nullable=True),
-        "vga_db": _number(raw["vga_db"], "state.gains.vga_db", 0, MAX_GAIN_DB, nullable=True),
-        "amp": _boolean(raw["amp"], "state.gains.amp"),
+        "lna_db": _number(raw["lna_db"], f"{field}.lna_db", 0, MAX_GAIN_DB, nullable=True),
+        "vga_db": _number(raw["vga_db"], f"{field}.vga_db", 0, MAX_GAIN_DB, nullable=True),
+        "amp": _boolean(raw["amp"], f"{field}.amp"),
     }
 
 
@@ -206,16 +206,21 @@ def _vfo(value: Any) -> Optional[Dict[str, Any]]:
 def _scan(value: Any) -> Optional[Dict[str, Any]]:
     if value is None:
         return None
-    raw = _object(value, "state.scan", frozenset({"phase", "start_hz", "stop_hz", "resolution_hz"}))
+    # gains is the scan's own LNA, VGA and amp. A page loaded before it was
+    # mirrored sends none; it is kept as null (unknown), so such a page keeps
+    # publishing until it reloads.
+    raw = _object(value, "state.scan", frozenset({"phase", "start_hz", "stop_hz", "resolution_hz"}), frozenset({"gains"}))
     start = _hz(raw["start_hz"], "state.scan.start_hz", nullable=True)
     stop = _hz(raw["stop_hz"], "state.scan.stop_hz", nullable=True)
     if start is not None and stop is not None and stop <= start:
         raise _invalid("state.scan.stop_hz must be above start_hz")
+    gains = raw.get("gains")
     return {
         "phase": _token(raw["phase"], "state.scan.phase", SCAN_PHASES),
         "start_hz": start,
         "stop_hz": stop,
         "resolution_hz": _number(raw["resolution_hz"], "state.scan.resolution_hz", 0.001, MAX_SAMPLE_RATE_HZ, nullable=True),
+        "gains": None if gains is None else _gains(gains, "state.scan.gains"),
     }
 
 

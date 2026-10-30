@@ -4,6 +4,7 @@ import {
   axisFor,
   binAt,
   contentBoxX,
+  createFrameGate,
   dbToByte,
   dockMode,
   followMemoryAtMount,
@@ -36,7 +37,7 @@ import {
   xAtFreq,
 } from './spectrumView';
 import type { DockViewInput, FollowInput } from './spectrumView';
-import type { BridgeMarker, ReceiverStatus, StatusSweep } from './receiverBridgeProtocol';
+import type { BridgeMarker, ReceiverStatus, RxSpectrumFrame, StatusSweep, SweepSpectrumFrame } from './receiverBridgeProtocol';
 import { DICTIONARIES } from './i18n';
 
 const START = 432_920_000;
@@ -438,5 +439,48 @@ describe('spectrum dock markers', () => {
     // No pick, or one out of range, is the plain left-to-right rule.
     expect(markerLabelSlots([0, 30, 70], [60, 60, 60], 4, -1)).toEqual([true, false, true]);
     expect(markerLabelSlots([0, 30, 70], [60, 60, 60], 4, 9)).toEqual([true, false, true]);
+  });
+});
+
+describe('spectrum frame gate', () => {
+  const rx = (seq: number): RxSpectrumFrame => ({
+    source: 'rx', seq, tMs: 0, centerHz: 100_000_000, startHz: 99_000_000, stopHz: 101_000_000, sampleRateHz: 2_000_000, fftSize: 16, binCount: 16, bins: new Float32Array(16),
+  });
+  const scan = (seq: number): SweepSpectrumFrame => ({
+    source: 'sweep', seq, tMs: 0, startHz: 50_000_000, stopHz: 1_000_000_000, resolutionHz: 4882.8125, sweepCount: 1, view: 'max', binCount: 16, bins: new Float32Array(16),
+  });
+
+  it('draws a frame of the mode shown at once', () => {
+    const gate = createFrameGate();
+    const frame = rx(1);
+    expect(gate.offer(frame, 'rx')).toBe(frame);
+    expect(gate.settle('rx')).toBeNull();
+  });
+
+  it('keeps a frame of the other mode for the next render, which draws it once when it shows that mode', () => {
+    const gate = createFrameGate();
+    const frame = scan(1);
+    expect(gate.offer(frame, 'rx')).toBeNull();
+    expect(gate.settle('sweep')).toBe(frame);
+    expect(gate.settle('sweep')).toBeNull();
+  });
+
+  it('drops it when the next render still shows the other mode, as a late frame of a mode that just ended', () => {
+    const gate = createFrameGate();
+    expect(gate.offer(scan(1), 'rx')).toBeNull();
+    expect(gate.settle('rx')).toBeNull();
+    expect(gate.settle('sweep')).toBeNull();
+  });
+
+  it('lets go of a held frame for a newer one: of the mode shown, or of the other mode', () => {
+    const gate = createFrameGate();
+    expect(gate.offer(scan(1), 'rx')).toBeNull();
+    const newer = rx(2);
+    expect(gate.offer(newer, 'rx')).toBe(newer);
+    expect(gate.settle('sweep')).toBeNull();
+    expect(gate.offer(scan(3), 'rx')).toBeNull();
+    const newest = scan(4);
+    expect(gate.offer(newest, 'rx')).toBeNull();
+    expect(gate.settle('sweep')).toBe(newest);
   });
 });
