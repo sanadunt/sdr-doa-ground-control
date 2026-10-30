@@ -4,12 +4,14 @@ Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QU
 
 ## 3.2.0
 
-Rilis minor: tidak ada yang dihapus. Tampilan LAN kini juga membaca **Rekaman** Receiver, hanya baca.
+Rilis minor: tidak ada yang dihapus. Tampilan LAN kini juga membaca **Rekaman** Receiver, hanya baca, dan mirror Receiver-nya menampilkan gain pindai dan frame pertama mode baru dengan benar. Kanal `3` dan timer update memasangnya sendiri.
 
 - **Rekaman di tablet.** Rute Receiver di tampilan LAN punya tab **Mirror | Rekaman**. Rekaman menampilkan rekaman audio dan pindai groundstation per hari (kalender bertitik, linimasa 24 jam, filter jenis, status, frekuensi dan cari, 50 baris per halaman) atau semua tanggal, memutar audio, menampilkan pratinjau pindai, dan mengunduh satu rekaman per baris (`.webm` atau ZIP pindai). Hapus, ZIP pilihan, Retensi dan Arsip otomatis tetap hanya di groundstation.
 - **Ikut terbuka bersama tampilan LAN**, tanpa pengaturan baru: setelah update, setiap klien di `allowed_clients` bisa membaca dan mengunduh rekaman. Matikan tampilan LAN bila rekaman tidak boleh terlihat dari LAN.
 - **Hanya route baca yang dibuka** (`GET`, dicocokkan persis dengan UUID rekaman): `archive/facets`, `calendar`, `timeline`, `items`, `scans/<id>/preview`, `audio/<id>/download`, `scans/<id>/download` dan `audio-segments/<id>/audio`. Aturan bacanya sendiri: aturan `Host` tampilan LAN dan `Sec-Fetch-Site` tidak ada, `none` atau `same-origin`. Pengaturan Receiver, set penanda, route pindai mentah, ekspor, hapus, retensi dan setiap penulisan tetap `LAN_READ_ONLY`.
 - **Batas beban**, karena setiap bacaan memakai kunci penyimpanan yang sama dengan upload rekaman yang sedang berjalan: satu bacaan daftar per tablet (yang kedua menunggu sampai 5 detik, lalu `429 LAN_RECORDS_BUSY`), paling banyak 50 baris per halaman, 4 unduhan atau pemutaran per tablet, dan satu ZIP pindai untuk seluruh tampilan LAN, terpisah dari dua slot ZIP groundstation. `HEAD` pada unduhan dan pemutaran dijawab `405`, jadi tidak membaca file atau membuat ZIP. Bacaan dari LAN tidak menutup sesi rekaman yang macet; itu tetap terjadi pada bacaan lokal berikutnya.
+- **Gain pindai di mirror.** Selama pindai lebar dimulai, berjalan atau berhenti, baris LNA, VGA dan +14 dB di rute Receiver tablet menampilkan gain pindai itu sendiri (`LNA · pindai`), bukan gain RX, dan baris info dock MIRROR di mode Spektrum menampilkannya juga. Halaman groundstation yang dimuat sebelum update belum mengirim gain pindai; mirror tetap berjalan dan baris itu tampil `—` sampai halaman itu dimuat ulang.
+- **Frame pertama mode baru tidak lagi hilang di mirror.** Tablet yang dibuka setelah pindai berhenti kini menampilkan trace dan waterfall terakhir pindai itu di bawah SCAN OFF, bukan kanvas kosong, dan frame pertama setelah pindah RX ↔ Spektrum ikut tergambar.
 
 ## 3.1.0
 

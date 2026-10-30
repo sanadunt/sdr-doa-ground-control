@@ -18,7 +18,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: sdr-doa-ground-console:3.1.0
+    image: sdr-doa-ground-console:3.2.0
     # The console binds 127.0.0.1 and refuses any other address. With the host
     # network that is this machine's own loopback, so http://127.0.0.1:8787/
     # works here and is not reachable from the LAN. A bridge network with
