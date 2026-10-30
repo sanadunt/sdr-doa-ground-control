@@ -139,7 +139,7 @@ Dilayani listener loopback dan listener LAN (masuk daftar route LAN), masing-mas
 - Listener loopback memakai aturan baca Receiver, sama dengan `/api/receiver/*`: `Sec-Fetch-Site` tidak ada, `none`, atau `same-origin`, dan tepat satu `Host` berupa nama loopback (`127.0.0.1`, `localhost`, `[::1]`) di port console. Mirror membawa apa yang ditampilkan Receiver (frekuensi, mode, gain, status rekam, spektrum), jadi situs lain, halaman dari port localhost lain, dan halaman DNS rebinding (yang mengirim nama host-nya sendiri) tidak bisa membacanya.
 - Listener LAN memakai aturan `Host`-nya sendiri (alamat IP, atau nama komputer ini, di port LAN) dan hanya menolak `Sec-Fetch-Site: cross-site`, seperti `/api/tiles`.
 
-Route `/api/receiver/*` tetap tertutup dari LAN; prefix `/api/mirror/` dipilih justru supaya daftar route LAN tidak perlu membukanya.
+Route `/api/receiver/*` tetap tertutup dari LAN kecuali route baca Rekaman (tab Rekaman di tablet, lihat bagian 8); prefix `/api/mirror/` dipilih justru supaya daftar route LAN tidak perlu membuka route Receiver lain.
 
 ```json
 {
@@ -203,10 +203,11 @@ Listener LAN melayani paling banyak 32 permintaan sekaligus; beberapa tablet yan
 
 ## 8. Batas
 
-- Mirror hanya tampilan. Tidak ada perintah ke Receiver, tidak ada audio, tidak ada rekaman, tidak ada penanda dari penampil. Semua kontrol di dock MIRROR terlihat dengan statusnya tetapi nonaktif, dan kanvasnya tidak bisa dipakai untuk tuning, menandai, atau tombol panah.
+- Mirror hanya tampilan. Tidak ada perintah ke Receiver, tidak ada audio langsung, tidak ada rekaman, tidak ada penanda dari penampil. Semua kontrol di dock MIRROR terlihat dengan statusnya tetapi nonaktif, dan kanvasnya tidak bisa dipakai untuk tuning, menandai, atau tombol panah.
 - Frame Receiver tidak pernah dipasang di mode LAN lihat-saja (RadioSpectrum ada di USB groundstation).
 - Tidak ada yang ditulis ke disk, dan tidak ada data rahasia di state.
 - Mode LAN tetap read-only: `POST /api/mirror/receiver` hanya lewat loopback, GET-nya satu-satunya route mirror di daftar route LAN.
+- Rekaman yang sudah tersimpan dibaca terpisah dari mirror, lewat tab **Rekaman** di rute Receiver tablet: hanya `GET` `/api/receiver/archive/{facets,calendar,timeline,items}`, `archive/scans/<id>/preview`, `archive/audio/<id>/download`, `archive/scans/<id>/download` dan `audio-segments/<id>/audio` (putar, dengan Range), dicocokkan persis dengan UUID rekaman (`lan_access.records_route()`). Aturan bacanya: aturan `Host` LAN dan `Sec-Fetch-Site` tidak ada, `none` atau `same-origin` (lebih ketat dari route LAN lain). Batasnya: satu bacaan daftar per klien (yang kedua menunggu sampai 5 detik, lalu `429 LAN_RECORDS_BUSY`), paling banyak 50 baris per halaman, 4 unduhan atau pemutaran per klien, satu ZIP pindai untuk seluruh LAN di luar dua slot groundstation, dan `HEAD` pada unduhan dan pemutaran dijawab `405`. Bacaan dari LAN tidak menutup sesi rekaman yang macet. Pengaturan, set penanda, route pindai mentah, ekspor ZIP pilihan, hapus, retensi dan setiap penulisan tetap `LAN_READ_ONLY`.
 
 ## 9. Fase 3 (B2): perintah dari tablet. Desain, **belum diimplementasikan**
 

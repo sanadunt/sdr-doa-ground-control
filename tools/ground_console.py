@@ -46,7 +46,11 @@ operator allowed. It stays closed while the default admin password is in use
 or admin login is disabled; ``lan_access.py`` holds its rules. While it is
 open, the groundstation page that runs the Receiver publishes its state and
 spectrum to ``POST /api/mirror/receiver`` and the LAN view reads them back
-from ``GET /api/mirror/receiver`` (``receiver_mirror.py``, memory only).
+from ``GET /api/mirror/receiver`` (``receiver_mirror.py``, memory only). The
+LAN view also reads the Receiver's Records: the archive list routes, a scan
+preview, one record's download and the audio playback, under its own read
+rule and limits (``LanConsoleHandler._lan_records_get``); every other
+Receiver route and every write stays refused there.
 
 Admin login uses ``SDR_DOA_ADMIN_PASSWORD`` from the environment or the
 ``--env-file`` (default: the repository ``.env``). When the variable is absent
@@ -2499,13 +2503,16 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
             self._stream_body(write)
 
-    def _archive_scan_download(self, scan_id: str, time_zone: Any, utc_offset_minutes: Any) -> None:
+    def _archive_scan_download(self, scan_id: str, time_zone: Any, utc_offset_minutes: Any,
+                               slots: Optional[threading.BoundedSemaphore] = None) -> None:
+        """GET archive/scans/<id>/download: one scan's ZIP in one of ``slots`` (the console's two by default)."""
         store = self.console_server.receiver_store
         zone, zone_name, fallback = self._archive_zone(time_zone, utc_offset_minutes)
         scan = store.archive_scan_entry(scan_id)
         if not scan["downloadable"]:
             raise ArchiveError(HTTPStatus.NOT_FOUND, ra.ARCHIVE_NOT_FOUND)
-        slots = self.console_server.archive_export_slots
+        if slots is None:
+            slots = self.console_server.archive_export_slots
         if not slots.acquire(blocking=False):
             raise ArchiveError(HTTPStatus.SERVICE_UNAVAILABLE, ra.ARCHIVE_EXPORT_BUSY)
         try:
@@ -2639,6 +2646,50 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 settings["retention_result"] = result
         self._send_json(settings)
 
+    def _receiver_segment_audio(self, segment_id: str) -> None:
+        """GET audio-segments/<id>/audio: a stored segment for playback, with Range."""
+        audio_path, content_type = self.console_server.receiver_store.get_segment_audio(segment_id)
+        size = audio_path.stat().st_size
+        range_header = self.headers.get("Range")
+        byte_range = _parse_audio_byte_range(range_header, size) if range_header else None
+        if range_header and byte_range is None:
+            self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+            self.send_header("Content-Range", f"bytes */{size}")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+        start, end = byte_range if byte_range is not None else (0, size - 1)
+        content_length = max(0, end - start + 1)
+        try:
+            source = audio_path.open("rb")
+        except OSError as exc:
+            raise KeyError("audio file not found") from exc
+        with source:
+            self.send_response(HTTPStatus.PARTIAL_CONTENT if byte_range is not None else HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(content_length))
+            self.send_header("Accept-Ranges", "bytes")
+            if byte_range is not None:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+
+            def write() -> None:
+                # A paused <audio> reconnects with Range after the write timeout.
+                self.end_headers()
+                source.seek(start)
+                remaining = content_length
+                while remaining:
+                    chunk = source.read(min(ra.STREAM_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+
+            self._stream_body(write)
+
     def _receiver_get(self, parsed: Any) -> bool:
         if not self._receiver_read_is_allowed():
             self._send_archive_error(HTTPStatus.FORBIDDEN, ra.ORIGIN_REJECTED, ra.READ_REJECTED_MESSAGE)
@@ -2726,47 +2777,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     self.end_headers()
                     self.wfile.write(data)
                 elif len(parts) == 5 and parts[:3] == ["api", "receiver", "audio-segments"] and parts[4] == "audio":
-                    audio_path, content_type = store.get_segment_audio(parts[3])
-                    size = audio_path.stat().st_size
-                    range_header = self.headers.get("Range")
-                    byte_range = _parse_audio_byte_range(range_header, size) if range_header else None
-                    if range_header and byte_range is None:
-                        self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
-                        self.send_header("Content-Range", f"bytes */{size}")
-                        self.send_header("Accept-Ranges", "bytes")
-                        self.send_header("Content-Length", "0")
-                        self.send_header("Cache-Control", "no-store")
-                        self.end_headers()
-                        return True
-                    start, end = byte_range if byte_range is not None else (0, size - 1)
-                    content_length = max(0, end - start + 1)
-                    try:
-                        source = audio_path.open("rb")
-                    except OSError as exc:
-                        raise KeyError("audio file not found") from exc
-                    with source:
-                        self.send_response(HTTPStatus.PARTIAL_CONTENT if byte_range is not None else HTTPStatus.OK)
-                        self.send_header("Content-Type", content_type)
-                        self.send_header("Content-Length", str(content_length))
-                        self.send_header("Accept-Ranges", "bytes")
-                        if byte_range is not None:
-                            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-                        self.send_header("Cache-Control", "no-store")
-                        self.send_header("X-Content-Type-Options", "nosniff")
-
-                        def write() -> None:
-                            # A paused <audio> reconnects with Range after the write timeout.
-                            self.end_headers()
-                            source.seek(start)
-                            remaining = content_length
-                            while remaining:
-                                chunk = source.read(min(ra.STREAM_CHUNK_BYTES, remaining))
-                                if not chunk:
-                                    break
-                                self.wfile.write(chunk)
-                                remaining -= len(chunk)
-
-                        self._stream_body(write)
+                    self._receiver_segment_audio(parts[3])
                 else:
                     return False
             return True
@@ -3646,9 +3657,10 @@ class LanConsoleHandler(ConsoleHandler):
     bare 403 from the accept thread). In order: an HTTP/0.9 request, which
     has no Host (403 ORIGIN_REJECTED), the method (GET and HEAD only, else
     405 LAN_READ_ONLY), Host and Sec-Fetch-Site (403 ORIGIN_REJECTED), then
-    the path: the built UI and a fixed list of read-only API routes, else 403
-    LAN_READ_ONLY. The request line and headers must arrive within
-    lan.REQUEST_DEADLINE_S. An admin cookie is never read here.
+    the path: the built UI, a fixed list of read-only API routes and the
+    Records read routes (_lan_records_get), else 403 LAN_READ_ONLY. The
+    request line and headers must arrive within lan.REQUEST_DEADLINE_S. An
+    admin cookie is never read here.
     """
 
     timeout = lan.REQUEST_TIMEOUT_S
@@ -3753,7 +3765,7 @@ class LanConsoleHandler(ConsoleHandler):
         body = super()._capabilities_body()
         body.update({
             # Nothing is written from the LAN: no admin, no Kontrol, no
-            # preference writes, no Receiver.
+            # preference writes, no Receiver control; Records are read only.
             "read_only": True,
             "mqtt_publish": False,
             "admin_branding": False,
@@ -3787,6 +3799,9 @@ class LanConsoleHandler(ConsoleHandler):
         if route == lan.ROUTE_TILE:
             self._send_tile(parsed.path)
             return
+        if route == lan.ROUTE_RECORDS:
+            self._lan_records_get(parsed)
+            return
         if route == "/api/snapshot":
             # Only the configured Data Out; a base_url in the query is ignored.
             # seen shares the read like a loopback viewer. refresh is ignored,
@@ -3818,6 +3833,105 @@ class LanConsoleHandler(ConsoleHandler):
 
     do_PUT = do_POST
     do_DELETE = do_POST
+
+    def _lan_records_read_is_allowed(self) -> bool:
+        """The Receiver's read rule on this listener: the LAN Host rule and Sec-Fetch-Site absent, none or same-origin."""
+        return lan.host_allowed(
+            _header_values(self.headers, "Host"),
+            self.server.server_address[1],
+            self.server.own_names,  # type: ignore[attr-defined]
+        ) and lan.records_fetch_site_allowed(self.headers.get("Sec-Fetch-Site"))
+
+    def _lan_records_get(self, parsed: Any) -> None:
+        """GET of a Records read route (lan.records_route): its read rule, its limits, then the route.
+
+        Its own dispatch, so no other Receiver route is reachable from here
+        whatever the loopback handler answers. Codes: the archive's, plus 405
+        LAN_READ_ONLY for a HEAD of a download and 429 LAN_RECORDS_BUSY past
+        a client's limit.
+        """
+        kind = lan.records_route(parsed.path)
+        if kind is None:
+            self._send_lan_error(HTTPStatus.FORBIDDEN, lan.LAN_READ_ONLY, "the LAN view answers the console's read-only pages only")
+            return
+        if not self._lan_records_read_is_allowed():
+            self._send_archive_error(HTTPStatus.FORBIDDEN, ra.ORIGIN_REJECTED, "Receiver Records are read by the LAN view's own pages only")
+            return
+        stream = kind in lan.RECORDS_STREAM_ROUTES
+        if stream and self.command != "GET":
+            self._send_json(
+                {"ok": False, "code": lan.LAN_READ_ONLY, "error": "Records downloads and playback answer GET only"},
+                HTTPStatus.METHOD_NOT_ALLOWED,
+                headers={"Allow": "GET"},
+            )
+            return
+        address = str(lan.client_address(self.client_address[0]) or self.client_address[0])
+        slots: lan.ClientSlots = self.server.records_streams if stream else self.server.records_reads  # type: ignore[attr-defined]
+        if not slots.acquire(address, 0.0 if stream else lan.RECORDS_READ_WAIT_S):
+            message = (f"at most {lan.RECORDS_STREAMS_PER_CLIENT} Records downloads at once" if stream
+                       else "one Records read at a time; try again")
+            self._send_json(
+                {"ok": False, "code": lan.LAN_RECORDS_BUSY, "error": message},
+                HTTPStatus.TOO_MANY_REQUESTS,
+                headers={"Retry-After": "1"},
+            )
+            return
+        try:
+            if kind == lan.RECORDS_AUDIO_PLAYBACK:
+                try:
+                    self._receiver_segment_audio(parsed.path.split("/")[4])
+                except (BrokenPipeError, ConnectionResetError):
+                    raise
+                except (ValueError, KeyError, OSError, sqlite3.Error, zlib.error) as exc:
+                    self._receiver_error(exc)
+                return
+            try:
+                self._lan_archive_get(kind, parsed)
+            except (BrokenPipeError, ConnectionResetError):
+                raise
+            except (ArchiveError, ValueError, KeyError, OSError, sqlite3.Error, zlib.error) as exc:
+                self._archive_failure(exc)
+        finally:
+            slots.release(address)
+
+    def _lan_archive_get(self, kind: str, parsed: Any) -> None:
+        """One archive read route. Lists leave stale sessions to the next local read (no write from the LAN)."""
+        store = self.console_server.receiver_store
+        query = parse_qs(parsed.query, keep_blank_values=False)
+
+        def first(key: str) -> Optional[str]:
+            values = query.get(key)
+            return values[0] if values else None
+
+        parts = parsed.path.split("/")
+        if kind == lan.RECORDS_FACETS:
+            self._send_json(store.archive_facets(recover=False))
+        elif kind == lan.RECORDS_CALENDAR:
+            bounds = ra.parse_calendar_bounds(first("bounds"))
+            self._send_json(store.archive_calendar(bounds, ra.parse_calendar_type(first("type"))))
+        elif kind == lan.RECORDS_TIMELINE:
+            from_ms, to_ms, archive_filter = ra.parse_timeline_query(query)
+            self._send_json(store.archive_timeline(from_ms, to_ms, archive_filter))
+        elif kind == lan.RECORDS_ITEMS:
+            archive_filter = ra.parse_filter_query(query)
+            sort, order, offset, limit = ra.parse_paging_query(query)
+            if limit > lan.RECORDS_PAGE_MAX:
+                raise ArchiveError(
+                    HTTPStatus.BAD_REQUEST, ra.ARCHIVE_INVALID_REQUEST,
+                    f"limit must be at most {lan.RECORDS_PAGE_MAX} on the LAN view",
+                )
+            self._send_json(store.archive_items(archive_filter, sort, order, offset, limit, recover=False))
+        elif kind == lan.RECORDS_SCAN_PREVIEW:
+            self._send_json(store.archive_scan_preview(ra.parse_item_id(parts[5])))
+        elif kind == lan.RECORDS_AUDIO_DOWNLOAD:
+            self._archive_audio_download(ra.parse_item_id(parts[5]), first("time_zone"), first("utc_offset_minutes"))
+        elif kind == lan.RECORDS_SCAN_DOWNLOAD:
+            self._archive_scan_download(
+                ra.parse_item_id(parts[5]), first("time_zone"), first("utc_offset_minutes"),
+                slots=self.console_server.lan_records_zip_slots,
+            )
+        else:
+            raise ArchiveError(HTTPStatus.NOT_FOUND, ra.ARCHIVE_NOT_FOUND, "unknown Receiver archive route")
 
 
 class LanViewServer(ThreadingHTTPServer):
@@ -3855,6 +3969,9 @@ class LanViewServer(ThreadingHTTPServer):
         self.request_deadline_s = lan.REQUEST_DEADLINE_S
         self._slots = threading.BoundedSemaphore(self.max_connections)
         self._busy_logged_at: Optional[float] = None
+        # Records reads per client address (lan_access.py); a move starts afresh.
+        self.records_reads = lan.ClientSlots(1)
+        self.records_streams = lan.ClientSlots(lan.RECORDS_STREAMS_PER_CLIENT)
         self.address_family = socket.AF_INET6 if ":" in address[0] else socket.AF_INET
         super().__init__(address, LanConsoleHandler)
 
@@ -4280,6 +4397,8 @@ class GroundConsoleServer(ThreadingHTTPServer):
         # shared by selection and single-scan ZIPs.
         self.archive_exports = ra.ArchiveExports()
         self.archive_export_slots = threading.BoundedSemaphore(ra.EXPORT_SLOTS)
+        # The LAN view's own scan ZIP slot, so a tablet never takes the groundstation's two.
+        self.lan_records_zip_slots = threading.BoundedSemaphore(lan.RECORDS_ZIP_SLOTS)
         self._retention_scheduler: Optional[ra.RetentionScheduler] = None
         # The Receiver mirror (receiver_mirror.py): the kiosk page's latest
         # Receiver state and frame for the LAN view, in memory only.

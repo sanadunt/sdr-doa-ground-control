@@ -214,15 +214,44 @@ describe('LAN view UI', () => {
 
   it('shows the Receiver route as the mirror without the frame', () => {
     for (const lang of ['en', 'id'] as const) {
-      const markup = withI18n(<ReceiverMirrorPage feed={createMirrorFeed()} />, lang);
+      const markup = withI18n(<ReceiverMirrorPage feed={createMirrorFeed()} initialTab="mirror" />, lang);
       expect(markup).toContain('>MIRROR</span>');
       expect(markup).toContain(translate(lang, 'mirror.stateTitle'));
       expect(markup).toContain(translate(lang, 'mirror.connecting'));
       expect(markup).toContain('class="ov-spectrum is-view-only is-mirror rx-mirror-spectrum"');
+      // The Mirror | Records switch sits in the page bar.
+      expect(markup).toContain(`aria-label="${translate(lang, 'records.tabs')}"`);
+      expect(markup).toContain(`<button type="button" aria-pressed="true">${translate(lang, 'records.tabMirror')}</button>`);
       expect(markup).not.toContain('<iframe');
       expect(markup).not.toContain('<audio');
       expect(markup).not.toContain('role="slider"');
     }
+  });
+
+  it('shows the Records tab read only: browse, play and download one record, nothing that writes', () => {
+    for (const lang of ['en', 'id'] as const) {
+      const markup = withI18n(<ReceiverMirrorPage feed={createMirrorFeed()} initialTab="records" />, lang);
+      expect(markup).toContain(`<button type="button" aria-pressed="true">${translate(lang, 'records.tabRecords')}</button>`);
+      expect(markup).toContain(translate(lang, 'records.modeDay'));
+      expect(markup).toContain(translate(lang, 'records.modeAll'));
+      expect(markup).toContain(translate(lang, 'records.loading'));
+      expect(markup).toContain(`aria-label="${translate(lang, 'records.filters')}"`);
+      // The mirror is not read while Records shows, and no player exists before a row is opened.
+      expect(markup).not.toContain('MIRROR');
+      expect(markup).not.toContain('<audio');
+      expect(markup).not.toContain('<iframe');
+      // No delete, selection ZIP, retention or settings control.
+      for (const forbidden of ['type="checkbox"', 'Hapus', 'Delete', 'ZIP', 'Retens', 'Retention', 'Auto-archive', 'method="post"']) {
+        expect(markup).not.toContain(forbidden);
+      }
+    }
+    const css = readSource('../pages/receiver-mirror.css');
+    const records = css.slice(css.indexOf('/* Records tab'));
+    expect(records.length).toBeGreaterThan(100);
+    // Console tokens only, 44 px targets.
+    expect(records).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/);
+    expect(records).toContain('min-height: 44px');
+    expect(records).toContain('.rec-tl-strip { position: relative; height: 44px;');
   });
 
   it('shows the mirror as live, STALE after 3 s and SOURCE LOST / SUMBER PUTUS after 10 s', () => {
