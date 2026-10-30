@@ -617,7 +617,7 @@ Workflow menjalankan seluruh test (`ci.yml`), membangun tarball dengan `make_rel
 Aset rilis bisa diunduh tanpa login karena repository publik:
 
 - aset yang namanya tetap, dari rilis terbaru: `https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/sdr-doa-docker` dan `https://github.com/sanadunt/sdr-doa-ground-control/releases/latest/download/SHA256SUMS`;
-- tarball, yang namanya memuat versi: `https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v3.1.0/sdr-doa-ground-console-3.1.0-linux.tar.gz` (`latest/download/<aset>` juga bisa, asal versi di nama file memang versi terbaru).
+- tarball, yang namanya memuat versi: `https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v3.2.0/sdr-doa-ground-console-3.2.0-linux.tar.gz` (`latest/download/<aset>` juga bisa, asal versi di nama file memang versi terbaru).
 
 **Sekali setelah rilis pertama**: GHCR bisa membuat package baru sebagai private. Bila job `images` memberi peringatan bahwa image tidak bisa di-pull tanpa login, buka GitHub > profil > **Packages** > `sdr-doa-ground-console` > **Package settings** > **Change visibility** > **Public**. Sebelum itu `docker pull` dari komputer lain ditolak (`denied` atau `unauthorized`). Rilis berikutnya tidak perlu langkah ini lagi.
 
@@ -665,8 +665,8 @@ Butuh Docker Engine dan Compose v2 di Linux. Console memakai `network_mode: host
 
 ```sh
 # dari rilis (tanpa Node.js)
-tar -xzf sdr-doa-ground-console-3.1.0-linux.tar.gz
-cd sdr-doa-ground-console-3.1.0-linux
+tar -xzf sdr-doa-ground-console-3.2.0-linux.tar.gz
+cd sdr-doa-ground-console-3.2.0-linux
 docker compose up -d --build
 
 # atau dari clone repository biasa (bukan worktree), build frontend di dalam image
@@ -688,11 +688,11 @@ Container berjalan sebagai uid 10001 dan `restart: unless-stopped` menyalakannya
 Butuh Python 3.9+ dengan modul `venv` (`sudo apt install python3-venv` di Debian/Ubuntu). Jalankan sebagai user desktop biasa, bukan root:
 
 ```sh
-curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v3.1.0/sdr-doa-ground-console-3.1.0-linux.tar.gz
-curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v3.1.0/SHA256SUMS
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v3.2.0/sdr-doa-ground-console-3.2.0-linux.tar.gz
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v3.2.0/SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS
-tar -xzf sdr-doa-ground-console-3.1.0-linux.tar.gz
-cd sdr-doa-ground-console-3.1.0-linux
+tar -xzf sdr-doa-ground-console-3.2.0-linux.tar.gz
+cd sdr-doa-ground-console-3.2.0-linux
 sh install.sh            # menanyakan kata sandi admin; Enter = default 123456
 sdr-doa-console auto-update on   # opsional: update otomatis setiap hari 03.45
 ```
