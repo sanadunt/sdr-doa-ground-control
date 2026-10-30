@@ -15,11 +15,11 @@ import { OverviewPanelToggles } from '../components/overview/OverviewPanelToggle
 import { ConfigurationPage, LanAccessCard } from '../pages/ConfigurationPage';
 import { MessageMonitorPage } from '../pages/MessageMonitorPage';
 import { OverviewPage } from '../pages/OverviewPage';
-import { ReceiverMirrorPage } from '../pages/ReceiverMirrorPage';
+import { ReceiverMirrorPage, mirrorStateItems } from '../pages/ReceiverMirrorPage';
 import { createMirrorFeed } from './receiverMirrorFeed';
 import type { MirrorFeedState, ReceiverMirrorFeed } from './receiverMirrorFeed';
-import { normalizeMirrorAnswer } from './receiverMirror';
-import { SpectrumDockMirror } from '../components/overview/SpectrumDockMirror';
+import { mirrorView, normalizeMirrorAnswer } from './receiverMirror';
+import { SpectrumDockMirror, mirrorInfoText } from '../components/overview/SpectrumDockMirror';
 
 /** Vitest blanks every CSS import, so a stylesheet is read from disk. */
 function readSource(path: string): string {
@@ -282,6 +282,45 @@ describe('LAN view UI', () => {
       const stopped = withI18n(<SpectrumDockMirror feed={feedAt(answerWith({ ...fixtureState, running: false }, 'rx'), 0)} />, lang);
       expect([chip(stopped), runLabel(stopped)]).toEqual(['RX OFF', translate(lang, 'spectrum.start')]);
     }
+  });
+
+  it('shows the scan\'s own gains while a scan runs, never the RX gains as the scan\'s', () => {
+    const fixture = JSON.parse(readSource('../../../tools/fixtures/receiver-mirror/publish.json')) as Record<string, unknown>;
+    const fixtureState = fixture.state as Record<string, unknown>;
+    const fixtureScan = fixtureState.scan as Record<string, unknown>;
+    const viewOf = (state: Record<string, unknown>, frameKind: 'rx' | 'sweep') => mirrorView({
+      answer: normalizeMirrorAnswer({
+        ok: true, v: 1, rev: 5, frame_rev: 3, source: fixture.source, source_age_ms: 100, state, state_age_ms: 100,
+        frame: { ...(fixture.frame as Record<string, unknown>), kind: frameKind }, frame_age_ms: 150, limits: { frame_stale_ms: 3000, source_lost_ms: 10000 },
+      }),
+      receivedAtMs: 0,
+      error: false,
+      nowMs: 0,
+    });
+    const scanning = (phase: string, scan: Record<string, unknown> = fixtureScan) => viewOf({ ...fixtureState, busy: 'sweep', running: false, scan: { ...scan, phase } }, 'sweep');
+    // The fixture's RX gains (16, 20, off) differ from its scan's (24, 30, on).
+    expect([fixtureState.gains, fixtureScan.gains]).toEqual([{ lna_db: 16, vga_db: 20, amp: false }, { lna_db: 24, vga_db: 30, amp: true }]);
+    for (const lang of ['en', 'id'] as const) {
+      const t: Parameters<typeof mirrorStateItems>[0] = (key, vars) => translate(lang, key, vars);
+      const gainRows = (view: ReturnType<typeof mirrorView>) => mirrorStateItems(t, view)
+        .filter((item) => ['lna', 'vga', 'amp'].includes(item.id ?? ''))
+        .map((item) => [item.label, item.value]);
+      const scanLabel = (gain: string) => translate(lang, 'mirror.scanGain', { gain });
+      for (const phase of ['starting', 'active', 'stopping']) {
+        expect(gainRows(scanning(phase))).toEqual([[scanLabel('LNA'), '24 dB'], [scanLabel('VGA'), '30 dB'], [scanLabel('+14 dB'), 'ON']]);
+      }
+      expect(gainRows(viewOf(fixtureState, 'rx'))).toEqual([['LNA', '16 dB'], ['VGA', '20 dB'], ['+14 dB', 'OFF']]);
+      // An older groundstation page sends no scan gains: unknown, not the RX gains.
+      const { gains: _gains, ...older } = fixtureScan;
+      expect(gainRows(scanning('active', older))).toEqual([[scanLabel('LNA'), '—'], [scanLabel('VGA'), '—'], [scanLabel('+14 dB'), '—']]);
+      // The dock's info line in Spektrum mode: the scan's gains, as the groundstation dock shows them.
+      const info = mirrorInfoText(t, scanning('active'));
+      expect(info).toContain('LNA 24 dB · VGA 30 dB · +14 dB');
+      expect(info).not.toContain('LNA 16 dB');
+      expect(mirrorInfoText(t, scanning('active', older))).toContain('LNA — dB · VGA — dB');
+      expect(mirrorInfoText(t, viewOf(fixtureState, 'rx'))).toContain('LNA 16 dB · VGA 20 dB');
+    }
+    expect(translate('en', 'mirror.scanGain', { gain: 'LNA' })).not.toBe(translate('id', 'mirror.scanGain', { gain: 'LNA' }));
   });
 
   it('has no Reconnect on the Message Monitor in the LAN view', () => {

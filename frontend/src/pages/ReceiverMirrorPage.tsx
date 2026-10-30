@@ -1,6 +1,7 @@
 import type { JSX } from 'react';
 import { useI18n } from '../lib/i18n';
 import type { Translate } from '../lib/i18n';
+import { mirrorGainsInUse } from '../lib/receiverMirror';
 import type { MirrorState, MirrorView } from '../lib/receiverMirror';
 import type { ReceiverMirrorFeed } from '../lib/receiverMirrorFeed';
 import { formatMsps } from '../lib/radioSettings';
@@ -31,6 +32,10 @@ export function mirrorStateItems(t: Translate, view: MirrorView): KeyValueItem[]
   const scanRange = scan && scan.start_hz !== null && scan.stop_hz !== null
     ? ` · ${formatMhzTrim(scan.start_hz)}–${formatMhzTrim(scan.stop_hz)} MHz`
     : '';
+  // While a scan starts, runs or stops the radio uses the scan's own gains, labelled as the scan's.
+  const inUse = mirrorGainsInUse(state);
+  const gains = inUse.gains;
+  const gainLabel = (gain: string) => (inUse.scan ? t('mirror.scanGain', { gain }) : gain);
   return [
     { id: 'source', label: t('mirror.sourceLabel'), value: view.source ? `${view.source.kind === 'engine-tab' ? t('mirror.sourceEngine') : t('mirror.sourceKiosk')}${view.source.visible ? '' : ' · HIDDEN'}` : DASH, mono: false },
     { id: 'seen', label: t('mirror.lastData'), value: mirrorAge(t, view.sourceAgeMs), tone: view.phase === 'lost' || view.phase === 'none' ? 'bad' : undefined },
@@ -42,9 +47,9 @@ export function mirrorStateItems(t: Translate, view: MirrorView): KeyValueItem[]
     { id: 'rate', label: t('spectrum.sampleRate'), value: state?.sample_rate_hz ? `${formatMsps(state.sample_rate_hz)} MSPS` : DASH },
     { id: 'span', label: t('mirror.span'), value: mhz(state?.span_hz) },
     { id: 'shift', label: 'Freq Shift', value: state ? mhz(state.frequency_shift_hz) : DASH },
-    { id: 'lna', label: 'LNA', value: db(state?.gains.lna_db) },
-    { id: 'vga', label: 'VGA', value: db(state?.gains.vga_db) },
-    { id: 'amp', label: t('spectrum.amp'), value: state ? (state.gains.amp ? 'ON' : 'OFF') : DASH },
+    { id: 'lna', label: gainLabel('LNA'), value: db(gains?.lna_db) },
+    { id: 'vga', label: gainLabel('VGA'), value: db(gains?.vga_db) },
+    { id: 'amp', label: gainLabel(t('spectrum.amp')), value: gains ? (gains.amp ? 'ON' : 'OFF') : DASH },
     { id: 'vfo', label: 'VFO', value: vfo ? `${vfo.index + 1} · ${mhz(vfo.frequency_hz)}${vfo.enabled ? '' : ' · OFF'}` : DASH },
     { id: 'mode', label: t('spectrum.mode'), value: vfo?.mode ? vfo.mode.toUpperCase() : DASH },
     { id: 'bandwidth', label: t('mirror.bandwidth'), value: khz(vfo?.bandwidth_hz) },

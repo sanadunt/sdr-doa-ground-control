@@ -35,7 +35,12 @@
       "phase": "idle",
       "start_hz": 400000000,
       "stop_hz": 500000000,
-      "resolution_hz": 4882.8125
+      "resolution_hz": 4882.8125,
+      "gains": {
+        "lna_db": 24,
+        "vga_db": 30,
+        "amp": true
+      }
     },
     "error": null
   },

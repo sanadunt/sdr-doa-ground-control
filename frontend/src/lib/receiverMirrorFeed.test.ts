@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { createMirrorFeed, MIRROR_READ_RETRY_MS } from './receiverMirrorFeed';
 import type { MirrorFeedEnvironment } from './receiverMirrorFeed';
+import type { ReceiverMirrorFeed } from './receiverMirrorFeed';
 import { MIRROR_POLL_LOST_MS, MIRROR_POLL_MS, bytesToBase64, mirrorView } from './receiverMirror';
 import type { SpectrumFrame } from './receiverBridgeProtocol';
+import type { DockMode } from './spectrumDockSettings';
+import { createFrameGate } from './spectrumView';
 
 const SOURCE = { id: 'kiosk-test-0001', kind: 'kiosk-tab', visible: true };
 const STATE = {
@@ -22,6 +25,49 @@ function body(rev: number, frameRev: number, overrides: Record<string, unknown> 
     limits: { frame_stale_ms: 3000, source_lost_ms: 10000 },
     ...overrides,
   };
+}
+
+/** A frame of the scan the groundstation ran over 50–1000 MHz. */
+function sweepFrame(seq: number): Record<string, unknown> {
+  return {
+    seq, t_ms: 1, kind: 'sweep', center_hz: 525_000_000, start_hz: 50_000_000, stop_hz: 1_000_000_000, bin_count: 16,
+    db_min: -110, db_max: -30, bins: bytesToBase64(Uint8Array.from({ length: 16 }, (_value, index) => index * 16)),
+  };
+}
+
+function scanState(phase: 'idle' | 'active', overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    ...STATE, running: false, busy: phase === 'idle' ? 'none' : 'sweep',
+    scan: { phase, start_hz: 50_000_000, stop_hz: 1_000_000_000, resolution_hz: 4882.8125, gains: { lna_db: 24, vga_db: 30, amp: false } },
+    ...overrides,
+  };
+}
+
+/**
+ * The dock's canvas as far as frames go (SpectrumCanvas): every frame goes
+ * through its gate with the mode of its last render, and React renders a
+ * state change after the change, here in a microtask, then settles the gate.
+ */
+function canvasOf(feed: ReceiverMirrorFeed) {
+  const gate = createFrameGate();
+  const modeNow = (): DockMode => {
+    const state = feed.getState();
+    return mirrorView({ ...state, nowMs: state.receivedAtMs ?? 0 }).mode;
+  };
+  let rendered = modeNow();
+  const drawn: Array<[SpectrumFrame['source'], number]> = [];
+  feed.onState(() => {
+    queueMicrotask(() => {
+      rendered = modeNow();
+      const frame = gate.settle(rendered);
+      if (frame) drawn.push([frame.source, frame.seq]);
+    });
+  });
+  feed.onSpectrum((frame) => {
+    const taken = gate.offer(frame, rendered);
+    if (taken) drawn.push([taken.source, taken.seq]);
+  });
+  return { drawn, mode: () => rendered };
 }
 
 function harness() {
@@ -170,6 +216,36 @@ describe('Receiver mirror feed (LAN view)', () => {
     h.setVisible(true);
     await h.settle();
     expect(h.reads).toHaveLength(2);
+    release();
+  });
+
+  it('draws a stopped scan\'s last frame for a view that loads after the scan', async () => {
+    const h = harness();
+    // The groundstation scanned and stopped: RX stopped, busy none, the last frame the scan's.
+    h.answers.push(body(4, 9, { state: scanState('idle'), frame: sweepFrame(9) }));
+    const canvas = canvasOf(h.feed);
+    const release = h.feed.retain();
+    await h.settle();
+    expect(canvas.mode()).toBe('sweep');
+    expect(mirrorView({ ...h.feed.getState(), nowMs: h.feed.getState().receivedAtMs ?? 0 })).toMatchObject({ chip: 'SCAN OFF' });
+    // SCAN OFF over the scan's last trace and waterfall row, not over an empty trace.
+    expect(canvas.drawn).toEqual([['sweep', 9]]);
+    release();
+  });
+
+  it('draws the first frame after RX switches to a scan and back', async () => {
+    const h = harness();
+    h.answers.push(
+      body(1, 1),
+      body(2, 2, { state: scanState('active'), frame: sweepFrame(2) }),
+      body(3, 3, { state: scanState('active'), frame: sweepFrame(3) }),
+      body(4, 4),
+    );
+    const canvas = canvasOf(h.feed);
+    const release = h.feed.retain();
+    await h.advance(MIRROR_POLL_MS * 3);
+    expect(canvas.drawn).toEqual([['rx', 1], ['sweep', 2], ['sweep', 3], ['rx', 4]]);
+    expect(canvas.mode()).toBe('rx');
     release();
   });
 });

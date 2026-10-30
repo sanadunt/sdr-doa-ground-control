@@ -75,11 +75,20 @@ export interface MirrorVfo {
   squelch_db: number | null;
 }
 
+/** LNA and VGA in dB (null when unknown) and the +14 dB amp. */
+export interface MirrorGains {
+  lna_db: number | null;
+  vga_db: number | null;
+  amp: boolean;
+}
+
 export interface MirrorScan {
   phase: SweepPhase;
   start_hz: number | null;
   stop_hz: number | null;
   resolution_hz: number | null;
+  /** The scan's own gains, apart from the RX gains; null from a page that sends none. */
+  gains: MirrorGains | null;
 }
 
 /** The Receiver as the source reports it; frequencies in displayed Hz (the Freq Shift included). */
@@ -96,7 +105,8 @@ export interface MirrorState {
   sample_rate_hz: number | null;
   span_hz: number | null;
   frequency_shift_hz: number;
-  gains: { lna_db: number | null; vga_db: number | null; amp: boolean };
+  /** The RX gains; a scan has its own (scan.gains). */
+  gains: MirrorGains;
   vfo: MirrorVfo | null;
   scan: MirrorScan | null;
   error: StatusErrorCode | null;
@@ -295,6 +305,7 @@ export function mirrorStateFromStatus(status: ReceiverStatus, rev: number, nowMs
       start_hz: scanStart,
       stop_hz: scanStop,
       resolution_hz: typeof sweep.resolutionHz === 'number' && Number.isFinite(sweep.resolutionHz) && sweep.resolutionHz > 0 ? sweep.resolutionHz : null,
+      gains: { lna_db: gainDb(sweep.lnaDb), vga_db: gainDb(sweep.vgaDb), amp: sweep.amp },
     } : null,
     error: status.error?.code ?? null,
   };
@@ -354,21 +365,33 @@ function normalizeVfo(value: unknown): MirrorVfo | null {
   };
 }
 
+function normalizeGains(value: unknown): MirrorGains | null {
+  if (!isRecord(value) || typeof value.amp !== 'boolean') return null;
+  return { lna_db: finite(value.lna_db, 0, 200), vga_db: finite(value.vga_db, 0, 200), amp: value.amp };
+}
+
 function normalizeScan(value: unknown): MirrorScan | null {
   if (!isRecord(value)) return null;
   const phase = oneOf(SCAN_PHASES, value.phase);
   if (!phase) return null;
-  return { phase, start_hz: hzOrNull(value.start_hz), stop_hz: hzOrNull(value.stop_hz), resolution_hz: finite(value.resolution_hz, 0.001, MIRROR_LIMITS.maxSampleRateHz) };
+  return {
+    phase,
+    start_hz: hzOrNull(value.start_hz),
+    stop_hz: hzOrNull(value.stop_hz),
+    resolution_hz: finite(value.resolution_hz, 0.001, MIRROR_LIMITS.maxSampleRateHz),
+    gains: normalizeGains(value.gains),
+  };
 }
 
 export function normalizeMirrorState(value: unknown): MirrorState | null {
-  if (!isRecord(value) || !isRecord(value.gains)) return null;
+  if (!isRecord(value)) return null;
   const busy = oneOf(BUSY_VALUES, value.busy);
   const rev = int(value.rev, 0, MAX_SAFE);
   const time = int(value.t_ms, 0, MAX_SAFE);
   const shift = hzOrNull(value.frequency_shift_hz);
-  const flags = [value.connected, value.running, value.recording, value.mock, value.gains.amp];
-  if (busy === null || rev === null || time === null || shift === null || !flags.every((flag) => typeof flag === 'boolean')) return null;
+  const gains = normalizeGains(value.gains);
+  const flags = [value.connected, value.running, value.recording, value.mock];
+  if (busy === null || rev === null || time === null || shift === null || gains === null || !flags.every((flag) => typeof flag === 'boolean')) return null;
   return {
     rev,
     t_ms: time,
@@ -381,7 +404,7 @@ export function normalizeMirrorState(value: unknown): MirrorState | null {
     sample_rate_hz: int(value.sample_rate_hz, 1, MIRROR_LIMITS.maxSampleRateHz),
     span_hz: int(value.span_hz, 1, MIRROR_LIMITS.maxSampleRateHz),
     frequency_shift_hz: shift,
-    gains: { lna_db: finite(value.gains.lna_db, 0, 200), vga_db: finite(value.gains.vga_db, 0, 200), amp: value.gains.amp as boolean },
+    gains,
     vfo: normalizeVfo(value.vfo),
     scan: normalizeScan(value.scan),
     error: oneOf(ERROR_VALUES, value.error),
@@ -431,6 +454,17 @@ export function normalizeMirrorAnswer(value: unknown): MirrorAnswer | null {
     frameStaleMs: int(limits.frame_stale_ms, 100, 600_000) ?? MIRROR_LIMITS.frameStaleMs,
     sourceLostMs: int(limits.source_lost_ms, 100, 600_000) ?? MIRROR_LIMITS.sourceLostMs,
   };
+}
+
+/**
+ * The gains the radio uses now: a scan's own while it starts, runs or stops
+ * (null when the page sent none, never the RX gains in their place), otherwise
+ * the RX gains. `scan` says whose they are.
+ */
+export function mirrorGainsInUse(state: MirrorState | null): { scan: boolean; gains: MirrorGains | null } {
+  if (!state) return { scan: false, gains: null };
+  const scanning = state.busy === 'sweep' || (state.scan !== null && state.scan.phase !== 'idle');
+  return scanning ? { scan: true, gains: state.scan?.gains ?? null } : { scan: false, gains: state.gains };
 }
 
 /** A published frame as the bridge frame the dock's canvas draws. */
