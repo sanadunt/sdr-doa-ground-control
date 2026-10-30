@@ -21,10 +21,11 @@ import {
   formatTime,
   HOUR_MS,
   formatterFor,
+  lastPage,
   localTimeOn,
   statusCode,
 } from './recordsArchiveFormat';
-import type { ArchiveSortKey, CalendarGrid, TimeRange } from './recordsArchiveFormat';
+import type { ArchiveSortKey, ArchiveTypeFilter, CalendarGrid, TimeRange } from './recordsArchiveFormat';
 
 export type RecordsMode = 'day' | 'all';
 
@@ -153,16 +154,28 @@ export interface CalendarDay {
   skipped: boolean;
 }
 
-/** The 6x7 cells of a month with the counts the console answered for them. */
-export function calendarDays(grid: CalendarGrid, calendar: ArchiveCalendar | null, selectedKey: string, todayKey: string): CalendarDay[] {
+/** A calendar answer with the month and type filter it was asked for. */
+export interface MonthCounts {
+  month: string;
+  type: ArchiveTypeFilter;
+  calendar: ArchiveCalendar;
+}
+
+/**
+ * The 6x7 cells of a month with the counts the console answered for them. Counts of
+ * another month or type filter (the answer before ‹ › or a type change) are not drawn,
+ * as the Receiver's calendarWeeks() does.
+ */
+export function calendarDays(grid: CalendarGrid, counts: MonthCounts | null, type: ArchiveTypeFilter, selectedKey: string, todayKey: string): CalendarDay[] {
+  const days = counts && counts.month === grid.month && counts.type === type ? counts.calendar.days : null;
   return grid.cells.map((cell) => {
-    const counts = calendar && cell.interval >= 0 ? calendar.days[cell.interval] : undefined;
+    const count = days && cell.interval >= 0 ? days[cell.interval] : undefined;
     return {
       key: cell.key,
       day: cell.day,
       inMonth: cell.inMonth,
-      audio: counts?.audio ?? 0,
-      scan: counts?.scan ?? 0,
+      audio: count?.audio ?? 0,
+      scan: count?.scan ?? 0,
       selected: cell.key === selectedKey,
       today: cell.key === todayKey,
       skipped: cell.interval < 0,
@@ -188,4 +201,32 @@ export function dayHours(dayStartMs: number, dayEndMs: number): TimeRange[] {
     hours.push({ startMs: start, endMs: Math.min(dayEndMs, start + HOUR_MS) });
   }
   return hours;
+}
+
+/**
+ * The page to show after an items answer: a page past the end (records deleted or
+ * removed by retention since it was asked for) becomes the last page, as the
+ * Receiver's loadItems() does.
+ */
+export function pageAfterAnswer(page: number, answer: { items: readonly unknown[]; total: number }, pageSize: number): number {
+  if (!answer.items.length && answer.total > 0 && page > 0) return Math.min(page, lastPage(answer.total, pageSize));
+  return page;
+}
+
+// HTMLMediaElement error codes (MediaError).
+const MEDIA_ERR_NETWORK = 2;
+const MEDIA_ERR_DECODE = 3;
+const MEDIA_ERR_SRC_NOT_SUPPORTED = 4;
+
+/**
+ * Why a recording did not play. `probe` is what the playback route answered when
+ * asked again (probePlayback): its refusal (busy, gone, no answer) names the cause;
+ * only when the route served the audio is the browser's decoder, or a dropped
+ * connection, to blame.
+ */
+export function playbackErrorText(t: Translate, mediaErrorCode: number | null, probe: unknown): string {
+  if (probe) return recordsErrorText(t, probe);
+  if (mediaErrorCode === MEDIA_ERR_DECODE || mediaErrorCode === MEDIA_ERR_SRC_NOT_SUPPORTED) return t('records.playUnsupported');
+  if (mediaErrorCode === MEDIA_ERR_NETWORK) return t('records.playDropped');
+  return t('records.playFailed');
 }

@@ -84,7 +84,7 @@ test('the error codes are the Receiver\'s ARCHIVE_ERROR_TEXT codes', () => {
 });
 
 test('every exported function of the copies exists on the Receiver side', () => {
-	const own = new Set(['recordsTimeQuery', 'createRecordsClient', 'isAbortError']);
+	const own = new Set(['recordsTimeQuery', 'createRecordsClient', 'isAbortError', 'probePlayback']);
 	for (const [name, value] of [...Object.entries(consoleFormat), ...Object.entries(consoleApi)]) {
 		if (typeof value !== 'function' || own.has(name) || name === 'RecordsRequestError') continue;
 		const receiverFn = receiverFormat[name] ?? receiverApi[name] ?? receiverRecords[name];
@@ -194,6 +194,7 @@ test('the tablet\'s Day and All dates query is the Receiver\'s archiveTimeSpec',
 
 test('paging and the trace plot', () => {
 	sameOn('pageCount', [[0, 50], [50, 50], [51, 50], [1000, 50]]);
+	sameOn('lastPage', [[0, 50], [50, 50], [51, 50], [60, 50], [1000, 50]]);
 	sameOn('pageRangeLabel', [[0, 50, 0], [0, 50, 50], [2, 50, 7]]);
 	sameOn('defaultSortOrder', ['start', 'end', 'duration', 'frequency', 'size', 'type', 'status'].map((key) => [key]));
 	sameOn('tracePlot', [

@@ -4,7 +4,7 @@ import type { MessageKey } from './i18n';
 import { RecordsRequestError } from './recordsArchiveApi';
 import type { ArchiveCalendar, ArchiveItem } from './recordsArchiveApi';
 import { calendarGrid, clearFormatterCache, formatTime, localDateKey, localDayBounds } from './recordsArchiveFormat';
-import { RECORDS_ERROR_CODES, calendarDays, dayHours, recordRow, recordStatusTone, recordsErrorText, weekdayLabels } from './recordsView';
+import { RECORDS_ERROR_CODES, calendarDays, dayHours, pageAfterAnswer, playbackErrorText, recordRow, recordStatusTone, recordsErrorText, weekdayLabels } from './recordsView';
 
 const t = (key: MessageKey, vars?: Record<string, string | number>) => translate('en', key, vars);
 // Node's process, without the node types the app's tsconfig leaves out.
@@ -114,19 +114,35 @@ describe('calendar and time line', () => {
         days: grid.bounds.slice(1).map((_, index) => (index === tenthInterval ? { audio: 2, scan: 1 } : { audio: 0, scan: 0 })),
         first_ms: null, last_ms: null, now_ms: 0, truncated: false,
       };
-      const days = calendarDays(grid, calendar, '2025-03-10', '2025-03-11');
+      const days = calendarDays(grid, { month: '2025-03', type: 'all', calendar }, 'all', '2025-03-10', '2025-03-11');
       expect(days).toHaveLength(42);
       const tenth = days.find((day) => day.key === '2025-03-10');
       expect(tenth).toMatchObject({ audio: 2, scan: 1, selected: true, today: false, inMonth: true, skipped: false });
       expect(days.find((day) => day.key === '2025-03-11')?.today).toBe(true);
       expect(days[0]).toMatchObject({ key: '2025-02-23', inMonth: false });
-      expect(calendarDays(grid, null, '', '').every((day) => day.audio === 0 && day.scan === 0)).toBe(true);
+      expect(calendarDays(grid, null, 'all', '', '').every((day) => day.audio === 0 && day.scan === 0)).toBe(true);
+    });
+  });
+
+  it("shows no counts of another month or type while the grid's own load", () => {
+    inZone('Asia/Jakarta', () => {
+      const february = calendarGrid('2025-02');
+      const calendar: ArchiveCalendar = {
+        days: february.bounds.slice(1).map(() => ({ audio: 3, scan: 2 })), first_ms: null, last_ms: null, now_ms: 0, truncated: false,
+      };
+      const march = calendarGrid('2025-03');
+      const empty = (days: ReturnType<typeof calendarDays>) => days.every((day) => day.audio === 0 && day.scan === 0);
+      // February's answer on March's grid (after ›, before March answers): no dots.
+      expect(empty(calendarDays(march, { month: '2025-02', type: 'all', calendar }, 'all', '', ''))).toBe(true);
+      // An answer for another type filter: no dots either.
+      expect(empty(calendarDays(february, { month: '2025-02', type: 'audio', calendar }, 'all', '', ''))).toBe(true);
+      expect(empty(calendarDays(february, { month: '2025-02', type: 'all', calendar }, 'all', '', ''))).toBe(false);
     });
   });
 
   it('marks a day the zone skipped', () => {
     inZone('Pacific/Apia', () => {
-      const skipped = calendarDays(calendarGrid('2011-12'), null, '', '').find((day) => day.key === '2011-12-30');
+      const skipped = calendarDays(calendarGrid('2011-12'), null, 'all', '', '').find((day) => day.key === '2011-12-30');
       expect(skipped?.skipped).toBe(true);
     });
   });
@@ -147,5 +163,38 @@ describe('calendar and time line', () => {
   it('names the weekdays Sunday first', () => {
     expect(weekdayLabels('en-GB')).toEqual(['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']);
     expect(weekdayLabels('id-ID')[0]).toBe('Min');
+  });
+});
+
+describe('paging after the records changed', () => {
+  it('moves an empty page past the end to the last page, as the Receiver does', () => {
+    // Page 3 of 120 (offset 100) after the groundstation deleted 60 records.
+    expect(pageAfterAnswer(2, { items: [], total: 60 }, 50)).toBe(1);
+    expect(pageAfterAnswer(5, { items: [], total: 1 }, 50)).toBe(0);
+    // A page with rows, the first page and an empty archive stay where they are.
+    expect(pageAfterAnswer(2, { items: [{}], total: 120 }, 50)).toBe(2);
+    expect(pageAfterAnswer(0, { items: [], total: 0 }, 50)).toBe(0);
+    expect(pageAfterAnswer(3, { items: [], total: 0 }, 50)).toBe(3);
+  });
+});
+
+describe('playback errors', () => {
+  const MEDIA_ERR_NETWORK = 2;
+  const MEDIA_ERR_DECODE = 3;
+  const MEDIA_ERR_SRC_NOT_SUPPORTED = 4;
+
+  it('names what the console answered when the playback route refused', () => {
+    const busy = new RecordsRequestError('at most 4 Records downloads at once', 429, 'LAN_RECORDS_BUSY');
+    expect(playbackErrorText(t, MEDIA_ERR_SRC_NOT_SUPPORTED, busy)).toBe(translate('en', 'records.error.LAN_RECORDS_BUSY'));
+    const missing = new RecordsRequestError('The audio file is missing.', 404, 'ARCHIVE_FILE_MISSING');
+    expect(playbackErrorText(t, MEDIA_ERR_SRC_NOT_SUPPORTED, missing)).toBe(translate('en', 'records.error.ARCHIVE_FILE_MISSING'));
+    expect(playbackErrorText(t, MEDIA_ERR_NETWORK, new RecordsRequestError('Failed to fetch', 0, 'NETWORK'))).toBe(translate('en', 'records.error.NETWORK'));
+  });
+
+  it('blames the browser only when the route answered and the media could not be decoded', () => {
+    expect(playbackErrorText(t, MEDIA_ERR_SRC_NOT_SUPPORTED, null)).toBe(translate('en', 'records.playUnsupported'));
+    expect(playbackErrorText(t, MEDIA_ERR_DECODE, null)).toBe(translate('en', 'records.playUnsupported'));
+    expect(playbackErrorText(t, MEDIA_ERR_NETWORK, null)).toBe(translate('en', 'records.playDropped'));
+    expect(playbackErrorText(t, null, null)).toBe(translate('en', 'records.playFailed'));
   });
 });

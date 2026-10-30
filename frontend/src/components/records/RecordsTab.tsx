@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { JSX, KeyboardEvent } from 'react';
+import type { JSX, KeyboardEvent, SyntheticEvent } from 'react';
 import { useI18n } from '../../lib/i18n';
 import type { Translate } from '../../lib/i18n';
-import { RECORDS_PAGE_SIZE, createRecordsClient, isAbortError } from '../../lib/recordsArchiveApi';
-import type { ArchiveCalendar, ArchiveFacets, ArchiveItemsPage, ArchiveScanPreview, ArchiveTimeline, RecordsClient } from '../../lib/recordsArchiveApi';
+import { RECORDS_PAGE_SIZE, createRecordsClient, isAbortError, probePlayback } from '../../lib/recordsArchiveApi';
+import type { ArchiveFacets, ArchiveItemsPage, ArchiveScanPreview, ArchiveTimeline, RecordsClient } from '../../lib/recordsArchiveApi';
 import {
   ARCHIVE_STATUSES,
   addMonths,
@@ -34,11 +34,23 @@ import {
   tracePlot,
 } from '../../lib/recordsArchiveFormat';
 import type { ArchiveFilters, ArchiveSortKey, ArchiveTypeFilter, TimeRange } from '../../lib/recordsArchiveFormat';
-import { RECORDS_SORT_KEYS, calendarDays, dayHours, recordRow, recordsErrorText, recordsLocale, weekdayLabels } from '../../lib/recordsView';
-import type { RecordRow, RecordsMode } from '../../lib/recordsView';
+import {
+  RECORDS_SORT_KEYS,
+  calendarDays,
+  dayHours,
+  pageAfterAnswer,
+  playbackErrorText,
+  recordRow,
+  recordsErrorText,
+  recordsLocale,
+  weekdayLabels,
+} from '../../lib/recordsView';
+import type { MonthCounts, RecordRow, RecordsMode } from '../../lib/recordsView';
 import { Card, EmptyState, FormField, Notice, Segmented, StatusChip, Tag, Toolbar } from '../page';
 
-interface ReadState<T> {
+export interface ReadState<T> {
+  /** The key of the read `data` and `error` came from (an earlier one while a new read loads). */
+  key: string | null;
   data: T | null;
   error: unknown;
   loading: boolean;
@@ -46,29 +58,38 @@ interface ReadState<T> {
 
 /**
  * One read per key: a new key aborts the read before (a queued read never goes
- * out) and keeps the last data on screen while the new one loads. A null key
- * reads nothing.
+ * out) and keeps the last data on screen while the new one loads, so a caller
+ * that must not show another read's data checks `key` or the data itself. A
+ * null key reads nothing.
  */
 function useRead<T>(key: string | null, read: (signal: AbortSignal) => Promise<T>): ReadState<T> {
   const readRef = useRef(read);
   readRef.current = read;
-  const [state, setState] = useState<ReadState<T>>({ data: null, error: null, loading: false });
+  const [state, setState] = useState<ReadState<T>>({ key: null, data: null, error: null, loading: false });
   useEffect(() => {
     if (key === null) {
-      setState({ data: null, error: null, loading: false });
+      setState({ key: null, data: null, error: null, loading: false });
       return undefined;
     }
     const controller = new AbortController();
-    setState((previous) => ({ data: previous.data, error: null, loading: true }));
+    setState((previous) => ({ key: previous.key, data: previous.data, error: null, loading: true }));
     readRef.current(controller.signal).then(
-      (data) => { if (!controller.signal.aborted) setState({ data, error: null, loading: false }); },
+      (data) => { if (!controller.signal.aborted) setState({ key, data, error: null, loading: false }); },
       (error: unknown) => {
-        if (!controller.signal.aborted && !isAbortError(error)) setState({ data: null, error, loading: false });
+        if (!controller.signal.aborted && !isAbortError(error)) setState({ key, data: null, error, loading: false });
       },
     );
     return () => controller.abort();
   }, [key]);
   return state;
+}
+
+function previewKeyPrefix(scanId: string): string {
+  return `preview:${scanId}:`;
+}
+
+function previewKey(scanId: string, reload: number): string {
+  return `${previewKeyPrefix(scanId)}${reload}`;
 }
 
 interface TextFilters {
@@ -83,18 +104,21 @@ function sameRange(a: TimeRange | null, b: TimeRange): boolean {
   return a !== null && a.startMs === b.startMs && a.endMs === b.endMs;
 }
 
-function Calendar({ t, locale, monthKey, dateKey, todayKey, calendar, onMonth, onPick }: {
+function Calendar({ t, locale, monthKey, type, dateKey, todayKey, counts, error, onMonth, onPick }: {
   t: Translate;
   locale: string;
   monthKey: string;
+  type: ArchiveTypeFilter;
   dateKey: string;
   todayKey: string;
-  calendar: ArchiveCalendar | null;
+  counts: MonthCounts | null;
+  /** The failure of this month's read, if it failed. */
+  error: unknown;
   onMonth: (monthKey: string) => void;
   onPick: (dateKey: string) => void;
 }): JSX.Element {
   const grid = useMemo(() => calendarGrid(monthKey), [monthKey]);
-  const days = calendarDays(grid, calendar, dateKey, todayKey);
+  const days = calendarDays(grid, counts, type, dateKey, todayKey);
   const weekdays = useMemo(() => weekdayLabels(locale), [locale]);
   return (
     <div className="rec-cal">
@@ -123,6 +147,7 @@ function Calendar({ t, locale, monthKey, dateKey, todayKey, calendar, onMonth, o
           </button>
         ))}
       </div>
+      {error ? <Notice tone="bad">{recordsErrorText(t, error)}</Notice> : null}
     </div>
   );
 }
@@ -176,9 +201,15 @@ function Timeline({ t, locale, dateKey, timeline, selected, onSelect }: {
   );
 }
 
-function ScanPreview({ t, preview }: { t: Translate; preview: ReadState<ArchiveScanPreview> }): JSX.Element {
-  if (preview.error) return <Notice tone="bad">{recordsErrorText(t, preview.error)}</Notice>;
-  const data = preview.data;
+/**
+ * A scan's preview under its row. The read keeps the previous scan's answer while
+ * this one loads (one read at a time), so only an answer with this scan's id is
+ * drawn, as the Receiver checks previewData.id.
+ */
+export function ScanPreview({ t, scanId, preview }: { t: Translate; scanId: string; preview: ReadState<ArchiveScanPreview> }): JSX.Element {
+  const ownRead = preview.key !== null && preview.key.startsWith(previewKeyPrefix(scanId));
+  if (ownRead && preview.error) return <Notice tone="bad">{recordsErrorText(t, preview.error)}</Notice>;
+  const data = preview.data && preview.data.id === scanId ? preview.data : null;
   if (!data) return <EmptyState label={t('records.previewLoading')} code={null} />;
   const plot = tracePlot(data.max_db, data.mean_db);
   if (!plot) return <EmptyState label={t('records.previewNone')} code="NO DATA" />;
@@ -225,14 +256,32 @@ function ScanPreview({ t, preview }: { t: Translate; preview: ReadState<ArchiveS
   );
 }
 
+interface PlaybackFailure {
+  mediaErrorCode: number | null;
+  probe: unknown;
+}
+
 function AudioPlayer({ t, url }: { t: Translate; url: string }): JSX.Element {
-  const [failed, setFailed] = useState(false);
+  const [failure, setFailure] = useState<PlaybackFailure | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  function onError(event: SyntheticEvent<HTMLAudioElement>): void {
+    const mediaErrorCode = event.currentTarget.error?.code ?? null;
+    // Ask the route once more, so the text names a busy tablet or a deleted file
+    // rather than blaming the browser.
+    void probePlayback(url).then((probe) => {
+      if (mounted.current) setFailure({ mediaErrorCode, probe });
+    });
+  }
   // One <audio> at a time and only while its row is open: closing the row
   // removes it, which ends its connection to the console.
   return (
     <div className="rec-player">
-      <audio controls autoPlay preload="none" src={url} onError={() => setFailed(true)} />
-      {failed ? <Notice tone="warn">{t('records.playFailed')}</Notice> : null}
+      <audio controls autoPlay preload="none" src={url} onError={onError} />
+      {failure ? <Notice tone="warn">{playbackErrorText(t, failure.mediaErrorCode, failure.probe)}</Notice> : null}
     </div>
   );
 }
@@ -282,7 +331,7 @@ function RecordItem({ t, row, open, preview, onToggle }: {
         </div>
       </div>
       {open && row.playable ? <AudioPlayer t={t} url={row.playbackUrl} /> : null}
-      {open && row.previewable ? <ScanPreview t={t} preview={preview} /> : null}
+      {open && row.previewable ? <ScanPreview t={t} scanId={row.id} preview={preview} /> : null}
     </li>
   );
 }
@@ -331,14 +380,23 @@ export function RecordsTab({ client: givenClient, now = Date.now }: { client?: R
   const grid = useMemo(() => calendarGrid(monthKey), [monthKey]);
 
   // Declared in the order the queue should send them: the table first.
-  const items = useRead<ArchiveItemsPage>(`items:${itemsParams}:${reload}`, (signal) => client.items(new URLSearchParams(itemsParams), signal));
+  const itemsKey = `items:${itemsParams}:${reload}`;
+  const items = useRead<ArchiveItemsPage>(itemsKey, (signal) => client.items(new URLSearchParams(itemsParams), signal));
   const timeline = useRead<ArchiveTimeline>(mode === 'day' ? `timeline:${timelineParams}:${reload}` : null,
     (signal) => client.timeline(new URLSearchParams(timelineParams), signal));
-  const calendar = useRead<ArchiveCalendar>(mode === 'day' && calendarOpen ? `calendar:${monthKey}:${filters.type}:${reload}` : null,
-    (signal) => client.calendar(grid.bounds, filters.type, signal));
+  const calendarKey = mode === 'day' && calendarOpen ? `calendar:${monthKey}:${filters.type}:${reload}` : null;
+  const calendarType = filters.type;
+  const calendar = useRead<MonthCounts>(calendarKey,
+    (signal) => client.calendar(grid.bounds, calendarType, signal).then((answer) => ({ month: monthKey, type: calendarType, calendar: answer })));
   const facets = useRead<ArchiveFacets>(`facets:${reload}`, (signal) => client.facets(signal));
   const openRow = openKey?.startsWith('scan:') ? openKey.slice(5) : null;
-  const preview = useRead<ArchiveScanPreview>(openRow ? `preview:${openRow}:${reload}` : null, (signal) => client.scanPreview(openRow ?? '', signal));
+  const preview = useRead<ArchiveScanPreview>(openRow ? previewKey(openRow, reload) : null, (signal) => client.scanPreview(openRow ?? '', signal));
+
+  // A page past the end (records deleted or removed by retention since) moves to the last page.
+  const pageNow = items.data && items.key === itemsKey ? pageAfterAnswer(page, items.data, RECORDS_PAGE_SIZE) : page;
+  useEffect(() => {
+    if (pageNow !== page) setPage(pageNow);
+  }, [pageNow, page]);
 
   const rowContext = { t, locale, mode, dayStartMs: day.startMs, dayEndMs: day.endMs };
   const rows = (items.data?.items ?? []).map((item) => recordRow(item, rowContext));
@@ -404,7 +462,8 @@ export function RecordsTab({ client: givenClient, now = Date.now }: { client?: R
         ) : null}
       </Toolbar>
       {mode === 'day' && calendarOpen ? (
-        <Calendar t={t} locale={locale} monthKey={monthKey} dateKey={dateKey} todayKey={todayKey} calendar={calendar.data}
+        <Calendar t={t} locale={locale} monthKey={monthKey} type={filters.type} dateKey={dateKey} todayKey={todayKey} counts={calendar.data}
+          error={calendar.key === calendarKey ? calendar.error : null}
           onMonth={setMonthKey} onPick={(key) => { pickDate(key); setCalendarOpen(false); }}
         />
       ) : null}
@@ -484,7 +543,10 @@ export function RecordsTab({ client: givenClient, now = Date.now }: { client?: R
           ))}
         </ul>
       ) : items.error ? null : (
-        <EmptyState label={items.loading || !items.data ? t('records.loading') : emptyLabel} code={items.loading || !items.data ? null : 'NO DATA'} />
+        <EmptyState
+          label={items.loading || !items.data || pageNow !== page ? t('records.loading') : emptyLabel}
+          code={items.loading || !items.data || pageNow !== page ? null : 'NO DATA'}
+        />
       )}
     </Card>
   );

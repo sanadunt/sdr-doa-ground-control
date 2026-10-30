@@ -520,3 +520,42 @@ export function createRecordsClient(env: RecordsClientEnv = browserEnv): Records
     scanPreview: (scanId, signal) => enqueue(`/archive/scans/${encodeId(scanId)}/preview`, parseArchiveScanPreview, signal),
   };
 }
+
+/**
+ * Ask the playback route for one byte after an <audio> error, so the player can say
+ * why: null when it serves the audio (the browser could not play it), otherwise the
+ * console's refusal (LAN_RECORDS_BUSY, ARCHIVE_FILE_MISSING, ...), TIMEOUT or NETWORK.
+ * It takes one of the tablet's download slots for a moment, outside the read queue.
+ */
+export async function probePlayback(url: string, env: RecordsClientEnv = browserEnv): Promise<RecordsRequestError | null> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = env.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, READ_TIMEOUT_MS);
+  try {
+    const response = await env.fetch(url, {
+      credentials: 'same-origin', cache: 'no-store', headers: { Range: 'bytes=0-0' }, signal: controller.signal,
+    });
+    if (response.ok) {
+      await response.body?.cancel();
+      return null;
+    }
+    let row: Record<string, unknown> = {};
+    try {
+      const body: unknown = JSON.parse(await response.text());
+      if (body !== null && typeof body === 'object' && !Array.isArray(body)) row = body as Record<string, unknown>;
+    } catch {
+      row = {};
+    }
+    const code = typeof row.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(row.code) ? row.code : '';
+    const message = typeof row.error === 'string' && row.error ? row.error : `request failed (${response.status})`;
+    return new RecordsRequestError(message, response.status, code);
+  } catch (error: unknown) {
+    if (timedOut) return new RecordsRequestError('The console did not answer in time.', 0, 'TIMEOUT');
+    return new RecordsRequestError(error instanceof Error ? error.message : String(error), 0, 'NETWORK');
+  } finally {
+    env.clearTimeout(timer);
+  }
+}

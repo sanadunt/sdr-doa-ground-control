@@ -2647,26 +2647,31 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self._send_json(settings)
 
     def _receiver_segment_audio(self, segment_id: str) -> None:
-        """GET audio-segments/<id>/audio: a stored segment for playback, with Range."""
+        """GET audio-segments/<id>/audio: a stored segment for playback, with Range.
+
+        The file is opened before it is sized, so a delete or a retention pass
+        that removes it after the store's check is a missing file (KeyError),
+        never an OSError naming its path.
+        """
         audio_path, content_type = self.console_server.receiver_store.get_segment_audio(segment_id)
-        size = audio_path.stat().st_size
-        range_header = self.headers.get("Range")
-        byte_range = _parse_audio_byte_range(range_header, size) if range_header else None
-        if range_header and byte_range is None:
-            self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
-            self.send_header("Content-Range", f"bytes */{size}")
-            self.send_header("Accept-Ranges", "bytes")
-            self.send_header("Content-Length", "0")
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            return
-        start, end = byte_range if byte_range is not None else (0, size - 1)
-        content_length = max(0, end - start + 1)
         try:
             source = audio_path.open("rb")
         except OSError as exc:
             raise KeyError("audio file not found") from exc
         with source:
+            size = os.fstat(source.fileno()).st_size
+            range_header = self.headers.get("Range")
+            byte_range = _parse_audio_byte_range(range_header, size) if range_header else None
+            if range_header and byte_range is None:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Length", "0")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                return
+            start, end = byte_range if byte_range is not None else (0, size - 1)
+            content_length = max(0, end - start + 1)
             self.send_response(HTTPStatus.PARTIAL_CONTENT if byte_range is not None else HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(content_length))
@@ -3846,9 +3851,10 @@ class LanConsoleHandler(ConsoleHandler):
         """GET of a Records read route (lan.records_route): its read rule, its limits, then the route.
 
         Its own dispatch, so no other Receiver route is reachable from here
-        whatever the loopback handler answers. Codes: the archive's, plus 405
-        LAN_READ_ONLY for a HEAD of a download and 429 LAN_RECORDS_BUSY past
-        a client's limit.
+        whatever the loopback handler answers. Every error is {ok, code, error}
+        with an archive code and its fixed text (the playback route too, so no
+        storage error names a path), plus 405 LAN_READ_ONLY for a HEAD of a
+        download and 429 LAN_RECORDS_BUSY past a client's limit.
         """
         kind = lan.records_route(parsed.path)
         if kind is None:
@@ -3877,16 +3883,15 @@ class LanConsoleHandler(ConsoleHandler):
             )
             return
         try:
-            if kind == lan.RECORDS_AUDIO_PLAYBACK:
-                try:
-                    self._receiver_segment_audio(parsed.path.split("/")[4])
-                except (BrokenPipeError, ConnectionResetError):
-                    raise
-                except (ValueError, KeyError, OSError, sqlite3.Error, zlib.error) as exc:
-                    self._receiver_error(exc)
-                return
             try:
-                self._lan_archive_get(kind, parsed)
+                if kind == lan.RECORDS_AUDIO_PLAYBACK:
+                    try:
+                        self._receiver_segment_audio(parsed.path.split("/")[4])
+                    except KeyError as exc:
+                        # Unknown, unfinished, failed or vanished: the archive's fixed text, no path.
+                        raise ArchiveError(HTTPStatus.NOT_FOUND, ra.ARCHIVE_FILE_MISSING) from exc
+                else:
+                    self._lan_archive_get(kind, parsed)
             except (BrokenPipeError, ConnectionResetError):
                 raise
             except (ArchiveError, ValueError, KeyError, OSError, sqlite3.Error, zlib.error) as exc:

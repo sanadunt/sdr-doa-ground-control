@@ -518,6 +518,10 @@ export function pageCount(total: number, pageSize: number): number {
   return Math.max(1, Math.ceil(total / pageSize));
 }
 
+export function lastPage(total: number, pageSize: number): number {
+  return pageCount(total, pageSize) - 1;
+}
+
 /** '1–50' of a page, or '0' for no rows. */
 export function pageRangeLabel(page: number, pageSize: number, shown: number): string {
   if (shown <= 0) return '0';

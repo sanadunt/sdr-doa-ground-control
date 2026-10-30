@@ -2127,6 +2127,24 @@ class LanRecordsHttpTests(StoreCase):
         self.assertEqual((body["ok"], body["code"]), (False, code))
         return body
 
+    def drained(self) -> Tuple[int, int, bool]:
+        """Read slots, download slots held, and whether the LAN ZIP slot is free, once nothing runs.
+
+        A handler releases its slots in a finally after its last byte, which
+        the client may have read already, so this waits (at most 5 s).
+        """
+        lan_server = self.server.lan._server
+        zip_slots = self.server.lan_records_zip_slots
+        deadline = time.monotonic() + 5.0
+        while True:
+            zip_free = zip_slots.acquire(blocking=False)
+            if zip_free:
+                zip_slots.release()
+            state = (lan_server.records_reads.held(), lan_server.records_streams.held(), zip_free)
+            if state == (0, 0, True) or time.monotonic() > deadline:
+                return state
+            time.sleep(0.01)
+
     def records(self) -> Tuple[str, str, int]:
         audio = bytes(range(256)) * 40
         _, segment_id = self.recording(BASE, BASE + timedelta(seconds=3), audio=audio)
@@ -2172,10 +2190,7 @@ class LanRecordsHttpTests(StoreCase):
         self.assertEqual((playback.status, playback.body), (206, audio[:4]))
         self.assertEqual(playback.headers["Content-Range"], f"bytes 0-3/{len(audio)}")
         # Every slot a request took is free again.
-        lan_server = self.server.lan._server
-        self.assertEqual((lan_server.records_reads.held(), lan_server.records_streams.held()), (0, 0))
-        self.assertTrue(self.server.lan_records_zip_slots.acquire(blocking=False))
-        self.server.lan_records_zip_slots.release()
+        self.assertEqual(self.drained(), (0, 0, True))
 
     def test_the_lan_read_rule(self) -> None:
         segment_id, scan_id, day = self.records()
@@ -2231,6 +2246,23 @@ class LanRecordsHttpTests(StoreCase):
         self.assertEqual(self.store.get_settings()["retention_days"], None)
         self.assertEqual({item["id"] for item in self.store.archive_items(ArchiveFilter())["items"]}, {segment_id, scan_id})
 
+    def test_playback_errors_use_the_archive_shape_and_never_name_a_path(self) -> None:
+        segment_id, _scan_id, _day = self.records()
+        unknown = self.request("GET", "/api/receiver/audio-segments/dddddddd-0000-4000-8000-000000000001/audio")
+        body = self.assert_code(unknown, 404, "ARCHIVE_FILE_MISSING")
+        self.assertIn(body["code"], ra.ARCHIVE_ERROR_CODES)
+        # The file vanishes between the store's check and the read (a delete or a retention pass).
+        gone = self.data_dir / "audio" / "vanished.webm"
+        with mock.patch.object(self.store, "get_segment_audio", return_value=(gone, "audio/webm")):
+            result = self.request("GET", f"/api/receiver/audio-segments/{segment_id}/audio", {"Range": "bytes=0-3"})
+        body = self.assert_code(result, 404, "ARCHIVE_FILE_MISSING")
+        self.assertNotIn(str(self.data_dir), result.body.decode("utf-8"))
+        self.assertEqual(body["error"], ra.ARCHIVE_ERROR_MESSAGES[ra.ARCHIVE_FILE_MISSING])
+        with mock.patch.object(self.store, "get_segment_audio", side_effect=sqlite3.OperationalError(f"disk I/O error at {self.data_dir}")):
+            result = self.request("GET", f"/api/receiver/audio-segments/{segment_id}/audio")
+        self.assert_code(result, 500, "ARCHIVE_STORAGE_ERROR")
+        self.assertNotIn(str(self.data_dir), result.body.decode("utf-8"))
+
     def test_pages_are_small_on_the_lan_view(self) -> None:
         self.records()
         self.assertEqual(self.request("GET", f"/api/receiver/archive/items?limit={lan.RECORDS_PAGE_MAX}").status, 200)
@@ -2268,6 +2300,7 @@ class LanRecordsHttpTests(StoreCase):
         self.records()
         reads = self.server.lan._server.records_reads
         self.assertTrue(reads.acquire("127.0.0.1"))
+        held = True  # this test's own slot, released once
         try:
             with mock.patch.object(lan, "RECORDS_READ_WAIT_S", 0.2):
                 busy = self.request("GET", "/api/receiver/archive/items")
@@ -2276,12 +2309,13 @@ class LanRecordsHttpTests(StoreCase):
             # A read that waits gets the slot when the other read ends.
             timer = threading.Timer(0.2, reads.release, ("127.0.0.1",))
             timer.start()
+            held = False
             self.assertEqual(self.request("GET", "/api/receiver/archive/items").status, 200)
             timer.join()
         finally:
-            if reads.held("127.0.0.1"):
+            if held:
                 reads.release("127.0.0.1")
-        self.assertEqual(reads.held(), 0)
+        self.assertEqual(self.drained(), (0, 0, True))
 
     def test_downloads_per_client_and_the_lan_zip_slot(self) -> None:
         segment_id, scan_id, _day = self.records()
@@ -2304,7 +2338,7 @@ class LanRecordsHttpTests(StoreCase):
         finally:
             zip_slots.release()
         self.assertEqual(self.request("GET", f"/api/receiver/archive/scans/{scan_id}/download").status, 200)
-        self.assertEqual(streams.held(), 0)
+        self.assertEqual(self.drained(), (0, 0, True))
 
 if __name__ == "__main__":
     unittest.main()

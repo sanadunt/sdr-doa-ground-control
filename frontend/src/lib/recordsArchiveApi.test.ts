@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RECORDS_PAGE_SIZE, RecordsRequestError, createRecordsClient, isAbortError } from './recordsArchiveApi';
+import { RECORDS_PAGE_SIZE, RecordsRequestError, createRecordsClient, isAbortError, probePlayback } from './recordsArchiveApi';
 import type { RecordsClientEnv } from './recordsArchiveApi';
 
 const FACETS = {
@@ -144,5 +144,41 @@ describe('Records client', () => {
     await flush();
     calls[3].resolve(new Response('<html>', { status: 403 }));
     await expect(html).rejects.toEqual(new RecordsRequestError('request failed (403)', 403, ''));
+  });
+});
+
+describe('playback probe', () => {
+  const url = '/api/receiver/audio-segments/0b1c2d3e-4f50-4a61-8b72-93a4b5c6d7e8/audio';
+
+  it('asks for one byte and reports nothing when the route serves the audio', async () => {
+    const { env, calls } = fakeEnv();
+    const probe = probePlayback(url, env);
+    await flush();
+    expect(calls[0].url).toBe(url);
+    expect(new Headers(calls[0].init.headers).get('Range')).toBe('bytes=0-0');
+    expect(calls[0].init).toMatchObject({ credentials: 'same-origin', cache: 'no-store' });
+    calls[0].resolve(new Response('x', { status: 206 }));
+    expect(await probe).toBeNull();
+  });
+
+  it("returns the console's refusal or the failure", async () => {
+    const { env, calls, fireTimers } = fakeEnv();
+    const busy = probePlayback(url, env);
+    await flush();
+    calls[0].resolve(json({ ok: false, code: 'LAN_RECORDS_BUSY', error: 'at most 4 Records downloads at once' }, 429));
+    expect(await busy).toMatchObject({ code: 'LAN_RECORDS_BUSY', status: 429 });
+    const missing = probePlayback(url, env);
+    await flush();
+    calls[1].resolve(json({ ok: false, code: 'ARCHIVE_FILE_MISSING', error: 'The audio file is missing.' }, 404));
+    expect(await missing).toMatchObject({ code: 'ARCHIVE_FILE_MISSING', status: 404 });
+    const down = probePlayback(url, env);
+    await flush();
+    calls[2].reject(new TypeError('Failed to fetch'));
+    expect(await down).toMatchObject({ code: 'NETWORK' });
+    const slow = probePlayback(url, env);
+    await flush();
+    fireTimers();
+    expect(await slow).toMatchObject({ code: 'TIMEOUT' });
+    expect(await slow).toBeInstanceOf(RecordsRequestError);
   });
 });
