@@ -1,4 +1,5 @@
-import type { JSX } from 'react';
+import { useState } from 'react';
+import type { JSX, ReactNode } from 'react';
 import { useI18n } from '../lib/i18n';
 import type { Translate } from '../lib/i18n';
 import { mirrorGainsInUse } from '../lib/receiverMirror';
@@ -6,9 +7,11 @@ import type { MirrorState, MirrorView } from '../lib/receiverMirror';
 import type { ReceiverMirrorFeed } from '../lib/receiverMirrorFeed';
 import { formatMsps } from '../lib/radioSettings';
 import { formatMhz, formatMhzTrim } from '../lib/spectrumView';
-import { Card, KeyValueGrid, Page, PageGrid, PageHeader, PageNotice, StatusChip, Tag } from '../components/page';
+import { Card, KeyValueGrid, Page, PageGrid, PageHeader, PageNotice, Segmented, StatusChip, Tag } from '../components/page';
 import type { KeyValueItem } from '../components/page';
 import { MirrorSpectrum, mirrorAge, mirrorChipText, mirrorMessage, useMirrorView } from '../components/overview/SpectrumDockMirror';
+import { RecordsTab } from '../components/records/RecordsTab';
+import type { RecordsClient } from '../lib/recordsArchiveApi';
 
 const DASH = '—';
 
@@ -58,13 +61,13 @@ export function mirrorStateItems(t: Translate, view: MirrorView): KeyValueItem[]
   ];
 }
 
-/**
- * The Receiver route in the LAN view: the groundstation's Receiver as the
- * console mirrors it, its state and its spectrum, view only and without
- * audio. The frame is never mounted here: the radio is on the
- * groundstation's USB.
- */
-export function ReceiverMirrorPage({ feed }: { feed: ReceiverMirrorFeed }): JSX.Element {
+export type ReceiverLanTab = 'mirror' | 'records';
+
+// The tab stays chosen across route changes while the page is open.
+let lastTab: ReceiverLanTab = 'mirror';
+
+/** The mirrored Receiver; its own component, so the mirror is read only while this tab shows. */
+function MirrorTab({ feed, tabs }: { feed: ReceiverMirrorFeed; tabs: ReactNode }): JSX.Element {
   const { t } = useI18n();
   const view = useMirrorView(feed);
   // A notice only for what needs attention: no source, a lost source, stale frames, a stopped radio's error.
@@ -75,6 +78,7 @@ export function ReceiverMirrorPage({ feed }: { feed: ReceiverMirrorFeed }): JSX.
       <PageHeader
         title={t('route.receiver')}
         chips={<><Tag tone="info">MIRROR</Tag><StatusChip code={mirrorChipText(t, view)} tone={view.tone} /></>}
+        actions={tabs}
       />
       {message ? <PageNotice tone={noticeTone} title={mirrorChipText(t, view)}>{message}</PageNotice> : null}
       <PageGrid>
@@ -88,6 +92,41 @@ export function ReceiverMirrorPage({ feed }: { feed: ReceiverMirrorFeed }): JSX.
         <Card title={t('mirror.stateTitle')} span={12}>
           <KeyValueGrid items={mirrorStateItems(t, view)} columns={3} label={t('mirror.stateTitle')} />
         </Card>
+      </PageGrid>
+    </Page>
+  );
+}
+
+/**
+ * The Receiver route in the LAN view. Mirror: the groundstation's Receiver as
+ * the console mirrors it, its state and its spectrum, view only and without
+ * audio. Records: the groundstation's recordings and scans, read only (play,
+ * preview, download one record). The frame is never mounted here: the radio
+ * is on the groundstation's USB.
+ */
+export function ReceiverMirrorPage({ feed, initialTab, recordsClient }: {
+  feed: ReceiverMirrorFeed;
+  /** Tests pick the tab; otherwise the last one chosen on this page. */
+  initialTab?: ReceiverLanTab;
+  recordsClient?: RecordsClient;
+}): JSX.Element {
+  const { t } = useI18n();
+  const [tab, setTab] = useState<ReceiverLanTab>(initialTab ?? lastTab);
+  const tabs = (
+    <Segmented<ReceiverLanTab>
+      label={t('records.tabs')}
+      compact
+      value={tab}
+      onChange={(next) => { lastTab = next; setTab(next); }}
+      options={[{ value: 'mirror', label: t('records.tabMirror') }, { value: 'records', label: t('records.tabRecords') }]}
+    />
+  );
+  if (tab === 'mirror') return <MirrorTab feed={feed} tabs={tabs} />;
+  return (
+    <Page className="rx-mirror-page rx-records-page">
+      <PageHeader title={t('route.receiver')} actions={tabs} />
+      <PageGrid>
+        <RecordsTab client={recordsClient} />
       </PageGrid>
     </Page>
   );

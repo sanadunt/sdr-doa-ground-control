@@ -17,6 +17,11 @@ tablet or another computer on the LAN can watch the console. That listener:
 * answers GET and HEAD of the built UI and of a fixed list of read-only API
   routes; every other method and path is refused with ``LAN_READ_ONLY``, and
   an admin cookie is never honoured;
+* answers the Receiver's Records read-only: the archive list routes, a scan
+  preview, the downloads of one record and the audio playback, each matched
+  exactly with a record UUID (``records_route``). A client gets one list read
+  at a time and ``RECORDS_STREAMS_PER_CLIENT`` downloads or playbacks, the LAN
+  view one scan ZIP at a time (``ClientSlots``, ``RECORDS_ZIP_SLOTS``);
 * refuses a Host that is not an IP literal, this machine's host name or
   ``<host name>.local`` (DNS rebinding), and a cross-site Sec-Fetch-Site.
 
@@ -29,6 +34,7 @@ from __future__ import annotations
 
 import io
 import ipaddress
+import re
 import selectors
 import socket
 import threading
@@ -108,6 +114,7 @@ LAN_ADMIN_PASSWORD_DEFAULT = "LAN_ADMIN_PASSWORD_DEFAULT"
 LAN_ACCESS_SAVE_FAILED = "LAN_ACCESS_SAVE_FAILED"
 ORIGIN_REJECTED = "ORIGIN_REJECTED"
 ADMIN_REQUIRED = "ADMIN_REQUIRED"
+LAN_RECORDS_BUSY = "LAN_RECORDS_BUSY"
 
 # The listener's state, and why it is closed ("reason" in the status).
 STATE_OPEN = "open"
@@ -147,7 +154,38 @@ API_ROUTES = frozenset({
 })
 ROUTE_UI = "ui"
 ROUTE_TILE = "tile"
+ROUTE_RECORDS = "records"
 READ_METHODS = ("GET", "HEAD")
+
+# The Receiver's Records, read only. Every other /api/receiver/ path stays
+# refused: settings, marker sets, the raw scan routes, exports, delete,
+# retention and every write. Ids are record UUIDs (receiver_archive's
+# _UUID_RE; tools/test_lan_access.py compares them).
+RECORDS_ARCHIVE_PREFIX = "/api/receiver/archive/"
+RECORD_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+RECORDS_FACETS = "facets"
+RECORDS_CALENDAR = "calendar"
+RECORDS_TIMELINE = "timeline"
+RECORDS_ITEMS = "items"
+RECORDS_SCAN_PREVIEW = "scan-preview"
+RECORDS_AUDIO_DOWNLOAD = "audio-download"
+RECORDS_SCAN_DOWNLOAD = "scan-download"
+RECORDS_AUDIO_PLAYBACK = "audio-playback"
+RECORDS_LIST_ROUTES = (RECORDS_FACETS, RECORDS_CALENDAR, RECORDS_TIMELINE, RECORDS_ITEMS)
+# Routes that stream a file or a ZIP: GET only (a HEAD would read the file or
+# build the ZIP to drop it), counted per client as downloads.
+RECORDS_STREAM_ROUTES = frozenset({RECORDS_AUDIO_DOWNLOAD, RECORDS_SCAN_DOWNLOAD, RECORDS_AUDIO_PLAYBACK})
+# Every Records read takes the record store's one lock, which a live
+# recording's chunk upload also needs. So a LAN client runs one list read at
+# a time (a second waits up to RECORDS_READ_WAIT_S, then 429
+# LAN_RECORDS_BUSY), pages hold at most RECORDS_PAGE_MAX rows, a client has
+# at most RECORDS_STREAMS_PER_CLIENT downloads or playbacks open and the LAN
+# view streams RECORDS_ZIP_SLOTS scan ZIP at a time, apart from the
+# groundstation's own two.
+RECORDS_READ_WAIT_S = 5.0
+RECORDS_PAGE_MAX = 50
+RECORDS_STREAMS_PER_CLIENT = 4
+RECORDS_ZIP_SLOTS = 1
 
 
 def default_settings() -> Dict[str, Any]:
@@ -336,15 +374,92 @@ def fetch_site_allowed(value: Optional[str]) -> bool:
     return (value or "").strip().lower() != "cross-site"
 
 
+def records_route(path: str) -> Optional[str]:
+    """The Records route of ``path`` (RECORDS_*), matched exactly; None for any other path.
+
+    /api/receiver/archive/{facets,calendar,timeline,items},
+    /api/receiver/archive/scans/<id>/preview, .../audio/<id>/download,
+    .../scans/<id>/download and /api/receiver/audio-segments/<id>/audio.
+    """
+    parts = path.split("/")
+    if len(parts) == 5 and path.startswith(RECORDS_ARCHIVE_PREFIX) and parts[4] in RECORDS_LIST_ROUTES:
+        return parts[4]
+    if len(parts) == 7 and path.startswith(RECORDS_ARCHIVE_PREFIX) and RECORD_ID_RE.fullmatch(parts[5]):
+        if parts[4] == "scans" and parts[6] == "preview":
+            return RECORDS_SCAN_PREVIEW
+        if parts[4] == "audio" and parts[6] == "download":
+            return RECORDS_AUDIO_DOWNLOAD
+        if parts[4] == "scans" and parts[6] == "download":
+            return RECORDS_SCAN_DOWNLOAD
+        return None
+    if (len(parts) == 6 and parts[:4] == ["", "api", "receiver", "audio-segments"]
+            and RECORD_ID_RE.fullmatch(parts[4]) and parts[5] == "audio"):
+        return RECORDS_AUDIO_PLAYBACK
+    return None
+
+
 def lan_route(path: str) -> Optional[str]:
-    """ROUTE_UI, ROUTE_TILE or the API path for a route the LAN view answers; None otherwise."""
+    """ROUTE_UI, ROUTE_TILE, ROUTE_RECORDS or the API path for a route the LAN view answers; None otherwise."""
     if path in UI_ROOT_PATHS or (path.startswith(UI_ASSET_PREFIX) and len(path) > len(UI_ASSET_PREFIX)):
         return ROUTE_UI
     if path.startswith(TILE_PREFIX):
         return ROUTE_TILE
     if path in API_ROUTES:
         return path
+    if records_route(path) is not None:
+        return ROUTE_RECORDS
     return None
+
+
+def records_fetch_site_allowed(value: Optional[str]) -> bool:
+    """Sec-Fetch-Site of a Records read: absent, none or same-origin, as the Receiver's own read rule.
+
+    Stricter than fetch_site_allowed: another port of this host (same-site)
+    is refused too.
+    """
+    return (value or "").strip().lower() in ("", "none", "same-origin")
+
+
+class ClientSlots:
+    """At most ``limit`` requests at once per client address; the record holds held slots only.
+
+    So it holds at most as many addresses as the listener has requests open
+    (MAX_CONNECTIONS), whatever addresses the LAN uses.
+    """
+
+    def __init__(self, limit: int, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._limit = limit
+        self._clock = clock
+        self._condition = threading.Condition()
+        self._held: Dict[str, int] = {}
+
+    def acquire(self, address: str, timeout_s: float = 0.0) -> bool:
+        """Take a slot of ``address``, waiting up to ``timeout_s``; False when none came free."""
+        deadline = self._clock() + timeout_s
+        with self._condition:
+            while self._held.get(address, 0) >= self._limit:
+                remaining = deadline - self._clock()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(remaining)
+            self._held[address] = self._held.get(address, 0) + 1
+            return True
+
+    def release(self, address: str) -> None:
+        with self._condition:
+            count = self._held.get(address, 0) - 1
+            if count > 0:
+                self._held[address] = count
+            else:
+                self._held.pop(address, None)
+            self._condition.notify_all()
+
+    def held(self, address: Optional[str] = None) -> int:
+        """Slots held by ``address``, or by every address."""
+        with self._condition:
+            if address is None:
+                return sum(self._held.values())
+            return self._held.get(address, 0)
 
 
 class RefusalLog:

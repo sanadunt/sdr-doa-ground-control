@@ -2386,14 +2386,16 @@ class ReceiverRecordStore:
         return found
 
     def archive_items(self, archive_filter: ArchiveFilter, sort: str = "start", order: str = "desc",
-                      offset: int = 0, limit: int = ra.ITEMS_DEFAULT_LIMIT) -> Dict[str, Any]:
+                      offset: int = 0, limit: int = ra.ITEMS_DEFAULT_LIMIT, recover: bool = True) -> Dict[str, Any]:
+        """One page of the archive. ``recover=False`` (the LAN view) leaves stale sessions to the next local read."""
         if sort not in _SORT_COLUMNS or order not in ra.SORT_ORDERS:
             raise ra.invalid("sort or order is not supported")
         if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= ra.ITEMS_MAX_OFFSET:
             raise ra.invalid(f"offset must be an integer between 0 and {ra.ITEMS_MAX_OFFSET}")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= ra.ITEMS_MAX_LIMIT:
             raise ra.invalid(f"limit must be an integer between 1 and {ra.ITEMS_MAX_LIMIT}")
-        self._maybe_recover()
+        if recover:
+            self._maybe_recover()
         now_ms = self._now_ms()
         union, params = self._archive_legs(archive_filter, now_ms)
         direction = "ASC" if order == "asc" else "DESC"
@@ -2421,8 +2423,10 @@ class ReceiverRecordStore:
         with self._lock, self._connect() as db:
             return self._counts(db, union, params)
 
-    def archive_facets(self) -> Dict[str, Any]:
-        self._maybe_recover()
+    def archive_facets(self, recover: bool = True) -> Dict[str, Any]:
+        """Filter choices and totals. ``recover=False`` (the LAN view) leaves stale sessions to the next local read."""
+        if recover:
+            self._maybe_recover()
         now_ms = self._now_ms()
         limit = ra.FACET_LIMIT
         scans_sql = "FROM scans WHERE archived=1 AND status!='deleting'"

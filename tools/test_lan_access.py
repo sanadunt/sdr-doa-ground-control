@@ -49,6 +49,7 @@ finally:
 
 import lan_access as lan  # noqa: E402
 import preferences_store  # noqa: E402
+import receiver_archive  # noqa: E402
 from tile_cache import TILE_ROUTE_PREFIX  # noqa: E402
 
 BASE_URL = "http://doasdr.local:8081"
@@ -59,6 +60,35 @@ NOBODY = [ipaddress.ip_network(TEST_NET)]
 FAKE_SNAPSHOT = {"overall_state": "UNVERIFIED", "source": "fake"}
 
 Headers = Sequence[Tuple[str, str]]
+
+RECORD_ID = "0b1c2d3e-4f50-4a61-8b72-93a4b5c6d7e8"
+# The Records read routes the LAN view answers.
+RECORDS_PATHS = {
+    "/api/receiver/archive/facets": lan.RECORDS_FACETS,
+    "/api/receiver/archive/calendar": lan.RECORDS_CALENDAR,
+    "/api/receiver/archive/timeline": lan.RECORDS_TIMELINE,
+    "/api/receiver/archive/items": lan.RECORDS_ITEMS,
+    f"/api/receiver/archive/scans/{RECORD_ID}/preview": lan.RECORDS_SCAN_PREVIEW,
+    f"/api/receiver/archive/audio/{RECORD_ID}/download": lan.RECORDS_AUDIO_DOWNLOAD,
+    f"/api/receiver/archive/scans/{RECORD_ID}/download": lan.RECORDS_SCAN_DOWNLOAD,
+    f"/api/receiver/audio-segments/{RECORD_ID}/audio": lan.RECORDS_AUDIO_PLAYBACK,
+}
+# Every other Receiver read stays refused on the LAN view.
+REFUSED_RECEIVER_PATHS = (
+    "/api/receiver/settings", "/api/receiver/records", "/api/receiver/audio-facets", "/api/receiver/marker-sets",
+    "/api/receiver/scans", f"/api/receiver/scans/{RECORD_ID}", f"/api/receiver/scans/{RECORD_ID}/trace",
+    f"/api/receiver/scans/{RECORD_ID}/traces", f"/api/receiver/scans/{RECORD_ID}/candidates",
+    f"/api/receiver/audio-segments/{RECORD_ID}", f"/api/receiver/audio-segments/{RECORD_ID}/chunk",
+    f"/api/receiver/audio-segments/{RECORD_ID}/finish",
+    "/api/receiver/archive/retention-preview", "/api/receiver/archive/exports",
+    "/api/receiver/archive/exports/" + "A" * 32, "/api/receiver/archive/delete", "/api/receiver/archive/nothing",
+    "/api/receiver/archive/", "/api/receiver/archive/items/", "/api/receiver/archive//items",
+    "/api/receiver/archive/facets/x", f"/api/receiver/archive/audio/{RECORD_ID}/preview",
+    f"/api/receiver/archive/scans/{RECORD_ID}/preview/", f"/api/receiver/archive/audio/{RECORD_ID}",
+    "/api/receiver/archive/scans/not-a-uuid/preview", f"/api/receiver/archive/scans/{RECORD_ID}x/download",
+    "/api/receiver/archive/audio/..%2F..%2Fetc%2Fpasswd/download", "/api/receiver/audio-segments/../audio",
+    f"/api/receiver/audio-segments/{RECORD_ID}/audio/", f"/api/receiver//audio-segments/{RECORD_ID}/audio",
+)
 
 
 def _free_port(host: str = "127.0.0.1") -> int:
@@ -389,8 +419,58 @@ class LanRequestRuleTests(unittest.TestCase):
             "/api/mqtt/config-get", "/api/mqtt/config-reported", "/api/mqtt/connect", "/api/dry-run/config-patch",
             "/assets/", "/assets",
             "/api/health/", "/api/", "/.env", "/tools/ground_console.py",
-        ):
+        ) + REFUSED_RECEIVER_PATHS:
             self.assertIsNone(lan.lan_route(path), path)
+            self.assertIsNone(lan.records_route(path), path)
+
+    def test_records_routes_match_exactly(self) -> None:
+        for path, kind in RECORDS_PATHS.items():
+            self.assertEqual(lan.records_route(path), kind, path)
+            self.assertEqual(lan.lan_route(path), lan.ROUTE_RECORDS, path)
+        self.assertEqual(lan.records_route(f"/api/receiver/archive/scans/{RECORD_ID.upper()}/preview"), lan.RECORDS_SCAN_PREVIEW)
+        self.assertEqual(lan.RECORDS_STREAM_ROUTES, frozenset({
+            lan.RECORDS_AUDIO_DOWNLOAD, lan.RECORDS_SCAN_DOWNLOAD, lan.RECORDS_AUDIO_PLAYBACK,
+        }))
+
+    def test_the_tablets_page_size_is_the_lan_cap(self) -> None:
+        source = (TOOLS_DIR.parent / "frontend" / "src" / "lib" / "recordsArchiveApi.ts").read_text(encoding="utf-8")
+        match = re.search(r"export const RECORDS_PAGE_SIZE = (\d+);", source)
+        assert match is not None
+        self.assertEqual(int(match.group(1)), lan.RECORDS_PAGE_MAX)
+        self.assertLessEqual(lan.RECORDS_PAGE_MAX, receiver_archive.ITEMS_MAX_LIMIT)
+
+    def test_the_record_id_rule_is_the_archives(self) -> None:
+        archive_rule = receiver_archive._UUID_RE
+        self.assertEqual((lan.RECORD_ID_RE.pattern, lan.RECORD_ID_RE.flags), (archive_rule.pattern, archive_rule.flags))
+
+    def test_records_fetch_site_rule(self) -> None:
+        for value in (None, "", "none", "same-origin", " Same-Origin "):
+            self.assertTrue(lan.records_fetch_site_allowed(value), value)
+        for value in ("same-site", "cross-site", "other"):
+            self.assertFalse(lan.records_fetch_site_allowed(value), value)
+
+    def test_client_slots_bound_each_address(self) -> None:
+        slots = lan.ClientSlots(2)
+        self.assertTrue(slots.acquire("192.168.1.5"))
+        self.assertTrue(slots.acquire("192.168.1.5"))
+        self.assertFalse(slots.acquire("192.168.1.5"))
+        self.assertTrue(slots.acquire("192.168.1.6"))
+        self.assertEqual((slots.held("192.168.1.5"), slots.held()), (2, 3))
+        # A waiting request gets the slot a finishing one frees.
+        timer = threading.Timer(0.1, slots.release, ("192.168.1.5",))
+        timer.start()
+        started = time.monotonic()
+        self.assertTrue(slots.acquire("192.168.1.5", timeout_s=5.0))
+        self.assertLess(time.monotonic() - started, 4.0)
+        timer.join()
+        started = time.monotonic()
+        self.assertFalse(slots.acquire("192.168.1.5", timeout_s=0.1))
+        self.assertGreaterEqual(time.monotonic() - started, 0.09)
+        for address in ("192.168.1.5", "192.168.1.5", "192.168.1.6"):
+            slots.release(address)
+        # Released addresses leave the record.
+        self.assertEqual(slots.held(), 0)
+        self.assertEqual(slots._held, {})
 
     def test_client_addresses(self) -> None:
         allowed = [ipaddress.ip_network("192.168.1.0/24"), ipaddress.ip_network("fd00:1::/64")]
@@ -631,13 +711,12 @@ class LanListenerTests(_ServerCase):
 
     def test_every_other_path_is_refused(self) -> None:
         for path in (
-            "/receiver", "/receiver/", "/receiver/index.html", "/api/receiver/settings", "/api/receiver/records",
-            "/api/receiver/archive/items", "/api/receiver/scans", "/api/lan-access", "/api/mqtt/config-reported",
+            "/receiver", "/receiver/", "/receiver/index.html", "/api/lan-access", "/api/mqtt/config-reported",
             "/api/mqtt/config-patch", "/api/mqtt/config-patch/gc-0123", "/api/mqtt/config-get", "/api/mqtt/connect",
             "/api/admin/login",
             "/api/admin/logout", "/api/admin/branding", "/api/dry-run/config-patch", "/api/unknown", "/.env",
             "/tools/ground_console.py", "/assets", "/api/health/",
-        ):
+        ) + REFUSED_RECEIVER_PATHS:
             with self.subTest(path=path):
                 self.assert_refused(self.get(path), 403, "LAN_READ_ONLY")
 
@@ -657,8 +736,15 @@ class LanListenerTests(_ServerCase):
             ("PUT", "/api/preferences", {"values": {"sdr-console-theme": "light"}}),
             ("POST", "/api/admin/branding", {"app_name": "LAN"}),
             ("POST", "/api/receiver/sessions", {}),
+            ("POST", "/api/receiver/settings", {"retention_days": 1, "confirm": True}),
+            ("POST", "/api/receiver/marker-sets", {"name": "LAN", "markers": []}),
+            ("POST", "/api/receiver/archive/exports", {"items": [{"kind": "audio", "id": RECORD_ID}]}),
+            ("POST", "/api/receiver/archive/delete", {"items": [{"kind": "audio", "id": RECORD_ID}]}),
+            ("POST", "/api/receiver/archive/items", {}),
+            ("PUT", f"/api/receiver/audio-segments/{RECORD_ID}/audio", {}),
             ("POST", "/api/mirror/receiver", {"v": 1}),
             ("DELETE", "/api/receiver/scans/abc", None),
+            ("DELETE", f"/api/receiver/records/{RECORD_ID}", None),
             ("POST", "/api/dry-run/config-patch", {"changes": {}}),
             ("PATCH", "/", None),
             ("OPTIONS", "/api/health", None),

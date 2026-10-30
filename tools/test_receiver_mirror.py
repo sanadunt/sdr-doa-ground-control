@@ -586,9 +586,13 @@ class MirrorRouteTests(_ServerCase):
         self.assertIn(f'"POST {rm.ROUTE} HTTP/1.1" 400', self.output.getvalue()[mark:])
 
     def test_the_receiver_read_rule_is_unchanged_on_the_lan_view(self) -> None:
+        # The /api/mirror/ prefix opens nothing under /api/receiver/; only the
+        # Records read routes answer there (tools/test_receiver_archive.py).
         lan_port = self.open_lan(self.server)
-        status, _headers, body = _request(lan_port, "GET", "/api/receiver/archive/facets")
-        self.assertEqual((status, _json(body)["code"]), (403, "LAN_READ_ONLY"))
+        for path in ("/api/receiver/settings", "/api/receiver/marker-sets", "/api/receiver/records"):
+            with self.subTest(path=path):
+                status, _headers, body = _request(lan_port, "GET", path)
+                self.assertEqual((status, _json(body)["code"]), (403, "LAN_READ_ONLY"))
 
 
 if __name__ == "__main__":

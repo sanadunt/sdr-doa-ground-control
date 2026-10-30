@@ -1,8 +1,10 @@
 """Receiver Records archive: migration, queries, retention, delete, ZIP export and HTTP routes."""
 from __future__ import annotations
 
+import contextlib
 import http.client
 import io
+import ipaddress
 import json
 import os
 import re
@@ -26,6 +28,7 @@ ROOT = TOOLS_DIR.parent
 sys.path.insert(0, str(TOOLS_DIR))
 
 import ground_console  # noqa: E402
+import lan_access as lan  # noqa: E402
 import receiver_archive as ra  # noqa: E402
 import receiver_record_store  # noqa: E402
 from receiver_archive import ArchiveError, ArchiveFilter  # noqa: E402
@@ -2067,6 +2070,275 @@ class ArchiveHttpTests(StoreCase):
         result = self.request("GET", f"/api/receiver/audio-segments/{segment_id}/audio", headers={"Range": "bytes=10-19"})
         self.assertEqual((result.status, result.body), (206, audio[10:20]))
 
+
+
+class LanRecordsHttpTests(StoreCase):
+    """The Records read routes on the LAN view: its own read rule, small pages, per-client limits, no write."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        password = mock.patch.object(ground_console, "ADMIN_PASSWORD", "records-lan-test-password")
+        password.start()
+        self.addCleanup(password.stop)
+        quiet = contextlib.redirect_stdout(io.StringIO())
+        quiet.__enter__()
+        self.addCleanup(quiet.__exit__, None, None, None)
+        self.server = ground_console.GroundConsoleServer(
+            ("127.0.0.1", 0), "http://doasdr.local:8081",
+            config_path=str(root / "console.json"), branding_path=str(root / "branding.json"),
+            receiver_data_dir=root / "receiver",
+        )
+        self.store = self.server.receiver_store
+        self.clock = Clock(BASE)
+        self.store.clock = self.clock
+        self.data_dir = self.store.data_dir
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.port = self.server.server_address[1]
+        status = self.server.lan.apply(
+            {"enabled": True, "port": 0, "bind": "127.0.0.1", "allowed_clients": []},
+            allowed=[ipaddress.ip_network("127.0.0.1/32")],
+        )
+        self.assertEqual(status["state"], "open", status)
+        self.lan_port = int(self.server.lan._server.server_address[1])
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.thread.join(timeout=5)
+        self.server.server_close()
+        self.temp.cleanup()
+
+    def request(self, method: str, path: str, headers: Optional[Dict[str, str]] = None, *, port: Optional[int] = None,
+                body: Optional[bytes] = None) -> HttpResult:
+        """One request to the LAN view (Host 127.0.0.1:<port> unless given), or to ``port``."""
+        target = port if port is not None else self.lan_port
+        connection = http.client.HTTPConnection("127.0.0.1", target, timeout=10)
+        request_headers = {"Host": f"127.0.0.1:{target}", **(headers or {})}
+        connection.request(method, path, body=body, headers=request_headers)
+        response = connection.getresponse()
+        result = HttpResult(response.status, dict(response.getheaders()), response.read(), response.version)
+        connection.close()
+        return result
+
+    def assert_code(self, result: HttpResult, status: int, code: str) -> Dict[str, Any]:
+        self.assertEqual(result.status, status, result.body[:300])
+        body = result.json()
+        self.assertEqual((body["ok"], body["code"]), (False, code))
+        return body
+
+    def drained(self) -> Tuple[int, int, bool]:
+        """Read slots, download slots held, and whether the LAN ZIP slot is free, once nothing runs.
+
+        A handler releases its slots in a finally after its last byte, which
+        the client may have read already, so this waits (at most 5 s).
+        """
+        lan_server = self.server.lan._server
+        zip_slots = self.server.lan_records_zip_slots
+        deadline = time.monotonic() + 5.0
+        while True:
+            zip_free = zip_slots.acquire(blocking=False)
+            if zip_free:
+                zip_slots.release()
+            state = (lan_server.records_reads.held(), lan_server.records_streams.held(), zip_free)
+            if state == (0, 0, True) or time.monotonic() > deadline:
+                return state
+            time.sleep(0.01)
+
+    def records(self) -> Tuple[str, str, int]:
+        audio = bytes(range(256)) * 40
+        _, segment_id = self.recording(BASE, BASE + timedelta(seconds=3), audio=audio)
+        scan_id = self.scan(BASE + timedelta(minutes=1), BASE + timedelta(minutes=2), traces=2, candidates=1)
+        self.clock.set(BASE + timedelta(minutes=5))
+        return segment_id, scan_id, ms(datetime(2025, 3, 10, tzinfo=UTC))
+
+    def read_paths(self, segment_id: str, scan_id: str, day: int) -> List[str]:
+        bounds = ",".join(str(day + index * 86_400_000) for index in range(3))
+        return [
+            "/api/receiver/archive/facets",
+            f"/api/receiver/archive/calendar?bounds={bounds}",
+            f"/api/receiver/archive/timeline?from_ms={day}&to_ms={day + 86_400_000}",
+            f"/api/receiver/archive/items?from_ms={day}&to_ms={day + 86_400_000}&limit=50",
+            f"/api/receiver/archive/scans/{scan_id}/preview",
+            f"/api/receiver/archive/audio/{segment_id}/download",
+            f"/api/receiver/archive/scans/{scan_id}/download",
+            f"/api/receiver/audio-segments/{segment_id}/audio",
+        ]
+
+    def test_the_read_routes_answer_on_the_lan_view(self) -> None:
+        segment_id, scan_id, day = self.records()
+        audio = (self.data_dir / "audio" / f"{segment_id}.webm").read_bytes()
+        facets = self.request("GET", "/api/receiver/archive/facets").json()
+        self.assertEqual((facets["totals"]["audio"], facets["totals"]["scan"]), (1, 1))
+        bounds = ",".join(str(day + index * 86_400_000) for index in range(3))
+        calendar = self.request("GET", f"/api/receiver/archive/calendar?bounds={bounds}&type=all").json()
+        self.assertEqual(calendar["days"], [{"audio": 1, "scan": 1}, {"audio": 0, "scan": 0}])
+        timeline = self.request("GET", f"/api/receiver/archive/timeline?from_ms={day}&to_ms={day + 86_400_000}").json()
+        self.assertEqual(timeline["counts"], {"audio": 1, "scan": 1})
+        items = self.request("GET", f"/api/receiver/archive/items?from_ms={day}&to_ms={day + 86_400_000}&limit=50").json()
+        self.assertEqual({item["id"] for item in items["items"]}, {segment_id, scan_id})
+        preview = self.request("GET", f"/api/receiver/archive/scans/{scan_id}/preview").json()
+        self.assertEqual(len(preview["max_db"]), ra.PREVIEW_BINS)
+        download = self.request("GET", f"/api/receiver/archive/audio/{segment_id}/download?time_zone=Asia%2FJakarta")
+        self.assertEqual((download.status, download.body), (200, audio))
+        self.assertTrue(download.headers["Content-Disposition"].startswith('attachment; filename="20250310-190000+0700_'))
+        scan_zip = self.request("GET", f"/api/receiver/archive/scans/{scan_id}/download")
+        self.assertEqual(scan_zip.status, 200)
+        with zipfile.ZipFile(io.BytesIO(scan_zip.body)) as archive:
+            self.assertIn("manifest.json", archive.namelist())
+        playback = self.request("GET", f"/api/receiver/audio-segments/{segment_id}/audio", {"Range": "bytes=0-3"})
+        self.assertEqual((playback.status, playback.body), (206, audio[:4]))
+        self.assertEqual(playback.headers["Content-Range"], f"bytes 0-3/{len(audio)}")
+        # Every slot a request took is free again.
+        self.assertEqual(self.drained(), (0, 0, True))
+
+    def test_the_lan_read_rule(self) -> None:
+        segment_id, scan_id, day = self.records()
+        for path in self.read_paths(segment_id, scan_id, day):
+            for headers in ({}, {"Sec-Fetch-Site": "none"}, {"Sec-Fetch-Site": "same-origin"}):
+                with self.subTest(path=path, headers=headers):
+                    self.assertIn(self.request("GET", path, headers).status, (200, 206))
+            with self.subTest(path=path, rule="same-site"):
+                # Another port of this host: allowed elsewhere on the LAN view, not for Records.
+                body = self.assert_code(self.request("GET", path, {"Sec-Fetch-Site": "same-site"}), 403, "ORIGIN_REJECTED")
+                self.assertIn(body["code"], ra.ARCHIVE_ERROR_CODES)
+            for headers in ({"Sec-Fetch-Site": "cross-site"}, {"Host": f"evil.example:{self.lan_port}"},
+                            {"Host": f"localhost:{self.lan_port}"}, {"Host": f"127.0.0.1:{self.lan_port + 1}"}):
+                with self.subTest(path=path, headers=headers):
+                    self.assert_code(self.request("GET", path, headers), 403, "ORIGIN_REJECTED")
+        # The loopback listener keeps its own rule: a LAN Host there is refused.
+        refused = self.request("GET", "/api/receiver/archive/facets", {"Host": f"192.168.1.10:{self.port}"}, port=self.port)
+        self.assertEqual(self.assert_code(refused, 403, "ORIGIN_REJECTED")["error"], ra.READ_REJECTED_MESSAGE)
+
+    def test_every_other_receiver_route_and_every_write_stays_refused(self) -> None:
+        segment_id, scan_id, _day = self.records()
+        token = self.request(
+            "POST", "/api/receiver/archive/exports", {"Origin": f"http://127.0.0.1:{self.port}", "Content-Type": "application/json"},
+            port=self.port, body=json.dumps({"items": [{"kind": "scan", "id": scan_id}]}).encode("utf-8"),
+        ).json()["export_id"]
+        for path in (
+            "/api/receiver/settings", "/api/receiver/records", "/api/receiver/audio-facets", "/api/receiver/marker-sets",
+            f"/api/receiver/scans/{scan_id}", f"/api/receiver/scans/{scan_id}/trace?sweep=0",
+            f"/api/receiver/scans/{scan_id}/traces", f"/api/receiver/scans/{scan_id}/candidates",
+            "/api/receiver/archive/retention-preview?days=7", f"/api/receiver/archive/exports/{token}",
+            "/api/receiver/archive/nothing", f"/api/receiver/archive/audio/{segment_id}/preview",
+        ):
+            with self.subTest(path=path):
+                self.assert_code(self.request("GET", path), 403, "LAN_READ_ONLY")
+        # The export the groundstation prepared is still there for it.
+        self.assertEqual(self.request("GET", f"/api/receiver/archive/exports/{token}", port=self.port).status, 200)
+        origin = {"Origin": f"http://127.0.0.1:{self.lan_port}", "Content-Type": "application/json"}
+        selection = json.dumps({"items": [{"kind": "audio", "id": segment_id}, {"kind": "scan", "id": scan_id}]}).encode("utf-8")
+        for method, path, body in (
+            ("POST", "/api/receiver/archive/exports", selection),
+            ("POST", "/api/receiver/archive/delete", selection),
+            ("POST", "/api/receiver/settings", json.dumps({"retention_days": 1, "confirm": True}).encode("utf-8")),
+            ("POST", "/api/receiver/marker-sets", b"{}"),
+            ("POST", "/api/receiver/archive/items", b"{}"),
+            ("DELETE", f"/api/receiver/scans/{scan_id}", None),
+            ("DELETE", f"/api/receiver/audio-segments/{segment_id}", None),
+            ("PUT", f"/api/receiver/audio-segments/{segment_id}/audio", b"x"),
+        ):
+            with self.subTest(method=method, path=path):
+                result = self.request(method, path, origin, body=body)
+                self.assert_code(result, 405, "LAN_READ_ONLY")
+                self.assertEqual(result.headers["Allow"], "GET, HEAD")
+        self.assertEqual(self.store.get_settings()["retention_days"], None)
+        self.assertEqual({item["id"] for item in self.store.archive_items(ArchiveFilter())["items"]}, {segment_id, scan_id})
+
+    def test_playback_errors_use_the_archive_shape_and_never_name_a_path(self) -> None:
+        segment_id, _scan_id, _day = self.records()
+        unknown = self.request("GET", "/api/receiver/audio-segments/dddddddd-0000-4000-8000-000000000001/audio")
+        body = self.assert_code(unknown, 404, "ARCHIVE_FILE_MISSING")
+        self.assertIn(body["code"], ra.ARCHIVE_ERROR_CODES)
+        # The file vanishes between the store's check and the read (a delete or a retention pass).
+        gone = self.data_dir / "audio" / "vanished.webm"
+        with mock.patch.object(self.store, "get_segment_audio", return_value=(gone, "audio/webm")):
+            result = self.request("GET", f"/api/receiver/audio-segments/{segment_id}/audio", {"Range": "bytes=0-3"})
+        body = self.assert_code(result, 404, "ARCHIVE_FILE_MISSING")
+        self.assertNotIn(str(self.data_dir), result.body.decode("utf-8"))
+        self.assertEqual(body["error"], ra.ARCHIVE_ERROR_MESSAGES[ra.ARCHIVE_FILE_MISSING])
+        with mock.patch.object(self.store, "get_segment_audio", side_effect=sqlite3.OperationalError(f"disk I/O error at {self.data_dir}")):
+            result = self.request("GET", f"/api/receiver/audio-segments/{segment_id}/audio")
+        self.assert_code(result, 500, "ARCHIVE_STORAGE_ERROR")
+        self.assertNotIn(str(self.data_dir), result.body.decode("utf-8"))
+
+    def test_pages_are_small_on_the_lan_view(self) -> None:
+        self.records()
+        self.assertEqual(self.request("GET", f"/api/receiver/archive/items?limit={lan.RECORDS_PAGE_MAX}").status, 200)
+        body = self.assert_code(self.request("GET", f"/api/receiver/archive/items?limit={lan.RECORDS_PAGE_MAX + 1}"),
+                                400, "ARCHIVE_INVALID_REQUEST")
+        self.assertIn(str(lan.RECORDS_PAGE_MAX), body["error"])
+        self.assertEqual(self.request("GET", "/api/receiver/archive/items?limit=200", port=self.port).status, 200)
+
+    def test_head_answers_lists_and_refuses_downloads(self) -> None:
+        segment_id, scan_id, _day = self.records()
+        listed = self.request("HEAD", "/api/receiver/archive/items")
+        self.assertEqual((listed.status, listed.body), (200, b""))
+        with mock.patch.object(self.store, "archive_scan_entry", wraps=self.store.archive_scan_entry) as scan_entry, \
+                mock.patch.object(self.store, "get_segment_audio", wraps=self.store.get_segment_audio) as segment_audio:
+            for path in (f"/api/receiver/archive/audio/{segment_id}/download", f"/api/receiver/archive/scans/{scan_id}/download",
+                         f"/api/receiver/audio-segments/{segment_id}/audio"):
+                with self.subTest(path=path):
+                    result = self.request("HEAD", path)
+                    self.assertEqual((result.status, result.body), (405, b""))
+                    self.assertEqual(result.headers["Allow"], "GET")
+            # No file was opened and no ZIP built for a HEAD.
+            scan_entry.assert_not_called()
+            segment_audio.assert_not_called()
+
+    def test_lan_reads_never_recover_stale_sessions(self) -> None:
+        self.records()
+        with mock.patch.object(self.store, "_maybe_recover") as recover:
+            self.assertEqual(self.request("GET", "/api/receiver/archive/items").status, 200)
+            self.assertEqual(self.request("GET", "/api/receiver/archive/facets").status, 200)
+            recover.assert_not_called()
+            self.assertEqual(self.request("GET", "/api/receiver/archive/items", port=self.port).status, 200)
+            recover.assert_called()
+
+    def test_one_list_read_at_a_time_per_client(self) -> None:
+        self.records()
+        reads = self.server.lan._server.records_reads
+        self.assertTrue(reads.acquire("127.0.0.1"))
+        held = True  # this test's own slot, released once
+        try:
+            with mock.patch.object(lan, "RECORDS_READ_WAIT_S", 0.2):
+                busy = self.request("GET", "/api/receiver/archive/items")
+            self.assert_code(busy, 429, "LAN_RECORDS_BUSY")
+            self.assertEqual(busy.headers["Retry-After"], "1")
+            # A read that waits gets the slot when the other read ends.
+            timer = threading.Timer(0.2, reads.release, ("127.0.0.1",))
+            timer.start()
+            held = False
+            self.assertEqual(self.request("GET", "/api/receiver/archive/items").status, 200)
+            timer.join()
+        finally:
+            if held:
+                reads.release("127.0.0.1")
+        self.assertEqual(self.drained(), (0, 0, True))
+
+    def test_downloads_per_client_and_the_lan_zip_slot(self) -> None:
+        segment_id, scan_id, _day = self.records()
+        streams = self.server.lan._server.records_streams
+        for _ in range(lan.RECORDS_STREAMS_PER_CLIENT):
+            self.assertTrue(streams.acquire("127.0.0.1"))
+        try:
+            self.assert_code(self.request("GET", f"/api/receiver/archive/audio/{segment_id}/download"), 429, "LAN_RECORDS_BUSY")
+            # List reads are counted apart.
+            self.assertEqual(self.request("GET", "/api/receiver/archive/facets").status, 200)
+        finally:
+            for _ in range(lan.RECORDS_STREAMS_PER_CLIENT):
+                streams.release("127.0.0.1")
+        zip_slots = self.server.lan_records_zip_slots
+        self.assertTrue(zip_slots.acquire(blocking=False))
+        try:
+            self.assert_code(self.request("GET", f"/api/receiver/archive/scans/{scan_id}/download"), 503, "ARCHIVE_EXPORT_BUSY")
+            # The groundstation's own two slots are untouched.
+            self.assertEqual(self.request("GET", f"/api/receiver/archive/scans/{scan_id}/download", port=self.port).status, 200)
+        finally:
+            zip_slots.release()
+        self.assertEqual(self.request("GET", f"/api/receiver/archive/scans/{scan_id}/download").status, 200)
+        self.assertEqual(self.drained(), (0, 0, True))
 
 if __name__ == "__main__":
     unittest.main()

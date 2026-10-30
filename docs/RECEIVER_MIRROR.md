@@ -140,7 +140,7 @@ Dilayani listener loopback dan listener LAN (masuk daftar route LAN), masing-mas
 - Listener loopback memakai aturan baca Receiver, sama dengan `/api/receiver/*`: `Sec-Fetch-Site` tidak ada, `none`, atau `same-origin`, dan tepat satu `Host` berupa nama loopback (`127.0.0.1`, `localhost`, `[::1]`) di port console. Mirror membawa apa yang ditampilkan Receiver (frekuensi, mode, gain, status rekam, spektrum), jadi situs lain, halaman dari port localhost lain, dan halaman DNS rebinding (yang mengirim nama host-nya sendiri) tidak bisa membacanya.
 - Listener LAN memakai aturan `Host`-nya sendiri (alamat IP, atau nama komputer ini, di port LAN) dan hanya menolak `Sec-Fetch-Site: cross-site`, seperti `/api/tiles`.
 
-Route `/api/receiver/*` tetap tertutup dari LAN; prefix `/api/mirror/` dipilih justru supaya daftar route LAN tidak perlu membukanya.
+Route `/api/receiver/*` tetap tertutup dari LAN kecuali route baca Rekaman (tab Rekaman di tablet, lihat bagian 8); prefix `/api/mirror/` dipilih justru supaya daftar route LAN tidak perlu membuka route Receiver lain.
 
 ```json
 {
@@ -169,7 +169,7 @@ Umur dihitung dengan jam monotonic server sejak post diterima, jadi jam sumber d
 - **Laju sumber**: paling banyak satu post per 200 ms (5 per detik) dan satu yang sedang berjalan. Post membawa state sekarang dan frame terbaru yang belum terkirim; frame yang lebih tua dibuang, tidak diantre. Post dikirim saat ada frame baru, state berubah, atau heartbeat jatuh tempo.
 - **Heartbeat**: state dikirim paling lambat tiap 2 detik walaupun tidak ada perubahan dan tidak ada frame (RX berhenti).
 - **Setelah penolakan**: 429, 400, atau gagal jaringan membuat sumber menunggu 1 detik, lalu dua kali lipat sampai 10 detik. `409 MIRROR_LAN_CLOSED` menghentikan post dan langganan frame; sumber lalu menanyakan `/api/health` tiap 10 detik sampai `lan_access.state` kembali `open`.
-- **Penampil**: membaca GET tiap 200 ms selama dock MIRROR atau rute Receiver tampil dan halaman terlihat, tiap 1 detik selama sumber putus, dan 1, 2, lalu 5 detik setelah baca gagal. Umur dihitung terus dari jawaban terakhir.
+- **Penampil**: membaca GET tiap 200 ms selama dock MIRROR, atau tab **Mirror** di rute Receiver (tab **Rekaman** tidak membacanya), tampil dan halaman terlihat, tiap 1 detik selama sumber putus, dan 1, 2, lalu 5 detik setelah baca gagal. Umur dihitung terus dari jawaban terakhir.
 
 Aturan basi (`mirrorView()` di `lib/receiverMirror.ts`, berurutan):
 
@@ -206,10 +206,11 @@ Listener LAN melayani paling banyak 32 permintaan sekaligus; beberapa tablet yan
 
 ## 8. Batas
 
-- Mirror hanya tampilan. Tidak ada perintah ke Receiver, tidak ada audio, tidak ada rekaman, tidak ada penanda dari penampil. Semua kontrol di dock MIRROR terlihat dengan statusnya tetapi nonaktif, dan kanvasnya tidak bisa dipakai untuk tuning, menandai, atau tombol panah.
+- Mirror hanya tampilan. Tidak ada perintah ke Receiver, tidak ada audio langsung, tidak ada rekaman, tidak ada penanda dari penampil. Semua kontrol di dock MIRROR terlihat dengan statusnya tetapi nonaktif, dan kanvasnya tidak bisa dipakai untuk tuning, menandai, atau tombol panah.
 - Frame Receiver tidak pernah dipasang di mode LAN lihat-saja (RadioSpectrum ada di USB groundstation).
 - Tidak ada yang ditulis ke disk, dan tidak ada data rahasia di state.
 - Mode LAN tetap read-only: `POST /api/mirror/receiver` hanya lewat loopback, GET-nya satu-satunya route mirror di daftar route LAN.
+- Rekaman yang sudah tersimpan dibaca terpisah dari mirror, lewat tab **Rekaman** di rute Receiver tablet: hanya `GET` `/api/receiver/archive/{facets,calendar,timeline,items}`, `archive/scans/<id>/preview`, `archive/audio/<id>/download`, `archive/scans/<id>/download` dan `audio-segments/<id>/audio` (putar, dengan Range), dicocokkan persis dengan UUID rekaman (`lan_access.records_route()`). Aturan bacanya: aturan `Host` LAN dan `Sec-Fetch-Site` tidak ada, `none` atau `same-origin` (lebih ketat dari route LAN lain). Batasnya: satu bacaan daftar per klien (yang kedua menunggu sampai 5 detik, lalu `429 LAN_RECORDS_BUSY`), paling banyak 50 baris per halaman, 4 unduhan atau pemutaran per klien, satu ZIP pindai untuk seluruh LAN di luar dua slot groundstation, dan `HEAD` pada unduhan dan pemutaran dijawab `405`. Setiap penolakan atas `GET` berbentuk `{ok: false, code, error}` dan tidak ada yang menyebut path (hanya Range yang tidak bisa dipenuhi file dijawab `416` tanpa isi dengan `Content-Range`, sama seperti di loopback). Jawaban `HEAD` dari route Rekaman tidak punya isi: `HEAD` pada unduhan dan pemutaran mendapat `405` polos dengan `Allow: GET` (isi `LAN_READ_ONLY`-nya dibuang), dan `HEAD` yang ditolak `403` atau `429` hanya membawa statusnya. Kode LAN memakai kode dan teksnya sendiri: `403 LAN_READ_ONLY` untuk path di luar daftar, `429 LAN_RECORDS_BUSY` (teksnya berbeda untuk bacaan daftar dan untuk unduhan atau pemutaran) dan `403 ORIGIN_REJECTED` dengan teks mode LAN, bukan teks loopback: `Host` di luar aturan LAN atau permintaan cross-site ditolak sebelum route dengan teks umum mode LAN, dan hanya permintaan `same-site` yang sampai ke aturan baca Rekaman dan mendapat teks Rekaman. Route-nya menjawab dengan kode arsip: `ARCHIVE_INVALID_REQUEST` dengan teks kesalahan parameternya atau batas halaman, jadi teksnya berbeda-beda, dan `ARCHIVE_NOT_FOUND`, `ARCHIVE_FILE_MISSING`, `ARCHIVE_EXPORT_BUSY` dan `ARCHIVE_STORAGE_ERROR` dengan teks tetap. Pemutaran juga memakai kode arsip: segmen yang tidak ada, belum selesai atau gagal, dan file yang gagal dibuka (hilang, izin, I/O) dijawab `404 ARCHIVE_FILE_MISSING`; kesalahan database atau nama file tersimpan yang tidak sah dijawab `500 ARCHIVE_STORAGE_ERROR`. Bacaan dari LAN tidak menutup sesi rekaman yang macet. Pengaturan, set penanda, route pindai mentah, ekspor ZIP pilihan, hapus, retensi dan setiap penulisan tetap `LAN_READ_ONLY`.
 
 ## 9. Fase 3 (B2): perintah dari tablet. Desain, **belum diimplementasikan**
 
