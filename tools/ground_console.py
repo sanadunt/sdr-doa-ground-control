@@ -3851,10 +3851,12 @@ class LanConsoleHandler(ConsoleHandler):
         """GET of a Records read route (lan.records_route): its read rule, its limits, then the route.
 
         Its own dispatch, so no other Receiver route is reachable from here
-        whatever the loopback handler answers. Every error is {ok, code, error}
-        with an archive code and its fixed text (the playback route too, so no
-        storage error names a path), plus 405 LAN_READ_ONLY for a HEAD of a
-        download and 429 LAN_RECORDS_BUSY past a client's limit.
+        whatever the loopback handler answers. Every refusal is {ok, code,
+        error} and none names a path (a Range the file cannot satisfy is the
+        bodiless 416): the LAN codes with their own texts (403/405
+        LAN_READ_ONLY, 429 LAN_RECORDS_BUSY, 403 ORIGIN_REJECTED), then the
+        routes' archive codes through _archive_failure, the playback route's
+        too (ARCHIVE_FILE_MISSING, ARCHIVE_STORAGE_ERROR).
         """
         kind = lan.records_route(parsed.path)
         if kind is None:
