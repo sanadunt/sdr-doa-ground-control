@@ -326,11 +326,12 @@ class HelperTests(HarnessCase):
         """No open by name there, and no mv, whose copy fallback would open it."""
         helper = HELPER.read_text(encoding="utf-8")
         handle = helper.split("cmd_handle() {", 1)[1].split("\n}\n", 1)[0]
-        uses = [line.strip() for line in handle.splitlines() if '"$request"' in line]
+        discard = helper.split("discard() {", 1)[1].split("\n}\n", 1)[0]
+        uses = [line.strip() for line in (discard + handle).splitlines() if '"$request"' in line]
         self.assertEqual(uses, [
+            'rm -rf -- "$request" 2>/dev/null',
             'if [ ! -e "$request" ] && [ ! -L "$request" ]; then',
             'if [ -d "$request" ] && [ ! -L "$request" ]; then',
-            'rm -rf -- "$request" 2>/dev/null',
             'if ! ln -P -- "$request" "$taken" 2>/dev/null; then',
             'if [ ! -e "$request" ] && [ ! -L "$request" ]; then',
             'rm -f -- "$request" 2>/dev/null',
@@ -379,7 +380,7 @@ class HelperTests(HarnessCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(self.h.power_calls(), [])
         self.assert_logged("cannot take")
-        self.assertEqual((self.h.request_dir / "request").read_bytes(), b"reboot")
+        self.assertFalse(os.path.lexists(self.h.request_dir / "request"), "refused and removed, never copied")
         self.assertEqual(list((other / "taken").iterdir()), [], "nothing copied")
 
     def test_root_s_directory_is_made_0700_and_must_stay_root_s(self):
@@ -394,11 +395,12 @@ class HelperTests(HarnessCase):
                 result = self.h.handle(1_700_001_000)
                 self.assertEqual(result.returncode, 1)
                 self.assert_logged("cannot prepare")
-                self.assertEqual((self.h.request_dir / "request").read_bytes(), b"poweroff", "left in place")
+                self.assertFalse(os.path.lexists(self.h.request_dir / "request"), "refused and removed")
                 self.assertEqual(stat.S_IMODE(self.h.taken_dir.stat().st_mode), mode, "never changed")
         # Root's but readable by others is enough: no one else can write in it.
         self.h.taken_dir.chmod(0o755)
         self.h.clear()
+        self.h.request(b"poweroff")
         self.assertEqual(self.h.handle(1_700_002_000, "--dry-run").returncode, 0)
         self.assert_logged("dry-run: would run: systemctl poweroff")
         # Owned by someone else: refused (a dry run, since that uid is not root either).
@@ -425,14 +427,41 @@ class HelperTests(HarnessCase):
         result = self.h.handle(HOST_POWER_TAKEN_DIR=str(blocker / "taken"))
         self.assertEqual(result.returncode, 1)
         self.assertEqual(self.h.power_calls(), [])
-        self.assertEqual((self.h.request_dir / "request").read_bytes(), b"reboot", "left for the next run")
+        self.assertFalse(os.path.lexists(self.h.request_dir / "request"), "refused and removed")
         self.assert_logged("cannot prepare")
+        self.assert_logged("refused the request and removed it")
         self.assertEqual([entry["priority"] for entry in self.h.logs()], ["daemon.err"])
         # A symlink in place of root's directory is not followed either.
         (self.h.base / "elsewhere").mkdir()
         self.h.taken_dir.symlink_to(self.h.base / "elsewhere")
+        self.h.request(b"reboot")
         self.assertEqual(self.h.handle().returncode, 1)
         self.assertEqual(list((self.h.base / "elsewhere").iterdir()), [])
+        self.assertFalse(os.path.lexists(self.h.request_dir / "request"))
+
+    def test_no_failed_run_leaves_the_request_for_pathexists_to_restart(self):
+        """The service has no start limit, so a run that failed with the request
+        still in place would start again at once, without end."""
+        failures = [("root's directory is group-writable", lambda: self.h.taken_dir.chmod(0o770), "cannot prepare")]
+        if os.geteuid() != 0:
+            # Root writes anywhere; another user cannot link into a read-only directory (as ENOSPC or EXDEV would).
+            failures.append(("the link fails", lambda: self.h.taken_dir.chmod(0o500), "cannot take"))
+        for name, breaks, message in failures:
+            with self.subTest(failure=name):
+                self.h.taken_dir.mkdir(parents=True, exist_ok=True)
+                self.h.taken_dir.chmod(0o700)
+                breaks()
+                self.h.clear()
+                self.h.request(b"poweroff")
+                result = self.h.handle()
+                self.assertEqual(result.returncode, 1)
+                self.assert_logged(message)
+                self.assertFalse(os.path.lexists(self.h.request_dir / "request"), "nothing for PathExists to see")
+                self.assertEqual(self.h.power_calls(), [])
+                self.h.taken_dir.chmod(0o700)
+                self.h.clear()
+                self.assertEqual(self.h.handle().returncode, 0, "the next start finds nothing to do")
+                self.assertEqual(self.h.logs(), [])
 
     def test_a_leftover_in_root_s_directory_is_cleared_first(self):
         self.h.taken_dir.mkdir(parents=True, mode=0o700)

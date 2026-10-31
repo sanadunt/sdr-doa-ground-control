@@ -16,9 +16,10 @@ export function isLoopbackHost(input: string): boolean {
  * serves the same build to allowed LAN clients, read only, and answers
  * `access: "lan-view"` in /api/capabilities.
  *
- * In the LAN view nothing is written: no admin unlock, no Kontrol, a
- * read-only Configuration page, preferences kept in this browser, and no
- * Receiver frame (the HackRF is on the groundstation's USB).
+ * In the LAN view nothing is written but a marker command for the
+ * groundstation Receiver (POST /api/mirror/receiver/markers): no admin
+ * unlock, no Kontrol, a read-only Configuration page, preferences kept in
+ * this browser, and no Receiver frame (the HackRF is on the groundstation's USB).
  */
 export type ConsoleAccess = 'local' | 'lan-view';
 

@@ -159,6 +159,11 @@ read_taken() {
   dd if="$taken" bs=9 count=1 $NONBLOCK 2>/dev/null
 }
 
+# discard: remove the request in the console's directory, whatever it is.
+discard() {
+  rm -rf -- "$request" 2>/dev/null
+}
+
 cmd_handle() {
   request=$REQUEST_DIR/request
   taken=$TAKEN_DIR/request
@@ -166,8 +171,12 @@ cmd_handle() {
   if [ ! -e "$request" ] && [ ! -L "$request" ]; then
     return 0
   fi
+  # A request that cannot be taken is removed where it is (rm unlinks, it
+  # never opens), so no run ends with one in place for PathExists to start
+  # the service again at once.
   if ! take_dir; then
-    log err "cannot prepare $TAKEN_DIR; nothing done"
+    discard
+    log err "cannot prepare $TAKEN_DIR; refused the request and removed it"
     return 1
   fi
   # Never open the request by name in the console's directory, where it can
@@ -176,7 +185,7 @@ cmd_handle() {
   # reach; unlike mv it never falls back to a copy that would open it there.
   if [ -d "$request" ] && [ ! -L "$request" ]; then
     # A directory cannot be linked and is never a request.
-    rm -rf -- "$request" 2>/dev/null
+    discard
     log warning "refused a request: it is not a regular file"
     return 0
   fi
@@ -184,7 +193,8 @@ cmd_handle() {
     if [ ! -e "$request" ] && [ ! -L "$request" ]; then
       return 0
     fi
-    log err "cannot take $request (another file system or mount?); nothing done"
+    discard
+    log err "cannot take $request (it changed, or is on another file system or mount); refused it and removed it"
     return 1
   fi
   rm -f -- "$request" 2>/dev/null

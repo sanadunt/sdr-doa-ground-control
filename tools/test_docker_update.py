@@ -575,6 +575,8 @@ class InstallTests(DockerScriptTestCase):
             "      # an empty root-owned directory and the buttons stay disabled.\n"
             "      - /run/sdr-doa-host-power:/run/sdr-doa-host-power\n"
         )
+        # Runbook 5.5 P0 runs install only once grep -c finds exactly this one line.
+        self.assertEqual(sum("sdr-doa-host-power" in line for line in SCRIPT.read_text().splitlines()), 1)
         self.install("--port", "8790")
         compose = self.dir / "compose.yml"
         env_file = self.dir / ".env"

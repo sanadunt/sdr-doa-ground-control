@@ -26,7 +26,7 @@ TMPFILES_DIR=/etc/tmpfiles.d
 TMPFILES_NAME=sdr-doa-host-power.conf
 # Fixed: the console's --host-power-dir default and the Docker bind mount.
 REQUEST_DIR=/run/sdr-doa-host-power
-# Root's own: the helper moves a request here before it checks or reads it.
+# Root's own: the helper takes a request here with a hard link before it checks or reads it.
 TAKEN_DIR=/run/sdr-doa-host-power.taken
 STATE_DIR=/var/lib/sdr-doa-host-power
 # The sdr-doa-docker install whose compose.yml must mount REQUEST_DIR.

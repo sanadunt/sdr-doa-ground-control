@@ -647,11 +647,14 @@ sudo grep -n 'sdr-doa-host-power' /opt/sdr-doa-ground-console/compose.yml
 **Periksa**: `"version": "3.3.0"` (atau lebih baru) dan satu baris `- /run/sdr-doa-host-power:/run/sdr-doa-host-power`. Tanpa baris itu, `compose.yml` ditulis `sdr-doa-docker` sebelum 3.3.0: `update` dan timer hariannya hanya mengganti image dan tidak pernah menulis ulang `compose.yml`, jadi groundstation yang sudah terpasang tetap tanpa mount setelah update ke 3.3.0, dan console menampilkan kedua tombol nonaktif dengan alasan "Direktori permintaan belum di-mount" (`DIR_NOT_MOUNTED`). `update` juga tidak pernah mengganti salinan dirinya di `/usr/local/bin/sdr-doa-docker`: salinan itu tetap script 3.2.0, dan `install`-nya menulis `compose.yml` **tanpa** mount. Jadi pasang dulu script 3.3.0, lalu jalankan `install`-nya sekali; `.env` dan volume tetap. Jalankan 5.1 dan A1 untuk rilis itu (script terverifikasi di `~/sdr-doa-dl/docker-<V>`), lalu, dengan izin manusia dan saat `/api/health` berisi `"receiver_busy": false` (7.3):
 
 ```sh
-cd ~/sdr-doa-dl/docker-"$(cat ~/sdr-doa-dl/release-version)" && sudo install -m 0755 sdr-doa-docker /usr/local/bin/sdr-doa-docker
-sudo /usr/local/bin/sdr-doa-docker install --dir /opt/sdr-doa-ground-console
+cd ~/sdr-doa-dl/docker-"$(cat ~/sdr-doa-dl/release-version)" &&
+sudo install -m 0755 sdr-doa-docker /usr/local/bin/sdr-doa-docker &&
+[ "$(grep -c sdr-doa-host-power /usr/local/bin/sdr-doa-docker)" = 1 ] &&
+sudo /usr/local/bin/sdr-doa-docker install --dir /opt/sdr-doa-ground-console ||
+echo "STOP: script 3.3.0 tidak terpasang di /usr/local/bin, atau install gagal"
 ```
 
-Perintah pertama butuh `sudo` biasa; bila `sudo` meminta kata sandi, manusia yang menjalankannya (4.9). **Periksa** sesudah perintah pertama: `grep -c sdr-doa-host-power /usr/local/bin/sdr-doa-docker` mencetak angka lebih dari 0 (script 3.2.0 mencetak `0`).
+Jalankan blok ini dalam satu panggilan shell (1.3). `install` dari `/usr/local/bin` hanya jalan setelah script 3.3.0 terpasang di sana: `grep -c` harus `1` (script 3.2.0: `0`), karena `install` script 3.2.0 menulis `compose.yml` tanpa mount. `sudo` pertama butuh kata sandi; bila diminta, manusia yang menjalankan blok ini (4.9). Ada baris `STOP:`: berhenti dan tanya manusia.
 
 `install` di direktori yang sudah ada:
 
@@ -775,7 +778,7 @@ Receiver di tablet adalah **mirror** dari Receiver groundstation (kontrak: `docs
 - Panel Spektrum di tablet menampilkan tag `MIRROR`, umur frame, spektrum dan waterfall; tombol RX/Spektrum, Dengar dan Mulai terlihat tetapi nonaktif, dan tidak ada audio. Rute Receiver menampilkan spektrum yang sama dan status Receiver.
 - Chip `STALE`: RX berjalan tetapi frame terakhir lebih tua dari 3 detik. Chip **SUMBER PUTUS** (EN: **SOURCE LOST**): groundstation tidak mengirim apa pun selama 10 detik, atau belum pernah.
 - Mirror hanya mengalir selama halaman console groundstation **memasang Receiver** (rute Receiver pernah dibuka, atau Mulai di panel Spektrum) dan **terlihat** di layar. Halaman yang tersembunyi atau diminimalkan berhenti mengirim frame (tablet: `STALE`), dan tab yang lama tersembunyi bisa berhenti mengirim sama sekali (tablet: **SUMBER PUTUS**). Biarkan halaman console groundstation terbuka di depan.
-- Kontrol Receiver dari tablet belum ada (fase 3 issue #15, menunggu keputusan HTTPS).
+- Selain menambah dan menghapus penanda, kontrol Receiver dari tablet belum ada (fase 3 issue #15, menunggu keputusan HTTPS).
 
 **Menyalakan** (oleh manusia, di browser groundstation, setelah A4/B3 memasang kata sandi admin sendiri):
 
@@ -984,7 +987,7 @@ Sesudahnya `curl -s --noproxy '*' http://127.0.0.1:8787/api/health; echo` berisi
 
 **2. Ganti forward LAN sementara (`sdr-doa-console-lan`, `socat 0.0.0.0:8788`) dengan mode LAN lihat-saja.**
 
-Forward itu meneruskan semua permintaan ke console, termasuk login admin dan Kontrol, sedangkan mode LAN lihat-saja hanya menjawab baca-saja (6.2). Cari dulu apakah unitnya unit sistem atau unit user:
+Forward itu meneruskan semua permintaan ke console, termasuk login admin dan Kontrol, sedangkan mode LAN lihat-saja hanya menjawab baca-saja, kecuali tambah dan hapus penanda Receiver (6.2). Cari dulu apakah unitnya unit sistem atau unit user:
 
 ```sh
 systemctl status sdr-doa-console-lan --no-pager

@@ -6,7 +6,9 @@
 Description=SDR-DoA Ground Console power request (Restart or Shutdown)
 Documentation=file://@SHARE_DIR@/README.md
 # No start limit: a burst of requests must not leave sdr-doa-host-power.path
-# failed until reset-failed or a reboot.
+# failed until reset-failed or a reboot. Every run removes the request, also
+# one it refuses or cannot take, so PathExists never restarts it in a loop;
+# the path unit keeps its own trigger limit.
 StartLimitIntervalSec=0
 
 [Service]
