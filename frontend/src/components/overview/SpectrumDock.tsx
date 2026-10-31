@@ -168,11 +168,14 @@ export interface SpectrumMarkRowProps {
   /** The last failed marker command. */
   notice: { code: DockNotice; message?: string } | null;
   onRemove: (markerId: string) => void;
-  onTune: (hz: number) => void;
+  /** Tune here; left out in the LAN view's mirror, which never tunes. */
+  onTune?: (hz: number) => void;
+  /** Already translated text after the rest: the mirror's sending, blocked and refusal lines. */
+  status?: ReactNode;
 }
 
 /** The marking part of the dock's notice line: the picked marker with Remove and Tune here, Not saved, the last marker error. */
-export function SpectrumMarkRow({ marker, unsaved, notice, onRemove, onTune }: SpectrumMarkRowProps): JSX.Element {
+export function SpectrumMarkRow({ marker, unsaved, notice, onRemove, onTune, status }: SpectrumMarkRowProps): JSX.Element {
   const { t } = useI18n();
   const frameText = noticeFrameText(notice);
   return (
@@ -187,11 +190,14 @@ export function SpectrumMarkRow({ marker, unsaved, notice, onRemove, onTune }: S
             <button className="ov-button ov-spec-inline-button" type="button" onClick={() => { if (marker.id) onRemove(marker.id); }}>{t('spectrum.markRemove')}</button>
           ) : null}
           {/* RX tunes up to 6 GHz; a marker above it can only be removed. */}
-          <button className="ov-button ov-spec-inline-button" type="button" disabled={!inTuneRange(marker.frequencyHz)} onClick={() => onTune(marker.frequencyHz)}>{t('spectrum.markTune')}</button>
+          {onTune ? (
+            <button className="ov-button ov-spec-inline-button" type="button" disabled={!inTuneRange(marker.frequencyHz)} onClick={() => onTune(marker.frequencyHz)}>{t('spectrum.markTune')}</button>
+          ) : null}
         </>
       ) : null}
       {unsaved ? <span className="ov-tag tone-warn">{t('spectrum.markUnsaved')}</span> : null}
       {notice ? <span className="ov-spec-message tone-warn">{t(markNoticeMessage(notice.code))}{frameText ? ` (${frameText})` : ''}</span> : null}
+      {status}
     </span>
   );
 }

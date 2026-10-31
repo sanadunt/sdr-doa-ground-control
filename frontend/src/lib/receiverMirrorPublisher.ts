@@ -3,35 +3,47 @@
  *
  * App starts it in the console page that owns the Receiver frame (never in
  * the LAN view). While the console's LAN view is open it posts the bridge's
- * state and its spectrum frames to POST /api/mirror/receiver; the LAN view
- * reads them back. It only listens to the bridge (its state and its frames,
- * under its own subscription owner) and never sends a command to the frame.
+ * state, its spectrum frames and the Receiver's marker list to POST
+ * /api/mirror/receiver; the LAN view reads them back. It listens to the
+ * bridge (its state, markers and frames, under its own subscription owner)
+ * and sends the frame two commands only: console:marker-add and
+ * console:marker-remove, for the marker commands of LAN viewers that the
+ * console hands it in the answer to a post (the owner's decision of
+ * 2026-10-31). Each runs once, and its result code goes out in a later post.
  *
  * Pace: at most one post every MIRROR_POST_INTERVAL_MS (5 a second), one at a
  * time. A post carries the current state and the newest frame not sent yet;
- * it goes out when a frame arrives, the state changes, or the heartbeat is
- * due (every MIRROR_LIMITS.heartbeatMs). Frames older than the newest one are
- * dropped, never queued. Frames are asked for only while this page is visible.
+ * it goes out when a frame arrives, the state changes, a marker result waits,
+ * or the heartbeat is due (every MIRROR_LIMITS.heartbeatMs, which is also how
+ * long a viewer's marker command waits at most). Frames older than the newest
+ * one are dropped, never queued. Frames are asked for only while this page is
+ * visible. A post carries at most maxMarkers markers nearest the view, fewer
+ * when the post would pass maxBodyBytes.
  *
  * The LAN view's state: checked at start through /api/health, and again every
  * MIRROR_LAN_CHECK_MS while closed; a post answered with MIRROR_LAN_CLOSED
  * stops the posts and the frames at once. Nothing is posted without a frame
  * that answers the bridge (no state, no post): viewers then see the source lost.
  */
-import type { ReceiverBridge } from './receiverBridge';
-import type { SpectrumFrame } from './receiverBridgeProtocol';
+import type { BridgeResult, ReceiverBridge } from './receiverBridge';
+import { COMMAND_ID_PATTERN } from './receiverBridgeProtocol';
+import type { BridgeCommand, SpectrumFrame } from './receiverBridgeProtocol';
 import {
   MIRROR_LAN_CHECK_MS,
   MIRROR_LIMITS,
+  MIRROR_MARKER_RESULT_CODES,
   MIRROR_POST_INTERVAL_MS,
   MIRROR_ROUTE,
   MIRROR_SUBSCRIBE_FPS,
   MIRROR_VERSION,
   mirrorFrameFromSpectrum,
+  mirrorMarkerViewHz,
+  mirrorMarkersFromBridge,
   mirrorStateFromStatus,
   mirrorStateKey,
+  normalizeMarkerCommands,
 } from './receiverMirror';
-import type { MirrorPublish, MirrorSource, MirrorState } from './receiverMirror';
+import type { MirrorMarkerCommand, MirrorMarkerResult, MirrorMarkerResultCode, MirrorPublish, MirrorSource, MirrorState } from './receiverMirror';
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -39,6 +51,8 @@ export interface MirrorPostAnswer {
   status: number;
   /** The error code of a refusal, when the answer carried one. */
   code: string | null;
+  /** Viewers' marker commands the console handed to this page (an accepted post only). */
+  commands?: MirrorMarkerCommand[];
 }
 
 export interface MirrorPublisherEnvironment {
@@ -73,17 +87,16 @@ async function postWithFetch(body: string): Promise<MirrorPostAnswer> {
       signal: controller.signal,
     });
     let code: string | null = null;
-    if (!response.ok) {
-      try {
-        const answer: unknown = await response.json();
-        if (typeof answer === 'object' && answer !== null && typeof (answer as { code?: unknown }).code === 'string') code = (answer as { code: string }).code;
-      } catch {
-        // A refusal without a JSON body keeps its status only.
-      }
-    } else {
-      void response.body?.cancel().catch(() => undefined);
+    let commands: MirrorMarkerCommand[] = [];
+    try {
+      const answer: unknown = await response.json();
+      const record = typeof answer === 'object' && answer !== null ? answer as { code?: unknown; commands?: unknown } : {};
+      if (!response.ok && typeof record.code === 'string') code = record.code;
+      if (response.ok) commands = normalizeMarkerCommands(record.commands);
+    } catch {
+      // An answer without a JSON body keeps its status only.
     }
-    return { status: response.status, code };
+    return { status: response.status, code, commands };
   } finally {
     clearTimeout(timer);
   }
@@ -133,6 +146,32 @@ export interface MirrorPublisherStatus {
   posts: number;
   frames: number;
   refused: number;
+  /** Viewers' marker commands run through the bridge. */
+  commands: number;
+}
+
+/** The ids of the marker commands this page ran recently; a command handed out again is not run twice. */
+const RAN_IDS_KEPT = 64;
+
+let byteEncoder: TextEncoder | null = null;
+/** UTF-8 length of a body: marker labels need not be ASCII. */
+function byteLength(text: string): number {
+  byteEncoder ??= new TextEncoder();
+  return byteEncoder.encode(text).length;
+}
+
+/** The bridge command for a viewer's marker command. */
+function bridgeMarkerCommand(command: MirrorMarkerCommand): BridgeCommand {
+  return command.op === 'add'
+    ? { type: 'console:marker-add', frequencyHz: command.frequency_hz }
+    : { type: 'console:marker-remove', markerId: command.marker_id };
+}
+
+/** A bridge result as the console takes it: one of the marker codes (any other one as NOT_READY) and a new marker's id. */
+function markerResult(id: string, result: BridgeResult): MirrorMarkerResult {
+  const code = (MIRROR_MARKER_RESULT_CODES as readonly string[]).includes(result.code) ? result.code as MirrorMarkerResultCode : 'NOT_READY';
+  const markerId = typeof result.markerId === 'string' && COMMAND_ID_PATTERN.test(result.markerId) ? result.markerId : null;
+  return { id, code, marker_id: markerId };
 }
 
 export interface MirrorPublisher {
@@ -158,7 +197,10 @@ export function startMirrorPublisher(bridge: ReceiverBridge, environment: Mirror
   let stateRev = 0;
   let stateDirty = false;
   let pendingFrame: SpectrumFrame | null = null;
-  const counters = { posts: 0, frames: 0, refused: 0 };
+  // Results of viewers' marker commands not posted yet, and the commands run.
+  let results: MirrorMarkerResult[] = [];
+  const ran = new Set<string>();
+  const counters = { posts: 0, frames: 0, refused: 0, commands: 0 };
 
   function source(): MirrorSource {
     return { id: sourceId, kind: 'kiosk-tab', visible: env.visible() };
@@ -196,13 +238,43 @@ export function startMirrorPublisher(bridge: ReceiverBridge, environment: Mirror
     state = { ...next, rev: stateRev };
   }
 
+  /** Run a viewer's marker command through the bridge once; its result goes out with a later post. */
+  function run(command: MirrorMarkerCommand): void {
+    if (stopped || ran.has(command.id)) return;
+    ran.add(command.id);
+    if (ran.size > RAN_IDS_KEPT) ran.delete(ran.values().next().value as string);
+    counters.commands += 1;
+    bridge.send(bridgeMarkerCommand(command)).then(
+      (result) => report(markerResult(command.id, result)),
+      () => report({ id: command.id, code: 'NOT_READY', marker_id: null }),
+    );
+  }
+
+  function report(result: MirrorMarkerResult): void {
+    if (stopped) return;
+    results = [...results, result].slice(-MIRROR_LIMITS.maxPendingMarkerCommands);
+    pump();
+  }
+
   function send(frame: SpectrumFrame | null, now: number): void {
     if (!state) return;
     const body: MirrorPublish = { v: MIRROR_VERSION, source: source(), state: { ...state, t_ms: Math.max(state.t_ms, 0) } };
     const encoded = frame ? mirrorFrameFromSpectrum(frame, now) : null;
     if (encoded) body.frame = encoded;
+    // The Receiver's list, nearest the view; it goes with every post, so a console restart loses nothing.
+    const bridgeMarkers = bridge.getState().markers;
+    const viewHz = mirrorMarkerViewHz(state);
+    const markers = mirrorMarkersFromBridge(bridgeMarkers, viewHz);
+    if (markers) body.markers = markers;
+    const sentResults = results;
+    if (sentResults.length) body.results = sentResults;
     let text = JSON.stringify(body);
-    if (text.length > MIRROR_LIMITS.maxBodyBytes && body.frame) {
+    // A long list with long labels: fewer markers, the farthest from the view first.
+    while (byteLength(text) > MIRROR_LIMITS.maxBodyBytes && body.markers && body.markers.markers.length > 0) {
+      body.markers = mirrorMarkersFromBridge(bridgeMarkers, viewHz, Math.floor((body.markers.markers.length * 3) / 4));
+      text = JSON.stringify(body);
+    }
+    if (byteLength(text) > MIRROR_LIMITS.maxBodyBytes && body.frame) {
       // Never expected (a frame is about 1 KiB); the state goes alone then.
       delete body.frame;
       text = JSON.stringify(body);
@@ -216,6 +288,9 @@ export function startMirrorPublisher(bridge: ReceiverBridge, environment: Mirror
       (answer) => {
         if (answer.status >= 200 && answer.status < 300) {
           retryMs = MIRROR_RETRY_MS;
+          // The results this post carried are with the console now.
+          results = results.filter((result) => !sentResults.includes(result));
+          for (const command of answer.commands ?? []) run(command);
           return;
         }
         counters.refused += 1;
@@ -246,7 +321,7 @@ export function startMirrorPublisher(bridge: ReceiverBridge, environment: Mirror
     if (!state) return;
     const now = env.now();
     const due = Math.max(lastPostAt + MIRROR_POST_INTERVAL_MS, blockedUntil);
-    const wanted = pendingFrame !== null || stateDirty || now - lastPostAt >= MIRROR_LIMITS.heartbeatMs;
+    const wanted = pendingFrame !== null || stateDirty || results.length > 0 || now - lastPostAt >= MIRROR_LIMITS.heartbeatMs;
     if (wanted && now >= due) {
       const frame = pendingFrame;
       pendingFrame = null;

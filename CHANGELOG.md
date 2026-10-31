@@ -2,6 +2,15 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.3.0
+
+- **Penanda dari tablet.** Tampilan LAN kini bisa menambah dan menghapus penanda spektrum Receiver groundstation, sementara operator groundstation memperhatikan DoA (keputusan pemilik 2026-10-31). Ini satu-satunya penulisan dari tampilan LAN; tune, gain, pindai, dengar dan pengaturan tetap tertutup.
+  - Tombol **Penanda** di dock MIRROR dan di kartu Spektrum rute Receiver tablet. Ketuk grafik untuk menambah penanda, ketuk dekat penanda untuk memilihnya, lalu **Hapus**. Tombol keyboard sama dengan dock groundstation, kecuali panah dan **Tala ke sini**: tablet tidak menala.
+  - Penanda masuk daftar **Penanda spektrum** Receiver sendiri, langsung tampil di dock dan halaman Receiver groundstation, dan tersimpan ke marker set yang dipilih di sana. Tanpa login: setiap klien di `allowed_clients` boleh menambah penanda dan menghapus penanda mana pun, termasuk buatan operator. Matikan tampilan LAN atau persempit `allowed_clients` bila itu tidak boleh.
+  - Jalurnya: `POST /api/mirror/receiver/markers` di listener LAN (hanya method dan path ini, `Origin` harus halaman tampilan LAN itu sendiri, 512 byte, 4 perintah per detik per tablet, antrean 16, kedaluwarsa 15 detik), lalu halaman console groundstation mengambilnya dari jawaban post mirror-nya, menjalankannya lewat bridge Receiver, dan melaporkan hasilnya. Tablet membaca statusnya di `GET /api/mirror/receiver/markers/<id>`. Setiap perintah tercatat di log console dengan alamat tablet.
+  - Menandai dijeda dengan alasannya selama mirror **SUMBER PUTUS** atau `STALE`. Halaman groundstation yang dimuat sebelum update belum menjalankan perintah penanda (perintahnya kedaluwarsa); muat ulang halaman itu sekali setelah update.
+- **Heartbeat mirror 500 ms** (sebelumnya 2 detik), supaya perintah penanda diambil cepat juga saat RX berhenti. Post mirror kini juga membawa daftar penanda Receiver (paling banyak 64 terdekat dari tampilan).
+
 ## 3.2.0
 
 Rilis minor: tidak ada yang dihapus. Tampilan LAN kini juga membaca **Rekaman** Receiver, hanya baca, dan mirror Receiver-nya menampilkan gain pindai dan frame pertama mode baru dengan benar. Kanal `3` dan timer update memasangnya sendiri.

@@ -11,16 +11,23 @@ shows, and the LAN view draws it without a radio of its own:
   (429 beyond). The schema below is checked strictly: unknown fields, wrong
   types and values out of range are refused whole.
 * ``GET /api/mirror/receiver`` answers on both listeners with the latest
-  source, state and frame and their ages in the server's own clock: on the
-  loopback listener under the Receiver's read rule (one loopback Host on the
-  console's port; Sec-Fetch-Site absent, none or same-origin), on the LAN
-  view under its own Host rule and without cross-site requests (403
-  ORIGIN_REJECTED otherwise).
+  source, state, frame and marker list and their ages in the server's own
+  clock: on the loopback listener under the Receiver's read rule (one
+  loopback Host on the console's port; Sec-Fetch-Site absent, none or
+  same-origin), on the LAN view under its own Host rule and without
+  cross-site requests (403 ORIGIN_REJECTED otherwise).
+* ``POST /api/mirror/receiver/markers`` is the LAN view's one write (the
+  owner's decision of 2026-10-31): a viewer adds or removes one of the
+  Receiver's spectrum markers. The command waits in a bounded queue
+  (``MAX_PENDING_MARKER_COMMANDS``, ``MARKER_COMMAND_TTL_MS``), goes to the
+  publishing page in the answer to its next POST, and that page reports the
+  bridge's result code in a later POST. ``GET .../markers/<id>`` reads the
+  command's status.
 
 Nothing is written to disk: the latest POST replaces the previous one, and a
-restart or a closed LAN view clears it. docs/RECEIVER_MIRROR.md is the
-contract; ``frontend/src/lib/receiverMirror.ts`` holds the browser's copy of
-these limits. Standard library only.
+restart or a closed LAN view clears it, the marker commands included.
+docs/RECEIVER_MIRROR.md is the contract; ``frontend/src/lib/receiverMirror.ts``
+holds the browser's copy of these limits. Standard library only.
 """
 
 from __future__ import annotations
@@ -32,8 +39,8 @@ import math
 import re
 import threading
 import time
-from collections import deque
-from typing import Any, Callable, Deque, Dict, FrozenSet, Optional, Tuple
+from collections import OrderedDict, deque
+from typing import Any, Callable, Deque, Dict, FrozenSet, List, NamedTuple, Optional, Sequence, Tuple
 
 ROUTE = "/api/mirror/receiver"
 VERSION = 1
@@ -45,10 +52,12 @@ RATE_WINDOW_S = 1.0
 
 # Stale rules for viewers (also in the GET answer): a frame older than
 # FRAME_STALE_MS is stale; no POST for SOURCE_LOST_MS means the source is lost.
-# The source sends its state at least every HEARTBEAT_MS.
+# The source sends its state at least every HEARTBEAT_MS, which is also how
+# long a viewer's marker command waits at most for a page that runs nothing
+# else (it goes out in the answer to the next POST).
 FRAME_STALE_MS = 3_000
 SOURCE_LOST_MS = 10_000
-HEARTBEAT_MS = 2_000
+HEARTBEAT_MS = 500
 
 # Spectrum frame: at most MAX_BINS bytes (u8) over [db_min, db_max].
 MIN_BINS = 16
@@ -62,6 +71,43 @@ MAX_SAMPLE_RATE_HZ = 100_000_000
 MAX_GAIN_DB = 200.0
 MAX_VFO_INDEX = 63
 MAX_REV = 2 ** 53 - 1
+
+# Spectrum markers. The publishing page sends at most MAX_MARKERS of the
+# Receiver's list, nearest the view, each label at most MAX_MARKER_LABEL_CHARS
+# long without control characters; marker ids are the bridge's
+# (COMMAND_ID_PATTERN in receiverBridgeProtocol.ts).
+MAX_MARKERS = 64
+MAX_MARKER_LABEL_CHARS = 32
+MARKER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
+
+# Marker commands from viewers: a body of at most MAX_MARKER_BODY_BYTES, at
+# most MARKER_COMMANDS_PER_S taken from one client address in any second, at
+# most MAX_PENDING_MARKER_COMMANDS queued or handed out at once, each one
+# expired MARKER_COMMAND_TTL_MS after it was queued. The last
+# MAX_KEPT_MARKER_COMMANDS stay readable by their id; a publishing POST
+# reports at most MAX_RESULTS_PER_POST results.
+MARKERS_ROUTE = ROUTE + "/markers"
+MAX_MARKER_BODY_BYTES = 512
+MARKER_COMMANDS_PER_S = 4
+MAX_RATE_CLIENTS = 1024
+MAX_PENDING_MARKER_COMMANDS = 16
+MARKER_COMMAND_TTL_MS = 15_000
+MAX_KEPT_MARKER_COMMANDS = 64
+MAX_RESULTS_PER_POST = MAX_PENDING_MARKER_COMMANDS
+# Command ids are chosen by the viewer, at random like a source id.
+MARKER_COMMAND_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+MARKER_OPS: FrozenSet[str] = frozenset({"add", "remove"})
+# The bridge's result codes of console:marker-add and console:marker-remove
+# (TIMEOUT is the console's own); the page reports any other one as NOT_READY.
+MARKER_RESULT_CODES: FrozenSet[str] = frozenset({
+    "OK", "OUT_OF_RANGE", "MARKER_LIMIT", "MARKER_NOT_FOUND", "MARKER_SAVE_FAILED", "NOT_READY", "INVALID_COMMAND", "TIMEOUT",
+})
+# A command's status: waiting for the page, handed to it, answered, or not answered in time.
+COMMAND_QUEUED = "queued"
+COMMAND_SENT = "sent"
+COMMAND_DONE = "done"
+COMMAND_EXPIRED = "expired"
 
 SOURCE_KINDS: FrozenSet[str] = frozenset({"kiosk-tab", "engine-tab"})
 SOURCE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
@@ -77,6 +123,10 @@ MIRROR_INVALID = "MIRROR_INVALID"
 MIRROR_TOO_LARGE = "MIRROR_TOO_LARGE"
 MIRROR_RATE_LIMITED = "MIRROR_RATE_LIMITED"
 MIRROR_LAN_CLOSED = "MIRROR_LAN_CLOSED"
+MIRROR_NO_SOURCE = "MIRROR_NO_SOURCE"
+MIRROR_DUPLICATE_ID = "MIRROR_DUPLICATE_ID"
+MIRROR_MARKER_BUSY = "MIRROR_MARKER_BUSY"
+MIRROR_UNKNOWN_COMMAND = "MIRROR_UNKNOWN_COMMAND"
 ORIGIN_REJECTED = "ORIGIN_REJECTED"
 LAN_CLOSED_MESSAGE = "the LAN view is closed; nothing is mirrored"
 ERROR_CODES_HTTP = {
@@ -85,6 +135,10 @@ ERROR_CODES_HTTP = {
     MIRROR_TOO_LARGE: 413,
     MIRROR_RATE_LIMITED: 429,
     MIRROR_LAN_CLOSED: 409,
+    MIRROR_NO_SOURCE: 409,
+    MIRROR_DUPLICATE_ID: 409,
+    MIRROR_MARKER_BUSY: 429,
+    MIRROR_UNKNOWN_COMMAND: 404,
 }
 
 
@@ -300,31 +354,146 @@ def _frame(value: Any) -> Optional[Dict[str, Any]]:
     }
 
 
-def parse_publish(payload: Any) -> Tuple[Dict[str, Any], Dict[str, Any], Optional[Dict[str, Any]]]:
-    """Source, state and frame (or None) of a POST body; MirrorRejected names the first bad field."""
-    raw = _object(payload, "body", frozenset({"v", "source", "state"}), frozenset({"frame"}))
+def _marker_id(value: Any, field: str, *, nullable: bool = False) -> Optional[str]:
+    if value is None and nullable:
+        return None
+    if not isinstance(value, str) or not MARKER_ID_PATTERN.match(value):
+        raise _invalid(f"{field} must be 1 to 64 letters, digits, '-' or '_'")
+    return value
+
+
+def _command_id(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not MARKER_COMMAND_ID_PATTERN.match(value):
+        raise _invalid(f"{field} must be 8 to 64 letters, digits, '-' or '_'")
+    return value
+
+
+def _label(value: Any, field: str) -> str:
+    if not isinstance(value, str) or len(value) > MAX_MARKER_LABEL_CHARS or _CONTROL_CHARACTERS.search(value):
+        raise _invalid(f"{field} must be text of at most {MAX_MARKER_LABEL_CHARS} characters without control characters")
+    return value
+
+
+def _markers(value: Any) -> Optional[Dict[str, Any]]:
+    """The Receiver's marker list as the page sends it: displayed Hz, ids, labels, power; null clears it."""
+    if value is None:
+        return None
+    raw = _object(value, "markers", frozenset({"rev", "saved", "total", "markers"}))
+    items = raw["markers"]
+    if not isinstance(items, list) or len(items) > MAX_MARKERS:
+        raise _invalid(f"markers.markers must be a list of at most {MAX_MARKERS}")
+    markers: List[Dict[str, Any]] = []
+    for index, item in enumerate(items):
+        field = f"markers.markers[{index}]"
+        entry = _object(item, field, frozenset({"id", "frequency_hz", "power_db", "label"}))
+        markers.append({
+            "id": _marker_id(entry["id"], f"{field}.id", nullable=True),
+            "frequency_hz": _hz(entry["frequency_hz"], f"{field}.frequency_hz"),
+            "power_db": _number(entry["power_db"], f"{field}.power_db", DB_FLOOR, DB_CEILING, nullable=True),
+            "label": _label(entry["label"], f"{field}.label"),
+        })
+    total = _integer(raw["total"], "markers.total", 0, MAX_REV)
+    assert total is not None
+    if total < len(markers):
+        raise _invalid("markers.total must count at least the markers sent")
+    return {
+        "rev": _integer(raw["rev"], "markers.rev", 0, MAX_REV),
+        "saved": _boolean(raw["saved"], "markers.saved"),
+        "total": total,
+        "markers": markers,
+    }
+
+
+def _results(value: Any) -> Tuple[Dict[str, Any], ...]:
+    """The bridge's results of marker commands the page ran: id, result code and the marker's id."""
+    if not isinstance(value, list) or len(value) > MAX_RESULTS_PER_POST:
+        raise _invalid(f"results must be a list of at most {MAX_RESULTS_PER_POST}")
+    results = []
+    for index, item in enumerate(value):
+        field = f"results[{index}]"
+        entry = _object(item, field, frozenset({"id", "code", "marker_id"}))
+        results.append({
+            "id": _command_id(entry["id"], f"{field}.id"),
+            "code": _token(entry["code"], f"{field}.code", MARKER_RESULT_CODES),
+            "marker_id": _marker_id(entry["marker_id"], f"{field}.marker_id", nullable=True),
+        })
+    return tuple(results)
+
+
+class _Unchanged:
+    """A post without a marker list: the stored one stays."""
+
+    def __repr__(self) -> str:
+        return "UNCHANGED"
+
+
+UNCHANGED: Any = _Unchanged()
+
+
+class Publish(NamedTuple):
+    """One parsed POST body; ``markers`` is UNCHANGED when the body has none."""
+
+    source: Dict[str, Any]
+    state: Dict[str, Any]
+    frame: Optional[Dict[str, Any]]
+    markers: Any = UNCHANGED
+    results: Tuple[Dict[str, Any], ...] = ()
+
+
+def parse_publish(payload: Any) -> Publish:
+    """Source, state, frame (or None), marker list and results of a POST body; MirrorRejected names the first bad field."""
+    raw = _object(payload, "body", frozenset({"v", "source", "state"}), frozenset({"frame", "markers", "results"}))
     if isinstance(raw["v"], bool) or raw["v"] != VERSION:
         raise _invalid(f"v must be {VERSION}")
-    return _source(raw["source"]), _state(raw["state"]), _frame(raw.get("frame"))
+    return Publish(
+        _source(raw["source"]),
+        _state(raw["state"]),
+        _frame(raw.get("frame")),
+        _markers(raw["markers"]) if "markers" in raw else UNCHANGED,
+        _results(raw["results"]) if "results" in raw else (),
+    )
 
 
 def _reject_constant(name: str) -> Any:
     raise ValueError(f"{name} is not JSON")
 
 
-def decode_publish(raw: bytes) -> Tuple[Dict[str, Any], Dict[str, Any], Optional[Dict[str, Any]]]:
-    """parse_publish of a raw POST body (UTF-8 JSON; NaN and Infinity are refused).
+def _decode_json(raw: bytes, limit: int) -> Any:
+    """UTF-8 JSON of at most ``limit`` bytes; NaN, Infinity and a nesting the decoder cannot take are invalid.
 
-    Every refusal is a MirrorRejected: a body nested too deeply for the JSON
-    decoder (RecursionError up to Python 3.11) is invalid JSON here too.
+    A body nested too deeply for the JSON decoder (RecursionError up to
+    Python 3.11) is invalid JSON here too.
     """
-    if len(raw) > MAX_BODY_BYTES:
-        raise MirrorRejected(MIRROR_TOO_LARGE, f"the body must be at most {MAX_BODY_BYTES} bytes")
+    if len(raw) > limit:
+        raise MirrorRejected(MIRROR_TOO_LARGE, f"the body must be at most {limit} bytes")
     try:
-        payload = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
+        return json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
     except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise _invalid("the body is not valid JSON") from exc
-    return parse_publish(payload)
+
+
+def decode_publish(raw: bytes) -> Publish:
+    """parse_publish of a raw POST body (UTF-8 JSON; NaN and Infinity are refused); every refusal is a MirrorRejected."""
+    return parse_publish(_decode_json(raw, MAX_BODY_BYTES))
+
+
+def parse_marker_command(payload: Any) -> Dict[str, Any]:
+    """A viewer's marker command: {v, id, op: "add", frequency_hz} or {v, id, op: "remove", marker_id}."""
+    raw = _object(payload, "body", frozenset({"v", "id", "op"}), frozenset({"frequency_hz", "marker_id"}))
+    if isinstance(raw["v"], bool) or raw["v"] != VERSION:
+        raise _invalid(f"v must be {VERSION}")
+    command_id = _command_id(raw["id"], "id")
+    op = _token(raw["op"], "op", MARKER_OPS)
+    if op == "add":
+        _object(raw, "body", frozenset({"v", "id", "op", "frequency_hz"}))
+        return {"id": command_id, "op": op, "frequency_hz": _hz(raw["frequency_hz"], "frequency_hz")}
+    _object(raw, "body", frozenset({"v", "id", "op", "marker_id"}))
+    return {"id": command_id, "op": op, "marker_id": _marker_id(raw["marker_id"], "marker_id")}
+
+
+def decode_marker_command(raw: bytes) -> Dict[str, Any]:
+    """parse_marker_command of a raw POST body; every refusal is a MirrorRejected."""
+    return parse_marker_command(_decode_json(raw, MAX_MARKER_BODY_BYTES))
 
 
 def limits() -> Dict[str, int]:
@@ -339,18 +508,33 @@ def limits() -> Dict[str, int]:
     }
 
 
+def _command_wire(record: Dict[str, Any]) -> Dict[str, Any]:
+    """A queued command as the publishing page gets it."""
+    if record["op"] == "add":
+        return {"id": record["id"], "op": "add", "frequency_hz": record["frequency_hz"]}
+    return {"id": record["id"], "op": "remove", "marker_id": record["target"]}
+
+
 class ReceiverMirror:
-    """The latest published source, state and frame; latest wins, memory only.
+    """The latest published source, state, frame and marker list, and the viewers' marker commands; memory only.
 
     ``admit`` is the rate rule (at most MAX_POSTS_PER_S taken in any
     RATE_WINDOW_S; a refused POST does not count). Ages use ``clock``
     (monotonic seconds), so the kiosk's and the viewers' clocks never matter.
 
-    The mirror takes posts only between ``open()`` and ``close()``, which the
-    LAN view's manager calls with its listener under its own lock. ``close()``
-    forgets everything in the same step, so a POST that found the LAN view
-    open and is still decoding when it closes is refused by ``publish()``
-    instead of storing its state after the clear.
+    The mirror takes posts and marker commands only between ``open()`` and
+    ``close()``, which the LAN view's manager calls with its listener under its
+    own lock. ``close()`` forgets everything in the same step, so a POST that
+    found the LAN view open and is still decoding when it closes is refused by
+    ``publish()`` instead of storing its state after the clear.
+
+    Marker commands (``queue_marker_command``) wait until the next accepted
+    POST of a page, which gets them in its answer (``publish()`` returns them)
+    and reports each result in a later POST. A command is queued only while a
+    page posted within SOURCE_LOST_MS; it expires MARKER_COMMAND_TTL_MS after
+    it was queued, and a result that comes later still settles one that was
+    handed out (its status view says ``handed``, so a viewer knows it may still
+    run). Nothing is handed out twice.
     """
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
@@ -360,10 +544,14 @@ class ReceiverMirror:
         self._source: Optional[Dict[str, Any]] = None
         self._state: Optional[Dict[str, Any]] = None
         self._frame: Optional[Dict[str, Any]] = None
+        self._markers: Optional[Dict[str, Any]] = None
         self._seen_at: Optional[float] = None
         self._state_at: Optional[float] = None
         self._frame_at: Optional[float] = None
         self._open = False
+        # Viewers' marker commands by id, oldest first, and their senders' recent commands.
+        self._commands: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        self._command_taken: Dict[str, Deque[float]] = {}
         # Server-side counters: every accepted POST, and every accepted frame.
         self._rev = 0
         self._frame_rev = 0
@@ -380,30 +568,78 @@ class ReceiverMirror:
             self._taken.append(now)
             return True
 
+    def admit_marker_command(self, client: str) -> bool:
+        """At most MARKER_COMMANDS_PER_S marker commands from one client address in any RATE_WINDOW_S."""
+        with self._lock:
+            now = self._clock()
+            for address in list(self._command_taken):
+                taken = self._command_taken[address]
+                while taken and now - taken[0] >= RATE_WINDOW_S:
+                    taken.popleft()
+                if not taken:
+                    del self._command_taken[address]
+            taken = self._command_taken.get(client)
+            if taken is None:
+                if len(self._command_taken) >= MAX_RATE_CLIENTS:
+                    return False
+                taken = self._command_taken[client] = deque()
+            if len(taken) >= MARKER_COMMANDS_PER_S:
+                return False
+            taken.append(now)
+            return True
+
     def open(self) -> None:
         """Take posts from now on (the LAN view opened)."""
         with self._lock:
             self._open = True
 
     def close(self) -> None:
-        """Refuse posts and forget everything (the LAN view closed, moved or was disabled)."""
+        """Refuse posts and forget everything, the marker commands too (the LAN view closed, moved or was disabled)."""
         with self._lock:
             self._open = False
             self._source = None
             self._state = None
             self._frame = None
+            self._markers = None
             self._seen_at = None
             self._state_at = None
             self._frame_at = None
+            self._commands.clear()
+            self._command_taken.clear()
 
     def is_open(self) -> bool:
         with self._lock:
             return self._open
 
-    def publish(self, source: Dict[str, Any], state: Dict[str, Any], frame: Optional[Dict[str, Any]]) -> Dict[str, int]:
-        """Keep this POST as the latest; a frame of another source than the stored one is not kept.
+    def _expire(self, now: float) -> None:
+        for record in self._commands.values():
+            if record["status"] in (COMMAND_QUEUED, COMMAND_SENT) and now - record["queued_at"] >= MARKER_COMMAND_TTL_MS / 1000:
+                record["status"] = COMMAND_EXPIRED
 
-        Raises MirrorRejected (MIRROR_LAN_CLOSED) while the mirror is closed.
+    def _settle(self, results: Sequence[Dict[str, Any]]) -> None:
+        """Results of commands handed out; one for a command never handed out, or answered already, is ignored."""
+        for result in results:
+            record = self._commands.get(result["id"])
+            if record is None or record["status"] not in (COMMAND_SENT, COMMAND_EXPIRED) or not record["handed"]:
+                continue
+            record["status"] = COMMAND_DONE
+            record["code"] = result["code"]
+            if record["op"] == "add":
+                record["marker_id"] = result["marker_id"]
+
+    def publish(
+        self,
+        source: Dict[str, Any],
+        state: Dict[str, Any],
+        frame: Optional[Dict[str, Any]],
+        markers: Any = UNCHANGED,
+        results: Sequence[Dict[str, Any]] = (),
+    ) -> Dict[str, Any]:
+        """Keep this POST as the latest and hand the queued marker commands to it.
+
+        A frame or marker list of another source than the stored one is not
+        kept. Raises MirrorRejected (MIRROR_LAN_CLOSED) while the mirror is
+        closed.
         """
         with self._lock:
             if not self._open:
@@ -413,6 +649,7 @@ class ReceiverMirror:
                 # Another page took over: nothing of the previous one stays.
                 self._frame = None
                 self._frame_at = None
+                self._markers = None
             self._source = source
             self._state = state
             self._seen_at = now
@@ -422,7 +659,82 @@ class ReceiverMirror:
                 self._frame = frame
                 self._frame_at = now
                 self._frame_rev += 1
-            return {"rev": self._rev, "frame_rev": self._frame_rev}
+            if markers is not UNCHANGED:
+                self._markers = markers
+            self._expire(now)
+            self._settle(results)
+            commands = []
+            for record in self._commands.values():
+                if record["status"] == COMMAND_QUEUED:
+                    record["status"] = COMMAND_SENT
+                    record["handed"] = True
+                    commands.append(_command_wire(record))
+            return {"rev": self._rev, "frame_rev": self._frame_rev, "commands": commands}
+
+    def queue_marker_command(self, command: Dict[str, Any]) -> Dict[str, Any]:
+        """Queue a viewer's marker command (parse_marker_command) for the next POST; its status view.
+
+        Refused while closed (MIRROR_LAN_CLOSED), without a page that posted
+        within SOURCE_LOST_MS (MIRROR_NO_SOURCE), for an id already held
+        (MIRROR_DUPLICATE_ID) and while MAX_PENDING_MARKER_COMMANDS are not
+        settled (MIRROR_MARKER_BUSY).
+        """
+        with self._lock:
+            if not self._open:
+                raise MirrorRejected(MIRROR_LAN_CLOSED, LAN_CLOSED_MESSAGE)
+            now = self._clock()
+            if self._seen_at is None or now - self._seen_at > SOURCE_LOST_MS / 1000:
+                raise MirrorRejected(MIRROR_NO_SOURCE, "no groundstation page publishes the Receiver now")
+            if command["id"] in self._commands:
+                raise MirrorRejected(MIRROR_DUPLICATE_ID, "a marker command with this id was taken already")
+            self._expire(now)
+            pending = sum(1 for record in self._commands.values() if record["status"] in (COMMAND_QUEUED, COMMAND_SENT))
+            if pending >= MAX_PENDING_MARKER_COMMANDS:
+                raise MirrorRejected(MIRROR_MARKER_BUSY, f"at most {MAX_PENDING_MARKER_COMMANDS} marker commands wait at once")
+            add = command["op"] == "add"
+            record = {
+                "id": command["id"],
+                "op": command["op"],
+                "frequency_hz": command["frequency_hz"] if add else None,
+                "target": None if add else command["marker_id"],
+                "marker_id": None if add else command["marker_id"],
+                "status": COMMAND_QUEUED,
+                "code": None,
+                "handed": False,
+                "queued_at": now,
+            }
+            self._commands[command["id"]] = record
+            # Only settled commands go when the record is full; at most MAX_PENDING are not settled.
+            for held_id in list(self._commands):
+                if len(self._commands) <= MAX_KEPT_MARKER_COMMANDS:
+                    break
+                if self._commands[held_id]["status"] in (COMMAND_DONE, COMMAND_EXPIRED):
+                    del self._commands[held_id]
+            return self._command_view(record, now)
+
+    def _command_view(self, record: Dict[str, Any], now: float) -> Dict[str, Any]:
+        return {
+            "ok": True,
+            "id": record["id"],
+            "op": record["op"],
+            "frequency_hz": record["frequency_hz"],
+            "marker_id": record["marker_id"],
+            "status": record["status"],
+            "code": record["code"],
+            # A page got it: an expired command may still run, and a late result settle it.
+            "handed": record["handed"],
+            "age_ms": max(0, int(round((now - record["queued_at"]) * 1000))),
+        }
+
+    def marker_command(self, command_id: str) -> Optional[Dict[str, Any]]:
+        """Body of GET /api/mirror/receiver/markers/<id>; None for an id not held."""
+        with self._lock:
+            record = self._commands.get(command_id)
+            if record is None:
+                return None
+            now = self._clock()
+            self._expire(now)
+            return self._command_view(record, now)
 
     def _age_ms(self, at: Optional[float], now: float) -> Optional[int]:
         return None if at is None else max(0, int(round((now - at) * 1000)))
@@ -442,5 +754,6 @@ class ReceiverMirror:
                 "state_age_ms": self._age_ms(self._state_at, now),
                 "frame": self._frame,
                 "frame_age_ms": self._age_ms(self._frame_at, now),
+                "markers": self._markers,
                 "limits": limits(),
             }
