@@ -275,9 +275,9 @@ check_docker_mount() {
   fi
   script=$(CDPATH='' cd -- "$HERE/../docker" 2>/dev/null && pwd)/sdr-doa-docker
   if [ ! -f "$script" ]; then
-    script="sdr-doa-docker (3.3.0 or later)"
+    script="SCRIPT (the sdr-doa-docker of 3.3.0 or later)"
   fi
-  warn "$DOCKER_DIR/compose.yml does not mount $REQUEST_DIR, so the console shows \"Request directory not mounted\" (sdr-doa-docker update never rewrites compose.yml). Once, while no recording runs: sudo sh $script install --dir $DOCKER_DIR (it keeps .env, the channel, the sdr-doa-data volume and the update timer, and recreates the container)"
+  warn "$DOCKER_DIR/compose.yml does not mount $REQUEST_DIR, so the console shows \"Request directory not mounted\": sdr-doa-docker update rewrites neither compose.yml nor the installed script. Install the script of this release first, then run its install once, while no recording runs: sudo install -m 0755 $script /usr/local/bin/sdr-doa-docker && sudo /usr/local/bin/sdr-doa-docker install --dir $DOCKER_DIR (it keeps .env, the channel, the sdr-doa-data volume and the update timer, and recreates the container)"
 }
 
 # Read-only checks of the running system; --root (test staging) skips them.

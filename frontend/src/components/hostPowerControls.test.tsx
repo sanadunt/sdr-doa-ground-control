@@ -84,9 +84,9 @@ describe('top bar Restart and Shutdown', () => {
     expect(powerButtons(shell('local', undefined)).every((button) => button.includes('disabled=""'))).toBe(true);
     // A container whose compose.yml has no mount names that, not the host helper.
     const unmounted = powerButtons(shell('local', { available: false, reason: 'DIR_NOT_MOUNTED' }));
-    expect(unmounted[0]).toContain('title="Restart this PC: Request directory not mounted (run sdr-doa-docker install once)"');
+    expect(unmounted[0]).toContain('title="Restart this PC: Request directory not mounted (install the 3.3.0 sdr-doa-docker, then run its install once)"');
     expect(powerButtons(shell('local', { available: false, reason: 'DIR_NOT_MOUNTED' }, 'id'))[1])
-      .toContain('title="Matikan PC ini: Direktori permintaan belum di-mount (jalankan sdr-doa-docker install sekali)"');
+      .toContain('title="Matikan PC ini: Direktori permintaan belum di-mount (pasang sdr-doa-docker 3.3.0, lalu jalankan install-nya sekali)"');
     const id = powerButtons(shell('local', { available: false, reason: 'HELPER_MISSING' }, 'id'));
     expect(id[0]).toContain('title="Mulai ulang PC ini: Helper host belum dipasang"');
     expect(id[1]).toContain('title="Matikan PC ini: Helper host belum dipasang"');

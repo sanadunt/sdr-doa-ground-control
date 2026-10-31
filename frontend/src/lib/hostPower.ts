@@ -4,7 +4,7 @@
  * The console's own page only (access "local"): POST /api/host/power writes
  * a request file that the host helper (packaging/host-power) acts on with
  * systemctl reboot or poweroff. The LAN view gets neither the buttons nor the
- * capability, and its listener refuses every POST.
+ * capability, and its listener refuses this route (its one POST is a marker command).
  *
  * The constants repeat tools/host_power.py (tools/test_host_power.py
  * compares them); every reason and error code has an EN and ID text.

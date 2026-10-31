@@ -54,8 +54,11 @@ spectrum to ``POST /api/mirror/receiver`` and the LAN view reads them back
 from ``GET /api/mirror/receiver`` (``receiver_mirror.py``, memory only). The
 LAN view also reads the Receiver's Records: the archive list routes, a scan
 preview, one record's download and the audio playback, under its own read
-rule and limits (``LanConsoleHandler._lan_records_get``); every other
-Receiver route and every write stays refused there.
+rule and limits (``LanConsoleHandler._lan_records_get``). Its one write is
+a marker command for the groundstation Receiver (``POST
+/api/mirror/receiver/markers``, ``lan.write_allowed``); every other Receiver
+route and every other write, ``POST /api/host/power`` included, stays
+refused there.
 
 Admin login uses ``SDR_DOA_ADMIN_PASSWORD`` from the environment or the
 ``--env-file`` (default: the repository ``.env``). When the variable is absent

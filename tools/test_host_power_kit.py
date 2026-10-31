@@ -12,10 +12,12 @@ machine, and no systemd unit or file outside the temporary directory is touched.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -40,7 +42,7 @@ NEXT_BOOT = "0b1c2d3e-4f50-4a61-8b72-93a4b5c6d7e8"
 # Real tools the scripts may use; anything else on PATH is a fake.
 REAL_TOOLS = (
     "sh", "dash", "bash", "cat", "sed", "awk", "grep", "tr", "tail", "head", "date", "mv", "rm", "mkdir", "chmod",
-    "cp", "ls", "dd", "wc", "mktemp", "dirname", "basename", "rmdir", "env", "touch", "find", "sort", "cut",
+    "cp", "ls", "ln", "dd", "wc", "mktemp", "dirname", "basename", "rmdir", "env", "touch", "find", "sort", "cut",
 )
 FAKE_TOOLS = ("systemctl", "logger", "id", "systemd-tmpfiles")
 
@@ -320,16 +322,91 @@ class HelperTests(HarnessCase):
             self.assertTrue(message.startswith(("dry-run: would run: systemctl reboot", "refused a request: it is not a regular file",
                                                 "refused reboot: reboot ran")), message)
 
-    def test_the_console_s_directory_is_only_checked_and_renamed(self):
-        handle = HELPER.read_text(encoding="utf-8").split("cmd_handle() {", 1)[1].split("\n}\n", 1)[0]
+    def test_the_console_s_directory_is_only_checked_linked_and_removed(self):
+        """No open by name there, and no mv, whose copy fallback would open it."""
+        helper = HELPER.read_text(encoding="utf-8")
+        handle = helper.split("cmd_handle() {", 1)[1].split("\n}\n", 1)[0]
         uses = [line.strip() for line in handle.splitlines() if '"$request"' in line]
         self.assertEqual(uses, [
             'if [ ! -e "$request" ] && [ ! -L "$request" ]; then',
-            'if ! mv -f -- "$request" "$taken" 2>/dev/null; then',
+            'if [ -d "$request" ] && [ ! -L "$request" ]; then',
+            'rm -rf -- "$request" 2>/dev/null',
+            'if ! ln -P -- "$request" "$taken" 2>/dev/null; then',
+            'if [ ! -e "$request" ] && [ ! -L "$request" ]; then',
+            'rm -f -- "$request" 2>/dev/null',
         ])
-        for line in handle.splitlines():
-            if "dd if=" in line or "wc -c" in line:
-                self.assertIn('"$taken"', line)
+        self.assertNotRegex(helper, r"(?m)^\s*(if !?\s*)?mv ")
+        reads = [line.strip() for line in helper.splitlines() if "dd if=" in line and "/dev/null of=" not in line]
+        self.assertEqual(reads, ['dd if="$taken" bs=9 count=1 $NONBLOCK 2>/dev/null'])
+
+    @unittest.skipUnless(hasattr(fcntl, "F_SETLEASE"), "file leases are Linux only")
+    def test_a_lease_on_the_request_never_holds_the_helper(self):
+        """The console's user can hold a write lease on its own file: a blocking
+        open by root would wait for the lease break (45 s by default)."""
+        request = self.h.request(b"reboot")
+        fd = os.open(request, os.O_RDONLY)
+        previous = signal.signal(signal.SIGIO, lambda *_args: None)
+        try:
+            try:
+                fcntl.fcntl(fd, fcntl.F_SETLEASE, fcntl.F_WRLCK)
+            except OSError as exc:
+                self.skipTest(f"no write lease on this file system: {exc}")
+            started = time.monotonic()
+            result = self.h.run(HELPER, "handle", now=1_700_000_000, timeout=20)
+            elapsed = time.monotonic() - started
+        finally:
+            try:
+                fcntl.fcntl(fd, fcntl.F_SETLEASE, fcntl.F_UNLCK)
+            except OSError:
+                pass
+            os.close(fd)
+            signal.signal(signal.SIGIO, previous)
+        self.assertLess(elapsed, 10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.h.power_calls(), [])
+        self.assert_logged("refused a request: it could not be read at once")
+        self.assertFalse(os.path.lexists(request))
+
+    def test_a_request_on_another_mount_is_never_copied(self):
+        """link(2) fails across file systems and mounts, where mv would copy."""
+        shm = Path("/dev/shm")
+        if not (shm.is_dir() and os.access(shm, os.W_OK)) or shm.stat().st_dev == self.h.base.stat().st_dev:
+            self.skipTest("no second writable file system (/dev/shm) here")
+        other = Path(tempfile.mkdtemp(prefix="test-host-power-", dir=shm))
+        self.addCleanup(shutil.rmtree, other, True)
+        self.h.request(b"reboot")
+        result = self.h.handle(HOST_POWER_TAKEN_DIR=str(other / "taken"))
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.h.power_calls(), [])
+        self.assert_logged("cannot take")
+        self.assertEqual((self.h.request_dir / "request").read_bytes(), b"reboot")
+        self.assertEqual(list((other / "taken").iterdir()), [], "nothing copied")
+
+    def test_root_s_directory_is_made_0700_and_must_stay_root_s(self):
+        self.h.request(b"reboot")
+        self.assertEqual(self.h.handle().returncode, 0)
+        self.assertEqual(stat.S_IMODE(self.h.taken_dir.stat().st_mode), 0o700)
+        for mode in (0o770, 0o707):
+            with self.subTest(mode=oct(mode)):
+                self.h.clear()
+                self.h.taken_dir.chmod(mode)
+                self.h.request(b"poweroff")
+                result = self.h.handle(1_700_001_000)
+                self.assertEqual(result.returncode, 1)
+                self.assert_logged("cannot prepare")
+                self.assertEqual((self.h.request_dir / "request").read_bytes(), b"poweroff", "left in place")
+                self.assertEqual(stat.S_IMODE(self.h.taken_dir.stat().st_mode), mode, "never changed")
+        # Root's but readable by others is enough: no one else can write in it.
+        self.h.taken_dir.chmod(0o755)
+        self.h.clear()
+        self.assertEqual(self.h.handle(1_700_002_000, "--dry-run").returncode, 0)
+        self.assert_logged("dry-run: would run: systemctl poweroff")
+        # Owned by someone else: refused (a dry run, since that uid is not root either).
+        self.h.request(b"poweroff")
+        self.h.clear()
+        result = self.h.handle(1_700_003_000, "--dry-run", HOST_POWER_ROOT_UID=str(os.geteuid() + 1))
+        self.assertEqual(result.returncode, 1)
+        self.assert_logged("cannot prepare")
 
     def test_a_directory_request_is_taken_refused_and_removed(self):
         (self.h.request_dir / "request").mkdir()
@@ -358,7 +435,8 @@ class HelperTests(HarnessCase):
         self.assertEqual(list((self.h.base / "elsewhere").iterdir()), [])
 
     def test_a_leftover_in_root_s_directory_is_cleared_first(self):
-        self.h.taken_dir.mkdir(parents=True)
+        self.h.taken_dir.mkdir(parents=True, mode=0o700)
+        self.h.taken_dir.chmod(0o700)
         (self.h.taken_dir / "request").write_bytes(b"poweroff")
         self.h.request(b"reboot")
         self.assertEqual(self.h.handle().returncode, 0)
@@ -513,6 +591,9 @@ class InstallerTests(HarnessCase):
         self.assertIn("SyslogIdentifier=sdr-doa-host-power\n", service)
         self.assertIn("PrivateDevices=yes\n", service)
         self.assertIn("TimeoutStartSec=30s\n", service)
+        unit_section = service.split("[Unit]\n", 1)[1].split("[Service]\n", 1)[0]
+        self.assertIn("StartLimitIntervalSec=0\n", unit_section, "a burst never fails the path unit")
+        self.assertIn("bind-mount\n# /run/sdr-doa-host-power or /run/sdr-doa-host-power.taken", service)
         self.assertNotIn("[Install]", service, "started by the path unit only")
         path_unit = self.read("etc/systemd/system/sdr-doa-host-power.path")
         self.assertIn("PathExists=/run/sdr-doa-host-power/request\n", path_unit)
@@ -559,7 +640,9 @@ class InstallerTests(HarnessCase):
         warning = next(line for line in result.stderr.splitlines() if "does not mount" in line)
         self.assertIn("/opt/sdr-doa-ground-console/compose.yml does not mount /run/sdr-doa-host-power", warning)
         self.assertIn('"Request directory not mounted"', warning)
-        self.assertIn(f"sudo sh {ROOT / 'packaging/docker/sdr-doa-docker'} install --dir /opt/sdr-doa-ground-console", warning)
+        self.assertIn(f"sudo install -m 0755 {ROOT / 'packaging/docker/sdr-doa-docker'} /usr/local/bin/sdr-doa-docker"
+                      " && sudo /usr/local/bin/sdr-doa-docker install --dir /opt/sdr-doa-ground-console", warning)
+        self.assertIn("rewrites neither compose.yml nor the installed script", warning)
         self.assertIn("keeps .env, the channel, the sdr-doa-data volume", warning)
         self.assertEqual(compose.read_text(encoding="utf-8"), old, "only named, never edited")
         # The dry run names it too; another --docker-dir; a compose with the mount; no install at all.
@@ -688,6 +771,19 @@ class InstallerTests(HarnessCase):
         result = self.h.run(script, "--root", str(self.root), "--purge")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.files(), set())
+
+    def test_uninstall_reads_an_install_info_without_the_taken_directory(self):
+        """The first, unreleased install-info had no TAKEN_DIR line."""
+        self.assertEqual(self.install().returncode, 0)
+        info = self.root / "usr/local/share/sdr-doa-host-power/install-info"
+        info.write_text("".join(line for line in info.read_text(encoding="utf-8").splitlines(True)
+                                if not line.startswith("TAKEN_DIR=")), encoding="utf-8")
+        taken = self.root / "run/sdr-doa-host-power.taken"
+        taken.mkdir(parents=True, mode=0o700)
+        script = self.root / "usr/local/share/sdr-doa-host-power/uninstall.sh"
+        result = self.h.run(script, "--root", str(self.root))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(taken.exists())
 
     def test_uninstall_dry_run(self):
         self.assertEqual(self.install().returncode, 0)

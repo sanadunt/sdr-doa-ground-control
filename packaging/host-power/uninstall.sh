@@ -90,7 +90,9 @@ PREFIX=$(value PREFIX)
 UNIT_DIR=$(value UNIT_DIR)
 TMPFILES_DIR=$(value TMPFILES_DIR)
 REQUEST_DIR=$(value REQUEST_DIR)
+# The first unreleased install-info had no TAKEN_DIR.
 TAKEN_DIR=$(value TAKEN_DIR)
+TAKEN_DIR=${TAKEN_DIR:-$REQUEST_DIR.taken}
 STATE_DIR=$(value STATE_DIR)
 for path in "$PREFIX" "$UNIT_DIR" "$TMPFILES_DIR" "$REQUEST_DIR" "$TAKEN_DIR" "$STATE_DIR"; do
   case $path in /?*) ;; *) die "$info is damaged: unexpected path '$path'" ;; esac

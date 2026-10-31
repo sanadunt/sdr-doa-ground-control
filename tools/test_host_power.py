@@ -140,7 +140,9 @@ class RequestFileTests(_TempDirCase):
         with self.assertRaises(hp.HostPowerRejected) as refused:
             hp.HostPower(self.base / "missing", in_container=True).request("reboot")
         self.assertEqual(refused.exception.extra, {"reason": hp.DIR_NOT_MOUNTED})
-        self.assertIn("sdr-doa-docker install", refused.exception.message)
+        # The installed 3.2.0 script would write no mount: the 3.3.0 script first, then its install.
+        self.assertIn("install the sdr-doa-docker script of 3.3.0 or later", refused.exception.message)
+        self.assertIn("then run its install once", refused.exception.message)
         with self.assertRaises(hp.HostPowerRejected) as refused:
             hp.HostPower(None).request("reboot")
         self.assertEqual(refused.exception.extra, {"reason": hp.NOT_CONFIGURED})

@@ -11,10 +11,10 @@
 # REQUEST_DIR/request holding exactly reboot or poweroff; sdr-doa-host-power.path
 # starts sdr-doa-host-power.service when it appears. The console's user owns
 # REQUEST_DIR and can replace the request at any moment, so handle never opens
-# it there: one rename moves it into TAKEN_DIR, which only root can enter, and
-# the checks, the read (at most 9 bytes of a regular file) and the delete
-# happen there. It acts only once the delete worked, so no request outlives
-# the boot it was made in. A request within REPEAT_WINDOW seconds of the last
+# it there: a hard link takes it into TAKEN_DIR, which is root's alone, and
+# the checks, the read (at most 9 bytes of a regular file, without waiting)
+# and the delete happen there. It acts only once the delete worked, so no
+# request outlives the boot it was made in. A request within REPEAT_WINDOW seconds of the last
 # action of the same boot is refused. It runs systemctl reboot or systemctl
 # poweroff and nothing else.
 # Every message goes to the journal with the tag sdr-doa-host-power.
@@ -24,7 +24,8 @@ umask 022
 TAG=sdr-doa-host-power
 REQUEST_DIR=${HOST_POWER_DIR:-/run/sdr-doa-host-power}
 STATE_DIR=${HOST_POWER_STATE_DIR:-/var/lib/sdr-doa-host-power}
-# Root's own directory on the same /run, so taking a request is one rename(2).
+# Root's own directory on the same /run mount: a request is taken with link(2),
+# which fails across file systems and mounts where mv would copy instead.
 TAKEN_DIR=${HOST_POWER_TAKEN_DIR:-/run/sdr-doa-host-power.taken}
 # Tests only: a fake /proc, a fixed clock and the uid that counts as root.
 PROC=${HOST_POWER_PROC:-/proc}
@@ -134,14 +135,28 @@ need_root() {
   fi
 }
 
-# take_dir: TAKEN_DIR exists, is root's alone and holds no request of a run
+# take_dir: TAKEN_DIR exists (made 0700 here when missing), is a directory
+# owned by root that no one else can write, and holds no request of a run
 # that was killed in between.
 take_dir() {
-  [ ! -L "$TAKEN_DIR" ] || return 1
-  mkdir -p -- "$TAKEN_DIR" 2>/dev/null || return 1
-  chmod 0700 "$TAKEN_DIR" 2>/dev/null || return 1
+  if [ ! -e "$TAKEN_DIR" ] && [ ! -L "$TAKEN_DIR" ]; then
+    mkdir -m 0700 -- "$TAKEN_DIR" 2>/dev/null || return 1
+  fi
+  [ -d "$TAKEN_DIR" ] && [ ! -L "$TAKEN_DIR" ] || return 1
+  # shellcheck disable=SC2012 # ls -n is the portable way to read owner and mode
+  ls -nd -- "$TAKEN_DIR" | awk -v root="$ROOT_UID" '
+    NR == 1 { ok = $3 == root && substr($1, 6, 1) != "w" && substr($1, 9, 1) != "w" }
+    END { exit ok ? 0 : 1 }' || return 1
   rm -rf -- "$TAKEN_DIR/request" 2>/dev/null
   [ ! -e "$TAKEN_DIR/request" ] && [ ! -L "$TAKEN_DIR/request" ]
+}
+
+# read_taken: at most 9 bytes of the taken request. GNU dd opens it with
+# O_NONBLOCK, so a lease its owner (the console's user) holds on the inode
+# makes the open fail at once instead of waiting for the lease to break.
+read_taken() {
+  # shellcheck disable=SC2086 # NONBLOCK is empty or one word
+  dd if="$taken" bs=9 count=1 $NONBLOCK 2>/dev/null
 }
 
 cmd_handle() {
@@ -151,26 +166,39 @@ cmd_handle() {
   if [ ! -e "$request" ] && [ ! -L "$request" ]; then
     return 0
   fi
-  # Never open the request by name in the console's directory, where it can
-  # become a FIFO or a symlink between a check and an open: rename moves
-  # whatever is there (a symlink or a FIFO as itself) out of the console's reach.
   if ! take_dir; then
     log err "cannot prepare $TAKEN_DIR; nothing done"
     return 1
   fi
-  if ! mv -f -- "$request" "$taken" 2>/dev/null; then
-    log err "cannot take $request; nothing done"
+  # Never open the request by name in the console's directory, where it can
+  # become a FIFO or a symlink between a check and an open. A hard link takes
+  # the inode as it is (a symlink or a FIFO as itself) out of the console's
+  # reach; unlike mv it never falls back to a copy that would open it there.
+  if [ -d "$request" ] && [ ! -L "$request" ]; then
+    # A directory cannot be linked and is never a request.
+    rm -rf -- "$request" 2>/dev/null
+    log warning "refused a request: it is not a regular file"
+    return 0
+  fi
+  if ! ln -P -- "$request" "$taken" 2>/dev/null; then
+    if [ ! -e "$request" ] && [ ! -L "$request" ]; then
+      return 0
+    fi
+    log err "cannot take $request (another file system or mount?); nothing done"
     return 1
   fi
+  rm -f -- "$request" 2>/dev/null
   word=
   size=
   refused=
   if [ -L "$taken" ] || [ ! -f "$taken" ]; then
     refused="it is not a regular file"
   else
-    word=$(dd if="$taken" bs=9 count=1 2>/dev/null) || word=
+    if ! word=$(read_taken); then
+      refused="it could not be read at once"
+    fi
     # $(...) drops a trailing newline; the byte count does not.
-    size=$(dd if="$taken" bs=9 count=1 2>/dev/null | wc -c | tr -d ' \t')
+    size=$(read_taken | wc -c | tr -d ' \t')
   fi
   # Delete before acting: a request that cannot be deleted is never acted on.
   rm -rf -- "$taken" 2>/dev/null
@@ -254,6 +282,10 @@ cmd_status() {
 }
 
 main() {
+  NONBLOCK=
+  if dd if=/dev/null of=/dev/null iflag=nonblock count=0 2>/dev/null; then
+    NONBLOCK=iflag=nonblock
+  fi
   while [ $# -gt 0 ]; do
     case $1 in
       --dry-run) DRY_RUN=1 ;;

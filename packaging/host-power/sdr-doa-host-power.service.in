@@ -5,6 +5,9 @@
 [Unit]
 Description=SDR-DoA Ground Console power request (Restart or Shutdown)
 Documentation=file://@SHARE_DIR@/README.md
+# No start limit: a burst of requests must not leave sdr-doa-host-power.path
+# failed until reset-failed or a reboot.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
@@ -19,3 +22,6 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 # No physical devices, whatever a request points at.
 PrivateDevices=yes
+# Do not add ProtectSystem=, ReadWritePaths= or other options that bind-mount
+# @REQUEST_DIR@ or @REQUEST_DIR@.taken: the helper takes a request with
+# link(2), which fails across mounts, so every request would be refused.

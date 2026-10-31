@@ -1,7 +1,7 @@
 """Restart and Shutdown of the console's own host, as a request file.
 
-``POST /api/host/power`` (the loopback listener only; the LAN view answers
-no write) writes one file named ``request`` holding exactly ``reboot`` or
+``POST /api/host/power`` (the loopback listener only; the LAN view's one
+write is a marker command, and it refuses this route) writes one file named ``request`` holding exactly ``reboot`` or
 ``poweroff`` into the request directory, atomically: the bytes go to a
 temporary name first and are hard-linked into place, so the host never sees
 a partial word and a second request cannot replace one the host has not taken
@@ -17,7 +17,9 @@ not writable for the console (Docker creates an empty root-owned one for the
 bind mount) or has no marker, and the route answers 503
 ``HOST_POWER_UNAVAILABLE`` with the reason the top bar shows. In a container
 without the directory the reason is ``DIR_NOT_MOUNTED``: its ``compose.yml``
-predates the mount, and ``sdr-doa-docker update`` never rewrites that file.
+predates the mount, and ``sdr-doa-docker update`` never rewrites that file
+nor replaces the installed script, so the 3.3.0 script is installed first
+and its ``install`` run once.
 
 Docker bind-mounts the host's ``/run/sdr-doa-host-power`` at the same path;
 a native console reads it directly. Stdlib only.
@@ -70,7 +72,10 @@ ERROR_CODES_HTTP: Dict[str, int] = {
 
 UNAVAILABLE_MESSAGES = {
     NOT_CONFIGURED: "host power requests are off in this console (--host-power-dir is empty)",
-    DIR_NOT_MOUNTED: "the request directory is not mounted into this container; run sdr-doa-docker install (3.3.0 or later) once so compose.yml mounts it",
+    DIR_NOT_MOUNTED: (
+        "the request directory is not mounted into this container: install the sdr-doa-docker script of 3.3.0 "
+        "or later (sdr-doa-docker update replaces neither itself nor compose.yml), then run its install once"
+    ),
     DIR_MISSING: "the host power request directory is missing; install packaging/host-power on the host",
     DIR_NOT_WRITABLE: "the console cannot write the host power request directory; install packaging/host-power on the host for this console's user",
     HELPER_MISSING: "the host power helper is not installed on the host (packaging/host-power)",

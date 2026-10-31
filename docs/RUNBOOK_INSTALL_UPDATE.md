@@ -644,17 +644,20 @@ curl -s --noproxy '*' http://127.0.0.1:8787/api/health; echo
 sudo grep -n 'sdr-doa-host-power' /opt/sdr-doa-ground-console/compose.yml
 ```
 
-**Periksa**: `"version": "3.3.0"` (atau lebih baru) dan satu baris `- /run/sdr-doa-host-power:/run/sdr-doa-host-power`. Tanpa baris itu, `compose.yml` ditulis `sdr-doa-docker` sebelum 3.3.0: `update` dan timer hariannya hanya mengganti image dan tidak pernah menulis ulang `compose.yml`, jadi groundstation yang sudah terpasang tetap tanpa mount setelah update ke 3.3.0, dan console menampilkan kedua tombol nonaktif dengan alasan "Direktori permintaan belum di-mount" (`DIR_NOT_MOUNTED`). Mount itu didapat dengan menjalankan `install` sekali dari script 3.3.0, tanpa kehilangan `.env` maupun volume. Jalankan 5.1 dan A1 untuk rilis itu, lalu, dengan izin manusia dan saat `/api/health` berisi `"receiver_busy": false` (7.3):
+**Periksa**: `"version": "3.3.0"` (atau lebih baru) dan satu baris `- /run/sdr-doa-host-power:/run/sdr-doa-host-power`. Tanpa baris itu, `compose.yml` ditulis `sdr-doa-docker` sebelum 3.3.0: `update` dan timer hariannya hanya mengganti image dan tidak pernah menulis ulang `compose.yml`, jadi groundstation yang sudah terpasang tetap tanpa mount setelah update ke 3.3.0, dan console menampilkan kedua tombol nonaktif dengan alasan "Direktori permintaan belum di-mount" (`DIR_NOT_MOUNTED`). `update` juga tidak pernah mengganti salinan dirinya di `/usr/local/bin/sdr-doa-docker`: salinan itu tetap script 3.2.0, dan `install`-nya menulis `compose.yml` **tanpa** mount. Jadi pasang dulu script 3.3.0, lalu jalankan `install`-nya sekali; `.env` dan volume tetap. Jalankan 5.1 dan A1 untuk rilis itu (script terverifikasi di `~/sdr-doa-dl/docker-<V>`), lalu, dengan izin manusia dan saat `/api/health` berisi `"receiver_busy": false` (7.3):
 
 ```sh
-cd ~/sdr-doa-dl/docker-"$(cat ~/sdr-doa-dl/release-version)" && sudo sh sdr-doa-docker install --dir /opt/sdr-doa-ground-console
+cd ~/sdr-doa-dl/docker-"$(cat ~/sdr-doa-dl/release-version)" && sudo install -m 0755 sdr-doa-docker /usr/local/bin/sdr-doa-docker
+sudo /usr/local/bin/sdr-doa-docker install --dir /opt/sdr-doa-ground-console
 ```
+
+Perintah pertama butuh `sudo` biasa; bila `sudo` meminta kata sandi, manusia yang menjalankannya (4.9). **Periksa** sesudah perintah pertama: `grep -c sdr-doa-host-power /usr/local/bin/sdr-doa-docker` mencetak angka lebih dari 0 (script 3.2.0 mencetak `0`).
 
 `install` di direktori yang sudah ada:
 
 - mempertahankan `DIR/.env` (kanal `SDR_DOA_IMAGE_TAG`, port, dan `SDR_DOA_ADMIN_PASSWORD` atau `SDR_DOA_SEED_*` bila ada di sana) dan timer update;
 - memakai project `sdr-doa-ground-console` dan volume `sdr-doa-data` yang sama, jadi semua pengaturan, kata sandi admin di `/data/.env`, rekaman dan cache tile tetap;
-- memasang script baru di `/usr/local/bin/sdr-doa-docker`, menulis ulang `compose.yml` dengan mount itu, lalu membuat ulang container (RX, pindai dan rekaman di halaman console berhenti).
+- menulis ulang `compose.yml` dengan mount itu, lalu membuat ulang container (RX, pindai dan rekaman di halaman console berhenti).
 
 Jangan hapus volume atau `.env`, dan jangan jalankan `docker compose down -v` (aturan 1.1.6). **Periksa**: baris `OK: console runs ... and is healthy`, `grep` di atas sekarang menemukan baris mount, dan `sudo docker volume ls --filter name=sdr-doa-data` masih menampilkan `sdr-doa-ground-console_sdr-doa-data`.
 
@@ -1249,7 +1252,7 @@ Satu blok singkat berisi:
 | Pengaturan tampak tidak tersimpan setelah restart | Console dijalankan dengan `--base-url`/`--mqtt-*` | Hapus flag itu dari perintah; ubah di Konfigurasi. |
 | Data Out tidak terjangkau dan MQTT tanpa pesan dari RDF-SDR; journal `t900-ground-ppp.service` berisi `LCP: timeout` | Link PPP lewat T900 ke RDF-SDR putus (di luar console) | Bila `packaging/ground-link` terpasang: `sudo t900-ground-diag -o /tmp` dan `t900-link status`, lalu laporkan. Prosedur insiden di `packaging/ground-link/README.md` (restart, usbreset, cabut-colok) hanya dengan izin manusia. |
 | UI lama setelah update | Halaman lama masih di browser | Muat ulang halaman. |
-| Mulai ulang dan Matikan nonaktif, "Direktori permintaan belum di-mount" | `host_power.reason` `DIR_NOT_MOUNTED`: console Docker dengan `compose.yml` dari sebelum 3.3.0, yang tidak ditulis ulang oleh `update` | 5.5 P0: `install` sekali dari script 3.3.0 (`.env` dan volume tetap); muat ulang halaman console sesudahnya. |
+| Mulai ulang dan Matikan nonaktif, "Direktori permintaan belum di-mount" | `host_power.reason` `DIR_NOT_MOUNTED`: console Docker dengan `compose.yml` dari sebelum 3.3.0; `update` tidak menulis ulang file itu dan tidak mengganti script `sdr-doa-docker` yang terpasang | 5.5 P0: pasang script 3.3.0 ke `/usr/local/bin/sdr-doa-docker`, lalu `sudo /usr/local/bin/sdr-doa-docker install --dir /opt/sdr-doa-ground-console` sekali (`.env` dan volume tetap); muat ulang halaman console sesudahnya. |
 | Mulai ulang dan Matikan nonaktif, "Helper host belum dipasang" | `host_power.reason` di `/api/capabilities`: `DIR_MISSING` (native: sisi host belum dipasang), `DIR_NOT_WRITABLE` (sisi host belum dipasang, atau dipasang untuk `--console-user` lain) atau `HELPER_MISSING` (penanda `helper` hilang) | 5.5; `sudo sdr-doa-host-power status`; muat ulang halaman console sesudahnya. |
 | "Mulai ulang diminta" tetapi PC tetap menyala, atau `HOST_POWER_PENDING` | Helper menolak (dalam 60 detik setelah tindakan sebelumnya, mode `--helper-dry-run`, bukan file biasa), `systemctl` gagal, atau unit `.path` tidak jalan | `journalctl -t sdr-doa-host-power -n 20 --no-pager`, `systemctl status sdr-doa-host-power.path`; laporkan ke manusia. |
 
