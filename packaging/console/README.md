@@ -28,15 +28,15 @@ Data realtime (snapshot DoA, MQTT, spektrum) tidak disimpan; itu diperbarui teru
 ## Native
 
 ```sh
-curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v3.2.0/sdr-doa-ground-console-3.2.0-linux.tar.gz
-curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v3.2.0/SHA256SUMS
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v3.3.0/sdr-doa-ground-console-3.3.0-linux.tar.gz
+curl -fLO https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v3.3.0/SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS
-tar -xzf sdr-doa-ground-console-3.2.0-linux.tar.gz
-cd sdr-doa-ground-console-3.2.0-linux
+tar -xzf sdr-doa-ground-console-3.3.0-linux.tar.gz
+cd sdr-doa-ground-console-3.3.0-linux
 sh install.sh
 ```
 
-Ganti `3.2.0` dengan versi di halaman Releases. Setelah terpasang, versi berikutnya datang lewat `sdr-doa-console update` (bagian "Update dari GitHub Releases").
+Ganti `3.3.0` dengan versi di halaman Releases. Setelah terpasang, versi berikutnya datang lewat `sdr-doa-console update` (bagian "Update dari GitHub Releases").
 
 Installer memeriksa file rilis terhadap `MANIFEST.sha256`, membuat venv berisi `paho-mqtt` dan `tzdata` (dari folder `wheels/` bila ada, selain itu dari PyPI), lalu menanyakan kata sandi admin: ketik sendiri, ketik `random` untuk dibuatkan, atau tekan Enter untuk memakai default `123456` (akan muncul peringatan). Setelah itu console langsung jalan dan dibuka dengan `sdr-doa-console open` atau menu **SDR-DoA Ground Console**.
 
@@ -149,8 +149,8 @@ Pindah dari image yang di-build sendiri: nama project compose dan volume sama de
 Dari rilis (tidak perlu Node.js):
 
 ```sh
-tar -xzf sdr-doa-ground-console-3.2.0-linux.tar.gz
-cd sdr-doa-ground-console-3.2.0-linux
+tar -xzf sdr-doa-ground-console-3.3.0-linux.tar.gz
+cd sdr-doa-ground-console-3.3.0-linux
 docker compose up -d --build
 ```
 

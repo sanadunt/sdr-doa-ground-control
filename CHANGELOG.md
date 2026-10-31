@@ -4,6 +4,8 @@ Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QU
 
 ## 3.3.0
 
+Rilis minor: tidak ada yang dihapus. Tablet di tampilan LAN kini bisa menandai spektrum, dan console groundstation punya tombol Mulai ulang dan Matikan. Kanal `3` dan timer update memasang image-nya sendiri. Tombol daya baru aktif setelah langkah host sekali: script `sdr-doa-docker` 3.3.0, `sdr-doa-docker install`, dan `packaging/host-power/install.sh` (lihat poin Docker di bawah).
+
 - **Penanda dari tablet.** Tampilan LAN kini bisa menambah dan menghapus penanda spektrum Receiver groundstation, sementara operator groundstation memperhatikan DoA (keputusan pemilik 2026-10-31). Ini satu-satunya penulisan dari tampilan LAN; tune, gain, pindai, dengar dan pengaturan tetap tertutup.
   - Tombol **Penanda** di dock MIRROR dan di kartu Spektrum rute Receiver tablet. Ketuk grafik untuk menambah penanda, ketuk dekat penanda untuk memilihnya, lalu **Hapus**. Tombol keyboard sama dengan dock groundstation, kecuali panah dan **Tala ke sini**: tablet tidak menala.
   - Penanda masuk daftar **Penanda spektrum** Receiver sendiri, langsung tampil di dock dan halaman Receiver groundstation, dan tersimpan ke marker set yang dipilih di sana. Tanpa login: setiap klien di `allowed_clients` boleh menambah penanda dan menghapus penanda mana pun, termasuk buatan operator. Matikan tampilan LAN atau persempit `allowed_clients` bila itu tidak boleh.
