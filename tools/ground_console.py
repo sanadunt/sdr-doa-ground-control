@@ -3412,12 +3412,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         """POST /api/mirror/receiver/markers on this listener: the console's own page (parity and tests)."""
         return self._same_origin_loopback_request()
 
+    def _queue_mirror_marker(self, command: Dict[str, Any]) -> Dict[str, Any]:
+        """Queue a marker command; LanConsoleHandler queues only while its own listener is the open one."""
+        return self.console_server.receiver_mirror.queue_marker_command(command)
+
     def _post_mirror_marker(self) -> None:
         """POST /api/mirror/receiver/markers: a viewer adds or removes one of the Receiver's markers.
 
         In order: the listener's own Origin (403), the body length (413), at
         most rm.MARKER_COMMANDS_PER_S from this client address (429), an open
-        LAN view (409), the schema (400), then a page that publishes
+        LAN view (409), the schema (400), on the LAN view a listener that is
+        still the open one (409 MIRROR_LAN_CLOSED), then a page that publishes
         (409 MIRROR_NO_SOURCE), a new id (409) and room in the queue (429
         MIRROR_MARKER_BUSY). 202 with the command's status; the publishing
         page runs it through the bridge and reports its result. No cookie is
@@ -3451,7 +3456,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         try:
             if len(raw) != length:
                 raise rm.MirrorRejected(rm.MIRROR_INVALID, "the body is incomplete")
-            view = mirror.queue_marker_command(rm.decode_marker_command(raw))
+            view = self._queue_mirror_marker(rm.decode_marker_command(raw))
         except rm.MirrorRejected as exc:
             self._send_mirror_error(exc.code, exc.message)
             return
@@ -3848,6 +3853,12 @@ class LanConsoleHandler(ConsoleHandler):
         # that parse_request admitted. Another site, LAN host or port of
         # this host sends its own origin; no cookie is read.
         return lan.origin_matches_host(_header_values(self.headers, "Origin"), _header_values(self.headers, "Host"))
+
+    def _queue_mirror_marker(self, command: Dict[str, Any]) -> Dict[str, Any]:
+        # The listener that admitted this client may have been replaced (new
+        # allowed_clients, port or bind) while its body arrived: queued only
+        # while that listener is still the open one.
+        return self.console_server.lan.queue_marker_command(self.server, command)
 
     def _capabilities_body(self) -> Dict[str, Any]:
         body = super()._capabilities_body()
@@ -4298,6 +4309,22 @@ class LanAccessManager:
         """The listener is open (the Receiver mirror is published only then)."""
         with self._lock:
             return self._server is not None
+
+    def queue_marker_command(self, server: Any, command: Dict[str, Any]) -> Dict[str, Any]:
+        """Queue a LAN viewer's marker command while ``server``, the listener that admitted it, is the open one.
+
+        apply() replaces the listener on every change (allowed_clients, port,
+        bind) and close() drops it, while a handler of the old one may still
+        be reading its body (block_on_close is False). Such a command is
+        refused as MIRROR_LAN_CLOSED, so a client the new settings no longer
+        admit never gets a marker in. Under the manager's lock, so no apply()
+        runs between the check and the queue (the same lock order as
+        apply() closing the mirror).
+        """
+        with self._lock:
+            if server is None or server is not self._server:
+                raise rm.MirrorRejected(rm.MIRROR_LAN_CLOSED, rm.LAN_CLOSED_MESSAGE)
+            return self.console.receiver_mirror.queue_marker_command(command)
 
     def close(self) -> None:
         """Close the listener for good (console stop)."""

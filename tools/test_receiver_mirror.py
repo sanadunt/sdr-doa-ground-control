@@ -759,17 +759,17 @@ class MarkerStoreTests(unittest.TestCase):
     def test_queued_handed_out_once_then_settled_by_its_result(self) -> None:
         self.post()
         queued = self.queue(_add())
-        self.assertEqual(
-            {key: queued[key] for key in ("ok", "id", "op", "frequency_hz", "marker_id", "status", "code", "age_ms")},
-            {"ok": True, "id": COMMAND_ID, "op": "add", "frequency_hz": 433_920_000, "marker_id": None, "status": "queued", "code": None, "age_ms": 0},
-        )
+        self.assertEqual(queued, {
+            "ok": True, "id": COMMAND_ID, "op": "add", "frequency_hz": 433_920_000, "marker_id": None, "status": "queued",
+            "code": None, "handed": False, "age_ms": 0,
+        })
         self.queue(_remove("tab-cmd-0002", "m-7"))
         answer = self.post()
         self.assertEqual(answer["commands"], [
             {"id": COMMAND_ID, "op": "add", "frequency_hz": 433_920_000},
             {"id": "tab-cmd-0002", "op": "remove", "marker_id": "m-7"},
         ])
-        self.assertEqual(self.mirror.marker_command(COMMAND_ID)["status"], rm.COMMAND_SENT)
+        self.assertEqual((self.mirror.marker_command(COMMAND_ID)["status"], self.mirror.marker_command(COMMAND_ID)["handed"]), (rm.COMMAND_SENT, True))
         # Nothing is handed out twice, also when the next post carries no result.
         self.assertEqual(self.post()["commands"], [])
         self.clock.now += 0.4
@@ -800,9 +800,10 @@ class MarkerStoreTests(unittest.TestCase):
         self.post()
         self.queue(_add())
         ttl = rm.MARKER_COMMAND_TTL_MS / 1000
-        # No post takes it in time: it expires unseen.
+        # No post takes it in time: it expires unseen, and its status says no page took it (it never runs).
         self.clock.now += ttl
-        self.assertEqual(self.mirror.marker_command(COMMAND_ID)["status"], rm.COMMAND_EXPIRED)
+        unseen = self.mirror.marker_command(COMMAND_ID)
+        self.assertEqual((unseen["status"], unseen["handed"]), (rm.COMMAND_EXPIRED, False))
         self.assertEqual(self.post()["commands"], [])
         # A result for a command never handed out does not settle it.
         self.post(results=[{"id": COMMAND_ID, "code": "OK", "marker_id": "m-1"}])
@@ -814,10 +815,12 @@ class MarkerStoreTests(unittest.TestCase):
         self.clock.now += ttl - 0.001
         self.assertEqual(self.mirror.marker_command("tab-cmd-0002")["status"], rm.COMMAND_SENT)
         self.clock.now += 0.001
-        self.assertEqual(self.mirror.marker_command("tab-cmd-0002")["status"], rm.COMMAND_EXPIRED)
+        # Expired, but a page took it: a viewer keeps reading, since a late result may still come.
+        taken = self.mirror.marker_command("tab-cmd-0002")
+        self.assertEqual((taken["status"], taken["handed"]), (rm.COMMAND_EXPIRED, True))
         self.post(results=[{"id": "tab-cmd-0002", "code": "OK", "marker_id": "m-2"}])
         late = self.mirror.marker_command("tab-cmd-0002")
-        self.assertEqual((late["status"], late["code"], late["marker_id"]), ("done", "OK", "m-2"))
+        self.assertEqual((late["status"], late["code"], late["marker_id"], late["handed"]), ("done", "OK", "m-2", True))
 
     def test_at_most_sixteen_wait_and_settled_ones_make_room(self) -> None:
         self.post()
@@ -1093,6 +1096,28 @@ class MarkerRouteTests(_ServerCase):
         self.publish()
         self.assertEqual(self.command(_add(), port=lan_port)[0], 202)
         self.assert_code(self.command(_add(), port=lan_port), 409, rm.MIRROR_DUPLICATE_ID)
+
+    def test_a_command_of_a_client_the_new_settings_drop_is_refused(self) -> None:
+        # The listener admitted 127.0.0.1; while its body is decoded, a save
+        # replaces the listener with one that admits nobody, and the page
+        # posts again. The old handler thread still finishes the request:
+        # the command must not be queued, and no page may ever run it.
+        lan_port = self.open_lan(self.server)
+        self.publish()
+        decode = rm.decode_marker_command
+
+        def replace_then_decode(raw: bytes) -> Any:
+            self.server.lan.apply({"enabled": True, "port": 0, "bind": "127.0.0.1", "allowed_clients": []}, allowed=NOBODY)
+            self.assertTrue(self.server.lan.is_open())
+            self.publish()
+            return decode(raw)
+
+        with mock.patch.object(rm, "decode_marker_command", side_effect=replace_then_decode):
+            self.assert_code(self.command(_add(), port=lan_port), 409, rm.MIRROR_LAN_CLOSED)
+        self.assertIsNone(self.server.receiver_mirror.marker_command(COMMAND_ID))
+        self.assertEqual(self.publish()["commands"], [])
+        # The loopback listener is not tied to a LAN listener: its commands still queue.
+        self.assertEqual(self.command(_add("tab-cmd-0002"), port=self.main_port)[0], 202)
 
     def test_closing_the_lan_view_clears_the_queue(self) -> None:
         lan_port = self.open_lan(self.server)

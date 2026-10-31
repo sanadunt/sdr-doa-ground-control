@@ -532,8 +532,9 @@ class ReceiverMirror:
     POST of a page, which gets them in its answer (``publish()`` returns them)
     and reports each result in a later POST. A command is queued only while a
     page posted within SOURCE_LOST_MS; it expires MARKER_COMMAND_TTL_MS after
-    it was queued, and a result that comes later still settles it. Nothing is
-    handed out twice.
+    it was queued, and a result that comes later still settles one that was
+    handed out (its status view says ``handed``, so a viewer knows it may still
+    run). Nothing is handed out twice.
     """
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
@@ -720,6 +721,8 @@ class ReceiverMirror:
             "marker_id": record["marker_id"],
             "status": record["status"],
             "code": record["code"],
+            # A page got it: an expired command may still run, and a late result settle it.
+            "handed": record["handed"],
             "age_ms": max(0, int(round((now - record["queued_at"]) * 1000))),
         }
 

@@ -7,8 +7,11 @@
  * for the groundstation page that publishes the mirror, which runs it through
  * the Receiver bridge and reports the bridge's result code. The client reads
  * the command's status (GET .../markers/<id>) every MIRROR_MARK_POLL_MS until
- * it is done or expired. Nothing else is writable from the LAN view: no tune,
- * gains, scan, listen or settings.
+ * it is done, or expired before a page took it (EXPIRED: not placed). One a
+ * page took may still run and settle late, so it is read until
+ * MIRROR_MARK_WAIT_MS and, still unsettled, is UNCONFIRMED (check the list
+ * before placing it again). Nothing else is writable from the LAN view: no
+ * tune, gains, scan, listen or settings.
  *
  * The marking controller holds the viewer's side: the Markers/Penanda toggle
  * (off at every mount, never saved), the picked marker, the mark on its way
@@ -24,8 +27,12 @@ import { markNoticeMessage } from './spectrumView';
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
-/** The bridge's result, the console's refusal, or what the viewer saw: EXPIRED, NETWORK, REFUSED (any other refusal). */
-export type MirrorMarkCode = MirrorMarkerResultCode | MirrorMarkerErrorCode | 'EXPIRED' | 'NETWORK' | 'REFUSED';
+/**
+ * The bridge's result, the console's refusal, or what the viewer saw: EXPIRED
+ * (no page took it, so it was not placed), UNCONFIRMED (a page may have run
+ * it, no result came), NETWORK, REFUSED (any other refusal).
+ */
+export type MirrorMarkCode = MirrorMarkerResultCode | MirrorMarkerErrorCode | 'EXPIRED' | 'UNCONFIRMED' | 'NETWORK' | 'REFUSED';
 
 export interface MirrorMarkOutcome {
   ok: boolean;
@@ -55,7 +62,7 @@ export interface MirrorMarkClient {
 
 /** The status of a command on its way is read this often. */
 export const MIRROR_MARK_POLL_MS = 250;
-/** A command not settled this long after it was taken is given up (the console expires it after markerCommandTtlMs). */
+/** A command not settled this long after it was taken is given up as UNCONFIRMED (the console expires it after markerCommandTtlMs, a late result still settles it). */
 export const MIRROR_MARK_WAIT_MS = MIRROR_LIMITS.markerCommandTtlMs + 5_000;
 
 const REQUEST_TIMEOUT_MS = 4_000;
@@ -136,11 +143,12 @@ export function createMirrorMarkClient(environment: MirrorMarkEnvironment = brow
       } catch {
         continue; // A dropped read; the command may still run.
       }
-      // Not held any more: the LAN view closed and opened again, or the console restarted.
-      if (status.status === 404) return failed('EXPIRED');
+      // Not held any more (the LAN view closed and opened again, or the console restarted): a page may have run it.
+      if (status.status === 404) return failed('UNCONFIRMED');
       if (status.status !== 200) continue;
       const state = field(status.body, 'status');
-      if (state === 'expired') return failed('EXPIRED');
+      // Expired before a page took it: it never runs. One a page took may still settle late.
+      if (state === 'expired' && field(status.body, 'handed') !== true) return failed('EXPIRED');
       if (state !== 'done') continue;
       const rawCode = field(status.body, 'code');
       const code: MirrorMarkCode = typeof rawCode === 'string' && (MIRROR_MARKER_RESULT_CODES as readonly string[]).includes(rawCode)
@@ -149,7 +157,7 @@ export function createMirrorMarkClient(environment: MirrorMarkEnvironment = brow
       const markerId = field(status.body, 'marker_id');
       return { ok: code === 'OK', code, markerId: typeof markerId === 'string' ? markerId : fallbackMarkerId };
     }
-    return failed('EXPIRED');
+    return failed('UNCONFIRMED');
   }
 
   return {
@@ -178,12 +186,13 @@ const MIRROR_CODE_MESSAGES: Partial<Record<MirrorMarkCode, MessageKey>> = {
   MIRROR_MARKER_BUSY: 'mirror.markBusy',
   MIRROR_LAN_CLOSED: 'mirror.markLanClosed',
   EXPIRED: 'mirror.markExpired',
+  UNCONFIRMED: 'mirror.markUnconfirmed',
   NETWORK: 'mirror.markFailed',
   ORIGIN_REJECTED: 'mirror.markRefused',
   MIRROR_INVALID: 'mirror.markRefused',
   MIRROR_TOO_LARGE: 'mirror.markRefused',
   MIRROR_DUPLICATE_ID: 'mirror.markRefused',
-  MIRROR_UNKNOWN_COMMAND: 'mirror.markExpired',
+  MIRROR_UNKNOWN_COMMAND: 'mirror.markUnconfirmed',
   REFUSED: 'mirror.markRefused',
 };
 

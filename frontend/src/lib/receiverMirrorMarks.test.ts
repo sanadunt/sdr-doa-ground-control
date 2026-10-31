@@ -111,22 +111,47 @@ describe('marker client', () => {
     expect(await outcome).toEqual({ ok: true, code: 'OK', markerId: 'm-1' });
   });
 
-  it('says EXPIRED when the console expired it, no longer holds it, or nothing settles it in time', async () => {
-    const expired = console_({ post: [accepted()], get: [{ status: 200, body: { status: 'expired' } }] });
+  it('says EXPIRED, not placed, only when no groundstation page took the command', async () => {
+    const expired = console_({ post: [accepted()], get: [{ status: 200, body: { status: 'expired', handed: false } }] });
     const first = createMirrorMarkClient(expired.env).add(433_920_000);
     await expired.advance(MIRROR_MARK_POLL_MS);
-    expect((await first).code).toBe('EXPIRED');
+    expect(await first).toEqual({ ok: false, code: 'EXPIRED', markerId: null });
+  });
+
+  it('keeps reading a command a page took after it expired, and takes its late result', async () => {
+    const lateGets: MirrorMarkAnswer[] = [
+      { status: 200, body: { status: 'sent', handed: true } },
+      { status: 200, body: { status: 'expired', handed: true } },
+      { status: 200, body: { status: 'expired', handed: true } },
+      { status: 200, body: { ok: true, status: 'done', code: 'OK', marker_id: 'm-4', handed: true } },
+    ];
+    const late = console_({ post: [accepted()], get: lateGets });
+    let outcome: MirrorMarkOutcome | null = null;
+    void createMirrorMarkClient(late.env).add(433_920_000).then((value) => { outcome = value; });
+    await late.advance(MIRROR_MARK_POLL_MS * 3);
+    expect(outcome).toBeNull();
+    await late.advance(MIRROR_MARK_POLL_MS);
+    expect(outcome).toEqual({ ok: true, code: 'OK', markerId: 'm-4' });
+  });
+
+  it('says UNCONFIRMED when a command a page may have run never settles or is no longer held', async () => {
+    const taken = console_({ post: [accepted()], get: Array.from({ length: 200 }, () => ({ status: 200, body: { status: 'expired', handed: true } })) });
+    let outcome: MirrorMarkOutcome | null = null;
+    void createMirrorMarkClient(taken.env).add(433_920_000).then((value) => { outcome = value; });
+    await taken.advance(MIRROR_MARK_WAIT_MS - MIRROR_MARK_POLL_MS);
+    expect(outcome).toBeNull();
+    await taken.advance(MIRROR_MARK_POLL_MS * 2);
+    expect(outcome).toEqual({ ok: false, code: 'UNCONFIRMED', markerId: null });
     const forgotten = console_({ post: [accepted()], get: [{ status: 404, body: { ok: false, code: 'MIRROR_UNKNOWN_COMMAND' } }] });
     const second = createMirrorMarkClient(forgotten.env).add(433_920_000);
     await forgotten.advance(MIRROR_MARK_POLL_MS);
-    expect((await second).code).toBe('EXPIRED');
+    expect((await second).code).toBe('UNCONFIRMED');
+    // A status read that never comes back (only 'sent', or dropped reads) is not called "not placed" either.
     const silent = console_({ post: [accepted()] });
-    let outcome: MirrorMarkOutcome | null = null;
-    void createMirrorMarkClient(silent.env).add(433_920_000).then((value) => { outcome = value; });
-    await silent.advance(MIRROR_MARK_WAIT_MS - MIRROR_MARK_POLL_MS);
-    expect(outcome).toBeNull();
-    await silent.advance(MIRROR_MARK_POLL_MS * 2);
-    expect(outcome).toEqual({ ok: false, code: 'EXPIRED', markerId: null });
+    let quiet: MirrorMarkOutcome | null = null;
+    void createMirrorMarkClient(silent.env).add(433_920_000).then((value) => { quiet = value; });
+    await silent.advance(MIRROR_MARK_WAIT_MS + MIRROR_MARK_POLL_MS);
+    expect(quiet).toEqual({ ok: false, code: 'UNCONFIRMED', markerId: null });
   });
 
   it('reads an unknown result code as NOT_READY', async () => {
@@ -264,7 +289,7 @@ describe('marking reasons and messages', () => {
   });
 
   it('names every failure in operator words, in both languages', () => {
-    const codes: MirrorMarkCode[] = [...MIRROR_MARKER_RESULT_CODES.filter((code) => code !== 'OK'), ...MIRROR_MARKER_ERROR_CODES, 'EXPIRED', 'NETWORK', 'REFUSED'];
+    const codes: MirrorMarkCode[] = [...MIRROR_MARKER_RESULT_CODES.filter((code) => code !== 'OK'), ...MIRROR_MARKER_ERROR_CODES, 'EXPIRED', 'UNCONFIRMED', 'NETWORK', 'REFUSED'];
     for (const code of codes) {
       const key = mirrorMarkMessage(code);
       for (const lang of ['en', 'id'] as const) {
@@ -278,6 +303,11 @@ describe('marking reasons and messages', () => {
     expect(mirrorMarkMessage('MIRROR_NO_SOURCE')).toBe('mirror.markNoSource');
     expect(mirrorMarkMessage('MIRROR_MARKER_BUSY')).toBe('mirror.markBusy');
     expect(mirrorMarkMessage('NETWORK')).toBe('mirror.markFailed');
-    expect(translate('id', 'mirror.markExpired')).toBe('Groundstation tidak memasang penanda tepat waktu.');
+    // Not placed (no page took it) and not confirmed (a page may have run it) read differently.
+    expect(mirrorMarkMessage('EXPIRED')).toBe('mirror.markExpired');
+    expect(mirrorMarkMessage('UNCONFIRMED')).toBe('mirror.markUnconfirmed');
+    expect(mirrorMarkMessage('MIRROR_UNKNOWN_COMMAND')).toBe('mirror.markUnconfirmed');
+    expect(translate('id', 'mirror.markExpired')).toBe('Halaman groundstation tidak mengambil penanda tepat waktu; penanda tidak dipasang.');
+    expect(translate('en', 'mirror.markUnconfirmed')).toBe('Not confirmed by the groundstation; check the marker list before placing it again.');
   });
 });

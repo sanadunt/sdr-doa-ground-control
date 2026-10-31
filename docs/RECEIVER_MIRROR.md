@@ -247,6 +247,7 @@ Pemeriksaan, berurutan; yang pertama gagal menentukan jawaban (`{"ok": false, "c
 | 3 | Paling banyak 4 perintah dari satu alamat klien dalam satu detik mana pun | `429 MIRROR_RATE_LIMITED` |
 | 4 | Mode LAN terbuka | `409 MIRROR_LAN_CLOSED` |
 | 5 | Skema ketat: field persis seperti di atas, `add` dengan `frequency_hz` saja, `remove` dengan `marker_id` saja | `400 MIRROR_INVALID` |
+| 5a | Dari listener LAN: listener yang menerima klien ini masih listener yang terbuka sekarang. Setiap simpan (`allowed_clients`, port, bind) mengganti listener; permintaan yang body-nya tiba setelah itu, juga dari klien yang tidak diizinkan lagi, tidak diantrekan. Diperiksa di bawah kunci pengelola LAN, jadi tidak ada simpan di antara pemeriksaan dan antrean | `409 MIRROR_LAN_CLOSED` |
 | 6 | Ada halaman groundstation yang mem-post dalam 10 detik terakhir | `409 MIRROR_NO_SOURCE` |
 | 7 | `id` belum pernah dipakai | `409 MIRROR_DUPLICATE_ID` |
 | 8 | Kurang dari 16 perintah menunggu atau sudah diserahkan tanpa hasil | `429 MIRROR_MARKER_BUSY` |
@@ -255,7 +256,7 @@ Berhasil: `202` dengan status perintah (bagian 8a.3). Listener LAN membuka **han
 
 ### 8a.2 Antrean, penyerahan, dan hasil
 
-- Server menyimpan perintah di memori (`ReceiverMirror`), paling banyak 16 yang belum selesai. Setiap perintah kedaluwarsa 15 detik setelah diterima (`expired`); perintah yang kedaluwarsa sebelum diserahkan tidak pernah diserahkan.
+- Server menyimpan perintah di memori (`ReceiverMirror`), paling banyak 16 yang belum selesai. Setiap perintah kedaluwarsa 15 detik setelah diterima (`expired`); perintah yang kedaluwarsa sebelum diserahkan tidak pernah diserahkan, jadi tidak pernah dijalankan. Perintah yang sudah diserahkan lalu kedaluwarsa masih bisa dijalankan halaman itu (misalnya hasilnya tertahan karena post-nya ditolak dan menunggu backoff).
 - Jawaban `200` dari `POST /api/mirror/receiver` berikutnya membawa perintah yang menunggu di `commands` (`{"id", "op": "add", "frequency_hz"}` atau `{"id", "op": "remove", "marker_id"}`), masing-masing **sekali**. Halaman mana pun yang mem-post boleh mengambilnya; jawaban yang hilang di jalan membuat perintahnya kedaluwarsa, tidak diserahkan lagi.
 - Publisher menjalankan setiap perintah sekali lewat bridge (`console:marker-add {frequencyHz}`, `console:marker-remove {markerId}`), dengan aturan, antrean dan kode bridge yang sama dengan dock groundstation (`OK`, `OUT_OF_RANGE`, `MARKER_LIMIT`, `MARKER_NOT_FOUND`, `MARKER_SAVE_FAILED`, `NOT_READY`, `INVALID_COMMAND`, `TIMEOUT`; kode lain dilaporkan `NOT_READY`).
 - Hasilnya dikirim di post berikutnya sebagai `results: [{"id", "code", "marker_id"}]` (paling banyak 16; `marker_id` adalah id penanda baru dari `add`, juga setelah `MARKER_SAVE_FAILED`, selain itu `null`). Hasil dari post yang ditolak dikirim lagi. Server hanya menerima hasil untuk perintah yang sudah diserahkan; hasil yang datang setelah kedaluwarsa tetap menyelesaikannya.
@@ -267,10 +268,10 @@ Dilayani kedua listener dengan aturan baca mirror (bagian 5). Jawaban:
 
 ```json
 {"ok": true, "id": "tab-k3m9x0q1n2p4r5s6", "op": "add", "frequency_hz": 433920000,
- "marker_id": "m-13", "status": "done", "code": "OK", "age_ms": 640}
+ "marker_id": "m-13", "status": "done", "code": "OK", "handed": true, "age_ms": 640}
 ```
 
-`status`: `queued` (menunggu halaman groundstation), `sent` (diserahkan), `done` (ada hasil; `code` kode bridge) atau `expired`. Untuk `remove`, `marker_id` adalah penanda yang dihapus. Server menyimpan 64 perintah terakhir; id lain dijawab `404 MIRROR_UNKNOWN_COMMAND`. Jawaban `200` tidak dicatat di log.
+`status`: `queued` (menunggu halaman groundstation), `sent` (diserahkan), `done` (ada hasil; `code` kode bridge) atau `expired`. `handed` berarti sebuah halaman sudah menerimanya: `expired` dengan `handed: false` tidak pernah dijalankan (penanda tidak dipasang), sedangkan `expired` dengan `handed: true` masih bisa selesai terlambat (`done`). Untuk `remove`, `marker_id` adalah penanda yang dihapus. Server menyimpan 64 perintah terakhir; id lain dijawab `404 MIRROR_UNKNOWN_COMMAND`. Jawaban `200` tidak dicatat di log.
 
 ### 8a.4 Daftar penanda di mirror
 
@@ -290,7 +291,7 @@ Publisher mengirim daftar penanda Receiver di **setiap** post (restart console t
 - Dock MIRROR dan tab Mirror rute Receiver punya tombol **Penanda** (setelah sakelar RX | Spektrum di dock, di kepala kartu Spektrum di rute Receiver) dengan jumlah penanda daftar Receiver. Mode menandai mati setiap kali halaman dimuat dan tidak disimpan.
 - Saat menandai, klik trace atau waterfall menambah penanda (dibulatkan ke 1 kHz; di pindai, bin terkuat di dekat klik), klik dekat penanda memilihnya, dan baris di atas grafik menampilkan penanda terpilih dengan **Hapus** (tanpa **Tala ke sini**: tablet tidak menala), **Belum disimpan**, "Mengirim ke groundstation…" selama perintah berjalan, dan kegagalan terakhir dalam bahasa operator. Tombol keyboard pada grafik yang difokuskan: Enter menandai VFO, `[` `]` memilih, Delete menghapus pilihan, `Ctrl+Z` menghapus tanda terakhir tablet ini, Esc melepas pilihan; panah tidak menala.
 - Menandai dijeda dengan alasannya selama mirror **SUMBER PUTUS** (juga sebelum ada data) atau **STALE**: kanvas kembali menjadi gambar dan baris penanda menampilkan "Penanda butuh data langsung dari groundstation." atau "Penanda dijeda: frame dari groundstation basi."
-- `lib/receiverMirrorMarks.ts`: klien perintah (POST lalu GET status tiap 250 ms sampai `done` atau `expired`, paling lama 20 detik) dan pengendali menandai; `SpectrumCanvas` dengan `readOnly` dan `marking` menandai tanpa pernah menala.
+- `lib/receiverMirrorMarks.ts`: klien perintah (POST lalu GET status tiap 250 ms, paling lama 20 detik) dan pengendali menandai; `SpectrumCanvas` dengan `readOnly` dan `marking` menandai tanpa pernah menala. Klien berhenti pada `done` (kode Receiver) atau `expired` tanpa `handed` ("Halaman groundstation tidak mengambil penanda tepat waktu; penanda tidak dipasang."). Perintah yang sudah diserahkan terus dibaca sampai 20 detik, karena hasil terlambat masih mungkin; bila tetap tanpa hasil, atau server tidak lagi menyimpannya (`404`), tablet menampilkan "Belum dikonfirmasi groundstation; periksa daftar penanda sebelum memasangnya lagi.", bukan "tidak dipasang", supaya tidak ada penanda ganda.
 
 ## 9. Fase 3 (B2): perintah dari tablet. Desain, **belum diimplementasikan**
 
