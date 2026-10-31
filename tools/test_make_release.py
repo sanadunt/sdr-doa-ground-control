@@ -34,6 +34,7 @@ CONSOLE_MODULES = {
     "config_command_tracker.py",
     "data_out_reader.py",
     "mdns_resolver.py",
+    "host_power.py",
     "lan_access.py",
     "preferences_store.py",
     "rdf_node_commands.py",
@@ -57,6 +58,9 @@ SHELL_SCRIPTS = (
     "packaging/ground-link/t900-ground-diag",
     "packaging/ground-link/t900-ground-watchdog",
     "packaging/ground-link/t900-link",
+    "packaging/host-power/install.sh",
+    "packaging/host-power/uninstall.sh",
+    "packaging/host-power/sdr-doa-host-power",
     "packaging/receiver-engine/trial-receiver-engine.sh",
 )
 # The groundstation's T900 link tools ship in the console release only.
@@ -66,6 +70,12 @@ GROUND_LINK_EXECUTABLES = {
     "packaging/ground-link/t900-ground-diag",
     "packaging/ground-link/t900-ground-watchdog",
     "packaging/ground-link/t900-link",
+}
+# The host side of the Restart and Shutdown buttons ships in the console release only.
+HOST_POWER_EXECUTABLES = {
+    "packaging/host-power/install.sh",
+    "packaging/host-power/uninstall.sh",
+    "packaging/host-power/sdr-doa-host-power",
 }
 # The phase 0 Receiver engine trial (issue #15): run by hand on the
 # groundstation, never shipped or installed.
@@ -234,6 +244,21 @@ class ReleaseBuildTests(unittest.TestCase):
         app = {entry.arcname for entry in make_release.console_app_entries(ROOT, self.dist)}
         self.assertFalse({name for name in app if name.startswith("packaging/ground-link/")})
         self.assertNotIn("ground-link", (ROOT / "Dockerfile.release").read_text(encoding="utf-8"))
+
+    def test_console_release_ships_every_host_power_file(self):
+        names = self.names(self.console_tar, self.console_top)
+        shipped = {name for name in names if name.startswith("packaging/host-power/")}
+        on_disk = {f"packaging/host-power/{path.name}" for path in (ROOT / "packaging/host-power").iterdir()}
+        self.assertEqual(shipped, on_disk, "a new file in packaging/host-power needs HOST_POWER_FILES")
+        modes = {member.name[len(self.console_top) + 1:]: member.mode for member in tar_members(self.console_tar)}
+        for name in shipped:
+            self.assertEqual(modes[name], 0o755 if name in HOST_POWER_EXECUTABLES else 0o644, name)
+        self.assertEqual({name for name in shipped if os.access(ROOT / name, os.X_OK)}, HOST_POWER_EXECUTABLES)
+        # Host tooling: never in the installed console, so never in its image.
+        app = {entry.arcname for entry in make_release.console_app_entries(ROOT, self.dist)}
+        self.assertFalse({name for name in app if name.startswith("packaging/host-power/")})
+        self.assertNotIn("host-power", (ROOT / "Dockerfile.release").read_text(encoding="utf-8"))
+        self.assertNotIn("host-power", (ROOT / "Dockerfile").read_text(encoding="utf-8"))
 
     def test_the_old_topic_path_and_the_agent_never_ship(self):
         names = self.names(self.console_tar, self.console_top)
@@ -436,6 +461,15 @@ class DockerAndComposeTests(unittest.TestCase):
             self.assertRegex(self.read(name), r"(?m)^      - SDR_DOA_ADMIN_PASSWORD$", name)
             self.assertRegex(self.read(name), r"(?m)^      - sdr-doa-data:/data$", name)
             self.assertNotIn("0.0.0.0", self.read(name), name)
+            # The one host path: the power request directory (packaging/host-power).
+            # No Docker socket, D-Bus, privileges or devices: the console gets no host control.
+            self.assertEqual(
+                re.findall(r"(?m)^      - (\S+:\S+)$", self.read(name).split("    volumes:\n", 1)[1].split("\n\n", 1)[0]),
+                ["sdr-doa-data:/data", "/run/sdr-doa-host-power:/run/sdr-doa-host-power"],
+                name,
+            )
+            for forbidden in ("docker.sock", "/run/dbus", "privileged", "cap_add", "pid:", "devices:", "ipc:", "security_opt"):
+                self.assertNotIn(forbidden, self.read(name), name)
         environment = [re.findall(r"(?m)^      - (SDR_DOA_\w+)", self.read(name)) for name in CONSOLE_COMPOSE_FILES]
         self.assertTrue(all(names == environment[0] for names in environment), environment)
 

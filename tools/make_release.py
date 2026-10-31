@@ -8,8 +8,9 @@ Writes, in ``dist/release`` by default:
   modules, the native installer, ``Dockerfile.release`` with its compose file,
   ``docker-compose.ghcr.yml``, the Docker host script
   ``packaging/docker/sdr-doa-docker``, the groundstation's T900 link tools
-  ``packaging/ground-link`` (with their own installer), ``QUICKSTART.md`` and
-  the user manual PDF;
+  ``packaging/ground-link`` (with their own installer), the host side of the
+  console's Restart and Shutdown buttons ``packaging/host-power`` (its own
+  installer too), ``QUICKSTART.md`` and the user manual PDF;
 * ``sdr-doa-docker``: the Docker host script on its own (install, update and
   roll back the GHCR image), a release asset next to the tarball;
 * ``SHA256SUMS`` for the two, in ``sha256sum -c`` format.
@@ -86,6 +87,23 @@ GROUND_LINK_FILES = tuple(
         ("50-t900-ground-link.rules.in", False),
     )
 )
+# Host side of the console's Restart and Shutdown buttons: the request
+# directory, a .path unit and a root oneshot that runs systemctl reboot or
+# poweroff. Shipped like the T900 tools: in the console release for its own
+# installer, never in the app tree or the image.
+HOST_POWER_DIR = "packaging/host-power"
+HOST_POWER_FILES = tuple(
+    (f"{HOST_POWER_DIR}/{name}", f"{HOST_POWER_DIR}/{name}", executable)
+    for name, executable in (
+        ("README.md", False),
+        ("install.sh", True),
+        ("uninstall.sh", True),
+        ("sdr-doa-host-power", True),
+        ("sdr-doa-host-power.path.in", False),
+        ("sdr-doa-host-power.service.in", False),
+        ("sdr-doa-host-power.tmpfiles.in", False),
+    )
+)
 CONSOLE_APP_FILES = (
     ("packaging/console/requirements.txt", "packaging/console/requirements.txt", False),
     ("packaging/console/set_admin_password.py", "packaging/console/set_admin_password.py", True),
@@ -107,7 +125,7 @@ CONSOLE_RELEASE_FILES = (
     (".env.example", ".env.example", False),
     ("QUICKSTART.md", "QUICKSTART.md", False),
     (MANUAL_PDF, MANUAL_PDF, False),
-) + GROUND_LINK_FILES
+) + GROUND_LINK_FILES + HOST_POWER_FILES
 # Inputs of a full build; a dirty copy would leak into frontend/dist.
 BUILD_INPUTS = (
     "frontend/index.html",

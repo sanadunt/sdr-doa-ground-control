@@ -1,0 +1,7 @@
+# Written by the sdr-doa-host-power installer (packaging/host-power/install.sh).
+# The request directory of the SDR-DoA Ground Console's Restart and Shutdown
+# buttons, writable by the console's user (@CONSOLE_UID@:@CONSOLE_GID@) only, and the
+# marker that tells the console this host side is installed. /run is empty
+# after every boot; systemd-tmpfiles creates both again before Docker starts.
+d @REQUEST_DIR@ 0700 @CONSOLE_UID@ @CONSOLE_GID@ -
+f @REQUEST_DIR@/helper 0644 root root - sdr-doa-host-power

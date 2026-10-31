@@ -51,6 +51,10 @@ services:
       - SDR_DOA_SEED_REFRESH_SECONDS
     volumes:
       - sdr-doa-data:/data
+      # The top bar's Restart and Shutdown write their request here, and the
+      # host side (packaging/host-power) acts on it. Without it Docker creates
+      # an empty root-owned directory and the buttons stay disabled.
+      - /run/sdr-doa-host-power:/run/sdr-doa-host-power
 
 volumes:
   sdr-doa-data:

@@ -949,6 +949,7 @@ export default function App(): ReactElement {
         onRefreshSecondsChange={viewOnly ? undefined : onRefreshSecondsChange}
         toolbar={route === 'overview' ? <OverviewPanelToggles panels={overviewPanels} onChange={setOverviewPanels} viewOnly={viewOnly} /> : undefined}
         access={access}
+        hostPower={capabilities?.hostPower ?? null}
       >
         {route !== 'receiver' || viewOnly ? (
           <section ref={contentRef} className="route-content" key={route}>

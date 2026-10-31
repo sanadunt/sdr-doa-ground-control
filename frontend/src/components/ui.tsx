@@ -75,7 +75,7 @@ export function CollectorError({ error }: { error: string }): JSX.Element {
 }
 
 export type IconName = 'overview' | 'health' | 'diagnostics' | 'configuration' | 'monitor' | 'receiver' | 'refresh' | 'lock' | 'map' | 'polar' | 'menu' | 'close' | 'sun' | 'moon' | 'chevron-left' | 'chevron-right' | 'layers' | 'expand' | 'collapse' | 'crosshair'
-  | 'spectrum' | 'sliders' | 'external' | 'play' | 'stop' | 'headphones' | 'send' | 'chevron-down' | 'chevron-up' | 'plus' | 'minus' | 'north' | 'peak-up' | 'reset' | 'polar-dock' | 'marker';
+  | 'spectrum' | 'sliders' | 'external' | 'play' | 'stop' | 'headphones' | 'send' | 'chevron-down' | 'chevron-up' | 'plus' | 'minus' | 'north' | 'peak-up' | 'reset' | 'polar-dock' | 'marker' | 'power' | 'restart';
 
 export function Icon({ name }: { name: IconName }): JSX.Element {
   const common = { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const, 'aria-hidden': true };
@@ -116,6 +116,8 @@ export function Icon({ name }: { name: IconName }): JSX.Element {
     reset: <><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /></>,
     'polar-dock': <><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="4" /><path d="M12 12l5.5-5.5" /></>,
     marker: <><path d="M6 21V4" /><path d="M6 4h12l-3 4 3 4H6" /></>,
+    power: <><path d="M12 3v8" /><path d="M6.6 6.6a8 8 0 1 0 10.8 0" /></>,
+    restart: <><path d="M20 12a8 8 0 1 1-2.6-5.9" /><path d="M20 4v4.5h-4.5" /></>,
   };
   return <svg {...common}>{paths[name]}</svg>;
 }

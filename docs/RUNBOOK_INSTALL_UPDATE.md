@@ -39,6 +39,7 @@ Konvensi:
 10. Memberi `--base-url` atau `--mqtt-*` ke service, unit, atau entrypoint. Flag itu menimpa pengaturan tersimpan setiap start.
 11. Mengisi `SDR_DOA_UPDATE_API`, `SDR_DOA_UPDATE_REPO`, `SDR_DOA_ROOT_UID` (khusus test), atau mematikan verifikasi TLS.
 12. Mematikan proses dengan `pkill`/`killall`. Hentikan service lewat perintahnya (`sdr-doa-console stop`, `docker compose stop`, `systemctl stop`).
+13. Menekan **Mulai ulang** atau **Matikan** di console, menulis `/run/sdr-doa-host-power/request`, atau menjalankan `sdr-doa-host-power handle` tanpa `--dry-run`: itu memulai ulang atau mematikan groundstation. Uji hanya dengan `--helper-dry-run` (5.5); klik sungguhan hanya oleh manusia.
 
 ### 1.2 Berhenti dan tanya manusia bila
 
@@ -630,6 +631,88 @@ echo "OLD=$OLD"
    Tambahkan `--prefix`, `--data-dir`, `--bin-dir`, `--port`, `--no-service`, `--no-desktop` hanya bila `info` menunjukkan nilai selain default (instalasi lama ini belum punya `install-options`). `--yes` mempertahankan kata sandi tersimpan. Installer menyalin `console.json` dan `branding.json` lama dari `~/.config/sdr-doa-ground-console/` bila belum ada di direktori data, dan memindahkan rekaman Receiver lama ke `receiver/`.
 3. **Periksa**: `~/.local/bin/sdr-doa-console update --check` sekarang mencetak `<V> is installed and current` (atau versi yang lebih baru tersedia). Lalu 8.1 dan 8.3.
 
+### 5.5 Tombol Mulai ulang dan Matikan (sisi host, opsional)
+
+Sejak `v3.3.0` bilah atas console punya **Mulai ulang** dan **Matikan** (setelah EN|ID), hanya di halaman console groundstation sendiri; tablet di mode LAN (6.2) tidak mendapatkannya. Console hanya menulis satu kata ke `/run/sdr-doa-host-power/request`, dan `packaging/host-power` di host menjalankan `systemctl reboot` atau `systemctl poweroff` (rincian di `packaging/host-power/README.md`). Tanpa langkah ini kedua tombol tampil nonaktif dengan alasan "Helper host belum dipasang". Memasangnya keputusan manusia (keputusan pemilik 2026-10-31: konfirmasi di halaman, tanpa admin).
+
+**P0. Console 3.3.0 dengan mount direktori permintaan**
+
+Docker:
+
+```sh
+curl -s --noproxy '*' http://127.0.0.1:8787/api/health; echo
+sudo grep -n 'sdr-doa-host-power' /opt/sdr-doa-ground-console/compose.yml
+```
+
+**Periksa**: `"version": "3.3.0"` (atau lebih baru) dan satu baris `- /run/sdr-doa-host-power:/run/sdr-doa-host-power`. Tanpa baris itu, `compose.yml` ditulis `sdr-doa-docker` sebelum 3.3.0; timer update harian hanya mengganti image dan tidak menulis ulang `compose.yml`. Jalankan 5.1 dan A1 untuk rilis itu, lalu, dengan izin manusia dan saat `/api/health` berisi `"receiver_busy": false` (7.3):
+
+```sh
+cd ~/sdr-doa-dl/docker-"$(cat ~/sdr-doa-dl/release-version)" && sudo sh sdr-doa-docker install --dir /opt/sdr-doa-ground-console
+```
+
+`install` mempertahankan `.env`, kanal dan timer update, memasang script baru di `/usr/local/bin/sdr-doa-docker`, menulis ulang `compose.yml`, lalu membuat ulang container (RX, pindai dan rekaman di halaman console berhenti). **Periksa**: baris `OK: console runs ... and is healthy`, dan `grep` di atas sekarang menemukan baris mount.
+
+Native:
+
+```sh
+~/.local/bin/sdr-doa-console info
+```
+
+**Periksa**: versi 3.3.0 atau lebih baru (update di 7.2). Console native membaca `/run/sdr-doa-host-power` langsung; tidak ada mount.
+
+**P1. Unduh paket host.** `packaging/host-power` ada di tarball console. Pada Jalur B, direktori B1 sudah memuatnya; pada Jalur A, unduh tarball yang sama:
+
+```sh
+V=$(cat ~/sdr-doa-dl/release-version) && [ -n "$V" ] && D=~/sdr-doa-dl/console-$V &&
+rm -rf "$D" && mkdir -p "$D" && cd "$D" &&
+curl -fsSLO "https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v$V/sdr-doa-ground-console-$V-linux.tar.gz" &&
+curl -fsSLO "https://github.com/sanadunt/sdr-doa-ground-control/releases/download/v$V/SHA256SUMS" &&
+sha256sum -c --ignore-missing SHA256SUMS &&
+tar -xzf "sdr-doa-ground-console-$V-linux.tar.gz" &&
+ls "sdr-doa-ground-console-$V-linux/packaging/host-power/install.sh" ||
+echo "STOP: langkah gagal (versi dari 5.1, unduhan, hash, atau ekstrak)"
+```
+
+**Periksa**: `sdr-doa-ground-console-<V>-linux.tar.gz: OK`, path `install.sh`, dan tidak ada baris `STOP:`.
+
+**P2. Lihat dulu** (tidak mengubah apa pun). Docker memakai uid console `10001` (bawaan); native memakai user yang menjalankan console (`--console-user`, contoh `rdf`):
+
+```sh
+V=$(cat ~/sdr-doa-dl/release-version) && cd ~/sdr-doa-dl/console-"$V"/sdr-doa-ground-console-"$V"-linux &&
+sudo sh packaging/host-power/install.sh --dry-run
+```
+
+Native: tambahkan `--console-user rdf` **(contoh)**. **Periksa**: baris `d /run/sdr-doa-host-power 0700 10001 10001 -` (native: uid dan gid user itu), `PathExists=/run/sdr-doa-host-power/request`, `ExecStart=/usr/local/sbin/sdr-doa-host-power handle`, dan `Dry run: nothing was changed.` Exit 1 dengan `the install would stop here: ...`: berhenti dan tanya manusia.
+
+**P3. Pasang dalam mode uji**: helper hanya mencatat tindakannya.
+
+```sh
+V=$(cat ~/sdr-doa-dl/release-version) && cd ~/sdr-doa-dl/console-"$V"/sdr-doa-ground-console-"$V"-linux &&
+sudo sh packaging/host-power/install.sh --helper-dry-run
+sudo sdr-doa-host-power status
+systemctl is-active sdr-doa-host-power.path
+curl -s --noproxy '*' http://127.0.0.1:8787/api/capabilities | python3 -c 'import json,sys; print(json.load(sys.stdin)["host_power"])'
+```
+
+Native: tambahkan `--console-user rdf` **(contoh)** ke `install.sh`. **Periksa**: `Helper: dry run: ...`; status berisi `owner 10001:10001, mode drwx------` (native: uid user itu), `helper marker: present` dan `waiting request: no`; `active`; `{'available': True, 'reason': None, 'actions': ['reboot', 'poweroff']}`. `available: False`: alasan di `reason` dan bagian 9.
+
+**P4. Uji oleh manusia.** Manusia memuat ulang halaman console (F5), menekan **Mulai ulang**, membaca konfirmasinya, lalu menekan **Mulai ulang** di panel. Lalu:
+
+```sh
+journalctl -t sdr-doa-host-power -n 5 --no-pager
+```
+
+**Periksa**: `dry-run: would run: systemctl reboot (requested by the console)`, dan PC tetap menyala.
+
+**P5. Aktifkan**, hanya setelah manusia setuju:
+
+```sh
+V=$(cat ~/sdr-doa-dl/release-version) && cd ~/sdr-doa-dl/console-"$V"/sdr-doa-ground-console-"$V"-linux &&
+sudo sh packaging/host-power/install.sh --helper-live
+```
+
+**Periksa**: `Helper: live: it runs systemctl reboot or poweroff`. Install ulang tanpa `--helper-*` mempertahankan mode terakhir. Klik sungguhan hanya oleh manusia (aturan 1.1.13); setelah PC menyala lagi, `journalctl -t sdr-doa-host-power -b -1 -n 5 --no-pager` menampilkan `running: systemctl reboot (requested by the console)`.
+
 ---
 
 ## 6. Membuka UI dari komputer lain
@@ -1160,6 +1243,8 @@ Satu blok singkat berisi:
 | Pengaturan tampak tidak tersimpan setelah restart | Console dijalankan dengan `--base-url`/`--mqtt-*` | Hapus flag itu dari perintah; ubah di Konfigurasi. |
 | Data Out tidak terjangkau dan MQTT tanpa pesan dari RDF-SDR; journal `t900-ground-ppp.service` berisi `LCP: timeout` | Link PPP lewat T900 ke RDF-SDR putus (di luar console) | Bila `packaging/ground-link` terpasang: `sudo t900-ground-diag -o /tmp` dan `t900-link status`, lalu laporkan. Prosedur insiden di `packaging/ground-link/README.md` (restart, usbreset, cabut-colok) hanya dengan izin manusia. |
 | UI lama setelah update | Halaman lama masih di browser | Muat ulang halaman. |
+| Mulai ulang dan Matikan nonaktif, "Helper host belum dipasang" | `host_power.reason` di `/api/capabilities`: `DIR_MISSING` (Docker: `compose.yml` tanpa mount, P0), `DIR_NOT_WRITABLE` (sisi host belum dipasang, atau dipasang untuk `--console-user` lain) atau `HELPER_MISSING` (penanda `helper` hilang) | 5.5; `sudo sdr-doa-host-power status`; muat ulang halaman console sesudahnya. |
+| "Mulai ulang diminta" tetapi PC tetap menyala, atau `HOST_POWER_PENDING` | Helper menolak (dalam 60 detik setelah tindakan sebelumnya, mode `--helper-dry-run`, bukan file biasa), `systemctl` gagal, atau unit `.path` tidak jalan | `journalctl -t sdr-doa-host-power -n 20 --no-pager`, `systemctl status sdr-doa-host-power.path`; laporkan ke manusia. |
 
 ---
 
@@ -1264,6 +1349,15 @@ sudo sh /opt/sdr-doa-agent/uninstall.sh
 ```
 
 **Periksa**: `Removed the agent from /opt/sdr-doa-agent` dan `Kept /etc/sdr-doa-agent/agent.env and /var/lib/sdr-doa-agent (remove them with --purge)`. PURGE, **sebagai pengganti** uninstall biasa: `sudo sh /opt/sdr-doa-agent/uninstall.sh --purge`.
+
+### 10.4 Tombol Mulai ulang dan Matikan (sisi host)
+
+```sh
+sudo sh /usr/local/share/sdr-doa-host-power/uninstall.sh --dry-run
+sudo sh /usr/local/share/sdr-doa-host-power/uninstall.sh
+```
+
+**Periksa**: `Removed sdr-doa-host-power from /usr/local` dan `Kept /var/lib/sdr-doa-host-power (remove it with --purge)`. Setelah halaman console dimuat ulang, kedua tombol nonaktif. PURGE (riwayat tindakan terakhir): `sudo sh /usr/local/share/sdr-doa-host-power/uninstall.sh --purge`. Mount di `compose.yml` tetap; Docker membuat ulang direktorinya sebagai milik root, jadi tombol tetap nonaktif.
 
 ---
 

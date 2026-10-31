@@ -2,6 +2,13 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.3.0
+
+- **Mulai ulang dan Matikan PC groundstation dari console.** Bilah atas punya dua tombol setelah EN|ID, hanya di halaman console groundstation sendiri: tablet di tampilan LAN tidak mendapat tombol, `host_power` di `/api/capabilities`, maupun route-nya (`POST` di listener LAN tetap `405 LAN_READ_ONLY`). Klik membuka konfirmasi yang menyebut aksinya, dengan fokus di **Batal** dan Escape untuk batal; konfirmasi memperingatkan bila `/api/health` melaporkan `receiver_busy` (rekaman atau pindai Receiver sedang ditulis). Tanpa admin: keputusan pemilik 2026-10-31.
+- **Satu kata, satu direktori.** `POST /api/host/power {action, confirm: true}` hanya dari `Origin` loopback yang sama, body paling besar 256 byte. Console menulis `/run/sdr-doa-host-power/request` berisi tepat `reboot` atau `poweroff`, secara atomik, dan tidak menjalankan apa pun di host. Kode errornya sendiri (`HOST_POWER_*`, di luar daftar kode Kontrol); `503 HOST_POWER_UNAVAILABLE` dengan alasannya bila sisi host belum dipasang.
+- **Sisi host baru: `packaging/host-power`** (di tarball console, tidak di image). Aturan tmpfiles.d membuat direktori permintaan untuk uid console, unit `.path` memicu service root oneshot yang hanya menerima dua kata itu, menghapus permintaan sebelum bertindak, menolak permintaan kedua dalam 60 detik pada boot yang sama, mencatat dengan tag `sdr-doa-host-power`, lalu menjalankan `systemctl reboot` atau `systemctl poweroff`. Pasang dengan `sudo sh packaging/host-power/install.sh` (Docker, uid 10001) atau `--console-user <user>` (native); `--helper-dry-run` untuk uji tanpa mematikan PC. Langkahnya di `docs/RUNBOOK_INSTALL_UPDATE.md` 5.5.
+- **Docker: satu mount host.** Setiap compose (dan `compose.yml` yang ditulis `sdr-doa-docker`) me-mount `/run/sdr-doa-host-power` ke path yang sama; tetap tanpa socket Docker, D-Bus, capability tambahan, atau port. Timer update hanya mengganti image, jadi instalasi yang ada perlu sekali `sudo sh sdr-doa-docker install` dari script 3.3.0 agar `compose.yml` memuat mount itu. Tanpa sisi host kedua tombol tampil nonaktif dengan alasan "Helper host belum dipasang".
+
 ## 3.2.0
 
 Rilis minor: tidak ada yang dihapus. Tampilan LAN kini juga membaca **Rekaman** Receiver, hanya baca, dan mirror Receiver-nya menampilkan gain pindai dan frame pertama mode baru dengan benar. Kanal `3` dan timer update memasangnya sendiri.

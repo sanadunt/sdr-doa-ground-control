@@ -1,0 +1,18 @@
+# Written by the sdr-doa-host-power installer (packaging/host-power/install.sh).
+# Takes one Restart or Shutdown request of the SDR-DoA Ground Console;
+# sdr-doa-host-power.path starts it when @REQUEST_DIR@/request appears.
+# Journal: journalctl -t sdr-doa-host-power
+[Unit]
+Description=SDR-DoA Ground Console power request (Restart or Shutdown)
+Documentation=file://@SHARE_DIR@/README.md
+
+[Service]
+Type=oneshot
+# Root: it runs systemctl reboot or systemctl poweroff. It opens no port.
+ExecStart=@SBIN_DIR@/sdr-doa-host-power @HANDLE@
+SyslogIdentifier=sdr-doa-host-power
+StateDirectory=sdr-doa-host-power
+StateDirectoryMode=0755
+TimeoutStartSec=2min
+NoNewPrivileges=yes
+PrivateTmp=yes

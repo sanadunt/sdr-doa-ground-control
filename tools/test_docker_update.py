@@ -1308,6 +1308,9 @@ class ComposePolicyTests(DockerScriptTestCase):
         self.assertNotIn("build:", console)
         self.assertRegex(console, r"(?m)^name: sdr-doa-ground-console$")
         self.assertRegex(console, r"(?m)^      - sdr-doa-data:/data$")
+        # The power request directory of packaging/host-power, the one host path.
+        self.assertRegex(console, r"(?m)^      - /run/sdr-doa-host-power:/run/sdr-doa-host-power$")
+        self.assertNotIn("docker.sock", console)
         self.assertRegex(console, r"(?m)^  sdr-doa-data:$")
         self.assertRegex(console, r"(?m)^      - SDR_DOA_ADMIN_PASSWORD$")
         self.assertIn("image: ${SDR_DOA_IMAGE:-%s}:${SDR_DOA_IMAGE_TAG:-%s}" % (CONSOLE_IMAGE, CHANNEL), console)

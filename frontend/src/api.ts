@@ -5,6 +5,8 @@ import { normalizeDataOutHostList } from './lib/dataOutHosts';
 import type { ConfigPatchKey } from './lib/controlDraft';
 import { isConsoleAccess } from './lib/access';
 import type { ConsoleAccess } from './lib/access';
+import { normalizeHostPower } from './lib/hostPower';
+import type { HostPowerCapability } from './lib/hostPower';
 
 export const DEFAULT_API_TIMEOUT_MS = 10_000;
 
@@ -398,6 +400,8 @@ export interface ConsoleCapabilities {
   access?: ConsoleAccess | null;
   /** State of the LAN view listener; null when not reported. */
   lanAccess?: LanAccessBrief | null;
+  /** Restart and Shutdown of the groundstation PC; null on the LAN view, which never reports it. */
+  hostPower?: HostPowerCapability | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -562,6 +566,7 @@ export function normalizeCapabilities(value: unknown): ConsoleCapabilities {
     configPatch: normalizeConfigPatchCapability(record.config_patch),
     access: isConsoleAccess(record.access) ? record.access : null,
     lanAccess: normalizeLanAccessBrief(record.lan_access),
+    hostPower: normalizeHostPower(record.host_power),
   };
 }
 

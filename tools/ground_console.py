@@ -36,7 +36,12 @@ The console keeps a narrow boundary:
   table, previews, downloads, ZIP exports, delete) and a retention pass that
   runs in its own thread. Every Receiver GET must come from this console's
   own pages (Sec-Fetch-Site and a loopback Host on this port); every POST
-  and DELETE needs the same-origin loopback Origin.
+  and DELETE needs the same-origin loopback Origin;
+* ``POST /api/host/power`` (the top bar's Restart and Shutdown, confirmed in
+  the page) writes a request file holding ``reboot`` or ``poweroff`` into
+  ``--host-power-dir`` (``host_power.py``) for a host helper
+  (``packaging/host-power``) to act on. It needs the same-origin loopback
+  Origin; the console itself runs nothing on the host.
 
 The console listens on loopback only. The one exception is the opt-in LAN
 view (``lan_access`` in ``--config-path``, changed by an admin through
@@ -123,6 +128,7 @@ from sdr_doa_collector import (
     data_out_url_host,
     normalize_data_out_hosts,
 )
+import host_power as hp
 import receiver_archive as ra
 import receiver_mirror as rm
 from receiver_archive import ArchiveError
@@ -3132,6 +3138,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             # view (LanConsoleHandler), and the LAN view's state.
             "access": lan.ACCESS_LOCAL,
             "lan_access": self.console_server.lan.status(),
+            # Restart and Shutdown of this host; the LAN view drops it.
+            "host_power": self.console_server.host_power.status(),
         }
 
     def _health_body(self) -> Dict[str, Any]:
@@ -3401,6 +3409,48 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"ok": True, **result})
 
+    def _send_host_power_error(self, code: str, message: str, **extra: Any) -> None:
+        # Host power codes go through this helper, never the Kontrol error
+        # helper, so the config-patch code contract does not count them.
+        self._send_json({**extra, "ok": False, "code": code, "error": message}, hp.ERROR_CODES_HTTP[code])
+
+    def _post_host_power(self) -> None:
+        """POST /api/host/power: Restart or Shutdown of this host, confirmed in the page.
+
+        In order: the same-origin loopback Origin (403, decided before the
+        body is read), the body length (413), the body (400), the request
+        directory and its helper (503), a request the host has not taken yet
+        (409), the write (500). The LAN view never gets here: it refuses
+        every POST.
+        """
+        if not self._same_origin_loopback_request():
+            self._discard_body(hp.MAX_BODY_BYTES)
+            self._send_host_power_error(hp.ORIGIN_REJECTED, f"{hp.ROUTE} requires a same-origin loopback request")
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            length = -1
+        if length > hp.MAX_BODY_BYTES:
+            self.close_connection = True
+            self._discard_body(lan.MAX_DISCARDED_BODY_BYTES)
+            self._send_host_power_error(hp.HOST_POWER_TOO_LARGE, f"the body must be at most {hp.MAX_BODY_BYTES} bytes")
+            return
+        if length < 1:
+            self._send_host_power_error(hp.HOST_POWER_INVALID, "the body must be JSON with a Content-Length")
+            return
+        raw = self.rfile.read(length)
+        try:
+            if len(raw) != length:
+                raise hp.HostPowerRejected(hp.HOST_POWER_INVALID, "the body is incomplete")
+            action = hp.decode_request(raw)
+            result = self.console_server.host_power.request(action)
+        except hp.HostPowerRejected as exc:
+            self._send_host_power_error(exc.code, exc.message, **exc.extra)
+            return
+        self.log_message("host power: %s requested", action)
+        self._send_json({"ok": True, **result}, HTTPStatus.ACCEPTED)
+
     def _post_lan_access(self) -> None:
         """POST /api/lan-access: change the LAN view and open, move or close it at once.
 
@@ -3438,6 +3488,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == rm.ROUTE:
             self._post_mirror()
+            return
+        if parsed.path == hp.ROUTE:
+            self._post_host_power()
             return
         if parsed.path in SAME_ORIGIN_POST_PATHS and not self._same_origin_loopback_request():
             # Rejected before the body is read, the login throttle or any
@@ -3781,6 +3834,8 @@ class LanConsoleHandler(ConsoleHandler):
             "access": lan.ACCESS_LAN_VIEW,
             "lan_access": self.console_server.lan.brief_status(),
         })
+        # Restart and Shutdown are the groundstation's own: not even their state.
+        body.pop("host_power", None)
         return body
 
     def do_HEAD(self) -> None:  # noqa: N802
@@ -4303,6 +4358,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
         retention_start_delay_s: float = ra.RETENTION_START_DELAY_S,
         data_out_fetcher: Optional[Callable[..., Any]] = None,
         saved_config: Optional[Dict[str, Any]] = None,
+        host_power_dir: Optional[Path] = None,
     ):
         self.frontend_dir = Path(frontend_dir).resolve() if frontend_dir is not None else None
         if not _is_loopback_bind(address[0]):
@@ -4413,6 +4469,9 @@ class GroundConsoleServer(ThreadingHTTPServer):
         # The Receiver mirror (receiver_mirror.py): the kiosk page's latest
         # Receiver state and frame for the LAN view, in memory only.
         self.receiver_mirror = rm.ReceiverMirror()
+        # Restart and Shutdown of this host (host_power.py): request files for
+        # the host helper; None (the default here, and in tests) turns them off.
+        self.host_power = hp.HostPower(host_power_dir)
         # The opt-in LAN view: a second listener of this process
         # (lan_access.py). It opens below, once this loopback socket is bound.
         self.lan = LanAccessManager(self)
@@ -5024,6 +5083,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=str(DEFAULT_ENV_PATH),
         help="dotenv file for SDR_DOA_ADMIN_PASSWORD and SDR_DOA_SEED_* (the process environment wins)",
     )
+    parser.add_argument(
+        "--host-power-dir",
+        default=hp.DEFAULT_DIR,
+        help="directory for the top bar's Restart and Shutdown requests, which packaging/host-power acts on (empty: off)",
+    )
     return parser
 
 
@@ -5079,11 +5143,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         tile_cache_dir=Path(args.tile_cache_dir).expanduser(),
         tile_cache_max_mb=args.tile_cache_max_mb,
         saved_config=saved_config,
+        host_power_dir=Path(args.host_power_dir).expanduser() if args.host_power_dir else None,
     )
     print(f"Ground Console: http://{args.bind}:{args.port}/", flush=True)
     print(f"Version: {server.version}", flush=True)
     print(f"Saved settings: {config_path}, {server.branding_path}, {server.preferences.path}", flush=True)
     print(f"Tile cache: {server.tile_cache.cache_dir} (at most {args.tile_cache_max_mb} MB)", flush=True)
+    power = server.host_power.status()
+    print(f"Host power: {args.host_power_dir or 'off'} ({'ready' if power['available'] else power['reason']})", flush=True)
     print(f"Read-only Data Out: {config['base_url']}", flush=True)
     if ADMIN_PASSWORD == DEFAULT_ADMIN_PASSWORD:
         print(

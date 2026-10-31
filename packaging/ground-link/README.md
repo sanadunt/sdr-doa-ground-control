@@ -1,6 +1,6 @@
 # Link T900/PPP di groundstation (t900-ground-link)
 
-Alat host untuk link PPP lewat radio T900 antara groundstation dan RDF-SDR (Raspberry). Semuanya jalan di host groundstation, di luar Docker: console tetap di container sebagai uid 10001 tanpa kendali atas host.
+Alat host untuk link PPP lewat radio T900 antara groundstation dan RDF-SDR (Raspberry). Semuanya jalan di host groundstation, di luar Docker: console tetap di container sebagai uid 10001 tanpa kendali atas alat ini. Satu-satunya tulisan console ke host adalah permintaan Mulai ulang atau Matikan (`packaging/host-power`).
 
 | File | Isi |
 |---|---|
@@ -177,12 +177,13 @@ t900-link log 50       # 50 baris journal watchdog
 
 Aturan polkit `50-t900-ground-link.rules` mengizinkan user operator (bawaan `rdf`) menjalankan tepat dua hal tanpa password: `restart` untuk `t900-ground-ppp.service` dan `start` untuk `t900-ground-usbreset.service`. Tindakan systemd lain, dan user lain, tetap meminta autentikasi. Aturan JavaScript butuh polkit 0.106 atau lebih baru (Debian 12, Ubuntu 23.10 ke atas); di Ubuntu 22.04 (polkit 0.105) installer memberi peringatan dan operator memakai `sudo systemctl restart t900-ground-ppp.service` atau `sudo systemctl start t900-ground-usbreset.service`. Membaca journal (`t900-link log`, bagian journal di diag) butuh grup `systemd-journal`: `sudo usermod -aG systemd-journal rdf` (berlaku setelah login ulang).
 
-## Usulan: tombol di console (belum dibuat)
+## Tombol di console
 
-Console berjalan di Docker sebagai uid 10001 dan tidak boleh mendapat kendali host: tanpa socket Docker, D-Bus, polkit, capability tambahan, atau port baru. Karena itu belum ada tombol. Rancangan bila nanti dibutuhkan:
+Console tidak punya tombol untuk link T900: ia berjalan di Docker sebagai uid 10001 tanpa socket Docker, D-Bus, polkit, capability tambahan, atau port baru, dan tidak mengendalikan alat ini.
 
-1. **Tampil saja.** Watchdog menulis ringkasan statusnya (kondisi link, sejak kapan, tindakan terakhir, remote unreachable) ke satu file JSON di direktori host yang di-mount read-only ke container. System Health menampilkan chip link T900 dari file itu. Tidak ada jalur tulis.
-2. **Tombol.** Console (admin, dengan langkah konfirmasi seperti Kontrol) menulis file permintaan berisi tepat `restart` atau `usb-reset` ke direktori khusus di volumenya. Unit `.path` di host memicu service root oneshot yang hanya menerima dua kata itu, menghapus permintaan, memakai lock dan batas per jam watchdog, dan mencatat dengan tag yang sama. Ini menambah jalur tulis dari console ke host, jadi perlu keputusan pemilik sebelum dibuat (aturan di `AGENTS.md`: hanya satu jalur tulis).
+Satu-satunya jalur tulis dari console ke host adalah tombol **Mulai ulang** dan **Matikan** PC groundstation (keputusan pemilik 2026-10-31, `packaging/host-power/README.md`). Console hanya menulis satu kata ke `/run/sdr-doa-host-power/request`; unit `.path` di host memicu service root oneshot yang menerima kata itu saja, menghapus permintaan, menolak pengulangan dalam 60 detik, mencatat dengan tag tetap, lalu menjalankan `systemctl reboot` atau `systemctl poweroff`.
+
+Tombol `restart` dan `usb-reset` untuk link ini bisa dibuat dengan pola yang sama: file permintaan berisi tepat salah satu dari dua kata itu, unit `.path`, dan service root yang memakai lock dan batas per jam watchdog serta tag `t900-ground-watchdog`. Karena itu menambah jalur tulis kedua dari console ke host, tombol tersebut perlu keputusan pemilik sebelum dibuat. Tanpa tombol, operator memakai `t900-link` di terminal.
 
 ## Daya: bila hanya cabut-colok yang menolong
 
