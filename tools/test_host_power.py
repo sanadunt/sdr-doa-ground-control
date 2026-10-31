@@ -283,6 +283,9 @@ class RouteTests(_ServerCase):
     def test_the_lan_view_never_reaches_the_route(self) -> None:
         lan_port = self.open_lan(self.server)
         self.assertIsNone(lan.lan_route(hp.ROUTE))
+        # The LAN view's one write is a marker command; the power request is not on its list.
+        self.assertFalse(lan.write_allowed("POST", hp.ROUTE))
+        self.assertTrue(all(path != hp.ROUTE for _method, path in lan.WRITE_ROUTES))
         for origin in ("default", None):
             with self.subTest(origin=origin):
                 status, answer = self.post({"action": "poweroff", "confirm": True}, origin=origin, port=lan_port)

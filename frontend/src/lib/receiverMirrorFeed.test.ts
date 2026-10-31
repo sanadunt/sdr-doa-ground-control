@@ -173,6 +173,30 @@ describe('Receiver mirror feed (LAN view)', () => {
     release();
   });
 
+  it('carries the groundstation Receiver\'s markers with each new post', async () => {
+    const h = harness();
+    const markers = { rev: 1, saved: false, total: 3, markers: [
+      { id: 'm-2', frequency_hz: 434_000_000, power_db: -50.5, label: 'Repeater' },
+      { id: 'm-1', frequency_hz: 433_500_000, power_db: null, label: 'M1' },
+    ] };
+    h.answers.push(body(1, 1), body(2, 1, { markers }));
+    const release = h.feed.retain();
+    await h.settle();
+    expect(h.feed.getState().answer?.markers).toBeNull();
+    const view = mirrorView({ ...h.feed.getState(), nowMs: 0 });
+    expect(view.markers).toBeNull();
+    await h.advance(MIRROR_POLL_MS);
+    expect(h.feed.getState().answer?.markers).toEqual({
+      saved: false, total: 3,
+      markers: [
+        { id: 'm-1', frequencyHz: 433_500_000, powerDb: null, label: 'M1' },
+        { id: 'm-2', frequencyHz: 434_000_000, powerDb: -50.5, label: 'Repeater' },
+      ],
+    });
+    expect(mirrorView({ ...h.feed.getState(), nowMs: 0 }).markers?.markers).toHaveLength(2);
+    release();
+  });
+
   it('marks a failed read, backs off, and the view counts the source lost after 10 s', async () => {
     const h = harness();
     h.answers.push(body(1, 1), new Error('offline'));

@@ -20,6 +20,8 @@ import { createMirrorFeed } from './receiverMirrorFeed';
 import type { MirrorFeedState, ReceiverMirrorFeed } from './receiverMirrorFeed';
 import { mirrorView, normalizeMirrorAnswer } from './receiverMirror';
 import { SpectrumDockMirror, mirrorInfoText } from '../components/overview/SpectrumDockMirror';
+import { createMirrorMarkController } from './receiverMirrorMarks';
+import type { MirrorMarkClient, MirrorMarkController, MirrorMarkOutcome } from './receiverMirrorMarks';
 
 /** Vitest blanks every CSS import, so a stylesheet is read from disk. */
 function readSource(path: string): string {
@@ -195,18 +197,22 @@ describe('LAN view UI', () => {
     );
     expect(markup).not.toContain('id="panel-control"');
     expect(markup).not.toContain('data-control="open"');
-    // The dock shows the groundstation's Receiver as MIRROR, every control disabled.
+    // The dock shows the groundstation's Receiver as MIRROR, every radio control disabled;
+    // Markers/Penanda is the one that works (marker add and remove, 2026-10-31).
     expect(markup).toContain('<section id="panel-spectrum" class="ov-spectrum is-view-only is-mirror"');
     expect(markup).toContain('<span class="ov-tag tone-info">MIRROR</span>');
     expect(markup).toContain(translate('en', 'mirror.connecting'));
     const dock = markup.slice(markup.indexOf('<section id="panel-spectrum"'));
     const dockButtons = dock.slice(0, dock.indexOf('</section>')).match(/<button[^>]*>/g) ?? [];
-    expect(dockButtons).toHaveLength(4);
-    for (const tag of dockButtons) expect(tag).toContain('disabled');
+    expect(dockButtons).toHaveLength(5);
+    const enabled = dockButtons.filter((tag) => !tag.includes('disabled'));
+    expect(enabled).toEqual([`<button class="ov-button ov-spec-mark" type="button" aria-pressed="false" title="${translate('en', 'mirror.markNoSource')}">`]);
+    // Marking is off at every mount: the trace is a picture until it is turned on.
     expect(markup).toContain('role="img"');
     expect(markup).not.toContain('role="slider"');
+    expect(markup).not.toContain('role="application"');
     expect(markup).not.toContain('ov-spec-settings-toggle');
-    expect(markup).not.toContain('ov-spec-mark');
+    expect(markup).not.toContain('ov-spec-mark-row');
     expect(markup).not.toContain('/receiver/');
     expect(markup).not.toContain('<iframe');
     expect(markup).not.toContain('<audio');
@@ -252,6 +258,110 @@ describe('LAN view UI', () => {
     expect(records).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/);
     expect(records).toContain('min-height: 44px');
     expect(records).toContain('.rec-tl-strip { position: relative; height: 44px;');
+  });
+
+  describe('marking from the tablet', () => {
+    const fixture = JSON.parse(readSource('../../../tools/fixtures/receiver-mirror/publish.json')) as Record<string, unknown>;
+    const answerWith = (markers: unknown) => normalizeMirrorAnswer({
+      ok: true, v: 1, rev: 5, frame_rev: 3, source: fixture.source, source_age_ms: 100, state: fixture.state, state_age_ms: 100,
+      frame: fixture.frame, frame_age_ms: 150, limits: { frame_stale_ms: 3000, source_lost_ms: 10000 }, markers,
+    });
+    const feedOf = (answer: ReturnType<typeof normalizeMirrorAnswer>, ageMs = 0): ReceiverMirrorFeed => {
+      const state: MirrorFeedState = { answer, receivedAtMs: Date.now() - ageMs, error: false };
+      return { retain: () => () => undefined, getState: () => state, onState: () => () => undefined, onSpectrum: () => () => undefined };
+    };
+    /** A controller whose commands settle when the test says so, turned on. */
+    const marking = (): { controller: MirrorMarkController; settle: (outcome: MirrorMarkOutcome) => void } => {
+      let settle: (outcome: MirrorMarkOutcome) => void = () => undefined;
+      const pending = () => new Promise<MirrorMarkOutcome>((resolve) => { settle = resolve; });
+      const client: MirrorMarkClient = { add: pending, remove: pending };
+      const controller = createMirrorMarkController(client);
+      controller.toggle();
+      return { controller, settle: (outcome) => settle(outcome) };
+    };
+    const flush = async () => { for (let index = 0; index < 10; index++) await Promise.resolve(); };
+    const head = (markup: string) => markup.slice(markup.indexOf('<div class="ov-dock-head'), markup.indexOf('<div class="ov-spec-main'));
+
+    it('turns the trace into a marking canvas, never a tuning one, with every radio control still disabled', () => {
+      const { controller } = marking();
+      for (const lang of ['en', 'id'] as const) {
+        const markup = withI18n(<SpectrumDockMirror feed={feedOf(answerWith(fixture.markers))} markController={controller} />, lang);
+        expect(markup).toContain(`role="application" aria-label="${translate(lang, 'mirror.canvasAriaMarking')}"`);
+        expect(markup).not.toContain('role="slider"');
+        expect(markup).toContain('ov-spec-trace is-marking is-read-only');
+        // The toggle is pressed and counts the groundstation's list; Mulai, Dengar and the mode switch stay disabled.
+        const buttons = head(markup).match(/<button[^>]*>/g) ?? [];
+        expect(buttons.filter((tag) => !tag.includes('disabled'))).toEqual(['<button class="ov-button ov-spec-mark" type="button" aria-pressed="true">']);
+        expect(head(markup)).toContain('<span class="ov-spec-mark-count">2</span>');
+        expect(markup).not.toContain(translate(lang, 'mirror.markNoSource'));
+      }
+    });
+
+    it('shows a picked marker with Remove and without Tune here', () => {
+      const { controller } = marking();
+      controller.select('m-2');
+      for (const lang of ['en', 'id'] as const) {
+        const markup = withI18n(<SpectrumDockMirror feed={feedOf(answerWith(fixture.markers))} markController={controller} />, lang);
+        expect(markup).toContain('<span class="ov-spec-mark-readout">Repeater · 434.000 MHz · −48.5 dB</span>');
+        expect(markup).toContain(`>${translate(lang, 'spectrum.markRemove')}</button>`);
+        expect(markup).not.toContain(translate(lang, 'spectrum.markTune'));
+        expect(markup).not.toContain(translate(lang, 'spectrum.markUnsaved'));
+      }
+    });
+
+    it('says Not saved while no marker set is selected on the groundstation', () => {
+      const { controller } = marking();
+      const unsaved = { ...(fixture.markers as Record<string, unknown>), saved: false };
+      for (const lang of ['en', 'id'] as const) {
+        const markup = withI18n(<SpectrumDockMirror feed={feedOf(answerWith(unsaved))} markController={controller} />, lang);
+        expect(markup).toContain(`<span class="ov-tag tone-warn">${translate(lang, 'spectrum.markUnsaved')}</span>`);
+      }
+    });
+
+    it('shows a mark on its way, then the failure in operator words', async () => {
+      const { controller, settle } = marking();
+      controller.mark(433_700_000, { blocked: null, frequencyShiftHz: 0, markers: [] });
+      const sending = withI18n(<SpectrumDockMirror feed={feedOf(answerWith(fixture.markers))} markController={controller} />, 'id');
+      expect(sending).toContain(translate('id', 'mirror.markSending'));
+      settle({ ok: false, code: 'MIRROR_MARKER_BUSY', markerId: null });
+      await flush();
+      const busy = withI18n(<SpectrumDockMirror feed={feedOf(answerWith(fixture.markers))} markController={controller} />, 'id');
+      expect(busy).not.toContain(translate('id', 'mirror.markSending'));
+      expect(busy).toContain(translate('id', 'mirror.markBusy'));
+    });
+
+    it('pauses marking with its reason while the source is lost or its frames are stale', () => {
+      const { controller } = marking();
+      for (const lang of ['en', 'id'] as const) {
+        const stale = withI18n(<SpectrumDockMirror feed={feedOf(answerWith(fixture.markers), 5_000)} markController={controller} />, lang);
+        expect(stale).toContain(translate(lang, 'mirror.markStale'));
+        expect(stale).toContain('role="img"');
+        expect(stale).not.toContain('role="application"');
+        expect(head(stale)).toContain(`aria-pressed="true" title="${translate(lang, 'mirror.markStale')}"`);
+        const lost = withI18n(<SpectrumDockMirror feed={feedOf(answerWith(fixture.markers), 20_000)} markController={controller} />, lang);
+        expect(lost).toContain(translate(lang, 'mirror.markNoSource'));
+        expect(lost).not.toContain('role="application"');
+        const none = withI18n(<SpectrumDockMirror feed={feedOf(normalizeMirrorAnswer({ ok: true, v: 1, rev: 0, frame_rev: 0, source: null, state: null, frame: null }))} markController={controller} />, lang);
+        expect(none).toContain(translate(lang, 'mirror.markNoSource'));
+      }
+    });
+
+    it('marks on the Receiver route too, from the Spectrum card', () => {
+      const { controller } = marking();
+      const markup = withI18n(<ReceiverMirrorPage feed={feedOf(answerWith(fixture.markers))} initialTab="mirror" markController={controller} />, 'id');
+      expect(markup).toContain('<button class="ov-button ov-spec-mark" type="button" aria-pressed="true"><svg');
+      expect(markup).toContain(`role="application" aria-label="${translate('id', 'mirror.canvasAriaMarking')}"`);
+      // Records never get the toggle.
+      const records = withI18n(<ReceiverMirrorPage feed={feedOf(answerWith(fixture.markers))} initialTab="records" markController={controller} />, 'id');
+      expect(records).not.toContain('ov-spec-mark');
+    });
+
+    it('keeps its touch targets at 44 px and the marking cursor on a view-only trace', () => {
+      const css = readSource('../overview-dashboard.css');
+      expect(css).toMatch(/\.ov-button \{[^}]*height: 44px;/u);
+      expect(css).toContain('.ov-spec-trace.is-read-only:not(.is-marking), .ov-spec-waterfall.is-read-only:not(.is-marking) { cursor: default; }');
+      expect(css).toContain('.ov-spec-trace.is-marking, .ov-spec-waterfall.is-marking, .ov-spec-trace.is-marking .ov-spec-overlay { cursor: copy; }');
+    });
   });
 
   it('shows the mirror as live, STALE after 3 s and SOURCE LOST / SUMBER PUTUS after 10 s', () => {

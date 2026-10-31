@@ -220,7 +220,11 @@ export interface SpectrumCanvasProps {
   onSelectMarker?: (id: string | null) => void;
   /** Delete/Backspace removes the picked marker; Ctrl/⌘+Z takes back the dock's last mark. */
   onMarkerKey?: (action: 'remove' | 'undo') => void;
-  /** View only (the Receiver mirror): no tuning, marking or keys; the hover readout stays. */
+  /**
+   * View only (the Receiver mirror): no tuning and no arrow keys; the hover
+   * readout stays. With `marking` on, a click marks or picks and the marker
+   * keys work, as in the LAN view, where the tablet marks but never tunes.
+   */
   readOnly?: boolean;
 }
 
@@ -239,7 +243,8 @@ const NO_MARKERS: readonly BridgeMarker[] = [];
  * strongest nearby bin); hovering shows the frequency and power under the pointer.
  * The Receiver's markers are lines on the trace (labelled where they fit) and
  * dashed lines on the waterfall. In marking mode a click adds a marker there,
- * or picks the one within a few pixels, and Enter, [ ], Delete and Ctrl/⌘+Z work.
+ * or picks the one within a few pixels, and Enter, [ ], Delete and Ctrl/⌘+Z work;
+ * a read-only canvas (the mirror) marks this way too but never tunes.
  */
 export function SpectrumCanvas({
   bridge, mode, live, fallbackView, centerHz, vfo, info, notice, overlay, tuneHz, onTune, dbRange, onAutoRange, handle,
@@ -544,8 +549,8 @@ export function SpectrumCanvas({
   };
 
   const onPointerDown = (event: ReactPointerEvent<HTMLElement>) => {
-    // A button in the stopped overlay is not a tune click; a view-only canvas tunes nothing.
-    if (readOnly || event.button !== 0 || (event.target instanceof Element && event.target.closest('button, a'))) return;
+    // A button in the stopped overlay is not a tune click; a view-only canvas tunes nothing, it only marks.
+    if ((readOnly && !marking) || event.button !== 0 || (event.target instanceof Element && event.target.closest('button, a'))) return;
     pointerRef.current = { x: event.clientX, y: event.clientY, id: event.pointerId };
   };
 
@@ -571,7 +576,7 @@ export function SpectrumCanvas({
     const frame = frameRef.current;
     const picked = props.current.mode === 'sweep' && frame?.source === 'sweep' ? scanPick(frame.bins, frame.startHz, frame.stopHz, hz) : null;
     if (marking) onMark?.(snapHz(picked ?? hz));
-    else onTune(snapHz(picked ?? hz));
+    else if (!readOnly) onTune(snapHz(picked ?? hz));
   };
 
   const onPointerMove = (event: ReactPointerEvent<HTMLElement>) => {
@@ -647,7 +652,7 @@ export function SpectrumCanvas({
   };
 
   const onKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
-    if (readOnly || markerKey(event)) return;
+    if (markerKey(event) || readOnly) return;
     const direction = event.key === 'ArrowRight' || event.key === 'ArrowUp' ? 1 : event.key === 'ArrowLeft' || event.key === 'ArrowDown' ? -1 : 0;
     if (!direction || event.altKey || event.ctrlKey || event.metaKey) return;
     event.preventDefault();
@@ -675,7 +680,10 @@ export function SpectrumCanvas({
       </div>
       {notice ? <div className="ov-spec-notice" role="status">{notice}</div> : null}
       <div className={`ov-spec-trace${live ? '' : ' is-stopped'}${marking ? ' is-marking' : ''}${readOnly ? ' is-read-only' : ''}`} {...pointerHandlers}>
-        {readOnly ? (
+        {readOnly && marking ? (
+          // The mirror while marking: the marker keys, never the tuning ones.
+          <canvas ref={traceRef} className="ov-spec-canvas" tabIndex={0} role="application" aria-label={t('mirror.canvasAriaMarking')} onKeyDown={onKeyDown} />
+        ) : readOnly ? (
           // A picture of the mirrored spectrum: nothing to focus or tune.
           <canvas ref={traceRef} className="ov-spec-canvas" role="img" aria-label={t('mirror.canvasAria')} />
         ) : (

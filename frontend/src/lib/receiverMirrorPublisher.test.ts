@@ -1,10 +1,10 @@
-import { describe, expect, it } from 'vitest';
-import { startMirrorPublisher, mirrorSourceId, MIRROR_RETRY_MS } from './receiverMirrorPublisher';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { browserPublisherEnvironment, startMirrorPublisher, mirrorSourceId, MIRROR_RETRY_MS } from './receiverMirrorPublisher';
 import type { MirrorPostAnswer, MirrorPublisherEnvironment } from './receiverMirrorPublisher';
 import { MIRROR_LAN_CHECK_MS, MIRROR_LIMITS, MIRROR_POST_INTERVAL_MS, MIRROR_SUBSCRIBE_FPS } from './receiverMirror';
 import type { MirrorPublish } from './receiverMirror';
-import type { BridgeState, ReceiverBridge, SubscriptionOwner } from './receiverBridge';
-import type { ReceiverStatus, RxSpectrumFrame, SpectrumFrame } from './receiverBridgeProtocol';
+import type { BridgeResult, BridgeState, ReceiverBridge, SubscriptionOwner } from './receiverBridge';
+import type { BridgeCommand, BridgeMarker, ReceiverMarkers, ReceiverStatus, RxSpectrumFrame, SpectrumFrame } from './receiverBridgeProtocol';
 
 function status(overrides: Partial<ReceiverStatus> = {}): ReceiverStatus {
   return {
@@ -47,7 +47,12 @@ function harness(options: { lanOpen?: boolean; visible?: boolean } = {}) {
   const stateListeners = new Set<() => void>();
   const spectrumListeners = new Set<(frame: SpectrumFrame) => void>();
   const subscriptions: Array<{ owner: SubscriptionOwner | undefined; spectrum: boolean; bins?: number; fps?: number }> = [];
+  // Commands the publisher sends the frame; each settles when the test says so.
+  const sent: Array<{ command: BridgeCommand; settle: (result: BridgeResult) => void; fail: () => void }> = [];
   const bridge = {
+    send: (command: BridgeCommand) => new Promise<BridgeResult>((resolve, reject) => {
+      sent.push({ command, settle: resolve, fail: () => reject(new Error('detached')) });
+    }),
     getState: () => bridgeState,
     onState: (listener: () => void) => { stateListeners.add(listener); return () => { stateListeners.delete(listener); }; },
     onSpectrum: (listener: (frame: SpectrumFrame) => void) => { spectrumListeners.add(listener); return () => { spectrumListeners.delete(listener); }; },
@@ -58,6 +63,10 @@ function harness(options: { lanOpen?: boolean; visible?: boolean } = {}) {
     for (const listener of [...stateListeners]) listener();
   };
   const sendFrame = (value: SpectrumFrame) => { for (const listener of [...spectrumListeners]) listener(value); };
+  const setMarkers = (markers: ReceiverMarkers | null) => {
+    bridgeState = { ...bridgeState, markers };
+    for (const listener of [...stateListeners]) listener();
+  };
 
   const posts: Array<{ at: number; body: MirrorPublish }> = [];
   const answers: Array<MirrorPostAnswer | Error> = [];
@@ -87,7 +96,7 @@ function harness(options: { lanOpen?: boolean; visible?: boolean } = {}) {
     random: () => 0.5,
   };
   return {
-    env, bridge, posts, answers, subscriptions, advance, settle, setStatus, sendFrame,
+    env, bridge, posts, answers, subscriptions, advance, settle, setStatus, sendFrame, setMarkers, sent,
     setLan: (open: boolean) => { lanOpen = open; },
     lanChecks: () => lanChecks,
     setVisible: (value: boolean) => { visible = value; for (const listener of [...visibilityListeners]) listener(); },
@@ -100,6 +109,8 @@ function harness(options: { lanOpen?: boolean; visible?: boolean } = {}) {
 }
 
 describe('Receiver mirror publisher', () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
   it('names its source per page load', () => {
     expect(mirrorSourceId(() => 0.5)).toBe('kiosk-iiiiiiiiiiiiiiii');
     expect(mirrorSourceId(Math.random)).toMatch(/^kiosk-[a-z0-9]{16}$/);
@@ -167,14 +178,14 @@ describe('Receiver mirror publisher', () => {
     publisher.stop();
   });
 
-  it('sends the state when it changes and a heartbeat every 2 s without frames', async () => {
+  it('sends the state when it changes and a heartbeat every 500 ms without frames', async () => {
     const h = harness();
     const publisher = startMirrorPublisher(h.bridge, h.env);
     await h.settle();
     expect(h.posts).toHaveLength(1);
-    // Same state with a new seq and time: nothing new.
+    // Same state with a new seq and time: nothing new before the heartbeat.
     h.setStatus(status({ seq: 2, tMs: 2_000 }));
-    await h.advance(500);
+    await h.advance(MIRROR_LIMITS.heartbeatMs - 100);
     expect(h.posts).toHaveLength(1);
     h.setStatus(status({ seq: 3, running: false }));
     await h.advance(MIRROR_POST_INTERVAL_MS);
@@ -279,6 +290,131 @@ describe('Receiver mirror publisher', () => {
     h.setVisible(true);
     expect(h.subscriptions.at(-1)).toMatchObject({ owner: 'mirror', spectrum: true });
     publisher.stop();
+  });
+
+  it('runs each viewer\'s marker command once and reports its result in the next post', async () => {
+    const h = harness();
+    const publisher = startMirrorPublisher(h.bridge, h.env);
+    await h.settle();
+    h.answers.push({ status: 200, code: null, commands: [
+      { id: 'tab-cmd-0001', op: 'add', frequency_hz: 433_920_000 },
+      { id: 'tab-cmd-0002', op: 'remove', marker_id: 'm-4' },
+    ] });
+    await h.advance(MIRROR_LIMITS.heartbeatMs);
+    expect(h.posts).toHaveLength(2);
+    expect(h.sent.map((entry) => entry.command)).toEqual([
+      { type: 'console:marker-add', frequencyHz: 433_920_000 },
+      { type: 'console:marker-remove', markerId: 'm-4' },
+    ]);
+    // A command handed out again (a resent answer) runs once only.
+    h.answers.push({ status: 200, code: null, commands: [{ id: 'tab-cmd-0001', op: 'add', frequency_hz: 433_920_000 }] });
+    await h.advance(MIRROR_LIMITS.heartbeatMs);
+    expect(h.sent).toHaveLength(2);
+    expect(publisher.status().commands).toBe(2);
+    // Results go out at the next post slot, without waiting for the heartbeat.
+    const before = h.posts.length;
+    h.sent[0].settle({ ok: true, code: 'OK', markerId: 'm-9' });
+    h.sent[1].settle({ ok: false, code: 'MARKER_NOT_FOUND' });
+    await h.advance(MIRROR_POST_INTERVAL_MS);
+    expect(h.posts).toHaveLength(before + 1);
+    expect(h.posts.at(-1)?.body.results).toEqual([
+      { id: 'tab-cmd-0001', code: 'OK', marker_id: 'm-9' },
+      { id: 'tab-cmd-0002', code: 'MARKER_NOT_FOUND', marker_id: null },
+    ]);
+    // Sent once: the next post carries none.
+    await h.advance(MIRROR_LIMITS.heartbeatMs);
+    expect(h.posts.at(-1)?.body.results).toBeUndefined();
+    publisher.stop();
+  });
+
+  it('reports a code the console does not take, or a failed send, as NOT_READY', async () => {
+    const h = harness();
+    const publisher = startMirrorPublisher(h.bridge, h.env);
+    await h.settle();
+    h.answers.push({ status: 200, code: null, commands: [
+      { id: 'tab-cmd-0001', op: 'add', frequency_hz: 433_920_000 },
+      { id: 'tab-cmd-0002', op: 'add', frequency_hz: 434_920_000 },
+    ] });
+    await h.advance(MIRROR_LIMITS.heartbeatMs);
+    h.sent[0].settle({ ok: false, code: 'SWEEP_BUSY', markerId: 'not an id' });
+    h.sent[1].fail();
+    await h.advance(MIRROR_POST_INTERVAL_MS);
+    expect(h.posts.at(-1)?.body.results).toEqual([
+      { id: 'tab-cmd-0001', code: 'NOT_READY', marker_id: null },
+      { id: 'tab-cmd-0002', code: 'NOT_READY', marker_id: null },
+    ]);
+    publisher.stop();
+  });
+
+  it('keeps the results of a refused post and sends them again', async () => {
+    const h = harness();
+    const publisher = startMirrorPublisher(h.bridge, h.env);
+    await h.settle();
+    h.answers.push({ status: 200, code: null, commands: [{ id: 'tab-cmd-0001', op: 'remove', marker_id: 'm-1' }] });
+    await h.advance(MIRROR_LIMITS.heartbeatMs);
+    h.answers.push({ status: 429, code: 'MIRROR_RATE_LIMITED' });
+    h.sent[0].settle({ ok: true, code: 'OK' });
+    await h.advance(MIRROR_POST_INTERVAL_MS);
+    expect(h.posts.at(-1)?.body.results).toEqual([{ id: 'tab-cmd-0001', code: 'OK', marker_id: null }]);
+    await h.advance(MIRROR_RETRY_MS);
+    expect(h.posts.at(-1)?.body.results).toEqual([{ id: 'tab-cmd-0001', code: 'OK', marker_id: null }]);
+    await h.advance(MIRROR_LIMITS.heartbeatMs);
+    expect(h.posts.at(-1)?.body.results).toBeUndefined();
+    publisher.stop();
+  });
+
+  it('sends the Receiver\'s marker list with every post, nearest the view, within the body limit', async () => {
+    const h = harness();
+    const marker = (index: number, label = `M${index}`): BridgeMarker => ({ id: `m-${index}`, frequencyHz: 433_920_000 + (index - 50) * 100_000, powerDb: -50, label });
+    const list = (markers: BridgeMarker[]): ReceiverMarkers => ({ rev: 2, setId: null, setName: null, frequencyShiftHz: 0, markers, total: markers.length, truncated: false });
+    h.setMarkers(list([marker(50), marker(10)]));
+    const publisher = startMirrorPublisher(h.bridge, h.env);
+    await h.settle();
+    expect(h.posts[0].body.markers).toEqual({
+      rev: 2, saved: false, total: 2,
+      markers: [
+        { id: 'm-10', frequency_hz: 429_920_000, power_db: -50, label: 'M10' },
+        { id: 'm-50', frequency_hz: 433_920_000, power_db: -50, label: 'M50' },
+      ],
+    });
+    // 100 markers with long labels of two-byte characters and a frame: the nearest that fit in 8 KiB.
+    h.setMarkers(list(Array.from({ length: 100 }, (_value, index) => marker(index, `é\n${'ö'.repeat(60)}`))));
+    h.sendFrame(frame(1));
+    await h.advance(MIRROR_POST_INTERVAL_MS);
+    const body = h.posts.at(-1)?.body as MirrorPublish;
+    expect(body.frame?.bin_count).toBe(512);
+    const sent = body.markers?.markers ?? [];
+    expect(new TextEncoder().encode(JSON.stringify(body)).length).toBeLessThanOrEqual(MIRROR_LIMITS.maxBodyBytes);
+    expect(sent.length).toBeGreaterThan(8);
+    expect(sent.length).toBeLessThan(MIRROR_LIMITS.maxMarkers);
+    expect(body.markers?.total).toBe(100);
+    // The kept markers are those nearest the RX centre, in frequency order, with labels the console takes.
+    const distances = sent.map((entry) => Math.abs(entry.frequency_hz - 433_920_000));
+    expect(Math.max(...distances)).toBeLessThanOrEqual((sent.length / 2 + 1) * 100_000);
+    expect(sent.map((entry) => entry.frequency_hz)).toEqual([...sent.map((entry) => entry.frequency_hz)].sort((a, b) => a - b));
+    for (const entry of sent) {
+      expect(Array.from(entry.label)).toHaveLength(MIRROR_LIMITS.maxMarkerLabelChars);
+      expect(entry.label).not.toMatch(/[\u0000-\u001f]/u);
+    }
+    publisher.stop();
+  });
+
+  it('reads the handed-out commands from the console\'s answer', async () => {
+    const fetchStub = vi.fn(async () => new Response(JSON.stringify({ ok: true, rev: 4, frame_rev: 1, commands: [
+      { id: 'tab-cmd-0001', op: 'add', frequency_hz: 433_920_000 },
+      { id: 'short', op: 'add', frequency_hz: 1 },
+      { id: 'tab-cmd-0002', op: 'tune', frequency_hz: 1 },
+      { id: 'tab-cmd-0003', op: 'remove', marker_id: 'm 1' },
+      { id: 'tab-cmd-0004', op: 'remove', marker_id: 'm-1' },
+    ] }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchStub);
+    const answer = await browserPublisherEnvironment().post('{}');
+    expect(answer).toEqual({ status: 200, code: null, commands: [
+      { id: 'tab-cmd-0001', op: 'add', frequency_hz: 433_920_000 },
+      { id: 'tab-cmd-0004', op: 'remove', marker_id: 'm-1' },
+    ] });
+    fetchStub.mockResolvedValueOnce(new Response(JSON.stringify({ ok: false, code: 'MIRROR_LAN_CLOSED', commands: [{ id: 'tab-cmd-0001', op: 'add', frequency_hz: 1 }] }), { status: 409 }));
+    expect(await browserPublisherEnvironment().post('{}')).toEqual({ status: 409, code: 'MIRROR_LAN_CLOSED', commands: [] });
   });
 
   it('stop() ends everything and drops the mirror subscription', async () => {
