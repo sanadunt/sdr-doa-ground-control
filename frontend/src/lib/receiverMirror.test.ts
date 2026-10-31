@@ -9,16 +9,21 @@ import {
   encodeBins,
   mirrorFrameFromSpectrum,
   mirrorGainsInUse,
+  mirrorMarkerLabel,
+  mirrorMarkerViewHz,
+  mirrorMarkersFromBridge,
   mirrorStateFromStatus,
   mirrorStateKey,
   mirrorView,
+  normalizeMarkerCommands,
   normalizeMirrorAnswer,
   normalizeMirrorFrame,
+  normalizeMirrorMarkers,
   normalizeMirrorState,
   spectrumFromMirrorFrame,
 } from './receiverMirror';
 import type { MirrorAnswer, MirrorFrame, MirrorPublish, MirrorState } from './receiverMirror';
-import type { ReceiverStatus, RxSpectrumFrame, SweepSpectrumFrame } from './receiverBridgeProtocol';
+import type { BridgeMarker, ReceiverMarkers, ReceiverStatus, RxSpectrumFrame, SweepSpectrumFrame } from './receiverBridgeProtocol';
 
 /** Vitest blanks no JSON, but the fixture lives outside the frontend: read it from disk. */
 function readFixture(): MirrorPublish {
@@ -231,9 +236,91 @@ function answer(overrides: Partial<MirrorAnswer> = {}, stateOverrides: Partial<M
     frameAgeMs: 150,
     frameStaleMs: 3000,
     sourceLostMs: 10000,
+    markers: null,
     ...overrides,
   };
 }
+
+describe('mirrored markers', () => {
+  const bridgeMarkers = (markers: BridgeMarker[], overrides: Partial<ReceiverMarkers> = {}): ReceiverMarkers => ({
+    rev: 4, setId: 'set-1', setName: 'Bandung', frequencyShiftHz: 0, markers, total: markers.length, truncated: false, ...overrides,
+  });
+
+  it('publishes the list in exactly the shape of the shared fixture, which the console checks too', () => {
+    const fixture = readFixture();
+    const built = mirrorMarkersFromBridge(bridgeMarkers([
+      { id: 'm-2', frequencyHz: 434_000_000, powerDb: -48.5, label: 'Repeater' },
+      { id: 'm-1', frequencyHz: 433_500_000, powerDb: null, label: 'M1' },
+    ]), 433_920_000);
+    expect(built).toEqual(fixture.markers);
+    // The set's name never leaves the groundstation; only whether the list is saved.
+    expect(JSON.stringify(built)).not.toContain('Bandung');
+    expect(mirrorMarkersFromBridge(null, 433_920_000)).toBeNull();
+    expect(mirrorMarkersFromBridge(bridgeMarkers([], { setId: null }), null)).toEqual({ rev: 4, saved: false, total: 0, markers: [] });
+  });
+
+  it('keeps at most 64 nearest the view, in frequency order, with labels and ids the console takes', () => {
+    const many = Array.from({ length: 200 }, (_value, index): BridgeMarker => ({ id: `m-${index}`, frequencyHz: 400_000_000 + index * 1_000_000, powerDb: -60, label: `M${index}` }));
+    const near = mirrorMarkersFromBridge(bridgeMarkers(many, { total: 900 }), 500_000_000);
+    expect(near?.markers).toHaveLength(MIRROR_LIMITS.maxMarkers);
+    expect(near?.total).toBe(900);
+    const hz = near?.markers.map((marker) => marker.frequency_hz) ?? [];
+    expect(hz).toEqual([...hz].sort((a, b) => a - b));
+    expect(Math.min(...hz)).toBe(468_000_000);
+    expect(Math.max(...hz)).toBe(531_000_000);
+    expect(mirrorMarkersFromBridge(bridgeMarkers(many), 500_000_000, 3)?.markers.map((marker) => marker.id)).toEqual(['m-99', 'm-100', 'm-101']);
+    const odd = mirrorMarkersFromBridge(bridgeMarkers([
+      { id: null, frequencyHz: 433_500_000.6, powerDb: -500, label: `tab\there\n${'x'.repeat(40)}` },
+    ]), null);
+    expect(odd?.markers).toEqual([{ id: null, frequency_hz: 433_500_001, power_db: null, label: `tab here ${'x'.repeat(23)}` }]);
+    expect(Array.from(mirrorMarkerLabel('😀'.repeat(40)))).toHaveLength(MIRROR_LIMITS.maxMarkerLabelChars);
+  });
+
+  it('cuts the list around the RX centre, or the middle of a running scan', () => {
+    const fixture = readFixture();
+    expect(mirrorMarkerViewHz(fixture.state)).toBe(433_920_000);
+    const scan = fixture.state.scan as NonNullable<MirrorState['scan']>;
+    expect(mirrorMarkerViewHz({ ...fixture.state, busy: 'sweep', scan: { ...scan, phase: 'active' } })).toBe(450_000_000);
+    expect(mirrorMarkerViewHz({ ...fixture.state, center_hz: null })).toBeNull();
+    expect(mirrorMarkerViewHz(null)).toBeNull();
+  });
+
+  it('reads the list back for the canvas, leaving out a marker that does not check out', () => {
+    const fixture = readFixture();
+    expect(normalizeMirrorMarkers(fixture.markers)).toEqual({
+      saved: true, total: 2,
+      markers: [
+        { id: 'm-1', frequencyHz: 433_500_000, powerDb: null, label: 'M1' },
+        { id: 'm-2', frequencyHz: 434_000_000, powerDb: -48.5, label: 'Repeater' },
+      ],
+    });
+    const mixed = normalizeMirrorMarkers({ saved: false, total: 1, markers: [
+      { id: 'm 1', frequency_hz: 1, power_db: 'x', label: 'A' },
+      { id: 'm-2', frequency_hz: 1.5, power_db: null, label: 'B' },
+      { id: 'm-3', frequency_hz: 3, power_db: null },
+    ] });
+    expect(mixed).toEqual({ saved: false, total: 1, markers: [{ id: null, frequencyHz: 1, powerDb: null, label: 'A' }] });
+    expect(normalizeMirrorMarkers({ total: 1, markers: [] })).toBeNull();
+    expect(normalizeMirrorMarkers(null)).toBeNull();
+  });
+
+  it('runs only well-formed commands from a post answer', () => {
+    expect(normalizeMarkerCommands([
+      { id: 'tab-cmd-0001', op: 'add', frequency_hz: 433_920_000 },
+      { id: 'tab-cmd-0002', op: 'remove', marker_id: 'm-1' },
+      { id: 'tab-cmd-0003', op: 'add', frequency_hz: '433920000' },
+      { id: 'tab', op: 'add', frequency_hz: 1 },
+      { id: 'tab-cmd-0004', op: 'tune', frequency_hz: 1 },
+      { id: 'tab-cmd-0005', op: 'remove', marker_id: 'm/1' },
+      'tab-cmd-0006',
+    ])).toEqual([
+      { id: 'tab-cmd-0001', op: 'add', frequency_hz: 433_920_000 },
+      { id: 'tab-cmd-0002', op: 'remove', marker_id: 'm-1' },
+    ]);
+    expect(normalizeMarkerCommands(Array.from({ length: 40 }, (_value, index) => ({ id: `tab-cmd-${String(index).padStart(4, '0')}`, op: 'add', frequency_hz: 1 })))).toHaveLength(MIRROR_LIMITS.maxPendingMarkerCommands);
+    expect(normalizeMarkerCommands(undefined)).toEqual([]);
+  });
+});
 
 describe('the GET answer', () => {
   it('reads a server answer and drops parts that do not check out', () => {
@@ -244,6 +331,7 @@ describe('the GET answer', () => {
     };
     expect(normalizeMirrorAnswer(body)).toEqual({
       rev: 3, frameRev: 2, source: fixture.source, sourceAgeMs: 120, state: fixture.state, stateAgeMs: 120, frame: fixture.frame, frameAgeMs: 400, frameStaleMs: 3000, sourceLostMs: 10000,
+      markers: null,
     });
     const badFrame = normalizeMirrorAnswer({ ...body, frame: { ...fixture.frame, bins: 'AAAA' } });
     expect(badFrame?.frame).toBeNull();

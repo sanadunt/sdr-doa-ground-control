@@ -414,7 +414,9 @@ class LanRequestRuleTests(unittest.TestCase):
         }))
         for path in (
             "/receiver", "/receiver/", "/receiver/index.html", "/api/receiver/settings", "/api/lan-access",
-            "/api/mirror/", "/api/mirror/receiver/", "/api/mirror/receiver/frame",
+            "/api/mirror/", "/api/mirror/receiver/", "/api/mirror/receiver/frame", "/api/mirror/receiver/markers",
+            "/api/mirror/receiver/markers/", "/api/mirror/receiver/markers/short", "/api/mirror/receiver/markers/a/b-c-d-e-f",
+            "/api/mirror/receiver/markers/" + "x" * 65,
             "/api/admin/login", "/api/admin/branding", "/api/mqtt/config-patch", "/api/mqtt/config-patch/abc",
             "/api/mqtt/config-get", "/api/mqtt/config-reported", "/api/mqtt/connect", "/api/dry-run/config-patch",
             "/assets/", "/assets",
@@ -422,6 +424,44 @@ class LanRequestRuleTests(unittest.TestCase):
         ) + REFUSED_RECEIVER_PATHS:
             self.assertIsNone(lan.lan_route(path), path)
             self.assertIsNone(lan.records_route(path), path)
+
+    def test_the_one_write_is_a_marker_command(self) -> None:
+        # The owner's decision of 2026-10-31: the LAN view may add and remove
+        # the groundstation Receiver's markers, and write nothing else.
+        self.assertEqual(lan.WRITE_ROUTES, frozenset({("POST", "/api/mirror/receiver/markers")}))
+        self.assertTrue(lan.write_allowed("POST", "/api/mirror/receiver/markers"))
+        for method, path in (
+            ("PUT", "/api/mirror/receiver/markers"), ("DELETE", "/api/mirror/receiver/markers"), ("post", "/api/mirror/receiver/markers"),
+            ("POST", "/api/mirror/receiver/markers/"), ("POST", "/api/mirror/receiver/markers/tab-cmd-0001"),
+            ("POST", "/api/mirror/receiver"), ("POST", "/api/receiver/marker-sets"), ("POST", "/api/mirror/receiver/commands"),
+            ("GET", "/api/mirror/receiver/markers"),
+        ):
+            self.assertFalse(lan.write_allowed(method, path), (method, path))
+        self.assertEqual(lan.lan_route("/api/mirror/receiver/markers/tab-cmd-0001"), lan.ROUTE_MIRROR_MARKER)
+        self.assertEqual(lan.lan_route("/api/mirror/receiver/markers/" + "A_-9" * 16), lan.ROUTE_MIRROR_MARKER)
+
+    def test_origin_matches_host(self) -> None:
+        for origin, host in (
+            ("http://192.168.1.10:8788", "192.168.1.10:8788"),
+            ("http://GROUNDSTATION.local:8788", "groundstation.local:8788"),
+            ("http://[fe80::1]:8788", "[fe80::1]:8788"),
+            ("http://192.168.1.10", "192.168.1.10:80"),
+        ):
+            self.assertTrue(lan.origin_matches_host([origin], [host]), (origin, host))
+        for origins, hosts in (
+            ([], ["192.168.1.10:8788"]),
+            (["http://192.168.1.10:8788"], []),
+            (["http://192.168.1.10:8788", "http://192.168.1.10:8788"], ["192.168.1.10:8788"]),
+            (["http://192.168.1.10:8788"], ["192.168.1.10:8788", "192.168.1.10:8788"]),
+            (["https://192.168.1.10:8788"], ["192.168.1.10:8788"]),
+            (["http://192.168.1.10:8789"], ["192.168.1.10:8788"]),
+            (["http://192.168.1.11:8788"], ["192.168.1.10:8788"]),
+            (["http://user@192.168.1.10:8788"], ["192.168.1.10:8788"]),
+            (["http://192.168.1.10:8788/"], ["192.168.1.10:8788"]),
+            (["null"], ["192.168.1.10:8788"]),
+            (["http://192.168.1.10:99999"], ["192.168.1.10:8788"]),
+        ):
+            self.assertFalse(lan.origin_matches_host(origins, hosts), (origins, hosts))
 
     def test_records_routes_match_exactly(self) -> None:
         for path, kind in RECORDS_PATHS.items():
@@ -743,6 +783,8 @@ class LanListenerTests(_ServerCase):
             ("POST", "/api/receiver/archive/items", {}),
             ("PUT", f"/api/receiver/audio-segments/{RECORD_ID}/audio", {}),
             ("POST", "/api/mirror/receiver", {"v": 1}),
+            ("PUT", "/api/mirror/receiver/markers", {"v": 1, "id": "tab-cmd-0001", "op": "add", "frequency_hz": 433920000}),
+            ("POST", "/api/mirror/receiver/markers/tab-cmd-0001", {"v": 1}),
             ("DELETE", "/api/receiver/scans/abc", None),
             ("DELETE", f"/api/receiver/records/{RECORD_ID}", None),
             ("POST", "/api/dry-run/config-patch", {"changes": {}}),

@@ -15,8 +15,11 @@ tablet or another computer on the LAN can watch the console. That listener:
 * runs at most ``MAX_CONNECTIONS`` requests at once (a bare 503 beyond), and
   each must send its request line and headers within ``REQUEST_DEADLINE_S``;
 * answers GET and HEAD of the built UI and of a fixed list of read-only API
-  routes; every other method and path is refused with ``LAN_READ_ONLY``, and
-  an admin cookie is never honoured;
+  routes, and one write: POST ``/api/mirror/receiver/markers``, which adds or
+  removes one of the groundstation Receiver's spectrum markers (the owner's
+  decision of 2026-10-31; its Origin must be the listener's own,
+  ``origin_matches_host``). Every other method and path is refused with
+  ``LAN_READ_ONLY``, and an admin cookie is never honoured;
 * answers the Receiver's Records read-only: the archive list routes, a scan
   preview, the downloads of one record and the audio playback, each matched
   exactly with a record UUID (``records_route``). A client gets one list read
@@ -155,7 +158,16 @@ API_ROUTES = frozenset({
 ROUTE_UI = "ui"
 ROUTE_TILE = "tile"
 ROUTE_RECORDS = "records"
+ROUTE_MIRROR_MARKER = "mirror-marker"
 READ_METHODS = ("GET", "HEAD")
+
+# The LAN view's one write: a marker command to the groundstation Receiver's
+# marker list (receiver_mirror.MARKERS_ROUTE, POST only, exact path), and the
+# status of one command (GET MIRROR_MARKERS_ROUTE/<command id>). Nothing else
+# becomes writable: no tune, gains, scan, listen or settings.
+MIRROR_MARKERS_ROUTE = "/api/mirror/receiver/markers"
+MIRROR_MARKER_COMMAND_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+WRITE_ROUTES = frozenset({("POST", MIRROR_MARKERS_ROUTE)})
 
 # The Receiver's Records, read only. Every other /api/receiver/ path stays
 # refused: settings, marker sets, the raw scan routes, exports, delete,
@@ -398,8 +410,14 @@ def records_route(path: str) -> Optional[str]:
     return None
 
 
+def mirror_marker_route(path: str) -> bool:
+    """GET MIRROR_MARKERS_ROUTE/<command id>: one marker command's status."""
+    prefix = MIRROR_MARKERS_ROUTE + "/"
+    return path.startswith(prefix) and MIRROR_MARKER_COMMAND_ID_RE.fullmatch(path[len(prefix):]) is not None
+
+
 def lan_route(path: str) -> Optional[str]:
-    """ROUTE_UI, ROUTE_TILE, ROUTE_RECORDS or the API path for a route the LAN view answers; None otherwise."""
+    """ROUTE_UI, ROUTE_TILE, ROUTE_RECORDS, ROUTE_MIRROR_MARKER or the API path for a GET the LAN view answers; None otherwise."""
     if path in UI_ROOT_PATHS or (path.startswith(UI_ASSET_PREFIX) and len(path) > len(UI_ASSET_PREFIX)):
         return ROUTE_UI
     if path.startswith(TILE_PREFIX):
@@ -408,7 +426,38 @@ def lan_route(path: str) -> Optional[str]:
         return path
     if records_route(path) is not None:
         return ROUTE_RECORDS
+    if mirror_marker_route(path):
+        return ROUTE_MIRROR_MARKER
     return None
+
+
+def write_allowed(method: str, path: str) -> bool:
+    """The LAN view's one write (WRITE_ROUTES): POST of a marker command, exactly that path."""
+    return (method, path) in WRITE_ROUTES
+
+
+def origin_matches_host(origins: Sequence[str], hosts: Sequence[str]) -> bool:
+    """Exactly one Origin, and it is ``http://`` and the request's one Host: the LAN view's own page.
+
+    host_allowed() has checked the Host already. A page of another site,
+    another host or another port of this host sends its own origin.
+    """
+    if len(origins) != 1 or len(hosts) != 1:
+        return False
+    try:
+        origin = urlsplit(origins[0].strip())
+        target = urlsplit(f"http://{hosts[0].strip()}")
+        origin_port = origin.port or 80
+        target_port = target.port or 80
+    except ValueError:
+        return False
+    if origin.scheme != "http" or origin.username is not None or origin.password is not None:
+        return False
+    if origin.path or origin.query or origin.fragment or target.path or target.query or target.fragment:
+        return False
+    origin_host = (origin.hostname or "").lower().rstrip(".")
+    target_host = (target.hostname or "").lower().rstrip(".")
+    return bool(origin_host) and origin_host == target_host and origin_port == target_port
 
 
 def records_fetch_site_allowed(value: Optional[str]) -> bool:

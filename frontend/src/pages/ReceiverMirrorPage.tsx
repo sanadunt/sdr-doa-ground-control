@@ -9,7 +9,8 @@ import { formatMsps } from '../lib/radioSettings';
 import { formatMhz, formatMhzTrim } from '../lib/spectrumView';
 import { Card, KeyValueGrid, Page, PageGrid, PageHeader, PageNotice, Segmented, StatusChip, Tag } from '../components/page';
 import type { KeyValueItem } from '../components/page';
-import { MirrorSpectrum, mirrorAge, mirrorChipText, mirrorMessage, useMirrorView } from '../components/overview/SpectrumDockMirror';
+import { MirrorMarkToggle, MirrorSpectrum, mirrorAge, mirrorChipText, mirrorMessage, useMirrorMarking, useMirrorView } from '../components/overview/SpectrumDockMirror';
+import type { MirrorMarkController } from '../lib/receiverMirrorMarks';
 import { RecordsTab } from '../components/records/RecordsTab';
 import type { RecordsClient } from '../lib/recordsArchiveApi';
 
@@ -67,9 +68,11 @@ export type ReceiverLanTab = 'mirror' | 'records';
 let lastTab: ReceiverLanTab = 'mirror';
 
 /** The mirrored Receiver; its own component, so the mirror is read only while this tab shows. */
-function MirrorTab({ feed, tabs }: { feed: ReceiverMirrorFeed; tabs: ReactNode }): JSX.Element {
+function MirrorTab({ feed, tabs, markController }: { feed: ReceiverMirrorFeed; tabs: ReactNode; markController?: MirrorMarkController }): JSX.Element {
   const { t } = useI18n();
   const view = useMirrorView(feed);
+  // The one thing the tablet changes: the groundstation Receiver's markers.
+  const marking = useMirrorMarking(view, markController ?? null);
   // A notice only for what needs attention: no source, a lost source, stale frames, a stopped radio's error.
   const message = view.phase === 'lost' || view.phase === 'none' || view.phase === 'stale' || view.phase === 'stopped' ? mirrorMessage(t, view) : null;
   const noticeTone = view.tone === 'bad' ? 'bad' : view.tone === 'warn' ? 'warn' : 'info';
@@ -82,10 +85,10 @@ function MirrorTab({ feed, tabs }: { feed: ReceiverMirrorFeed; tabs: ReactNode }
       />
       {message ? <PageNotice tone={noticeTone} title={mirrorChipText(t, view)}>{message}</PageNotice> : null}
       <PageGrid>
-        <Card title={t('spectrum.title')} span={12} bodyClassName="rx-mirror-spectrum-body">
+        <Card title={t('spectrum.title')} span={12} bodyClassName="rx-mirror-spectrum-body" actions={<MirrorMarkToggle marking={marking} />}>
           <div className="ov-spectrum is-view-only is-mirror rx-mirror-spectrum">
             <div className="ov-spec-main">
-              <MirrorSpectrum feed={feed} view={view} />
+              <MirrorSpectrum feed={feed} view={view} marking={marking} />
             </div>
           </div>
         </Card>
@@ -99,16 +102,19 @@ function MirrorTab({ feed, tabs }: { feed: ReceiverMirrorFeed; tabs: ReactNode }
 
 /**
  * The Receiver route in the LAN view. Mirror: the groundstation's Receiver as
- * the console mirrors it, its state and its spectrum, view only and without
- * audio. Records: the groundstation's recordings and scans, read only (play,
- * preview, download one record). The frame is never mounted here: the radio
- * is on the groundstation's USB.
+ * the console mirrors it, its state and its spectrum, without audio; the only
+ * change it makes is adding and removing the Receiver's markers (Markers /
+ * Penanda). Records: the groundstation's recordings and scans, read only
+ * (play, preview, download one record). The frame is never mounted here: the
+ * radio is on the groundstation's USB.
  */
-export function ReceiverMirrorPage({ feed, initialTab, recordsClient }: {
+export function ReceiverMirrorPage({ feed, initialTab, recordsClient, markController }: {
   feed: ReceiverMirrorFeed;
   /** Tests pick the tab; otherwise the last one chosen on this page. */
   initialTab?: ReceiverLanTab;
   recordsClient?: RecordsClient;
+  /** Tests pass a marking controller; otherwise the mirror tab makes its own. */
+  markController?: MirrorMarkController;
 }): JSX.Element {
   const { t } = useI18n();
   const [tab, setTab] = useState<ReceiverLanTab>(initialTab ?? lastTab);
@@ -121,7 +127,7 @@ export function ReceiverMirrorPage({ feed, initialTab, recordsClient }: {
       options={[{ value: 'mirror', label: t('records.tabMirror') }, { value: 'records', label: t('records.tabRecords') }]}
     />
   );
-  if (tab === 'mirror') return <MirrorTab feed={feed} tabs={tabs} />;
+  if (tab === 'mirror') return <MirrorTab feed={feed} tabs={tabs} markController={markController} />;
   return (
     <Page className="rx-mirror-page rx-records-page">
       <PageHeader title={t('route.receiver')} actions={tabs} />

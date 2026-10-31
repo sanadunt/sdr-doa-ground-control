@@ -55,5 +55,31 @@
     "db_min": -120,
     "db_max": -20.5,
     "bins": "ABAgMEBQYHCAkKCwwNDg8A=="
-  }
+  },
+  "markers": {
+    "rev": 4,
+    "saved": true,
+    "total": 2,
+    "markers": [
+      {
+        "id": "m-1",
+        "frequency_hz": 433500000,
+        "power_db": null,
+        "label": "M1"
+      },
+      {
+        "id": "m-2",
+        "frequency_hz": 434000000,
+        "power_db": -48.5,
+        "label": "Repeater"
+      }
+    ]
+  },
+  "results": [
+    {
+      "id": "tab-cmd-0001",
+      "code": "OK",
+      "marker_id": "m-2"
+    }
+  ]
 }

@@ -11,14 +11,21 @@
  * turns a frame into the bridge's SpectrumFrame for the dock's canvas.
  * mirrorView() applies the stale rules: a frame older than 3 s is stale, no
  * post for 10 s means the source is lost.
+ *
+ * Spectrum markers (the owner's decision of 2026-10-31): the publisher sends
+ * the Receiver's marker list (at most maxMarkers nearest the view,
+ * mirrorMarkersFromBridge) and runs the viewers' marker commands, which the
+ * console hands it in the answer to a post (MIRROR_MARKERS_ROUTE); it
+ * reports each bridge result in a later post.
  */
 import type { DockMode } from './spectrumDockSettings';
 import type { MessageKey } from './i18n';
-import { LISTEN_MODES, SPECTRUM_FLOOR_DB } from './receiverBridgeProtocol';
-import type { BusyState, ListenMode, ReceiverStatus, SpectrumFrame, StatusErrorCode, SweepPhase } from './receiverBridgeProtocol';
+import { COMMAND_ID_PATTERN, LISTEN_MODES, SPECTRUM_FLOOR_DB } from './receiverBridgeProtocol';
+import type { BridgeMarker, BusyState, ListenMode, ReceiverMarkers, ReceiverStatus, SpectrumFrame, StatusErrorCode, SweepPhase } from './receiverBridgeProtocol';
 import type { DockTone } from './spectrumView';
 
 export const MIRROR_ROUTE = '/api/mirror/receiver';
+export const MIRROR_MARKERS_ROUTE = '/api/mirror/receiver/markers';
 export const MIRROR_VERSION = 1;
 
 /** The contract's numbers (tools/receiver_mirror.py). */
@@ -29,15 +36,35 @@ export const MIRROR_LIMITS = {
   maxPostsPerS: 12,
   frameStaleMs: 3_000,
   sourceLostMs: 10_000,
-  heartbeatMs: 2_000,
+  heartbeatMs: 500,
   dbFloor: -200,
   dbCeiling: 100,
   minDbSpan: 1,
   maxAbsFrequencyHz: 100_000_000_000,
   maxSampleRateHz: 100_000_000,
+  maxMarkers: 64,
+  maxMarkerLabelChars: 32,
+  maxMarkerBodyBytes: 512,
+  markerCommandsPerS: 4,
+  maxPendingMarkerCommands: 16,
+  markerCommandTtlMs: 15_000,
 } as const;
 
-/** The publisher sends at most one post every this many ms (5 a second), one at a time. */
+/** The bridge's result codes of a marker command, as the publisher reports them (any other one as NOT_READY). */
+export const MIRROR_MARKER_RESULT_CODES = [
+  'OK', 'OUT_OF_RANGE', 'MARKER_LIMIT', 'MARKER_NOT_FOUND', 'MARKER_SAVE_FAILED', 'NOT_READY', 'INVALID_COMMAND', 'TIMEOUT',
+] as const;
+export type MirrorMarkerResultCode = typeof MIRROR_MARKER_RESULT_CODES[number];
+/** The console's refusals of the mirror routes ({ok: false, code, error}). */
+export const MIRROR_MARKER_ERROR_CODES = [
+  'ORIGIN_REJECTED', 'MIRROR_INVALID', 'MIRROR_TOO_LARGE', 'MIRROR_RATE_LIMITED', 'MIRROR_LAN_CLOSED',
+  'MIRROR_NO_SOURCE', 'MIRROR_DUPLICATE_ID', 'MIRROR_MARKER_BUSY', 'MIRROR_UNKNOWN_COMMAND',
+] as const;
+export type MirrorMarkerErrorCode = typeof MIRROR_MARKER_ERROR_CODES[number];
+/** Ids a viewer gives its marker commands: random, like a source id. */
+export const MARKER_COMMAND_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/u;
+
+/** The publisher sends at most one post every this many ms (5 a second), one at a time; at least one every heartbeatMs. */
 export const MIRROR_POST_INTERVAL_MS = 200;
 /** The frames the publisher asks the Receiver frame for. */
 export const MIRROR_SUBSCRIBE_FPS = 5;
@@ -126,11 +153,51 @@ export interface MirrorFrame {
   bins: string;
 }
 
+/** One of the Receiver's markers on the wire: displayed Hz; id null when the console cannot address it. */
+export interface MirrorMarker {
+  id: string | null;
+  frequency_hz: number;
+  power_db: number | null;
+  label: string;
+}
+
+/** The Receiver's marker list as the page publishes it. */
+export interface MirrorMarkers {
+  /** The bridge's rev of the list. */
+  rev: number;
+  /** The list is saved to a marker set selected on the Receiver page. */
+  saved: boolean;
+  /** Markers in the Receiver's list; more than `markers` when it was cut to the view. */
+  total: number;
+  markers: MirrorMarker[];
+}
+
+/** A viewer's marker command as the console hands it to the page. */
+export type MirrorMarkerCommand =
+  | { id: string; op: 'add'; frequency_hz: number }
+  | { id: string; op: 'remove'; marker_id: string };
+
+/** The bridge's result of a marker command the page ran; marker_id is a new marker's id. */
+export interface MirrorMarkerResult {
+  id: string;
+  code: MirrorMarkerResultCode;
+  marker_id: string | null;
+}
+
 export interface MirrorPublish {
   v: typeof MIRROR_VERSION;
   source: MirrorSource;
   state: MirrorState;
   frame?: MirrorFrame;
+  markers?: MirrorMarkers | null;
+  results?: MirrorMarkerResult[];
+}
+
+/** The mirrored marker list as the LAN view draws it (the bridge's marker shape). */
+export interface MirrorMarkersView {
+  saved: boolean;
+  total: number;
+  markers: BridgeMarker[];
 }
 
 /** GET /api/mirror/receiver; ages are the server's, at the time it answered. */
@@ -145,6 +212,8 @@ export interface MirrorAnswer {
   frameAgeMs: number | null;
   frameStaleMs: number;
   sourceLostMs: number;
+  /** The Receiver's markers; null before the page sent them. */
+  markers: MirrorMarkersView | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +380,69 @@ export function mirrorStateFromStatus(status: ReceiverStatus, rev: number, nowMs
   };
 }
 
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/gu;
+
+/** A label as the console takes it: no control characters, at most maxMarkerLabelChars code points. */
+export function mirrorMarkerLabel(label: string): string {
+  return Array.from(label.replace(CONTROL_CHARACTERS, ' ')).slice(0, MIRROR_LIMITS.maxMarkerLabelChars).join('');
+}
+
+/** Markers by distance from `viewHz` (the RX centre or the middle of a scan), nearest first; frequency order without a view. */
+function byDistance(markers: readonly BridgeMarker[], viewHz: number | null): BridgeMarker[] {
+  return viewHz === null
+    ? [...markers]
+    : [...markers].sort((a, b) => Math.abs(a.frequencyHz - viewHz) - Math.abs(b.frequencyHz - viewHz) || a.frequencyHz - b.frequencyHz);
+}
+
+/**
+ * The bridge's marker list as the page publishes it: at most `limit`
+ * (maxMarkers) nearest `viewHz`, in frequency order, labels the console takes;
+ * null while the frame has not sent its list.
+ */
+export function mirrorMarkersFromBridge(markers: ReceiverMarkers | null, viewHz: number | null, limit: number = MIRROR_LIMITS.maxMarkers): MirrorMarkers | null {
+  if (!markers) return null;
+  const usable = markers.markers.filter((marker) => wholeHz(marker.frequencyHz) !== null);
+  const kept = byDistance(usable, viewHz).slice(0, Math.max(0, Math.min(limit, MIRROR_LIMITS.maxMarkers)));
+  kept.sort((a, b) => a.frequencyHz - b.frequencyHz);
+  return {
+    rev: Number.isInteger(markers.rev) && markers.rev >= 0 ? markers.rev : 0,
+    saved: markers.setId !== null,
+    total: Math.max(kept.length, Number.isInteger(markers.total) && markers.total >= 0 ? markers.total : 0),
+    markers: kept.map((marker) => ({
+      id: marker.id !== null && COMMAND_ID_PATTERN.test(marker.id) ? marker.id : null,
+      frequency_hz: wholeHz(marker.frequencyHz) as number,
+      power_db: typeof marker.powerDb === 'number' && Number.isFinite(marker.powerDb) && marker.powerDb >= MIRROR_LIMITS.dbFloor && marker.powerDb <= MIRROR_LIMITS.dbCeiling ? marker.powerDb : null,
+      label: mirrorMarkerLabel(marker.label),
+    })),
+  };
+}
+
+/** The frequency a published marker list is cut around: the RX centre, or the middle of a running scan. */
+export function mirrorMarkerViewHz(state: MirrorState | null): number | null {
+  if (!state) return null;
+  const scan = state.scan;
+  if ((state.busy === 'sweep' || (scan !== null && scan.phase !== 'idle')) && scan?.start_hz != null && scan.stop_hz != null) {
+    return Math.round((scan.start_hz + scan.stop_hz) / 2);
+  }
+  return state.center_hz;
+}
+
+/** The marker commands of a post answer that check out. */
+export function normalizeMarkerCommands(value: unknown): MirrorMarkerCommand[] {
+  if (!Array.isArray(value)) return [];
+  const commands: MirrorMarkerCommand[] = [];
+  for (const entry of value.slice(0, MIRROR_LIMITS.maxPendingMarkerCommands)) {
+    if (!isRecord(entry) || typeof entry.id !== 'string' || !MARKER_COMMAND_ID_PATTERN.test(entry.id)) continue;
+    if (entry.op === 'add') {
+      const hz = hzOrNull(entry.frequency_hz);
+      if (hz !== null) commands.push({ id: entry.id, op: 'add', frequency_hz: hz });
+    } else if (entry.op === 'remove' && typeof entry.marker_id === 'string' && COMMAND_ID_PATTERN.test(entry.marker_id)) {
+      commands.push({ id: entry.id, op: 'remove', marker_id: entry.marker_id });
+    }
+  }
+  return commands;
+}
+
 /** What a state change is: everything but rev and t_ms. */
 export function mirrorStateKey(state: MirrorState): string {
   const { rev: _rev, t_ms: _time, ...rest } = state;
@@ -432,6 +564,25 @@ function age(value: unknown): number | null {
   return int(value, 0, MAX_SAFE);
 }
 
+/** The mirrored marker list for the canvas; a marker that does not check out is left out. */
+export function normalizeMirrorMarkers(value: unknown): MirrorMarkersView | null {
+  if (!isRecord(value) || typeof value.saved !== 'boolean' || !Array.isArray(value.markers)) return null;
+  const markers: BridgeMarker[] = [];
+  for (const entry of value.markers.slice(0, MIRROR_LIMITS.maxMarkers)) {
+    if (!isRecord(entry) || typeof entry.label !== 'string') continue;
+    const frequencyHz = hzOrNull(entry.frequency_hz);
+    if (frequencyHz === null) continue;
+    markers.push({
+      id: typeof entry.id === 'string' && COMMAND_ID_PATTERN.test(entry.id) ? entry.id : null,
+      frequencyHz,
+      powerDb: finite(entry.power_db, MIRROR_LIMITS.dbFloor, MIRROR_LIMITS.dbCeiling),
+      label: entry.label.slice(0, MIRROR_LIMITS.maxMarkerLabelChars),
+    });
+  }
+  markers.sort((a, b) => a.frequencyHz - b.frequencyHz);
+  return { saved: value.saved, total: Math.max(markers.length, int(value.total, 0, MAX_SAFE) ?? 0), markers };
+}
+
 /** The GET answer, or null when it is not one; a part that does not check out is null. */
 export function normalizeMirrorAnswer(value: unknown): MirrorAnswer | null {
   if (!isRecord(value) || value.ok !== true || value.v !== MIRROR_VERSION) return null;
@@ -442,6 +593,7 @@ export function normalizeMirrorAnswer(value: unknown): MirrorAnswer | null {
   const source = normalizeSource(value.source);
   const state = source ? normalizeMirrorState(value.state) : null;
   const frame = source ? normalizeMirrorFrame(value.frame) : null;
+  const markers = source ? normalizeMirrorMarkers(value.markers) : null;
   return {
     rev,
     frameRev,
@@ -453,6 +605,7 @@ export function normalizeMirrorAnswer(value: unknown): MirrorAnswer | null {
     frameAgeMs: frame ? age(value.frame_age_ms) : null,
     frameStaleMs: int(limits.frame_stale_ms, 100, 600_000) ?? MIRROR_LIMITS.frameStaleMs,
     sourceLostMs: int(limits.source_lost_ms, 100, 600_000) ?? MIRROR_LIMITS.sourceLostMs,
+    markers,
   };
 }
 
@@ -535,6 +688,8 @@ export interface MirrorView {
   frameAgeMs: number | null;
   state: MirrorState | null;
   source: MirrorSource | null;
+  /** The Receiver's markers as the page last sent them. */
+  markers: MirrorMarkersView | null;
 }
 
 export interface MirrorViewInput {
@@ -571,7 +726,8 @@ export function mirrorView({ answer, receivedAtMs, error, nowMs }: MirrorViewInp
   const mode: DockMode = scanning || stoppedAfterScan ? 'sweep' : 'rx';
   const scanPhase: SweepPhase = scanning ? state.scan?.phase && state.scan.phase !== 'idle' ? state.scan.phase : 'active' : 'idle';
   const stoppable = mode === 'sweep' ? scanPhase === 'active' || scanPhase === 'starting' : state?.running === true && state.busy !== 'scan-listen';
-  const base = { mode, stoppable, live: false, sourceAgeMs, frameAgeMs, state, source, messageAgeMs: null, chipKey: null };
+  const markers = answer?.markers ?? null;
+  const base = { mode, stoppable, live: false, sourceAgeMs, frameAgeMs, state, source, markers, messageAgeMs: null, chipKey: null };
   if (!answer) {
     return error
       ? { ...base, phase: 'lost', chip: '', chipKey: 'mirror.chipLost', tone: 'bad', message: 'mirror.readFailed' }
