@@ -20,6 +20,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -100,6 +102,7 @@ class Harness:
         self.proc = self.base / "proc"
         self.request_dir = self.base / "run/sdr-doa-host-power"
         self.state_dir = self.base / "state"
+        self.taken_dir = self.base / "run/sdr-doa-host-power.taken"
         self.scenario_path = self.base / "scenario.json"
         self.calls_path = self.base / "calls.jsonl"
         self.log_path = self.base / "log.jsonl"
@@ -154,18 +157,20 @@ class Harness:
             "FAKE_LOG": str(self.log_path),
             "HOST_POWER_DIR": str(self.request_dir),
             "HOST_POWER_STATE_DIR": str(self.state_dir),
+            "HOST_POWER_TAKEN_DIR": str(self.taken_dir),
             "HOST_POWER_PROC": str(self.proc),
             "HOST_POWER_ROOT_UID": str(os.geteuid()),
         }
         environment.update(extra)
         return environment
 
-    def run(self, script: Path, *args: str, now: Optional[int] = None, **extra: str) -> subprocess.CompletedProcess:
+    def run(self, script: Path, *args: str, now: Optional[int] = None, timeout: int = 60,
+            **extra: str) -> subprocess.CompletedProcess:
         environment = self.env(**extra)
         if now is not None:
             environment["HOST_POWER_NOW"] = str(now)
         return subprocess.run([SH, str(script), *args], capture_output=True, text=True, env=environment,
-                              cwd=str(self.base), timeout=60)
+                              cwd=str(self.base), timeout=timeout)
 
     def handle(self, now: int = 1_700_000_000, *args: str, **extra: str) -> subprocess.CompletedProcess:
         return self.run(HELPER, *args, "handle", now=now, **extra)
@@ -255,15 +260,111 @@ class HelperTests(HarnessCase):
         self.assertEqual(target.read_text(encoding="utf-8"), "reboot")
         self.assert_logged("refused a request: it is not a regular file")
 
-    def test_a_request_that_cannot_be_deleted_is_never_acted_on(self):
-        # A directory: rm -f cannot remove it, as root either.
+    def test_a_fifo_or_a_symlink_to_one_is_refused_without_blocking(self):
+        """A FIFO with no writer would block a read until the unit's timeout."""
+        fifo = self.h.base / "fifo"
+        os.mkfifo(fifo)
+        for make in (lambda path: os.mkfifo(path), lambda path: path.symlink_to(fifo)):
+            self.h.clear()
+            request = self.h.request_dir / "request"
+            make(request)
+            started = time.monotonic()
+            result = self.h.run(HELPER, "handle", now=1_700_000_000, timeout=10)
+            self.assertLess(time.monotonic() - started, 8)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.h.power_calls(), [])
+            self.assertFalse(os.path.lexists(request))
+            self.assertFalse(os.path.lexists(self.h.taken_dir / "request"))
+            self.assert_logged("refused a request: it is not a regular file")
+        self.assertTrue(stat.S_ISFIFO(fifo.lstat().st_mode), "the target is left alone")
+
+    def test_a_request_swapped_while_it_is_taken_never_blocks(self):
+        """The console's user can rename anything over the request at any time.
+
+        A swapper replaces it with a regular file or a FIFO as fast as it can
+        while the helper runs; every run ends at once, acting at most on a
+        regular file that holds the word."""
+        stop = threading.Event()
+        # Hard links of one FIFO and one file: the swapper renames a new name
+        # over the request in a tight loop, as a hostile console could.
+        fifo = self.h.request_dir / ".fifo"
+        word = self.h.request_dir / ".word"
+        os.mkfifo(fifo)
+        word.write_bytes(b"reboot")
+
+        def swap() -> None:
+            n = 0
+            while not stop.is_set():
+                n += 1
+                item = self.h.request_dir / f".item-{n}"
+                try:
+                    os.link(fifo if n % 2 else word, item)
+                    os.replace(item, self.h.request_dir / "request")
+                except OSError:
+                    pass
+
+        swapper = threading.Thread(target=swap, daemon=True)
+        swapper.start()
+        self.addCleanup(stop.set)
+        try:
+            for run in range(30):
+                started = time.monotonic()
+                result = self.h.run(HELPER, "--dry-run", "handle", now=1_700_000_000 + run * 100, timeout=10)
+                self.assertLess(time.monotonic() - started, 8, f"run {run} waited")
+                self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            stop.set()
+            swapper.join(timeout=5)
+        self.assertEqual(self.h.power_calls(), [], "dry run")
+        for message in self.h.messages():
+            self.assertTrue(message.startswith(("dry-run: would run: systemctl reboot", "refused a request: it is not a regular file",
+                                                "refused reboot: reboot ran")), message)
+
+    def test_the_console_s_directory_is_only_checked_and_renamed(self):
+        handle = HELPER.read_text(encoding="utf-8").split("cmd_handle() {", 1)[1].split("\n}\n", 1)[0]
+        uses = [line.strip() for line in handle.splitlines() if '"$request"' in line]
+        self.assertEqual(uses, [
+            'if [ ! -e "$request" ] && [ ! -L "$request" ]; then',
+            'if ! mv -f -- "$request" "$taken" 2>/dev/null; then',
+        ])
+        for line in handle.splitlines():
+            if "dd if=" in line or "wc -c" in line:
+                self.assertIn('"$taken"', line)
+
+    def test_a_directory_request_is_taken_refused_and_removed(self):
         (self.h.request_dir / "request").mkdir()
         (self.h.request_dir / "request" / "x").write_text("reboot", encoding="utf-8")
         result = self.h.handle()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.h.power_calls(), [])
+        self.assertFalse(os.path.lexists(self.h.request_dir / "request"))
+        self.assertEqual(list(self.h.taken_dir.iterdir()), [])
+        self.assert_logged("refused a request: it is not a regular file")
+
+    def test_a_request_that_cannot_be_taken_is_never_acted_on(self):
+        blocker = self.h.base / "not-a-directory"
+        blocker.write_text("", encoding="utf-8")
+        self.h.request(b"reboot")
+        result = self.h.handle(HOST_POWER_TAKEN_DIR=str(blocker / "taken"))
         self.assertEqual(result.returncode, 1)
         self.assertEqual(self.h.power_calls(), [])
-        self.assert_logged("cannot delete")
+        self.assertEqual((self.h.request_dir / "request").read_bytes(), b"reboot", "left for the next run")
+        self.assert_logged("cannot prepare")
         self.assertEqual([entry["priority"] for entry in self.h.logs()], ["daemon.err"])
+        # A symlink in place of root's directory is not followed either.
+        (self.h.base / "elsewhere").mkdir()
+        self.h.taken_dir.symlink_to(self.h.base / "elsewhere")
+        self.assertEqual(self.h.handle().returncode, 1)
+        self.assertEqual(list((self.h.base / "elsewhere").iterdir()), [])
+
+    def test_a_leftover_in_root_s_directory_is_cleared_first(self):
+        self.h.taken_dir.mkdir(parents=True)
+        (self.h.taken_dir / "request").write_bytes(b"poweroff")
+        self.h.request(b"reboot")
+        self.assertEqual(self.h.handle().returncode, 0)
+        self.assertEqual(self.h.power_calls(), [["systemctl", "reboot"]])
+        self.assertEqual(stat.S_IMODE(self.h.taken_dir.stat().st_mode), 0o700)
+        self.assertEqual(list(self.h.taken_dir.iterdir()), [])
 
     def test_a_repeat_within_the_window_of_the_same_boot_is_refused(self):
         self.h.request(b"reboot")
@@ -410,6 +511,8 @@ class InstallerTests(HarnessCase):
         self.assertIn("ExecStart=/usr/local/sbin/sdr-doa-host-power handle\n", service)
         self.assertIn("Type=oneshot\n", service)
         self.assertIn("SyslogIdentifier=sdr-doa-host-power\n", service)
+        self.assertIn("PrivateDevices=yes\n", service)
+        self.assertIn("TimeoutStartSec=30s\n", service)
         self.assertNotIn("[Install]", service, "started by the path unit only")
         path_unit = self.read("etc/systemd/system/sdr-doa-host-power.path")
         self.assertIn("PathExists=/run/sdr-doa-host-power/request\n", path_unit)
@@ -422,7 +525,8 @@ class InstallerTests(HarnessCase):
             self.assertNotRegex(text, r"@[A-Z_]+@")
             self.assertIn("packaging/host-power", text)
         info = self.read("usr/local/share/sdr-doa-host-power/install-info")
-        for line in ("CONSOLE_UID=10001\n", "CONSOLE_GID=10001\n", "HELPER_DRY_RUN=0\n", "REQUEST_DIR=/run/sdr-doa-host-power\n"):
+        for line in ("CONSOLE_UID=10001\n", "CONSOLE_GID=10001\n", "HELPER_DRY_RUN=0\n", "REQUEST_DIR=/run/sdr-doa-host-power\n",
+                     "TAKEN_DIR=/run/sdr-doa-host-power.taken\n"):
             self.assertIn(line, info)
         self.assertIn("skipped (--root): systemd-tmpfiles --create /etc/tmpfiles.d/sdr-doa-host-power.conf", result.stdout)
         self.assertIn("skipped (--root): systemctl daemon-reload", result.stdout)
@@ -442,6 +546,33 @@ class InstallerTests(HarnessCase):
         helper = HELPER.read_text(encoding="utf-8")
         self.assertEqual(set(re.findall(r"\$\(systemctl ([^\s)]+)", helper)), {'"$word"', "is-active"})
         self.assertEqual([line for line in helper.splitlines() if re.match(r"\s*(?:if !?\s*)?systemctl\b", line)], [])
+
+    def test_a_docker_install_without_the_mount_is_named(self):
+        compose = self.root / "opt/sdr-doa-ground-console/compose.yml"
+        compose.parent.mkdir(parents=True)
+        mounted = (ROOT / "docker-compose.ghcr.yml").read_text(encoding="utf-8")
+        old = mounted.replace("      - /run/sdr-doa-host-power:/run/sdr-doa-host-power\n", "")
+        self.assertNotEqual(old, mounted)
+        compose.write_text(old, encoding="utf-8")
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        warning = next(line for line in result.stderr.splitlines() if "does not mount" in line)
+        self.assertIn("/opt/sdr-doa-ground-console/compose.yml does not mount /run/sdr-doa-host-power", warning)
+        self.assertIn('"Request directory not mounted"', warning)
+        self.assertIn(f"sudo sh {ROOT / 'packaging/docker/sdr-doa-docker'} install --dir /opt/sdr-doa-ground-console", warning)
+        self.assertIn("keeps .env, the channel, the sdr-doa-data volume", warning)
+        self.assertEqual(compose.read_text(encoding="utf-8"), old, "only named, never edited")
+        # The dry run names it too; another --docker-dir; a compose with the mount; no install at all.
+        self.assertIn("does not mount", self.install("--dry-run").stderr)
+        other = self.root / "srv/console/compose.yml"
+        other.parent.mkdir(parents=True)
+        other.write_text(old, encoding="utf-8")
+        self.assertIn("/srv/console/compose.yml does not mount", self.install("--docker-dir", "/srv/console").stderr)
+        compose.write_text(mounted, encoding="utf-8")
+        self.assertNotIn("does not mount", self.install().stderr)
+        compose.unlink()
+        self.assertNotIn("does not mount", self.install().stderr)
+        self.assertIn("may hold only", self.install("--docker-dir", "/opt/a b").stderr)
 
     def test_native_console_user(self):
         result = self.install("--console-user", "rdf")
@@ -539,6 +670,7 @@ class InstallerTests(HarnessCase):
         request_dir.mkdir(parents=True)
         (request_dir / "helper").write_text("sdr-doa-host-power", encoding="utf-8")
         (request_dir / "request").write_text("reboot", encoding="utf-8")
+        (self.root / "run/sdr-doa-host-power.taken").mkdir(mode=0o700)
         state = self.root / "var/lib/sdr-doa-host-power"
         state.mkdir(parents=True)
         (state / "last").write_text("ACTION=reboot\n", encoding="utf-8")
@@ -550,6 +682,7 @@ class InstallerTests(HarnessCase):
         self.assertIn("kept /usr/local/sbin/sdr-doa-host-power: not written by the sdr-doa-host-power installer", result.stdout)
         self.assertEqual(self.files(), {"var/lib/sdr-doa-host-power/last", "usr/local/sbin/sdr-doa-host-power"})
         self.assertTrue(request_dir.is_dir(), "a container's bind mount may hold it")
+        self.assertFalse((self.root / "run/sdr-doa-host-power.taken").exists())
         foreign.unlink()
         self.assertEqual(self.install().returncode, 0)
         result = self.h.run(script, "--root", str(self.root), "--purge")
@@ -564,7 +697,7 @@ class InstallerTests(HarnessCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("would run: systemctl disable --now sdr-doa-host-power.path", result.stdout)
         self.assertIn("would remove /etc/tmpfiles.d/sdr-doa-host-power.conf", result.stdout)
-        self.assertIn("would remove /run/sdr-doa-host-power/helper", result.stdout)
+        self.assertIn("would remove /run/sdr-doa-host-power/helper, a waiting request and /run/sdr-doa-host-power.taken", result.stdout)
         self.assertEqual(self.files(), before)
 
     def test_the_installed_helper_takes_a_request(self):

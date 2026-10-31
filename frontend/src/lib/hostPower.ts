@@ -14,8 +14,11 @@ import type { MessageKey } from './i18n';
 export const HOST_POWER_ROUTE = '/api/host/power';
 export const HOST_POWER_ACTIONS = ['reboot', 'poweroff'] as const;
 export type HostPowerAction = typeof HOST_POWER_ACTIONS[number];
-/** Why the buttons are disabled: no directory configured, none on the host, not writable, or no helper marker. */
-export const HOST_POWER_REASONS = ['NOT_CONFIGURED', 'DIR_MISSING', 'DIR_NOT_WRITABLE', 'HELPER_MISSING'] as const;
+/**
+ * Why the buttons are disabled: no directory configured, a container whose
+ * compose.yml lacks the mount, none on the host, not writable, or no helper marker.
+ */
+export const HOST_POWER_REASONS = ['NOT_CONFIGURED', 'DIR_NOT_MOUNTED', 'DIR_MISSING', 'DIR_NOT_WRITABLE', 'HELPER_MISSING'] as const;
 export type HostPowerReason = typeof HOST_POWER_REASONS[number];
 export const HOST_POWER_ERROR_CODES = [
   'ORIGIN_REJECTED', 'HOST_POWER_INVALID', 'HOST_POWER_TOO_LARGE', 'HOST_POWER_CONFIRM_REQUIRED',

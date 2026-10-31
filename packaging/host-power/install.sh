@@ -26,7 +26,11 @@ TMPFILES_DIR=/etc/tmpfiles.d
 TMPFILES_NAME=sdr-doa-host-power.conf
 # Fixed: the console's --host-power-dir default and the Docker bind mount.
 REQUEST_DIR=/run/sdr-doa-host-power
+# Root's own: the helper moves a request here before it checks or reads it.
+TAKEN_DIR=/run/sdr-doa-host-power.taken
 STATE_DIR=/var/lib/sdr-doa-host-power
+# The sdr-doa-docker install whose compose.yml must mount REQUEST_DIR.
+DOCKER_DIR=/opt/sdr-doa-ground-console
 ROOT=
 REAL_ROOT=
 DRY_RUN=0
@@ -47,6 +51,9 @@ Usage: sudo sh install.sh [options]
                        DIR/sbin/sdr-doa-host-power, DIR/share/sdr-doa-host-power/
   --helper-dry-run     the helper logs the action without running it
   --helper-live        the helper runs systemctl reboot or poweroff (the default)
+  --docker-dir DIR     the sdr-doa-docker install whose compose.yml must mount
+                       /run/sdr-doa-host-power (default /opt/sdr-doa-ground-console;
+                       checked only when DIR/compose.yml exists)
   --root DIR           install below DIR (test staging): no systemctl
   --dry-run            show the files and commands, change nothing; exits 1
                        when the install would stop
@@ -122,6 +129,7 @@ parse_args() {
       --prefix) need_value "$@"; PREFIX=$2; shift ;;
       --helper-dry-run) HELPER_MODE=1 ;;
       --helper-live) HELPER_MODE=0 ;;
+      --docker-dir) need_value "$@"; DOCKER_DIR=$2; shift ;;
       --root) need_value "$@"; ROOT=$2; shift ;;
       --dry-run) DRY_RUN=1 ;;
       -h | --help) usage; exit 0 ;;
@@ -134,6 +142,7 @@ parse_args() {
   esac
   check_path --prefix "$PREFIX"
   [ "$PREFIX" != / ] || die "--prefix must not be /"
+  check_path --docker-dir "$DOCKER_DIR"
   if [ -n "$ROOT" ]; then
     check_path --root "$ROOT"
   fi
@@ -255,6 +264,22 @@ previous_mode() {
   fi
 }
 
+# check_docker_mount TREE: the console in Docker sees requests only through
+# the bind mount that sdr-doa-docker 3.3.0 and later write into compose.yml,
+# and sdr-doa-docker update never rewrites that file.
+check_docker_mount() {
+  compose=$1$DOCKER_DIR/compose.yml
+  [ -f "$compose" ] || return 0
+  if grep -q "^ *- $REQUEST_DIR:$REQUEST_DIR\$" "$compose" 2>/dev/null; then
+    return 0
+  fi
+  script=$(CDPATH='' cd -- "$HERE/../docker" 2>/dev/null && pwd)/sdr-doa-docker
+  if [ ! -f "$script" ]; then
+    script="sdr-doa-docker (3.3.0 or later)"
+  fi
+  warn "$DOCKER_DIR/compose.yml does not mount $REQUEST_DIR, so the console shows \"Request directory not mounted\" (sdr-doa-docker update never rewrites compose.yml). Once, while no recording runs: sudo sh $script install --dir $DOCKER_DIR (it keeps .env, the channel, the sdr-doa-data volume and the update timer, and recreates the container)"
+}
+
 # Read-only checks of the running system; --root (test staging) skips them.
 preflight() {
   if [ -n "$ROOT" ] && [ "$DRY_RUN" = 0 ]; then
@@ -292,6 +317,7 @@ PREFIX=$PREFIX
 UNIT_DIR=$UNIT_DIR
 TMPFILES_DIR=$TMPFILES_DIR
 REQUEST_DIR=$REQUEST_DIR
+TAKEN_DIR=$TAKEN_DIR
 STATE_DIR=$STATE_DIR
 CONSOLE_USER=$CONSOLE_USER
 CONSOLE_UID=$CONSOLE_UID
@@ -357,6 +383,7 @@ main() {
   fi
   install_files
   enable_units
+  check_docker_mount "$info_root"
   if [ "$DRY_RUN" = 1 ]; then
     show_dry_run
     if [ "$DRY_STOP" = 1 ]; then

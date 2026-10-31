@@ -82,6 +82,11 @@ describe('top bar Restart and Shutdown', () => {
     // Before capabilities arrive (null) they wait, disabled.
     expect(powerButtons(shell('local', null)).every((button) => button.includes('disabled=""'))).toBe(true);
     expect(powerButtons(shell('local', undefined)).every((button) => button.includes('disabled=""'))).toBe(true);
+    // A container whose compose.yml has no mount names that, not the host helper.
+    const unmounted = powerButtons(shell('local', { available: false, reason: 'DIR_NOT_MOUNTED' }));
+    expect(unmounted[0]).toContain('title="Restart this PC: Request directory not mounted (run sdr-doa-docker install once)"');
+    expect(powerButtons(shell('local', { available: false, reason: 'DIR_NOT_MOUNTED' }, 'id'))[1])
+      .toContain('title="Matikan PC ini: Direktori permintaan belum di-mount (jalankan sdr-doa-docker install sekali)"');
     const id = powerButtons(shell('local', { available: false, reason: 'HELPER_MISSING' }, 'id'));
     expect(id[0]).toContain('title="Mulai ulang PC ini: Helper host belum dipasang"');
     expect(id[1]).toContain('title="Matikan PC ini: Helper host belum dipasang"');
@@ -173,6 +178,7 @@ describe('host power API', () => {
   it('reads the capability strictly', () => {
     expect(normalizeHostPower({ available: true, reason: null, actions: ['reboot', 'poweroff'] })).toEqual({ available: true, reason: null });
     expect(normalizeHostPower({ available: false, reason: 'DIR_NOT_WRITABLE' })).toEqual({ available: false, reason: 'DIR_NOT_WRITABLE' });
+    expect(normalizeHostPower({ available: false, reason: 'DIR_NOT_MOUNTED' })).toEqual({ available: false, reason: 'DIR_NOT_MOUNTED' });
     expect(normalizeHostPower({ available: false, reason: 'SOMETHING_NEW' })).toEqual({ available: false, reason: null });
     for (const bad of [null, undefined, 'yes', [], { available: 'true' }]) expect(normalizeHostPower(bad)).toBeNull();
     expect(normalizeCapabilities({ access: 'local', host_power: { available: true } }).hostPower).toEqual(READY);
@@ -235,5 +241,17 @@ describe('host power CSS', () => {
     expect(rules.join('\n')).not.toMatch(/(?:width|height):\s*(?:[0-3]?\d|4[0-3])px/);
     expect(css).toMatch(/\.icon-button \{[^}]*width: 44px; height: 44px;/);
     for (const rule of rules) expect(rule.replace(/rgba\(0, 0, 0, \.35\)/g, '')).not.toMatch(/#[0-9a-f]{3,8}\b|rgba?\(/i);
+  });
+
+  it('gives the row back up to 1600 px, where the longest status texts fit beside the buttons', () => {
+    // Measured in a browser: with these rules the status strip clips nowhere the
+    // row without the buttons fits, in EN and ID, on the Dashboard and other pages.
+    const wide = css.slice(css.indexOf('@media (min-width: 1024px) and (max-width: 1600px) {'));
+    expect(wide).toMatch(/^@media \(min-width: 1024px\) and \(max-width: 1600px\) \{\s*\.topbar:has\(\.host-power\) \{ gap: 4px; \}\s*\.topbar:has\(\.host-power\) \.telemetry-item \{ padding: 0 4px; \}\s*\.topbar-tools:has\(\.host-power\) \{ gap: 4px; \}/);
+    const tight = css.slice(css.indexOf('@media (min-width: 1024px) and (max-width: 1180px) {\n  .topbar-tools:has(.host-power)'));
+    expect(tight).toContain(".topbar-tools:has(.host-power) .lang-switch button[aria-pressed='true'] { display: none; }");
+    expect(tight).toContain('.topbar-tools:has(.host-power) .refresh-interval { width: 80px; }');
+    // None of it applies without the buttons, so the LAN view's top bar is unchanged.
+    for (const line of css.split('\n').filter((text) => text.includes(':has(.host-power)'))) expect(line).toMatch(/^\s*\.topbar(-tools)?:has\(\.host-power\)/);
   });
 });

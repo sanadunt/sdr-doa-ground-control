@@ -166,11 +166,21 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 @media (min-width: 1024px) and (max-width: 1180px) {
   .topbar { gap: 6px; }
   .telemetry-item { padding: 0 6px; }
-  /* Restart and Shutdown take about 100 px of that row on the console's own
-     page; as below 360 px, the other language stays one tap away. */
-  .console-shell.is-overview .topbar-tools:has(.host-power) { gap: 4px; }
-  .console-shell.is-overview .topbar-tools:has(.host-power) .lang-switch button[aria-pressed='true'] { display: none; }
-  .console-shell.is-overview .topbar-tools:has(.host-power) .lang-switch button + button { border-left: 0; }
+}
+/* Restart and Shutdown take about 95 px of the single-row top bar on the
+   console's own page. Up to 1600 px, past which the longest status texts
+   fit beside them, the row gives that back on every route with tighter
+   spacing; below 1181 px, where it is tight already, also with a narrower
+   interval select and, as below 360 px, only the other language's button. */
+@media (min-width: 1024px) and (max-width: 1600px) {
+  .topbar:has(.host-power) { gap: 4px; }
+  .topbar:has(.host-power) .telemetry-item { padding: 0 4px; }
+  .topbar-tools:has(.host-power) { gap: 4px; }
+}
+@media (min-width: 1024px) and (max-width: 1180px) {
+  .topbar-tools:has(.host-power) .refresh-interval { width: 80px; }
+  .topbar-tools:has(.host-power) .lang-switch button[aria-pressed='true'] { display: none; }
+  .topbar-tools:has(.host-power) .lang-switch button + button { border-left: 0; }
 }
 @media (max-width: 1023px) {
   /* Row 1: menu, brand, title, tools. Row 2: status chips, all visible. Row 3: page tools. */

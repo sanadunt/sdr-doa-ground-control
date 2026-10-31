@@ -54,9 +54,11 @@ class StatusTests(_TempDirCase):
     def test_reasons_in_order(self) -> None:
         self.assertEqual(hp.HostPower(None).status(), {"available": False, "reason": hp.NOT_CONFIGURED, "actions": ["reboot", "poweroff"]})
         missing = self.base / "missing"
-        self.assertEqual(hp.HostPower(missing).status()["reason"], hp.DIR_MISSING)
+        self.assertEqual(hp.HostPower(missing, in_container=False).status()["reason"], hp.DIR_MISSING)
         (self.base / "file").write_text("", encoding="utf-8")
-        self.assertEqual(hp.HostPower(self.base / "file").status()["reason"], hp.DIR_MISSING)
+        self.assertEqual(hp.HostPower(self.base / "file", in_container=False).status()["reason"], hp.DIR_MISSING)
+        # In a container a missing directory is a missing bind mount (an old compose.yml).
+        self.assertEqual(hp.HostPower(missing, in_container=True).status()["reason"], hp.DIR_NOT_MOUNTED)
         directory = self.base / "dir"
         directory.mkdir()
         self.assertEqual(hp.HostPower(directory).status()["reason"], hp.HELPER_MISSING)
@@ -64,6 +66,18 @@ class StatusTests(_TempDirCase):
         self.assertEqual(hp.HostPower(directory).status()["reason"], hp.HELPER_MISSING, "a directory is no marker")
         ready = _ready_dir(self.base)
         self.assertEqual(hp.HostPower(ready).status(), {"available": True, "reason": None, "actions": ["reboot", "poweroff"]})
+
+    def test_a_container_is_told_by_its_runtime_s_marker(self) -> None:
+        marker = self.base / ".dockerenv"
+        self.assertFalse(hp.running_in_container((str(marker), str(self.base / ".containerenv"))))
+        marker.write_text("", encoding="utf-8")
+        self.assertTrue(hp.running_in_container((str(self.base / "nothing"), str(marker))))
+        self.assertEqual(hp.CONTAINER_MARKERS, ("/.dockerenv", "/run/.containerenv"))
+        with mock.patch.object(hp, "running_in_container", return_value=True):
+            self.assertEqual(hp.HostPower(self.base / "missing").status()["reason"], hp.DIR_NOT_MOUNTED)
+        # The mount present but the host side missing is still not writable or not installed.
+        ready = _ready_dir(self.base)
+        self.assertTrue(hp.HostPower(ready, in_container=True).status()["available"])
 
     def test_a_directory_the_console_cannot_write(self) -> None:
         """Docker creates the bind mount's source root-owned when the host side is missing."""
@@ -121,8 +135,12 @@ class RequestFileTests(_TempDirCase):
 
     def test_unavailable_and_failed_writes(self) -> None:
         with self.assertRaises(hp.HostPowerRejected) as refused:
-            hp.HostPower(self.base / "missing").request("reboot")
+            hp.HostPower(self.base / "missing", in_container=False).request("reboot")
         self.assertEqual((refused.exception.code, refused.exception.extra), (hp.HOST_POWER_UNAVAILABLE, {"reason": hp.DIR_MISSING}))
+        with self.assertRaises(hp.HostPowerRejected) as refused:
+            hp.HostPower(self.base / "missing", in_container=True).request("reboot")
+        self.assertEqual(refused.exception.extra, {"reason": hp.DIR_NOT_MOUNTED})
+        self.assertIn("sdr-doa-docker install", refused.exception.message)
         with self.assertRaises(hp.HostPowerRejected) as refused:
             hp.HostPower(None).request("reboot")
         self.assertEqual(refused.exception.extra, {"reason": hp.NOT_CONFIGURED})
@@ -176,7 +194,7 @@ class RouteTests(_ServerCase):
         self.server = self.start_server()
         self.port = self.server.server_address[1]
         self.dir = _ready_dir(self.root)
-        self.server.host_power = hp.HostPower(self.dir)
+        self.server.host_power = hp.HostPower(self.dir, in_container=False)
 
     def post(self, body: Any = None, *, origin: Optional[str] = "default", raw: Optional[bytes] = None,
              port: Optional[int] = None) -> Tuple[int, Dict[str, Any]]:
@@ -244,11 +262,12 @@ class RouteTests(_ServerCase):
 
     def test_a_missing_host_side_is_503_with_its_reason(self) -> None:
         cases = (
-            (hp.HostPower(self.root / "missing"), hp.DIR_MISSING),
+            (hp.HostPower(self.root / "missing", in_container=False), hp.DIR_MISSING),
+            (hp.HostPower(self.root / "missing", in_container=True), hp.DIR_NOT_MOUNTED),
             (hp.HostPower(None), hp.NOT_CONFIGURED),
         )
         (self.dir / hp.HELPER_NAME).unlink()
-        for power, reason in cases + ((hp.HostPower(self.dir), hp.HELPER_MISSING),):
+        for power, reason in cases + ((hp.HostPower(self.dir, in_container=False), hp.HELPER_MISSING),):
             with self.subTest(reason=reason):
                 self.server.host_power = power
                 answer = self.assert_code(self.post({"action": "reboot", "confirm": True}), 503, hp.HOST_POWER_UNAVAILABLE)

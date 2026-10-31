@@ -13,6 +13,9 @@ ExecStart=@SBIN_DIR@/sdr-doa-host-power @HANDLE@
 SyslogIdentifier=sdr-doa-host-power
 StateDirectory=sdr-doa-host-power
 StateDirectoryMode=0755
-TimeoutStartSec=2min
+# It reads only a regular file in its own directory, so it never waits long.
+TimeoutStartSec=30s
 NoNewPrivileges=yes
 PrivateTmp=yes
+# No physical devices, whatever a request points at.
+PrivateDevices=yes

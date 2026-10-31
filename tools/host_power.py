@@ -15,7 +15,9 @@ request, refuses a repeat within a short window and runs ``systemctl reboot``
 or ``systemctl poweroff``. Without that host side the directory is missing,
 not writable for the console (Docker creates an empty root-owned one for the
 bind mount) or has no marker, and the route answers 503
-``HOST_POWER_UNAVAILABLE`` with the reason the top bar shows.
+``HOST_POWER_UNAVAILABLE`` with the reason the top bar shows. In a container
+without the directory the reason is ``DIR_NOT_MOUNTED``: its ``compose.yml``
+predates the mount, and ``sdr-doa-docker update`` never rewrites that file.
 
 Docker bind-mounts the host's ``/run/sdr-doa-host-power`` at the same path;
 a native console reads it directly. Stdlib only.
@@ -41,10 +43,13 @@ MAX_BODY_BYTES = 256
 
 # Why the buttons are disabled; the top bar names each one.
 NOT_CONFIGURED = "NOT_CONFIGURED"
+DIR_NOT_MOUNTED = "DIR_NOT_MOUNTED"
 DIR_MISSING = "DIR_MISSING"
 DIR_NOT_WRITABLE = "DIR_NOT_WRITABLE"
 HELPER_MISSING = "HELPER_MISSING"
-REASONS = (NOT_CONFIGURED, DIR_MISSING, DIR_NOT_WRITABLE, HELPER_MISSING)
+REASONS = (NOT_CONFIGURED, DIR_NOT_MOUNTED, DIR_MISSING, DIR_NOT_WRITABLE, HELPER_MISSING)
+# What a container runtime puts in every container (Docker, Podman).
+CONTAINER_MARKERS = ("/.dockerenv", "/run/.containerenv")
 
 ORIGIN_REJECTED = "ORIGIN_REJECTED"
 HOST_POWER_INVALID = "HOST_POWER_INVALID"
@@ -65,6 +70,7 @@ ERROR_CODES_HTTP: Dict[str, int] = {
 
 UNAVAILABLE_MESSAGES = {
     NOT_CONFIGURED: "host power requests are off in this console (--host-power-dir is empty)",
+    DIR_NOT_MOUNTED: "the request directory is not mounted into this container; run sdr-doa-docker install (3.3.0 or later) once so compose.yml mounts it",
     DIR_MISSING: "the host power request directory is missing; install packaging/host-power on the host",
     DIR_NOT_WRITABLE: "the console cannot write the host power request directory; install packaging/host-power on the host for this console's user",
     HELPER_MISSING: "the host power helper is not installed on the host (packaging/host-power)",
@@ -115,12 +121,18 @@ def decode_request(raw: bytes) -> str:
     return str(action)
 
 
+def running_in_container(markers: Tuple[str, ...] = CONTAINER_MARKERS) -> bool:
+    return any(os.path.exists(marker) for marker in markers)
+
+
 class HostPower:
     """The request directory of one console; ``None`` turns requests off."""
 
-    def __init__(self, directory: Optional[Path], clock: Any = time.time) -> None:
+    def __init__(self, directory: Optional[Path], clock: Any = time.time, in_container: Optional[bool] = None) -> None:
         self.directory = Path(directory) if directory is not None else None
         self._clock = clock
+        # A missing directory in a container is a missing bind mount.
+        self.in_container = running_in_container() if in_container is None else in_container
 
     def status(self) -> Dict[str, Any]:
         """Whether a request can be written now, and if not why (REASONS)."""
@@ -132,7 +144,7 @@ class HostPower:
         if directory is None:
             return NOT_CONFIGURED
         if not directory.is_dir():
-            return DIR_MISSING
+            return DIR_NOT_MOUNTED if self.in_container else DIR_MISSING
         if not os.access(directory, os.W_OK | os.X_OK):
             return DIR_NOT_WRITABLE
         if not (directory / HELPER_NAME).is_file():

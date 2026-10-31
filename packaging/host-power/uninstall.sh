@@ -90,8 +90,9 @@ PREFIX=$(value PREFIX)
 UNIT_DIR=$(value UNIT_DIR)
 TMPFILES_DIR=$(value TMPFILES_DIR)
 REQUEST_DIR=$(value REQUEST_DIR)
+TAKEN_DIR=$(value TAKEN_DIR)
 STATE_DIR=$(value STATE_DIR)
-for path in "$PREFIX" "$UNIT_DIR" "$TMPFILES_DIR" "$REQUEST_DIR" "$STATE_DIR"; do
+for path in "$PREFIX" "$UNIT_DIR" "$TMPFILES_DIR" "$REQUEST_DIR" "$TAKEN_DIR" "$STATE_DIR"; do
   case $path in /?*) ;; *) die "$info is damaged: unexpected path '$path'" ;; esac
 done
 SHARE_DIR=$PREFIX/share/sdr-doa-host-power
@@ -106,9 +107,10 @@ remove "$TMPFILES_DIR/sdr-doa-host-power.conf"
 # Without the marker the console disables its buttons. The directory may be
 # a running container's bind mount, so it stays until the next boot empties /run.
 if [ "$DRY_RUN" = 1 ]; then
-  printf 'would remove %s/helper and a waiting request\n' "$REQUEST_DIR"
+  printf 'would remove %s/helper, a waiting request and %s\n' "$REQUEST_DIR" "$TAKEN_DIR"
 else
   rm -f "$ROOT$REQUEST_DIR/helper" "$ROOT$REQUEST_DIR/request"
+  rm -rf "$ROOT$TAKEN_DIR"
 fi
 remove "$PREFIX/sbin/sdr-doa-host-power"
 if [ "$DRY_RUN" = 1 ]; then

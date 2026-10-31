@@ -9,11 +9,14 @@
 #
 # The console, in Docker as uid 10001 or natively as the operator, writes
 # REQUEST_DIR/request holding exactly reboot or poweroff; sdr-doa-host-power.path
-# starts sdr-doa-host-power.service when it appears. handle reads at most 16
-# bytes of a regular file, deletes the request and acts only once the delete
-# worked, so no request outlives the boot it was made in. A request within
-# REPEAT_WINDOW seconds of the last action of the same boot is refused. It
-# runs systemctl reboot or systemctl poweroff and nothing else.
+# starts sdr-doa-host-power.service when it appears. The console's user owns
+# REQUEST_DIR and can replace the request at any moment, so handle never opens
+# it there: one rename moves it into TAKEN_DIR, which only root can enter, and
+# the checks, the read (at most 9 bytes of a regular file) and the delete
+# happen there. It acts only once the delete worked, so no request outlives
+# the boot it was made in. A request within REPEAT_WINDOW seconds of the last
+# action of the same boot is refused. It runs systemctl reboot or systemctl
+# poweroff and nothing else.
 # Every message goes to the journal with the tag sdr-doa-host-power.
 set -u
 umask 022
@@ -21,6 +24,8 @@ umask 022
 TAG=sdr-doa-host-power
 REQUEST_DIR=${HOST_POWER_DIR:-/run/sdr-doa-host-power}
 STATE_DIR=${HOST_POWER_STATE_DIR:-/var/lib/sdr-doa-host-power}
+# Root's own directory on the same /run, so taking a request is one rename(2).
+TAKEN_DIR=${HOST_POWER_TAKEN_DIR:-/run/sdr-doa-host-power.taken}
 # Tests only: a fake /proc, a fixed clock and the uid that counts as root.
 PROC=${HOST_POWER_PROC:-/proc}
 ROOT_UID=${HOST_POWER_ROOT_UID:-0}
@@ -129,34 +134,53 @@ need_root() {
   fi
 }
 
+# take_dir: TAKEN_DIR exists, is root's alone and holds no request of a run
+# that was killed in between.
+take_dir() {
+  [ ! -L "$TAKEN_DIR" ] || return 1
+  mkdir -p -- "$TAKEN_DIR" 2>/dev/null || return 1
+  chmod 0700 "$TAKEN_DIR" 2>/dev/null || return 1
+  rm -rf -- "$TAKEN_DIR/request" 2>/dev/null
+  [ ! -e "$TAKEN_DIR/request" ] && [ ! -L "$TAKEN_DIR/request" ]
+}
+
 cmd_handle() {
   request=$REQUEST_DIR/request
+  taken=$TAKEN_DIR/request
   # The .path unit can start the service once more after the file is gone.
   if [ ! -e "$request" ] && [ ! -L "$request" ]; then
     return 0
   fi
-  # Read the word before the delete, and only from a regular file: never
-  # through a symlink, a FIFO or a device the console's user could put there.
+  # Never open the request by name in the console's directory, where it can
+  # become a FIFO or a symlink between a check and an open: rename moves
+  # whatever is there (a symlink or a FIFO as itself) out of the console's reach.
+  if ! take_dir; then
+    log err "cannot prepare $TAKEN_DIR; nothing done"
+    return 1
+  fi
+  if ! mv -f -- "$request" "$taken" 2>/dev/null; then
+    log err "cannot take $request; nothing done"
+    return 1
+  fi
   word=
   size=
   refused=
-  if [ -L "$request" ] || [ ! -f "$request" ]; then
+  if [ -L "$taken" ] || [ ! -f "$taken" ]; then
     refused="it is not a regular file"
   else
-    size=$(wc -c <"$request" 2>/dev/null | tr -d ' \t')
-    word=$(dd if="$request" bs=16 count=1 2>/dev/null) || word=
+    word=$(dd if="$taken" bs=9 count=1 2>/dev/null) || word=
+    # $(...) drops a trailing newline; the byte count does not.
+    size=$(dd if="$taken" bs=9 count=1 2>/dev/null | wc -c | tr -d ' \t')
   fi
-  # Delete first: a request that cannot be deleted is never acted on, so it
-  # cannot start the same action again at the next boot.
-  rm -f -- "$request" 2>/dev/null
-  if [ -e "$request" ] || [ -L "$request" ]; then
-    log err "cannot delete $request; nothing done"
+  # Delete before acting: a request that cannot be deleted is never acted on.
+  rm -rf -- "$taken" 2>/dev/null
+  if [ -e "$taken" ] || [ -L "$taken" ]; then
+    log err "cannot delete $taken; nothing done"
     return 1
   fi
   if [ -z "$refused" ]; then
     case $word in
       reboot | poweroff)
-        # $(...) drops a trailing newline; the size does not.
         [ "$size" = "${#word}" ] || refused="it does not hold exactly reboot or poweroff"
         ;;
       *) refused="it does not hold exactly reboot or poweroff" ;;
