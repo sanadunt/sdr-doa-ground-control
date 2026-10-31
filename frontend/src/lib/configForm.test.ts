@@ -57,8 +57,8 @@ describe('refresh intervals (AUD-24)', () => {
   });
 
   it('normalizes /api/capabilities defensively', () => {
-    expect(normalizeCapabilities({ refresh_intervals_s: [30, 0, 2, 2, 1, -1, 1.5, '5', 99999], admin_enabled: false })).toEqual({ refreshIntervalsS: [0, 1, 2, 30], adminEnabled: false, adminDefaultPassword: null, configPatch: null, access: null, lanAccess: null });
-    expect(normalizeCapabilities('nope')).toEqual({ refreshIntervalsS: null, adminEnabled: null, adminDefaultPassword: null, configPatch: null, access: null, lanAccess: null });
+    expect(normalizeCapabilities({ refresh_intervals_s: [30, 0, 2, 2, 1, -1, 1.5, '5', 99999], admin_enabled: false })).toEqual({ refreshIntervalsS: [0, 1, 2, 30], adminEnabled: false, adminDefaultPassword: null, configPatch: null, access: null, lanAccess: null, hostPower: null });
+    expect(normalizeCapabilities('nope')).toEqual({ refreshIntervalsS: null, adminEnabled: null, adminDefaultPassword: null, configPatch: null, access: null, lanAccess: null, hostPower: null });
   });
 
   it('reads the default-password flag and the config patch block without trusting its shape', () => {

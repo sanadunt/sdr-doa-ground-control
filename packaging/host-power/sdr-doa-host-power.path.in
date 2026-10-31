@@ -1,0 +1,13 @@
+# Written by the sdr-doa-host-power installer (packaging/host-power/install.sh).
+# Starts sdr-doa-host-power.service when the SDR-DoA Ground Console writes a
+# Restart or Shutdown request.
+[Unit]
+Description=SDR-DoA Ground Console power requests
+Documentation=file://@SHARE_DIR@/README.md
+
+[Path]
+PathExists=@REQUEST_DIR@/request
+Unit=sdr-doa-host-power.service
+
+[Install]
+WantedBy=paths.target

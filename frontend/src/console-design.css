@@ -133,6 +133,24 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .lang-switch button:hover { color: var(--text); }
 .lang-switch button[aria-pressed='true'] { background: var(--surface-3); color: var(--text); }
 .lang-switch button:focus-visible { outline-offset: -2px; }
+/* Restart and Shutdown of the groundstation PC, after EN|ID (the console's own page only). */
+.host-power { display: inline-flex; flex: none; gap: 4px; }
+.icon-button.host-power-button { border-color: var(--line); background: transparent; color: var(--text); }
+.icon-button.host-power-button.is-poweroff:hover:not(:disabled) { border-color: var(--red); color: var(--red); }
+.icon-button.host-power-button:disabled { cursor: not-allowed; opacity: .45; }
+.icon-button.host-power-button:disabled:hover { border-color: var(--line); color: var(--text); }
+.icon-button.host-power-button[aria-expanded='true'] { border-color: var(--accent); background: var(--accent-soft); }
+.host-power-panel { position: fixed; z-index: 60; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: 0 10px 28px rgba(0, 0, 0, .35); color: var(--text); font-size: 13px; }
+.host-power-panel.is-poweroff { border-color: var(--red); }
+.host-power-panel h3 { margin: 0 0 6px; font-size: 14px; }
+.host-power-panel p { margin: 0 0 8px; color: var(--muted); line-height: 1.45; }
+.host-power-panel .host-power-warning { color: var(--amber); font-weight: 600; }
+.host-power-panel .host-power-done { color: var(--text); }
+.host-power-panel .host-power-failed { color: var(--red); }
+.host-power-panel code { display: block; margin-top: 2px; color: var(--subtle); font-family: var(--mono); font-size: 11px; overflow-wrap: anywhere; }
+.host-power-actions { display: flex; gap: 8px; margin-top: 10px; }
+.ov-button.is-danger { border-color: var(--red); background: var(--red); color: var(--on-accent); font-weight: 700; }
+.ov-button.is-danger:hover:not(:disabled) { border-color: var(--red); filter: brightness(1.08); }
 .icon-button { display: grid; place-items: center; width: 44px; height: 44px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface); color: var(--muted); cursor: pointer; }
 .icon-button:hover { border-color: var(--accent); color: var(--accent); }
 .menu-toggle { border-color: transparent; background: transparent; color: var(--text); }
@@ -148,6 +166,21 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 @media (min-width: 1024px) and (max-width: 1180px) {
   .topbar { gap: 6px; }
   .telemetry-item { padding: 0 6px; }
+}
+/* Restart and Shutdown take about 95 px of the single-row top bar on the
+   console's own page. Up to 1600 px, past which the longest status texts
+   fit beside them, the row gives that back on every route with tighter
+   spacing; below 1181 px, where it is tight already, also with a narrower
+   interval select and, as below 360 px, only the other language's button. */
+@media (min-width: 1024px) and (max-width: 1600px) {
+  .topbar:has(.host-power) { gap: 4px; }
+  .topbar:has(.host-power) .telemetry-item { padding: 0 4px; }
+  .topbar-tools:has(.host-power) { gap: 4px; }
+}
+@media (min-width: 1024px) and (max-width: 1180px) {
+  .topbar-tools:has(.host-power) .refresh-interval { width: 80px; }
+  .topbar-tools:has(.host-power) .lang-switch button[aria-pressed='true'] { display: none; }
+  .topbar-tools:has(.host-power) .lang-switch button + button { border-left: 0; }
 }
 @media (max-width: 1023px) {
   /* Row 1: menu, brand, title, tools. Row 2: status chips, all visible. Row 3: page tools. */
@@ -182,6 +215,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   /* The LAN view's interval select only shows the console's value; on a phone its
      place goes to the VIEW ONLY chip, so the first row still fits. */
   .console-shell.is-view-only .refresh-interval { display: none; }
+  /* Restart and Shutdown wrap under the other tools instead of widening the page. */
+  .topbar-tools:has(.host-power) { flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; }
 }
 
 .page-content { flex: 1 1 auto; width: 100%; max-width: 1860px; min-height: 0; margin: 0 auto; padding: 24px 28px 36px; }

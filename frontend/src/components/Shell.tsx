@@ -14,6 +14,8 @@ import type { RouteName } from '../lib/routes';
 import type { ConsoleAccess } from '../lib/access';
 import { PageReadAgeContext } from './page/pageContext';
 import { DeliveryChecklist } from './DeliveryChecklist';
+import { HostPowerControls } from './HostPowerControls';
+import type { HostPowerCapability } from '../lib/hostPower';
 
 export { ROUTES, routeShortcut } from '../lib/routes';
 export type { RouteName } from '../lib/routes';
@@ -89,6 +91,7 @@ export function ConsoleShell({
   onRefreshSecondsChange,
   toolbar,
   access = 'local',
+  hostPower = null,
   children,
 }: {
   route: RouteName;
@@ -118,6 +121,8 @@ export function ConsoleShell({
   toolbar?: ReactNode;
   /** The LAN view ("lan-view") shows a VIEW ONLY chip, and its Receiver route is an ordinary page without the frame. */
   access?: ConsoleAccess;
+  /** Restart and Shutdown of the groundstation PC (capabilities `host_power`); shown on the console's own page only. */
+  hostPower?: HostPowerCapability | null;
   children: ReactNode;
 }): JSX.Element {
   const { lang, setLang, t } = useI18n();
@@ -337,6 +342,8 @@ export function ConsoleShell({
                 </button>
               ))}
             </div>
+            {/* The groundstation's own page only: the LAN view (a tablet) never gets them. */}
+            {viewOnly ? null : <HostPowerControls capability={hostPower} />}
           </div>
         </header>
         {readError ? <div className="read-error-banner" role="alert"><i aria-hidden="true" /><span>{t('shell.snapshotError', { error: readError })}</span></div> : null}

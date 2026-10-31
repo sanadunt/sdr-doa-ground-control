@@ -1,0 +1,316 @@
+#!/bin/sh
+# sdr-doa-host-power: restarts or shuts down the groundstation host when the
+# SDR-DoA Ground Console asks (its top bar's Restart and Shutdown buttons).
+# Part of packaging/host-power.
+#
+#   sdr-doa-host-power handle            take the request (sdr-doa-host-power.service)
+#   sdr-doa-host-power status            the request directory, a waiting request, the last action
+#   sdr-doa-host-power --dry-run handle  log what it would run, run nothing
+#
+# The console, in Docker as uid 10001 or natively as the operator, writes
+# REQUEST_DIR/request holding exactly reboot or poweroff; sdr-doa-host-power.path
+# starts sdr-doa-host-power.service when it appears. The console's user owns
+# REQUEST_DIR and can replace the request at any moment, so handle never opens
+# it there: a hard link takes it into TAKEN_DIR, which is root's alone, and
+# the checks, the read (at most 9 bytes of a regular file, without waiting)
+# and the delete happen there. It acts only once the delete worked, so no
+# request outlives the boot it was made in. A request within REPEAT_WINDOW seconds of the last
+# action of the same boot is refused. It runs systemctl reboot or systemctl
+# poweroff and nothing else.
+# Every message goes to the journal with the tag sdr-doa-host-power.
+set -u
+umask 022
+
+TAG=sdr-doa-host-power
+REQUEST_DIR=${HOST_POWER_DIR:-/run/sdr-doa-host-power}
+STATE_DIR=${HOST_POWER_STATE_DIR:-/var/lib/sdr-doa-host-power}
+# Root's own directory on the same /run mount: a request is taken with link(2),
+# which fails across file systems and mounts where mv would copy instead.
+TAKEN_DIR=${HOST_POWER_TAKEN_DIR:-/run/sdr-doa-host-power.taken}
+# Tests only: a fake /proc, a fixed clock and the uid that counts as root.
+PROC=${HOST_POWER_PROC:-/proc}
+ROOT_UID=${HOST_POWER_ROOT_UID:-0}
+# Seconds after an action in which another request of the same boot is refused.
+REPEAT_WINDOW=60
+DRY_RUN=0
+
+usage() {
+  cat <<'EOF'
+Usage: sdr-doa-host-power [--dry-run] COMMAND
+
+  handle   take the console's request: delete it, then run systemctl reboot
+           or systemctl poweroff (root; sdr-doa-host-power.service runs it)
+  status   the request directory, a waiting request and the last action
+
+  --dry-run  log the action instead of running it
+EOF
+}
+
+# log LEVEL MESSAGE: to the journal under the fixed tag. Outside a systemd
+# unit (no INVOCATION_ID) also to stderr, so a manual run sees it; inside one,
+# stderr would put it in the journal twice.
+log() {
+  level=$1
+  shift
+  sent=0
+  if command -v logger >/dev/null 2>&1 && logger -t "$TAG" -p "daemon.$level" "$*" 2>/dev/null; then
+    sent=1
+  fi
+  if [ "$sent" = 0 ] || [ -z "${INVOCATION_ID:-}" ]; then
+    printf '%s: %s\n' "$TAG" "$*" >&2
+  fi
+}
+
+die() {
+  log err "$*"
+  exit 1
+}
+
+is_uint() {
+  case $1 in '' | *[!0-9]*) return 1 ;; esac
+  return 0
+}
+
+now() {
+  if [ -n "${HOST_POWER_NOW:-}" ]; then
+    printf '%s\n' "$HOST_POWER_NOW"
+  else
+    date +%s
+  fi
+}
+
+fmt_time() {
+  date -d "@$1" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '@%s' "$1"
+}
+
+# The kernel's id of this boot; empty when it cannot be read.
+boot_id() {
+  id_text=$(cat "$PROC/sys/kernel/random/boot_id" 2>/dev/null || true)
+  case $id_text in '' | *[!0-9a-f-]*) ;; *) printf '%s' "$id_text" ;; esac
+}
+
+state_file() {
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '%s/last.dry-run' "$STATE_DIR"
+  else
+    printf '%s/last' "$STATE_DIR"
+  fi
+}
+
+read_state() {
+  LAST_BOOT=
+  LAST_AT=0
+  LAST_ACTION=
+  file=$(state_file)
+  [ -f "$file" ] || return 0
+  while IFS='=' read -r key value; do
+    case $key in
+      BOOT_ID) case $value in '' | *[!0-9a-f-]*) ;; *) LAST_BOOT=$value ;; esac ;;
+      AT) if is_uint "$value"; then LAST_AT=$value; fi ;;
+      ACTION) case $value in reboot | poweroff) LAST_ACTION=$value ;; esac ;;
+    esac
+  done <"$file"
+}
+
+# save_state ACTION AT BOOT_ID
+save_state() {
+  file=$(state_file)
+  tmp=$file.tmp.$$
+  if mkdir -p "$STATE_DIR" 2>/dev/null && {
+    printf '# sdr-doa-host-power: the last action it ran; sdr-doa-host-power status reads it\n'
+    printf 'BOOT_ID=%s\nAT=%s\nACTION=%s\n' "$3" "$2" "$1"
+  } >"$tmp" 2>/dev/null && mv -f "$tmp" "$file"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+need_root() {
+  if [ "$DRY_RUN" = 1 ]; then
+    mkdir -p "$STATE_DIR" 2>/dev/null || die "cannot create $STATE_DIR; run with sudo"
+    [ -w "$STATE_DIR" ] || die "cannot write $STATE_DIR; run with sudo"
+  elif [ "$(id -u)" != "$ROOT_UID" ]; then
+    die "run as root (sudo sdr-doa-host-power $1)"
+  fi
+}
+
+# take_dir: TAKEN_DIR exists (made 0700 here when missing), is a directory
+# owned by root that no one else can write, and holds no request of a run
+# that was killed in between.
+take_dir() {
+  if [ ! -e "$TAKEN_DIR" ] && [ ! -L "$TAKEN_DIR" ]; then
+    mkdir -m 0700 -- "$TAKEN_DIR" 2>/dev/null || return 1
+  fi
+  [ -d "$TAKEN_DIR" ] && [ ! -L "$TAKEN_DIR" ] || return 1
+  # shellcheck disable=SC2012 # ls -n is the portable way to read owner and mode
+  ls -nd -- "$TAKEN_DIR" | awk -v root="$ROOT_UID" '
+    NR == 1 { ok = $3 == root && substr($1, 6, 1) != "w" && substr($1, 9, 1) != "w" }
+    END { exit ok ? 0 : 1 }' || return 1
+  rm -rf -- "$TAKEN_DIR/request" 2>/dev/null
+  [ ! -e "$TAKEN_DIR/request" ] && [ ! -L "$TAKEN_DIR/request" ]
+}
+
+# read_taken: at most 9 bytes of the taken request. GNU dd opens it with
+# O_NONBLOCK, so a lease its owner (the console's user) holds on the inode
+# makes the open fail at once instead of waiting for the lease to break.
+read_taken() {
+  # shellcheck disable=SC2086 # NONBLOCK is empty or one word
+  dd if="$taken" bs=9 count=1 $NONBLOCK 2>/dev/null
+}
+
+# discard: remove the request in the console's directory, whatever it is.
+discard() {
+  rm -rf -- "$request" 2>/dev/null
+}
+
+cmd_handle() {
+  request=$REQUEST_DIR/request
+  taken=$TAKEN_DIR/request
+  # The .path unit can start the service once more after the file is gone.
+  if [ ! -e "$request" ] && [ ! -L "$request" ]; then
+    return 0
+  fi
+  # A request that cannot be taken is removed where it is (rm unlinks, it
+  # never opens), so no run ends with one in place for PathExists to start
+  # the service again at once.
+  if ! take_dir; then
+    discard
+    log err "cannot prepare $TAKEN_DIR; refused the request and removed it"
+    return 1
+  fi
+  # Never open the request by name in the console's directory, where it can
+  # become a FIFO or a symlink between a check and an open. A hard link takes
+  # the inode as it is (a symlink or a FIFO as itself) out of the console's
+  # reach; unlike mv it never falls back to a copy that would open it there.
+  if [ -d "$request" ] && [ ! -L "$request" ]; then
+    # A directory cannot be linked and is never a request.
+    discard
+    log warning "refused a request: it is not a regular file"
+    return 0
+  fi
+  if ! ln -P -- "$request" "$taken" 2>/dev/null; then
+    if [ ! -e "$request" ] && [ ! -L "$request" ]; then
+      return 0
+    fi
+    discard
+    log err "cannot take $request (it changed, or is on another file system or mount); refused it and removed it"
+    return 1
+  fi
+  rm -f -- "$request" 2>/dev/null
+  word=
+  size=
+  refused=
+  if [ -L "$taken" ] || [ ! -f "$taken" ]; then
+    refused="it is not a regular file"
+  else
+    if ! word=$(read_taken); then
+      refused="it could not be read at once"
+    fi
+    # $(...) drops a trailing newline; the byte count does not.
+    size=$(read_taken | wc -c | tr -d ' \t')
+  fi
+  # Delete before acting: a request that cannot be deleted is never acted on.
+  rm -rf -- "$taken" 2>/dev/null
+  if [ -e "$taken" ] || [ -L "$taken" ]; then
+    log err "cannot delete $taken; nothing done"
+    return 1
+  fi
+  if [ -z "$refused" ]; then
+    case $word in
+      reboot | poweroff)
+        [ "$size" = "${#word}" ] || refused="it does not hold exactly reboot or poweroff"
+        ;;
+      *) refused="it does not hold exactly reboot or poweroff" ;;
+    esac
+  fi
+  if [ -n "$refused" ]; then
+    # The content is not logged: only the two words are ever acted on.
+    log warning "refused a request: $refused"
+    return 0
+  fi
+
+  at=$(now)
+  current_boot=$(boot_id)
+  read_state
+  if [ -n "$LAST_ACTION" ] && { [ -z "$current_boot" ] || [ "$LAST_BOOT" = "$current_boot" ]; } &&
+    [ "$LAST_AT" -le "$at" ] && [ $((at - LAST_AT)) -lt "$REPEAT_WINDOW" ]; then
+    log warning "refused $word: $LAST_ACTION ran $((at - LAST_AT)) s ago, less than $REPEAT_WINDOW s"
+    return 0
+  fi
+  if ! save_state "$word" "$at" "$current_boot"; then
+    log warning "cannot write $(state_file); a repeat within $REPEAT_WINDOW s would not be refused"
+  fi
+  if [ "$DRY_RUN" = 1 ]; then
+    log notice "dry-run: would run: systemctl $word (requested by the console)"
+    return 0
+  fi
+  log notice "running: systemctl $word (requested by the console)"
+  if ! output=$(systemctl "$word" 2>&1); then
+    log err "systemctl $word failed: $(printf '%s' "$output" | tail -n 1)"
+    return 1
+  fi
+  return 0
+}
+
+cmd_status() {
+  printf 'request directory: %s\n' "$REQUEST_DIR"
+  if [ -d "$REQUEST_DIR" ]; then
+    # shellcheck disable=SC2012 # ls -n is the portable way to read owner and mode
+    ls -nd -- "$REQUEST_DIR" | awk '{ printf "  owner %s:%s, mode %s\n", $3, $4, $1 }'
+    if [ ! -x "$REQUEST_DIR" ]; then
+      # 0700 for the console's user: only root (or that user) sees inside.
+      printf '  contents: not readable by this user (sudo sdr-doa-host-power status)\n'
+    elif [ -f "$REQUEST_DIR/helper" ]; then
+      printf '  helper marker: present (the console shows Restart and Shutdown)\n'
+    else
+      printf '  helper marker: missing (sudo systemd-tmpfiles --create /etc/tmpfiles.d/sdr-doa-host-power.conf)\n'
+    fi
+    if [ -e "$REQUEST_DIR/request" ] || [ -L "$REQUEST_DIR/request" ]; then
+      printf '  waiting request: yes (sdr-doa-host-power.path has not taken it)\n'
+    else
+      printf '  waiting request: no\n'
+    fi
+  else
+    printf '  missing (sudo systemd-tmpfiles --create /etc/tmpfiles.d/sdr-doa-host-power.conf)\n'
+  fi
+  read_state
+  if [ -n "$LAST_ACTION" ]; then
+    if [ -n "$LAST_BOOT" ] && [ "$LAST_BOOT" = "$(boot_id)" ]; then
+      when="this boot"
+    else
+      when="an earlier boot"
+    fi
+    printf 'last action: %s at %s (%s)\n' "$LAST_ACTION" "$(fmt_time "$LAST_AT")" "$when"
+  else
+    printf 'last action: none\n'
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    printf 'sdr-doa-host-power.path: %s\n' "$(systemctl is-active sdr-doa-host-power.path 2>/dev/null || true)"
+  fi
+  printf 'journal: journalctl -t %s\n' "$TAG"
+}
+
+main() {
+  NONBLOCK=
+  if dd if=/dev/null of=/dev/null iflag=nonblock count=0 2>/dev/null; then
+    NONBLOCK=iflag=nonblock
+  fi
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --dry-run) DRY_RUN=1 ;;
+      -h | --help) usage; exit 0 ;;
+      -*) die "unknown option $1 (see --help)" ;;
+      *) break ;;
+    esac
+    shift
+  done
+  [ $# -eq 1 ] || { usage >&2; exit 64; }
+  case $1 in
+    handle) need_root handle; cmd_handle ;;
+    status) cmd_status ;;
+    *) die "unknown command $1 (see --help)" ;;
+  esac
+}
+
+main "$@"

@@ -39,7 +39,7 @@ Istilah:
 |---|---|
 | **Sumber** | Satu halaman yang memegang RadioSpectrum dan mengirim state serta frame. Fase 2: halaman console di groundstation (`kiosk-tab`). |
 | **Server** | Proses console (`tools/ground_console.py`). Menyimpan post terakhir di memori dan melayani pembacanya. |
-| **Penampil** | Halaman console di mode LAN lihat-saja (tablet, komputer lain). Hanya membaca. |
+| **Penampil** | Halaman console di mode LAN lihat-saja (tablet, komputer lain). Membaca saja, kecuali menambah dan menghapus penanda Receiver (8a). |
 
 ## 1. Sumber
 

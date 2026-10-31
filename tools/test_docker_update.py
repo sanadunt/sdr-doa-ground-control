@@ -566,6 +566,37 @@ class InstallTests(DockerScriptTestCase):
         self.assertEqual(compose_env[-1], {"SDR_DOA_IMAGE": CONSOLE_IMAGE, "SDR_DOA_IMAGE_TAG": f"{CHANNEL}.0", "SDR_DOA_PORT": "8790"})
         self.assertNotIn("s3cret", result.stdout + result.stderr)
 
+    def test_install_adds_the_host_power_mount_to_a_3_2_compose_and_keeps_env(self):
+        """sdr-doa-docker update never rewrites compose.yml, so a 3.2 install has no
+        /run/sdr-doa-host-power mount until the 3.3 script's install runs once."""
+        mount_block = (
+            "      # The top bar's Restart and Shutdown write their request here, and the\n"
+            "      # host side (packaging/host-power) acts on it. Without it Docker creates\n"
+            "      # an empty root-owned directory and the buttons stay disabled.\n"
+            "      - /run/sdr-doa-host-power:/run/sdr-doa-host-power\n"
+        )
+        # Runbook 5.5 P0 runs install only once grep -c finds exactly this one line.
+        self.assertEqual(sum("sdr-doa-host-power" in line for line in SCRIPT.read_text().splitlines()), 1)
+        self.install("--port", "8790")
+        compose = self.dir / "compose.yml"
+        env_file = self.dir / ".env"
+        current = compose.read_text()
+        self.assertIn(mount_block, current)
+        # What the 3.2.0 script wrote: the same file without the mount.
+        compose.write_text(current.replace(mount_block, ""))
+        env_file.write_text(env_file.read_text() + "SDR_DOA_ADMIN_PASSWORD='s3cret'\nSDR_DOA_SEED_BASE_URL=http://192.168.100.100:8081\n")
+        env_before = env_file.read_bytes()
+        self.h.reset_calls()
+        self.install()
+        rewritten = compose.read_text()
+        self.assertIn(mount_block, rewritten)
+        self.assertEqual(rewritten, current, "the same file the 3.3 script writes")
+        self.assertRegex(rewritten, r"(?m)^      - sdr-doa-data:/data$")
+        self.assertRegex(rewritten, r"(?m)^name: sdr-doa-ground-console$")
+        self.assertEqual(env_file.read_bytes(), env_before, ".env stays byte for byte")
+        self.assertEqual(stat.S_IMODE(env_file.stat().st_mode), 0o600)
+        self.assertIn(["compose", "-p", "sdr-doa-ground-console", "-f", "compose.yml", "up", "-d"], self.h.argvs())
+
     def test_install_applies_a_changed_port_with_the_same_image(self):
         self.install()
         first = self.h.container()["id"]
@@ -1308,6 +1339,9 @@ class ComposePolicyTests(DockerScriptTestCase):
         self.assertNotIn("build:", console)
         self.assertRegex(console, r"(?m)^name: sdr-doa-ground-console$")
         self.assertRegex(console, r"(?m)^      - sdr-doa-data:/data$")
+        # The power request directory of packaging/host-power, the one host path.
+        self.assertRegex(console, r"(?m)^      - /run/sdr-doa-host-power:/run/sdr-doa-host-power$")
+        self.assertNotIn("docker.sock", console)
         self.assertRegex(console, r"(?m)^  sdr-doa-data:$")
         self.assertRegex(console, r"(?m)^      - SDR_DOA_ADMIN_PASSWORD$")
         self.assertIn("image: ${SDR_DOA_IMAGE:-%s}:${SDR_DOA_IMAGE_TAG:-%s}" % (CONSOLE_IMAGE, CHANNEL), console)

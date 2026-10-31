@@ -1,0 +1,29 @@
+# Written by the sdr-doa-host-power installer (packaging/host-power/install.sh).
+# Takes one Restart or Shutdown request of the SDR-DoA Ground Console;
+# sdr-doa-host-power.path starts it when @REQUEST_DIR@/request appears.
+# Journal: journalctl -t sdr-doa-host-power
+[Unit]
+Description=SDR-DoA Ground Console power request (Restart or Shutdown)
+Documentation=file://@SHARE_DIR@/README.md
+# No start limit: a burst of requests must not leave sdr-doa-host-power.path
+# failed until reset-failed or a reboot. Every run removes the request, also
+# one it refuses or cannot take, so PathExists never restarts it in a loop;
+# the path unit keeps its own trigger limit.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+# Root: it runs systemctl reboot or systemctl poweroff. It opens no port.
+ExecStart=@SBIN_DIR@/sdr-doa-host-power @HANDLE@
+SyslogIdentifier=sdr-doa-host-power
+StateDirectory=sdr-doa-host-power
+StateDirectoryMode=0755
+# It reads only a regular file in its own directory, so it never waits long.
+TimeoutStartSec=30s
+NoNewPrivileges=yes
+PrivateTmp=yes
+# No physical devices, whatever a request points at.
+PrivateDevices=yes
+# Do not add ProtectSystem=, ReadWritePaths= or other options that bind-mount
+# @REQUEST_DIR@ or @REQUEST_DIR@.taken: the helper takes a request with
+# link(2), which fails across mounts, so every request would be refused.
