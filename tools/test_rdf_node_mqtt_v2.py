@@ -527,6 +527,20 @@ class HealthNavTests(unittest.TestCase):
         self.assertEqual((health["hs"], health["sat"], health["daq"]), ("OK", 7, 1))
         self.assertTrue(store.session_view(NOW)["health_fresh"])
 
+    def test_real_edge_1_6_health_over_lora(self) -> None:
+        # A telemetry/health of RDF Node 1.6.0 on 2026-11-01 (sent through the LoRa bridge), with the
+        # position replaced by the edge doc's example and its own sid, q and t replaced by the fixture's.
+        real = {"v": 2, "run": 1, "daq": 1, "drop": 0, "age": 3626067, "temp": 50.1, "clk": 1, "rev": CFG,
+                "why": ["NO_FRESH_DOA", "DOA_FILE_NOT_UPDATING", "SOURCE_UNVERIFIED", "ANGLE_UNVERIFIED"],
+                "hs": "OK", "hdg": 168.5, "gs": "FIX", "fix": 3, "sat": 7, "lat": -6.20576, "lon": 106.81,
+                "alt": 685.6, "sog": 0.2, "cog": None}
+        store = session_store(health=False)
+        entry = put(store, "telemetry/health", dict(real, sid=SID, q=710, t=NOW))
+        self.assertEqual((entry["status"], entry["error"]), ("FRESH", None))
+        health = node(store)["health"]
+        self.assertEqual((health["hdg"], health["gs"], health["fix"], health["sat"], health["lat"]), (168.5, "FIX", 3, 7, -6.20576))
+        self.assertTrue(store.session_view(NOW)["health_fresh"])
+
     def test_a_position_needs_both_coordinates(self) -> None:
         health = node(session_store(gs="FIX", fix=2, lat=-6.2))["health"]
         self.assertNotIn("lat", health)
