@@ -1,9 +1,10 @@
 import type { FocusEvent, JSX, ReactNode } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Branding, TelemetrySnapshot, Tone } from '../types';
+import type { Branding, LoraLinkView, TelemetrySnapshot, Tone } from '../types';
 import { REFRESH_INTERVALS_S, candidateErrors, deriveDataState, toneFor } from '../lib/telemetry';
 import { actionableGateReasons, doaStatusTextKey, overviewDoaStatus } from '../lib/doaStatus';
 import { sourceBadge, sourceReasonKey } from '../lib/telemetrySource';
+import { loraChip } from '../lib/loraLink';
 import { shortcutAction } from '../lib/shortcuts';
 import { THEME_STORAGE_KEY, readPreference, writePreference } from '../lib/preferenceStore';
 import { LANGS, gateReasonLabel, useI18n } from '../lib/i18n';
@@ -55,6 +56,20 @@ export function formatElapsed(t: Translate, ms: number): string {
   return minutes < 60 ? t('common.durationMin', { value: minutes }) : t('common.durationH', { value: Math.floor(minutes / 60) });
 }
 
+/** The LoRa chip's tooltip: only the current cause (no frames, a silent bridge, the port, the RDF-SDR clock). */
+export function loraCause(t: Translate, lora: LoraLinkView | undefined): string | undefined {
+  const ground = lora?.ground;
+  if (!ground) return undefined;
+  const causes: string[] = [];
+  if (ground.state === 'STALE' && ground.status_age_ms !== null) causes.push(t('lora.cause.stale', { age: formatElapsed(t, ground.status_age_ms) }));
+  else if (ground.state === 'PORT_ERROR') causes.push(t('lora.cause.port', { error: ground.port_error ?? 'ERROR' }));
+  else if (ground.data === 'NONE' && ground.since_rx_ms !== null) causes.push(t('lora.cause.noFrame', { age: formatElapsed(t, ground.since_rx_ms) }));
+  else if (ground.data === 'LINK_ONLY') causes.push(t('lora.cause.idle'));
+  const offset = ground.peer?.clock_offset_ms;
+  if (ground.clock_warning && offset !== null && offset !== undefined) causes.push(t('lora.cause.clock', { offset: `${(offset / 1000).toFixed(1)} s` }));
+  return causes.join('\n') || undefined;
+}
+
 /** Intervals for the top-bar select: the offered list plus the saved value, sorted. */
 export function refreshSelectOptions(options: readonly number[], current: number | null): number[] {
   const values = new Set(options.filter((value) => Number.isInteger(value) && value >= 0));
@@ -62,9 +77,9 @@ export function refreshSelectOptions(options: readonly number[], current: number
   return [...values].sort((a, b) => a - b);
 }
 
-function TelemetryItem({ label, value, tone, title, live }: { label: string; value: string; tone: Tone; title?: string; live?: boolean }): JSX.Element {
+function TelemetryItem({ label, value, tone, title, live, pulse }: { label: string; value: string; tone: Tone; title?: string; live?: boolean; pulse?: boolean }): JSX.Element {
   return (
-    <span className={`telemetry-item tone-${tone}`} title={title} role={live ? 'status' : undefined} aria-live={live ? 'polite' : undefined}>
+    <span className={`telemetry-item tone-${tone}${pulse ? ' is-receiving' : ''}`} title={title} role={live ? 'status' : undefined} aria-live={live ? 'polite' : undefined}>
       <span className="telemetry-key">{label}</span>
       <span className="telemetry-value"><i aria-hidden="true" />{value}</span>
     </span>
@@ -82,6 +97,7 @@ export function ConsoleShell({
   lastReadAgeMs,
   mqttConnection,
   mqttError = null,
+  loraLink,
   simulationEnabled,
   onRefresh,
   refreshSeconds,
@@ -106,6 +122,8 @@ export function ConsoleShell({
   mqttConnection?: string;
   /** The last /api/mqtt read failed. */
   mqttError?: string | null;
+  /** The LoRa serial bridge's link from /api/mqtt; its chip shows only where a bridge reports. */
+  loraLink?: LoraLinkView;
   simulationEnabled: boolean;
   onRefresh: () => void;
   /** Saved automatic refresh interval in seconds (0 = manual); unknown until the configuration is read. */
@@ -149,6 +167,8 @@ export function ConsoleShell({
   const mqttState = mqttError ? 'ERROR' : (mqttConnection ?? 'OFF').toUpperCase();
   const mqttTone: Tone = mqttState === 'CONNECTED' ? 'good' : mqttState === 'OFF' || mqttState === 'DISABLED' ? 'neutral' : 'warn';
   const mqttTitle = mqttError ? t('app.mqttReadFailed', { error: mqttError }) : undefined;
+  const lora = loraChip(loraLink);
+  const loraTitle = lora ? loraCause(t, loraLink) : undefined;
   const readLabel = loading ? t('shell.reading') : lastReadAgeMs === null ? t('shell.noRead') : t('shell.lastRead', { age: formatElapsed(t, lastReadAgeMs) });
   const overview = route === 'overview';
   const viewOnly = access === 'lan-view';
@@ -290,13 +310,14 @@ export function ConsoleShell({
               <span className="topbar-read">{readLabel}</span>
             </div>
           ) : null}
-          <div className={source ? 'telemetry-strip has-source' : 'telemetry-strip'} role="group" aria-label={t('shell.runtimeStatus')}>
+          <div className={['telemetry-strip', source ? 'has-source' : '', lora ? 'has-lora' : ''].filter(Boolean).join(' ')} role="group" aria-label={t('shell.runtimeStatus')}>
             {source ? <TelemetryItem label={t('status.source')} value={t(source.labelKey)} tone={source.tone} title={sourceTitle} /> : null}
             <TelemetryItem label={t('status.data')} value={dataState} tone={dataTone} title={dataTitle} />
             <TelemetryItem label={t('status.doa')} value={doa.code} tone={doa.tone} title={doaTitle} />
             <DeliveryChecklist snapshot={snapshot} />
             <TelemetryItem label={t('status.snapshot')} value={snapshotState} tone={snapshotTone} title={readError ? t('shell.snapshotError', { error: readError }) : undefined} live />
             <TelemetryItem label={t('status.mqtt')} value={mqttState} tone={mqttTone} title={mqttTitle} />
+            {lora ? <TelemetryItem label={t('status.lora')} value={lora.value} tone={lora.tone} title={loraTitle} pulse={lora.receiving} /> : null}
             <TelemetryItem label={t('status.sim')} value={simulationEnabled ? 'ON' : 'OFF'} tone={simulationEnabled ? 'warn' : 'neutral'} />
           </div>
           <span className="topbar-spacer" aria-hidden="true" />

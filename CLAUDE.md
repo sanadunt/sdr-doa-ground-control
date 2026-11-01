@@ -20,7 +20,7 @@ cd frontend && npx vitest run -t "partial test name"
 # test_preferences_store, test_make_release, test_tile_cache, test_basemap_contract, test_receiver_archive,
 # test_release_workflow, test_docker_update, test_console_update, test_ground_link, test_data_out_reader,
 # test_data_out_hosts, test_mdns_resolver, test_lan_access, test_receiver_mirror, test_telemetry_source, test_rdf_node_broker,
-# test_host_power, test_host_power_kit)
+# test_host_power, test_host_power_kit, test_lora_link)
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_ground_console_static.GroundConsoleStaticRegressionTests.<test_method>
 # Shared Data Out read: reuse window, seen/refresh/fresh_settings, 1 and 5 viewers against a loopback fake Data Out
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_data_out_reader
@@ -50,6 +50,9 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_ground_link
 # Restart and Shutdown: POST /api/host/power (a temporary request directory, the LAN view refusing it), then
 # packaging/host-power (helper, installer, uninstaller) against fake systemctl, logger, id and systemd-tmpfiles
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_host_power tools.test_host_power_kit
+# The LoRa serial bridge status (lora/ground): parsing, rates, data-in indicator, STALE, the shared fixture
+# (after a deliberate change of the view: .venv/bin/python -c "import tools.test_lora_link as t; t.write_fixture()")
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_lora_link
 # The opt-in LAN view: settings, Host/route/client rules, the second listener and its connection bounds, POST /api/lan-access, start and SIGTERM
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest tools.test_lan_access
 # The Receiver mirror: schema, memory store, both routes on both listeners (the loopback GET under the Receiver's read rule), the browser's limits and the shared fixture,
@@ -231,6 +234,7 @@ The `.venv` is not committed. Create it locally with Python 3.9+ (stdlib is enou
 - Docker or native auto-update logs `deferred: Receiver recording or scan active` every night: `/api/health` reports `receiver_busy` (a recording or scan archive is running, or a session was written within 120 s). It updates by itself after 7 days of deferrals; `sudo sdr-doa-docker update --yes` or `sdr-doa-console update --yes` updates now.
 - `sdr-doa-docker auto-update on` refuses with "not owned by root or is writable by another user": root's timer only runs a root-only copy of the script for a root-only DIR. Install in `/opt` as root, or use the printed crontab line as the DIR's owner. "cannot read DIR/.env (mode 0600); run with sudo": the install is root's.
 - `sdr-doa-docker` 3 refuses a directory with "holds the RDF-SDR agent install of sdr-doa-docker 2": that is an agent install of version 2, which the console no longer manages (the Raspberry runs the RDF Node edge). Stop it with `docker compose down` in that directory; to put the console there, then move its `compose.yml` away and run `install` (`--force` does not replace it). `--agent` and its options are refused the same way.
+- LoRa chip (top bar, only where the RDF Node LoRa serial bridge `run.py lora-bridge --role ground` publishes its retained `sdr/v2/<node>/lora/ground`; `tools/lora_link.py`, `lib/loraLink.ts`, the `lora` block of `/api/mqtt`, System Health's LoRa link card): `RX` (dot pulses) while delivered messages arrive, `IDLE` heartbeats only, `NO RX` nothing for 6 s on an UP link, `DOWN` the bridge saw no frame for 15 s, `PORT` it cannot open the radio port, `STALE` its status is older than 15 s (the bridge stopped or lost the broker; dated by the status's own `t`, so a retained status after a console restart reads STALE too). A warning tone and tooltip when the RDF-SDR clock is off by more than 1 s (`peer.clock_offset_ms`): its data is then refused `SOURCE_TIMESTAMP_NOT_FRESH`. Without IP over LoRa there is no Data Out, so the light read's position, settings fields and ADC overdrive are missing (DOA `DEGRADED` with `ADC_OVERDRIVE_UNKNOWN`). The bridge's frame format and status are `docs/LORA_SERIAL.md` in `sanadunt/rdf-indicator-raspberry`.
 - PPP to the RDF-SDR stays down (`LCP: timeout` in `journalctl -u t900-ground-ppp`, Data Out unreachable, no MQTT from the edge): not a console fault. Run `sudo t900-ground-diag` and `t900-link status`; "remote unreachable" means the watchdog's actions of the last hour did not help. The incident procedure (restart, then `usbreset` and restart, then unplug and replug, 30–60 s and a diag after each) and what each outcome says about the layer are in `packaging/ground-link/README.md`. `t900-ground-watchdog` exits 78 on a `link.conf` error (`sudo t900-ground-watchdog check-config`).
 
 ## antislop paths
