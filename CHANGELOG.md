@@ -2,6 +2,30 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.4.0
+
+Rilis minor: tidak ada yang dihapus. Console kini siap untuk link LoRa serial ke RDF-SDR, yang menggantikan T900/PPP. Ada status link LoRa di bilah atas dan System Health, posisi stasiun dari GPS RDF-SDR, dan label jujur untuk nilai yang tidak bisa lewat LoRa. Kanal `3` dan timer update memasangnya sendiri. Tanpa jembatan LoRa, tampilan console sama seperti 3.3.0.
+
+- **Jembatan LoRa bukan bagian console.** Link-nya dibawa jembatan RDF Node `run.py lora-bridge` (protokol RLS1, `docs/LORA_SERIAL.md` di `sanadunt/rdf-indicator-raspberry`), yang dipasang terpisah di kedua sisi: `--role edge` di RDF-SDR dan `--role ground` di groundstation. Jembatan itu meneruskan topik MQTT RDF Node apa adanya ke broker groundstation, jadi kontrak MQTT dan Kontrol tidak berubah.
+- **Chip LoRa di bilah atas**, setelah MQTT, hanya bila jembatan groundstation mempublish statusnya (`sdr/v2/<node>/lora/ground`):
+  - `RX` (titiknya berkedip): telemetri masuk lewat radio
+  - `IDLE`: hanya heartbeat
+  - `NO RX`: tidak ada frame 6 detik
+  - `DOWN`: jembatan tidak menerima frame 15 detik
+  - `PORT`: port radio tidak bisa dibuka
+  - `STALE`: status jembatan sendiri lebih tua dari 15 detik, artinya jembatan berhenti
+
+  Chip berwarna peringatan dan tooltip-nya menjelaskan bila jam RDF-SDR selisih lebih dari 1 detik, karena datanya akan ditolak `SOURCE_TIMESTAMP_NOT_FRESH`.
+- **Kartu Link LoRa di System Health**: data masuk, frame terakhir, pesan dan frame per detik, error CRC, frame hilang, yang diterima RDF-SDR, selisih jam, antrean kirim, port radio, broker jembatan, umur status, dan pergantian link. `GET /api/mqtt` membawanya sebagai `lora`.
+- **Posisi stasiun dari GPS RDF-SDR.**
+  - Console membaca field nav opsional di `telemetry/health` (kontrak 1.6: kompas, status GPS, fix, satelit, lat/lon, ketinggian, kecepatan, arah). Field nav yang rusak dibuang dengan catatan dan tidak pernah membuat health ditolak.
+  - Peta memakai lat/lon itu bila Data Out tidak memberi posisi, hanya dengan fix GPS. Di RDF-SDR, `nav.gps.publish_position` harus menyala.
+  - doa.xml Data Out tetap didahulukan bila ada.
+- **"Tidak tersedia lewat LoRa".** Lewat LoRa tidak ada jalur IP, jadi tidak ada Data Out.
+  - Kartu node menulis "tidak tersedia lewat LoRa" untuk frekuensi tengah, gain, SNR dan ADC.
+  - HUD menulis "ADC overdrive tidak diketahui · tidak tersedia lewat LoRa"; DOA tetap `DEGRADED`, bearing tetap tampil.
+  - Tidak ada nilai yang dikarang. Jawaban `/api/snapshot` dari MQTT membawa `source.link: "lora"` dan blok `nav`.
+
 ## 3.3.0
 
 Rilis minor: tidak ada yang dihapus. Tablet di tampilan LAN kini bisa menandai spektrum, dan console groundstation punya tombol Mulai ulang dan Matikan. Kanal `3` dan timer update memasang image-nya sendiri. Tombol daya baru aktif setelah langkah host sekali: script `sdr-doa-docker` 3.3.0, `sdr-doa-docker install`, dan `packaging/host-power/install.sh` (lihat poin Docker di bawah).
