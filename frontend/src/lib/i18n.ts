@@ -249,6 +249,7 @@ const en = {
   'source.reason.MQTT_DAQ_NOT_HEALTHY': 'DAQ not healthy over MQTT',
   'source.reason.DATA_OUT_REQUESTED': 'Data Out requested',
   'source.reason.DATA_OUT_UNAVAILABLE': 'Data Out unreachable',
+  'source.reason.DATA_OUT_NOT_OVER_LORA': 'Data Out not used over Telemetry LoRa',
 
   'route.overview': 'Dashboard',
   'route.system-health': 'System Health',
@@ -352,6 +353,7 @@ const en = {
   'polarDock.footerPolar': 'θ₀ {theta}° · −3 dB {width} · HU {head}°',
   'polarDock.footerWaiting': 'Waiting for fresh data · HU {head}°',
   'polarDock.noCurve': 'no Angular curve',
+  'polarDock.angularAge': 'Angular {age} ago',
   'polarDock.heldCurve': 'No update yet · last {time}',
 
   'spectrum.title': 'Spectrum',
@@ -493,6 +495,7 @@ const en = {
   'control.send': 'Send to RDF-SDR',
   'control.back': 'Back',
   'control.posting': 'Sending to the console…',
+  'control.loraWaiting': 'Waiting for the Telemetry LoRa radio turn…',
   'control.sending': 'Sent to the broker. Waiting for {topic} for {id}…',
   'control.done': 'Done',
   'control.reload': 'Read values again',
@@ -1009,6 +1012,7 @@ const en = {
   'config.nav.lan': 'LAN access',
   'config.connectionTitle': 'Connection & refresh',
   'config.baseUrl': 'Data Out base URL',
+  'config.dataOutUnused': 'Data Out · not used over Telemetry LoRa',
   'config.dataOutHosts': 'Data Out (fallback) hosts',
   'config.dataOutHostNew': 'New host',
   'config.dataOutHostAdd': 'Add host',
@@ -1401,6 +1405,7 @@ const id: Dictionary = {
   'source.reason.MQTT_DAQ_NOT_HEALTHY': 'DAQ tidak sehat menurut MQTT',
   'source.reason.DATA_OUT_REQUESTED': 'Data Out diminta',
   'source.reason.DATA_OUT_UNAVAILABLE': 'Data Out tidak terjangkau',
+  'source.reason.DATA_OUT_NOT_OVER_LORA': 'Data Out tidak dipakai lewat Telemetry LoRa',
 
   'route.overview': 'Dashboard',
   'route.system-health': 'Kesehatan Sistem',
@@ -1504,6 +1509,7 @@ const id: Dictionary = {
   'polarDock.footerPolar': 'θ₀ {theta}° · −3 dB {width} · HU {head}°',
   'polarDock.footerWaiting': 'Menunggu data segar · HU {head}°',
   'polarDock.noCurve': 'tanpa kurva Angular',
+  'polarDock.angularAge': 'Angular {age} lalu',
   'polarDock.heldCurve': 'Belum ada update · terakhir {time}',
 
   'spectrum.title': 'Spektrum',
@@ -1645,6 +1651,7 @@ const id: Dictionary = {
   'control.send': 'Kirim ke RDF-SDR',
   'control.back': 'Kembali',
   'control.posting': 'Mengirim ke console…',
+  'control.loraWaiting': 'Menunggu giliran radio Telemetry LoRa…',
   'control.sending': 'Terkirim ke broker. Menunggu {topic} untuk {id}…',
   'control.done': 'Selesai',
   'control.reload': 'Baca ulang nilai',
@@ -2161,6 +2168,7 @@ const id: Dictionary = {
   'config.nav.lan': 'Akses LAN',
   'config.connectionTitle': 'Koneksi & refresh',
   'config.baseUrl': 'Base URL Data Out',
+  'config.dataOutUnused': 'Data Out · tidak dipakai selama Telemetry LoRa',
   'config.dataOutHosts': 'Host Data Out (cadangan)',
   'config.dataOutHostNew': 'Host baru',
   'config.dataOutHostAdd': 'Tambah host',

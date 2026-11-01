@@ -2,6 +2,22 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.4.2
+
+Rilis patch: tidak ada yang dihapus. Console kini menyesuaikan diri dengan Telemetry LoRa: Data Out disembunyikan selama jalurnya LoRa, Kontrol menyebut perintah yang menunggu giliran radio, dan dock Polar menyebut umur kurva Angular. Kanal `3` dan timer update memasangnya sendiri.
+
+- **Data Out tidak dipakai selama Telemetry LoRa.** Selama broker groundstation memegang status jembatan `lora/ground`, console sama sekali tidak membaca Data Out.
+  - Tidak ada lagi bacaan ringan tiap 30 detik yang pasti gagal.
+  - Bila MQTT tidak segar, sumber langsung **tidak ada**, dengan alasan "Data Out tidak dipakai lewat Telemetry LoRa" (`DATA_OUT_NOT_OVER_LORA`). Console tidak menunggu 4 detik untuk Data Out yang tidak terjangkau.
+  - **Konfigurasi:** URL dan daftar host Data Out dilipat ke "Data Out · tidak dipakai selama Telemetry LoRa". Setelannya tetap tersimpan.
+  - **System Health:** kartu Data Out tidak ditampilkan.
+  - Tanpa jembatan LoRa, semuanya kembali seperti biasa.
+- **Kontrol menunggu giliran radio.** Lewat Telemetry LoRa sebuah perintah menunggu giliran pancar groundstation (ACK biasanya 2–5 detik). Selama perintah sudah dikirim tapi belum dijawab, Kontrol menulis "Menunggu giliran radio Telemetry LoRa…".
+  - Batas waktunya tidak berubah: tidak ada ACK sampai batas 15 detik ditambah 5 detik, dan tidak ada yang dikirim ulang otomatis.
+  - Hanya satu patch dan satu Baca settings yang berjalan sekaligus.
+- **Umur kurva Angular.** Lewat Telemetry LoRa frame Angular datang paling cepat tiap 20 detik. Kaki dock Polar kini menyebut umurnya ("Angular 14 dtk lalu"), supaya kurva tidak terlihat macet.
+- **Ritme jembatan LoRa yang baru** (health sekitar tiap 2 detik dengan `q` naik sekitar 2, DoA diprioritaskan) sudah cocok dengan aturan console: health dianggap segar 8 detik selama `q` naik, dan indikator data masuk memakai jumlah pesan antar status jembatan.
+
 ## 3.4.1
 
 Rilis patch: tidak ada yang dihapus. Istilah link LoRa di console kini **Telemetry LoRa**, dan kartu node menampilkan kompas dan GPS RDF-SDR. Kanal `3` dan timer update memasangnya sendiri.

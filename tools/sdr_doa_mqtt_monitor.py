@@ -620,6 +620,8 @@ class MqttMonitor:
                 "now_ms": now,
                 "session": self._rdf_node.session_view(now),
                 "settings": self._rdf_node.settings_report(),
+                # Commands reach the node over the LoRa serial bridge: each waits for a radio turn.
+                "link": "lora" if self._lora.has_role("ground") else None,
             }
 
     def snapshot(self) -> Dict[str, Any]:

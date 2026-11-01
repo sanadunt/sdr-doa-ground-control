@@ -186,6 +186,7 @@ class DataOutReader:
         *,
         collect_light: Optional[Callable[[str, bool], Dict[str, Any]]] = None,
         mqtt_view: Callable[[], Optional[Mapping[str, Any]]] = lambda: None,
+        collect_offline: Optional[Callable[[str], Dict[str, Any]]] = None,
         light_interval_s: float = LIGHT_READ_INTERVAL_S,
         run_background: Callable[[Callable[[], None]], None] = _start_thread,
     ) -> None:
@@ -199,6 +200,9 @@ class DataOutReader:
         self._collect = collect
         self._collect_light = collect_light
         self._mqtt_view = mqtt_view
+        # The answer that reads nothing, for a node with no IP path (view
+        # "link" "lora", the LoRa serial bridge): no Data Out at all then.
+        self._collect_offline = collect_offline
         self._light_interval_s = float(light_interval_s)
         self._run_background = run_background
         self._refresh_seconds = refresh_seconds
@@ -287,7 +291,15 @@ class DataOutReader:
             # MQTT went stale while Kontrol's "Cek ulang" waited for settings.
             view = self._read_mqtt_view()
             fresh, reasons = ts.mqtt_freshness(view)
+        if self._over_lora(view, request):
+            # No IP path to the node: nothing to read, and no 4 s wait for it.
+            return ts.with_source(self._collect_offline(base_url), view, reasons, over_lora=True)
         return ts.with_source(self._data_out_snapshot(base_url, request), view, reasons)
+
+    def _over_lora(self, view: Optional[Mapping[str, Any]], request: SnapshotRequest) -> bool:
+        """The node reaches the broker over the LoRa serial bridge (and the legacy UI did not ask for Data Out)."""
+        return (self._collect_offline is not None and view is not None and view.get("link") == "lora"
+                and not request.data_out_only)
 
     def _mqtt_snapshot(self, base_url: str, request: SnapshotRequest, view: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
         key = base_url.rstrip("/")
@@ -301,7 +313,7 @@ class DataOutReader:
             wait_for: Optional[_Collection] = None
             with self._lock:
                 target = self._target_locked(key)
-                if self._collect_light is None:
+                if self._collect_light is None or self._over_lora(view, request):
                     break
                 running = target.light_running
                 if running is None:

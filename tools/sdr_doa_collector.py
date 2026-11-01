@@ -384,6 +384,14 @@ def _elapsed_ms(started_monotonic: float) -> int:
     return max(0, int(round((time.monotonic() - started_monotonic) * 1000)))
 
 
+NOT_OVER_LORA_ERROR = "Data Out is not read over Telemetry LoRa (no IP path to the node)"
+
+
+def not_over_lora_fetcher(base_url: str, path: str, _timeout: float = 0.0, _max_body: int = 0) -> FetchedResource:
+    """A fetcher that reads nothing: the answer of a console whose node has no IP path (the LoRa serial bridge)."""
+    return _not_fetched(base_url, path, NOT_OVER_LORA_ERROR, "skipped")
+
+
 def _not_fetched(base_url: Any, path: str, error: str, error_kind: str) -> FetchedResource:
     return FetchedResource(
         path=path,

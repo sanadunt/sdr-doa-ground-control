@@ -811,6 +811,46 @@ class ReaderTests(unittest.TestCase):
         # 120 s at 2 s polls: a light read at 0, 30, 60 and 90 s.
         self.assertEqual(len(self.light.calls), 4)
 
+    def lora_reader(self) -> DataOutReader:
+        """The reader of a console whose node reaches the broker over the LoRa serial bridge."""
+        self.offline: list = []
+
+        def offline(base_url: str) -> Dict[str, Any]:
+            self.offline.append(base_url)
+            return collector.collect(base_url=base_url, fetcher=collector.not_over_lora_fetcher, allowed_hosts=["127.0.0.1"])
+
+        return DataOutReader(
+            self.full, lambda: 2, wait_timeout_s=5.0, clock=self.clock, wall_ms=lambda: 9_000_000,
+            console_base_url=lambda: BASE_URL, collect_light=self.light,
+            mqtt_view=lambda: dict(self.edge.view(), link="lora"), collect_offline=offline,
+            run_background=lambda function: function(),
+        )
+
+    def test_no_data_out_at_all_over_lora(self) -> None:
+        reader = self.lora_reader()
+        self.edge.live()
+        for request in (SnapshotRequest(), SnapshotRequest(refresh=True), SnapshotRequest(fresh_settings=True)):
+            answer = reader.snapshot(BASE_URL, request)
+            self.assertEqual((answer["source"]["kind"], answer["source"]["link"]), ("mqtt", "lora"))
+            self.advance(31.0)
+            self.keep_alive()
+        self.assertEqual((self.full.calls, self.light.calls, self.offline), ([], [], []))
+
+    def test_stale_mqtt_over_lora_reads_nothing(self) -> None:
+        reader = self.lora_reader()
+        self.edge.live()
+        self.advance(9.0)
+        answer = reader.snapshot(BASE_URL, SnapshotRequest())
+        self.assertEqual(answer["source"]["kind"], "none")
+        self.assertEqual(answer["source"]["reasons"], ["MQTT_HEALTH_STALE", "DATA_OUT_NOT_OVER_LORA"])
+        self.assertEqual((answer["source"]["link"], answer["source"]["data_out"]["read"]), ("lora", "none"))
+        self.assertEqual(answer["resources"]["/status.json"]["error_kind"], "skipped")
+        self.assertEqual(self.full.calls, [])
+        self.assertEqual(self.offline, [BASE_URL])
+        # The legacy UI still asks Data Out itself.
+        reader.snapshot(BASE_URL, SnapshotRequest(data_out_only=True))
+        self.assertEqual(len(self.full.calls), 1)
+
     def test_read_reason_decides_light_reads(self) -> None:
         reason = self.reader.read_reason
         mark = ("227c8be2", 1)

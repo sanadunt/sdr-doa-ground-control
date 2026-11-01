@@ -3,7 +3,7 @@ import type { Candidate, LoraLinkRole, MqttSnapshot, TelemetrySnapshot, Tone } f
 import type { ConsoleCapabilities } from '../api';
 import { configPatchPublishable } from '../lib/configPatch';
 import { elapsedSinceRead, lastMessageAgeMs } from '../lib/mqttMonitor';
-import { loraChip } from '../lib/loraLink';
+import { dataOutUnused, loraChip } from '../lib/loraLink';
 import { candidate, formatNumber, numberOrNull, syncCount, toneFor } from '../lib/telemetry';
 import { isMqttSnapshot } from '../lib/telemetrySource';
 import { useI18n } from '../lib/i18n';
@@ -382,7 +382,8 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
           <DoaViewsCard snapshot={snapshot} />
         </PageStack>
         <PageStack span={6}>
-          <DataOutCard snapshot={snapshot} />
+          {/* Over Telemetry LoRa there is no Data Out to show (no IP path to the node). */}
+          {dataOutUnused(snapshot, mqtt) ? null : <DataOutCard snapshot={snapshot} />}
           <MqttCard mqtt={mqtt} mqttError={mqttError} capabilities={capabilities} />
           <LoraCard mqtt={mqtt} />
         </PageStack>

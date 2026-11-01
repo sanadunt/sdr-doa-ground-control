@@ -302,6 +302,7 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self.assertEqual(self.monitor.rdf_node_snapshot()["received"], 0)
         with patch.object(self.module, "_now_ms", lambda: clock[0]):
             self.assertEqual(self.monitor.rdf_node_view()["link"], "lora")
+            self.assertEqual(self.monitor.rdf_node_control_view()["link"], "lora")
 
     def test_client_construction_failure_surfaces_shared_connection_error(self) -> None:
         def unavailable_client(*_args: object, **_kwargs: object) -> None:

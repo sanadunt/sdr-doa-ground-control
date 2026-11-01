@@ -284,8 +284,11 @@ export function ControlPanelView({
   const baseRev = reported?.baseRev ?? null;
   const brokerText = reported?.broker.host ? `${reported.broker.host}${reported.broker.port ? `:${reported.broker.port}` : ''}` : '—';
   const settings = reported?.settings ?? null;
+  const overLora = reported?.link === 'lora';
   const settingsRead = settingsReadView(reported?.settingsRequest);
   const reading = settingsRead?.key === 'control.settings.reading';
+  // Over Telemetry LoRa a command waits for the ground's radio turn before the RDF-SDR answers.
+  const radioWait = (state: string | undefined) => overLora && (state === 'published' || state === 'delivered');
   // remote_config_patch false: Send stays usable, after an explicit second confirmation.
   const capabilityWarning = node?.remoteConfigPatch === false;
   const reviewBlocked: MessageKey | null = !review ? null
@@ -337,7 +340,7 @@ export function ControlPanelView({
         </div>
         {settingsRead ? (
           <p className={settingsRead.tone === 'info' ? 'ov-control-note' : settingsRead.tone === 'warn' ? 'ov-control-warn' : 'ov-control-error'} role="status">
-            {settingsRead.code ? <><span className="ov-mono">{settingsRead.code}</span> · </> : null}{t(settingsRead.key)}
+            {settingsRead.code ? <><span className="ov-mono">{settingsRead.code}</span> · </> : null}{t(reading && radioWait(reported?.settingsRequest?.state) ? 'control.loraWaiting' : settingsRead.key)}
           </p>
         ) : null}
         {settingsError ? (
@@ -445,7 +448,9 @@ export function ControlPanelView({
 
         {stage === 'sending' ? (
           <div className="ov-control-box" aria-live="polite">
-            <span>{sending?.commandId ? withSlots(t('control.sending'), { topic: ackTopic, id: sending.commandId }) : t('control.posting')}</span>
+            <span>{sending?.commandId
+              ? radioWait(sending.status?.state) ? t('control.loraWaiting') : withSlots(t('control.sending'), { topic: ackTopic, id: sending.commandId })
+              : t('control.posting')}</span>
             {sending?.status ? <span className="ov-mono ov-control-state">{sending.status.ack?.status ?? sending.status.state}</span> : null}
           </div>
         ) : null}

@@ -100,9 +100,12 @@ MQTT_DAQ_NOT_HEALTHY = "MQTT_DAQ_NOT_HEALTHY"
 # The request asked for Data Out (the legacy UI); MQTT was not consulted.
 DATA_OUT_REQUESTED = "DATA_OUT_REQUESTED"
 DATA_OUT_UNAVAILABLE = "DATA_OUT_UNAVAILABLE"
+# The node reaches the broker over the LoRa serial bridge, which carries no IP:
+# Data Out is not read at all, also when MQTT is not fresh.
+DATA_OUT_NOT_OVER_LORA = "DATA_OUT_NOT_OVER_LORA"
 SOURCE_REASONS = (
     MQTT_FRESH, MQTT_DISABLED, MQTT_NO_SESSION, MQTT_NO_HEALTH, MQTT_HEALTH_STALE, MQTT_DAQ_NOT_HEALTHY,
-    DATA_OUT_REQUESTED, DATA_OUT_UNAVAILABLE,
+    DATA_OUT_REQUESTED, DATA_OUT_UNAVAILABLE, DATA_OUT_NOT_OVER_LORA,
 )
 
 # Publication-gate reasons of an MQTT answer besides the collector's own.
@@ -210,19 +213,27 @@ def mqtt_summary(view: Optional[Mapping[str, Any]], fresh: bool) -> Dict[str, An
     }
 
 
-def with_source(answer: Dict[str, Any], view: Optional[Mapping[str, Any]], reasons: List[str]) -> Dict[str, Any]:
-    """Mark a Data Out answer: ``data_out`` when it read status.json, else ``none``."""
+def with_source(answer: Dict[str, Any], view: Optional[Mapping[str, Any]], reasons: List[str],
+                *, over_lora: bool = False) -> Dict[str, Any]:
+    """Mark a Data Out answer: ``data_out`` when it read status.json, else ``none``.
+
+    ``over_lora``: the answer read nothing because the node has no IP path
+    (the LoRa serial bridge); it is ``none`` with DATA_OUT_NOT_OVER_LORA.
+    """
     status = _record(answer.get("status")) or {}
-    available = status.get("available") is True
+    available = status.get("available") is True and not over_lora
     reasons = list(reasons) or [MQTT_DISABLED]
-    if not available:
+    if over_lora:
+        reasons.append(DATA_OUT_NOT_OVER_LORA)
+    elif not available:
         reasons.append(DATA_OUT_UNAVAILABLE)
     answer["source"] = {
         "kind": SOURCE_DATA_OUT if available else SOURCE_NONE,
         "reason": reasons[0],
         "reasons": reasons,
+        "link": "lora" if over_lora else None,
         "mqtt": mqtt_summary(view, False),
-        "data_out": {"read": "full", "available": available},
+        "data_out": {"read": "none" if over_lora else "full", "available": available},
     }
     return answer
 
@@ -814,6 +825,7 @@ def mqtt_snapshot(
 
 __all__ = [
     "DATA_OUT_REQUESTED",
+    "DATA_OUT_NOT_OVER_LORA",
     "DATA_OUT_UNAVAILABLE",
     "LIGHT_READ_INTERVAL_S",
     "MQTT_FRESH",
