@@ -2,11 +2,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { NodeCard } from '../components/overview/NodeCard';
 import type { TelemetrySnapshot } from '../types';
-import { overviewDoaStatus } from './doaStatus';
+import { doaStatusTextKey, overviewDoaStatus } from './doaStatus';
 import { I18nContext, translate } from './i18n';
 import type { Lang } from './i18n';
 import { gpsReportsNoFix, resolveGpsSource, resolveStationCoordinate } from './map';
-import { overLora, snapshotNav } from './telemetrySource';
+import { overLora, snapshotNav, sourceBadge } from './telemetrySource';
 
 /** An answer of tools/telemetry_source.py, written by tools/test_telemetry_source.py. */
 function answer(name: string): TelemetrySnapshot {
@@ -43,16 +43,28 @@ describe('LoRa link of an MQTT answer', () => {
   it('shows the unknown ADC overdrive as not available over LoRa, the bearing still drawn', () => {
     const status = overviewDoaStatus(LORA, true);
     expect(status).toMatchObject({ code: 'DEGRADED', reason: 'adcNotOverLora', shown: true });
-    expect(translate('id', 'polar.adcNotOverLora')).toContain('tidak tersedia lewat LoRa');
+    expect(translate('id', 'polar.adcNotOverLora')).toContain('tidak tersedia lewat Telemetry LoRa');
     expect(overviewDoaStatus(withNav({ ...LORA, source: { ...LORA.source, link: null } }, LORA.nav ?? null), true).reason).toBe('adcUnknown');
+  });
+
+  it('names the source and the missing DoA Telemetry LoRa', () => {
+    expect(sourceBadge(LORA)).toMatchObject({ kind: 'mqtt', labelKey: 'source.lora' });
+    expect(sourceBadge(LIVE)).toMatchObject({ kind: 'mqtt', labelKey: 'source.mqtt' });
+    expect(translate('en', 'source.lora')).toBe('Telemetry LoRa');
+    const noDoa = { ...LORA, doa_candidates: { mqtt: { available: false } } } as TelemetrySnapshot;
+    expect(overviewDoaStatus(noDoa, true)).toMatchObject({ code: 'STALE', reason: 'loraNoDoa' });
+    expect(doaStatusTextKey('loraNoDoa')).toBe('polar.loraNoDoa');
+    expect(translate('id', 'polar.loraNoDoa')).toBe('Tidak ada DoA LIVE lewat Telemetry LoRa');
+    const mqttNoDoa = { ...LIVE, doa_candidates: { mqtt: { available: false } } } as TelemetrySnapshot;
+    expect(overviewDoaStatus(mqttNoDoa, true).reason).toBe('mqttNoDoa');
   });
 
   it('names the node values that cannot come over LoRa instead of faking them', () => {
     const markup = node(LORA);
-    expect(markup).toContain('Frequency and gain not available over LoRa');
-    expect(markup.match(/not available over LoRa/g)?.length).toBeGreaterThanOrEqual(4);
-    expect(node(LORA, 'id')).toContain('tidak tersedia lewat LoRa');
-    expect(node(LIVE)).not.toContain('LoRa');
+    expect(markup).toContain('Frequency and gain not available over Telemetry LoRa');
+    expect(markup.match(/not available over Telemetry LoRa/g)?.length).toBeGreaterThanOrEqual(4);
+    expect(node(LORA, 'id')).toContain('tidak tersedia lewat Telemetry LoRa');
+    expect(node(LIVE)).not.toContain('Telemetry LoRa');
   });
 });
 

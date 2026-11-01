@@ -24,7 +24,9 @@ export type DoaStatusReason =
   | 'localExpired'
   | 'angleMissing'
   | 'mqttUnverified'
-  | 'mqttNoDoa';
+  | 'mqttNoDoa'
+  | 'loraUnverified'
+  | 'loraNoDoa';
 
 export interface DoaStatus {
   /** Untranslated status code for badges. */
@@ -86,7 +88,13 @@ export function doaStatus(snapshot: TelemetrySnapshot | null | undefined, localF
     // One view from MQTT: the LIVE DoA (ok=1), shown with or without its
     // Angular frame. An UNVERIFIED DoA (ok=0) is a diagnostic and never shown.
     const view = candidate(snapshot, 'mqtt');
-    if (view.available !== true) return mqttDoaUnverified(snapshot) ? blocked('UNVERIFIED', 'mqttUnverified') : blocked('STALE', 'mqttNoDoa');
+    if (view.available !== true) {
+      // Over the LoRa serial bridge the same MQTT topics arrive by radio; the operator sees Telemetry LoRa.
+      const lora = overLora(snapshot);
+      return mqttDoaUnverified(snapshot)
+        ? blocked('UNVERIFIED', lora ? 'loraUnverified' : 'mqttUnverified')
+        : blocked('STALE', lora ? 'loraNoDoa' : 'mqttNoDoa');
+    }
     if (!parsedCandidate(view)) return blocked('INCOMPLETE', 'angleMissing');
     if (!freshCandidate(view)) return blocked('STALE', 'sourceStale');
     if (!localFresh) return blocked('STALE', 'localExpired');
@@ -120,6 +128,8 @@ export function overviewDoaStatus(snapshot: TelemetrySnapshot | null | undefined
 const PROVISIONAL_REASONS: ReadonlySet<DoaStatusReason> = new Set<DoaStatusReason>([
   'mqttUnverified',
   'mqttNoDoa',
+  'loraUnverified',
+  'loraNoDoa',
   'sourceStale',
   'localExpired',
   'nodeStalled',
@@ -169,6 +179,8 @@ const STATUS_TEXT: Record<DoaStatusReason, MessageKey> = {
   angleMissing: 'polar.angleMissing',
   mqttUnverified: 'polar.mqttUnverified',
   mqttNoDoa: 'polar.mqttNoDoa',
+  loraUnverified: 'polar.loraUnverified',
+  loraNoDoa: 'polar.loraNoDoa',
 };
 
 export function doaStatusTextKey(reason: DoaStatusReason): MessageKey {

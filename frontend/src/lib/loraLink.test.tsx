@@ -38,7 +38,7 @@ function shellMarkup(lora: LoraLinkView | undefined, lang: Lang = 'en'): string 
 }
 
 function loraItem(markup: string): { className: string; value: string; title: string | null } | null {
-  const match = markup.match(/<span class="(telemetry-item[^"]*)"( title="([^"]*)")?[^>]*><span class="telemetry-key">LoRa<\/span><span class="telemetry-value"><i aria-hidden="true"><\/i>([^<]*)<\/span>/);
+  const match = markup.match(/<span class="(telemetry-item[^"]*)"( title="([^"]*)")?[^>]*><span class="telemetry-key">Telemetry LoRa<\/span><span class="telemetry-value"><i aria-hidden="true"><\/i>([^<]*)<\/span>/);
   return match ? { className: match[1], title: match[3] ?? null, value: match[4] } : null;
 }
 
@@ -95,9 +95,9 @@ describe('LoRa chip', () => {
     const t = (lang: Lang) => (key: Parameters<typeof translate>[1], vars?: Parameters<typeof translate>[2]) => translate(lang, key, vars);
     expect(loraCause(t('en'), view('receiving'))).toBeUndefined();
     expect(loraCause(t('en'), view('idle'))).toBe('Heartbeats only, no telemetry');
-    expect(loraCause(t('en'), view('down'))).toBe('No LoRa frame for 16 s');
-    expect(loraCause(t('id'), view('stale'))).toBe('Jembatan LoRa diam selama 40 dtk');
-    expect(loraCause(t('en'), view('port_error'))).toBe('LoRa port: ENOENT');
+    expect(loraCause(t('en'), view('down'))).toBe('No Telemetry LoRa frame for 16 s');
+    expect(loraCause(t('id'), view('stale'))).toBe('Jembatan Telemetry LoRa diam selama 40 dtk');
+    expect(loraCause(t('en'), view('port_error'))).toBe('Telemetry LoRa port: ENOENT');
     expect(loraCause(t('en'), view('clock'))).toContain('RDF-SDR clock off by -2.4 s');
     expect(loraItem(shellMarkup(view('clock'), 'id'))?.title).toContain('SOURCE_TIMESTAMP_NOT_FRESH');
   });
@@ -110,13 +110,13 @@ describe('System Health LoRa card', () => {
   );
 
   it('is absent without a bridge', () => {
-    expect(page(undefined)).not.toContain('LoRa link');
-    expect(page(view('absent'))).not.toContain('LoRa link');
+    expect(page(undefined)).not.toContain('>Telemetry LoRa<');
+    expect(page(view('absent'))).not.toContain('>Telemetry LoRa<');
   });
 
   it('shows the data-in state, rates, errors and the RDF-SDR side', () => {
     const markup = page(view('receiving'));
-    expect(markup).toContain('LoRa link');
+    expect(markup).toContain('>Telemetry LoRa<');
     expect(markup).toContain('Receiving');
     expect(markup).toContain('4/s · 6/s');
     expect(markup).toContain('198 frames · 2 lost');
@@ -125,8 +125,8 @@ describe('System Health LoRa card', () => {
   });
 
   it('warns about a silent bridge, the port and the RDF-SDR clock', () => {
-    expect(page(view('stale'))).toContain('LoRa bridge silent for');
-    expect(page(view('port_error'))).toContain('LoRa port: ENOENT');
+    expect(page(view('stale'))).toContain('Telemetry LoRa bridge silent for');
+    expect(page(view('port_error'))).toContain('Telemetry LoRa port: ENOENT');
     expect(page(view('clock'))).toContain('SOURCE_TIMESTAMP_NOT_FRESH');
   });
 });
