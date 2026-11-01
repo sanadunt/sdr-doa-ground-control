@@ -2,6 +2,14 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.4.1
+
+Rilis patch: tidak ada yang dihapus. Istilah link LoRa di console kini **Telemetry LoRa**, dan kartu node menampilkan kompas dan GPS RDF-SDR. Kanal `3` dan timer update memasangnya sendiri.
+
+- **Telemetry LoRa.** Lewat jembatan LoRa serial, console tetap membaca topik MQTT RDF Node dari broker lokal groundstation, tapi tampilan kini menyebut jalurnya. Chip **Sumber** dan badge HUD menjadi **Telemetry LoRa** selama jawaban MQTT membawa `source.link: "lora"` (tanpa jembatan tetap **MQTT**). "Tidak ada DoA LIVE lewat MQTT" menjadi **"Tidak ada DoA LIVE lewat Telemetry LoRa"**, juga di notifikasi peta dan DoA Diagnostics. Chip, kartu System Health, tooltip, dan teks "tidak tersedia lewat Telemetry LoRa" memakai nama yang sama. Chip **MQTT** tetap: itu koneksi console ke broker lokal yang juga dipakai jembatan.
+- **Panel Kontrol berjudul "Kontrol RDF-SDR"** (sebelumnya "Kontrol MQTT"): yang dikendalikan adalah RDF-SDR, apa pun jalurnya.
+- **Kompas dan GPS RDF-SDR di kartu node.** Bila RDF Node 1.6 mengirim field nav di `telemetry/health`, kartu node (dibuka) menampilkan heading kompas (atau state-nya bila belum `OK`), state GPS dengan fix dan jumlah satelit, ketinggian dan kecepatan. Heading hanya ditampilkan; bearing di peta tetap memakai offset kompas yang dipilih.
+
 ## 3.4.0
 
 Rilis minor: tidak ada yang dihapus. Console kini siap untuk link LoRa serial ke RDF-SDR, yang menggantikan T900/PPP. Ada status link LoRa di bilah atas dan System Health, posisi stasiun dari GPS RDF-SDR, dan label jujur untuk nilai yang tidak bisa lewat LoRa. Kanal `3` dan timer update memasangnya sendiri. Tanpa jembatan LoRa, tampilan console sama seperti 3.3.0.
