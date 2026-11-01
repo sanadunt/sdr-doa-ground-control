@@ -2,7 +2,7 @@ import { useState } from 'react';
 import type { JSX, ReactNode } from 'react';
 import type { Candidate, TelemetrySnapshot } from '../types';
 import { candidate, formatNumber, nativeViewsReady, primaryCandidate } from '../lib/telemetry';
-import { isMqttSnapshot, mqttAngleMode, mqttDiagnosticRows } from '../lib/telemetrySource';
+import { isMqttSnapshot, mqttAngleMode, mqttDiagnosticRows, overLora } from '../lib/telemetrySource';
 import type { MqttDiagnosticRow } from '../lib/telemetrySource';
 import { gateReasonLabel, useI18n } from '../lib/i18n';
 import type { MessageKey, Translate } from '../lib/i18n';
@@ -331,7 +331,7 @@ function MqttDoaCard({ snapshot }: { snapshot: TelemetrySnapshot | null }): JSX.
       ]} />
       {rows.length
         ? <DataTable columns={columns} rows={rows} rowKey={(row) => row.key} label={t('diag.mqtt.title')} stack={false} />
-        : <EmptyState label={t('polar.mqttNoDoa')} code="WAITING" />}
+        : <EmptyState label={t(overLora(snapshot) ? 'polar.loraNoDoa' : 'polar.mqttNoDoa')} code="WAITING" />}
     </Card>
   );
 }

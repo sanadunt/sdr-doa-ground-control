@@ -73,7 +73,9 @@ export function sourceBadge(snapshot: TelemetrySnapshot | null | undefined): Sou
   const kind = snapshotSourceKind(snapshot);
   if (kind === null) return null;
   const reasons = kind === 'mqtt' ? [] : snapshotSourceReasons(snapshot).filter((reason) => reason !== 'MQTT_FRESH');
-  return { kind, ...BADGE[kind], reasons };
+  // The LoRa serial bridge carries the same MQTT topics by radio: name the link the operator knows.
+  const badge = kind === 'mqtt' && overLora(snapshot) ? { ...BADGE.mqtt, labelKey: 'source.lora' as MessageKey } : BADGE[kind];
+  return { kind, ...badge, reasons };
 }
 
 /** i18n key of a source code. */
