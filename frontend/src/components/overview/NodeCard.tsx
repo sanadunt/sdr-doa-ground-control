@@ -3,7 +3,8 @@ import type { MapCoordinate, TelemetrySnapshot } from '../../types';
 import { adcOverdriven, daqSyncState, numberOrNull, syncCount } from '../../lib/telemetry';
 import { signalQualityView } from '../../lib/healthView';
 import { useI18n } from '../../lib/i18n';
-import { overLora } from '../../lib/telemetrySource';
+import type { Translate } from '../../lib/i18n';
+import { overLora, snapshotNav } from '../../lib/telemetrySource';
 import { coordinateSourceKey } from '../DoaReadout';
 import { Icon } from '../ui';
 
@@ -75,6 +76,43 @@ export function nodeSummary(snapshot: TelemetrySnapshot | null): NodeSummary {
   };
 }
 
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function navState(value: unknown): string | null {
+  return typeof value === 'string' && /^[A-Z_]{1,16}$/u.test(value) ? value : null;
+}
+
+/**
+ * The RDF-SDR's compass and GPS from the nav fields of health (contract 1.6),
+ * shown only when the edge sends them. The heading is the compass's own value
+ * (magnetic north plus the edge's offset); the bearing on the map does not use it.
+ */
+export function navRows(nav: Record<string, unknown> | null, t: Translate): Array<[string, string, string?]> {
+  if (!nav) return [];
+  const rows: Array<[string, string, string?]> = [];
+  const compass = navState(nav.compass_state);
+  const heading = finiteNumber(nav.heading_deg);
+  if (compass !== null || heading !== null) {
+    const text = heading !== null && compass === 'OK' ? `${heading.toFixed(1)}°` : compass ?? '—';
+    rows.push([t('node.compass'), text, compass === 'OK' ? 'is-good' : compass ? 'is-warn' : undefined]);
+  }
+  const gps = navState(nav.gps_state);
+  if (gps !== null) {
+    const fix = finiteNumber(nav.fix);
+    const sats = finiteNumber(nav.satellites);
+    const parts = [gps === 'FIX' && (fix === 2 || fix === 3) ? `FIX ${fix}D` : gps];
+    if (sats !== null) parts.push(t('node.satellites', { count: sats }));
+    rows.push([t('node.gps'), parts.join(' · '), gps === 'FIX' ? 'is-good' : 'is-warn']);
+  }
+  const altitude = finiteNumber(nav.altitude_m);
+  if (altitude !== null) rows.push([t('node.altitude'), `${altitude.toFixed(1)} m`]);
+  const speed = finiteNumber(nav.speed_mps);
+  if (speed !== null) rows.push([t('node.speed'), `${speed.toFixed(1)} m/s`]);
+  return rows;
+}
+
 /**
  * Collapsible node card in the right column. The two summary lines always
  * render, including the station position, so the position stays visible
@@ -133,6 +171,7 @@ export function NodeCard({
     [t('node.adc'), dataOutValue(summary.adc === 'N/A', summary.adc), summary.adc === 'OK' ? 'is-good' : summary.adc === 'OVERDRIVE' ? 'is-bad' : undefined],
     [t('node.frame'), value(summary.frame === null ? '—' : `#${summary.frame}`)],
     [t('node.remoteControl'), value(summary.remoteControl)],
+    ...navRows(snapshotNav(snapshot), t),
   ];
 
   return (

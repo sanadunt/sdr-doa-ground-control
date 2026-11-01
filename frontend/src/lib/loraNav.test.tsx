@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { NodeCard } from '../components/overview/NodeCard';
+import { NodeCard, navRows } from '../components/overview/NodeCard';
 import type { TelemetrySnapshot } from '../types';
 import { doaStatusTextKey, overviewDoaStatus } from './doaStatus';
 import { I18nContext, translate } from './i18n';
@@ -93,5 +93,30 @@ describe('Station position from the health nav fields', () => {
     expect(gpsReportsNoFix(withNav(LORA, { gps_state: 'NO_FIX', fix: 0 }), true)).toBe(true);
     expect(gpsReportsNoFix(withNav(LORA, { compass_state: 'OK' }), true)).toBe(false);
     expect(gpsReportsNoFix(withNav(LORA, null), true)).toBe(false);
+  });
+});
+
+describe('Compass and GPS rows of the node card', () => {
+  const t = (key: Parameters<typeof translate>[1], vars?: Parameters<typeof translate>[2]) => translate('en', key, vars);
+
+  it('shows the RDF-SDR compass, GPS, altitude and speed', () => {
+    expect(navRows(snapshotNav(LORA), t)).toEqual([
+      ['Compass', '201.1°', 'is-good'],
+      ['GPS', 'FIX 3D · 7 sat', 'is-good'],
+      ['Altitude', '715.9 m'],
+      ['Speed', '0.1 m/s'],
+    ]);
+    expect(node(LORA)).toContain('201.1°');
+    expect(node(LORA, 'id')).toContain('Kompas');
+  });
+
+  it('names a compass or GPS that is not ready and shows nothing without nav', () => {
+    expect(navRows({ compass_state: 'NO_REPLY', heading_deg: null, gps_state: 'NO_FIX', fix: 0, satellites: 2 }, t)).toEqual([
+      ['Compass', 'NO_REPLY', 'is-warn'],
+      ['GPS', 'NO_FIX · 2 sat', 'is-warn'],
+    ]);
+    expect(navRows({ compass_state: '<b>', gps_state: 'fix ok' }, t)).toEqual([]);
+    expect(navRows(null, t)).toEqual([]);
+    expect(node(LIVE)).not.toContain('<dt>Compass</dt>');
   });
 });
