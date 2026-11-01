@@ -1,4 +1,4 @@
-import type { LoraDataState, LoraLinkRole, LoraLinkState, LoraLinkView, Tone } from '../types';
+import type { LoraDataState, LoraLinkRole, LoraLinkState, LoraLinkView, MqttSnapshot, TelemetrySnapshot, Tone } from '../types';
 
 type JsonObject = Record<string, unknown>;
 
@@ -101,4 +101,15 @@ export function loraChip(lora: LoraLinkView | null | undefined): LoraChip | null
     case 'NONE': return { value: 'NO RX', tone: 'warn', receiving: false, clockWarning };
     default: return { value: 'UP', tone: warn, receiving: false, clockWarning };
   }
+}
+
+/**
+ * Data Out is not used: the node reaches the broker over the LoRa serial
+ * bridge (no IP path), named by the snapshot's source or by a bridge status on
+ * the broker. Its settings and card then fold away.
+ */
+export function dataOutUnused(snapshot: TelemetrySnapshot | null | undefined, mqtt: MqttSnapshot | null | undefined): boolean {
+  const source = snapshot?.source;
+  const link = source !== null && typeof source === 'object' ? (source as Record<string, unknown>).link : undefined;
+  return link === 'lora' || mqtt?.lora?.present === true;
 }

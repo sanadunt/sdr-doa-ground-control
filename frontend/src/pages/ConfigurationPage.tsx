@@ -25,6 +25,7 @@ import {
   summarizeDryRun,
 } from '../lib/configForm';
 import { DATA_OUT_PORT, DEFAULT_DATA_OUT_HOSTS, addDataOutHost, checkDataOutDraft, dataOutErrorNotice, dataOutUrlHost } from '../lib/dataOutHosts';
+import { dataOutUnused } from '../lib/loraLink';
 import { MAX_LOGO_BYTES, pngDataUrl, pngLogoErrorKey, validatePngLogo } from '../lib/pngLogo';
 import { CONFIG_PATCH_FIELDS, configPatchPublishable, fieldRange, plainNumber } from '../lib/configPatch';
 import { DEFAULT_MQTT_TRANSPORT, DEFAULT_MQTT_WS_PATH, lastMessageAgeMs, mqttTargetFromConfig, mqttTransportFields } from '../lib/mqttMonitor';
@@ -311,6 +312,7 @@ export function ConfigurationPage({
   // The port stays text while it is edited so clearing the field does not turn it into 0.
   const [mqttPortDraft, setMqttPortDraft] = useState(String(config.mqtt_port));
   const savedHosts = config.data_out_hosts ?? DEFAULT_DATA_OUT_HOSTS;
+  const dataOutHidden = dataOutUnused(null, mqtt);
   // The host list is its own draft: a new saved list replaces it only when its content changed.
   const [hostsDraft, setHostsDraft] = useState<readonly string[]>(savedHosts);
   const [newHost, setNewHost] = useState('');
@@ -894,6 +896,64 @@ export function ConfigurationPage({
           <Card id="connection-settings" span={6} className="cfg-section" bodyClassName="cfg-conn-body" title={t('config.connectionTitle')}>
             <form className="cfg-form cfg-conn-form" noValidate onSubmit={submitWith(() => { if (!busy && !readOnly) void saveConnection(); })}>
               <fieldset className="cfg-fieldset" disabled={readOnly}>
+              {dataOutHidden ? (
+                <>
+              <div className="cfg-group">
+                <span className="pg-field-label" aria-hidden="true">{refreshLabel}</span>
+                <Segmented
+                  label={refreshLabel}
+                  className={changedClass(changed.refresh)}
+                  options={refreshOptions.map((seconds) => ({ value: seconds, label: seconds === 0 ? t('shell.refreshManual') : t('common.durationS', { value: seconds }) }))}
+                  value={Number(connection.refresh_seconds)}
+                  onChange={(seconds) => editConnection({ refresh_seconds: seconds }, 'refresh')}
+                />
+                {connectionErrors.refresh ? <span className="pg-field-error" role="alert">{fieldError(connectionErrors.refresh)}</span> : null}
+                {refreshWarning ? <span className="cfg-warn" role="status">{t(refreshWarning)}</span> : null}
+              </div>
+                  {/* Over Telemetry LoRa the console reads no Data Out; its saved settings stay and fold away. */}
+                  <details className="cfg-dataout-unused">
+                    <summary>{t('config.dataOutUnused')}</summary>
+              <FormField label={t('config.baseUrl')} mono error={fieldError(connectionErrors.baseUrl)} className={changedClass(changed.baseUrl)}>
+                <input type="text" inputMode="url" list={`${ids}-data-out`} value={connection.base_url} placeholder={dataOutUrl(DEFAULT_DATA_OUT_HOSTS[0])} spellCheck={false} autoComplete="off" onChange={(event) => editConnection({ base_url: event.target.value }, 'baseUrl')} />
+              </FormField>
+              <datalist id={`${ids}-data-out`}>{hostsDraft.map((host) => <option key={host} value={dataOutUrl(host)} />)}</datalist>
+              <div className={['cfg-group', 'cfg-hosts', changedClass(changed.hosts)].filter(Boolean).join(' ')} role="group" aria-labelledby={`${ids}-hosts`}>
+                <span className="pg-field-label" id={`${ids}-hosts`}>{t('config.dataOutHosts')}</span>
+                <ul className="cfg-host-list">
+                  {hostsDraft.map((host) => (
+                    <li key={host} className="cfg-host">
+                      <span className="cfg-host-name">{host}</span>
+                      <button className="cfg-host-remove" type="button" aria-label={t('config.dataOutHostRemove', { host })} disabled={busy !== null || host === draftUrlHost} onClick={() => removeHost(host)}><Icon name="close" /></button>
+                    </li>
+                  ))}
+                </ul>
+                {connectionErrors.hosts ? <span className="pg-field-error" role="alert">{fieldError(connectionErrors.hosts)}</span> : null}
+                <div className="cfg-host-add">
+                  <FormField label={t('config.dataOutHostNew')} mono className="cfg-grow" error={fieldError(connectionErrors.newHost)}>
+                    <input
+                      type="text"
+                      value={newHost}
+                      placeholder="rdf.local · 192.168.1.20"
+                      spellCheck={false}
+                      autoComplete="off"
+                      autoCapitalize="none"
+                      onChange={(event) => { setNewHost(event.target.value); setConnectionErrors((errors) => ({ ...errors, newHost: undefined })); }}
+                      onKeyDown={(event) => {
+                        // Enter adds the typed host instead of saving the card.
+                        if (event.key === 'Enter' && newHost.trim()) {
+                          event.preventDefault();
+                          addHost();
+                        }
+                      }}
+                    />
+                  </FormField>
+                  <button className="ov-button" type="button" disabled={busy !== null || !newHost.trim()} onClick={addHost}>{t('config.dataOutHostAdd')}</button>
+                </div>
+              </div>
+                  </details>
+                </>
+              ) : (
+                <>
               <FormField label={t('config.baseUrl')} mono error={fieldError(connectionErrors.baseUrl)} className={changedClass(changed.baseUrl)}>
                 <input type="text" inputMode="url" list={`${ids}-data-out`} value={connection.base_url} placeholder={dataOutUrl(DEFAULT_DATA_OUT_HOSTS[0])} spellCheck={false} autoComplete="off" onChange={(event) => editConnection({ base_url: event.target.value }, 'baseUrl')} />
               </FormField>
@@ -943,6 +1003,8 @@ export function ConfigurationPage({
                   <button className="ov-button" type="button" disabled={busy !== null || !newHost.trim()} onClick={addHost}>{t('config.dataOutHostAdd')}</button>
                 </div>
               </div>
+                </>
+              )}
               </fieldset>
               {readOnly ? null : (
                 <div className="cfg-actions">

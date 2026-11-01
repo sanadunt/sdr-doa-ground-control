@@ -130,6 +130,7 @@ from sdr_doa_collector import (
     collect_light,
     data_out_url_host,
     normalize_data_out_hosts,
+    not_over_lora_fetcher,
 )
 import host_power as hp
 import receiver_archive as ra
@@ -4574,6 +4575,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
             console_base_url=lambda: self._config.get("base_url"),
             collect_light=self._collect_light_data_out,
             mqtt_view=self._mqtt_view,
+            collect_offline=self._collect_data_out_offline,
         )
         self.receiver_store = ReceiverRecordStore(
             receiver_data_dir if receiver_data_dir is not None else DEFAULT_DATA_DIR,
@@ -4677,6 +4679,16 @@ class GroundConsoleServer(ThreadingHTTPServer):
             allowed_hosts=self.data_out_hosts,
             mdns_resolver=self.mdns_resolver,
             **options,
+        )
+
+    def _collect_data_out_offline(self, base_url: str) -> Dict[str, Any]:
+        """The Data Out answer that reads nothing: the node has no IP path (Telemetry LoRa)."""
+        return collect(
+            base_url=base_url,
+            authority="none",
+            clock_source="remote_unverified",
+            fetcher=not_over_lora_fetcher,
+            allowed_hosts=self.data_out_hosts,
         )
 
     def _collect_data_out(self, base_url: str, fresh_settings: bool) -> Dict[str, Any]:
@@ -4951,6 +4963,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
             "value_received_at_ms": dict(empty),
             "pending_command_id": self.config_commands.in_flight(monitor),
             "settings_request": self.config_commands.latest(monitor, op=cmds.OP_CONFIG_GET),
+            "link": None,
         }
         if monitor is None:
             body["code"] = "MQTT_MONITOR_DISABLED"
@@ -4966,7 +4979,8 @@ class GroundConsoleServer(ThreadingHTTPServer):
         session = _session_or_none(view)
         node = _node_view(session, view_now)
         settings = _settings_view(view.get("settings"), view_now)
-        body.update(available=True, node=node, base_rev=None if node is None else node["cfg"], settings=settings)
+        body.update(available=True, node=node, base_rev=None if node is None else node["cfg"], settings=settings,
+                    link="lora" if view.get("link") == "lora" else None)
         if settings is not None and settings["matches_state_cfg"]:
             for field, value in settings["values"].items():
                 if value is not None:

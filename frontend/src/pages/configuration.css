@@ -111,3 +111,7 @@
 .cfg-json summary:hover { color: var(--text); }
 .cfg-json summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .cfg-json pre { max-height: 320px; margin: 0; overflow: auto; padding: 10px 12px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--pg-field-bg); color: var(--muted); font-family: var(--mono); font-size: 11.5px; line-height: 1.5; overscroll-behavior: contain; white-space: pre; }
+
+/* Data Out settings while Telemetry LoRa carries the node (no IP path): kept, folded away. */
+.cfg-dataout-unused { display: grid; gap: 14px; }
+.cfg-dataout-unused > summary { min-height: 44px; display: flex; align-items: center; color: var(--muted); cursor: pointer; }

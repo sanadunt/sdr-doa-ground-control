@@ -680,6 +680,8 @@ export interface ConfigReported {
   pendingCommandId: string | null;
   /** The latest config.get this console sent. */
   settingsRequest: ConfigCommandStatus | null;
+  /** "lora": commands reach the RDF-SDR over the LoRa serial bridge and wait for a radio turn. */
+  link: 'lora' | null;
 }
 
 function normalizeNode(value: unknown): ConfigNodeView | null {
@@ -730,6 +732,7 @@ export function normalizeConfigReported(value: unknown): ConfigReported {
     valueReceivedAtMs: patchValues(value.value_received_at_ms, (entry) => integerOrNull(entry, 0)),
     pendingCommandId: commandIdOrNull(value.pending_command_id),
     settingsRequest: normalizeConfigCommandStatus(value.settings_request),
+    link: value.link === 'lora' ? 'lora' : null,
   };
 }
 

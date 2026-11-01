@@ -3,7 +3,7 @@ import { useState } from 'react';
 import type { CompassConfig, PolarSettings, TelemetrySnapshot } from '../../types';
 import { bearingForView, formatDegrees, normalizeDegrees, polarView } from '../../lib/polar';
 import { overviewDoaStatus } from '../../lib/doaStatus';
-import { sourceBadge } from '../../lib/telemetrySource';
+import { angularFrameAgeMs, sourceBadge } from '../../lib/telemetrySource';
 import { halfPowerWidth } from '../../lib/doaGeometry';
 import { parseCompassOffsetInput, parseTypedNumber, validPolarHead, validPolarRange } from '../../lib/polarViewSettings';
 import type { PolarViewSettings } from '../../lib/polarViewSettings';
@@ -107,6 +107,11 @@ export function PolarDock({
       : t('polarDock.footerPolar', { theta: formatDegrees(polar.canonicalAngle, 1), width: widthText, head: headLabel })
     : t('polarDock.footerWaiting', { head: headLabel });
 
+  // The age of the Angular frame behind the drawn curve (MQTT; every 20 s at most over Telemetry LoRa).
+  const angularAge = !heldAt && values ? angularFrameAgeMs(snapshot) : null;
+  const angularAgeText = angularAge === null ? null
+    : t('polarDock.angularAge', { age: angularAge < 60_000 ? t('common.durationS', { value: Math.round(angularAge / 1000) }) : t('common.durationMin', { value: Math.floor(angularAge / 60_000) }) });
+
   // Head Up: slider, typed value and "peak up" all write the same view field.
   const [headDraft, setHeadDraft] = useSyncedDraft(head, parseHead, degreesLabel);
   const headError = parseHead(headDraft) === null;
@@ -166,7 +171,7 @@ export function PolarDock({
           <div className={heldAt ? 'ov-polar-frame is-held' : 'ov-polar-frame'}>
             <PolarPlot values={values} settings={settings} simulation={simulation} offsetSource={offsetSource} head={head} range={view.range} hideSettings compactCaption modeBar={false} sourceLabel={sourceLabel} />
           </div>
-          <p className={heldAt ? 'ov-polar-footer is-warn' : 'ov-polar-footer'}>{footer}{!heldAt && status.shown && !values ? <span className="is-warn"> · {t('polarDock.noCurve')}</span> : null}{manualOffset && compass ? <span className="is-manual"> · MANUAL</span> : null}</p>
+          <p className={heldAt ? 'ov-polar-footer is-warn' : 'ov-polar-footer'}>{footer}{angularAgeText ? <span> · {angularAgeText}</span> : null}{!heldAt && status.shown && !values ? <span className="is-warn"> · {t('polarDock.noCurve')}</span> : null}{manualOffset && compass ? <span className="is-manual"> · MANUAL</span> : null}</p>
         </div>
         {settingsOpen ? (
           <div id="polar-settings" className="ov-polar-settings" role="group" aria-label={t('polarDock.settingsRegion')}>

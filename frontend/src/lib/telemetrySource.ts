@@ -22,6 +22,7 @@ export const SOURCE_REASONS = [
   'MQTT_DAQ_NOT_HEALTHY',
   'DATA_OUT_REQUESTED',
   'DATA_OUT_UNAVAILABLE',
+  'DATA_OUT_NOT_OVER_LORA',
 ] as const;
 export type SourceReason = typeof SOURCE_REASONS[number];
 
@@ -108,6 +109,18 @@ export function lightStatus(snapshot: TelemetrySnapshot | null | undefined): Rec
 /** An MQTT answer whose node reaches the broker over the LoRa serial bridge: no Data Out values can come. */
 export function overLora(snapshot: TelemetrySnapshot | null | undefined): boolean {
   return isMqttSnapshot(snapshot) && record(snapshot?.source)?.link === 'lora';
+}
+
+/**
+ * How old the Angular frame behind an MQTT answer's curve was when the answer
+ * was built, or null. Over Telemetry LoRa a frame comes at most every 20 s,
+ * so the curve shows its age instead of looking stuck.
+ */
+export function angularFrameAgeMs(snapshot: TelemetrySnapshot | null | undefined): number | null {
+  if (!isMqttSnapshot(snapshot)) return null;
+  const frame = record(record(record(snapshot?.doa_candidates)?.mqtt)?.angular_frame);
+  const age = frame?.age_ms;
+  return typeof age === 'number' && Number.isFinite(age) && age >= 0 ? age : null;
 }
 
 /** The nav fields of an MQTT answer (health, contract 1.6), or null. */
