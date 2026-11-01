@@ -2,6 +2,18 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.4.3
+
+Rilis patch: tidak ada yang dihapus. Pemeriksaan Kontrol setelah sebuah perintah kini menyebut apa yang sebenarnya diperiksanya: isi settings.json RDF-SDR, bukan radio yang berjalan. Kanal `3` dan timer update memasangnya sendiri.
+
+- **"Tersimpan di settings.json", bukan "RDF-SDR berubah".** Pemeriksaan membandingkan nilai yang dikirim dengan settings.json yang dilaporkan RDF-SDR. Nilai yang cocok berarti tersimpan di sana, bukan bahwa radio berjalan dengan nilai itu.
+  - Pada uji 1 November, KrakenSDR menyimpan 105 MHz lalu DAQ-nya gagal, tetapi Kontrol menulis "RDF-SDR berubah · CONFIRMED".
+  - Kini judulnya **Cek settings.json** dan statusnya **`SAVED`**, dengan nada info, bukan hijau.
+  - Ringkasannya "Tersimpan di settings.json · n/m", "Sebagian tersimpan…", "Memeriksa settings.json…" atau "settings.json belum berubah".
+- **Bukti radio berjalan tetap hanya `APPLIED`** dari RDF-SDR sendiri.
+  - `PERSISTED_UNVERIFIED` kini berbunyi: tersimpan, tetapi belum ada bukti radio berjalan dengan setiap nilai.
+  - Periksa status DAQ dan DoA sebelum mengirim lagi.
+
 ## 3.4.2
 
 Rilis patch: tidak ada yang dihapus. Console kini menyesuaikan diri dengan Telemetry LoRa: Data Out disembunyikan selama jalurnya LoRa, Kontrol menyebut perintah yang menunggu giliran radio, dan dock Polar menyebut umur kurva Angular. Kanal `3` dan timer update memasangnya sendiri.

@@ -485,11 +485,14 @@ describe('Kontrol read-back from the RDF-SDR', () => {
 
   it('lists each sent field with its settings/reported and Data Out values and a status code', () => {
     const markup = view({ stage: 'done', done: applied, verification: check(), onRecheck: () => undefined });
-    expect(markup).toContain('aria-label="Cek RDF-SDR"');
-    expect(markup).toContain('role="status">Memeriksa RDF-SDR · 1/3</span>');
-    expect(markup).toMatch(/Frekuensi tengah<\/span><span class="ov-tag tone-good">CONFIRMED<\/span>/);
+    expect(markup).toContain('aria-label="Cek settings.json"');
+    expect(markup).toContain('role="status">Memeriksa settings.json · 1/3</span>');
+    expect(markup).toMatch(/Frekuensi tengah<\/span><span class="ov-tag tone-info">SAVED<\/span>/);
     expect(markup).toMatch(/Frekuensi VFO<\/span><span class="ov-tag tone-info">PENDING<\/span>/);
     expect(markup).toMatch(/Squelch VFO<\/span><span class="ov-tag tone-neutral">NOT REPORTED<\/span>/);
+    // A match means saved in settings.json, never that the radio runs with it.
+    expect(markup).not.toContain('CONFIRMED');
+    expect(markup).not.toContain('RDF-SDR berubah');
     expect(markup).toContain('<dt>Dikirim</dt><dd class="ov-mono">433.920 MHz</dd>');
     expect(markup).toContain('<dt>Data Out</dt><dd class="ov-mono">433.900 MHz</dd>');
     // This settings report arrived before the command, so it is not evidence.
@@ -505,24 +508,24 @@ describe('Kontrol read-back from the RDF-SDR', () => {
     const verification = check({ reported: after });
     expect(verification.fields.every((field) => field.basis === 'mqtt' && field.status === 'confirmed')).toBe(true);
     const markup = view({ stage: 'done', done: applied, verification });
-    expect(markup).toContain('RDF-SDR berubah · 3/3');
+    expect(markup).toContain('Tersimpan di settings.json · 3/3');
     expect(markup).toContain('<dt>MQTT</dt><dd class="ov-mono">433.920 MHz</dd>');
   });
 
   it('reads the verdict once the window has ended', () => {
     const after = view({ stage: 'done', done: applied, verification: check({ nowMs: 90_000 }) });
-    expect(after).toContain('Sebagian berubah · 1/3');
+    expect(after).toContain('Sebagian tersimpan di settings.json · 1/3');
     expect(after).toContain('>UNCHANGED</span>');
     const confirmed = check({ changes: { center_frequency_hz: 433_920_000 } });
-    expect(view({ stage: 'done', done: applied, verification: confirmed })).toContain('RDF-SDR berubah · 1/1');
-    expect(view({ stage: 'done', done: applied, verification: confirmed }, 'en')).toContain('RDF-SDR changed · 1/1');
+    expect(view({ stage: 'done', done: applied, verification: confirmed })).toContain('Tersimpan di settings.json · 1/1');
+    expect(view({ stage: 'done', done: applied, verification: confirmed }, 'en')).toContain('Saved in settings.json · 1/1');
     const unchanged = check({ changes: { vfo0_frequency_hz: 433_925_000 }, nowMs: 90_000 });
-    expect(view({ stage: 'done', done: applied, verification: unchanged })).toContain('Belum berubah · 0/1');
+    expect(view({ stage: 'done', done: applied, verification: unchanged })).toContain('settings.json belum berubah · 0/1');
   });
 
   it('shows the read-back after a rejection, and nothing without one', () => {
     const rejected = { ...applied, view: commandResultView({ state: 'acked', ack: { status: 'REJECTED', error: 'REMOTE_COMMANDS_DISABLED', reason: null, revision: null }, pubackReason: null }, 3, 42, 15) };
-    expect(view({ stage: 'done', done: rejected, verification: check({ nowMs: 90_000 }) })).toContain('Sebagian berubah · 1/3');
+    expect(view({ stage: 'done', done: rejected, verification: check({ nowMs: 90_000 }) })).toContain('Sebagian tersimpan di settings.json · 1/3');
     expect(view({ stage: 'done', done: applied })).not.toContain('ov-verify');
   });
 
