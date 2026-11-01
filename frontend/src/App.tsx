@@ -938,6 +938,7 @@ export default function App(): ReactElement {
         readError={readErrorText}
         lastReadAgeMs={lastReadAgeMs}
         mqttConnection={mqtt?.connection}
+        loraLink={mqtt?.lora}
         mqttError={mqttErrorText}
         simulationEnabled={simulationEnabled}
         onRefresh={onRefresh}

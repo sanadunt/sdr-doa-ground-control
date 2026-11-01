@@ -17,6 +17,7 @@ from typing import Any
 from unittest.mock import patch
 
 from tools import rdf_node_commands as commands
+from tools.lora_link import LORA_SUFFIXES
 from tools.rdf_node_mqtt_v2 import RDF_NODE_V2_SUFFIXES
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -205,7 +206,7 @@ class SharedMqttMonitorTests(unittest.TestCase):
         answers = codes if codes is not None else successful_codes(count)
         self.client.on_subscribe(self.client, None, self.client.mid, answers, None)
 
-    def test_one_websocket_client_subscribes_to_the_rdf_node_topics_only(self) -> None:
+    def test_one_websocket_client_subscribes_to_the_rdf_node_topics_and_the_lora_status(self) -> None:
         self.client = self._start()
         self.client.on_connect(self.client, None, {}, types.SimpleNamespace(value=0, is_failure=False), None)
 
@@ -216,7 +217,7 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self.assertEqual(self.client.kwargs.get("protocol"), 5)
         self.assertEqual(self.client.kwargs.get("transport"), "websockets")
         self.assertIn(("ws_set_options", (), {"path": "/mqtt"}), self.client.calls)
-        expected = [f"sdr/v2/{NODE}/{suffix}" for suffix in RDF_NODE_V2_SUFFIXES]
+        expected = [f"sdr/v2/{NODE}/{suffix}" for suffix in RDF_NODE_V2_SUFFIXES + LORA_SUFFIXES]
         self.assertEqual([topic for topic, _options in self.client.subscriptions], expected)
         for topic, options in self.client.subscriptions:
             self.assertEqual(options.qos, 1)
@@ -265,6 +266,42 @@ class SharedMqttMonitorTests(unittest.TestCase):
         for key in ("last_by_kind", "kind_counts", "topic_counts", "last_topic", "total_bytes", "last_latency_ms"):
             self.assertNotIn(key, status)
         self.assertEqual(self.client.publish_calls, [])
+
+    def test_lora_bridge_status_reaches_the_snapshot_without_counting_as_rdf_node_traffic(self) -> None:
+        self.client = self._start()
+        self.client.on_connect(self.client, None, {}, types.SimpleNamespace(value=0, is_failure=False), None)
+        self.acknowledge()
+        clock = [1_700_000_000_000]
+
+        def status(t: int, frames: int, messages: int) -> bytes:
+            return json.dumps({
+                "v": 1, "role": "ground", "t": t, "link": "UP", "last_rx_ms": 300, "port": "OPEN",
+                "port_error": None, "mqtt": "CONNECTED",
+                "rx": {"frames": frames, "crc_errors": 0, "bad_frames": 0, "lost_frames": 0, "messages": messages,
+                       "duplicates": 0, "incomplete": 0, "heartbeats": 2},
+                "tx": {}, "queue": 0, "peer": {"uptime_s": 10, "rx_frames": 3, "crc_errors": 0, "lost_frames": 0,
+                                               "clock_offset_ms": -40},
+                "mqtt_dropped": 0, "ignored": 0, "link_changes": 1,
+            }).encode("utf-8")
+
+        with patch.object(self.module, "_now_ms", lambda: clock[0]):
+            self.assertFalse(self.monitor.snapshot()["lora"]["present"])
+            self.assertIsNone(self.monitor.rdf_node_view()["link"])
+            self.client.on_message(self.client, None, message(f"sdr/v2/{NODE}/lora/ground", status(clock[0], 10, 5), 1, True))
+            clock[0] += 5_000
+            self.client.on_message(self.client, None, message(f"sdr/v2/{NODE}/lora/ground", status(clock[0], 30, 20), 1, True))
+            snapshot = self.monitor.snapshot()
+
+        lora = snapshot["lora"]
+        self.assertTrue(lora["present"])
+        self.assertEqual(lora["ground"]["state"], "UP")
+        self.assertEqual(lora["ground"]["data"], "DATA")
+        self.assertEqual(lora["ground"]["rates"]["messages"], 3.0)
+        self.assertIsNone(lora["edge"])
+        self.assertEqual((snapshot["received"], snapshot["valid"]), (0, 0))
+        self.assertEqual(self.monitor.rdf_node_snapshot()["received"], 0)
+        with patch.object(self.module, "_now_ms", lambda: clock[0]):
+            self.assertEqual(self.monitor.rdf_node_view()["link"], "lora")
 
     def test_client_construction_failure_surfaces_shared_connection_error(self) -> None:
         def unavailable_client(*_args: object, **_kwargs: object) -> None:

@@ -1,0 +1,365 @@
+{
+  "absent": {
+    "clock_warn_ms": 1000,
+    "edge": null,
+    "ground": null,
+    "invalid": 0,
+    "last_invalid": null,
+    "present": false,
+    "stale_after_ms": 15000
+  },
+  "clock": {
+    "clock_warn_ms": 1000,
+    "edge": null,
+    "ground": {
+      "clock_warning": true,
+      "data": "DATA",
+      "last_rx_ms": 400,
+      "link": "UP",
+      "link_changes": 1,
+      "mqtt": "CONNECTED",
+      "mqtt_dropped": 0,
+      "notes": [],
+      "peer": {
+        "clock_offset_ms": -2400,
+        "crc_errors": 0,
+        "lost_frames": 2,
+        "rx_frames": 198,
+        "uptime_s": 812
+      },
+      "port": "OPEN",
+      "port_error": null,
+      "queue": 0,
+      "rates": {
+        "crc_errors": 0.0,
+        "frames": 4.0,
+        "heartbeats": 0.0,
+        "lost_frames": 0.0,
+        "messages": 2.0
+      },
+      "role": "ground",
+      "rx": {
+        "bad_frames": 0,
+        "crc_errors": 1,
+        "duplicates": 12,
+        "frames": 120,
+        "heartbeats": 10,
+        "incomplete": 0,
+        "lost_frames": 3,
+        "messages": 60
+      },
+      "since_rx_ms": 400,
+      "state": "UP",
+      "status_age_ms": 0,
+      "t": 1793500005000,
+      "tx": {
+        "expired": 0,
+        "queued": 20,
+        "sent_bytes": 2400,
+        "sent_frames": 200,
+        "sent_messages": 20,
+        "superseded": 0,
+        "too_large": 0
+      },
+      "v": 1
+    },
+    "invalid": 0,
+    "last_invalid": null,
+    "present": true,
+    "stale_after_ms": 15000
+  },
+  "down": {
+    "clock_warn_ms": 1000,
+    "edge": null,
+    "ground": {
+      "clock_warning": false,
+      "data": "NONE",
+      "last_rx_ms": 16000,
+      "link": "DOWN",
+      "link_changes": 1,
+      "mqtt": "CONNECTED",
+      "mqtt_dropped": 0,
+      "notes": [],
+      "peer": {
+        "clock_offset_ms": -35,
+        "crc_errors": 0,
+        "lost_frames": 2,
+        "rx_frames": 198,
+        "uptime_s": 812
+      },
+      "port": "OPEN",
+      "port_error": null,
+      "queue": 0,
+      "rates": {
+        "crc_errors": 0.0,
+        "frames": 0.0,
+        "heartbeats": 0.0,
+        "lost_frames": 0.0,
+        "messages": 0.0
+      },
+      "role": "ground",
+      "rx": {
+        "bad_frames": 0,
+        "crc_errors": 1,
+        "duplicates": 12,
+        "frames": 131,
+        "heartbeats": 12,
+        "incomplete": 0,
+        "lost_frames": 3,
+        "messages": 70
+      },
+      "since_rx_ms": 16000,
+      "state": "DOWN",
+      "status_age_ms": 0,
+      "t": 1793500015000,
+      "tx": {
+        "expired": 0,
+        "queued": 20,
+        "sent_bytes": 2400,
+        "sent_frames": 200,
+        "sent_messages": 20,
+        "superseded": 0,
+        "too_large": 0
+      },
+      "v": 1
+    },
+    "invalid": 0,
+    "last_invalid": null,
+    "present": true,
+    "stale_after_ms": 15000
+  },
+  "idle": {
+    "clock_warn_ms": 1000,
+    "edge": null,
+    "ground": {
+      "clock_warning": false,
+      "data": "LINK_ONLY",
+      "last_rx_ms": 400,
+      "link": "UP",
+      "link_changes": 1,
+      "mqtt": "CONNECTED",
+      "mqtt_dropped": 0,
+      "notes": [],
+      "peer": {
+        "clock_offset_ms": -35,
+        "crc_errors": 0,
+        "lost_frames": 2,
+        "rx_frames": 198,
+        "uptime_s": 812
+      },
+      "port": "OPEN",
+      "port_error": null,
+      "queue": 0,
+      "rates": {
+        "crc_errors": 0.0,
+        "frames": 0.2,
+        "heartbeats": 0.2,
+        "lost_frames": 0.0,
+        "messages": 0.0
+      },
+      "role": "ground",
+      "rx": {
+        "bad_frames": 0,
+        "crc_errors": 1,
+        "duplicates": 12,
+        "frames": 131,
+        "heartbeats": 12,
+        "incomplete": 0,
+        "lost_frames": 3,
+        "messages": 70
+      },
+      "since_rx_ms": 400,
+      "state": "UP",
+      "status_age_ms": 0,
+      "t": 1793500010000,
+      "tx": {
+        "expired": 0,
+        "queued": 20,
+        "sent_bytes": 2400,
+        "sent_frames": 200,
+        "sent_messages": 20,
+        "superseded": 0,
+        "too_large": 0
+      },
+      "v": 1
+    },
+    "invalid": 0,
+    "last_invalid": null,
+    "present": true,
+    "stale_after_ms": 15000
+  },
+  "port_error": {
+    "clock_warn_ms": 1000,
+    "edge": null,
+    "ground": {
+      "clock_warning": false,
+      "data": "NONE",
+      "last_rx_ms": null,
+      "link": "DOWN",
+      "link_changes": 1,
+      "mqtt": "CONNECTED",
+      "mqtt_dropped": 0,
+      "notes": [],
+      "peer": {
+        "clock_offset_ms": -35,
+        "crc_errors": 0,
+        "lost_frames": 2,
+        "rx_frames": 198,
+        "uptime_s": 812
+      },
+      "port": "ERROR",
+      "port_error": "ENOENT",
+      "queue": 0,
+      "rates": null,
+      "role": "ground",
+      "rx": {
+        "bad_frames": 0,
+        "crc_errors": 1,
+        "duplicates": 12,
+        "frames": 100,
+        "heartbeats": 10,
+        "incomplete": 0,
+        "lost_frames": 3,
+        "messages": 50
+      },
+      "since_rx_ms": null,
+      "state": "PORT_ERROR",
+      "status_age_ms": 0,
+      "t": 1793500000000,
+      "tx": {
+        "expired": 0,
+        "queued": 20,
+        "sent_bytes": 2400,
+        "sent_frames": 200,
+        "sent_messages": 20,
+        "superseded": 0,
+        "too_large": 0
+      },
+      "v": 1
+    },
+    "invalid": 0,
+    "last_invalid": null,
+    "present": true,
+    "stale_after_ms": 15000
+  },
+  "receiving": {
+    "clock_warn_ms": 1000,
+    "edge": null,
+    "ground": {
+      "clock_warning": false,
+      "data": "DATA",
+      "last_rx_ms": 400,
+      "link": "UP",
+      "link_changes": 1,
+      "mqtt": "CONNECTED",
+      "mqtt_dropped": 0,
+      "notes": [],
+      "peer": {
+        "clock_offset_ms": -35,
+        "crc_errors": 0,
+        "lost_frames": 2,
+        "rx_frames": 198,
+        "uptime_s": 812
+      },
+      "port": "OPEN",
+      "port_error": null,
+      "queue": 0,
+      "rates": {
+        "crc_errors": 0.0,
+        "frames": 6.0,
+        "heartbeats": 0.2,
+        "lost_frames": 0.0,
+        "messages": 4.0
+      },
+      "role": "ground",
+      "rx": {
+        "bad_frames": 0,
+        "crc_errors": 1,
+        "duplicates": 12,
+        "frames": 130,
+        "heartbeats": 11,
+        "incomplete": 0,
+        "lost_frames": 3,
+        "messages": 70
+      },
+      "since_rx_ms": 600,
+      "state": "UP",
+      "status_age_ms": 200,
+      "t": 1793500005000,
+      "tx": {
+        "expired": 0,
+        "queued": 20,
+        "sent_bytes": 2400,
+        "sent_frames": 200,
+        "sent_messages": 20,
+        "superseded": 0,
+        "too_large": 0
+      },
+      "v": 1
+    },
+    "invalid": 0,
+    "last_invalid": null,
+    "present": true,
+    "stale_after_ms": 15000
+  },
+  "stale": {
+    "clock_warn_ms": 1000,
+    "edge": null,
+    "ground": {
+      "clock_warning": false,
+      "data": "NONE",
+      "last_rx_ms": 16000,
+      "link": "DOWN",
+      "link_changes": 1,
+      "mqtt": "CONNECTED",
+      "mqtt_dropped": 0,
+      "notes": [],
+      "peer": {
+        "clock_offset_ms": -35,
+        "crc_errors": 0,
+        "lost_frames": 2,
+        "rx_frames": 198,
+        "uptime_s": 812
+      },
+      "port": "OPEN",
+      "port_error": null,
+      "queue": 0,
+      "rates": {
+        "crc_errors": 0.0,
+        "frames": 0.0,
+        "heartbeats": 0.0,
+        "lost_frames": 0.0,
+        "messages": 0.0
+      },
+      "role": "ground",
+      "rx": {
+        "bad_frames": 0,
+        "crc_errors": 1,
+        "duplicates": 12,
+        "frames": 131,
+        "heartbeats": 12,
+        "incomplete": 0,
+        "lost_frames": 3,
+        "messages": 70
+      },
+      "since_rx_ms": 56000,
+      "state": "STALE",
+      "status_age_ms": 40000,
+      "t": 1793500015000,
+      "tx": {
+        "expired": 0,
+        "queued": 20,
+        "sent_bytes": 2400,
+        "sent_frames": 200,
+        "sent_messages": 20,
+        "superseded": 0,
+        "too_large": 0
+      },
+      "v": 1
+    },
+    "invalid": 0,
+    "last_invalid": null,
+    "present": true,
+    "stale_after_ms": 15000
+  }
+}

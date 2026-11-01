@@ -1,3 +1,4 @@
+import { normalizeLoraLink } from './loraLink';
 import type { ConsoleConfig, MqttSnapshot, MqttTarget, MqttTransport, RdfNodeAck, RdfNodePart, RdfNodeSnapshot, RdfNodeTopic, RdfNodeView, Tone } from '../types';
 
 type JsonObject = Record<string, unknown>;
@@ -136,6 +137,8 @@ export function normalizeMqttSnapshot(value: unknown, fetchedAtMs: number): Mqtt
   }
   snapshot.last_received_at_ms = nonNegative(value.last_received_at_ms);
   snapshot.last_age_ms = nonNegative(value.last_age_ms);
+  const lora = normalizeLoraLink(value.lora);
+  if (lora) snapshot.lora = lora;
   return snapshot;
 }
 

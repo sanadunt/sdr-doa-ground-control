@@ -144,12 +144,31 @@ export interface SnapshotSource {
   reasons?: string[];
   mqtt?: Record<string, unknown>;
   data_out?: Record<string, unknown>;
+  /** "lora": the node reaches the broker over the LoRa serial bridge, with no IP path for Data Out. */
+  link?: string | null;
+}
+
+/** Compass and GPS of an MQTT answer, from the optional nav fields of telemetry/health (contract 1.6); unvalidated JSON. */
+export interface SnapshotNav {
+  [key: string]: unknown;
+  gps_state?: string | null;
+  fix?: number | null;
+  satellites?: number | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  altitude_m?: number | null;
+  speed_mps?: number | null;
+  course_deg?: number | null;
+  heading_deg?: number | null;
+  compass_state?: string | null;
 }
 
 export interface TelemetrySnapshot {
   [key: string]: unknown;
   /** Absent from older servers, which always answered from Data Out. */
   source?: SnapshotSource;
+  /** MQTT answers only: null without nav fields; absent from Data Out answers and older servers. */
+  nav?: SnapshotNav | null;
   schema_version?: number;
   collector?: Record<string, unknown>;
   observed_at_ms?: number;
@@ -228,6 +247,41 @@ export interface MqttSnapshot {
   cleared?: number;
   last_received_at_ms?: number | null;
   last_age_ms?: number | null;
+  /** The LoRa serial bridge's link (tools/lora_link.py); absent from consoles without it. */
+  lora?: LoraLinkView;
+}
+
+/** LoRa bridge state: STALE when the bridge's status stopped, PORT_ERROR when it cannot open the radio. */
+export type LoraLinkState = 'UP' | 'DOWN' | 'STALE' | 'PORT_ERROR';
+/** Data-in indicator: delivered messages, heartbeats only, nothing, or no rate yet. */
+export type LoraDataState = 'DATA' | 'LINK_ONLY' | 'NONE' | 'UNKNOWN';
+
+/** One bridge's status (lora/ground, or lora/edge), as /api/mqtt reports it. */
+export interface LoraLinkRole {
+  role: 'ground' | 'edge';
+  state: LoraLinkState;
+  data: LoraDataState;
+  status_age_ms: number | null;
+  since_rx_ms: number | null;
+  port_error: string | null;
+  mqtt: string | null;
+  rx: Record<string, number | null>;
+  tx: Record<string, number | null>;
+  queue: number | null;
+  /** Rates between the bridge's last two statuses, per second; null after a restart or before a second status. */
+  rates: Record<'frames' | 'messages' | 'heartbeats' | 'crc_errors' | 'lost_frames', number> | null;
+  peer: { uptime_s: number | null; rx_frames: number | null; crc_errors: number | null; lost_frames: number | null; clock_offset_ms: number | null } | null;
+  link_changes: number | null;
+  clock_warning: boolean;
+}
+
+export interface LoraLinkView {
+  /** A bridge has reported on this console's broker. */
+  present: boolean;
+  ground: LoraLinkRole | null;
+  edge: LoraLinkRole | null;
+  invalid: number;
+  clock_warn_ms: number;
 }
 
 /** One RDF Node topic as reported by /api/mqtt/rdf-node, normalized: the status of its latest message. */
@@ -296,7 +350,7 @@ export type CompassSourceMode = 'DATA_OUT' | 'MANUAL' | 'FALLBACK';
 export interface MapCoordinate {
   latitude: number;
   longitude: number;
-  source: 'CSV' | 'XML' | 'DATA_OUT' | 'MANUAL' | 'FALLBACK' | 'SIMULATION';
+  source: 'CSV' | 'XML' | 'NAV' | 'DATA_OUT' | 'MANUAL' | 'FALLBACK' | 'SIMULATION';
 }
 
 export interface PolarSettings {

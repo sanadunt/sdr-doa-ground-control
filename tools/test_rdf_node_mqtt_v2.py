@@ -499,6 +499,41 @@ class HealthTests(unittest.TestCase):
                 self.assertEqual(node(store, NOW)["detail"]["cpu"], cpu)
 
 
+class HealthNavTests(unittest.TestCase):
+    """The optional nav fields of contract 1.6 (docs/MQTT_TOPIC_SUMMARY.md of the edge)."""
+
+    NAV = {"hdg": 201.1, "hs": "OK", "gs": "FIX", "fix": 3, "sat": 7, "lat": -6.20576, "lon": 106.81,
+           "alt": 715.9, "sog": 0.1, "cog": None}
+
+    def test_health_without_nav_is_unchanged(self) -> None:
+        health = node(session_store())["health"]
+        for key in self.NAV:
+            self.assertNotIn(key, health)
+
+    def test_nav_fields_are_kept(self) -> None:
+        store = session_store(**self.NAV)
+        self.assertEqual(topic(store, "telemetry/health")["status"], "FRESH")
+        health = node(store)["health"]
+        for key, value in self.NAV.items():
+            self.assertEqual(health[key], value)
+
+    def test_a_bad_nav_field_is_dropped_never_the_health(self) -> None:
+        store = session_store(**{**self.NAV, "lat": 91, "hdg": "north", "fix": 1, "gs": "fix ok"})
+        entry = topic(store, "telemetry/health")
+        self.assertEqual(entry["status"], "FRESH")
+        health = node(store)["health"]
+        for key in ("lat", "lon", "hdg", "fix", "gs"):
+            self.assertNotIn(key, health)
+        self.assertEqual((health["hs"], health["sat"], health["daq"]), ("OK", 7, 1))
+        self.assertTrue(store.session_view(NOW)["health_fresh"])
+
+    def test_a_position_needs_both_coordinates(self) -> None:
+        health = node(session_store(gs="FIX", fix=2, lat=-6.2))["health"]
+        self.assertNotIn("lat", health)
+        self.assertNotIn("lon", health)
+        self.assertEqual(health["fix"], 2)
+
+
 class DoaTests(unittest.TestCase):
     def test_live_needs_a_fresh_source_and_fresh_healthy_health(self) -> None:
         for offset, status in ((-5000, "LIVE"), (-5001, "STALE"), (1000, "LIVE"), (1001, "STALE")):

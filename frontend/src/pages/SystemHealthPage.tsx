@@ -1,8 +1,9 @@
 import type { JSX, ReactNode } from 'react';
-import type { Candidate, MqttSnapshot, TelemetrySnapshot, Tone } from '../types';
+import type { Candidate, LoraLinkRole, MqttSnapshot, TelemetrySnapshot, Tone } from '../types';
 import type { ConsoleCapabilities } from '../api';
 import { configPatchPublishable } from '../lib/configPatch';
-import { lastMessageAgeMs } from '../lib/mqttMonitor';
+import { elapsedSinceRead, lastMessageAgeMs } from '../lib/mqttMonitor';
+import { loraChip } from '../lib/loraLink';
 import { candidate, formatNumber, numberOrNull, syncCount, toneFor } from '../lib/telemetry';
 import { isMqttSnapshot } from '../lib/telemetrySource';
 import { useI18n } from '../lib/i18n';
@@ -236,6 +237,56 @@ function MqttCard({ mqtt, mqttError, capabilities }: { mqtt: MqttSnapshot | null
   );
 }
 
+function loraRate(t: Translate, lang: string, value: number | undefined): string {
+  return value === undefined ? '—' : t('health.lora.perSecond', { value: value.toLocaleString(lang === 'id' ? 'id-ID' : 'en-US', { maximumFractionDigits: 1 }) });
+}
+
+/** The LoRa serial bridge on this groundstation (lora/ground); shown only where one reports. */
+function LoraCard({ mqtt }: { mqtt: MqttSnapshot | null }): JSX.Element | null {
+  const { lang, t } = useI18n();
+  const lora = mqtt?.lora;
+  const chip = loraChip(lora);
+  const ground: LoraLinkRole | null = lora?.ground ?? null;
+  if (!chip || !ground) return null;
+  // Ages from the server, aged locally since the /api/mqtt read.
+  const elapsed = elapsedSinceRead(mqtt?.fetched_at_ms, Date.now());
+  const sinceRx = ground.since_rx_ms === null ? null : ground.since_rx_ms + elapsed;
+  const statusAge = ground.status_age_ms === null ? null : ground.status_age_ms + elapsed;
+  const offset = ground.peer?.clock_offset_ms ?? null;
+  const crc = ground.rx.crc_errors;
+  const lost = ground.rx.lost_frames;
+  const dataTone: PageTone = ground.data === 'DATA' ? 'good' : ground.data === 'UNKNOWN' ? 'neutral' : 'warn';
+  const items: KeyValueItem[] = [
+    { id: 'data', label: t('health.lora.data'), value: t(`health.lora.data.${ground.data}`), tone: chip.value === 'STALE' || chip.value === 'DOWN' || chip.value === 'PORT' ? 'bad' : dataTone, mono: false },
+    { id: 'last', label: t('health.lora.lastFrame'), value: sinceRx === null ? '—' : formatDuration(t, sinceRx) },
+    { id: 'rates', label: t('health.lora.rates'), value: ground.rates ? `${loraRate(t, lang, ground.rates.messages)} · ${loraRate(t, lang, ground.rates.frames)}` : '—' },
+    { id: 'crc', label: t('health.lora.crc'), value: crc === null ? '—' : formatCount(lang, crc), tone: ground.rates && ground.rates.crc_errors > 0 ? 'warn' : undefined },
+    { id: 'lost', label: t('health.lora.lost'), value: lost === null ? '—' : formatCount(lang, lost), tone: ground.rates && ground.rates.lost_frames > 0 ? 'warn' : undefined },
+    {
+      id: 'peer',
+      label: t('health.lora.peer'),
+      value: ground.peer && ground.peer.rx_frames !== null
+        ? t('health.lora.peerValue', { frames: formatCount(lang, ground.peer.rx_frames), lost: formatCount(lang, ground.peer.lost_frames ?? 0) })
+        : '—',
+    },
+    { id: 'clock', label: t('health.lora.clock'), value: offset === null ? '—' : `${offset > 0 ? '+' : ''}${formatCount(lang, Math.round(offset))} ms`, tone: ground.clock_warning ? 'bad' : undefined },
+    { id: 'queue', label: t('health.lora.queue'), value: ground.queue === null ? '—' : formatCount(lang, ground.queue) },
+    { id: 'port', label: t('health.lora.port'), value: ground.state === 'PORT_ERROR' ? (ground.port_error ?? 'ERROR') : 'OPEN', tone: ground.state === 'PORT_ERROR' ? 'bad' : undefined },
+    { id: 'mqtt', label: t('health.lora.bridgeMqtt'), value: ground.mqtt ?? '—', tone: ground.mqtt === 'DISCONNECTED' ? 'bad' : undefined },
+    { id: 'status', label: t('health.lora.status'), value: statusAge === null ? '—' : t('health.lora.statusAge', { age: formatDuration(t, statusAge) }), tone: ground.state === 'STALE' ? 'bad' : undefined },
+    { id: 'changes', label: t('health.lora.linkChanges'), value: ground.link_changes === null ? '—' : formatCount(lang, ground.link_changes) },
+  ];
+  const tone: PageTone = chip.tone === 'good' ? 'good' : chip.tone === 'bad' ? 'bad' : 'warn';
+  return (
+    <Card title={t('health.lora.title')} chip={<StatusChip code={chip.value} tone={tone} />}>
+      {ground.state === 'STALE' && statusAge !== null ? <Notice tone="bad" title="STALE">{t('lora.cause.stale', { age: formatDuration(t, statusAge) })}</Notice> : null}
+      {ground.state === 'PORT_ERROR' ? <Notice tone="bad" title="PORT">{t('lora.cause.port', { error: ground.port_error ?? 'ERROR' })}</Notice> : null}
+      {ground.clock_warning && offset !== null ? <Notice tone="bad" title="CLOCK">{t('lora.cause.clock', { offset: `${(offset / 1000).toFixed(1)} s` })}</Notice> : null}
+      <KeyValueGrid items={items} label={t('health.lora.title')} />
+    </Card>
+  );
+}
+
 function syncTone(ok: boolean | null): PageTone {
   return ok === true ? 'good' : ok === false ? 'bad' : 'neutral';
 }
@@ -333,6 +384,7 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
         <PageStack span={6}>
           <DataOutCard snapshot={snapshot} />
           <MqttCard mqtt={mqtt} mqttError={mqttError} capabilities={capabilities} />
+          <LoraCard mqtt={mqtt} />
         </PageStack>
       </PageGrid>
     </Page>

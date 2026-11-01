@@ -110,11 +110,12 @@ class Edge:
             self.send("capabilities", dict(fixture("capabilities.json"), sid=state["sid"], boot=state["boot"],
                                            instance=state["instance"], angle=angle))
 
-    def health(self, *, daq: int = 1, q: Optional[int] = None, at: Optional[int] = None) -> Dict[str, Any]:
+    def health(self, *, daq: int = 1, q: Optional[int] = None, at: Optional[int] = None,
+               nav: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         t = self.now_ms() if at is None else at
         return self.send("telemetry/health", dict(
             fixture("telemetry-health.json"), sid=self.state["sid"], t=t, daq=daq,
-            q=self.next_q("health") if q is None else q, rev=self.state["cfg"],
+            q=self.next_q("health") if q is None else q, rev=self.state["cfg"], **(nav or {}),
         ), at=at)
 
     def doa(self, theta: float = THETA, *, ok: int = 1, angle: str = "theta_mirror", f: int = FREQUENCY_HZ,
@@ -155,9 +156,9 @@ class Edge:
         self.angular(theta)
         return self
 
-    def view(self, at: Optional[int] = None, connection: str = "ready") -> Dict[str, Any]:
+    def view(self, at: Optional[int] = None, connection: str = "ready", link: Optional[str] = None) -> Dict[str, Any]:
         now = self.now_ms() if at is None else at
-        return {"now_ms": now, "connection": connection, "node_id": NODE, "node": self.store.node_view(now)}
+        return {"now_ms": now, "connection": connection, "node_id": NODE, "node": self.store.node_view(now), "link": link}
 
 
 class ManualMs:
@@ -226,12 +227,17 @@ def fixed_light(*, reachable: bool = True) -> Dict[str, Any]:
         return collector.collect_light(BASE_URL, fetcher=fetcher, total_budget_s=4.0, monotonic_clock=lambda: 50.0)
 
 
+# The edge's own 1.6 example (docs/MQTT_TOPIC_SUMMARY.md of rdf-indicator-raspberry).
+NAV_FIX = {"hdg": 201.1, "hs": "OK", "gs": "FIX", "fix": 3, "sat": 7, "lat": -6.20576, "lon": 106.81,
+           "alt": 715.9, "sog": 0.1, "cog": None}
+
+
 def fixture_answers() -> Dict[str, Dict[str, Any]]:
     """The MQTT answers the frontend tests read, built at a fixed time."""
     answers: Dict[str, Dict[str, Any]] = {}
 
-    def answer(edge: Edge, light: Optional[Dict[str, Any]], index: int) -> Dict[str, Any]:
-        built = ts.mqtt_snapshot(edge.view(), light, base_url=BASE_URL, light_age_ms=None if light is None else 2_000,
+    def answer(edge: Edge, light: Optional[Dict[str, Any]], index: int, link: Optional[str] = None) -> Dict[str, Any]:
+        built = ts.mqtt_snapshot(edge.view(link=link), light, base_url=BASE_URL, light_age_ms=None if light is None else 2_000,
                                  light_meta={"interval_s": 30.0, "reason": "light-first", "running": False, "error": None})
         # The reader's own fields, with fixed values.
         built["collection"].update({"id": f"0f1e2d3c-{index}", "collected_at_ms": FIXED_NOW, "age_ms": 0,
@@ -251,6 +257,13 @@ def fixture_answers() -> Dict[str, Dict[str, Any]]:
     unverified.doa(ok=0)
     unverified.angular(flags=23)
     answers["mqtt-unverified.json"] = answer(unverified, fixed_light(), 3)
+    # Over the LoRa serial link: no Data Out at all, the position from the health nav fields (contract 1.6).
+    lora = Edge(ManualMs(FIXED_NOW))
+    lora.hello()
+    lora.health(nav=NAV_FIX)
+    lora.doa()
+    lora.angular()
+    answers["mqtt-lora-nav.json"] = answer(lora, None, 4, link="lora")
     return answers
 
 
@@ -259,6 +272,39 @@ def write_source_fixtures() -> None:
     SOURCE_FIXTURES.mkdir(parents=True, exist_ok=True)
     for name, body in fixture_answers().items():
         (SOURCE_FIXTURES / name).write_text(json.dumps(body, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+
+
+class NavTests(unittest.TestCase):
+    def build(self, nav: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        edge = Edge(ManualMs(FIXED_NOW))
+        edge.hello()
+        edge.health(nav=nav)
+        edge.doa()
+        edge.angular()
+        return ts.mqtt_snapshot(edge.view(), None, base_url=BASE_URL, light_age_ms=None,
+                                light_meta={"interval_s": 30.0, "reason": None, "running": False, "error": None})
+
+    def test_no_nav_without_the_fields(self) -> None:
+        self.assertIsNone(self.build(None)["nav"])
+
+    def test_nav_from_health(self) -> None:
+        nav = self.build(NAV_FIX)["nav"]
+        self.assertEqual(nav, {
+            "source": "telemetry/health", "t": FIXED_NOW, "gps_state": "FIX", "fix": 3, "satellites": 7,
+            "latitude": -6.20576, "longitude": 106.81, "altitude_m": 715.9, "speed_mps": 0.1, "course_deg": None,
+            "heading_deg": 201.1, "compass_state": "OK",
+        })
+
+    def test_link_is_named_only_for_lora(self) -> None:
+        edge = Edge(ManualMs(FIXED_NOW)).live()
+        meta = {"interval_s": 30.0, "reason": None, "running": False, "error": None}
+        for link, expected in ((None, None), ("lora", "lora"), ("ppp", None)):
+            built = ts.mqtt_snapshot(edge.view(link=link), None, base_url=BASE_URL, light_age_ms=None, light_meta=meta)
+            self.assertEqual(built["source"]["link"], expected)
+
+    def test_compass_only(self) -> None:
+        nav = self.build({"hdg": None, "hs": "NO_REPLY"})["nav"]
+        self.assertEqual((nav["compass_state"], nav["heading_deg"], nav["latitude"], nav["gps_state"]), ("NO_REPLY", None, None, None))
 
 
 class SharedFixtureTests(unittest.TestCase):

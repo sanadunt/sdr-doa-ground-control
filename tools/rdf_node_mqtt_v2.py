@@ -429,7 +429,49 @@ def _validate_health(data: Dict[str, Any]) -> Dict[str, Any]:
         clk=_choice(data, "clk", frozenset({0, 1})),
         rev=_int(data, "rev", 0, _U32, nullable=True),
     )
+    value.update(_health_nav(data))
     return value
+
+
+_NAV_STATE_RE = re.compile(r"[A-Z_]{1,16}")
+
+
+def _optional(data: Dict[str, Any], key: str, read: Any) -> Tuple[bool, Any]:
+    """An optional field: (present, value). A bad value reads as absent, noted, never refusing the message."""
+    if key not in data:
+        return False, None
+    try:
+        return True, read()
+    except _Invalid:
+        _note("INVALID_FIELD", key)
+        return False, None
+
+
+def _health_nav(data: Dict[str, Any]) -> Dict[str, Any]:
+    """The optional nav fields of contract 1.6 (compass and GPS): only those present, each read on its own."""
+    readers = (
+        ("hdg", lambda: _number(data, "hdg", 0, 360, nullable=True)),
+        ("hs", lambda: _text(data, "hs", _NAV_STATE_RE)),
+        ("gs", lambda: _text(data, "gs", _NAV_STATE_RE)),
+        ("fix", lambda: _choice(data, "fix", frozenset({0, 2, 3}))),
+        ("sat", lambda: _int(data, "sat", 0, 255, nullable=True)),
+        ("lat", lambda: _number(data, "lat", -90, 90)),
+        ("lon", lambda: _number(data, "lon", -180, 180)),
+        ("alt", lambda: _number(data, "alt", -1000, 100000, nullable=True)),
+        ("sog", lambda: _number(data, "sog", 0, 1000, nullable=True)),
+        ("cog", lambda: _number(data, "cog", 0, 360, nullable=True)),
+    )
+    nav: Dict[str, Any] = {}
+    for key, read in readers:
+        present, value = _optional(data, key, read)
+        if present:
+            nav[key] = value
+    if ("lat" in nav) != ("lon" in nav):
+        # A position needs both; one alone is dropped with its partner's note.
+        _note("INVALID_FIELD", "lon" if "lat" in nav else "lat")
+        nav.pop("lat", None)
+        nav.pop("lon", None)
+    return nav
 
 
 def _validate_detail(data: Dict[str, Any]) -> Dict[str, Any]:
