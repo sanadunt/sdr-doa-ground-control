@@ -183,7 +183,7 @@ describe('Overview dashboard', () => {
     expect(markup).toContain('Ikuti frekuensi node');
     expect(markup).toContain('>Kirim ke RDF-SDR<');
     expect(markup).toContain('class="ov-spec-canvas"');
-    expect(markup).toContain('Kontrol MQTT');
+    expect(markup).toContain('Kontrol RDF-SDR');
     expect(markup).toContain('LOCKED');
     expect(markup).toContain('Memeriksa sesi admin…');
     // Nothing in the dock mounts or names the Receiver frame.
