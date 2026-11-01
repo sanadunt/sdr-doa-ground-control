@@ -103,6 +103,16 @@ export function lightStatus(snapshot: TelemetrySnapshot | null | undefined): Rec
   return status && status.available === true ? status : null;
 }
 
+/** An MQTT answer whose node reaches the broker over the LoRa serial bridge: no Data Out values can come. */
+export function overLora(snapshot: TelemetrySnapshot | null | undefined): boolean {
+  return isMqttSnapshot(snapshot) && record(snapshot?.source)?.link === 'lora';
+}
+
+/** The nav fields of an MQTT answer (health, contract 1.6), or null. */
+export function snapshotNav(snapshot: TelemetrySnapshot | null | undefined): Record<string, unknown> | null {
+  return isMqttSnapshot(snapshot) ? record(snapshot?.nav) : null;
+}
+
 /** The doa.xml view of the light read (its position and freshness at that read), or null. */
 export function lightXml(snapshot: TelemetrySnapshot | null | undefined): Candidate | null {
   const xml = record(lightRead(snapshot)?.xml);

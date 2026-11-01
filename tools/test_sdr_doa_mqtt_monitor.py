@@ -286,6 +286,7 @@ class SharedMqttMonitorTests(unittest.TestCase):
 
         with patch.object(self.module, "_now_ms", lambda: clock[0]):
             self.assertFalse(self.monitor.snapshot()["lora"]["present"])
+            self.assertIsNone(self.monitor.rdf_node_view()["link"])
             self.client.on_message(self.client, None, message(f"sdr/v2/{NODE}/lora/ground", status(clock[0], 10, 5), 1, True))
             clock[0] += 5_000
             self.client.on_message(self.client, None, message(f"sdr/v2/{NODE}/lora/ground", status(clock[0], 30, 20), 1, True))
@@ -299,6 +300,8 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self.assertIsNone(lora["edge"])
         self.assertEqual((snapshot["received"], snapshot["valid"]), (0, 0))
         self.assertEqual(self.monitor.rdf_node_snapshot()["received"], 0)
+        with patch.object(self.module, "_now_ms", lambda: clock[0]):
+            self.assertEqual(self.monitor.rdf_node_view()["link"], "lora")
 
     def test_client_construction_failure_surfaces_shared_connection_error(self) -> None:
         def unavailable_client(*_args: object, **_kwargs: object) -> None:

@@ -1,6 +1,6 @@
 import type { Candidate, GpsConfig, GpsResolution, GpsSourceMode, ManualGpsOverride, MapCoordinate, TelemetrySnapshot } from '../types';
 import type { BasemapTone } from './basemaps';
-import { isMqttSnapshot, lightStatus, lightXml } from './telemetrySource';
+import { isMqttSnapshot, lightStatus, lightXml, snapshotNav } from './telemetrySource';
 
 // Basemap health. The console's tile route tries the upstream hosts itself
 // (tools/tile_cache.py), so a style has one URL in the browser and hostCount
@@ -286,9 +286,12 @@ export interface HeldStation {
 export function gpsReportsNoFix(snapshot: TelemetrySnapshot | null | undefined, localFresh: boolean): boolean {
   if (!localFresh || snapshot?.status?.available !== true) return false;
   if (isMqttSnapshot(snapshot)) {
-    // Over MQTT only the light Data Out read knows the GPS state.
+    // Over MQTT the light Data Out read knows the GPS state, else the nav fields of health do.
     const status = lightStatus(snapshot);
-    if (!status) return false;
+    if (!status) {
+      const nav = snapshotNav(snapshot);
+      return typeof nav?.gps_state === 'string' && navStationCoordinate(snapshot) === null;
+    }
     const safe = status.safe !== null && typeof status.safe === 'object' ? status.safe as Record<string, unknown> : {};
     const light = safe.gps_status;
     return typeof light !== 'string' || !GPS_POSITIVE_STATES.has(light.trim().toLowerCase());
@@ -362,9 +365,24 @@ function lightStationCoordinate(snapshot: TelemetrySnapshot): MapCoordinate | nu
   return coordinateFromCandidate(lightXml(snapshot) ?? undefined, 'XML');
 }
 
+/**
+ * The station position from the nav fields of health (contract 1.6): the
+ * RDF-SDR's own GPS, sent only with a fix. An MQTT answer exists only while
+ * health is fresh, so the position is as current as the answer.
+ */
+function navStationCoordinate(snapshot: TelemetrySnapshot): MapCoordinate | null {
+  const nav = snapshotNav(snapshot);
+  if (!nav || nav.gps_state !== 'FIX' || (nav.fix !== 2 && nav.fix !== 3)) return null;
+  const { latitude, longitude } = nav;
+  if (!finiteCoordinate(latitude, -90, 90) || !finiteCoordinate(longitude, -180, 180)) return null;
+  if (latitude === 0 && longitude === 0) return null;
+  return { latitude, longitude, source: 'NAV' };
+}
+
 export function resolveStationCoordinate(snapshot: TelemetrySnapshot | null | undefined): MapCoordinate | null {
   if (!snapshot || snapshot.status?.available !== true) return null;
-  if (isMqttSnapshot(snapshot)) return lightStationCoordinate(snapshot);
+  // doa.xml of the light read first, as before; over LoRa there is none and the nav position stands in.
+  if (isMqttSnapshot(snapshot)) return lightStationCoordinate(snapshot) ?? navStationCoordinate(snapshot);
   const rawGpsStatus = snapshot.status.safe?.gps_status;
   if (typeof rawGpsStatus !== 'string') return null;
   const gpsStatus = rawGpsStatus.trim().toLowerCase();

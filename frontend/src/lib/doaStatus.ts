@@ -1,7 +1,7 @@
 import type { Candidate, TelemetrySnapshot, Tone } from '../types';
 import type { MessageKey } from './i18n';
 import { adcOverdriveUnknown, adcOverdriven, candidate, completeVector, daqFailed, daqUnknown, doaDataReady, freshCandidate, nativeViewsReady, nodeStalled, numberOrNull, parsedCandidate, partialCsvReady, sourceViewNames } from './telemetry';
-import { isMqttSnapshot, mqttDoaUnverified } from './telemetrySource';
+import { isMqttSnapshot, mqttDoaUnverified, overLora } from './telemetrySource';
 
 /** Why the DoA curve and bearing are, or are not, shown. */
 export type DoaStatusReason =
@@ -13,6 +13,7 @@ export type DoaStatusReason =
   | 'daqUnknown'
   | 'adcOverdrive'
   | 'adcUnknown'
+  | 'adcNotOverLora'
   | 'conflict'
   | 'statusUnavailable'
   | 'viewMissing'
@@ -76,7 +77,7 @@ export function doaStatus(snapshot: TelemetrySnapshot | null | undefined, localF
   if (drawable && localFresh) {
     // MQTT stays the source while Data Out is unreachable, so an unknown
     // overdrive does not hide the bearing; it is shown DEGRADED with the cause.
-    if (adcOverdriveUnknown(snapshot)) return { code: 'DEGRADED', tone: 'warn', reason: 'adcUnknown', shown: true };
+    if (adcOverdriveUnknown(snapshot)) return { code: 'DEGRADED', tone: 'warn', reason: overLora(snapshot) ? 'adcNotOverLora' : 'adcUnknown', shown: true };
     // Data Out without doa.xml: the CSV view alone, drawn and labelled partial.
     if (partialCsvReady(snapshot)) return { code: 'PARTIAL', tone: 'warn', reason: 'partial', shown: true };
     return { code: 'AVAILABLE', tone: 'good', reason: 'available', shown: true };
@@ -156,6 +157,7 @@ const STATUS_TEXT: Record<DoaStatusReason, MessageKey> = {
   daqUnknown: 'polar.daqUnknown',
   adcOverdrive: 'polar.adcOverdrive',
   adcUnknown: 'polar.adcUnknown',
+  adcNotOverLora: 'polar.adcNotOverLora',
   conflict: 'polar.conflict',
   statusUnavailable: 'polar.statusUnavailable',
   viewMissing: 'polar.viewMissing',

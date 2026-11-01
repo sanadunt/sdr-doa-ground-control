@@ -662,6 +662,7 @@
    "telemetry/angular"
   ]
  },
+ "nav": null,
  "node_progress": {
   "changed_counters": [],
   "health_q": 1,
@@ -766,6 +767,7 @@
    "read": "light"
   },
   "kind": "mqtt",
+  "link": null,
   "mqtt": {
    "connection": "ready",
    "fresh": true,

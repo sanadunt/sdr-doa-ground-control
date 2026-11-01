@@ -710,6 +710,9 @@ class MqttMonitor:
                 "connection": self._rdf_connection_locked(),
                 "node_id": self._rdf_node.node_id,
                 "node": self._rdf_node.node_view(now),
+                # The node reaches this broker over the LoRa serial bridge: no
+                # IP path, so no Data Out (telemetry_source names that).
+                "link": "lora" if self._lora.has_role("ground") else None,
             }
 
 

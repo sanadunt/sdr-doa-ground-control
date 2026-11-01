@@ -196,6 +196,10 @@ class LoraLinkStore:
         })
         return view
 
+    def has_role(self, role: str) -> bool:
+        """A status of this bridge role is held (retained, so also while its link is down)."""
+        return role in self._latest
+
     def view(self, now_ms: int) -> Dict[str, Any]:
         """The ``lora`` block of ``GET /api/mqtt``: ``present`` once a bridge reported."""
         return {

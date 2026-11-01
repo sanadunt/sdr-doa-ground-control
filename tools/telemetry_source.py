@@ -58,8 +58,9 @@ The mapping, with its evidence in the edge's code (commit 8691ad0):
 - ``daq=1`` in health means status.json was fresh with ``daq_ok`` and all
   three sync flags true (``source.Source.view``), so the DAQ state is PASS.
 
-MQTT never carries the station position, the settings fields or the ADC
-overdrive; the light Data Out read (``sdr_doa_collector.collect_light``)
+MQTT carries no settings fields or ADC overdrive, and the station position
+only in the optional nav fields of health (contract 1.6, ``nav``); the light
+Data Out read (``sdr_doa_collector.collect_light``)
 does, and ``DataOutReader`` decides when it runs. All of it counts for
 ``LIGHT_VALUES_MAX_AGE_MS`` after the read and is left out once older. So
 the overdrive verdict is at most one light interval (30 s) old; without a
@@ -657,6 +658,34 @@ def _overall_and_gate(
     return state, {"state": "BLOCKED", "checks": checks, "reasons": reasons}
 
 
+NAV_KEYS = ("hdg", "hs", "gs", "fix", "sat", "lat", "lon", "alt", "sog", "cog")
+
+
+def _nav(health: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """Compass and GPS from the optional nav fields of telemetry/health (contract 1.6), or None without them.
+
+    Over the LoRa serial link there is no Data Out, so this is where the
+    station position comes from. ``latitude``/``longitude`` are there only with
+    a fix the edge chose to publish (``nav.gps.publish_position``).
+    """
+    if not any(key in health for key in NAV_KEYS):
+        return None
+    return {
+        "source": "telemetry/health",
+        "t": _int(health.get("t")),
+        "gps_state": health.get("gs"),
+        "fix": _int(health.get("fix")),
+        "satellites": _int(health.get("sat")),
+        "latitude": _number(health.get("lat")),
+        "longitude": _number(health.get("lon")),
+        "altitude_m": _number(health.get("alt")),
+        "speed_mps": _number(health.get("sog")),
+        "course_deg": _number(health.get("cog")),
+        "heading_deg": _number(health.get("hdg")),
+        "compass_state": health.get("hs"),
+    }
+
+
 def mqtt_snapshot(
     view: Mapping[str, Any],
     light: Optional[Mapping[str, Any]],
@@ -716,6 +745,9 @@ def mqtt_snapshot(
             "kind": SOURCE_MQTT,
             "reason": MQTT_FRESH,
             "reasons": [],
+            # "lora": the node reaches the broker over the LoRa serial bridge, so
+            # the light read's values (settings, ADC overdrive, SNR) cannot come.
+            "link": "lora" if view.get("link") == "lora" else None,
             "mqtt": mqtt_summary(view, True),
             "data_out": {
                 "read": "light",
@@ -776,6 +808,7 @@ def mqtt_snapshot(
         "overall_state": overall,
         "mqtt": diagnostics,
         "data_out_light": data_out_light,
+        "nav": _nav(health),
     }
 
 

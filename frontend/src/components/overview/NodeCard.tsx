@@ -3,6 +3,7 @@ import type { MapCoordinate, TelemetrySnapshot } from '../../types';
 import { adcOverdriven, daqSyncState, numberOrNull, syncCount } from '../../lib/telemetry';
 import { signalQualityView } from '../../lib/healthView';
 import { useI18n } from '../../lib/i18n';
+import { overLora } from '../../lib/telemetrySource';
 import { coordinateSourceKey } from '../DoaReadout';
 import { Icon } from '../ui';
 
@@ -112,19 +113,24 @@ export function NodeCard({
   const values = reachable && !localSnapshotFresh ? 'is-stale' : undefined;
   const fmt = (value: number | null, digits: number, unit = '') => (value === null ? '—' : `${value.toFixed(digits)}${unit}`);
   const value = (text: string) => (reachable ? text : '—');
+  // Over the LoRa serial link there is no Data Out: settings, SNR and the ADC state cannot come, and are named so.
+  const lora = overLora(snapshot);
+  const dataOutValue = (missing: boolean, text: string) => (lora && missing ? t('node.notOverLora') : value(text));
   const line1 = !snapshot
     ? t('node.waiting')
-    : reachable ? t('node.summary', { center: fmt(summary.centerMhz, 3), gain: fmt(summary.gainDb, 1) }) : t('node.unreachable');
+    : lora && summary.centerMhz === null && summary.gainDb === null
+      ? t('node.summaryLora')
+      : reachable ? t('node.summary', { center: fmt(summary.centerMhz, 3), gain: fmt(summary.gainDb, 1) }) : t('node.unreachable');
   const sourceLabel = coordinate ? t(positionHeld ? 'map.sourceHeld' : coordinateSourceKey(coordinate.source)) : null;
   const sourceTone = positionHeld || coordinate?.source === 'FALLBACK' ? 'is-warn' : coordinate?.source === 'MANUAL' ? 'is-manual' : undefined;
   const position = coordinate ? `${coordinate.latitude.toFixed(5)}, ${coordinate.longitude.toFixed(5)}` : t('readout.noPosition');
   const host = dataOutHost(snapshot);
   const rows: Array<[string, string, string?]> = [
-    [t('node.center'), value(fmt(summary.centerMhz, 3, ' MHz'))],
-    [t('node.gain'), value(fmt(summary.gainDb, 1, ' dB'))],
-    [t('node.snr'), value(fmt(summary.snrDb, 1, ' dB'))],
+    [t('node.center'), dataOutValue(summary.centerMhz === null, fmt(summary.centerMhz, 3, ' MHz'))],
+    [t('node.gain'), dataOutValue(summary.gainDb === null, fmt(summary.gainDb, 1, ' dB'))],
+    [t('node.snr'), dataOutValue(summary.snrDb === null, fmt(summary.snrDb, 1, ' dB'))],
     [t('node.daq'), value(summary.daq), summary.daq.startsWith('PASS') ? 'is-good' : summary.daq.startsWith('FAIL') ? 'is-bad' : undefined],
-    [t('node.adc'), value(summary.adc), summary.adc === 'OK' ? 'is-good' : summary.adc === 'OVERDRIVE' ? 'is-bad' : undefined],
+    [t('node.adc'), dataOutValue(summary.adc === 'N/A', summary.adc), summary.adc === 'OK' ? 'is-good' : summary.adc === 'OVERDRIVE' ? 'is-bad' : undefined],
     [t('node.frame'), value(summary.frame === null ? '—' : `#${summary.frame}`)],
     [t('node.remoteControl'), value(summary.remoteControl)],
   ];

@@ -144,12 +144,31 @@ export interface SnapshotSource {
   reasons?: string[];
   mqtt?: Record<string, unknown>;
   data_out?: Record<string, unknown>;
+  /** "lora": the node reaches the broker over the LoRa serial bridge, with no IP path for Data Out. */
+  link?: string | null;
+}
+
+/** Compass and GPS of an MQTT answer, from the optional nav fields of telemetry/health (contract 1.6); unvalidated JSON. */
+export interface SnapshotNav {
+  [key: string]: unknown;
+  gps_state?: string | null;
+  fix?: number | null;
+  satellites?: number | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  altitude_m?: number | null;
+  speed_mps?: number | null;
+  course_deg?: number | null;
+  heading_deg?: number | null;
+  compass_state?: string | null;
 }
 
 export interface TelemetrySnapshot {
   [key: string]: unknown;
   /** Absent from older servers, which always answered from Data Out. */
   source?: SnapshotSource;
+  /** MQTT answers only: null without nav fields; absent from Data Out answers and older servers. */
+  nav?: SnapshotNav | null;
   schema_version?: number;
   collector?: Record<string, unknown>;
   observed_at_ms?: number;
@@ -331,7 +350,7 @@ export type CompassSourceMode = 'DATA_OUT' | 'MANUAL' | 'FALLBACK';
 export interface MapCoordinate {
   latitude: number;
   longitude: number;
-  source: 'CSV' | 'XML' | 'DATA_OUT' | 'MANUAL' | 'FALLBACK' | 'SIMULATION';
+  source: 'CSV' | 'XML' | 'NAV' | 'DATA_OUT' | 'MANUAL' | 'FALLBACK' | 'SIMULATION';
 }
 
 export interface PolarSettings {
