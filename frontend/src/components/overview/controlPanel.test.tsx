@@ -248,6 +248,17 @@ describe('Kontrol unlocked', () => {
     expect(view({ evaluation: evaluate({ center_frequency_hz: '1800', vfo0_frequency_hz: '1800' }) })).toContain('Di luar 24 s/d 1766 MHz');
   });
 
+  it('names the band rule a new centre falls under, or that it falls under none', () => {
+    const uhf = view({ evaluation: evaluate(draftWithCenter({}, '433.92', REPORTED.values)) });
+    expect(uhf).toContain('UHF 400–480 MHz: gain 15.7 dB, UCA 0.128 m. RDF-SDR belum menerima jarak UCA dari Ground; atur di RDF-SDR.');
+    const vhf = view({ evaluation: evaluate(draftWithCenter({}, '145.5', REPORTED.values)) }, 'en');
+    expect(vhf).toContain('VHF 136–174 MHz: gain 25.4 dB, UCA 0.3 m.');
+    expect(vhf).toContain('Changed from 15.7 dB');
+    expect(view({ evaluation: evaluate(draftWithCenter({}, '175', REPORTED.values)) })).toContain('Di luar rule band (136–174 dan 400–480 MHz): gain dan UCA tidak diubah.');
+    // Nothing to say while the centre is not changed.
+    expect(view({ evaluation: evaluate({ gain_db: '20.7' }) })).not.toContain('rule band');
+  });
+
   it('reports an unavailable MQTT publish path', () => {
     const reported = normalizeConfigReported({ available: false, code: 'MQTT_DEPENDENCY_MISSING', broker: { connection: 'error' } });
     const markup = view({ reported, evaluation: evaluate({}, reported) });

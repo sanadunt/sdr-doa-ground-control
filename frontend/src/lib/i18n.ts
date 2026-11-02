@@ -328,7 +328,7 @@ const en = {
   'node.offset': 'Compass offset',
   'node.unreachable': 'Data Out unreachable',
   'node.noTelemetryLora': 'No current RDF-SDR telemetry over Telemetry LoRa',
-  'node.waiting': 'Waiting for the first Data Out read',
+  'node.waiting': 'Waiting for the first read',
 
   'polarDock.title': 'Polar DoA',
   'polarDock.viewMode': 'Plot mode',
@@ -507,6 +507,8 @@ const en = {
   'control.back': 'Back',
   'control.posting': 'Sending to the console…',
   'control.loraWaiting': 'Waiting for the Telemetry LoRa radio turn…',
+  'control.band.rule': '{band} {from}–{to} MHz: gain {gain} dB, UCA {uca} m. RDF-SDR does not take the UCA radius from Ground yet; set it on the RDF-SDR.',
+  'control.band.none': 'Outside the band rules (136–174 and 400–480 MHz): gain and UCA stay as they are.',
   'control.stage.live': 'RDF-SDR is retuning live and checking the DAQ…',
   'control.stage.restart': 'RDF-SDR is restarting the SDR to apply the change…',
   'control.stage.restartReason': 'RDF-SDR is restarting the SDR to apply the change ({reason})…',
@@ -757,7 +759,7 @@ const en = {
   'overlay.errorBelowMax': 'Must be below the maximum ({max} dB)',
   'overlay.errorAboveMin': 'Must be above the minimum ({min} dB)',
 
-  'polar.waiting': 'Waiting for Data Out',
+  'polar.waiting': 'Waiting for the first read',
   'polar.expired': 'Snapshot expired',
   'polar.available': 'Data available',
   'polar.partial': 'CSV view only (doa.xml missing) · partial',
@@ -1514,7 +1516,7 @@ const id: Dictionary = {
   'node.offset': 'Offset kompas',
   'node.unreachable': 'Data Out tidak terjangkau',
   'node.noTelemetryLora': 'Belum ada telemetri RDF-SDR terkini lewat Telemetry LoRa',
-  'node.waiting': 'Menunggu pembacaan Data Out pertama',
+  'node.waiting': 'Menunggu pembacaan pertama',
 
   'polarDock.title': 'Polar DoA',
   'polarDock.viewMode': 'Mode plot',
@@ -1693,6 +1695,8 @@ const id: Dictionary = {
   'control.back': 'Kembali',
   'control.posting': 'Mengirim ke console…',
   'control.loraWaiting': 'Menunggu giliran radio Telemetry LoRa…',
+  'control.band.rule': '{band} {from}–{to} MHz: gain {gain} dB, UCA {uca} m. RDF-SDR belum menerima jarak UCA dari Ground; atur di RDF-SDR.',
+  'control.band.none': 'Di luar rule band (136–174 dan 400–480 MHz): gain dan UCA tidak diubah.',
   'control.stage.live': 'RDF-SDR melakukan retune langsung dan memeriksa DAQ…',
   'control.stage.restart': 'RDF-SDR me-restart SDR untuk menerapkan perubahan…',
   'control.stage.restartReason': 'RDF-SDR me-restart SDR untuk menerapkan perubahan ({reason})…',
@@ -1943,7 +1947,7 @@ const id: Dictionary = {
   'overlay.errorBelowMax': 'Harus di bawah maksimum ({max} dB)',
   'overlay.errorAboveMin': 'Harus di atas minimum ({min} dB)',
 
-  'polar.waiting': 'Menunggu Data Out',
+  'polar.waiting': 'Menunggu pembacaan pertama',
   'polar.expired': 'Snapshot kedaluwarsa',
   'polar.available': 'Data tersedia',
   'polar.partial': 'Hanya tampilan CSV (doa.xml tidak ada) · sebagian',

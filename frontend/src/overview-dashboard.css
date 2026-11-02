@@ -151,7 +151,8 @@
 .ov-node { flex: none; width: 264px; }
 .ov-node-summary { display: flex; flex-direction: column; gap: 2px; padding: 0 12px 10px; color: var(--text); font-family: var(--mono); font-size: 12px; }
 .ov-node-summary > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ov-node-summary > span.is-setting { white-space: normal; }
+/* The first line (a setting, or why there is no telemetry) wraps instead of clipping. */
+.ov-node-summary > span:first-child { white-space: normal; }
 .ov-node-summary.is-stale, .ov-node-detail dl.is-stale dd { color: var(--subtle); }
 .ov-node-summary > .ov-node-source { color: var(--subtle); font-size: 10.5px; letter-spacing: .04em; }
 .ov-node-summary > .ov-node-source.is-warn { color: var(--amber); }

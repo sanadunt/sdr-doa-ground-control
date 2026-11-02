@@ -24,6 +24,16 @@ Rilis minor: tidak ada yang dihapus. Console membaca tambahan kontrak 1.7 dari R
     - engine mengubah nilai saat mulai.
   - Begitu RDF-SDR menyebut retune langsung atau restart, Kontrol menunggu hasil akhir sampai 270 detik, bukan 90 detik. Restart SDR bisa makan waktu hingga batas start 180 detik.
   - `APPLIED` tetap satu-satunya keberhasilan, dan tidak ada yang dikirim ulang.
+- **Rule band frekuensi di Kontrol.** Frekuensi tengah baru di dalam sebuah band otomatis membawa gain band itu. Ini berlaku saat diketik maupun saat dikirim dari dock Spektrum:
+  - **VHF 136–174 MHz:** gain 25.4 dB, UCA 0,3 m.
+  - **UHF 400–480 MHz:** gain 15.7 dB, UCA 0,128 m.
+
+  Nilai 25 dan 15 dB dari rule dibulatkan ke nilai terdekat di tabel gain KrakenSDR. Di luar kedua band, gain tidak diubah. Kontrol menulis band mana yang berlaku. Jarak UCA belum bisa dikirim karena RDF-SDR belum menerimanya lewat `config.patch`, jadi untuk sementara atur di RDF-SDR.
+- **Tablet 8".**
+  - Dalam portrait, strip status yang memuat Telemetry LoRa menjadi dua baris berisi empat, sehingga UNAVAILABLE dan label Telemetry LoRa tidak lagi terpotong.
+  - Waterfall Mirror Receiver mengisi kartunya.
+  - Baris pertama kartu RDF-SDR dan label kode di DoA Diagnostics boleh pindah baris.
+  - Saat halaman dimuat, tertulis "Menunggu pembacaan pertama", bukan "Menunggu Data Out".
 - **LoRa tanpa telemetri segar.** Bila RDF-SDR terhubung lewat LoRa tetapi telemetrinya tidak segar (misalnya DAQ dilaporkan tidak sehat), HUD, kartu RDF-SDR, chip DATA, System Health dan DoA Diagnostics menulis "Belum ada telemetri RDF-SDR terkini lewat Telemetry LoRa", bukan "Data Out tidak terjangkau" atau tabel CSV/XML.
 
 ## 3.4.4

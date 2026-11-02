@@ -151,10 +151,42 @@ export function mergeIntoDraft(draft: DraftValues, changes: ConfigPatchChanges, 
 }
 
 /**
+ * The operator's band rules (2 November): within a band a new centre
+ * frequency takes that band's receiver gain and UCA radius. The gains are the
+ * edge's gain table values nearest the rule's 15 and 25 dB, the ones the
+ * KrakenSDR engine itself uses there. Outside both bands nothing else changes.
+ */
+export interface BandRule {
+  id: 'VHF' | 'UHF';
+  minHz: number;
+  maxHz: number;
+  gainDb: number;
+  /** UCA radius in metres; sent only once the edge takes it (ant_spacing_m). */
+  ucaM: number;
+}
+
+export const BAND_RULES: readonly BandRule[] = [
+  { id: 'VHF', minHz: 136_000_000, maxHz: 174_000_000, gainDb: 25.4, ucaM: 0.3 },
+  { id: 'UHF', minHz: 400_000_000, maxHz: 480_000_000, gainDb: 15.7, ucaM: 0.128 },
+];
+
+export function bandRuleFor(hz: number | null | undefined): BandRule | null {
+  if (typeof hz !== 'number' || !Number.isFinite(hz)) return null;
+  return BAND_RULES.find((rule) => hz >= rule.minHz && hz <= rule.maxHz) ?? null;
+}
+
+/** A draft whose new centre lies in a band: the gain follows the band rule. */
+export function draftWithBand(draft: DraftValues, centerHz: number | null | undefined): DraftValues {
+  const rule = bandRuleFor(centerHz);
+  return rule ? { ...draft, gain_db: draftText(fieldFor('gain_db'), rule.gainDb) } : draft;
+}
+
+/**
  * A draft after the operator typed the centre frequency: VFO0 follows it,
  * because the edge takes a centre change only with VFO0 at the same
  * frequency. Typed back to the reported centre, VFO0 returns to its own
- * reported value.
+ * reported value. A new centre in a band also takes the band's gain
+ * (draftWithBand), which goes back with the centre.
  */
 export function draftWithCenter(draft: DraftValues, text: string, reported: ReportedValues): DraftValues {
   const field = fieldFor('center_frequency_hz');
@@ -162,11 +194,14 @@ export function draftWithCenter(draft: DraftValues, text: string, reported: Repo
   const typed = parseTypedNumber(text);
   const known = reported.center_frequency_hz;
   if (typed !== null && typeof known === 'number' && Math.round(typed * field.scale) === Math.round(known)) {
+    // Back on the reported centre, VFO0 and the gain return to their reported values too.
     delete next.vfo0_frequency_hz;
-  } else {
-    next.vfo0_frequency_hz = text;
+    delete next.gain_db;
+    return next;
   }
-  return next;
+  next.vfo0_frequency_hz = text;
+  // A new centre in a band takes the band's gain (the operator can still pick another).
+  return typed === null ? next : draftWithBand(next, typed * field.scale);
 }
 
 function sameValue(field: ConfigPatchField, left: number, right: number): boolean {

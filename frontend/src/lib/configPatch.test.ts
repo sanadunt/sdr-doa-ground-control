@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BAND_RULES,
   appliedMethodText,
+  bandRuleFor,
   commandStageText,
   restartReasonText,
   CONFIG_PATCH_ERROR_CODES,
@@ -11,6 +13,7 @@ import {
   commandResultView,
   displayValue,
   draftFromReported,
+  draftWithBand,
   draftWithCenter,
   edgeErrorKey,
   edgeHelperFault,
@@ -125,11 +128,31 @@ describe('parseDraft', () => {
   it('lets VFO0 follow the typed centre, and return to its own value', () => {
     const reported = { ...REPORTED, vfo0_frequency_hz: 416_600_000 };
     const followed = draftWithCenter({}, '434.5', reported);
-    expect(followed).toEqual({ center_frequency_hz: '434.5', vfo0_frequency_hz: '434.5' });
+    // 434.5 MHz is UHF, so the gain follows the band rule too.
+    expect(followed).toEqual({ center_frequency_hz: '434.5', vfo0_frequency_hz: '434.5', gain_db: '15.7' });
     const back = draftWithCenter(followed, '416.588', reported);
     expect(back).toEqual({ center_frequency_hz: '416.588' });
     const result = parseDraft(CONFIG_PATCH_FIELDS, { ...draftFromReported(reported), ...back }, reported, null);
     expect(result.changes).toEqual({});
+  });
+
+  it('gives a new centre in a band the band rule gain, and leaves other frequencies alone', () => {
+    // The operator's rule of 2 November: UHF 400-480 MHz gain 15.7 dB (UCA 0.128 m), VHF 136-174 MHz 25.4 dB (UCA 0.3 m).
+    expect(BAND_RULES.map((rule) => [rule.id, rule.gainDb, rule.ucaM])).toEqual([['VHF', 25.4, 0.3], ['UHF', 15.7, 0.128]]);
+    for (const rule of BAND_RULES) expect(GAIN_TABLE_DB).toContain(rule.gainDb);
+    expect(bandRuleFor(136_000_000)?.id).toBe('VHF');
+    expect(bandRuleFor(174_000_000)?.id).toBe('VHF');
+    expect(bandRuleFor(400_000_000)?.id).toBe('UHF');
+    expect(bandRuleFor(480_000_000)?.id).toBe('UHF');
+    for (const hz of [135_999_999, 174_000_001, 399_999_999, 480_000_001, null]) expect(bandRuleFor(hz)).toBeNull();
+    const vhf = draftWithCenter({ gain_db: '15.7' }, '145.5', REPORTED);
+    expect(vhf).toMatchObject({ center_frequency_hz: '145.5', vfo0_frequency_hz: '145.5', gain_db: '25.4' });
+    expect(parseDraft(CONFIG_PATCH_FIELDS, { ...draftFromReported(REPORTED), ...vhf }, REPORTED, null).changes)
+      .toEqual({ center_frequency_hz: 145_500_000, gain_db: 25.4, vfo0_frequency_hz: 145_500_000 });
+    // Outside both bands the gain the operator chose stays.
+    expect(draftWithCenter({ gain_db: '20.7' }, '175', REPORTED)).toEqual({ center_frequency_hz: '175', vfo0_frequency_hz: '175', gain_db: '20.7' });
+    expect(draftWithBand({}, 433_920_000)).toEqual({ gain_db: '15.7' });
+    expect(draftWithBand({ gain_db: '20.7' }, 1_200_000_000)).toEqual({ gain_db: '20.7' });
   });
 
   it('merges a spectrum draft as display text', () => {

@@ -7,6 +7,12 @@
 @media (max-width: 600px) {
   .rx-mirror-spectrum { height: 360px; }
 }
+/* The Dashboard's stacked rules (1023 px and below) give the waterfall a fixed
+   96 px; on this page it fills the card, as on a wide screen, so a portrait
+   tablet shows no empty band under it. */
+@media (max-width: 1023px) {
+  .rx-mirror-spectrum .ov-spec-waterfall { flex: 1 1 0; height: auto; min-height: 96px; }
+}
 
 /* Records tab (components/records/RecordsTab.tsx): the groundstation's
    recordings and scans, read only. 44 px targets, console tokens only. A row

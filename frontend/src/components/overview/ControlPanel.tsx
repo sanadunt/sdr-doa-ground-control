@@ -8,10 +8,12 @@ import {
   CONFIG_PATCH_FIELDS,
   GAIN_TABLE_DB,
   appliedMethodText,
+  bandRuleFor,
   commandResultView,
   commandStageText,
   displayValue,
   draftFromReported,
+  draftWithBand,
   draftWithCenter,
   fieldFor,
   isConfigPatchErrorCode,
@@ -129,6 +131,24 @@ function fieldHint(t: Translate, evaluation: FieldEvaluation, ranges: ConfigPatc
   }
   if (evaluation.reported === null && evaluation.text.trim() === '') return { text: t('control.notReported'), tone: 'neutral' };
   return null;
+}
+
+/**
+ * The band rule a changed centre frequency falls under (its gain and UCA
+ * radius), or that it falls under none and the gain stays as it is.
+ */
+export function bandNote(t: Translate, evaluation: DraftEvaluation): string | null {
+  const center = evaluation.fields.find((entry) => entry.field.key === 'center_frequency_hz');
+  if (!center?.changed || center.value === null) return null;
+  const rule = bandRuleFor(center.value);
+  if (!rule) return t('control.band.none');
+  return t('control.band.rule', {
+    band: rule.id,
+    from: plainNumber(rule.minHz / 1e6),
+    to: plainNumber(rule.maxHz / 1e6),
+    gain: plainNumber(rule.gainDb),
+    uca: plainNumber(rule.ucaM),
+  });
 }
 
 /** Rows of the review box: label, contract key, reported value and new value. */
@@ -404,6 +424,7 @@ export function ControlPanelView({
                 );
               })}
             </div>
+            {bandNote(t, evaluation) ? <p className="ov-control-note">{bandNote(t, evaluation)}</p> : null}
             {editError ? <p className="ov-control-error" role="alert">{noticeText(t, editError.message)}</p> : null}
             <div className="ov-control-actions">
               <button className="ov-button is-primary is-wide" type="button" disabled={!reported || patchUnavailable || evaluation.invalid || changeCount === 0} onClick={onReview}>{t('control.review')}</button>
@@ -813,7 +834,8 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
   // Merge a waiting dock request once Kontrol is unlocked and has the reported values.
   useEffect(() => {
     if (!pendingDraft || admin !== 'unlocked' || !reported || stage === 'sending' || stage === 'done') return;
-    const merged = { ...draft, ...mergeIntoDraft({}, pendingDraft) };
+    // A frequency from the dock takes its band's gain, as a typed one does.
+    const merged = draftWithBand({ ...draft, ...mergeIntoDraft({}, pendingDraft) }, pendingDraft.center_frequency_hz);
     setPendingDraft(null);
     setDraft(merged);
     const current = values ?? reported.values;
