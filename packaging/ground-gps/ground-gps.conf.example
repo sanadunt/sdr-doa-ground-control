@@ -1,0 +1,31 @@
+# Settings of ground-gps-publisher on the groundstation (packaging/ground-gps).
+# Installed as /etc/ground-gps/ground-gps.conf (owner root, mode 0644); the
+# installer writes it once and keeps it on every later run. Change it with
+# sudoedit, check it with: ground-gps-publisher check-config --config /etc/ground-gps/ground-gps.conf
+# then apply it with: sudo systemctl restart ground-gps.service
+#
+# NAME=VALUE per line, read literally (no $ expansion). A line left out keeps
+# the default shown here.
+
+# The GNSS receiver's NMEA output, opened read only. Use the stable
+# /dev/serial/by-id name, not ttyACM0. The service may open USB CDC ACM
+# devices (ttyACM*) only; the LoRa bridge's serial adapter (ttyUSB0) is never
+# opened.
+DEVICE=/dev/serial/by-id/usb-u-blox_AG_-_www.u-blox.com_u-blox_7_-_GPS_GNSS_Receiver-if00
+
+# Line speed. Empty leaves it as it is, which a USB receiver (ACM) ignores
+# anyway; a receiver behind a serial adapter needs its rate, such as 9600.
+BAUD=
+
+# The groundstation's MQTT broker (anonymous MQTT 3.1.1 over TCP): an IP
+# address or localhost, no DNS name.
+BROKER_HOST=127.0.0.1
+BROKER_PORT=1883
+
+# The RDF Node id of the topic sdr/v2/<NODE_ID>/ground/gps (1 to 32 letters,
+# digits, _ and -). The console reads the node of its own MQTT settings.
+NODE_ID=uav-01
+
+# Seconds between two retained statuses (1 to 60); a change of the fix state
+# is published at once.
+INTERVAL=2

@@ -180,12 +180,47 @@ export interface SnapshotRf {
   gain_db?: number | null;
   vfo0_bandwidth_hz?: number | null;
   vfo0_squelch_db?: number | null;
+  /** Contract 1.8: the UCA radius (settings.json ant_spacing_meters) in metres. */
+  uca_m?: number | null;
+}
+
+/**
+ * The groundstation's own GNSS receiver: the retained status of
+ * ground-gps-publisher on sdr/v2/<node>/ground/gps, as tools/ground_gps.py
+ * views it at answer time. STALE when the status is older than stale_after_ms
+ * (or ahead of the server clock), NONE when nothing reported; lat and lon only
+ * while FIX.
+ */
+export type GroundGpsState = 'FIX' | 'NO_FIX' | 'NO_DEVICE' | 'NO_DATA' | 'ERROR' | 'STOPPED' | 'STALE' | 'NONE';
+
+export interface GroundGpsView {
+  present: boolean;
+  state: GroundGpsState;
+  lat: number | null;
+  lon: number | null;
+  /** Metres above mean sea level. */
+  alt: number | null;
+  /** 0, 2 or 3 (2D, 3D). */
+  fix: number | null;
+  sat: number | null;
+  hdop: number | null;
+  sog: number | null;
+  cog: number | null;
+  /** The receiver's /dev/serial/by-id name or path. */
+  device: string | null;
+  error: string | null;
+  /** Age of the status by its own t, at answer time. */
+  status_age_ms: number | null;
+  received_at_ms: number | null;
+  stale_after_ms: number;
 }
 
 export interface TelemetrySnapshot {
   [key: string]: unknown;
   /** Absent from older servers, which always answered from Data Out. */
   source?: SnapshotSource;
+  /** Every answer of a console with ground GPS: null without an MQTT monitor; absent from older servers. */
+  ground_gps?: GroundGpsView | null;
   /** MQTT answers only: null without nav fields; absent from Data Out answers and older servers. */
   nav?: SnapshotNav | null;
   /** MQTT answers only: null without state.rf (an edge before 1.7); absent from Data Out answers and older servers. */

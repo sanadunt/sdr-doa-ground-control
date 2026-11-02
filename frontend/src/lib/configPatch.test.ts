@@ -3,6 +3,9 @@ import {
   BAND_RULES,
   appliedMethodText,
   bandRuleFor,
+  bandSpacingText,
+  configPatchFieldsFor,
+  takesUca,
   commandStageText,
   restartReasonText,
   CONFIG_PATCH_ERROR_CODES,
@@ -29,6 +32,9 @@ import type { CommandStatusLike } from './configPatch';
 import { CONFIG_PATCH_KEYS } from './controlDraft';
 import { DICTIONARIES, translate } from './i18n';
 
+// The five fields of an edge without capabilities.config_fields (before 1.8.0): Kontrol as before.
+const LEGACY = configPatchFieldsFor(null);
+
 const REPORTED = {
   center_frequency_hz: 416_588_000,
   gain_db: 15.7,
@@ -41,7 +47,7 @@ describe('config patch fields', () => {
   it('cover the edge safe fields in its order with the helper limits', () => {
     expect(CONFIG_PATCH_FIELDS.map((field) => field.key)).toEqual([...CONFIG_PATCH_KEYS]);
     expect(CONFIG_PATCH_FIELDS.map((field) => [field.min, field.max])).toEqual([
-      [24_000_000, 1_766_000_000], [-10, 100], [24_000_000, 1_766_000_000], [100, 2_400_000], [-200, 50],
+      [24_000_000, 1_766_000_000], [-10, 100], [24_000_000, 1_766_000_000], [100, 2_400_000], [-200, 50], [0.05, 1],
     ]);
     expect(CONFIG_PATCH_FIELDS.filter((field) => field.table).map((field) => field.key)).toEqual(['gain_db']);
     expect(GAIN_TABLE_DB).toHaveLength(29);
@@ -73,55 +79,55 @@ describe('config patch fields', () => {
 });
 
 describe('parseDraft', () => {
-  const draft = draftFromReported(REPORTED);
+  const draft = draftFromReported(REPORTED, LEGACY);
 
   it('starts with no changes and leaves unreported fields empty', () => {
     expect(draft).toEqual({ center_frequency_hz: '416.588', gain_db: '15.7', vfo0_frequency_hz: '', vfo0_bandwidth_hz: '', vfo0_squelch_db: '' });
-    const result = parseDraft(CONFIG_PATCH_FIELDS, draft, REPORTED, null);
+    const result = parseDraft(LEGACY, draft, REPORTED, null);
     expect(result.invalid).toBe(false);
     expect(result.changes).toEqual({});
   });
 
   it('converts display units to SI and keeps frequencies integer Hz', () => {
-    const result = parseDraft(CONFIG_PATCH_FIELDS, { ...draft, vfo0_bandwidth_hz: '12.5', gain_db: '20,7', vfo0_squelch_db: '−70' }, REPORTED, null);
+    const result = parseDraft(LEGACY, { ...draft, vfo0_bandwidth_hz: '12.5', gain_db: '20,7', vfo0_squelch_db: '−70' }, REPORTED, null);
     expect(result.invalid).toBe(false);
     expect(result.changes).toEqual({ gain_db: 20.7, vfo0_bandwidth_hz: 12_500, vfo0_squelch_db: -70 });
     expect(result.fields.find((field) => field.field.key === 'vfo0_bandwidth_hz')?.reported).toBeNull();
   });
 
   it('flags empty reported fields, non-numbers, out-of-range values and gains off the table', () => {
-    const result = parseDraft(CONFIG_PATCH_FIELDS, { ...draft, center_frequency_hz: '', gain_db: '20', vfo0_squelch_db: '60' }, REPORTED, null);
+    const result = parseDraft(LEGACY, { ...draft, center_frequency_hz: '', gain_db: '20', vfo0_squelch_db: '60' }, REPORTED, null);
     expect(result.invalid).toBe(true);
     expect(result.fields.map((field) => field.problem)).toEqual(['empty', 'table', null, null, 'range']);
     expect(result.changes).toEqual({});
-    expect(parseDraft(CONFIG_PATCH_FIELDS, { ...draft, gain_db: 'abc' }, REPORTED, null).fields[1].problem).toBe('number');
+    expect(parseDraft(LEGACY, { ...draft, gain_db: 'abc' }, REPORTED, null).fields[1].problem).toBe('number');
     // A server table replaces the client copy.
-    expect(parseDraft(CONFIG_PATCH_FIELDS, { ...draft, gain_db: '20' }, REPORTED, null, [20]).changes).toEqual({ gain_db: 20 });
+    expect(parseDraft(LEGACY, { ...draft, gain_db: '20' }, REPORTED, null, [20]).changes).toEqual({ gain_db: 20 });
   });
 
   it('treats a value equal to the reported one as unchanged', () => {
-    const result = parseDraft(CONFIG_PATCH_FIELDS, { ...draft, center_frequency_hz: '416.5880' }, REPORTED, null);
+    const result = parseDraft(LEGACY, { ...draft, center_frequency_hz: '416.5880' }, REPORTED, null);
     expect(result.changes).toEqual({});
   });
 
   it('takes VFO0 along with a centre change, at the same frequency', () => {
     const reported = { ...REPORTED, vfo0_frequency_hz: 433_920_000 };
-    const base = draftFromReported(reported);
+    const base = draftFromReported(reported, LEGACY);
     // The centre moves to where VFO0 already is: VFO0 is sent unchanged.
-    const along = parseDraft(CONFIG_PATCH_FIELDS, { ...base, center_frequency_hz: '433.92' }, reported, null);
+    const along = parseDraft(LEGACY, { ...base, center_frequency_hz: '433.92' }, reported, null);
     expect(along.invalid).toBe(false);
     expect(along.changes).toEqual({ center_frequency_hz: 433_920_000, vfo0_frequency_hz: 433_920_000 });
     const vfo = along.fields.find((field) => field.field.key === 'vfo0_frequency_hz');
     expect([vfo?.changed, vfo?.required]).toEqual([true, true]);
     // Another frequency for VFO0 is refused, as the edge refuses it.
-    const apart = parseDraft(CONFIG_PATCH_FIELDS, { ...base, center_frequency_hz: '434', vfo0_frequency_hz: '434.01' }, reported, null);
+    const apart = parseDraft(LEGACY, { ...base, center_frequency_hz: '434', vfo0_frequency_hz: '434.01' }, reported, null);
     expect(apart.invalid).toBe(true);
     expect(apart.fields.find((field) => field.field.key === 'vfo0_frequency_hz')?.problem).toBe('centerVfo');
     expect(apart.changes).toEqual({ center_frequency_hz: 434_000_000 });
     // VFO0 alone may move inside the band.
-    expect(parseDraft(CONFIG_PATCH_FIELDS, { ...base, vfo0_frequency_hz: '433.95' }, reported, null).changes).toEqual({ vfo0_frequency_hz: 433_950_000 });
+    expect(parseDraft(LEGACY, { ...base, vfo0_frequency_hz: '433.95' }, reported, null).changes).toEqual({ vfo0_frequency_hz: 433_950_000 });
     // An unreported, empty VFO0 cannot go along.
-    const empty = parseDraft(CONFIG_PATCH_FIELDS, { ...draft, center_frequency_hz: '434' }, REPORTED, null);
+    const empty = parseDraft(LEGACY, { ...draft, center_frequency_hz: '434' }, REPORTED, null);
     expect(empty.fields.find((field) => field.field.key === 'vfo0_frequency_hz')?.problem).toBe('centerVfo');
   });
 
@@ -132,7 +138,7 @@ describe('parseDraft', () => {
     expect(followed).toEqual({ center_frequency_hz: '434.5', vfo0_frequency_hz: '434.5', gain_db: '15.7' });
     const back = draftWithCenter(followed, '416.588', reported);
     expect(back).toEqual({ center_frequency_hz: '416.588' });
-    const result = parseDraft(CONFIG_PATCH_FIELDS, { ...draftFromReported(reported), ...back }, reported, null);
+    const result = parseDraft(LEGACY, { ...draftFromReported(reported, LEGACY), ...back }, reported, null);
     expect(result.changes).toEqual({});
   });
 
@@ -147,7 +153,7 @@ describe('parseDraft', () => {
     for (const hz of [135_999_999, 174_000_001, 399_999_999, 480_000_001, null]) expect(bandRuleFor(hz)).toBeNull();
     const vhf = draftWithCenter({ gain_db: '15.7' }, '145.5', REPORTED);
     expect(vhf).toMatchObject({ center_frequency_hz: '145.5', vfo0_frequency_hz: '145.5', gain_db: '25.4' });
-    expect(parseDraft(CONFIG_PATCH_FIELDS, { ...draftFromReported(REPORTED), ...vhf }, REPORTED, null).changes)
+    expect(parseDraft(LEGACY, { ...draftFromReported(REPORTED, LEGACY), ...vhf }, REPORTED, null).changes)
       .toEqual({ center_frequency_hz: 145_500_000, gain_db: 25.4, vfo0_frequency_hz: 145_500_000 });
     // Outside both bands the gain the operator chose stays.
     expect(draftWithCenter({ gain_db: '20.7' }, '175', REPORTED)).toEqual({ center_frequency_hz: '175', vfo0_frequency_hz: '175', gain_db: '20.7' });
@@ -155,11 +161,89 @@ describe('parseDraft', () => {
     expect(draftWithBand({ gain_db: '20.7' }, 1_200_000_000)).toEqual({ gain_db: '20.7' });
   });
 
+  it('compares a reported UCA spacing at the precision it is sent with', () => {
+    const fields = CONFIG_PATCH_FIELDS;
+    const reported = { ...REPORTED, ant_spacing_m: 0.21125 };
+    expect(parseDraft(fields, draftFromReported(reported, fields), reported, null).changes).toEqual({});
+    expect(parseDraft(fields, { ...draftFromReported(reported, fields), gain_db: '20.7' }, reported, null).changes).toEqual({ gain_db: 20.7 });
+  });
+
   it('merges a spectrum draft as display text', () => {
     const merged = mergeIntoDraft(draft, { center_frequency_hz: 433_925_000, vfo0_frequency_hz: 433_925_000 });
     expect(merged.center_frequency_hz).toBe('433.925');
     expect(merged.vfo0_frequency_hz).toBe('433.925');
-    expect(parseDraft(CONFIG_PATCH_FIELDS, merged, REPORTED, null).changes).toEqual({ center_frequency_hz: 433_925_000, vfo0_frequency_hz: 433_925_000 });
+    expect(parseDraft(LEGACY, merged, REPORTED, null).changes).toEqual({ center_frequency_hz: 433_925_000, vfo0_frequency_hz: 433_925_000 });
+  });
+});
+
+describe('edge 1.8: the UCA spacing (ant_spacing_m)', () => {
+  const EDGE_18 = ['ant_spacing_m', 'center_frequency_hz', 'gain_db', 'vfo0_bandwidth_hz', 'vfo0_frequency_hz', 'vfo0_squelch_db'];
+  const FIELDS = configPatchFieldsFor(EDGE_18);
+  const reported = { ...REPORTED, vfo0_frequency_hz: 416_588_000, ant_spacing_m: 0.128 };
+
+  it('offers the field only to an edge that lists it, in the edge order', () => {
+    expect(LEGACY.map((field) => field.key)).toEqual(['center_frequency_hz', 'gain_db', 'vfo0_frequency_hz', 'vfo0_bandwidth_hz', 'vfo0_squelch_db']);
+    expect(configPatchFieldsFor([])).toEqual(LEGACY);
+    expect(configPatchFieldsFor(['something_new'])).toEqual(LEGACY);
+    expect(FIELDS.map((field) => field.key)).toEqual([...CONFIG_PATCH_KEYS]);
+    expect(configPatchFieldsFor(['gain_db', 'ant_spacing_m']).map((field) => field.key)).toEqual(['gain_db', 'ant_spacing_m']);
+    expect([takesUca(LEGACY), takesUca(FIELDS)]).toEqual([false, true]);
+  });
+
+  it('shows metres with 3 decimals and sends 4, as the edge rounds it', () => {
+    const field = fieldFor('ant_spacing_m');
+    expect([field.unit, field.decimals, field.integer]).toEqual(['m', 3, false]);
+    expect(displayValue(field, 0.3)).toBe('0.300 m');
+    expect(displayValue(field, 0.1234)).toBe('0.1234 m');
+    expect(rangeParts(field, null)).toEqual({ min: '0.05', max: '1', unit: 'm' });
+    const base = draftFromReported(reported, FIELDS);
+    expect(base.ant_spacing_m).toBe('0.128');
+    expect(parseDraft(FIELDS, base, reported, null).changes).toEqual({});
+    expect(parseDraft(FIELDS, { ...base, ant_spacing_m: '0,12345' }, reported, null).changes).toEqual({ ant_spacing_m: 0.1235 });
+    expect(parseDraft(FIELDS, { ...base, ant_spacing_m: '1.2' }, reported, null).fields[5].problem).toBe('range');
+    expect(parseDraft(FIELDS, { ...base, ant_spacing_m: '0.04' }, reported, null).fields[5].problem).toBe('range');
+  });
+
+  it('sets the band UCA with the gain, and takes both back with the centre', () => {
+    const vhf = draftWithCenter({}, '145.5', reported, true);
+    expect(vhf).toEqual({ center_frequency_hz: '145.5', vfo0_frequency_hz: '145.5', gain_db: '25.4', ant_spacing_m: '0.3' });
+    expect(parseDraft(FIELDS, { ...draftFromReported(reported, FIELDS), ...vhf }, reported, null).changes)
+      .toEqual({ center_frequency_hz: 145_500_000, gain_db: 25.4, vfo0_frequency_hz: 145_500_000, ant_spacing_m: 0.3 });
+    expect(draftWithCenter(vhf, '416.588', reported, true)).toEqual({ center_frequency_hz: '416.588' });
+    // UHF keeps a reported 0.128 m: nothing to send for the spacing.
+    const uhf = draftWithCenter({}, '433.92', reported, true);
+    expect(parseDraft(FIELDS, { ...draftFromReported(reported, FIELDS), ...uhf }, reported, null).changes)
+      .toEqual({ center_frequency_hz: 433_920_000, vfo0_frequency_hz: 433_920_000 });
+    expect(draftWithBand({}, 150_000_000, true)).toEqual({ gain_db: '25.4', ant_spacing_m: '0.3' });
+    // An older edge: the gain only, as before.
+    expect(draftWithCenter({}, '145.5', reported)).toEqual({ center_frequency_hz: '145.5', vfo0_frequency_hz: '145.5', gain_db: '25.4' });
+    expect(draftWithBand({ gain_db: '20.7' }, 1_200_000_000, true)).toEqual({ gain_db: '20.7' });
+  });
+
+  it('explains the engine band refusal with the band spacing, and names it in the codes', () => {
+    const ack = { status: 'FAILED', error: 'SPACING_SET_BY_ENGINE_BAND', reason: null, revision: 42, bandSpacingM: 0.3 };
+    const view = commandResultView({ state: 'acked', pubackReason: null, ack }, 1, 42, 15);
+    expect(view).toMatchObject({
+      tone: 'err', body: { key: 'control.result.spacingSetByBand', vars: { spacing: '0.3' } },
+      code: 'FAILED · SPACING_SET_BY_ENGINE_BAND · band_spacing_m 0.3',
+    });
+    const en = (key: Parameters<typeof translate>[1], vars?: Parameters<typeof translate>[2]) => translate('en', key, vars);
+    expect(en(view.body.key, view.body.vars)).toBe('In this band the KrakenSDR engine sets the UCA spacing itself: 0.3 m. Nothing was written.');
+    expect(translate('id', view.body.key, view.body.vars)).toContain('0.3 m');
+    // Without band_spacing_m the general message names both bands.
+    const plain = commandResultView({ state: 'acked', pubackReason: null, ack: { ...ack, bandSpacingM: null } }, 1, 42, 15);
+    expect(plain).toMatchObject({ body: { key: 'control.edge.SPACING_SET_BY_ENGINE_BAND' }, code: 'FAILED · SPACING_SET_BY_ENGINE_BAND' });
+    expect(edgeErrorKey('SPACING_SET_BY_ENGINE_BAND')).toBe('control.edge.SPACING_SET_BY_ENGINE_BAND');
+    expect(bandSpacingText(en, ack)).toBeNull();
+  });
+
+  it('says when the edge wrote the band spacing with another change', () => {
+    const en = (key: Parameters<typeof translate>[1], vars?: Parameters<typeof translate>[2]) => translate('en', key, vars);
+    const ack = { status: 'APPLIED', error: null, reason: null, revision: 43, method: 'LIVE', bandSpacingM: 0.128 };
+    expect(bandSpacingText(en, ack)).toBe('The RDF-SDR also set the UCA spacing to 0.128 m, the value its engine uses in this band.');
+    expect(commandResultView({ state: 'acked', pubackReason: null, ack }, 1, 42, 15).code).toBe('APPLIED · LIVE · band_spacing_m 0.128');
+    expect(bandSpacingText(en, { ...ack, bandSpacingM: null })).toBeNull();
+    expect(bandSpacingText(en, null)).toBeNull();
   });
 });
 

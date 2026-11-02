@@ -8,10 +8,18 @@ function formatDb(value: number, known = true): string {
 }
 
 /**
- * Map legend: layer swatches, the colour scale the heat layer is painted with,
+ * Map legend: layer swatches (the RDF-SDR heading only while it is drawn), the colour scale the heat layer is painted with,
  * and the readings derived from the current vector (ring spacing, -3 dB width).
  */
-export function OverlayLegend({ settings, scale, saturation, ringStepM, halfPower }: { settings: DoaOverlaySettings; scale: DbScale; saturation: number; ringStepM: number; halfPower: HalfPowerWidth | null }): JSX.Element {
+export function OverlayLegend({ settings, scale, saturation, ringStepM, halfPower, heading = null }: {
+  settings: DoaOverlaySettings;
+  scale: DbScale;
+  saturation: number;
+  ringStepM: number;
+  halfPower: HalfPowerWidth | null;
+  /** The RDF-SDR heading as the map draws it: live, held (STALE) or not drawn. */
+  heading?: 'live' | 'held' | null;
+}): JSX.Element {
   const { t } = useI18n();
   const beam = settings.heatStyle === 'beam';
   const auto = scale.mode !== 'manual';
@@ -28,6 +36,7 @@ export function OverlayLegend({ settings, scale, saturation, ringStepM, halfPowe
         {settings.bearingVisible ? <span><i className="legend-swatch legend-bearing" /> {t('map.legendBearing')}</span> : null}
         {settings.edgesVisible && halfPower ? <span><i className="legend-swatch legend-edge" /> {t('map.legendEdges')}</span> : null}
         {settings.lobeVisible ? <span><i className="legend-swatch legend-lobe" /> {t('map.legendLobe')}</span> : null}
+        {heading ? <span><i className={heading === 'held' ? 'legend-swatch legend-heading is-held' : 'legend-swatch legend-heading'} /> {t(heading === 'held' ? 'map.legendHeadingHeld' : 'map.legendHeading')}</span> : null}
         {settings.ringsVisible && ringStepM > 0 ? <span className="legend-reading">{t('map.ringStep', { step: formatDistance(ringStepM) })}</span> : null}
         <span className="legend-reading">{halfPower ? t('map.halfPower', { deg: halfPower.widthDeg }) : t('map.halfPowerNone')}</span>
       </div>

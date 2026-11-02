@@ -880,6 +880,8 @@ def _rf(session: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
         "gain_db": _number(rf.get("g")),
         "vfo0_bandwidth_hz": _int(rf.get("bw")),
         "vfo0_squelch_db": _number(rf.get("sq")),
+        # Contract 1.8: the UCA radius (ant_spacing_meters) in metres.
+        "uca_m": _number(rf.get("uca")),
     }
 
 

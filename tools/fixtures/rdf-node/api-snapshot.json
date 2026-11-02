@@ -996,6 +996,7 @@
    "safe_settings": {
     "active_vfos": 1,
     "ant_arrangement": "UCA",
+    "ant_spacing_m": 0.21,
     "center_frequency_hz": 433920000,
     "doa_method": "MUSIC",
     "en_doa": true,

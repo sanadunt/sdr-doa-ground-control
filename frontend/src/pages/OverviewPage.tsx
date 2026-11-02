@@ -4,6 +4,7 @@ import type { ConsoleCapabilities } from '../api';
 import type { CompassConfig, GpsConfig, MapCoordinate, PolarSettings, TelemetrySnapshot } from '../types';
 import type { SimulationSettings } from '../lib/simulation';
 import { gpsReportsNoFix, holdStationCoordinate, resolveGpsSource } from '../lib/map';
+import { groundPosition } from '../lib/groundGps';
 import { doaStatusTextKey, overviewDoaStatus, provisionalTheta } from '../lib/doaStatus';
 import { lazyWithRetry } from '../lib/lazyRetry';
 import { compassOffsetSourceLabel, polarSettings, rememberDataOutCompass, resolveCompassSource } from '../lib/polar';
@@ -11,7 +12,7 @@ import type { CompassSourceCode, DataOutCompassSettings } from '../lib/polar';
 import { revealSection } from '../lib/revealSection';
 import type { MessageKey } from '../lib/i18n';
 import { effectiveDbScale } from '../lib/doaGeometry';
-import type { DoaOverlaySettings } from '../lib/doaGeometry';
+import type { DoaOverlaySettings, GeoOrigin } from '../lib/doaGeometry';
 import { loadOverlaySettings, saveOverlaySettings, validateOverlaySettings } from '../lib/mapOverlaySettings';
 import { loadPolarViewSettings, savePolarViewSettings, validatePolarViewSettings, effectiveFigType } from '../lib/polarViewSettings';
 import { loadBasemapId, normalizeBasemapId, saveBasemapId } from '../lib/basemaps';
@@ -97,6 +98,7 @@ export interface OverviewDashboardProps {
 function OverviewPageView({
   snapshot,
   localSnapshotFresh,
+  groundGpsFresh = localSnapshotFresh,
   gpsConfig,
   compassConfig,
   simulation,
@@ -115,6 +117,8 @@ function OverviewPageView({
 }: {
   snapshot: TelemetrySnapshot | null;
   localSnapshotFresh: boolean;
+  /** The groundstation GPS is current; it ages apart from the RDF-SDR's data (default: localSnapshotFresh). */
+  groundGpsFresh?: boolean;
   gpsConfig: GpsConfig;
   compassConfig: CompassConfig;
   simulation?: SimulationSettings;
@@ -153,6 +157,15 @@ function OverviewPageView({
   const readoutCoordinate = useMemo<MapCoordinate | null>(
     () => (heldLatitude === undefined || heldLongitude === undefined ? coordinate : { latitude: heldLatitude, longitude: heldLongitude, source: 'DATA_OUT' }),
     [coordinate, heldLatitude, heldLongitude],
+  );
+  // The groundstation's own GPS fix, from a fresh answer only; none in simulation,
+  // whose station is synthetic. Stable across equal values like the station.
+  const ground = simulation ? null : groundPosition(groundGpsFresh ? snapshot : null);
+  const groundLatitude = ground?.latitude;
+  const groundLongitude = ground?.longitude;
+  const groundCoordinate = useMemo<GeoOrigin | null>(
+    () => (groundLatitude === undefined || groundLongitude === undefined ? null : { latitude: groundLatitude, longitude: groundLongitude }),
+    [groundLatitude, groundLongitude],
   );
   // One readiness decision for the map overlay, the bearing HUD and the polar curve.
   const doa = overviewDoaStatus(snapshot, localSnapshotFresh);
@@ -246,6 +259,7 @@ function OverviewPageView({
               insets={insets}
               basemapId={basemapId}
               onBasemapSelect={onBasemapSelect}
+              ground={groundCoordinate}
             />
           </Suspense>
         </LoadErrorBoundary>
@@ -258,8 +272,10 @@ function OverviewPageView({
         <NodeCard
           snapshot={snapshot}
           localSnapshotFresh={localSnapshotFresh}
+          groundGpsFresh={groundGpsFresh}
           coordinate={readoutCoordinate}
           positionHeld={station?.held === true}
+          ground={groundCoordinate}
           compassOffset={compassOffset}
           offsetSource={offsetSource}
           offsetManual={offsetManual}

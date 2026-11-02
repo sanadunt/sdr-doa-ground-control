@@ -1163,7 +1163,7 @@ export function ConfigurationPage({
               {DRY_RUN_FIELDS.map((field) => {
                 const [min, max] = fieldRange(field, ranges);
                 const reportedValue = reported?.values[field.key];
-                const unit = field.unit === 'dB' ? 'dB' : 'Hz';
+                const unit = field.unit === 'dB' || field.unit === 'm' ? field.unit : 'Hz';
                 return (
                   <FormField key={field.key} label={t(field.label)} unit={unit} error={fieldError(dryRunErrors[field.key])}>
                     <input

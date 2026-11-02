@@ -662,6 +662,8 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         # fixture has no readable status.json, so there is no source at all.
         source = snapshot.pop("source")
         self.assertEqual((source["kind"], source["reasons"]), ("none", ["MQTT_DISABLED", "DATA_OUT_UNAVAILABLE"]))
+        # Every answer names the groundstation's own GPS; without a monitor it is null.
+        self.assertIsNone(snapshot.pop("ground_gps"))
         self.assertEqual(snapshot, fixture_snapshot)
         self.assertEqual(
             sorted(collection),

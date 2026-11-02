@@ -61,6 +61,8 @@ SHELL_SCRIPTS = (
     "packaging/host-power/install.sh",
     "packaging/host-power/uninstall.sh",
     "packaging/host-power/sdr-doa-host-power",
+    "packaging/ground-gps/install.sh",
+    "packaging/ground-gps/uninstall.sh",
     "packaging/receiver-engine/trial-receiver-engine.sh",
 )
 # The groundstation's T900 link tools ship in the console release only.
@@ -76,6 +78,12 @@ HOST_POWER_EXECUTABLES = {
     "packaging/host-power/install.sh",
     "packaging/host-power/uninstall.sh",
     "packaging/host-power/sdr-doa-host-power",
+}
+# The groundstation GPS publisher ships in the console release only.
+GROUND_GPS_EXECUTABLES = {
+    "packaging/ground-gps/install.sh",
+    "packaging/ground-gps/uninstall.sh",
+    "packaging/ground-gps/ground-gps-publisher",
 }
 # The phase 0 Receiver engine trial (issue #15): run by hand on the
 # groundstation, never shipped or installed.
@@ -259,6 +267,21 @@ class ReleaseBuildTests(unittest.TestCase):
         self.assertFalse({name for name in app if name.startswith("packaging/host-power/")})
         self.assertNotIn("host-power", (ROOT / "Dockerfile.release").read_text(encoding="utf-8"))
         self.assertNotIn("host-power", (ROOT / "Dockerfile").read_text(encoding="utf-8"))
+
+    def test_console_release_ships_every_ground_gps_file(self):
+        names = self.names(self.console_tar, self.console_top)
+        shipped = {name for name in names if name.startswith("packaging/ground-gps/")}
+        on_disk = {f"packaging/ground-gps/{path.name}" for path in (ROOT / "packaging/ground-gps").iterdir()}
+        self.assertEqual(shipped, on_disk, "a new file in packaging/ground-gps needs GROUND_GPS_FILES")
+        modes = {member.name[len(self.console_top) + 1:]: member.mode for member in tar_members(self.console_tar)}
+        for name in shipped:
+            self.assertEqual(modes[name], 0o755 if name in GROUND_GPS_EXECUTABLES else 0o644, name)
+        self.assertEqual({name for name in shipped if os.access(ROOT / name, os.X_OK)}, GROUND_GPS_EXECUTABLES)
+        # Host tooling: never in the installed console, so never in its image.
+        app = {entry.arcname for entry in make_release.console_app_entries(ROOT, self.dist)}
+        self.assertFalse({name for name in app if name.startswith("packaging/ground-gps/")})
+        for dockerfile in ("Dockerfile.release", "Dockerfile"):
+            self.assertNotIn("ground-gps", (ROOT / dockerfile).read_text(encoding="utf-8"))
 
     def test_the_old_topic_path_and_the_agent_never_ship(self):
         names = self.names(self.console_tar, self.console_top)

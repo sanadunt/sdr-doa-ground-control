@@ -13,6 +13,8 @@ export interface DoaOverlaySettings {
   edgesVisible: boolean;
   /** Ring distances, N/E/S/W letters and the bearing pill (DOM labels). */
   labelsVisible: boolean;
+  /** The RDF-SDR's compass heading: a triangle on the station and a dashed line (lib/rdfHeading.ts). */
+  headingVisible: boolean;
   /** Multiplies every overlay paint opacity, 0.2 to 1. */
   overlayOpacity: number;
   heatStyle: 'beam' | 'density';
@@ -42,6 +44,7 @@ export const DEFAULT_DOA_OVERLAY_SETTINGS: DoaOverlaySettings = {
   ringsVisible: true,
   edgesVisible: true,
   labelsVisible: true,
+  headingVisible: true,
   overlayOpacity: 0.85,
   heatStyle: 'beam',
   dbScale: 'auto',

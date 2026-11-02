@@ -391,6 +391,13 @@
 .ov-admin-row input.is-error { border-color: var(--red); }
 .ov-admin-message { min-height: 18px; color: var(--red); font-size: 12px; }
 
+/* Groundstation on the map: a square marked GS, apart from the RDF-SDR's round
+   marker, and the distance and bearing halfway along the dotted line to it.
+   A reference line (the RDF-SDR position is not live) has a grey, dashed label. */
+.ov-ground-marker { display: grid; place-items: center; width: 24px; height: 24px; border: 2px solid var(--surface); border-radius: 4px; background: var(--accent); color: var(--on-accent); font-family: var(--mono); font-size: 10px; font-weight: 800; letter-spacing: .02em; line-height: 1; box-shadow: 0 0 0 1px var(--line), 0 2px 6px color-mix(in srgb, var(--bg) 60%, transparent); user-select: none; }
+.ov-ground-label { padding: 3px 6px; border: 1px solid var(--accent); border-radius: 4px; background: var(--surface); color: var(--text); font-size: 11.5px; font-weight: 700; }
+.ov-ground-label.is-reference { border-style: dashed; border-color: var(--subtle); color: var(--muted); }
+
 /* Stacked layout ------------------------------------------------------------ */
 @media (max-width: 1023px) {
   .ov-stage { --ov-dock-h: 0px; display: flex; flex-direction: column; gap: var(--ov-gap); height: auto; padding: var(--ov-gap); }

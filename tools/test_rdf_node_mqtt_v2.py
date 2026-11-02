@@ -445,6 +445,64 @@ class Edge17Tests(unittest.TestCase):
         self.assertEqual(ack["result"], result)
 
 
+class Edge18Tests(unittest.TestCase):
+    """Contract 1.8 (edge 1a98575, RDF Node 1.8.0): capabilities.config_fields, state.rf.uca, result.band_spacing_m."""
+
+    FIELDS = ["ant_spacing_m", "center_frequency_hz", "gain_db", "vfo0_bandwidth_hz", "vfo0_frequency_hz", "vfo0_squelch_db"]
+
+    def capabilities(self, store: RdfNodeV2Telemetry, **changes: Any) -> Dict[str, Any]:
+        return put(store, "capabilities", obj("capabilities.json", **changes))
+
+    def test_config_fields_reach_the_session_view(self) -> None:
+        store = session_store()
+        entry = self.capabilities(store, config_fields=self.FIELDS)
+        self.assertEqual(entry["status"], "CONTEXT")
+        self.assertEqual(store.session_view(NOW)["capabilities"]["config_fields"], self.FIELDS)
+
+    def test_an_older_edge_has_no_config_fields(self) -> None:
+        store = session_store()
+        self.capabilities(store)
+        self.assertIsNone(store.session_view(NOW)["capabilities"]["config_fields"])
+
+    def test_a_bad_config_fields_list_is_noted_never_the_capabilities(self) -> None:
+        store = session_store()
+        entry = self.capabilities(store, config_fields="ant_spacing_m")
+        self.assertEqual(entry["status"], "CONTEXT")
+        self.assertIsNone(store.session_view(NOW)["capabilities"]["config_fields"])
+        self.assertIn("INVALID_FIELD:config_fields", entry["payload"]["notes"])
+        store = session_store()
+        entry = self.capabilities(store, config_fields=["gain_db", "", 7, "ant spacing"])
+        self.assertEqual(store.session_view(NOW)["capabilities"]["config_fields"], ["gain_db"])
+        self.assertIn("DROPPED_ITEMS:config_fields", entry["payload"]["notes"])
+
+    def test_rf_uca_is_kept_and_a_bad_one_dropped(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        put(store, "state", obj("state.json", rf={"f": 433_920_000, "uca": 0.128}))
+        self.assertEqual(node(store)["session"]["rf"], {"f": 433_920_000, "uca": 0.128})
+        store = RdfNodeV2Telemetry(NODE)
+        entry = put(store, "state", obj("state.json", rf={"f": 433_920_000, "uca": "0.3"}))
+        self.assertEqual(node(store)["session"]["rf"]["uca"], 0.3)
+        self.assertIn("COERCED:rf.uca", entry["payload"]["notes"])
+        for bad in (-0.1, "wide", True, None):
+            with self.subTest(uca=bad):
+                store = RdfNodeV2Telemetry(NODE)
+                entry = put(store, "state", obj("state.json", rf={"f": 433_920_000, "uca": bad}))
+                self.assertEqual(entry["status"], "CONTEXT")
+                self.assertEqual(node(store)["session"]["rf"], {"f": 433_920_000})
+                self.assertIn("INVALID_FIELD:rf.uca", entry["payload"]["notes"])
+
+    def test_the_band_spacing_of_a_result_is_kept(self) -> None:
+        store = session_store()
+        result = {"error": "SPACING_SET_BY_ENGINE_BAND", "persisted": False, "band_spacing_m": 0.3}
+        put(store, "ack/config", obj("ack-config.config-patch-rejected.json", id="gc-0123456789abcdef01234567",
+                                     status="FAILED", rev=CFG, result=result))
+        self.assertEqual(store.ack("gc-0123456789abcdef01234567")["result"], result)
+
+    def test_a_settings_report_carries_the_uca_spacing(self) -> None:
+        self.assertEqual(rdf_node_mqtt_v2.safe_settings({"ant_spacing_meters": 0.128, "center_freq": 433.92}),
+                         {"ant_spacing_m": 0.128, "center_frequency_hz": 433_920_000})
+
+
 class SessionTests(unittest.TestCase):
     def test_telemetry_before_state_is_ignored(self) -> None:
         store = RdfNodeV2Telemetry(NODE)
@@ -895,7 +953,8 @@ class SettingsReportTests(unittest.TestCase):
         self.assertEqual(saved["safe_settings"], view["safe_settings"])
         self.assertEqual(view["safe_settings"], {
             "center_frequency_hz": 433920000, "gain_db": 15.7, "vfo0_frequency_hz": 433920000,
-            "vfo0_bandwidth_hz": 12500, "vfo0_squelch_db": -80, "ant_arrangement": "UCA", "doa_method": "MUSIC",
+            "vfo0_bandwidth_hz": 12500, "vfo0_squelch_db": -80, "ant_spacing_m": 0.21, "ant_arrangement": "UCA",
+            "doa_method": "MUSIC",
             "active_vfos": 1, "output_vfo": 0, "en_doa": True,
         })
         self.assertEqual(view["settings_requests"] if "settings_requests" in view else node(self.store)["settings_requests"], [])

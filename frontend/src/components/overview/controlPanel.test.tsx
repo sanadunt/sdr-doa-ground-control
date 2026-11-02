@@ -4,7 +4,7 @@ import { ApiError, normalizeCapabilities, normalizeConfigCommandStatus, normaliz
 import type { ConfigReported } from '../../api';
 import { I18nContext, translate } from '../../lib/i18n';
 import type { Lang } from '../../lib/i18n';
-import { CONFIG_PATCH_FIELDS, commandResultView, draftFromReported, draftWithCenter, parseDraft } from '../../lib/configPatch';
+import { commandResultView, configPatchFieldsFor, draftFromReported, draftWithCenter, parseDraft } from '../../lib/configPatch';
 import type { CommandStatusLike, DraftValues } from '../../lib/configPatch';
 import { currentConfigValues, dataOutConfigValues, verifyConfigPatch } from '../../lib/configVerify';
 import type { VerifyInput } from '../../lib/configVerify';
@@ -52,9 +52,10 @@ const REPORTED: ConfigReported = normalizeConfigReported(reportedBody());
 
 const t = (key: Parameters<typeof translate>[1], vars?: Record<string, string | number>) => translate('id', key, vars);
 
+// The node's fields, as ControlPanel picks them: capabilities.config_fields, else the five of an older edge.
 function evaluate(draft: DraftValues = {}, reported: ConfigReported | null = REPORTED) {
   const values = reported?.values ?? {};
-  return parseDraft(CONFIG_PATCH_FIELDS, { ...(reported ? draftFromReported(reported.values) : {}), ...draft }, values, CAPABILITIES.configPatch?.ranges ?? null);
+  return parseDraft(configPatchFieldsFor(reported?.node?.configFields), { ...(reported ? draftFromReported(reported.values) : {}), ...draft }, values, CAPABILITIES.configPatch?.ranges ?? null);
 }
 
 function view(props: Partial<ControlPanelViewProps> = {}, lang: Lang = 'id'): string {
@@ -160,7 +161,7 @@ describe('Kontrol unlocked', () => {
     expect(view({ valueSource: 'none' })).toContain('Nilai: tidak dilaporkan');
     expect(view({ valueSource: 'data-out' }, 'en')).toContain('Values: Data Out (fallback)');
     const dataOut = dataOutConfigValues({ settings: { available: true, fields: { center_freq: 433.92 } } }, true);
-    const empty = { center_frequency_hz: null, gain_db: null, vfo0_frequency_hz: null, vfo0_bandwidth_hz: null, vfo0_squelch_db: null };
+    const empty = { center_frequency_hz: null, gain_db: null, vfo0_frequency_hz: null, vfo0_bandwidth_hz: null, vfo0_squelch_db: null, ant_spacing_m: null };
     expect(controlValueSource(REPORTED, empty)).toBe('settings');
     const unreported = normalizeConfigReported(reportedBody({ settings: null, values: {}, value_sources: {}, value_received_at_ms: {} }));
     expect(controlValueSource(unreported, dataOut)).toBe('data-out');
@@ -257,6 +258,35 @@ describe('Kontrol unlocked', () => {
     expect(view({ evaluation: evaluate(draftWithCenter({}, '175', REPORTED.values)) })).toContain('Di luar rule band (136–174 dan 400–480 MHz): gain dan UCA tidak diubah.');
     // Nothing to say while the centre is not changed.
     expect(view({ evaluation: evaluate({ gain_db: '20.7' }) })).not.toContain('rule band');
+  });
+
+  it('shows exactly the five fields of an older edge, and the UCA spacing of edge 1.8', () => {
+    const legacy = view();
+    expect(legacy).not.toContain('ant_spacing_m');
+    expect(legacy).not.toContain('Jarak UCA');
+    expect(legacy.match(/class="ov-control-field"/g)).toHaveLength(5);
+    const edge18 = normalizeConfigReported(reportedBody({
+      node: { ...NODE, config_fields: ['ant_spacing_m', 'center_frequency_hz', 'gain_db', 'vfo0_bandwidth_hz', 'vfo0_frequency_hz', 'vfo0_squelch_db'] },
+      values: { ...(reportedBody().values as Record<string, unknown>), ant_spacing_m: 0.128 },
+    }));
+    expect(edge18.node?.configFields).toContain('ant_spacing_m');
+    const markup = view({ reported: edge18, evaluation: evaluate({}, edge18) });
+    expect(markup.match(/class="ov-control-field"/g)).toHaveLength(6);
+    expect(markup).toContain('<label for="ov-control-ant_spacing_m">Jarak UCA</label>');
+    expect(markup).toContain('value="0.128"/><span>m</span>');
+    // The band rule sets the UCA with the gain, without the "not yet" sentence.
+    const vhf = evaluate(draftWithCenter({}, '145.5', edge18.values, true), edge18);
+    expect(vhf.changes).toEqual({ center_frequency_hz: 145_500_000, gain_db: 25.4, vfo0_frequency_hz: 145_500_000, ant_spacing_m: 0.3 });
+    const note = view({ reported: edge18, evaluation: vhf }, 'en');
+    expect(note).toContain('<p class="ov-control-note">VHF 136–174 MHz: gain 25.4 dB, UCA 0.3 m.</p>');
+    expect(note).toContain('Changed from 0.128 m');
+    expect(reviewRows(t, vhf.fields)).toContainEqual({ key: 'ant_spacing_m', label: 'Jarak UCA', from: '0.128 m', to: '0.300 m' });
+    // Outside the operator's bands the 1.8 engine still sets the spacing by frequency itself.
+    const outside = view({ reported: edge18, evaluation: evaluate(draftWithCenter({}, '175', edge18.values, true), edge18) });
+    expect(outside).toContain('Di luar rule band (136–174 dan 400–480 MHz): gain tidak diubah. RDF-SDR mengatur sendiri jarak UCA untuk frekuensi ini (0,3 m di 30–300 MHz, 0,128 m di 300–3000 MHz).');
+    // Below 30 MHz the engine sets no spacing: the plain note.
+    const low = view({ reported: edge18, evaluation: evaluate(draftWithCenter({}, '27', edge18.values, true), edge18) });
+    expect(low).toContain('Di luar rule band (136–174 dan 400–480 MHz): gain dan UCA tidak diubah.');
   });
 
   it('reports an unavailable MQTT publish path', () => {
@@ -423,6 +453,18 @@ describe('Kontrol results', () => {
     expect(view({ stage: 'done', done: { ...done('acked', ack('APPLIED')), ack: ack('APPLIED') } })).not.toContain('Diterapkan dengan');
   });
 
+  it('names the band spacing of an edge 1.8 answer', () => {
+    const refused = { status: 'FAILED', error: 'SPACING_SET_BY_ENGINE_BAND', reason: null, revision: null, bandSpacingM: 0.3 };
+    const failed = view({ stage: 'done', done: { ...done('acked', refused), ack: refused } }, 'en');
+    expect(failed).toContain('In this band the KrakenSDR engine sets the UCA spacing itself: 0.3 m. Nothing was written.');
+    expect(failed).toContain('Code: FAILED · SPACING_SET_BY_ENGINE_BAND · band_spacing_m 0.3');
+    expect(failed).not.toContain('also set the UCA spacing');
+    const applied = { status: 'APPLIED', error: null, reason: null, revision: 43, method: 'LIVE', bandSpacingM: 0.128 };
+    const markup = view({ stage: 'done', done: { ...done('acked', applied), ack: applied } });
+    expect(markup).toContain('<span>RDF-SDR juga memasang jarak UCA 0.128 m, nilai yang dipakai engine-nya di band ini.</span>');
+    expect(markup).toContain('Kode: APPLIED · LIVE · band_spacing_m 0.128');
+  });
+
   it('keeps PERSISTED_UNVERIFIED, OUTCOME_UNKNOWN and a missing final ACK apart from success and failure', () => {
     const persisted = view({ stage: 'done', done: done('acked', ack('PERSISTED_UNVERIFIED', null, 'NATIVE_RUNTIME_EVIDENCE_INCOMPLETE')) });
     expect(persisted).toContain('ov-control-result tone-info');
@@ -571,14 +613,14 @@ describe('Kontrol read-back from the RDF-SDR', () => {
     const dataOut = dataOutConfigValues({ settings: { available: true, fields: { center_freq: 415.7882, vfo_freq_0: 433_925_000, vfo_bw_0: 12_500, vfo_squelch_0: -80 } } }, true);
     const values = currentConfigValues(REPORTED.values, dataOut);
     const ranges = CAPABILITIES.configPatch?.ranges ?? null;
-    const markup = view({ evaluation: parseDraft(CONFIG_PATCH_FIELDS, draftFromReported(values), values, ranges) });
+    const markup = view({ evaluation: parseDraft(configPatchFieldsFor(null), draftFromReported(values), values, ranges) });
     // settings/reported still wins for the centre and VFO frequency.
     expect(markup).toContain('value="416.588"');
     expect(markup).not.toContain('value="433.925"');
     expect(markup).toContain('value="12.5"');
     expect(markup).toContain('value="-80"');
     expect(markup).not.toContain('tidak dilaporkan');
-    const edited = parseDraft(CONFIG_PATCH_FIELDS, { ...draftFromReported(values), vfo0_bandwidth_hz: '25' }, values, ranges);
+    const edited = parseDraft(configPatchFieldsFor(null), { ...draftFromReported(values), vfo0_bandwidth_hz: '25' }, values, ranges);
     expect(reviewRows(t, edited.fields)).toEqual([{ key: 'vfo0_bandwidth_hz', label: 'Bandwidth VFO', from: '12.5 kHz', to: '25.0 kHz' }]);
   });
 });

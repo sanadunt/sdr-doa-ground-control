@@ -360,7 +360,7 @@ class Edge17Tests(unittest.TestCase):
         self.assertEqual(built["rf"], {
             "source": "state.rf", "cfg": 298, "t": FIXED_NOW, "received_at_ms": FIXED_NOW, "age_ms": 0,
             "center_frequency_hz": 103_100_000, "vfo0_frequency_hz": 103_100_000, "gain_db": 12.5,
-            "vfo0_bandwidth_hz": 12_500, "vfo0_squelch_db": -100.0,
+            "vfo0_bandwidth_hz": 12_500, "vfo0_squelch_db": -100.0, "uca_m": None,
         })
         # settings is a Data Out read of settings.json; state.rf never fills it.
         self.assertFalse(built["settings"]["available"])
@@ -373,6 +373,13 @@ class Edge17Tests(unittest.TestCase):
         partial.hello(rf={"g": 12.5})
         partial.health()
         self.assertEqual((self.answer(partial)["rf"]["gain_db"], self.answer(partial)["rf"]["center_frequency_hz"]), (12.5, None))
+
+    def test_rf_uca_is_the_uca_spacing_in_metres(self) -> None:
+        # Contract 1.8 (edge 1.8.0): state.rf.uca is settings.json ant_spacing_meters.
+        edge = Edge(ManualMs(FIXED_NOW))
+        edge.hello(rf=dict(RF_17, uca=0.3), cfg=298)
+        edge.health()
+        self.assertEqual(self.answer(edge)["rf"]["uca_m"], 0.3)
 
     def test_detail_ovr_settles_the_overdrive_over_lora(self) -> None:
         for ovr, reason, check, state, overall in (

@@ -772,7 +772,8 @@ def test_snapshot_requests_share_one_collection() -> None:
     # No MQTT monitor and no status.json in the fixture: every answer names no source (#8).
     sources = [result.pop("source") for result in results]
     assert [(entry["kind"], entry["reasons"]) for entry in sources] == [("none", ["MQTT_DISABLED", "DATA_OUT_UNAVAILABLE"])] * 5, sources
-    assert results == [{"overall_state": "FIXTURE", "call": 1}] * 5, results
+    # Every answer also names the groundstation GPS; without a monitor it is null.
+    assert results == [{"overall_state": "FIXTURE", "call": 1, "ground_gps": None}] * 5, results
     # One request started the collection; the other four shared it (#13).
     assert len({entry["id"] for entry in collections}) == 1, collections
     assert sorted(entry["shared"] for entry in collections) == [False, True, True, True, True], collections

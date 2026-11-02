@@ -17,6 +17,7 @@ from typing import Any
 from unittest.mock import patch
 
 from tools import rdf_node_commands as commands
+from tools.ground_gps import GROUND_GPS_SUFFIX
 from tools.lora_link import LORA_SUFFIXES
 from tools.rdf_node_mqtt_v2 import RDF_NODE_V2_SUFFIXES
 
@@ -217,7 +218,7 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self.assertEqual(self.client.kwargs.get("protocol"), 5)
         self.assertEqual(self.client.kwargs.get("transport"), "websockets")
         self.assertIn(("ws_set_options", (), {"path": "/mqtt"}), self.client.calls)
-        expected = [f"sdr/v2/{NODE}/{suffix}" for suffix in RDF_NODE_V2_SUFFIXES + LORA_SUFFIXES]
+        expected = [f"sdr/v2/{NODE}/{suffix}" for suffix in RDF_NODE_V2_SUFFIXES + LORA_SUFFIXES + (GROUND_GPS_SUFFIX,)]
         self.assertEqual([topic for topic, _options in self.client.subscriptions], expected)
         for topic, options in self.client.subscriptions:
             self.assertEqual(options.qos, 1)
@@ -750,8 +751,12 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self.assertEqual(
             self.monitor.rdf_node_control_view()["session"]["capabilities"],
             {"remote_commands": capabilities["remote_commands"], "remote_config_patch": capabilities["remote_config_patch"],
-             "config_patch": capabilities["config_patch"]},
+             "config_patch": capabilities["config_patch"], "config_fields": None},
         )
+        # Edge 1.8.0 (contract 1.8) lists the fields config.patch takes.
+        fields = ["ant_spacing_m", "center_frequency_hz", "gain_db", "vfo0_bandwidth_hz", "vfo0_frequency_hz", "vfo0_squelch_db"]
+        self._rdf("capabilities", dict(capabilities, sid=state["sid"], boot=state["boot"], config_fields=fields), retained=True)
+        self.assertEqual(self.monitor.rdf_node_control_view()["session"]["capabilities"]["config_fields"], fields)
 
     def test_retired_rdf_node_config_reported_is_not_read(self) -> None:
         # The RDF Node edge has no config/reported. A retained leftover on the
