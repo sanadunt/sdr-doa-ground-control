@@ -833,12 +833,20 @@ export interface ConfigCommandAck {
   final: boolean;
   /** result.error, a code such as CONFIG_REVISION_CONFLICT. */
   error: string | null;
-  /** result.reason, such as NATIVE_RUNTIME_EVIDENCE_INCOMPLETE. */
+  /** result.reason, such as NATIVE_RUNTIME_EVIDENCE_INCOMPLETE or LIVE_FAILED:ENGINE_OVERRODE:gain_db. */
   reason: string | null;
   revision: number | null;
-  /** config.patch: field -> evidence (FRESH_DAQ_RF_CENTER, ...); config.get: one word. */
-  proof: Partial<Record<ConfigPatchKey, string>> | string | null;
+  /**
+   * config.patch: field -> evidence (FRESH_DAQ_RF_CENTER, ...), and since
+   * contract 1.7 daq and settings (FRESH_HEALTHY_AFTER_RESTART, ...);
+   * config.get: one word.
+   */
+  proof: Partial<Record<ConfigPatchKey | ConfigProofKey, string>> | string | null;
   persisted: boolean | null;
+  /** Contract 1.7: how a config.patch is applied: LIVE, RESTART or FILE. */
+  method: string | null;
+  /** Contract 1.7: why a live retune did not hold, such as DAQ_NOT_HEALTHY_AFTER_RETUNE. */
+  liveFailure: string | null;
   receivedAtMs: number | null;
 }
 
@@ -858,11 +866,22 @@ export interface ConfigCommandStatus {
   settingsReportedAtMs: number | null;
 }
 
+/** Contract 1.7 proof keys besides the fields: the DAQ and the settings after a retune or restart. */
+export const CONFIG_PROOF_KEYS = ['daq', 'settings'] as const;
+export type ConfigProofKey = typeof CONFIG_PROOF_KEYS[number];
+
+// An edge reason may name a cause and a field: LIVE_FAILED:ENGINE_OVERRODE:gain_db.
+const REASON_RE = /^[A-Z][A-Z0-9_]*(?::[A-Za-z0-9_]+)*$/u;
+
+function reasonOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.length <= 64 && REASON_RE.test(value) ? value : null;
+}
+
 function normalizeProof(value: unknown): ConfigCommandAck['proof'] {
   if (typeof value === 'string') return codeOrNull(value.toUpperCase()) ? value : null;
   if (!isObject(value)) return null;
-  const proof: Partial<Record<ConfigPatchKey, string>> = {};
-  for (const key of CONFIG_PATCH_KEYS) {
+  const proof: Partial<Record<ConfigPatchKey | ConfigProofKey, string>> = {};
+  for (const key of [...CONFIG_PATCH_KEYS, ...CONFIG_PROOF_KEYS]) {
     const entry = codeOrNull(value[key]);
     if (entry) proof[key] = entry;
   }
@@ -877,10 +896,12 @@ function normalizeAck(value: unknown): ConfigCommandAck | null {
     status,
     final: value.final === true,
     error: codeOrNull(value.error),
-    reason: codeOrNull(value.reason),
+    reason: reasonOrNull(value.reason),
     revision: integerOrNull(value.revision, 0),
     proof: normalizeProof(value.proof),
     persisted: booleanOrNull(value.persisted),
+    method: codeOrNull(value.method),
+    liveFailure: reasonOrNull(value.live_failure),
     receivedAtMs: integerOrNull(value.received_at_ms, 0),
   };
 }

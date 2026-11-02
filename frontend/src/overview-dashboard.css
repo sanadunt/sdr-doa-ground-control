@@ -121,9 +121,12 @@
 .ov-hud-grid.is-provisional b { color: var(--subtle); }
 .readout-empty { color: var(--subtle); }
 .ov-hud-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; color: var(--subtle); font-size: 11.5px; }
-.ov-hud-grid b, .ov-hud-offset b, .ov-node-foot b { color: var(--text); font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
+.ov-hud-grid b, .ov-hud-offset b, .ov-hud-sample b, .ov-node-foot b { color: var(--text); font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
 .ov-hud-offset { overflow: hidden; color: var(--subtle); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
 .ov-hud-offset > span { font-family: var(--mono); font-weight: 600; }
+.ov-hud-sample { overflow: hidden; color: var(--subtle); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.ov-hud-sample.is-provisional { opacity: .72; }
+.ov-hud-sample.is-provisional b, .ov-hud-sample.is-setting b { color: var(--subtle); }
 .ov-hud-held { margin: 0; color: var(--amber); font-size: 12px; line-height: 1.35; }
 .ov-layers { display: flex; flex: 0 1 auto; flex-direction: column; min-height: 0; }
 .ov-layers-body { min-height: 0; overflow-y: auto; padding: 4px 6px 10px; overscroll-behavior: contain; }
@@ -148,6 +151,7 @@
 .ov-node { flex: none; width: 264px; }
 .ov-node-summary { display: flex; flex-direction: column; gap: 2px; padding: 0 12px 10px; color: var(--text); font-family: var(--mono); font-size: 12px; }
 .ov-node-summary > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-node-summary > span.is-setting { white-space: normal; }
 .ov-node-summary.is-stale, .ov-node-detail dl.is-stale dd { color: var(--subtle); }
 .ov-node-summary > .ov-node-source { color: var(--subtle); font-size: 10.5px; letter-spacing: .04em; }
 .ov-node-summary > .ov-node-source.is-warn { color: var(--amber); }
@@ -160,6 +164,12 @@
 .ov-node-detail dd { margin: 0; overflow: hidden; color: var(--text); font-family: var(--mono); font-size: 12.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .ov-node-detail dd.is-good { color: var(--green); }
 .ov-node-detail dd.is-bad { color: var(--red); }
+/* A value that needs the full width (a setting marker, the DoA record's frequency and power). */
+.ov-node-detail dl > div.is-wide { grid-column: 1 / -1; }
+/* Its marker (setting, UNVERIFIED) must stay readable, so a wide value wraps instead of clipping. */
+.ov-node-detail dl > div.is-wide dd { overflow-wrap: anywhere; white-space: normal; }
+/* An UNVERIFIED (ok=0) record: dimmed like the held bearing, never in a valid value's colour. */
+.ov-node-detail dd.is-provisional { color: var(--subtle); opacity: .72; }
 .ov-node-foot { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--line-soft); color: var(--subtle); font-size: 11.5px; }
 .ov-control { display: flex; flex: 0 1 auto; flex-direction: column; width: 360px; min-height: 0; background: color-mix(in srgb, var(--surface) 97%, transparent); }
 .ov-control-body { min-height: 0; overflow-y: auto; padding: 10px 12px 12px; color: var(--muted); font-size: 12.5px; overscroll-behavior: contain; }

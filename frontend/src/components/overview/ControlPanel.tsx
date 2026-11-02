@@ -7,7 +7,9 @@ import {
   CONFIG_PATCH_ERROR_KEYS,
   CONFIG_PATCH_FIELDS,
   GAIN_TABLE_DB,
+  appliedMethodText,
   commandResultView,
+  commandStageText,
   displayValue,
   draftFromReported,
   draftWithCenter,
@@ -19,7 +21,7 @@ import {
   rangeParts,
   settingsReadView,
 } from '../../lib/configPatch';
-import type { CommandResultView, ConfigPatchRanges, DraftEvaluation, DraftValues, FieldEvaluation } from '../../lib/configPatch';
+import type { CommandResultView, CommandStatusLike, ConfigPatchRanges, DraftEvaluation, DraftValues, FieldEvaluation } from '../../lib/configPatch';
 import { VERIFY_WINDOW_MS, currentConfigValues, dataOutConfigValues, verifyConfigPatch } from '../../lib/configVerify';
 import type { ConfigVerification, VerifyStatus, VerifyVerdict } from '../../lib/configVerify';
 import type { TelemetrySnapshot } from '../../types';
@@ -55,6 +57,8 @@ export interface ControlDone {
   error: ControlFailure | null;
   commandId: string | null;
   restarted: boolean;
+  /** The final ACK, for how a contract 1.7 edge applied the change. */
+  ack?: CommandStatusLike['ack'];
   /** A published command to read back from the RDF-SDR. */
   verify?: ControlVerifyTarget;
   /** The change and its base revision, to review again when the node's settings changed (CONFIG_REVISION_CONFLICT). */
@@ -452,7 +456,8 @@ export function ControlPanelView({
         {stage === 'sending' ? (
           <div className="ov-control-box" aria-live="polite">
             <span>{sending?.commandId
-              ? radioWait(sending.status?.state) ? t('control.loraWaiting') : withSlots(t('control.sending'), { topic: ackTopic, id: sending.commandId })
+              ? radioWait(sending.status?.state) ? t('control.loraWaiting')
+                : commandStageText(t, sending.status?.ack ?? null) ?? withSlots(t('control.sending'), { topic: ackTopic, id: sending.commandId })
               : t('control.posting')}</span>
             {sending?.status ? <span className="ov-mono ov-control-state">{sending.status.ack?.status ?? sending.status.state}</span> : null}
           </div>
@@ -465,6 +470,7 @@ export function ControlPanelView({
                 {done.view ? t(done.view.title.key, done.view.title.vars) : t('control.errorTitle', { code: done.error?.code ?? '—' })}
               </span>
               <span>{done.view ? t(done.view.body.key, done.view.body.vars) : done.error ? noticeText(t, done.error.message) : ''}</span>
+              {done.view && appliedMethodText(t, done.ack ?? null) ? <span>{appliedMethodText(t, done.ack ?? null)}</span> : null}
               {done.restarted ? <span className="ov-control-small">{t('control.result.restarted')}</span> : null}
               {/* The raw codes stay visible under the operator's words. */}
               {done.view?.code ? <span className="ov-mono ov-control-small">{t('control.result.code', { code: done.view.code })}</span> : null}
@@ -698,7 +704,7 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
       ? { changes: status.changes, issuedAtMs: status.issuedMs, finalAtMs: Date.now(), ...(refused ? { windowMs: 0 } : {}) }
       : undefined;
     const rebaseTarget = view.rebase && Object.keys(status.changes).length ? { changes: status.changes, fromRev: baseRev } : undefined;
-    setDone({ view, error: null, commandId: status.commandId, restarted: status.monitorRestarted, verify, rebase: rebaseTarget });
+    setDone({ view, error: null, commandId: status.commandId, restarted: status.monitorRestarted, ack: status.ack, verify, rebase: rebaseTarget });
     setStage('done');
     if (view.reload) setReloadTick((tick) => tick + 1);
     if (verify) {

@@ -639,7 +639,7 @@ class ConfigPatchServerTests(unittest.TestCase):
         self.assertEqual(acked["ack"], {
             "status": "APPLIED", "final": True, "error": None, "reason": None, "revision": 43,
             "proof": {"center_frequency_hz": "FRESH_DAQ_RF_CENTER", "vfo0_frequency_hz": "FRESH_DOA_FREQUENCY"},
-            "persisted": True, "t": acked["ack"]["t"], "received_at_ms": 2,
+            "persisted": True, "method": None, "live_failure": None, "t": acked["ack"]["t"], "received_at_ms": 2,
         })
         self.assertNotIn("never-shown", json.dumps(acked))
         _status, _headers, latest = self.request("GET", "/api/mqtt/config-patch")

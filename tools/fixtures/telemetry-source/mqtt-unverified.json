@@ -369,6 +369,7 @@
    "url": "http://127.0.0.1:8081"
   }
  },
+ "rf": null,
  "schema_version": 1,
  "settings": {
   "available": true,

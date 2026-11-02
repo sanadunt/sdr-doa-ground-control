@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  appliedMethodText,
+  commandStageText,
+  restartReasonText,
   CONFIG_PATCH_ERROR_CODES,
   CONFIG_PATCH_ERROR_KEYS,
   CONFIG_PATCH_FIELDS,
@@ -21,7 +24,7 @@ import {
 } from './configPatch';
 import type { CommandStatusLike } from './configPatch';
 import { CONFIG_PATCH_KEYS } from './controlDraft';
-import { DICTIONARIES } from './i18n';
+import { DICTIONARIES, translate } from './i18n';
 
 const REPORTED = {
   center_frequency_hz: 416_588_000,
@@ -230,6 +233,55 @@ describe('commandResultView', () => {
       .toEqual({ key: 'control.result.outcomeUnknownLink', vars: { code: 'CONNECTION_LOST' } });
     // An unknown final status is not a success and shows its code.
     expect(commandResultView(status('acked', ack({ status: 'SOMETHING_NEW' })), 1, 42, 15)).toMatchObject({ tone: 'info', code: 'SOMETHING_NEW' });
+  });
+
+  it('keeps the plain code line of an edge before contract 1.7', () => {
+    expect(commandResultView(status('acked', ack({ method: null, liveFailure: null })), 1, 42, 15).code).toBe('APPLIED');
+  });
+
+  it('names the method, the reason and the proof of a contract 1.7 answer', () => {
+    // The final ACK of 105.9 -> 103.1 MHz over Telemetry LoRa on 2 November.
+    const applied = ack({ method: 'RESTART', reason: 'LIVE_FAILED:ENGINE_OVERRODE:gain_db', revision: 298,
+      proof: { daq: 'FRESH_HEALTHY_AFTER_RESTART', settings: 'INTACT_AFTER_START' } });
+    const view = commandResultView(status('acked', applied), 2, 297, 15);
+    expect(view).toMatchObject({ tone: 'ok', body: { key: 'control.result.applied', vars: { count: 2, rev: 298 } } });
+    expect(view.code).toBe('APPLIED · RESTART · LIVE_FAILED:ENGINE_OVERRODE:gain_db · daq FRESH_HEALTHY_AFTER_RESTART · settings INTACT_AFTER_START');
+    const persisted = commandResultView(status('acked', ack({ status: 'PERSISTED_UNVERIFIED', method: 'LIVE',
+      reason: 'NATIVE_RUNTIME_EVIDENCE_INCOMPLETE', liveFailure: 'DAQ_NOT_HEALTHY_AFTER_RETUNE' })), 1, 42, 15);
+    expect(persisted).toMatchObject({ tone: 'info', body: { key: 'control.result.persistedUnverified' },
+      code: 'PERSISTED_UNVERIFIED · LIVE · NATIVE_RUNTIME_EVIDENCE_INCOMPLETE · live DAQ_NOT_HEALTHY_AFTER_RETUNE' });
+    expect(commandResultView(status('acked', ack({ status: 'PERSISTED_UNVERIFIED', method: 'FILE', reason: 'ENGINE_NOT_RUNNING' })), 1, 42, 15))
+      .toMatchObject({ tone: 'info', body: { key: 'control.result.persistedEngineStopped', vars: { rev: 43 } } });
+    expect(commandResultView(status('acked', ack({ status: 'PERSISTED_UNVERIFIED', method: 'RESTART', reason: 'GAIN_CHANGE', error: 'ENGINE_OVERRODE_AT_START' })), 1, 42, 15).body.key)
+      .toBe('control.result.persistedEngineOverrode');
+    for (const [error, key] of [['ENGINE_DID_NOT_STOP', 'control.result.outcomeEngineDidNotStop'], ['DAQ_NOT_HEALTHY_AFTER_RESTART', 'control.result.outcomeDaqAfterRestart']] as const) {
+      expect(commandResultView(status('acked', ack({ status: 'OUTCOME_UNKNOWN', method: 'RESTART', reason: 'GAIN_CHANGE', error })), 1, 42, 15))
+        .toMatchObject({ tone: 'info', body: { key }, code: `OUTCOME_UNKNOWN · RESTART · ${error}` });
+    }
+  });
+
+  it('says which step the edge is on and how it applied the change', () => {
+    const en = (key: Parameters<typeof translate>[1], vars?: Record<string, string | number>) => translate('en', key, vars);
+    const id = (key: Parameters<typeof translate>[1], vars?: Record<string, string | number>) => translate('id', key, vars);
+    expect(commandStageText(en, ack({ status: 'ACCEPTED' }))).toBeNull();
+    expect(commandStageText(en, ack({ status: 'VERIFYING' }))).toBeNull();
+    expect(commandStageText(en, ack({ status: 'VERIFYING', method: 'LIVE' }))).toBe('RDF-SDR is retuning live and checking the DAQ…');
+    expect(commandStageText(id, ack({ status: 'APPLYING', method: 'RESTART', reason: 'LIVE_FAILED:ENGINE_OVERRODE:gain_db' })))
+      .toBe('RDF-SDR me-restart SDR untuk menerapkan perubahan (engine SDR mengubah Gain saat retune langsung)…');
+    expect(commandStageText(en, ack({ status: 'VERIFYING', method: 'RESTART', reason: 'GAIN_CHANGE' })))
+      .toBe('RDF-SDR is restarting the SDR to apply the change (a gain change needs a restart)…');
+    expect(commandStageText(en, ack({ status: 'APPLIED', method: 'RESTART' }))).toBeNull();
+    expect(appliedMethodText(en, ack({ method: 'LIVE' }))).toBe('Applied by a live retune.');
+    expect(appliedMethodText(id, ack({ method: 'RESTART', reason: 'LARGE_FREQUENCY_JUMP' })))
+      .toBe('Diterapkan dengan restart SDR (frekuensi bergeser lebih jauh dari batas retune langsung).');
+    expect(appliedMethodText(en, ack({ method: 'RESTART' }))).toBe('Applied by restarting the SDR.');
+    expect(appliedMethodText(en, ack({}))).toBeNull();
+    expect(appliedMethodText(en, ack({ status: 'PERSISTED_UNVERIFIED', method: 'LIVE' }))).toBeNull();
+    // A field the console does not know and a reason it has no words for are shown as the edge sent them.
+    expect(restartReasonText(en, 'LIVE_FAILED:ENGINE_OVERRODE:vfo1_frequency_hz')).toBe('the SDR engine changed vfo1_frequency_hz on the live retune');
+    expect(restartReasonText(en, 'LIVE_FAILED:DAQ_NOT_HEALTHY_AFTER_RETUNE')).toBe('the DAQ was not healthy after the live retune');
+    expect(restartReasonText(en, 'SOMETHING_NEW')).toBe('SOMETHING_NEW');
+    expect(restartReasonText(en, null)).toBeNull();
   });
 
   it('has its own messages for no ACK and a refused publish', () => {

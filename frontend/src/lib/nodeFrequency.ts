@@ -3,11 +3,15 @@
  * ("Ikuti frekuensi node"). Read only from a fresh snapshot: the centre is
  * settings.json `center_freq` (MHz; over MQTT from the light Data Out read),
  * the VFO is the DoA view's `frequency_hz_normalized` (the CSV view, or the
- * LIVE MQTT DoA's `f`), falling back to the centre. MQTT settings/reported
- * is not used here; Kontrol reads that.
+ * LIVE MQTT DoA's `f`). Where those have none, an MQTT answer's state.rf
+ * (edge 1.7: what the SDR is set to, as over Telemetry LoRa) gives the
+ * centre and the VFO; the VFO then falls back to the centre. An UNVERIFIED
+ * ok=0 DoA is never used. MQTT settings/reported is not used here; Kontrol
+ * reads that.
  */
 import type { TelemetrySnapshot } from '../types';
 import { primaryCandidate } from './telemetry';
+import { snapshotRf } from './telemetrySource';
 
 export interface NodeFrequencies {
   centerHz: number;
@@ -33,16 +37,23 @@ function validHz(value: number | null): number | null {
   return hz >= MIN_HZ && hz <= MAX_HZ ? hz : null;
 }
 
-/** null unless the snapshot is fresh, reachable and reports a valid centre frequency. */
+// settings.json keeps center_freq in MHz with a few decimals; state.rf is whole Hz.
+const RF_CENTER_MATCH_HZ = 1_000;
+
+/** null unless the snapshot is fresh, reachable and reports a valid centre frequency (settings.json or state.rf). */
 export function nodeFrequencies(snapshot: TelemetrySnapshot | null, localFresh: boolean): NodeFrequencies | null {
   if (!snapshot || !localFresh || snapshot.status?.available !== true || snapshot.simulation === true) return null;
   const fields = snapshot.settings?.fields;
   const centerMhz = fields && typeof fields === 'object' ? numeric((fields as Record<string, unknown>).center_freq) : null;
-  const centerHz = validHz(centerMhz === null ? null : centerMhz * 1e6);
+  const rf = snapshotRf(snapshot);
+  const centerHz = validHz(centerMhz === null ? null : centerMhz * 1e6) ?? rf?.centerHz ?? null;
   if (centerHz === null) return null;
   const view = primaryCandidate(snapshot);
   const vfoHz = view.available !== false ? validHz(numeric(view.frequency_hz_normalized)) : null;
-  return { centerHz, vfoHz: vfoHz ?? centerHz };
+  // state.rf may be a newer revision than a light read's settings.json: its VFO
+  // only goes with the centre it was set with, never with another one.
+  const rfVfoHz = rf && rf.centerHz !== null && Math.abs(rf.centerHz - centerHz) <= RF_CENTER_MATCH_HZ ? rf.vfo0Hz : null;
+  return { centerHz, vfoHz: vfoHz ?? rfVfoHz ?? centerHz };
 }
 
 /** True when both frequencies moved by more than `toleranceHz` (or one side is missing). */

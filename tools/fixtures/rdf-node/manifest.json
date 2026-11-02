@@ -281,6 +281,12 @@
       "edge_version": "1.0.0",
       "file": "compat.35984d8.json",
       "kind": "compat"
+    },
+    {
+      "edge_commit": "d46e648",
+      "edge_version": "1.7.0",
+      "file": "compat.d46e648.json",
+      "kind": "compat"
     }
   ]
 }

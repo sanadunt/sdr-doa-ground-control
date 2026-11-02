@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Branding, LoraLinkView, TelemetrySnapshot, Tone } from '../types';
 import { REFRESH_INTERVALS_S, candidateErrors, deriveDataState, toneFor } from '../lib/telemetry';
 import { actionableGateReasons, doaStatusTextKey, overviewDoaStatus } from '../lib/doaStatus';
-import { sourceBadge, sourceReasonKey } from '../lib/telemetrySource';
+import { loraLink as answerOverLora, sourceBadge, sourceReasonKey } from '../lib/telemetrySource';
 import { dataOutUnused, loraChip } from '../lib/loraLink';
 import { shortcutAction } from '../lib/shortcuts';
 import { THEME_STORAGE_KEY, readPreference, writePreference } from '../lib/preferenceStore';
@@ -148,8 +148,11 @@ export function ConsoleShell({
   const dataState = deriveDataState(snapshot, Boolean(readError), localSnapshotFresh);
   const dataTone: Tone = readError ? 'bad' : toneFor(dataState);
   const leadReason = actionableGateReasons(snapshot?.publication_gate?.reasons)[0];
+  // Over Telemetry LoRa an answer without fresh MQTT has no Data Out views to blame: name the missing telemetry.
+  const loraNoTelemetry = answerOverLora(snapshot) && snapshot?.status?.available !== true;
   const dataCause = dataState === 'AVAILABLE' || dataState === 'LOADING' ? []
-    : [leadReason ? `${leadReason} · ${gateReasonLabel(lang, leadReason)}` : dataState === 'STALE' ? t('polar.expired') : '', ...candidateErrors(snapshot)].filter(Boolean);
+    : loraNoTelemetry ? [t('polar.loraNoTelemetry')]
+      : [leadReason ? `${leadReason} · ${gateReasonLabel(lang, leadReason)}` : dataState === 'STALE' ? t('polar.expired') : '', ...candidateErrors(snapshot)].filter(Boolean);
   const dataTitle = readError ? t('shell.snapshotError', { error: readError }) : dataCause.join('\n') || undefined;
   // The same readiness decision Overview uses for the map, readout and polar plot.
   const doa = overviewDoaStatus(snapshot, localSnapshotFresh);

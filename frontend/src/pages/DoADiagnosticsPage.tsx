@@ -2,7 +2,7 @@ import { useState } from 'react';
 import type { JSX, ReactNode } from 'react';
 import type { Candidate, TelemetrySnapshot } from '../types';
 import { candidate, formatNumber, nativeViewsReady, primaryCandidate } from '../lib/telemetry';
-import { isMqttSnapshot, mqttAngleMode, mqttDiagnosticRows, overLora } from '../lib/telemetrySource';
+import { isMqttSnapshot, loraLink, mqttAngleMode, mqttDiagnosticRows, overLora } from '../lib/telemetrySource';
 import type { MqttDiagnosticRow } from '../lib/telemetrySource';
 import { gateReasonLabel, useI18n } from '../lib/i18n';
 import type { MessageKey, Translate } from '../lib/i18n';
@@ -261,7 +261,7 @@ function CollectorCard({ snapshot, localSnapshotFresh }: { snapshot: TelemetrySn
   const rawOmitted = snapshot?.settings?.raw_fields_omitted ?? true;
   const chip = (code: string): ReactNode => <StatusChip code={code} tone={decisionTone(code)} />;
   // The native CSV/XML views and settings.json are Data Out's; Telemetry LoRa has neither.
-  const lora = overLora(snapshot);
+  const lora = loraLink(snapshot);
   const items: KeyValueItem[] = [
     { id: 'authority', label: t('diag.authority'), value: chip(authority) },
     { id: 'angle', label: t('diag.angleReadiness'), value: chip(angle) },
@@ -286,7 +286,7 @@ function EffectiveConfigCard({ snapshot }: { snapshot: TelemetrySnapshot | null 
   const settingsError = typeof snapshot?.settings?.error === 'string' ? snapshot.settings.error : null;
   const available = snapshot?.settings?.available === true;
   const settings: KeyValueItem[] = shownFields.map(([key, value]) => ({ id: key, label: key, value: settingValueText(key, value) }));
-  if (overLora(snapshot)) {
+  if (loraLink(snapshot)) {
     // No settings.json over Telemetry LoRa; Kontrol reads the node's settings/reported.
     return (
       <Card title={t('diag.configTitle')} span={12}>
@@ -353,6 +353,8 @@ export function DoADiagnosticsPage({ snapshot, localSnapshotFresh }: { snapshot:
   const gateState = String(snapshot?.publication_gate?.state ?? 'BLOCKED').toUpperCase();
   const consistency = consistencyView(snapshot?.native_consistency);
   const mqtt = isMqttSnapshot(snapshot);
+  // Over Telemetry LoRa without fresh MQTT there is no Data Out to show either: no CSV and XML views.
+  const lora = loraLink(snapshot);
   const csv = primaryCandidate(snapshot);
   const xml = candidate(snapshot, 'xml');
   // θ₀ as the Dashboard reads it: the CSV view (or the MQTT view) carries the vector.
@@ -364,7 +366,7 @@ export function DoADiagnosticsPage({ snapshot, localSnapshotFresh }: { snapshot:
         chips={<>
           <StatusChip label={t('status.delivery')} code={gateState} tone={gateState === 'READY' ? 'good' : 'warn'} />
           <span className="pg-chip"><span className="pg-chip-label">θ₀</span><Tag tone={theta === null ? 'neutral' : 'signal'}>{degrees(theta)}</Tag></span>
-          <StatusChip label={mqtt ? 'DoA↔Angular' : 'CSV↔XML'} code={consistency.relation} tone={stateTone(consistency.relation)} />
+          <StatusChip label={mqtt || lora ? 'DoA↔Angular' : 'CSV↔XML'} code={consistency.relation} tone={stateTone(consistency.relation)} />
           {consistency.frameRelation ? <StatusChip label={t('page.chip.frame')} code={consistency.frameRelation} /> : null}
         </>}
       />
@@ -374,7 +376,9 @@ export function DoADiagnosticsPage({ snapshot, localSnapshotFresh }: { snapshot:
           <GateCard snapshot={snapshot} />
           <CollectorCard snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} />
         </PageStack>
-        {mqtt ? <MqttDoaCard snapshot={snapshot} /> : <NativeRecordsCard snapshot={snapshot} />}
+        {mqtt ? <MqttDoaCard snapshot={snapshot} />
+          : lora ? <Card title={t('diag.mqtt.title')} span={7}><EmptyState label={t('polar.loraNoTelemetry')} code="N/A" /></Card>
+            : <NativeRecordsCard snapshot={snapshot} />}
         <EffectiveConfigCard snapshot={snapshot} />
       </PageGrid>
     </Page>

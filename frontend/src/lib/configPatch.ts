@@ -8,7 +8,7 @@
  * again; the client copy only gives early feedback.
  */
 import type { ConsoleCapabilities } from '../api';
-import type { MessageKey } from './i18n';
+import type { MessageKey, Translate } from './i18n';
 import type { ConfigPatchChanges, ConfigPatchKey } from './controlDraft';
 import { parseTypedNumber } from './polarViewSettings';
 
@@ -373,11 +373,85 @@ export interface CommandResultView {
 export interface CommandStatusLike {
   state: string;
   pubackReason: number | null;
-  ack: { status: string; error: string | null; reason: string | null; revision: number | null } | null;
+  ack: {
+    status: string;
+    error: string | null;
+    reason: string | null;
+    revision: number | null;
+    /** Contract 1.7: LIVE, RESTART or FILE. */
+    method?: string | null;
+    liveFailure?: string | null;
+    proof?: Readonly<Record<string, string>> | string | null;
+  } | null;
 }
 
 function withCode(status: string, code: string | null): string {
   return code ? `${status} · ${code}` : status;
+}
+
+/**
+ * The raw line of a contract 1.7 answer: status, method, the reason or error,
+ * why a live retune did not hold, and the DAQ and settings proof.
+ */
+function rawCodes(ack: NonNullable<CommandStatusLike['ack']>, code: string | null): string {
+  const parts = [ack.status, ack.method ?? null, code, ack.liveFailure ? `live ${ack.liveFailure}` : null];
+  const proof = ack.proof;
+  if (ack.method && proof && typeof proof === 'object') {
+    for (const key of ['daq', 'settings'] as const) {
+      if (typeof proof[key] === 'string') parts.push(`${key} ${proof[key]}`);
+    }
+  }
+  return parts.filter((part): part is string => Boolean(part)).join(' · ');
+}
+
+const RESTART_REASON_KEYS: Readonly<Record<string, MessageKey>> = {
+  GAIN_CHANGE: 'control.reason.GAIN_CHANGE',
+  LARGE_FREQUENCY_JUMP: 'control.reason.LARGE_FREQUENCY_JUMP',
+  'LIVE_FAILED:DAQ_NOT_HEALTHY_AFTER_RETUNE': 'control.reason.DAQ_NOT_HEALTHY_AFTER_RETUNE',
+};
+const ENGINE_OVERRODE_PREFIX = 'LIVE_FAILED:ENGINE_OVERRODE:';
+
+/**
+ * Why the edge restarts the SDR engine for a config.patch, in the operator's
+ * words: a gain change, a jump above its live-retune limit, or a live retune
+ * the engine overrode (naming the field) or that left the DAQ unhealthy.
+ * Anything else is shown as the edge sent it.
+ */
+export function restartReasonText(t: Translate, reason: string | null | undefined): string | null {
+  if (!reason) return null;
+  if (Object.prototype.hasOwnProperty.call(RESTART_REASON_KEYS, reason)) return t(RESTART_REASON_KEYS[reason]);
+  if (reason.startsWith(ENGINE_OVERRODE_PREFIX)) {
+    const field = reason.slice(ENGINE_OVERRODE_PREFIX.length);
+    const known = CONFIG_PATCH_FIELDS.find((entry) => entry.key === field);
+    return t('control.reason.ENGINE_OVERRODE', { field: known ? t(known.shortLabel) : field });
+  }
+  return reason;
+}
+
+/**
+ * The step a contract 1.7 edge is on while it applies a config.patch, or
+ * null when its ACK says no more than the status: VERIFYING a live retune,
+ * or APPLYING / VERIFYING a restart of the SDR engine with its reason.
+ */
+export function commandStageText(t: Translate, ack: CommandStatusLike['ack']): string | null {
+  if (!ack || (ack.status !== 'APPLYING' && ack.status !== 'VERIFYING')) return null;
+  if (ack.method === 'LIVE') return t('control.stage.live');
+  if (ack.method === 'RESTART') {
+    const reason = restartReasonText(t, ack.reason);
+    return reason ? t('control.stage.restartReason', { reason }) : t('control.stage.restart');
+  }
+  return null;
+}
+
+/** How an APPLIED config.patch was applied (contract 1.7), or null for an older edge. */
+export function appliedMethodText(t: Translate, ack: CommandStatusLike['ack']): string | null {
+  if (!ack || ack.status !== 'APPLIED') return null;
+  if (ack.method === 'LIVE') return t('control.result.method.live');
+  if (ack.method === 'RESTART') {
+    const reason = restartReasonText(t, ack.reason);
+    return reason ? t('control.result.method.restartReason', { reason }) : t('control.result.method.restart');
+  }
+  return null;
 }
 
 /**
@@ -410,19 +484,26 @@ export function commandResultView(status: CommandStatusLike, changeCount: number
     return { tone: 'err', title: { key: 'control.result.noAckTitle' }, body: { key: 'control.result.noAck', vars: { ttl: ttlS } }, code: 'NO ACK', reload: false };
   }
   const code = ack.error ?? ack.reason;
-  const raw = withCode(ack.status, code);
+  // A contract 1.7 answer also names its method; an older one keeps the plain line.
+  const raw = ack.method || ack.liveFailure ? rawCodes(ack, code) : withCode(ack.status, code);
   const rev = ack.revision ?? '—';
   const helper = edgeHelperFault(ack.error);
   if (ack.status === 'APPLIED') {
     return { tone: 'ok', title: { key: 'control.result.title.applied' }, body: { key: 'control.result.applied', vars: { count: changeCount, rev } }, code: raw, reload: true };
   }
   if (ack.status === 'PERSISTED_UNVERIFIED') {
-    return { tone: 'info', title: { key: 'control.result.title.persisted' }, body: { key: 'control.result.persistedUnverified', vars: { rev } }, code: raw, reload: true };
+    // Contract 1.7 names why there is no runtime proof: the engine was not running, or changed a value at its start.
+    const body: MessageKey = ack.reason === 'ENGINE_NOT_RUNNING' ? 'control.result.persistedEngineStopped'
+      : ack.error === 'ENGINE_OVERRODE_AT_START' ? 'control.result.persistedEngineOverrode' : 'control.result.persistedUnverified';
+    return { tone: 'info', title: { key: 'control.result.title.persisted' }, body: { key: body, vars: { rev } }, code: raw, reload: true };
   }
   if (ack.status === 'OUTCOME_UNKNOWN') {
-    // Name the likely cause: the helper did not run, or the link dropped while applying.
-    const body: MessageKey = helper ? 'control.result.outcomeUnknownHelper'
-      : ack.reason === 'CONNECTION_LOST' ? 'control.result.outcomeUnknownLink' : 'control.result.outcomeUnknown';
+    // Name the likely cause: the helper did not run, the link dropped while
+    // applying, or (1.7) the engine did not stop or its DAQ did not recover.
+    const body: MessageKey = ack.error === 'ENGINE_DID_NOT_STOP' ? 'control.result.outcomeEngineDidNotStop'
+      : ack.error === 'DAQ_NOT_HEALTHY_AFTER_RESTART' ? 'control.result.outcomeDaqAfterRestart'
+        : helper ? 'control.result.outcomeUnknownHelper'
+          : ack.reason === 'CONNECTION_LOST' ? 'control.result.outcomeUnknownLink' : 'control.result.outcomeUnknown';
     return { tone: 'info', title: { key: 'control.result.title.unknown' }, body: { key: body, vars: { code: code ?? '—' } }, code: raw, reload: true };
   }
   if (ack.error === 'CONFIG_REVISION_CONFLICT' || (ack.status === 'CONFLICT' && !ack.error)) {

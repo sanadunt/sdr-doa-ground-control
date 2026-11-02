@@ -43,7 +43,7 @@ describe('LoRa link of an MQTT answer', () => {
   it('shows the unknown ADC overdrive as not available over LoRa, the bearing still drawn', () => {
     const status = overviewDoaStatus(LORA, true);
     expect(status).toMatchObject({ code: 'DEGRADED', reason: 'adcNotOverLora', shown: true });
-    expect(translate('id', 'polar.adcNotOverLora')).toContain('tidak tersedia lewat Telemetry LoRa');
+    expect(translate('id', 'polar.adcNotOverLora')).toContain('tidak dilaporkan lewat Telemetry LoRa');
     expect(overviewDoaStatus(withNav({ ...LORA, source: { ...LORA.source, link: null } }, LORA.nav ?? null), true).reason).toBe('adcUnknown');
   });
 

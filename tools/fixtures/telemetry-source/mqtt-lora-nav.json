@@ -636,6 +636,7 @@
   "state": "BLOCKED"
  },
  "resources": {},
+ "rf": null,
  "schema_version": 1,
  "settings": {
   "available": false,

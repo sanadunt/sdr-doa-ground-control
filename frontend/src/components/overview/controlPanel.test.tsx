@@ -364,6 +364,20 @@ describe('Kontrol review and send', () => {
     const delivered = normalizeConfigCommandStatus({ command_id: 'gc-0123', op: 'config.patch', state: 'delivered', changes: {} });
     expect(view({ stage: 'sending', sending: { commandId: 'gc-0123', count: 2, baseRev: 42, status: delivered } })).toContain('<span class="ov-mono ov-control-state">delivered</span>');
   });
+
+  it('names the step a contract 1.7 edge is on', () => {
+    // The ACKs of 105.9 -> 103.1 MHz over Telemetry LoRa on 2 November.
+    const stage = (ack: Record<string, unknown>) => view({ stage: 'sending', sending: { commandId: 'gc-0123', count: 2, baseRev: 297,
+      status: normalizeConfigCommandStatus({ command_id: 'gc-0123', op: 'config.patch', state: 'acknowledged', changes: {}, ack: { final: false, ...ack } }) } });
+    const live = stage({ status: 'VERIFYING', method: 'LIVE', persisted: true });
+    expect(live).toContain('RDF-SDR melakukan retune langsung dan memeriksa DAQ…');
+    expect(live).toContain('<span class="ov-mono ov-control-state">VERIFYING</span>');
+    const restart = stage({ status: 'APPLYING', method: 'RESTART', reason: 'LIVE_FAILED:ENGINE_OVERRODE:gain_db' });
+    expect(restart).toContain('RDF-SDR me-restart SDR untuk menerapkan perubahan (engine SDR mengubah Gain saat retune langsung)…');
+    expect(restart).not.toContain('Terkirim ke broker');
+    // An older edge's progress keeps the plain line.
+    expect(stage({ status: 'ACCEPTED' })).toContain('Terkirim ke broker. Menunggu');
+  });
 });
 
 describe('Kontrol results', () => {
@@ -383,6 +397,19 @@ describe('Kontrol results', () => {
     expect(markup).toContain('RDF-SDR menerapkan 2 perubahan dan melihatnya berlaku. Config rev sekarang 43.');
     expect(markup).toContain('>Selesai</button>');
     expect(markup).not.toContain('Baca ulang nilai');
+  });
+
+  it('says how a contract 1.7 edge applied the change', () => {
+    const applied = { status: 'APPLIED', error: null, reason: 'LIVE_FAILED:ENGINE_OVERRODE:gain_db', revision: 298, method: 'RESTART',
+      liveFailure: null, proof: { daq: 'FRESH_HEALTHY_AFTER_RESTART', settings: 'INTACT_AFTER_START' } };
+    const markup = view({ stage: 'done', done: { ...done('acked', applied), ack: applied } });
+    expect(markup).toContain('ov-control-result tone-ok');
+    expect(markup).toContain('<span>Diterapkan dengan restart SDR (engine SDR mengubah Gain saat retune langsung).</span>');
+    expect(markup).toContain('Kode: APPLIED · RESTART · LIVE_FAILED:ENGINE_OVERRODE:gain_db · daq FRESH_HEALTHY_AFTER_RESTART · settings INTACT_AFTER_START');
+    const live = { ...applied, reason: null, method: 'LIVE', proof: { daq: 'FRESH_HEALTHY_AFTER_RETUNE', settings: 'KEPT_BY_ENGINE' } };
+    expect(view({ stage: 'done', done: { ...done('acked', live), ack: live } })).toContain('<span>Diterapkan dengan retune langsung.</span>');
+    // An older edge's APPLIED says nothing about the method.
+    expect(view({ stage: 'done', done: { ...done('acked', ack('APPLIED')), ack: ack('APPLIED') } })).not.toContain('Diterapkan dengan');
   });
 
   it('keeps PERSISTED_UNVERIFIED, OUTCOME_UNKNOWN and a missing final ACK apart from success and failure', () => {
