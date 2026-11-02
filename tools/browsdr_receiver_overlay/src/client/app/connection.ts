@@ -387,7 +387,14 @@ export const connectionMethods = {
 						this._consoleBridge?.spectrum(spectrumData, deviceHz);
 					}
 				}),
-				Comlink.proxy((audioSamples: any) => this.playAudio(audioSamples)),
+				Comlink.proxy((audioSamples: any) => {
+					try {
+						this.playAudio(audioSamples);
+					} finally {
+						// The Receiver mirror's audio: what the speaker gets, sent only while LAN viewers listen.
+						this._consoleBridge?.audio(audioSamples);
+					}
+				}),
 				Comlink.proxy((vfoIndex: number, freq: number, samples: Float32Array) => {
 					this._feedWhisperVfo(vfoIndex, freq, samples);
 					this.recordVfoAudio(vfoIndex, freq, samples);

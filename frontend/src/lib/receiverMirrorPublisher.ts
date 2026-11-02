@@ -24,6 +24,11 @@
  * MIRROR_LAN_CHECK_MS while closed; a post answered with MIRROR_LAN_CLOSED
  * stops the posts and the frames at once. Nothing is posted without a frame
  * that answers the bridge (no state, no post): viewers then see the source lost.
+ *
+ * Audio (docs/RECEIVER_MIRROR.md 10a): every accepted post's answer says how
+ * many LAN viewers listen (audio_listeners); the audio publisher
+ * (receiverMirrorAudio.ts) taps the Receiver only while that is above 0, and
+ * stops with the posts (a closed LAN view, stop()).
  */
 import type { BridgeResult, ReceiverBridge } from './receiverBridge';
 import { COMMAND_ID_PATTERN } from './receiverBridgeProtocol';
@@ -44,6 +49,8 @@ import {
   normalizeMarkerCommands,
 } from './receiverMirror';
 import type { MirrorMarkerCommand, MirrorMarkerResult, MirrorMarkerResultCode, MirrorPublish, MirrorSource, MirrorState } from './receiverMirror';
+import { createMirrorAudioPublisher } from './receiverMirrorAudio';
+import type { MirrorAudioPublisher } from './receiverMirrorAudio';
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -53,6 +60,8 @@ export interface MirrorPostAnswer {
   code: string | null;
   /** Viewers' marker commands the console handed to this page (an accepted post only). */
   commands?: MirrorMarkerCommand[];
+  /** LAN viewers listening to the Receiver's audio (an accepted post only). */
+  audioListeners?: number;
 }
 
 export interface MirrorPublisherEnvironment {
@@ -88,15 +97,19 @@ async function postWithFetch(body: string): Promise<MirrorPostAnswer> {
     });
     let code: string | null = null;
     let commands: MirrorMarkerCommand[] = [];
+    let audioListeners = 0;
     try {
       const answer: unknown = await response.json();
-      const record = typeof answer === 'object' && answer !== null ? answer as { code?: unknown; commands?: unknown } : {};
+      const record = typeof answer === 'object' && answer !== null ? answer as { code?: unknown; commands?: unknown; audio_listeners?: unknown } : {};
       if (!response.ok && typeof record.code === 'string') code = record.code;
       if (response.ok) commands = normalizeMarkerCommands(record.commands);
+      if (response.ok && typeof record.audio_listeners === 'number' && Number.isInteger(record.audio_listeners) && record.audio_listeners > 0) {
+        audioListeners = record.audio_listeners;
+      }
     } catch {
       // An answer without a JSON body keeps its status only.
     }
-    return { status: response.status, code, commands };
+    return { status: response.status, code, commands, audioListeners };
   } finally {
     clearTimeout(timer);
   }
@@ -179,8 +192,12 @@ export interface MirrorPublisher {
   status(): MirrorPublisherStatus;
 }
 
-/** Start publishing this page's Receiver; stop() ends it and drops the mirror's subscription. */
-export function startMirrorPublisher(bridge: ReceiverBridge, environment: MirrorPublisherEnvironment = browserPublisherEnvironment()): MirrorPublisher {
+/** Start publishing this page's Receiver; stop() ends it and drops the mirror's subscriptions (frames and audio). */
+export function startMirrorPublisher(
+  bridge: ReceiverBridge,
+  environment: MirrorPublisherEnvironment = browserPublisherEnvironment(),
+  audio: MirrorAudioPublisher = createMirrorAudioPublisher(bridge),
+): MirrorPublisher {
   const env = environment;
   const sourceId = mirrorSourceId(env.random);
   let stopped = false;
@@ -291,6 +308,7 @@ export function startMirrorPublisher(bridge: ReceiverBridge, environment: Mirror
           // The results this post carried are with the console now.
           results = results.filter((result) => !sentResults.includes(result));
           for (const command of answer.commands ?? []) run(command);
+          audio.setListeners(answer.audioListeners ?? 0, sourceId);
           return;
         }
         counters.refused += 1;
@@ -352,6 +370,7 @@ export function startMirrorPublisher(bridge: ReceiverBridge, environment: Mirror
     } else {
       pendingFrame = null;
       clearTimer();
+      audio.setListeners(0, sourceId);
     }
     scheduleLanCheck();
   }
@@ -399,6 +418,7 @@ export function startMirrorPublisher(bridge: ReceiverBridge, environment: Mirror
       lanTimer = null;
       pendingFrame = null;
       bridge.subscribe({ spectrum: false }, 'mirror');
+      audio.stop();
     },
     status() {
       return { lanOpen, ...counters };

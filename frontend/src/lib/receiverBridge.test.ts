@@ -39,7 +39,7 @@ import {
   snapGain,
   sweepMaxSpanHz,
 } from './receiverBridgeProtocol';
-import type { SpectrumFrame } from './receiverBridgeProtocol';
+import type { ReceiverAudio, SpectrumFrame } from './receiverBridgeProtocol';
 
 const ORIGIN = 'http://127.0.0.1:8787';
 
@@ -121,7 +121,7 @@ describe('receiver bridge protocol', () => {
   it('matches the frame-side constants', () => {
     expect(BRIDGE_CHANNEL).toBe('sdr-console-receiver');
     expect(BRIDGE_VERSION).toBe(1);
-    expect([...FRAME_MESSAGE_TYPES]).toEqual(['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep', 'receiver:markers']);
+    expect([...FRAME_MESSAGE_TYPES]).toEqual(['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep', 'receiver:markers', 'receiver:audio']);
     expect([...CONSOLE_MESSAGE_TYPES]).toEqual([
       'console:hello', 'console:subscribe', 'console:start', 'console:stop', 'console:tune', 'console:vfo', 'console:listen', 'console:display',
       'console:gains', 'console:radio', 'console:sweep-start', 'console:sweep-stop', 'console:sweep-config', 'console:sweep-display',
@@ -290,8 +290,9 @@ describe('receiver bridge protocol', () => {
   });
 
   it('clamps subscriptions like the frame', () => {
-    expect(clampSubscription({ spectrum: true, bins: 10, fps: 99, spanHz: 5 })).toEqual({ spectrum: true, bins: 64, fps: 15, spanHz: 100_000 });
-    expect(clampSubscription({ spectrum: 'yes', bins: Number.NaN })).toEqual({ spectrum: false, bins: 512, fps: 10, spanHz: 2_000_000 });
+    expect(clampSubscription({ spectrum: true, bins: 10, fps: 99, spanHz: 5 })).toEqual({ spectrum: true, audio: false, bins: 64, fps: 15, spanHz: 100_000 });
+    expect(clampSubscription({ spectrum: 'yes', audio: 'yes', bins: Number.NaN })).toEqual({ spectrum: false, audio: false, bins: 512, fps: 10, spanHz: 2_000_000 });
+    expect(clampSubscription({ spectrum: false, audio: true })).toMatchObject({ spectrum: false, audio: true });
   });
 
   it('rejects anything that is not a well-formed frame envelope', () => {
@@ -456,12 +457,48 @@ describe('createReceiverBridge', () => {
 
   it('merges owner subscriptions', () => {
     expect(mergeSubscriptions(new Map())).toBeNull();
-    const off = { spectrum: false, bins: 2048, fps: 15, spanHz: 6_000_000 };
-    expect(mergeSubscriptions(new Map([['dock', off]]))).toEqual({ spectrum: false, bins: 512, fps: 10, spanHz: 2_000_000 });
+    const off = { spectrum: false, audio: false, bins: 2048, fps: 15, spanHz: 6_000_000 };
+    expect(mergeSubscriptions(new Map([['dock', off]]))).toEqual({ spectrum: false, audio: false, bins: 512, fps: 10, spanHz: 2_000_000 });
     expect(mergeSubscriptions(new Map([
-      ['mirror', { spectrum: true, bins: 512, fps: 5, spanHz: 2_000_000 }],
-      ['dock', { spectrum: true, bins: 256, fps: 10, spanHz: 4_000_000 }],
-    ]))).toEqual({ spectrum: true, bins: 512, fps: 10, spanHz: 4_000_000 });
+      ['mirror', { spectrum: true, audio: false, bins: 512, fps: 5, spanHz: 2_000_000 }],
+      ['dock', { spectrum: true, audio: false, bins: 256, fps: 10, spanHz: 4_000_000 }],
+    ]))).toEqual({ spectrum: true, audio: false, bins: 512, fps: 10, spanHz: 4_000_000 });
+  });
+
+  it('asks for audio while any owner wants it, with or without frames', () => {
+    const audioOnly = { spectrum: false, audio: true, bins: 512, fps: 10, spanHz: 2_000_000 };
+    expect(mergeSubscriptions(new Map([['mirror-audio', audioOnly]]))).toEqual(audioOnly);
+    expect(mergeSubscriptions(new Map([
+      ['dock', { spectrum: true, audio: false, bins: 256, fps: 10, spanHz: 4_000_000 }],
+      ['mirror-audio', audioOnly],
+    ]))).toEqual({ spectrum: true, audio: true, bins: 256, fps: 10, spanHz: 4_000_000 });
+  });
+
+  it('hands receiver:audio to its listeners as a copy and keeps the subscription per owner', () => {
+    const h = harness();
+    h.bridge.attach(h.frame);
+    h.fromFrame('receiver:hello', hello);
+    const subscriptions = () => h.posted.map((entry) => entry.message).filter((message) => message.type === 'console:subscribe');
+    h.bridge.subscribe({ spectrum: true, bins: 512, fps: 5 }, 'mirror');
+    h.bridge.subscribe({ spectrum: false, audio: true }, 'mirror-audio');
+    expect(subscriptions().at(-1)).toMatchObject({ spectrum: true, audio: true, fps: 5 });
+    const heard: ReceiverAudio[] = [];
+    const stop = h.bridge.onAudio((audio) => heard.push(audio));
+    const samples = new Float32Array(4800).fill(0.25);
+    samples[0] = Number.NaN;
+    samples[1] = 3;
+    h.fromFrame('receiver:audio', { seq: 4, sampleRateHz: 48_000, gap: true, samples });
+    h.fromFrame('receiver:audio', { seq: 5, sampleRateHz: 44_100, samples });
+    h.fromFrame('receiver:audio', { seq: 6, sampleRateHz: 48_000, samples: [0.1, 0.2] });
+    expect(heard).toHaveLength(1);
+    expect(heard[0]).toMatchObject({ seq: 4, sampleRateHz: 48_000, gap: true });
+    expect(heard[0].samples).not.toBe(samples);
+    expect([heard[0].samples[0], heard[0].samples[1], heard[0].samples[2]]).toEqual([0, 1, 0.25]);
+    stop();
+    h.fromFrame('receiver:audio', { seq: 7, sampleRateHz: 48_000, samples });
+    expect(heard).toHaveLength(1);
+    h.bridge.subscribe({ spectrum: false, audio: false }, 'mirror-audio');
+    expect(subscriptions().at(-1)).toMatchObject({ spectrum: true, audio: false });
   });
 
   it('ignores messages from another origin, another window or with a wrong envelope', () => {

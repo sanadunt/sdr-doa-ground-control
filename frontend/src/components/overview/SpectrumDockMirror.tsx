@@ -1,7 +1,7 @@
 import type { JSX, ReactNode } from 'react';
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useI18n } from '../../lib/i18n';
-import type { MessageKey, Translate } from '../../lib/i18n';
+import type { Lang, MessageKey, Translate } from '../../lib/i18n';
 import { formatDuration } from '../../lib/healthView';
 import type { BridgeMarker } from '../../lib/receiverBridgeProtocol';
 import { mirrorView } from '../../lib/receiverMirror';
@@ -9,6 +9,8 @@ import type { MirrorState, MirrorView } from '../../lib/receiverMirror';
 import { createMirrorFeed } from '../../lib/receiverMirrorFeed';
 import type { ReceiverMirrorFeed } from '../../lib/receiverMirrorFeed';
 import { createMirrorMarkClient, createMirrorMarkController, mirrorMarkBlocked, mirrorMarkMessage } from '../../lib/receiverMirrorMarks';
+import { MIRROR_AUDIO_LIMITS, mirrorAudioPlayer } from '../../lib/receiverMirrorAudio';
+import type { MirrorAudioPlayer, MirrorAudioState } from '../../lib/receiverMirrorAudio';
 import type { MirrorMarkContext, MirrorMarkController, MirrorMarkState } from '../../lib/receiverMirrorMarks';
 import { formatMsps } from '../../lib/radioSettings';
 import { formatMhz, formatMhzTrim, spanAround } from '../../lib/spectrumView';
@@ -126,6 +128,71 @@ export function useMirrorMarking(view: MirrorView, given: MirrorMarkController |
   return { state, blocked, markers, total: view.markers?.total ?? null, saved: view.markers?.saved ?? null, selected, context, controller };
 }
 
+/**
+ * The text beside Dengar in the LAN view: the estimated latency while audio
+ * plays, otherwise why there is none (from the player and the mirror's state).
+ * Null while the tablet does not listen.
+ */
+export function mirrorAudioText(t: Translate, lang: Lang, audio: MirrorAudioState, view: MirrorView): string | null {
+  switch (audio.status) {
+    case 'off':
+      return null;
+    case 'connecting':
+    case 'buffering':
+      return t('mirror.audio.connecting');
+    case 'playing': {
+      const seconds = ((audio.latencyMs ?? 0) / 1000).toFixed(1);
+      return t('mirror.audio.latency', { latency: lang === 'id' ? seconds.replace('.', ',') : seconds });
+    }
+    case 'retrying':
+      return view.phase === 'lost' || view.phase === 'none' ? mirrorChipText(t, view) : t('mirror.audio.retrying');
+    case 'busy':
+      return t('mirror.audio.busy', { max: MIRROR_AUDIO_LIMITS.maxListeners });
+    case 'blocked':
+      return t('mirror.audio.blocked');
+    case 'unsupported':
+      return t('mirror.audio.unsupported');
+    case 'silent': {
+      const state = view.state;
+      if (view.phase === 'lost' || view.phase === 'none' || !state) return mirrorChipText(t, view);
+      const phase = state.scan?.phase;
+      if (state.busy === 'sweep' || phase === 'starting' || phase === 'active') return t('mirror.audio.scan');
+      if (!state.running) return t('mirror.audio.rxOff');
+      return t('mirror.audio.silent');
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * Dengar/Listen in the LAN view: the tablet hears the groundstation Receiver
+ * (docs/RECEIVER_MIRROR.md 10a). The click starts the page's one player
+ * inside the gesture, so the browser lets it play; a second click stops it,
+ * or resumes audio the browser held. Off at every page load.
+ */
+export function MirrorListenButton({ view, player: given = null }: { view: MirrorView; player?: MirrorAudioPlayer | null }): JSX.Element {
+  const { t, lang } = useI18n();
+  const player = given ?? mirrorAudioPlayer();
+  const audio = useSyncExternalStore(player.subscribe, player.getState, player.getState);
+  const on = audio.status !== 'off' && audio.status !== 'unsupported';
+  const text = mirrorAudioText(t, lang, audio, view);
+  const tone = audio.status === 'playing' ? 'good' : audio.status === 'busy' || audio.status === 'blocked' || audio.status === 'unsupported' || audio.status === 'retrying' ? 'warn' : 'muted';
+  return (
+    <div className="ov-spec-group ov-spec-audio-group">
+      <button
+        className="ov-button ov-spec-listen"
+        type="button"
+        aria-pressed={on}
+        onClick={() => { if (on && audio.status !== 'blocked') player.stop(); else player.start(); }}
+      >
+        <Icon name="headphones" /><span>{t('spectrum.listen')}</span>
+      </button>
+      {text ? <span className={`ov-spec-audio tone-${tone}`} role="status">{text}</span> : null}
+    </div>
+  );
+}
+
 /** The Markers/Penanda toggle with the list's count; it stays usable so a blocked reason shows when it is turned on. */
 export function MirrorMarkToggle({ marking }: { marking: MirrorMarking }): JSX.Element {
   const { t } = useI18n();
@@ -221,11 +288,17 @@ export function MirrorSpectrum({ feed, view, marking = null }: { feed: ReceiverM
  * The spectrum dock in the LAN view: the groundstation's Receiver as the
  * console mirrors it (MIRROR), with the age of its last frame, STALE when
  * frames stop and SOURCE LOST / SUMBER PUTUS when the groundstation page
- * stops posting. Every radio control shows its state and is disabled; no
- * audio. Markers/Penanda is the one control that works: it adds and removes
- * the groundstation Receiver's markers (the owner's decision of 2026-10-31).
+ * stops posting. Every radio control shows its state and is disabled, but
+ * two: Markers/Penanda adds and removes the groundstation Receiver's markers
+ * (the owner's decision of 2026-10-31), and Dengar/Listen plays its audio on
+ * this tablet (the owner's decision of 2026-11-02).
  */
-export function SpectrumDockMirror({ feed: given = null, markController = null }: { feed?: ReceiverMirrorFeed | null; markController?: MirrorMarkController | null }): JSX.Element {
+export function SpectrumDockMirror({ feed: given = null, markController = null, audioPlayer = null }: {
+  feed?: ReceiverMirrorFeed | null;
+  markController?: MirrorMarkController | null;
+  /** Tests pass a player; otherwise the page's one (mirrorAudioPlayer()). */
+  audioPlayer?: MirrorAudioPlayer | null;
+}): JSX.Element {
   const { t } = useI18n();
   // App passes its one feed; a dock rendered on its own (tests) makes one.
   const fallback = useRef<ReceiverMirrorFeed | null>(null);
@@ -237,7 +310,6 @@ export function SpectrumDockMirror({ feed: given = null, markController = null }
   const shiftHz = state?.frequency_shift_hz ?? 0;
   // From the last state, as on the groundstation's dock; the chip shows STALE or SOURCE LOST.
   const stoppable = view.stoppable;
-  const listening = state?.running === true && state.vfo?.enabled === true;
   return (
     <section id="panel-spectrum" className="ov-spectrum is-view-only is-mirror" aria-labelledby="ov-spectrum-title">
       <div className="ov-dock-head ov-spec-head">
@@ -255,11 +327,7 @@ export function SpectrumDockMirror({ feed: given = null, markController = null }
         </div>
         <MirrorMarkToggle marking={marking} />
         <span className="ov-spacer" />
-        <div className="ov-spec-group">
-          <button className="ov-button ov-spec-listen" type="button" aria-pressed={listening} disabled>
-            <Icon name="headphones" /><span>{t('spectrum.listen')}</span>
-          </button>
-        </div>
+        <MirrorListenButton view={view} player={audioPlayer} />
         <div className="ov-spec-group">
           <button className="ov-button ov-spec-run" type="button" disabled>
             <Icon name={stoppable ? 'stop' : 'play'} /><span>{stoppable ? t('spectrum.stop') : t('spectrum.start')}</span>

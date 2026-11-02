@@ -17,7 +17,7 @@ export const BRIDGE_CHANNEL = 'sdr-console-receiver';
 export const BRIDGE_VERSION = 1;
 
 /** Frame to console. */
-export const FRAME_MESSAGE_TYPES = ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep', 'receiver:markers'] as const;
+export const FRAME_MESSAGE_TYPES = ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep', 'receiver:markers', 'receiver:audio'] as const;
 /** Console to frame. */
 export const CONSOLE_MESSAGE_TYPES = [
   'console:hello',
@@ -103,6 +103,11 @@ export const SWEEP_SPAN_LIMITS = { minSpanHz: 1_000_000, sampleRateHz: 20_000_00
  * Receiver's list takes at most maxTotal; labels are at most labelMaxChars long.
  */
 export const MARKER_LIMITS = { minHz: 1_000_000, maxHz: 7_250_000_000, maxSent: 512, maxTotal: 10_000, labelMaxChars: 80 } as const;
+/**
+ * receiver:audio (the Receiver mirror's audio, docs/RECEIVER_MIRROR.md 10a): the mono mix the Receiver plays,
+ * at sampleRateHz, chunkSamples per message (100 ms), never more than maxSamples.
+ */
+export const AUDIO_LIMITS = { sampleRateHz: 48_000, chunkSamples: 4_800, maxSamples: 48_000 } as const;
 export const VOLUME_LIMITS = { min: 0, max: 100 } as const;
 /**
  * Manual dB range of the Receiver's RX (Dengar) spectrum and waterfall, which
@@ -151,6 +156,8 @@ export const LONG_COMMAND_TYPES: ReadonlySet<ConsoleMessageType> = new Set<Conso
 
 export interface Subscription {
   spectrum: boolean;
+  /** receiver:audio messages while true (the Receiver mirror's audio). */
+  audio: boolean;
   bins: number;
   fps: number;
   spanHz: number;
@@ -256,6 +263,15 @@ export interface ReceiverStatus {
   sweep: StatusSweep | null;
 }
 
+/** A receiver:audio chunk: AUDIO_LIMITS.chunkSamples of the mix the Receiver plays (mono, -1..1). */
+export interface ReceiverAudio {
+  seq: number;
+  sampleRateHz: number;
+  /** Samples were left out before this chunk (a new subscription, muted VFOs, an RX restart). */
+  gap: boolean;
+  samples: Float32Array;
+}
+
 /** A receiver:spectrum frame: the RX spectrum around the centre. */
 export interface RxSpectrumFrame {
   source: 'rx';
@@ -333,7 +349,8 @@ export type FrameMessage =
   | { type: 'receiver:spectrum'; frame: RxSpectrumFrame }
   | { type: 'receiver:sweep'; frame: SweepSpectrumFrame }
   | { type: 'receiver:result'; result: ReceiverResult }
-  | { type: 'receiver:markers'; markers: ReceiverMarkers };
+  | { type: 'receiver:markers'; markers: ReceiverMarkers }
+  | { type: 'receiver:audio'; audio: ReceiverAudio };
 
 /** Commands the console sends; the bridge adds `id` and the envelope. */
 export type BridgeCommand =
@@ -479,10 +496,11 @@ export function inSweepRange(startHz: unknown, stopHz: unknown, fftSize: unknown
 }
 
 /** Clamps a requested subscription exactly as the frame does; non-numbers take the default. */
-export function clampSubscription(raw: { spectrum?: unknown; bins?: unknown; fps?: unknown; spanHz?: unknown }): Subscription {
+export function clampSubscription(raw: { spectrum?: unknown; audio?: unknown; bins?: unknown; fps?: unknown; spanHz?: unknown }): Subscription {
   const limits = SUBSCRIBE_LIMITS;
   return {
     spectrum: raw.spectrum === true,
+    audio: raw.audio === true,
     bins: Math.round(clampNumber(raw.bins, limits.binsMin, limits.binsMax, limits.binsDefault)),
     fps: clampNumber(raw.fps, limits.fpsMin, limits.fpsMax, limits.fpsDefault),
     spanHz: Math.round(clampNumber(raw.spanHz, limits.spanMinHz, TUNE_LIMITS.maxHz, limits.spanDefaultHz)),
@@ -623,6 +641,29 @@ function copyBins(value: Record<string, unknown>): Float32Array | null {
     copy[index] = Number.isFinite(power) ? power : SPECTRUM_FLOOR_DB;
   }
   return copy;
+}
+
+/**
+ * Normalize a receiver:audio payload. The samples are copied (non-finite ones
+ * become 0, the rest are clamped to -1..1), so the console never keeps a
+ * buffer the frame owns; at most AUDIO_LIMITS.maxSamples at AUDIO_LIMITS.sampleRateHz.
+ */
+export function normalizeAudio(value: unknown): ReceiverAudio | null {
+  if (!isRecord(value)) return null;
+  const seq = finiteOrNull(value.seq);
+  if (seq === null || !Number.isInteger(seq) || seq < 0) return null;
+  if (value.sampleRateHz !== AUDIO_LIMITS.sampleRateHz) return null;
+  const raw = value.samples;
+  if (!ArrayBuffer.isView(raw) || raw instanceof DataView) return null;
+  const source = raw as unknown as ArrayLike<unknown>;
+  const length = typeof source.length === 'number' ? source.length : 0;
+  if (length < 1 || length > AUDIO_LIMITS.maxSamples) return null;
+  const samples = new Float32Array(length);
+  for (let index = 0; index < length; index++) {
+    const sample = Number(source[index]);
+    samples[index] = Number.isFinite(sample) ? Math.max(-1, Math.min(1, sample)) : 0;
+  }
+  return { seq, sampleRateHz: AUDIO_LIMITS.sampleRateHz, gap: value.gap === true, samples };
 }
 
 /** Normalize a receiver:spectrum payload; the bins are copied, so the console never keeps a reference the frame owns. */
@@ -770,6 +811,10 @@ export function parseFrameMessage(data: unknown): FrameMessage | null {
     case 'receiver:markers': {
       const markers = normalizeMarkers(data);
       return markers ? { type: data.type, markers } : null;
+    }
+    case 'receiver:audio': {
+      const audio = normalizeAudio(data);
+      return audio ? { type: data.type, audio } : null;
     }
     default:
       return null;

@@ -2,6 +2,23 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.8.0
+
+Rilis minor: tidak ada yang dihapus. Tablet di mode LAN kini bisa **mendengar** audio Receiver groundstation (keputusan pemilik 2026-11-02). Ini jalur baca baru di listener LAN, bukan penulisan; tetap tanpa login, untuk setiap klien di `allowed_clients`. Kanal `3` dan timer update memasangnya sendiri.
+
+- **Dengar di tablet.** Tombol **Dengar** di dock MIRROR dan di kartu Spektrum rute Receiver tablet kini aktif, dan menyalakan audio di tablet itu sendiri.
+  - Klik pertama membuka audio di dalam klik itu (aturan autoplay browser). Dengar mati setiap kali halaman dimuat.
+  - Di sampingnya tertulis perkiraan tunda, sekitar **≈ 0,5 dtk**.
+  - Bila tidak ada suara, tertulis alasannya: "Tidak ada audio dari groundstation (VFO bisu?)", "RX OFF · tidak ada audio", "Pindai berjalan; tidak ada audio", **SUMBER PUTUS**, "Pendengar penuh (4)" atau "Browser menahan audio; ketuk Dengar lagi."
+  - Yang terdengar persis yang diputar speaker groundstation: VFO yang dibisukan di sana juga bisu di tablet. Tablet tidak menala, tidak membuka bisu VFO dan tidak merekam.
+- **Cara kerjanya.** Selama ada pendengar, halaman groundstation menyadap audio Receiver, menurunkannya ke PCM 16 kHz, dan mengirim potongan 200 ms ke console (`POST /api/mirror/receiver/audio`, hanya loopback).
+  - Tablet membaca satu stream `GET /api/mirror/receiver/audio`: paling banyak 4 pendengar dan satu per alamat, sekitar 256 kbit/s per tablet.
+  - Server hanya menyimpan 2 detik terakhir di memori dan tidak menulis apa pun ke disk. Menutup mode LAN memutus semua stream.
+  - Tanpa pendengar, halaman groundstation tidak menyadap apa pun.
+  - Setiap stream yang dibuka dan ditutup tercatat di log console dengan alamat tablet.
+- **Halaman groundstation tetap harus terbuka.** Audio tetap mengalir saat tab groundstation tersembunyi selama Receiver memutar suara. Bila halaman ditutup atau dimuat ulang, tablet menampilkan **SUMBER PUTUS** dan menyambung lagi sendiri. Halaman groundstation yang dimuat sebelum 3.8.0 tidak mengirim audio, jadi muat ulang sekali setelah update.
+- Kontrak lengkap, pilihan yang ditimbang (WebRTC, Opus) dan pengukuran latensinya ada di `docs/RECEIVER_MIRROR.md` bagian 10a.
+
 ## 3.7.0
 
 Rilis minor: tidak ada yang dihapus, dan tanpa file peta semuanya berjalan seperti 3.6.0. Menu peta mendapat gaya **Offline**: peta dari satu file di console sendiri, yang tampil tanpa internet.
