@@ -1,0 +1,5 @@
+Glyph files (*.pbf) of the Offline basemap: Noto Sans Regular, Medium and Italic,
+Latin ranges 0-255 and 256-511, as packaged by protomaps/basemaps-assets
+(https://github.com/protomaps/basemaps-assets, fonts/, generated with
+maplibre/font-maker). Noto Sans is licensed under the SIL Open Font License 1.1
+(https://openfontlicense.org). Used by frontend/src/lib/offlineBasemap.ts.
