@@ -176,8 +176,30 @@ describe('getConfigPatchStatus', () => {
     expect(status?.op).toBe('config.patch');
     expect(status?.ack).toEqual({
       status: 'APPLIED', final: true, error: null, reason: null, revision: 43, persisted: true, receivedAtMs: 5,
-      proof: { center_frequency_hz: 'FRESH_DAQ_RF_CENTER', vfo0_frequency_hz: 'FRESH_DOA_FREQUENCY' },
+      proof: { center_frequency_hz: 'FRESH_DAQ_RF_CENTER', vfo0_frequency_hz: 'FRESH_DOA_FREQUENCY' }, method: null, liveFailure: null,
     });
+  });
+
+  it('reads the method, reason and proof of a contract 1.7 edge', () => {
+    // The final ACK of 105.9 -> 103.1 MHz over Telemetry LoRa on 2 November.
+    const applied = normalizeConfigCommandStatus({ ...STATUS, ack: {
+      status: 'APPLIED', final: true, error: null, reason: 'LIVE_FAILED:ENGINE_OVERRODE:gain_db', revision: 298, persisted: true,
+      method: 'RESTART', live_failure: null, t: 1, received_at_ms: 5,
+      proof: { daq: 'FRESH_HEALTHY_AFTER_RESTART', settings: 'INTACT_AFTER_START', engine: 'X' },
+    } })?.ack;
+    expect(applied).toMatchObject({
+      method: 'RESTART', reason: 'LIVE_FAILED:ENGINE_OVERRODE:gain_db', liveFailure: null,
+      proof: { daq: 'FRESH_HEALTHY_AFTER_RESTART', settings: 'INTACT_AFTER_START' },
+    });
+    const persisted = normalizeConfigCommandStatus({ ...STATUS, ack: {
+      status: 'PERSISTED_UNVERIFIED', final: true, reason: 'NATIVE_RUNTIME_EVIDENCE_INCOMPLETE', method: 'LIVE',
+      live_failure: 'DAQ_NOT_HEALTHY_AFTER_RETUNE', revision: 9, persisted: true,
+    } })?.ack;
+    expect(persisted).toMatchObject({ method: 'LIVE', liveFailure: 'DAQ_NOT_HEALTHY_AFTER_RETUNE' });
+    for (const reason of ['live failed', 'LIVE_FAILED:', 'LIVE_FAILED::x', `X${'Y'.repeat(64)}`, 'LIVE_FAILED:<b>']) {
+      expect(normalizeConfigCommandStatus({ ...STATUS, ack: { ...STATUS.ack, reason } })?.ack?.reason, reason).toBeNull();
+    }
+    expect(normalizeConfigCommandStatus({ ...STATUS, ack: { ...STATUS.ack, method: 'restart' } })?.ack?.method).toBeNull();
   });
 
   it('knows every state of the edge command path', () => {

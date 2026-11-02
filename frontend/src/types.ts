@@ -163,12 +163,33 @@ export interface SnapshotNav {
   compass_state?: string | null;
 }
 
+/**
+ * What the SDR is set to, from the RDF Node's retained state (state.rf,
+ * contract 1.7): settings.json values of revision `cfg`, configured and not
+ * measured. Kept apart from `settings`, the Data Out read; unvalidated JSON.
+ */
+export interface SnapshotRf {
+  [key: string]: unknown;
+  source?: string;
+  cfg?: number | null;
+  t?: number | null;
+  received_at_ms?: number | null;
+  age_ms?: number | null;
+  center_frequency_hz?: number | null;
+  vfo0_frequency_hz?: number | null;
+  gain_db?: number | null;
+  vfo0_bandwidth_hz?: number | null;
+  vfo0_squelch_db?: number | null;
+}
+
 export interface TelemetrySnapshot {
   [key: string]: unknown;
   /** Absent from older servers, which always answered from Data Out. */
   source?: SnapshotSource;
   /** MQTT answers only: null without nav fields; absent from Data Out answers and older servers. */
   nav?: SnapshotNav | null;
+  /** MQTT answers only: null without state.rf (an edge before 1.7); absent from Data Out answers and older servers. */
+  rf?: SnapshotRf | null;
   schema_version?: number;
   collector?: Record<string, unknown>;
   observed_at_ms?: number;

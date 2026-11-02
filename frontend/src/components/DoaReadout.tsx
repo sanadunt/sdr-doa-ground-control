@@ -5,7 +5,7 @@ import { bearingForView, formatDegrees, geographicBearingForBin, polarView } fro
 import { doaStatusTextKey, overviewDoaStatus, provisionalTheta } from '../lib/doaStatus';
 import { useI18n } from '../lib/i18n';
 import { ageAtAnswerMs } from '../lib/snapshotRead';
-import { sourceBadge } from '../lib/telemetrySource';
+import { doaSample, doaSampleText, snapshotRf, sourceBadge } from '../lib/telemetrySource';
 import type { MessageKey } from '../lib/i18n';
 
 export function coordinateSourceKey(source: MapCoordinate['source'] | undefined): MessageKey {
@@ -25,7 +25,10 @@ function formatOffset(offset: number): string {
  * stays visible beside it, and so does the plotted display peak, because the
  * two are not guaranteed to agree. A DoA overviewDoaStatus() does not show
  * but that is still readable (old, ok=0, DAQ unknown) keeps its bearing,
- * dimmed and marked NOT VALID, with the reason it is held.
+ * dimmed and marked NOT VALID, with the reason it is held. One line names
+ * the DoA record's frequency and power (an UNVERIFIED ok=0 record dimmed
+ * with the held bearing), or without a current record the frequency the SDR
+ * is set to (state.rf), marked as a setting.
  */
 export function DoaReadout({
   snapshot,
@@ -81,6 +84,15 @@ export function DoaReadout({
       source: offsetSource,
     })
     : null;
+  const sample = doaSample(snapshot, status, localSnapshotFresh);
+  // An expired answer's setting is not shown as current either.
+  const rfCenterHz = sample === null && localSnapshotFresh ? snapshotRf(snapshot)?.centerHz ?? null : null;
+  // A verified record only while the bearing is shown, an UNVERIFIED one only in the held branch (doaSample).
+  const sampleLine = sample !== null ? (
+    <div className={sample.verified ? 'ov-hud-sample' : 'ov-hud-sample is-provisional'}>{t('hud.signal')} <b>{doaSampleText(sample)}</b></div>
+  ) : rfCenterHz !== null ? (
+    <div className="ov-hud-sample is-setting">{t('hud.setting')} <b>{(rfCenterHz / 1e6).toFixed(3)} MHz</b></div>
+  ) : null;
   const peakAxis = settings.figType === 'Compass' ? t('readout.peakAxisCompass') : t('readout.peakAxisPolar');
   const peakTitle = status.shown && view.peakValue !== null ? `${peakAxis} · ${t('readout.peakDetail', { db: view.peakValue.toFixed(1) })}` : undefined;
 
@@ -105,6 +117,7 @@ export function DoaReadout({
             <span>{t('hud.theta')} <b>{view.canonicalAngle !== null ? `${formatDegrees(view.canonicalAngle, 1)}°` : '—'}</b></span>
             <span title={peakTitle}>{t('hud.peak')} <b>{view.displayPeak !== null ? `${formatDegrees(view.displayPeak, 1)}°` : '—'}</b></span>
           </div>
+          {sampleLine}
           <div className="ov-hud-offset">
             {t('hud.offset')} <b>{formatOffset(settings.compassOffset)}°</b> · <span className={offsetManual ? 'is-manual' : offsetVerified ? undefined : 'is-warn'}>{offsetSource}</span>
           </div>
@@ -117,6 +130,7 @@ export function DoaReadout({
               <span>{t('hud.theta')} <b>{formatDegrees(heldTheta, 1)}°</b></span>
             </div>
           ) : null}
+          {sampleLine}
           <p className="ov-hud-held" role="status">{statusText}</p>
         </>
       )}

@@ -22,7 +22,8 @@ States (``COMMAND_STATES``):
 * ``publish_failed`` (final): the publish failed or the PUBACK was 128 or above;
 * ``no_ack`` (final): no ACK at all by ``expires_ms`` plus ``NO_ACK_GRACE_MS``;
 * ``no_final_ack`` (final): the edge acknowledged the command but sent no final
-  ACK within ``FINAL_ACK_WAIT_MS`` of issuing it; its outcome is unknown;
+  ACK within ``FINAL_ACK_WAIT_MS`` of issuing it (``RESTART_FINAL_ACK_WAIT_MS``
+  once a contract 1.7 edge names its method); its outcome is unknown;
 * ``no_report`` (final): a ``config.get`` answered ``APPLIED`` without a
   settings report within ``SETTINGS_REPORT_WAIT_MS``.
 
@@ -47,6 +48,12 @@ NO_ACK_GRACE_MS = 5_000
 # After a progress ACK the edge may verify for up to its verify_seconds (at
 # most 60 s, default 12 s) behind an 8 s helper call before its final ACK.
 FINAL_ACK_WAIT_MS = 90_000
+# A contract 1.7 edge that names its method (LIVE, RESTART) may restart the
+# SDR engine: a live window (20 s), a stop (30 s), a start of up to its
+# start_timeout_seconds (180 s by default) and the settle, plus the LoRa
+# radio turn. Its final ACK, also DAQ_NOT_HEALTHY_AFTER_RESTART, comes within this.
+RESTART_FINAL_ACK_WAIT_MS = 270_000
+_RESTART_METHODS = frozenset({"LIVE", "RESTART"})
 # The edge keeps one settings request; the console keeps its id for 60 s
 # (command TTL at most 30 s plus the report's 30 s expiry).
 SETTINGS_REPORT_WAIT_MS = 60_000
@@ -159,7 +166,7 @@ def _text(value: Any, limit: int = 64) -> Optional[str]:
 
 
 def public_ack(ack: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
-    """What Kontrol shows of an ACK: status, error, reason, revision, proof."""
+    """What Kontrol shows of an ACK: status, error, reason, revision, proof, method."""
     if ack is None:
         return None
     result = ack.get("result") if isinstance(ack.get("result"), Mapping) else {}
@@ -178,6 +185,10 @@ def public_ack(ack: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
             if isinstance(proof, Mapping) else _text(proof)
         ),
         "persisted": persisted if isinstance(persisted, bool) else None,
+        # Contract 1.7: LIVE (retuned in place), RESTART (engine restarted) or FILE
+        # (only settings.json, the engine was not running), and why a live retune fell back.
+        "method": _text(result.get("method"), 16),
+        "live_failure": _text(result.get("live_failure")),
         "t": ack.get("t"),
         "received_at_ms": ack.get("received_at_ms"),
     }
@@ -359,8 +370,11 @@ class ConfigCommandTracker:
                     return "no_report"
                 return "acknowledged"
             return "acked"
-        if observed["progress"] is not None:
-            return "no_final_ack" if now > entry["issued_ms"] + FINAL_ACK_WAIT_MS else "acknowledged"
+        progress = observed["progress"]
+        if progress is not None:
+            result = progress.get("result") if isinstance(progress.get("result"), Mapping) else {}
+            wait = RESTART_FINAL_ACK_WAIT_MS if result.get("method") in _RESTART_METHODS else FINAL_ACK_WAIT_MS
+            return "no_final_ack" if now > entry["issued_ms"] + wait else "acknowledged"
         if now > entry["expires_ms"] + NO_ACK_GRACE_MS:
             return "no_ack"
         return "delivered" if puback is not None else "published"
@@ -403,6 +417,7 @@ __all__ = [
     "ConfigCommandTracker",
     "FINAL_ACK_STATUSES",
     "FINAL_ACK_WAIT_MS",
+    "RESTART_FINAL_ACK_WAIT_MS",
     "FINAL_STATES",
     "MonitorPublishError",
     "NO_ACK_GRACE_MS",

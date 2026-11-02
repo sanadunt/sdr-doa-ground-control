@@ -54,3 +54,7 @@
   .hd-relation { gap: 6px 12px; }
   .hd-ledger .pg-table td.hd-field-cell { white-space: normal; }
 }
+
+/* A code label (local_snapshot_fresh) wraps at its underscores instead of clipping on a tablet. */
+.hd-collector dt code { overflow-wrap: anywhere; }
+.hd-collector dt:has(> code) { white-space: normal; }

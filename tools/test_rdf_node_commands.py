@@ -37,7 +37,9 @@ from config_command_tracker import (  # noqa: E402
     MAX_TRACKED_COMMANDS,
     NO_ACK_GRACE_MS,
     SETTINGS_REPORT_WAIT_MS,
+    RESTART_FINAL_ACK_WAIT_MS,
     ConfigCommandTracker,
+    public_ack,
 )
 from rdf_node_mqtt_v2 import ACK_FINAL_STATUSES, RdfNodeV2Telemetry  # noqa: E402
 
@@ -315,6 +317,31 @@ class FakeObservingMonitor:
 
 
 class TrackerTests(unittest.TestCase):
+    def test_the_1_7_stages_carry_their_method_and_reason(self) -> None:
+        # The ACKs edge 1.7.0 sent for 105.9 -> 103.1 MHz over LoRa on 2 November.
+        stages = [
+            ("VERIFYING", {"method": "LIVE", "persisted": True}, ("LIVE", None, None)),
+            ("APPLYING", {"method": "RESTART", "reason": "LIVE_FAILED:ENGINE_OVERRODE:gain_db",
+                          "changes": {"center_frequency_hz": 103_100_000}},
+             ("RESTART", "LIVE_FAILED:ENGINE_OVERRODE:gain_db", None)),
+            ("APPLIED", {"method": "RESTART", "reason": "LIVE_FAILED:ENGINE_OVERRODE:gain_db", "persisted": True,
+                         "revision": 298, "proof": {"daq": "FRESH_HEALTHY_AFTER_RESTART", "settings": "INTACT_AFTER_START"}},
+             ("RESTART", "LIVE_FAILED:ENGINE_OVERRODE:gain_db", None)),
+            ("PERSISTED_UNVERIFIED", {"method": "LIVE", "persisted": True, "revision": 9,
+                                      "reason": "NATIVE_RUNTIME_EVIDENCE_INCOMPLETE",
+                                      "live_failure": "DAQ_NOT_HEALTHY_AFTER_RETUNE"},
+             ("LIVE", "NATIVE_RUNTIME_EVIDENCE_INCOMPLETE", "DAQ_NOT_HEALTHY_AFTER_RETUNE")),
+        ]
+        for status, result, (method, reason, live_failure) in stages:
+            with self.subTest(status=status):
+                shown = public_ack({"status": status, "t": 1, "rev": 298, "result": result, "received_at_ms": 2})
+                self.assertEqual((shown["method"], shown["reason"], shown["live_failure"]), (method, reason, live_failure))
+        applied = public_ack({"status": "APPLIED", "t": 1, "rev": 298, "result": stages[2][1], "received_at_ms": 2})
+        self.assertEqual(applied["proof"], {"daq": "FRESH_HEALTHY_AFTER_RESTART", "settings": "INTACT_AFTER_START"})
+        # The changes of an APPLYING ACK and anything unexpected stay out.
+        self.assertNotIn("changes", public_ack({"status": "APPLYING", "result": stages[1][1]}))
+        self.assertIsNone(public_ack({"status": "APPLIED", "result": {"method": "X" * 17}})["method"])
+
     def setUp(self) -> None:
         self.monitor = FakeObservingMonitor()
         self.clock = [STATE["t"]]
@@ -355,7 +382,7 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual(done["ack"], {
             "status": "APPLIED", "final": True, "error": None, "reason": None, "revision": 2,
             "proof": {"center_frequency_hz": "FRESH_DAQ_RF_CENTER", "vfo0_frequency_hz": "FRESH_DOA_FREQUENCY"},
-            "persisted": True, "t": json.loads(applied["payload"])["t"], "received_at_ms": self.monitor.clock,
+            "persisted": True, "method": None, "live_failure": None, "t": json.loads(applied["payload"])["t"], "received_at_ms": self.monitor.clock,
         })
         self.assertIsNone(self.tracker.in_flight(self.monitor))
 
@@ -413,6 +440,23 @@ class TrackerTests(unittest.TestCase):
         self.clock[0] += 1
         lost = self.status(command["id"])
         self.assertEqual((lost["state"], lost["final"], lost["ack"]["status"]), ("no_final_ack", True, "ACCEPTED"))
+
+    def test_a_1_7_restart_gets_its_longer_wait(self) -> None:
+        # Once the edge names a live retune or a restart, the start of the SDR
+        # engine may take its start timeout (180 s by default) before the final ACK.
+        command = self.send("bandwidth-squelch")
+        accepted, _final = CASES["bandwidth-squelch"]["edge"]["acks"]
+        self.monitor.deliver("ack/config", accepted["payload"])
+        stage = dict(json.loads(accepted["payload"]), status="APPLYING",
+                     result={"method": "RESTART", "reason": "GAIN_CHANGE", "changes": {}})
+        self.monitor.deliver("ack/config", json.dumps(stage))
+        self.clock[0] = command["issued_ms"] + FINAL_ACK_WAIT_MS + 1
+        waiting = self.status(command["id"])
+        self.assertEqual((waiting["state"], waiting["ack"]["method"]), ("acknowledged", "RESTART"))
+        self.clock[0] = command["issued_ms"] + RESTART_FINAL_ACK_WAIT_MS
+        self.assertEqual(self.status(command["id"])["state"], "acknowledged")
+        self.clock[0] += 1
+        self.assertEqual(self.status(command["id"])["state"], "no_final_ack")
 
     def test_config_get_waits_for_its_settings_report(self) -> None:
         command = self.send("config-get")

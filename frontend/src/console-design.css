@@ -201,6 +201,13 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   .telemetry-strip.has-lora { grid-template-columns: repeat(7, minmax(0, 1fr)); }
   .telemetry-strip.has-source.has-lora { grid-template-columns: repeat(8, minmax(0, 1fr)); }
   .telemetry-item { min-width: 0; padding: 4px 8px; }
+  /* Eight chips in one row clip their values (UNAVAILABLE) and the Telemetry LoRa
+     label on a portrait tablet: two rows of four there. */
+  @media (min-width: 601px) and (max-width: 900px) {
+    .telemetry-strip.has-source.has-lora { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .telemetry-strip.has-source.has-lora .telemetry-item:nth-child(5) { border-left: 0; }
+    .telemetry-strip.has-source.has-lora .telemetry-item:nth-child(n+5) { border-top: 1px solid var(--line-soft); }
+  }
   .telemetry-value { overflow: hidden; text-overflow: ellipsis; }
   .topbar-toolbar { grid-area: toolbar; }
   /* Three rows here (tools, status chips, panel toggles) would cover a quarter

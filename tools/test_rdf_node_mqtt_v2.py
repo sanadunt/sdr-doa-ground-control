@@ -355,6 +355,96 @@ class NewerEdgeCompatTests(unittest.TestCase):
         self.assertEqual(report["safe_settings"]["center_frequency_hz"], 433_920_000)
 
 
+COMPAT_17 = json.loads((FIXTURES / "compat.d46e648.json").read_text(encoding="utf-8"))
+
+
+class Edge17Tests(unittest.TestCase):
+    """Contract 1.7 (edge d46e648, RDF Node 1.7.0): state.rf, detail.ovr and the config.patch method."""
+
+    RF = {"f": 103_100_000, "vfo": 103_100_000, "g": 12.5, "bw": 12_500, "sq": -100}
+
+    def test_a_session_of_the_1_7_edge_is_accepted_with_rf_and_ovr(self) -> None:
+        self.assertEqual(COMPAT_17["edge_commit"], "d46e648")
+        self.assertIn({"file": "compat.d46e648.json", "kind": "compat", "edge_commit": "d46e648",
+                       "edge_version": COMPAT_17["edge_version"]}, MANIFEST["sets"])
+        at = COMPAT_17["generated_at_ms"]
+        store = RdfNodeV2Telemetry(NODE)
+        for message in COMPAT_17["messages"]:
+            body = json.loads(message["payload"])
+            if message["suffix"] == "ack/config":
+                store.expect_settings_report(body["id"], at)
+            store.ingest(f"sdr/v2/{NODE}/{message['suffix']}", message["payload"].encode("utf-8"), qos=message["qos"],
+                         retained=message["retain"], received_at_ms=at, message_expiry_s=message["expiry_s"])
+        snapshot = store.snapshot(at)
+        self.assertEqual((snapshot["invalid"], snapshot["valid"]), (0, snapshot["received"]))
+        state = json.loads(COMPAT_17["messages"][0]["payload"])
+        self.assertEqual(state["contract"], "1.7")
+        view = node(store, at)
+        self.assertEqual(view["session"]["rf"], state["rf"])
+        self.assertIn("ovr", view["detail"])
+        self.assertIsNone(view["detail"]["ovr"])
+        # Shown as the edge sent it in Message Monitor's topic table.
+        self.assertEqual(snapshot["topics"]["state"]["payload"]["rf"], state["rf"])
+
+    def test_rf_is_kept_and_follows_every_state(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        entry = put(store, "state", obj("state.json", rf=self.RF))
+        self.assertEqual(entry["status"], "CONTEXT")
+        self.assertEqual(node(store)["session"]["rf"], self.RF)
+        moved = dict(self.RF, f=105_900_000, vfo=105_900_000)
+        put(store, "state", obj("state.json", cfg=8, rf=moved))
+        self.assertEqual((node(store)["session"]["cfg"], node(store)["session"]["rf"]), (8, moved))
+        put(store, "state", obj("state.json", cfg=9))
+        self.assertNotIn("rf", node(store)["session"])
+
+    def test_rf_notes_name_the_rf_field(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        entry = put(store, "state", obj("state.json", rf={"f": 103100000.0, "vfo": "103100000", "g": "12.5", "bw": "x"}))
+        self.assertEqual(node(store)["session"]["rf"], {"f": 103_100_000, "vfo": 103_100_000, "g": 12.5})
+        self.assertEqual(entry["payload"]["notes"], ["COERCED:rf.f", "COERCED:rf.vfo", "COERCED:rf.g", "INVALID_FIELD:rf.bw"])
+
+    def test_a_bad_rf_field_is_dropped_never_the_state(self) -> None:
+        store = RdfNodeV2Telemetry(NODE)
+        entry = put(store, "state", obj("state.json", rf={"f": "fast", "vfo": 0, "g": 12.5, "bw": 12.5, "sq": -100}))
+        self.assertEqual(entry["status"], "CONTEXT")
+        self.assertEqual(node(store)["session"]["rf"], {"g": 12.5, "sq": -100})
+        self.assertTrue({"INVALID_FIELD:rf.f", "INVALID_FIELD:rf.vfo", "INVALID_FIELD:rf.bw"} <= set(entry["payload"]["notes"]))
+        for bad in ("103.1 MHz", [1, 2], None, {"f": None}):
+            with self.subTest(rf=bad):
+                store = RdfNodeV2Telemetry(NODE)
+                entry = put(store, "state", obj("state.json", rf=bad))
+                self.assertEqual(entry["status"], "CONTEXT")
+                self.assertNotIn("rf", node(store)["session"])
+                self.assertTrue(store.session_view(NOW)["known"])
+
+    def test_detail_ovr_is_kept_and_a_bad_one_dropped(self) -> None:
+        for ovr, kept in ((True, True), (False, False), (None, None), (1, True)):
+            with self.subTest(ovr=ovr):
+                store = session_store()
+                entry = put(store, "telemetry/health/detail", obj("telemetry-health-detail.json", t=NOW, ovr=ovr))
+                self.assertEqual(entry["status"], "FRESH")
+                self.assertIs(node(store)["detail"]["ovr"], kept)
+        store = session_store()
+        entry = put(store, "telemetry/health/detail", obj("telemetry-health-detail.json", t=NOW, ovr="sometimes"))
+        self.assertEqual(entry["status"], "FRESH")
+        self.assertNotIn("ovr", node(store)["detail"])
+        self.assertIn("INVALID_FIELD:ovr", entry["payload"]["notes"])
+        # An older edge sends none.
+        store = session_store()
+        put(store, "telemetry/health/detail", obj("telemetry-health-detail.json", t=NOW))
+        self.assertNotIn("ovr", node(store)["detail"])
+
+    def test_the_config_patch_method_and_live_failure_are_kept(self) -> None:
+        store = session_store()
+        result = {"method": "RESTART", "reason": "LIVE_FAILED:ENGINE_OVERRODE:gain_db", "persisted": True, "revision": 8,
+                  "live_failure": "ENGINE_OVERRODE:gain_db",
+                  "proof": {"daq": "FRESH_HEALTHY_AFTER_RESTART", "settings": "INTACT_AFTER_START"}}
+        put(store, "ack/config", obj("ack-config.config-patch-rejected.json", id="gc-0123456789abcdef01234567",
+                                     status="APPLIED", rev=8, result=result))
+        ack = store.ack("gc-0123456789abcdef01234567")
+        self.assertEqual(ack["result"], result)
+
+
 class SessionTests(unittest.TestCase):
     def test_telemetry_before_state_is_ignored(self) -> None:
         store = RdfNodeV2Telemetry(NODE)
