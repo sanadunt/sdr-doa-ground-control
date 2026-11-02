@@ -358,13 +358,15 @@ ADMIN_SESSION_TTL_SECONDS = 30 * 60
 # failed-login throttle; console-config and mqtt/connect replace the MQTT
 # monitor, which is also the config-patch publish channel; lan-access opens a
 # listener on the LAN; preferences would otherwise let any page rewrite the
-# operator's saved view.
+# operator's saved view, and position-estimate/reset would throw away the
+# bearings the estimate was built from.
 SAME_ORIGIN_POST_PATHS = frozenset({
     "/api/admin/login",
     "/api/admin/logout",
     "/api/console-config",
     "/api/lan-access",
     "/api/mqtt/connect",
+    "/api/position-estimate/reset",
     "/api/preferences",
 })
 # Failed logins are counted for the whole server: after this many inside the
@@ -3808,6 +3810,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/preferences":
             self._write_preferences()
+            return
+        if parsed.path == "/api/position-estimate/reset":
+            # Local to this console: nothing is sent to the node.
+            reset = getattr(self.console_server.mqtt_monitor, "reset_position_estimate", None)
+            if reset is None:
+                self._send_json({"ok": False, "error": "MQTT monitor is not running", "code": "MQTT_MONITOR_DISABLED"},
+                                HTTPStatus.CONFLICT)
+                return
+            self._send_json({"ok": True, "position_estimate": reset()})
             return
         if parsed.path == "/api/console-config":
             try:

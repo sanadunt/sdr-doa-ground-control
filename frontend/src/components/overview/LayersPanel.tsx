@@ -9,7 +9,7 @@ import { OverlayControls } from '../OverlayControls';
 import { Icon } from '../ui';
 import { BasemapSelect } from './BasemapPicker';
 
-type LayerKey = 'heatmapVisible' | 'lobeVisible' | 'bearingVisible' | 'edgesVisible' | 'ringsVisible' | 'guidesVisible' | 'labelsVisible' | 'headingVisible';
+type LayerKey = 'heatmapVisible' | 'lobeVisible' | 'bearingVisible' | 'edgesVisible' | 'ringsVisible' | 'guidesVisible' | 'labelsVisible' | 'headingVisible' | 'estimateVisible';
 
 const LAYERS: ReadonlyArray<[LayerKey, MessageKey]> = [
   ['heatmapVisible', 'layers.beam'],
@@ -20,9 +20,10 @@ const LAYERS: ReadonlyArray<[LayerKey, MessageKey]> = [
   ['guidesVisible', 'layers.guides'],
   ['labelsVisible', 'layers.labels'],
   ['headingVisible', 'layers.heading'],
+  ['estimateVisible', 'layers.estimate'],
 ];
 
-/** Map layers panel: the basemap, the eight layer switches, overlay opacity and the advanced overlay settings. */
+/** Map layers panel: the basemap, the nine layer switches, overlay opacity and the advanced overlay settings. */
 export function LayersPanel({
   settings,
   scale,

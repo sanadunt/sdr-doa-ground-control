@@ -189,6 +189,22 @@ Tambahan, semuanya opsional; edge yang lebih lama tetap dibaca seperti sebelumny
   - Mengirim level saat squelch otomatis mengubah mode ke Manual; hasilnya membawa `result.squelch_mode`.
 - **`state.rf.sqm`** adalah mode squelch. Saat squelch otomatis, `rf.sq` tidak dikirim, karena level di file tidak menentukan deteksi. Dashboard lalu menampilkan AUTO atau AUTO CHANNEL, bukan level.
 
+## 7e. Kontrak 1.10 (RDF Node 1.10.0)
+
+Tambahan, semuanya opsional; edge yang lebih lama tetap dibaca seperti sebelumnya.
+
+- **Stamp navigasi di setiap `telemetry/doa`** (hanya bila kompas atau GPS dikonfigurasi di edge):
+  - `h`: arah referensi array (DoA 0°) saat sampel dikirim, derajat dari utara searah jarum jam; `null` bila tidak ada sumber heading.
+  - `hsrc`: `C` kompas (+`nav.compass.offset_deg`), `G` course GPS saat bergerak, `H` course GPS yang ditahan setelah berhenti.
+  - `b`: bearing ke pemancar dari utara. Dengan `capabilities.angle` `theta_mirror`, `a` adalah theta_0 (berlawanan jarum jam dari referensi array), jadi `b` = (`h` − `a`) mod 360. Hanya pada `ok=1` dengan `h`.
+  - `lat`, `lon`: posisi saat sampel dikirim; hanya dengan fix GPS dan `nav.gps.publish_position`.
+  - Field yang rusak dibuang dengan catatan; sampelnya tetap. `b` tanpa `h` dan posisi tanpa pasangannya juga dibuang.
+- **`telemetry/angular`** membawa `heading_deg` dan `heading_source` (heading sampel DoA terakhir). Console belum memakainya.
+- **Console:**
+  - Kandidat MQTT membawa `array_heading_deg`, `heading_source` (`COMPASS`, `GPS`, `HOLD`), `bearing_deg`, `sample_latitude`, `sample_longitude`.
+  - Selama `array_heading_deg` ada, offset kompas peta dan polar adalah heading itu (`NODE_HEADING`, kecuali pilihan MANUAL), sehingga bearing di peta sama dengan `b` edge.
+  - Setiap DoA LIVE dengan `b`, `lat`, `lon` masuk ke estimasi posisi pemancar (`position_estimate`, lihat `CLAUDE.md`).
+
 ## 8. Dashboard: MQTT dulu, Data Out cadangan (#8)
 
 Kode: `tools/telemetry_source.py` (keputusan sumber dan jawaban dari MQTT), `DataOutReader.read_reason()` di `tools/data_out_reader.py` (kapan Data Out dibaca), `collect_light()` di `tools/sdr_doa_collector.py` (pembacaan ringan), `frontend/src/lib/telemetrySource.ts` (badge dan view DoA di browser). Contoh jawaban: `tools/fixtures/telemetry-source/`.

@@ -594,7 +594,39 @@ def _validate_doa(data: Dict[str, Any]) -> Dict[str, Any]:
             _note("UNEXPECTED_VALUE", "angle_reference")
         value.update(trust="UNVERIFIED", angle_reference="RAW",
                      validation_reasons=_reasons(data.get("validation_reasons"), "validation_reasons", 32))
+    value.update(_doa_nav(data))
     return value
+
+
+def _doa_nav(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Contract 1.10: the array heading, bearing and position stamped on a DoA sample, only those present.
+
+    ``h`` is where the array reference pointed (null without a heading source),
+    ``hsrc`` where that came from (C compass, G GPS course, H held course),
+    ``b`` the bearing to the transmitter from north and ``lat``/``lon`` where
+    the sample was taken. A bad one is dropped (noted); the sample stays.
+    """
+    readers = (
+        ("h", lambda: _number(data, "h", 0, 360, nullable=True)),
+        ("hsrc", lambda: None if data.get("hsrc") is None else _choice(data, "hsrc", frozenset({"C", "G", "H"}))),
+        ("b", lambda: _number(data, "b", 0, 360)),
+        ("lat", lambda: _number(data, "lat", -90, 90)),
+        ("lon", lambda: _number(data, "lon", -180, 180)),
+    )
+    nav: Dict[str, Any] = {}
+    for key, read in readers:
+        present, value = _optional(data, key, read)
+        if present:
+            nav[key] = value
+    if ("lat" in nav) != ("lon" in nav):
+        _note("INVALID_FIELD", "lat" if "lat" not in nav else "lon")
+        nav.pop("lat", None)
+        nav.pop("lon", None)
+    if "b" in nav and nav.get("h") is None:
+        # A bearing needs the heading it was made with.
+        _note("INVALID_FIELD", "b")
+        nav.pop("b")
+    return nav
 
 
 def _reasons(value: Any, key: str, limit: int) -> List[str]:
@@ -864,6 +896,9 @@ class RdfNodeV2Telemetry:
         # Called with (suffix, record) for every ACK and settings report this
         # store accepts; the monitor uses it to follow the commands it sent.
         self.on_accepted: Optional[Callable[[str, Dict[str, Any]], None]] = None
+        # Called with the payload of every LIVE DoA accepted without a receipt
+        # problem; the monitor feeds the position estimate from it.
+        self.on_live_doa: Optional[Callable[[Dict[str, Any]], None]] = None
         self._reset_session()
 
     @staticmethod
@@ -1174,6 +1209,8 @@ class RdfNodeV2Telemetry:
             self._mark(suffix, entry, "INCONSISTENT", value, problems[0])
         else:
             self._mark(suffix, entry, "LIVE" if live else "UNVERIFIED", value)
+            if live and self.on_live_doa is not None:
+                self.on_live_doa(copy.deepcopy(value))
 
     def _on_diagnostic_doa(self, suffix: str, value: Dict[str, Any], entry: Dict[str, Any], at: int) -> None:
         if not self._bound(suffix, value, entry) or not self._advanced("diagnostic_doa", suffix, value, entry):

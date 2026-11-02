@@ -128,6 +128,18 @@
 .ov-hud-sample.is-provisional { opacity: .72; }
 .ov-hud-sample.is-provisional b, .ov-hud-sample.is-setting b { color: var(--subtle); }
 .ov-hud-held { margin: 0; color: var(--amber); font-size: 12px; line-height: 1.35; }
+/* Transmitter position estimate, under the HUD. */
+/* Only a prediction: small, quiet text that never competes with the bearing above it. */
+.ov-estimate { display: flex; flex: none; flex-direction: column; gap: 2px; padding: 8px 12px; font-size: 11px; }
+.ov-estimate .ov-tag { font-size: 10px; }
+.ov-estimate-distance { color: var(--subtle); font-family: var(--mono); font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.ov-estimate .ov-hud-offset, .ov-estimate .ov-hud-held { font-size: 11px; }
+.ov-estimate .ov-hud-offset b { color: var(--subtle); font-size: 11px; font-weight: 500; }
+.ov-estimate.is-pending .ov-hud-held { color: var(--subtle); }
+.ov-estimate-note { margin: 0; color: var(--muted); font-size: 10.5px; line-height: 1.35; }
+.ov-estimate-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 2px; }
+.ov-estimate-actions .ov-button { height: 28px; padding: 0 8px; font-size: 11.5px; }
+.ov-estimate-actions .ov-button:disabled { cursor: default; opacity: .55; }
 .ov-layers { display: flex; flex: 0 1 auto; flex-direction: column; min-height: 0; }
 .ov-layers-body { min-height: 0; overflow-y: auto; padding: 4px 6px 10px; overscroll-behavior: contain; }
 .ov-layer-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 4px; }

@@ -37,6 +37,7 @@ import { numberOrNull, primaryCandidate } from '../lib/telemetry';
 import { doaSample, isMqttSnapshot } from '../lib/telemetrySource';
 import { overviewDoaStatus } from '../lib/doaStatus';
 import { headingLabel, headingLabelPosition, headingLineFeatures, headingPopupText, rdfHeading, type RdfHeading } from '../lib/rdfHeading';
+import { NO_ESTIMATE_FEATURES, positionEstimateFeatures, positionEstimateLabel, type PositionEstimate } from '../lib/positionEstimate';
 import { useI18n } from '../lib/i18n';
 import type { MessageKey, Translate } from '../lib/i18n';
 import { coordinateSourceKey } from './DoaReadout';
@@ -71,7 +72,7 @@ const BASEMAP_CHECK_MS = 20_000;
 const BASEMAP_RETRY_MS = 60_000;
 // The console's tile route tries each upstream's hosts; the browser has one URL per source.
 const BASEMAP_HOSTS = 1;
-const SOURCE_IDS = ['doa-station', 'doa-beam', 'doa-heat', 'doa-rings', 'doa-guides', 'doa-lobe', 'doa-edges', 'doa-bearing', 'doa-provisional', 'rdf-heading', 'ground-link'] as const;
+const SOURCE_IDS = ['doa-station', 'doa-beam', 'doa-heat', 'doa-rings', 'doa-guides', 'doa-lobe', 'doa-edges', 'doa-bearing', 'doa-provisional', 'rdf-heading', 'ground-link', 'estimate-heat', 'estimate-lines', 'estimate-point'] as const;
 type SourceId = typeof SOURCE_IDS[number];
 const SOURCE_ID_SET: ReadonlySet<string> = new Set(SOURCE_IDS);
 const EMPTY: OverlayFeatureCollection = { type: 'FeatureCollection', features: [] };
@@ -88,6 +89,11 @@ function groundLinkColor(darkBackground: boolean): ExpressionSpecification {
 // the ground link; slate and finer dashes while the heading is held (STALE).
 const HEADING_LIVE = { dark: '#c2a6ff', light: '#5b34c4' } as const;
 const HEADING_HELD = { dark: '#9aa6b2', light: '#46525e' } as const;
+// The transmitter position estimate: cyan, apart from the DoA's amber and red.
+const ESTIMATE_COLOR = { dark: '#5fd4ff', light: '#0b6f99' } as const;
+function estimateColor(darkBackground: boolean): string {
+  return darkBackground ? ESTIMATE_COLOR.dark : ESTIMATE_COLOR.light;
+}
 function headingColors(darkBackground: boolean): { live: string; held: string } {
   return { live: darkBackground ? HEADING_LIVE.dark : HEADING_LIVE.light, held: darkBackground ? HEADING_HELD.dark : HEADING_HELD.light };
 }
@@ -256,9 +262,11 @@ export interface TacticalMapProps {
   onBasemapSelect?: (id: BasemapId) => void;
   /** The groundstation's own GPS fix; null without one. Kept stable across equal values by the caller. */
   ground?: GeoOrigin | null;
+  /** Where the moving RDF-SDR's bearings cross (lib/positionEstimate.ts); null without one. Stable across equal values. */
+  estimate?: PositionEstimate | null;
 }
 
-function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, provisionalTheta = null, orientationCause, onOpenCompassSettings, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect, ground = null }: TacticalMapProps): JSX.Element {
+function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, provisionalTheta = null, orientationCause, onOpenCompassSettings, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect, ground = null, estimate = null }: TacticalMapProps): JSX.Element {
   const { t, lang } = useI18n();
   const hostRef = useRef<HTMLDivElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -311,8 +319,10 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const bearing = theta === null ? null : geographicBearingForBin(theta, offset);
   const provisionalBearing = !doaReady && provisionalTheta !== null && Number.isFinite(provisionalTheta) ? geographicBearingForBin(provisionalTheta, offset) : null;
   // The RDF-SDR's own compass heading (its direction of travel), drawn apart
-  // from the bearing; the bearing never uses it. Kept as primitives so a new
-  // snapshot with the same heading changes nothing on the map.
+  // from the bearing. Since contract 1.10 the bearing is turned with the array
+  // heading the DoA carries (compassOffset, lib/polar.ts NODE_HEADING), not with
+  // this line. Kept as primitives so a new snapshot with the same heading
+  // changes nothing on the map.
   const headingNow = rdfHeading(snapshot, fresh);
   const headingDeg = headingNow?.headingDeg ?? null;
   const headingState = headingNow?.state ?? null;
@@ -329,6 +339,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const geometry = useMemo<OverlayGeometry>(() => {
     const data: Record<SourceId, OverlayFeatureCollection> = {
       'doa-station': pointFeature(stationCoordinate), 'doa-beam': EMPTY, 'doa-heat': EMPTY, 'doa-rings': EMPTY, 'doa-guides': EMPTY, 'doa-lobe': EMPTY, 'doa-edges': EMPTY, 'doa-bearing': EMPTY, 'doa-provisional': EMPTY, 'rdf-heading': EMPTY, 'ground-link': EMPTY,
+      'estimate-heat': EMPTY, 'estimate-lines': EMPTY, 'estimate-point': EMPTY,
     };
     if (!stationCoordinate) return { data, rings: [], halfPower: null };
     // Rings and guides are a ground-distance and orientation reference; they do not depend on DoA data.
@@ -359,7 +370,13 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const headingLine = useMemo<OverlayFeatureCollection>(() => (stationCoordinate && g.headingVisible ? headingLineFeatures(stationCoordinate, heading, g.maxDistanceM) : EMPTY), [stationCoordinate, heading, g.headingVisible, g.maxDistanceM]);
   const headingDrawn = headingLine.features.length > 0;
   const headingHeld = heading !== null && heading.state !== 'OK';
-  const sourceData = useMemo<Record<SourceId, OverlayFeatureCollection>>(() => ({ ...geometry.data, 'rdf-heading': headingLine, 'ground-link': link?.features ?? EMPTY }), [geometry, headingLine, link]);
+  const estimateShapes = useMemo(() => (g.estimateVisible ? positionEstimateFeatures(estimate, stationCoordinate) : NO_ESTIMATE_FEATURES), [estimate, stationCoordinate, g.estimateVisible]);
+  const estimatePoint = g.estimateVisible && estimate?.state === 'ESTIMATE' && estimate.latitude !== null && estimate.longitude !== null
+    ? [estimate.longitude, estimate.latitude] as [number, number] : null;
+  const sourceData = useMemo<Record<SourceId, OverlayFeatureCollection>>(() => ({
+    ...geometry.data, 'rdf-heading': headingLine, 'ground-link': link?.features ?? EMPTY,
+    'estimate-heat': estimateShapes.heat, 'estimate-lines': estimateShapes.lines, 'estimate-point': estimateShapes.point,
+  }), [geometry, headingLine, link, estimateShapes]);
 
   // Frame below the notices (basemap unavailable, overlay held...) so they never
   // cover the north label, and above the map controls so they never cover the south one.
@@ -429,6 +446,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
           ...contents.flatMap((content) => content.layers),
           { id: 'doa-beam', type: 'fill', source: 'doa-beam', paint: { 'fill-antialias': false, 'fill-color': beamColorExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatPalette), 'fill-opacity': beamOpacityExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatOpacity, DEFAULT_DOA_OVERLAY_SETTINGS.heatIntensity) } },
           { id: 'doa-heat', type: 'heatmap', source: 'doa-heat', maxzoom: 20, paint: { 'heatmap-weight': ['coalesce', ['get', 'densityWeight'], ['get', 'weight'], 0], 'heatmap-intensity': 1, 'heatmap-radius': heatmapRadiusExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatBlur), 'heatmap-opacity': .72, 'heatmap-color': heatmapColorExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatPalette) } },
+          // Where the bearings of many places agree: cyan cells, fainter while the rays do not cross yet.
+          { id: 'estimate-heat', type: 'fill', source: 'estimate-heat', paint: { 'fill-antialias': false, 'fill-color': estimateColor(consoleTheme() === 'dark'), 'fill-opacity': ['*', ['case', ['==', ['get', 'ready'], true], 1, .5], ['interpolate', ['linear'], ['get', 'share'], .2, .08, 1, .5]] } },
           { id: 'doa-rings', type: 'line', source: 'doa-rings', paint: { 'line-color': paint.rings, 'line-opacity': .55, 'line-width': 1.2, 'line-dasharray': [4, 3] } },
           { id: 'doa-guides', type: 'line', source: 'doa-guides', paint: { 'line-color': paint.guides, 'line-opacity': .4, 'line-width': 1, 'line-dasharray': [2, 3] } },
           { id: 'doa-lobe-fill', type: 'fill', source: 'doa-lobe', paint: { 'fill-color': '#dca861', 'fill-opacity': .18 } },
@@ -443,6 +462,9 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
           { id: 'doa-provisional', type: 'line', source: 'doa-provisional', paint: { 'line-color': '#8d99a6', 'line-opacity': .9, 'line-width': 3, 'line-dasharray': [2, 1.5] } },
           // Groundstation to RDF-SDR: dots (zero-length dashes with round caps).
           { id: 'ground-link', type: 'line', source: 'ground-link', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': groundLinkColor(consoleTheme() === 'dark'), 'line-opacity': ['case', ['==', ['get', 'live'], true], .95, .9], 'line-width': 4, 'line-dasharray': [0, 2] } },
+          { id: 'estimate-lines', type: 'line', source: 'estimate-lines', layout: { 'line-cap': 'round' }, paint: { 'line-color': estimateColor(consoleTheme() === 'dark'), 'line-opacity': .7, 'line-width': 1.2, 'line-dasharray': [3, 2] } },
+          { id: 'estimate-point-halo', type: 'circle', source: 'estimate-point', paint: { 'circle-radius': 8, 'circle-color': '#182027', 'circle-opacity': .75 } },
+          { id: 'estimate-point', type: 'circle', source: 'estimate-point', paint: { 'circle-radius': 4.5, 'circle-color': estimateColor(consoleTheme() === 'dark'), 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1.5 } },
           { id: 'doa-station-halo', type: 'circle', source: 'doa-station', paint: { 'circle-radius': 12, 'circle-color': '#182027', 'circle-opacity': .8 } },
           { id: 'doa-station', type: 'circle', source: 'doa-station', paint: { 'circle-radius': 6, 'circle-color': '#ebbc70', 'circle-stroke-color': '#15181b', 'circle-stroke-width': 2 } },
         ] },
@@ -655,6 +677,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     const headingPaint = headingColors(tilesLoaded ? tone === 'dark' : theme === 'dark');
     map.setPaintProperty('rdf-heading', 'line-color', headingPaint.live);
     map.setPaintProperty('rdf-heading-held', 'line-color', headingPaint.held);
+    const estimatePaint = estimateColor(tilesLoaded ? tone === 'dark' : theme === 'dark');
+    for (const [layer, property] of [['estimate-heat', 'fill-color'], ['estimate-lines', 'line-color'], ['estimate-point', 'circle-color']] as const) map.setPaintProperty(layer, property, estimatePaint);
   }, [styleReady, theme, tilesLoaded, tone]);
 
   // Resizes from the window, the dashboard layout or the notices keep the
@@ -851,8 +875,9 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       add(headingLabelPosition(stationCoordinate, heading.headingDeg, g.maxDistanceM, near), headingHeld ? 'doa-heading-label is-held' : 'doa-heading-label', headingLabel(heading, t));
     }
     if (link) add(link.label, link.live ? 'ov-ground-label' : 'ov-ground-label is-reference', groundLinkLabel(link, t));
+    if (estimatePoint && estimate) add(estimatePoint, 'doa-estimate-label', positionEstimateLabel(estimate, t));
     return () => { for (const marker of markers) marker.remove(); };
-  }, [styleReady, stationCoordinate, geometry.rings, bearing, bearingDrawn, provisionalBearing, provisionalDrawn, frequencyText, heading, headingDrawn, headingHeld, link, g.ringsVisible, g.guidesVisible, g.labelsVisible, g.maxDistanceM, t]);
+  }, [styleReady, stationCoordinate, geometry.rings, bearing, bearingDrawn, provisionalBearing, provisionalDrawn, frequencyText, heading, headingDrawn, headingHeld, link, estimate, estimatePoint?.[0], estimatePoint?.[1], g.ringsVisible, g.guidesVisible, g.labelsVisible, g.maxDistanceM, t]);
 
   // Hover (or tap) readout: geographic bearing, its theta_0 bin and shifted dB value, and ground distance from the station.
   useEffect(() => {
@@ -954,6 +979,12 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       // The station and groundstation markers and their line stay opaque, as on the map.
       context.globalAlpha = 1;
       if (link) strokeLines(link.features, link.live ? (darkBackground ? GROUND_LINK_LIVE.dark : GROUND_LINK_LIVE.light) : (darkBackground ? GROUND_LINK_REFERENCE.dark : GROUND_LINK_REFERENCE.light), 3, [2, 5]);
+      if (estimatePoint) {
+        strokeLines(estimateShapes.lines, estimateColor(darkBackground), 2, [6, 4]);
+        const point = project(estimatePoint);
+        context.save(); context.fillStyle = estimateColor(darkBackground); context.strokeStyle = '#ffffff'; context.lineWidth = 2;
+        context.beginPath(); context.arc(point.x, point.y, 7, 0, Math.PI * 2); context.fill(); context.stroke(); context.restore();
+      }
       if (ground) {
         const point = project([ground.longitude, ground.latitude]);
         context.save(); context.fillStyle = darkBackground ? GROUND_LINK_LIVE.dark : GROUND_LINK_LIVE.light; context.strokeStyle = '#172027'; context.lineWidth = 2;
@@ -993,6 +1024,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
           label(headingLabelPosition(stationCoordinate, heading.headingDeg, settings.maxDistanceM, near), headingLabel(heading, t), headingHeld ? '#5b6670' : HEADING_LIVE.light);
         }
         if (link) label(link.label, groundLinkLabel(link, t), link.live ? '#11171e' : '#5b6670');
+        if (estimatePoint && estimate) label([estimatePoint[0], estimatePoint[1]], positionEstimateLabel(estimate, t), ESTIMATE_COLOR.light);
         context.restore();
       }
     };
@@ -1009,7 +1041,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       map?.off('resize', schedule);
       canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
     };
-  }, [fallbackActive, mapState, theme, tilesLoaded, tone, styleReady, stationCoordinate, geometry, bearing, provisionalBearing, frequencyText, heading, headingLine, headingHeld, ground, link, settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.edgesVisible, settings.bearingVisible, settings.headingVisible, settings.labelsVisible, settings.overlayOpacity, settings.lobeOpacity, settings.maxDistanceM, settings.lobeDistanceM, t]);
+  }, [fallbackActive, mapState, theme, tilesLoaded, tone, styleReady, stationCoordinate, geometry, bearing, provisionalBearing, frequencyText, heading, headingLine, headingHeld, ground, link, estimate, estimateShapes, estimatePoint?.[0], estimatePoint?.[1], settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.edgesVisible, settings.bearingVisible, settings.headingVisible, settings.labelsVisible, settings.overlayOpacity, settings.lobeOpacity, settings.maxDistanceM, settings.lobeDistanceM, t]);
 
   const reducedMotion = prefersReducedMotion;
   const resetView = () => {

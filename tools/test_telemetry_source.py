@@ -129,14 +129,14 @@ class Edge:
         return self.send("telemetry/health/detail", payload, at=at)
 
     def doa(self, theta: float = THETA, *, ok: int = 1, angle: str = "theta_mirror", f: int = FREQUENCY_HZ,
-            q: Optional[int] = None, at: Optional[int] = None) -> Dict[str, Any]:
+            q: Optional[int] = None, at: Optional[int] = None, stamp: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         raw = (360.0 - theta) % 360.0
         if ok == 1:
             payload = dict(fixture("telemetry-doa.ok1.json"), a=theta if angle == "theta_mirror" else raw)
         else:
             payload = dict(fixture("telemetry-doa.ok0.json"), a=raw)
         payload.update(sid=self.state["sid"], t=self.now_ms() if at is None else at, f=f, rev=self.state["cfg"],
-                       q=self.next_q("frame") if q is None else q)
+                       q=self.next_q("frame") if q is None else q, **(stamp or {}))
         return self.send("telemetry/doa", payload, at=at)
 
     def angular(self, theta: float = THETA, *, flags: int = 63, q: Optional[int] = None,
@@ -340,6 +340,35 @@ class NavTests(unittest.TestCase):
     def test_compass_only(self) -> None:
         nav = self.build({"hdg": None, "hs": "NO_REPLY"})["nav"]
         self.assertEqual((nav["compass_state"], nav["heading_deg"], nav["latitude"], nav["gps_state"]), ("NO_REPLY", None, None, None))
+
+
+class Edge110Tests(unittest.TestCase):
+    """Contract 1.10: the heading, bearing and position on each DoA, and the position estimate."""
+
+    META = {"interval_s": 30.0, "reason": None, "running": False, "error": None}
+
+    def test_doa_stamp_reaches_the_candidate(self) -> None:
+        edge = Edge(ManualMs(FIXED_NOW))
+        edge.hello(); edge.health()
+        edge.doa(stamp={"h": 84.3, "hsrc": "C", "b": 294.3, "lat": -6.92977, "lon": 107.71142})
+        edge.angular()
+        candidate = build(edge)["doa_candidates"]["mqtt"]
+        self.assertEqual((candidate["array_heading_deg"], candidate["heading_source"], candidate["bearing_deg"],
+                          candidate["sample_latitude"], candidate["sample_longitude"]),
+                         (84.3, "COMPASS", 294.3, -6.92977, 107.71142))
+
+    def test_an_older_edge_has_no_stamp_and_no_estimate(self) -> None:
+        built = build(Edge(ManualMs(FIXED_NOW)).live())
+        candidate = built["doa_candidates"]["mqtt"]
+        self.assertIsNone(candidate["bearing_deg"])
+        self.assertIsNone(candidate["array_heading_deg"])
+        self.assertIsNone(built["position_estimate"])
+
+    def test_the_estimate_passes_through(self) -> None:
+        edge = Edge(ManualMs(FIXED_NOW)).live()
+        view = dict(edge.view(), position_estimate={"state": "NEED_MOVEMENT", "samples": 3})
+        built = ts.mqtt_snapshot(view, None, base_url=BASE_URL, light_age_ms=None, light_meta=self.META)
+        self.assertEqual(built["position_estimate"], {"state": "NEED_MOVEMENT", "samples": 3})
 
 
 class Edge17Tests(unittest.TestCase):

@@ -230,6 +230,8 @@ export interface TelemetrySnapshot {
   nav?: SnapshotNav | null;
   /** MQTT answers only: null without state.rf (an edge before 1.7); absent from Data Out answers and older servers. */
   rf?: SnapshotRf | null;
+  /** MQTT answers only: the transmitter position estimate (lib/positionEstimate.ts); null while the monitor is off. */
+  position_estimate?: Record<string, unknown> | null;
   schema_version?: number;
   collector?: Record<string, unknown>;
   observed_at_ms?: number;

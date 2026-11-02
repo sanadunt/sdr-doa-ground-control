@@ -2,6 +2,19 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.10.0
+
+Rilis minor: tidak ada yang dihapus. Dengan RDF Node Edge 1.10 (kontrak 1.10), bearing di peta ikut heading RDF-SDR yang bergerak, dan groundstation memperkirakan posisi pemancar dari banyak bearing (keputusan pemilik 2026-11-02: prediksi di groundstation, Raspberry hanya mengirim data).
+
+- **Bearing ikut heading RDF-SDR.** Edge 1.10 mengirim heading array (`h`) di setiap DoA. Selama heading itu ada, peta dan polar memakainya sebagai offset kompas (sumber **heading RDF-SDR**), bukan offset tetap dari settings.json. Pilihan kompas MANUAL tetap diutamakan.
+- **Estimasi posisi pemancar.** Console menumpuk bearing dari tempat-tempat yang dilewati RDF-SDR ke grid 10 km (sel 100 m), seperti cara aplikasi KrakenSDR, dan menandai tempat bearing-bearing itu berpotongan.
+  - Status **PERLU BERGERAK** selama bearing belum datang dari minimal 3 titik yang terpisah 15° atau lebih; dari satu titik saja jarak tidak bisa diketahui.
+  - Status **ESTIMASI**: titik kecil, lingkaran radius putus-putus, garis dari RDF-SDR, dan label kecil berisi jarak dan arah.
+  - Kartu kecil di bawah HUD bearing berisi jarak, koordinat, jumlah bearing dan titik, serta tombol **Mulai ulang** (hanya di console groundstation, tidak di tampilan LAN).
+  - Sengaja ditampilkan kecil dan samar karena ini prediksi, bukan posisi terukur. Lapisan bisa dimatikan di panel Lapisan (**Estimasi posisi**).
+  - Estimasi dimulai ulang sendiri saat frekuensi berubah lebih dari 25 kHz.
+- **Rute baru `POST /api/position-estimate/reset`** (same-origin loopback). Tidak ada yang dikirim ke node.
+
 ## 3.9.0
 
 Rilis minor: tidak ada yang dihapus. Squelch VFO RDF-SDR (RDF Node Edge 1.9) kini bisa diatur dari Kontrol. Kanal `3` dan timer update memasangnya sendiri.

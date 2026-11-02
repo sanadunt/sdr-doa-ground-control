@@ -70,7 +70,8 @@ export type CompassSourceCode =
   | 'DATA_OUT_LOCAL_OFFSET'
   | 'DATA_OUT_UNAVAILABLE'
   | 'MANUAL'
-  | 'FALLBACK';
+  | 'FALLBACK'
+  | 'NODE_HEADING';
 
 export interface CompassSourceResolution extends CompassResolution {
   code: CompassSourceCode;
@@ -165,6 +166,23 @@ export function resolveCompassSource(
       };
     }
   }
+  // Contract 1.10: the array heading the edge stamped on the LIVE DoA. With it
+  // every theta_0 bin turns into a true bearing (360 - theta + heading), which
+  // is what a moving node needs; only a MANUAL choice stays above it.
+  const heading = nodeArrayHeading(snapshot);
+  if (heading !== null) {
+    const reported = dataOutCompassFromSnapshot(snapshot);
+    return {
+      settings: { figType: reported?.figType ?? previousSettings.figType, compassOffset: heading },
+      selectedSource: config.source,
+      effectiveSource: 'DATA_OUT',
+      label: 'RDF-SDR HEADING',
+      detail: 'Using the array heading the RDF-SDR sent with this DoA (compass or GPS course).',
+      code: 'NODE_HEADING',
+      offsetVerified: true,
+      lastKnownAgeMs: null,
+    };
+  }
   if (config.source === 'FALLBACK') {
     return {
       settings: { figType: config.manualFigType, compassOffset: config.manualCompassOffset },
@@ -215,8 +233,16 @@ export function resolveCompassSource(
   };
 }
 
+/** The array heading on the MQTT answer's LIVE DoA (contract 1.10), or null. */
+export function nodeArrayHeading(snapshot: TelemetrySnapshot | null | undefined): number | null {
+  if (!snapshot || snapshot.simulation === true) return null;
+  const heading = recordOrNull(snapshot.doa_candidates?.mqtt)?.array_heading_deg;
+  return typeof heading === 'number' && Number.isFinite(heading) && heading >= 0 && heading <= 360 ? heading % 360 : null;
+}
+
 /** Short source label for the compass offset in captions and the bearing readout. */
 export function compassOffsetSourceLabel(resolution: CompassSourceResolution, t: Translate): string {
+  if (resolution.code === 'NODE_HEADING') return t('polar.offsetNodeHeading');
   if (!resolution.offsetVerified) return t('polar.offsetAssumed');
   const base = resolution.code === 'MANUAL' ? 'MANUAL' : resolution.code === 'DATA_OUT_LOCAL_AXIS' ? 'DATA_OUT · LOCAL AXIS' : 'DATA_OUT';
   if (resolution.lastKnownAgeMs === null) return base;

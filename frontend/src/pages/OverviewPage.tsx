@@ -25,6 +25,7 @@ import type { ReceiverBridge } from '../lib/receiverBridge';
 import { ZERO_INSETS, computeMapInsets, sameInsets } from '../lib/mapInsets';
 import type { MapInsets } from '../lib/mapInsets';
 import { primaryCandidate } from '../lib/telemetry';
+import { positionEstimate, type PositionEstimate } from '../lib/positionEstimate';
 import { overLora } from '../lib/telemetrySource';
 import { useI18n } from '../lib/i18n';
 import { DoaReadout } from '../components/DoaReadout';
@@ -32,6 +33,7 @@ import { LoadErrorBoundary } from '../components/LoadErrorBoundary';
 import type { RouteName } from '../components/Shell';
 import { NodeCard } from '../components/overview/NodeCard';
 import { LayersPanel } from '../components/overview/LayersPanel';
+import { EstimatePanel } from '../components/overview/EstimatePanel';
 import { PolarDock } from '../components/overview/PolarDock';
 import { SpectrumDock } from '../components/overview/SpectrumDock';
 import { SpectrumDockMirror } from '../components/overview/SpectrumDockMirror';
@@ -167,6 +169,12 @@ function OverviewPageView({
     () => (groundLatitude === undefined || groundLongitude === undefined ? null : { latitude: groundLatitude, longitude: groundLongitude }),
     [groundLatitude, groundLongitude],
   );
+  // Where the moving RDF-SDR's bearings cross. It is built on the console from
+  // every bearing so far, so it outlives a stale answer; kept stable across
+  // equal answers so the map only redraws it when it changes.
+  const estimateNow = simulation ? null : positionEstimate(snapshot);
+  const estimateKey = estimateNow ? JSON.stringify(estimateNow) : '';
+  const estimate = useMemo<PositionEstimate | null>(() => (estimateKey ? JSON.parse(estimateKey) as PositionEstimate : null), [estimateKey]);
   // One readiness decision for the map overlay, the bearing HUD and the polar curve.
   const doa = overviewDoaStatus(snapshot, localSnapshotFresh);
 
@@ -260,12 +268,14 @@ function OverviewPageView({
               basemapId={basemapId}
               onBasemapSelect={onBasemapSelect}
               ground={groundCoordinate}
+              estimate={estimate}
             />
           </Suspense>
         </LoadErrorBoundary>
       </div>
       <div className="ov-left" ref={leftRef}>
         <DoaReadout snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} settings={plotSettings} offsetSource={offsetSource} offsetVerified={offsetVerified} offsetManual={offsetManual} />
+        {estimate && overlaySettings.estimateVisible ? <EstimatePanel estimate={estimate} viewOnly={viewOnly} /> : null}
         {panels.layers ? <LayersPanel settings={overlaySettings} scale={overlayScale} onChange={onOverlayChange} onClose={() => onPanelsChange({ ...panels, layers: false })} basemapId={basemapId} onBasemapChange={onBasemapSelect} /> : null}
       </div>
       <div className="ov-right" ref={rightRef}>
