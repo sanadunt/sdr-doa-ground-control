@@ -279,8 +279,47 @@ class EnvelopeTests(unittest.TestCase):
             "vfo0_frequency_hz": [24_000_000, 1_766_000_000],
             "vfo0_bandwidth_hz": [100, 2_400_000],
             "vfo0_squelch_db": [-200, 50],
+            "ant_spacing_m": [0.05, 1],
         })
         self.assertEqual(len(cmds.GAIN_TABLE_DB), 29)
+
+    def test_uca_spacing_follows_the_edge_rules(self) -> None:
+        # Edge 1.8.0 (helper.validate_changes): ant_spacing_m 0.05..1.0 m, rounded to 4 decimals,
+        # sent last (source.FIELD_MAP order).
+        self.assertEqual(cmds.PATCH_FIELDS[-1], "ant_spacing_m")
+        self.assertEqual(cmds.LEGACY_PATCH_FIELDS, cmds.PATCH_FIELDS[:5])
+        self.assertEqual(cmds.validate_patch_changes({"ant_spacing_m": 0.12804}), {"ant_spacing_m": 0.128})
+        self.assertEqual(cmds.validate_patch_changes({"ant_spacing_m": 1}), {"ant_spacing_m": 1.0})
+        self.assertEqual(
+            list(cmds.validate_patch_changes({"ant_spacing_m": 0.3, "gain_db": 25.4, "center_frequency_hz": 150_000_000,
+                                              "vfo0_frequency_hz": 150_000_000})),
+            ["center_frequency_hz", "gain_db", "vfo0_frequency_hz", "ant_spacing_m"],
+        )
+        for value in (0.0499, 1.0001, float("nan"), "0.3", True, None):
+            with self.subTest(value=value):
+                with self.assertRaises(cmds.CommandRefused) as raised:
+                    cmds.validate_patch_changes({"ant_spacing_m": value})
+                self.assertEqual(raised.exception.code, "VALUE_OUT_OF_RANGE")
+                self.assertIn(" m from 0.05 to 1", raised.exception.message)
+        command = cmds.build_command(
+            cmds.OP_CONFIG_PATCH, command_id="gc-" + "a" * 24, sid="0123abcd", boot="boot-1", base_rev=4,
+            issued_ms=1_000, changes={"ant_spacing_m": 0.128},
+        )
+        self.assertEqual(cmds.validate_command(command)["changes"], {"ant_spacing_m": 0.128})
+        # An unrounded spacing is not the normalized form the console publishes.
+        command["changes"] = {"ant_spacing_m": 0.12804}
+        with self.assertRaises(cmds.CommandRefused):
+            cmds.validate_command(command)
+
+    def test_the_fields_a_node_takes(self) -> None:
+        legacy = cmds.LEGACY_PATCH_FIELDS
+        self.assertEqual(cmds.node_patch_fields(None), legacy)
+        self.assertEqual(cmds.node_patch_fields([]), legacy)
+        self.assertEqual(cmds.node_patch_fields("ant_spacing_m"), legacy)
+        # The edge publishes sorted(FIELD_MAP); the console keeps the edge's field order.
+        edge = sorted(cmds.PATCH_FIELDS)
+        self.assertEqual(cmds.node_patch_fields(edge), cmds.PATCH_FIELDS)
+        self.assertEqual(cmds.node_patch_fields(["gain_db", "future_field", 7]), ("gain_db",))
 
 
 class FakeObservingMonitor:
@@ -382,7 +421,7 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual(done["ack"], {
             "status": "APPLIED", "final": True, "error": None, "reason": None, "revision": 2,
             "proof": {"center_frequency_hz": "FRESH_DAQ_RF_CENTER", "vfo0_frequency_hz": "FRESH_DOA_FREQUENCY"},
-            "persisted": True, "method": None, "live_failure": None, "t": json.loads(applied["payload"])["t"], "received_at_ms": self.monitor.clock,
+            "persisted": True, "method": None, "live_failure": None, "band_spacing_m": None, "t": json.loads(applied["payload"])["t"], "received_at_ms": self.monitor.clock,
         })
         self.assertIsNone(self.tracker.in_flight(self.monitor))
 

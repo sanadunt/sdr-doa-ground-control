@@ -52,14 +52,19 @@ _U32 = 0xFFFFFFFF
 # default policy limits (helper.DEFAULT_POLICY, validate_changes). Deliberately
 # narrower than the settings document: no DAQ topology, calibration,
 # endpoints, credentials or lifecycle. A node whose helper policy is narrower
-# answers FAILED with INTEGER_OUT_OF_RANGE.
+# answers FAILED with INTEGER_OUT_OF_RANGE. ant_spacing_m (the UCA radius,
+# settings.json ant_spacing_meters) came with edge 1.8.0 (contract 1.8); an
+# edge takes it only when its capabilities.config_fields lists it, and one
+# without that list takes the five fields before it (LEGACY_PATCH_FIELDS).
 PATCH_FIELDS: Tuple[str, ...] = (
     "center_frequency_hz",
     "gain_db",
     "vfo0_frequency_hz",
     "vfo0_bandwidth_hz",
     "vfo0_squelch_db",
+    "ant_spacing_m",
 )
+LEGACY_PATCH_FIELDS: Tuple[str, ...] = PATCH_FIELDS[:5]
 FREQUENCY_RANGE_HZ = (24_000_000, 1_766_000_000)
 PATCH_RANGES: Dict[str, Tuple[float, float]] = {
     "center_frequency_hz": FREQUENCY_RANGE_HZ,
@@ -67,6 +72,7 @@ PATCH_RANGES: Dict[str, Tuple[float, float]] = {
     "vfo0_frequency_hz": FREQUENCY_RANGE_HZ,
     "vfo0_bandwidth_hz": (100, 2_400_000),
     "vfo0_squelch_db": (-200, 50),
+    "ant_spacing_m": (0.05, 1.0),
 }
 INTEGER_FIELDS = frozenset({"center_frequency_hz", "vfo0_frequency_hz", "vfo0_bandwidth_hz"})
 # The helper accepts a gain only within 0.001 dB of one of these.
@@ -75,6 +81,8 @@ GAIN_TABLE_DB: Tuple[float, ...] = (
     28.0, 29.7, 32.8, 33.8, 36.4, 37.2, 38.6, 40.2, 42.1, 43.4, 43.9, 44.5, 48.0, 49.6,
 )
 GAIN_TABLE_TOLERANCE_DB = 0.001
+# helper.validate_changes and control.py round the UCA radius to 4 decimals (0.1 mm).
+SPACING_DECIMALS = 4
 # control.py: every value must be finite in -200..5e9 before the helper sees it.
 SUBMIT_VALUE_RANGE = (-200.0, 5e9)
 
@@ -118,7 +126,7 @@ def new_command_id() -> str:
 def _number(field: str, value: Any) -> float:
     low, high = PATCH_RANGES[field]
     whole = field in INTEGER_FIELDS
-    unit = "Hz" if field.endswith("_hz") else "dB"
+    unit = "Hz" if field.endswith("_hz") else "m" if field.endswith("_m") else "dB"
     message = (
         f"{field} must be a whole number of {unit} from {_plain(low)} to {_plain(high)}"
         if whole else f"{field} must be a finite number of {unit} from {_plain(low)} to {_plain(high)}"
@@ -129,14 +137,29 @@ def _number(field: str, value: Any) -> float:
         raise CommandRefused("VALUE_OUT_OF_RANGE", message, field=field, range=[_plain(low), _plain(high)])
     if not low <= value <= high:
         raise CommandRefused("VALUE_OUT_OF_RANGE", message, field=field, range=[_plain(low), _plain(high)])
+    if field == "ant_spacing_m":
+        return round(float(value), SPACING_DECIMALS)
     return int(value) if whole else value
+
+
+def node_patch_fields(config_fields: Any) -> Tuple[str, ...]:
+    """The fields a node takes: its ``capabilities.config_fields`` (contract 1.8)
+    that this console knows, in the edge's order, or the five of an older edge
+    without that list (or with an empty one)."""
+    if isinstance(config_fields, (list, tuple)):
+        listed = {item for item in config_fields if isinstance(item, str)}
+        known = tuple(field for field in PATCH_FIELDS if field in listed)
+        if known:
+            return known
+    return LEGACY_PATCH_FIELDS
 
 
 def validate_patch_changes(changes: Any) -> Dict[str, Any]:
     """The ``changes`` of a ``config.patch`` as the edge checks them, normalized.
 
     Hz fields become integers, a gain becomes its table value, and the fields
-    keep the edge's order. Raises ``CommandRefused`` with the first failure:
+    keep the edge's order, and the UCA radius is rounded to 4 decimals as the
+    edge rounds it. Raises ``CommandRefused`` with the first failure:
     ``INVALID_REQUEST``, ``EMPTY_CHANGES``, ``FIELD_NOT_ALLOWED``,
     ``VALUE_OUT_OF_RANGE``, ``GAIN_NOT_IN_APPROVED_TABLE``,
     ``CENTER_CHANGE_REQUIRES_VFO0_TARGET`` or ``MVP_CENTER_MUST_EQUAL_VFO0``.
@@ -254,7 +277,10 @@ def validate_command(command: Any, *, now_ms: Optional[int] = None) -> Dict[str,
         if list(normalized) != list(given) or any(
             type(value) is not type(given[field]) or value != given[field] for field, value in normalized.items()
         ):
-            raise bad("changes must be normalized: whole Hz as integers, gains from the table, the edge's field order")
+            raise bad(
+                "changes must be normalized: whole Hz as integers, gains from the table, the spacing to 4 decimals,"
+                " the edge's field order"
+            )
         for value in normalized.values():
             if not SUBMIT_VALUE_RANGE[0] <= value <= SUBMIT_VALUE_RANGE[1]:
                 raise bad("a value is outside -200..5e9")
@@ -273,6 +299,7 @@ __all__ = [
     "COMMAND_TTL_MS",
     "CommandRefused",
     "GAIN_TABLE_DB",
+    "LEGACY_PATCH_FIELDS",
     "MAX_COMMAND_TTL_MS",
     "OP_CONFIG_GET",
     "OP_CONFIG_PATCH",
@@ -283,6 +310,7 @@ __all__ = [
     "command_topic",
     "encode_command",
     "new_command_id",
+    "node_patch_fields",
     "ranges_view",
     "validate_command",
     "validate_patch_changes",

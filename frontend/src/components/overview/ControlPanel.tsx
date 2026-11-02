@@ -5,12 +5,13 @@ import type { ConfigCommandStatus, ConfigReported, ConsoleCapabilities } from '.
 import type { ConfigPatchChanges, ConfigPatchKey, ControlDraftRequest } from '../../lib/controlDraft';
 import {
   CONFIG_PATCH_ERROR_KEYS,
-  CONFIG_PATCH_FIELDS,
   GAIN_TABLE_DB,
   appliedMethodText,
   bandRuleFor,
+  bandSpacingText,
   commandResultView,
   commandStageText,
+  configPatchFieldsFor,
   displayValue,
   draftFromReported,
   draftWithBand,
@@ -22,8 +23,9 @@ import {
   plainNumber,
   rangeParts,
   settingsReadView,
+  takesUca,
 } from '../../lib/configPatch';
-import type { CommandResultView, CommandStatusLike, ConfigPatchRanges, DraftEvaluation, DraftValues, FieldEvaluation } from '../../lib/configPatch';
+import type { CommandResultView, CommandStatusLike, ConfigPatchField, ConfigPatchRanges, DraftEvaluation, DraftValues, FieldEvaluation } from '../../lib/configPatch';
 import { VERIFY_WINDOW_MS, currentConfigValues, dataOutConfigValues, verifyConfigPatch } from '../../lib/configVerify';
 import type { ConfigVerification, VerifyStatus, VerifyVerdict } from '../../lib/configVerify';
 import type { TelemetrySnapshot } from '../../types';
@@ -135,14 +137,20 @@ function fieldHint(t: Translate, evaluation: FieldEvaluation, ranges: ConfigPatc
 
 /**
  * The band rule a changed centre frequency falls under (its gain and UCA
- * radius), or that it falls under none and the gain stays as it is.
+ * radius), or that it falls under none and the gain stays as it is. An edge
+ * that takes the UCA radius (its field is in the form) gets it with the
+ * gain; an older one is told to set it on the RDF-SDR.
  */
 export function bandNote(t: Translate, evaluation: DraftEvaluation): string | null {
   const center = evaluation.fields.find((entry) => entry.field.key === 'center_frequency_hz');
   if (!center?.changed || center.value === null) return null;
   const rule = bandRuleFor(center.value);
-  if (!rule) return t('control.band.none');
-  return t('control.band.rule', {
+  const uca = takesUca(evaluation.fields.map((entry) => entry.field));
+  // A 1.8 edge's KrakenSDR sets the UCA spacing by frequency itself (30-300 MHz 0.3 m, 300-3000 MHz 0.128 m).
+  // The engine's own spacing rule covers 30-3000 MHz only; below that the spacing stays as it is.
+  const engineSets = center.value >= 30_000_000 && center.value <= 3_000_000_000;
+  if (!rule) return t(uca && engineSets ? 'control.band.noneEngine' : 'control.band.none');
+  return t(uca ? 'control.band.ruleUca' : 'control.band.rule', {
     band: rule.id,
     from: plainNumber(rule.minHz / 1e6),
     to: plainNumber(rule.maxHz / 1e6),
@@ -492,6 +500,7 @@ export function ControlPanelView({
               </span>
               <span>{done.view ? t(done.view.body.key, done.view.body.vars) : done.error ? noticeText(t, done.error.message) : ''}</span>
               {done.view && appliedMethodText(t, done.ack ?? null) ? <span>{appliedMethodText(t, done.ack ?? null)}</span> : null}
+              {done.view && bandSpacingText(t, done.ack ?? null) ? <span>{bandSpacingText(t, done.ack ?? null)}</span> : null}
               {done.restarted ? <span className="ov-control-small">{t('control.result.restarted')}</span> : null}
               {/* The raw codes stay visible under the operator's words. */}
               {done.view?.code ? <span className="ov-mono ov-control-small">{t('control.result.code', { code: done.view.code })}</span> : null}
@@ -550,7 +559,7 @@ export function rebaseOutcome(
   if (reported.baseRev === rebase.fromRev && nowMs - rebase.startedAtMs < REBASE_SETTLE_MS) return { kind: 'wait' };
   const draft = mergeIntoDraft({}, rebase.changes);
   const current = values ?? reported.values;
-  const next = parseDraft(CONFIG_PATCH_FIELDS, { ...draftFromReported(current), ...draft }, current, ranges, gainTable);
+  const next = parseDraft(configPatchFieldsFor(reported.node?.configFields), { ...draftFromReported(current), ...draft }, current, ranges, gainTable);
   if (next.invalid) return { kind: 'invalid', draft };
   if (!Object.keys(next.changes).length) return { kind: 'same', draft };
   return {
@@ -606,6 +615,14 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
   const ranges = capabilities?.configPatch?.ranges ?? null;
   const gainTable = capabilities?.configPatch?.gainTableDb.length ? capabilities.configPatch.gainTableDb : GAIN_TABLE_DB;
   const ttlS = Math.round((capabilities?.configPatch?.ttlMs ?? DEFAULT_TTL_MS) / 1000);
+  // The fields this node takes: its capabilities.config_fields (edge 1.8.0), else the five of an older edge.
+  const configFields = reported?.node?.configFields ?? null;
+  const configFieldsKey = configFields ? configFields.join(',') : '';
+  const fields: readonly ConfigPatchField[] = useMemo(
+    () => configPatchFieldsFor(configFieldsKey ? configFieldsKey.split(',') : null),
+    [configFieldsKey],
+  );
+  const withUca = takesUca(fields);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -780,8 +797,8 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
   const values = useMemo(() => (reported ? currentConfigValues(reported.values, dataOut) : null), [reported, dataOut]);
   const valueSource = controlValueSource(reported, dataOut);
   const evaluation = useMemo(
-    () => parseDraft(CONFIG_PATCH_FIELDS, { ...(values ? draftFromReported(values) : {}), ...draft }, values ?? {}, ranges, gainTable),
-    [draft, values, ranges, gainTable],
+    () => parseDraft(fields, { ...(values ? draftFromReported(values) : {}), ...draft }, values ?? {}, ranges, gainTable),
+    [fields, draft, values, ranges, gainTable],
   );
 
   const enterReview = useCallback((changes: ConfigPatchChanges, rev: number | null, fields: readonly FieldEvaluation[]) => {
@@ -834,16 +851,16 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
   // Merge a waiting dock request once Kontrol is unlocked and has the reported values.
   useEffect(() => {
     if (!pendingDraft || admin !== 'unlocked' || !reported || stage === 'sending' || stage === 'done') return;
-    // A frequency from the dock takes its band's gain, as a typed one does.
-    const merged = draftWithBand({ ...draft, ...mergeIntoDraft({}, pendingDraft) }, pendingDraft.center_frequency_hz);
+    // A frequency from the dock takes its band's gain (and UCA radius), as a typed one does.
+    const merged = draftWithBand({ ...draft, ...mergeIntoDraft({}, pendingDraft) }, pendingDraft.center_frequency_hz, withUca);
     setPendingDraft(null);
     setDraft(merged);
     const current = values ?? reported.values;
-    const next = parseDraft(CONFIG_PATCH_FIELDS, { ...draftFromReported(current), ...merged }, current, ranges, gainTable);
+    const next = parseDraft(fields, { ...draftFromReported(current), ...merged }, current, ranges, gainTable);
     const publishable = reported.available && capabilities?.configPatch?.enabled !== false;
     if (!next.invalid && Object.keys(next.changes).length && publishable) enterReview(next.changes, reported.baseRev, next.fields);
     else setStage('edit');
-  }, [pendingDraft, admin, reported, values, stage, draft, ranges, gainTable, enterReview, capabilities]);
+  }, [pendingDraft, admin, reported, values, stage, draft, ranges, gainTable, enterReview, capabilities, fields, withUca]);
 
   const lock = () => {
     sendController.current?.abort();
@@ -947,7 +964,7 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
       onLock={lock}
       onUnlocked={() => { setAdminNotice(null); setAdmin('unlocked'); }}
       onDraftChange={(key, text) => setDraft((current) => (
-        key === 'center_frequency_hz' ? draftWithCenter(current, text, values ?? {}) : { ...current, [key]: text }
+        key === 'center_frequency_hz' ? draftWithCenter(current, text, values ?? {}, withUca) : { ...current, [key]: text }
       ))}
       onReview={() => { if (!evaluation.invalid && Object.keys(evaluation.changes).length) enterReview(evaluation.changes, reported?.baseRev ?? null, evaluation.fields); }}
       onReset={() => { setDraft({}); setEditError(null); }}

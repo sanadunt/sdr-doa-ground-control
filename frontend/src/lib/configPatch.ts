@@ -2,7 +2,7 @@
  * Fields, units and draft evaluation for Kontrol's config.patch to the RDF
  * Node edge (sdr/v2/<node>/cmd/config/patch), the results of the edge's ACKs,
  * and the codes the console server and the edge answer with. Values on the
- * wire are SI (Hz, dB); the form shows MHz and kHz. The field rules are the
+ * wire are SI (Hz, dB, m); the form shows MHz and kHz. The field rules are the
  * edge's (tools/rdf_node_commands.py): whole Hz, the gain table, and a centre
  * change takes VFO0 along at the same frequency. The server checks them
  * again; the client copy only gives early feedback.
@@ -24,10 +24,12 @@ export interface ConfigPatchField {
   /** Step of the dry-run number input, in SI units. */
   step: number;
   /** Unit shown in Kontrol, and the SI value of one displayed unit. */
-  unit: 'MHz' | 'kHz' | 'dB';
+  unit: 'MHz' | 'kHz' | 'dB' | 'm';
   scale: number;
   /** Decimals shown for a value in Kontrol. */
   decimals: number;
+  /** Decimals of the SI value sent, when not 3 (the edge rounds the UCA radius to 4). */
+  sentDecimals?: number;
   /** Frequencies are sent as integer Hz. */
   integer: boolean;
   /** Only these values are accepted (the gain table); Kontrol shows a select. */
@@ -41,14 +43,36 @@ export const GAIN_TABLE_DB: readonly number[] = [
 ];
 const GAIN_TOLERANCE_DB = 0.001;
 
-/** The edge's safe fields in its order. Ranges mirror rdf_node_commands.PATCH_RANGES. */
+/**
+ * The edge's safe fields in its order. Ranges mirror rdf_node_commands.PATCH_RANGES.
+ * The last, ant_spacing_m (edge 1.8.0), is offered only to an edge that lists it.
+ */
 export const CONFIG_PATCH_FIELDS: readonly ConfigPatchField[] = [
   { key: 'center_frequency_hz', label: 'config.field.center', shortLabel: 'control.field.center', min: 24_000_000, max: 1_766_000_000, step: 1_000, unit: 'MHz', scale: 1e6, decimals: 3, integer: true },
   { key: 'gain_db', label: 'config.field.gain', shortLabel: 'control.field.gain', min: -10, max: 100, step: 0.1, unit: 'dB', scale: 1, decimals: 1, integer: false, table: true },
   { key: 'vfo0_frequency_hz', label: 'config.field.vfo', shortLabel: 'control.field.vfo', min: 24_000_000, max: 1_766_000_000, step: 1_000, unit: 'MHz', scale: 1e6, decimals: 3, integer: true },
   { key: 'vfo0_bandwidth_hz', label: 'config.field.bandwidth', shortLabel: 'control.field.bandwidth', min: 100, max: 2_400_000, step: 100, unit: 'kHz', scale: 1e3, decimals: 1, integer: true },
   { key: 'vfo0_squelch_db', label: 'config.field.squelch', shortLabel: 'control.field.squelch', min: -200, max: 50, step: 0.5, unit: 'dB', scale: 1, decimals: 0, integer: false },
+  { key: 'ant_spacing_m', label: 'config.field.uca', shortLabel: 'control.field.uca', min: 0.05, max: 1, step: 0.001, unit: 'm', scale: 1, decimals: 3, sentDecimals: 4, integer: false },
 ];
+
+/** The fields an edge without capabilities.config_fields (before 1.8.0) takes. */
+const LEGACY_FIELD_COUNT = 5;
+
+/**
+ * The Kontrol fields a node takes: those its capabilities.config_fields
+ * lists (contract 1.8), in the edge's order, or the five of an older edge that
+ * sends no list (tools/rdf_node_commands.py node_patch_fields).
+ */
+export function configPatchFieldsFor(configFields: readonly string[] | null | undefined): readonly ConfigPatchField[] {
+  const listed = configFields?.length ? CONFIG_PATCH_FIELDS.filter((field) => configFields.includes(field.key)) : [];
+  return listed.length ? listed : CONFIG_PATCH_FIELDS.slice(0, LEGACY_FIELD_COUNT);
+}
+
+/** True when the fields include the UCA radius, so the band rule sets it too. */
+export function takesUca(fields: readonly ConfigPatchField[]): boolean {
+  return fields.some((field) => field.key === 'ant_spacing_m');
+}
 
 export type ConfigPatchRanges = Partial<Record<ConfigPatchKey, readonly [number, number]>>;
 
@@ -161,7 +185,7 @@ export interface BandRule {
   minHz: number;
   maxHz: number;
   gainDb: number;
-  /** UCA radius in metres; sent only once the edge takes it (ant_spacing_m). */
+  /** UCA radius in metres; sent only to an edge that takes ant_spacing_m (1.8.0). */
   ucaM: number;
 }
 
@@ -175,20 +199,26 @@ export function bandRuleFor(hz: number | null | undefined): BandRule | null {
   return BAND_RULES.find((rule) => hz >= rule.minHz && hz <= rule.maxHz) ?? null;
 }
 
-/** A draft whose new centre lies in a band: the gain follows the band rule. */
-export function draftWithBand(draft: DraftValues, centerHz: number | null | undefined): DraftValues {
+/**
+ * A draft whose new centre lies in a band: the gain follows the band rule,
+ * and with `withUca` (an edge that takes ant_spacing_m) the UCA radius too.
+ */
+export function draftWithBand(draft: DraftValues, centerHz: number | null | undefined, withUca = false): DraftValues {
   const rule = bandRuleFor(centerHz);
-  return rule ? { ...draft, gain_db: draftText(fieldFor('gain_db'), rule.gainDb) } : draft;
+  if (!rule) return draft;
+  const next: DraftValues = { ...draft, gain_db: draftText(fieldFor('gain_db'), rule.gainDb) };
+  if (withUca) next.ant_spacing_m = draftText(fieldFor('ant_spacing_m'), rule.ucaM);
+  return next;
 }
 
 /**
  * A draft after the operator typed the centre frequency: VFO0 follows it,
  * because the edge takes a centre change only with VFO0 at the same
  * frequency. Typed back to the reported centre, VFO0 returns to its own
- * reported value. A new centre in a band also takes the band's gain
- * (draftWithBand), which goes back with the centre.
+ * reported value. A new centre in a band also takes the band's gain (and,
+ * with `withUca`, its UCA radius; draftWithBand), which go back with the centre.
  */
-export function draftWithCenter(draft: DraftValues, text: string, reported: ReportedValues): DraftValues {
+export function draftWithCenter(draft: DraftValues, text: string, reported: ReportedValues, withUca = false): DraftValues {
   const field = fieldFor('center_frequency_hz');
   const next: DraftValues = { ...draft, center_frequency_hz: text };
   const typed = parseTypedNumber(text);
@@ -197,11 +227,12 @@ export function draftWithCenter(draft: DraftValues, text: string, reported: Repo
     // Back on the reported centre, VFO0 and the gain return to their reported values too.
     delete next.vfo0_frequency_hz;
     delete next.gain_db;
+    if (withUca) delete next.ant_spacing_m;
     return next;
   }
   next.vfo0_frequency_hz = text;
-  // A new centre in a band takes the band's gain (the operator can still pick another).
-  return typed === null ? next : draftWithBand(next, typed * field.scale);
+  // A new centre in a band takes the band's gain and UCA (the operator can still pick another).
+  return typed === null ? next : draftWithBand(next, typed * field.scale, withUca);
 }
 
 function sameValue(field: ConfigPatchField, left: number, right: number): boolean {
@@ -239,13 +270,16 @@ export function parseDraft(
       return { field, text, value: null, reported: known, changed: false, problem: 'number' };
     }
     const scaled = typed * field.scale;
-    let value = field.integer ? Math.round(scaled) : Number(scaled.toFixed(3));
+    let value = field.integer ? Math.round(scaled) : Number(scaled.toFixed(field.sentDecimals ?? 3));
     const [min, max] = fieldRange(field, ranges);
     if (value < min || value > max) {
       invalid = true;
       return { field, text, value, reported: known, changed: false, problem: 'range' };
     }
-    const changed = known === null || !sameValue(field, value, known);
+    // The reported value at the precision a typed one is sent with: a reported
+    // 0.21125 m is not a change from the 0.2112 m its own text reads back as.
+    const knownSent = known === null || field.integer ? known : Number(known.toFixed(field.sentDecimals ?? 3));
+    const changed = knownSent === null || !sameValue(field, value, knownSent);
     if (field.table && changed) {
       const tableValue = gainTableValue(value, gainTable);
       if (tableValue === null) {
@@ -371,7 +405,20 @@ export const EDGE_ERROR_KEYS: Readonly<Record<string, MessageKey>> = {
   NUMBER_OUT_OF_RANGE: 'control.edge.OUT_OF_RANGE',
   INVALID_PATCH: 'control.error.FIELD_NOT_ALLOWED',
   COMMAND_ID_CONFLICT: 'control.edge.COMMAND_ID_CONFLICT',
+  // Edge 1.8.0: in VHF/UHF the KrakenSDR engine sets the UCA radius itself (result.band_spacing_m names it).
+  SPACING_SET_BY_ENGINE_BAND: 'control.edge.SPACING_SET_BY_ENGINE_BAND',
 };
+
+const SPACING_SET_BY_ENGINE_BAND = 'SPACING_SET_BY_ENGINE_BAND';
+
+/** The message of an edge error code, with the band's UCA radius when the edge named it. */
+function edgeErrorBody(code: string | null, bandSpacingM: number | null | undefined): CommandResultView['body'] | null {
+  if (code === SPACING_SET_BY_ENGINE_BAND && typeof bandSpacingM === 'number') {
+    return { key: 'control.result.spacingSetByBand', vars: { spacing: plainNumber(bandSpacingM, 4) } };
+  }
+  const key = edgeErrorKey(code);
+  return key ? { key } : null;
+}
 
 export function edgeErrorKey(code: string | null | undefined): MessageKey | null {
   return code && Object.prototype.hasOwnProperty.call(EDGE_ERROR_KEYS, code) ? EDGE_ERROR_KEYS[code] : null;
@@ -417,6 +464,8 @@ export interface CommandStatusLike {
     method?: string | null;
     liveFailure?: string | null;
     proof?: Readonly<Record<string, string>> | string | null;
+    /** Contract 1.8: the UCA radius the engine's band rule set with the patch, or requires. */
+    bandSpacingM?: number | null;
   } | null;
 }
 
@@ -478,6 +527,16 @@ export function commandStageText(t: Translate, ack: CommandStatusLike['ack']): s
   return null;
 }
 
+/**
+ * The UCA radius the edge wrote with a patch inside a band (contract 1.8):
+ * the KrakenSDR engine sets it there itself, so the edge keeps settings.json
+ * in step. Null without one, and for the refusal that names the band radius.
+ */
+export function bandSpacingText(t: Translate, ack: CommandStatusLike['ack']): string | null {
+  if (!ack || typeof ack.bandSpacingM !== 'number' || ack.error === SPACING_SET_BY_ENGINE_BAND) return null;
+  return t('control.result.bandSpacing', { spacing: plainNumber(ack.bandSpacingM, 4) });
+}
+
 /** How an APPLIED config.patch was applied (contract 1.7), or null for an older edge. */
 export function appliedMethodText(t: Translate, ack: CommandStatusLike['ack']): string | null {
   if (!ack || ack.status !== 'APPLIED') return null;
@@ -520,7 +579,9 @@ export function commandResultView(status: CommandStatusLike, changeCount: number
   }
   const code = ack.error ?? ack.reason;
   // A contract 1.7 answer also names its method; an older one keeps the plain line.
-  const raw = ack.method || ack.liveFailure ? rawCodes(ack, code) : withCode(ack.status, code);
+  const plain = ack.method || ack.liveFailure ? rawCodes(ack, code) : withCode(ack.status, code);
+  // Contract 1.8: the band radius the edge named.
+  const raw = typeof ack.bandSpacingM === 'number' ? `${plain} · band_spacing_m ${plainNumber(ack.bandSpacingM, 4)}` : plain;
   const rev = ack.revision ?? '—';
   const helper = edgeHelperFault(ack.error);
   if (ack.status === 'APPLIED') {
@@ -551,9 +612,9 @@ export function commandResultView(status: CommandStatusLike, changeCount: number
       rebase: true,
     };
   }
-  const edgeKey = edgeErrorKey(code);
+  const edgeBody = edgeErrorBody(code, ack.bandSpacingM);
   if (ack.status === 'REJECTED' || ack.status === 'CONFLICT') {
-    return { tone: 'warn', title: { key: 'control.result.title.rejected' }, body: { key: edgeKey ?? 'control.result.rejected' }, code: raw, reload: false };
+    return { tone: 'warn', title: { key: 'control.result.title.rejected' }, body: edgeBody ?? { key: 'control.result.rejected' }, code: raw, reload: false };
   }
   if (ack.status === 'EXPIRED') {
     return { tone: 'warn', title: { key: 'control.result.title.expired' }, body: { key: 'control.result.expired' }, code: raw, reload: false };
@@ -565,7 +626,7 @@ export function commandResultView(status: CommandStatusLike, changeCount: number
     return {
       tone: 'err',
       title: { key: 'control.result.title.failed' },
-      body: helper ? { key: 'control.result.failedHelper', vars: { code: code ?? '—' } } : { key: edgeKey ?? 'control.result.failed' },
+      body: helper ? { key: 'control.result.failedHelper', vars: { code: code ?? '—' } } : edgeBody ?? { key: 'control.result.failed' },
       code: raw,
       reload: true,
     };

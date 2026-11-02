@@ -28,11 +28,13 @@ from paho.mqtt.properties import Properties
 if __package__:
     from . import rdf_node_commands as commands
     from .config_command_tracker import FINAL_ACK_STATUSES, MonitorPublishError
+    from .ground_gps import GROUND_GPS_SUFFIX, GroundGpsStore
     from .lora_link import LORA_SUFFIXES, LoraLinkStore
     from .rdf_node_mqtt_v2 import RDF_NODE_V2_SUFFIXES, RdfNodeV2Telemetry
 else:
     import rdf_node_commands as commands
     from config_command_tracker import FINAL_ACK_STATUSES, MonitorPublishError
+    from ground_gps import GROUND_GPS_SUFFIX, GroundGpsStore
     from lora_link import LORA_SUFFIXES, LoraLinkStore
     from rdf_node_mqtt_v2 import RDF_NODE_V2_SUFFIXES, RdfNodeV2Telemetry
 
@@ -96,11 +98,14 @@ class MqttMonitor:
         self._rdf_node = RdfNodeV2Telemetry(node_id)
         self._rdf_node.on_accepted = self._on_rdf_node_accepted
         # The RDF Node topics first, then the LoRa serial bridge's status
-        # (lora_link.py), which only a groundstation with that bridge publishes.
+        # (lora_link.py) and the groundstation's own GNSS position
+        # (ground_gps.py), which only a groundstation publishes.
         self._filters = tuple(
-            f"{self._rdf_node.prefix}{suffix}" for suffix in RDF_NODE_V2_SUFFIXES + LORA_SUFFIXES
+            f"{self._rdf_node.prefix}{suffix}"
+            for suffix in RDF_NODE_V2_SUFFIXES + LORA_SUFFIXES + (GROUND_GPS_SUFFIX,)
         )
         self._lora = LoraLinkStore()
+        self._ground_gps = GroundGpsStore()
         self._lock = threading.RLock()
         self._lifecycle_lock = threading.Lock()
         self._client: Any = None
@@ -304,6 +309,9 @@ class MqttMonitor:
             suffix = topic[len(self._rdf_node.prefix):]
             if suffix in LORA_SUFFIXES:
                 self._lora.ingest(suffix.split("/", 1)[1], payload, received_at_ms)
+                return
+            if suffix == GROUND_GPS_SUFFIX:
+                self._ground_gps.ingest(payload, received_at_ms)
                 return
             if suffix not in RDF_NODE_V2_SUFFIXES:
                 return
@@ -630,7 +638,9 @@ class MqttMonitor:
         The counts are those of every subscribed RDF Node topic; per-topic
         statuses are in ``rdf_node_snapshot``. ``lora`` is the LoRa serial
         bridge's link (``lora_link.LoraLinkStore.view``), ``present`` false
-        where no bridge reports.
+        where no bridge reports; ``ground_gps`` the groundstation's own
+        position (``ground_gps.GroundGpsStore.view``). Neither counts as RDF
+        Node traffic.
         """
         with self._lock:
             now = _now_ms()
@@ -652,7 +662,13 @@ class MqttMonitor:
                 **counters,
                 "last_age_ms": None if last is None else max(0, now - last),
                 "lora": self._lora.view(now),
+                "ground_gps": self._ground_gps.view(now),
             }
+
+    def ground_gps_view(self, now_ms: Optional[int] = None) -> Dict[str, Any]:
+        """The groundstation's own position (``ground_gps.py``), as every /api/snapshot carries it."""
+        with self._lock:
+            return self._ground_gps.view(_now_ms() if now_ms is None else now_ms)
 
     def rdf_node_session(self) -> Dict[str, Any]:
         """The RDF Node session (``state.sid``, ``boot``, ``cfg``) and health freshness."""

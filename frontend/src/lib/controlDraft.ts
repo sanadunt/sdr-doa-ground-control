@@ -6,9 +6,11 @@
 
 /**
  * The RDF Node edge's safe fields for config.patch, in its own order and SI
- * units (Hz, dB); tools/rdf_node_commands.py PATCH_FIELDS.
+ * units (Hz, dB, m); tools/rdf_node_commands.py PATCH_FIELDS. ant_spacing_m
+ * (the UCA radius) came with edge 1.8.0 and goes only to an edge whose
+ * capabilities.config_fields lists it (configPatchFieldsFor()).
  */
-export const CONFIG_PATCH_KEYS = ['center_frequency_hz', 'gain_db', 'vfo0_frequency_hz', 'vfo0_bandwidth_hz', 'vfo0_squelch_db'] as const;
+export const CONFIG_PATCH_KEYS = ['center_frequency_hz', 'gain_db', 'vfo0_frequency_hz', 'vfo0_bandwidth_hz', 'vfo0_squelch_db', 'ant_spacing_m'] as const;
 
 export type ConfigPatchKey = typeof CONFIG_PATCH_KEYS[number];
 

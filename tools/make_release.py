@@ -10,7 +10,8 @@ Writes, in ``dist/release`` by default:
   ``packaging/docker/sdr-doa-docker``, the groundstation's T900 link tools
   ``packaging/ground-link`` (with their own installer), the host side of the
   console's Restart and Shutdown buttons ``packaging/host-power`` (its own
-  installer too), ``QUICKSTART.md`` and the user manual PDF;
+  installer too), the groundstation GPS publisher ``packaging/ground-gps``
+  (its own installer too), ``QUICKSTART.md`` and the user manual PDF;
 * ``sdr-doa-docker``: the Docker host script on its own (install, update and
   roll back the GHCR image), a release asset next to the tarball;
 * ``SHA256SUMS`` for the two, in ``sha256sum -c`` format.
@@ -104,6 +105,21 @@ HOST_POWER_FILES = tuple(
         ("sdr-doa-host-power.tmpfiles.in", False),
     )
 )
+# The groundstation's own GPS: a publisher that reads the USB receiver and
+# publishes its position to the local broker. Shipped like the T900 tools: in
+# the console release for its own installer, never in the app tree or the image.
+GROUND_GPS_DIR = "packaging/ground-gps"
+GROUND_GPS_FILES = tuple(
+    (f"{GROUND_GPS_DIR}/{name}", f"{GROUND_GPS_DIR}/{name}", executable)
+    for name, executable in (
+        ("README.md", False),
+        ("install.sh", True),
+        ("uninstall.sh", True),
+        ("ground-gps-publisher", True),
+        ("ground-gps.conf.example", False),
+        ("ground-gps.service.in", False),
+    )
+)
 CONSOLE_APP_FILES = (
     ("packaging/console/requirements.txt", "packaging/console/requirements.txt", False),
     ("packaging/console/set_admin_password.py", "packaging/console/set_admin_password.py", True),
@@ -125,7 +141,7 @@ CONSOLE_RELEASE_FILES = (
     (".env.example", ".env.example", False),
     ("QUICKSTART.md", "QUICKSTART.md", False),
     (MANUAL_PDF, MANUAL_PDF, False),
-) + GROUND_LINK_FILES + HOST_POWER_FILES
+) + GROUND_LINK_FILES + HOST_POWER_FILES + GROUND_GPS_FILES
 # Inputs of a full build; a dirty copy would leak into frontend/dist.
 BUILD_INPUTS = (
     "frontend/index.html",

@@ -156,6 +156,21 @@ Tambahan, semuanya opsional; edge yang lebih lama tetap dibaca seperti sebelumny
     - Uji 2 November: `APPLIED` 43,7 s lewat LoRa.
   - Console tidak mengirim `processing.set` atau stop/start untuk ganti frekuensi; edge yang memutuskan retune langsung atau restart.
 
+## 7c. Kontrak 1.8 (edge `1a98575`, RDF Node 1.8.0)
+
+Tambahan, semuanya opsional; edge yang lebih lama tetap dibaca seperti sebelumnya.
+
+- **Field `ant_spacing_m`** untuk `config.patch`: jarak UCA dalam meter, 0.05–1.0, dibulatkan 4 desimal, ditulis ke `ant_spacing_meters` di settings.json.
+  - Console mengirim dan menampilkannya hanya bila `capabilities.config_fields` memuatnya.
+  - Server console menolak field yang tidak tercantum dengan 409 `FIELD_NOT_ALLOWED` sebelum publish.
+  - `state.rf.uca` adalah jaraknya dalam meter; jawaban MQTT menyebutnya `rf.uca_m`. `settings/reported` membawa `ant_spacing_m`.
+- **Aturan band dijalankan engine KrakenSDR** (fork rdfsdr di Pi), pada setiap retune dan saat start:
+  - 30–300 MHz memakai 0.3 m dan 300–3000 MHz memakai 0.128 m (hanya UCA).
+  - Jarak lain yang meleset lebih dari 0.5 mm ditolak sebelum ditulis: `FAILED` dengan `result.error` `SPACING_SET_BY_ENGINE_BAND` dan `result.band_spacing_m`. Yang lebih dekat dibulatkan ke nilai band.
+  - Patch apa pun di band itu ikut menulis jarak band bila file berisi nilai lain, dan menyebutnya di `result.band_spacing_m`.
+  - Di luar 30–3000 MHz atau dengan ULA, jarak bebas dan diterapkan langsung tanpa restart.
+- **Rule band operator di Kontrol** (VHF 136–174 MHz: gain 25.4 dB, UCA 0.3 m; UHF 400–480 MHz: gain 15.7 dB, UCA 0.128 m) kini juga mengirim `ant_spacing_m`. Gain tetap perlu dikirim, karena restart memakai gain dari file apa adanya.
+
 ## 8. Dashboard: MQTT dulu, Data Out cadangan (#8)
 
 Kode: `tools/telemetry_source.py` (keputusan sumber dan jawaban dari MQTT), `DataOutReader.read_reason()` di `tools/data_out_reader.py` (kapan Data Out dibaca), `collect_light()` di `tools/sdr_doa_collector.py` (pembacaan ringan), `frontend/src/lib/telemetrySource.ts` (badge dan view DoA di browser). Contoh jawaban: `tools/fixtures/telemetry-source/`.

@@ -1,0 +1,49 @@
+# Written by the ground-gps installer (packaging/ground-gps/install.sh).
+# Publishes the groundstation's own GNSS position, retained, on
+# sdr/v2/<node>/ground/gps of the local broker for the SDR-DoA Ground Console.
+# Settings: @CONFIG@. Journal: journalctl -u ground-gps
+[Unit]
+Description=Groundstation GPS publisher (SDR-DoA Ground Console)
+Documentation=file://@SHARE_DIR@/README.md
+After=network.target mosquitto.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=@PYTHON@ -I @BIN_DIR@/ground-gps-publisher run --config @CONFIG@
+Restart=always
+RestartSec=5s
+# A config error exits 78: restarting would not fix it.
+RestartPreventExitStatus=78
+SyslogIdentifier=ground-gps
+# Not root: a user of its own for each run, in the group that owns the
+# receiver's tty (dialout on Ubuntu).
+DynamicUser=yes
+SupplementaryGroups=dialout
+# Only USB CDC ACM ttys (ttyACM*), read only; no other device, so the LoRa
+# bridge's ttyUSB0 cannot be opened. A receiver behind a serial adapter needs
+# a drop-in: systemctl edit ground-gps (DeviceAllow=char-ttyUSB r).
+DevicePolicy=closed
+DeviceAllow=char-ttyACM r
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+# The broker only: no listening port, no other protocol.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
