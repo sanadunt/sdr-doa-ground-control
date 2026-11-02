@@ -4103,8 +4103,9 @@ class LanConsoleHandler(ConsoleHandler):
             self._send_json({"authenticated": False})
             return
         # health, capabilities, console-config, mqtt, mqtt/rdf-node, branding,
-        # mirror/receiver and a marker command's status: the loopback
-        # listener's answer (capabilities through the override).
+        # mirror/receiver, its audio stream (under the Records read rule,
+        # _mirror_audio_read_is_allowed) and a marker command's status: the
+        # loopback listener's answer (capabilities through the override).
         super().do_GET()
 
     def do_POST(self) -> None:  # noqa: N802
