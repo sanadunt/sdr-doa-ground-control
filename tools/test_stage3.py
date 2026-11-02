@@ -219,7 +219,7 @@ def test_dry_run_settings_validation_has_no_apply_path() -> None:
     assert result["dry_run"] is True
     assert result["transport"] == "none"
     assert result["applied"] is False
-    assert result["command"]["expires_ms"] == 16_000
+    assert result["command"]["expires_ms"] == 31_000  # issued 1 000 + the 30 s command lifetime
 
     for payload in (
         {"changes": {"external_url": "http://not-allowed"}},
