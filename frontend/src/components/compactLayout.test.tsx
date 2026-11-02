@@ -300,7 +300,8 @@ describe('compact layout styles', () => {
     expect(body(shellRules, '.page-menu-row')).toMatch(/min-height: 44px/);
     expect(body(dashRules, '.topbar-toolbar .ov-panel-toggles button')).toMatch(/width: 44px; min-width: 44px/);
     expect(body(dashRules, '.ov-spec-open')).toMatch(/width: 44px/);
-    expect(body(dashRules, '.ov-estimate-summary')).toMatch(/min-height: 44px/);
+    // The folded estimate is also used on a desktop while Lapisan is open, so its rule is outside the compact section.
+    expect(body(rules(sheets.dashboard), '.ov-estimate-summary')).toMatch(/min-height: 44px/);
     // No compact rule shrinks a control below 44 px.
     for (const { selector, body: declarations } of [...shellRules, ...dashRules]) {
       if (/height: 1px/.test(declarations)) continue;

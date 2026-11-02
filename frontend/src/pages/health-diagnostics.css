@@ -32,6 +32,8 @@
 
 /* CSV / XML ledger: field names read as labels; values stay right-aligned mono. */
 .hd-ledger .pg-table td.hd-field-cell { color: var(--subtle); font-size: 12px; white-space: nowrap; }
+/* A part or field name ("Angular flags=63") breaks between its words, never inside one. */
+.pg-table td.hd-field-cell { overflow-wrap: break-word; }
 .hd-ledger .pg-table tr.is-error td { vertical-align: top; }
 .hd-ledger .pg-table tr.is-error td.is-num { font-family: inherit; font-size: 12px; font-weight: 400; white-space: normal; }
 /* A long error wraps left-aligned inside its right-aligned column. */

@@ -342,7 +342,7 @@ function MqttDoaCard({ snapshot }: { snapshot: TelemetrySnapshot | null }): JSX.
         { id: 'angle', label: t('diag.mqtt.angleMode'), value: mode ?? 'N/A', tone: mode ? undefined : 'warn' },
       ]} />
       {rows.length
-        ? <DataTable columns={columns} rows={rows} rowKey={(row) => row.key} label={t('diag.mqtt.title')} stack={false} />
+        ? <DataTable columns={columns} rows={rows} rowKey={(row) => row.key} label={t('diag.mqtt.title')} />
         : <EmptyState label={t(overLora(snapshot) ? 'polar.loraNoDoa' : 'polar.mqttNoDoa')} code="WAITING" />}
     </Card>
   );

@@ -1000,6 +1000,20 @@ def _apply_embedded_changes(source: Path) -> None:
     ):
         _replace_once(listener_canvas, dark_color, light_color, "theme Listener canvas colors")
 
+    # A muted VFO keeps its faded tint and dashed line, but its label is drawn at full
+    # strength and in the Receiver's language ("VFO 1 (bisu)").
+    _replace_once(
+        listener_canvas,
+        "\t\t\tctx.fillStyle = color;\n"
+        "\t\t\tctx.font = \"10px Inter, sans-serif\";\n"
+        "\t\t\tctx.fillText(muted ? `VFO ${vi + 1} (mute)` : `VFO ${vi + 1}`, centerPixel + 4, 12 + vi * 12);\n",
+        "\t\t\tctx.globalAlpha = 1;\n"
+        "\t\t\tctx.fillStyle = color;\n"
+        "\t\t\tctx.font = \"10px Inter, sans-serif\";\n"
+        "\t\t\tctx.fillText(muted ? `VFO ${vi + 1} (${this.t('mute')})` : `VFO ${vi + 1}`, centerPixel + 4, 12 + vi * 12);\n",
+        "muted VFO label on the Listener canvas",
+    )
+
     # The Dengar tab's dB scale (overlay listener-display.ts): the trace and the
     # waterfall draw with the Auto or Manual range instead of display.minDB/maxDB.
     _replace_once(
