@@ -39,7 +39,7 @@ export const TILE_SOURCES: Readonly<Record<TileSourceId, { readonly maxzoom: num
   topo: { maxzoom: 17 },
 };
 
-export type BasemapId = 'standard' | 'hot' | 'light' | 'dark' | 'satellite' | 'hybrid' | 'topo' | 'plain';
+export type BasemapId = 'standard' | 'hot' | 'light' | 'dark' | 'satellite' | 'hybrid' | 'topo' | 'offline' | 'plain';
 /** Whether the drawn tiles are mostly light or dark; reference lines follow it. */
 export type BasemapTone = 'light' | 'dark';
 
@@ -67,8 +67,13 @@ export interface BasemapStyle {
   id: BasemapId;
   labelKey: MessageKey;
   tone: BasemapTone;
-  /** Base layer first, then reference layers drawn over it. Empty for Plain. */
+  /** Base layer first, then reference layers drawn over it. Empty for Plain and Offline. */
   layers: readonly BasemapLayer[];
+  /**
+   * Offline draws vector tiles from the console's own PMTiles archive
+   * (lib/offlineBasemap.ts) instead of raster tiles from `layers`.
+   */
+  offline?: true;
   attribution: BasemapAttribution | null;
 }
 
@@ -131,11 +136,22 @@ export const BASEMAPS: Readonly<Record<BasemapId, BasemapStyle>> = {
       links: [OSM_LINK, { text: '© OpenTopoMap (CC-BY-SA)', href: 'https://opentopomap.org/about' }],
     },
   },
+  offline: {
+    id: 'offline',
+    labelKey: 'basemap.offline',
+    tone: 'light',
+    layers: [],
+    offline: true,
+    attribution: {
+      text: '© OpenStreetMap contributors · Protomaps',
+      links: [OSM_LINK, { text: 'Protomaps', href: 'https://protomaps.com/' }],
+    },
+  },
   plain: { id: 'plain', labelKey: 'basemap.plain', tone: 'light', layers: [], attribution: null },
 };
 
 /** Menu order. */
-export const BASEMAP_ORDER: readonly BasemapId[] = ['standard', 'hot', 'light', 'dark', 'satellite', 'hybrid', 'topo', 'plain'];
+export const BASEMAP_ORDER: readonly BasemapId[] = ['standard', 'hot', 'light', 'dark', 'satellite', 'hybrid', 'topo', 'offline', 'plain'];
 export const DEFAULT_BASEMAP_ID: BasemapId = 'standard';
 
 export function isBasemapId(value: unknown): value is BasemapId {
@@ -169,6 +185,14 @@ export function saveBasemapId(id: BasemapId, storage: StorageLike | null = prefe
 /** The tile source of the style's base layer, or null for Plain. */
 export function basemapBaseSource(id: BasemapId): TileSourceId | null {
   return BASEMAPS[id].layers[0]?.source ?? null;
+}
+
+/**
+ * What a style's outages are remembered under: its tile source, 'offline' for
+ * the Offline style (one archive, no provider), null for Plain.
+ */
+export function basemapHealthKey(id: BasemapId): string | null {
+  return BASEMAPS[id].offline ? 'offline' : basemapBaseSource(id);
 }
 
 /** MapLibre source and layer id of one basemap layer: 'bm-<style>' for the base, 'bm-<style>-<n>' above it. */

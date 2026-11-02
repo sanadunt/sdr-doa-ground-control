@@ -6,7 +6,8 @@ import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&ur
 import type { Feature, FeatureCollection, LineString, Point, Polygon } from 'geojson';
 import type { GpsSourceMode, MapCoordinate, TelemetrySnapshot } from '../types';
 import { basemapAfterTile, basemapAfterView, basemapNotice, basemapPaint, basemapPartialCheck, gpsReportsNoFix, holdStationCoordinate, nextBasemapHost, resumeBasemapHealth, shouldReframeStation, type BasemapHealth, type BasemapNotice, type StationFraming } from '../lib/map';
-import { BASEMAPS, DEFAULT_BASEMAP_ID, basemapBaseSource, basemapRasterLayers, basemapSourceId, isBasemapSourceId, type BasemapId, type TileSourceId } from '../lib/basemaps';
+import { BASEMAPS, DEFAULT_BASEMAP_ID, basemapHealthKey, basemapSourceId, isBasemapSourceId, type BasemapId } from '../lib/basemaps';
+import { OFFLINE_GLYPHS_PATH, basemapContents, registerOfflineProtocol, type BasemapContent } from '../lib/offlineBasemap';
 import { MAP_CONTROLS_ROW_PX, ZERO_INSETS, clampMapPadding, controlsFramingBottom, type MapInsets } from '../lib/mapInsets';
 import {
   DEFAULT_DOA_OVERLAY_SETTINGS,
@@ -116,11 +117,12 @@ interface CameraMemory {
 // when Overview opens again.
 let cameraMemory: CameraMemory | null = null;
 let lastLiveStation: MapCoordinate | null = null;
-// Basemap outages seen earlier, per tile source, so a known outage shows its
-// notice at once when the map mounts again or the operator returns to a style.
-const basemapMemory: Partial<Record<TileSourceId, BasemapHealth>> = {};
+// Basemap outages seen earlier, per tile source (or 'offline'), so a known
+// outage shows its notice at once when the map mounts again or the operator
+// returns to a style.
+const basemapMemory: Partial<Record<string, BasemapHealth>> = {};
 
-function basemapHealthFor(source: TileSourceId | null): BasemapHealth {
+function basemapHealthFor(source: string | null): BasemapHealth {
   return resumeBasemapHealth(source ? basemapMemory[source] ?? null : null, 0, BASEMAP_HOSTS);
 }
 
@@ -134,6 +136,21 @@ function rasterSourceDrawn(map: MapLibreMap, sourceId: string): boolean | null {
     return Array.isArray(ids) ? ids.length > 0 : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Removes the layers and sources of `remove`, then adds `add` under the DoA
+ * overlay. Never map.setStyle(): see selectBasemapRef.
+ */
+function replaceBasemapContent(map: MapLibreMap, remove: readonly BasemapContent[], add: readonly BasemapContent[]): void {
+  for (const content of remove) {
+    for (const layer of [...content.layers].reverse()) if (map.getLayer(layer.id)) map.removeLayer(layer.id);
+    if (map.getSource(content.id)) map.removeSource(content.id);
+  }
+  for (const content of add) {
+    map.addSource(content.id, content.source);
+    for (const layer of content.layers) map.addLayer(layer, 'doa-beam');
   }
 }
 
@@ -257,7 +274,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const [styleReady, setStyleReady] = useState(false);
   // The style the map draws; it follows basemapId once the style is ready.
   const [activeBasemap, setActiveBasemap] = useState<BasemapId>(basemapId);
-  const [basemapStatus, setBasemapStatus] = useState<BasemapNotice>(() => basemapNotice(basemapHealthFor(basemapBaseSource(basemapId))));
+  const [basemapStatus, setBasemapStatus] = useState<BasemapNotice>(() => basemapNotice(basemapHealthFor(basemapHealthKey(basemapId))));
   const [tilesLoaded, setTilesLoaded] = useState(false);
   const [theme, setTheme] = useState(consoleTheme);
   const noticesRef = useRef<HTMLDivElement>(null);
@@ -380,14 +397,16 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     // Tiles come from this console; MapLibre needs absolute tile URLs.
     const origin = window.location.origin;
     let activeId: BasemapId = basemapIdRef.current;
-    let activeSource = basemapBaseSource(activeId);
+    let activeSource = basemapHealthKey(activeId);
     let basemap: BasemapHealth = basemapHealthFor(activeSource);
     // When the active style was chosen or its tiles last reloaded, for the silent-host check.
     let basemapSince = performance.now();
-    const rasters = basemapRasterLayers(activeId, origin, prefersReducedMotion());
+    const contents = basemapContents(activeId, origin, prefersReducedMotion());
     const paint = basemapPaint(consoleTheme(), false);
     let map: MapLibreMap;
     try {
+      // The Offline style reads its PMTiles archive through this protocol.
+      registerOfflineProtocol((name, loader) => maplibregl.addProtocol(name, loader));
       map = new maplibregl.Map({
         container: host,
         center: memory?.center ?? (start ? [start.longitude, start.latitude] : [0, 0]),
@@ -398,11 +417,11 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
         maxZoom: 19,
         attributionControl: false,
         locale: mapLocale(t),
-        style: { version: 8, sources: { ...Object.fromEntries(rasters.map((raster) => [raster.id, raster.source])), ...Object.fromEntries(SOURCE_IDS.map((id) => [id, { type: 'geojson', data: EMPTY }])) }, layers: [
+        style: { version: 8, glyphs: origin + OFFLINE_GLYPHS_PATH, sources: { ...Object.fromEntries(contents.map((content) => [content.id, content.source])), ...Object.fromEntries(SOURCE_IDS.map((id) => [id, { type: 'geojson', data: EMPTY }])) }, layers: [
           // Neutral land colour under the tiles; it follows the console theme when no tiles load.
           { id: 'basemap-background', type: 'background', paint: { 'background-color': paint.background } },
           // Basemap raster layers sit here, under 'doa-beam'; a style change swaps only them.
-          ...rasters.map((raster) => raster.layer),
+          ...contents.flatMap((content) => content.layers),
           { id: 'doa-beam', type: 'fill', source: 'doa-beam', paint: { 'fill-antialias': false, 'fill-color': beamColorExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatPalette), 'fill-opacity': beamOpacityExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatOpacity, DEFAULT_DOA_OVERLAY_SETTINGS.heatIntensity) } },
           { id: 'doa-heat', type: 'heatmap', source: 'doa-heat', maxzoom: 20, paint: { 'heatmap-weight': ['coalesce', ['get', 'densityWeight'], ['get', 'weight'], 0], 'heatmap-intensity': 1, 'heatmap-radius': heatmapRadiusExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatBlur), 'heatmap-opacity': .72, 'heatmap-color': heatmapColorExpression(DEFAULT_DOA_OVERLAY_SETTINGS.heatPalette) } },
           { id: 'doa-rings', type: 'line', source: 'doa-rings', paint: { 'line-color': paint.rings, 'line-opacity': .55, 'line-width': 1.2, 'line-dasharray': [4, 3] } },
@@ -441,7 +460,12 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       if (activeSource) basemapMemory[activeSource] = next;
       if (reload && map.style) {
         basemapSince = performance.now();
-        for (const raster of basemapRasterLayers(activeId, origin)) (map.getSource(raster.id) as RasterTileSource | undefined)?.setTiles(raster.source.tiles ?? []);
+        for (const content of basemapContents(activeId, origin)) {
+          const source = map.getSource(content.id);
+          if (source?.type === 'raster') (source as RasterTileSource).setTiles((content.source as { tiles?: string[] }).tiles ?? []);
+          // A vector archive has no tile list to reset: add it again.
+          else if (source) replaceBasemapContent(map, [content], [content]);
+        }
       }
       setBasemapStatus(basemapNotice(next));
       setTilesLoaded(next.loaded);
@@ -453,20 +477,13 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     selectBasemapRef.current = (next: BasemapId) => {
       if (disposed || next === activeId || !styleReadyRef.current || !map.style) return;
       try {
-        for (const raster of [...basemapRasterLayers(activeId, origin), ...basemapRasterLayers(next, origin)]) {
-          if (map.getLayer(raster.id)) map.removeLayer(raster.id);
-          if (map.getSource(raster.id)) map.removeSource(raster.id);
-        }
-        for (const raster of basemapRasterLayers(next, origin, prefersReducedMotion())) {
-          map.addSource(raster.id, raster.source);
-          map.addLayer(raster.layer, 'doa-beam');
-        }
+        replaceBasemapContent(map, [...basemapContents(activeId, origin), ...basemapContents(next, origin)], basemapContents(next, origin, prefersReducedMotion()));
       } catch {
         // activeId stays, so the next ready style or selection tries again.
         return;
       }
       activeId = next;
-      activeSource = basemapBaseSource(next);
+      activeSource = basemapHealthKey(next);
       basemap = basemapHealthFor(activeSource);
       basemapSince = performance.now();
       setActiveBasemap(next);
@@ -487,6 +504,9 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       // renderer: repeated failures of the active style show a non-blocking
       // notice and the overlay stays. Only other errors block the map.
       const sourceId = String((event as unknown as { sourceId?: string }).sourceId ?? '');
+      // A glyph range the console does not ship (a rare script in a place name)
+      // only leaves that label out; it is not a map failure.
+      if (String((event.error as { url?: unknown } | undefined)?.url ?? '').includes('/assets/map-fonts/')) return;
       if (isBasemapSourceId(sourceId)) {
         // Only the active base layer counts; a removed style or a label layer does not.
         if (sourceId === basemapSourceId(activeId)) applyBasemap(basemapAfterTile(basemap, false, BASEMAP_HOSTS, performance.now()));

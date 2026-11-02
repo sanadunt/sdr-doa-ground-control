@@ -31,6 +31,9 @@ The console keeps a narrow boundary:
   disk cache (``--tile-cache-dir``) and fetches a missing or stale tile from
   the fixed upstreams in ``tile_cache.py``, so the browser never contacts a
   tile provider and the map keeps every area it has shown while offline;
+* ``/api/maps/offline.pmtiles`` serves byte ranges of the offline basemap
+  archive the operator put into ``--maps-dir`` (``map_files.py``), which the
+  Offline basemap style reads in the browser;
 * ``/api/receiver/*`` keeps the Receiver's records under ``--data-dir``
   (``receiver_record_store.py``), with the Records archive routes under
   ``/api/receiver/archive/`` (``receiver_archive.py``: calendar, time line,
@@ -146,6 +149,7 @@ from receiver_record_store import (
     _utc_offset_minutes,
     resolve_time_zone,
 )
+from map_files import DEFAULT_MAPS_DIR_NAME, MAPS_ROUTE_PREFIX, MapFiles
 from preferences_store import MAX_PREFERENCES_REQUEST_BYTES, PreferencesRejected, PreferencesStore
 from tile_cache import (
     BROWSER_MAX_AGE_S,
@@ -159,6 +163,7 @@ from tile_cache import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_MAPS_DIR = Path.home() / ".config" / "sdr-doa-ground-console" / DEFAULT_MAPS_DIR_NAME
 BROWSDR_SOURCE_ARCHIVE = "freq-spectrum-source.tar.gz"
 # Files the built console serves from the root of frontend/dist besides
 # assets/: the page and its icons (copied there from frontend/public).
@@ -2257,6 +2262,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         # tile cache logs that outage once, when it starts and when it ends.
         if path.startswith(TILE_ROUTE_PREFIX) and status in {"200", "504"}:
             return
+        # The offline map is read in many small ranges: a served range is not logged.
+        if path.startswith(MAPS_ROUTE_PREFIX) and status == "206":
+            return
         # The Receiver mirror is posted and polled several times a second. A
         # served answer and a rate refusal are not logged (the mirror counts
         # refusals); every other refusal is.
@@ -3000,6 +3008,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             ".svg": "image/svg+xml",
             ".woff2": "font/woff2",
             ".ico": "image/x-icon",
+            # Glyph ranges of the Offline basemap (frontend/public/assets/map-fonts).
+            ".pbf": "application/x-protobuf",
         }
         receiver_mime = {
             ".html": "text/html; charset=utf-8",
@@ -3117,6 +3127,35 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(result.body)
 
+    def _send_map(self, path: str) -> None:
+        """GET /api/maps/offline.pmtiles: one byte range of the offline basemap archive."""
+        # Same rule as the tiles: only this console's own pages (or a typed URL
+        # or curl) may read it, never another site's page.
+        if self.headers.get("Sec-Fetch-Site", "").strip().lower() not in ("", "none", "same-origin"):
+            self._send_json({"ok": False, "code": "ORIGIN_REJECTED", "error": "the map is served to this console's own pages only"}, HTTPStatus.FORBIDDEN)
+            return
+        result = self.console_server.map_files.read(path, self.headers.get("Range"))
+        if result.status != HTTPStatus.PARTIAL_CONTENT:
+            # Sent outside the Kontrol error helper, like the tile and archive codes.
+            body = json.dumps({"ok": False, "code": result.code, "error": result.error}).encode("utf-8")
+            self.send_response(result.status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            for name, value in result.headers:
+                self.send_header(name, value)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(HTTPStatus.PARTIAL_CONTENT)
+        for name, value in result.headers:
+            self.send_header(name, value)
+        self.send_header("Content-Length", str(len(result.body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(result.body)
+
     def _capabilities_body(self) -> Dict[str, Any]:
         """Body of GET /api/capabilities on the loopback listener."""
         monitor = self.console_server.mqtt_monitor
@@ -3203,6 +3242,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith(TILE_ROUTE_PREFIX):
             # The query is never forwarded; only the path names a tile.
             self._send_tile(parsed.path)
+            return
+        if parsed.path.startswith(MAPS_ROUTE_PREFIX):
+            self._send_map(parsed.path)
             return
         if self.console_server.frontend_dir is not None and not parsed.path.startswith("/api/"):
             self._send_frontend(parsed.path)
@@ -3972,6 +4014,9 @@ class LanConsoleHandler(ConsoleHandler):
         if route == lan.ROUTE_TILE:
             self._send_tile(parsed.path)
             return
+        if route == lan.ROUTE_MAP:
+            self._send_map(parsed.path)
+            return
         if route == lan.ROUTE_RECORDS:
             self._lan_records_get(parsed)
             return
@@ -4488,6 +4533,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
         tile_cache_dir: Optional[Path] = None,
         tile_cache_max_mb: int = DEFAULT_TILE_CACHE_MAX_MB,
         tile_sources: Optional[Dict[str, TileSource]] = None,
+        maps_dir: Optional[Path] = None,
         retention_interval_s: float = ra.RETENTION_INTERVAL_S,
         retention_start_delay_s: float = ra.RETENTION_START_DELAY_S,
         data_out_fetcher: Optional[Callable[..., Any]] = None,
@@ -4557,6 +4603,15 @@ class GroundConsoleServer(ThreadingHTTPServer):
             user_agent=f"SDR-DoA-Ground-Console/{CONSOLE_VERSION}",
             log=lambda message: print(f"[ground-console] {message}", flush=True),
         )
+        # The offline basemap archive sits next to console.json too, so a test
+        # server never reads the real one.
+        if maps_dir is not None:
+            resolved_maps = Path(maps_dir).expanduser()
+        elif config_path:
+            resolved_maps = self.config_path.with_name(DEFAULT_MAPS_DIR_NAME)
+        else:
+            resolved_maps = DEFAULT_MAPS_DIR
+        self.map_files = MapFiles(resolved_maps)
         self._session_lock = threading.RLock()
         self._admin_sessions: Dict[str, float] = {}
         # Failed-login throttle, global to this server and kept under
@@ -5246,6 +5301,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="local directory for cached basemap tiles (kept so the map works offline)",
     )
     parser.add_argument(
+        "--maps-dir",
+        default=None,
+        help="local directory that holds offline.pmtiles, the archive of the Offline basemap (default: maps next to --config-path; docs/PETA_OFFLINE.md)",
+    )
+    parser.add_argument(
         "--tile-cache-max-mb",
         type=int,
         default=DEFAULT_TILE_CACHE_MAX_MB,
@@ -5315,6 +5375,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         preferences_path=str(Path(args.preferences_path).expanduser()),
         tile_cache_dir=Path(args.tile_cache_dir).expanduser(),
         tile_cache_max_mb=args.tile_cache_max_mb,
+        maps_dir=Path(args.maps_dir).expanduser() if args.maps_dir else None,
         saved_config=saved_config,
         host_power_dir=Path(args.host_power_dir).expanduser() if args.host_power_dir else None,
     )
@@ -5322,6 +5383,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"Version: {server.version}", flush=True)
     print(f"Saved settings: {config_path}, {server.branding_path}, {server.preferences.path}", flush=True)
     print(f"Tile cache: {server.tile_cache.cache_dir} (at most {args.tile_cache_max_mb} MB)", flush=True)
+    offline_map = server.map_files.info()
+    print(f"Offline map: {server.map_files.maps_dir} ({'installed, %d MB' % round(offline_map.size / 1048576) if offline_map else 'not installed'})", flush=True)
     power = server.host_power.status()
     print(f"Host power: {args.host_power_dir or 'off'} ({'ready' if power['available'] else power['reason']})", flush=True)
     print(f"Read-only Data Out: {config['base_url']}", flush=True)

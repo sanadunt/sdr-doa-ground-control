@@ -142,6 +142,8 @@ CLOSED_REASON_TEXT = {
 UI_ROOT_PATHS = frozenset({"/", "/index.html", "/favicon.ico", "/favicon.svg"})
 UI_ASSET_PREFIX = "/assets/"
 TILE_PREFIX = "/api/tiles/"
+# The offline basemap archive (map_files.py), read by byte range: exactly this one path.
+MAP_ROUTE = "/api/maps/offline.pmtiles"
 API_ROUTES = frozenset({
     "/api/health",
     "/api/capabilities",
@@ -157,6 +159,7 @@ API_ROUTES = frozenset({
 })
 ROUTE_UI = "ui"
 ROUTE_TILE = "tile"
+ROUTE_MAP = "map"
 ROUTE_RECORDS = "records"
 ROUTE_MIRROR_MARKER = "mirror-marker"
 READ_METHODS = ("GET", "HEAD")
@@ -417,11 +420,13 @@ def mirror_marker_route(path: str) -> bool:
 
 
 def lan_route(path: str) -> Optional[str]:
-    """ROUTE_UI, ROUTE_TILE, ROUTE_RECORDS, ROUTE_MIRROR_MARKER or the API path for a GET the LAN view answers; None otherwise."""
+    """ROUTE_UI, ROUTE_TILE, ROUTE_MAP, ROUTE_RECORDS, ROUTE_MIRROR_MARKER or the API path for a GET the LAN view answers; None otherwise."""
     if path in UI_ROOT_PATHS or (path.startswith(UI_ASSET_PREFIX) and len(path) > len(UI_ASSET_PREFIX)):
         return ROUTE_UI
     if path.startswith(TILE_PREFIX):
         return ROUTE_TILE
+    if path == MAP_ROUTE:
+        return ROUTE_MAP
     if path in API_ROUTES:
         return path
     if records_route(path) is not None:
