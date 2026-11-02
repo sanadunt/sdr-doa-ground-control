@@ -14,6 +14,10 @@ Rilis minor: tidak ada yang dihapus. Groundstation kini punya lokasi sendiri dar
   - Bila posisi RDF-SDR bukan posisi langsung (cadangan, manual, atau posisi terakhir yang ditahan), garisnya abu-abu dan bertanda "REFERENCE".
   - Kartu RDF-SDR punya baris Groundstation, misalnya "FIX 3D · 4 sat · 1.23 km", dan System Health punya kartu GPS groundstation.
   - Tablet di tampilan LAN ikut melihatnya.
+- **Heading RDF-SDR di peta.** Kompas RDF-SDR (heading dari `telemetry/health`) ditampilkan sebagai segitiga ungu di lingkaran stasiun dan garis putus-putus dengan label "HDG 87°". Keduanya otomatis berputar mengikuti heading.
+  - Heading yang sudah basi tampil abu-abu dengan tanda BASI. Bila kompas tidak OK, tidak ada yang digambar.
+  - Bisa dinyalakan atau dimatikan di Lapisan.
+  - Ini arah gerak RDF-SDR, terpisah dari garis bearing DoA.
 - **Jarak UCA dari Kontrol (RDF Node Edge 1.8).** Kontrol menampilkan kolom "Jarak UCA" bila RDF-SDR mendukungnya.
   - Rule band mengirim 0,3 m (VHF) atau 0,128 m (UHF) bersama gain.
   - Di band ini engine KrakenSDR menetapkan jaraknya sendiri. Jarak lain ditolak RDF-SDR dengan pesan, dan Kontrol menyebut bila RDF-SDR ikut menulis jarak band.

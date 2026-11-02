@@ -34,6 +34,7 @@ import { geographicBearingForBin } from '../lib/polar';
 import { beamColorExpression, beamOpacityExpression, formatBearing, formatDistance, heatmapColorExpression, heatmapRadiusExpression } from '../lib/overlayPalette';
 import { numberOrNull, primaryCandidate } from '../lib/telemetry';
 import { isMqttSnapshot } from '../lib/telemetrySource';
+import { headingLabel, headingLabelPosition, headingLineFeatures, headingPopupText, rdfHeading, type RdfHeading } from '../lib/rdfHeading';
 import { useI18n } from '../lib/i18n';
 import type { MessageKey, Translate } from '../lib/i18n';
 import { coordinateSourceKey } from './DoaReadout';
@@ -68,7 +69,7 @@ const BASEMAP_CHECK_MS = 20_000;
 const BASEMAP_RETRY_MS = 60_000;
 // The console's tile route tries each upstream's hosts; the browser has one URL per source.
 const BASEMAP_HOSTS = 1;
-const SOURCE_IDS = ['doa-station', 'doa-beam', 'doa-heat', 'doa-rings', 'doa-guides', 'doa-lobe', 'doa-edges', 'doa-bearing', 'doa-provisional', 'ground-link'] as const;
+const SOURCE_IDS = ['doa-station', 'doa-beam', 'doa-heat', 'doa-rings', 'doa-guides', 'doa-lobe', 'doa-edges', 'doa-bearing', 'doa-provisional', 'rdf-heading', 'ground-link'] as const;
 type SourceId = typeof SOURCE_IDS[number];
 const SOURCE_ID_SET: ReadonlySet<string> = new Set(SOURCE_IDS);
 const EMPTY: OverlayFeatureCollection = { type: 'FeatureCollection', features: [] };
@@ -81,6 +82,13 @@ const GROUND_LINK_REFERENCE = { dark: '#9aa6b2', light: '#46525e' } as const;
 function groundLinkColor(darkBackground: boolean): ExpressionSpecification {
   return ['case', ['==', ['get', 'live'], true], darkBackground ? GROUND_LINK_LIVE.dark : GROUND_LINK_LIVE.light, darkBackground ? GROUND_LINK_REFERENCE.dark : GROUND_LINK_REFERENCE.light];
 }
+// The RDF-SDR's compass heading: violet, apart from the bearing, the lobe and
+// the ground link; slate and finer dashes while the heading is held (STALE).
+const HEADING_LIVE = { dark: '#c2a6ff', light: '#5b34c4' } as const;
+const HEADING_HELD = { dark: '#9aa6b2', light: '#46525e' } as const;
+function headingColors(darkBackground: boolean): { live: string; held: string } {
+  return { live: darkBackground ? HEADING_LIVE.dark : HEADING_LIVE.light, held: darkBackground ? HEADING_HELD.dark : HEADING_HELD.light };
+}
 // Base opacity of each line layer at overlay opacity 1, as set in the style below.
 const LINE_LAYER_OPACITY: ReadonlyArray<[string, 'line-opacity', number]> = [
   ['doa-rings', 'line-opacity', .55],
@@ -90,6 +98,8 @@ const LINE_LAYER_OPACITY: ReadonlyArray<[string, 'line-opacity', number]> = [
   ['doa-bearing-casing', 'line-opacity', .85],
   ['doa-bearing', 'line-opacity', .95],
   ['doa-provisional', 'line-opacity', .9],
+  ['rdf-heading', 'line-opacity', .95],
+  ['rdf-heading-held', 'line-opacity', .8],
 ];
 
 interface CameraMemory {
@@ -238,6 +248,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const stationMarkerRef = useRef<maplibregl.Marker | null>(null);
   const stationPopupRef = useRef<maplibregl.Popup | null>(null);
   const groundMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const headingMarkerRef = useRef<maplibregl.Marker | null>(null);
   const framingRef = useRef<StationFraming | null>(null);
   const operatorMovedRef = useRef(false);
   const styleReadyRef = useRef(false);
@@ -281,13 +292,21 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const theta = doaReady && fresh && (values || isMqttSnapshot(snapshot)) ? numberOrNull(csv.canonical_angle_deg) : null;
   const bearing = theta === null ? null : geographicBearingForBin(theta, offset);
   const provisionalBearing = !doaReady && provisionalTheta !== null && Number.isFinite(provisionalTheta) ? geographicBearingForBin(provisionalTheta, offset) : null;
+  // The RDF-SDR's own compass heading (its direction of travel), drawn apart
+  // from the bearing; the bearing never uses it. Kept as primitives so a new
+  // snapshot with the same heading changes nothing on the map.
+  const headingNow = rdfHeading(snapshot, fresh);
+  const headingDeg = headingNow?.headingDeg ?? null;
+  const headingState = headingNow?.state ?? null;
+  const compassState = headingNow?.compassState ?? null;
+  const heading = useMemo<RdfHeading | null>(() => (headingState === null ? null : { headingDeg, state: headingState, compassState }), [headingDeg, headingState, compassState]);
   // Only the scale fields matter here; depending on all of g would rebuild geometry on paint-only changes.
   const scale = useMemo(() => effectiveDbScale(values, g, simulation), [values, simulation, g.dbScale, g.minDb, g.maxDb, g.thresholdDb]);
   const saturation = useMemo(() => saturatedFraction(values, scale.maxDb), [values, scale.maxDb]);
 
   const geometry = useMemo<OverlayGeometry>(() => {
     const data: Record<SourceId, OverlayFeatureCollection> = {
-      'doa-station': pointFeature(stationCoordinate), 'doa-beam': EMPTY, 'doa-heat': EMPTY, 'doa-rings': EMPTY, 'doa-guides': EMPTY, 'doa-lobe': EMPTY, 'doa-edges': EMPTY, 'doa-bearing': EMPTY, 'doa-provisional': EMPTY, 'ground-link': EMPTY,
+      'doa-station': pointFeature(stationCoordinate), 'doa-beam': EMPTY, 'doa-heat': EMPTY, 'doa-rings': EMPTY, 'doa-guides': EMPTY, 'doa-lobe': EMPTY, 'doa-edges': EMPTY, 'doa-bearing': EMPTY, 'doa-provisional': EMPTY, 'rdf-heading': EMPTY, 'ground-link': EMPTY,
     };
     if (!stationCoordinate) return { data, rings: [], halfPower: null };
     // Rings and guides are a ground-distance and orientation reference; they do not depend on DoA data.
@@ -315,7 +334,10 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   // The groundstation stands apart from the RDF-SDR; the dotted line joins them.
   const stationLive = stationPositionLive(stationCoordinate, station.held);
   const link = useMemo(() => (ground && stationCoordinate ? groundLink(ground, stationCoordinate, stationLive) : null), [ground, stationCoordinate, stationLive]);
-  const sourceData = useMemo<Record<SourceId, OverlayFeatureCollection>>(() => ({ ...geometry.data, 'ground-link': link?.features ?? EMPTY }), [geometry, link]);
+  const headingLine = useMemo<OverlayFeatureCollection>(() => (stationCoordinate && g.headingVisible ? headingLineFeatures(stationCoordinate, heading, g.maxDistanceM) : EMPTY), [stationCoordinate, heading, g.headingVisible, g.maxDistanceM]);
+  const headingDrawn = headingLine.features.length > 0;
+  const headingHeld = heading !== null && heading.state !== 'OK';
+  const sourceData = useMemo<Record<SourceId, OverlayFeatureCollection>>(() => ({ ...geometry.data, 'rdf-heading': headingLine, 'ground-link': link?.features ?? EMPTY }), [geometry, headingLine, link]);
 
   // Frame below the notices (basemap unavailable, overlay held...) so they never
   // cover the north label, and above the map controls so they never cover the south one.
@@ -388,6 +410,9 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
           { id: 'doa-lobe-fill', type: 'fill', source: 'doa-lobe', paint: { 'fill-color': '#dca861', 'fill-opacity': .18 } },
           { id: 'doa-lobe-outline', type: 'line', source: 'doa-lobe', paint: { 'line-color': '#c98a2e', 'line-opacity': .9, 'line-width': 2 } },
           { id: 'doa-edges', type: 'line', source: 'doa-edges', paint: { 'line-color': '#e0603a', 'line-opacity': .75, 'line-width': 1.5, 'line-dasharray': [1, 2] } },
+          // The RDF-SDR's compass heading, under the DoA bearing: violet dashes, or slate finer dashes while held.
+          { id: 'rdf-heading', type: 'line', source: 'rdf-heading', filter: ['!=', ['get', 'held'], true], layout: { 'line-cap': 'butt' }, paint: { 'line-color': headingColors(consoleTheme() === 'dark').live, 'line-opacity': .95, 'line-width': 2, 'line-dasharray': [4, 2.5] } },
+          { id: 'rdf-heading-held', type: 'line', source: 'rdf-heading', filter: ['==', ['get', 'held'], true], layout: { 'line-cap': 'butt' }, paint: { 'line-color': headingColors(consoleTheme() === 'dark').held, 'line-opacity': .8, 'line-width': 2, 'line-dasharray': [1.5, 2.5] } },
           { id: 'doa-bearing-casing', type: 'line', source: 'doa-bearing', layout: { 'line-cap': 'round' }, paint: { 'line-color': '#ffffff', 'line-opacity': .85, 'line-width': 6 } },
           { id: 'doa-bearing', type: 'line', source: 'doa-bearing', layout: { 'line-cap': 'round' }, paint: { 'line-color': '#e0603a', 'line-opacity': .95, 'line-width': 3 } },
           // A held DoA that is still readable: grey and dashed, never the bearing colour.
@@ -545,6 +570,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       stationMarkerRef.current = null;
       groundMarkerRef.current?.remove();
       groundMarkerRef.current = null;
+      headingMarkerRef.current?.remove();
+      headingMarkerRef.current = null;
       appliedDataRef.current = {};
       styleReadyRef.current = false;
       map.remove();
@@ -600,6 +627,9 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     map.setPaintProperty('doa-edges', 'line-width', paint.edgeWidth);
     map.setPaintProperty('doa-lobe-outline', 'line-color', paint.lobeOutline);
     map.setPaintProperty('ground-link', 'line-color', groundLinkColor(tilesLoaded ? tone === 'dark' : theme === 'dark'));
+    const headingPaint = headingColors(tilesLoaded ? tone === 'dark' : theme === 'dark');
+    map.setPaintProperty('rdf-heading', 'line-color', headingPaint.live);
+    map.setPaintProperty('rdf-heading-held', 'line-color', headingPaint.held);
   }, [styleReady, theme, tilesLoaded, tone]);
 
   // Resizes from the window, the dashboard layout or the notices keep the
@@ -661,6 +691,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     setVisibility('doa-bearing-casing', settings.bearingVisible);
     setVisibility('doa-bearing', settings.bearingVisible);
     setVisibility('doa-provisional', settings.bearingVisible);
+    setVisibility('rdf-heading', settings.headingVisible);
+    setVisibility('rdf-heading-held', settings.headingVisible);
     // Overlay opacity scales every DoA layer; the station marker stays opaque.
     const fade = settings.overlayOpacity;
     map.setPaintProperty('doa-beam', 'fill-color', beamColorExpression(settings.heatPalette));
@@ -671,7 +703,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     map.setPaintProperty('doa-heat', 'heatmap-intensity', settings.heatIntensity);
     map.setPaintProperty('doa-lobe-fill', 'fill-opacity', settings.lobeOpacity * fade);
     for (const [id, property, base] of LINE_LAYER_OPACITY) map.setPaintProperty(id, property, base * fade);
-  }, [styleReady, settings.heatmapVisible, settings.heatStyle, settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.edgesVisible, settings.bearingVisible, settings.heatPalette, settings.heatOpacity, settings.heatIntensity, settings.heatBlur, settings.lobeOpacity, settings.overlayOpacity]);
+  }, [styleReady, settings.heatmapVisible, settings.heatStyle, settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.edgesVisible, settings.bearingVisible, settings.headingVisible, settings.heatPalette, settings.heatOpacity, settings.heatIntensity, settings.heatBlur, settings.lobeOpacity, settings.overlayOpacity]);
 
   // Station marker, popup, and camera framing. shouldReframeStation decides
   // when a new position frames the camera; an operator-moved camera that still
@@ -707,10 +739,32 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     const unavailable = t('map.popupUnavailable');
     // Popup text comes only from the static dictionary, internal enums, and formatted numbers.
     stationPopupRef.current?.setLngLat([stationCoordinate.longitude, stationCoordinate.latitude]).setHTML(
-      `<div class="station-popup-content"><strong>${t('map.stationTitle')}</strong><dl><dt>${t('map.popupSource')}</dt><dd>${stationCoordinate.source}${station.held ? ' · STALE' : ''}</dd><dt>${t('map.popupPosition')}</dt><dd>${stationCoordinate.latitude.toFixed(6)}°, ${stationCoordinate.longitude.toFixed(6)}°</dd><dt>${t('map.popupBearing')}</dt><dd>${bearing === null ? unavailable : `${formatBearing(bearing, 1)}°`}</dd><dt>${t('map.popupTheta')}</dt><dd>${theta === null ? unavailable : `${formatBearing(theta, 1)}°`}</dd><dt>${t('map.popupOffset')}</dt><dd>${Number(offset.toFixed(1))}°</dd><dt>${t('map.popupHalfPower')}</dt><dd>${geometry.halfPower ? `${geometry.halfPower.widthDeg}°` : unavailable}</dd><dt>${t('map.popupVector')}</dt><dd>${values ? t('map.popupBins') : unavailable}</dd></dl></div>`,
+      `<div class="station-popup-content"><strong>${t('map.stationTitle')}</strong><dl><dt>${t('map.popupSource')}</dt><dd>${stationCoordinate.source}${station.held ? ' · STALE' : ''}</dd><dt>${t('map.popupPosition')}</dt><dd>${stationCoordinate.latitude.toFixed(6)}°, ${stationCoordinate.longitude.toFixed(6)}°</dd><dt>${t('map.popupBearing')}</dt><dd>${bearing === null ? unavailable : `${formatBearing(bearing, 1)}°`}</dd><dt>${t('map.popupTheta')}</dt><dd>${theta === null ? unavailable : `${formatBearing(theta, 1)}°`}</dd><dt>${t('map.popupOffset')}</dt><dd>${Number(offset.toFixed(1))}°</dd>${heading ? `<dt>${t('map.popupHeading')}</dt><dd>${headingPopupText(heading, unavailable)}</dd>` : ''}<dt>${t('map.popupHalfPower')}</dt><dd>${geometry.halfPower ? `${geometry.halfPower.widthDeg}°` : unavailable}</dd><dt>${t('map.popupVector')}</dt><dd>${values ? t('map.popupBins') : unavailable}</dd></dl></div>`,
     );
     stationMarkerRef.current.setLngLat([stationCoordinate.longitude, stationCoordinate.latitude]);
-  }, [styleReady, stationCoordinate, gpsSource, station.held, bearing, theta, offset, values, geometry.halfPower, t]);
+  }, [styleReady, stationCoordinate, gpsSource, station.held, bearing, theta, offset, values, geometry.halfPower, heading, t]);
+
+  // The heading triangle on the station circle. rotationAlignment 'map' keeps
+  // it on the geographic heading while the map rotates; it takes no clicks, so
+  // the station marker under it still opens its popup.
+  const triangleDeg = settings.headingVisible && stationCoordinate && headingDeg !== null && headingState !== 'UNAVAILABLE' ? headingDeg : null;
+  const triangleHeld = headingState !== 'OK';
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady || triangleDeg === null || !stationCoordinate) {
+      headingMarkerRef.current?.remove();
+      headingMarkerRef.current = null;
+      return;
+    }
+    if (!headingMarkerRef.current) {
+      const element = document.createElement('div');
+      element.className = 'rdf-heading-marker';
+      element.setAttribute('aria-hidden', 'true');
+      headingMarkerRef.current = new maplibregl.Marker({ element, anchor: 'center', rotationAlignment: 'map', pitchAlignment: 'map' }).setLngLat([stationCoordinate.longitude, stationCoordinate.latitude]).addTo(map);
+    }
+    headingMarkerRef.current.getElement().classList.toggle('is-held', triangleHeld);
+    headingMarkerRef.current.setRotation(triangleDeg).setLngLat([stationCoordinate.longitude, stationCoordinate.latitude]);
+  }, [styleReady, stationCoordinate, triangleDeg, triangleHeld]);
 
   // Groundstation marker: a square marked GS, apart from the RDF-SDR's round
   // marker. It only moves on data updates; the camera stays where it is.
@@ -757,9 +811,13 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     }
     if (bearingDrawn && bearing !== null) add(destination(stationCoordinate, bearing, g.maxDistanceM * 1.1), 'doa-bearing-label', `${formatBearing(bearing, 1)}°`);
     if (provisionalDrawn && provisionalBearing !== null) add(destination(stationCoordinate, provisionalBearing, g.maxDistanceM * 1.1), 'doa-bearing-label is-provisional', `${t('polar.notValid')} · ${formatBearing(provisionalBearing, 1)}°`);
+    if (headingDrawn && heading?.headingDeg != null) {
+      const near = [bearingDrawn ? bearing : null, provisionalDrawn ? provisionalBearing : null];
+      add(headingLabelPosition(stationCoordinate, heading.headingDeg, g.maxDistanceM, near), headingHeld ? 'doa-heading-label is-held' : 'doa-heading-label', headingLabel(heading, t));
+    }
     if (link) add(link.label, link.live ? 'ov-ground-label' : 'ov-ground-label is-reference', groundLinkLabel(link, t));
     return () => { for (const marker of markers) marker.remove(); };
-  }, [styleReady, stationCoordinate, geometry.rings, bearing, bearingDrawn, provisionalBearing, provisionalDrawn, link, g.ringsVisible, g.guidesVisible, g.labelsVisible, g.maxDistanceM, t]);
+  }, [styleReady, stationCoordinate, geometry.rings, bearing, bearingDrawn, provisionalBearing, provisionalDrawn, heading, headingDrawn, headingHeld, link, g.ringsVisible, g.guidesVisible, g.labelsVisible, g.maxDistanceM, t]);
 
   // Hover (or tap) readout: geographic bearing, its theta_0 bin and shifted dB value, and ground distance from the station.
   useEffect(() => {
@@ -856,6 +914,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       if (settings.edgesVisible) strokeLines(geometry.data['doa-edges'], darkBackground ? 'rgba(255,138,92,.8)' : 'rgba(224,96,58,.75)', darkBackground ? 2 : 1.5, [2, 4]);
       if (settings.bearingVisible) strokeLines(geometry.data['doa-bearing'], '#e0603a', 3, [9, 5]);
       if (settings.bearingVisible) strokeLines(geometry.data['doa-provisional'], darkBackground ? 'rgba(170,182,194,.9)' : 'rgba(96,108,120,.9)', 3, [6, 5]);
+      const headingPaint = headingColors(darkBackground);
+      if (settings.headingVisible) strokeLines(headingLine, headingHeld ? headingPaint.held : headingPaint.live, 2, headingHeld ? [3, 5] : [8, 5]);
       // The station and groundstation markers and their line stay opaque, as on the map.
       context.globalAlpha = 1;
       if (link) strokeLines(link.features, link.live ? (darkBackground ? GROUND_LINK_LIVE.dark : GROUND_LINK_LIVE.light) : (darkBackground ? GROUND_LINK_REFERENCE.dark : GROUND_LINK_REFERENCE.light), 3, [2, 5]);
@@ -867,6 +927,15 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       const origin = project([stationCoordinate.longitude, stationCoordinate.latitude]);
       context.save(); context.fillStyle = '#ebbc70'; context.strokeStyle = '#172027'; context.lineWidth = 3;
       context.beginPath(); context.arc(origin.x, origin.y, 7, 0, Math.PI * 2); context.fill(); context.stroke(); context.restore();
+      if (settings.headingVisible && heading?.headingDeg != null && heading.state !== 'UNAVAILABLE') {
+        // The screen direction of the heading follows the projection, so a rotated map turns the triangle too.
+        const ahead = project(destination(stationCoordinate, heading.headingDeg, Math.max(1, settings.maxDistanceM)));
+        const angle = Math.atan2(ahead.x - origin.x, origin.y - ahead.y);
+        context.save(); context.translate(origin.x, origin.y); context.rotate(angle);
+        context.globalAlpha = headingHeld ? .6 : 1;
+        context.fillStyle = headingHeld ? HEADING_HELD.dark : HEADING_LIVE.light; context.strokeStyle = '#ffffff'; context.lineWidth = 1.5;
+        context.beginPath(); context.moveTo(0, -22); context.lineTo(7, -11); context.lineTo(-7, -11); context.closePath(); context.fill(); context.stroke(); context.restore();
+      }
       if (drawText) {
         context.save();
         context.font = '700 11px ui-monospace, SFMono-Regular, Menlo, monospace';
@@ -884,6 +953,10 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
         if (settings.bearingVisible && bearingLine && bearing !== null) label(destination(stationCoordinate, bearing, settings.maxDistanceM * 1.1), `${formatBearing(bearing, 1)}°`, '#11171e');
         const provisionalLine = geometry.data['doa-provisional'].features.length > 0;
         if (settings.bearingVisible && provisionalLine && provisionalBearing !== null) label(destination(stationCoordinate, provisionalBearing, settings.maxDistanceM * 1.1), `${t('polar.notValid')} · ${formatBearing(provisionalBearing, 1)}°`, '#5b6670');
+        if (settings.headingVisible && headingLine.features.length > 0 && heading?.headingDeg != null) {
+          const near = [bearingLine ? bearing : null, provisionalLine ? provisionalBearing : null];
+          label(headingLabelPosition(stationCoordinate, heading.headingDeg, settings.maxDistanceM, near), headingLabel(heading, t), headingHeld ? '#5b6670' : HEADING_LIVE.light);
+        }
         if (link) label(link.label, groundLinkLabel(link, t), link.live ? '#11171e' : '#5b6670');
         context.restore();
       }
@@ -901,7 +974,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       map?.off('resize', schedule);
       canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
     };
-  }, [fallbackActive, mapState, theme, tilesLoaded, tone, styleReady, stationCoordinate, geometry, bearing, provisionalBearing, ground, link, settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.edgesVisible, settings.bearingVisible, settings.labelsVisible, settings.overlayOpacity, settings.lobeOpacity, settings.maxDistanceM, settings.lobeDistanceM, t]);
+  }, [fallbackActive, mapState, theme, tilesLoaded, tone, styleReady, stationCoordinate, geometry, bearing, provisionalBearing, heading, headingLine, headingHeld, ground, link, settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.edgesVisible, settings.bearingVisible, settings.headingVisible, settings.labelsVisible, settings.overlayOpacity, settings.lobeOpacity, settings.maxDistanceM, settings.lobeDistanceM, t]);
 
   const reducedMotion = prefersReducedMotion;
   const resetView = () => {
@@ -985,7 +1058,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
         ) : null}
       </div>
       <div className="map-bottom-overlay">
-        <OverlayLegend settings={settings} scale={scale} saturation={saturation} ringStepM={niceRingStep(settings.maxDistanceM)} halfPower={geometry.halfPower} />
+        <OverlayLegend settings={settings} scale={scale} saturation={saturation} ringStepM={niceRingStep(settings.maxDistanceM)} halfPower={geometry.halfPower} heading={settings.headingVisible && headingDrawn ? (headingHeld ? 'held' : 'live') : null} />
         {stationCoordinate ? <div className="map-coordinate" aria-label={t('map.coordinatesAria')}><span>{station.held ? t('map.sourceHeld') : t(coordinateSourceKey(stationCoordinate.source))}</span><strong>{stationCoordinate.latitude.toFixed(6)}°, {stationCoordinate.longitude.toFixed(6)}°</strong><small>{dataLabel}</small></div> : null}
       </div>
     </div>

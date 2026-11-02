@@ -534,6 +534,13 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 :root:not([data-theme='light']) .doa-cardinal-label { box-shadow: 0 0 0 1px rgba(230, 237, 243, .45); }
 .doa-bearing-label { padding: 4px 7px; border: 1px solid #e0603a; border-radius: 4px; background: #11171e; color: #ffffff; font-size: 12px; font-weight: 700; box-shadow: 0 2px 8px rgba(0, 0, 0, .35); }
 .doa-bearing-label.is-provisional { border: 1px dashed #8d99a6; background: #3b434b; color: #e6eaee; }
+.doa-heading-label { padding: 3px 6px; border: 1px solid #a98bff; border-radius: 4px; background: #11171e; color: #ffffff; font-size: 11.5px; font-weight: 700; box-shadow: 0 2px 8px rgba(0, 0, 0, .35); }
+.doa-heading-label.is-held { border: 1px dashed #8d99a6; background: #3b434b; color: #e6eaee; }
+/* The RDF-SDR heading: a triangle just outside the 44 px station marker, turned by MapLibre (rotationAlignment 'map'). */
+.rdf-heading-marker { width: 76px; height: 76px; pointer-events: none; filter: drop-shadow(0 0 1px #ffffff) drop-shadow(0 0 1px #ffffff) drop-shadow(0 1px 2px rgba(0, 0, 0, .5)); }
+.rdf-heading-marker::before { position: absolute; top: 0; left: 50%; width: 14px; height: 12px; margin-left: -7px; background: #6c45d8; clip-path: polygon(50% 0, 100% 100%, 0 100%); content: ''; }
+.rdf-heading-marker.is-held { opacity: .65; }
+.rdf-heading-marker.is-held::before { background: #8d99a6; }
 .doa-hover-popup .maplibregl-popup-content { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); box-shadow: 0 6px 18px rgba(0, 0, 0, .3); pointer-events: none; }
 .doa-hover-popup { pointer-events: none; }
 .doa-hover-popup strong { font-family: var(--mono); font-size: 12.5px; }
@@ -551,6 +558,9 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 .legend-reading { color: var(--text); font-family: var(--mono); font-size: 11px; }
 .legend-edge { height: 0 !important; border-top: 2px dotted #e0603a; border-radius: 0 !important; }
 .legend-bearing { background: #e0603a; }
+.legend-heading { height: 0 !important; width: 14px !important; border-top: 2px dashed #c2a6ff; border-radius: 0 !important; }
+:root[data-theme='light'] .legend-heading:not(.is-held) { border-top-color: #5b34c4; }
+.legend-heading.is-held { border-top: 2px dotted var(--subtle); }
 .legend-scale { display: grid; grid-template-columns: auto minmax(80px, 260px) auto auto; justify-content: start; align-items: center; gap: 8px; color: var(--muted); font-family: var(--mono); font-size: 10.5px; }
 .legend-scale-mode { justify-self: start; padding: 1px 5px; border: 1px solid var(--line); border-radius: 3px; color: var(--subtle); font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase; }
 .map-overlay-legend .legend-warning { color: var(--amber); font-size: 11px; line-height: 1.4; white-space: normal; }
