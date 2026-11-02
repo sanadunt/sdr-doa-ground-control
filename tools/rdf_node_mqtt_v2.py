@@ -118,6 +118,8 @@ ACK_RESULT_KEYS = frozenset({
     "method", "live_failure",
     # Contract 1.8: the UCA radius the engine's band rule set (or required, with SPACING_SET_BY_ENGINE_BAND).
     "band_spacing_m",
+    # Contract 1.9: a squelch level sent while the squelch was automatic switched it to Manual.
+    "squelch_mode",
 })
 _SECRET_KEY_WORDS = ("challenge", "secret", "password", "passwd", "token", "credential", "private")
 
@@ -131,13 +133,19 @@ SAFE_SETTINGS_MAP = {
     # Contract 1.8: the UCA radius in metres.
     "ant_spacing_m": ("ant_spacing_meters", 1),
 }
-SAFE_SETTINGS_SCALARS = ("ant_arrangement", "doa_method", "active_vfos", "output_vfo", "en_doa")
+# Contract 1.9: the edge's text fields (source.STRING_FIELDS), kept only with one of its values.
+SAFE_SETTINGS_TEXT = {"vfo0_squelch_mode": ("vfo_squelch_mode_0", ("Manual", "Auto", "Auto Channel", "Default"))}
+SAFE_SETTINGS_SCALARS = (
+    "ant_arrangement", "doa_method", "active_vfos", "output_vfo", "en_doa", "vfo_default_squelch_mode",
+)
 
 _NODE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _SID_RE = re.compile(r"^[0-9a-f]{8}$")
 _IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
 COMMAND_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 _WORD_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:+-]{0,63}$")
+# A short word or phrase, such as the squelch mode "Auto Channel" (state.rf.sqm).
+_PHRASE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.:+-]{0,31}$")
 _CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 _REASON_RE = re.compile(r"^[A-Z0-9_:-]{1,64}$")
 _FIELD_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
@@ -407,6 +415,9 @@ def _state_rf(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         ("sq", lambda: _number(named, "rf.sq", -1000, 1000)),
         # Contract 1.8: the UCA radius (ant_spacing_meters) in metres.
         ("uca", lambda: _number(named, "rf.uca", 0, 100)),
+        # Contract 1.9: the VFO0 squelch mode (Manual, Auto, Auto Channel, Default); the edge leaves
+        # rf.sq out while it is automatic. Read as a short phrase, so a future mode is shown, not dropped.
+        ("sqm", lambda: _text(named, "rf.sqm", _PHRASE_RE)),
     )
     value: Dict[str, Any] = {}
     for key, read in readers:
@@ -679,6 +690,12 @@ def safe_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
                 _note("DROPPED_FIELD", name)
                 continue
             result[name] = int(round(number)) if name.endswith("_hz") else number
+    for name, (key, choices) in SAFE_SETTINGS_TEXT.items():
+        if key in settings:
+            if settings[key] in choices:
+                result[name] = settings[key]
+            else:
+                _note("DROPPED_FIELD", name)
     for key in SAFE_SETTINGS_SCALARS:
         item = settings.get(key)
         if isinstance(item, (str, int, bool)) and len(str(item)) < 64:

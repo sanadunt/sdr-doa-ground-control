@@ -1,8 +1,8 @@
 import type { Branding, ConsoleConfig, MqttSnapshot, MqttTarget, RdfNodeSnapshot, TelemetrySnapshot } from './types';
 import { isMqttTransport, isMqttWsPath, normalizeMqttSnapshot, normalizeRdfNodeSnapshot } from './lib/mqttMonitor';
-import { CONFIG_PATCH_KEYS } from './lib/controlDraft';
+import { CONFIG_PATCH_KEYS, configPatchValue } from './lib/controlDraft';
 import { normalizeDataOutHostList } from './lib/dataOutHosts';
-import type { ConfigPatchKey } from './lib/controlDraft';
+import type { ConfigPatchChanges, ConfigPatchKey, ConfigPatchNumberKey, ConfigPatchValue } from './lib/controlDraft';
 import { isConsoleAccess } from './lib/access';
 import type { ConsoleAccess } from './lib/access';
 import { normalizeHostPower } from './lib/hostPower';
@@ -357,7 +357,7 @@ export async function connectMqtt(target: MqttTarget, signal?: AbortSignal): Pro
 
 /** Validate a config.patch as Kontrol would send it, without sending it. */
 export async function dryRunConfigPatch(payload: {
-  changes: Record<string, number>;
+  changes: Record<string, number | string>;
 }, signal?: AbortSignal): Promise<Record<string, unknown>> {
   const body = await requestJson<unknown>('/api/dry-run/config-patch', {
     method: 'POST',
@@ -382,7 +382,7 @@ export interface ConfigPatchCapability {
   /** Command lifetime the server sets, in ms. */
   ttlMs: number | null;
   /** Server-side [min, max] per field in SI units (Hz, dB). Missing fields fall back to the client copy. */
-  ranges: Partial<Record<ConfigPatchKey, readonly [number, number]>>;
+  ranges: Partial<Record<ConfigPatchNumberKey, readonly [number, number]>>;
   /** The edge's gain table; empty when not reported (the client copy applies). */
   gainTableDb: number[];
 }
@@ -525,9 +525,10 @@ function normalizeTopic(value: unknown): string | null {
 
 function normalizeConfigPatchCapability(value: unknown): ConfigPatchCapability | null {
   if (!isObject(value)) return null;
-  const ranges: Partial<Record<ConfigPatchKey, readonly [number, number]>> = {};
+  const ranges: Partial<Record<ConfigPatchNumberKey, readonly [number, number]>> = {};
   if (isObject(value.ranges)) {
     for (const key of CONFIG_PATCH_KEYS) {
+      if (key === 'vfo0_squelch_mode') continue;
       const range = value.ranges[key];
       if (Array.isArray(range) && range.length === 2 && finiteNumber(range[0]) && finiteNumber(range[1]) && range[0] < range[1]) {
         ranges[key] = [range[0], range[1]];
@@ -624,11 +625,16 @@ function booleanOrNull(value: unknown): boolean | null {
   return typeof value === 'boolean' ? value : null;
 }
 
-function patchValues<T>(input: unknown, pick: (value: unknown) => T | null): Record<ConfigPatchKey, T | null> {
+function patchValues<T>(input: unknown, pick: (value: unknown, key: ConfigPatchKey) => T | null): Record<ConfigPatchKey, T | null> {
   const record = isObject(input) ? input : {};
   const values = {} as Record<ConfigPatchKey, T | null>;
-  for (const key of CONFIG_PATCH_KEYS) values[key] = pick(record[key]);
+  for (const key of CONFIG_PATCH_KEYS) values[key] = pick(record[key], key);
   return values;
+}
+
+/** A reported value: a finite number, or for the squelch mode one of the edge's strings (contract 1.9). */
+function patchValueOrNull(value: unknown, key: ConfigPatchKey): ConfigPatchValue | null {
+  return configPatchValue(key, value);
 }
 
 export interface ConfigReportedBroker {
@@ -666,6 +672,16 @@ export interface ConfigSettingsReport {
   ageMs: number | null;
   /** Its rev is the node's state.cfg; only then are its values the node's. */
   matchesStateCfg: boolean;
+  /**
+   * Contract 1.9, resolved on the server as the edge does (source.squelch_is_auto):
+   * whether VFO0's squelch is automatic (Auto, Auto Channel, or Default that
+   * follows one). Null from an older edge or a report of another revision.
+   */
+  squelchAuto: boolean | null;
+  /** The mode after Default is resolved (Manual, Auto, Auto Channel); null when unknown. */
+  squelchModeResolved: string | null;
+  /** settings.json vfo_default_squelch_mode, what Default follows; null when not reported. */
+  defaultSquelchMode: string | null;
 }
 
 export interface ConfigReported {
@@ -678,8 +694,8 @@ export interface ConfigReported {
   /** The revision a patch must name: the node's state.cfg. */
   baseRev: number | null;
   settings: ConfigSettingsReport | null;
-  /** Values from a settings/reported of the current revision; null otherwise. */
-  values: Record<ConfigPatchKey, number | null>;
+  /** Values from a settings/reported of the current revision (the squelch mode as its string); null otherwise. */
+  values: Record<ConfigPatchKey, ConfigPatchValue | null>;
   valueSources: Record<ConfigPatchKey, ConfigValueSource | null>;
   /** Server time the report carrying each value arrived; null when unknown. */
   valueReceivedAtMs: Record<ConfigPatchKey, number | null>;
@@ -720,6 +736,9 @@ function normalizeSettings(value: unknown): ConfigSettingsReport | null {
     receivedAtMs: integerOrNull(value.received_at_ms, 0),
     ageMs: integerOrNull(value.age_ms, 0),
     matchesStateCfg: value.matches_state_cfg === true,
+    squelchAuto: booleanOrNull(value.squelch_auto),
+    squelchModeResolved: squelchModeOrNull(value.squelch_mode_resolved),
+    defaultSquelchMode: squelchModeOrNull(value.vfo_default_squelch_mode),
   };
 }
 
@@ -741,7 +760,7 @@ export function normalizeConfigReported(value: unknown): ConfigReported {
     // The base revision is the node's; without a node there is none.
     baseRev: node ? integerOrNull(value.base_rev, 0) : null,
     settings: normalizeSettings(value.settings),
-    values: patchValues(value.values, finiteOrNull),
+    values: patchValues(value.values, patchValueOrNull),
     valueSources: patchValues(value.value_sources, (entry) => (oneOfValues(VALUE_SOURCES, entry) ? entry : null)),
     valueReceivedAtMs: patchValues(value.value_received_at_ms, (entry) => integerOrNull(entry, 0)),
     pendingCommandId: commandIdOrNull(value.pending_command_id),
@@ -760,7 +779,7 @@ export async function getConfigReported(signal?: AbortSignal): Promise<ConfigRep
 }
 
 export interface ConfigPatchRequest {
-  changes: Partial<Record<ConfigPatchKey, number>>;
+  changes: ConfigPatchChanges;
   /** The node's state.cfg the operator reviewed. */
   base_rev: number;
   /** Always true: the operator reviewed the change in Kontrol. */
@@ -777,15 +796,15 @@ export interface ConfigCommandAccepted {
   issuedMs: number | null;
   expiresMs: number | null;
   ttlMs: number | null;
-  changes: Partial<Record<ConfigPatchKey, number>>;
+  changes: ConfigPatchChanges;
 }
 
-function patchChanges(value: unknown): Partial<Record<ConfigPatchKey, number>> {
-  const changes: Partial<Record<ConfigPatchKey, number>> = {};
+function patchChanges(value: unknown): ConfigPatchChanges {
+  const changes: ConfigPatchChanges = {};
   if (!isObject(value)) return changes;
   for (const key of CONFIG_PATCH_KEYS) {
-    const entry = value[key];
-    if (finiteNumber(entry)) changes[key] = entry;
+    const entry = configPatchValue(key, value[key]);
+    if (entry !== null) changes[key] = entry;
   }
   return changes;
 }
@@ -866,6 +885,8 @@ export interface ConfigCommandAck {
    * patch, or the one it requires (FAILED SPACING_SET_BY_ENGINE_BAND).
    */
   bandSpacingM: number | null;
+  /** Contract 1.9: "Manual" when a level sent while the squelch was automatic switched it to Manual. */
+  squelchMode: string | null;
   receivedAtMs: number | null;
 }
 
@@ -878,7 +899,7 @@ export interface ConfigCommandStatus {
   issuedMs: number | null;
   expiresMs: number | null;
   baseRev: number | null;
-  changes: Partial<Record<ConfigPatchKey, number>>;
+  changes: ConfigPatchChanges;
   pubackReason: number | null;
   monitorRestarted: boolean;
   ack: ConfigCommandAck | null;
@@ -907,6 +928,11 @@ function normalizeProof(value: unknown): ConfigCommandAck['proof'] {
   return proof;
 }
 
+/** A squelch mode the edge named: a short word or phrase (Manual, Auto Channel), else null. */
+function squelchModeOrNull(value: unknown): string | null {
+  return typeof value === 'string' && /^[A-Za-z][A-Za-z ]{0,31}$/u.test(value) ? value : null;
+}
+
 function spacingOrNull(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 100 ? value : null;
 }
@@ -926,6 +952,7 @@ function normalizeAck(value: unknown): ConfigCommandAck | null {
     method: codeOrNull(value.method),
     liveFailure: reasonOrNull(value.live_failure),
     bandSpacingM: spacingOrNull(value.band_spacing_m),
+    squelchMode: squelchModeOrNull(value.squelch_mode),
     receivedAtMs: integerOrNull(value.received_at_ms, 0),
   };
 }

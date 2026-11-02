@@ -58,12 +58,15 @@ describe('getConfigReported', () => {
     expect(reported.baseRev).toBe(42);
     // An older edge sends no capabilities.config_fields.
     expect(reported.node).toEqual({ sid: 'e2fe561d', cfg: 42, healthFresh: true, healthAgeMs: 400, remoteCommands: true, remoteConfigPatch: false, configFields: null });
-    expect(reported.settings).toEqual({ id: 'gc-000000000000000000000001', rev: 42, receivedAtMs: 900, ageMs: 100, matchesStateCfg: true });
+    expect(reported.settings).toEqual({
+      id: 'gc-000000000000000000000001', rev: 42, receivedAtMs: 900, ageMs: 100, matchesStateCfg: true,
+      squelchAuto: null, squelchModeResolved: null, defaultSquelchMode: null,
+    });
     expect(reported.broker).toEqual({ host: '10.90.0.1', port: 9001, transport: 'websockets', connection: 'connected' });
-    expect(reported.values).toEqual({ center_frequency_hz: 416588000, gain_db: 15.7, vfo0_frequency_hz: null, vfo0_bandwidth_hz: null, vfo0_squelch_db: null, ant_spacing_m: null });
+    expect(reported.values).toEqual({ center_frequency_hz: 416588000, gain_db: 15.7, vfo0_frequency_hz: null, vfo0_bandwidth_hz: null, vfo0_squelch_db: null, ant_spacing_m: null, vfo0_squelch_mode: null });
     expect(reported.valueSources.vfo0_frequency_hz).toBeNull();
     expect(reported.valueSources.gain_db).toBe('settings_reported');
-    expect(reported.valueReceivedAtMs).toEqual({ center_frequency_hz: 900, gain_db: null, vfo0_frequency_hz: null, vfo0_bandwidth_hz: null, vfo0_squelch_db: null, ant_spacing_m: null });
+    expect(reported.valueReceivedAtMs).toEqual({ center_frequency_hz: 900, gain_db: null, vfo0_frequency_hz: null, vfo0_bandwidth_hz: null, vfo0_squelch_db: null, ant_spacing_m: null, vfo0_squelch_mode: null });
     expect(reported.settingsRequest).toMatchObject({ op: 'config.get', state: 'acked', final: true, ack: { status: 'REJECTED', error: 'TLS_REQUIRED_FOR_SETTINGS_REPORT' } });
   });
 
@@ -178,7 +181,7 @@ describe('getConfigPatchStatus', () => {
     expect(status?.ack).toEqual({
       status: 'APPLIED', final: true, error: null, reason: null, revision: 43, persisted: true, receivedAtMs: 5,
       proof: { center_frequency_hz: 'FRESH_DAQ_RF_CENTER', vfo0_frequency_hz: 'FRESH_DOA_FREQUENCY' }, method: null, liveFailure: null,
-      bandSpacingM: null,
+      bandSpacingM: null, squelchMode: null,
     });
   });
 

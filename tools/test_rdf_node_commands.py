@@ -286,7 +286,7 @@ class EnvelopeTests(unittest.TestCase):
     def test_uca_spacing_follows_the_edge_rules(self) -> None:
         # Edge 1.8.0 (helper.validate_changes): ant_spacing_m 0.05..1.0 m, rounded to 4 decimals,
         # sent last (source.FIELD_MAP order).
-        self.assertEqual(cmds.PATCH_FIELDS[-1], "ant_spacing_m")
+        self.assertEqual(cmds.PATCH_FIELDS[5], "ant_spacing_m")
         self.assertEqual(cmds.LEGACY_PATCH_FIELDS, cmds.PATCH_FIELDS[:5])
         self.assertEqual(cmds.validate_patch_changes({"ant_spacing_m": 0.12804}), {"ant_spacing_m": 0.128})
         self.assertEqual(cmds.validate_patch_changes({"ant_spacing_m": 1}), {"ant_spacing_m": 1.0})
@@ -310,6 +310,66 @@ class EnvelopeTests(unittest.TestCase):
         command["changes"] = {"ant_spacing_m": 0.12804}
         with self.assertRaises(cmds.CommandRefused):
             cmds.validate_command(command)
+
+    def test_squelch_mode_and_whole_db_follow_the_edge_rules(self) -> None:
+        # Edge 1.9.0: vfo0_squelch_mode is one of the four exact strings, sent last (source.FIELD_MAP
+        # order); anything else is SQUELCH_MODE_INVALID (helper.validate_changes, control.py).
+        self.assertEqual(cmds.PATCH_FIELDS[-1], "vfo0_squelch_mode")
+        self.assertEqual(cmds.SQUELCH_MODES, ("Manual", "Auto", "Auto Channel", "Default"))
+        self.assertEqual(cmds.choices_view(), {"vfo0_squelch_mode": ["Manual", "Auto", "Auto Channel", "Default"]})
+        self.assertNotIn("vfo0_squelch_mode", cmds.ranges_view())
+        for mode in cmds.SQUELCH_MODES:
+            self.assertEqual(cmds.validate_patch_changes({"vfo0_squelch_mode": mode}), {"vfo0_squelch_mode": mode})
+        for bad in ("auto", "AUTO", "Auto channel", "Auto  Channel", " Manual", "", None, 1, True, ["Auto"]):
+            with self.subTest(mode=bad):
+                with self.assertRaises(cmds.CommandRefused) as raised:
+                    cmds.validate_patch_changes({"vfo0_squelch_mode": bad})
+                self.assertEqual(raised.exception.code, "SQUELCH_MODE_INVALID")
+                self.assertEqual(raised.exception.extra["choices"], list(cmds.SQUELCH_MODES))
+        self.assertEqual(
+            list(cmds.validate_patch_changes({"vfo0_squelch_mode": "Manual", "vfo0_squelch_db": -80, "gain_db": 15.7,
+                                              "ant_spacing_m": 0.128})),
+            ["gain_db", "vfo0_squelch_db", "ant_spacing_m", "vfo0_squelch_mode"],
+        )
+        # The edge writes the squelch in whole dB and rounds a fraction with Python's round(), never refusing it.
+        for value, whole in ((-40.7, -41), (-40.2, -40), (-40.5, -40), (-41.5, -42), (-80, -80), (-80.0, -80),
+                             (49.6, 50), (-199.6, -200)):
+            with self.subTest(squelch=value):
+                normalized = cmds.validate_patch_changes({"vfo0_squelch_db": value})
+                self.assertEqual(normalized, {"vfo0_squelch_db": whole})
+                self.assertIs(type(normalized["vfo0_squelch_db"]), int)
+        # The range is checked before rounding, as finite(val, -200, 50) does on the edge.
+        for value in (50.4, -200.4):
+            with self.assertRaises(cmds.CommandRefused):
+                cmds.validate_patch_changes({"vfo0_squelch_db": value})
+        before = ["ant_spacing_m", "center_frequency_hz", "gain_db", "vfo0_bandwidth_hz", "vfo0_frequency_hz",
+                  "vfo0_squelch_db"]
+        command = cmds.build_command(
+            cmds.OP_CONFIG_PATCH, command_id="gc-" + "a" * 24, sid="0123abcd", boot="boot-1", base_rev=4,
+            issued_ms=1_000, changes={"vfo0_squelch_db": -80, "vfo0_squelch_mode": "Manual"},
+        )
+        self.assertEqual(cmds.validate_command(command)["changes"], {"vfo0_squelch_db": -80, "vfo0_squelch_mode": "Manual"})
+        self.assertEqual(cmds.encode_command(command).count(b'"vfo0_squelch_mode":"Manual"'), 1)
+        # With the squelch mode (edge 1.9.0) a fraction or a float is not the normalized form.
+        for changes in ({"vfo0_squelch_db": -40.7, "vfo0_squelch_mode": "Manual"},
+                        {"vfo0_squelch_db": -80.0, "vfo0_squelch_mode": "Manual"}):
+            command["changes"] = changes
+            with self.assertRaises(cmds.CommandRefused):
+                cmds.validate_command(command)
+        # An older edge keeps the squelch as sent: there it goes out unrounded, as before.
+        self.assertEqual(cmds.validate_patch_changes({"vfo0_squelch_db": -40.7}, whole_db=False), {"vfo0_squelch_db": -40.7})
+        command["changes"] = {"vfo0_squelch_db": -40.7}
+        self.assertEqual(cmds.validate_command(command)["changes"], {"vfo0_squelch_db": -40.7})
+        self.assertFalse(cmds.node_writes_whole_db(None))
+        self.assertFalse(cmds.node_writes_whole_db(before))
+        self.assertTrue(cmds.node_writes_whole_db(sorted(cmds.PATCH_FIELDS)))
+        command["changes"] = {"vfo0_squelch_mode": "auto"}
+        with self.assertRaises(cmds.CommandRefused) as raised:
+            cmds.validate_command(command)
+        self.assertEqual(raised.exception.code, "SQUELCH_MODE_INVALID")
+        # Edge 1.8.0 lists no squelch mode: a console never sends it there.
+        self.assertNotIn("vfo0_squelch_mode", cmds.node_patch_fields(before))
+        self.assertNotIn("vfo0_squelch_mode", cmds.node_patch_fields(None))
 
     def test_the_fields_a_node_takes(self) -> None:
         legacy = cmds.LEGACY_PATCH_FIELDS
@@ -421,7 +481,7 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual(done["ack"], {
             "status": "APPLIED", "final": True, "error": None, "reason": None, "revision": 2,
             "proof": {"center_frequency_hz": "FRESH_DAQ_RF_CENTER", "vfo0_frequency_hz": "FRESH_DOA_FREQUENCY"},
-            "persisted": True, "method": None, "live_failure": None, "band_spacing_m": None, "t": json.loads(applied["payload"])["t"], "received_at_ms": self.monitor.clock,
+            "persisted": True, "method": None, "live_failure": None, "band_spacing_m": None, "squelch_mode": None, "t": json.loads(applied["payload"])["t"], "received_at_ms": self.monitor.clock,
         })
         self.assertIsNone(self.tracker.in_flight(self.monitor))
 

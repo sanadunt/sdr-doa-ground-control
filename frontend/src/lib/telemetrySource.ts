@@ -165,6 +165,16 @@ export interface RfSettings {
   squelchDb: number | null;
   /** The UCA radius in metres (state.rf.uca, edge 1.8.0). */
   ucaM: number | null;
+  /**
+   * The VFO0 squelch mode as the edge names it (state.rf.sqm, edge 1.9.0:
+   * Manual, Auto, Auto Channel, Default); null from an older edge.
+   */
+  squelchMode?: string | null;
+}
+
+/** A squelch mode as the edge sent it: a short word or phrase, else null. */
+function squelchModeOrNull(value: unknown): string | null {
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9 _.:+-]{0,31}$/u.test(value) ? value : null;
 }
 
 /**
@@ -186,9 +196,10 @@ export function snapshotRf(snapshot: TelemetrySnapshot | null | undefined): RfSe
     bandwidthHz: bandwidth === null ? null : Math.round(bandwidth),
     squelchDb: inRange(rf.vfo0_squelch_db, -200, 50),
     ucaM: inRange(rf.uca_m, 0.001, 100),
+    squelchMode: squelchModeOrNull(rf.squelch_mode),
   };
   return view.centerHz === null && view.vfo0Hz === null && view.gainDb === null && view.bandwidthHz === null && view.squelchDb === null
-    && view.ucaM === null ? null : view;
+    && view.ucaM === null && view.squelchMode === null ? null : view;
 }
 
 /** Frequency and power of one DoA record. */

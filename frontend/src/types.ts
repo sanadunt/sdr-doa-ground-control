@@ -182,6 +182,11 @@ export interface SnapshotRf {
   vfo0_squelch_db?: number | null;
   /** Contract 1.8: the UCA radius (settings.json ant_spacing_meters) in metres. */
   uca_m?: number | null;
+  /**
+   * Contract 1.9: the VFO0 squelch mode (Manual, Auto, Auto Channel, Default).
+   * While it is automatic the edge sends no level, so vfo0_squelch_db is null.
+   */
+  squelch_mode?: string | null;
 }
 
 /**

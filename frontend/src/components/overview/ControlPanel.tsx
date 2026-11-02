@@ -2,7 +2,7 @@ import type { JSX, ReactNode } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, getAdminStatus, getConfigPatchStatus, getConfigReported, logoutAdmin, requestConfigGet, sendConfigPatch } from '../../api';
 import type { ConfigCommandStatus, ConfigReported, ConsoleCapabilities } from '../../api';
-import type { ConfigPatchChanges, ConfigPatchKey, ControlDraftRequest } from '../../lib/controlDraft';
+import type { ConfigPatchChanges, ConfigPatchKey, ConfigPatchValue, ControlDraftRequest } from '../../lib/controlDraft';
 import {
   CONFIG_PATCH_ERROR_KEYS,
   GAIN_TABLE_DB,
@@ -16,17 +16,22 @@ import {
   draftFromReported,
   draftWithBand,
   draftWithCenter,
+  draftWithSquelchLevel,
   fieldFor,
+  fieldValueText,
   isConfigPatchErrorCode,
   mergeIntoDraft,
   parseDraft,
   plainNumber,
   rangeParts,
+  reportedSquelch,
   settingsReadView,
+  squelchModeText,
   takesUca,
 } from '../../lib/configPatch';
-import type { CommandResultView, CommandStatusLike, ConfigPatchField, ConfigPatchRanges, DraftEvaluation, DraftValues, FieldEvaluation } from '../../lib/configPatch';
-import { VERIFY_WINDOW_MS, currentConfigValues, dataOutConfigValues, verifyConfigPatch } from '../../lib/configVerify';
+import { parseTypedNumber } from '../../lib/polarViewSettings';
+import type { CommandResultView, CommandStatusLike, ConfigPatchField, ConfigPatchRanges, DraftEvaluation, DraftValues, FieldEvaluation, ReportedSquelch } from '../../lib/configPatch';
+import { VERIFY_WINDOW_MS, currentConfigValues, dataOutConfigValues, dataOutDefaultSquelchMode, verifyConfigPatch } from '../../lib/configVerify';
 import type { ConfigVerification, VerifyStatus, VerifyVerdict } from '../../lib/configVerify';
 import type { TelemetrySnapshot } from '../../types';
 import { errorNotice, noticeText } from '../../lib/errorNotice';
@@ -118,9 +123,16 @@ export function controlFailure(error: unknown): ControlFailure {
 
 type HintTone = 'neutral' | 'changed' | 'error';
 
-/** The line under a field: an input error, the reported value it changes, or "not reported"; nothing otherwise. */
+/**
+ * The line under a field: an input error, the reported value it changes,
+ * "not reported", or that the RDF-SDR sets a level itself; nothing otherwise.
+ */
 function fieldHint(t: Translate, evaluation: FieldEvaluation, ranges: ConfigPatchRanges | null): { text: string; tone: HintTone } | null {
-  const range = t('control.range', rangeParts(evaluation.field, ranges));
+  const field = evaluation.field;
+  if (evaluation.locked) return { text: t('control.squelchLocked'), tone: 'neutral' };
+  if (evaluation.problem === 'choice') return { text: t('control.notAChoice'), tone: 'error' };
+  const range = field.kind === 'number' ? t('control.range', rangeParts(field, ranges)) : '';
+  if (evaluation.problem === 'empty' && field.kind === 'choice') return { text: t('control.notAChoice'), tone: 'error' };
   if (evaluation.problem === 'number') return { text: t('control.notNumber'), tone: 'error' };
   if (evaluation.problem === 'range') return { text: t('control.outOfRange', { range }), tone: 'error' };
   if (evaluation.problem === 'empty') return { text: t('control.required', { range }), tone: 'error' };
@@ -128,8 +140,12 @@ function fieldHint(t: Translate, evaluation: FieldEvaluation, ranges: ConfigPatc
   if (evaluation.problem === 'centerVfo') return { text: t('control.vfoMustFollowCenter'), tone: 'error' };
   if (evaluation.required) return { text: t('control.vfoFollowsCenter'), tone: 'changed' };
   if (evaluation.changed) {
-    const from = evaluation.reported === null ? t('control.notReported') : displayValue(evaluation.field, evaluation.reported);
-    return { text: t('control.changedFrom', { value: from }), tone: 'changed' };
+    // A typed fraction of a whole-dB field: say which whole value is sent (edge 1.9.0 writes whole dB).
+    const typed = field.kind === 'number' && field.integer && field.scale === 1 ? parseTypedNumber(evaluation.text) : null;
+    if (typed !== null && typed !== evaluation.value) {
+      return { text: t('control.wholeDb', { value: fieldValueText(t, field, evaluation.value) }), tone: 'changed' };
+    }
+    return { text: t('control.changedFrom', { value: reportedValueText(t, evaluation) }), tone: 'changed' };
   }
   if (evaluation.reported === null && evaluation.text.trim() === '') return { text: t('control.notReported'), tone: 'neutral' };
   return null;
@@ -143,7 +159,7 @@ function fieldHint(t: Translate, evaluation: FieldEvaluation, ranges: ConfigPatc
  */
 export function bandNote(t: Translate, evaluation: DraftEvaluation): string | null {
   const center = evaluation.fields.find((entry) => entry.field.key === 'center_frequency_hz');
-  if (!center?.changed || center.value === null) return null;
+  if (!center?.changed || typeof center.value !== 'number') return null;
   const rule = bandRuleFor(center.value);
   const uca = takesUca(evaluation.fields.map((entry) => entry.field));
   // A 1.8 edge's KrakenSDR sets the UCA spacing by frequency itself (30-300 MHz 0.3 m, 300-3000 MHz 0.128 m).
@@ -159,21 +175,37 @@ export function bandNote(t: Translate, evaluation: DraftEvaluation): string | nu
   });
 }
 
+/**
+ * A field's current value: the reported squelch mode while the reported
+ * squelch is automatic (its level does not run then), else the reported value.
+ */
+function reportedValueText(t: Translate, evaluation: FieldEvaluation): string {
+  if (evaluation.reportedText) return evaluation.reportedText;
+  return evaluation.reported === null ? t('control.notReported') : fieldValueText(t, evaluation.field, evaluation.reported);
+}
+
 /** Rows of the review box: label, contract key, reported value and new value. */
 export function reviewRows(t: Translate, fields: readonly FieldEvaluation[]): ControlReviewRow[] {
   return fields.filter((field) => field.changed && field.value !== null).map((field) => ({
     key: field.field.key,
     label: t(field.field.shortLabel),
-    from: field.reported === null ? t('control.notReported') : displayValue(field.field, field.reported),
-    to: displayValue(field.field, field.value),
+    from: reportedValueText(t, field),
+    to: fieldValueText(t, field.field, field.value),
   }));
 }
 
-/** Select options for a table field: every table value, and the current text when it is none of them. */
-function tableOptions(entry: FieldEvaluation, table: readonly number[]): Array<{ value: string; label: string }> {
-  const options = table.map((gain) => ({ value: plainNumber(gain), label: displayValue(entry.field, gain) }));
+/**
+ * Select options: for the gain every table value, for a choice field (the
+ * squelch mode) each value in the operator's words with the edge's string as
+ * its value; and the current text when it is none of them.
+ */
+function selectOptions(t: Translate, entry: FieldEvaluation, table: readonly number[]): Array<{ value: string; label: string }> {
+  const field = entry.field;
+  const options = field.kind === 'choice'
+    ? field.choices.map((choice) => ({ value: choice, label: fieldValueText(t, field, choice) }))
+    : table.map((gain) => ({ value: plainNumber(gain), label: displayValue(field, gain) }));
   if (entry.text.trim() !== '' && !options.some((option) => option.value === entry.text)) {
-    options.unshift({ value: entry.text, label: entry.value === null ? entry.text : displayValue(entry.field, entry.value) });
+    options.unshift({ value: entry.text, label: entry.value === null ? entry.text : fieldValueText(t, field, entry.value) });
   }
   return options;
 }
@@ -214,9 +246,9 @@ export function VerifyList({ verification, onRecheck }: { verification: ConfigVe
             <li key={row.key}>
               <div className="ov-verify-row"><span>{t(field.shortLabel)}</span><span className={`ov-tag tone-${chip.tone}`}>{chip.code}</span></div>
               <dl className="ov-verify-values">
-                <div><dt>{t('verify.sent')}</dt><dd className="ov-mono">{displayValue(field, row.sent)}</dd></div>
-                <div><dt>{t('verify.mqtt')}</dt><dd className="ov-mono">{displayValue(field, row.mqtt)}</dd></div>
-                <div><dt>{t('verify.dataOut')}</dt><dd className="ov-mono">{displayValue(field, row.dataOut)}</dd></div>
+                <div><dt>{t('verify.sent')}</dt><dd className="ov-mono">{fieldValueText(t, field, row.sent)}</dd></div>
+                <div><dt>{t('verify.mqtt')}</dt><dd className="ov-mono">{fieldValueText(t, field, row.mqtt)}</dd></div>
+                <div><dt>{t('verify.dataOut')}</dt><dd className="ov-mono">{fieldValueText(t, field, row.dataOut)}</dd></div>
               </dl>
             </li>
           );
@@ -395,21 +427,23 @@ export function ControlPanelView({
                 const hint = fieldHint(t, entry, ranges);
                 const inputId = `ov-control-${entry.field.key}`;
                 const hintId = hint ? `${inputId}-hint` : undefined;
+                const field = entry.field;
+                const select = field.kind === 'choice' || field.table === true;
                 return (
-                  <div className="ov-control-field" key={entry.field.key}>
-                    <label htmlFor={inputId}>{t(entry.field.shortLabel)}</label>
+                  <div className="ov-control-field" key={field.key}>
+                    <label htmlFor={inputId}>{t(field.shortLabel)}</label>
                     <div className={`ov-unit-input${hint?.tone === 'error' ? ' is-error' : hint?.tone === 'changed' ? ' is-changed' : ''}`}>
-                      {entry.field.table ? (
+                      {select ? (
                         <select
                           id={inputId}
                           value={entry.text}
                           disabled={!reported}
                           aria-invalid={hint?.tone === 'error' ? true : undefined}
                           aria-describedby={hintId}
-                          onChange={(event) => onDraftChange(entry.field.key, event.target.value)}
+                          onChange={(event) => onDraftChange(field.key, event.target.value)}
                         >
                           {entry.text.trim() === '' ? <option value="">—</option> : null}
-                          {tableOptions(entry, gainTable).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                          {selectOptions(t, entry, gainTable).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                         </select>
                       ) : (
                         <input
@@ -418,14 +452,14 @@ export function ControlPanelView({
                           inputMode="decimal"
                           autoComplete="off"
                           spellCheck={false}
-                          value={entry.text}
-                          disabled={!reported}
+                          value={entry.locked && entry.lockedText ? entry.lockedText : entry.text}
+                          disabled={!reported || entry.locked === true}
                           aria-invalid={hint?.tone === 'error' ? true : undefined}
                           aria-describedby={hintId}
-                          onChange={(event) => onDraftChange(entry.field.key, event.target.value)}
+                          onChange={(event) => onDraftChange(field.key, event.target.value)}
                         />
                       )}
-                      {entry.field.table ? null : <span>{entry.field.unit}</span>}
+                      {field.kind === 'number' && !field.table && !entry.locked ? <span>{field.unit}</span> : null}
                     </div>
                     {hint ? <small id={hintId} className={`ov-control-hint is-${hint.tone}`}>{hint.text}</small> : null}
                   </div>
@@ -501,6 +535,7 @@ export function ControlPanelView({
               <span>{done.view ? t(done.view.body.key, done.view.body.vars) : done.error ? noticeText(t, done.error.message) : ''}</span>
               {done.view && appliedMethodText(t, done.ack ?? null) ? <span>{appliedMethodText(t, done.ack ?? null)}</span> : null}
               {done.view && bandSpacingText(t, done.ack ?? null) ? <span>{bandSpacingText(t, done.ack ?? null)}</span> : null}
+              {done.view && squelchModeText(t, done.ack ?? null) ? <span>{squelchModeText(t, done.ack ?? null)}</span> : null}
               {done.restarted ? <span className="ov-control-small">{t('control.result.restarted')}</span> : null}
               {/* The raw codes stay visible under the operator's words. */}
               {done.view?.code ? <span className="ov-mono ov-control-small">{t('control.result.code', { code: done.view.code })}</span> : null}
@@ -549,17 +584,19 @@ export type RebaseOutcome =
 export function rebaseOutcome(
   rebase: ControlRebase,
   reported: ConfigReported | null,
-  values: Record<ConfigPatchKey, number | null> | null,
+  values: Record<ConfigPatchKey, ConfigPatchValue | null> | null,
   ranges: ConfigPatchRanges | null,
   gainTable: readonly number[],
   t: Translate,
   nowMs: number,
+  squelch: ReportedSquelch | null = reportedSquelch(reported?.settings),
 ): RebaseOutcome {
   if (!reported || reported.baseRev === null) return { kind: 'wait' };
   if (reported.baseRev === rebase.fromRev && nowMs - rebase.startedAtMs < REBASE_SETTLE_MS) return { kind: 'wait' };
-  const draft = mergeIntoDraft({}, rebase.changes);
+  const fields = configPatchFieldsFor(reported.node?.configFields);
+  const draft = mergeIntoDraft({}, rebase.changes, fields);
   const current = values ?? reported.values;
-  const next = parseDraft(configPatchFieldsFor(reported.node?.configFields), { ...draftFromReported(current), ...draft }, current, ranges, gainTable);
+  const next = parseDraft(fields, { ...draftFromReported(current, fields), ...draft }, current, ranges, gainTable, squelch);
   if (next.invalid) return { kind: 'invalid', draft };
   if (!Object.keys(next.changes).length) return { kind: 'same', draft };
   return {
@@ -571,7 +608,7 @@ export function rebaseOutcome(
 }
 
 /** Where the values the form starts from come from. */
-export function controlValueSource(reported: ConfigReported | null, dataOut: Record<ConfigPatchKey, number | null>): ControlValueSource {
+export function controlValueSource(reported: ConfigReported | null, dataOut: Record<ConfigPatchKey, ConfigPatchValue | null>): ControlValueSource {
   if (reported && Object.values(reported.valueSources).some((source) => source !== null)) return 'settings';
   if (Object.values(dataOut).some((value) => value !== null)) return 'data-out';
   return 'none';
@@ -796,9 +833,12 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
   const dataOut = useMemo(() => dataOutConfigValues(snapshot, localSnapshotFresh), [snapshot, localSnapshotFresh]);
   const values = useMemo(() => (reported ? currentConfigValues(reported.values, dataOut) : null), [reported, dataOut]);
   const valueSource = controlValueSource(reported, dataOut);
+  // Edge 1.9: whether the squelch is automatic, as the edge resolves it (settings/reported, else Data Out's default mode).
+  const dataOutDefaultMode = useMemo(() => dataOutDefaultSquelchMode(snapshot, localSnapshotFresh), [snapshot, localSnapshotFresh]);
+  const squelch = useMemo(() => reportedSquelch(reported?.settings, dataOutDefaultMode), [reported, dataOutDefaultMode]);
   const evaluation = useMemo(
-    () => parseDraft(fields, { ...(values ? draftFromReported(values) : {}), ...draft }, values ?? {}, ranges, gainTable),
-    [fields, draft, values, ranges, gainTable],
+    () => parseDraft(fields, { ...(values ? draftFromReported(values, fields) : {}), ...draft }, values ?? {}, ranges, gainTable, squelch),
+    [fields, draft, values, ranges, gainTable, squelch],
   );
 
   const enterReview = useCallback((changes: ConfigPatchChanges, rev: number | null, fields: readonly FieldEvaluation[]) => {
@@ -829,7 +869,7 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
   // operator's one explicit confirmation.
   useEffect(() => {
     if (!rebase) return;
-    const outcome = rebaseOutcome(rebase, reported, values, ranges, gainTable, t, Date.now());
+    const outcome = rebaseOutcome(rebase, reported, values, ranges, gainTable, t, Date.now(), squelch);
     if (outcome.kind === 'wait') return;
     setRebase(null);
     setDraft(outcome.draft);
@@ -846,17 +886,17 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
     setRebaseNotice(null);
     if (outcome.kind === 'same') setEditError({ code: 'NO_CHANGE', message: { key: 'control.rebaseSame' } });
     setStage('edit');
-  }, [rebase, reported, values, ranges, gainTable, t]);
+  }, [rebase, reported, values, ranges, gainTable, t, squelch]);
 
   // Merge a waiting dock request once Kontrol is unlocked and has the reported values.
   useEffect(() => {
     if (!pendingDraft || admin !== 'unlocked' || !reported || stage === 'sending' || stage === 'done') return;
     // A frequency from the dock takes its band's gain (and UCA radius), as a typed one does.
-    const merged = draftWithBand({ ...draft, ...mergeIntoDraft({}, pendingDraft) }, pendingDraft.center_frequency_hz, withUca);
+    const merged = draftWithBand({ ...draft, ...mergeIntoDraft({}, pendingDraft, fields) }, pendingDraft.center_frequency_hz, withUca);
     setPendingDraft(null);
     setDraft(merged);
     const current = values ?? reported.values;
-    const next = parseDraft(fields, { ...draftFromReported(current), ...merged }, current, ranges, gainTable);
+    const next = parseDraft(fields, { ...draftFromReported(current, fields), ...merged }, current, ranges, gainTable);
     const publishable = reported.available && capabilities?.configPatch?.enabled !== false;
     if (!next.invalid && Object.keys(next.changes).length && publishable) enterReview(next.changes, reported.baseRev, next.fields);
     else setStage('edit');
@@ -964,7 +1004,10 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
       onLock={lock}
       onUnlocked={() => { setAdminNotice(null); setAdmin('unlocked'); }}
       onDraftChange={(key, text) => setDraft((current) => (
-        key === 'center_frequency_hz' ? draftWithCenter(current, text, values ?? {}, withUca) : { ...current, [key]: text }
+        key === 'center_frequency_hz' ? draftWithCenter(current, text, values ?? {}, withUca)
+          // A typed squelch level makes the squelch mode Manual (edge 1.9.0), the only mode that uses it.
+          : key === 'vfo0_squelch_db' ? draftWithSquelchLevel(current, text, fields)
+            : { ...current, [key]: text }
       ))}
       onReview={() => { if (!evaluation.invalid && Object.keys(evaluation.changes).length) enterReview(evaluation.changes, reported?.baseRev ?? null, evaluation.fields); }}
       onReset={() => { setDraft({}); setEditError(null); }}

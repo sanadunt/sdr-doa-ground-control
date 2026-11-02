@@ -56,6 +56,8 @@ _U32 = 0xFFFFFFFF
 # settings.json ant_spacing_meters) came with edge 1.8.0 (contract 1.8); an
 # edge takes it only when its capabilities.config_fields lists it, and one
 # without that list takes the five fields before it (LEGACY_PATCH_FIELDS).
+# vfo0_squelch_mode (settings.json vfo_squelch_mode_0) came with edge 1.9.0
+# (contract 1.9): one of SQUELCH_MODES, the only field carried as text.
 PATCH_FIELDS: Tuple[str, ...] = (
     "center_frequency_hz",
     "gain_db",
@@ -63,6 +65,7 @@ PATCH_FIELDS: Tuple[str, ...] = (
     "vfo0_bandwidth_hz",
     "vfo0_squelch_db",
     "ant_spacing_m",
+    "vfo0_squelch_mode",
 )
 LEGACY_PATCH_FIELDS: Tuple[str, ...] = PATCH_FIELDS[:5]
 FREQUENCY_RANGE_HZ = (24_000_000, 1_766_000_000)
@@ -75,6 +78,17 @@ PATCH_RANGES: Dict[str, Tuple[float, float]] = {
     "ant_spacing_m": (0.05, 1.0),
 }
 INTEGER_FIELDS = frozenset({"center_frequency_hz", "vfo0_frequency_hz", "vfo0_bandwidth_hz"})
+# source.SQUELCH_MODES and STRING_FIELDS of edge 1.9.0: the text fields and the
+# exact values the edge takes (helper.validate_changes, control.py
+# _config_patch). Anything else is SQUELCH_MODE_INVALID there and here.
+SQUELCH_MODES: Tuple[str, ...] = ("Manual", "Auto", "Auto Channel", "Default")
+CHOICE_FIELDS: Dict[str, Tuple[str, ...]] = {"vfo0_squelch_mode": SQUELCH_MODES}
+# Edge 1.9.0 writes the squelch in whole dB (rdfsdr reads it with int()):
+# control.py and helper.validate_changes round a fraction with Python's
+# round() and never refuse it, so the console rounds the same way for an edge
+# that lists vfo0_squelch_mode (the two came together). An older edge keeps
+# the squelch as sent, so it gets it unrounded, as before.
+WHOLE_DB_FIELDS = frozenset({"vfo0_squelch_db"})
 # The helper accepts a gain only within 0.001 dB of one of these.
 GAIN_TABLE_DB: Tuple[float, ...] = (
     0.0, 0.9, 1.4, 2.7, 3.7, 7.7, 8.7, 12.5, 14.4, 15.7, 16.6, 19.7, 20.7, 22.9, 25.4,
@@ -106,8 +120,13 @@ def _plain(value: float) -> Any:
 
 
 def ranges_view() -> Dict[str, list]:
-    """[min, max] per field, as capabilities report them."""
+    """[min, max] per numeric field, as capabilities report them."""
     return {field: [_plain(low), _plain(high)] for field, (low, high) in PATCH_RANGES.items()}
+
+
+def choices_view() -> Dict[str, list]:
+    """The values of each text field, as capabilities report them."""
+    return {field: list(values) for field, values in CHOICE_FIELDS.items()}
 
 
 def command_topic(node_id: str, op: str) -> str:
@@ -123,7 +142,7 @@ def new_command_id() -> str:
     return COMMAND_ID_PREFIX + uuid.uuid4().hex[:24]
 
 
-def _number(field: str, value: Any) -> float:
+def _number(field: str, value: Any, whole_db: bool = True) -> float:
     low, high = PATCH_RANGES[field]
     whole = field in INTEGER_FIELDS
     unit = "Hz" if field.endswith("_hz") else "m" if field.endswith("_m") else "dB"
@@ -139,7 +158,19 @@ def _number(field: str, value: Any) -> float:
         raise CommandRefused("VALUE_OUT_OF_RANGE", message, field=field, range=[_plain(low), _plain(high)])
     if field == "ant_spacing_m":
         return round(float(value), SPACING_DECIMALS)
+    if field in WHOLE_DB_FIELDS and whole_db:
+        return int(round(value))
     return int(value) if whole else value
+
+
+def _choice(field: str, value: Any) -> str:
+    choices = CHOICE_FIELDS[field]
+    if not isinstance(value, str) or value not in choices:
+        raise CommandRefused(
+            "SQUELCH_MODE_INVALID", f"{field} must be one of " + ", ".join(choices), field=field,
+            choices=list(choices),
+        )
+    return value
 
 
 def node_patch_fields(config_fields: Any) -> Tuple[str, ...]:
@@ -154,21 +185,29 @@ def node_patch_fields(config_fields: Any) -> Tuple[str, ...]:
     return LEGACY_PATCH_FIELDS
 
 
-def validate_patch_changes(changes: Any) -> Dict[str, Any]:
+def node_writes_whole_db(config_fields: Any) -> bool:
+    """True for an edge that writes the squelch in whole dB: one that lists
+    vfo0_squelch_mode (edge 1.9.0, contract 1.9)."""
+    return "vfo0_squelch_mode" in node_patch_fields(config_fields)
+
+
+def validate_patch_changes(changes: Any, *, whole_db: bool = True) -> Dict[str, Any]:
     """The ``changes`` of a ``config.patch`` as the edge checks them, normalized.
 
     Hz fields become integers, a gain becomes its table value, and the fields
-    keep the edge's order, and the UCA radius is rounded to 4 decimals as the
-    edge rounds it. Raises ``CommandRefused`` with the first failure:
-    ``INVALID_REQUEST``, ``EMPTY_CHANGES``, ``FIELD_NOT_ALLOWED``,
-    ``VALUE_OUT_OF_RANGE``, ``GAIN_NOT_IN_APPROVED_TABLE``,
+    keep the edge's order, the UCA radius is rounded to 4 decimals and the
+    squelch to whole dB as edge 1.9.0 rounds them (``whole_db``; an older
+    edge keeps the squelch as sent). Raises ``CommandRefused``
+    with the first failure: ``INVALID_REQUEST``, ``EMPTY_CHANGES``,
+    ``FIELD_NOT_ALLOWED``, ``VALUE_OUT_OF_RANGE``, ``SQUELCH_MODE_INVALID``,
+    ``GAIN_NOT_IN_APPROVED_TABLE``,
     ``CENTER_CHANGE_REQUIRES_VFO0_TARGET`` or ``MVP_CENTER_MUST_EQUAL_VFO0``.
     """
     if not isinstance(changes, Mapping):
         raise CommandRefused("INVALID_REQUEST", "changes must be a JSON object")
     if not changes:
         raise CommandRefused("EMPTY_CHANGES", "changes must contain at least one field")
-    unknown = sorted(str(key) for key in changes if key not in PATCH_RANGES)
+    unknown = sorted(str(key) for key in changes if key not in PATCH_FIELDS)
     if unknown:
         raise CommandRefused(
             "FIELD_NOT_ALLOWED", "fields not allowed: " + ", ".join(unknown), fields=unknown,
@@ -178,7 +217,10 @@ def validate_patch_changes(changes: Any) -> Dict[str, Any]:
     for field in PATCH_FIELDS:
         if field not in changes:
             continue
-        value = _number(field, changes[field])
+        if field in CHOICE_FIELDS:
+            normalized[field] = _choice(field, changes[field])
+            continue
+        value = _number(field, changes[field], whole_db)
         if field == "gain_db":
             table = [gain for gain in GAIN_TABLE_DB if abs(value - gain) < GAIN_TABLE_TOLERANCE_DB]
             if not table:
@@ -272,16 +314,24 @@ def validate_command(command: Any, *, now_ms: Optional[int] = None) -> Dict[str,
     if op == OP_CONFIG_PATCH:
         if base_rev is None:
             raise bad("a config.patch needs the node's revision as base_rev")
-        normalized = validate_patch_changes(command["changes"])
-        given = dict(command["changes"])
+        given = dict(command["changes"]) if isinstance(command["changes"], Mapping) else command["changes"]
+        # A whole-dB squelch is sent as an integer (edge 1.9.0, which also takes the squelch
+        # mode); an older edge gets it as typed, and never with a mode.
+        whole_db = (
+            not isinstance(given, dict) or "vfo0_squelch_mode" in given
+            or type(given.get("vfo0_squelch_db")) is not float
+        )
+        normalized = validate_patch_changes(command["changes"], whole_db=whole_db)
         if list(normalized) != list(given) or any(
             type(value) is not type(given[field]) or value != given[field] for field, value in normalized.items()
         ):
             raise bad(
                 "changes must be normalized: whole Hz as integers, gains from the table, the spacing to 4 decimals,"
-                " the edge's field order"
+                " the squelch in whole dB, the edge's field order"
             )
-        for value in normalized.values():
+        for field, value in normalized.items():
+            if field in CHOICE_FIELDS:
+                continue
             if not SUBMIT_VALUE_RANGE[0] <= value <= SUBMIT_VALUE_RANGE[1]:
                 raise bad("a value is outside -200..5e9")
     return dict(command)
@@ -297,6 +347,7 @@ __all__ = [
     "COMMAND_QOS",
     "COMMAND_SUFFIXES",
     "COMMAND_TTL_MS",
+    "CHOICE_FIELDS",
     "CommandRefused",
     "GAIN_TABLE_DB",
     "LEGACY_PATCH_FIELDS",
@@ -306,11 +357,14 @@ __all__ = [
     "PATCH_FIELDS",
     "PATCH_RANGES",
     "SETTINGS_SUFFIX",
+    "SQUELCH_MODES",
     "build_command",
+    "choices_view",
     "command_topic",
     "encode_command",
     "new_command_id",
     "node_patch_fields",
+    "node_writes_whole_db",
     "ranges_view",
     "validate_command",
     "validate_patch_changes",

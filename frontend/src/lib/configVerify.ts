@@ -10,8 +10,8 @@
  */
 import type { ConfigReported } from '../api';
 import type { TelemetrySnapshot } from '../types';
-import { CONFIG_PATCH_KEYS } from './controlDraft';
-import type { ConfigPatchChanges, ConfigPatchKey } from './controlDraft';
+import { CONFIG_PATCH_KEYS, configPatchValue } from './controlDraft';
+import type { ConfigPatchChanges, ConfigPatchKey, ConfigPatchValue } from './controlDraft';
 import { settingsReadAtMs } from './snapshotRead';
 
 export type VerifyStatus = 'confirmed' | 'pending' | 'unchanged' | 'not-reported';
@@ -26,7 +26,7 @@ export interface VerifyFieldRule {
   dataOutKey: string;
   /** SI value of one settings.json unit (center_freq is MHz). */
   scale: number;
-  /** Largest difference, in SI, that still counts as the sent value. */
+  /** Largest difference, in SI, that still counts as the sent value; a text value must be equal. */
   tolerance: number;
 }
 
@@ -39,9 +39,11 @@ export const VERIFY_FIELD_RULES: Record<ConfigPatchKey, VerifyFieldRule> = {
   vfo0_squelch_db: { dataOutKey: 'vfo_squelch_0', scale: 1, tolerance: 0.05 },
   // The UCA radius in metres (edge 1.8.0); the edge rounds it to 0.1 mm and its band rule to the band value.
   ant_spacing_m: { dataOutKey: 'ant_spacing_meters', scale: 1, tolerance: 0.0005 },
+  // The squelch mode (edge 1.9.0): the exact string the edge took (Manual, Auto, Auto Channel, Default).
+  vfo0_squelch_mode: { dataOutKey: 'vfo_squelch_mode_0', scale: 1, tolerance: 0 },
 };
 
-export type ConfigValues = Record<ConfigPatchKey, number | null>;
+export type ConfigValues = Record<ConfigPatchKey, ConfigPatchValue | null>;
 
 function emptyValues(): ConfigValues {
   const values = {} as ConfigValues;
@@ -58,9 +60,9 @@ function settingsValues(snapshot: TelemetrySnapshot | null): ConfigValues {
   if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return values;
   for (const key of CONFIG_PATCH_KEYS) {
     const rule = VERIFY_FIELD_RULES[key];
-    const raw = fields[rule.dataOutKey];
-    if (typeof raw !== 'number' || !Number.isFinite(raw)) continue;
-    values[key] = rule.scale === 1 ? raw : Math.round(raw * rule.scale);
+    const raw = configPatchValue(key, fields[rule.dataOutKey]);
+    if (raw === null) continue;
+    values[key] = typeof raw === 'number' && rule.scale !== 1 ? Math.round(raw * rule.scale) : raw;
   }
   return values;
 }
@@ -70,13 +72,23 @@ export function dataOutConfigValues(snapshot: TelemetrySnapshot | null, fresh: b
   return fresh ? settingsValues(snapshot) : emptyValues();
 }
 
+/**
+ * settings.json vfo_default_squelch_mode (what a Default squelch mode follows,
+ * edge 1.9) from a fresh, live Data Out snapshot; null otherwise.
+ */
+export function dataOutDefaultSquelchMode(snapshot: TelemetrySnapshot | null, fresh: boolean): string | null {
+  const settings = snapshot?.settings;
+  if (!fresh || !snapshot || snapshot.simulation === true || settings?.available !== true) return null;
+  const fields = settings.fields;
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return null;
+  const value = (fields as Record<string, unknown>).vfo_default_squelch_mode;
+  return typeof value === 'string' && /^[A-Za-z][A-Za-z ]{0,31}$/u.test(value) ? value : null;
+}
+
 /** Current values for the Kontrol form: settings/reported first, then Data Out for what it does not carry. */
-export function currentConfigValues(mqtt: Partial<Record<ConfigPatchKey, number | null>> | null | undefined, dataOut: ConfigValues): ConfigValues {
+export function currentConfigValues(mqtt: Partial<Record<ConfigPatchKey, ConfigPatchValue | null>> | null | undefined, dataOut: ConfigValues): ConfigValues {
   const values = emptyValues();
-  for (const key of CONFIG_PATCH_KEYS) {
-    const reported = mqtt?.[key];
-    values[key] = typeof reported === 'number' && Number.isFinite(reported) ? reported : dataOut[key];
-  }
+  for (const key of CONFIG_PATCH_KEYS) values[key] = configPatchValue(key, mqtt?.[key]) ?? dataOut[key];
   return values;
 }
 
@@ -97,11 +109,11 @@ export interface VerifyInput {
 
 export interface VerifyField {
   key: ConfigPatchKey;
-  sent: number;
+  sent: ConfigPatchValue;
   /** Fresh Data Out value in SI, else null. */
-  dataOut: number | null;
+  dataOut: ConfigPatchValue | null;
   /** settings/reported value that arrived after the command was issued, else null. */
-  mqtt: number | null;
+  mqtt: ConfigPatchValue | null;
   /** Source the status was decided on. */
   basis: VerifyBasis | null;
   status: VerifyStatus;
@@ -115,7 +127,8 @@ export interface ConfigVerification {
   windowEndsAtMs: number;
 }
 
-function matches(key: ConfigPatchKey, value: number, sent: number): boolean {
+function matches(key: ConfigPatchKey, value: ConfigPatchValue, sent: ConfigPatchValue): boolean {
+  if (typeof value === 'string' || typeof sent === 'string') return value === sent;
   return Math.abs(value - sent) <= VERIFY_FIELD_RULES[key].tolerance + 1e-9;
 }
 
@@ -133,8 +146,8 @@ export function verifyConfigPatch(input: VerifyInput): ConfigVerification {
   const carried = settingsValues(input.snapshot);
   const fields: VerifyField[] = [];
   for (const key of CONFIG_PATCH_KEYS) {
-    const sent = input.changes[key];
-    if (typeof sent !== 'number' || !Number.isFinite(sent)) continue;
+    const sent = configPatchValue(key, input.changes[key]);
+    if (sent === null) continue;
     const dataOut = fresh[key];
     const mqttValue = input.reported?.values[key] ?? null;
     const receivedAt = input.reported?.valueReceivedAtMs[key] ?? null;

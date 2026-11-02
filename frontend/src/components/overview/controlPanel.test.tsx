@@ -161,7 +161,7 @@ describe('Kontrol unlocked', () => {
     expect(view({ valueSource: 'none' })).toContain('Nilai: tidak dilaporkan');
     expect(view({ valueSource: 'data-out' }, 'en')).toContain('Values: Data Out (fallback)');
     const dataOut = dataOutConfigValues({ settings: { available: true, fields: { center_freq: 433.92 } } }, true);
-    const empty = { center_frequency_hz: null, gain_db: null, vfo0_frequency_hz: null, vfo0_bandwidth_hz: null, vfo0_squelch_db: null, ant_spacing_m: null };
+    const empty = { center_frequency_hz: null, gain_db: null, vfo0_frequency_hz: null, vfo0_bandwidth_hz: null, vfo0_squelch_db: null, ant_spacing_m: null, vfo0_squelch_mode: null };
     expect(controlValueSource(REPORTED, empty)).toBe('settings');
     const unreported = normalizeConfigReported(reportedBody({ settings: null, values: {}, value_sources: {}, value_received_at_ms: {} }));
     expect(controlValueSource(unreported, dataOut)).toBe('data-out');

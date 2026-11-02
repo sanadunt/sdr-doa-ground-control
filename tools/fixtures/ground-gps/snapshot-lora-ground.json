@@ -230,6 +230,7 @@
   "gain_db": 12.5,
   "received_at_ms": 1793070140000,
   "source": "state.rf",
+  "squelch_mode": null,
   "t": 1793070140000,
   "uca_m": null,
   "vfo0_bandwidth_hz": 12500,

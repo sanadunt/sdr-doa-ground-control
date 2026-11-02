@@ -86,8 +86,22 @@ class ConfigPatchContractTests(unittest.TestCase):
             self.assertIsNotNone(high_text, key)
             self.assertEqual(float(low_text.group(1)), float(low), key)
             self.assertEqual(float(high_text.group(1)), float(high), key)
-            whole = key in rdf_node_commands.INTEGER_FIELDS
+            # Sent as a whole number: the Hz fields (the edge refuses a fraction) and, since edge
+            # 1.9.0, the squelch in whole dB (the edge rounds a fraction).
+            whole = key in rdf_node_commands.INTEGER_FIELDS or key in rdf_node_commands.WHOLE_DB_FIELDS
             self.assertIn(f"integer: {'true' if whole else 'false'}", text, key)
+
+    def test_choice_fields_match_the_edge(self) -> None:
+        # Contract 1.9: vfo0_squelch_mode takes exactly the edge's strings, and the browser sends them unchanged.
+        match = re.search(r"SQUELCH_MODES\s*=\s*\[(.*?)\]\s*as const", CONTROL_DRAFT_TS, re.S)
+        self.assertIsNotNone(match, "SQUELCH_MODES not found in controlDraft.ts")
+        self.assertEqual(tuple(re.findall(r"'([^']+)'", match.group(1))), rdf_node_commands.SQUELCH_MODES)
+        self.assertEqual(set(rdf_node_commands.CHOICE_FIELDS), {"vfo0_squelch_mode"})
+        for key in rdf_node_commands.CHOICE_FIELDS:
+            row = re.search(r"\{ key: '" + key + r"'[^}]*\}", CONFIG_PATCH_TS)
+            self.assertIsNotNone(row, key)
+            self.assertIn("kind: 'choice'", row.group(0), key)
+            self.assertNotIn(key, rdf_node_commands.PATCH_RANGES)
 
     def test_gain_table_matches_the_edge(self) -> None:
         match = re.search(r"GAIN_TABLE_DB: readonly number\[\] = \[(.*?)\];", CONFIG_PATCH_TS, re.S)

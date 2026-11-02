@@ -503,6 +503,73 @@ class Edge18Tests(unittest.TestCase):
                          {"ant_spacing_m": 0.128, "center_frequency_hz": 433_920_000})
 
 
+COMPAT_19 = json.loads((FIXTURES / "compat.e0b53bb.json").read_text(encoding="utf-8"))
+
+
+class Edge19Tests(unittest.TestCase):
+    """Contract 1.9 (edge e0b53bb, RDF Node 1.9.0): vfo0_squelch_mode, state.rf.sqm, result.squelch_mode."""
+
+    def test_a_session_of_the_1_9_edge_is_accepted(self) -> None:
+        self.assertEqual(COMPAT_19["edge_commit"], "e0b53bb")
+        self.assertIn({"file": "compat.e0b53bb.json", "kind": "compat", "edge_commit": "e0b53bb",
+                       "edge_version": COMPAT_19["edge_version"]}, MANIFEST["sets"])
+        at = COMPAT_19["generated_at_ms"]
+        store = RdfNodeV2Telemetry(NODE)
+        for message in COMPAT_19["messages"]:
+            body = json.loads(message["payload"])
+            if message["suffix"] == "ack/config":
+                store.expect_settings_report(body["id"], at)
+            store.ingest(f"sdr/v2/{NODE}/{message['suffix']}", message["payload"].encode("utf-8"), qos=message["qos"],
+                         retained=message["retain"], received_at_ms=at, message_expiry_s=message["expiry_s"])
+        snapshot = store.snapshot(at)
+        self.assertEqual((snapshot["invalid"], snapshot["valid"]), (0, snapshot["received"]))
+        state = json.loads(COMPAT_19["messages"][0]["payload"])
+        self.assertEqual(state["contract"], "1.9")
+        view = node(store, at)
+        self.assertEqual(view["session"]["rf"], state["rf"])
+        # The fixture's settings.json has no squelch mode: rdfsdr's Default -> Auto, so the edge leaves sq out.
+        self.assertNotIn("sq", view["session"]["rf"])
+        self.assertIn("vfo0_squelch_mode", store.session_view(at)["capabilities"]["config_fields"])
+
+    def test_rf_sqm_is_kept_with_or_without_sq(self) -> None:
+        for rf in ({"f": 433_920_000, "sq": -80, "sqm": "Manual"}, {"f": 433_920_000, "sqm": "Auto Channel"},
+                   {"sqm": "Auto"}, {"sqm": "Default"}):
+            with self.subTest(rf=rf):
+                store = RdfNodeV2Telemetry(NODE)
+                entry = put(store, "state", obj("state.json", rf=rf))
+                self.assertEqual(entry["status"], "CONTEXT")
+                self.assertEqual(node(store)["session"]["rf"], rf)
+                self.assertNotIn("notes", entry["payload"])
+
+    def test_a_bad_rf_sqm_is_dropped_with_a_note(self) -> None:
+        for bad in ("", 3, None, True, ["Auto"], "x" * 40, " Auto"):
+            with self.subTest(sqm=bad):
+                store = RdfNodeV2Telemetry(NODE)
+                entry = put(store, "state", obj("state.json", rf={"f": 433_920_000, "sqm": bad}))
+                self.assertEqual(entry["status"], "CONTEXT")
+                self.assertEqual(node(store)["session"]["rf"], {"f": 433_920_000})
+                self.assertIn("INVALID_FIELD:rf.sqm", entry["payload"]["notes"])
+
+    def test_the_squelch_mode_of_a_result_is_kept(self) -> None:
+        store = session_store()
+        result = {"method": "LIVE", "persisted": True, "revision": CFG + 1, "squelch_mode": "Manual"}
+        put(store, "ack/config", obj("ack-config.config-patch-rejected.json", id="gc-0123456789abcdef01234567",
+                                     status="APPLIED", rev=CFG + 1, result=result))
+        self.assertEqual(store.ack("gc-0123456789abcdef01234567")["result"], result)
+
+    def test_a_settings_report_carries_the_squelch_mode(self) -> None:
+        self.assertEqual(
+            rdf_node_mqtt_v2.safe_settings({"vfo_squelch_mode_0": "Auto Channel", "vfo_squelch_0": -40.7,
+                                            "vfo_default_squelch_mode": "Auto"}),
+            {"vfo0_squelch_db": -40.7, "vfo0_squelch_mode": "Auto Channel", "vfo_default_squelch_mode": "Auto"},
+        )
+        # A value the edge does not know is left out, as the edge's own safe_settings does.
+        self.assertEqual(rdf_node_mqtt_v2.safe_settings({"vfo_squelch_mode_0": "auto", "center_freq": 433.92}),
+                         {"center_frequency_hz": 433_920_000})
+        # An older edge's settings.json has no mode: nothing is added.
+        self.assertNotIn("vfo0_squelch_mode", rdf_node_mqtt_v2.safe_settings({"vfo_squelch_0": -80}))
+
+
 class SessionTests(unittest.TestCase):
     def test_telemetry_before_state_is_ignored(self) -> None:
         store = RdfNodeV2Telemetry(NODE)

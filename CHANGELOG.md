@@ -2,6 +2,21 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.9.0
+
+Rilis minor: tidak ada yang dihapus. Squelch VFO RDF-SDR (RDF Node Edge 1.9) kini bisa diatur dari Kontrol. Kanal `3` dan timer update memasangnya sendiri.
+
+- **Mode squelch.** Kolom baru "Mode squelch" di Kontrol, hanya muncul bila RDF-SDR mendukungnya. Pilihannya:
+  - **Manual:** memakai level dB.
+  - **Auto:** rata-rata seluruh spektrum + 5 dB.
+  - **Auto Channel:** rata-rata noise di sekitar VFO + 3 dB, yaitu squelch otomatis yang mengikuti noise di bawah sinyal.
+  - **Default:** mengikuti mode bawaan RDF-SDR.
+
+  Perubahan mode diterapkan langsung tanpa restart SDR. Selama squelch otomatis, level dB dikunci dan Kontrol menampilkan AUTO atau AUTO CHANNEL.
+- **Level squelch dalam dB bulat.** RDF-SDR hanya memakai dB bulat. Kontrol membulatkan level yang diketik, jadi form tidak lagi tetap "berubah" setelah perintah diterapkan. Mengirim level saat squelch otomatis mengubah mode ke Manual, dan hasilnya menyebutkan hal itu.
+- **Kartu RDF-SDR** menampilkan mode squelch (AUTO / AUTO CHANNEL) atau levelnya, sebagai setelan.
+- **Frekuensi di peta.** Label sudut DoA di peta kini menampilkan frekuensi rekaman DoA di atas angkanya, misalnya "481.287 MHz" di atas "134.0°". Untuk DoA yang belum valid, frekuensi ikut tampil redup.
+
 ## 3.8.0
 
 Rilis minor: tidak ada yang dihapus. Tablet di mode LAN kini bisa **mendengar** audio Receiver groundstation (keputusan pemilik 2026-11-02). Ini jalur baca baru di listener LAN, bukan penulisan; tetap tanpa login, untuk setiap klien di `allowed_clients`. Kanal `3` dan timer update memasangnya sendiri.

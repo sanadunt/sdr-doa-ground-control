@@ -171,6 +171,24 @@ Tambahan, semuanya opsional; edge yang lebih lama tetap dibaca seperti sebelumny
   - Di luar 30–3000 MHz atau dengan ULA, jarak bebas dan diterapkan langsung tanpa restart.
 - **Rule band operator di Kontrol** (VHF 136–174 MHz: gain 25.4 dB, UCA 0.3 m; UHF 400–480 MHz: gain 15.7 dB, UCA 0.128 m) kini juga mengirim `ant_spacing_m`. Gain tetap perlu dikirim, karena restart memakai gain dari file apa adanya.
 
+## 7d. Kontrak 1.9 (edge `e0b53bb`, RDF Node 1.9.0)
+
+Tambahan, semuanya opsional; edge yang lebih lama tetap dibaca seperti sebelumnya. Fixture: `compat.e0b53bb.json`.
+
+- **Field `vfo0_squelch_mode`** untuk `config.patch`: `Manual`, `Auto`, `Auto Channel` atau `Default`, ditulis ke `vfo_squelch_mode_0` di settings.json.
+  - rdfsdr hanya menghitung DoA bila puncak kanal VFO melewati squelch.
+  - Arti tiap mode:
+    - Manual memakai `vfo0_squelch_db`.
+    - Auto memakai rata-rata seluruh spektrum + 5 dB.
+    - Auto Channel memakai rata-rata noise di sekitar VFO + 3 dB.
+    - Default mengikuti `vfo_default_squelch_mode`. Mode yang kosong di file dibaca sebagai Default, dan Default yang kosong dibaca sebagai Auto.
+  - Console mengirim dan menampilkannya hanya bila `capabilities.config_fields` memuatnya; field yang tidak tercantum ditolak dengan 409 `FIELD_NOT_ALLOWED`. Nilai lain ditolak dengan `SQUELCH_MODE_INVALID`.
+  - Diterapkan langsung: `ACCEPTED` → `VERIFYING {method: LIVE}` → `APPLIED`, sekitar 7–8 detik lewat LoRa.
+- **`vfo0_squelch_db` dalam dB bulat** pada edge yang memuat field itu. Edge menulis `int(round())` dari nilai yang dikirim, dan engine membaca level di file dengan `int()`, yaitu dipotong ke arah nol.
+  - Console membulatkan nilai yang diketik operator. Level yang dilaporkan dibandingkan dan ditampilkan dalam bentuk terpotong.
+  - Mengirim level saat squelch otomatis mengubah mode ke Manual; hasilnya membawa `result.squelch_mode`.
+- **`state.rf.sqm`** adalah mode squelch. Saat squelch otomatis, `rf.sq` tidak dikirim, karena level di file tidak menentukan deteksi. Dashboard lalu menampilkan AUTO atau AUTO CHANNEL, bukan level.
+
 ## 8. Dashboard: MQTT dulu, Data Out cadangan (#8)
 
 Kode: `tools/telemetry_source.py` (keputusan sumber dan jawaban dari MQTT), `DataOutReader.read_reason()` di `tools/data_out_reader.py` (kapan Data Out dibaca), `collect_light()` di `tools/sdr_doa_collector.py` (pembacaan ringan), `frontend/src/lib/telemetrySource.ts` (badge dan view DoA di browser). Contoh jawaban: `tools/fixtures/telemetry-source/`.

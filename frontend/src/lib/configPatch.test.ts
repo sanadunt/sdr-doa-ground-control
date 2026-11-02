@@ -46,10 +46,11 @@ const REPORTED = {
 describe('config patch fields', () => {
   it('cover the edge safe fields in its order with the helper limits', () => {
     expect(CONFIG_PATCH_FIELDS.map((field) => field.key)).toEqual([...CONFIG_PATCH_KEYS]);
-    expect(CONFIG_PATCH_FIELDS.map((field) => [field.min, field.max])).toEqual([
+    expect(CONFIG_PATCH_FIELDS.map((field) => (field.kind === 'number' ? [field.min, field.max] : field.choices))).toEqual([
       [24_000_000, 1_766_000_000], [-10, 100], [24_000_000, 1_766_000_000], [100, 2_400_000], [-200, 50], [0.05, 1],
+      ['Manual', 'Auto', 'Auto Channel', 'Default'],
     ]);
-    expect(CONFIG_PATCH_FIELDS.filter((field) => field.table).map((field) => field.key)).toEqual(['gain_db']);
+    expect(CONFIG_PATCH_FIELDS.filter((field) => field.kind === 'number' && field.table).map((field) => field.key)).toEqual(['gain_db']);
     expect(GAIN_TABLE_DB).toHaveLength(29);
   });
 
@@ -185,7 +186,7 @@ describe('edge 1.8: the UCA spacing (ant_spacing_m)', () => {
     expect(LEGACY.map((field) => field.key)).toEqual(['center_frequency_hz', 'gain_db', 'vfo0_frequency_hz', 'vfo0_bandwidth_hz', 'vfo0_squelch_db']);
     expect(configPatchFieldsFor([])).toEqual(LEGACY);
     expect(configPatchFieldsFor(['something_new'])).toEqual(LEGACY);
-    expect(FIELDS.map((field) => field.key)).toEqual([...CONFIG_PATCH_KEYS]);
+    expect(FIELDS.map((field) => field.key)).toEqual(CONFIG_PATCH_KEYS.filter((key) => key !== 'vfo0_squelch_mode'));
     expect(configPatchFieldsFor(['gain_db', 'ant_spacing_m']).map((field) => field.key)).toEqual(['gain_db', 'ant_spacing_m']);
     expect([takesUca(LEGACY), takesUca(FIELDS)]).toEqual([false, true]);
   });

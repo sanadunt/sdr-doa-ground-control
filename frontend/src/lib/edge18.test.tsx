@@ -55,8 +55,8 @@ describe('state.rf.uca of an MQTT answer (edge 1.8)', () => {
 describe('the read-back of a sent UCA spacing', () => {
   const issued = 1_000;
   const reported = (value: number | null, at = 2_000) => ({
-    values: { center_frequency_hz: null, gain_db: null, vfo0_frequency_hz: null, vfo0_bandwidth_hz: null, vfo0_squelch_db: null, ant_spacing_m: value },
-    valueReceivedAtMs: { center_frequency_hz: null, gain_db: null, vfo0_frequency_hz: null, vfo0_bandwidth_hz: null, vfo0_squelch_db: null, ant_spacing_m: value === null ? null : at },
+    values: { center_frequency_hz: null, gain_db: null, vfo0_frequency_hz: null, vfo0_bandwidth_hz: null, vfo0_squelch_db: null, ant_spacing_m: value, vfo0_squelch_mode: null },
+    valueReceivedAtMs: { center_frequency_hz: null, gain_db: null, vfo0_frequency_hz: null, vfo0_bandwidth_hz: null, vfo0_squelch_db: null, ant_spacing_m: value === null ? null : at, vfo0_squelch_mode: null },
   });
   const check = (mqtt: number | null, dataOut: number | null = null) => verifyConfigPatch({
     changes: { ant_spacing_m: 0.3 },

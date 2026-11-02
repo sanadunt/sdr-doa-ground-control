@@ -882,7 +882,15 @@ def _rf(session: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
         "vfo0_squelch_db": _number(rf.get("sq")),
         # Contract 1.8: the UCA radius (ant_spacing_meters) in metres.
         "uca_m": _number(rf.get("uca")),
+        # Contract 1.9: the VFO0 squelch mode (Manual, Auto, Auto Channel, Default). While it is
+        # automatic the edge leaves rf.sq out, so vfo0_squelch_db is null then.
+        "squelch_mode": _phrase(rf.get("sqm")),
     }
+
+
+def _phrase(value: Any) -> Optional[str]:
+    """A short text value (at most 32 characters), or None."""
+    return value if isinstance(value, str) and 0 < len(value) <= 32 else None
 
 
 __all__ = [

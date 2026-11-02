@@ -92,14 +92,23 @@ export function gpsInputErrorKey(latitudeInput: string, longitudeInput: string):
   return null;
 }
 
+/**
+ * The dry-run form's changes: a number per filled numeric field, and for a
+ * choice field (the squelch mode, contract 1.9) the picked string as sent.
+ */
 export function parseDryRunChanges(
   values: Record<string, string>,
-  fields: ReadonlyArray<{ key: string; label: MessageKey }>,
-): FormResult<Record<string, number>> {
-  const changes: Record<string, number> = {};
+  fields: ReadonlyArray<{ key: string; label: MessageKey; kind?: 'number' | 'choice' }>,
+): FormResult<Record<string, number | string>> {
+  const changes: Record<string, number | string> = {};
   for (const field of fields) {
     const raw = values[field.key];
     if (raw === undefined || raw.trim() === '') continue;
+    if (field.kind === 'choice') {
+      // Picked from a select; the server checks the value and answers SQUELCH_MODE_INVALID otherwise.
+      changes[field.key] = raw;
+      continue;
+    }
     const value = parsedNumber(raw);
     if (value === null) return { ok: false, error: 'config.dryRunNotNumber', vars: { field: field.key } };
     changes[field.key] = value;
@@ -191,8 +200,8 @@ export interface DryRunSummary {
   /** The node session (state.sid) the preview names, or null. */
   sid: string | null;
   topic: string | null;
-  /** Normalized changes in the order the server returned them. */
-  changes: Array<{ key: string; value: number }>;
+  /** Normalized changes in the order the server returned them (the squelch mode as its string). */
+  changes: Array<{ key: string; value: number | string }>;
   ttlMs: number | null;
 }
 
@@ -221,7 +230,8 @@ export function summarizeDryRun(result: Record<string, unknown>): DryRunSummary 
     topic: typeof topic === 'string' && topic.length <= 128 && /^[\x21-\x7e]+$/u.test(topic) ? topic : null,
     changes: changes
       ? Object.entries(changes)
-        .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]))
+        .filter((entry): entry is [string, number | string] => (typeof entry[1] === 'number' && Number.isFinite(entry[1]))
+          || (typeof entry[1] === 'string' && entry[1].length > 0 && entry[1].length <= 32))
         .map(([key, value]) => ({ key, value }))
       : [],
     ttlMs: typeof issued === 'number' && typeof expires === 'number' && Number.isFinite(issued) && Number.isFinite(expires) && expires > issued ? expires - issued : null,

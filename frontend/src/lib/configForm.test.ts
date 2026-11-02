@@ -211,14 +211,14 @@ describe('Configuration page helpers', () => {
       validation: 'passed',
       transport: 'none',
       topic: 'sdr/v2/uav-01/cmd/config/patch',
-      command: { v: 2, op: 'config.patch', sid: '0a1b2c3d', base_rev: 12, issued_ms: 1000, expires_ms: 16000, changes: { center_frequency_hz: 433920000, gain_db: 12.5, bad: 'x', inf: Number.POSITIVE_INFINITY } },
+      command: { v: 2, op: 'config.patch', sid: '0a1b2c3d', base_rev: 12, issued_ms: 1000, expires_ms: 16000, changes: { center_frequency_hz: 433920000, gain_db: 12.5, bad: '', long: 'x'.repeat(33), inf: Number.POSITIVE_INFINITY, vfo0_squelch_mode: 'Auto Channel' } },
     })).toEqual({
       validation: 'passed',
       transport: 'none',
       baseRev: 12,
       sid: '0a1b2c3d',
       topic: 'sdr/v2/uav-01/cmd/config/patch',
-      changes: [{ key: 'center_frequency_hz', value: 433920000 }, { key: 'gain_db', value: 12.5 }],
+      changes: [{ key: 'center_frequency_hz', value: 433920000 }, { key: 'gain_db', value: 12.5 }, { key: 'vfo0_squelch_mode', value: 'Auto Channel' }],
       ttlMs: 15000,
     });
     // No node session yet: the preview has base_rev and sid null.
