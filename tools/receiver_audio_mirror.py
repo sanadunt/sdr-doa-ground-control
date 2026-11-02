@@ -132,7 +132,6 @@ class Listener:
         self.queue: Deque[bytes] = deque()
         self.gap = False
         self.ended = False
-        self.opened_at = time.monotonic()
 
 
 class ReceiverAudioMirror:
