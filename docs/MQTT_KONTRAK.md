@@ -6,7 +6,7 @@
 | Issue | #7 (parser console mengikuti kontrak edge), #8 (Dashboard memakai MQTT dulu, bagian 8), #9 (perintah Kontrol dalam format edge, bagian 9) |
 | Keputusan | `docs/KEPUTUSAN_MQTT.md`: satu MQTT, root `sdr/v2/uav-01`, Data Out hanya cadangan |
 | Kode console | `tools/rdf_node_mqtt_v2.py` (parser dan store), `tools/sdr_doa_mqtt_monitor.py` (koneksi dan publish perintah), `tools/rdf_node_commands.py` (envelope dan aturan field), `tools/config_command_tracker.py` (status perintah), `GET /api/mqtt/rdf-node`, rute Kontrol `/api/mqtt/config-*`; `tools/telemetry_source.py` dan `tools/data_out_reader.py` (sumber `/api/snapshot`) |
-| Fixture | `tools/fixtures/rdf-node/`, dibuat oleh kode edge sendiri (`commands.8691ad0.json` dan `commands.35984d8.json`: perintah buatan console yang dinilai edge; `compat.35984d8.json`: satu sesi edge baru dalam urutan broker); `tools/fixtures/telemetry-source/`, jawaban `/api/snapshot` dari MQTT |
+| Fixture | `tools/fixtures/rdf-node/`, dibuat oleh kode edge sendiri (`commands.8691ad0.json` dan `commands.35984d8.json`: perintah buatan console yang dinilai edge; `compat.35984d8.json`: satu sesi edge baru dalam urutan broker; `compat.d46e648.json`: satu sesi edge 1.7.0, bagian 7b); `tools/fixtures/telemetry-source/`, jawaban `/api/snapshot` dari MQTT |
 
 Sumber: repo `sanadunt/rdf-indicator-raspberry`, folder `rdf-node/`: `docs/MQTT_TOPIC_SUMMARY.md`, `docs/PROTOCOL.md`, `docs/CONTROL.md`, `docs/MQTT_GROUND.md`, dan kode `src/rdf_node/ground.py`, `codec.py`, `control.py`, `agent.py`, `journal.py`, `source.py`. Acuan wajib: commit `8691ad000146111cd633e9e4fac600b5da53fd8c` (edge rilis `1.0.0-20261013194717`, yang terpasang di Raspberry). Tambahan dari HEAD `20713ff9f0580386cece39f9b12d1d24e47b9bb6` (2026-10-27) ada di bagian 7 dan bersifat opsional. Commit `35984d8ada106a1bcb4c9a40179bae6198ed2df1` (PR `sanadunt/rdf-indicator-raspberry#5`, belum di-merge saat ditulis) hanya mengubah syarat TLS `config.get` (bagian 7a); console benar untuk kedua perilaku.
 
@@ -130,6 +130,31 @@ Field: `v`, `sid`, `id`, `status`, `t`, `rev`, `result`. `config.*` dijawab di `
 | `35984d8` dan sesudahnya | `ack/config APPLIED`, lalu satu `settings/reported` | `REJECTED TLS_REQUIRED_FOR_SETTINGS_REPORT`, kecuali edge menyalakan `mqtt.backup.settings_report_plaintext` |
 
 Dengan TLS, kedua versi menjawab. Aturan lain `settings/reported` tidak berubah: hanya setelah `config.get`, hanya ke broker yang meminta (tidak di-mirror), QoS 1, tidak retained, expiry 30 s, envelope `{v, sid, boot, id, rev, t, settings_json}`, kode error lain, dan batas 1/s per broker. Topik dan field tidak berubah. Console tidak tahu versi edge dan tidak perlu tahu: ia mengirim envelope yang sama dan memakai `settings/reported` bila datang, atau Data Out (cadangan) bila edge menolak. Console selalu tersambung lewat broker utama.
+
+## 7b. Kontrak 1.7 (edge `d46e648`, RDF Node 1.7.0)
+
+Tambahan, semuanya opsional; edge yang lebih lama tetap dibaca seperti sebelumnya. Fixture: `compat.d46e648.json` (satu sesi edge 1.7.0, dibuat dengan `make_fixtures.py --set compat`).
+
+- **`state.rf`**: setelan SDR dari settings.json revisi `cfg`: `f` frekuensi tengah Hz, `vfo` frekuensi VFO0 Hz, `g` gain dB, `bw` bandwidth VFO0 Hz, `sq` squelch VFO0 dB. Dikirim ulang tiap revisi config.
+  - Setiap field dibaca sendiri. Field yang buruk dibuang dengan catatan `INVALID_FIELD:rf.<field>` dan tidak pernah menolak `state`, karena `state` adalah jangkar sesi.
+  - Jawaban MQTT `/api/snapshot` membawanya sebagai blok `rf` (`source: "state.rf"`, `cfg`, umur), terpisah dari `settings`, yang tetap berarti pembacaan settings.json lewat Data Out.
+  - Ini nilai yang **disetel**, bukan bukti radio berjalan dengannya. Dashboard memberinya label "setelan".
+- **`telemetry/health/detail.ovr`**: ADC overdrive KrakenSDR (`true`, `false` atau `null`).
+  - Lewat LoRa, detail datang kira-kira tiap 30 s, jadi verdict ini berlaku 65 s sejak diterima (`DETAIL_OVERDRIVE_MAX_AGE_MS`), bukan jendela detail 15 s.
+  - Ia bergabung dengan pembacaan ringan Data Out: overdrive yang dilaporkan salah satu sumber dihitung sebagai overdrive. Sumbernya bernama `detail`.
+  - Tanpa `ovr` yang berlaku, lewat LoRa gate tetap memberi `ADC_OVERDRIVE_NOT_OVER_LORA`.
+- **Tahap `config.patch` di `ack/config`.** `result.method` bernilai `LIVE`, `RESTART` atau `FILE`, dan `result.live_failure` menyimpan alasan retune langsung gagal. Keduanya kini disimpan bersama `reason`, `proof` dan `changes`.
+  - Retune langsung: `ACCEPTED` → `VERIFYING {method: LIVE}` → `APPLIED {method: LIVE, proof: {daq: FRESH_HEALTHY_AFTER_RETUNE, settings: KEPT_BY_ENGINE}}`.
+  - Restart engine: `APPLYING {method: RESTART, reason, changes}` → `VERIFYING {method: RESTART, reason}` → `APPLIED {method: RESTART, reason, proof: {daq: FRESH_HEALTHY_AFTER_RESTART, settings: INTACT_AFTER_START}}`.
+  - Nilai `reason` restart: `GAIN_CHANGE`, `LARGE_FREQUENCY_JUMP` (di atas 20 MHz), `LIVE_FAILED:ENGINE_OVERRODE:<field>` atau `LIVE_FAILED:DAQ_NOT_HEALTHY_AFTER_RETUNE`.
+  - Hasil lain: `OUTCOME_UNKNOWN` dengan `ENGINE_DID_NOT_STOP` (settings.json tidak diubah) atau `DAQ_NOT_HEALTHY_AFTER_RESTART`; `PERSISTED_UNVERIFIED` dengan `result.error` `ENGINE_OVERRODE_AT_START` (field yang diubah engine ada di `result.fields`), `{method: FILE, reason: ENGINE_NOT_RUNNING}` atau `live_failure`.
+  - Kontrol menampilkan tahapnya ("retune langsung…", "restart SDR (alasan)…") dan cara penerapan pada `APPLIED`.
+  - `APPLIED` tetap satu-satunya keberhasilan.
+  - Batas tunggu ACK akhir:
+    - 90 s untuk edge lama.
+    - 270 s (`RESTART_FINAL_ACK_WAIT_MS`) begitu ACK progres menyebut `method` `LIVE` atau `RESTART`. Ini mencakup jendela retune langsung 20 s, stop 30 s, start sampai `start_timeout_seconds` (bawaan 180 s) dan giliran radio LoRa.
+    - Uji 2 November: `APPLIED` 43,7 s lewat LoRa.
+  - Console tidak mengirim `processing.set` atau stop/start untuk ganti frekuensi; edge yang memutuskan retune langsung atau restart.
 
 ## 8. Dashboard: MQTT dulu, Data Out cadangan (#8)
 

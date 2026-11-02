@@ -857,7 +857,10 @@ export function ConfigurationPage({
     }
   };
 
-  const sourceOptions = SOURCES.map((source) => ({ value: source, label: t(SOURCE_LABELS[source]) }));
+  // Over Telemetry LoRa the node's own values come from telemetry/health, not Data Out.
+  const sourceLabel = (source: SourceCode): MessageKey => (dataOutHidden && source === 'DATA_OUT' ? 'config.sourceNodeLora' : SOURCE_LABELS[source]);
+  const sourceTag = (source: SourceCode): string => (dataOutHidden && source === 'DATA_OUT' ? 'RDF-SDR' : source);
+  const sourceOptions = SOURCES.map((source) => ({ value: source, label: t(sourceLabel(source)) }));
   const refreshLabel = t('config.refresh');
   const transportLabel = t('config.mqttTransport');
   const axisLabel = t('config.manualAxis');
@@ -1065,7 +1068,7 @@ export function ConfigurationPage({
               <form className="cfg-sub" noValidate aria-labelledby={`${ids}-gps`} onSubmit={submitWith(applyGpsConfig)}>
                 <div className="cfg-sub-head">
                   <h3 id={`${ids}-gps`} className="cfg-sub-title">{t('config.gpsTitle')}</h3>
-                  <Tag tone={SOURCE_TONES[gpsConfig.source]}>{gpsConfig.source}</Tag>
+                  <Tag tone={SOURCE_TONES[gpsConfig.source]}>{sourceTag(gpsConfig.source)}</Tag>
                 </div>
                 <Segmented label={t('config.gpsSource')} className={changedClass(changed.gpsSource)} options={sourceOptions} value={gpsSource} onChange={(source) => { setGpsSource(source); setGpsErrors({}); setGpsResult(null); }} />
                 <div className="cfg-pair">
@@ -1086,7 +1089,7 @@ export function ConfigurationPage({
               <form className="cfg-sub" noValidate aria-labelledby={`${ids}-compass`} onSubmit={submitWith(applyCompassConfig)}>
                 <div className="cfg-sub-head">
                   <h3 id={`${ids}-compass`} className="cfg-sub-title">{t('config.compassTitle')}</h3>
-                  <Tag tone={SOURCE_TONES[compassConfig.source]}>{compassConfig.source}</Tag>
+                  <Tag tone={SOURCE_TONES[compassConfig.source]}>{sourceTag(compassConfig.source)}</Tag>
                 </div>
                 <Segmented label={t('config.compassSource')} className={changedClass(changed.compassSource)} options={sourceOptions} value={compassSource} onChange={(source) => { setCompassSource(source); setCompassResult(null); }} />
                 <div className="cfg-pair">

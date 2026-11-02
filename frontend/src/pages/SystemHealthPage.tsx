@@ -5,7 +5,7 @@ import { configPatchPublishable } from '../lib/configPatch';
 import { elapsedSinceRead, lastMessageAgeMs } from '../lib/mqttMonitor';
 import { dataOutUnused, loraChip } from '../lib/loraLink';
 import { candidate, formatNumber, numberOrNull, syncCount, toneFor } from '../lib/telemetry';
-import { isMqttSnapshot } from '../lib/telemetrySource';
+import { isMqttSnapshot, loraLink, snapshotNav } from '../lib/telemetrySource';
 import { useI18n } from '../lib/i18n';
 import type { Translate } from '../lib/i18n';
 import {
@@ -58,10 +58,11 @@ function progressCause(t: Translate, progress: NodeProgressView | null): string 
   }
 }
 
-/** Name the Data Out file that reported the ADC state, not the collector's internal source id. */
+/** Name the Data Out file or MQTT topic that reported the ADC state, not the collector's internal source id. */
 export function overdriveSourceFile(source: string): string {
   if (source === 'status') return 'status.json';
   if (source === 'xml') return 'doa.xml';
+  if (source === 'detail') return 'health/detail';
   return source;
 }
 
@@ -156,8 +157,9 @@ function viewState(item: Candidate): string {
 
 function DoaViewsCard({ snapshot }: { snapshot: TelemetrySnapshot | null }): JSX.Element {
   const { t } = useI18n();
-  // Data Out has a CSV and an XML view; an MQTT answer has its one view (issue #8).
-  const rows: ViewRow[] = isMqttSnapshot(snapshot)
+  // Data Out has a CSV and an XML view; an MQTT answer has its one view (issue #8),
+  // and so does Telemetry LoRa without fresh MQTT, where Data Out is never read.
+  const rows: ViewRow[] = isMqttSnapshot(snapshot) || loraLink(snapshot)
     ? [{ name: 'MQTT', item: candidate(snapshot, 'mqtt') }]
     : [{ name: 'CSV', item: candidate(snapshot, 'csv') }, { name: 'XML', item: candidate(snapshot, 'xml') }];
   const present = rows.filter((row) => row.item.available === true).length;
@@ -324,10 +326,13 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
     </>
   );
   const noise = quality?.noiseSourceEnabled === true ? 'ON' : quality?.noiseSourceEnabled === false ? 'OFF' : 'N/A';
-  const gps = String(statusValue(status, 'gps_status') ?? 'UNKNOWN');
+  // Over Telemetry LoRa nothing of status.json comes: no frame index or noise
+  // source, and the GPS state is the one telemetry/health carries.
+  const lora = dataOutUnused(snapshot, mqtt);
+  const gps = String((lora ? snapshotNav(snapshot)?.gps_state : statusValue(status, 'gps_status')) ?? 'UNKNOWN');
   const nodeItems: KeyValueItem[] = [
     { id: 'progress', label: t('health.row.progress'), value: progressValue, title: progressCause(t, progress) },
-    { id: 'frame', label: t('health.row.frame'), value: typeof daq.data_frame_index === 'number' ? formatCount(lang, daq.data_frame_index) : 'N/A' },
+    ...(lora ? [] : [{ id: 'frame', label: t('health.row.frame'), value: typeof daq.data_frame_index === 'number' ? formatCount(lang, daq.data_frame_index) : 'N/A' }]),
     { id: 'dropped', label: t('health.row.dropped'), value: dropped === null ? 'N/A' : formatCount(lang, dropped), tone: dropped !== null && dropped > 0 ? 'warn' : undefined },
     {
       id: 'sync',
@@ -335,7 +340,7 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
       value: <span className="hd-flags">{flags.map((flag) => <Tag key={flag.key} tone={syncTone(flag.ok)} title={flag.key}>{flag.label}</Tag>)}</span>,
       title: syncCause,
     },
-    { id: 'noise', label: t('health.row.noiseSource'), value: noise, tone: noise === 'ON' ? 'warn' : undefined },
+    ...(lora ? [] : [{ id: 'noise', label: t('health.row.noiseSource'), value: noise, tone: noise === 'ON' ? 'warn' as const : undefined }]),
     { id: 'gps', label: t('health.row.gps'), value: gps },
   ];
   const papr = quality && (quality.paprCsvDb !== null || quality.paprXmlDb !== null)
@@ -350,7 +355,7 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
         title={t('route.system-health')}
         chips={<>
           <StatusChip code={headline} />
-          <StatusChip label={t('page.chip.http')} code={http.state} />
+          {lora ? null : <StatusChip label={t('page.chip.http')} code={http.state} />}
           <StatusChip label={t('page.chip.node')} code={node.state} />
           <StatusChip label={t('page.chip.progress')} code={progress?.state ?? 'N/A'} />
         </>}
@@ -360,9 +365,16 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
         <StatRow label={t('route.system-health')}>
           <StatTile label="DAQ" value={daqHealth} tone={toneFor(daqHealth)} sub={dropped === null ? undefined : t('health.drops', { count: formatCount(lang, dropped) })} />
           <StatTile label={t('health.sync')} value={`${syncs}/3`} tone={syncs === 3 ? 'good' : snapshot ? 'bad' : 'neutral'} title={syncCause} />
-          <StatTile label="ADC" value={adcState} tone={adcState === 'OVERDRIVE' ? 'bad' : adcState === 'PASS' ? 'good' : 'neutral'} sub={adcSources || undefined} />
-          <StatTile label="SNR" value={snr} unit={snr === 'N/A' ? undefined : 'dB'} sub="XML" />
-          <StatTile label="PAPR" value={papr} unit={papr === 'N/A' ? undefined : 'dB'} sub="CSV / XML" />
+          {/* Over Telemetry LoRa only the edge's own verdict (health/detail ovr, edge 1.7) can tell the ADC state. */}
+          {lora && adcState !== 'PASS' && adcState !== 'OVERDRIVE'
+            ? <StatTile label="ADC" value="N/A" tone="neutral" sub={t('node.notOverLora')} />
+            : <StatTile label="ADC" value={adcState} tone={adcState === 'OVERDRIVE' ? 'bad' : adcState === 'PASS' ? 'good' : 'neutral'} sub={adcSources || undefined} />}
+          {lora
+            ? null
+            : <>
+              <StatTile label="SNR" value={snr} unit={snr === 'N/A' ? undefined : 'dB'} sub="XML" />
+              <StatTile label="PAPR" value={papr} unit={papr === 'N/A' ? undefined : 'dB'} sub="CSV / XML" />
+            </>}
           <StatTile label="MQTT" value={connection} tone={readFailed || connection === 'ERROR' ? 'bad' : connection === 'CONNECTED' ? 'good' : 'warn'} />
           <StatTile label={t('health.clock')} value={clock} tone={clock === 'LOCAL' ? 'good' : 'neutral'} />
         </StatRow>
@@ -370,7 +382,7 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
       <PageGrid>
         <PageStack span={6}>
           <Card title={t('node.title')} chip={<StatusChip code={node.state} />}>
-            {node.error ? <Notice tone="bad" title={node.state}><CollectorError error={node.error} /></Notice> : null}
+            {node.error ? <Notice tone="bad" title={node.state}>{loraLink(snapshot) ? t('polar.loraNoTelemetry') : <CollectorError error={node.error} />}</Notice> : null}
             {progress?.state === 'STALLED' ? <Notice tone="bad" title="NODE_CLOCK_STALLED">{progressCause(t, progress)}</Notice> : null}
             {progress && progress.state !== 'STALLED' && progress.regressedCounters.length
               ? <Notice tone="warn" title={progress.state}>{t('health.progress.regressed', { counters: progress.regressedCounters.join(', ') })}</Notice>
@@ -383,7 +395,7 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
         </PageStack>
         <PageStack span={6}>
           {/* Over Telemetry LoRa there is no Data Out to show (no IP path to the node). */}
-          {dataOutUnused(snapshot, mqtt) ? null : <DataOutCard snapshot={snapshot} />}
+          {lora ? null : <DataOutCard snapshot={snapshot} />}
           <MqttCard mqtt={mqtt} mqttError={mqttError} capabilities={capabilities} />
           <LoraCard mqtt={mqtt} />
         </PageStack>

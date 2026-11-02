@@ -629,17 +629,18 @@
   },
   "reasons": [
    "GROUND_CLOCK_UNVERIFIED",
-   "ADC_OVERDRIVE_UNKNOWN",
+   "ADC_OVERDRIVE_NOT_OVER_LORA",
    "CANONICAL_ANGLE_NOT_CONFIGURED",
    "DOA_AUTHORITY_NOT_SELECTED"
   ],
   "state": "BLOCKED"
  },
  "resources": {},
+ "rf": null,
  "schema_version": 1,
  "settings": {
   "available": false,
-  "error": "settings.json not read yet",
+  "error": "settings.json is not read over Telemetry LoRa",
   "raw_fields_omitted": true,
   "read_at_ms": null,
   "redacted": true,

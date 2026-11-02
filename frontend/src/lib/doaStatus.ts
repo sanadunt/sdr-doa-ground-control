@@ -1,7 +1,7 @@
 import type { Candidate, TelemetrySnapshot, Tone } from '../types';
 import type { MessageKey } from './i18n';
 import { adcOverdriveUnknown, adcOverdriven, candidate, completeVector, daqFailed, daqUnknown, doaDataReady, freshCandidate, nativeViewsReady, nodeStalled, numberOrNull, parsedCandidate, partialCsvReady, sourceViewNames } from './telemetry';
-import { isMqttSnapshot, mqttDoaUnverified, overLora } from './telemetrySource';
+import { isMqttSnapshot, loraLink, mqttDoaUnverified, overLora } from './telemetrySource';
 
 /** Why the DoA curve and bearing are, or are not, shown. */
 export type DoaStatusReason =
@@ -26,7 +26,8 @@ export type DoaStatusReason =
   | 'mqttUnverified'
   | 'mqttNoDoa'
   | 'loraUnverified'
-  | 'loraNoDoa';
+  | 'loraNoDoa'
+  | 'loraNoTelemetry';
 
 export interface DoaStatus {
   /** Untranslated status code for badges. */
@@ -72,7 +73,8 @@ export function doaStatus(snapshot: TelemetrySnapshot | null | undefined, localF
   }
   const blocked = (code: DoaStatus['code'], reason: DoaStatusReason): DoaStatus => ({ code, tone: 'warn', reason, shown: false });
   if (snapshot.native_consistency?.conflict === true) return blocked('CONFLICT', 'conflict');
-  if (snapshot.status?.available !== true) return blocked('UNAVAILABLE', 'statusUnavailable');
+  // Over Telemetry LoRa there is no Data Out status to read: the RDF-SDR's telemetry is what is missing.
+  if (snapshot.status?.available !== true) return blocked('UNAVAILABLE', loraLink(snapshot) ? 'loraNoTelemetry' : 'statusUnavailable');
   if (daqFailed(snapshot)) return blocked('DEGRADED', 'daqDegraded');
   if (daqUnknown(snapshot)) return blocked('DEGRADED', 'daqUnknown');
   if (adcOverdriven(snapshot)) return blocked('DEGRADED', 'adcOverdrive');
@@ -130,6 +132,7 @@ const PROVISIONAL_REASONS: ReadonlySet<DoaStatusReason> = new Set<DoaStatusReaso
   'mqttNoDoa',
   'loraUnverified',
   'loraNoDoa',
+  'loraNoTelemetry',
   'sourceStale',
   'localExpired',
   'nodeStalled',
@@ -181,6 +184,7 @@ const STATUS_TEXT: Record<DoaStatusReason, MessageKey> = {
   mqttNoDoa: 'polar.mqttNoDoa',
   loraUnverified: 'polar.loraUnverified',
   loraNoDoa: 'polar.loraNoDoa',
+  loraNoTelemetry: 'polar.loraNoTelemetry',
 };
 
 export function doaStatusTextKey(reason: DoaStatusReason): MessageKey {
@@ -193,8 +197,10 @@ export function doaStatusTextKey(reason: DoaStatusReason): MessageKey {
 // with read timing (CSV and XML from adjacent frames, or an MQTT DoA newer
 // than its Angular frame) and needs no action, and so does
 // MQTT_ANGULAR_UNAVAILABLE (an MQTT DoA between Angular frames, shown
-// without its curve).
+// without its curve). Over Telemetry LoRa the ADC overdrive is never carried
+// (ADC_OVERDRIVE_NOT_OVER_LORA), a property of the link.
 const STANDING_GATE_REASONS = [
+  'ADC_OVERDRIVE_NOT_OVER_LORA',
   'POWER_FLOOR_LOSSY',
   'POWER_MAPPING_UNVERIFIED',
   'CONFIDENCE_MAPPING_UNVERIFIED',

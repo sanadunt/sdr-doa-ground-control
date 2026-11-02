@@ -70,7 +70,7 @@ function transportLabel(mqtt: MqttSnapshot | null): string | null {
   return null;
 }
 
-function rdfColumns(t: Translate, count: (value: number | null | undefined) => string): Array<DataColumn<RdfTopicRow>> {
+function rdfColumns(t: Translate, count: (value: number | null | undefined) => string, lora = false): Array<DataColumn<RdfTopicRow>> {
   return [
     { key: 'topic', label: t('monitor.col.topic'), code: true, render: (row) => row.suffix },
     { key: 'count', label: t('monitor.col.count'), numeric: true, render: (row) => count(row.count) },
@@ -83,7 +83,7 @@ function rdfColumns(t: Translate, count: (value: number | null | undefined) => s
       render: (row) => {
         const parts: ReactNode[] = [];
         if (row.error) parts.push(<Tag key="error" tone={row.status === 'IGNORED' ? 'neutral' : 'bad'}>{row.field ? `${row.error} ${row.field}` : row.error}</Tag>);
-        if (row.summary.length) parts.push(<span key="summary" className="ms-summary">{summaryText(row.summary)}</span>);
+        if (row.summary.length) parts.push(<span key="summary" className="ms-summary">{summaryText(row.summary, lora)}</span>);
         if (row.withheld) parts.push(<span key="withheld" className="ms-sub">{t('monitor.v2Gated')}</span>);
         return parts.length ? <span className="ms-chips">{parts}</span> : EMPTY_CELL;
       },
@@ -91,11 +91,14 @@ function rdfColumns(t: Translate, count: (value: number | null | undefined) => s
   ];
 }
 
-function summaryText(summary: Array<[string, string]>): string {
-  return summary.map(([field, value]) => `${field} ${value}`).join(' · ');
+// The edge reports its PPP link in health/detail; over Telemetry LoRa there is none to report.
+const PPP_FIELDS: ReadonlySet<string> = new Set(['ppp', 'peer', 'ppp_svc', 'ppp_restarts']);
+
+function summaryText(summary: Array<[string, string]>, lora = false): string {
+  return summary.filter(([field]) => !(lora && PPP_FIELDS.has(field))).map(([field, value]) => `${field} ${value}`).join(' · ');
 }
 
-function nodeColumns(t: Translate): Array<DataColumn<RdfNodeRow>> {
+function nodeColumns(t: Translate, lora = false): Array<DataColumn<RdfNodeRow>> {
   return [
     { key: 'part', label: t('monitor.col.part'), render: (row) => t(`monitor.part.${row.part}` as MessageKey) },
     { key: 'status', label: t('monitor.col.status'), render: (row) => <StatusChip code={row.status} tone={rdfStatusTone(row.status)} /> },
@@ -105,7 +108,7 @@ function nodeColumns(t: Translate): Array<DataColumn<RdfNodeRow>> {
       label: t('monitor.col.detail'),
       render: (row) => {
         const parts: ReactNode[] = row.reasons.map((reason) => <Tag key={`reason-${reason}`}>{reason}</Tag>);
-        if (row.summary.length) parts.push(<span key="summary" className="ms-summary">{summaryText(row.summary)}</span>);
+        if (row.summary.length) parts.push(<span key="summary" className="ms-summary">{summaryText(row.summary, lora)}</span>);
         if (row.withheld) parts.push(<span key="withheld" className="ms-sub">{t('monitor.v2Gated')}</span>);
         return parts.length ? <span className="ms-chips">{parts}</span> : EMPTY_CELL;
       },
@@ -137,7 +140,7 @@ function topicHasData(row: RdfTopicRow): boolean {
 }
 
 /** RDF Node: counters, subscription state, the node view, the last ACKs and one row per subscribed topic. */
-export function RdfNodeView({ rdfNode, rdfError, nowMs }: { rdfNode: RdfNodeSnapshot | null; rdfError: Notice | null; nowMs: number }): ReactElement {
+export function RdfNodeView({ rdfNode, rdfError, nowMs, lora = false }: { rdfNode: RdfNodeSnapshot | null; rdfError: Notice | null; nowMs: number; lora?: boolean }): ReactElement {
   const { t, lang } = useI18n();
   const count = useCountFormat(lang);
   const [showEmpty, setShowEmpty] = useState(false);
@@ -167,7 +170,7 @@ export function RdfNodeView({ rdfNode, rdfError, nowMs }: { rdfNode: RdfNodeSnap
       {rdfNode ? (
         <Card title={t('monitor.rdfNode')} flush>
           {nodeRows.length
-            ? <DataTable columns={nodeColumns(t)} rows={nodeRows} rowKey={(row) => row.part} className="ms-node" label={t('monitor.rdfNode')} minWidth="720px" />
+            ? <DataTable columns={nodeColumns(t, lora)} rows={nodeRows} rowKey={(row) => row.part} className="ms-node" label={t('monitor.rdfNode')} minWidth="720px" />
             : <EmptyState label={t('monitor.rdfNodeEmpty')} />}
         </Card>
       ) : null}
@@ -192,7 +195,7 @@ export function RdfNodeView({ rdfNode, rdfError, nowMs }: { rdfNode: RdfNodeSnap
             ? <EmptyState label={t('monitor.v2NoMessage')} />
             : (
               <DataTable
-                columns={rdfColumns(t, count)}
+                columns={rdfColumns(t, count, lora)}
                 rows={shown}
                 rowKey={(row) => row.suffix}
                 rowClassName={(row) => (topicHasData(row) ? undefined : 'is-muted')}
@@ -362,7 +365,7 @@ export function MessageMonitorPage({
       />
       {mqttError ? <PageNotice tone="bad" title="ERROR">{t('monitor.stateUnknown', { error: mqttError })}</PageNotice> : null}
       {message ? <PageNotice tone={message.tone}>{noticeText(t, message.notice)}</PageNotice> : null}
-      <RdfNodeView rdfNode={rdfNode} rdfError={rdfError} nowMs={nowMs} />
+      <RdfNodeView rdfNode={rdfNode} rdfError={rdfError} nowMs={nowMs} lora={mqtt?.lora?.present === true} />
       <Card className="ms-conn" title={t('monitor.connection')} chip={<StatusChip code={connection} tone={connectionTone(connection)} title={connectionError ?? undefined} />}>
         <KeyValueGrid items={connectionItems} columns={3} label={t('monitor.connection')} />
       </Card>

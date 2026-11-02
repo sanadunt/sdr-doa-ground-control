@@ -2,9 +2,11 @@ import type { JSX } from 'react';
 import type { MapCoordinate, TelemetrySnapshot } from '../../types';
 import { adcOverdriven, daqSyncState, numberOrNull, syncCount } from '../../lib/telemetry';
 import { signalQualityView } from '../../lib/healthView';
+import { overviewDoaStatus } from '../../lib/doaStatus';
 import { useI18n } from '../../lib/i18n';
 import type { Translate } from '../../lib/i18n';
-import { overLora, snapshotNav } from '../../lib/telemetrySource';
+import { doaSample, doaSampleText, loraLink, overLora, snapshotNav, snapshotRf } from '../../lib/telemetrySource';
+import type { RfSettings } from '../../lib/telemetrySource';
 import { coordinateSourceKey } from '../DoaReadout';
 import { Icon } from '../ui';
 
@@ -113,6 +115,24 @@ export function navRows(nav: Record<string, unknown> | null, t: Translate): Arra
   return rows;
 }
 
+/** One detail row: label, value text, value class, and whether it spans both columns. */
+type NodeRow = [string, string, string?, boolean?];
+
+/**
+ * VFO0, bandwidth and squelch of state.rf (edge 1.7), each only when the edge
+ * sends it, and marked as a setting: settings.json of revision cfg, not a
+ * measurement.
+ */
+export function rfRows(rf: RfSettings | null, t: Translate): NodeRow[] {
+  if (!rf) return [];
+  const setting = (value: string) => t('node.settingValue', { value });
+  const rows: NodeRow[] = [];
+  if (rf.vfo0Hz !== null) rows.push([t('node.vfo0'), setting(`${(rf.vfo0Hz / 1e6).toFixed(3)} MHz`), undefined, true]);
+  if (rf.bandwidthHz !== null) rows.push([t('node.bandwidth'), setting(`${Number((rf.bandwidthHz / 1000).toFixed(1))} kHz`), undefined, true]);
+  if (rf.squelchDb !== null) rows.push([t('node.squelch'), setting(`${rf.squelchDb.toFixed(1)} dB`), undefined, true]);
+  return rows;
+}
+
 /**
  * Collapsible node card in the right column. The two summary lines always
  * render, including the station position, so the position stays visible
@@ -153,24 +173,56 @@ export function NodeCard({
   const value = (text: string) => (reachable ? text : '—');
   // Over the LoRa serial link there is no Data Out: settings, SNR and the ADC state cannot come, and are named so.
   const lora = overLora(snapshot);
+  // Also without fresh MQTT: over the LoRa bridge Data Out is never the missing source.
+  const link = loraLink(snapshot);
   const dataOutValue = (missing: boolean, text: string) => (lora && missing ? t('node.notOverLora') : value(text));
+  // Without settings.json (over LoRa, or Data Out down) the edge's state.rf
+  // names what the SDR is set to: shown, and marked as a setting.
+  const rf = snapshotRf(snapshot);
+  const rfCenterMhz = rf && rf.centerHz !== null ? rf.centerHz / 1e6 : null;
+  const rfGainDb = rf?.gainDb ?? null;
+  const rfSummary = summary.centerMhz === null && summary.gainDb === null && (rfCenterMhz !== null || rfGainDb !== null);
   const line1 = !snapshot
     ? t('node.waiting')
-    : lora && summary.centerMhz === null && summary.gainDb === null
-      ? t('node.summaryLora')
-      : reachable ? t('node.summary', { center: fmt(summary.centerMhz, 3), gain: fmt(summary.gainDb, 1) }) : t('node.unreachable');
+    : rfSummary && reachable
+      ? t('node.summarySetting', { center: fmt(rfCenterMhz, 3), gain: fmt(rfGainDb, 1) })
+      : lora && summary.centerMhz === null && summary.gainDb === null
+        ? t('node.summaryLora')
+        : reachable ? t('node.summary', { center: fmt(summary.centerMhz, 3), gain: fmt(summary.gainDb, 1) })
+          : t(link ? 'node.noTelemetryLora' : 'node.unreachable');
+  const setting = (text: string) => value(t('node.settingValue', { value: text }));
+  const centerRow: NodeRow = summary.centerMhz === null && rfCenterMhz !== null
+    ? [t('node.center'), setting(fmt(rfCenterMhz, 3, ' MHz')), undefined, true]
+    : [t('node.center'), dataOutValue(summary.centerMhz === null, fmt(summary.centerMhz, 3, ' MHz'))];
+  const gainRow: NodeRow = summary.gainDb === null && rfGainDb !== null
+    ? [t('node.gain'), setting(fmt(rfGainDb, 1, ' dB')), undefined, true]
+    : [t('node.gain'), dataOutValue(summary.gainDb === null, fmt(summary.gainDb, 1, ' dB'))];
+  // The DoA record's frequency and power; an UNVERIFIED (ok=0) one is dimmed and named so.
+  const sample = doaSample(snapshot, overviewDoaStatus(snapshot, localSnapshotFresh), localSnapshotFresh);
+  const sampleRows: NodeRow[] = sample === null ? [] : [[
+    t('node.sample'),
+    value(sample.verified ? doaSampleText(sample) : `${doaSampleText(sample)} · UNVERIFIED`),
+    sample.verified ? undefined : 'is-provisional',
+    true,
+  ]];
   const sourceLabel = coordinate ? t(positionHeld ? 'map.sourceHeld' : coordinateSourceKey(coordinate.source)) : null;
   const sourceTone = positionHeld || coordinate?.source === 'FALLBACK' ? 'is-warn' : coordinate?.source === 'MANUAL' ? 'is-manual' : undefined;
   const position = coordinate ? `${coordinate.latitude.toFixed(5)}, ${coordinate.longitude.toFixed(5)}` : t('readout.noPosition');
-  const host = dataOutHost(snapshot);
-  const rows: Array<[string, string, string?]> = [
-    [t('node.center'), dataOutValue(summary.centerMhz === null, fmt(summary.centerMhz, 3, ' MHz'))],
-    [t('node.gain'), dataOutValue(summary.gainDb === null, fmt(summary.gainDb, 1, ' dB'))],
+  // The Data Out host, frame index and settings.json's remote-control flag are Data Out only.
+  const host = link ? null : dataOutHost(snapshot);
+  const dataOutRows: NodeRow[] = link ? [] : [
+    [t('node.frame'), value(summary.frame === null ? '—' : `#${summary.frame}`)],
+    [t('node.remoteControl'), value(summary.remoteControl)],
+  ];
+  const rows: NodeRow[] = [
+    centerRow,
+    gainRow,
+    ...rfRows(rf, t),
+    ...sampleRows,
     [t('node.snr'), dataOutValue(summary.snrDb === null, fmt(summary.snrDb, 1, ' dB'))],
     [t('node.daq'), value(summary.daq), summary.daq.startsWith('PASS') ? 'is-good' : summary.daq.startsWith('FAIL') ? 'is-bad' : undefined],
     [t('node.adc'), dataOutValue(summary.adc === 'N/A', summary.adc), summary.adc === 'OK' ? 'is-good' : summary.adc === 'OVERDRIVE' ? 'is-bad' : undefined],
-    [t('node.frame'), value(summary.frame === null ? '—' : `#${summary.frame}`)],
-    [t('node.remoteControl'), value(summary.remoteControl)],
+    ...dataOutRows,
     ...navRows(snapshotNav(snapshot), t),
   ];
 
@@ -184,15 +236,15 @@ export function NodeCard({
         </button>
       </div>
       <div className={values ? `ov-node-summary ${values}` : 'ov-node-summary'}>
-        <span>{line1}</span>
+        <span className={rfSummary && reachable ? 'is-setting' : undefined}>{line1}</span>
         <span title={t('node.position')}>{position}</span>
         {sourceLabel ? <span className={`ov-node-source ${sourceTone ?? ''}`}>{sourceLabel}</span> : null}
       </div>
       <div id="ov-node-detail" className="ov-node-detail" hidden={collapsed}>
         {host ? <div className="ov-node-host">{host}</div> : null}
         <dl className={values}>
-          {rows.map(([label, text, tone]) => (
-            <div key={label}>
+          {rows.map(([label, text, tone, wide]) => (
+            <div key={label} className={wide ? 'is-wide' : undefined}>
               <dt>{label}</dt>
               <dd className={tone}>{text}</dd>
             </div>

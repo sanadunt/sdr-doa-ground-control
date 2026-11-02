@@ -114,6 +114,8 @@ ACK_RESULT_KEYS = frozenset({
     "accepted_by_systemd", "requested_ms", "service", "valid_seconds", "prepare_id", "scheduled",
     "delay_seconds", "action", "requested", "operation", "elapsed_ms", "phase", "steps", "boot",
     "previous_boot", "boot_before", "changes", "cleared", "late",
+    # Contract 1.7: how a config.patch was applied (LIVE, RESTART, FILE) and why a live retune fell back.
+    "method", "live_failure",
 })
 _SECRET_KEY_WORDS = ("challenge", "secret", "password", "passwd", "token", "credential", "private")
 
@@ -373,7 +375,42 @@ def _validate_state(data: Dict[str, Any]) -> Dict[str, Any]:
         profile=_text(data, "profile", _WORD_RE),
         clock=_text(data, "clock", _WORD_RE),
     )
+    rf = _state_rf(data)
+    if rf:
+        value["rf"] = rf
     return value
+
+
+def _state_rf(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The optional ``rf`` of contract 1.7: the SDR settings of revision ``cfg`` (settings.json, not runtime proof).
+
+    Each field is read on its own; a bad one is dropped with an ``rf.<key>``
+    note and never refuses the state, which anchors the session.
+    """
+    if "rf" not in data:
+        return None
+    rf = data["rf"]
+    if not isinstance(rf, dict):
+        _note("INVALID_FIELD", "rf")
+        return None
+    # Read under rf.<key>, so a COERCED note names the field where it is.
+    named = {f"rf.{key}": item for key, item in rf.items()}
+    readers = (
+        ("f", lambda: _int(named, "rf.f", 1, _U32)),
+        ("vfo", lambda: _int(named, "rf.vfo", 1, _U32)),
+        ("g", lambda: _number(named, "rf.g", -100, 100)),
+        ("bw", lambda: _int(named, "rf.bw", 1, _U32)),
+        ("sq", lambda: _number(named, "rf.sq", -1000, 1000)),
+    )
+    value: Dict[str, Any] = {}
+    for key, read in readers:
+        if key not in rf:
+            continue
+        try:
+            value[key] = read()
+        except _Invalid:
+            _note("INVALID_FIELD", f"rf.{key}")
+    return value or None
 
 
 def _validate_capabilities(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -505,6 +542,10 @@ def _validate_detail(data: Dict[str, Any]) -> Dict[str, Any]:
             value[key] = _free_text(data[key], key)
     if "ppp_restarts" in data:
         value["ppp_restarts"] = _int(data, "ppp_restarts", 0, _COUNT_MAX, nullable=True)
+    # Contract 1.7: the KrakenSDR ADC overdrive (null when the edge does not know it).
+    present, ovr = _optional(data, "ovr", lambda: _bool(data, "ovr", nullable=True))
+    if present:
+        value["ovr"] = ovr
     return value
 
 

@@ -118,9 +118,12 @@ MQTT_DOA_ANGULAR_CONFLICT = "MQTT_DOA_ANGULAR_CONFLICT"
 # (source.view at 8691ad0 has no overdrive reason): without a current light
 # read the console cannot say the record is not from an overdriven ADC.
 ADC_OVERDRIVE_UNKNOWN = "ADC_OVERDRIVE_UNKNOWN"
+# Over the LoRa serial bridge there is no Data Out to read, so the overdrive
+# is never known: a standing condition of the link, not a failed read.
+ADC_OVERDRIVE_NOT_OVER_LORA = "ADC_OVERDRIVE_NOT_OVER_LORA"
 MQTT_GATE_REASONS = (
     MQTT_NO_DOA, MQTT_DOA_UNVERIFIED, MQTT_ANGLE_CONVENTION_UNKNOWN, MQTT_ANGULAR_UNAVAILABLE, MQTT_DOA_ANGULAR_CONFLICT,
-    ADC_OVERDRIVE_UNKNOWN,
+    ADC_OVERDRIVE_UNKNOWN, ADC_OVERDRIVE_NOT_OVER_LORA,
 )
 
 # capabilities.angle values of the edge (config.validate_config).
@@ -150,6 +153,10 @@ LIGHT_READ_INTERVAL_S = 30.0
 # and SNR) counts for this long after the read: two intervals and a read
 # budget. Older, it answers as not read.
 LIGHT_VALUES_MAX_AGE_MS = 65_000
+# The ADC overdrive of telemetry/health/detail (contract 1.7, ``ovr``) counts
+# this long after receipt: over LoRa the detail comes about every 30 s, so the
+# 15 s detail window would make the verdict come and go between reports.
+DETAIL_OVERDRIVE_MAX_AGE_MS = 65_000
 
 
 def _record(value: Any) -> Optional[Dict[str, Any]]:
@@ -529,7 +536,18 @@ def _status(node: Mapping[str, Any], light: Optional[Mapping[str, Any]]) -> Dict
     }
 
 
-def _signal_quality(light: Optional[Mapping[str, Any]], candidate: Mapping[str, Any]) -> Dict[str, Any]:
+def _detail_overdrive(detail: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The edge's own overdrive verdict (``detail.ovr``) while it counts, else None."""
+    if detail is None or type(detail.get("ovr")) is not bool:
+        return None
+    age = _int(detail.get("age_ms"))
+    if age is None or age > DETAIL_OVERDRIVE_MAX_AGE_MS:
+        return None
+    return {"ovr": detail["ovr"], "age_ms": age}
+
+
+def _signal_quality(light: Optional[Mapping[str, Any]], candidate: Mapping[str, Any],
+                    detail: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     quality = copy.deepcopy(_record((light or {}).get("signal_quality"))) if light is not None else None
     if quality is None:
         quality = {
@@ -545,6 +563,19 @@ def _signal_quality(light: Optional[Mapping[str, Any]], candidate: Mapping[str, 
             "noise_source_enabled": None,
             "daq_num_dropped_frames": None,
         }
+    # The edge's detail.ovr joins the light read's reports: either one seeing an
+    # overdrive is an overdrive, and it settles an overdrive nothing else reported.
+    edge = _detail_overdrive(detail)
+    if edge is not None:
+        reported = [name for name in quality.get("adc_overdrive_reported_by") or [] if name != "detail"] + ["detail"]
+        active = [name for name in quality.get("adc_overdrive_sources") or [] if name != "detail"]
+        if edge["ovr"]:
+            active.append("detail")
+        quality["adc_overdrive_reported_by"] = reported
+        quality["adc_overdrive_sources"] = active
+        quality["adc_overdrive"] = bool(active)
+        quality["state"] = "OVERDRIVE" if active else "PASS"
+        quality["adc_overdrive_detail_age_ms"] = edge["age_ms"]
     quality["confidence_metric_db"] = {"mqtt": _number(candidate.get("confidence_metric_db"))}
     quality["confidence_metric_unit"] = "dB_papr_unmapped"
     quality["source"] = "data_out_light" if light is not None else None
@@ -606,6 +637,7 @@ def _overall_and_gate(
     consistency: Mapping[str, Any],
     diagnostics: Mapping[str, Any],
     overdrive: Optional[bool],
+    over_lora: bool = False,
 ) -> Tuple[str, Dict[str, Any]]:
     parsed = candidate.get("available") is True and "canonical_angle_deg" in candidate
     fresh = parsed and (_record(candidate.get("freshness")) or {}).get("fresh") is True
@@ -622,7 +654,7 @@ def _overall_and_gate(
     if overdrive is True:
         reasons.append("ADC_OVERDRIVE")
     elif overdrive is None:
-        reasons.append(ADC_OVERDRIVE_UNKNOWN)
+        reasons.append(ADC_OVERDRIVE_NOT_OVER_LORA if over_lora else ADC_OVERDRIVE_UNKNOWN)
     if candidate.get("available") is not True:
         reasons.append(MQTT_DOA_UNVERIFIED if unverified_current else MQTT_NO_DOA)
     else:
@@ -718,9 +750,11 @@ def mqtt_snapshot(
     consistency = _consistency(candidate)
     diagnostics = _diagnostics(node, convention, candidate.get("angular_pairing"))
     current_light = _light_current(light, light_age_ms)
-    quality = _signal_quality(current_light, candidate)
+    quality = _signal_quality(current_light, candidate, _record(node.get("detail")))
     overdrive = quality.get("adc_overdrive")
-    overall, gate = _overall_and_gate(candidate, consistency, diagnostics, overdrive if isinstance(overdrive, bool) else None)
+    over_lora = view.get("link") == "lora"
+    overall, gate = _overall_and_gate(candidate, consistency, diagnostics, overdrive if isinstance(overdrive, bool) else None,
+                                      over_lora)
     health = _record(node.get("health")) or {}
 
     settings: Dict[str, Any]
@@ -733,7 +767,8 @@ def mqtt_snapshot(
         settings = copy.deepcopy(light_settings)
     else:
         settings = {"available": False, "redacted": True, "raw_fields_omitted": True, "reused": False, "read_at_ms": None,
-                    "error": "last settings.json read is too old" if expired else "settings.json not read yet"}
+                    "error": "settings.json is not read over Telemetry LoRa" if over_lora
+                    else "last settings.json read is too old" if expired else "settings.json not read yet"}
     light_collection = _record((current_light or {}).get("collection")) or {}
     settings_age = _int(light_collection.get("settings_age_ms"))
     if settings_age is not None and light_age_ms is not None:
@@ -820,6 +855,31 @@ def mqtt_snapshot(
         "mqtt": diagnostics,
         "data_out_light": data_out_light,
         "nav": _nav(health),
+        "rf": _rf(_record(node.get("session")) or {}),
+    }
+
+
+def _rf(session: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """What the SDR is set to (``state.rf``, contract 1.7), or None without it.
+
+    These are settings.json values of revision ``cfg``, configured and not
+    measured: the radio runs with them only once the edge's ``APPLIED`` says so.
+    Kept apart from ``settings``, which is a Data Out read of settings.json.
+    """
+    rf = _record(session.get("rf"))
+    if not rf:
+        return None
+    return {
+        "source": "state.rf",
+        "cfg": _int(session.get("cfg")),
+        "t": _int(session.get("t")),
+        "received_at_ms": _int(session.get("received_at_ms")),
+        "age_ms": _int(session.get("age_ms")),
+        "center_frequency_hz": _int(rf.get("f")),
+        "vfo0_frequency_hz": _int(rf.get("vfo")),
+        "gain_db": _number(rf.get("g")),
+        "vfo0_bandwidth_hz": _int(rf.get("bw")),
+        "vfo0_squelch_db": _number(rf.get("sq")),
     }
 
 

@@ -27,6 +27,8 @@ export const SETUP_GATE_REASONS: readonly string[] = [
 export const NOTE_GATE_REASONS: readonly string[] = [
   'NATIVE_ANGLE_UNCHECKED',
   'MQTT_ANGULAR_UNAVAILABLE',
+  // Telemetry LoRa has no Data Out, so the overdrive never comes (the HUD says so).
+  'ADC_OVERDRIVE_NOT_OVER_LORA',
   'POWER_FLOOR_LOSSY',
   'SIMULATION_ONLY',
 ];

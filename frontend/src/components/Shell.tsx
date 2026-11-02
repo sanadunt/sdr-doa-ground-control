@@ -3,8 +3,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Branding, LoraLinkView, TelemetrySnapshot, Tone } from '../types';
 import { REFRESH_INTERVALS_S, candidateErrors, deriveDataState, toneFor } from '../lib/telemetry';
 import { actionableGateReasons, doaStatusTextKey, overviewDoaStatus } from '../lib/doaStatus';
-import { sourceBadge, sourceReasonKey } from '../lib/telemetrySource';
-import { loraChip } from '../lib/loraLink';
+import { loraLink as answerOverLora, sourceBadge, sourceReasonKey } from '../lib/telemetrySource';
+import { dataOutUnused, loraChip } from '../lib/loraLink';
 import { shortcutAction } from '../lib/shortcuts';
 import { THEME_STORAGE_KEY, readPreference, writePreference } from '../lib/preferenceStore';
 import { LANGS, gateReasonLabel, useI18n } from '../lib/i18n';
@@ -148,8 +148,11 @@ export function ConsoleShell({
   const dataState = deriveDataState(snapshot, Boolean(readError), localSnapshotFresh);
   const dataTone: Tone = readError ? 'bad' : toneFor(dataState);
   const leadReason = actionableGateReasons(snapshot?.publication_gate?.reasons)[0];
+  // Over Telemetry LoRa an answer without fresh MQTT has no Data Out views to blame: name the missing telemetry.
+  const loraNoTelemetry = answerOverLora(snapshot) && snapshot?.status?.available !== true;
   const dataCause = dataState === 'AVAILABLE' || dataState === 'LOADING' ? []
-    : [leadReason ? `${leadReason} · ${gateReasonLabel(lang, leadReason)}` : dataState === 'STALE' ? t('polar.expired') : '', ...candidateErrors(snapshot)].filter(Boolean);
+    : loraNoTelemetry ? [t('polar.loraNoTelemetry')]
+      : [leadReason ? `${leadReason} · ${gateReasonLabel(lang, leadReason)}` : dataState === 'STALE' ? t('polar.expired') : '', ...candidateErrors(snapshot)].filter(Boolean);
   const dataTitle = readError ? t('shell.snapshotError', { error: readError }) : dataCause.join('\n') || undefined;
   // The same readiness decision Overview uses for the map, readout and polar plot.
   const doa = overviewDoaStatus(snapshot, localSnapshotFresh);
@@ -169,6 +172,8 @@ export function ConsoleShell({
   const mqttTitle = mqttError ? t('app.mqttReadFailed', { error: mqttError }) : undefined;
   const lora = loraChip(loraLink);
   const loraTitle = lora ? loraCause(t, loraLink) : undefined;
+  // Over Telemetry LoRa a refresh reads the MQTT answer again; there is no Data Out to read.
+  const refreshLora = dataOutUnused(snapshot, null) || loraLink?.present === true;
   const readLabel = loading ? t('shell.reading') : lastReadAgeMs === null ? t('shell.noRead') : t('shell.lastRead', { age: formatElapsed(t, lastReadAgeMs) });
   const overview = route === 'overview';
   const viewOnly = access === 'lan-view';
@@ -324,7 +329,7 @@ export function ConsoleShell({
           {toolbar ? <div className="topbar-toolbar">{toolbar}</div> : null}
           <div className="topbar-tools">
             {viewOnly ? <span className="ov-chip tone-info view-only-chip">{t('shell.viewOnly')}</span> : null}
-            <button className={`icon-button refresh-button${loading ? ' is-loading' : ''}`} type="button" onClick={onRefresh} aria-busy={loading} aria-label={t('shell.refresh')} aria-keyshortcuts="R" title={t('shell.refreshShortcut')}>
+            <button className={`icon-button refresh-button${loading ? ' is-loading' : ''}`} type="button" onClick={onRefresh} aria-busy={loading} aria-label={t(refreshLora ? 'shell.refreshLora' : 'shell.refresh')} aria-keyshortcuts="R" title={t(refreshLora ? 'shell.refreshShortcutLora' : 'shell.refreshShortcut')}>
               <Icon name="refresh" />
             </button>
             <select

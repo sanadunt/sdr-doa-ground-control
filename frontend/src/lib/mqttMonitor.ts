@@ -239,7 +239,7 @@ export type RdfNodePartName = typeof RDF_NODE_PARTS[number];
 const RDF_PART_FIELDS: Readonly<Record<RdfNodePartName, readonly string[]>> = {
   session: ['sid', 'cfg', 'run', 'daq', 'profile', 'clock'],
   health: ['run', 'daq', 'clk', 'temp', 'drop', 'age', 'rev'],
-  detail: ['usb', 'sync', 'cpu', 'mem', 'disk_free', 'throt', 'uv', 'tx', 'rx', 'ppp', 'peer', 'ppp_svc', 'ppp_restarts'],
+  detail: ['usb', 'sync', 'cpu', 'mem', 'disk_free', 'throt', 'uv', 'ovr', 'tx', 'rx', 'ppp', 'peer', 'ppp_svc', 'ppp_restarts'],
   doa: ['a', 'f', 'c', 'p', 'rev'],
   doa_unverified: ['a', 'angle_reference', 'f', 'c', 'p', 'rev'],
   diagnostic_doa: ['raw_doa_deg', 'frequency_mhz', 'source'],
@@ -386,7 +386,7 @@ const RDF_SUMMARY_FIELDS: Readonly<Record<string, readonly string[]>> = {
   capabilities: ['version', 'mode', 'angle', 'count', 'remote_commands'],
   availability: ['online', 'reason'],
   'telemetry/health': ['run', 'daq', 'drop', 'age', 'temp', 'clk', 'rev'],
-  'telemetry/health/detail': ['usb', 'sync', 'cpu', 'mem', 'disk_free', 'throt', 'uv', 'ppp', 'peer', 'ppp_svc'],
+  'telemetry/health/detail': ['usb', 'sync', 'cpu', 'mem', 'disk_free', 'throt', 'uv', 'ovr', 'ppp', 'peer', 'ppp_svc'],
   'telemetry/doa': ['a', 'c', 'p', 'f', 'ok', 'rev'],
   'telemetry/diagnostic/doa': ['raw_doa_deg', 'frequency_mhz'],
   'telemetry/angular': ['flags', 'raw_doa_deg', 'frequency_hz', 'revision'],

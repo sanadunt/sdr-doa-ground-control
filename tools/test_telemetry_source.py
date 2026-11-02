@@ -99,8 +99,12 @@ class Edge:
         self.q[kind] += 1
         return self.q[kind]
 
-    def hello(self, *, angle: Optional[str] = "theta_mirror", sid: Optional[str] = None, cfg: int = 1) -> None:
+    def hello(self, *, angle: Optional[str] = "theta_mirror", sid: Optional[str] = None, cfg: int = 1,
+              rf: Optional[Dict[str, Any]] = None) -> None:
         state = dict(self.state, t=self.now_ms(), cfg=cfg)
+        state.pop("rf", None)
+        if rf is not None:
+            state["rf"] = rf
         if sid is not None:
             state.update(sid=sid, boot=f"boot-{sid}", instance=f"instance-{sid}")
             self.q.clear()
@@ -117,6 +121,12 @@ class Edge:
             fixture("telemetry-health.json"), sid=self.state["sid"], t=t, daq=daq,
             q=self.next_q("health") if q is None else q, rev=self.state["cfg"], **(nav or {}),
         ), at=at)
+
+    def detail(self, *, ovr: Any = "absent", at: Optional[int] = None) -> Dict[str, Any]:
+        payload = dict(fixture("telemetry-health-detail.json"), sid=self.state["sid"], t=self.now_ms() if at is None else at)
+        if ovr != "absent":
+            payload["ovr"] = ovr
+        return self.send("telemetry/health/detail", payload, at=at)
 
     def doa(self, theta: float = THETA, *, ok: int = 1, angle: str = "theta_mirror", f: int = FREQUENCY_HZ,
             q: Optional[int] = None, at: Optional[int] = None) -> Dict[str, Any]:
@@ -232,6 +242,10 @@ NAV_FIX = {"hdg": 201.1, "hs": "OK", "gs": "FIX", "fix": 3, "sat": 7, "lat": -6.
            "alt": 715.9, "sog": 0.1, "cog": None}
 
 
+# state.rf of RDF Node 1.7.0 after the 103.1 MHz retune on 2 November.
+RF_17 = {"f": 103_100_000, "vfo": 103_100_000, "g": 12.5, "bw": 12_500, "sq": -100}
+
+
 def fixture_answers() -> Dict[str, Dict[str, Any]]:
     """The MQTT answers the frontend tests read, built at a fixed time."""
     answers: Dict[str, Dict[str, Any]] = {}
@@ -264,6 +278,15 @@ def fixture_answers() -> Dict[str, Dict[str, Any]]:
     lora.doa()
     lora.angular()
     answers["mqtt-lora-nav.json"] = answer(lora, None, 4, link="lora")
+    # Edge 1.7 over LoRa as on 2 November: the SDR settings in state.rf, the
+    # overdrive in health/detail, and only an UNVERIFIED (ok=0) DoA.
+    rf = Edge(ManualMs(FIXED_NOW))
+    rf.hello(rf=RF_17, cfg=298)
+    rf.health(nav=NAV_FIX)
+    rf.detail(ovr=False)
+    rf.doa(ok=0, f=103_100_000)
+    rf.angular(flags=23, frequency_hz=103_100_000)
+    answers["mqtt-lora-rf.json"] = answer(rf, None, 5, link="lora")
     return answers
 
 
@@ -302,9 +325,106 @@ class NavTests(unittest.TestCase):
             built = ts.mqtt_snapshot(edge.view(link=link), None, base_url=BASE_URL, light_age_ms=None, light_meta=meta)
             self.assertEqual(built["source"]["link"], expected)
 
+    def test_overdrive_over_lora_is_a_property_of_the_link(self) -> None:
+        edge = Edge(ManualMs(FIXED_NOW)).live()
+        meta = {"interval_s": 30.0, "reason": None, "running": False, "error": None}
+        for link, reason, error in ((None, ts.ADC_OVERDRIVE_UNKNOWN, "settings.json not read yet"),
+                                    ("lora", ts.ADC_OVERDRIVE_NOT_OVER_LORA, "settings.json is not read over Telemetry LoRa")):
+            built = ts.mqtt_snapshot(edge.view(link=link), None, base_url=BASE_URL, light_age_ms=None, light_meta=meta)
+            reasons = built["publication_gate"]["reasons"]
+            self.assertIn(reason, reasons)
+            self.assertNotIn(ts.ADC_OVERDRIVE_NOT_OVER_LORA if link is None else ts.ADC_OVERDRIVE_UNKNOWN, reasons)
+            self.assertIsNone(built["publication_gate"]["checks"]["adc_not_overdriven"])
+            self.assertEqual(built["settings"]["error"], error)
+
     def test_compass_only(self) -> None:
         nav = self.build({"hdg": None, "hs": "NO_REPLY"})["nav"]
         self.assertEqual((nav["compass_state"], nav["heading_deg"], nav["latitude"], nav["gps_state"]), ("NO_REPLY", None, None, None))
+
+
+class Edge17Tests(unittest.TestCase):
+    """Contract 1.7: state.rf as configured values, detail.ovr as the overdrive verdict."""
+
+    def edge(self) -> Edge:
+        edge = Edge(ManualMs(FIXED_NOW))
+        edge.hello(rf=RF_17, cfg=298)
+        edge.health()
+        return edge
+
+    def answer(self, edge: Edge, light: Optional[Dict[str, Any]] = None, link: Optional[str] = "lora") -> Dict[str, Any]:
+        return ts.mqtt_snapshot(edge.view(link=link), light, base_url=BASE_URL, light_age_ms=None if light is None else 2_000,
+                                light_meta={"interval_s": 30.0, "reason": None, "running": False, "error": None})
+
+    def test_rf_is_its_own_block_never_settings(self) -> None:
+        built = self.answer(self.edge())
+        self.assertEqual(built["rf"], {
+            "source": "state.rf", "cfg": 298, "t": FIXED_NOW, "received_at_ms": FIXED_NOW, "age_ms": 0,
+            "center_frequency_hz": 103_100_000, "vfo0_frequency_hz": 103_100_000, "gain_db": 12.5,
+            "vfo0_bandwidth_hz": 12_500, "vfo0_squelch_db": -100.0,
+        })
+        # settings is a Data Out read of settings.json; state.rf never fills it.
+        self.assertFalse(built["settings"]["available"])
+        self.assertNotIn("fields", built["settings"])
+        edge = Edge(ManualMs(FIXED_NOW))
+        edge.hello()
+        edge.health()
+        self.assertIsNone(self.answer(edge)["rf"])
+        partial = Edge(ManualMs(FIXED_NOW))
+        partial.hello(rf={"g": 12.5})
+        partial.health()
+        self.assertEqual((self.answer(partial)["rf"]["gain_db"], self.answer(partial)["rf"]["center_frequency_hz"]), (12.5, None))
+
+    def test_detail_ovr_settles_the_overdrive_over_lora(self) -> None:
+        for ovr, reason, check, state, overall in (
+            (False, None, True, "PASS", "STALE"),
+            (True, "ADC_OVERDRIVE", False, "OVERDRIVE", "DEGRADED"),
+            (None, ts.ADC_OVERDRIVE_NOT_OVER_LORA, None, "UNKNOWN", "STALE"),
+            ("absent", ts.ADC_OVERDRIVE_NOT_OVER_LORA, None, "UNKNOWN", "STALE"),
+        ):
+            with self.subTest(ovr=ovr):
+                edge = self.edge()
+                edge.detail(ovr=ovr)
+                built = self.answer(edge)
+                reasons = built["publication_gate"]["reasons"]
+                adc = [r for r in reasons if r.startswith("ADC_OVERDRIVE")]
+                self.assertEqual(adc, [] if reason is None else [reason])
+                self.assertIs(built["publication_gate"]["checks"]["adc_not_overdriven"], check)
+                self.assertEqual(built["signal_quality"]["state"], state)
+                self.assertEqual(built["overall_state"], overall)
+                if isinstance(ovr, bool):
+                    self.assertEqual(built["signal_quality"]["adc_overdrive_reported_by"], ["detail"])
+                    self.assertEqual(built["signal_quality"]["adc_overdrive_sources"], ["detail"] if ovr else [])
+                    self.assertEqual(built["signal_quality"]["adc_overdrive_detail_age_ms"], 0)
+
+    def test_an_old_detail_no_longer_counts(self) -> None:
+        clock = ManualMs(FIXED_NOW)
+        edge = Edge(clock)
+        edge.hello(rf=RF_17)
+        edge.detail(ovr=False)
+        clock.now = FIXED_NOW + ts.DETAIL_OVERDRIVE_MAX_AGE_MS
+        edge.health()
+        built = self.answer(edge)
+        self.assertIs(built["publication_gate"]["checks"]["adc_not_overdriven"], True)
+        clock.now += 1
+        edge.health()
+        built = self.answer(edge)
+        self.assertIsNone(built["publication_gate"]["checks"]["adc_not_overdriven"])
+        self.assertIn(ts.ADC_OVERDRIVE_NOT_OVER_LORA, built["publication_gate"]["reasons"])
+
+    def test_either_report_of_an_overdrive_counts(self) -> None:
+        edge = self.edge()
+        edge.detail(ovr=True)
+        built = self.answer(edge, light=fixed_light(), link=None)
+        quality = built["signal_quality"]
+        self.assertIs(quality["adc_overdrive"], True)
+        self.assertEqual(quality["adc_overdrive_sources"], ["detail"])
+        self.assertEqual(quality["adc_overdrive_reported_by"][-1], "detail")
+        self.assertIn("ADC_OVERDRIVE", built["publication_gate"]["reasons"])
+        edge = self.edge()
+        edge.detail(ovr=False)
+        built = self.answer(edge, light=fixed_light(), link=None)
+        self.assertIs(built["signal_quality"]["adc_overdrive"], False)
+        self.assertNotIn("ADC_OVERDRIVE", built["publication_gate"]["reasons"])
 
 
 class SharedFixtureTests(unittest.TestCase):

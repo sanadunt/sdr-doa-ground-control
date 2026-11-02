@@ -2,7 +2,7 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
-## 3.5.0
+## 3.6.0
 
 Rilis minor: tidak ada yang dihapus. Tablet di mode LAN kini bisa **mendengar** audio Receiver groundstation (keputusan pemilik 2026-11-02). Ini jalur baca baru di listener LAN, bukan penulisan; tetap tanpa login, untuk setiap klien di `allowed_clients`. Kanal `3` dan timer update memasangnya sendiri.
 
@@ -16,8 +16,63 @@ Rilis minor: tidak ada yang dihapus. Tablet di mode LAN kini bisa **mendengar** 
   - Server hanya menyimpan 2 detik terakhir di memori dan tidak menulis apa pun ke disk. Menutup mode LAN memutus semua stream.
   - Tanpa pendengar, halaman groundstation tidak menyadap apa pun.
   - Setiap stream yang dibuka dan ditutup tercatat di log console dengan alamat tablet.
-- **Halaman groundstation tetap harus terbuka.** Audio tetap mengalir saat tab groundstation tersembunyi selama Receiver memutar suara. Bila halaman ditutup atau dimuat ulang, tablet menampilkan **SUMBER PUTUS** dan menyambung lagi sendiri. Halaman groundstation yang dimuat sebelum update tidak mengirim audio, jadi muat ulang sekali setelah update.
+- **Halaman groundstation tetap harus terbuka.** Audio tetap mengalir saat tab groundstation tersembunyi selama Receiver memutar suara. Bila halaman ditutup atau dimuat ulang, tablet menampilkan **SUMBER PUTUS** dan menyambung lagi sendiri. Halaman groundstation yang dimuat sebelum 3.6.0 tidak mengirim audio, jadi muat ulang sekali setelah update.
 - Kontrak lengkap, pilihan yang ditimbang (WebRTC, Opus) dan pengukuran latensinya ada di `docs/RECEIVER_MIRROR.md` bagian 10a.
+
+## 3.5.0
+
+Rilis minor: tidak ada yang dihapus. Console membaca tambahan kontrak 1.7 dari RDF Node Edge 1.7.0, sehingga lewat Telemetry LoRa Dashboard menampilkan frekuensi, dB dan setelan SDR, dan Kontrol menampilkan cara RDF-SDR menerapkan perubahan. Edge yang lebih lama tetap tampil seperti sebelumnya. Kanal `3` dan timer update memasangnya sendiri.
+
+- **Frekuensi dan dB di HUD dan kartu RDF-SDR.**
+  - Satu baris "Sinyal" menampilkan frekuensi dan daya rekaman DoA, misalnya "103.100 MHz · -97.1 dB".
+  - DoA `ok=0` (belum diverifikasi di RDF-SDR) tetap ditampilkan, tetapi redup dan bertanda BELUM VALID, tidak pernah dengan gaya data yang valid.
+  - Tanpa rekaman terkini, HUD menampilkan frekuensi yang disetel dengan label "Setelan".
+- **Setelan SDR lewat LoRa (`state.rf`).** Frekuensi tengah, gain, VFO0, bandwidth dan squelch kini muncul di kartu RDF-SDR, bertanda "setelan": nilai settings.json, bukan bukti radio berjalan dengannya. "Ikuti frekuensi node" di dock Spektrum juga memakainya.
+- **ADC overdrive lewat LoRa.** RDF-SDR melaporkan ADC overdrive di `telemetry/health/detail` (`ovr`), dan console memakainya selama 65 detik.
+  - Overdrive menyembunyikan bearing, sama seperti lewat Data Out.
+  - `false` menghapus DOA `DEGRADED` karena "ADC overdrive tidak diketahui". System Health menampilkan ADC dari `health/detail`.
+- **Kontrol menyebut tahap dan cara penerapan.**
+  - Selama menunggu: "RDF-SDR melakukan retune langsung…" atau "RDF-SDR me-restart SDR (alasan)…". Contoh alasan: perubahan gain, lompatan frekuensi, atau engine yang menimpa gain saat retune langsung.
+  - Setelah `APPLIED`: "Diterapkan dengan retune langsung" atau "Diterapkan dengan restart SDR (alasan)". Kode dan bukti DAQ tampil di baris kode.
+  - Hasil 1.7 lainnya punya teks sendiri:
+    - engine tidak berhenti (settings.json tidak diubah);
+    - DAQ tidak sehat setelah restart;
+    - engine tidak berjalan;
+    - engine mengubah nilai saat mulai.
+  - Begitu RDF-SDR menyebut retune langsung atau restart, Kontrol menunggu hasil akhir sampai 270 detik, bukan 90 detik. Restart SDR bisa makan waktu hingga batas start 180 detik.
+  - `APPLIED` tetap satu-satunya keberhasilan, dan tidak ada yang dikirim ulang.
+- **Rule band frekuensi di Kontrol.** Frekuensi tengah baru di dalam sebuah band otomatis membawa gain band itu. Ini berlaku saat diketik maupun saat dikirim dari dock Spektrum:
+  - **VHF 136–174 MHz:** gain 25.4 dB, UCA 0,3 m.
+  - **UHF 400–480 MHz:** gain 15.7 dB, UCA 0,128 m.
+
+  Nilai 25 dan 15 dB dari rule dibulatkan ke nilai terdekat di tabel gain KrakenSDR. Di luar kedua band, gain tidak diubah. Kontrol menulis band mana yang berlaku. Jarak UCA belum bisa dikirim karena RDF-SDR belum menerimanya lewat `config.patch`, jadi untuk sementara atur di RDF-SDR.
+- **Tablet 8".**
+  - Dalam portrait, strip status yang memuat Telemetry LoRa menjadi dua baris berisi empat, sehingga UNAVAILABLE dan label Telemetry LoRa tidak lagi terpotong.
+  - Waterfall Mirror Receiver mengisi kartunya.
+  - Baris pertama kartu RDF-SDR dan label kode di DoA Diagnostics boleh pindah baris.
+  - Saat halaman dimuat, tertulis "Menunggu pembacaan pertama", bukan "Menunggu Data Out".
+- **LoRa tanpa telemetri segar.** Bila RDF-SDR terhubung lewat LoRa tetapi telemetrinya tidak segar (misalnya DAQ dilaporkan tidak sehat), HUD, kartu RDF-SDR, chip DATA, System Health dan DoA Diagnostics menulis "Belum ada telemetri RDF-SDR terkini lewat Telemetry LoRa", bukan "Data Out tidak terjangkau" atau tabel CSV/XML.
+
+## 3.4.4
+
+Rilis patch: tidak ada yang dihapus. Selama Telemetry LoRa, halaman data tidak lagi menyebut Data Out, settings.json atau PPP, yang tidak dipakai di jalur itu. Tanpa jembatan LoRa, semuanya tetap seperti biasa. Kanal `3` dan timer update memasangnya sendiri.
+
+- **ADC overdrive lewat LoRa.** Alasan gate kini `ADC_OVERDRIVE_NOT_OVER_LORA`: "ADC overdrive tidak dikirim lewat Telemetry LoRa".
+  - Alasan lama, `ADC_OVERDRIVE_UNKNOWN`, menyebut status.json, doa.xml dan Data Out.
+  - Ini sifat jalurnya, bukan masalah data. Delivery/Publikasi tidak lagi menulis ADA MASALAH karenanya, dan tooltip DATA menyebut alasan yang sebenarnya, misalnya DoA yang belum dikirim RDF-SDR.
+- **Dashboard.**
+  - Notice peta kini "offset kompas tidak tersedia lewat Telemetry LoRa", bukan "settings Data Out belum terbaca".
+  - Tombol muat ulang bernama "Muat ulang".
+  - Kartu RDF-SDR tidak lagi menampilkan alamat Data Out, DAQ frame dan Remote control.
+- **System Health.** Chip HTTP, ubin SNR dan PAPR, Frame index dan Noise source disembunyikan.
+  - ADC menulis "tidak tersedia lewat Telemetry LoRa".
+  - Status GPS diambil dari `telemetry/health`.
+- **DoA Diagnostics.**
+  - Sumber ditulis "MQTT · Telemetry LoRa".
+  - Baris Native views, Settings source dan `raw_settings_omitted` disembunyikan.
+  - Effective config menjelaskan bahwa settings.json tidak dibaca lewat LoRa, dan Kontrol → Baca settings menanyakannya ke RDF-SDR.
+- **Configuration.** Pilihan sumber "Data Out" di GPS & Compass bernama "RDF-SDR (Telemetry LoRa)".
+- **Message Monitor.** Field PPP dari `telemetry/health/detail` (`ppp`, `peer`, `ppp_svc`, `ppp_restarts`) tidak ditampilkan.
 
 ## 3.4.3
 

@@ -599,6 +599,10 @@ class CollectorPathTests(unittest.TestCase):
 
         def connect(address: Tuple[str, int], *args: Any, **kwargs: Any) -> socket.socket:
             host, wanted = address
+            # Only Data Out's port: a thread another test left behind (an MQTT
+            # monitor reconnecting to its default broker) passes through unrecorded.
+            if wanted != 8081:
+                return real_connect(address, *args, **kwargs)
             self.connects.append((host, wanted))
             if host == "doasdr.local":
                 raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")

@@ -208,7 +208,8 @@ export function nodeProgressView(snapshot: TelemetrySnapshot | null | undefined)
 }
 
 const SIGNAL_STATES = ['PASS', 'OVERDRIVE', 'UNKNOWN'] as const;
-const OVERDRIVE_SOURCES = ['status', 'xml'] as const;
+// status.json and doa.xml of a Data Out read, and telemetry/health/detail `ovr` of the edge (contract 1.7).
+const OVERDRIVE_SOURCES = ['status', 'xml', 'detail'] as const;
 
 export interface SignalQualityView {
   state: typeof SIGNAL_STATES[number];

@@ -8,6 +8,7 @@
  * source block comes from an older server, which always read Data Out.
  */
 import type { Candidate, Tone, TelemetrySnapshot } from '../types';
+import type { DoaStatus, DoaStatusReason } from './doaStatus';
 import type { MessageKey } from './i18n';
 
 export type TelemetrySourceKind = 'mqtt' | 'data_out' | 'none';
@@ -106,6 +107,15 @@ export function lightStatus(snapshot: TelemetrySnapshot | null | undefined): Rec
   return status && status.available === true ? status : null;
 }
 
+/**
+ * Any answer while the node reaches the broker over the LoRa serial bridge,
+ * also one without fresh MQTT (source none): Data Out is not used then, so
+ * nothing may name it as the missing source.
+ */
+export function loraLink(snapshot: TelemetrySnapshot | null | undefined): boolean {
+  return record(snapshot?.source)?.link === 'lora';
+}
+
 /** An MQTT answer whose node reaches the broker over the LoRa serial bridge: no Data Out values can come. */
 export function overLora(snapshot: TelemetrySnapshot | null | undefined): boolean {
   return isMqttSnapshot(snapshot) && record(snapshot?.source)?.link === 'lora';
@@ -126,6 +136,100 @@ export function angularFrameAgeMs(snapshot: TelemetrySnapshot | null | undefined
 /** The nav fields of an MQTT answer (health, contract 1.6), or null. */
 export function snapshotNav(snapshot: TelemetrySnapshot | null | undefined): Record<string, unknown> | null {
   return isMqttSnapshot(snapshot) ? record(snapshot?.nav) : null;
+}
+
+/** The DOA_value.html power floor (CSV_POWER_FLOOR_DB of tools/sdr_doa_collector.py): a clip, not a measurement. */
+const POWER_FLOOR_DB = -100;
+
+/** Frequencies the console takes from the node: 1 MHz to 6 GHz, in whole Hz. */
+const MIN_HZ = 1_000_000;
+const MAX_HZ = 6_000_000_000;
+
+function hzOrNull(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  const hz = Math.round(value);
+  return hz >= MIN_HZ && hz <= MAX_HZ ? hz : null;
+}
+
+function inRange(value: unknown, min: number, max: number): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max ? value : null;
+}
+
+/** The SDR settings of the node's retained state (state.rf); each value null when missing or out of range. */
+export interface RfSettings {
+  cfg: number | null;
+  centerHz: number | null;
+  vfo0Hz: number | null;
+  gainDb: number | null;
+  bandwidthHz: number | null;
+  squelchDb: number | null;
+}
+
+/**
+ * What an MQTT answer says the SDR is set to (state.rf, edge 1.7), or null
+ * without one or when none of its values is usable. These are settings.json
+ * values of revision cfg: configured, not measured, so they are shown as a
+ * setting and never as the DoA's frequency.
+ */
+export function snapshotRf(snapshot: TelemetrySnapshot | null | undefined): RfSettings | null {
+  const rf = isMqttSnapshot(snapshot) ? record(snapshot?.rf) : null;
+  if (!rf) return null;
+  const cfg = inRange(rf.cfg, 0, Number.MAX_SAFE_INTEGER);
+  const bandwidth = inRange(rf.vfo0_bandwidth_hz, 1, 100_000_000);
+  const view: RfSettings = {
+    cfg: cfg !== null && Number.isInteger(cfg) ? cfg : null,
+    centerHz: hzOrNull(rf.center_frequency_hz),
+    vfo0Hz: hzOrNull(rf.vfo0_frequency_hz),
+    gainDb: inRange(rf.gain_db, -20, 100),
+    bandwidthHz: bandwidth === null ? null : Math.round(bandwidth),
+    squelchDb: inRange(rf.vfo0_squelch_db, -200, 50),
+  };
+  return view.centerHz === null && view.vfo0Hz === null && view.gainDb === null && view.bandwidthHz === null && view.squelchDb === null ? null : view;
+}
+
+/** Frequency and power of one DoA record. */
+export interface DoaSample {
+  frequencyHz: number;
+  /** The record's native power in dB (not dBm), or null. */
+  powerDb: number | null;
+  /** The shown DoA (LIVE, ok=1); false for the UNVERIFIED ok=0 record, which is shown dimmed. */
+  verified: boolean;
+}
+
+/** Frequency in MHz with three decimals and power in dB with one, e.g. "103.100 MHz · -54.2 dB". */
+export function doaSampleText(sample: DoaSample): string {
+  const mhz = `${(sample.frequencyHz / 1e6).toFixed(3)} MHz`;
+  return sample.powerDb === null ? mhz : `${mhz} · ${sample.powerDb.toFixed(1)} dB`;
+}
+
+// The held reasons under which the UNVERIFIED ok=0 record is the current one.
+const UNVERIFIED_SAMPLE_REASONS: ReadonlySet<DoaStatusReason> = new Set<DoaStatusReason>(['mqttUnverified', 'loraUnverified']);
+
+/**
+ * The frequency and power of the DoA record the Dashboard is showing, with
+ * `status` from overviewDoaStatus(): the shown view's (the MQTT view or the
+ * CSV view of Data Out); else, while the local window is open, the current
+ * UNVERIFIED ok=0 record of an MQTT answer, marked unverified. null when
+ * there is no current record, so the caller can show the configured
+ * frequency (snapshotRf) instead. The ok=0 record never fills a DoA view.
+ */
+export function doaSample(snapshot: TelemetrySnapshot | null | undefined, status: DoaStatus, localFresh: boolean): DoaSample | null {
+  if (!snapshot || snapshot.simulation === true) return null;
+  if (status.shown) {
+    const view = record(snapshot.doa_candidates?.[isMqttSnapshot(snapshot) ? 'mqtt' : 'csv']);
+    const frequencyHz = hzOrNull(view?.frequency_hz_normalized) ?? hzOrNull(view?.frequency_hz);
+    if (frequencyHz === null) return null;
+    // Data Out marks a CSV power at its floor as not valid (POWER_FLOOR_LOSSY).
+    const powerDb = view?.power_native_valid === false ? null : inRange(view?.power_native_db, -250, 100);
+    return { frequencyHz, powerDb, verified: true };
+  }
+  if (!localFresh || !isMqttSnapshot(snapshot) || !UNVERIFIED_SAMPLE_REASONS.has(status.reason)) return null;
+  const unverified = record(record(snapshot.mqtt)?.doa_unverified);
+  if (!unverified || unverified.stale === true) return null;
+  const frequencyHz = hzOrNull(unverified.f);
+  // A power at the DOA_value.html floor is the clip, not a measurement, as for a LIVE record.
+  const powerDb = inRange(unverified.p, -250, 100);
+  return frequencyHz === null ? null : { frequencyHz, powerDb: powerDb !== null && powerDb <= POWER_FLOOR_DB ? null : powerDb, verified: false };
 }
 
 /** The doa.xml view of the light read (its position and freshness at that read), or null. */
