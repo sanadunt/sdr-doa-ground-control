@@ -11,10 +11,16 @@
  *
  * LAN view: one player for the page (mirrorAudioPlayer()), started by the
  * Dengar click (the browser's autoplay rule), reads the GET stream and plays
- * it through Web Audio with a buffer of TARGET_BUFFER_S, never more than
- * MAX_BUFFER_S behind. Its latency is an estimate: the capture (the frame's
- * 100 ms and the chunk's 200 ms) plus what is buffered and the output's own
- * latency; neither clock is compared, and the Wi-Fi time is left out.
+ * it through Web Audio with a buffer of TARGET_BUFFER_S; once more than
+ * CATCH_UP_S is buffered (a stall, a burst, a tab whose audio clock paused in
+ * the background) it drops chunks until it is back at TARGET_BUFFER_S.
+ *
+ * Latency: a chunk holds the 200 ms of audio captured before it was posted,
+ * and each of its samples plays that long after the chunk's start, so every
+ * sample's delay is the time until the end of the newest scheduled chunk,
+ * plus the output's own latency (estimateLatencyMs); with TARGET_BUFFER_S
+ * that is about 0.5 s. Neither clock is compared, and the Wi-Fi time (a few
+ * milliseconds on a LAN) is left out.
  */
 import type { ReceiverBridge } from './receiverBridge';
 import type { ReceiverAudio } from './receiverBridgeProtocol';
@@ -39,14 +45,12 @@ export const MIRROR_AUDIO_LIMITS = {
 
 /** Samples per posted chunk: 200 ms at 16 kHz. */
 export const CHUNK_SAMPLES = 3200;
-/** The frame's 100 ms batch and the chunk's 200 ms, counted into the latency. */
-export const CAPTURE_MS = 300;
 /** Chunks waiting while a POST is in flight; an older one is dropped (the next is marked as a gap). */
 export const MAX_QUEUED_AUDIO_CHUNKS = 2;
 /** The player starts this far ahead after a start or an empty buffer. */
 export const TARGET_BUFFER_S = 0.25;
-/** A chunk that would play later than this is dropped, so the latency stays bounded. */
-export const MAX_BUFFER_S = 1.0;
+/** More than this buffered: chunks are dropped until TARGET_BUFFER_S is left, so the latency comes back down. */
+export const CATCH_UP_S = 0.6;
 /** No audio for this long while connected: the groundstation sends none (stopped RX, a scan, muted VFOs). */
 export const SILENT_AFTER_MS = 2000;
 /** No bytes at all (not even a keepalive) for this long: the stream is dead and opened again. */
@@ -416,23 +420,33 @@ export function browserPlayerEnvironment(): MirrorAudioPlayerEnvironment {
   };
 }
 
-/**
- * Where the next chunk goes on the AudioContext's clock: after an empty
- * buffer (or at the start) TARGET_BUFFER_S ahead; a chunk that would start
- * more than MAX_BUFFER_S ahead is dropped (startAt null).
- */
-export function scheduleChunk(nextTime: number, now: number, durationS: number): { startAt: number | null; nextTime: number } {
-  if (nextTime < now + 0.02) {
-    const startAt = now + TARGET_BUFFER_S;
-    return { startAt, nextTime: startAt + durationS };
-  }
-  if (nextTime - now > MAX_BUFFER_S) return { startAt: null, nextTime };
-  return { startAt: nextTime, nextTime: nextTime + durationS };
+export interface ChunkSlot {
+  /** When the chunk starts on the AudioContext's clock; null: dropped. */
+  startAt: number | null;
+  nextTime: number;
+  /** Dropping chunks until the buffer is back at TARGET_BUFFER_S. */
+  catchingUp: boolean;
 }
 
-/** The latency estimate: capture, what is buffered, and the output's own latency. */
+/**
+ * Where the next chunk goes on the AudioContext's clock: after an empty
+ * buffer (or at the start) TARGET_BUFFER_S ahead, else right after the
+ * previous one. With more than CATCH_UP_S buffered, chunks are dropped
+ * (startAt null) until no more than TARGET_BUFFER_S is left.
+ */
+export function scheduleChunk(nextTime: number, now: number, durationS: number, catchingUp = false): ChunkSlot {
+  const ahead = nextTime - now;
+  if (ahead < 0.02) {
+    const startAt = now + TARGET_BUFFER_S;
+    return { startAt, nextTime: startAt + durationS, catchingUp: false };
+  }
+  if ((catchingUp || ahead > CATCH_UP_S) && ahead > TARGET_BUFFER_S) return { startAt: null, nextTime, catchingUp: true };
+  return { startAt: nextTime, nextTime: nextTime + durationS, catchingUp: false };
+}
+
+/** The latency estimate: until the end of the newest scheduled chunk, and the output's own latency. */
 export function estimateLatencyMs(nextTime: number, now: number, outputLatencyS: number): number {
-  return Math.round(CAPTURE_MS + Math.max(0, nextTime - now) * 1000 + Math.max(0, outputLatencyS) * 1000);
+  return Math.round(Math.max(0, nextTime - now) * 1000 + Math.max(0, outputLatencyS) * 1000);
 }
 
 export interface MirrorAudioPlayer {
@@ -453,6 +467,7 @@ export function createMirrorAudioPlayer(env: MirrorAudioPlayerEnvironment = brow
   let retryTimer: TimerHandle | null = null;
   let idleTimer: TimerHandle | null = null;
   let nextTime = 0;
+  let catchingUp = false;
   let lastAudioAt = -Infinity;
   let connectedAt = 0;
 
@@ -499,8 +514,9 @@ export function createMirrorAudioPlayer(env: MirrorAudioPlayerEnvironment = brow
     if (!context) return;
     const now = context.currentTime;
     const duration = chunk.samples.length / MIRROR_AUDIO_LIMITS.sampleRate;
-    const slot = scheduleChunk(nextTime, now, duration);
+    const slot = scheduleChunk(nextTime, now, duration, catchingUp);
     nextTime = slot.nextTime;
+    catchingUp = slot.catchingUp;
     if (slot.startAt !== null) {
       const buffer = context.createBuffer(1, chunk.samples.length, MIRROR_AUDIO_LIMITS.sampleRate);
       buffer.getChannelData(0).set(chunk.samples);

@@ -1,9 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   BUSY_RETRY_MS,
-  CAPTURE_MS,
   CHUNK_SAMPLES,
-  MAX_BUFFER_S,
+  CATCH_UP_S,
   MIRROR_AUDIO_LIMITS,
   RETRY_MS,
   SILENT_AFTER_MS,
@@ -192,19 +191,34 @@ describe('audio publisher (groundstation)', () => {
 });
 
 describe('player scheduling', () => {
-  it('starts a buffer ahead, plays back to back, and drops what would lag more than a second', () => {
-    expect(scheduleChunk(0, 10, 0.2)).toEqual({ startAt: 10 + TARGET_BUFFER_S, nextTime: 10 + TARGET_BUFFER_S + 0.2 });
+  it('starts a buffer ahead, plays back to back, and catches up after a stall', () => {
+    expect(scheduleChunk(0, 10, 0.2)).toEqual({ startAt: 10 + TARGET_BUFFER_S, nextTime: 10 + TARGET_BUFFER_S + 0.2, catchingUp: false });
     const slot = scheduleChunk(10.45, 10.2, 0.2);
     expect(slot.startAt).toBe(10.45);
     expect(slot.nextTime).toBeCloseTo(10.65);
     // An empty buffer starts again a buffer ahead.
     expect(scheduleChunk(10.0, 10.5, 0.2).startAt).toBeCloseTo(10.5 + TARGET_BUFFER_S);
-    expect(scheduleChunk(10 + MAX_BUFFER_S + 0.01, 10, 0.2)).toEqual({ startAt: null, nextTime: 10 + MAX_BUFFER_S + 0.01 });
+    // A burst of two (jitter) is played; more than CATCH_UP_S buffered is dropped down to the target.
+    expect(scheduleChunk(10 + 0.45, 10, 0.2).startAt).toBe(10.45);
+    let next = 10 + CATCH_UP_S + 0.35;
+    let now = 10;
+    let catching = false;
+    const played: boolean[] = [];
+    for (let chunk = 0; chunk < 8; chunk++) {
+      const result = scheduleChunk(next, now, 0.2, catching);
+      played.push(result.startAt !== null);
+      next = result.nextTime;
+      catching = result.catchingUp;
+      now += 0.2;
+    }
+    // The steady stream catches up: dropped until no more than the target is left, then played back to back.
+    expect(played).toEqual([false, false, false, false, true, true, true, true]);
+    expect(next - now).toBeLessThanOrEqual(TARGET_BUFFER_S + 0.2 + 1e-9);
   });
 
-  it('estimates the latency from the capture, the buffer and the output', () => {
-    expect(estimateLatencyMs(10.45, 10, 0.02)).toBe(CAPTURE_MS + 450 + 20);
-    expect(estimateLatencyMs(9, 10, 0)).toBe(CAPTURE_MS);
+  it('estimates the latency until the end of the newest chunk, with the output\'s own', () => {
+    expect(estimateLatencyMs(10.45, 10, 0.02)).toBe(470);
+    expect(estimateLatencyMs(9, 10, 0)).toBe(0);
   });
 });
 
@@ -289,7 +303,7 @@ describe('audio player (LAN view)', () => {
     await h.push(audioChunk(1));
     await h.push(audioChunk(2));
     expect(h.fake.started).toEqual([TARGET_BUFFER_S, TARGET_BUFFER_S + 0.2]);
-    expect(player.getState()).toEqual({ status: 'playing', latencyMs: CAPTURE_MS + 650 + 20, code: null });
+    expect(player.getState()).toEqual({ status: 'playing', latencyMs: 650 + 20, code: null });
     player.stop();
     expect(player.getState()).toEqual({ status: 'off', latencyMs: null, code: null });
     expect(h.opened[0].aborted).toBe(true);
