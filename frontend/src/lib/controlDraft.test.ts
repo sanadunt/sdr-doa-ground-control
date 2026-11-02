@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { CONFIG_PATCH_KEYS, isConfigPatchKey, nextControlDraftRequest, normalizeConfigPatchChanges } from './controlDraft';
+import {
+  createControlSendingStore, CONFIG_PATCH_KEYS, isConfigPatchKey, nextControlDraftRequest, normalizeConfigPatchChanges } from './controlDraft';
 
 describe('control draft requests', () => {
   it('cover exactly the edge config.patch allowlist', () => {
@@ -22,5 +23,21 @@ describe('control draft requests', () => {
     expect(first.seq).toBe(1);
     expect(second.seq).toBe(2);
     expect(second.changes).toEqual(first.changes);
+  });
+});
+
+describe('controlSendingStore (Kirim ke RDF-SDR waits for a patch on its way)', () => {
+  it('notifies only on a change and stops after unsubscribe', () => {
+    const store = createControlSendingStore();
+    let calls = 0;
+    const off = store.subscribe(() => { calls += 1; });
+    expect(store.get()).toBe(false);
+    store.set(true); store.set(true);
+    expect(store.get()).toBe(true);
+    expect(calls).toBe(1);
+    off();
+    store.set(false);
+    expect(calls).toBe(1);
+    expect(store.get()).toBe(false);
   });
 });

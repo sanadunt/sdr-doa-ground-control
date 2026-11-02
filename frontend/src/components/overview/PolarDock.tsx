@@ -8,6 +8,7 @@ import { halfPowerWidth } from '../../lib/doaGeometry';
 import { parseCompassOffsetInput, parseTypedNumber, validPolarHead, validPolarRange } from '../../lib/polarViewSettings';
 import type { PolarViewSettings } from '../../lib/polarViewSettings';
 import { useI18n } from '../../lib/i18n';
+import { heldTimeText } from '../../lib/heldOverlay';
 import { PolarPlot, peakUpHead, radialDomain } from '../PolarPlot';
 import { Icon } from '../ui';
 import { useSyncedDraft } from './useSyncedDraft';
@@ -88,7 +89,7 @@ export function PolarDock({
   const curve = heldCurve(lastCurve, status.shown ? polar.values : null, snapshot?.simulation === true, Date.now());
   lastCurve = curve.memory;
   const values = curve.draw;
-  const heldAt = curve.held ? new Date(curve.held.atMs).toLocaleTimeString(lang === 'id' ? 'id-ID' : 'en-GB', { hour12: false }) : null;
+  const heldAt = curve.held ? heldTimeText(curve.held.atMs, lang) : null;
   const width = values ? halfPowerWidth(values) : null;
   const widthText = width ? `${width.widthDeg}°` : t('common.na');
   const head = validPolarHead(view.head) ? view.head : 0;

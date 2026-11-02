@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAP_CONTROLS_ROW_PX, ZERO_INSETS, clampMapPadding, computeMapInsets, controlsFramingBottom, sameInsets } from './mapInsets';
+import { COMPACT_TOP_INSET_SHARE, MAP_CONTROLS_ROW_PX, ZERO_INSETS, cameraInsets, clampMapPadding, compactMapInsets, computeMapInsets, controlsFramingBottom, noticePlacement, sameInsets } from './mapInsets';
 
 const map = { left: 0, top: 52, right: 1440, bottom: 900 };
 
@@ -63,5 +63,45 @@ describe('framing clearance for the map controls', () => {
   it('grows when the controls wrap onto a second row at phone width', () => {
     // 44 px buttons, a 6 px gap and the wrapped attribution row.
     expect(controlsFramingBottom(94)).toBe(118);
+  });
+});
+
+describe('compact map insets (phones and tablets)', () => {
+  // A 412 px wide phone held upright: the map is 412 x 475 under the top bar.
+  const map = { left: 0, top: 52, right: 412, bottom: 527 };
+  const hud = { left: 8, top: 60, right: 248, bottom: 170 };
+  const node = { left: 84, top: 60, right: 404, bottom: 200 };
+
+  it('frames the station centred across: the camera takes only the top inset', () => {
+    const insets = compactMapInsets(map, { left: [hud] });
+    expect(insets).toEqual({ top: 170 - 52 + 8, right: 0, bottom: 0, left: 0 });
+    expect(cameraInsets(insets, true)).toEqual({ top: 126, right: 0, bottom: 0, left: 0 });
+    // The PC keeps every side.
+    const pc = { top: 0, right: 340, bottom: 200, left: 300 };
+    expect(cameraInsets(pc, false)).toBe(pc);
+  });
+
+  it('takes the lowest panel, at most a share of the map height, and nothing from panels off the map', () => {
+    expect(compactMapInsets(map, { left: [hud], right: [node] }).top).toBe(200 - 52 + 8);
+    const tall = { left: 8, top: 60, right: 248, bottom: 520 };
+    expect(compactMapInsets(map, { left: [tall] }).top).toBe(Math.round((527 - 52) * COMPACT_TOP_INSET_SHARE));
+    expect(compactMapInsets(map, { left: [{ left: 0, top: 600, right: 200, bottom: 700 }] })).toEqual(ZERO_INSETS);
+    expect(compactMapInsets(map, {})).toEqual(ZERO_INSETS);
+  });
+
+  it('puts the map notices full width under the HUD and the node card on a 412 px phone', () => {
+    // HUD (240 px) and node card (320 px) together are wider than the map.
+    const insets = compactMapInsets(map, { left: [hud], right: [node] });
+    const placement = noticePlacement(insets, true);
+    expect(placement).toEqual({ top: 200 - 52 + 8 });
+    // No side offsets: the stylesheet's map gap leaves the notices the map's width.
+    expect(placement?.left).toBeUndefined();
+    expect(placement?.right).toBeUndefined();
+    expect(noticePlacement(compactMapInsets(map, {}), true)).toBeUndefined();
+  });
+
+  it('keeps the PC notices between the side panels', () => {
+    expect(noticePlacement({ top: 0, right: 340, bottom: 200, left: 300 }, false)).toEqual({ left: 312, right: 352 });
+    expect(noticePlacement(ZERO_INSETS, false)).toBeUndefined();
   });
 });

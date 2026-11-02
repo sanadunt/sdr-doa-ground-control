@@ -62,12 +62,16 @@ SESSION = {"sid": STATE["sid"], "boot": STATE["boot"]}
 
 
 def rebuild(case: Dict[str, Any]) -> bytes:
-    """The envelope ``rdf_node_commands`` builds from the case's inputs."""
+    """The envelope ``rdf_node_commands`` builds from the case's inputs.
+
+    The edge judged these envelopes when the console sent 15 s commands; the lifetime is taken from the
+    case, so the bytes stay the ones the edge judged (control.py takes any lifetime up to 30 s).
+    """
     sent = json.loads(case["console"]["payload"])
     changes = cmds.validate_patch_changes(case["changes"]) if case["op"] == cmds.OP_CONFIG_PATCH else None
     command = cmds.build_command(
         case["op"], command_id=sent["id"], sid=sent["sid"], boot=sent["boot"], base_rev=sent["base_rev"],
-        issued_ms=sent["issued_ms"], changes=changes,
+        issued_ms=sent["issued_ms"], changes=changes, ttl_ms=sent["expires_ms"] - sent["issued_ms"],
     )
     cmds.validate_command(command, now_ms=sent["issued_ms"])
     return cmds.encode_command(command)
@@ -94,7 +98,7 @@ class EdgeJudgedEnvelopeTests(unittest.TestCase):
                     self.assertEqual(case["console"]["topic"], cmds.command_topic(NODE, case["op"]))
                     self.assertEqual((case["console"]["qos"], case["console"]["retain"]), (1, False))
                     sent = json.loads(case["console"]["payload"])
-                    self.assertEqual(sent["expires_ms"] - sent["issued_ms"], cmds.COMMAND_TTL_MS)
+                    self.assertLessEqual(sent["expires_ms"] - sent["issued_ms"], cmds.MAX_COMMAND_TTL_MS)
                     self.assertEqual((sent["sid"], sent["boot"]), (state["sid"], state["boot"]))
 
     def test_the_edge_accepted_what_the_console_accepts(self) -> None:
@@ -178,14 +182,16 @@ class EnvelopeTests(unittest.TestCase):
     def test_envelope_fields_order_and_lifetime(self) -> None:
         patch_command = self.command()
         self.assertEqual(list(patch_command), ["v", "id", "sid", "boot", "issued_ms", "expires_ms", "base_rev", "op", "changes"])
-        self.assertEqual(patch_command["expires_ms"] - patch_command["issued_ms"], 15_000)
+        self.assertEqual(patch_command["expires_ms"] - patch_command["issued_ms"], 30_000)
+        # The console takes the whole lifetime the edge accepts (control.py: 0 < expires - issued <= 30 s).
+        self.assertEqual(cmds.COMMAND_TTL_MS, cmds.MAX_COMMAND_TTL_MS)
         get_command = self.command(cmds.OP_CONFIG_GET)
         self.assertNotIn("changes", get_command)
         self.assertEqual(cmds.validate_command(get_command, now_ms=1_790_000_000_000), get_command)
         self.assertEqual(
             cmds.encode_command(get_command),
             b'{"v":2,"id":"gc-000000000000000000000000","sid":"' + SESSION["sid"].encode() + b'","boot":"'
-            + SESSION["boot"].encode() + b'","issued_ms":1790000000000,"expires_ms":1790000015000,"base_rev":7,"op":"config.get"}',
+            + SESSION["boot"].encode() + b'","issued_ms":1790000000000,"expires_ms":1790000030000,"base_rev":7,"op":"config.get"}',
         )
         self.assertEqual(cmds.command_topic("uav-01", cmds.OP_CONFIG_PATCH), "sdr/v2/uav-01/cmd/config/patch")
         self.assertEqual(cmds.command_topic("uav-01", cmds.OP_CONFIG_GET), "sdr/v2/uav-01/cmd/config/get")
@@ -227,7 +233,7 @@ class EnvelopeTests(unittest.TestCase):
         cmds.validate_command(self.command(cmds.OP_CONFIG_GET, base_rev=None), now_ms=now)
         # The deadline is checked against the clock that is given.
         with self.assertRaises(cmds.CommandRefused):
-            cmds.validate_command(self.command(), now_ms=now + 15_000)
+            cmds.validate_command(self.command(), now_ms=now + cmds.COMMAND_TTL_MS)
         with self.assertRaises(cmds.CommandRefused):
             cmds.validate_command(self.command(), now_ms=now - 1_001)
         cmds.validate_command(self.command(), now_ms=now - 1_000)

@@ -2,6 +2,38 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.11.0
+
+Rilis minor: tidak ada yang dihapus. Tata letak ringkas untuk perangkat sentuh (HP dan tablet, di tampilan LAN maupun di console sendiri). PC groundstation yang memakai mouse tampil persis seperti 3.10.0.
+
+- **Kapan dipakai.** Hanya pada perangkat yang input utamanya jari dan tidak punya hover (`(hover: none) and (pointer: coarse)`), di lebar layar berapa pun. Mouse yang dicolokkan ke tablet mengembalikan tata letak biasa. Untuk memeriksa dari PC: `?layout=compact` di URL (misalnya `http://127.0.0.1:8787/?layout=compact#/dashboard`), `?layout=desktop` untuk sebaliknya; hanya berlaku untuk satu kali muat halaman.
+- **Top bar satu baris** di semua halaman, tombol 44 px: menu halaman, logo, satu pil status, tombol panel (ikon saja), muat ulang, dan LIHAT SAJA di tampilan LAN.
+  - Pil status menampilkan sumber (MQTT, Telemetry LoRa, Data Out) dan nilai DOA, dengan warna status terburuk. Ketukan membuka seluruh strip status, termasuk daftar Publikasi; Escape, ketukan di luar, atau ketukan kedua menutupnya.
+  - Interval segarkan, EN|ID, serta Mulai ulang/Matikan pindah ke bagian bawah menu halaman, di sebelah tombol tema.
+- **Dashboard tanpa gulir halaman.**
+  - **Lanskap:** peta di kiri (55 %) dan Spektrum di kanan (45 %). **Potret:** peta di atas (55 %) dan Spektrum di bawah. Bila Spektrum dimatikan, peta memenuhi layar.
+  - **Tanpa Polar.** Arah DoA sudah tergambar di peta; pilihan Polar yang tersimpan tidak berubah dan tetap berlaku di PC.
+  - **HUD ringkas** di pojok kiri atas peta: bearing (lebih kecil), sumber dan umur, frekuensi dan dB, θ₀. Tanda BELUM VALID dan USANG tetap ada. Kartu estimasi posisi menjadi dua baris dan hanya tampil setelah estimasi ada (MENUNGGU dan PERLU BERGERAK tidak menutupi peta kecil); ketukan membuka rinciannya.
+  - **Kartu RDF-SDR** tersembunyi; tombol antena baru di top bar membukanya di atas peta (kanan atas). Kontrol (hanya di console sendiri) dan Lapisan juga terbuka di atas peta dan bisa digulir di dalamnya. Buka-tutup kartu RDF-SDR tidak disimpan.
+  - **Pemberitahuan peta** (REFERENSI offset kompas, BASEMAP UNAVAILABLE, dan lainnya) menjadi satu baris; ketukan membuka teks lengkap beserta tautannya.
+  - Legenda dan koordinat di bawah peta disembunyikan; tombol peta (zoom, pusatkan, utara, basemap, atribusi) tetap di kiri bawah.
+- **Dock Spektrum ringkas.** Header satu baris: chip dan tag, RX|Spektrum, Penanda, Dengar, Mulai/Berhenti, dan Receiver sebagai ikon. Atur, ikuti frekuensi node, mode dengar dan Kirim tidak tampil di tata letak ringkas. Penanda, penalaan, audio mirror dan semua status tetap bekerja.
+- **Spektrum memenuhi panelnya** (trace mendapat bagian tetap, waterfall mengisi sisanya sampai bawah panel), di dock groundstation maupun dock MIRROR tablet.
+- **Peta di HP tegak memusatkan RDF-SDR.** HUD dan kartu di atas peta tidak lagi mendorong RDF-SDR ke tepi kanan (labelnya terpotong); di tata letak ringkas peta hanya memberi ruang di atas untuk kartu-kartu itu. PC tidak berubah. Pemberitahuan peta di tata letak ringkas memakai lebar penuh peta, di bawah kartu-kartu itu.
+- Halaman lain hanya mendapat top bar satu baris; isinya tidak berubah.
+- **Peta menahan grafik DoA terakhir**, seperti grafik Polar. Bila DoA berhenti (USANG, BELUM VALID, konflik, sinkronisasi DAQ gagal, ADC overdrive), beam, lobe, tepi −3 dB dan bearing terakhir tetap tampil di peta, tetap berwarna penuh seperti grafik hidup (warna, opasitas dan pengaturan Lapisan yang sama, garis bearing utuh), sampai DoA baru datang dan menggantikannya. Grafik itu hanya ditandai USANG dan jam data terakhir: di label bearing ("USANG 134.0° · terakhir 20.27.52"), di legenda, di bacaan saat kursor di atas peta, dan di pemberitahuan "DoA ditahan · terakhir 20.27.52 · …". Keputusan pemilik 2026-11-02: grafik abu-abu yang redup sulit dilihat. Grafik itu tetap di titik tempat ia diukur, juga bila RDF-SDR sudah berpindah. Grafik dari simulasi tidak pernah ditahan, dan grafik node lain atau dari sebelum node restart tidak dipakai.
+- **Kirim ke RDF-SDR** (dock Spektrum) kini hanya mengisi kolom Kontrol, belum mengirim apa pun.
+  - Frekuensi tengah dan VFO diisi dengan frekuensi yang dipilih; gain dan jarak UCA ikut aturan pita, seperti frekuensi yang diketik sendiri.
+  - Kontrol tetap di langkah isian, jadi operator bisa memeriksa atau mengubah kolomnya dulu, lalu Tinjau dan Kirim seperti biasa.
+  - Hasil perintah sebelumnya yang sudah selesai, termasuk pemeriksaan nilainya yang masih berjalan, diganti oleh permintaan baru ini.
+  - Di mode Spektrum, dock kembali ke RX (Listener) pada frekuensi yang dipilih (pindai yang berjalan dihentikan), jadi trace di frekuensi itu langsung terlihat.
+  - Selama Kontrol masih mengirim perintah sebelumnya dan menunggu jawaban akhir RDF-SDR, tombolnya mati dengan keterangan "Kontrol masih mengirim perintah terakhir dan menunggu jawaban RDF-SDR; tunggu hasilnya". Isian yang tetap sampai ke Kontrol saat itu (misalnya Kontrol ditutup dan dibuka lagi) menunggu sampai perintah itu selesai; tidak ada yang dikirim sendiri.
+- **Kata BASI diganti USANG** di semua label bahasa Indonesia (HUD, peta, legenda, Polar, heading), misalnya "USANG 19 dtk" dan "USANG 134.0° · terakhir 20.27.52". Kode status bahasa Inggris (STALE) tidak berubah.
+- **HUD menampilkan setelan RDF-SDR di bawah sinyal:** Gain, VFO dan Squelch (level dalam dB, atau modenya seperti DEFAULT bila otomatis), dari `state.rf` edge 1.7 ke atas.
+- **Perintah Kontrol berlaku 30 detik** (sebelumnya 15 detik), batas terpanjang yang diterima RDF-SDR. Lewat Telemetry LoRa perintah menunggu giliran radio dan ACK-nya menunggu giliran RDF-SDR, jadi "Belum ada ACK" baru muncul sekitar 35 detik setelah Kirim (keputusan pemilik 2026-11-02).
+- **Baca settings lewat Telemetry LoRa diulang sendiri.** Bila RDF-SDR tidak menjawab sama sekali (NO ACK), Kontrol meminta lagi sampai 3 kali dan menuliskan "tidak dijawab lewat Telemetry LoRa, meminta lagi (2/3)". Baca settings tidak mengubah apa pun di RDF-SDR; perubahan pengaturan (config.patch) tetap tidak pernah dikirim ulang (keputusan pemilik 2026-11-02).
+  - Penyebab utamanya ada di bridge LoRa RDF-SDR: jendela giliran bicara groundstation dihitung terlalu awal, sehingga sekitar 62% frame dari groundstation hilang. Perbaikannya ada di RDF Node (`rdf-lora-edge`, jendela diam 0,45 detik dihitung dari saat frame benar-benar terkirim) dan menurunkan kehilangan itu menjadi sekitar 13%.
+
 ## 3.10.0
 
 Rilis minor: tidak ada yang dihapus. Dengan RDF Node Edge 1.10 (kontrak 1.10), bearing di peta ikut heading RDF-SDR yang bergerak, dan groundstation memperkirakan posisi pemancar dari banyak bearing (keputusan pemilik 2026-11-02: prediksi di groundstation, Raspberry hanya mengirim data).

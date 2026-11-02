@@ -17,6 +17,7 @@ import { PageReadAgeContext } from './page/pageContext';
 import { DeliveryChecklist } from './DeliveryChecklist';
 import { HostPowerControls } from './HostPowerControls';
 import type { HostPowerCapability } from '../lib/hostPower';
+import type { CompactLayout } from '../lib/compactLayout';
 
 export { ROUTES, routeShortcut } from '../lib/routes';
 export type { RouteName } from '../lib/routes';
@@ -77,6 +78,13 @@ export function refreshSelectOptions(options: readonly number[], current: number
   return [...values].sort((a, b) => a - b);
 }
 
+const TONE_RANK: Readonly<Record<Tone, number>> = { good: 0, neutral: 1, warn: 2, bad: 3 };
+
+/** The worst of the strip's tones, for the compact layout's one status pill. */
+export function worstTone(tones: readonly Tone[]): Tone {
+  return tones.reduce<Tone>((worst, tone) => (TONE_RANK[tone] > TONE_RANK[worst] ? tone : worst), 'good');
+}
+
 function TelemetryItem({ label, value, tone, title, live, pulse }: { label: string; value: string; tone: Tone; title?: string; live?: boolean; pulse?: boolean }): JSX.Element {
   return (
     <span className={`telemetry-item tone-${tone}${pulse ? ' is-receiving' : ''}`} title={title} role={live ? 'status' : undefined} aria-live={live ? 'polite' : undefined}>
@@ -108,6 +116,7 @@ export function ConsoleShell({
   toolbar,
   access = 'local',
   hostPower = null,
+  layout = null,
   children,
 }: {
   route: RouteName;
@@ -141,6 +150,12 @@ export function ConsoleShell({
   access?: ConsoleAccess;
   /** Restart and Shutdown of the groundstation PC (capabilities `host_power`); shown on the console's own page only. */
   hostPower?: HostPowerCapability | null;
+  /**
+   * The compact touch layout (lib/compactLayout.ts), or null for the PC's. Compact keeps one
+   * top-bar row: the status strip opens from one pill, and the interval, the language and
+   * Restart/Shutdown move into the page menu.
+   */
+  layout?: CompactLayout | null;
   children: ReactNode;
 }): JSX.Element {
   const { lang, setLang, t } = useI18n();
@@ -207,6 +222,28 @@ export function ConsoleShell({
     if (next instanceof Node && !event.currentTarget.contains(next)) setMenuOpen(false);
   };
 
+  // Compact layout: the status strip opens from one pill. It stays in the DOM
+  // while closed (hidden), so the Delivery checklist keeps its state.
+  const compact = layout !== null;
+  const [statusOpen, setStatusOpen] = useState(false);
+  const statusToggleRef = useRef<HTMLButtonElement>(null);
+  const closeStatus = (returnFocus = true) => {
+    setStatusOpen(false);
+    if (returnFocus) window.requestAnimationFrame(() => statusToggleRef.current?.focus());
+  };
+  useEffect(() => {
+    if (!statusOpen) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setStatusOpen(false);
+      window.requestAnimationFrame(() => statusToggleRef.current?.focus());
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [statusOpen]);
+  // Leaving the compact layout (a mouse plugged in) shows the strip in the bar again.
+  useEffect(() => { if (!compact) setStatusOpen(false); }, [compact]);
+
   useEffect(() => {
     if (!menuOpen) return undefined;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -250,6 +287,7 @@ export function ConsoleShell({
     overview ? 'is-overview' : '',
     receiverFrame ? 'is-receiver' : '',
     viewOnly ? 'is-view-only' : '',
+    compact ? 'is-compact' : '',
     menuOpen ? 'menu-open' : '',
   ].filter(Boolean).join(' ');
   const routeLabel = t(`route.${route}` as MessageKey);
@@ -258,8 +296,68 @@ export function ConsoleShell({
   const intervalValue = refreshSeconds !== undefined && Number.isInteger(refreshSeconds) && refreshSeconds >= 0 ? refreshSeconds : null;
   const intervals = refreshSelectOptions(refreshOptions, intervalValue);
 
+  const strip = (
+    <div className={['telemetry-strip', source ? 'has-source' : '', lora ? 'has-lora' : ''].filter(Boolean).join(' ')} role="group" aria-label={t('shell.runtimeStatus')}>
+      {source ? <TelemetryItem label={t('status.source')} value={t(source.labelKey)} tone={source.tone} title={sourceTitle} /> : null}
+      <TelemetryItem label={t('status.data')} value={dataState} tone={dataTone} title={dataTitle} />
+      <TelemetryItem label={t('status.doa')} value={doa.code} tone={doa.tone} title={doaTitle} />
+      <DeliveryChecklist snapshot={snapshot} />
+      <TelemetryItem label={t('status.snapshot')} value={snapshotState} tone={snapshotTone} title={readError ? t('shell.snapshotError', { error: readError }) : undefined} live />
+      <TelemetryItem label={t('status.mqtt')} value={mqttState} tone={mqttTone} title={mqttTitle} />
+      {lora ? <TelemetryItem label={t('status.lora')} value={lora.value} tone={lora.tone} title={loraTitle} pulse={lora.receiving} /> : null}
+      <TelemetryItem label={t('status.sim')} value={simulationEnabled ? 'ON' : 'OFF'} tone={simulationEnabled ? 'warn' : 'neutral'} />
+    </div>
+  );
+  const intervalSelect = (
+    <select
+      className={`refresh-interval${refreshError ? ' is-error' : ''}`}
+      aria-label={t('shell.refreshInterval')}
+      aria-invalid={refreshError ? true : undefined}
+      title={refreshError ? `${t('shell.refreshInterval')}\n${refreshError}` : t('shell.refreshInterval')}
+      value={intervalValue === null ? '' : String(intervalValue)}
+      disabled={refreshDisabled || !onRefreshSecondsChange || intervalValue === null}
+      onChange={(event) => {
+        const next = Number(event.target.value);
+        if (event.target.value !== '' && Number.isInteger(next) && next >= 0) onRefreshSecondsChange?.(next);
+      }}
+    >
+      {intervalValue === null ? <option value="">—</option> : null}
+      {intervals.map((seconds) => <option key={seconds} value={seconds}>{seconds === 0 ? t('shell.refreshManual') : t('common.durationS', { value: seconds })}</option>)}
+    </select>
+  );
+  const langSwitch = (
+    <div className="lang-switch" role="group" aria-label={t('shell.language')}>
+      {LANGS.map((option) => (
+        <button
+          key={option}
+          type="button"
+          aria-pressed={lang === option}
+          onClick={(event) => {
+            const button = event.currentTarget;
+            setLang(option);
+            // Below 360 px the active language's button is hidden; keep focus in the switch.
+            window.requestAnimationFrame(() => {
+              const focusLost = document.activeElement === button || !document.activeElement || document.activeElement === document.body;
+              if (focusLost && button.getClientRects().length === 0) button.parentElement?.querySelector<HTMLButtonElement>('button[aria-pressed="false"]')?.focus();
+            });
+          }}
+          lang={option}
+        >
+          {option.toUpperCase()}
+        </button>
+      ))}
+    </div>
+  );
+  // The groundstation's own page only: the LAN view (a tablet) never gets them.
+  const hostPowerControls = viewOnly ? null : <HostPowerControls capability={hostPower} />;
+  // The compact pill: where the answer came from and the DoA state, in the strip's worst tone.
+  const summaryTone = worstTone([
+    source?.tone ?? 'good', dataTone, doa.tone, snapshotTone, mqttTone, lora?.tone ?? 'good', simulationEnabled ? 'warn' : 'good',
+  ]);
+  const summaryText = [source ? t(source.labelKey) : null, `${t('status.doa')} ${doa.code}`].filter(Boolean).join(' · ');
+
   return (
-    <div className={shellClass}>
+    <div className={shellClass} data-layout={layout ?? undefined}>
       <a
         className="skip-link"
         href="#console-content"
@@ -298,9 +396,22 @@ export function ConsoleShell({
           <button className="page-menu-theme" type="button" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} aria-label={themeLabel} title={themeLabel}>
             <Icon name={theme === 'dark' ? 'sun' : 'moon'} /><span>{t('shell.theme')}</span>
           </button>
+          {compact ? (
+            <>
+              <div className="page-menu-row"><span>{t('shell.refreshInterval')}</span>{intervalSelect}</div>
+              <div className="page-menu-row"><span>{t('shell.language')}</span>{langSwitch}</div>
+              {hostPowerControls ? <div className="page-menu-row page-menu-power"><span>{t('power.group')}</span>{hostPowerControls}</div> : null}
+            </>
+          ) : null}
           <div className="local-chip"><Icon name="lock" /><span>{viewOnly ? t('shell.viewOnly') : t('shell.readOnly')}</span></div>
         </div>
       </div>
+      {compact && statusOpen ? <div className="status-popover-backdrop" aria-hidden="true" onClick={() => closeStatus()} /> : null}
+      {compact ? (
+        <div id="topbar-status" className="status-popover" hidden={!statusOpen}>
+          {strip}
+        </div>
+      ) : null}
       <div className="console-main">
         <header className="topbar">
           <button ref={menuToggleRef} className="icon-button menu-toggle" type="button" onClick={() => (menuOpen ? closeMenu() : openMenu())} aria-controls="console-navigation" aria-expanded={menuOpen} aria-label={menuOpen ? t('shell.pageMenuClose') : t('shell.pageMenu')} title={t('shell.pageMenu')}>
@@ -315,16 +426,21 @@ export function ConsoleShell({
               <span className="topbar-read">{readLabel}</span>
             </div>
           ) : null}
-          <div className={['telemetry-strip', source ? 'has-source' : '', lora ? 'has-lora' : ''].filter(Boolean).join(' ')} role="group" aria-label={t('shell.runtimeStatus')}>
-            {source ? <TelemetryItem label={t('status.source')} value={t(source.labelKey)} tone={source.tone} title={sourceTitle} /> : null}
-            <TelemetryItem label={t('status.data')} value={dataState} tone={dataTone} title={dataTitle} />
-            <TelemetryItem label={t('status.doa')} value={doa.code} tone={doa.tone} title={doaTitle} />
-            <DeliveryChecklist snapshot={snapshot} />
-            <TelemetryItem label={t('status.snapshot')} value={snapshotState} tone={snapshotTone} title={readError ? t('shell.snapshotError', { error: readError }) : undefined} live />
-            <TelemetryItem label={t('status.mqtt')} value={mqttState} tone={mqttTone} title={mqttTitle} />
-            {lora ? <TelemetryItem label={t('status.lora')} value={lora.value} tone={lora.tone} title={loraTitle} pulse={lora.receiving} /> : null}
-            <TelemetryItem label={t('status.sim')} value={simulationEnabled ? 'ON' : 'OFF'} tone={simulationEnabled ? 'warn' : 'neutral'} />
-          </div>
+          {compact ? (
+            <button
+              ref={statusToggleRef}
+              className={`status-summary tone-${summaryTone}`}
+              type="button"
+              aria-expanded={statusOpen}
+              aria-controls="topbar-status"
+              aria-label={t('shell.statusSummary', { status: summaryText })}
+              onClick={() => (statusOpen ? closeStatus(false) : setStatusOpen(true))}
+            >
+              <i aria-hidden="true" />
+              {source ? <span className="status-summary-source">{t(source.labelKey)}</span> : null}
+              <span className="status-summary-doa">{t('status.doa')} {doa.code}</span>
+            </button>
+          ) : strip}
           <span className="topbar-spacer" aria-hidden="true" />
           {toolbar ? <div className="topbar-toolbar">{toolbar}</div> : null}
           <div className="topbar-tools">
@@ -332,44 +448,13 @@ export function ConsoleShell({
             <button className={`icon-button refresh-button${loading ? ' is-loading' : ''}`} type="button" onClick={onRefresh} aria-busy={loading} aria-label={t(refreshLora ? 'shell.refreshLora' : 'shell.refresh')} aria-keyshortcuts="R" title={t(refreshLora ? 'shell.refreshShortcutLora' : 'shell.refreshShortcut')}>
               <Icon name="refresh" />
             </button>
-            <select
-              className={`refresh-interval${refreshError ? ' is-error' : ''}`}
-              aria-label={t('shell.refreshInterval')}
-              aria-invalid={refreshError ? true : undefined}
-              title={refreshError ? `${t('shell.refreshInterval')}\n${refreshError}` : t('shell.refreshInterval')}
-              value={intervalValue === null ? '' : String(intervalValue)}
-              disabled={refreshDisabled || !onRefreshSecondsChange || intervalValue === null}
-              onChange={(event) => {
-                const next = Number(event.target.value);
-                if (event.target.value !== '' && Number.isInteger(next) && next >= 0) onRefreshSecondsChange?.(next);
-              }}
-            >
-              {intervalValue === null ? <option value="">—</option> : null}
-              {intervals.map((seconds) => <option key={seconds} value={seconds}>{seconds === 0 ? t('shell.refreshManual') : t('common.durationS', { value: seconds })}</option>)}
-            </select>
-            <div className="lang-switch" role="group" aria-label={t('shell.language')}>
-              {LANGS.map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  aria-pressed={lang === option}
-                  onClick={(event) => {
-                    const button = event.currentTarget;
-                    setLang(option);
-                    // Below 360 px the active language's button is hidden; keep focus in the switch.
-                    window.requestAnimationFrame(() => {
-                      const focusLost = document.activeElement === button || !document.activeElement || document.activeElement === document.body;
-                      if (focusLost && button.getClientRects().length === 0) button.parentElement?.querySelector<HTMLButtonElement>('button[aria-pressed="false"]')?.focus();
-                    });
-                  }}
-                  lang={option}
-                >
-                  {option.toUpperCase()}
-                </button>
-              ))}
-            </div>
-            {/* The groundstation's own page only: the LAN view (a tablet) never gets them. */}
-            {viewOnly ? null : <HostPowerControls capability={hostPower} />}
+            {compact ? null : (
+              <>
+                {intervalSelect}
+                {langSwitch}
+                {hostPowerControls}
+              </>
+            )}
           </div>
         </header>
         {readError ? <div className="read-error-banner" role="alert"><i aria-hidden="true" /><span>{t('shell.snapshotError', { error: readError })}</span></div> : null}

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  SETTINGS_GET_LORA_TRIES,
+  settingsGetRetry,
   BAND_RULES,
   appliedMethodText,
   bandRuleFor,
@@ -416,5 +418,23 @@ describe('settingsReadView', () => {
     expect(settingsReadView(status('no_ack'))).toEqual({ tone: 'warn', code: 'NO ACK', key: 'control.settings.noAck' });
     expect(settingsReadView(status('no_report'))).toEqual({ tone: 'warn', code: 'NO REPORT', key: 'control.settings.noReport' });
     expect(settingsReadView(status('publish_failed', null, 135))).toEqual({ tone: 'err', code: 'PUBACK 135', key: 'control.settings.publishFailed' });
+  });
+});
+
+describe('settingsGetRetry (config.get over Telemetry LoRa)', () => {
+  const lost = { state: 'no_ack' as const, final: true, commandId: 'gc-1' };
+  it('asks again for an unanswered read over LoRa, up to three requests in all', () => {
+    expect(SETTINGS_GET_LORA_TRIES).toBe(3);
+    expect(settingsGetRetry(lost, true, 1)).toBe(true);
+    expect(settingsGetRetry(lost, true, 2)).toBe(true);
+    expect(settingsGetRetry(lost, true, 3)).toBe(false);
+  });
+  it('never repeats off LoRa, before the end, or after any answer', () => {
+    expect(settingsGetRetry(lost, false, 1)).toBe(false);
+    expect(settingsGetRetry({ ...lost, final: false }, true, 1)).toBe(false);
+    for (const state of ['reported', 'no_report', 'acked', 'publish_failed'] as const) {
+      expect(settingsGetRetry({ ...lost, state }, true, 1)).toBe(false);
+    }
+    expect(settingsGetRetry(null, true, 1)).toBe(false);
   });
 });

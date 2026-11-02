@@ -1,3 +1,4 @@
+import { Fragment } from 'react';
 import type { JSX } from 'react';
 import type { MapCoordinate, PolarSettings, TelemetrySnapshot, Tone } from '../types';
 import { numberOrNull, partialCsvReady, primaryCandidate } from '../lib/telemetry';
@@ -6,7 +7,9 @@ import { doaStatusTextKey, overviewDoaStatus, provisionalTheta } from '../lib/do
 import { useI18n } from '../lib/i18n';
 import { ageAtAnswerMs } from '../lib/snapshotRead';
 import { doaSample, doaSampleText, snapshotRf, sourceBadge } from '../lib/telemetrySource';
-import type { MessageKey } from '../lib/i18n';
+import type { MessageKey, Translate } from '../lib/i18n';
+import type { RfSettings } from '../lib/telemetrySource';
+import { engineSquelchDb } from '../lib/configPatch';
 
 export function coordinateSourceKey(source: MapCoordinate['source'] | undefined): MessageKey {
   if (source === 'SIMULATION') return 'map.sourceSimulation';
@@ -93,6 +96,8 @@ export function DoaReadout({
   ) : rfCenterHz !== null ? (
     <div className="ov-hud-sample is-setting">{t('hud.setting')} <b>{(rfCenterHz / 1e6).toFixed(3)} MHz</b></div>
   ) : null;
+  // What the SDR is set to (state.rf, edge 1.7+): gain, VFO0 and its squelch, under the signal line.
+  const rfLine = hudRfParts(localSnapshotFresh ? snapshotRf(snapshot) : null, t);
   const peakAxis = settings.figType === 'Compass' ? t('readout.peakAxisCompass') : t('readout.peakAxisPolar');
   const peakTitle = status.shown && view.peakValue !== null ? `${peakAxis} · ${t('readout.peakDetail', { db: view.peakValue.toFixed(1) })}` : undefined;
 
@@ -118,6 +123,7 @@ export function DoaReadout({
             <span title={peakTitle}>{t('hud.peak')} <b>{view.displayPeak !== null ? `${formatDegrees(view.displayPeak, 1)}°` : '—'}</b></span>
           </div>
           {sampleLine}
+          {rfLine.length ? <div className="ov-hud-sample is-setting ov-hud-rf">{rfLine.map(([label, value], index) => <Fragment key={label}>{index ? ' · ' : ''}<span>{label} <b>{value}</b></span></Fragment>)}</div> : null}
           <div className="ov-hud-offset">
             {t('hud.offset')} <b>{formatOffset(settings.compassOffset)}°</b> · <span className={offsetManual ? 'is-manual' : offsetVerified ? undefined : 'is-warn'}>{offsetSource}</span>
           </div>
@@ -131,9 +137,25 @@ export function DoaReadout({
             </div>
           ) : null}
           {sampleLine}
+          {rfLine.length ? <div className="ov-hud-sample is-setting ov-hud-rf">{rfLine.map(([label, value], index) => <Fragment key={label}>{index ? ' · ' : ''}<span>{label} <b>{value}</b></span></Fragment>)}</div> : null}
           <p className="ov-hud-held" role="status">{statusText}</p>
         </>
       )}
     </section>
   );
+}
+
+/**
+ * The HUD's settings line from state.rf: gain, VFO0 and its squelch, each only when the edge sends it.
+ * The squelch is the level the engine runs (whole dB) or, while automatic, its mode (edge 1.9).
+ */
+export function hudRfParts(rf: RfSettings | null, t: Translate): Array<[string, string]> {
+  if (!rf) return [];
+  const parts: Array<[string, string]> = [];
+  if (rf.gainDb !== null) parts.push([t('hud.gain'), `${rf.gainDb.toFixed(1)} dB`]);
+  if (rf.vfo0Hz !== null) parts.push(['VFO', `${(rf.vfo0Hz / 1e6).toFixed(3)} MHz`]);
+  const mode = rf.squelchMode ?? null;
+  if (rf.squelchDb !== null) parts.push([t('hud.squelch'), `${mode === null ? rf.squelchDb.toFixed(1) : engineSquelchDb(rf.squelchDb)} dB`]);
+  else if (mode !== null && mode !== 'Manual') parts.push([t('hud.squelch'), mode.toUpperCase()]);
+  return parts;
 }

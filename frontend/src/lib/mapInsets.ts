@@ -45,6 +45,50 @@ export function computeMapInsets(
   return { top: 0, right: whole(right), bottom: whole(bottom), left: whole(left) };
 }
 
+/** At most this share of the map's height goes to the compact layout's top inset. */
+export const COMPACT_TOP_INSET_SHARE = 0.35;
+
+/**
+ * Insets in the compact touch layout (lib/compactLayout.ts), where the HUD and
+ * the node card float over the top corners of a map a phone may show only 412
+ * px wide, so the two together can be wider than the map. Only `top` is set:
+ * the lowest panel bottom over the map (plus `gap`), at most
+ * COMPACT_TOP_INSET_SHARE of the map's height. The camera frames below it with
+ * the station centred across (cameraInsets()), and the map notices sit full
+ * width under the panels (noticePlacement()) instead of in a gap between them
+ * that a phone does not have.
+ */
+export function compactMapInsets(
+  map: RectLike,
+  panels: { left?: readonly RectLike[]; right?: readonly RectLike[] },
+  gap = 8,
+): MapInsets {
+  let top = 0;
+  for (const rect of [...(panels.left ?? []), ...(panels.right ?? [])]) if (overlaps(rect, map)) top = Math.max(top, rect.bottom - map.top + gap);
+  const height = Number.isFinite(map.bottom - map.top) ? Math.max(0, map.bottom - map.top) : 0;
+  return { top: whole(Math.min(top, height * COMPACT_TOP_INSET_SHARE)), right: 0, bottom: 0, left: 0 };
+}
+
+/**
+ * The insets the camera frames with: all of them on the PC; in the compact
+ * layout only the top one, so the station is centred horizontally.
+ */
+export function cameraInsets(insets: MapInsets, compact: boolean): MapInsets {
+  return compact ? { top: insets.top, right: 0, bottom: 0, left: 0 } : insets;
+}
+
+/**
+ * Where the map notices go, as overrides of their stylesheet position (top and
+ * sides at the map gap). On the PC they sit top-centre between the side
+ * panels; in the compact layout they span the map's width under the panels,
+ * so a node card and a HUD wider together than the map never squeeze them to
+ * nothing. `undefined` keeps the stylesheet position.
+ */
+export function noticePlacement(insets: MapInsets, compact: boolean, gap = 12): { top?: number; left?: number; right?: number } | undefined {
+  if (compact) return insets.top > 0 ? { top: whole(insets.top) } : undefined;
+  return insets.left || insets.right ? { left: whole(insets.left) + gap, right: whole(insets.right) + gap } : undefined;
+}
+
 /** One row of the bottom-left map buttons. */
 export const MAP_CONTROLS_ROW_PX = 44;
 

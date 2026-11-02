@@ -85,7 +85,7 @@ QoS 1, tidak retained, satu objek JSON per topik. Envelope:
 | `v` | 2 |
 | `id` | `[A-Za-z0-9_.:-]{1,80}`. `id` sama dengan payload sama mengembalikan hasil jurnal; payload lain → `COMMAND_ID_CONFLICT`. |
 | `sid`, `boot` | Dari `state` terakhir; selain itu `SESSION_MISMATCH` |
-| `issued_ms`, `expires_ms` | `expires_ms` > sekarang, `issued_ms` ≤ sekarang + 1 s, 0 < `expires_ms` − `issued_ms` ≤ 30000 (default 15000) |
+| `issued_ms`, `expires_ms` | `expires_ms` > sekarang, `issued_ms` ≤ sekarang + 1 s, 0 < `expires_ms` − `issued_ms` ≤ 30000 (Ground edge memakai 15000; console 30000 sejak 3.11.0) |
 | `base_rev` | `state.cfg`; untuk mutasi harus sama dengan revisi edge (`CONFIG_REVISION_CONFLICT`) |
 | `op` | Harus cocok dengan topik |
 | field operasi | `changes`, `desired`, `profile`, `target_id`, `prepare_id`, `challenge` sesuai `op`; field lain ditolak |
@@ -306,7 +306,7 @@ Kontrol adalah satu-satunya jalur tulis console. Monitor tidak pernah publish se
 | Syarat di console | Origin loopback yang sama, cookie admin, `confirm`, field edge, monitor tersambung dengan semua SUBACK, `state` diterima, health segar, `base_rev` = `state.cfg`, tidak ada `config.patch` lain yang belum final | Origin loopback yang sama, cookie admin, monitor tersambung, `state` diterima; tidak ada `config.get` yang menunggu, paling cepat 1 s setelah yang terakhir |
 | Jawaban edge | `ACCEPTED` lalu satu ACK final di `ack/config` | `APPLIED` di `ack/config`, lalu `settings/reported`; edge 8691ad0 menjawab `REJECTED TLS_REQUIRED_FOR_SETTINGS_REPORT` bila koneksinya ke broker tanpa TLS (bagian 7a) |
 
-Envelope dibuat server (`rdf_node_commands.build_command`), tidak pernah browser: `v` 2, `id` `gc-` + 24 hex acak, `sid` dan `boot` dari `state` terakhir, `issued_ms` jam server console, `expires_ms` = `issued_ms` + 15000, `base_rev` `state.cfg`, `op` sesuai topik, dan untuk patch `changes` dengan urutan field edge. Publish QoS 1, tidak retained, `MessageExpiryInterval` 15 s, hanya saat monitor tersambung dan semua SUBACK masuk (paho tidak pernah menyimpan perintah untuk diputar ulang setelah reconnect).
+Envelope dibuat server (`rdf_node_commands.build_command`), tidak pernah browser: `v` 2, `id` `gc-` + 24 hex acak, `sid` dan `boot` dari `state` terakhir, `issued_ms` jam server console, `expires_ms` = `issued_ms` + 30000 (batas terpanjang edge; sejak 3.11.0, sebelumnya 15000), `base_rev` `state.cfg`, `op` sesuai topik, dan untuk patch `changes` dengan urutan field edge. Publish QoS 1, tidak retained, `MessageExpiryInterval` 30 s, hanya saat monitor tersambung dan semua SUBACK masuk (paho tidak pernah menyimpan perintah untuk diputar ulang setelah reconnect).
 
 Aturan `changes` sama dengan helper edge (`helper.validate_changes`), dicek server sebelum publish dan dicek ulang oleh edge: hanya lima field bagian 5; frekuensi dan bandwidth bilangan bulat Hz; `gain_db` salah satu nilai tabel gain (toleransi 0,001 dB); perubahan `center_frequency_hz` wajib membawa `vfo0_frequency_hz` dengan nilai sama (`CENTER_CHANGE_REQUIRES_VFO0_TARGET`, `MVP_CENTER_MUST_EQUAL_VFO0`). Kode penolakan console memakai nama kode edge untuk aturan yang sama. Pemeriksaan `POST` berurutan dan kegagalan pertama yang dijawab: Origin (403 `ORIGIN_REJECTED`), admin (401 `ADMIN_REQUIRED`), bentuk body, `confirm`, field (400), monitor (409 `MQTT_MONITOR_DISABLED`, 503 `MQTT_DEPENDENCY_MISSING`, 503 `MQTT_NOT_CONNECTED`), sesi node (409 `NODE_SESSION_UNAVAILABLE`), lalu untuk patch health (409 `NODE_NOT_FRESH`), revisi (409 `CONFIG_REVISION_UNKNOWN`, `CONFIG_REVISION_STALE` dengan `current_base_rev`) dan perintah lain (409 `COMMAND_IN_FLIGHT`), untuk get permintaan tertunda (409 `SETTINGS_REQUEST_PENDING`) dan jarak 1 s (429 `CONFIG_GET_TOO_SOON`), terakhir publish (503 atau 502 `MQTT_PUBLISH_FAILED`).
 
@@ -319,7 +319,7 @@ Status perintah di server (`GET /api/mqtt/config-patch/<id>`, 32 terakhir; `conf
 | `acked` (final) | ACK final edge, apa pun isinya; status, `result.error`, `result.reason`, `revision` dan `proof` ikut di status |
 | `reported` (final) | `config.get` yang `settings/reported`-nya datang |
 | `publish_failed` (final) | Publish gagal atau PUBACK ≥ 128 |
-| `no_ack` (final) | Tidak ada ACK sampai `expires_ms` + 5 s (sekitar 20 s) |
+| `no_ack` (final) | Tidak ada ACK sampai `expires_ms` + 5 s (sekitar 35 s) |
 | `no_final_ack` (final) | Ada ACK progres tetapi tidak ada ACK final 90 s sejak `issued_ms`; hasil tidak diketahui |
 | `no_report` (final) | `config.get` `APPLIED` tanpa laporan dalam 60 s |
 

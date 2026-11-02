@@ -270,7 +270,7 @@ export function NodeCard({
   ];
 
   return (
-    <section className="ov-node ov-card" aria-labelledby="ov-node-title">
+    <section id="panel-node" className="ov-node ov-card" aria-labelledby="ov-node-title">
       <div className="ov-card-head">
         <h2 id="ov-node-title">{t('node.title')}</h2>
         <span className={`ov-chip tone-${stateTone(state)}`}>{state}</span>
