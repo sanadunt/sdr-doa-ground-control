@@ -2,6 +2,17 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.7.0
+
+Rilis minor: tidak ada yang dihapus, dan tanpa file peta semuanya berjalan seperti 3.6.0. Menu peta mendapat gaya **Offline**: peta dari satu file di console sendiri, yang tampil tanpa internet.
+
+- **Gaya Offline.** Peta vektor (jalan, bangunan, air, batas wilayah, nama tempat; data OpenStreetMap dalam format Protomaps) digambar dari `maps/offline.pmtiles`, di sebelah `console.json` (`--maps-dir` mengubahnya; Docker: `/data/maps`). Tidak ada permintaan ke penyedia tile, tampilan LAN (tablet) ikut bisa memakainya, dan gaya lain tidak berubah. Tanpa file itu, gaya Offline menampilkan BASEMAP UNAVAILABLE · Offline.
+  - Cakupan dan zoom tertinggi mengikuti file; di atasnya peta hanya diperbesar. Seluruh Indonesia sampai zoom 12 berukuran 216 MB, sampai zoom 13 454 MB, sampai zoom 14 942 MB.
+  - Tanpa ikon POI dan perisai jalan; nama tempat memakai huruf Latin.
+- **Rute baru `GET /api/maps/offline.pmtiles`.** Satu nama file tetap, hanya baca: browser membaca file dengan permintaan rentang byte, jadi `Range` wajib dan satu jawaban paling banyak 4 MiB. Tampilan LAN menjawab path itu saja; tidak ada yang bisa ditulis lewatnya.
+- **Memasang file.** `docs/PETA_OFFLINE.md` menjelaskan cara membuat file dengan `pmtiles extract` dan memasangnya. Di Docker: `docker compose exec console mkdir -p /data/maps`, lalu `docker compose cp offline.pmtiles console:/data/maps/offline.pmtiles`. Console membaca file pada setiap permintaan, jadi mengganti file tidak perlu restart.
+- Font peta (Noto Sans, lisensi SIL OFL) ikut di `assets/map-fonts`; dependensi frontend baru `pmtiles` dan `@protomaps/basemaps`.
+
 ## 3.6.0
 
 Rilis minor: tidak ada yang dihapus. Groundstation kini punya lokasi sendiri dari GPS USB-nya, dan peta menampilkan jaraknya ke RDF-SDR. Kanal `3` dan timer update memasang console-nya sendiri. Pembaca GPS di host dipasang sekali dengan `sudo`.
