@@ -8,7 +8,8 @@
 | Penanda dari tablet | **Terpasang** (keputusan pemilik 2026-10-31, bagian 8a): tambah dan hapus penanda Receiver lewat listener LAN HTTP, tanpa login. Satu-satunya penulisan dari mode LAN |
 | Fase 3 (B2) | **Desain saja, belum diimplementasikan** (bagian 9) untuk semua perintah lain. Menunggu keputusan HTTPS di LAN |
 | Fase 0 | Kit uji C-lite di `packaging/receiver-engine/` (belum dijalankan, tidak dipasang installer mana pun) |
-| Fase 4 dan 5 | Belum dikerjakan (bagian 10) |
+| Audio mirror (fase 5) | **Usulan, menunggu keputusan pemilik** (bagian 10a): tablet ikut mendengar audio VFO groundstation lewat jalur baca baru di listener LAN |
+| Fase 4 | Belum dikerjakan (bagian 10) |
 
 ## Ringkasnya
 
@@ -325,7 +326,147 @@ Setiap perintah dicatat append-only di direktori data (JSONL, dirotasi): siapa, 
 ## 10. Fase 4 dan 5
 
 - **Fase 4**: sumber pindah ke tab engine khusus (Chromium tanpa interaksi yang membuka RadioSpectrum lewat `WebUsbAllowDevicesForUrls`, dikelola sebagai service, health di console). Tab engine mengirim body yang sama dengan `source.kind: "engine-tab"`; halaman kiosk menjadi penampil dan tidak boleh menekan Connect Device. Uji kelayakannya di `packaging/receiver-engine/README.md` (fase 0).
-- **Fase 5** (opsional): audio ke penampil. Sampai fase itu audio hanya keluar di speaker groundstation.
+- **Fase 5**: audio ke penampil. Usulannya di bagian 10a; sampai pemilik memutuskan dan fase itu dibangun, audio hanya keluar di speaker groundstation.
+
+## 10a. Audio mirror (fase 5): usulan, **menunggu keputusan pemilik**
+
+Operator bertanya pada 2026-11-02 apakah tablet bisa ikut mendengar audio radio. Bagian ini usulan; belum ada kode. Audio menambah permukaan LAN, jadi dibangun hanya setelah pemilik memutuskan (aturannya: setiap jalur LAN baru adalah keputusan pemilik).
+
+Tujuannya: tablet di `allowed_clients` menekan **Dengar** dan mendengar audio VFO yang sedang diputar Receiver groundstation, dengan latensi yang terlihat di layar. Yang bukan tujuan: tablet menala, membuka bisu VFO, mengganti mode, atau merekam (fase 3 dan Rekaman tetap seperti sekarang); audio tidak disimpan di server atau tablet.
+
+```text
+frame Receiver (groundstation)
+  worker DSP ── sampel audio 48 kHz (campuran VFO yang tidak bisu, sama dengan yang ke speaker)
+      │  receiver:audio (postMessage, 100 ms per pesan, hanya selama mirror meminta audio)
+      ▼
+halaman console groundstation: lib/receiverMirrorAudio.ts
+  turunkan ke 16 kHz, PCM 16-bit, potongan 200 ms
+      │  POST /api/mirror/receiver/audio   (loopback, same-origin, ≤ 16 KiB, ≤ 10/detik)
+      ▼
+server console: ReceiverAudioMirror (memori saja, 2 detik terakhir)
+      │  GET /api/mirror/receiver/audio    (stream, listener LAN dan loopback, ≤ 4 pendengar)
+      ▼
+tablet (mode LAN): pemutar Web Audio dengan buffer 250 ms, tombol Dengar
+```
+
+### 10a.1 Sumber audio
+
+- **Titik sadap.** `connection.ts` di overlay (berkas overlay sendiri, bukan vendor) sudah menerima audio dari worker dan meneruskannya ke `playAudio()` vendor: sampel mono `Float32Array` 48 kHz, campuran semua VFO yang tidak bisu, potongan kecil sekitar 16 ms. Di tempat yang sama bridge mendapat salinannya (`consoleBridge.audio(samples)`). Jadi tablet mendengar **persis yang diputar speaker groundstation**: VFO yang dibisukan di groundstation juga bisu di tablet. Volume groundstation dan keadaan `AudioContext` groundstation tidak memengaruhi tablet (sampel diambil sebelum `gainNode`). Tidak ada anchor vendor baru.
+- **Bridge.** Langganan mendapat field baru `audio: boolean` (`console:subscribe`); `mergeSubscriptions()` menggabungkannya dengan OR. Selama `audio` diminta, frame mengumpulkan sampel menjadi potongan 100 ms (4800 sampel) dan mengirim `receiver:audio {seq, sampleRate: 48000, samples}` dengan `Float32Array` yang dipindahkan (transfer). Tanpa permintaan audio, frame tidak mengirim apa pun, jadi biayanya nol selama tidak ada yang mendengar. Kedua salinan protokol berubah bersama (`tools/test_receiver_bridge_contract.mjs`).
+- **Pengkodean di halaman groundstation.** Saran saya PCM 16-bit 16 kHz, bukan Opus. Turunkan 48 kHz ke 16 kHz dengan filter low-pass FIR (batas sekitar 7 kHz, cukup untuk NFM, AM, SSB dan CW; WFM siaran terdengar seperti telepon), bulatkan ke Int16 little-endian, potong per 200 ms (3200 sampel, 6400 byte). Semuanya fungsi murni yang bisa diuji di Vitest.
+
+| Pilihan kodek | Bandwidth per pendengar | Kelebihan | Kekurangan |
+|---|---|---|---|
+| **PCM 16-bit 16 kHz** (saran) | 256 kbit/s | Tiap potongan berdiri sendiri, jadi pendengar yang baru masuk langsung bisa memutar. Tanpa encoder atau decoder; jalan di semua browser dengan Web Audio. CPU hampir nol. Latensi hanya dari ukuran potongan dan buffer | Bandwidth terbesar, tetapi 4 pendengar hanya sekitar 1 Mbit/s di Wi-Fi |
+| Opus lewat `MediaRecorder` (WebM) | 24–32 kbit/s | Ada di Chrome tanpa kode kodek; dipakai Rekaman | Potongan WebM tidak berdiri sendiri: pendengar yang masuk belakangan perlu header dan batas cluster yang tidak dijamin sejajar dengan potongan `timeslice`. Tablet harus memutar lewat MediaSource `audio/webm;codecs=opus`, yang tidak tersedia di semua browser tablet. `MediaRecorder` menahan data sendiri, latensi bertambah |
+| Opus lewat WebCodecs (`AudioEncoder`/`AudioDecoder`) | 24–32 kbit/s | Paket 20 ms yang berdiri sendiri, latensi rendah | Tablet butuh `AudioDecoder`; dukungannya di browser tablet harus dicek dulu. Bisa ditambahkan nanti sebagai kodek kedua bila bandwidth jadi masalah |
+
+### 10a.2 Jalur kirim
+
+**(a) POST ke server loopback, tablet membaca GET streaming di listener LAN** (saran saya)
+
+- Halaman groundstation mem-POST tiap potongan ke `POST /api/mirror/receiver/audio`. Server menyimpan 2 detik terakhir di memori. Tablet membuka satu `GET /api/mirror/receiver/audio` yang tetap terbuka; server menulis setiap potongan baru ke semua stream yang terbuka, mulai dari potongan terbaru (tanpa backlog, supaya latensi tidak menumpuk).
+- **Latensi** (perkiraan, dari bicara ke telinga): kumpulan di frame 100 ms + potongan 200 ms + POST loopback dan tulis ke Wi-Fi beberapa milidetik + buffer awal tablet 250 ms + keluaran browser sekitar 20–40 ms, **sekitar 0,6 detik**. Tablet menjaga buffer di 250–1000 ms; bila tertinggal lebih dari 1 detik, ia membuang ke potongan terbaru.
+- **CPU**: filter dan konversi di halaman groundstation jauh di bawah 1 % satu inti; server Python hanya menyalin byte (32 KB/detik per pendengar); tablet mengubah Int16 ke Float32 dan menjadwalkan buffer, seperti `playAudio()` BrowSDR.
+- **Bandwidth Wi-Fi**: 256 kbit/s per pendengar ditambah header kecil (sekitar 1 %); 4 pendengar sekitar 1 Mbit/s. Sumber ke server satu kali, lewat loopback.
+- Cocok dengan arsitektur sekarang (HTTP, satu proses, memori saja), bisa diuji seluruhnya di Python, Vitest dan Node, dan **tidak membuka penulisan LAN baru**: tablet hanya membaca.
+
+**(b) WebRTC peer-to-peer, signaling lewat server**
+
+- Halaman groundstation membuat satu `RTCPeerConnection` per tablet dengan track audio dari `MediaStreamAudioDestinationNode`; server hanya menyampaikan offer, answer dan kandidat ICE.
+- **Latensi** sekitar 150–300 ms (Opus 20 ms dan jitter buffer adaptif WebRTC). **Bandwidth** sekitar 32–64 kbit/s per pendengar. **CPU**: satu encoder Opus per tablet di halaman groundstation, sekitar 1–2 % per tablet.
+- Kekurangannya: tablet harus mengirim answer dan kandidat ICE ke server, jadi **ada route tulis LAN baru**. Chrome menyembunyikan alamat LAN di balik kandidat mDNS `.local`, jadi sambungan gagal di jaringan yang memblokir multicast (masalah yang sama dengan Data Out `doasdr.local`). Mode remote bawaan BrowSDR memakai PeerJS dengan server signaling di internet, jadi tidak bisa dipakai (offline dan CSP). Node dan Vitest tidak punya WebRTC, jadi sebagian besar hanya bisa diuji manual. Koneksi peer hidup di halaman groundstation dan putus bersamanya.
+
+Saya menyarankan (a): latensinya sedikit lebih besar, tetapi jalurnya hanya baca, sederhana, dan bisa diuji. Bila latensi 0,6 detik terasa terlalu lambat setelah dicoba, potongan bisa dikecilkan ke 100 ms (sekitar 0,4 detik) tanpa mengubah kontrak.
+
+### 10a.3 Kontrak jalur (a)
+
+**Potongan.** Satu format untuk body POST dan untuk stream: header tetap 20 byte, lalu sampel.
+
+| Byte | Field | Isi |
+|---|---|---|
+| 0–3 | `magic` | ASCII `SDRA` |
+| 4 | `version` | 1 |
+| 5 | `flags` | bit 0: ada celah sebelum potongan ini (sampel hilang, RX restart, sumber berganti); bit lain 0 |
+| 6–7 | cadangan | 0 |
+| 8–11 | `seq` | u32 little-endian, naik satu per potongan dari sumber |
+| 12–15 | `sample_rate` | u32 little-endian, hanya 16000 di versi 1 |
+| 16–19 | `length` | u32 little-endian, jumlah byte sampel: genap, 1600..16000 (50–500 ms). Di stream, `length` 0 adalah keepalive tanpa sampel |
+| 20– | sampel | Int16 little-endian, mono |
+
+**`POST /api/mirror/receiver/audio?source=<id>`** (hanya loopback; listener LAN `405 LAN_READ_ONLY`). `source` adalah `source.id` mirror (bagian 1). Pemeriksaan berurutan, error berbentuk `{ok: false, code, error}` di luar daftar kode Kontrol:
+
+| Urutan | Syarat | Jawaban bila gagal |
+|---|---|---|
+| 1 | `Origin` loopback same-origin | `403 ORIGIN_REJECTED` |
+| 2 | `Content-Length` paling banyak 16 384 byte | `413 MIRROR_TOO_LARGE` |
+| 3 | Paling banyak 10 potongan per detik | `429 MIRROR_RATE_LIMITED` |
+| 4 | Mode LAN terbuka | `409 MIRROR_LAN_CLOSED` |
+| 5 | Format persis seperti tabel di atas, `source` cocok dengan pola id | `400 MIRROR_INVALID` |
+| 6 | `source` adalah sumber mirror sekarang dan ia mem-post dalam 10 detik terakhir | `409 MIRROR_NO_SOURCE` |
+
+Berhasil: `200 {"ok": true, "listeners": n}`. Tidak dicatat di log (5 per detik).
+
+**`GET /api/mirror/receiver/audio`** (kedua listener). Aturan baca: di listener LAN aturan `Host` LAN dan `Sec-Fetch-Site` tidak ada, `none` atau `same-origin` (ketat seperti Rekaman, karena ini isi siaran); di loopback aturan baca Receiver (bagian 5). Jawaban `200`, `Content-Type: application/octet-stream`, `Cache-Control: no-store`, tanpa `Content-Length`; isinya deretan potongan. HEAD dijawab `405` dengan `Allow: GET`.
+
+| Batas | Nilai |
+|---|---|
+| Pendengar sekaligus | 4 di seluruh mode LAN (`429 MIRROR_AUDIO_BUSY` dengan `Retry-After: 5`); tiap stream memakai satu dari 32 koneksi LAN |
+| Per alamat klien | 1 stream; stream baru dari alamat yang sama menutup yang lama (muat ulang, tab kedua) |
+| Mulai | dari potongan terbaru, tanpa backlog |
+| Keepalive | potongan `length` 0 tiap 1 detik tanpa audio |
+| Tulis | timeout 5 detik per tulis; tablet yang berhenti membaca diputus |
+| Berakhir | mode LAN ditutup, dipindah atau dimatikan; sumber putus 10 detik; tablet menutup |
+| Memori server | 2 detik terakhir (paling banyak 64 KiB), dikosongkan saat sumber berganti, tidak ada potongan 2 detik, atau mode LAN ditutup (`ReceiverMirror.close()`) |
+| Disk | tidak ada |
+| Log | satu baris saat stream dibuka dan ditutup, dengan alamat klien dan lamanya (`lan 192.168.1.20 audio open`, `... audio closed after 312 s`), supaya terlihat siapa mendengar |
+
+**Audio hanya mengalir selama ada pendengar.** Jawaban `POST /api/mirror/receiver` membawa `audio_listeners`; publisher meminta audio dari frame (`audio: true`) hanya selama angka itu lebih dari 0, dan berhenti meminta saat 0. Jadi tablet yang menekan Dengar menunggu paling lama satu post mirror (heartbeat 500 ms) ditambah satu potongan sebelum suara pertama. `GET /api/mirror/receiver` menambah `audio: {listeners, age_ms, sample_rate, chunk_ms}` (`age_ms` umur potongan terakhir, `null` bila belum ada) untuk teks di tablet.
+
+### 10a.4 Aturan mode LAN
+
+- Ini **jalur baca baru** di listener LAN, bukan penulisan: `GET` saja, `WRITE_ROUTES` tidak berubah, dan tablet tidak mengubah apa pun di Receiver. Satu-satunya efek samping: selama ada pendengar, halaman groundstation menyadap dan mengirim audio.
+- **Tanpa login**, seperti mirror dan Rekaman: setiap klien di `allowed_clients` boleh mendengar. Cookie tidak dibaca. Artinya setiap perangkat di daftar itu bisa mendengar siaran yang didengar operator.
+- Route ini masuk daftar route LAN dengan pencocokan path persis; route Receiver lain tetap tertutup.
+
+### 10a.5 Kegagalan
+
+| Keadaan | Yang terjadi | Teks di tablet |
+|---|---|---|
+| Halaman groundstation tersembunyi | Frame spektrum berhenti, tetapi audio tetap mengalir selama Receiver memutar suara: Chrome tidak memperlambat timer tab yang sedang bersuara. Bila `AudioContext` groundstation masih tertahan (belum pernah diklik), tab dianggap tidak bersuara, timer diperlambat, dan audio tersendat | spektrum `STALE`; audio tetap, atau "Audio terputus" |
+| Halaman groundstation ditutup atau dimuat ulang | Potongan berhenti; setelah 10 detik mirror `SUMBER PUTUS` dan server menutup stream. Tablet mencoba lagi tiap 2 detik selama Dengar menyala; halaman baru (sumber baru) langsung dipakai | "Audio terputus", lalu **SUMBER PUTUS** |
+| RX berhenti | Tidak ada sampel, stream tetap terbuka dengan keepalive, audio kembali saat RX mulai lagi | `RX OFF` · "Tidak ada audio" |
+| Pindai lebar | RX berhenti selama pindai | "Pindai berjalan; tidak ada audio" |
+| Scan listen (Receiver mendengar kandidat) | Audio kandidat mengalir seperti di speaker | `BUSY` dengan audio |
+| VFO dibisukan di groundstation | Tidak ada sampel, sama dengan speaker | "Tidak ada audio dari groundstation (VFO bisu?)" setelah 2 detik tanpa potongan saat RX berjalan |
+| RX restart (ganti sample rate) | Celah sekitar 1 detik, potongan berikutnya bertanda celah; tablet mengisi ulang buffer | — |
+| Wi-Fi tersendat | Buffer kosong: tablet mengisi ulang 250 ms; tertinggal lebih dari 1 detik: lompat ke potongan terbaru | latensi naik sementara |
+| Pendengar penuh | `429 MIRROR_AUDIO_BUSY` | "Pendengar penuh (4); coba lagi nanti." |
+| Mode LAN ditutup | Semua stream ditutup, mirror dikosongkan | **SUMBER PUTUS** |
+| Browser tablet menolak memutar | `AudioContext` tetap `suspended` setelah klik | "Browser menahan audio; ketuk Dengar lagi." |
+
+### 10a.6 UI tablet
+
+- **Dock MIRROR**: tombol **Dengar** (sekarang nonaktif) menjadi tombol nyala/mati (`aria-pressed`), satu-satunya kontrol baru; Mulai, mode, Kirim dan sakelar tetap nonaktif. **Rute Receiver, tab Mirror**: tombol yang sama di kepala kartu Spektrum. Keduanya memakai satu pemutar milik App (`createMirrorAudio()`), jadi pindah rute tidak memutus suara.
+- **Aturan autoplay**: klik Dengar membuat atau melanjutkan `AudioContext` di dalam klik itu, lalu membuka stream. Dengar mati setiap kali halaman dimuat dan tidak disimpan. Volume memakai tombol volume tablet (tanpa slider).
+- **Indikator latensi** di samping tombol: "≈ 0,6 dtk", dihitung dari panjang potongan dan kumpulan di frame (300 ms), umur potongan di server saat dikirim, dan isi buffer tablet. Jam groundstation dan tablet tidak dipakai, jadi ini perkiraan; waktu tempuh Wi-Fi (beberapa milidetik) tidak dihitung.
+- **Teks keadaan**: "Menyambung…", lalu latensi; `STALE` dan **SUMBER PUTUS** mengikuti chip mirror; teks kegagalan di tabel 10a.5, dalam EN dan ID.
+
+### 10a.7 Yang dibangun setelah keputusan
+
+| Berkas | Isi |
+|---|---|
+| overlay `connection.ts`, `console-bridge.ts`, `console-bridge-protocol.ts`; `lib/receiverBridgeProtocol.ts`, `lib/receiverBridge.ts` | Sadap audio, `audio` di langganan, `receiver:audio` |
+| `lib/receiverMirrorAudio.ts` | Penurunan 16 kHz, Int16, format potongan, publisher audio, pemutar tablet dan perhitungan latensi |
+| `tools/receiver_mirror.py`, `tools/ground_console.py`, `tools/lan_access.py` | `ReceiverAudioMirror`, kedua route, batas, aturan baca, penutupan bersama mirror |
+| `SpectrumDockMirror.tsx`, `ReceiverMirrorPage.tsx`, `lib/i18n.ts` | Tombol Dengar, indikator, teks |
+| Test | Python: route, batas, Origin/Host, stream dan penutupannya; Vitest: format, filter, publisher, pemutar; Node: sisi frame dan kontrak protokol |
+
+### 10a.8 Keputusan yang diminta
+
+1. Audio boleh dibuka sebagai jalur baca baru di listener LAN, tanpa login, untuk semua `allowed_clients`?
+2. Jalur (a) HTTP dengan PCM 16 kHz (saran), atau (b) WebRTC?
+3. Batasnya: 4 pendengar, 16 kHz, potongan 200 ms (sekitar 0,6 detik)?
 
 ## 11. Berkas
 
