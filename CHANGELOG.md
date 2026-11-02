@@ -2,17 +2,6 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
-## 3.6.0
-
-Rilis minor: tidak ada yang dihapus, dan tanpa file peta semuanya berjalan seperti 3.5.0. Menu peta mendapat gaya **Offline**: peta dari satu file di console sendiri, yang tampil tanpa internet.
-
-- **Gaya Offline.** Peta vektor (jalan, bangunan, air, batas wilayah, nama tempat; data OpenStreetMap dalam format Protomaps) digambar dari `maps/offline.pmtiles`, di sebelah `console.json` (`--maps-dir` mengubahnya; Docker: `/data/maps`). Tidak ada permintaan ke penyedia tile, tampilan LAN (tablet) ikut bisa memakainya, dan gaya lain tidak berubah. Tanpa file itu, gaya Offline menampilkan BASEMAP UNAVAILABLE · Offline.
-  - Cakupan dan zoom tertinggi mengikuti file; di atasnya peta hanya diperbesar. Seluruh Indonesia sampai zoom 12 berukuran 216 MB, sampai zoom 13 454 MB, sampai zoom 14 942 MB.
-  - Tanpa ikon POI dan perisai jalan; nama tempat memakai huruf Latin.
-- **Rute baru `GET /api/maps/offline.pmtiles`.** Satu nama file tetap, hanya baca: browser membaca file dengan permintaan rentang byte, jadi `Range` wajib dan satu jawaban paling banyak 4 MiB. Tampilan LAN menjawab path itu saja; tidak ada yang bisa ditulis lewatnya.
-- **Memasang file.** `docs/PETA_OFFLINE.md` menjelaskan cara membuat file dengan `pmtiles extract` dan memasangnya. Di Docker: `docker compose exec console mkdir -p /data/maps`, lalu `docker compose cp offline.pmtiles console:/data/maps/offline.pmtiles`. Console membaca file pada setiap permintaan, jadi mengganti file tidak perlu restart.
-- Font peta (Noto Sans, lisensi SIL OFL) ikut di `assets/map-fonts`; dependensi frontend baru `pmtiles` dan `@protomaps/basemaps`.
-
 ## 3.5.0
 
 Rilis minor: tidak ada yang dihapus. Console membaca tambahan kontrak 1.7 dari RDF Node Edge 1.7.0, sehingga lewat Telemetry LoRa Dashboard menampilkan frekuensi, dB dan setelan SDR, dan Kontrol menampilkan cara RDF-SDR menerapkan perubahan. Edge yang lebih lama tetap tampil seperti sebelumnya. Kanal `3` dan timer update memasangnya sendiri.
