@@ -27,7 +27,7 @@ import {
 import { DATA_OUT_PORT, DEFAULT_DATA_OUT_HOSTS, addDataOutHost, checkDataOutDraft, dataOutErrorNotice, dataOutUrlHost } from '../lib/dataOutHosts';
 import { dataOutUnused } from '../lib/loraLink';
 import { MAX_LOGO_BYTES, pngDataUrl, pngLogoErrorKey, validatePngLogo } from '../lib/pngLogo';
-import { CONFIG_PATCH_FIELDS, configPatchPublishable, fieldRange, plainNumber } from '../lib/configPatch';
+import { CONFIG_PATCH_FIELDS, configPatchPublishable, fieldRange, fieldValueText, plainNumber } from '../lib/configPatch';
 import { DEFAULT_MQTT_TRANSPORT, DEFAULT_MQTT_WS_PATH, lastMessageAgeMs, mqttTargetFromConfig, mqttTransportFields } from '../lib/mqttMonitor';
 import { formatCount, formatDuration } from '../lib/healthView';
 import { MAX_COMPASS_OFFSET_DEG, saveCompassConfig, saveGpsConfig } from '../lib/sourceConfigStorage';
@@ -868,7 +868,11 @@ export function ConfigurationPage({
     dryRunSummary.topic ? { id: 'topic', label: 'topic', value: dryRunSummary.topic } : null,
     { id: 'sid', label: 'sid', value: dryRunSummary.sid ?? '—' },
     { id: 'rev', label: 'base_rev', value: dryRunSummary.baseRev ?? '—' },
-    ...dryRunSummary.changes.map((change): KeyValueItem => ({ id: change.key, label: change.key, value: `${numberFormat.format(change.value)} ${patchKeyUnit(change.key)}`.trim() })),
+    ...dryRunSummary.changes.map((change): KeyValueItem => ({
+      id: change.key,
+      label: change.key,
+      value: typeof change.value === 'string' ? change.value : `${numberFormat.format(change.value)} ${patchKeyUnit(change.key)}`.trim(),
+    })),
     dryRunSummary.ttlMs !== null ? { id: 'ttl', label: 'ttl', value: t('common.durationS', { value: numberFormat.format(dryRunSummary.ttlMs / 1000) }) } : null,
     dryRunSummary.transport ? { id: 'transport', label: 'transport', value: dryRunSummary.transport } : null,
   ] : [];
@@ -1161,8 +1165,27 @@ export function ConfigurationPage({
           <form className="cfg-form" noValidate onSubmit={submitWith(() => { if (!busy) void runDryRun(); })}>
             <div className="cfg-dry-fields">
               {DRY_RUN_FIELDS.map((field) => {
-                const [min, max] = fieldRange(field, ranges);
                 const reportedValue = reported?.values[field.key];
+                if (field.kind === 'choice') {
+                  // The squelch mode (edge 1.9.0): one of the edge's strings, picked; empty leaves it out.
+                  return (
+                    <FormField key={field.key} label={t(field.label)} error={fieldError(dryRunErrors[field.key])}>
+                      <select
+                        value={dryRunValues[field.key] ?? ''}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          setDryRunValues((values) => ({ ...values, [field.key]: value }));
+                          setDryRunErrors((errors) => without(errors, field.key));
+                          setDryRunResult(null);
+                        }}
+                      >
+                        <option value="">{typeof reportedValue === 'string' ? `— (${fieldValueText(t, field, reportedValue)})` : '—'}</option>
+                        {field.choices.map((choice) => <option key={choice} value={choice}>{fieldValueText(t, field, choice)}</option>)}
+                      </select>
+                    </FormField>
+                  );
+                }
+                const [min, max] = fieldRange(field, ranges);
                 const unit = field.unit === 'dB' || field.unit === 'm' ? field.unit : 'Hz';
                 return (
                   <FormField key={field.key} label={t(field.label)} unit={unit} error={fieldError(dryRunErrors[field.key])}>

@@ -534,6 +534,9 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 :root:not([data-theme='light']) .doa-cardinal-label { box-shadow: 0 0 0 1px rgba(230, 237, 243, .45); }
 .doa-bearing-label { padding: 4px 7px; border: 1px solid #e0603a; border-radius: 4px; background: #11171e; color: #ffffff; font-size: 12px; font-weight: 700; box-shadow: 0 2px 8px rgba(0, 0, 0, .35); }
 .doa-bearing-label.is-provisional { border: 1px dashed #8d99a6; background: #3b434b; color: #e6eaee; }
+/* The DoA record's frequency above the angle on the bearing label. */
+.doa-map-label:has(> .doa-map-label-above) { display: flex; flex-direction: column; align-items: center; line-height: 1.2; }
+.doa-map-label-above { font-size: 10.5px; font-weight: 600; opacity: .82; }
 .doa-heading-label { padding: 3px 6px; border: 1px solid #a98bff; border-radius: 4px; background: #11171e; color: #ffffff; font-size: 11.5px; font-weight: 700; box-shadow: 0 2px 8px rgba(0, 0, 0, .35); }
 .doa-heading-label.is-held { border: 1px dashed #8d99a6; background: #3b434b; color: #e6eaee; }
 /* The RDF-SDR heading: a triangle just outside the 44 px station marker, turned by MapLibre (rotationAlignment 'map'). */

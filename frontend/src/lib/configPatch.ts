@@ -7,17 +7,35 @@
  * change takes VFO0 along at the same frequency. The server checks them
  * again; the client copy only gives early feedback.
  */
-import type { ConsoleCapabilities } from '../api';
+import type { ConfigSettingsReport, ConsoleCapabilities } from '../api';
 import type { MessageKey, Translate } from './i18n';
-import type { ConfigPatchChanges, ConfigPatchKey } from './controlDraft';
+import { SQUELCH_MODES } from './controlDraft';
+import type { ConfigPatchChanges, ConfigPatchChoiceKey, ConfigPatchKey, ConfigPatchNumberKey, ConfigPatchValue, SquelchMode } from './controlDraft';
 import { parseTypedNumber } from './polarViewSettings';
 
-export interface ConfigPatchField {
-  key: ConfigPatchKey;
+interface ConfigPatchFieldBase {
   /** Label of the dry-run form on the Configuration page (SI unit in the label). */
   label: MessageKey;
   /** Label in Kontrol, where the unit stands beside the input. */
   shortLabel: MessageKey;
+}
+
+/**
+ * A field sent as one of a few exact strings (contract 1.9 vfo0_squelch_mode).
+ * Kontrol shows a select with the operator's words; the edge's string is sent.
+ */
+export interface ChoicePatchField extends ConfigPatchFieldBase {
+  kind: 'choice';
+  key: ConfigPatchChoiceKey;
+  choices: readonly string[];
+  /** The operator's words for each value; the value itself is what is sent. */
+  optionLabels: Readonly<Record<string, MessageKey>>;
+}
+
+/** A field sent as a number in SI units. */
+export interface NumberPatchField extends ConfigPatchFieldBase {
+  kind: 'number';
+  key: ConfigPatchNumberKey;
   /** Fallback range in SI units; the server's capabilities override it. */
   min: number;
   max: number;
@@ -30,10 +48,94 @@ export interface ConfigPatchField {
   decimals: number;
   /** Decimals of the SI value sent, when not 3 (the edge rounds the UCA radius to 4). */
   sentDecimals?: number;
-  /** Frequencies are sent as integer Hz. */
+  /**
+   * Sent as a whole number of SI units: frequencies in integer Hz, and since
+   * edge 1.9.0 the squelch in whole dB (rdfsdr reads it with int(); the edge
+   * rounds a fraction with Python's round(), as wholeNumber() does).
+   */
   integer: boolean;
   /** Only these values are accepted (the gain table); Kontrol shows a select. */
   table?: boolean;
+}
+
+export type ConfigPatchField = NumberPatchField | ChoicePatchField;
+
+/** The operator's words for each squelch mode; the edge's string is what is sent. */
+export const SQUELCH_MODE_KEYS: Readonly<Record<SquelchMode, MessageKey>> = {
+  Manual: 'control.squelchMode.manual',
+  Auto: 'control.squelchMode.auto',
+  'Auto Channel': 'control.squelchMode.autoChannel',
+  Default: 'control.squelchMode.default',
+};
+
+/** The squelch mode whose level is vfo0_squelch_db; in every other mode the RDF-SDR sets the level itself. */
+export const MANUAL_SQUELCH: SquelchMode = 'Manual';
+
+/**
+ * The squelch mode rdfsdr runs, as the edge resolves it (source.squelch_is_auto):
+ * a missing mode is Default, and Default follows vfo_default_squelch_mode
+ * (missing: Auto, rdfsdr's own default).
+ */
+export function resolvedSquelchMode(mode: unknown, defaultMode?: unknown): unknown {
+  const own = mode === undefined || mode === null ? 'Default' : mode;
+  if (own !== 'Default') return own;
+  return defaultMode === undefined || defaultMode === null ? 'Auto' : defaultMode;
+}
+
+/** True when rdfsdr sets VFO0's squelch level itself: Auto or Auto Channel, Default resolved. */
+export function squelchIsAuto(mode: unknown, defaultMode?: unknown): boolean {
+  const resolved = resolvedSquelchMode(mode, defaultMode);
+  return resolved === 'Auto' || resolved === 'Auto Channel';
+}
+
+/**
+ * What the node reports about its squelch beside the values (edge 1.9):
+ * settings/reported's resolved flag and modes, and Data Out's
+ * vfo_default_squelch_mode where the report has none.
+ */
+export interface ReportedSquelch {
+  /** The server's squelch_is_auto of a current settings/reported; null without one. */
+  auto: boolean | null;
+  /** The mode after Default is resolved, from the same report; null when unknown. */
+  resolvedMode: string | null;
+  /** What Default follows (vfo_default_squelch_mode); null when not reported. */
+  defaultMode: string | null;
+}
+
+/**
+ * The squelch facts beside Kontrol's values: a current settings/reported's
+ * (resolved on the server), with Data Out's vfo_default_squelch_mode where
+ * the report has none.
+ */
+export function reportedSquelch(
+  settings: Pick<ConfigSettingsReport, 'squelchAuto' | 'squelchModeResolved' | 'defaultSquelchMode'> | null | undefined,
+  dataOutDefaultMode: string | null = null,
+): ReportedSquelch {
+  return {
+    auto: settings?.squelchAuto ?? null,
+    resolvedMode: settings?.squelchModeResolved ?? null,
+    defaultMode: settings?.defaultSquelchMode ?? dataOutDefaultMode,
+  };
+}
+
+/** The squelch mode Kontrol shows in place of an automatic level, e.g. AUTO or DEFAULT → AUTO CHANNEL. */
+export function squelchModeShort(mode: string, resolved: string | null): string {
+  if (mode !== 'Default') return mode.toUpperCase();
+  return resolved && resolved !== 'Default' ? `DEFAULT → ${resolved.toUpperCase()}` : 'DEFAULT';
+}
+
+/**
+ * The squelch level as rdfsdr runs it: a Manual squelch is read with int(),
+ * which truncates toward zero, so a level of -40.7 dB left in settings.json
+ * runs as -40 dB.
+ */
+export function engineSquelchDb(value: number): number {
+  return Math.trunc(value) || 0;
+}
+
+/** True for the squelch level in whole dB (edge 1.9.0), whose reported value is truncated as rdfsdr reads it. */
+function wholeDbField(field: NumberPatchField): boolean {
+  return field.key === 'vfo0_squelch_db' && field.integer;
 }
 
 /** The edge helper's gain table; a gain must be within 0.001 dB of one of these. */
@@ -45,28 +147,39 @@ const GAIN_TOLERANCE_DB = 0.001;
 
 /**
  * The edge's safe fields in its order. Ranges mirror rdf_node_commands.PATCH_RANGES.
- * The last, ant_spacing_m (edge 1.8.0), is offered only to an edge that lists it.
+ * ant_spacing_m (edge 1.8.0) and vfo0_squelch_mode (edge 1.9.0) are offered
+ * only to an edge that lists them.
  */
 export const CONFIG_PATCH_FIELDS: readonly ConfigPatchField[] = [
-  { key: 'center_frequency_hz', label: 'config.field.center', shortLabel: 'control.field.center', min: 24_000_000, max: 1_766_000_000, step: 1_000, unit: 'MHz', scale: 1e6, decimals: 3, integer: true },
-  { key: 'gain_db', label: 'config.field.gain', shortLabel: 'control.field.gain', min: -10, max: 100, step: 0.1, unit: 'dB', scale: 1, decimals: 1, integer: false, table: true },
-  { key: 'vfo0_frequency_hz', label: 'config.field.vfo', shortLabel: 'control.field.vfo', min: 24_000_000, max: 1_766_000_000, step: 1_000, unit: 'MHz', scale: 1e6, decimals: 3, integer: true },
-  { key: 'vfo0_bandwidth_hz', label: 'config.field.bandwidth', shortLabel: 'control.field.bandwidth', min: 100, max: 2_400_000, step: 100, unit: 'kHz', scale: 1e3, decimals: 1, integer: true },
-  { key: 'vfo0_squelch_db', label: 'config.field.squelch', shortLabel: 'control.field.squelch', min: -200, max: 50, step: 0.5, unit: 'dB', scale: 1, decimals: 0, integer: false },
-  { key: 'ant_spacing_m', label: 'config.field.uca', shortLabel: 'control.field.uca', min: 0.05, max: 1, step: 0.001, unit: 'm', scale: 1, decimals: 3, sentDecimals: 4, integer: false },
+  { key: 'center_frequency_hz', kind: 'number', label: 'config.field.center', shortLabel: 'control.field.center', min: 24_000_000, max: 1_766_000_000, step: 1_000, unit: 'MHz', scale: 1e6, decimals: 3, integer: true },
+  { key: 'gain_db', kind: 'number', label: 'config.field.gain', shortLabel: 'control.field.gain', min: -10, max: 100, step: 0.1, unit: 'dB', scale: 1, decimals: 1, integer: false, table: true },
+  { key: 'vfo0_frequency_hz', kind: 'number', label: 'config.field.vfo', shortLabel: 'control.field.vfo', min: 24_000_000, max: 1_766_000_000, step: 1_000, unit: 'MHz', scale: 1e6, decimals: 3, integer: true },
+  { key: 'vfo0_bandwidth_hz', kind: 'number', label: 'config.field.bandwidth', shortLabel: 'control.field.bandwidth', min: 100, max: 2_400_000, step: 100, unit: 'kHz', scale: 1e3, decimals: 1, integer: true },
+  { key: 'vfo0_squelch_db', kind: 'number', label: 'config.field.squelch', shortLabel: 'control.field.squelch', min: -200, max: 50, step: 1, unit: 'dB', scale: 1, decimals: 0, integer: true },
+  { key: 'ant_spacing_m', kind: 'number', label: 'config.field.uca', shortLabel: 'control.field.uca', min: 0.05, max: 1, step: 0.001, unit: 'm', scale: 1, decimals: 3, sentDecimals: 4, integer: false },
+  { key: 'vfo0_squelch_mode', kind: 'choice', label: 'config.field.squelchMode', shortLabel: 'control.field.squelchMode', choices: SQUELCH_MODES, optionLabels: SQUELCH_MODE_KEYS },
 ];
 
 /** The fields an edge without capabilities.config_fields (before 1.8.0) takes. */
 const LEGACY_FIELD_COUNT = 5;
 
 /**
+ * The squelch of an edge before 1.9.0, which keeps a fraction as sent: 0.5 dB
+ * steps and no rounding, as before (the server rounds only for edge 1.9.0).
+ */
+const LEGACY_SQUELCH_FIELD: NumberPatchField = { ...(CONFIG_PATCH_FIELDS[4] as NumberPatchField), step: 0.5, integer: false };
+
+/**
  * The Kontrol fields a node takes: those its capabilities.config_fields
  * lists (contract 1.8), in the edge's order, or the five of an older edge that
- * sends no list (tools/rdf_node_commands.py node_patch_fields).
+ * sends no list (tools/rdf_node_commands.py node_patch_fields). The squelch is
+ * in whole dB only for an edge that also takes the squelch mode (1.9.0), as
+ * rdf_node_commands.node_writes_whole_db() decides on the server.
  */
 export function configPatchFieldsFor(configFields: readonly string[] | null | undefined): readonly ConfigPatchField[] {
   const listed = configFields?.length ? CONFIG_PATCH_FIELDS.filter((field) => configFields.includes(field.key)) : [];
-  return listed.length ? listed : CONFIG_PATCH_FIELDS.slice(0, LEGACY_FIELD_COUNT);
+  const fields = listed.length ? listed : CONFIG_PATCH_FIELDS.slice(0, LEGACY_FIELD_COUNT);
+  return takesSquelchMode(fields) ? fields : fields.map((field) => (field.key === 'vfo0_squelch_db' ? LEGACY_SQUELCH_FIELD : field));
 }
 
 /** True when the fields include the UCA radius, so the band rule sets it too. */
@@ -74,20 +187,41 @@ export function takesUca(fields: readonly ConfigPatchField[]): boolean {
   return fields.some((field) => field.key === 'ant_spacing_m');
 }
 
-export type ConfigPatchRanges = Partial<Record<ConfigPatchKey, readonly [number, number]>>;
+/** True when the fields include the squelch mode (edge 1.9.0). */
+export function takesSquelchMode(fields: readonly ConfigPatchField[]): boolean {
+  return fields.some((field) => field.key === 'vfo0_squelch_mode');
+}
+
+export type ConfigPatchRanges = Partial<Record<ConfigPatchNumberKey, readonly [number, number]>>;
 
 /** [min, max] in SI for a field: the server's range when it sent one, else the client copy. */
-export function fieldRange(field: ConfigPatchField, ranges: ConfigPatchRanges | null | undefined): readonly [number, number] {
+export function fieldRange(field: NumberPatchField, ranges: ConfigPatchRanges | null | undefined): readonly [number, number] {
   const range = ranges?.[field.key];
   return range && Number.isFinite(range[0]) && Number.isFinite(range[1]) && range[0] < range[1] ? range : [field.min, field.max];
 }
 
+export function fieldFor(key: ConfigPatchChoiceKey): ChoicePatchField;
+export function fieldFor(key: ConfigPatchNumberKey): NumberPatchField;
+export function fieldFor(key: ConfigPatchKey): ConfigPatchField;
 export function fieldFor(key: ConfigPatchKey): ConfigPatchField {
   return CONFIG_PATCH_FIELDS.find((field) => field.key === key) as ConfigPatchField;
 }
 
+/**
+ * Python's round() of the edge: to the nearest whole number, a half to the
+ * even one (-40.5 -> -40, -41.5 -> -42), so the console shows the squelch the
+ * edge will write.
+ */
+export function wholeNumber(value: number): number {
+  const floor = Math.floor(value);
+  const diff = value - floor;
+  if (diff > 0.5) return floor + 1;
+  if (diff < 0.5) return floor;
+  return floor % 2 === 0 ? floor : floor + 1;
+}
+
 /** True when an SI value lies in the field's range. */
-export function inFieldRange(key: ConfigPatchKey, value: number | null | undefined, ranges?: ConfigPatchRanges | null): boolean {
+export function inFieldRange(key: ConfigPatchNumberKey, value: number | null | undefined, ranges?: ConfigPatchRanges | null): boolean {
   if (typeof value !== 'number' || !Number.isFinite(value)) return false;
   const [min, max] = fieldRange(fieldFor(key), ranges);
   return value >= min && value <= max;
@@ -105,13 +239,35 @@ export function plainNumber(value: number, maxDecimals = 6): string {
   return String(Number(value.toFixed(maxDecimals)));
 }
 
-/** An SI value as the operator types it: MHz, kHz or dB without trailing zeros. */
-export function draftText(field: ConfigPatchField, siValue: number | null | undefined): string {
-  return typeof siValue === 'number' && Number.isFinite(siValue) ? plainNumber(siValue / field.scale) : '';
+/**
+ * A reported SI value as the operator types it: MHz, kHz or dB without
+ * trailing zeros; a whole-unit field shows a whole value (the squelch level as
+ * rdfsdr runs it, truncated toward zero: a reported -40.7 dB reads -40), and
+ * a choice field its exact string.
+ */
+export function draftText(field: ConfigPatchField, value: ConfigPatchValue | null | undefined): string {
+  if (field.kind === 'choice') return typeof value === 'string' && field.choices.includes(value) ? value : '';
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '';
+  return plainNumber(reportedNumber(field, value) / field.scale);
+}
+
+/** A reported number at the precision the field is shown and compared in. */
+function reportedNumber(field: NumberPatchField, value: number): number {
+  if (!field.integer) return value;
+  return wholeDbField(field) ? engineSquelchDb(value) : wholeNumber(value);
+}
+
+/** A value for review, hints and the read-back: the operator's words for a choice, an SI value with its unit otherwise. */
+export function fieldValueText(t: Translate, field: ConfigPatchField, value: ConfigPatchValue | null | undefined): string {
+  if (field.kind === 'choice') {
+    if (typeof value !== 'string' || value === '') return '—';
+    return Object.prototype.hasOwnProperty.call(field.optionLabels, value) ? t(field.optionLabels[value]) : value;
+  }
+  return displayValue(field, typeof value === 'number' ? value : null);
 }
 
 /** An SI value with its unit for review and hints, using a real minus sign. */
-export function displayValue(field: ConfigPatchField, siValue: number | null | undefined): string {
+export function displayValue(field: NumberPatchField, siValue: number | null | undefined): string {
   if (typeof siValue !== 'number' || !Number.isFinite(siValue)) return '—';
   const shown = siValue / field.scale;
   // Keep the precision that was typed when it is finer than the default.
@@ -121,7 +277,7 @@ export function displayValue(field: ConfigPatchField, siValue: number | null | u
 }
 
 /** Range text in display units, e.g. "24 to 1766 MHz" pieces. */
-export function rangeParts(field: ConfigPatchField, ranges: ConfigPatchRanges | null | undefined): { min: string; max: string; unit: string } {
+export function rangeParts(field: NumberPatchField, ranges: ConfigPatchRanges | null | undefined): { min: string; max: string; unit: string } {
   const [min, max] = fieldRange(field, ranges);
   const format = (value: number) => {
     const text = plainNumber(Math.abs(value / field.scale), 3);
@@ -131,24 +287,34 @@ export function rangeParts(field: ConfigPatchField, ranges: ConfigPatchRanges | 
 }
 
 export type DraftValues = Partial<Record<ConfigPatchKey, string>>;
-export type ReportedValues = Partial<Record<ConfigPatchKey, number | null>>;
+export type ReportedValues = Partial<Record<ConfigPatchKey, ConfigPatchValue | null>>;
 
 /**
  * `table`: a gain the edge's table does not have; `centerVfo`: the centre
- * changes and VFO0 is not the same frequency (the edge requires both, equal).
+ * changes and VFO0 is not the same frequency (the edge requires both, equal);
+ * `choice`: a value a choice field does not have.
  */
-export type FieldProblem = 'empty' | 'number' | 'range' | 'table' | 'centerVfo';
+export type FieldProblem = 'empty' | 'number' | 'range' | 'table' | 'centerVfo' | 'choice';
 
 export interface FieldEvaluation {
   field: ConfigPatchField;
   text: string;
-  /** Parsed SI value, or null. */
-  value: number | null;
-  reported: number | null;
+  /** Parsed SI value (a choice field: its string), or null. */
+  value: ConfigPatchValue | null;
+  reported: ConfigPatchValue | null;
   changed: boolean;
   problem: FieldProblem | null;
   /** Sent although unchanged: VFO0 goes along with a centre change. */
   required?: boolean;
+  /** The squelch level while the squelch is automatic: the RDF-SDR sets it, so it is never sent. */
+  locked?: boolean;
+  /** With `locked`: the mode shown in place of the level (AUTO, AUTO CHANNEL, DEFAULT → AUTO). */
+  lockedText?: string;
+  /**
+   * The current value shown in place of the reported level while the reported
+   * squelch is automatic (the level in settings.json does not run then).
+   */
+  reportedText?: string;
 }
 
 export interface DraftEvaluation {
@@ -164,13 +330,31 @@ export function draftFromReported(reported: ReportedValues, fields: readonly Con
   return draft;
 }
 
-/** Merge SI changes (from the spectrum dock) into a draft as display text. */
+/**
+ * Merge SI changes (from the spectrum dock, or a change reviewed again) into
+ * a draft as display text. A squelch level without a mode sets the mode to
+ * Manual where the node takes one, as the edge itself does.
+ */
 export function mergeIntoDraft(draft: DraftValues, changes: ConfigPatchChanges, fields: readonly ConfigPatchField[] = CONFIG_PATCH_FIELDS): DraftValues {
   const next: DraftValues = { ...draft };
   for (const field of fields) {
-    const value = changes[field.key];
-    if (typeof value === 'number' && Number.isFinite(value)) next[field.key] = draftText(field, value);
+    const text = draftText(field, changes[field.key]);
+    if (text !== '') next[field.key] = text;
   }
+  if (next.vfo0_squelch_db !== draft.vfo0_squelch_db && changes.vfo0_squelch_mode === undefined && takesSquelchMode(fields)) {
+    next.vfo0_squelch_mode = MANUAL_SQUELCH;
+  }
+  return next;
+}
+
+/**
+ * A draft after the operator typed a squelch level: where the node takes a
+ * squelch mode, the mode becomes Manual, since only a Manual squelch uses the
+ * level (the edge switches an automatic squelch to Manual for a level anyway).
+ */
+export function draftWithSquelchLevel(draft: DraftValues, text: string, fields: readonly ConfigPatchField[]): DraftValues {
+  const next: DraftValues = { ...draft, vfo0_squelch_db: text };
+  if (takesSquelchMode(fields)) next.vfo0_squelch_mode = MANUAL_SQUELCH;
   return next;
 }
 
@@ -203,7 +387,8 @@ export function bandRuleFor(hz: number | null | undefined): BandRule | null {
  * A draft whose new centre lies in a band: the gain follows the band rule,
  * and with `withUca` (an edge that takes ant_spacing_m) the UCA radius too.
  */
-export function draftWithBand(draft: DraftValues, centerHz: number | null | undefined, withUca = false): DraftValues {
+export function draftWithBand(draft: DraftValues, centerHz: ConfigPatchValue | null | undefined, withUca = false): DraftValues {
+  if (typeof centerHz !== 'number') return draft;
   const rule = bandRuleFor(centerHz);
   if (!rule) return draft;
   const next: DraftValues = { ...draft, gain_db: draftText(fieldFor('gain_db'), rule.gainDb) };
@@ -235,8 +420,47 @@ export function draftWithCenter(draft: DraftValues, text: string, reported: Repo
   return typed === null ? next : draftWithBand(next, typed * field.scale, withUca);
 }
 
-function sameValue(field: ConfigPatchField, left: number, right: number): boolean {
-  return field.integer ? Math.round(left) === Math.round(right) : Math.abs(left - right) < 1e-9;
+/** A typed value (rounded as the edge rounds it) against a reported one (as the field shows it). */
+function sameValue(field: NumberPatchField, typed: number, reported: number): boolean {
+  return field.integer ? wholeNumber(typed) === reportedNumber(field, reported) : Math.abs(typed - reported) < 1e-9;
+}
+
+/**
+ * The squelch mode that locks the level, or null: an unchanged mode while
+ * the reported squelch is automatic (the server's flag, else the edge's rule
+ * on the reported mode), or a mode picked now that is Auto or Auto Channel,
+ * or Default when what it follows is known and automatic. Default following
+ * Manual (or an unknown default) leaves the level editable.
+ */
+function squelchLock(mode: FieldEvaluation | undefined, squelch: ReportedSquelch | null): string | null {
+  if (!mode || mode.problem !== null) return null;
+  const defaultMode = squelch?.defaultMode ?? null;
+  if (mode.changed) {
+    const picked = mode.value;
+    if (picked === 'Auto' || picked === 'Auto Channel') return squelchModeShort(picked, picked);
+    if (picked === 'Default' && defaultMode !== null && squelchIsAuto(picked, defaultMode)) return squelchModeShort(picked, defaultMode);
+    return null;
+  }
+  return reportedSquelchText(mode, squelch);
+}
+
+/** The reported squelch mode when the reported squelch is automatic (its level then counts for nothing), else null. */
+function reportedSquelchText(mode: FieldEvaluation | undefined, squelch: ReportedSquelch | null): string | null {
+  if (!mode) return null;
+  const defaultMode = squelch?.defaultMode ?? null;
+  const reported = typeof mode.reported === 'string' ? mode.reported : null;
+  const auto = typeof squelch?.auto === 'boolean' ? squelch.auto : reported !== null && squelchIsAuto(reported, defaultMode);
+  if (!auto) return null;
+  const shown = reported ?? 'Default';
+  const resolved = squelch?.resolvedMode ?? resolvedSquelchMode(shown, defaultMode);
+  return squelchModeShort(shown, typeof resolved === 'string' ? resolved : null);
+}
+
+function evaluateChoice(field: ChoicePatchField, text: string, reportedValue: ConfigPatchValue | null | undefined): FieldEvaluation {
+  const known = typeof reportedValue === 'string' && field.choices.includes(reportedValue) ? reportedValue : null;
+  if (text.trim() === '') return { field, text, value: null, reported: known, changed: false, problem: known === null ? null : 'empty' };
+  if (!field.choices.includes(text)) return { field, text, value: null, reported: known, changed: false, problem: 'choice' };
+  return { field, text, value: text, reported: known, changed: text !== known, problem: null };
 }
 
 /**
@@ -252,28 +476,35 @@ export function parseDraft(
   reported: ReportedValues,
   ranges: ConfigPatchRanges | null | undefined,
   gainTable: readonly number[] = GAIN_TABLE_DB,
+  squelch: ReportedSquelch | null = null,
 ): DraftEvaluation {
   const changes: ConfigPatchChanges = {};
-  let invalid = false;
   const evaluated = fields.map((field): FieldEvaluation => {
     const text = draft[field.key] ?? '';
     const reportedValue = reported[field.key];
-    const known = typeof reportedValue === 'number' && Number.isFinite(reportedValue) ? reportedValue : null;
+    if (field.kind === 'choice') {
+      const entry = evaluateChoice(field, text, reportedValue);
+      if (entry.changed && typeof entry.value === 'string') changes[field.key] = entry.value;
+      return entry;
+    }
+    // A reported squelch level as rdfsdr runs it (whole dB, truncated); other values as reported.
+    const known = typeof reportedValue === 'number' && Number.isFinite(reportedValue)
+      ? (wholeDbField(field) ? engineSquelchDb(reportedValue) : reportedValue) : null;
     if (text.trim() === '') {
       const problem: FieldProblem | null = known === null ? null : 'empty';
-      if (problem) invalid = true;
       return { field, text, value: null, reported: known, changed: false, problem };
     }
     const typed = parseTypedNumber(text);
     if (typed === null) {
-      invalid = true;
       return { field, text, value: null, reported: known, changed: false, problem: 'number' };
     }
     const scaled = typed * field.scale;
-    let value = field.integer ? Math.round(scaled) : Number(scaled.toFixed(field.sentDecimals ?? 3));
+    let value = field.integer ? wholeNumber(scaled) : Number(scaled.toFixed(field.sentDecimals ?? 3));
     const [min, max] = fieldRange(field, ranges);
-    if (value < min || value > max) {
-      invalid = true;
+    // A value typed in SI units (dB, m) is checked before rounding, as the edge's
+    // finite(value, low, high) does; MHz and kHz are checked once converted to whole Hz.
+    const checked = field.scale === 1 ? scaled : value;
+    if (checked < min || checked > max) {
       return { field, text, value, reported: known, changed: false, problem: 'range' };
     }
     // The reported value at the precision a typed one is sent with: a reported
@@ -283,7 +514,6 @@ export function parseDraft(
     if (field.table && changed) {
       const tableValue = gainTableValue(value, gainTable);
       if (tableValue === null) {
-        invalid = true;
         return { field, text, value, reported: known, changed: false, problem: 'table' };
       }
       value = tableValue;
@@ -295,8 +525,7 @@ export function parseDraft(
   const vfoIndex = evaluated.findIndex((entry) => entry.field.key === 'vfo0_frequency_hz');
   if (center !== undefined && vfoIndex >= 0 && evaluated[vfoIndex].problem === null) {
     const vfo = evaluated[vfoIndex];
-    if (vfo.value === null || Math.round(vfo.value) !== Math.round(center)) {
-      invalid = true;
+    if (typeof vfo.value !== 'number' || typeof center !== 'number' || Math.round(vfo.value) !== Math.round(center)) {
       delete changes.vfo0_frequency_hz;
       evaluated[vfoIndex] = { ...vfo, changed: false, problem: 'centerVfo' };
     } else {
@@ -304,12 +533,23 @@ export function parseDraft(
       evaluated[vfoIndex] = { ...vfo, changed: true, required: !vfo.changed };
     }
   }
+  // Contract 1.9: an automatic squelch sets its level itself, so the level is
+  // neither checked nor sent then (squelchLock()); the mode is shown instead.
+  const modeEntry = evaluated.find((entry) => entry.field.key === 'vfo0_squelch_mode');
+  const lockedText = squelchLock(modeEntry, squelch);
+  const reportedText = reportedSquelchText(modeEntry, squelch);
+  const squelchIndex = evaluated.findIndex((entry) => entry.field.key === 'vfo0_squelch_db');
+  if (lockedText !== null && squelchIndex >= 0) {
+    delete changes.vfo0_squelch_db;
+    evaluated[squelchIndex] = { ...evaluated[squelchIndex], changed: false, problem: null, locked: true, lockedText };
+  }
+  if (reportedText !== null && squelchIndex >= 0) evaluated[squelchIndex] = { ...evaluated[squelchIndex], reportedText };
   const ordered: ConfigPatchChanges = {};
   for (const field of fields) {
     const value = changes[field.key];
     if (value !== undefined) ordered[field.key] = value;
   }
-  return { fields: evaluated, changes: ordered, invalid };
+  return { fields: evaluated, changes: ordered, invalid: evaluated.some((entry) => entry.problem !== null) };
 }
 
 /**
@@ -326,6 +566,7 @@ export const CONFIG_PATCH_ERROR_CODES = [
   'EMPTY_CHANGES',
   'FIELD_NOT_ALLOWED',
   'VALUE_OUT_OF_RANGE',
+  'SQUELCH_MODE_INVALID',
   'GAIN_NOT_IN_APPROVED_TABLE',
   'CENTER_CHANGE_REQUIRES_VFO0_TARGET',
   'MVP_CENTER_MUST_EQUAL_VFO0',
@@ -354,6 +595,7 @@ export const CONFIG_PATCH_ERROR_KEYS: Record<ConfigPatchErrorCode, MessageKey> =
   EMPTY_CHANGES: 'control.error.EMPTY_CHANGES',
   FIELD_NOT_ALLOWED: 'control.error.FIELD_NOT_ALLOWED',
   VALUE_OUT_OF_RANGE: 'control.error.VALUE_OUT_OF_RANGE',
+  SQUELCH_MODE_INVALID: 'control.error.SQUELCH_MODE_INVALID',
   GAIN_NOT_IN_APPROVED_TABLE: 'control.error.GAIN_NOT_IN_APPROVED_TABLE',
   CENTER_CHANGE_REQUIRES_VFO0_TARGET: 'control.error.CENTER_CHANGE_REQUIRES_VFO0_TARGET',
   MVP_CENTER_MUST_EQUAL_VFO0: 'control.error.MVP_CENTER_MUST_EQUAL_VFO0',
@@ -407,6 +649,8 @@ export const EDGE_ERROR_KEYS: Readonly<Record<string, MessageKey>> = {
   COMMAND_ID_CONFLICT: 'control.edge.COMMAND_ID_CONFLICT',
   // Edge 1.8.0: in VHF/UHF the KrakenSDR engine sets the UCA radius itself (result.band_spacing_m names it).
   SPACING_SET_BY_ENGINE_BAND: 'control.edge.SPACING_SET_BY_ENGINE_BAND',
+  // Edge 1.9.0: a squelch mode other than Manual, Auto, Auto Channel or Default.
+  SQUELCH_MODE_INVALID: 'control.error.SQUELCH_MODE_INVALID',
 };
 
 const SPACING_SET_BY_ENGINE_BAND = 'SPACING_SET_BY_ENGINE_BAND';
@@ -466,6 +710,8 @@ export interface CommandStatusLike {
     proof?: Readonly<Record<string, string>> | string | null;
     /** Contract 1.8: the UCA radius the engine's band rule set with the patch, or requires. */
     bandSpacingM?: number | null;
+    /** Contract 1.9: the squelch mode a level sent while the squelch was automatic switched it to (Manual). */
+    squelchMode?: string | null;
   } | null;
 }
 
@@ -537,6 +783,15 @@ export function bandSpacingText(t: Translate, ack: CommandStatusLike['ack']): st
   return t('control.result.bandSpacing', { spacing: plainNumber(ack.bandSpacingM, 4) });
 }
 
+/**
+ * The squelch mode the edge switched to with a patch (contract 1.9): a level
+ * sent while the squelch was automatic makes it Manual. Null without one.
+ */
+export function squelchModeText(t: Translate, ack: CommandStatusLike['ack']): string | null {
+  if (!ack || typeof ack.squelchMode !== 'string' || !ack.squelchMode) return null;
+  return t('control.result.squelchMode', { mode: fieldValueText(t, fieldFor('vfo0_squelch_mode'), ack.squelchMode) });
+}
+
 /** How an APPLIED config.patch was applied (contract 1.7), or null for an older edge. */
 export function appliedMethodText(t: Translate, ack: CommandStatusLike['ack']): string | null {
   if (!ack || ack.status !== 'APPLIED') return null;
@@ -580,8 +835,9 @@ export function commandResultView(status: CommandStatusLike, changeCount: number
   const code = ack.error ?? ack.reason;
   // A contract 1.7 answer also names its method; an older one keeps the plain line.
   const plain = ack.method || ack.liveFailure ? rawCodes(ack, code) : withCode(ack.status, code);
-  // Contract 1.8: the band radius the edge named.
-  const raw = typeof ack.bandSpacingM === 'number' ? `${plain} · band_spacing_m ${plainNumber(ack.bandSpacingM, 4)}` : plain;
+  // Contract 1.8: the band radius the edge named; contract 1.9: the squelch mode it switched to.
+  const spaced = typeof ack.bandSpacingM === 'number' ? `${plain} · band_spacing_m ${plainNumber(ack.bandSpacingM, 4)}` : plain;
+  const raw = ack.squelchMode ? `${spaced} · squelch_mode ${ack.squelchMode}` : spaced;
   const rev = ack.revision ?? '—';
   const helper = edgeHelperFault(ack.error);
   if (ack.status === 'APPLIED') {

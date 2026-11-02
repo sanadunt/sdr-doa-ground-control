@@ -7,6 +7,7 @@ import { useI18n } from '../../lib/i18n';
 import type { Translate } from '../../lib/i18n';
 import { doaSample, doaSampleText, loraLink, overLora, snapshotNav, snapshotRf } from '../../lib/telemetrySource';
 import type { RfSettings } from '../../lib/telemetrySource';
+import { engineSquelchDb } from '../../lib/configPatch';
 import { distanceAndBearing, groundGpsState, groundGpsSummary, snapshotGroundGps, stationPositionLive } from '../../lib/groundGps';
 import type { GeoOrigin } from '../../lib/doaGeometry';
 import { coordinateSourceKey } from '../DoaReadout';
@@ -121,9 +122,14 @@ export function navRows(nav: Record<string, unknown> | null, t: Translate): Arra
 type NodeRow = [string, string, string?, boolean?];
 
 /**
- * VFO0, bandwidth and squelch of state.rf (edge 1.7) and the UCA radius (edge
- * 1.8), each only when the edge sends it, and marked as a setting:
- * settings.json of revision cfg, not a measurement.
+ * VFO0, bandwidth and squelch of state.rf (edge 1.7), the UCA radius (edge
+ * 1.8) and the squelch mode (edge 1.9), each only when the edge sends it, and
+ * marked as a setting: settings.json of revision cfg, not a measurement. The
+ * edge leaves rf.sq out exactly while the squelch is automatic, so a level
+ * shows whenever it is sent: on a 1.9 node in whole dB as rdfsdr runs it
+ * (int(), truncated toward zero), on an older one with a decimal as before.
+ * Without a level, a mode other than Manual shows instead (AUTO, AUTO
+ * CHANNEL, DEFAULT).
  */
 export function rfRows(rf: RfSettings | null, t: Translate): NodeRow[] {
   if (!rf) return [];
@@ -131,7 +137,11 @@ export function rfRows(rf: RfSettings | null, t: Translate): NodeRow[] {
   const rows: NodeRow[] = [];
   if (rf.vfo0Hz !== null) rows.push([t('node.vfo0'), setting(`${(rf.vfo0Hz / 1e6).toFixed(3)} MHz`), undefined, true]);
   if (rf.bandwidthHz !== null) rows.push([t('node.bandwidth'), setting(`${Number((rf.bandwidthHz / 1000).toFixed(1))} kHz`), undefined, true]);
-  if (rf.squelchDb !== null) rows.push([t('node.squelch'), setting(`${rf.squelchDb.toFixed(1)} dB`), undefined, true]);
+  const mode = rf.squelchMode ?? null;
+  if (rf.squelchDb !== null) {
+    const level = mode === null ? rf.squelchDb.toFixed(1) : String(engineSquelchDb(rf.squelchDb));
+    rows.push([t('node.squelch'), setting(`${level} dB`), undefined, true]);
+  } else if (mode !== null && mode !== 'Manual') rows.push([t('node.squelch'), setting(mode.toUpperCase()), undefined, true]);
   if (rf.ucaM !== null) rows.push([t('node.uca'), setting(`${rf.ucaM.toFixed(3)} m`), undefined, true]);
   return rows;
 }

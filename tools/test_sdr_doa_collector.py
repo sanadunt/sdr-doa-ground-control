@@ -184,6 +184,14 @@ def test_vfo_settings_are_kept_only_as_finite_numbers():
     assert fields["vfo_squelch_0"] == fixture["vfo_squelch_0"]
 
 
+def test_squelch_mode_and_its_default_are_kept_as_text():
+    """Edge 1.9: Kontrol resolves a Default squelch mode through vfo_default_squelch_mode."""
+    body = json.dumps({"vfo_squelch_mode_0": "Default", "vfo_default_squelch_mode": "Manual"}).encode()
+    fields = collector.parse_settings(resource(collector.PATH_SETTINGS, body))["fields"]
+    assert fields["vfo_squelch_mode_0"] == "Default"
+    assert fields["vfo_default_squelch_mode"] == "Manual"
+
+
 def test_unhealthy_daq_blocks():
     result = fake_collection(make_status(100_000, daq_ok=False), make_csv(), make_xml())
     assert result["status"]["daq_health"] == "FAIL"

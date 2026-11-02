@@ -164,7 +164,8 @@ class FakeMonitor:
             "state_cfg": 42, "matches_state_cfg": matches,
             "safe_settings": {
                 "center_frequency_hz": 433_920_000, "gain_db": 15.7, "vfo0_frequency_hz": 433_920_000,
-                "vfo0_bandwidth_hz": 12_500, "vfo0_squelch_db": -80, "ant_spacing_m": 0.128, "ant_arrangement": "UCA",
+                "vfo0_bandwidth_hz": 12_500, "vfo0_squelch_db": -80, "ant_spacing_m": 0.128,
+                "vfo0_squelch_mode": "Manual", "ant_arrangement": "UCA",
             } if matches else {},
         }
 
@@ -350,7 +351,8 @@ class ConfigPatchServerTests(unittest.TestCase):
         self.assertIs(capabilities["admin_default_password"], False)
         self.assertEqual(
             capabilities["config_allowlist"],
-            ["center_frequency_hz", "gain_db", "vfo0_frequency_hz", "vfo0_bandwidth_hz", "vfo0_squelch_db", "ant_spacing_m"],
+            ["center_frequency_hz", "gain_db", "vfo0_frequency_hz", "vfo0_bandwidth_hz", "vfo0_squelch_db", "ant_spacing_m",
+             "vfo0_squelch_mode"],
         )
         self.assertEqual(
             capabilities["config_patch"],
@@ -371,6 +373,7 @@ class ConfigPatchServerTests(unittest.TestCase):
                     "vfo0_squelch_db": [-200, 50],
                     "ant_spacing_m": [0.05, 1],
                 },
+                "choices": {"vfo0_squelch_mode": ["Manual", "Auto", "Auto Channel", "Default"]},
                 "gain_table_db": list(cmds.GAIN_TABLE_DB),
                 "requires_fresh_health": True,
             },
@@ -598,6 +601,63 @@ class ConfigPatchServerTests(unittest.TestCase):
         self.assertEqual(failed["ack"]["band_spacing_m"], 0.3)
         self.assertNotIn("message", failed["ack"])
 
+    def test_squelch_mode_goes_only_to_an_edge_that_lists_it(self) -> None:
+        cookie = self.admin_cookie()
+        body = self.patch_body(changes={"vfo0_squelch_mode": "Auto Channel"})
+        # Edge 1.8.0 lists its fields without the squelch mode; an older edge lists none.
+        for listed in (None, sorted(set(cmds.PATCH_FIELDS) - {"vfo0_squelch_mode"})):
+            with self.subTest(config_fields=listed):
+                self.monitor.session["capabilities"] = {
+                    "remote_commands": True, "remote_config_patch": True, "config_patch": True, "config_fields": listed,
+                }
+                refused = self.assert_error(self.send_patch(body, cookie=cookie), 409, "FIELD_NOT_ALLOWED")
+                self.assertEqual(refused["fields"], ["vfo0_squelch_mode"])
+                self.assertNotIn("vfo0_squelch_mode", refused["allowed"])
+        self.assertEqual(self.monitor.published, [])
+        # Edge 1.9.0 lists it: the exact string goes out, after every numeric field.
+        self.monitor.session["capabilities"] = {
+            "remote_commands": True, "remote_config_patch": True, "config_patch": True,
+            "config_fields": sorted(cmds.PATCH_FIELDS),
+        }
+        status, accepted = self.send_patch(
+            self.patch_body(changes={"vfo0_squelch_mode": "Manual", "vfo0_squelch_db": -40.7}), cookie=cookie,
+        )
+        self.assertEqual(status, 202, accepted)
+        # The edge writes whole dB (Python round), so the console sends what the edge would write.
+        self.assertEqual(accepted["changes"], {"vfo0_squelch_db": -41, "vfo0_squelch_mode": "Manual"})
+        [published] = self.monitor.published
+        self.assertEqual(list(published["changes"]), ["vfo0_squelch_db", "vfo0_squelch_mode"])
+        self.assertIs(type(published["changes"]["vfo0_squelch_db"]), int)
+        cmds.validate_command(published, now_ms=published["issued_ms"])
+        # A level sent while the squelch was automatic: the edge names the mode it switched to.
+        self.monitor.ack(accepted["command_id"], "APPLIED", rev=43, result={
+            "revision": 43, "persisted": True, "method": "LIVE", "squelch_mode": "Manual",
+        })
+        applied = self.status_of(accepted["command_id"])
+        self.assertEqual((applied["ack"]["status"], applied["ack"]["method"], applied["ack"]["squelch_mode"]),
+                         ("APPLIED", "LIVE", "Manual"))
+
+    def test_an_older_edge_gets_the_squelch_as_sent(self) -> None:
+        # Before 1.9.0 the edge keeps a fractional squelch: the console sends it unrounded, as before.
+        cookie = self.admin_cookie()
+        status, accepted = self.send_patch(self.patch_body(changes={"vfo0_squelch_db": -40.7}), cookie=cookie)
+        self.assertEqual(status, 202, accepted)
+        self.assertEqual(accepted["changes"], {"vfo0_squelch_db": -40.7})
+        [published] = self.monitor.published
+        self.assertEqual(published["changes"], {"vfo0_squelch_db": -40.7})
+        cmds.validate_command(published, now_ms=published["issued_ms"])
+
+    def test_an_unknown_squelch_mode_is_refused_with_the_edge_code(self) -> None:
+        cookie = self.admin_cookie()
+        for bad in ("auto", "AUTO CHANNEL", "", 1, None, ["Auto"]):
+            with self.subTest(mode=bad):
+                refused = self.assert_error(
+                    self.send_patch(self.patch_body(changes={"vfo0_squelch_mode": bad}), cookie=cookie),
+                    400, "SQUELCH_MODE_INVALID",
+                )
+                self.assertEqual(refused["choices"], list(cmds.SQUELCH_MODES))
+        self.assertEqual(self.monitor.published, [])
+
     def test_one_command_in_flight_at_a_time(self) -> None:
         cookie = self.admin_cookie()
         status, first = self.send_patch(self.patch_body(), cookie=cookie)
@@ -673,7 +733,8 @@ class ConfigPatchServerTests(unittest.TestCase):
         self.assertEqual(acked["ack"], {
             "status": "APPLIED", "final": True, "error": None, "reason": None, "revision": 43,
             "proof": {"center_frequency_hz": "FRESH_DAQ_RF_CENTER", "vfo0_frequency_hz": "FRESH_DOA_FREQUENCY"},
-            "persisted": True, "method": None, "live_failure": None, "band_spacing_m": None, "t": acked["ack"]["t"],
+            "persisted": True, "method": None, "live_failure": None, "band_spacing_m": None, "squelch_mode": None,
+            "t": acked["ack"]["t"],
             "received_at_ms": 2,
         })
         self.assertNotIn("never-shown", json.dumps(acked))
@@ -908,7 +969,7 @@ class ConfigPatchServerTests(unittest.TestCase):
         body = self.request("GET", "/api/mqtt/config-reported")[2]
         self.assertEqual(body["values"], {
             "center_frequency_hz": 433_920_000, "gain_db": 15.7, "vfo0_frequency_hz": 433_920_000,
-            "vfo0_bandwidth_hz": 12_500, "vfo0_squelch_db": -80, "ant_spacing_m": 0.128,
+            "vfo0_bandwidth_hz": 12_500, "vfo0_squelch_db": -80, "ant_spacing_m": 0.128, "vfo0_squelch_mode": "Manual",
         })
         self.assertEqual(set(body["value_sources"].values()), {"settings_reported"})
         self.assertEqual(set(body["value_received_at_ms"].values()), {1_234})
@@ -955,6 +1016,20 @@ class ConfigPatchServerTests(unittest.TestCase):
         self.assertEqual(command["expires_ms"] - command["issued_ms"], 15_000)
         self.assertEqual(command["changes"], {"gain_db": 20.7})
         self.assertTrue(command["id"].startswith("dryrun-"))
+        # The squelch as the node writes it: unrounded for an older edge, whole dB and a mode for edge 1.9.0.
+        squelch = {"changes": {"vfo0_squelch_db": -40.7}}
+        self.assertEqual(self.request("POST", "/api/dry-run/config-patch", squelch)[2]["command"]["changes"],
+                         {"vfo0_squelch_db": -40.7})
+        self.monitor.session["capabilities"] = {
+            "remote_commands": True, "remote_config_patch": True, "config_patch": True,
+            "config_fields": sorted(cmds.PATCH_FIELDS),
+        }
+        squelch = {"changes": {"vfo0_squelch_db": -40.7, "vfo0_squelch_mode": "Manual"}}
+        self.assertEqual(self.request("POST", "/api/dry-run/config-patch", squelch)[2]["command"]["changes"],
+                         {"vfo0_squelch_db": -41, "vfo0_squelch_mode": "Manual"})
+        status, _headers, body = self.request("POST", "/api/dry-run/config-patch", {"changes": {"vfo0_squelch_mode": "On"}})
+        self.assertEqual(status, 400)
+        self.assertIn("SQUELCH_MODE_INVALID", body["error"])
         self.monitor.session.update(known=False)
         _status, _headers, body = self.request("POST", "/api/dry-run/config-patch", {"changes": {"gain_db": 20.7}})
         self.assertIs(body["session_known"], False)
@@ -969,6 +1044,74 @@ class ConfigPatchServerTests(unittest.TestCase):
             self.assertEqual((status, body["ok"], body["dry_run"]), (400, False, True), payload)
             self.assertIn(fragment, body["error"])
         self.assertEqual(self.monitor.published, [])
+
+    def test_dry_run_refuses_a_field_the_node_does_not_take(self) -> None:
+        # As the real POST: an edge before 1.9.0 does not take the squelch mode, so the
+        # preview names it, never "changes must be normalized".
+        body = {"changes": {"vfo0_squelch_db": -40.7, "vfo0_squelch_mode": "Manual"}}
+        for listed in (None, sorted(set(cmds.PATCH_FIELDS) - {"vfo0_squelch_mode"})):
+            with self.subTest(config_fields=listed):
+                self.monitor.session["capabilities"] = {
+                    "remote_commands": True, "remote_config_patch": True, "config_patch": True, "config_fields": listed,
+                }
+                status, _headers, answer = self.request("POST", "/api/dry-run/config-patch", body)
+                self.assertEqual((status, answer["ok"]), (400, False), answer)
+                self.assertIn("FIELD_NOT_ALLOWED", answer["error"])
+                self.assertIn("vfo0_squelch_mode", answer["error"])
+                self.assertNotIn("normalized", answer["error"])
+        # The UCA radius to an edge before 1.8.0 (no list) the same way.
+        self.monitor.session["capabilities"] = {"remote_commands": True, "remote_config_patch": True}
+        status, _headers, answer = self.request("POST", "/api/dry-run/config-patch", {"changes": {"ant_spacing_m": 0.3}})
+        self.assertEqual(status, 400)
+        self.assertIn("FIELD_NOT_ALLOWED", answer["error"])
+        self.assertIn("ant_spacing_m", answer["error"])
+        # Without a node session the preview takes every field the console knows.
+        self.monitor.session.update(known=False)
+        status, _headers, answer = self.request("POST", "/api/dry-run/config-patch", body)
+        self.assertEqual(status, 200, answer)
+        self.assertEqual(answer["command"]["changes"], {"vfo0_squelch_db": -41, "vfo0_squelch_mode": "Manual"})
+        self.assertEqual(self.monitor.published, [])
+
+    def test_config_reported_resolves_the_squelch_mode_as_the_edge(self) -> None:
+        # source.squelch_is_auto of edge 1.9.0: a missing mode is Default, Default follows
+        # vfo_default_squelch_mode (missing: Auto), and Auto and Auto Channel are automatic.
+        self.monitor.session["capabilities"] = {
+            "remote_commands": True, "remote_config_patch": True, "config_patch": True,
+            "config_fields": list(cmds.PATCH_FIELDS),
+        }
+        base = {"center_frequency_hz": 433_920_000, "vfo0_squelch_db": -40.7}
+        for extra, expected in (
+            ({"vfo0_squelch_mode": "Manual"}, (False, "Manual", None)),
+            ({"vfo0_squelch_mode": "Auto"}, (True, "Auto", None)),
+            ({"vfo0_squelch_mode": "Auto Channel", "vfo_default_squelch_mode": "Manual"}, (True, "Auto Channel", "Manual")),
+            ({}, (True, "Auto", None)),
+            ({"vfo0_squelch_mode": "Default"}, (True, "Auto", None)),
+            ({"vfo0_squelch_mode": "Default", "vfo_default_squelch_mode": "Manual"}, (False, "Manual", "Manual")),
+            ({"vfo_default_squelch_mode": "Auto Channel"}, (True, "Auto Channel", "Auto Channel")),
+            ({"vfo0_squelch_mode": "Default", "vfo_default_squelch_mode": 3}, (False, None, None)),
+        ):
+            with self.subTest(settings=extra):
+                self.monitor.report("gc-" + "3" * 24)
+                self.monitor.settings["safe_settings"] = {**base, **extra}
+                settings = self.request("GET", "/api/mqtt/config-reported")[2]["settings"]
+                self.assertEqual(
+                    (settings["squelch_auto"], settings["squelch_mode_resolved"], settings["vfo_default_squelch_mode"]),
+                    expected,
+                )
+        # A report of another revision says nothing about the squelch.
+        self.monitor.report("gc-" + "4" * 24, rev=41, matches=False)
+        settings = self.request("GET", "/api/mqtt/config-reported")[2]["settings"]
+        self.assertEqual((settings["squelch_auto"], settings["squelch_mode_resolved"]), (None, None))
+        # An edge before 1.9.0 (no squelch mode in config_fields) gets nulls, as before.
+        for listed in (None, sorted(set(cmds.PATCH_FIELDS) - {"vfo0_squelch_mode"})):
+            with self.subTest(config_fields=listed):
+                self.monitor.session["capabilities"] = {"remote_commands": True, "config_fields": listed}
+                self.monitor.report("gc-" + "5" * 24)
+                settings = self.request("GET", "/api/mqtt/config-reported")[2]["settings"]
+                self.assertEqual(
+                    (settings["squelch_auto"], settings["squelch_mode_resolved"], settings["vfo_default_squelch_mode"]),
+                    (None, None, None),
+                )
 
     # -- login throttle --------------------------------------------------------
 
@@ -1204,7 +1347,10 @@ class RealMonitorEndToEndTests(unittest.TestCase):
                          ("reported", "APPLIED"))
         self.assertIs(reported["settings"]["matches_state_cfg"], True)
         self.assertEqual(reported["values"]["center_frequency_hz"], 433_920_000)
-        self.assertEqual(set(reported["value_sources"].values()), {"settings_reported"})
+        # Edge 35984d8's settings.json carries no squelch mode (contract 1.9): only that value is missing.
+        self.assertIsNone(reported["values"]["vfo0_squelch_mode"])
+        self.assertEqual({source for field, source in reported["value_sources"].items() if field != "vfo0_squelch_mode"},
+                         {"settings_reported"})
 
     def test_the_installed_edge_refuses_config_get_over_plaintext_and_kontrol_keeps_data_out(self) -> None:
         reported = self.plaintext_config_get("8691ad0")

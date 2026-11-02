@@ -176,7 +176,7 @@ def _spacing(value: Any) -> Optional[float]:
 
 
 def public_ack(ack: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
-    """What Kontrol shows of an ACK: status, error, reason, revision, proof, method."""
+    """What Kontrol shows of an ACK: status, error, reason, revision, proof, method, squelch mode."""
     if ack is None:
         return None
     result = ack.get("result") if isinstance(ack.get("result"), Mapping) else {}
@@ -202,6 +202,9 @@ def public_ack(ack: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
         # Contract 1.8: the UCA radius the engine's band rule set with this patch, or the one
         # it requires (FAILED SPACING_SET_BY_ENGINE_BAND); null when the edge named none.
         "band_spacing_m": _spacing(result.get("band_spacing_m")),
+        # Contract 1.9: "Manual" when a squelch level sent while the squelch was automatic
+        # switched it to Manual; null otherwise.
+        "squelch_mode": _text(result.get("squelch_mode"), 32),
         "t": ack.get("t"),
         "received_at_ms": ack.get("received_at_ms"),
     }

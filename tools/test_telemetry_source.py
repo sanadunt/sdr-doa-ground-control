@@ -360,7 +360,7 @@ class Edge17Tests(unittest.TestCase):
         self.assertEqual(built["rf"], {
             "source": "state.rf", "cfg": 298, "t": FIXED_NOW, "received_at_ms": FIXED_NOW, "age_ms": 0,
             "center_frequency_hz": 103_100_000, "vfo0_frequency_hz": 103_100_000, "gain_db": 12.5,
-            "vfo0_bandwidth_hz": 12_500, "vfo0_squelch_db": -100.0, "uca_m": None,
+            "vfo0_bandwidth_hz": 12_500, "vfo0_squelch_db": -100.0, "uca_m": None, "squelch_mode": None,
         })
         # settings is a Data Out read of settings.json; state.rf never fills it.
         self.assertFalse(built["settings"]["available"])
@@ -380,6 +380,21 @@ class Edge17Tests(unittest.TestCase):
         edge.hello(rf=dict(RF_17, uca=0.3), cfg=298)
         edge.health()
         self.assertEqual(self.answer(edge)["rf"]["uca_m"], 0.3)
+
+    def test_rf_sqm_is_the_squelch_mode(self) -> None:
+        # Contract 1.9 (edge 1.9.0): state.rf.sqm is the VFO0 squelch mode; while it is automatic
+        # the edge leaves rf.sq out, so the level is null and only the mode is shown.
+        for rf, mode, level in (
+            (dict(RF_17, sq=-80, sqm="Manual"), "Manual", -80),
+            ({key: value for key, value in RF_17.items() if key != "sq"} | {"sqm": "Auto Channel"}, "Auto Channel", None),
+            ({"sqm": "Auto"}, "Auto", None),
+        ):
+            with self.subTest(sqm=mode):
+                edge = Edge(ManualMs(FIXED_NOW))
+                edge.hello(rf=rf, cfg=298)
+                edge.health()
+                built = self.answer(edge)["rf"]
+                self.assertEqual((built["squelch_mode"], built["vfo0_squelch_db"]), (mode, level))
 
     def test_detail_ovr_settles_the_overdrive_over_lora(self) -> None:
         for ovr, reason, check, state, overall in (

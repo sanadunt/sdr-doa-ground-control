@@ -548,7 +548,9 @@ def _parse_config_patch_request(payload: Any) -> Tuple[Dict[str, Any], Optional[
             HTTPStatus.BAD_REQUEST, "CONFIRM_REQUIRED", "confirm must be true after the change has been reviewed",
         )
     try:
-        normalized = cmds.validate_patch_changes(changes)
+        # The squelch is rounded to whole dB only for an edge that writes it so (1.9.0);
+        # that is known once the node session is read, in _publish_command_locked.
+        normalized = cmds.validate_patch_changes(changes, whole_db=False)
     except cmds.CommandRefused as refused:
         raise ConfigPatchRejected(HTTPStatus.BAD_REQUEST, refused.code, refused.message, **refused.extra) from refused
     return normalized, base_rev
@@ -619,21 +621,60 @@ def _config_fields_or_none(value: Any) -> Optional[List[str]]:
     return [item for item in value if isinstance(item, str)][:16]
 
 
-def _settings_view(report: Any, now_ms: int) -> Optional[Dict[str, Any]]:
-    """The latest settings/reported without its native text; safe values only while current."""
+def _settings_view(report: Any, now_ms: int, config_fields: Any = None) -> Optional[Dict[str, Any]]:
+    """The latest settings/reported without its native text; safe values only while current.
+
+    For an edge that takes the squelch mode (contract 1.9, ``config_fields``
+    lists vfo0_squelch_mode) a current report also says whether the squelch is
+    automatic, resolved as the edge does (``squelch_is_auto``); null otherwise.
+    """
     if not isinstance(report, dict) or not isinstance(report.get("id"), str):
         return None
     received = _int_or_none(report.get("received_at_ms"))
     current = report.get("matches_state_cfg") is True
     safe = report.get("safe_settings") if current and isinstance(report.get("safe_settings"), dict) else {}
+    squelch = _squelch_view(safe) if current and cmds.node_writes_whole_db(config_fields) else None
     return {
         "id": report["id"],
         "rev": _int_or_none(report.get("rev")),
         "received_at_ms": received,
         "age_ms": None if received is None else max(0, now_ms - received),
         "matches_state_cfg": current,
-        "values": {field: _finite_or_none(safe.get(field)) for field in cmds.PATCH_FIELDS},
+        "values": {field: _setting_or_none(field, safe.get(field)) for field in cmds.PATCH_FIELDS},
+        "squelch_auto": None if squelch is None else squelch[0],
+        "squelch_mode_resolved": None if squelch is None else squelch[1],
+        "vfo_default_squelch_mode": None if squelch is None else squelch[2],
     }
+
+
+def _squelch_view(safe: Dict[str, Any]) -> Tuple[bool, Optional[str], Optional[str]]:
+    """(automatic, the mode after Default, vfo_default_squelch_mode) of a 1.9 edge's safe settings.
+
+    As the edge's ``source.squelch_is_auto``: a missing vfo0_squelch_mode is
+    Default, Default follows vfo_default_squelch_mode (missing: Auto), and
+    the squelch is automatic in Auto and Auto Channel.
+    """
+    mode = safe.get("vfo0_squelch_mode", "Default")
+    default = safe.get("vfo_default_squelch_mode", "Auto")
+    resolved = default if mode == "Default" else mode
+    shown_default = safe.get("vfo_default_squelch_mode")
+    return (
+        resolved in ("Auto", "Auto Channel"),
+        resolved if isinstance(resolved, str) and _SQUELCH_MODE_TEXT_RE.fullmatch(resolved) else None,
+        shown_default if isinstance(shown_default, str) and _SQUELCH_MODE_TEXT_RE.fullmatch(shown_default) else None,
+    )
+
+
+# A squelch mode as text Kontrol may show: a short word or phrase (Manual, Auto Channel).
+_SQUELCH_MODE_TEXT_RE = re.compile(r"^[A-Za-z][A-Za-z ]{0,31}$")
+
+
+def _setting_or_none(field: str, value: Any) -> Any:
+    """A reported value Kontrol can show: a finite number, or for a text field
+    (contract 1.9 vfo0_squelch_mode) one of the edge's own values."""
+    if field in cmds.CHOICE_FIELDS:
+        return value if isinstance(value, str) and value in cmds.CHOICE_FIELDS[field] else None
+    return _finite_or_none(value)
 
 
 def _is_allowed_mqtt_ws_path(value: Any) -> bool:
@@ -2195,8 +2236,22 @@ def validate_config_patch(
         raise ValueError("request must be a JSON object")
     if set(payload) - {"changes"}:
         raise ValueError("only changes is accepted; sid, boot and base_rev come from the node's state")
+    capabilities = session.get("capabilities") if session is not None and isinstance(session.get("capabilities"), dict) else {}
+    changes_in = payload.get("changes")
+    if session is not None and isinstance(changes_in, dict):
+        # As the real POST: a known node takes only what its capabilities.config_fields lists
+        # (the five fields of an older edge), so the preview never builds a command it would refuse.
+        takes = cmds.node_patch_fields(capabilities.get("config_fields"))
+        unsupported = [str(field) for field in changes_in if field in cmds.PATCH_FIELDS and field not in takes]
+        if unsupported:
+            raise ValueError(
+                "FIELD_NOT_ALLOWED: the RDF Node does not take " + ", ".join(unsupported)
+                + " (capabilities.config_fields)"
+            )
+    # The squelch in whole dB for an edge that writes it so (1.9.0), and for a preview without a node.
+    whole_db = session is None or cmds.node_writes_whole_db(capabilities.get("config_fields"))
     try:
-        changes = cmds.validate_patch_changes(payload.get("changes"))
+        changes = cmds.validate_patch_changes(payload.get("changes"), whole_db=whole_db)
     except cmds.CommandRefused as refused:
         raise ValueError(f"{refused.code}: {refused.message}") from refused
     issued = int(time.time() * 1000) if now_ms is None else int(now_ms)
@@ -3190,6 +3245,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 "qos": cmds.COMMAND_QOS,
                 "ttl_ms": cmds.COMMAND_TTL_MS,
                 "ranges": _config_patch_ranges(),
+                # Contract 1.9: the text fields and the exact values the edge takes.
+                "choices": cmds.choices_view(),
                 "gain_table_db": list(cmds.GAIN_TABLE_DB),
                 "requires_fresh_health": True,
             },
@@ -5177,7 +5234,10 @@ class GroundConsoleServer(ThreadingHTTPServer):
         view_now = _int_or_none(view.get("now_ms")) or now
         session = _session_or_none(view)
         node = _node_view(session, view_now)
-        settings = _settings_view(view.get("settings"), view_now)
+        settings = _settings_view(
+            view.get("settings"), view_now,
+            config_fields=None if node is None else node.get("config_fields"),
+        )
         body.update(available=True, node=node, base_rev=None if node is None else node["cfg"], settings=settings,
                     link="lora" if view.get("link") == "lora" else None)
         if settings is not None and settings["matches_state_cfg"]:
@@ -5255,6 +5315,9 @@ class GroundConsoleServer(ThreadingHTTPServer):
                     fields=unsupported,
                     allowed=list(takes),
                 )
+            if changes and cmds.node_writes_whole_db(capabilities.get("config_fields")):
+                # Edge 1.9.0 writes the squelch in whole dB (Python round): send what it will write.
+                changes = cmds.validate_patch_changes(changes)
             if session.get("health_fresh") is not True:
                 raise ConfigPatchRejected(
                     HTTPStatus.CONFLICT,

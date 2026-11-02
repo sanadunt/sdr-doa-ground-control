@@ -3,7 +3,7 @@ import { CONFIG_PATCH_KEYS, isConfigPatchKey, nextControlDraftRequest, normalize
 
 describe('control draft requests', () => {
   it('cover exactly the edge config.patch allowlist', () => {
-    expect([...CONFIG_PATCH_KEYS]).toEqual(['center_frequency_hz', 'gain_db', 'vfo0_frequency_hz', 'vfo0_bandwidth_hz', 'vfo0_squelch_db', 'ant_spacing_m']);
+    expect([...CONFIG_PATCH_KEYS]).toEqual(['center_frequency_hz', 'gain_db', 'vfo0_frequency_hz', 'vfo0_bandwidth_hz', 'vfo0_squelch_db', 'ant_spacing_m', 'vfo0_squelch_mode']);
     expect(isConfigPatchKey('vfo_frequency_hz')).toBe(false);
     expect(isConfigPatchKey('gain_db')).toBe(true);
     expect(isConfigPatchKey('restart_service')).toBe(false);

@@ -34,7 +34,8 @@ import { groundLink, groundLinkLabel, stationPositionLive } from '../lib/groundG
 import { geographicBearingForBin } from '../lib/polar';
 import { beamColorExpression, beamOpacityExpression, formatBearing, formatDistance, heatmapColorExpression, heatmapRadiusExpression } from '../lib/overlayPalette';
 import { numberOrNull, primaryCandidate } from '../lib/telemetry';
-import { isMqttSnapshot } from '../lib/telemetrySource';
+import { doaSample, isMqttSnapshot } from '../lib/telemetrySource';
+import { overviewDoaStatus } from '../lib/doaStatus';
 import { headingLabel, headingLabelPosition, headingLineFeatures, headingPopupText, rdfHeading, type RdfHeading } from '../lib/rdfHeading';
 import { useI18n } from '../lib/i18n';
 import type { MessageKey, Translate } from '../lib/i18n';
@@ -317,6 +318,10 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const headingState = headingNow?.state ?? null;
   const compassState = headingNow?.compassState ?? null;
   const heading = useMemo<RdfHeading | null>(() => (headingState === null ? null : { headingDeg, state: headingState, compassState }), [headingDeg, headingState, compassState]);
+  // The DoA record's frequency, shown above the angle on the bearing label: the
+  // shown DoA's, or the held (NOT VALID) record's beside its dimmed angle.
+  const sampleHz = doaSample(snapshot, overviewDoaStatus(snapshot, fresh), fresh)?.frequencyHz ?? null;
+  const frequencyText = sampleHz === null ? null : `${(sampleHz / 1e6).toFixed(3)} MHz`;
   // Only the scale fields matter here; depending on all of g would rebuild geometry on paint-only changes.
   const scale = useMemo(() => effectiveDbScale(values, g, simulation), [values, simulation, g.dbScale, g.minDb, g.maxDb, g.thresholdDb]);
   const saturation = useMemo(() => saturatedFraction(values, scale.maxDb), [values, scale.maxDb]);
@@ -817,10 +822,20 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     const map = mapRef.current;
     if (!map || !styleReady || !stationCoordinate || !g.labelsVisible) return undefined;
     const markers: maplibregl.Marker[] = [];
-    const add = (lngLat: [number, number], className: string, text: string) => {
+    const add = (lngLat: [number, number], className: string, text: string, above: string | null = null) => {
       const element = document.createElement('div');
       element.className = `doa-map-label ${className}`;
-      element.textContent = text;
+      if (above) {
+        // Two lines: a small upper line (the frequency) over the value.
+        const top = document.createElement('span');
+        top.className = 'doa-map-label-above';
+        top.textContent = above;
+        const value = document.createElement('span');
+        value.textContent = text;
+        element.append(top, value);
+      } else {
+        element.textContent = text;
+      }
       element.setAttribute('aria-hidden', 'true');
       markers.push(new maplibregl.Marker({ element, anchor: 'center' }).setLngLat(lngLat).addTo(map));
     };
@@ -829,15 +844,15 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       const outer = (geometry.rings.length ? geometry.rings[geometry.rings.length - 1].distanceM : g.maxDistanceM) * 1.12;
       for (const [key, angle] of CARDINALS) add(destination(stationCoordinate, angle, outer), 'doa-cardinal-label', t(key));
     }
-    if (bearingDrawn && bearing !== null) add(destination(stationCoordinate, bearing, g.maxDistanceM * 1.1), 'doa-bearing-label', `${formatBearing(bearing, 1)}°`);
-    if (provisionalDrawn && provisionalBearing !== null) add(destination(stationCoordinate, provisionalBearing, g.maxDistanceM * 1.1), 'doa-bearing-label is-provisional', `${t('polar.notValid')} · ${formatBearing(provisionalBearing, 1)}°`);
+    if (bearingDrawn && bearing !== null) add(destination(stationCoordinate, bearing, g.maxDistanceM * 1.1), 'doa-bearing-label', `${formatBearing(bearing, 1)}°`, frequencyText);
+    if (provisionalDrawn && provisionalBearing !== null) add(destination(stationCoordinate, provisionalBearing, g.maxDistanceM * 1.1), 'doa-bearing-label is-provisional', `${t('polar.notValid')} · ${formatBearing(provisionalBearing, 1)}°`, frequencyText);
     if (headingDrawn && heading?.headingDeg != null) {
       const near = [bearingDrawn ? bearing : null, provisionalDrawn ? provisionalBearing : null];
       add(headingLabelPosition(stationCoordinate, heading.headingDeg, g.maxDistanceM, near), headingHeld ? 'doa-heading-label is-held' : 'doa-heading-label', headingLabel(heading, t));
     }
     if (link) add(link.label, link.live ? 'ov-ground-label' : 'ov-ground-label is-reference', groundLinkLabel(link, t));
     return () => { for (const marker of markers) marker.remove(); };
-  }, [styleReady, stationCoordinate, geometry.rings, bearing, bearingDrawn, provisionalBearing, provisionalDrawn, heading, headingDrawn, headingHeld, link, g.ringsVisible, g.guidesVisible, g.labelsVisible, g.maxDistanceM, t]);
+  }, [styleReady, stationCoordinate, geometry.rings, bearing, bearingDrawn, provisionalBearing, provisionalDrawn, frequencyText, heading, headingDrawn, headingHeld, link, g.ringsVisible, g.guidesVisible, g.labelsVisible, g.maxDistanceM, t]);
 
   // Hover (or tap) readout: geographic bearing, its theta_0 bin and shifted dB value, and ground distance from the station.
   useEffect(() => {
@@ -970,9 +985,9 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
         const outer = (geometry.rings.length ? geometry.rings[geometry.rings.length - 1].distanceM : settings.maxDistanceM) * 1.12;
         if (settings.guidesVisible) for (const [key, angle] of CARDINALS) label(destination(stationCoordinate, angle, outer), t(key), 'rgba(17,23,30,.82)');
         const bearingLine = geometry.data['doa-bearing'].features.length > 0;
-        if (settings.bearingVisible && bearingLine && bearing !== null) label(destination(stationCoordinate, bearing, settings.maxDistanceM * 1.1), `${formatBearing(bearing, 1)}°`, '#11171e');
+        if (settings.bearingVisible && bearingLine && bearing !== null) label(destination(stationCoordinate, bearing, settings.maxDistanceM * 1.1), `${frequencyText ? `${frequencyText} · ` : ''}${formatBearing(bearing, 1)}°`, '#11171e');
         const provisionalLine = geometry.data['doa-provisional'].features.length > 0;
-        if (settings.bearingVisible && provisionalLine && provisionalBearing !== null) label(destination(stationCoordinate, provisionalBearing, settings.maxDistanceM * 1.1), `${t('polar.notValid')} · ${formatBearing(provisionalBearing, 1)}°`, '#5b6670');
+        if (settings.bearingVisible && provisionalLine && provisionalBearing !== null) label(destination(stationCoordinate, provisionalBearing, settings.maxDistanceM * 1.1), `${frequencyText ? `${frequencyText} · ` : ''}${t('polar.notValid')} · ${formatBearing(provisionalBearing, 1)}°`, '#5b6670');
         if (settings.headingVisible && headingLine.features.length > 0 && heading?.headingDeg != null) {
           const near = [bearingLine ? bearing : null, provisionalLine ? provisionalBearing : null];
           label(headingLabelPosition(stationCoordinate, heading.headingDeg, settings.maxDistanceM, near), headingLabel(heading, t), headingHeld ? '#5b6670' : HEADING_LIVE.light);
@@ -994,7 +1009,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       map?.off('resize', schedule);
       canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
     };
-  }, [fallbackActive, mapState, theme, tilesLoaded, tone, styleReady, stationCoordinate, geometry, bearing, provisionalBearing, heading, headingLine, headingHeld, ground, link, settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.edgesVisible, settings.bearingVisible, settings.headingVisible, settings.labelsVisible, settings.overlayOpacity, settings.lobeOpacity, settings.maxDistanceM, settings.lobeDistanceM, t]);
+  }, [fallbackActive, mapState, theme, tilesLoaded, tone, styleReady, stationCoordinate, geometry, bearing, provisionalBearing, frequencyText, heading, headingLine, headingHeld, ground, link, settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.edgesVisible, settings.bearingVisible, settings.headingVisible, settings.labelsVisible, settings.overlayOpacity, settings.lobeOpacity, settings.maxDistanceM, settings.lobeDistanceM, t]);
 
   const reducedMotion = prefersReducedMotion;
   const resetView = () => {

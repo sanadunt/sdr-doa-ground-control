@@ -158,6 +158,10 @@ SAFE_SETTINGS_FIELDS = (
     "vfo_freq_0",
     "vfo_bw_0",
     "vfo_squelch_0",
+    # Edge 1.9.0: the VFO 0 squelch mode (Manual, Auto, Auto Channel, Default), as text.
+    "vfo_squelch_mode_0",
+    # What a Default squelch mode follows (rdfsdr's own default is Auto).
+    "vfo_default_squelch_mode",
 )
 # VFO 0 as the edge agent writes it for a config patch (Hz, Hz, dB). Kontrol
 # compares them with what it sent, so only finite numbers pass.
