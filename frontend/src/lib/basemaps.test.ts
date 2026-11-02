@@ -7,6 +7,7 @@ import {
   TILE_ROUTE,
   TILE_SOURCES,
   basemapBaseSource,
+  basemapHealthKey,
   basemapRasterLayers,
   basemapSourceId,
   isBasemapSourceId,
@@ -33,8 +34,8 @@ function memoryStorage(initial: Record<string, string> = {}) {
 }
 
 describe('basemap catalogue', () => {
-  it('lists the eight styles once, Standard first, as the menu order', () => {
-    expect(BASEMAP_ORDER).toEqual(['standard', 'hot', 'light', 'dark', 'satellite', 'hybrid', 'topo', 'plain']);
+  it('lists the nine styles once, Standard first, as the menu order', () => {
+    expect(BASEMAP_ORDER).toEqual(['standard', 'hot', 'light', 'dark', 'satellite', 'hybrid', 'topo', 'offline', 'plain']);
     expect([...BASEMAP_ORDER].sort()).toEqual([...IDS].sort());
     expect(DEFAULT_BASEMAP_ID).toBe('standard');
     for (const id of IDS) {
@@ -108,6 +109,18 @@ describe('basemap catalogue', () => {
     expect(basemapBaseSource('plain')).toBeNull();
   });
 
+  it('keeps the Offline style out of the tile sources: its outages are remembered under their own key', () => {
+    expect(BASEMAPS.offline.offline).toBe(true);
+    expect(BASEMAPS.offline.layers).toEqual([]);
+    expect(basemapBaseSource('offline')).toBeNull();
+    expect(basemapRasterLayers('offline')).toEqual([]);
+    expect(basemapHealthKey('offline')).toBe('offline');
+    expect(basemapHealthKey('dark')).toBe('osm');
+    expect(basemapHealthKey('plain')).toBeNull();
+    expect(isBasemapSourceId(basemapSourceId('offline'))).toBe(true);
+    expect(Object.keys(TILE_SOURCES)).not.toContain('offline');
+  });
+
   it('turns tile fades off under reduced motion', () => {
     expect(basemapRasterLayers('standard', '', true)[0].layer.paint?.['raster-fade-duration']).toBe(0);
     expect(basemapRasterLayers('standard', '', false)[0].layer.paint?.['raster-fade-duration']).toBe(300);
@@ -121,10 +134,10 @@ describe('basemap catalogue', () => {
     for (const other of ['doa-beam', 'doa-station', 'osm', 'bm-', 'bm-unknown', 'bm-standard-12', 'xbm-standard']) expect(isBasemapSourceId(other), other).toBe(false);
   });
 
-  it('credits the sources of every tiled style with https links, and Plain has none', () => {
+  it('credits the sources of every tiled and offline style with https links, and Plain has none', () => {
     for (const id of IDS) {
       const style = BASEMAPS[id];
-      if (style.layers.length === 0) {
+      if (style.layers.length === 0 && !style.offline) {
         expect(style.attribution).toBeNull();
         continue;
       }

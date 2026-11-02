@@ -740,6 +740,7 @@ Semua yang diubah lewat UI disimpan di server console, bukan hanya di browser. P
 - Console menyimpan setiap tile yang pernah tampil di `--tile-cache-dir` (instalasi: `DATA/tiles`), paling banyak `--tile-cache-max-mb` (bawaan 512 MB; tile yang paling lama tidak dipakai dihapus lebih dulu; `0` berarti tidak menyimpan apa pun).
 - Tile dianggap segar selama max(`max-age` dari upstream, 7 hari), paling lama 30 hari, dan selama segar disajikan tanpa jaringan. Setelah itu console mengambilnya lagi; bila upstream tidak bisa dihubungi, salinan lama tetap disajikan. Tile yang belum pernah tersimpan dijawab 504.
 - Tidak ada unduh massal per area; kebijakan penyedia tile melarangnya. Untuk menyiapkan area sebelum ke lapangan, buka area itu di Dashboard pada zoom dan gaya yang akan dipakai selagi masih online.
+- Gaya **Offline** tidak memakai cache ini: ia membaca satu file `offline.pmtiles` di folder `maps` console (seluruh Indonesia sampai zoom 12 = 216 MB). Cara membuat dan memasangnya: `docs/PETA_OFFLINE.md`.
 - Host yang gagal dilewati selama 30 detik, sehingga tile yang belum tersimpan langsung dijawab saat offline. Log console mencatat sekali saat upstream sebuah sumber tidak bisa dihubungi dan sekali saat kembali; tile yang berhasil disajikan tidak dicatat.
 - Permintaan keluar memakai proxy standar dari environment (`HTTPS_PROXY`, `NO_PROXY`) dan User-Agent `SDR-DoA-Ground-Console/<versi>`.
 - Setiap tile yang belum tersimpan memberi tahu penyedia area stasiun. Gaya Polos tidak meminta tile.
