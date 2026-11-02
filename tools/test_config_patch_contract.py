@@ -80,8 +80,12 @@ class ConfigPatchContractTests(unittest.TestCase):
             row = re.search(r"\{ key: '" + key + r"'[^}]*\}", CONFIG_PATCH_TS)
             self.assertIsNotNone(row, key)
             text = row.group(0).replace("_", "")
-            self.assertRegex(text, rf"min: {int(low)}\b", key)
-            self.assertRegex(text, rf"max: {int(high)}\b", key)
+            low_text = re.search(r"min: (-?\d+(?:\.\d+)?)", text)
+            high_text = re.search(r"max: (-?\d+(?:\.\d+)?)", text)
+            self.assertIsNotNone(low_text, key)
+            self.assertIsNotNone(high_text, key)
+            self.assertEqual(float(low_text.group(1)), float(low), key)
+            self.assertEqual(float(high_text.group(1)), float(high), key)
             whole = key in rdf_node_commands.INTEGER_FIELDS
             self.assertIn(f"integer: {'true' if whole else 'false'}", text, key)
 

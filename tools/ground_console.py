@@ -7,7 +7,8 @@ The console keeps a narrow boundary:
   (``telemetry_source``), with a light Data Out read for what MQTT never
   carries, and otherwise from Data Out (the fallback): bounded read-only GETs
   through ``sdr_doa_collector``, one collection per refresh interval for
-  every viewer together (``data_out_reader``);
+  every viewer together (``data_out_reader``); every answer also carries
+  the groundstation's own GNSS position as ``ground_gps`` (``ground_gps``);
 * an optional MQTT monitor subscribes to its configured broker;
 * its one remote write is Kontrol's: ``POST /api/mqtt/config-patch``, an
   admin-gated, explicitly confirmed ``config.patch`` in the RDF Node edge's
@@ -116,6 +117,7 @@ import lan_access as lan
 import rdf_node_commands as cmds
 from config_command_tracker import ConfigCommandTracker, MonitorPublishError
 from data_out_reader import DataOutReader, SnapshotRequest, valid_collection_id
+from ground_gps import with_ground_gps
 from mdns_resolver import MdnsResolver
 from sdr_doa_collector import (
     DATA_OUT_HOST_IN_USE,
@@ -599,7 +601,17 @@ def _node_view(session: Optional[Dict[str, Any]], now_ms: int) -> Optional[Dict[
         "health_age_ms": None if received is None else max(0, now_ms - received),
         "remote_commands": flag("remote_commands"),
         "remote_config_patch": flag("remote_config_patch"),
+        # Contract 1.8: the fields the edge's config.patch takes; null from an older edge
+        # (or before its capabilities arrived), which takes the five fields before ant_spacing_m.
+        "config_fields": _config_fields_or_none(capabilities.get("config_fields")),
     }
+
+
+def _config_fields_or_none(value: Any) -> Optional[List[str]]:
+    """capabilities.config_fields as the edge listed them (known or not), or None without a list."""
+    if not isinstance(value, list):
+        return None
+    return [item for item in value if isinstance(item, str)][:16]
 
 
 def _settings_view(report: Any, now_ms: int) -> Optional[Dict[str, Any]]:
@@ -4774,8 +4786,21 @@ class GroundConsoleServer(ThreadingHTTPServer):
         younger than the reuse window (the saved refresh interval, at least
         1 s) and concurrent misses share one collection. See
         data_out_reader.py and telemetry_source.py.
+
+        Every answer (MQTT, Data Out, none; loopback, legacy UI and LAN view)
+        carries ``ground_gps``, the groundstation's own position at answer
+        time, added to a copy because answers are shared between viewers.
         """
-        return self.data_out.snapshot(base_url, request or SnapshotRequest())
+        answer = self.data_out.snapshot(base_url, request or SnapshotRequest())
+        return with_ground_gps(answer, self._ground_gps_view())
+
+    def _ground_gps_view(self) -> Optional[Dict[str, Any]]:
+        """The monitor's groundstation GNSS view (ground_gps.py), or None without a monitor."""
+        reader = getattr(self.mqtt_monitor, "ground_gps_view", None)
+        if reader is None:
+            return None
+        view = reader()
+        return view if isinstance(view, dict) else None
 
     def _mqtt_view(self) -> Optional[Dict[str, Any]]:
         """The monitor's RDF Node view for the telemetry source, or None without one."""
@@ -5162,6 +5187,19 @@ class GroundConsoleServer(ThreadingHTTPServer):
             )
         base_rev = _int_or_none(session.get("cfg"))
         if op == cmds.OP_CONFIG_PATCH:
+            capabilities = session.get("capabilities") if isinstance(session.get("capabilities"), dict) else {}
+            takes = cmds.node_patch_fields(capabilities.get("config_fields"))
+            unsupported = [field for field in (changes or {}) if field not in takes]
+            if unsupported:
+                # Contract 1.8: Ground sends only what capabilities.config_fields lists; an edge
+                # without that list takes the five fields before ant_spacing_m.
+                raise ConfigPatchRejected(
+                    HTTPStatus.CONFLICT,
+                    "FIELD_NOT_ALLOWED",
+                    "the RDF Node does not take " + ", ".join(unsupported) + " (capabilities.config_fields)",
+                    fields=unsupported,
+                    allowed=list(takes),
+                )
             if session.get("health_fresh") is not True:
                 raise ConfigPatchRejected(
                     HTTPStatus.CONFLICT,

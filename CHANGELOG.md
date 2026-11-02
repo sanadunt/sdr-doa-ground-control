@@ -2,7 +2,7 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
-## 3.6.0
+## 3.7.0
 
 Rilis minor: tidak ada yang dihapus. Tablet di mode LAN kini bisa **mendengar** audio Receiver groundstation (keputusan pemilik 2026-11-02). Ini jalur baca baru di listener LAN, bukan penulisan; tetap tanpa login, untuk setiap klien di `allowed_clients`. Kanal `3` dan timer update memasangnya sendiri.
 
@@ -16,8 +16,31 @@ Rilis minor: tidak ada yang dihapus. Tablet di mode LAN kini bisa **mendengar** 
   - Server hanya menyimpan 2 detik terakhir di memori dan tidak menulis apa pun ke disk. Menutup mode LAN memutus semua stream.
   - Tanpa pendengar, halaman groundstation tidak menyadap apa pun.
   - Setiap stream yang dibuka dan ditutup tercatat di log console dengan alamat tablet.
-- **Halaman groundstation tetap harus terbuka.** Audio tetap mengalir saat tab groundstation tersembunyi selama Receiver memutar suara. Bila halaman ditutup atau dimuat ulang, tablet menampilkan **SUMBER PUTUS** dan menyambung lagi sendiri. Halaman groundstation yang dimuat sebelum 3.6.0 tidak mengirim audio, jadi muat ulang sekali setelah update.
+- **Halaman groundstation tetap harus terbuka.** Audio tetap mengalir saat tab groundstation tersembunyi selama Receiver memutar suara. Bila halaman ditutup atau dimuat ulang, tablet menampilkan **SUMBER PUTUS** dan menyambung lagi sendiri. Halaman groundstation yang dimuat sebelum 3.7.0 tidak mengirim audio, jadi muat ulang sekali setelah update.
 - Kontrak lengkap, pilihan yang ditimbang (WebRTC, Opus) dan pengukuran latensinya ada di `docs/RECEIVER_MIRROR.md` bagian 10a.
+
+## 3.6.0
+
+Rilis minor: tidak ada yang dihapus. Groundstation kini punya lokasi sendiri dari GPS USB-nya, dan peta menampilkan jaraknya ke RDF-SDR. Kanal `3` dan timer update memasang console-nya sendiri. Pembaca GPS di host dipasang sekali dengan `sudo`.
+
+- **GPS groundstation.** Service host baru, `packaging/ground-gps`, membaca GPS USB groundstation (u-blox 7).
+  - Ia berjalan di luar Docker seperti jembatan LoRa, hanya membaca, dan tidak bisa membuka port LoRa.
+  - Posisinya diterbitkan ke broker lokal di topik `sdr/v2/uav-01/ground/gps`. Console membacanya lewat MQTT, tanpa akses ke perangkat USB.
+  - Pasang: `sudo sh packaging/ground-gps/install.sh` dari tarball rilis. Coba dulu dengan `--dry-run`.
+- **Di peta:** penanda kotak "GS" dan garis titik-titik ke RDF-SDR, dengan jarak dan arah.
+  - Bila posisi RDF-SDR bukan posisi langsung (cadangan, manual, atau posisi terakhir yang ditahan), garisnya abu-abu dan bertanda "REFERENCE".
+  - Kartu RDF-SDR punya baris Groundstation, misalnya "FIX 3D · 4 sat · 1.23 km", dan System Health punya kartu GPS groundstation.
+  - Tablet di tampilan LAN ikut melihatnya.
+- **Heading RDF-SDR di peta.** Kompas RDF-SDR (heading dari `telemetry/health`) ditampilkan sebagai segitiga ungu di lingkaran stasiun dan garis putus-putus dengan label "HDG 87°". Keduanya otomatis berputar mengikuti heading.
+  - Heading yang sudah basi tampil abu-abu dengan tanda BASI. Bila kompas tidak OK, tidak ada yang digambar.
+  - Bisa dinyalakan atau dimatikan di Lapisan.
+  - Ini arah gerak RDF-SDR, terpisah dari garis bearing DoA.
+- **Jarak UCA dari Kontrol (RDF Node Edge 1.8).** Kontrol menampilkan kolom "Jarak UCA" bila RDF-SDR mendukungnya.
+  - Rule band mengirim 0,3 m (VHF) atau 0,128 m (UHF) bersama gain.
+  - Di band ini engine KrakenSDR menetapkan jaraknya sendiri. Jarak lain ditolak RDF-SDR dengan pesan, dan Kontrol menyebut bila RDF-SDR ikut menulis jarak band.
+  - Di luar rule band, Kontrol menulis bahwa RDF-SDR mengatur jarak UCA sendiri untuk frekuensi itu.
+  - Kartu RDF-SDR menampilkan UCA sebagai setelan.
+  - Edge yang lebih lama tetap memakai lima kolom seperti sebelumnya.
 
 ## 3.5.0
 

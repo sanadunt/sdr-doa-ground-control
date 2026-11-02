@@ -37,6 +37,7 @@ This module has no paho dependency, so the console can import it, and raise
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 import weakref
@@ -165,6 +166,15 @@ def _text(value: Any, limit: int = 64) -> Optional[str]:
     return value if isinstance(value, str) and 0 < len(value) <= limit else None
 
 
+def _spacing(value: Any) -> Optional[float]:
+    """A UCA radius in metres (0 < value <= 100), or None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or not 0 < value <= 100:
+        return None
+    return float(value)
+
+
 def public_ack(ack: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
     """What Kontrol shows of an ACK: status, error, reason, revision, proof, method."""
     if ack is None:
@@ -189,6 +199,9 @@ def public_ack(ack: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
         # (only settings.json, the engine was not running), and why a live retune fell back.
         "method": _text(result.get("method"), 16),
         "live_failure": _text(result.get("live_failure")),
+        # Contract 1.8: the UCA radius the engine's band rule set with this patch, or the one
+        # it requires (FAILED SPACING_SET_BY_ENGINE_BAND); null when the edge named none.
+        "band_spacing_m": _spacing(result.get("band_spacing_m")),
         "t": ack.get("t"),
         "received_at_ms": ack.get("received_at_ms"),
     }

@@ -40,7 +40,9 @@ function verify(overrides: Partial<VerifyInput>) {
 describe('dataOutConfigValues', () => {
   it('converts settings.json units to SI', () => {
     const values = dataOutConfigValues(snapshot({ center_freq: 433.92, uniform_gain: 15.7, vfo_freq_0: 433_925_000, vfo_bw_0: 12_500, vfo_squelch_0: -80 }), true);
-    expect(values).toEqual({ center_frequency_hz: 433_920_000, gain_db: 15.7, vfo0_frequency_hz: 433_925_000, vfo0_bandwidth_hz: 12_500, vfo0_squelch_db: -80 });
+    expect(values).toEqual({ center_frequency_hz: 433_920_000, gain_db: 15.7, vfo0_frequency_hz: 433_925_000, vfo0_bandwidth_hz: 12_500, vfo0_squelch_db: -80, ant_spacing_m: null });
+    // The UCA radius in metres (edge 1.8.0), as settings.json holds it.
+    expect(dataOutConfigValues(snapshot({ ant_spacing_meters: 0.128 }), true).ant_spacing_m).toBe(0.128);
   });
 
   it('ignores stale, synthetic, unavailable and non-numeric settings', () => {
@@ -61,7 +63,7 @@ describe('currentConfigValues', () => {
   it('prefers settings/reported and fills what it does not carry from Data Out', () => {
     const dataOut = dataOutConfigValues(snapshot({ center_freq: 415.7882, uniform_gain: 15.7, vfo_freq_0: 415_788_200, vfo_bw_0: 12_500, vfo_squelch_0: -80 }), true);
     const values = currentConfigValues({ center_frequency_hz: 416_588_000, gain_db: 15.5, vfo0_frequency_hz: null, vfo0_bandwidth_hz: null, vfo0_squelch_db: null }, dataOut);
-    expect(values).toEqual({ center_frequency_hz: 416_588_000, gain_db: 15.5, vfo0_frequency_hz: 415_788_200, vfo0_bandwidth_hz: 12_500, vfo0_squelch_db: -80 });
+    expect(values).toEqual({ center_frequency_hz: 416_588_000, gain_db: 15.5, vfo0_frequency_hz: 415_788_200, vfo0_bandwidth_hz: 12_500, vfo0_squelch_db: -80, ant_spacing_m: null });
     expect(currentConfigValues(null, dataOut).center_frequency_hz).toBe(415_788_200);
   });
 });

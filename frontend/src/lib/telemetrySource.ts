@@ -163,6 +163,8 @@ export interface RfSettings {
   gainDb: number | null;
   bandwidthHz: number | null;
   squelchDb: number | null;
+  /** The UCA radius in metres (state.rf.uca, edge 1.8.0). */
+  ucaM: number | null;
 }
 
 /**
@@ -183,8 +185,10 @@ export function snapshotRf(snapshot: TelemetrySnapshot | null | undefined): RfSe
     gainDb: inRange(rf.gain_db, -20, 100),
     bandwidthHz: bandwidth === null ? null : Math.round(bandwidth),
     squelchDb: inRange(rf.vfo0_squelch_db, -200, 50),
+    ucaM: inRange(rf.uca_m, 0.001, 100),
   };
-  return view.centerHz === null && view.vfo0Hz === null && view.gainDb === null && view.bandwidthHz === null && view.squelchDb === null ? null : view;
+  return view.centerHz === null && view.vfo0Hz === null && view.gainDb === null && view.bandwidthHz === null && view.squelchDb === null
+    && view.ucaM === null ? null : view;
 }
 
 /** Frequency and power of one DoA record. */

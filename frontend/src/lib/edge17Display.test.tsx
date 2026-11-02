@@ -65,7 +65,7 @@ function row(markup: string, label: string): { text: string; className: string }
 
 describe('state.rf of an MQTT answer (edge 1.7)', () => {
   it('reads what the SDR is set to', () => {
-    expect(snapshotRf(LORA_RF)).toEqual({ cfg: 298, centerHz: 103_100_000, vfo0Hz: 103_100_000, gainDb: 12.5, bandwidthHz: 12_500, squelchDb: -100 });
+    expect(snapshotRf(LORA_RF)).toEqual({ cfg: 298, centerHz: 103_100_000, vfo0Hz: 103_100_000, gainDb: 12.5, bandwidthHz: 12_500, squelchDb: -100, ucaM: null });
   });
 
   it('is null without state.rf, for a Data Out answer and for a simulation', () => {
@@ -89,7 +89,7 @@ describe('state.rf of an MQTT answer (edge 1.7)', () => {
     }));
     expect(rf).toBeNull();
     expect(snapshotRf(withRf(LORA_RF, { center_frequency_hz: 7e9, gain_db: Infinity, vfo0_squelch_db: -100 }))).toEqual({
-      cfg: null, centerHz: null, vfo0Hz: null, gainDb: null, bandwidthHz: null, squelchDb: -100,
+      cfg: null, centerHz: null, vfo0Hz: null, gainDb: null, bandwidthHz: null, squelchDb: -100, ucaM: null,
     });
     expect(snapshotRf(withRf(LORA_RF, { center_frequency_hz: 433_920_000.4 }))?.centerHz).toBe(433_920_000);
   });
@@ -156,8 +156,8 @@ describe('Node card with state.rf', () => {
   it('adds only the rows the edge sends', () => {
     const t = (key: Parameters<typeof translate>[1], vars?: Parameters<typeof translate>[2]) => translate('en', key, vars);
     expect(rfRows(null, t)).toEqual([]);
-    expect(rfRows({ cfg: 1, centerHz: 103_100_000, vfo0Hz: null, gainDb: 12.5, bandwidthHz: null, squelchDb: null }, t)).toEqual([]);
-    expect(rfRows({ cfg: 1, centerHz: null, vfo0Hz: null, gainDb: null, bandwidthHz: 200_000, squelchDb: null }, t)).toEqual([
+    expect(rfRows({ cfg: 1, centerHz: 103_100_000, vfo0Hz: null, gainDb: 12.5, bandwidthHz: null, squelchDb: null, ucaM: null }, t)).toEqual([]);
+    expect(rfRows({ cfg: 1, centerHz: null, vfo0Hz: null, gainDb: null, bandwidthHz: 200_000, squelchDb: null, ucaM: null }, t)).toEqual([
       ['Bandwidth', '200 kHz · setting', undefined, true],
     ]);
   });

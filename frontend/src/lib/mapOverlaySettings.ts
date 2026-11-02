@@ -24,6 +24,8 @@ export function validateOverlaySettings(input: Partial<DoaOverlaySettings>): Doa
     ringsVisible: Boolean(merged.ringsVisible),
     edgesVisible: Boolean(merged.edgesVisible),
     labelsVisible: Boolean(merged.labelsVisible),
+    // Added after the stored key: an older value without it (or a non-boolean) shows the heading.
+    headingVisible: typeof merged.headingVisible === 'boolean' ? merged.headingVisible : DEFAULT_DOA_OVERLAY_SETTINGS.headingVisible,
     overlayOpacity: number(merged.overlayOpacity, DEFAULT_DOA_OVERLAY_SETTINGS.overlayOpacity, OVERLAY_OPACITY_MIN, 1),
     heatStyle: merged.heatStyle === 'density' ? 'density' : 'beam',
     dbScale: merged.dbScale === 'manual' ? 'manual' : 'auto',

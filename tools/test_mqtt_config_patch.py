@@ -164,7 +164,7 @@ class FakeMonitor:
             "state_cfg": 42, "matches_state_cfg": matches,
             "safe_settings": {
                 "center_frequency_hz": 433_920_000, "gain_db": 15.7, "vfo0_frequency_hz": 433_920_000,
-                "vfo0_bandwidth_hz": 12_500, "vfo0_squelch_db": -80, "ant_arrangement": "UCA",
+                "vfo0_bandwidth_hz": 12_500, "vfo0_squelch_db": -80, "ant_spacing_m": 0.128, "ant_arrangement": "UCA",
             } if matches else {},
         }
 
@@ -350,7 +350,7 @@ class ConfigPatchServerTests(unittest.TestCase):
         self.assertIs(capabilities["admin_default_password"], False)
         self.assertEqual(
             capabilities["config_allowlist"],
-            ["center_frequency_hz", "gain_db", "vfo0_frequency_hz", "vfo0_bandwidth_hz", "vfo0_squelch_db"],
+            ["center_frequency_hz", "gain_db", "vfo0_frequency_hz", "vfo0_bandwidth_hz", "vfo0_squelch_db", "ant_spacing_m"],
         )
         self.assertEqual(
             capabilities["config_patch"],
@@ -369,6 +369,7 @@ class ConfigPatchServerTests(unittest.TestCase):
                     "vfo0_frequency_hz": [24_000_000, 1_766_000_000],
                     "vfo0_bandwidth_hz": [100, 2_400_000],
                     "vfo0_squelch_db": [-200, 50],
+                    "ant_spacing_m": [0.05, 1],
                 },
                 "gain_table_db": list(cmds.GAIN_TABLE_DB),
                 "requires_fresh_health": True,
@@ -564,6 +565,39 @@ class ConfigPatchServerTests(unittest.TestCase):
         self.assertEqual(type(published["changes"]["center_frequency_hz"]), int)
         cmds.validate_command(published, now_ms=published["issued_ms"])
 
+    def test_uca_spacing_goes_only_to_an_edge_that_lists_it(self) -> None:
+        cookie = self.admin_cookie()
+        body = self.patch_body(changes={"ant_spacing_m": 0.12804, "gain_db": 15.7})
+        # An edge without capabilities.config_fields (before 1.8.0) takes the five fields only.
+        refused = self.assert_error(self.send_patch(body, cookie=cookie), 409, "FIELD_NOT_ALLOWED")
+        self.assertEqual(refused["fields"], ["ant_spacing_m"])
+        self.assertEqual(refused["allowed"], list(cmds.LEGACY_PATCH_FIELDS))
+        self.assertEqual(self.monitor.published, [])
+        _status, _headers, reported = self.request("GET", "/api/mqtt/config-reported")
+        self.assertIsNone(reported["node"]["config_fields"])
+        # Edge 1.8.0 lists it (sorted(FIELD_MAP)): sent last, rounded to 4 decimals as the edge rounds it.
+        self.monitor.session["capabilities"] = {
+            "remote_commands": True, "remote_config_patch": True, "config_patch": True,
+            "config_fields": sorted(cmds.PATCH_FIELDS),
+        }
+        _status, _headers, reported = self.request("GET", "/api/mqtt/config-reported")
+        self.assertEqual(reported["node"]["config_fields"], sorted(cmds.PATCH_FIELDS))
+        status, accepted = self.send_patch(body, cookie=cookie)
+        self.assertEqual(status, 202, accepted)
+        self.assertEqual(accepted["changes"], {"gain_db": 15.7, "ant_spacing_m": 0.128})
+        [published] = self.monitor.published
+        self.assertEqual(list(published["changes"]), ["gain_db", "ant_spacing_m"])
+        self.assertEqual(published["changes"]["ant_spacing_m"], 0.128)
+        # The engine's band answer: FAILED SPACING_SET_BY_ENGINE_BAND names the band radius.
+        self.monitor.ack(accepted["command_id"], "FAILED", rev=42, result={
+            "error": "SPACING_SET_BY_ENGINE_BAND", "persisted": False, "band_spacing_m": 0.3,
+            "message": "Di band ini KrakenSDR sendiri memasang jarak UCA",
+        })
+        failed = self.status_of(accepted["command_id"])
+        self.assertEqual((failed["ack"]["status"], failed["ack"]["error"]), ("FAILED", "SPACING_SET_BY_ENGINE_BAND"))
+        self.assertEqual(failed["ack"]["band_spacing_m"], 0.3)
+        self.assertNotIn("message", failed["ack"])
+
     def test_one_command_in_flight_at_a_time(self) -> None:
         cookie = self.admin_cookie()
         status, first = self.send_patch(self.patch_body(), cookie=cookie)
@@ -639,7 +673,8 @@ class ConfigPatchServerTests(unittest.TestCase):
         self.assertEqual(acked["ack"], {
             "status": "APPLIED", "final": True, "error": None, "reason": None, "revision": 43,
             "proof": {"center_frequency_hz": "FRESH_DAQ_RF_CENTER", "vfo0_frequency_hz": "FRESH_DOA_FREQUENCY"},
-            "persisted": True, "method": None, "live_failure": None, "t": acked["ack"]["t"], "received_at_ms": 2,
+            "persisted": True, "method": None, "live_failure": None, "band_spacing_m": None, "t": acked["ack"]["t"],
+            "received_at_ms": 2,
         })
         self.assertNotIn("never-shown", json.dumps(acked))
         _status, _headers, latest = self.request("GET", "/api/mqtt/config-patch")
@@ -873,7 +908,7 @@ class ConfigPatchServerTests(unittest.TestCase):
         body = self.request("GET", "/api/mqtt/config-reported")[2]
         self.assertEqual(body["values"], {
             "center_frequency_hz": 433_920_000, "gain_db": 15.7, "vfo0_frequency_hz": 433_920_000,
-            "vfo0_bandwidth_hz": 12_500, "vfo0_squelch_db": -80,
+            "vfo0_bandwidth_hz": 12_500, "vfo0_squelch_db": -80, "ant_spacing_m": 0.128,
         })
         self.assertEqual(set(body["value_sources"].values()), {"settings_reported"})
         self.assertEqual(set(body["value_received_at_ms"].values()), {1_234})

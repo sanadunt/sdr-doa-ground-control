@@ -56,13 +56,14 @@ describe('getConfigReported', () => {
     expect(calls[0].init.credentials).toBe('same-origin');
     expect(calls[0].init.method).toBeUndefined();
     expect(reported.baseRev).toBe(42);
-    expect(reported.node).toEqual({ sid: 'e2fe561d', cfg: 42, healthFresh: true, healthAgeMs: 400, remoteCommands: true, remoteConfigPatch: false });
+    // An older edge sends no capabilities.config_fields.
+    expect(reported.node).toEqual({ sid: 'e2fe561d', cfg: 42, healthFresh: true, healthAgeMs: 400, remoteCommands: true, remoteConfigPatch: false, configFields: null });
     expect(reported.settings).toEqual({ id: 'gc-000000000000000000000001', rev: 42, receivedAtMs: 900, ageMs: 100, matchesStateCfg: true });
     expect(reported.broker).toEqual({ host: '10.90.0.1', port: 9001, transport: 'websockets', connection: 'connected' });
-    expect(reported.values).toEqual({ center_frequency_hz: 416588000, gain_db: 15.7, vfo0_frequency_hz: null, vfo0_bandwidth_hz: null, vfo0_squelch_db: null });
+    expect(reported.values).toEqual({ center_frequency_hz: 416588000, gain_db: 15.7, vfo0_frequency_hz: null, vfo0_bandwidth_hz: null, vfo0_squelch_db: null, ant_spacing_m: null });
     expect(reported.valueSources.vfo0_frequency_hz).toBeNull();
     expect(reported.valueSources.gain_db).toBe('settings_reported');
-    expect(reported.valueReceivedAtMs).toEqual({ center_frequency_hz: 900, gain_db: null, vfo0_frequency_hz: null, vfo0_bandwidth_hz: null, vfo0_squelch_db: null });
+    expect(reported.valueReceivedAtMs).toEqual({ center_frequency_hz: 900, gain_db: null, vfo0_frequency_hz: null, vfo0_bandwidth_hz: null, vfo0_squelch_db: null, ant_spacing_m: null });
     expect(reported.settingsRequest).toMatchObject({ op: 'config.get', state: 'acked', final: true, ack: { status: 'REJECTED', error: 'TLS_REQUIRED_FOR_SETTINGS_REPORT' } });
   });
 
@@ -177,7 +178,31 @@ describe('getConfigPatchStatus', () => {
     expect(status?.ack).toEqual({
       status: 'APPLIED', final: true, error: null, reason: null, revision: 43, persisted: true, receivedAtMs: 5,
       proof: { center_frequency_hz: 'FRESH_DAQ_RF_CENTER', vfo0_frequency_hz: 'FRESH_DOA_FREQUENCY' }, method: null, liveFailure: null,
+      bandSpacingM: null,
     });
+  });
+
+  it('reads the config fields, the UCA spacing and the band spacing of an edge 1.8 answer', () => {
+    const fields = ['ant_spacing_m', 'center_frequency_hz', 'gain_db', 'vfo0_bandwidth_hz', 'vfo0_frequency_hz', 'vfo0_squelch_db'];
+    const reported = normalizeConfigReported({
+      ...REPORTED,
+      node: { ...REPORTED.node, config_fields: [...fields, 7, 'Not A Field'] },
+      values: { ...REPORTED.values, ant_spacing_m: 0.128 },
+      value_sources: { ...REPORTED.value_sources, ant_spacing_m: 'settings_reported' },
+    });
+    expect(reported.node?.configFields).toEqual(fields);
+    expect(reported.values.ant_spacing_m).toBe(0.128);
+    expect(reported.valueSources.ant_spacing_m).toBe('settings_reported');
+    expect(normalizeConfigReported({ ...REPORTED, node: { ...REPORTED.node, config_fields: 'ant_spacing_m' } }).node?.configFields).toBeNull();
+    const refused = normalizeConfigCommandStatus({ ...STATUS, changes: { ant_spacing_m: 0.2 }, ack: {
+      status: 'FAILED', final: true, error: 'SPACING_SET_BY_ENGINE_BAND', reason: null, revision: null, persisted: false,
+      band_spacing_m: 0.3, t: 1, received_at_ms: 5,
+    } });
+    expect(refused?.changes).toEqual({ ant_spacing_m: 0.2 });
+    expect(refused?.ack).toMatchObject({ status: 'FAILED', error: 'SPACING_SET_BY_ENGINE_BAND', bandSpacingM: 0.3 });
+    for (const bad of [0, -0.3, '0.3', Number.NaN, true, 1000]) {
+      expect(normalizeConfigCommandStatus({ ...STATUS, ack: { ...STATUS.ack, band_spacing_m: bad } })?.ack?.bandSpacingM).toBeNull();
+    }
   });
 
   it('reads the method, reason and proof of a contract 1.7 edge', () => {

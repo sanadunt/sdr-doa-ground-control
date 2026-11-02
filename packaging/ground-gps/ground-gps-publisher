@@ -1,0 +1,914 @@
+#!/usr/bin/env python3
+# ground-gps-publisher (packaging/ground-gps): the groundstation's own position.
+#
+# Reads the NMEA 0183 output of the groundstation's GNSS receiver (a u-blox 7
+# on USB, /dev/ttyACM0) and publishes its status, retained, to the local MQTT
+# broker on sdr/v2/<node>/ground/gps, where the SDR-DoA Ground Console reads
+# it. Python 3 standard library only.
+#
+#   ground-gps-publisher run [--config FILE]        # the service
+#   ground-gps-publisher print [--count N]          # read the receiver, print the status, publish nothing
+#   ground-gps-publisher check-config [--config FILE]
+#
+# The device is opened read only and the publisher never writes to it: the
+# only change it makes to the tty is clearing ECHO (the line discipline would
+# otherwise send every received byte back to the receiver) and, when BAUD is
+# set, the speed. On the very first open of a new ttyACM the kernel may echo
+# the few bytes that arrive before ECHO is cleared; the u-blox ignores them.
+"""Publish the groundstation GNSS position to the local MQTT broker."""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import errno
+import ipaddress
+import json
+import math
+import os
+import re
+import select
+import signal
+import socket
+import sys
+import time
+
+try:
+    import termios
+except ImportError:  # not POSIX: no tty settings to change
+    termios = None  # type: ignore[assignment]
+from typing import Callable, Dict, List, Optional, Tuple
+
+DEFAULT_CONFIG = "/etc/ground-gps/ground-gps.conf"
+DEFAULTS = {
+    "DEVICE": "/dev/serial/by-id/usb-u-blox_AG_-_www.u-blox.com_u-blox_7_-_GPS_GNSS_Receiver-if00",
+    "BROKER_HOST": "127.0.0.1",
+    "BROKER_PORT": "1883",
+    "NODE_ID": "uav-01",
+    "INTERVAL": "2",
+    "BAUD": "",
+}
+TOPIC_SUFFIX = "ground/gps"
+PAYLOAD_VERSION = 1
+PAYLOAD_MAX_BYTES = 512
+# A sentence older than this no longer counts: FIX needs an RMC and a GGA this
+# recent, and a device that sent nothing for this long is NO_DATA.
+SENTENCE_WINDOW_S = 5.0
+# How often a missing or unreadable device is tried again.
+DEVICE_RETRY_S = 2.0
+KNOTS_TO_MPS = 0.514444
+STATES = ("FIX", "NO_FIX", "NO_DEVICE", "NO_DATA", "ERROR", "STOPPED")
+DEVICE_NAME_MAX = 96
+ERROR_TEXT_MAX = 120
+# NMEA 0183 allows 82 characters; anything far longer is noise.
+LINE_MAX = 256
+BUFFER_MAX = 4096
+READS_PER_TURN = 64
+BAUD_RATES = (4800, 9600, 19200, 38400, 57600, 115200, 230400)
+NODE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+EX_CONFIG = 78
+
+# MQTT 3.1.1
+KEEPALIVE_S = 30
+CONNECT_TIMEOUT_S = 5.0
+SEND_TIMEOUT_S = 5.0
+BACKOFF_FIRST_S = 1.0
+BACKOFF_MAX_S = 30.0
+CLIENT_ID_MAX = 23
+
+
+def log(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Settings
+
+
+class ConfigError(ValueError):
+    pass
+
+
+def _unquote(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        return value[1:-1]
+    return value
+
+
+def read_config_text(text: str) -> Dict[str, str]:
+    """NAME=VALUE lines, read literally; unknown names are refused."""
+    values = dict(DEFAULTS)
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, sep, value = line.partition("=")
+        name = name.strip()
+        if not sep or not re.match(r"^[A-Z_]+$", name):
+            raise ConfigError(f"line {number}: expected NAME=VALUE")
+        if name not in DEFAULTS:
+            raise ConfigError(f"line {number}: unknown setting {name}")
+        values[name] = _unquote(value.strip())
+    return values
+
+
+def broker_host(value: str) -> str:
+    """An IP literal or localhost: no DNS lookup, as the console's MQTT host."""
+    if value == "localhost":
+        return value
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        raise ConfigError(f"BROKER_HOST must be an IP address or localhost: {value!r}") from None
+
+
+def validate_config(values: Dict[str, str]) -> Dict[str, object]:
+    device = values["DEVICE"]
+    if not device.startswith("/") or "\x00" in device or len(device) > 512:
+        raise ConfigError(f"DEVICE must be an absolute path: {device!r}")
+    host = broker_host(values["BROKER_HOST"])
+    try:
+        port = int(values["BROKER_PORT"])
+    except ValueError:
+        port = 0
+    if not 1 <= port <= 65535:
+        raise ConfigError(f"BROKER_PORT must be 1..65535: {values['BROKER_PORT']!r}")
+    node = values["NODE_ID"]
+    if not NODE_ID_RE.match(node):
+        raise ConfigError(f"NODE_ID may hold 1 to 32 letters, digits, _ and -: {node!r}")
+    try:
+        interval = float(values["INTERVAL"])
+    except ValueError:
+        interval = 0.0
+    if not 1.0 <= interval <= 60.0:
+        raise ConfigError(f"INTERVAL must be 1..60 seconds: {values['INTERVAL']!r}")
+    baud: Optional[int] = None
+    if values["BAUD"]:
+        try:
+            baud = int(values["BAUD"])
+        except ValueError:
+            baud = -1
+        if baud not in BAUD_RATES:
+            raise ConfigError(f"BAUD must be empty or one of {', '.join(map(str, BAUD_RATES))}: {values['BAUD']!r}")
+    return {"device": device, "host": host, "port": port, "node": node, "interval": interval, "baud": baud}
+
+
+def load_config(path: Optional[str]) -> Dict[str, object]:
+    """The settings of PATH; a missing default file means the defaults."""
+    text = ""
+    if path is not None:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                text = handle.read(65536)
+        except FileNotFoundError:
+            if path != DEFAULT_CONFIG:
+                raise ConfigError(f"{path} does not exist") from None
+            log(f"{path} does not exist; using the defaults")
+        except (OSError, UnicodeDecodeError) as error:
+            raise ConfigError(f"cannot read {path}: {error}") from None
+    return validate_config(read_config_text(text))
+
+
+def topic_for(node: str) -> str:
+    return f"sdr/v2/{node}/{TOPIC_SUFFIX}"
+
+
+def device_label(path: str) -> str:
+    """The by-id basename, which names the receiver, or the path."""
+    label = os.path.basename(path) if path.startswith("/dev/serial/by-id/") else path
+    return label[:DEVICE_NAME_MAX]
+
+
+# ---------------------------------------------------------------------------
+# NMEA 0183
+
+
+def nmea_checksum_ok(line: str) -> Optional[str]:
+    """The sentence between $ and *, when its checksum is valid."""
+    if not line.startswith("$") or len(line) > LINE_MAX:
+        return None
+    body, star, check = line[1:].partition("*")
+    if not star or len(check) != 2:
+        return None
+    try:
+        expected = int(check, 16)
+    except ValueError:
+        return None
+    total = 0
+    for char in body:
+        code = ord(char)
+        if code > 0x7E or code < 0x20:
+            return None
+        total ^= code
+    return body if total == expected else None
+
+
+def _float(text: str) -> Optional[float]:
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _int(text: str) -> Optional[int]:
+    return int(text) if text.isdigit() else None
+
+
+def nmea_coordinate(value: str, hemisphere: str, positive: str, negative: str, limit: int) -> Optional[float]:
+    """ddmm.mmmm (latitude) or dddmm.mmmm (longitude) with its hemisphere, in degrees."""
+    if hemisphere not in (positive, negative) or not re.match(r"^\d{4,5}(\.\d+)?$", value):
+        return None
+    number = float(value)
+    degrees = math.floor(number / 100)
+    minutes = number - degrees * 100
+    if minutes >= 60 or degrees > limit:
+        return None
+    result = degrees + minutes / 60
+    if result > limit:
+        return None
+    return round(-result if hemisphere == negative else result, 7)
+
+
+def nmea_epoch_ms(date: str, clock: str) -> Optional[int]:
+    """ddmmyy and hhmmss[.ss] (UTC) as epoch milliseconds."""
+    if not re.match(r"^\d{6}$", date) or not re.match(r"^\d{6}(\.\d{1,3})?$", clock):
+        return None
+    year = int(date[4:6])
+    year += 2000 if year < 80 else 1900
+    try:
+        moment = datetime.datetime(year, int(date[2:4]), int(date[0:2]), int(clock[0:2]), int(clock[2:4]),
+                                   int(clock[4:6]), tzinfo=datetime.timezone.utc)
+    except ValueError:
+        return None
+    fraction = float("0" + clock[6:]) if len(clock) > 6 else 0.0
+    return int(moment.timestamp() * 1000) + int(round(fraction * 1000))
+
+
+def parse_sentence(line: str) -> Optional[Tuple[str, Dict[str, object]]]:
+    """(GGA|RMC|GSA, fields) of one line with a valid checksum, else None.
+
+    Any talker counts (GP, GN, GL, GA, BD). A field that does not read is
+    left out (None), never the sentence.
+    """
+    body = nmea_checksum_ok(line.strip())
+    if body is None:
+        return None
+    fields = body.split(",")
+    address = fields[0]
+    if len(address) != 5:
+        return None
+    kind = address[2:]
+    if kind == "GGA" and len(fields) >= 10:
+        latitude = nmea_coordinate(fields[2], fields[3], "N", "S", 90)
+        longitude = nmea_coordinate(fields[4], fields[5], "E", "W", 180)
+        altitude = _float(fields[9]) if len(fields) < 11 or fields[10] in ("M", "") else None
+        return kind, {
+            "quality": _int(fields[6]),
+            "lat": latitude if longitude is not None else None,
+            "lon": longitude if latitude is not None else None,
+            "sat": _int(fields[7]),
+            "hdop": _float(fields[8]),
+            "alt": altitude,
+        }
+    if kind == "RMC" and len(fields) >= 10:
+        # NMEA 2.3 adds a mode; N means not valid whatever the status says.
+        valid = fields[2] == "A" and (len(fields) < 13 or fields[12] != "N")
+        knots = _float(fields[7])
+        track = _float(fields[8])
+        return kind, {
+            "valid": valid,
+            "sog": round(knots * KNOTS_TO_MPS, 3) if knots is not None and knots >= 0 else None,
+            "cog": round(track % 360.0, 2) if track is not None else None,
+            "gnss_t": nmea_epoch_ms(fields[9], fields[1]),
+        }
+    if kind == "GSA" and len(fields) >= 3:
+        mode = _int(fields[2])
+        return kind, {"mode": mode if mode in (1, 2, 3) else None}
+    return None
+
+
+class GpsTracker:
+    """The latest GGA, RMC and GSA by the monotonic time they arrived."""
+
+    def __init__(self) -> None:
+        self.buffer = b""
+        self.sentences: Dict[str, Tuple[float, Dict[str, object]]] = {}
+        self.last_sentence_at: Optional[float] = None
+        self.opened_at: Optional[float] = None
+        self.bad_lines = 0
+
+    def reset(self, now: float) -> None:
+        self.buffer = b""
+        self.sentences = {}
+        self.last_sentence_at = None
+        self.opened_at = now
+
+    def feed(self, data: bytes, now: float) -> int:
+        """Bytes from the device; returns how many valid sentences they held."""
+        self.buffer += data
+        count = 0
+        while True:
+            newline = self.buffer.find(b"\n")
+            if newline < 0:
+                break
+            raw, self.buffer = self.buffer[:newline], self.buffer[newline + 1:]
+            if self.feed_line(raw.decode("ascii", "replace"), now):
+                count += 1
+        if len(self.buffer) > BUFFER_MAX:
+            self.buffer = b""
+        return count
+
+    def feed_line(self, line: str, now: float) -> bool:
+        if not line.strip():
+            return False
+        parsed = parse_sentence(line)
+        if parsed is None:
+            # A checksum that does not match, a cut line or another format.
+            if line.strip().startswith("$"):
+                self.bad_lines += 1
+            return False
+        kind, values = parsed
+        self.sentences[kind] = (now, values)
+        self.last_sentence_at = now
+        return True
+
+    def recent(self, kind: str, now: float) -> Optional[Dict[str, object]]:
+        entry = self.sentences.get(kind)
+        if entry is None or now - entry[0] > SENTENCE_WINDOW_S or entry[0] > now:
+            return None
+        return entry[1]
+
+    def status(self, now: float) -> Dict[str, object]:
+        """state, fix and values while the device is open."""
+        if self.last_sentence_at is None or now - self.last_sentence_at > SENTENCE_WINDOW_S:
+            return {"state": "NO_DATA"}
+        gga = self.recent("GGA", now)
+        rmc = self.recent("RMC", now)
+        gsa = self.recent("GSA", now)
+        result: Dict[str, object] = {"state": "NO_FIX"}
+        if gga is not None:
+            result["sat"] = gga["sat"]
+            result["hdop"] = gga["hdop"]
+        has_fix = (rmc is not None and rmc["valid"] and gga is not None and isinstance(gga["quality"], int)
+                   and gga["quality"] >= 1 and gga["lat"] is not None)
+        if not has_fix:
+            return result
+        assert gga is not None and rmc is not None
+        mode = gsa["mode"] if gsa is not None else None
+        result.update({
+            "state": "FIX",
+            "fix": mode if mode in (2, 3) else 2,
+            "lat": gga["lat"],
+            "lon": gga["lon"],
+            "alt": gga["alt"],
+            "sog": rmc["sog"],
+            "cog": rmc["cog"],
+            "gnss_t": rmc["gnss_t"],
+        })
+        return result
+
+
+def build_payload(t_ms: int, state: str, device: str, values: Optional[Dict[str, object]] = None,
+                  error: Optional[str] = None) -> Dict[str, object]:
+    values = values or {}
+    fix = state == "FIX"
+    payload: Dict[str, object] = {
+        "v": PAYLOAD_VERSION,
+        "t": int(t_ms),
+        "state": state,
+        "device": device[:DEVICE_NAME_MAX],
+        "fix": values.get("fix", 2) if fix else 0,
+        "sat": values.get("sat") if state in ("FIX", "NO_FIX") else None,
+        "lat": values.get("lat") if fix else None,
+        "lon": values.get("lon") if fix else None,
+        "alt": values.get("alt") if fix else None,
+        "hdop": values.get("hdop") if state in ("FIX", "NO_FIX") else None,
+        "sog": values.get("sog") if fix else None,
+        "cog": values.get("cog") if fix else None,
+        "gnss_t": values.get("gnss_t") if fix else None,
+        "error": error[:ERROR_TEXT_MAX] if error else None,
+    }
+    return payload
+
+
+def encode_payload(payload: Dict[str, object]) -> bytes:
+    """Compact JSON of at most PAYLOAD_MAX_BYTES: the error text, then the device name gives way."""
+    def dump() -> bytes:
+        return json.dumps(payload, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
+
+    data = dump()
+    for key in ("error", "device"):
+        excess = len(data) - PAYLOAD_MAX_BYTES
+        text = payload.get(key)
+        if excess > 0 and isinstance(text, str) and text:
+            # ASCII only, so one character is one byte (an escape is more, never less).
+            payload[key] = text[: max(0, len(text) - excess)] or (None if key == "error" else "")
+            data = dump()
+    if len(data) > PAYLOAD_MAX_BYTES:
+        raise ValueError("payload too large")
+    return data
+
+
+# ---------------------------------------------------------------------------
+# MQTT 3.1.1, the four packets this publisher needs
+
+
+class MqttError(Exception):
+    pass
+
+
+def encode_remaining_length(length: int) -> bytes:
+    if not 0 <= length <= 268_435_455:
+        raise ValueError("remaining length out of range")
+    out = bytearray()
+    while True:
+        byte = length % 128
+        length //= 128
+        if length:
+            byte |= 0x80
+        out.append(byte)
+        if not length:
+            return bytes(out)
+
+
+def _utf8(text: str) -> bytes:
+    data = text.encode("utf-8")
+    if len(data) > 65535:
+        raise ValueError("string too long")
+    return len(data).to_bytes(2, "big") + data
+
+
+def connect_packet(client_id: str, keepalive: int = KEEPALIVE_S) -> bytes:
+    # Protocol name, level 4 (3.1.1), flags: clean session only (no will, no login).
+    variable = _utf8("MQTT") + bytes([4, 0x02]) + keepalive.to_bytes(2, "big")
+    body = variable + _utf8(client_id)
+    return bytes([0x10]) + encode_remaining_length(len(body)) + body
+
+
+def publish_packet(topic: str, payload: bytes, retain: bool = True) -> bytes:
+    # QoS 0: no packet identifier.
+    body = _utf8(topic) + payload
+    return bytes([0x30 | (0x01 if retain else 0)]) + encode_remaining_length(len(body)) + body
+
+
+PINGREQ = b"\xc0\x00"
+DISCONNECT = b"\xe0\x00"
+CONNACK_CODES = {
+    1: "unacceptable protocol version",
+    2: "client identifier rejected",
+    3: "server unavailable",
+    4: "bad user name or password",
+    5: "not authorized",
+}
+
+
+def client_id_for(hostname: str) -> str:
+    name = re.sub(r"[^A-Za-z0-9-]", "-", hostname.split(".")[0]) or "host"
+    return ("ground-gps-" + name)[:CLIENT_ID_MAX]
+
+
+class MqttClient:
+    """One TCP connection to the broker: CONNECT, PUBLISH QoS 0, PINGREQ, DISCONNECT."""
+
+    def __init__(self, host: str, port: int, client_id: str, keepalive: int = KEEPALIVE_S,
+                 monotonic: Callable[[], float] = time.monotonic,
+                 create_connection: Callable[..., socket.socket] = socket.create_connection) -> None:
+        self.host = host
+        self.port = port
+        self.client_id = client_id
+        self.keepalive = keepalive
+        self.monotonic = monotonic
+        self.create_connection = create_connection
+        self.sock: Optional[socket.socket] = None
+        self.inbound = b""
+        self.last_sent = 0.0
+        self.ping_sent_at: Optional[float] = None
+
+    @property
+    def connected(self) -> bool:
+        return self.sock is not None
+
+    def connect(self) -> None:
+        self.close()
+        sock = self.create_connection((self.host, self.port), timeout=CONNECT_TIMEOUT_S)
+        try:
+            sock.settimeout(CONNECT_TIMEOUT_S)
+            sock.sendall(connect_packet(self.client_id, self.keepalive))
+            reply = b""
+            while len(reply) < 4:
+                chunk = sock.recv(4 - len(reply))
+                if not chunk:
+                    raise MqttError("the broker closed the connection before CONNACK")
+                reply += chunk
+            if reply[0] != 0x20 or reply[1] != 0x02:
+                raise MqttError("the broker did not answer with CONNACK")
+            if reply[3] != 0:
+                raise MqttError("the broker refused the connection: "
+                                + CONNACK_CODES.get(reply[3], f"code {reply[3]}"))
+            sock.settimeout(SEND_TIMEOUT_S)
+        except BaseException:
+            sock.close()
+            raise
+        self.sock = sock
+        self.inbound = b""
+        self.last_sent = self.monotonic()
+        self.ping_sent_at = None
+
+    def send(self, packet: bytes) -> None:
+        if self.sock is None:
+            raise MqttError("not connected")
+        try:
+            self.sock.sendall(packet)
+        except OSError as error:
+            self.close()
+            raise MqttError(f"send failed: {error}") from None
+        self.last_sent = self.monotonic()
+
+    def publish(self, topic: str, payload: bytes, retain: bool = True) -> None:
+        self.send(publish_packet(topic, payload, retain))
+
+    def fileno(self) -> int:
+        return self.sock.fileno() if self.sock is not None else -1
+
+    def on_readable(self) -> None:
+        """Read what the broker sent: PINGRESP, or the end of the connection."""
+        if self.sock is None:
+            return
+        try:
+            self.sock.setblocking(False)
+            chunk = self.sock.recv(4096)
+        except (BlockingIOError, InterruptedError):
+            return
+        except OSError as error:
+            self.close()
+            raise MqttError(f"connection lost: {error}") from None
+        finally:
+            if self.sock is not None:
+                self.sock.settimeout(SEND_TIMEOUT_S)
+        if not chunk:
+            self.close()
+            raise MqttError("the broker closed the connection")
+        self.inbound += chunk
+        while len(self.inbound) >= 2:
+            # Only short packets come back to a QoS 0 publisher; skip anything else whole.
+            length, used = 0, 1
+            multiplier = 1
+            complete = False
+            while used < len(self.inbound) and used <= 4:
+                byte = self.inbound[used]
+                length += (byte & 0x7F) * multiplier
+                multiplier *= 128
+                used += 1
+                if not byte & 0x80:
+                    complete = True
+                    break
+            if not complete or len(self.inbound) < used + length:
+                break
+            packet_type = self.inbound[0] >> 4
+            self.inbound = self.inbound[used + length:]
+            if packet_type == 13:  # PINGRESP
+                self.ping_sent_at = None
+
+    def tick(self) -> None:
+        """PINGREQ when nothing went out for half the keepalive; a lost PINGRESP ends the connection."""
+        if self.sock is None:
+            return
+        now = self.monotonic()
+        if self.ping_sent_at is not None and now - self.ping_sent_at > self.keepalive:
+            self.close()
+            raise MqttError("no PINGRESP from the broker")
+        if self.ping_sent_at is None and now - self.last_sent >= self.keepalive / 2:
+            self.send(PINGREQ)
+            self.ping_sent_at = now
+
+    def disconnect(self) -> None:
+        if self.sock is not None:
+            try:
+                self.sock.sendall(DISCONNECT)
+            except OSError:
+                pass
+        self.close()
+
+    def close(self) -> None:
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+        self.sock = None
+        self.inbound = b""
+        self.ping_sent_at = None
+
+
+# ---------------------------------------------------------------------------
+# The device
+
+
+def clear_echo(fd: int, baud: Optional[int]) -> None:
+    """Stop the tty echoing received bytes back to the receiver; set the speed when asked.
+
+    Nothing else of the line settings changes. A device that is not a tty
+    (a test FIFO) is left as it is.
+    """
+    if termios is None:
+        return
+    try:
+        attrs = termios.tcgetattr(fd)
+    except termios.error:
+        return
+    echo = termios.ECHO | termios.ECHOE | termios.ECHOK | termios.ECHONL
+    changed = False
+    if attrs[3] & echo:
+        attrs[3] &= ~echo
+        changed = True
+    if baud is not None:
+        speed = getattr(termios, f"B{baud}", None)
+        if speed is not None and (attrs[4] != speed or attrs[5] != speed):
+            attrs[4] = attrs[5] = speed
+            changed = True
+    if changed:
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+
+
+def open_device(path: str, baud: Optional[int]) -> int:
+    fd = os.open(path, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        clear_echo(fd, baud)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def device_error(error: OSError) -> Tuple[str, Optional[str]]:
+    """(state, error text) for a device that would not open."""
+    if error.errno in (errno.ENOENT, errno.ENODEV, errno.ENXIO):
+        return "NO_DEVICE", None
+    if error.errno in (errno.EACCES, errno.EPERM):
+        return "ERROR", "permission denied (the user needs the dialout group)"
+    if error.errno == errno.EBUSY:
+        return "ERROR", "device busy"
+    return "ERROR", (os.strerror(error.errno) if error.errno else str(error))[:ERROR_TEXT_MAX]
+
+
+# ---------------------------------------------------------------------------
+# The loop
+
+
+class Publisher:
+    def __init__(self, config: Dict[str, object], *, wall_ms: Optional[Callable[[], int]] = None,
+                 monotonic: Callable[[], float] = time.monotonic, mqtt: Optional[MqttClient] = None,
+                 emit: Optional[Callable[[bytes], None]] = None, backoff_first: float = BACKOFF_FIRST_S,
+                 backoff_max: float = BACKOFF_MAX_S) -> None:
+        self.config = config
+        self.path = str(config["device"])
+        self.device = device_label(self.path)
+        self.topic = topic_for(str(config["node"]))
+        self.interval = float(config["interval"])  # type: ignore[arg-type]
+        self.wall_ms = wall_ms or (lambda: int(time.time() * 1000))
+        self.monotonic = monotonic
+        self.mqtt = mqtt
+        # print mode: each payload goes to emit instead of the broker.
+        self.emit = emit
+        self.backoff_first = backoff_first
+        self.backoff_max = backoff_max
+        self.tracker = GpsTracker()
+        self.fd: Optional[int] = None
+        self.device_state: Tuple[str, Optional[str]] = ("NO_DEVICE", None)
+        self.next_open = 0.0
+        self.next_publish = 0.0
+        self.next_connect = 0.0
+        self.backoff = backoff_first
+        self.last_key: Optional[Tuple[object, ...]] = None
+        self.last_logged_device: Optional[Tuple[str, Optional[str]]] = None
+        self.connect_failures = 0
+        self.published = 0
+
+    # The device side.
+
+    def try_open(self, now: float) -> None:
+        try:
+            self.fd = open_device(self.path, self.config.get("baud"))  # type: ignore[arg-type]
+        except OSError as error:
+            self.fd = None
+            self.device_state = device_error(error)
+            self.next_open = now + DEVICE_RETRY_S
+            if self.device_state != self.last_logged_device:
+                text = self.device_state[1] or "not found"
+                log(f"{self.path}: {text}; trying again every {DEVICE_RETRY_S:g} s")
+                self.last_logged_device = self.device_state
+            return
+        self.tracker.reset(now)
+        self.device_state = ("OPEN", None)
+        self.last_logged_device = None
+        log(f"reading {self.path} (read only)")
+
+    def close_device(self, now: float, why: str) -> None:
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+        self.fd = None
+        self.device_state = ("NO_DEVICE", None)
+        self.next_open = now + DEVICE_RETRY_S
+        log(f"{self.path}: {why}")
+
+    def read_device(self, now: float) -> None:
+        # A tty in canonical mode hands out one line per read: take what is
+        # waiting, a bounded amount per turn.
+        for _ in range(READS_PER_TURN):
+            if self.fd is None:
+                return
+            try:
+                data = os.read(self.fd, 4096)
+            except (BlockingIOError, InterruptedError):
+                return
+            except OSError as error:
+                # EIO: the receiver was unplugged.
+                self.close_device(now, f"read failed ({os.strerror(error.errno) if error.errno else error})")
+                return
+            if not data:
+                self.close_device(now, "the device went away")
+                return
+            self.tracker.feed(data, now)
+
+    def status(self, now: float) -> Dict[str, object]:
+        state, error = self.device_state
+        if state == "OPEN":
+            values = self.tracker.status(now)
+            return build_payload(self.wall_ms(), str(values["state"]), self.device, values)
+        return build_payload(self.wall_ms(), state, self.device, None, error)
+
+    # The broker side.
+
+    def ensure_connected(self, now: float) -> None:
+        if self.mqtt is None or self.mqtt.connected or now < self.next_connect:
+            return
+        try:
+            self.mqtt.connect()
+        except (OSError, MqttError) as error:
+            self.connect_failures += 1
+            if self.connect_failures == 1 or self.backoff >= self.backoff_max:
+                log(f"broker {self.mqtt.host}:{self.mqtt.port}: {error}; trying again in {self.backoff:g} s")
+            self.next_connect = now + self.backoff
+            self.backoff = min(self.backoff * 2, self.backoff_max)
+            return
+        log(f"connected to {self.mqtt.host}:{self.mqtt.port} as {self.mqtt.client_id}, publishing {self.topic}")
+        self.connect_failures = 0
+        self.backoff = self.backoff_first
+        # The retained status is current again at once.
+        self.next_publish = now
+
+    def lost(self, now: float, error: Exception) -> None:
+        log(f"broker connection lost: {error}; trying again in {self.backoff_first:g} s")
+        self.next_connect = now + self.backoff_first
+        self.backoff = self.backoff_first
+
+    def send(self, payload: Dict[str, object]) -> None:
+        data = encode_payload(payload)
+        if self.emit is not None:
+            self.emit(data)
+            self.published += 1
+            return
+        if self.mqtt is None or not self.mqtt.connected:
+            return
+        self.mqtt.publish(self.topic, data, retain=True)
+        self.published += 1
+
+    def step(self, timeout: float = 0.5) -> None:
+        """One turn: open, read, keep the connection, publish when due or when the fix changes."""
+        now = self.monotonic()
+        if self.fd is None and now >= self.next_open:
+            self.try_open(now)
+        self.ensure_connected(now)
+        readers: List[int] = []
+        if self.fd is not None:
+            readers.append(self.fd)
+        if self.mqtt is not None and self.mqtt.connected:
+            readers.append(self.mqtt.fileno())
+        wait = max(0.0, min(timeout, self.next_publish - now)) if self.next_publish > now else 0.0
+        if readers:
+            try:
+                ready, _, _ = select.select(readers, [], [], wait)
+            except InterruptedError:
+                ready = []
+        else:
+            time.sleep(wait)
+            ready = []
+        now = self.monotonic()
+        if self.fd is not None and self.fd in ready:
+            self.read_device(now)
+        if self.mqtt is not None and self.mqtt.connected and self.mqtt.fileno() in ready:
+            try:
+                self.mqtt.on_readable()
+            except MqttError as error:
+                self.lost(now, error)
+        payload = self.status(now)
+        key = (payload["state"], payload["fix"], payload["error"])
+        if key != self.last_key:
+            log(f"state {payload['state']}" + (f" fix {payload['fix']}D" if payload["state"] == "FIX" else "")
+                + (f": {payload['error']}" if payload["error"] else ""))
+            self.next_publish = now
+        if now >= self.next_publish:
+            try:
+                self.send(payload)
+                self.last_key = key
+            except MqttError as error:
+                self.lost(now, error)
+            self.next_publish = now + self.interval
+        if self.mqtt is not None and self.mqtt.connected:
+            try:
+                self.mqtt.tick()
+            except MqttError as error:
+                self.lost(now, error)
+
+    def run(self, should_stop: Callable[[], bool] = lambda: False, max_steps: Optional[int] = None) -> None:
+        steps = 0
+        try:
+            while not should_stop():
+                self.step()
+                steps += 1
+                if max_steps is not None and steps >= max_steps:
+                    break
+        finally:
+            self.finish()
+
+    def finish(self) -> None:
+        """A last retained STOPPED, then DISCONNECT, so the console does not wait for STALE."""
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            self.fd = None
+        if self.emit is None and self.mqtt is not None:
+            if self.mqtt.connected:
+                try:
+                    self.send(build_payload(self.wall_ms(), "STOPPED", self.device))
+                except MqttError:
+                    pass
+            self.mqtt.disconnect()
+
+
+# ---------------------------------------------------------------------------
+# Command line
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(prog="ground-gps-publisher", description=__doc__)
+    parser.add_argument("command", nargs="?", default="run", choices=("run", "print", "check-config"))
+    parser.add_argument("--config", default=None, help=f"settings file (default {DEFAULT_CONFIG} when it exists)")
+    parser.add_argument("--device", help="override DEVICE")
+    parser.add_argument("--count", type=int, default=5, help="print: how many statuses (default 5)")
+    args = parser.parse_args(argv)
+    try:
+        config = load_config(args.config if args.config is not None else DEFAULT_CONFIG)
+        if args.device:
+            config = validate_config(dict(DEFAULTS, DEVICE=args.device, BROKER_HOST=str(config["host"]),
+                                          BROKER_PORT=str(config["port"]), NODE_ID=str(config["node"]),
+                                          INTERVAL=str(config["interval"]),
+                                          BAUD="" if config["baud"] is None else str(config["baud"])))
+    except ConfigError as error:
+        log(f"ground-gps-publisher: {error}")
+        return EX_CONFIG
+
+    if args.command == "check-config":
+        print(f"DEVICE={config['device']}")
+        print(f"BROKER_HOST={config['host']}")
+        print(f"BROKER_PORT={config['port']}")
+        print(f"NODE_ID={config['node']}")
+        print(f"INTERVAL={config['interval']:g}")
+        print(f"BAUD={'' if config['baud'] is None else config['baud']}")
+        print(f"TOPIC={topic_for(str(config['node']))}")
+        return 0
+
+    stop = {"flag": False}
+
+    def request_stop(signum: int, frame: object) -> None:
+        stop["flag"] = True
+
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+
+    if args.command == "print":
+        def emit(data: bytes) -> None:
+            print(data.decode("ascii"), flush=True)
+
+        publisher = Publisher(config, emit=emit)
+        publisher.interval = min(publisher.interval, 2.0)
+        publisher.run(lambda: stop["flag"] or publisher.published >= max(1, args.count))
+        return 0
+
+    mqtt = MqttClient(str(config["host"]), int(config["port"]),  # type: ignore[arg-type]
+                      client_id_for(socket.gethostname()))
+    publisher = Publisher(config, mqtt=mqtt)
+    log(f"ground-gps-publisher: {config['device']} -> {config['host']}:{config['port']} {publisher.topic}")
+    publisher.run(lambda: stop["flag"])
+    log("stopped")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

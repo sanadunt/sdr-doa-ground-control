@@ -6,6 +6,7 @@ import { elapsedSinceRead, lastMessageAgeMs } from '../lib/mqttMonitor';
 import { dataOutUnused, loraChip } from '../lib/loraLink';
 import { candidate, formatNumber, numberOrNull, syncCount, toneFor } from '../lib/telemetry';
 import { isMqttSnapshot, loraLink, snapshotNav } from '../lib/telemetrySource';
+import { groundGpsCause, groundGpsCode, groundGpsState, groundGpsTone, snapshotGroundGps } from '../lib/groundGps';
 import { useI18n } from '../lib/i18n';
 import type { Translate } from '../lib/i18n';
 import {
@@ -289,11 +290,44 @@ function LoraCard({ mqtt }: { mqtt: MqttSnapshot | null }): JSX.Element | null {
   );
 }
 
+/**
+ * The groundstation's own GPS (ground-gps-publisher); shown when the console
+ * reports it, which a console without the ground_gps block does not.
+ */
+export function GroundGpsCard({ snapshot, localSnapshotFresh }: { snapshot: TelemetrySnapshot | null; localSnapshotFresh: boolean }): JSX.Element | null {
+  const { lang, t } = useI18n();
+  if (!snapshot || !('ground_gps' in snapshot)) return null;
+  const view = snapshotGroundGps(snapshot);
+  const state = groundGpsState(view, localSnapshotFresh);
+  const tone = groundGpsTone(state);
+  const cause = groundGpsCause(view, state, t);
+  const fixed = state === 'FIX';
+  const age = view?.status_age_ms ?? null;
+  const items: KeyValueItem[] = [
+    { id: 'position', label: t('health.ground.position'), value: fixed && view?.lat != null && view.lon != null ? `${view.lat.toFixed(6)}°, ${view.lon.toFixed(6)}°` : '—' },
+    { id: 'altitude', label: t('health.ground.altitude'), value: fixed && view?.alt != null ? `${view.alt.toFixed(1)} m` : '—' },
+    {
+      id: 'satellites',
+      label: t('health.ground.satellites'),
+      value: view?.sat == null ? '—' : `${formatCount(lang, view.sat)}${fixed && (view.fix === 2 || view.fix === 3) ? ` · FIX ${view.fix}D` : ''}`,
+    },
+    { id: 'hdop', label: t('health.ground.hdop'), value: view?.hdop == null ? '—' : view.hdop.toFixed(2) },
+    { id: 'device', label: t('health.ground.device'), value: view?.device ?? '—', mono: false },
+    { id: 'status', label: t('health.ground.status'), value: age === null ? '—' : t('health.ground.statusAge', { age: formatDuration(t, Math.max(0, age)) }), tone: state === 'STALE' ? 'bad' : undefined },
+  ];
+  return (
+    <Card title={t('health.ground.title')} chip={<StatusChip code={groundGpsCode(state)} tone={tone} />}>
+      {cause ? <Notice tone={tone === 'bad' ? 'bad' : tone === 'neutral' ? 'info' : 'warn'} title={groundGpsCode(state)}>{cause}</Notice> : null}
+      <KeyValueGrid items={items} label={t('health.ground.title')} />
+    </Card>
+  );
+}
+
 function syncTone(ok: boolean | null): PageTone {
   return ok === true ? 'good' : ok === false ? 'bad' : 'neutral';
 }
 
-export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapshotFresh, capabilities = null }: { snapshot: TelemetrySnapshot | null; mqtt: MqttSnapshot | null; mqttError?: string | null; localSnapshotFresh: boolean; capabilities?: ConsoleCapabilities | null }): JSX.Element {
+export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapshotFresh, groundGpsFresh, capabilities = null }: { snapshot: TelemetrySnapshot | null; mqtt: MqttSnapshot | null; mqttError?: string | null; localSnapshotFresh: boolean; groundGpsFresh?: boolean; capabilities?: ConsoleCapabilities | null }): JSX.Element {
   const { lang, t } = useI18n();
   const status = snapshot?.status;
   const daq = safeRecord(statusValue(status, 'daq_status'));
@@ -398,6 +432,7 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
           {lora ? null : <DataOutCard snapshot={snapshot} />}
           <MqttCard mqtt={mqtt} mqttError={mqttError} capabilities={capabilities} />
           <LoraCard mqtt={mqtt} />
+          <GroundGpsCard snapshot={snapshot} localSnapshotFresh={groundGpsFresh ?? localSnapshotFresh} />
         </PageStack>
       </PageGrid>
     </Page>
