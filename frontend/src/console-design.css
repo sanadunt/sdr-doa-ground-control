@@ -22,6 +22,8 @@
   --plot-fill: rgba(235, 188, 112, .14);
   /* Spectrum markers: the Receiver's marker colour. */
   --marker: #ff75a0;
+  /* Transmitter position estimate (map point, radius, panel). */
+  --estimate: #5fd4ff;
   --shadow: none;
   --mono: ui-monospace, 'SFMono-Regular', 'JetBrains Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
   --topbar-h: 52px;
@@ -49,6 +51,7 @@
   --red: #ac2f2a;
   --plot-fill: rgba(154, 91, 18, .12);
   --marker: #a23557;
+  --estimate: #0b6f99;
 }
 body { background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; }
 ::selection { background: var(--accent); color: var(--on-accent); }
@@ -539,6 +542,7 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 .doa-map-label-above { font-size: 10.5px; font-weight: 600; opacity: .82; }
 .doa-heading-label { padding: 3px 6px; border: 1px solid #a98bff; border-radius: 4px; background: #11171e; color: #ffffff; font-size: 11.5px; font-weight: 700; box-shadow: 0 2px 8px rgba(0, 0, 0, .35); }
 .doa-heading-label.is-held { border: 1px dashed #8d99a6; background: #3b434b; color: #e6eaee; }
+.doa-estimate-label { padding: 1px 4px; border: 1px dashed var(--estimate); border-radius: 3px; background: rgba(17, 23, 30, .72); color: #d6e2ea; font-size: 9.5px; font-weight: 500; transform: translateY(-16px); }
 /* The RDF-SDR heading: a triangle just outside the 44 px station marker, turned by MapLibre (rotationAlignment 'map'). */
 .rdf-heading-marker { width: 76px; height: 76px; pointer-events: none; filter: drop-shadow(0 0 1px #ffffff) drop-shadow(0 0 1px #ffffff) drop-shadow(0 1px 2px rgba(0, 0, 0, .5)); }
 .rdf-heading-marker::before { position: absolute; top: 0; left: 50%; width: 14px; height: 12px; margin-left: -7px; background: #6c45d8; clip-path: polygon(50% 0, 100% 100%, 0 100%); content: ''; }

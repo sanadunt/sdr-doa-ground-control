@@ -28,12 +28,14 @@ from paho.mqtt.properties import Properties
 if __package__:
     from . import rdf_node_commands as commands
     from .config_command_tracker import FINAL_ACK_STATUSES, MonitorPublishError
+    from .doa_position_estimate import PositionEstimator
     from .ground_gps import GROUND_GPS_SUFFIX, GroundGpsStore
     from .lora_link import LORA_SUFFIXES, LoraLinkStore
     from .rdf_node_mqtt_v2 import RDF_NODE_V2_SUFFIXES, RdfNodeV2Telemetry
 else:
     import rdf_node_commands as commands
     from config_command_tracker import FINAL_ACK_STATUSES, MonitorPublishError
+    from doa_position_estimate import PositionEstimator
     from ground_gps import GROUND_GPS_SUFFIX, GroundGpsStore
     from lora_link import LORA_SUFFIXES, LoraLinkStore
     from rdf_node_mqtt_v2 import RDF_NODE_V2_SUFFIXES, RdfNodeV2Telemetry
@@ -97,6 +99,9 @@ class MqttMonitor:
         self.client_id = CLIENT_ID_PREFIX + secrets.token_hex(5)
         self._rdf_node = RdfNodeV2Telemetry(node_id)
         self._rdf_node.on_accepted = self._on_rdf_node_accepted
+        # Where the moving node's bearings cross (contract 1.10 b, lat, lon).
+        self._estimate = PositionEstimator()
+        self._rdf_node.on_live_doa = self._on_live_doa
         # The RDF Node topics first, then the LoRa serial bridge's status
         # (lora_link.py) and the groundstation's own GNSS position
         # (ground_gps.py), which only a groundstation publishes.
@@ -712,6 +717,18 @@ class MqttMonitor:
             })
             return result
 
+    def _on_live_doa(self, doa: Dict[str, Any]) -> None:
+        if doa.get("b") is None or doa.get("lat") is None or doa.get("lon") is None:
+            return
+        self._estimate.add(q=doa["q"], t_ms=doa["t"], frequency_hz=doa["f"], bearing_deg=doa["b"],
+                           latitude=doa["lat"], longitude=doa["lon"], confidence_db=doa.get("c"),
+                           heading_source=doa.get("hsrc"))
+
+    def reset_position_estimate(self) -> Dict[str, Any]:
+        """Start the position estimate over (operator: another target, or the node was moved by hand)."""
+        self._estimate.reset()
+        return self._estimate.view(_now_ms())
+
     def rdf_node_view(self) -> Optional[Dict[str, Any]]:
         """The RDF Node view the Dashboard's telemetry source reads (issue #8).
 
@@ -728,6 +745,7 @@ class MqttMonitor:
                 "connection": self._rdf_connection_locked(),
                 "node_id": self._rdf_node.node_id,
                 "node": self._rdf_node.node_view(now),
+                "position_estimate": self._estimate.view(now),
                 # The node reaches this broker over the LoRa serial bridge: no
                 # IP path, so no Data Out (telemetry_source names that).
                 "link": "lora" if self._lora.has_role("ground") else None,

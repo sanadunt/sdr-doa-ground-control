@@ -445,6 +445,41 @@ class Edge17Tests(unittest.TestCase):
         self.assertEqual(ack["result"], result)
 
 
+class Edge110Tests(unittest.TestCase):
+    """Contract 1.10 (RDF Node 1.10.0): h, hsrc, b, lat, lon on telemetry/doa."""
+
+    STAMP = {"h": 84.3, "hsrc": "C", "b": 294.3, "lat": -6.92977, "lon": 107.71142}
+
+    def test_the_stamp_is_kept_with_the_doa(self) -> None:
+        store = session_store()
+        entry = put(store, "telemetry/doa", obj("telemetry-doa.ok1.json", t=NOW, **self.STAMP))
+        self.assertEqual(entry["status"], "LIVE")
+        doa = node(store)["doa"]
+        for key, value in self.STAMP.items():
+            self.assertEqual(doa[key], value)
+
+    def test_a_bad_stamp_is_dropped_never_the_doa(self) -> None:
+        store = session_store()
+        entry = put(store, "telemetry/doa", obj("telemetry-doa.ok1.json", t=NOW, h=None, hsrc=None, b=10.0, lat=-6.9, lon=400))
+        self.assertEqual(entry["status"], "LIVE")
+        doa = node(store)["doa"]
+        self.assertEqual((doa["h"], doa["hsrc"]), (None, None))
+        for key in ("b", "lat", "lon"):
+            self.assertNotIn(key, doa)
+        put(store, "telemetry/doa", obj("telemetry-doa.ok1.json", t=NOW, q=999, h=10.0, hsrc="X"))
+        self.assertNotIn("hsrc", node(store)["doa"])
+
+    def test_live_doa_reaches_the_estimate_hook(self) -> None:
+        store = session_store()
+        seen = []
+        store.on_live_doa = seen.append
+        put(store, "telemetry/doa", obj("telemetry-doa.ok1.json", t=NOW, **self.STAMP))
+        put(store, "telemetry/doa", obj("telemetry-doa.ok1.json", t=NOW - 60_000, q=999, **self.STAMP))  # STALE
+        put(store, "telemetry/doa", obj("telemetry-doa.ok0.json", t=NOW, q=1000))  # UNVERIFIED
+        self.assertEqual(len(seen), 1)
+        self.assertEqual((seen[0]["b"], seen[0]["lat"]), (294.3, -6.92977))
+
+
 class Edge18Tests(unittest.TestCase):
     """Contract 1.8 (edge 1a98575, RDF Node 1.8.0): capabilities.config_fields, state.rf.uca, result.band_spacing_m."""
 

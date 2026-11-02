@@ -15,6 +15,8 @@ export interface DoaOverlaySettings {
   labelsVisible: boolean;
   /** The RDF-SDR's compass heading: a triangle on the station and a dashed line (lib/rdfHeading.ts). */
   headingVisible: boolean;
+  /** The transmitter position estimate: hot cells, the estimate, its radius and the line to it (lib/positionEstimate.ts). */
+  estimateVisible: boolean;
   /** Multiplies every overlay paint opacity, 0.2 to 1. */
   overlayOpacity: number;
   heatStyle: 'beam' | 'density';
@@ -45,6 +47,7 @@ export const DEFAULT_DOA_OVERLAY_SETTINGS: DoaOverlaySettings = {
   edgesVisible: true,
   labelsVisible: true,
   headingVisible: true,
+  estimateVisible: true,
   overlayOpacity: 0.85,
   heatStyle: 'beam',
   dbScale: 'auto',

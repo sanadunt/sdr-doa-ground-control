@@ -494,7 +494,9 @@
    "angular_power_transform": "preserved_source_shifted_db",
    "angular_power_unit": "dB_relative_to_source_floor",
    "angular_values_local_only": true,
+   "array_heading_deg": null,
    "available": true,
+   "bearing_deg": null,
    "canonical_angle_convention": "upstream_theta_0",
    "canonical_angle_deg": 160.0,
    "confidence": null,
@@ -523,6 +525,7 @@
     "reference_kind": "mqtt_received_at",
     "timestamp_ms": 1793070140000
    },
+   "heading_source": null,
    "native_metrics_state": "READY",
    "native_metrics_valid": true,
    "path": "telemetry/doa",
@@ -535,6 +538,8 @@
    "q": 1,
    "received_at_ms": 1793070140000,
    "rev": 1,
+   "sample_latitude": null,
+   "sample_longitude": null,
    "source_format": "mqtt",
    "timestamp_ms": 1793070140000,
    "unit_reasons": [
@@ -677,6 +682,7 @@
  },
  "observed_at_ms": 1793070140000,
  "overall_state": "UNVERIFIED",
+ "position_estimate": null,
  "publication_gate": {
   "checks": {
    "adc_not_overdriven": null,

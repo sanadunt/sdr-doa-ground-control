@@ -369,6 +369,15 @@ def _doa_candidate(node: Mapping[str, Any], convention: Optional[str]) -> Dict[s
         "units_state": "NOT_READY",
         "units_valid": False,
     }
+    # Contract 1.10: the heading the edge turned this sample with, the bearing
+    # it made and where it was taken (None from an older edge).
+    candidate.update({
+        "array_heading_deg": _number(doa.get("h")),
+        "heading_source": {"C": "COMPASS", "G": "GPS", "H": "HOLD"}.get(doa.get("hsrc")),
+        "bearing_deg": _number(doa.get("b")),
+        "sample_latitude": _number(doa.get("lat")),
+        "sample_longitude": _number(doa.get("lon")),
+    })
     theta = theta0_from_doa(a, convention)
     if theta is None:
         candidate["normalization_error"] = MQTT_ANGLE_CONVENTION_UNKNOWN
@@ -856,6 +865,7 @@ def mqtt_snapshot(
         "data_out_light": data_out_light,
         "nav": _nav(health),
         "rf": _rf(_record(node.get("session")) or {}),
+        "position_estimate": copy.deepcopy(_record(view.get("position_estimate"))),
     }
 
 

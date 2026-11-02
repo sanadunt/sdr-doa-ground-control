@@ -178,6 +178,7 @@
  },
  "observed_at_ms": 1793070140000,
  "overall_state": "UNVERIFIED",
+ "position_estimate": null,
  "publication_gate": {
   "checks": {
    "adc_not_overdriven": true,
