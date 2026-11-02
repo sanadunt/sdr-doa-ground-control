@@ -193,8 +193,10 @@ export function doaStatusTextKey(reason: DoaStatusReason): MessageKey {
 // with read timing (CSV and XML from adjacent frames, or an MQTT DoA newer
 // than its Angular frame) and needs no action, and so does
 // MQTT_ANGULAR_UNAVAILABLE (an MQTT DoA between Angular frames, shown
-// without its curve).
+// without its curve). Over Telemetry LoRa the ADC overdrive is never carried
+// (ADC_OVERDRIVE_NOT_OVER_LORA), a property of the link.
 const STANDING_GATE_REASONS = [
+  'ADC_OVERDRIVE_NOT_OVER_LORA',
   'POWER_FLOOR_LOSSY',
   'POWER_MAPPING_UNVERIFIED',
   'CONFIDENCE_MAPPING_UNVERIFIED',

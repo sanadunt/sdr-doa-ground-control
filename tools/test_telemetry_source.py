@@ -302,6 +302,18 @@ class NavTests(unittest.TestCase):
             built = ts.mqtt_snapshot(edge.view(link=link), None, base_url=BASE_URL, light_age_ms=None, light_meta=meta)
             self.assertEqual(built["source"]["link"], expected)
 
+    def test_overdrive_over_lora_is_a_property_of_the_link(self) -> None:
+        edge = Edge(ManualMs(FIXED_NOW)).live()
+        meta = {"interval_s": 30.0, "reason": None, "running": False, "error": None}
+        for link, reason, error in ((None, ts.ADC_OVERDRIVE_UNKNOWN, "settings.json not read yet"),
+                                    ("lora", ts.ADC_OVERDRIVE_NOT_OVER_LORA, "settings.json is not read over Telemetry LoRa")):
+            built = ts.mqtt_snapshot(edge.view(link=link), None, base_url=BASE_URL, light_age_ms=None, light_meta=meta)
+            reasons = built["publication_gate"]["reasons"]
+            self.assertIn(reason, reasons)
+            self.assertNotIn(ts.ADC_OVERDRIVE_NOT_OVER_LORA if link is None else ts.ADC_OVERDRIVE_UNKNOWN, reasons)
+            self.assertIsNone(built["publication_gate"]["checks"]["adc_not_overdriven"])
+            self.assertEqual(built["settings"]["error"], error)
+
     def test_compass_only(self) -> None:
         nav = self.build({"hdg": None, "hs": "NO_REPLY"})["nav"]
         self.assertEqual((nav["compass_state"], nav["heading_deg"], nav["latitude"], nav["gps_state"]), ("NO_REPLY", None, None, None))

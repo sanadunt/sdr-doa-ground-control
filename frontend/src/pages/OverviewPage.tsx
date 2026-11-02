@@ -24,6 +24,7 @@ import type { ReceiverBridge } from '../lib/receiverBridge';
 import { ZERO_INSETS, computeMapInsets, sameInsets } from '../lib/mapInsets';
 import type { MapInsets } from '../lib/mapInsets';
 import { primaryCandidate } from '../lib/telemetry';
+import { overLora } from '../lib/telemetrySource';
 import { useI18n } from '../lib/i18n';
 import { DoaReadout } from '../components/DoaReadout';
 import { LoadErrorBoundary } from '../components/LoadErrorBoundary';
@@ -59,10 +60,11 @@ let lastLiveStation: MapCoordinate | null = null;
 const noop = (): void => undefined;
 
 /** Why the compass offset in use is not verified, for the map's REFERENCE notice. */
-export function compassCauseKey(code: CompassSourceCode): MessageKey | null {
+export function compassCauseKey(code: CompassSourceCode, lora = false): MessageKey | null {
   if (code === 'FALLBACK') return 'map.orientationFallback';
   if (code === 'DATA_OUT_LOCAL_OFFSET') return 'map.orientationNoOffset';
-  if (code === 'DATA_OUT_UNAVAILABLE') return 'map.orientationNotRead';
+  // Telemetry LoRa never carries settings.json, so there is no read to wait for.
+  if (code === 'DATA_OUT_UNAVAILABLE') return lora ? 'map.orientationNotOverLora' : 'map.orientationNotRead';
   return null;
 }
 
@@ -139,7 +141,7 @@ function OverviewPageView({
   const offsetSource = simulation ? 'SIMULATION' : compassOffsetSourceLabel(compass, t);
   const offsetVerified = simulation ? true : compass.offsetVerified;
   const offsetManual = !simulation && compass.code === 'MANUAL';
-  const causeKey = simulation ? null : compassCauseKey(compass.code);
+  const causeKey = simulation ? null : compassCauseKey(compass.code, overLora(snapshot));
   const orientationCause = causeKey ? t(causeKey) : undefined;
   // The REFERENCE notice opens Configuration at GPS & Compass.
   const openCompassSettings = useCallback(() => {

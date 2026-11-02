@@ -260,13 +260,17 @@ function CollectorCard({ snapshot, localSnapshotFresh }: { snapshot: TelemetrySn
   const views = nativeViewsReady(snapshot) && localSnapshotFresh ? 'FRESH / COMPARABLE' : 'NOT READY';
   const rawOmitted = snapshot?.settings?.raw_fields_omitted ?? true;
   const chip = (code: string): ReactNode => <StatusChip code={code} tone={decisionTone(code)} />;
+  // The native CSV/XML views and settings.json are Data Out's; Telemetry LoRa has neither.
+  const lora = overLora(snapshot);
   const items: KeyValueItem[] = [
     { id: 'authority', label: t('diag.authority'), value: chip(authority) },
     { id: 'angle', label: t('diag.angleReadiness'), value: chip(angle) },
-    { id: 'views', label: t('diag.nativeViews'), value: chip(views) },
-    { id: 'source', label: t('diag.settingsSource'), value: chip(source) },
+    ...(lora ? [] : [
+      { id: 'views', label: t('diag.nativeViews'), value: chip(views) },
+      { id: 'source', label: t('diag.settingsSource'), value: chip(source) },
+    ]),
     { id: 'fresh', label: <code>local_snapshot_fresh</code>, value: localSnapshotFresh ? 'true' : 'false' },
-    { id: 'omitted', label: <code>raw_settings_omitted</code>, value: rawOmitted === false ? 'false' : 'true' },
+    ...(lora ? [] : [{ id: 'omitted', label: <code>raw_settings_omitted</code>, value: rawOmitted === false ? 'false' : 'true' }]),
   ];
   return (
     <Card title="Collector">
@@ -282,6 +286,14 @@ function EffectiveConfigCard({ snapshot }: { snapshot: TelemetrySnapshot | null 
   const settingsError = typeof snapshot?.settings?.error === 'string' ? snapshot.settings.error : null;
   const available = snapshot?.settings?.available === true;
   const settings: KeyValueItem[] = shownFields.map(([key, value]) => ({ id: key, label: key, value: settingValueText(key, value) }));
+  if (overLora(snapshot)) {
+    // No settings.json over Telemetry LoRa; Kontrol reads the node's settings/reported.
+    return (
+      <Card title={t('diag.configTitle')} span={12}>
+        <EmptyState label={t('diag.configLora')} code="N/A" />
+      </Card>
+    );
+  }
   return (
     <Card title={t('diag.configTitle')} chip={snapshot && !available ? <StatusChip code="UNAVAILABLE" tone="warn" /> : null} span={12}>
       {settingsError ? <Notice tone="warn" title="settings.json"><CollectorError error={settingsError} /></Notice> : null}
@@ -326,7 +338,7 @@ function MqttDoaCard({ snapshot }: { snapshot: TelemetrySnapshot | null }): JSX.
       flush
     >
       <KeyValueGrid items={[
-        { id: 'source', label: t('diag.mqtt.source'), value: t('diag.mqtt.sourceValue') },
+        { id: 'source', label: t('diag.mqtt.source'), value: t(overLora(snapshot) ? 'diag.mqtt.sourceValueLora' : 'diag.mqtt.sourceValue') },
         { id: 'angle', label: t('diag.mqtt.angleMode'), value: mode ?? 'N/A', tone: mode ? undefined : 'warn' },
       ]} />
       {rows.length

@@ -5,7 +5,7 @@ import { configPatchPublishable } from '../lib/configPatch';
 import { elapsedSinceRead, lastMessageAgeMs } from '../lib/mqttMonitor';
 import { dataOutUnused, loraChip } from '../lib/loraLink';
 import { candidate, formatNumber, numberOrNull, syncCount, toneFor } from '../lib/telemetry';
-import { isMqttSnapshot } from '../lib/telemetrySource';
+import { isMqttSnapshot, snapshotNav } from '../lib/telemetrySource';
 import { useI18n } from '../lib/i18n';
 import type { Translate } from '../lib/i18n';
 import {
@@ -324,10 +324,13 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
     </>
   );
   const noise = quality?.noiseSourceEnabled === true ? 'ON' : quality?.noiseSourceEnabled === false ? 'OFF' : 'N/A';
-  const gps = String(statusValue(status, 'gps_status') ?? 'UNKNOWN');
+  // Over Telemetry LoRa nothing of status.json comes: no frame index or noise
+  // source, and the GPS state is the one telemetry/health carries.
+  const lora = dataOutUnused(snapshot, mqtt);
+  const gps = String((lora ? snapshotNav(snapshot)?.gps_state : statusValue(status, 'gps_status')) ?? 'UNKNOWN');
   const nodeItems: KeyValueItem[] = [
     { id: 'progress', label: t('health.row.progress'), value: progressValue, title: progressCause(t, progress) },
-    { id: 'frame', label: t('health.row.frame'), value: typeof daq.data_frame_index === 'number' ? formatCount(lang, daq.data_frame_index) : 'N/A' },
+    ...(lora ? [] : [{ id: 'frame', label: t('health.row.frame'), value: typeof daq.data_frame_index === 'number' ? formatCount(lang, daq.data_frame_index) : 'N/A' }]),
     { id: 'dropped', label: t('health.row.dropped'), value: dropped === null ? 'N/A' : formatCount(lang, dropped), tone: dropped !== null && dropped > 0 ? 'warn' : undefined },
     {
       id: 'sync',
@@ -335,7 +338,7 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
       value: <span className="hd-flags">{flags.map((flag) => <Tag key={flag.key} tone={syncTone(flag.ok)} title={flag.key}>{flag.label}</Tag>)}</span>,
       title: syncCause,
     },
-    { id: 'noise', label: t('health.row.noiseSource'), value: noise, tone: noise === 'ON' ? 'warn' : undefined },
+    ...(lora ? [] : [{ id: 'noise', label: t('health.row.noiseSource'), value: noise, tone: noise === 'ON' ? 'warn' as const : undefined }]),
     { id: 'gps', label: t('health.row.gps'), value: gps },
   ];
   const papr = quality && (quality.paprCsvDb !== null || quality.paprXmlDb !== null)
@@ -350,7 +353,7 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
         title={t('route.system-health')}
         chips={<>
           <StatusChip code={headline} />
-          <StatusChip label={t('page.chip.http')} code={http.state} />
+          {lora ? null : <StatusChip label={t('page.chip.http')} code={http.state} />}
           <StatusChip label={t('page.chip.node')} code={node.state} />
           <StatusChip label={t('page.chip.progress')} code={progress?.state ?? 'N/A'} />
         </>}
@@ -360,9 +363,13 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
         <StatRow label={t('route.system-health')}>
           <StatTile label="DAQ" value={daqHealth} tone={toneFor(daqHealth)} sub={dropped === null ? undefined : t('health.drops', { count: formatCount(lang, dropped) })} />
           <StatTile label={t('health.sync')} value={`${syncs}/3`} tone={syncs === 3 ? 'good' : snapshot ? 'bad' : 'neutral'} title={syncCause} />
-          <StatTile label="ADC" value={adcState} tone={adcState === 'OVERDRIVE' ? 'bad' : adcState === 'PASS' ? 'good' : 'neutral'} sub={adcSources || undefined} />
-          <StatTile label="SNR" value={snr} unit={snr === 'N/A' ? undefined : 'dB'} sub="XML" />
-          <StatTile label="PAPR" value={papr} unit={papr === 'N/A' ? undefined : 'dB'} sub="CSV / XML" />
+          {lora
+            ? <StatTile label="ADC" value="N/A" tone="neutral" sub={t('node.notOverLora')} />
+            : <>
+              <StatTile label="ADC" value={adcState} tone={adcState === 'OVERDRIVE' ? 'bad' : adcState === 'PASS' ? 'good' : 'neutral'} sub={adcSources || undefined} />
+              <StatTile label="SNR" value={snr} unit={snr === 'N/A' ? undefined : 'dB'} sub="XML" />
+              <StatTile label="PAPR" value={papr} unit={papr === 'N/A' ? undefined : 'dB'} sub="CSV / XML" />
+            </>}
           <StatTile label="MQTT" value={connection} tone={readFailed || connection === 'ERROR' ? 'bad' : connection === 'CONNECTED' ? 'good' : 'warn'} />
           <StatTile label={t('health.clock')} value={clock} tone={clock === 'LOCAL' ? 'good' : 'neutral'} />
         </StatRow>
@@ -383,7 +390,7 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
         </PageStack>
         <PageStack span={6}>
           {/* Over Telemetry LoRa there is no Data Out to show (no IP path to the node). */}
-          {dataOutUnused(snapshot, mqtt) ? null : <DataOutCard snapshot={snapshot} />}
+          {lora ? null : <DataOutCard snapshot={snapshot} />}
           <MqttCard mqtt={mqtt} mqttError={mqttError} capabilities={capabilities} />
           <LoraCard mqtt={mqtt} />
         </PageStack>
