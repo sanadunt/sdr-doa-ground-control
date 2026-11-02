@@ -118,9 +118,12 @@ MQTT_DOA_ANGULAR_CONFLICT = "MQTT_DOA_ANGULAR_CONFLICT"
 # (source.view at 8691ad0 has no overdrive reason): without a current light
 # read the console cannot say the record is not from an overdriven ADC.
 ADC_OVERDRIVE_UNKNOWN = "ADC_OVERDRIVE_UNKNOWN"
+# Over the LoRa serial bridge there is no Data Out to read, so the overdrive
+# is never known: a standing condition of the link, not a failed read.
+ADC_OVERDRIVE_NOT_OVER_LORA = "ADC_OVERDRIVE_NOT_OVER_LORA"
 MQTT_GATE_REASONS = (
     MQTT_NO_DOA, MQTT_DOA_UNVERIFIED, MQTT_ANGLE_CONVENTION_UNKNOWN, MQTT_ANGULAR_UNAVAILABLE, MQTT_DOA_ANGULAR_CONFLICT,
-    ADC_OVERDRIVE_UNKNOWN,
+    ADC_OVERDRIVE_UNKNOWN, ADC_OVERDRIVE_NOT_OVER_LORA,
 )
 
 # capabilities.angle values of the edge (config.validate_config).
@@ -606,6 +609,7 @@ def _overall_and_gate(
     consistency: Mapping[str, Any],
     diagnostics: Mapping[str, Any],
     overdrive: Optional[bool],
+    over_lora: bool = False,
 ) -> Tuple[str, Dict[str, Any]]:
     parsed = candidate.get("available") is True and "canonical_angle_deg" in candidate
     fresh = parsed and (_record(candidate.get("freshness")) or {}).get("fresh") is True
@@ -622,7 +626,7 @@ def _overall_and_gate(
     if overdrive is True:
         reasons.append("ADC_OVERDRIVE")
     elif overdrive is None:
-        reasons.append(ADC_OVERDRIVE_UNKNOWN)
+        reasons.append(ADC_OVERDRIVE_NOT_OVER_LORA if over_lora else ADC_OVERDRIVE_UNKNOWN)
     if candidate.get("available") is not True:
         reasons.append(MQTT_DOA_UNVERIFIED if unverified_current else MQTT_NO_DOA)
     else:
@@ -720,7 +724,9 @@ def mqtt_snapshot(
     current_light = _light_current(light, light_age_ms)
     quality = _signal_quality(current_light, candidate)
     overdrive = quality.get("adc_overdrive")
-    overall, gate = _overall_and_gate(candidate, consistency, diagnostics, overdrive if isinstance(overdrive, bool) else None)
+    over_lora = view.get("link") == "lora"
+    overall, gate = _overall_and_gate(candidate, consistency, diagnostics, overdrive if isinstance(overdrive, bool) else None,
+                                      over_lora)
     health = _record(node.get("health")) or {}
 
     settings: Dict[str, Any]
@@ -733,7 +739,8 @@ def mqtt_snapshot(
         settings = copy.deepcopy(light_settings)
     else:
         settings = {"available": False, "redacted": True, "raw_fields_omitted": True, "reused": False, "read_at_ms": None,
-                    "error": "last settings.json read is too old" if expired else "settings.json not read yet"}
+                    "error": "settings.json is not read over Telemetry LoRa" if over_lora
+                    else "last settings.json read is too old" if expired else "settings.json not read yet"}
     light_collection = _record((current_light or {}).get("collection")) or {}
     settings_age = _int(light_collection.get("settings_age_ms"))
     if settings_age is not None and light_age_ms is not None:

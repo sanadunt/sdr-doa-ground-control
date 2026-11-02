@@ -162,15 +162,19 @@ export function NodeCard({
   const sourceLabel = coordinate ? t(positionHeld ? 'map.sourceHeld' : coordinateSourceKey(coordinate.source)) : null;
   const sourceTone = positionHeld || coordinate?.source === 'FALLBACK' ? 'is-warn' : coordinate?.source === 'MANUAL' ? 'is-manual' : undefined;
   const position = coordinate ? `${coordinate.latitude.toFixed(5)}, ${coordinate.longitude.toFixed(5)}` : t('readout.noPosition');
-  const host = dataOutHost(snapshot);
+  // The Data Out host, frame index and settings.json's remote-control flag are Data Out only.
+  const host = lora ? null : dataOutHost(snapshot);
+  const dataOutRows: Array<[string, string, string?]> = lora ? [] : [
+    [t('node.frame'), value(summary.frame === null ? '—' : `#${summary.frame}`)],
+    [t('node.remoteControl'), value(summary.remoteControl)],
+  ];
   const rows: Array<[string, string, string?]> = [
     [t('node.center'), dataOutValue(summary.centerMhz === null, fmt(summary.centerMhz, 3, ' MHz'))],
     [t('node.gain'), dataOutValue(summary.gainDb === null, fmt(summary.gainDb, 1, ' dB'))],
     [t('node.snr'), dataOutValue(summary.snrDb === null, fmt(summary.snrDb, 1, ' dB'))],
     [t('node.daq'), value(summary.daq), summary.daq.startsWith('PASS') ? 'is-good' : summary.daq.startsWith('FAIL') ? 'is-bad' : undefined],
     [t('node.adc'), dataOutValue(summary.adc === 'N/A', summary.adc), summary.adc === 'OK' ? 'is-good' : summary.adc === 'OVERDRIVE' ? 'is-bad' : undefined],
-    [t('node.frame'), value(summary.frame === null ? '—' : `#${summary.frame}`)],
-    [t('node.remoteControl'), value(summary.remoteControl)],
+    ...dataOutRows,
     ...navRows(snapshotNav(snapshot), t),
   ];
 

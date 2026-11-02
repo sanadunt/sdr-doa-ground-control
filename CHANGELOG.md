@@ -2,6 +2,27 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.4.4
+
+Rilis patch: tidak ada yang dihapus. Selama Telemetry LoRa, halaman data tidak lagi menyebut Data Out, settings.json atau PPP, yang tidak dipakai di jalur itu. Tanpa jembatan LoRa, semuanya tetap seperti biasa. Kanal `3` dan timer update memasangnya sendiri.
+
+- **ADC overdrive lewat LoRa.** Alasan gate kini `ADC_OVERDRIVE_NOT_OVER_LORA`: "ADC overdrive tidak dikirim lewat Telemetry LoRa".
+  - Alasan lama, `ADC_OVERDRIVE_UNKNOWN`, menyebut status.json, doa.xml dan Data Out.
+  - Ini sifat jalurnya, bukan masalah data. Delivery/Publikasi tidak lagi menulis ADA MASALAH karenanya, dan tooltip DATA menyebut alasan yang sebenarnya, misalnya DoA yang belum dikirim RDF-SDR.
+- **Dashboard.**
+  - Notice peta kini "offset kompas tidak tersedia lewat Telemetry LoRa", bukan "settings Data Out belum terbaca".
+  - Tombol muat ulang bernama "Muat ulang".
+  - Kartu RDF-SDR tidak lagi menampilkan alamat Data Out, DAQ frame dan Remote control.
+- **System Health.** Chip HTTP, ubin SNR dan PAPR, Frame index dan Noise source disembunyikan.
+  - ADC menulis "tidak tersedia lewat Telemetry LoRa".
+  - Status GPS diambil dari `telemetry/health`.
+- **DoA Diagnostics.**
+  - Sumber ditulis "MQTT · Telemetry LoRa".
+  - Baris Native views, Settings source dan `raw_settings_omitted` disembunyikan.
+  - Effective config menjelaskan bahwa settings.json tidak dibaca lewat LoRa, dan Kontrol → Baca settings menanyakannya ke RDF-SDR.
+- **Configuration.** Pilihan sumber "Data Out" di GPS & Compass bernama "RDF-SDR (Telemetry LoRa)".
+- **Message Monitor.** Field PPP dari `telemetry/health/detail` (`ppp`, `peer`, `ppp_svc`, `ppp_restarts`) tidak ditampilkan.
+
 ## 3.4.3
 
 Rilis patch: tidak ada yang dihapus. Pemeriksaan Kontrol setelah sebuah perintah kini menyebut apa yang sebenarnya diperiksanya: isi settings.json RDF-SDR, bukan radio yang berjalan. Kanal `3` dan timer update memasangnya sendiri.
