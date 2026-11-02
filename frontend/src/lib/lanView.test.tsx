@@ -19,7 +19,8 @@ import { ReceiverMirrorPage, mirrorStateItems } from '../pages/ReceiverMirrorPag
 import { createMirrorFeed } from './receiverMirrorFeed';
 import type { MirrorFeedState, ReceiverMirrorFeed } from './receiverMirrorFeed';
 import { mirrorView, normalizeMirrorAnswer } from './receiverMirror';
-import { SpectrumDockMirror, mirrorInfoText } from '../components/overview/SpectrumDockMirror';
+import { SpectrumDockMirror, mirrorAudioText, mirrorInfoText } from '../components/overview/SpectrumDockMirror';
+import type { MirrorAudioPlayer, MirrorAudioState } from './receiverMirrorAudio';
 import { createMirrorMarkController } from './receiverMirrorMarks';
 import type { MirrorMarkClient, MirrorMarkController, MirrorMarkOutcome } from './receiverMirrorMarks';
 
@@ -198,7 +199,7 @@ describe('LAN view UI', () => {
     expect(markup).not.toContain('id="panel-control"');
     expect(markup).not.toContain('data-control="open"');
     // The dock shows the groundstation's Receiver as MIRROR, every radio control disabled;
-    // Markers/Penanda is the one that works (marker add and remove, 2026-10-31).
+    // Markers/Penanda (marker add and remove, 2026-10-31) and Dengar (this tablet hears it, 2026-11-02) work.
     expect(markup).toContain('<section id="panel-spectrum" class="ov-spectrum is-view-only is-mirror"');
     expect(markup).toContain('<span class="ov-tag tone-info">MIRROR</span>');
     expect(markup).toContain(translate('en', 'mirror.connecting'));
@@ -206,7 +207,10 @@ describe('LAN view UI', () => {
     const dockButtons = dock.slice(0, dock.indexOf('</section>')).match(/<button[^>]*>/g) ?? [];
     expect(dockButtons).toHaveLength(5);
     const enabled = dockButtons.filter((tag) => !tag.includes('disabled'));
-    expect(enabled).toEqual([`<button class="ov-button ov-spec-mark" type="button" aria-pressed="false" title="${translate('en', 'mirror.markNoSource')}">`]);
+    expect(enabled).toEqual([
+      `<button class="ov-button ov-spec-mark" type="button" aria-pressed="false" title="${translate('en', 'mirror.markNoSource')}">`,
+      '<button class="ov-button ov-spec-listen" type="button" aria-pressed="false">',
+    ]);
     // Marking is off at every mount: the trace is a picture until it is turned on.
     expect(markup).toContain('role="img"');
     expect(markup).not.toContain('role="slider"');
@@ -289,9 +293,12 @@ describe('LAN view UI', () => {
         expect(markup).toContain(`role="application" aria-label="${translate(lang, 'mirror.canvasAriaMarking')}"`);
         expect(markup).not.toContain('role="slider"');
         expect(markup).toContain('ov-spec-trace is-marking is-read-only');
-        // The toggle is pressed and counts the groundstation's list; Mulai, Dengar and the mode switch stay disabled.
+        // The toggle is pressed and counts the groundstation's list; Mulai and the mode switch stay disabled, Dengar is this tablet's own.
         const buttons = head(markup).match(/<button[^>]*>/g) ?? [];
-        expect(buttons.filter((tag) => !tag.includes('disabled'))).toEqual(['<button class="ov-button ov-spec-mark" type="button" aria-pressed="true">']);
+        expect(buttons.filter((tag) => !tag.includes('disabled'))).toEqual([
+          '<button class="ov-button ov-spec-mark" type="button" aria-pressed="true">',
+          '<button class="ov-button ov-spec-listen" type="button" aria-pressed="false">',
+        ]);
         expect(head(markup)).toContain('<span class="ov-spec-mark-count">2</span>');
         expect(markup).not.toContain(translate(lang, 'mirror.markNoSource'));
       }
@@ -390,6 +397,58 @@ describe('LAN view UI', () => {
       expect(lost).toContain('ov-spec-trace is-stopped');
     }
     expect(translate('id', 'mirror.chipLost')).toBe('SUMBER PUTUS');
+  });
+
+  describe('listening from the tablet', () => {
+    const fixture = JSON.parse(readSource('../../../tools/fixtures/receiver-mirror/publish.json')) as Record<string, unknown>;
+    const fixtureState = fixture.state as Record<string, unknown>;
+    const answerWith = (state: Record<string, unknown>) => normalizeMirrorAnswer({
+      ok: true, v: 1, rev: 5, frame_rev: 3, source: fixture.source, source_age_ms: 100, state, state_age_ms: 100,
+      frame: fixture.frame, frame_age_ms: 150, limits: { frame_stale_ms: 3000, source_lost_ms: 10000 },
+    });
+    const feedAt = (answer: ReturnType<typeof normalizeMirrorAnswer>, ageMs = 0): ReceiverMirrorFeed => {
+      const state: MirrorFeedState = { answer, receivedAtMs: Date.now() - ageMs, error: false };
+      return { retain: () => () => undefined, getState: () => state, onState: () => () => undefined, onSpectrum: () => () => undefined };
+    };
+    const playerIn = (status: MirrorAudioState['status'], latencyMs: number | null = null): MirrorAudioPlayer => {
+      const state: MirrorAudioState = { status, latencyMs, code: null };
+      return { start: () => undefined, stop: () => undefined, getState: () => state, subscribe: () => () => undefined };
+    };
+    const viewOf = (state: Record<string, unknown>, ageMs = 0) => mirrorView({ ...feedAt(answerWith(state), ageMs).getState(), nowMs: Date.now() });
+
+    it('makes Dengar the tablet\'s own toggle, with the latency beside it while audio plays', () => {
+      for (const lang of ['en', 'id'] as const) {
+        const off = withI18n(<SpectrumDockMirror feed={feedAt(answerWith(fixtureState))} audioPlayer={playerIn('off')} />, lang);
+        expect(off).toContain('<button class="ov-button ov-spec-listen" type="button" aria-pressed="false">');
+        expect(off).not.toContain('ov-spec-audio ');
+        const playing = withI18n(<SpectrumDockMirror feed={feedAt(answerWith(fixtureState))} audioPlayer={playerIn('playing', 620)} />, lang);
+        expect(playing).toContain('<button class="ov-button ov-spec-listen" type="button" aria-pressed="true">');
+        expect(playing).toContain(`<span class="ov-spec-audio tone-good" role="status">${lang === 'id' ? '≈ 0,6 dtk' : '≈ 0.6 s'}</span>`);
+        const route = withI18n(<ReceiverMirrorPage feed={feedAt(answerWith(fixtureState))} initialTab="mirror" audioPlayer={playerIn('playing', 620)} />, lang);
+        expect(route).toContain('<button class="ov-button ov-spec-listen" type="button" aria-pressed="true">');
+      }
+    });
+
+    it('says why there is no audio in operator words', () => {
+      const t = (lang: Lang) => (key: Parameters<typeof translate>[1], vars?: Record<string, string | number>) => translate(lang, key, vars);
+      for (const lang of ['en', 'id'] as const) {
+        const live = viewOf(fixtureState);
+        const text = (status: MirrorAudioState['status'], view = live) => mirrorAudioText(t(lang), lang, { status, latencyMs: null, code: null }, view);
+        expect(text('off')).toBeNull();
+        expect(text('connecting')).toBe(translate(lang, 'mirror.audio.connecting'));
+        expect(text('silent')).toBe(translate(lang, 'mirror.audio.silent'));
+        expect(text('silent', viewOf({ ...fixtureState, running: false }))).toBe(translate(lang, 'mirror.audio.rxOff'));
+        expect(text('silent', viewOf({ ...fixtureState, running: false, busy: 'sweep', scan: { phase: 'active', start_hz: 400_000_000, stop_hz: 500_000_000, resolution_hz: 4882.8125 } })))
+          .toBe(translate(lang, 'mirror.audio.scan'));
+        expect(text('silent', viewOf(fixtureState, 20_000))).toBe(translate(lang, 'mirror.chipLost'));
+        expect(text('retrying', viewOf(fixtureState, 20_000))).toBe(translate(lang, 'mirror.chipLost'));
+        expect(text('retrying')).toBe(translate(lang, 'mirror.audio.retrying'));
+        expect(text('busy')).toBe(translate(lang, 'mirror.audio.busy', { max: 4 }));
+        expect(text('blocked')).toBe(translate(lang, 'mirror.audio.blocked'));
+        expect(text('unsupported')).toBe(translate(lang, 'mirror.audio.unsupported'));
+      }
+      expect(translate('id', 'mirror.audio.busy', { max: 4 })).toBe('Pendengar penuh (4); coba lagi nanti.');
+    });
   });
 
   it('keeps Stop on a running scan or RX while its frames are STALE or its source is lost', () => {

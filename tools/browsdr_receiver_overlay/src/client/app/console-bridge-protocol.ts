@@ -14,7 +14,7 @@ export const BRIDGE_CHANNEL = 'sdr-console-receiver';
 export const BRIDGE_VERSION = 1;
 
 /** Frame to console. */
-export const FRAME_MESSAGE_TYPES = ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep', 'receiver:markers'] as const;
+export const FRAME_MESSAGE_TYPES = ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep', 'receiver:markers', 'receiver:audio'] as const;
 /** Console to frame. */
 export const CONSOLE_MESSAGE_TYPES = [
 	'console:hello',
@@ -105,6 +105,11 @@ export const SWEEP_SPAN_LIMITS = { minSpanHz: 1_000_000, sampleRateHz: 20_000_00
  * (a saved marker set's limit); labels are at most labelMaxChars long.
  */
 export const MARKER_LIMITS = { minHz: 1_000_000, maxHz: 7_250_000_000, maxSent: 512, maxTotal: 10_000, labelMaxChars: 80 } as const;
+/**
+ * receiver:audio (the Receiver mirror's audio, docs/RECEIVER_MIRROR.md 10a): the mono mix the Receiver plays,
+ * at sampleRateHz, chunkSamples per message (100 ms), never more than maxSamples.
+ */
+export const AUDIO_LIMITS = { sampleRateHz: 48_000, chunkSamples: 4_800, maxSamples: 48_000 } as const;
 export const VOLUME_LIMITS = { min: 0, max: 100 } as const;
 /**
  * Manual dB range of the Listener's spectrum and waterfall (the Dengar tab's
@@ -149,6 +154,8 @@ export type SweepPhase = typeof SWEEP_PHASES[number];
 
 export interface Subscription {
 	spectrum: boolean;
+	/** receiver:audio messages while true (the Receiver mirror's audio). */
+	audio: boolean;
 	bins: number;
 	fps: number;
 	spanHz: number;
@@ -382,10 +389,11 @@ export function decimateMaxHold(values: ArrayLike<number>, bins: number): Float3
 }
 
 /** Clamps a requested subscription; values that are not finite numbers take the default. */
-export function clampSubscription(raw: { spectrum?: unknown; bins?: unknown; fps?: unknown; spanHz?: unknown }): Subscription {
+export function clampSubscription(raw: { spectrum?: unknown; audio?: unknown; bins?: unknown; fps?: unknown; spanHz?: unknown }): Subscription {
 	const limits = SUBSCRIBE_LIMITS;
 	return {
 		spectrum: raw.spectrum === true,
+		audio: raw.audio === true,
 		bins: Math.round(clampNumber(raw.bins, limits.binsMin, limits.binsMax, limits.binsDefault)),
 		fps: clampNumber(raw.fps, limits.fpsMin, limits.fpsMax, limits.fpsDefault),
 		// The upper bound is the sample rate, applied when a frame is cropped.

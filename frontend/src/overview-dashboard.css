@@ -229,6 +229,11 @@
 .ov-spec-follow > span, .ov-spec-open-label { white-space: normal; }
 .ov-spec-head h2 { flex: none; }
 .ov-spec-source { flex: none; color: var(--muted); font-size: 12px; white-space: nowrap; }
+/* LAN view: the tablet's own Dengar and, beside it, its latency or why there is no audio. */
+.ov-spec-audio-group { align-items: center; gap: 8px; }
+.ov-spec-audio { flex: none; max-width: 260px; overflow: hidden; color: var(--muted); font-family: var(--mono); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.ov-spec-audio.tone-good { color: var(--green); }
+.ov-spec-audio.tone-warn { color: var(--amber); }
 .ov-spec-follow { display: inline-flex; flex: none; align-items: center; gap: 8px; height: 44px; color: var(--muted); cursor: pointer; font-size: 12.5px; white-space: nowrap; }
 .ov-spec-follow input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
 .ov-listen-mode { flex: none; width: 76px; height: 44px; padding: 0 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-family: var(--mono); font-size: 12.5px; }

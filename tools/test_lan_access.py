@@ -411,6 +411,7 @@ class LanRequestRuleTests(unittest.TestCase):
         self.assertEqual(lan.API_ROUTES, frozenset({
             "/api/health", "/api/capabilities", "/api/snapshot", "/api/console-config", "/api/mqtt",
             "/api/mqtt/rdf-node", "/api/preferences", "/api/branding", "/api/admin/status", "/api/mirror/receiver",
+            "/api/mirror/receiver/audio",
         }))
         for path in (
             "/receiver", "/receiver/", "/receiver/index.html", "/api/receiver/settings", "/api/lan-access",
@@ -783,6 +784,7 @@ class LanListenerTests(_ServerCase):
             ("POST", "/api/receiver/archive/items", {}),
             ("PUT", f"/api/receiver/audio-segments/{RECORD_ID}/audio", {}),
             ("POST", "/api/mirror/receiver", {"v": 1}),
+            ("POST", "/api/mirror/receiver/audio", {"v": 1}),
             ("PUT", "/api/mirror/receiver/markers", {"v": 1, "id": "tab-cmd-0001", "op": "add", "frequency_hz": 433920000}),
             ("POST", "/api/mirror/receiver/markers/tab-cmd-0001", {"v": 1}),
             ("DELETE", "/api/receiver/scans/abc", None),

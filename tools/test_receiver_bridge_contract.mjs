@@ -38,6 +38,7 @@ const SHARED = [
 	'SWEEP_PHASES',
 	'SWEEP_SPAN_LIMITS',
 	'MARKER_LIMITS',
+	'AUDIO_LIMITS',
 ];
 
 for (const name of SHARED) {

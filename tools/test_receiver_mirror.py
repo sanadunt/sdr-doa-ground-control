@@ -351,10 +351,10 @@ class MirrorStoreTests(unittest.TestCase):
         })
 
     def test_latest_wins_and_ages_follow_the_server_clock(self) -> None:
-        self.assertEqual(self.mirror.publish(*rm.parse_publish(_publish(1))), {"rev": 1, "frame_rev": 1, "commands": []})
+        self.assertEqual(self.mirror.publish(*rm.parse_publish(_publish(1))), {"rev": 1, "frame_rev": 1, "commands": [], "audio_listeners": 0})
         self.clock.now += 1.25
         # A state-only post (a heartbeat) keeps the frame and its age.
-        self.assertEqual(self.mirror.publish(*rm.parse_publish(_publish(2, frame=False))), {"rev": 2, "frame_rev": 1, "commands": []})
+        self.assertEqual(self.mirror.publish(*rm.parse_publish(_publish(2, frame=False))), {"rev": 2, "frame_rev": 1, "commands": [], "audio_listeners": 0})
         self.clock.now += 0.5
         view = self.mirror.view()
         self.assertEqual(view["state"]["rev"], 2)
@@ -394,7 +394,7 @@ class MirrorStoreTests(unittest.TestCase):
         # Opened again (the LAN view moved or was enabled again), it takes posts.
         self.mirror.open()
         self.assertTrue(self.mirror.is_open())
-        self.assertEqual(self.mirror.publish(*rm.parse_publish(_publish(3))), {"rev": 1, "frame_rev": 1, "commands": []})
+        self.assertEqual(self.mirror.publish(*rm.parse_publish(_publish(3))), {"rev": 1, "frame_rev": 1, "commands": [], "audio_listeners": 0})
 
 
 class MirrorRouteTests(_ServerCase):
@@ -430,7 +430,7 @@ class MirrorRouteTests(_ServerCase):
     def test_the_kiosk_page_publishes_and_both_listeners_read_it(self) -> None:
         lan_port = self.open_lan(self.server)
         status, answer = self.post(_publish(7))
-        self.assertEqual((status, answer), (200, {"ok": True, "rev": 1, "frame_rev": 1, "commands": []}))
+        self.assertEqual((status, answer), (200, {"ok": True, "rev": 1, "frame_rev": 1, "commands": [], "audio_listeners": 0}))
         for port in (self.main_port, lan_port):
             with self.subTest(port=port):
                 status, view = self.get(port)
@@ -577,7 +577,7 @@ class MirrorRouteTests(_ServerCase):
         self.assertEqual((view["rev"], view["frame_rev"]), (1, 1))
         # Opened again, the next post is taken.
         self.open_lan(self.server)
-        self.assertEqual(self.post(_publish(3)), (200, {"ok": True, "rev": 2, "frame_rev": 2, "commands": []}))
+        self.assertEqual(self.post(_publish(3)), (200, {"ok": True, "rev": 2, "frame_rev": 2, "commands": [], "audio_listeners": 0}))
 
     def test_moving_the_lan_view_keeps_taking_posts(self) -> None:
         self.open_lan(self.server)
@@ -909,7 +909,8 @@ class MarkerContractTests(unittest.TestCase):
         self.assertEqual(set(re.findall(r"'([A-Z_]+)'", codes.group(1))), set(rm.MARKER_RESULT_CODES))
         errors = re.search(r"export const MIRROR_MARKER_ERROR_CODES = \[([^\]]*)\]", text)
         assert errors is not None, "MIRROR_MARKER_ERROR_CODES not found"
-        self.assertEqual(set(re.findall(r"'([A-Z_]+)'", errors.group(1))), set(rm.ERROR_CODES_HTTP))
+        # Every mirror code but the audio stream's own, which a marker command never meets.
+        self.assertEqual(set(re.findall(r"'([A-Z_]+)'", errors.group(1))), set(rm.ERROR_CODES_HTTP) - {rm.MIRROR_AUDIO_BUSY})
         self.assertIn("const MARKER_COMMAND_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/u;", text)
 
     def test_the_lan_view_rules_name_the_same_route(self) -> None:

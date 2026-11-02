@@ -56,6 +56,7 @@ function harness(options: { lanOpen?: boolean; visible?: boolean } = {}) {
     getState: () => bridgeState,
     onState: (listener: () => void) => { stateListeners.add(listener); return () => { stateListeners.delete(listener); }; },
     onSpectrum: (listener: (frame: SpectrumFrame) => void) => { spectrumListeners.add(listener); return () => { spectrumListeners.delete(listener); }; },
+    onAudio: () => () => undefined,
     subscribe: (subscription: { spectrum: boolean; bins?: number; fps?: number }, owner?: SubscriptionOwner) => { subscriptions.push({ owner, ...subscription }); },
   } as unknown as ReceiverBridge;
   const setStatus = (next: ReceiverStatus | null, phase: BridgeState['phase'] = 'ready') => {
@@ -110,6 +111,26 @@ function harness(options: { lanOpen?: boolean; visible?: boolean } = {}) {
 
 describe('Receiver mirror publisher', () => {
   afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('hands the listener count of every accepted post to the audio publisher and stops it with the posts', async () => {
+    const h = harness();
+    const calls: Array<[number, string]> = [];
+    let stops = 0;
+    const audio = { setListeners: (count: number, id: string) => { calls.push([count, id]); }, stop: () => { stops += 1; }, status: () => ({ tapping: false, chunks: 0, refused: 0, dropped: 0 }) };
+    h.answers.push({ status: 200, code: null, commands: [], audioListeners: 2 });
+    const publisher = startMirrorPublisher(h.bridge, h.env, audio);
+    await h.advance(0);
+    expect(calls).toEqual([[2, 'kiosk-iiiiiiiiiiiiiiii']]);
+    await h.advance(600);
+    expect(calls.at(-1)).toEqual([0, 'kiosk-iiiiiiiiiiiiiiii']);
+    // A closed LAN view stops the tap at once.
+    h.answers.push({ status: 409, code: 'MIRROR_LAN_CLOSED' });
+    calls.length = 0;
+    await h.advance(600);
+    expect(calls).toEqual([[0, 'kiosk-iiiiiiiiiiiiiiii']]);
+    publisher.stop();
+    expect(stops).toBe(1);
+  });
 
   it('names its source per page load', () => {
     expect(mirrorSourceId(() => 0.5)).toBe('kiosk-iiiiiiiiiiiiiiii');
@@ -406,15 +427,15 @@ describe('Receiver mirror publisher', () => {
       { id: 'tab-cmd-0002', op: 'tune', frequency_hz: 1 },
       { id: 'tab-cmd-0003', op: 'remove', marker_id: 'm 1' },
       { id: 'tab-cmd-0004', op: 'remove', marker_id: 'm-1' },
-    ] }), { status: 200 }));
+    ], audio_listeners: 3 }), { status: 200 }));
     vi.stubGlobal('fetch', fetchStub);
     const answer = await browserPublisherEnvironment().post('{}');
-    expect(answer).toEqual({ status: 200, code: null, commands: [
+    expect(answer).toEqual({ status: 200, code: null, audioListeners: 3, commands: [
       { id: 'tab-cmd-0001', op: 'add', frequency_hz: 433_920_000 },
       { id: 'tab-cmd-0004', op: 'remove', marker_id: 'm-1' },
     ] });
     fetchStub.mockResolvedValueOnce(new Response(JSON.stringify({ ok: false, code: 'MIRROR_LAN_CLOSED', commands: [{ id: 'tab-cmd-0001', op: 'add', frequency_hz: 1 }] }), { status: 409 }));
-    expect(await browserPublisherEnvironment().post('{}')).toEqual({ status: 409, code: 'MIRROR_LAN_CLOSED', commands: [] });
+    expect(await browserPublisherEnvironment().post('{}')).toEqual({ status: 409, code: 'MIRROR_LAN_CLOSED', commands: [], audioListeners: 0 });
   });
 
   it('stop() ends everything and drops the mirror subscription', async () => {

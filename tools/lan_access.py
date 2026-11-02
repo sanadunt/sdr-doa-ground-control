@@ -154,6 +154,9 @@ API_ROUTES = frozenset({
     "/api/admin/status",
     # The Receiver mirror (receiver_mirror.py): the kiosk's Receiver, view only.
     "/api/mirror/receiver",
+    # Its audio (receiver_audio_mirror.py, the owner's decision of 2026-11-02):
+    # a stream to read, GET only, under the Records read rule.
+    "/api/mirror/receiver/audio",
 })
 ROUTE_UI = "ui"
 ROUTE_TILE = "tile"

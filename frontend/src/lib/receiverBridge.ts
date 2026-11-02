@@ -34,6 +34,7 @@ import type {
   ConsoleMessageType,
   ReceiverHello,
   ReceiverMarkers,
+  ReceiverAudio,
   ReceiverStatus,
   ResultCode,
   ResultTune,
@@ -86,22 +87,29 @@ export interface BridgeState {
   lastResult: BridgeLastResult | null;
 }
 
-/** Who asked for spectrum frames: the Overview dock or the Receiver mirror publisher (receiverMirrorPublisher.ts). */
-export type SubscriptionOwner = 'dock' | 'mirror';
+/**
+ * Who asked for frames: the Overview dock, the Receiver mirror publisher
+ * (receiverMirrorPublisher.ts) or the mirror's audio publisher
+ * (receiverMirrorAudio.ts), which asks for audio only.
+ */
+export type SubscriptionOwner = 'dock' | 'mirror' | 'mirror-audio';
 /** Priority order: the first active owner's span is the one sent. */
-export const SUBSCRIPTION_OWNERS: readonly SubscriptionOwner[] = ['dock', 'mirror'];
+export const SUBSCRIPTION_OWNERS: readonly SubscriptionOwner[] = ['dock', 'mirror', 'mirror-audio'];
 
 /**
  * One subscription that serves every owner: frames while any owner wants them,
  * the most bins and the highest rate any of them asked for, and the span of
- * the first active owner in SUBSCRIPTION_OWNERS order. Null before any owner subscribed.
+ * the first active owner in SUBSCRIPTION_OWNERS order; audio while any owner
+ * wants it. Null before any owner subscribed.
  */
 export function mergeSubscriptions(claims: ReadonlyMap<SubscriptionOwner, Subscription>): Subscription | null {
   if (!claims.size) return null;
+  const audio = [...claims.values()].some((claim) => claim.audio);
   const active = SUBSCRIPTION_OWNERS.map((owner) => claims.get(owner)).filter((claim): claim is Subscription => claim?.spectrum === true);
-  if (!active.length) return clampSubscription({ spectrum: false });
+  if (!active.length) return clampSubscription({ spectrum: false, audio });
   return {
     spectrum: true,
+    audio,
     bins: Math.max(...active.map((claim) => claim.bins)),
     fps: Math.max(...active.map((claim) => claim.fps)),
     spanHz: active[0].spanHz,
@@ -120,13 +128,15 @@ export interface ReceiverBridge extends SpectrumFeed {
   detach(): void;
   /** Post a command (synchronously when the frame is ready) and settle with its result. */
   send(command: BridgeCommand): Promise<BridgeResult>;
-  /** Set one owner's spectrum subscription (default the dock's); the merged one is re-sent after every hello. */
-  subscribe(options: { spectrum: boolean; bins?: number; fps?: number; spanHz?: number }, owner?: SubscriptionOwner): void;
+  /** Set one owner's subscription (default the dock's); the merged one is re-sent after every hello. */
+  subscribe(options: { spectrum: boolean; audio?: boolean; bins?: number; fps?: number; spanHz?: number }, owner?: SubscriptionOwner): void;
   getState(): BridgeState;
   /** For useSyncExternalStore. */
   onState(listener: () => void): () => void;
   /** RX spectrum and scan frames go to canvases directly; they are never React state. */
   onSpectrum(listener: (frame: SpectrumFrame) => void): () => void;
+  /** The Receiver's audio (receiver:audio), while an owner subscribed to it. */
+  onAudio(listener: (audio: ReceiverAudio) => void): () => void;
   /** Probe once whether the Receiver build is being served. */
   probeBuild(): void;
 }
@@ -245,6 +255,7 @@ export function createReceiverBridge(environment: BridgeEnvironment = browserEnv
   const queue: PendingCommand[] = [];
   const stateListeners = new Set<() => void>();
   const spectrumListeners = new Set<(frame: SpectrumFrame) => void>();
+  const audioListeners = new Set<(audio: ReceiverAudio) => void>();
 
   function setState(patch: Partial<BridgeState>): void {
     state = { ...state, ...patch };
@@ -342,6 +353,15 @@ export function createReceiverBridge(environment: BridgeEnvironment = browserEnv
             listener(message.frame);
           } catch {
             // A canvas error must not block other listeners.
+          }
+        }
+        return;
+      case 'receiver:audio':
+        for (const listener of [...audioListeners]) {
+          try {
+            listener(message.audio);
+          } catch {
+            // A publisher error must not block other listeners.
           }
         }
         return;
@@ -450,6 +470,11 @@ export function createReceiverBridge(environment: BridgeEnvironment = browserEnv
     onSpectrum(listener) {
       spectrumListeners.add(listener);
       return () => { spectrumListeners.delete(listener); };
+    },
+
+    onAudio(listener) {
+      audioListeners.add(listener);
+      return () => { audioListeners.delete(listener); };
     },
 
     probeBuild() {

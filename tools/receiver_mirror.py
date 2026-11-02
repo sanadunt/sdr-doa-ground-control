@@ -23,6 +23,10 @@ shows, and the LAN view draws it without a radio of its own:
   publishing page in the answer to its next POST, and that page reports the
   bridge's result code in a later POST. ``GET .../markers/<id>`` reads the
   command's status.
+* ``/api/mirror/receiver/audio`` (receiver_audio_mirror.py) carries the
+  Receiver's audio to LAN viewers that listen (phase 5, the owner's decision
+  of 2026-11-02). The mirror owns it, opens and closes it with itself and
+  tells it which page publishes; the answer to a POST says how many listen.
 
 Nothing is written to disk: the latest POST replaces the previous one, and a
 restart or a closed LAN view clears it, the marker commands included.
@@ -41,6 +45,8 @@ import threading
 import time
 from collections import OrderedDict, deque
 from typing import Any, Callable, Deque, Dict, FrozenSet, List, NamedTuple, Optional, Sequence, Tuple
+
+import receiver_audio_mirror as ram
 
 ROUTE = "/api/mirror/receiver"
 VERSION = 1
@@ -127,6 +133,7 @@ MIRROR_NO_SOURCE = "MIRROR_NO_SOURCE"
 MIRROR_DUPLICATE_ID = "MIRROR_DUPLICATE_ID"
 MIRROR_MARKER_BUSY = "MIRROR_MARKER_BUSY"
 MIRROR_UNKNOWN_COMMAND = "MIRROR_UNKNOWN_COMMAND"
+MIRROR_AUDIO_BUSY = ram.MIRROR_AUDIO_BUSY
 ORIGIN_REJECTED = "ORIGIN_REJECTED"
 LAN_CLOSED_MESSAGE = "the LAN view is closed; nothing is mirrored"
 ERROR_CODES_HTTP = {
@@ -139,6 +146,7 @@ ERROR_CODES_HTTP = {
     MIRROR_DUPLICATE_ID: 409,
     MIRROR_MARKER_BUSY: 429,
     MIRROR_UNKNOWN_COMMAND: 404,
+    MIRROR_AUDIO_BUSY: 429,
 }
 
 
@@ -556,6 +564,8 @@ class ReceiverMirror:
         self._rev = 0
         self._frame_rev = 0
         self.refused = 0
+        # The Receiver's audio for listening viewers (receiver_audio_mirror.py).
+        self.audio = ram.ReceiverAudioMirror(clock)
 
     def admit(self) -> bool:
         with self._lock:
@@ -592,6 +602,7 @@ class ReceiverMirror:
         """Take posts from now on (the LAN view opened)."""
         with self._lock:
             self._open = True
+            self.audio.open()
 
     def close(self) -> None:
         """Refuse posts and forget everything, the marker commands too (the LAN view closed, moved or was disabled)."""
@@ -606,6 +617,8 @@ class ReceiverMirror:
             self._frame_at = None
             self._commands.clear()
             self._command_taken.clear()
+            # Every audio stream ends in the same step.
+            self.audio.close()
 
     def is_open(self) -> bool:
         with self._lock:
@@ -653,6 +666,7 @@ class ReceiverMirror:
             self._source = source
             self._state = state
             self._seen_at = now
+            self.audio.note_source(source["id"], now)
             self._state_at = now
             self._rev += 1
             if frame is not None:
@@ -669,7 +683,13 @@ class ReceiverMirror:
                     record["status"] = COMMAND_SENT
                     record["handed"] = True
                     commands.append(_command_wire(record))
-            return {"rev": self._rev, "frame_rev": self._frame_rev, "commands": commands}
+            return {
+                "rev": self._rev,
+                "frame_rev": self._frame_rev,
+                "commands": commands,
+                # The page asks its Receiver for audio only while somebody listens.
+                "audio_listeners": self.audio.listener_count(),
+            }
 
     def queue_marker_command(self, command: Dict[str, Any]) -> Dict[str, Any]:
         """Queue a viewer's marker command (parse_marker_command) for the next POST; its status view.
@@ -755,5 +775,6 @@ class ReceiverMirror:
                 "frame": self._frame,
                 "frame_age_ms": self._age_ms(self._frame_at, now),
                 "markers": self._markers,
+                "audio": self.audio.view(),
                 "limits": limits(),
             }

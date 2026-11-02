@@ -67,6 +67,7 @@ import {
 	createFrameThrottle,
 	cropSpectrum,
 	decimateMaxHold,
+	AUDIO_LIMITS,
 	GAIN_LIMITS,
 	isCommandId,
 	inMarkerRange,
@@ -120,6 +121,13 @@ export interface ConsoleBridge {
 	spectrum(data: ArrayLike<number>, deviceHz?: number | null): void;
 	/** Called with every frame of a running wide scan (sweep.ts). */
 	sweepFrame(frame: SweepFrameLike): void;
+	/**
+	 * Called with every chunk of audio the worker hands playAudio() (48 kHz
+	 * mono, the mix of the VFOs that are not muted). Sent as receiver:audio in
+	 * AUDIO_LIMITS.chunkSamples while the console subscribed to audio (the
+	 * Receiver mirror's listeners), whatever this page's volume or AudioContext.
+	 */
+	audio(samples: ArrayLike<number>): void;
 	/** Whether a fresh RX start unmutes VFO 1: false while a console start without listen runs, as before a scan start that resumes RX. */
 	initialVfoEnabled(): boolean;
 	/** A device connection that started outside the bridge; console starts wait for it. */
@@ -301,6 +309,17 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 	let lastMarkersAt = -Infinity;
 	let markerChain: Promise<void> = Promise.resolve();
 	let markersQueued = 0;
+	// receiver:audio: the chunk being filled, and whether samples were left out before it.
+	let audioSeq = 0;
+	let audioChunk: Float32Array | null = null;
+	let audioFill = 0;
+	let audioGap = true;
+
+	function dropAudio(): void {
+		audioChunk = null;
+		audioFill = 0;
+		audioGap = true;
+	}
 
 	function post(message: Record<string, unknown>, transfer: Transferable[] = []): void {
 		if (disposed) return;
@@ -1266,6 +1285,7 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 					sweepThrottle.setFps(next.fps);
 				}
 				subscription = next;
+				if (!next.audio) dropAudio();
 				if (heartbeat === null) heartbeat = env.setInterval(() => { if (!disposed) sendStatusNow(); }, STATUS_HEARTBEAT_MS);
 				reply(command.id, 'OK');
 				return;
@@ -1448,6 +1468,31 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 				binCount: bins.length,
 				bins,
 			}, [bins.buffer]);
+		},
+		audio(samples: ArrayLike<number>): void {
+			if (disposed || !subscription?.audio || !samples || !samples.length) return;
+			// The same rule as playAudio(): nothing plays while every VFO is muted.
+			const vfos = Array.isArray(app.vfos) ? app.vfos : [];
+			if (!vfos.some((vfo: any) => vfo?.enabled) || app._rxRestarting) {
+				dropAudio();
+				return;
+			}
+			let offset = 0;
+			while (offset < samples.length) {
+				if (!audioChunk) audioChunk = new Float32Array(AUDIO_LIMITS.chunkSamples);
+				const take = Math.min(AUDIO_LIMITS.chunkSamples - audioFill, samples.length - offset);
+				for (let index = 0; index < take; index++) audioChunk[audioFill + index] = Number(samples[offset + index]) || 0;
+				audioFill += take;
+				offset += take;
+				if (audioFill === AUDIO_LIMITS.chunkSamples) {
+					const chunk = audioChunk;
+					const gap = audioGap;
+					audioChunk = null;
+					audioFill = 0;
+					audioGap = false;
+					post({ type: 'receiver:audio', seq: ++audioSeq, sampleRateHz: AUDIO_LIMITS.sampleRateHz, gap, samples: chunk }, [chunk.buffer]);
+				}
+			}
 		},
 		initialVfoEnabled(): boolean {
 			if (resumeVfoEnabled !== null) return resumeVfoEnabled;

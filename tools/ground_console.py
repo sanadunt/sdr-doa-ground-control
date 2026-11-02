@@ -134,6 +134,7 @@ from sdr_doa_collector import (
 )
 import host_power as hp
 import receiver_archive as ra
+import receiver_audio_mirror as ram
 import receiver_mirror as rm
 from receiver_archive import ArchiveError
 from receiver_record_store import (
@@ -2250,6 +2251,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         # refusals); every other refusal is.
         if path == rm.ROUTE and status in {"200", "429"}:
             return
+        # Audio chunks are posted five times a second; a listener's stream is
+        # logged when it opens (GET, 200) and when it closes (_get_mirror_audio).
+        if path == ram.AUDIO_ROUTE and self.command == "POST" and status in {"200", "429"}:
+            return
         # A viewer polls its marker command's status while it waits; the
         # command itself (POST .../markers) is logged with the client address.
         if path.startswith(rm.MARKERS_ROUTE + "/") and status == "200":
@@ -3254,6 +3259,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if parsed.path == rm.ROUTE:
             self._get_mirror()
             return
+        if parsed.path == ram.AUDIO_ROUTE:
+            self._get_mirror_audio()
+            return
         if parsed.path.startswith(rm.MARKERS_ROUTE + "/"):
             self._get_mirror_marker(parsed.path[len(rm.MARKERS_ROUTE) + 1:])
             return
@@ -3420,6 +3428,108 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"ok": True, **result})
 
+    def _post_mirror_audio(self, parsed: Any) -> None:
+        """POST /api/mirror/receiver/audio?source=<id>: one audio chunk of the page that publishes the mirror.
+
+        In order: the same-origin loopback Origin (403), the body length (413),
+        the rate (429), an open LAN view (409), the chunk and the source id
+        (400), then the source (409 MIRROR_NO_SOURCE). The answer says how
+        many viewers listen. receiver_audio_mirror.py has the format.
+        """
+        audio = self.console_server.receiver_mirror.audio
+        if not self._same_origin_loopback_request():
+            self._discard_body(ram.MAX_AUDIO_BODY_BYTES)
+            self._send_mirror_error(rm.ORIGIN_REJECTED, f"{ram.AUDIO_ROUTE} requires a same-origin loopback request")
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            length = -1
+        if length > ram.MAX_AUDIO_BODY_BYTES:
+            self.close_connection = True
+            self._discard_body(lan.MAX_DISCARDED_BODY_BYTES)
+            self._send_mirror_error(rm.MIRROR_TOO_LARGE, f"the body must be at most {ram.MAX_AUDIO_BODY_BYTES} bytes")
+            return
+        if length < 1:
+            self._send_mirror_error(rm.MIRROR_INVALID, "the body must be one audio chunk with a Content-Length")
+            return
+        raw = self.rfile.read(length)
+        if not audio.admit():
+            self._send_mirror_error(rm.MIRROR_RATE_LIMITED, f"at most {ram.MAX_CHUNKS_PER_S} audio chunks a second")
+            return
+        if not self.console_server.lan.is_open():
+            self._send_mirror_error(rm.MIRROR_LAN_CLOSED, rm.LAN_CLOSED_MESSAGE)
+            return
+        sources = parse_qs(parsed.query, keep_blank_values=True).get("source", [])
+        try:
+            if len(raw) != length:
+                raise ValueError("the body is incomplete")
+            if len(sources) != 1 or not ram.SOURCE_ID_PATTERN.fullmatch(sources[0]):
+                raise ValueError("source must name the mirror's source id once")
+            chunk = ram.parse_chunk(raw)
+        except ValueError as exc:
+            self._send_mirror_error(rm.MIRROR_INVALID, str(exc))
+            return
+        try:
+            listeners = audio.publish(sources[0], chunk)
+        except ram.AudioRejected as exc:
+            self._send_mirror_error(exc.code, exc.message)
+            return
+        self._send_json({"ok": True, "listeners": listeners})
+
+    def _mirror_audio_read_is_allowed(self) -> bool:
+        """GET /api/mirror/receiver/audio on this listener: the mirror's read rule (the Receiver's, here)."""
+        return self._mirror_read_is_allowed()
+
+    def _get_mirror_audio(self) -> None:
+        """GET /api/mirror/receiver/audio (both listeners): a stream of the Receiver's audio chunks.
+
+        Its read rule, GET only (a HEAD gets a bare 405), then a listener slot
+        (409 MIRROR_LAN_CLOSED or MIRROR_NO_SOURCE, 429 MIRROR_AUDIO_BUSY).
+        The stream starts at the newest chunk and ends when the LAN view
+        closes, the source is lost, the same client opens another stream, or
+        a write does not finish within WRITE_TIMEOUT_S. Its opening is logged
+        (the 200) and its end, with how long it ran.
+        """
+        if not self._mirror_audio_read_is_allowed():
+            self._send_mirror_error(rm.ORIGIN_REJECTED, "the Receiver's audio is read by this console's pages only")
+            return
+        if self.command != "GET":
+            self._send_json(
+                {"ok": False, "code": lan.LAN_READ_ONLY, "error": "the Receiver's audio answers GET only"},
+                HTTPStatus.METHOD_NOT_ALLOWED,
+                headers={"Allow": "GET"},
+            )
+            return
+        audio = self.console_server.receiver_mirror.audio
+        client = str(lan.client_address(self.client_address[0]) or self.client_address[0])
+        try:
+            listener = audio.attach(client)
+        except ram.AudioRejected as exc:
+            headers = {"Retry-After": str(ram.AUDIO_BUSY_RETRY_AFTER_S)} if exc.code == ram.MIRROR_AUDIO_BUSY else None
+            self._send_json({"ok": False, "code": exc.code, "error": exc.message}, rm.ERROR_CODES_HTTP[exc.code], headers=headers)
+            return
+        started = time.monotonic()
+        try:
+            self.close_connection = True
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.connection.settimeout(ram.WRITE_TIMEOUT_S)
+            while True:
+                chunk = audio.next_chunk(listener)
+                if chunk is None:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except Exception:  # noqa: BLE001 - a stalled or gone client ends its own stream, nothing follows a started body
+            pass
+        finally:
+            audio.detach(listener)
+            self.log_message("audio stream closed after %d s", int(time.monotonic() - started))
+
     def _mirror_marker_origin_is_valid(self) -> bool:
         """POST /api/mirror/receiver/markers on this listener: the console's own page (parity and tests)."""
         return self._same_origin_loopback_request()
@@ -3567,6 +3677,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == rm.MARKERS_ROUTE:
             self._post_mirror_marker()
+            return
+        if parsed.path == ram.AUDIO_ROUTE:
+            self._post_mirror_audio(parsed)
             return
         if parsed.path == hp.ROUTE:
             self._post_host_power()
@@ -3904,6 +4017,11 @@ class LanConsoleHandler(ConsoleHandler):
             self.server.server_address[1],
             self.server.own_names,  # type: ignore[attr-defined]
         ) and lan.fetch_site_allowed(self.headers.get("Sec-Fetch-Site"))
+
+    def _mirror_audio_read_is_allowed(self) -> bool:
+        # The broadcast itself, so read as strictly as Records: the LAN Host
+        # rule and Sec-Fetch-Site absent, none or same-origin.
+        return self._lan_records_read_is_allowed()
 
     def _mirror_marker_origin_is_valid(self) -> bool:
         # The LAN view's own page: one Origin equal to http:// and the Host

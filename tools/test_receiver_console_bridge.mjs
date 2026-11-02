@@ -360,7 +360,7 @@ function setup(t, { frame: frameOptions = {}, app: appOptions = {} } = {}) {
 test('protocol constants match the console contract', () => {
 	assert.equal(BRIDGE_CHANNEL, 'sdr-console-receiver');
 	assert.equal(BRIDGE_VERSION, 1);
-	assert.deepEqual([...FRAME_MESSAGE_TYPES], ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep', 'receiver:markers']);
+	assert.deepEqual([...FRAME_MESSAGE_TYPES], ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep', 'receiver:markers', 'receiver:audio']);
 	assert.deepEqual([...CONSOLE_MESSAGE_TYPES], [
 		'console:hello', 'console:subscribe', 'console:start', 'console:stop', 'console:tune', 'console:vfo', 'console:listen',
 		'console:display', 'console:gains', 'console:radio', 'console:sweep-start', 'console:sweep-stop', 'console:sweep-config',
@@ -473,7 +473,7 @@ test('parseConsoleMessage marks a wrong payload invalid and normalizes valid one
 	assert.deepEqual(parseConsoleMessage(envelope('console:display', { auto: false, minDb: -200, maxDb: -199 })),
 		{ type: 'console:display', id: 'c2-x', auto: false, minDb: -160, maxDb: -155 }, 'clamped like the console sends it');
 	assert.deepEqual(parseConsoleMessage(envelope('console:subscribe', { spectrum: true, bins: 9999, fps: 0, spanHz: 10 })),
-		{ type: 'console:subscribe', id: 'c2-x', spectrum: true, bins: 2048, fps: 1, spanHz: 100_000 });
+		{ type: 'console:subscribe', id: 'c2-x', spectrum: true, audio: false, bins: 2048, fps: 1, spanHz: 100_000 });
 	assert.deepEqual(parseConsoleMessage(envelope('console:gains', { lnaDb: 24, amp: false, extra: 1 })), { type: 'console:gains', id: 'c2-x', lnaDb: 24, amp: false });
 	assert.deepEqual(parseConsoleMessage(envelope('console:gains', { vgaDb: 7 })), { type: 'console:gains', id: 'c2-x', vgaDb: 7 }, 'the step is checked against the device');
 	assert.deepEqual(parseConsoleMessage(envelope('console:radio', { sampleRateHz: 8_000_000 })), { type: 'console:radio', id: 'c2-x', sampleRateHz: 8_000_000 });
@@ -483,10 +483,12 @@ test('parseConsoleMessage marks a wrong payload invalid and normalizes valid one
 });
 
 test('clampSubscription clamps ranges and defaults non-numbers', () => {
-	assert.deepEqual(clampSubscription({ spectrum: true }), { spectrum: true, bins: 512, fps: 10, spanHz: 2_000_000 });
-	assert.deepEqual(clampSubscription({ spectrum: false, bins: 1, fps: 99, spanHz: 5_000_000 }), { spectrum: false, bins: 64, fps: 15, spanHz: 5_000_000 });
-	assert.deepEqual(clampSubscription({ spectrum: 'yes', bins: Number.NaN, fps: '5', spanHz: -1 }), { spectrum: false, bins: 512, fps: 10, spanHz: 100_000 });
+	assert.deepEqual(clampSubscription({ spectrum: true }), { spectrum: true, audio: false, bins: 512, fps: 10, spanHz: 2_000_000 });
+	assert.deepEqual(clampSubscription({ spectrum: false, bins: 1, fps: 99, spanHz: 5_000_000 }), { spectrum: false, audio: false, bins: 64, fps: 15, spanHz: 5_000_000 });
+	assert.deepEqual(clampSubscription({ spectrum: 'yes', bins: Number.NaN, fps: '5', spanHz: -1 }), { spectrum: false, audio: false, bins: 512, fps: 10, spanHz: 100_000 });
 	assert.equal(clampSubscription({ bins: 300.6 }).bins, 301);
+	assert.equal(clampSubscription({ audio: true }).audio, true);
+	assert.equal(clampSubscription({ audio: 1 }).audio, false);
 });
 
 // ---------------------------------------------------------------------------
@@ -790,6 +792,43 @@ test('spectrum frames flow only while subscribed and running, cropped, throttled
 	frame.send('console:subscribe', { id: 'sub-3', spectrum: false });
 	feed(30, 33);
 	assert.equal(messages('receiver:spectrum').length, 5, 'spectrum:false stops frames');
+});
+
+test('audio flows in 100 ms chunks only while subscribed and a VFO plays, transferred and marked after a gap', async t => {
+	const { frame, app, bridge, messages } = setup(t);
+	app.running = true;
+	app.vfos[0].enabled = true;
+	const piece = new Float32Array(786).fill(0.5);
+	const feed = count => { for (let i = 0; i < count; i++) bridge.audio(piece); };
+	feed(20);
+	assert.deepEqual(messages('receiver:audio'), [], 'no audio subscription yet');
+
+	frame.send('console:subscribe', { id: 'sub-a1', spectrum: false, audio: true });
+	feed(13); // 10 218 samples: two chunks of 4800 and the rest waiting
+	let chunks = messages('receiver:audio');
+	assert.equal(chunks.length, 2);
+	assert.deepEqual(chunks.map(chunk => [chunk.seq, chunk.sampleRateHz, chunk.gap, chunk.samples.length]), [[1, 48_000, true, 4800], [2, 48_000, false, 4800]]);
+	assert.ok(chunks[0].samples.every(sample => sample === 0.5));
+	const audioPosts = frame.posted.filter(entry => entry.message.type === 'receiver:audio');
+	for (const entry of audioPosts) {
+		assert.equal(entry.transfer.length, 1);
+		assert.equal(entry.transfer[0].byteLength, 0, 'the chunk was transferred, not cloned');
+	}
+	assert.equal(piece.length, 786, 'the speaker keeps its samples');
+
+	// Every VFO muted: nothing is sent, as nothing plays, and the next chunk follows a gap.
+	app.vfos.forEach(vfo => { vfo.enabled = false; });
+	feed(20);
+	assert.equal(messages('receiver:audio').length, 2);
+	app.vfos[0].enabled = true;
+	feed(7);
+	chunks = messages('receiver:audio');
+	assert.equal(chunks.length, 3);
+	assert.equal(chunks[2].gap, true);
+
+	frame.send('console:subscribe', { id: 'sub-a2', spectrum: false, audio: false });
+	feed(20);
+	assert.equal(messages('receiver:audio').length, 3, 'audio:false stops audio');
 });
 
 test('a spectrum frame carries the centre the stream was tuned to, not the one still on its way', async t => {
