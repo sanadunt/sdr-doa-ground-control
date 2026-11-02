@@ -146,15 +146,18 @@ function tableOptions(entry: FieldEvaluation, table: readonly number[]): Array<{
   return options;
 }
 
+// The read-back compares the sent values with what the RDF-SDR reports from its
+// settings.json: a match means saved there, not that the radio runs with it.
+// Only the edge's APPLIED (its own runtime evidence) says that.
 const VERIFY_CHIPS: Record<VerifyStatus, { code: string; tone: string }> = {
-  confirmed: { code: 'CONFIRMED', tone: 'good' },
+  confirmed: { code: 'SAVED', tone: 'info' },
   pending: { code: 'PENDING', tone: 'info' },
   unchanged: { code: 'UNCHANGED', tone: 'warn' },
   'not-reported': { code: 'NOT REPORTED', tone: 'neutral' },
 };
 
 const VERIFY_VERDICTS: Record<VerifyVerdict, { key: MessageKey; tone: string }> = {
-  confirmed: { key: 'verify.verdict.confirmed', tone: 'good' },
+  confirmed: { key: 'verify.verdict.confirmed', tone: 'info' },
   partial: { key: 'verify.verdict.partial', tone: 'warn' },
   pending: { key: 'verify.verdict.pending', tone: 'info' },
   unchanged: { key: 'verify.verdict.unchanged', tone: 'warn' },
