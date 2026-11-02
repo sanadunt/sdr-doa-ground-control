@@ -295,4 +295,3 @@ describe('groundstation GPS freshness', () => {
     expect(groundRowText(card)).toMatch(/^FIX/);
   });
 });
-
