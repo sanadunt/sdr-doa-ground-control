@@ -37,6 +37,8 @@ export const VERIFY_FIELD_RULES: Record<ConfigPatchKey, VerifyFieldRule> = {
   vfo0_frequency_hz: { dataOutKey: 'vfo_freq_0', scale: 1, tolerance: 500 },
   vfo0_bandwidth_hz: { dataOutKey: 'vfo_bw_0', scale: 1, tolerance: 1 },
   vfo0_squelch_db: { dataOutKey: 'vfo_squelch_0', scale: 1, tolerance: 0.05 },
+  // The UCA radius in metres (edge 1.8.0); the edge rounds it to 0.1 mm and its band rule to the band value.
+  ant_spacing_m: { dataOutKey: 'ant_spacing_meters', scale: 1, tolerance: 0.0005 },
 };
 
 export type ConfigValues = Record<ConfigPatchKey, number | null>;

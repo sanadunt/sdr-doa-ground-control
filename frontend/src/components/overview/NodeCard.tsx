@@ -7,6 +7,8 @@ import { useI18n } from '../../lib/i18n';
 import type { Translate } from '../../lib/i18n';
 import { doaSample, doaSampleText, loraLink, overLora, snapshotNav, snapshotRf } from '../../lib/telemetrySource';
 import type { RfSettings } from '../../lib/telemetrySource';
+import { distanceAndBearing, groundGpsState, groundGpsSummary, snapshotGroundGps, stationPositionLive } from '../../lib/groundGps';
+import type { GeoOrigin } from '../../lib/doaGeometry';
 import { coordinateSourceKey } from '../DoaReadout';
 import { Icon } from '../ui';
 
@@ -119,9 +121,9 @@ export function navRows(nav: Record<string, unknown> | null, t: Translate): Arra
 type NodeRow = [string, string, string?, boolean?];
 
 /**
- * VFO0, bandwidth and squelch of state.rf (edge 1.7), each only when the edge
- * sends it, and marked as a setting: settings.json of revision cfg, not a
- * measurement.
+ * VFO0, bandwidth and squelch of state.rf (edge 1.7) and the UCA radius (edge
+ * 1.8), each only when the edge sends it, and marked as a setting:
+ * settings.json of revision cfg, not a measurement.
  */
 export function rfRows(rf: RfSettings | null, t: Translate): NodeRow[] {
   if (!rf) return [];
@@ -130,7 +132,31 @@ export function rfRows(rf: RfSettings | null, t: Translate): NodeRow[] {
   if (rf.vfo0Hz !== null) rows.push([t('node.vfo0'), setting(`${(rf.vfo0Hz / 1e6).toFixed(3)} MHz`), undefined, true]);
   if (rf.bandwidthHz !== null) rows.push([t('node.bandwidth'), setting(`${Number((rf.bandwidthHz / 1000).toFixed(1))} kHz`), undefined, true]);
   if (rf.squelchDb !== null) rows.push([t('node.squelch'), setting(`${rf.squelchDb.toFixed(1)} dB`), undefined, true]);
+  if (rf.ucaM !== null) rows.push([t('node.uca'), setting(`${rf.ucaM.toFixed(3)} m`), undefined, true]);
   return rows;
+}
+
+/**
+ * The Groundstation row: its own GPS (ground-gps-publisher), with the distance
+ * to the RDF-SDR while both positions are known. None from a console or an
+ * answer without the ground_gps block, or while nothing reported.
+ */
+export function groundRow(
+  snapshot: TelemetrySnapshot | null,
+  localSnapshotFresh: boolean,
+  ground: GeoOrigin | null,
+  coordinate: MapCoordinate | null,
+  positionHeld: boolean,
+  t: Translate,
+): NodeRow[] {
+  const view = snapshotGroundGps(snapshot);
+  if (!view?.present) return [];
+  const state = groundGpsState(view, localSnapshotFresh);
+  const distance = state === 'FIX' && ground && coordinate
+    ? { distanceM: distanceAndBearing(ground, coordinate).distanceM, live: stationPositionLive(coordinate, positionHeld) }
+    : null;
+  const tone = state === 'FIX' ? 'is-good' : state === 'NO_DEVICE' || state === 'ERROR' ? 'is-bad' : undefined;
+  return [[t('node.ground'), groundGpsSummary(view, state, distance, t), tone, true]];
 }
 
 /**
@@ -143,6 +169,8 @@ export function NodeCard({
   localSnapshotFresh,
   coordinate,
   positionHeld,
+  ground = null,
+  groundGpsFresh,
   compassOffset,
   offsetSource,
   offsetManual,
@@ -153,6 +181,10 @@ export function NodeCard({
   localSnapshotFresh: boolean;
   coordinate: MapCoordinate | null;
   positionHeld: boolean;
+  /** The groundstation's own GPS fix, for the distance to the RDF-SDR. */
+  ground?: GeoOrigin | null;
+  /** The groundstation GPS is current, apart from the RDF-SDR's data. */
+  groundGpsFresh?: boolean;
   compassOffset: number;
   offsetSource: string;
   offsetManual: boolean;
@@ -224,6 +256,7 @@ export function NodeCard({
     [t('node.adc'), dataOutValue(summary.adc === 'N/A', summary.adc), summary.adc === 'OK' ? 'is-good' : summary.adc === 'OVERDRIVE' ? 'is-bad' : undefined],
     ...dataOutRows,
     ...navRows(snapshotNav(snapshot), t),
+    ...groundRow(snapshot, groundGpsFresh ?? localSnapshotFresh, ground, coordinate, positionHeld, t),
   ];
 
   return (

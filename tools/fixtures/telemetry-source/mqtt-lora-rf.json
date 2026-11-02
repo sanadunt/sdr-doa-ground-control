@@ -211,6 +211,7 @@
   "received_at_ms": 1793070140000,
   "source": "state.rf",
   "t": 1793070140000,
+  "uca_m": null,
   "vfo0_bandwidth_hz": 12500,
   "vfo0_frequency_hz": 103100000,
   "vfo0_squelch_db": -100.0

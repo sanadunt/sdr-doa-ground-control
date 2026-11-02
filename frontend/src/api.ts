@@ -650,6 +650,12 @@ export interface ConfigNodeView {
   remoteCommands: boolean | null;
   /** False when the node reports no settings target: a patch would fail. */
   remoteConfigPatch: boolean | null;
+  /**
+   * Contract 1.8: the fields the node's config.patch takes
+   * (capabilities.config_fields); null from an older edge, which takes the
+   * five fields before ant_spacing_m.
+   */
+  configFields: string[] | null;
 }
 
 /** The latest settings/reported, without its settings.json text. */
@@ -693,7 +699,15 @@ function normalizeNode(value: unknown): ConfigNodeView | null {
     healthAgeMs: integerOrNull(value.health_age_ms, 0),
     remoteCommands: booleanOrNull(value.remote_commands),
     remoteConfigPatch: booleanOrNull(value.remote_config_patch),
+    configFields: configFieldsOrNull(value.config_fields),
   };
+}
+
+const CONFIG_FIELD_RE = /^[a-z][a-z0-9_]{0,63}$/u;
+
+function configFieldsOrNull(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.filter((item): item is string => typeof item === 'string' && CONFIG_FIELD_RE.test(item)).slice(0, 16);
 }
 
 function normalizeSettings(value: unknown): ConfigSettingsReport | null {
@@ -847,6 +861,11 @@ export interface ConfigCommandAck {
   method: string | null;
   /** Contract 1.7: why a live retune did not hold, such as DAQ_NOT_HEALTHY_AFTER_RETUNE. */
   liveFailure: string | null;
+  /**
+   * Contract 1.8: the UCA radius (m) the engine's band rule set with the
+   * patch, or the one it requires (FAILED SPACING_SET_BY_ENGINE_BAND).
+   */
+  bandSpacingM: number | null;
   receivedAtMs: number | null;
 }
 
@@ -888,6 +907,10 @@ function normalizeProof(value: unknown): ConfigCommandAck['proof'] {
   return proof;
 }
 
+function spacingOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 100 ? value : null;
+}
+
 function normalizeAck(value: unknown): ConfigCommandAck | null {
   if (!isObject(value)) return null;
   const status = codeOrNull(value.status);
@@ -902,6 +925,7 @@ function normalizeAck(value: unknown): ConfigCommandAck | null {
     persisted: booleanOrNull(value.persisted),
     method: codeOrNull(value.method),
     liveFailure: reasonOrNull(value.live_failure),
+    bandSpacingM: spacingOrNull(value.band_spacing_m),
     receivedAtMs: integerOrNull(value.received_at_ms, 0),
   };
 }

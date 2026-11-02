@@ -2,6 +2,25 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.6.0
+
+Rilis minor: tidak ada yang dihapus. Groundstation kini punya lokasi sendiri dari GPS USB-nya, dan peta menampilkan jaraknya ke RDF-SDR. Kanal `3` dan timer update memasang console-nya sendiri. Pembaca GPS di host dipasang sekali dengan `sudo`.
+
+- **GPS groundstation.** Service host baru, `packaging/ground-gps`, membaca GPS USB groundstation (u-blox 7).
+  - Ia berjalan di luar Docker seperti jembatan LoRa, hanya membaca, dan tidak bisa membuka port LoRa.
+  - Posisinya diterbitkan ke broker lokal di topik `sdr/v2/uav-01/ground/gps`. Console membacanya lewat MQTT, tanpa akses ke perangkat USB.
+  - Pasang: `sudo sh packaging/ground-gps/install.sh` dari tarball rilis. Coba dulu dengan `--dry-run`.
+- **Di peta:** penanda kotak "GS" dan garis titik-titik ke RDF-SDR, dengan jarak dan arah.
+  - Bila posisi RDF-SDR bukan posisi langsung (cadangan, manual, atau posisi terakhir yang ditahan), garisnya abu-abu dan bertanda "REFERENCE".
+  - Kartu RDF-SDR punya baris Groundstation, misalnya "FIX 3D · 4 sat · 1.23 km", dan System Health punya kartu GPS groundstation.
+  - Tablet di tampilan LAN ikut melihatnya.
+- **Jarak UCA dari Kontrol (RDF Node Edge 1.8).** Kontrol menampilkan kolom "Jarak UCA" bila RDF-SDR mendukungnya.
+  - Rule band mengirim 0,3 m (VHF) atau 0,128 m (UHF) bersama gain.
+  - Di band ini engine KrakenSDR menetapkan jaraknya sendiri. Jarak lain ditolak RDF-SDR dengan pesan, dan Kontrol menyebut bila RDF-SDR ikut menulis jarak band.
+  - Di luar rule band, Kontrol menulis bahwa RDF-SDR mengatur jarak UCA sendiri untuk frekuensi itu.
+  - Kartu RDF-SDR menampilkan UCA sebagai setelan.
+  - Edge yang lebih lama tetap memakai lima kolom seperti sebelumnya.
+
 ## 3.5.0
 
 Rilis minor: tidak ada yang dihapus. Console membaca tambahan kontrak 1.7 dari RDF Node Edge 1.7.0, sehingga lewat Telemetry LoRa Dashboard menampilkan frekuensi, dB dan setelan SDR, dan Kontrol menampilkan cara RDF-SDR menerapkan perubahan. Edge yang lebih lama tetap tampil seperti sebelumnya. Kanal `3` dan timer update memasangnya sendiri.

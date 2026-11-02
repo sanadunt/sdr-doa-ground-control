@@ -116,6 +116,8 @@ ACK_RESULT_KEYS = frozenset({
     "previous_boot", "boot_before", "changes", "cleared", "late",
     # Contract 1.7: how a config.patch was applied (LIVE, RESTART, FILE) and why a live retune fell back.
     "method", "live_failure",
+    # Contract 1.8: the UCA radius the engine's band rule set (or required, with SPACING_SET_BY_ENGINE_BAND).
+    "band_spacing_m",
 })
 _SECRET_KEY_WORDS = ("challenge", "secret", "password", "passwd", "token", "credential", "private")
 
@@ -126,6 +128,8 @@ SAFE_SETTINGS_MAP = {
     "vfo0_frequency_hz": ("vfo_freq_0", 1),
     "vfo0_bandwidth_hz": ("vfo_bw_0", 1),
     "vfo0_squelch_db": ("vfo_squelch_0", 1),
+    # Contract 1.8: the UCA radius in metres.
+    "ant_spacing_m": ("ant_spacing_meters", 1),
 }
 SAFE_SETTINGS_SCALARS = ("ant_arrangement", "doa_method", "active_vfos", "output_vfo", "en_doa")
 
@@ -401,6 +405,8 @@ def _state_rf(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         ("g", lambda: _number(named, "rf.g", -100, 100)),
         ("bw", lambda: _int(named, "rf.bw", 1, _U32)),
         ("sq", lambda: _number(named, "rf.sq", -1000, 1000)),
+        # Contract 1.8: the UCA radius (ant_spacing_meters) in metres.
+        ("uca", lambda: _number(named, "rf.uca", 0, 100)),
     )
     value: Dict[str, Any] = {}
     for key, read in readers:
@@ -436,6 +442,13 @@ def _validate_capabilities(data: Dict[str, Any]) -> Dict[str, Any]:
         else:
             _note("DEFAULTED", flag)
             value[flag] = False
+    # Contract 1.8: the fields config.patch takes. Without the list (an older edge) it stays
+    # out, and Ground sends only the five fields before ant_spacing_m; a bad list is noted.
+    if "config_fields" in data:
+        try:
+            value["config_fields"] = _words(data, "config_fields", 16)
+        except _Invalid:
+            _note("INVALID_FIELD", "config_fields")
     # Edges before 1.0.0-20261013 published it; it is no longer required.
     if "maintenance" in data:
         value["maintenance"] = _bool(data, "maintenance")
@@ -879,14 +892,21 @@ class RdfNodeV2Telemetry:
             "capabilities": self._session_capabilities(),
         }
 
-    def _session_capabilities(self) -> Optional[Dict[str, bool]]:
-        """The command flags of ``capabilities``, only when it belongs to the current session."""
+    def _session_capabilities(self) -> Optional[Dict[str, Any]]:
+        """The command flags of ``capabilities``, only when it belongs to the current session.
+
+        ``config_fields`` (contract 1.8) is the list of fields ``config.patch``
+        takes, or None from an older edge that sends no list.
+        """
         if self._capabilities is None or self._session is None:
             return None
         payload = self._capabilities["payload"]
         if payload["sid"] != self._session["payload"]["sid"]:
             return None
-        return {flag: payload[flag] for flag in ("remote_commands", "remote_config_patch", "config_patch")}
+        flags: Dict[str, Any] = {flag: payload[flag] for flag in ("remote_commands", "remote_config_patch", "config_patch")}
+        fields = payload.get("config_fields")
+        flags["config_fields"] = list(fields) if isinstance(fields, list) else None
+        return flags
 
     def expect_settings_report(self, command_id: str, now_ms: int, sid: Optional[str] = None) -> None:
         """Accept the ``settings/reported`` answer to a ``config.get`` with this id.
