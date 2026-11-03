@@ -9,9 +9,11 @@ function formatDb(value: number, known = true): string {
 
 /**
  * Map legend: layer swatches (the RDF-SDR heading only while it is drawn), the colour scale the heat layer is painted with,
- * and the readings derived from the current vector (ring spacing, -3 dB width).
+ * and the readings derived from the current vector (ring spacing, -3 dB width). While the map draws the last live
+ * overlay held (`heldTime`), the legend leads with STALE and that time; its swatches and scale keep the live colours,
+ * as the held overlay does (owner's decision of 2026-11-02).
  */
-export function OverlayLegend({ settings, scale, saturation, ringStepM, halfPower, heading = null }: {
+export function OverlayLegend({ settings, scale, saturation, ringStepM, halfPower, heading = null, heldTime = null }: {
   settings: DoaOverlaySettings;
   scale: DbScale;
   saturation: number;
@@ -19,6 +21,8 @@ export function OverlayLegend({ settings, scale, saturation, ringStepM, halfPowe
   halfPower: HalfPowerWidth | null;
   /** The RDF-SDR heading as the map draws it: live, held (STALE) or not drawn. */
   heading?: 'live' | 'held' | null;
+  /** The time the held overlay was last live, while the map draws it held; null for live data. */
+  heldTime?: string | null;
 }): JSX.Element {
   const { t } = useI18n();
   const beam = settings.heatStyle === 'beam';
@@ -30,12 +34,14 @@ export function OverlayLegend({ settings, scale, saturation, ringStepM, halfPowe
     ? t('map.scaleAutoAria', { min: formatDb(scale.minDb, scale.known), max: formatDb(scale.maxDb, scale.known) })
     : t('map.scaleAria', { min: formatDb(scale.minDb), max: formatDb(scale.maxDb) });
   const saturated = scale.mode === 'manual' && saturation >= SATURATION_WARNING_FRACTION;
+  const swatch = (name: string) => `legend-swatch ${name}`;
   return (
     <div className="map-overlay-legend" role="note">
       <div className="legend-row">
-        {settings.bearingVisible ? <span><i className="legend-swatch legend-bearing" /> {t('map.legendBearing')}</span> : null}
-        {settings.edgesVisible && halfPower ? <span><i className="legend-swatch legend-edge" /> {t('map.legendEdges')}</span> : null}
-        {settings.lobeVisible ? <span><i className="legend-swatch legend-lobe" /> {t('map.legendLobe')}</span> : null}
+        {heldTime !== null ? <span className="legend-held">{t('map.legendHeld', { time: heldTime })}</span> : null}
+        {settings.bearingVisible ? <span><i className={swatch('legend-bearing')} /> {t('map.legendBearing')}</span> : null}
+        {settings.edgesVisible && halfPower ? <span><i className={swatch('legend-edge')} /> {t('map.legendEdges')}</span> : null}
+        {settings.lobeVisible ? <span><i className={swatch('legend-lobe')} /> {t('map.legendLobe')}</span> : null}
         {heading ? <span><i className={heading === 'held' ? 'legend-swatch legend-heading is-held' : 'legend-swatch legend-heading'} /> {t(heading === 'held' ? 'map.legendHeadingHeld' : 'map.legendHeading')}</span> : null}
         {settings.ringsVisible && ringStepM > 0 ? <span className="legend-reading">{t('map.ringStep', { step: formatDistance(ringStepM) })}</span> : null}
         <span className="legend-reading">{halfPower ? t('map.halfPower', { deg: halfPower.widthDeg }) : t('map.halfPowerNone')}</span>

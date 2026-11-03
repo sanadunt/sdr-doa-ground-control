@@ -330,8 +330,8 @@ def _admin_password_from_sources(
 # console never accepts a URL the collector would refuse to read.
 DEFAULT_BIND = "127.0.0.1"
 DEFAULT_PORT = 8787
-# Kontrol's RDF Node commands live 15 s (rdf_node_commands.COMMAND_TTL_MS, the
-# edge's Ground default; the edge accepts at most 30 s).
+# Kontrol's RDF Node commands live 30 s (rdf_node_commands.COMMAND_TTL_MS, the
+# most the edge accepts).
 MAX_CONFIG_PATCH_REQUEST_BYTES = 4096
 CONFIG_PATCH_REQUEST_KEYS = frozenset({"changes", "base_rev", "confirm"})
 # The edge refuses a second config.get from the same link within 1 s.

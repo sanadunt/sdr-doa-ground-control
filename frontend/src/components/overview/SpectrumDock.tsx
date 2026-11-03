@@ -4,6 +4,7 @@ import type { ConsoleCapabilities } from '../../api';
 import type { TelemetrySnapshot } from '../../types';
 import type { OverviewPanels } from '../../lib/overviewPanels';
 import type { ConfigPatchChanges } from '../../lib/controlDraft';
+import { controlSendingStore } from '../../lib/controlDraft';
 import { consoleRequestsMockSdr, createReceiverBridge } from '../../lib/receiverBridge';
 import type { BridgeResult, ReceiverBridge } from '../../lib/receiverBridge';
 import { SUBSCRIBE_LIMITS, SWEEP_SPAN_LIMITS, inMarkerRange, inTuneRange, isListenMode } from '../../lib/receiverBridgeProtocol';
@@ -53,6 +54,12 @@ export interface SpectrumDockProps {
   onNavigate: (route: RouteName) => void;
   /** The console's one Receiver bridge (App). Without it the dock uses a detached bridge of its own. */
   receiverBridge?: ReceiverBridge;
+  /**
+   * The compact touch layout: the dock fills its panel, the header keeps one row without the
+   * source text, follow-node, the mode select, Kirim and Atur (they live in the Atur column,
+   * which compact does not open), and the Receiver link is an icon.
+   */
+  compact?: boolean;
 }
 
 /** Codes a successful start (RX or scan) makes obsolete. */
@@ -160,6 +167,11 @@ function spectrumNeedPx(section: HTMLElement): { need: number; trace: number } |
   };
 }
 
+/** A mode switch label: the text on the PC; in the compact layout an icon too, so a phone's panel can show the icon alone. */
+export function SpectrumModeLabel({ compact, icon, text }: { compact: boolean; icon: 'receiver' | 'spectrum'; text: string }): JSX.Element {
+  return compact ? <><Icon name={icon} /><span className="ov-spec-mode-label">{text}</span></> : <>{text}</>;
+}
+
 export interface SpectrumMarkRowProps {
   /** The picked marker, or null. */
   marker: BridgeMarker | null;
@@ -246,6 +258,7 @@ export function SpectrumDock({
   onRequestReceiver,
   onNavigate,
   receiverBridge,
+  compact = false,
 }: SpectrumDockProps): JSX.Element {
   const { t } = useI18n();
   const fallbackBridge = useRef<ReceiverBridge | null>(null);
@@ -795,18 +808,26 @@ export function SpectrumDock({
   const rxVfoHz = shownCenter !== null || shownVfo !== null
     ? shownVfo ?? shownCenter
     : target?.vfoHz ?? target?.centerHz ?? null;
-  const sendable = rxVfoHz !== null
+  // Kontrol is still sending a patch (until the edge's final ACK): the next request waits until that one is final.
+  const controlSending = useSyncExternalStore(controlSendingStore.subscribe, controlSendingStore.get, controlSendingStore.get);
+  const inRange = rxVfoHz !== null
     && inFieldRange('center_frequency_hz', rxVfoHz, ranges) && inFieldRange('vfo0_frequency_hz', rxVfoHz, ranges);
+  const sendable = inRange && !controlSending;
   const [rangeMin, rangeMax] = fieldRange(fieldFor('center_frequency_hz'), ranges);
   const sendTitle = rxVfoHz === null
     ? t('spectrum.sendNoFrequency')
-    : sendable
+    : controlSending && inRange
+      ? t('spectrum.sendBusy')
+      : sendable
       ? t('spectrum.sendTitle', { vfo: formatMhz(rxVfoHz, 3) })
       : t('spectrum.sendOutOfRange', { min: formatMhz(rangeMin, 0), max: formatMhz(rangeMax, 0) });
+  // Only fills Kontrol's form; in Spektrum mode the dock also goes back to RX (the Listener), so the
+  // operator sees the trace at the frequency that goes to the RDF-SDR.
   const sendDraft = () => {
     if (!sendable || rxVfoHz === null) return;
     onPanelsChange({ ...panels, control: true });
     onControlDraftRequest({ center_frequency_hz: rxVfoHz, vfo0_frequency_hz: rxVfoHz });
+    if (dockMode === 'sweep') chooseMode('rx');
   };
 
   const sampleRate = live?.sampleRateHz ?? null;
@@ -901,9 +922,11 @@ export function SpectrumDock({
   const simulatedScan = liveSweep?.source === 'simulated' && (scanPhase === 'starting' || scanPhase === 'active');
   const runStops = view.stoppable;
   const modeDisabled = view.controlsDisabled || starting || radioPending !== null || scanPhase === 'stopping';
+  // The compact layout never shows the Atur column, also one left open before the layout changed.
+  const settingsShown = settingsOpen && !compact;
 
   return (
-    <section id="panel-spectrum" className={`ov-spectrum${settingsOpen ? ' is-settings-open' : ''}`} aria-labelledby="ov-spectrum-title" ref={sectionRef}>
+    <section id="panel-spectrum" className={`ov-spectrum${settingsShown ? ' is-settings-open' : ''}${compact ? ' is-compact' : ''}`} aria-labelledby="ov-spectrum-title" ref={sectionRef}>
       {/* [title][source or MOCK][tags][chip][mode switch][Penanda] … [follow, mode, Dengar] Kirim [Mulai, Receiver] Atur.
           The mode switch and the Penanda toggle take their place after the chip. Follow, mode and Kirim
           carry ov-spec-wide: on a narrow dock they are hidden here and shown in the Atur column. */}
@@ -911,14 +934,14 @@ export function SpectrumDock({
         <h2 id="ov-spectrum-title">{t('spectrum.title')}</h2>
         {mock
           ? <span className="ov-tag tone-warn">MOCK</span>
-          : <span className="ov-spec-source">{t('spectrum.sourceHackrf')}</span>}
+          : compact ? null : <span className="ov-spec-source">{t('spectrum.sourceHackrf')}</span>}
         {shiftHz !== 0 ? <span className="ov-tag tone-info" title={t('spectrum.upconverterTitle', { shift: formatMhz(shiftHz, 3) })}>UPCONVERTER</span> : null}
         {simulatedScan ? <span className="ov-tag tone-warn">SIM</span> : null}
         {live?.recording ? <span className="ov-tag tone-bad">REC</span> : null}
         <span className={`ov-chip tone-${view.tone}`}>{view.chip}</span>
         <div className="ov-seg ov-seg-compact ov-spec-mode" role="group" aria-label={t('spectrum.modeGroup')}>
-          <button type="button" aria-pressed={dockMode === 'rx'} disabled={modeDisabled} onClick={() => chooseMode('rx')}>{t('spectrum.modeRx')}</button>
-          <button type="button" aria-pressed={dockMode === 'sweep'} disabled={modeDisabled} onClick={() => chooseMode('sweep')}>{t('spectrum.modeSweep')}</button>
+          <button type="button" aria-pressed={dockMode === 'rx'} disabled={modeDisabled} onClick={() => chooseMode('rx')}><SpectrumModeLabel compact={compact} icon="receiver" text={t('spectrum.modeRx')} /></button>
+          <button type="button" aria-pressed={dockMode === 'sweep'} disabled={modeDisabled} onClick={() => chooseMode('sweep')}><SpectrumModeLabel compact={compact} icon="spectrum" text={t('spectrum.modeSweep')} /></button>
         </div>
         <button className="ov-button ov-spec-mark" type="button" aria-pressed={marking} disabled={phase !== 'ready'} onClick={toggleMarking}>
           <Icon name="marker" /><span className="ov-spec-mark-label">{t('spectrum.mark')}</span>
@@ -927,13 +950,17 @@ export function SpectrumDock({
         <span className="ov-spacer" />
         {/* Follow, mode and Dengar wrap as one group, as do Mulai/Berhenti and the Receiver link. */}
         <div className="ov-spec-group">
-          <label className="ov-spec-follow ov-spec-wide">
-            <input type="checkbox" checked={followNode} onChange={(event) => setFollowNode(event.target.checked)} />
-            <span>{t('spectrum.follow')}</span>
-          </label>
-          <select className="ov-listen-mode ov-spec-wide" aria-label={t('spectrum.mode')} title={t('spectrum.mode')} value={shownMode} onChange={changeMode}>
-            {LISTEN_MODE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-          </select>
+          {compact ? null : (
+            <>
+              <label className="ov-spec-follow ov-spec-wide">
+                <input type="checkbox" checked={followNode} onChange={(event) => setFollowNode(event.target.checked)} />
+                <span>{t('spectrum.follow')}</span>
+              </label>
+              <select className="ov-listen-mode ov-spec-wide" aria-label={t('spectrum.mode')} title={t('spectrum.mode')} value={shownMode} onChange={changeMode}>
+                {LISTEN_MODE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </>
+          )}
           <button
             className="ov-button ov-spec-listen"
             type="button"
@@ -945,9 +972,11 @@ export function SpectrumDock({
             <Icon name="headphones" /><span>{t('spectrum.listen')}</span>
           </button>
         </div>
-        <button className="ov-button ov-spec-send ov-spec-wide" type="button" disabled={!sendable} title={sendTitle} onClick={sendDraft}>
-          <Icon name="send" /><span>{t('spectrum.send')}</span>
-        </button>
+        {compact ? null : (
+          <button className="ov-button ov-spec-send ov-spec-wide" type="button" disabled={!sendable} title={sendTitle} onClick={sendDraft}>
+            <Icon name="send" /><span>{t('spectrum.send')}</span>
+          </button>
+        )}
         <div className="ov-spec-group">
           <button
             className="ov-button ov-spec-run"
@@ -967,9 +996,11 @@ export function SpectrumDock({
             <Icon name="external" /><span className="ov-spec-open-label">{t('spectrum.openReceiver')}</span><kbd aria-hidden="true">{RECEIVER_KEY}</kbd>
           </button>
         </div>
-        <button className="ov-button ov-spec-settings-toggle" type="button" aria-expanded={settingsOpen} aria-controls="spectrum-settings" onClick={() => setSettingsOpen(!settingsOpen)}>
-          <Icon name="sliders" /><span>{t('spectrum.settings')}</span>
-        </button>
+        {compact ? null : (
+          <button className="ov-button ov-spec-settings-toggle" type="button" aria-expanded={settingsOpen} aria-controls="spectrum-settings" onClick={() => setSettingsOpen(!settingsOpen)}>
+            <Icon name="sliders" /><span>{t('spectrum.settings')}</span>
+          </button>
+        )}
       </div>
       <div className="ov-spec-main">
         <SpectrumCanvas
@@ -985,7 +1016,7 @@ export function SpectrumDock({
           tuneHz={vfoHz}
           onTune={tune}
           dbRange={dbRange}
-          onAutoRange={settingsOpen && shownDb.auto ? onAutoRange : undefined}
+          onAutoRange={settingsShown && shownDb.auto ? onAutoRange : undefined}
           handle={canvasHandle}
           markers={markerList}
           selectedMarkerId={selectedMarker?.id ?? null}
@@ -995,7 +1026,7 @@ export function SpectrumDock({
           onSelectMarker={setSelectedMarkerId}
           onMarkerKey={onMarkerKey}
         />
-        {settingsOpen ? (
+        {settingsShown ? (
           <SpectrumSettings
             dockMode={dockMode}
             followNode={followNode}

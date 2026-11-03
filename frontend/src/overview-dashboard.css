@@ -126,6 +126,9 @@
 .ov-hud-offset > span { font-family: var(--mono); font-weight: 600; }
 .ov-hud-sample { overflow: hidden; color: var(--subtle); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
 .ov-hud-sample.is-provisional { opacity: .72; }
+/* Gain, VFO and squelch of state.rf: wraps between its parts instead of cutting the squelch off. */
+.ov-hud-rf { overflow: visible; white-space: normal; }
+.ov-hud-rf > span { display: inline-block; white-space: nowrap; }
 .ov-hud-sample.is-provisional b, .ov-hud-sample.is-setting b { color: var(--subtle); }
 .ov-hud-held { margin: 0; color: var(--amber); font-size: 12px; line-height: 1.35; }
 /* Transmitter position estimate, under the HUD. */
@@ -459,3 +462,77 @@
 @media (max-width: 399px) {
   .ov-toggle-label { display: none; }
 }
+
+/* Compact touch layout ------------------------------------------------------ */
+/* Phones and tablets without a mouse (data-layout on the shell root, lib/compactLayout.ts).
+   The stage fills the viewport under the one-row top bar with no page scroll: map left
+   (55 %) and Spektrum right (45 %) in landscape, map above Spektrum in portrait, the map
+   alone when Spektrum is off. No Polar dock. The HUD and Lapisan float top-left on the
+   map, the node card and Kontrol top-right when their top-bar switches open them; the
+   legend row is left out and the map buttons stay bottom-left. A PC never matches. */
+.console-shell[data-layout^='compact'] .ov-stage { --ov-dock-h: 0px; --ov-gap: 8px; display: grid; grid-template-areas: 'map dock'; grid-template-columns: minmax(0, 55fr) minmax(0, 45fr); grid-template-rows: minmax(0, 1fr); gap: 0; height: 100%; min-height: 0; padding: 0; }
+.console-shell[data-layout='compact-portrait'] .ov-stage { grid-template-areas: 'map' 'dock'; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 55fr) minmax(0, 45fr); }
+.console-shell[data-layout^='compact'] .ov-stage[data-dock='none'] { grid-template-areas: 'map'; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+.console-shell[data-layout^='compact'] .ov-map { position: relative; z-index: 0; grid-area: map; min-width: 0; min-height: 0; }
+.console-shell[data-layout^='compact'] .ov-map > .map-panel { height: 100%; border: 0; border-radius: 0; }
+.console-shell[data-layout^='compact'] .ov-map .map-stage { flex: 1 1 0; }
+.console-shell[data-layout^='compact'] .ov-map .map-frame { flex: 1 1 0; height: auto; }
+.console-shell[data-layout^='compact'] .ov-stage .map-bottom-overlay { display: none; }
+.console-shell[data-layout^='compact'] .ov-map-controls { bottom: var(--ov-gap); left: var(--ov-gap); flex-wrap: nowrap; max-width: calc(100% - 2 * var(--ov-gap)); }
+.console-shell[data-layout^='compact'] .ov-map-attribution { max-width: 132px; padding: 0 8px; }
+/* Overlays on the map's grid area: they hug their content and scroll inside above the map buttons. */
+.console-shell[data-layout^='compact'] .ov-left, .console-shell[data-layout^='compact'] .ov-right { position: absolute; z-index: 2; grid-area: map; top: var(--ov-gap); bottom: auto; display: flex; flex-direction: column; gap: var(--ov-gap); max-height: calc(100% - 44px - 3 * var(--ov-gap)); min-height: 0; overflow-y: auto; overscroll-behavior: contain; pointer-events: auto; }
+.console-shell[data-layout^='compact'] .ov-left { left: var(--ov-gap); width: min(240px, calc(100% - 2 * var(--ov-gap))); align-items: stretch; }
+.console-shell[data-layout^='compact'] .ov-right { right: var(--ov-gap); left: auto; width: min(320px, calc(100% - 2 * var(--ov-gap))); align-items: stretch; }
+.console-shell[data-layout^='compact'] .ov-right:empty { display: none; }
+.console-shell[data-layout^='compact'] .ov-left > section, .console-shell[data-layout^='compact'] .ov-right > section { flex: none; width: 100%; }
+.console-shell[data-layout^='compact'] .ov-left > .ov-layers { flex: 0 1 auto; min-height: 132px; }
+.console-shell[data-layout^='compact'] .ov-card { box-shadow: var(--ov-shadow); }
+/* HUD: the bearing, the source and age, the record's frequency and power, theta_0; held tags stay. */
+.console-shell[data-layout^='compact'] .ov-hud { min-height: 0; padding: 6px 10px 8px; gap: 1px; }
+.console-shell[data-layout^='compact'] .ov-hud-head > .ov-eyebrow { display: none; }
+.console-shell[data-layout^='compact'] .ov-hud-bearing { font-size: 27px; }
+.console-shell[data-layout^='compact'] .ov-hud > .ov-hud-offset { display: none; }
+.console-shell[data-layout^='compact'] .ov-hud-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
+.console-shell[data-layout^='compact'] .ov-hud-grid > span:nth-child(2) { display: none; }
+.console-shell[data-layout^='compact'] .ov-hud-held { display: -webkit-box; overflow: hidden; font-size: 11.5px; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+/* Position estimate: two lines that open the rest on a tap. */
+.console-shell[data-layout^='compact'] .ov-estimate { padding: 0; }
+.console-shell[data-layout^='compact'] .ov-estimate-summary { display: flex; flex-direction: column; align-items: stretch; gap: 1px; width: 100%; min-height: 44px; padding: 6px 10px; border: 0; border-radius: 10px; background: transparent; color: inherit; cursor: pointer; font: inherit; text-align: left; }
+.console-shell[data-layout^='compact'] .ov-estimate-summary .ov-estimate-distance { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.console-shell[data-layout^='compact'] .ov-estimate.is-compact > :not(.ov-estimate-summary) { margin: 0 10px; }
+.console-shell[data-layout^='compact'] .ov-estimate.is-compact > :last-child:not(.ov-estimate-summary) { margin-bottom: 8px; }
+.console-shell[data-layout^='compact'] .ov-estimate-actions .ov-button { height: 44px; }
+/* Spektrum fills its panel beside or under the map. */
+.console-shell[data-layout^='compact'] .ov-dock { position: relative; inset: auto; z-index: 1; grid-area: dock; display: flex; flex-direction: column; gap: 0; height: auto; min-width: 0; min-height: 0; border: 0; border-left: 1px solid var(--line-soft); border-radius: 0; background: var(--bg); }
+.console-shell[data-layout='compact-portrait'] .ov-dock { border-top: 1px solid var(--line-soft); border-left: 0; }
+.console-shell[data-layout^='compact'] .ov-dock > .ov-spectrum { flex: 1 1 auto; width: auto; min-height: 0; border: 0; border-radius: 0; background: transparent; }
+.console-shell[data-layout^='compact'] .ov-spec-main { flex: 1 1 auto; flex-direction: column; min-height: 0; overflow: hidden; }
+.console-shell[data-layout^='compact'] .ov-spec-main > .ov-spec-body { flex: 1 1 auto; min-height: 0; overflow: hidden; }
+/* The trace takes a fixed share of the panel (at most 280 px), the waterfall all the rest down to the
+   bottom; both canvases follow their element's size (SpectrumCanvas fitCanvas() on a ResizeObserver). */
+.console-shell[data-layout^='compact'] .ov-spec-trace { flex: 0 1 42%; min-height: 76px; max-height: 280px; }
+.console-shell[data-layout^='compact'] .ov-spec-waterfall { flex: 1 1 0; height: auto; min-height: 40px; }
+/* One header row: chip and tags, RX|Spektrum, Penanda, Dengar, Mulai/Berhenti and the Receiver link as icons. */
+.console-shell[data-layout^='compact'] .ov-spec-head { flex-wrap: nowrap; gap: 4px; min-height: 48px; padding: 2px 6px; overflow-x: auto; scrollbar-width: none; }
+.console-shell[data-layout^='compact'] .ov-spec-head::-webkit-scrollbar { display: none; }
+.console-shell[data-layout^='compact'] .ov-spec-head > h2, .console-shell[data-layout^='compact'] .ov-spec-mark-label, .console-shell[data-layout^='compact'] .ov-spec-open-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.console-shell[data-layout^='compact'] .ov-spec-group { flex-wrap: nowrap; gap: 0 6px; }
+.console-shell[data-layout^='compact'] .ov-spec-head .ov-button { padding: 0 10px; }
+.console-shell[data-layout^='compact'] .ov-spec-run { width: auto; min-width: 44px; }
+.console-shell[data-layout^='compact'] .ov-spec-open { width: 44px; padding: 0; }
+.console-shell[data-layout^='compact'] .ov-spec-open kbd { display: none; }
+.console-shell[data-layout^='compact'] .ov-spec-mode button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-width: 44px; padding: 0 8px; }
+.console-shell[data-layout^='compact'] .ov-spec-mode button svg { flex: none; width: 16px; height: 16px; }
+.console-shell[data-layout^='compact'] .ov-spec-audio { max-width: 140px; }
+/* A phone's panel: Dengar and Mulai/Berhenti as icons too (their text stays their name). */
+@container ov-spec (max-width: 559px) {
+  .console-shell[data-layout^='compact'] .ov-spec-listen > span, .console-shell[data-layout^='compact'] .ov-spec-run > span, .console-shell[data-layout^='compact'] .ov-spec-mode-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .console-shell[data-layout^='compact'] .ov-spec-head .ov-spec-listen, .console-shell[data-layout^='compact'] .ov-spec-head .ov-spec-run { width: 44px; padding: 0; }
+  .console-shell[data-layout^='compact'] .ov-spec-mode button { padding: 0; }
+  .console-shell[data-layout^='compact'] .ov-spec-audio { max-width: 96px; }
+}
+/* Top-bar switches as icons, 44 px each. */
+.console-shell[data-layout^='compact'] .topbar-toolbar .ov-panel-toggles { width: auto; }
+.console-shell[data-layout^='compact'] .topbar-toolbar .ov-panel-toggles button { flex: none; width: 44px; min-width: 44px; padding: 0; }
+.console-shell[data-layout^='compact'] .ov-toggle-label { display: none; }

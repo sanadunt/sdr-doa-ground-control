@@ -36,6 +36,8 @@ import { consoleAccess, pageHostname } from './lib/access';
 import { DEFAULT_SIMULATION, simulationSnapshot, randomizeSimulationSettings } from './lib/simulation';
 import { snapshotCollectionId, snapshotConsoleBaseUrl, snapshotConsoleRefreshSeconds, snapshotReadAtMonotonic, snapshotServedAgeMs } from './lib/snapshotRead';
 import { groundGpsCurrent } from './lib/groundGps';
+import { layoutOverrideFrom, useCompactLayout } from './lib/compactLayout';
+import type { CompactLayout, LayoutOverride } from './lib/compactLayout';
 
 // Overview is the landing route and stays in the entry chunk. The other pages
 // load on first visit so the initial bundle only carries what the operator sees.
@@ -412,8 +414,17 @@ function PageForRoute({
   }
 }
 
-export default function App(): ReactElement {
+/**
+ * `layout` forces the layout (tests); otherwise the device decides
+ * (lib/compactLayout.ts), or `?layout=` in the page URL for one load.
+ */
+export default function App({ layout: forcedLayout }: { layout?: CompactLayout | null } = {}): ReactElement {
   const [route, navigate] = useRoute();
+  // The compact touch layout of phones and tablets; a PC with a mouse never gets it.
+  const [layoutOverride] = useState<LayoutOverride | null>(() => (typeof window === 'undefined' ? null : layoutOverrideFrom(window.location.search)));
+  const layout = useCompactLayout(forcedLayout, layoutOverride);
+  // The compact layout's node card over the map: open for this visit only, never saved.
+  const [nodeOpen, setNodeOpen] = useState(false);
   const [config, setConfig] = useState<ConsoleConfig>(DEFAULT_CONSOLE_CONFIG);
   const [configLoaded, setConfigLoaded] = useState(false);
   const [configError, setConfigError] = useState<Notice | null>(null);
@@ -911,7 +922,9 @@ export default function App(): ReactElement {
     onRefreshSnapshot: refreshSnapshot,
     viewOnly,
     mirrorFeed,
-  }), [overviewPanels, onCompassConfigChanged, requestReceiver, navigate, capabilities, controlDraftRequest, onControlDraftRequest, receiverBridge, refreshSnapshot, viewOnly, mirrorFeed]);
+    compactLayout: layout,
+    nodeOpen,
+  }), [overviewPanels, onCompassConfigChanged, requestReceiver, navigate, capabilities, controlDraftRequest, onControlDraftRequest, receiverBridge, refreshSnapshot, viewOnly, mirrorFeed, layout, nodeOpen]);
   const refreshOptions = useMemo(() => refreshIntervalOptions(capabilities?.refreshIntervalsS ?? null, config.refresh_seconds), [capabilities, config.refresh_seconds]);
 
   const onRefresh = useCallback((): void => {
@@ -954,9 +967,10 @@ export default function App(): ReactElement {
         refreshError={refreshSaveErrorText}
         // The interval is the console's saved setting; the LAN view only shows it.
         onRefreshSecondsChange={viewOnly ? undefined : onRefreshSecondsChange}
-        toolbar={route === 'overview' ? <OverviewPanelToggles panels={overviewPanels} onChange={setOverviewPanels} viewOnly={viewOnly} /> : undefined}
+        toolbar={route === 'overview' ? <OverviewPanelToggles panels={overviewPanels} onChange={setOverviewPanels} viewOnly={viewOnly} compact={layout !== null} nodeOpen={nodeOpen} onNodeOpenChange={setNodeOpen} /> : undefined}
         access={access}
         hostPower={capabilities?.hostPower ?? null}
+        layout={layout}
       >
         {route !== 'receiver' || viewOnly ? (
           <section ref={contentRef} className="route-content" key={route}>

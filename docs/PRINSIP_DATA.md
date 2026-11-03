@@ -42,12 +42,13 @@ Console dipakai di lapangan lewat link radio yang sering tidak sempurna. Karena 
 ### Tampilan (3.1.0)
 
 - **DoA belum valid tetap tampil.** Ini berlaku untuk DoA ok=0, rekaman lama, jendela lokal yang habis, node macet, status DAQ yang tidak diketahui, dan status.json yang tidak terbaca (`provisionalTheta()`, `lib/doaStatus.ts`).
-  - Di HUD, bearing terakhirnya tampil redup dengan label BELUM VALID atau "BASI N s".
+  - Di HUD, bearing terakhirnya tampil redup dengan label BELUM VALID atau "USANG N s".
   - Di peta, garisnya putus-putus abu-abu berlabel BELUM VALID.
   - Konflik CSV/XML, sinkronisasi DAQ gagal, dan ADC overdrive tetap disembunyikan, karena sudutnya tidak bermakna.
   - `overviewDoaStatus().shown` tetap satu-satunya penentu DoA yang valid.
 - **Data Out tanpa doa.xml.** Tampilan CSV saja digambar dengan status DoA `PARTIAL` dan label SEBAGIAN.
 - **Kurva polar** terakhir tetap tampil redup dengan "Belum ada update · terakhir HH.MM.SS", tanpa batas waktu.
+- **Grafik DoA di peta** (3.11.0) ikut kurva polar: selama DoA berhenti (USANG, BELUM VALID, konflik, sinkronisasi DAQ gagal, ADC overdrive, node macet), peta menggambar grafik hidup terakhir (beam atau heat, lobe, tepi −3 dB, bearing) tetap berwarna penuh, dengan warna, opasitas dan pengaturan Lapisan yang sama dengan grafik hidup. Keputusan pemilik 2026-11-02: grafik terakhir tetap berwarna penuh dan hanya ditandai label USANG dan jam data terakhir (di bearing, legenda, readout dan pemberitahuan), karena grafik yang diredupkan sulit dilihat (`rememberOverlay()`, `heldLayerSpec()`, `lib/heldOverlay.ts`). Grafik itu tetap di posisi stasiun tempat ia diukur, jadi RDF-SDR yang bergerak tidak membawa bearing lama ke tempat barunya. Tanpa batas waktu; data hidup menggantikannya seketika. Simulasi tidak pernah mengisinya; URL Data Out lain, `sid` MQTT lain, atau uptime Data Out yang mundur (node restart) menghapusnya.
 - **Chip Publikasi** berisi PERLU DISIAPKAN bila yang menahan hanya pengaturan: authority, konvensi sudut, jam, pemetaan satuan, dan edge yang masih mengirim ok=0. Isinya ADA MASALAH bila datanya bermasalah. Chip ini membuka checklist alasan dan pemeriksaan gate.
 - **Sumber disebut.** Kartu DoA MQTT di DoA Diagnostics menulis "Sumber: MQTT · Data Out (cadangan) tidak dipakai". Banner kompas di peta menyebut penyebabnya dan membuka Konfigurasi → GPS & Kompas.
 
@@ -68,6 +69,6 @@ Console dipakai di lapangan lewat link radio yang sering tidak sempurna. Karena 
 ## Aturan untuk perubahan berikutnya
 
 - Validator baru menambah catatan, bukan penolakan, kecuali datanya memang tidak bisa dibaca. Setiap penolakan punya kode dan nama field.
-- Kondisi tampil baru memisahkan "valid" (`shown`) dari "masih terbaca" (redup dengan label). Data yang belum valid tidak pernah memakai warna atau gaya data yang valid.
+- Kondisi tampil baru memisahkan "valid" (`shown`) dari "masih terbaca" (redup dengan label). Data yang belum valid tidak pernah memakai warna atau gaya data yang valid. Satu-satunya pengecualian adalah grafik DoA terakhir di peta, yang dulu valid: ia tetap berwarna penuh dan ditandai label USANG dan jam data terakhir (keputusan pemilik 2026-11-02).
 - Setiap alasan gate dan kode sumber punya label EN dan ID di `frontend/src/lib/i18n.ts`. Kalimat operator datang lebih dulu, kodenya ikut tampil.
 - Perubahan di bagian 6 (bind, LAN, admin, konfirmasi, batas nilai, expiry, persetujuan) butuh keputusan tertulis baru, bukan bagian dari pelonggaran pembacaan.

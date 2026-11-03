@@ -101,13 +101,13 @@ describe('heading geometry', () => {
     expect(bearingAndDistance(STATION, wrap[0], wrap[1]).distanceM).toBeCloseTo(620, 0);
   });
 
-  it('labels the heading in both languages, STALE/BASI when held', () => {
+  it('labels the heading in both languages, STALE/USANG when held', () => {
     const live = rdfHeading(NAV, true)!;
     const held = rdfHeading(NAV, false)!;
     expect(headingLabel(live, tr('en'))).toBe('HDG 201°');
     expect(headingLabel(live, tr('id'))).toBe('HDG 201°');
     expect(headingLabel(held, tr('en'))).toBe('HDG 201° · STALE');
-    expect(headingLabel(held, tr('id'))).toBe('HDG 201° · BASI');
+    expect(headingLabel(held, tr('id'))).toBe('HDG 201° · USANG');
     expect(headingPopupText(live, 'Unavailable')).toBe('201.1°');
     expect(headingPopupText(held, 'Unavailable')).toBe('201.1° · STALE');
     expect(headingPopupText(rdfHeading(withNav({ compass_state: 'NO_REPLY' }), true)!, 'Unavailable')).toBe('NO_REPLY');
@@ -142,7 +142,7 @@ describe('heading layer setting', () => {
     const legend = (heading: 'live' | 'held' | null, lang: Lang = 'en') => markup(<OverlayLegend settings={DEFAULT_DOA_OVERLAY_SETTINGS} scale={scale} saturation={0} ringStepM={250} halfPower={null} heading={heading} />, lang);
     expect(legend('live')).toContain('legend-swatch legend-heading"></i> RDF-SDR heading');
     expect(legend('held')).toContain('legend-heading is-held"></i> RDF-SDR heading · STALE');
-    expect(legend('held', 'id')).toContain('Heading RDF-SDR · BASI');
+    expect(legend('held', 'id')).toContain('Heading RDF-SDR · USANG');
     expect(legend(null)).not.toContain('legend-heading');
   });
 });

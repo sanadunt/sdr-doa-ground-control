@@ -22,7 +22,7 @@ import { DEFAULT_OVERVIEW_PANELS } from '../lib/overviewPanels';
 import type { OverviewPanels } from '../lib/overviewPanels';
 import type { ConfigPatchChanges, ControlDraftRequest } from '../lib/controlDraft';
 import type { ReceiverBridge } from '../lib/receiverBridge';
-import { ZERO_INSETS, computeMapInsets, sameInsets } from '../lib/mapInsets';
+import { ZERO_INSETS, compactMapInsets, computeMapInsets, sameInsets } from '../lib/mapInsets';
 import type { MapInsets } from '../lib/mapInsets';
 import { primaryCandidate } from '../lib/telemetry';
 import { positionEstimate, type PositionEstimate } from '../lib/positionEstimate';
@@ -38,6 +38,7 @@ import { PolarDock } from '../components/overview/PolarDock';
 import { SpectrumDock } from '../components/overview/SpectrumDock';
 import { SpectrumDockMirror } from '../components/overview/SpectrumDockMirror';
 import type { ReceiverMirrorFeed } from '../lib/receiverMirrorFeed';
+import type { CompactLayout } from '../lib/compactLayout';
 import { ControlPanel } from '../components/overview/ControlPanel';
 
 // MapLibre is one of the two large dependencies (Plotly, loaded by PolarPlot,
@@ -95,6 +96,14 @@ export interface OverviewDashboardProps {
   viewOnly?: boolean;
   /** The LAN view's Receiver mirror; the spectrum dock shows it in MIRROR mode. */
   mirrorFeed?: ReceiverMirrorFeed | null;
+  /**
+   * The compact touch layout (lib/compactLayout.ts): map and spectrum side by side or
+   * stacked without a page scroll, no Polar (the stored choice is kept), and the node card
+   * only while `nodeOpen`, over the map.
+   */
+  compactLayout?: CompactLayout | null;
+  /** The node card is open in the compact layout; this visit only, never saved. */
+  nodeOpen?: boolean;
 }
 
 function OverviewPageView({
@@ -116,6 +125,8 @@ function OverviewPageView({
   onRefreshSnapshot = noop,
   viewOnly = false,
   mirrorFeed = null,
+  compactLayout = null,
+  nodeOpen = false,
 }: {
   snapshot: TelemetrySnapshot | null;
   localSnapshotFresh: boolean;
@@ -215,7 +226,11 @@ function OverviewPageView({
   const rightRef = useRef<HTMLDivElement>(null);
   const dockRef = useRef<HTMLDivElement>(null);
   const [insets, setInsets] = useState<MapInsets>(ZERO_INSETS);
-  const dockShown = panels.polar || panels.spectrum;
+  const compact = compactLayout !== null;
+  // The compact layout has no Polar: the DoA is on the map. The stored choice stays for the PC.
+  const polarShown = panels.polar && !compact;
+  const nodeShown = !compact || nodeOpen;
+  const dockShown = polarShown || panels.spectrum;
   // Kontrol publishes to the node; the LAN view never shows it, whatever the saved panels say.
   const controlShown = panels.control && !viewOnly;
   useEffect(() => {
@@ -225,11 +240,15 @@ function OverviewPageView({
     const rects = (element: HTMLElement | null) => (element ? Array.from(element.children, (child) => child.getBoundingClientRect()) : []);
     const measure = () => {
       frame = 0;
-      const next = computeMapInsets(mapElement.getBoundingClientRect(), {
-        left: rects(leftRef.current),
-        right: rects(rightRef.current),
-        bottom: dockRef.current ? [dockRef.current.getBoundingClientRect()] : [],
-      });
+      // Compact: the dock is beside or below the map, never over it, and the
+      // camera takes only the top inset (cameraInsets() in the map).
+      const next = compact
+        ? compactMapInsets(mapElement.getBoundingClientRect(), { left: rects(leftRef.current), right: rects(rightRef.current) })
+        : computeMapInsets(mapElement.getBoundingClientRect(), {
+          left: rects(leftRef.current),
+          right: rects(rightRef.current),
+          bottom: dockRef.current ? [dockRef.current.getBoundingClientRect()] : [],
+        });
       setInsets((current) => (sameInsets(current, next) ? current : next));
     };
     const schedule = () => { if (!frame) frame = window.requestAnimationFrame(measure); };
@@ -242,10 +261,10 @@ function OverviewPageView({
     }
     schedule();
     return () => { window.cancelAnimationFrame(frame); observer.disconnect(); };
-  }, [panels.layers, controlShown, panels.polar, panels.spectrum, panels.nodeCollapsed]);
+  }, [panels.layers, controlShown, polarShown, panels.spectrum, panels.nodeCollapsed, nodeShown, compactLayout]);
 
   return (
-    <div className="page page-overview ov-stage" data-dock={dockShown ? (panels.spectrum ? 'full' : 'polar') : 'none'} data-control={controlShown ? 'open' : undefined}>
+    <div className="page page-overview ov-stage" data-dock={dockShown ? (panels.spectrum ? 'full' : 'polar') : 'none'} data-control={controlShown ? 'open' : undefined} data-layout={compactLayout ?? undefined}>
       <h1 className="visually-hidden" data-route-focus tabIndex={-1}>{t('route.overview')}</h1>
       <div className="ov-map" ref={mapRef}>
         <LoadErrorBoundary variant="map">
@@ -269,17 +288,19 @@ function OverviewPageView({
               onBasemapSelect={onBasemapSelect}
               ground={groundCoordinate}
               estimate={estimate}
+              compact={compact}
             />
           </Suspense>
         </LoadErrorBoundary>
       </div>
       <div className="ov-left" ref={leftRef}>
         <DoaReadout snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} settings={plotSettings} offsetSource={offsetSource} offsetVerified={offsetVerified} offsetManual={offsetManual} />
-        {estimate && overlaySettings.estimateVisible ? <EstimatePanel estimate={estimate} viewOnly={viewOnly} /> : null}
+        {/* On a phone or tablet the card shows only once there is an estimate: its waiting states would cover the small map. */}
+        {estimate && overlaySettings.estimateVisible && (!compact || estimate.state === 'ESTIMATE') ? <EstimatePanel estimate={estimate} viewOnly={viewOnly} compact={compact} /> : null}
         {panels.layers ? <LayersPanel settings={overlaySettings} scale={overlayScale} onChange={onOverlayChange} onClose={() => onPanelsChange({ ...panels, layers: false })} basemapId={basemapId} onBasemapChange={onBasemapSelect} /> : null}
       </div>
       <div className="ov-right" ref={rightRef}>
-        <NodeCard
+        {nodeShown ? <NodeCard
           snapshot={snapshot}
           localSnapshotFresh={localSnapshotFresh}
           groundGpsFresh={groundGpsFresh}
@@ -291,7 +312,7 @@ function OverviewPageView({
           offsetManual={offsetManual}
           collapsed={panels.nodeCollapsed}
           onToggle={() => onPanelsChange({ ...panels, nodeCollapsed: !panels.nodeCollapsed })}
-        />
+        /> : null}
         {controlShown ? (
           <ControlPanel
             capabilities={capabilities}
@@ -305,7 +326,7 @@ function OverviewPageView({
       </div>
       {dockShown ? (
         <div className="ov-dock" ref={dockRef}>
-          {panels.polar ? (
+          {polarShown ? (
             <PolarDock
               snapshot={snapshot}
               localSnapshotFresh={localSnapshotFresh}
@@ -318,7 +339,7 @@ function OverviewPageView({
               onViewChange={onPolarViewChange}
             />
           ) : null}
-          {panels.spectrum && viewOnly ? <SpectrumDockMirror feed={mirrorFeed} /> : null}
+          {panels.spectrum && viewOnly ? <SpectrumDockMirror feed={mirrorFeed} compact={compact} /> : null}
           {panels.spectrum && !viewOnly ? (
             <SpectrumDock
               snapshot={snapshot}
@@ -330,6 +351,7 @@ function OverviewPageView({
               onRequestReceiver={onRequestReceiver}
               onNavigate={onNavigate}
               receiverBridge={receiverBridge}
+              compact={compact}
             />
           ) : null}
         </div>

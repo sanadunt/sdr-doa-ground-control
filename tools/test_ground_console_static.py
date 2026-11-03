@@ -637,7 +637,7 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         self.assertIs(config_patch["requires_admin"], True)
         self.assertEqual(config_patch["topic"], "sdr/v2/uav-01/cmd/config/patch")
         self.assertEqual(config_patch["get_topic"], "sdr/v2/uav-01/cmd/config/get")
-        self.assertEqual((config_patch["qos"], config_patch["ttl_ms"]), (1, 15_000))
+        self.assertEqual((config_patch["qos"], config_patch["ttl_ms"]), (1, 30_000))
         self.assertEqual(config_patch["ranges"]["center_frequency_hz"], [24_000_000, 1_766_000_000])
 
         self.assertEqual(config_result.status, 200)

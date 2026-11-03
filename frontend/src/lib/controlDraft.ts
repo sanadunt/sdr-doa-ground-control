@@ -74,3 +74,34 @@ export function normalizeConfigPatchChanges(value: unknown): ConfigPatchChanges 
 export function nextControlDraftRequest(previous: ControlDraftRequest | null, changes: unknown): ControlDraftRequest {
   return { seq: (previous?.seq ?? 0) + 1, changes: normalizeConfigPatchChanges(changes) };
 }
+
+/**
+ * Whether Kontrol has a config.patch on its way (published, not final yet: the RDF-SDR is still
+ * applying or verifying it). The dock's "Kirim ke RDF-SDR" stays disabled meanwhile, so a dock
+ * request never waits behind a command: the newest request always fills the form at once.
+ */
+export interface ControlSendingStore {
+  get(): boolean;
+  set(value: boolean): void;
+  subscribe(listener: () => void): () => void;
+}
+
+export function createControlSendingStore(): ControlSendingStore {
+  let value = false;
+  const listeners = new Set<() => void>();
+  return {
+    get: () => value,
+    set(next) {
+      if (next === value) return;
+      value = next;
+      for (const listener of [...listeners]) listener();
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+  };
+}
+
+/** The page's one store, written by ControlPanel and read by the spectrum dock. */
+export const controlSendingStore = createControlSendingStore();

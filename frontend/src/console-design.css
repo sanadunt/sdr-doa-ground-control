@@ -552,6 +552,7 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 .doa-hover-popup { pointer-events: none; }
 .doa-hover-popup strong { font-family: var(--mono); font-size: 12.5px; }
 .doa-hover-popup span { color: var(--muted); font-family: var(--mono); font-size: 11.5px; }
+.doa-hover-popup span.is-held { color: var(--subtle); font-weight: 700; letter-spacing: .04em; }
 .doa-hover-popup .maplibregl-popup-tip { border-top-color: var(--surface); border-bottom-color: var(--surface); }
 .map-notices { position: absolute; top: 58px; left: 10px; z-index: 20; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; max-width: calc(100% - 80px); pointer-events: none; }
 /* A notice with an action takes clicks; the rest of the notice column lets them through to the map. */
@@ -567,7 +568,9 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 .legend-bearing { background: #e0603a; }
 .legend-heading { height: 0 !important; width: 14px !important; border-top: 2px dashed #c2a6ff; border-radius: 0 !important; }
 :root[data-theme='light'] .legend-heading:not(.is-held) { border-top-color: #5b34c4; }
-.legend-heading.is-held { border-top: 2px dotted var(--subtle); }
+.legend-heading.is-held { border-top: 2px dotted var(--subtle); opacity: .6; }
+/* The held overlay (the last live one, in the live colours): only this STALE tag with its time marks it. */
+.legend-held { padding: 1px 5px; border: 1px dashed var(--subtle); border-radius: 3px; color: var(--muted); font-family: var(--mono); font-size: 10.5px; font-weight: 700; letter-spacing: .04em; }
 .legend-scale { display: grid; grid-template-columns: auto minmax(80px, 260px) auto auto; justify-content: start; align-items: center; gap: 8px; color: var(--muted); font-family: var(--mono); font-size: 10.5px; }
 .legend-scale-mode { justify-self: start; padding: 1px 5px; border: 1px solid var(--line); border-radius: 3px; color: var(--subtle); font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase; }
 .map-overlay-legend .legend-warning { color: var(--amber); font-size: 11px; line-height: 1.4; white-space: normal; }
@@ -627,3 +630,56 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 .form-contents { display: contents; }
 .dry-run-panel > .form-contents > .form-field { max-width: 360px; margin-left: 20px; }
 .admin-login-form .form-field input:disabled { cursor: not-allowed; opacity: .6; }
+
+/* Compact touch layout ------------------------------------------------------ */
+/* Phones and tablets without a mouse (lib/compactLayout.ts sets data-layout on the
+   shell root): one top-bar row of 44 px controls. The status strip opens from one
+   pill; the interval, the language and Restart/Shutdown are in the page menu. A PC
+   with a mouse never matches these rules. */
+.console-shell[data-layout^='compact'] .topbar { position: sticky; display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; min-height: var(--topbar-h); padding: 3px 8px; }
+.console-shell[data-layout^='compact'] .brand-mark, .console-shell[data-layout^='compact'] .brand-logo { margin-right: 0; }
+/* A phone held upright: the row needs the brand mark's room for the panel switches and the VIEW ONLY chip. */
+@media (max-width: 479px) {
+  .console-shell.is-overview[data-layout^='compact'] .brand-mark, .console-shell.is-overview[data-layout^='compact'] .brand-logo { display: none; }
+  .console-shell[data-layout^='compact'] .view-only-chip { padding: 1px 5px; }
+  .console-shell.is-overview[data-layout^='compact'] .status-summary-source { display: none; }
+}
+.console-shell[data-layout^='compact'] .topbar-title { flex: 0 1 auto; min-width: 0; }
+.console-shell[data-layout^='compact'] .topbar-spacer { display: block; flex: 1 1 0; min-width: 0; }
+.console-shell[data-layout^='compact'] .topbar-toolbar { flex: none; }
+.console-shell[data-layout^='compact'] .topbar-tools { flex: none; flex-wrap: nowrap; gap: 6px; }
+.console-shell[data-layout^='compact'] .status-summary { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 6px; min-width: 44px; height: 44px; padding: 0 10px; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 999px; background: var(--surface); color: var(--muted); cursor: pointer; font-family: var(--mono); font-size: 11.5px; font-weight: 700; white-space: nowrap; }
+.console-shell[data-layout^='compact'] .status-summary > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The DoA value stays whole; the source gives way first. */
+.console-shell[data-layout^='compact'] .status-summary-source { flex: 0 100 auto; }
+.console-shell[data-layout^='compact'] .status-summary-doa { flex: 0 1 auto; }
+.console-shell[data-layout^='compact'] .status-summary > i { flex: none; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.console-shell[data-layout^='compact'] .status-summary[aria-expanded='true'] { border-color: var(--accent); background: var(--accent-soft); }
+.console-shell[data-layout^='compact'] .status-summary.tone-good { border-color: color-mix(in srgb, var(--green) 45%, transparent); color: var(--green); }
+.console-shell[data-layout^='compact'] .status-summary.tone-warn { border-color: color-mix(in srgb, var(--amber) 55%, transparent); color: var(--amber); }
+.console-shell[data-layout^='compact'] .status-summary.tone-bad { border-color: color-mix(in srgb, var(--red) 55%, transparent); color: var(--red); }
+/* The pill's popover: the full strip, two cells a row, the Delivery checklist still opens from it. */
+.console-shell[data-layout^='compact'] .status-popover-backdrop { position: fixed; inset: 0; z-index: 65; background: transparent; }
+.console-shell[data-layout^='compact'] .status-popover { position: fixed; z-index: 66; top: calc(var(--topbar-h) + 4px); left: 8px; width: min(520px, calc(100vw - 16px)); padding: 6px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface); box-shadow: 0 10px 28px color-mix(in srgb, var(--bg) 70%, transparent); }
+.console-shell[data-layout^='compact'] .status-popover[hidden] { display: none; }
+.console-shell[data-layout^='compact'] .status-popover .telemetry-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); height: auto; overflow: visible; border: 0; background: transparent; }
+.console-shell[data-layout^='compact'] .status-popover .telemetry-item { grid-column: auto; min-width: 0; min-height: 44px; padding: 4px 10px; border-top: 1px solid var(--line-soft); border-left: 0; }
+.console-shell[data-layout^='compact'] .status-popover .telemetry-item:nth-child(-n+2) { border-top: 0; }
+.console-shell[data-layout^='compact'] .status-popover .telemetry-item:nth-child(even) { border-left: 1px solid var(--line-soft); }
+/* Interval, language and Restart/Shutdown in the page menu's footer. */
+.console-shell[data-layout^='compact'] .page-menu-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; padding: 0 4px 0 10px; color: var(--muted); font-size: 13px; }
+.console-shell[data-layout^='compact'] .page-menu-row > span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.console-shell[data-layout^='compact'] .page-menu-row .refresh-interval { width: 104px; }
+.console-shell[data-layout^='compact'] .page-menu-row .lang-switch button { display: block; }
+.console-shell[data-layout^='compact'] .page-menu-row .lang-switch button + button { border-left: 1px solid var(--line); }
+/* The Dashboard fills the viewport under the one-row bar, with no page scroll. */
+.console-shell[data-layout^='compact'] .page-content-overview { height: calc(100dvh - var(--topbar-h)); overflow: hidden; }
+.console-shell[data-layout^='compact'] .console-main:has(> .read-error-banner) .page-content-overview { height: calc(100dvh - var(--topbar-h) - var(--read-error-h)); }
+.console-shell.is-overview[data-layout^='compact'] .topbar { position: sticky; }
+/* Map notices fold to one line; a tap opens the whole notice with its link. */
+.console-shell[data-layout^='compact'] .map-data-chip.is-compact { display: flex; flex-wrap: wrap; align-items: center; gap: 0 8px; padding: 0 4px; pointer-events: auto; text-align: left; }
+.console-shell[data-layout^='compact'] .map-chip-toggle { display: flex; flex: 1 1 auto; align-items: center; min-width: 0; min-height: 44px; padding: 0 6px; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; text-align: left; }
+.console-shell[data-layout^='compact'] .map-data-chip.is-compact:not(.is-expanded) .map-chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.console-shell[data-layout^='compact'] .map-data-chip.is-expanded { max-height: 40dvh; overflow-y: auto; }
+.console-shell[data-layout^='compact'] .map-data-chip.is-expanded .map-chip-text { overflow-wrap: anywhere; white-space: normal; }
+.console-shell[data-layout^='compact'] .map-data-chip.is-compact .map-chip-action { margin: 0 4px 6px auto; }

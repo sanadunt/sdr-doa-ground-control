@@ -900,6 +900,22 @@ export interface SettingsReadView {
 }
 
 /** The latest config.get as Kontrol shows it; a delivered settings report needs no line. */
+/**
+ * Over Telemetry LoRa a config.get can be lost on the way to the RDF-SDR (the radio is half-duplex), and
+ * then nothing answers it. A config.get only reads, so Kontrol asks again, at most this many times in
+ * all (owner's decision of 2026-11-02). A config.patch is never resent.
+ */
+export const SETTINGS_GET_LORA_TRIES = 3;
+
+/** Whether Kontrol asks for the settings again: a config.get over LoRa ended without any answer. */
+export function settingsGetRetry(
+  status: Pick<CommandStatusLike, 'state'> & { commandId?: string; final?: boolean } | null | undefined,
+  overLora: boolean,
+  tries: number,
+): boolean {
+  return overLora && status?.final === true && status.state === 'no_ack' && tries < SETTINGS_GET_LORA_TRIES;
+}
+
 export function settingsReadView(status: CommandStatusLike | null | undefined): SettingsReadView | null {
   if (!status) return null;
   switch (status.state) {

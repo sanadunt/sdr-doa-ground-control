@@ -85,7 +85,7 @@ export function headingLabelPosition(origin: GeoOrigin, headingDeg: number, dist
   return destination(origin, headingDeg, distanceM * (near ? 0.62 : 1.1));
 }
 
-/** "HDG 201°", or marked STALE/BASI when the heading is held. */
+/** "HDG 201°", or marked STALE/USANG when the heading is held. */
 export function headingLabel(heading: RdfHeading, t: Translate): string {
   if (heading.headingDeg === null) return heading.compassState ?? '—';
   const deg = formatBearing(heading.headingDeg, 0);

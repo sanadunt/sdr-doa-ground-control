@@ -1,5 +1,6 @@
 import type { JSX, ReactNode } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { controlSendingStore } from '../../lib/controlDraft';
 import { ApiError, getAdminStatus, getConfigPatchStatus, getConfigReported, logoutAdmin, requestConfigGet, sendConfigPatch } from '../../api';
 import type { ConfigCommandStatus, ConfigReported, ConsoleCapabilities } from '../../api';
 import type { ConfigPatchChanges, ConfigPatchKey, ConfigPatchValue, ControlDraftRequest } from '../../lib/controlDraft';
@@ -25,6 +26,8 @@ import {
   plainNumber,
   rangeParts,
   reportedSquelch,
+  SETTINGS_GET_LORA_TRIES,
+  settingsGetRetry,
   settingsReadView,
   squelchModeText,
   takesUca,
@@ -85,7 +88,7 @@ const PATCH_TOPIC_SUFFIX = 'cmd/config/patch';
 const ACK_TOPIC_SUFFIX = 'ack/config';
 const REPORTED_POLL_MS = 2_000;
 const STATUS_POLL_MS = 1_000;
-const DEFAULT_TTL_MS = 15_000;
+const DEFAULT_TTL_MS = 30_000;
 const COMMAND_ID_RE = /^[A-Za-z0-9_.:-]{1,80}$/u;
 /** Refusals of a command that was not sent; the draft stays and the values are read again. */
 const RETRY_IN_FORM_CODES = new Set(['NODE_NOT_FRESH', 'NODE_SESSION_UNAVAILABLE']);
@@ -279,6 +282,8 @@ export interface ControlPanelViewProps {
   valueSource?: ControlValueSource;
   /** A config.get the console refused, by its code. */
   settingsError?: ControlFailure | null;
+  /** Which request of a settings read this is, while Kontrol repeats it over LoRa (2 and 3), or null. */
+  settingsRetry?: number | null;
   /** The reviewed change waits for the node's new revision. */
   rebasing?: boolean;
   rebaseNotice?: ControlRebaseNotice | null;
@@ -316,6 +321,7 @@ export function ControlPanelView({
   verification = null,
   valueSource = 'none',
   settingsError = null,
+  settingsRetry = null,
   rebasing = false,
   rebaseNotice = null,
   capabilityConfirmed = false,
@@ -408,6 +414,7 @@ export function ControlPanelView({
         {settingsRead ? (
           <p className={settingsRead.tone === 'info' ? 'ov-control-note' : settingsRead.tone === 'warn' ? 'ov-control-warn' : 'ov-control-error'} role="status">
             {settingsRead.code ? <><span className="ov-mono">{settingsRead.code}</span> · </> : null}{t(reading && radioWait(reported?.settingsRequest?.state) ? 'control.loraWaiting' : settingsRead.key)}
+            {settingsRetry && reading ? <> · {t('control.settings.retrying', { n: settingsRetry, max: SETTINGS_GET_LORA_TRIES })}</> : null}
           </p>
         ) : null}
         {settingsError ? (
@@ -646,6 +653,9 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
   const mountedRef = useRef(true);
   const sendController = useRef<AbortController | null>(null);
   const settingsController = useRef<AbortController | null>(null);
+  // Requests of the current settings read (Kontrol's repeats over LoRa) and the request last repeated.
+  const settingsTries = useRef<{ tries: number; after: string | null }>({ tries: 1, after: null });
+  const [settingsRetry, setSettingsRetry] = useState<number | null>(null);
   // One automatic config.get per node session and revision (sid:cfg), when no settings report of it is here.
   const autoReadRef = useRef<string | null>(null);
 
@@ -682,6 +692,12 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
     });
     return () => controller.abort();
   }, []);
+
+  // The dock's "Kirim ke RDF-SDR" is disabled while a patch is on its way (sending until final).
+  useEffect(() => {
+    controlSendingStore.set(stage === 'sending');
+  }, [stage]);
+  useEffect(() => () => controlSendingStore.set(false), []);
 
   // A new request from the spectrum dock waits here until it can be merged.
   useEffect(() => {
@@ -731,7 +747,9 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
   }, [admin]);
 
   // config.get: the edge answers with settings/reported (only over a TLS link to the broker).
-  const readSettings = useCallback(() => {
+  // `retry` marks Kontrol's own repeat over LoRa (settingsGetRetry); any other read starts a new count.
+  const readSettings = useCallback((retry = false) => {
+    if (retry !== true) settingsTries.current = { tries: 1, after: null };
     settingsController.current?.abort();
     const controller = new AbortController();
     settingsController.current = controller;
@@ -755,6 +773,22 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
   useEffect(() => {
     if (admin !== 'unlocked') autoReadRef.current = null;
   }, [admin]);
+
+  // Over Telemetry LoRa a lost config.get is asked again (a read changes nothing on the node), once per
+  // unanswered request, until SETTINGS_GET_LORA_TRIES requests in all have gone out.
+  const settingsRequest = reported?.settingsRequest ?? null;
+  useEffect(() => {
+    if (admin !== 'unlocked' || !settingsRequest) return;
+    const count = settingsTries.current;
+    if (count.after === settingsRequest.commandId) return;
+    if (!settingsGetRetry(settingsRequest, reported?.link === 'lora', count.tries)) return;
+    settingsTries.current = { tries: count.tries + 1, after: settingsRequest.commandId };
+    setSettingsRetry(count.tries + 1);
+    readSettings(true);
+  }, [admin, settingsRequest, reported?.link, readSettings]);
+  useEffect(() => {
+    if (settingsRequest && settingsRequest.final && settingsRequest.state !== 'no_ack') setSettingsRetry(null);
+  }, [settingsRequest]);
 
   // Read the node's settings when no report of its current revision is here: once per
   // session and revision, so an unknown revision (state.cfg null) or a new one is asked
@@ -888,19 +922,19 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
     setStage('edit');
   }, [rebase, reported, values, ranges, gainTable, t, squelch]);
 
-  // Merge a waiting dock request once Kontrol is unlocked and has the reported values.
+  // Merge a waiting dock request once Kontrol is unlocked and has the reported values. It only fills
+  // the form: the operator checks or changes the fields, then reviews and sends as with typed values.
+  // A finished command's result gives way to it; a command still being sent keeps it waiting.
   useEffect(() => {
-    if (!pendingDraft || admin !== 'unlocked' || !reported || stage === 'sending' || stage === 'done') return;
+    if (!pendingDraft || admin !== 'unlocked' || !reported || stage === 'sending') return;
     // A frequency from the dock takes its band's gain (and UCA radius), as a typed one does.
     const merged = draftWithBand({ ...draft, ...mergeIntoDraft({}, pendingDraft, fields) }, pendingDraft.center_frequency_hz, withUca);
     setPendingDraft(null);
     setDraft(merged);
-    const current = values ?? reported.values;
-    const next = parseDraft(fields, { ...draftFromReported(current, fields), ...merged }, current, ranges, gainTable);
-    const publishable = reported.available && capabilities?.configPatch?.enabled !== false;
-    if (!next.invalid && Object.keys(next.changes).length && publishable) enterReview(next.changes, reported.baseRev, next.fields);
-    else setStage('edit');
-  }, [pendingDraft, admin, reported, values, stage, draft, ranges, gainTable, enterReview, capabilities, fields, withUca]);
+    setReview(null);
+    setDone(null);
+    setStage('edit');
+  }, [pendingDraft, admin, reported, stage, draft, fields, withUca]);
 
   const lock = () => {
     sendController.current?.abort();
@@ -993,6 +1027,7 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
       verification={verification}
       valueSource={valueSource}
       settingsError={settingsError}
+      settingsRetry={settingsRetry}
       rebasing={rebase !== null}
       rebaseNotice={rebaseNotice}
       capabilityConfirmed={capabilityConfirmed}

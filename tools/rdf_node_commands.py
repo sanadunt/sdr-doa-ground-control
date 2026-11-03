@@ -26,8 +26,10 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 
 PROTOCOL_VERSION = 2
 COMMAND_QOS = 1
-# The edge's Ground default; control.py refuses a lifetime above 30 s.
-COMMAND_TTL_MS = 15_000
+# The edge's limit (control.py refuses a lifetime above 30 s). Its own Ground uses 15 s; over Telemetry
+# LoRa a command waits for the ground's radio turn and its ACK for the edge's, so the console takes the
+# whole 30 s (owner's decision of 2026-11-02).
+COMMAND_TTL_MS = 30_000
 MAX_COMMAND_TTL_MS = 30_000
 # control.py: issued_ms may be at most 1 s ahead of the edge clock.
 MAX_ISSUED_AHEAD_MS = 1_000

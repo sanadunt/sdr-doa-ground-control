@@ -16,7 +16,7 @@ import { formatMsps } from '../../lib/radioSettings';
 import { formatMhz, formatMhzTrim, spanAround } from '../../lib/spectrumView';
 import { Icon } from '../ui';
 import { SpectrumCanvas } from './SpectrumCanvas';
-import { SpectrumMarkRow } from './SpectrumDock';
+import { SpectrumMarkRow, SpectrumModeLabel } from './SpectrumDock';
 
 /** Ages and the stale rules move on with time even when nothing new arrives. */
 const AGE_TICK_MS = 500;
@@ -291,13 +291,15 @@ export function MirrorSpectrum({ feed, view, marking = null }: { feed: ReceiverM
  * stops posting. Every radio control shows its state and is disabled, but
  * two: Markers/Penanda adds and removes the groundstation Receiver's markers
  * (the owner's decision of 2026-10-31), and Dengar/Listen plays its audio on
- * this tablet (the owner's decision of 2026-11-02).
+ * this tablet (the owner's decision of 2026-11-02). In the compact touch
+ * layout the header keeps one row: no source text, buttons as icons.
  */
-export function SpectrumDockMirror({ feed: given = null, markController = null, audioPlayer = null }: {
+export function SpectrumDockMirror({ feed: given = null, markController = null, audioPlayer = null, compact = false }: {
   feed?: ReceiverMirrorFeed | null;
   markController?: MirrorMarkController | null;
   /** Tests pass a player; otherwise the page's one (mirrorAudioPlayer()). */
   audioPlayer?: MirrorAudioPlayer | null;
+  compact?: boolean;
 }): JSX.Element {
   const { t } = useI18n();
   // App passes its one feed; a dock rendered on its own (tests) makes one.
@@ -311,19 +313,19 @@ export function SpectrumDockMirror({ feed: given = null, markController = null, 
   // From the last state, as on the groundstation's dock; the chip shows STALE or SOURCE LOST.
   const stoppable = view.stoppable;
   return (
-    <section id="panel-spectrum" className="ov-spectrum is-view-only is-mirror" aria-labelledby="ov-spectrum-title">
+    <section id="panel-spectrum" className={`ov-spectrum is-view-only is-mirror${compact ? ' is-compact' : ''}`} aria-labelledby="ov-spectrum-title">
       <div className="ov-dock-head ov-spec-head">
         <h2 id="ov-spectrum-title">{t('spectrum.title')}</h2>
         {state?.mock
           ? <span className="ov-tag tone-warn">MOCK</span>
-          : <span className="ov-spec-source">{t('mirror.source')}</span>}
+          : compact ? null : <span className="ov-spec-source">{t('mirror.source')}</span>}
         <span className="ov-tag tone-info">MIRROR</span>
         {shiftHz !== 0 ? <span className="ov-tag tone-info">UPCONVERTER</span> : null}
         {state?.recording ? <span className="ov-tag tone-bad">REC</span> : null}
         <span className={`ov-chip tone-${view.tone}`}>{mirrorChipText(t, view)}</span>
         <div className="ov-seg ov-seg-compact ov-spec-mode" role="group" aria-label={t('spectrum.modeGroup')}>
-          <button type="button" aria-pressed={view.mode === 'rx'} disabled>{t('spectrum.modeRx')}</button>
-          <button type="button" aria-pressed={view.mode === 'sweep'} disabled>{t('spectrum.modeSweep')}</button>
+          <button type="button" aria-pressed={view.mode === 'rx'} disabled><SpectrumModeLabel compact={compact} icon="receiver" text={t('spectrum.modeRx')} /></button>
+          <button type="button" aria-pressed={view.mode === 'sweep'} disabled><SpectrumModeLabel compact={compact} icon="spectrum" text={t('spectrum.modeSweep')} /></button>
         </div>
         <MirrorMarkToggle marking={marking} />
         <span className="ov-spacer" />

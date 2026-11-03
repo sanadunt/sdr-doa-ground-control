@@ -364,7 +364,7 @@ class ConfigPatchServerTests(unittest.TestCase):
                 "ack_topic": f"sdr/v2/{NODE}/ack/config",
                 "settings_topic": f"sdr/v2/{NODE}/settings/reported",
                 "qos": 1,
-                "ttl_ms": 15_000,
+                "ttl_ms": 30_000,
                 "ranges": {
                     "center_frequency_hz": [24_000_000, 1_766_000_000],
                     "gain_db": [-10, 100],
@@ -551,9 +551,9 @@ class ConfigPatchServerTests(unittest.TestCase):
         self.assertIs(body["ok"], True)
         self.assertRegex(body["command_id"], COMMAND_ID_RE)
         self.assertEqual((body["op"], body["state"]), ("config.patch", "published"))
-        self.assertEqual((body["topic"], body["qos"], body["ttl_ms"]), (PATCH_TOPIC, 1, 15_000))
+        self.assertEqual((body["topic"], body["qos"], body["ttl_ms"]), (PATCH_TOPIC, 1, 30_000))
         self.assertEqual(body["base_rev"], 42)
-        self.assertEqual(body["expires_ms"] - body["issued_ms"], 15_000)
+        self.assertEqual(body["expires_ms"] - body["issued_ms"], 30_000)
         self.assertGreaterEqual(body["issued_ms"], before)
         expected = {"center_frequency_hz": 433_920_000, "gain_db": 20.7, "vfo0_frequency_hz": 433_920_000, "vfo0_squelch_db": -70}
         self.assertEqual(body["changes"], expected)
@@ -904,7 +904,7 @@ class ConfigPatchServerTests(unittest.TestCase):
         status, sent = self.send_get(cookie=cookie)
         self.assertEqual(status, 202, sent)
         self.assertEqual((sent["op"], sent["topic"], sent["qos"], sent["ttl_ms"], sent["changes"]),
-                         ("config.get", GET_TOPIC, 1, 15_000, {}))
+                         ("config.get", GET_TOPIC, 1, 30_000, {}))
         [published] = self.monitor.published
         self.assertEqual(list(published), ["v", "id", "sid", "boot", "issued_ms", "expires_ms", "base_rev", "op"])
         self.assertEqual((published["op"], published["base_rev"], published["sid"]), ("config.get", 42, STATE["sid"]))
@@ -1013,7 +1013,7 @@ class ConfigPatchServerTests(unittest.TestCase):
         command = body["command"]
         self.assertEqual((command["op"], command["sid"], command["boot"], command["base_rev"]),
                          ("config.patch", STATE["sid"], STATE["boot"], 42))
-        self.assertEqual(command["expires_ms"] - command["issued_ms"], 15_000)
+        self.assertEqual(command["expires_ms"] - command["issued_ms"], 30_000)
         self.assertEqual(command["changes"], {"gain_db": 20.7})
         self.assertTrue(command["id"].startswith("dryrun-"))
         # The squelch as the node writes it: unrounded for an older edge, whole dB and a mode for edge 1.9.0.
@@ -1298,7 +1298,7 @@ class RealMonitorEndToEndTests(unittest.TestCase):
         [((topic, raw), options)] = self.client.publish_calls
         self.assertEqual(topic, GET_TOPIC)
         self.assertEqual((options["qos"], options["retain"]), (1, False))
-        self.assertEqual(options["properties"].MessageExpiryInterval, 15)
+        self.assertEqual(options["properties"].MessageExpiryInterval, 30)
         command = json.loads(raw.decode("utf-8"))
         self.assertEqual(raw, cmds.encode_command(command))
         self.assertEqual((command["id"], command["sid"], command["boot"], command["base_rev"], command["op"]),
@@ -1383,7 +1383,7 @@ class RealMonitorEndToEndTests(unittest.TestCase):
         [((topic, raw), options)] = self.client.publish_calls
         self.assertEqual(topic, PATCH_TOPIC)
         self.assertEqual((options["qos"], options["retain"]), (1, False))
-        self.assertEqual(options["properties"].MessageExpiryInterval, 15)
+        self.assertEqual(options["properties"].MessageExpiryInterval, 30)
         command = json.loads(raw.decode("utf-8"))
         # Byte for byte the envelope shape the edge accepted in commands.8691ad0.json.
         judged = json.loads(CASES["retune"]["console"]["payload"])
