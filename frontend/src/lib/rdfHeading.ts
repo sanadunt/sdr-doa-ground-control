@@ -94,8 +94,8 @@ export function headingLabel(heading: RdfHeading, t: Translate): string {
 }
 
 /** The station popup's value: the heading with one decimal, STALE when held, or the compass state. */
-export function headingPopupText(heading: RdfHeading, unavailable: string): string {
+export function headingPopupText(heading: RdfHeading, unavailable: string, heldTag = 'STALE'): string {
   if (heading.headingDeg === null) return heading.compassState ?? unavailable;
   const deg = `${formatBearing(heading.headingDeg, 1)}°`;
-  return heading.state === 'OK' ? deg : `${deg} · STALE`;
+  return heading.state === 'OK' ? deg : `${deg} · ${heldTag}`;
 }

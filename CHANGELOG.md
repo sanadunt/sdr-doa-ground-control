@@ -2,6 +2,13 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.12.1
+
+Rilis patch: tidak ada yang dihapus. Label bahasa Indonesia untuk posisi RDF-SDR yang ditahan kini sesuai dengan catatan 3.12.0.
+
+- **Posisi stasiun yang ditahan tertulis USANG.** Kartu RDF-SDR dan kotak koordinat di bawah peta kini menulis "POSISI STASIUN TERAKHIR · USANG", bukan "· STALE".
+- **Popup stasiun di peta** menulis USANG di baris Sumber dan Heading saat nilainya ditahan, bukan STALE yang tertulis tetap di kode. Dalam bahasa Inggris tetap STALE.
+
 ## 3.12.0
 
 Rilis minor: tidak ada yang dihapus. Ada mode baru "Telemetry LoRa saja". Dalam mode ini, setiap data RDF-SDR tampil begitu datang. Data yang tidak datang tetap memakai nilai terakhir, berlabel USANG dengan umurnya, sehingga Dashboard tidak lagi kosong hanya karena satu data basi atau error.
