@@ -352,6 +352,8 @@ class LanViewTests(DroneServerCase):
         status, _h, raw = self.sdp_request(port, "PUT", dv.WHEP_ROUTE)
         self.assertEqual(status, 405)
 
+
+class LanWriteRuleTests(unittest.TestCase):
     def test_write_rule(self) -> None:
         self.assertTrue(lan.write_allowed("POST", dv.WHEP_ROUTE))
         self.assertTrue(lan.write_allowed("DELETE", dv.WHEP_ROUTE + "/abc-123"))

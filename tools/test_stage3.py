@@ -773,6 +773,9 @@ def test_snapshot_requests_share_one_collection() -> None:
     sources = [result.pop("source") for result in results]
     assert [(entry["kind"], entry["reasons"]) for entry in sources] == [("none", ["MQTT_DISABLED", "DATA_OUT_UNAVAILABLE"])] * 5, sources
     # Every answer also names the groundstation GPS; without a monitor it is null.
+    # And the drone's: a console without the drone link says it is off.
+    drones = [result.pop("drone") for result in results]
+    assert [(entry["state"], entry["connection"]) for entry in drones] == [("DISABLED", "disabled")] * 5, drones
     assert results == [{"overall_state": "FIXTURE", "call": 1, "ground_gps": None}] * 5, results
     # One request started the collection; the other four shared it (#13).
     assert len({entry["id"] for entry in collections}) == 1, collections
