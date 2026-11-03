@@ -158,6 +158,8 @@ export const RECEIVER_INDONESIAN: Readonly<Record<string, string>> = {
 	'Squelch open – receiving': 'Squelch terbuka – menerima',
 	'Outside bandwidth – no audio': 'Di luar bandwidth – tanpa audio',
 	'Audio disabled': 'Audio nonaktif',
+	// The Listener canvas tag of a muted VFO, "VFO 1 (mute)"
+	'mute': 'bisu',
 	'Lock tuning and zoom': 'Kunci penalaan dan zoom',
 	'Pause Receiver': 'Jeda Receiver',
 	'Resume Receiver': 'Lanjutkan Receiver',

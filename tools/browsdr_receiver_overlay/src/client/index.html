@@ -132,7 +132,7 @@
 			<div class="sidebar" :class="{ 'sidebar-open': sidebarOpen }">
 				<div class="sidebar-scroll">
 				<div class="panel">
-					<div class="panel-header panel-header-collapsible" @click="togglePanel('source')">
+					<div class="panel-header panel-header-collapsible" role="button" tabindex="0" :aria-expanded="String(!collapsedPanels['source'])" @click="togglePanel('source')" @keydown.enter.self.prevent="togglePanel('source')" @keydown.space.self.prevent="togglePanel('source')">
 						<span>{{ t('Source') }}</span>
 						<svg class="panel-chevron" :class="{ 'panel-chevron-collapsed': collapsedPanels['source'] }" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
 					</div>
@@ -176,7 +176,7 @@
 				</div>
 
 				<div class="panel" :class="{ disabled: !connected }">
-					<div class="panel-header panel-header-collapsible" @click="togglePanel('radio')">
+					<div class="panel-header panel-header-collapsible" role="button" tabindex="0" :aria-expanded="String(!collapsedPanels['radio'])" @click="togglePanel('radio')" @keydown.enter.self.prevent="togglePanel('radio')" @keydown.space.self.prevent="togglePanel('radio')">
 						<span>{{ t('Radio') }}</span>
 						<svg class="panel-chevron" :class="{ 'panel-chevron-collapsed': collapsedPanels['radio'] }" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
 					</div>
@@ -252,7 +252,7 @@
 
 				<!-- dB scale of the trace and waterfall (listener-display.ts); the console's Spektrum dock mirrors it. -->
 				<div class="panel">
-					<div class="panel-header panel-header-collapsible" @click="togglePanel('dbScale')">
+					<div class="panel-header panel-header-collapsible" role="button" tabindex="0" :aria-expanded="String(!collapsedPanels['dbScale'])" @click="togglePanel('dbScale')" @keydown.enter.self.prevent="togglePanel('dbScale')" @keydown.space.self.prevent="togglePanel('dbScale')">
 						<span>{{ t('dB scale') }}</span>
 						<svg class="panel-chevron" :class="{ 'panel-chevron-collapsed': collapsedPanels['dbScale'] }" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
 					</div>
@@ -284,7 +284,7 @@
 
 				<div class="panel" v-for="(vfo, i) in vfos" :key="'vfo-panel-' + i" :class="{ disabled: !connected, 'panel-oob': !isFreqInBandwidth(vfo.freq) }">
 					<div class="panel-header panel-header-collapsible" style="display: flex; justify-content: space-between; align-items: center;" @click="togglePanel('vfo-' + i)">
-						<div style="display: flex; align-items: center; gap: 6px;">
+						<div class="panel-header-toggle" style="display: flex; align-items: center; gap: 6px;" role="button" tabindex="0" :aria-expanded="String(!collapsedPanels['vfo-' + i])" @keydown.enter.prevent="togglePanel('vfo-' + i)" @keydown.space.prevent="togglePanel('vfo-' + i)">
 							<span class="vfo-dot" :style="{ background: vfoColor(i) }"></span>
 							VFO {{ i + 1 }}
 							<span v-if="!isFreqInBandwidth(vfo.freq)" class="vfo-oob-badge" style="font-size:8px;padding:1px 3px">OOB</span>
@@ -414,7 +414,7 @@
 
 				<!-- Bookmarks panel -->
 				<div class="panel">
-					<div class="panel-header bookmark-panel-header panel-header-collapsible" @click="togglePanel('bookmarks')">
+					<div class="panel-header bookmark-panel-header panel-header-collapsible" role="button" tabindex="0" :aria-expanded="String(!collapsedPanels['bookmarks'])" @click="togglePanel('bookmarks')" @keydown.enter.self.prevent="togglePanel('bookmarks')" @keydown.space.self.prevent="togglePanel('bookmarks')">
 						<span>{{ t('Bookmarks') }}</span>
 						<svg class="panel-chevron" :class="{ 'panel-chevron-collapsed': collapsedPanels['bookmarks'] }" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
 					</div>

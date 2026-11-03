@@ -70,6 +70,18 @@ export function compactMapInsets(
 }
 
 /**
+ * Where the compact layout's right column (node card, Kontrol) starts, in px
+ * from the map's top, when a map too narrow for both columns side by side
+ * (a phone: 240 + 320 px and the gaps) would let it cover the HUD: just under
+ * the left column. `null` while they fit beside each other or a column is empty.
+ */
+export function stackedRightTop(map: RectLike, left: RectLike | null, right: RectLike | null, gap = 8): number | null {
+  if (!left || !right || left.right - left.left <= 0 || right.right - right.left <= 0) return null;
+  if (right.left >= left.right) return null;
+  return whole(left.bottom - map.top + gap);
+}
+
+/**
  * The insets the camera frames with: all of them on the PC; in the compact
  * layout only the top one, so the station is centred horizontally.
  */

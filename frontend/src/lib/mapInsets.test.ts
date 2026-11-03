@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { COMPACT_TOP_INSET_SHARE, MAP_CONTROLS_ROW_PX, ZERO_INSETS, cameraInsets, clampMapPadding, compactMapInsets, computeMapInsets, controlsFramingBottom, noticePlacement, sameInsets } from './mapInsets';
+import { COMPACT_TOP_INSET_SHARE, MAP_CONTROLS_ROW_PX, ZERO_INSETS, cameraInsets, clampMapPadding, compactMapInsets, computeMapInsets, controlsFramingBottom, noticePlacement, sameInsets, stackedRightTop } from './mapInsets';
 
 const map = { left: 0, top: 52, right: 1440, bottom: 900 };
 
@@ -87,6 +87,17 @@ describe('compact map insets (phones and tablets)', () => {
     expect(compactMapInsets(map, { left: [tall] }).top).toBe(Math.round((527 - 52) * COMPACT_TOP_INSET_SHARE));
     expect(compactMapInsets(map, { left: [{ left: 0, top: 600, right: 200, bottom: 700 }] })).toEqual(ZERO_INSETS);
     expect(compactMapInsets(map, {})).toEqual(ZERO_INSETS);
+  });
+
+  it('starts the node card or Kontrol under the HUD when the two would cover each other', () => {
+    // 412 px phone: the right column (from x 84) reaches into the HUD (to x 248).
+    expect(stackedRightTop(map, hud, node)).toBe(170 - 52 + 8);
+    // A tablet's map has room for both side by side.
+    const wide = { left: 0, top: 52, right: 704, bottom: 800 };
+    expect(stackedRightTop(wide, hud, { left: 376, top: 60, right: 696, bottom: 200 })).toBeNull();
+    // An empty right column (display: none) or no HUD leaves it where it is.
+    expect(stackedRightTop(map, hud, { left: 0, top: 0, right: 0, bottom: 0 })).toBeNull();
+    expect(stackedRightTop(map, null, node)).toBeNull();
   });
 
   it('puts the map notices full width under the HUD and the node card on a 412 px phone', () => {

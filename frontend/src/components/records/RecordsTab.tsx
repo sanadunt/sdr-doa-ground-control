@@ -445,13 +445,13 @@ export function RecordsTab({ client: givenClient, now = Date.now }: { client?: R
         />
         {mode === 'day' ? (
           <>
-            <button type="button" className="ov-button" aria-label={t('records.prevDay')} onClick={() => pickDate(shiftExistingDay(dateKey, -1))}>‹</button>
+            <button type="button" className="ov-button rec-step" aria-label={t('records.prevDay')} onClick={() => pickDate(shiftExistingDay(dateKey, -1))}>‹</button>
             <button type="button" className="ov-button rec-date" aria-expanded={calendarOpen} aria-label={t('records.chooseDate', { date: dateLabel })}
               onClick={() => { setCalendarOpen((value) => !value); setMonthKey(monthKeyOf(dateKey)); }}
             >
               {dateLabel}
             </button>
-            <button type="button" className="ov-button" aria-label={t('records.nextDay')} onClick={() => pickDate(shiftExistingDay(dateKey, 1))}>›</button>
+            <button type="button" className="ov-button rec-step" aria-label={t('records.nextDay')} onClick={() => pickDate(shiftExistingDay(dateKey, 1))}>›</button>
             <button type="button" className="ov-button" disabled={dateKey === todayKey} onClick={() => pickDate(todayKey)}>{t('records.today')}</button>
           </>
         ) : null}
@@ -524,9 +524,9 @@ export function RecordsTab({ client: givenClient, now = Date.now }: { client?: R
           {order === 'asc' ? `↑ ${t('records.orderAsc')}` : `↓ ${t('records.orderDesc')}`}
         </button>
         <span className="rec-pages">
-          <button type="button" className="ov-button" aria-label={t('records.prevPage')} disabled={page === 0} onClick={() => setPage(page - 1)}>‹</button>
+          <button type="button" className="ov-button rec-step" aria-label={t('records.prevPage')} disabled={page === 0} onClick={() => setPage(page - 1)}>‹</button>
           <span className="pg-value">{t('records.page', { range: pageRangeLabel(page, RECORDS_PAGE_SIZE, rows.length), total })}</span>
-          <button type="button" className="ov-button" aria-label={t('records.nextPage')} disabled={page >= pages - 1} onClick={() => setPage(page + 1)}>›</button>
+          <button type="button" className="ov-button rec-step" aria-label={t('records.nextPage')} disabled={page >= pages - 1} onClick={() => setPage(page + 1)}>›</button>
         </span>
       </Toolbar>
       {items.error ? (

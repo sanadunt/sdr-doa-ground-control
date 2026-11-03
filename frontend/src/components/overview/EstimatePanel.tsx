@@ -19,7 +19,8 @@ const STATE_TEXT: Record<PositionEstimate['state'], MessageKey> = {
  * The transmitter position estimate under the bearing HUD: where the moving
  * RDF-SDR's bearings cross, how far that is, and what it rests on. "Start
  * over" clears it on this console (nothing goes to the node). Not shown in
- * the LAN view, which only watches. In the compact touch layout it is one
+ * the LAN view, which only watches. In the compact touch layout, and on a
+ * desktop while Lapisan is open (the column would squeeze it), it is one
  * button of two lines (title, state and distance) that opens the rest.
  */
 export function EstimatePanel({ estimate, viewOnly = false, compact = false }: { estimate: PositionEstimate; viewOnly?: boolean; compact?: boolean }): JSX.Element {

@@ -134,6 +134,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .delivery-checks .is-unknown .delivery-mark { color: var(--subtle); }
 .topbar-toolbar { display: flex; flex: none; align-items: center; }
 .topbar-tools { display: flex; flex: none; align-items: center; gap: 8px; }
+.view-only-chip { display: inline-flex; align-items: center; gap: 4px; }
+.view-only-chip svg { flex: none; width: 12px; height: 12px; }
 .lang-switch { display: inline-flex; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; }
 .lang-switch button { min-width: 44px; min-height: 42px; padding: 0 8px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-family: var(--mono); font-size: 12px; font-weight: 600; }
 .lang-switch button + button { border-left: 1px solid var(--line); }
@@ -188,6 +190,26 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   .topbar-tools:has(.host-power) .refresh-interval { width: 80px; }
   .topbar-tools:has(.host-power) .lang-switch button[aria-pressed='true'] { display: none; }
   .topbar-tools:has(.host-power) .lang-switch button + button { border-left: 0; }
+}
+/* Eight status chips (Source and Telemetry LoRa) do not fit one row beside the
+   tools below 1301 px: the chips take a second row there, all visible, and the
+   viewport-sized Dashboard gets the taller bar through --topbar-h. Between 1301
+   and 1600 px the Dashboard's panel toggles drop their labels instead. */
+@media (min-width: 1024px) and (max-width: 1300px) {
+  .console-shell:has(.topbar > .telemetry-strip.has-source.has-lora) { --topbar-h: 100px; }
+  .topbar:has(> .telemetry-strip.has-source.has-lora) { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto; grid-template-areas: 'menu brand title toolbar tools' 'chips chips chips chips chips'; align-content: center; gap: 4px 8px; }
+  .topbar:has(> .telemetry-strip.has-source.has-lora) > .menu-toggle { grid-area: menu; }
+  .topbar:has(> .telemetry-strip.has-source.has-lora) > :is(.brand-mark, .brand-logo) { grid-area: brand; }
+  .topbar:has(> .telemetry-strip.has-source.has-lora) > .topbar-title { grid-area: title; }
+  .topbar:has(> .telemetry-strip.has-source.has-lora) > .topbar-spacer { display: none; }
+  .topbar:has(> .telemetry-strip.has-source.has-lora) > .topbar-toolbar { grid-area: toolbar; }
+  .topbar:has(> .telemetry-strip.has-source.has-lora) > .topbar-tools { grid-area: tools; justify-self: end; }
+  .topbar > .telemetry-strip.has-source.has-lora { grid-area: chips; display: grid; grid-template-columns: repeat(8, auto); overflow: visible; }
+  .topbar > .telemetry-strip.has-source.has-lora .telemetry-item { min-width: 0; padding: 0 8px; }
+  .topbar > .telemetry-strip.has-source.has-lora .telemetry-value { overflow: hidden; text-overflow: ellipsis; }
+}
+@media (min-width: 1301px) and (max-width: 1600px) {
+  .topbar:has(> .telemetry-strip.has-source.has-lora) .ov-toggle-label { display: none; }
 }
 @media (max-width: 1023px) {
   /* Row 1: menu, brand, title, tools. Row 2: status chips, all visible. Row 3: page tools. */
@@ -642,6 +664,11 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 @media (max-width: 479px) {
   .console-shell.is-overview[data-layout^='compact'] .brand-mark, .console-shell.is-overview[data-layout^='compact'] .brand-logo { display: none; }
   .console-shell[data-layout^='compact'] .view-only-chip { padding: 1px 5px; }
+  /* At 360 px the chip keeps only its lock (its text stays its name; the page menu says it too). */
+  @media (max-width: 399px) {
+    .console-shell[data-layout^='compact'] .view-only-chip { min-width: 28px; justify-content: center; }
+    .console-shell[data-layout^='compact'] .view-only-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  }
   .console-shell.is-overview[data-layout^='compact'] .status-summary-source { display: none; }
 }
 .console-shell[data-layout^='compact'] .topbar-title { flex: 0 1 auto; min-width: 0; }
