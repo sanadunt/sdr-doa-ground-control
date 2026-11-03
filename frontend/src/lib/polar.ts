@@ -1,6 +1,7 @@
 import type { Candidate, CompassConfig, CompassResolution, ManualCompassOverride, PolarSettings, PolarView, TelemetrySnapshot } from '../types';
 import { curveDataReady, nativeViewsReady, numberOrNull, partialCsvReady, primaryCandidate } from './telemetry';
 import { isMqttSnapshot } from './telemetrySource';
+import { droneArrayHeadingAtDoa, snapshotDrone } from './droneLink';
 import type { Translate } from './i18n';
 import { formatDuration } from './healthView';
 import { settingsReadAtMs } from './snapshotRead';
@@ -45,6 +46,7 @@ export function manualCompassOverrideFromInput(figTypeInput: unknown, compassOff
 /** Return safe renderer settings for an enabled manual compass override. */
 export const DEFAULT_COMPASS_CONFIG: CompassConfig = {
   source: 'DATA_OUT',
+  preferDrone: true,
   manualFigType: 'Compass',
   manualCompassOffset: 0,
 };
@@ -71,7 +73,8 @@ export type CompassSourceCode =
   | 'DATA_OUT_UNAVAILABLE'
   | 'MANUAL'
   | 'FALLBACK'
-  | 'NODE_HEADING';
+  | 'NODE_HEADING'
+  | 'DRONE_YAW';
 
 export interface CompassSourceResolution extends CompassResolution {
   code: CompassSourceCode;
@@ -165,6 +168,24 @@ export function resolveCompassSource(
         lastKnownAgeMs: null,
       };
     }
+  }
+  // The drone's yaw when this DoA sample was taken (within 1 s, tools/drone_link.py),
+  // turned by the array's offset against the drone's nose: the drone's compass
+  // is steadier than the RDF-SDR's inside the airframe. Without a match in
+  // time, the RDF-SDR's own heading below.
+  const droneHeading = config.preferDrone === false ? null : droneArrayHeadingAtDoa(snapshotDrone(snapshot));
+  if (droneHeading !== null) {
+    const reported = dataOutCompassFromSnapshot(snapshot);
+    return {
+      settings: { figType: reported?.figType ?? previousSettings.figType, compassOffset: droneHeading },
+      selectedSource: config.source,
+      effectiveSource: 'DATA_OUT',
+      label: 'DRONE YAW',
+      detail: "Using the drone's yaw at the time of this DoA sample.",
+      code: 'DRONE_YAW',
+      offsetVerified: true,
+      lastKnownAgeMs: null,
+    };
   }
   // Contract 1.10: the array heading the edge stamped on the LIVE DoA. With it
   // every theta_0 bin turns into a true bearing (360 - theta + heading), which
@@ -263,6 +284,12 @@ export function curveCompassOffset(
   resolution: Pick<CompassSourceResolution, 'code'>,
   compassOffset: number,
 ): number {
+  if (resolution.code === 'DRONE_YAW') {
+    // The drone's yaw at the DoA, moved by how far the RDF-SDR turned between its Angular frame and the DoA.
+    const frame = angularFrameHeading(snapshot);
+    const doa = nodeArrayHeading(snapshot);
+    return frame !== null && doa !== null ? compassOffset + (frame - doa) : compassOffset;
+  }
   const frame = resolution.code === 'NODE_HEADING' ? angularFrameHeading(snapshot) : null;
   return frame ?? compassOffset;
 }
@@ -289,6 +316,7 @@ export function curveInDoaFrame(values: number[] | null, compassOffset: number, 
 /** Short source label for the compass offset in captions and the bearing readout. */
 export function compassOffsetSourceLabel(resolution: CompassSourceResolution, t: Translate): string {
   if (resolution.code === 'NODE_HEADING') return t('polar.offsetNodeHeading');
+  if (resolution.code === 'DRONE_YAW') return t('polar.offsetDroneYaw');
   if (!resolution.offsetVerified) return t('polar.offsetAssumed');
   const base = resolution.code === 'MANUAL' ? 'MANUAL' : resolution.code === 'DATA_OUT_LOCAL_AXIS' ? 'DATA_OUT · LOCAL AXIS' : 'DATA_OUT';
   if (resolution.lastKnownAgeMs === null) return base;

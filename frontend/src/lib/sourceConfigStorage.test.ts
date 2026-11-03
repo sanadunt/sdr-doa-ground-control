@@ -17,8 +17,11 @@ describe('GPS / Compass source persistence (AUD-39)', () => {
     const storage = memoryStorage();
     saveGpsConfig({ source: 'MANUAL', manualLatitude: -7.25, manualLongitude: 112.75 }, storage);
     saveCompassConfig({ source: 'MANUAL', manualFigType: 'Polar', manualCompassOffset: 30 }, storage);
-    expect(loadGpsConfig(storage)).toEqual({ source: 'MANUAL', manualLatitude: -7.25, manualLongitude: 112.75 });
-    expect(loadCompassConfig(storage)).toEqual({ source: 'MANUAL', manualFigType: 'Polar', manualCompassOffset: 30 });
+    // A choice stored before the drone existed reads with the drone first.
+    expect(loadGpsConfig(storage)).toEqual({ source: 'MANUAL', manualLatitude: -7.25, manualLongitude: 112.75, preferDrone: true });
+    expect(loadCompassConfig(storage)).toEqual({ source: 'MANUAL', manualFigType: 'Polar', manualCompassOffset: 30, preferDrone: true });
+    saveGpsConfig({ source: 'DATA_OUT', manualLatitude: -7.25, manualLongitude: 112.75, preferDrone: false }, storage);
+    expect(loadGpsConfig(storage).preferDrone).toBe(false);
   });
 
   it('falls back to the defaults for missing, malformed or out-of-range values', () => {

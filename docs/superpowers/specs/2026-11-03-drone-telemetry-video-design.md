@@ -169,15 +169,19 @@ Bentuk blok `drone` (semua angka null bila tidak diketahui):
 - `lib/droneLink.ts`: `normalizeDrone()` (longgar), `droneStation()` (posisi drone yang boleh dipakai:
   LIVE, fix ≥ 3D, tidak basi), `droneHeadingAtDoa()`, selisih posisi/heading dengan RDF-SDR, dan
   label RTK.
-- **Sumber GPS**: mode baru `DRONE` menjadi default `GpsConfig.source` untuk preferensi baru.
-  Resolusi: posisi drone dulu, lalu jalur RDF-SDR yang sekarang (Data Out/LoRa nav), lalu fallback.
-  `MapCoordinate.source` `DRONE`. Pilihan lama yang tersimpan (`DATA_OUT`) dihormati.
-  **[keputusan builder]** preferensi yang tersimpan `DATA_OUT` dimigrasi sekali ke `DRONE`, karena
-  owner minta drone diutamakan; operator bisa memilih RDF-SDR lagi di Konfigurasi.
-- **Sumber kompas**: mode baru `DRONE` (default): `compassOffset = heading_at_doa.deg + offset` bila
-  ada, selain itu `NODE_HEADING` seperti sekarang. Label: "DRONE YAW" atau
-  "RDF-SDR HEADING · drone tidak cocok waktu". MANUAL tetap di atas segalanya.
-- Peta: marker drone (segitiga oranye yang berputar sesuai heading) di posisi drone, jejak 2000 titik
+- **Sumber GPS**: `GpsConfig.preferDrone` (bawaan nyala). Dengan sumber live, posisi drone dipakai
+  dulu (`MapCoordinate.source` `DRONE`), lalu jalur RDF-SDR yang sekarang (Data Out/LoRa nav), lalu
+  fallback. MANUAL dan FALLBACK yang dipilih tetap dihormati.
+  **[keputusan builder]** dipilih sakelar, bukan mode baru dengan migrasi: pilihan lama yang tersimpan
+  tidak punya field ini, jadi terbaca nyala (drone diutamakan, sesuai permintaan owner), dan operator
+  bisa mematikannya di Konfigurasi → GPS & Kompas.
+- **Sumber kompas**: `CompassConfig.preferDrone` (bawaan nyala): `compassOffset = heading_at_doa.deg +
+  offset` (kode `DRONE_YAW`, label "DRONE YAW") bila ada, selain itu `NODE_HEADING` seperti sekarang.
+  MANUAL tetap di atas segalanya. Kurva Angular ikut diputar sebesar putaran RDF-SDR antara frame-nya
+  dan DoA.
+- **[keputusan builder]** Data drone berumur sendiri (`droneCurrent()`, seperti GPS groundstation),
+  terpisah dari kesegaran data RDF-SDR, supaya drone tetap di peta walau RDF-SDR atau link-nya mati.
+- Peta: marker drone (cincin oranye dengan penunjuk arah hidung) di posisi drone, jejak 2000 titik
   (memori halaman), dan marker RDF-SDR GPS-nya sendiri tetap tampil kecil saat posisi stasiun berasal
   dari drone, dengan garis tipis dan jaraknya bila > 5 m.
 - Kartu RDF-SDR (`NodeCard`): baris "GPS drone / GPS RDF-SDR / selisih" dan "Heading drone / heading

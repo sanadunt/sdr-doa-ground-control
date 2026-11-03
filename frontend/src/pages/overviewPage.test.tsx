@@ -136,20 +136,20 @@ describe('Overview dashboard', () => {
   });
 
   it('follows the panel choices from App', () => {
-    const all = dashboard(snapshot(), { panels: { layers: true, polar: true, spectrum: false, control: true, nodeCollapsed: false } });
+    const all = dashboard(snapshot(), { panels: { layers: true, polar: true, spectrum: false, control: true, drone: false, nodeCollapsed: false } });
     expect(all).toContain('id="panel-layers"');
     expect(all).toContain('id="panel-control"');
     expect(all).not.toContain('id="panel-spectrum"');
     expect(all).toContain('data-dock="polar"');
     expect(all).toContain('data-control="open"');
     expect(all).toContain('id="ov-node-detail" class="ov-node-detail">');
-    const none = dashboard(snapshot(), { panels: { layers: false, polar: false, spectrum: false, control: false, nodeCollapsed: true } });
+    const none = dashboard(snapshot(), { panels: { layers: false, polar: false, spectrum: false, control: false, drone: false, nodeCollapsed: true } });
     expect(none).not.toContain('class="ov-dock"');
     expect(none).toContain('data-dock="none"');
   });
 
   it('shows the layer switches, including the new edges and labels layers', () => {
-    const layers = dashboard(snapshot(), { panels: { layers: true, polar: false, spectrum: false, control: false, nodeCollapsed: true } }, 'id')
+    const layers = dashboard(snapshot(), { panels: { layers: true, polar: false, spectrum: false, control: false, drone: false, nodeCollapsed: true } }, 'id')
       .match(/<section id="panel-layers"[\s\S]*?<\/section>/)?.[0] ?? '';
     for (const label of ['Sorotan beam', 'Lobe', 'Garis bearing', 'Tepi −3 dB', 'Cincin jarak', 'Arah U/T/S/B', 'Label teks', 'Opasitas overlay', 'Lanjutan']) {
       expect(layers, label).toContain(label);
@@ -177,7 +177,7 @@ describe('Overview dashboard', () => {
   });
 
   it('renders the spectrum dock and a locked Kontrol', () => {
-    const markup = dashboard(snapshot(), { panels: { layers: false, polar: false, spectrum: true, control: true, nodeCollapsed: true } }, 'id');
+    const markup = dashboard(snapshot(), { panels: { layers: false, polar: false, spectrum: true, control: true, drone: false, nodeCollapsed: true } }, 'id');
     expect(markup).toContain('Spektrum');
     expect(markup).toMatch(/aria-keyshortcuts="2" aria-label="Buka Receiver penuh"/);
     expect(markup).toContain('Ikuti frekuensi node');
@@ -191,7 +191,7 @@ describe('Overview dashboard', () => {
   });
 
   it('puts the basemap select first in the Lapisan panel', () => {
-    const markup = dashboard(snapshot(), { panels: { layers: true, polar: false, spectrum: false, control: false, nodeCollapsed: true } }, 'id');
+    const markup = dashboard(snapshot(), { panels: { layers: true, polar: false, spectrum: false, control: false, drone: false, nodeCollapsed: true } }, 'id');
     expect(markup).toMatch(/<div class="ov-layers-body"><label class="ov-basemap-row"><span>Peta dasar<\/span><select>/);
     expect(markup).toContain('<option value="standard" selected="">Standar</option>');
   });
@@ -201,7 +201,7 @@ describe('Overview panel toggles', () => {
   it('press, label and point at the open panels', () => {
     const markup = renderToStaticMarkup(
       <I18nContext.Provider value={{ lang: 'id', setLang: () => undefined, t: (key, vars) => translate('id', key, vars) }}>
-        <OverviewPanelToggles panels={{ layers: false, polar: true, spectrum: true, control: false, nodeCollapsed: true }} onChange={() => undefined} />
+        <OverviewPanelToggles panels={{ layers: false, polar: true, spectrum: true, control: false, drone: false, nodeCollapsed: true }} onChange={() => undefined} />
       </I18nContext.Provider>,
     );
     expect(markup).toContain('role="group" aria-label="Panel"');

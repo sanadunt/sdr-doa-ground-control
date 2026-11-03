@@ -28,6 +28,7 @@ import {
 } from '../lib/healthView';
 import type { NodeProgressView, ResourceRow, SignalQualityView } from '../lib/healthView';
 import { CollectorError } from '../components/ui';
+import { DroneLinkCard, DroneVideoCard } from '../components/DroneHealthCards';
 import { Card, DataTable, EmptyState, KeyValueGrid, Notice, Page, PageGrid, PageHeader, PageStack, StatRow, StatTile, StatusChip, Tag } from '../components/page';
 import type { DataColumn, KeyValueItem, PageTone } from '../components/page';
 
@@ -433,6 +434,8 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
           <MqttCard mqtt={mqtt} mqttError={mqttError} capabilities={capabilities} />
           <LoraCard mqtt={mqtt} />
           <GroundGpsCard snapshot={snapshot} localSnapshotFresh={groundGpsFresh ?? localSnapshotFresh} />
+          <DroneLinkCard snapshot={snapshot} />
+          <DroneVideoCard />
         </PageStack>
       </PageGrid>
     </Page>

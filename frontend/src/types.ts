@@ -226,6 +226,8 @@ export interface TelemetrySnapshot {
   source?: SnapshotSource;
   /** Every answer of a console with ground GPS: null without an MQTT monitor; absent from older servers. */
   ground_gps?: GroundGpsView | null;
+  /** Every answer of a console with the drone link (tools/drone_link.py); read through lib/droneLink.ts. */
+  drone?: unknown;
   /** MQTT answers only: null without nav fields; absent from Data Out answers and older servers. */
   nav?: SnapshotNav | null;
   /** MQTT answers only: null without state.rf (an edge before 1.7); absent from Data Out answers and older servers. */
@@ -421,7 +423,8 @@ export type CompassSourceMode = 'DATA_OUT' | 'MANUAL' | 'FALLBACK';
 export interface MapCoordinate {
   latitude: number;
   longitude: number;
-  source: 'CSV' | 'XML' | 'NAV' | 'DATA_OUT' | 'MANUAL' | 'FALLBACK' | 'SIMULATION';
+  /** DRONE: the SIYI drone's own GPS (tools/drone_link.py), which carries the RDF-SDR. */
+  source: 'CSV' | 'XML' | 'NAV' | 'DRONE' | 'DATA_OUT' | 'MANUAL' | 'FALLBACK' | 'SIMULATION';
   /** A NAV position from a held (not fresh) health, kept with link_mode "lora": shown as the last position, STALE. */
   stale?: boolean;
 }
@@ -436,6 +439,8 @@ export interface GpsConfig {
   source: GpsSourceMode;
   manualLatitude: number;
   manualLongitude: number;
+  /** With the live source: the drone's GPS first, the RDF-SDR's when the drone has none (default on). */
+  preferDrone?: boolean;
 }
 
 /** Local Compass source selection. It only selects renderer settings. */
@@ -443,6 +448,8 @@ export interface CompassConfig {
   source: CompassSourceMode;
   manualFigType: PolarSettings['figType'];
   manualCompassOffset: number;
+  /** Below MANUAL: the drone's yaw at the DoA sample first, the RDF-SDR's heading otherwise (default on). */
+  preferDrone?: boolean;
 }
 
 export interface GpsResolution {

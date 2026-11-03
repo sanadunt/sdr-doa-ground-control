@@ -11,6 +11,7 @@ const TOGGLES: ReadonlyArray<{ key: OverviewPanelKey; icon: IconName; label: Mes
   { key: 'layers', icon: 'layers', label: 'shell.panelLayers', controls: 'panel-layers' },
   { key: 'polar', icon: 'polar-dock', label: 'shell.panelPolar', controls: 'panel-polar' },
   { key: 'spectrum', icon: 'spectrum', label: 'shell.panelSpectrum', controls: 'panel-spectrum' },
+  { key: 'drone', icon: 'drone', label: 'shell.panelDrone', controls: 'panel-drone' },
   { key: 'control', icon: 'sliders', label: 'shell.panelControl', controls: 'panel-control' },
 ];
 
@@ -19,6 +20,7 @@ const COMPACT_TOGGLES: ReadonlyArray<{ key: ToggleKey; icon: IconName; label: Me
   { key: 'layers', icon: 'layers', label: 'shell.panelLayers', controls: 'panel-layers' },
   { key: 'spectrum', icon: 'spectrum', label: 'shell.panelSpectrum', controls: 'panel-spectrum' },
   { key: 'node', icon: 'antenna', label: 'shell.panelNode', controls: 'panel-node' },
+  { key: 'drone', icon: 'drone', label: 'shell.panelDrone', controls: 'panel-drone' },
   { key: 'control', icon: 'sliders', label: 'shell.panelControl', controls: 'panel-control' },
 ];
 

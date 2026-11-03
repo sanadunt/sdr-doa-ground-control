@@ -8,14 +8,15 @@ function memoryStorage(entries: Record<string, string> = {}): Pick<Storage, 'get
 
 describe('Overview panels', () => {
   it('start from the mockup defaults: polar and spectrum open, node card collapsed', () => {
-    expect(DEFAULT_OVERVIEW_PANELS).toEqual({ layers: false, polar: true, spectrum: true, control: false, nodeCollapsed: true });
+    expect(DEFAULT_OVERVIEW_PANELS).toEqual({ layers: false, polar: true, spectrum: true, control: false, drone: true, nodeCollapsed: true });
     expect(loadOverviewPanels(memoryStorage())).toEqual(DEFAULT_OVERVIEW_PANELS);
     expect(loadOverviewPanels(null)).toEqual(DEFAULT_OVERVIEW_PANELS);
   });
 
   it('restore each stored boolean on its own and ignore anything else', () => {
     expect(validateOverviewPanels({ layers: true, polar: 'no', spectrum: false, control: 1, nodeCollapsed: false, extra: true }))
-      .toEqual({ layers: true, polar: true, spectrum: false, control: false, nodeCollapsed: false });
+      .toEqual({ layers: true, polar: true, spectrum: false, control: false, drone: true, nodeCollapsed: false });
+    expect(validateOverviewPanels({ drone: false }).drone).toBe(false);
     expect(validateOverviewPanels(null)).toEqual(DEFAULT_OVERVIEW_PANELS);
     expect(validateOverviewPanels([true, false])).toEqual(DEFAULT_OVERVIEW_PANELS);
   });
@@ -30,7 +31,7 @@ describe('Overview panels', () => {
 
   it('round-trip through storage', () => {
     const storage = memoryStorage();
-    const panels = { layers: true, polar: false, spectrum: true, control: true, nodeCollapsed: false };
+    const panels = { layers: true, polar: false, spectrum: true, control: true, drone: false, nodeCollapsed: false };
     saveOverviewPanels(panels, storage);
     expect(loadOverviewPanels(storage)).toEqual(panels);
     expect(sameOverviewPanels(loadOverviewPanels(storage), panels)).toBe(true);

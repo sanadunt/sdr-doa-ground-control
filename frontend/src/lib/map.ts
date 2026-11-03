@@ -1,6 +1,7 @@
 import type { Candidate, GpsConfig, GpsResolution, GpsSourceMode, ManualGpsOverride, MapCoordinate, TelemetrySnapshot } from '../types';
 import type { BasemapTone } from './basemaps';
 import { isMqttSnapshot, lightStatus, lightXml, snapshotNav } from './telemetrySource';
+import { droneStation, snapshotDrone } from './droneLink';
 
 // Basemap health. The console's tile route tries the upstream hosts itself
 // (tools/tile_cache.py), so a style has one URL in the browser and hostCount
@@ -172,6 +173,7 @@ export function basemapPaint(theme: 'light' | 'dark', tilesLoaded: boolean, tone
 export const DEFAULT_FALLBACK_COORDINATE = Object.freeze({ latitude: -6.932468839245536, longitude: 107.66069405900005 });
 export const DEFAULT_GPS_CONFIG: GpsConfig = {
   source: 'DATA_OUT',
+  preferDrone: true,
   manualLatitude: DEFAULT_FALLBACK_COORDINATE.latitude,
   manualLongitude: DEFAULT_FALLBACK_COORDINATE.longitude,
 };
@@ -223,6 +225,8 @@ function fallbackCoordinate(): MapCoordinate {
 export function resolveGpsSource(
   snapshot: TelemetrySnapshot | null | undefined,
   config: GpsConfig = DEFAULT_GPS_CONFIG,
+  /** The answer whose drone block counts: it ages apart from the RDF-SDR's (lib/droneLink.ts droneCurrent). */
+  droneSnapshot: TelemetrySnapshot | null | undefined = snapshot,
 ): GpsResolution {
   const selectedSource = config.source;
   if (selectedSource === 'MANUAL') {
@@ -250,6 +254,17 @@ export function resolveGpsSource(
       effectiveSource: 'FALLBACK',
       label: 'DEFAULT FALLBACK',
       detail: 'Using the configured fallback station location; this is not a live GPS fix.',
+    };
+  }
+  // The drone carries the RDF-SDR: its GPS (RTK) first, the RDF-SDR's own when the drone has none.
+  const drone = config.preferDrone === false ? null : droneStation(snapshotDrone(droneSnapshot));
+  if (drone) {
+    return {
+      coordinate: drone,
+      selectedSource,
+      effectiveSource: 'DATA_OUT',
+      label: 'DRONE GPS',
+      detail: "Using the drone's own GPS; the RDF-SDR's GPS is shown beside it.",
     };
   }
   const dataOut = resolveStationCoordinate(snapshot);
@@ -313,7 +328,7 @@ export function holdStationCoordinate(
   noFixReported: boolean,
   selectedSource: GpsSourceMode = 'DATA_OUT',
 ): HeldStation {
-  if (coordinate?.source === 'DATA_OUT') return { coordinate, held: false, lastLive: coordinate };
+  if (coordinate?.source === 'DATA_OUT' || coordinate?.source === 'DRONE') return { coordinate, held: false, lastLive: coordinate };
   // The RDF-SDR's own GPS from a held health (link_mode "lora"): its last position, STALE.
   if (coordinate?.source === 'NAV' && coordinate.stale === true) return { coordinate, held: true, lastLive };
   if (selectedSource !== 'DATA_OUT' || coordinate?.source !== 'FALLBACK') return { coordinate, held: false, lastLive };

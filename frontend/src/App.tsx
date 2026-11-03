@@ -36,6 +36,7 @@ import { consoleAccess, pageHostname } from './lib/access';
 import { DEFAULT_SIMULATION, simulationSnapshot, randomizeSimulationSettings } from './lib/simulation';
 import { snapshotCollectionId, snapshotConsoleBaseUrl, snapshotConsoleRefreshSeconds, snapshotReadAtMonotonic, snapshotServedAgeMs } from './lib/snapshotRead';
 import { groundGpsCurrent } from './lib/groundGps';
+import { droneCurrent } from './lib/droneLink';
 import { layoutOverrideFrom, useCompactLayout } from './lib/compactLayout';
 import type { CompactLayout, LayoutOverride } from './lib/compactLayout';
 
@@ -360,6 +361,7 @@ function PageForRoute({
   snapshot,
   localFresh,
   groundFresh,
+  droneFresh,
   mqtt,
   mqttError,
   config,
@@ -382,6 +384,8 @@ function PageForRoute({
   localFresh: boolean;
   /** The groundstation GPS of the last answer is current (lib/groundGps.ts groundGpsCurrent). */
   groundFresh: boolean;
+  /** The drone block of the last answer is current (lib/droneLink.ts droneCurrent). */
+  droneFresh: boolean;
   mqtt: MqttSnapshot | null;
   mqttError: string | null;
   config: ConsoleConfig;
@@ -410,7 +414,7 @@ function PageForRoute({
       : <ConfigUnavailable error={configError} />;
     case 'message-monitor': return <MessageMonitorPage mqtt={mqtt} mqttError={mqttError} config={config} onMqttChanged={onMqttChanged} onRefreshMqtt={onRefreshMqtt} onReconnectMqtt={onReconnectMqtt} capabilities={overview.capabilities} readOnly={overview.viewOnly} />;
     case 'overview':
-    default: return <OverviewPage snapshot={snapshot} localSnapshotFresh={localFresh} groundGpsFresh={groundFresh} gpsConfig={gpsConfig} compassConfig={compassConfig} {...overview} />;
+    default: return <OverviewPage snapshot={snapshot} localSnapshotFresh={localFresh} groundGpsFresh={groundFresh} droneFresh={droneFresh} gpsConfig={gpsConfig} compassConfig={compassConfig} {...overview} />;
   }
 }
 
@@ -941,6 +945,8 @@ export default function App({ layout: forcedLayout }: { layout?: CompactLayout |
   // Time since the node was read, which can be before this page's last answer.
   // The groundstation's own GPS ages by itself, apart from the RDF-SDR's data.
   const groundFresh = expiryTick >= 0 && groundGpsCurrent(snapshot, readAtMonotonic, readError !== null, now);
+  // So does the drone's.
+  const droneFresh = expiryTick >= 0 && droneCurrent(snapshot, readAtMonotonic, readError !== null, now);
   const lastReadAgeMs = readAtMonotonic === null ? null : Math.max(0, now - readAtMonotonic);
   // A quick poll is not announced; the first read and slow reads are.
   const readingVisible = readStartedAt !== null && (snapshot === null || now - readStartedAt >= SLOW_READ_MS);
@@ -979,7 +985,7 @@ export default function App({ layout: forcedLayout }: { layout?: CompactLayout |
                 {route === 'receiver' ? <ReceiverMirrorPage feed={mirrorFeed} />
                   : route === 'simulation' ? <SimulationPage enabled={simulationEnabled} automatic={simulationAutomatic} settings={simulationSettings} onEnabled={enabled => { setSimulationEnabled(enabled); if (!enabled) setSimulationAutomatic(false); }} onAutomatic={setSimulationAutomatic} onSettings={setSimulationSettings} onRandomize={randomizeSimulation} onOverview={() => navigate('overview')} />
                   : route === 'overview' && simulationEnabled ? <OverviewPage snapshot={syntheticSnapshot} localSnapshotFresh={true} gpsConfig={gpsConfig} compassConfig={compassConfig} simulation={simulationSettings} {...overviewWiring} />
-                  : <PageForRoute route={route} snapshot={snapshot} localFresh={currentLocalFresh} groundFresh={groundFresh} mqtt={mqtt} mqttError={mqttErrorText} config={config} configLoaded={configLoaded} configError={configErrorText} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={setGpsConfig} onCompassConfigChanged={onCompassConfigChanged} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} onMqttChanged={applyMqtt} onRefreshMqtt={refreshMqtt} onReconnectMqtt={reconnectMqtt} overview={overviewWiring} />}
+                  : <PageForRoute route={route} snapshot={snapshot} localFresh={currentLocalFresh} groundFresh={groundFresh} droneFresh={droneFresh} mqtt={mqtt} mqttError={mqttErrorText} config={config} configLoaded={configLoaded} configError={configErrorText} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={setGpsConfig} onCompassConfigChanged={onCompassConfigChanged} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} onMqttChanged={applyMqtt} onRefreshMqtt={refreshMqtt} onReconnectMqtt={reconnectMqtt} overview={overviewWiring} />}
               </Suspense>
             </LoadErrorBoundary>
           </section>

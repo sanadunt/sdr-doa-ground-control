@@ -36,6 +36,7 @@ import type { Notice } from '../lib/errorNotice';
 import { useI18n } from '../lib/i18n';
 import type { MessageKey } from '../lib/i18n';
 import { Icon } from '../components/ui';
+import { DroneSettingsCard } from '../components/DroneSettingsCard';
 import { Card, FileButton, FormField, KeyValueGrid, Page, PageGrid, PageHeader, PageNotice, PageStack, Segmented, StatusChip, Switch, Tag } from '../components/page';
 import type { KeyValueItem, PageTone } from '../components/page';
 // Styled by pages/configuration.css, which main.tsx loads with the entry (no CSS in lazy chunks).
@@ -62,6 +63,7 @@ const SOURCE_TONES: Record<SourceCode, PageTone> = { DATA_OUT: 'neutral', MANUAL
 const SECTIONS = [
   { id: 'connection-settings', label: 'config.nav.connection' },
   { id: 'mqtt-settings', label: 'config.nav.mqtt' },
+  { id: 'drone-settings', label: 'config.nav.drone' },
   { id: 'lan-settings', label: 'config.nav.lan' },
   { id: 'navigation-settings', label: 'config.nav.navigation' },
   { id: 'branding-settings', label: 'config.nav.branding' },
@@ -726,6 +728,7 @@ export function ConfigurationPage({
       source: gpsSource,
       manualLatitude: validation.override?.latitude ?? DEFAULT_FALLBACK_COORDINATE.latitude,
       manualLongitude: validation.override?.longitude ?? DEFAULT_FALLBACK_COORDINATE.longitude,
+      preferDrone: gpsConfig.preferDrone !== false,
     };
     onGpsConfigChanged(next);
     saveGpsConfig(next);
@@ -740,7 +743,7 @@ export function ConfigurationPage({
       setCompassResult(null);
       return;
     }
-    const next: CompassConfig = { source: compassSource, manualFigType: manualAxis, manualCompassOffset: compassOffset };
+    const next: CompassConfig = { source: compassSource, manualFigType: manualAxis, manualCompassOffset: compassOffset, preferDrone: compassConfig.preferDrone !== false };
     onCompassConfigChanged(next);
     saveCompassConfig(next);
     setCompassError(null);
@@ -1089,6 +1092,8 @@ export function ConfigurationPage({
             </form>
           </Card>
 
+          <DroneSettingsCard readOnly={readOnly} />
+
           {readOnly ? null : (
             <LanAccessCard
               adminAuthenticated={adminAuthenticated}
@@ -1115,6 +1120,16 @@ export function ConfigurationPage({
                     <input type="number" inputMode="decimal" value={manualLongitude} min={-180} max={180} step={0.000001} placeholder="−180…180" disabled={gpsSource !== 'MANUAL'} onChange={(event) => { setManualLongitude(event.target.value); setGpsErrors({}); setGpsResult(null); }} />
                   </FormField>
                 </div>
+                <Switch
+                  checked={gpsConfig.preferDrone !== false}
+                  label={t('config.gpsPreferDrone')}
+                  onChange={(preferDrone) => {
+                    const next: GpsConfig = { ...gpsConfig, preferDrone };
+                    onGpsConfigChanged(next);
+                    saveGpsConfig(next);
+                    setGpsResult({ code: 'APPLIED', tone: 'good' });
+                  }}
+                />
                 <KeyValueGrid columns={1} items={[{ id: 'fallback', label: t('config.sourceFallback'), value: `${DEFAULT_FALLBACK_COORDINATE.latitude.toFixed(6)}, ${DEFAULT_FALLBACK_COORDINATE.longitude.toFixed(6)}` }]} />
                 <div className="cfg-actions">
                   <button className={primaryWhen(gpsDirty)} type="submit" aria-label={t('config.applyGps')}>{t('config.apply')}</button>
@@ -1137,6 +1152,16 @@ export function ConfigurationPage({
                     <input type="number" inputMode="decimal" value={manualOffset} min={-MAX_COMPASS_OFFSET_DEG} max={MAX_COMPASS_OFFSET_DEG} step={0.1} onChange={(event) => { setManualOffset(event.target.value); setCompassError(null); setCompassResult(null); }} />
                   </FormField>
                 </div>
+                <Switch
+                  checked={compassConfig.preferDrone !== false}
+                  label={t('config.compassPreferDrone')}
+                  onChange={(preferDrone) => {
+                    const next: CompassConfig = { ...compassConfig, preferDrone };
+                    onCompassConfigChanged(next);
+                    saveCompassConfig(next);
+                    setCompassResult({ code: 'APPLIED', tone: 'good' });
+                  }}
+                />
                 <div className="cfg-actions">
                   <button className={primaryWhen(compassDirty)} type="submit" aria-label={t('config.applyCompass')}>{t('config.apply')}</button>
                   <button className="ov-icon-button is-bordered" type="button" aria-label={t('config.restoreCompassDefaults')} title={t('config.restoreCompassDefaults')} onClick={restoreCompassDefaults}><Icon name="reset" /></button>

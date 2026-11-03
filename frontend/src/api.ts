@@ -1051,3 +1051,42 @@ export async function getConfigPatchStatus(commandId?: string, signal?: AbortSig
   if (!status || status.commandId !== commandId) throw new Error('config-patch status response has an invalid shape');
   return status;
 }
+
+/** GET /api/drone: the drone block (tools/drone_link.py), read leniently by lib/droneLink.ts. */
+export async function getDrone(signal?: AbortSignal): Promise<unknown> {
+  return requestJson<unknown>('/api/drone', { cache: 'no-store' }, signal);
+}
+
+export type DroneVideoState = 'OK' | 'NO_CAMERA' | 'NO_ENCODER' | 'DOWN' | 'DISABLED';
+
+export interface DroneVideoHealth {
+  state: DroneVideoState;
+  reason: string | null;
+  cameraReady: boolean;
+  videoReady: boolean;
+  readers: number | null;
+  tracks: string[];
+  error: string | null;
+}
+
+const DRONE_VIDEO_STATES: readonly DroneVideoState[] = ['OK', 'NO_CAMERA', 'NO_ENCODER', 'DOWN', 'DISABLED'];
+
+export function normalizeDroneVideoHealth(value: unknown): DroneVideoHealth {
+  const input = value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const short = (text: unknown, max: number) => (typeof text === 'string' && text.trim() ? text.trim().slice(0, max) : null);
+  const readers = input.readers;
+  return {
+    state: DRONE_VIDEO_STATES.find((state) => state === input.state) ?? 'DOWN',
+    reason: short(input.reason, 40),
+    cameraReady: input.camera_ready === true,
+    videoReady: input.video_ready === true,
+    readers: typeof readers === 'number' && Number.isInteger(readers) && readers >= 0 ? readers : null,
+    tracks: Array.isArray(input.tracks) ? input.tracks.filter((track): track is string => typeof track === 'string').slice(0, 4) : [],
+    error: short(input.error, 200),
+  };
+}
+
+/** GET /api/drone/video: the host video service's state (tools/drone_video.py). */
+export async function getDroneVideoHealth(signal?: AbortSignal): Promise<DroneVideoHealth> {
+  return normalizeDroneVideoHealth(await requestJson<unknown>('/api/drone/video', { cache: 'no-store' }, signal));
+}

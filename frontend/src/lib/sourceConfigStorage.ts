@@ -52,6 +52,8 @@ export function validateGpsConfig(value: unknown): GpsConfig {
     source,
     manualLatitude: manual?.latitude ?? DEFAULT_GPS_CONFIG.manualLatitude,
     manualLongitude: manual?.longitude ?? DEFAULT_GPS_CONFIG.manualLongitude,
+    // A choice stored before the drone existed has none: the drone comes first.
+    preferDrone: input.preferDrone !== false,
   };
 }
 
@@ -65,7 +67,7 @@ export function validateCompassConfig(value: unknown): CompassConfig {
   if (!source || !figType || typeof offset !== 'number' || !Number.isFinite(offset) || Math.abs(offset) > MAX_COMPASS_OFFSET_DEG) {
     return { ...DEFAULT_COMPASS_CONFIG };
   }
-  return { source, manualFigType: figType, manualCompassOffset: offset };
+  return { source, manualFigType: figType, manualCompassOffset: offset, preferDrone: input.preferDrone !== false };
 }
 
 export function loadGpsConfig(storage: StorageLike | null = defaultStorage()): GpsConfig {
