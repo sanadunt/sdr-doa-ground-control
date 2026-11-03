@@ -276,6 +276,45 @@ export function snapshotRf(snapshot: TelemetrySnapshot | null | undefined): RfSe
     && view.ucaM === null && view.squelchMode === null ? null : view;
 }
 
+/**
+ * The output VFO's peak against squelch (health pk/psq, contract 1.11), or
+ * null without it. dB on KrakenSDR's FFT scale, not dBm. rdfsdr measures it
+ * also while squelch holds DoA back and computes DoA only above squelch, so
+ * the margin tells a missing signal from a squelch set too high. Only a fresh
+ * health message with a fresh edge reading counts; otherwise `fresh` is false
+ * and the numbers are null.
+ */
+export interface VfoPeak {
+  fresh: boolean;
+  peakDb: number | null;
+  squelchDb: number | null;
+  /** peak - squelch: negative while squelch holds the signal back. */
+  marginDb: number | null;
+}
+
+export function snapshotVfoPeak(snapshot: TelemetrySnapshot | null | undefined): VfoPeak | null {
+  const peak = isMqttSnapshot(snapshot) ? record(snapshot?.vfo_peak) : null;
+  if (!peak) return null;
+  const peakDb = inRange(peak.peak_db, -400, 200);
+  const squelchDb = inRange(peak.squelch_db, -400, 200);
+  const fresh = peak.fresh === true && peakDb !== null;
+  return {
+    fresh,
+    peakDb: fresh ? peakDb : null,
+    squelchDb: fresh ? squelchDb : null,
+    marginDb: fresh && squelchDb !== null ? Math.round((peakDb - squelchDb) * 10) / 10 : null,
+  };
+}
+
+/** "-78.4 dB · SQ -70.0 dB (-8.4)", or the peak alone without a squelch level. */
+export function vfoPeakText(peak: VfoPeak): string {
+  if (peak.peakDb === null) return '—';
+  const level = `${peak.peakDb.toFixed(1)} dB`;
+  if (peak.squelchDb === null || peak.marginDb === null) return level;
+  const margin = `${peak.marginDb > 0 ? '+' : ''}${peak.marginDb.toFixed(1)}`;
+  return `${level} · SQ ${peak.squelchDb.toFixed(1)} dB (${margin})`;
+}
+
 /** Frequency and power of one DoA record. */
 export interface DoaSample {
   frequencyHz: number;

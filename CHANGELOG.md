@@ -2,6 +2,15 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.13.0
+
+Rilis minor: tidak ada yang dihapus. Dengan RDF Node Edge 1.11 (kontrak 1.11) dan patch `vfo_peaks` di rdfsdr, operator melihat seberapa kuat sinyal di frekuensi VFO dibanding squelch, juga saat squelch menahan DoA. Edge yang lebih lama tetap berjalan seperti di 3.12.0.
+
+- **Puncak VFO dan squelch.** `telemetry/health` dari Edge 1.11 membawa `pk` (puncak spektrum di lebar VFO, dB skala KrakenSDR, bukan dBm) dan `psq` (squelch yang dipakai KrakenSDR). Console menyimpannya di `vfo_peak` jawaban `/api/snapshot` dengan selisihnya (`margin_db`).
+  - Kartu RDF-SDR punya baris "Puncak VFO", misalnya `-78.4 dB · SQ -70.0 dB (-8.4)`: oranye di bawah squelch, hijau di atasnya. Selisih tepat 0,0 tanpa warna, karena KrakenSDR membandingkan nilai sebelum dibulatkan.
+  - Selama DoA tidak ditampilkan, HUD menulis baris yang sama di bawah setelan gain/VFO/squelch, dengan "di bawah squelch" bila puncak tidak lolos. Bersama "RDF-SDR: CSV DoA kosong", operator tahu apakah sinyalnya tidak ada atau squelch-nya terlalu tinggi.
+- `docs/MQTT_KONTRAK.md` bagian 7f menjelaskan field baru.
+
 ## 3.12.0
 
 Rilis minor: tidak ada yang dihapus. Ada mode baru "Telemetry LoRa saja". Dalam mode ini, setiap data RDF-SDR tampil begitu datang. Data yang tidak datang tetap memakai nilai terakhir, berlabel USANG dengan umurnya, sehingga Dashboard tidak lagi kosong hanya karena satu data basi atau error.

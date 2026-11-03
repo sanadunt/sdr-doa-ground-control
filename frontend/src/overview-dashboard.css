@@ -131,6 +131,7 @@
 /* Gain, VFO and squelch of state.rf: wraps between its parts instead of cutting the squelch off. */
 .ov-hud-rf { overflow: visible; white-space: normal; }
 .ov-hud-rf > span { display: inline-block; white-space: nowrap; }
+.ov-hud-sample.is-warn b { color: var(--amber); }
 .ov-hud-sample.is-provisional b, .ov-hud-sample.is-setting b { color: var(--subtle); }
 .ov-hud-held { margin: 0; color: var(--amber); font-size: 12px; line-height: 1.35; }
 /* Transmitter position estimate, under the HUD. */
@@ -193,6 +194,7 @@
 .ov-node-detail dd { margin: 0; overflow: hidden; color: var(--text); font-family: var(--mono); font-size: 12.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .ov-node-detail dd.is-good { color: var(--green); }
 .ov-node-detail dd.is-bad { color: var(--red); }
+.ov-node-detail dd.is-warn { color: var(--amber); }
 /* A value that needs the full width (a setting marker, the DoA record's frequency and power). */
 .ov-node-detail dl > div.is-wide { grid-column: 1 / -1; }
 /* Its marker (setting, UNVERIFIED) must stay readable, so a wide value wraps instead of clipping. */

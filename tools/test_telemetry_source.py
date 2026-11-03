@@ -295,6 +295,9 @@ def lora_110_unverified(clock: "ManualMs") -> Edge:
     return edge
 
 
+VFO_PEAK_BELOW = {"pk": -78.4, "psq": -70.0}
+
+
 def fixture_answers() -> Dict[str, Dict[str, Any]]:
     """The MQTT answers the frontend tests read, built at a fixed time."""
     answers: Dict[str, Dict[str, Any]] = {}
@@ -362,6 +365,11 @@ def fixture_answers() -> Dict[str, Dict[str, Any]]:
     quiet.angular()
     quiet_clock.now = FIXED_NOW
     answers["mqtt-lora-held-health.json"] = answer(quiet, None, 9, link="lora", held=("MQTT_HEALTH_STALE",))
+    # Edge 1.11 over LoRa with squelch holding the signal back: an empty DoA file, the peak 8.4 dB under squelch.
+    peak = Edge(ManualMs(FIXED_NOW))
+    peak.hello(rf=RF_17, cfg=298)
+    peak.health(nav={**NAV_FIX, **VFO_PEAK_BELOW}, why=["NO_FRESH_DOA", "EMPTY_CSV"])
+    answers["mqtt-lora-vfo-peak.json"] = answer(peak, None, 10, link="lora")
     return answers
 
 
@@ -415,6 +423,45 @@ class NavTests(unittest.TestCase):
     def test_compass_only(self) -> None:
         nav = self.build({"hdg": None, "hs": "NO_REPLY"})["nav"]
         self.assertEqual((nav["compass_state"], nav["heading_deg"], nav["latitude"], nav["gps_state"]), ("NO_REPLY", None, None, None))
+
+
+class VfoPeakTests(unittest.TestCase):
+    """Contract 1.11: the output VFO's peak against squelch (health pk/psq)."""
+
+    def build(self, fields: Optional[Dict[str, Any]], *, health_at: Optional[int] = None) -> Dict[str, Any]:
+        clock = ManualMs(FIXED_NOW)
+        edge = Edge(clock)
+        edge.hello()
+        edge.health(nav=fields, at=health_at)
+        return ts.mqtt_snapshot(edge.view(), None, base_url=BASE_URL, light_age_ms=None,
+                                light_meta={"interval_s": 30.0, "reason": None, "running": False, "error": None})
+
+    def test_none_without_the_fields(self) -> None:
+        self.assertIsNone(self.build(None)["vfo_peak"])
+
+    def test_peak_under_squelch(self) -> None:
+        peak = self.build(VFO_PEAK_BELOW)["vfo_peak"]
+        self.assertEqual({key: peak[key] for key in ("source", "fresh", "peak_db", "squelch_db", "margin_db", "above_squelch")},
+                         {"source": "telemetry/health", "fresh": True, "peak_db": -78.4, "squelch_db": -70.0,
+                          "margin_db": -8.4, "above_squelch": False})
+
+    def test_peak_above_squelch_and_without_a_level(self) -> None:
+        peak = self.build({"pk": -61.0, "psq": -70.0})["vfo_peak"]
+        self.assertEqual((peak["margin_db"], peak["above_squelch"]), (9.0, True))
+        peak = self.build({"pk": -61.0, "psq": None})["vfo_peak"]
+        self.assertEqual((peak["peak_db"], peak["margin_db"], peak["above_squelch"]), (-61.0, None, None))
+
+    def test_at_squelch_does_not_say_which_side(self) -> None:
+        peak = self.build({"pk": -70.0, "psq": -70.0})["vfo_peak"]
+        self.assertEqual((peak["margin_db"], peak["above_squelch"]), (0.0, None))
+
+    def test_a_stale_edge_reading_has_no_numbers(self) -> None:
+        peak = self.build({"pk": None, "psq": None})["vfo_peak"]
+        self.assertEqual((peak["peak_db"], peak["squelch_db"], peak["margin_db"]), (None, None, None))
+
+    def test_old_health_is_not_fresh(self) -> None:
+        peak = self.build(VFO_PEAK_BELOW, health_at=FIXED_NOW - 60_000)["vfo_peak"]
+        self.assertFalse(peak["fresh"])
 
 
 class Edge110Tests(unittest.TestCase):

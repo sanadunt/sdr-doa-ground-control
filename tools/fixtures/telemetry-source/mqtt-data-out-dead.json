@@ -816,5 +816,6 @@
    "timestamp_ms": 1793070140000
   },
   "source": "mqtt"
- }
+ },
+ "vfo_peak": null
 }

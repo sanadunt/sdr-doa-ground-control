@@ -6,7 +6,7 @@ import { bearingForView, formatDegrees, heldBearing as heldBearingFor, polarView
 import { doaStatusTextKey, overviewDoaStatus, provisionalDoa } from '../lib/doaStatus';
 import { useI18n } from '../lib/i18n';
 import { ageAtAnswerMs } from '../lib/snapshotRead';
-import { doaSample, doaSampleText, edgeDoaReasonKey, edgeDoaReasons, snapshotRf, sourceBadge } from '../lib/telemetrySource';
+import { doaSample, doaSampleText, edgeDoaReasonKey, edgeDoaReasons, snapshotRf, snapshotVfoPeak, sourceBadge, vfoPeakText } from '../lib/telemetrySource';
 import type { MessageKey, Translate } from '../lib/i18n';
 import type { RfSettings } from '../lib/telemetrySource';
 import { engineSquelchDb } from '../lib/configPatch';
@@ -115,6 +115,15 @@ export function DoaReadout({
   ) : null;
   // What the SDR is set to (state.rf, edge 1.7+): gain, VFO0 and its squelch, under the signal line.
   const rfLine = hudRfParts(localSnapshotFresh ? snapshotRf(snapshot) : null, t);
+  // Without a shown DoA: how far the output VFO's peak is from squelch (edge 1.11), so the operator can tell
+  // no signal from a squelch set too high. An expired answer's reading is not shown as current.
+  const vfoPeak = !status.shown && localSnapshotFresh ? snapshotVfoPeak(snapshot) : null;
+  const belowSquelch = vfoPeak?.marginDb != null && vfoPeak.marginDb < 0;
+  const vfoPeakLine = vfoPeak?.fresh ? (
+    <div className={belowSquelch ? 'ov-hud-sample is-warn' : 'ov-hud-sample'}>
+      {t('hud.vfoPeak')} <b>{vfoPeakText(vfoPeak)}</b>{belowSquelch ? ` · ${t('hud.belowSquelch')}` : null}
+    </div>
+  ) : null;
   const peakAxis = settings.figType === 'Compass' ? t('readout.peakAxisCompass') : t('readout.peakAxisPolar');
   const peakTitle = status.shown && view.peakValue !== null ? `${peakAxis} · ${t('readout.peakDetail', { db: view.peakValue.toFixed(1) })}` : undefined;
 
@@ -155,6 +164,7 @@ export function DoaReadout({
           ) : null}
           {sampleLine}
           {rfLine.length ? <div className="ov-hud-sample is-setting ov-hud-rf">{rfLine.map(([label, value], index) => <Fragment key={label}>{index ? ' · ' : ''}<span>{label} <b>{value}</b></span></Fragment>)}</div> : null}
+          {vfoPeakLine}
           <p className="ov-hud-held" role="status">{statusText}</p>
           {edgeWhy.length ? <p className="ov-hud-held" title={edgeWhy.join(', ')}>{t('hud.edgeWhy', { reasons: edgeWhyText })}</p> : null}
         </>

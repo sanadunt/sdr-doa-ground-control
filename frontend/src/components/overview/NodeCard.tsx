@@ -5,7 +5,7 @@ import { signalQualityView } from '../../lib/healthView';
 import { overviewDoaStatus } from '../../lib/doaStatus';
 import { useI18n } from '../../lib/i18n';
 import type { Translate } from '../../lib/i18n';
-import { doaSample, doaSampleText, loraLink, overLora, snapshotNav, snapshotRf } from '../../lib/telemetrySource';
+import { doaSample, doaSampleText, loraLink, overLora, snapshotNav, snapshotRf, snapshotVfoPeak, vfoPeakText, type VfoPeak } from '../../lib/telemetrySource';
 import type { RfSettings } from '../../lib/telemetrySource';
 import { engineSquelchDb } from '../../lib/configPatch';
 import { distanceAndBearing, groundGpsState, groundGpsSummary, snapshotGroundGps, stationPositionLive } from '../../lib/groundGps';
@@ -147,6 +147,19 @@ export function rfRows(rf: RfSettings | null, t: Translate): NodeRow[] {
 }
 
 /**
+ * The output VFO's peak against squelch (edge 1.11 health pk/psq), measured
+ * also while squelch holds DoA back: amber under squelch, green above it,
+ * no tone at 0.0 dB (rdfsdr compares unrounded values). A reading that is
+ * not fresh shows no number.
+ */
+export function vfoPeakRows(peak: VfoPeak | null, t: Translate): NodeRow[] {
+  if (!peak) return [];
+  if (!peak.fresh) return [[t('node.vfoPeak'), t('node.vfoPeakStale'), 'is-provisional', true]];
+  const tone = peak.marginDb === null || peak.marginDb === 0 ? undefined : peak.marginDb > 0 ? 'is-good' : 'is-warn';
+  return [[t('node.vfoPeak'), vfoPeakText(peak), tone, true]];
+}
+
+/**
  * The Groundstation row: its own GPS (ground-gps-publisher), with the distance
  * to the RDF-SDR while both positions are known. None from a console or an
  * answer without the ground_gps block, or while nothing reported.
@@ -260,6 +273,7 @@ export function NodeCard({
     centerRow,
     gainRow,
     ...rfRows(rf, t),
+    ...(reachable ? vfoPeakRows(snapshotVfoPeak(snapshot), t) : []),
     ...sampleRows,
     [t('node.snr'), dataOutValue(summary.snrDb === null, fmt(summary.snrDb, 1, ' dB'))],
     [t('node.daq'), value(summary.daq), summary.daq.startsWith('PASS') ? 'is-good' : summary.daq.startsWith('FAIL') ? 'is-bad' : undefined],
