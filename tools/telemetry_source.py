@@ -955,7 +955,36 @@ def mqtt_snapshot(
         "data_out_light": data_out_light,
         "nav": _nav(health),
         "rf": _rf(_record(node.get("session")) or {}),
+        "vfo_peak": _vfo_peak(health),
         "position_estimate": copy.deepcopy(_record(view.get("position_estimate"))),
+    }
+
+
+def _vfo_peak(health: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """The output VFO's peak against squelch from telemetry/health (contract 1.11), or None without it.
+
+    dB on KrakenSDR's FFT scale (not dBm, it moves with gain). rdfsdr measures
+    it every frame, also while squelch holds DoA back, and computes DoA only
+    while the peak is above squelch: a peak well under squelch with an empty
+    DoA file says squelch is holding the signal back. The numbers are null
+    when the edge's own reading is stale; ``fresh`` is the health message's.
+    """
+    if "pk" not in health and "psq" not in health:
+        return None
+    peak = _number(health.get("pk"))
+    squelch = _number(health.get("psq"))
+    margin = round(peak - squelch, 1) if peak is not None and squelch is not None else None
+    return {
+        "source": "telemetry/health",
+        "t": _int(health.get("t")),
+        "received_at_ms": _int(health.get("received_at_ms")),
+        "age_ms": _int(health.get("age_ms")),
+        "fresh": health.get("fresh") is True,
+        "peak_db": peak,
+        "squelch_db": squelch,
+        "margin_db": margin,
+        # rdfsdr compares unrounded values and sends 0.1 dB: a 0.0 margin cannot say which side it was.
+        "above_squelch": margin > 0 if margin else None,
     }
 
 

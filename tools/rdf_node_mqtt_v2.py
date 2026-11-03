@@ -538,6 +538,12 @@ def _validate_health(data: Dict[str, Any]) -> Dict[str, Any]:
     if present:
         value["why"] = why
     value.update(_health_nav(data))
+    # Contract 1.11: the output VFO's peak and the squelch rdfsdr held it against, measured also while
+    # squelch holds DoA back. Only from a KrakenSDR that reports them; a bad value reads as absent.
+    for key in ("pk", "psq"):
+        present, level = _optional(data, key, lambda key=key: _number(data, key, -400, 200, nullable=True))
+        if present:
+            value[key] = level
     return value
 
 

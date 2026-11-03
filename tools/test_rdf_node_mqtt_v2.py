@@ -964,6 +964,29 @@ class HealthTests(unittest.TestCase):
                 self.assertEqual(node(store, NOW)["detail"]["cpu"], cpu)
 
 
+class HealthVfoPeakTests(unittest.TestCase):
+    """Contract 1.11: the output VFO's peak and squelch on telemetry/health (pk, psq)."""
+
+    def test_health_without_a_peak_is_unchanged(self) -> None:
+        health = node(session_store())["health"]
+        self.assertNotIn("pk", health)
+        self.assertNotIn("psq", health)
+
+    def test_peak_and_squelch_are_kept_null_included(self) -> None:
+        health = node(session_store(pk=-78.4, psq=-70.0))["health"]
+        self.assertEqual((health["pk"], health["psq"]), (-78.4, -70.0))
+        health = node(session_store(pk=None, psq=None))["health"]
+        self.assertEqual((health["pk"], health["psq"]), (None, None))
+
+    def test_a_bad_peak_is_dropped_never_the_health(self) -> None:
+        store = session_store(pk="loud", psq=999)
+        self.assertEqual(topic(store, "telemetry/health")["status"], "FRESH")
+        health = node(store)["health"]
+        self.assertNotIn("pk", health)
+        self.assertNotIn("psq", health)
+        self.assertTrue(store.session_view(NOW)["health_fresh"])
+
+
 class HealthNavTests(unittest.TestCase):
     """The optional nav fields of contract 1.6 (docs/MQTT_TOPIC_SUMMARY.md of the edge)."""
 
