@@ -299,9 +299,11 @@ def fixture_answers() -> Dict[str, Dict[str, Any]]:
     """The MQTT answers the frontend tests read, built at a fixed time."""
     answers: Dict[str, Dict[str, Any]] = {}
 
-    def answer(edge: Edge, light: Optional[Dict[str, Any]], index: int, link: Optional[str] = None) -> Dict[str, Any]:
+    def answer(edge: Edge, light: Optional[Dict[str, Any]], index: int, link: Optional[str] = None,
+               daq_unhealthy: bool = False) -> Dict[str, Any]:
         built = ts.mqtt_snapshot(edge.view(link=link), light, base_url=BASE_URL, light_age_ms=None if light is None else 2_000,
-                                 light_meta={"interval_s": 30.0, "reason": "light-first", "running": False, "error": None})
+                                 light_meta={"interval_s": 30.0, "reason": "light-first", "running": False, "error": None},
+                                 daq_unhealthy=daq_unhealthy)
         # The reader's own fields, with fixed values.
         built["collection"].update({"id": f"0f1e2d3c-{index}", "collected_at_ms": FIXED_NOW, "age_ms": 0,
                                     "shared": False, "refresh_seconds": 2, "console_base_url": BASE_URL})
@@ -340,6 +342,15 @@ def fixture_answers() -> Dict[str, Dict[str, Any]]:
     # sample with its own heading, reason, health.why and capabilities.nav.
     answers["mqtt-lora-held.json"] = answer(lora_110_held(ManualMs(FIXED_NOW)), None, 6, link="lora")
     answers["mqtt-lora-unverified-heading.json"] = answer(lora_110_unverified(ManualMs(FIXED_NOW)), None, 7, link="lora")
+    # Over LoRa as on 3 November after a retune: the KrakenSDR DAQ does not
+    # sync (daq 2, delay and IQ sync false) while health, compass and GPS keep coming.
+    unsynced = Edge(ManualMs(FIXED_NOW))
+    unsynced.store.set_link("lora")
+    unsynced.hello(nav=CAPS_NAV_110)
+    unsynced.health(daq=2, nav=NAV_FIX, why=["EMPTY_CSV", "NO_RECORD", "DAQ_NOT_HEALTHY", "DOA_FILE_NOT_UPDATING"])
+    unsynced.send("telemetry/health/detail", dict(fixture("telemetry-health-detail.json"), sid=unsynced.state["sid"],
+                                                  t=unsynced.now_ms(), sync=[True, False, False]))
+    answers["mqtt-lora-daq-unhealthy.json"] = answer(unsynced, None, 8, link="lora", daq_unhealthy=True)
     return answers
 
 
@@ -1217,6 +1228,56 @@ class ReaderTests(unittest.TestCase):
         # The legacy UI still asks Data Out itself.
         reader.snapshot(BASE_URL, SnapshotRequest(data_out_only=True))
         self.assertEqual(len(self.full.calls), 1)
+
+    def test_daq_not_healthy_over_lora_still_answers_from_mqtt(self) -> None:
+        # 2026-11-03: a retune left the KrakenSDR DAQ unsynced; health, compass
+        # and GPS kept coming over LoRa, yet the answer was "none" and the
+        # Dashboard showed no RDF-SDR at all. Now MQTT answers, DEGRADED.
+        reader = self.lora_reader()
+        self.edge.hello()
+        self.edge.health(daq=2, nav=NAV_FIX, why=["DAQ_NOT_HEALTHY", "EMPTY_CSV"])
+        answer = reader.snapshot(BASE_URL, SnapshotRequest())
+        source = answer["source"]
+        self.assertEqual((source["kind"], source["reason"], source["reasons"], source["link"]),
+                         ("mqtt", "MQTT_DAQ_NOT_HEALTHY", ["MQTT_DAQ_NOT_HEALTHY"], "lora"))
+        self.assertEqual((source["mqtt"]["fresh"], source["mqtt"]["health_daq"], source["mqtt"]["health_why"]),
+                         (False, 2, ["DAQ_NOT_HEALTHY", "EMPTY_CSV"]))
+        self.assertEqual(answer["overall_state"], "DEGRADED")
+        self.assertIn("DAQ_HEALTH_GATE_FAILED", answer["publication_gate"]["reasons"])
+        self.assertIs(answer["publication_gate"]["checks"]["daq_healthy"], False)
+        self.assertNotEqual(answer["status"]["daq_health"], "PASS")
+        self.assertEqual((answer["nav"]["heading_deg"], answer["nav"]["latitude"]), (201.1, -6.20576))
+        self.assertFalse(answer["doa_candidates"]["mqtt"]["available"])
+        # Nothing was read: no Data Out over LoRa.
+        self.assertEqual((self.full.calls, self.light.calls, self.offline), ([], [], []))
+        # A healthy DAQ again is the plain MQTT answer.
+        self.edge.live()
+        healthy = reader.snapshot(BASE_URL, SnapshotRequest())
+        self.assertEqual((healthy["source"]["reason"], healthy["source"]["reasons"]), ("MQTT_FRESH", []))
+        self.assertIs(healthy["publication_gate"]["checks"]["daq_healthy"], True)
+
+    def test_daq_not_healthy_reads_data_out_first_and_falls_back_to_mqtt(self) -> None:
+        self.edge.hello()
+        self.edge.health(daq=0, nav=NAV_FIX)
+        # Data Out answers: it has the DAQ detail, so it stays the source.
+        answer = self.reader.snapshot(BASE_URL, SnapshotRequest())
+        self.assertEqual((answer["source"]["kind"], answer["source"]["reasons"]), ("data_out", ["MQTT_DAQ_NOT_HEALTHY"]))
+        # Data Out unreachable: MQTT's health, compass and GPS rather than nothing.
+        self.full.status_available = False
+        self.advance(3.0)
+        self.edge.health(daq=0, nav=NAV_FIX)
+        answer = self.reader.snapshot(BASE_URL, SnapshotRequest(refresh=True))
+        self.assertEqual((answer["source"]["kind"], answer["source"]["reason"]), ("mqtt", "MQTT_DAQ_NOT_HEALTHY"))
+        self.assertEqual(answer["overall_state"], "DEGRADED")
+        self.assertEqual(answer["nav"]["heading_deg"], 201.1)
+        # Stale health is still nothing: only a fresh health answers.
+        self.advance(9.0)
+        stale = self.reader.snapshot(BASE_URL, SnapshotRequest(refresh=True))
+        self.assertEqual(stale["source"]["kind"], "none")
+        # The legacy UI asks Data Out and gets it, whatever it holds.
+        self.edge.health(daq=0, nav=NAV_FIX)
+        legacy = self.reader.snapshot(BASE_URL, SnapshotRequest(data_out_only=True))
+        self.assertEqual(legacy["source"]["kind"], "none")
 
     def test_read_reason_decides_light_reads(self) -> None:
         reason = self.reader.read_reason

@@ -138,7 +138,7 @@ export interface SnapshotSource {
   [key: string]: unknown;
   /** mqtt, data_out (the fallback) or none. */
   kind?: string;
-  /** The first of `reasons`, or MQTT_FRESH for an MQTT answer. */
+  /** The first of `reasons`, or MQTT_FRESH for an MQTT answer whose DAQ is healthy. */
   reason?: string;
   /** Why MQTT is not the source, then DATA_OUT_UNAVAILABLE when Data Out failed too. */
   reasons?: string[];

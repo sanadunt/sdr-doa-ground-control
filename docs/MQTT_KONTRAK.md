@@ -249,7 +249,7 @@ Jawaban membawa `source`: `kind`, `reason`, `reasons`, `mqtt` (`fresh`, `connect
 | `MQTT_NO_SESSION` | Belum ada `state` |
 | `MQTT_NO_HEALTH` | Belum ada `telemetry/health` dari sesi ini |
 | `MQTT_HEALTH_STALE` | Health terakhir lebih tua dari 8 s |
-| `MQTT_DAQ_NOT_HEALTHY` | Health segar tetapi `daq` 0 atau 2; Data Out penuh lalu menunjukkan detail DAQ-nya |
+| `MQTT_DAQ_NOT_HEALTHY` | Health segar tetapi `daq` 0 atau 2; Data Out penuh lalu menunjukkan detail DAQ-nya. Bila Data Out tidak bisa menjawab (lewat LoRa, atau tidak terjangkau), jawabannya tetap dari MQTT dengan alasan ini: `kind` `mqtt`, `DEGRADED`, `DAQ_HEALTH_GATE_FAILED`, `checks.daq_healthy` false, tanpa DoA, tetapi dengan health, kompas dan GPS (sejak 3.11.1) |
 | `DATA_OUT_REQUESTED` | UI lama (`--legacy-ui`) meminta Data Out (`source=data_out`), karena ia hanya merender view CSV dan XML |
 | `DATA_OUT_UNAVAILABLE` | Data Out juga tidak terbaca (sumber `none`) |
 

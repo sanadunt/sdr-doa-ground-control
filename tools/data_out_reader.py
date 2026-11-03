@@ -291,10 +291,21 @@ class DataOutReader:
             # MQTT went stale while Kontrol's "Cek ulang" waited for settings.
             view = self._read_mqtt_view()
             fresh, reasons = ts.mqtt_freshness(view)
+        # Health is fresh but the DAQ is not healthy: Data Out has the DAQ
+        # detail, but where it cannot answer, MQTT still has the node's health,
+        # compass and GPS, so the answer comes from MQTT, marked DEGRADED.
+        daq_only = reasons == [ts.MQTT_DAQ_NOT_HEALTHY] and view is not None and not request.data_out_only
         if self._over_lora(view, request):
+            if daq_only and view is not None:
+                return self._mqtt_answer(base_url, base_url.rstrip("/"), view, daq_unhealthy=True)
             # No IP path to the node: nothing to read, and no 4 s wait for it.
             return ts.with_source(self._collect_offline(base_url), view, reasons, over_lora=True)
-        return ts.with_source(self._data_out_snapshot(base_url, request), view, reasons)
+        answer = ts.with_source(self._data_out_snapshot(base_url, request), view, reasons)
+        if daq_only and view is not None and answer["source"]["kind"] == ts.SOURCE_NONE:
+            fresher = self._read_mqtt_view()
+            if fresher is not None and ts.mqtt_freshness(fresher)[1] == [ts.MQTT_DAQ_NOT_HEALTHY]:
+                return self._mqtt_answer(base_url, base_url.rstrip("/"), fresher, daq_unhealthy=True)
+        return answer
 
     def _over_lora(self, view: Optional[Mapping[str, Any]], request: SnapshotRequest) -> bool:
         """The node reaches the broker over the LoRa serial bridge (and the legacy UI did not ask for Data Out)."""
@@ -369,7 +380,7 @@ class DataOutReader:
                     target.light_good = running
             running.done.set()
 
-    def _mqtt_answer(self, base_url: str, key: str, view: Mapping[str, Any]) -> Dict[str, Any]:
+    def _mqtt_answer(self, base_url: str, key: str, view: Mapping[str, Any], daq_unhealthy: bool = False) -> Dict[str, Any]:
         with self._lock:
             target = self._target_locked(key)
             light = target.light
@@ -404,6 +415,7 @@ class DataOutReader:
         }
         answer = ts.mqtt_snapshot(
             view, result, base_url=base_url, light_age_ms=age_ms if result is not None else None, light_meta=meta,
+            daq_unhealthy=daq_unhealthy,
         )
         answer["collection"].update({
             "id": answer_id,

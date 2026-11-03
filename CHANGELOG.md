@@ -2,6 +2,20 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.11.1
+
+Rilis patch: tidak ada yang dihapus. Bila DAQ KrakenSDR tidak sehat, Dashboard tetap menampilkan RDF-SDR.
+
+- **DAQ tidak sehat lewat Telemetry LoRa tidak lagi mengosongkan Dashboard.** Pada 3 November, perubahan frekuensi ke 479,999 MHz membuat DAQ KrakenSDR gagal sinkron (`DAQ_NOT_HEALTHY_AFTER_RESTART`, sample delay dan IQ sync false). Health, kompas dan GPS RDF-SDR tetap masuk lewat LoRa, tetapi console menjawab "none". Akibatnya Dashboard menampilkan "Tidak ada telemetri RDF-SDR terkini", tanpa heading dan dengan posisi USANG, sehingga tampak seperti link LoRa putus.
+  - Kini, bila health segar tetapi DAQ tidak sehat dan Data Out tidak bisa menjawab (lewat LoRa, atau tidak terjangkau), jawabannya tetap dari MQTT. Hasilnya:
+    - Posisi dan heading RDF-SDR tetap di peta.
+    - Kartu RDF-SDR tetap terisi.
+    - HUD menulis DAQ gagal sinkron dengan alasan RDF-SDR sendiri.
+    - Chip Sumber menunjukkan Telemetry LoRa (atau MQTT) berwarna peringatan, dengan alasan `MQTT_DAQ_NOT_HEALTHY`.
+  - DoA tidak ditampilkan selama itu (`DEGRADED`, `DAQ_HEALTH_GATE_FAILED`).
+  - Dengan Data Out yang menjawab, jawabannya tetap dari Data Out seperti sebelumnya.
+- Sync flag dari `telemetry/health/detail` yang gagal membuat status DAQ `FAIL`, bukan `UNKNOWN`.
+
 ## 3.11.0
 
 Rilis minor: tidak ada yang dihapus. Tata letak ringkas untuk perangkat sentuh (HP dan tablet, di tampilan LAN maupun di console sendiri). PC groundstation yang memakai mouse tampil seperti 3.10.0, dengan perbaikan tata letak dari audit UI di bawah. Console juga membaca semua yang dikirim RDF Node Edge 1.10.2 (kontrak 1.10); edge yang lebih lama tetap berjalan seperti di 3.10.0.
