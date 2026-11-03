@@ -104,6 +104,7 @@
    "angle": "theta_mirror",
    "count": 360,
    "native_axis": 1,
+   "nav": null,
    "profiles": [
     "control",
     "balanced",
@@ -120,11 +121,15 @@
    "a": 200.0,
    "age_ms": 0,
    "angle_reference": "RAW",
+   "array_heading_deg": null,
+   "bearing_deg": null,
    "c": 8.27,
    "canonical_angle_deg": 160.0,
    "f": 103100000,
+   "heading_source": null,
    "p": -54.2,
    "q": 1,
+   "reason": null,
    "received_at_ms": 1793070140000,
    "rev": 298,
    "source_age_ms": 0,
@@ -148,7 +153,8 @@
    "rev": 298,
    "run": 1,
    "t": 1793070140000,
-   "temp": 52.3
+   "temp": 52.3,
+   "why": null
   },
   "profile": "balanced",
   "run": "RUNNING",
@@ -283,6 +289,7 @@
    "health_age_ms": 0,
    "health_daq": 1,
    "health_fresh_ms": 8000,
+   "health_why": null,
    "sid": "227c8be2"
   },
   "reason": "MQTT_FRESH",

@@ -444,7 +444,7 @@ export function ConsoleShell({
           <span className="topbar-spacer" aria-hidden="true" />
           {toolbar ? <div className="topbar-toolbar">{toolbar}</div> : null}
           <div className="topbar-tools">
-            {viewOnly ? <span className="ov-chip tone-info view-only-chip">{t('shell.viewOnly')}</span> : null}
+            {viewOnly ? <span className="ov-chip tone-info view-only-chip"><Icon name="lock" /><span className="view-only-text">{t('shell.viewOnly')}</span></span> : null}
             <button className={`icon-button refresh-button${loading ? ' is-loading' : ''}`} type="button" onClick={onRefresh} aria-busy={loading} aria-label={t(refreshLora ? 'shell.refreshLora' : 'shell.refresh')} aria-keyshortcuts="R" title={t(refreshLora ? 'shell.refreshShortcutLora' : 'shell.refreshShortcut')}>
               <Icon name="refresh" />
             </button>

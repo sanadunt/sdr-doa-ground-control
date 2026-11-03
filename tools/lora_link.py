@@ -3,7 +3,10 @@
 
 The bridge on each end of the LoRa link publishes a retained status to its own
 broker every 5 s: ``sdr/v2/<node>/lora/ground`` on the groundstation's broker
-(``lora/edge`` stays on the Raspberry's). The bridge's ``docs/LORA_SERIAL.md``
+(``lora/edge`` stays on the Raspberry's: the bridge's topic table does not carry
+it over the radio, so ``edge`` in the view is filled only while the console is
+connected straight to the Raspberry's broker, never on a LoRa-only
+groundstation). The bridge's ``docs/LORA_SERIAL.md``
 ("Status jembatan", ``v`` 1) is the shape; the console reads it leniently
 (``docs/PRINSIP_DATA.md``): a field of the wrong type reads as null, unknown
 fields are ignored, and only a payload that is not a JSON object is refused.
@@ -36,7 +39,10 @@ RATE_MAX_GAP_MS = 60_000
 # A status whose t is this far from the console clock is dated by its receipt.
 CLOCK_PLAUSIBLE_MS = 24 * 3600 * 1000
 
-RX_KEYS = ("frames", "crc_errors", "bad_frames", "lost_frames", "messages", "duplicates", "incomplete", "heartbeats")
+# peer_restarts (edge 1.10.2): times the other end restarted and its duplicate
+# memory was cleared; null from an older bridge.
+RX_KEYS = ("frames", "crc_errors", "bad_frames", "lost_frames", "messages", "duplicates", "incomplete", "heartbeats",
+           "peer_restarts")
 TX_KEYS = ("queued", "superseded", "expired", "sent_messages", "sent_frames", "sent_bytes", "too_large")
 PEER_KEYS = ("uptime_s", "rx_frames", "crc_errors", "lost_frames")
 RATE_KEYS = ("frames", "messages", "heartbeats", "crc_errors", "lost_frames")
@@ -201,7 +207,12 @@ class LoraLinkStore:
         return role in self._latest
 
     def view(self, now_ms: int) -> Dict[str, Any]:
-        """The ``lora`` block of ``GET /api/mqtt``: ``present`` once a bridge reported."""
+        """The ``lora`` block of ``GET /api/mqtt``: ``present`` once a bridge reported.
+
+        ``edge`` stays null over the radio (see the module docstring); the
+        Raspberry's side of the link reaches the groundstation only as the
+        heartbeat ``peer`` block of ``ground``.
+        """
         return {
             "present": bool(self._latest),
             "ground": self._role_view("ground", now_ms) if "ground" in self._latest else None,

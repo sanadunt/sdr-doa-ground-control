@@ -2,7 +2,7 @@ import type { Feature, FeatureCollection, LineString, Point, Polygon } from 'geo
 import type { TelemetrySnapshot } from '../types';
 import { destination, type GeoOrigin } from './doaGeometry';
 import { formatBearing } from './overlayPalette';
-import type { Translate } from './i18n';
+import type { MessageKey, Translate } from './i18n';
 
 /**
  * The transmitter position estimate the console builds from the moving
@@ -40,6 +40,21 @@ export interface PositionEstimate {
   minSpreadDeg: number;
   resetReason: string | null;
   grid: PositionEstimateGrid | null;
+  /**
+   * What the last skipped LIVE DoA lacked (tools/doa_position_estimate.py):
+   * NO_BEARING (no b: no heading on the node), NO_POSITION (no lat/lon); null
+   * once a sample is used, and from an older console.
+   */
+  waitingFor: 'NO_BEARING' | 'NO_POSITION' | null;
+  /** LIVE DoA samples skipped for that reason so far; 0 when the last skip came before the last reset. */
+  skipped: number;
+  /** The node's GPS has a fix (nav.gps_state FIX); null when the node does not say. */
+  nodeGpsFix: boolean | null;
+  /**
+   * The node says it does not send its position with the DoA
+   * (capabilities.nav.position false: nav.gps.publish_position off); null when it does not say.
+   */
+  positionWithheld: boolean | null;
 }
 
 export const POSITION_ESTIMATE_RESET_ROUTE = '/api/position-estimate/reset';
@@ -86,6 +101,10 @@ export function positionEstimate(snapshot: TelemetrySnapshot | null | undefined)
   const latitude = finite(value.latitude, -90, 90);
   const longitude = finite(value.longitude, -180, 180);
   const method = record(value.method) ?? {};
+  // A skip from before "Start over" (or the console's start) says nothing about the estimate since.
+  const skippedAt = finite(value.skipped_at_ms, 0);
+  const resetAt = finite(value.reset_at_ms, 0);
+  const skipCurrent = skippedAt === null || resetAt === null || skippedAt >= resetAt;
   return {
     state: state !== 'NO_DATA' && (latitude === null || longitude === null) ? 'NO_DATA' : state,
     latitude,
@@ -101,7 +120,37 @@ export function positionEstimate(snapshot: TelemetrySnapshot | null | undefined)
     minSpreadDeg: finite(method.min_spread_deg, 0, 180) ?? 15,
     resetReason: typeof value.reset_reason === 'string' && /^[A-Z_]{1,32}$/u.test(value.reset_reason) ? value.reset_reason : null,
     grid: parseGrid(value.grid),
+    waitingFor: skipCurrent && (value.waiting_for === 'NO_BEARING' || value.waiting_for === 'NO_POSITION') ? value.waiting_for : null,
+    skipped: skipCurrent ? count(value.skipped) : 0,
+    positionWithheld: positionWithheld(snapshot),
+    nodeGpsFix: nodeGpsFix(snapshot),
   };
+}
+
+/** nav.gps_state of the node (telemetry/health): FIX or another state; null without one. */
+function nodeGpsFix(snapshot: TelemetrySnapshot): boolean | null {
+  const state = record(snapshot.nav)?.gps_state;
+  return typeof state === 'string' ? state === 'FIX' : null;
+}
+
+/** capabilities.nav.position of the MQTT session: false when the node withholds its position. */
+function positionWithheld(snapshot: TelemetrySnapshot): boolean | null {
+  const position = record(record(record(snapshot.mqtt)?.capabilities)?.nav)?.position;
+  return typeof position === 'boolean' ? !position : null;
+}
+
+/**
+ * What the estimate waits for, in the operator's terms, or null: a node that
+ * withholds its position (publish_position off), a node GPS without a fix, a
+ * bearing without a position, or a DoA without a heading.
+ */
+export function estimateWaitKey(estimate: PositionEstimate): MessageKey | null {
+  if (estimate.waitingFor === 'NO_POSITION') {
+    if (estimate.positionWithheld === true) return 'estimate.waitPositionWithheld';
+    return estimate.nodeGpsFix === false ? 'estimate.waitGpsFix' : 'estimate.waitPosition';
+  }
+  if (estimate.waitingFor === 'NO_BEARING') return 'estimate.waitBearing';
+  return null;
 }
 
 const EMPTY_POLYGONS: FeatureCollection<Polygon> = { type: 'FeatureCollection', features: [] };

@@ -19,6 +19,11 @@ The grid moves with the node: a sample in the outer quarter re-centres it on
 that sample and replays the kept samples (``HISTORY``). Work runs on one worker
 thread, so a replay never holds up the MQTT callback that feeds ``add()``.
 This is an aid for finding a transmitter, not a measured position.
+
+A LIVE sample without ``b`` (no heading source at the edge) or without
+``lat``/``lon`` (no fix, or ``nav.gps.publish_position`` off) is no ray. The
+monitor reports it with ``skip()``, and the view names what the estimate waits
+for (``waiting_for``) until a usable sample comes.
 """
 from __future__ import annotations
 
@@ -49,6 +54,9 @@ EARTH_R = 6_371_000.0
 STATE_NO_DATA = "NO_DATA"
 STATE_NEED_MOVEMENT = "NEED_MOVEMENT"
 STATE_ESTIMATE = "ESTIMATE"
+# Why the latest LIVE sample was no ray (``waiting_for``).
+WAITING_NO_BEARING = "NO_BEARING"
+WAITING_NO_POSITION = "NO_POSITION"
 
 
 def _east_north(lat0: float, lon0: float, lat: float, lon: float) -> Tuple[float, float]:
@@ -121,6 +129,9 @@ class PositionEstimator:
         self._worker: Optional[threading.Thread] = None
         self._generation = 0
         self._dropped = 0
+        self._waiting_for: Optional[str] = None
+        self._skipped = 0
+        self._skipped_at_ms: Optional[int] = None
         self._clear("STARTED")
 
     # -- input ------------------------------------------------------------
@@ -131,6 +142,8 @@ class PositionEstimator:
         sample = {"q": q, "t_ms": t_ms, "frequency_hz": frequency_hz, "bearing_deg": bearing_deg % 360.0,
                   "latitude": latitude, "longitude": longitude, "confidence_db": confidence_db,
                   "heading_source": heading_source, "generation": self._generation}
+        with self._lock:
+            self._waiting_for = None
         if not self._threaded:
             self._process(sample)
             return
@@ -141,9 +154,18 @@ class PositionEstimator:
             with self._lock:
                 self._dropped += 1
 
+    def skip(self, reason: str) -> None:
+        """A LIVE sample that is no ray: ``WAITING_NO_BEARING`` or ``WAITING_NO_POSITION``."""
+        with self._lock:
+            self._waiting_for = reason
+            self._skipped += 1
+            self._skipped_at_ms = int(time.time() * 1000)
+
     def reset(self, reason: str = "OPERATOR_RESET") -> None:
         with self._lock:
             self._generation += 1
+            # Skips are counted since the last reset; what samples lack stays.
+            self._skipped = 0
             self._clear(reason)
 
     # -- output -----------------------------------------------------------
@@ -153,6 +175,11 @@ class PositionEstimator:
             result = dict(self._result)
             result["pending"] = self._queue.qsize()
             result["dropped"] = self._dropped
+            # What the latest LIVE sample lacked (null once one is used), how
+            # many were skipped and when the last one was.
+            result["waiting_for"] = self._waiting_for
+            result["skipped"] = self._skipped
+            result["skipped_at_ms"] = self._skipped_at_ms
             result["age_ms"] = None if result.get("updated_at_ms") is None else max(0, now_ms - result["updated_at_ms"])
             return result
 
@@ -315,4 +342,7 @@ def _circular_span(directions: List[float]) -> float:
     return 360.0 - max(gaps)
 
 
-__all__ = ["PositionEstimator", "STATE_ESTIMATE", "STATE_NEED_MOVEMENT", "STATE_NO_DATA"]
+__all__ = [
+    "PositionEstimator", "STATE_ESTIMATE", "STATE_NEED_MOVEMENT", "STATE_NO_DATA", "WAITING_NO_BEARING",
+    "WAITING_NO_POSITION",
+]

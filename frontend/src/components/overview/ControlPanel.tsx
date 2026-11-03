@@ -19,7 +19,12 @@ import {
   draftWithCenter,
   draftWithSquelchLevel,
   fieldFor,
+  fieldNamesText,
   fieldValueText,
+  finalAnswerWaitText,
+  ignoredKeysText,
+  lateAnswerOpen,
+  lateAnswerStep,
   isConfigPatchErrorCode,
   mergeIntoDraft,
   parseDraft,
@@ -31,10 +36,11 @@ import {
   settingsReadView,
   squelchModeText,
   takesUca,
+  withoutBandFill,
 } from '../../lib/configPatch';
 import { parseTypedNumber } from '../../lib/polarViewSettings';
-import type { CommandResultView, CommandStatusLike, ConfigPatchField, ConfigPatchRanges, DraftEvaluation, DraftValues, FieldEvaluation, ReportedSquelch } from '../../lib/configPatch';
-import { VERIFY_WINDOW_MS, currentConfigValues, dataOutConfigValues, dataOutDefaultSquelchMode, verifyConfigPatch } from '../../lib/configVerify';
+import type { CommandResultView, CommandStatusLike, ConfigPatchField, ConfigPatchRanges, DraftEvaluation, DraftValues, FieldEvaluation, LateAnswerShown, ReportedSquelch } from '../../lib/configPatch';
+import { VERIFY_WINDOW_MS, controlAntArrangement, currentConfigValues, dataOutAntArrangement, dataOutConfigValues, dataOutDefaultSquelchMode, verifyConfigPatch } from '../../lib/configVerify';
 import type { ConfigVerification, VerifyStatus, VerifyVerdict } from '../../lib/configVerify';
 import type { TelemetrySnapshot } from '../../types';
 import { errorNotice, noticeText } from '../../lib/errorNotice';
@@ -75,6 +81,11 @@ export interface ControlDone {
   verify?: ControlVerifyTarget;
   /** The change and its base revision, to review again when the node's settings changed (CONFIG_REVISION_CONFLICT). */
   rebase?: { changes: ConfigPatchChanges; fromRev: number | null };
+  /**
+   * A timeout (no final ACK, no ACK) a late answer of the RDF-SDR may still
+   * replace: the command is read again, slowly, while this is set.
+   */
+  late?: { count: number; baseRev: number | null } & LateAnswerShown;
 }
 /** After a revision change: the reviewed change waits for the new revision, then comes back for one more Send. */
 export interface ControlRebase { changes: ConfigPatchChanges; fromRev: number | null; startedAtMs: number }
@@ -88,6 +99,8 @@ const PATCH_TOPIC_SUFFIX = 'cmd/config/patch';
 const ACK_TOPIC_SUFFIX = 'ack/config';
 const REPORTED_POLL_MS = 2_000;
 const STATUS_POLL_MS = 1_000;
+/** After a timeout the command is read this often, while a late answer may still come (lateAnswerOpen). */
+const LATE_POLL_MS = 5_000;
 const DEFAULT_TTL_MS = 30_000;
 const COMMAND_ID_RE = /^[A-Za-z0-9_.:-]{1,80}$/u;
 /** Refusals of a command that was not sent; the draft stays and the values are read again. */
@@ -141,6 +154,7 @@ function fieldHint(t: Translate, evaluation: FieldEvaluation, ranges: ConfigPatc
   if (evaluation.problem === 'empty') return { text: t('control.required', { range }), tone: 'error' };
   if (evaluation.problem === 'table') return { text: t('control.notInGainTable'), tone: 'error' };
   if (evaluation.problem === 'centerVfo') return { text: t('control.vfoMustFollowCenter'), tone: 'error' };
+  if (evaluation.problem === 'engineBand') return { text: t('control.spacingSetByEngine', { spacing: plainNumber(evaluation.bandSpacingM ?? 0, 4) }), tone: 'error' };
   if (evaluation.required) return { text: t('control.vfoFollowsCenter'), tone: 'changed' };
   if (evaluation.changed) {
     // A typed fraction of a whole-dB field: say which whole value is sent (edge 1.9.0 writes whole dB).
@@ -165,7 +179,7 @@ export function bandNote(t: Translate, evaluation: DraftEvaluation): string | nu
   if (!center?.changed || typeof center.value !== 'number') return null;
   const rule = bandRuleFor(center.value);
   const uca = takesUca(evaluation.fields.map((entry) => entry.field));
-  // A 1.8 edge's KrakenSDR sets the UCA spacing by frequency itself (30-300 MHz 0.3 m, 300-3000 MHz 0.128 m).
+  // A 1.8 edge's KrakenSDR sets the UCA spacing by frequency itself (30 to below 300 MHz 0.3 m, 300-3000 MHz 0.128 m).
   // The engine's own spacing rule covers 30-3000 MHz only; below that the spacing stays as it is.
   const engineSets = center.value >= 30_000_000 && center.value <= 3_000_000_000;
   if (!rule) return t(uca && engineSets ? 'control.band.noneEngine' : 'control.band.none');
@@ -530,6 +544,8 @@ export function ControlPanelView({
                 : commandStageText(t, sending.status?.ack ?? null) ?? withSlots(t('control.sending'), { topic: ackTopic, id: sending.commandId })
               : t('control.posting')}</span>
             {sending?.status ? <span className="ov-mono ov-control-state">{sending.status.ack?.status ?? sending.status.state}</span> : null}
+            {/* Contract 1.10: the RDF-SDR says when its final ACK comes at the latest; the console waits that long. */}
+            {finalAnswerWaitText(t, sending?.status) ? <span className="ov-control-small">{finalAnswerWaitText(t, sending?.status)}</span> : null}
           </div>
         ) : null}
 
@@ -540,10 +556,15 @@ export function ControlPanelView({
                 {done.view ? t(done.view.title.key, done.view.title.vars) : t('control.errorTitle', { code: done.error?.code ?? '—' })}
               </span>
               <span>{done.view ? t(done.view.body.key, done.view.body.vars) : done.error ? noticeText(t, done.error.message) : ''}</span>
+              {/* The RDF-SDR's own sentence, for an error this console has no message for. */}
+              {done.view?.message ? <span>{t('control.result.edgeMessage', { message: done.view.message })}</span> : null}
+              {done.view?.fields?.length ? <span>{t('control.result.engineOverrodeFields', { fields: fieldNamesText(t, done.view.fields) })}</span> : null}
               {done.view && appliedMethodText(t, done.ack ?? null) ? <span>{appliedMethodText(t, done.ack ?? null)}</span> : null}
               {done.view && bandSpacingText(t, done.ack ?? null) ? <span>{bandSpacingText(t, done.ack ?? null)}</span> : null}
               {done.view && squelchModeText(t, done.ack ?? null) ? <span>{squelchModeText(t, done.ack ?? null)}</span> : null}
+              {done.view && ignoredKeysText(t, done.ack ?? null) ? <span className="ov-control-small">{ignoredKeysText(t, done.ack ?? null)}</span> : null}
               {done.restarted ? <span className="ov-control-small">{t('control.result.restarted')}</span> : null}
+              {done.late ? <span className="ov-control-small" role="status">{t('control.result.lateWatch')}</span> : null}
               {/* The raw codes stay visible under the operator's words. */}
               {done.view?.code ? <span className="ov-mono ov-control-small">{t('control.result.code', { code: done.view.code })}</span> : null}
               {done.commandId ? <span className="ov-mono ov-control-small">{done.commandId}</span> : null}
@@ -813,7 +834,9 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
       ? { changes: status.changes, issuedAtMs: status.issuedMs, finalAtMs: Date.now(), ...(refused ? { windowMs: 0 } : {}) }
       : undefined;
     const rebaseTarget = view.rebase && Object.keys(status.changes).length ? { changes: status.changes, fromRev: baseRev } : undefined;
-    setDone({ view, error: null, commandId: status.commandId, restarted: status.monitorRestarted, ack: status.ack, verify, rebase: rebaseTarget });
+    // A timeout is not the last word: a final ACK that comes late still replaces it (the server keeps the command 900 s).
+    const late = lateAnswerOpen(status) ? { count, baseRev, state: status.state, ackStatus: status.ack?.status ?? null } : undefined;
+    setDone({ view, error: null, commandId: status.commandId, restarted: status.monitorRestarted, ack: status.ack, verify, rebase: rebaseTarget, late });
     setStage('done');
     if (view.reload) setReloadTick((tick) => tick + 1);
     if (verify) {
@@ -863,6 +886,55 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
     };
   }, [sendingId, sendingCount, sendingRev, finish]);
 
+  // After a timeout (no final ACK), read the command again every few seconds: the RDF-SDR may still
+  // answer (a restart of up to start_timeout_seconds, a lost radio turn), and its late final ACK replaces
+  // the timeout. Stops once the answer is in, the window has passed, or the operator moves on.
+  const lateId = stage === 'done' && done?.late ? done.commandId : null;
+  const lateCount = done?.late?.count ?? 0;
+  const lateRev = done?.late?.baseRev ?? null;
+  const lateState = done?.late?.state ?? '';
+  const lateAckStatus = done?.late?.ackStatus ?? null;
+  useEffect(() => {
+    if (!lateId) return undefined;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let controller: AbortController | null = null;
+    const stopListening = () => setDone((current) => (current && current.commandId === lateId ? { ...current, late: undefined } : current));
+    const poll = () => {
+      controller = new AbortController();
+      const signal = controller.signal;
+      getConfigPatchStatus(lateId, signal).then((status) => {
+        if (stopped || !status) return;
+        const step = lateAnswerStep({ state: lateState, ackStatus: lateAckStatus }, status);
+        if (step === 'answered') {
+          // The answer came: show the command as it is now.
+          finish(status, lateCount, lateRev);
+          return;
+        }
+        if (step === 'closed') {
+          // The window closed on the same timeout: the result shown stays, nothing is read back again.
+          stopListening();
+          return;
+        }
+        timer = setTimeout(poll, LATE_POLL_MS);
+      }).catch((error: unknown) => {
+        if (stopped || signal.aborted || isAbort(error)) return;
+        // The server forgot the command (restart, eviction): the timeout stays as shown, no longer listened for.
+        if (error instanceof ApiError && error.status === 404) {
+          stopListening();
+          return;
+        }
+        timer = setTimeout(poll, LATE_POLL_MS);
+      });
+    };
+    timer = setTimeout(poll, LATE_POLL_MS);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      controller?.abort();
+    };
+  }, [lateId, lateCount, lateRev, lateState, lateAckStatus, finish]);
+
   // settings/reported first; a fresh Data Out snapshot fills what it does not carry.
   const dataOut = useMemo(() => dataOutConfigValues(snapshot, localSnapshotFresh), [snapshot, localSnapshotFresh]);
   const values = useMemo(() => (reported ? currentConfigValues(reported.values, dataOut) : null), [reported, dataOut]);
@@ -870,9 +942,11 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
   // Edge 1.9: whether the squelch is automatic, as the edge resolves it (settings/reported, else Data Out's default mode).
   const dataOutDefaultMode = useMemo(() => dataOutDefaultSquelchMode(snapshot, localSnapshotFresh), [snapshot, localSnapshotFresh]);
   const squelch = useMemo(() => reportedSquelch(reported?.settings, dataOutDefaultMode), [reported, dataOutDefaultMode]);
+  // The engine's UCA radius rule holds for a UCA; settings/reported (also over LoRa), else Data Out, says when the array is another one.
+  const antArrangement = controlAntArrangement(reported?.settings, dataOutAntArrangement(snapshot, localSnapshotFresh));
   const evaluation = useMemo(
-    () => parseDraft(fields, { ...(values ? draftFromReported(values, fields) : {}), ...draft }, values ?? {}, ranges, gainTable, squelch),
-    [fields, draft, values, ranges, gainTable, squelch],
+    () => parseDraft(fields, { ...(values ? draftFromReported(values, fields) : {}), ...draft }, values ?? {}, ranges, gainTable, squelch, antArrangement),
+    [fields, draft, values, ranges, gainTable, squelch, antArrangement],
   );
 
   const enterReview = useCallback((changes: ConfigPatchChanges, rev: number | null, fields: readonly FieldEvaluation[]) => {
@@ -927,8 +1001,9 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
   // A finished command's result gives way to it; a command still being sent keeps it waiting.
   useEffect(() => {
     if (!pendingDraft || admin !== 'unlocked' || !reported || stage === 'sending') return;
-    // A frequency from the dock takes its band's gain (and UCA radius), as a typed one does.
-    const merged = draftWithBand({ ...draft, ...mergeIntoDraft({}, pendingDraft, fields) }, pendingDraft.center_frequency_hz, withUca);
+    // A frequency from the dock takes its band's gain (and UCA radius), as a typed one does, and drops the fill of the centre before.
+    const before = pendingDraft.center_frequency_hz === undefined ? draft : withoutBandFill(draft, withUca);
+    const merged = draftWithBand({ ...before, ...mergeIntoDraft({}, pendingDraft, fields) }, pendingDraft.center_frequency_hz, withUca);
     setPendingDraft(null);
     setDraft(merged);
     setReview(null);

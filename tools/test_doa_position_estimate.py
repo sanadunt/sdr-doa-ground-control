@@ -107,6 +107,25 @@ class EstimateTests(unittest.TestCase):
         self.assertEqual((view["state"], view["samples"], view["reset_reason"], view["grid"]),
                          (estimate.STATE_NO_DATA, 0, "OPERATOR_RESET", None))
 
+    def test_a_skipped_sample_names_what_the_estimate_waits_for(self) -> None:
+        est = estimate.PositionEstimator(threaded=False)
+        view = est.view(0)
+        self.assertEqual((view["waiting_for"], view["skipped"], view["skipped_at_ms"]), (None, 0, None))
+        est.skip(estimate.WAITING_NO_BEARING)
+        est.skip(estimate.WAITING_NO_POSITION)
+        view = est.view(0)
+        self.assertEqual((view["waiting_for"], view["skipped"], view["state"]), ("NO_POSITION", 2, estimate.STATE_NO_DATA))
+        self.assertIsInstance(view["skipped_at_ms"], int)
+        # A reset starts the estimate over, not what the samples lack.
+        # The skip count starts over with it.
+        est.reset()
+        self.assertEqual((est.view(0)["waiting_for"], est.view(0)["skipped"]), ("NO_POSITION", 0))
+        est.skip(estimate.WAITING_NO_BEARING)
+        self.assertEqual(est.view(0)["skipped"], 1)
+        lat, lon = place(0, 0)
+        est.add(q=1, t_ms=1, frequency_hz=1, bearing_deg=10, latitude=lat, longitude=lon)
+        self.assertEqual((est.view(0)["waiting_for"], est.view(0)["skipped"]), (None, 1))
+
     def test_the_grid_follows_a_long_drive(self) -> None:
         # The target lies beyond the first grid; driving towards and past it re-centres the grid
         # and the replayed bearings still find it.

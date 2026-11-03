@@ -40,6 +40,10 @@ class ParseTests(unittest.TestCase):
         parsed = parse_status(status())
         self.assertEqual((parsed["v"], parsed["t"], parsed["link"], parsed["last_rx_ms"]), (1, T0, "UP", 400))
         self.assertEqual(parsed["rx"]["messages"], 50)
+        # Edge 1.10.2 counts the other end's restarts; an older bridge sends none.
+        self.assertIsNone(parsed["rx"]["peer_restarts"])
+        rx = dict(json.loads(status())["rx"], peer_restarts=2)
+        self.assertEqual(parse_status(status(rx=rx))["rx"]["peer_restarts"], 2)
         self.assertEqual(parsed["tx"]["sent_bytes"], 2400)
         self.assertEqual(parsed["peer"]["clock_offset_ms"], -35)
         self.assertEqual(parsed["notes"], [])

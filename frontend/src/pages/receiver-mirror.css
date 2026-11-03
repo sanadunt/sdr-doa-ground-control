@@ -54,10 +54,17 @@
 .rec-tl-ticks { position: relative; height: 16px; margin-top: 2px; }
 .rec-tl-ticks span { position: absolute; top: 0; color: var(--subtle); font-family: var(--mono); font-size: 10.5px; transform: translateX(-50%); white-space: nowrap; }
 .rec-tl-ticks span:first-child { transform: none; }
+/* A finger needs 44 px per hour: the time line scrolls sideways on a touch screen. */
+@media (pointer: coarse) {
+  .rec-tl { overflow-x: auto; overscroll-behavior-x: contain; }
+  .rec-tl-strip, .rec-tl-ticks { min-width: calc(24 * 44px); }
+  .rec-tl-strip { height: 46px; }
+}
 
 .rec-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 12px; min-width: 0; }
 .rec-results { align-items: flex-end; }
 .rec-pages { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+.ov-button.rec-step { justify-content: center; min-width: 44px; }
 
 .rec-list { margin: 0; padding: 0; border: 1px solid var(--line-soft); border-radius: 8px; list-style: none; }
 .rec-list.is-loading { opacity: .6; }

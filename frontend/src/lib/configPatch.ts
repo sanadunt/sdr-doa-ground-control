@@ -292,9 +292,11 @@ export type ReportedValues = Partial<Record<ConfigPatchKey, ConfigPatchValue | n
 /**
  * `table`: a gain the edge's table does not have; `centerVfo`: the centre
  * changes and VFO0 is not the same frequency (the edge requires both, equal);
- * `choice`: a value a choice field does not have.
+ * `choice`: a value a choice field does not have; `engineBand`: a UCA radius
+ * other than the one the KrakenSDR engine sets itself at the centre
+ * (engineSpacingFor), which the edge would refuse.
  */
-export type FieldProblem = 'empty' | 'number' | 'range' | 'table' | 'centerVfo' | 'choice';
+export type FieldProblem = 'empty' | 'number' | 'range' | 'table' | 'centerVfo' | 'choice' | 'engineBand';
 
 export interface FieldEvaluation {
   field: ConfigPatchField;
@@ -315,6 +317,8 @@ export interface FieldEvaluation {
    * squelch is automatic (the level in settings.json does not run then).
    */
   reportedText?: string;
+  /** With `engineBand`: the radius the engine sets at the centre, in metres. */
+  bandSpacingM?: number;
 }
 
 export interface DraftEvaluation {
@@ -397,15 +401,51 @@ export function draftWithBand(draft: DraftValues, centerHz: ConfigPatchValue | n
 }
 
 /**
+ * The UCA radius the KrakenSDR engine sets itself at a centre frequency, as
+ * the edge (1.8.0, control._band_spacing) applies it: 0.3 m from 30 to below
+ * 300 MHz, 0.128 m from 300 to 3000 MHz, none elsewhere (the file's radius
+ * stays). The edge refuses another explicit radius there
+ * (SPACING_SET_BY_ENGINE_BAND). It holds for a UCA only.
+ */
+export function engineSpacingFor(hz: number | null | undefined): number | null {
+  if (typeof hz !== 'number' || !Number.isFinite(hz)) return null;
+  if (hz >= 30_000_000 && hz < 300_000_000) return 0.3;
+  if (hz >= 300_000_000 && hz <= 3_000_000_000) return 0.128;
+  return null;
+}
+
+/** How far a sent UCA radius may be from the engine's band radius (the edge's own tolerance). */
+const ENGINE_SPACING_TOLERANCE_M = 5e-4;
+
+/**
+ * A draft without the gain and UCA radius a band rule filled in for the
+ * centre typed before (draftWithBand): every keystroke runs the band rule,
+ * so typing 1575.42 passes 157 MHz (VHF) and would otherwise keep its 25.4 dB
+ * and 0.3 m; a centre from the spectrum dock replaces the typed one the
+ * same way. A value that differs from the rule's was picked by the operator
+ * and stays.
+ */
+export function withoutBandFill(draft: DraftValues, withUca = false): DraftValues {
+  const typed = parseTypedNumber(draft.center_frequency_hz ?? '');
+  const rule = typed === null ? null : bandRuleFor(typed * fieldFor('center_frequency_hz').scale);
+  if (!rule) return draft;
+  const next: DraftValues = { ...draft };
+  if (next.gain_db === draftText(fieldFor('gain_db'), rule.gainDb)) delete next.gain_db;
+  if (withUca && next.ant_spacing_m === draftText(fieldFor('ant_spacing_m'), rule.ucaM)) delete next.ant_spacing_m;
+  return next;
+}
+
+/**
  * A draft after the operator typed the centre frequency: VFO0 follows it,
  * because the edge takes a centre change only with VFO0 at the same
  * frequency. Typed back to the reported centre, VFO0 returns to its own
  * reported value. A new centre in a band also takes the band's gain (and,
- * with `withUca`, its UCA radius; draftWithBand), which go back with the centre.
+ * with `withUca`, its UCA radius; draftWithBand), which go back with the
+ * centre, and a centre that leaves the band drops them again.
  */
 export function draftWithCenter(draft: DraftValues, text: string, reported: ReportedValues, withUca = false): DraftValues {
   const field = fieldFor('center_frequency_hz');
-  const next: DraftValues = { ...draft, center_frequency_hz: text };
+  const next: DraftValues = { ...withoutBandFill(draft, withUca), center_frequency_hz: text };
   const typed = parseTypedNumber(text);
   const known = reported.center_frequency_hz;
   if (typed !== null && typeof known === 'number' && Math.round(typed * field.scale) === Math.round(known)) {
@@ -468,7 +508,10 @@ function evaluateChoice(field: ChoicePatchField, text: string, reportedValue: Co
  * the edge's rules. An empty field is fine only when the node did not report
  * that value (it is then left out); a changed, valid field goes into
  * `changes` in SI units. A centre change takes VFO0 along: VFO0 must then be
- * the same frequency, and is sent even when it did not change.
+ * the same frequency, and is sent even when it did not change. A UCA radius
+ * other than the engine's band radius at the centre is refused here, before
+ * a round trip to the edge; `antArrangement` (settings.json, when known)
+ * other than UCA leaves the radius to the edge.
  */
 export function parseDraft(
   fields: readonly ConfigPatchField[],
@@ -477,6 +520,7 @@ export function parseDraft(
   ranges: ConfigPatchRanges | null | undefined,
   gainTable: readonly number[] = GAIN_TABLE_DB,
   squelch: ReportedSquelch | null = null,
+  antArrangement: string | null = null,
 ): DraftEvaluation {
   const changes: ConfigPatchChanges = {};
   const evaluated = fields.map((field): FieldEvaluation => {
@@ -532,6 +576,16 @@ export function parseDraft(
       changes.vfo0_frequency_hz = vfo.value;
       evaluated[vfoIndex] = { ...vfo, changed: true, required: !vfo.changed };
     }
+  }
+  // Edge 1.8.0: at 30-3000 MHz the KrakenSDR engine sets the UCA radius itself and the
+  // edge refuses another one (FAILED SPACING_SET_BY_ENGINE_BAND, after a LoRa round trip).
+  const spacing = changes.ant_spacing_m;
+  const spacingIndex = evaluated.findIndex((entry) => entry.field.key === 'ant_spacing_m');
+  const knownCenter = typeof reported.center_frequency_hz === 'number' ? reported.center_frequency_hz : null;
+  const band = antArrangement === null || antArrangement === 'UCA' ? engineSpacingFor(typeof center === 'number' ? center : knownCenter) : null;
+  if (typeof spacing === 'number' && band !== null && spacingIndex >= 0 && Math.abs(spacing - band) > ENGINE_SPACING_TOLERANCE_M) {
+    delete changes.ant_spacing_m;
+    evaluated[spacingIndex] = { ...evaluated[spacingIndex], changed: false, problem: 'engineBand', bandSpacingM: band };
   }
   // Contract 1.9: an automatic squelch sets its level itself, so the level is
   // neither checked nor sent then (squelchLock()); the mode is shown instead.
@@ -651,6 +705,20 @@ export const EDGE_ERROR_KEYS: Readonly<Record<string, MessageKey>> = {
   SPACING_SET_BY_ENGINE_BAND: 'control.edge.SPACING_SET_BY_ENGINE_BAND',
   // Edge 1.9.0: a squelch mode other than Manual, Auto, Auto Channel or Default.
   SQUELCH_MODE_INVALID: 'control.error.SQUELCH_MODE_INVALID',
+  // Edge 1.x (186df81, in 1.10.0): helper and agent codes in place of exception class names.
+  HELPER_UNAVAILABLE: 'control.edge.HELPER_UNAVAILABLE',
+  HELPER_ACCESS_DENIED: 'control.edge.HELPER_ACCESS_DENIED',
+  PEER_UID_DENIED: 'control.edge.HELPER_ACCESS_DENIED',
+  HELPER_INTERNAL_ERROR: 'control.edge.INTERNAL_ERROR',
+  INTERNAL_ERROR: 'control.edge.INTERNAL_ERROR',
+  CONFIG_ADAPTER_NOT_APPROVED: 'control.edge.CONFIG_ADAPTER_NOT_APPROVED',
+  CAPABILITY_DISABLED: 'control.edge.CAPABILITY_DISABLED',
+  UNSUPPORTED_SETTINGS_FIELD: 'control.edge.UNSUPPORTED_SETTINGS_FIELD',
+  SETTINGS_FILE_INVALID: 'control.edge.SETTINGS_FILE_INVALID',
+  SETTINGS_OBJECT_REQUIRED: 'control.edge.SETTINGS_FILE_INVALID',
+  SETTINGS_TOO_LARGE: 'control.edge.SETTINGS_FILE_INVALID',
+  INVALID_COMMAND_FIELD: 'control.edge.INVALID_COMMAND_FIELD',
+  JOURNAL_UNAVAILABLE: 'control.edge.JOURNAL_UNAVAILABLE',
 };
 
 const SPACING_SET_BY_ENGINE_BAND = 'SPACING_SET_BY_ENGINE_BAND';
@@ -669,13 +737,44 @@ export function edgeErrorKey(code: string | null | undefined): MessageKey | null
 }
 
 /**
- * The edge puts the class name of an exception its settings helper raised
- * in `result.error`, upper-cased (OSERROR, FILENOTFOUNDERROR,
- * PERMISSIONERROR, TIMEOUTEXPIRED...). Such a code means the helper on the
- * Raspberry could not run, not that the values were refused.
+ * Helper codes of edge 1.10.0 (since 186df81) that leave the outcome open:
+ * the control helper got the command and then stopped answering, or systemd
+ * gave no clear answer.
+ */
+const HELPER_LOST_CODES: ReadonlySet<string> = new Set([
+  'HELPER_TIMEOUT', 'HELPER_CONNECTION_LOST', 'HELPER_CLOSED', 'RPC_TIMEOUT', 'SYSTEMD_ACTION_OUTCOME_UNKNOWN',
+]);
+
+/** Helper codes of edge 1.10.0 for a control helper that did not run the command, or not to the end. */
+const HELPER_FAULT_CODES: ReadonlySet<string> = new Set([
+  ...HELPER_LOST_CODES, 'HELPER_UNAVAILABLE', 'HELPER_ACCESS_DENIED', 'PEER_UID_DENIED', 'HELPER_RESPONSE_LIMIT', 'HELPER_FAILED',
+]);
+
+/**
+ * The control helper on the Raspberry could not run the command, not that
+ * the values were refused: the HELPER_* codes of edge 1.10.0, or, from an
+ * edge before 186df81, the upper-cased class name of the exception its
+ * helper raised (OSERROR, FILENOTFOUNDERROR, PERMISSIONERROR, TIMEOUTEXPIRED...).
  */
 export function edgeHelperFault(code: string | null | undefined): boolean {
-  return typeof code === 'string' && /^(?:[A-Z][A-Z0-9]*ERROR|TIMEOUTEXPIRED|CALLEDPROCESSERROR)$/u.test(code);
+  if (typeof code !== 'string') return false;
+  return HELPER_FAULT_CODES.has(code) || /^(?:[A-Z][A-Z0-9]*ERROR|TIMEOUTEXPIRED|CALLEDPROCESSERROR)$/u.test(code);
+}
+
+/** The control helper got the command and then stopped answering: whether it ran is not known. */
+export function edgeHelperLost(code: string | null | undefined): boolean {
+  return typeof code === 'string' && HELPER_LOST_CODES.has(code);
+}
+
+/**
+ * Helper codes of edge 1.10 for a helper that ran and answered with a failure
+ * (HELPER_FAILED) or an answer too large to read: it is not missing or unapproved.
+ */
+const HELPER_ANSWERED_CODES: ReadonlySet<string> = new Set(['HELPER_RESPONSE_LIMIT', 'HELPER_FAILED']);
+
+/** The control helper did not run the command at all: missing, not approved, or an exception class name of an older edge. */
+function edgeHelperNotRun(code: string | null | undefined): boolean {
+  return edgeHelperFault(code) && !edgeHelperLost(code) && !HELPER_ANSWERED_CODES.has(code as string);
 }
 
 /** `info`: neither success nor failure (PERSISTED_UNVERIFIED, OUTCOME_UNKNOWN, no final ACK). */
@@ -693,6 +792,13 @@ export interface CommandResultView {
   reload: boolean;
   /** The node's settings changed after the base revision was read: the same change can be reviewed again on the new one. */
   rebase?: boolean;
+  /**
+   * The edge's own sentence for an error this console has no message for
+   * (result.message, in the edge's words), shown under the body; null otherwise.
+   */
+  message?: string | null;
+  /** ENGINE_OVERRODE_AT_START: the fields the SDR engine changed at its start (edge names). */
+  fields?: string[];
 }
 
 /** Minimal view of a command status, as normalized by api.ts. */
@@ -712,6 +818,13 @@ export interface CommandStatusLike {
     bandSpacingM?: number | null;
     /** Contract 1.9: the squelch mode a level sent while the squelch was automatic switched it to (Manual). */
     squelchMode?: string | null;
+    /** The edge's operator sentence and the technical cause of its error. */
+    message?: string | null;
+    detail?: string | null;
+    /** The fields the SDR engine rewrote at its start (ENGINE_OVERRODE_AT_START). */
+    fields?: readonly string[] | null;
+    /** The request keys the edge ignored (REJECTED), as it named them. */
+    ignored?: readonly string[] | null;
   } | null;
 }
 
@@ -741,19 +854,26 @@ const RESTART_REASON_KEYS: Readonly<Record<string, MessageKey>> = {
 };
 const ENGINE_OVERRODE_PREFIX = 'LIVE_FAILED:ENGINE_OVERRODE:';
 
+/** Edge field names in the operator's words (Kontrol's labels), joined: "Gain, VFO0". */
+export function fieldNamesText(t: Translate, names: readonly string[]): string {
+  return names.map((name) => {
+    const known = CONFIG_PATCH_FIELDS.find((entry) => entry.key === name);
+    return known ? t(known.shortLabel) : name;
+  }).join(', ');
+}
+
 /**
  * Why the edge restarts the SDR engine for a config.patch, in the operator's
  * words: a gain change, a jump above its live-retune limit, or a live retune
- * the engine overrode (naming the field) or that left the DAQ unhealthy.
- * Anything else is shown as the edge sent it.
+ * the engine overrode (naming the fields, comma-separated by the edge) or that
+ * left the DAQ unhealthy. Anything else is shown as the edge sent it.
  */
 export function restartReasonText(t: Translate, reason: string | null | undefined): string | null {
   if (!reason) return null;
   if (Object.prototype.hasOwnProperty.call(RESTART_REASON_KEYS, reason)) return t(RESTART_REASON_KEYS[reason]);
   if (reason.startsWith(ENGINE_OVERRODE_PREFIX)) {
-    const field = reason.slice(ENGINE_OVERRODE_PREFIX.length);
-    const known = CONFIG_PATCH_FIELDS.find((entry) => entry.key === field);
-    return t('control.reason.ENGINE_OVERRODE', { field: known ? t(known.shortLabel) : field });
+    const fields = reason.slice(ENGINE_OVERRODE_PREFIX.length).split(',').filter(Boolean);
+    return t('control.reason.ENGINE_OVERRODE', { field: fieldNamesText(t, fields) });
   }
   return reason;
 }
@@ -790,6 +910,63 @@ export function bandSpacingText(t: Translate, ack: CommandStatusLike['ack']): st
 export function squelchModeText(t: Translate, ack: CommandStatusLike['ack']): string | null {
   if (!ack || typeof ack.squelchMode !== 'string' || !ack.squelchMode) return null;
   return t('control.result.squelchMode', { mode: fieldValueText(t, fieldFor('vfo0_squelch_mode'), ack.squelchMode) });
+}
+
+/** The request keys the edge ignored (result.ignored), as it named them; null without any. */
+export function ignoredKeysText(t: Translate, ack: CommandStatusLike['ack']): string | null {
+  if (!ack || !ack.ignored?.length) return null;
+  return t('control.result.ignored', { keys: ack.ignored.join(', ') });
+}
+
+/**
+ * How long the console still waits for the final ACK while a progress ACK
+ * is in (contract 1.10 final_within_ms widens it), or null without a
+ * deadline: "up to 3 min 20 s".
+ */
+export function finalAnswerWaitText(t: Translate, status: { nowMs: number | null; finalAckDeadlineMs: number | null } | null | undefined): string | null {
+  if (!status || status.nowMs === null || status.finalAckDeadlineMs === null) return null;
+  const left = Math.ceil((status.finalAckDeadlineMs - status.nowMs) / 1000);
+  if (!(left > 0)) return null;
+  const minutes = Math.floor(left / 60);
+  const seconds = left % 60;
+  const wait = minutes === 0 ? t('common.durationS', { value: seconds })
+    : seconds === 0 ? t('common.durationMin', { value: minutes }) : t('control.stage.minSec', { min: minutes, sec: seconds });
+  return t('control.stage.finalWithin', { wait });
+}
+
+/**
+ * How long after it was issued a late answer is still looked for: the server
+ * keeps a timed-out command for a new monitor this long
+ * (config_command_tracker.FINAL_WITHIN_MAX_WAIT_MS).
+ */
+export const LATE_ANSWER_WINDOW_MS = 900_000;
+
+/**
+ * A final status that is a timeout (no ACK, no final ACK, no report) a late
+ * answer of the RDF-SDR may still replace, inside LATE_ANSWER_WINDOW_MS of
+ * the command: Kontrol keeps reading it, slowly, instead of stopping there.
+ */
+export function lateAnswerOpen(status: { lateAnswerPossible?: boolean; nowMs: number | null; issuedMs: number | null } | null | undefined): boolean {
+  if (!status || status.lateAnswerPossible !== true) return false;
+  return status.nowMs === null || status.issuedMs === null || status.nowMs - status.issuedMs < LATE_ANSWER_WINDOW_MS;
+}
+
+/** The timeout a late read is compared with: its state and the status of its last ACK. */
+export interface LateAnswerShown { state: string; ackStatus: string | null }
+
+/**
+ * What a late read of a timed-out command means: 'wait' while a late answer
+ * may still come (lateAnswerOpen); 'closed' when the window has passed on the
+ * same timeout, so the result already shown stays and only the reading
+ * stops; 'answered' when the command changed (a late ACK, a report), to be
+ * shown as it is now.
+ */
+export function lateAnswerStep(
+  shown: LateAnswerShown,
+  status: { state: string; ack: { status: string } | null; lateAnswerPossible?: boolean; nowMs: number | null; issuedMs: number | null },
+): 'wait' | 'closed' | 'answered' {
+  if (lateAnswerOpen(status)) return 'wait';
+  return status.state === shown.state && (status.ack?.status ?? null) === shown.ackStatus ? 'closed' : 'answered';
 }
 
 /** How an APPLIED config.patch was applied (contract 1.7), or null for an older edge. */
@@ -837,26 +1014,40 @@ export function commandResultView(status: CommandStatusLike, changeCount: number
   const plain = ack.method || ack.liveFailure ? rawCodes(ack, code) : withCode(ack.status, code);
   // Contract 1.8: the band radius the edge named; contract 1.9: the squelch mode it switched to.
   const spaced = typeof ack.bandSpacingM === 'number' ? `${plain} · band_spacing_m ${plainNumber(ack.bandSpacingM, 4)}` : plain;
-  const raw = ack.squelchMode ? `${spaced} · squelch_mode ${ack.squelchMode}` : spaced;
+  const moded = ack.squelchMode ? `${spaced} · squelch_mode ${ack.squelchMode}` : spaced;
+  // The technical cause the edge sent with its error (exception and text) ends the raw line.
+  const raw = ack.detail ? `${moded} · ${ack.detail}` : moded;
   const rev = ack.revision ?? '—';
-  const helper = edgeHelperFault(ack.error);
+  const helper = edgeHelperNotRun(ack.error);
+  // The edge's own sentence, where this console has no message for its code.
+  const edgeMessage = (known: boolean) => (!known && ack.message ? { message: ack.message } : {});
   if (ack.status === 'APPLIED') {
     return { tone: 'ok', title: { key: 'control.result.title.applied' }, body: { key: 'control.result.applied', vars: { count: changeCount, rev } }, code: raw, reload: true };
   }
   if (ack.status === 'PERSISTED_UNVERIFIED') {
-    // Contract 1.7 names why there is no runtime proof: the engine was not running, or changed a value at its start.
+    // Contract 1.7 names why there is no runtime proof: the engine was not running, or changed values at its start
+    // (result.fields names them).
+    const overrode = ack.error === 'ENGINE_OVERRODE_AT_START';
     const body: MessageKey = ack.reason === 'ENGINE_NOT_RUNNING' ? 'control.result.persistedEngineStopped'
-      : ack.error === 'ENGINE_OVERRODE_AT_START' ? 'control.result.persistedEngineOverrode' : 'control.result.persistedUnverified';
-    return { tone: 'info', title: { key: 'control.result.title.persisted' }, body: { key: body, vars: { rev } }, code: raw, reload: true };
+      : overrode ? 'control.result.persistedEngineOverrode' : 'control.result.persistedUnverified';
+    return {
+      tone: 'info', title: { key: 'control.result.title.persisted' }, body: { key: body, vars: { rev } }, code: raw, reload: true,
+      ...(overrode && ack.fields?.length ? { fields: [...ack.fields] } : {}),
+    };
   }
   if (ack.status === 'OUTCOME_UNKNOWN') {
-    // Name the likely cause: the helper did not run, the link dropped while
-    // applying, or (1.7) the engine did not stop or its DAQ did not recover.
+    // Name the likely cause: the helper stopped answering after the command
+    // was sent, or did not run at all, or (1.7) the engine did not stop or its
+    // DAQ did not recover.
     const body: MessageKey = ack.error === 'ENGINE_DID_NOT_STOP' ? 'control.result.outcomeEngineDidNotStop'
       : ack.error === 'DAQ_NOT_HEALTHY_AFTER_RESTART' ? 'control.result.outcomeDaqAfterRestart'
-        : helper ? 'control.result.outcomeUnknownHelper'
-          : ack.reason === 'CONNECTION_LOST' ? 'control.result.outcomeUnknownLink' : 'control.result.outcomeUnknown';
-    return { tone: 'info', title: { key: 'control.result.title.unknown' }, body: { key: body, vars: { code: code ?? '—' } }, code: raw, reload: true };
+        : edgeHelperLost(ack.error) ? 'control.result.outcomeUnknownHelperLost'
+          : helper ? 'control.result.outcomeUnknownHelper' : 'control.result.outcomeUnknown';
+    return {
+      tone: 'info', title: { key: 'control.result.title.unknown' }, body: { key: body, vars: { code: code ?? '—' } }, code: raw, reload: true,
+      // The generic body names no cause, so the edge's sentence is kept even for a code with a message elsewhere.
+      ...edgeMessage(body !== 'control.result.outcomeUnknown'),
+    };
   }
   if (ack.error === 'CONFIG_REVISION_CONFLICT' || (ack.status === 'CONFLICT' && !ack.error)) {
     return {
@@ -870,25 +1061,39 @@ export function commandResultView(status: CommandStatusLike, changeCount: number
   }
   const edgeBody = edgeErrorBody(code, ack.bandSpacingM);
   if (ack.status === 'REJECTED' || ack.status === 'CONFLICT') {
-    return { tone: 'warn', title: { key: 'control.result.title.rejected' }, body: edgeBody ?? { key: 'control.result.rejected' }, code: raw, reload: false };
+    return { tone: 'warn', title: { key: 'control.result.title.rejected' }, body: edgeBody ?? { key: 'control.result.rejected' }, code: raw, reload: false, ...edgeMessage(edgeBody !== null) };
   }
   if (ack.status === 'EXPIRED') {
     return { tone: 'warn', title: { key: 'control.result.title.expired' }, body: { key: 'control.result.expired' }, code: raw, reload: false };
   }
   if (ack.status === 'CANCELLED') {
-    return { tone: 'warn', title: { key: 'control.result.title.cancelled' }, body: { key: 'control.result.cancelled' }, code: raw, reload: true };
+    return { tone: 'warn', title: { key: 'control.result.title.cancelled' }, body: { key: 'control.result.cancelled' }, code: raw, reload: true, ...edgeMessage(false) };
   }
   if (ack.status === 'FAILED') {
+    // Edge 1.10 sends HELPER_CLOSED as FAILED: the helper got the command and closed without an answer, so whether
+    // it ran is not known. The edge's sentence stays.
+    if (edgeHelperLost(ack.error)) {
+      return {
+        tone: 'info', title: { key: 'control.result.title.unknown' }, body: { key: 'control.result.outcomeUnknownHelperLost', vars: { code: code ?? '—' } }, code: raw, reload: true,
+        ...edgeMessage(false),
+      };
+    }
+    // A code with its own message first (HELPER_UNAVAILABLE names the helper), then the helper fault of an older edge;
+    // HELPER_RESPONSE_LIMIT and HELPER_FAILED keep the generic body with the edge's sentence.
     return {
       tone: 'err',
       title: { key: 'control.result.title.failed' },
-      body: helper ? { key: 'control.result.failedHelper', vars: { code: code ?? '—' } } : edgeBody ?? { key: 'control.result.failed' },
+      body: edgeBody ?? (helper ? { key: 'control.result.failedHelper', vars: { code: code ?? '—' } } : { key: 'control.result.failed' }),
       code: raw,
       reload: true,
+      ...edgeMessage(edgeBody !== null || helper),
     };
   }
   // A status this console does not know: not a success; show the code as the edge sent it.
-  return { tone: 'info', title: { key: 'control.result.ackTitle', vars: { status: ack.status } }, body: { key: 'control.result.outcomeUnknown', vars: { code: code ?? '—' } }, code: raw, reload: true };
+  return {
+    tone: 'info', title: { key: 'control.result.ackTitle', vars: { status: ack.status } }, body: { key: 'control.result.outcomeUnknown', vars: { code: code ?? '—' } }, code: raw, reload: true,
+    ...edgeMessage(false),
+  };
 }
 
 /** What Kontrol shows about the latest config.get, or null when there is nothing to say. */

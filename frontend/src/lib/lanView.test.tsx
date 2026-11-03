@@ -158,7 +158,7 @@ describe('LAN view UI', () => {
     for (const lang of ['en', 'id'] as const) {
       const markup = shell('lan-view', lang);
       const chip = translate(lang, 'shell.viewOnly');
-      expect(markup).toContain(`<div class="topbar-tools"><span class="ov-chip tone-info view-only-chip">${chip}</span>`);
+      expect(markup).toMatch(new RegExp(`<div class="topbar-tools"><span class="ov-chip tone-info view-only-chip"><svg[^]*?</svg><span class="view-only-text">${chip}</span></span>`));
       expect(markup).toContain(`<div class="local-chip">`);
       expect(markup.match(new RegExp(chip, 'g'))).toHaveLength(2);
       expect(markup.match(/<select[^>]*refresh-interval[^>]*>/)?.[0]).toContain('disabled');

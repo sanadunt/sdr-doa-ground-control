@@ -67,6 +67,14 @@ describe('Data Out while Telemetry LoRa carries the node', () => {
     expect(configuration({ connection: 'connected' })).not.toContain('cfg-dataout-unused');
   });
 
+  it('names the node source RDF-SDR in the GPS and Compass switches, the long name as its title', () => {
+    const markup = configuration(LORA_MQTT, 'id');
+    expect(markup.match(/<button type="button" aria-pressed="[a-z]+" title="RDF-SDR \(Telemetry LoRa\)">RDF-SDR<\/button>/g)).toHaveLength(2);
+    const ip = configuration({ connection: 'connected' });
+    expect(ip).toContain('<button type="button" aria-pressed="true">Data Out</button>');
+    expect(ip).not.toContain('RDF-SDR (Telemetry LoRa)');
+  });
+
   it('leaves the Data Out card out of System Health', () => {
     const health = (snapshot: TelemetrySnapshot, mqtt: MqttSnapshot | null) => render(<SystemHealthPage snapshot={snapshot} mqtt={mqtt} localSnapshotFresh />);
     const title = 'Data Out';

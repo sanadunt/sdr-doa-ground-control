@@ -23,13 +23,17 @@ States (``COMMAND_STATES``):
 * ``no_ack`` (final): no ACK at all by ``expires_ms`` plus ``NO_ACK_GRACE_MS``;
 * ``no_final_ack`` (final): the edge acknowledged the command but sent no final
   ACK within ``FINAL_ACK_WAIT_MS`` of issuing it (``RESTART_FINAL_ACK_WAIT_MS``
-  once a contract 1.7 edge names its method); its outcome is unknown;
+  once any progress ACK of a contract 1.7 edge named its method, and at least
+  until a contract 1.10 ``final_within_ms`` ran out); its outcome is unknown;
 * ``no_report`` (final): a ``config.get`` answered ``APPLIED`` without a
   settings report within ``SETTINGS_REPORT_WAIT_MS``.
 
 A final state stays final; a late final ACK (or a late report) still upgrades
-``no_ack``, ``no_final_ack`` and ``no_report``, because it is more information.
-Nothing here retries a command or sends another one.
+``no_ack``, ``no_final_ack`` and ``no_report``, because it is more information
+(``late_answer_possible`` says so, and ``hand_over`` passes such a command to a
+new monitor, both for ``FINAL_WITHIN_MAX_WAIT_MS`` after issuing it, or until
+its ``final_within_ms`` ran out when that is later). Nothing here retries a
+command or sends another one.
 
 This module has no paho dependency, so the console can import it, and raise
 ``MonitorPublishError``, when paho-mqtt is not installed.
@@ -38,6 +42,7 @@ This module has no paho dependency, so the console can import it, and raise
 from __future__ import annotations
 
 import math
+import re
 import threading
 import time
 import weakref
@@ -55,6 +60,13 @@ FINAL_ACK_WAIT_MS = 90_000
 # radio turn. Its final ACK, also DAQ_NOT_HEALTHY_AFTER_RESTART, comes within this.
 RESTART_FINAL_ACK_WAIT_MS = 270_000
 _RESTART_METHODS = frozenset({"LIVE", "RESTART"})
+# Contract 1.10: a progress ACK may carry result.final_within_ms, the latest the
+# edge sends its final ACK after that ACK (from its own helper and start
+# timeouts). The console then waits at least until the ACK's receipt plus that
+# plus FINAL_WITHIN_MARGIN_MS (the LoRa radio turn), the sum capped at
+# FINAL_WITHIN_MAX_WAIT_MS; without it the waits above stay.
+FINAL_WITHIN_MARGIN_MS = 30_000
+FINAL_WITHIN_MAX_WAIT_MS = 900_000
 # The edge keeps one settings request; the console keeps its id for 60 s
 # (command TTL at most 30 s plus the report's 30 s expiry).
 SETTINGS_REPORT_WAIT_MS = 60_000
@@ -117,7 +129,30 @@ def _monitor_reference(monitor: Any, *, strong: bool = False) -> Callable[[], An
 
 
 def _empty_observation() -> Dict[str, Any]:
-    return {"puback": None, "progress": None, "final": None, "reported_at_ms": None}
+    return {"puback": None, "progress": None, "final": None, "reported_at_ms": None,
+            "restart_seen": False, "final_ack_by_ms": None}
+
+
+def final_ack_deadline(ack: Optional[Mapping[str, Any]]) -> Optional[int]:
+    """When a progress ACK's ``final_within_ms`` runs out, as the console waits for it; None without one.
+
+    The receipt time plus ``final_within_ms`` plus FINAL_WITHIN_MARGIN_MS, the
+    two together at most FINAL_WITHIN_MAX_WAIT_MS.
+    """
+    if not isinstance(ack, Mapping):
+        return None
+    result = ack.get("result") if isinstance(ack.get("result"), Mapping) else {}
+    within = result.get("final_within_ms")
+    received = ack.get("received_at_ms")
+    if isinstance(within, bool) or not isinstance(within, (int, float)) or type(received) is not int:
+        return None
+    if not math.isfinite(within) or within < 0:
+        return None
+    return received + int(min(math.ceil(within) + FINAL_WITHIN_MARGIN_MS, FINAL_WITHIN_MAX_WAIT_MS))
+
+
+def _later(first: Optional[int], second: Optional[int]) -> Optional[int]:
+    return second if first is None else first if second is None else max(first, second)
 
 
 def _ack_or_none(value: Any, final: bool) -> Optional[Dict[str, Any]]:
@@ -159,11 +194,42 @@ def _observe(monitor: Any, command_id: str) -> Dict[str, Any]:
     reported = observed.get("reported_at_ms")
     if type(reported) is int:
         result["reported_at_ms"] = reported
+    # What every progress ACK the monitor saw left, also those replaced before
+    # this read: a restart method and the latest final_within_ms deadline.
+    progress = result["progress"]
+    method = observed.get("method_seen")
+    result["restart_seen"] = method in _RESTART_METHODS or (
+        progress is not None and progress["result"].get("method") in _RESTART_METHODS)
+    deadline = observed.get("final_ack_by_ms")
+    result["final_ack_by_ms"] = _later(deadline if type(deadline) is int else None, final_ack_deadline(progress))
     return result
 
 
 def _text(value: Any, limit: int = 64) -> Optional[str]:
     return value if isinstance(value, str) and 0 < len(value) <= limit else None
+
+
+def _prose(value: Any, limit: int) -> Optional[str]:
+    """The edge's free text (message, detail): printable characters, cut to ``limit``; None when empty."""
+    if not isinstance(value, str):
+        return None
+    cleaned = "".join(char for char in value if char.isprintable()).strip()[:limit]
+    return cleaned or None
+
+
+def _names(value: Any, pattern: "re.Pattern[str]", limit: int = 16) -> Optional[List[str]]:
+    """A list of field or key names; items that are not names are left out. None without a list."""
+    if not isinstance(value, list):
+        return None
+    return [item for item in value if isinstance(item, str) and pattern.fullmatch(item)][:limit]
+
+
+# ENGINE_OVERRODE names every field the engine rewrote, comma separated:
+# "LIVE_FAILED:ENGINE_OVERRODE:center_frequency_hz,vfo0_frequency_hz" is 65
+# characters, and three fields reach 83.
+REASON_MAX_CHARS = 160
+_FIELD_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_KEY_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 
 
 def _spacing(value: Any) -> Optional[float]:
@@ -176,7 +242,7 @@ def _spacing(value: Any) -> Optional[float]:
 
 
 def public_ack(ack: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
-    """What Kontrol shows of an ACK: status, error, reason, revision, proof, method, squelch mode."""
+    """What Kontrol shows of an ACK: status, error, reason, revision, proof, method, squelch mode, the edge's text."""
     if ack is None:
         return None
     result = ack.get("result") if isinstance(ack.get("result"), Mapping) else {}
@@ -187,7 +253,7 @@ def public_ack(ack: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
         "status": ack["status"],
         "final": ack["status"] in FINAL_ACK_STATUSES,
         "error": _text(result.get("error")),
-        "reason": _text(result.get("reason")),
+        "reason": _text(result.get("reason"), REASON_MAX_CHARS),
         "revision": revision if type(revision) is int else ack.get("rev"),
         # config.patch: field -> FRESH_* evidence; config.get: "runtime", "persisted_unverified", ...
         "proof": (
@@ -198,16 +264,32 @@ def public_ack(ack: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
         # Contract 1.7: LIVE (retuned in place), RESTART (engine restarted) or FILE
         # (only settings.json, the engine was not running), and why a live retune fell back.
         "method": _text(result.get("method"), 16),
-        "live_failure": _text(result.get("live_failure")),
+        "live_failure": _text(result.get("live_failure"), REASON_MAX_CHARS),
         # Contract 1.8: the UCA radius the engine's band rule set with this patch, or the one
         # it requires (FAILED SPACING_SET_BY_ENGINE_BAND); null when the edge named none.
         "band_spacing_m": _spacing(result.get("band_spacing_m")),
         # Contract 1.9: "Manual" when a squelch level sent while the squelch was automatic
         # switched it to Manual; null otherwise.
         "squelch_mode": _text(result.get("squelch_mode"), 32),
+        # The edge's operator sentence for its error and the technical cause
+        # (exception and text, cut to 200 by the edge); null when it sent none.
+        "message": _prose(result.get("message"), 256),
+        "detail": _prose(result.get("detail"), 256),
+        # The fields the engine rewrote at start (ENGINE_OVERRODE_AT_START) and
+        # the request keys the edge ignored (REJECTED); null without a list.
+        "fields": _names(result.get("fields"), _FIELD_NAME_RE),
+        "ignored": _names(result.get("ignored"), _KEY_NAME_RE),
+        # Contract 1.10, progress ACKs: at most this many ms until the final ACK.
+        "final_within_ms": _within_ms(result.get("final_within_ms")),
         "t": ack.get("t"),
         "received_at_ms": ack.get("received_at_ms"),
     }
+
+
+def _within_ms(value: Any) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        return None
+    return int(math.ceil(value))
 
 
 class ConfigCommandTracker:
@@ -335,7 +417,7 @@ class ConfigCommandTracker:
             pending = [
                 {"command_id": entry["command_id"], "op": entry["op"], "sid": entry["sid"]}
                 for entry in self._entries.values()
-                if not entry["publish_failed"] and not self._status_locked(entry, current_monitor, now)["final"]
+                if not entry["publish_failed"] and self._still_answerable_locked(entry, current_monitor, now)
             ]
         if not pending:
             return 0
@@ -344,6 +426,11 @@ class ConfigCommandTracker:
         except Exception:
             return 0
         return taken if type(taken) is int else 0
+
+    def _still_answerable_locked(self, entry: Dict[str, Any], current_monitor: Any, now: int) -> bool:
+        """Not final yet, or ended by a timeout recently enough that a late answer may still come."""
+        status = self._status_locked(entry, current_monitor, now)
+        return not status["final"] or status["late_answer_possible"]
 
     def ids(self) -> List[str]:
         with self._lock:
@@ -370,6 +457,9 @@ class ConfigCommandTracker:
                 observed["progress"] = fresh["progress"]
             if observed["reported_at_ms"] is None and fresh["reported_at_ms"] is not None:
                 observed["reported_at_ms"] = fresh["reported_at_ms"]
+            # Once seen, these stay: a later ACK (or a resent ACCEPTED) never shortens the wait.
+            observed["restart_seen"] = observed["restart_seen"] or fresh["restart_seen"]
+            observed["final_ack_by_ms"] = _later(observed["final_ack_by_ms"], fresh["final_ack_by_ms"])
         return restarted
 
     def _derive_locked(self, entry: Dict[str, Any], now: int) -> str:
@@ -386,14 +476,27 @@ class ConfigCommandTracker:
                     return "no_report"
                 return "acknowledged"
             return "acked"
-        progress = observed["progress"]
-        if progress is not None:
-            result = progress.get("result") if isinstance(progress.get("result"), Mapping) else {}
-            wait = RESTART_FINAL_ACK_WAIT_MS if result.get("method") in _RESTART_METHODS else FINAL_ACK_WAIT_MS
-            return "no_final_ack" if now > entry["issued_ms"] + wait else "acknowledged"
+        if observed["progress"] is not None:
+            return "no_final_ack" if now > self._final_ack_deadline_locked(entry) else "acknowledged"
         if now > entry["expires_ms"] + NO_ACK_GRACE_MS:
             return "no_ack"
         return "delivered" if puback is not None else "published"
+
+    @staticmethod
+    def _late_answer_until_locked(entry: Dict[str, Any]) -> int:
+        """Until when an answer to a timed-out command may still come (tracker clock).
+
+        FINAL_WITHIN_MAX_WAIT_MS after issuing it, or later while a contract
+        1.10 ``final_within_ms`` has not run out; no edge answers after that.
+        """
+        return max(entry["issued_ms"] + FINAL_WITHIN_MAX_WAIT_MS, entry["observed"]["final_ack_by_ms"] or 0)
+
+    @staticmethod
+    def _final_ack_deadline_locked(entry: Dict[str, Any]) -> int:
+        """Until when a command with a progress ACK waits for its final ACK (tracker clock)."""
+        observed = entry["observed"]
+        wait = RESTART_FINAL_ACK_WAIT_MS if observed["restart_seen"] else FINAL_ACK_WAIT_MS
+        return _later(entry["issued_ms"] + wait, observed["final_ack_by_ms"])  # type: ignore[return-value]
 
     def _status_locked(self, entry: Dict[str, Any], current_monitor: Any, now: int) -> Dict[str, Any]:
         restarted = self._merge_observations_locked(entry, current_monitor)
@@ -425,6 +528,14 @@ class ConfigCommandTracker:
             "monitor_restarted": restarted,
             "ack": public_ack(ack),
             "settings_reported_at_ms": observed["reported_at_ms"],
+            # While a progress ACK waits for the final one: until when (tracker clock), else null.
+            "final_ack_deadline_ms": (
+                self._final_ack_deadline_locked(entry)
+                if observed["progress"] is not None and observed["final"] is None else None
+            ),
+            # A timeout (no_ack, no_final_ack, no_report) that a late answer may still replace:
+            # keep polling, slowly. False once no edge answer can come any more.
+            "late_answer_possible": state in _TIMEOUT_STATES and now <= self._late_answer_until_locked(entry),
         }
 
 
@@ -433,11 +544,14 @@ __all__ = [
     "ConfigCommandTracker",
     "FINAL_ACK_STATUSES",
     "FINAL_ACK_WAIT_MS",
-    "RESTART_FINAL_ACK_WAIT_MS",
     "FINAL_STATES",
+    "FINAL_WITHIN_MARGIN_MS",
+    "FINAL_WITHIN_MAX_WAIT_MS",
     "MonitorPublishError",
     "NO_ACK_GRACE_MS",
     "PROGRESS_ACK_STATUSES",
+    "RESTART_FINAL_ACK_WAIT_MS",
     "SETTINGS_REPORT_WAIT_MS",
+    "final_ack_deadline",
     "public_ack",
 ]

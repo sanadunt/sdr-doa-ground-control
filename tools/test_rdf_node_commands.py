@@ -9,8 +9,10 @@
 edge's root helper writing a scratch ``settings.json``; the ACKs and settings
 report are what the edge answered. ``8691ad0`` is the release installed on the
 Raspberry, which answers ``config.get`` only over TLS; ``35984d8`` also answers
-it over a plaintext link to the primary broker. The console sends the same
-bytes to both. These tests rebuild each
+it over a plaintext link to the primary broker; ``d6946cf`` (1.10.1) retunes a
+running engine live (``method`` ``LIVE``) and names its errors (``message``);
+``f8f9e52`` (1.10.2) also says when its final ACK leaves (``final_within_ms``).
+The console sends the same bytes to all four. These tests rebuild each
 envelope from the same inputs and require the same bytes, so a change to the
 builder fails here until the edge has judged the new envelope again (the
 console never imports edge code). They also check that every case the console
@@ -34,11 +36,14 @@ import rdf_node_commands as cmds  # noqa: E402
 from config_command_tracker import (  # noqa: E402
     FINAL_ACK_STATUSES,
     FINAL_ACK_WAIT_MS,
+    FINAL_WITHIN_MARGIN_MS,
+    FINAL_WITHIN_MAX_WAIT_MS,
     MAX_TRACKED_COMMANDS,
     NO_ACK_GRACE_MS,
     SETTINGS_REPORT_WAIT_MS,
     RESTART_FINAL_ACK_WAIT_MS,
     ConfigCommandTracker,
+    final_ack_deadline,
     public_ack,
 )
 from rdf_node_mqtt_v2 import ACK_FINAL_STATUSES, RdfNodeV2Telemetry  # noqa: E402
@@ -46,7 +51,7 @@ from rdf_node_mqtt_v2 import ACK_FINAL_STATUSES, RdfNodeV2Telemetry  # noqa: E40
 FIXTURES = TOOLS_DIR / "fixtures" / "rdf-node"
 EDGE_SETS = {
     commit: json.loads((FIXTURES / f"commands.{commit}.json").read_text(encoding="utf-8"))
-    for commit in ("8691ad0", "35984d8")
+    for commit in ("8691ad0", "35984d8", "d6946cf", "f8f9e52")
 }
 # The installed edge release; the tracker tests below drive its ACKs.
 COMMANDS = EDGE_SETS["8691ad0"]
@@ -54,7 +59,19 @@ COMMANDS = EDGE_SETS["8691ad0"]
 PLAINTEXT_CONFIG_GET = {
     "8691ad0": ("REJECTED", "TLS_REQUIRED_FOR_SETTINGS_REPORT"),
     "35984d8": ("APPLIED", None),
+    "d6946cf": ("APPLIED", None),
+    "f8f9e52": ("APPLIED", None),
 }
+# Bandwidth and squelch: only written before 1.7.0, retuned live since.
+BANDWIDTH_SQUELCH = {
+    "8691ad0": ("PERSISTED_UNVERIFIED", None),
+    "35984d8": ("PERSISTED_UNVERIFIED", None),
+    "d6946cf": ("APPLIED", None),
+    "f8f9e52": ("APPLIED", None),
+}
+# An edge that retunes live answers through VERIFYING {method: LIVE} with the
+# DAQ's health after the retune as proof.
+LIVE_RETUNE = {"d6946cf", "f8f9e52"}
 CASES = {case["name"]: case for case in COMMANDS["cases"]}
 NODE = COMMANDS["node_id"]
 STATE = json.loads(COMMANDS["session"]["state"])
@@ -110,7 +127,7 @@ class EdgeJudgedEnvelopeTests(unittest.TestCase):
                 "retune": ("APPLIED", None),
                 "gain": ("APPLIED", None),
                 "vfo-only": ("APPLIED", None),
-                "bandwidth-squelch": ("PERSISTED_UNVERIFIED", None),
+                "bandwidth-squelch": BANDWIDTH_SQUELCH[commit],
                 # The console's own base_rev check would refuse it; the edge does too.
                 "stale-base-rev": ("REJECTED", "CONFIG_REVISION_CONFLICT"),
             }
@@ -125,14 +142,20 @@ class EdgeJudgedEnvelopeTests(unittest.TestCase):
                         self.assertEqual(json.loads(ack["payload"])["id"], json.loads(case["console"]["payload"])["id"])
             with self.subTest(edge=commit, case="retune proof"):
                 retune = json.loads(cases["retune"]["edge"]["acks"][-1]["payload"])
-                self.assertEqual(retune["result"]["proof"], {
-                    "center_frequency_hz": "FRESH_DAQ_RF_CENTER", "vfo0_frequency_hz": "FRESH_DOA_FREQUENCY",
-                })
-                # A patch is ACCEPTED first; APPLYING and VERIFYING stay in the edge's journal.
-                self.assertEqual(
-                    [json.loads(ack["payload"])["status"] for ack in cases["retune"]["edge"]["acks"]],
-                    ["ACCEPTED", "APPLIED"],
-                )
+                statuses = [json.loads(ack["payload"])["status"] for ack in cases["retune"]["edge"]["acks"]]
+                if commit in LIVE_RETUNE:
+                    self.assertEqual(retune["result"]["method"], "LIVE")
+                    self.assertEqual(retune["result"]["proof"], {
+                        "daq": "FRESH_HEALTHY_AFTER_RETUNE", "settings": "KEPT_BY_ENGINE",
+                        "vfo0_frequency_hz": "FRESH_DOA_FREQUENCY",
+                    })
+                    self.assertEqual(statuses, ["ACCEPTED", "VERIFYING", "APPLIED"])
+                else:
+                    self.assertEqual(retune["result"]["proof"], {
+                        "center_frequency_hz": "FRESH_DAQ_RF_CENTER", "vfo0_frequency_hz": "FRESH_DOA_FREQUENCY",
+                    })
+                    # A patch is ACCEPTED first; APPLYING and VERIFYING stay in the edge's journal.
+                    self.assertEqual(statuses, ["ACCEPTED", "APPLIED"])
             for name in ("config-get", "config-get-tls-off"):
                 with self.subTest(edge=commit, case=name + " report"):
                     raw_report = cases[name]["edge"]["settings_reported"]
@@ -447,6 +470,29 @@ class TrackerTests(unittest.TestCase):
         self.assertNotIn("changes", public_ack({"status": "APPLYING", "result": stages[1][1]}))
         self.assertIsNone(public_ack({"status": "APPLIED", "result": {"method": "X" * 17}})["method"])
 
+    def test_the_edges_text_and_every_overridden_field_reach_kontrol(self) -> None:
+        # Three fields: 83 characters, past the 64 of a plain code.
+        reason = "LIVE_FAILED:ENGINE_OVERRODE:center_frequency_hz,gain_db,vfo0_frequency_hz"
+        shown = public_ack({"status": "APPLYING", "result": {
+            "method": "RESTART", "reason": reason, "live_failure": reason[len("LIVE_FAILED:"):], "final_within_ms": 221_000.4,
+        }})
+        self.assertEqual((shown["reason"], shown["live_failure"], shown["final_within_ms"]),
+                         (reason, reason[len("LIVE_FAILED:"):], 221_001))
+        self.assertIsNone(public_ack({"status": "APPLIED", "result": {"reason": "X" * 161}})["reason"])
+        unknown = public_ack({"status": "OUTCOME_UNKNOWN", "result": {
+            "error": "HELPER_CONNECTION_LOST", "message": "Helper root\u0000 tidak menjawab ",
+            "detail": "NotADirectoryError: [Errno 20] Not a directory: 'var'", "ignored": ["x", "bad key", 3],
+        }})
+        self.assertEqual((unknown["error"], unknown["message"], unknown["detail"], unknown["ignored"]),
+                         ("HELPER_CONNECTION_LOST", "Helper root tidak menjawab",
+                          "NotADirectoryError: [Errno 20] Not a directory: 'var'", ["x"]))
+        overrode = public_ack({"status": "PERSISTED_UNVERIFIED", "result": {
+            "error": "ENGINE_OVERRODE_AT_START", "fields": ["gain_db", "vfo0_squelch_db", "Not A Field"]}})
+        self.assertEqual(overrode["fields"], ["gain_db", "vfo0_squelch_db"])
+        empty = public_ack({"status": "APPLIED", "result": {"message": " ", "fields": "gain_db"}})
+        self.assertEqual((empty["message"], empty["detail"], empty["fields"], empty["ignored"], empty["final_within_ms"]),
+                         (None, None, None, None, None))
+
     def setUp(self) -> None:
         self.monitor = FakeObservingMonitor()
         self.clock = [STATE["t"]]
@@ -487,7 +533,9 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual(done["ack"], {
             "status": "APPLIED", "final": True, "error": None, "reason": None, "revision": 2,
             "proof": {"center_frequency_hz": "FRESH_DAQ_RF_CENTER", "vfo0_frequency_hz": "FRESH_DOA_FREQUENCY"},
-            "persisted": True, "method": None, "live_failure": None, "band_spacing_m": None, "squelch_mode": None, "t": json.loads(applied["payload"])["t"], "received_at_ms": self.monitor.clock,
+            "persisted": True, "method": None, "live_failure": None, "band_spacing_m": None, "squelch_mode": None,
+            "message": None, "detail": None, "fields": None, "ignored": None, "final_within_ms": None,
+            "t": json.loads(applied["payload"])["t"], "received_at_ms": self.monitor.clock,
         })
         self.assertIsNone(self.tracker.in_flight(self.monitor))
 
@@ -563,6 +611,151 @@ class TrackerTests(unittest.TestCase):
         self.clock[0] += 1
         self.assertEqual(self.status(command["id"])["state"], "no_final_ack")
 
+    def test_a_restart_method_once_seen_keeps_the_longer_wait(self) -> None:
+        # A later progress ACK without a method (or a resent ACCEPTED) never
+        # shortens the wait a RESTART stage gave.
+        command = self.send("bandwidth-squelch")
+        accepted, _final = CASES["bandwidth-squelch"]["edge"]["acks"]
+        base = json.loads(accepted["payload"])
+        self.monitor.deliver("ack/config", json.dumps(dict(base, status="APPLYING", result={"method": "RESTART"})))
+        self.assertEqual(self.status(command["id"])["state"], "acknowledged")
+        self.monitor.deliver("ack/config", json.dumps(dict(base, status="VERIFYING", t=base["t"] + 1, result={})))
+        self.clock[0] = command["issued_ms"] + FINAL_ACK_WAIT_MS + 1
+        waiting = self.status(command["id"])
+        self.assertEqual((waiting["state"], waiting["ack"]["status"], waiting["ack"]["method"]),
+                         ("acknowledged", "VERIFYING", None))
+        self.assertEqual(waiting["final_ack_deadline_ms"], command["issued_ms"] + RESTART_FINAL_ACK_WAIT_MS)
+        self.clock[0] = command["issued_ms"] + RESTART_FINAL_ACK_WAIT_MS + 1
+        self.assertEqual(self.status(command["id"])["state"], "no_final_ack")
+
+    def test_a_live_retune_falling_back_to_a_restart_reaches_kontrol(self) -> None:
+        # VERIFYING {LIVE}, then APPLYING and VERIFYING {RESTART} (control._patch_with_restart):
+        # the APPLYING ACK's reason and bound reach Kontrol, a resent ACCEPTED does not.
+        command = self.send("retune")
+        accepted = json.loads(CASES["retune"]["edge"]["acks"][0]["payload"])
+        reason = "LIVE_FAILED:ENGINE_OVERRODE:center_frequency_hz"
+        self.monitor.deliver("ack/config", json.dumps(accepted))
+        self.monitor.deliver("ack/config", json.dumps(dict(accepted, status="VERIFYING", t=accepted["t"] + 5_000,
+                                                           result={"method": "LIVE", "persisted": True})))
+        self.assertEqual(self.status(command["id"])["ack"]["method"], "LIVE")
+        self.monitor.clock = received = command["issued_ms"] + 27_000
+        self.monitor.deliver("ack/config", json.dumps(dict(accepted, status="APPLYING", t=accepted["t"] + 27_000, result={
+            "method": "RESTART", "reason": reason, "changes": {}, "final_within_ms": 230_000})))
+        self.monitor.deliver("ack/config", json.dumps(accepted))
+        restarting = self.status(command["id"])
+        self.assertEqual((restarting["ack"]["status"], restarting["ack"]["method"], restarting["ack"]["reason"]),
+                         ("APPLYING", "RESTART", reason))
+        self.assertEqual(restarting["final_ack_deadline_ms"], received + 230_000 + FINAL_WITHIN_MARGIN_MS)
+        self.monitor.deliver("ack/config", json.dumps(dict(accepted, status="VERIFYING", t=accepted["t"] + 60_000,
+                                                           result={"method": "RESTART", "reason": reason})))
+        verifying = self.status(command["id"])
+        self.assertEqual((verifying["state"], verifying["ack"]["status"], verifying["ack"]["reason"]),
+                         ("acknowledged", "VERIFYING", reason))
+        self.assertEqual(verifying["final_ack_deadline_ms"], received + 230_000 + FINAL_WITHIN_MARGIN_MS)
+
+    def test_final_within_ms_extends_the_wait(self) -> None:
+        # Contract 1.10: the edge bounds its own final ACK (helper and start timeouts).
+        command = self.send("bandwidth-squelch")
+        accepted, _final = CASES["bandwidth-squelch"]["edge"]["acks"]
+        base = json.loads(accepted["payload"])
+        received = self.monitor.clock
+        self.monitor.deliver("ack/config", json.dumps(dict(base, status="APPLYING",
+                                                           result={"method": "RESTART", "final_within_ms": 400_000})))
+        deadline = received + 400_000 + FINAL_WITHIN_MARGIN_MS
+        waiting = self.status(command["id"])
+        self.assertEqual((waiting["ack"]["final_within_ms"], waiting["final_ack_deadline_ms"]), (400_000, deadline))
+        self.assertIs(waiting["late_answer_possible"], False)
+        self.clock[0] = command["issued_ms"] + RESTART_FINAL_ACK_WAIT_MS + 1
+        self.assertEqual(self.status(command["id"])["state"], "acknowledged")
+        # A later, shorter bound never shortens the wait already given.
+        self.monitor.deliver("ack/config", json.dumps(dict(base, status="VERIFYING", t=base["t"] + 1,
+                                                           result={"method": "RESTART", "final_within_ms": 10_000})))
+        self.assertEqual(self.status(command["id"])["final_ack_deadline_ms"], deadline)
+        self.clock[0] = deadline
+        self.assertEqual(self.status(command["id"])["state"], "acknowledged")
+        self.clock[0] = deadline + 1
+        lost = self.status(command["id"])
+        self.assertEqual((lost["state"], lost["final"], lost["late_answer_possible"]), ("no_final_ack", True, True))
+        # The late final ACK still replaces the timeout, and nothing is late any more.
+        self.monitor.deliver("ack/config", _final["payload"])
+        done = self.status(command["id"])
+        self.assertEqual((done["state"], done["late_answer_possible"], done["final_ack_deadline_ms"]), ("acked", False, None))
+
+    def test_final_within_ms_is_capped_and_never_shortens_the_default(self) -> None:
+        self.assertEqual(final_ack_deadline({"result": {"final_within_ms": 5_000_000}, "received_at_ms": 1_000}),
+                         1_000 + FINAL_WITHIN_MAX_WAIT_MS)
+        self.assertEqual(final_ack_deadline({"result": {"final_within_ms": 12.2}, "received_at_ms": 0}),
+                         13 + FINAL_WITHIN_MARGIN_MS)
+        for within in (None, -1, True, "60000", float("nan")):
+            with self.subTest(within=within):
+                self.assertIsNone(final_ack_deadline({"result": {"final_within_ms": within}, "received_at_ms": 0}))
+        self.assertIsNone(final_ack_deadline({"result": {"final_within_ms": 1}}))
+        command = self.send("gain")
+        accepted = json.loads(CASES["gain"]["edge"]["acks"][0]["payload"])
+        self.monitor.deliver("ack/config", json.dumps(dict(accepted, result={"final_within_ms": 1_000})))
+        self.assertEqual(self.status(command["id"])["final_ack_deadline_ms"], command["issued_ms"] + FINAL_ACK_WAIT_MS)
+
+    def test_a_timed_out_command_is_handed_over_for_its_late_answer(self) -> None:
+        command = self.send("gain")
+        accepted = CASES["gain"]["edge"]["acks"][0]
+        self.monitor.deliver("ack/config", accepted["payload"])
+        self.clock[0] = command["issued_ms"] + FINAL_ACK_WAIT_MS + 1
+        self.assertEqual(self.status(command["id"])["state"], "no_final_ack")
+        taken = []
+
+        class Replacement:
+            def adopt_rdf_node_commands(self, pending):
+                taken.extend(pending)
+                return len(pending)
+
+        self.assertEqual(self.tracker.hand_over(self.monitor, Replacement()), 1)
+        self.assertEqual(taken, [{"command_id": command["id"], "op": "config.patch", "sid": command["sid"]}])
+        self.assertIs(self.status(command["id"])["late_answer_possible"], True)
+        # Long after, nothing late is waited for.
+        taken.clear()
+        self.clock[0] = command["issued_ms"] + FINAL_WITHIN_MAX_WAIT_MS
+        self.assertIs(self.status(command["id"])["late_answer_possible"], True)
+        self.clock[0] += 1
+        late = self.status(command["id"])
+        self.assertEqual((late["state"], late["final"], late["late_answer_possible"]), ("no_final_ack", True, False))
+        self.assertEqual(self.tracker.hand_over(self.monitor, Replacement()), 0)
+
+    def test_late_answers_are_waited_for_until_the_edges_own_bound(self) -> None:
+        class Replacement:
+            def adopt_rdf_node_commands(self, pending):
+                return len(pending)
+
+        # A bound that runs out before issued + FINAL_WITHIN_MAX_WAIT_MS leaves the usual late window.
+        command = self.send("bandwidth-squelch")
+        accepted, _final = CASES["bandwidth-squelch"]["edge"]["acks"]
+        base = json.loads(accepted["payload"])
+        self.monitor.deliver("ack/config", json.dumps(dict(base, status="APPLYING",
+                                                           result={"method": "RESTART", "final_within_ms": 300_000})))
+        self.clock[0] = self.monitor.clock + 300_000 + FINAL_WITHIN_MARGIN_MS + 1
+        lost = self.status(command["id"])
+        self.assertEqual((lost["state"], lost["late_answer_possible"]), ("no_final_ack", True))
+        self.clock[0] = command["issued_ms"] + FINAL_WITHIN_MAX_WAIT_MS + 1
+        self.assertIs(self.status(command["id"])["late_answer_possible"], False)
+        self.assertEqual(self.tracker.hand_over(self.monitor, Replacement()), 0)
+
+        # A bound received late in the command ends after issued + FINAL_WITHIN_MAX_WAIT_MS: the
+        # command is followed until then, and no edge answer comes after it.
+        command = self.send("gain")
+        accepted = json.loads(CASES["gain"]["edge"]["acks"][0]["payload"])
+        self.monitor.clock += 300_000
+        self.monitor.deliver("ack/config", json.dumps(dict(accepted, status="APPLYING",
+                                                           result={"method": "RESTART", "final_within_ms": 870_000})))
+        deadline = self.monitor.clock + FINAL_WITHIN_MAX_WAIT_MS
+        self.assertGreater(deadline, command["issued_ms"] + FINAL_WITHIN_MAX_WAIT_MS)
+        self.clock[0] = deadline
+        waiting = self.status(command["id"])
+        self.assertEqual((waiting["state"], waiting["final_ack_deadline_ms"]), ("acknowledged", deadline))
+        self.assertEqual(self.tracker.hand_over(self.monitor, Replacement()), 1)
+        self.clock[0] = deadline + 1
+        lost = self.status(command["id"])
+        self.assertEqual((lost["state"], lost["late_answer_possible"]), ("no_final_ack", False))
+        self.assertEqual(self.tracker.hand_over(self.monitor, Replacement()), 0)
+
     def test_config_get_waits_for_its_settings_report(self) -> None:
         command = self.send("config-get")
         self.monitor.store.expect_settings_report(command["id"], self.monitor.clock)
@@ -618,6 +811,53 @@ class TrackerTests(unittest.TestCase):
                 else:
                     self.assertEqual((done["state"], done["ack"]["error"]), ("acked", "TLS_REQUIRED_FOR_SETTINGS_REPORT"))
                     self.assertIsNone(report)
+
+    def test_the_1_10_edges_answers_reach_kontrol(self) -> None:
+        # Edge d6946cf: a live retune of bandwidth and squelch, its stage, and the edge's own sentence.
+        fixture = EDGE_SETS["d6946cf"]
+        monitor = FakeObservingMonitor(fixture)
+        tracker = ConfigCommandTracker(clock_ms=lambda: monitor.clock)
+        cases = {item["name"]: item for item in fixture["cases"]}
+        shown = {}
+        for name in ("bandwidth-squelch", "stale-base-rev", "gain-not-in-table"):
+            command = json.loads(cases[name]["console"]["payload"])
+            monitor.published(command["id"])
+            tracker.record(command, monitor, topic=cases[name]["console"]["topic"], published_at_ms=command["issued_ms"])
+            stages = []
+            for ack in cases[name]["edge"]["acks"]:
+                monitor.deliver("ack/config", ack["payload"])
+                stages.append(tracker.status(command["id"], monitor)["ack"])
+            shown[name] = stages
+        live = shown["bandwidth-squelch"]
+        self.assertEqual([(ack["status"], ack["method"]) for ack in live],
+                         [("ACCEPTED", None), ("VERIFYING", "LIVE"), ("APPLIED", "LIVE")])
+        self.assertEqual((live[-1]["squelch_mode"], live[-1]["proof"]),
+                         ("Manual", {"daq": "FRESH_HEALTHY_AFTER_RETUNE", "settings": "KEPT_BY_ENGINE"}))
+        for name, error in (("stale-base-rev", "CONFIG_REVISION_CONFLICT"), ("gain-not-in-table", "GAIN_NOT_IN_APPROVED_TABLE")):
+            with self.subTest(case=name):
+                final = shown[name][-1]
+                self.assertEqual(final["error"], error)
+                self.assertEqual(final["message"], json.loads(cases[name]["edge"]["acks"][-1]["payload"])["result"]["message"])
+                self.assertTrue(final["message"])
+
+    def test_the_1_10_2_edge_says_when_its_final_ack_leaves(self) -> None:
+        # Edge f8f9e52: ACCEPTED and VERIFYING carry final_within_ms, the final ACK does not.
+        fixture = EDGE_SETS["f8f9e52"]
+        monitor = FakeObservingMonitor(fixture)
+        tracker = ConfigCommandTracker(clock_ms=lambda: monitor.clock)
+        case = {item["name"]: item for item in fixture["cases"]}["bandwidth-squelch"]
+        command = json.loads(case["console"]["payload"])
+        monitor.published(command["id"])
+        tracker.record(command, monitor, topic=case["console"]["topic"], published_at_ms=command["issued_ms"])
+        shown = []
+        for ack in case["edge"]["acks"]:
+            monitor.deliver("ack/config", ack["payload"])
+            shown.append(tracker.status(command["id"], monitor)["ack"])
+        sent = [json.loads(ack["payload"])["result"].get("final_within_ms") for ack in case["edge"]["acks"]]
+        self.assertEqual([(ack["status"], ack["final_within_ms"]) for ack in shown],
+                         list(zip(("ACCEPTED", "VERIFYING", "APPLIED"), sent)))
+        self.assertTrue(all(isinstance(value, int) and value > 0 for value in sent[:2]))
+        self.assertIsNone(sent[2])
 
     def test_publish_failures_and_failed_pubacks(self) -> None:
         command = json.loads(CASES["gain"]["console"]["payload"])

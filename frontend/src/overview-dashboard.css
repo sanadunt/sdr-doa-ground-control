@@ -105,7 +105,9 @@
 }
 
 /* Left column: HUD and Layers ---------------------------------------------- */
-.ov-left { position: absolute; z-index: 2; top: var(--ov-gap); left: var(--ov-gap); display: flex; flex-direction: column; gap: var(--ov-gap); width: 264px; max-height: calc(100% - var(--ov-dock-h) - 80px); min-height: 0; pointer-events: none; }
+/* A tall HUD (live data) with Lapisan open on a short window: the column scrolls instead of
+   running over the map buttons. Its 24 px side and bottom padding keep the cards' shadows unclipped. */
+.ov-left { position: absolute; z-index: 2; top: var(--ov-gap); left: calc(var(--ov-gap) - 24px); display: flex; flex-direction: column; gap: var(--ov-gap); width: calc(264px + 48px); max-height: calc(100% - var(--ov-dock-h) - 80px); min-height: 0; overflow-y: auto; padding: 0 24px 24px; overscroll-behavior: contain; scrollbar-width: thin; pointer-events: none; }
 .ov-left > * { pointer-events: auto; }
 .ov-hud { display: flex; flex: none; flex-direction: column; gap: 2px; min-height: 144px; padding: 10px 12px; }
 /* Wraps the age (with its STALE mark) under the label instead of cutting the label off. */
@@ -133,7 +135,7 @@
 .ov-hud-held { margin: 0; color: var(--amber); font-size: 12px; line-height: 1.35; }
 /* Transmitter position estimate, under the HUD. */
 /* Only a prediction: small, quiet text that never competes with the bearing above it. */
-.ov-estimate { display: flex; flex: none; flex-direction: column; gap: 2px; padding: 8px 12px; font-size: 11px; }
+.ov-estimate { display: flex; flex: 0 1 auto; flex-direction: column; gap: 2px; min-height: 44px; overflow-y: auto; padding: 8px 12px; font-size: 11px; overscroll-behavior: contain; }
 .ov-estimate .ov-tag { font-size: 10px; }
 .ov-estimate-distance { color: var(--subtle); font-family: var(--mono); font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .ov-estimate .ov-hud-offset, .ov-estimate .ov-hud-held { font-size: 11px; }
@@ -143,7 +145,15 @@
 .ov-estimate-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 2px; }
 .ov-estimate-actions .ov-button { height: 28px; padding: 0 8px; font-size: 11.5px; }
 .ov-estimate-actions .ov-button:disabled { cursor: default; opacity: .55; }
+/* Position estimate: two lines that open the rest on a tap (also on a desktop while Lapisan is open). */
+.ov-estimate.is-compact { flex-shrink: 0; padding: 0; }
+.ov-estimate-summary { display: flex; flex-direction: column; align-items: stretch; gap: 1px; width: 100%; min-height: 44px; padding: 6px 10px; border: 0; border-radius: 10px; background: transparent; color: inherit; cursor: pointer; font: inherit; text-align: left; }
+.ov-estimate-summary .ov-estimate-distance { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-estimate.is-compact > :not(.ov-estimate-summary) { margin: 0 10px; }
+.ov-estimate.is-compact > :last-child:not(.ov-estimate-summary) { margin-bottom: 8px; }
 .ov-layers { display: flex; flex: 0 1 auto; flex-direction: column; min-height: 0; }
+/* Lapisan keeps its header and first rows; the estimate gives way first (it folds to two lines while Lapisan is open). */
+.ov-left > .ov-layers { min-height: 132px; }
 .ov-layers-body { min-height: 0; overflow-y: auto; padding: 4px 6px 10px; overscroll-behavior: contain; }
 .ov-layer-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 4px; }
 .ov-check { display: flex; align-items: center; gap: 8px; min-width: 0; height: 44px; padding: 0 6px; cursor: pointer; font-size: 12.5px; }
@@ -163,8 +173,11 @@
 /* Right column: node card and Kontrol ----------------------------------------- */
 .ov-right { position: absolute; z-index: 2; top: var(--ov-gap); right: var(--ov-gap); bottom: calc(var(--ov-dock-h) + var(--ov-gap)); display: flex; flex-direction: column; align-items: flex-end; gap: var(--ov-gap); width: 360px; min-height: 0; pointer-events: none; }
 .ov-right > * { pointer-events: auto; }
-.ov-node { flex: none; width: 264px; }
-.ov-node-summary { display: flex; flex-direction: column; gap: 2px; padding: 0 12px 10px; color: var(--text); font-family: var(--mono); font-size: 12px; }
+/* The expanded card scrolls its details inside the column instead of running under the dock. */
+.ov-node { display: flex; flex: 0 1 auto; flex-direction: column; width: 264px; min-height: 0; }
+/* With Kontrol open the card takes at most 40 % of the column, so Kontrol keeps the rest. */
+.ov-right:has(> .ov-control) > .ov-node { flex-shrink: 0; max-height: 40%; }
+.ov-node-summary { display: flex; flex: none; flex-direction: column; gap: 2px; padding: 0 12px 10px; color: var(--text); font-family: var(--mono); font-size: 12px; }
 .ov-node-summary > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The first line (a setting, or why there is no telemetry) wraps instead of clipping. */
 .ov-node-summary > span:first-child { white-space: normal; }
@@ -172,7 +185,7 @@
 .ov-node-summary > .ov-node-source { color: var(--subtle); font-size: 10.5px; letter-spacing: .04em; }
 .ov-node-summary > .ov-node-source.is-warn { color: var(--amber); }
 .ov-node-summary > .ov-node-source.is-manual { color: var(--signal); }
-.ov-node-detail { padding: 2px 12px 12px; border-top: 1px solid var(--line-soft); }
+.ov-node-detail { min-height: 0; overflow-y: auto; padding: 2px 12px 12px; border-top: 1px solid var(--line-soft); overscroll-behavior: contain; }
 .ov-node-detail[hidden] { display: none; }
 .ov-node-host { margin: 6px 0 8px; color: var(--subtle); font-family: var(--mono); font-size: 11px; }
 .ov-node-detail dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 12px; margin: 0; }
@@ -427,6 +440,7 @@
   .ov-map .map-frame { flex: none; height: clamp(320px, 52vh, 560px); }
   .ov-stage .map-bottom-overlay { position: static; max-width: none; border: 0; border-top: 1px solid var(--line-soft); border-radius: 0; background: transparent; box-shadow: none; }
   .ov-left, .ov-right { position: static; width: auto; max-height: none; align-items: stretch; pointer-events: auto; }
+  .ov-left { overflow: visible; padding: 0; }
   .ov-map-controls { flex-wrap: wrap; max-width: calc(100% - 2 * var(--ov-gap)); }
   .ov-left > section, .ov-right > section { width: auto; }
   .ov-card { box-shadow: none; }
@@ -482,9 +496,11 @@
 .console-shell[data-layout^='compact'] .ov-map-attribution { max-width: 132px; padding: 0 8px; }
 /* Overlays on the map's grid area: they hug their content and scroll inside above the map buttons. */
 .console-shell[data-layout^='compact'] .ov-left, .console-shell[data-layout^='compact'] .ov-right { position: absolute; z-index: 2; grid-area: map; top: var(--ov-gap); bottom: auto; display: flex; flex-direction: column; gap: var(--ov-gap); max-height: calc(100% - 44px - 3 * var(--ov-gap)); min-height: 0; overflow-y: auto; overscroll-behavior: contain; pointer-events: auto; }
-.console-shell[data-layout^='compact'] .ov-left { left: var(--ov-gap); width: min(240px, calc(100% - 2 * var(--ov-gap))); align-items: stretch; }
+.console-shell[data-layout^='compact'] .ov-left { left: var(--ov-gap); width: min(240px, calc(100% - 2 * var(--ov-gap))); align-items: stretch; padding: 0; }
 .console-shell[data-layout^='compact'] .ov-right { right: var(--ov-gap); left: auto; width: min(320px, calc(100% - 2 * var(--ov-gap))); align-items: stretch; }
 .console-shell[data-layout^='compact'] .ov-right:empty { display: none; }
+/* A map too narrow for both columns side by side (a phone): the right one starts under the HUD (OverviewPage, stackedRightTop()). */
+.console-shell[data-layout^='compact'] .ov-right.is-stacked { top: var(--ov-right-top); max-height: calc(100% - var(--ov-right-top) - 44px - 2 * var(--ov-gap)); }
 .console-shell[data-layout^='compact'] .ov-left > section, .console-shell[data-layout^='compact'] .ov-right > section { flex: none; width: 100%; }
 .console-shell[data-layout^='compact'] .ov-left > .ov-layers { flex: 0 1 auto; min-height: 132px; }
 .console-shell[data-layout^='compact'] .ov-card { box-shadow: var(--ov-shadow); }
@@ -496,12 +512,6 @@
 .console-shell[data-layout^='compact'] .ov-hud-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
 .console-shell[data-layout^='compact'] .ov-hud-grid > span:nth-child(2) { display: none; }
 .console-shell[data-layout^='compact'] .ov-hud-held { display: -webkit-box; overflow: hidden; font-size: 11.5px; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-/* Position estimate: two lines that open the rest on a tap. */
-.console-shell[data-layout^='compact'] .ov-estimate { padding: 0; }
-.console-shell[data-layout^='compact'] .ov-estimate-summary { display: flex; flex-direction: column; align-items: stretch; gap: 1px; width: 100%; min-height: 44px; padding: 6px 10px; border: 0; border-radius: 10px; background: transparent; color: inherit; cursor: pointer; font: inherit; text-align: left; }
-.console-shell[data-layout^='compact'] .ov-estimate-summary .ov-estimate-distance { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.console-shell[data-layout^='compact'] .ov-estimate.is-compact > :not(.ov-estimate-summary) { margin: 0 10px; }
-.console-shell[data-layout^='compact'] .ov-estimate.is-compact > :last-child:not(.ov-estimate-summary) { margin-bottom: 8px; }
 .console-shell[data-layout^='compact'] .ov-estimate-actions .ov-button { height: 44px; }
 /* Spektrum fills its panel beside or under the map. */
 .console-shell[data-layout^='compact'] .ov-dock { position: relative; inset: auto; z-index: 1; grid-area: dock; display: flex; flex-direction: column; gap: 0; height: auto; min-width: 0; min-height: 0; border: 0; border-left: 1px solid var(--line-soft); border-radius: 0; background: var(--bg); }
@@ -525,6 +535,10 @@
 .console-shell[data-layout^='compact'] .ov-spec-mode button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-width: 44px; padding: 0 8px; }
 .console-shell[data-layout^='compact'] .ov-spec-mode button svg { flex: none; width: 16px; height: 16px; }
 .console-shell[data-layout^='compact'] .ov-spec-audio { max-width: 140px; }
+/* A 360 px phone: the header wraps to a second row instead of hiding Mulai/Berhenti off-screen. */
+@container ov-spec (max-width: 399px) {
+  .console-shell[data-layout^='compact'] .ov-spec-head { flex-wrap: wrap; row-gap: 4px; overflow-x: visible; }
+}
 /* A phone's panel: Dengar and Mulai/Berhenti as icons too (their text stays their name). */
 @container ov-spec (max-width: 559px) {
   .console-shell[data-layout^='compact'] .ov-spec-listen > span, .console-shell[data-layout^='compact'] .ov-spec-run > span, .console-shell[data-layout^='compact'] .ov-spec-mode-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }

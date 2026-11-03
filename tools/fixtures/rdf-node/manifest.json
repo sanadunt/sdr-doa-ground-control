@@ -277,6 +277,18 @@
       "kind": "commands"
     },
     {
+      "edge_commit": "d6946cf",
+      "edge_version": "1.10.1",
+      "file": "commands.d6946cf.json",
+      "kind": "commands"
+    },
+    {
+      "edge_commit": "f8f9e52",
+      "edge_version": "1.10.2",
+      "file": "commands.f8f9e52.json",
+      "kind": "commands"
+    },
+    {
       "edge_commit": "35984d8",
       "edge_version": "1.0.0",
       "file": "compat.35984d8.json",
@@ -289,9 +301,21 @@
       "kind": "compat"
     },
     {
+      "edge_commit": "d6946cf",
+      "edge_version": "1.10.1",
+      "file": "compat.d6946cf.json",
+      "kind": "compat"
+    },
+    {
       "edge_commit": "e0b53bb",
       "edge_version": "1.9.0",
       "file": "compat.e0b53bb.json",
+      "kind": "compat"
+    },
+    {
+      "edge_commit": "f8f9e52",
+      "edge_version": "1.10.2",
+      "file": "compat.f8f9e52.json",
       "kind": "compat"
     }
   ]

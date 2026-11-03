@@ -1,13 +1,13 @@
-import type { JSX } from 'react';
+import type { CSSProperties, JSX } from 'react';
 import { Suspense, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ConsoleCapabilities } from '../api';
 import type { CompassConfig, GpsConfig, MapCoordinate, PolarSettings, TelemetrySnapshot } from '../types';
 import type { SimulationSettings } from '../lib/simulation';
 import { gpsReportsNoFix, holdStationCoordinate, resolveGpsSource } from '../lib/map';
 import { groundPosition } from '../lib/groundGps';
-import { doaStatusTextKey, overviewDoaStatus, provisionalTheta } from '../lib/doaStatus';
+import { doaStatusTextKey, overviewDoaStatus, provisionalDoa } from '../lib/doaStatus';
 import { lazyWithRetry } from '../lib/lazyRetry';
-import { compassOffsetSourceLabel, polarSettings, rememberDataOutCompass, resolveCompassSource } from '../lib/polar';
+import { compassOffsetSourceLabel, curveCompassOffset, polarSettings, rememberDataOutCompass, resolveCompassSource } from '../lib/polar';
 import type { CompassSourceCode, DataOutCompassSettings } from '../lib/polar';
 import { revealSection } from '../lib/revealSection';
 import type { MessageKey } from '../lib/i18n';
@@ -22,7 +22,7 @@ import { DEFAULT_OVERVIEW_PANELS } from '../lib/overviewPanels';
 import type { OverviewPanels } from '../lib/overviewPanels';
 import type { ConfigPatchChanges, ControlDraftRequest } from '../lib/controlDraft';
 import type { ReceiverBridge } from '../lib/receiverBridge';
-import { ZERO_INSETS, compactMapInsets, computeMapInsets, sameInsets } from '../lib/mapInsets';
+import { ZERO_INSETS, compactMapInsets, computeMapInsets, sameInsets, stackedRightTop } from '../lib/mapInsets';
 import type { MapInsets } from '../lib/mapInsets';
 import { primaryCandidate } from '../lib/telemetry';
 import { positionEstimate, type PositionEstimate } from '../lib/positionEstimate';
@@ -158,6 +158,8 @@ function OverviewPageView({
   const offsetSource = simulation ? 'SIMULATION' : compassOffsetSourceLabel(compass, t);
   const offsetVerified = simulation ? true : compass.offsetVerified;
   const offsetManual = !simulation && compass.code === 'MANUAL';
+  // The Angular curve turns with the heading of its own frame (contract 1.10), which may be older than the DoA's.
+  const curveOffset = simulationSettings ? compassOffset : curveCompassOffset(snapshot, compass, compassOffset);
   const causeKey = simulation ? null : compassCauseKey(compass.code, overLora(snapshot));
   const orientationCause = causeKey ? t(causeKey) : undefined;
   // The REFERENCE notice opens Configuration at GPS & Compass.
@@ -188,6 +190,9 @@ function OverviewPageView({
   const estimate = useMemo<PositionEstimate | null>(() => (estimateKey ? JSON.parse(estimateKey) as PositionEstimate : null), [estimateKey]);
   // One readiness decision for the map overlay, the bearing HUD and the polar curve.
   const doa = overviewDoaStatus(snapshot, localSnapshotFresh);
+  // A held DoA is drawn with the heading of the very sample it comes from; a manual offset stays above it, as for a LIVE one.
+  const provisional = provisionalDoa(snapshot, doa);
+  const provisionalHeading = offsetManual ? null : provisional?.headingDeg ?? null;
 
   // Polar view choices (axis override, Head Up, dB range) only change the plot
   // and the display peak; the map and the bearing use the resolved settings.
@@ -226,6 +231,8 @@ function OverviewPageView({
   const rightRef = useRef<HTMLDivElement>(null);
   const dockRef = useRef<HTMLDivElement>(null);
   const [insets, setInsets] = useState<MapInsets>(ZERO_INSETS);
+  // Compact: where the node card and Kontrol start when the map is too narrow for them beside the HUD (under it), else null.
+  const [rightTop, setRightTop] = useState<number | null>(null);
   const compact = compactLayout !== null;
   // The compact layout has no Polar: the DoA is on the map. The stored choice stays for the PC.
   const polarShown = panels.polar && !compact;
@@ -237,6 +244,7 @@ function OverviewPageView({
     const mapElement = mapRef.current;
     if (!mapElement || typeof ResizeObserver !== 'function') return undefined;
     let frame = 0;
+    const box = (element: HTMLElement | null) => (element ? element.getBoundingClientRect() : null);
     const rects = (element: HTMLElement | null) => (element ? Array.from(element.children, (child) => child.getBoundingClientRect()) : []);
     const measure = () => {
       frame = 0;
@@ -250,6 +258,7 @@ function OverviewPageView({
           bottom: dockRef.current ? [dockRef.current.getBoundingClientRect()] : [],
         });
       setInsets((current) => (sameInsets(current, next) ? current : next));
+      setRightTop(compact ? stackedRightTop(mapElement.getBoundingClientRect(), box(leftRef.current), box(rightRef.current)) : null);
     };
     const schedule = () => { if (!frame) frame = window.requestAnimationFrame(measure); };
     const observer = new ResizeObserver(schedule);
@@ -274,12 +283,14 @@ function OverviewPageView({
               snapshot={snapshot}
               localSnapshotFresh={localSnapshotFresh}
               compassOffset={compassOffset}
+              curveOffset={curveOffset}
               orientationVerified={offsetVerified}
               gpsSource={gpsConfig.source}
               doaReady={doa.shown}
               doaHeldCode={doa.shown ? undefined : doa.code}
               doaHeldText={doa.shown ? undefined : t(doaStatusTextKey(doa.reason))}
-              provisionalTheta={provisionalTheta(snapshot, doa)}
+              provisionalTheta={provisional?.thetaDeg ?? null}
+              provisionalHeading={provisionalHeading}
               orientationCause={orientationCause}
               onOpenCompassSettings={openCompassSettings}
               overlaySettings={overlaySettings}
@@ -294,12 +305,12 @@ function OverviewPageView({
         </LoadErrorBoundary>
       </div>
       <div className="ov-left" ref={leftRef}>
-        <DoaReadout snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} settings={plotSettings} offsetSource={offsetSource} offsetVerified={offsetVerified} offsetManual={offsetManual} />
+        <DoaReadout snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} settings={plotSettings} curveOffset={curveOffset} offsetSource={offsetSource} offsetVerified={offsetVerified} offsetManual={offsetManual} />
         {/* On a phone or tablet the card shows only once there is an estimate: its waiting states would cover the small map. */}
-        {estimate && overlaySettings.estimateVisible && (!compact || estimate.state === 'ESTIMATE') ? <EstimatePanel estimate={estimate} viewOnly={viewOnly} compact={compact} /> : null}
+        {estimate && overlaySettings.estimateVisible && (!compact || estimate.state === 'ESTIMATE') ? <EstimatePanel estimate={estimate} viewOnly={viewOnly} compact={compact || panels.layers} /> : null}
         {panels.layers ? <LayersPanel settings={overlaySettings} scale={overlayScale} onChange={onOverlayChange} onClose={() => onPanelsChange({ ...panels, layers: false })} basemapId={basemapId} onBasemapChange={onBasemapSelect} /> : null}
       </div>
-      <div className="ov-right" ref={rightRef}>
+      <div className={rightTop === null ? 'ov-right' : 'ov-right is-stacked'} ref={rightRef} style={rightTop === null ? undefined : { '--ov-right-top': `${rightTop}px` } as CSSProperties}>
         {nodeShown ? <NodeCard
           snapshot={snapshot}
           localSnapshotFresh={localSnapshotFresh}
@@ -331,6 +342,7 @@ function OverviewPageView({
               snapshot={snapshot}
               localSnapshotFresh={localSnapshotFresh}
               settings={plotSettings}
+              curveOffset={curveOffset}
               offsetSource={offsetSource}
               offsetVerified={offsetVerified}
               compassConfig={compassConfig}
@@ -339,7 +351,7 @@ function OverviewPageView({
               onViewChange={onPolarViewChange}
             />
           ) : null}
-          {panels.spectrum && viewOnly ? <SpectrumDockMirror feed={mirrorFeed} compact={compact} /> : null}
+          {panels.spectrum && viewOnly ? <SpectrumDockMirror feed={mirrorFeed} compact={compact || panels.layers} /> : null}
           {panels.spectrum && !viewOnly ? (
             <SpectrumDock
               snapshot={snapshot}

@@ -277,7 +277,9 @@ function rdfPartStatus(name: RdfNodePartName, raw: JsonObject): string {
 
 function normalizeRdfPart(name: RdfNodePartName, value: unknown): RdfNodePart | null {
   if (!isObject(value)) return null;
-  const reasons = rdfReasons(name === 'angular_unverified' || name === 'doa_unverified' || name === 'diagnostic_doa' ? value.validation_reasons : value.reasons);
+  // Contract 1.10: health.why names why the edge does not send the DoA as LIVE.
+  const reasons = rdfReasons(name === 'angular_unverified' || name === 'doa_unverified' || name === 'diagnostic_doa' ? value.validation_reasons
+    : name === 'health' ? value.why : value.reasons);
   if (name === 'settings' && value.matches_state_cfg === false) reasons.push('PREVIOUS_CONFIG');
   const fields = pickSanitized(value, RDF_PART_FIELDS[name].filter((field) => field !== 'from'));
   // The candidate's topic (a key the payload sanitizer hides), named after one of the two Angular topics only.

@@ -60,7 +60,7 @@ describe('getConfigReported', () => {
     expect(reported.node).toEqual({ sid: 'e2fe561d', cfg: 42, healthFresh: true, healthAgeMs: 400, remoteCommands: true, remoteConfigPatch: false, configFields: null });
     expect(reported.settings).toEqual({
       id: 'gc-000000000000000000000001', rev: 42, receivedAtMs: 900, ageMs: 100, matchesStateCfg: true,
-      squelchAuto: null, squelchModeResolved: null, defaultSquelchMode: null,
+      squelchAuto: null, squelchModeResolved: null, defaultSquelchMode: null, antArrangement: null,
     });
     expect(reported.broker).toEqual({ host: '10.90.0.1', port: 9001, transport: 'websockets', connection: 'connected' });
     expect(reported.values).toEqual({ center_frequency_hz: 416588000, gain_db: 15.7, vfo0_frequency_hz: null, vfo0_bandwidth_hz: null, vfo0_squelch_db: null, ant_spacing_m: null, vfo0_squelch_mode: null });
@@ -181,8 +181,36 @@ describe('getConfigPatchStatus', () => {
     expect(status?.ack).toEqual({
       status: 'APPLIED', final: true, error: null, reason: null, revision: 43, persisted: true, receivedAtMs: 5,
       proof: { center_frequency_hz: 'FRESH_DAQ_RF_CENTER', vfo0_frequency_hz: 'FRESH_DOA_FREQUENCY' }, method: null, liveFailure: null,
-      bandSpacingM: null, squelchMode: null,
+      bandSpacingM: null, squelchMode: null, message: null, detail: null, fields: null, ignored: null, finalWithinMs: null,
     });
+    // A server before contract 1.10 sends no deadline and no late-answer flag.
+    expect(status).toMatchObject({ finalAckDeadlineMs: null, lateAnswerPossible: false });
+  });
+
+  it('reads the edge text, the override fields, final_within_ms and a late answer that may still come', () => {
+    const reason = 'LIVE_FAILED:ENGINE_OVERRODE:center_frequency_hz,gain_db,vfo0_frequency_hz';
+    const progress = normalizeConfigCommandStatus({ ...STATUS, state: 'acknowledged', final_ack_deadline_ms: 401_000, late_answer_possible: false, ack: {
+      status: 'APPLYING', final: false, error: null, reason, method: 'RESTART', live_failure: 'ENGINE_OVERRODE:center_frequency_hz,gain_db',
+      final_within_ms: 170_000, t: 1, received_at_ms: 5,
+    } });
+    expect(progress).toMatchObject({ final: false, finalAckDeadlineMs: 401_000, lateAnswerPossible: false });
+    expect(progress?.ack).toMatchObject({ reason, liveFailure: 'ENGINE_OVERRODE:center_frequency_hz,gain_db', finalWithinMs: 170_000 });
+    const failed = normalizeConfigCommandStatus({ ...STATUS, state: 'acked', ack: {
+      status: 'FAILED', final: true, error: 'HELPER_CONNECTION_LOST', reason: null, revision: null,
+      message: 'Koneksi ke helper kontrol terputus\nsetelah perintah dikirim.', detail: `NotADirectoryError: ${'x'.repeat(300)}`,
+      fields: ['gain_db', 'Bad Field', 7], ignored: ['extra', 'has space', 'ns:key'],
+    } })?.ack;
+    expect(failed?.message).toBe('Koneksi ke helper kontrol terputus setelah perintah dikirim.');
+    expect(failed?.detail?.length).toBe(256);
+    expect(failed?.detail?.startsWith('NotADirectoryError: x')).toBe(true);
+    // The same key pattern as the server (config_command_tracker._KEY_NAME_RE), ':' included.
+    expect(failed).toMatchObject({ fields: ['gain_db'], ignored: ['extra', 'ns:key'], finalWithinMs: null });
+    const late = normalizeConfigCommandStatus({ ...STATUS, state: 'no_final_ack', late_answer_possible: true, ack: { status: 'VERIFYING', final: false } });
+    expect(late).toMatchObject({ final: true, lateAnswerPossible: true });
+    for (const bad of [-1, 1.5, '170000', true]) {
+      expect(normalizeConfigCommandStatus({ ...STATUS, ack: { ...STATUS.ack, final_within_ms: bad } })?.ack?.finalWithinMs).toBeNull();
+    }
+    expect(normalizeConfigCommandStatus({ ...STATUS, ack: { ...STATUS.ack, message: '   ', detail: 7 } })?.ack).toMatchObject({ message: null, detail: null });
   });
 
   it('reads the config fields, the UCA spacing and the band spacing of an edge 1.8 answer', () => {
@@ -224,7 +252,7 @@ describe('getConfigPatchStatus', () => {
       live_failure: 'DAQ_NOT_HEALTHY_AFTER_RETUNE', revision: 9, persisted: true,
     } })?.ack;
     expect(persisted).toMatchObject({ method: 'LIVE', liveFailure: 'DAQ_NOT_HEALTHY_AFTER_RETUNE' });
-    for (const reason of ['live failed', 'LIVE_FAILED:', 'LIVE_FAILED::x', `X${'Y'.repeat(64)}`, 'LIVE_FAILED:<b>']) {
+    for (const reason of ['live failed', 'LIVE_FAILED:', 'LIVE_FAILED::x', `X${'Y'.repeat(160)}`, 'LIVE_FAILED:<b>', 'LIVE_FAILED:A,', 'LIVE_FAILED:,A', 'LIVE_FAILED:A,,B', 'LIVE_FAILED:a b']) {
       expect(normalizeConfigCommandStatus({ ...STATUS, ack: { ...STATUS.ack, reason } })?.ack?.reason, reason).toBeNull();
     }
     expect(normalizeConfigCommandStatus({ ...STATUS, ack: { ...STATUS.ack, method: 'restart' } })?.ack?.method).toBeNull();

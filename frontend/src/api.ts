@@ -1,6 +1,7 @@
 import type { Branding, ConsoleConfig, MqttSnapshot, MqttTarget, RdfNodeSnapshot, TelemetrySnapshot } from './types';
 import { isMqttTransport, isMqttWsPath, normalizeMqttSnapshot, normalizeRdfNodeSnapshot } from './lib/mqttMonitor';
 import { CONFIG_PATCH_KEYS, configPatchValue } from './lib/controlDraft';
+import { antArrangementOrNull } from './lib/configVerify';
 import { normalizeDataOutHostList } from './lib/dataOutHosts';
 import type { ConfigPatchChanges, ConfigPatchKey, ConfigPatchNumberKey, ConfigPatchValue } from './lib/controlDraft';
 import { isConsoleAccess } from './lib/access';
@@ -682,6 +683,12 @@ export interface ConfigSettingsReport {
   squelchModeResolved: string | null;
   /** settings.json vfo_default_squelch_mode, what Default follows; null when not reported. */
   defaultSquelchMode: string | null;
+  /**
+   * settings.json ant_arrangement (UCA, ULA) as reported, unchanged: the
+   * engine's band spacing rule holds for a UCA only. Null when not reported
+   * (an older console, a report of another revision).
+   */
+  antArrangement: string | null;
 }
 
 export interface ConfigReported {
@@ -739,6 +746,7 @@ function normalizeSettings(value: unknown): ConfigSettingsReport | null {
     squelchAuto: booleanOrNull(value.squelch_auto),
     squelchModeResolved: squelchModeOrNull(value.squelch_mode_resolved),
     defaultSquelchMode: squelchModeOrNull(value.vfo_default_squelch_mode),
+    antArrangement: antArrangementOrNull(value.ant_arrangement),
   };
 }
 
@@ -887,6 +895,16 @@ export interface ConfigCommandAck {
   bandSpacingM: number | null;
   /** Contract 1.9: "Manual" when a level sent while the squelch was automatic switched it to Manual. */
   squelchMode: string | null;
+  /** The edge's operator sentence for its error (Indonesian, as the edge wrote it), or null. */
+  message: string | null;
+  /** The technical cause behind the error (exception and text), or null. */
+  detail: string | null;
+  /** The fields the SDR engine rewrote at its start (ENGINE_OVERRODE_AT_START), or null. */
+  fields: string[] | null;
+  /** The request keys the edge ignored (REJECTED), or null. */
+  ignored: string[] | null;
+  /** Contract 1.10, progress ACKs: the edge sends its final ACK within this many ms of this one. */
+  finalWithinMs: number | null;
   receivedAtMs: number | null;
 }
 
@@ -904,17 +922,40 @@ export interface ConfigCommandStatus {
   monitorRestarted: boolean;
   ack: ConfigCommandAck | null;
   settingsReportedAtMs: number | null;
+  /** While a progress ACK waits for the final one: until when the console waits (clock of nowMs), else null. */
+  finalAckDeadlineMs: number | null;
+  /** A timeout (no_ack, no_final_ack, no_report) a late answer may still replace. */
+  lateAnswerPossible: boolean;
 }
 
 /** Contract 1.7 proof keys besides the fields: the DAQ and the settings after a retune or restart. */
 export const CONFIG_PROOF_KEYS = ['daq', 'settings'] as const;
 export type ConfigProofKey = typeof CONFIG_PROOF_KEYS[number];
 
-// An edge reason may name a cause and a field: LIVE_FAILED:ENGINE_OVERRODE:gain_db.
-const REASON_RE = /^[A-Z][A-Z0-9_]*(?::[A-Za-z0-9_]+)*$/u;
+// An edge reason may name a cause and its fields: LIVE_FAILED:ENGINE_OVERRODE:center_frequency_hz,vfo0_frequency_hz.
+const REASON_RE = /^[A-Z][A-Z0-9_]*(?::[A-Za-z0-9_]+(?:,[A-Za-z0-9_]+)*)*$/u;
+const REASON_MAX_CHARS = 160;
+const ACK_TEXT_MAX_CHARS = 256;
+const FIELD_NAME_RE = /^[a-z0-9_]{1,64}$/u;
+// As the server's _KEY_NAME_RE (tools/config_command_tracker.py), so no key it passes on is dropped here.
+const KEY_NAME_RE = /^[A-Za-z0-9_.:-]{1,64}$/u;
+const MAX_ACK_NAMES = 32;
 
 function reasonOrNull(value: unknown): string | null {
-  return typeof value === 'string' && value.length <= 64 && REASON_RE.test(value) ? value : null;
+  return typeof value === 'string' && value.length <= REASON_MAX_CHARS && REASON_RE.test(value) ? value : null;
+}
+
+/** The edge's prose (message, detail): control characters become spaces, at most 256 characters. */
+function ackTextOrNull(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const text = value.replace(/[\u0000-\u001f\u007f]+/gu, ' ').trim();
+  return text ? text.slice(0, ACK_TEXT_MAX_CHARS) : null;
+}
+
+/** A list of field or key names; null when the edge sent no list. */
+function namesOrNull(value: unknown, pattern: RegExp): string[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.filter((item): item is string => typeof item === 'string' && pattern.test(item)).slice(0, MAX_ACK_NAMES);
 }
 
 function normalizeProof(value: unknown): ConfigCommandAck['proof'] {
@@ -953,6 +994,11 @@ function normalizeAck(value: unknown): ConfigCommandAck | null {
     liveFailure: reasonOrNull(value.live_failure),
     bandSpacingM: spacingOrNull(value.band_spacing_m),
     squelchMode: squelchModeOrNull(value.squelch_mode),
+    message: ackTextOrNull(value.message),
+    detail: ackTextOrNull(value.detail),
+    fields: namesOrNull(value.fields, FIELD_NAME_RE),
+    ignored: namesOrNull(value.ignored, KEY_NAME_RE),
+    finalWithinMs: integerOrNull(value.final_within_ms, 0),
     receivedAtMs: integerOrNull(value.received_at_ms, 0),
   };
 }
@@ -976,6 +1022,8 @@ export function normalizeConfigCommandStatus(value: unknown): ConfigCommandStatu
     monitorRestarted: value.monitor_restarted === true,
     ack: normalizeAck(value.ack),
     settingsReportedAtMs: integerOrNull(value.settings_reported_at_ms, 0),
+    finalAckDeadlineMs: integerOrNull(value.final_ack_deadline_ms, 0),
+    lateAnswerPossible: value.late_answer_possible === true,
   };
 }
 

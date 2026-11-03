@@ -30,7 +30,14 @@ and every ACK and settings report the edge answered with. Cases the console
 refuses itself are built without its checks, so the file also records that
 the edge refuses them for the same reason. Run it once per edge commit: an
 edge before 35984d8 refuses ``config.get`` over a plaintext link to the primary
-broker (``TLS_REQUIRED_FOR_SETTINGS_REPORT``), 35984d8 and later answer it.
+broker (``TLS_REQUIRED_FOR_SETTINGS_REPORT``), 35984d8 and later answer it. An
+edge before d46e648 (1.7.0) only writes bandwidth and squelch
+(``PERSISTED_UNVERIFIED``); d46e648 and later retune them live (``APPLIED``,
+``method`` ``LIVE``).
+
+The scratch share lives under the real path of the temporary directory: the
+edge's helper walks ``settings_path`` with ``O_NOFOLLOW``, and on macOS the
+default ``TMPDIR`` is under ``/var``, a symbolic link.
 
 ``--set compat`` writes ``compat.<commit>.json``: one session of that edge in
 the order a broker delivers it to a new subscriber (retained context first,
@@ -417,7 +424,7 @@ def commands_set(run: Run) -> dict:
     cases = []
 
     def send(name: str, op: str, changes, note: str, *, check: bool = True, base_rev="current",
-             expect=None) -> None:
+             expect=None, method=None) -> None:
         agent.commands.last_rate.clear()
         refused = None
         normalized = changes
@@ -461,6 +468,8 @@ def commands_set(run: Run) -> dict:
         final = json.loads(acks[-1]["data"])
         if expect is not None and (final["status"], final["result"].get("error")) != expect:
             raise SystemExit(f"{name}: edge answered {final['status']} {final['result']}, expected {expect}")
+        if method is not None and final["result"].get("method") != method:
+            raise SystemExit(f"{name}: edge answered method {final['result'].get('method')}, expected {method}")
         cases.append({
             "name": name,
             "note": note,
@@ -502,8 +511,14 @@ def commands_set(run: Run) -> dict:
          expect=("APPLIED", None))
     send("vfo-only", cmds.OP_CONFIG_PATCH, {"vfo0_frequency_hz": 434010000},
          "VFO0 alone inside the band; a fresh DoA frequency proves it", expect=("APPLIED", None))
-    send("bandwidth-squelch", cmds.OP_CONFIG_PATCH, {"vfo0_bandwidth_hz": 25000, "vfo0_squelch_db": -70},
-         "no runtime evidence exists for these fields", expect=("PERSISTED_UNVERIFIED", None))
+    if "retune_live_window_seconds" in agent.cfg["control"]:
+        # d46e648 (1.7.0) and later: a running engine is retuned live and its
+        # healthy DAQ afterwards proves the fields.
+        send("bandwidth-squelch", cmds.OP_CONFIG_PATCH, {"vfo0_bandwidth_hz": 25000, "vfo0_squelch_db": -70},
+             "retuned live; a healthy DAQ after the retune proves it", expect=("APPLIED", None), method="LIVE")
+    else:
+        send("bandwidth-squelch", cmds.OP_CONFIG_PATCH, {"vfo0_bandwidth_hz": 25000, "vfo0_squelch_db": -70},
+             "no runtime evidence exists for these fields", expect=("PERSISTED_UNVERIFIED", None))
     stale = agent.source.revision - 1
     send("stale-base-rev", cmds.OP_CONFIG_PATCH, {"gain_db": 15.7},
          "base_rev of the previous revision (another writer changed the settings)", base_rev=stale,
@@ -613,8 +628,8 @@ def main() -> int:
     parser.add_argument("--set", required=True, choices=("full", "detail-ppp", "commands", "compat"))
     parser.add_argument("--out", type=Path, default=HERE)
     args = parser.parse_args()
-    with tempfile.TemporaryDirectory() as tmp:
-        run = Run(args.edge.resolve(), Path(tmp))
+    with tempfile.TemporaryDirectory(dir=os.path.realpath(tempfile.gettempdir())) as tmp:
+        run = Run(args.edge.resolve(), Path(tmp).resolve())
         if args.set == "commands":
             result = commands_set(run)
             run.agent.commands.stop()

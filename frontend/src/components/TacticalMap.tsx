@@ -31,10 +31,10 @@ import {
   type RangeRing,
 } from '../lib/doaGeometry';
 import { groundLink, groundLinkLabel, stationPositionLive } from '../lib/groundGps';
-import { geographicBearingForBin } from '../lib/polar';
+import { binsAtBearing, geographicBearingForBin, heldBearing as provisionalBearingOf } from '../lib/polar';
 import { beamColorExpression, beamOpacityExpression, formatBearing, formatDistance, heatmapColorExpression, heatmapRadiusExpression } from '../lib/overlayPalette';
 import { numberOrNull, primaryCandidate } from '../lib/telemetry';
-import { doaSample, isMqttSnapshot } from '../lib/telemetrySource';
+import { angularFrameAgeMs, angularHeld, doaSample, isMqttSnapshot } from '../lib/telemetrySource';
 import { overviewDoaStatus } from '../lib/doaStatus';
 import { headingLabel, headingLabelPosition, headingLineFeatures, headingPopupText, rdfHeading, type RdfHeading } from '../lib/rdfHeading';
 import { NO_ESTIMATE_FEATURES, positionEstimateFeatures, positionEstimateLabel, type PositionEstimate } from '../lib/positionEstimate';
@@ -69,6 +69,8 @@ const MAX_FRAMING_ZOOM = 17;
 const FRAMING_PADDING = { top: 24, right: 24, bottom: controlsFramingBottom(MAP_CONTROLS_ROW_PX), left: 24 };
 const NOTICE_CLEARANCE_PX = 8;
 const GEOMETRY_DEBOUNCE_MS = 120;
+// A held Angular curve (older than 10 s, kept by the Telemetry LoRa window) is drawn at this share of its opacity.
+const HELD_CURVE_FADE = .45;
 const WORKER_WATCHDOG_MS = 10_000;
 const BASEMAP_CHECK_MS = 20_000;
 const BASEMAP_RETRY_MS = 60_000;
@@ -87,8 +89,10 @@ const GROUND_LINK_REFERENCE = { dark: '#9aa6b2', light: '#46525e' } as const;
 function groundLinkColor(darkBackground: boolean): ExpressionSpecification {
   return ['case', ['==', ['get', 'live'], true], darkBackground ? GROUND_LINK_LIVE.dark : GROUND_LINK_LIVE.light, darkBackground ? GROUND_LINK_REFERENCE.dark : GROUND_LINK_REFERENCE.light];
 }
-// The RDF-SDR's compass heading: violet, apart from the bearing, the lobe and
-// the ground link; slate and finer dashes while the heading is held (STALE).
+// The RDF-SDR's heading from telemetry/health (nav heading_deg: the compass, plus
+// the edge's own offset): violet, apart from the bearing, the lobe and the ground
+// link; slate and finer dashes while the heading is held (STALE). It shows where
+// the array points now, not the direction of travel, and it never turns the bearing.
 const HEADING_LIVE = { dark: '#c2a6ff', light: '#5b34c4' } as const;
 const HEADING_HELD = { dark: '#9aa6b2', light: '#46525e' } as const;
 // The transmitter position estimate: cyan, apart from the DoA's amber and red.
@@ -99,6 +103,8 @@ function estimateColor(darkBackground: boolean): string {
 function headingColors(darkBackground: boolean): { live: string; held: string } {
   return { live: darkBackground ? HEADING_LIVE.dark : HEADING_LIVE.light, held: darkBackground ? HEADING_HELD.dark : HEADING_HELD.light };
 }
+// The line layers drawn from the Angular curve; they fade with a held curve.
+const CURVE_LINE_LAYERS: ReadonlySet<string> = new Set(['doa-lobe-outline', 'doa-edges']);
 // Base opacity of each line layer at overlay opacity 1, as set in the style below.
 const LINE_LAYER_OPACITY: ReadonlyArray<[string, 'line-opacity', number]> = [
   ['doa-rings', 'line-opacity', .55],
@@ -251,8 +257,13 @@ export interface TacticalMapProps {
   coordinate: MapCoordinate | null;
   snapshot?: TelemetrySnapshot | null;
   localSnapshotFresh?: boolean;
-  /** Compass offset applied to every theta_0 bin on the map; 0 in simulation. */
+  /** Compass offset applied to the DoA's theta_0 on the map; 0 in simulation. */
   compassOffset?: number;
+  /**
+   * Offset applied to the Angular curve's bins (beam, heat, lobe, edges): the
+   * heading of the curve's own frame (contract 1.10), else compassOffset.
+   */
+  curveOffset?: number;
   /** False when the offset is a local fallback rather than reported or entered; bearings are then a reference only. */
   orientationVerified?: boolean;
   /** Selected GPS source. Only a DATA_OUT selection holds the last live fix through a freshness gap. */
@@ -265,6 +276,12 @@ export interface TacticalMapProps {
   doaHeldText?: string;
   /** theta_0 of a held DoA that is still readable; drawn as a dashed grey line marked NOT VALID. */
   provisionalTheta?: number | null;
+  /**
+   * The array heading of the sample provisionalTheta comes from (contract 1.10
+   * h); the dashed line turns with it instead of compassOffset and then needs no
+   * orientation notice. Null: compassOffset.
+   */
+  provisionalHeading?: number | null;
   /** Translated cause of an unverified compass offset, named in the REFERENCE notice. */
   orientationCause?: string;
   /** Opens Configuration → GPS & Compass from the REFERENCE notice. */
@@ -285,7 +302,7 @@ export interface TacticalMapProps {
   compact?: boolean;
 }
 
-function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, provisionalTheta = null, orientationCause, onOpenCompassSettings, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect, ground = null, estimate = null, compact = false }: TacticalMapProps): JSX.Element {
+function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, curveOffset, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, provisionalTheta = null, provisionalHeading = null, orientationCause, onOpenCompassSettings, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect, ground = null, estimate = null, compact = false }: TacticalMapProps): JSX.Element {
   const { t, lang } = useI18n();
   const hostRef = useRef<HTMLDivElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -332,17 +349,26 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const simulation = snapshot?.simulation === true;
   const values = doaReady && fresh && Array.isArray(csv.angular_power_db) && csv.angular_power_db.length === 360 ? csv.angular_power_db : null;
   const offset = Number.isFinite(compassOffset) ? compassOffset : 0;
+  // The curve's bins turn with the heading of their own frame, which may be older than the DoA's.
+  const binOffset = typeof curveOffset === 'number' && Number.isFinite(curveOffset) ? curveOffset : offset;
+  // A held curve (LoRa window) stays, dimmed, with its age.
+  const curveHeld = values !== null && angularHeld(snapshot);
+  const curveFade = curveHeld ? HELD_CURVE_FADE : 1;
   // theta_0 is the array-frame angle; only its geographic bearing is drawn or reported.
   // An MQTT DoA is shown without its Angular vector between frames: the
   // bearing line stays, the beam, lobe and edges need the vector.
   const theta = doaReady && fresh && (values || isMqttSnapshot(snapshot)) ? numberOrNull(csv.canonical_angle_deg) : null;
   const bearing = theta === null ? null : geographicBearingForBin(theta, offset);
-  const provisionalBearing = !doaReady && provisionalTheta !== null && Number.isFinite(provisionalTheta) ? geographicBearingForBin(provisionalTheta, offset) : null;
-  // The RDF-SDR's own compass heading (its direction of travel), drawn apart
-  // from the bearing. Since contract 1.10 the bearing is turned with the array
-  // heading the DoA carries (compassOffset, lib/polar.ts NODE_HEADING), not with
-  // this line. Kept as primitives so a new snapshot with the same heading
-  // changes nothing on the map.
+  // The held (NOT VALID) DoA turns with the heading of its own sample when it has one.
+  const provisional = doaReady ? null : provisionalBearingOf(provisionalTheta, provisionalHeading, offset);
+  const provisionalBearing = provisional?.bearingDeg ?? null;
+  // The RDF-SDR's heading from telemetry/health (where its array points, from
+  // the compass), drawn apart from the bearing. It never turns the bearing: a
+  // contract 1.10 DoA carries the heading it was taken with (h, which may come
+  // from the GPS course or be held), and that one turns it (compassOffset,
+  // lib/polar.ts NODE_HEADING, or provisionalHeading for a held DoA), so the
+  // two lines may differ while the platform turns. Kept as primitives so a new
+  // snapshot with the same heading changes nothing on the map.
   const headingNow = rdfHeading(snapshot, fresh);
   const headingDeg = headingNow?.headingDeg ?? null;
   const headingState = headingNow?.state ?? null;
@@ -358,7 +384,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   // polar dock keeps its curve. Never from or during a simulation; another
   // node or a restart forgets it. Kept in module scope across route changes.
   const remembered = rememberOverlay(overlayMemory, {
-    live: values && !simulation && stationCoordinate ? { values, thetaDeg: theta, offsetDeg: offset, frequencyHz: sampleHz, origin: stationCoordinate } : null,
+    live: values && !simulation && stationCoordinate ? { values, thetaDeg: theta, offsetDeg: offset, curveOffsetDeg: binOffset, frequencyHz: sampleHz, origin: stationCoordinate } : null,
     liveBearing: bearing !== null,
     identity: overlayIdentity(snapshot),
     simulation,
@@ -401,14 +427,14 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     }
     if (draw.maxDb <= draw.minDb) return { data, rings: ringSet?.rings ?? [], halfPower: null, heldHalfPower: null };
     const halfPower = halfPowerWidth(values);
-    if (g.heatmapVisible && g.heatStyle === 'beam') data['doa-beam'] = beamFeatures(stationCoordinate, values, draw, offset);
-    if (g.heatmapVisible && g.heatStyle === 'density') data['doa-heat'] = heatFeatures(stationCoordinate, values, draw, offset);
-    if (g.lobeVisible) data['doa-lobe'] = { type: 'FeatureCollection', features: [lobeFeature(stationCoordinate, values, draw, offset)] };
+    if (g.heatmapVisible && g.heatStyle === 'beam') data['doa-beam'] = beamFeatures(stationCoordinate, values, draw, binOffset);
+    if (g.heatmapVisible && g.heatStyle === 'density') data['doa-heat'] = heatFeatures(stationCoordinate, values, draw, binOffset);
+    if (g.lobeVisible) data['doa-lobe'] = { type: 'FeatureCollection', features: [lobeFeature(stationCoordinate, values, draw, binOffset)] };
     if (g.bearingVisible && bearing !== null) data['doa-bearing'] = { type: 'FeatureCollection', features: [bearingFeature(stationCoordinate, bearing, draw)] };
-    if (g.edgesVisible) data['doa-edges'] = edgeFeatures(stationCoordinate, halfPower, draw, offset);
+    if (g.edgesVisible) data['doa-edges'] = edgeFeatures(stationCoordinate, halfPower, draw, binOffset);
     return { data, rings: ringSet?.rings ?? [], halfPower, heldHalfPower: null };
     // Paint-only settings (palette, opacity, intensity, blur) are intentionally not dependencies.
-  }, [stationCoordinate, values, bearing, provisionalBearing, provisionalShown, heldDraw, offset, scale, g.ringsVisible, g.guidesVisible, g.guideInterval, g.heatmapVisible, g.heatStyle, g.lobeVisible, g.bearingVisible, g.edgesVisible, g.maxDistanceM, g.lobeDistanceM, g.contrast, g.radialSamples, g.distanceFalloff]);
+  }, [stationCoordinate, values, bearing, provisionalBearing, provisionalShown, heldDraw, binOffset, scale, g.ringsVisible, g.guidesVisible, g.guideInterval, g.heatmapVisible, g.heatStyle, g.lobeVisible, g.bearingVisible, g.edgesVisible, g.maxDistanceM, g.lobeDistanceM, g.contrast, g.radialSamples, g.distanceFalloff]);
   const bearingDrawn = geometry.data['doa-bearing'].features.length > 0;
   const provisionalDrawn = geometry.data['doa-provisional'].features.length > 0;
   const heldBearingDrawn = geometry.data['doa-held-bearing'].features.length > 0;
@@ -812,17 +838,19 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     setVisibility('rdf-heading', settings.headingVisible);
     setVisibility('rdf-heading-held', settings.headingVisible);
     // Overlay opacity scales every DoA layer; the station marker stays opaque.
+    // The curve's layers (beam, heat, lobe, edges) fade further while the curve is held.
     const fade = settings.overlayOpacity;
+    const curveLayerFade = fade * curveFade;
     // The held layers get the same palette, opacity, intensity and blur (setDoaPaint()).
     setDoaPaint(map, 'doa-beam', 'fill-color', beamColorExpression(settings.heatPalette));
-    setDoaPaint(map, 'doa-beam', 'fill-opacity', beamOpacityExpression(settings.heatOpacity * fade, settings.heatIntensity));
+    setDoaPaint(map, 'doa-beam', 'fill-opacity', beamOpacityExpression(settings.heatOpacity * curveLayerFade, settings.heatIntensity));
     setDoaPaint(map, 'doa-heat', 'heatmap-color', heatmapColorExpression(settings.heatPalette));
     setDoaPaint(map, 'doa-heat', 'heatmap-radius', heatmapRadiusExpression(settings.heatBlur));
-    setDoaPaint(map, 'doa-heat', 'heatmap-opacity', settings.heatOpacity * fade);
+    setDoaPaint(map, 'doa-heat', 'heatmap-opacity', settings.heatOpacity * curveLayerFade);
     setDoaPaint(map, 'doa-heat', 'heatmap-intensity', settings.heatIntensity);
-    setDoaPaint(map, 'doa-lobe-fill', 'fill-opacity', settings.lobeOpacity * fade);
-    for (const [id, property, base] of LINE_LAYER_OPACITY) setDoaPaint(map, id, property, base * fade);
-  }, [styleReady, settings.heatmapVisible, settings.heatStyle, settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.edgesVisible, settings.bearingVisible, settings.headingVisible, settings.heatPalette, settings.heatOpacity, settings.heatIntensity, settings.heatBlur, settings.lobeOpacity, settings.overlayOpacity]);
+    setDoaPaint(map, 'doa-lobe-fill', 'fill-opacity', settings.lobeOpacity * curveLayerFade);
+    for (const [id, property, base] of LINE_LAYER_OPACITY) setDoaPaint(map, id, property, base * (CURVE_LINE_LAYERS.has(id) ? curveLayerFade : fade));
+  }, [styleReady, curveFade, settings.heatmapVisible, settings.heatStyle, settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.edgesVisible, settings.bearingVisible, settings.headingVisible, settings.heatPalette, settings.heatOpacity, settings.heatIntensity, settings.heatBlur, settings.lobeOpacity, settings.overlayOpacity]);
 
   // Station marker, popup, and camera framing. shouldReframeStation decides
   // when a new position frames the camera; an operator-moved camera that still
@@ -951,10 +979,11 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     return () => { for (const marker of markers) marker.remove(); };
   }, [styleReady, stationCoordinate, geometry.rings, bearing, bearingDrawn, provisionalBearing, provisionalDrawn, frequencyText, heldBearing, heldBearingDrawn, heldOrigin, heldTime, heldFrequencyText, heading, headingDrawn, headingHeld, link, estimate, estimatePoint?.[0], estimatePoint?.[1], g.ringsVisible, g.guidesVisible, g.labelsVisible, g.maxDistanceM, t]);
 
-  // Hover (or tap) readout: geographic bearing, its theta_0 bin and shifted dB value, and ground distance from the station.
+  // Hover (or tap) readout: geographic bearing, its theta_0 in the DoA frame and the curve's dB value there, and ground distance from the station.
   // A held overlay reads its remembered vector and offset, under a STALE line with its time.
   const readoutValues = values ?? heldDraw?.values ?? null;
   const readoutOffset = values ? offset : heldDraw?.offsetDeg ?? offset;
+  const readoutCurveOffset = values ? binOffset : heldDraw?.curveOffsetDeg ?? heldDraw?.offsetDeg ?? offset;
   const readoutHeld = values ? null : heldTime;
   // Measured from where the drawn overlay starts: the station, or the held overlay's own origin.
   const readoutOrigin = values ? stationCoordinate : heldOrigin ?? stationCoordinate;
@@ -971,9 +1000,10 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       if (!pending || dragging) return;
       const { bearingDeg, distanceM } = bearingAndDistance(readoutOrigin, pending.lng, pending.lat);
       if (distanceM > radius || distanceM < 1) { popup.remove(); return; }
-      const bin = Math.round(geographicBearingForBin(bearingDeg, readoutOffset)) % 360;
+      // The value comes from the curve's own frame; theta_0 is named in the DoA's frame, as on the HUD.
+      const { frameBin, theta } = binsAtBearing(bearingDeg, readoutCurveOffset, readoutOffset);
       const heldLine = readoutHeld ? `<span class="is-held">${t('map.legendHeld', { time: readoutHeld })}</span>` : '';
-      popup.setLngLat(pending).setHTML(`${heldLine}<strong>${t('map.hoverBearing', { deg: formatBearing(bearingDeg, 0), theta: bin, db: readoutValues[bin].toFixed(1) })}</strong><span>${t('map.hoverDistance', { distance: formatDistance(distanceM) })}</span>`);
+      popup.setLngLat(pending).setHTML(`${heldLine}<strong>${t('map.hoverBearing', { deg: formatBearing(bearingDeg, 0), theta, db: readoutValues[frameBin].toFixed(1) })}</strong><span>${t('map.hoverDistance', { distance: formatDistance(distanceM) })}</span>`);
       if (!popup.isOpen()) popup.addTo(map);
     };
     const onMove = (event: MapMouseEvent) => {
@@ -998,7 +1028,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       canvas.removeEventListener('mouseleave', hide);
       popup.remove();
     };
-  }, [styleReady, readoutOrigin, readoutValues, readoutOffset, readoutHeld, settings.heatmapVisible, settings.lobeVisible, g.maxDistanceM, g.lobeDistanceM, t]);
+  }, [styleReady, readoutOrigin, readoutValues, readoutCurveOffset, readoutOffset, readoutHeld, settings.heatmapVisible, settings.lobeVisible, g.maxDistanceM, g.lobeDistanceM, t]);
 
   // Canvas fallback, used when MapLibre's GL layers may not be drawing (non-tile
   // error, lost context, stalled worker) or when there is no map at all (no
@@ -1046,6 +1076,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       // The live overlay and the held one (the last live one) in the same live style.
       const drawDirection = (lobeData: OverlayFeatureCollection, edgesData: OverlayFeatureCollection, bearingData: OverlayFeatureCollection) => {
         const lobe = lobeData.features[0] as Feature<Polygon> | undefined;
+      // A held curve's lobe and edges are drawn fainter, as on the map.
+      context.globalAlpha = settings.overlayOpacity * curveFade;
         if (settings.lobeVisible && lobe) {
           context.save(); context.beginPath();
           lobe.geometry.coordinates[0].forEach((position, index) => { const point = project(position); if (index) context.lineTo(point.x, point.y); else context.moveTo(point.x, point.y); });
@@ -1053,7 +1085,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
           context.strokeStyle = darkBackground ? 'rgba(235,188,112,.92)' : 'rgba(201,138,46,.92)'; context.lineWidth = 2; context.stroke(); context.restore();
         }
         if (settings.edgesVisible) strokeLines(edgesData, darkBackground ? 'rgba(255,138,92,.8)' : 'rgba(224,96,58,.75)', darkBackground ? 2 : 1.5, [2, 4]);
-        if (settings.bearingVisible) strokeLines(bearingData, '#e0603a', 3, [9, 5]);
+        context.globalAlpha = settings.overlayOpacity;
+      if (settings.bearingVisible) strokeLines(bearingData, '#e0603a', 3, [9, 5]);
       };
       drawDirection(geometry.data['doa-lobe'], geometry.data['doa-edges'], geometry.data['doa-bearing']);
       drawDirection(geometry.data['doa-held-lobe'], geometry.data['doa-held-edges'], geometry.data['doa-held-bearing']);
@@ -1127,7 +1160,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       map?.off('resize', schedule);
       canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
     };
-  }, [fallbackActive, mapState, theme, tilesLoaded, tone, styleReady, stationCoordinate, geometry, bearing, provisionalBearing, frequencyText, heldBearing, heldOrigin, heldTime, heldFrequencyText, heading, headingLine, headingHeld, ground, link, estimate, estimateShapes, estimatePoint?.[0], estimatePoint?.[1], settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.edgesVisible, settings.bearingVisible, settings.headingVisible, settings.labelsVisible, settings.overlayOpacity, settings.lobeOpacity, settings.maxDistanceM, settings.lobeDistanceM, t]);
+  }, [fallbackActive, mapState, theme, tilesLoaded, tone, styleReady, stationCoordinate, geometry, curveFade, bearing, provisionalBearing, frequencyText, heldBearing, heldOrigin, heldTime, heldFrequencyText, heading, headingLine, headingHeld, ground, link, estimate, estimateShapes, estimatePoint?.[0], estimatePoint?.[1], settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.edgesVisible, settings.bearingVisible, settings.headingVisible, settings.labelsVisible, settings.overlayOpacity, settings.lobeOpacity, settings.maxDistanceM, settings.lobeDistanceM, t]);
 
   const reducedMotion = prefersReducedMotion;
   const resetView = () => {
@@ -1151,8 +1184,10 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const held = !doaReady && doaHeldText !== undefined;
   // An MQTT DoA between Angular frames: the bearing without the curve.
   const bearingOnly = !values && bearing !== null;
+  const bearingText = bearing === null ? t('map.bearingUnavailable') : t('map.bearingReference', { deg: formatBearing(bearing, 0) });
+  const heldAgeMs = curveHeld ? angularFrameAgeMs(snapshot) : null;
   const dataLabel = values
-    ? t('map.vectorReady', { bearing: bearing === null ? t('map.bearingUnavailable') : t('map.bearingReference', { deg: formatBearing(bearing, 0) }) })
+    ? heldAgeMs !== null ? t('map.vectorHeld', { bearing: bearingText, age: t('common.durationS', { value: Math.round(heldAgeMs / 1000) }) }) : t('map.vectorReady', { bearing: bearingText })
     : bearingOnly ? t('map.bearingOnly', { deg: formatBearing(bearing, 0) })
       : provisionalBearing !== null ? t('map.provisional', { deg: formatBearing(provisionalBearing, 0) })
         : heldDraw && heldTime ? t('map.heldData', { deg: heldBearing === null ? t('common.na') : formatBearing(heldBearing, 0), time: heldTime })
@@ -1169,7 +1204,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       : held ? t('map.overlayHeld', { reason: doaHeldText }) : t('map.overlayCleared'));
   }
   // The compass notice names its cause and links to the setting that fixes it.
-  const orientationNotice = (values || bearingOnly || provisionalBearing !== null || heldDraw) && !orientationVerified
+  // A held DoA turned with its own sample's heading does not depend on the offset in use.
+  const orientationNotice = (values || bearingOnly || (provisional !== null && !provisional.nodeHeading) || heldDraw) && !orientationVerified
     ? t('map.orientationReference', { cause: orientationCause ?? t('map.orientationNotReported'), offset: Number(offset.toFixed(1)) })
     : null;
   // The credit follows the style the map draws; Plain draws no tiles and needs none.

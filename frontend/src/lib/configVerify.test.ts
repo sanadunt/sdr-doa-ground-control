@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import type { TelemetrySnapshot } from '../types';
 import { CONFIG_PATCH_KEYS } from './controlDraft';
 import type { ConfigPatchKey } from './controlDraft';
-import { VERIFY_WINDOW_MS, currentConfigValues, dataOutConfigValues, settingsReadAfter, verifyConfigPatch } from './configVerify';
+import { normalizeConfigReported } from '../api';
+import { CONFIG_PATCH_FIELDS as FIELDS, GAIN_TABLE_DB, parseDraft } from './configPatch';
+import { VERIFY_WINDOW_MS, controlAntArrangement, currentConfigValues, dataOutAntArrangement, dataOutConfigValues, settingsReadAfter, verifyConfigPatch } from './configVerify';
 import type { VerifyInput } from './configVerify';
 
 const ISSUED = 1_000_000;
@@ -56,6 +58,33 @@ describe('dataOutConfigValues', () => {
     expect(values.gain_db).toBeNull();
     expect(values.vfo0_bandwidth_hz).toBeNull();
     expect(values.vfo0_squelch_db).toBeNull();
+  });
+});
+
+describe('controlAntArrangement', () => {
+  const reportedWith = (settings: Record<string, unknown>) => normalizeConfigReported({ available: true, broker: {}, settings: { id: 'gc-get-1', rev: 42, ...settings } }).settings;
+  const dataOut = (value: unknown) => dataOutAntArrangement({ settings: { available: true, fields: { ant_arrangement: value } } } as unknown as TelemetrySnapshot, true);
+
+  it('reads settings/reported first, so a ULA over LoRa (no Data Out) leaves the spacing to the edge', () => {
+    const settings = reportedWith({ matches_state_cfg: true, ant_arrangement: 'ULA' });
+    expect(settings?.antArrangement).toBe('ULA');
+    const arrangement = controlAntArrangement(settings, null);
+    expect(arrangement).toBe('ULA');
+    const reported = { center_frequency_hz: 145_500_000, ant_spacing_m: 0.3 };
+    const ula = parseDraft(FIELDS, { center_frequency_hz: '145.5', ant_spacing_m: '0.2' }, reported, null, GAIN_TABLE_DB, null, arrangement);
+    expect(ula.changes).toEqual({ ant_spacing_m: 0.2 });
+    // Without a word from either side it is a UCA, as for the edge, and the band radius stands.
+    const uca = parseDraft(FIELDS, { center_frequency_hz: '145.5', ant_spacing_m: '0.2' }, reported, null, GAIN_TABLE_DB, null, controlAntArrangement(null, null));
+    expect(uca.fields.find((entry) => entry.field.key === 'ant_spacing_m')).toMatchObject({ problem: 'engineBand', bandSpacingM: 0.3 });
+  });
+
+  it('falls back to Data Out, and keeps the value as spelled, since the edge compares it with UCA exactly', () => {
+    expect(controlAntArrangement(reportedWith({ matches_state_cfg: false, ant_arrangement: 'ULA' }), 'UCA')).toBe('UCA');
+    expect(controlAntArrangement(reportedWith({ matches_state_cfg: true }), dataOut('ULA'))).toBe('ULA');
+    expect(dataOut('uca')).toBe('uca');
+    expect(dataOut('<b>')).toBeNull();
+    expect(reportedWith({ matches_state_cfg: true, ant_arrangement: 'ula' })?.antArrangement).toBe('ula');
+    expect(reportedWith({ matches_state_cfg: true, ant_arrangement: 7 })?.antArrangement).toBeNull();
   });
 });
 

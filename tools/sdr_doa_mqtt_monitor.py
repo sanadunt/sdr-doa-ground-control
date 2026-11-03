@@ -27,15 +27,15 @@ from paho.mqtt.properties import Properties
 
 if __package__:
     from . import rdf_node_commands as commands
-    from .config_command_tracker import FINAL_ACK_STATUSES, MonitorPublishError
-    from .doa_position_estimate import PositionEstimator
+    from .config_command_tracker import FINAL_ACK_STATUSES, MonitorPublishError, final_ack_deadline
+    from .doa_position_estimate import WAITING_NO_BEARING, WAITING_NO_POSITION, PositionEstimator
     from .ground_gps import GROUND_GPS_SUFFIX, GroundGpsStore
     from .lora_link import LORA_SUFFIXES, LoraLinkStore
     from .rdf_node_mqtt_v2 import RDF_NODE_V2_SUFFIXES, RdfNodeV2Telemetry
 else:
     import rdf_node_commands as commands
-    from config_command_tracker import FINAL_ACK_STATUSES, MonitorPublishError
-    from doa_position_estimate import PositionEstimator
+    from config_command_tracker import FINAL_ACK_STATUSES, MonitorPublishError, final_ack_deadline
+    from doa_position_estimate import WAITING_NO_BEARING, WAITING_NO_POSITION, PositionEstimator
     from ground_gps import GROUND_GPS_SUFFIX, GroundGpsStore
     from lora_link import LORA_SUFFIXES, LoraLinkStore
     from rdf_node_mqtt_v2 import RDF_NODE_V2_SUFFIXES, RdfNodeV2Telemetry
@@ -51,6 +51,8 @@ RECONNECT_MAX_DELAY_S = 10
 # arrived before their mid was known.
 MAX_COMMAND_RECORDS = 32
 MAX_EARLY_PUBACKS = 16
+# A config.patch method that may restart the SDR engine (contract 1.7).
+_RESTART_METHODS = frozenset({"LIVE", "RESTART"})
 
 
 def _now_ms() -> int:
@@ -320,6 +322,7 @@ class MqttMonitor:
                 return
             if suffix not in RDF_NODE_V2_SUFFIXES:
                 return
+            self._sync_link_locked()
             qos = getattr(message, "qos", None)
             retained = getattr(message, "retain", None)
             if type(qos) is not int or qos not in (0, 1) or type(retained) is not bool:
@@ -360,7 +363,16 @@ class MqttMonitor:
             if command["final"] is None:
                 command["final"] = ack
         elif command["final"] is None:
+            # The store passes progress in the edge's t order (a stage may
+            # come again: LIVE falls back to RESTART). What each one says
+            # about the wait stays, also once a later ACK replaced it.
             command["progress"] = ack
+            result = ack["result"] if isinstance(ack.get("result"), dict) else {}
+            if result.get("method") in _RESTART_METHODS:
+                command["method_seen"] = result["method"]
+            deadline = final_ack_deadline(ack)
+            if deadline is not None and (command["final_ack_by_ms"] is None or deadline > command["final_ack_by_ms"]):
+                command["final_ack_by_ms"] = deadline
 
     def _on_publish(
         self,
@@ -469,6 +481,8 @@ class MqttMonitor:
                 "progress": None,
                 "final": None,
                 "reported_at_ms": None,
+                "method_seen": None,
+                "final_ack_by_ms": None,
             }
             if mid is not None:
                 early = self._early_pubacks.pop(mid, None)
@@ -556,6 +570,8 @@ class MqttMonitor:
                     "progress": None,
                     "final": None,
                     "reported_at_ms": None,
+                    "method_seen": None,
+                    "final_ack_by_ms": None,
                 })
                 adopted += 1
                 ack = self._rdf_node.ack(command_id)
@@ -601,6 +617,7 @@ class MqttMonitor:
                 return {
                     "published": False, "adopted": False,
                     "puback": None, "progress": None, "final": None, "reported_at_ms": None,
+                    "method_seen": None, "final_ack_by_ms": None,
                 }
             return {
                 "published": not record["adopted"],
@@ -609,7 +626,21 @@ class MqttMonitor:
                 "progress": dict(record["progress"]) if record["progress"] else None,
                 "final": dict(record["final"]) if record["final"] else None,
                 "reported_at_ms": record["reported_at_ms"],
+                # A LIVE or RESTART method any progress ACK named, and the latest
+                # final_within_ms deadline (config_command_tracker.final_ack_deadline).
+                "method_seen": record["method_seen"],
+                "final_ack_by_ms": record["final_ack_by_ms"],
             }
+
+    def _link_locked(self) -> Optional[str]:
+        """``lora`` while the LoRa serial bridge's ground status is held: the node has no IP path."""
+        return "lora" if self._lora.has_role("ground") else None
+
+    def _sync_link_locked(self) -> Optional[str]:
+        """Tell the store the link, which sets its Angular and detail windows (rdf_node_mqtt_v2.set_link)."""
+        link = self._link_locked()
+        self._rdf_node.set_link(link)
+        return link
 
     def _connection_label_locked(self) -> str:
         if self._publish_ready_locked():
@@ -634,7 +665,7 @@ class MqttMonitor:
                 "session": self._rdf_node.session_view(now),
                 "settings": self._rdf_node.settings_report(),
                 # Commands reach the node over the LoRa serial bridge: each waits for a radio turn.
-                "link": "lora" if self._lora.has_role("ground") else None,
+                "link": self._link_locked(),
             }
 
     def snapshot(self) -> Dict[str, Any]:
@@ -708,17 +739,26 @@ class MqttMonitor:
 
     def rdf_node_snapshot(self) -> Dict[str, Any]:
         with self._lock:
+            link = self._sync_link_locked()
             result = self._rdf_node.snapshot(_now_ms())
             result.update({
                 "enabled": self._started,
                 "connection": self._rdf_connection_locked(),
                 "node_id": self._rdf_node.node_id,
                 "last_error": self._rdf_last_error,
+                # "lora": the Angular and detail rows age by the LoRa windows.
+                "link": link,
             })
             return result
 
     def _on_live_doa(self, doa: Dict[str, Any]) -> None:
-        if doa.get("b") is None or doa.get("lat") is None or doa.get("lon") is None:
+        # A sample without a bearing (no heading source) or a position (no fix,
+        # or nav.gps.publish_position off) is no ray; the estimate says which.
+        if doa.get("b") is None:
+            self._estimate.skip(WAITING_NO_BEARING)
+            return
+        if doa.get("lat") is None or doa.get("lon") is None:
+            self._estimate.skip(WAITING_NO_POSITION)
             return
         self._estimate.add(q=doa["q"], t_ms=doa["t"], frequency_hz=doa["f"], bearing_deg=doa["b"],
                            latitude=doa["lat"], longitude=doa["lon"], confidence_db=doa.get("c"),
@@ -740,6 +780,7 @@ class MqttMonitor:
             if not self._started:
                 return None
             now = _now_ms()
+            link = self._sync_link_locked()
             return {
                 "now_ms": now,
                 "connection": self._rdf_connection_locked(),
@@ -747,8 +788,9 @@ class MqttMonitor:
                 "node": self._rdf_node.node_view(now),
                 "position_estimate": self._estimate.view(now),
                 # The node reaches this broker over the LoRa serial bridge: no
-                # IP path, so no Data Out (telemetry_source names that).
-                "link": "lora" if self._lora.has_role("ground") else None,
+                # IP path, so no Data Out (telemetry_source names that), and the
+                # store's Angular and detail windows are the LoRa ones.
+                "link": link,
             }
 
 

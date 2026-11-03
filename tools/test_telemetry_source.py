@@ -100,7 +100,7 @@ class Edge:
         return self.q[kind]
 
     def hello(self, *, angle: Optional[str] = "theta_mirror", sid: Optional[str] = None, cfg: int = 1,
-              rf: Optional[Dict[str, Any]] = None) -> None:
+              rf: Optional[Dict[str, Any]] = None, nav: Optional[Dict[str, Any]] = None) -> None:
         state = dict(self.state, t=self.now_ms(), cfg=cfg)
         state.pop("rf", None)
         if rf is not None:
@@ -111,16 +111,22 @@ class Edge:
         self.state = state
         self.send("state", state)
         if angle is not None:
-            self.send("capabilities", dict(fixture("capabilities.json"), sid=state["sid"], boot=state["boot"],
-                                           instance=state["instance"], angle=angle))
+            capabilities = dict(fixture("capabilities.json"), sid=state["sid"], boot=state["boot"],
+                                instance=state["instance"], angle=angle)
+            if nav is not None:
+                capabilities["nav"] = nav
+            self.send("capabilities", capabilities)
 
     def health(self, *, daq: int = 1, q: Optional[int] = None, at: Optional[int] = None,
-               nav: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+               nav: Optional[Dict[str, Any]] = None, why: Optional[List[str]] = None) -> Dict[str, Any]:
         t = self.now_ms() if at is None else at
-        return self.send("telemetry/health", dict(
+        payload = dict(
             fixture("telemetry-health.json"), sid=self.state["sid"], t=t, daq=daq,
             q=self.next_q("health") if q is None else q, rev=self.state["cfg"], **(nav or {}),
-        ), at=at)
+        )
+        if why is not None:
+            payload["why"] = why
+        return self.send("telemetry/health", payload, at=at)
 
     def detail(self, *, ovr: Any = "absent", at: Optional[int] = None) -> Dict[str, Any]:
         payload = dict(fixture("telemetry-health-detail.json"), sid=self.state["sid"], t=self.now_ms() if at is None else at)
@@ -141,13 +147,13 @@ class Edge:
 
     def angular(self, theta: float = THETA, *, flags: int = 63, q: Optional[int] = None,
                 frequency_hz: int = FREQUENCY_HZ, revision: Optional[int] = None, topic: str = "telemetry/angular",
-                at: Optional[int] = None) -> Dict[str, Any]:
+                at: Optional[int] = None, heading: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         payload = dict(fixture("telemetry-angular.live.json"))
         payload.update(
             sid=self.state["sid"], timestamp_ms=self.now_ms() if at is None else at, flags=flags,
             q=self.q["frame"] if q is None else q, frequency_hz=frequency_hz,
             revision=self.state["cfg"] if revision is None else revision,
-            raw_doa_deg=(360.0 - theta) % 360.0, values=peaked(theta),
+            raw_doa_deg=(360.0 - theta) % 360.0, values=peaked(theta), **(heading or {}),
         )
         return self.send(topic, payload, at=at)
 
@@ -168,6 +174,8 @@ class Edge:
 
     def view(self, at: Optional[int] = None, connection: str = "ready", link: Optional[str] = None) -> Dict[str, Any]:
         now = self.now_ms() if at is None else at
+        # As the monitor does: the link sets the store's Angular and detail windows.
+        self.store.set_link(link)
         return {"now_ms": now, "connection": connection, "node_id": NODE, "node": self.store.node_view(now), "link": link}
 
 
@@ -245,6 +253,47 @@ NAV_FIX = {"hdg": 201.1, "hs": "OK", "gs": "FIX", "fix": 3, "sat": 7, "lat": -6.
 # state.rf of RDF Node 1.7.0 after the 103.1 MHz retune on 2 November.
 RF_17 = {"f": 103_100_000, "vfo": 103_100_000, "g": 12.5, "bw": 12_500, "sq": -100}
 
+# capabilities.nav of RDF Node 1.10 with compass and GPS on and publish_position at its default (off).
+CAPS_NAV_110 = {"compass": True, "gps": True, "position": False, "heading": "compass"}
+
+
+def lora_110_held(clock: "ManualMs") -> Edge:
+    """Edge 1.10 over LoRa: a LIVE DoA (h=100) whose curve is a frame 15 s old taken at heading 90.
+
+    The node turned 10 degrees since the frame, so the frame's peak (150) lies
+    10 degrees off this DoA's theta_0 (160) in array degrees and on it in
+    bearings (300): the curve is SAME_CONFIG, held, drawn turned by its own heading.
+    """
+    edge = Edge(clock)
+    clock.now -= 15_000
+    edge.store.set_link("lora")
+    edge.hello(nav=CAPS_NAV_110)
+    edge.health(nav=NAV_FIX, why=[])
+    edge.doa(150.0, stamp={"h": 90.0, "hsrc": "C", "b": 300.0})
+    edge.angular(150.0, heading={"heading_deg": 90.0, "heading_source": "C"})
+    clock.now += 15_000
+    edge.health(nav=NAV_FIX, why=[])
+    edge.doa(THETA, stamp={"h": 100.0, "hsrc": "C", "b": 300.0})
+    return edge
+
+
+def lora_110_unverified(clock: "ManualMs") -> Edge:
+    """Edge 1.10 over LoRa during a config.patch: only an ok=0 DoA, with the heading it went out with.
+
+    theta_0 30 and h 100 make the unverified bearing 70; the edge's reason
+    (CONTROL_IN_PROGRESS) comes in ``reason`` alone and health.why says the same.
+    """
+    edge = Edge(clock)
+    edge.store.set_link("lora")
+    edge.hello(nav=CAPS_NAV_110)
+    edge.health(nav=NAV_FIX, why=["CONTROL_IN_PROGRESS"])
+    raw = dict(fixture("telemetry-doa.ok0.json"), sid=edge.state["sid"], t=clock(), f=FREQUENCY_HZ,
+               rev=edge.state["cfg"], q=edge.next_q("frame"), a=330.0, h=100.0, hsrc="C",
+               reason=["CONTROL_IN_PROGRESS"])
+    raw.pop("validation_reasons", None)
+    edge.send("telemetry/doa", raw)
+    return edge
+
 
 def fixture_answers() -> Dict[str, Dict[str, Any]]:
     """The MQTT answers the frontend tests read, built at a fixed time."""
@@ -287,6 +336,10 @@ def fixture_answers() -> Dict[str, Dict[str, Any]]:
     rf.doa(ok=0, f=103_100_000)
     rf.angular(flags=23, frequency_hz=103_100_000)
     answers["mqtt-lora-rf.json"] = answer(rf, None, 5, link="lora")
+    # Edge 1.10 over LoRa: a held curve turned by its own heading, and an ok=0
+    # sample with its own heading, reason, health.why and capabilities.nav.
+    answers["mqtt-lora-held.json"] = answer(lora_110_held(ManualMs(FIXED_NOW)), None, 6, link="lora")
+    answers["mqtt-lora-unverified-heading.json"] = answer(lora_110_unverified(ManualMs(FIXED_NOW)), None, 7, link="lora")
     return answers
 
 
@@ -369,6 +422,149 @@ class Edge110Tests(unittest.TestCase):
         view = dict(edge.view(), position_estimate={"state": "NEED_MOVEMENT", "samples": 3})
         built = ts.mqtt_snapshot(view, None, base_url=BASE_URL, light_age_ms=None, light_meta=self.META)
         self.assertEqual(built["position_estimate"], {"state": "NEED_MOVEMENT", "samples": 3})
+
+    def lora(self, edge: Edge) -> Dict[str, Any]:
+        return ts.mqtt_snapshot(edge.view(link="lora"), None, base_url=BASE_URL, light_age_ms=None, light_meta=self.META)
+
+    def test_an_unverified_sample_carries_its_own_heading(self) -> None:
+        # The edge stamps h on ok=0 too; the dashed bearing is h - theta_0 of
+        # that same sample (100 - 30 = 70), never the raw angle with offset 0.
+        snapshot = self.lora(lora_110_unverified(ManualMs(FIXED_NOW)))
+        unverified = snapshot["mqtt"]["doa_unverified"]
+        self.assertIs(snapshot["doa_candidates"]["mqtt"]["available"], False)
+        self.assertEqual((unverified["canonical_angle_deg"], unverified["array_heading_deg"], unverified["heading_source"],
+                          unverified["bearing_deg"]), (30.0, 100.0, "COMPASS", 70.0))
+        self.assertEqual(unverified["received_at_ms"], FIXED_NOW)
+        # Edge 1.10 sends this reason in reason alone: it becomes the validation reasons, and health.why says it too.
+        self.assertEqual((unverified["validation_reasons"], unverified["reason"]),
+                         (["CONTROL_IN_PROGRESS"], ["CONTROL_IN_PROGRESS"]))
+        self.assertEqual(snapshot["mqtt"]["health"]["why"], ["CONTROL_IN_PROGRESS"])
+        self.assertEqual(snapshot["source"]["mqtt"]["health_why"], ["CONTROL_IN_PROGRESS"])
+        self.assertEqual(snapshot["mqtt"]["capabilities"]["nav"],
+                         {"compass": True, "gps": True, "position": False, "heading": "compass"})
+        # Without a heading source (h null) or from an older edge there is no bearing.
+        edge = Edge(ManualMs(FIXED_NOW))
+        edge.hello(); edge.health()
+        edge.doa(30.0, ok=0, stamp={"h": None, "hsrc": None})
+        unverified = build(edge)["mqtt"]["doa_unverified"]
+        self.assertEqual((unverified["array_heading_deg"], unverified["heading_source"], unverified["bearing_deg"]),
+                         (None, None, None))
+        self.assertIsNone(build(edge)["mqtt"]["health"]["why"])
+
+    def test_health_why_reaches_an_answer_mqtt_does_not_give(self) -> None:
+        # Over LoRa with the DAQ down there is no MQTT answer and no Data Out:
+        # the source block still says why the edge has no LIVE DoA.
+        edge = Edge(ManualMs(FIXED_NOW))
+        edge.hello()
+        edge.health(daq=0, why=["DAQ_NOT_HEALTHY", "EMPTY_CSV"])
+        view = edge.view(link="lora")
+        fresh, reasons = ts.mqtt_freshness(view)
+        answer = ts.with_source({"status": {"available": False}}, view, reasons, over_lora=True)
+        self.assertEqual((fresh, answer["source"]["reason"]), (False, "MQTT_DAQ_NOT_HEALTHY"))
+        self.assertEqual(answer["source"]["mqtt"]["health_why"], ["DAQ_NOT_HEALTHY", "EMPTY_CSV"])
+        self.assertIsNone(ts.mqtt_summary(Edge(ManualMs(FIXED_NOW)).live().view(), True)["health_why"])
+
+    def test_a_live_and_an_unverified_sample_each_keep_their_receipt_time(self) -> None:
+        # During a patch the last LIVE DoA ages while ok=0 samples keep coming:
+        # both views say when they arrived, so the newer one can be told apart.
+        clock = ManualMs(FIXED_NOW)
+        edge = Edge(clock)
+        edge.hello(); edge.health()
+        edge.doa(60.0, stamp={"h": 10.0, "hsrc": "C", "b": 310.0})
+        clock.now += 40_000
+        edge.health()
+        edge.doa(200.0, ok=0, stamp={"h": 20.0, "hsrc": "C"})
+        snapshot = build(edge)
+        candidate = snapshot["doa_candidates"]["mqtt"]
+        unverified = snapshot["mqtt"]["doa_unverified"]
+        self.assertIs(candidate["freshness"]["fresh"], False)
+        self.assertEqual((candidate["received_at_ms"], candidate["array_heading_deg"]), (FIXED_NOW, 10.0))
+        self.assertEqual((unverified["received_at_ms"], unverified["array_heading_deg"], unverified["bearing_deg"]),
+                         (FIXED_NOW + 40_000, 20.0, 180.0))
+        self.assertIs(unverified["stale"], False)
+
+    def test_over_lora_a_held_curve_counts_and_is_marked(self) -> None:
+        # The bridge sends Angular at most every 20 s: over LoRa a frame counts
+        # for 45 s, marked held once it is older than the 10 s of a direct link.
+        clock = ManualMs(FIXED_NOW)
+        edge = Edge(clock)
+        edge.store.set_link("lora")
+        edge.hello(); edge.health()
+        edge.doa(); edge.angular()
+        for second in (5, 10, 15, 30, 45):
+            clock.now = FIXED_NOW + second * 1_000
+            edge.health(); edge.doa()
+            candidate = self.lora(edge)["doa_candidates"]["mqtt"]
+            with self.subTest(second=second):
+                self.assertEqual(candidate["angular_pairing"], "SAME_CONFIG")
+                self.assertIn("angular_power_db", candidate)
+                self.assertIs(candidate["angular_held"], second > 10)
+                self.assertIs(candidate["angular_frame"]["held"], second > 10)
+                self.assertEqual(candidate["angular_frame"]["max_age_ms"], 45_000)
+        clock.now = FIXED_NOW + 46_000
+        edge.health(); edge.doa()
+        candidate = self.lora(edge)["doa_candidates"]["mqtt"]
+        self.assertEqual(candidate["angular_pairing"], "NOT_LIVE")
+        self.assertIs(candidate["angular_held"], False)
+        # The same 15 s frame over a direct link is not LIVE: no curve.
+        clock = ManualMs(FIXED_NOW)
+        edge = Edge(clock)
+        edge.hello(); edge.health(); edge.doa(); edge.angular()
+        clock.now += 15_000
+        edge.health(); edge.doa()
+        candidate = build(edge)["doa_candidates"]["mqtt"]
+        self.assertEqual((candidate["angular_pairing"], candidate["angular_frame"]["max_age_ms"]), ("NOT_LIVE", 10_000))
+        self.assertNotIn("angular_power_db", candidate)
+
+    def test_a_held_curve_keeps_the_pairing_guards(self) -> None:
+        clock = ManualMs(FIXED_NOW)
+        edge = Edge(clock)
+        edge.store.set_link("lora")
+        edge.hello(); edge.health()
+        edge.doa(100.0); edge.angular(100.0)
+        clock.now += 20_000
+        edge.health()
+        edge.doa(130.0)
+        self.assertEqual(self.lora(edge)["doa_candidates"]["mqtt"]["angular_pairing"], "PEAK_MOVED")
+        edge.doa(100.0, f=FREQUENCY_HZ + 25_000)
+        self.assertEqual(self.lora(edge)["doa_candidates"]["mqtt"]["angular_pairing"], "OTHER_FREQUENCY")
+        edge.hello(cfg=2)
+        edge.health()
+        edge.doa(100.0)
+        self.assertEqual(self.lora(edge)["doa_candidates"]["mqtt"]["angular_pairing"], "OTHER_REVISION")
+
+    def test_a_turned_node_keeps_its_curve_by_the_frames_own_heading(self) -> None:
+        snapshot = self.lora(lora_110_held(ManualMs(FIXED_NOW)))
+        candidate = snapshot["doa_candidates"]["mqtt"]
+        # Array degrees 150 against 160, the same bearing (300): one direction, kept.
+        self.assertEqual(candidate["angular_pairing"], "SAME_CONFIG")
+        self.assertEqual((candidate["angular_heading_deg"], candidate["angular_heading_source"]), (90.0, "COMPASS"))
+        self.assertEqual((candidate["angular_frame"]["heading_deg"], candidate["angular_frame"]["heading_turn_deg"]),
+                         (90.0, 10.0))
+        self.assertEqual((candidate["angular_frame"]["doa_peak_distance_deg"], candidate["angular_peak_angle_distance_deg"]),
+                         (0.0, 0.0))
+        self.assertIs(candidate["angular_peak_angle_consistent"], True)
+        self.assertEqual(snapshot["mqtt"]["angular"]["heading_deg"], 90.0)
+        # A frame from an edge before 1.10 carries no heading: the array-degree guard decides, as before.
+        clock = ManualMs(FIXED_NOW)
+        edge = Edge(clock)
+        edge.store.set_link("lora")
+        edge.hello(); edge.health()
+        edge.doa(150.0, stamp={"h": 90.0, "hsrc": "C", "b": 300.0}); edge.angular(150.0)
+        clock.now += 15_000
+        edge.health()
+        edge.doa(THETA, stamp={"h": 100.0, "hsrc": "C", "b": 300.0})
+        candidate = self.lora(edge)["doa_candidates"]["mqtt"]
+        self.assertEqual((candidate["angular_pairing"], candidate["angular_heading_deg"]), ("PEAK_MOVED", None))
+        self.assertIsNone(candidate["angular_frame"]["heading_turn_deg"])
+        # With both headings a bearing that moved is still PEAK_MOVED.
+        clock = ManualMs(FIXED_NOW)
+        edge = Edge(clock)
+        edge.hello(); edge.health()
+        edge.doa(150.0, stamp={"h": 90.0, "hsrc": "C", "b": 300.0})
+        edge.angular(150.0, heading={"heading_deg": 90.0, "heading_source": "C"})
+        edge.doa(THETA, stamp={"h": 90.0, "hsrc": "C", "b": 290.0})
+        self.assertEqual(build(edge)["doa_candidates"]["mqtt"]["angular_pairing"], "PEAK_MOVED")
 
 
 class Edge17Tests(unittest.TestCase):

@@ -860,7 +860,10 @@ export function ConfigurationPage({
   // Over Telemetry LoRa the node's own values come from telemetry/health, not Data Out.
   const sourceLabel = (source: SourceCode): MessageKey => (dataOutHidden && source === 'DATA_OUT' ? 'config.sourceNodeLora' : SOURCE_LABELS[source]);
   const sourceTag = (source: SourceCode): string => (dataOutHidden && source === 'DATA_OUT' ? 'RDF-SDR' : source);
-  const sourceOptions = SOURCES.map((source) => ({ value: source, label: t(sourceLabel(source)) }));
+  // The switch shows the short name, like the tag; its long name ("RDF-SDR (Telemetry LoRa)") would not fit a third of it.
+  const sourceOptions = SOURCES.map((source) => (sourceTag(source) === 'RDF-SDR'
+    ? { value: source, label: 'RDF-SDR', title: t(sourceLabel(source)) }
+    : { value: source, label: t(sourceLabel(source)) }));
   const refreshLabel = t('config.refresh');
   const transportLabel = t('config.mqttTransport');
   const axisLabel = t('config.manualAxis');

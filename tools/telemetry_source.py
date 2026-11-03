@@ -54,7 +54,12 @@ The mapping, with its evidence in the edge's code (commit 8691ad0):
   still gives the DoA its vector only while the vector's peak is within 3
   degrees of that DoA's theta_0, so the bearing and the curve drawn from them
   never point apart; otherwise it is ``PEAK_MOVED`` and the DoA is shown
-  without a curve until the next frame.
+  without a curve until the next frame. With the heading of both (contract
+  1.10: DoA ``h``, Angular ``heading_deg``) that check is made between
+  bearings, since the curve is drawn turned by its own heading.
+- Over the LoRa serial bridge the store keeps an Angular frame LIVE for 45 s
+  (the bridge sends one at most every 20 s); a curve older than the 10 s of a
+  direct link is ``angular_held``, for the Dashboard to dim.
 - ``daq=1`` in health means status.json was fresh with ``daq_ok`` and all
   three sync flags true (``source.Source.view``), so the DAQ state is PASS.
 
@@ -178,6 +183,15 @@ def _circular_distance(first: float, second: float) -> float:
     return min(delta, 360.0 - delta)
 
 
+def _signed_turn(degrees: float) -> float:
+    """An angle as the shorter turn, -180 < turn <= 180."""
+    turn = degrees % 360.0
+    return turn - 360.0 if turn > 180.0 else turn
+
+
+HEADING_SOURCES = {"C": "COMPASS", "G": "GPS", "H": "HOLD"}
+
+
 def mqtt_freshness(view: Optional[Mapping[str, Any]]) -> Tuple[bool, List[str]]:
     """Whether MQTT answers the Dashboard, and when not, why (one reason)."""
     if not isinstance(view, Mapping):
@@ -217,6 +231,11 @@ def mqtt_summary(view: Optional[Mapping[str, Any]], fresh: bool) -> Dict[str, An
         "health_age_ms": _int(health.get("age_ms")),
         "health_daq": _int(health.get("daq")),
         "health_fresh_ms": HEALTH_FRESH_MS,
+        # Contract 1.10 health.why: the edge's reasons DoA is not LIVE, also in
+        # a Data Out or empty answer (MQTT_DAQ_NOT_HEALTHY over LoRa, say). Null
+        # from an older edge or without health.
+        "health_why": [code for code in health["why"] if isinstance(code, str)]
+        if isinstance(health.get("why"), list) else None,
     }
 
 
@@ -373,7 +392,7 @@ def _doa_candidate(node: Mapping[str, Any], convention: Optional[str]) -> Dict[s
     # it made and where it was taken (None from an older edge).
     candidate.update({
         "array_heading_deg": _number(doa.get("h")),
-        "heading_source": {"C": "COMPASS", "G": "GPS", "H": "HOLD"}.get(doa.get("hsrc")),
+        "heading_source": HEADING_SOURCES.get(doa.get("hsrc")),
         "bearing_deg": _number(doa.get("b")),
         "sample_latitude": _number(doa.get("lat")),
         "sample_longitude": _number(doa.get("lon")),
@@ -389,6 +408,16 @@ def _doa_candidate(node: Mapping[str, Any], convention: Optional[str]) -> Dict[s
     angular = _record(node.get("angular"))
     pairing = angular_pairing(doa, angular)
     values = angular.get("values") if angular is not None else None
+    # Edge 1.10: the frame's own heading. With the DoA's heading too, the frame
+    # is compared in bearings: its bin p points at heading_deg - p, the DoA at
+    # h - theta, so the peak is p + turn against theta (turn = h - heading_deg).
+    frame_heading = _number(angular.get("heading_deg")) if angular is not None else None
+    doa_heading = candidate["array_heading_deg"]
+    turn = None if frame_heading is None or doa_heading is None else _signed_turn(doa_heading - frame_heading)
+    candidate.update({
+        "angular_heading_deg": frame_heading,
+        "angular_heading_source": HEADING_SOURCES.get(angular.get("heading_source")) if angular is not None else None,
+    })
     vector: Optional[List[float]] = None
     peak_index = 0
     doa_peak_distance: Optional[float] = None
@@ -396,7 +425,7 @@ def _doa_candidate(node: Mapping[str, Any], convention: Optional[str]) -> Dict[s
         vector = [float(value) for value in values]
         peak_index = max(range(360), key=vector.__getitem__)
         if theta is not None:
-            doa_peak_distance = _circular_distance(float(peak_index), theta)
+            doa_peak_distance = _circular_distance(float(peak_index) + (turn or 0.0), theta)
         if (pairing == PAIR_SAME_CONFIG and doa_peak_distance is not None
                 and doa_peak_distance > ANGULAR_PEAK_ANGLE_TOLERANCE_DEG):
             # An older record whose direction is not this DoA's: drawing its
@@ -404,9 +433,12 @@ def _doa_candidate(node: Mapping[str, Any], convention: Optional[str]) -> Dict[s
             pairing = PAIR_PEAK_MOVED
             vector = None
     candidate["angular_pairing"] = pairing
+    # A curve from an older frame that only the LoRa window keeps: drawn dimmed.
+    candidate["angular_held"] = vector is not None and _angular_held(angular)
     if angular is not None:
         candidate["angular_frame"] = _angular_meta(angular, pairing)
         candidate["angular_frame"]["doa_peak_distance_deg"] = doa_peak_distance
+        candidate["angular_frame"]["heading_turn_deg"] = turn
     if vector is not None:
         peak = vector[peak_index]
         candidate.update({
@@ -425,13 +457,22 @@ def _doa_candidate(node: Mapping[str, Any], convention: Optional[str]) -> Dict[s
         # The peak against the theta_0 drawn with it: the DoA's, or the
         # frame's own while the DoA's angle is unknown (nothing is drawn then).
         drawn_theta = theta if theta is not None else theta0_from_angular((angular or {}).get("raw_doa_deg"))
-        distance = None if drawn_theta is None else _circular_distance(float(peak_index), drawn_theta)
+        shift = (turn or 0.0) if theta is not None else 0.0
+        distance = None if drawn_theta is None else _circular_distance(float(peak_index) + shift, drawn_theta)
         candidate.update({
             "angular_peak_angle_distance_deg": distance,
             "angular_peak_angle_consistent": None if distance is None else distance <= ANGULAR_PEAK_ANGLE_TOLERANCE_DEG,
             "angular_peak_angle_tolerance_deg": ANGULAR_PEAK_ANGLE_TOLERANCE_DEG,
         })
     return candidate
+
+
+def _angular_held(angular: Optional[Mapping[str, Any]]) -> bool:
+    """A LIVE frame older than the direct link's window, kept only by the LoRa window."""
+    if angular is None or angular.get("live") is not True:
+        return False
+    ages = [_int(angular.get("source_age_ms")), _int(angular.get("age_ms"))]
+    return any(age is not None and age > ANGULAR_FRESH_MS for age in ages)
 
 
 def _angular_meta(angular: Mapping[str, Any], pairing: str) -> Dict[str, Any]:
@@ -442,7 +483,11 @@ def _angular_meta(angular: Mapping[str, Any], pairing: str) -> Dict[str, Any]:
         "received_at_ms": _int(angular.get("received_at_ms")),
         "age_ms": _int(angular.get("age_ms")),
         "source_age_ms": _int(angular.get("source_age_ms")),
-        "max_age_ms": ANGULAR_FRESH_MS,
+        # The store's window: ANGULAR_LORA_FRESH_MS over the LoRa bridge.
+        "max_age_ms": _int(angular.get("max_age_ms")) or ANGULAR_FRESH_MS,
+        "held": _angular_held(angular),
+        "heading_deg": _number(angular.get("heading_deg")),
+        "heading_source": HEADING_SOURCES.get(angular.get("heading_source")),
         "frequency_hz": _int(angular.get("frequency_hz")),
         "revision": _int(angular.get("revision")),
         "vfo": _int(angular.get("vfo")),
@@ -598,13 +643,24 @@ def _diagnostics(node: Mapping[str, Any], convention: Optional[str], pairing: Op
             return None
         return {key: copy.deepcopy(record.get(key)) for key in keys}
 
-    unverified = pick(_record(node.get("doa_unverified")), (
-        "q", "t", "f", "a", "c", "p", "rev", "trust", "angle_reference", "validation_reasons",
+    unverified_record = _record(node.get("doa_unverified"))
+    unverified = pick(unverified_record, (
+        "q", "t", "f", "a", "c", "p", "rev", "trust", "angle_reference", "validation_reasons", "reason",
         "received_at_ms", "age_ms", "source_age_ms", "stale",
     ))
-    if unverified is not None:
+    if unverified is not None and unverified_record is not None:
         # ok=0 sends the RAW column 1 (agent.py), which is 360 - theta_0.
-        unverified["canonical_angle_deg"] = theta0_from_angular(unverified.get("a"))
+        theta = theta0_from_angular(unverified.get("a"))
+        heading = _number(unverified_record.get("h"))
+        unverified["canonical_angle_deg"] = theta
+        # Contract 1.10: the heading this same sample went out with (the edge
+        # stamps h on ok=0 too, only b waits for a valid sample), so its
+        # bearing never mixes its angle with another sample's heading.
+        unverified.update({
+            "array_heading_deg": heading,
+            "heading_source": HEADING_SOURCES.get(unverified_record.get("hsrc")),
+            "bearing_deg": None if heading is None or theta is None else (heading - theta) % 360.0,
+        })
     diagnostic_doa = pick(_record(node.get("diagnostic_doa")), (
         "q", "source", "source_timestamp_ms", "observed_timestamp_ms", "raw_doa_deg", "frequency_mhz", "trust",
         "validation_reasons", "received_at_ms", "age_ms", "stale",
@@ -630,10 +686,15 @@ def _diagnostics(node: Mapping[str, Any], convention: Optional[str], pairing: Op
         "run": session.get("run"),
         "profile": session.get("profile"),
         "clock": session.get("clock"),
-        "health": pick(health, ("q", "t", "run", "daq", "clk", "drop", "age", "temp", "rev", "received_at_ms", "age_ms", "fresh")),
-        "capabilities": pick(capabilities, ("angle", "native_axis", "count", "profiles", "version", "session_match")),
+        # why: the edge's reasons DoA is not LIVE (contract 1.10; null from an older edge).
+        "health": pick(health, ("q", "t", "run", "daq", "clk", "drop", "age", "temp", "rev", "why", "received_at_ms",
+                                "age_ms", "fresh")),
+        # nav (contract 1.10): {compass, gps, position, heading}, null from an older edge.
+        "capabilities": pick(capabilities, ("angle", "native_axis", "count", "profiles", "version", "nav",
+                                            "session_match")),
         "angle_convention": convention,
-        "doa": pick(doa, ("q", "t", "f", "rev", "live", "reasons", "received_at_ms", "age_ms", "source_age_ms")),
+        "doa": pick(doa, ("q", "t", "f", "rev", "live", "reasons", "reason", "received_at_ms", "age_ms",
+                          "source_age_ms")),
         "angular": None if angular is None else _angular_meta(angular, pairing or angular_pairing(doa, angular)),
         "doa_unverified": unverified,
         "diagnostic_doa": diagnostic_doa,
