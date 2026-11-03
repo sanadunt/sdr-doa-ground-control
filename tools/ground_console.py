@@ -387,6 +387,9 @@ ALLOWED_LOGO_MIME = {"image/png"}
 # screen between reads; 0 means manual refresh.
 ALLOWED_REFRESH_INTERVALS = {0, 1, 2, 5, 10, 30}
 DEFAULT_REFRESH_SECONDS = 2
+# How the console reaches the RDF-SDR (console.json link_mode, data_out_reader.py).
+LINK_MODES = ("auto", "lora")
+DEFAULT_LINK_MODE = "auto"
 # One /api/snapshot collection may not take longer than this, so a slow or
 # unreachable Data Out returns an explicit UNAVAILABLE well inside the
 # browser's request timeout.
@@ -726,6 +729,7 @@ def _default_console_config(
     mqtt_ws_path: str = DEFAULT_MQTT_WS_PATH,
     data_out_hosts: Optional[Sequence[str]] = None,
     lan_access: Optional[Dict[str, Any]] = None,
+    link_mode: str = DEFAULT_LINK_MODE,
 ) -> Dict[str, Any]:
     return {
         "version": CONSOLE_CONFIG_VERSION,
@@ -737,6 +741,10 @@ def _default_console_config(
         "mqtt_transport": mqtt_transport,
         "mqtt_ws_path": mqtt_ws_path,
         "refresh_seconds": int(refresh_seconds),
+        # "lora": the RDF-SDR is read only from what the LoRa serial bridge
+        # brings to the local broker; Data Out and the MQTT freshness rules
+        # are off (data_out_reader.py). "auto": MQTT first, Data Out as the fallback.
+        "link_mode": link_mode,
         # The opt-in LAN view (lan_access.py). It is saved here with the
         # rest, but only POST /api/lan-access (admin) changes it, and the
         # console-config routes never show it.
@@ -831,6 +839,9 @@ def _validate_console_config(payload: Any, fallback: Optional[Dict[str, Any]] = 
     refresh_seconds = _config_integer(payload.get("refresh_seconds", defaults["refresh_seconds"]), "refresh_seconds")
     if refresh_seconds not in ALLOWED_REFRESH_INTERVALS:
         raise ValueError("refresh_seconds is not an allowed interval")
+    link_mode = payload.get("link_mode", defaults.get("link_mode", DEFAULT_LINK_MODE))
+    if not isinstance(link_mode, str) or link_mode not in LINK_MODES:
+        raise ValueError("link_mode must be auto or lora")
     fallback_lan = defaults.get("lan_access")
     if not isinstance(fallback_lan, dict):
         fallback_lan = lan.default_settings()
@@ -844,6 +855,7 @@ def _validate_console_config(payload: Any, fallback: Optional[Dict[str, Any]] = 
         mqtt_ws_path=mqtt_ws_path,
         data_out_hosts=data_out_hosts,
         lan_access=lan_access,
+        link_mode=link_mode,
     )
 
 
@@ -4830,6 +4842,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
         self.data_out = DataOutReader(
             self._collect_data_out,
             refresh_seconds=lambda: self._config.get("refresh_seconds"),
+            link_mode=lambda: self._config.get("link_mode"),
             wait_timeout_s=SNAPSHOT_TOTAL_BUDGET_S + SNAPSHOT_WAIT_GRACE_S,
             console_base_url=lambda: self._config.get("base_url"),
             collect_light=self._collect_light_data_out,

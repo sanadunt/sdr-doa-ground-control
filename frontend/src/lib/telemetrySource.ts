@@ -59,7 +59,7 @@ export interface SourceBadge {
   /** MQTT, Data Out (fallback) or none, in the UI language. */
   labelKey: MessageKey;
   tone: Tone;
-  /** Why this source: the codes the tooltip names (empty for MQTT). */
+  /** Why this source: the codes the tooltip names (for MQTT only MQTT_DAQ_NOT_HEALTHY, when the DAQ is not healthy). */
   reasons: SourceReason[];
 }
 
@@ -74,10 +74,11 @@ export function sourceBadge(snapshot: TelemetrySnapshot | null | undefined): Sou
   if (!snapshot || snapshot.simulation === true) return null;
   const kind = snapshotSourceKind(snapshot);
   if (kind === null) return null;
-  const reasons = kind === 'mqtt' ? [] : snapshotSourceReasons(snapshot).filter((reason) => reason !== 'MQTT_FRESH');
+  const reasons = snapshotSourceReasons(snapshot).filter((reason) => reason !== 'MQTT_FRESH');
   // The LoRa serial bridge carries the same MQTT topics by radio: name the link the operator knows.
   const badge = kind === 'mqtt' && overLora(snapshot) ? { ...BADGE.mqtt, labelKey: 'source.lora' as MessageKey } : BADGE[kind];
-  return { kind, ...badge, reasons };
+  // An MQTT answer while the DAQ is not healthy (health, compass and GPS still come): a warning, with its reason.
+  return { kind, ...badge, ...(kind === 'mqtt' && reasons.length > 0 ? { tone: 'warn' as Tone } : {}), reasons };
 }
 
 /** i18n key of a source code. */

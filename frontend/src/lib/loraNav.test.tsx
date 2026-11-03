@@ -2,11 +2,12 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { NodeCard, navRows } from '../components/overview/NodeCard';
 import type { TelemetrySnapshot } from '../types';
-import { doaStatusTextKey, overviewDoaStatus } from './doaStatus';
+import { doaStatusTextKey, overviewDoaStatus, provisionalTheta } from './doaStatus';
 import { I18nContext, translate } from './i18n';
 import type { Lang } from './i18n';
-import { gpsReportsNoFix, resolveGpsSource, resolveStationCoordinate } from './map';
+import { gpsReportsNoFix, holdStationCoordinate, resolveGpsSource, resolveStationCoordinate } from './map';
 import { overLora, snapshotNav, sourceBadge } from './telemetrySource';
+import { rdfHeading } from './rdfHeading';
 
 /** An answer of tools/telemetry_source.py, written by tools/test_telemetry_source.py. */
 function answer(name: string): TelemetrySnapshot {
@@ -118,5 +119,46 @@ describe('Compass and GPS rows of the node card', () => {
     expect(navRows({ compass_state: '<b>', gps_state: 'fix ok' }, t)).toEqual([]);
     expect(navRows(null, t)).toEqual([]);
     expect(node(LIVE)).not.toContain('<dt>Compass</dt>');
+  });
+});
+
+// 3 November: a retune left the KrakenSDR DAQ unsynced while health, compass and GPS kept coming over LoRa.
+const UNSYNCED = answer('mqtt-lora-daq-unhealthy.json');
+
+describe('an MQTT answer while the DAQ is not healthy', () => {
+  it('keeps the RDF-SDR on the map: position, compass heading and node card', () => {
+    expect(snapshotNav(UNSYNCED)).toMatchObject({ heading_deg: 201.1, compass_state: 'OK', gps_state: 'FIX', latitude: -6.20576 });
+    expect(rdfHeading(UNSYNCED, true)).toEqual({ headingDeg: 201.1, state: 'OK', compassState: 'OK' });
+    expect(resolveStationCoordinate(UNSYNCED)).toMatchObject({ latitude: -6.20576, longitude: 106.81 });
+    expect(node(UNSYNCED)).toContain('201');
+  });
+
+  it('says the DAQ did not sync instead of showing no RDF-SDR at all', () => {
+    expect(overviewDoaStatus(UNSYNCED, true)).toMatchObject({ code: 'DEGRADED', shown: false, reason: 'daqDegraded' });
+    const badge = sourceBadge(UNSYNCED);
+    expect(badge).toMatchObject({ kind: 'mqtt', labelKey: 'source.lora', tone: 'warn', reasons: ['MQTT_DAQ_NOT_HEALTHY'] });
+    expect(sourceBadge(LORA)).toMatchObject({ tone: 'good', reasons: [] });
+    expect(translate('id', 'source.reason.MQTT_DAQ_NOT_HEALTHY')).toBe('DAQ tidak sehat menurut MQTT');
+  });
+});
+
+// link_mode "lora": nothing over the radio for 2 minutes. The last health and DoA stay, each with its age.
+const QUIET = answer('mqtt-lora-held-health.json');
+
+describe('a held answer of link_mode lora', () => {
+  it('keeps the compass heading and the position, both STALE', () => {
+    expect(snapshotNav(QUIET)).toMatchObject({ stale: true, age_ms: 120_000, heading_deg: 201.1 });
+    expect(rdfHeading(QUIET, true)).toEqual({ headingDeg: 201.1, state: 'STALE', compassState: 'OK' });
+    const coordinate = resolveStationCoordinate(QUIET);
+    expect(coordinate).toMatchObject({ latitude: -6.20576, longitude: 106.81, source: 'NAV', stale: true });
+    expect(holdStationCoordinate(null, coordinate, false)).toMatchObject({ held: true });
+    expect(holdStationCoordinate(null, resolveStationCoordinate(LORA), false)).toMatchObject({ held: false });
+  });
+
+  it('holds the last DoA, never as a valid one, and names why on the source chip', () => {
+    const status = overviewDoaStatus(QUIET, true);
+    expect(status.shown).toBe(false);
+    expect(provisionalTheta(QUIET, status)).toBe(160);
+    expect(sourceBadge(QUIET)).toMatchObject({ labelKey: 'source.lora', tone: 'warn', reasons: ['MQTT_HEALTH_STALE'] });
   });
 });

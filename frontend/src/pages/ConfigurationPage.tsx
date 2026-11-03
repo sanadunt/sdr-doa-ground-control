@@ -1,6 +1,6 @@
 import type { FormEvent, JSX, KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
-import type { Branding, CompassConfig, ConsoleConfig, GpsConfig, MqttSnapshot, MqttTransport, PolarSettings } from '../types';
+import type { Branding, CompassConfig, ConsoleConfig, GpsConfig, LinkMode, MqttSnapshot, MqttTransport, PolarSettings } from '../types';
 import { ApiError, LAN_MAX_ALLOWED_CLIENTS, connectMqtt, dryRunConfigPatch, getAdminStatus, getBranding, getCapabilities, getConfigReported, getLanAccess, loginAdmin, logoutAdmin, saveBranding, updateConsoleConfig, updateLanAccess } from '../api';
 import type { ConfigReported, ConsoleCapabilities, LanAccessView } from '../api';
 import { lanDraftDirty, lanDraftFrom, lanErrorKey, lanReasonKey, lanSettingsFromDraft, lanStateChip, parseLanClients } from '../lib/lanAccessForm';
@@ -75,7 +75,7 @@ const NAVIGATION_KEYS = new Set(['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp',
 type Tone = 'good' | 'warn' | 'bad' | 'neutral';
 /** The last action of a card: a state code, plus a message for errors and prompts. */
 type Result = { code: string; tone: Tone; message?: Notice };
-type Busy = 'connection' | 'mqtt' | 'reconnect' | 'login' | 'logout' | 'branding' | 'dry-run';
+type Busy = 'connection' | 'link' | 'mqtt' | 'reconnect' | 'login' | 'logout' | 'branding' | 'dry-run';
 type AdminState = 'checking' | 'locked' | 'unlocked' | 'unknown';
 
 function failure(error: unknown, fallback: MessageKey, code = 'ERROR'): Result {
@@ -312,7 +312,10 @@ export function ConfigurationPage({
   // The port stays text while it is edited so clearing the field does not turn it into 0.
   const [mqttPortDraft, setMqttPortDraft] = useState(String(config.mqtt_port));
   const savedHosts = config.data_out_hosts ?? DEFAULT_DATA_OUT_HOSTS;
-  const dataOutHidden = dataOutUnused(null, mqtt);
+  // LoRa only (link_mode) or a LoRa bridge on the broker: the console reads no Data Out.
+  const linkMode: LinkMode = config.link_mode ?? 'auto';
+  const dataOutHidden = linkMode === 'lora' || dataOutUnused(null, mqtt);
+  const [linkResult, setLinkResult] = useState<Result | null>(null);
   // The host list is its own draft: a new saved list replaces it only when its content changed.
   const [hostsDraft, setHostsDraft] = useState<readonly string[]>(savedHosts);
   const [newHost, setNewHost] = useState('');
@@ -590,6 +593,22 @@ export function ConfigurationPage({
     setConnection((draft) => ({ ...draft, ...patch }));
     if (field) setMqttErrors((errors) => ({ ...errors, [field]: undefined }));
     setMqttResult(null);
+  };
+
+  // The RDF-SDR path saves on its own, at once: it decides what the next snapshot reads.
+  const saveLinkMode = async (mode: LinkMode) => {
+    if (busy || readOnly || mode === linkMode) return;
+    setLinkResult(null);
+    setBusy('link');
+    try {
+      const normalized = await updateConsoleConfig({ ...saved, link_mode: mode });
+      await onConfigSaved(normalized);
+      if (mountedRef.current) setLinkResult({ code: 'SAVED', tone: 'good' });
+    } catch (error: unknown) {
+      if (mountedRef.current) setLinkResult(failure(error, 'config.connectionRejected'));
+    } finally {
+      if (mountedRef.current) setBusy(null);
+    }
   };
 
   const saveConnection = async () => {
@@ -906,6 +925,16 @@ export function ConfigurationPage({
           <Card id="connection-settings" span={6} className="cfg-section" bodyClassName="cfg-conn-body" title={t('config.connectionTitle')}>
             <form className="cfg-form cfg-conn-form" noValidate onSubmit={submitWith(() => { if (!busy && !readOnly) void saveConnection(); })}>
               <fieldset className="cfg-fieldset" disabled={readOnly}>
+              <div className="cfg-group">
+                <span className="pg-field-label" aria-hidden="true">{t('config.linkMode')}</span>
+                <Segmented
+                  label={t('config.linkMode')}
+                  options={[{ value: 'lora' as LinkMode, label: t('config.linkModeLora') }, { value: 'auto' as LinkMode, label: t('config.linkModeAuto') }]}
+                  value={linkMode}
+                  onChange={(mode) => { void saveLinkMode(mode); }}
+                />
+                <ResultLine result={linkResult} />
+              </div>
               {dataOutHidden ? (
                 <>
               <div className="cfg-group">

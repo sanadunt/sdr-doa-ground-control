@@ -2,6 +2,28 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.12.0
+
+Rilis minor: tidak ada yang dihapus. Ada mode baru "Telemetry LoRa saja". Dalam mode ini, setiap data RDF-SDR tampil begitu datang. Data yang tidak datang tetap memakai nilai terakhir, berlabel USANG dengan umurnya, sehingga Dashboard tidak lagi kosong hanya karena satu data basi atau error.
+
+- **Jalur RDF-SDR: Telemetry LoRa | Otomatis** (Konfigurasi → Koneksi, `link_mode` di `console.json`; bawaannya Otomatis, seperti sebelumnya).
+  - Pada **Telemetry LoRa**, console hanya memakai apa yang dibawa bridge LoRa ke broker lokal. Data Out tidak dibaca sama sekali, baik baca penuh, baca ringan, maupun dari UI legacy. Pengaturan Data Out tetap tersimpan dan dilipat. Jalur MQTT jaringan dan Data Out tidak dihapus: pilih Otomatis untuk memakainya lagi.
+  - Selama ada sesi RDF-SDR, jawabannya selalu dari data LoRa. Health yang basi (`MQTT_HEALTH_STALE`) atau DAQ yang tidak sehat (`MQTT_DAQ_NOT_HEALTHY`) tidak lagi membuat jawaban "none". Keduanya menjadi alasan pada chip Sumber (Telemetry LoRa, warna peringatan) dan status `STALE` atau `DEGRADED`.
+  - **Tiap data dengan umurnya sendiri.**
+    - Heading kompas dan posisi GPS dari health terakhir tetap di peta. Bila health sudah basi, heading tertulis USANG dan posisi "POSISI STASIUN TERAKHIR · USANG".
+    - DoA terakhir ditahan, redup dengan USANG N dtk, dan tidak pernah tampil sebagai DoA valid.
+    - Kartu RDF-SDR tetap terisi.
+  - Hanya tanpa sesi sama sekali (belum ada yang masuk) jawabannya "none". Itu pun tanpa membaca Data Out.
+- **DAQ tidak sehat tidak lagi mengosongkan Dashboard, juga pada mode Otomatis.** Pada 3 November, perubahan frekuensi ke 479,999 MHz membuat DAQ KrakenSDR gagal sinkron (`DAQ_NOT_HEALTHY_AFTER_RESTART`, sample delay dan IQ sync false). Health, kompas dan GPS RDF-SDR tetap masuk lewat LoRa, tetapi console menjawab "none". Akibatnya Dashboard menampilkan "Tidak ada telemetri RDF-SDR terkini", tanpa heading dan dengan posisi USANG, sehingga tampak seperti link LoRa putus.
+  - Kini, bila health segar tetapi DAQ tidak sehat dan Data Out tidak bisa menjawab (lewat LoRa, atau tidak terjangkau), jawabannya tetap dari MQTT. Hasilnya:
+    - Posisi dan heading RDF-SDR tetap di peta.
+    - Kartu RDF-SDR tetap terisi.
+    - HUD menulis DAQ gagal sinkron dengan alasan RDF-SDR sendiri.
+    - Chip Sumber menunjukkan Telemetry LoRa (atau MQTT) berwarna peringatan, dengan alasan `MQTT_DAQ_NOT_HEALTHY`.
+  - DoA tidak ditampilkan selama itu (`DEGRADED`, `DAQ_HEALTH_GATE_FAILED`).
+  - Dengan Data Out yang menjawab, jawabannya tetap dari Data Out seperti sebelumnya.
+- Sync flag dari `telemetry/health/detail` yang gagal membuat status DAQ `FAIL`, bukan `UNKNOWN`.
+
 ## 3.11.0
 
 Rilis minor: tidak ada yang dihapus. Tata letak ringkas untuk perangkat sentuh (HP dan tablet, di tampilan LAN maupun di console sendiri). PC groundstation yang memakai mouse tampil seperti 3.10.0, dengan perbaikan tata letak dari audit UI di bawah. Console juga membaca semua yang dikirim RDF Node Edge 1.10.2 (kontrak 1.10); edge yang lebih lama tetap berjalan seperti di 3.10.0.

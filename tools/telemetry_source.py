@@ -78,7 +78,7 @@ from __future__ import annotations
 
 import copy
 import math
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from rdf_node_mqtt_v2 import ANGULAR_FRESH_MS, DOA_FRESH_MS, HEALTH_FRESH_MS
 from sdr_doa_collector import (
@@ -129,6 +129,8 @@ ADC_OVERDRIVE_NOT_OVER_LORA = "ADC_OVERDRIVE_NOT_OVER_LORA"
 MQTT_GATE_REASONS = (
     MQTT_NO_DOA, MQTT_DOA_UNVERIFIED, MQTT_ANGLE_CONVENTION_UNKNOWN, MQTT_ANGULAR_UNAVAILABLE, MQTT_DOA_ANGULAR_CONFLICT,
     ADC_OVERDRIVE_UNKNOWN, ADC_OVERDRIVE_NOT_OVER_LORA,
+    # link_mode "lora" answers from a held health too (DataOutReader._lora_snapshot).
+    MQTT_HEALTH_STALE, MQTT_NO_HEALTH,
 )
 
 # capabilities.angle values of the edge (config.validate_config).
@@ -571,6 +573,10 @@ def _status(node: Mapping[str, Any], light: Optional[Mapping[str, Any]]) -> Dict
         daq_status[name] = bool(value)
         if value is False:
             failed.append(name)
+    if failed and daq != 1:
+        # health/detail names the sync flags that failed: the DAQ did not sync,
+        # whatever the edge's daq code (2 while its status.json is late) says.
+        daq_health = "FAIL"
     safe: Dict[str, Any] = {"timestamp_ms": _int(health.get("t")), "daq_status": daq_status}
     if _int(health.get("drop")) is not None:
         safe["daq_num_dropped_frames"] = health["drop"]
@@ -708,6 +714,7 @@ def _overall_and_gate(
     diagnostics: Mapping[str, Any],
     overdrive: Optional[bool],
     over_lora: bool = False,
+    held: Sequence[str] = (),
 ) -> Tuple[str, Dict[str, Any]]:
     parsed = candidate.get("available") is True and "canonical_angle_deg" in candidate
     fresh = parsed and (_record(candidate.get("freshness")) or {}).get("fresh") is True
@@ -720,7 +727,13 @@ def _overall_and_gate(
     unverified = _record(diagnostics.get("doa_unverified"))
     unverified_current = unverified is not None and unverified.get("stale") is not True
 
+    daq_unhealthy = MQTT_DAQ_NOT_HEALTHY in held
+    health_stale = MQTT_HEALTH_STALE in held or MQTT_NO_HEALTH in held
     reasons: List[str] = ["GROUND_CLOCK_UNVERIFIED"]
+    if health_stale:
+        reasons.append(held[0])
+    if daq_unhealthy:
+        reasons.append("DAQ_HEALTH_GATE_FAILED")
     if overdrive is True:
         reasons.append("ADC_OVERDRIVE")
     elif overdrive is None:
@@ -742,8 +755,8 @@ def _overall_and_gate(
         reasons.append("ANGULAR_PEAK_ANGLE_MISMATCH")
     reasons.extend(["CANONICAL_ANGLE_NOT_CONFIGURED", "DOA_AUTHORITY_NOT_SELECTED"])
     checks = {
-        "mqtt_health_fresh": True,
-        "daq_healthy": True,
+        "mqtt_health_fresh": not health_stale,
+        "daq_healthy": False if daq_unhealthy else None if health_stale else True,
         "adc_not_overdriven": None if overdrive is None else not overdrive,
         "node_not_stalled": True,
         "doa_candidate_parsed": parsed,
@@ -759,10 +772,12 @@ def _overall_and_gate(
     # The collector's order: DEGRADED, CONFLICT, STALE, INCOMPLETE, then
     # UNVERIFIED, which is as far as the console ever goes. A LIVE DoA without
     # its Angular vector is not INCOMPLETE: the vector only adds the curve.
-    if overdrive is True:
+    if overdrive is True or daq_unhealthy:
         state = "DEGRADED"
     elif conflict:
         state = "CONFLICT"
+    elif health_stale:
+        state = "STALE"
     elif candidate.get("available") is True:
         state = "STALE" if not (_record(candidate.get("freshness")) or {}).get("fresh") else (
             "INCOMPLETE" if not parsed else "UNVERIFIED")
@@ -786,6 +801,10 @@ def _nav(health: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     return {
         "source": "telemetry/health",
         "t": _int(health.get("t")),
+        # The health it came with: a held one (link_mode "lora") keeps its
+        # values, marked stale with its age, rather than dropping them.
+        "age_ms": _int(health.get("age_ms")),
+        "stale": health.get("fresh") is not True,
         "gps_state": health.get("gs"),
         "fix": _int(health.get("fix")),
         "satellites": _int(health.get("sat")),
@@ -806,12 +825,22 @@ def mqtt_snapshot(
     base_url: str,
     light_age_ms: Optional[int],
     light_meta: Mapping[str, Any],
+    held: Sequence[str] = (),
 ) -> Dict[str, Any]:
     """The /api/snapshot answer from MQTT, in the TelemetrySnapshot shape.
 
     ``light`` is the last light Data Out read (``collect_light``) or None,
     ``light_age_ms`` how long ago it completed, and ``light_meta`` what the
     reader says about it (interval, reason, running, error).
+
+    ``held``: why MQTT is not fresh (mqtt_freshness reasons) when the answer
+    comes from MQTT all the same: MQTT_DAQ_NOT_HEALTHY where Data Out cannot
+    answer instead (over LoRa, or unreachable), and with console.json
+    link_mode "lora" also MQTT_HEALTH_STALE or MQTT_NO_HEALTH. The answer
+    then keeps every value the store holds, each with its own age (``nav``
+    has ``age_ms`` and ``stale``), and names the reasons: DEGRADED with
+    DAQ_HEALTH_GATE_FAILED, STALE with the health reason. A LIVE DoA still
+    needs a fresh, healthy health (the store's rule), so none is shown then.
     """
     node = _record(view.get("node")) or {}
     now_ms = _int(view.get("now_ms")) or 0
@@ -824,7 +853,7 @@ def mqtt_snapshot(
     overdrive = quality.get("adc_overdrive")
     over_lora = view.get("link") == "lora"
     overall, gate = _overall_and_gate(candidate, consistency, diagnostics, overdrive if isinstance(overdrive, bool) else None,
-                                      over_lora)
+                                      over_lora, held)
     health = _record(node.get("health")) or {}
 
     settings: Dict[str, Any]
@@ -859,12 +888,12 @@ def mqtt_snapshot(
         "schema_version": SCHEMA_VERSION,
         "source": {
             "kind": SOURCE_MQTT,
-            "reason": MQTT_FRESH,
-            "reasons": [],
+            "reason": held[0] if held else MQTT_FRESH,
+            "reasons": list(held),
             # "lora": the node reaches the broker over the LoRa serial bridge, so
             # the light read's values (settings, ADC overdrive, SNR) cannot come.
             "link": "lora" if view.get("link") == "lora" else None,
-            "mqtt": mqtt_summary(view, True),
+            "mqtt": mqtt_summary(view, not held),
             "data_out": {
                 "read": "light",
                 "available": (_record((current_light or {}).get("status")) or {}).get("available") is True,

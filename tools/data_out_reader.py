@@ -57,7 +57,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import telemetry_source as ts
 from sdr_doa_collector import CollectorError
@@ -187,6 +187,7 @@ class DataOutReader:
         collect_light: Optional[Callable[[str, bool], Dict[str, Any]]] = None,
         mqtt_view: Callable[[], Optional[Mapping[str, Any]]] = lambda: None,
         collect_offline: Optional[Callable[[str], Dict[str, Any]]] = None,
+        link_mode: Callable[[], Any] = lambda: "auto",
         light_interval_s: float = LIGHT_READ_INTERVAL_S,
         run_background: Callable[[Callable[[], None]], None] = _start_thread,
     ) -> None:
@@ -203,6 +204,9 @@ class DataOutReader:
         # The answer that reads nothing, for a node with no IP path (view
         # "link" "lora", the LoRa serial bridge): no Data Out at all then.
         self._collect_offline = collect_offline
+        # console.json link_mode: "lora" reads no Data Out at all and answers
+        # from what the LoRa bridge brought, whatever its age (_lora_snapshot).
+        self._link_mode = link_mode
         self._light_interval_s = float(light_interval_s)
         self._run_background = run_background
         self._refresh_seconds = refresh_seconds
@@ -281,6 +285,8 @@ class DataOutReader:
         ``source`` says which source it came from and why.
         """
         view = self._read_mqtt_view()
+        if self.lora_only():
+            return self._lora_snapshot(base_url, view)
         fresh, reasons = ts.mqtt_freshness(view)
         if fresh and request.data_out_only:
             fresh, reasons = False, [ts.DATA_OUT_REQUESTED]
@@ -291,10 +297,44 @@ class DataOutReader:
             # MQTT went stale while Kontrol's "Cek ulang" waited for settings.
             view = self._read_mqtt_view()
             fresh, reasons = ts.mqtt_freshness(view)
+        # Health is fresh but the DAQ is not healthy: Data Out has the DAQ
+        # detail, but where it cannot answer, MQTT still has the node's health,
+        # compass and GPS, so the answer comes from MQTT, marked DEGRADED.
+        daq_only = reasons == [ts.MQTT_DAQ_NOT_HEALTHY] and view is not None and not request.data_out_only
         if self._over_lora(view, request):
+            if daq_only and view is not None:
+                return self._mqtt_answer(base_url, base_url.rstrip("/"), view, held=reasons)
             # No IP path to the node: nothing to read, and no 4 s wait for it.
             return ts.with_source(self._collect_offline(base_url), view, reasons, over_lora=True)
-        return ts.with_source(self._data_out_snapshot(base_url, request), view, reasons)
+        answer = ts.with_source(self._data_out_snapshot(base_url, request), view, reasons)
+        if daq_only and view is not None and answer["source"]["kind"] == ts.SOURCE_NONE:
+            fresher = self._read_mqtt_view()
+            if fresher is not None and ts.mqtt_freshness(fresher)[1] == [ts.MQTT_DAQ_NOT_HEALTHY]:
+                return self._mqtt_answer(base_url, base_url.rstrip("/"), fresher, held=[ts.MQTT_DAQ_NOT_HEALTHY])
+        return answer
+
+    def lora_only(self) -> bool:
+        """console.json link_mode is "lora": Data Out and the MQTT freshness rules are off."""
+        try:
+            return self._link_mode() == "lora"
+        except Exception:
+            return False
+
+    def _lora_snapshot(self, base_url: str, view: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+        """The answer of link_mode "lora": from the RDF Node store, never from Data Out.
+
+        Every value the LoRa bridge brought stays in the answer with its own
+        age (ts.mqtt_snapshot ``held``): a stale or missing health, or a DAQ
+        that is not healthy, is a reason on the answer, not a reason to drop
+        the node. Only without any session (nothing received yet, or no
+        monitor) is the answer ``none``; that reads nothing either.
+        """
+        _fresh, reasons = ts.mqtt_freshness(view)
+        lora_view = dict(view, link="lora") if view is not None else None
+        if lora_view is not None and reasons[:1] not in ([ts.MQTT_DISABLED], [ts.MQTT_NO_SESSION]):
+            return self._mqtt_answer(base_url, base_url.rstrip("/"), lora_view, held=reasons)
+        offline = self._collect_offline(base_url) if self._collect_offline is not None else {"status": {"available": False}}
+        return ts.with_source(offline, lora_view, reasons, over_lora=True)
 
     def _over_lora(self, view: Optional[Mapping[str, Any]], request: SnapshotRequest) -> bool:
         """The node reaches the broker over the LoRa serial bridge (and the legacy UI did not ask for Data Out)."""
@@ -369,7 +409,7 @@ class DataOutReader:
                     target.light_good = running
             running.done.set()
 
-    def _mqtt_answer(self, base_url: str, key: str, view: Mapping[str, Any]) -> Dict[str, Any]:
+    def _mqtt_answer(self, base_url: str, key: str, view: Mapping[str, Any], held: Sequence[str] = ()) -> Dict[str, Any]:
         with self._lock:
             target = self._target_locked(key)
             light = target.light
@@ -404,6 +444,7 @@ class DataOutReader:
         }
         answer = ts.mqtt_snapshot(
             view, result, base_url=base_url, light_age_ms=age_ms if result is not None else None, light_meta=meta,
+            held=held,
         )
         answer["collection"].update({
             "id": answer_id,

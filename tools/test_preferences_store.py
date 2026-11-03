@@ -569,6 +569,7 @@ class SeedTests(unittest.TestCase):
             "mqtt_transport": "tcp",
             "mqtt_ws_path": "/ws",
             "refresh_seconds": 5,
+            "link_mode": "auto",
             # The LAN view has no seed: it starts off, for nobody.
             "lan_access": {"enabled": False, "port": 8788, "bind": "0.0.0.0", "allowed_clients": []},
         }

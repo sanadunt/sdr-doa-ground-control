@@ -47,7 +47,8 @@ export function rdfHeading(snapshot: TelemetrySnapshot | null | undefined, local
   const heading = headingValue(nav.heading_deg);
   if (compassState === null && heading === null) return null;
   if (compassState !== 'OK' || heading === null) return { headingDeg: null, state: 'UNAVAILABLE', compassState };
-  return { headingDeg: heading, state: localFresh ? 'OK' : 'STALE', compassState };
+  // A held health (link_mode "lora") keeps its heading, STALE like an old answer.
+  return { headingDeg: heading, state: localFresh && nav.stale !== true ? 'OK' : 'STALE', compassState };
 }
 
 /**
