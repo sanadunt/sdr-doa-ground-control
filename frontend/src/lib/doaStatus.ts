@@ -1,7 +1,7 @@
 import type { Candidate, TelemetrySnapshot, Tone } from '../types';
 import type { MessageKey } from './i18n';
 import { adcOverdriveUnknown, adcOverdriven, candidate, completeVector, daqFailed, daqUnknown, doaDataReady, freshCandidate, nativeViewsReady, nodeStalled, numberOrNull, parsedCandidate, partialCsvReady, sourceViewNames } from './telemetry';
-import { isMqttSnapshot, loraLink, mqttDoaUnverified, overLora } from './telemetrySource';
+import { isMqttSnapshot, loraLink, mqttDoaUnverified, overLora, unverifiedAfterStaleLive } from './telemetrySource';
 
 /** Why the DoA curve and bearing are, or are not, shown. */
 export type DoaStatusReason =
@@ -143,22 +143,56 @@ const PROVISIONAL_REASONS: ReadonlySet<DoaStatusReason> = new Set<DoaStatusReaso
   'viewMissing',
 ]);
 
+/** A DoA that is not valid but still readable: its theta_0 and the array heading it was taken with. */
+export interface ProvisionalDoa {
+  thetaDeg: number;
+  /**
+   * The array heading the edge stamped on that same sample (contract 1.10 h),
+   * so the bearing is h - theta_0 whatever the offset in use says; null
+   * without one (Data Out, an older edge), when the compass offset applies.
+   */
+  headingDeg: number | null;
+  /** The UNVERIFIED ok=0 sample, not the last LIVE one. */
+  unverified: boolean;
+}
+
+function headingOrNull(value: unknown): number | null {
+  const heading = numberOrNull(value);
+  return heading !== null && heading >= 0 && heading <= 360 ? heading % 360 : null;
+}
+
 /**
- * theta_0 of a DoA that is not valid but still readable, for the dimmed
- * bearing on the HUD and the dashed grey line on the map; null while the DoA
- * is shown, or when nothing readable is left. MQTT: the LIVE view's angle,
- * else the UNVERIFIED (ok=0) one. Data Out: the CSV view, else XML.
+ * The DoA that is not valid but still readable, for the dimmed bearing on the
+ * HUD and the dashed grey line on the map; null while the DoA is shown, or
+ * when nothing readable is left. MQTT: the LIVE view's angle, else the
+ * UNVERIFIED (ok=0) one; a current ok=0 sample that arrived after a LIVE one
+ * gone stale (a retune in progress, say) is the newer word and wins. Each
+ * comes with its own sample's heading. Data Out: the CSV view, else XML.
  */
-export function provisionalTheta(snapshot: TelemetrySnapshot | null | undefined, status: DoaStatus): number | null {
+export function provisionalDoa(snapshot: TelemetrySnapshot | null | undefined, status: DoaStatus): ProvisionalDoa | null {
   if (!snapshot || snapshot.simulation === true || status.shown || !PROVISIONAL_REASONS.has(status.reason)) return null;
+  const raw = snapshot.mqtt?.doa_unverified;
+  const unverified = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+  const unverifiedTheta = numberOrNull(unverified?.canonical_angle_deg);
+  const fromUnverified = (): ProvisionalDoa | null => (unverified && unverifiedTheta !== null
+    ? { thetaDeg: unverifiedTheta, headingDeg: headingOrNull(unverified.array_heading_deg), unverified: true }
+    : null);
   for (const name of sourceViewNames(snapshot)) {
     const view = candidate(snapshot, name);
-    if (parsedCandidate(view)) return numberOrNull(view.canonical_angle_deg);
+    if (!parsedCandidate(view)) continue;
+    const thetaDeg = numberOrNull(view.canonical_angle_deg) as number;
+    if (name === 'mqtt' && unverifiedAfterStaleLive(snapshot)) {
+      const newer = fromUnverified();
+      if (newer) return newer;
+    }
+    return { thetaDeg, headingDeg: name === 'mqtt' ? headingOrNull(view.array_heading_deg) : null, unverified: false };
   }
-  const unverified = snapshot.mqtt?.doa_unverified;
-  return unverified !== null && typeof unverified === 'object'
-    ? numberOrNull((unverified as Record<string, unknown>).canonical_angle_deg)
-    : null;
+  return fromUnverified();
+}
+
+/** theta_0 of provisionalDoa(), or null. */
+export function provisionalTheta(snapshot: TelemetrySnapshot | null | undefined, status: DoaStatus): number | null {
+  return provisionalDoa(snapshot, status)?.thetaDeg ?? null;
 }
 
 const STATUS_TEXT: Record<DoaStatusReason, MessageKey> = {

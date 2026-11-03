@@ -283,7 +283,10 @@ describe('Kontrol unlocked', () => {
     expect(reviewRows(t, vhf.fields)).toContainEqual({ key: 'ant_spacing_m', label: 'Jarak UCA', from: '0.128 m', to: '0.300 m' });
     // Outside the operator's bands the 1.8 engine still sets the spacing by frequency itself.
     const outside = view({ reported: edge18, evaluation: evaluate(draftWithCenter({}, '175', edge18.values, true), edge18) });
-    expect(outside).toContain('Di luar rule band (136–174 dan 400–480 MHz): gain tidak diubah. RDF-SDR mengatur sendiri jarak UCA untuk frekuensi ini (0,3 m di 30–300 MHz, 0,128 m di 300–3000 MHz).');
+    expect(outside).toContain('Di luar rule band (136–174 dan 400–480 MHz): gain tidak diubah. RDF-SDR mengatur sendiri jarak UCA untuk frekuensi ini (0,3 m dari 30 sampai di bawah 300 MHz, 0,128 m dari 300 sampai 3000 MHz).');
+    // The boundary is unambiguous in English too: 300 MHz itself is 0.128 m.
+    expect(view({ reported: edge18, evaluation: evaluate(draftWithCenter({}, '175', edge18.values, true), edge18) }, 'en'))
+      .toContain('0.3 m from 30 to below 300 MHz, 0.128 m from 300 to 3000 MHz');
     // Below 30 MHz the engine sets no spacing: the plain note.
     const low = view({ reported: edge18, evaluation: evaluate(draftWithCenter({}, '27', edge18.values, true), edge18) });
     expect(low).toContain('Di luar rule band (136–174 dan 400–480 MHz): gain dan UCA tidak diubah.');
@@ -476,7 +479,8 @@ describe('Kontrol results', () => {
     expect(unknown).toContain('ov-control-result tone-info');
     expect(unknown).toContain('Hasil tidak diketahui');
     expect(unknown).toContain('Kode: OUTCOME_UNKNOWN · HELPER_TIMEOUT');
-    expect(unknown).toContain('Jangan kirim ulang; baca settings dulu.');
+    // Edge 1.10: the control helper stopped answering after the command was sent.
+    expect(unknown).toContain('helper kontrolnya berhenti menjawab setelah perintah terkirim (HELPER_TIMEOUT). Jangan kirim ulang; baca settings dulu');
     const noFinal = view({ stage: 'done', done: done('no_final_ack', { status: 'ACCEPTED', error: null, reason: null, revision: null }) });
     expect(noFinal).toContain('ov-control-result tone-info');
     expect(noFinal).toContain('Tidak ada ACK akhir');
@@ -525,6 +529,74 @@ describe('Kontrol results', () => {
       const failed = view({ stage: 'done', done: done('acked', ack('FAILED', 'FILENOTFOUNDERROR')) }, lang);
       expect(failed).toContain(translate(lang, 'control.result.failedHelper', { code: 'FILENOTFOUNDERROR' }));
     }
+  });
+
+  it('shows the edge sentence and technical cause of a code this console has no message for', () => {
+    const odd = { status: 'FAILED', error: 'LIFECYCLE_VERIFICATION_TIMEOUT', reason: null, revision: null,
+      message: 'SDR belum terbukti berjalan/berhenti dalam batas waktu verifikasi.', detail: 'TimeoutError: unit still activating' };
+    const markup = view({ stage: 'done', done: done('acked', odd) }, 'en');
+    expect(markup).toContain('RDF-SDR could not apply the change.');
+    expect(markup).toContain('<span>RDF-SDR says: SDR belum terbukti berjalan/berhenti dalam batas waktu verifikasi.</span>');
+    expect(markup).toContain('Code: FAILED · LIFECYCLE_VERIFICATION_TIMEOUT · TimeoutError: unit still activating');
+    // A code with its own message keeps it; the edge sentence is not repeated.
+    const helper = view({ stage: 'done', done: done('acked', { ...odd, error: 'HELPER_UNAVAILABLE', message: 'Helper kontrol tidak berjalan.' }) }, 'en');
+    expect(helper).toContain('(rdf-control-helper.service) is not running or its socket is missing');
+    expect(helper).not.toContain('RDF-SDR says:');
+    const id = view({ stage: 'done', done: done('acked', odd) });
+    expect(id).toContain('<span>Pesan RDF-SDR: SDR belum terbukti berjalan/berhenti dalam batas waktu verifikasi.</span>');
+  });
+
+  it('names the request keys the RDF-SDR ignored', () => {
+    const rejected = { status: 'REJECTED', error: 'UNKNOWN_FIELD', reason: null, revision: null, ignored: ['extra', 'ns:key'] };
+    const markup = view({ stage: 'done', done: { ...done('acked', rejected), ack: rejected } }, 'en');
+    expect(markup).toContain('<span class="ov-control-small">Ignored by RDF-SDR: extra, ns:key.</span>');
+    expect(view({ stage: 'done', done: { ...done('acked', rejected), ack: rejected } })).toContain('Diabaikan RDF-SDR: extra, ns:key.');
+    const none = { ...rejected, ignored: [] };
+    expect(view({ stage: 'done', done: { ...done('acked', none), ack: none } }, 'en')).not.toContain('Ignored by RDF-SDR');
+  });
+
+  it('names the fields the SDR engine changed at its start', () => {
+    const overrode = { status: 'PERSISTED_UNVERIFIED', error: 'ENGINE_OVERRODE_AT_START', reason: null, revision: 44, fields: ['center_frequency_hz', 'gain_db'] };
+    const markup = view({ stage: 'done', done: done('acked', overrode) }, 'en');
+    expect(markup).toContain('but the SDR engine changed a value when it started');
+    expect(markup).toContain('<span>Changed by the engine at its start: Center frequency, Gain.</span>');
+    expect(view({ stage: 'done', done: done('acked', overrode) })).toContain('<span>Diubah engine saat mulai: Frekuensi tengah, Gain.</span>');
+  });
+
+  it('keeps listening for a late final ACK after a timeout', () => {
+    const noFinal = done('no_final_ack', { status: 'VERIFYING', error: null, reason: null, revision: null });
+    const listening = view({ stage: 'done', done: { ...noFinal, late: { count: 2, baseRev: 42, state: 'no_final_ack', ackStatus: 'VERIFYING' } } }, 'en');
+    expect(listening).toContain('<span class="ov-control-small" role="status">Still listening: a late answer from RDF-SDR replaces this result.</span>');
+    expect(view({ stage: 'done', done: noFinal }, 'en')).not.toContain('Still listening');
+    expect(view({ stage: 'done', done: { ...noFinal, late: { count: 2, baseRev: 42, state: 'no_final_ack', ackStatus: 'VERIFYING' } } })).toContain('Masih menunggu: jawaban RDF-SDR yang terlambat');
+  });
+
+  it('says how long the console still waits for the final ACK (contract 1.10 final_within_ms)', () => {
+    const raw = {
+      command_id: 'gc-0123', op: 'config.patch', state: 'acknowledged', now_ms: 100_000, issued_ms: 90_000, expires_ms: 105_000,
+      changes: { gain_db: 25.4 }, final_ack_deadline_ms: 300_000, late_answer_possible: false,
+      ack: { status: 'APPLYING', final: false, error: null, reason: 'GAIN_CHANGE', method: 'RESTART', final_within_ms: 170_000 },
+    };
+    const waiting = normalizeConfigCommandStatus(raw);
+    const markup = view({ stage: 'sending', sending: { commandId: 'gc-0123', count: 1, baseRev: 42, status: waiting } }, 'en');
+    expect(markup).toContain('<span class="ov-control-small">Waiting up to 3 min 20 s more for the result.</span>');
+    // An older server sends no deadline: the same answer with its clock, and no countdown.
+    const older = normalizeConfigCommandStatus({ ...raw, final_ack_deadline_ms: null });
+    expect([older?.nowMs, older?.finalAckDeadlineMs]).toEqual([100_000, null]);
+    expect(view({ stage: 'sending', sending: { commandId: 'gc-0123', count: 1, baseRev: 42, status: older } }, 'en')).not.toContain('Waiting up to');
+  });
+
+  it('refuses a UCA spacing the engine would override, before sending', () => {
+    const edge18 = normalizeConfigReported(reportedBody({
+      node: { ...NODE, config_fields: ['ant_spacing_m', 'center_frequency_hz', 'gain_db', 'vfo0_bandwidth_hz', 'vfo0_frequency_hz', 'vfo0_squelch_db'] },
+      values: { ...(reportedBody().values as Record<string, unknown>), ant_spacing_m: 0.128 },
+    }));
+    const evaluation = evaluate({ ant_spacing_m: '0.2' }, edge18);
+    expect(evaluation.invalid).toBe(true);
+    expect(evaluation.changes).toEqual({});
+    const markup = view({ reported: edge18, evaluation }, 'en');
+    expect(markup).toContain('At this center frequency the KrakenSDR engine sets the UCA spacing itself: 0.128 m.');
+    expect(markup).toMatch(/<button class="ov-button is-primary is-wide" type="button" disabled="">/u);
   });
 
   it('reports no ACK and a refused publish', () => {

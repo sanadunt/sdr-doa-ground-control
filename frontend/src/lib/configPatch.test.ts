@@ -22,15 +22,21 @@ import {
   draftWithCenter,
   edgeErrorKey,
   edgeHelperFault,
+  edgeHelperLost,
+  engineSpacingFor,
   fieldFor,
+  finalAnswerWaitText,
+  lateAnswerOpen,
+  lateAnswerStep,
   gainTableValue,
   inFieldRange,
   mergeIntoDraft,
   parseDraft,
   rangeParts,
   settingsReadView,
+  withoutBandFill,
 } from './configPatch';
-import type { CommandStatusLike } from './configPatch';
+import type { CommandStatusLike, DraftValues } from './configPatch';
 import { CONFIG_PATCH_KEYS } from './controlDraft';
 import { DICTIONARIES, translate } from './i18n';
 
@@ -202,7 +208,8 @@ describe('edge 1.8: the UCA spacing (ant_spacing_m)', () => {
     const base = draftFromReported(reported, FIELDS);
     expect(base.ant_spacing_m).toBe('0.128');
     expect(parseDraft(FIELDS, base, reported, null).changes).toEqual({});
-    expect(parseDraft(FIELDS, { ...base, ant_spacing_m: '0,12345' }, reported, null).changes).toEqual({ ant_spacing_m: 0.1235 });
+    // A ULA keeps the radius it is given (the engine's band rule holds for a UCA only).
+    expect(parseDraft(FIELDS, { ...base, ant_spacing_m: '0,12345' }, reported, null, GAIN_TABLE_DB, null, 'ULA').changes).toEqual({ ant_spacing_m: 0.1235 });
     expect(parseDraft(FIELDS, { ...base, ant_spacing_m: '1.2' }, reported, null).fields[5].problem).toBe('range');
     expect(parseDraft(FIELDS, { ...base, ant_spacing_m: '0.04' }, reported, null).fields[5].problem).toBe('range');
   });
@@ -221,6 +228,53 @@ describe('edge 1.8: the UCA spacing (ant_spacing_m)', () => {
     // An older edge: the gain only, as before.
     expect(draftWithCenter({}, '145.5', reported)).toEqual({ center_frequency_hz: '145.5', vfo0_frequency_hz: '145.5', gain_db: '25.4' });
     expect(draftWithBand({ gain_db: '20.7' }, 1_200_000_000, true)).toEqual({ gain_db: '20.7' });
+  });
+
+  it('drops a band fill that no longer applies while the centre is typed one key at a time', () => {
+    const typed = (from: DraftValues, text: string) => {
+      let draft = from;
+      for (let end = 1; end <= text.length; end += 1) draft = draftWithCenter(draft, text.slice(0, end), reported, true);
+      return draft;
+    };
+    // 1575.42 passes 157 MHz (VHF): its 25.4 dB and 0.3 m must not stay in the patch.
+    const gps = typed({}, '1575.42');
+    expect(gps).toEqual({ center_frequency_hz: '1575.42', vfo0_frequency_hz: '1575.42' });
+    expect(parseDraft(FIELDS, { ...draftFromReported(reported, FIELDS), ...gps }, reported, null).changes)
+      .toEqual({ center_frequency_hz: 1_575_420_000, vfo0_frequency_hz: 1_575_420_000 });
+    for (const text of ['1420', '1600', '1700']) expect(typed({}, text), text).toEqual({ center_frequency_hz: text, vfo0_frequency_hz: text });
+    // A band reached at the end keeps its fill; a gain the operator picked stays.
+    expect(typed({}, '145.5')).toEqual({ center_frequency_hz: '145.5', vfo0_frequency_hz: '145.5', gain_db: '25.4', ant_spacing_m: '0.3' });
+    expect(draftWithCenter({ ...typed({}, '157'), gain_db: '20.7' }, '1575', reported, true)).toEqual({ center_frequency_hz: '1575', vfo0_frequency_hz: '1575', gain_db: '20.7' });
+    // UHF to VHF: the new band's fill replaces the old one.
+    expect(draftWithCenter(typed({}, '433.92'), '145', reported, true)).toMatchObject({ gain_db: '25.4', ant_spacing_m: '0.3' });
+    // A centre from the spectrum dock replaces a typed one the same way (ControlPanel merges it after this).
+    expect(withoutBandFill(typed({}, '157'), true)).toEqual({ center_frequency_hz: '157', vfo0_frequency_hz: '157' });
+    expect(withoutBandFill({ center_frequency_hz: '157', gain_db: '20.7' }, true)).toEqual({ center_frequency_hz: '157', gain_db: '20.7' });
+    // An older edge without the UCA field: only the gain is filled and dropped.
+    expect(draftWithCenter({ center_frequency_hz: '157', gain_db: '25.4', ant_spacing_m: '0.3' }, '1575', reported)).toEqual({
+      center_frequency_hz: '1575', vfo0_frequency_hz: '1575', ant_spacing_m: '0.3',
+    });
+  });
+
+  it('refuses a UCA spacing the engine band rule would override, as the edge does', () => {
+    expect([engineSpacingFor(29_999_999), engineSpacingFor(30_000_000), engineSpacingFor(299_999_999), engineSpacingFor(300_000_000),
+      engineSpacingFor(3_000_000_000), engineSpacingFor(3_000_000_001), engineSpacingFor(null)]).toEqual([null, 0.3, 0.3, 0.128, 0.128, null, null]);
+    const base = draftFromReported(reported, FIELDS);
+    // At the reported 416.588 MHz the engine runs 0.128 m.
+    const refused = parseDraft(FIELDS, { ...base, ant_spacing_m: '0.2' }, reported, null);
+    expect(refused.invalid).toBe(true);
+    expect(refused.changes).toEqual({});
+    expect(refused.fields[5]).toMatchObject({ problem: 'engineBand', bandSpacingM: 0.128 });
+    // Within the edge's 0.5 mm the band value passes.
+    expect(parseDraft(FIELDS, { ...base, ant_spacing_m: '0.1284' }, reported, null).changes).toEqual({ ant_spacing_m: 0.1284 });
+    // The centre sent with it decides: 300 MHz is already 0.128 m, 299.999 MHz still 0.3 m.
+    const at = (center: string, spacing: string) => parseDraft(FIELDS, { ...base, center_frequency_hz: center, vfo0_frequency_hz: center, ant_spacing_m: spacing }, reported, null);
+    expect(at('300', '0.1281').changes).toMatchObject({ ant_spacing_m: 0.1281 });
+    expect(at('299.999', '0.1281').fields[5]).toMatchObject({ problem: 'engineBand', bandSpacingM: 0.3 });
+    // Below 30 MHz the engine sets nothing; a ULA is left to the edge.
+    expect(at('27', '0.2').changes).toMatchObject({ ant_spacing_m: 0.2 });
+    expect(parseDraft(FIELDS, { ...base, ant_spacing_m: '0.2' }, reported, null, GAIN_TABLE_DB, null, 'ULA').invalid).toBe(false);
+    expect(parseDraft(FIELDS, { ...base, ant_spacing_m: '0.2' }, reported, null, GAIN_TABLE_DB, null, 'UCA').invalid).toBe(true);
   });
 
   it('explains the engine band refusal with the band spacing, and names it in the codes', () => {
@@ -295,8 +349,8 @@ describe('commandResultView', () => {
       code: 'PERSISTED_UNVERIFIED · NATIVE_RUNTIME_EVIDENCE_INCOMPLETE',
       reload: true,
     });
-    const unknown = commandResultView(status('acked', ack({ status: 'OUTCOME_UNKNOWN', error: 'HELPER_CLOSED', revision: null })), 1, 42, 15);
-    expect(unknown).toMatchObject({ tone: 'info', title: { key: 'control.result.title.unknown' }, body: { key: 'control.result.outcomeUnknown' }, code: 'OUTCOME_UNKNOWN · HELPER_CLOSED', reload: true });
+    const unknown = commandResultView(status('acked', ack({ status: 'OUTCOME_UNKNOWN', error: 'ENGINE_STATE_UNCLEAR', revision: null })), 1, 42, 15);
+    expect(unknown).toMatchObject({ tone: 'info', title: { key: 'control.result.title.unknown' }, body: { key: 'control.result.outcomeUnknown' }, code: 'OUTCOME_UNKNOWN · ENGINE_STATE_UNCLEAR', reload: true });
     const lost = commandResultView(status('no_final_ack', ack({ status: 'ACCEPTED', revision: null })), 1, 42, 15);
     expect(lost).toEqual({ tone: 'info', title: { key: 'control.result.noFinalAckTitle' }, body: { key: 'control.result.noFinalAck', vars: { status: 'ACCEPTED' } }, code: 'ACCEPTED', reload: true });
   });
@@ -337,12 +391,127 @@ describe('commandResultView', () => {
       const failed = commandResultView(status('acked', ack({ status: 'FAILED', error: code })), 1, 42, 15);
       expect(failed).toMatchObject({ tone: 'err', body: { key: 'control.result.failedHelper', vars: { code } }, code: `FAILED · ${code}` });
     }
-    for (const code of ['BUSY', 'CONFIG_REVISION_CONFLICT', 'ERRORS', null]) expect(edgeHelperFault(code)).toBe(false);
-    // A link that dropped while applying is named too.
+    for (const code of ['BUSY', 'CONFIG_REVISION_CONFLICT', 'ERRORS', 'INTERNAL_ERROR', 'HELPER_INTERNAL_ERROR', null]) expect(edgeHelperFault(code)).toBe(false);
+    // CONNECTION_LOST is only the Last Will of availability, never an ACK reason: no message of its own.
     expect(commandResultView(status('acked', ack({ status: 'OUTCOME_UNKNOWN', reason: 'CONNECTION_LOST', revision: null })), 1, 42, 15).body)
-      .toEqual({ key: 'control.result.outcomeUnknownLink', vars: { code: 'CONNECTION_LOST' } });
+      .toEqual({ key: 'control.result.outcomeUnknown', vars: { code: 'CONNECTION_LOST' } });
     // An unknown final status is not a success and shows its code.
     expect(commandResultView(status('acked', ack({ status: 'SOMETHING_NEW' })), 1, 42, 15)).toMatchObject({ tone: 'info', code: 'SOMETHING_NEW' });
+  });
+
+  it('recognises the helper and agent codes of edge 1.10 with what to do', () => {
+    // The helper got the command, then stopped answering: whether it ran is not known.
+    for (const code of ['HELPER_TIMEOUT', 'HELPER_CONNECTION_LOST', 'HELPER_CLOSED', 'RPC_TIMEOUT', 'SYSTEMD_ACTION_OUTCOME_UNKNOWN']) {
+      expect([edgeHelperFault(code), edgeHelperLost(code)], code).toEqual([true, true]);
+      expect(commandResultView(status('acked', ack({ status: 'OUTCOME_UNKNOWN', error: code, revision: null })), 1, 42, 15).body)
+        .toEqual({ key: 'control.result.outcomeUnknownHelperLost', vars: { code } });
+    }
+    // Edge 1.10 sends HELPER_CLOSED as FAILED: still an open outcome, not a helper that could not run; its sentence stays.
+    const closed = ack({ status: 'FAILED', error: 'HELPER_CLOSED', message: 'Helper kontrol menutup koneksi tanpa jawaban; hasilnya belum pasti.' });
+    expect(commandResultView(status('acked', closed), 1, 42, 15)).toMatchObject({
+      tone: 'info', title: { key: 'control.result.title.unknown' }, body: { key: 'control.result.outcomeUnknownHelperLost', vars: { code: 'HELPER_CLOSED' } },
+      code: 'FAILED · HELPER_CLOSED', reload: true, message: 'Helper kontrol menutup koneksi tanpa jawaban; hasilnya belum pasti.',
+    });
+    // The helper ran and answered with a failure: the generic body and the edge's sentence, not "missing or not approved".
+    for (const [code, message] of [
+      ['HELPER_RESPONSE_LIMIT', 'Jawaban helper kontrol terlalu besar dan tidak dibaca.'], ['HELPER_FAILED', 'Helper kontrol menolak perintah tanpa alasan.'],
+    ] as const) {
+      expect([edgeHelperFault(code), edgeHelperLost(code)], code).toEqual([true, false]);
+      expect(commandResultView(status('acked', ack({ status: 'FAILED', error: code, message })), 1, 42, 15), code).toMatchObject({
+        tone: 'err', title: { key: 'control.result.title.failed' }, body: { key: 'control.result.failed' }, code: `FAILED · ${code}`, message,
+      });
+    }
+    // The helper did not run the command: its own message, which says what to check.
+    for (const [code, key] of [
+      ['HELPER_UNAVAILABLE', 'control.edge.HELPER_UNAVAILABLE'], ['HELPER_ACCESS_DENIED', 'control.edge.HELPER_ACCESS_DENIED'],
+      ['PEER_UID_DENIED', 'control.edge.HELPER_ACCESS_DENIED'],
+    ] as const) {
+      expect([edgeHelperFault(code), edgeHelperLost(code)], code).toEqual([true, false]);
+      expect(commandResultView(status('acked', ack({ status: 'FAILED', error: code })), 1, 42, 15).body).toEqual({ key });
+      expect(commandResultView(status('acked', ack({ status: 'REJECTED', error: code })), 1, 42, 15).body).toEqual({ key });
+      expect(commandResultView(status('acked', ack({ status: 'OUTCOME_UNKNOWN', error: code, revision: null })), 1, 42, 15).body)
+        .toEqual({ key: 'control.result.outcomeUnknownHelper', vars: { code } });
+    }
+    for (const [code, key] of [
+      ['INTERNAL_ERROR', 'control.edge.INTERNAL_ERROR'], ['HELPER_INTERNAL_ERROR', 'control.edge.INTERNAL_ERROR'],
+      ['CONFIG_ADAPTER_NOT_APPROVED', 'control.edge.CONFIG_ADAPTER_NOT_APPROVED'], ['UNSUPPORTED_SETTINGS_FIELD', 'control.edge.UNSUPPORTED_SETTINGS_FIELD'],
+      ['SETTINGS_FILE_INVALID', 'control.edge.SETTINGS_FILE_INVALID'], ['INVALID_COMMAND_FIELD', 'control.edge.INVALID_COMMAND_FIELD'],
+      ['JOURNAL_UNAVAILABLE', 'control.edge.JOURNAL_UNAVAILABLE'], ['CAPABILITY_DISABLED', 'control.edge.CAPABILITY_DISABLED'],
+    ] as const) {
+      expect(edgeErrorKey(code), code).toBe(key);
+      expect(commandResultView(status('acked', ack({ status: 'FAILED', error: code })), 1, 42, 15).body).toEqual({ key });
+    }
+    expect(translate('en', 'control.edge.CONFIG_ADAPTER_NOT_APPROVED')).toContain('sudo rdf-node controls approve --settings');
+    // A config.get the helper could not answer reads as a helper fault, not a refusal.
+    expect(settingsReadView(status('acked', ack({ status: 'OUTCOME_UNKNOWN', error: 'HELPER_TIMEOUT' })))?.key).toBe('control.settings.helper');
+    expect(settingsReadView(status('acked', ack({ status: 'REJECTED', error: 'HELPER_UNAVAILABLE' })))?.key).toBe('control.edge.HELPER_UNAVAILABLE');
+  });
+
+  it('shows the edge message for an unmapped code and the technical cause on the code line', () => {
+    const odd = ack({ status: 'FAILED', error: 'LIFECYCLE_VERIFICATION_TIMEOUT', message: 'SDR belum terbukti berjalan.', detail: 'TimeoutError: unit activating' });
+    expect(commandResultView(status('acked', odd), 1, 42, 15)).toMatchObject({
+      body: { key: 'control.result.failed' }, message: 'SDR belum terbukti berjalan.', code: 'FAILED · LIFECYCLE_VERIFICATION_TIMEOUT · TimeoutError: unit activating',
+    });
+    for (const state of ['REJECTED', 'CANCELLED', 'OUTCOME_UNKNOWN', 'SOMETHING_NEW']) {
+      expect(commandResultView(status('acked', { ...odd, status: state }), 1, 42, 15).message, state).toBe('SDR belum terbukti berjalan.');
+    }
+    // A code with a message of its own (or a named cause) does not repeat the edge's sentence.
+    expect(commandResultView(status('acked', { ...odd, error: 'BUSY' }), 1, 42, 15).message).toBeUndefined();
+    expect(commandResultView(status('acked', { ...odd, status: 'OUTCOME_UNKNOWN', error: 'HELPER_TIMEOUT' }), 1, 42, 15).message).toBeUndefined();
+    // OUTCOME_UNKNOWN keeps its generic body for a mapped code without a branch of its own, so the edge's sentence stays.
+    for (const code of ['INTERNAL_ERROR', 'JOURNAL_UNAVAILABLE', 'CAPABILITY_DISABLED']) {
+      expect(commandResultView(status('acked', { ...odd, status: 'OUTCOME_UNKNOWN', error: code }), 1, 42, 15), code).toMatchObject({
+        body: { key: 'control.result.outcomeUnknown' }, message: 'SDR belum terbukti berjalan.',
+      });
+    }
+    expect(commandResultView(status('acked', { ...odd, message: null }), 1, 42, 15).message).toBeUndefined();
+    // An older edge sends neither.
+    expect(commandResultView(status('acked', ack({ status: 'FAILED', error: 'APPLY_FAULT' })), 1, 42, 15)).toMatchObject({ code: 'FAILED · APPLY_FAULT' });
+  });
+
+  it('names every field of a multi-field engine override', () => {
+    const en = (key: Parameters<typeof translate>[1], vars?: Parameters<typeof translate>[2]) => translate('en', key, vars);
+    expect(restartReasonText(en, 'LIVE_FAILED:ENGINE_OVERRODE:center_frequency_hz,vfo0_frequency_hz'))
+      .toBe('the SDR engine changed Center frequency, VFO frequency on the live retune');
+    expect(restartReasonText(en, 'LIVE_FAILED:ENGINE_OVERRODE:gain_db,vfo0_squelch_db,new_field'))
+      .toBe('the SDR engine changed Gain, VFO squelch, new_field on the live retune');
+    const applied = ack({ method: 'RESTART', reason: 'LIVE_FAILED:ENGINE_OVERRODE:center_frequency_hz,gain_db,vfo0_frequency_hz', revision: 300 });
+    expect(appliedMethodText(en, applied)).toBe('Applied by restarting the SDR (the SDR engine changed Center frequency, Gain, VFO frequency on the live retune).');
+    // ENGINE_OVERRODE_AT_START names the fields the engine rewrote (result.fields).
+    const overrode = commandResultView(status('acked', ack({ status: 'PERSISTED_UNVERIFIED', error: 'ENGINE_OVERRODE_AT_START', fields: ['gain_db'] })), 1, 42, 15);
+    expect(overrode).toMatchObject({ body: { key: 'control.result.persistedEngineOverrode' }, fields: ['gain_db'] });
+    expect(commandResultView(status('acked', ack({ status: 'PERSISTED_UNVERIFIED', error: 'ENGINE_OVERRODE_AT_START' })), 1, 42, 15).fields).toBeUndefined();
+  });
+
+  it('says how long the final ACK may still take, and keeps a timeout open for a late answer', () => {
+    const en = (key: Parameters<typeof translate>[1], vars?: Parameters<typeof translate>[2]) => translate('en', key, vars);
+    expect(finalAnswerWaitText(en, { nowMs: 1_000, finalAckDeadlineMs: 201_000 })).toBe('Waiting up to 3 min 20 s more for the result.');
+    expect(finalAnswerWaitText(en, { nowMs: 1_000, finalAckDeadlineMs: 46_000 })).toBe('Waiting up to 45 s more for the result.');
+    expect(finalAnswerWaitText(en, { nowMs: 1_000, finalAckDeadlineMs: 121_000 })).toBe('Waiting up to 2 min more for the result.');
+    expect(finalAnswerWaitText(en, { nowMs: 1_000, finalAckDeadlineMs: 1_000 })).toBeNull();
+    expect(finalAnswerWaitText(en, { nowMs: 1_000, finalAckDeadlineMs: null })).toBeNull();
+    expect(finalAnswerWaitText(en, null)).toBeNull();
+    expect(lateAnswerOpen({ lateAnswerPossible: true, nowMs: 300_000, issuedMs: 0 })).toBe(true);
+    expect(lateAnswerOpen({ lateAnswerPossible: true, nowMs: 900_000, issuedMs: 0 })).toBe(false);
+    expect(lateAnswerOpen({ lateAnswerPossible: true, nowMs: null, issuedMs: 0 })).toBe(true);
+    expect(lateAnswerOpen({ lateAnswerPossible: false, nowMs: 1, issuedMs: 0 })).toBe(false);
+    expect(lateAnswerOpen({ nowMs: 1, issuedMs: 0 })).toBe(false);
+  });
+
+  it('stops reading a timeout whose window closed without showing it again, and shows a late answer', () => {
+    const shown = { state: 'no_final_ack', ackStatus: 'APPLYING' };
+    const read = (state: string, ackStatus: string | null, lateAnswerPossible: boolean, nowMs: number) => ({
+      state, ack: ackStatus === null ? null : { status: ackStatus }, lateAnswerPossible, nowMs, issuedMs: 0,
+    });
+    expect(lateAnswerStep(shown, read('no_final_ack', 'APPLYING', true, 300_000))).toBe('wait');
+    // The 900 s window closed on the same timeout (the server, or the console's own clock).
+    expect(lateAnswerStep(shown, read('no_final_ack', 'APPLYING', false, 900_001))).toBe('closed');
+    expect(lateAnswerStep(shown, read('no_final_ack', 'APPLYING', true, 900_000))).toBe('closed');
+    // A late final ACK replaces the timeout, inside the window or just as it closes.
+    expect(lateAnswerStep(shown, read('acked', 'APPLIED', false, 400_000))).toBe('answered');
+    expect(lateAnswerStep(shown, read('acked', 'FAILED', false, 900_001))).toBe('answered');
+    // A first ACK after no ACK at all is new too.
+    expect(lateAnswerStep({ state: 'no_ack', ackStatus: null }, read('no_final_ack', 'ACCEPTED', false, 900_001))).toBe('answered');
   });
 
   it('keeps the plain code line of an edge before contract 1.7', () => {

@@ -125,6 +125,20 @@ describe('held overlay geometry', () => {
     expect(bearingAndDistance(origin, end[0], end[1]).bearingDeg).toBeCloseTo(330, 0);
   });
 
+  it('turns the held curve with its own frame heading and the bearing with the compass offset', () => {
+    // Contract 1.10: the Angular frame carries its own heading, which may differ from the DoA's.
+    const turned = { ...held, curveOffsetDeg: 50 };
+    const same = heldOverlayFeatures(held, draw)['doa-held-lobe'];
+    const moved = heldOverlayFeatures(turned, draw)['doa-held-lobe'];
+    expect(moved).not.toEqual(same);
+    expect(heldOverlayFeatures({ ...held, curveOffsetDeg: 10 }, draw)['doa-held-lobe']).toEqual(same);
+    expect(heldBearingDeg(turned)).toBeCloseTo(330, 6);
+    // A new frame heading is a new live overlay to remember.
+    const first = step(null, { live: live(), nowMs: 1_000 });
+    const next = step(first.memory, { live: live(first.memory?.overlay?.values, { curveOffsetDeg: 50 }), nowMs: 2_000 });
+    expect(next.memory?.overlay?.curveOffsetDeg).toBe(50);
+  });
+
   it('stays where it was measured while the station moves on', () => {
     // Live at A; the DoA stops and the RDF-SDR drives about 2 km north to B.
     const atA = step(null, { live: live(), nowMs: 1_000 });
@@ -219,7 +233,7 @@ describe('the held overlay keeps the live paint (owner\'s decision of 2026-11-02
     // Palette, opacity, intensity and blur reach the held layers through setDoaPaint().
     expect(source).not.toMatch(/map\.setPaintProperty\('doa-(beam|heat|lobe|edges|bearing)/u);
     for (const property of ["'doa-beam', 'fill-color'", "'doa-beam', 'fill-opacity'", "'doa-heat', 'heatmap-color'", "'doa-heat', 'heatmap-radius'", "'doa-heat', 'heatmap-opacity'", "'doa-heat', 'heatmap-intensity'", "'doa-lobe-fill', 'fill-opacity'", "'doa-edges', 'line-color'", "'doa-lobe-outline', 'line-color'"]) expect(source).toContain(`setDoaPaint(map, ${property}`);
-    expect(source).toContain('setDoaPaint(map, id, property, base * fade)');
+    expect(source).toContain('setDoaPaint(map, id, property, base * (CURVE_LINE_LAYERS.has(id) ? curveLayerFade : fade))');
     // The canvas fallback draws the held lobe, edges and bearing with the live strokes.
     expect(source).toContain("drawDirection(geometry.data['doa-held-lobe'], geometry.data['doa-held-edges'], geometry.data['doa-held-bearing'])");
   });

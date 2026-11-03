@@ -85,6 +85,36 @@ export function dataOutDefaultSquelchMode(snapshot: TelemetrySnapshot | null, fr
   return typeof value === 'string' && /^[A-Za-z][A-Za-z ]{0,31}$/u.test(value) ? value : null;
 }
 
+// An array arrangement as settings.json spells it; kept as it is, since the edge compares it with 'UCA' exactly.
+const ANT_ARRANGEMENT_RE = /^[A-Za-z_]{1,16}$/u;
+
+/** settings.json ant_arrangement as the edge reads it, or null when it is not a short word. */
+export function antArrangementOrNull(value: unknown): string | null {
+  return typeof value === 'string' && ANT_ARRANGEMENT_RE.test(value) ? value : null;
+}
+
+/**
+ * settings.json ant_arrangement (UCA, ULA) from a fresh, live Data Out
+ * snapshot; null otherwise. The engine's own UCA radius rule holds for a UCA only.
+ */
+export function dataOutAntArrangement(snapshot: TelemetrySnapshot | null, fresh: boolean): string | null {
+  const settings = snapshot?.settings;
+  if (!fresh || !snapshot || snapshot.simulation === true || settings?.available !== true) return null;
+  const fields = settings.fields;
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return null;
+  return antArrangementOrNull((fields as Record<string, unknown>).ant_arrangement);
+}
+
+/**
+ * The array arrangement the edge's band rule (control._band_spacing) reads:
+ * the current settings/reported first, which also arrives over LoRa, then a
+ * fresh Data Out; null when neither says, which parseDraft treats as a UCA,
+ * as the edge treats a settings.json without the key.
+ */
+export function controlAntArrangement(settings: ConfigReported['settings'] | null | undefined, dataOut: string | null): string | null {
+  return (settings?.matchesStateCfg === true ? settings.antArrangement : null) ?? dataOut;
+}
+
 /** Current values for the Kontrol form: settings/reported first, then Data Out for what it does not carry. */
 export function currentConfigValues(mqtt: Partial<Record<ConfigPatchKey, ConfigPatchValue | null>> | null | undefined, dataOut: ConfigValues): ConfigValues {
   const values = emptyValues();

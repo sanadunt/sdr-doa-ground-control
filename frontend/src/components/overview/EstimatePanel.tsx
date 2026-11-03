@@ -1,7 +1,7 @@
 import { useState, type JSX } from 'react';
 import { useI18n } from '../../lib/i18n';
 import type { MessageKey } from '../../lib/i18n';
-import { formatEstimateDistance, resetPositionEstimate, type PositionEstimate } from '../../lib/positionEstimate';
+import { estimateWaitKey, formatEstimateDistance, resetPositionEstimate, type PositionEstimate } from '../../lib/positionEstimate';
 import { formatBearing } from '../../lib/overlayPalette';
 
 const STATE_TAG: Record<PositionEstimate['state'], MessageKey> = {
@@ -17,9 +17,10 @@ const STATE_TEXT: Record<PositionEstimate['state'], MessageKey> = {
 
 /**
  * The transmitter position estimate under the bearing HUD: where the moving
- * RDF-SDR's bearings cross, how far that is, and what it rests on. "Start
- * over" clears it on this console (nothing goes to the node). Not shown in
- * the LAN view, which only watches. In the compact touch layout, and on a
+ * RDF-SDR's bearings cross, how far that is, and what it rests on. While the
+ * console skips LIVE bearings it says what they lack: a position (or that the
+ * node does not send one) or a heading. "Start over" clears it on this
+ * console (nothing goes to the node). Not shown in the LAN view, which only watches. In the compact touch layout, and on a
  * desktop while Lapisan is open (the column would squeeze it), it is one
  * button of two lines (title, state and distance) that opens the rest.
  */
@@ -33,6 +34,7 @@ export function EstimatePanel({ estimate, viewOnly = false, compact = false }: {
     distance: formatEstimateDistance(estimate.distanceM),
     bearing: estimate.bearingDeg === null ? '--' : formatBearing(estimate.bearingDeg, 0),
   }) : null;
+  const waitKey = estimateWaitKey(estimate);
   const onReset = () => {
     setResetState({ busy: true, error: null });
     resetPositionEstimate().then(
@@ -69,7 +71,13 @@ export function EstimatePanel({ estimate, viewOnly = false, compact = false }: {
           <span className="ov-tag tone-neutral">{t(STATE_TAG[estimate.state])}</span>
         </div>
       )}
-      {ready ? null : <p className="ov-hud-held" role="status">{t(STATE_TEXT[estimate.state])}</p>}
+      {/* Nothing used yet: what the skipped bearings lack replaces the plain waiting text. */}
+      {ready || (estimate.state === 'NO_DATA' && waitKey) ? null : <p className="ov-hud-held" role="status">{t(STATE_TEXT[estimate.state])}</p>}
+      {waitKey ? (
+        <p className="ov-hud-held" role={estimate.state === 'NO_DATA' ? 'status' : undefined}>
+          {t(waitKey)}{estimate.skipped > 0 ? ` · ${t('estimate.skipped', { count: String(estimate.skipped) })}` : ''}
+        </p>
+      ) : null}
       {located && estimate.latitude !== null && estimate.longitude !== null ? (
         <>
           <div className="ov-estimate-distance">{distanceText}</div>

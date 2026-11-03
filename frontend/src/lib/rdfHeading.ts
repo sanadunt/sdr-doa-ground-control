@@ -6,7 +6,7 @@ import type { Translate } from './i18n';
 import { snapshotNav } from './telemetrySource';
 
 /**
- * The RDF-SDR's compass heading (its direction of travel) from the nav fields
+ * The RDF-SDR's compass heading (where its array points, not its course) from the nav fields
  * of telemetry/health (contract 1.6): `heading_deg` from north, magnetic plus
  * the edge's own offset, and `compass_state`. It is drawn on the map apart
  * from the DoA bearing, which never uses it.

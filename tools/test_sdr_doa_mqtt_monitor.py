@@ -304,6 +304,9 @@ class SharedMqttMonitorTests(unittest.TestCase):
         with patch.object(self.module, "_now_ms", lambda: clock[0]):
             self.assertEqual(self.monitor.rdf_node_view()["link"], "lora")
             self.assertEqual(self.monitor.rdf_node_control_view()["link"], "lora")
+            # The store ages Angular and detail by the LoRa windows from now on.
+            self.assertEqual(self.monitor._rdf_node.link, "lora")
+            self.assertEqual(self.monitor.rdf_node_snapshot()["link"], "lora")
 
     def test_client_construction_failure_surfaces_shared_connection_error(self) -> None:
         def unavailable_client(*_args: object, **_kwargs: object) -> None:
@@ -499,6 +502,7 @@ class SharedMqttMonitorTests(unittest.TestCase):
         observation = self.monitor.rdf_node_command_observation(command["id"])
         self.assertEqual(observation, {
             "published": True, "adopted": False, "puback": None, "progress": None, "final": None, "reported_at_ms": None,
+            "method_seen": None, "final_ack_by_ms": None,
         })
         # The Message Monitor snapshot keeps saying the monitor never publishes on its own.
         snapshot = self.monitor.snapshot()
@@ -605,6 +609,74 @@ class SharedMqttMonitorTests(unittest.TestCase):
             self.monitor.publish_rdf_node_command(self._command(f"gc-bulk-{index}"))
         self.assertEqual(len(self.monitor._commands), self.module.MAX_COMMAND_RECORDS)
         self.assertIs(self.monitor.rdf_node_command_observation("gc-ours")["published"], False)
+
+    def test_progress_acks_keep_their_order_method_and_bound(self) -> None:
+        self._connected()
+        self._node_state()
+        self.monitor.publish_rdf_node_command(self._command("gc-restart"))
+        accepted = self._edge_ack("gc-restart", "ACCEPTED")
+        applying = dict(self._edge_ack("gc-restart", "APPLYING", {"method": "RESTART", "final_within_ms": 100_000}),
+                        t=accepted["t"] + 200)
+        with patch.object(self.module, "_now_ms", lambda: 1_700_000_000_000):
+            self._rdf("ack/config", applying)
+        # The resent ACCEPTED (its first send lost over LoRa) never replaces APPLYING.
+        self._rdf("ack/config", accepted)
+        observed = self.monitor.rdf_node_command_observation("gc-restart")
+        self.assertEqual((observed["progress"]["status"], observed["method_seen"]), ("APPLYING", "RESTART"))
+        self.assertEqual(observed["final_ack_by_ms"], 1_700_000_000_000 + 130_000)
+        # A later stage without a method keeps what the earlier one said.
+        self._rdf("ack/config", dict(self._edge_ack("gc-restart", "VERIFYING"), t=accepted["t"] + 9_000))
+        observed = self.monitor.rdf_node_command_observation("gc-restart")
+        self.assertEqual((observed["progress"]["status"], observed["method_seen"], observed["final_ack_by_ms"]),
+                         ("VERIFYING", "RESTART", 1_700_000_000_000 + 130_000))
+
+    def test_a_live_retune_falling_back_to_a_restart_is_followed(self) -> None:
+        # VERIFYING {LIVE}, then APPLYING {RESTART} with the override and the
+        # edge's bound, then VERIFYING {RESTART}: stages go back, t does not.
+        self._connected()
+        self._node_state()
+        self.monitor.publish_rdf_node_command(self._command("gc-fallback"))
+        reason = "LIVE_FAILED:ENGINE_OVERRODE:gain_db"
+        accepted = self._edge_ack("gc-fallback", "ACCEPTED")
+        self._rdf("ack/config", accepted)
+        self._rdf("ack/config", dict(self._edge_ack("gc-fallback", "VERIFYING", {"method": "LIVE", "persisted": True}),
+                                     t=accepted["t"] + 5_000))
+        applying = dict(self._edge_ack("gc-fallback", "APPLYING", {
+            "method": "RESTART", "reason": reason, "changes": {}, "final_within_ms": 230_000}), t=accepted["t"] + 27_000)
+        with patch.object(self.module, "_now_ms", lambda: 1_700_000_000_000):
+            self._rdf("ack/config", applying)
+            self.assertEqual(self.monitor.rdf_node_snapshot()["topics"]["ack/config"]["status"], "FRESH")
+        observed = self.monitor.rdf_node_command_observation("gc-fallback")
+        self.assertEqual((observed["progress"]["status"], observed["progress"]["result"]["reason"]), ("APPLYING", reason))
+        self.assertEqual((observed["method_seen"], observed["final_ack_by_ms"]), ("RESTART", 1_700_000_000_000 + 260_000))
+        # The resent ACCEPTED is still the one ACK that is older.
+        self._rdf("ack/config", accepted)
+        self.assertEqual(self.monitor.rdf_node_snapshot()["topics"]["ack/config"]["error"], "ACK_OUT_OF_ORDER")
+        self._rdf("ack/config", dict(self._edge_ack("gc-fallback", "VERIFYING", {"method": "RESTART", "reason": reason}),
+                                     t=accepted["t"] + 60_000))
+        observed = self.monitor.rdf_node_command_observation("gc-fallback")
+        self.assertEqual((observed["progress"]["status"], observed["progress"]["result"]["method"]), ("VERIFYING", "RESTART"))
+        self.assertEqual(observed["final_ack_by_ms"], 1_700_000_000_000 + 260_000)
+
+    def test_the_estimate_says_why_a_live_doa_gave_no_ray(self) -> None:
+        fixtures = TOOLS_DIR / "fixtures" / "rdf-node"
+        manifest = json.loads((fixtures / "manifest.json").read_text(encoding="utf-8"))
+        now = manifest["generated_at_ms"]
+        self._connected()
+        doa = json.loads((fixtures / "telemetry-doa.ok1.json").read_text(encoding="utf-8"))
+        with patch.object(self.module, "_now_ms", lambda: now):
+            for name in ("state.json", "telemetry-health.json"):
+                entry = {item["file"]: item for item in manifest["fixtures"]}[name]
+                self._rdf(entry["topic"], (fixtures / name).read_bytes(), qos=entry["qos"], retained=entry["retain"])
+            self.assertIsNone(self.monitor.rdf_node_view()["position_estimate"]["waiting_for"])
+            self._rdf("telemetry/doa", dict(doa, t=now, q=10, h=None, hsrc=None), qos=0)
+            self.assertEqual(self.monitor.rdf_node_view()["position_estimate"]["waiting_for"], "NO_BEARING")
+            self._rdf("telemetry/doa", dict(doa, t=now, q=11, h=84.3, hsrc="C", b=294.3), qos=0)
+            estimate = self.monitor.rdf_node_view()["position_estimate"]
+            self.assertEqual((estimate["waiting_for"], estimate["skipped"]), ("NO_POSITION", 2))
+            self.assertIsInstance(estimate["skipped_at_ms"], int)
+            self._rdf("telemetry/doa", dict(doa, t=now, q=12, h=84.3, hsrc="C", b=294.3, lat=-6.9, lon=107.7), qos=0)
+            self.assertIsNone(self.monitor.rdf_node_view()["position_estimate"]["waiting_for"])
 
     def test_answered_config_gets_never_push_out_a_waiting_patch(self) -> None:
         # A patch the edge ACCEPTED waits up to 90 s for its final ACK while

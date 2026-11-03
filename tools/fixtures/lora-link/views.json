@@ -46,7 +46,8 @@
         "heartbeats": 10,
         "incomplete": 0,
         "lost_frames": 3,
-        "messages": 60
+        "messages": 60,
+        "peer_restarts": null
       },
       "since_rx_ms": 400,
       "state": "UP",
@@ -106,7 +107,8 @@
         "heartbeats": 12,
         "incomplete": 0,
         "lost_frames": 3,
-        "messages": 70
+        "messages": 70,
+        "peer_restarts": null
       },
       "since_rx_ms": 16000,
       "state": "DOWN",
@@ -166,7 +168,8 @@
         "heartbeats": 12,
         "incomplete": 0,
         "lost_frames": 3,
-        "messages": 70
+        "messages": 70,
+        "peer_restarts": null
       },
       "since_rx_ms": 400,
       "state": "UP",
@@ -220,7 +223,8 @@
         "heartbeats": 10,
         "incomplete": 0,
         "lost_frames": 3,
-        "messages": 50
+        "messages": 50,
+        "peer_restarts": null
       },
       "since_rx_ms": null,
       "state": "PORT_ERROR",
@@ -280,7 +284,8 @@
         "heartbeats": 11,
         "incomplete": 0,
         "lost_frames": 3,
-        "messages": 70
+        "messages": 70,
+        "peer_restarts": null
       },
       "since_rx_ms": 600,
       "state": "UP",
@@ -340,7 +345,8 @@
         "heartbeats": 12,
         "incomplete": 0,
         "lost_frames": 3,
-        "messages": 70
+        "messages": 70,
+        "peer_restarts": null
       },
       "since_rx_ms": 56000,
       "state": "STALE",

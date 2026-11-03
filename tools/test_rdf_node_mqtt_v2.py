@@ -258,6 +258,22 @@ class FixtureTests(unittest.TestCase):
         del online["t"]
         self.assertEqual(put(store, "availability", online)["status"], "INVALID")
 
+    def test_a_retained_online_goes_stale_with_health(self) -> None:
+        store = session_store()
+        self.assertEqual(feed(store, "availability.online.json")["status"], "CONTEXT")
+        # Health keeps it current; without health it is a leftover.
+        later = NOW + rdf_node_mqtt_v2.HEALTH_FRESH_MS + 1
+        self.assertEqual((topic(store, "availability", later)["status"], topic(store, "availability", later)["error"]),
+                         ("STALE", "HEALTH_STALE"))
+        health = obj("telemetry-health.json")
+        put(store, "telemetry/health", dict(health, t=later, q=health["q"] + 1), at=later)
+        self.assertEqual(topic(store, "availability", later)["status"], "CONTEXT")
+        # Edge 1.10.2's farewell on a clean stop is an answer, never stale.
+        farewell = {"v": 2, "sid": obj("availability.online.json")["sid"], "online": False, "reason": "STOPPED"}
+        entry = put(store, "availability", farewell, at=later)
+        self.assertEqual((entry["status"], entry["payload"]["reason"]), ("CONTEXT", "STOPPED"))
+        self.assertEqual(topic(store, "availability", later + 60_000)["status"], "CONTEXT")
+
     def test_newer_edge_detail_with_ppp_fields(self) -> None:
         store = RdfNodeV2Telemetry(NODE)
         feed(store, "state.ppp-session.json")
@@ -445,10 +461,47 @@ class Edge17Tests(unittest.TestCase):
         self.assertEqual(ack["result"], result)
 
 
+COMPAT_110 = json.loads((FIXTURES / "compat.d6946cf.json").read_text(encoding="utf-8"))
+COMPAT_1102 = json.loads((FIXTURES / "compat.f8f9e52.json").read_text(encoding="utf-8"))
+
+
 class Edge110Tests(unittest.TestCase):
     """Contract 1.10 (RDF Node 1.10.0): h, hsrc, b, lat, lon on telemetry/doa."""
 
     STAMP = {"h": 84.3, "hsrc": "C", "b": 294.3, "lat": -6.92977, "lon": 107.71142}
+
+    def test_a_session_of_the_1_10_edge_is_accepted(self) -> None:
+        # Edges d6946cf (1.10.1) and f8f9e52 (1.10.2), as a broker hands them to a new subscriber; no nav configured.
+        for compat, commit in ((COMPAT_110, "d6946cf"), (COMPAT_1102, "f8f9e52")):
+            with self.subTest(edge=commit):
+                self.check_session(compat, commit)
+
+    def check_session(self, compat: Dict[str, Any], commit: str) -> None:
+        self.assertEqual(compat["edge_commit"], commit)
+        self.assertIn({"file": f"compat.{commit}.json", "kind": "compat", "edge_commit": commit,
+                       "edge_version": compat["edge_version"]}, MANIFEST["sets"])
+        at = compat["generated_at_ms"]
+        store = RdfNodeV2Telemetry(NODE)
+        for message in compat["messages"]:
+            body = json.loads(message["payload"])
+            self.assertEqual((message["qos"], message["retain"]), POLICY[message["suffix"]])
+            if message["suffix"] == "ack/config":
+                store.expect_settings_report(body["id"], at)
+            store.ingest(f"sdr/v2/{NODE}/{message['suffix']}", message["payload"].encode("utf-8"), qos=message["qos"],
+                         retained=message["retain"], received_at_ms=at, message_expiry_s=message["expiry_s"])
+        snapshot = store.snapshot(at)
+        self.assertEqual((snapshot["invalid"], snapshot["valid"]), (0, snapshot["received"]))
+        state = json.loads(compat["messages"][0]["payload"])
+        self.assertEqual(state["contract"], "1.10")
+        for suffix, status in (("telemetry/health", "FRESH"), ("telemetry/angular", "LIVE"),
+                               ("ack/config", "FRESH"), ("settings/reported", "FRESH")):
+            with self.subTest(topic=suffix):
+                self.assertEqual(topic(store, suffix, at)["status"], status)
+        view = node(store, at)
+        self.assertTrue(view["doa"]["live"])
+        self.assertEqual((view["doa"]["a"], view["doa"]["reason"]), (350.0, []))
+        self.assertEqual(view["health"]["why"], [])
+        self.assertIs(store.settings_report()["matches_state_cfg"], True)
 
     def test_the_stamp_is_kept_with_the_doa(self) -> None:
         store = session_store()
@@ -478,6 +531,168 @@ class Edge110Tests(unittest.TestCase):
         put(store, "telemetry/doa", obj("telemetry-doa.ok0.json", t=NOW, q=1000))  # UNVERIFIED
         self.assertEqual(len(seen), 1)
         self.assertEqual((seen[0]["b"], seen[0]["lat"]), (294.3, -6.92977))
+
+    def test_an_unverified_sample_keeps_its_heading(self) -> None:
+        store = session_store()
+        put(store, "telemetry/doa", obj("telemetry-doa.ok0.json", t=NOW, h=100.0, hsrc="C"))
+        unverified = node(store)["doa_unverified"]
+        self.assertEqual((unverified["h"], unverified["hsrc"]), (100.0, "C"))
+        self.assertNotIn("b", unverified)
+
+    def test_health_why_is_kept(self) -> None:
+        store = session_store(why=["EMPTY_CSV", "DAQ_NOT_HEALTHY"])
+        entry = topic(store, "telemetry/health")
+        self.assertEqual((entry["status"], entry["payload"].get("notes")), ("FRESH", None))
+        self.assertEqual(node(store)["health"]["why"], ["EMPTY_CSV", "DAQ_NOT_HEALTHY"])
+        self.assertEqual(node(session_store(q=1, why=[]))["health"]["why"], [])
+        # An older edge sends none: no key and no note.
+        health = node(session_store())["health"]
+        self.assertNotIn("why", health)
+        self.assertNotIn("notes", health)
+        # A bad list never refuses the health; a bad code is dropped with a note.
+        store = session_store(why="EMPTY_CSV")
+        self.assertEqual((topic(store, "telemetry/health")["status"], node(store)["health"]["notes"]),
+                         ("FRESH", ["INVALID_FIELD:why"]))
+        self.assertNotIn("why", node(store)["health"])
+        store = session_store(why=["EMPTY_CSV", "not a code"])
+        self.assertEqual((node(store)["health"]["why"], node(store)["health"]["notes"]),
+                         (["EMPTY_CSV"], ["DROPPED_ITEMS:why"]))
+
+    def test_the_doa_reason_list_is_kept_and_fills_the_unverified_reasons(self) -> None:
+        # Edge 1.10 sends validation_reasons only for the approval pair; every
+        # other ok=0 list comes once, in reason, with no MISSING_FIELD note.
+        store = session_store()
+        sample = obj("telemetry-doa.ok0.json", t=NOW, reason=["CLOCK_UNTRUSTED", "SOURCE_UNVERIFIED"])
+        sample.pop("validation_reasons")
+        entry = put(store, "telemetry/doa", sample)
+        self.assertEqual((entry["status"], entry["payload"].get("notes")), ("UNVERIFIED", None))
+        unverified = node(store)["doa_unverified"]
+        self.assertEqual(unverified["validation_reasons"], ["CLOCK_UNTRUSTED", "SOURCE_UNVERIFIED"])
+        self.assertEqual(unverified["reason"], ["CLOCK_UNTRUSTED", "SOURCE_UNVERIFIED"])
+        # Both present (the approval pair): validation_reasons as sent.
+        pair = ["SOURCE_UNVERIFIED", "ANGLE_UNVERIFIED"]
+        put(store, "telemetry/doa", obj("telemetry-doa.ok0.json", q=50, t=NOW, reason=pair, validation_reasons=pair))
+        self.assertEqual(node(store)["doa_unverified"]["validation_reasons"], pair)
+        # Neither (not an edge's): empty, noted, as before.
+        bare = obj("telemetry-doa.ok0.json", q=51, t=NOW)
+        bare.pop("validation_reasons")
+        entry = put(store, "telemetry/doa", bare)
+        self.assertEqual((entry["payload"]["validation_reasons"], entry["payload"]["notes"]),
+                         ([], ["MISSING_FIELD:validation_reasons"]))
+        # A LIVE sample keeps its (empty) reason list too.
+        put(store, "telemetry/doa", obj("telemetry-doa.ok1.json", t=NOW, reason=[]))
+        self.assertEqual(node(store)["doa"]["reason"], [])
+
+    def test_an_unverified_sample_with_an_unhealthy_daq_names_the_daq(self) -> None:
+        # Health arrived (daq=0): the ok=0 sample is UNVERIFIED for the DAQ, not
+        # INCONSISTENT for a missing health. LIVE still needs daq=1.
+        store = session_store(daq=0)
+        sample = obj("telemetry-doa.ok0.json", t=NOW, reason=["DAQ_NOT_HEALTHY"])
+        sample.pop("validation_reasons")
+        entry = put(store, "telemetry/doa", sample)
+        self.assertEqual((entry["status"], entry["error"]), ("UNVERIFIED", "DAQ_NOT_HEALTHY"))
+        self.assertEqual(node(store)["doa_unverified"]["reasons"], ["DAQ_NOT_HEALTHY"])
+        self.assertEqual(node(store)["doa_unverified"]["validation_reasons"], ["DAQ_NOT_HEALTHY"])
+        self.assertEqual(put(store, "telemetry/doa", obj("telemetry-doa.ok1.json", t=NOW))["error"], "DOA_WITHOUT_HEALTH")
+        store = session_store(health=False)
+        entry = put(store, "telemetry/doa", obj("telemetry-doa.ok0.json", t=NOW))
+        self.assertEqual((entry["status"], entry["error"]), ("INCONSISTENT", "DOA_WITHOUT_HEALTH"))
+
+    def test_capabilities_nav_is_kept(self) -> None:
+        store = session_store()
+        nav = {"compass": True, "gps": True, "position": False, "heading": "compass"}
+        entry = put(store, "capabilities", obj("capabilities.json", nav=nav))
+        self.assertEqual(entry["status"], "CONTEXT")
+        self.assertEqual(node(store)["capabilities"]["nav"], nav)
+        # Nav off at the edge: heading null.
+        put(store, "capabilities", obj("capabilities.json", nav={"compass": False, "gps": False, "position": False,
+                                                                 "heading": None}))
+        self.assertIsNone(node(store)["capabilities"]["nav"]["heading"])
+        # A bad key reads as null (noted), never the capabilities; an older edge has no nav.
+        entry = put(store, "capabilities", obj("capabilities.json", nav={"compass": "yes", "gps": 1, "heading": "a b"}))
+        self.assertEqual(entry["status"], "CONTEXT")
+        self.assertEqual(node(store)["capabilities"]["nav"],
+                         {"compass": None, "gps": True, "position": None, "heading": None})
+        self.assertEqual(entry["payload"]["notes"],
+                         ["INVALID_FIELD:nav.compass", "COERCED:nav.gps", "INVALID_FIELD:nav.heading"])
+        entry = put(store, "capabilities", obj("capabilities.json", nav=[1]))
+        self.assertEqual((entry["status"], entry["payload"]["notes"]), ("CONTEXT", ["INVALID_FIELD:nav"]))
+        self.assertNotIn("nav", node(store)["capabilities"])
+        put(store, "capabilities", obj("capabilities.json"))
+        self.assertNotIn("nav", node(store)["capabilities"])
+
+    def test_the_angular_heading_is_kept(self) -> None:
+        store = session_store()
+        entry = put(store, "telemetry/angular", obj("telemetry-angular.live.json", timestamp_ms=NOW, heading_deg=84.3,
+                                                    heading_source="G"))
+        self.assertEqual(entry["status"], "LIVE")
+        angular = node(store)["angular"]
+        self.assertEqual((angular["heading_deg"], angular["heading_source"]), (84.3, "G"))
+        # A bad one is dropped (noted), never the frame; an older edge sends neither.
+        entry = put(store, "telemetry/angular", obj("telemetry-angular.live.json", q=2, timestamp_ms=NOW,
+                                                    heading_deg=400, heading_source="X"))
+        self.assertEqual((entry["status"], entry["payload"]["notes"]),
+                         ("LIVE", ["INVALID_FIELD:heading_deg", "INVALID_FIELD:heading_source"]))
+        for key in ("heading_deg", "heading_source"):
+            self.assertNotIn(key, node(store)["angular"])
+
+    def test_the_edges_ack_text_and_final_bound_are_kept(self) -> None:
+        store = session_store()
+        result = {"error": "HELPER_CONNECTION_LOST", "message": "Helper root di Raspberry tidak menjawab",
+                  "detail": "NotADirectoryError: [Errno 20] Not a directory: 'var'", "ignored": ["x"],
+                  "fields": ["center_frequency_hz", "vfo0_frequency_hz"], "final_within_ms": 221_000}
+        put(store, "ack/config", obj("ack-config.config-patch-rejected.json", id="gc-0123456789abcdef01234568",
+                                     status="OUTCOME_UNKNOWN", result=result))
+        self.assertEqual(store.ack("gc-0123456789abcdef01234568")["result"], result)
+
+
+class LoraWindowTests(unittest.TestCase):
+    """Over the LoRa serial bridge the Angular frame counts 45 s and the detail 65 s."""
+
+    def test_angular_counts_for_45_s_over_lora(self) -> None:
+        store = session_store()
+        store.set_link("lora")
+        self.assertEqual(store.link, "lora")
+        put(store, "telemetry/angular", obj("telemetry-angular.live.json", timestamp_ms=NOW - 30_000))
+        later = NOW + 15_000
+        put(store, "telemetry/health", obj("telemetry-health.json", q=2, t=later), at=later)
+        self.assertEqual((node(store, later)["angular"]["live"], node(store, later)["angular"]["max_age_ms"]),
+                         (True, 45_000))
+        self.assertEqual(topic(store, "telemetry/angular", later)["status"], "LIVE")
+        stale = NOW + 15_001
+        put(store, "telemetry/health", obj("telemetry-health.json", q=3, t=stale), at=stale)
+        self.assertEqual(node(store, stale)["angular"]["reasons"], ["SOURCE_STALE"])
+        self.assertEqual(topic(store, "telemetry/angular", stale)["status"], "STALE")
+        # At receipt too: 45 s old is LIVE, older STALE.
+        for offset, status in ((-45_000, "LIVE"), (-45_001, "STALE")):
+            with self.subTest(offset=offset):
+                fresh = session_store()
+                fresh.set_link("lora")
+                self.assertEqual(put(fresh, "telemetry/angular", obj("telemetry-angular.live.json",
+                                                                     timestamp_ms=NOW + offset))["status"], status)
+        # The diagnostic candidate ages by the same window.
+        put(store, "telemetry/diagnostic/angular", obj("telemetry-diagnostic-angular.json", timestamp_ms=NOW - 40_000))
+        self.assertEqual(topic(store, "telemetry/diagnostic/angular")["status"], "UNVERIFIED")
+        self.assertIs(node(store)["angular_unverified"]["stale"], False)
+        self.assertEqual(node(store)["angular_unverified"]["max_age_ms"], 45_000)
+        # Back on a direct link the 10 s window applies again.
+        store.set_link(None)
+        self.assertIsNone(store.link)
+        put(store, "telemetry/health", obj("telemetry-health.json", q=4, t=NOW), at=NOW)
+        self.assertEqual(node(store, NOW)["angular"]["reasons"], ["SOURCE_STALE"])
+
+    def test_detail_counts_for_65_s_over_lora(self) -> None:
+        store = session_store(health=False)
+        store.set_link("lora")
+        feed(store, "telemetry-health-detail.json")
+        self.assertEqual(topic(store, "telemetry/health/detail", NOW + 65_000)["status"], "FRESH")
+        self.assertEqual(node(store, NOW + 65_000)["detail"]["max_age_ms"], 65_000)
+        self.assertIs(node(store, NOW + 65_000)["detail"]["stale"], False)
+        self.assertEqual(topic(store, "telemetry/health/detail", NOW + 65_001)["status"], "STALE")
+        self.assertIs(node(store, NOW + 65_001)["detail"]["stale"], True)
+        store.set_link("t900")
+        self.assertIsNone(store.link)
+        self.assertEqual(topic(store, "telemetry/health/detail", NOW + 15_001)["status"], "STALE")
 
 
 class Edge18Tests(unittest.TestCase):
@@ -789,6 +1004,7 @@ class HealthNavTests(unittest.TestCase):
         self.assertEqual((entry["status"], entry["error"]), ("FRESH", None))
         health = node(store)["health"]
         self.assertEqual((health["hdg"], health["gs"], health["fix"], health["sat"], health["lat"]), (168.5, "FIX", 3, 7, -6.20576))
+        self.assertEqual(health["why"], real["why"])
         self.assertTrue(store.session_view(NOW)["health_fresh"])
 
     def test_a_position_needs_both_coordinates(self) -> None:
@@ -1253,6 +1469,59 @@ class AckTests(unittest.TestCase):
         for change in ({"id": "x" * 81}, {"id": "has space"}, {"result": None}, {"rev": -1}):
             with self.subTest(change=change):
                 self.assertEqual(put(store, "ack/operation", dict(ack, **change))["status"], "INVALID")
+
+    def test_a_resent_earlier_ack_never_replaces_a_later_one(self) -> None:
+        # The LoRa bridge sends each ACK twice, the copy 0.5 s later: with the
+        # first ACCEPTED lost, its copy arrives after APPLYING {method: RESTART}.
+        # The edge's t orders them, not the stage.
+        store = session_store(health=False)
+        ack = obj("ack-config.config-patch-rejected.json", id="gc-0123456789abcdef0123456a")
+        accepted = dict(ack, status="ACCEPTED", t=NOW, result={})
+        applying = dict(ack, status="APPLYING", t=NOW + 200, result={"method": "RESTART", "reason": "GAIN_CHANGE"})
+        put(store, "ack/config", applying)
+        entry = put(store, "ack/config", accepted)
+        self.assertEqual((entry["status"], entry["error"]), ("IGNORED", "ACK_OUT_OF_ORDER"))
+        self.assertEqual(store.ack(ack["id"])["status"], "APPLYING")
+        # The next stage, and a newer copy of the same stage, are taken.
+        self.assertEqual(put(store, "ack/config", dict(applying, t=NOW + 300))["status"], "FRESH")
+        self.assertEqual(put(store, "ack/config", dict(applying, t=NOW + 250))["error"], "ACK_OUT_OF_ORDER")
+        verifying = dict(ack, status="VERIFYING", t=NOW + 9_000, result={"method": "RESTART"})
+        self.assertEqual(put(store, "ack/config", verifying)["status"], "FRESH")
+        self.assertEqual(put(store, "ack/config", dict(applying, t=NOW + 300))["error"], "ACK_OUT_OF_ORDER")
+        self.assertEqual(store.ack(ack["id"])["status"], "VERIFYING")
+        # The final answer is taken whatever came before it.
+        self.assertEqual(put(store, "ack/config", dict(ack, status="APPLIED", t=NOW + 8_000))["status"], "FRESH")
+        self.assertEqual(store.ack(ack["id"])["status"], "APPLIED")
+        # Only an older t is older; an equal one, or one that is not an integer, is not.
+        self.assertTrue(rdf_node_mqtt_v2.progress_ack_older(1, 2))
+        self.assertFalse(rdf_node_mqtt_v2.progress_ack_older(2, 2))
+        self.assertFalse(rdf_node_mqtt_v2.progress_ack_older(5, 1))
+        self.assertFalse(rdf_node_mqtt_v2.progress_ack_older(1, None))
+
+    def test_a_failed_live_retune_goes_back_to_applying(self) -> None:
+        # control._config_patch_apply: a live retune the engine overrode falls
+        # back to a restart, so VERIFYING {LIVE} is followed by APPLYING and
+        # VERIFYING {RESTART}. Each is newer, so each is taken.
+        store = session_store(health=False)
+        ack = obj("ack-config.config-patch-rejected.json", id="gc-0123456789abcdef0123456b")
+        reason = "LIVE_FAILED:ENGINE_OVERRODE:gain_db"
+        accepted = dict(ack, status="ACCEPTED", t=NOW, result={})
+        sequence = (
+            dict(ack, status="VERIFYING", t=NOW + 5_000, result={"method": "LIVE", "persisted": True}),
+            dict(ack, status="APPLYING", t=NOW + 27_000,
+                 result={"method": "RESTART", "reason": reason, "changes": {}, "final_within_ms": 230_000}),
+            dict(ack, status="VERIFYING", t=NOW + 60_000, result={"method": "RESTART", "reason": reason, "persisted": True}),
+        )
+        self.assertEqual(put(store, "ack/config", accepted)["status"], "FRESH")
+        for stage in sequence:
+            with self.subTest(status=stage["status"], method=stage["result"]["method"]):
+                self.assertEqual(put(store, "ack/config", stage)["status"], "FRESH")
+                held = store.ack(ack["id"])
+                self.assertEqual((held["status"], held["result"]), (stage["status"], stage["result"]))
+            if stage["status"] == "APPLYING":
+                # The resent ACCEPTED copy is still older than what is held.
+                entry = put(store, "ack/config", accepted)
+                self.assertEqual((entry["status"], entry["error"]), ("IGNORED", "ACK_OUT_OF_ORDER"))
 
 
 class MessageRuleTests(unittest.TestCase):

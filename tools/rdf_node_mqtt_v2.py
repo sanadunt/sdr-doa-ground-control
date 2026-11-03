@@ -20,7 +20,9 @@ topic entry and in the accepted payload, so the operator sees it. Only data
 that cannot be read (not JSON, not an object, empty or malformed sid, another
 protocol version, oversize, a core field missing) is INVALID. A message outside
 its freshness window, without fresh health or with another revision is kept
-and labelled; LIVE keeps its edge rules.
+and labelled; LIVE keeps its edge rules. Over the LoRa serial bridge
+(``set_link``) an Angular frame counts for 45 s and the detail for 65 s, since
+the bridge sends them at most every 20 s and 30 s.
 """
 from __future__ import annotations
 
@@ -66,6 +68,14 @@ UNVERIFIED_DOA_FRESH_MS = 5_000
 DIAGNOSTIC_DOA_FRESH_MS = 5_000
 SETTINGS_FRESH_MS = 30_000
 ACK_FRESH_MS = 30_000
+# Over the LoRa serial bridge (``link`` "lora") the bridge sends an Angular frame
+# at most every 20 s, keeps a queued one up to 8 s and loses a fragment now and
+# then, and sends the detail at most every 30 s: these windows replace
+# ANGULAR_FRESH_MS and DETAIL_FRESH_MS there, so a frame or detail between two
+# reports still counts. The pairing guards in telemetry_source.py stay.
+ANGULAR_LORA_FRESH_MS = 45_000
+DETAIL_LORA_FRESH_MS = 65_000
+LINK_LORA = "lora"
 # A config.get lives at most 30 s and its answer expires 30 s after it is sent.
 SETTINGS_REQUEST_TTL_MS = 60_000
 # KrakenSDR's settings.json is one flat object; deeper nesting is refused so
@@ -120,6 +130,11 @@ ACK_RESULT_KEYS = frozenset({
     "band_spacing_m",
     # Contract 1.9: a squelch level sent while the squelch was automatic switched it to Manual.
     "squelch_mode",
+    # The edge's operator text and technical cause of an error (control.error_result), the request keys
+    # it ignored (reject) and the fields the engine overrode at start (ENGINE_OVERRODE_AT_START).
+    "message", "detail", "ignored", "fields",
+    # Contract 1.10: at most how many ms after this progress ACK the final ACK follows.
+    "final_within_ms",
 })
 _SECRET_KEY_WORDS = ("challenge", "secret", "password", "passwd", "token", "credential", "private")
 
@@ -463,6 +478,33 @@ def _validate_capabilities(data: Dict[str, Any]) -> Dict[str, Any]:
     # Edges before 1.0.0-20261013 published it; it is no longer required.
     if "maintenance" in data:
         value["maintenance"] = _bool(data, "maintenance")
+    nav = _capabilities_nav(data)
+    if nav is not None:
+        value["nav"] = nav
+    return value
+
+
+def _capabilities_nav(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Contract 1.10: the sensors behind the nav fields, or None from an older edge.
+
+    ``compass`` and ``gps`` say which sensors the edge reads, ``position``
+    whether it sends ``lat``/``lon`` (``nav.gps.publish_position``) and
+    ``heading`` its heading source setting (null with nav off). Each key is read
+    on its own; a bad one reads as null (noted), never refusing the capabilities.
+    """
+    if "nav" not in data:
+        return None
+    nav = data["nav"]
+    if not isinstance(nav, dict):
+        _note("INVALID_FIELD", "nav")
+        return None
+    named = {f"nav.{key}": item for key, item in nav.items()}
+    value: Dict[str, Any] = {}
+    for key in ("compass", "gps", "position"):
+        present, item = _optional(named, f"nav.{key}", lambda key=key: _bool(named, f"nav.{key}", nullable=True))
+        value[key] = item if present else None
+    present, item = _optional(named, "nav.heading", lambda: _text(named, "nav.heading", _WORD_RE, nullable=True))
+    value["heading"] = item if present else None
     return value
 
 
@@ -490,6 +532,11 @@ def _validate_health(data: Dict[str, Any]) -> Dict[str, Any]:
         clk=_choice(data, "clk", frozenset({0, 1})),
         rev=_int(data, "rev", 0, _U32, nullable=True),
     )
+    # Contract 1.10: why DoA is not LIVE at the edge (empty while it is), the
+    # one channel for it while the edge sends no DoA. Older edges send none.
+    present, why = _optional_reasons(data, "why")
+    if present:
+        value["why"] = why
     value.update(_health_nav(data))
     return value
 
@@ -506,6 +553,17 @@ def _optional(data: Dict[str, Any], key: str, read: Any) -> Tuple[bool, Any]:
     except _Invalid:
         _note("INVALID_FIELD", key)
         return False, None
+
+
+def _optional_reasons(data: Dict[str, Any], key: str) -> Tuple[bool, List[str]]:
+    """An optional list of reason codes: (present, codes). Null reads as absent; not a list as absent with a note."""
+    value = data.get(key)
+    if value is None:
+        return False, []
+    if not isinstance(value, list):
+        _note("INVALID_FIELD", key)
+        return False, []
+    return True, _reasons(value, key, 32)
 
 
 def _health_nav(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -585,6 +643,10 @@ def _validate_doa(data: Dict[str, Any]) -> Dict[str, Any]:
         rev=_int(data, "rev", 0, _U32, nullable=True),
         ok=_choice(data, "ok", frozenset({0, 1})),
     )
+    # Contract 1.10: the edge's reasons for this sample (empty on ok=1).
+    has_reason, reason = _optional_reasons(data, "reason")
+    if has_reason:
+        value["reason"] = reason
     if value["ok"] == 0:
         # ok=0 is UNVERIFIED and RAW whatever the labels say; other labels or
         # reason codes are kept as notes, not refused.
@@ -592,8 +654,14 @@ def _validate_doa(data: Dict[str, Any]) -> Dict[str, Any]:
             _note("UNEXPECTED_VALUE", "trust")
         if data.get("angle_reference") != "RAW":
             _note("UNEXPECTED_VALUE", "angle_reference")
-        value.update(trust="UNVERIFIED", angle_reference="RAW",
-                     validation_reasons=_reasons(data.get("validation_reasons"), "validation_reasons", 32))
+        # Edge 1.10 sends validation_reasons only when every reason is
+        # SOURCE_UNVERIFIED or ANGLE_UNVERIFIED and every other list once, in
+        # reason; an edge before 1.10 sends only validation_reasons.
+        if "validation_reasons" in data or not has_reason:
+            reasons = _reasons(data.get("validation_reasons"), "validation_reasons", 32)
+        else:
+            reasons = list(reason)
+        value.update(trust="UNVERIFIED", angle_reference="RAW", validation_reasons=reasons)
     value.update(_doa_nav(data))
     return value
 
@@ -681,6 +749,17 @@ def _validate_angular_frame(data: Dict[str, Any]) -> Dict[str, Any]:
         raw_doa_deg=_number(data, "raw_doa_deg", 0, 360, nullable=True),
         confidence_native_db=_number(data, "confidence_native_db", -327.67, 327.67, nullable=True),
     )
+    # Edge 1.10: the heading the latest DoA sample went out with when the frame
+    # was built (C, G, H as hsrc), so each bin turns into a bearing with the
+    # frame's own heading. Only those present; a bad one is dropped (noted).
+    for key, read in (
+        ("heading_deg", lambda: _number(data, "heading_deg", 0, 360, nullable=True)),
+        ("heading_source", lambda: None if data.get("heading_source") is None
+         else _choice(data, "heading_source", frozenset({"C", "G", "H"}))),
+    ):
+        present, item = _optional(data, key, read)
+        if present:
+            value[key] = item
     samples = data.get("values")
     if not isinstance(samples, list) or len(samples) != 360:
         raise _Invalid("EXPECTED_360_SAMPLES", "values")
@@ -840,6 +919,18 @@ def _add_note(value: Dict[str, Any], note: str) -> None:
         notes.append(note)
 
 
+def progress_ack_older(t: Any, previous_t: Any) -> bool:
+    """True when a progress ACK belongs before the progress ACK already held for its command.
+
+    Only the edge's ``t`` decides, never the stage: the edge stamps every ACK
+    when it sends it, and the LoRa bridge's second send (0.5 s later) is the
+    same bytes, so a late copy of ACCEPTED is older than the APPLYING that
+    overtook it. Stages do go back: a config.patch whose live retune fails
+    sends VERIFYING {method: LIVE}, then APPLYING and VERIFYING {method: RESTART}.
+    """
+    return type(t) is int and type(previous_t) is int and t < previous_t
+
+
 def _source_window(source_ms: int, at_ms: int, max_age_ms: int) -> Optional[str]:
     """Why a source timestamp is outside its window at ``at_ms``, or None."""
     if source_ms > at_ms + FUTURE_TOLERANCE_MS:
@@ -899,6 +990,8 @@ class RdfNodeV2Telemetry:
         # Called with the payload of every LIVE DoA accepted without a receipt
         # problem; the monitor feeds the position estimate from it.
         self.on_live_doa: Optional[Callable[[Dict[str, Any]], None]] = None
+        # How the node reaches the broker (set_link): "lora" widens the Angular and detail windows.
+        self._link: Optional[str] = None
         self._reset_session()
 
     @staticmethod
@@ -921,6 +1014,24 @@ class RdfNodeV2Telemetry:
         self._diagnostic_source_ms = 0
         for suffix in SESSION_SUFFIXES:
             self._topics[suffix] = self._empty()
+
+    def set_link(self, link: Optional[str]) -> None:
+        """How the node reaches this broker: ``"lora"`` (the LoRa serial bridge) or None.
+
+        Over LoRa an Angular frame counts for ANGULAR_LORA_FRESH_MS and the
+        detail for DETAIL_LORA_FRESH_MS, at receipt and in every later view.
+        """
+        self._link = LINK_LORA if link == LINK_LORA else None
+
+    @property
+    def link(self) -> Optional[str]:
+        return self._link
+
+    def _angular_fresh_ms(self) -> int:
+        return ANGULAR_LORA_FRESH_MS if self._link == LINK_LORA else ANGULAR_FRESH_MS
+
+    def _detail_fresh_ms(self) -> int:
+        return DETAIL_LORA_FRESH_MS if self._link == LINK_LORA else DETAIL_FRESH_MS
 
     # -- public reads ---------------------------------------------------------
 
@@ -1195,7 +1306,11 @@ class RdfNodeV2Telemetry:
             cfg = self._session["payload"]["cfg"] if self._session else None
             if cfg is not None and value["rev"] != cfg:
                 _add_note(value, "REVISION_MISMATCH")
-        if not self._health_ok(at):
+        if not live and self._health_fresh(at) and not self._health_ok(at):
+            # Fresh health with daq 0 or 2: the edge's own reason for an ok=0
+            # sample, not a missing health. LIVE still needs daq=1.
+            problems.append("DAQ_NOT_HEALTHY")
+        elif not self._health_ok(at):
             problems.append("DOA_WITHOUT_HEALTH")
         self._seq[kind] = value["q"]
         record = {"payload": value, "received_at_ms": at, "receipt_reasons": problems}
@@ -1205,6 +1320,8 @@ class RdfNodeV2Telemetry:
             self._doa_unverified = record
         if window:
             self._mark(suffix, entry, "STALE", value, window)
+        elif problems == ["DAQ_NOT_HEALTHY"]:
+            self._mark(suffix, entry, "UNVERIFIED", value, problems[0])
         elif problems:
             self._mark(suffix, entry, "INCONSISTENT", value, problems[0])
         else:
@@ -1231,7 +1348,7 @@ class RdfNodeV2Telemetry:
         if not self._advanced(kind, suffix, value, entry):
             return
         problems: List[str] = []
-        window = _source_window(value["timestamp_ms"], at, ANGULAR_FRESH_MS)
+        window = _source_window(value["timestamp_ms"], at, self._angular_fresh_ms())
         if window:
             problems.append(window)
         if not self._health_ok(at):
@@ -1256,7 +1373,7 @@ class RdfNodeV2Telemetry:
         self._seq["diagnostic_angular"] = value["q"]
         # A stale candidate is kept; its age becomes a reason, not a reject.
         self._angular_unverified = {"payload": value, "received_at_ms": at, "topic": suffix}
-        problem = _source_window(value["timestamp_ms"], at, ANGULAR_FRESH_MS)
+        problem = _source_window(value["timestamp_ms"], at, self._angular_fresh_ms())
         if problem:
             self._mark(suffix, entry, "STALE", value, problem)
         else:
@@ -1294,6 +1411,11 @@ class RdfNodeV2Telemetry:
         previous = self._acks.get(value["id"])
         if previous is not None and previous["final"] and not final:
             self._mark(suffix, entry, "IGNORED", value, "ACK_AFTER_FINAL")
+            return
+        if (previous is not None and not previous["final"] and not final and
+                progress_ack_older(value["t"], previous["t"])):
+            # A resent copy of an earlier ACK (the LoRa bridge's second send).
+            self._mark(suffix, entry, "IGNORED", value, "ACK_OUT_OF_ORDER")
             return
         self._acks.pop(value["id"], None)
         self._acks[value["id"]] = {
@@ -1339,7 +1461,7 @@ class RdfNodeV2Telemetry:
         assert self._angular is not None
         reasons: List[str] = [reason for reason in self._angular.get("receipt_reasons", ())
                               if reason == "ANGULAR_WITHOUT_HEALTH"]
-        problem = _source_window(self._angular["payload"]["timestamp_ms"], now_ms, ANGULAR_FRESH_MS)
+        problem = _source_window(self._angular["payload"]["timestamp_ms"], now_ms, self._angular_fresh_ms())
         if problem:
             reasons.append("SOURCE_TIME_FUTURE" if problem == "SOURCE_TIME_FUTURE" else "SOURCE_STALE")
         if not self._health_fresh(now_ms):
@@ -1367,7 +1489,7 @@ class RdfNodeV2Telemetry:
         ):
             if not flags & bit:
                 reasons.append(reason)
-        problem = _source_window(frame["timestamp_ms"], now_ms, ANGULAR_FRESH_MS)
+        problem = _source_window(frame["timestamp_ms"], now_ms, self._angular_fresh_ms())
         if problem:
             reasons.append("SOURCE_TIME_FUTURE" if problem == "SOURCE_TIME_FUTURE" else "SOURCE_STALE")
         if not self._health_fresh(now_ms):
@@ -1421,11 +1543,12 @@ class RdfNodeV2Telemetry:
                 self._diagnostic_doa,
                 stale=not _within(now_ms, self._diagnostic_doa["received_at_ms"], DIAGNOSTIC_DOA_FRESH_MS),
             )
+        angular_window = self._angular_fresh_ms()
         angular = None
         if self._angular is not None:
             reasons = self._angular_reasons(now_ms)
             angular = timed(self._angular, source_age_ms=_age(now_ms, self._angular["payload"]["timestamp_ms"]),
-                            live=not reasons, reasons=reasons)
+                            live=not reasons, reasons=reasons, max_age_ms=angular_window)
         angular_unverified = None
         if self._angular_unverified is not None:
             frame = self._angular_unverified
@@ -1433,8 +1556,8 @@ class RdfNodeV2Telemetry:
             angular_unverified = timed(
                 frame, topic=frame["topic"], trust="UNVERIFIED",
                 source_age_ms=_age(now_ms, frame["payload"]["timestamp_ms"]),
-                stale=_source_window(frame["payload"]["timestamp_ms"], now_ms, ANGULAR_FRESH_MS) is not None,
-                validation_reasons=reasons,
+                stale=_source_window(frame["payload"]["timestamp_ms"], now_ms, angular_window) is not None,
+                validation_reasons=reasons, max_age_ms=angular_window,
             )
         settings = None
         if self._settings is not None:
@@ -1455,7 +1578,7 @@ class RdfNodeV2Telemetry:
             "session": None if self._session is None else timed(self._session),
             "health": timed(self._health, fresh=self._health_fresh(now_ms)),
             "detail": timed(self._detail, stale=self._detail is not None and not _within(
-                now_ms, self._detail["received_at_ms"], DETAIL_FRESH_MS)),
+                now_ms, self._detail["received_at_ms"], self._detail_fresh_ms()), max_age_ms=self._detail_fresh_ms()),
             "doa": doa,
             "doa_unverified": doa_unverified,
             "diagnostic_doa": diagnostic_doa,
@@ -1492,7 +1615,8 @@ class RdfNodeV2Telemetry:
             received = topics[suffix]["received_at_ms"]
             return isinstance(received, int) and not _within(now_ms, received, limit_ms)
 
-        for suffix, limit in (("telemetry/health", HEALTH_FRESH_MS), ("telemetry/health/detail", DETAIL_FRESH_MS),
+        for suffix, limit in (("telemetry/health", HEALTH_FRESH_MS),
+                              ("telemetry/health/detail", self._detail_fresh_ms()),
                               ("settings/reported", SETTINGS_FRESH_MS), ("ack/config", ACK_FRESH_MS),
                               ("ack/operation", ACK_FRESH_MS)):
             if topics[suffix]["status"] == "FRESH" and aged(suffix, limit):
@@ -1511,7 +1635,7 @@ class RdfNodeV2Telemetry:
         for suffix in ("telemetry/angular", "telemetry/diagnostic/angular"):
             payload = topics[suffix]["payload"]
             if topics[suffix]["status"] == "UNVERIFIED" and isinstance(payload, dict):
-                problem = _source_window(payload["timestamp_ms"], now_ms, ANGULAR_FRESH_MS)
+                problem = _source_window(payload["timestamp_ms"], now_ms, self._angular_fresh_ms())
                 if problem:
                     decay(suffix, "STALE", "SOURCE_TIME_FUTURE" if problem == "SOURCE_TIME_FUTURE" else "SOURCE_STALE")
         session = node["session"]
@@ -1520,6 +1644,13 @@ class RdfNodeV2Telemetry:
             if (topics[suffix]["status"] == "CONTEXT" and session is not None and isinstance(payload, dict) and
                     payload.get("sid") != session["sid"]):
                 decay(suffix, "INCONSISTENT", "SESSION_MISMATCH")
+        # A retained online:true means nothing once health stops: an edge that
+        # stopped without its STOPPED farewell (older than 1.10.2, or the LoRa
+        # bridge went down first) leaves it behind.
+        payload = topics["availability"]["payload"]
+        if (topics["availability"]["status"] == "CONTEXT" and isinstance(payload, dict) and payload.get("online") is True
+                and aged("availability", HEALTH_FRESH_MS) and not self._health_fresh(now_ms)):
+            decay("availability", "STALE", "HEALTH_STALE")
         return {
             "node_id": self.node_id,
             "now_ms": now_ms,
@@ -1549,9 +1680,12 @@ _HANDLERS: Dict[str, Callable[[RdfNodeV2Telemetry, str, Dict[str, Any], Dict[str
 __all__ = [
     "ACK_FINAL_STATUSES",
     "ACK_STATUSES",
+    "ANGULAR_LORA_FRESH_MS",
     "COMMAND_ID_RE",
+    "DETAIL_LORA_FRESH_MS",
     "MAX_PAYLOAD_BYTES",
     "RDF_NODE_V2_SUFFIXES",
     "RdfNodeV2Telemetry",
+    "progress_ack_older",
     "safe_settings",
 ]

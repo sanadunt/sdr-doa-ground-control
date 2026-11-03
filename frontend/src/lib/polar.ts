@@ -240,6 +240,52 @@ export function nodeArrayHeading(snapshot: TelemetrySnapshot | null | undefined)
   return typeof heading === 'number' && Number.isFinite(heading) && heading >= 0 && heading <= 360 ? heading % 360 : null;
 }
 
+/**
+ * The array heading the edge stamped on the Angular frame behind the MQTT
+ * answer's curve (contract 1.10 heading_deg), or null: the frame may be
+ * older than the DoA, taken while the array pointed elsewhere.
+ */
+export function angularFrameHeading(snapshot: TelemetrySnapshot | null | undefined): number | null {
+  if (!snapshot || snapshot.simulation === true) return null;
+  const heading = recordOrNull(snapshot.doa_candidates?.mqtt)?.angular_heading_deg;
+  return typeof heading === 'number' && Number.isFinite(heading) && heading >= 0 && heading <= 360 ? heading % 360 : null;
+}
+
+/**
+ * The offset that turns the Angular curve's bins into bearings: the heading
+ * of the curve's own frame while the DoA's heading turns the bearing
+ * (NODE_HEADING), so a curve taken before the platform turned still points
+ * where it pointed; otherwise the compass offset (MANUAL, Data Out, an edge
+ * without frame headings).
+ */
+export function curveCompassOffset(
+  snapshot: TelemetrySnapshot | null | undefined,
+  resolution: Pick<CompassSourceResolution, 'code'>,
+  compassOffset: number,
+): number {
+  const frame = resolution.code === 'NODE_HEADING' ? angularFrameHeading(snapshot) : null;
+  return frame ?? compassOffset;
+}
+
+// The last curve turned into the DoA's frame, so equal answers keep one array (Plotly, the held curve).
+let lastTurned: { source: readonly number[]; shift: number; values: number[] } | null = null;
+
+/**
+ * A 360-bin curve in the frame of the DoA beside it: each bin moved by the
+ * whole degrees between the curve's offset and the DoA's, so a bin sits at
+ * the theta_0 its bearing has now, in both plot axes. Unchanged when the two agree.
+ */
+export function curveInDoaFrame(values: number[] | null, compassOffset: number, curveOffset: number): number[] | null {
+  if (!values || values.length !== 360 || !Number.isFinite(compassOffset) || !Number.isFinite(curveOffset)) return values;
+  const shift = ((Math.round(compassOffset - curveOffset) % 360) + 360) % 360;
+  if (shift === 0) return values;
+  if (lastTurned && lastTurned.source === values && lastTurned.shift === shift) return lastTurned.values;
+  const turned = new Array<number>(360);
+  values.forEach((value, index) => { turned[(index + shift) % 360] = value; });
+  lastTurned = { source: values, shift, values: turned };
+  return turned;
+}
+
 /** Short source label for the compass offset in captions and the bearing readout. */
 export function compassOffsetSourceLabel(resolution: CompassSourceResolution, t: Translate): string {
   if (resolution.code === 'NODE_HEADING') return t('polar.offsetNodeHeading');
@@ -272,6 +318,30 @@ export function displayAngleForBin(bin: number, settings: PolarSettings): number
  */
 export function geographicBearingForBin(bin: number, compassOffset: number): number {
   return normalizeDegrees(360 - bin + (Number.isFinite(compassOffset) ? compassOffset : 0));
+}
+
+/**
+ * What lies under a map bearing: the Angular curve's bin in its own frame
+ * (curveOffset), to read its value, and the theta_0 that bearing has in the
+ * DoA's frame (compassOffset), as the HUD and the polar plot name it.
+ */
+export function binsAtBearing(bearingDeg: number, curveOffset: number, compassOffset: number): { frameBin: number; theta: number } {
+  return {
+    frameBin: Math.round(geographicBearingForBin(bearingDeg, curveOffset)) % 360,
+    theta: Math.round(geographicBearingForBin(bearingDeg, compassOffset)) % 360,
+  };
+}
+
+/**
+ * The geographic bearing of a held (NOT VALID) DoA: turned with the array
+ * heading of its own sample (contract 1.10 h) when it has one, so it needs no
+ * compass offset and no orientation notice (`nodeHeading`); else with the
+ * compass offset in use. Null without a theta_0.
+ */
+export function heldBearing(thetaDeg: number | null, headingDeg: number | null, compassOffset: number): { bearingDeg: number; nodeHeading: boolean } | null {
+  if (thetaDeg === null || !Number.isFinite(thetaDeg)) return null;
+  const nodeHeading = headingDeg !== null && Number.isFinite(headingDeg);
+  return { bearingDeg: geographicBearingForBin(thetaDeg, nodeHeading ? headingDeg : compassOffset), nodeHeading };
 }
 
 /** Geographic bearing of the view's canonical theta_0, or null when there is none. */
@@ -309,12 +379,18 @@ export function signedPeak(values: number[]): { index: number; value: number } |
   return { index: numeric.indexOf(value), value };
 }
 
+/**
+ * The curve, angle and peak the polar views draw. `curveOffset` (the
+ * offset of the curve's own frame, curveCompassOffset) turns the curve into
+ * the DoA's frame first (curveInDoaFrame), so its peak sits by the DoA.
+ */
 export function polarView(
   snapshot: TelemetrySnapshot | null | undefined,
   previousSettings: PolarSettings = { figType: 'Polar', compassOffset: 0 },
   localFresh = true,
   manualCompassOverride: ManualCompassOverride | null | undefined = null,
   resolvedSettings: PolarSettings | null = null,
+  curveOffset: number | null = null,
 ): PolarView {
   const settingsFields = snapshot?.settings?.fields ?? {};
   const liveSettings = polarSettings(
@@ -325,9 +401,10 @@ export function polarView(
   // The CSV view of Data Out, or the MQTT view (LIVE DoA and its Angular frame).
   const csv = primaryCandidate(snapshot);
   const canonicalAngle = numberOrNull(csv.canonical_angle_deg);
-  const values = Array.isArray(csv.angular_power_db) && csv.angular_power_db.length === 360 && csv.angular_power_db.every((value) => typeof value === 'number' && Number.isFinite(value))
+  const vector = Array.isArray(csv.angular_power_db) && csv.angular_power_db.length === 360 && csv.angular_power_db.every((value) => typeof value === 'number' && Number.isFinite(value))
     ? csv.angular_power_db
     : null;
+  const values = curveOffset === null ? vector : curveInDoaFrame(vector, settings.compassOffset, curveOffset);
   const fresh = localFresh && curveDataReady(snapshot) && canonicalAngle !== null && Boolean(values);
   if (!fresh || !values) {
     return {

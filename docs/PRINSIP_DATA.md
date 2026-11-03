@@ -41,13 +41,14 @@ Console dipakai di lapangan lewat link radio yang sering tidak sempurna. Karena 
 
 ### Tampilan (3.1.0)
 
-- **DoA belum valid tetap tampil.** Ini berlaku untuk DoA ok=0, rekaman lama, jendela lokal yang habis, node macet, status DAQ yang tidak diketahui, dan status.json yang tidak terbaca (`provisionalTheta()`, `lib/doaStatus.ts`).
-  - Di HUD, bearing terakhirnya tampil redup dengan label BELUM VALID atau "USANG N s".
+- **DoA belum valid tetap tampil.** Ini berlaku untuk DoA ok=0, rekaman lama, jendela lokal yang habis, node macet, status DAQ yang tidak diketahui, dan status.json yang tidak terbaca (`provisionalDoa()`, `lib/doaStatus.ts`).
+  - Bearing-nya dihitung dengan heading yang dikirim bersama sampel itu sendiri (`h`, kontrak 1.10), dan sampel ok=0 yang lebih baru menggantikan DoA LIVE yang sudah basi.
+  - Di HUD, bearing terakhirnya tampil redup dengan label BELUM VALID atau "USANG N s", bersama alasan RDF-SDR sendiri (`health.why`, alasan sampel ok=0).
   - Di peta, garisnya putus-putus abu-abu berlabel BELUM VALID.
   - Konflik CSV/XML, sinkronisasi DAQ gagal, dan ADC overdrive tetap disembunyikan, karena sudutnya tidak bermakna.
   - `overviewDoaStatus().shown` tetap satu-satunya penentu DoA yang valid.
 - **Data Out tanpa doa.xml.** Tampilan CSV saja digambar dengan status DoA `PARTIAL` dan label SEBAGIAN.
-- **Kurva polar** terakhir tetap tampil redup dengan "Belum ada update · terakhir HH.MM.SS", tanpa batas waktu.
+- **Kurva polar** terakhir tetap tampil redup dengan "Belum ada update · terakhir HH.MM.SS", tanpa batas waktu. Lewat Telemetry LoRa frame Angular berlaku 45 s dan detail health 65 s; kurva yang lebih tua dari 10 s digambar redup dengan umurnya, dan setiap kurva diputar dengan heading frame-nya sendiri.
 - **Grafik DoA di peta** (3.11.0) ikut kurva polar: selama DoA berhenti (USANG, BELUM VALID, konflik, sinkronisasi DAQ gagal, ADC overdrive, node macet), peta menggambar grafik hidup terakhir (beam atau heat, lobe, tepi −3 dB, bearing) tetap berwarna penuh, dengan warna, opasitas dan pengaturan Lapisan yang sama dengan grafik hidup. Keputusan pemilik 2026-11-02: grafik terakhir tetap berwarna penuh dan hanya ditandai label USANG dan jam data terakhir (di bearing, legenda, readout dan pemberitahuan), karena grafik yang diredupkan sulit dilihat (`rememberOverlay()`, `heldLayerSpec()`, `lib/heldOverlay.ts`). Grafik itu tetap di posisi stasiun tempat ia diukur, jadi RDF-SDR yang bergerak tidak membawa bearing lama ke tempat barunya. Tanpa batas waktu; data hidup menggantikannya seketika. Simulasi tidak pernah mengisinya; URL Data Out lain, `sid` MQTT lain, atau uptime Data Out yang mundur (node restart) menghapusnya.
 - **Chip Publikasi** berisi PERLU DISIAPKAN bila yang menahan hanya pengaturan: authority, konvensi sudut, jam, pemetaan satuan, dan edge yang masih mengirim ok=0. Isinya ADA MASALAH bila datanya bermasalah. Chip ini membuka checklist alasan dan pemeriksaan gate.
 - **Sumber disebut.** Kartu DoA MQTT di DoA Diagnostics menulis "Sumber: MQTT · Data Out (cadangan) tidak dipakai". Banner kompas di peta menyebut penyebabnya dan membuka Konfigurasi → GPS & Kompas.
@@ -63,8 +64,8 @@ Console dipakai di lapangan lewat link radio yang sering tidak sempurna. Karena 
 - **Revisi yang belum ada diminta, bukan ditunggu.** `config.get` dikirim sendiri sekali per sesi node dan revisi bila belum ada laporan settings untuknya. Jadi `state.cfg` null langsung diminta.
 - **`remote_config_patch` false.** Kirim tetap bisa dipakai setelah peringatan dan konfirmasi kedua yang eksplisit.
 - **Hasil ACK dalam bahasa operator**: Diterapkan, Tersimpan belum terbukti, Hasil tidak diketahui, Ditolak RDF-SDR, Kedaluwarsa, Dibatalkan, Gagal. Kode mentah tampil di baris sendiri.
-  - Kode exception dari helper edge (`OSERROR`, `FILENOTFOUNDERROR`, `PERMISSIONERROR`, `TIMEOUTEXPIRED`) menyebut penyebab yang mungkin: helper tidak tersedia atau belum disetujui di RDF-SDR.
-  - `CONNECTION_LOST` menyebut link yang putus.
+  - Kode helper Edge 1.10 punya teksnya sendiri: `HELPER_TIMEOUT`, `HELPER_CONNECTION_LOST`, `HELPER_CLOSED`, `RPC_TIMEOUT` dan `SYSTEMD_ACTION_OUTCOME_UNKNOWN` berarti helper berhenti menjawab setelah perintah terkirim; `HELPER_UNAVAILABLE`, `HELPER_ACCESS_DENIED`/`PEER_UID_DENIED` dan lainnya menyebut apa yang perlu diperiksa di RDF-SDR. Kode exception dari edge lama (`OSERROR`, `FILENOTFOUNDERROR`, `PERMISSIONERROR`, `TIMEOUTEXPIRED`) menyebut helper yang tidak tersedia atau belum disetujui.
+  - Kode yang tidak dikenal console tampil dengan pesan RDF-SDR sendiri ("Pesan RDF-SDR: …"). Hasil juga menyebut kunci yang diabaikan RDF-SDR dan semua field yang diubah engine saat mulai.
 
 ## Aturan untuk perubahan berikutnya
 

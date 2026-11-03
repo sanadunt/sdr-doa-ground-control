@@ -629,6 +629,8 @@ def _settings_view(report: Any, now_ms: int, config_fields: Any = None) -> Optio
     For an edge that takes the squelch mode (contract 1.9, ``config_fields``
     lists vfo0_squelch_mode) a current report also says whether the squelch is
     automatic, resolved as the edge does (``squelch_is_auto``); null otherwise.
+    ``ant_arrangement`` (UCA, ULA, as written) lets Kontrol apply the engine's
+    UCA radius rule only where the edge does.
     """
     if not isinstance(report, dict) or not isinstance(report.get("id"), str):
         return None
@@ -636,6 +638,7 @@ def _settings_view(report: Any, now_ms: int, config_fields: Any = None) -> Optio
     current = report.get("matches_state_cfg") is True
     safe = report.get("safe_settings") if current and isinstance(report.get("safe_settings"), dict) else {}
     squelch = _squelch_view(safe) if current and cmds.node_writes_whole_db(config_fields) else None
+    arrangement = safe.get("ant_arrangement")
     return {
         "id": report["id"],
         "rev": _int_or_none(report.get("rev")),
@@ -646,6 +649,7 @@ def _settings_view(report: Any, now_ms: int, config_fields: Any = None) -> Optio
         "squelch_auto": None if squelch is None else squelch[0],
         "squelch_mode_resolved": None if squelch is None else squelch[1],
         "vfo_default_squelch_mode": None if squelch is None else squelch[2],
+        "ant_arrangement": arrangement if isinstance(arrangement, str) and _ANT_ARRANGEMENT_RE.fullmatch(arrangement) else None,
     }
 
 
@@ -669,6 +673,7 @@ def _squelch_view(safe: Dict[str, Any]) -> Tuple[bool, Optional[str], Optional[s
 
 # A squelch mode as text Kontrol may show: a short word or phrase (Manual, Auto Channel).
 _SQUELCH_MODE_TEXT_RE = re.compile(r"^[A-Za-z][A-Za-z ]{0,31}$")
+_ANT_ARRANGEMENT_RE = re.compile(r"[A-Za-z_]{1,16}")
 
 
 def _setting_or_none(field: str, value: Any) -> Any:

@@ -32,6 +32,12 @@ export interface LiveOverlay {
   thetaDeg: number | null;
   /** The compass offset the overlay was drawn with. */
   offsetDeg: number;
+  /**
+   * The offset the curve's bins were turned with (contract 1.10: the heading
+   * of the Angular frame itself, which may be older than the DoA's); the
+   * compass offset when absent.
+   */
+  curveOffsetDeg?: number;
   /** The DoA record's frequency, or null. */
   frequencyHz: number | null;
   /**
@@ -123,7 +129,7 @@ export function rememberOverlay(
   const held = memory?.overlay ?? null;
   if (input.live) {
     const live = input.live;
-    const unchanged = held !== null && held.values === live.values && held.thetaDeg === live.thetaDeg && held.offsetDeg === live.offsetDeg && held.frequencyHz === live.frequencyHz
+    const unchanged = held !== null && held.values === live.values && held.thetaDeg === live.thetaDeg && held.offsetDeg === live.offsetDeg && held.curveOffsetDeg === live.curveOffsetDeg && held.frequencyHz === live.frequencyHz
       && held.origin.latitude === live.origin.latitude && held.origin.longitude === live.origin.longitude;
     const overlay = unchanged ? held : { ...live, origin: { latitude: live.origin.latitude, longitude: live.origin.longitude }, atMs: held !== null && held.values === live.values ? held.atMs : input.nowMs };
     return { draw: null, memory: memory && overlay === held && identity === memory.identity ? memory : { overlay, identity } };
@@ -190,11 +196,12 @@ export function heldOverlayFeatures(held: HeldOverlay | null, draw: DoaOverlaySe
   if (!origin || !held || held.values.length !== 360 || draw.maxDb <= draw.minDb) return NO_HELD_FEATURES;
   const halfPower = halfPowerWidth(held.values);
   const bearing = heldBearingDeg(held);
+  const curveOffset = held.curveOffsetDeg ?? held.offsetDeg;
   return {
-    'doa-held-beam': draw.heatmapVisible && draw.heatStyle === 'beam' ? beamFeatures(origin, held.values, draw, held.offsetDeg) : NONE,
-    'doa-held-heat': draw.heatmapVisible && draw.heatStyle === 'density' ? heatFeatures(origin, held.values, draw, held.offsetDeg) : NONE,
-    'doa-held-lobe': draw.lobeVisible ? { type: 'FeatureCollection', features: [lobeFeature(origin, held.values, draw, held.offsetDeg)] } : NONE,
-    'doa-held-edges': draw.edgesVisible ? edgeFeatures(origin, halfPower, draw, held.offsetDeg) : NONE,
+    'doa-held-beam': draw.heatmapVisible && draw.heatStyle === 'beam' ? beamFeatures(origin, held.values, draw, curveOffset) : NONE,
+    'doa-held-heat': draw.heatmapVisible && draw.heatStyle === 'density' ? heatFeatures(origin, held.values, draw, curveOffset) : NONE,
+    'doa-held-lobe': draw.lobeVisible ? { type: 'FeatureCollection', features: [lobeFeature(origin, held.values, draw, curveOffset)] } : NONE,
+    'doa-held-edges': draw.edgesVisible ? edgeFeatures(origin, halfPower, draw, curveOffset) : NONE,
     'doa-held-bearing': draw.bearingVisible && bearing !== null ? { type: 'FeatureCollection', features: [bearingFeature(origin, bearing, draw)] } : NONE,
     halfPower,
   };

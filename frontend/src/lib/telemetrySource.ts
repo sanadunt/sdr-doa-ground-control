@@ -133,6 +133,79 @@ export function angularFrameAgeMs(snapshot: TelemetrySnapshot | null | undefined
   return typeof age === 'number' && Number.isFinite(age) && age >= 0 ? age : null;
 }
 
+/**
+ * The Angular curve of an MQTT answer is held: its frame is older than the
+ * 10 s a curve stays LIVE and only the Telemetry LoRa window (45 s) keeps it
+ * (a frame comes at most every 20 s by radio). It is drawn dimmed with its age.
+ */
+export function angularHeld(snapshot: TelemetrySnapshot | null | undefined): boolean {
+  return isMqttSnapshot(snapshot) && record(record(snapshot?.doa_candidates)?.mqtt)?.angular_held === true;
+}
+
+/**
+ * Codes the RDF Node edge gives for a DoA it does not send as LIVE (contract
+ * 1.10), with their words. Several parse errors of the DoA CSV share one text.
+ */
+const EDGE_DOA_REASON_KEYS: Readonly<Record<string, MessageKey>> = {
+  SETUP_REQUIRED: 'edgeReason.SETUP_REQUIRED',
+  SOURCE_NOT_CONFIGURED: 'edgeReason.SOURCE_NOT_CONFIGURED',
+  NO_RECORD: 'edgeReason.NO_RECORD',
+  STATUS_STALE_OR_UNAVAILABLE: 'edgeReason.STATUS_STALE_OR_UNAVAILABLE',
+  DAQ_NOT_HEALTHY: 'edgeReason.DAQ_NOT_HEALTHY',
+  CLOCK_UNTRUSTED: 'edgeReason.CLOCK_UNTRUSTED',
+  NO_FRESH_DOA: 'edgeReason.NO_FRESH_DOA',
+  DOA_FILE_NOT_UPDATING: 'edgeReason.DOA_FILE_NOT_UPDATING',
+  EMPTY_CSV: 'edgeReason.EMPTY_CSV',
+  NUL_IN_CSV: 'edgeReason.CSV_MALFORMED',
+  CSV_FIELD_COUNT: 'edgeReason.CSV_MALFORMED',
+  VFO_RECORD_AMBIGUOUS_OR_MISSING: 'edgeReason.VFO_RECORD',
+  MULTIPLE_RECORDS_WITHOUT_VFO_AUTHORITY: 'edgeReason.VFO_RECORD',
+  OUTPUT_VFO_MISMATCH: 'edgeReason.VFO_RECORD',
+  SOURCE_TIME_REGRESSED: 'edgeReason.SOURCE_TIME_REGRESSED',
+  SOURCE_UNVERIFIED: 'edgeReason.SOURCE_UNVERIFIED',
+  ANGLE_UNVERIFIED: 'edgeReason.ANGLE_UNVERIFIED',
+  CONFIG_UNAVAILABLE: 'edgeReason.CONFIG_UNAVAILABLE',
+  CONFIG_ATTRIBUTION_UNVERIFIED: 'edgeReason.CONFIG_ATTRIBUTION_UNVERIFIED',
+  CONTROL_IN_PROGRESS: 'edgeReason.CONTROL_IN_PROGRESS',
+};
+
+/** i18n key of an edge DoA code, or null for a code without words (shown as sent). */
+export function edgeDoaReasonKey(code: string): MessageKey | null {
+  return Object.prototype.hasOwnProperty.call(EDGE_DOA_REASON_KEYS, code) ? EDGE_DOA_REASON_KEYS[code] : null;
+}
+
+/**
+ * Why the edge itself holds the DoA back (contract 1.10), as codes: the
+ * reasons of the current UNVERIFIED ok=0 sample (validation_reasons, which
+ * the console fills from the edge's reason), then telemetry/health.why while
+ * that health is fresh. The edge stops sending DoA while its source has
+ * nothing new, so health.why is then the only word on it; it also comes in a
+ * Data Out or empty answer (source.mqtt.health_why). Empty from an older edge.
+ */
+export function edgeDoaReasons(snapshot: TelemetrySnapshot | null | undefined): string[] {
+  if (!snapshot || snapshot.simulation === true) return [];
+  const found: string[] = [];
+  const add = (value: unknown) => {
+    for (const code of codes(value)) if (!found.includes(code)) found.push(code);
+  };
+  const mqtt = isMqttSnapshot(snapshot) ? record(snapshot.mqtt) : null;
+  const unverified = record(mqtt?.doa_unverified);
+  if (unverified && unverified.stale !== true) {
+    const listed = codes(unverified.validation_reasons);
+    add(listed.length ? listed : unverified.reason);
+  }
+  const health = record(mqtt?.health);
+  if (health) {
+    if (health.fresh === true) add(health.why);
+  } else {
+    const summary = record(record(snapshot.source)?.mqtt);
+    const age = finiteOrNull(summary?.health_age_ms);
+    const window = finiteOrNull(summary?.health_fresh_ms);
+    if (age !== null && window !== null && age >= 0 && age <= window) add(summary?.health_why);
+  }
+  return found.slice(0, MAX_ROW_REASONS);
+}
+
 /** The nav fields of an MQTT answer (health, contract 1.6), or null. */
 export function snapshotNav(snapshot: TelemetrySnapshot | null | undefined): Record<string, unknown> | null {
   return isMqttSnapshot(snapshot) ? record(snapshot?.nav) : null;
@@ -221,10 +294,27 @@ export function doaSampleText(sample: DoaSample): string {
 const UNVERIFIED_SAMPLE_REASONS: ReadonlySet<DoaStatusReason> = new Set<DoaStatusReason>(['mqttUnverified', 'loraUnverified']);
 
 /**
+ * The current UNVERIFIED ok=0 record of an MQTT answer that arrived after its
+ * LIVE DoA view went stale (a retune in progress, say): the newer word, held
+ * in place of the last LIVE angle (provisionalDoa) and named on the signal
+ * line with its own frequency and age. null otherwise.
+ */
+export function unverifiedAfterStaleLive(snapshot: TelemetrySnapshot | null | undefined): Record<string, unknown> | null {
+  if (!isMqttSnapshot(snapshot)) return null;
+  const unverified = record(record(snapshot?.mqtt)?.doa_unverified);
+  const live = record(snapshot?.doa_candidates?.mqtt);
+  if (!unverified || unverified.stale === true || !live || record(live.freshness)?.fresh === true) return null;
+  const liveAt = finiteOrNull(live.received_at_ms);
+  const unverifiedAt = finiteOrNull(unverified.received_at_ms);
+  return liveAt !== null && unverifiedAt !== null && unverifiedAt > liveAt ? unverified : null;
+}
+
+/**
  * The frequency and power of the DoA record the Dashboard is showing, with
  * `status` from overviewDoaStatus(): the shown view's (the MQTT view or the
  * CSV view of Data Out); else, while the local window is open, the current
- * UNVERIFIED ok=0 record of an MQTT answer, marked unverified. null when
+ * UNVERIFIED ok=0 record of an MQTT answer (also one newer than a stale LIVE
+ * DoA, unverifiedAfterStaleLive), marked unverified. null when
  * there is no current record, so the caller can show the configured
  * frequency (snapshotRf) instead. The ok=0 record never fills a DoA view.
  */
@@ -238,7 +328,9 @@ export function doaSample(snapshot: TelemetrySnapshot | null | undefined, status
     const powerDb = view?.power_native_valid === false ? null : inRange(view?.power_native_db, -250, 100);
     return { frequencyHz, powerDb, verified: true };
   }
-  if (!localFresh || !isMqttSnapshot(snapshot) || !UNVERIFIED_SAMPLE_REASONS.has(status.reason)) return null;
+  if (!localFresh || !isMqttSnapshot(snapshot)) return null;
+  // A stale LIVE DoA gives way to a newer ok=0 record, as the held bearing does.
+  if (!UNVERIFIED_SAMPLE_REASONS.has(status.reason) && !(status.reason === 'sourceStale' && unverifiedAfterStaleLive(snapshot))) return null;
   const unverified = record(record(snapshot.mqtt)?.doa_unverified);
   if (!unverified || unverified.stale === true) return null;
   const frequencyHz = hzOrNull(unverified.f);

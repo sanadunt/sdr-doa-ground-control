@@ -599,7 +599,8 @@ class ConfigPatchServerTests(unittest.TestCase):
         failed = self.status_of(accepted["command_id"])
         self.assertEqual((failed["ack"]["status"], failed["ack"]["error"]), ("FAILED", "SPACING_SET_BY_ENGINE_BAND"))
         self.assertEqual(failed["ack"]["band_spacing_m"], 0.3)
-        self.assertNotIn("message", failed["ack"])
+        # The edge's own sentence reaches Kontrol with its code.
+        self.assertEqual(failed["ack"]["message"], "Di band ini KrakenSDR sendiri memasang jarak UCA")
 
     def test_squelch_mode_goes_only_to_an_edge_that_lists_it(self) -> None:
         cookie = self.admin_cookie()
@@ -734,6 +735,7 @@ class ConfigPatchServerTests(unittest.TestCase):
             "status": "APPLIED", "final": True, "error": None, "reason": None, "revision": 43,
             "proof": {"center_frequency_hz": "FRESH_DAQ_RF_CENTER", "vfo0_frequency_hz": "FRESH_DOA_FREQUENCY"},
             "persisted": True, "method": None, "live_failure": None, "band_spacing_m": None, "squelch_mode": None,
+            "message": None, "detail": None, "fields": None, "ignored": None, "final_within_ms": None,
             "t": acked["ack"]["t"],
             "received_at_ms": 2,
         })
@@ -979,7 +981,8 @@ class ConfigPatchServerTests(unittest.TestCase):
         )
         # The node's settings.json text never leaves the server.
         self.assertNotIn("settings_json", json.dumps(body))
-        self.assertNotIn("ant_arrangement", json.dumps(body))
+        # The array type is passed on as written, for Kontrol's UCA radius rule.
+        self.assertEqual(body["settings"]["ant_arrangement"], "UCA")
         # A report of another revision is history, not the node's values.
         self.monitor.report("gc-" + "2" * 24, rev=41, matches=False)
         body = self.request("GET", "/api/mqtt/config-reported")[2]

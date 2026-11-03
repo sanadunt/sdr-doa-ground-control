@@ -4,7 +4,7 @@ Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QU
 
 ## 3.11.0
 
-Rilis minor: tidak ada yang dihapus. Tata letak ringkas untuk perangkat sentuh (HP dan tablet, di tampilan LAN maupun di console sendiri). PC groundstation yang memakai mouse tampil persis seperti 3.10.0.
+Rilis minor: tidak ada yang dihapus. Tata letak ringkas untuk perangkat sentuh (HP dan tablet, di tampilan LAN maupun di console sendiri). PC groundstation yang memakai mouse tampil seperti 3.10.0, dengan perbaikan tata letak dari audit UI di bawah. Console juga membaca semua yang dikirim RDF Node Edge 1.10.2 (kontrak 1.10); edge yang lebih lama tetap berjalan seperti di 3.10.0.
 
 - **Kapan dipakai.** Hanya pada perangkat yang input utamanya jari dan tidak punya hover (`(hover: none) and (pointer: coarse)`), di lebar layar berapa pun. Mouse yang dicolokkan ke tablet mengembalikan tata letak biasa. Untuk memeriksa dari PC: `?layout=compact` di URL (misalnya `http://127.0.0.1:8787/?layout=compact#/dashboard`), `?layout=desktop` untuk sebaliknya; hanya berlaku untuk satu kali muat halaman.
 - **Top bar satu baris** di semua halaman, tombol 44 px: menu halaman, logo, satu pil status, tombol panel (ikon saja), muat ulang, dan LIHAT SAJA di tampilan LAN.
@@ -33,6 +33,27 @@ Rilis minor: tidak ada yang dihapus. Tata letak ringkas untuk perangkat sentuh (
 - **Perintah Kontrol berlaku 30 detik** (sebelumnya 15 detik), batas terpanjang yang diterima RDF-SDR. Lewat Telemetry LoRa perintah menunggu giliran radio dan ACK-nya menunggu giliran RDF-SDR, jadi "Belum ada ACK" baru muncul sekitar 35 detik setelah Kirim (keputusan pemilik 2026-11-02).
 - **Baca settings lewat Telemetry LoRa diulang sendiri.** Bila RDF-SDR tidak menjawab sama sekali (NO ACK), Kontrol meminta lagi sampai 3 kali dan menuliskan "tidak dijawab lewat Telemetry LoRa, meminta lagi (2/3)". Baca settings tidak mengubah apa pun di RDF-SDR; perubahan pengaturan (config.patch) tetap tidak pernah dikirim ulang (keputusan pemilik 2026-11-02).
   - Penyebab utamanya ada di bridge LoRa RDF-SDR: jendela giliran bicara groundstation dihitung terlalu awal, sehingga sekitar 62% frame dari groundstation hilang. Perbaikannya ada di RDF Node (`rdf-lora-edge`, jendela diam 0,45 detik dihitung dari saat frame benar-benar terkirim) dan menurunkan kehilangan itu menjadi sekitar 13%.
+- **Perbaikan audit UI 007** (tampilan desktop dan sentuh): Lapisan dan kartu estimasi bisa digulir dan tidak menutupi tombol peta di 1024 px; kartu RDF-SDR dan Kontrol berbagi kolom kanan tanpa terpotong; top bar 1024–1300 px memakai dua baris bila chip Sumber dan Telemetry LoRa tampil; chip LIHAT SAJA berikon gembok; tabel MQTT di Diagnostik DoA bertumpuk di layar sempit; tombol Rekaman 44 px; di Receiver, VFO yang dibisukan tetap terbaca ("VFO n (bisu)") dan header panel bisa dibuka dengan keyboard.
+
+**Dengan RDF Node Edge 1.10.2** (kontrak 1.10; field yang tidak dikirim edge lama tidak dipakai):
+
+- **Bearing BELUM VALID memakai heading sampelnya sendiri.** Garis putus-putus di peta dan bearing redup di HUD kini dihitung dari heading yang dikirim bersama sampel `ok=0` itu, bukan dari offset tetap. Sebelumnya, lewat Telemetry LoRa tanpa DoA LIVE, garis itu bisa menunjuk ke arah yang salah.
+  - Selama perintah Kontrol berjalan, sampel `ok=0` yang lebih baru menggantikan DoA LIVE yang sudah basi. Umurnya umur sampel itu sendiri, dan label tetap BELUM VALID, bukan USANG.
+- **Alasan dari RDF-SDR.** Selama DoA belum ditampilkan, HUD menulis alasan edge, misalnya "RDF-SDR: tidak ada DoA baru" atau "RDF-SDR: jam belum tersinkron". Kodenya ada di tooltip. Monitor Pesan menampilkan `why` dari `telemetry/health`.
+- **Kurva Angular lewat Telemetry LoRa.**
+  - Frame Angular kini berlaku 45 detik (sebelumnya 10 detik), karena bridge mengirimnya paling cepat tiap 20 detik. Kurva yang lebih tua dari 10 detik digambar redup di peta dan Polar, dengan umurnya ("kurva 25 dtk lalu", "Angular 25 dtk lalu · ditahan").
+  - Kurva diputar dengan heading frame-nya sendiri, jadi tetap pas saat RDF-SDR berbelok setelah frame dibuat. Pemeriksaan 3° antara puncak kurva dan DoA ikut dihitung dalam bearing.
+  - Detail health berlaku 65 detik lewat LoRa (sebelumnya 15 detik).
+- **Kontrol.**
+  - **Batas tunggu dari RDF-SDR.** Edge 1.10.2 menyebut paling lama berapa lagi hasilnya datang (`final_within_ms`). Kontrol kini menunggu sampai yang paling akhir dari batas 90/270 detik setelah kirim dan saat ACK itu diterima ditambah `final_within_ms` dan 30 detik (paling lama 15 menit). Selama menunggu, Kontrol menulis sisa batas tunggunya sendiri ("Menunggu hasil paling lama 4 mnt 10 dtk lagi."); saat sisa itu habis, ia menulis "Tidak ada ACK akhir". Baris ini juga muncul untuk edge lama, dengan batas 90 atau 270 detik.
+  - Salinan `ACCEPTED` yang terlambat lewat LoRa tidak lagi memendekkan batas 270 detik.
+  - Setelah batas waktu habis, Kontrol tetap mendengarkan: jawaban RDF-SDR yang terlambat menggantikan hasil "tidak ada ACK final".
+  - Hasil perintah menampilkan pesan RDF-SDR sendiri ("Pesan RDF-SDR: …"), kunci yang diabaikan dan field yang diubah engine saat mulai, juga bila lebih dari satu field.
+  - Kode helper Edge 1.10 (`HELPER_UNAVAILABLE`, `HELPER_ACCESS_DENIED`, `INTERNAL_ERROR`, `CONFIG_ADAPTER_NOT_APPROVED` dan lainnya) kini punya teks yang menyebut apa yang perlu diperiksa di RDF-SDR.
+  - **Jarak UCA.** Pada frekuensi tengah 30–3000 MHz engine KrakenSDR memasang jarak UCA sendiri (0,3 m di bawah 300 MHz, 0,128 m dari 300 MHz). Kontrol tidak lagi mengirim jarak lain yang pasti ditolak RDF-SDR, dan menulis nilai yang berlaku.
+- **Estimasi posisi menyebut yang kurang.** Bila bearing datang tanpa heading atau tanpa posisi GPS RDF-SDR, kartu estimasi menulis sebabnya ("Menunggu bearing: DoA datang tanpa heading", "GPS RDF-SDR belum punya posisi", "nav.gps.publish_position mati di node") dan berapa bearing yang dilewati.
+- **Telemetry LoRa.** `GET /api/mqtt` membawa berapa kali bridge di ujung lain mulai ulang (`rx.peer_restarts`, bridge Edge 1.10.2; `null` dari bridge lama). Blok `lora/edge` memang tidak pernah sampai lewat radio; dokumentasinya kini menyebutnya.
+- `docs/MQTT_KONTRAK.md` bagian 7e dan 8.3b menjelaskan field baru dan aturan LoRa, termasuk bahwa broker cadangan edge bukan failover console.
 
 ## 3.10.0
 
