@@ -572,6 +572,8 @@ class SeedTests(unittest.TestCase):
             "link_mode": "auto",
             # The LAN view has no seed: it starts off, for nobody.
             "lan_access": {"enabled": False, "port": 8788, "bind": "0.0.0.0", "allowed_clients": []},
+            "drone": {"enabled": True, "host": "auto", "port": 1883, "array_heading_offset_deg": 0.0,
+                      "video_enabled": True, "last_host": None},
         }
         self.assertEqual(config, expected)
         self.assertEqual(self.saved(), expected)

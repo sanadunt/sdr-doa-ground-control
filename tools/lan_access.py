@@ -159,6 +159,10 @@ API_ROUTES = frozenset({
     # Its audio (receiver_audio_mirror.py, the owner's decision of 2026-11-02):
     # a stream to read, GET only, under the Records read rule.
     "/api/mirror/receiver/audio",
+    # The SIYI drone's telemetry and its video service's health (owner's
+    # decision of 2026-11-03), read only.
+    "/api/drone",
+    "/api/drone/video",
 })
 ROUTE_UI = "ui"
 ROUTE_TILE = "tile"
@@ -174,6 +178,11 @@ READ_METHODS = ("GET", "HEAD")
 MIRROR_MARKERS_ROUTE = "/api/mirror/receiver/markers"
 MIRROR_MARKER_COMMAND_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 WRITE_ROUTES = frozenset({("POST", MIRROR_MARKERS_ROUTE)})
+# The drone video player (owner's decision of 2026-11-03): an SDP offer to the
+# host video service and the end of that session. They write nothing; they
+# open and close a WebRTC stream of the drone camera.
+DRONE_WHEP_ROUTE = "/api/drone/video/whep"
+DRONE_WHEP_SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 
 # The Receiver's Records, read only. Every other /api/receiver/ path stays
 # refused: settings, marker sets, the raw scan routes, exports, delete,
@@ -440,7 +449,11 @@ def lan_route(path: str) -> Optional[str]:
 
 
 def write_allowed(method: str, path: str) -> bool:
-    """The LAN view's one write (WRITE_ROUTES): POST of a marker command, exactly that path."""
+    """The LAN view's one write (WRITE_ROUTES), and the drone video player's offer and its end."""
+    if method == "POST" and path == DRONE_WHEP_ROUTE:
+        return True
+    if method == "DELETE" and path.startswith(DRONE_WHEP_ROUTE + "/"):
+        return DRONE_WHEP_SESSION_RE.fullmatch(path[len(DRONE_WHEP_ROUTE) + 1:]) is not None
     return (method, path) in WRITE_ROUTES
 
 
