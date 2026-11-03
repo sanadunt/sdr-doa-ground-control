@@ -236,7 +236,7 @@ Tambahan opsional di `telemetry/health`; edge yang lebih lama tetap dibaca seper
 - KrakenSDR membandingkan nilai sebelum dibulatkan ke 0,1 dB, jadi selisih tepat 0,0 tidak menyatakan sisi mana: `above_squelch` `null`, tanpa warna dan tanpa label "di bawah squelch".
 - **Console:** jawaban MQTT membawa `vfo_peak` (`null` tanpa field ini): `source`, `t`, `received_at_ms`, `age_ms`, `fresh` (health segar), `peak_db`, `squelch_db`, `margin_db` (`pk` − `psq`), `above_squelch`.
   - Kartu RDF-SDR menulis baris "Puncak VFO": oranye bila puncak di bawah squelch, hijau di atasnya, tanpa angka bila bacaan tidak segar.
-  - Selama DoA tidak ditampilkan, HUD menulis "Puncak VFO −78.4 dB · SQ −70.0 dB (−8.4) · di bawah squelch". Bersama alasan edge `EMPTY_CSV`, operator bisa membedakan sinyal yang memang tidak ada dari squelch yang terlalu tinggi.
+  - Selama DoA tidak ditampilkan, HUD menulis "Puncak VFO −78.4 dB · SQ −70.0 dB (−8.4) · di bawah squelch". Bersama alasan edge `EMPTY_CSV` atau `DOA_FILE_NOT_UPDATING` (rdfsdr hanya menulis `DOA_value.html` saat DoA dihitung), operator bisa membedakan sinyal yang memang tidak ada dari squelch yang terlalu tinggi.
 - Fixture: `tools/fixtures/telemetry-source/mqtt-lora-vfo-peak.json` (edge 1.11 lewat LoRa, `why` `EMPTY_CSV`, puncak 8,4 dB di bawah squelch).
 
 ## 8. Dashboard: MQTT dulu, Data Out cadangan (#8)

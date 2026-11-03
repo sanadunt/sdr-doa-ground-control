@@ -8,7 +8,7 @@ Rilis minor: tidak ada yang dihapus. Dengan RDF Node Edge 1.11 (kontrak 1.11) da
 
 - **Puncak VFO dan squelch.** `telemetry/health` dari Edge 1.11 membawa `pk` (puncak spektrum di lebar VFO, dB skala KrakenSDR, bukan dBm) dan `psq` (squelch yang dipakai KrakenSDR). Console menyimpannya di `vfo_peak` jawaban `/api/snapshot` dengan selisihnya (`margin_db`).
   - Kartu RDF-SDR punya baris "Puncak VFO", misalnya `-78.4 dB · SQ -70.0 dB (-8.4)`: oranye di bawah squelch, hijau di atasnya. Selisih tepat 0,0 tanpa warna, karena KrakenSDR membandingkan nilai sebelum dibulatkan.
-  - Selama DoA tidak ditampilkan, HUD menulis baris yang sama di bawah setelan gain/VFO/squelch, dengan "di bawah squelch" bila puncak tidak lolos. Bersama "RDF-SDR: CSV DoA kosong", operator tahu apakah sinyalnya tidak ada atau squelch-nya terlalu tinggi.
+  - Selama DoA tidak ditampilkan, HUD menulis baris yang sama di bawah setelan gain/VFO/squelch, dengan "di bawah squelch" bila puncak tidak lolos. Bersama alasan RDF-SDR (CSV DoA kosong, atau file DoA tidak diperbarui), operator tahu apakah sinyalnya tidak ada atau squelch-nya terlalu tinggi.
 - `docs/MQTT_KONTRAK.md` bagian 7f menjelaskan field baru.
 
 ## 3.12.0
