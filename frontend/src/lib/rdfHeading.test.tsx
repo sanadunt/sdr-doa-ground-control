@@ -110,6 +110,9 @@ describe('heading geometry', () => {
     expect(headingLabel(held, tr('id'))).toBe('HDG 201° · USANG');
     expect(headingPopupText(live, 'Unavailable')).toBe('201.1°');
     expect(headingPopupText(held, 'Unavailable')).toBe('201.1° · STALE');
+    expect(headingPopupText(held, 'Tidak tersedia', tr('id')('map.popupHeld'))).toBe('201.1° · USANG');
+    expect(tr('id')('map.sourceHeld')).toBe('POSISI STASIUN TERAKHIR · USANG');
+    expect(tr('en')('map.sourceHeld')).toBe('LAST STATION POSITION · STALE');
     expect(headingPopupText(rdfHeading(withNav({ compass_state: 'NO_REPLY' }), true)!, 'Unavailable')).toBe('NO_REPLY');
   });
 });
