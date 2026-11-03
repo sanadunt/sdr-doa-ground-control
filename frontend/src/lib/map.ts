@@ -314,6 +314,8 @@ export function holdStationCoordinate(
   selectedSource: GpsSourceMode = 'DATA_OUT',
 ): HeldStation {
   if (coordinate?.source === 'DATA_OUT') return { coordinate, held: false, lastLive: coordinate };
+  // The RDF-SDR's own GPS from a held health (link_mode "lora"): its last position, STALE.
+  if (coordinate?.source === 'NAV' && coordinate.stale === true) return { coordinate, held: true, lastLive };
   if (selectedSource !== 'DATA_OUT' || coordinate?.source !== 'FALLBACK') return { coordinate, held: false, lastLive };
   if (noFixReported) return { coordinate, held: false, lastLive: null };
   return lastLive ? { coordinate: lastLive, held: true, lastLive } : { coordinate, held: false, lastLive: null };
@@ -367,8 +369,8 @@ function lightStationCoordinate(snapshot: TelemetrySnapshot): MapCoordinate | nu
 
 /**
  * The station position from the nav fields of health (contract 1.6): the
- * RDF-SDR's own GPS, sent only with a fix. An MQTT answer exists only while
- * health is fresh, so the position is as current as the answer.
+ * RDF-SDR's own GPS, sent only with a fix. With link_mode "lora" the answer
+ * keeps a held health's position, marked ``stale`` (nav.stale).
  */
 function navStationCoordinate(snapshot: TelemetrySnapshot): MapCoordinate | null {
   const nav = snapshotNav(snapshot);
@@ -376,7 +378,7 @@ function navStationCoordinate(snapshot: TelemetrySnapshot): MapCoordinate | null
   const { latitude, longitude } = nav;
   if (!finiteCoordinate(latitude, -90, 90) || !finiteCoordinate(longitude, -180, 180)) return null;
   if (latitude === 0 && longitude === 0) return null;
-  return { latitude, longitude, source: 'NAV' };
+  return nav.stale === true ? { latitude, longitude, source: 'NAV', stale: true } : { latitude, longitude, source: 'NAV' };
 }
 
 export function resolveStationCoordinate(snapshot: TelemetrySnapshot | null | undefined): MapCoordinate | null {

@@ -149,6 +149,18 @@ class ConsoleConfigTests(unittest.TestCase):
         self.assertEqual(config["data_out_hosts"], DEFAULTS)
         self.assertEqual(ground_console._validate_console_config({}), config)
 
+    def test_link_mode_is_auto_or_lora_and_kept_by_other_saves(self) -> None:
+        self.assertEqual(ground_console._default_console_config()["link_mode"], "auto")
+        lora = ground_console._validate_console_config({"link_mode": "lora"})
+        self.assertEqual(lora["link_mode"], "lora")
+        # A save of another field keeps it; an older file without it reads as auto.
+        self.assertEqual(ground_console._validate_console_config({"refresh_seconds": 5}, lora)["link_mode"], "lora")
+        self.assertEqual(ground_console._validate_console_config({}, {k: v for k, v in lora.items() if k != "link_mode"})["link_mode"], "auto")
+        for bad in ("LORA", "mqtt", "", None, 1, True):
+            with self.subTest(bad):
+                with self.assertRaises(ValueError):
+                    ground_console._validate_console_config({"link_mode": bad})
+
     def test_a_url_on_a_saved_host_is_accepted(self) -> None:
         config = ground_console._validate_console_config({"base_url": "http://rdf.local:8081/", "data_out_hosts": ["RDF.local", "doasdr.local", "rdf.local"]})
         self.assertEqual((config["base_url"], config["data_out_hosts"]), ("http://rdf.local:8081", ["rdf.local", "doasdr.local"]))

@@ -190,6 +190,10 @@ export function normalizeConsoleConfig(value: unknown): ConsoleConfig {
     config.mqtt_ws_path = value.mqtt_ws_path;
   }
   if (value.data_out_hosts !== undefined) config.data_out_hosts = normalizeDataOutHostList(value.data_out_hosts);
+  if (value.link_mode !== undefined) {
+    if (value.link_mode !== 'auto' && value.link_mode !== 'lora') throw new Error('console config response has an invalid link mode');
+    config.link_mode = value.link_mode;
+  }
   return config;
 }
 
@@ -205,6 +209,7 @@ function sameConfigValues(left: ConsoleConfig, right: ConsoleConfig): boolean {
     && (left.mqtt_transport === undefined || left.mqtt_transport === right.mqtt_transport)
     && (left.mqtt_ws_path === undefined || left.mqtt_ws_path === right.mqtt_ws_path)
     && (left.data_out_hosts === undefined || sameHosts(left.data_out_hosts, right.data_out_hosts))
+    && (left.link_mode === undefined || left.link_mode === right.link_mode)
     && (left.version === undefined || left.version === right.version);
 }
 

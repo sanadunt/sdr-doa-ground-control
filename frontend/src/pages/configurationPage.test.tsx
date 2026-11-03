@@ -84,6 +84,18 @@ describe('Configuration page', () => {
     expect(css.replace(/\.cfg-fieldset \{[^}]*\}/, '').match(/display: contents/g)).toHaveLength(1);
   });
 
+  it('switches the RDF-SDR path between Telemetry LoRa and automatic, folding Data Out away for LoRa', () => {
+    const lora = render({ lang: 'id', config: { link_mode: 'lora' } });
+    expect(lora).toContain('Jalur RDF-SDR');
+    expect(lora).toMatch(/aria-pressed="true"[^>]*>Telemetry LoRa</);
+    expect(lora).toContain('Data Out · tidak dipakai selama Telemetry LoRa');
+    const auto = render({ lang: 'en', config: { link_mode: 'auto' } });
+    expect(auto).toMatch(/aria-pressed="true"[^>]*>Automatic</);
+    expect(auto).not.toContain('not used over Telemetry LoRa');
+    // An older server without link_mode reads as automatic.
+    expect(render({ lang: 'en' })).toMatch(/aria-pressed="true"[^>]*>Automatic</);
+  });
+
   it('offers the refresh intervals as one segmented control and warns about a 10 s interval (AUD-24)', () => {
     const markup = render();
     for (const label of ['Manual', '1 s', '2 s', '5 s', '10 s', '30 s']) expect(markup).toContain(`>${label}</button>`);

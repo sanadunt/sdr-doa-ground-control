@@ -1,0 +1,370 @@
+{
+ "authority": {
+  "canonical_angle_ready": false,
+  "raw_and_canonical_separated": true,
+  "selected": null,
+  "selected_doa": null
+ },
+ "collection": {
+  "age_ms": 0,
+  "budget_ms": null,
+  "collected_at_ms": 1793070140000,
+  "console_base_url": "http://127.0.0.1:8081",
+  "deadline_exceeded": false,
+  "elapsed_ms": 0,
+  "host_resolution": null,
+  "id": "0f1e2d3c-9",
+  "refresh_seconds": 2,
+  "settings_age_ms": null,
+  "settings_reused": false,
+  "shared": false,
+  "source": "mqtt",
+  "status_transport_failed": false
+ },
+ "collector": {
+  "angular_plot_local_only": true,
+  "authority_config": "none",
+  "base_url": "http://127.0.0.1:8081",
+  "clock_source": "remote_unverified",
+  "mode": "read_only",
+  "mqtt_publish": false,
+  "node_id": "uav-01",
+  "raw_angular_values_omitted": true,
+  "raw_settings_omitted": true,
+  "source": "mqtt"
+ },
+ "completed_at_ms": 1793070140000,
+ "data_out_light": {
+  "age_ms": null,
+  "error": null,
+  "expired": false,
+  "host_resolution": null,
+  "interval_s": 30.0,
+  "max_age_ms": 65000,
+  "read_at_ms": null,
+  "reason": "light-first",
+  "resources": {},
+  "running": false,
+  "status": null,
+  "xml": null
+ },
+ "doa_candidates": {
+  "mqtt": {
+   "angle_convention": "mqtt_theta_mirror",
+   "angle_raw_deg": 160.0,
+   "angular_frame": {
+    "age_ms": 120000,
+    "canonical_angle_deg": 160.0,
+    "doa_peak_distance_deg": null,
+    "flags": 63,
+    "frequency_hz": 433920000,
+    "heading_deg": null,
+    "heading_source": null,
+    "heading_turn_deg": null,
+    "held": false,
+    "live": false,
+    "max_age_ms": 45000,
+    "pairing": "NOT_LIVE",
+    "peak_index": 160,
+    "q": 1,
+    "raw_doa_deg": 200.0,
+    "reasons": [
+     "SOURCE_STALE",
+     "HEALTH_STALE"
+    ],
+    "received_at_ms": 1793070020000,
+    "revision": 1,
+    "source_age_ms": 120000,
+    "timestamp_ms": 1793070020000,
+    "vfo": 0
+   },
+   "angular_heading_deg": null,
+   "angular_heading_source": null,
+   "angular_held": false,
+   "angular_pairing": "NOT_LIVE",
+   "array_heading_deg": null,
+   "available": true,
+   "bearing_deg": null,
+   "canonical_angle_convention": "upstream_theta_0",
+   "canonical_angle_deg": 160.0,
+   "confidence": null,
+   "confidence_contract_valid": false,
+   "confidence_mapping_ready": false,
+   "confidence_metric_db": 8.27,
+   "confidence_metric_unit": "dB_papr",
+   "confidence_metric_valid": true,
+   "confidence_unit": "dB_papr_unmapped",
+   "confidence_valid": false,
+   "contract_mapping_state": "NOT_READY",
+   "doa_raw_deg": 160.0,
+   "frequency_hz": 433920000,
+   "frequency_hz_normalized": 433920000,
+   "frequency_unit": "Hz",
+   "frequency_valid": true,
+   "freshness": {
+    "age_ms": 120000,
+    "fresh": false,
+    "freshness_known": true,
+    "future_skew": false,
+    "max_age_ms": 5000,
+    "raw_age_ms": 120000,
+    "reasons": [
+     "SOURCE_STALE",
+     "HEALTH_STALE"
+    ],
+    "received_age_ms": 120000,
+    "reference_kind": "mqtt_received_at",
+    "timestamp_ms": 1793070020000
+   },
+   "heading_source": null,
+   "native_metrics_state": "READY",
+   "native_metrics_valid": true,
+   "path": "telemetry/doa",
+   "power_db": null,
+   "power_mapping_lossy": false,
+   "power_native_db": -54.2,
+   "power_native_valid": true,
+   "power_unit": "dB_spectrum_native_unverified",
+   "power_valid": false,
+   "q": 1,
+   "received_at_ms": 1793070020000,
+   "rev": 1,
+   "sample_latitude": null,
+   "sample_longitude": null,
+   "source_format": "mqtt",
+   "timestamp_ms": 1793070020000,
+   "unit_reasons": [
+    "CONFIDENCE_MAPPING_UNVERIFIED",
+    "POWER_MAPPING_UNVERIFIED"
+   ],
+   "units_state": "NOT_READY",
+   "units_valid": false
+  }
+ },
+ "mqtt": {
+  "angle_convention": "theta_mirror",
+  "angular": {
+   "age_ms": 120000,
+   "canonical_angle_deg": 160.0,
+   "flags": 63,
+   "frequency_hz": 433920000,
+   "heading_deg": null,
+   "heading_source": null,
+   "held": false,
+   "live": false,
+   "max_age_ms": 45000,
+   "pairing": "NOT_LIVE",
+   "peak_index": 160,
+   "q": 1,
+   "raw_doa_deg": 200.0,
+   "reasons": [
+    "SOURCE_STALE",
+    "HEALTH_STALE"
+   ],
+   "received_at_ms": 1793070020000,
+   "revision": 1,
+   "source_age_ms": 120000,
+   "timestamp_ms": 1793070020000,
+   "vfo": 0
+  },
+  "angular_unverified": null,
+  "capabilities": {
+   "angle": "theta_mirror",
+   "count": 360,
+   "native_axis": 1,
+   "nav": {
+    "compass": true,
+    "gps": true,
+    "heading": "compass",
+    "position": false
+   },
+   "profiles": [
+    "control",
+    "balanced",
+    "graph_u8"
+   ],
+   "session_match": true,
+   "version": "1.0.0"
+  },
+  "cfg": 1,
+  "clock": "SYNCED",
+  "diagnostic_doa": null,
+  "doa": {
+   "age_ms": 120000,
+   "f": 433920000,
+   "live": false,
+   "q": 1,
+   "reason": null,
+   "reasons": [
+    "SOURCE_STALE",
+    "HEALTH_STALE"
+   ],
+   "received_at_ms": 1793070020000,
+   "rev": 1,
+   "source_age_ms": 120000,
+   "t": 1793070020000
+  },
+  "doa_unverified": null,
+  "health": {
+   "age": 7,
+   "age_ms": 120000,
+   "clk": 1,
+   "daq": 1,
+   "drop": 2,
+   "fresh": false,
+   "q": 1,
+   "received_at_ms": 1793070020000,
+   "rev": 1,
+   "run": 1,
+   "t": 1793070020000,
+   "temp": 52.3,
+   "why": null
+  },
+  "profile": "balanced",
+  "run": "RUNNING",
+  "sid": "227c8be2"
+ },
+ "native_consistency": {
+  "angle_checked": false,
+  "angle_invalid": false,
+  "comparable": false,
+  "conflict": false,
+  "frame_relation": "INCOMPLETE",
+  "same_timestamp": false,
+  "source": "mqtt",
+  "timestamp_delta_ms": null,
+  "timestamp_tolerance_ms": 2000,
+  "tolerance_deg": 1.0,
+  "views": [
+   "telemetry/doa",
+   "telemetry/angular"
+  ]
+ },
+ "nav": {
+  "age_ms": 120000,
+  "altitude_m": 715.9,
+  "compass_state": "OK",
+  "course_deg": null,
+  "fix": 3,
+  "gps_state": "FIX",
+  "heading_deg": 201.1,
+  "latitude": -6.20576,
+  "longitude": 106.81,
+  "satellites": 7,
+  "source": "telemetry/health",
+  "speed_mps": 0.1,
+  "stale": true,
+  "t": 1793070020000
+ },
+ "node_progress": {
+  "changed_counters": [],
+  "health_q": 1,
+  "max_stall_ms": 8000,
+  "regressed_counters": [],
+  "samples": 0,
+  "source": "mqtt",
+  "stalled": false,
+  "stalled_counters": [],
+  "state": "ADVANCING",
+  "unchanged_for_ms": {}
+ },
+ "observed_at_ms": 1793070140000,
+ "overall_state": "STALE",
+ "position_estimate": null,
+ "publication_gate": {
+  "checks": {
+   "adc_not_overdriven": null,
+   "angular_peak_consistent": true,
+   "angular_vector_live": false,
+   "authority_selected": false,
+   "canonical_angle_ready": false,
+   "daq_healthy": null,
+   "doa_candidate_fresh": false,
+   "doa_candidate_parsed": true,
+   "mqtt_health_fresh": false,
+   "native_views_consistent": true,
+   "node_not_stalled": true,
+   "selected_doa_fresh": false,
+   "selected_units_valid": false
+  },
+  "reasons": [
+   "GROUND_CLOCK_UNVERIFIED",
+   "MQTT_HEALTH_STALE",
+   "ADC_OVERDRIVE_NOT_OVER_LORA",
+   "DOA_CANDIDATES_STALE",
+   "MQTT_ANGULAR_UNAVAILABLE",
+   "CANONICAL_ANGLE_NOT_CONFIGURED",
+   "DOA_AUTHORITY_NOT_SELECTED"
+  ],
+  "state": "BLOCKED"
+ },
+ "resources": {},
+ "rf": null,
+ "schema_version": 1,
+ "settings": {
+  "available": false,
+  "error": "settings.json is not read over Telemetry LoRa",
+  "raw_fields_omitted": true,
+  "read_at_ms": null,
+  "redacted": true,
+  "reused": false
+ },
+ "signal_quality": {
+  "adc_overdrive": null,
+  "adc_overdrive_channel_mask": null,
+  "adc_overdrive_reported_by": [],
+  "adc_overdrive_sources": [],
+  "confidence_metric_db": {
+   "mqtt": 8.27
+  },
+  "confidence_metric_unit": "dB_papr_unmapped",
+  "daq_num_dropped_frames": null,
+  "last_doa_record": {},
+  "noise_source_enabled": null,
+  "snr_db": null,
+  "snr_source": null,
+  "snr_unit": "dB_native_unverified",
+  "source": null,
+  "state": "UNKNOWN"
+ },
+ "source": {
+  "data_out": {
+   "age_ms": null,
+   "available": false,
+   "interval_s": 30.0,
+   "read": "light"
+  },
+  "kind": "mqtt",
+  "link": "lora",
+  "mqtt": {
+   "connection": "ready",
+   "fresh": false,
+   "health_age_ms": 120000,
+   "health_daq": 1,
+   "health_fresh_ms": 8000,
+   "health_why": null,
+   "sid": "227c8be2"
+  },
+  "reason": "MQTT_HEALTH_STALE",
+  "reasons": [
+   "MQTT_HEALTH_STALE"
+  ]
+ },
+ "status": {
+  "available": true,
+  "daq_health": "PASS",
+  "failed_sync_flags": [],
+  "freshness": null,
+  "missing_sync_flags": [],
+  "safe": {
+   "daq_num_dropped_frames": 2,
+   "daq_status": {
+    "frame_sync": true,
+    "iq_sync": true,
+    "sample_delay_sync": true
+   },
+   "timestamp_ms": 1793070020000
+  },
+  "source": "mqtt"
+ }
+}

@@ -124,6 +124,7 @@
   ]
  },
  "nav": {
+  "age_ms": 0,
   "altitude_m": 715.9,
   "compass_state": "OK",
   "course_deg": null,
@@ -135,6 +136,7 @@
   "satellites": 7,
   "source": "telemetry/health",
   "speed_mps": 0.1,
+  "stale": false,
   "t": 1793070140000
  },
  "node_progress": {

@@ -276,7 +276,15 @@ export interface ConsoleConfig {
   /** Hosts Data Out may be read from (port 8081); base_url's host is one of them. Absent from older servers. */
   data_out_hosts?: string[];
   refresh_seconds: number;
+  /**
+   * How the console reaches the RDF-SDR: 'lora' reads only what the LoRa
+   * bridge brings (no Data Out, values held with their age); 'auto' is MQTT
+   * first with Data Out as the fallback. Absent from older servers.
+   */
+  link_mode?: LinkMode;
 }
+
+export type LinkMode = 'auto' | 'lora';
 
 export interface Branding {
   app_name: string;
@@ -414,6 +422,8 @@ export interface MapCoordinate {
   latitude: number;
   longitude: number;
   source: 'CSV' | 'XML' | 'NAV' | 'DATA_OUT' | 'MANUAL' | 'FALLBACK' | 'SIMULATION';
+  /** A NAV position from a held (not fresh) health, kept with link_mode "lora": shown as the last position, STALE. */
+  stale?: boolean;
 }
 
 export interface PolarSettings {
