@@ -9,7 +9,7 @@ import { normalizeDrone } from '../../lib/droneLink';
 import type { TelemetrySnapshot } from '../../types';
 import { DroneLinkCard, DroneVideoCard } from '../DroneHealthCards';
 import { DroneSettingsCard, droneHostValid, normalizeDroneSettings } from '../DroneSettingsCard';
-import { DronePanel, droneChip, droneLinkStatus, droneRows, droneVideoStatus, droneVideoText } from './DronePanel';
+import { DroneDetails, DronePanel, droneChip, droneLinkStatus, dronePipShown, droneRows, droneVideoStatus, droneVideoText } from './DronePanel';
 import { droneCompareRows } from './NodeCard';
 
 const t = (lang: Lang): Translate => (key: MessageKey, vars?: Record<string, string | number>) => translate(lang, key, vars);
@@ -94,6 +94,24 @@ describe('drone panel', () => {
     expect(droneVideoStatus(normalizeDroneVideoHealth({ state: 'DOWN' }), 'idle', null, en).tone).toBe('is-bad');
     expect(droneVideoStatus(normalizeDroneVideoHealth({ state: 'DISABLED', reason: 'NOT_CONFIGURED' }), 'idle', null, en).value).toBe('No video service on this console');
     expect(droneVideoStatus(normalizeDroneVideoHealth({ state: 'DISABLED', reason: 'TURNED_OFF' }), 'idle', null, id).value).toBe('Mati (Konfigurasi)');
+  });
+
+  it('the camera keeps its place unless the link is off or the console has no video', () => {
+    expect(dronePipShown(null, OK)).toBe(false);
+    expect(dronePipShown(normalizeDrone({ ...BLOCK, enabled: false, state: 'DISABLED', connection: 'disabled' }), OK)).toBe(false);
+    expect(dronePipShown(normalizeDrone({ ...BLOCK, video_enabled: false }), OK)).toBe(false);
+    expect(dronePipShown(normalizeDrone(BLOCK), normalizeDroneVideoHealth({ state: 'DISABLED', reason: 'NOT_CONFIGURED' }))).toBe(false);
+    expect(dronePipShown(normalizeDrone({ ...BLOCK, connection: 'searching', state: 'NO_DATA' }), OK)).toBe(true);
+    expect(dronePipShown(normalizeDrone(BLOCK), normalizeDroneVideoHealth({ state: 'DOWN' }))).toBe(true);
+    expect(dronePipShown(normalizeDrone(BLOCK), null)).toBe(true);
+  });
+
+  it('the details are the rows without the video', () => {
+    const markup = render(<DroneDetails view={normalizeDrone(BLOCK)} health={OK} video={{ phase: 'playing', code: null }} />);
+    expect(markup).toContain('>Telemetry<');
+    expect(markup).toContain('Connected · live');
+    expect(markup).toContain('RTK FIXED · 22 sat · HDOP 0.6');
+    expect(markup).not.toContain('<video');
   });
 
   it('chips and rows', () => {

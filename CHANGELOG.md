@@ -2,6 +2,16 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.14.0
+
+Tampilan tablet dan ponsel (layout compact) disusun ulang. Tampilan PC dengan mouse tidak berubah.
+
+- **Layar utama yang bisa ditukar.** Area besar menampilkan peta DoA, dan video drone ada di jendela kecil 16:9 di pojok kanan bawah. Ketuk jendela kecil untuk menukar: video jadi besar dan peta pindah ke pojok. Peta tidak dimuat ulang dan video tidak terputus saat ditukar, dan video tetap live di jendela kecil. Jendela kecil hanya ada selama link drone menyala dan video drone dikonfigurasi; pilihan ini berlaku per kunjungan.
+- **Baris info selalu tampil di bawah layar utama.** Isinya bearing dari utara beserta umurnya (yang ditahan diberi tanda USANG/BELUM VALID dan warna redup), frekuensi RDF-SDR, ketinggian/heading/fix drone, dan tiga titik status link (RDF-SDR, telemetri drone, video). Portrait dan layar pendek hanya menampilkan bearing dan drone. Ketuk kotak untuk membuka tab yang sesuai.
+- **Panel samping bertab.** Tab Spektrum, Drone, RDF-SDR, dan Kontrol (Kontrol tidak ada di LAN view) ada di kanan saat landscape dan di bawah saat portrait. Tiap tab memberi label status kecil. Panel tidak lagi menutupi peta. Lapisan tetap dibuka dari tombol top bar.
+- **Pesan kuning di peta bisa disingkirkan.** Ketuk pesan, ia mengecil jadi tanda ⓘ, dan tanda itu membuka teks lengkap beserta tautannya. Pesan yang sama tetap tersingkir walaupun jamnya berganti, dan muncul lagi hanya bila penyebabnya berubah.
+- Saklar Spektrum/Drone/Kontrol yang tersimpan di PC tidak diubah oleh tablet.
+
 ## 3.13.5
 
 Rilis perbaikan: tidak ada yang dihapus.

@@ -34,7 +34,10 @@ import { DoaReadout } from '../components/DoaReadout';
 import { LoadErrorBoundary } from '../components/LoadErrorBoundary';
 import type { RouteName } from '../components/Shell';
 import { NodeCard } from '../components/overview/NodeCard';
-import { DronePanel } from '../components/overview/DronePanel';
+import { DroneDetails, DronePanel, DroneVideo, droneChip, dronePipShown, useDroneFeed } from '../components/overview/DronePanel';
+import type { DroneVideoPhase, DroneVideoState } from '../components/overview/DronePanel';
+import { CompactInfoStrip } from '../components/overview/CompactInfoStrip';
+import type { CompactTab } from '../components/overview/CompactInfoStrip';
 import type { DroneMapView } from '../components/TacticalMap';
 import { DRONE_SAME_PLACE_M, droneArrayHeadingNow, droneStation, positionGap, rememberDroneTrack, snapshotDrone } from '../lib/droneLink';
 import { LayersPanel } from '../components/overview/LayersPanel';
@@ -277,6 +280,17 @@ function OverviewPageView({
   const dockShown = polarShown || panels.spectrum;
   // Kontrol publishes to the node; the LAN view never shows it, whatever the saved panels say.
   const controlShown = panels.control && !viewOnly;
+  // Compact: one main view (map or drone video, the other in the corner window) and a tabbed
+  // side panel, both for this visit only; the saved panel switches are neither read nor written.
+  const droneFeed = useDroneFeed(droneView, null, compact);
+  const [mainView, setMainView] = useState<'map' | 'video'>('map');
+  const [tab, setTab] = useState<CompactTab>('spectrum');
+  const [compactNodeCollapsed, setCompactNodeCollapsed] = useState(false);
+  const [droneVideo, setDroneVideo] = useState<DroneVideoState>({ phase: 'idle', code: null });
+  const onDroneVideoState = useCallback((phase: DroneVideoPhase, code: string | null) => setDroneVideo({ phase, code }), []);
+  const pipShown = compact && dronePipShown(droneFeed.view, droneFeed.health);
+  // Without the camera the map is the main view, also when the video was.
+  const main = pipShown ? mainView : 'map';
   useEffect(() => {
     const mapElement = mapRef.current;
     if (!mapElement || typeof ResizeObserver !== 'function') return undefined;
@@ -309,10 +323,8 @@ function OverviewPageView({
     return () => { window.cancelAnimationFrame(frame); observer.disconnect(); };
   }, [panels.layers, controlShown, polarShown, panels.spectrum, panels.drone, panels.nodeCollapsed, nodeShown, compactLayout]);
 
-  return (
-    <div className="page page-overview ov-stage" data-dock={dockShown ? (panels.spectrum ? 'full' : 'polar') : 'none'} data-control={controlShown ? 'open' : undefined} data-layout={compactLayout ?? undefined}>
-      <h1 className="visually-hidden" data-route-focus tabIndex={-1}>{t('route.overview')}</h1>
-      <div className="ov-map" ref={mapRef}>
+  const mapView = (
+    <div className="ov-map" ref={mapRef}>
         <LoadErrorBoundary variant="map">
           <Suspense fallback={<MapPlaceholder />}>
             <TacticalMap
@@ -342,38 +354,126 @@ function OverviewPageView({
             />
           </Suspense>
         </LoadErrorBoundary>
+    </div>
+  );
+  const nodeCard = (collapsed: boolean, onToggle: () => void) => (
+    <NodeCard
+      snapshot={snapshot}
+      localSnapshotFresh={localSnapshotFresh}
+      groundGpsFresh={groundGpsFresh}
+      coordinate={readoutCoordinate}
+      positionHeld={station?.held === true}
+      ground={groundCoordinate}
+      compassOffset={compassOffset}
+      offsetSource={offsetSource}
+      offsetManual={offsetManual}
+      collapsed={collapsed}
+      onToggle={onToggle}
+    />
+  );
+  const controlPanel = (onClose: () => void) => (
+    <ControlPanel
+      capabilities={capabilities}
+      controlDraftRequest={controlDraftRequest}
+      onClose={onClose}
+      snapshot={snapshot}
+      localSnapshotFresh={localSnapshotFresh}
+      onRefreshSnapshot={onRefreshSnapshot}
+    />
+  );
+  const spectrumDock = viewOnly ? <SpectrumDockMirror feed={mirrorFeed} compact={compact || panels.layers} /> : (
+    <SpectrumDock
+      snapshot={snapshot}
+      localSnapshotFresh={localSnapshotFresh}
+      capabilities={capabilities}
+      panels={panels}
+      onPanelsChange={onPanelsChange}
+      onControlDraftRequest={onControlDraftRequest}
+      onRequestReceiver={onRequestReceiver}
+      onNavigate={onNavigate}
+      receiverBridge={receiverBridge}
+      compact={compact}
+    />
+  );
+  const readout = <DoaReadout snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} settings={plotSettings} curveOffset={curveOffset} offsetSource={offsetSource} offsetVerified={offsetVerified} offsetManual={offsetManual} />;
+  const estimateCard = estimate && overlaySettings.estimateVisible && (!compact || estimate.state === 'ESTIMATE') ? <EstimatePanel estimate={estimate} viewOnly={viewOnly} compact={compact || panels.layers} /> : null;
+  const layersPanel = panels.layers ? <LayersPanel settings={overlaySettings} scale={overlayScale} onChange={onOverlayChange} onClose={() => onPanelsChange({ ...panels, layers: false })} basemapId={basemapId} onBasemapChange={onBasemapSelect} /> : null;
+
+  if (compact) {
+    const droneTag = droneChip(droneFeed.view);
+    const tabs: ReadonlyArray<{ id: CompactTab; label: string; tag?: { code: string; tone: string } }> = [
+      { id: 'spectrum', label: t('overview.tabSpectrum') },
+      { id: 'drone', label: t('overview.tabDrone'), tag: droneTag },
+      { id: 'node', label: t('overview.tabNode'), tag: { code: doa.code, tone: doa.shown ? 'good' : 'warn' } },
+      ...(viewOnly ? [] : [{ id: 'control' as const, label: t('overview.tabControl') }]),
+    ];
+    return (
+      <div className="page page-overview ov-stage" data-dock="full" data-layout={compactLayout ?? undefined} data-main={main}>
+        <h1 className="visually-hidden" data-route-focus tabIndex={-1}>{t('route.overview')}</h1>
+        <div className="ov-main" data-main={main}>
+          {mapView}
+          {pipShown ? (
+            <div className="ov-video">
+              <DroneVideo view={droneFeed.view} health={droneFeed.health} onState={onDroneVideoState} />
+            </div>
+          ) : null}
+          {/* Over the corner window: a tap swaps the two views; neither one is mounted again. */}
+          {pipShown ? (
+            <button type="button" className="ov-pip-swap" aria-label={main === 'map' ? t('overview.swapToVideo') : t('overview.swapToMap')} title={main === 'map' ? t('overview.swapToVideo') : t('overview.swapToMap')} onClick={() => setMainView(main === 'map' ? 'video' : 'map')} />
+          ) : null}
+          <div className="ov-left" ref={leftRef}>
+            {estimateCard}
+            {layersPanel}
+          </div>
+        </div>
+        <CompactInfoStrip
+          snapshot={snapshot}
+          localSnapshotFresh={localSnapshotFresh}
+          settings={plotSettings}
+          curveOffset={curveOffset}
+          offsetManual={offsetManual}
+          drone={droneFeed.view}
+          videoLive={droneVideo.phase === 'playing'}
+          onOpenTab={setTab}
+        />
+        <div className="ov-side">
+          <div className="ov-side-tabs" role="tablist" aria-label={t('overview.tabs')}>
+            {tabs.map((item) => (
+              <button key={item.id} type="button" role="tab" id={`ov-tab-${item.id}`} aria-selected={tab === item.id} aria-controls="ov-side-panel" onClick={() => setTab(item.id)}>
+                <span>{item.label}</span>
+                {item.tag ? <em className={`tone-${item.tag.tone}`}>{item.tag.code}</em> : null}
+              </button>
+            ))}
+          </div>
+          <div className="ov-side-panel" id="ov-side-panel" role="tabpanel" aria-labelledby={`ov-tab-${tab}`}>
+            {tab === 'spectrum' ? <div className="ov-dock">{spectrumDock}</div> : null}
+            {tab === 'drone' ? (
+              <section id="panel-drone" className="ov-drone ov-card" aria-label={t('drone.title')}>
+                <DroneDetails view={droneFeed.view} health={droneFeed.health} video={droneVideo} />
+              </section>
+            ) : null}
+            {tab === 'node' ? <>{readout}{nodeCard(compactNodeCollapsed, () => setCompactNodeCollapsed(!compactNodeCollapsed))}</> : null}
+            {/* Kept mounted while hidden: a patch on its way keeps its stage. */}
+            {viewOnly ? null : <div className="ov-side-control" hidden={tab !== 'control'}>{controlPanel(() => setTab('spectrum'))}</div>}
+          </div>
+        </div>
       </div>
+    );
+  }
+
+  return (
+    <div className="page page-overview ov-stage" data-dock={dockShown ? (panels.spectrum ? 'full' : 'polar') : 'none'} data-control={controlShown ? 'open' : undefined} data-layout={compactLayout ?? undefined}>
+      <h1 className="visually-hidden" data-route-focus tabIndex={-1}>{t('route.overview')}</h1>
+      {mapView}
       <div className="ov-left" ref={leftRef}>
-        <DoaReadout snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} settings={plotSettings} curveOffset={curveOffset} offsetSource={offsetSource} offsetVerified={offsetVerified} offsetManual={offsetManual} />
-        {/* On a phone or tablet the card shows only once there is an estimate: its waiting states would cover the small map. */}
-        {estimate && overlaySettings.estimateVisible && (!compact || estimate.state === 'ESTIMATE') ? <EstimatePanel estimate={estimate} viewOnly={viewOnly} compact={compact || panels.layers} /> : null}
-        {panels.layers ? <LayersPanel settings={overlaySettings} scale={overlayScale} onChange={onOverlayChange} onClose={() => onPanelsChange({ ...panels, layers: false })} basemapId={basemapId} onBasemapChange={onBasemapSelect} /> : null}
+        {readout}
+        {estimateCard}
+        {layersPanel}
       </div>
       <div className={rightTop === null ? 'ov-right' : 'ov-right is-stacked'} ref={rightRef} style={rightTop === null ? undefined : { '--ov-right-top': `${rightTop}px` } as CSSProperties}>
         {panels.drone ? <DronePanel initialView={droneView} onClose={() => onPanelsChange({ ...panels, drone: false })} /> : null}
-        {nodeShown ? <NodeCard
-          snapshot={snapshot}
-          localSnapshotFresh={localSnapshotFresh}
-          groundGpsFresh={groundGpsFresh}
-          coordinate={readoutCoordinate}
-          positionHeld={station?.held === true}
-          ground={groundCoordinate}
-          compassOffset={compassOffset}
-          offsetSource={offsetSource}
-          offsetManual={offsetManual}
-          collapsed={panels.nodeCollapsed}
-          onToggle={() => onPanelsChange({ ...panels, nodeCollapsed: !panels.nodeCollapsed })}
-        /> : null}
-        {controlShown ? (
-          <ControlPanel
-            capabilities={capabilities}
-            controlDraftRequest={controlDraftRequest}
-            onClose={() => onPanelsChange({ ...panels, control: false })}
-            snapshot={snapshot}
-            localSnapshotFresh={localSnapshotFresh}
-            onRefreshSnapshot={onRefreshSnapshot}
-          />
-        ) : null}
+        {nodeShown ? nodeCard(panels.nodeCollapsed, () => onPanelsChange({ ...panels, nodeCollapsed: !panels.nodeCollapsed })) : null}
+        {controlShown ? controlPanel(() => onPanelsChange({ ...panels, control: false })) : null}
       </div>
       {dockShown ? (
         <div className="ov-dock" ref={dockRef}>
@@ -392,21 +492,7 @@ function OverviewPageView({
               heldSeed={heldSeed}
             />
           ) : null}
-          {panels.spectrum && viewOnly ? <SpectrumDockMirror feed={mirrorFeed} compact={compact || panels.layers} /> : null}
-          {panels.spectrum && !viewOnly ? (
-            <SpectrumDock
-              snapshot={snapshot}
-              localSnapshotFresh={localSnapshotFresh}
-              capabilities={capabilities}
-              panels={panels}
-              onPanelsChange={onPanelsChange}
-              onControlDraftRequest={onControlDraftRequest}
-              onRequestReceiver={onRequestReceiver}
-              onNavigate={onNavigate}
-              receiverBridge={receiverBridge}
-              compact={compact}
-            />
-          ) : null}
+          {panels.spectrum ? spectrumDock : null}
         </div>
       ) : null}
     </div>

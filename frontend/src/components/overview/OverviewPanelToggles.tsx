@@ -15,19 +15,15 @@ const TOGGLES: ReadonlyArray<{ key: OverviewPanelKey; icon: IconName; label: Mes
   { key: 'control', icon: 'sliders', label: 'shell.panelControl', controls: 'panel-control' },
 ];
 
-// The compact touch layout: no Polar (the DoA is on the map), and the node card opens from its own toggle.
+// The compact touch layout: only Lapisan; Spektrum, Drone, RDF-SDR and Kontrol are tabs of its side panel.
 const COMPACT_TOGGLES: ReadonlyArray<{ key: ToggleKey; icon: IconName; label: MessageKey; controls: string }> = [
   { key: 'layers', icon: 'layers', label: 'shell.panelLayers', controls: 'panel-layers' },
-  { key: 'spectrum', icon: 'spectrum', label: 'shell.panelSpectrum', controls: 'panel-spectrum' },
-  { key: 'node', icon: 'antenna', label: 'shell.panelNode', controls: 'panel-node' },
-  { key: 'drone', icon: 'drone', label: 'shell.panelDrone', controls: 'panel-drone' },
-  { key: 'control', icon: 'sliders', label: 'shell.panelControl', controls: 'panel-control' },
 ];
 
 /**
  * Top-bar switches for the Overview dashboard panels; the LAN view has no Kontrol switch.
- * In the compact layout they are icons only, Polar is left out and an RDF-SDR switch opens
- * the node card over the map for this visit (`nodeOpen`, never saved).
+ * In the compact layout only Lapisan stays, as an icon: the other panels are the tabs of the
+ * side panel there (OverviewPage).
  */
 export function OverviewPanelToggles({ panels, onChange, viewOnly = false, compact = false, nodeOpen = false, onNodeOpenChange }: {
   panels: OverviewPanels;
