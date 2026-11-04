@@ -39,6 +39,8 @@ import { overviewDoaStatus } from '../lib/doaStatus';
 import { headingLabel, headingLabelPosition, headingLineFeatures, headingPopupText, rdfHeading, type RdfHeading } from '../lib/rdfHeading';
 import { NO_ESTIMATE_FEATURES, positionEstimateFeatures, positionEstimateLabel, type PositionEstimate } from '../lib/positionEstimate';
 import { HELD_LAYER_OF, NO_HELD_FEATURES, heldBearingDeg, heldLayerSpec, heldNoticeText, heldOverlayFeatures, heldTimeText, overlayIdentity, provisionalBesideHeld, rememberOverlay, type OverlayMemory } from '../lib/heldOverlay';
+import { seedOverlayMemory } from '../lib/lastLiveDoa';
+import type { HeldSeed } from '../lib/lastLiveDoa';
 import { useI18n } from '../lib/i18n';
 import type { MessageKey, Translate } from '../lib/i18n';
 import { coordinateSourceKey } from './DoaReadout';
@@ -266,6 +268,8 @@ export interface TacticalMapProps {
   curveOffset?: number;
   /** False when the offset is a local fallback rather than reported or entered; bearings are then a reference only. */
   orientationVerified?: boolean;
+  /** The console's last live DoA graph (GET /api/doa/last-live), held while this page remembers none of its own. */
+  heldSeed?: HeldSeed | null;
   /** Selected GPS source. Only a DATA_OUT selection holds the last live fix through a freshness gap. */
   gpsSource?: GpsSourceMode;
   /** Single gate for DoA geometry, applied on top of vector freshness. */
@@ -314,7 +318,7 @@ export interface DroneMapView {
   rdfOwn: GeoOrigin | null;
 }
 
-function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, curveOffset, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, provisionalTheta = null, provisionalHeading = null, orientationCause, onOpenCompassSettings, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect, ground = null, estimate = null, compact = false, drone = null }: TacticalMapProps): JSX.Element {
+function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, curveOffset, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, provisionalTheta = null, provisionalHeading = null, orientationCause, onOpenCompassSettings, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect, ground = null, estimate = null, compact = false, drone = null, heldSeed = null }: TacticalMapProps): JSX.Element {
   const { t, lang } = useI18n();
   const hostRef = useRef<HTMLDivElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -397,9 +401,10 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   // CONFLICT, a failed DAQ sync, an overdrive...) never empties the map, as the
   // polar dock keeps its curve. Never from or during a simulation; another
   // node or a restart forgets it. Kept in module scope across route changes.
+  // A page that opened after the graph went stale starts from the console's last one.
+  overlayMemory = seedOverlayMemory(overlayMemory, heldSeed, overlayIdentity(snapshot), simulation);
   const remembered = rememberOverlay(overlayMemory, {
     live: values && !simulation && stationCoordinate ? { values, thetaDeg: theta, offsetDeg: offset, curveOffsetDeg: binOffset, frequencyHz: sampleHz, origin: stationCoordinate } : null,
-    liveBearing: bearing !== null,
     identity: overlayIdentity(snapshot),
     simulation,
     nowMs: Date.now(),
@@ -435,7 +440,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       if (g.bearingVisible && bearing !== null) data['doa-bearing'] = { type: 'FeatureCollection', features: [bearingFeature(stationCoordinate, bearing, draw)] };
       if (g.bearingVisible && provisionalShown && provisionalBearing !== null) data['doa-provisional'] = { type: 'FeatureCollection', features: [bearingFeature(stationCoordinate, provisionalBearing, draw)] };
       // The held overlay goes only into its own sources, painted like the live ones.
-      const { halfPower: heldHalfPower, ...held } = heldDraw ? heldOverlayFeatures(heldDraw, draw) : NO_HELD_FEATURES;
+      const { halfPower: heldHalfPower, ...held } = heldDraw ? heldOverlayFeatures(heldDraw, draw, bearing === null) : NO_HELD_FEATURES;
       Object.assign(data, held);
       return { data, rings: ringSet?.rings ?? [], halfPower: null, heldHalfPower };
     }
@@ -1271,6 +1276,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   if (mapState === 'error') notices.push(t('map.rendererError'));
   if (basemapStatus && mapState !== 'no-webgl') notices.push(t(basemapStatus === 'partial' ? 'map.basemapPartial' : 'map.basemapUnavailable', { style: t(BASEMAPS[activeBasemap].labelKey) }));
   // With a remembered overlay the map draws it held and says since when; without one it says why it is empty.
+  // A live bearing without its Angular curve keeps the last graph beside it, held.
+  if (stationCoordinate && bearingOnly && heldDraw && heldTime) notices.push(t('map.curveHeldLast', { time: heldTime }));
   if (stationCoordinate && !values && !bearingOnly) {
     notices.push(heldDraw && heldTime ? heldNoticeText(t, heldTime, held ? doaHeldText : undefined)
       : held ? t('map.overlayHeld', { reason: doaHeldText }) : t('map.overlayCleared'));

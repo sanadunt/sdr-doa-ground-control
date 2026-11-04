@@ -44,7 +44,7 @@ const NODE: OverlayIdentity = { baseUrl: 'http://192.168.100.100:8081', sid: 'a1
 const STATION = { latitude: -6.2, longitude: 106.8 };
 const live = (values = vector(), extra: Partial<LiveOverlay> = {}): LiveOverlay => ({ values, thetaDeg: 40, offsetDeg: 10, frequencyHz: 433_920_000, origin: { ...STATION }, ...extra });
 const step = (previous: OverlayMemory | null, input: Partial<Parameters<typeof rememberOverlay>[1]> = {}) =>
-  rememberOverlay(previous, { live: null, liveBearing: false, identity: NODE, simulation: false, nowMs: 2_000, ...input });
+  rememberOverlay(previous, { live: null, identity: NODE, simulation: false, nowMs: 2_000, ...input });
 
 describe('rememberOverlay: the map keeps its last live overlay like the polar dock', () => {
   it('remembers a live overlay with the time it arrived and draws nothing held', () => {
@@ -69,11 +69,16 @@ describe('rememberOverlay: the map keeps its last live overlay like the polar do
     expect(step(held.memory, { live: live(vector(90)), nowMs: 5_000 }).draw).toBeNull();
   });
 
-  it('draws nothing held while a live bearing is drawn without the curve (MQTT between Angular frames)', () => {
+  it('keeps the held graph beside a live bearing without the curve (MQTT between Angular frames), without its own bearing line', () => {
     const remembered = step(null, { live: live(), nowMs: 1_000 }).memory;
-    const between = step(remembered, { liveBearing: true });
-    expect(between.draw).toBeNull();
+    const between = step(remembered, {});
+    expect(between.draw).toBe(remembered?.overlay);
     expect(between.memory).toBe(remembered);
+    const settings: DoaOverlaySettings = { ...DEFAULT_DOA_OVERLAY_SETTINGS, minDb: -40, maxDb: 0, thresholdDb: -40 };
+    expect(heldOverlayFeatures(between.draw, settings)['doa-held-bearing'].features).toHaveLength(1);
+    const beside = heldOverlayFeatures(between.draw, settings, false);
+    expect(beside['doa-held-bearing'].features).toHaveLength(0);
+    expect(beside['doa-held-lobe'].features).toHaveLength(1);
   });
 
   it('never remembers or draws a simulation', () => {

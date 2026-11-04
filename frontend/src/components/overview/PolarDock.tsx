@@ -8,7 +8,9 @@ import { halfPowerWidth } from '../../lib/doaGeometry';
 import { parseCompassOffsetInput, parseTypedNumber, validPolarHead, validPolarRange } from '../../lib/polarViewSettings';
 import type { PolarViewSettings } from '../../lib/polarViewSettings';
 import { useI18n } from '../../lib/i18n';
-import { heldTimeText } from '../../lib/heldOverlay';
+import { heldTimeText, overlayIdentity } from '../../lib/heldOverlay';
+import { seedCurve } from '../../lib/lastLiveDoa';
+import type { HeldSeed } from '../../lib/lastLiveDoa';
 import { PolarPlot, peakUpHead, radialDomain } from '../PolarPlot';
 import { Icon } from '../ui';
 import { useSyncedDraft } from './useSyncedDraft';
@@ -68,6 +70,7 @@ export function PolarDock({
   onCompassConfigChanged,
   view,
   onViewChange,
+  heldSeed = null,
 }: {
   snapshot: TelemetrySnapshot | null;
   localSnapshotFresh: boolean;
@@ -81,6 +84,8 @@ export function PolarDock({
   onCompassConfigChanged?: (next: CompassConfig) => void;
   view: PolarViewSettings;
   onViewChange: (next: PolarViewSettings) => void;
+  /** The console's last live DoA graph (GET /api/doa/last-live), held while this page remembers no curve of its own. */
+  heldSeed?: HeldSeed | null;
 }): JSX.Element {
   const { t, lang } = useI18n();
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -89,6 +94,8 @@ export function PolarDock({
   const sourceLabel = source ? t(source.labelKey) : undefined;
   const status = overviewDoaStatus(snapshot, localSnapshotFresh);
   const polar = polarView(snapshot, settings, localSnapshotFresh, null, settings, curveOffset);
+  // A page that opened after the graph went stale starts from the console's last curve.
+  lastCurve ??= seedCurve(heldSeed, overlayIdentity(snapshot), simulation);
   const curve = heldCurve(lastCurve, status.shown ? polar.values : null, snapshot?.simulation === true, Date.now());
   lastCurve = curve.memory;
   const values = curve.draw;

@@ -163,6 +163,8 @@ API_ROUTES = frozenset({
     # decision of 2026-11-03), read only.
     "/api/drone",
     "/api/drone/video",
+    # The last answer with a live DoA graph (last_live_doa.py), read only.
+    "/api/doa/last-live",
 })
 ROUTE_UI = "ui"
 ROUTE_TILE = "tile"

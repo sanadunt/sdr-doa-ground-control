@@ -21,8 +21,9 @@ that cannot be read (not JSON, not an object, empty or malformed sid, another
 protocol version, oversize, a core field missing) is INVALID. A message outside
 its freshness window, without fresh health or with another revision is kept
 and labelled; LIVE keeps its edge rules. Over the LoRa serial bridge
-(``set_link``) an Angular frame counts for 45 s and the detail for 65 s, since
-the bridge sends them at most every 20 s and 30 s.
+(``set_link``) an Angular frame counts for 45 s, the detail for 65 s and a DoA
+(ok=1 or ok=0) for 15 s, since the bridge sends them at most every 20 s, 30 s
+and a few seconds, and a DoA arrives already 2-4 s old.
 """
 from __future__ import annotations
 
@@ -75,6 +76,11 @@ ACK_FRESH_MS = 30_000
 # reports still counts. The pairing guards in telemetry_source.py stay.
 ANGULAR_LORA_FRESH_MS = 45_000
 DETAIL_LORA_FRESH_MS = 65_000
+# A DoA over the bridge arrives 2-4 s after its source time and the next one
+# 4-8 s later (measured on the groundstation, 2026-11-04): with the 5 s window
+# it read STALE between two DoA. This replaces DOA_FRESH_MS and
+# UNVERIFIED_DOA_FRESH_MS there.
+DOA_LORA_FRESH_MS = 15_000
 LINK_LORA = "lora"
 # A config.get lives at most 30 s and its answer expires 30 s after it is sent.
 SETTINGS_REQUEST_TTL_MS = 60_000
@@ -1018,8 +1024,9 @@ class RdfNodeV2Telemetry:
     def set_link(self, link: Optional[str]) -> None:
         """How the node reaches this broker: ``"lora"`` (the LoRa serial bridge) or None.
 
-        Over LoRa an Angular frame counts for ANGULAR_LORA_FRESH_MS and the
-        detail for DETAIL_LORA_FRESH_MS, at receipt and in every later view.
+        Over LoRa an Angular frame counts for ANGULAR_LORA_FRESH_MS, the
+        detail for DETAIL_LORA_FRESH_MS and a DoA (ok=1 and ok=0) for
+        DOA_LORA_FRESH_MS, at receipt and in every later view.
         """
         self._link = LINK_LORA if link == LINK_LORA else None
 
@@ -1032,6 +1039,12 @@ class RdfNodeV2Telemetry:
 
     def _detail_fresh_ms(self) -> int:
         return DETAIL_LORA_FRESH_MS if self._link == LINK_LORA else DETAIL_FRESH_MS
+
+    def _doa_fresh_ms(self) -> int:
+        return DOA_LORA_FRESH_MS if self._link == LINK_LORA else DOA_FRESH_MS
+
+    def _unverified_doa_fresh_ms(self) -> int:
+        return DOA_LORA_FRESH_MS if self._link == LINK_LORA else UNVERIFIED_DOA_FRESH_MS
 
     # -- public reads ---------------------------------------------------------
 
@@ -1299,7 +1312,7 @@ class RdfNodeV2Telemetry:
         # Every DoA is kept; what was wrong when it came is a reason that
         # keeps it from being LIVE, shown with it instead of dropping it.
         problems: List[str] = []
-        window = _source_window(value["t"], at, DOA_FRESH_MS)
+        window = _source_window(value["t"], at, self._doa_fresh_ms() if value["ok"] == 1 else self._unverified_doa_fresh_ms())
         if window:
             problems.append(window)
         if not live:
@@ -1449,7 +1462,7 @@ class RdfNodeV2Telemetry:
         t = self._doa["payload"]["t"]
         if t > now_ms + FUTURE_TOLERANCE_MS:
             reasons.append("SOURCE_TIME_FUTURE")
-        elif not _within(now_ms, self._doa["received_at_ms"], DOA_FRESH_MS) or now_ms - t > DOA_FRESH_MS:
+        elif not _within(now_ms, self._doa["received_at_ms"], self._doa_fresh_ms()) or now_ms - t > self._doa_fresh_ms():
             reasons.append("SOURCE_STALE")
         if not self._health_fresh(now_ms):
             reasons.append("HEALTH_STALE")
@@ -1526,15 +1539,16 @@ class RdfNodeV2Telemetry:
         doa = None
         if self._doa is not None:
             reasons = self._doa_reasons(now_ms)
-            doa = timed(self._doa, source_age_ms=_age(now_ms, self._doa["payload"]["t"]), live=not reasons, reasons=reasons)
+            doa = timed(self._doa, source_age_ms=_age(now_ms, self._doa["payload"]["t"]), live=not reasons, reasons=reasons,
+                        max_age_ms=self._doa_fresh_ms())
         doa_unverified = None
         if self._doa_unverified is not None:
             unverified_t = self._doa_unverified["payload"]["t"]
             doa_unverified = timed(
                 self._doa_unverified,
                 source_age_ms=_age(now_ms, unverified_t),
-                stale=(not _within(now_ms, self._doa_unverified["received_at_ms"], UNVERIFIED_DOA_FRESH_MS) or
-                       _source_window(unverified_t, now_ms, UNVERIFIED_DOA_FRESH_MS) is not None),
+                stale=(not _within(now_ms, self._doa_unverified["received_at_ms"], self._unverified_doa_fresh_ms()) or
+                       _source_window(unverified_t, now_ms, self._unverified_doa_fresh_ms()) is not None),
                 reasons=list(self._doa_unverified.get("receipt_reasons", ())),
             )
         diagnostic_doa = None
@@ -1623,7 +1637,7 @@ class RdfNodeV2Telemetry:
                 decay(suffix, "STALE", "SOURCE_STALE")
         if topics["telemetry/doa"]["status"] == "LIVE" and node["doa"] and not node["doa"]["live"]:
             decay("telemetry/doa", "STALE", node["doa"]["reasons"][0])
-        if topics["telemetry/doa"]["status"] == "UNVERIFIED" and aged("telemetry/doa", UNVERIFIED_DOA_FRESH_MS):
+        if topics["telemetry/doa"]["status"] == "UNVERIFIED" and aged("telemetry/doa", self._unverified_doa_fresh_ms()):
             decay("telemetry/doa", "STALE", "SOURCE_STALE")
         if topics["telemetry/diagnostic/doa"]["status"] == "UNVERIFIED" and aged(
                 "telemetry/diagnostic/doa", DIAGNOSTIC_DOA_FRESH_MS):
@@ -1683,6 +1697,7 @@ __all__ = [
     "ANGULAR_LORA_FRESH_MS",
     "COMMAND_ID_RE",
     "DETAIL_LORA_FRESH_MS",
+    "DOA_LORA_FRESH_MS",
     "MAX_PAYLOAD_BYTES",
     "RDF_NODE_V2_SUFFIXES",
     "RdfNodeV2Telemetry",

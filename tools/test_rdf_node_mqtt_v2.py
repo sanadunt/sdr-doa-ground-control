@@ -647,7 +647,7 @@ class Edge110Tests(unittest.TestCase):
 
 
 class LoraWindowTests(unittest.TestCase):
-    """Over the LoRa serial bridge the Angular frame counts 45 s and the detail 65 s."""
+    """Over the LoRa serial bridge the Angular frame counts 45 s, the detail 65 s and a DoA 15 s."""
 
     def test_angular_counts_for_45_s_over_lora(self) -> None:
         store = session_store()
@@ -693,6 +693,41 @@ class LoraWindowTests(unittest.TestCase):
         store.set_link("t900")
         self.assertIsNone(store.link)
         self.assertEqual(topic(store, "telemetry/health/detail", NOW + 15_001)["status"], "STALE")
+
+
+    def test_doa_counts_for_15_s_over_lora(self) -> None:
+        # At receipt: a LIVE DoA 15 s old is LIVE over LoRa, older STALE; the direct 5 s rule otherwise.
+        for link, offset, status in (("lora", -15_000, "LIVE"), ("lora", -15_001, "STALE"), (None, -5_001, "STALE")):
+            with self.subTest(link=link, offset=offset):
+                store = session_store()
+                store.set_link(link)
+                self.assertEqual(put(store, "telemetry/doa", obj("telemetry-doa.ok1.json", t=NOW + offset))["status"], status)
+        # In the view: LIVE until 15 s after the source time, with the window named.
+        store = session_store()
+        store.set_link("lora")
+        put(store, "telemetry/doa", obj("telemetry-doa.ok1.json", t=NOW - 3_000))
+        later = NOW + 12_000
+        put(store, "telemetry/health", obj("telemetry-health.json", q=2, t=later), at=later)
+        self.assertEqual((node(store, later)["doa"]["live"], node(store, later)["doa"]["max_age_ms"]), (True, 15_000))
+        self.assertEqual(topic(store, "telemetry/doa", later)["status"], "LIVE")
+        stale = NOW + 12_001
+        put(store, "telemetry/health", obj("telemetry-health.json", q=3, t=stale), at=stale)
+        self.assertEqual(node(store, stale)["doa"]["reasons"], ["SOURCE_STALE"])
+        self.assertEqual(topic(store, "telemetry/doa", stale)["status"], "STALE")
+        # Back on a direct link the 5 s window applies again.
+        store.set_link(None)
+        self.assertEqual(node(store, stale)["doa"]["max_age_ms"], 5_000)
+
+    def test_an_ok0_doa_counts_for_15_s_over_lora(self) -> None:
+        store = session_store()
+        store.set_link("lora")
+        put(store, "telemetry/doa", obj("telemetry-doa.ok0.json", t=NOW))
+        self.assertIs(node(store, NOW + 15_000)["doa_unverified"]["stale"], False)
+        self.assertEqual(topic(store, "telemetry/doa", NOW + 15_000)["status"], "UNVERIFIED")
+        self.assertIs(node(store, NOW + 15_001)["doa_unverified"]["stale"], True)
+        self.assertEqual(topic(store, "telemetry/doa", NOW + 15_001)["status"], "STALE")
+        store.set_link(None)
+        self.assertIs(node(store, NOW + 5_001)["doa_unverified"]["stale"], True)
 
 
 class Edge18Tests(unittest.TestCase):

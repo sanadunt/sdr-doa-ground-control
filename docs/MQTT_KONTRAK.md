@@ -301,14 +301,15 @@ Console tahu node datang lewat bridge LoRa selama status `lora/ground` ada (`sou
 | Topik | Lewat LoRa | Akibat di console |
 |---|---|---|
 | `telemetry/health` | sekitar tiap 2 s | Jendela 8 s tetap |
-| `telemetry/doa` | sekitar tiap 1,25 s | Jendela 5 s tetap |
+| `telemetry/doa` | sekitar tiap 1,25 s di edge; di groundstation tiba 4–8 s sekali dan sudah berumur 2–4 s (diukur 2026-11-04) | Dengan jendela 5 s DoA bolak-balik `STALE` di antara dua pesan, jadi lewat LoRa store memakai 15 s (`DOA_LORA_FRESH_MS`) untuk `ok=1` dan `ok=0`; kandidat menyebutnya di `freshness.max_age_ms`, dan browser mengikuti nilai itu. |
 | `telemetry/angular` | paling cepat tiap 20 s (`--angular-every`), latest wins, antre paling lama 8 s; satu frame 360 nilai menjadi sekitar 4–5 frame radio, jadi sesekali hilang (jeda 40–100 s) | Frame tiba berumur 2–10 s. Jendela 10 s hanya membuat kurva tampil sekitar 20–30 % waktu, jadi lewat LoRa store memakai 45 s (`ANGULAR_LORA_FRESH_MS`). |
 | `telemetry/health/detail` | paling cepat tiap 30 s (`--detail-every`) | Jendela 65 s (`DETAIL_LORA_FRESH_MS`, sama dengan `DETAIL_OVERDRIVE_MAX_AGE_MS`) |
 | `ack/*` | dua kali, salinan 0,5 s kemudian | Salinan yang `t`-nya lebih lama daripada ACK progres yang disimpan diabaikan (`ACK_OUT_OF_ORDER`, bagian 3) |
 
 - Kurva dari frame yang lebih tua dari 10 s (hanya bertahan karena jendela LoRa) ditandai `angular_held` di kandidat dan `held` di `angular_frame`; Dashboard menggambarnya redup.
 - Penjaga pasangan tetap: frekuensi (`OTHER_FREQUENCY`), revisi config (`OTHER_REVISION`) dan puncak 3° (`PEAK_MOVED`). Kurva lama tidak pernah digambar di bawah bearing yang sudah berpindah.
-- `angular_frame.max_age_ms` (dan `max_age_ms` di Angular dan detail tampilan node `/api/mqtt/rdf-node`) menyebut jendela yang dipakai.
+- `angular_frame.max_age_ms` (dan `max_age_ms` di DoA, Angular dan detail tampilan node `/api/mqtt/rdf-node`) menyebut jendela yang dipakai.
+- Grafik DoA live terakhir (jawaban `/api/snapshot` terakhir yang punya vektor 360 bin yang segar) disimpan console di memori dan dilayani `GET /api/doa/last-live` (`tools/last_live_doa.py`), di kedua listener. Halaman yang baru dibuka menggambar grafik itu sebagai grafik ditahan (USANG + jam data terakhir) selama halaman itu belum melihat grafik live sendiri. `sid` lain atau URL Data Out lain menghapusnya.
 - **`lora/edge`** hanya ada di broker Raspberry: tabel topik bridge tidak membawanya lewat radio. `lora.edge` di `GET /api/mqtt` hanya terisi bila console tersambung langsung ke broker Raspberry, tidak pernah di groundstation yang hanya lewat LoRa. Sisi Raspberry dari link sampai ke groundstation hanya sebagai blok `peer` heartbeat di `lora.ground` (uptime, frame RX, error CRC, frame hilang, selisih jam).
 - `rx.peer_restarts` (bridge edge 1.10.2): berapa kali ujung lain mulai ulang dan memori salinan dikosongkan; `null` dari bridge yang lebih lama.
 

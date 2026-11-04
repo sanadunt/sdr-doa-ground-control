@@ -414,6 +414,7 @@ class LanRequestRuleTests(unittest.TestCase):
             "/api/mirror/receiver/audio",
             "/api/drone",
             "/api/drone/video",
+            "/api/doa/last-live",
         }))
         for path in (
             "/receiver", "/receiver/", "/receiver/index.html", "/api/receiver/settings", "/api/lan-access",
