@@ -138,6 +138,7 @@ drone-video-supervisor print-config                     # konfigurasi mediamtx y
 | Gejala | Sebab |
 |---|---|
 | System Health: Video drone `STANDBY` | normal dengan `PULL=on-demand`: belum ada yang menonton, kamera belum ditarik |
+| Panel Drone: "Remote drone belum ditemukan; video menunggu." (`NO_CAMERA`, `CAMERA_UNKNOWN`) | `CAMERA_URL=auto` dan console belum menemukan remote; nyalakan remote di jaringan yang sama dengan groundstation, atau isi IP tetap di Konfigurasi → Drone |
 | `raw` tidak ready | drone belum ditemukan console (lihat System Health), kamera mati, atau RTSP 8554 tidak tercapai |
 | `raw` ready, `drone` tidak | ffmpeg gagal: encoder tidak tersedia, driver VAAPI, atau `FFMPEG_BIN` salah; coba `ENCODER=x264` |
 | service tidak mau mulai, journal menyebut grup | grup `render` atau `video` tidak ada; `sudo systemctl edit drone-video` dan isi `SupplementaryGroups=` dengan grup yang ada |

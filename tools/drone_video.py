@@ -132,15 +132,25 @@ class VideoService:
     def configured(self) -> bool:
         return self.api is not None and self.whep_upstream is not None
 
-    def _on_demand(self) -> bool:
-        """Whether the video path runs ffmpeg on demand (the supervisor's PULL=on-demand)."""
+    def _path_config(self, name: str) -> Optional[Dict[str, Any]]:
+        """mediamtx's configuration of one path, or None (an older mediamtx, no answer)."""
         try:
-            with self._opener.open(f"{self.api}/v3/config/paths/get/{VIDEO_PATH}", timeout=TIMEOUT_S) as response:
+            with self._opener.open(f"{self.api}/v3/config/paths/get/{name}", timeout=TIMEOUT_S) as response:
                 raw = response.read(MAX_API_BYTES + 1)
             config = json.loads(raw.decode("utf-8")) if len(raw) <= MAX_API_BYTES else None
         except (OSError, ValueError, urllib.error.URLError):
-            return False
-        return isinstance(config, dict) and isinstance(config.get("runOnDemand"), str) and bool(config["runOnDemand"].strip())
+            return None
+        return config if isinstance(config, dict) else None
+
+    def _on_demand(self) -> bool:
+        """Whether the video path runs ffmpeg on demand (the supervisor's PULL=on-demand)."""
+        config = self._path_config(VIDEO_PATH)
+        return config is not None and isinstance(config.get("runOnDemand"), str) and bool(config["runOnDemand"].strip())
+
+    def _camera_unknown(self) -> bool:
+        """The supervisor knows no camera yet (CAMERA_URL=auto before the console found the remote)."""
+        config = self._path_config(RAW_PATH)
+        return config is not None and config.get("source") in (None, "", "publisher")
 
     def health(self, enabled: bool = True) -> Dict[str, Any]:
         """GET /api/drone/video: the service's state, read at most once a second."""
@@ -162,6 +172,9 @@ class VideoService:
                 raise ValueError("answer too large")
             view = health_from_paths(json.loads(raw.decode("utf-8")), self._on_demand())
             view.update({"reason": None, "error": None})
+            if view["state"] == "STANDBY" and self._camera_unknown():
+                # No remote found yet: an offer would only start ffmpeg on a camera that is not there.
+                view.update(state="NO_CAMERA", reason="CAMERA_UNKNOWN")
         except (OSError, ValueError, urllib.error.URLError) as exc:
             view = {
                 "state": "DOWN", "reason": "SERVICE_UNREACHABLE", "on_demand": False,
