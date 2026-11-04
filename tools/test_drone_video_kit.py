@@ -104,6 +104,28 @@ class BuildConfigTests(unittest.TestCase):
         self.assertTrue(command.startswith("/opt/ff/bin/ffmpeg -hide_banner"))
         self.assertIn(" -b:v 4M ", command)
 
+    def test_on_demand_pulls_the_camera_only_while_someone_watches(self):
+        # Owner's choice of 2026-11-04: the radio carries the camera only while a page plays it
+        # (the remote's own VGCS already takes one of the about two streams the link carries).
+        config = json.loads(dv.build_config(CAMERA, "x264", "2500k", [], "ffmpeg", pull="on-demand"))
+        self.assertEqual(config["paths"]["raw"], {
+            "source": CAMERA, "rtspTransport": "tcp", "sourceOnDemand": True,
+            "sourceOnDemandStartTimeout": "10s", "sourceOnDemandCloseAfter": "10s",
+        })
+        drone = config["paths"]["drone"]
+        self.assertNotIn("runOnInit", drone)
+        self.assertTrue(drone["runOnDemand"].startswith("ffmpeg -hide_banner"))
+        self.assertEqual((drone["runOnDemandRestart"], drone["runOnDemandStartTimeout"], drone["runOnDemandCloseAfter"]),
+                         (True, "20s", "10s"))
+        with self.assertRaises(ValueError):
+            dv.build_config(CAMERA, "x264", "2500k", [], "ffmpeg", pull="sometimes")
+
+    def test_pull_setting(self):
+        self.assertEqual(settings()["pull"], "on-demand")
+        self.assertEqual(settings(PULL="always")["pull"], "always")
+        with self.assertRaises(dv.ConfigError):
+            settings(PULL="sometimes")
+
     def test_unknown_camera_leaves_raw_a_publisher_path(self):
         config = self.config(camera=None)
         self.assertEqual(config["paths"]["raw"], {})
@@ -204,7 +226,7 @@ class ConfigTests(unittest.TestCase):
     def test_defaults(self):
         values = dv.validate_config(dv.read_config_text(""), environ={})
         self.assertEqual(values, {
-            "camera_url": None, "console_url": "http://127.0.0.1:8787", "encoder": "auto", "bitrate": "2500k",
+            "camera_url": None, "console_url": "http://127.0.0.1:8787", "encoder": "auto", "bitrate": "2500k", "pull": "on-demand",
             "additional_hosts": [], "mediamtx_bin": "mediamtx", "ffmpeg_bin": "ffmpeg",
             "runtime_dir": "/run/drone-video",
         })
@@ -276,7 +298,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         config = json.loads(result.stdout)
         self.assertEqual(config["paths"]["raw"]["source"], CAMERA)
-        self.assertIn("-c:v h264_nvenc", config["paths"]["drone"]["runOnInit"])
+        # PULL defaults to on-demand.
+        self.assertIn("-c:v h264_nvenc", config["paths"]["drone"]["runOnDemand"])
+        self.assertIs(config["paths"]["raw"]["sourceOnDemand"], True)
 
 
 # ---------------------------------------------------------------------------

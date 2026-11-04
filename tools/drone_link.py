@@ -313,6 +313,7 @@ class DroneStore:
     def __init__(self) -> None:
         self._latest: Dict[str, Dict[str, Any]] = {}
         self._attitude_yaw = _HeadingHistory()
+        self._hud_heading = _HeadingHistory()
         self._position_heading = _HeadingHistory()
         self.invalid = 0
         self.last_invalid: Optional[str] = None
@@ -342,13 +343,15 @@ class DroneStore:
         values = parsed["values"]
         if topic == "drone/attitude" and values.get("yaw_deg") is not None:
             self._attitude_yaw.add(received_at_ms, values["yaw_deg"])
+        elif topic == "drone/hud" and values.get("heading_deg") is not None:
+            self._hud_heading.add(received_at_ms, values["heading_deg"])
         elif topic == "drone/position" and values.get("heading_deg") is not None:
             self._position_heading.add(received_at_ms, values["heading_deg"])
         return True
 
     def heading_at(self, t_ms: int) -> Optional[Dict[str, Any]]:
         """The drone's yaw at ``t_ms`` (console clock), or None when no sample is within 1 s."""
-        for source, history in (("attitude", self._attitude_yaw), ("position", self._position_heading)):
+        for source, history in (("attitude", self._attitude_yaw), ("hud", self._hud_heading), ("position", self._position_heading)):
             found = history.at(t_ms)
             if found is not None:
                 return {"deg": round(found[0], 3), "offset_ms": int(found[1]), "source": source}
@@ -376,13 +379,18 @@ class DroneStore:
         attitude = self._topic("drone/attitude", now_ms, ("roll_deg", "pitch_deg", "yaw_deg", "yawspeed_dps"))
         battery = self._topic("drone/battery", now_ms, ("voltage_v", "current_a", "remaining_pct"))
         status = self._topic("drone/status", now_ms, ("armed", "custom_mode", "system_status", "type_name", "autopilot_name"))
-        hud = self._topic("drone/hud", now_ms, ("groundspeed_ms", "airspeed_ms", "climb_ms", "throttle_pct", "alt_m"))
+        hud = self._topic("drone/hud", now_ms, ("groundspeed_ms", "airspeed_ms", "climb_ms", "throttle_pct", "alt_m", "heading_deg"))
         statustext = self._topic("drone/statustext", now_ms, ("severity", "text"))
         if statustext is not None:
             statustext.pop("stale", None)
         link = self._topic("bridge/link", now_ms, ("fc_online", "fc_last_seen_s", "frames_per_s", "camera_online", "uptime_s", "version"))
         heading = None
-        for source, block, key in (("attitude", attitude, "yaw_deg"), ("position", position, "heading_deg")):
+        # One heading for every view (the SIYI fix of 2026-11-04, pickHeading()): the ATTITUDE
+        # yaw first, then VFR_HUD, then GLOBAL_POSITION_INT. This FC sends VFR_HUD.heading the
+        # other way round (220 at a yaw of 139.3) and GLOBAL_POSITION_INT.hdg always 0, so
+        # they only stand in while no attitude comes; the GPS course is the direction of travel
+        # and never counts as the nose.
+        for source, block, key in (("attitude", attitude, "yaw_deg"), ("hud", hud, "heading_deg"), ("position", position, "heading_deg")):
             if block is not None and not block["stale"] and block.get(key) is not None:
                 heading = {"deg": block[key], "source": source, "age_ms": block["age_ms"]}
                 break

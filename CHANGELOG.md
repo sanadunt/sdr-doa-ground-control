@@ -2,6 +2,15 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.13.4
+
+Rilis perbaikan: tidak ada yang dihapus. Perbaikan drone SIYI 4 November 2026 diterapkan ke console.
+
+- **Heading drone: yaw dulu, lalu VFR_HUD, lalu posisi.** FC drone ini mengirim `VFR_HUD.heading` terbalik arah (220 saat yaw 139,3) dan `GLOBAL_POSITION_INT.hdg` selalu 0. Console sudah memakai yaw `ATTITUDE` (dinormalkan ke 0–360) sebagai sumber pertama; sekarang, selama tidak ada attitude, VFR_HUD dipakai sebelum posisi, sama dengan `pickHeading()` dashboard SIYI. Arah gerak GPS tidak pernah dipakai sebagai arah hidung. Baris Heading di panel Drone, `HDG` di video, panah drone di peta, perbandingan dengan RDF-SDR dan putaran bearing DoA tetap membaca satu heading yang sama.
+- **Video drone hanya ditarik saat ditonton.** `packaging/drone-video` punya setelan baru `PULL`, bawaannya `on-demand`: kamera ditarik lewat radio drone hanya selama video diputar, lalu dilepas 10 detik setelah penonton terakhir. Radio drone cuma cukup untuk sekitar dua stream 800 kbps, dan VGCS di remote sudah memakai satu. `PULL=always` mengembalikan perilaku lama. System Health menampilkan `STANDBY` selama belum ada yang menonton; itu normal.
+- Pakai satu penarik kamera saja di LAN: service `drone-video` di groundstation atau gateway dashboard SIYI, jangan keduanya.
+- Belum diuji dengan drone asli: putar drone searah jarum jam, angka heading harus naik.
+
 ## 3.13.3
 
 Rilis perbaikan: tidak ada yang dihapus. Grafik DoA lewat Telemetry LoRa tidak lagi sering hilang.

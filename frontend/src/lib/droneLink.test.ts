@@ -56,6 +56,10 @@ describe('normalizeDrone', () => {
     expect(view?.state).toBe('LIVE');
     expect(view?.gps?.rtk).toBe('FIXED');
     expect(view?.headingAtDoa).toEqual({ deg: 80, offset_ms: 120, source: 'attitude', doa_timestamp_ms: 1000 });
+    // The console's one heading, whichever source it came from (yaw, then VFR_HUD, then position).
+    expect(normalizeDrone(block({ heading: { deg: 220, source: 'hud', age_ms: 0 } }))?.heading?.source).toBe('hud');
+    expect(normalizeDrone(block({ heading_at_doa: { deg: 220, offset_ms: 0, source: 'hud' } }))?.headingAtDoa?.source).toBe('hud');
+    expect(normalizeDrone(block({ heading: { deg: 10, source: 'compass?', age_ms: 0 } }))?.heading?.source).toBe('attitude');
     expect(view?.candidates).toEqual([{ host: '192.168.1.162', fcOnline: true, version: '0.1.0' }]);
     expect(view?.battery?.remaining_pct).toBeNull();
   });

@@ -37,6 +37,12 @@ export function DroneLinkCard({ snapshot }: { snapshot: TelemetrySnapshot | null
   );
 }
 
+function readiness(health: DroneVideoHealth | null, ready: boolean | undefined): string {
+  if (!health) return '—';
+  if (ready) return 'READY';
+  return health.state === 'STANDBY' ? 'IDLE' : 'NOT READY';
+}
+
 /** System Health: the host video service (mediamtx + ffmpeg, packaging/drone-video), read every 5 s. */
 export function DroneVideoCard({ initial = null }: { initial?: DroneVideoHealth | null }): JSX.Element {
   const { t } = useI18n();
@@ -58,11 +64,12 @@ export function DroneVideoCard({ initial = null }: { initial?: DroneVideoHealth 
     return () => { stopped = true; window.clearTimeout(timer); };
   }, [initial]);
   const state = health?.state ?? 'N/A';
-  const tone = state === 'OK' ? 'good' : state === 'DISABLED' || state === 'N/A' ? 'neutral' : state === 'DOWN' ? 'bad' : 'warn';
+  const tone = state === 'OK' ? 'good' : state === 'DISABLED' || state === 'N/A' || state === 'STANDBY' ? 'neutral' : state === 'DOWN' ? 'bad' : 'warn';
   const cause = health && health.state !== 'OK' ? droneVideoText(health, 'idle', null, t) : null;
   const items: KeyValueItem[] = [
-    { id: 'camera', label: t('health.video.camera'), value: health ? (health.cameraReady ? 'READY' : 'NOT READY') : '—', tone: health && !health.cameraReady ? 'bad' : undefined },
-    { id: 'encoder', label: t('health.video.encoder'), value: health ? (health.videoReady ? 'READY' : 'NOT READY') : '—', tone: health && !health.videoReady ? 'bad' : undefined },
+    // On demand and nobody watching, neither is pulled: IDLE, not a fault.
+    { id: 'camera', label: t('health.video.camera'), value: readiness(health, health?.cameraReady), tone: health && !health.cameraReady && state !== 'STANDBY' ? 'bad' : undefined },
+    { id: 'encoder', label: t('health.video.encoder'), value: readiness(health, health?.videoReady), tone: health && !health.videoReady && state !== 'STANDBY' ? 'bad' : undefined },
     { id: 'tracks', label: t('health.video.tracks'), value: health?.tracks.length ? health.tracks.join(', ') : '—' },
     { id: 'readers', label: t('health.video.readers'), value: health?.readers == null ? '—' : String(health.readers) },
   ];

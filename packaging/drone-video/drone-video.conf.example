@@ -27,6 +27,14 @@ ENCODER=auto
 # Video bit rate of the H.264 stream: a number with k or M.
 BITRATE=2500k
 
+# When the camera is pulled over the drone's radio. on-demand: only while a page
+# plays the video (it starts in a few seconds and stops 10 s after the last
+# viewer), so the radio is not loaded while nobody watches; the remote's own app
+# already takes one of the about two 800 kbps streams the link carries. always:
+# pulled from the start, the video comes up at once. Only one puller of the
+# camera on the LAN either way: not this service and the SIYI dashboard gateway.
+PULL=on-demand
+
 # Addresses the WebRTC answer offers to browsers besides the ones mediamtx
 # finds itself: comma separated IP addresses or host names, such as this
 # host's LAN address when tablets do not reach it otherwise. Empty: none.

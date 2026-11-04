@@ -55,6 +55,8 @@ export function droneVideoStatus(health: DroneVideoHealth | null, phase: DroneVi
   if (phase === 'playing') return { value: t('drone.videoLive'), tone: 'is-good' };
   if (!health) return { value: t('drone.videoChecking'), tone: 'is-empty' };
   if (health.state === 'DISABLED') return { value: t(health.reason === 'NOT_CONFIGURED' ? 'drone.videoNone' : 'drone.videoOff'), tone: 'is-empty' };
+  // Nobody watches yet: the camera is pulled once the player asks (PULL=on-demand).
+  if (health.state === 'STANDBY' && phase === 'idle') return { value: t('drone.videoStandby'), tone: 'is-empty' };
   if (health.state === 'DOWN') return { value: t('drone.videoDown'), tone: 'is-bad' };
   if (health.state === 'NO_ENCODER') return { value: t('drone.videoNoEncoder'), tone: 'is-bad' };
   if (health.state === 'NO_CAMERA' || code === 'DRONE_VIDEO_NO_STREAM') return { value: t('drone.videoNoCamera'), tone: 'is-warn' };
@@ -107,6 +109,7 @@ export function droneRows(view: DroneView | null, t: Translate): DroneRow[] {
 
 const VIDEO_STATE_KEYS: Record<DroneVideoHealth['state'], MessageKey> = {
   OK: 'drone.video.connecting',
+  STANDBY: 'drone.video.standby',
   NO_CAMERA: 'drone.video.noCamera',
   NO_ENCODER: 'drone.video.noEncoder',
   DOWN: 'drone.video.down',
@@ -118,7 +121,9 @@ export function droneVideoText(health: DroneVideoHealth | null, phase: 'idle' | 
   if (phase === 'playing') return null;
   if (!health) return t('drone.video.checking');
   if (health.state === 'DISABLED' && health.reason === 'NOT_CONFIGURED') return t('drone.video.notConfigured');
-  if (health.state !== 'OK') return t(VIDEO_STATE_KEYS[health.state]);
+  // STANDBY plays as OK: the player's offer starts the pull.
+  if (health.state === 'STANDBY' && phase === 'idle') return t(VIDEO_STATE_KEYS.STANDBY);
+  if (health.state !== 'OK' && health.state !== 'STANDBY') return t(VIDEO_STATE_KEYS[health.state]);
   if (phase === 'error') return code === 'DRONE_VIDEO_NO_STREAM' ? t('drone.video.noCamera') : t('drone.video.failed');
   return t('drone.video.connecting');
 }
@@ -136,7 +141,8 @@ function DroneVideo({ view, health, onState }: {
   const [code, setCode] = useState<string | null>(null);
   useEffect(() => { onState(phase, code); }, [onState, phase, code]);
   const [attempt, setAttempt] = useState(0);
-  const ready = health?.state === 'OK' && typeof RTCPeerConnection === 'function';
+  // On demand the offer itself starts the camera, so STANDBY plays like OK.
+  const ready = (health?.state === 'OK' || health?.state === 'STANDBY') && typeof RTCPeerConnection === 'function';
 
   useEffect(() => {
     if (!ready) {

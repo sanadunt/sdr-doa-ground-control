@@ -41,12 +41,17 @@ DEFAULTS = {
     "CONSOLE_URL": "http://127.0.0.1:8787",
     "ENCODER": "auto",
     "BITRATE": "2500k",
+    "PULL": "on-demand",
     "WEBRTC_ADDITIONAL_HOSTS": "",
     "MEDIAMTX_BIN": "mediamtx",
     "FFMPEG_BIN": "ffmpeg",
     "RUNTIME_DIR": "",
 }
 ENCODERS = ("auto", "vaapi", "x264", "nvenc", "v4l2m2m", "videotoolbox")
+# on-demand: the camera is pulled over the drone's radio only while a page plays the
+# video (the remote's own app takes one of the about two streams the link carries);
+# always: pulled from the start, the video comes up at once.
+PULLS = ("on-demand", "always")
 ENCODER_ARGS = {
     "videotoolbox": ["-c:v", "h264_videotoolbox", "-realtime", "1", "-profile:v", "baseline"],
     "x264": ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-profile:v", "baseline",
@@ -181,6 +186,9 @@ def validate_config(values: Dict[str, str], environ: Optional[Dict[str, str]] = 
     bitrate = values["BITRATE"]
     if not BITRATE_RE.match(bitrate):
         raise ConfigError(f"BITRATE must be a number with k or M, such as 2500k: {bitrate!r}")
+    pull = values["PULL"]
+    if pull not in PULLS:
+        raise ConfigError(f"PULL must be one of {', '.join(PULLS)}: {pull!r}")
     hosts = additional_hosts_setting(values["WEBRTC_ADDITIONAL_HOSTS"])
     for name in ("MEDIAMTX_BIN", "FFMPEG_BIN"):
         if not BIN_RE.match(values[name]):
@@ -190,7 +198,7 @@ def validate_config(values: Dict[str, str], environ: Optional[Dict[str, str]] = 
     runtime = runtime.split(":")[0]
     if not PATH_RE.match(runtime):
         raise ConfigError(f"RUNTIME_DIR must be an absolute path: {runtime!r}")
-    return {"camera_url": camera, "console_url": console, "encoder": encoder, "bitrate": bitrate,
+    return {"camera_url": camera, "console_url": console, "encoder": encoder, "bitrate": bitrate, "pull": pull,
             "additional_hosts": hosts, "mediamtx_bin": values["MEDIAMTX_BIN"],
             "ffmpeg_bin": values["FFMPEG_BIN"], "runtime_dir": runtime}
 
@@ -226,13 +234,24 @@ def transcode_command(encoder: str, bitrate: str, ffmpeg_bin: str) -> List[str]:
 
 
 def build_config(camera_url: Optional[str], encoder: str, bitrate: str, additional_hosts: List[str],
-                 ffmpeg_bin: str) -> str:
+                 ffmpeg_bin: str, pull: str = "always") -> str:
     """The mediamtx configuration as JSON text, which is valid YAML."""
     if encoder not in ENCODER_ARGS:
         raise ValueError(f"no encoder {encoder!r}")
+    if pull not in PULLS:
+        raise ValueError(f"no pull mode {pull!r}")
+    on_demand = pull == "on-demand"
     raw: Dict[str, object] = {}
     if camera_url is not None:
-        raw = {"source": camera_url, "rtspTransport": "tcp", "sourceOnDemand": False}
+        raw = {"source": camera_url, "rtspTransport": "tcp", "sourceOnDemand": on_demand}
+        if on_demand:
+            raw.update(sourceOnDemandStartTimeout="10s", sourceOnDemandCloseAfter="10s")
+    command = " ".join(transcode_command(encoder, bitrate, ffmpeg_bin))
+    # On demand, ffmpeg starts with the first viewer (and so pulls the camera) and stops 10 s after the last.
+    drone: Dict[str, object] = (
+        {"runOnDemand": command, "runOnDemandRestart": True, "runOnDemandStartTimeout": "20s", "runOnDemandCloseAfter": "10s"}
+        if on_demand else {"runOnInit": command, "runOnInitRestart": True}
+    )
     config = {
         "logLevel": "warn",
         "rtspAddress": RTSP_ADDRESS,
@@ -253,10 +272,7 @@ def build_config(camera_url: Optional[str], encoder: str, bitrate: str, addition
         "pprof": False,
         "paths": {
             "raw": raw,
-            "drone": {
-                "runOnInit": " ".join(transcode_command(encoder, bitrate, ffmpeg_bin)),
-                "runOnInitRestart": True,
-            },
+            "drone": drone,
         },
     }
     return json.dumps(config, indent=2) + "\n"
@@ -430,7 +446,8 @@ class Supervisor:
 
     def start_child(self, now: float) -> None:
         text = build_config(self.camera_url, self.encoder, str(self.settings["bitrate"]),
-                            list(self.settings["additional_hosts"]), str(self.settings["ffmpeg_bin"]))  # type: ignore[call-overload]
+                            list(self.settings["additional_hosts"]), str(self.settings["ffmpeg_bin"]),  # type: ignore[call-overload]
+                            str(self.settings["pull"]))
         self.write(self.config_path, text)
         self.child_camera = self.camera_url
         self.child_started = now
@@ -528,7 +545,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         supervisor = Supervisor(settings, logger=log, fetch=fetch_console_drone)
         supervisor.resolve_camera(supervisor.monotonic())
         sys.stdout.write(build_config(supervisor.camera_url, supervisor.encoder, str(settings["bitrate"]),
-                                      list(settings["additional_hosts"]), str(settings["ffmpeg_bin"])))  # type: ignore[call-overload]
+                                      list(settings["additional_hosts"]), str(settings["ffmpeg_bin"]),  # type: ignore[call-overload]
+                                      str(settings["pull"])))
         return 0
 
     stop = {"flag": False}
