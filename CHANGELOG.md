@@ -2,7 +2,7 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
-## 3.13.1
+## 3.13.2
 
 Rilis perbaikan tampilan Dashboard; tidak ada yang dihapus.
 
