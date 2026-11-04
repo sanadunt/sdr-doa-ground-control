@@ -422,6 +422,7 @@ class LanRequestRuleTests(unittest.TestCase):
             "/api/mirror/receiver/markers/", "/api/mirror/receiver/markers/short", "/api/mirror/receiver/markers/a/b-c-d-e-f",
             "/api/mirror/receiver/markers/" + "x" * 65,
             "/api/admin/login", "/api/admin/branding", "/api/mqtt/config-patch", "/api/mqtt/config-patch/abc",
+            "/api/mqtt/operation", "/api/mqtt/operation/abc",
             "/api/mqtt/config-get", "/api/mqtt/config-reported", "/api/mqtt/connect", "/api/dry-run/config-patch",
             "/assets/", "/assets",
             "/api/health/", "/api/", "/.env", "/tools/ground_console.py",
@@ -757,6 +758,7 @@ class LanListenerTests(_ServerCase):
         for path in (
             "/receiver", "/receiver/", "/receiver/index.html", "/api/lan-access", "/api/mqtt/config-reported",
             "/api/mqtt/config-patch", "/api/mqtt/config-patch/gc-0123", "/api/mqtt/config-get", "/api/mqtt/connect",
+            "/api/mqtt/operation", "/api/mqtt/operation/gc-0123",
             "/api/admin/login",
             "/api/admin/logout", "/api/admin/branding", "/api/dry-run/config-patch", "/api/unknown", "/.env",
             "/tools/ground_console.py", "/assets", "/api/health/",
@@ -775,6 +777,7 @@ class LanListenerTests(_ServerCase):
             ("POST", "/api/lan-access", {"enabled": False}),
             ("POST", "/api/mqtt/config-patch", {"changes": {"gain_db": 20.7}, "base_rev": 1, "confirm": True}),
             ("POST", "/api/mqtt/config-get", {}),
+            ("POST", "/api/mqtt/operation", {"op": "system.reboot.prepare", "confirm": True}),
             ("POST", "/api/mqtt/connect?host=127.0.0.1&port=1883", None),
             ("POST", "/api/preferences", {"values": {"sdr-console-theme": "light"}}),
             ("PUT", "/api/preferences", {"values": {"sdr-console-theme": "light"}}),

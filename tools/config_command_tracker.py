@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Server-side state of the RDF Node commands Kontrol published.
 
-Kontrol sends ``config.patch`` and ``config.get`` to the RDF Node edge
+Kontrol sends ``config.patch`` and ``config.get`` to the RDF Node edge, and
+since 3.15.0 the operations ``processing.set``, ``service.restart`` and the
+two steps of ``system.reboot`` and ``system.shutdown``
 (``tools/rdf_node_commands.py``). The console server remembers each command it
 published and derives its state from what the MQTT monitor observed for that
-id: the broker's PUBACK, the edge's ACKs on ``ack/config`` and, for a
-``config.get``, the ``settings/reported`` answer. The browser only polls the
+id: the broker's PUBACK, the edge's ACKs on ``ack/config`` or
+``ack/operation`` and, for a ``config.get``, the ``settings/reported`` answer.
+A prepare's one-time challenge stays with the monitor; this record only
+learns until when it can be used (``prepare_valid_until_ms``). The browser only polls the
 state; it never sees the payload ids it would need to match ACKs itself.
 
 States (``COMMAND_STATES``):
@@ -17,7 +21,10 @@ States (``COMMAND_STATES``):
   not arrived yet;
 * ``acked`` (final): the edge's final ACK, whatever it says (``APPLIED``,
   ``PERSISTED_UNVERIFIED``, ``OUTCOME_UNKNOWN``, ``REJECTED``, ``CONFLICT``,
-  ``EXPIRED``, ``FAILED``, ``CANCELLED``); the ACK itself is in the status;
+  ``EXPIRED``, ``FAILED``, ``CANCELLED``); the ACK itself is in the status.
+  For a reboot or shutdown ``execute`` also ``REBOOT_SCHEDULED`` or
+  ``SHUTDOWN_SCHEDULED``: the host goes down 5 s later and the edge's journal
+  closes the command after the boot without sending another ACK;
 * ``reported`` (final): a ``config.get`` whose ``settings/reported`` arrived;
 * ``publish_failed`` (final): the publish failed or the PUBACK was 128 or above;
 * ``no_ack`` (final): no ACK at all by ``expires_ms`` plus ``NO_ACK_GRACE_MS``;
@@ -91,6 +98,16 @@ PUBACK_FAILURE_REASON = 128
 
 OP_CONFIG_GET = "config.get"
 OP_CONFIG_PATCH = "config.patch"
+# processing.set and service.restart wait for the SDR engine to start: up to the
+# edge's start_timeout_seconds (180 s by default) behind an 8 s helper call.
+LIFECYCLE_OPS = frozenset({"processing.set", "service.restart"})
+# A reboot or shutdown execute ends at its *_SCHEDULED ACK (see acked above).
+SCHEDULED_FINAL_STATUSES: Dict[str, str] = {
+    "system.reboot.execute": "REBOOT_SCHEDULED",
+    "system.shutdown.execute": "SHUTDOWN_SCHEDULED",
+}
+PREPARE_OPS = frozenset({"system.reboot.prepare", "system.shutdown.prepare"})
+MUTATION_OPS = frozenset({OP_CONFIG_PATCH, "processing.set", "service.restart", *SCHEDULED_FINAL_STATUSES, *PREPARE_OPS})
 
 
 class MonitorPublishError(RuntimeError):
@@ -130,7 +147,7 @@ def _monitor_reference(monitor: Any, *, strong: bool = False) -> Callable[[], An
 
 def _empty_observation() -> Dict[str, Any]:
     return {"puback": None, "progress": None, "final": None, "reported_at_ms": None,
-            "restart_seen": False, "final_ack_by_ms": None}
+            "restart_seen": False, "final_ack_by_ms": None, "prepare_valid_until_ms": None}
 
 
 def final_ack_deadline(ack: Optional[Mapping[str, Any]]) -> Optional[int]:
@@ -202,6 +219,8 @@ def _observe(monitor: Any, command_id: str) -> Dict[str, Any]:
         progress is not None and progress["result"].get("method") in _RESTART_METHODS)
     deadline = observed.get("final_ack_by_ms")
     result["final_ack_by_ms"] = _later(deadline if type(deadline) is int else None, final_ack_deadline(progress))
+    valid_until = observed.get("prepare_valid_until_ms")
+    result["prepare_valid_until_ms"] = valid_until if type(valid_until) is int else None
     return result
 
 
@@ -281,6 +300,12 @@ def public_ack(ack: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
         "ignored": _names(result.get("ignored"), _KEY_NAME_RE),
         # Contract 1.10, progress ACKs: at most this many ms until the final ACK.
         "final_within_ms": _within_ms(result.get("final_within_ms")),
+        # Operations: the state processing.set asked for (RUNNING, STOPPED), the
+        # seconds before a scheduled reboot or shutdown, and how long a prepare's
+        # challenge lives on the edge. Never the challenge itself.
+        "desired": _text(result.get("desired"), 16),
+        "delay_seconds": _within_ms(result.get("delay_seconds")),
+        "valid_seconds": _within_ms(result.get("valid_seconds")),
         "t": ack.get("t"),
         "received_at_ms": ack.get("received_at_ms"),
     }
@@ -323,6 +348,8 @@ class ConfigCommandTracker:
         changes = command.get("changes")
         base_rev = command.get("base_rev")
         sid = command.get("sid")
+        desired = command.get("desired")
+        prepare_id = command.get("prepare_id")
         entry = {
             "command_id": command_id,
             "op": str(command["op"]),
@@ -332,6 +359,9 @@ class ConfigCommandTracker:
             "expires_ms": int(command["expires_ms"]),
             "base_rev": base_rev if type(base_rev) is int else None,
             "changes": dict(changes) if isinstance(changes, Mapping) else {},
+            # Never the execute's challenge: only the prepare it answers.
+            "desired": desired if isinstance(desired, str) else None,
+            "prepare_id": prepare_id if isinstance(prepare_id, str) else None,
             "published_at_ms": published_at_ms if published_at_ms is not None else self.now_ms(),
             "monitor": _monitor_reference(monitor, strong=not publish_failed),
             "publish_failed": bool(publish_failed),
@@ -380,6 +410,14 @@ class ConfigCommandTracker:
                     return self._status_locked(entry, current_monitor, self.now_ms())
         return None
 
+    def latest_of(self, current_monitor: Any, ops: Any) -> Optional[Dict[str, Any]]:
+        """The newest command whose op is in ``ops``, or None."""
+        with self._lock:
+            for entry in reversed(list(self._entries.values())):
+                if entry["op"] in ops:
+                    return self._status_locked(entry, current_monitor, self.now_ms())
+        return None
+
     def in_flight(self, current_monitor: Any, op: str = OP_CONFIG_PATCH, now_ms: Optional[int] = None) -> Optional[str]:
         """The id of a command of ``op`` that is not final yet, or None."""
         now = self.now_ms() if now_ms is None else int(now_ms)
@@ -389,6 +427,20 @@ class ConfigCommandTracker:
                     continue
                 status = self._status_locked(entry, current_monitor, now)
                 if not status["final"]:
+                    return entry["command_id"]
+        return None
+
+    def mutation_in_flight(self, current_monitor: Any, now_ms: Optional[int] = None) -> Optional[str]:
+        """The id of a command that changes the node (anything but config.get) and is not final yet.
+
+        The edge runs one at a time (BUSY), so Kontrol sends one at a time too.
+        """
+        now = self.now_ms() if now_ms is None else int(now_ms)
+        with self._lock:
+            for entry in reversed(list(self._entries.values())):
+                if entry["op"] not in MUTATION_OPS:
+                    continue
+                if not self._status_locked(entry, current_monitor, now)["final"]:
                     return entry["command_id"]
         return None
 
@@ -447,8 +499,11 @@ class ConfigCommandTracker:
             # on either, so the current monitor is consulted first.
             sources.append(publisher)
         observed = entry["observed"]
+        held_until: Optional[int] = None
         for monitor in sources:
             fresh = _observe(monitor, entry["command_id"])
+            if monitor is current_monitor:
+                held_until = fresh["prepare_valid_until_ms"]
             if observed["puback"] is None and fresh["puback"] is not None:
                 observed["puback"] = fresh["puback"]
             if observed["final"] is None and fresh["final"] is not None:
@@ -460,6 +515,9 @@ class ConfigCommandTracker:
             # Once seen, these stay: a later ACK (or a resent ACCEPTED) never shortens the wait.
             observed["restart_seen"] = observed["restart_seen"] or fresh["restart_seen"]
             observed["final_ack_by_ms"] = _later(observed["final_ack_by_ms"], fresh["final_ack_by_ms"])
+        # Only the monitor that holds the challenge says until when it can be used; once the
+        # execute took it (or another monitor replaced this one) it reads null again.
+        observed["prepare_valid_until_ms"] = held_until if entry["op"] in PREPARE_OPS else None
         return restarted
 
     def _derive_locked(self, entry: Dict[str, Any], now: int) -> str:
@@ -477,6 +535,8 @@ class ConfigCommandTracker:
                 return "acknowledged"
             return "acked"
         if observed["progress"] is not None:
+            if observed["progress"]["status"] == SCHEDULED_FINAL_STATUSES.get(entry["op"]):
+                return "acked"
             return "no_final_ack" if now > self._final_ack_deadline_locked(entry) else "acknowledged"
         if now > entry["expires_ms"] + NO_ACK_GRACE_MS:
             return "no_ack"
@@ -495,7 +555,8 @@ class ConfigCommandTracker:
     def _final_ack_deadline_locked(entry: Dict[str, Any]) -> int:
         """Until when a command with a progress ACK waits for its final ACK (tracker clock)."""
         observed = entry["observed"]
-        wait = RESTART_FINAL_ACK_WAIT_MS if observed["restart_seen"] else FINAL_ACK_WAIT_MS
+        long_wait = observed["restart_seen"] or entry["op"] in LIFECYCLE_OPS
+        wait = RESTART_FINAL_ACK_WAIT_MS if long_wait else FINAL_ACK_WAIT_MS
         return _later(entry["issued_ms"] + wait, observed["final_ack_by_ms"])  # type: ignore[return-value]
 
     def _status_locked(self, entry: Dict[str, Any], current_monitor: Any, now: int) -> Dict[str, Any]:
@@ -524,6 +585,16 @@ class ConfigCommandTracker:
             "published_at_ms": entry["published_at_ms"],
             "base_rev": entry["base_rev"],
             "changes": dict(entry["changes"]),
+            "sid": entry["sid"],
+            "desired": entry["desired"],
+            "prepare_id": entry["prepare_id"],
+            # A prepare whose challenge the monitor holds: until when an execute may use it
+            # (tracker clock); null before the APPLIED ACK, after it ran out or was used.
+            "prepare_valid_until_ms": (
+                observed["prepare_valid_until_ms"]
+                if observed["prepare_valid_until_ms"] is not None and now < observed["prepare_valid_until_ms"]
+                else None
+            ),
             "puback_reason": None if observed["puback"] is None else observed["puback"]["reason"],
             "monitor_restarted": restarted,
             "ack": public_ack(ack),
@@ -547,6 +618,8 @@ __all__ = [
     "FINAL_STATES",
     "FINAL_WITHIN_MARGIN_MS",
     "FINAL_WITHIN_MAX_WAIT_MS",
+    "LIFECYCLE_OPS",
+    "MUTATION_OPS",
     "MonitorPublishError",
     "NO_ACK_GRACE_MS",
     "PROGRESS_ACK_STATUSES",

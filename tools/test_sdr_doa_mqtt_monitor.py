@@ -502,7 +502,7 @@ class SharedMqttMonitorTests(unittest.TestCase):
         observation = self.monitor.rdf_node_command_observation(command["id"])
         self.assertEqual(observation, {
             "published": True, "adopted": False, "puback": None, "progress": None, "final": None, "reported_at_ms": None,
-            "method_seen": None, "final_ack_by_ms": None,
+            "method_seen": None, "final_ack_by_ms": None, "prepare_valid_until_ms": None,
         })
         # The Message Monitor snapshot keeps saying the monitor never publishes on its own.
         snapshot = self.monitor.snapshot()
@@ -823,7 +823,9 @@ class SharedMqttMonitorTests(unittest.TestCase):
         self.assertEqual(
             self.monitor.rdf_node_control_view()["session"]["capabilities"],
             {"remote_commands": capabilities["remote_commands"], "remote_config_patch": capabilities["remote_config_patch"],
-             "config_patch": capabilities["config_patch"], "config_fields": None},
+             "config_patch": capabilities["config_patch"], "config_fields": None,
+             **{flag: capabilities[flag] for flag in (
+                 "remote_processing", "remote_restart", "remote_reboot", "remote_shutdown")}},
         )
         # Edge 1.8.0 (contract 1.8) lists the fields config.patch takes.
         fields = ["ant_spacing_m", "center_frequency_hz", "gain_db", "vfo0_bandwidth_hz", "vfo0_frequency_hz", "vfo0_squelch_db"]
