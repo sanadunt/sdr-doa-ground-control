@@ -2,6 +2,15 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.13.1
+
+Rilis perbaikan tampilan Dashboard; tidak ada yang dihapus.
+
+- **Panel Drone selalu menunjukkan status koneksinya.** Dua baris teratas, **Telemetri** dan **Kamera drone**, selalu tampil: memeriksa, mati, mencari remote di LAN, menghubungkan, tidak terhubung (dengan IP remote), atau terhubung (live, data usang, atau belum ada data). Video juga menyebut sebabnya: service tidak jalan, encoder belum jalan, tidak ada gambar kamera, atau mencoba lagi.
+- Semua baris telemetri (status, GPS, ketinggian, kecepatan, heading, roll/pitch, baterai, remote) selalu tampil, berisi "—" selama drone belum mengirimnya. Barisnya kini satu kolom (label di kiri, nilai di kanan), jadi lebih banyak nilai yang muat di kolom kanan.
+- **Panel Drone tidak lagi menimpa kartu RDF-SDR.** Di layar yang tinggi (misalnya zoom browser 80%), video drone sempat tergambar di atas kartu RDF-SDR yang dibuka. Sekarang keduanya mengecil di dalam kotaknya sendiri: nilai drone dan detail RDF-SDR bisa digulir, dan header, video, serta baris status drone selalu terlihat.
+- **Legenda peta tidak tertutup kolom kanan.** Selama panel Drone atau detail kartu RDF-SDR terbuka, legenda pindah ke kiri kolom kanan.
+
 ## 3.13.0
 
 Rilis minor: tidak ada yang dihapus. Telemetry dan video drone SIYI (yang membawa RDF-SDR) masuk ke console. GPS dan kompas drone diutamakan, sedangkan GPS dan kompas RDF-SDR tetap tampil di sampingnya.

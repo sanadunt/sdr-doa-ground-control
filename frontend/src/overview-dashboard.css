@@ -99,6 +99,11 @@
    that corner when it is open; the node card repeats the coordinates. */
 .ov-stage .map-bottom-overlay { position: absolute; z-index: 15; right: var(--ov-gap); bottom: calc(var(--ov-dock-h) + var(--ov-gap)); max-width: min(460px, calc(100% - 380px)); padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--ov-card-bg); box-shadow: var(--ov-shadow); }
 .ov-stage[data-control='open'] .map-bottom-overlay { display: none; }
+/* A long right column (the drone panel, an open RDF-SDR card) reaches that
+   corner too: the legend then sits left of the column instead of under it. */
+@media (min-width: 1024px) {
+  .ov-stage:has(.ov-right > .ov-drone, .ov-node-detail:not([hidden])) .map-bottom-overlay { right: calc(360px + 2 * var(--ov-gap)); max-width: min(460px, calc(100% - 760px)); }
+}
 @media (min-width: 1024px) and (max-width: 1279px) {
   .ov-stage .map-bottom-overlay { grid-template-columns: minmax(0, 1fr); grid-template-areas: 'legend'; max-width: 320px; }
   .ov-stage .map-bottom-overlay .map-coordinate { display: none; }
@@ -445,8 +450,9 @@
 .ov-drone-video[data-phase='playing'] .ov-drone-video-notice { display: none; }
 .ov-drone-video-notice { position: absolute; inset: 0; display: grid; place-items: center; padding: 12px; color: #c9d3dc; font-size: 12px; text-align: center; }
 .ov-drone-hud { position: absolute; right: 6px; bottom: 6px; left: 6px; display: flex; flex-wrap: wrap; gap: 4px 10px; color: #f5f7f9; font-family: var(--mono); font-size: 11px; font-weight: 700; text-shadow: 0 1px 2px #000, 0 0 2px #000; pointer-events: none; }
-.ov-drone-rows { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 12px; min-height: 0; margin: 0; padding: 8px 12px 10px; overflow-y: auto; overscroll-behavior: contain; }
-.ov-drone-rows > div.is-wide { grid-column: 1 / -1; }
+/* One line per value, label left: the column is short, so the rows stay dense. */
+.ov-drone-rows { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-height: 0; margin: 0; padding: 8px 12px 10px; overflow-y: auto; overscroll-behavior: contain; }
+.ov-drone-rows > div { display: grid; grid-template-columns: 88px minmax(0, 1fr); align-items: baseline; gap: 8px; }
 .ov-drone-rows > div.is-wide dd { overflow-wrap: anywhere; white-space: normal; }
 .ov-drone-rows dt { color: var(--subtle); font-size: 11px; }
 .ov-drone-rows dd { margin: 0; overflow: hidden; color: var(--text); font-family: var(--mono); font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
