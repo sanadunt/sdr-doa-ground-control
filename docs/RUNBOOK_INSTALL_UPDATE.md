@@ -1419,6 +1419,7 @@ sudo sh /usr/local/share/sdr-doa-host-power/uninstall.sh
 | Tag lokal image sebelumnya | `sdr-doa-previous` |
 | Label versi image | `org.opencontainers.image.version` |
 | Manual (di tarball console) | `docs/manual/Panduan_Penggunaan_SDR-DoA_Ground_Console.pdf` (Lampiran F: host tile) |
+| Panduan singkat operasi (di tarball console) | `docs/manual/Panduan_Singkat_Operasi_Groundstation.pdf` |
 
 ### 11.4 Variabel environment
 

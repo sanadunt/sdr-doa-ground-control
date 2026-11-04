@@ -11,7 +11,8 @@ Writes, in ``dist/release`` by default:
   ``packaging/ground-link`` (with their own installer), the host side of the
   console's Restart and Shutdown buttons ``packaging/host-power`` (its own
   installer too), the groundstation GPS publisher ``packaging/ground-gps``
-  (its own installer too), ``QUICKSTART.md`` and the user manual PDF;
+  (its own installer too), ``QUICKSTART.md``, the user manual PDF and the
+  short groundstation operation guide PDF;
 * ``sdr-doa-docker``: the Docker host script on its own (install, update and
   roll back the GHCR image), a release asset next to the tarball;
 * ``SHA256SUMS`` for the two, in ``sha256sum -c`` format.
@@ -62,6 +63,7 @@ VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 # 1980-01-01, the earliest time every archive format can store.
 FALLBACK_EPOCH = 315532800
 MANUAL_PDF = "docs/manual/Panduan_Penggunaan_SDR-DoA_Ground_Console.pdf"
+QUICK_GUIDE_PDF = "docs/manual/Panduan_Singkat_Operasi_Groundstation.pdf"
 BROWSDR_LICENSE = "vendor/BrowSDR/LICENSE"
 # Never shipped from a walked directory such as frontend/dist.
 _SKIP_NAMES = frozenset({"node_modules", "__pycache__", ".git", ".DS_Store"})
@@ -154,6 +156,7 @@ CONSOLE_RELEASE_FILES = (
     (".env.example", ".env.example", False),
     ("QUICKSTART.md", "QUICKSTART.md", False),
     (MANUAL_PDF, MANUAL_PDF, False),
+    (QUICK_GUIDE_PDF, QUICK_GUIDE_PDF, False),
 ) + GROUND_LINK_FILES + HOST_POWER_FILES + GROUND_GPS_FILES + DRONE_VIDEO_FILES
 # Inputs of a full build; a dirty copy would leak into frontend/dist.
 BUILD_INPUTS = (
