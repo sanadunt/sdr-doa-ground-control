@@ -142,7 +142,7 @@ describe('compact panel switches', () => {
     const markup = toggles();
     expect(markup).toContain('class="ov-panel-toggles is-compact"');
     const labels = [...markup.matchAll(/aria-label="([^"]+)"/g)].map((match) => match[1]);
-    expect(labels).toEqual(['Panels', 'Layers', 'Spectrum', 'RDF-SDR', 'Control']);
+    expect(labels).toEqual(['Panels', 'Layers', 'Spectrum', 'RDF-SDR', 'Drone', 'Control']);
     expect(markup).not.toContain('Polar');
     expect(markup).toContain('<button type="button" aria-pressed="false" aria-label="RDF-SDR" title="RDF-SDR">');
     expect(toggles({ nodeOpen: true })).toContain('aria-pressed="true" aria-controls="panel-node" aria-label="RDF-SDR"');

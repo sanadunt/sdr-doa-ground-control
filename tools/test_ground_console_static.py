@@ -664,6 +664,8 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         self.assertEqual((source["kind"], source["reasons"]), ("none", ["MQTT_DISABLED", "DATA_OUT_UNAVAILABLE"]))
         # Every answer names the groundstation's own GPS; without a monitor it is null.
         self.assertIsNone(snapshot.pop("ground_gps"))
+        # And the drone's; a console without the drone link says it is off.
+        self.assertEqual(snapshot.pop("drone")["state"], "DISABLED")
         self.assertEqual(snapshot, fixture_snapshot)
         self.assertEqual(
             sorted(collection),

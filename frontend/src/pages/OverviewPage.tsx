@@ -3,7 +3,7 @@ import { Suspense, memo, useCallback, useEffect, useMemo, useRef, useState } fro
 import type { ConsoleCapabilities } from '../api';
 import type { CompassConfig, GpsConfig, MapCoordinate, PolarSettings, TelemetrySnapshot } from '../types';
 import type { SimulationSettings } from '../lib/simulation';
-import { gpsReportsNoFix, holdStationCoordinate, resolveGpsSource } from '../lib/map';
+import { gpsReportsNoFix, holdStationCoordinate, resolveGpsSource, resolveStationCoordinate } from '../lib/map';
 import { groundPosition } from '../lib/groundGps';
 import { doaStatusTextKey, overviewDoaStatus, provisionalDoa } from '../lib/doaStatus';
 import { lazyWithRetry } from '../lib/lazyRetry';
@@ -32,6 +32,9 @@ import { DoaReadout } from '../components/DoaReadout';
 import { LoadErrorBoundary } from '../components/LoadErrorBoundary';
 import type { RouteName } from '../components/Shell';
 import { NodeCard } from '../components/overview/NodeCard';
+import { DronePanel } from '../components/overview/DronePanel';
+import type { DroneMapView } from '../components/TacticalMap';
+import { DRONE_SAME_PLACE_M, droneArrayHeadingNow, droneStation, positionGap, rememberDroneTrack, snapshotDrone } from '../lib/droneLink';
 import { LayersPanel } from '../components/overview/LayersPanel';
 import { EstimatePanel } from '../components/overview/EstimatePanel';
 import { PolarDock } from '../components/overview/PolarDock';
@@ -110,6 +113,7 @@ function OverviewPageView({
   snapshot,
   localSnapshotFresh,
   groundGpsFresh = localSnapshotFresh,
+  droneFresh = localSnapshotFresh,
   gpsConfig,
   compassConfig,
   simulation,
@@ -132,13 +136,15 @@ function OverviewPageView({
   localSnapshotFresh: boolean;
   /** The groundstation GPS is current; it ages apart from the RDF-SDR's data (default: localSnapshotFresh). */
   groundGpsFresh?: boolean;
+  /** The drone block is current; it ages apart from the RDF-SDR's data (default: localSnapshotFresh). */
+  droneFresh?: boolean;
   gpsConfig: GpsConfig;
   compassConfig: CompassConfig;
   simulation?: SimulationSettings;
 } & OverviewDashboardProps): JSX.Element {
   const { t } = useI18n();
   const evidence = localSnapshotFresh ? snapshot : null;
-  const gpsCoordinate = resolveGpsSource(evidence, gpsConfig).coordinate;
+  const gpsCoordinate = resolveGpsSource(evidence, gpsConfig, droneFresh ? snapshot : null).coordinate;
   const station = simulation ? null : holdStationCoordinate(lastLiveStation, gpsCoordinate, gpsReportsNoFix(snapshot, localSnapshotFresh), gpsConfig.source);
   if (station) lastLiveStation = station.lastLive;
   dataOutCompassMemory = rememberDataOutCompass(dataOutCompassMemory, snapshot);
@@ -182,6 +188,26 @@ function OverviewPageView({
     () => (groundLatitude === undefined || groundLongitude === undefined ? null : { latitude: groundLatitude, longitude: groundLongitude }),
     [groundLatitude, groundLongitude],
   );
+  // The drone that carries the RDF-SDR: its marker on its nose heading, its
+  // track, and the RDF-SDR's own GPS beside it where the two disagree.
+  const droneView = simulation ? null : snapshotDrone(droneFresh ? snapshot : null);
+  const droneHere = droneStation(droneView);
+  const droneTrack = simulation ? null : rememberDroneTrack(droneView);
+  const rdfOwn = droneHere ? resolveStationCoordinate(evidence) : null;
+  const rdfGap = positionGap(droneHere, rdfOwn);
+  const rdfOwnShown = rdfOwn && rdfGap && rdfGap.distanceM > DRONE_SAME_PLACE_M ? rdfOwn : null;
+  const droneHeadingNow = droneArrayHeadingNow(droneView);
+  const droneMapKey = droneHere
+    ? JSON.stringify([droneHere.latitude, droneHere.longitude, droneHeadingNow === null ? null : Math.round(droneHeadingNow * 10) / 10, droneTrack?.length ?? 0, rdfOwnShown?.latitude, rdfOwnShown?.longitude])
+    : '';
+  const droneMap = useMemo<DroneMapView | null>(() => (droneHere && droneTrack ? {
+    position: { latitude: droneHere.latitude, longitude: droneHere.longitude },
+    headingDeg: droneView?.heading?.deg ?? null,
+    track: droneTrack,
+    rdfOwn: rdfOwnShown ? { latitude: rdfOwnShown.latitude, longitude: rdfOwnShown.longitude } : null,
+  } : null),
+  // Rebuilt only when what the map draws changes.
+  [droneMapKey]);
   // Where the moving RDF-SDR's bearings cross. It is built on the console from
   // every bearing so far, so it outlives a stale answer; kept stable across
   // equal answers so the map only redraws it when it changes.
@@ -270,7 +296,7 @@ function OverviewPageView({
     }
     schedule();
     return () => { window.cancelAnimationFrame(frame); observer.disconnect(); };
-  }, [panels.layers, controlShown, polarShown, panels.spectrum, panels.nodeCollapsed, nodeShown, compactLayout]);
+  }, [panels.layers, controlShown, polarShown, panels.spectrum, panels.drone, panels.nodeCollapsed, nodeShown, compactLayout]);
 
   return (
     <div className="page page-overview ov-stage" data-dock={dockShown ? (panels.spectrum ? 'full' : 'polar') : 'none'} data-control={controlShown ? 'open' : undefined} data-layout={compactLayout ?? undefined}>
@@ -300,6 +326,7 @@ function OverviewPageView({
               ground={groundCoordinate}
               estimate={estimate}
               compact={compact}
+              drone={droneMap}
             />
           </Suspense>
         </LoadErrorBoundary>
@@ -311,6 +338,7 @@ function OverviewPageView({
         {panels.layers ? <LayersPanel settings={overlaySettings} scale={overlayScale} onChange={onOverlayChange} onClose={() => onPanelsChange({ ...panels, layers: false })} basemapId={basemapId} onBasemapChange={onBasemapSelect} /> : null}
       </div>
       <div className={rightTop === null ? 'ov-right' : 'ov-right is-stacked'} ref={rightRef} style={rightTop === null ? undefined : { '--ov-right-top': `${rightTop}px` } as CSSProperties}>
+        {panels.drone ? <DronePanel initialView={droneView} onClose={() => onPanelsChange({ ...panels, drone: false })} /> : null}
         {nodeShown ? <NodeCard
           snapshot={snapshot}
           localSnapshotFresh={localSnapshotFresh}

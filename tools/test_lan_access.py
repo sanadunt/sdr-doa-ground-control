@@ -412,6 +412,8 @@ class LanRequestRuleTests(unittest.TestCase):
             "/api/health", "/api/capabilities", "/api/snapshot", "/api/console-config", "/api/mqtt",
             "/api/mqtt/rdf-node", "/api/preferences", "/api/branding", "/api/admin/status", "/api/mirror/receiver",
             "/api/mirror/receiver/audio",
+            "/api/drone",
+            "/api/drone/video",
         }))
         for path in (
             "/receiver", "/receiver/", "/receiver/index.html", "/api/receiver/settings", "/api/lan-access",

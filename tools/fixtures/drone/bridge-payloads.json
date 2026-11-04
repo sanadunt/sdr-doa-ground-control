@@ -1,0 +1,11 @@
+{
+  "_comment": "One payload per SIYI Bridge topic, in the bridge's own field names (decode.go, main.go). Values follow the real FC of 2026-11-03: quadrotor, autopilot 30, custom_mode 4, about 6.1 V, remaining_pct null.",
+  "drone/status": {"sysid": 1, "type": 2, "type_name": "quadrotor", "autopilot": 30, "autopilot_name": "30", "custom_mode": 4, "base_mode": 129, "armed": true, "system_status": 4},
+  "drone/battery": {"sysid": 1, "voltage_v": 6.1, "current_a": 4.2, "remaining_pct": null, "cpu_load_pct": 31.5},
+  "drone/gps": {"sysid": 1, "fix": 6, "fix_name": "RTK fixed", "satellites": 22, "lat": -6.9321, "lon": 107.6612, "alt_m": 742.3, "hdop": 0.6, "speed_ms": 3.1, "course_deg": 87.0},
+  "drone/position": {"sysid": 1, "lat": -6.9321, "lon": 107.6612, "alt_msl_m": 742.3, "alt_rel_m": 25.4, "vx_ms": 0.16, "vy_ms": 3.1, "vz_ms": -0.2, "speed_ms": 3.104, "heading_deg": 87.0},
+  "drone/attitude": {"sysid": 1, "roll_deg": 8.2, "pitch_deg": -4.1, "yaw_deg": 87.3, "rollspeed_dps": 0.3, "pitchspeed_dps": -0.2, "yawspeed_dps": 6.0},
+  "drone/hud": {"sysid": 1, "airspeed_ms": 3.1, "groundspeed_ms": 3.1, "alt_m": 25.4, "climb_ms": 0.2, "heading_deg": 87, "throttle_pct": 52},
+  "drone/statustext": {"sysid": 1, "severity": 6, "text": "EKF3 IMU0 is using GPS"},
+  "bridge/link": {"fc_online": true, "fc_last_seen_s": 0.1, "frames_per_s": 41.5, "camera_online": true, "camera": "rtsp://192.168.144.25:8554/main.264", "telemetry": "udp 192.168.144.12:19856", "uptime_s": 10992, "version": "0.1.0"}
+}

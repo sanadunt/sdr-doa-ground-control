@@ -76,7 +76,7 @@ const BASEMAP_CHECK_MS = 20_000;
 const BASEMAP_RETRY_MS = 60_000;
 // The console's tile route tries each upstream's hosts; the browser has one URL per source.
 const BASEMAP_HOSTS = 1;
-const SOURCE_IDS = ['doa-station', 'doa-beam', 'doa-heat', 'doa-rings', 'doa-guides', 'doa-lobe', 'doa-edges', 'doa-bearing', 'doa-provisional', 'doa-held-beam', 'doa-held-heat', 'doa-held-lobe', 'doa-held-edges', 'doa-held-bearing', 'rdf-heading', 'ground-link', 'estimate-heat', 'estimate-lines', 'estimate-point'] as const;
+const SOURCE_IDS = ['doa-station', 'doa-beam', 'doa-heat', 'doa-rings', 'doa-guides', 'doa-lobe', 'doa-edges', 'doa-bearing', 'doa-provisional', 'doa-held-beam', 'doa-held-heat', 'doa-held-lobe', 'doa-held-edges', 'doa-held-bearing', 'rdf-heading', 'ground-link', 'estimate-heat', 'estimate-lines', 'estimate-point', 'drone-track', 'drone-gap'] as const;
 type SourceId = typeof SOURCE_IDS[number];
 const SOURCE_ID_SET: ReadonlySet<string> = new Set(SOURCE_IDS);
 const EMPTY: OverlayFeatureCollection = { type: 'FeatureCollection', features: [] };
@@ -300,9 +300,21 @@ export interface TacticalMapProps {
   estimate?: PositionEstimate | null;
   /** The compact touch layout: notices fold to one-line chips that open on a tap. */
   compact?: boolean;
+  /** The SIYI drone (lib/droneLink.ts): where it is and where its nose points; null without a usable fix. Stable across equal values. */
+  drone?: DroneMapView | null;
 }
 
-function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, curveOffset, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, provisionalTheta = null, provisionalHeading = null, orientationCause, onOpenCompassSettings, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect, ground = null, estimate = null, compact = false }: TacticalMapProps): JSX.Element {
+/** The drone on the map: its position and nose heading, its flown track, and the RDF-SDR's own GPS when it differs. */
+export interface DroneMapView {
+  position: GeoOrigin;
+  headingDeg: number | null;
+  /** [lon, lat] points, oldest first (lib/droneLink.ts rememberDroneTrack). */
+  track: ReadonlyArray<[number, number]>;
+  /** The RDF-SDR's own GPS while the station position comes from the drone; null when they agree within 5 m. */
+  rdfOwn: GeoOrigin | null;
+}
+
+function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, curveOffset, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, provisionalTheta = null, provisionalHeading = null, orientationCause, onOpenCompassSettings, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect, ground = null, estimate = null, compact = false, drone = null }: TacticalMapProps): JSX.Element {
   const { t, lang } = useI18n();
   const hostRef = useRef<HTMLDivElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -310,6 +322,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const stationMarkerRef = useRef<maplibregl.Marker | null>(null);
   const stationPopupRef = useRef<maplibregl.Popup | null>(null);
   const groundMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const droneMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const rdfOwnMarkerRef = useRef<maplibregl.Marker | null>(null);
   const headingMarkerRef = useRef<maplibregl.Marker | null>(null);
   const framingRef = useRef<StationFraming | null>(null);
   const operatorMovedRef = useRef(false);
@@ -409,7 +423,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     const data: Record<SourceId, OverlayFeatureCollection> = {
       'doa-station': pointFeature(stationCoordinate), 'doa-beam': EMPTY, 'doa-heat': EMPTY, 'doa-rings': EMPTY, 'doa-guides': EMPTY, 'doa-lobe': EMPTY, 'doa-edges': EMPTY, 'doa-bearing': EMPTY, 'doa-provisional': EMPTY,
       'doa-held-beam': EMPTY, 'doa-held-heat': EMPTY, 'doa-held-lobe': EMPTY, 'doa-held-edges': EMPTY, 'doa-held-bearing': EMPTY, 'rdf-heading': EMPTY, 'ground-link': EMPTY,
-      'estimate-heat': EMPTY, 'estimate-lines': EMPTY, 'estimate-point': EMPTY,
+      'estimate-heat': EMPTY, 'estimate-lines': EMPTY, 'estimate-point': EMPTY, 'drone-track': EMPTY, 'drone-gap': EMPTY,
     };
     if (!stationCoordinate) return { data, rings: [], halfPower: null, heldHalfPower: null };
     // Rings and guides are a ground-distance and orientation reference; they do not depend on DoA data.
@@ -447,10 +461,18 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const estimateShapes = useMemo(() => (g.estimateVisible ? positionEstimateFeatures(estimate, stationCoordinate) : NO_ESTIMATE_FEATURES), [estimate, stationCoordinate, g.estimateVisible]);
   const estimatePoint = g.estimateVisible && estimate?.state === 'ESTIMATE' && estimate.latitude !== null && estimate.longitude !== null
     ? [estimate.longitude, estimate.latitude] as [number, number] : null;
+  // The drone's flown track, and a thin line to the RDF-SDR's own GPS where the two disagree.
+  const droneTrack = useMemo<OverlayFeatureCollection>(() => (drone && drone.track.length > 1
+    ? { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: drone.track.map((point) => [point[0], point[1]]) } }] }
+    : EMPTY), [drone]);
+  const droneGap = useMemo<OverlayFeatureCollection>(() => (drone?.rdfOwn
+    ? { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [[drone.position.longitude, drone.position.latitude], [drone.rdfOwn.longitude, drone.rdfOwn.latitude]] } }] }
+    : EMPTY), [drone]);
   const sourceData = useMemo<Record<SourceId, OverlayFeatureCollection>>(() => ({
     ...geometry.data, 'rdf-heading': headingLine, 'ground-link': link?.features ?? EMPTY,
     'estimate-heat': estimateShapes.heat, 'estimate-lines': estimateShapes.lines, 'estimate-point': estimateShapes.point,
-  }), [geometry, headingLine, link, estimateShapes]);
+    'drone-track': droneTrack, 'drone-gap': droneGap,
+  }), [geometry, headingLine, link, estimateShapes, droneTrack, droneGap]);
 
   // Frame below the notices (basemap unavailable, overlay held...) so they never
   // cover the north label, and above the map controls so they never cover the south one.
@@ -554,6 +576,9 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
           heldLayerSpec(doaLayers.bearing),
           // A held DoA that is still readable: grey and dashed, never the bearing colour.
           { id: 'doa-provisional', type: 'line', source: 'doa-provisional', paint: { 'line-color': '#8d99a6', 'line-opacity': .9, 'line-width': 3, 'line-dasharray': [2, 1.5] } },
+          // The drone's flown track (orange), and the line to the RDF-SDR's own GPS where they disagree.
+          { id: 'drone-track', type: 'line', source: 'drone-track', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#f08a24', 'line-opacity': .8, 'line-width': 2 } },
+          { id: 'drone-gap', type: 'line', source: 'drone-gap', paint: { 'line-color': '#a78bfa', 'line-opacity': .9, 'line-width': 1.5, 'line-dasharray': [2, 2] } },
           // Groundstation to RDF-SDR: dots (zero-length dashes with round caps).
           { id: 'ground-link', type: 'line', source: 'ground-link', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': groundLinkColor(consoleTheme() === 'dark'), 'line-opacity': ['case', ['==', ['get', 'live'], true], .95, .9], 'line-width': 4, 'line-dasharray': [0, 2] } },
           { id: 'estimate-lines', type: 'line', source: 'estimate-lines', layout: { 'line-cap': 'round' }, paint: { 'line-color': estimateColor(consoleTheme() === 'dark'), 'line-opacity': .7, 'line-width': 1.2, 'line-dasharray': [3, 2] } },
@@ -713,6 +738,10 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       groundMarkerRef.current = null;
       headingMarkerRef.current?.remove();
       headingMarkerRef.current = null;
+      droneMarkerRef.current?.remove();
+      droneMarkerRef.current = null;
+      rdfOwnMarkerRef.current?.remove();
+      rdfOwnMarkerRef.current = null;
       appliedDataRef.current = {};
       styleReadyRef.current = false;
       map.remove();
@@ -935,6 +964,49 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     element.setAttribute('title', t('map.groundTitle'));
     groundMarkerRef.current.setLngLat([ground.longitude, ground.latitude]);
   }, [styleReady, ground, t]);
+
+  // The drone: an orange arrow on its nose heading (a dot without one), and the
+  // RDF-SDR's own GPS as a small hollow violet ring where it differs.
+  const dronePosition = drone?.position ?? null;
+  const droneHeading = drone?.headingDeg ?? null;
+  const rdfOwn = drone?.rdfOwn ?? null;
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady || !dronePosition) {
+      droneMarkerRef.current?.remove();
+      droneMarkerRef.current = null;
+      return;
+    }
+    if (!droneMarkerRef.current) {
+      const element = document.createElement('div');
+      element.className = 'ov-drone-marker';
+      element.setAttribute('role', 'img');
+      droneMarkerRef.current = new maplibregl.Marker({ element, anchor: 'center', rotationAlignment: 'map', pitchAlignment: 'map' }).setLngLat([dronePosition.longitude, dronePosition.latitude]).addTo(map);
+    }
+    const element = droneMarkerRef.current.getElement();
+    element.classList.toggle('has-heading', droneHeading !== null);
+    element.setAttribute('aria-label', t('map.droneAria', { lat: dronePosition.latitude.toFixed(6), lon: dronePosition.longitude.toFixed(6) }));
+    element.setAttribute('title', t('map.droneTitle'));
+    droneMarkerRef.current.setRotation(droneHeading ?? 0).setLngLat([dronePosition.longitude, dronePosition.latitude]);
+  }, [styleReady, dronePosition, droneHeading, t]);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady || !rdfOwn) {
+      rdfOwnMarkerRef.current?.remove();
+      rdfOwnMarkerRef.current = null;
+      return;
+    }
+    if (!rdfOwnMarkerRef.current) {
+      const element = document.createElement('div');
+      element.className = 'ov-rdf-own-marker';
+      element.setAttribute('role', 'img');
+      rdfOwnMarkerRef.current = new maplibregl.Marker({ element, anchor: 'center' }).setLngLat([rdfOwn.longitude, rdfOwn.latitude]).addTo(map);
+    }
+    const element = rdfOwnMarkerRef.current.getElement();
+    element.setAttribute('aria-label', t('map.rdfOwnAria', { lat: rdfOwn.latitude.toFixed(6), lon: rdfOwn.longitude.toFixed(6) }));
+    element.setAttribute('title', t('map.rdfOwnTitle'));
+    rdfOwnMarkerRef.current.setLngLat([rdfOwn.longitude, rdfOwn.latitude]);
+  }, [styleReady, rdfOwn, t]);
 
   // Text labels as DOM markers: the inline style has no glyph source, and the
   // CSP keeps the console from fetching remote fonts for symbol layers.

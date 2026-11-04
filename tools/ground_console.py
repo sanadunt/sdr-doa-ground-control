@@ -121,6 +121,9 @@ import rdf_node_commands as cmds
 from config_command_tracker import ConfigCommandTracker, MonitorPublishError
 from data_out_reader import DataOutReader, SnapshotRequest, valid_collection_id
 from ground_gps import with_ground_gps
+import drone_video as dv
+from drone_discovery import AUTO as DRONE_AUTO, DroneService, drone_settings, is_drone_host
+from drone_link import with_drone
 from mdns_resolver import MdnsResolver
 from sdr_doa_collector import (
     DATA_OUT_HOST_IN_USE,
@@ -730,6 +733,7 @@ def _default_console_config(
     data_out_hosts: Optional[Sequence[str]] = None,
     lan_access: Optional[Dict[str, Any]] = None,
     link_mode: str = DEFAULT_LINK_MODE,
+    drone: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     return {
         "version": CONSOLE_CONFIG_VERSION,
@@ -749,6 +753,10 @@ def _default_console_config(
         # rest, but only POST /api/lan-access (admin) changes it, and the
         # console-config routes never show it.
         "lan_access": dict(lan_access) if lan_access is not None else lan.default_settings(),
+        # The SIYI drone (drone_link.py, drone_discovery.py, drone_video.py):
+        # its remote's broker ("auto" finds it), the array's turn against the
+        # drone's nose, and the host video service.
+        "drone": drone_settings(drone),
     }
 
 
@@ -817,6 +825,46 @@ def _validate_data_out(payload: Dict[str, Any], defaults: Dict[str, Any]) -> Tup
     return check_data_out_url(base_url, hosts), hosts
 
 
+DRONE_CONFIG_FIELDS = ("enabled", "host", "port", "array_heading_offset_deg", "video_enabled", "last_host")
+
+
+def _validate_drone_config(value: Any, fallback: Any) -> Dict[str, Any]:
+    """The ``drone`` block of a save: fields left out keep their value, a bad one is refused."""
+    current = drone_settings(fallback)
+    if value is None:
+        return current
+    if not isinstance(value, dict):
+        raise ValueError("drone must be a JSON object")
+    unknown = sorted(set(value) - set(DRONE_CONFIG_FIELDS))
+    if unknown:
+        raise ValueError(f"drone has unknown field(s): {', '.join(unknown)}")
+    merged = dict(current)
+    for field in ("enabled", "video_enabled"):
+        if field in value:
+            if not isinstance(value[field], bool):
+                raise ValueError(f"drone.{field} must be true or false")
+            merged[field] = value[field]
+    if "host" in value:
+        host = value["host"].strip() if isinstance(value["host"], str) else value["host"]
+        if host != DRONE_AUTO and not is_drone_host(host):
+            raise ValueError("drone.host must be auto or an IPv4/IPv6 address")
+        merged["host"] = host
+    if "port" in value:
+        merged["port"] = _config_integer(value["port"], "drone.port")
+        if not 1 <= merged["port"] <= 65535:
+            raise ValueError("drone.port must be between 1 and 65535")
+    if "array_heading_offset_deg" in value:
+        offset = value["array_heading_offset_deg"]
+        if isinstance(offset, bool) or not isinstance(offset, (int, float)) or not math.isfinite(offset) or not -180 <= offset <= 180:
+            raise ValueError("drone.array_heading_offset_deg must be a number from -180 to 180")
+        merged["array_heading_offset_deg"] = float(offset)
+    if "last_host" in value:
+        if value["last_host"] is not None and not is_drone_host(value["last_host"]):
+            raise ValueError("drone.last_host must be an IPv4/IPv6 address or null")
+        merged["last_host"] = value["last_host"]
+    return merged
+
+
 def _validate_console_config(payload: Any, fallback: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     defaults = dict(fallback or _default_console_config())
     if not isinstance(payload, dict):
@@ -846,6 +894,7 @@ def _validate_console_config(payload: Any, fallback: Optional[Dict[str, Any]] = 
     if not isinstance(fallback_lan, dict):
         fallback_lan = lan.default_settings()
     lan_access = lan.validate_settings(payload.get("lan_access", fallback_lan), fallback_lan)
+    drone = _validate_drone_config(payload.get("drone"), defaults.get("drone"))
     return _default_console_config(
         base_url,
         mqtt_host.strip(),
@@ -856,7 +905,41 @@ def _validate_console_config(payload: Any, fallback: Optional[Dict[str, Any]] = 
         data_out_hosts=data_out_hosts,
         lan_access=lan_access,
         link_mode=link_mode,
+        drone=drone,
     )
+
+
+def _drone_off_view(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """The drone block of a console without a drone link (turned off, or a test server)."""
+    return {
+        "enabled": False,
+        "state": "DISABLED",
+        "connection": "disabled",
+        "host": None,
+        "port": settings.get("port"),
+        "last_error": None,
+        "discovery": {"mode": "auto" if settings.get("host") == DRONE_AUTO else "fixed", "scanning": False,
+                      "last_scan_at_ms": None, "candidates": []},
+        "position": None, "gps": None, "attitude": None, "battery": None, "status": None, "hud": None,
+        "statustext": None, "link": None, "heading": None, "received": 0, "invalid": 0, "last_invalid": None,
+        "notes": [],
+        "array_heading_offset_deg": settings.get("array_heading_offset_deg", 0.0),
+        "video_enabled": settings.get("video_enabled", True),
+    }
+
+
+def _doa_sample_time(answer: Any) -> Optional[Tuple[str, int]]:
+    """The view and source time (ms) of the answer's DoA sample: MQTT's, else the CSV's."""
+    candidates = answer.get("doa_candidates") if isinstance(answer, dict) else None
+    if not isinstance(candidates, dict):
+        return None
+    for name in ("mqtt", "csv"):
+        candidate = candidates.get(name)
+        if isinstance(candidate, dict) and candidate.get("available") is True:
+            stamp = candidate.get("timestamp_ms")
+            if type(stamp) is int and stamp > 0:
+                return name, stamp
+    return None
 
 
 def _mqtt_connection(config: Dict[str, Any]) -> Tuple[str, int, str, str]:
@@ -3389,6 +3472,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if parsed.path == rm.ROUTE:
             self._get_mirror()
             return
+        if parsed.path == "/api/drone":
+            self._send_json(self.console_server.drone_view())
+            return
+        if parsed.path == "/api/drone/video":
+            settings = self.console_server.get_config()["drone"]
+            self._send_json(self.console_server.drone_video.health(settings["enabled"] and settings["video_enabled"]))
+            return
         if parsed.path == ram.AUDIO_ROUTE:
             self._get_mirror_audio()
             return
@@ -3725,6 +3815,70 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         self._send_json(view)
 
+    def _send_drone_error(self, status: int, code: str, message: str) -> None:
+        # Outside the Kontrol code contract, like the other route families.
+        self._send_json({"ok": False, "code": code, "error": message}, status)
+
+    def _drone_video_origin_is_valid(self) -> bool:
+        """The video player's requests come from this console's own page (the LAN view: its own Origin)."""
+        return self._same_origin_loopback_request()
+
+    def _drone_video_on(self) -> bool:
+        settings = self.console_server.get_config()["drone"]
+        return bool(settings["enabled"] and settings["video_enabled"])
+
+    def _post_drone_whep(self) -> None:
+        """POST /api/drone/video/whep: an SDP offer for the drone camera, passed to the host video service."""
+        if not self._drone_video_origin_is_valid():
+            self._discard_body(dv.MAX_SDP_BYTES)
+            self._send_drone_error(HTTPStatus.FORBIDDEN, dv.ORIGIN_REJECTED, "the drone video is played from this console's own pages only")
+            return
+        if not self._drone_video_on():
+            self._discard_body(dv.MAX_SDP_BYTES)
+            self._send_drone_error(HTTPStatus.SERVICE_UNAVAILABLE, dv.VIDEO_DISABLED, "the drone video is turned off in Configuration")
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            length = -1
+        if length > dv.MAX_SDP_BYTES:
+            self.close_connection = True
+            self._send_drone_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, dv.VIDEO_TOO_LARGE, "the offer must be at most 64 KiB")
+            return
+        if length <= 0:
+            self._send_drone_error(HTTPStatus.BAD_REQUEST, dv.VIDEO_INVALID, "the offer is empty")
+            return
+        content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        body = self.rfile.read(length)
+        if content_type != "application/sdp":
+            self._send_drone_error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, dv.VIDEO_INVALID, "the offer must be application/sdp")
+            return
+        try:
+            status, answer, headers = self.console_server.drone_video.whep_offer(body)
+        except dv.VideoError as exc:
+            self._send_drone_error(exc.status, exc.code, str(exc))
+            return
+        self.send_response(status)
+        for name, value in headers.items():
+            self.send_header(name, value)
+        self.send_header("Content-Length", str(len(answer)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(answer)
+
+    def _delete_drone_whep(self, session: str) -> None:
+        """DELETE /api/drone/video/whep/<session>: the page closed its player."""
+        if not self._drone_video_origin_is_valid():
+            self._send_drone_error(HTTPStatus.FORBIDDEN, dv.ORIGIN_REJECTED, "the drone video is played from this console's own pages only")
+            return
+        try:
+            self.console_server.drone_video.whep_delete(session)
+        except dv.VideoError as exc:
+            self._send_drone_error(exc.status, exc.code, str(exc))
+            return
+        self._send_json({"ok": True})
+
     def _send_host_power_error(self, code: str, message: str, **extra: Any) -> None:
         # Host power codes go through this helper, never the Kontrol error
         # helper, so the config-patch code contract does not count them.
@@ -3813,6 +3967,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == hp.ROUTE:
             self._post_host_power()
+            return
+        if parsed.path == dv.WHEP_ROUTE:
+            self._post_drone_whep()
             return
         if parsed.path in SAME_ORIGIN_POST_PATHS and not self._same_origin_loopback_request():
             # Rejected before the body is read, the login throttle or any
@@ -4005,6 +4162,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
+        if parsed.path.startswith(dv.WHEP_ROUTE + "/"):
+            self._delete_drone_whep(parsed.path[len(dv.WHEP_ROUTE) + 1:])
+            return
         if parsed.path.startswith("/api/receiver/") and not self._receiver_mutation_origin_is_valid():
             self._send_archive_error(HTTPStatus.FORBIDDEN, ra.ORIGIN_REJECTED, ra.MUTATION_REJECTED_MESSAGE)
             return
@@ -4251,7 +4411,13 @@ class LanConsoleHandler(ConsoleHandler):
         super().do_GET()
 
     def do_POST(self) -> None:  # noqa: N802
-        if lan.write_allowed("POST", urlsplit(self.path).path):
+        path = urlsplit(self.path).path
+        if path == dv.WHEP_ROUTE:
+            # The drone video player (owner's decision of 2026-11-03): an SDP
+            # offer to watch the camera, nothing written anywhere.
+            self._post_drone_whep()
+            return
+        if lan.write_allowed("POST", path):
             self._post_mirror_marker()
             return
         self._refuse_method()
@@ -4259,7 +4425,16 @@ class LanConsoleHandler(ConsoleHandler):
     def do_PUT(self) -> None:  # noqa: N802
         self._refuse_method()
 
-    do_DELETE = do_PUT
+    def do_DELETE(self) -> None:  # noqa: N802
+        path = urlsplit(self.path).path
+        if path.startswith(dv.WHEP_ROUTE + "/") and lan.write_allowed("DELETE", path):
+            self._delete_drone_whep(path[len(dv.WHEP_ROUTE) + 1:])
+            return
+        self._refuse_method()
+
+    def _drone_video_origin_is_valid(self) -> bool:
+        # The LAN view's own page, as for a marker command.
+        return lan.origin_matches_host(_header_values(self.headers, "Origin"), _header_values(self.headers, "Host"))
 
     def _lan_records_read_is_allowed(self) -> bool:
         """The Receiver's read rule on this listener: the LAN Host rule and Sec-Fetch-Site absent, none or same-origin."""
@@ -4743,6 +4918,8 @@ class GroundConsoleServer(ThreadingHTTPServer):
         data_out_fetcher: Optional[Callable[..., Any]] = None,
         saved_config: Optional[Dict[str, Any]] = None,
         host_power_dir: Optional[Path] = None,
+        drone_service_factory: Optional[Callable[..., Any]] = None,
+        drone_video: Optional[dv.VideoService] = None,
     ):
         self.frontend_dir = Path(frontend_dir).resolve() if frontend_dir is not None else None
         if not _is_loopback_bind(address[0]):
@@ -4867,6 +5044,14 @@ class GroundConsoleServer(ThreadingHTTPServer):
         # Restart and Shutdown of this host (host_power.py): request files for
         # the host helper; None (the default here, and in tests) turns them off.
         self.host_power = hp.HostPower(host_power_dir)
+        # The SIYI drone: a subscribe-only link to its remote's broker
+        # (drone_discovery.DroneService) and the host video service
+        # (drone_video.py). Without a factory (the default here, and in
+        # tests) there is no link and no LAN scan; main() passes one.
+        self._drone_service_factory = drone_service_factory
+        self.drone_service: Optional[Any] = None
+        self._drone_lock = threading.Lock()
+        self.drone_video = drone_video if drone_video is not None else dv.VideoService()
         # The opt-in LAN view: a second listener of this process
         # (lan_access.py). It opens below, once this loopback socket is bound.
         self.lan = LanAccessManager(self)
@@ -4887,6 +5072,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
         # An enabled LAN view opens now, unless the admin password is the
         # default or admin login is disabled; the status and the log say why.
         self.lan.apply(self._config["lan_access"])
+        self._start_drone_service()
 
     def run_retention(self) -> Optional[Dict[str, Any]]:
         """One background retention pass (no time budget beyond the per-pass item bound)."""
@@ -4908,6 +5094,12 @@ class GroundConsoleServer(ThreadingHTTPServer):
             lan_manager = getattr(self, "lan", None)
             if lan_manager is not None:
                 lan_manager.close()
+            drone_lock = getattr(self, "_drone_lock", None)
+            if drone_lock is not None:
+                with drone_lock:
+                    service, self.drone_service = self.drone_service, None
+                if service is not None:
+                    service.stop()
             # The scheduler stops before the store closes. TCPServer calls this
             # on a failed bind too, before the scheduler exists.
             scheduler = getattr(self, "_retention_scheduler", None)
@@ -4933,7 +5125,62 @@ class GroundConsoleServer(ThreadingHTTPServer):
         time, added to a copy because answers are shared between viewers.
         """
         answer = self.data_out.snapshot(base_url, request or SnapshotRequest())
-        return with_ground_gps(answer, self._ground_gps_view())
+        return with_drone(with_ground_gps(answer, self._ground_gps_view()), self.drone_view(answer))
+
+    def _start_drone_service(self) -> None:
+        """Start (or replace) the drone link with the saved drone settings."""
+        factory = self._drone_service_factory
+        if factory is None:
+            return
+        with self._config_lock:
+            settings = dict(self._config["drone"])
+        service = factory(settings, on_found=self._remember_drone_host)
+        service.start()
+        with self._drone_lock:
+            retired, self.drone_service = self.drone_service, service
+        if retired is not None:
+            retired.stop()
+
+    def _reconcile_drone(self, before: Dict[str, Any], after: Dict[str, Any]) -> None:
+        """Restart the drone link when a save changed what it connects to."""
+        keys = ("enabled", "host", "port")
+        if any(before.get(key) != after.get(key) for key in keys):
+            # Stopping waits for a running LAN search; the save answers at once.
+            threading.Thread(target=self._start_drone_service, name="drone-restart", daemon=True).start()
+
+    def _remember_drone_host(self, host: str) -> None:
+        """Save the host the search found, tried first after a restart."""
+        with self._config_lock:
+            drone = dict(self._config["drone"], last_host=host)
+            config = {**self._config, "drone": drone}
+            saved = self._saved_copy_locked(config)
+            try:
+                _save_console_config(self.config_path, saved)
+            except OSError as exc:
+                _log_warning(f"the drone host {host} could not be saved ({type(exc).__name__})")
+                return
+            self._saved_config = saved
+            self._config = config
+        print(f"[ground-console] drone remote found at {host}", flush=True)
+
+    def drone_view(self, answer: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """The ``drone`` block of /api/drone and every /api/snapshot answer.
+
+        ``heading_at_doa`` is the drone's yaw when the answer's DoA sample was
+        taken (its own clock, ``timestamp_ms``), within 1 s, or None.
+        """
+        with self._drone_lock:
+            service = self.drone_service
+        with self._config_lock:
+            settings = dict(self._config["drone"])
+        view = service.view() if service is not None else _drone_off_view(settings)
+        view["heading_at_doa"] = None
+        sample = _doa_sample_time(answer)
+        if service is not None and sample is not None:
+            found = service.heading_at(sample[1])
+            if found is not None:
+                view["heading_at_doa"] = dict(found, doa_timestamp_ms=sample[1], candidate=sample[0])
+        return view
 
     def _ground_gps_view(self) -> Optional[Dict[str, Any]]:
         """The monitor's groundstation GNSS view (ground_gps.py), or None without a monitor."""
@@ -5012,8 +5259,10 @@ class GroundConsoleServer(ThreadingHTTPServer):
             normalized = _validate_console_config({**config, "lan_access": self._config["lan_access"]}, self._config)
             saved = self._saved_copy_locked(normalized)
             _save_console_config(self.config_path, saved)
+            drone_before = self._config.get("drone") or {}
             self._saved_config = saved
             self._config = normalized
+            self._reconcile_drone(drone_before, normalized["drone"])
             return dict(self._config)
 
     def _saved_copy_locked(self, active: Dict[str, Any]) -> Dict[str, Any]:
@@ -5133,8 +5382,10 @@ class GroundConsoleServer(ThreadingHTTPServer):
                         self.config_commands.hand_over(self.mqtt_monitor, replacement)
                         retired = self.mqtt_monitor
                         self.mqtt_monitor = replacement
+                drone_before = self._config.get("drone") or {}
                 self._saved_config = saved
                 self._config = normalized
+                self._reconcile_drone(drone_before, normalized["drone"])
                 return dict(self._config), self.mqtt_monitor
         finally:
             # stop() joins the paho thread, which can take seconds while it is
@@ -5589,6 +5840,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         maps_dir=Path(args.maps_dir).expanduser() if args.maps_dir else None,
         saved_config=saved_config,
         host_power_dir=Path(args.host_power_dir).expanduser() if args.host_power_dir else None,
+        drone_service_factory=DroneService,
+        drone_video=dv.VideoService(dv.DEFAULT_API, dv.DEFAULT_WHEP_UPSTREAM),
     )
     print(f"Ground Console: http://{args.bind}:{args.port}/", flush=True)
     print(f"Version: {server.version}", flush=True)
@@ -5598,6 +5851,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"Offline map: {server.map_files.maps_dir} ({'installed, %d MB' % round(offline_map.size / 1048576) if offline_map else 'not installed'})", flush=True)
     power = server.host_power.status()
     print(f"Host power: {args.host_power_dir or 'off'} ({'ready' if power['available'] else power['reason']})", flush=True)
+    drone = server.get_config()["drone"]
+    print(
+        f"Drone: {'off' if not drone['enabled'] else drone['host'] + ':' + str(drone['port'])} "
+        f"(read only; video {'on' if drone['video_enabled'] else 'off'})",
+        flush=True,
+    )
     print(f"Read-only Data Out: {config['base_url']}", flush=True)
     if ADMIN_PASSWORD == DEFAULT_ADMIN_PASSWORD:
         print(

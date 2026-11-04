@@ -1,0 +1,548 @@
+#!/usr/bin/env python3
+# drone-video-supervisor (packaging/drone-video): the drone camera for the console.
+#
+# Runs mediamtx as its child. mediamtx pulls the SIYI camera (HEVC 1280x720
+# 30 fps, rtsp://<drone>:8554/main.264, always over TCP) into the path "raw",
+# and an ffmpeg it starts turns that into H.264 baseline on the path "drone",
+# which browsers read over WebRTC (WHEP, TCP 8889 for signalling, UDP 8189 for
+# media). The SDR-DoA Ground Console reads its state from the mediamtx API on
+# 127.0.0.1:9997 and proxies WHEP, so a page never talks to 8889 itself.
+# Python 3 standard library only.
+#
+#   drone-video-supervisor run [--config FILE]            # the service
+#   drone-video-supervisor check-config [--config FILE]
+#   drone-video-supervisor print-config [--config FILE]   # the mediamtx config it would write
+#
+# With CAMERA_URL=auto the camera's host is the drone host the console found
+# (GET CONSOLE_URL/api/drone, every 5 s). A new host rewrites the config and
+# restarts mediamtx; a mediamtx that exits is started again (2 s, doubling to
+# 30 s). SIGTERM stops mediamtx (terminate, 5 s, kill) and exits 0.
+"""Run mediamtx and ffmpeg to serve the drone camera as H.264 over WebRTC."""
+
+from __future__ import annotations
+
+import argparse
+import ipaddress
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.parse
+import urllib.request
+from typing import Callable, Dict, List, Optional, Set
+
+DEFAULT_CONFIG = "/etc/drone-video/drone-video.conf"
+DEFAULTS = {
+    "CAMERA_URL": "auto",
+    "CONSOLE_URL": "http://127.0.0.1:8787",
+    "ENCODER": "auto",
+    "BITRATE": "2500k",
+    "WEBRTC_ADDITIONAL_HOSTS": "",
+    "MEDIAMTX_BIN": "mediamtx",
+    "FFMPEG_BIN": "ffmpeg",
+    "RUNTIME_DIR": "",
+}
+ENCODERS = ("auto", "vaapi", "x264", "nvenc", "v4l2m2m", "videotoolbox")
+ENCODER_ARGS = {
+    "videotoolbox": ["-c:v", "h264_videotoolbox", "-realtime", "1", "-profile:v", "baseline"],
+    "x264": ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-profile:v", "baseline",
+             "-pix_fmt", "yuv420p"],
+    "vaapi": ["-vaapi_device", "/dev/dri/renderD128", "-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi",
+              "-profile:v", "constrained_baseline"],
+    "nvenc": ["-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ll", "-profile:v", "baseline"],
+    "v4l2m2m": ["-c:v", "h264_v4l2m2m", "-pix_fmt", "yuv420p"],
+}
+RENDER_NODE = "/dev/dri/renderD128"
+CAMERA_PORT = 8554
+CAMERA_PATH = "/main.264"
+RTSP_ADDRESS = "127.0.0.1:8654"
+RAW_URL = "rtsp://127.0.0.1:8654/raw"
+DRONE_URL = "rtsp://127.0.0.1:8654/drone"
+WEBRTC_ADDRESS = ":8889"
+WEBRTC_UDP_ADDRESS = ":8189"
+API_ADDRESS = "127.0.0.1:9997"
+CONFIG_NAME = "mediamtx.yml"
+BITRATE_RE = re.compile(r"^[1-9][0-9]{0,5}[kM]$")
+# mediamtx splits runOnInit on spaces itself (no shell): a program name or path
+# without spaces or shell characters.
+BIN_RE = re.compile(r"^[A-Za-z0-9/._+-]{1,256}$")
+PATH_RE = re.compile(r"^/[A-Za-z0-9/._+-]{0,255}$")
+HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?$")
+ADDITIONAL_HOSTS_MAX = 16
+CONSOLE_BODY_MAX = 64 * 1024
+CONSOLE_POLL_S = 5.0
+BACKOFF_FIRST_S = 2.0
+BACKOFF_MAX_S = 30.0
+# A child that ran this long without exiting resets the backoff.
+BACKOFF_RESET_S = 60.0
+STOP_WAIT_S = 5.0
+STEP_SLEEP_S = 0.5
+EX_CONFIG = 78
+
+
+def log(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Settings
+
+
+class ConfigError(ValueError):
+    pass
+
+
+def _unquote(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        return value[1:-1]
+    return value
+
+
+def read_config_text(text: str) -> Dict[str, str]:
+    """NAME=VALUE lines, read literally (no $ expansion); unknown names are refused."""
+    values = dict(DEFAULTS)
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, sep, value = line.partition("=")
+        name = name.strip()
+        if not sep or not re.match(r"^[A-Z_]+$", name):
+            raise ConfigError(f"line {number}: expected NAME=VALUE")
+        if name not in DEFAULTS:
+            raise ConfigError(f"line {number}: unknown setting {name}")
+        values[name] = _unquote(value.strip())
+    return values
+
+
+def camera_url_setting(value: str) -> Optional[str]:
+    """None for auto, else an rtsp:// URL with a host."""
+    if value == "auto":
+        return None
+    if any(ord(char) <= 32 or ord(char) == 127 for char in value) or len(value) > 512:
+        raise ConfigError(f"CAMERA_URL must be auto or an rtsp:// URL: {value!r}")
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        host = parsed.hostname
+        parsed.port  # noqa: B018 - raises on a bad port
+    except ValueError:
+        raise ConfigError(f"CAMERA_URL must be auto or an rtsp:// URL: {value!r}") from None
+    if parsed.scheme != "rtsp" or not host:
+        raise ConfigError(f"CAMERA_URL must be auto or an rtsp:// URL: {value!r}")
+    return value
+
+
+def console_url_setting(value: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        host = parsed.hostname
+        parsed.port  # noqa: B018 - raises on a bad port
+    except ValueError:
+        host = None
+    else:
+        if parsed.scheme != "http" or parsed.path not in ("", "/") or parsed.query or parsed.fragment \
+                or parsed.username or parsed.password:
+            host = None
+    if not host:
+        raise ConfigError(f"CONSOLE_URL must be http://HOST[:PORT]: {value!r}")
+    return value.rstrip("/")
+
+
+def additional_hosts_setting(value: str) -> List[str]:
+    hosts: List[str] = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            host = str(ipaddress.ip_address(item))
+        except ValueError:
+            if not HOSTNAME_RE.match(item):
+                raise ConfigError(f"WEBRTC_ADDITIONAL_HOSTS: not an IP address or host name: {item!r}") from None
+            host = item.lower().rstrip(".")
+        if host not in hosts:
+            hosts.append(host)
+    if len(hosts) > ADDITIONAL_HOSTS_MAX:
+        raise ConfigError(f"WEBRTC_ADDITIONAL_HOSTS: at most {ADDITIONAL_HOSTS_MAX} hosts")
+    return hosts
+
+
+def validate_config(values: Dict[str, str], environ: Optional[Dict[str, str]] = None) -> Dict[str, object]:
+    environ = os.environ if environ is None else environ  # type: ignore[assignment]
+    camera = camera_url_setting(values["CAMERA_URL"])
+    console = console_url_setting(values["CONSOLE_URL"])
+    encoder = values["ENCODER"]
+    if encoder not in ENCODERS:
+        raise ConfigError(f"ENCODER must be one of {', '.join(ENCODERS)}: {encoder!r}")
+    bitrate = values["BITRATE"]
+    if not BITRATE_RE.match(bitrate):
+        raise ConfigError(f"BITRATE must be a number with k or M, such as 2500k: {bitrate!r}")
+    hosts = additional_hosts_setting(values["WEBRTC_ADDITIONAL_HOSTS"])
+    for name in ("MEDIAMTX_BIN", "FFMPEG_BIN"):
+        if not BIN_RE.match(values[name]):
+            raise ConfigError(f"{name} must be a program name or path without spaces: {values[name]!r}")
+    runtime = values["RUNTIME_DIR"] or environ.get("RUNTIME_DIRECTORY", "") or "/run/drone-video"
+    # systemd may list several directories separated by ':'; the first is ours.
+    runtime = runtime.split(":")[0]
+    if not PATH_RE.match(runtime):
+        raise ConfigError(f"RUNTIME_DIR must be an absolute path: {runtime!r}")
+    return {"camera_url": camera, "console_url": console, "encoder": encoder, "bitrate": bitrate,
+            "additional_hosts": hosts, "mediamtx_bin": values["MEDIAMTX_BIN"],
+            "ffmpeg_bin": values["FFMPEG_BIN"], "runtime_dir": runtime}
+
+
+def default_config_path() -> str:
+    return os.environ.get("DRONE_VIDEO_CONFIG") or DEFAULT_CONFIG
+
+
+def load_config(path: Optional[str]) -> Dict[str, object]:
+    """The settings of PATH; a missing default file means the defaults."""
+    text = ""
+    if path is not None:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                text = handle.read(65536)
+        except FileNotFoundError:
+            if path != DEFAULT_CONFIG:
+                raise ConfigError(f"{path} does not exist") from None
+            log(f"{path} does not exist; using the defaults")
+        except (OSError, UnicodeDecodeError) as error:
+            raise ConfigError(f"cannot read {path}: {error}") from None
+    return validate_config(read_config_text(text))
+
+
+# ---------------------------------------------------------------------------
+# mediamtx configuration
+
+
+def transcode_command(encoder: str, bitrate: str, ffmpeg_bin: str) -> List[str]:
+    return [ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-rtsp_transport", "tcp", "-i", RAW_URL, "-an",
+            *ENCODER_ARGS[encoder], "-b:v", bitrate, "-g", "30", "-bf", "0",
+            "-f", "rtsp", "-rtsp_transport", "tcp", DRONE_URL]
+
+
+def build_config(camera_url: Optional[str], encoder: str, bitrate: str, additional_hosts: List[str],
+                 ffmpeg_bin: str) -> str:
+    """The mediamtx configuration as JSON text, which is valid YAML."""
+    if encoder not in ENCODER_ARGS:
+        raise ValueError(f"no encoder {encoder!r}")
+    raw: Dict[str, object] = {}
+    if camera_url is not None:
+        raw = {"source": camera_url, "rtspTransport": "tcp", "sourceOnDemand": False}
+    config = {
+        "logLevel": "warn",
+        "rtspAddress": RTSP_ADDRESS,
+        "rtspTransports": ["tcp"],
+        "webrtc": True,
+        "webrtcAddress": WEBRTC_ADDRESS,
+        "webrtcLocalUDPAddress": WEBRTC_UDP_ADDRESS,
+        "webrtcAllowOrigins": ["*"],
+        "webrtcAdditionalHosts": list(additional_hosts),
+        "api": True,
+        "apiAddress": API_ADDRESS,
+        "hls": False,
+        "rtmp": False,
+        "srt": False,
+        "moq": False,
+        "metrics": False,
+        "playback": False,
+        "pprof": False,
+        "paths": {
+            "raw": raw,
+            "drone": {
+                "runOnInit": " ".join(transcode_command(encoder, bitrate, ffmpeg_bin)),
+                "runOnInitRestart": True,
+            },
+        },
+    }
+    return json.dumps(config, indent=2) + "\n"
+
+
+def ffmpeg_encoders(ffmpeg_bin: str) -> Set[str]:
+    """The encoder names `ffmpeg -encoders` lists; empty when it cannot run."""
+    try:
+        result = subprocess.run([ffmpeg_bin, "-hide_banner", "-encoders"], stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    names: Set[str] = set()
+    started = False
+    for line in result.stdout.decode("utf-8", "replace").splitlines():
+        # The list follows a "------" line; each entry is "FLAGS name description".
+        if not started:
+            started = line.strip().startswith("---")
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and re.match(r"^[A-Z.]{6}$", parts[0]):
+            names.add(parts[1])
+    return names
+
+
+def pick_encoder(requested: str, has_render_node: bool, ffmpeg_encoders: Set[str], platform: str) -> str:
+    """An explicit ENCODER as it is; auto: VideoToolbox on macOS, VAAPI on a render node, else libx264."""
+    if requested != "auto":
+        return requested
+    if platform == "darwin" and "h264_videotoolbox" in ffmpeg_encoders:
+        return "videotoolbox"
+    if has_render_node and "h264_vaapi" in ffmpeg_encoders:
+        return "vaapi"
+    return "x264"
+
+
+# ---------------------------------------------------------------------------
+# The console
+
+
+def camera_url_from_console(body: object) -> Optional[str]:
+    """rtsp://HOST:8554/main.264 from the console's /api/drone answer, HOST an IP literal."""
+    if not isinstance(body, dict):
+        return None
+    host = body.get("host")
+    if host is None and isinstance(body.get("drone"), dict):
+        host = body["drone"].get("host")
+    if not isinstance(host, str) or "%" in host:
+        return None
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    if address.is_unspecified or address.is_multicast:
+        return None
+    if address.version == 6:
+        return f"rtsp://[{address}]:{CAMERA_PORT}{CAMERA_PATH}"
+    return f"rtsp://{address}:{CAMERA_PORT}{CAMERA_PATH}"
+
+
+def fetch_console_drone(console_url: str, timeout: float = 2.0) -> Optional[dict]:
+    """GET CONSOLE_URL/api/drone, without a proxy; None on any failure."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    request = urllib.request.Request(console_url.rstrip("/") + "/api/drone",
+                                     headers={"Accept": "application/json"})
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            if response.status != 200:
+                return None
+            data = response.read(CONSOLE_BODY_MAX + 1)
+        if len(data) > CONSOLE_BODY_MAX:
+            return None
+        body = json.loads(data.decode("utf-8"))
+    except Exception:  # noqa: BLE001 - any failure is "not known now"
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def redact(url: Optional[str]) -> str:
+    """A camera URL for the log, without user and password."""
+    if url is None:
+        return "none"
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return "rtsp://?"
+    if parsed.username is None and parsed.password is None:
+        return url
+    host = parsed.netloc.rsplit("@", 1)[-1]
+    return urllib.parse.urlunsplit((parsed.scheme, "***@" + host, parsed.path, parsed.query, parsed.fragment))
+
+
+# ---------------------------------------------------------------------------
+# The supervisor
+
+
+def write_atomic(path: str, text: str) -> None:
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(prefix=".mediamtx-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+class Supervisor:
+    """mediamtx as a child: started, restarted on a new camera or an exit, stopped on request."""
+
+    def __init__(self, settings: Dict[str, object], *, monotonic: Callable[[], float] = time.monotonic,
+                 popen: Callable[..., object] = subprocess.Popen,
+                 fetch: Callable[[str], Optional[dict]] = fetch_console_drone,
+                 encoders: Optional[Set[str]] = None, has_render_node: Optional[bool] = None,
+                 platform: str = sys.platform, logger: Callable[[str], None] = log,
+                 write: Callable[[str, str], None] = write_atomic) -> None:
+        self.settings = settings
+        self.monotonic = monotonic
+        self.popen = popen
+        self.fetch = fetch
+        self.log = logger
+        self.write = write
+        self.fixed_camera: Optional[str] = settings["camera_url"]  # type: ignore[assignment]
+        self.console_url = str(settings["console_url"])
+        self.config_path = os.path.join(str(settings["runtime_dir"]), CONFIG_NAME)
+        requested = str(settings["encoder"])
+        if requested == "auto":
+            if encoders is None:
+                encoders = ffmpeg_encoders(str(settings["ffmpeg_bin"]))
+            if has_render_node is None:
+                has_render_node = os.path.exists(RENDER_NODE)
+            if not encoders:
+                self.log(f"{settings['ffmpeg_bin']} -encoders gave no list: is ffmpeg installed?")
+        self.encoder = pick_encoder(requested, bool(has_render_node), encoders or set(), platform)
+        self.camera_url: Optional[str] = self.fixed_camera
+        self.child: Optional[object] = None
+        self.child_camera: Optional[str] = None
+        self.child_started = 0.0
+        self.next_poll = 0.0
+        self.next_start = 0.0
+        self.backoff = BACKOFF_FIRST_S
+        self.starts = 0
+        self.console_known: Optional[bool] = None
+        self.log(f"encoder {self.encoder} ({requested}), bitrate {settings['bitrate']}, "
+                 f"camera {'auto from ' + self.console_url if self.fixed_camera is None else redact(self.fixed_camera)}")
+
+    def resolve_camera(self, now: float) -> None:
+        if self.fixed_camera is not None or now < self.next_poll:
+            return
+        self.next_poll = now + CONSOLE_POLL_S
+        body = self.fetch(self.console_url)
+        url = camera_url_from_console(body) if body is not None else None
+        known = url is not None
+        if known != self.console_known:
+            if body is None:
+                self.log(f"console {self.console_url}: no answer from /api/drone")
+            elif not known:
+                self.log("console: no drone host yet")
+            self.console_known = known
+        if url is not None and url != self.camera_url:
+            self.log(f"camera {redact(self.camera_url)} -> {redact(url)}")
+            self.camera_url = url
+
+    def start_child(self, now: float) -> None:
+        text = build_config(self.camera_url, self.encoder, str(self.settings["bitrate"]),
+                            list(self.settings["additional_hosts"]), str(self.settings["ffmpeg_bin"]))  # type: ignore[call-overload]
+        self.write(self.config_path, text)
+        self.child_camera = self.camera_url
+        self.child_started = now
+        self.starts += 1
+        try:
+            self.child = self.popen([str(self.settings["mediamtx_bin"]), self.config_path])
+        except OSError as error:
+            self.child = None
+            self.log(f"cannot start {self.settings['mediamtx_bin']}: {error}; again in {self.backoff:g} s")
+            self.next_start = now + self.backoff
+            self.backoff = min(self.backoff * 2, BACKOFF_MAX_S)
+            return
+        self.log(f"mediamtx started (pid {getattr(self.child, 'pid', '?')}), camera {redact(self.camera_url)}")
+
+    def stop_child(self) -> Optional[int]:
+        child = self.child
+        self.child = None
+        if child is None:
+            return None
+        if child.poll() is None:  # type: ignore[attr-defined]
+            try:
+                child.terminate()  # type: ignore[attr-defined]
+            except OSError:
+                pass
+            try:
+                return child.wait(timeout=STOP_WAIT_S)  # type: ignore[attr-defined]
+            except subprocess.TimeoutExpired:
+                self.log(f"mediamtx did not stop in {STOP_WAIT_S:g} s; killed")
+                child.kill()  # type: ignore[attr-defined]
+                return child.wait()  # type: ignore[attr-defined]
+        return child.poll()  # type: ignore[attr-defined]
+
+    def step(self) -> None:
+        """One turn: follow the camera host, keep mediamtx running with the config for it."""
+        now = self.monotonic()
+        self.resolve_camera(now)
+        if self.child is not None:
+            code = self.child.poll()  # type: ignore[attr-defined]
+            if code is None and self.camera_url != self.child_camera:
+                self.log("camera changed: restarting mediamtx")
+                self.stop_child()
+                self.next_start = now
+                self.backoff = BACKOFF_FIRST_S
+            elif code is not None:
+                self.child = None
+                if now - self.child_started >= BACKOFF_RESET_S:
+                    self.backoff = BACKOFF_FIRST_S
+                self.log(f"mediamtx exited with {code}; again in {self.backoff:g} s")
+                self.next_start = now + self.backoff
+                self.backoff = min(self.backoff * 2, BACKOFF_MAX_S)
+            elif now - self.child_started >= BACKOFF_RESET_S:
+                self.backoff = BACKOFF_FIRST_S
+        if self.child is None and now >= self.next_start:
+            self.start_child(now)
+
+    def run(self, should_stop: Callable[[], bool], sleep: Callable[[float], None] = time.sleep) -> None:
+        try:
+            while not should_stop():
+                self.step()
+                sleep(STEP_SLEEP_S)
+        finally:
+            code = self.stop_child()
+            if code is not None:
+                self.log(f"mediamtx stopped ({code})")
+
+
+# ---------------------------------------------------------------------------
+# Command line
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(prog="drone-video-supervisor", description=__doc__)
+    parser.add_argument("command", nargs="?", default="run", choices=("run", "check-config", "print-config"))
+    parser.add_argument("--config", default=None,
+                        help=f"settings file (default $DRONE_VIDEO_CONFIG or {DEFAULT_CONFIG} when it exists)")
+    args = parser.parse_args(argv)
+    try:
+        settings = load_config(args.config if args.config is not None else default_config_path())
+    except ConfigError as error:
+        log(f"drone-video-supervisor: {error}")
+        return EX_CONFIG
+
+    if args.command == "check-config":
+        print(f"CAMERA_URL={'auto' if settings['camera_url'] is None else redact(settings['camera_url'])}")  # type: ignore[arg-type]
+        print(f"CONSOLE_URL={settings['console_url']}")
+        print(f"ENCODER={settings['encoder']}")
+        print(f"BITRATE={settings['bitrate']}")
+        print(f"WEBRTC_ADDITIONAL_HOSTS={','.join(settings['additional_hosts'])}")  # type: ignore[arg-type]
+        print(f"MEDIAMTX_BIN={settings['mediamtx_bin']}")
+        print(f"FFMPEG_BIN={settings['ffmpeg_bin']}")
+        print(f"RUNTIME_DIR={settings['runtime_dir']}")
+        return 0
+
+    if args.command == "print-config":
+        supervisor = Supervisor(settings, logger=log, fetch=fetch_console_drone)
+        supervisor.resolve_camera(supervisor.monotonic())
+        sys.stdout.write(build_config(supervisor.camera_url, supervisor.encoder, str(settings["bitrate"]),
+                                      list(settings["additional_hosts"]), str(settings["ffmpeg_bin"])))  # type: ignore[call-overload]
+        return 0
+
+    stop = {"flag": False}
+
+    def request_stop(signum: int, frame: object) -> None:
+        stop["flag"] = True
+
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+    supervisor = Supervisor(settings)
+    supervisor.run(lambda: stop["flag"])
+    log("stopped")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

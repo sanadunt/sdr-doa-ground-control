@@ -1,0 +1,41 @@
+# Settings of drone-video-supervisor on the groundstation (packaging/drone-video).
+# Installed as /etc/drone-video/drone-video.conf (owner root, mode 0644); the
+# installer writes it once and keeps it on every later run. Change it with
+# sudoedit, check it with: drone-video-supervisor check-config --config /etc/drone-video/drone-video.conf
+# then apply it with: sudo systemctl restart drone-video.service
+#
+# NAME=VALUE per line, read literally (no $ expansion). A line left out keeps
+# the default shown here. An unknown name or a bad value stops the service
+# (exit 78) until it is fixed.
+
+# The drone camera (SIYI, HEVC 1280x720 30 fps), always read over TCP. auto
+# takes the drone host the console found (GET CONSOLE_URL/api/drone, every
+# 5 s) as rtsp://<host>:8554/main.264; or an rtsp:// URL of its own.
+CAMERA_URL=auto
+
+# The SDR-DoA Ground Console on this host (http://HOST[:PORT]), asked for the
+# drone host when CAMERA_URL is auto. No proxy is used.
+CONSOLE_URL=http://127.0.0.1:8787
+
+# The H.264 encoder: auto, vaapi (Intel/AMD GPU, /dev/dri/renderD128), x264
+# (libx264 on the CPU, about one core for 720p30), nvenc (NVIDIA), v4l2m2m
+# (Raspberry Pi and other V4L2 encoders) or videotoolbox (macOS). auto picks
+# videotoolbox on macOS, vaapi when the render node and ffmpeg's h264_vaapi
+# are there, else x264.
+ENCODER=auto
+
+# Video bit rate of the H.264 stream: a number with k or M.
+BITRATE=2500k
+
+# Addresses the WebRTC answer offers to browsers besides the ones mediamtx
+# finds itself: comma separated IP addresses or host names, such as this
+# host's LAN address when tablets do not reach it otherwise. Empty: none.
+WEBRTC_ADDITIONAL_HOSTS=
+
+# The programs, a name on PATH or an absolute path.
+MEDIAMTX_BIN=mediamtx
+FFMPEG_BIN=ffmpeg
+
+# Where mediamtx.yml is written. Empty: $RUNTIME_DIRECTORY of the service
+# (/run/drone-video), else /run/drone-video.
+RUNTIME_DIR=

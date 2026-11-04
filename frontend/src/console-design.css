@@ -569,6 +569,11 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 .rdf-heading-marker { width: 76px; height: 76px; pointer-events: none; filter: drop-shadow(0 0 1px #ffffff) drop-shadow(0 0 1px #ffffff) drop-shadow(0 1px 2px rgba(0, 0, 0, .5)); }
 .rdf-heading-marker::before { position: absolute; top: 0; left: 50%; width: 14px; height: 12px; margin-left: -7px; background: #6c45d8; clip-path: polygon(50% 0, 100% 100%, 0 100%); content: ''; }
 .rdf-heading-marker.is-held { opacity: .65; }
+/* The drone: an orange ring around the station marker and a pointer on its nose heading (the RDF-SDR heading is the violet one, further out). */
+.ov-drone-marker { width: 58px; height: 58px; pointer-events: none; filter: drop-shadow(0 0 1px #ffffff) drop-shadow(0 1px 2px rgba(0, 0, 0, .5)); }
+.ov-drone-marker::after { position: absolute; inset: 9px; border: 3px solid #f08a24; border-radius: 50%; content: ''; }
+.ov-drone-marker.has-heading::before { position: absolute; top: 0; left: 50%; width: 16px; height: 11px; margin-left: -8px; background: #f08a24; clip-path: polygon(50% 0, 100% 100%, 0 100%); content: ''; }
+.ov-rdf-own-marker { width: 14px; height: 14px; border: 2.5px solid #a78bfa; border-radius: 50%; background: transparent; box-shadow: 0 0 0 1px rgba(0, 0, 0, .45); }
 .rdf-heading-marker.is-held::before { background: #8d99a6; }
 .doa-hover-popup .maplibregl-popup-content { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); box-shadow: 0 6px 18px rgba(0, 0, 0, .3); pointer-events: none; }
 .doa-hover-popup { pointer-events: none; }

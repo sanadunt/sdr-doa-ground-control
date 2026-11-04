@@ -15,6 +15,7 @@ export function coordinateSourceKey(source: MapCoordinate['source'] | undefined)
   if (source === 'SIMULATION') return 'map.sourceSimulation';
   if (source === 'FALLBACK') return 'map.sourceFallback';
   if (source === 'MANUAL') return 'map.sourceManual';
+  if (source === 'DRONE') return 'map.sourceDrone';
   return 'map.sourceStation';
 }
 

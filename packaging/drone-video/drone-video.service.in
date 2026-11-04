@@ -1,0 +1,45 @@
+# Written by the drone-video installer (packaging/drone-video/install.sh).
+# Runs mediamtx and ffmpeg: the drone camera (RTSP over TCP) as H.264 over
+# WebRTC for the SDR-DoA Ground Console, which proxies WHEP.
+# Settings: @CONFIG@. Journal: journalctl -u drone-video
+#
+# Firewall: open the WebRTC ports for LAN tablets on this host: UDP 8189 (the
+# media, always straight to this host) and TCP 8889 (WHEP signalling, for a
+# player that reaches mediamtx directly; the console's Dashboard goes through
+# /api/drone/video/whep), such as: sudo ufw allow 8189/udp && sudo ufw allow 8889/tcp
+# RTSP 127.0.0.1:8654 and the API 127.0.0.1:9997 stay on loopback.
+[Unit]
+Description=Drone video (mediamtx, SDR-DoA Ground Console)
+Documentation=file://@SHARE_DIR@/README.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=@PYTHON@ -I @BIN_DIR@/drone-video-supervisor run --config @CONFIG@
+Restart=always
+RestartSec=3
+# A config error exits 78: restarting would not fix it.
+RestartPreventExitStatus=78
+SyslogIdentifier=drone-video
+# Not root: a user of its own for each run, in the groups that own the GPU's
+# render node (VAAPI) and video devices (V4L2). /dev stays visible for them.
+DynamicUser=yes
+SupplementaryGroups=render video
+RuntimeDirectory=drone-video
+RuntimeDirectoryMode=0700
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

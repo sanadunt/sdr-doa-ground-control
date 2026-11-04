@@ -13,6 +13,8 @@ export interface OverviewPanels {
   spectrum: boolean;
   /** Kontrol (MQTT config patch) panel (right column). */
   control: boolean;
+  /** The drone's camera and flight telemetry (right column, first). */
+  drone: boolean;
   /** The node card shows only its two-line summary. */
   nodeCollapsed: boolean;
 }
@@ -26,10 +28,11 @@ export const DEFAULT_OVERVIEW_PANELS: Readonly<OverviewPanels> = Object.freeze({
   polar: true,
   spectrum: true,
   control: false,
+  drone: true,
   nodeCollapsed: true,
 });
 
-const KEYS: ReadonlyArray<keyof OverviewPanels> = ['layers', 'polar', 'spectrum', 'control', 'nodeCollapsed'];
+const KEYS: ReadonlyArray<keyof OverviewPanels> = ['layers', 'polar', 'spectrum', 'control', 'drone', 'nodeCollapsed'];
 
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>;
 

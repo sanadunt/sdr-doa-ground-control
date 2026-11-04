@@ -120,6 +120,19 @@ GROUND_GPS_FILES = tuple(
         ("ground-gps.service.in", False),
     )
 )
+# The drone camera's host video service (mediamtx + ffmpeg, outside Docker).
+DRONE_VIDEO_DIR = "packaging/drone-video"
+DRONE_VIDEO_FILES = tuple(
+    (f"{DRONE_VIDEO_DIR}/{name}", f"{DRONE_VIDEO_DIR}/{name}", executable)
+    for name, executable in (
+        ("README.md", False),
+        ("install.sh", True),
+        ("uninstall.sh", True),
+        ("drone-video-supervisor", True),
+        ("drone-video.conf.example", False),
+        ("drone-video.service.in", False),
+    )
+)
 CONSOLE_APP_FILES = (
     ("packaging/console/requirements.txt", "packaging/console/requirements.txt", False),
     ("packaging/console/set_admin_password.py", "packaging/console/set_admin_password.py", True),
@@ -141,7 +154,7 @@ CONSOLE_RELEASE_FILES = (
     (".env.example", ".env.example", False),
     ("QUICKSTART.md", "QUICKSTART.md", False),
     (MANUAL_PDF, MANUAL_PDF, False),
-) + GROUND_LINK_FILES + HOST_POWER_FILES + GROUND_GPS_FILES
+) + GROUND_LINK_FILES + HOST_POWER_FILES + GROUND_GPS_FILES + DRONE_VIDEO_FILES
 # Inputs of a full build; a dirty copy would leak into frontend/dist.
 BUILD_INPUTS = (
     "frontend/index.html",

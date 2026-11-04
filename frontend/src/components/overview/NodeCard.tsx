@@ -11,6 +11,9 @@ import { engineSquelchDb } from '../../lib/configPatch';
 import { distanceAndBearing, groundGpsState, groundGpsSummary, snapshotGroundGps, stationPositionLive } from '../../lib/groundGps';
 import type { GeoOrigin } from '../../lib/doaGeometry';
 import { coordinateSourceKey } from '../DoaReadout';
+import { resolveStationCoordinate } from '../../lib/map';
+import { DRONE_HEADING_GAP_WARN_DEG, DRONE_POSITION_GAP_WARN_M, droneArrayHeadingNow, droneStation, headingGap, positionGap, snapshotDrone } from '../../lib/droneLink';
+import { formatDistance } from '../../lib/overlayPalette';
 import { Icon } from '../ui';
 
 type ChipTone = 'good' | 'warn' | 'bad' | 'neutral' | 'info';
@@ -170,6 +173,37 @@ export function groundRow(
 }
 
 /**
+ * The drone and the RDF-SDR it carries, side by side: where each one's GPS
+ * puts them and where each one's compass points (the drone's yaw turned by the
+ * array's offset). Both stay visible so a fault in either shows; a gap above
+ * 25 m or 15° is marked. None without a drone in the answer.
+ */
+export function droneCompareRows(snapshot: TelemetrySnapshot | null, localSnapshotFresh: boolean, t: Translate): NodeRow[] {
+  const view = snapshotDrone(localSnapshotFresh ? snapshot : null);
+  if (!view || view.state === 'DISABLED' || view.state === 'NO_DATA') return [];
+  const rows: NodeRow[] = [];
+  const drone = droneStation(view);
+  const own = resolveStationCoordinate(localSnapshotFresh ? snapshot : null);
+  const gap = positionGap(drone, own);
+  const gpsText = gap
+    ? t('node.gpsGapValue', { gap: formatDistance(gap.distanceM) })
+    : t('node.gpsPair', { drone: drone ? 'FIX' : '—', rdf: own ? 'FIX' : '—' });
+  rows.push([t('node.droneGps'), gpsText, gap && gap.distanceM > DRONE_POSITION_GAP_WARN_M ? 'is-warn' : gap ? 'is-good' : undefined, true]);
+  const droneHeading = droneArrayHeadingNow(view);
+  const nav = snapshotNav(localSnapshotFresh ? snapshot : null);
+  const rdfHeading = nav && nav.compass_state === 'OK' && typeof nav.heading_deg === 'number' && Number.isFinite(nav.heading_deg) ? nav.heading_deg : null;
+  const turn = headingGap(droneHeading, rdfHeading);
+  const fmtDeg = (value: number | null) => (value === null ? '—' : `${value.toFixed(1)}°`);
+  rows.push([
+    t('node.droneHeading'),
+    t('node.headingPair', { drone: fmtDeg(droneHeading), rdf: fmtDeg(rdfHeading), gap: turn === null ? '—' : `${turn > 0 ? '+' : ''}${turn.toFixed(1)}°` }),
+    turn !== null && Math.abs(turn) > DRONE_HEADING_GAP_WARN_DEG ? 'is-warn' : turn !== null ? 'is-good' : undefined,
+    true,
+  ]);
+  return rows;
+}
+
+/**
  * Collapsible node card in the right column. The two summary lines always
  * render, including the station position, so the position stays visible
  * without opening the card.
@@ -266,6 +300,7 @@ export function NodeCard({
     [t('node.adc'), dataOutValue(summary.adc === 'N/A', summary.adc), summary.adc === 'OK' ? 'is-good' : summary.adc === 'OVERDRIVE' ? 'is-bad' : undefined],
     ...dataOutRows,
     ...navRows(snapshotNav(snapshot), t),
+    ...droneCompareRows(snapshot, localSnapshotFresh, t),
     ...groundRow(snapshot, groundGpsFresh ?? localSnapshotFresh, ground, coordinate, positionHeld, t),
   ];
 

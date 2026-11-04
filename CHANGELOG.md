@@ -2,6 +2,29 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.13.0
+
+Rilis minor: tidak ada yang dihapus. Telemetry dan video drone SIYI (yang membawa RDF-SDR) masuk ke console. GPS dan kompas drone diutamakan, sedangkan GPS dan kompas RDF-SDR tetap tampil di sampingnya.
+
+- **Telemetry drone.** Console berlangganan ke broker MQTT SIYI Bridge di remote MK32 (port 1883), hanya delapan topic yang disebut namanya (`drone/status`, `battery`, `gps`, `position`, `attitude`, `hud`, `statustext`, `bridge/link`). Console tidak pernah publish ke drone.
+  - IP remote dicari sendiri di LAN (Konfigurasi → Drone, "Cari di LAN"). Broker tanpa `bridge/link` milik SIYI Bridge, termasuk broker groundstation sendiri, ditolak. Bisa juga diisi IP tetap.
+  - Dashboard punya panel **Drone** (toggle baru di top bar): video kamera, ARMED, mode, GPS/RTK, ketinggian, kecepatan, heading, roll/pitch, baterai, dan status remote.
+  - Peta menampilkan cincin oranye drone dengan penunjuk arah hidungnya, serta jejak terbangnya. Bila GPS RDF-SDR berbeda lebih dari 5 m, posisinya tampil sebagai cincin ungu kecil dengan garis ke drone.
+- **GPS dan kompas mengutamakan drone.**
+  - Posisi stasiun diambil dari GPS drone (fix 3D ke atas; RTK tertulis). Bila drone tidak punya fix, kembali ke GPS RDF-SDR seperti sebelumnya.
+  - Bearing DoA diputar dengan yaw drone *pada saat sampel DoA diambil* (paling jauh 1 detik dari sampel yaw), ditambah "Putaran array dari hidung drone" di Konfigurasi. Tanpa yaw yang cocok waktunya, heading RDF-SDR dipakai seperti sebelumnya.
+  - Kartu RDF-SDR menampilkan selisih GPS dan heading drone dibanding RDF-SDR (peringatan di atas 25 m atau 15°).
+  - Konfigurasi → GPS & Kompas punya sakelar "Utamakan GPS drone" dan "Utamakan yaw drone" (bawaannya nyala). Pilihan MANUAL tetap di atas semuanya.
+  - Raspberry tetap mengirim GPS dan kompasnya sendiri; belum ada perubahan di sisi RDF-SDR.
+- **Video kamera drone.** Service baru di host, `packaging/drone-video/` (di luar Docker, ikut di tarball console):
+  - mediamtx dan ffmpeg mengubah HEVC kamera menjadi H.264 untuk browser lewat WebRTC.
+  - Encoder dipilih otomatis: VAAPI bila ada GPU Intel/AMD, selain itu libx264.
+  - Console membaca kesehatan service dari API mediamtx dan meneruskan WHEP lewat alamatnya sendiri (`/api/drone/video/whep`). Tablet di LAN view juga bisa menonton.
+  - Buka TCP 8889 dan UDP 8189 di firewall groundstation.
+  - Cara pasang ada di `packaging/drone-video/README.md`.
+- **System Health** punya kartu "Telemetri drone" dan "Video drone".
+- Port console tetap 8787.
+
 ## 3.12.1
 
 Rilis patch: tidak ada yang dihapus. Label bahasa Indonesia untuk posisi RDF-SDR yang ditahan kini sesuai dengan catatan 3.12.0.

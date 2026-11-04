@@ -564,7 +564,7 @@ describe('Configuration in the LAN view', () => {
     expect(markup).not.toContain(`>${translate('en', 'config.save')}</button>`);
     expect(markup).toContain('Ground Console');
     const index = markup.match(/<nav class="cfg-index"[\s\S]*?<\/nav>/)?.[0] ?? '';
-    expect([...index.matchAll(/aria-controls="([^"]+)"/g)].map((match) => match[1])).toEqual(['connection-settings', 'mqtt-settings', 'navigation-settings', 'branding-settings']);
+    expect([...index.matchAll(/aria-controls="([^"]+)"/g)].map((match) => match[1])).toEqual(['connection-settings', 'mqtt-settings', 'drone-settings', 'navigation-settings', 'branding-settings']);
   });
 
   it('puts the LAN access card under MQTT on the console itself', () => {

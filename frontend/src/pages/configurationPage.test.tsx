@@ -43,15 +43,15 @@ describe('Configuration page', () => {
   it('wraps each section in a form so Enter submits it (AUD-106)', () => {
     const markup = render();
     // connection, MQTT, LAN access, GPS, Compass, admin login, dry-run
-    expect(markup.match(/<form\b/g)?.length).toBe(7);
-    expect(markup.match(/type="submit"/g)?.length).toBe(7);
+    expect(markup.match(/<form\b/g)?.length).toBe(8);
+    expect(markup.match(/type="submit"/g)?.length).toBe(8);
     expect(markup).toContain('aria-label="Restore GPS defaults"');
     expect(markup).toContain('aria-label="Restore Compass defaults"');
   });
 
   it('lays the cards out in the section index order', () => {
     const markup = render();
-    const ids = ['connection-settings', 'mqtt-settings', 'lan-settings', 'navigation-settings', 'branding-settings', 'dry-run-settings'];
+    const ids = ['connection-settings', 'mqtt-settings', 'drone-settings', 'lan-settings', 'navigation-settings', 'branding-settings', 'dry-run-settings'];
     const cardOrder = ids.map((id) => markup.indexOf(`<section id="${id}"`));
     expect(cardOrder.every((index) => index > 0)).toBe(true);
     expect([...cardOrder].sort((a, b) => a - b)).toEqual(cardOrder);
