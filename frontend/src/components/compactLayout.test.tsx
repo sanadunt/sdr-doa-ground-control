@@ -10,7 +10,7 @@ import { DEFAULT_OVERVIEW_PANELS } from '../lib/overviewPanels';
 import type { CompactLayout } from '../lib/compactLayout';
 import type { PositionEstimate } from '../lib/positionEstimate';
 import { ConsoleShell, worstTone } from './Shell';
-import { MapNoticeChip } from './MapNoticeChip';
+import { MapNoticeChip, foldNotice, noticeKey, resetDismissedNotices } from './MapNoticeChip';
 import { OverviewPanelToggles } from './overview/OverviewPanelToggles';
 import { SpectrumDock } from './overview/SpectrumDock';
 import { SpectrumDockMirror } from './overview/SpectrumDockMirror';
@@ -138,14 +138,12 @@ describe('compact panel switches', () => {
     <OverviewPanelToggles panels={DEFAULT_OVERVIEW_PANELS} onChange={() => undefined} compact {...props} />,
   );
 
-  it('offers Layers, Spectrum, the RDF-SDR node card and Control as icons, without Polar', () => {
+  it('offers only Layers: the other panels are tabs of the side panel', () => {
     const markup = toggles();
     expect(markup).toContain('class="ov-panel-toggles is-compact"');
     const labels = [...markup.matchAll(/aria-label="([^"]+)"/g)].map((match) => match[1]);
-    expect(labels).toEqual(['Panels', 'Layers', 'Spectrum', 'RDF-SDR', 'Drone', 'Control']);
+    expect(labels).toEqual(['Panels', 'Layers']);
     expect(markup).not.toContain('Polar');
-    expect(markup).toContain('<button type="button" aria-pressed="false" aria-label="RDF-SDR" title="RDF-SDR">');
-    expect(toggles({ nodeOpen: true })).toContain('aria-pressed="true" aria-controls="panel-node" aria-label="RDF-SDR"');
   });
 
   it('leaves Control out in the LAN view and keeps Polar on the PC', () => {
@@ -166,20 +164,49 @@ describe('compact dashboard', () => {
     const markup = dashboard('compact-landscape', { panels });
     expect(markup).not.toContain('id="panel-polar"');
     expect(markup).toContain('id="panel-spectrum"');
-    expect(markup).toMatch(/<div class="page page-overview ov-stage" data-dock="full" data-layout="compact-landscape">/);
+    expect(markup).toMatch(/<div class="page page-overview ov-stage" data-dock="full" data-layout="compact-landscape" data-main="map">/);
     expect(dashboard(null, { panels })).toContain('id="panel-polar"');
   });
 
-  it('gives the map the whole stage when Spektrum is off', () => {
-    const markup = dashboard('compact-portrait', { panels: { ...DEFAULT_OVERVIEW_PANELS, polar: true, spectrum: false } });
-    expect(markup).toContain('data-dock="none"');
-    expect(markup).not.toContain('class="ov-dock"');
+  it('has a main view, the info row and the side panel tabs, whatever the saved switches say', () => {
+    const markup = dashboard('compact-portrait', { panels: { ...DEFAULT_OVERVIEW_PANELS, spectrum: false, drone: false, control: false } });
+    expect(markup).toContain('<div class="ov-main" data-main="map"><div class="ov-map">');
+    expect(markup).toContain('class="ov-info" role="group"');
+    const tabs = [...markup.matchAll(/role="tab" id="ov-tab-([a-z]+)" aria-selected="(true|false)"/g)].map((match) => `${match[1]}:${match[2]}`);
+    expect(tabs).toEqual(['spectrum:true', 'drone:false', 'node:false', 'control:false']);
+    // Spektrum is the first tab; Kontrol stays mounted, hidden, so a patch on its way keeps its stage.
+    expect(markup).toContain('id="panel-spectrum"');
+    expect(markup).toMatch(/<div class="ov-side-control" hidden="">/);
+    // No drone link (this snapshot has none): no corner window and no swap.
+    expect(markup).not.toContain('ov-pip-swap');
+    expect(markup).not.toContain('class="ov-video"');
   });
 
-  it('shows the node card only while its switch has it open', () => {
-    expect(dashboard('compact-landscape')).not.toContain('id="panel-node"');
-    expect(dashboard('compact-landscape', { nodeOpen: true })).toContain('id="panel-node"');
-    expect(dashboard(null)).toContain('id="panel-node"');
+  it('puts the drone video in the corner window with a swap, and the drone in the info row', () => {
+    const aged = { age_ms: 200, stale: false };
+    const drone = {
+      enabled: true, state: 'LIVE', connection: 'connected', host: '192.168.1.162', port: 1883,
+      position: { ...aged, lat: -6.9321, lon: 107.6612, alt_msl_m: 742.3, alt_rel_m: 25.4, speed_ms: 3.1, heading_deg: 87 },
+      gps: { ...aged, fix: 6, fix_label: 'RTK_FIXED', rtk: 'FIXED', satellites: 22, hdop: 0.6 },
+      heading: { deg: 87.3, source: 'attitude', age_ms: 300 },
+      heading_at_doa: null, array_heading_offset_deg: 0, video_enabled: true,
+    };
+    const markup = dashboard('compact-landscape', { snapshot: liveSnapshot({ drone } as Partial<TelemetrySnapshot>) });
+    expect(markup).toMatch(/<div class="ov-main" data-main="map"><div class="ov-map">[\s\S]*<div class="ov-video">[\s\S]*<button type="button" class="ov-pip-swap" aria-label="Show the drone video large"/);
+    expect(markup).toContain('25 m · 87°');
+    expect(markup).toContain('RTK FIXED');
+    // Video off on the console: no corner window, the map stays the main view.
+    const off = dashboard('compact-landscape', { snapshot: liveSnapshot({ drone: { ...drone, video_enabled: false } } as Partial<TelemetrySnapshot>) });
+    expect(off).not.toContain('ov-pip-swap');
+  });
+
+  it('leaves Kontrol out in the LAN view and keeps the PC dashboard as it was', () => {
+    const lan = dashboard('compact-landscape', { viewOnly: true });
+    expect(lan).not.toContain('ov-tab-control');
+    expect(lan).not.toContain('ov-side-control');
+    const desktop = dashboard(null);
+    expect(desktop).toContain('id="panel-node"');
+    for (const compactOnly of ['ov-main', 'ov-info', 'ov-side-tabs', 'ov-pip-swap']) expect(desktop).not.toContain(compactOnly);
   });
 
   it('opens the spectrum dock without Atur, follow-node, the mode select or Kirim', () => {
@@ -218,15 +245,28 @@ describe('compact spectrum docks', () => {
 });
 
 describe('compact map notice', () => {
-  it('is a one-line chip that a tap opens, with the link only once open', () => {
+  it('is a one-line chip that a tap folds away, without the link', () => {
+    resetDismissedNotices();
     const action = { label: 'Configuration → GPS & Compass', onClick: () => undefined };
     const chip = render(<MapNoticeChip text="REFERENCE: compass offset not reported" action={action} compact />);
     expect(chip).toBe(
       '<div class="map-data-chip is-compact" role="status">'
-      + '<button type="button" class="map-chip-toggle" aria-expanded="false" title="REFERENCE: compass offset not reported">'
+      + '<button type="button" class="map-chip-toggle" title="REFERENCE: compass offset not reported">'
       + '<span class="map-chip-text">REFERENCE: compass offset not reported</span></button></div>',
     );
     expect(chip).not.toContain('map-chip-action');
+  });
+
+  it('stays a small mark once folded, until its cause changes', () => {
+    resetDismissedNotices();
+    expect(noticeKey('DoA held · last 17:23:12 · DoA record stale')).toBe(noticeKey('DoA held · last 17:25:40 · DoA record stale'));
+    expect(noticeKey('DoA held · last 17:23:12 · DoA record stale')).not.toBe(noticeKey('DoA held · last 17:23:12 · DAQ not synced'));
+    foldNotice('DoA held · last 17:23:12 · DoA record stale');
+    const folded = render(<MapNoticeChip text="DoA held · last 17:25:40 · DoA record stale" compact />);
+    expect(folded).toContain('class="map-data-chip is-compact is-folded"');
+    expect(folded).toContain('class="map-chip-flag" aria-label="DoA held · last 17:25:40 · DoA record stale"');
+    expect(render(<MapNoticeChip text="DoA held · last 17:25:40 · DAQ not synced" compact />)).toContain('map-chip-toggle');
+    resetDismissedNotices();
   });
 
   it('keeps the PC notice markup', () => {
@@ -315,9 +355,8 @@ describe('compact layout styles', () => {
 
   it('lays the stage out side by side in landscape and stacked in portrait, without a page scroll', () => {
     const dashboard = compactSection(sheets.dashboard);
-    expect(dashboard).toMatch(/\.console-shell\[data-layout\^='compact'\] \.ov-stage \{[^}]*grid-template-areas: 'map dock'; grid-template-columns: minmax\(0, 55fr\) minmax\(0, 45fr\)/);
-    expect(dashboard).toMatch(/\.console-shell\[data-layout='compact-portrait'\] \.ov-stage \{[^}]*grid-template-areas: 'map' 'dock'; grid-template-columns: minmax\(0, 1fr\); grid-template-rows: minmax\(0, 55fr\) minmax\(0, 45fr\)/);
-    expect(dashboard).toMatch(/\.ov-stage\[data-dock='none'\] \{[^}]*grid-template-areas: 'map'/);
+    expect(dashboard).toMatch(/\.console-shell\[data-layout\^='compact'\] \.ov-stage \{[^}]*grid-template-areas: 'main side' 'info side'; grid-template-columns: minmax\(0, 72fr\) minmax\(260px, 28fr\); grid-template-rows: minmax\(0, 1fr\) auto;/);
+    expect(dashboard).toMatch(/\.console-shell\[data-layout='compact-portrait'\] \.ov-stage \{[^}]*grid-template-areas: 'main' 'info' 'side'; grid-template-columns: minmax\(0, 1fr\); grid-template-rows: minmax\(0, 60fr\) auto minmax\(0, 40fr\)/);
     expect(dashboard).toMatch(/\.ov-stage \.map-bottom-overlay \{ display: none; \}/);
     expect(compactSection(sheets.shell)).toMatch(/\.page-content-overview \{ height: calc\(100dvh - var\(--topbar-h\)\); overflow: hidden; \}/);
   });

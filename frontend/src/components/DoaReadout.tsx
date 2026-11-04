@@ -23,6 +23,43 @@ function formatOffset(offset: number): string {
   return String(Number(offset.toFixed(1)));
 }
 
+/** The HUD's bearing for one answer: shown, or held (old or not valid), with its age at the answer. */
+export interface HudBearing {
+  /** The live bearing, north clockwise, while the DoA is shown. */
+  bearing: number | null;
+  /** The held bearing while the DoA is not shown but still readable. */
+  heldBearing: number | null;
+  /** The held bearing is old (STALE N s) rather than not valid (ok=0, DAQ unknown). */
+  heldOld: boolean;
+  heldUnverified: boolean;
+  /** The DoA age when the page got the answer (a shared read's age counts). */
+  ageMs: number | null;
+  /** The age no longer reads as current (the local window closed, or the source is stale). */
+  ageStale: boolean;
+}
+
+/** The bearing the HUD shows; DoaReadout and the compact info row read the same rules. */
+export function hudBearing(snapshot: TelemetrySnapshot | null, localSnapshotFresh: boolean, settings: PolarSettings, curveOffset: number | null, offsetManual: boolean): HudBearing {
+  const simulation = Boolean(snapshot?.simulation);
+  const view = polarView(snapshot, settings, localSnapshotFresh, null, settings, curveOffset);
+  const status = overviewDoaStatus(snapshot, localSnapshotFresh);
+  const bearing = status.shown ? bearingForView(view) : null;
+  // A held DoA turns with the heading of its own sample (contract 1.10 h); a manual offset stays above it.
+  const held = provisionalDoa(snapshot, status);
+  const heldBearing = heldBearingFor(held?.thetaDeg ?? null, offsetManual ? null : held?.headingDeg ?? null, settings.compassOffset)?.bearingDeg ?? null;
+  const heldUnverified = held?.unverified === true;
+  const csv = primaryCandidate(snapshot);
+  const unverifiedRecord = snapshot?.mqtt?.doa_unverified;
+  const rawAge = heldUnverified
+    ? numberOrNull(unverifiedRecord !== null && typeof unverifiedRecord === 'object' ? (unverifiedRecord as Record<string, unknown>).age_ms : null)
+    : numberOrNull(csv.freshness?.age_ms);
+  // The DoA age when this page got the answer: a shared read's own age counts.
+  const ageMs = ageAtAnswerMs(rawAge !== null && rawAge >= 0 ? rawAge : null, snapshot);
+  const ageStale = !simulation && ageMs !== null && (!localSnapshotFresh || (status.code === 'STALE' && !heldUnverified));
+  const heldOld = !heldUnverified && (status.reason === 'sourceStale' || status.reason === 'localExpired' || status.reason === 'nodeStalled');
+  return { bearing, heldBearing, heldOld, heldUnverified, ageMs, ageStale };
+}
+
 /**
  * Compact bearing HUD over the map. The primary value is the geographic
  * north-clockwise bearing derived from theta_0 and the compass offset; theta_0
@@ -61,11 +98,9 @@ export function DoaReadout({
   const view = polarView(snapshot, settings, localSnapshotFresh, null, settings, curveOffset);
   const status = overviewDoaStatus(snapshot, localSnapshotFresh);
   const statusText = t(doaStatusTextKey(status.reason));
-  const bearing = status.shown ? bearingForView(view) : null;
-  // A held DoA turns with the heading of its own sample (contract 1.10 h); a manual offset stays above it.
+  const { bearing, heldBearing, heldOld, heldUnverified, ageMs, ageStale } = hudBearing(snapshot, localSnapshotFresh, settings, curveOffset, offsetManual);
   const held = provisionalDoa(snapshot, status);
   const heldTheta = held?.thetaDeg ?? null;
-  const heldBearing = heldBearingFor(heldTheta, offsetManual ? null : held?.headingDeg ?? null, settings.compassOffset)?.bearingDeg ?? null;
   // Why the edge itself holds the DoA back, in words, the codes in the tooltip.
   const edgeWhy = status.shown ? [] : edgeDoaReasons(snapshot);
   const edgeWhyText = edgeWhy.map((code) => {
@@ -77,22 +112,12 @@ export function DoaReadout({
   const csv = primaryCandidate(snapshot);
   const source = sourceBadge(snapshot);
   // A held ok=0 sample newer than the stale LIVE DoA carries its own age, and is NOT VALID rather than old.
-  const heldUnverified = held?.unverified === true;
-  const unverifiedRecord = snapshot?.mqtt?.doa_unverified;
-  const rawAge = heldUnverified
-    ? numberOrNull(unverifiedRecord !== null && typeof unverifiedRecord === 'object' ? (unverifiedRecord as Record<string, unknown>).age_ms : null)
-    : numberOrNull(csv.freshness?.age_ms);
-  // The DoA age when this page got the answer: a shared read's own age counts.
-  const ageMs = ageAtAnswerMs(rawAge !== null && rawAge >= 0 ? rawAge : null, snapshot);
   const bearingTone: Tone = status.shown ? (status.code === 'DEGRADED' || !offsetVerified ? 'warn' : 'good') : status.code === 'WAITING' ? 'neutral' : 'warn';
   // The age is the value when the last answer arrived and does not grow, so
   // once the local window has closed (or the source itself is stale) it is
   // marked STALE instead of reading as current. Without an age (Data Out
   // unreachable) there is nothing to mark.
-  const ageStale = !simulation && ageMs !== null && (!localSnapshotFresh || (status.code === 'STALE' && !heldUnverified));
   const ageValue = simulation ? 'SIM' : ageMs !== null ? t('common.durationS', { value: (ageMs / 1000).toFixed(1) }) : '—';
-  // A held bearing is old (STALE N s) or not valid at all (ok=0, DAQ unknown).
-  const heldOld = !heldUnverified && (status.reason === 'sourceStale' || status.reason === 'localExpired' || status.reason === 'nodeStalled');
   const staleTag = heldBearing !== null && heldOld && ageMs !== null && !simulation;
   const heldTag = heldBearing === null ? null : staleTag ? t('polar.staleTag', { age: ageValue }) : t('polar.notValid');
   // The STALE tag already carries the age; the age line does not repeat it.
