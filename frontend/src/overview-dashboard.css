@@ -432,29 +432,36 @@
 .ov-ground-label.is-reference { border-style: dashed; border-color: var(--subtle); color: var(--muted); }
 
 /* Drone (SIYI): camera and flight telemetry, first in the right column ------- */
-.ov-drone { display: flex; flex: 0 1 auto; flex-direction: column; width: 320px; min-height: 0; }
-/* The drone panel gives way first: its rows scroll, so the RDF-SDR card below stays whole. */
-.ov-right:has(> .ov-drone) > .ov-node { flex-shrink: 0; }
-.ov-drone.is-large { width: 360px; }
+.ov-drone { --ov-drone-w: 320px; display: flex; flex: 0 1 auto; flex-direction: column; width: var(--ov-drone-w); min-height: calc(var(--ov-drone-w) * 9 / 16 + 84px); overflow: hidden; }
+/* Both cards give way where the column is short, each inside its own box: the drone
+   keeps its header, video and link row and scrolls its values; the RDF-SDR card keeps
+   its summary and scrolls its details. Neither is drawn over the other. */
+.ov-drone:not(:has(> .ov-drone-video)) { min-height: 0; }
+.ov-drone > :not(.ov-drone-rows) { flex: none; }
+.ov-right:has(> .ov-drone) > .ov-node { flex-shrink: 1; overflow: hidden; }
+.ov-drone.is-large { --ov-drone-w: 360px; }
 .ov-drone-video { position: relative; flex: none; aspect-ratio: 16 / 9; margin: 0 8px; overflow: hidden; border-radius: 6px; background: #05080b; }
 .ov-drone-video video { display: block; width: 100%; height: 100%; object-fit: contain; }
 .ov-drone-video[data-phase='playing'] .ov-drone-video-notice { display: none; }
 .ov-drone-video-notice { position: absolute; inset: 0; display: grid; place-items: center; padding: 12px; color: #c9d3dc; font-size: 12px; text-align: center; }
 .ov-drone-hud { position: absolute; right: 6px; bottom: 6px; left: 6px; display: flex; flex-wrap: wrap; gap: 4px 10px; color: #f5f7f9; font-family: var(--mono); font-size: 11px; font-weight: 700; text-shadow: 0 1px 2px #000, 0 0 2px #000; pointer-events: none; }
-.ov-drone-empty { margin: 8px 12px 10px; color: var(--muted); font-size: 12px; }
 .ov-drone-rows { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 12px; min-height: 0; margin: 0; padding: 8px 12px 10px; overflow-y: auto; overscroll-behavior: contain; }
 .ov-drone-rows > div.is-wide { grid-column: 1 / -1; }
+.ov-drone-rows > div.is-wide dd { overflow-wrap: anywhere; white-space: normal; }
 .ov-drone-rows dt { color: var(--subtle); font-size: 11px; }
 .ov-drone-rows dd { margin: 0; overflow: hidden; color: var(--text); font-family: var(--mono); font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .ov-drone-rows dd.is-good { color: var(--green); }
 .ov-drone-rows dd.is-bad { color: var(--red); }
 .ov-drone-rows dd.is-warn { color: var(--amber); }
 .ov-drone-rows dd.is-stale { color: var(--subtle); }
+.ov-drone-rows dd.is-empty { color: var(--subtle); font-weight: 500; }
+/* Telemetry and Video, the two link rows, apart from the values under them. */
+.ov-drone-rows > div.is-last-status { padding-bottom: 6px; border-bottom: 1px solid var(--line-soft); }
 .ov-drone-text { margin: 0 12px 10px; overflow: hidden; color: var(--muted); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
 .ov-node-detail dd.is-warn { color: var(--amber); }
 /* Large video: the panel grows over the map, the rest of the column moves down. */
 @media (min-width: 1024px) {
-  .ov-drone.is-large { position: relative; width: min(640px, calc(100vw - 2 * var(--ov-gap) - 400px)); }
+  .ov-drone.is-large { --ov-drone-w: min(640px, calc(100vw - 2 * var(--ov-gap) - 400px)); position: relative; }
 }
 
 /* Stacked layout ------------------------------------------------------------ */
