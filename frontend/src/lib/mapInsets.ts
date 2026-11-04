@@ -1,3 +1,6 @@
+import type { FeatureCollection } from 'geojson';
+import type { MapCoordinate } from '../types';
+
 /**
  * Space the floating Overview panels take from the map, in CSS pixels. The map
  * keeps drawing under the panels; the insets only move the camera's framing
@@ -45,28 +48,38 @@ export function computeMapInsets(
   return { top: 0, right: whole(right), bottom: whole(bottom), left: whole(left) };
 }
 
-/** At most this share of the map's height goes to the compact layout's top inset. */
-export const COMPACT_TOP_INSET_SHARE = 0.35;
+/** The narrowest free map width beside the compact layout's left column that still takes the map notices. */
+export const COMPACT_NOTICE_MIN_PX = 280;
+
+/** Map height the compact layout's top inset always leaves below it: one notice above the map buttons. */
+export const COMPACT_TOP_KEEP_PX = 120;
 
 /**
- * Insets in the compact touch layout (lib/compactLayout.ts), where the HUD and
- * the node card float over the top corners of a map a phone may show only 412
- * px wide, so the two together can be wider than the map. Only `top` is set:
- * the lowest panel bottom over the map (plus `gap`), at most
- * COMPACT_TOP_INSET_SHARE of the map's height. The camera frames below it with
- * the station centred across (cameraInsets()), and the map notices sit full
- * width under the panels (noticePlacement()) instead of in a gap between them
- * that a phone does not have.
+ * Insets in the compact touch layout (lib/compactLayout.ts), where Lapisan and
+ * the estimate card float over the main view's top-left corner. With at least
+ * COMPACT_NOTICE_MIN_PX of map free beside them (a tablet) only `left` is
+ * set, so the notices sit top-centre in the free part and the camera frames
+ * there; on a map narrower than that (a phone) only `top`, the lowest panel
+ * bottom plus `gap`, leaving at least COMPACT_TOP_KEEP_PX of the map below,
+ * so the notices go full width under the panels (noticePlacement()) instead
+ * of under the panel itself. A right column (none in the compact stage since
+ * 3.14.0) always counts as `top`.
  */
 export function compactMapInsets(
   map: RectLike,
   panels: { left?: readonly RectLike[]; right?: readonly RectLike[] },
   gap = 8,
 ): MapInsets {
-  let top = 0;
-  for (const rect of [...(panels.left ?? []), ...(panels.right ?? [])]) if (overlaps(rect, map)) top = Math.max(top, rect.bottom - map.top + gap);
+  const left = (panels.left ?? []).filter((rect) => overlaps(rect, map));
+  const right = (panels.right ?? []).filter((rect) => overlaps(rect, map));
+  if (left.length === 0 && right.length === 0) return { ...ZERO_INSETS };
+  const edge = Math.max(...left.map((rect) => rect.right), map.left);
+  if (right.length === 0 && map.right - edge - 2 * gap >= COMPACT_NOTICE_MIN_PX) {
+    return { top: 0, right: 0, bottom: 0, left: whole(edge - map.left + gap) };
+  }
+  const lowest = Math.max(...[...left, ...right].map((rect) => rect.bottom));
   const height = Number.isFinite(map.bottom - map.top) ? Math.max(0, map.bottom - map.top) : 0;
-  return { top: whole(Math.min(top, height * COMPACT_TOP_INSET_SHARE)), right: 0, bottom: 0, left: 0 };
+  return { top: whole(Math.min(lowest - map.top + gap, height - COMPACT_TOP_KEEP_PX)), right: 0, bottom: 0, left: 0 };
 }
 
 /**
@@ -83,21 +96,25 @@ export function stackedRightTop(map: RectLike, left: RectLike | null, right: Rec
 
 /**
  * The insets the camera frames with: all of them on the PC; in the compact
- * layout only the top one, so the station is centred horizontally.
+ * layout the top and left ones compactMapInsets() sets (never the right or
+ * bottom: the side panel and the info row are beside the map, not over it).
  */
 export function cameraInsets(insets: MapInsets, compact: boolean): MapInsets {
-  return compact ? { top: insets.top, right: 0, bottom: 0, left: 0 } : insets;
+  return compact ? { top: insets.top, right: 0, bottom: 0, left: insets.left } : insets;
 }
 
 /**
  * Where the map notices go, as overrides of their stylesheet position (top and
  * sides at the map gap). On the PC they sit top-centre between the side
- * panels; in the compact layout they span the map's width under the panels,
- * so a node card and a HUD wider together than the map never squeeze them to
- * nothing. `undefined` keeps the stylesheet position.
+ * panels; in the compact layout beside the left panel where the map has room
+ * (a tablet), else across the map's width under it (a phone), so the panel
+ * never covers them. `undefined` keeps the stylesheet position.
  */
 export function noticePlacement(insets: MapInsets, compact: boolean, gap = 12): { top?: number; left?: number; right?: number } | undefined {
-  if (compact) return insets.top > 0 ? { top: whole(insets.top) } : undefined;
+  if (compact) {
+    if (insets.left > 0) return { left: whole(insets.left) };
+    return insets.top > 0 ? { top: whole(insets.top) } : undefined;
+  }
   return insets.left || insets.right ? { left: whole(insets.left) + gap, right: whole(insets.right) + gap } : undefined;
 }
 
@@ -138,4 +155,34 @@ export function clampMapPadding(insets: MapInsets, width: number, height: number
   const [left, right] = axis(insets.left, insets.right, width, framing.left, framing.right);
   const [top, bottom] = axis(insets.top, insets.bottom, height, framing.top, framing.bottom);
   return { top, right, bottom, left };
+}
+
+/**
+ * Camera bounds around the station and every drawn part of the DoA graph, so the
+ * graph and its direction fill a small map; null while nothing of it is drawn.
+ */
+export function graphBounds(collections: ReadonlyArray<FeatureCollection>, station: MapCoordinate): [[number, number], [number, number]] | null {
+  let west = station.longitude;
+  let east = station.longitude;
+  let south = station.latitude;
+  let north = station.latitude;
+  let drawn = false;
+  const visit = (value: unknown): void => {
+    if (!Array.isArray(value)) return;
+    if (value.length >= 2 && typeof value[0] === 'number' && typeof value[1] === 'number') {
+      const [lon, lat] = value as number[];
+      if (!Number.isFinite(lon) || !Number.isFinite(lat)) return;
+      drawn = true;
+      west = Math.min(west, lon); east = Math.max(east, lon); south = Math.min(south, lat); north = Math.max(north, lat);
+      return;
+    }
+    for (const item of value) visit(item);
+  };
+  for (const collection of collections) {
+    for (const feature of collection.features) {
+      const geometry = feature.geometry as { coordinates?: unknown } | null;
+      if (geometry && 'coordinates' in geometry) visit(geometry.coordinates);
+    }
+  }
+  return drawn ? [[west, south], [east, north]] : null;
 }

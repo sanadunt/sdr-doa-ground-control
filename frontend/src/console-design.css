@@ -675,11 +675,15 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
     .console-shell[data-layout^='compact'] .view-only-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   }
   .console-shell.is-overview[data-layout^='compact'] .status-summary-source { display: none; }
+  /* Language and theme stay in the page menu; the bar keeps its room. */
+  .console-shell[data-layout^='compact'] .compact-lang, .console-shell[data-layout^='compact'] .compact-theme { display: none; }
 }
 .console-shell[data-layout^='compact'] .topbar-title { flex: 0 1 auto; min-width: 0; }
 .console-shell[data-layout^='compact'] .topbar-spacer { display: block; flex: 1 1 0; min-width: 0; }
 .console-shell[data-layout^='compact'] .topbar-toolbar { flex: none; }
 .console-shell[data-layout^='compact'] .topbar-tools { flex: none; flex-wrap: nowrap; gap: 6px; }
+.console-shell[data-layout^='compact'] .compact-lang { width: 44px; min-width: 44px; height: 44px; font-family: var(--mono); font-size: 13px; font-weight: 700; }
+.console-shell[data-layout^='compact'] .compact-theme { width: 44px; min-width: 44px; height: 44px; }
 .console-shell[data-layout^='compact'] .status-summary { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 6px; min-width: 44px; height: 44px; padding: 0 10px; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 999px; background: var(--surface); color: var(--muted); cursor: pointer; font-family: var(--mono); font-size: 11.5px; font-weight: 700; white-space: nowrap; }
 .console-shell[data-layout^='compact'] .status-summary > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* The DoA value stays whole; the source gives way first. */

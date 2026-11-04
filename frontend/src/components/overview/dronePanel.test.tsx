@@ -147,6 +147,19 @@ describe('drone panel', () => {
   });
 });
 
+describe('the PC swap of video and map', () => {
+  it('turns the enlarge button into the swap and leaves the video to the stage while it is large', () => {
+    const view = normalizeDrone(BLOCK);
+    const small = render(<DronePanel initialView={view} initialHealth={OK} feed={{ view, health: OK }} onVideoMain={() => undefined} />);
+    expect(small).toContain('aria-pressed="false" aria-label="Show the drone video large"');
+    expect(small).toContain('<video');
+    const large = render(<DronePanel initialView={view} initialHealth={OK} feed={{ view, health: OK }} videoMain onVideoMain={() => undefined} videoState={{ phase: 'playing', code: null }} />);
+    expect(large).toContain('class="ov-drone ov-card is-video-main"');
+    expect(large).toContain('aria-pressed="true" aria-label="Show the map large"');
+    expect(large).not.toContain('<video');
+  });
+});
+
 describe('drone beside the RDF-SDR', () => {
   it('compares the two GPS and headings', () => {
     const answer = {

@@ -125,6 +125,14 @@ describe('compact top bar', () => {
     expect(menuFooter(shell({ layout: null }))).not.toContain('<select');
   });
 
+  it('keeps the language and the theme one tap away in the bar, also in the LAN view', () => {
+    const bar = header(shell({ access: 'lan-view' }));
+    expect(bar).toContain('<button class="icon-button compact-lang" type="button" lang="id" aria-label="Bahasa Indonesia" title="Bahasa Indonesia">ID</button>');
+    expect(bar).toContain('class="icon-button compact-theme"');
+    expect(header(shell({}, 'id'))).toContain('lang="en" aria-label="English"');
+    expect(header(shell({ layout: null }))).not.toContain('compact-lang');
+  });
+
   it('shows VIEW ONLY in the bar and no Restart/Shutdown in the LAN view', () => {
     const markup = shell({ access: 'lan-view' }, 'id');
     expect(header(markup)).toContain('view-only-chip');

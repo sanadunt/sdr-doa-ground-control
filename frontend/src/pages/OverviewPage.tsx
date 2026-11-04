@@ -1,5 +1,5 @@
 import type { CSSProperties, JSX } from 'react';
-import { Suspense, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { ConsoleCapabilities } from '../api';
 import type { CompassConfig, GpsConfig, MapCoordinate, PolarSettings, TelemetrySnapshot } from '../types';
 import type { SimulationSettings } from '../lib/simulation';
@@ -282,13 +282,19 @@ function OverviewPageView({
   const controlShown = panels.control && !viewOnly;
   // Compact: one main view (map or drone video, the other in the corner window) and a tabbed
   // side panel, both for this visit only; the saved panel switches are neither read nor written.
-  const droneFeed = useDroneFeed(droneView, null, compact);
+  // One drone feed for the page: the compact stage and tabs, or the PC's Drone panel and its large video.
+  const droneFeed = useDroneFeed(droneView, null, compact || panels.drone);
+  const wideStage = useWideStage();
   const [mainView, setMainView] = useState<'map' | 'video'>('map');
   const [tab, setTab] = useState<CompactTab>('spectrum');
   const [compactNodeCollapsed, setCompactNodeCollapsed] = useState(false);
   const [droneVideo, setDroneVideo] = useState<DroneVideoState>({ phase: 'idle', code: null });
   const onDroneVideoState = useCallback((phase: DroneVideoPhase, code: string | null) => setDroneVideo({ phase, code }), []);
-  const pipShown = compact && dronePipShown(droneFeed.view, droneFeed.health);
+  // PC: the Drone panel's enlarge button puts the video large behind the panels and the map in a corner window
+  // (from 1024 px; the stacked layout below keeps the map). Compact: the corner window is always there.
+  const pipShown = compact
+    ? dronePipShown(droneFeed.view, droneFeed.health)
+    : panels.drone && wideStage && dronePipShown(droneFeed.view, droneFeed.health);
   // Without the camera the map is the main view, also when the video was.
   const main = pipShown ? mainView : 'map';
   useEffect(() => {
@@ -350,6 +356,7 @@ function OverviewPageView({
               estimate={estimate}
               compact={compact}
               drone={droneMap}
+              mini={main === 'video'}
               heldSeed={heldSeed}
             />
           </Suspense>
@@ -462,16 +469,34 @@ function OverviewPageView({
   }
 
   return (
-    <div className="page page-overview ov-stage" data-dock={dockShown ? (panels.spectrum ? 'full' : 'polar') : 'none'} data-control={controlShown ? 'open' : undefined} data-layout={compactLayout ?? undefined}>
+    <div className="page page-overview ov-stage" data-dock={dockShown ? (panels.spectrum ? 'full' : 'polar') : 'none'} data-control={controlShown ? 'open' : undefined} data-layout={compactLayout ?? undefined} data-main={main}>
       <h1 className="visually-hidden" data-route-focus tabIndex={-1}>{t('route.overview')}</h1>
       {mapView}
+      {/* The video large behind the panels, the map in the corner window over it; a click on the window swaps back. */}
+      {main === 'video' ? (
+        <div className="ov-video">
+          <DroneVideo view={droneFeed.view} health={droneFeed.health} onState={onDroneVideoState} />
+        </div>
+      ) : null}
+      {main === 'video' ? (
+        <button type="button" className="ov-pip-swap" aria-label={t('overview.swapToMap')} title={t('overview.swapToMap')} onClick={() => setMainView('map')} />
+      ) : null}
       <div className="ov-left" ref={leftRef}>
         {readout}
         {estimateCard}
         {layersPanel}
       </div>
       <div className={rightTop === null ? 'ov-right' : 'ov-right is-stacked'} ref={rightRef} style={rightTop === null ? undefined : { '--ov-right-top': `${rightTop}px` } as CSSProperties}>
-        {panels.drone ? <DronePanel initialView={droneView} onClose={() => onPanelsChange({ ...panels, drone: false })} /> : null}
+        {panels.drone ? (
+          <DronePanel
+            initialView={droneView}
+            feed={droneFeed}
+            videoMain={main === 'video'}
+            onVideoMain={pipShown ? () => setMainView(main === 'video' ? 'map' : 'video') : undefined}
+            videoState={droneVideo}
+            onClose={() => onPanelsChange({ ...panels, drone: false })}
+          />
+        ) : null}
         {nodeShown ? nodeCard(panels.nodeCollapsed, () => onPanelsChange({ ...panels, nodeCollapsed: !panels.nodeCollapsed })) : null}
         {controlShown ? controlPanel(() => onPanelsChange({ ...panels, control: false })) : null}
       </div>
@@ -500,3 +525,21 @@ function OverviewPageView({
 }
 
 export const OverviewPage = memo(OverviewPageView);
+
+const WIDE_STAGE_QUERY = '(min-width: 1024px)';
+
+function subscribeWideStage(onChange: () => void): () => void {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return () => undefined;
+  const query = window.matchMedia(WIDE_STAGE_QUERY);
+  query.addEventListener?.('change', onChange);
+  return () => query.removeEventListener?.('change', onChange);
+}
+
+/** Whether the PC stage floats its panels over the map (from 1024 px) rather than stacking them below it. */
+function useWideStage(): boolean {
+  return useSyncExternalStore(
+    subscribeWideStage,
+    () => (typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia(WIDE_STAGE_QUERY).matches : true),
+    () => true,
+  );
+}
