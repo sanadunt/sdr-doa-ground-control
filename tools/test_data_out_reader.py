@@ -513,7 +513,8 @@ class SnapshotHttpTests(unittest.TestCase):
 
     def test_snapshot_query_flags(self) -> None:
         server, port = self.start_console(refresh_seconds=30)
-        clock = FakeClock(time.monotonic())
+        # Whole seconds, so the steps below add up exactly (see test_telemetry_source).
+        clock = FakeClock(float(int(time.monotonic())))
         server.data_out.clock = clock
         first = self.get(port)
         collection = first["collection"]
