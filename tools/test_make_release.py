@@ -222,6 +222,7 @@ class ReleaseBuildTests(unittest.TestCase):
             "docker-compose.yml",
             "QUICKSTART.md",
             make_release.MANUAL_PDF,
+            make_release.QUICK_GUIDE_PDF,
             "frontend/dist/index.html",
             "frontend/dist/assets/index-abc.js",
             "frontend/dist/receiver/index.html",
