@@ -24,7 +24,7 @@ Rilis minor: tidak ada yang dihapus. Telemetry dan video drone SIYI (yang membaw
   - Cara pasang ada di `packaging/drone-video/README.md`.
 - **System Health** punya kartu "Telemetri drone" dan "Video drone".
 - Port console tetap 8787.
-- **Mirror Receiver jalan sendiri setelah boot.** Selama LAN view terbuka, halaman console di groundstation sendiri langsung membuka Receiver (HackRF tersambung, RX belum dimulai). Tablet langsung melihat status Receiver (RX OFF), tanpa ada yang perlu membuka Receiver dulu di groundstation; spektrum muncul setelah Mulai. Halaman yang dibuka saat LAN view masih tertutup mengecek lagi tiap 10 detik.
+- **Mirror Receiver jalan sendiri setelah boot.** Selama LAN view terbuka, halaman console di groundstation sendiri langsung membuka Receiver. Receiver menyambung ke HackRF yang sudah diizinkan dan langsung menjalankan RX dengan setelan terakhirnya (VFO seperti tersimpan, tidak dibisukan), jadi tablet langsung mendapat spektrum live tanpa ada yang perlu membuka Receiver dulu di groundstation. Tanpa HackRF yang diizinkan, atau bila ada lebih dari satu, RX tidak dimulai dan tablet menampilkan RX OFF. Halaman yang dibuka saat LAN view masih tertutup mengecek lagi tiap 10 detik.
 
 ## 3.12.1
 
