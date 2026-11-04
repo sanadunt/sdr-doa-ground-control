@@ -712,12 +712,8 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 .console-shell[data-layout^='compact'] .page-content-overview { height: calc(100dvh - var(--topbar-h)); overflow: hidden; }
 .console-shell[data-layout^='compact'] .console-main:has(> .read-error-banner) .page-content-overview { height: calc(100dvh - var(--topbar-h) - var(--read-error-h)); }
 .console-shell.is-overview[data-layout^='compact'] .topbar { position: sticky; }
-/* Map notices: one line; a tap folds one to a small mark (the mark opens the whole notice with its link). */
+/* Map notices: one line; a tap removes one until its cause changes. */
 .console-shell[data-layout^='compact'] .map-data-chip.is-compact { display: flex; flex-wrap: wrap; align-items: center; gap: 0 8px; padding: 0 4px; pointer-events: auto; text-align: left; }
 .console-shell[data-layout^='compact'] .map-chip-toggle { display: flex; flex: 1 1 auto; align-items: center; min-width: 0; min-height: 44px; padding: 0 6px; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; text-align: left; }
-.console-shell[data-layout^='compact'] .map-data-chip.is-compact:not(.is-expanded) .map-chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.console-shell[data-layout^='compact'] .map-data-chip.is-expanded { max-height: 40dvh; overflow-y: auto; }
-.console-shell[data-layout^='compact'] .map-data-chip.is-expanded .map-chip-text { overflow-wrap: anywhere; white-space: normal; }
+.console-shell[data-layout^='compact'] .map-data-chip.is-compact .map-chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .console-shell[data-layout^='compact'] .map-data-chip.is-compact .map-chip-action { margin: 0 4px 6px auto; }
-.console-shell[data-layout^='compact'] .map-data-chip.is-folded { flex-wrap: nowrap; padding: 0; }
-.console-shell[data-layout^='compact'] .map-chip-flag { width: 44px; height: 44px; padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 18px; line-height: 1; }

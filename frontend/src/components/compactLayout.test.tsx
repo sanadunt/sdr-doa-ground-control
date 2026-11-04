@@ -181,7 +181,7 @@ describe('compact dashboard', () => {
     expect(markup).toContain('<div class="ov-main" data-main="map"><div class="ov-map">');
     expect(markup).toContain('class="ov-info" role="group"');
     const tabs = [...markup.matchAll(/role="tab" id="ov-tab-([a-z]+)" aria-selected="(true|false)"/g)].map((match) => `${match[1]}:${match[2]}`);
-    expect(tabs).toEqual(['spectrum:true', 'drone:false', 'node:false', 'control:false']);
+    expect(tabs).toEqual(['spectrum:true', 'polar:false', 'drone:false', 'node:false', 'control:false']);
     // Spektrum is the first tab; Kontrol stays mounted, hidden, so a patch on its way keeps its stage.
     expect(markup).toContain('id="panel-spectrum"');
     expect(markup).toMatch(/<div class="ov-side-control" hidden="">/);
@@ -253,7 +253,7 @@ describe('compact spectrum docks', () => {
 });
 
 describe('compact map notice', () => {
-  it('is a one-line chip that a tap folds away, without the link', () => {
+  it('is a one-line chip that a tap removes, without the link', () => {
     resetDismissedNotices();
     const action = { label: 'Configuration → GPS & Compass', onClick: () => undefined };
     const chip = render(<MapNoticeChip text="REFERENCE: compass offset not reported" action={action} compact />);
@@ -265,14 +265,12 @@ describe('compact map notice', () => {
     expect(chip).not.toContain('map-chip-action');
   });
 
-  it('stays a small mark once folded, until its cause changes', () => {
+  it('stays away once tapped, until its cause changes', () => {
     resetDismissedNotices();
     expect(noticeKey('DoA held · last 17:23:12 · DoA record stale')).toBe(noticeKey('DoA held · last 17:25:40 · DoA record stale'));
     expect(noticeKey('DoA held · last 17:23:12 · DoA record stale')).not.toBe(noticeKey('DoA held · last 17:23:12 · DAQ not synced'));
     foldNotice('DoA held · last 17:23:12 · DoA record stale');
-    const folded = render(<MapNoticeChip text="DoA held · last 17:25:40 · DoA record stale" compact />);
-    expect(folded).toContain('class="map-data-chip is-compact is-folded"');
-    expect(folded).toContain('class="map-chip-flag" aria-label="DoA held · last 17:25:40 · DoA record stale"');
+    expect(render(<MapNoticeChip text="DoA held · last 17:25:40 · DoA record stale" compact />)).toBe('');
     expect(render(<MapNoticeChip text="DoA held · last 17:25:40 · DAQ not synced" compact />)).toContain('map-chip-toggle');
     resetDismissedNotices();
   });

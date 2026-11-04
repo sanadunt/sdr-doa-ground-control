@@ -410,6 +410,21 @@ function OverviewPageView({
   const estimateCard = estimate && overlaySettings.estimateVisible && (!compact || estimate.state === 'ESTIMATE') ? <EstimatePanel estimate={estimate} viewOnly={viewOnly} compact={compact || panels.layers} /> : null;
   const layersPanel = panels.layers ? <LayersPanel settings={overlaySettings} scale={overlayScale} onChange={onOverlayChange} onClose={() => onPanelsChange({ ...panels, layers: false })} basemapId={basemapId} onBasemapChange={onBasemapSelect} /> : null;
 
+  const polarDock = (
+    <PolarDock
+      snapshot={snapshot}
+      localSnapshotFresh={localSnapshotFresh}
+      settings={plotSettings}
+      curveOffset={curveOffset}
+      offsetSource={offsetSource}
+      offsetVerified={offsetVerified}
+      compassConfig={compassConfig}
+      onCompassConfigChanged={onCompassConfigChanged}
+      view={polarViewSettings}
+      onViewChange={onPolarViewChange}
+      heldSeed={heldSeed}
+    />
+  );
   // + and − over the map in the corner window; the window itself swaps the views on a click.
   const pipZoom = main === 'video' ? (
     <div className="ov-pip-zoom" role="group" aria-label={t('overview.pipZoom')}>
@@ -422,6 +437,7 @@ function OverviewPageView({
     const droneTag = droneChip(droneFeed.view);
     const tabs: ReadonlyArray<{ id: CompactTab; label: string; tag?: { code: string; tone: string } }> = [
       { id: 'spectrum', label: t('overview.tabSpectrum') },
+      { id: 'polar', label: t('overview.tabPolar') },
       { id: 'drone', label: t('overview.tabDrone'), tag: droneTag },
       { id: 'node', label: t('overview.tabNode'), tag: { code: doa.code, tone: doa.shown ? 'good' : 'warn' } },
       ...(viewOnly ? [] : [{ id: 'control' as const, label: t('overview.tabControl') }]),
@@ -469,6 +485,7 @@ function OverviewPageView({
           </div>
           <div className="ov-side-panel" id="ov-side-panel" role="tabpanel" aria-labelledby={`ov-tab-${tab}`}>
             {tab === 'spectrum' ? <div className="ov-dock">{spectrumDock}</div> : null}
+            {tab === 'polar' ? polarDock : null}
             {tab === 'drone' ? (
               <section id="panel-drone" className="ov-drone ov-card" aria-label={t('drone.title')}>
                 <DroneDetails view={droneFeed.view} health={droneFeed.health} video={droneVideo} />
@@ -520,21 +537,7 @@ function OverviewPageView({
       </div>
       {dockShown ? (
         <div className="ov-dock" ref={dockRef}>
-          {polarShown ? (
-            <PolarDock
-              snapshot={snapshot}
-              localSnapshotFresh={localSnapshotFresh}
-              settings={plotSettings}
-              curveOffset={curveOffset}
-              offsetSource={offsetSource}
-              offsetVerified={offsetVerified}
-              compassConfig={compassConfig}
-              onCompassConfigChanged={onCompassConfigChanged}
-              view={polarViewSettings}
-              onViewChange={onPolarViewChange}
-              heldSeed={heldSeed}
-            />
-          ) : null}
+          {polarShown ? polarDock : null}
           {panels.spectrum ? spectrumDock : null}
         </div>
       ) : null}

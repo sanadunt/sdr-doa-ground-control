@@ -9,7 +9,7 @@ import { doaSample, snapshotRf } from '../../lib/telemetrySource';
 import { hudBearing } from '../DoaReadout';
 
 /** The tabs of the compact side panel. */
-export type CompactTab = 'spectrum' | 'drone' | 'node' | 'control';
+export type CompactTab = 'spectrum' | 'polar' | 'drone' | 'node' | 'control';
 
 /**
  * The compact layout's row under the main view, always shown: the bearing with
