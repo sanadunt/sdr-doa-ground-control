@@ -2,6 +2,14 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.15.1
+
+Rilis perbaikan dari uji tablet 3.14.0, ditambah tukar video dan peta di PC.
+
+- **Pesan kuning tidak lagi tertutup Lapisan.** Di tablet, selama panel Lapisan terbuka, pesan peta pindah ke kanan panel di bagian atas peta, tidak lagi turun ke tengah peta di bawah panel. Di ponsel yang sempit pesan tetap di bawah panel, dan selalu disisakan tempat di atas tombol peta.
+- **Peta kecil memperlihatkan grafik DoA.** Selama video drone tampil besar, peta di jendela kecil otomatis memusatkan dan men-zoom ke arah grafiknya (garis bearing dan tepi −3 dB, atau beam bila tidak ada bearing). Penanda dibuat lebih kecil, tombol peta dan pesan tidak tampil, dan bingkainya diperbarui setiap data baru. Tombol + dan − di pojok kanan atas jendela kecil menambah atau mengurangi zoom di atas bingkai otomatis itu (sampai 6 langkah), dan zoom itu tetap dipakai saat data baru datang. Saat peta kembali besar, posisi kamera peta besar dipulihkan seperti sebelumnya.
+- **Tukar video dan peta di PC.** Tombol perbesar di panel Drone sekarang menampilkan video drone besar di belakang panel, dan peta beserta grafik DoA pindah ke jendela kecil di kiri bawah, di samping kolom HUD dan Lapisan. Klik jendela kecil atau tombol yang sama untuk menukar kembali. Fitur ini berlaku mulai lebar 1024 px; tampilan bertumpuk di bawah itu tetap seperti sebelumnya.
+- **Bahasa dan tema di bar atas tablet.** Tombol EN/ID dan terang/gelap kini ada langsung di bar atas tablet, juga di LAN view. Pilihan ini berlaku untuk browser itu sendiri. Di ponsel di bawah 480 px keduanya tetap ada di menu ☰.
 ## 3.15.0
 
 Kontrol bisa mengoperasikan RDF-SDR dari groundstation (keputusan pemilik 2026-11-04). Ini perintah yang sudah diterima RDF Node edge, dan console kini juga mengirimnya: menyalakan dan menghentikan pemrosesan RDF, me-restart service RDF, serta me-reboot atau mematikan Raspberry RDF-SDR.

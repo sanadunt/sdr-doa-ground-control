@@ -125,6 +125,14 @@ describe('compact top bar', () => {
     expect(menuFooter(shell({ layout: null }))).not.toContain('<select');
   });
 
+  it('keeps the language and the theme one tap away in the bar, also in the LAN view', () => {
+    const bar = header(shell({ access: 'lan-view' }));
+    expect(bar).toContain('<button class="icon-button compact-lang" type="button" lang="id" aria-label="Bahasa Indonesia" title="Bahasa Indonesia">ID</button>');
+    expect(bar).toContain('class="icon-button compact-theme"');
+    expect(header(shell({}, 'id'))).toContain('lang="en" aria-label="English"');
+    expect(header(shell({ layout: null }))).not.toContain('compact-lang');
+  });
+
   it('shows VIEW ONLY in the bar and no Restart/Shutdown in the LAN view', () => {
     const markup = shell({ access: 'lan-view' }, 'id');
     expect(header(markup)).toContain('view-only-chip');
@@ -192,7 +200,7 @@ describe('compact dashboard', () => {
       heading_at_doa: null, array_heading_offset_deg: 0, video_enabled: true,
     };
     const markup = dashboard('compact-landscape', { snapshot: liveSnapshot({ drone } as Partial<TelemetrySnapshot>) });
-    expect(markup).toMatch(/<div class="ov-main" data-main="map"><div class="ov-map">[\s\S]*<div class="ov-video">[\s\S]*<button type="button" class="ov-pip-swap" aria-label="Show the drone video large"/);
+    expect(markup).toMatch(/<div class="ov-main" data-main="map"><div class="ov-map">[\s\S]*<div class="ov-video">[\s\S]*<div class="ov-pip"><button type="button" class="ov-pip-swap" aria-label="Show the drone video large"/);
     expect(markup).toContain('25 m · 87°');
     expect(markup).toContain('RTK FIXED');
     // Video off on the console: no corner window, the map stays the main view.

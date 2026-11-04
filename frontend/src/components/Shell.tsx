@@ -8,6 +8,7 @@ import { dataOutUnused, loraChip } from '../lib/loraLink';
 import { shortcutAction } from '../lib/shortcuts';
 import { THEME_STORAGE_KEY, readPreference, writePreference } from '../lib/preferenceStore';
 import { LANGS, gateReasonLabel, useI18n } from '../lib/i18n';
+import type { Lang } from '../lib/i18n';
 import type { MessageKey, Translate } from '../lib/i18n';
 import { Icon } from './ui';
 import { ROUTES, routeFromHash, routeHash } from '../lib/routes';
@@ -18,6 +19,9 @@ import { DeliveryChecklist } from './DeliveryChecklist';
 import { HostPowerControls } from './HostPowerControls';
 import type { HostPowerCapability } from '../lib/hostPower';
 import type { CompactLayout } from '../lib/compactLayout';
+
+/** Each language by its own name, for the compact bar's switch (no translation needed). */
+const LANG_NAMES: Readonly<Record<Lang, string>> = { en: 'English', id: 'Bahasa Indonesia' };
 
 export { ROUTES, routeShortcut } from '../lib/routes';
 export type { RouteName } from '../lib/routes';
@@ -325,6 +329,7 @@ export function ConsoleShell({
       {intervals.map((seconds) => <option key={seconds} value={seconds}>{seconds === 0 ? t('shell.refreshManual') : t('common.durationS', { value: seconds })}</option>)}
     </select>
   );
+  const otherLang: Lang = lang === 'en' ? 'id' : 'en';
   const langSwitch = (
     <div className="lang-switch" role="group" aria-label={t('shell.language')}>
       {LANGS.map((option) => (
@@ -445,6 +450,17 @@ export function ConsoleShell({
           {toolbar ? <div className="topbar-toolbar">{toolbar}</div> : null}
           <div className="topbar-tools">
             {viewOnly ? <span className="ov-chip tone-info view-only-chip"><Icon name="lock" /><span className="view-only-text">{t('shell.viewOnly')}</span></span> : null}
+            {/* Compact: language and theme stay one tap away in the bar, also in the LAN view (this browser's own choice). */}
+            {compact ? (
+              <>
+                <button className="icon-button compact-lang" type="button" lang={otherLang} aria-label={LANG_NAMES[otherLang]} title={LANG_NAMES[otherLang]} onClick={() => setLang(otherLang)}>
+                  {otherLang.toUpperCase()}
+                </button>
+                <button className="icon-button compact-theme" type="button" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} aria-label={themeLabel} title={themeLabel}>
+                  <Icon name={theme === 'dark' ? 'sun' : 'moon'} />
+                </button>
+              </>
+            ) : null}
             <button className={`icon-button refresh-button${loading ? ' is-loading' : ''}`} type="button" onClick={onRefresh} aria-busy={loading} aria-label={t(refreshLora ? 'shell.refreshLora' : 'shell.refresh')} aria-keyshortcuts="R" title={t(refreshLora ? 'shell.refreshShortcutLora' : 'shell.refreshShortcut')}>
               <Icon name="refresh" />
             </button>
