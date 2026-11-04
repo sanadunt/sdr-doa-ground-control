@@ -25,20 +25,17 @@ export function resetDismissedNotices(): void {
 
 /**
  * One map notice (basemap unavailable, overlay held, the REFERENCE compass
- * notice with its link). In the compact touch layout it is a one-line chip;
- * a tap folds it to a small "ⓘ" mark, so it stops covering the map. The mark
- * opens the whole notice with its link, and a tap there folds it again. A
- * notice of another cause shows whole again. Every notice keeps the warning colour.
+ * notice with its link). In the compact touch layout it is a one-line chip
+ * without the link, and a tap removes it until its cause changes (the info row
+ * and the tabs still say what it said). Every notice keeps the warning colour.
  */
 export function MapNoticeChip({ text, action = null, compact = false }: {
   text: string;
   /** The link that fixes the cause, e.g. Configuration → GPS & Compass. */
   action?: { label: string; onClick: () => void } | null;
   compact?: boolean;
-}): JSX.Element {
-  const key = noticeKey(text);
-  const [folded, setFolded] = useState(() => dismissed.has(key));
-  const [expanded, setExpanded] = useState(false);
+}): JSX.Element | null {
+  const [, setDismissals] = useState(0);
   if (!compact) {
     if (!action) return <div className="map-data-chip" role="status">{text}</div>;
     return (
@@ -48,24 +45,17 @@ export function MapNoticeChip({ text, action = null, compact = false }: {
       </div>
     );
   }
+  // A tap removes the notice until its cause changes.
+  if (dismissed.has(noticeKey(text))) return null;
   const fold = () => {
     foldNotice(text);
-    setFolded(true);
-    setExpanded(false);
+    setDismissals((count) => count + 1);
   };
-  if (folded && !expanded) {
-    return (
-      <div className="map-data-chip is-compact is-folded" role="status">
-        <button type="button" className="map-chip-flag" aria-label={text} title={text} onClick={() => setExpanded(true)}>ⓘ</button>
-      </div>
-    );
-  }
   return (
-    <div className={`map-data-chip is-compact${expanded ? ' is-expanded' : ''}`} role="status">
-      <button type="button" className="map-chip-toggle" title={expanded ? undefined : text} onClick={fold}>
+    <div className="map-data-chip is-compact" role="status">
+      <button type="button" className="map-chip-toggle" title={text} onClick={fold}>
         <span className="map-chip-text">{text}</span>
       </button>
-      {expanded && action ? <button type="button" className="map-chip-action" onClick={action.onClick}>{action.label}</button> : null}
     </div>
   );
 }

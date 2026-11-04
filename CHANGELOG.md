@@ -2,6 +2,14 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.15.2
+
+Rilis perbaikan untuk tablet. Tidak ada yang dihapus.
+
+- **Tab RDF-SDR bisa di-scroll lagi.** Bagian detail kartu RDF-SDR (juga baris drone dan Kontrol) punya kotak scroll sendiri yang menahan usapan, sehingga panel samping tidak bergerak saat diusap di atas detail itu. Di tablet, sekarang panel samping yang di-scroll.
+- **Tab Polar di tablet.** Panel samping punya tab baru, Polar, berisi grafik DoA beserta pengaturannya (Kompas|Polar, Atur), sama seperti dock Polar di PC.
+- **Pesan kuning di peta hilang saat disentuh.** Di tablet, sentuh pesan di peta untuk menghilangkannya. Tidak ada lagi tanda ⓘ yang tertinggal. Pesan muncul lagi hanya bila penyebabnya berubah. Keadaan bearing tetap terbaca di baris info dan di tab RDF-SDR.
+
 ## 3.15.1
 
 Rilis perbaikan dari uji tablet 3.14.0, ditambah tukar video dan peta di PC.
