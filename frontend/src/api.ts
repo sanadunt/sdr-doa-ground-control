@@ -597,11 +597,20 @@ export const CONFIG_COMMAND_STATES = [
   'published', 'delivered', 'acknowledged', 'acked', 'reported', 'publish_failed', 'no_ack', 'no_final_ack', 'no_report',
 ] as const;
 const FINAL_COMMAND_STATES: ReadonlySet<string> = new Set(['acked', 'reported', 'publish_failed', 'no_ack', 'no_final_ack', 'no_report']);
-const COMMAND_OPS = ['config.patch', 'config.get'] as const;
+/**
+ * config.patch and config.get, and since 3.15.0 the edge's operations
+ * (POST /api/mqtt/operation; the owner's decision of 2026-11-04).
+ */
+export const NODE_OPERATION_OPS = [
+  'processing.set', 'service.restart', 'system.reboot.prepare', 'system.reboot.execute',
+  'system.shutdown.prepare', 'system.shutdown.execute',
+] as const;
+const COMMAND_OPS = ['config.patch', 'config.get', ...NODE_OPERATION_OPS] as const;
 
 export type ConfigValueSource = typeof VALUE_SOURCES[number];
 export type ConfigCommandState = typeof CONFIG_COMMAND_STATES[number];
 export type ConfigCommandOp = typeof COMMAND_OPS[number];
+export type NodeOperationOp = typeof NODE_OPERATION_OPS[number];
 
 function oneOfValues<T extends string>(values: readonly T[], value: unknown): value is T {
   return typeof value === 'string' && (values as readonly string[]).includes(value);
@@ -668,6 +677,13 @@ export interface ConfigNodeView {
    * five fields before ant_spacing_m.
    */
   configFields: string[] | null;
+  /** The operations the node takes (capabilities.remote_*); null before its capabilities arrived. */
+  remoteProcessing: boolean | null;
+  remoteRestart: boolean | null;
+  remoteReboot: boolean | null;
+  remoteShutdown: boolean | null;
+  /** state.run: RUNNING, STOPPED, STARTING, STOPPING, ERROR or UNKNOWN; null when not sent. */
+  run: string | null;
 }
 
 /** The latest settings/reported, without its settings.json text. */
@@ -728,6 +744,11 @@ function normalizeNode(value: unknown): ConfigNodeView | null {
     remoteCommands: booleanOrNull(value.remote_commands),
     remoteConfigPatch: booleanOrNull(value.remote_config_patch),
     configFields: configFieldsOrNull(value.config_fields),
+    remoteProcessing: booleanOrNull(value.remote_processing),
+    remoteRestart: booleanOrNull(value.remote_restart),
+    remoteReboot: booleanOrNull(value.remote_reboot),
+    remoteShutdown: booleanOrNull(value.remote_shutdown),
+    run: codeOrNull(value.run),
   };
 }
 
@@ -812,6 +833,9 @@ export interface ConfigCommandAccepted {
   changes: ConfigPatchChanges;
 }
 
+const PROCESSING_STATES = ['RUNNING', 'STOPPED'] as const;
+export type ProcessingState = typeof PROCESSING_STATES[number];
+
 function patchChanges(value: unknown): ConfigPatchChanges {
   const changes: ConfigPatchChanges = {};
   if (!isObject(value)) return changes;
@@ -872,6 +896,34 @@ export async function requestConfigGet(signal?: AbortSignal): Promise<ConfigComm
   return normalizeConfigCommandAccepted(body);
 }
 
+export interface NodeOperationRequest {
+  op: NodeOperationOp;
+  /** processing.set only. */
+  desired?: ProcessingState;
+  /** An execute only: the command id of the prepare the RDF-SDR answered APPLIED. */
+  prepareId?: string;
+}
+
+/**
+ * Send one of the edge's operations after the operator confirmed it in
+ * Kontrol. The server checks Origin, admin, the node's capability, fresh
+ * health and one command at a time, and holds a prepare's challenge itself:
+ * the browser names only the prepare's id.
+ */
+export async function sendNodeOperation(request: NodeOperationRequest, signal?: AbortSignal): Promise<ConfigCommandAccepted> {
+  const payload: Record<string, unknown> = { op: request.op, confirm: true };
+  if (request.op === 'processing.set') payload.desired = request.desired;
+  if (request.op === 'system.reboot.execute' || request.op === 'system.shutdown.execute') payload.prepare_id = request.prepareId;
+  const body = await requestJson<unknown>('/api/mqtt/operation', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    cache: 'no-store',
+    body: JSON.stringify(payload),
+  }, signal);
+  return normalizeConfigCommandAccepted(body);
+}
+
 /** An edge ACK as Kontrol shows it. */
 export interface ConfigCommandAck {
   /** The edge's status: ACCEPTED, APPLYING, VERIFYING, APPLIED, PERSISTED_UNVERIFIED, ... */
@@ -910,6 +962,9 @@ export interface ConfigCommandAck {
   ignored: string[] | null;
   /** Contract 1.10, progress ACKs: the edge sends its final ACK within this many ms of this one. */
   finalWithinMs: number | null;
+  /** Operations: the state processing.set asked for, the seconds before a scheduled reboot or shutdown. */
+  desired: string | null;
+  delaySeconds: number | null;
   receivedAtMs: number | null;
 }
 
@@ -931,6 +986,14 @@ export interface ConfigCommandStatus {
   finalAckDeadlineMs: number | null;
   /** A timeout (no_ack, no_final_ack, no_report) a late answer may still replace. */
   lateAnswerPossible: boolean;
+  /** The node session the command named. */
+  sid: string | null;
+  /** processing.set: RUNNING or STOPPED. */
+  desired: string | null;
+  /** An execute: the prepare it used. */
+  prepareId: string | null;
+  /** A prepare the RDF-SDR answered APPLIED: until when the execute may go (clock of nowMs), else null. */
+  prepareValidUntilMs: number | null;
 }
 
 /** Contract 1.7 proof keys besides the fields: the DAQ and the settings after a retune or restart. */
@@ -1004,6 +1067,8 @@ function normalizeAck(value: unknown): ConfigCommandAck | null {
     fields: namesOrNull(value.fields, FIELD_NAME_RE),
     ignored: namesOrNull(value.ignored, KEY_NAME_RE),
     finalWithinMs: integerOrNull(value.final_within_ms, 0),
+    desired: codeOrNull(value.desired),
+    delaySeconds: integerOrNull(value.delay_seconds, 0),
     receivedAtMs: integerOrNull(value.received_at_ms, 0),
   };
 }
@@ -1029,6 +1094,10 @@ export function normalizeConfigCommandStatus(value: unknown): ConfigCommandStatu
     settingsReportedAtMs: integerOrNull(value.settings_reported_at_ms, 0),
     finalAckDeadlineMs: integerOrNull(value.final_ack_deadline_ms, 0),
     lateAnswerPossible: value.late_answer_possible === true,
+    sid: typeof value.sid === 'string' && SESSION_ID_RE.test(value.sid) ? value.sid : null,
+    desired: codeOrNull(value.desired),
+    prepareId: commandIdOrNull(value.prepare_id),
+    prepareValidUntilMs: integerOrNull(value.prepare_valid_until_ms, 0),
   };
 }
 
@@ -1037,8 +1106,17 @@ export function normalizeConfigCommandStatus(value: unknown): ConfigCommandStatu
  * config.patch (null when there is none), so a reload can resume.
  */
 export async function getConfigPatchStatus(commandId?: string, signal?: AbortSignal): Promise<ConfigCommandStatus | null> {
+  return commandStatus('/api/mqtt/config-patch', commandId, signal);
+}
+
+/** Status of one operation this console sent, or with no id the latest operation (null when there is none). */
+export async function getOperationStatus(commandId?: string, signal?: AbortSignal): Promise<ConfigCommandStatus | null> {
+  return commandStatus('/api/mqtt/operation', commandId, signal);
+}
+
+async function commandStatus(base: string, commandId: string | undefined, signal?: AbortSignal): Promise<ConfigCommandStatus | null> {
   if (commandId !== undefined && !COMMAND_ID_RE.test(commandId)) throw new Error('invalid command id');
-  const path = commandId === undefined ? '/api/mqtt/config-patch' : `/api/mqtt/config-patch/${encodeURIComponent(commandId)}`;
+  const path = commandId === undefined ? base : `${base}/${encodeURIComponent(commandId)}`;
   const body = await requestJson<unknown>(path, {
     cache: 'no-store',
     credentials: 'same-origin',
