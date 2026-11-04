@@ -1650,7 +1650,8 @@ class SourceHttpTests(unittest.TestCase):
         node = LoopbackNode()
         self.addCleanup(node.close)
         server, port = self.start_console(node.fetcher)
-        clock = FakeClock(time.monotonic())
+        # Whole seconds: steps then add up exactly (from a start such as 511.99, fifteen 2 s steps make 29.99999999999994).
+        clock = FakeClock(float(int(time.monotonic())))
         server.data_out.clock = clock
         self.live_edge()
         self.get(port)
