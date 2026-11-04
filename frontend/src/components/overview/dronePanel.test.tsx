@@ -113,6 +113,14 @@ describe('drone panel', () => {
     expect(droneVideoText(normalizeDroneVideoHealth({ state: 'DISABLED', reason: 'NOT_CONFIGURED' }), 'idle', null, en)).toBe('This console has no video service.');
     expect(droneVideoText(OK, 'error', 'DRONE_VIDEO_NO_STREAM', en)).toBe('No picture from the drone camera.');
     expect(droneVideoText(OK, 'playing', null, en)).toBeNull();
+    // On demand and nobody watching: standby, and the player still starts (its offer starts the pull).
+    const standby = normalizeDroneVideoHealth({ state: 'STANDBY', on_demand: true });
+    expect(standby.state).toBe('STANDBY');
+    expect(droneVideoText(standby, 'idle', null, en)).toBe('Standby: the camera is pulled only while the video plays.');
+    expect(droneVideoText(standby, 'connecting', null, en)).toBe('Connecting video…');
+    expect(droneVideoStatus(standby, 'idle', null, en)).toEqual({ value: 'Standby · the camera is pulled when the video plays', tone: 'is-empty' });
+    expect(droneVideoStatus(standby, 'connecting', null, en).value).toBe('Connecting…');
+    expect(droneVideoStatus(standby, 'error', 'DRONE_VIDEO_NO_STREAM', en).value).toContain('no camera picture');
     expect(normalizeDroneVideoHealth({ state: 'WHAT' }).state).toBe('DOWN');
   });
 });

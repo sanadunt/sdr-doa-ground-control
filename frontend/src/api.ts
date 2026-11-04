@@ -1057,7 +1057,8 @@ export async function getDrone(signal?: AbortSignal): Promise<unknown> {
   return requestJson<unknown>('/api/drone', { cache: 'no-store' }, signal);
 }
 
-export type DroneVideoState = 'OK' | 'NO_CAMERA' | 'NO_ENCODER' | 'DOWN' | 'DISABLED';
+/** STANDBY: the camera is pulled only while someone watches (PULL=on-demand) and nobody does; no fault. */
+export type DroneVideoState = 'OK' | 'STANDBY' | 'NO_CAMERA' | 'NO_ENCODER' | 'DOWN' | 'DISABLED';
 
 export interface DroneVideoHealth {
   state: DroneVideoState;
@@ -1069,7 +1070,7 @@ export interface DroneVideoHealth {
   error: string | null;
 }
 
-const DRONE_VIDEO_STATES: readonly DroneVideoState[] = ['OK', 'NO_CAMERA', 'NO_ENCODER', 'DOWN', 'DISABLED'];
+const DRONE_VIDEO_STATES: readonly DroneVideoState[] = ['OK', 'STANDBY', 'NO_CAMERA', 'NO_ENCODER', 'DOWN', 'DISABLED'];
 
 export function normalizeDroneVideoHealth(value: unknown): DroneVideoHealth {
   const input = value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};

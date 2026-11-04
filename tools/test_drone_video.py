@@ -35,6 +35,8 @@ class FakeMediamtx:
 
     def __init__(self) -> None:
         self.paths: Any = PATHS_OK
+        # GET /v3/config/paths/get/drone; None answers 404 (a mediamtx without that route).
+        self.drone_config: Any = {"name": "drone", "runOnInit": "ffmpeg ...", "runOnDemand": ""}
         self.whep_status = 201
         self.requests: List[Dict[str, Any]] = []
         outer = self
@@ -55,6 +57,8 @@ class FakeMediamtx:
                 outer.requests.append({"method": "GET", "path": self.path})
                 if self.path == "/v3/paths/list":
                     self._reply(200, json.dumps(outer.paths).encode())
+                elif self.path == "/v3/config/paths/get/drone" and outer.drone_config is not None:
+                    self._reply(200, json.dumps(outer.drone_config).encode())
                 else:
                     self._reply(404, b"")
 
@@ -261,6 +265,34 @@ class VideoHealthTests(DroneServerCase):
         server.drone_video._cached = None
         self.mediamtx.paths = "garbage"
         self.assertEqual(server.drone_video.health()["state"], "NO_CAMERA")
+
+    def test_on_demand_idle_is_standby(self) -> None:
+        # The camera is pulled only while someone watches: idle, nothing is ready and that is not a fault.
+        server = self.start_drone_server()
+        self.mediamtx.drone_config = {"name": "drone", "runOnInit": "", "runOnDemand": "ffmpeg ..."}
+        self.mediamtx.paths = {"items": [{"name": "raw", "ready": False, "readers": []}, {"name": "drone", "ready": False, "readers": []}]}
+        server.drone_video._cached = None
+        view = server.drone_video.health()
+        self.assertEqual((view["state"], view["on_demand"]), ("STANDBY", True))
+        # Someone watches: the same states as an always-on service.
+        self.mediamtx.paths = PATHS_OK
+        server.drone_video._cached = None
+        self.assertEqual(server.drone_video.health()["state"], "OK")
+        self.mediamtx.paths = {"items": [{"name": "raw", "ready": False, "readers": []},
+                                         {"name": "drone", "ready": False, "readers": [{"type": "webRTCSession"}]}]}
+        server.drone_video._cached = None
+        self.assertEqual(server.drone_video.health()["state"], "NO_CAMERA")
+        # Always on (or a mediamtx without the config route): idle reads as before.
+        for config in ({"name": "drone", "runOnInit": "ffmpeg ...", "runOnDemand": ""}, None):
+            self.mediamtx.drone_config = config
+            self.mediamtx.paths = {"items": [{"name": "raw", "ready": False}, {"name": "drone", "ready": False}]}
+            server.drone_video._cached = None
+            view = server.drone_video.health()
+            self.assertEqual((view["state"], view["on_demand"]), ("NO_CAMERA", False))
+
+    def test_the_offer_waits_for_an_on_demand_start(self) -> None:
+        # The camera, then ffmpeg, start only when the offer comes: the proxy waits longer than for a read.
+        self.assertGreaterEqual(dv.WHEP_OFFER_TIMEOUT_S, 20.0)
 
     def test_service_down(self) -> None:
         service = dv.VideoService("http://127.0.0.1:9", "http://127.0.0.1:9")

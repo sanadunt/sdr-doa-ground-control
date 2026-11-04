@@ -4,7 +4,7 @@ Kamera SIYI di drone mengirim HEVC 1280×720 30 fps lewat RTSP (`rtsp://<drone>:
 
 `drone-video-supervisor` berjalan di host groundstation, di luar Docker (`packaging/drone-video`, ikut tarball console seperti `packaging/ground-gps`). Ia menjalankan [mediamtx](https://github.com/bluenviron/mediamtx) sebagai proses anak:
 
-- path `raw`: mediamtx menarik kamera, selalu lewat TCP;
+- path `raw`: mediamtx menarik kamera, selalu lewat TCP; dengan `PULL=on-demand` (bawaan) hanya selama ada yang menonton video;
 - path `drone`: ffmpeg yang dijalankan mediamtx membaca `raw`, meng-encode ke H.264 baseline (`-g 30 -bf 0`, tanpa audio) dan menerbitkannya kembali ke mediamtx;
 - browser membaca `drone` lewat WebRTC.
 
@@ -22,6 +22,14 @@ Kamera SIYI di drone mengirim HEVC 1280×720 30 fps lewat RTSP (`rtsp://<drone>:
 - Host kamera berubah: konfigurasi ditulis ulang dan mediamtx dimulai ulang. mediamtx berhenti sendiri: dijalankan lagi setelah 2 detik, berlipat sampai 30 detik (kembali ke 2 detik setelah berjalan 60 detik).
 - `SIGTERM` (`systemctl stop`) menghentikan mediamtx dengan rapi (SIGTERM, tunggu 5 detik, lalu kill) dan supervisor keluar dengan 0.
 - Setiap perubahan (encoder, kamera, start, exit) tercatat satu baris di journal. User dan password di `CAMERA_URL` tidak pernah dicatat.
+
+## Kapasitas radio drone
+
+Radio drone → remote hanya cukup untuk sekitar dua stream kamera 800 kbps (diukur 4 November 2026), dan aplikasi VGCS di remote sudah mengambil satu. Karena itu:
+
+- **Hanya satu penarik kamera di LAN.** Service ini atau gateway dashboard SIYI, jangan keduanya sekaligus. Browser dan tablet sebanyak apa pun menonton lewat service ini (WebRTC), tidak pernah langsung dari remote.
+- Bawaannya `PULL=on-demand`: kamera hanya ditarik selama ada yang memutar video. Video butuh beberapa detik untuk mulai.
+- Bitrate kamera (800 kbps) diatur di kamera dengan perintah SDK SIYI, bukan oleh service ini; service ini tidak pernah mengirim perintah ke kamera.
 
 ## Port
 
@@ -91,6 +99,7 @@ Service berjalan sebagai user sementara miliknya sendiri (`DynamicUser=yes`) di 
 | `CONSOLE_URL` | `http://127.0.0.1:8787` | console yang ditanya host drone, `http://HOST[:PORT]` |
 | `ENCODER` | `auto` | `auto`, `vaapi`, `x264`, `nvenc`, `v4l2m2m` atau `videotoolbox` |
 | `BITRATE` | `2500k` | bit rate H.264, angka dengan `k` atau `M` |
+| `PULL` | `on-demand` | `on-demand`: kamera ditarik lewat radio drone hanya selama video diputar (mulai beberapa detik, berhenti 10 detik setelah penonton terakhir); `always`: ditarik sejak awal, video langsung muncul |
 | `WEBRTC_ADDITIONAL_HOSTS` | kosong | alamat IP atau nama host tambahan yang ditawarkan WebRTC ke browser, dipisah koma |
 | `MEDIAMTX_BIN` | `mediamtx` | nama di PATH atau path absolut |
 | `FFMPEG_BIN` | `ffmpeg` | nama di PATH atau path absolut |
@@ -128,6 +137,7 @@ drone-video-supervisor print-config                     # konfigurasi mediamtx y
 
 | Gejala | Sebab |
 |---|---|
+| System Health: Video drone `STANDBY` | normal dengan `PULL=on-demand`: belum ada yang menonton, kamera belum ditarik |
 | `raw` tidak ready | drone belum ditemukan console (lihat System Health), kamera mati, atau RTSP 8554 tidak tercapai |
 | `raw` ready, `drone` tidak | ffmpeg gagal: encoder tidak tersedia, driver VAAPI, atau `FFMPEG_BIN` salah; coba `ENCODER=x264` |
 | service tidak mau mulai, journal menyebut grup | grup `render` atau `video` tidak ada; `sudo systemctl edit drone-video` dan isi `SupplementaryGroups=` dengan grup yang ada |

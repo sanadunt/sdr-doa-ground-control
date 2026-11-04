@@ -35,9 +35,14 @@ SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 MAX_SDP_BYTES = 64 * 1024
 MAX_API_BYTES = 256 * 1024
 TIMEOUT_S = 3.0
+# With PULL=on-demand the camera and then ffmpeg start only when an offer comes
+# (mediamtx waits up to runOnDemandStartTimeout, 20 s), so the offer waits longer.
+WHEP_OFFER_TIMEOUT_S = 25.0
 HEALTH_CACHE_S = 1.0
 
-STATES = ("OK", "NO_CAMERA", "NO_ENCODER", "DOWN", "DISABLED")
+# STANDBY: the service pulls the camera only while someone watches (PULL=on-demand)
+# and nobody does, so nothing is ready and that is no fault.
+STATES = ("OK", "STANDBY", "NO_CAMERA", "NO_ENCODER", "DOWN", "DISABLED")
 # Error codes of the video routes (sent outside the Kontrol code contract).
 VIDEO_DISABLED = "DRONE_VIDEO_DISABLED"
 VIDEO_UNAVAILABLE = "DRONE_VIDEO_UNAVAILABLE"
@@ -71,14 +76,21 @@ def _count(value: Any) -> Optional[int]:
     return value if type(value) is int and value >= 0 else None
 
 
-def health_from_paths(body: Any) -> Dict[str, Any]:
-    """The service's state from mediamtx's ``/v3/paths/list`` answer."""
+def health_from_paths(body: Any, on_demand: bool = False) -> Dict[str, Any]:
+    """The service's state from mediamtx's ``/v3/paths/list`` answer.
+
+    ``on_demand``: the video path runs ffmpeg only while it has readers
+    (runOnDemand), so an idle path with no reader is STANDBY.
+    """
     items = body.get("items") if isinstance(body, dict) else None
     raw = _path_item(items, RAW_PATH)
     drone = _path_item(items, VIDEO_PATH)
     camera_ready = bool(raw and raw.get("ready") is True)
     video_ready = bool(drone and drone.get("ready") is True)
-    if not camera_ready:
+    watched = bool(drone and isinstance(drone.get("readers"), list) and drone["readers"])
+    if on_demand and not video_ready and not watched:
+        state = "STANDBY"
+    elif not camera_ready:
         state = "NO_CAMERA"
     elif not video_ready:
         state = "NO_ENCODER"
@@ -88,6 +100,7 @@ def health_from_paths(body: Any) -> Dict[str, Any]:
     tracks = drone.get("tracks") if drone else None
     return {
         "state": state,
+        "on_demand": on_demand,
         "camera_ready": camera_ready,
         "video_ready": video_ready,
         "camera_bytes": _count(raw.get("bytesReceived")) if raw else None,
@@ -119,13 +132,23 @@ class VideoService:
     def configured(self) -> bool:
         return self.api is not None and self.whep_upstream is not None
 
+    def _on_demand(self) -> bool:
+        """Whether the video path runs ffmpeg on demand (the supervisor's PULL=on-demand)."""
+        try:
+            with self._opener.open(f"{self.api}/v3/config/paths/get/{VIDEO_PATH}", timeout=TIMEOUT_S) as response:
+                raw = response.read(MAX_API_BYTES + 1)
+            config = json.loads(raw.decode("utf-8")) if len(raw) <= MAX_API_BYTES else None
+        except (OSError, ValueError, urllib.error.URLError):
+            return False
+        return isinstance(config, dict) and isinstance(config.get("runOnDemand"), str) and bool(config["runOnDemand"].strip())
+
     def health(self, enabled: bool = True) -> Dict[str, Any]:
         """GET /api/drone/video: the service's state, read at most once a second."""
         if not enabled or not self.configured:
             return {
                 "state": "DISABLED",
                 "reason": "TURNED_OFF" if not enabled else "NOT_CONFIGURED",
-                "camera_ready": False, "video_ready": False, "camera_bytes": None, "video_bytes": None,
+                "on_demand": False, "camera_ready": False, "video_ready": False, "camera_bytes": None, "video_bytes": None,
                 "readers": None, "tracks": [], "error": None,
             }
         now = self._clock()
@@ -137,11 +160,11 @@ class VideoService:
                 raw = response.read(MAX_API_BYTES + 1)
             if len(raw) > MAX_API_BYTES:
                 raise ValueError("answer too large")
-            view = health_from_paths(json.loads(raw.decode("utf-8")))
+            view = health_from_paths(json.loads(raw.decode("utf-8")), self._on_demand())
             view.update({"reason": None, "error": None})
         except (OSError, ValueError, urllib.error.URLError) as exc:
             view = {
-                "state": "DOWN", "reason": "SERVICE_UNREACHABLE",
+                "state": "DOWN", "reason": "SERVICE_UNREACHABLE", "on_demand": False,
                 "camera_ready": False, "video_ready": False, "camera_bytes": None, "video_bytes": None,
                 "readers": None, "tracks": [], "error": (str(exc) or type(exc).__name__)[:200],
             }
@@ -172,7 +195,7 @@ class VideoService:
             headers={"Content-Type": "application/sdp"},
         )
         try:
-            with self._opener.open(request, timeout=TIMEOUT_S) as response:
+            with self._opener.open(request, timeout=WHEP_OFFER_TIMEOUT_S) as response:
                 status = response.status
                 body = response.read(MAX_SDP_BYTES + 1)
                 location = response.headers.get("Location") or ""

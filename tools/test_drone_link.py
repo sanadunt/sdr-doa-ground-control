@@ -139,6 +139,47 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(store.view(0)["received"], 0)
 
 
+class PickHeadingTests(unittest.TestCase):
+    """One heading for every view, as the SIYI fix of 2026-11-04 (pickHeading()): yaw, then VFR_HUD, then position."""
+
+    def ingest(self, store, topic, t, **fields):
+        store.ingest(topic, encode(dict(payloads()[topic], **fields)), t)
+
+    def test_the_yaw_wins_over_the_reversed_hud_heading(self):
+        # Measured on the real FC: ATTITUDE yaw 139.3 while VFR_HUD says 220 and GLOBAL_POSITION_INT 0.
+        store = DroneStore()
+        self.ingest(store, "drone/attitude", 0, yaw_deg=139.3)
+        self.ingest(store, "drone/hud", 0, heading_deg=220)
+        self.ingest(store, "drone/position", 0, heading_deg=0)
+        self.assertEqual(store.view(0)["heading"], {"deg": 139.3, "source": "attitude", "age_ms": 0})
+        self.assertEqual(store.heading_at(0), {"deg": 139.3, "offset_ms": 0, "source": "attitude"})
+
+    def test_a_negative_yaw_reads_0_to_360(self):
+        store = DroneStore()
+        self.ingest(store, "drone/attitude", 0, yaw_deg=-45.0)
+        self.assertEqual(store.view(0)["heading"]["deg"], 315.0)
+        self.assertEqual(store.heading_at(0)["deg"], 315.0)
+
+    def test_fallback_order_hud_then_position(self):
+        store = DroneStore()
+        self.ingest(store, "drone/position", 0, heading_deg=0)
+        self.assertEqual(store.view(0)["heading"]["source"], "position")
+        self.ingest(store, "drone/hud", 0, heading_deg=220)
+        self.assertEqual(store.view(0)["heading"], {"deg": 220.0, "source": "hud", "age_ms": 0})
+        self.assertEqual(store.heading_at(0)["source"], "hud")
+        self.ingest(store, "drone/attitude", 0, yaw_deg=139.3)
+        self.assertEqual(store.view(0)["heading"]["source"], "attitude")
+        # A stale yaw gives way to a current HUD heading.
+        self.ingest(store, "drone/hud", 20_000, heading_deg=221)
+        self.assertEqual(store.view(20_000)["heading"], {"deg": 221.0, "source": "hud", "age_ms": 0})
+
+    def test_the_gps_course_never_counts_as_the_nose(self):
+        store = DroneStore()
+        self.ingest(store, "drone/gps", 0, course_deg=33.0)
+        self.assertIsNone(store.view(0)["heading"])
+        self.assertIsNone(store.heading_at(0))
+
+
 class HeadingHistoryTests(unittest.TestCase):
     def store_with_yaw(self, samples):
         store = DroneStore()

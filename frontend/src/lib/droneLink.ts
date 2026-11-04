@@ -71,7 +71,7 @@ export interface DroneBridgeLink extends Aged {
 export interface DroneHeadingAtDoa {
   deg: number;
   offset_ms: number;
-  source: 'attitude' | 'position';
+  source: DroneHeadingSource;
   doa_timestamp_ms: number | null;
 }
 
@@ -93,7 +93,7 @@ export interface DroneView {
   hud: DroneHud | null;
   statustext: { severity: number | null; text: string | null; age_ms: number | null } | null;
   link: DroneBridgeLink | null;
-  heading: { deg: number; source: 'attitude' | 'position'; age_ms: number | null } | null;
+  heading: { deg: number; source: DroneHeadingSource; age_ms: number | null } | null;
   headingAtDoa: DroneHeadingAtDoa | null;
   arrayHeadingOffsetDeg: number;
   videoEnabled: boolean;
@@ -146,6 +146,17 @@ function heading(value: unknown): number | null {
 
 function block<T>(value: unknown, read: (item: JsonObject) => T): T | null {
   return isObject(value) ? read(value) : null;
+}
+
+/**
+ * Where the console took the drone's heading from (tools/drone_link.py, the SIYI fix of
+ * 2026-11-04): the ATTITUDE yaw, else VFR_HUD, else GLOBAL_POSITION_INT. Every view reads
+ * that one heading; none picks its own.
+ */
+export type DroneHeadingSource = 'attitude' | 'hud' | 'position';
+
+function headingSource(value: unknown): DroneHeadingSource {
+  return value === 'hud' || value === 'position' ? value : 'attitude';
 }
 
 /** Read leniently: a bad field reads as null, never the whole block. */
@@ -230,13 +241,13 @@ export function normalizeDrone(value: unknown): DroneView | null {
       uptime_s: finite(item.uptime_s),
     })),
     heading: headingDeg !== null && headingBlock
-      ? { deg: headingDeg, source: headingBlock.source === 'position' ? 'position' : 'attitude', age_ms: finite(headingBlock.age_ms) }
+      ? { deg: headingDeg, source: headingSource(headingBlock.source), age_ms: finite(headingBlock.age_ms) }
       : null,
     headingAtDoa: atDoa && atDoaDeg !== null
       ? {
           deg: atDoaDeg,
           offset_ms: finite(atDoa.offset_ms) ?? 0,
-          source: atDoa.source === 'position' ? 'position' : 'attitude',
+          source: headingSource(atDoa.source),
           doa_timestamp_ms: finite(atDoa.doa_timestamp_ms),
         }
       : null,
