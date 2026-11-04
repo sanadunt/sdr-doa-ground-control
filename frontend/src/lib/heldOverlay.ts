@@ -112,15 +112,18 @@ function mergeIdentity(previous: OverlayIdentity, next: OverlayIdentity): Overla
 /**
  * The overlay to draw held, and the memory to keep. A live overlay is
  * remembered with the time it arrived (the same object while nothing in it
- * changes, so the map rebuilds nothing); while there is none and no live
- * bearing is drawn either (the MQTT DoA between Angular frames draws its live
- * bearing alone), the remembered one is drawn held, with no time cutoff.
+ * changes, so the map rebuilds nothing); while there is none, the remembered
+ * one is drawn held, with no time cutoff. That includes an MQTT DoA between
+ * Angular frames, which draws its live bearing: the held beam, lobe and edges
+ * stay beside it (owner's request of 2026-11-04: over Telemetry LoRa a frame
+ * comes rarely, as the polar dock keeps its curve), and only the held bearing
+ * line is left out (heldOverlayFeatures(), withBearing).
  * Simulation is never remembered and never draws a held overlay. Another node
  * or a restart of the same one (overlayIdentity()) forgets the memory.
  */
 export function rememberOverlay(
   previous: OverlayMemory | null,
-  input: { live: LiveOverlay | null; liveBearing: boolean; identity: OverlayIdentity; simulation: boolean; nowMs: number },
+  input: { live: LiveOverlay | null; identity: OverlayIdentity; simulation: boolean; nowMs: number },
 ): { draw: HeldOverlay | null; memory: OverlayMemory | null } {
   if (input.simulation) return { draw: null, memory: previous };
   let memory = previous;
@@ -135,7 +138,7 @@ export function rememberOverlay(
     return { draw: null, memory: memory && overlay === held && identity === memory.identity ? memory : { overlay, identity } };
   }
   const next = memory && identity === memory.identity ? memory : { overlay: held, identity };
-  return { draw: input.liveBearing ? null : held, memory: next };
+  return { draw: held, memory: next };
 }
 
 /** The geographic bearing the held overlay was drawn with, or null. */
@@ -156,6 +159,19 @@ export const PROVISIONAL_HELD_GAP_DEG = 3;
 export function provisionalBesideHeld(provisionalBearing: number | null, heldBearing: number | null): boolean {
   if (provisionalBearing === null) return false;
   return heldBearing === null || bearingGapDeg(provisionalBearing, heldBearing) > PROVISIONAL_HELD_GAP_DEG;
+}
+
+// The map's memory for the page (module scope keeps it across route changes); the
+// polar dock reads it too, so a seeded curve follows what the map remembers.
+let pageMemory: OverlayMemory | null = null;
+
+/** The map's remembered overlay for this page load, or null. */
+export function pageOverlayMemory(): OverlayMemory | null {
+  return pageMemory;
+}
+
+export function setPageOverlayMemory(memory: OverlayMemory | null): void {
+  pageMemory = memory;
 }
 
 /** The held time as the polar dock shows it ("last 20.27.52"). */
@@ -191,7 +207,7 @@ export const NO_HELD_FEATURES: HeldFeatures = {
  * remembered station position, into the held sources only (never the live
  * ones). `draw` carries the visibility and the dB scale in use.
  */
-export function heldOverlayFeatures(held: HeldOverlay | null, draw: DoaOverlaySettings): HeldFeatures {
+export function heldOverlayFeatures(held: HeldOverlay | null, draw: DoaOverlaySettings, withBearing = true): HeldFeatures {
   const origin = held?.origin;
   if (!origin || !held || held.values.length !== 360 || draw.maxDb <= draw.minDb) return NO_HELD_FEATURES;
   const halfPower = halfPowerWidth(held.values);
@@ -202,7 +218,7 @@ export function heldOverlayFeatures(held: HeldOverlay | null, draw: DoaOverlaySe
     'doa-held-heat': draw.heatmapVisible && draw.heatStyle === 'density' ? heatFeatures(origin, held.values, draw, curveOffset) : NONE,
     'doa-held-lobe': draw.lobeVisible ? { type: 'FeatureCollection', features: [lobeFeature(origin, held.values, draw, curveOffset)] } : NONE,
     'doa-held-edges': draw.edgesVisible ? edgeFeatures(origin, halfPower, draw, curveOffset) : NONE,
-    'doa-held-bearing': draw.bearingVisible && bearing !== null ? { type: 'FeatureCollection', features: [bearingFeature(origin, bearing, draw)] } : NONE,
+    'doa-held-bearing': withBearing && draw.bearingVisible && bearing !== null ? { type: 'FeatureCollection', features: [bearingFeature(origin, bearing, draw)] } : NONE,
     halfPower,
   };
 }

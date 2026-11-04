@@ -2,6 +2,15 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.13.3
+
+Rilis perbaikan: tidak ada yang dihapus. Grafik DoA lewat Telemetry LoRa tidak lagi sering hilang.
+
+- **DoA lewat LoRa berlaku 15 detik.** Lewat bridge LoRa, DoA tiba di groundstation 4–8 detik sekali dan sudah berumur 2–4 detik (diukur 2026-11-04). Dengan batas 5 detik, DoA bolak-balik USANG ("Snapshot kedaluwarsa") di antara dua pesan. Lewat LoRa batasnya sekarang 15 detik, untuk DoA `ok=1` maupun `ok=0` (`DOA_LORA_FRESH_MS`); browser mengikuti nilai yang disebut jawaban (`freshness.max_age_ms`). Lewat jaringan IP tetap 5 detik.
+- **Grafik DoA terakhir disimpan console.** Console menyimpan jawaban terakhir yang punya grafik DoA live (vektor Angular 360 bin) di memori, dan menyediakannya di `GET /api/doa/last-live` (juga di LAN view). Halaman yang baru dibuka, misalnya tablet atau kiosk setelah reload, langsung menggambar grafik itu sebagai grafik ditahan (USANG + jam data terakhir) di peta dan Polar, tidak kosong sampai frame Angular berikutnya. Sesi RDF-SDR lain atau URL Data Out lain menghapusnya.
+- **Grafik ditahan tetap tampil di samping bearing live.** Lewat LoRa garis bearing hampir selalu live, sedangkan frame Angular (bahan beam, lobe dan tepi −3 dB) jarang datang. Peta sekarang tetap menggambar beam, lobe dan tepi yang ditahan di samping bearing live, tanpa garis bearing kedua, dengan catatan "Grafik DoA ditahan · terakhir … · bearing live tanpa kurva Angular". Dock Polar sudah menahan kurvanya seperti ini.
+- Frekuensi frame Angular dari RDF-SDR lewat LoRa tidak berubah: itu diatur di sisi edge (repo Raspberry).
+
 ## 3.13.2
 
 Rilis perbaikan tampilan Dashboard; tidak ada yang dihapus.

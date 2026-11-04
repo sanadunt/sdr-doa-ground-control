@@ -124,6 +124,7 @@ from ground_gps import with_ground_gps
 import drone_video as dv
 from drone_discovery import AUTO as DRONE_AUTO, DroneService, drone_settings, is_drone_host
 from drone_link import with_drone
+import last_live_doa
 from mdns_resolver import MdnsResolver
 from sdr_doa_collector import (
     DATA_OUT_HOST_IN_USE,
@@ -3475,6 +3476,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/drone":
             self._send_json(self.console_server.drone_view())
             return
+        if parsed.path == last_live_doa.ROUTE:
+            self._send_json(self.console_server.last_live_doa.view())
+            return
         if parsed.path == "/api/drone/video":
             settings = self.console_server.get_config()["drone"]
             self._send_json(self.console_server.drone_video.health(settings["enabled"] and settings["video_enabled"]))
@@ -5052,6 +5056,8 @@ class GroundConsoleServer(ThreadingHTTPServer):
         self.drone_service: Optional[Any] = None
         self._drone_lock = threading.Lock()
         self.drone_video = drone_video if drone_video is not None else dv.VideoService()
+        # The last answer with a live DoA graph, for pages that open later (GET /api/doa/last-live).
+        self.last_live_doa = last_live_doa.LastLiveDoa()
         # The opt-in LAN view: a second listener of this process
         # (lan_access.py). It opens below, once this loopback socket is bound.
         self.lan = LanAccessManager(self)
@@ -5125,7 +5131,10 @@ class GroundConsoleServer(ThreadingHTTPServer):
         time, added to a copy because answers are shared between viewers.
         """
         answer = self.data_out.snapshot(base_url, request or SnapshotRequest())
-        return with_drone(with_ground_gps(answer, self._ground_gps_view()), self.drone_view(answer))
+        composed = with_drone(with_ground_gps(answer, self._ground_gps_view()), self.drone_view(answer))
+        # An answer with a live DoA graph is kept for pages that open later (last_live_doa.py).
+        self.last_live_doa.observe(composed)
+        return composed
 
     def _start_drone_service(self) -> None:
         """Start (or replace) the drone link with the saved drone settings."""

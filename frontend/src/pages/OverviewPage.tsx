@@ -25,6 +25,8 @@ import type { ReceiverBridge } from '../lib/receiverBridge';
 import { ZERO_INSETS, compactMapInsets, computeMapInsets, sameInsets, stackedRightTop } from '../lib/mapInsets';
 import type { MapInsets } from '../lib/mapInsets';
 import { primaryCandidate } from '../lib/telemetry';
+import { fetchLastLiveDoa, heldSeedFrom } from '../lib/lastLiveDoa';
+import type { LastLiveDoa } from '../lib/lastLiveDoa';
 import { positionEstimate, type PositionEstimate } from '../lib/positionEstimate';
 import { overLora } from '../lib/telemetrySource';
 import { useI18n } from '../lib/i18n';
@@ -153,6 +155,15 @@ function OverviewPageView({
   const latitude = simulation?.latitude ?? gpsCoordinate?.latitude;
   const longitude = simulation?.longitude ?? gpsCoordinate?.longitude;
   const source = simulation ? 'SIMULATION' : gpsCoordinate?.source;
+  // The console's last live DoA graph, read once per page: a page that opens while the DoA is
+  // stale holds that graph (marked STALE with its time) instead of nothing (lib/lastLiveDoa.ts).
+  const [lastLive, setLastLive] = useState<LastLiveDoa | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchLastLiveDoa(controller.signal).then(setLastLive, () => undefined);
+    return () => controller.abort();
+  }, []);
+  const heldSeed = useMemo(() => heldSeedFrom(lastLive, gpsConfig, compassConfig), [lastLive, gpsConfig, compassConfig]);
   // Keep the coordinate and settings objects stable across equal values so map
   // overlays and Plotly only update when the underlying numbers change.
   const coordinate = useMemo<MapCoordinate | null>(
@@ -327,6 +338,7 @@ function OverviewPageView({
               estimate={estimate}
               compact={compact}
               drone={droneMap}
+              heldSeed={heldSeed}
             />
           </Suspense>
         </LoadErrorBoundary>
@@ -377,6 +389,7 @@ function OverviewPageView({
               onCompassConfigChanged={onCompassConfigChanged}
               view={polarViewSettings}
               onViewChange={onPolarViewChange}
+              heldSeed={heldSeed}
             />
           ) : null}
           {panels.spectrum && viewOnly ? <SpectrumDockMirror feed={mirrorFeed} compact={compact || panels.layers} /> : null}

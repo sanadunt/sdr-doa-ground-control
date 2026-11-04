@@ -359,7 +359,7 @@ def _doa_candidate(node: Mapping[str, Any], convention: Optional[str]) -> Dict[s
             "received_age_ms": received_age,
             "fresh": doa.get("live") is True,
             "future_skew": "SOURCE_TIME_FUTURE" in reasons,
-            "max_age_ms": DOA_FRESH_MS,
+            "max_age_ms": _int(doa.get("max_age_ms")) or DOA_FRESH_MS,
             "reasons": reasons,
         },
         "doa_raw_deg": a,
