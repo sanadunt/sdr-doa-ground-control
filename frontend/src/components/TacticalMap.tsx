@@ -38,7 +38,7 @@ import { angularFrameAgeMs, angularHeld, doaSample, isMqttSnapshot } from '../li
 import { overviewDoaStatus } from '../lib/doaStatus';
 import { headingLabel, headingLabelPosition, headingLineFeatures, headingPopupText, rdfHeading, type RdfHeading } from '../lib/rdfHeading';
 import { NO_ESTIMATE_FEATURES, positionEstimateFeatures, positionEstimateLabel, type PositionEstimate } from '../lib/positionEstimate';
-import { HELD_LAYER_OF, NO_HELD_FEATURES, heldBearingDeg, heldLayerSpec, heldNoticeText, heldOverlayFeatures, heldTimeText, overlayIdentity, provisionalBesideHeld, rememberOverlay, type OverlayMemory } from '../lib/heldOverlay';
+import { HELD_LAYER_OF, NO_HELD_FEATURES, heldBearingDeg, heldLayerSpec, heldNoticeText, heldOverlayFeatures, heldTimeText, overlayIdentity, pageOverlayMemory, provisionalBesideHeld, rememberOverlay, setPageOverlayMemory } from '../lib/heldOverlay';
 import { seedOverlayMemory } from '../lib/lastLiveDoa';
 import type { HeldSeed } from '../lib/lastLiveDoa';
 import { useI18n } from '../lib/i18n';
@@ -144,9 +144,11 @@ interface CameraMemory {
 // when Overview opens again.
 let cameraMemory: CameraMemory | null = null;
 let lastLiveStation: MapCoordinate | null = null;
-// The last live DoA overlay and the node it came from, drawn held while the
-// DoA has stopped (lib/heldOverlay.ts), as the polar dock keeps its last curve.
-let overlayMemory: OverlayMemory | null = null;
+// The last live DoA overlay and the node it came from (pageOverlayMemory() in
+// lib/heldOverlay.ts) is drawn held while the DoA has stopped, as the polar dock
+// keeps its last curve. The console's last live graph is offered to it once per
+// page load (lastLiveDoa.ts): a node change that forgot it is never undone by the seed.
+let seedOffered = false;
 // Basemap outages seen earlier, per tile source (or 'offline'), so a known
 // outage shows its notice at once when the map mounts again or the operator
 // returns to a style.
@@ -397,19 +399,24 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const sampleHz = doaSample(snapshot, overviewDoaStatus(snapshot, fresh), fresh)?.frequencyHz ?? null;
   const frequencyText = sampleHz === null ? null : `${(sampleHz / 1e6).toFixed(3)} MHz`;
   // The last live overlay, drawn held (in the live style, marked STALE with its time) while no
-  // live vector and no live bearing is drawn: a stopped DoA (STALE, NOT VALID,
+  // live vector is drawn (beside a live MQTT bearing between Angular frames too, then
+  // without its own bearing line): a stopped DoA (STALE, NOT VALID,
   // CONFLICT, a failed DAQ sync, an overdrive...) never empties the map, as the
   // polar dock keeps its curve. Never from or during a simulation; another
   // node or a restart forgets it. Kept in module scope across route changes.
   // A page that opened after the graph went stale starts from the console's last one.
-  overlayMemory = seedOverlayMemory(overlayMemory, heldSeed, overlayIdentity(snapshot), simulation);
+  let overlayMemory = pageOverlayMemory();
+  if (heldSeed && !seedOffered) {
+    seedOffered = true;
+    overlayMemory = seedOverlayMemory(overlayMemory, heldSeed, overlayIdentity(snapshot), simulation);
+  }
   const remembered = rememberOverlay(overlayMemory, {
     live: values && !simulation && stationCoordinate ? { values, thetaDeg: theta, offsetDeg: offset, curveOffsetDeg: binOffset, frequencyHz: sampleHz, origin: stationCoordinate } : null,
     identity: overlayIdentity(snapshot),
     simulation,
     nowMs: Date.now(),
   });
-  overlayMemory = remembered.memory;
+  setPageOverlayMemory(remembered.memory);
   const heldDraw = stationCoordinate ? remembered.draw : null;
   // The held overlay stays where it was measured, not where the station is now.
   const heldOrigin = heldDraw?.origin ?? null;

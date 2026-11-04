@@ -69,7 +69,6 @@ export function heldSeedFrom(kept: LastLiveDoa | null, gpsConfig: GpsConfig, com
   const compass = resolveCompassSource(snapshot, { figType: compassConfig.manualFigType, compassOffset: compassConfig.manualCompassOffset }, compassConfig, null, kept.capturedAtMs);
   const offsetDeg = Number.isFinite(compass.settings.compassOffset) ? compass.settings.compassOffset : 0;
   const curveOffsetDeg = curveCompassOffset(snapshot, compass, offsetDeg);
-  const sampleMs = numberOrNull(candidate.timestamp_ms);
   return {
     overlay: {
       values,
@@ -78,8 +77,8 @@ export function heldSeedFrom(kept: LastLiveDoa | null, gpsConfig: GpsConfig, com
       curveOffsetDeg,
       frequencyHz: numberOrNull(candidate.frequency_hz_normalized),
       origin: { latitude: origin.latitude, longitude: origin.longitude },
-      // The time of the DoA record itself, as the page would have remembered it.
-      atMs: sampleMs !== null && sampleMs > 0 ? sampleMs : kept.capturedAtMs,
+      // When the console kept it, as a page's own memory keeps the time an answer arrived.
+      atMs: kept.capturedAtMs,
     },
     identity: overlayIdentity(snapshot),
   };

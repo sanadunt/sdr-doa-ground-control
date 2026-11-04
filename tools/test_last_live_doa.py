@@ -35,35 +35,62 @@ def stale(answer: Dict[str, Any]) -> Dict[str, Any]:
     return later
 
 
+def data_out_answer(*, xml: bool = True, comparable: bool = True, daq: str = "PASS") -> Dict[str, Any]:
+    fresh = {"fresh": True, "age_ms": 500}
+    candidates: Dict[str, Any] = {"csv": {"available": True, "canonical_angle_deg": 40.0, "angular_power_db": [-30.0] * 360,
+                                          "freshness": dict(fresh)}}
+    if xml:
+        candidates["xml"] = {"available": True, "canonical_angle_deg": 40.0, "freshness": dict(fresh)}
+    return {"source": {"kind": "data_out"}, "overall_state": "UNVERIFIED", "status": {"available": True, "daq_health": daq},
+            "publication_gate": {"checks": {"adc_not_overdriven": True}},
+            "native_consistency": {"comparable": comparable, "conflict": False}, "doa_candidates": candidates}
+
+
 class ShowsLiveGraphTests(unittest.TestCase):
     def test_a_fresh_360_bin_vector_in_the_answers_view(self) -> None:
         self.assertTrue(lld.shows_live_graph(fixture("mqtt-live.json")))
         self.assertFalse(lld.shows_live_graph(fixture("mqtt-unverified.json")))
         self.assertFalse(lld.shows_live_graph(stale(fixture("mqtt-live.json"))))
 
-    def test_states_and_conflicts_that_draw_no_live_graph(self) -> None:
-        for change in (
-            {"overall_state": "CONFLICT"}, {"overall_state": "DEGRADED"}, {"simulation": True},
-            {"native_consistency": {"conflict": True}}, {"source": {"kind": "none"}},
+    def test_what_the_page_never_draws_live_is_never_kept(self) -> None:
+        # The page's overviewDoaStatus() refuses each of these, so it never remembers them either.
+        for name, change in (
+            ("conflict state", {"overall_state": "CONFLICT"}), ("degraded", {"overall_state": "DEGRADED"}),
+            ("simulation", {"simulation": True}), ("conflict", {"native_consistency": {"conflict": True}}),
+            ("no source", {"source": {"kind": "none"}}), ("DAQ unknown", {"status": {"available": True, "daq_health": "UNKNOWN"}}),
+            ("no status", {"status": {"available": False}}),
+            ("overdrive", {"publication_gate": {"checks": {"adc_not_overdriven": False}}}),
         ):
-            with self.subTest(change=change):
+            with self.subTest(name):
                 answer = fixture("mqtt-live.json")
                 answer.update(change)
                 self.assertFalse(lld.shows_live_graph(answer))
-        short = fixture("mqtt-live.json")
-        short["doa_candidates"]["mqtt"]["angular_power_db"] = [0.0] * 359
-        self.assertFalse(lld.shows_live_graph(short))
-        # A Data Out answer reads its CSV view.
-        csv = {"source": {"kind": "data_out"}, "overall_state": "UNVERIFIED",
-               "doa_candidates": {"csv": {"angular_power_db": [0.0] * 360, "freshness": {"fresh": True}}}}
-        self.assertTrue(lld.shows_live_graph(csv))
+        for name, edit in (
+            ("short vector", lambda c: c.update(angular_power_db=[0.0] * 359)),
+            ("angle convention unknown", lambda c: (c.pop("canonical_angle_deg"), c.update(normalization_error="MQTT_ANGLE_CONVENTION_UNKNOWN"))),
+            ("normalization error", lambda c: c.update(normalization_error="X")),
+            ("no age", lambda c: c["freshness"].pop("age_ms")),
+        ):
+            with self.subTest(name):
+                answer = fixture("mqtt-live.json")
+                edit(answer["doa_candidates"]["mqtt"])
+                self.assertFalse(lld.shows_live_graph(answer))
+
+    def test_a_data_out_answer_needs_comparable_views_or_the_csv_alone(self) -> None:
+        self.assertTrue(lld.shows_live_graph(data_out_answer()))
+        self.assertFalse(lld.shows_live_graph(data_out_answer(comparable=False)))
+        self.assertTrue(lld.shows_live_graph(data_out_answer(xml=False, comparable=False)))
+        self.assertFalse(lld.shows_live_graph(data_out_answer(daq="UNKNOWN")))
 
     def test_identity(self) -> None:
-        self.assertEqual(lld.answer_identity(fixture("mqtt-live.json")), ("http://127.0.0.1:8081", "227c8be2"))
-        self.assertEqual(lld.answer_identity({}), (None, None))
-        self.assertTrue(lld.same_node(("a", None), ("a", "s1")))
-        self.assertFalse(lld.same_node(("a", "s1"), ("a", "s2")))
-        self.assertFalse(lld.same_node(("a", "s1"), ("b", "s1")))
+        self.assertEqual(lld.answer_identity(fixture("mqtt-live.json")), ("http://127.0.0.1:8081", "227c8be2", None))
+        self.assertEqual(lld.answer_identity({"status": {"safe": {"uptime_ms": 1234}}}), (None, None, 1234.0))
+        self.assertEqual(lld.answer_identity({}), (None, None, None))
+        self.assertTrue(lld.same_node(("a", None, None), ("a", "s1", 5.0)))
+        self.assertFalse(lld.same_node(("a", "s1", None), ("a", "s2", None)))
+        self.assertFalse(lld.same_node(("a", "s1", None), ("b", "s1", None)))
+        self.assertFalse(lld.same_node(("a", None, 9_000.0), ("a", None, 1_000.0)))
+        self.assertEqual(lld.merged_identity(("a", None, 5.0), (None, "s1", 7.0)), ("a", "s1", 7.0))
 
 
 class HolderTests(unittest.TestCase):
@@ -98,6 +125,32 @@ class HolderTests(unittest.TestCase):
         holder.observe({"source": {"kind": "none"}})
         self.assertIsNotNone(holder.view()["snapshot"])
         holder.clear()
+        self.assertIsNone(holder.view()["snapshot"])
+
+    def test_a_session_named_later_still_forgets_it_when_it_changes(self) -> None:
+        # Kept from Data Out (no session), then MQTT names S1 without a graph, then the edge restarts as S2.
+        holder = lld.LastLiveDoa(clock_ms=lambda: 1)
+        kept = data_out_answer()
+        kept["collection"] = {"console_base_url": "http://u:8081"}
+        holder.observe(kept)
+        for sid in ("s1", "s2"):
+            later = stale(fixture("mqtt-live.json"))
+            later["collection"]["console_base_url"] = "http://u:8081"
+            later["mqtt"]["sid"] = later["source"]["mqtt"]["sid"] = sid
+            holder.observe(later)
+            if sid == "s1":
+                self.assertIsNotNone(holder.view()["snapshot"])
+        self.assertIsNone(holder.view()["snapshot"])
+
+    def test_an_uptime_that_went_back_forgets_it(self) -> None:
+        holder = lld.LastLiveDoa(clock_ms=lambda: 1)
+        kept = data_out_answer()
+        kept["status"]["safe"] = {"uptime_ms": 90_000}
+        holder.observe(kept)
+        restarted = data_out_answer(xml=False)
+        restarted["doa_candidates"]["csv"]["freshness"]["fresh"] = False
+        restarted["status"]["safe"] = {"uptime_ms": 4_000}
+        holder.observe(restarted)
         self.assertIsNone(holder.view()["snapshot"])
 
 

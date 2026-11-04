@@ -57,8 +57,8 @@ Untuk semua topik:
 | `state`, `capabilities`, `availability` | `CONTEXT`; bukan heartbeat | `capabilities` dan `availability` dari `sid` lain → `INCONSISTENT SESSION_MISMATCH`; `availability` `online: true` yang diterima lebih dari 8 s lalu tanpa health segar → `STALE HEALTH_STALE` (sisa retained dari Edge yang berhenti tanpa pamit) |
 | `telemetry/health` | `FRESH`, segar 8 s sejak diterima | `t` lebih dari 8 s lalu atau lebih dari 1 s di depan → `STALE` |
 | `telemetry/health/detail` | `FRESH` 15 s sejak diterima (65 s lewat LoRa, 8.3b); tidak pernah menjadi gate | — |
-| `telemetry/doa` `ok=1` | `LIVE` bila `t` ≤ 5 s lalu dan ≤ 1 s di depan, dan health segar dengan `daq=1`. Tetap `LIVE` selama DoA ≤ 5 s sejak diterima, `t` ≤ 5 s, dan health segar dengan `daq=1`. | `t` di luar jendela → `STALE`; tanpa health segar `daq=1` → `INCONSISTENT DOA_WITHOUT_HEALTH` |
-| `telemetry/doa` `ok=0` | `UNVERIFIED`, tidak pernah `LIVE`, tidak mengisi deteksi; basi 5 s sejak diterima. Dashboard menampilkan sudutnya redup dengan label BELUM VALID. | `rev` ≠ `state.cfg` (bila `cfg` diketahui) → catatan `REVISION_MISMATCH`; tanpa health segar → `INCONSISTENT DOA_WITHOUT_HEALTH` (tetap disimpan); health segar dengan `daq` 0 atau 2 → tetap `UNVERIFIED` dengan error `DAQ_NOT_HEALTHY` (alasan edge sendiri, bukan health yang hilang) |
+| `telemetry/doa` `ok=1` | `LIVE` bila `t` ≤ 5 s lalu (15 s lewat LoRa, 8.3b) dan ≤ 1 s di depan, dan health segar dengan `daq=1`. Tetap `LIVE` selama DoA ≤ 5 s sejak diterima (15 s lewat LoRa), `t` ≤ 5 s (15 s lewat LoRa), dan health segar dengan `daq=1`. | `t` di luar jendela → `STALE`; tanpa health segar `daq=1` → `INCONSISTENT DOA_WITHOUT_HEALTH` |
+| `telemetry/doa` `ok=0` | `UNVERIFIED`, tidak pernah `LIVE`, tidak mengisi deteksi; basi 5 s sejak diterima (15 s lewat LoRa, 8.3b). Dashboard menampilkan sudutnya redup dengan label BELUM VALID. | `rev` ≠ `state.cfg` (bila `cfg` diketahui) → catatan `REVISION_MISMATCH`; tanpa health segar → `INCONSISTENT DOA_WITHOUT_HEALTH` (tetap disimpan); health segar dengan `daq` 0 atau 2 → tetap `UNVERIFIED` dengan error `DAQ_NOT_HEALTHY` (alasan edge sendiri, bukan health yang hilang) |
 | `telemetry/diagnostic/doa` | `UNVERIFIED`, terpisah dari deteksi; basi 5 s sejak diterima | `source_timestamp_ms` mundur → `INCONSISTENT SOURCE_TIME_REGRESSED` |
 | `telemetry/angular` | `flags = 63`: `LIVE`. `flags & 23 = 23` tetapi bukan 63: `UNVERIFIED`, disimpan di jalur diagnostik; baris topiknya `STALE` bila umur sumbernya > 10 s. `LIVE` bertahan selama umur sumber ≤ 10 s, health segar, `daq=1`, dan `run=1`. Lewat LoRa batas umur 10 s ini menjadi 45 s (8.3b). | `flags & 23 ≠ 23` → `UNVERIFIED` dengan catatan `EVIDENCE_INCOMPLETE`; `timestamp_ms` lebih dari 10 s (LoRa: 45 s) lalu atau lebih dari 1 s di depan → `STALE`; tanpa health segar `daq=1` → `INCONSISTENT ANGULAR_WITHOUT_HEALTH` |
 | `telemetry/diagnostic/angular` | Selalu `UNVERIFIED`, disimpan walau basi, tidak pernah mengisi Angular LIVE; `STALE` bila umur sumber > 10 s (LoRa: 45 s). Kedua topik Angular berbagi satu kandidat diagnostik (seperti Ground edge), tetapi baris tiap topik menjadi `STALE` menurut frame terakhirnya sendiri, juga setelah kandidat diganti topik lain. Alasan dari bit flags yang hilang, umur, health, dan revisi (`PREVIOUS_CONFIG`). | — |
@@ -70,7 +70,7 @@ Untuk semua topik:
 | Data | Batas |
 |---|---|
 | Health | Segar sampai 8 s sejak diterima, `t` saat diterima ≤ 8 s lalu dan ≤ 1 s di depan, `q` maju. MQTT tersambung atau `state.daq` bukan pengganti health. |
-| DoA (`telemetry/doa`) | `t` ≤ 5 s lalu dan ≤ 1 s di depan |
+| DoA (`telemetry/doa`) | `t` ≤ 5 s lalu (15 s lewat LoRa, `DOA_LORA_FRESH_MS`) dan ≤ 1 s di depan |
 | Angular | Umur sumber `timestamp_ms` ≤ 10 s (lewat LoRa ≤ 45 s, `ANGULAR_LORA_FRESH_MS`) dan ≤ 1 s di depan |
 | Detail health | 15 s sejak diterima (lewat LoRa 65 s, `DETAIL_LORA_FRESH_MS`) |
 | Flags Angular | Bit 0 parsed (1), bit 1 jam dan sumber segar (2), bit 2 DAQ sehat (4), bit 3 konvensi sudut (8), bit 4 atribusi config (16), bit 5 authority sumber (32). Mask integritas 23, LIVE hanya 63. |
@@ -268,7 +268,7 @@ Jawaban MQTT memakai bentuk TelemetrySnapshot yang sama, dengan satu view DoA `d
 | `frequency_hz_normalized` | `f` (Hz) | kolom 4 |
 | `confidence_metric_db` | `c` (PAPR dB native); `confidence` tetap `null` | kolom 2 |
 | `power_native_db` | `p`; `power_db` tetap `null`, ≤ −100 dB `POWER_FLOOR_LOSSY` | kolom 3 |
-| `timestamp_ms`, `freshness` | `t`; `fresh` = DoA LIVE di store (≤ 5 s sejak diterima, `t` ≤ 5 s, health segar `daq=1`); `age_ms` = yang lebih besar dari umur sejak diterima dan umur sumber; `max_age_ms` 5000 | kolom 0 |
+| `timestamp_ms`, `freshness` | `t`; `fresh` = DoA LIVE di store (≤ 5 s sejak diterima, `t` ≤ 5 s, lewat LoRa 15 s; health segar `daq=1`); `age_ms` = yang lebih besar dari umur sejak diterima dan umur sumber; `max_age_ms` jendela yang dipakai (5000, lewat LoRa 15000) | kolom 0 |
 | `status.daq_health`, flag sync | `daq=1`: `PASS` dan ketiga flag sync `true`; detail health segar dipakai bila ada | `Source.view`: `healthy` = `status.json` segar, `daq_ok`, ketiga flag sync `true` (dan frame maju bila diwajibkan) |
 | `status.safe.daq_num_dropped_frames` | health `drop` | `dropped_frames` = `daq_num_dropped_frames` |
 | `node_progress` | `ADVANCING` (health `q` maju) | — |
@@ -315,7 +315,7 @@ Console tahu node datang lewat bridge LoRa selama status `lora/ground` ada (`sou
 
 ### 8.4 Batas observasi
 
-Jawaban MQTT tetap `authority` `none`, `clock_source` `remote_unverified`, gate publikasi `BLOCKED` dengan `GROUND_CLOCK_UNVERIFIED`, `CANONICAL_ANGLE_NOT_CONFIGURED` dan `DOA_AUTHORITY_NOT_SELECTED`, dan `overall_state` tidak pernah `LIVE`. Urutan state: `DEGRADED` (ADC overdrive dari pembacaan ringan), `CONFLICT`, `STALE` (DoA LIVE sudah tua, atau tidak ada DoA saat ini), `INCOMPLETE` (θ₀ tidak ada; vektor yang tidak ada tidak membuatnya `INCOMPLETE`, 8.3a), lalu `UNVERIFIED`. Aturan freshness lokal browser sama dengan Data Out: jendela 5 s dari umur DoA, dan `collection.age_ms` jawaban MQTT selalu 0 karena dibangun dari store saat itu.
+Jawaban MQTT tetap `authority` `none`, `clock_source` `remote_unverified`, gate publikasi `BLOCKED` dengan `GROUND_CLOCK_UNVERIFIED`, `CANONICAL_ANGLE_NOT_CONFIGURED` dan `DOA_AUTHORITY_NOT_SELECTED`, dan `overall_state` tidak pernah `LIVE`. Urutan state: `DEGRADED` (ADC overdrive dari pembacaan ringan), `CONFLICT`, `STALE` (DoA LIVE sudah tua, atau tidak ada DoA saat ini), `INCOMPLETE` (θ₀ tidak ada; vektor yang tidak ada tidak membuatnya `INCOMPLETE`, 8.3a), lalu `UNVERIFIED`. Aturan freshness lokal browser sama dengan Data Out: jendela `freshness.max_age_ms` kandidat (5 s, lewat LoRa 15 s) dari umur DoA, dan `collection.age_ms` jawaban MQTT selalu 0 karena dibangun dari store saat itu.
 
 ### 8.5 Data Out selama MQTT segar: pembacaan ringan
 

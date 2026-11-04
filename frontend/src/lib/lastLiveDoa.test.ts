@@ -31,8 +31,8 @@ describe('the console\'s last live DoA graph (GET /api/doa/last-live)', () => {
     expect(seed?.overlay.values).toBe(candidate.angular_power_db);
     expect(seed?.overlay.thetaDeg).toBe(160);
     expect(seed?.overlay.frequencyHz).toBe(433_920_000);
-    // The DoA record's own time, not the console's.
-    expect(seed?.overlay.atMs).toBe(1_793_070_140_000);
+    // When the console kept it, as a page's own memory keeps the time an answer arrived.
+    expect(seed?.overlay.atMs).toBe(KEPT.capturedAtMs);
     expect(seed?.identity).toEqual(overlayIdentity(LIVE));
     // A MANUAL compass offset turns it, as it turns a live one.
     const manual = heldSeedFrom(KEPT, DEFAULT_GPS_CONFIG, { ...DEFAULT_COMPASS_CONFIG, source: 'MANUAL', manualCompassOffset: 42 });

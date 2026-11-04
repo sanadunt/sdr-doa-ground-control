@@ -8,7 +8,7 @@ import { halfPowerWidth } from '../../lib/doaGeometry';
 import { parseCompassOffsetInput, parseTypedNumber, validPolarHead, validPolarRange } from '../../lib/polarViewSettings';
 import type { PolarViewSettings } from '../../lib/polarViewSettings';
 import { useI18n } from '../../lib/i18n';
-import { heldTimeText, overlayIdentity } from '../../lib/heldOverlay';
+import { heldTimeText, overlayIdentity, pageOverlayMemory } from '../../lib/heldOverlay';
 import { seedCurve } from '../../lib/lastLiveDoa';
 import type { HeldSeed } from '../../lib/lastLiveDoa';
 import { PolarPlot, peakUpHead, radialDomain } from '../PolarPlot';
@@ -31,6 +31,7 @@ export interface HeldCurve {
 
 // Module scope keeps it across route changes, like the map's last station fix.
 let lastCurve: HeldCurve | null = null;
+let curveSeedOffered = false;
 
 /**
  * The curve to draw: the current one, remembered with the time it arrived,
@@ -94,8 +95,16 @@ export function PolarDock({
   const sourceLabel = source ? t(source.labelKey) : undefined;
   const status = overviewDoaStatus(snapshot, localSnapshotFresh);
   const polar = polarView(snapshot, settings, localSnapshotFresh, null, settings, curveOffset);
-  // A page that opened after the graph went stale starts from the console's last curve.
-  lastCurve ??= seedCurve(heldSeed, overlayIdentity(snapshot), simulation);
+  // A page that opened after the graph went stale starts from the map's memory, else the
+  // console's last curve, offered once per page load (lastLiveDoa.ts).
+  if (lastCurve === null && !curveSeedOffered) {
+    const own = pageOverlayMemory();
+    const seed = own?.overlay ? { overlay: own.overlay, identity: own.identity } : heldSeed;
+    if (seed) {
+      curveSeedOffered = true;
+      lastCurve = seedCurve(seed, overlayIdentity(snapshot), simulation);
+    }
+  }
   const curve = heldCurve(lastCurve, status.shown ? polar.values : null, snapshot?.simulation === true, Date.now());
   lastCurve = curve.memory;
   const values = curve.draw;

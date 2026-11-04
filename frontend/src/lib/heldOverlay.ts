@@ -161,6 +161,19 @@ export function provisionalBesideHeld(provisionalBearing: number | null, heldBea
   return heldBearing === null || bearingGapDeg(provisionalBearing, heldBearing) > PROVISIONAL_HELD_GAP_DEG;
 }
 
+// The map's memory for the page (module scope keeps it across route changes); the
+// polar dock reads it too, so a seeded curve follows what the map remembers.
+let pageMemory: OverlayMemory | null = null;
+
+/** The map's remembered overlay for this page load, or null. */
+export function pageOverlayMemory(): OverlayMemory | null {
+  return pageMemory;
+}
+
+export function setPageOverlayMemory(memory: OverlayMemory | null): void {
+  pageMemory = memory;
+}
+
 /** The held time as the polar dock shows it ("last 20.27.52"). */
 export function heldTimeText(atMs: number, lang: Lang): string {
   return new Date(atMs).toLocaleTimeString(lang === 'id' ? 'id-ID' : 'en-GB', { hour12: false });
