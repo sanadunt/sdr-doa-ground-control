@@ -2,6 +2,12 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.13.5
+
+Rilis perbaikan: tidak ada yang dihapus.
+
+- **Video drone menunggu remote ditemukan.** Dengan `PULL=on-demand`, selama console belum menemukan remote drone, panel Drone terus mencoba memutar video, sehingga ffmpeg di groundstation dinyalakan dan gagal sekitar 30 kali per menit. Selama kamera belum diketahui, console sekarang melaporkan `NO_CAMERA` dengan alasan `CAMERA_UNKNOWN`. Panel Drone menampilkan "Remote drone belum ditemukan; video menunggu." dan tidak mencoba memutar. Begitu remote ditemukan, status kembali `STANDBY`, dan video dimulai saat ditonton.
+
 ## 3.13.4
 
 Rilis perbaikan: tidak ada yang dihapus. Perbaikan drone SIYI 4 November 2026 diterapkan ke console.

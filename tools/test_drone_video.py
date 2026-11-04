@@ -37,6 +37,8 @@ class FakeMediamtx:
         self.paths: Any = PATHS_OK
         # GET /v3/config/paths/get/drone; None answers 404 (a mediamtx without that route).
         self.drone_config: Any = {"name": "drone", "runOnInit": "ffmpeg ...", "runOnDemand": ""}
+        # GET /v3/config/paths/get/raw: "publisher" while the supervisor knows no camera yet.
+        self.raw_config: Any = {"name": "raw", "source": "rtsp://192.168.1.162:8554/main.264"}
         self.whep_status = 201
         self.requests: List[Dict[str, Any]] = []
         outer = self
@@ -59,6 +61,8 @@ class FakeMediamtx:
                     self._reply(200, json.dumps(outer.paths).encode())
                 elif self.path == "/v3/config/paths/get/drone" and outer.drone_config is not None:
                     self._reply(200, json.dumps(outer.drone_config).encode())
+                elif self.path == "/v3/config/paths/get/raw" and outer.raw_config is not None:
+                    self._reply(200, json.dumps(outer.raw_config).encode())
                 else:
                     self._reply(404, b"")
 
@@ -289,6 +293,21 @@ class VideoHealthTests(DroneServerCase):
             server.drone_video._cached = None
             view = server.drone_video.health()
             self.assertEqual((view["state"], view["on_demand"]), ("NO_CAMERA", False))
+
+    def test_no_camera_known_is_not_standby(self) -> None:
+        # The console has not found the remote yet: an offer would only start ffmpeg on a camera
+        # that is not there (30 failed starts a minute on the groundstation), so the panel waits.
+        server = self.start_drone_server()
+        self.mediamtx.drone_config = {"name": "drone", "runOnInit": "", "runOnDemand": "ffmpeg ..."}
+        self.mediamtx.raw_config = {"name": "raw", "source": "publisher"}
+        self.mediamtx.paths = {"items": [{"name": "raw", "ready": False, "readers": []}, {"name": "drone", "ready": False, "readers": []}]}
+        server.drone_video._cached = None
+        view = server.drone_video.health()
+        self.assertEqual((view["state"], view["reason"], view["on_demand"]), ("NO_CAMERA", "CAMERA_UNKNOWN", True))
+        # Found: standby again.
+        self.mediamtx.raw_config = {"name": "raw", "source": "rtsp://192.168.1.162:8554/main.264"}
+        server.drone_video._cached = None
+        self.assertEqual(server.drone_video.health()["state"], "STANDBY")
 
     def test_the_offer_waits_for_an_on_demand_start(self) -> None:
         # The camera, then ffmpeg, start only when the offer comes: the proxy waits longer than for a read.

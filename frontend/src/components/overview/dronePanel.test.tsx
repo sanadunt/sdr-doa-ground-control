@@ -121,6 +121,10 @@ describe('drone panel', () => {
     expect(droneVideoStatus(standby, 'idle', null, en)).toEqual({ value: 'Standby · the camera is pulled when the video plays', tone: 'is-empty' });
     expect(droneVideoStatus(standby, 'connecting', null, en).value).toBe('Connecting…');
     expect(droneVideoStatus(standby, 'error', 'DRONE_VIDEO_NO_STREAM', en).value).toContain('no camera picture');
+    // No remote found yet: the panel says so and does not start its player.
+    const unknown = normalizeDroneVideoHealth({ state: 'NO_CAMERA', reason: 'CAMERA_UNKNOWN', on_demand: true });
+    expect(droneVideoText(unknown, 'idle', null, en)).toBe('The drone remote is not found yet; the video waits for it.');
+    expect(droneVideoStatus(unknown, 'idle', null, en)).toEqual({ value: 'Not connected · drone remote not found yet', tone: 'is-warn' });
     expect(normalizeDroneVideoHealth({ state: 'WHAT' }).state).toBe('DOWN');
   });
 });

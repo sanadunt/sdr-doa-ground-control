@@ -59,6 +59,7 @@ export function droneVideoStatus(health: DroneVideoHealth | null, phase: DroneVi
   if (health.state === 'STANDBY' && phase === 'idle') return { value: t('drone.videoStandby'), tone: 'is-empty' };
   if (health.state === 'DOWN') return { value: t('drone.videoDown'), tone: 'is-bad' };
   if (health.state === 'NO_ENCODER') return { value: t('drone.videoNoEncoder'), tone: 'is-bad' };
+  if (health.state === 'NO_CAMERA' && health.reason === 'CAMERA_UNKNOWN') return { value: t('drone.videoNoRemote'), tone: 'is-warn' };
   if (health.state === 'NO_CAMERA' || code === 'DRONE_VIDEO_NO_STREAM') return { value: t('drone.videoNoCamera'), tone: 'is-warn' };
   if (phase === 'error') return { value: t('drone.videoRetrying'), tone: 'is-warn' };
   return { value: t('drone.videoConnecting'), tone: 'is-warn' };
@@ -121,6 +122,8 @@ export function droneVideoText(health: DroneVideoHealth | null, phase: 'idle' | 
   if (phase === 'playing') return null;
   if (!health) return t('drone.video.checking');
   if (health.state === 'DISABLED' && health.reason === 'NOT_CONFIGURED') return t('drone.video.notConfigured');
+  // The video service waits for the console to find the drone remote (CAMERA_URL=auto).
+  if (health.state === 'NO_CAMERA' && health.reason === 'CAMERA_UNKNOWN') return t('drone.video.noRemote');
   // STANDBY plays as OK: the player's offer starts the pull.
   if (health.state === 'STANDBY' && phase === 'idle') return t(VIDEO_STATE_KEYS.STANDBY);
   if (health.state !== 'OK' && health.state !== 'STANDBY') return t(VIDEO_STATE_KEYS[health.state]);
