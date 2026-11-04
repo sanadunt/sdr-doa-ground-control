@@ -146,6 +146,38 @@ export function browserPublisherEnvironment(): MirrorPublisherEnvironment {
   };
 }
 
+/**
+ * Call onOpen once the console's LAN view is open: at once, or at a check every
+ * MIRROR_LAN_CHECK_MS while it is closed or unknown. The groundstation page
+ * mounts its Receiver then, so the mirror starts after a boot without anyone
+ * opening the Receiver first. The returned function stops the checks.
+ */
+export function watchLanViewOpen(
+  onOpen: () => void,
+  environment: Pick<MirrorPublisherEnvironment, 'lanOpen' | 'setTimeout' | 'clearTimeout'> = browserPublisherEnvironment(),
+): () => void {
+  let stopped = false;
+  let timer: TimerHandle | null = null;
+  function check(): void {
+    timer = null;
+    environment.lanOpen().catch(() => false).then((open) => {
+      if (stopped) return;
+      if (open) {
+        stopped = true;
+        onOpen();
+      } else {
+        timer = environment.setTimeout(check, MIRROR_LAN_CHECK_MS);
+      }
+    });
+  }
+  check();
+  return () => {
+    stopped = true;
+    if (timer !== null) environment.clearTimeout(timer);
+    timer = null;
+  };
+}
+
 /** A page-load id for the mirror's source: 'kiosk-' and 16 base-36 characters. */
 export function mirrorSourceId(random: () => number): string {
   let text = '';

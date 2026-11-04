@@ -31,7 +31,7 @@ import { Page, PageHeader, PageNotice } from './components/page';
 import { ReceiverMirrorPage } from './pages/ReceiverMirrorPage';
 import { createMirrorFeed } from './lib/receiverMirrorFeed';
 import type { ReceiverMirrorFeed } from './lib/receiverMirrorFeed';
-import { startMirrorPublisher } from './lib/receiverMirrorPublisher';
+import { startMirrorPublisher, watchLanViewOpen } from './lib/receiverMirrorPublisher';
 import { consoleAccess, pageHostname } from './lib/access';
 import { DEFAULT_SIMULATION, simulationSnapshot, randomizeSimulationSettings } from './lib/simulation';
 import { snapshotCollectionId, snapshotConsoleBaseUrl, snapshotConsoleRefreshSeconds, snapshotReadAtMonotonic, snapshotServedAgeMs } from './lib/snapshotRead';
@@ -485,8 +485,10 @@ export default function App({ layout: forcedLayout }: { layout?: CompactLayout |
   }, []);
   // The Receiver frame stays mounted after its first visit so RX, scans and
   // recordings keep running while the operator uses other pages. It also
-  // mounts, once, when the Overview spectrum dock asks for it (Mulai/Dengar);
-  // it never mounts at console load, because mounting claims the HackRF.
+  // mounts, once, when the Overview spectrum dock asks for it (Mulai/Dengar),
+  // and on the console's own page once the LAN view is open, so the mirror
+  // starts after a boot (owner's decision of 2026-11-04). Otherwise it never
+  // mounts at console load, because mounting claims the HackRF.
   const [receiverRequested, setReceiverRequested] = useState(false);
   const requestReceiver = useCallback((): void => { setReceiverRequested(true); }, []);
   // One bridge to the Receiver frame for the life of the console page; the
@@ -508,6 +510,9 @@ export default function App({ layout: forcedLayout }: { layout?: CompactLayout |
   const [receiverMounted, setReceiverMounted] = useState(route === 'receiver' && !viewOnly);
   if ((route === 'receiver' || receiverRequested) && !receiverMounted && !viewOnly) setReceiverMounted(true);
   const receiverFrame = receiverMounted && !viewOnly;
+  // Only once the console says this is its own page: a guess from the host never mounts it.
+  const autoMountReceiver = capabilities?.access === 'local' && !receiverMounted;
+  useEffect(() => (autoMountReceiver ? watchLanViewOpen(requestReceiver) : undefined), [autoMountReceiver, requestReceiver]);
   // The Receiver mirror (issue #15): this page publishes its Receiver for the LAN view while the
   // frame is mounted and the console's LAN view is open; the LAN view reads it through one feed.
   useEffect(() => {

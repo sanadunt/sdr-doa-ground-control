@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { browserPublisherEnvironment, startMirrorPublisher, mirrorSourceId, MIRROR_RETRY_MS } from './receiverMirrorPublisher';
+import { browserPublisherEnvironment, startMirrorPublisher, mirrorSourceId, watchLanViewOpen, MIRROR_RETRY_MS } from './receiverMirrorPublisher';
 import type { MirrorPostAnswer, MirrorPublisherEnvironment } from './receiverMirrorPublisher';
 import { MIRROR_LAN_CHECK_MS, MIRROR_LIMITS, MIRROR_POST_INTERVAL_MS, MIRROR_SUBSCRIBE_FPS } from './receiverMirror';
 import type { MirrorPublish } from './receiverMirror';
@@ -449,5 +449,88 @@ describe('Receiver mirror publisher', () => {
     h.sendFrame(frame(1));
     await h.advance(10_000);
     expect(h.posts).toHaveLength(1);
+  });
+});
+
+describe('watchLanViewOpen (the groundstation page mounts its Receiver for the mirror)', () => {
+  function clock(answers: Array<boolean | Error>) {
+    const timers: Array<{ at: number; callback: () => void }> = [];
+    let now = 0;
+    let checks = 0;
+    const environment = {
+      lanOpen: () => {
+        const answer = answers[Math.min(checks, answers.length - 1)];
+        checks += 1;
+        return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer);
+      },
+      setTimeout: (callback: () => void, ms: number) => {
+        const timer = { at: now + ms, callback };
+        timers.push(timer);
+        return timer as unknown as ReturnType<typeof setTimeout>;
+      },
+      clearTimeout: (handle: ReturnType<typeof setTimeout>) => {
+        const index = timers.indexOf(handle as unknown as { at: number; callback: () => void });
+        if (index >= 0) timers.splice(index, 1);
+      },
+    };
+    return {
+      environment,
+      checks: () => checks,
+      pending: () => timers.length,
+      async advance(ms: number) {
+        now += ms;
+        for (const timer of timers.filter((entry) => entry.at <= now)) {
+          timers.splice(timers.indexOf(timer), 1);
+          timer.callback();
+        }
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      },
+    };
+  }
+
+  it('calls onOpen once when the LAN view is already open', async () => {
+    const c = clock([true]);
+    const onOpen = vi.fn();
+    watchLanViewOpen(onOpen, c.environment);
+    await c.advance(0);
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(c.pending()).toBe(0);
+  });
+
+  it('checks again every MIRROR_LAN_CHECK_MS while closed or unknown, then opens', async () => {
+    const c = clock([false, new Error('health 503'), true]);
+    const onOpen = vi.fn();
+    watchLanViewOpen(onOpen, c.environment);
+    await c.advance(0);
+    expect(onOpen).not.toHaveBeenCalled();
+    await c.advance(MIRROR_LAN_CHECK_MS - 1);
+    expect(c.checks()).toBe(1);
+    await c.advance(1);
+    expect(c.checks()).toBe(2);
+    expect(onOpen).not.toHaveBeenCalled();
+    await c.advance(MIRROR_LAN_CHECK_MS);
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    await c.advance(MIRROR_LAN_CHECK_MS * 3);
+    expect(c.checks()).toBe(3);
+  });
+
+  it('stops checking and never opens after stop()', async () => {
+    const c = clock([false, true]);
+    const onOpen = vi.fn();
+    const stop = watchLanViewOpen(onOpen, c.environment);
+    await c.advance(0);
+    stop();
+    expect(c.pending()).toBe(0);
+    await c.advance(MIRROR_LAN_CHECK_MS * 2);
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it('drops an answer that arrives after stop()', async () => {
+    const c = clock([true]);
+    const onOpen = vi.fn();
+    const stop = watchLanViewOpen(onOpen, c.environment);
+    stop();
+    await c.advance(0);
+    expect(onOpen).not.toHaveBeenCalled();
   });
 });
