@@ -2,7 +2,7 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
-## 3.14.1
+## 3.15.1
 
 Rilis perbaikan dari uji tablet 3.14.0, ditambah tukar video dan peta di PC.
 
@@ -10,6 +10,18 @@ Rilis perbaikan dari uji tablet 3.14.0, ditambah tukar video dan peta di PC.
 - **Peta kecil memperlihatkan grafik DoA.** Selama video drone tampil besar, peta di jendela kecil otomatis memusatkan dan men-zoom ke arah grafiknya (garis bearing dan tepi −3 dB, atau beam bila tidak ada bearing). Penanda dibuat lebih kecil, tombol peta dan pesan tidak tampil, dan bingkainya diperbarui setiap data baru. Tombol + dan − di pojok kanan atas jendela kecil menambah atau mengurangi zoom di atas bingkai otomatis itu (sampai 6 langkah), dan zoom itu tetap dipakai saat data baru datang. Saat peta kembali besar, posisi kamera peta besar dipulihkan seperti sebelumnya.
 - **Tukar video dan peta di PC.** Tombol perbesar di panel Drone sekarang menampilkan video drone besar di belakang panel, dan peta beserta grafik DoA pindah ke jendela kecil di kiri bawah, di samping kolom HUD dan Lapisan. Klik jendela kecil atau tombol yang sama untuk menukar kembali. Fitur ini berlaku mulai lebar 1024 px; tampilan bertumpuk di bawah itu tetap seperti sebelumnya.
 - **Bahasa dan tema di bar atas tablet.** Tombol EN/ID dan terang/gelap kini ada langsung di bar atas tablet, juga di LAN view. Pilihan ini berlaku untuk browser itu sendiri. Di ponsel di bawah 480 px keduanya tetap ada di menu ☰.
+## 3.15.0
+
+Kontrol bisa mengoperasikan RDF-SDR dari groundstation (keputusan pemilik 2026-11-04). Ini perintah yang sudah diterima RDF Node edge, dan console kini juga mengirimnya: menyalakan dan menghentikan pemrosesan RDF, me-restart service RDF, serta me-reboot atau mematikan Raspberry RDF-SDR.
+
+- **Blok "Operasi RDF-SDR" di Kontrol.** Blok ini muncul setelah kunci admin dibuka, di atas formulir setelan. Isinya status engine (`state.run`) dan hanya tombol yang diizinkan capabilities RDF-SDR: Mulai/Hentikan pemrosesan (`processing.set`), Restart service RDF (`service.restart`), Reboot RDF-SDR dan Matikan RDF-SDR.
+- **Setiap tombol meminta konfirmasi.** Klik membuka kotak konfirmasi. Batal didahulukan dan mendapat fokus, dan Escape membatalkan.
+- **Reboot dan matikan dua langkah, dengan konfirmasi tegas.** RDF-SDR bisa sedang terbang di drone, jadi operator harus mencentang "drone ada di darat, atau kehilangan RDF-SDR saat terbang bisa diterima". "Siapkan reboot" lalu mengirim `system.reboot.prepare`. Setelah RDF-SDR menjawab, tombol "Reboot sekarang" tampil dengan hitungan mundur sekitar 20 detik. Bila waktunya habis atau Batal ditekan, tidak ada yang dijalankan.
+- **Challenge sekali pakai tetap di console.** Challenge dari RDF-SDR disimpan di memori server console dan dipakai sekali untuk `execute`. Browser, status perintah dan log tidak pernah melihatnya.
+- **Hasil dalam kata-kata operator.** Contohnya: "Pemrosesan berjalan", "Reboot dijadwalkan" (RDF-SDR kembali sebagai sesi baru dalam 1–2 menit), atau penolakan edge dengan kodenya (`LIFECYCLE_NOT_APPROVED`, `REBOOT_CHALLENGE_INVALID`, `BUSY`).
+- **Satu perintah sekaligus.** Patch setelan dan operasi tidak bisa dikirim bersamaan (`COMMAND_IN_FLIGHT`). Tidak ada yang dikirim ulang otomatis.
+- Rute baru `POST /api/mqtt/operation` (Origin loopback, admin, `confirm: true`) dan `GET /api/mqtt/operation[/<id>]`. Keduanya tidak ada di LAN view. Kontraknya ada di `docs/MQTT_KONTRAK.md` bagian 9a.
+- `ppp.restart` tidak dikirim, karena link T900/PPP sudah tidak dipakai.
 
 ## 3.14.0
 

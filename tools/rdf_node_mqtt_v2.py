@@ -1059,6 +1059,8 @@ class RdfNodeV2Telemetry:
             "boot": state["boot"] if state else None,
             "instance": state["instance"] if state else None,
             "cfg": state["cfg"] if state else None,
+            # RUNNING, STOPPED, STARTING, STOPPING, ERROR, UNKNOWN: the SDR engine as the edge's state says.
+            "run": state.get("run") if state else None,
             "state_received_at_ms": self._session["received_at_ms"] if self._session else None,
             "health_fresh": fresh,
             "health_daq": health["payload"]["daq"] if health else None,
@@ -1072,14 +1074,19 @@ class RdfNodeV2Telemetry:
         """The command flags of ``capabilities``, only when it belongs to the current session.
 
         ``config_fields`` (contract 1.8) is the list of fields ``config.patch``
-        takes, or None from an older edge that sends no list.
+        takes, or None from an older edge that sends no list. The
+        ``remote_processing``, ``remote_restart``, ``remote_reboot`` and
+        ``remote_shutdown`` flags say which operations Kontrol may send.
         """
         if self._capabilities is None or self._session is None:
             return None
         payload = self._capabilities["payload"]
         if payload["sid"] != self._session["payload"]["sid"]:
             return None
-        flags: Dict[str, Any] = {flag: payload[flag] for flag in ("remote_commands", "remote_config_patch", "config_patch")}
+        flags: Dict[str, Any] = {flag: payload[flag] for flag in (
+            "remote_commands", "remote_config_patch", "config_patch",
+            "remote_processing", "remote_restart", "remote_reboot", "remote_shutdown",
+        )}
         fields = payload.get("config_fields")
         flags["config_fields"] = list(fields) if isinstance(fields, list) else None
         return flags

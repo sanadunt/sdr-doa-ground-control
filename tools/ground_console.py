@@ -19,8 +19,13 @@ The console keeps a narrow boundary:
   ``telemetry/health`` and the base revision (``state.cfg``) the operator
   reviewed. ``POST /api/mqtt/config-get`` sends the read-only ``config.get``
   with the same Origin and admin gates, so the edge answers with
-  ``settings/reported``. The edge decides whether to apply a patch and
-  answers on ``ack/config``;
+  ``settings/reported``. ``POST /api/mqtt/operation`` (since 3.15.0, the
+  owner's decision of 2026-11-04) sends the edge's operations with the same
+  gates and ``confirm: true``: ``processing.set`` (start or stop the SDR
+  processing), ``service.restart`` and the two steps of a reboot or shutdown
+  of the Raspberry, each only while the node's capabilities allow it. The
+  edge decides whether to apply a command and answers on ``ack/config`` or
+  ``ack/operation``;
 * the settings form's ``/api/dry-run/config-patch`` only validates a preview;
 * local admin settings also change this console's branding;
 * ``/api/preferences`` keeps the operator's browser preferences (theme,
@@ -338,6 +343,7 @@ DEFAULT_PORT = 8787
 # most the edge accepts).
 MAX_CONFIG_PATCH_REQUEST_BYTES = 4096
 CONFIG_PATCH_REQUEST_KEYS = frozenset({"changes", "base_rev", "confirm"})
+OPERATION_REQUEST_KEYS = frozenset({"op", "desired", "prepare_id", "confirm"})
 # The edge refuses a second config.get from the same link within 1 s.
 CONFIG_GET_MIN_INTERVAL_MS = 1_000
 # Status lookups take any id the edge accepts; the console's own are gc-<hex>.
@@ -565,6 +571,42 @@ def _parse_config_patch_request(payload: Any) -> Tuple[Dict[str, Any], Optional[
     return normalized, base_rev
 
 
+def _parse_operation_request(payload: Any) -> Tuple[str, Optional[str], Optional[str]]:
+    """POST /api/mqtt/operation: (op, desired, prepare_id); the first failure wins."""
+    if not isinstance(payload, dict) or "op" not in payload or set(payload) - OPERATION_REQUEST_KEYS:
+        raise ConfigPatchRejected(
+            HTTPStatus.BAD_REQUEST,
+            "INVALID_REQUEST",
+            "request must be a JSON object with op, confirm and the op's own field only",
+        )
+    op = payload["op"]
+    if op not in cmds.OPERATION_OPS:
+        raise ConfigPatchRejected(
+            HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "op must be one of " + ", ".join(cmds.OPERATION_OPS),
+        )
+    desired = payload.get("desired")
+    prepare_id = payload.get("prepare_id")
+    if ("desired" in payload) != (op == cmds.OP_PROCESSING_SET) or (
+        ("prepare_id" in payload) != (op in cmds.EXECUTE_OPS)
+    ):
+        raise ConfigPatchRejected(
+            HTTPStatus.BAD_REQUEST,
+            "INVALID_REQUEST",
+            "processing.set takes desired, an execute takes prepare_id, the others neither",
+        )
+    if payload.get("confirm") is not True:
+        raise ConfigPatchRejected(
+            HTTPStatus.BAD_REQUEST, "CONFIRM_REQUIRED", "confirm must be true after the operator confirmed",
+        )
+    if op == cmds.OP_PROCESSING_SET and desired not in cmds.PROCESSING_STATES:
+        raise ConfigPatchRejected(HTTPStatus.BAD_REQUEST, "INVALID_DESIRED_STATE", "desired must be RUNNING or STOPPED")
+    if op in cmds.EXECUTE_OPS and (not isinstance(prepare_id, str) or not _COMMAND_ID_RE.fullmatch(prepare_id)):
+        raise ConfigPatchRejected(
+            HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "prepare_id must be the command id of the prepare",
+        )
+    return op, desired, prepare_id
+
+
 def _monitor_control_view(monitor: Any) -> Optional[Dict[str, Any]]:
     """The monitor's rdf_node_control_view(), or None when it has none or fails."""
     reader = getattr(monitor, "rdf_node_control_view", None)
@@ -617,6 +659,13 @@ def _node_view(session: Optional[Dict[str, Any]], now_ms: int) -> Optional[Dict[
         "health_age_ms": None if received is None else max(0, now_ms - received),
         "remote_commands": flag("remote_commands"),
         "remote_config_patch": flag("remote_config_patch"),
+        # The operations the node takes (POST /api/mqtt/operation); null before its capabilities.
+        "remote_processing": flag("remote_processing"),
+        "remote_restart": flag("remote_restart"),
+        "remote_reboot": flag("remote_reboot"),
+        "remote_shutdown": flag("remote_shutdown"),
+        # The SDR engine as state.run says (RUNNING, STOPPED, STARTING, STOPPING, ERROR, UNKNOWN).
+        "run": session.get("run") if isinstance(session.get("run"), str) else None,
         # Contract 1.8: the fields the edge's config.patch takes; null from an older edge
         # (or before its capabilities arrived), which takes the five fields before ant_spacing_m.
         "config_fields": _config_fields_or_none(capabilities.get("config_fields")),
@@ -3352,6 +3401,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 "choices": cmds.choices_view(),
                 "gain_table_db": list(cmds.GAIN_TABLE_DB),
                 "requires_fresh_health": True,
+                # POST /api/mqtt/operation: the edge's operations this console sends,
+                # each only while the node's capabilities allow it.
+                "operations": list(cmds.OPERATION_OPS),
+                "operation_ack_topic": f"sdr/v2/{node_id}/{cmds.OPERATION_ACK_SUFFIX}",
             },
             "refresh_intervals_s": sorted(ALLOWED_REFRESH_INTERVALS),
             "snapshot_budget_ms": int(SNAPSHOT_TOTAL_BUDGET_S * 1000),
@@ -3509,8 +3562,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/mqtt/config-patch":
             self._send_json({"command": self.console_server.config_commands.latest(self.console_server.mqtt_monitor)})
             return
-        if parsed.path.startswith("/api/mqtt/config-patch/"):
-            command_id = parsed.path[len("/api/mqtt/config-patch/"):]
+        if parsed.path == "/api/mqtt/operation":
+            self._send_json({"command": self.console_server.config_commands.latest_of(
+                self.console_server.mqtt_monitor, cmds.OPERATION_OPS,
+            )})
+            return
+        if parsed.path.startswith(("/api/mqtt/config-patch/", "/api/mqtt/operation/")):
+            command_id = parsed.path.rsplit("/", 1)[1]
             if _COMMAND_ID_RE.fullmatch(command_id) is None:
                 self._send_config_patch_error(
                     HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "command id must match [A-Za-z0-9_.:-]{1,80}",
@@ -4086,7 +4144,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             except (ValueError, OSError) as exc:
                 self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
-        if parsed.path in ("/api/mqtt/config-patch", "/api/mqtt/config-get"):
+        if parsed.path in ("/api/mqtt/config-patch", "/api/mqtt/config-get", "/api/mqtt/operation"):
             # Kontrol's RDF Node commands. Origin and admin are checked before
             # the body is read; the other checks live on the server.
             if not self._same_origin_loopback_request():
@@ -4108,6 +4166,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/mqtt/config-patch":
                 status, body = self.console_server.submit_config_patch(payload)
+            elif parsed.path == "/api/mqtt/operation":
+                status, body = self.console_server.submit_operation(payload)
             else:
                 status, body = self.console_server.submit_config_get(payload)
             self._send_json(body, status)
@@ -5558,12 +5618,50 @@ class GroundConsoleServer(ThreadingHTTPServer):
         except ConfigPatchRejected as rejected:
             return rejected.status, rejected.body()
 
+    def submit_operation(self, payload: Any) -> Tuple[int, Dict[str, Any]]:
+        """POST /api/mqtt/operation after Origin and admin; returns (status, body)."""
+        try:
+            op, desired, prepare_id = _parse_operation_request(payload)
+            with self._config_patch_lock:
+                return self._publish_command_locked(op, desired=desired, prepare_id=prepare_id)
+        except ConfigPatchRejected as rejected:
+            return rejected.status, rejected.body()
+
+    def _take_challenge_locked(self, monitor: Any, op: str, prepare_id: str, session: Dict[str, Any]) -> str:
+        """The challenge for an execute: its prepare answered APPLIED in this session and is still valid."""
+        prepare = self.config_commands.status(prepare_id, monitor)
+        if prepare is None or prepare["op"] != cmds.PREPARE_FOR_EXECUTE[op]:
+            raise ConfigPatchRejected(
+                HTTPStatus.CONFLICT,
+                "PREPARE_UNKNOWN",
+                "this console sent no such prepare; prepare the operation first",
+            )
+        ack = prepare.get("ack") or {}
+        if prepare["state"] != "acked" or ack.get("status") != "APPLIED":
+            raise ConfigPatchRejected(
+                HTTPStatus.CONFLICT,
+                "PREPARE_NOT_READY",
+                "the prepare has no APPLIED answer from the RDF Node",
+                state=prepare["state"],
+            )
+        taker = getattr(monitor, "take_rdf_node_challenge", None)
+        challenge = taker(prepare_id) if callable(taker) and prepare.get("sid") == session["sid"] else None
+        if not isinstance(challenge, str):
+            raise ConfigPatchRejected(
+                HTTPStatus.CONFLICT,
+                "PREPARE_EXPIRED",
+                "the prepare's challenge expired or was used; prepare the operation again",
+            )
+        return challenge
+
     def _publish_command_locked(
         self,
         op: str,
         *,
         changes: Optional[Dict[str, Any]] = None,
         requested_rev: Optional[int] = None,
+        desired: Optional[str] = None,
+        prepare_id: Optional[str] = None,
     ) -> Tuple[int, Dict[str, Any]]:
         """The monitor, node and in-flight checks, then the publish; the first failure wins."""
         monitor = self.mqtt_monitor
@@ -5626,12 +5724,36 @@ class GroundConsoleServer(ThreadingHTTPServer):
                     "the reviewed base revision is no longer the node's; read the values again",
                     current_base_rev=base_rev,
                 )
-            pending = self.config_commands.in_flight(monitor, cmds.OP_CONFIG_PATCH)
+            pending = self.config_commands.mutation_in_flight(monitor)
             if pending is not None:
                 raise ConfigPatchRejected(
                     HTTPStatus.CONFLICT,
                     "COMMAND_IN_FLIGHT",
-                    "another config patch is still waiting for its result",
+                    "another command is still waiting for its result",
+                    command_id=pending,
+                )
+        elif op in cmds.OPERATION_OPS:
+            capabilities = session.get("capabilities") if isinstance(session.get("capabilities"), dict) else {}
+            flag = cmds.OPERATION_CAPABILITIES[op]
+            if capabilities.get(flag) is not True:
+                raise ConfigPatchRejected(
+                    HTTPStatus.CONFLICT,
+                    "OPERATION_NOT_ALLOWED",
+                    f"the RDF Node does not take {op} (capabilities.{flag} is not true)",
+                    capability=flag,
+                )
+            if session.get("health_fresh") is not True:
+                raise ConfigPatchRejected(
+                    HTTPStatus.CONFLICT,
+                    "NODE_NOT_FRESH",
+                    "the RDF Node sent no fresh telemetry/health; an operation needs a live node",
+                )
+            pending = self.config_commands.mutation_in_flight(monitor)
+            if pending is not None:
+                raise ConfigPatchRejected(
+                    HTTPStatus.CONFLICT,
+                    "COMMAND_IN_FLIGHT",
+                    "another command is still waiting for its result",
                     command_id=pending,
                 )
         else:
@@ -5650,6 +5772,8 @@ class GroundConsoleServer(ThreadingHTTPServer):
                     "CONFIG_GET_TOO_SOON",
                     "the RDF Node answers at most one settings request a second",
                 )
+        # Last, so a refused execute never uses up its prepare's one-time challenge.
+        challenge = self._take_challenge_locked(monitor, op, prepare_id, session) if op in cmds.EXECUTE_OPS else None
         issued = int(self.clock_ms())
         command = cmds.build_command(
             op,
@@ -5659,6 +5783,9 @@ class GroundConsoleServer(ThreadingHTTPServer):
             base_rev=base_rev,
             issued_ms=issued,
             changes=changes,
+            desired=desired,
+            prepare_id=prepare_id,
+            challenge=challenge,
         )
         try:
             cmds.validate_command(command, now_ms=issued)
@@ -5704,6 +5831,8 @@ class GroundConsoleServer(ThreadingHTTPServer):
             "expires_ms": command["expires_ms"],
             "ttl_ms": cmds.COMMAND_TTL_MS,
             "changes": dict(command.get("changes") or {}),
+            "desired": desired,
+            "prepare_id": prepare_id,
         }
 
     def enable_mqtt_monitor(

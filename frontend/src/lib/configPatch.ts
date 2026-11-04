@@ -7,7 +7,10 @@
  * change takes VFO0 along at the same frequency. The server checks them
  * again; the client copy only gives early feedback.
  */
+import { ApiError } from '../api';
 import type { ConfigSettingsReport, ConsoleCapabilities } from '../api';
+import { errorNotice } from './errorNotice';
+import type { Notice } from './errorNotice';
 import type { MessageKey, Translate } from './i18n';
 import { SQUELCH_MODES } from './controlDraft';
 import type { ConfigPatchChanges, ConfigPatchChoiceKey, ConfigPatchKey, ConfigPatchNumberKey, ConfigPatchValue, SquelchMode } from './controlDraft';
@@ -637,6 +640,12 @@ export const CONFIG_PATCH_ERROR_CODES = [
   'MQTT_PUBLISH_FAILED',
   'COMMAND_UNKNOWN',
   'ADMIN_LOGIN_THROTTLED',
+  // POST /api/mqtt/operation (3.15.0).
+  'INVALID_DESIRED_STATE',
+  'OPERATION_NOT_ALLOWED',
+  'PREPARE_UNKNOWN',
+  'PREPARE_NOT_READY',
+  'PREPARE_EXPIRED',
 ] as const;
 
 export type ConfigPatchErrorCode = typeof CONFIG_PATCH_ERROR_CODES[number];
@@ -666,10 +675,29 @@ export const CONFIG_PATCH_ERROR_KEYS: Record<ConfigPatchErrorCode, MessageKey> =
   MQTT_PUBLISH_FAILED: 'control.error.MQTT_PUBLISH_FAILED',
   COMMAND_UNKNOWN: 'control.error.COMMAND_UNKNOWN',
   ADMIN_LOGIN_THROTTLED: 'control.error.ADMIN_LOGIN_THROTTLED',
+  INVALID_DESIRED_STATE: 'control.error.INVALID_DESIRED_STATE',
+  OPERATION_NOT_ALLOWED: 'control.error.OPERATION_NOT_ALLOWED',
+  PREPARE_UNKNOWN: 'control.error.PREPARE_UNKNOWN',
+  PREPARE_NOT_READY: 'control.error.PREPARE_NOT_READY',
+  PREPARE_EXPIRED: 'control.error.PREPARE_EXPIRED',
 };
 
 export function isConfigPatchErrorCode(value: unknown): value is ConfigPatchErrorCode {
   return typeof value === 'string' && (CONFIG_PATCH_ERROR_CODES as readonly string[]).includes(value);
+}
+
+/** A Kontrol request the console refused, by its stable code, or one that failed on the way. */
+export interface CommandFailure { code: string; message: Notice }
+
+/** Translate a failed console request by its stable error code. */
+export function commandFailure(error: unknown): CommandFailure {
+  if (error instanceof ApiError && error.code) {
+    return {
+      code: error.code,
+      message: isConfigPatchErrorCode(error.code) ? { key: CONFIG_PATCH_ERROR_KEYS[error.code] } : { key: 'control.error.unknown', vars: { error: error.message } },
+    };
+  }
+  return { code: error instanceof ApiError ? `HTTP ${error.status}` : 'REQUEST_FAILED', message: errorNotice(error, 'common.requestFailed') };
 }
 
 /**
@@ -719,6 +747,17 @@ export const EDGE_ERROR_KEYS: Readonly<Record<string, MessageKey>> = {
   SETTINGS_TOO_LARGE: 'control.edge.SETTINGS_FILE_INVALID',
   INVALID_COMMAND_FIELD: 'control.edge.INVALID_COMMAND_FIELD',
   JOURNAL_UNAVAILABLE: 'control.edge.JOURNAL_UNAVAILABLE',
+  // Operations (3.15.0): processing.set, service.restart, reboot and shutdown.
+  INVALID_DESIRED_STATE: 'control.error.INVALID_DESIRED_STATE',
+  LIFECYCLE_NOT_APPROVED: 'control.edge.LIFECYCLE_NOT_APPROVED',
+  LIFECYCLE_TARGET_NOT_READY: 'control.edge.LIFECYCLE_NOT_APPROVED',
+  UNSAFE_ENGINE_UNIT: 'control.edge.LIFECYCLE_NOT_APPROVED',
+  REBOOT_CHALLENGE_INVALID: 'control.edge.CHALLENGE_INVALID',
+  SHUTDOWN_CHALLENGE_INVALID: 'control.edge.CHALLENGE_INVALID',
+  REBOOT_PREPARE_REQUIRED: 'control.edge.CHALLENGE_INVALID',
+  SHUTDOWN_PREPARE_REQUIRED: 'control.edge.CHALLENGE_INVALID',
+  TOO_MANY_ACTIVE_CHALLENGES: 'control.edge.TOO_MANY_ACTIVE_CHALLENGES',
+  SHUTDOWN_ALREADY_SCHEDULED: 'control.edge.SHUTDOWN_ALREADY_SCHEDULED',
 };
 
 const SPACING_SET_BY_ENGINE_BAND = 'SPACING_SET_BY_ENGINE_BAND';

@@ -10,6 +10,7 @@ import {
   appliedMethodText,
   bandRuleFor,
   bandSpacingText,
+  commandFailure,
   commandResultView,
   commandStageText,
   configPatchFieldsFor,
@@ -49,6 +50,7 @@ import { useI18n } from '../../lib/i18n';
 import type { MessageKey, Translate } from '../../lib/i18n';
 import { AdminUnlock } from '../AdminUnlock';
 import { Icon } from '../ui';
+import { NodeOperations } from './NodeOperations';
 
 export interface ControlPanelProps {
   capabilities: ConsoleCapabilities | null;
@@ -127,15 +129,7 @@ function withSlots(template: string, slots: Record<string, ReactNode>): ReactNod
 }
 
 /** Translate a failed console request by its stable error code. */
-export function controlFailure(error: unknown): ControlFailure {
-  if (error instanceof ApiError && error.code) {
-    return {
-      code: error.code,
-      message: isConfigPatchErrorCode(error.code) ? { key: CONFIG_PATCH_ERROR_KEYS[error.code] } : { key: 'control.error.unknown', vars: { error: error.message } },
-    };
-  }
-  return { code: error instanceof ApiError ? `HTTP ${error.status}` : 'REQUEST_FAILED', message: errorNotice(error, 'common.requestFailed') };
-}
+export const controlFailure: (error: unknown) => ControlFailure = commandFailure;
 
 type HintTone = 'neutral' | 'changed' | 'error';
 
@@ -301,6 +295,8 @@ export interface ControlPanelViewProps {
   /** The reviewed change waits for the node's new revision. */
   rebasing?: boolean;
   rebaseNotice?: ControlRebaseNotice | null;
+  /** The operations on the RDF-SDR (NodeOperations), shown once admin is unlocked. */
+  operations?: ReactNode;
   /** The operator confirmed sending although the node reports remote_config_patch false. */
   capabilityConfirmed?: boolean;
   onCapabilityConfirm?: (confirmed: boolean) => void;
@@ -338,6 +334,7 @@ export function ControlPanelView({
   settingsRetry = null,
   rebasing = false,
   rebaseNotice = null,
+  operations = null,
   capabilityConfirmed = false,
   onCapabilityConfirm,
   onRebase,
@@ -440,6 +437,7 @@ export function ControlPanelView({
           <p className="ov-control-warn">{reported?.code && isConfigPatchErrorCode(reported.code) ? t(CONFIG_PATCH_ERROR_KEYS[reported.code]) : t('control.patchUnavailable')}</p>
         ) : null}
         {!reported && !reportedError ? <p className="ov-control-note" role="status">{t('control.loading')}</p> : null}
+        {operations}
 
         {stage === 'edit' ? (
           <>
@@ -1105,6 +1103,7 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
       settingsRetry={settingsRetry}
       rebasing={rebase !== null}
       rebaseNotice={rebaseNotice}
+      operations={<NodeOperations reported={reported} busy={stage === 'sending'} />}
       capabilityConfirmed={capabilityConfirmed}
       onCapabilityConfirm={setCapabilityConfirmed}
       onRebase={() => { if (done?.rebase) { setStage('review'); setReview(null); startRebase(done.rebase.changes, done.rebase.fromRev); } }}
