@@ -2,7 +2,7 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
-## 3.13.1
+## 3.13.3
 
 Rilis perbaikan: tidak ada yang dihapus. Grafik DoA lewat Telemetry LoRa tidak lagi sering hilang.
 
@@ -10,6 +10,15 @@ Rilis perbaikan: tidak ada yang dihapus. Grafik DoA lewat Telemetry LoRa tidak l
 - **Grafik DoA terakhir disimpan console.** Console menyimpan jawaban terakhir yang punya grafik DoA live (vektor Angular 360 bin) di memori, dan menyediakannya di `GET /api/doa/last-live` (juga di LAN view). Halaman yang baru dibuka, misalnya tablet atau kiosk setelah reload, langsung menggambar grafik itu sebagai grafik ditahan (USANG + jam data terakhir) di peta dan Polar, tidak kosong sampai frame Angular berikutnya. Sesi RDF-SDR lain atau URL Data Out lain menghapusnya.
 - **Grafik ditahan tetap tampil di samping bearing live.** Lewat LoRa garis bearing hampir selalu live, sedangkan frame Angular (bahan beam, lobe dan tepi −3 dB) jarang datang. Peta sekarang tetap menggambar beam, lobe dan tepi yang ditahan di samping bearing live, tanpa garis bearing kedua, dengan catatan "Grafik DoA ditahan · terakhir … · bearing live tanpa kurva Angular". Dock Polar sudah menahan kurvanya seperti ini.
 - Frekuensi frame Angular dari RDF-SDR lewat LoRa tidak berubah: itu diatur di sisi edge (repo Raspberry).
+
+## 3.13.2
+
+Rilis perbaikan tampilan Dashboard; tidak ada yang dihapus.
+
+- **Panel Drone selalu menunjukkan status koneksinya.** Dua baris teratas, **Telemetri** dan **Kamera drone**, selalu tampil: memeriksa, mati, mencari remote di LAN, menghubungkan, tidak terhubung (dengan IP remote), atau terhubung (live, data usang, atau belum ada data). Video juga menyebut sebabnya: service tidak jalan, encoder belum jalan, tidak ada gambar kamera, atau mencoba lagi.
+- Semua baris telemetri (status, GPS, ketinggian, kecepatan, heading, roll/pitch, baterai, remote) selalu tampil, berisi "—" selama drone belum mengirimnya. Barisnya kini satu kolom (label di kiri, nilai di kanan), jadi lebih banyak nilai yang muat di kolom kanan.
+- **Panel Drone tidak lagi menimpa kartu RDF-SDR.** Di layar yang tinggi (misalnya zoom browser 80%), video drone sempat tergambar di atas kartu RDF-SDR yang dibuka. Sekarang keduanya mengecil di dalam kotaknya sendiri: nilai drone dan detail RDF-SDR bisa digulir, dan header, video, serta baris status drone selalu terlihat.
+- **Legenda peta tidak tertutup kolom kanan.** Selama panel Drone atau detail kartu RDF-SDR terbuka, legenda pindah ke kiri kolom kanan.
 
 ## 3.13.0
 
@@ -33,7 +42,7 @@ Rilis minor: tidak ada yang dihapus. Telemetry dan video drone SIYI (yang membaw
   - Cara pasang ada di `packaging/drone-video/README.md`.
 - **System Health** punya kartu "Telemetri drone" dan "Video drone".
 - Port console tetap 8787.
-- **Mirror Receiver jalan sendiri setelah boot.** Selama LAN view terbuka, halaman console di groundstation sendiri langsung membuka Receiver (HackRF tersambung, RX belum dimulai). Tablet langsung melihat status Receiver (RX OFF), tanpa ada yang perlu membuka Receiver dulu di groundstation; spektrum muncul setelah Mulai. Halaman yang dibuka saat LAN view masih tertutup mengecek lagi tiap 10 detik.
+- **Mirror Receiver jalan sendiri setelah boot.** Selama LAN view terbuka, halaman console di groundstation sendiri langsung membuka Receiver. Receiver menyambung ke HackRF yang sudah diizinkan dan langsung menjalankan RX dengan setelan terakhirnya (VFO seperti tersimpan, tidak dibisukan), jadi tablet langsung mendapat spektrum live tanpa ada yang perlu membuka Receiver dulu di groundstation. Tanpa HackRF yang diizinkan, atau bila ada lebih dari satu, RX tidak dimulai dan tablet menampilkan RX OFF. Halaman yang dibuka saat LAN view masih tertutup mengecek lagi tiap 10 detik.
 
 ## 3.12.1
 

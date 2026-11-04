@@ -9,7 +9,7 @@ import { normalizeDrone } from '../../lib/droneLink';
 import type { TelemetrySnapshot } from '../../types';
 import { DroneLinkCard, DroneVideoCard } from '../DroneHealthCards';
 import { DroneSettingsCard, droneHostValid, normalizeDroneSettings } from '../DroneSettingsCard';
-import { DronePanel, droneChip, droneRows, droneVideoText } from './DronePanel';
+import { DronePanel, droneChip, droneLinkStatus, droneRows, droneVideoStatus, droneVideoText } from './DronePanel';
 import { droneCompareRows } from './NodeCard';
 
 const t = (lang: Lang): Translate => (key: MessageKey, vars?: Record<string, string | number>) => translate(lang, key, vars);
@@ -52,10 +52,48 @@ describe('drone panel', () => {
     expect(markup).toContain('aria-label="Close the drone panel"');
   });
 
-  it('names why there is no data, in both languages', () => {
-    expect(render(<DronePanel initialView={normalizeDrone({ ...BLOCK, connection: 'searching', state: 'NO_DATA', position: null, gps: null, attitude: null, battery: null, status: null, hud: null, link: null, heading: null, statustext: null })} initialHealth={OK} />))
-      .toContain('Searching the LAN for the drone remote…');
-    expect(render(<DronePanel initialView={null} initialHealth={OK} />, 'id')).toContain('Link drone mati.');
+  it('always shows the link rows and every value row, "—" until the drone sends it', () => {
+    const empty = { ...BLOCK, connection: 'searching', state: 'NO_DATA', host: null, position: null, gps: null, attitude: null, battery: null, status: null, hud: null, link: null, heading: null, statustext: null };
+    const markup = render(<DronePanel initialView={normalizeDrone(empty)} initialHealth={normalizeDroneVideoHealth({ state: 'DOWN' })} />);
+    expect(markup).toContain('>Telemetry<');
+    expect(markup).toContain('Not connected · searching the LAN for the remote…');
+    expect(markup).toContain('>Drone camera<');
+    expect(markup).toContain('Not connected · service not running');
+    for (const label of ['Status', 'GPS', 'Altitude', 'Speed', 'Heading', 'Roll / pitch', 'Battery', 'Remote']) expect(markup).toContain(`<dt>${label}</dt>`);
+    expect(markup.match(/class="is-empty">—</g)).toHaveLength(8);
+    const id = render(<DronePanel initialView={normalizeDrone(empty)} initialHealth={normalizeDroneVideoHealth({ state: 'DOWN' })} />, 'id');
+    expect(id).toContain('>Telemetri<');
+    expect(id).toContain('Tidak terhubung · mencari remote di LAN…');
+    expect(id).toContain('Tidak terhubung · service tidak jalan');
+    expect(render(<DronePanel initialView={null} initialHealth={OK} />, 'id')).toContain('Memeriksa…');
+  });
+
+  it('link row: off, searching, connecting, not connected, connected live, stale, no data', () => {
+    const en = t('en');
+    const id = t('id');
+    expect(droneLinkStatus(null, en)).toEqual({ value: 'Checking…', tone: 'is-empty' });
+    expect(droneLinkStatus(normalizeDrone({ ...BLOCK, enabled: false, state: 'DISABLED', connection: 'disabled' }), en)).toEqual({ value: 'Off (Configuration)', tone: 'is-empty' });
+    expect(droneLinkStatus(normalizeDrone({ ...BLOCK, connection: 'searching' }), en).tone).toBe('is-warn');
+    expect(droneLinkStatus(normalizeDrone({ ...BLOCK, connection: 'connecting' }), en)).toEqual({ value: 'Connecting to 192.168.1.162…', tone: 'is-warn' });
+    expect(droneLinkStatus(normalizeDrone({ ...BLOCK, connection: 'disconnected' }), en)).toEqual({ value: 'Not connected · 192.168.1.162 · trying again', tone: 'is-bad' });
+    expect(droneLinkStatus(normalizeDrone(BLOCK), en)).toEqual({ value: 'Connected · 192.168.1.162', tone: 'is-good' });
+    expect(droneLinkStatus(normalizeDrone({ ...BLOCK, state: 'STALE' }), id)).toEqual({ value: 'Terhubung · 192.168.1.162 · data usang', tone: 'is-warn' });
+    expect(droneLinkStatus(normalizeDrone({ ...BLOCK, state: 'NO_DATA' }), id)).toEqual({ value: 'Terhubung · 192.168.1.162 · belum ada data', tone: 'is-warn' });
+  });
+
+  it('video row: from the service health and the player', () => {
+    const en = t('en');
+    const id = t('id');
+    expect(droneVideoStatus(null, 'idle', null, en)).toEqual({ value: 'Checking…', tone: 'is-empty' });
+    expect(droneVideoStatus(OK, 'playing', null, en)).toEqual({ value: 'Connected · live', tone: 'is-good' });
+    expect(droneVideoStatus(OK, 'connecting', null, en)).toEqual({ value: 'Connecting…', tone: 'is-warn' });
+    expect(droneVideoStatus(OK, 'error', null, en)).toEqual({ value: 'Not connected · trying again', tone: 'is-warn' });
+    expect(droneVideoStatus(OK, 'error', 'DRONE_VIDEO_NO_STREAM', en).value).toBe('Not connected · no camera picture');
+    expect(droneVideoStatus(normalizeDroneVideoHealth({ state: 'NO_CAMERA' }), 'idle', null, id).value).toBe('Tidak terhubung · tidak ada gambar kamera');
+    expect(droneVideoStatus(normalizeDroneVideoHealth({ state: 'NO_ENCODER' }), 'idle', null, en)).toEqual({ value: 'Not connected · encoder not running', tone: 'is-bad' });
+    expect(droneVideoStatus(normalizeDroneVideoHealth({ state: 'DOWN' }), 'idle', null, en).tone).toBe('is-bad');
+    expect(droneVideoStatus(normalizeDroneVideoHealth({ state: 'DISABLED', reason: 'NOT_CONFIGURED' }), 'idle', null, en).value).toBe('No video service on this console');
+    expect(droneVideoStatus(normalizeDroneVideoHealth({ state: 'DISABLED', reason: 'TURNED_OFF' }), 'idle', null, id).value).toBe('Mati (Konfigurasi)');
   });
 
   it('chips and rows', () => {
@@ -64,6 +102,8 @@ describe('drone panel', () => {
     expect(droneChip(normalizeDrone({ ...BLOCK, state: 'STALE' }))).toEqual({ code: 'STALE', tone: 'warn' });
     const stale = droneRows(normalizeDrone({ ...BLOCK, gps: { ...BLOCK.gps, stale: true } }), t('en'));
     expect(stale.find((row) => row.key === 'gps')?.tone).toBe('is-stale');
+    expect(droneRows(null, t('en')).map((row) => row.key)).toEqual(['status', 'gps', 'alt', 'speed', 'heading', 'attitude', 'battery', 'link']);
+    expect(droneRows(normalizeDrone(BLOCK), t('en')).every((row) => row.tone !== 'is-empty')).toBe(true);
   });
 
   it('video notices follow the service state', () => {

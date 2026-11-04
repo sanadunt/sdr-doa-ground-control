@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { JSX } from 'react';
 import { getDrone, getDroneVideoHealth } from '../../api';
 import type { DroneVideoHealth } from '../../api';
@@ -30,35 +30,74 @@ export function droneChip(view: DroneView | null): { code: string; tone: ChipTon
 
 const fmt = (value: number | null | undefined, digits: number, unit = '') => (value === null || value === undefined ? '—' : `${value.toFixed(digits)}${unit}`);
 
-/** The panel's label/value rows; only what the drone sent, a stale value marked. */
+/** A row of the panel; tone is a class of the value (is-good, is-warn, is-bad, is-stale, is-empty). */
 export interface DroneRow { key: string; label: string; value: string; tone?: string; wide?: boolean }
 
+const NONE = '—';
+
+/** The telemetry link's state in a few words: off, searching, connecting, connected (with or without data), not connected. */
+export function droneLinkStatus(view: DroneView | null, t: Translate): { value: string; tone: string } {
+  if (!view) return { value: t('drone.linkChecking'), tone: 'is-empty' };
+  if (view.state === 'DISABLED' || view.connection === 'disabled') return { value: t('drone.linkOff'), tone: 'is-empty' };
+  const host = view.host ?? NONE;
+  if (view.connection === 'searching' || (view.scanning && view.connection !== 'connected')) return { value: t('drone.linkSearching'), tone: 'is-warn' };
+  if (view.connection === 'connecting') return { value: t('drone.linkConnecting', { host }), tone: 'is-warn' };
+  if (view.connection !== 'connected') return { value: t('drone.linkDown', { host }), tone: 'is-bad' };
+  if (view.state === 'LIVE') return { value: t('drone.linkLive', { host }), tone: 'is-good' };
+  if (view.state === 'STALE') return { value: t('drone.linkStale', { host }), tone: 'is-warn' };
+  return { value: t('drone.linkNoData', { host }), tone: 'is-warn' };
+}
+
+export type DroneVideoPhase = 'idle' | 'connecting' | 'playing' | 'error';
+
+/** The video's state in a few words, from the service's health and the player. */
+export function droneVideoStatus(health: DroneVideoHealth | null, phase: DroneVideoPhase, code: string | null, t: Translate): { value: string; tone: string } {
+  if (phase === 'playing') return { value: t('drone.videoLive'), tone: 'is-good' };
+  if (!health) return { value: t('drone.videoChecking'), tone: 'is-empty' };
+  if (health.state === 'DISABLED') return { value: t(health.reason === 'NOT_CONFIGURED' ? 'drone.videoNone' : 'drone.videoOff'), tone: 'is-empty' };
+  if (health.state === 'DOWN') return { value: t('drone.videoDown'), tone: 'is-bad' };
+  if (health.state === 'NO_ENCODER') return { value: t('drone.videoNoEncoder'), tone: 'is-bad' };
+  if (health.state === 'NO_CAMERA' || code === 'DRONE_VIDEO_NO_STREAM') return { value: t('drone.videoNoCamera'), tone: 'is-warn' };
+  if (phase === 'error') return { value: t('drone.videoRetrying'), tone: 'is-warn' };
+  return { value: t('drone.videoConnecting'), tone: 'is-warn' };
+}
+
+/**
+ * The telemetry rows, always all of them: a value the drone has not sent
+ * reads "—", so the panel shows where each value will come; a stale one is marked.
+ */
 export function droneRows(view: DroneView | null, t: Translate): DroneRow[] {
-  if (!view) return [];
   const rows: DroneRow[] = [];
   const stale = (block: { stale: boolean } | null) => (block?.stale ? 'is-stale' : undefined);
-  if (view.status) {
+  const empty = (key: string, label: string, wide = false): DroneRow => ({ key, label, value: NONE, tone: 'is-empty', wide });
+  if (!view?.status) rows.push(empty('status', t('drone.status')));
+  else {
     const armed = view.status.armed === null ? '—' : view.status.armed ? 'ARMED' : 'DISARMED';
     const mode = view.status.custom_mode === null ? '' : ` · ${t('drone.modeValue', { mode: view.status.custom_mode })}`;
     rows.push({ key: 'status', label: t('drone.status'), value: `${armed}${mode}`, tone: stale(view.status) ?? (view.status.armed ? 'is-warn' : undefined) });
   }
-  if (view.gps) {
+  if (!view?.gps) rows.push(empty('gps', t('drone.gps'), true));
+  else {
     const parts = [droneFixLabel(view.gps)];
     if (view.gps.satellites !== null) parts.push(t('drone.satellites', { count: view.gps.satellites }));
     if (view.gps.hdop !== null) parts.push(`HDOP ${view.gps.hdop.toFixed(1)}`);
     rows.push({ key: 'gps', label: t('drone.gps'), value: parts.join(' · '), wide: true, tone: stale(view.gps) ?? (view.gps.rtk === 'FIXED' ? 'is-good' : view.gps.fix !== null && view.gps.fix < 3 ? 'is-bad' : undefined) });
   }
-  if (view.position) {
+  if (!view?.position) rows.push(empty('alt', t('drone.altitude'), true), empty('speed', t('drone.speed')));
+  else {
     rows.push({ key: 'alt', label: t('drone.altitude'), value: t('drone.altValue', { rel: fmt(view.position.alt_rel_m, 1, ' m'), msl: fmt(view.position.alt_msl_m, 0, ' m') }), wide: true, tone: stale(view.position) });
     rows.push({ key: 'speed', label: t('drone.speed'), value: `${fmt(view.position.speed_ms, 1, ' m/s')}${view.hud?.climb_ms !== null && view.hud?.climb_ms !== undefined ? ` · ↕ ${view.hud.climb_ms.toFixed(1)} m/s` : ''}`, tone: stale(view.position) });
   }
-  if (view.heading) rows.push({ key: 'heading', label: t('drone.heading'), value: `${view.heading.deg.toFixed(1)}°` });
-  if (view.attitude) rows.push({ key: 'attitude', label: t('drone.attitude'), value: `${fmt(view.attitude.roll_deg, 1, '°')} / ${fmt(view.attitude.pitch_deg, 1, '°')}`, tone: stale(view.attitude) });
-  if (view.battery) {
+  rows.push(view?.heading ? { key: 'heading', label: t('drone.heading'), value: `${view.heading.deg.toFixed(1)}°` } : empty('heading', t('drone.heading')));
+  if (!view?.attitude) rows.push(empty('attitude', t('drone.attitude')));
+  else rows.push({ key: 'attitude', label: t('drone.attitude'), value: `${fmt(view.attitude.roll_deg, 1, '°')} / ${fmt(view.attitude.pitch_deg, 1, '°')}`, tone: stale(view.attitude) });
+  if (!view?.battery) rows.push(empty('battery', t('drone.battery')));
+  else {
     const pct = view.battery.remaining_pct === null ? '' : ` · ${view.battery.remaining_pct.toFixed(0)}%`;
     rows.push({ key: 'battery', label: t('drone.battery'), value: `${fmt(view.battery.voltage_v, 2, ' V')} · ${fmt(view.battery.current_a, 1, ' A')}${pct}`, tone: stale(view.battery) });
   }
-  if (view.link) {
+  if (!view?.link) rows.push(empty('link', t('drone.link'), true));
+  else {
     const fc = view.link.fc_online === null ? '—' : view.link.fc_online ? t('drone.fcOnline') : t('drone.fcOffline');
     const host = view.host ? ` · ${view.host}` : '';
     rows.push({ key: 'link', label: t('drone.link'), value: `${fc}${host}`, wide: true, tone: view.link.stale ? 'is-stale' : view.link.fc_online === false ? 'is-bad' : undefined });
@@ -85,11 +124,17 @@ export function droneVideoText(health: DroneVideoHealth | null, phase: 'idle' | 
 }
 
 /** The drone camera through the console's WHEP proxy, started only while the video service reports OK. */
-function DroneVideo({ view, health }: { view: DroneView | null; health: DroneVideoHealth | null }): JSX.Element {
+function DroneVideo({ view, health, onState }: {
+  view: DroneView | null;
+  health: DroneVideoHealth | null;
+  /** The player's phase and last error code, for the panel's Video row. */
+  onState: (phase: DroneVideoPhase, code: string | null) => void;
+}): JSX.Element {
   const { t } = useI18n();
   const videoRef = useRef<HTMLVideoElement>(null);
-  const [phase, setPhase] = useState<'idle' | 'connecting' | 'playing' | 'error'>('idle');
+  const [phase, setPhase] = useState<DroneVideoPhase>('idle');
   const [code, setCode] = useState<string | null>(null);
+  useEffect(() => { onState(phase, code); }, [onState, phase, code]);
   const [attempt, setAttempt] = useState(0);
   const ready = health?.state === 'OK' && typeof RTCPeerConnection === 'function';
 
@@ -222,14 +267,18 @@ export function DronePanel({ initialView = null, initialHealth = null, onClose }
     return () => { stopped = true; window.clearTimeout(timer); };
   }, [staticRender]);
 
+  const [video, setVideo] = useState<{ phase: DroneVideoPhase; code: string | null }>({ phase: 'idle', code: null });
+  const onVideoState = useCallback((phase: DroneVideoPhase, code: string | null) => setVideo({ phase, code }), []);
   const chip = droneChip(view);
   const rows = droneRows(view, t);
   const text = view?.statustext?.text ?? null;
   const videoShown = view?.videoEnabled !== false;
-  const empty = !view || view.state === 'DISABLED'
-    ? t('drone.disabled')
-    : view.connection === 'searching' ? t('drone.searching')
-      : rows.length === 0 ? t('drone.noData') : null;
+  const link = droneLinkStatus(view, t);
+  const videoStatus = droneVideoStatus(health, videoShown ? video.phase : 'idle', video.code, t);
+  const status: DroneRow[] = [
+    { key: 'telemetry', label: t('drone.telemetry'), value: link.value, tone: link.tone, wide: true },
+    { key: 'video', label: t('drone.video.label'), value: videoShown ? videoStatus.value : t('drone.videoOff'), tone: videoShown ? videoStatus.tone : 'is-empty', wide: true },
+  ];
   return (
     <section id="panel-drone" className={large ? 'ov-drone ov-card is-large' : 'ov-drone ov-card'} aria-labelledby="ov-drone-title">
       <div className="ov-card-head">
@@ -246,18 +295,15 @@ export function DronePanel({ initialView = null, initialHealth = null, onClose }
           </button>
         ) : null}
       </div>
-      {videoShown ? <DroneVideo view={view} health={health} /> : null}
-      {empty ? <p className="ov-drone-empty">{empty}</p> : null}
-      {rows.length > 0 ? (
-        <dl className="ov-drone-rows">
-          {rows.map((row) => (
-            <div key={row.key} className={row.wide ? 'is-wide' : undefined}>
-              <dt>{row.label}</dt>
-              <dd className={row.tone}>{row.value}</dd>
-            </div>
-          ))}
-        </dl>
-      ) : null}
+      {videoShown ? <DroneVideo view={view} health={health} onState={onVideoState} /> : null}
+      <dl className="ov-drone-rows">
+        {[...status, ...rows].map((row) => (
+          <div key={row.key} className={[row.wide ? 'is-wide' : '', row.key === 'video' ? 'is-last-status' : ''].filter(Boolean).join(' ') || undefined}>
+            <dt>{row.label}</dt>
+            <dd className={row.tone}>{row.value}</dd>
+          </div>
+        ))}
+      </dl>
       {text ? <p className="ov-drone-text" title={t('drone.statustext')}>{text}</p> : null}
     </section>
   );
