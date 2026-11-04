@@ -34,6 +34,7 @@ import { DoaReadout } from '../components/DoaReadout';
 import { LoadErrorBoundary } from '../components/LoadErrorBoundary';
 import type { RouteName } from '../components/Shell';
 import { NodeCard } from '../components/overview/NodeCard';
+import { Icon } from '../components/ui';
 import { DroneDetails, DronePanel, DroneVideo, droneChip, dronePipShown, useDroneFeed } from '../components/overview/DronePanel';
 import type { DroneVideoPhase, DroneVideoState } from '../components/overview/DronePanel';
 import { CompactInfoStrip } from '../components/overview/CompactInfoStrip';
@@ -286,6 +287,8 @@ function OverviewPageView({
   const droneFeed = useDroneFeed(droneView, null, compact || panels.drone);
   const wideStage = useWideStage();
   const [mainView, setMainView] = useState<'map' | 'video'>('map');
+  // The operator's zoom on top of the corner map's automatic framing (steps of one map zoom), for this visit.
+  const [miniZoom, setMiniZoom] = useState(0);
   const [tab, setTab] = useState<CompactTab>('spectrum');
   const [compactNodeCollapsed, setCompactNodeCollapsed] = useState(false);
   const [droneVideo, setDroneVideo] = useState<DroneVideoState>({ phase: 'idle', code: null });
@@ -357,6 +360,7 @@ function OverviewPageView({
               compact={compact}
               drone={droneMap}
               mini={main === 'video'}
+              miniZoom={miniZoom}
               heldSeed={heldSeed}
             />
           </Suspense>
@@ -406,6 +410,14 @@ function OverviewPageView({
   const estimateCard = estimate && overlaySettings.estimateVisible && (!compact || estimate.state === 'ESTIMATE') ? <EstimatePanel estimate={estimate} viewOnly={viewOnly} compact={compact || panels.layers} /> : null;
   const layersPanel = panels.layers ? <LayersPanel settings={overlaySettings} scale={overlayScale} onChange={onOverlayChange} onClose={() => onPanelsChange({ ...panels, layers: false })} basemapId={basemapId} onBasemapChange={onBasemapSelect} /> : null;
 
+  // + and − over the map in the corner window; the window itself swaps the views on a click.
+  const pipZoom = main === 'video' ? (
+    <div className="ov-pip-zoom" role="group" aria-label={t('overview.pipZoom')}>
+      <button type="button" aria-label={t('overview.pipZoomIn')} title={t('overview.pipZoomIn')} disabled={miniZoom >= MINI_ZOOM_STEPS} onClick={() => setMiniZoom(Math.min(MINI_ZOOM_STEPS, miniZoom + 1))}><Icon name="plus" /></button>
+      <button type="button" aria-label={t('overview.pipZoomOut')} title={t('overview.pipZoomOut')} disabled={miniZoom <= -MINI_ZOOM_STEPS} onClick={() => setMiniZoom(Math.max(-MINI_ZOOM_STEPS, miniZoom - 1))}><Icon name="minus" /></button>
+    </div>
+  ) : null;
+
   if (compact) {
     const droneTag = droneChip(droneFeed.view);
     const tabs: ReadonlyArray<{ id: CompactTab; label: string; tag?: { code: string; tone: string } }> = [
@@ -426,7 +438,10 @@ function OverviewPageView({
           ) : null}
           {/* Over the corner window: a tap swaps the two views; neither one is mounted again. */}
           {pipShown ? (
-            <button type="button" className="ov-pip-swap" aria-label={main === 'map' ? t('overview.swapToVideo') : t('overview.swapToMap')} title={main === 'map' ? t('overview.swapToVideo') : t('overview.swapToMap')} onClick={() => setMainView(main === 'map' ? 'video' : 'map')} />
+            <div className="ov-pip">
+              <button type="button" className="ov-pip-swap" aria-label={main === 'map' ? t('overview.swapToVideo') : t('overview.swapToMap')} title={main === 'map' ? t('overview.swapToVideo') : t('overview.swapToMap')} onClick={() => setMainView(main === 'map' ? 'video' : 'map')} />
+              {pipZoom}
+            </div>
           ) : null}
           <div className="ov-left" ref={leftRef}>
             {estimateCard}
@@ -479,7 +494,10 @@ function OverviewPageView({
         </div>
       ) : null}
       {main === 'video' ? (
-        <button type="button" className="ov-pip-swap" aria-label={t('overview.swapToMap')} title={t('overview.swapToMap')} onClick={() => setMainView('map')} />
+        <div className="ov-pip">
+          <button type="button" className="ov-pip-swap" aria-label={t('overview.swapToMap')} title={t('overview.swapToMap')} onClick={() => setMainView('map')} />
+          {pipZoom}
+        </div>
       ) : null}
       <div className="ov-left" ref={leftRef}>
         {readout}
@@ -492,7 +510,7 @@ function OverviewPageView({
             initialView={droneView}
             feed={droneFeed}
             videoMain={main === 'video'}
-            onVideoMain={pipShown ? () => setMainView(main === 'video' ? 'map' : 'video') : undefined}
+            onVideoMain={wideStage ? () => setMainView(main === 'video' ? 'map' : 'video') : undefined}
             videoState={droneVideo}
             onClose={() => onPanelsChange({ ...panels, drone: false })}
           />
@@ -543,3 +561,6 @@ function useWideStage(): boolean {
     () => true,
   );
 }
+
+/** How many map zoom steps the operator can add to or take from the corner map's framing. */
+const MINI_ZOOM_STEPS = 6;

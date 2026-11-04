@@ -200,7 +200,7 @@ describe('compact dashboard', () => {
       heading_at_doa: null, array_heading_offset_deg: 0, video_enabled: true,
     };
     const markup = dashboard('compact-landscape', { snapshot: liveSnapshot({ drone } as Partial<TelemetrySnapshot>) });
-    expect(markup).toMatch(/<div class="ov-main" data-main="map"><div class="ov-map">[\s\S]*<div class="ov-video">[\s\S]*<button type="button" class="ov-pip-swap" aria-label="Show the drone video large"/);
+    expect(markup).toMatch(/<div class="ov-main" data-main="map"><div class="ov-map">[\s\S]*<div class="ov-video">[\s\S]*<div class="ov-pip"><button type="button" class="ov-pip-swap" aria-label="Show the drone video large"/);
     expect(markup).toContain('25 m · 87°');
     expect(markup).toContain('RTK FIXED');
     // Video off on the console: no corner window, the map stays the main view.

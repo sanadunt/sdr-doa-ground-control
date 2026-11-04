@@ -452,8 +452,15 @@
 .ov-stage > .ov-video { position: absolute; inset: 0 0 var(--ov-dock-h) 0; z-index: 0; background: #05080b; }
 .ov-stage > .ov-video .ov-drone-video { height: 100%; margin: 0; aspect-ratio: auto; border-radius: 0; }
 .ov-stage[data-main='video'] > .ov-map { inset: auto auto calc(var(--ov-dock-h) + var(--ov-gap)) calc(264px + 2 * var(--ov-gap)); z-index: 1; width: min(400px, 34%); height: auto; aspect-ratio: 16 / 9; overflow: hidden; border: 2px solid var(--line); border-radius: 8px; box-shadow: var(--ov-shadow); }
-.ov-stage > .ov-pip-swap { position: absolute; bottom: calc(var(--ov-dock-h) + var(--ov-gap)); left: calc(264px + 2 * var(--ov-gap)); z-index: 1; width: min(400px, 34%); aspect-ratio: 16 / 9; padding: 0; border: 0; border-radius: 8px; background: transparent; cursor: pointer; }
-.ov-stage > .ov-pip-swap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ov-stage > .ov-pip { position: absolute; bottom: calc(var(--ov-dock-h) + var(--ov-gap)); left: calc(264px + 2 * var(--ov-gap)); z-index: 1; width: min(400px, 34%); aspect-ratio: 16 / 9; }
+/* The corner window (PC and compact): the swap button fills it, + and − sit top-right over it. */
+.ov-pip-swap { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; border-radius: 8px; background: transparent; cursor: pointer; }
+.ov-pip-swap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ov-pip-zoom { position: absolute; top: 6px; right: 6px; z-index: 1; display: flex; gap: 4px; }
+.ov-pip-zoom button { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--ov-card-bg); color: var(--text); cursor: pointer; }
+.ov-pip-zoom button:hover:not(:disabled) { border-color: var(--accent); }
+.ov-pip-zoom button:disabled { opacity: .45; cursor: default; }
+.ov-pip-zoom button svg { width: 16px; height: 16px; }
 .ov-drone.is-video-main { min-height: 0; }
 /* A map in the corner window (PC and compact): only the picture, the graph framed by TacticalMap, small markers. */
 .map-panel.is-mini .ov-map-controls, .map-panel.is-mini .map-notices, .map-panel.is-mini .doa-map-label, .map-panel.is-mini .map-bottom-overlay { display: none; }
@@ -547,12 +554,12 @@
 .console-shell[data-layout^='compact'] .ov-main > .ov-map, .console-shell[data-layout^='compact'] .ov-main > .ov-video { position: absolute; inset: 0; z-index: 0; min-width: 0; min-height: 0; }
 .console-shell[data-layout^='compact'] .ov-main[data-main='video'] > .ov-map, .console-shell[data-layout^='compact'] .ov-main[data-main='map'] > .ov-video { inset: auto var(--ov-gap) var(--ov-gap) auto; z-index: 3; width: max(132px, 32%); height: auto; aspect-ratio: 16 / 9; overflow: hidden; border: 2px solid var(--line); border-radius: 8px; box-shadow: var(--ov-shadow); }
 .console-shell[data-layout='compact-portrait'] .ov-main[data-main='video'] > .ov-map, .console-shell[data-layout='compact-portrait'] .ov-main[data-main='map'] > .ov-video { width: max(132px, 38%); }
-.console-shell[data-layout^='compact'] .ov-pip-swap { position: absolute; right: var(--ov-gap); bottom: var(--ov-gap); z-index: 4; width: max(132px, 32%); aspect-ratio: 16 / 9; min-height: 44px; padding: 0; border: 0; border-radius: 8px; background: transparent; cursor: pointer; }
-.console-shell[data-layout='compact-portrait'] .ov-pip-swap { width: max(132px, 38%); }
-.console-shell[data-layout^='compact'] .ov-pip-swap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.console-shell[data-layout^='compact'] .ov-pip { position: absolute; right: var(--ov-gap); bottom: var(--ov-gap); z-index: 4; width: max(132px, 32%); aspect-ratio: 16 / 9; min-height: 44px; }
+.console-shell[data-layout='compact-portrait'] .ov-pip { width: max(132px, 38%); }
+.console-shell[data-layout^='compact'] .ov-pip-zoom button { width: 44px; height: 44px; }
 /* A phone's main view: the video's corner window sits above the map buttons instead of over them. */
 @container ov-main (max-width: 599px) {
-  .console-shell[data-layout^='compact'] .ov-main[data-main='map'] > .ov-video, .console-shell[data-layout^='compact'] .ov-main[data-main='map'] > .ov-pip-swap { bottom: calc(44px + 2 * var(--ov-gap)); }
+  .console-shell[data-layout^='compact'] .ov-main[data-main='map'] > .ov-video, .console-shell[data-layout^='compact'] .ov-main[data-main='map'] > .ov-pip { bottom: calc(44px + 2 * var(--ov-gap)); }
 }
 .console-shell[data-layout^='compact'] .ov-video .ov-drone-video { height: 100%; margin: 0; aspect-ratio: auto; border-radius: 0; }
 .console-shell[data-layout^='compact'] .ov-main[data-main='map'] > .ov-video .ov-drone-hud { display: none; }

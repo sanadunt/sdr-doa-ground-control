@@ -227,6 +227,8 @@ const GRAPH_AREA_IDS = ['doa-beam', 'doa-heat', 'doa-held-beam', 'doa-held-heat'
 
 /** Padding of a corner-window map's framing: the window has no buttons, notices or panels to clear. */
 const MINI_FRAMING_PADDING = { top: 14, right: 14, bottom: 14, left: 14 };
+const MIN_MINI_ZOOM = 2;
+const MAX_MINI_ZOOM = 19;
 
 function stationInView(map: MapLibreMap, coordinate: MapCoordinate): boolean {
   try {
@@ -325,6 +327,8 @@ export interface TacticalMapProps {
    * the camera fits the DoA graph (beam, lobe, bearing) after every update; the big map's camera comes back after.
    */
   mini?: boolean;
+  /** The operator's zoom steps on top of the corner map's automatic framing (+ and − over the window). */
+  miniZoom?: number;
 }
 
 /** The drone on the map: its position and nose heading, its flown track, and the RDF-SDR's own GPS when it differs. */
@@ -337,7 +341,7 @@ export interface DroneMapView {
   rdfOwn: GeoOrigin | null;
 }
 
-function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, curveOffset, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, provisionalTheta = null, provisionalHeading = null, orientationCause, onOpenCompassSettings, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect, ground = null, estimate = null, compact = false, drone = null, heldSeed = null, mini = false }: TacticalMapProps): JSX.Element {
+function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, curveOffset, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, provisionalTheta = null, provisionalHeading = null, orientationCause, onOpenCompassSettings, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect, ground = null, estimate = null, compact = false, drone = null, heldSeed = null, mini = false, miniZoom = 0 }: TacticalMapProps): JSX.Element {
   const { t, lang } = useI18n();
   const hostRef = useRef<HTMLDivElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -352,6 +356,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const operatorMovedRef = useRef(false);
   const miniRef = useRef(mini);
   miniRef.current = mini;
+  const miniZoomRef = useRef(miniZoom);
+  miniZoomRef.current = miniZoom;
   // The big map's camera while the map is the corner window, put back when it is big again.
   const bigCameraRef = useRef<{ center: [number, number]; zoom: number; bearing: number; pitch: number; operatorMoved: boolean } | null>(null);
   const styleReadyRef = useRef(false);
@@ -539,7 +545,12 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       const bounds = graphBounds(GRAPH_DIRECTION_IDS.map((id) => data[id]), target)
         ?? graphBounds(GRAPH_AREA_IDS.map((id) => data[id]), target)
         ?? overlayBounds(target, reach);
-      map.fitBounds(bounds, { padding: MINI_FRAMING_PADDING, maxZoom: MAX_FRAMING_ZOOM, duration: durationMs });
+      // The framing's centre, at its zoom plus the operator's + and − steps.
+      const camera = map.cameraForBounds(bounds, { padding: MINI_FRAMING_PADDING, maxZoom: MAX_FRAMING_ZOOM, bearing: map.getBearing() });
+      if (camera?.center !== undefined && camera.zoom !== undefined) {
+        const zoom = Math.min(MAX_MINI_ZOOM, Math.max(MIN_MINI_ZOOM, camera.zoom + miniZoomRef.current));
+        map.easeTo({ center: camera.center, zoom, bearing: map.getBearing(), duration: durationMs });
+      }
       framingRef.current = { source: target.source, selection: gpsSource };
       return;
     }
@@ -848,7 +859,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     if (!mini || !map || !target) return undefined;
     const frame = window.requestAnimationFrame(() => frameStationRef.current(map, target, prefersReducedMotion() ? 0 : 300));
     return () => window.cancelAnimationFrame(frame);
-  }, [mini, sourceData, mapState]);
+  }, [mini, miniZoom, sourceData, mapState]);
 
   useEffect(() => {
     const update = () => setTheme(consoleTheme());
