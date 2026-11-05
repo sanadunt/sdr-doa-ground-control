@@ -4,16 +4,21 @@
 It subscribes to the RDF Node topics under ``sdr/v2/<node>/`` (the edge
 contract, ``docs/MQTT_KONTRAK.md``) and, on its own, never publishes. Its one
 publish path is ``publish_rdf_node_command``: a Kontrol command
-(``config.patch`` after the admin's review and confirmation, or the read-only
-``config.get``) that the console server builds and hands it, published to
-``sdr/v2/<node>/cmd/config/...`` at QoS 1, never retained and only while
-connected with every subscription acknowledged. It never writes a Raspberry
-resource directly; the RDF Node edge decides whether to apply the command and
-answers on ``ack/config``.
+(``config.patch`` after the admin's review and confirmation, the read-only
+``config.get``, or since 3.15.0 a confirmed operation: ``processing.set``,
+``service.restart``, ``system.reboot.*``, ``system.shutdown.*``) that the
+console server builds and hands it, published to ``sdr/v2/<node>/cmd/...`` at
+QoS 1, never retained and only while connected with every subscription
+acknowledged. It never writes a Raspberry resource directly; the RDF Node edge
+decides whether to apply the command and answers on ``ack/config`` or
+``ack/operation``. The one-time challenge of a prepare's ACK is the only part
+of an ACK the store does not keep; this monitor keeps it, for the prepares it
+published only, until the execute takes it (``take_rdf_node_challenge``).
 """
 
 from __future__ import annotations
 
+import json
 import math
 import secrets
 import threading
@@ -342,6 +347,54 @@ class MqttMonitor:
                 )
             except Exception:
                 return
+            if suffix == commands.OPERATION_ACK_SUFFIX:
+                self._keep_challenge_locked(payload, received_at_ms)
+
+    def _keep_challenge_locked(self, payload: bytes, received_at_ms: int) -> None:
+        """Keep the challenge of an APPLIED prepare ACK this client asked for, as the execute needs it.
+
+        Called after the store accepted the ACK (session, schema, order), so
+        only the challenge is read here from the raw payload. It never reaches
+        an observation, a log or the browser.
+        """
+        try:
+            data = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return
+        if not isinstance(data, dict) or data.get("status") != "APPLIED":
+            return
+        command_id = data.get("id")
+        record = self._commands.get(command_id) if isinstance(command_id, str) else None
+        if record is None or record.get("op") not in commands.PREPARE_OPS or record.get("challenge_used"):
+            return
+        final = record.get("final")
+        if not isinstance(final, Mapping) or final.get("status") != "APPLIED" or final.get("received_at_ms") != received_at_ms:
+            return
+        result = data.get("result")
+        if not isinstance(result, dict) or result.get("prepare_id") != command_id:
+            return
+        challenge = result.get("challenge")
+        valid = result.get("valid_seconds")
+        if not isinstance(challenge, str) or not commands.CHALLENGE_RE.fullmatch(challenge):
+            return
+        if type(valid) is not int or valid <= 0:
+            valid = commands.CHALLENGE_VALID_S
+        valid = min(valid, commands.CHALLENGE_VALID_S)
+        record["challenge"] = challenge
+        record["challenge_valid_until_ms"] = received_at_ms + valid * 1000 - commands.CHALLENGE_SAFETY_MS
+
+    def take_rdf_node_challenge(self, prepare_id: str) -> Optional[str]:
+        """The challenge of a prepare this client published, once, while it is still valid; else None."""
+        with self._lock:
+            record = self._commands.get(prepare_id)
+            if record is None or record.get("op") not in commands.PREPARE_OPS:
+                return None
+            challenge = record.pop("challenge", None)
+            valid_until = record.pop("challenge_valid_until_ms", None)
+            record["challenge_used"] = True
+            if not isinstance(challenge, str) or type(valid_until) is not int or _now_ms() >= valid_until:
+                return None
+            return challenge
 
     def _on_rdf_node_accepted(self, suffix: str, record: Dict[str, Any]) -> None:
         """Keep the ACKs and the settings report of the commands this client sent or adopted.
@@ -416,8 +469,8 @@ class MqttMonitor:
     def publish_rdf_node_command(self, command: Mapping[str, Any]) -> Dict[str, Any]:
         """Publish one checked RDF Node command at QoS 1, never retained.
 
-        The topic follows the command's ``op`` (``cmd/config/get`` or
-        ``cmd/config/patch`` under ``sdr/v2/<node>/``). It publishes only
+        The topic follows the command's ``op`` (``cmd/config/get``,
+        ``cmd/config/patch``, ``cmd/processing/set``... under ``sdr/v2/<node>/``). It publishes only
         while connected with every subscription acknowledged, so paho does
         not hold a command back for a later reconnect. The broker drops it
         after its lifetime (MessageExpiryInterval), and the edge refuses it
@@ -514,7 +567,10 @@ class MqttMonitor:
         final = record.get("final")
         if not isinstance(final, Mapping):
             return False
-        # An APPLIED config.get still waits for its settings report.
+        # An APPLIED config.get still waits for its settings report, and a prepare
+        # holds its challenge until the execute takes it.
+        if record.get("challenge") is not None:
+            return False
         return not (record.get("op") == commands.OP_CONFIG_GET and final.get("status") == "APPLIED"
                     and record.get("reported_at_ms") is None)
 
@@ -531,7 +587,7 @@ class MqttMonitor:
             if self._command_done(self._commands[command_id]):
                 return command_id
         for command_id in candidates:
-            if self._commands[command_id].get("op") != commands.OP_CONFIG_PATCH:
+            if self._commands[command_id].get("op") not in commands.MUTATION_OPS:
                 return command_id
         return candidates[0] if candidates else None
 
@@ -539,7 +595,7 @@ class MqttMonitor:
         """Follow commands a replaced monitor published and that are not final yet.
 
         Each item names ``command_id``, ``op`` and the ``sid`` the command
-        carried. The edge answers on ``ack/config`` whichever client is
+        carried. The edge answers on ``ack/config`` (``ack/operation``) whichever client is
         connected, so after a reconnect only this monitor can still see the
         ACK, and the ``settings/reported`` of a ``config.get``. Nothing is
         published; the PUBACK stays with the client that sent the command.
@@ -557,7 +613,7 @@ class MqttMonitor:
                 sid = item.get("sid")
                 if not isinstance(command_id, str) or not commands.COMMAND_ID_RE.fullmatch(command_id):
                     continue
-                if op not in (commands.OP_CONFIG_GET, commands.OP_CONFIG_PATCH):
+                if op not in commands.COMMAND_SUFFIXES:
                     continue
                 if command_id in self._commands:
                     continue
@@ -630,6 +686,10 @@ class MqttMonitor:
                 # final_within_ms deadline (config_command_tracker.final_ack_deadline).
                 "method_seen": record["method_seen"],
                 "final_ack_by_ms": record["final_ack_by_ms"],
+                # A prepare's challenge is held: until when the execute may use it. Never the challenge.
+                "prepare_valid_until_ms": (
+                    record.get("challenge_valid_until_ms") if record.get("challenge") is not None else None
+                ),
             }
 
     def _link_locked(self) -> Optional[str]:

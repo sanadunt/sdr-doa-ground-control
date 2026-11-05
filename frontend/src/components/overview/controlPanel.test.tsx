@@ -92,6 +92,17 @@ function view(props: Partial<ControlPanelViewProps> = {}, lang: Lang = 'id'): st
   );
 }
 
+describe('Kontrol operations', () => {
+  it('shows the RDF-SDR operations only once admin is unlocked', () => {
+    const slot = <div id="ops-slot" />;
+    expect(view({ operations: slot })).toContain('<div id="ops-slot"></div>');
+    expect(view({ operations: slot, admin: 'locked' })).not.toContain('ops-slot');
+    // The operations sit above the patch form.
+    const markup = view({ operations: slot });
+    expect(markup.indexOf('ops-slot')).toBeLessThan(markup.indexOf('ov-control-fields'));
+  });
+});
+
 describe('Kontrol locked', () => {
   it('starts locked while the admin session is checked', () => {
     const markup = renderToStaticMarkup(
@@ -609,7 +620,7 @@ describe('Kontrol results', () => {
   it('reports a refused request by its code', () => {
     const markup = view({ stage: 'done', done: { view: null, error: { code: 'COMMAND_IN_FLIGHT', message: { key: 'control.error.COMMAND_IN_FLIGHT' } }, commandId: 'gc-9', restarted: false } }, 'en');
     expect(markup).toContain('Not sent · COMMAND_IN_FLIGHT');
-    expect(markup).toContain('Another config patch is still waiting for its result.');
+    expect(markup).toContain('Another command to RDF-SDR is still waiting for its result.');
     expect(markup).toContain('gc-9');
     const failure = controlFailure(new ApiError('nope', 409, 'NODE_NOT_FRESH'));
     expect(failure).toEqual({ code: 'NODE_NOT_FRESH', message: { key: 'control.error.NODE_NOT_FRESH' } });

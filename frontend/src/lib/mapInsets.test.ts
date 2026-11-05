@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { COMPACT_TOP_INSET_SHARE, MAP_CONTROLS_ROW_PX, ZERO_INSETS, cameraInsets, clampMapPadding, compactMapInsets, computeMapInsets, controlsFramingBottom, noticePlacement, sameInsets, stackedRightTop } from './mapInsets';
+import { COMPACT_NOTICE_MIN_PX, COMPACT_TOP_KEEP_PX, MAP_CONTROLS_ROW_PX, ZERO_INSETS, cameraInsets, clampMapPadding, compactMapInsets, computeMapInsets, controlsFramingBottom, graphBounds, noticePlacement, sameInsets, stackedRightTop } from './mapInsets';
 
 const map = { left: 0, top: 52, right: 1440, bottom: 900 };
 
@@ -81,10 +81,10 @@ describe('compact map insets (phones and tablets)', () => {
     expect(cameraInsets(pc, false)).toBe(pc);
   });
 
-  it('takes the lowest panel, at most a share of the map height, and nothing from panels off the map', () => {
+  it('takes the lowest panel, leaving room for a notice below it, and nothing from panels off the map', () => {
     expect(compactMapInsets(map, { left: [hud], right: [node] }).top).toBe(200 - 52 + 8);
     const tall = { left: 8, top: 60, right: 248, bottom: 520 };
-    expect(compactMapInsets(map, { left: [tall] }).top).toBe(Math.round((527 - 52) * COMPACT_TOP_INSET_SHARE));
+    expect(compactMapInsets(map, { left: [tall] }).top).toBe(527 - 52 - COMPACT_TOP_KEEP_PX);
     expect(compactMapInsets(map, { left: [{ left: 0, top: 600, right: 200, bottom: 700 }] })).toEqual(ZERO_INSETS);
     expect(compactMapInsets(map, {})).toEqual(ZERO_INSETS);
   });
@@ -111,8 +111,42 @@ describe('compact map insets (phones and tablets)', () => {
     expect(noticePlacement(compactMapInsets(map, {}), true)).toBeUndefined();
   });
 
+  it('puts the notices beside Lapisan on a tablet, not under it in the middle of the map', () => {
+    // 1280 x 800 tablet, landscape: the main view is 922 x 688 and Lapisan (260 px) is taller than half of it.
+    const main = { left: 0, top: 52, right: 922, bottom: 740 };
+    const layers = { left: 8, top: 60, right: 268, bottom: 502 };
+    const insets = compactMapInsets(main, { left: [layers] });
+    expect(insets).toEqual({ top: 0, right: 0, bottom: 0, left: 268 + 8 });
+    expect(noticePlacement(insets, true)).toEqual({ left: 276 });
+    expect(cameraInsets(insets, true)).toEqual(insets);
+    // Too little map beside it (a 360 px phone): under it, full width, with a notice's room left below.
+    const phone = { left: 0, top: 52, right: 360, bottom: 453 };
+    const narrow = compactMapInsets(phone, { left: [{ left: 8, top: 60, right: 268, bottom: 445 }] });
+    expect(narrow).toEqual({ top: 401 - COMPACT_TOP_KEEP_PX, right: 0, bottom: 0, left: 0 });
+    expect(noticePlacement(narrow, true)).toEqual({ top: 281 });
+    // The free width needed is the limit itself.
+    const edge = { left: 0, top: 0, right: 268 + 16 + COMPACT_NOTICE_MIN_PX, bottom: 600 };
+    expect(compactMapInsets(edge, { left: [{ left: 8, top: 8, right: 268, bottom: 300 }] }).left).toBe(276);
+    expect(compactMapInsets({ ...edge, right: edge.right - 1 }, { left: [{ left: 8, top: 8, right: 268, bottom: 300 }] }).top).toBe(308);
+  });
+
   it('keeps the PC notices between the side panels', () => {
     expect(noticePlacement({ top: 0, right: 340, bottom: 200, left: 300 }, false)).toEqual({ left: 312, right: 352 });
     expect(noticePlacement(ZERO_INSETS, false)).toBeUndefined();
+  });
+});
+
+describe('the corner-window map frames the DoA graph', () => {
+  const station = { latitude: -6.9, longitude: 107.6, source: 'NAV' } as const;
+  it('spans the station and every drawn coordinate', () => {
+    const beam = { type: 'FeatureCollection' as const, features: [{ type: 'Feature' as const, properties: {}, geometry: { type: 'Polygon' as const, coordinates: [[[107.6, -6.9], [107.61, -6.89], [107.605, -6.885], [107.6, -6.9]]] } }] };
+    const bearing = { type: 'FeatureCollection' as const, features: [{ type: 'Feature' as const, properties: {}, geometry: { type: 'LineString' as const, coordinates: [[107.6, -6.9], [107.62, -6.88]] } }] };
+    expect(graphBounds([beam, bearing], station)).toEqual([[107.6, -6.9], [107.62, -6.88]]);
+  });
+
+  it('is null while no part of the graph is drawn, so the station and its reach are framed', () => {
+    expect(graphBounds([{ type: 'FeatureCollection', features: [] }], station)).toBeNull();
+    const broken = { type: 'FeatureCollection' as const, features: [{ type: 'Feature' as const, properties: {}, geometry: { type: 'LineString' as const, coordinates: [[Number.NaN, 1]] } }] };
+    expect(graphBounds([broken], station)).toBeNull();
   });
 });

@@ -386,6 +386,8 @@
 .ov-control-hint { color: var(--subtle); font-size: 10.5px; line-height: 1.3; }
 .ov-control-hint.is-changed { color: var(--signal); }
 .ov-control-hint.is-error { color: var(--red); }
+.ov-control-assist { display: grid; gap: 6px; }
+.ov-control-assist .ov-control-warn { margin: 0; }
 .ov-control-actions { display: flex; gap: 8px; }
 .ov-control-review, .ov-control-box, .ov-control-result { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
 .ov-control-review strong { color: var(--text); font-size: 12.5px; }
@@ -398,6 +400,15 @@
 .ov-control-state { color: var(--text); font-size: 11.5px; }
 .ov-control-result { gap: 4px; }
 .ov-control-result-title { font-family: var(--mono); font-size: 12.5px; font-weight: 700; }
+/* RDF-SDR operations (NodeOperations): start/stop, restart, reboot, shutdown. */
+.ov-control-ops { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.ov-control-ops-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 8px; }
+.ov-control-ops-head strong { color: var(--text); font-size: 12.5px; }
+.ov-control-ops-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.ov-control-ops-buttons .ov-button { min-height: 44px; }
+.ov-control-ops-buttons .ov-button.is-host:hover:not(:disabled) { border-color: var(--red); color: var(--red); }
+.ov-control-ops-box strong { color: var(--text); font-size: 12.5px; }
+.ov-control-ops-box.is-host { border-color: var(--red); }
 .ov-control-result > span:not(.ov-control-result-title) { color: var(--text); }
 .ov-control-result > .ov-control-small { color: var(--subtle); }
 .ov-control-result.tone-ok { border-color: var(--green); background: color-mix(in srgb, var(--green) 8%, transparent); }
@@ -446,6 +457,29 @@
 .ov-right:has(> .ov-drone) > .ov-node { flex-shrink: 1; overflow: hidden; }
 .ov-drone.is-large { --ov-drone-w: 360px; }
 .ov-drone-video { position: relative; flex: none; aspect-ratio: 16 / 9; margin: 0 8px; overflow: hidden; border-radius: 6px; background: #05080b; }
+/* PC: the Drone panel's enlarge button puts the video large behind the panels (above the dock)
+   and the map in a 16:9 window bottom-left, right of the HUD and Lapisan column; a click on it swaps back. Both stay
+   mounted, so the map keeps its source data and the video its stream. */
+.ov-stage > .ov-video { position: absolute; inset: 0 0 var(--ov-dock-h) 0; z-index: 0; background: #05080b; }
+.ov-stage > .ov-video .ov-drone-video { height: 100%; margin: 0; aspect-ratio: auto; border-radius: 0; }
+.ov-stage[data-main='video'] > .ov-map { inset: auto auto calc(var(--ov-dock-h) + var(--ov-gap)) calc(264px + 2 * var(--ov-gap)); z-index: 1; width: min(400px, 34%); height: auto; aspect-ratio: 16 / 9; overflow: hidden; border: 2px solid var(--line); border-radius: 8px; box-shadow: var(--ov-shadow); }
+.ov-stage > .ov-pip { position: absolute; bottom: calc(var(--ov-dock-h) + var(--ov-gap)); left: calc(264px + 2 * var(--ov-gap)); z-index: 1; width: min(400px, 34%); aspect-ratio: 16 / 9; }
+/* The corner window (PC and compact): the swap button fills it, + and − sit top-right over it. */
+.ov-pip-swap { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; border-radius: 8px; background: transparent; cursor: pointer; }
+.ov-pip-swap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ov-pip-zoom { position: absolute; top: 6px; right: 6px; z-index: 1; display: flex; gap: 4px; }
+.ov-pip-zoom button { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--ov-card-bg); color: var(--text); cursor: pointer; }
+.ov-pip-zoom button:hover:not(:disabled) { border-color: var(--accent); }
+.ov-pip-zoom button:disabled { opacity: .45; cursor: default; }
+.ov-pip-zoom button svg { width: 16px; height: 16px; }
+.ov-drone.is-video-main { min-height: 0; }
+/* A map in the corner window (PC and compact): only the picture, the graph framed by TacticalMap, small markers. */
+.map-panel.is-mini .ov-map-controls, .map-panel.is-mini .map-notices, .map-panel.is-mini .doa-map-label, .map-panel.is-mini .map-bottom-overlay { display: none; }
+.map-panel.is-mini .doa-station-marker { width: 18px; height: 18px; border-width: 2px; box-shadow: 0 0 0 2px rgba(255, 255, 255, .85); }
+.map-panel.is-mini .doa-station-marker::after { inset: 4px; }
+.map-panel.is-mini .rdf-heading-marker { width: 34px; height: 34px; }
+.map-panel.is-mini .ov-drone-marker { width: 28px; height: 28px; }
+.map-panel.is-mini .ov-ground-marker { width: 14px; height: 14px; font-size: 0; }
 .ov-drone-video video { display: block; width: 100%; height: 100%; object-fit: contain; }
 .ov-drone-video[data-phase='playing'] .ov-drone-video-notice { display: none; }
 .ov-drone-video-notice { position: absolute; inset: 0; display: grid; place-items: center; padding: 12px; color: #c9d3dc; font-size: 12px; text-align: center; }
@@ -518,29 +552,87 @@
 
 /* Compact touch layout ------------------------------------------------------ */
 /* Phones and tablets without a mouse (data-layout on the shell root, lib/compactLayout.ts).
-   The stage fills the viewport under the one-row top bar with no page scroll: map left
-   (55 %) and Spektrum right (45 %) in landscape, map above Spektrum in portrait, the map
-   alone when Spektrum is off. No Polar dock. The HUD and Lapisan float top-left on the
-   map, the node card and Kontrol top-right when their top-bar switches open them; the
-   legend row is left out and the map buttons stay bottom-left. A PC never matches. */
-.console-shell[data-layout^='compact'] .ov-stage { --ov-dock-h: 0px; --ov-gap: 8px; display: grid; grid-template-areas: 'map dock'; grid-template-columns: minmax(0, 55fr) minmax(0, 45fr); grid-template-rows: minmax(0, 1fr); gap: 0; height: 100%; min-height: 0; padding: 0; }
-.console-shell[data-layout='compact-portrait'] .ov-stage { grid-template-areas: 'map' 'dock'; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 55fr) minmax(0, 45fr); }
-.console-shell[data-layout^='compact'] .ov-stage[data-dock='none'] { grid-template-areas: 'map'; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
-.console-shell[data-layout^='compact'] .ov-map { position: relative; z-index: 0; grid-area: map; min-width: 0; min-height: 0; }
+   The stage fills the viewport under the one-row top bar with no page scroll: the main
+   view (the map, or the drone video with the map in the corner window; a tap on the
+   corner window swaps them) with the info row under it, and the side panel with its
+   tabs (Spektrum, Drone, RDF-SDR, Kontrol) right in landscape, below in portrait. No
+   Polar. Lapisan floats top-left over the main view while open; the legend row is left
+   out and the map buttons stay bottom-left. A PC never matches. */
+.console-shell[data-layout^='compact'] .ov-stage { --ov-dock-h: 0px; --ov-gap: 8px; display: grid; grid-template-areas: 'main side' 'info side'; grid-template-columns: minmax(0, 72fr) minmax(260px, 28fr); grid-template-rows: minmax(0, 1fr) auto; gap: 0; height: 100%; min-height: 0; padding: 0; }
+.console-shell[data-layout='compact-portrait'] .ov-stage { grid-template-areas: 'main' 'info' 'side'; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 60fr) auto minmax(0, 40fr); }
+.console-shell[data-layout^='compact'] .ov-main { container: ov-main / inline-size; position: relative; grid-area: main; min-width: 0; min-height: 0; overflow: hidden; background: var(--bg); }
+/* Both views stay mounted; only their box changes, so the map keeps its camera and the video its stream. */
+.console-shell[data-layout^='compact'] .ov-main > .ov-map, .console-shell[data-layout^='compact'] .ov-main > .ov-video { position: absolute; inset: 0; z-index: 0; min-width: 0; min-height: 0; }
+.console-shell[data-layout^='compact'] .ov-main[data-main='video'] > .ov-map, .console-shell[data-layout^='compact'] .ov-main[data-main='map'] > .ov-video { inset: auto var(--ov-gap) var(--ov-gap) auto; z-index: 3; width: max(132px, 32%); height: auto; aspect-ratio: 16 / 9; overflow: hidden; border: 2px solid var(--line); border-radius: 8px; box-shadow: var(--ov-shadow); }
+.console-shell[data-layout='compact-portrait'] .ov-main[data-main='video'] > .ov-map, .console-shell[data-layout='compact-portrait'] .ov-main[data-main='map'] > .ov-video { width: max(132px, 38%); }
+.console-shell[data-layout^='compact'] .ov-pip { position: absolute; right: var(--ov-gap); bottom: var(--ov-gap); z-index: 4; width: max(132px, 32%); aspect-ratio: 16 / 9; min-height: 44px; }
+.console-shell[data-layout='compact-portrait'] .ov-pip { width: max(132px, 38%); }
+.console-shell[data-layout^='compact'] .ov-pip-zoom button { width: 44px; height: 44px; }
+/* A phone's main view: the video's corner window sits above the map buttons instead of over them. */
+@container ov-main (max-width: 599px) {
+  .console-shell[data-layout^='compact'] .ov-main[data-main='map'] > .ov-video, .console-shell[data-layout^='compact'] .ov-main[data-main='map'] > .ov-pip { bottom: calc(44px + 2 * var(--ov-gap)); }
+}
+.console-shell[data-layout^='compact'] .ov-video .ov-drone-video { height: 100%; margin: 0; aspect-ratio: auto; border-radius: 0; }
+.console-shell[data-layout^='compact'] .ov-main[data-main='map'] > .ov-video .ov-drone-hud { display: none; }
+.console-shell[data-layout^='compact'] .ov-main[data-main='map'] > .ov-video .ov-drone-video-notice { padding: 4px; font-size: 10px; }
+/* Always shown under the main view: bearing, RDF-SDR frequency, drone, link dots; each box opens its tab. */
+.console-shell[data-layout^='compact'] .ov-info { grid-area: info; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; padding: 6px; border-top: 1px solid var(--line-soft); background: var(--bg); }
+.console-shell[data-layout^='compact'] .ov-info-box { display: flex; flex-direction: column; justify-content: center; gap: 1px; min-width: 0; min-height: 44px; padding: 3px 8px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--ov-card-bg); color: var(--text); text-align: left; cursor: pointer; }
+.console-shell[data-layout^='compact'] .ov-info-box small { overflow: hidden; color: var(--subtle); font-size: 10.5px; letter-spacing: .03em; text-overflow: ellipsis; white-space: nowrap; }
+.console-shell[data-layout^='compact'] .ov-info-box b { overflow: hidden; font-family: var(--mono); font-size: 15px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.console-shell[data-layout^='compact'] .ov-info-box.is-bearing b { color: var(--signal); }
+.console-shell[data-layout^='compact'] .ov-info-box.is-held b { color: var(--subtle); }
+.console-shell[data-layout^='compact'] .ov-info-tag { color: var(--amber); }
+.console-shell[data-layout^='compact'] .ov-info-dots { display: flex; gap: 6px; color: var(--subtle); }
+.console-shell[data-layout^='compact'] .ov-info-dots .is-on { color: var(--green); }
+.console-shell[data-layout='compact-portrait'] .ov-info { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.console-shell[data-layout='compact-portrait'] .ov-info .is-frequency , .console-shell[data-layout='compact-portrait'] .ov-info .is-link { display: none; }
+@media (max-height: 499px) {
+  .console-shell[data-layout^='compact'] .ov-info { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 4px 6px; }
+  .console-shell[data-layout^='compact'] .ov-info .is-frequency , .console-shell[data-layout^='compact'] .ov-info .is-link { display: none; }
+}
+/* The side panel: one tab at a time. */
+.console-shell[data-layout^='compact'] .ov-side { container: ov-side / inline-size; grid-area: side; display: flex; flex-direction: column; min-width: 0; min-height: 0; border-left: 1px solid var(--line-soft); background: var(--bg); }
+.console-shell[data-layout='compact-portrait'] .ov-side { border-top: 1px solid var(--line-soft); border-left: 0; }
+.console-shell[data-layout^='compact'] .ov-side-tabs { display: flex; flex: none; border-bottom: 1px solid var(--line-soft); overflow-x: auto; scrollbar-width: none; }
+.console-shell[data-layout^='compact'] .ov-side-tabs button { display: inline-flex; flex: 1 0 auto; align-items: center; justify-content: center; gap: 5px; min-height: 44px; padding: 0 6px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; }
+.console-shell[data-layout^='compact'] .ov-side-tabs button[aria-selected='true'] { border-bottom-color: var(--accent); color: var(--accent); }
+.console-shell[data-layout^='compact'] .ov-side-tabs em { padding: 0 5px; border: 1px solid currentColor; border-radius: 999px; font-family: var(--mono); font-size: 9.5px; font-style: normal; }
+.console-shell[data-layout^='compact'] .ov-side-tabs em.tone-good { color: var(--green); }
+.console-shell[data-layout^='compact'] .ov-side-tabs em.tone-warn { color: var(--amber); }
+.console-shell[data-layout^='compact'] .ov-side-tabs em.tone-bad { color: var(--red); }
+.console-shell[data-layout^='compact'] .ov-side-tabs em.tone-neutral { color: var(--subtle); }
+/* A narrow side panel: each tab's status tag becomes a dot in its colour (the code stays its name). */
+@container ov-side (max-width: 399px) {
+  .console-shell[data-layout^='compact'] .ov-side-tabs em { width: 8px; height: 8px; padding: 0; overflow: hidden; border: 0; background: currentColor; font-size: 0; }
+}
+@container ov-side (max-width: 299px) {
+  .console-shell[data-layout^='compact'] .ov-side-tabs button { gap: 4px; padding: 0 4px; font-size: 11px; }
+}
+.console-shell[data-layout^='compact'] .ov-side-panel { display: flex; flex: 1 1 auto; flex-direction: column; gap: var(--ov-gap); min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.console-shell[data-layout^='compact'] .ov-side-panel > .ov-hud , .console-shell[data-layout^='compact'] .ov-side-panel > .ov-node , .console-shell[data-layout^='compact'] .ov-side-panel > .ov-drone , .console-shell[data-layout^='compact'] .ov-side-panel > .ov-side-control { flex: none; width: auto; margin: var(--ov-gap) var(--ov-gap) 0; }
+.console-shell[data-layout^='compact'] .ov-side-panel > .ov-drone { width: auto; min-height: 0; margin-bottom: var(--ov-gap); }
+.console-shell[data-layout^='compact'] .ov-side-panel > .ov-node { max-height: none; }
+.console-shell[data-layout^='compact'] .ov-side-panel > .ov-side-control[hidden] { display: none; }
+/* The panel is the one scroller: the cards' own scroll boxes (RDF-SDR details, drone rows, Kontrol)
+   grow instead, so a swipe anywhere on a card scrolls the panel rather than stopping in a box with nothing to scroll. */
+.console-shell[data-layout^='compact'] .ov-side-panel .ov-node-detail, .console-shell[data-layout^='compact'] .ov-side-panel .ov-drone-rows, .console-shell[data-layout^='compact'] .ov-side-panel .ov-control-body { max-height: none; overflow: visible; overscroll-behavior: auto; }
+/* The Polar tab: the plot over the panel's width, Atur below it. */
+.console-shell[data-layout^='compact'] .ov-side-panel > .ov-polar, .console-shell[data-layout^='compact'] .ov-side-panel > .ov-polar.is-settings-open { flex: none; width: auto; }
+.console-shell[data-layout^='compact'] .ov-side-panel > .ov-polar .ov-polar-body { flex-direction: column; }
+.console-shell[data-layout^='compact'] .ov-side-panel > .ov-polar .ov-polar-plot { width: auto; height: min(420px, 62vh); }
+.console-shell[data-layout^='compact'] .ov-side-panel > .ov-polar .ov-polar-settings { width: auto; overflow: visible; border-top: 1px solid var(--line-soft); border-left: 0; }
+.console-shell[data-layout^='compact'] .ov-map { position: relative; z-index: 0; min-width: 0; min-height: 0; }
 .console-shell[data-layout^='compact'] .ov-map > .map-panel { height: 100%; border: 0; border-radius: 0; }
 .console-shell[data-layout^='compact'] .ov-map .map-stage { flex: 1 1 0; }
 .console-shell[data-layout^='compact'] .ov-map .map-frame { flex: 1 1 0; height: auto; }
 .console-shell[data-layout^='compact'] .ov-stage .map-bottom-overlay { display: none; }
 .console-shell[data-layout^='compact'] .ov-map-controls { bottom: var(--ov-gap); left: var(--ov-gap); flex-wrap: nowrap; max-width: calc(100% - 2 * var(--ov-gap)); }
 .console-shell[data-layout^='compact'] .ov-map-attribution { max-width: 132px; padding: 0 8px; }
-/* Overlays on the map's grid area: they hug their content and scroll inside above the map buttons. */
-.console-shell[data-layout^='compact'] .ov-left, .console-shell[data-layout^='compact'] .ov-right { position: absolute; z-index: 2; grid-area: map; top: var(--ov-gap); bottom: auto; display: flex; flex-direction: column; gap: var(--ov-gap); max-height: calc(100% - 44px - 3 * var(--ov-gap)); min-height: 0; overflow-y: auto; overscroll-behavior: contain; pointer-events: auto; }
-.console-shell[data-layout^='compact'] .ov-left { left: var(--ov-gap); width: min(240px, calc(100% - 2 * var(--ov-gap))); align-items: stretch; padding: 0; }
-.console-shell[data-layout^='compact'] .ov-right { right: var(--ov-gap); left: auto; width: min(320px, calc(100% - 2 * var(--ov-gap))); align-items: stretch; }
-.console-shell[data-layout^='compact'] .ov-right:empty { display: none; }
-/* A map too narrow for both columns side by side (a phone): the right one starts under the HUD (OverviewPage, stackedRightTop()). */
-.console-shell[data-layout^='compact'] .ov-right.is-stacked { top: var(--ov-right-top); max-height: calc(100% - var(--ov-right-top) - 44px - 2 * var(--ov-gap)); }
-.console-shell[data-layout^='compact'] .ov-left > section, .console-shell[data-layout^='compact'] .ov-right > section { flex: none; width: 100%; }
+/* Lapisan (and the estimate) over the main view: they hug their content and scroll inside above the map buttons. */
+.console-shell[data-layout^='compact'] .ov-left { position: absolute; z-index: 5; top: var(--ov-gap); left: var(--ov-gap); width: min(260px, calc(100% - 2 * var(--ov-gap))); align-items: stretch; padding: 0; bottom: auto; display: flex; flex-direction: column; gap: var(--ov-gap); max-height: calc(100% - 44px - 3 * var(--ov-gap)); min-height: 0; overflow-y: auto; overscroll-behavior: contain; pointer-events: auto; }
+.console-shell[data-layout^='compact'] .ov-left:empty { display: none; }
+.console-shell[data-layout^='compact'] .ov-left > section { flex: none; width: 100%; }
 .console-shell[data-layout^='compact'] .ov-left > .ov-layers { flex: 0 1 auto; min-height: 132px; }
 .console-shell[data-layout^='compact'] .ov-card { box-shadow: var(--ov-shadow); }
 /* HUD: the bearing, the source and age, the record's frequency and power, theta_0; held tags stay. */
@@ -553,8 +645,7 @@
 .console-shell[data-layout^='compact'] .ov-hud-held { display: -webkit-box; overflow: hidden; font-size: 11.5px; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .console-shell[data-layout^='compact'] .ov-estimate-actions .ov-button { height: 44px; }
 /* Spektrum fills its panel beside or under the map. */
-.console-shell[data-layout^='compact'] .ov-dock { position: relative; inset: auto; z-index: 1; grid-area: dock; display: flex; flex-direction: column; gap: 0; height: auto; min-width: 0; min-height: 0; border: 0; border-left: 1px solid var(--line-soft); border-radius: 0; background: var(--bg); }
-.console-shell[data-layout='compact-portrait'] .ov-dock { border-top: 1px solid var(--line-soft); border-left: 0; }
+.console-shell[data-layout^='compact'] .ov-dock { position: relative; inset: auto; z-index: 1; display: flex; flex-direction: column; flex: 1 1 auto; gap: 0; height: auto; min-width: 0; min-height: 0; border: 0; border-radius: 0; background: var(--bg); }
 .console-shell[data-layout^='compact'] .ov-dock > .ov-spectrum { flex: 1 1 auto; width: auto; min-height: 0; border: 0; border-radius: 0; background: transparent; }
 .console-shell[data-layout^='compact'] .ov-spec-main { flex: 1 1 auto; flex-direction: column; min-height: 0; overflow: hidden; }
 .console-shell[data-layout^='compact'] .ov-spec-main > .ov-spec-body { flex: 1 1 auto; min-height: 0; overflow: hidden; }

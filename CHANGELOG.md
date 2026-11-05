@@ -2,6 +2,60 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.16.0
+
+Console membaca puncak sinyal VFO0 dan squelch dari RDF-SDR (RDF Node 1.11). Tidak ada yang dihapus.
+
+- **Kenapa grafik DoA tidak muncul kini terbaca.** KrakenSDR hanya menghitung DoA selama puncak sinyal di lebar VFO0 melewati squelch. RDF Node 1.11 mengirim puncak itu (`pk`) dan squelch-nya (`psq`) di `telemetry/health` setiap 2 s, juga saat squelch menahan DoA; console sebelumnya membuang keduanya. Uji 2026-11-05: pemancar di dekat RDF-SDR terbaca sekitar −80 dB, squelch Manual −70 dB, jadi DoA hanya datang sesekali dan kurva Angular tidak pernah segar.
+- **HUD dan kartu RDF-SDR.** Selama DoA ditahan, HUD menulis "Puncak VFO0 −79.7 dB" dan, bila puncak di bawah squelch, "Squelch menahan DoA: sinyal 9.7 dB di bawah squelch". Kartu RDF-SDR punya baris "Puncak VFO0 / SQ".
+- **Kontrol mengusulkan nilai.** Selama squelch menahan DoA, Kontrol menampilkan puncak dan squelch dengan dua tombol yang hanya mengisi form: "Squelch → X dB" (6 dB di bawah puncak sekarang, pakai saat pemancar menyala) dan "Gain → Y dB" (gain tabel berikutnya, paling sedikit 3 dB lebih tinggi). Review dan Kirim tetap langkah operator.
+
+## 3.15.3
+
+Garis heading di peta mengikuti drone. Tidak ada yang dihapus.
+
+- **Garis dan label HDG memakai heading drone.** Selama drone LIVE dan pilihan kompas "utamakan drone" aktif (bawaannya aktif), garis putus-putus ungu, segitiga di penanda stasiun, dan label di peta memakai yaw drone ditambah putaran array dari hidung drone. Ini heading yang sama dengan yang memutar bearing DoA. Labelnya `HDG 244° · DRONE`, dan legenda menulis "Heading RDF-SDR · drone".
+- **Kompas RDF-SDR tetap sebagai cadangan.** Bila data drone hilang atau usang, atau pilihan "utamakan drone" dimatikan, garis kembali memakai kompas RDF-SDR seperti sebelumnya. Kartu RDF-SDR tetap menampilkan kedua heading beserta selisihnya.
+
+## 3.15.2
+
+Rilis perbaikan untuk tablet. Tidak ada yang dihapus.
+
+- **Tab RDF-SDR bisa di-scroll lagi.** Bagian detail kartu RDF-SDR (juga baris drone dan Kontrol) punya kotak scroll sendiri yang menahan usapan, sehingga panel samping tidak bergerak saat diusap di atas detail itu. Di tablet, sekarang panel samping yang di-scroll.
+- **Tab Polar di tablet.** Panel samping punya tab baru, Polar, berisi grafik DoA beserta pengaturannya (Kompas|Polar, Atur), sama seperti dock Polar di PC.
+- **Pesan kuning di peta hilang saat disentuh.** Di tablet, sentuh pesan di peta untuk menghilangkannya. Tidak ada lagi tanda ⓘ yang tertinggal. Pesan muncul lagi hanya bila penyebabnya berubah. Keadaan bearing tetap terbaca di baris info dan di tab RDF-SDR.
+
+## 3.15.1
+
+Rilis perbaikan dari uji tablet 3.14.0, ditambah tukar video dan peta di PC.
+
+- **Pesan kuning tidak lagi tertutup Lapisan.** Di tablet, selama panel Lapisan terbuka, pesan peta pindah ke kanan panel di bagian atas peta, tidak lagi turun ke tengah peta di bawah panel. Di ponsel yang sempit pesan tetap di bawah panel, dan selalu disisakan tempat di atas tombol peta.
+- **Peta kecil memperlihatkan grafik DoA.** Selama video drone tampil besar, peta di jendela kecil otomatis memusatkan dan men-zoom ke arah grafiknya (garis bearing dan tepi −3 dB, atau beam bila tidak ada bearing). Penanda dibuat lebih kecil, tombol peta dan pesan tidak tampil, dan bingkainya diperbarui setiap data baru. Tombol + dan − di pojok kanan atas jendela kecil menambah atau mengurangi zoom di atas bingkai otomatis itu (sampai 6 langkah), dan zoom itu tetap dipakai saat data baru datang. Saat peta kembali besar, posisi kamera peta besar dipulihkan seperti sebelumnya.
+- **Tukar video dan peta di PC.** Tombol perbesar di panel Drone sekarang menampilkan video drone besar di belakang panel, dan peta beserta grafik DoA pindah ke jendela kecil di kiri bawah, di samping kolom HUD dan Lapisan. Klik jendela kecil atau tombol yang sama untuk menukar kembali. Fitur ini berlaku mulai lebar 1024 px; tampilan bertumpuk di bawah itu tetap seperti sebelumnya.
+- **Bahasa dan tema di bar atas tablet.** Tombol EN/ID dan terang/gelap kini ada langsung di bar atas tablet, juga di LAN view. Pilihan ini berlaku untuk browser itu sendiri. Di ponsel di bawah 480 px keduanya tetap ada di menu ☰.
+## 3.15.0
+
+Kontrol bisa mengoperasikan RDF-SDR dari groundstation (keputusan pemilik 2026-11-04). Ini perintah yang sudah diterima RDF Node edge, dan console kini juga mengirimnya: menyalakan dan menghentikan pemrosesan RDF, me-restart service RDF, serta me-reboot atau mematikan Raspberry RDF-SDR.
+
+- **Blok "Operasi RDF-SDR" di Kontrol.** Blok ini muncul setelah kunci admin dibuka, di atas formulir setelan. Isinya status engine (`state.run`) dan hanya tombol yang diizinkan capabilities RDF-SDR: Mulai/Hentikan pemrosesan (`processing.set`), Restart service RDF (`service.restart`), Reboot RDF-SDR dan Matikan RDF-SDR.
+- **Setiap tombol meminta konfirmasi.** Klik membuka kotak konfirmasi. Batal didahulukan dan mendapat fokus, dan Escape membatalkan.
+- **Reboot dan matikan dua langkah, dengan konfirmasi tegas.** RDF-SDR bisa sedang terbang di drone, jadi operator harus mencentang "drone ada di darat, atau kehilangan RDF-SDR saat terbang bisa diterima". "Siapkan reboot" lalu mengirim `system.reboot.prepare`. Setelah RDF-SDR menjawab, tombol "Reboot sekarang" tampil dengan hitungan mundur sekitar 20 detik. Bila waktunya habis atau Batal ditekan, tidak ada yang dijalankan.
+- **Challenge sekali pakai tetap di console.** Challenge dari RDF-SDR disimpan di memori server console dan dipakai sekali untuk `execute`. Browser, status perintah dan log tidak pernah melihatnya.
+- **Hasil dalam kata-kata operator.** Contohnya: "Pemrosesan berjalan", "Reboot dijadwalkan" (RDF-SDR kembali sebagai sesi baru dalam 1–2 menit), atau penolakan edge dengan kodenya (`LIFECYCLE_NOT_APPROVED`, `REBOOT_CHALLENGE_INVALID`, `BUSY`).
+- **Satu perintah sekaligus.** Patch setelan dan operasi tidak bisa dikirim bersamaan (`COMMAND_IN_FLIGHT`). Tidak ada yang dikirim ulang otomatis.
+- Rute baru `POST /api/mqtt/operation` (Origin loopback, admin, `confirm: true`) dan `GET /api/mqtt/operation[/<id>]`. Keduanya tidak ada di LAN view. Kontraknya ada di `docs/MQTT_KONTRAK.md` bagian 9a.
+- `ppp.restart` tidak dikirim, karena link T900/PPP sudah tidak dipakai.
+
+## 3.14.0
+
+Tampilan tablet dan ponsel (layout compact) disusun ulang. Tampilan PC dengan mouse tidak berubah.
+
+- **Layar utama yang bisa ditukar.** Area besar menampilkan peta DoA, dan video drone ada di jendela kecil 16:9 di pojok kanan bawah. Ketuk jendela kecil untuk menukar: video jadi besar dan peta pindah ke pojok. Peta tidak dimuat ulang dan video tidak terputus saat ditukar, dan video tetap live di jendela kecil. Jendela kecil hanya ada selama link drone menyala dan video drone dikonfigurasi; pilihan ini berlaku per kunjungan.
+- **Baris info selalu tampil di bawah layar utama.** Isinya bearing dari utara beserta umurnya (yang ditahan diberi tanda USANG/BELUM VALID dan warna redup), frekuensi RDF-SDR, ketinggian/heading/fix drone, dan tiga titik status link (RDF-SDR, telemetri drone, video). Portrait dan layar pendek hanya menampilkan bearing dan drone. Ketuk kotak untuk membuka tab yang sesuai.
+- **Panel samping bertab.** Tab Spektrum, Drone, RDF-SDR, dan Kontrol (Kontrol tidak ada di LAN view) ada di kanan saat landscape dan di bawah saat portrait. Tiap tab memberi label status kecil. Panel tidak lagi menutupi peta. Lapisan tetap dibuka dari tombol top bar.
+- **Pesan kuning di peta bisa disingkirkan.** Ketuk pesan, ia mengecil jadi tanda ⓘ, dan tanda itu membuka teks lengkap beserta tautannya. Pesan yang sama tetap tersingkir walaupun jamnya berganti, dan muncul lagi hanya bila penyebabnya berubah.
+- Saklar Spektrum/Drone/Kontrol yang tersimpan di PC tidak diubah oleh tablet.
+
 ## 3.13.5
 
 Rilis perbaikan: tidak ada yang dihapus.

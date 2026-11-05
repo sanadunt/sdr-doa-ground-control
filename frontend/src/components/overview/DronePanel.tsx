@@ -131,8 +131,70 @@ export function droneVideoText(health: DroneVideoHealth | null, phase: 'idle' | 
   return t('drone.video.connecting');
 }
 
+/**
+ * Whether the drone camera has a place on the compact Dashboard (the main view or
+ * the corner window): the drone link is on and the video is neither turned off nor
+ * missing on this console. A remote still searched for or a stopped video service
+ * keeps the place and shows why there is no picture.
+ */
+export function dronePipShown(view: DroneView | null, health: DroneVideoHealth | null): boolean {
+  if (!view || view.state === 'DISABLED' || view.videoEnabled === false) return false;
+  return health?.state !== 'DISABLED';
+}
+
+const STATIC_HEALTH_DOWN: DroneVideoHealth = { state: 'DOWN', reason: 'CONSOLE_UNREACHABLE', cameraReady: false, videoReady: false, readers: null, tracks: [], error: null };
+
+/**
+ * The page's one reader of the drone link: /api/drone every second (while the
+ * page is visible) and the video service every 5 s. A given health (tests,
+ * static renders) or `active` false means no reads at all.
+ */
+export function useDroneFeed(initialView: DroneView | null, initialHealth: DroneVideoHealth | null = null, active = true): { view: DroneView | null; health: DroneVideoHealth | null } {
+  const [view, setView] = useState<DroneView | null>(initialView);
+  const [health, setHealth] = useState<DroneVideoHealth | null>(initialHealth);
+  const staticRender = initialHealth !== null || !active;
+
+  useEffect(() => {
+    if (staticRender) return undefined;
+    let stopped = false;
+    let timer = 0;
+    const read = async () => {
+      if (document.visibilityState !== 'hidden') {
+        try {
+          const next = normalizeDrone(await getDrone());
+          if (!stopped && next) setView(next);
+        } catch {
+          // Kept: the next read tries again.
+        }
+      }
+      if (!stopped) timer = window.setTimeout(() => { void read(); }, DRONE_POLL_MS);
+    };
+    void read();
+    return () => { stopped = true; window.clearTimeout(timer); };
+  }, [staticRender]);
+
+  useEffect(() => {
+    if (staticRender) return undefined;
+    let stopped = false;
+    let timer = 0;
+    const read = async () => {
+      try {
+        const next = await getDroneVideoHealth();
+        if (!stopped) setHealth(next);
+      } catch {
+        if (!stopped) setHealth((current) => current ?? STATIC_HEALTH_DOWN);
+      }
+      if (!stopped) timer = window.setTimeout(() => { void read(); }, DRONE_VIDEO_HEALTH_MS);
+    };
+    void read();
+    return () => { stopped = true; window.clearTimeout(timer); };
+  }, [staticRender]);
+
+  return { view, health };
+}
+
 /** The drone camera through the console's WHEP proxy, started only while the video service reports OK. */
-function DroneVideo({ view, health, onState }: {
+export function DroneVideo({ view, health, onState }: {
   view: DroneView | null;
   health: DroneVideoHealth | null;
   /** The player's phase and last error code, for the panel's Video row. */
@@ -222,63 +284,15 @@ function DroneVideo({ view, health, onState }: {
   );
 }
 
-/**
- * The drone panel (right column, above the RDF-SDR card): the camera and the
- * flight telemetry from the SIYI remote, read only. It reads /api/drone every
- * second and the video service every 5 s while shown.
- */
-export function DronePanel({ initialView = null, initialHealth = null, onClose }: {
-  /** The drone block of the last snapshot answer, shown until the first read. */
-  initialView?: DroneView | null;
-  /** Static renders (tests) pass a health and never read. */
-  initialHealth?: DroneVideoHealth | null;
-  onClose?: () => void;
+export interface DroneVideoState { phase: DroneVideoPhase; code: string | null }
+
+/** The panel's rows: the two link rows (Telemetry, Video), every value row, and the flight controller's last message. */
+export function DroneDetails({ view, health, video }: {
+  view: DroneView | null;
+  health: DroneVideoHealth | null;
+  video: DroneVideoState;
 }): JSX.Element {
   const { t } = useI18n();
-  const [view, setView] = useState<DroneView | null>(initialView);
-  const [health, setHealth] = useState<DroneVideoHealth | null>(initialHealth);
-  const [large, setLarge] = useState(false);
-  const staticRender = initialHealth !== null;
-
-  useEffect(() => {
-    if (staticRender) return undefined;
-    let stopped = false;
-    let timer = 0;
-    const read = async () => {
-      if (document.visibilityState !== 'hidden') {
-        try {
-          const next = normalizeDrone(await getDrone());
-          if (!stopped && next) setView(next);
-        } catch {
-          // Kept: the next read tries again.
-        }
-      }
-      if (!stopped) timer = window.setTimeout(() => { void read(); }, DRONE_POLL_MS);
-    };
-    void read();
-    return () => { stopped = true; window.clearTimeout(timer); };
-  }, [staticRender]);
-
-  useEffect(() => {
-    if (staticRender) return undefined;
-    let stopped = false;
-    let timer = 0;
-    const read = async () => {
-      try {
-        const next = await getDroneVideoHealth();
-        if (!stopped) setHealth(next);
-      } catch {
-        if (!stopped) setHealth((current) => current ?? { state: 'DOWN', reason: 'CONSOLE_UNREACHABLE', cameraReady: false, videoReady: false, readers: null, tracks: [], error: null });
-      }
-      if (!stopped) timer = window.setTimeout(() => { void read(); }, DRONE_VIDEO_HEALTH_MS);
-    };
-    void read();
-    return () => { stopped = true; window.clearTimeout(timer); };
-  }, [staticRender]);
-
-  const [video, setVideo] = useState<{ phase: DroneVideoPhase; code: string | null }>({ phase: 'idle', code: null });
-  const onVideoState = useCallback((phase: DroneVideoPhase, code: string | null) => setVideo({ phase, code }), []);
-  const chip = droneChip(view);
   const rows = droneRows(view, t);
   const text = view?.statustext?.text ?? null;
   const videoShown = view?.videoEnabled !== false;
@@ -289,22 +303,7 @@ export function DronePanel({ initialView = null, initialHealth = null, onClose }
     { key: 'video', label: t('drone.video.label'), value: videoShown ? videoStatus.value : t('drone.videoOff'), tone: videoShown ? videoStatus.tone : 'is-empty', wide: true },
   ];
   return (
-    <section id="panel-drone" className={large ? 'ov-drone ov-card is-large' : 'ov-drone ov-card'} aria-labelledby="ov-drone-title">
-      <div className="ov-card-head">
-        <h2 id="ov-drone-title">{t('drone.title')}</h2>
-        <span className={`ov-chip tone-${chip.tone}`}>{chip.code}</span>
-        {videoShown ? (
-          <button className="ov-icon-button" type="button" aria-pressed={large} aria-label={large ? t('drone.shrink') : t('drone.expand')} title={large ? t('drone.shrink') : t('drone.expand')} onClick={() => setLarge(!large)}>
-            <Icon name={large ? 'collapse' : 'expand'} />
-          </button>
-        ) : null}
-        {onClose ? (
-          <button className="ov-icon-button" type="button" aria-label={t('drone.close')} title={t('drone.close')} onClick={onClose}>
-            <Icon name="close" />
-          </button>
-        ) : null}
-      </div>
-      {videoShown ? <DroneVideo view={view} health={health} onState={onVideoState} /> : null}
+    <>
       <dl className="ov-drone-rows">
         {[...status, ...rows].map((row) => (
           <div key={row.key} className={[row.wide ? 'is-wide' : '', row.key === 'video' ? 'is-last-status' : ''].filter(Boolean).join(' ') || undefined}>
@@ -314,6 +313,60 @@ export function DronePanel({ initialView = null, initialHealth = null, onClose }
         ))}
       </dl>
       {text ? <p className="ov-drone-text" title={t('drone.statustext')}>{text}</p> : null}
+    </>
+  );
+}
+
+/**
+ * The drone panel (right column, above the RDF-SDR card): the camera and the
+ * flight telemetry from the SIYI remote, read only. It reads /api/drone every
+ * second and the video service every 5 s while shown.
+ */
+export function DronePanel({ initialView = null, initialHealth = null, onClose, feed = null, videoMain = false, onVideoMain, videoState }: {
+  /** The drone block of the last snapshot answer, shown until the first read. */
+  initialView?: DroneView | null;
+  /** Static renders (tests) pass a health and never read. */
+  initialHealth?: DroneVideoHealth | null;
+  onClose?: () => void;
+  /** The page's own drone feed (useDroneFeed()); the panel then reads nothing itself. */
+  feed?: { view: DroneView | null; health: DroneVideoHealth | null } | null;
+  /** The video plays large behind the panels (the map in the corner window), not in this panel. */
+  videoMain?: boolean;
+  /** Swaps the video and the map; the panel's enlarge button does this when it is set. */
+  onVideoMain?: () => void;
+  /** The large video's player state, for the Video row while videoMain. */
+  videoState?: DroneVideoState;
+}): JSX.Element {
+  const { t } = useI18n();
+  const own = useDroneFeed(initialView, initialHealth, feed === null);
+  const { view, health } = feed ?? own;
+  const [large, setLarge] = useState(false);
+  const [video, setVideo] = useState<DroneVideoState>({ phase: 'idle', code: null });
+  const onVideoState = useCallback((phase: DroneVideoPhase, code: string | null) => setVideo({ phase, code }), []);
+  const chip = droneChip(view);
+  const videoShown = view?.videoEnabled !== false;
+  const swaps = onVideoMain !== undefined;
+  const pressed = swaps ? videoMain : large;
+  const sizeLabel = swaps ? (videoMain ? t('overview.swapToMap') : t('overview.swapToVideo')) : (large ? t('drone.shrink') : t('drone.expand'));
+  const classes = ['ov-drone', 'ov-card', large && !swaps ? 'is-large' : '', videoMain ? 'is-video-main' : ''].filter(Boolean).join(' ');
+  return (
+    <section id="panel-drone" className={classes} aria-labelledby="ov-drone-title">
+      <div className="ov-card-head">
+        <h2 id="ov-drone-title">{t('drone.title')}</h2>
+        <span className={`ov-chip tone-${chip.tone}`}>{chip.code}</span>
+        {videoShown ? (
+          <button className="ov-icon-button" type="button" aria-pressed={pressed} aria-label={sizeLabel} title={sizeLabel} onClick={() => (swaps ? onVideoMain?.() : setLarge(!large))}>
+            <Icon name={pressed ? 'collapse' : 'expand'} />
+          </button>
+        ) : null}
+        {onClose ? (
+          <button className="ov-icon-button" type="button" aria-label={t('drone.close')} title={t('drone.close')} onClick={onClose}>
+            <Icon name="close" />
+          </button>
+        ) : null}
+      </div>
+      {videoShown && !videoMain ? <DroneVideo view={view} health={health} onState={onVideoState} /> : null}
+      <DroneDetails view={view} health={health} video={videoMain && videoState ? videoState : video} />
     </section>
   );
 }

@@ -1,15 +1,23 @@
-"""Commands the console sends to the RDF Node edge: ``config.get`` and ``config.patch``.
+"""Commands the console sends to the RDF Node edge: ``config.get``, ``config.patch``
+and, since 3.15.0, the operations ``processing.set``, ``service.restart`` and
+the two-step ``system.reboot.*`` and ``system.shutdown.*`` (owner's decision of
+2026-11-04).
 
 The contract is ``docs/MQTT_KONTRAK.md`` section 5, taken from the edge at
 commit 8691ad0 (``rdf_node/control.py`` ``CommandManager.submit``, and the
 field rules of ``rdf_node/helper.py`` ``validate_changes`` and ``patch_file``).
-Every command is one compact JSON object on ``sdr/v2/<node>/cmd/config/get``
-or ``.../cmd/config/patch``, QoS 1, never retained, with the envelope
+Every command is one compact JSON object on its ``sdr/v2/<node>/cmd/...``
+topic (``COMMAND_SUFFIXES``), QoS 1, never retained, with the envelope
 
     {"v": 2, "id", "sid", "boot", "issued_ms", "expires_ms", "base_rev", "op", ...}
 
 ``sid`` and ``boot`` come from the node's latest ``state``, ``base_rev`` from
-``state.cfg``, and the command lives 15 s (the edge accepts at most 30 s).
+``state.cfg``, and the command lives 30 s (the most the edge accepts). The
+operations' rules are the edge's ``CommandManager.submit`` and ``_execute``
+(edge 1.10.2, f8f9e52): ``processing.set`` carries ``desired`` ``RUNNING`` or
+``STOPPED``; a ``*.prepare`` carries nothing more and its ``APPLIED`` ACK holds
+the one-time ``challenge``; the ``*.execute`` carries the ``prepare_id`` (the
+prepare command's id) and that challenge.
 This module only builds and checks; it publishes nothing and imports no
 edge code. Its checks are the edge's, so a command the console refuses here
 is one the edge would refuse too, and the console's own error codes reuse the
@@ -36,11 +44,57 @@ MAX_ISSUED_AHEAD_MS = 1_000
 
 OP_CONFIG_GET = "config.get"
 OP_CONFIG_PATCH = "config.patch"
+OP_PROCESSING_SET = "processing.set"
+OP_SERVICE_RESTART = "service.restart"
+OP_REBOOT_PREPARE = "system.reboot.prepare"
+OP_REBOOT_EXECUTE = "system.reboot.execute"
+OP_SHUTDOWN_PREPARE = "system.shutdown.prepare"
+OP_SHUTDOWN_EXECUTE = "system.shutdown.execute"
 COMMAND_SUFFIXES: Dict[str, str] = {
     OP_CONFIG_GET: "cmd/config/get",
     OP_CONFIG_PATCH: "cmd/config/patch",
+    OP_PROCESSING_SET: "cmd/processing/set",
+    OP_SERVICE_RESTART: "cmd/service/restart",
+    OP_REBOOT_PREPARE: "cmd/system/reboot/prepare",
+    OP_REBOOT_EXECUTE: "cmd/system/reboot/execute",
+    OP_SHUTDOWN_PREPARE: "cmd/system/shutdown/prepare",
+    OP_SHUTDOWN_EXECUTE: "cmd/system/shutdown/execute",
 }
+# The operations Kontrol sends besides config.get and config.patch, in the order it shows them.
+# ppp.restart, operation.get and stream.set are not sent (the T900 PPP link is retired).
+OPERATION_OPS: Tuple[str, ...] = (
+    OP_PROCESSING_SET, OP_SERVICE_RESTART, OP_REBOOT_PREPARE, OP_REBOOT_EXECUTE,
+    OP_SHUTDOWN_PREPARE, OP_SHUTDOWN_EXECUTE,
+)
+# Everything but config.get changes the node: the edge runs one at a time (BUSY).
+MUTATION_OPS = frozenset({OP_CONFIG_PATCH, *OPERATION_OPS})
+# Each prepare and the execute that consumes its challenge.
+PREPARE_FOR_EXECUTE: Dict[str, str] = {
+    OP_REBOOT_EXECUTE: OP_REBOOT_PREPARE,
+    OP_SHUTDOWN_EXECUTE: OP_SHUTDOWN_PREPARE,
+}
+PREPARE_OPS = frozenset(PREPARE_FOR_EXECUTE.values())
+EXECUTE_OPS = frozenset(PREPARE_FOR_EXECUTE)
+# The capabilities flag (agent.capabilities) that must be true for the node to take each operation.
+OPERATION_CAPABILITIES: Dict[str, str] = {
+    OP_PROCESSING_SET: "remote_processing",
+    OP_SERVICE_RESTART: "remote_restart",
+    OP_REBOOT_PREPARE: "remote_reboot",
+    OP_REBOOT_EXECUTE: "remote_reboot",
+    OP_SHUTDOWN_PREPARE: "remote_shutdown",
+    OP_SHUTDOWN_EXECUTE: "remote_shutdown",
+}
+PROCESSING_STATES: Tuple[str, ...] = ("RUNNING", "STOPPED")
+# helper.py: secrets.token_urlsafe(24), 32 characters; a little room either way.
+CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+# helper.py keeps a challenge 30 s from the prepare (monotonic on the Raspberry).
+CHALLENGE_VALID_S = 30
+# The console offers the execute only until the prepare ACK's receipt plus its
+# valid_seconds less this: the ACK left the edge before it arrived, and the
+# execute still has to reach it (each up to a few seconds over Telemetry LoRa).
+CHALLENGE_SAFETY_MS = 8_000
 ACK_SUFFIX = "ack/config"
+OPERATION_ACK_SUFFIX = "ack/operation"
 SETTINGS_SUFFIX = "settings/reported"
 
 COMMAND_ID_PREFIX = "gc-"
@@ -104,7 +158,16 @@ SUBMIT_VALUE_RANGE = (-200.0, 5e9)
 
 # Envelope fields control.py allows, and the fields each op of this module sends.
 ENVELOPE_FIELDS = ("v", "id", "sid", "boot", "issued_ms", "expires_ms", "base_rev", "op")
-_OP_FIELDS = {OP_CONFIG_GET: frozenset(), OP_CONFIG_PATCH: frozenset({"changes"})}
+_OP_FIELDS = {
+    OP_CONFIG_GET: frozenset(),
+    OP_CONFIG_PATCH: frozenset({"changes"}),
+    OP_PROCESSING_SET: frozenset({"desired"}),
+    OP_SERVICE_RESTART: frozenset(),
+    OP_REBOOT_PREPARE: frozenset(),
+    OP_REBOOT_EXECUTE: frozenset({"prepare_id", "challenge"}),
+    OP_SHUTDOWN_PREPARE: frozenset(),
+    OP_SHUTDOWN_EXECUTE: frozenset({"prepare_id", "challenge"}),
+}
 
 
 class CommandRefused(ValueError):
@@ -260,6 +323,9 @@ def build_command(
     issued_ms: int,
     ttl_ms: int = COMMAND_TTL_MS,
     changes: Optional[Mapping[str, Any]] = None,
+    desired: Optional[str] = None,
+    prepare_id: Optional[str] = None,
+    challenge: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The envelope in the edge's field order; no checks (see ``validate_command``)."""
     command: Dict[str, Any] = {
@@ -274,6 +340,11 @@ def build_command(
     }
     if op == OP_CONFIG_PATCH:
         command["changes"] = dict(changes or {})
+    elif op == OP_PROCESSING_SET:
+        command["desired"] = desired
+    elif op in EXECUTE_OPS:
+        command["prepare_id"] = prepare_id
+        command["challenge"] = challenge
     return command
 
 
@@ -291,7 +362,7 @@ def validate_command(command: Any, *, now_ms: Optional[int] = None) -> Dict[str,
         raise bad("command must be a JSON object")
     op = command.get("op")
     if op not in _OP_FIELDS:
-        raise bad("op must be config.get or config.patch")
+        raise bad("op must be one of " + ", ".join(_OP_FIELDS))
     expected = set(ENVELOPE_FIELDS) | _OP_FIELDS[op]
     if set(command) != expected:
         raise bad("command fields must be exactly " + ", ".join(sorted(expected)))
@@ -313,6 +384,13 @@ def validate_command(command: Any, *, now_ms: Optional[int] = None) -> Dict[str,
     base_rev = command["base_rev"]
     if base_rev is not None and (type(base_rev) is not int or not 0 <= base_rev <= _U32):
         raise bad("base_rev must be state.cfg: an integer or null")
+    if op == OP_PROCESSING_SET and command["desired"] not in PROCESSING_STATES:
+        raise CommandRefused("INVALID_DESIRED_STATE", "desired must be RUNNING or STOPPED")
+    if op in EXECUTE_OPS:
+        if not isinstance(command["prepare_id"], str) or not COMMAND_ID_RE.fullmatch(command["prepare_id"]):
+            raise bad("prepare_id must be the id of the prepare command")
+        if not isinstance(command["challenge"], str) or not CHALLENGE_RE.fullmatch(command["challenge"]):
+            raise bad("challenge must be the one the prepare ACK carried")
     if op == OP_CONFIG_PATCH:
         if base_rev is None:
             raise bad("a config.patch needs the node's revision as base_rev")
@@ -346,6 +424,9 @@ def encode_command(command: Mapping[str, Any]) -> bytes:
 
 __all__ = [
     "ACK_SUFFIX",
+    "CHALLENGE_RE",
+    "CHALLENGE_SAFETY_MS",
+    "CHALLENGE_VALID_S",
     "COMMAND_QOS",
     "COMMAND_SUFFIXES",
     "COMMAND_TTL_MS",
@@ -353,11 +434,25 @@ __all__ = [
     "CommandRefused",
     "GAIN_TABLE_DB",
     "LEGACY_PATCH_FIELDS",
+    "EXECUTE_OPS",
     "MAX_COMMAND_TTL_MS",
+    "MUTATION_OPS",
+    "OPERATION_ACK_SUFFIX",
+    "OPERATION_CAPABILITIES",
+    "OPERATION_OPS",
     "OP_CONFIG_GET",
     "OP_CONFIG_PATCH",
+    "OP_PROCESSING_SET",
+    "OP_REBOOT_EXECUTE",
+    "OP_REBOOT_PREPARE",
+    "OP_SERVICE_RESTART",
+    "OP_SHUTDOWN_EXECUTE",
+    "OP_SHUTDOWN_PREPARE",
     "PATCH_FIELDS",
     "PATCH_RANGES",
+    "PREPARE_FOR_EXECUTE",
+    "PREPARE_OPS",
+    "PROCESSING_STATES",
     "SETTINGS_SUFFIX",
     "SQUELCH_MODES",
     "build_command",

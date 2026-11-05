@@ -675,11 +675,15 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
     .console-shell[data-layout^='compact'] .view-only-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   }
   .console-shell.is-overview[data-layout^='compact'] .status-summary-source { display: none; }
+  /* Language and theme stay in the page menu; the bar keeps its room. */
+  .console-shell[data-layout^='compact'] .compact-lang, .console-shell[data-layout^='compact'] .compact-theme { display: none; }
 }
 .console-shell[data-layout^='compact'] .topbar-title { flex: 0 1 auto; min-width: 0; }
 .console-shell[data-layout^='compact'] .topbar-spacer { display: block; flex: 1 1 0; min-width: 0; }
 .console-shell[data-layout^='compact'] .topbar-toolbar { flex: none; }
 .console-shell[data-layout^='compact'] .topbar-tools { flex: none; flex-wrap: nowrap; gap: 6px; }
+.console-shell[data-layout^='compact'] .compact-lang { width: 44px; min-width: 44px; height: 44px; font-family: var(--mono); font-size: 13px; font-weight: 700; }
+.console-shell[data-layout^='compact'] .compact-theme { width: 44px; min-width: 44px; height: 44px; }
 .console-shell[data-layout^='compact'] .status-summary { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 6px; min-width: 44px; height: 44px; padding: 0 10px; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 999px; background: var(--surface); color: var(--muted); cursor: pointer; font-family: var(--mono); font-size: 11.5px; font-weight: 700; white-space: nowrap; }
 .console-shell[data-layout^='compact'] .status-summary > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* The DoA value stays whole; the source gives way first. */
@@ -708,10 +712,8 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 .console-shell[data-layout^='compact'] .page-content-overview { height: calc(100dvh - var(--topbar-h)); overflow: hidden; }
 .console-shell[data-layout^='compact'] .console-main:has(> .read-error-banner) .page-content-overview { height: calc(100dvh - var(--topbar-h) - var(--read-error-h)); }
 .console-shell.is-overview[data-layout^='compact'] .topbar { position: sticky; }
-/* Map notices fold to one line; a tap opens the whole notice with its link. */
+/* Map notices: one line; a tap removes one until its cause changes. */
 .console-shell[data-layout^='compact'] .map-data-chip.is-compact { display: flex; flex-wrap: wrap; align-items: center; gap: 0 8px; padding: 0 4px; pointer-events: auto; text-align: left; }
 .console-shell[data-layout^='compact'] .map-chip-toggle { display: flex; flex: 1 1 auto; align-items: center; min-width: 0; min-height: 44px; padding: 0 6px; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; text-align: left; }
-.console-shell[data-layout^='compact'] .map-data-chip.is-compact:not(.is-expanded) .map-chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.console-shell[data-layout^='compact'] .map-data-chip.is-expanded { max-height: 40dvh; overflow-y: auto; }
-.console-shell[data-layout^='compact'] .map-data-chip.is-expanded .map-chip-text { overflow-wrap: anywhere; white-space: normal; }
+.console-shell[data-layout^='compact'] .map-data-chip.is-compact .map-chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .console-shell[data-layout^='compact'] .map-data-chip.is-compact .map-chip-action { margin: 0 4px 6px auto; }

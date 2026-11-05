@@ -13,7 +13,7 @@ function formatDb(value: number, known = true): string {
  * overlay held (`heldTime`), the legend leads with STALE and that time; its swatches and scale keep the live colours,
  * as the held overlay does (owner's decision of 2026-11-02).
  */
-export function OverlayLegend({ settings, scale, saturation, ringStepM, halfPower, heading = null, heldTime = null }: {
+export function OverlayLegend({ settings, scale, saturation, ringStepM, halfPower, heading = null, headingSource = 'RDF', heldTime = null }: {
   settings: DoaOverlaySettings;
   scale: DbScale;
   saturation: number;
@@ -21,6 +21,8 @@ export function OverlayLegend({ settings, scale, saturation, ringStepM, halfPowe
   halfPower: HalfPowerWidth | null;
   /** The RDF-SDR heading as the map draws it: live, held (STALE) or not drawn. */
   heading?: 'live' | 'held' | null;
+  /** Where the drawn heading comes from: the RDF-SDR's compass or the drone's yaw. */
+  headingSource?: 'RDF' | 'DRONE';
   /** The time the held overlay was last live, while the map draws it held; null for live data. */
   heldTime?: string | null;
 }): JSX.Element {
@@ -42,7 +44,7 @@ export function OverlayLegend({ settings, scale, saturation, ringStepM, halfPowe
         {settings.bearingVisible ? <span><i className={swatch('legend-bearing')} /> {t('map.legendBearing')}</span> : null}
         {settings.edgesVisible && halfPower ? <span><i className={swatch('legend-edge')} /> {t('map.legendEdges')}</span> : null}
         {settings.lobeVisible ? <span><i className={swatch('legend-lobe')} /> {t('map.legendLobe')}</span> : null}
-        {heading ? <span><i className={heading === 'held' ? 'legend-swatch legend-heading is-held' : 'legend-swatch legend-heading'} /> {t(heading === 'held' ? 'map.legendHeadingHeld' : 'map.legendHeading')}</span> : null}
+        {heading ? <span><i className={heading === 'held' ? 'legend-swatch legend-heading is-held' : 'legend-swatch legend-heading'} /> {t(headingSource === 'DRONE' ? 'map.legendHeadingDrone' : heading === 'held' ? 'map.legendHeadingHeld' : 'map.legendHeading')}</span> : null}
         {settings.ringsVisible && ringStepM > 0 ? <span className="legend-reading">{t('map.ringStep', { step: formatDistance(ringStepM) })}</span> : null}
         <span className="legend-reading">{halfPower ? t('map.halfPower', { deg: halfPower.widthDeg }) : t('map.halfPowerNone')}</span>
       </div>

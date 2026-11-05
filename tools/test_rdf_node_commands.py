@@ -261,6 +261,57 @@ class EnvelopeTests(unittest.TestCase):
             cmds.validate_command(self.command(), now_ms=now - 1_001)
         cmds.validate_command(self.command(), now_ms=now - 1_000)
 
+    def test_operation_envelopes_follow_the_edge(self) -> None:
+        # control.py OPS and COMMAND_FIELDS (edge 1.10.2): each op's topic and its own fields only.
+        now = 1_790_000_000_000
+        topics = {
+            "processing.set": "cmd/processing/set", "service.restart": "cmd/service/restart",
+            "system.reboot.prepare": "cmd/system/reboot/prepare", "system.reboot.execute": "cmd/system/reboot/execute",
+            "system.shutdown.prepare": "cmd/system/shutdown/prepare",
+            "system.shutdown.execute": "cmd/system/shutdown/execute",
+        }
+        self.assertEqual(tuple(topics), cmds.OPERATION_OPS)
+        for op, suffix in topics.items():
+            self.assertEqual(cmds.command_topic("uav-01", op), f"sdr/v2/uav-01/{suffix}")
+        challenge = "g29oKmX_l6mcMunnJBk8MqBy5Ewq501A"
+        good = {
+            "processing.set": {"desired": "STOPPED"},
+            "service.restart": {},
+            "system.reboot.prepare": {},
+            "system.reboot.execute": {"prepare_id": "gc-" + "1" * 24, "challenge": challenge},
+            "system.shutdown.prepare": {},
+            "system.shutdown.execute": {"prepare_id": "gc-" + "1" * 24, "challenge": challenge},
+        }
+        for op, fields in good.items():
+            command = cmds.build_command(op, command_id="gc-" + "0" * 24, sid=SESSION["sid"], boot=SESSION["boot"],
+                                         base_rev=7, issued_ms=now, **fields)
+            self.assertEqual(list(command), list(cmds.ENVELOPE_FIELDS) + list(fields), op)
+            self.assertEqual(cmds.validate_command(command, now_ms=now), command)
+            # The edge compares base_rev with its own revision; null names a node without one.
+            cmds.validate_command(dict(command, base_rev=None), now_ms=now)
+            with self.assertRaises(cmds.CommandRefused):
+                cmds.validate_command(dict(command, changes={}), now_ms=now)
+        base = dict(cmds.build_command("processing.set", command_id="gc-" + "0" * 24, sid=SESSION["sid"],
+                                       boot=SESSION["boot"], base_rev=7, issued_ms=now, desired="RUNNING"))
+        for desired in ("running", "PAUSED", None, 1):
+            with self.assertRaises(cmds.CommandRefused) as refused:
+                cmds.validate_command(dict(base, desired=desired), now_ms=now)
+            self.assertEqual(refused.exception.code, "INVALID_DESIRED_STATE")
+        execute = cmds.build_command("system.reboot.execute", command_id="gc-" + "0" * 24, sid=SESSION["sid"],
+                                     boot=SESSION["boot"], base_rev=7, issued_ms=now, prepare_id="gc-1", challenge=challenge)
+        for bad in ({"prepare_id": "bad id"}, {"prepare_id": None}, {"challenge": "short"}, {"challenge": None},
+                    {"challenge": "has space " + challenge}):
+            with self.subTest(bad=bad), self.assertRaises(cmds.CommandRefused):
+                cmds.validate_command(dict(execute, **bad), now_ms=now)
+        with self.assertRaises(cmds.CommandRefused):
+            cmds.validate_command({k: v for k, v in execute.items() if k != "challenge"}, now_ms=now)
+        self.assertEqual(cmds.PREPARE_FOR_EXECUTE["system.shutdown.execute"], "system.shutdown.prepare")
+        self.assertEqual(cmds.MUTATION_OPS, frozenset(cmds.OPERATION_OPS) | {"config.patch"})
+        # The prepare fixture of the edge's own agent: its challenge has the shape the console checks.
+        prepared = json.loads((FIXTURES / "ack-operation.reboot-prepare-applied.json").read_text(encoding="utf-8"))
+        self.assertRegex(prepared["result"]["challenge"], cmds.CHALLENGE_RE)
+        self.assertEqual(prepared["result"]["valid_seconds"], cmds.CHALLENGE_VALID_S)
+
     def test_field_rules_and_normalization(self) -> None:
         self.assertEqual(
             cmds.validate_patch_changes({"vfo0_squelch_db": -70, "gain_db": 20.7004, "center_frequency_hz": 434e6,
@@ -535,6 +586,7 @@ class TrackerTests(unittest.TestCase):
             "proof": {"center_frequency_hz": "FRESH_DAQ_RF_CENTER", "vfo0_frequency_hz": "FRESH_DOA_FREQUENCY"},
             "persisted": True, "method": None, "live_failure": None, "band_spacing_m": None, "squelch_mode": None,
             "message": None, "detail": None, "fields": None, "ignored": None, "final_within_ms": None,
+            "desired": None, "delay_seconds": None, "valid_seconds": None,
             "t": json.loads(applied["payload"])["t"], "received_at_ms": self.monitor.clock,
         })
         self.assertIsNone(self.tracker.in_flight(self.monitor))
@@ -858,6 +910,60 @@ class TrackerTests(unittest.TestCase):
                          list(zip(("ACCEPTED", "VERIFYING", "APPLIED"), sent)))
         self.assertTrue(all(isinstance(value, int) and value > 0 for value in sent[:2]))
         self.assertIsNone(sent[2])
+
+    def operation(self, op: str, **fields: Any) -> Dict[str, Any]:
+        command = cmds.build_command(op, command_id=cmds.new_command_id(), sid=STATE["sid"], boot=STATE["boot"],
+                                     base_rev=STATE["cfg"], issued_ms=self.clock[0], **fields)
+        self.monitor.published(command["id"])
+        self.tracker.record(command, self.monitor, topic=cmds.command_topic(NODE, op), published_at_ms=self.clock[0])
+        return command
+
+    def operation_ack(self, command: Dict[str, Any], status: str, result: Dict[str, Any], t_offset: int = 0) -> None:
+        self.monitor.deliver("ack/operation", json.dumps({
+            "v": 2, "sid": STATE["sid"], "id": command["id"], "status": status, "t": STATE["t"] + t_offset,
+            "rev": STATE["cfg"], "result": result,
+        }))
+
+    def test_a_lifecycle_operation_waits_for_the_engine_start(self) -> None:
+        # processing.set and service.restart wait for the engine (start_timeout_seconds, 180 s by default):
+        # also from an edge that names no final_within_ms.
+        command = self.operation("service.restart")
+        self.operation_ack(command, "ACCEPTED", {})
+        self.clock[0] = command["issued_ms"] + FINAL_ACK_WAIT_MS + 1
+        self.assertEqual(self.status(command["id"])["state"], "acknowledged")
+        self.assertEqual(self.tracker.mutation_in_flight(self.monitor), command["id"])
+        self.clock[0] = command["issued_ms"] + RESTART_FINAL_ACK_WAIT_MS + 1
+        self.assertEqual(self.status(command["id"])["state"], "no_final_ack")
+        self.assertIsNone(self.tracker.mutation_in_flight(self.monitor))
+        # A started processing.set ends with the edge's proof.
+        command = self.operation("processing.set", desired="RUNNING")
+        self.operation_ack(command, "ACCEPTED", {"final_within_ms": 190_250}, 1)
+        self.operation_ack(command, "APPLIED", {"proof": "NEW_FRESH_DAQ_AND_UNIT_ACTIVE", "scope": "SDR_STACK",
+                                                "desired": "RUNNING"}, 2)
+        done = self.status(command["id"])
+        self.assertEqual((done["state"], done["desired"], done["ack"]["desired"], done["ack"]["proof"]),
+                         ("acked", "RUNNING", "RUNNING", "NEW_FRESH_DAQ_AND_UNIT_ACTIVE"))
+
+    def test_a_scheduled_reboot_is_the_end_and_the_challenge_never_stays(self) -> None:
+        prepare = self.operation("system.reboot.prepare")
+        challenge = "g29oKmX_l6mcMunnJBk8MqBy5Ewq501A"
+        self.operation_ack(prepare, "APPLIED", {"challenge": challenge, "valid_seconds": 30, "prepare_id": prepare["id"]})
+        shown = self.status(prepare["id"])
+        self.assertEqual((shown["state"], shown["ack"]["valid_seconds"]), ("acked", 30))
+        self.assertIsNone(shown["prepare_valid_until_ms"])
+        execute = self.operation("system.reboot.execute", prepare_id=prepare["id"], challenge=challenge)
+        self.operation_ack(execute, "ACCEPTED", {"final_within_ms": 10_250}, 1)
+        self.assertEqual(self.tracker.mutation_in_flight(self.monitor), execute["id"])
+        self.operation_ack(execute, "REBOOT_SCHEDULED", {"scheduled": True, "delay_seconds": 5, "action": "reboot"}, 2)
+        scheduled = self.status(execute["id"])
+        self.assertEqual((scheduled["state"], scheduled["final"], scheduled["prepare_id"]),
+                         ("acked", True, prepare["id"]))
+        self.assertIsNone(self.tracker.mutation_in_flight(self.monitor))
+        # The edge closes the command after the boot without another ACK: nothing times out.
+        self.clock[0] += FINAL_WITHIN_MAX_WAIT_MS
+        self.assertEqual(self.status(execute["id"])["state"], "acked")
+        self.assertNotIn(challenge, json.dumps([self.status(prepare["id"]), self.status(execute["id"])]))
+        self.assertNotIn(challenge, json.dumps(self.tracker._entries, default=str))
 
     def test_publish_failures_and_failed_pubacks(self) -> None:
         command = json.loads(CASES["gain"]["console"]["payload"])

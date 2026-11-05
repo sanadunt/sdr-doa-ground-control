@@ -51,7 +51,8 @@ from config_command_tracker import FINAL_ACK_WAIT_MS, NO_ACK_GRACE_MS, SETTINGS_
 
 BASE_URL = "http://doasdr.local:8081"
 PASSWORD = "config-patch-test-password"
-COMMANDS = json.loads((TOOLS_DIR / "fixtures" / "rdf-node" / "commands.8691ad0.json").read_text(encoding="utf-8"))
+FIXTURES = TOOLS_DIR / "fixtures" / "rdf-node"
+COMMANDS = json.loads((FIXTURES / "commands.8691ad0.json").read_text(encoding="utf-8"))
 CASES = {case["name"]: case for case in COMMANDS["cases"]}
 STATE = json.loads(COMMANDS["session"]["state"])
 NODE = COMMANDS["node_id"]
@@ -88,13 +89,19 @@ class FakeMonitor:
             "health_q": 7,
             "health_t": _now_ms(),
             "health_received_at_ms": _now_ms() - 400,
-            "capabilities": {"remote_commands": True, "remote_config_patch": True, "config_patch": False},
+            "capabilities": {
+                "remote_commands": True, "remote_config_patch": True, "config_patch": False,
+                "remote_processing": True, "remote_restart": True, "remote_reboot": True, "remote_shutdown": True,
+            },
+            "run": "RUNNING",
         }
         self.settings: Optional[Dict[str, Any]] = None
         self.published: list[Dict[str, Any]] = []
         self.publish_error: Optional[BaseException] = None
         self.observations: Dict[str, Dict[str, Any]] = {}
         self.adopted: list[Dict[str, Any]] = []
+        # Prepare id -> (challenge, valid until): what the real monitor keeps from an APPLIED prepare ACK.
+        self.challenges: Dict[str, Tuple[str, int]] = {}
 
     def start(self) -> None:
         return None
@@ -141,10 +148,18 @@ class FakeMonitor:
         published = any(item["id"] == command_id for item in self.published)
         adopted = any(item["command_id"] == command_id for item in self.adopted)
         observed = {"published": published, "adopted": adopted, "puback": None, "progress": None, "final": None,
-                    "reported_at_ms": None}
+                    "reported_at_ms": None, "prepare_valid_until_ms": None}
         if published or adopted:
             observed.update(self.observations.get(command_id, {}))
+            if command_id in self.challenges:
+                observed["prepare_valid_until_ms"] = self.challenges[command_id][1]
         return observed
+
+    def take_rdf_node_challenge(self, prepare_id: str) -> Optional[str]:
+        held = self.challenges.pop(prepare_id, None)
+        if held is None or _now_ms() >= held[1]:
+            return None
+        return held[0]
 
     def puback(self, command_id: str, reason: int = 0) -> None:
         self.observations.setdefault(command_id, {})["puback"] = {"received_at_ms": 1, "reason": reason}
@@ -376,6 +391,11 @@ class ConfigPatchServerTests(unittest.TestCase):
                 "choices": {"vfo0_squelch_mode": ["Manual", "Auto", "Auto Channel", "Default"]},
                 "gain_table_db": list(cmds.GAIN_TABLE_DB),
                 "requires_fresh_health": True,
+                "operations": [
+                    "processing.set", "service.restart", "system.reboot.prepare", "system.reboot.execute",
+                    "system.shutdown.prepare", "system.shutdown.execute",
+                ],
+                "operation_ack_topic": f"sdr/v2/{NODE}/ack/operation",
             },
         )
 
@@ -698,6 +718,212 @@ class ConfigPatchServerTests(unittest.TestCase):
         self.assertEqual(sorted(results), [202] + [409] * 5)
         self.assertEqual(len(self.monitor.published), 1)
 
+
+    # -- operations (POST /api/mqtt/operation) ----------------------------------
+
+    def send_operation(self, body: Any, *, cookie: Optional[str] = None, origin: Any = True) -> Tuple[int, Any]:
+        status, _headers, payload = self.request("POST", "/api/mqtt/operation", body, origin=origin, cookie=cookie)
+        return status, payload
+
+    def prepared(self, cookie: str, op: str = "system.reboot.prepare") -> str:
+        """A prepare the edge answered APPLIED, its challenge held by the monitor."""
+        status, sent = self.send_operation({"op": op, "confirm": True}, cookie=cookie)
+        self.assertEqual(status, 202, sent)
+        command_id = sent["command_id"]
+        self.monitor.ack(command_id, "ACCEPTED", rev=42)
+        self.monitor.ack(command_id, "APPLIED", rev=42, result={"prepare_id": command_id, "valid_seconds": 30})
+        self.monitor.challenges[command_id] = ("Ch4llenge-for-the-execute_0123456", _now_ms() + 20_000)
+        return command_id
+
+    def test_operation_needs_origin_admin_and_confirm(self) -> None:
+        body = {"op": "service.restart", "confirm": True}
+        self.assert_error(self.send_operation(body, origin=None), 403, "ORIGIN_REJECTED")
+        self.assert_error(self.send_operation(body, origin="http://evil.example"), 403, "ORIGIN_REJECTED")
+        self.assert_error(self.send_operation(body), 401, "ADMIN_REQUIRED")
+        cookie = self.admin_cookie()
+        for bad in (
+            [], {"confirm": True}, {"op": "ppp.restart", "confirm": True}, {"op": "config.patch", "confirm": True},
+            {"op": "service.restart", "confirm": True, "extra": 1},
+            {"op": "processing.set", "confirm": True},
+            {"op": "service.restart", "desired": "RUNNING", "confirm": True},
+            {"op": "system.reboot.execute", "confirm": True},
+            {"op": "system.reboot.prepare", "prepare_id": "gc-1", "confirm": True},
+            {"op": "system.reboot.execute", "prepare_id": "bad id!", "confirm": True},
+            {"op": "system.reboot.execute", "prepare_id": "gc-1", "challenge": "x" * 32, "confirm": True},
+        ):
+            self.assert_error(self.send_operation(bad, cookie=cookie), 400, "INVALID_REQUEST")
+        for confirm in (False, "true", 1, None):
+            self.assert_error(self.send_operation({"op": "service.restart", "confirm": confirm}, cookie=cookie),
+                              400, "CONFIRM_REQUIRED")
+        self.assert_error(self.send_operation({"op": "service.restart"}, cookie=cookie), 400, "CONFIRM_REQUIRED")
+        for desired in ("running", "PAUSED", None, 1):
+            self.assert_error(
+                self.send_operation({"op": "processing.set", "desired": desired, "confirm": True}, cookie=cookie),
+                400, "INVALID_DESIRED_STATE",
+            )
+        self.assertEqual(self.monitor.published, [])
+
+    def test_operation_checks_in_order(self) -> None:
+        cookie = self.admin_cookie()
+        body = {"op": "processing.set", "desired": "STOPPED", "confirm": True}
+        self.server.mqtt_monitor = None
+        self.assert_error(self.send_operation(body, cookie=cookie), 409, "MQTT_MONITOR_DISABLED")
+        self.server.mqtt_monitor = self.monitor
+        self.monitor.connection = "disconnected"
+        self.monitor.session.update(known=False, health_fresh=False)
+        self.monitor.session["capabilities"] = dict(self.monitor.session["capabilities"], remote_processing=False)
+        self.assert_error(self.send_operation(body, cookie=cookie), 503, "MQTT_NOT_CONNECTED")
+        self.monitor.connection = "connected"
+        self.assert_error(self.send_operation(body, cookie=cookie), 409, "NODE_SESSION_UNAVAILABLE")
+        self.monitor.session.update(known=True)
+        refused = self.assert_error(self.send_operation(body, cookie=cookie), 409, "OPERATION_NOT_ALLOWED")
+        self.assertEqual(refused["capability"], "remote_processing")
+        # Capabilities not received yet grant nothing either.
+        self.monitor.session["capabilities"] = None
+        self.assert_error(self.send_operation(body, cookie=cookie), 409, "OPERATION_NOT_ALLOWED")
+        self.monitor.session["capabilities"] = {"remote_processing": True}
+        self.assert_error(self.send_operation(body, cookie=cookie), 409, "NODE_NOT_FRESH")
+        self.monitor.session.update(health_fresh=True)
+        status, first = self.send_operation(body, cookie=cookie)
+        self.assertEqual(status, 202, first)
+        busy = self.assert_error(self.send_operation(body, cookie=cookie), 409, "COMMAND_IN_FLIGHT")
+        self.assertEqual(busy["command_id"], first["command_id"])
+        self.assertEqual(len(self.monitor.published), 1)
+
+    def test_one_mutation_at_a_time_across_patch_and_operations(self) -> None:
+        cookie = self.admin_cookie()
+        status, patch_sent = self.send_patch(self.patch_body(), cookie=cookie)
+        self.assertEqual(status, 202, patch_sent)
+        self.assert_error(self.send_operation({"op": "service.restart", "confirm": True}, cookie=cookie),
+                          409, "COMMAND_IN_FLIGHT")
+        self.monitor.ack(patch_sent["command_id"], "APPLIED", rev=43)
+        status, restart = self.send_operation({"op": "service.restart", "confirm": True}, cookie=cookie)
+        self.assertEqual(status, 202, restart)
+        busy = self.assert_error(self.send_patch(self.patch_body(), cookie=cookie), 409, "COMMAND_IN_FLIGHT")
+        self.assertEqual(busy["command_id"], restart["command_id"])
+        # A read still goes out while an operation waits.
+        self.assertEqual(self.send_get(cookie=cookie)[0], 202)
+
+    def test_operation_envelopes_are_the_edge_ones(self) -> None:
+        cookie = self.admin_cookie()
+        expected = {
+            "processing.set": ("cmd/processing/set", {"desired": "RUNNING"}),
+            "service.restart": ("cmd/service/restart", {}),
+            "system.reboot.prepare": ("cmd/system/reboot/prepare", {}),
+            "system.shutdown.prepare": ("cmd/system/shutdown/prepare", {}),
+        }
+        for op, (suffix, extra) in expected.items():
+            before = _now_ms()
+            status, sent = self.send_operation({"op": op, "confirm": True, **extra}, cookie=cookie)
+            self.assertEqual(status, 202, sent)
+            self.assertEqual((sent["op"], sent["topic"], sent["qos"], sent["ttl_ms"], sent["base_rev"]),
+                             (op, f"sdr/v2/{NODE}/{suffix}", 1, 30_000, 42))
+            command = self.monitor.published[-1]
+            self.assertEqual(list(command), list(cmds.ENVELOPE_FIELDS) + list(extra))
+            self.assertEqual((command["op"], command["sid"], command["boot"], command["base_rev"]),
+                             (op, STATE["sid"], STATE["boot"], 42))
+            self.assertGreaterEqual(command["issued_ms"], before)
+            self.assertEqual(command["expires_ms"] - command["issued_ms"], 30_000)
+            for key, value in extra.items():
+                self.assertEqual(command[key], value)
+            self.monitor.ack(sent["command_id"], "APPLIED", rev=42)
+        # An unknown revision is the edge's to judge: it compares base_rev with its own.
+        self.monitor.session["cfg"] = None
+        status, sent = self.send_operation({"op": "service.restart", "confirm": True}, cookie=cookie)
+        self.assertEqual(status, 202, sent)
+        self.assertIsNone(self.monitor.published[-1]["base_rev"])
+
+    def test_reboot_is_prepared_then_executed_with_the_held_challenge(self) -> None:
+        cookie = self.admin_cookie()
+        execute = {"op": "system.reboot.execute", "confirm": True}
+        self.assert_error(self.send_operation(dict(execute, prepare_id="gc-000000000000000000000000"), cookie=cookie),
+                          409, "PREPARE_UNKNOWN")
+        status, sent = self.send_operation({"op": "system.reboot.prepare", "confirm": True}, cookie=cookie)
+        self.assertEqual(status, 202, sent)
+        prepare_id = sent["command_id"]
+        # The prepare is a mutation of its own: nothing else goes while it waits.
+        self.assert_error(self.send_operation(dict(execute, prepare_id=prepare_id), cookie=cookie), 409, "COMMAND_IN_FLIGHT")
+        self.monitor.ack(prepare_id, "REJECTED", rev=42, result={"error": "REBOOT_DISABLED"})
+        waiting = self.assert_error(self.send_operation(dict(execute, prepare_id=prepare_id), cookie=cookie),
+                                    409, "PREPARE_NOT_READY")
+        self.assertEqual(waiting["state"], "acked")
+        status, sent = self.send_operation({"op": "system.reboot.prepare", "confirm": True}, cookie=cookie)
+        prepare_id = sent["command_id"]
+        self.monitor.ack(prepare_id, "APPLIED", rev=42, result={"prepare_id": prepare_id, "valid_seconds": 30})
+        # A shutdown cannot use a reboot's prepare.
+        self.assert_error(
+            self.send_operation({"op": "system.shutdown.execute", "prepare_id": prepare_id, "confirm": True}, cookie=cookie),
+            409, "PREPARE_UNKNOWN",
+        )
+        # APPLIED without a held challenge (another monitor, or it ran out) cannot be executed.
+        self.assert_error(self.send_operation(dict(execute, prepare_id=prepare_id), cookie=cookie), 409, "PREPARE_EXPIRED")
+
+        prepare_id = self.prepared(cookie)
+        shown = self.status_of(prepare_id)
+        self.assertEqual((shown["state"], shown["ack"]["status"], shown["ack"]["valid_seconds"]), ("acked", "APPLIED", 30))
+        self.assertGreater(shown["prepare_valid_until_ms"], _now_ms())
+        self.assertNotIn("Ch4llenge", json.dumps(shown))
+        # A refused execute leaves the challenge for the next try.
+        self.monitor.session["health_fresh"] = False
+        self.assert_error(self.send_operation(dict(execute, prepare_id=prepare_id), cookie=cookie), 409, "NODE_NOT_FRESH")
+        self.monitor.session["health_fresh"] = True
+        status, done = self.send_operation(dict(execute, prepare_id=prepare_id), cookie=cookie)
+        self.assertEqual(status, 202, done)
+        self.assertEqual((done["topic"], done["prepare_id"]), (f"sdr/v2/{NODE}/cmd/system/reboot/execute", prepare_id))
+        self.assertNotIn("Ch4llenge", json.dumps(done))
+        command = self.monitor.published[-1]
+        self.assertEqual(list(command), list(cmds.ENVELOPE_FIELDS) + ["prepare_id", "challenge"])
+        self.assertEqual((command["prepare_id"], command["challenge"]), (prepare_id, "Ch4llenge-for-the-execute_0123456"))
+        self.assertIsNone(self.status_of(prepare_id)["prepare_valid_until_ms"])
+        # The challenge is used once.
+        self.monitor.ack(done["command_id"], "REJECTED", rev=42, result={"error": "BUSY"})
+        self.assert_error(self.send_operation(dict(execute, prepare_id=prepare_id), cookie=cookie), 409, "PREPARE_EXPIRED")
+        executed = self.status_of(done["command_id"])
+        self.assertEqual((executed["prepare_id"], executed["op"]), (prepare_id, "system.reboot.execute"))
+        self.assertNotIn("Ch4llenge", json.dumps(executed))
+
+    def test_a_scheduled_reboot_ends_the_execute(self) -> None:
+        cookie = self.admin_cookie()
+        prepare_id = self.prepared(cookie)
+        _status, done = self.send_operation({"op": "system.reboot.execute", "prepare_id": prepare_id, "confirm": True},
+                                            cookie=cookie)
+        self.monitor.ack(done["command_id"], "ACCEPTED", rev=42, result={"final_within_ms": 10_250})
+        self.assertEqual(self.status_of(done["command_id"])["state"], "acknowledged")
+        self.monitor.ack(done["command_id"], "REBOOT_SCHEDULED", rev=42,
+                         result={"scheduled": True, "delay_seconds": 5, "action": "reboot"})
+        scheduled = self.status_of(done["command_id"])
+        self.assertEqual((scheduled["state"], scheduled["final"], scheduled["ack"]["status"],
+                          scheduled["ack"]["delay_seconds"]), ("acked", True, "REBOOT_SCHEDULED", 5))
+        self.assertEqual(scheduled["sid"], STATE["sid"])
+        # Nothing waits any more: the next command may go once the node is back.
+        status, _sent = self.send_operation({"op": "service.restart", "confirm": True}, cookie=cookie)
+        self.assertEqual(status, 202)
+        _status, _headers, latest = self.request("GET", "/api/mqtt/operation")
+        self.assertEqual(latest["command"]["op"], "service.restart")
+
+    def test_an_expired_or_foreign_session_prepare_is_refused(self) -> None:
+        cookie = self.admin_cookie()
+        prepare_id = self.prepared(cookie, "system.shutdown.prepare")
+        self.monitor.challenges[prepare_id] = ("Ch4llenge-for-the-execute_0123456", _now_ms() - 1)
+        self.assertIsNone(self.status_of(prepare_id)["prepare_valid_until_ms"])
+        body = {"op": "system.shutdown.execute", "prepare_id": prepare_id, "confirm": True}
+        self.assert_error(self.send_operation(body, cookie=cookie), 409, "PREPARE_EXPIRED")
+        prepare_id = self.prepared(cookie, "system.shutdown.prepare")
+        self.monitor.session["sid"] = "0badc0de"
+        self.assert_error(self.send_operation(dict(body, prepare_id=prepare_id), cookie=cookie), 409, "PREPARE_EXPIRED")
+        self.assertEqual([item["op"] for item in self.monitor.published],
+                         ["system.shutdown.prepare", "system.shutdown.prepare"])
+
+    def test_operation_status_route_and_lan_view(self) -> None:
+        cookie = self.admin_cookie()
+        _status, sent = self.send_operation({"op": "processing.set", "desired": "RUNNING", "confirm": True}, cookie=cookie)
+        status, _headers, body = self.request("GET", f"/api/mqtt/operation/{sent['command_id']}", origin=None)
+        self.assertEqual((status, body["op"], body["desired"]), (200, "processing.set", "RUNNING"))
+        status, _headers, body = self.request("GET", "/api/mqtt/operation/bad%20id", origin=None)
+        self.assertEqual((status, body["code"]), (400, "INVALID_REQUEST"))
+        status, _headers, body = self.request("GET", "/api/mqtt/operation/gc-unknown", origin=None)
+        self.assertEqual((status, body["code"]), (404, "COMMAND_UNKNOWN"))
+
     # -- command status --------------------------------------------------------
 
     def status_of(self, command_id: str) -> Dict[str, Any]:
@@ -736,6 +962,7 @@ class ConfigPatchServerTests(unittest.TestCase):
             "proof": {"center_frequency_hz": "FRESH_DAQ_RF_CENTER", "vfo0_frequency_hz": "FRESH_DOA_FREQUENCY"},
             "persisted": True, "method": None, "live_failure": None, "band_spacing_m": None, "squelch_mode": None,
             "message": None, "detail": None, "fields": None, "ignored": None, "final_within_ms": None,
+            "desired": None, "delay_seconds": None, "valid_seconds": None,
             "t": acked["ack"]["t"],
             "received_at_ms": 2,
         })
@@ -1411,6 +1638,90 @@ class RealMonitorEndToEndTests(unittest.TestCase):
         # The Message Monitor still reports a monitor that never publishes on its own.
         snapshot = self.request("GET", "/api/mqtt")[2]
         self.assertEqual((snapshot["read_only"], snapshot["publish_enabled"]), (True, False))
+
+    def test_reboot_prepare_and_execute_with_the_edge_answers(self) -> None:
+        """The edge's own prepare ACK (ack-operation.reboot-prepare-applied.json) carries the challenge:
+        the monitor keeps it for the execute, and no route ever shows it."""
+        cookie = self.cookie()
+        self.fresh_state()
+        capabilities = json.loads((FIXTURES / "capabilities.json").read_text(encoding="utf-8"))
+        self.deliver("capabilities", dict(capabilities, sid=STATE["sid"], boot=STATE["boot"]), retained=True)
+        self.fresh_health()
+        # The fixture's node takes reboots but not processing.set.
+        status, _headers, body = self.request(
+            "POST", "/api/mqtt/operation", {"op": "processing.set", "desired": "STOPPED", "confirm": True}, cookie=cookie,
+        )
+        self.assertEqual((status, body["code"]), (409, "OPERATION_NOT_ALLOWED"))
+        reported = self.request("GET", "/api/mqtt/config-reported")[2]
+        self.assertEqual((reported["node"]["remote_reboot"], reported["node"]["remote_processing"]), (True, False))
+        status, _headers, sent = self.request(
+            "POST", "/api/mqtt/operation", {"op": "system.reboot.prepare", "confirm": True}, cookie=cookie,
+        )
+        self.assertEqual(status, 202, sent)
+        [((topic, raw), options)] = self.client.publish_calls
+        self.assertEqual((topic, options["qos"], options["retain"]), (f"sdr/v2/{NODE}/cmd/system/reboot/prepare", 1, False))
+        prepare = json.loads(raw.decode("utf-8"))
+        self.assertEqual(list(prepare), list(cmds.ENVELOPE_FIELDS))
+
+        answer = json.loads((FIXTURES / "ack-operation.reboot-prepare-applied.json").read_text(encoding="utf-8"))
+        challenge = answer["result"]["challenge"]
+        answer.update(id=prepare["id"], sid=STATE["sid"], t=_now_ms(), result=dict(answer["result"], prepare_id=prepare["id"]))
+        self.deliver("ack/operation", answer)
+        path = f"/api/mqtt/operation/{prepare['id']}"
+        shown = self.request("GET", path)[2]
+        self.assertEqual((shown["state"], shown["ack"]["status"], shown["ack"]["valid_seconds"]), ("acked", "APPLIED", 30))
+        self.assertGreater(shown["prepare_valid_until_ms"], _now_ms() + 15_000)
+        for route in (path, "/api/mqtt/rdf-node", "/api/mqtt", "/api/mqtt/config-reported", "/api/mqtt/operation"):
+            self.assertNotIn(challenge, json.dumps(self.request("GET", route)[2]), route)
+
+        status, _headers, done = self.request(
+            "POST", "/api/mqtt/operation",
+            {"op": "system.reboot.execute", "prepare_id": prepare["id"], "confirm": True}, cookie=cookie,
+        )
+        self.assertEqual(status, 202, done)
+        self.assertNotIn(challenge, json.dumps(done))
+        (topic, raw), _options = self.client.publish_calls[-1]
+        command = json.loads(raw.decode("utf-8"))
+        self.assertEqual(topic, f"sdr/v2/{NODE}/cmd/system/reboot/execute")
+        self.assertEqual((command["prepare_id"], command["challenge"]), (prepare["id"], challenge))
+        self.assertIsNone(self.request("GET", path)[2]["prepare_valid_until_ms"])
+        # The edge's answers to an execute (control.py _execute): ACCEPTED, then REBOOT_SCHEDULED.
+        for status_name, result in (("ACCEPTED", {"final_within_ms": 10_250}),
+                                    ("REBOOT_SCHEDULED", {"scheduled": True, "delay_seconds": 5, "action": "reboot"})):
+            self.deliver("ack/operation", {"v": 2, "sid": STATE["sid"], "id": command["id"], "status": status_name,
+                                           "t": _now_ms(), "rev": STATE["cfg"], "result": result})
+        executed = self.request("GET", f"/api/mqtt/operation/{command['id']}")[2]
+        self.assertEqual((executed["state"], executed["final"], executed["ack"]["status"]),
+                         ("acked", True, "REBOOT_SCHEDULED"))
+        status, _headers, again = self.request(
+            "POST", "/api/mqtt/operation",
+            {"op": "system.reboot.execute", "prepare_id": prepare["id"], "confirm": True}, cookie=cookie,
+        )
+        self.assertEqual((status, again["code"]), (409, "PREPARE_EXPIRED"))
+        self.assertEqual(len(self.client.publish_calls), 2)
+
+    def test_the_monitor_keeps_only_the_challenge_of_its_own_applied_prepare(self) -> None:
+        cookie = self.cookie()
+        self.fresh_state()
+        capabilities = json.loads((FIXTURES / "capabilities.json").read_text(encoding="utf-8"))
+        self.deliver("capabilities", dict(capabilities, sid=STATE["sid"], boot=STATE["boot"]), retained=True)
+        self.fresh_health()
+        answer = json.loads((FIXTURES / "ack-operation.reboot-prepare-applied.json").read_text(encoding="utf-8"))
+        # Another Ground's prepare: never kept.
+        self.deliver("ack/operation", dict(answer, sid=STATE["sid"], t=_now_ms()))
+        self.assertIsNone(self.monitor.take_rdf_node_challenge(answer["id"]))
+        _status, _headers, sent = self.request(
+            "POST", "/api/mqtt/operation", {"op": "system.reboot.prepare", "confirm": True}, cookie=cookie,
+        )
+        prepare_id = sent["command_id"]
+        mine = dict(answer, id=prepare_id, sid=STATE["sid"], result=dict(answer["result"], prepare_id=prepare_id))
+        # A refusal carries no challenge, and an ACK of another session is not the store's.
+        self.deliver("ack/operation", dict(mine, sid="0badc0de", t=_now_ms()))
+        self.assertIsNone(self.request("GET", f"/api/mqtt/operation/{prepare_id}")[2]["ack"])
+        # An APPLIED whose prepare_id names another command is not this prepare's.
+        self.deliver("ack/operation", dict(mine, t=_now_ms(), result=dict(mine["result"], prepare_id="gc-other")))
+        self.assertIsNone(self.request("GET", f"/api/mqtt/operation/{prepare_id}")[2]["prepare_valid_until_ms"])
+        self.assertIsNone(self.monitor.take_rdf_node_challenge(prepare_id))
 
     def test_a_stale_base_rev_is_answered_with_the_edge_conflict(self) -> None:
         cookie = self.cookie()

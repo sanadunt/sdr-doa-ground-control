@@ -57,7 +57,11 @@ describe('getConfigReported', () => {
     expect(calls[0].init.method).toBeUndefined();
     expect(reported.baseRev).toBe(42);
     // An older edge sends no capabilities.config_fields.
-    expect(reported.node).toEqual({ sid: 'e2fe561d', cfg: 42, healthFresh: true, healthAgeMs: 400, remoteCommands: true, remoteConfigPatch: false, configFields: null });
+    expect(reported.node).toEqual({
+      sid: 'e2fe561d', cfg: 42, healthFresh: true, healthAgeMs: 400, remoteCommands: true, remoteConfigPatch: false, configFields: null,
+      // A console before 3.15.0 sends no operation flags and no engine state.
+      remoteProcessing: null, remoteRestart: null, remoteReboot: null, remoteShutdown: null, run: null,
+    });
     expect(reported.settings).toEqual({
       id: 'gc-000000000000000000000001', rev: 42, receivedAtMs: 900, ageMs: 100, matchesStateCfg: true,
       squelchAuto: null, squelchModeResolved: null, defaultSquelchMode: null, antArrangement: null,
@@ -182,6 +186,7 @@ describe('getConfigPatchStatus', () => {
       status: 'APPLIED', final: true, error: null, reason: null, revision: 43, persisted: true, receivedAtMs: 5,
       proof: { center_frequency_hz: 'FRESH_DAQ_RF_CENTER', vfo0_frequency_hz: 'FRESH_DOA_FREQUENCY' }, method: null, liveFailure: null,
       bandSpacingM: null, squelchMode: null, message: null, detail: null, fields: null, ignored: null, finalWithinMs: null,
+      desired: null, delaySeconds: null,
     });
     // A server before contract 1.10 sends no deadline and no late-answer flag.
     expect(status).toMatchObject({ finalAckDeadlineMs: null, lateAnswerPossible: false });

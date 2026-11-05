@@ -8,7 +8,7 @@ import type { GpsSourceMode, MapCoordinate, TelemetrySnapshot } from '../types';
 import { basemapAfterTile, basemapAfterView, basemapNotice, basemapPaint, basemapPartialCheck, gpsReportsNoFix, holdStationCoordinate, nextBasemapHost, resumeBasemapHealth, shouldReframeStation, type BasemapHealth, type BasemapNotice, type StationFraming } from '../lib/map';
 import { BASEMAPS, DEFAULT_BASEMAP_ID, basemapHealthKey, basemapSourceId, isBasemapSourceId, type BasemapId } from '../lib/basemaps';
 import { OFFLINE_GLYPHS_PATH, basemapContents, registerOfflineProtocol, type BasemapContent } from '../lib/offlineBasemap';
-import { MAP_CONTROLS_ROW_PX, ZERO_INSETS, cameraInsets, clampMapPadding, controlsFramingBottom, noticePlacement, type MapInsets } from '../lib/mapInsets';
+import { MAP_CONTROLS_ROW_PX, ZERO_INSETS, cameraInsets, clampMapPadding, controlsFramingBottom, graphBounds, noticePlacement, type MapInsets } from '../lib/mapInsets';
 import {
   DEFAULT_DOA_OVERLAY_SETTINGS,
   EARTH_RADIUS_M,
@@ -36,7 +36,7 @@ import { beamColorExpression, beamOpacityExpression, formatBearing, formatDistan
 import { numberOrNull, primaryCandidate } from '../lib/telemetry';
 import { angularFrameAgeMs, angularHeld, doaSample, isMqttSnapshot } from '../lib/telemetrySource';
 import { overviewDoaStatus } from '../lib/doaStatus';
-import { headingLabel, headingLabelPosition, headingLineFeatures, headingPopupText, rdfHeading, type RdfHeading } from '../lib/rdfHeading';
+import { headingLabel, headingLabelPosition, headingLineFeatures, headingPopupText, stationHeading, type HeadingSource, type RdfHeading } from '../lib/rdfHeading';
 import { NO_ESTIMATE_FEATURES, positionEstimateFeatures, positionEstimateLabel, type PositionEstimate } from '../lib/positionEstimate';
 import { HELD_LAYER_OF, NO_HELD_FEATURES, heldBearingDeg, heldLayerSpec, heldNoticeText, heldOverlayFeatures, heldTimeText, overlayIdentity, pageOverlayMemory, provisionalBesideHeld, rememberOverlay, setPageOverlayMemory } from '../lib/heldOverlay';
 import { seedOverlayMemory } from '../lib/lastLiveDoa';
@@ -216,6 +216,20 @@ function overlayBounds(coordinate: MapCoordinate, radiusM: number): [[number, nu
   return [[west, south], [east, north]];
 }
 
+/**
+ * What a corner-window map frames: the bearing and the −3 dB edges (live, held or NOT VALID), so the
+ * window shows the station and where the graph points; the beam or density heat only without them.
+ * Neither the beam nor the lobe on its own: both reach round the station in every direction (the beam
+ * as a faint gradient), so the window would centre on the station, not on the direction.
+ */
+const GRAPH_DIRECTION_IDS = ['doa-bearing', 'doa-edges', 'doa-provisional', 'doa-held-bearing', 'doa-held-edges'] as const;
+const GRAPH_AREA_IDS = ['doa-beam', 'doa-heat', 'doa-held-beam', 'doa-held-heat'] as const;
+
+/** Padding of a corner-window map's framing: the window has no buttons, notices or panels to clear. */
+const MINI_FRAMING_PADDING = { top: 14, right: 14, bottom: 14, left: 14 };
+const MIN_MINI_ZOOM = 2;
+const MAX_MINI_ZOOM = 19;
+
 function stationInView(map: MapLibreMap, coordinate: MapCoordinate): boolean {
   try {
     return map.getBounds().contains([coordinate.longitude, coordinate.latitude]);
@@ -308,6 +322,19 @@ export interface TacticalMapProps {
   compact?: boolean;
   /** The SIYI drone (lib/droneLink.ts): where it is and where its nose points; null without a usable fix. Stable across equal values. */
   drone?: DroneMapView | null;
+  /**
+   * The RDF-SDR's array heading from the drone (yaw plus the array's turn) while the drone is LIVE
+   * and the compass choice prefers it; the heading line and label then use it instead of the
+   * RDF-SDR's own compass. Null otherwise.
+   */
+  droneArrayHeading?: number | null;
+  /**
+   * The map is the small corner window beside the drone video: no buttons or notices, small markers, and
+   * the camera fits the DoA graph (beam, lobe, bearing) after every update; the big map's camera comes back after.
+   */
+  mini?: boolean;
+  /** The operator's zoom steps on top of the corner map's automatic framing (+ and − over the window). */
+  miniZoom?: number;
 }
 
 /** The drone on the map: its position and nose heading, its flown track, and the RDF-SDR's own GPS when it differs. */
@@ -320,7 +347,7 @@ export interface DroneMapView {
   rdfOwn: GeoOrigin | null;
 }
 
-function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, curveOffset, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, provisionalTheta = null, provisionalHeading = null, orientationCause, onOpenCompassSettings, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect, ground = null, estimate = null, compact = false, drone = null, heldSeed = null }: TacticalMapProps): JSX.Element {
+function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, curveOffset, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, provisionalTheta = null, provisionalHeading = null, orientationCause, onOpenCompassSettings, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect, ground = null, estimate = null, compact = false, drone = null, droneArrayHeading = null, heldSeed = null, mini = false, miniZoom = 0 }: TacticalMapProps): JSX.Element {
   const { t, lang } = useI18n();
   const hostRef = useRef<HTMLDivElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -333,6 +360,12 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const headingMarkerRef = useRef<maplibregl.Marker | null>(null);
   const framingRef = useRef<StationFraming | null>(null);
   const operatorMovedRef = useRef(false);
+  const miniRef = useRef(mini);
+  miniRef.current = mini;
+  const miniZoomRef = useRef(miniZoom);
+  miniZoomRef.current = miniZoom;
+  // The big map's camera while the map is the corner window, put back when it is big again.
+  const bigCameraRef = useRef<{ center: [number, number]; zoom: number; bearing: number; pitch: number; operatorMoved: boolean } | null>(null);
   const styleReadyRef = useRef(false);
   const appliedDataRef = useRef<Partial<Record<SourceId, OverlayFeatureCollection>>>({});
   const [mapState, setMapState] = useState<MapState>('initializing');
@@ -382,18 +415,20 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   // The held (NOT VALID) DoA turns with the heading of its own sample when it has one.
   const provisional = doaReady ? null : provisionalBearingOf(provisionalTheta, provisionalHeading, offset);
   const provisionalBearing = provisional?.bearingDeg ?? null;
-  // The RDF-SDR's heading from telemetry/health (where its array points, from
-  // the compass), drawn apart from the bearing. It never turns the bearing: a
-  // contract 1.10 DoA carries the heading it was taken with (h, which may come
-  // from the GPS course or be held), and that one turns it (compassOffset,
-  // lib/polar.ts NODE_HEADING, or provisionalHeading for a held DoA), so the
-  // two lines may differ while the platform turns. Kept as primitives so a new
+  // Where the RDF-SDR's array points, drawn apart from the bearing: the drone's
+  // yaw plus the array's turn while the drone is LIVE (the heading a DRONE_YAW
+  // bearing turns with, taken now rather than at the DoA sample), else the
+  // RDF-SDR's compass from telemetry/health. The compass never turns the
+  // bearing: a contract 1.10 DoA carries the heading it was taken with (h), and
+  // that one turns it (NODE_HEADING, or provisionalHeading for a held DoA), so
+  // the lines may differ while the platform turns. Kept as primitives so a new
   // snapshot with the same heading changes nothing on the map.
-  const headingNow = rdfHeading(snapshot, fresh);
+  const headingNow = stationHeading(snapshot, fresh, droneArrayHeading);
   const headingDeg = headingNow?.headingDeg ?? null;
   const headingState = headingNow?.state ?? null;
   const compassState = headingNow?.compassState ?? null;
-  const heading = useMemo<RdfHeading | null>(() => (headingState === null ? null : { headingDeg, state: headingState, compassState }), [headingDeg, headingState, compassState]);
+  const headingSource: HeadingSource = headingNow?.source ?? 'RDF';
+  const heading = useMemo<RdfHeading | null>(() => (headingState === null ? null : { headingDeg, state: headingState, compassState, source: headingSource }), [headingDeg, headingState, compassState, headingSource]);
   // The DoA record's frequency, shown above the angle on the bearing label: the
   // shown DoA's, or the held (NOT VALID) record's beside its dimmed angle.
   const sampleHz = doaSample(snapshot, overviewDoaStatus(snapshot, fresh), fresh)?.frequencyHz ?? null;
@@ -485,6 +520,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     'estimate-heat': estimateShapes.heat, 'estimate-lines': estimateShapes.lines, 'estimate-point': estimateShapes.point,
     'drone-track': droneTrack, 'drone-gap': droneGap,
   }), [geometry, headingLine, link, estimateShapes, droneTrack, droneGap]);
+  const sourceDataRef = useRef(sourceData);
+  sourceDataRef.current = sourceData;
 
   // Frame below the notices (basemap unavailable, overlay held...) so they never
   // cover the north label, and above the map controls so they never cover the south one.
@@ -501,7 +538,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   // clamped so it and the framing padding still leave fitBounds room to act.
   const applyPadding = (map: MapLibreMap) => {
     const container = map.getContainer();
-    const padding = clampMapPadding(insetsRef.current, container.clientWidth, container.clientHeight, framingPadding(map));
+    const padding = miniRef.current ? { top: 0, right: 0, bottom: 0, left: 0 } : clampMapPadding(insetsRef.current, container.clientWidth, container.clientHeight, framingPadding(map));
     const current = map.getPadding();
     if (current.top === padding.top && current.right === padding.right && current.bottom === padding.bottom && current.left === padding.left) return false;
     map.setPadding(padding);
@@ -511,6 +548,20 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   applyPaddingRef.current = applyPadding;
   const frameStation = (map: MapLibreMap, target: MapCoordinate, durationMs = 0) => {
     const reach = Math.max(settingsRef.current.maxDistanceM, settingsRef.current.lobeDistanceM);
+    if (miniRef.current) {
+      const data = sourceDataRef.current;
+      const bounds = graphBounds(GRAPH_DIRECTION_IDS.map((id) => data[id]), target)
+        ?? graphBounds(GRAPH_AREA_IDS.map((id) => data[id]), target)
+        ?? overlayBounds(target, reach);
+      // The framing's centre, at its zoom plus the operator's + and − steps.
+      const camera = map.cameraForBounds(bounds, { padding: MINI_FRAMING_PADDING, maxZoom: MAX_FRAMING_ZOOM, bearing: map.getBearing() });
+      if (camera?.center !== undefined && camera.zoom !== undefined) {
+        const zoom = Math.min(MAX_MINI_ZOOM, Math.max(MIN_MINI_ZOOM, camera.zoom + miniZoomRef.current));
+        map.easeTo({ center: camera.center, zoom, bearing: map.getBearing(), duration: durationMs });
+      }
+      framingRef.current = { source: target.source, selection: gpsSource };
+      return;
+    }
     map.fitBounds(overlayBounds(target, reach), { padding: framingPadding(map), maxZoom: MAX_FRAMING_ZOOM, duration: durationMs });
     framingRef.current = { source: target.source, selection: gpsSource };
     operatorMovedRef.current = false;
@@ -735,7 +786,10 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       selectBasemapRef.current = null;
       window.clearTimeout(workerWatchdog);
       window.clearInterval(basemapCheck);
-      cameraMemory = { center: map.getCenter().toArray(), zoom: map.getZoom(), bearing: map.getBearing(), pitch: map.getPitch(), framing: framingRef.current, operatorMoved: operatorMovedRef.current };
+      const big = bigCameraRef.current;
+      cameraMemory = big
+        ? { center: big.center, zoom: big.zoom, bearing: big.bearing, pitch: big.pitch, framing: framingRef.current, operatorMoved: big.operatorMoved }
+        : { center: map.getCenter().toArray(), zoom: map.getZoom(), bearing: map.getBearing(), pitch: map.getPitch(), framing: framingRef.current, operatorMoved: operatorMovedRef.current };
       map.off('styledata', onStyleData);
       map.off('error', onError);
       map.off('sourcedata', onSourceData);
@@ -781,8 +835,39 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     if (!map) return;
     if (!applyPaddingRef.current(map)) return;
     const target = coordinateRef.current;
-    if (target && framingRef.current?.source === target.source && !operatorMovedRef.current) frameStationRef.current(map, target);
+    if (target && framingRef.current?.source === target.source && (miniRef.current || !operatorMovedRef.current)) frameStationRef.current(map, target);
   }, [mapState, insets.top, insets.right, insets.bottom, insets.left, compact]);
+
+  // Into the corner window: keep the big camera and fit the graph; back: the big camera as it was.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.resize();
+    if (mini) {
+      if (!bigCameraRef.current) bigCameraRef.current = { center: map.getCenter().toArray() as [number, number], zoom: map.getZoom(), bearing: map.getBearing(), pitch: map.getPitch(), operatorMoved: operatorMovedRef.current };
+      applyPaddingRef.current(map);
+      const target = coordinateRef.current;
+      if (target) frameStationRef.current(map, target);
+      return;
+    }
+    const big = bigCameraRef.current;
+    if (!big) return;
+    bigCameraRef.current = null;
+    applyPaddingRef.current(map);
+    map.jumpTo({ center: big.center, zoom: big.zoom, bearing: big.bearing, pitch: big.pitch });
+    operatorMovedRef.current = big.operatorMoved;
+    const target = coordinateRef.current;
+    if (target && !big.operatorMoved) frameStationRef.current(map, target);
+  }, [mini, mapState]);
+
+  // The corner window follows the graph: every new overlay is framed again.
+  useEffect(() => {
+    const map = mapRef.current;
+    const target = coordinateRef.current;
+    if (!mini || !map || !target) return undefined;
+    const frame = window.requestAnimationFrame(() => frameStationRef.current(map, target, prefersReducedMotion() ? 0 : 300));
+    return () => window.cancelAnimationFrame(frame);
+  }, [mini, miniZoom, sourceData, mapState]);
 
   useEffect(() => {
     const update = () => setTheme(consoleTheme());
@@ -830,7 +915,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
         frame = 0;
         applyPaddingRef.current(map);
         const target = coordinateRef.current;
-        if (target && framingRef.current?.source === target.source && !operatorMovedRef.current) frameStationRef.current(map, target);
+        if (target && framingRef.current?.source === target.source && (miniRef.current || !operatorMovedRef.current)) frameStationRef.current(map, target);
       });
     });
     observer.observe(host);
@@ -843,7 +928,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   useEffect(() => {
     const map = mapRef.current;
     const target = coordinateRef.current;
-    if (map && target && framingRef.current?.source === target.source && !operatorMovedRef.current) frameStationRef.current(map, target);
+    if (map && target && framingRef.current?.source === target.source && (miniRef.current || !operatorMovedRef.current)) frameStationRef.current(map, target);
   }, [g.maxDistanceM, g.lobeDistanceM]);
 
   // Push only the sources whose collections changed since the last update.
@@ -909,7 +994,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       return;
     }
     if (shouldReframeStation(framingRef.current, stationCoordinate.source, gpsSource)) {
-      if (!operatorMovedRef.current || !stationInView(map, stationCoordinate)) frameStationRef.current(map, stationCoordinate);
+      if (miniRef.current || !operatorMovedRef.current || !stationInView(map, stationCoordinate)) frameStationRef.current(map, stationCoordinate);
       framingRef.current = { source: stationCoordinate.source, selection: gpsSource };
     }
     if (!stationMarkerRef.current) {
@@ -1300,7 +1385,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   const frameStyle = { '--overlay-opacity': String(settings.overlayOpacity) } as CSSProperties;
   // Notices sit top-centre between the floating panels, or under them in the compact layout.
   const noticeStyle: CSSProperties | undefined = noticePlacement(insets, compact);
-  return <section className="panel map-panel">
+  return <section className={mini ? 'panel map-panel is-mini' : 'panel map-panel'}>
     <div className="map-workspace">
       <div className="map-stage">
         <div className="map-frame" role="application" aria-label={t('map.appAria')} tabIndex={-1} style={frameStyle}>
@@ -1339,7 +1424,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
         ) : null}
       </div>
       <div className="map-bottom-overlay">
-        <OverlayLegend settings={settings} scale={scale} saturation={saturation} ringStepM={niceRingStep(settings.maxDistanceM)} halfPower={geometry.halfPower ?? geometry.heldHalfPower} heldTime={values ? null : heldTime} heading={settings.headingVisible && headingDrawn ? (headingHeld ? 'held' : 'live') : null} />
+        <OverlayLegend settings={settings} scale={scale} saturation={saturation} ringStepM={niceRingStep(settings.maxDistanceM)} halfPower={geometry.halfPower ?? geometry.heldHalfPower} heldTime={values ? null : heldTime} heading={settings.headingVisible && headingDrawn ? (headingHeld ? 'held' : 'live') : null} headingSource={headingSource} />
         {stationCoordinate ? <div className="map-coordinate" aria-label={t('map.coordinatesAria')}><span>{station.held ? t('map.sourceHeld') : t(coordinateSourceKey(stationCoordinate.source))}</span><strong>{stationCoordinate.latitude.toFixed(6)}°, {stationCoordinate.longitude.toFixed(6)}°</strong><small>{dataLabel}</small></div> : null}
       </div>
     </div>

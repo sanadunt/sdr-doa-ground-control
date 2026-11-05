@@ -24,7 +24,7 @@ Sumber: repo `sanadunt/rdf-indicator-raspberry`, folder `rdf-node/`: `docs/MQTT_
 | `state` | 1 | ya | saat berubah, paling lambat 60 s | 211 B | `v`=2, `sid`, `boot`, `instance`, `t`, `run` (`RUNNING`, `STOPPED`, `STARTING`, `STOPPING`, `ERROR`, `UNKNOWN`), `daq` (bool), `cfg` (int ≥ 0 atau null), `profile`, `clock` (`SYNCED`, `UNTRUSTED`, `DEMO`) |
 | `capabilities` | 1 | ya | saat koneksi Control baru; sejak Edge 1.10.2 juga setiap kali berubah | 593 B | `v`, `sid`, `boot`, `instance`, `version`, `mode`, `codecs` (list teks), `angle`, `native_axis` (int), `count` (int), `profiles` (list teks), `scope`, dan bool `helper_available`, `remote_commands`, `remote_config_patch`, `remote_processing`, `remote_restart`, `remote_reboot`, `remote_shutdown`, `remote_ppp_restart`, `config_patch`, `processing`, `restart`, `reboot`, `shutdown`, `ppp_restart`. Tanpa `t`, tanpa `maintenance`. Kontrak 1.10: `nav` (7e). |
 | `availability` | 1 | ya | online saat Control siap; Last Will saat koneksi putus (`CONNECTION_LOST`); sejak Edge 1.10.2 juga pamit retained `reason: "STOPPED"` saat dihentikan normal | 56 / 66 B | `v`, `sid`, `online` (bool); `t` wajib saat online; `reason` (teks) saat offline |
-| `telemetry/health` | 0 | tidak | 1 s; expiry 5 s | 109 B | `v`, `sid`, `q`, `t`, `run` (0 stop, 1 jalan, 2 mulai, 3 berhenti, 4 error, 255 tidak diketahui), `daq` (0 turun, 1 sehat, 2 tidak diketahui), `clk` (0, 1), `drop`, `age` (int ≥ 0 atau null), `temp` (angka atau null), `rev` (int atau null). Kontrak 1.10: `why` (7e). |
+| `telemetry/health` | 0 | tidak | 1 s; expiry 5 s | 109 B | `v`, `sid`, `q`, `t`, `run` (0 stop, 1 jalan, 2 mulai, 3 berhenti, 4 error, 255 tidak diketahui), `daq` (0 turun, 1 sehat, 2 tidak diketahui), `clk` (0, 1), `drop`, `age` (int ≥ 0 atau null), `temp` (angka atau null), `rev` (int atau null). Kontrak 1.10: `why` (7e). Kontrak 1.11: `pk`, `psq` (7f). |
 | `telemetry/health/detail` | 0 | tidak | 10 s; expiry 15 s | 178 B | `v`, `sid`, `t`, `usb` (int atau null), `sync` (3 × bool atau null), `cpu` (≥ 0 atau null; edge tidak membatasinya dan iowait yang mundur di Pi sibuk bisa memberi sedikit di atas 100), `mem`, `disk_free` (0..100 atau null), `throt`, `uv` (bool atau null), `tx`, `rx` (kbit/s ≥ 0 atau null), `adrop`, `parse` (int ≥ 0) |
 | `telemetry/doa` | 0 | tidak | maks. 1/s; expiry 3 s | 106 / 213 B | `v`, `sid`, `q`, `t` (waktu sumber), `f` (Hz), `a` (0..360), `c` (dB native, ±327,67), `p` (±1e6), `rev` (int atau null), `ok` (0, 1). Bila `ok=0` juga `trust`=`UNVERIFIED`, `angle_reference`=`RAW`, `validation_reasons` (1–2 dari `SOURCE_UNVERIFIED`, `ANGLE_UNVERIFIED`); `a` adalah sudut RAW. Kontrak 1.10: `reason`, `clk`, `age`, dan `validation_reasons` hanya untuk pasangan persetujuan itu (7e). |
 | `telemetry/diagnostic/doa` | 0 | tidak | 3 s selama `doa.xml` ada; expiry 3 s | 234 B | `v`, `sid`, `q`, `source`=`doa.xml`, `source_timestamp_ms`, `observed_timestamp_ms`, `raw_doa_deg` (0..360), `frequency_mhz` (0,001..5000), `trust`=`UNVERIFIED`, `validation_reasons` (1–32 kode `[A-Z0-9_:-]{1,64}`, termasuk `DIAGNOSTIC_UNVERIFIED`) |
@@ -226,6 +226,15 @@ Tambahan, semuanya opsional; edge yang lebih lama tetap dibaca seperti sebelumny
   - Kandidat MQTT membawa `angular_heading_deg` dan `angular_heading_source` frame Angular, dan `angular_frame.heading_turn_deg` (`h` DoA − `heading_deg` frame, −180..180). Kurva digambar diputar dengan heading frame-nya sendiri. Bila kedua heading ada, pemeriksaan 3° `PEAK_MOVED` dihitung dalam bearing (puncak + putaran terhadap θ₀ DoA), sehingga node yang berbelok sejak frame dibuat tetap punya kurva. Tanpa salah satu heading pemeriksaan tetap dalam derajat array.
   - Setiap DoA LIVE dengan `b`, `lat`, `lon` masuk ke estimasi posisi pemancar (`position_estimate`, lihat `CLAUDE.md`). DoA LIVE tanpa `b` atau tanpa posisi dilewati, dan `position_estimate.waiting_for` menyebut yang kurang: `NO_BEARING` (tidak ada sumber heading) atau `NO_POSITION` (tidak ada fix, atau `publish_position` mati; lihat `capabilities.nav.position`). Nilainya `null` lagi begitu satu sampel dipakai. `skipped` dan `skipped_at_ms` menghitung sampel yang dilewati.
 
+## 7f. Kontrak 1.11 (RDF Node 1.11.0)
+
+Tambahan opsional di `telemetry/health`; edge yang lebih lama, atau KrakenSDR tanpa patch `vfo_peaks` (rdfsdr `deploy/kraken/vfo_peaks.patch`), tidak mengirimnya dan dibaca seperti sebelumnya.
+
+- **`pk`**: puncak spektrum FFT di lebar VFO output (`source.output_vfo`), dB skala FFT KrakenSDR (bukan dBm, ikut gain), 0,1 dB. Diukur setiap frame, juga saat di bawah squelch. `null` bila pengukuran edge basi.
+- **`psq`**: squelch yang dipakai KrakenSDR pada frame itu (Manual, atau hasil Auto/Auto Channel), 0,1 dB. rdfsdr hanya menghitung DoA bila `pk` > `psq`. `null` bila basi atau tidak diketahui.
+- `pk` di bawah `psq` dengan `why` `NO_FRESH_DOA`/`DOA_FILE_NOT_UPDATING` berarti squelch menahan sinyal (atau pemancar mati). Karena file DoA hanya ditulis selama squelch terbuka, frame Angular yang dibuat lebih dari `freshness.doa_ms` (2,5 s) sesudah record terakhir membawa flags 61 (tanpa bit segar), jadi kurva tidak tampil.
+- **Console:** store menyimpan keduanya di health (angka ±300, `null` dipertahankan; nilai rusak dibuang dengan catatan `INVALID_FIELD`, health tetap diterima), jawaban MQTT membawanya di `mqtt.health.pk`/`psq`. Selama DoA ditahan dan health segar, HUD menampilkan puncaknya dan, bila `pk` ≤ `psq`, "Squelch menahan DoA" dengan selisihnya; kartu RDF-SDR punya baris "Puncak VFO0 / SQ"; Kontrol menawarkan dua isian form (`controlAssist()` di `lib/vfoPeak.ts`): squelch = puncak − 6 dB dibulatkan, dan gain tabel berikutnya paling sedikit 3 dB lebih tinggi. Tidak ada yang dikirim sendiri.
+
 ## 8. Dashboard: MQTT dulu, Data Out cadangan (#8)
 
 Kode: `tools/telemetry_source.py` (keputusan sumber dan jawaban dari MQTT), `DataOutReader.read_reason()` di `tools/data_out_reader.py` (kapan Data Out dibaca), `collect_light()` di `tools/sdr_doa_collector.py` (pembacaan ringan), `frontend/src/lib/telemetrySource.ts` (badge dan view DoA di browser). Contoh jawaban: `tools/fixtures/telemetry-source/`.
@@ -339,7 +348,7 @@ Angka di link T900 PPP (~5,6 kB/s), tanpa header HTTP:
 
 ## 9. Perintah dari console (#9)
 
-Kontrol adalah satu-satunya jalur tulis console. Monitor tidak pernah publish sendiri; console tidak mengirim operasi selain dua di bawah, tidak mengirim ulang otomatis, dan tidak memakai `cmd/operation/get`.
+Kontrol adalah satu-satunya jalur tulis console ke RDF-SDR. Monitor tidak pernah publish sendiri; console mengirim `config.patch` dan `config.get` di bawah, dan sejak 3.15.0 operasi edge di bagian 9a (keputusan pemilik 2026-11-04), tidak mengirim ulang otomatis, dan tidak memakai `cmd/operation/get`, `stream.set` atau `ppp.restart`.
 
 | | `config.patch` | `config.get` |
 |---|---|---|
@@ -374,3 +383,46 @@ Nilai yang dipakai Kontrol: field aman `settings/reported` yang `rev`-nya sama d
 Satu operator: `rdf-ground.service` (client `uav-01-ground`, `src/rdf_node/ground.py` edge) dapat mengirim perintah yang sama. Edge mengerjakan satu mutasi sekaligus (`BUSY`), satu permintaan settings sekaligus (`SETTINGS_REQUEST_PENDING`) dan membatasi `config.get` 1/s per aktor dan link (`REQUEST_RATE_LIMIT`). Patch dari pengirim lain mengubah `state.cfg`, sehingga patch yang sudah ditinjau di sini ditolak (`CONFIG_REVISION_STALE` di console atau `CONFIG_REVISION_CONFLICT` di edge). Laporan settings untuk permintaan pengirim lain diabaikan console (`IGNORED UNREQUESTED_SETTINGS_REPORT`). Jalankan satu pengendali sekaligus: satu console dengan Kontrol terbuka, atau `rdf-ground.service`.
 
 Fixture `tools/fixtures/rdf-node/commands.8691ad0.json`, `commands.35984d8.json`, `commands.d6946cf.json` dan `commands.f8f9e52.json` berisi envelope buatan console (`build_command`) beserta jawaban `CommandManager` dan helper edge commit itu untuk setiap kasus (get, get tanpa TLS: `REJECTED` di 8691ad0 dan `APPLIED` dengan laporan di 35984d8, retune, gain, VFO saja, bandwidth dan squelch `PERSISTED_UNVERIFIED` sebelum 1.7.0 dan `APPLIED` `method` `LIVE` di d6946cf, `base_rev` basi, dan nilai yang ditolak console maupun edge, di d6946cf dengan `message` edge). `tools/test_rdf_node_commands.py` membangun envelope yang sama dan menuntut byte yang sama, tanpa mengimpor kode edge saat runtime.
+
+## 9a. Operasi dari Kontrol (3.15.0)
+
+Keputusan pemilik 2026-11-04: dari groundstation operator bisa menyalakan dan menghentikan pemrosesan RDF, me-restart service RDF, dan me-reboot atau mematikan Raspberry RDF-SDR. Semuanya operasi edge di bagian 5, dijawab di `ack/operation`, dan aturannya diambil dari `control.py` edge 1.10.2 (f8f9e52, `CommandManager.submit` dan `_execute`) serta `helper.py`.
+
+| Tombol Kontrol | `op` | Topik | Field tambahan | Flag `capabilities` |
+|---|---|---|---|---|
+| Mulai / Hentikan pemrosesan | `processing.set` | `cmd/processing/set` | `desired` `RUNNING` / `STOPPED` | `remote_processing` |
+| Restart service RDF | `service.restart` | `cmd/service/restart` | — | `remote_restart` |
+| Reboot RDF-SDR, langkah 1 | `system.reboot.prepare` | `cmd/system/reboot/prepare` | — | `remote_reboot` |
+| Reboot RDF-SDR, langkah 2 | `system.reboot.execute` | `cmd/system/reboot/execute` | `prepare_id`, `challenge` | `remote_reboot` |
+| Matikan RDF-SDR, langkah 1 dan 2 | `system.shutdown.prepare`, `.execute` | `cmd/system/shutdown/...` | sama dengan reboot | `remote_shutdown` |
+
+`ppp.restart` tidak dikirim (link T900/PPP sudah tidak dipakai), begitu juga `stream.set` dan `operation.get`.
+
+Rute console `POST /api/mqtt/operation` `{op, confirm: true}`, ditambah `desired` untuk `processing.set` dan `prepare_id` (id perintah prepare) untuk execute; field lain ditolak. Browser tidak pernah melihat challenge. Pemeriksaan berurutan dan kegagalan pertama yang dijawab:
+
+1. Origin loopback yang sama (403 `ORIGIN_REJECTED`), lalu cookie admin (401 `ADMIN_REQUIRED`), sebelum body dibaca.
+2. Bentuk body (400 `INVALID_REQUEST`), `confirm` (400 `CONFIRM_REQUIRED`), `desired` (400 `INVALID_DESIRED_STATE`).
+3. Monitor: 409 `MQTT_MONITOR_DISABLED`, 503 `MQTT_DEPENDENCY_MISSING`, 503 `MQTT_NOT_CONNECTED`.
+4. Sesi node (409 `NODE_SESSION_UNAVAILABLE`).
+5. Flag `capabilities` operasi itu harus `true` (409 `OPERATION_NOT_ALLOWED`, dengan `capability`). Capabilities yang belum datang tidak mengizinkan apa pun.
+6. Health segar (409 `NODE_NOT_FRESH`), seperti Ground edge.
+7. Satu mutasi sekaligus: `config.patch` dan semua operasi berbagi satu jalur (409 `COMMAND_IN_FLIGHT`), karena edge mengerjakan satu sekaligus (`BUSY`). `config.get` tetap boleh berjalan.
+8. Untuk execute: prepare dengan id itu dari console ini dan untuk aksi yang sama (409 `PREPARE_UNKNOWN`), dijawab `APPLIED` (409 `PREPARE_NOT_READY`), dari sesi yang sama dan challenge-nya masih berlaku (409 `PREPARE_EXPIRED`). Pemeriksaan ini terakhir, jadi execute yang ditolak lebih dulu tidak memakai challenge.
+9. Publish (503 atau 502 `MQTT_PUBLISH_FAILED`).
+
+Envelope sama dengan bagian 9: `base_rev` adalah `state.cfg` saat itu (boleh `null`; edge membandingkannya dengan revisinya sendiri dan menjawab `CONFIG_REVISION_CONFLICT` bila berbeda), QoS 1, tidak retained, TTL 30 s, tidak dikirim ulang.
+
+**Challenge.** ACK `APPLIED` sebuah prepare membawa `result.challenge` (`secrets.token_urlsafe(24)`), `valid_seconds` 30 dan `prepare_id` (= id prepare). Store tidak pernah menyimpannya (bagian 3). Hanya monitor yang mempublish prepare itu yang membaca challenge dari payload mentah, setelah store menerima ACK-nya (sesi, skema, urutan), dan menyimpannya di memori sampai execute mengambilnya sekali (`take_rdf_node_challenge`). Console menawarkan execute sampai waktu terima ACK + `valid_seconds` − 8 s (`CHALLENGE_SAFETY_MS`: ACK sudah berangkat sebelum diterima, dan execute masih harus sampai, masing-masing beberapa detik lewat LoRa). Status prepare hanya memuat `prepare_valid_until_ms`. Challenge tidak pernah masuk tracker, status, log, `/api/mqtt/rdf-node` atau browser. Monitor yang diganti (Reconnect, simpan setelan MQTT) kehilangan challenge-nya; operator mulai lagi dari prepare.
+
+**Jawaban edge dan status console.**
+
+- `processing.set` dan `service.restart`: `ACCEPTED` dengan `final_within_ms` (sekitar 190 s), lalu ACK final. `APPLIED` membawa `proof` `NEW_FRESH_DAQ_AND_UNIT_ACTIVE` (berjalan) atau `APPROVED_UNIT_AND_CGROUP_STOPPED` (berhenti). `OUTCOME_UNKNOWN` dengan `reason` `LIFECYCLE_VERIFICATION_TIMEOUT` berarti systemd sudah diminta tetapi engine belum menunjukkan status baru. Console menunggu ACK final paling sedikit 270 s, juga dari edge tanpa `final_within_ms`.
+- Prepare: `ACCEPTED`, lalu `APPLIED` dengan challenge.
+- Execute: `ACCEPTED`, lalu `REBOOT_SCHEDULED` atau `SHUTDOWN_SCHEDULED` (`scheduled`, `delay_seconds` 5, `action`). Host turun 5 detik kemudian. Journal edge menutup perintah itu setelah boot tanpa mengirim ACK lagi, jadi bagi console `*_SCHEDULED` pada execute adalah akhir (`acked`); RDF-SDR kembali sebagai sesi baru (`sid` baru). `SHUTDOWN_SCHEDULED` bukan bukti host mati.
+- Penolakan membawa `result.error`, misalnya `BUSY`, `CONFIG_REVISION_CONFLICT`, `LIFECYCLE_NOT_APPROVED`, `REBOOT_CHALLENGE_INVALID` atau `TOO_MANY_ACTIVE_CHALLENGES`, dan `message` edge.
+
+Status dibaca di `GET /api/mqtt/operation/<id>` (juga `/api/mqtt/config-patch/<id>`), dan `GET /api/mqtt/operation` memberi operasi terbaru. Status membawa juga `sid`, `desired`, `prepare_id` dan, di ACK, `desired`, `delay_seconds` dan `valid_seconds`.
+
+**Di Kontrol.** Blok "Operasi RDF-SDR" muncul setelah kunci admin dibuka, hanya dengan tombol yang flag-nya `true`, dan menampilkan `state.run`. Mulai dinonaktifkan saat engine sudah berjalan, Hentikan saat sudah berhenti. Klik membuka kotak konfirmasi: Batal didahulukan dan mendapat fokus, dan Escape membatalkan. Reboot dan matikan meminta konfirmasi tegas, karena RDF-SDR bisa sedang terbang di drone. Operator harus mencentang "drone ada di darat, atau kehilangan RDF-SDR saat terbang bisa diterima", lalu "Siapkan reboot" mengirim prepare. Setelah RDF-SDR menjawab, tombol kedua "Reboot sekarang" tampil dengan hitungan mundur. Bila waktunya habis atau Batal ditekan, tidak ada yang dikirim. Tidak ada di LAN view: rute ini ditolak di sana (403/405 `LAN_READ_ONLY`).
+
+Fixture: `ack-operation.reboot-prepare-applied.json` (ACK prepare dari agent edge sendiri, dengan challenge) dipakai `tools/test_mqtt_config_patch.py` untuk perjalanan prepare → execute lewat monitor asli. Jawaban execute dan lifecycle di tes dibangun dari kode `_execute` edge; `make_fixtures.py` belum menjalankan operasi ini, karena helper root aslinya memanggil systemd.

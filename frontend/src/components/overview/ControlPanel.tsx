@@ -10,6 +10,7 @@ import {
   appliedMethodText,
   bandRuleFor,
   bandSpacingText,
+  commandFailure,
   commandResultView,
   commandStageText,
   configPatchFieldsFor,
@@ -49,6 +50,9 @@ import { useI18n } from '../../lib/i18n';
 import type { MessageKey, Translate } from '../../lib/i18n';
 import { AdminUnlock } from '../AdminUnlock';
 import { Icon } from '../ui';
+import { controlAssist, vfoPeak } from '../../lib/vfoPeak';
+import type { VfoPeak } from '../../lib/vfoPeak';
+import { NodeOperations } from './NodeOperations';
 
 export interface ControlPanelProps {
   capabilities: ConsoleCapabilities | null;
@@ -127,15 +131,7 @@ function withSlots(template: string, slots: Record<string, ReactNode>): ReactNod
 }
 
 /** Translate a failed console request by its stable error code. */
-export function controlFailure(error: unknown): ControlFailure {
-  if (error instanceof ApiError && error.code) {
-    return {
-      code: error.code,
-      message: isConfigPatchErrorCode(error.code) ? { key: CONFIG_PATCH_ERROR_KEYS[error.code] } : { key: 'control.error.unknown', vars: { error: error.message } },
-    };
-  }
-  return { code: error instanceof ApiError ? `HTTP ${error.status}` : 'REQUEST_FAILED', message: errorNotice(error, 'common.requestFailed') };
-}
+export const controlFailure: (error: unknown) => ControlFailure = commandFailure;
 
 type HintTone = 'neutral' | 'changed' | 'error';
 
@@ -301,6 +297,10 @@ export interface ControlPanelViewProps {
   /** The reviewed change waits for the node's new revision. */
   rebasing?: boolean;
   rebaseNotice?: ControlRebaseNotice | null;
+  /** The operations on the RDF-SDR (NodeOperations), shown once admin is unlocked. */
+  operations?: ReactNode;
+  /** The output VFO's peak against its squelch (contract 1.11); while the squelch holds the DoA, fills for the form. */
+  peak?: VfoPeak | null;
   /** The operator confirmed sending although the node reports remote_config_patch false. */
   capabilityConfirmed?: boolean;
   onCapabilityConfirm?: (confirmed: boolean) => void;
@@ -338,6 +338,8 @@ export function ControlPanelView({
   settingsRetry = null,
   rebasing = false,
   rebaseNotice = null,
+  operations = null,
+  peak = null,
   capabilityConfirmed = false,
   onCapabilityConfirm,
   onRebase,
@@ -365,6 +367,7 @@ export function ControlPanelView({
   const unlocked = admin === 'unlocked';
   const defaultPassword = capabilities?.adminDefaultPassword === true;
   const changeCount = Object.keys(evaluation.changes).length;
+  const assist = controlAssist(peak, evaluation.fields, gainTable);
   const patchUnavailable = patch?.enabled === false || (reported !== null && !reported.available);
   const connected = reported?.broker.connection === 'connected';
   const node = reported?.node ?? null;
@@ -440,6 +443,7 @@ export function ControlPanelView({
           <p className="ov-control-warn">{reported?.code && isConfigPatchErrorCode(reported.code) ? t(CONFIG_PATCH_ERROR_KEYS[reported.code]) : t('control.patchUnavailable')}</p>
         ) : null}
         {!reported && !reportedError ? <p className="ov-control-note" role="status">{t('control.loading')}</p> : null}
+        {operations}
 
         {stage === 'edit' ? (
           <>
@@ -488,6 +492,27 @@ export function ControlPanelView({
               })}
             </div>
             {bandNote(t, evaluation) ? <p className="ov-control-note">{bandNote(t, evaluation)}</p> : null}
+            {assist ? (
+              <div className="ov-control-assist" role="group" aria-label={t('control.assist.held')}>
+                <p className="ov-control-warn">
+                  {t('control.assist.line', { peak: assist.peak.peakDb.toFixed(1), squelch: assist.peak.squelchDb === null ? '—' : assist.peak.squelchDb.toFixed(1) })}
+                  {' · '}{t('control.assist.held')}
+                </p>
+                <div className="ov-control-actions">
+                  {assist.squelchDb !== null ? (
+                    <button className="ov-button ov-control-assist-button" type="button" disabled={!reported} onClick={() => onDraftChange('vfo0_squelch_db', String(assist.squelchDb))}>
+                      {t('control.assist.squelch', { value: assist.squelchDb })}
+                    </button>
+                  ) : null}
+                  {assist.gainDb !== null ? (
+                    <button className="ov-button ov-control-assist-button" type="button" disabled={!reported} onClick={() => onDraftChange('gain_db', plainNumber(assist.gainDb as number))}>
+                      {t('control.assist.gain', { value: plainNumber(assist.gainDb) })}
+                    </button>
+                  ) : null}
+                </div>
+                <small className="ov-control-hint">{t('control.assist.hint')}</small>
+              </div>
+            ) : null}
             {editError ? <p className="ov-control-error" role="alert">{noticeText(t, editError.message)}</p> : null}
             <div className="ov-control-actions">
               <button className="ov-button is-primary is-wide" type="button" disabled={!reported || patchUnavailable || evaluation.invalid || changeCount === 0} onClick={onReview}>{t('control.review')}</button>
@@ -1105,6 +1130,8 @@ export function ControlPanel({ capabilities, controlDraftRequest, onClose, snaps
       settingsRetry={settingsRetry}
       rebasing={rebase !== null}
       rebaseNotice={rebaseNotice}
+      operations={<NodeOperations reported={reported} busy={stage === 'sending'} />}
+      peak={vfoPeak(snapshot, localSnapshotFresh)}
       capabilityConfirmed={capabilityConfirmed}
       onCapabilityConfirm={setCapabilityConfirmed}
       onRebase={() => { if (done?.rebase) { setStage('review'); setReview(null); startRebase(done.rebase.changes, done.rebase.fromRev); } }}

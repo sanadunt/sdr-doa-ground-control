@@ -1,5 +1,5 @@
 import type { CSSProperties, JSX } from 'react';
-import { Suspense, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { ConsoleCapabilities } from '../api';
 import type { CompassConfig, GpsConfig, MapCoordinate, PolarSettings, TelemetrySnapshot } from '../types';
 import type { SimulationSettings } from '../lib/simulation';
@@ -34,9 +34,13 @@ import { DoaReadout } from '../components/DoaReadout';
 import { LoadErrorBoundary } from '../components/LoadErrorBoundary';
 import type { RouteName } from '../components/Shell';
 import { NodeCard } from '../components/overview/NodeCard';
-import { DronePanel } from '../components/overview/DronePanel';
+import { Icon } from '../components/ui';
+import { DroneDetails, DronePanel, DroneVideo, droneChip, dronePipShown, useDroneFeed } from '../components/overview/DronePanel';
+import type { DroneVideoPhase, DroneVideoState } from '../components/overview/DronePanel';
+import { CompactInfoStrip } from '../components/overview/CompactInfoStrip';
+import type { CompactTab } from '../components/overview/CompactInfoStrip';
 import type { DroneMapView } from '../components/TacticalMap';
-import { DRONE_SAME_PLACE_M, droneArrayHeadingNow, droneStation, positionGap, rememberDroneTrack, snapshotDrone } from '../lib/droneLink';
+import { DRONE_SAME_PLACE_M, droneArrayHeadingNow, droneLineHeading, droneStation, positionGap, rememberDroneTrack, snapshotDrone } from '../lib/droneLink';
 import { LayersPanel } from '../components/overview/LayersPanel';
 import { EstimatePanel } from '../components/overview/EstimatePanel';
 import { PolarDock } from '../components/overview/PolarDock';
@@ -208,6 +212,8 @@ function OverviewPageView({
   const rdfGap = positionGap(droneHere, rdfOwn);
   const rdfOwnShown = rdfOwn && rdfGap && rdfGap.distanceM > DRONE_SAME_PLACE_M ? rdfOwn : null;
   const droneHeadingNow = droneArrayHeadingNow(droneView);
+  // The map's heading line follows the drone while it is LIVE and the compass choice prefers it, like the bearing.
+  const droneLine = droneLineHeading(droneView, compassConfig);
   const droneMapKey = droneHere
     ? JSON.stringify([droneHere.latitude, droneHere.longitude, droneHeadingNow === null ? null : Math.round(droneHeadingNow * 10) / 10, droneTrack?.length ?? 0, rdfOwnShown?.latitude, rdfOwnShown?.longitude])
     : '';
@@ -277,6 +283,25 @@ function OverviewPageView({
   const dockShown = polarShown || panels.spectrum;
   // Kontrol publishes to the node; the LAN view never shows it, whatever the saved panels say.
   const controlShown = panels.control && !viewOnly;
+  // Compact: one main view (map or drone video, the other in the corner window) and a tabbed
+  // side panel, both for this visit only; the saved panel switches are neither read nor written.
+  // One drone feed for the page: the compact stage and tabs, or the PC's Drone panel and its large video.
+  const droneFeed = useDroneFeed(droneView, null, compact || panels.drone);
+  const wideStage = useWideStage();
+  const [mainView, setMainView] = useState<'map' | 'video'>('map');
+  // The operator's zoom on top of the corner map's automatic framing (steps of one map zoom), for this visit.
+  const [miniZoom, setMiniZoom] = useState(0);
+  const [tab, setTab] = useState<CompactTab>('spectrum');
+  const [compactNodeCollapsed, setCompactNodeCollapsed] = useState(false);
+  const [droneVideo, setDroneVideo] = useState<DroneVideoState>({ phase: 'idle', code: null });
+  const onDroneVideoState = useCallback((phase: DroneVideoPhase, code: string | null) => setDroneVideo({ phase, code }), []);
+  // PC: the Drone panel's enlarge button puts the video large behind the panels and the map in a corner window
+  // (from 1024 px; the stacked layout below keeps the map). Compact: the corner window is always there.
+  const pipShown = compact
+    ? dronePipShown(droneFeed.view, droneFeed.health)
+    : panels.drone && wideStage && dronePipShown(droneFeed.view, droneFeed.health);
+  // Without the camera the map is the main view, also when the video was.
+  const main = pipShown ? mainView : 'map';
   useEffect(() => {
     const mapElement = mapRef.current;
     if (!mapElement || typeof ResizeObserver !== 'function') return undefined;
@@ -309,10 +334,8 @@ function OverviewPageView({
     return () => { window.cancelAnimationFrame(frame); observer.disconnect(); };
   }, [panels.layers, controlShown, polarShown, panels.spectrum, panels.drone, panels.nodeCollapsed, nodeShown, compactLayout]);
 
-  return (
-    <div className="page page-overview ov-stage" data-dock={dockShown ? (panels.spectrum ? 'full' : 'polar') : 'none'} data-control={controlShown ? 'open' : undefined} data-layout={compactLayout ?? undefined}>
-      <h1 className="visually-hidden" data-route-focus tabIndex={-1}>{t('route.overview')}</h1>
-      <div className="ov-map" ref={mapRef}>
+  const mapView = (
+    <div className="ov-map" ref={mapRef}>
         <LoadErrorBoundary variant="map">
           <Suspense fallback={<MapPlaceholder />}>
             <TacticalMap
@@ -338,75 +361,187 @@ function OverviewPageView({
               estimate={estimate}
               compact={compact}
               drone={droneMap}
+              droneArrayHeading={droneLine}
+              mini={main === 'video'}
+              miniZoom={miniZoom}
               heldSeed={heldSeed}
             />
           </Suspense>
         </LoadErrorBoundary>
-      </div>
-      <div className="ov-left" ref={leftRef}>
-        <DoaReadout snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} settings={plotSettings} curveOffset={curveOffset} offsetSource={offsetSource} offsetVerified={offsetVerified} offsetManual={offsetManual} />
-        {/* On a phone or tablet the card shows only once there is an estimate: its waiting states would cover the small map. */}
-        {estimate && overlaySettings.estimateVisible && (!compact || estimate.state === 'ESTIMATE') ? <EstimatePanel estimate={estimate} viewOnly={viewOnly} compact={compact || panels.layers} /> : null}
-        {panels.layers ? <LayersPanel settings={overlaySettings} scale={overlayScale} onChange={onOverlayChange} onClose={() => onPanelsChange({ ...panels, layers: false })} basemapId={basemapId} onBasemapChange={onBasemapSelect} /> : null}
-      </div>
-      <div className={rightTop === null ? 'ov-right' : 'ov-right is-stacked'} ref={rightRef} style={rightTop === null ? undefined : { '--ov-right-top': `${rightTop}px` } as CSSProperties}>
-        {panels.drone ? <DronePanel initialView={droneView} onClose={() => onPanelsChange({ ...panels, drone: false })} /> : null}
-        {nodeShown ? <NodeCard
+    </div>
+  );
+  const nodeCard = (collapsed: boolean, onToggle: () => void) => (
+    <NodeCard
+      snapshot={snapshot}
+      localSnapshotFresh={localSnapshotFresh}
+      groundGpsFresh={groundGpsFresh}
+      coordinate={readoutCoordinate}
+      positionHeld={station?.held === true}
+      ground={groundCoordinate}
+      compassOffset={compassOffset}
+      offsetSource={offsetSource}
+      offsetManual={offsetManual}
+      collapsed={collapsed}
+      onToggle={onToggle}
+    />
+  );
+  const controlPanel = (onClose: () => void) => (
+    <ControlPanel
+      capabilities={capabilities}
+      controlDraftRequest={controlDraftRequest}
+      onClose={onClose}
+      snapshot={snapshot}
+      localSnapshotFresh={localSnapshotFresh}
+      onRefreshSnapshot={onRefreshSnapshot}
+    />
+  );
+  const spectrumDock = viewOnly ? <SpectrumDockMirror feed={mirrorFeed} compact={compact || panels.layers} /> : (
+    <SpectrumDock
+      snapshot={snapshot}
+      localSnapshotFresh={localSnapshotFresh}
+      capabilities={capabilities}
+      panels={panels}
+      onPanelsChange={onPanelsChange}
+      onControlDraftRequest={onControlDraftRequest}
+      onRequestReceiver={onRequestReceiver}
+      onNavigate={onNavigate}
+      receiverBridge={receiverBridge}
+      compact={compact}
+    />
+  );
+  const readout = <DoaReadout snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} settings={plotSettings} curveOffset={curveOffset} offsetSource={offsetSource} offsetVerified={offsetVerified} offsetManual={offsetManual} />;
+  const estimateCard = estimate && overlaySettings.estimateVisible && (!compact || estimate.state === 'ESTIMATE') ? <EstimatePanel estimate={estimate} viewOnly={viewOnly} compact={compact || panels.layers} /> : null;
+  const layersPanel = panels.layers ? <LayersPanel settings={overlaySettings} scale={overlayScale} onChange={onOverlayChange} onClose={() => onPanelsChange({ ...panels, layers: false })} basemapId={basemapId} onBasemapChange={onBasemapSelect} /> : null;
+
+  const polarDock = (
+    <PolarDock
+      snapshot={snapshot}
+      localSnapshotFresh={localSnapshotFresh}
+      settings={plotSettings}
+      curveOffset={curveOffset}
+      offsetSource={offsetSource}
+      offsetVerified={offsetVerified}
+      compassConfig={compassConfig}
+      onCompassConfigChanged={onCompassConfigChanged}
+      view={polarViewSettings}
+      onViewChange={onPolarViewChange}
+      heldSeed={heldSeed}
+    />
+  );
+  // + and − over the map in the corner window; the window itself swaps the views on a click.
+  const pipZoom = main === 'video' ? (
+    <div className="ov-pip-zoom" role="group" aria-label={t('overview.pipZoom')}>
+      <button type="button" aria-label={t('overview.pipZoomIn')} title={t('overview.pipZoomIn')} disabled={miniZoom >= MINI_ZOOM_STEPS} onClick={() => setMiniZoom(Math.min(MINI_ZOOM_STEPS, miniZoom + 1))}><Icon name="plus" /></button>
+      <button type="button" aria-label={t('overview.pipZoomOut')} title={t('overview.pipZoomOut')} disabled={miniZoom <= -MINI_ZOOM_STEPS} onClick={() => setMiniZoom(Math.max(-MINI_ZOOM_STEPS, miniZoom - 1))}><Icon name="minus" /></button>
+    </div>
+  ) : null;
+
+  if (compact) {
+    const droneTag = droneChip(droneFeed.view);
+    const tabs: ReadonlyArray<{ id: CompactTab; label: string; tag?: { code: string; tone: string } }> = [
+      { id: 'spectrum', label: t('overview.tabSpectrum') },
+      { id: 'polar', label: t('overview.tabPolar') },
+      { id: 'drone', label: t('overview.tabDrone'), tag: droneTag },
+      { id: 'node', label: t('overview.tabNode'), tag: { code: doa.code, tone: doa.shown ? 'good' : 'warn' } },
+      ...(viewOnly ? [] : [{ id: 'control' as const, label: t('overview.tabControl') }]),
+    ];
+    return (
+      <div className="page page-overview ov-stage" data-dock="full" data-layout={compactLayout ?? undefined} data-main={main}>
+        <h1 className="visually-hidden" data-route-focus tabIndex={-1}>{t('route.overview')}</h1>
+        <div className="ov-main" data-main={main}>
+          {mapView}
+          {pipShown ? (
+            <div className="ov-video">
+              <DroneVideo view={droneFeed.view} health={droneFeed.health} onState={onDroneVideoState} />
+            </div>
+          ) : null}
+          {/* Over the corner window: a tap swaps the two views; neither one is mounted again. */}
+          {pipShown ? (
+            <div className="ov-pip">
+              <button type="button" className="ov-pip-swap" aria-label={main === 'map' ? t('overview.swapToVideo') : t('overview.swapToMap')} title={main === 'map' ? t('overview.swapToVideo') : t('overview.swapToMap')} onClick={() => setMainView(main === 'map' ? 'video' : 'map')} />
+              {pipZoom}
+            </div>
+          ) : null}
+          <div className="ov-left" ref={leftRef}>
+            {estimateCard}
+            {layersPanel}
+          </div>
+        </div>
+        <CompactInfoStrip
           snapshot={snapshot}
           localSnapshotFresh={localSnapshotFresh}
-          groundGpsFresh={groundGpsFresh}
-          coordinate={readoutCoordinate}
-          positionHeld={station?.held === true}
-          ground={groundCoordinate}
-          compassOffset={compassOffset}
-          offsetSource={offsetSource}
+          settings={plotSettings}
+          curveOffset={curveOffset}
           offsetManual={offsetManual}
-          collapsed={panels.nodeCollapsed}
-          onToggle={() => onPanelsChange({ ...panels, nodeCollapsed: !panels.nodeCollapsed })}
-        /> : null}
-        {controlShown ? (
-          <ControlPanel
-            capabilities={capabilities}
-            controlDraftRequest={controlDraftRequest}
-            onClose={() => onPanelsChange({ ...panels, control: false })}
-            snapshot={snapshot}
-            localSnapshotFresh={localSnapshotFresh}
-            onRefreshSnapshot={onRefreshSnapshot}
+          drone={droneFeed.view}
+          videoLive={droneVideo.phase === 'playing'}
+          onOpenTab={setTab}
+        />
+        <div className="ov-side">
+          <div className="ov-side-tabs" role="tablist" aria-label={t('overview.tabs')}>
+            {tabs.map((item) => (
+              <button key={item.id} type="button" role="tab" id={`ov-tab-${item.id}`} aria-selected={tab === item.id} aria-controls="ov-side-panel" onClick={() => setTab(item.id)}>
+                <span>{item.label}</span>
+                {item.tag ? <em className={`tone-${item.tag.tone}`}>{item.tag.code}</em> : null}
+              </button>
+            ))}
+          </div>
+          <div className="ov-side-panel" id="ov-side-panel" role="tabpanel" aria-labelledby={`ov-tab-${tab}`}>
+            {tab === 'spectrum' ? <div className="ov-dock">{spectrumDock}</div> : null}
+            {tab === 'polar' ? polarDock : null}
+            {tab === 'drone' ? (
+              <section id="panel-drone" className="ov-drone ov-card" aria-label={t('drone.title')}>
+                <DroneDetails view={droneFeed.view} health={droneFeed.health} video={droneVideo} />
+              </section>
+            ) : null}
+            {tab === 'node' ? <>{readout}{nodeCard(compactNodeCollapsed, () => setCompactNodeCollapsed(!compactNodeCollapsed))}</> : null}
+            {/* Kept mounted while hidden: a patch on its way keeps its stage. */}
+            {viewOnly ? null : <div className="ov-side-control" hidden={tab !== 'control'}>{controlPanel(() => setTab('spectrum'))}</div>}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="page page-overview ov-stage" data-dock={dockShown ? (panels.spectrum ? 'full' : 'polar') : 'none'} data-control={controlShown ? 'open' : undefined} data-layout={compactLayout ?? undefined} data-main={main}>
+      <h1 className="visually-hidden" data-route-focus tabIndex={-1}>{t('route.overview')}</h1>
+      {mapView}
+      {/* The video large behind the panels, the map in the corner window over it; a click on the window swaps back. */}
+      {main === 'video' ? (
+        <div className="ov-video">
+          <DroneVideo view={droneFeed.view} health={droneFeed.health} onState={onDroneVideoState} />
+        </div>
+      ) : null}
+      {main === 'video' ? (
+        <div className="ov-pip">
+          <button type="button" className="ov-pip-swap" aria-label={t('overview.swapToMap')} title={t('overview.swapToMap')} onClick={() => setMainView('map')} />
+          {pipZoom}
+        </div>
+      ) : null}
+      <div className="ov-left" ref={leftRef}>
+        {readout}
+        {estimateCard}
+        {layersPanel}
+      </div>
+      <div className={rightTop === null ? 'ov-right' : 'ov-right is-stacked'} ref={rightRef} style={rightTop === null ? undefined : { '--ov-right-top': `${rightTop}px` } as CSSProperties}>
+        {panels.drone ? (
+          <DronePanel
+            initialView={droneView}
+            feed={droneFeed}
+            videoMain={main === 'video'}
+            onVideoMain={wideStage ? () => setMainView(main === 'video' ? 'map' : 'video') : undefined}
+            videoState={droneVideo}
+            onClose={() => onPanelsChange({ ...panels, drone: false })}
           />
         ) : null}
+        {nodeShown ? nodeCard(panels.nodeCollapsed, () => onPanelsChange({ ...panels, nodeCollapsed: !panels.nodeCollapsed })) : null}
+        {controlShown ? controlPanel(() => onPanelsChange({ ...panels, control: false })) : null}
       </div>
       {dockShown ? (
         <div className="ov-dock" ref={dockRef}>
-          {polarShown ? (
-            <PolarDock
-              snapshot={snapshot}
-              localSnapshotFresh={localSnapshotFresh}
-              settings={plotSettings}
-              curveOffset={curveOffset}
-              offsetSource={offsetSource}
-              offsetVerified={offsetVerified}
-              compassConfig={compassConfig}
-              onCompassConfigChanged={onCompassConfigChanged}
-              view={polarViewSettings}
-              onViewChange={onPolarViewChange}
-              heldSeed={heldSeed}
-            />
-          ) : null}
-          {panels.spectrum && viewOnly ? <SpectrumDockMirror feed={mirrorFeed} compact={compact || panels.layers} /> : null}
-          {panels.spectrum && !viewOnly ? (
-            <SpectrumDock
-              snapshot={snapshot}
-              localSnapshotFresh={localSnapshotFresh}
-              capabilities={capabilities}
-              panels={panels}
-              onPanelsChange={onPanelsChange}
-              onControlDraftRequest={onControlDraftRequest}
-              onRequestReceiver={onRequestReceiver}
-              onNavigate={onNavigate}
-              receiverBridge={receiverBridge}
-              compact={compact}
-            />
-          ) : null}
+          {polarShown ? polarDock : null}
+          {panels.spectrum ? spectrumDock : null}
         </div>
       ) : null}
     </div>
@@ -414,3 +549,24 @@ function OverviewPageView({
 }
 
 export const OverviewPage = memo(OverviewPageView);
+
+const WIDE_STAGE_QUERY = '(min-width: 1024px)';
+
+function subscribeWideStage(onChange: () => void): () => void {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return () => undefined;
+  const query = window.matchMedia(WIDE_STAGE_QUERY);
+  query.addEventListener?.('change', onChange);
+  return () => query.removeEventListener?.('change', onChange);
+}
+
+/** Whether the PC stage floats its panels over the map (from 1024 px) rather than stacking them below it. */
+function useWideStage(): boolean {
+  return useSyncExternalStore(
+    subscribeWideStage,
+    () => (typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia(WIDE_STAGE_QUERY).matches : true),
+    () => true,
+  );
+}
+
+/** How many map zoom steps the operator can add to or take from the corner map's framing. */
+const MINI_ZOOM_STEPS = 6;
