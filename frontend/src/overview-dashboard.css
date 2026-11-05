@@ -386,6 +386,8 @@
 .ov-control-hint { color: var(--subtle); font-size: 10.5px; line-height: 1.3; }
 .ov-control-hint.is-changed { color: var(--signal); }
 .ov-control-hint.is-error { color: var(--red); }
+.ov-control-assist { display: grid; gap: 6px; }
+.ov-control-assist .ov-control-warn { margin: 0; }
 .ov-control-actions { display: flex; gap: 8px; }
 .ov-control-review, .ov-control-box, .ov-control-result { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
 .ov-control-review strong { color: var(--text); font-size: 12.5px; }

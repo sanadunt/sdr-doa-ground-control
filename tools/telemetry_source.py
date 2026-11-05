@@ -692,9 +692,10 @@ def _diagnostics(node: Mapping[str, Any], convention: Optional[str], pairing: Op
         "run": session.get("run"),
         "profile": session.get("profile"),
         "clock": session.get("clock"),
-        # why: the edge's reasons DoA is not LIVE (contract 1.10; null from an older edge).
-        "health": pick(health, ("q", "t", "run", "daq", "clk", "drop", "age", "temp", "rev", "why", "received_at_ms",
-                                "age_ms", "fresh")),
+        # why: the edge's reasons DoA is not LIVE (contract 1.10); pk, psq: the output VFO's peak and
+        # squelch (contract 1.11). Null from an older edge.
+        "health": pick(health, ("q", "t", "run", "daq", "clk", "drop", "age", "temp", "rev", "why", "pk", "psq",
+                                "received_at_ms", "age_ms", "fresh")),
         # nav (contract 1.10): {compass, gps, position, heading}, null from an older edge.
         "capabilities": pick(capabilities, ("angle", "native_axis", "count", "profiles", "version", "nav",
                                             "session_match")),

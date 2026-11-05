@@ -10,6 +10,7 @@ import { doaSample, doaSampleText, edgeDoaReasonKey, edgeDoaReasons, snapshotRf,
 import type { MessageKey, Translate } from '../lib/i18n';
 import type { RfSettings } from '../lib/telemetrySource';
 import { engineSquelchDb } from '../lib/configPatch';
+import { vfoPeak } from '../lib/vfoPeak';
 
 export function coordinateSourceKey(source: MapCoordinate['source'] | undefined): MessageKey {
   if (source === 'SIMULATION') return 'map.sourceSimulation';
@@ -70,7 +71,8 @@ export function hudBearing(snapshot: TelemetrySnapshot | null, localSnapshotFres
  * own reasons (contract 1.10 health.why, the ok=0 reason). One line names
  * the DoA record's frequency and power (an UNVERIFIED ok=0 record dimmed
  * with the held bearing), or without a current record the frequency the SDR
- * is set to (state.rf), marked as a setting.
+ * is set to (state.rf), marked as a setting. While the DoA is held it also
+ * names the output VFO's peak and whether the squelch holds it (contract 1.11).
  */
 export function DoaReadout({
   snapshot,
@@ -141,6 +143,9 @@ export function DoaReadout({
   ) : null;
   // What the SDR is set to (state.rf, edge 1.7+): gain, VFO0 and its squelch, under the signal line.
   const rfLine = hudRfParts(localSnapshotFresh ? snapshotRf(snapshot) : null, t);
+  // While the DoA is held: the output VFO's peak against its squelch (contract 1.11), so a squelch set too high
+  // reads apart from a transmitter that is off.
+  const peak = status.shown ? null : vfoPeak(snapshot, localSnapshotFresh);
   const peakAxis = settings.figType === 'Compass' ? t('readout.peakAxisCompass') : t('readout.peakAxisPolar');
   const peakTitle = status.shown && view.peakValue !== null ? `${peakAxis} · ${t('readout.peakDetail', { db: view.peakValue.toFixed(1) })}` : undefined;
 
@@ -181,7 +186,9 @@ export function DoaReadout({
           ) : null}
           {sampleLine}
           {rfLine.length ? <div className="ov-hud-sample is-setting ov-hud-rf">{rfLine.map(([label, value], index) => <Fragment key={label}>{index ? ' · ' : ''}<span>{label} <b>{value}</b></span></Fragment>)}</div> : null}
+          {peak ? <div className="ov-hud-sample">{t('hud.vfoPeak')} <b>{peak.peakDb.toFixed(1)} dB</b></div> : null}
           <p className="ov-hud-held" role="status">{statusText}</p>
+          {peak?.held && peak.marginDb !== null ? <p className="ov-hud-held">{t('hud.squelchHolds', { margin: Math.abs(peak.marginDb).toFixed(1) })}</p> : null}
           {edgeWhy.length ? <p className="ov-hud-held" title={edgeWhy.join(', ')}>{t('hud.edgeWhy', { reasons: edgeWhyText })}</p> : null}
         </>
       )}

@@ -543,6 +543,12 @@ def _validate_health(data: Dict[str, Any]) -> Dict[str, Any]:
     present, why = _optional_reasons(data, "why")
     if present:
         value["why"] = why
+    # Contract 1.11: the output VFO's FFT peak (dB on KrakenSDR's scale, not dBm) and the
+    # squelch it was held against, also while squelch holds DoA back; null while stale.
+    for key in ("pk", "psq"):
+        present, level = _optional(data, key, lambda key=key: _number(data, key, -300, 300, nullable=True))
+        if present:
+            value[key] = level
     value.update(_health_nav(data))
     return value
 

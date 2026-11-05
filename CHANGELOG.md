@@ -2,6 +2,14 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.16.0
+
+Console membaca puncak sinyal VFO0 dan squelch dari RDF-SDR (RDF Node 1.11). Tidak ada yang dihapus.
+
+- **Kenapa grafik DoA tidak muncul kini terbaca.** KrakenSDR hanya menghitung DoA selama puncak sinyal di lebar VFO0 melewati squelch. RDF Node 1.11 mengirim puncak itu (`pk`) dan squelch-nya (`psq`) di `telemetry/health` setiap 2 s, juga saat squelch menahan DoA; console sebelumnya membuang keduanya. Uji 2026-11-05: pemancar di dekat RDF-SDR terbaca sekitar −80 dB, squelch Manual −70 dB, jadi DoA hanya datang sesekali dan kurva Angular tidak pernah segar.
+- **HUD dan kartu RDF-SDR.** Selama DoA ditahan, HUD menulis "Puncak VFO0 −79.7 dB" dan, bila puncak di bawah squelch, "Squelch menahan DoA: sinyal 9.7 dB di bawah squelch". Kartu RDF-SDR punya baris "Puncak VFO0 / SQ".
+- **Kontrol mengusulkan nilai.** Selama squelch menahan DoA, Kontrol menampilkan puncak dan squelch dengan dua tombol yang hanya mengisi form: "Squelch → X dB" (6 dB di bawah puncak sekarang, pakai saat pemancar menyala) dan "Gain → Y dB" (gain tabel berikutnya, paling sedikit 3 dB lebih tinggi). Review dan Kirim tetap langkah operator.
+
 ## 3.15.3
 
 Garis heading di peta mengikuti drone. Tidak ada yang dihapus.
