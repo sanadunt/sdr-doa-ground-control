@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Groundstation</string>
+    <string name="searching">Searching for the groundstation…</string>
+    <string name="scan_progress">Checked %1$d of %2$d addresses</string>
+    <string name="opening">Opening %1$s…</string>
+    <string name="choose">Several groundstations found</string>
+    <string name="not_found">No groundstation found on this network (this tablet: %1$s).</string>
+    <string name="no_network">This tablet has no Wi-Fi or LAN address. Join the groundstation\'s network.</string>
+    <string name="refused">The groundstation at %1$s does not let this tablet in (this tablet: %2$s). On the groundstation, add the address in Configuration → LAN access.</string>
+    <string name="unreachable">The groundstation at %1$s does not answer.</string>
+    <string name="webview_old">This tablet\'s WebView is version %1$s; the console needs %2$d or newer. Update Android System WebView (or Chrome) from the Play Store.</string>
+    <string name="search_again">Search again</string>
+    <string name="enter_address">Enter address</string>
+    <string name="address_hint">192.168.1.117 or 192.168.1.117:8788</string>
+    <string name="address_invalid">Not an address</string>
+    <string name="try_again">Try again</string>
+    <string name="open">Open</string>
+    <string name="open_anyway">Open anyway</string>
+    <string name="cancel">Cancel</string>
+    <string name="leave_title">Leave the console?</string>
+    <string name="find_other">Find another groundstation</string>
+    <string name="exit">Exit</string>
+    <string name="download_started">Downloading %1$s</string>
+    <string name="download_failed">Download failed</string>
+    <string name="storage_needed">Allow storage, then download again.</string>
+</resources>

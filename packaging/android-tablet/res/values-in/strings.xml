@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Groundstation</string>
+    <string name="searching">Mencari groundstation…</string>
+    <string name="scan_progress">%1$d dari %2$d alamat diperiksa</string>
+    <string name="opening">Membuka %1$s…</string>
+    <string name="choose">Ada beberapa groundstation</string>
+    <string name="not_found">Groundstation tidak ditemukan di jaringan ini (tablet ini: %1$s).</string>
+    <string name="no_network">Tablet ini tidak punya alamat Wi-Fi atau LAN. Sambungkan ke jaringan groundstation.</string>
+    <string name="refused">Groundstation di %1$s tidak mengizinkan tablet ini (tablet ini: %2$s). Di groundstation, tambahkan alamatnya di Konfigurasi → Akses LAN.</string>
+    <string name="unreachable">Groundstation di %1$s tidak menjawab.</string>
+    <string name="webview_old">WebView tablet ini versi %1$s; konsol butuh versi %2$d atau lebih baru. Perbarui Android System WebView (atau Chrome) dari Play Store.</string>
+    <string name="search_again">Cari lagi</string>
+    <string name="enter_address">Masukkan alamat</string>
+    <string name="address_hint">192.168.1.117 atau 192.168.1.117:8788</string>
+    <string name="address_invalid">Bukan alamat</string>
+    <string name="try_again">Coba lagi</string>
+    <string name="open">Buka</string>
+    <string name="open_anyway">Tetap buka</string>
+    <string name="cancel">Batal</string>
+    <string name="leave_title">Keluar dari konsol?</string>
+    <string name="find_other">Cari groundstation lain</string>
+    <string name="exit">Keluar</string>
+    <string name="download_started">Mengunduh %1$s</string>
+    <string name="download_failed">Unduhan gagal</string>
+    <string name="storage_needed">Izinkan penyimpanan, lalu unduh lagi.</string>
+</resources>
