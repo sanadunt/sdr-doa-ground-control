@@ -36,7 +36,7 @@ import { beamColorExpression, beamOpacityExpression, formatBearing, formatDistan
 import { numberOrNull, primaryCandidate } from '../lib/telemetry';
 import { angularFrameAgeMs, angularHeld, doaSample, isMqttSnapshot } from '../lib/telemetrySource';
 import { overviewDoaStatus } from '../lib/doaStatus';
-import { headingLabel, headingLabelPosition, headingLineFeatures, headingPopupText, rdfHeading, type RdfHeading } from '../lib/rdfHeading';
+import { headingLabel, headingLabelPosition, headingLineFeatures, headingPopupText, stationHeading, type HeadingSource, type RdfHeading } from '../lib/rdfHeading';
 import { NO_ESTIMATE_FEATURES, positionEstimateFeatures, positionEstimateLabel, type PositionEstimate } from '../lib/positionEstimate';
 import { HELD_LAYER_OF, NO_HELD_FEATURES, heldBearingDeg, heldLayerSpec, heldNoticeText, heldOverlayFeatures, heldTimeText, overlayIdentity, pageOverlayMemory, provisionalBesideHeld, rememberOverlay, setPageOverlayMemory } from '../lib/heldOverlay';
 import { seedOverlayMemory } from '../lib/lastLiveDoa';
@@ -323,6 +323,12 @@ export interface TacticalMapProps {
   /** The SIYI drone (lib/droneLink.ts): where it is and where its nose points; null without a usable fix. Stable across equal values. */
   drone?: DroneMapView | null;
   /**
+   * The RDF-SDR's array heading from the drone (yaw plus the array's turn) while the drone is LIVE
+   * and the compass choice prefers it; the heading line and label then use it instead of the
+   * RDF-SDR's own compass. Null otherwise.
+   */
+  droneArrayHeading?: number | null;
+  /**
    * The map is the small corner window beside the drone video: no buttons or notices, small markers, and
    * the camera fits the DoA graph (beam, lobe, bearing) after every update; the big map's camera comes back after.
    */
@@ -341,7 +347,7 @@ export interface DroneMapView {
   rdfOwn: GeoOrigin | null;
 }
 
-function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, curveOffset, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, provisionalTheta = null, provisionalHeading = null, orientationCause, onOpenCompassSettings, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect, ground = null, estimate = null, compact = false, drone = null, heldSeed = null, mini = false, miniZoom = 0 }: TacticalMapProps): JSX.Element {
+function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, curveOffset, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, provisionalTheta = null, provisionalHeading = null, orientationCause, onOpenCompassSettings, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect, ground = null, estimate = null, compact = false, drone = null, droneArrayHeading = null, heldSeed = null, mini = false, miniZoom = 0 }: TacticalMapProps): JSX.Element {
   const { t, lang } = useI18n();
   const hostRef = useRef<HTMLDivElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -409,18 +415,20 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   // The held (NOT VALID) DoA turns with the heading of its own sample when it has one.
   const provisional = doaReady ? null : provisionalBearingOf(provisionalTheta, provisionalHeading, offset);
   const provisionalBearing = provisional?.bearingDeg ?? null;
-  // The RDF-SDR's heading from telemetry/health (where its array points, from
-  // the compass), drawn apart from the bearing. It never turns the bearing: a
-  // contract 1.10 DoA carries the heading it was taken with (h, which may come
-  // from the GPS course or be held), and that one turns it (compassOffset,
-  // lib/polar.ts NODE_HEADING, or provisionalHeading for a held DoA), so the
-  // two lines may differ while the platform turns. Kept as primitives so a new
+  // Where the RDF-SDR's array points, drawn apart from the bearing: the drone's
+  // yaw plus the array's turn while the drone is LIVE (the heading a DRONE_YAW
+  // bearing turns with, taken now rather than at the DoA sample), else the
+  // RDF-SDR's compass from telemetry/health. The compass never turns the
+  // bearing: a contract 1.10 DoA carries the heading it was taken with (h), and
+  // that one turns it (NODE_HEADING, or provisionalHeading for a held DoA), so
+  // the lines may differ while the platform turns. Kept as primitives so a new
   // snapshot with the same heading changes nothing on the map.
-  const headingNow = rdfHeading(snapshot, fresh);
+  const headingNow = stationHeading(snapshot, fresh, droneArrayHeading);
   const headingDeg = headingNow?.headingDeg ?? null;
   const headingState = headingNow?.state ?? null;
   const compassState = headingNow?.compassState ?? null;
-  const heading = useMemo<RdfHeading | null>(() => (headingState === null ? null : { headingDeg, state: headingState, compassState }), [headingDeg, headingState, compassState]);
+  const headingSource: HeadingSource = headingNow?.source ?? 'RDF';
+  const heading = useMemo<RdfHeading | null>(() => (headingState === null ? null : { headingDeg, state: headingState, compassState, source: headingSource }), [headingDeg, headingState, compassState, headingSource]);
   // The DoA record's frequency, shown above the angle on the bearing label: the
   // shown DoA's, or the held (NOT VALID) record's beside its dimmed angle.
   const sampleHz = doaSample(snapshot, overviewDoaStatus(snapshot, fresh), fresh)?.frequencyHz ?? null;
@@ -1416,7 +1424,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
         ) : null}
       </div>
       <div className="map-bottom-overlay">
-        <OverlayLegend settings={settings} scale={scale} saturation={saturation} ringStepM={niceRingStep(settings.maxDistanceM)} halfPower={geometry.halfPower ?? geometry.heldHalfPower} heldTime={values ? null : heldTime} heading={settings.headingVisible && headingDrawn ? (headingHeld ? 'held' : 'live') : null} />
+        <OverlayLegend settings={settings} scale={scale} saturation={saturation} ringStepM={niceRingStep(settings.maxDistanceM)} halfPower={geometry.halfPower ?? geometry.heldHalfPower} heldTime={values ? null : heldTime} heading={settings.headingVisible && headingDrawn ? (headingHeld ? 'held' : 'live') : null} headingSource={headingSource} />
         {stationCoordinate ? <div className="map-coordinate" aria-label={t('map.coordinatesAria')}><span>{station.held ? t('map.sourceHeld') : t(coordinateSourceKey(stationCoordinate.source))}</span><strong>{stationCoordinate.latitude.toFixed(6)}°, {stationCoordinate.longitude.toFixed(6)}°</strong><small>{dataLabel}</small></div> : null}
       </div>
     </div>

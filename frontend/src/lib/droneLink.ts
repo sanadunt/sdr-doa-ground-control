@@ -1,4 +1,4 @@
-import type { MapCoordinate, TelemetrySnapshot } from '../types';
+import type { CompassConfig, MapCoordinate, TelemetrySnapshot } from '../types';
 import { distanceAndBearing } from './groundGps';
 
 /**
@@ -285,6 +285,17 @@ export function droneArrayHeadingAtDoa(view: DroneView | null): number | null {
 export function droneArrayHeadingNow(view: DroneView | null): number | null {
   if (!view || !view.heading) return null;
   return (((view.heading.deg + view.arrayHeadingOffsetDeg) % 360) + 360) % 360;
+}
+
+/**
+ * The array heading the map's heading line uses instead of the RDF-SDR's compass: the drone's,
+ * while the drone is LIVE with a heading and the compass choice prefers it (as for the bearing).
+ * Rounded to 0.1° and wrapped to [0, 360), so equal answers keep the map still.
+ */
+export function droneLineHeading(view: DroneView | null, compass: Pick<CompassConfig, 'preferDrone'>): number | null {
+  if (!view || view.state !== 'LIVE' || compass.preferDrone === false) return null;
+  const now = droneArrayHeadingNow(view);
+  return now === null ? null : (Math.round(now * 10) / 10) % 360;
 }
 
 /** Distance and bearing between two positions, or null when either is missing. */

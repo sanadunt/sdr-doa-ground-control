@@ -6,10 +6,12 @@ import type { Translate } from './i18n';
 import { snapshotNav } from './telemetrySource';
 
 /**
- * The RDF-SDR's compass heading (where its array points, not its course) from the nav fields
- * of telemetry/health (contract 1.6): `heading_deg` from north, magnetic plus
- * the edge's own offset, and `compass_state`. It is drawn on the map apart
- * from the DoA bearing, which never uses it.
+ * Where the RDF-SDR's array points (not its course), drawn on the map apart from the DoA
+ * bearing. While the SIYI drone that carries it gives a heading, that is the drone's yaw
+ * plus the array's turn against the nose (source DRONE, `stationHeading()`), the heading
+ * the bearing turns with (lib/polar.ts DRONE_YAW). Otherwise it is the RDF-SDR's own compass
+ * from the nav fields of telemetry/health (contract 1.6, source RDF): `heading_deg` from
+ * north, magnetic plus the edge's own offset, and `compass_state`.
  *
  * OK: compass OK, a heading in [0, 360) and a locally fresh MQTT answer.
  * STALE: the same heading once the answer is no longer fresh; drawn dimmed and
@@ -19,12 +21,17 @@ import { snapshotNav } from './telemetrySource';
  */
 export type RdfHeadingState = 'OK' | 'STALE' | 'UNAVAILABLE';
 
+/** RDF: the RDF-SDR's own compass. DRONE: the drone's yaw plus the array's turn. */
+export type HeadingSource = 'RDF' | 'DRONE';
+
 export interface RdfHeading {
   /** Degrees from north, clockwise; null while UNAVAILABLE. */
   headingDeg: number | null;
   state: RdfHeadingState;
   /** The edge's compass state code (OK, NO_REPLY, ...), or null when it sends none. */
   compassState: string | null;
+  /** Where the heading comes from; RDF when absent. */
+  source?: HeadingSource;
 }
 
 function compassCode(value: unknown): string | null {
@@ -52,6 +59,22 @@ export function rdfHeading(snapshot: TelemetrySnapshot | null | undefined, local
 }
 
 /**
+ * The heading the map draws: the drone's array heading (yaw plus the array's turn) while
+ * the drone gives one, else the RDF-SDR's compass (`rdfHeading`). `droneHeadingDeg` is null
+ * unless the drone is LIVE with a heading and the compass choice prefers the drone.
+ */
+export function stationHeading(snapshot: TelemetrySnapshot | null | undefined, localFresh: boolean, droneHeadingDeg: number | null): RdfHeading | null {
+  if (snapshot?.simulation === true) return null;
+  if (droneHeadingDeg !== null && Number.isFinite(droneHeadingDeg)) {
+    // Already in [0, 360) from droneArrayHeadingNow(); wrapping again would only add rounding.
+    const deg = droneHeadingDeg >= 0 && droneHeadingDeg < 360 ? droneHeadingDeg : normalizeBearing(droneHeadingDeg);
+    return { headingDeg: deg, state: 'OK', compassState: null, source: 'DRONE' };
+  }
+  const rdf = rdfHeading(snapshot, localFresh);
+  return rdf ? { ...rdf, source: 'RDF' } : null;
+}
+
+/**
  * The heading line from the station, as long as the bearing line. `held` marks
  * a STALE heading, which the map paints grey; an empty collection without a heading.
  */
@@ -63,7 +86,7 @@ export function headingLineFeatures(origin: GeoOrigin, heading: RdfHeading | nul
     type: 'FeatureCollection',
     features: [{
       type: 'Feature',
-      properties: { layer: 'rdf-heading', heading: bearing, held: heading.state !== 'OK', meaning: 'RDF-SDR compass heading, not a DoA bearing' },
+      properties: { layer: 'rdf-heading', heading: bearing, held: heading.state !== 'OK', source: heading.source ?? 'RDF', meaning: 'RDF-SDR array heading, not a DoA bearing' },
       geometry: { type: 'LineString', coordinates: [[origin.longitude, origin.latitude], destination(origin, bearing, distanceM)] },
     }],
   };
@@ -86,16 +109,18 @@ export function headingLabelPosition(origin: GeoOrigin, headingDeg: number, dist
   return destination(origin, headingDeg, distanceM * (near ? 0.62 : 1.1));
 }
 
-/** "HDG 201°", or marked STALE/USANG when the heading is held. */
+/** "HDG 201°", "HDG 244° · DRONE" from the drone, or marked STALE/USANG when the heading is held. */
 export function headingLabel(heading: RdfHeading, t: Translate): string {
   if (heading.headingDeg === null) return heading.compassState ?? '—';
   const deg = formatBearing(heading.headingDeg, 0);
+  if (heading.source === 'DRONE') return t('map.headingDroneLabel', { deg });
   return t(heading.state === 'OK' ? 'map.headingLabel' : 'map.headingHeldLabel', { deg });
 }
 
-/** The station popup's value: the heading with one decimal, STALE when held, or the compass state. */
+/** The station popup's value: the heading with one decimal, DRONE from the drone, STALE when held, or the compass state. */
 export function headingPopupText(heading: RdfHeading, unavailable: string, heldTag = 'STALE'): string {
   if (heading.headingDeg === null) return heading.compassState ?? unavailable;
   const deg = `${formatBearing(heading.headingDeg, 1)}°`;
+  if (heading.source === 'DRONE') return `${deg} · DRONE`;
   return heading.state === 'OK' ? deg : `${deg} · ${heldTag}`;
 }
