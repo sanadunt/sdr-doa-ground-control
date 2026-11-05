@@ -5,6 +5,7 @@ import {
   droneArrayHeadingAtDoa,
   droneArrayHeadingNow,
   droneFixLabel,
+  droneLineHeading,
   droneStation,
   forgetDroneTrack,
   headingGap,
@@ -94,6 +95,17 @@ describe('headings', () => {
     expect(droneArrayHeadingAtDoa(normalizeDrone(block({ array_heading_offset_deg: -90 })))).toBe(350);
     expect(droneArrayHeadingAtDoa(normalizeDrone(block({ heading_at_doa: null })))).toBeNull();
     expect(droneArrayHeadingNow(normalizeDrone(block({ array_heading_offset_deg: 10 })))).toBeCloseTo(97.3);
+  });
+
+  it('gives the map heading line the drone heading only while LIVE and preferred', () => {
+    expect(droneLineHeading(normalizeDrone(block({ array_heading_offset_deg: 10 })), DEFAULT_COMPASS_CONFIG)).toBe(97.3);
+    expect(droneLineHeading(normalizeDrone(block({ heading: { deg: 243.68433, source: 'attitude', age_ms: 90 } })), DEFAULT_COMPASS_CONFIG)).toBe(243.7);
+    // 359.96 rounds to 360, which the line wraps to 0.
+    expect(droneLineHeading(normalizeDrone(block({ heading: { deg: 359.96, source: 'attitude', age_ms: 90 } })), DEFAULT_COMPASS_CONFIG)).toBe(0);
+    expect(droneLineHeading(normalizeDrone(block()), { ...DEFAULT_COMPASS_CONFIG, preferDrone: false })).toBeNull();
+    expect(droneLineHeading(normalizeDrone(block({ state: 'STALE' })), DEFAULT_COMPASS_CONFIG)).toBeNull();
+    expect(droneLineHeading(normalizeDrone(block({ heading: null })), DEFAULT_COMPASS_CONFIG)).toBeNull();
+    expect(droneLineHeading(null, DEFAULT_COMPASS_CONFIG)).toBeNull();
   });
 
   it('compares headings the short way', () => {

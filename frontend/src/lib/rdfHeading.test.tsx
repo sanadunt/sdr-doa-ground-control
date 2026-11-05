@@ -9,7 +9,7 @@ import { DEFAULT_DOA_OVERLAY_SETTINGS, bearingAndDistance, type DbScale } from '
 import { I18nContext, translate } from './i18n';
 import type { Lang, Translate } from './i18n';
 import { validateOverlaySettings } from './mapOverlaySettings';
-import { headingLabel, headingLabelPosition, headingLineFeatures, headingPopupText, rdfHeading } from './rdfHeading';
+import { headingLabel, headingLabelPosition, headingLineFeatures, headingPopupText, rdfHeading, stationHeading } from './rdfHeading';
 
 /** An answer of tools/telemetry_source.py, written by tools/test_telemetry_source.py. */
 function answer(name: string): TelemetrySnapshot {
@@ -69,6 +69,36 @@ describe('rdfHeading', () => {
     expect(rdfHeading({ ...NAV, simulation: true }, true)).toBeNull();
     expect(rdfHeading(null, true)).toBeNull();
     expect(rdfHeading(undefined, false)).toBeNull();
+  });
+});
+
+describe('stationHeading', () => {
+  it('takes the drone heading while the drone gives one, over the RDF-SDR compass', () => {
+    const drone = stationHeading(NAV, true, 243.7);
+    expect(drone).toEqual({ headingDeg: 243.7, state: 'OK', compassState: null, source: 'DRONE' });
+    // Even with the RDF-SDR answer stale or without compass fields.
+    expect(stationHeading(NAV, false, 243.7)?.state).toBe('OK');
+    expect(stationHeading(LIVE, true, 10)?.source).toBe('DRONE');
+    expect(stationHeading(null, true, 359.96)?.headingDeg).toBeCloseTo(359.96, 6);
+  });
+
+  it('falls back to the RDF-SDR compass without a drone heading', () => {
+    expect(stationHeading(NAV, true, null)).toEqual({ ...rdfHeading(NAV, true), source: 'RDF' });
+    expect(stationHeading(NAV, false, Number.NaN)?.state).toBe('STALE');
+    expect(stationHeading(LIVE, true, null)).toBeNull();
+  });
+
+  it('never draws a drone heading in a simulation', () => {
+    expect(stationHeading({ ...NAV, simulation: true }, true, 243.7)).toBeNull();
+  });
+
+  it('labels the drone heading with its source in both languages', () => {
+    const drone = stationHeading(NAV, true, 243.7)!;
+    expect(headingLabel(drone, tr('en'))).toBe('HDG 244° · DRONE');
+    expect(headingLabel(drone, tr('id'))).toBe('HDG 244° · DRONE');
+    expect(headingPopupText(drone, 'Unavailable')).toBe('243.7° · DRONE');
+    const line = headingLineFeatures(STATION, drone, 1000);
+    expect(line.features[0].properties).toMatchObject({ heading: 243.7, held: false, source: 'DRONE' });
   });
 });
 
@@ -147,5 +177,8 @@ describe('heading layer setting', () => {
     expect(legend('held')).toContain('legend-heading is-held"></i> RDF-SDR heading · STALE');
     expect(legend('held', 'id')).toContain('Heading RDF-SDR · USANG');
     expect(legend(null)).not.toContain('legend-heading');
+    const drone = (lang: Lang) => markup(<OverlayLegend settings={DEFAULT_DOA_OVERLAY_SETTINGS} scale={scale} saturation={0} ringStepM={250} halfPower={null} heading="live" headingSource="DRONE" />, lang);
+    expect(drone('en')).toContain('legend-swatch legend-heading"></i> RDF-SDR heading · drone');
+    expect(drone('id')).toContain('Heading RDF-SDR · drone');
   });
 });

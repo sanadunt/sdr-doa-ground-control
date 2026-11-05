@@ -2,6 +2,13 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.15.3
+
+Garis heading di peta mengikuti drone. Tidak ada yang dihapus.
+
+- **Garis dan label HDG memakai heading drone.** Selama drone LIVE dan pilihan kompas "utamakan drone" aktif (bawaannya aktif), garis putus-putus ungu, segitiga di penanda stasiun, dan label di peta memakai yaw drone ditambah putaran array dari hidung drone. Ini heading yang sama dengan yang memutar bearing DoA. Labelnya `HDG 244° · DRONE`, dan legenda menulis "Heading RDF-SDR · drone".
+- **Kompas RDF-SDR tetap sebagai cadangan.** Bila data drone hilang atau usang, atau pilihan "utamakan drone" dimatikan, garis kembali memakai kompas RDF-SDR seperti sebelumnya. Kartu RDF-SDR tetap menampilkan kedua heading beserta selisihnya.
+
 ## 3.15.2
 
 Rilis perbaikan untuk tablet. Tidak ada yang dihapus.

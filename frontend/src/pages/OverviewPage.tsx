@@ -40,7 +40,7 @@ import type { DroneVideoPhase, DroneVideoState } from '../components/overview/Dr
 import { CompactInfoStrip } from '../components/overview/CompactInfoStrip';
 import type { CompactTab } from '../components/overview/CompactInfoStrip';
 import type { DroneMapView } from '../components/TacticalMap';
-import { DRONE_SAME_PLACE_M, droneArrayHeadingNow, droneStation, positionGap, rememberDroneTrack, snapshotDrone } from '../lib/droneLink';
+import { DRONE_SAME_PLACE_M, droneArrayHeadingNow, droneLineHeading, droneStation, positionGap, rememberDroneTrack, snapshotDrone } from '../lib/droneLink';
 import { LayersPanel } from '../components/overview/LayersPanel';
 import { EstimatePanel } from '../components/overview/EstimatePanel';
 import { PolarDock } from '../components/overview/PolarDock';
@@ -212,6 +212,8 @@ function OverviewPageView({
   const rdfGap = positionGap(droneHere, rdfOwn);
   const rdfOwnShown = rdfOwn && rdfGap && rdfGap.distanceM > DRONE_SAME_PLACE_M ? rdfOwn : null;
   const droneHeadingNow = droneArrayHeadingNow(droneView);
+  // The map's heading line follows the drone while it is LIVE and the compass choice prefers it, like the bearing.
+  const droneLine = droneLineHeading(droneView, compassConfig);
   const droneMapKey = droneHere
     ? JSON.stringify([droneHere.latitude, droneHere.longitude, droneHeadingNow === null ? null : Math.round(droneHeadingNow * 10) / 10, droneTrack?.length ?? 0, rdfOwnShown?.latitude, rdfOwnShown?.longitude])
     : '';
@@ -359,6 +361,7 @@ function OverviewPageView({
               estimate={estimate}
               compact={compact}
               drone={droneMap}
+              droneArrayHeading={droneLine}
               mini={main === 'video'}
               miniZoom={miniZoom}
               heldSeed={heldSeed}
