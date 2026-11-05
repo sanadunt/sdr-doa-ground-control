@@ -34,7 +34,9 @@ fail() {
 PLATFORM="$ANDROID_HOME/platforms/android-$TARGET_SDK/android.jar"
 [ -f "$PLATFORM" ] || fail "no android-$TARGET_SDK platform in $ANDROID_HOME (sdkmanager \"platforms;android-$TARGET_SDK\")"
 BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1)
-[ -n "$BUILD_TOOLS" ] && [ -x "$BUILD_TOOLS/aapt2" ] || fail "no build-tools in $ANDROID_HOME (sdkmanager \"build-tools;35.0.0\")"
+if [ -z "$BUILD_TOOLS" ] || [ ! -x "$BUILD_TOOLS/aapt2" ]; then
+    fail "no build-tools in $ANDROID_HOME (sdkmanager \"build-tools;35.0.0\")"
+fi
 
 PATH="$JAVA_HOME/bin:$PATH"
 export PATH JAVA_HOME
