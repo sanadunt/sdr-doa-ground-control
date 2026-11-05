@@ -558,6 +558,31 @@ class Edge110Tests(unittest.TestCase):
         self.assertEqual((node(store)["health"]["why"], node(store)["health"]["notes"]),
                          (["EMPTY_CSV"], ["DROPPED_ITEMS:why"]))
 
+    def test_health_vfo_peak_and_squelch_are_kept(self) -> None:
+        # Contract 1.11: the output VFO's peak (pk) and the squelch it was held against (psq),
+        # also while squelch holds DoA back. A telemetry/health of RDF Node 1.11.0 on 2026-11-05
+        # over LoRa, its sid, q and t replaced by the fixture's.
+        real = {"v": 2, "run": 1, "daq": 1, "drop": 0, "age": 132811, "temp": 56.8, "clk": 1, "rev": CFG,
+                "why": ["NO_FRESH_DOA", "DOA_FILE_NOT_UPDATING"], "pk": -92.3, "psq": -70.0,
+                "hs": "OK", "hdg": 252.4, "gs": "NO_FIX", "fix": 0, "sat": 0}
+        store = session_store(health=False)
+        entry = put(store, "telemetry/health", dict(real, sid=SID, q=710, t=NOW))
+        self.assertEqual((entry["status"], entry["payload"].get("notes")), ("FRESH", None))
+        health = node(store)["health"]
+        self.assertEqual((health["pk"], health["psq"]), (-92.3, -70.0))
+        # Null while the edge's measurement is stale: kept as null, no note.
+        health = node(session_store(pk=None, psq=None))["health"]
+        self.assertEqual((health["pk"], health["psq"], health.get("notes")), (None, None, None))
+        # An older edge (stock KrakenSDR) sends neither: no key.
+        self.assertNotIn("pk", node(session_store())["health"])
+        # A bad value is dropped with a note, never the health.
+        store = session_store(pk="loud", psq=1e9)
+        self.assertEqual(topic(store, "telemetry/health")["status"], "FRESH")
+        health = node(store)["health"]
+        self.assertNotIn("pk", health)
+        self.assertNotIn("psq", health)
+        self.assertEqual(health["notes"], ["INVALID_FIELD:pk", "INVALID_FIELD:psq"])
+
     def test_the_doa_reason_list_is_kept_and_fills_the_unverified_reasons(self) -> None:
         # Edge 1.10 sends validation_reasons only for the approval pair; every
         # other ok=0 list comes once, in reason, with no MISSING_FIELD note.

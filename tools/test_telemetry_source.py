@@ -118,11 +118,12 @@ class Edge:
             self.send("capabilities", capabilities)
 
     def health(self, *, daq: int = 1, q: Optional[int] = None, at: Optional[int] = None,
-               nav: Optional[Dict[str, Any]] = None, why: Optional[List[str]] = None) -> Dict[str, Any]:
+               nav: Optional[Dict[str, Any]] = None, why: Optional[List[str]] = None,
+               peak: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         t = self.now_ms() if at is None else at
         payload = dict(
             fixture("telemetry-health.json"), sid=self.state["sid"], t=t, daq=daq,
-            q=self.next_q("health") if q is None else q, rev=self.state["cfg"], **(nav or {}),
+            q=self.next_q("health") if q is None else q, rev=self.state["cfg"], **(nav or {}), **(peak or {}),
         )
         if why is not None:
             payload["why"] = why
@@ -472,6 +473,18 @@ class Edge110Tests(unittest.TestCase):
         self.assertEqual((unverified["array_heading_deg"], unverified["heading_source"], unverified["bearing_deg"]),
                          (None, None, None))
         self.assertIsNone(build(edge)["mqtt"]["health"]["why"])
+
+    def test_health_vfo_peak_and_squelch_reach_the_answer(self) -> None:
+        # Contract 1.11: pk and psq tell a missing signal from a squelch set too high,
+        # also while the edge sends no DoA; null from an older edge.
+        edge = Edge(ManualMs(FIXED_NOW))
+        edge.hello(); edge.health(why=["NO_FRESH_DOA", "DOA_FILE_NOT_UPDATING"], peak={"pk": -79.7, "psq": -70.0})
+        health = build(edge)["mqtt"]["health"]
+        self.assertEqual((health["pk"], health["psq"]), (-79.7, -70.0))
+        edge = Edge(ManualMs(FIXED_NOW))
+        edge.hello(); edge.health()
+        health = build(edge)["mqtt"]["health"]
+        self.assertEqual((health["pk"], health["psq"]), (None, None))
 
     def test_health_why_reaches_an_answer_mqtt_does_not_give(self) -> None:
         # Over LoRa with the DAQ down there is no MQTT answer and no Data Out:

@@ -212,6 +212,8 @@
    "daq": 1,
    "drop": 2,
    "fresh": false,
+   "pk": null,
+   "psq": null,
    "q": 1,
    "received_at_ms": 1793070020000,
    "rev": 1,

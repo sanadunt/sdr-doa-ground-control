@@ -8,6 +8,8 @@ import type { Translate } from '../../lib/i18n';
 import { doaSample, doaSampleText, loraLink, overLora, snapshotNav, snapshotRf } from '../../lib/telemetrySource';
 import type { RfSettings } from '../../lib/telemetrySource';
 import { engineSquelchDb } from '../../lib/configPatch';
+import { vfoPeak } from '../../lib/vfoPeak';
+import type { VfoPeak } from '../../lib/vfoPeak';
 import { distanceAndBearing, groundGpsState, groundGpsSummary, snapshotGroundGps, stationPositionLive } from '../../lib/groundGps';
 import type { GeoOrigin } from '../../lib/doaGeometry';
 import { coordinateSourceKey } from '../DoaReadout';
@@ -147,6 +149,16 @@ export function rfRows(rf: RfSettings | null, t: Translate): NodeRow[] {
   } else if (mode !== null && mode !== 'Manual') rows.push([t('node.squelch'), setting(mode.toUpperCase()), undefined, true]);
   if (rf.ucaM !== null) rows.push([t('node.uca'), setting(`${rf.ucaM.toFixed(3)} m`), undefined, true]);
   return rows;
+}
+
+/**
+ * The output VFO's peak against its squelch (contract 1.11 health pk, psq), a
+ * measurement on KrakenSDR's dB scale; warned while the squelch holds the DoA.
+ */
+export function peakRows(peak: VfoPeak | null, t: Translate): NodeRow[] {
+  if (!peak) return [];
+  const squelch = peak.squelchDb === null ? '—' : peak.squelchDb.toFixed(1);
+  return [[t('node.vfoPeak'), `${peak.peakDb.toFixed(1)} / ${squelch} dB`, peak.held ? 'is-warn' : undefined, true]];
 }
 
 /**
@@ -294,6 +306,7 @@ export function NodeCard({
     centerRow,
     gainRow,
     ...rfRows(rf, t),
+    ...peakRows(vfoPeak(snapshot, localSnapshotFresh), t),
     ...sampleRows,
     [t('node.snr'), dataOutValue(summary.snrDb === null, fmt(summary.snrDb, 1, ' dB'))],
     [t('node.daq'), value(summary.daq), summary.daq.startsWith('PASS') ? 'is-good' : summary.daq.startsWith('FAIL') ? 'is-bad' : undefined],
