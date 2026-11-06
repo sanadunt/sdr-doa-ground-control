@@ -1066,8 +1066,15 @@ class SelectionAndDeleteTests(StoreCase):
         self.store.update_settings({"auto_spectrum_recording": True})
         scan_id = self.scan(BASE, BASE + timedelta(minutes=1), traces=10)
         pauses: List[Tuple[float, bool]] = []
+        # time.sleep is patched for the whole process: a sleep of another thread
+        # (a client of an earlier test still winding down) sleeps for real.
+        real_sleep = time.sleep
+        deleting = threading.current_thread()
 
         def pause(seconds: float) -> None:
+            if threading.current_thread() is not deleting:
+                real_sleep(seconds)
+                return
             pauses.append((seconds, self.store._lock._is_owned()))
 
         with mock.patch.object(ra, "SCAN_DELETE_BATCH_ROWS", 3), mock.patch.object(receiver_record_store.time, "sleep", pause):
