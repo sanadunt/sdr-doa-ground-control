@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { FormEvent, ReactElement } from 'react';
 import type { SimulationSettings } from '../lib/simulation';
-import { simulationHalfPowerWidth, simulationSnapshot, validateSimulation } from '../lib/simulation';
+import { SIMULATION_TARGET_KM, simulationHalfPowerWidth, simulationSnapshot, validateSimulation } from '../lib/simulation';
 import { halfPowerWidth } from '../lib/doaGeometry';
 import { geographicBearingForBin } from '../lib/polar';
 import { useI18n } from '../lib/i18n';
@@ -9,15 +9,16 @@ import type { MessageKey } from '../lib/i18n';
 import { Icon } from '../components/ui';
 import { Card, EmptyState, FormField, KeyValueGrid, Page, PageGrid, PageHeader, StatusChip, Switch, Tag } from '../components/page';
 
-type ScenarioKey = 'angle' | 'width' | 'latitude' | 'longitude';
+type ScenarioKey = 'angle' | 'width' | 'targetKm' | 'latitude' | 'longitude';
 type Draft = Record<ScenarioKey, string>;
 
 /** Ranges as validateSimulation checks them (the bearing accepts anything below 360). */
-const SCENARIO_FIELDS: ReadonlyArray<{ key: ScenarioKey; label: MessageKey; min: number; max: number; step: string; placeholder: string }> = [
-  { key: 'angle', label: 'sim.angle', min: 0, max: 359, step: '1', placeholder: '0–359' },
-  { key: 'width', label: 'sim.width', min: 5, max: 60, step: '1', placeholder: '5–60' },
-  { key: 'latitude', label: 'sim.latitude', min: -90, max: 90, step: 'any', placeholder: '−90…90' },
-  { key: 'longitude', label: 'sim.longitude', min: -180, max: 180, step: 'any', placeholder: '−180…180' },
+const SCENARIO_FIELDS: ReadonlyArray<{ key: ScenarioKey; label: MessageKey; unit: string; min: number; max: number; step: string; placeholder: string }> = [
+  { key: 'angle', label: 'sim.angle', unit: '°', min: 0, max: 359, step: '1', placeholder: '0–359' },
+  { key: 'width', label: 'sim.width', unit: '°', min: 5, max: 60, step: '1', placeholder: '5–60' },
+  { key: 'targetKm', label: 'sim.target', unit: 'km', min: SIMULATION_TARGET_KM.min, max: SIMULATION_TARGET_KM.max, step: '0.1', placeholder: '0.5–8' },
+  { key: 'latitude', label: 'sim.latitude', unit: '°', min: -90, max: 90, step: 'any', placeholder: '−90…90' },
+  { key: 'longitude', label: 'sim.longitude', unit: '°', min: -180, max: 180, step: 'any', placeholder: '−180…180' },
 ];
 
 /** Six decimals (about 0.1 m) without trailing zeros. */
@@ -26,24 +27,25 @@ function coordinateText(value: number): string {
 }
 
 function draftFrom(settings: SimulationSettings): Draft {
-  return { angle: String(settings.angle), width: String(settings.width), latitude: coordinateText(settings.latitude), longitude: coordinateText(settings.longitude) };
+  return { angle: String(settings.angle), width: String(settings.width), targetKm: String(settings.targetKm), latitude: coordinateText(settings.latitude), longitude: coordinateText(settings.longitude) };
 }
 
 function parseDraft(draft: Draft): SimulationSettings {
   const number = (text: string) => (text.trim() === '' ? Number.NaN : Number(text));
-  return { latitude: number(draft.latitude), longitude: number(draft.longitude), angle: number(draft.angle), width: number(draft.width) };
+  return { latitude: number(draft.latitude), longitude: number(draft.longitude), angle: number(draft.angle), width: number(draft.width), targetKm: number(draft.targetKm) };
 }
 
 function fieldValid(key: ScenarioKey, value: number): boolean {
   if (!Number.isFinite(value)) return false;
   if (key === 'angle') return value >= 0 && value < 360;
   if (key === 'width') return value >= 5 && value <= 60;
+  if (key === 'targetKm') return value >= SIMULATION_TARGET_KM.min && value <= SIMULATION_TARGET_KM.max;
   if (key === 'latitude') return Math.abs(value) <= 90;
   return Math.abs(value) <= 180;
 }
 
 function sameSettings(left: SimulationSettings, right: SimulationSettings): boolean {
-  return left.angle === right.angle && left.width === right.width
+  return left.angle === right.angle && left.width === right.width && left.targetKm === right.targetKm
     && Number(left.latitude.toFixed(6)) === Number(right.latitude.toFixed(6))
     && Number(left.longitude.toFixed(6)) === Number(right.longitude.toFixed(6));
 }
@@ -158,6 +160,7 @@ export function SimulationPage({ enabled, automatic, settings, onEnabled, onAuto
               { id: 'bearing', label: t('sim.angle'), value: `${settings.angle}°`, tone: 'signal' },
               { id: 'sigma', label: t('sim.width'), value: `${settings.width}°` },
               { id: 'half-power', label: t('sim.halfPower'), value: activeHalfPower === null ? '—' : `${activeHalfPower}°` },
+              { id: 'target', label: t('sim.target'), value: `${settings.targetKm} km` },
               { id: 'position', label: t('sim.position'), value: `${settings.latitude.toFixed(6)}, ${settings.longitude.toFixed(6)}` },
             ]}
           />
@@ -169,7 +172,7 @@ export function SimulationPage({ enabled, automatic, settings, onEnabled, onAuto
                 <FormField
                   key={field.key}
                   label={t(field.label)}
-                  unit="°"
+                  unit={field.unit}
                   error={fieldValid(field.key, parsed[field.key]) ? undefined : t('sim.rangeError', { min: field.min, max: field.max })}
                 >
                   <input

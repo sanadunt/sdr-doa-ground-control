@@ -2,6 +2,13 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.18.0
+
+Simulasi kini menampilkan estimasi posisi, dan kotak sumber peta tidak lagi melebar. Tidak ada yang dihapus.
+
+- **Estimasi posisi di Simulasi.** Dengan Simulasi aktif, peta Dashboard menampilkan drone dengan jejak terbangnya, tanda GS, area panas estimasi, titik estimasi, serta garis ke RDF-SDR dan ke GS dengan jarak dan arahnya, juga kartu Estimasi posisi. Halaman Simulasi punya kolom baru "Jarak pemancar" (0,5–8 km, bawaan 2 km): pemancar diletakkan sejauh itu di arah bearing. Semuanya hanya gambar di browser; estimasi asli di console tidak tersentuh, dan kartu tidak punya tombol Mulai ulang selama simulasi.
+- **Kotak sumber peta tetap lebarnya.** Kotak di samping tombol peta (© OpenStreetMap, Powered by Esri, …) dulu selebar teksnya, jadi melebar setiap kali gaya peta dipilih (Standar 118 px, Satelit + label 409 px). Kini lebarnya 220 px untuk semua gaya; sumber yang panjang dipendekkan dengan "…", teks lengkapnya muncul saat kursor di atasnya, dan tiap sumber tetap tautan.
+
 ## 3.17.0
 
 Estimasi posisi pemancar memakai GPS dan yaw drone, dan menyebut jaraknya dari groundstation. Tidak ada yang dihapus.

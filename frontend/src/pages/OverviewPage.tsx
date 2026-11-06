@@ -3,6 +3,7 @@ import { Suspense, memo, useCallback, useEffect, useMemo, useRef, useState, useS
 import type { ConsoleCapabilities } from '../api';
 import type { CompassConfig, GpsConfig, MapCoordinate, PolarSettings, TelemetrySnapshot } from '../types';
 import type { SimulationSettings } from '../lib/simulation';
+import { simulationScene } from '../lib/simulation';
 import { gpsReportsNoFix, holdStationCoordinate, resolveGpsSource, resolveStationCoordinate } from '../lib/map';
 import { groundPosition } from '../lib/groundGps';
 import { doaStatusTextKey, overviewDoaStatus, provisionalDoa } from '../lib/doaStatus';
@@ -194,9 +195,11 @@ function OverviewPageView({
     () => (heldLatitude === undefined || heldLongitude === undefined ? coordinate : { latitude: heldLatitude, longitude: heldLongitude, source: 'DATA_OUT' }),
     [coordinate, heldLatitude, heldLongitude],
   );
-  // The groundstation's own GPS fix, from a fresh answer only; none in simulation,
-  // whose station is synthetic. Stable across equal values like the station.
-  const ground = simulation ? null : groundPosition(groundGpsFresh ? snapshot : null);
+  // In simulation the groundstation, the drone and the estimate come from a
+  // synthetic scene around the simulated station, never from live data.
+  const scene = useMemo(() => (simulation ? simulationScene(simulation) : null), [simulation]);
+  // The groundstation's own GPS fix, from a fresh answer only. Stable across equal values like the station.
+  const ground = simulation ? scene?.ground ?? null : groundPosition(groundGpsFresh ? snapshot : null);
   const groundLatitude = ground?.latitude;
   const groundLongitude = ground?.longitude;
   const groundCoordinate = useMemo<GeoOrigin | null>(
@@ -217,7 +220,7 @@ function OverviewPageView({
   const droneMapKey = droneHere
     ? JSON.stringify([droneHere.latitude, droneHere.longitude, droneHeadingNow === null ? null : Math.round(droneHeadingNow * 10) / 10, droneTrack?.length ?? 0, rdfOwnShown?.latitude, rdfOwnShown?.longitude])
     : '';
-  const droneMap = useMemo<DroneMapView | null>(() => (droneHere && droneTrack ? {
+  const liveDroneMap = useMemo<DroneMapView | null>(() => (droneHere && droneTrack ? {
     position: { latitude: droneHere.latitude, longitude: droneHere.longitude },
     headingDeg: droneView?.heading?.deg ?? null,
     track: droneTrack,
@@ -225,12 +228,14 @@ function OverviewPageView({
   } : null),
   // Rebuilt only when what the map draws changes.
   [droneMapKey]);
+  const droneMap = useMemo<DroneMapView | null>(() => (scene ? { ...scene.drone, rdfOwn: null } : liveDroneMap), [scene, liveDroneMap]);
   // Where the moving RDF-SDR's bearings cross. It is built on the console from
   // every bearing so far, so it outlives a stale answer; kept stable across
   // equal answers so the map only redraws it when it changes.
   const estimateNow = simulation ? null : positionEstimate(snapshot);
   const estimateKey = estimateNow ? JSON.stringify(estimateNow) : '';
-  const estimate = useMemo<PositionEstimate | null>(() => (estimateKey ? JSON.parse(estimateKey) as PositionEstimate : null), [estimateKey]);
+  const liveEstimate = useMemo<PositionEstimate | null>(() => (estimateKey ? JSON.parse(estimateKey) as PositionEstimate : null), [estimateKey]);
+  const estimate = scene ? scene.estimate : liveEstimate;
   // One readiness decision for the map overlay, the bearing HUD and the polar curve.
   const doa = overviewDoaStatus(snapshot, localSnapshotFresh);
   // A held DoA is drawn with the heading of the very sample it comes from; a manual offset stays above it, as for a LIVE one.
@@ -410,7 +415,7 @@ function OverviewPageView({
     />
   );
   const readout = <DoaReadout snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} settings={plotSettings} curveOffset={curveOffset} offsetSource={offsetSource} offsetVerified={offsetVerified} offsetManual={offsetManual} />;
-  const estimateCard = estimate && overlaySettings.estimateVisible && (!compact || estimate.state === 'ESTIMATE') ? <EstimatePanel estimate={estimate} viewOnly={viewOnly} compact={compact || panels.layers} /> : null;
+  const estimateCard = estimate && overlaySettings.estimateVisible && (!compact || estimate.state === 'ESTIMATE') ? <EstimatePanel estimate={estimate} viewOnly={viewOnly || scene !== null} compact={compact || panels.layers} /> : null;
   const layersPanel = panels.layers ? <LayersPanel settings={overlaySettings} scale={overlayScale} onChange={onOverlayChange} onClose={() => onPanelsChange({ ...panels, layers: false })} basemapId={basemapId} onBasemapChange={onBasemapSelect} /> : null;
 
   const polarDock = (
