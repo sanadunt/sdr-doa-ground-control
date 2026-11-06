@@ -1,5 +1,6 @@
 import type { Feature, FeatureCollection, LineString, Point, Polygon } from 'geojson';
 import { geographicBearingForBin } from './polar';
+import type { CoordinateFormat } from './gridCoordinates';
 
 export const EARTH_RADIUS_M = 6_371_000;
 
@@ -17,6 +18,8 @@ export interface DoaOverlaySettings {
   headingVisible: boolean;
   /** The transmitter position estimate: hot cells, the estimate, its radius and the line to it (lib/positionEstimate.ts). */
   estimateVisible: boolean;
+  /** How the estimate card writes its position for a land map (lib/gridCoordinates.ts). */
+  coordinateFormat: CoordinateFormat;
   /** Multiplies every overlay paint opacity, 0.2 to 1. */
   overlayOpacity: number;
   heatStyle: 'beam' | 'density';
@@ -48,6 +51,7 @@ export const DEFAULT_DOA_OVERLAY_SETTINGS: DoaOverlaySettings = {
   labelsVisible: true,
   headingVisible: true,
   estimateVisible: true,
+  coordinateFormat: 'latlon',
   overlayOpacity: 0.85,
   heatStyle: 'beam',
   dbScale: 'auto',

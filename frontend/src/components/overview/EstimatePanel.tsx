@@ -1,7 +1,8 @@
 import { useState, type JSX } from 'react';
 import { useI18n } from '../../lib/i18n';
 import type { MessageKey } from '../../lib/i18n';
-import { estimateSourceKey, estimateWaitKey, formatEstimateDistance, resetPositionEstimate, type PositionEstimate } from '../../lib/positionEstimate';
+import { estimatePositionText, estimateSourceKey, estimateWaitKey, formatEstimateDistance, resetPositionEstimate, type PositionEstimate } from '../../lib/positionEstimate';
+import { COORDINATE_FORMATS, isCoordinateFormat, type CoordinateFormat } from '../../lib/gridCoordinates';
 import { formatBearing } from '../../lib/overlayPalette';
 
 const STATE_TAG: Record<PositionEstimate['state'], MessageKey> = {
@@ -21,11 +22,19 @@ const STATE_TEXT: Record<PositionEstimate['state'], MessageKey> = {
  * groundstation, and what it rests on (the drone's GPS and yaw, or the RDF-SDR's own). While the
  * console skips LIVE bearings it says what they lack: a position (or that the
  * node does not send one) or a heading. "Start over" clears it on this
- * console (nothing goes to the node). Not shown in the LAN view, which only watches. In the compact touch layout, and on a
+ * console (nothing goes to the node). Not shown in the LAN view, which only watches.
+ * The position is written as Lat/Lon, UTM, MGRS or X,Y from the groundstation,
+ * as the operator picks for a land map (the overlay setting coordinateFormat). In the compact touch layout, and on a
  * desktop while Lapisan is open (the column would squeeze it), it is one
  * button of two lines (title, state and distance) that opens the rest.
  */
-export function EstimatePanel({ estimate, viewOnly = false, compact = false }: { estimate: PositionEstimate; viewOnly?: boolean; compact?: boolean }): JSX.Element {
+export function EstimatePanel({ estimate, viewOnly = false, compact = false, coordinateFormat = 'latlon', onCoordinateFormatChange }: {
+  estimate: PositionEstimate;
+  viewOnly?: boolean;
+  compact?: boolean;
+  coordinateFormat?: CoordinateFormat;
+  onCoordinateFormatChange?: (format: CoordinateFormat) => void;
+}): JSX.Element {
   const { t } = useI18n();
   const [resetState, setResetState] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
   const [expanded, setExpanded] = useState(false);
@@ -88,13 +97,20 @@ export function EstimatePanel({ estimate, viewOnly = false, compact = false }: {
         <>
           <div className="ov-estimate-distance">{distanceText}</div>
           {groundText ? <div className="ov-estimate-distance">{groundText}</div> : null}
-          <div className="ov-hud-offset">
-            <b>{t('estimate.position', {
-              lat: estimate.latitude.toFixed(5),
-              lon: estimate.longitude.toFixed(5),
-              radius: formatEstimateDistance(estimate.radiusM),
-            })}</b>
+          <div className="ov-hud-offset ov-estimate-position">
+            <b>{estimatePositionText(estimate, coordinateFormat, t)}</b>
           </div>
+          {onCoordinateFormatChange ? (
+            <label className="ov-estimate-format">
+              <span>{t('estimate.coordinates')}</span>
+              <select
+                value={coordinateFormat}
+                onChange={(event) => { if (isCoordinateFormat(event.target.value)) onCoordinateFormatChange(event.target.value); }}
+              >
+                {COORDINATE_FORMATS.map((format) => <option key={format} value={format}>{t(`estimate.coord.${format}`)}</option>)}
+              </select>
+            </label>
+          ) : null}
         </>
       ) : null}
       {estimate.samples > 0 ? (

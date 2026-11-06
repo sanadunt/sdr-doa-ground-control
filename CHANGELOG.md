@@ -4,7 +4,9 @@ Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QU
 
 ## 3.18.0
 
-Simulasi kini menampilkan estimasi posisi, dan kotak sumber peta tidak lagi melebar. Tidak ada yang dihapus.
+Simulasi kini menampilkan estimasi posisi, posisi estimasi bisa ditulis dalam koordinat peta darat, dan kotak sumber peta tidak lagi melebar. Tidak ada yang dihapus.
+
+- **Koordinat untuk peta darat.** Kartu Estimasi posisi punya pilihan **Koordinat**: Lat/Lon, UTM (zona, X easting, Y northing dalam meter, WGS84, misalnya "UTM 48M · X 795503 · Y 9234235"), MGRS ("48M YT 95502 34234", presisi 1 m) atau X,Y dari GS (meter ke timur dan ke utara dari GPS groundstation, misalnya "X +2360 m · Y +1506 m"; tanpa fix GPS groundstation kartu menyebutnya). Pilihan disimpan bersama setelan Lapisan dan juga tersedia di tablet. Hasil UTM dan MGRS dicek terhadap pyproj dan pustaka `mgrs` (selisih di bawah 1 cm).
 
 - **Estimasi posisi di Simulasi.** Dengan Simulasi aktif, peta Dashboard menampilkan drone dengan jejak terbangnya, tanda GS, area panas estimasi, titik estimasi, serta garis ke RDF-SDR dan ke GS dengan jarak dan arahnya, juga kartu Estimasi posisi. Halaman Simulasi punya kolom baru "Jarak pemancar" (0,5–8 km, bawaan 2 km): pemancar diletakkan sejauh itu di arah bearing. Semuanya hanya gambar di browser; estimasi asli di console tidak tersentuh, dan kartu tidak punya tombol Mulai ulang selama simulasi.
 - **Kotak sumber peta tetap lebarnya.** Kotak di samping tombol peta (© OpenStreetMap, Powered by Esri, …) dulu selebar teksnya, jadi melebar setiap kali gaya peta dipilih (Standar 118 px, Satelit + label 409 px). Kini lebarnya 220 px untuk semua gaya; sumber yang panjang dipendekkan dengan "…", teks lengkapnya muncul saat kursor di atasnya, dan tiap sumber tetap tautan.

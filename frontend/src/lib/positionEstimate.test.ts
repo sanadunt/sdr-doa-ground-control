@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import type { TelemetrySnapshot } from '../types';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createElement } from 'react';
-import { estimateSourceKey, formatEstimateDistance, positionEstimate, positionEstimateFeatures, positionEstimateLabel, positionEstimateLineLabels } from './positionEstimate';
+import { estimatePositionText, estimateSourceKey, formatEstimateDistance, positionEstimate, positionEstimateFeatures, positionEstimateLabel, positionEstimateLineLabels } from './positionEstimate';
 import { bearingAndDistance } from './doaGeometry';
 import { EstimatePanel } from '../components/overview/EstimatePanel';
 import { I18nContext, translate } from './i18n';
+import { DEFAULT_DOA_OVERLAY_SETTINGS } from './doaGeometry';
+import { validateOverlaySettings } from './mapOverlaySettings';
 import { DEFAULT_COMPASS_CONFIG, geographicBearingForBin, nodeArrayHeading, resolveCompassSource } from './polar';
 import type { Translate } from './i18n';
 
@@ -138,5 +140,44 @@ describe('node array heading as the compass offset (contract 1.10)', () => {
     expect(nodeArrayHeading(live(null))).toBeNull();
     expect(nodeArrayHeading(live(Number.NaN))).toBeNull();
     expect(resolveCompassSource(live(null), undefined, DEFAULT_COMPASS_CONFIG).code).not.toBe('NODE_HEADING');
+  });
+});
+
+describe('the estimate in land map coordinates', () => {
+  const tId: Translate = ((key, vars) => translate('id', key, vars)) as Translate;
+  const withGround = positionEstimate(snapshot({ ...ESTIMATE, ground_latitude: -6.92, ground_longitude: 107.6 }));
+  const withoutGround = positionEstimate(snapshot(ESTIMATE));
+  if (!withGround || !withoutGround) throw new Error('no estimate');
+
+  it('writes Lat/Lon, UTM, MGRS and X,Y from the groundstation', () => {
+    // UTM and MGRS of -6.902, 107.62 by pyproj and the mgrs package: 48M 789540 9236289, 48MYT8954036288.
+    expect(estimatePositionText(withGround, 'latlon', tId)).toBe('-6.90200, 107.62000 · ±420 m');
+    expect(estimatePositionText(withGround, 'utm', tId)).toBe('UTM 48M · X 789540 · Y 9236289 · ±420 m');
+    expect(estimatePositionText(withGround, 'mgrs', tId)).toBe('MGRS 48M YT 89540 36288 · ±420 m');
+    expect(estimatePositionText(withGround, 'gsxy', tId)).toBe('Dari GS · X +2210 m · Y +1991 m · ±420 m');
+  });
+
+  it('says when X,Y from GS has no groundstation fix', () => {
+    expect(estimatePositionText(withoutGround, 'gsxy', tId)).toBe('X,Y dari GS: GPS groundstation belum fix');
+  });
+
+  it('keeps the choice in the overlay settings, Lat/Lon for an older or unknown value', () => {
+    expect(DEFAULT_DOA_OVERLAY_SETTINGS.coordinateFormat).toBe('latlon');
+    expect(validateOverlaySettings({ coordinateFormat: 'mgrs' }).coordinateFormat).toBe('mgrs');
+    expect(validateOverlaySettings({ coordinateFormat: 'xyz' as never }).coordinateFormat).toBe('latlon');
+    expect(validateOverlaySettings({}).coordinateFormat).toBe('latlon');
+  });
+
+  it('shows the chosen format with a 44 px select on the card', () => {
+    const html = renderToStaticMarkup(createElement(I18nContext.Provider, { value: { lang: 'id', setLang: () => undefined, t: (key, vars) => translate('id', key, vars) } },
+      createElement(EstimatePanel, { estimate: withGround, coordinateFormat: 'utm', onCoordinateFormatChange: () => undefined })));
+    expect(html).toContain('UTM 48M · X 789540 · Y 9236289 · ±420 m');
+    expect(html).toMatch(/<label class="ov-estimate-format"><span>Koordinat<\/span><select>/);
+    for (const label of ['Lat/Lon', 'UTM', 'MGRS', 'X,Y dari GS']) expect(html).toContain(`>${label}</option>`);
+    expect(html).toContain('<option value="utm" selected="">UTM</option>');
+    // Without a handler (a test or an older caller) the card shows no select.
+    const plain = renderToStaticMarkup(createElement(I18nContext.Provider, { value: { lang: 'id', setLang: () => undefined, t: (key, vars) => translate('id', key, vars) } },
+      createElement(EstimatePanel, { estimate: withGround })));
+    expect(plain).not.toContain('ov-estimate-format');
   });
 });

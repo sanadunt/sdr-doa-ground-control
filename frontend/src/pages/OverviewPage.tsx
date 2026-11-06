@@ -4,6 +4,7 @@ import type { ConsoleCapabilities } from '../api';
 import type { CompassConfig, GpsConfig, MapCoordinate, PolarSettings, TelemetrySnapshot } from '../types';
 import type { SimulationSettings } from '../lib/simulation';
 import { simulationScene } from '../lib/simulation';
+import type { CoordinateFormat } from '../lib/gridCoordinates';
 import { gpsReportsNoFix, holdStationCoordinate, resolveGpsSource, resolveStationCoordinate } from '../lib/map';
 import { groundPosition } from '../lib/groundGps';
 import { doaStatusTextKey, overviewDoaStatus, provisionalDoa } from '../lib/doaStatus';
@@ -260,6 +261,13 @@ function OverviewPageView({
     setOverlaySettings(valid);
     saveOverlaySettings(valid);
   }, []);
+  const onCoordinateFormatChange = useCallback((coordinateFormat: CoordinateFormat) => {
+    setOverlaySettings((current) => {
+      const valid = validateOverlaySettings({ ...current, coordinateFormat });
+      saveOverlaySettings(valid);
+      return valid;
+    });
+  }, []);
   // The basemap style; the map button and the Lapisan select share it.
   const [basemapId, setBasemapId] = useState<BasemapId>(() => loadBasemapId());
   const onBasemapSelect = useCallback((id: BasemapId) => {
@@ -415,7 +423,15 @@ function OverviewPageView({
     />
   );
   const readout = <DoaReadout snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} settings={plotSettings} curveOffset={curveOffset} offsetSource={offsetSource} offsetVerified={offsetVerified} offsetManual={offsetManual} />;
-  const estimateCard = estimate && overlaySettings.estimateVisible && (!compact || estimate.state === 'ESTIMATE') ? <EstimatePanel estimate={estimate} viewOnly={viewOnly || scene !== null} compact={compact || panels.layers} /> : null;
+  const estimateCard = estimate && overlaySettings.estimateVisible && (!compact || estimate.state === 'ESTIMATE') ? (
+    <EstimatePanel
+      estimate={estimate}
+      viewOnly={viewOnly || scene !== null}
+      compact={compact || panels.layers}
+      coordinateFormat={overlaySettings.coordinateFormat}
+      onCoordinateFormatChange={onCoordinateFormatChange}
+    />
+  ) : null;
   const layersPanel = panels.layers ? <LayersPanel settings={overlaySettings} scale={overlayScale} onChange={onOverlayChange} onClose={() => onPanelsChange({ ...panels, layers: false })} basemapId={basemapId} onBasemapChange={onBasemapSelect} /> : null;
 
   const polarDock = (

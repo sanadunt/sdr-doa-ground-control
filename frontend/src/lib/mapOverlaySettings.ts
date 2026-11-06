@@ -1,4 +1,5 @@
 import { DEFAULT_DOA_OVERLAY_SETTINGS, type DoaOverlaySettings } from './doaGeometry';
+import { isCoordinateFormat } from './gridCoordinates';
 import { readPreference, writePreference } from './preferenceStore';
 
 export const OVERLAY_SETTINGS_STORAGE_KEY = 'sdr-doa-overlay-settings-v4';
@@ -27,6 +28,7 @@ export function validateOverlaySettings(input: Partial<DoaOverlaySettings>): Doa
     // Added after the stored key: an older value without it (or a non-boolean) shows the heading.
     headingVisible: typeof merged.headingVisible === 'boolean' ? merged.headingVisible : DEFAULT_DOA_OVERLAY_SETTINGS.headingVisible,
     estimateVisible: typeof merged.estimateVisible === 'boolean' ? merged.estimateVisible : DEFAULT_DOA_OVERLAY_SETTINGS.estimateVisible,
+    coordinateFormat: isCoordinateFormat(merged.coordinateFormat) ? merged.coordinateFormat : DEFAULT_DOA_OVERLAY_SETTINGS.coordinateFormat,
     overlayOpacity: number(merged.overlayOpacity, DEFAULT_DOA_OVERLAY_SETTINGS.overlayOpacity, OVERLAY_OPACITY_MIN, 1),
     heatStyle: merged.heatStyle === 'density' ? 'density' : 'beam',
     dbScale: merged.dbScale === 'manual' ? 'manual' : 'auto',
