@@ -454,6 +454,13 @@ def _load_mqtt_monitor_class() -> Any:
     return monitor_class
 
 
+def _attach_drone_reference(monitor: Any, reference: Callable[[int], Optional[Dict[str, Any]]]) -> None:
+    """Give a monitor the drone reference for its position estimate (a stand-in monitor has none)."""
+    setter = getattr(monitor, "set_drone_reference", None)
+    if callable(setter):
+        setter(reference)
+
+
 class _UnavailableMqttMonitor:
     """Monitor slot that reports why no MQTT client could be created."""
 
@@ -5139,6 +5146,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
         # default or admin login is disabled; the status and the log say why.
         self.lan.apply(self._config["lan_access"])
         self._start_drone_service()
+        _attach_drone_reference(self.mqtt_monitor, self.drone_reference_at)
 
     def run_retention(self) -> Optional[Dict[str, Any]]:
         """One background retention pass (no time budget beyond the per-pass item bound)."""
@@ -5250,6 +5258,25 @@ class GroundConsoleServer(ThreadingHTTPServer):
             if found is not None:
                 view["heading_at_doa"] = dict(found, doa_timestamp_ms=sample[1], candidate=sample[0])
         return view
+
+    def drone_reference_at(self, t_ms: int) -> Optional[Dict[str, Any]]:
+        """Where the drone was (fixed GPS) and where its array pointed (yaw plus the array's turn) at ``t_ms``.
+
+        The position estimate's samples take these before the RDF-SDR's own
+        (doa_position_estimate.py). Called under the MQTT monitor's lock, so it
+        takes only the drone locks.
+        """
+        with self._drone_lock:
+            service = self.drone_service
+        if service is None:
+            return None
+        position = service.position_at(t_ms)
+        heading = service.heading_at(t_ms)
+        return {
+            "lat": None if position is None else position["lat"],
+            "lon": None if position is None else position["lon"],
+            "heading_deg": None if heading is None else (heading["deg"] + service.array_offset_deg()) % 360.0,
+        }
 
     def _ground_gps_view(self) -> Optional[Dict[str, Any]]:
         """The monitor's groundstation GNSS view (ground_gps.py), or None without a monitor."""
@@ -5434,6 +5461,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
                 replacement = None
                 if monitor_changed and new_host:
                     replacement = _new_mqtt_monitor(*new_connection)
+                    _attach_drone_reference(replacement, self.drone_reference_at)
                     # Before start(), so no ACK or settings report of a
                     # pending command reaches the new client unasked.
                     self.config_commands.hand_over(self.mqtt_monitor, replacement)

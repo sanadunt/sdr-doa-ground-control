@@ -112,6 +112,12 @@ class FakeService:
     def heading_at(self, t_ms: int) -> Optional[Dict[str, Any]]:
         return {"deg": 87.3, "offset_ms": abs(t_ms - 1_000), "source": "attitude"} if abs(t_ms - 1_000) <= 1_000 else None
 
+    def position_at(self, t_ms: int) -> Optional[Dict[str, Any]]:
+        return {"lat": -6.9321, "lon": 107.6612, "offset_ms": abs(t_ms - 1_000)} if abs(t_ms - 1_000) <= 1_000 else None
+
+    def array_offset_deg(self) -> float:
+        return float(self.settings["array_heading_offset_deg"])
+
     def view(self, now_ms: Optional[int] = None) -> Dict[str, Any]:
         view = self.store.view(1_200)
         view.update({"enabled": True, "host": "192.168.1.162", "port": 1883, "connection": "connected",
@@ -201,6 +207,17 @@ class DroneRouteTests(DroneServerCase):
         csv = {"doa_candidates": {"mqtt": {"available": False}, "csv": {"available": True, "timestamp_ms": 1_000}}}
         with mock.patch.object(server.data_out, "snapshot", return_value=csv):
             self.assertEqual(server.collect_snapshot(BASE_URL)["drone"]["heading_at_doa"]["candidate"], "csv")
+
+    def test_the_position_estimate_takes_the_drone_at_the_sample_time(self) -> None:
+        server = self.start_drone_server({"enabled": True, "host": "auto", "port": 1883,
+                                          "array_heading_offset_deg": -90.0, "video_enabled": True})
+        # The yaw plus the array's turn against the nose, and the fixed GPS position.
+        self.assertEqual(server.drone_reference_at(1_200), {"lat": -6.9321, "lon": 107.6612, "heading_deg": 357.3})
+        self.assertEqual(server.drone_reference_at(9_000), {"lat": None, "lon": None, "heading_deg": None})
+        # Every monitor the console uses gets the reference.
+        monitor = mock.Mock()
+        ground_console._attach_drone_reference(monitor, server.drone_reference_at)
+        monitor.set_drone_reference.assert_called_once_with(server.drone_reference_at)
 
     def test_without_a_factory_the_drone_is_off(self) -> None:
         server = self.start_server()

@@ -219,6 +219,34 @@ class HeadingHistoryTests(unittest.TestCase):
         self.assertEqual(store.heading_at(5_000)["deg"], 20.0)
 
 
+class PositionHistoryTests(unittest.TestCase):
+    def ingest(self, store, topic, t, **fields):
+        store.ingest(topic, encode(dict(payloads()[topic], **fields)), t)
+
+    def test_position_at_interpolates_while_the_gps_is_fixed(self):
+        store = DroneStore()
+        self.ingest(store, "drone/gps", 0, fix=6)
+        self.ingest(store, "drone/position", 0, lat=-6.9, lon=107.6)
+        self.ingest(store, "drone/position", 400, lat=-6.8, lon=107.8)
+        self.assertEqual(store.position_at(100), {"lat": -6.875, "lon": 107.65, "offset_ms": 100})
+        self.assertEqual(store.position_at(1_300), {"lat": -6.8, "lon": 107.8, "offset_ms": 900})
+        self.assertIsNone(store.position_at(1_500))
+
+    def test_no_position_without_a_3d_fix(self):
+        store = DroneStore()
+        self.ingest(store, "drone/position", 0, lat=-6.9, lon=107.6)
+        self.assertIsNone(store.position_at(0))
+        self.ingest(store, "drone/gps", 100, fix=2)
+        self.ingest(store, "drone/position", 100, lat=-6.9, lon=107.6)
+        self.assertIsNone(store.position_at(100))
+        # A fix older than the stale window counts as none.
+        self.ingest(store, "drone/gps", 200, fix=3)
+        self.ingest(store, "drone/position", 200 + drone_link.STALE_MS + 1, lat=-6.9, lon=107.6)
+        self.assertIsNone(store.position_at(200 + drone_link.STALE_MS + 1))
+        self.ingest(store, "drone/position", 300, lat=0, lon=0)
+        self.assertIsNone(store.position_at(300))
+
+
 class FakeClient:
     def __init__(self, client_id):
         self.client_id = client_id

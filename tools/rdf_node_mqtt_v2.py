@@ -1076,6 +1076,15 @@ class RdfNodeV2Telemetry:
             "capabilities": self._session_capabilities(),
         }
 
+    def session_angle(self) -> Optional[str]:
+        """``capabilities.angle`` of the current session (how ``a`` maps to theta_0), or None."""
+        if self._capabilities is None or self._session is None:
+            return None
+        payload = self._capabilities["payload"]
+        if payload["sid"] != self._session["payload"]["sid"]:
+            return None
+        return payload.get("angle")
+
     def _session_capabilities(self) -> Optional[Dict[str, Any]]:
         """The command flags of ``capabilities``, only when it belongs to the current session.
 

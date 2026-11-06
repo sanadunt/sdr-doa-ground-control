@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { TelemetrySnapshot } from '../types';
-import { formatEstimateDistance, positionEstimate, positionEstimateFeatures, positionEstimateLabel } from './positionEstimate';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { createElement } from 'react';
+import { estimateSourceKey, formatEstimateDistance, positionEstimate, positionEstimateFeatures, positionEstimateLabel } from './positionEstimate';
+import { EstimatePanel } from '../components/overview/EstimatePanel';
+import { I18nContext, translate } from './i18n';
 import { DEFAULT_COMPASS_CONFIG, geographicBearingForBin, nodeArrayHeading, resolveCompassSource } from './polar';
 import type { Translate } from './i18n';
 
@@ -63,6 +67,40 @@ describe('positionEstimate', () => {
     expect(formatEstimateDistance(850)).toBe('850 m');
     expect(formatEstimateDistance(12_400)).toBe('12 km');
     expect(formatEstimateDistance(null)).toBe('--');
+  });
+
+  it('reads the groundstation distance and the sources, and draws the line from the groundstation', () => {
+    const value = { ...ESTIMATE, ground_latitude: -6.92, ground_longitude: 107.6, ground_distance_m: 5200, ground_bearing_deg: 47.6,
+      bearing_source: 'drone', position_source: 'drone' };
+    const estimate = positionEstimate(snapshot(value));
+    expect([estimate?.groundDistanceM, estimate?.groundBearingDeg, estimate?.bearingSource, estimate?.positionSource])
+      .toEqual([5200, 47.6, 'drone', 'drone']);
+    const shapes = positionEstimateFeatures(estimate, { latitude: -6.93, longitude: 107.71 });
+    expect(shapes.lines.features.map((feature) => feature.properties?.kind)).toEqual(['radius', 'link', 'ground']);
+    expect(shapes.lines.features[2].geometry.coordinates).toEqual([[107.6, -6.92], [107.62, -6.902]]);
+    const gs: Translate = ((key: string, values?: Record<string, string>) => (
+      key === 'estimate.mapLabel' ? 'ESTIMATE' : key === 'estimate.mapGround' ? `GS ${values?.distance}` : key)) as Translate;
+    expect(estimate && positionEstimateLabel(estimate, gs)).toBe('ESTIMATE · 3.4 km · 294° · GS 5.2 km');
+    expect(estimate && estimateSourceKey(estimate)).toBe('estimate.sourceDrone');
+    // An older console, or a groundstation without a fix: no line, no source line.
+    const plain = positionEstimate(snapshot({ ...ESTIMATE, bearing_source: 'compass' }));
+    expect([plain?.groundDistanceM, plain?.bearingSource]).toEqual([null, null]);
+    expect(plain && estimateSourceKey(plain)).toBeNull();
+    expect(positionEstimateFeatures(plain, null).lines.features.map((feature) => feature.properties?.kind)).toEqual(['radius']);
+    for (const [bearing, position, key] of [['drone', 'rdf', 'estimate.sourceDroneYaw'], ['rdf', 'drone', 'estimate.sourceDroneGps'], ['rdf', 'rdf', 'estimate.sourceRdf']]) {
+      const mixed = positionEstimate(snapshot({ ...ESTIMATE, bearing_source: bearing, position_source: position }));
+      expect(mixed && estimateSourceKey(mixed)).toBe(key);
+    }
+  });
+
+  it('shows both distances and the source on the card', () => {
+    const estimate = positionEstimate(snapshot({ ...ESTIMATE, ground_latitude: -6.92, ground_longitude: 107.6, ground_distance_m: 5200,
+      ground_bearing_deg: 47.6, bearing_source: 'drone', position_source: 'drone' }));
+    if (!estimate) throw new Error('no estimate');
+    const html = renderToStaticMarkup(createElement(I18nContext.Provider, { value: { lang: 'id', setLang: () => undefined, t: (key, vars) => translate('id', key, vars) } }, createElement(EstimatePanel, { estimate })));
+    expect(html).toContain('3.4 km dari RDF-SDR · arah 294°');
+    expect(html).toContain('5.2 km dari groundstation · arah 48°');
+    expect(html).toContain('Bearing terakhir: GPS dan yaw drone');
   });
 });
 

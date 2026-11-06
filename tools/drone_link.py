@@ -303,6 +303,46 @@ class _HeadingHistory:
         return values[nearest], gap
 
 
+class _PositionHistory:
+    """Positions by receipt time, for where the drone was at a DoA sample's moment."""
+
+    def __init__(self) -> None:
+        self._times: Deque[int] = deque()
+        self._points: Deque[Tuple[float, float]] = deque()
+
+    def add(self, t_ms: int, lat: float, lon: float) -> None:
+        if self._times and t_ms < self._times[-1]:
+            self._times.clear()
+            self._points.clear()
+        self._times.append(t_ms)
+        self._points.append((lat, lon))
+        while self._times and (t_ms - self._times[0] > HEADING_HISTORY_MS or len(self._times) > HEADING_HISTORY_MAX):
+            self._times.popleft()
+            self._points.popleft()
+
+    def at(self, t_ms: int) -> Optional[Tuple[float, float, int]]:
+        times = list(self._times)
+        if not times:
+            return None
+        points = list(self._points)
+        index = bisect.bisect_left(times, t_ms)
+        before = index - 1 if index > 0 else None
+        after = index if index < len(times) else None
+        if before is not None and after is not None:
+            gap_before = t_ms - times[before]
+            gap_after = times[after] - t_ms
+            if gap_before <= HEADING_MATCH_MS and gap_after <= HEADING_MATCH_MS:
+                span = times[after] - times[before]
+                share = 0.0 if span <= 0 else gap_before / span
+                (lat0, lon0), (lat1, lon1) = points[before], points[after]
+                return lat0 + (lat1 - lat0) * share, lon0 + (lon1 - lon0) * share, min(gap_before, gap_after)
+        nearest = min((i for i in (before, after) if i is not None), key=lambda i: abs(times[i] - t_ms))
+        gap = abs(times[nearest] - t_ms)
+        if gap > HEADING_MATCH_MS:
+            return None
+        return points[nearest][0], points[nearest][1], gap
+
+
 def _rtk(fix: Optional[int]) -> str:
     return {5: "FLOAT", 6: "FIXED"}.get(fix if fix is not None else -1, "NONE")
 
@@ -315,6 +355,7 @@ class DroneStore:
         self._attitude_yaw = _HeadingHistory()
         self._hud_heading = _HeadingHistory()
         self._position_heading = _HeadingHistory()
+        self._positions = _PositionHistory()
         self.invalid = 0
         self.last_invalid: Optional[str] = None
         self.received = 0
@@ -347,7 +388,24 @@ class DroneStore:
             self._hud_heading.add(received_at_ms, values["heading_deg"])
         elif topic == "drone/position" and values.get("heading_deg") is not None:
             self._position_heading.add(received_at_ms, values["heading_deg"])
+        if topic == "drone/position" and values.get("lat") is not None and self._gps_fixed(received_at_ms):
+            # Only with a 3D fix, as the map's drone station (droneStation()).
+            self._positions.add(received_at_ms, values["lat"], values["lon"])
         return True
+
+    def _gps_fixed(self, now_ms: int) -> bool:
+        gps = self._latest.get("drone/gps")
+        if gps is None or now_ms - gps["received_at_ms"] > STALE_MS:
+            return False
+        fix = gps["values"].get("fix")
+        return fix is not None and fix >= POSITION_FIX_MIN
+
+    def position_at(self, t_ms: int) -> Optional[Dict[str, Any]]:
+        """Where the drone was at ``t_ms`` (console clock), or None when no fixed position is within 1 s."""
+        found = self._positions.at(t_ms)
+        if found is None:
+            return None
+        return {"lat": round(found[0], 7), "lon": round(found[1], 7), "offset_ms": int(found[2])}
 
     def heading_at(self, t_ms: int) -> Optional[Dict[str, Any]]:
         """The drone's yaw at ``t_ms`` (console clock), or None when no sample is within 1 s."""
@@ -559,6 +617,10 @@ class DroneLink:
     def heading_at(self, t_ms: int) -> Optional[Dict[str, Any]]:
         with self._lock:
             return self._store.heading_at(t_ms)
+
+    def position_at(self, t_ms: int) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            return self._store.position_at(t_ms)
 
     def view(self, now_ms: Optional[int] = None) -> Dict[str, Any]:
         now = self._clock() if now_ms is None else now_ms

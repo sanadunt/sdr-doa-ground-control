@@ -24,7 +24,7 @@ import secrets
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Dict, Iterable, Mapping, Optional
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional
 
 import paho.mqtt.client as mqtt
 from paho.mqtt.packettypes import PacketTypes
@@ -33,14 +33,18 @@ from paho.mqtt.properties import Properties
 if __package__:
     from . import rdf_node_commands as commands
     from .config_command_tracker import FINAL_ACK_STATUSES, MonitorPublishError, final_ack_deadline
-    from .doa_position_estimate import WAITING_NO_BEARING, WAITING_NO_POSITION, PositionEstimator
+    from .doa_position_estimate import (
+        SOURCE_DRONE, SOURCE_RDF, WAITING_NO_BEARING, WAITING_NO_POSITION, PositionEstimator, with_ground,
+    )
     from .ground_gps import GROUND_GPS_SUFFIX, GroundGpsStore
     from .lora_link import LORA_SUFFIXES, LoraLinkStore
     from .rdf_node_mqtt_v2 import RDF_NODE_V2_SUFFIXES, RdfNodeV2Telemetry
 else:
     import rdf_node_commands as commands
     from config_command_tracker import FINAL_ACK_STATUSES, MonitorPublishError, final_ack_deadline
-    from doa_position_estimate import WAITING_NO_BEARING, WAITING_NO_POSITION, PositionEstimator
+    from doa_position_estimate import (
+        SOURCE_DRONE, SOURCE_RDF, WAITING_NO_BEARING, WAITING_NO_POSITION, PositionEstimator, with_ground,
+    )
     from ground_gps import GROUND_GPS_SUFFIX, GroundGpsStore
     from lora_link import LORA_SUFFIXES, LoraLinkStore
     from rdf_node_mqtt_v2 import RDF_NODE_V2_SUFFIXES, RdfNodeV2Telemetry
@@ -108,6 +112,8 @@ class MqttMonitor:
         self._rdf_node.on_accepted = self._on_rdf_node_accepted
         # Where the moving node's bearings cross (contract 1.10 b, lat, lon).
         self._estimate = PositionEstimator()
+        # The drone that carries the RDF-SDR, by time (set_drone_reference()).
+        self._drone_reference: Optional[Callable[[int], Optional[Dict[str, Any]]]] = None
         self._rdf_node.on_live_doa = self._on_live_doa
         # The RDF Node topics first, then the LoRa serial bridge's status
         # (lora_link.py) and the groundstation's own GNSS position
@@ -811,23 +817,78 @@ class MqttMonitor:
             })
             return result
 
+    def set_drone_reference(self, reference: Optional[Callable[[int], Optional[Dict[str, Any]]]]) -> None:
+        """Where the drone was and where its array pointed at a time (ms): ``{lat, lon, heading_deg}``, each or None.
+
+        The console passes it (``GroundConsoleServer.drone_reference_at``); it
+        must not take this monitor's lock, since it is called under it.
+        """
+        self._drone_reference = reference
+
+    def _drone_at(self, t_ms: Any) -> Dict[str, Any]:
+        reference = self._drone_reference
+        if reference is None or type(t_ms) is not int:
+            return {}
+        try:
+            found = reference(t_ms)
+        except Exception:  # the drone side never stops the MQTT thread
+            return {}
+        return found if isinstance(found, dict) else {}
+
+    def _array_bearing(self, doa: Dict[str, Any]) -> Optional[float]:
+        """The transmitter's direction from the array reference, clockwise (degrees), or None.
+
+        The edge's bearing is ``h - theta_0``, so ``b - h`` while it sent both,
+        otherwise ``-theta_0`` from ``a`` and this session's angle convention.
+        """
+        b, h = doa.get("b"), doa.get("h")
+        if isinstance(b, (int, float)) and isinstance(h, (int, float)):
+            return (b - h) % 360.0
+        a = doa.get("a")
+        if not isinstance(a, (int, float)):
+            return None
+        angle = self._rdf_node.session_angle()
+        if angle == "theta_mirror":
+            return (-a) % 360.0
+        if angle == "csv_native":
+            return a % 360.0
+        return None
+
     def _on_live_doa(self, doa: Dict[str, Any]) -> None:
-        # A sample without a bearing (no heading source) or a position (no fix,
-        # or nav.gps.publish_position off) is no ray; the estimate says which.
-        if doa.get("b") is None:
+        # The RDF-SDR flies inside the drone: its RTK position and its yaw (plus
+        # the array's turn against the nose) at the sample's time come first,
+        # the edge's own b and lat/lon only where the drone has none. A sample
+        # with neither is no ray; the estimate says what it lacks.
+        drone = self._drone_at(doa.get("t"))
+        bearing, bearing_source = None, None
+        relative = self._array_bearing(doa)
+        heading = drone.get("heading_deg")
+        if isinstance(heading, (int, float)) and relative is not None:
+            bearing, bearing_source = (heading + relative) % 360.0, SOURCE_DRONE
+        elif doa.get("b") is not None:
+            bearing, bearing_source = doa["b"], SOURCE_RDF
+        if bearing is None:
             self._estimate.skip(WAITING_NO_BEARING)
             return
-        if doa.get("lat") is None or doa.get("lon") is None:
+        if isinstance(drone.get("lat"), (int, float)) and isinstance(drone.get("lon"), (int, float)):
+            lat, lon, position_source = drone["lat"], drone["lon"], SOURCE_DRONE
+        elif doa.get("lat") is not None and doa.get("lon") is not None:
+            lat, lon, position_source = doa["lat"], doa["lon"], SOURCE_RDF
+        else:
             self._estimate.skip(WAITING_NO_POSITION)
             return
-        self._estimate.add(q=doa["q"], t_ms=doa["t"], frequency_hz=doa["f"], bearing_deg=doa["b"],
-                           latitude=doa["lat"], longitude=doa["lon"], confidence_db=doa.get("c"),
-                           heading_source=doa.get("hsrc"))
+        self._estimate.add(q=doa["q"], t_ms=doa["t"], frequency_hz=doa["f"], bearing_deg=bearing,
+                           latitude=lat, longitude=lon, confidence_db=doa.get("c"),
+                           heading_source=doa.get("hsrc"), bearing_source=bearing_source,
+                           position_source=position_source)
 
     def reset_position_estimate(self) -> Dict[str, Any]:
         """Start the position estimate over (operator: another target, or the node was moved by hand)."""
         self._estimate.reset()
-        return self._estimate.view(_now_ms())
+        now = _now_ms()
+        with self._lock:
+            ground = self._ground_gps.view(now)
+        return with_ground(self._estimate.view(now), ground)
 
     def rdf_node_view(self) -> Optional[Dict[str, Any]]:
         """The RDF Node view the Dashboard's telemetry source reads (issue #8).
@@ -846,7 +907,7 @@ class MqttMonitor:
                 "connection": self._rdf_connection_locked(),
                 "node_id": self._rdf_node.node_id,
                 "node": self._rdf_node.node_view(now),
-                "position_estimate": self._estimate.view(now),
+                "position_estimate": with_ground(self._estimate.view(now), self._ground_gps.view(now)),
                 # The node reaches this broker over the LoRa serial bridge: no
                 # IP path, so no Data Out (telemetry_source names that), and the
                 # store's Angular and detail windows are the LoRa ones.
