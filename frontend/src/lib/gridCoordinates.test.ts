@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatGridMetres, gsRelativeXY, isCoordinateFormat, toMgrs, toUtm } from './gridCoordinates';
+import { formatGridMetres, fromUtm, gsRelativeXY, isCoordinateFormat, toMgrs, toUtm, toUtmInZone } from './gridCoordinates';
 
 /** WGS84 to UTM by pyproj 3.8 (EPSG:326xx/327xx) and MGRS by the `mgrs` package, 1 m digits. */
 const REFERENCE = [
@@ -41,6 +41,38 @@ describe('UTM', () => {
 
   it('puts 180° in zone 60', () => {
     expect(toUtm(-6, 180)?.zone).toBe(60);
+  });
+});
+
+describe('UTM back to latitude and longitude', () => {
+  // pyproj 3.8, EPSG:327xx/326xx to EPSG:4326.
+  it.each([
+    { zone: 48, south: true, e: 795000, n: 9234000, lat: -6.922407278, lon: 107.669483737 },
+    { zone: 48, south: true, e: 700000, n: 9300000, lat: -6.329713275, lon: 106.808005127 },
+    { zone: 48, south: true, e: 166000, n: 9990000, lat: -0.090348294, lon: 101.999803854 },
+    { zone: 48, south: true, e: 800000, n: 9230000, lat: -6.958294313, lon: 107.714902183 },
+    { zone: 33, south: false, e: 513696.945, n: 8680760.053, lat: 78.199999998, lon: 15.599999982 },
+  ])('matches pyproj for $zone $e $n', (point) => {
+    const back = fromUtm(point.zone, point.south, point.e, point.n);
+    expect(Math.abs(back.latitude - point.lat)).toBeLessThan(1e-7);
+    expect(Math.abs(back.longitude - point.lon)).toBeLessThan(1e-7);
+  });
+
+  it('round-trips every reference point', () => {
+    for (const point of REFERENCE) {
+      const utm = toUtm(point.lat, point.lon)!;
+      const back = fromUtm(utm.zone, utm.south, utm.easting, utm.northing);
+      expect(Math.abs(back.latitude - point.lat)).toBeLessThan(1e-8);
+      expect(Math.abs(back.longitude - point.lon)).toBeLessThan(1e-8);
+    }
+  });
+
+  it('keeps a forced zone for a point beyond it, as a map sheet does', () => {
+    // 108.2°E lies in zone 49; pyproj in zone 48 (EPSG:32748): 853697.815, 9236118.228.
+    const utm = toUtmInZone(-6.9, 108.2, 48)!;
+    expect(utm.zone).toBe(48);
+    expect(Math.abs(utm.easting - 853697.815)).toBeLessThan(0.01);
+    expect(Math.abs(utm.northing - 9236118.228)).toBeLessThan(0.01);
   });
 });
 

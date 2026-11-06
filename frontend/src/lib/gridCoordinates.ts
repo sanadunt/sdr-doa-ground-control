@@ -49,10 +49,19 @@ function utmZone(lat: number, lon: number): number {
 /** WGS84 latitude and longitude to UTM; null outside 80°S..84°N, where UTM is not defined. */
 export function toUtm(lat: number, lon: number): UtmCoordinate | null {
   if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -80 || lat > 84 || lon < -180 || lon > 180) return null;
-  const zone = utmZone(lat, lon);
+  return toUtmInZone(lat, lon, utmZone(lat, lon));
+}
+
+/**
+ * UTM in a given zone, also for a point just outside it (a map grid keeps the
+ * zone of the view's centre, as a printed map sheet does); null outside
+ * 80°S..84°N.
+ */
+export function toUtmInZone(lat: number, lon: number, zone: number): UtmCoordinate | null {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -80 || lat > 84 || !Number.isInteger(zone) || zone < 1 || zone > 60) return null;
   const central = ((zone - 1) * 6 - 180 + 3) * (Math.PI / 180);
   const phi = lat * (Math.PI / 180);
-  const lambda = lon * (Math.PI / 180) - central;
+  const lambda = ((((lon * (Math.PI / 180) - central) + 3 * Math.PI) % (2 * Math.PI)) - Math.PI);
   const sinPhi = Math.sin(phi);
   const t = Math.sinh(Math.atanh(sinPhi) - E2N * Math.atanh(E2N * sinPhi));
   const xiPrime = Math.atan2(t, Math.cos(lambda));
@@ -71,6 +80,30 @@ export function toUtm(lat: number, lon: number): UtmCoordinate | null {
     south,
     easting: 500_000 + K0 * RECTIFYING_RADIUS * eta,
     northing: (south ? 10_000_000 : 0) + K0 * RECTIFYING_RADIUS * xi,
+  };
+}
+
+const BETA = [N / 2 - (2 * N ** 2) / 3 + (37 * N ** 3) / 96, N ** 2 / 48 + N ** 3 / 15, (17 * N ** 3) / 480];
+const DELTA = [2 * N - (2 * N ** 2) / 3 - 2 * N ** 3, (7 * N ** 2) / 3 - (8 * N ** 3) / 5, (56 * N ** 3) / 15];
+
+/** UTM back to WGS84 latitude and longitude (the inverse Krüger series), for drawing grid lines. */
+export function fromUtm(zone: number, south: boolean, easting: number, northing: number): { latitude: number; longitude: number } {
+  const xi = (northing - (south ? 10_000_000 : 0)) / (K0 * RECTIFYING_RADIUS);
+  const eta = (easting - 500_000) / (K0 * RECTIFYING_RADIUS);
+  let xiPrime = xi;
+  let etaPrime = eta;
+  BETA.forEach((beta, index) => {
+    const j = 2 * (index + 1);
+    xiPrime -= beta * Math.sin(j * xi) * Math.cosh(j * eta);
+    etaPrime -= beta * Math.cos(j * xi) * Math.sinh(j * eta);
+  });
+  const chi = Math.asin(Math.sin(xiPrime) / Math.cosh(etaPrime));
+  let phi = chi;
+  DELTA.forEach((delta, index) => { phi += delta * Math.sin(2 * (index + 1) * chi); });
+  const central = (zone - 1) * 6 - 180 + 3;
+  return {
+    latitude: phi * (180 / Math.PI),
+    longitude: central + Math.atan2(Math.sinh(etaPrime), Math.cos(xiPrime)) * (180 / Math.PI),
   };
 }
 

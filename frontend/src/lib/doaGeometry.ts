@@ -1,6 +1,7 @@
 import type { Feature, FeatureCollection, LineString, Point, Polygon } from 'geojson';
 import { geographicBearingForBin } from './polar';
 import type { CoordinateFormat } from './gridCoordinates';
+import type { MapGridKind } from './mapGrid';
 
 export const EARTH_RADIUS_M = 6_371_000;
 
@@ -20,6 +21,8 @@ export interface DoaOverlaySettings {
   estimateVisible: boolean;
   /** How the estimate card writes its position for a land map (lib/gridCoordinates.ts). */
   coordinateFormat: CoordinateFormat;
+  /** A UTM, MGRS or latitude/longitude grid over the map, or none (lib/mapGrid.ts). */
+  mapGrid: MapGridKind;
   /** Multiplies every overlay paint opacity, 0.2 to 1. */
   overlayOpacity: number;
   heatStyle: 'beam' | 'density';
@@ -52,6 +55,7 @@ export const DEFAULT_DOA_OVERLAY_SETTINGS: DoaOverlaySettings = {
   headingVisible: true,
   estimateVisible: true,
   coordinateFormat: 'latlon',
+  mapGrid: 'off',
   overlayOpacity: 0.85,
   heatStyle: 'beam',
   dbScale: 'auto',

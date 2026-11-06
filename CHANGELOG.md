@@ -4,8 +4,9 @@ Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QU
 
 ## 3.18.0
 
-Simulasi kini menampilkan estimasi posisi, posisi estimasi bisa ditulis dalam koordinat peta darat, dan kotak sumber peta tidak lagi melebar. Tidak ada yang dihapus.
+Simulasi kini menampilkan estimasi posisi, peta bisa diberi grid UTM, MGRS atau Lat/Lon, posisi estimasi bisa ditulis dalam koordinat peta darat, dan kotak sumber peta tidak lagi melebar. Tidak ada yang dihapus.
 
+- **Grid peta.** Panel Lapisan punya pilihan **Grid peta**: Mati (bawaan), UTM (X, Y), MGRS atau Lat/Lon. Garis grid digambar di atas peta dasar dan di bawah garis DoA. Jaraknya menyesuaikan zoom (100 m, 1 km, 10 km, 100 km untuk UTM/MGRS; derajat bulat untuk Lat/Lon), paling banyak 15 garis per arah, dan setiap garis diberi angka: UTM "X 795000"/"Y 9234000", MGRS dua digit seperti di lembar peta topografi ("94", "33"), Lat/Lon "-6.930°". Grid UTM/MGRS memakai zona di tengah tampilan, seperti satu lembar peta cetak, dan jalan juga offline. Tidak digambar di jendela peta kecil.
 - **Koordinat untuk peta darat.** Kartu Estimasi posisi punya pilihan **Koordinat**: Lat/Lon, UTM (zona, X easting, Y northing dalam meter, WGS84, misalnya "UTM 48M · X 795503 · Y 9234235"), MGRS ("48M YT 95502 34234", presisi 1 m) atau X,Y dari GS (meter ke timur dan ke utara dari GPS groundstation, misalnya "X +2360 m · Y +1506 m"; tanpa fix GPS groundstation kartu menyebutnya). Pilihan disimpan bersama setelan Lapisan dan juga tersedia di tablet. Hasil UTM dan MGRS dicek terhadap pyproj dan pustaka `mgrs` (selisih di bawah 1 cm).
 
 - **Estimasi posisi di Simulasi.** Dengan Simulasi aktif, peta Dashboard menampilkan drone dengan jejak terbangnya, tanda GS, area panas estimasi, titik estimasi, serta garis ke RDF-SDR dan ke GS dengan jarak dan arahnya, juga kartu Estimasi posisi. Halaman Simulasi punya kolom baru "Jarak pemancar" (0,5–8 km, bawaan 2 km): pemancar diletakkan sejauh itu di arah bearing. Semuanya hanya gambar di browser; estimasi asli di console tidak tersentuh, dan kartu tidak punya tombol Mulai ulang selama simulasi.
