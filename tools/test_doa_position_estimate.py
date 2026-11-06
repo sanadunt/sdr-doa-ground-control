@@ -149,6 +149,34 @@ class EstimateTests(unittest.TestCase):
         self.assertEqual((view["samples"], view["state"], view["error"]), (101, estimate.STATE_ESTIMATE, None))
         self.assertLess(error_m(view, target), 300)
 
+    def test_the_view_names_where_bearings_and_positions_came_from(self) -> None:
+        est = estimate.PositionEstimator(threaded=False)
+        lat, lon = place(0, 0)
+        est.add(q=1, t_ms=1, frequency_hz=1, bearing_deg=10, latitude=lat, longitude=lon,
+                bearing_source=estimate.SOURCE_DRONE, position_source=estimate.SOURCE_DRONE)
+        est.add(q=2, t_ms=2, frequency_hz=1, bearing_deg=12, latitude=lat, longitude=lon,
+                bearing_source=estimate.SOURCE_RDF, position_source=estimate.SOURCE_DRONE)
+        view = est.view(0)
+        self.assertEqual((view["bearing_source"], view["position_source"], view["drone_samples"]),
+                         (estimate.SOURCE_RDF, estimate.SOURCE_DRONE, 1))
+
+    def test_distance_and_bearing_from_the_groundstation(self) -> None:
+        target = place(-1500, 3000)
+        est = estimate.PositionEstimator(threaded=False)
+        drive(est, target, road(-2500, 2500, step=50))
+        view = est.view(0)
+        ground_lat, ground_lon = place(-1500, 0)
+        fixed = {"state": "FIX", "lat": ground_lat, "lon": ground_lon}
+        located = estimate.with_ground(view, fixed)
+        self.assertEqual((located["ground_latitude"], located["ground_longitude"]), (ground_lat, ground_lon))
+        self.assertLess(abs(located["ground_distance_m"] - 3000), 300)
+        self.assertLess(estimate._angle_diff(located["ground_bearing_deg"], 0.0), 6)
+        # The estimate itself is left as it was.
+        self.assertNotIn("ground_distance_m", view)
+        for ground in (None, {"state": "STALE", "lat": None, "lon": None}, {"state": "NO_FIX", "lat": None, "lon": None}):
+            self.assertIsNone(estimate.with_ground(view, ground)["ground_distance_m"])
+        self.assertIsNone(estimate.with_ground(estimate.PositionEstimator(threaded=False).view(0), fixed)["ground_distance_m"])
+
     def test_circular_span(self) -> None:
         self.assertEqual(estimate._circular_span([]), 0.0)
         self.assertEqual(estimate._circular_span([350, 10]), 20.0)

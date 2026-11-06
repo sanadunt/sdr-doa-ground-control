@@ -678,6 +678,54 @@ class SharedMqttMonitorTests(unittest.TestCase):
             self._rdf("telemetry/doa", dict(doa, t=now, q=12, h=84.3, hsrc="C", b=294.3, lat=-6.9, lon=107.7), qos=0)
             self.assertIsNone(self.monitor.rdf_node_view()["position_estimate"]["waiting_for"])
 
+    def test_the_estimate_takes_the_drones_position_and_yaw_first(self) -> None:
+        fixtures = TOOLS_DIR / "fixtures" / "rdf-node"
+        manifest = json.loads((fixtures / "manifest.json").read_text(encoding="utf-8"))
+        now = manifest["generated_at_ms"]
+        self._connected()
+        estimator = self.module.PositionEstimator(threaded=False)
+        self.monitor._estimate = estimator
+        drone = {"lat": -6.95, "lon": 107.75, "heading_deg": 100.0}
+        asked = []
+
+        def reference(t_ms):
+            asked.append(t_ms)
+            return dict(drone)
+
+        self.monitor.set_drone_reference(reference)
+        doa = json.loads((fixtures / "telemetry-doa.ok1.json").read_text(encoding="utf-8"))
+        entries = {item["file"]: item for item in manifest["fixtures"]}
+        with patch.object(self.module, "_now_ms", lambda: now):
+            for name in ("state.json", "capabilities.json", "telemetry-health.json"):
+                entry = entries[name]
+                self._rdf(entry["topic"], (fixtures / name).read_bytes(), qos=entry["qos"], retained=entry["retain"])
+            # The edge turned theta_0 with its compass (b = h - theta_0); the drone's array heading replaces h.
+            self._rdf("telemetry/doa", dict(doa, t=now, q=20, h=84.3, hsrc="C", b=294.3, lat=-6.9, lon=107.7), qos=0)
+            sample = estimator._samples[-1]
+            self.assertEqual(asked, [now])
+            self.assertAlmostEqual(sample["bearing_deg"], (100.0 + 294.3 - 84.3) % 360.0)
+            self.assertEqual((sample["latitude"], sample["longitude"]), (-6.95, 107.75))
+            self.assertEqual((sample["bearing_source"], sample["position_source"]), ("drone", "drone"))
+            # Without the edge's compass, theta_0 comes from a (capabilities.angle theta_mirror).
+            self._rdf("telemetry/doa", dict(doa, t=now, q=21, h=None, hsrc=None), qos=0)
+            self.assertAlmostEqual(estimator._samples[-1]["bearing_deg"], (100.0 - doa["a"]) % 360.0)
+            # No drone yaw: the edge's own bearing, with the drone's position.
+            drone["heading_deg"] = None
+            self._rdf("telemetry/doa", dict(doa, t=now, q=22, h=84.3, hsrc="C", b=294.3), qos=0)
+            sample = estimator._samples[-1]
+            self.assertEqual((sample["bearing_deg"], sample["bearing_source"], sample["position_source"]),
+                             (294.3, "rdf", "drone"))
+            # No drone at all: the edge's bearing and position, as before.
+            drone.update(lat=None, lon=None)
+            self._rdf("telemetry/doa", dict(doa, t=now, q=23, h=84.3, hsrc="C", b=294.3, lat=-6.9, lon=107.7), qos=0)
+            sample = estimator._samples[-1]
+            self.assertEqual((sample["latitude"], sample["position_source"]), (-6.9, "rdf"))
+            # A reference that fails is no drone.
+            self.monitor.set_drone_reference(lambda t_ms: 1 / 0)
+            self._rdf("telemetry/doa", dict(doa, t=now, q=24, h=84.3, hsrc="C", b=294.3, lat=-6.9, lon=107.7), qos=0)
+            self.assertEqual(estimator._samples[-1]["bearing_source"], "rdf")
+            self.assertIn("ground_distance_m", self.monitor.rdf_node_view()["position_estimate"])
+
     def test_answered_config_gets_never_push_out_a_waiting_patch(self) -> None:
         # A patch the edge ACCEPTED waits up to 90 s for its final ACK while
         # Kontrol may send a config.get every second, each answered at once.

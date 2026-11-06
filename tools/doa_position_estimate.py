@@ -20,10 +20,15 @@ that sample and replays the kept samples (``HISTORY``). Work runs on one worker
 thread, so a replay never holds up the MQTT callback that feeds ``add()``.
 This is an aid for finding a transmitter, not a measured position.
 
-A LIVE sample without ``b`` (no heading source at the edge) or without
-``lat``/``lon`` (no fix, or ``nav.gps.publish_position`` off) is no ray. The
-monitor reports it with ``skip()``, and the view names what the estimate waits
-for (``waiting_for``) until a usable sample comes.
+The RDF-SDR flies inside the drone, so the monitor takes the drone's own
+position (RTK) and yaw at the sample's time first (``bearing_source`` and
+``position_source`` ``drone``), and the edge's ``b`` and ``lat``/``lon`` only
+where the drone has none (``rdf``). A sample with neither bearing nor position
+is no ray. The monitor reports it with ``skip()``, and the view names what the
+estimate waits for (``waiting_for``) until a usable sample comes.
+
+``with_ground()`` adds the distance and bearing from the groundstation's own
+GNSS (``ground_gps.py``) to the estimate, at answer time.
 """
 from __future__ import annotations
 
@@ -33,7 +38,7 @@ import threading
 import time
 from array import array
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Mapping, Optional, Tuple
 
 GRID_SIZE_M = 10_000.0
 GRID_CELLS = 100
@@ -57,6 +62,9 @@ STATE_ESTIMATE = "ESTIMATE"
 # Why the latest LIVE sample was no ray (``waiting_for``).
 WAITING_NO_BEARING = "NO_BEARING"
 WAITING_NO_POSITION = "NO_POSITION"
+# Where a sample's bearing and position came from.
+SOURCE_DRONE = "drone"
+SOURCE_RDF = "rdf"
 
 
 def _east_north(lat0: float, lon0: float, lat: float, lon: float) -> Tuple[float, float]:
@@ -137,11 +145,13 @@ class PositionEstimator:
     # -- input ------------------------------------------------------------
 
     def add(self, *, q: int, t_ms: int, frequency_hz: int, bearing_deg: float, latitude: float, longitude: float,
-            confidence_db: Optional[float] = None, heading_source: Optional[str] = None) -> None:
+            confidence_db: Optional[float] = None, heading_source: Optional[str] = None,
+            bearing_source: str = SOURCE_RDF, position_source: str = SOURCE_RDF) -> None:
         """Queue one LIVE sample; the worker scores it."""
         sample = {"q": q, "t_ms": t_ms, "frequency_hz": frequency_hz, "bearing_deg": bearing_deg % 360.0,
                   "latitude": latitude, "longitude": longitude, "confidence_db": confidence_db,
-                  "heading_source": heading_source, "generation": self._generation}
+                  "heading_source": heading_source, "bearing_source": bearing_source,
+                  "position_source": position_source, "generation": self._generation}
         with self._lock:
             self._waiting_for = None
         if not self._threaded:
@@ -213,6 +223,7 @@ class PositionEstimator:
             "frequency_hz": None, "samples": 0, "stations": 0, "spread_deg": None,
             "latitude": None, "longitude": None, "radius_m": None, "peak_share": None,
             "node_latitude": None, "node_longitude": None, "distance_m": None, "bearing_deg": None,
+            "bearing_source": None, "position_source": None, "drone_samples": 0,
             "grid": None, "updated_at_ms": None, "error": None,
             "method": {"grid_size_m": GRID_SIZE_M, "grid_cells": GRID_CELLS, "bearing_sigma_deg": BEARING_SIGMA_DEG,
                        "min_stations": MIN_STATIONS, "min_spread_deg": MIN_SPREAD_DEG, "station_m": STATION_M},
@@ -273,6 +284,8 @@ class PositionEstimator:
         result = dict(self._result)
         result.update(frequency_hz=self._frequency, samples=len(self._samples), stations=len(self._stations),
                       node_latitude=latest["latitude"], node_longitude=latest["longitude"],
+                      bearing_source=latest.get("bearing_source"), position_source=latest.get("position_source"),
+                      drone_samples=sum(1 for s in self._samples if s.get("bearing_source") == SOURCE_DRONE),
                       updated_at_ms=int(time.time() * 1000), error=None, reset_reason=None)
         peak_index = max(range(len(values)), key=values.__getitem__)
         peak = values[peak_index]
@@ -333,6 +346,22 @@ class PositionEstimator:
         return result
 
 
+def with_ground(estimate: Dict[str, Any], ground: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """The estimate with the distance and bearing from the groundstation (``ground_*``), null without a fix."""
+    result = dict(estimate)
+    result.update(ground_latitude=None, ground_longitude=None, ground_distance_m=None, ground_bearing_deg=None)
+    lat, lon = estimate.get("latitude"), estimate.get("longitude")
+    if ground is None or ground.get("state") != "FIX" or lat is None or lon is None:
+        return result
+    glat, glon = ground.get("lat"), ground.get("lon")
+    if not isinstance(glat, (int, float)) or not isinstance(glon, (int, float)):
+        return result
+    east, north = _east_north(glat, glon, lat, lon)
+    result.update(ground_latitude=glat, ground_longitude=glon, ground_distance_m=round(math.hypot(east, north)),
+                  ground_bearing_deg=round(_bearing(east, north), 1))
+    return result
+
+
 def _circular_span(directions: List[float]) -> float:
     """Smallest arc (degrees) that holds every direction; 0 for fewer than two."""
     if len(directions) < 2:
@@ -343,6 +372,6 @@ def _circular_span(directions: List[float]) -> float:
 
 
 __all__ = [
-    "PositionEstimator", "STATE_ESTIMATE", "STATE_NEED_MOVEMENT", "STATE_NO_DATA", "WAITING_NO_BEARING",
-    "WAITING_NO_POSITION",
+    "PositionEstimator", "SOURCE_DRONE", "SOURCE_RDF", "STATE_ESTIMATE", "STATE_NEED_MOVEMENT", "STATE_NO_DATA",
+    "WAITING_NO_BEARING", "WAITING_NO_POSITION", "with_ground",
 ]

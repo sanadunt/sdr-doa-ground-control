@@ -378,6 +378,15 @@ class DroneService:
             link = self._link
         return None if link is None else link.heading_at(t_ms)
 
+    def position_at(self, t_ms: int) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            link = self._link
+        return None if link is None else link.position_at(t_ms)
+
+    def array_offset_deg(self) -> float:
+        """The array's turn against the drone's nose (``array_heading_offset_deg``)."""
+        return float(self.settings["array_heading_offset_deg"])
+
     def host(self) -> Optional[str]:
         with self._lock:
             return None if self._link is None else self._link.host

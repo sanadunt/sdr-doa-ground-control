@@ -1,7 +1,7 @@
 import { useState, type JSX } from 'react';
 import { useI18n } from '../../lib/i18n';
 import type { MessageKey } from '../../lib/i18n';
-import { estimateWaitKey, formatEstimateDistance, resetPositionEstimate, type PositionEstimate } from '../../lib/positionEstimate';
+import { estimateSourceKey, estimateWaitKey, formatEstimateDistance, resetPositionEstimate, type PositionEstimate } from '../../lib/positionEstimate';
 import { formatBearing } from '../../lib/overlayPalette';
 
 const STATE_TAG: Record<PositionEstimate['state'], MessageKey> = {
@@ -17,7 +17,8 @@ const STATE_TEXT: Record<PositionEstimate['state'], MessageKey> = {
 
 /**
  * The transmitter position estimate under the bearing HUD: where the moving
- * RDF-SDR's bearings cross, how far that is, and what it rests on. While the
+ * RDF-SDR's bearings cross, how far that is from the RDF-SDR and from the
+ * groundstation, and what it rests on (the drone's GPS and yaw, or the RDF-SDR's own). While the
  * console skips LIVE bearings it says what they lack: a position (or that the
  * node does not send one) or a heading. "Start over" clears it on this
  * console (nothing goes to the node). Not shown in the LAN view, which only watches. In the compact touch layout, and on a
@@ -34,6 +35,11 @@ export function EstimatePanel({ estimate, viewOnly = false, compact = false }: {
     distance: formatEstimateDistance(estimate.distanceM),
     bearing: estimate.bearingDeg === null ? '--' : formatBearing(estimate.bearingDeg, 0),
   }) : null;
+  const groundText = located && estimate.groundDistanceM !== null ? t('estimate.groundDistance', {
+    distance: formatEstimateDistance(estimate.groundDistanceM),
+    bearing: estimate.groundBearingDeg === null ? '--' : formatBearing(estimate.groundBearingDeg, 0),
+  }) : null;
+  const sourceKey = estimateSourceKey(estimate);
   const waitKey = estimateWaitKey(estimate);
   const onReset = () => {
     setResetState({ busy: true, error: null });
@@ -81,6 +87,7 @@ export function EstimatePanel({ estimate, viewOnly = false, compact = false }: {
       {located && estimate.latitude !== null && estimate.longitude !== null ? (
         <>
           <div className="ov-estimate-distance">{distanceText}</div>
+          {groundText ? <div className="ov-estimate-distance">{groundText}</div> : null}
           <div className="ov-hud-offset">
             <b>{t('estimate.position', {
               lat: estimate.latitude.toFixed(5),
@@ -99,6 +106,7 @@ export function EstimatePanel({ estimate, viewOnly = false, compact = false }: {
           })}
         </div>
       ) : null}
+      {sourceKey && estimate.samples > 0 ? <div className="ov-hud-offset">{t(sourceKey)}</div> : null}
       {!ready ? <p className="ov-estimate-note">{t('estimate.needs', { stations: String(estimate.minStations), spread: estimate.minSpreadDeg.toFixed(0) })}</p> : null}
       {estimate.resetReason === 'FREQUENCY_CHANGED' ? <p className="ov-hud-held">{t('estimate.frequencyChanged')}</p> : null}
       <p className="ov-estimate-note">{t('estimate.note')}</p>

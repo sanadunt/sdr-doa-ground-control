@@ -1,13 +1,14 @@
 import type { Feature, FeatureCollection, LineString, Point, Polygon } from 'geojson';
 import type { TelemetrySnapshot } from '../types';
-import { destination, type GeoOrigin } from './doaGeometry';
+import { bearingAndDistance, destination, type GeoOrigin } from './doaGeometry';
 import { formatBearing } from './overlayPalette';
 import type { MessageKey, Translate } from './i18n';
 
 /**
  * The transmitter position estimate the console builds from the moving
- * RDF-SDR's bearings (tools/doa_position_estimate.py, contract 1.10 b, lat,
- * lon). ESTIMATE: rays from enough places cross; NEED_MOVEMENT: there is a
+ * RDF-SDR's bearings (tools/doa_position_estimate.py): the drone's GPS and yaw
+ * at each sample first, the edge's own b, lat and lon (contract 1.10) where the
+ * drone has none. ESTIMATE: rays from enough places cross; NEED_MOVEMENT: there is a
  * hot area but the rays do not cross from far enough apart yet, so it is not a
  * position; NO_DATA: no bearing with a position has come.
  */
@@ -29,9 +30,17 @@ export interface PositionEstimate {
   longitude: number | null;
   /** Radius of the area at half the peak or more, metres. */
   radiusM: number | null;
-  /** From the place of the latest bearing. */
+  /** From the place of the latest bearing (the drone, or the RDF-SDR's own GPS). */
   distanceM: number | null;
   bearingDeg: number | null;
+  /** From the groundstation's own GNSS (ground_gps); null without a fix. */
+  groundDistanceM: number | null;
+  groundBearingDeg: number | null;
+  groundLatitude: number | null;
+  groundLongitude: number | null;
+  /** Where the latest bearing's direction and place came from; null from an older console. */
+  bearingSource: EstimateSource | null;
+  positionSource: EstimateSource | null;
   samples: number;
   stations: number;
   spreadDeg: number | null;
@@ -55,6 +64,13 @@ export interface PositionEstimate {
    * (capabilities.nav.position false: nav.gps.publish_position off); null when it does not say.
    */
   positionWithheld: boolean | null;
+}
+
+/** drone: the drone's GPS or yaw at the sample's time; rdf: the RDF-SDR's own GPS or compass. */
+export type EstimateSource = 'drone' | 'rdf';
+
+function source(value: unknown): EstimateSource | null {
+  return value === 'drone' || value === 'rdf' ? value : null;
 }
 
 export const POSITION_ESTIMATE_RESET_ROUTE = '/api/position-estimate/reset';
@@ -112,6 +128,12 @@ export function positionEstimate(snapshot: TelemetrySnapshot | null | undefined)
     radiusM: finite(value.radius_m, 0),
     distanceM: finite(value.distance_m, 0),
     bearingDeg: finite(value.bearing_deg, 0, 360),
+    groundDistanceM: finite(value.ground_distance_m, 0),
+    groundBearingDeg: finite(value.ground_bearing_deg, 0, 360),
+    groundLatitude: finite(value.ground_latitude, -90, 90),
+    groundLongitude: finite(value.ground_longitude, -180, 180),
+    bearingSource: source(value.bearing_source),
+    positionSource: source(value.position_source),
     samples: count(value.samples),
     stations: count(value.stations),
     spreadDeg: finite(value.spread_deg, 0, 360),
@@ -153,20 +175,28 @@ export function estimateWaitKey(estimate: PositionEstimate): MessageKey | null {
   return null;
 }
 
+/** Where the latest bearing came from, for the card; null from an older console. */
+export function estimateSourceKey(estimate: PositionEstimate): MessageKey | null {
+  const { bearingSource, positionSource } = estimate;
+  if (bearingSource === null || positionSource === null) return null;
+  if (bearingSource === 'drone') return positionSource === 'drone' ? 'estimate.sourceDrone' : 'estimate.sourceDroneYaw';
+  return positionSource === 'drone' ? 'estimate.sourceDroneGps' : 'estimate.sourceRdf';
+}
+
 const EMPTY_POLYGONS: FeatureCollection<Polygon> = { type: 'FeatureCollection', features: [] };
 const EMPTY_LINES: FeatureCollection<LineString> = { type: 'FeatureCollection', features: [] };
 const EMPTY_POINTS: FeatureCollection<Point> = { type: 'FeatureCollection', features: [] };
 
 export interface PositionEstimateFeatures {
   heat: FeatureCollection<Polygon>;
-  /** The half-peak radius around the estimate and the line from the RDF-SDR to it. */
+  /** The half-peak radius around the estimate and the lines from the RDF-SDR and the groundstation to it. */
   lines: FeatureCollection<LineString>;
   point: FeatureCollection<Point>;
 }
 
 export const NO_ESTIMATE_FEATURES: PositionEstimateFeatures = { heat: EMPTY_POLYGONS, lines: EMPTY_LINES, point: EMPTY_POINTS };
 
-/** Map geometry: hot cells (share 0..1), and with an ESTIMATE its point, radius and the line from the station. */
+/** Map geometry: hot cells (share 0..1), and with an ESTIMATE its point, radius and the lines from the station and the groundstation. */
 export function positionEstimateFeatures(estimate: PositionEstimate | null, station: GeoOrigin | null): PositionEstimateFeatures {
   if (!estimate || estimate.state === 'NO_DATA') return NO_ESTIMATE_FEATURES;
   const grid = estimate.grid;
@@ -201,6 +231,13 @@ export function positionEstimateFeatures(estimate: PositionEstimate | null, stat
       geometry: { type: 'LineString', coordinates: [[station.longitude, station.latitude], [centre.longitude, centre.latitude]] },
     });
   }
+  if (estimate.groundLatitude !== null && estimate.groundLongitude !== null) {
+    lines.push({
+      type: 'Feature',
+      properties: { kind: 'ground' },
+      geometry: { type: 'LineString', coordinates: [[estimate.groundLongitude, estimate.groundLatitude], [centre.longitude, centre.latitude]] },
+    });
+  }
   return {
     heat: { type: 'FeatureCollection', features: heat },
     lines: { type: 'FeatureCollection', features: lines },
@@ -213,12 +250,37 @@ export function formatEstimateDistance(metres: number | null): string {
   return metres >= 1000 ? `${(metres / 1000).toFixed(metres >= 10_000 ? 0 : 1)} km` : `${Math.round(metres)} m`;
 }
 
-/** Map pill at the estimate: "ESTIMATE 3.4 km · 294°" (distance and bearing from the latest bearing's place). */
-export function positionEstimateLabel(estimate: PositionEstimate, t: Translate): string {
-  const parts = [t('estimate.mapLabel')];
-  if (estimate.distanceM !== null) parts.push(formatEstimateDistance(estimate.distanceM));
-  if (estimate.bearingDeg !== null) parts.push(`${formatBearing(estimate.bearingDeg, 0)}°`);
-  return parts.join(' · ');
+/** Map pill at the estimate point; the distances sit on the lines (positionEstimateLineLabels()). */
+export function positionEstimateLabel(_estimate: PositionEstimate, t: Translate): string {
+  return t('estimate.mapLabel');
+}
+
+export interface EstimateLineLabel {
+  /** Halfway along the line. */
+  lngLat: [number, number];
+  text: string;
+}
+
+/**
+ * The distance and bearing written halfway along each line to an ESTIMATE: "RDF-SDR 3.4 km · 294°"
+ * from the station drawn now (the drone), "GS 5.2 km · 48°" from the groundstation while it has a fix.
+ */
+export function positionEstimateLineLabels(estimate: PositionEstimate | null, station: GeoOrigin | null, t: Translate): EstimateLineLabel[] {
+  if (!estimate || estimate.state !== 'ESTIMATE' || estimate.latitude === null || estimate.longitude === null) return [];
+  const labels: EstimateLineLabel[] = [];
+  const along = (origin: GeoOrigin, key: 'estimate.mapNode' | 'estimate.mapGround') => {
+    const { bearingDeg, distanceM } = bearingAndDistance(origin, estimate.longitude as number, estimate.latitude as number);
+    if (!(distanceM > 0)) return;
+    labels.push({
+      lngLat: destination(origin, bearingDeg, distanceM / 2),
+      text: t(key, { distance: formatEstimateDistance(distanceM), bearing: formatBearing(bearingDeg, 0) }),
+    });
+  };
+  if (station) along(station, 'estimate.mapNode');
+  if (estimate.groundLatitude !== null && estimate.groundLongitude !== null) {
+    along({ latitude: estimate.groundLatitude, longitude: estimate.groundLongitude }, 'estimate.mapGround');
+  }
+  return labels;
 }
 
 /** POST the reset; resolves with the server's new (empty) estimate view, rejects with its code. */

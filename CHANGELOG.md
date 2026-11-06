@@ -2,6 +2,14 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.17.0
+
+Estimasi posisi pemancar memakai GPS dan yaw drone, dan menyebut jaraknya dari groundstation. Tidak ada yang dihapus.
+
+- **Data drone lebih dulu.** RDF-SDR terbang di dalam drone, jadi setiap bearing kini memakai posisi GPS drone (dengan fix 3D, RTK bila ada) dan yaw drone ditambah putaran array (Konfigurasi → Drone) pada saat sampel DoA diambil. GPS dan kompas RDF-SDR sendiri hanya dipakai bila drone tidak punya data di detik itu. Tanpa kompas RDF-SDR pun bearing tetap terhitung selama yaw drone ada.
+- **Jarak dari groundstation.** Kartu estimasi menulis dua jarak: dari RDF-SDR (drone) dan dari groundstation (GPS groundstation sendiri, bila fix), masing-masing dengan arahnya. Peta menarik garis putus-putus dari RDF-SDR (drone) dan dari tanda GS ke titik estimasi; di tengah tiap garis tertulis jarak dan arahnya ("RDF-SDR 3.4 km · 294°", "GS 5.2 km · 48°").
+- **Sumber terlihat.** Kartu menulis sumber bearing terakhir: "GPS dan yaw drone", atau campuran dengan GPS/kompas RDF-SDR.
+
 ## 3.16.0
 
 Console membaca puncak sinyal VFO0 dan squelch dari RDF-SDR (RDF Node 1.11). Tidak ada yang dihapus.
