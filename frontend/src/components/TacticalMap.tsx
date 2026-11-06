@@ -38,6 +38,7 @@ import { angularFrameAgeMs, angularHeld, doaSample, isMqttSnapshot } from '../li
 import { overviewDoaStatus } from '../lib/doaStatus';
 import { headingLabel, headingLabelPosition, headingLineFeatures, headingPopupText, stationHeading, type HeadingSource, type RdfHeading } from '../lib/rdfHeading';
 import { NO_ESTIMATE_FEATURES, positionEstimateFeatures, positionEstimateLabel, positionEstimateLineLabels, type PositionEstimate } from '../lib/positionEstimate';
+import { mapGridColors, mapGridFeatures } from '../lib/mapGrid';
 import { HELD_LAYER_OF, NO_HELD_FEATURES, heldBearingDeg, heldLayerSpec, heldNoticeText, heldOverlayFeatures, heldTimeText, overlayIdentity, pageOverlayMemory, provisionalBesideHeld, rememberOverlay, setPageOverlayMemory } from '../lib/heldOverlay';
 import { seedOverlayMemory } from '../lib/lastLiveDoa';
 import type { HeldSeed } from '../lib/lastLiveDoa';
@@ -611,7 +612,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
         maxZoom: 19,
         attributionControl: false,
         locale: mapLocale(t),
-        style: { version: 8, glyphs: origin + OFFLINE_GLYPHS_PATH, sources: { ...Object.fromEntries(contents.map((content) => [content.id, content.source])), ...Object.fromEntries(SOURCE_IDS.map((id) => [id, { type: 'geojson', data: EMPTY }])) }, layers: [
+        style: { version: 8, glyphs: origin + OFFLINE_GLYPHS_PATH, sources: { ...Object.fromEntries(contents.map((content) => [content.id, content.source])), ...Object.fromEntries(SOURCE_IDS.map((id) => [id, { type: 'geojson', data: EMPTY }])), 'map-grid': { type: 'geojson', data: EMPTY } }, layers: [
           // Neutral land colour under the tiles; it follows the console theme when no tiles load.
           { id: 'basemap-background', type: 'background', paint: { 'background-color': paint.background } },
           // Basemap raster layers sit here, under 'doa-beam'; a style change swaps only them.
@@ -622,6 +623,9 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
           heldLayerSpec(doaLayers.heat),
           // Where the bearings of many places agree: cyan cells, fainter while the rays do not cross yet.
           { id: 'estimate-heat', type: 'fill', source: 'estimate-heat', paint: { 'fill-antialias': false, 'fill-color': estimateColor(consoleTheme() === 'dark'), 'fill-opacity': ['*', ['case', ['==', ['get', 'ready'], true], 1, .5], ['interpolate', ['linear'], ['get', 'share'], .2, .08, 1, .5]] } },
+          // The operator's land map grid (UTM, MGRS or Lat/Lon), above the tiles and under the DoA lines; empty while off.
+          { id: 'map-grid-line', type: 'line', source: 'map-grid', paint: { 'line-color': mapGridColors(consoleTheme() === 'dark').line, 'line-width': 1 } },
+          { id: 'map-grid-label', type: 'symbol', source: 'map-grid', layout: { 'symbol-placement': 'line', 'symbol-spacing': 320, 'text-field': ['get', 'label'], 'text-font': ['NotoSans-Regular'], 'text-size': 11, 'text-keep-upright': true }, paint: { 'text-color': mapGridColors(consoleTheme() === 'dark').text, 'text-halo-color': mapGridColors(consoleTheme() === 'dark').halo, 'text-halo-width': 1.5 } },
           { id: 'doa-rings', type: 'line', source: 'doa-rings', paint: { 'line-color': paint.rings, 'line-opacity': .55, 'line-width': 1.2, 'line-dasharray': [4, 3] } },
           { id: 'doa-guides', type: 'line', source: 'doa-guides', paint: { 'line-color': paint.guides, 'line-opacity': .4, 'line-width': 1, 'line-dasharray': [2, 3] } },
           doaLayers.lobeFill,
@@ -897,6 +901,10 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     const headingPaint = headingColors(tilesLoaded ? tone === 'dark' : theme === 'dark');
     map.setPaintProperty('rdf-heading', 'line-color', headingPaint.live);
     map.setPaintProperty('rdf-heading-held', 'line-color', headingPaint.held);
+    const gridPaint = mapGridColors(tilesLoaded ? tone === 'dark' : theme === 'dark');
+    map.setPaintProperty('map-grid-line', 'line-color', gridPaint.line);
+    map.setPaintProperty('map-grid-label', 'text-color', gridPaint.text);
+    map.setPaintProperty('map-grid-label', 'text-halo-color', gridPaint.halo);
     const estimatePaint = estimateColor(tilesLoaded ? tone === 'dark' : theme === 'dark');
     for (const [layer, property] of [['estimate-heat', 'fill-color'], ['estimate-lines', 'line-color'], ['estimate-point', 'circle-color']] as const) map.setPaintProperty(layer, property, estimatePaint);
   }, [styleReady, theme, tilesLoaded, tone]);
@@ -930,6 +938,22 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     const target = coordinateRef.current;
     if (map && target && framingRef.current?.source === target.source && (miniRef.current || !operatorMovedRef.current)) frameStationRef.current(map, target);
   }, [g.maxDistanceM, g.lobeDistanceM]);
+
+  // The land map grid follows the view: rebuilt after every move, none in the corner window.
+  const gridKind = mini ? 'off' : settings.mapGrid;
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady) return undefined;
+    const source = map.getSource('map-grid') as GeoJSONSource | undefined;
+    const update = () => {
+      const bounds = map.getBounds();
+      source?.setData(mapGridFeatures(gridKind, { west: bounds.getWest(), south: bounds.getSouth(), east: bounds.getEast(), north: bounds.getNorth() }));
+    };
+    update();
+    if (gridKind === 'off') return undefined;
+    map.on('moveend', update);
+    return () => { map.off('moveend', update); };
+  }, [styleReady, gridKind]);
 
   // Push only the sources whose collections changed since the last update.
   useEffect(() => {

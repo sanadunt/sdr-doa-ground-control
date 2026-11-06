@@ -94,6 +94,18 @@ describe('basemap styles', () => {
     expect(declarations('.ov-basemap-menu[hidden]')).toMatch(/display:\s*none/);
   });
 
+  it('keeps the source credit one width whatever style is picked', () => {
+    // Its text changes with the style (118 px for Standard to 409 px for Satellite + labels);
+    // a width taken from the text made the box next to the map button grow on every pick.
+    const own = (selector: string) => rules.find((rule) => rule.selector.split('*/').pop()?.trim() === selector)?.body ?? '';
+    const chip = own('.ov-map-attribution');
+    expect(chip).toMatch(/(?:^|[;\s])flex:\s*none/);
+    expect(chip).toMatch(/(?:^|[;\s])width:\s*min\(220px, 100%\)/);
+    // Every source shrinks with an ellipsis, so each one keeps its start in view.
+    expect(own('.ov-map-attribution a')).toMatch(/flex:\s*0 1 auto;[^}]*min-width:\s*0;[^}]*text-overflow:\s*ellipsis/);
+    expect(css).toMatch(/\.console-shell\[data-layout\^='compact'\] \.ov-map-attribution \{ width: 132px;/);
+  });
+
   it('uses console tokens only', () => {
     for (const rule of rules.filter((item) => /ov-basemap|ov-map-attribution/.test(item.selector))) {
       expect(rule.body, rule.selector).not.toMatch(/#[0-9a-f]{3,8}\b|rgba?\(/i);

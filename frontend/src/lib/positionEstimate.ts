@@ -2,6 +2,7 @@ import type { Feature, FeatureCollection, LineString, Point, Polygon } from 'geo
 import type { TelemetrySnapshot } from '../types';
 import { bearingAndDistance, destination, type GeoOrigin } from './doaGeometry';
 import { formatBearing } from './overlayPalette';
+import { formatGridMetres, gsRelativeXY, toMgrs, toUtm, type CoordinateFormat } from './gridCoordinates';
 import type { MessageKey, Translate } from './i18n';
 
 /**
@@ -243,6 +244,37 @@ export function positionEstimateFeatures(estimate: PositionEstimate | null, stat
     lines: { type: 'FeatureCollection', features: lines },
     point: { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [centre.longitude, centre.latitude] } }] },
   };
+}
+
+/**
+ * The estimate's position in the chosen format, with its radius, or null
+ * without a position: latitude/longitude, UTM (zone, X easting, Y northing),
+ * MGRS, or X/Y metres east and north of the groundstation's own GPS fix.
+ */
+export function estimatePositionText(estimate: PositionEstimate, format: CoordinateFormat, t: Translate): string | null {
+  const { latitude, longitude } = estimate;
+  if (latitude === null || longitude === null) return null;
+  const radius = formatEstimateDistance(estimate.radiusM);
+  if (format === 'utm') {
+    const utm = toUtm(latitude, longitude);
+    if (!utm) return t('estimate.positionNoGrid');
+    return t('estimate.positionUtm', {
+      zone: `${utm.zone}${utm.band}`,
+      x: String(Math.round(utm.easting)),
+      y: String(Math.round(utm.northing)),
+      radius,
+    });
+  }
+  if (format === 'mgrs') {
+    const mgrs = toMgrs(latitude, longitude);
+    return mgrs ? t('estimate.positionMgrs', { mgrs, radius }) : t('estimate.positionNoGrid');
+  }
+  if (format === 'gsxy') {
+    if (estimate.groundLatitude === null || estimate.groundLongitude === null) return t('estimate.positionNoGround');
+    const { x, y } = gsRelativeXY({ latitude: estimate.groundLatitude, longitude: estimate.groundLongitude }, { latitude, longitude });
+    return t('estimate.positionGs', { x: formatGridMetres(x), y: formatGridMetres(y), radius });
+  }
+  return t('estimate.position', { lat: latitude.toFixed(5), lon: longitude.toFixed(5), radius });
 }
 
 export function formatEstimateDistance(metres: number | null): string {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_SIMULATION, simulationHalfPowerWidth, simulationSnapshot, simulationTheta, validateSimulation, randomizeSimulationSettings, simulationRayEnd } from './simulation';
-import { halfPowerWidth } from './doaGeometry';
+import { DEFAULT_SIMULATION, simulationHalfPowerWidth, simulationScene, simulationSnapshot, simulationTheta, validateSimulation, randomizeSimulationSettings, simulationRayEnd } from './simulation';
+import { bearingAndDistance, halfPowerWidth } from './doaGeometry';
+import { positionEstimate, positionEstimateFeatures, positionEstimateLineLabels } from './positionEstimate';
 import { translate } from './i18n';
 import { bearingForView, geographicBearingForBin, polarView } from './polar';
 import { overviewDoaStatus } from './doaStatus';
@@ -54,7 +55,7 @@ describe('local simulation', () => {
     expect(snapshot.authority?.selected).toBeNull();
     expect(snapshot.simulation).toBe(true);
   });
-  it.each([{ latitude: 91 }, { longitude: -181 }, { angle: 360 }, { width: 0 }, { angle: NaN }])('rejects invalid settings %o', invalid => {
+  it.each([{ latitude: 91 }, { longitude: -181 }, { angle: 360 }, { width: 0 }, { angle: NaN }, { targetKm: 0.4 }, { targetKm: 9 }])('rejects invalid settings %o', invalid => {
     const settings = { ...DEFAULT_SIMULATION, ...invalid };
     expect(validateSimulation(settings)).toBe(false);
     expect(() => simulationSnapshot(settings)).toThrow();
@@ -83,5 +84,58 @@ describe('simulation lobe spread', () => {
     expect(translate('en', 'sim.width')).toContain('σ');
     expect(translate('id', 'sim.width')).toContain('σ');
     expect(translate('id', 'sim.halfPower')).toBe('Lebar −3 dB');
+  });
+});
+
+describe('simulation scene', () => {
+  const settings = { ...DEFAULT_SIMULATION, angle: 60, targetKm: 3 };
+  const scene = simulationScene(settings);
+  const station = { latitude: settings.latitude, longitude: settings.longitude };
+
+  it('puts the estimate near the transmitter on the entered bearing', () => {
+    expect(scene).not.toBeNull();
+    const estimate = scene!.estimate;
+    expect(estimate.state).toBe('ESTIMATE');
+    const from = bearingAndDistance(station, estimate.longitude!, estimate.latitude!);
+    expect(Math.abs(from.distanceM - 3000)).toBeLessThan(150);
+    expect(Math.abs(from.bearingDeg - 60)).toBeLessThan(5);
+    expect(estimate.distanceM).toBe(Math.round(from.distanceM));
+    expect(estimate.bearingSource).toBe('drone');
+    expect(estimate.positionSource).toBe('drone');
+  });
+
+  it('measures the groundstation distance from the simulated groundstation', () => {
+    const { ground, estimate } = scene!;
+    expect(bearingAndDistance(station, ground.longitude, ground.latitude).distanceM).toBeCloseTo(900, -1);
+    const from = bearingAndDistance(ground, estimate.longitude!, estimate.latitude!);
+    expect(estimate.groundDistanceM).toBe(Math.round(from.distanceM));
+    expect(estimate.groundLatitude).toBe(ground.latitude);
+  });
+
+  it('flies the drone from the groundstation to the station', () => {
+    const { drone, ground } = scene!;
+    expect(drone.position).toEqual(station);
+    expect(drone.track[0]).toEqual([ground.longitude, ground.latitude]);
+    const [lon, lat] = drone.track[drone.track.length - 1];
+    expect(bearingAndDistance(station, lon, lat).distanceM).toBeLessThan(1);
+    expect(drone.track.length).toBeGreaterThan(20);
+    expect(drone.headingDeg).toBeGreaterThanOrEqual(0);
+    expect(drone.headingDeg).toBeLessThan(360);
+  });
+
+  it('draws the heat, both lines and their labels on the map', () => {
+    const estimate = scene!.estimate;
+    expect(estimate.grid!.hot.length).toBeGreaterThan(10);
+    expect(estimate.grid!.hot.length).toBeLessThanOrEqual(800);
+    expect(estimate.grid!.hot[0][2]).toBeGreaterThan(0.9);
+    const features = positionEstimateFeatures(estimate, station);
+    expect(features.lines.features.map((line) => line.properties?.kind)).toEqual(['radius', 'link', 'ground']);
+    const labels = positionEstimateLineLabels(estimate, station, (key, values) => translate('id', key, values));
+    expect(labels).toHaveLength(2);
+  });
+
+  it('stays out of the live estimate and rejects invalid settings', () => {
+    expect(positionEstimate(simulationSnapshot(settings))).toBeNull();
+    expect(simulationScene({ ...settings, targetKm: 20 })).toBeNull();
   });
 });

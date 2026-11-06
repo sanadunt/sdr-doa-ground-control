@@ -8,6 +8,7 @@ import type { MessageKey } from '../../lib/i18n';
 import { OverlayControls } from '../OverlayControls';
 import { Icon } from '../ui';
 import { BasemapSelect } from './BasemapPicker';
+import { MAP_GRID_KINDS, isMapGridKind } from '../../lib/mapGrid';
 
 type LayerKey = 'heatmapVisible' | 'lobeVisible' | 'bearingVisible' | 'edgesVisible' | 'ringsVisible' | 'guidesVisible' | 'labelsVisible' | 'headingVisible' | 'estimateVisible';
 
@@ -50,6 +51,12 @@ export function LayersPanel({
       <div className="ov-layers-body">
         {/* The basemap is its own preference: Advanced Reset changes only the overlay. */}
         <BasemapSelect value={basemapId} onChange={onBasemapChange} />
+        <label className="ov-basemap-row">
+          <span>{t('layers.grid')}</span>
+          <select value={settings.mapGrid} onChange={(event) => { if (isMapGridKind(event.target.value)) onChange({ ...settings, mapGrid: event.target.value }); }}>
+            {MAP_GRID_KINDS.map((kind) => <option key={kind} value={kind}>{t(`layers.grid.${kind}`)}</option>)}
+          </select>
+        </label>
         <div className="ov-layer-grid">
           {LAYERS.map(([key, label]) => (
             <label key={key} className="ov-check">
@@ -72,7 +79,7 @@ export function LayersPanel({
         </label>
         <details className="ov-advanced">
           <summary>{t('layers.advanced')}</summary>
-          <OverlayControls embedded settings={settings} scale={scale} onChange={onChange} onReset={() => onChange({ ...DEFAULT_DOA_OVERLAY_SETTINGS })} />
+          <OverlayControls embedded settings={settings} scale={scale} onChange={onChange} onReset={() => onChange({ ...DEFAULT_DOA_OVERLAY_SETTINGS, mapGrid: settings.mapGrid, coordinateFormat: settings.coordinateFormat })} />
         </details>
       </div>
     </section>

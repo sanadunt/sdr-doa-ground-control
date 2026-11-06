@@ -76,10 +76,10 @@
 .ov-map-controls > * { pointer-events: auto; }
 .ov-map-button { display: grid; flex: none; place-items: center; width: 44px; height: 44px; padding: 0; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--ov-card-bg); color: var(--text); cursor: pointer; }
 .ov-map-button:hover { border-color: var(--accent); }
-/* Source credit of the drawn basemap: one 44 px chip, each source a link; the last one ends in an ellipsis when the row is short. */
-.ov-map-attribution { display: flex; flex: 0 1 auto; align-items: center; gap: 0 5px; box-sizing: border-box; min-width: 0; max-width: min(460px, 100%); height: 44px; margin: 0; padding: 0 10px; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--ov-card-bg); color: var(--muted); font-size: 11px; white-space: nowrap; }
-.ov-map-attribution a { display: block; flex: none; color: inherit; line-height: 42px; text-decoration: none; }
-.ov-map-attribution a:last-child { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Source credit of the drawn basemap: one 44 px chip of one width for every style, so a pick never
+   resizes it beside the map button; each source is a link that ends in an ellipsis, the full credit in its title. */
+.ov-map-attribution { display: flex; flex: none; align-items: center; gap: 0 5px; box-sizing: border-box; width: min(220px, 100%); min-width: 0; height: 44px; margin: 0; padding: 0 10px; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--ov-card-bg); color: var(--muted); font-size: 11px; white-space: nowrap; }
+.ov-map-attribution a { display: block; flex: 0 1 auto; min-width: 0; overflow: hidden; color: inherit; line-height: 42px; text-decoration: none; text-overflow: ellipsis; }
 .ov-map-attribution a:hover, .ov-map-attribution a:focus-visible { color: var(--text); text-decoration: underline; }
 .ov-map-attribution-sep { flex: none; }
 /* Basemap picker. The menu is a popover in the top layer, so the floating
@@ -146,6 +146,8 @@
 .ov-estimate .ov-hud-offset, .ov-estimate .ov-hud-held { font-size: 11px; }
 .ov-estimate .ov-hud-offset b { color: var(--subtle); font-size: 11px; font-weight: 500; }
 .ov-estimate.is-pending .ov-hud-held { color: var(--subtle); }
+.ov-estimate-format { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; color: var(--muted); font-size: 11px; }
+.ov-estimate-format select { flex: 0 1 140px; min-width: 0; height: 44px; padding: 0 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 12px; }
 .ov-estimate-note { margin: 0; color: var(--muted); font-size: 10.5px; line-height: 1.35; }
 .ov-estimate-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 2px; }
 .ov-estimate-actions .ov-button { height: 28px; padding: 0 8px; font-size: 11.5px; }
@@ -628,7 +630,7 @@
 .console-shell[data-layout^='compact'] .ov-map .map-frame { flex: 1 1 0; height: auto; }
 .console-shell[data-layout^='compact'] .ov-stage .map-bottom-overlay { display: none; }
 .console-shell[data-layout^='compact'] .ov-map-controls { bottom: var(--ov-gap); left: var(--ov-gap); flex-wrap: nowrap; max-width: calc(100% - 2 * var(--ov-gap)); }
-.console-shell[data-layout^='compact'] .ov-map-attribution { max-width: 132px; padding: 0 8px; }
+.console-shell[data-layout^='compact'] .ov-map-attribution { width: 132px; padding: 0 8px; }
 /* Lapisan (and the estimate) over the main view: they hug their content and scroll inside above the map buttons. */
 .console-shell[data-layout^='compact'] .ov-left { position: absolute; z-index: 5; top: var(--ov-gap); left: var(--ov-gap); width: min(260px, calc(100% - 2 * var(--ov-gap))); align-items: stretch; padding: 0; bottom: auto; display: flex; flex-direction: column; gap: var(--ov-gap); max-height: calc(100% - 44px - 3 * var(--ov-gap)); min-height: 0; overflow-y: auto; overscroll-behavior: contain; pointer-events: auto; }
 .console-shell[data-layout^='compact'] .ov-left:empty { display: none; }
