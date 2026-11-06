@@ -37,7 +37,7 @@ import { numberOrNull, primaryCandidate } from '../lib/telemetry';
 import { angularFrameAgeMs, angularHeld, doaSample, isMqttSnapshot } from '../lib/telemetrySource';
 import { overviewDoaStatus } from '../lib/doaStatus';
 import { headingLabel, headingLabelPosition, headingLineFeatures, headingPopupText, stationHeading, type HeadingSource, type RdfHeading } from '../lib/rdfHeading';
-import { NO_ESTIMATE_FEATURES, positionEstimateFeatures, positionEstimateLabel, type PositionEstimate } from '../lib/positionEstimate';
+import { NO_ESTIMATE_FEATURES, positionEstimateFeatures, positionEstimateLabel, positionEstimateLineLabels, type PositionEstimate } from '../lib/positionEstimate';
 import { HELD_LAYER_OF, NO_HELD_FEATURES, heldBearingDeg, heldLayerSpec, heldNoticeText, heldOverlayFeatures, heldTimeText, overlayIdentity, pageOverlayMemory, provisionalBesideHeld, rememberOverlay, setPageOverlayMemory } from '../lib/heldOverlay';
 import { seedOverlayMemory } from '../lib/lastLiveDoa';
 import type { HeldSeed } from '../lib/lastLiveDoa';
@@ -1144,7 +1144,10 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       add(headingLabelPosition(stationCoordinate, heading.headingDeg, g.maxDistanceM, near), headingHeld ? 'doa-heading-label is-held' : 'doa-heading-label', headingLabel(heading, t));
     }
     if (link) add(link.label, link.live ? 'ov-ground-label' : 'ov-ground-label is-reference', groundLinkLabel(link, t));
-    if (estimatePoint && estimate) add(estimatePoint, 'doa-estimate-label', positionEstimateLabel(estimate, t));
+    if (estimatePoint && estimate) {
+      add(estimatePoint, 'doa-estimate-label', positionEstimateLabel(estimate, t));
+      for (const line of positionEstimateLineLabels(estimate, stationCoordinate, t)) add(line.lngLat, 'doa-estimate-label is-line', line.text);
+    }
     return () => { for (const marker of markers) marker.remove(); };
   }, [styleReady, stationCoordinate, geometry.rings, bearing, bearingDrawn, provisionalBearing, provisionalDrawn, frequencyText, heldBearing, heldBearingDrawn, heldOrigin, heldTime, heldFrequencyText, heading, headingDrawn, headingHeld, link, estimate, estimatePoint?.[0], estimatePoint?.[1], g.ringsVisible, g.guidesVisible, g.labelsVisible, g.maxDistanceM, t]);
 
@@ -1312,7 +1315,10 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
           label(headingLabelPosition(stationCoordinate, heading.headingDeg, settings.maxDistanceM, near), headingLabel(heading, t), headingHeld ? '#5b6670' : HEADING_LIVE.light);
         }
         if (link) label(link.label, groundLinkLabel(link, t), link.live ? '#11171e' : '#5b6670');
-        if (estimatePoint && estimate) label([estimatePoint[0], estimatePoint[1]], positionEstimateLabel(estimate, t), ESTIMATE_COLOR.light);
+        if (estimatePoint && estimate) {
+          label([estimatePoint[0], estimatePoint[1]], positionEstimateLabel(estimate, t), ESTIMATE_COLOR.light);
+          for (const line of positionEstimateLineLabels(estimate, stationCoordinate, t)) label(line.lngLat, line.text, ESTIMATE_COLOR.light);
+        }
         context.restore();
       }
     };

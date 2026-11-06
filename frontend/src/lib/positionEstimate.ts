@@ -1,6 +1,6 @@
 import type { Feature, FeatureCollection, LineString, Point, Polygon } from 'geojson';
 import type { TelemetrySnapshot } from '../types';
-import { destination, type GeoOrigin } from './doaGeometry';
+import { bearingAndDistance, destination, type GeoOrigin } from './doaGeometry';
 import { formatBearing } from './overlayPalette';
 import type { MessageKey, Translate } from './i18n';
 
@@ -250,16 +250,37 @@ export function formatEstimateDistance(metres: number | null): string {
   return metres >= 1000 ? `${(metres / 1000).toFixed(metres >= 10_000 ? 0 : 1)} km` : `${Math.round(metres)} m`;
 }
 
+/** Map pill at the estimate point; the distances sit on the lines (positionEstimateLineLabels()). */
+export function positionEstimateLabel(_estimate: PositionEstimate, t: Translate): string {
+  return t('estimate.mapLabel');
+}
+
+export interface EstimateLineLabel {
+  /** Halfway along the line. */
+  lngLat: [number, number];
+  text: string;
+}
+
 /**
- * Map pill at the estimate: "ESTIMATE · 3.4 km · 294° · GS 5.2 km" (distance and bearing from the
- * latest bearing's place, then the distance from the groundstation when it has a fix).
+ * The distance and bearing written halfway along each line to an ESTIMATE: "RDF-SDR 3.4 km · 294°"
+ * from the station drawn now (the drone), "GS 5.2 km · 48°" from the groundstation while it has a fix.
  */
-export function positionEstimateLabel(estimate: PositionEstimate, t: Translate): string {
-  const parts = [t('estimate.mapLabel')];
-  if (estimate.distanceM !== null) parts.push(formatEstimateDistance(estimate.distanceM));
-  if (estimate.bearingDeg !== null) parts.push(`${formatBearing(estimate.bearingDeg, 0)}°`);
-  if (estimate.groundDistanceM !== null) parts.push(t('estimate.mapGround', { distance: formatEstimateDistance(estimate.groundDistanceM) }));
-  return parts.join(' · ');
+export function positionEstimateLineLabels(estimate: PositionEstimate | null, station: GeoOrigin | null, t: Translate): EstimateLineLabel[] {
+  if (!estimate || estimate.state !== 'ESTIMATE' || estimate.latitude === null || estimate.longitude === null) return [];
+  const labels: EstimateLineLabel[] = [];
+  const along = (origin: GeoOrigin, key: 'estimate.mapNode' | 'estimate.mapGround') => {
+    const { bearingDeg, distanceM } = bearingAndDistance(origin, estimate.longitude as number, estimate.latitude as number);
+    if (!(distanceM > 0)) return;
+    labels.push({
+      lngLat: destination(origin, bearingDeg, distanceM / 2),
+      text: t(key, { distance: formatEstimateDistance(distanceM), bearing: formatBearing(bearingDeg, 0) }),
+    });
+  };
+  if (station) along(station, 'estimate.mapNode');
+  if (estimate.groundLatitude !== null && estimate.groundLongitude !== null) {
+    along({ latitude: estimate.groundLatitude, longitude: estimate.groundLongitude }, 'estimate.mapGround');
+  }
+  return labels;
 }
 
 /** POST the reset; resolves with the server's new (empty) estimate view, rejects with its code. */

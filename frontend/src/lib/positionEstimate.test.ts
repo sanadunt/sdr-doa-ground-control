@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import type { TelemetrySnapshot } from '../types';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createElement } from 'react';
-import { estimateSourceKey, formatEstimateDistance, positionEstimate, positionEstimateFeatures, positionEstimateLabel } from './positionEstimate';
+import { estimateSourceKey, formatEstimateDistance, positionEstimate, positionEstimateFeatures, positionEstimateLabel, positionEstimateLineLabels } from './positionEstimate';
+import { bearingAndDistance } from './doaGeometry';
 import { EstimatePanel } from '../components/overview/EstimatePanel';
 import { I18nContext, translate } from './i18n';
 import { DEFAULT_COMPASS_CONFIG, geographicBearingForBin, nodeArrayHeading, resolveCompassSource } from './polar';
@@ -61,9 +62,9 @@ describe('positionEstimate', () => {
     expect(shapes.lines.features).toHaveLength(0);
   });
 
-  it('labels distance and bearing', () => {
+  it('labels the point and formats distances', () => {
     const estimate = positionEstimate(snapshot(ESTIMATE));
-    expect(estimate && positionEstimateLabel(estimate, t)).toBe('ESTIMATE · 3.4 km · 294°');
+    expect(estimate && positionEstimateLabel(estimate, t)).toBe('ESTIMATE');
     expect(formatEstimateDistance(850)).toBe('850 m');
     expect(formatEstimateDistance(12_400)).toBe('12 km');
     expect(formatEstimateDistance(null)).toBe('--');
@@ -78,9 +79,22 @@ describe('positionEstimate', () => {
     const shapes = positionEstimateFeatures(estimate, { latitude: -6.93, longitude: 107.71 });
     expect(shapes.lines.features.map((feature) => feature.properties?.kind)).toEqual(['radius', 'link', 'ground']);
     expect(shapes.lines.features[2].geometry.coordinates).toEqual([[107.6, -6.92], [107.62, -6.902]]);
-    const gs: Translate = ((key: string, values?: Record<string, string>) => (
-      key === 'estimate.mapLabel' ? 'ESTIMATE' : key === 'estimate.mapGround' ? `GS ${values?.distance}` : key)) as Translate;
-    expect(estimate && positionEstimateLabel(estimate, gs)).toBe('ESTIMATE · 3.4 km · 294° · GS 5.2 km');
+    const named: Translate = ((key: string, values?: Record<string, string>) => (
+      key === 'estimate.mapNode' ? `RDF-SDR ${values?.distance} · ${values?.bearing}°`
+        : key === 'estimate.mapGround' ? `GS ${values?.distance} · ${values?.bearing}°` : key)) as Translate;
+    const station = { latitude: -6.93, longitude: 107.71 };
+    const labels = positionEstimateLineLabels(estimate, station, named);
+    // Measured from the points drawn, written halfway along each line.
+    const fromStation = bearingAndDistance(station, 107.62, -6.902);
+    const fromGround = bearingAndDistance({ latitude: -6.92, longitude: 107.6 }, 107.62, -6.902);
+    expect(labels.map((label) => label.text)).toEqual([
+      `RDF-SDR ${formatEstimateDistance(fromStation.distanceM)} · ${Math.round(fromStation.bearingDeg)}°`,
+      `GS ${formatEstimateDistance(fromGround.distanceM)} · ${Math.round(fromGround.bearingDeg)}°`,
+    ]);
+    expect(labels[1].lngLat[0]).toBeCloseTo(107.61, 3);
+    expect(labels[1].lngLat[1]).toBeCloseTo(-6.911, 3);
+    expect(positionEstimateLineLabels(positionEstimate(snapshot({ ...ESTIMATE, state: 'NEED_MOVEMENT' })), station, named)).toEqual([]);
+    expect(positionEstimateLineLabels(estimate, null, named).map((label) => label.text[0])).toEqual(['G']);
     expect(estimate && estimateSourceKey(estimate)).toBe('estimate.sourceDrone');
     // An older console, or a groundstation without a fix: no line, no source line.
     const plain = positionEstimate(snapshot({ ...ESTIMATE, bearing_source: 'compass' }));
