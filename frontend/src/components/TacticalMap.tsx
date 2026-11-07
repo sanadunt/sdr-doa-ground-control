@@ -39,7 +39,7 @@ import { overviewDoaStatus } from '../lib/doaStatus';
 import { headingLabel, headingLabelPosition, headingLineFeatures, headingPopupText, stationHeading, type HeadingSource, type RdfHeading } from '../lib/rdfHeading';
 import { NO_ESTIMATE_FEATURES, estimateMapLabel, positionEstimateFeatures, positionEstimateLineLabels, type PositionEstimate } from '../lib/positionEstimate';
 import { mapGridColors, mapGridFeatures } from '../lib/mapGrid';
-import { annotationFeatures, annotationLabelFeatures, draftFeatures, type AnnotationTool, type LonLat, type MapAnnotation } from '../lib/mapAnnotations';
+import { annotationFeatures, annotationLabelFeatures, draftFeatures, useAnnotationDraft, type AnnotationDraftStore, type AnnotationTool, type LonLat, type MapAnnotation } from '../lib/mapAnnotations';
 import { HELD_LAYER_OF, NO_HELD_FEATURES, heldBearingDeg, heldLayerSpec, heldNoticeText, heldOverlayFeatures, heldTimeText, overlayIdentity, pageOverlayMemory, provisionalBesideHeld, rememberOverlay, setPageOverlayMemory } from '../lib/heldOverlay';
 import { seedOverlayMemory } from '../lib/lastLiveDoa';
 import type { HeldSeed } from '../lib/lastLiveDoa';
@@ -343,11 +343,10 @@ export interface TacticalMapProps {
   /** No-go areas the drone is inside of: drawn thicker, and named in geofenceNotice. */
   geofenceAlertIds?: ReadonlySet<string>;
   geofenceNotice?: string | null;
-  /** The drawing tool in use and the corners drawn so far; a click on the map adds one while a tool draws. */
+  /** The drawing tool in use and the store of the corners drawn so far; a click on the map adds one while a tool draws. */
   annotationTool?: AnnotationTool;
-  annotationDraft?: readonly LonLat[];
+  annotationDraft?: AnnotationDraftStore | null;
   onAnnotationTool?: (tool: AnnotationTool) => void;
-  onAnnotationMapClick?: (point: LonLat) => void;
   onAnnotationSelect?: (id: string) => void;
   /** Move the camera to a mark picked in the list (a new key moves it again). */
   annotationFocus?: { center: LonLat; key: number } | null;
@@ -355,7 +354,6 @@ export interface TacticalMapProps {
 
 const NO_ANNOTATIONS: readonly MapAnnotation[] = [];
 const NO_ALERTS: ReadonlySet<string> = new Set();
-const NO_DRAFT: readonly LonLat[] = [];
 const ANNOTATION_LAYERS = ['map-annotation-fill', 'map-annotation-line', 'map-annotation-point', 'map-annotation-label'] as const;
 const ANNOTATION_HIT_LAYERS = ['map-annotation-point', 'map-annotation-line', 'map-annotation-fill'] as const;
 const DRAWING_TOOLS: ReadonlySet<AnnotationTool> = new Set(['measure', 'area', 'point']);
@@ -376,7 +374,7 @@ export interface DroneMapView {
   rdfOwn: GeoOrigin | null;
 }
 
-function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, curveOffset, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, provisionalTheta = null, provisionalHeading = null, orientationCause, onOpenCompassSettings, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect, ground = null, estimate = null, compact = false, drone = null, droneArrayHeading = null, heldSeed = null, mini = false, miniZoom = 0, annotations = NO_ANNOTATIONS, selectedAnnotationId = null, geofenceAlertIds = NO_ALERTS, geofenceNotice = null, annotationTool = 'none', annotationDraft = NO_DRAFT, onAnnotationTool, onAnnotationMapClick, onAnnotationSelect, annotationFocus = null }: TacticalMapProps): JSX.Element {
+function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, curveOffset, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, provisionalTheta = null, provisionalHeading = null, orientationCause, onOpenCompassSettings, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect, ground = null, estimate = null, compact = false, drone = null, droneArrayHeading = null, heldSeed = null, mini = false, miniZoom = 0, annotations = NO_ANNOTATIONS, selectedAnnotationId = null, geofenceAlertIds = NO_ALERTS, geofenceNotice = null, annotationTool = 'none', annotationDraft = null, onAnnotationTool, onAnnotationSelect, annotationFocus = null }: TacticalMapProps): JSX.Element {
   const { t, lang } = useI18n();
   const hostRef = useRef<HTMLDivElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -994,7 +992,6 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   // The operators' areas and markers, and the shape being drawn.
   const annotationShapes = useMemo(() => annotationFeatures(annotations, selectedAnnotationId, geofenceAlertIds), [annotations, selectedAnnotationId, geofenceAlertIds]);
   const annotationLabels = useMemo(() => annotationLabelFeatures(annotations), [annotations]);
-  const draftShapes = useMemo(() => draftFeatures(annotationTool, annotationDraft), [annotationTool, annotationDraft]);
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !styleReady) return;
@@ -1004,17 +1001,12 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !styleReady) return;
-    (map.getSource('map-annotation-draft') as GeoJSONSource | undefined)?.setData(draftShapes);
-  }, [styleReady, draftShapes]);
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !styleReady) return;
     const visible = settings.annotationsVisible && !mini ? 'visible' : 'none';
     for (const id of ANNOTATION_LAYERS) if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', visible);
   }, [styleReady, settings.annotationsVisible, mini]);
   // While a tool draws, a click adds a corner (double-click zoom off, crosshair cursor); otherwise a click on a mark picks it.
-  const annotationClickRef = useRef(onAnnotationMapClick);
-  annotationClickRef.current = onAnnotationMapClick;
+  const annotationDraftRef = useRef(annotationDraft);
+  annotationDraftRef.current = annotationDraft;
   const annotationSelectRef = useRef(onAnnotationSelect);
   annotationSelectRef.current = onAnnotationSelect;
   useEffect(() => {
@@ -1028,7 +1020,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     }
     const onClick = (event: MapMouseEvent) => {
       if (drawing) {
-        annotationClickRef.current?.([Number(event.lngLat.lng.toFixed(7)), Number(event.lngLat.lat.toFixed(7))]);
+        annotationDraftRef.current?.add([Number(event.lngLat.lng.toFixed(7)), Number(event.lngLat.lat.toFixed(7))], annotationTool);
         return;
       }
       if (!annotationSelectRef.current) return;
@@ -1522,6 +1514,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       <div className="map-stage">
         <div className="map-frame" role="application" aria-label={t('map.appAria')} tabIndex={-1} style={frameStyle}>
           <div className="maplibre-host" ref={hostRef} />
+          {annotationDraft ? <AnnotationDraftLayer store={annotationDraft} tool={annotationTool} mapRef={mapRef} styleReady={styleReady} /> : null}
           <canvas ref={overlayCanvasRef} className="doa-overlay-canvas" aria-hidden="true" hidden={!fallbackActive} />
           <div className="map-notices" ref={noticesRef} style={noticeStyle}>
             {notices.map((notice) => <MapNoticeChip key={notice} text={notice} compact={compact} />)}
@@ -1574,6 +1567,17 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       </div>
     </div>
   </section>;
+}
+
+/** The shape being drawn: only this renders again when a corner is added, never the map or the Dashboard. */
+function AnnotationDraftLayer({ store, tool, mapRef, styleReady }: { store: AnnotationDraftStore; tool: AnnotationTool; mapRef: { current: MapLibreMap | null }; styleReady: boolean }): null {
+  const points = useAnnotationDraft(store);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady) return;
+    (map.getSource('map-annotation-draft') as GeoJSONSource | undefined)?.setData(draftFeatures(tool, points));
+  }, [mapRef, styleReady, tool, points]);
+  return null;
 }
 
 /** Keeps a map failure inside the map panel; the rest of Overview keeps running. */

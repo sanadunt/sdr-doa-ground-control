@@ -14,8 +14,10 @@ import {
   pathLengthM,
   polygonAreaM2,
   polygonPerimeterM,
+  useAnnotationDraft,
   writeAnnotation,
   type AnnotationCategory,
+  type AnnotationDraftStore,
   type AnnotationColor,
   type AnnotationDraft,
   type AnnotationTool,
@@ -60,14 +62,14 @@ function formOf(item: MapAnnotation): FormState {
  * list of every mark. A save or a delete goes to the console at once; a
  * change another page made in between comes back as a conflict.
  */
-export function AnnotationPanel({ tool, draft, items, stale, selected, onTool, onDraftChange, onSelect, onFocus, onChanged, write = writeAnnotation }: {
+export function AnnotationPanel({ tool, draftStore, items, stale, selected, onTool, onSelect, onFocus, onChanged, write = writeAnnotation }: {
   tool: AnnotationTool;
-  draft: readonly LonLat[];
+  /** The corners being drawn (the same store the map adds to). */
+  draftStore: AnnotationDraftStore;
   items: readonly MapAnnotation[];
   stale: boolean;
   selected: MapAnnotation | null;
   onTool: (tool: AnnotationTool) => void;
-  onDraftChange: (draft: LonLat[]) => void;
   onSelect: (id: string | null) => void;
   onFocus: (center: LonLat) => void;
   /** Read the marks again after a change. */
@@ -75,6 +77,8 @@ export function AnnotationPanel({ tool, draft, items, stale, selected, onTool, o
   write?: (write: AnnotationWrite) => Promise<AnnotationWriteResult>;
 }): JSX.Element {
   const { t, lang } = useI18n();
+  const draft = useAnnotationDraft(draftStore);
+  const onDraftChange = draftStore.set;
   const [form, setForm] = useState<FormState | null>(null);
   const [message, setMessage] = useState<Message>(null);
   const [busy, setBusy] = useState(false);
