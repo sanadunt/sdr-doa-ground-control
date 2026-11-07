@@ -2,6 +2,12 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.18.1
+
+Perbaikan kartu Estimasi posisi. Tidak ada yang dihapus.
+
+- **Koordinat tidak lagi hilang di layar pendek.** Bila HUD dan kartu Estimasi posisi tidak muat di kolom kiri (misalnya jendela 1600 × 700), baris posisi (Lat/Lon, UTM, MGRS atau X,Y dari GS), jumlah bearing dan sumbernya menyusut sampai tidak terlihat; hanya jarak dan pilihan Koordinat yang tersisa. Kini barisnya tetap utuh dan kartunya bisa digulir. Baris posisi juga turun ke baris berikut bila panjang, bukan terpotong "…".
+
 ## 3.18.0
 
 Simulasi kini menampilkan estimasi posisi, peta bisa diberi grid UTM, MGRS atau Lat/Lon, posisi estimasi bisa ditulis dalam koordinat peta darat, dan kotak sumber peta tidak lagi melebar. Tidak ada yang dihapus.

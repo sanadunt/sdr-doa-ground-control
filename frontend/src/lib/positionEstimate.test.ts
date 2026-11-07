@@ -181,3 +181,20 @@ describe('the estimate in land map coordinates', () => {
     expect(plain).not.toContain('ov-estimate-format');
   });
 });
+
+describe('the estimate card in a short left column', () => {
+  type Fs = { readFileSync(file: URL, encoding: 'utf8'): string };
+  const { process } = globalThis as unknown as { process: { getBuiltinModule(id: 'node:fs'): Fs } };
+  const css = process.getBuiltinModule('node:fs').readFileSync(new URL('../overview-dashboard.css', import.meta.url), 'utf8');
+
+  it('scrolls instead of shrinking its lines to nothing', () => {
+    // The lines with overflow: hidden (position, bearings, source) shrank to 0 px while the HUD and the card did not fit
+    // the left column (1600 x 700); the card scrolls instead.
+    expect(css).toMatch(/\.ov-estimate > \* \{ flex: none; \}/);
+    expect(css).toMatch(/\.ov-estimate \{[^}]*overflow-y: auto;/);
+  });
+
+  it('wraps the position, so a long UTM or MGRS value is never cut', () => {
+    expect(css).toMatch(/\.ov-estimate \.ov-estimate-position \{ white-space: normal; overflow-wrap: anywhere; \}/);
+  });
+});
