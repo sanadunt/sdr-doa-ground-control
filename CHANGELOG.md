@@ -2,6 +2,12 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.19.1
+
+Menggambar tanda peta tidak lagi tersendat. Tidak ada yang dihapus.
+
+- **Klik saat menggambar jadi ringan.** Setiap klik untuk menambah titik (ukur jarak, area, marker) dulu membuat seluruh Dashboard (peta, HUD, polar, spektrum, panel) dirender ulang, sehingga terasa lag. Kini titik-titik yang sedang digambar disimpan terpisah dan hanya lapisan gambar serta panel Tanda peta yang diperbarui. Di pengujian, jeda panel setelah klik turun dari 3–4 ms menjadi 1 ms, dan frame yang lebih dari 50 ms saat menggambar berkurang dari belasan menjadi beberapa (sisanya dari peta yang menggambar ulang lapisannya).
+
 ## 3.19.0
 
 Tanda peta: ukur jarak, area (geofence) dan marker, dari groundstation maupun tablet. Tidak ada yang dihapus.

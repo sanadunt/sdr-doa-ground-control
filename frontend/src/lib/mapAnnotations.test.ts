@@ -4,6 +4,8 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
   MAP_ANNOTATIONS_ROUTE,
   annotationErrorKey,
+  createAnnotationDraftStore,
+  MAP_ANNOTATION_LIMITS,
   annotationFeatures,
   annotationLabelFeatures,
   draftFeatures,
@@ -108,6 +110,37 @@ describe('measuring', () => {
   });
 });
 
+describe('the corners being drawn', () => {
+  it('grows a path or an area, keeps one point for a marker, and stops at the corner limit', () => {
+    const store = createAnnotationDraftStore();
+    let calls = 0;
+    const stop = store.subscribe(() => { calls += 1; });
+    store.add([107.66, -6.93], 'area');
+    store.add([107.67, -6.93], 'area');
+    expect(store.get()).toEqual([[107.66, -6.93], [107.67, -6.93]]);
+    store.add([107.68, -6.95], 'point');
+    expect(store.get()).toEqual([[107.68, -6.95]]);
+    expect(calls).toBe(3);
+    store.set([]);
+    store.set([]);
+    // Clearing an empty draft tells nobody.
+    expect(calls).toBe(4);
+    for (let k = 0; k < MAP_ANNOTATION_LIMITS.areaMaxVertices + 5; k += 1) store.add([107 + k / 1000, -6.9], 'area');
+    expect(store.get()).toHaveLength(MAP_ANNOTATION_LIMITS.areaMaxVertices);
+    stop();
+    store.set([]);
+    expect(calls).toBe(4 + MAP_ANNOTATION_LIMITS.areaMaxVertices);
+  });
+
+  it('stays out of the Dashboard page state, so a click renders only the drawing layer and the panel', () => {
+    type Fs = { readFileSync(file: URL, encoding: 'utf8'): string };
+    const { process } = globalThis as unknown as { process: { getBuiltinModule(id: 'node:fs'): Fs } };
+    const page = process.getBuiltinModule('node:fs').readFileSync(new URL('../pages/OverviewPage.tsx', import.meta.url), 'utf8');
+    expect(page).toContain('useState(createAnnotationDraftStore)');
+    expect(page).not.toMatch(/useState<LonLat\[\]>/u);
+  });
+});
+
 describe('map geometry', () => {
   it('closes area rings, marks the picked and the alert, and labels each mark', () => {
     const features = annotationFeatures([AREA, MARKER], MARKER.id, new Set([AREA.id]));
@@ -129,12 +162,12 @@ describe('map geometry', () => {
 });
 
 describe('the marks panel', () => {
-  const render = (props: Partial<Parameters<typeof AnnotationPanel>[0]>) => renderToStaticMarkup(createElement(
+  const render = ({ draft = [], ...props }: Partial<Parameters<typeof AnnotationPanel>[0]> & { draft?: LonLat[] }) => renderToStaticMarkup(createElement(
     I18nContext.Provider,
     { value: { lang: 'id', setLang: () => undefined, t: (key, vars) => translate('id', key, vars) } },
     createElement(AnnotationPanel, {
-      tool: 'none', draft: [], items: [AREA, MARKER], stale: false, selected: null,
-      onTool: () => undefined, onDraftChange: () => undefined, onSelect: () => undefined, onFocus: () => undefined, onChanged: () => undefined,
+      tool: 'none', draftStore: (() => { const store = createAnnotationDraftStore(); store.set(draft); return store; })(), items: [AREA, MARKER], stale: false, selected: null,
+      onTool: () => undefined, onSelect: () => undefined, onFocus: () => undefined, onChanged: () => undefined,
       ...props,
     }),
   ));

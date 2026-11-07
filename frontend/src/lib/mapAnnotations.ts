@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { Feature, FeatureCollection, Geometry } from 'geojson';
 import { bearingAndDistance } from './doaGeometry';
 import { gsRelativeXY } from './gridCoordinates';
@@ -358,6 +358,48 @@ export function annotationFeatures(items: readonly MapAnnotation[], selectedId: 
 }
 
 export type AnnotationTool = 'none' | 'measure' | 'area' | 'point' | 'list';
+
+/**
+ * The corners being drawn, kept outside React state: a click on the map adds
+ * one, and only the drawing layer and the marks panel subscribe, so drawing
+ * never renders the whole Dashboard again (it did, about 100 ms a click).
+ */
+export interface AnnotationDraftStore {
+  get(): readonly LonLat[];
+  set(points: readonly LonLat[]): void;
+  /** A marker keeps one point (the newest); a path or an area grows up to areaMaxVertices. */
+  add(point: LonLat, tool: AnnotationTool): void;
+  subscribe(listener: () => void): () => void;
+}
+
+const NO_POINTS: readonly LonLat[] = [];
+
+export function createAnnotationDraftStore(): AnnotationDraftStore {
+  let points: readonly LonLat[] = NO_POINTS;
+  const listeners = new Set<() => void>();
+  const set = (next: readonly LonLat[]) => {
+    if (next === points || (next.length === 0 && points.length === 0)) return;
+    points = next.length === 0 ? NO_POINTS : next;
+    for (const listener of [...listeners]) listener();
+  };
+  return {
+    get: () => points,
+    set,
+    add: (point, tool) => {
+      if (tool === 'point') set([point]);
+      else if (points.length < MAP_ANNOTATION_LIMITS.areaMaxVertices) set([...points, point]);
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+  };
+}
+
+/** The corners drawn so far; re-renders only the component that reads them. */
+export function useAnnotationDraft(store: AnnotationDraftStore): readonly LonLat[] {
+  return useSyncExternalStore(store.subscribe, store.get, store.get);
+}
 
 /** The shape being drawn: its line (closed for an area once it has three corners) and its corners. */
 export function draftFeatures(tool: AnnotationTool, points: readonly LonLat[]): FeatureCollection<Geometry, { role: 'line' | 'corner' }> {

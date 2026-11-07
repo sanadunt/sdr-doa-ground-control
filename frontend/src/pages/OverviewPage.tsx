@@ -46,7 +46,7 @@ import { DRONE_SAME_PLACE_M, droneArrayHeadingNow, droneLineHeading, droneStatio
 import { LayersPanel } from '../components/overview/LayersPanel';
 import { EstimatePanel } from '../components/overview/EstimatePanel';
 import { AnnotationPanel } from '../components/overview/AnnotationPanel';
-import { MAP_ANNOTATION_LIMITS, geofenceHits, useMapAnnotations, type AnnotationTool, type LonLat } from '../lib/mapAnnotations';
+import { createAnnotationDraftStore, geofenceHits, useMapAnnotations, type AnnotationTool, type LonLat } from '../lib/mapAnnotations';
 import { PolarDock } from '../components/overview/PolarDock';
 import { SpectrumDock } from '../components/overview/SpectrumDock';
 import { SpectrumDockMirror } from '../components/overview/SpectrumDockMirror';
@@ -240,24 +240,17 @@ function OverviewPageView({
   // The operators' areas and markers, shared with every page through the console (lib/mapAnnotations.ts).
   const marks = useMapAnnotations(true);
   const [annotationTool, setAnnotationTool] = useState<AnnotationTool>('none');
-  const [annotationDraft, setAnnotationDraft] = useState<LonLat[]>([]);
+  // The corners being drawn live in their own store, so a click does not render this page again.
+  const [annotationDraft] = useState(createAnnotationDraftStore);
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
   const [annotationFocus, setAnnotationFocus] = useState<{ center: LonLat; key: number } | null>(null);
   const selectedAnnotation = marks.items.find((item) => item.id === selectedAnnotationId) ?? null;
   const onAnnotationTool = useCallback((tool: AnnotationTool) => {
     setAnnotationTool(tool);
-    setAnnotationDraft([]);
+    annotationDraft.set([]);
     // A tool or the list starts without a picked mark; a row of the list picks one again.
     if (tool !== 'none') setSelectedAnnotationId(null);
-  }, []);
-  const onAnnotationMapClick = useCallback((point: LonLat) => {
-    setAnnotationDraft((current) => {
-      if (annotationToolRef.current === 'point') return [point];
-      return current.length >= MAP_ANNOTATION_LIMITS.areaMaxVertices ? current : [...current, point];
-    });
-  }, []);
-  const annotationToolRef = useRef(annotationTool);
-  annotationToolRef.current = annotationTool;
+  }, [annotationDraft]);
   const onAnnotationSelect = useCallback((id: string | null) => {
     setSelectedAnnotationId(id);
     if (id !== null) setAnnotationTool((tool) => (tool === 'list' ? tool : 'none'));
@@ -423,7 +416,6 @@ function OverviewPageView({
               annotationTool={annotationTool}
               annotationDraft={annotationDraft}
               onAnnotationTool={onAnnotationTool}
-              onAnnotationMapClick={onAnnotationMapClick}
               onAnnotationSelect={onAnnotationSelect}
               annotationFocus={annotationFocus}
             />
@@ -483,12 +475,11 @@ function OverviewPageView({
   const annotationPanel = annotationTool !== 'none' || selectedAnnotation ? (
     <AnnotationPanel
       tool={annotationTool}
-      draft={annotationDraft}
+      draftStore={annotationDraft}
       items={marks.items}
       stale={marks.stale}
       selected={selectedAnnotation}
       onTool={onAnnotationTool}
-      onDraftChange={setAnnotationDraft}
       onSelect={onAnnotationSelect}
       onFocus={onAnnotationFocus}
       onChanged={marks.refresh}
