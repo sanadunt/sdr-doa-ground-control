@@ -6,7 +6,7 @@ import type { SimulationSettings } from '../lib/simulation';
 import { simulationScene } from '../lib/simulation';
 import type { CoordinateFormat } from '../lib/gridCoordinates';
 import { gpsReportsNoFix, holdStationCoordinate, resolveGpsSource, resolveStationCoordinate } from '../lib/map';
-import { groundPosition } from '../lib/groundGps';
+import { groundPosition, stationPositionLive } from '../lib/groundGps';
 import { doaStatusTextKey, overviewDoaStatus, provisionalDoa } from '../lib/doaStatus';
 import { lazyWithRetry } from '../lib/lazyRetry';
 import { compassOffsetSourceLabel, curveCompassOffset, polarSettings, rememberDataOutCompass, resolveCompassSource } from '../lib/polar';
@@ -45,6 +45,8 @@ import type { DroneMapView } from '../components/TacticalMap';
 import { DRONE_SAME_PLACE_M, droneArrayHeadingNow, droneLineHeading, droneStation, positionGap, rememberDroneTrack, snapshotDrone } from '../lib/droneLink';
 import { LayersPanel } from '../components/overview/LayersPanel';
 import { EstimatePanel } from '../components/overview/EstimatePanel';
+import { AnnotationPanel } from '../components/overview/AnnotationPanel';
+import { MAP_ANNOTATION_LIMITS, geofenceHits, useMapAnnotations, type AnnotationTool, type LonLat } from '../lib/mapAnnotations';
 import { PolarDock } from '../components/overview/PolarDock';
 import { SpectrumDock } from '../components/overview/SpectrumDock';
 import { SpectrumDockMirror } from '../components/overview/SpectrumDockMirror';
@@ -235,6 +237,42 @@ function OverviewPageView({
   // equal answers so the map only redraws it when it changes.
   const estimateNow = simulation ? null : positionEstimate(snapshot);
   const estimateKey = estimateNow ? JSON.stringify(estimateNow) : '';
+  // The operators' areas and markers, shared with every page through the console (lib/mapAnnotations.ts).
+  const marks = useMapAnnotations(true);
+  const [annotationTool, setAnnotationTool] = useState<AnnotationTool>('none');
+  const [annotationDraft, setAnnotationDraft] = useState<LonLat[]>([]);
+  const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
+  const [annotationFocus, setAnnotationFocus] = useState<{ center: LonLat; key: number } | null>(null);
+  const selectedAnnotation = marks.items.find((item) => item.id === selectedAnnotationId) ?? null;
+  const onAnnotationTool = useCallback((tool: AnnotationTool) => {
+    setAnnotationTool(tool);
+    setAnnotationDraft([]);
+    // A tool or the list starts without a picked mark; a row of the list picks one again.
+    if (tool !== 'none') setSelectedAnnotationId(null);
+  }, []);
+  const onAnnotationMapClick = useCallback((point: LonLat) => {
+    setAnnotationDraft((current) => {
+      if (annotationToolRef.current === 'point') return [point];
+      return current.length >= MAP_ANNOTATION_LIMITS.areaMaxVertices ? current : [...current, point];
+    });
+  }, []);
+  const annotationToolRef = useRef(annotationTool);
+  annotationToolRef.current = annotationTool;
+  const onAnnotationSelect = useCallback((id: string | null) => {
+    setSelectedAnnotationId(id);
+    if (id !== null) setAnnotationTool((tool) => (tool === 'list' ? tool : 'none'));
+  }, []);
+  const onAnnotationFocus = useCallback((center: LonLat) => setAnnotationFocus((current) => ({ center, key: (current?.key ?? 0) + 1 })), []);
+  // Geofence: the drone (else the RDF-SDR's live or simulated position) inside a no-go area.
+  const fenceLon = droneHere ? droneHere.longitude : coordinate && (coordinate.source === 'SIMULATION' || stationPositionLive(coordinate, station?.held === true)) ? coordinate.longitude : null;
+  const fenceLat = droneHere ? droneHere.latitude : fenceLon === null || !coordinate ? null : coordinate.latitude;
+  const fenceHits = useMemo(
+    () => geofenceHits(fenceLon === null || fenceLat === null ? null : [fenceLon, fenceLat], marks.items),
+    [fenceLon, fenceLat, marks.items],
+  );
+  const geofenceKey = fenceHits.map((item) => item.id).join(',');
+  const geofenceAlertIds = useMemo(() => new Set(geofenceKey ? geofenceKey.split(',') : []), [geofenceKey]);
+  const geofenceNotice = fenceHits.length ? t('annot.geofence', { names: fenceHits.map((item) => item.name).join(', ') }) : null;
   const liveEstimate = useMemo<PositionEstimate | null>(() => (estimateKey ? JSON.parse(estimateKey) as PositionEstimate : null), [estimateKey]);
   const estimate = scene ? scene.estimate : liveEstimate;
   // One readiness decision for the map overlay, the bearing HUD and the polar curve.
@@ -378,6 +416,16 @@ function OverviewPageView({
               mini={main === 'video'}
               miniZoom={miniZoom}
               heldSeed={heldSeed}
+              annotations={marks.items}
+              selectedAnnotationId={selectedAnnotationId}
+              geofenceAlertIds={geofenceAlertIds}
+              geofenceNotice={geofenceNotice}
+              annotationTool={annotationTool}
+              annotationDraft={annotationDraft}
+              onAnnotationTool={onAnnotationTool}
+              onAnnotationMapClick={onAnnotationMapClick}
+              onAnnotationSelect={onAnnotationSelect}
+              annotationFocus={annotationFocus}
             />
           </Suspense>
         </LoadErrorBoundary>
@@ -432,6 +480,20 @@ function OverviewPageView({
       onCoordinateFormatChange={onCoordinateFormatChange}
     />
   ) : null;
+  const annotationPanel = annotationTool !== 'none' || selectedAnnotation ? (
+    <AnnotationPanel
+      tool={annotationTool}
+      draft={annotationDraft}
+      items={marks.items}
+      stale={marks.stale}
+      selected={selectedAnnotation}
+      onTool={onAnnotationTool}
+      onDraftChange={setAnnotationDraft}
+      onSelect={onAnnotationSelect}
+      onFocus={onAnnotationFocus}
+      onChanged={marks.refresh}
+    />
+  ) : null;
   const layersPanel = panels.layers ? <LayersPanel settings={overlaySettings} scale={overlayScale} onChange={onOverlayChange} onClose={() => onPanelsChange({ ...panels, layers: false })} basemapId={basemapId} onBasemapChange={onBasemapSelect} /> : null;
 
   const polarDock = (
@@ -484,6 +546,7 @@ function OverviewPageView({
             </div>
           ) : null}
           <div className="ov-left" ref={leftRef}>
+            {annotationPanel}
             {estimateCard}
             {layersPanel}
           </div>
@@ -542,6 +605,7 @@ function OverviewPageView({
       ) : null}
       <div className="ov-left" ref={leftRef}>
         {readout}
+        {annotationPanel}
         {estimateCard}
         {layersPanel}
       </div>

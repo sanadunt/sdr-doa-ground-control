@@ -29,6 +29,7 @@ export function validateOverlaySettings(input: Partial<DoaOverlaySettings>): Doa
     // Added after the stored key: an older value without it (or a non-boolean) shows the heading.
     headingVisible: typeof merged.headingVisible === 'boolean' ? merged.headingVisible : DEFAULT_DOA_OVERLAY_SETTINGS.headingVisible,
     estimateVisible: typeof merged.estimateVisible === 'boolean' ? merged.estimateVisible : DEFAULT_DOA_OVERLAY_SETTINGS.estimateVisible,
+    annotationsVisible: typeof merged.annotationsVisible === 'boolean' ? merged.annotationsVisible : DEFAULT_DOA_OVERLAY_SETTINGS.annotationsVisible,
     coordinateFormat: isCoordinateFormat(merged.coordinateFormat) ? merged.coordinateFormat : DEFAULT_DOA_OVERLAY_SETTINGS.coordinateFormat,
     mapGrid: isMapGridKind(merged.mapGrid) ? merged.mapGrid : DEFAULT_DOA_OVERLAY_SETTINGS.mapGrid,
     overlayOpacity: number(merged.overlayOpacity, DEFAULT_DOA_OVERLAY_SETTINGS.overlayOpacity, OVERLAY_OPACITY_MIN, 1),

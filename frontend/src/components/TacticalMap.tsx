@@ -39,6 +39,7 @@ import { overviewDoaStatus } from '../lib/doaStatus';
 import { headingLabel, headingLabelPosition, headingLineFeatures, headingPopupText, stationHeading, type HeadingSource, type RdfHeading } from '../lib/rdfHeading';
 import { NO_ESTIMATE_FEATURES, estimateMapLabel, positionEstimateFeatures, positionEstimateLineLabels, type PositionEstimate } from '../lib/positionEstimate';
 import { mapGridColors, mapGridFeatures } from '../lib/mapGrid';
+import { annotationFeatures, annotationLabelFeatures, draftFeatures, type AnnotationTool, type LonLat, type MapAnnotation } from '../lib/mapAnnotations';
 import { HELD_LAYER_OF, NO_HELD_FEATURES, heldBearingDeg, heldLayerSpec, heldNoticeText, heldOverlayFeatures, heldTimeText, overlayIdentity, pageOverlayMemory, provisionalBesideHeld, rememberOverlay, setPageOverlayMemory } from '../lib/heldOverlay';
 import { seedOverlayMemory } from '../lib/lastLiveDoa';
 import type { HeldSeed } from '../lib/lastLiveDoa';
@@ -46,7 +47,7 @@ import { useI18n } from '../lib/i18n';
 import type { MessageKey, Translate } from '../lib/i18n';
 import { coordinateSourceKey } from './DoaReadout';
 import { OverlayLegend } from './OverlayLegend';
-import { EmptyState, Icon } from './ui';
+import { EmptyState, Icon, type IconName } from './ui';
 import { BasemapMenu } from './overview/BasemapPicker';
 import { MapNoticeChip } from './MapNoticeChip';
 
@@ -336,7 +337,34 @@ export interface TacticalMapProps {
   mini?: boolean;
   /** The operator's zoom steps on top of the corner map's automatic framing (+ and − over the window). */
   miniZoom?: number;
+  /** The operators' areas and markers (lib/mapAnnotations.ts); hidden with the Layers switch annotationsVisible. */
+  annotations?: readonly MapAnnotation[];
+  selectedAnnotationId?: string | null;
+  /** No-go areas the drone is inside of: drawn thicker, and named in geofenceNotice. */
+  geofenceAlertIds?: ReadonlySet<string>;
+  geofenceNotice?: string | null;
+  /** The drawing tool in use and the corners drawn so far; a click on the map adds one while a tool draws. */
+  annotationTool?: AnnotationTool;
+  annotationDraft?: readonly LonLat[];
+  onAnnotationTool?: (tool: AnnotationTool) => void;
+  onAnnotationMapClick?: (point: LonLat) => void;
+  onAnnotationSelect?: (id: string) => void;
+  /** Move the camera to a mark picked in the list (a new key moves it again). */
+  annotationFocus?: { center: LonLat; key: number } | null;
 }
+
+const NO_ANNOTATIONS: readonly MapAnnotation[] = [];
+const NO_ALERTS: ReadonlySet<string> = new Set();
+const NO_DRAFT: readonly LonLat[] = [];
+const ANNOTATION_LAYERS = ['map-annotation-fill', 'map-annotation-line', 'map-annotation-point', 'map-annotation-label'] as const;
+const ANNOTATION_HIT_LAYERS = ['map-annotation-point', 'map-annotation-line', 'map-annotation-fill'] as const;
+const DRAWING_TOOLS: ReadonlySet<AnnotationTool> = new Set(['measure', 'area', 'point']);
+const ANNOTATION_TOOL_BUTTONS: ReadonlyArray<[AnnotationTool, IconName, MessageKey]> = [
+  ['measure', 'ruler', 'annot.toolMeasure'],
+  ['area', 'polygon', 'annot.toolArea'],
+  ['point', 'pin', 'annot.toolPoint'],
+  ['list', 'list', 'annot.toolList'],
+];
 
 /** The drone on the map: its position and nose heading, its flown track, and the RDF-SDR's own GPS when it differs. */
 export interface DroneMapView {
@@ -348,7 +376,7 @@ export interface DroneMapView {
   rdfOwn: GeoOrigin | null;
 }
 
-function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, curveOffset, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, provisionalTheta = null, provisionalHeading = null, orientationCause, onOpenCompassSettings, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect, ground = null, estimate = null, compact = false, drone = null, droneArrayHeading = null, heldSeed = null, mini = false, miniZoom = 0 }: TacticalMapProps): JSX.Element {
+function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffset = 0, curveOffset, orientationVerified = true, gpsSource = 'DATA_OUT', doaReady = true, doaHeldCode, doaHeldText, provisionalTheta = null, provisionalHeading = null, orientationCause, onOpenCompassSettings, overlaySettings = DEFAULT_DOA_OVERLAY_SETTINGS, insets = ZERO_INSETS, basemapId = DEFAULT_BASEMAP_ID, onBasemapSelect, ground = null, estimate = null, compact = false, drone = null, droneArrayHeading = null, heldSeed = null, mini = false, miniZoom = 0, annotations = NO_ANNOTATIONS, selectedAnnotationId = null, geofenceAlertIds = NO_ALERTS, geofenceNotice = null, annotationTool = 'none', annotationDraft = NO_DRAFT, onAnnotationTool, onAnnotationMapClick, onAnnotationSelect, annotationFocus = null }: TacticalMapProps): JSX.Element {
   const { t, lang } = useI18n();
   const hostRef = useRef<HTMLDivElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -612,7 +640,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
         maxZoom: 19,
         attributionControl: false,
         locale: mapLocale(t),
-        style: { version: 8, glyphs: origin + OFFLINE_GLYPHS_PATH, sources: { ...Object.fromEntries(contents.map((content) => [content.id, content.source])), ...Object.fromEntries(SOURCE_IDS.map((id) => [id, { type: 'geojson', data: EMPTY }])), 'map-grid': { type: 'geojson', data: EMPTY } }, layers: [
+        style: { version: 8, glyphs: origin + OFFLINE_GLYPHS_PATH, sources: { ...Object.fromEntries(contents.map((content) => [content.id, content.source])), ...Object.fromEntries(SOURCE_IDS.map((id) => [id, { type: 'geojson', data: EMPTY }])), 'map-grid': { type: 'geojson', data: EMPTY }, 'map-annotations': { type: 'geojson', data: EMPTY }, 'map-annotation-labels': { type: 'geojson', data: EMPTY }, 'map-annotation-draft': { type: 'geojson', data: EMPTY } }, layers: [
           // Neutral land colour under the tiles; it follows the console theme when no tiles load.
           { id: 'basemap-background', type: 'background', paint: { 'background-color': paint.background } },
           // Basemap raster layers sit here, under 'doa-beam'; a style change swaps only them.
@@ -626,6 +654,14 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
           // The operator's land map grid (UTM, MGRS or Lat/Lon), above the tiles and under the DoA lines; empty while off.
           { id: 'map-grid-line', type: 'line', source: 'map-grid', paint: { 'line-color': mapGridColors(consoleTheme() === 'dark').line, 'line-width': 1 } },
           { id: 'map-grid-label', type: 'symbol', source: 'map-grid', layout: { 'symbol-placement': 'line', 'symbol-spacing': 320, 'text-field': ['get', 'label'], 'text-font': ['NotoSans-Regular'], 'text-size': 11, 'text-keep-upright': true }, paint: { 'text-color': mapGridColors(consoleTheme() === 'dark').text, 'text-halo-color': mapGridColors(consoleTheme() === 'dark').halo, 'text-halo-width': 1.5 } },
+          // The operators' areas and markers in their own colours; a no-go area the drone is inside of is drawn thick.
+          { id: 'map-annotation-fill', type: 'fill', source: 'map-annotations', filter: ['==', ['geometry-type'], 'Polygon'], paint: { 'fill-color': ['get', 'color'], 'fill-opacity': ['case', ['get', 'selected'], 0.32, 0.18] } },
+          { id: 'map-annotation-line', type: 'line', source: 'map-annotations', filter: ['==', ['geometry-type'], 'Polygon'], layout: { 'line-join': 'round' }, paint: { 'line-color': ['get', 'color'], 'line-opacity': 0.95, 'line-width': ['case', ['get', 'alert'], 5, ['get', 'selected'], 3.5, 2] } },
+          { id: 'map-annotation-point', type: 'circle', source: 'map-annotations', filter: ['==', ['geometry-type'], 'Point'], paint: { 'circle-radius': ['case', ['get', 'selected'], 9, 7], 'circle-color': ['get', 'color'], 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2 } },
+          { id: 'map-annotation-label', type: 'symbol', source: 'map-annotation-labels', layout: { 'text-field': ['get', 'name'], 'text-font': ['NotoSans-Medium'], 'text-size': 12, 'text-offset': ['case', ['==', ['get', 'kind'], 'point'], ['literal', [0, 1.3]], ['literal', [0, 0]]], 'text-anchor': ['case', ['==', ['get', 'kind'], 'point'], 'top', 'center'], 'text-max-width': 12 }, paint: { 'text-color': '#ffffff', 'text-halo-color': 'rgba(12, 16, 20, 0.9)', 'text-halo-width': 1.6 } },
+          // The shape being drawn (or measured): a dashed line and its corners.
+          { id: 'map-annotation-draft-line', type: 'line', source: 'map-annotation-draft', filter: ['==', ['get', 'role'], 'line'], paint: { 'line-color': '#ffd166', 'line-width': 2.5, 'line-dasharray': [3, 2] } },
+          { id: 'map-annotation-draft-corner', type: 'circle', source: 'map-annotation-draft', filter: ['==', ['get', 'role'], 'corner'], paint: { 'circle-radius': 5, 'circle-color': '#ffffff', 'circle-stroke-color': '#ffd166', 'circle-stroke-width': 2.5 } },
           { id: 'doa-rings', type: 'line', source: 'doa-rings', paint: { 'line-color': paint.rings, 'line-opacity': .55, 'line-width': 1.2, 'line-dasharray': [4, 3] } },
           { id: 'doa-guides', type: 'line', source: 'doa-guides', paint: { 'line-color': paint.guides, 'line-opacity': .4, 'line-width': 1, 'line-dasharray': [2, 3] } },
           doaLayers.lobeFill,
@@ -954,6 +990,68 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     map.on('moveend', update);
     return () => { map.off('moveend', update); };
   }, [styleReady, gridKind]);
+
+  // The operators' areas and markers, and the shape being drawn.
+  const annotationShapes = useMemo(() => annotationFeatures(annotations, selectedAnnotationId, geofenceAlertIds), [annotations, selectedAnnotationId, geofenceAlertIds]);
+  const annotationLabels = useMemo(() => annotationLabelFeatures(annotations), [annotations]);
+  const draftShapes = useMemo(() => draftFeatures(annotationTool, annotationDraft), [annotationTool, annotationDraft]);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady) return;
+    (map.getSource('map-annotations') as GeoJSONSource | undefined)?.setData(annotationShapes);
+    (map.getSource('map-annotation-labels') as GeoJSONSource | undefined)?.setData(annotationLabels);
+  }, [styleReady, annotationShapes, annotationLabels]);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady) return;
+    (map.getSource('map-annotation-draft') as GeoJSONSource | undefined)?.setData(draftShapes);
+  }, [styleReady, draftShapes]);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady) return;
+    const visible = settings.annotationsVisible && !mini ? 'visible' : 'none';
+    for (const id of ANNOTATION_LAYERS) if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', visible);
+  }, [styleReady, settings.annotationsVisible, mini]);
+  // While a tool draws, a click adds a corner (double-click zoom off, crosshair cursor); otherwise a click on a mark picks it.
+  const annotationClickRef = useRef(onAnnotationMapClick);
+  annotationClickRef.current = onAnnotationMapClick;
+  const annotationSelectRef = useRef(onAnnotationSelect);
+  annotationSelectRef.current = onAnnotationSelect;
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady || mini) return undefined;
+    const drawing = DRAWING_TOOLS.has(annotationTool);
+    const canvas = map.getCanvas();
+    if (drawing) {
+      map.doubleClickZoom.disable();
+      canvas.style.cursor = 'crosshair';
+    }
+    const onClick = (event: MapMouseEvent) => {
+      if (drawing) {
+        annotationClickRef.current?.([Number(event.lngLat.lng.toFixed(7)), Number(event.lngLat.lat.toFixed(7))]);
+        return;
+      }
+      if (!annotationSelectRef.current) return;
+      const layers = ANNOTATION_HIT_LAYERS.filter((id) => map.getLayer(id));
+      // A finger is wide: look 8 px around the tap.
+      const { x, y } = event.point;
+      const hit = map.queryRenderedFeatures([[x - 8, y - 8], [x + 8, y + 8]], { layers: [...layers] }).find((feature) => typeof feature.properties?.id === 'string');
+      if (hit) annotationSelectRef.current(String(hit.properties?.id));
+    };
+    map.on('click', onClick);
+    return () => {
+      map.off('click', onClick);
+      if (drawing) {
+        map.doubleClickZoom.enable();
+        canvas.style.cursor = '';
+      }
+    };
+  }, [styleReady, mini, annotationTool]);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady || !annotationFocus) return;
+    map.easeTo({ center: annotationFocus.center, duration: 600 });
+  }, [styleReady, annotationFocus]);
 
   // Push only the sources whose collections changed since the last update.
   useEffect(() => {
@@ -1395,6 +1493,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
         : heldDraw && heldTime ? t('map.heldData', { deg: heldBearing === null ? t('common.na') : formatBearing(heldBearing, 0), time: heldTime })
           : held && doaHeldCode ? t('map.doaHeld', { code: doaHeldCode }) : t('map.noVector');
   const notices: string[] = [];
+  if (geofenceNotice) notices.push(geofenceNotice);
   if (mapState === 'no-webgl') notices.push(t('map.noWebgl'));
   if (mapState === 'gl-lost') notices.push(t('map.glLost'));
   if (mapState === 'worker-stalled') notices.push(t('map.workerStalled'));
@@ -1442,6 +1541,19 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
             <button className="ov-map-button" type="button" aria-label={t('map.ctrlZoomOut')} title={t('map.ctrlZoomOut')} onClick={() => zoomBy(-1)}><Icon name="minus" /></button>
             {stationCoordinate ? <button className="ov-map-button" type="button" aria-label={t('map.centerAria')} title={t('map.centerAria')} onClick={resetView}><Icon name="crosshair" /></button> : null}
             <button className="ov-map-button" type="button" aria-label={t('map.northUp')} title={t('map.northUp')} onClick={northUp}><Icon name="north" /></button>
+            {onAnnotationTool ? ANNOTATION_TOOL_BUTTONS.map(([tool, icon, label]) => (
+              <button
+                key={tool}
+                className={annotationTool === tool ? 'ov-map-button is-active' : 'ov-map-button'}
+                type="button"
+                aria-label={t(label)}
+                aria-pressed={annotationTool === tool}
+                title={t(label)}
+                onClick={() => onAnnotationTool(annotationTool === tool ? 'none' : tool)}
+              >
+                <Icon name={icon} />
+              </button>
+            )) : null}
             {onBasemapSelect ? <BasemapMenu value={basemapId} onChange={onBasemapSelect} /> : null}
             {attribution ? (
               <p className="ov-map-attribution" title={attribution.text}>

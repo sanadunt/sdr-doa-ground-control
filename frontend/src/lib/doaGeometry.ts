@@ -19,6 +19,8 @@ export interface DoaOverlaySettings {
   headingVisible: boolean;
   /** The transmitter position estimate: hot cells, the estimate, its radius and the line to it (lib/positionEstimate.ts). */
   estimateVisible: boolean;
+  /** The operators' areas and markers (lib/mapAnnotations.ts). */
+  annotationsVisible: boolean;
   /** How the estimate card writes its position for a land map (lib/gridCoordinates.ts). */
   coordinateFormat: CoordinateFormat;
   /** A UTM, MGRS or latitude/longitude grid over the map, or none (lib/mapGrid.ts). */
@@ -54,6 +56,7 @@ export const DEFAULT_DOA_OVERLAY_SETTINGS: DoaOverlaySettings = {
   labelsVisible: true,
   headingVisible: true,
   estimateVisible: true,
+  annotationsVisible: true,
   coordinateFormat: 'latlon',
   mapGrid: 'off',
   overlayOpacity: 0.85,

@@ -916,7 +916,7 @@ class MarkerContractTests(unittest.TestCase):
     def test_the_lan_view_rules_name_the_same_route(self) -> None:
         self.assertEqual(lan.MIRROR_MARKERS_ROUTE, rm.MARKERS_ROUTE)
         self.assertEqual(lan.MIRROR_MARKER_COMMAND_ID_RE.pattern, rm.MARKER_COMMAND_ID_PATTERN.pattern)
-        self.assertEqual(lan.WRITE_ROUTES, frozenset({("POST", rm.MARKERS_ROUTE)}))
+        self.assertIn(("POST", rm.MARKERS_ROUTE), lan.WRITE_ROUTES)
         # A command id fits the GET path rule.
         self.assertEqual(lan.lan_route(f"{rm.MARKERS_ROUTE}/{COMMAND_ID}"), lan.ROUTE_MIRROR_MARKER)
 

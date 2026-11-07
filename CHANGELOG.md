@@ -2,6 +2,16 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.19.0
+
+Tanda peta: ukur jarak, area (geofence) dan marker, dari groundstation maupun tablet. Tidak ada yang dihapus.
+
+- **Ukur jarak.** Tombol penggaris di kontrol peta: klik titik-titik di peta, panel menulis total jarak, jumlah ruas dan arah ruas terakhir. Tidak disimpan.
+- **Area dan marker.** Tombol "Gambar area" (klik sudut-sudutnya, minimal 3, lalu Selesai) dan "Pasang marker" (klik tempatnya), lalu isi nama, jenis (Curiga, Dilarang lewat, Aman, Info), warna (8 pilihan) dan catatan. Tanda disimpan di groundstation (`map-annotations.json` di folder data), jadi tetap ada setelah restart dan terlihat di groundstation dan semua tablet dalam 2 detik. Area menulis luas dan kelilingnya.
+- **Ubah dan hapus dari mana saja.** Klik tanda di peta, atau buka "Daftar tanda": panel menulis siapa yang terakhir mengubahnya, dengan tombol Ubah, Hapus (dengan konfirmasi) dan Tampilkan di peta. Bila dua halaman mengubah tanda yang sama, yang kedua mendapat pesan dan versi terbaru untuk dicek, tidak ada yang tertimpa diam-diam.
+- **Geofence.** Selama drone (atau posisi RDF-SDR yang live, juga di simulasi) berada di dalam area jenis Dilarang lewat, peta menampilkan "Drone di area Dilarang lewat: <nama>" dan garis area itu menebal.
+- **Aturan baru.** Tablet di LAN view kini boleh menulis tanda peta, selain penanda spektrum Receiver (keputusan pemilik 2026-11-06). Lapisan punya sakelar "Tanda peta" untuk menyembunyikan semuanya.
+
 ## 3.18.2
 
 Koordinat estimasi langsung di peta. Tidak ada yang dihapus.
