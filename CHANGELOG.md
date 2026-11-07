@@ -2,6 +2,13 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.18.2
+
+Koordinat estimasi langsung di peta. Tidak ada yang dihapus.
+
+- **Label ESTIMASI menulis koordinatnya.** Label di titik estimasi kini dua baris: "ESTIMASI · ±160 m" lalu posisinya dalam format pilihan di kartu (Lat/Lon, UTM "UTM 48M · X 795503 · Y 9234235", MGRS, atau "Dari GS · X +2360 m · Y +1506 m"), teks putih 12 px di latar gelap, jadi terbaca tanpa membuka kartu.
+- **Kartu lebih terang.** Jarak dan baris posisi di kartu Estimasi posisi memakai warna teks utama, bukan abu-abu redup.
+
 ## 3.18.1
 
 Perbaikan kartu Estimasi posisi. Tidak ada yang dihapus.

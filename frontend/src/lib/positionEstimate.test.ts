@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { TelemetrySnapshot } from '../types';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createElement } from 'react';
-import { estimatePositionText, estimateSourceKey, formatEstimateDistance, positionEstimate, positionEstimateFeatures, positionEstimateLabel, positionEstimateLineLabels } from './positionEstimate';
+import { estimateMapLabel, estimatePositionText, estimateSourceKey, formatEstimateDistance, positionEstimate, positionEstimateFeatures, positionEstimateLineLabels } from './positionEstimate';
 import { bearingAndDistance } from './doaGeometry';
 import { EstimatePanel } from '../components/overview/EstimatePanel';
 import { I18nContext, translate } from './i18n';
@@ -64,9 +64,8 @@ describe('positionEstimate', () => {
     expect(shapes.lines.features).toHaveLength(0);
   });
 
-  it('labels the point and formats distances', () => {
+  it('formats distances', () => {
     const estimate = positionEstimate(snapshot(ESTIMATE));
-    expect(estimate && positionEstimateLabel(estimate, t)).toBe('ESTIMATE');
     expect(formatEstimateDistance(850)).toBe('850 m');
     expect(formatEstimateDistance(12_400)).toBe('12 km');
     expect(formatEstimateDistance(null)).toBe('--');
@@ -157,6 +156,14 @@ describe('the estimate in land map coordinates', () => {
     expect(estimatePositionText(withGround, 'gsxy', tId)).toBe('Dari GS · X +2210 m · Y +1991 m · ±420 m');
   });
 
+  it('puts the same coordinates on the map label, under ESTIMATE and the radius', () => {
+    expect(estimateMapLabel(withGround, 'utm', tId)).toEqual({ above: 'ESTIMASI · ±420 m', text: 'UTM 48M · X 789540 · Y 9236289' });
+    expect(estimateMapLabel(withGround, 'mgrs', tId)).toEqual({ above: 'ESTIMASI · ±420 m', text: 'MGRS 48M YT 89540 36288' });
+    expect(estimateMapLabel(withGround, 'gsxy', tId)).toEqual({ above: 'ESTIMASI · ±420 m', text: 'Dari GS · X +2210 m · Y +1991 m' });
+    expect(estimateMapLabel(withGround, 'latlon', tId)).toEqual({ above: 'ESTIMASI · ±420 m', text: '-6.90200, 107.62000' });
+    expect(estimateMapLabel(withoutGround, 'gsxy', tId).text).toBe('X,Y dari GS: GPS groundstation belum fix');
+  });
+
   it('says when X,Y from GS has no groundstation fix', () => {
     expect(estimatePositionText(withoutGround, 'gsxy', tId)).toBe('X,Y dari GS: GPS groundstation belum fix');
   });
@@ -196,5 +203,22 @@ describe('the estimate card in a short left column', () => {
 
   it('wraps the position, so a long UTM or MGRS value is never cut', () => {
     expect(css).toMatch(/\.ov-estimate \.ov-estimate-position \{ white-space: normal; overflow-wrap: anywhere; \}/);
+  });
+});
+
+describe('estimate text on the map and the card reads clearly', () => {
+  type Fs = { readFileSync(file: URL, encoding: 'utf8'): string };
+  const { process } = globalThis as unknown as { process: { getBuiltinModule(id: 'node:fs'): Fs } };
+  const fs = process.getBuiltinModule('node:fs');
+  const dashboard = fs.readFileSync(new URL('../overview-dashboard.css', import.meta.url), 'utf8');
+  const design = fs.readFileSync(new URL('../console-design.css', import.meta.url), 'utf8');
+
+  it('draws the card distances and position in the main text colour', () => {
+    expect(dashboard).toMatch(/\.ov-estimate-distance \{[^}]*color: var\(--text\);/);
+    expect(dashboard).toMatch(/\.ov-estimate \.ov-estimate-position b \{ color: var\(--text\); font-size: 12px; font-weight: 600; \}/);
+  });
+
+  it('gives the point label white text at 12 px on a near-opaque ground', () => {
+    expect(design).toMatch(/\.doa-estimate-label\.is-point \{[^}]*background: rgba\(17, 23, 30, \.9\);[^}]*color: #ffffff;[^}]*font-size: 12px;/);
   });
 });

@@ -37,7 +37,7 @@ import { numberOrNull, primaryCandidate } from '../lib/telemetry';
 import { angularFrameAgeMs, angularHeld, doaSample, isMqttSnapshot } from '../lib/telemetrySource';
 import { overviewDoaStatus } from '../lib/doaStatus';
 import { headingLabel, headingLabelPosition, headingLineFeatures, headingPopupText, stationHeading, type HeadingSource, type RdfHeading } from '../lib/rdfHeading';
-import { NO_ESTIMATE_FEATURES, positionEstimateFeatures, positionEstimateLabel, positionEstimateLineLabels, type PositionEstimate } from '../lib/positionEstimate';
+import { NO_ESTIMATE_FEATURES, estimateMapLabel, positionEstimateFeatures, positionEstimateLineLabels, type PositionEstimate } from '../lib/positionEstimate';
 import { mapGridColors, mapGridFeatures } from '../lib/mapGrid';
 import { HELD_LAYER_OF, NO_HELD_FEATURES, heldBearingDeg, heldLayerSpec, heldNoticeText, heldOverlayFeatures, heldTimeText, overlayIdentity, pageOverlayMemory, provisionalBesideHeld, rememberOverlay, setPageOverlayMemory } from '../lib/heldOverlay';
 import { seedOverlayMemory } from '../lib/lastLiveDoa';
@@ -1169,11 +1169,13 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
     }
     if (link) add(link.label, link.live ? 'ov-ground-label' : 'ov-ground-label is-reference', groundLinkLabel(link, t));
     if (estimatePoint && estimate) {
-      add(estimatePoint, 'doa-estimate-label', positionEstimateLabel(estimate, t));
+      // ESTIMATE and its radius over the position in the operator's coordinate format.
+      const pointLabel = estimateMapLabel(estimate, g.coordinateFormat, t);
+      add(estimatePoint, 'doa-estimate-label is-point', pointLabel.text, pointLabel.above);
       for (const line of positionEstimateLineLabels(estimate, stationCoordinate, t)) add(line.lngLat, 'doa-estimate-label is-line', line.text);
     }
     return () => { for (const marker of markers) marker.remove(); };
-  }, [styleReady, stationCoordinate, geometry.rings, bearing, bearingDrawn, provisionalBearing, provisionalDrawn, frequencyText, heldBearing, heldBearingDrawn, heldOrigin, heldTime, heldFrequencyText, heading, headingDrawn, headingHeld, link, estimate, estimatePoint?.[0], estimatePoint?.[1], g.ringsVisible, g.guidesVisible, g.labelsVisible, g.maxDistanceM, t]);
+  }, [styleReady, stationCoordinate, geometry.rings, bearing, bearingDrawn, provisionalBearing, provisionalDrawn, frequencyText, heldBearing, heldBearingDrawn, heldOrigin, heldTime, heldFrequencyText, heading, headingDrawn, headingHeld, link, estimate, estimatePoint?.[0], estimatePoint?.[1], g.ringsVisible, g.guidesVisible, g.labelsVisible, g.maxDistanceM, g.coordinateFormat, t]);
 
   // Hover (or tap) readout: geographic bearing, its theta_0 in the DoA frame and the curve's dB value there, and ground distance from the station.
   // A held overlay reads its remembered vector and offset, under a STALE line with its time.
@@ -1340,7 +1342,8 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
         }
         if (link) label(link.label, groundLinkLabel(link, t), link.live ? '#11171e' : '#5b6670');
         if (estimatePoint && estimate) {
-          label([estimatePoint[0], estimatePoint[1]], positionEstimateLabel(estimate, t), ESTIMATE_COLOR.light);
+          const pointLabel = estimateMapLabel(estimate, settings.coordinateFormat, t);
+          label([estimatePoint[0], estimatePoint[1]], `${pointLabel.above} · ${pointLabel.text}`, ESTIMATE_COLOR.light);
           for (const line of positionEstimateLineLabels(estimate, stationCoordinate, t)) label(line.lngLat, line.text, ESTIMATE_COLOR.light);
         }
         context.restore();
@@ -1359,7 +1362,7 @@ function TacticalMapView({ coordinate, snapshot, localSnapshotFresh, compassOffs
       map?.off('resize', schedule);
       canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
     };
-  }, [fallbackActive, mapState, theme, tilesLoaded, tone, styleReady, stationCoordinate, geometry, curveFade, bearing, provisionalBearing, frequencyText, heldBearing, heldOrigin, heldTime, heldFrequencyText, heading, headingLine, headingHeld, ground, link, estimate, estimateShapes, estimatePoint?.[0], estimatePoint?.[1], settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.edgesVisible, settings.bearingVisible, settings.headingVisible, settings.labelsVisible, settings.overlayOpacity, settings.lobeOpacity, settings.maxDistanceM, settings.lobeDistanceM, t]);
+  }, [fallbackActive, mapState, theme, tilesLoaded, tone, styleReady, stationCoordinate, geometry, curveFade, bearing, provisionalBearing, frequencyText, heldBearing, heldOrigin, heldTime, heldFrequencyText, heading, headingLine, headingHeld, ground, link, estimate, estimateShapes, estimatePoint?.[0], estimatePoint?.[1], settings.ringsVisible, settings.guidesVisible, settings.lobeVisible, settings.edgesVisible, settings.bearingVisible, settings.headingVisible, settings.labelsVisible, settings.overlayOpacity, settings.lobeOpacity, settings.maxDistanceM, settings.lobeDistanceM, settings.coordinateFormat, t]);
 
   const reducedMotion = prefersReducedMotion;
   const resetView = () => {

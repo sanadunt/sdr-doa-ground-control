@@ -252,29 +252,43 @@ export function positionEstimateFeatures(estimate: PositionEstimate | null, stat
  * MGRS, or X/Y metres east and north of the groundstation's own GPS fix.
  */
 export function estimatePositionText(estimate: PositionEstimate, format: CoordinateFormat, t: Translate): string | null {
+  const coordinates = estimateCoordinates(estimate, format, t);
+  if (!coordinates) return null;
+  return coordinates.located ? `${coordinates.text} · ±${formatEstimateDistance(estimate.radiusM)}` : coordinates.text;
+}
+
+/**
+ * The map label at the estimate: a small upper line with ESTIMATE and the
+ * radius, and the position in the chosen format below it, so it reads off
+ * the map without opening the card.
+ */
+export function estimateMapLabel(estimate: PositionEstimate, format: CoordinateFormat, t: Translate): { above: string; text: string } {
+  const above = `${t('estimate.mapLabel')} · ±${formatEstimateDistance(estimate.radiusM)}`;
+  return { above, text: estimateCoordinates(estimate, format, t)?.text ?? t('estimate.mapLabel') };
+}
+
+/** The position alone in the chosen format; `located` is false for a reason it cannot be written that way. */
+function estimateCoordinates(estimate: PositionEstimate, format: CoordinateFormat, t: Translate): { text: string; located: boolean } | null {
   const { latitude, longitude } = estimate;
   if (latitude === null || longitude === null) return null;
-  const radius = formatEstimateDistance(estimate.radiusM);
   if (format === 'utm') {
     const utm = toUtm(latitude, longitude);
-    if (!utm) return t('estimate.positionNoGrid');
-    return t('estimate.positionUtm', {
-      zone: `${utm.zone}${utm.band}`,
-      x: String(Math.round(utm.easting)),
-      y: String(Math.round(utm.northing)),
-      radius,
-    });
+    if (!utm) return { text: t('estimate.positionNoGrid'), located: false };
+    return {
+      text: t('estimate.positionUtm', { zone: `${utm.zone}${utm.band}`, x: String(Math.round(utm.easting)), y: String(Math.round(utm.northing)) }),
+      located: true,
+    };
   }
   if (format === 'mgrs') {
     const mgrs = toMgrs(latitude, longitude);
-    return mgrs ? t('estimate.positionMgrs', { mgrs, radius }) : t('estimate.positionNoGrid');
+    return mgrs ? { text: t('estimate.positionMgrs', { mgrs }), located: true } : { text: t('estimate.positionNoGrid'), located: false };
   }
   if (format === 'gsxy') {
-    if (estimate.groundLatitude === null || estimate.groundLongitude === null) return t('estimate.positionNoGround');
+    if (estimate.groundLatitude === null || estimate.groundLongitude === null) return { text: t('estimate.positionNoGround'), located: false };
     const { x, y } = gsRelativeXY({ latitude: estimate.groundLatitude, longitude: estimate.groundLongitude }, { latitude, longitude });
-    return t('estimate.positionGs', { x: formatGridMetres(x), y: formatGridMetres(y), radius });
+    return { text: t('estimate.positionGs', { x: formatGridMetres(x), y: formatGridMetres(y) }), located: true };
   }
-  return t('estimate.position', { lat: latitude.toFixed(5), lon: longitude.toFixed(5), radius });
+  return { text: t('estimate.position', { lat: latitude.toFixed(5), lon: longitude.toFixed(5) }), located: true };
 }
 
 export function formatEstimateDistance(metres: number | null): string {
@@ -282,10 +296,6 @@ export function formatEstimateDistance(metres: number | null): string {
   return metres >= 1000 ? `${(metres / 1000).toFixed(metres >= 10_000 ? 0 : 1)} km` : `${Math.round(metres)} m`;
 }
 
-/** Map pill at the estimate point; the distances sit on the lines (positionEstimateLineLabels()). */
-export function positionEstimateLabel(_estimate: PositionEstimate, t: Translate): string {
-  return t('estimate.mapLabel');
-}
 
 export interface EstimateLineLabel {
   /** Halfway along the line. */
