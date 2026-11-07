@@ -566,6 +566,7 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 .doa-heading-label.is-held { border: 1px dashed #8d99a6; background: #3b434b; color: #e6eaee; }
 .doa-estimate-label { padding: 1px 4px; border: 1px dashed var(--estimate); border-radius: 3px; background: rgba(17, 23, 30, .72); color: #d6e2ea; font-size: 9.5px; font-weight: 500; transform: translateY(-16px); }
 /* The distance halfway along a line to the estimate sits on the line. */
+.doa-estimate-label.is-point { padding: 4px 8px; border-style: solid; background: rgba(17, 23, 30, .9); color: #ffffff; font-size: 12px; font-weight: 600; box-shadow: 0 2px 8px rgba(0, 0, 0, .35); transform: translateY(-28px); }
 .doa-estimate-label.is-line { border-style: solid; transform: none; white-space: nowrap; }
 /* The RDF-SDR heading: a triangle just outside the 44 px station marker, turned by MapLibre (rotationAlignment 'map'). */
 .rdf-heading-marker { width: 76px; height: 76px; pointer-events: none; filter: drop-shadow(0 0 1px #ffffff) drop-shadow(0 0 1px #ffffff) drop-shadow(0 1px 2px rgba(0, 0, 0, .5)); }
