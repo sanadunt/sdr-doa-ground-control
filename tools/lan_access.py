@@ -165,6 +165,8 @@ API_ROUTES = frozenset({
     "/api/drone/video",
     # The last answer with a live DoA graph (last_live_doa.py), read only.
     "/api/doa/last-live",
+    # The operators' map annotations (map_annotations.py); its POST is in WRITE_ROUTES.
+    "/api/map/annotations",
 })
 ROUTE_UI = "ui"
 ROUTE_TILE = "tile"
@@ -179,7 +181,11 @@ READ_METHODS = ("GET", "HEAD")
 # becomes writable: no tune, gains, scan, listen or settings.
 MIRROR_MARKERS_ROUTE = "/api/mirror/receiver/markers"
 MIRROR_MARKER_COMMAND_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
-WRITE_ROUTES = frozenset({("POST", MIRROR_MARKERS_ROUTE)})
+# The operators' map annotations (owner's decisions of 2026-11-06 and
+# 2026-11-07): create, change or remove an area or a marker, POST only, this
+# exact path (map_annotations.ROUTE).
+MAP_ANNOTATIONS_ROUTE = "/api/map/annotations"
+WRITE_ROUTES = frozenset({("POST", MIRROR_MARKERS_ROUTE), ("POST", MAP_ANNOTATIONS_ROUTE)})
 # The drone video player (owner's decision of 2026-11-03): an SDP offer to the
 # host video service and the end of that session. They write nothing; they
 # open and close a WebRTC stream of the drone camera.

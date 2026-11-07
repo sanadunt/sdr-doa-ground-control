@@ -415,6 +415,7 @@ class LanRequestRuleTests(unittest.TestCase):
             "/api/drone",
             "/api/drone/video",
             "/api/doa/last-live",
+            "/api/map/annotations",
         }))
         for path in (
             "/receiver", "/receiver/", "/receiver/index.html", "/api/receiver/settings", "/api/lan-access",
@@ -430,11 +431,14 @@ class LanRequestRuleTests(unittest.TestCase):
             self.assertIsNone(lan.lan_route(path), path)
             self.assertIsNone(lan.records_route(path), path)
 
-    def test_the_one_write_is_a_marker_command(self) -> None:
-        # The owner's decision of 2026-10-31: the LAN view may add and remove
-        # the groundstation Receiver's markers, and write nothing else.
-        self.assertEqual(lan.WRITE_ROUTES, frozenset({("POST", "/api/mirror/receiver/markers")}))
+    def test_the_writes_are_a_marker_command_and_the_map_annotations(self) -> None:
+        # The owner's decisions of 2026-10-31 (the groundstation Receiver's
+        # markers) and 2026-11-06/07 (the map annotations): nothing else.
+        self.assertEqual(lan.WRITE_ROUTES, frozenset({("POST", "/api/mirror/receiver/markers"), ("POST", "/api/map/annotations")}))
         self.assertTrue(lan.write_allowed("POST", "/api/mirror/receiver/markers"))
+        self.assertTrue(lan.write_allowed("POST", "/api/map/annotations"))
+        for method, path in (("PUT", "/api/map/annotations"), ("DELETE", "/api/map/annotations"), ("POST", "/api/map/annotations/"), ("POST", "/api/map")):
+            self.assertFalse(lan.write_allowed(method, path), (method, path))
         for method, path in (
             ("PUT", "/api/mirror/receiver/markers"), ("DELETE", "/api/mirror/receiver/markers"), ("post", "/api/mirror/receiver/markers"),
             ("POST", "/api/mirror/receiver/markers/"), ("POST", "/api/mirror/receiver/markers/tab-cmd-0001"),

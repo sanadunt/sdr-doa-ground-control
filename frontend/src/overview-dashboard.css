@@ -152,6 +152,39 @@
 .ov-estimate.is-pending .ov-hud-held { color: var(--subtle); }
 .ov-estimate-format { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; color: var(--muted); font-size: 11px; }
 .ov-estimate-format select { flex: 0 1 140px; min-width: 0; height: 44px; padding: 0 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 12px; }
+/* Map marks (lib/mapAnnotations.ts): the tool hint and result, the save form, the picked mark and the list. */
+.ov-map-button.is-active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 24%, var(--ov-card-bg)); }
+.ov-annotations { display: flex; flex: none; flex-direction: column; min-height: 0; }
+.ov-annot-body { display: flex; flex-direction: column; gap: 8px; padding: 8px 12px 12px; font-size: 12px; }
+.ov-annot-body > * { flex: none; margin: 0; }
+.ov-annot-hint { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.35; }
+.ov-annot-result { margin: 0; color: var(--text); font-family: var(--mono); font-size: 13px; font-weight: 600; }
+.ov-annot-meta { margin: 0; color: var(--subtle); font-size: 11.5px; }
+.ov-annot-name { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--text); font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.ov-annot-note { margin: 0; color: var(--text); font-size: 12px; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ov-annot-dot { flex: none; width: 12px; height: 12px; border: 1px solid var(--line); border-radius: 50%; }
+.ov-annot-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.ov-annot-actions .ov-button { min-height: 44px; }
+.ov-annot-form { display: flex; flex-direction: column; gap: 8px; }
+.ov-annot-field { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11.5px; }
+.ov-annot-field input, .ov-annot-field select, .ov-annot-field textarea { box-sizing: border-box; width: 100%; min-height: 44px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; font-size: 13px; }
+.ov-annot-field textarea { min-height: 72px; resize: vertical; }
+.ov-annot-colors { display: flex; flex-wrap: wrap; gap: 4px; margin: 0; padding: 0; border: 0; }
+.ov-annot-colors legend { padding: 0 0 4px; color: var(--muted); font-size: 11.5px; }
+.ov-annot-swatch { position: relative; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 8px; cursor: pointer; }
+.ov-annot-swatch::before { content: ''; width: 24px; height: 24px; border: 2px solid var(--line); border-radius: 50%; background: var(--swatch); }
+.ov-annot-swatch:has(input:checked)::before { border-color: var(--text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 45%, transparent); }
+.ov-annot-swatch:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ov-annot-swatch input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+.ov-annot-list ul { display: flex; flex-direction: column; gap: 2px; max-height: 320px; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.ov-annot-row { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer; }
+.ov-annot-row:hover { background: var(--surface-2); }
+.ov-annot-row-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-annot-row-cat { flex: none; color: var(--subtle); font-size: 11px; }
+.ov-annot-status { margin: 0; color: var(--green); font-size: 12px; }
+.ov-annot-status.is-bad { color: var(--red); }
+.ov-annot-confirm { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--red); border-radius: 8px; }
+.ov-annot-confirm p { margin: 0; color: var(--text); }
 .ov-estimate-note { margin: 0; color: var(--muted); font-size: 10.5px; line-height: 1.35; }
 .ov-estimate-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 2px; }
 .ov-estimate-actions .ov-button { height: 28px; padding: 0 8px; font-size: 11.5px; }

@@ -130,6 +130,7 @@ import drone_video as dv
 from drone_discovery import AUTO as DRONE_AUTO, DroneService, drone_settings, is_drone_host
 from drone_link import with_drone
 import last_live_doa
+import map_annotations as man
 from mdns_resolver import MdnsResolver
 from sdr_doa_collector import (
     DATA_OUT_HOST_IN_USE,
@@ -2493,6 +2494,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         # command itself (POST .../markers) is logged with the client address.
         if path.startswith(rm.MARKERS_ROUTE + "/") and status == "200":
             return
+        # Every page polls the map annotations every 2 s; a write is logged with the client address.
+        if path == man.ROUTE and self.command == "GET" and status == "200":
+            return
         super().log_request(code, size)
 
     @property
@@ -3417,6 +3421,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             "snapshot_budget_ms": int(SNAPSHOT_TOTAL_BUDGET_S * 1000),
             # Browser preferences are kept on this host (/api/preferences).
             "preferences": True,
+            # The operators' areas and markers (/api/map/annotations), on both listeners.
+            "map_annotations": True,
             "version": self.console_server.version,
             # Which listener answered: "local" here, "lan-view" on the LAN
             # view (LanConsoleHandler), and the LAN view's state.
@@ -3532,6 +3538,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == rm.ROUTE:
             self._get_mirror()
+            return
+        if parsed.path == man.ROUTE:
+            self._get_annotations(parsed)
             return
         if parsed.path == "/api/drone":
             self._send_json(self.console_server.drone_view())
@@ -3884,6 +3893,75 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         self._send_json(view)
 
+    def _send_annotation_error(self, code: str, message: str, item: Optional[Dict[str, Any]] = None) -> None:
+        # Outside the Kontrol code contract, like the other route families.
+        body: Dict[str, Any] = {"ok": False, "code": code, "error": message}
+        if item is not None:
+            body["item"] = item
+        self._send_json(body, man.ERROR_CODES_HTTP.get(code, HTTPStatus.BAD_REQUEST))
+
+    def _get_annotations(self, parsed: Any) -> None:
+        """GET /api/map/annotations (both listeners, the mirror's read rule): every annotation, or unchanged since a rev."""
+        if not self._mirror_read_is_allowed():
+            self._send_annotation_error(man.ORIGIN_REJECTED, "the map annotations are read by this console's pages only")
+            return
+        since_values = parse_qs(parsed.query).get("since") or []
+        since: Optional[int] = None
+        if since_values and since_values[0].isdigit() and len(since_values[0]) <= 12:
+            since = int(since_values[0])
+        self._send_json(self.console_server.annotations.snapshot(since))
+
+    def _annotation_origin_is_valid(self) -> bool:
+        """POST /api/map/annotations on this listener: the console's own page."""
+        return self._same_origin_loopback_request()
+
+    def _annotation_author(self) -> str:
+        return "groundstation"
+
+    def _apply_annotation(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Run one annotation request; LanConsoleHandler runs it only while its own listener is the open one."""
+        return self.console_server.annotations.apply(request, self._annotation_author())
+
+    def _post_annotation(self) -> None:
+        """POST /api/map/annotations: create, change or remove one area or marker.
+
+        In order: the listener's own Origin (403), the body length (413), at
+        most man.WRITES_PER_S from this client address (429), the schema
+        (400), on the LAN view a listener that is still the open one (409
+        MIRROR_LAN_CLOSED), then the store's own refusals (404 unknown id,
+        409 another page changed it or the set is full, 500 not saved). No
+        cookie is read; the write is logged with the client address.
+        """
+        if not self._annotation_origin_is_valid():
+            self._discard_body(man.MAX_BODY_BYTES)
+            self._send_annotation_error(man.ORIGIN_REJECTED, f"{man.ROUTE} takes changes from this console's own pages only")
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            length = -1
+        if length > man.MAX_BODY_BYTES:
+            self.close_connection = True
+            self._discard_body(lan.MAX_DISCARDED_BODY_BYTES)
+            self._send_annotation_error(man.ANNOTATION_TOO_LARGE, f"the body must be at most {man.MAX_BODY_BYTES} bytes")
+            return
+        if length < 1:
+            self._send_annotation_error(man.ANNOTATION_INVALID, "the body must be JSON with a Content-Length")
+            return
+        raw = self.rfile.read(length)
+        client = str(lan.client_address(self.client_address[0]) or self.client_address[0])
+        if not self.console_server.annotations.admit_write(client):
+            self._send_annotation_error(man.ANNOTATION_RATE_LIMITED, f"at most {man.WRITES_PER_S} changes a second")
+            return
+        try:
+            if len(raw) != length:
+                raise man.AnnotationRejected(man.ANNOTATION_INVALID, "the body is incomplete")
+            result = self._apply_annotation(man.decode_request(raw))
+        except man.AnnotationRejected as exc:
+            self._send_annotation_error(exc.code, exc.message, exc.item)
+            return
+        self._send_json(result)
+
     def _send_drone_error(self, status: int, code: str, message: str) -> None:
         # Outside the Kontrol code contract, like the other route families.
         self._send_json({"ok": False, "code": code, "error": message}, status)
@@ -4030,6 +4108,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == rm.MARKERS_ROUTE:
             self._post_mirror_marker()
+            return
+        if parsed.path == man.ROUTE:
+            self._post_annotation()
             return
         if parsed.path == ram.AUDIO_ROUTE:
             self._post_mirror_audio(parsed)
@@ -4405,6 +4486,17 @@ class LanConsoleHandler(ConsoleHandler):
         # while that listener is still the open one.
         return self.console_server.lan.queue_marker_command(self.server, command)
 
+    def _annotation_origin_is_valid(self) -> bool:
+        # The LAN view's own page, as for a marker command; no cookie is read.
+        return lan.origin_matches_host(_header_values(self.headers, "Origin"), _header_values(self.headers, "Host"))
+
+    def _annotation_author(self) -> str:
+        return f"tablet {lan.client_address(self.client_address[0]) or self.client_address[0]}"
+
+    def _apply_annotation(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        # Only while the listener that admitted this client is still the open one (as a marker command).
+        return self.console_server.lan.while_open(self.server, lambda: self.console_server.annotations.apply(request, self._annotation_author()))
+
     def _capabilities_body(self) -> Dict[str, Any]:
         body = super()._capabilities_body()
         body.update({
@@ -4414,6 +4506,7 @@ class LanConsoleHandler(ConsoleHandler):
             # read only.
             "read_only": True,
             "mirror_markers": True,
+            "map_annotations": True,
             "mqtt_publish": False,
             "admin_branding": False,
             "admin_enabled": False,
@@ -4487,6 +4580,10 @@ class LanConsoleHandler(ConsoleHandler):
             # The drone video player (owner's decision of 2026-11-03): an SDP
             # offer to watch the camera, nothing written anywhere.
             self._post_drone_whep()
+            return
+        if path == man.ROUTE and lan.write_allowed("POST", path):
+            # The operators' map annotations (owner's decisions of 2026-11-06 and 2026-11-07).
+            self._post_annotation()
             return
         if lan.write_allowed("POST", path):
             self._post_mirror_marker()
@@ -4892,6 +4989,17 @@ class LanAccessManager:
                 raise rm.MirrorRejected(rm.MIRROR_LAN_CLOSED, rm.LAN_CLOSED_MESSAGE)
             return self.console.receiver_mirror.queue_marker_command(command)
 
+    def while_open(self, server: Any, action: Callable[[], Any]) -> Any:
+        """Run ``action`` under the manager's lock while ``server``, the listener that admitted the client, is the open one.
+
+        As queue_marker_command: a body that arrives after a save replaced
+        or closed that listener is refused as MIRROR_LAN_CLOSED.
+        """
+        with self._lock:
+            if server is None or server is not self._server:
+                raise man.AnnotationRejected(man.LAN_CLOSED, rm.LAN_CLOSED_MESSAGE)
+            return action()
+
     def close(self) -> None:
         """Close the listener for good (console stop)."""
         with self._lock:
@@ -5035,6 +5143,8 @@ class GroundConsoleServer(ThreadingHTTPServer):
         else:
             resolved_preferences = DEFAULT_PREFERENCES_PATH
         self.preferences = PreferencesStore(resolved_preferences)
+        # The operators' map annotations sit beside the preferences (the data directory of an install).
+        self.annotations = man.AnnotationStore(resolved_preferences.with_name(man.FILE_NAME))
         self.version = CONSOLE_VERSION
         # Like the preferences: without an explicit directory the tiles sit
         # next to console.json, so a test server never fills the real cache.

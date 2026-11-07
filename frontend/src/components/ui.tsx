@@ -75,7 +75,7 @@ export function CollectorError({ error }: { error: string }): JSX.Element {
 }
 
 export type IconName = 'overview' | 'health' | 'diagnostics' | 'configuration' | 'monitor' | 'receiver' | 'refresh' | 'lock' | 'map' | 'polar' | 'menu' | 'close' | 'sun' | 'moon' | 'chevron-left' | 'chevron-right' | 'layers' | 'expand' | 'collapse' | 'crosshair'
-  | 'spectrum' | 'sliders' | 'external' | 'play' | 'stop' | 'headphones' | 'send' | 'chevron-down' | 'chevron-up' | 'plus' | 'minus' | 'north' | 'peak-up' | 'reset' | 'polar-dock' | 'marker' | 'power' | 'restart' | 'antenna' | 'drone';
+  | 'spectrum' | 'sliders' | 'external' | 'play' | 'stop' | 'headphones' | 'send' | 'chevron-down' | 'chevron-up' | 'plus' | 'minus' | 'north' | 'peak-up' | 'reset' | 'polar-dock' | 'marker' | 'power' | 'restart' | 'antenna' | 'drone' | 'ruler' | 'polygon' | 'pin' | 'list';
 
 export function Icon({ name }: { name: IconName }): JSX.Element {
   const common = { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const, 'aria-hidden': true };
@@ -100,6 +100,10 @@ export function Icon({ name }: { name: IconName }): JSX.Element {
     expand: <><path d="M4 9V4h5" /><path d="M20 9V4h-5" /><path d="M4 15v5h5" /><path d="M20 15v5h-5" /></>,
     collapse: <><path d="M9 4v5H4" /><path d="M15 4v5h5" /><path d="M9 20v-5H4" /><path d="M15 20v-5h5" /></>,
     crosshair: <><circle cx="12" cy="12" r="7" /><path d="M12 2v5M12 17v5M2 12h5M17 12h5" /></>,
+    ruler: <><path d="m3 17 14-14 4 4L7 21z" /><path d="m7 13 2 2M10 10l2 2M13 7l2 2" /></>,
+    polygon: <><path d="M5 8 12 3l7 5-2.5 10h-9z" /><circle cx="5" cy="8" r="1.5" /><circle cx="19" cy="8" r="1.5" /><circle cx="12" cy="3" r="1.5" /></>,
+    pin: <><path d="M12 21s-6-5.5-6-11a6 6 0 0 1 12 0c0 5.5-6 11-6 11z" /><circle cx="12" cy="10" r="2" /></>,
+    list: <><path d="M9 6h11M9 12h11M9 18h11" /><circle cx="4.5" cy="6" r="1" /><circle cx="4.5" cy="12" r="1" /><circle cx="4.5" cy="18" r="1" /></>,
     spectrum: <path d="M3 17l4-4 3 2 3-9 3 8 3-3 2 2" />,
     sliders: <><path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" /></>,
     external: <path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" />,

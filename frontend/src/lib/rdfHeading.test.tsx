@@ -165,8 +165,8 @@ describe('heading layer setting', () => {
     expect(panel('en', true)).toMatch(/<input type="checkbox" checked=""\/><span>RDF-SDR heading<\/span>/u);
     expect(panel('id', true)).toContain('<span>Heading RDF-SDR</span>');
     expect(panel('en', false)).toMatch(/<input type="checkbox"\/><span>RDF-SDR heading<\/span>/u);
-    // Eight layers and, since contract 1.10, the position estimate.
-    expect(panel('en', true).match(/type="checkbox"/gu)).toHaveLength(9);
+    // Eight layers, since contract 1.10 the position estimate, and since 3.19.0 the map marks.
+    expect(panel('en', true).match(/type="checkbox"/gu)).toHaveLength(10);
     expect(panel('id', true)).toContain('<span>Estimasi posisi</span>');
   });
 
