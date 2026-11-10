@@ -13,6 +13,9 @@
  * times are Date.now() milliseconds.
  */
 
+import { FILTER_ERROR_CODES, FILTER_STATES, serializeFilterSettings, validFilterSettings } from './radioAudioFilter';
+import type { FilterErrorCode, FilterSettings, FilterState } from './radioAudioFilter';
+
 export const BRIDGE_CHANNEL = 'sdr-console-receiver';
 export const BRIDGE_VERSION = 1;
 
@@ -36,7 +39,11 @@ export const CONSOLE_MESSAGE_TYPES = [
   'console:sweep-display',
   'console:marker-add',
   'console:marker-remove',
+  'console:audio-filter',
 ] as const;
+/** The voice filter's states (radioAudioFilter.ts), as receiver:status reports them. */
+export const AUDIO_FILTER_STATES = FILTER_STATES;
+export const AUDIO_FILTER_ERROR_CODES = FILTER_ERROR_CODES;
 /** Demodulator modes in UI order; the keys of the Receiver's MODE_DEFAULTS. */
 export const LISTEN_MODES = ['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw'] as const;
 /** receiver:result codes. TIMEOUT is produced by the console only. */
@@ -261,6 +268,15 @@ export interface ReceiverStatus {
   sampleRatesHz: number[];
   /** The wide scan; null from a frame that does not report it or reports an unusable one. */
   sweep: StatusSweep | null;
+  /** The voice filter on what the Receiver plays; null from a frame that does not report it. */
+  audioFilter: StatusAudioFilter | null;
+}
+
+/** The Receiver's voice filter: its settings, its state and why it failed. */
+export interface StatusAudioFilter {
+  settings: FilterSettings;
+  state: FilterState;
+  error: { code: FilterErrorCode; detail: string } | null;
 }
 
 /** A receiver:audio chunk: AUDIO_LIMITS.chunkSamples of the mix the Receiver plays (mono, -1..1). */
@@ -374,7 +390,9 @@ export type BridgeCommand =
   | { type: 'console:sweep-display'; minDb: number; maxDb: number }
   /** Displayed Hz; the frame measures the power on a running scan. */
   | { type: 'console:marker-add'; frequencyHz: number }
-  | { type: 'console:marker-remove'; markerId: string };
+  | { type: 'console:marker-remove'; markerId: string }
+  /** The voice filter's settings, whole (radioAudioFilter.ts); the frame saves them. */
+  | { type: 'console:audio-filter'; settings: FilterSettings };
 
 const MAX_TEXT_CHARS = 300;
 const MAX_DEVICE_NAME_CHARS = 80;
@@ -620,7 +638,20 @@ export function normalizeReceiverStatus(value: unknown): ReceiverStatus | null {
     display: normalizeDisplay(value.display),
     sampleRatesHz: normalizeSampleRates(value.sampleRatesHz),
     sweep: normalizeSweep(value.sweep),
+    audioFilter: normalizeAudioFilter(value.audioFilter),
   };
+}
+
+const MAX_FILTER_DETAIL_CHARS = 200;
+
+export function normalizeAudioFilter(value: unknown): StatusAudioFilter | null {
+  if (!isRecord(value)) return null;
+  const settings = validFilterSettings(value.settings);
+  if (!settings || !oneOf(AUDIO_FILTER_STATES, value.state)) return null;
+  const error = isRecord(value.error) && oneOf(AUDIO_FILTER_ERROR_CODES, value.error.code)
+    ? { code: value.error.code, detail: boundedText(value.error.detail, MAX_FILTER_DETAIL_CHARS) ?? '' }
+    : null;
+  return { settings, state: value.state, error };
 }
 
 /**
@@ -900,6 +931,10 @@ export function commandMessage(id: string, command: BridgeCommand): Record<strin
       return typeof command.frequencyHz === 'number' && Number.isFinite(command.frequencyHz) ? { ...envelope, frequencyHz: Math.round(command.frequencyHz) } : envelope;
     case 'console:marker-remove':
       return isCommandId(command.markerId) ? { ...envelope, markerId: command.markerId } : envelope;
+    case 'console:audio-filter': {
+      const settings = validFilterSettings(command.settings);
+      return settings ? { ...envelope, settings: JSON.parse(serializeFilterSettings(settings)) as unknown } : envelope;
+    }
     default:
       return envelope;
   }

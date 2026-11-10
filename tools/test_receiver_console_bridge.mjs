@@ -24,6 +24,8 @@ const {
 const { connectionMethods } = await import(new URL('connection.ts', appDir).href);
 const { recordsMethods } = await import(new URL('records.ts', appDir).href);
 const { vfoMethods } = await import(new URL('vfo.ts', appDir).href);
+const { audioFilterMethods } = await import(new URL('audio-filter.ts', appDir).href);
+const { DEFAULT_FILTER_SETTINGS, presetSettings } = await import(new URL('../frontend/src/lib/radioAudioFilter.ts', import.meta.url).href);
 const { makeDefaultVfo, MODE_DEFAULTS } = await import(new URL('../vendor/BrowSDR/src/client/app/constants.ts', import.meta.url).href);
 
 const {
@@ -181,6 +183,10 @@ function receiverApp({ audioAllowed = true, openOk = true, mockSdrEnabled = fals
 	const app = {
 		...connectionMethods,
 		...vfoMethods,
+		...audioFilterMethods,
+		audioFilter: { ...DEFAULT_FILTER_SETTINGS },
+		audioFilterState: 'on',
+		audioFilterError: null,
 		backend,
 		connected: false,
 		running: false,
@@ -364,7 +370,7 @@ test('protocol constants match the console contract', () => {
 	assert.deepEqual([...CONSOLE_MESSAGE_TYPES], [
 		'console:hello', 'console:subscribe', 'console:start', 'console:stop', 'console:tune', 'console:vfo', 'console:listen',
 		'console:display', 'console:gains', 'console:radio', 'console:sweep-start', 'console:sweep-stop', 'console:sweep-config',
-		'console:sweep-display', 'console:marker-add', 'console:marker-remove',
+		'console:sweep-display', 'console:marker-add', 'console:marker-remove', 'console:audio-filter',
 	]);
 	assert.deepEqual([...LISTEN_MODES], ['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw']);
 	assert.deepEqual([...LISTEN_MODES].sort(), Object.keys(MODE_DEFAULTS).sort(), 'every Receiver mode, nothing else');
@@ -649,7 +655,7 @@ test('without WebUSB the paired count stays unknown', async t => {
 const STATUS_KEYS = [
 	'ch', 'v', 'type', 'seq', 'tMs', 'webusb', 'mockAvailable', 'pairedCount', 'connected', 'mock', 'deviceName', 'running', 'busy',
 	'workspace', 'centerHz', 'sampleRateHz', 'frequencyShiftHz', 'gains', 'vfo', 'squelchOpen', 'audio', 'recording', 'error', 'notice',
-	'tune', 'display', 'sampleRatesHz', 'sweep',
+	'tune', 'display', 'sampleRatesHz', 'sweep', 'audioFilter',
 ];
 
 test('status reports the radio in Hz with the documented fields', async t => {
@@ -682,6 +688,7 @@ test('status reports the radio in Hz with the documented fields', async t => {
 			phase: 'idle', source: 'native', startHz: -25_000_000, stopHz: 875_000_000, fftSize: 8192, resolutionHz: 20_000_000 / 8192,
 			lnaDb: 40, vgaDb: 20, amp: false, displayMinDb: -60, displayMaxDb: 0, view: 'average',
 		},
+		audioFilter: { settings: { ...DEFAULT_FILTER_SETTINGS }, state: 'on', error: null },
 	});
 	assert.equal(status.notice, 'Connected to Mock SDR', 'the visible snackbar text, through tm()');
 	app.snackbar.show = false;
@@ -2637,4 +2644,47 @@ test('dispose stops a pending marker list', async t => {
 	assert.equal(clock.pending(), 0);
 	clock.advance(1000);
 	assert.equal(messages('receiver:markers').length, sent);
+});
+
+// ---------------------------------------------------------------------------
+// Voice filter (audio-filter.ts): console:audio-filter and status.audioFilter
+
+test('console:audio-filter sets the Receiver voice filter, during a scan too, and status reports it', async t => {
+	const { frame, app, clock, flushWatchers, messages, result } = setup(t, { app: { mockSdrEnabled: true } });
+	const strong = presetSettings('strong');
+	app.sweep.active = true;
+	frame.send('console:audio-filter', { id: 'af1', settings: strong });
+	await settle(5);
+	assert.equal(result('af1').code, 'OK');
+	assert.deepEqual({ ...app.audioFilter }, strong);
+	app.sweep.active = false;
+	app.audioFilterState = 'error';
+	app.audioFilterError = { code: 'DENOISE_LOAD', detail: 'x'.repeat(300) };
+	flushWatchers();
+	clock.advance(150);
+	const status = messages('receiver:status').at(-1);
+	assert.deepEqual(status.audioFilter.settings, strong);
+	assert.equal(status.audioFilter.state, 'error');
+	assert.equal(status.audioFilter.error.code, 'DENOISE_LOAD');
+	assert.equal(status.audioFilter.error.detail.length, 200);
+
+	// A named preset is exactly its values; a broken setting is INVALID_COMMAND and changes nothing.
+	frame.send('console:audio-filter', { id: 'af2', settings: { ...strong, boostDb: 40 } });
+	frame.send('console:audio-filter', { id: 'af3', settings: { ...strong, preset: 'loud' } });
+	frame.send('console:audio-filter', { id: 'af4' });
+	await settle(5);
+	for (const id of ['af2', 'af3', 'af4']) assert.equal(result(id).code, 'INVALID_COMMAND', id);
+	assert.deepEqual({ ...app.audioFilter }, strong);
+
+	// A custom setting goes through as sent; an unknown state or error code is never reported.
+	const custom = { ...strong, preset: 'custom', lowHz: 250, gate: false, boostDb: 12 };
+	frame.send('console:audio-filter', { id: 'af5', settings: custom });
+	await settle(5);
+	assert.equal(result('af5').code, 'OK');
+	app.audioFilterState = 'weird';
+	app.audioFilterError = { code: 'NOPE', detail: '' };
+	flushWatchers();
+	clock.advance(150);
+	const latest = messages('receiver:status').at(-1).audioFilter;
+	assert.deepEqual(latest, { settings: custom, state: 'on', error: null });
 });

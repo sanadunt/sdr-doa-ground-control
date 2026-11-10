@@ -589,7 +589,28 @@
   .ov-toggle-label { display: none; }
 }
 
+/* Voice filter (components/AudioFilterControls.tsx): rows of the Atur column, and of the tablet's Filter popover. */
+.ov-filter { display: contents; }
+.ov-filter-state { font-weight: 600; }
+.ov-ps-label .ov-filter-state.is-ai, .ov-ps-label .ov-filter-state.is-on { color: var(--green); }
+.ov-ps-label .ov-filter-state.is-loading { color: var(--amber); }
+.ov-ps-label .ov-filter-state.is-error { color: var(--red); }
+.ov-filter-presets { flex: 1 1 auto; }
+.ov-filter-toggles .ov-button { flex: 1 1 0; min-width: 0; padding: 0 8px; }
+.ov-filter-boost { flex: 1 1 auto; min-width: 0; height: 44px; margin: 0; accent-color: var(--accent); }
+.ov-filter-note { margin: 0; color: var(--muted); font-size: 12px; }
+.ov-filter-note.is-error { color: var(--red); }
+/* The tablet's Filter button beside Dengar and its popover (top layer, fixed under or over the button). */
+.ov-spec-head > .ov-spec-filter { flex: none; }
+.ov-spec-filter { position: relative; padding: 0 10px; }
+.ov-spec-filter-dot { position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--red); }
+.ov-filter-pop { position: fixed; inset: auto; z-index: 30; display: flex; flex-direction: column; gap: 6px; box-sizing: border-box; height: auto; margin: 0; padding: 8px 12px; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); box-shadow: var(--ov-shadow); overscroll-behavior: contain; }
+.ov-filter-pop[hidden] { display: none; }
+@container ov-spec (min-width: 761px) and (max-width: 1099px) {
+  .ov-spec-filter-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
 /* Compact touch layout ------------------------------------------------------ */
+}
 /* Phones and tablets without a mouse (data-layout on the shell root, lib/compactLayout.ts).
    The stage fills the viewport under the one-row top bar with no page scroll: the main
    view (the map, or the drone video with the map in the corner window; a tap on the
@@ -698,6 +719,9 @@
 .console-shell[data-layout^='compact'] .ov-spec-head > h2, .console-shell[data-layout^='compact'] .ov-spec-mark-label, .console-shell[data-layout^='compact'] .ov-spec-open-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .console-shell[data-layout^='compact'] .ov-spec-group { flex-wrap: nowrap; gap: 0 6px; }
 .console-shell[data-layout^='compact'] .ov-spec-head .ov-button { padding: 0 10px; }
+/* The tablet's Filter (voice filter popover) is an icon in the compact header; its text stays its name. */
+.console-shell[data-layout^='compact'] .ov-spec-filter-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.console-shell[data-layout^='compact'] .ov-spec-head .ov-spec-filter { width: 44px; padding: 0; justify-content: center; }
 .console-shell[data-layout^='compact'] .ov-spec-run { width: auto; min-width: 44px; }
 .console-shell[data-layout^='compact'] .ov-spec-open { width: 44px; padding: 0; }
 .console-shell[data-layout^='compact'] .ov-spec-open kbd { display: none; }

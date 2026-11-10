@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { RECEIVER_SETTING_KEY, RECEIVER_SETTING_MAX_CHARS, savedReceiverTuning } from './receiverSavedTuning';
+import { RECEIVER_SETTING_KEY, RECEIVER_SETTING_MAX_CHARS, savedAudioFilter, savedReceiverTuning } from './receiverSavedTuning';
+import { DEFAULT_FILTER_SETTINGS, presetSettings } from './radioAudioFilter';
 
 function storage(value: string | null) {
   return { getItem: (key: string) => (key === RECEIVER_SETTING_KEY ? value : null) };
@@ -27,5 +28,15 @@ describe('savedReceiverTuning', () => {
 
   it('reads nothing outside a browser', () => {
     expect(savedReceiverTuning()).toBeNull();
+  });
+});
+
+describe('savedAudioFilter', () => {
+  it('reads the Receiver\'s saved voice filter, Standard when there is none or it is broken', () => {
+    expect(savedAudioFilter(storage(JSON.stringify({ audioFilter: presetSettings('strong') })))).toEqual(presetSettings('strong'));
+    for (const raw of [null, '{}', 'not json', JSON.stringify({ audioFilter: { preset: 'loud' } })]) {
+      expect(savedAudioFilter(storage(raw)), String(raw)).toEqual(DEFAULT_FILTER_SETTINGS);
+    }
+    expect(savedAudioFilter(null)).toEqual(DEFAULT_FILTER_SETTINGS);
   });
 });

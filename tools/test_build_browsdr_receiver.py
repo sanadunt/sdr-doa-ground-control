@@ -113,6 +113,10 @@ class ReceiverBuildSourceTests(unittest.TestCase):
         )
         (build / "sw.js").write_text("self.workbox; registerRoute(/api/, new NetworkFirst({cacheName:'api-cache'}))", encoding="utf-8")
         (build / "workbox-1234.js").write_text("workbox runtime", encoding="utf-8")
+        # The voice filter's noise suppressor (CONSOLE_SHARED_FILES).
+        (build / "assets/gtcrn-abc.wasm").write_bytes(b"wasm")
+        (build / "assets/speex-abc.wasm").write_bytes(b"wasm")
+        (build / "assets/workletProcessor-abc.js").write_text("registerProcessor('x', class {});", encoding="utf-8")
         return build
 
     def test_service_worker_is_retired_and_verified(self) -> None:
@@ -164,6 +168,29 @@ class ReceiverBuildSourceTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "Records archive client"):
                 builder._verify_embedded_build(build)
+
+    def test_embedded_build_requires_the_voice_filter_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            build = self._valid_build(Path(temporary))
+            builder._retire_service_worker(build)
+            builder._verify_embedded_build(build)
+            (build / "assets/gtcrn-abc.wasm").unlink()
+            with self.assertRaisesRegex(RuntimeError, "voice filter's gtcrn"):
+                builder._verify_embedded_build(build)
+
+    def test_console_shared_files_exist_and_are_copied_after_the_overlay(self) -> None:
+        for relative, target in builder.CONSOLE_SHARED_FILES:
+            self.assertTrue((builder.PROJECT_ROOT / relative).exists(), relative)
+            self.assertTrue(target.startswith("src/client/"), target)
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            builder._apply_console_shared_files(source)
+            self.assertTrue((source / "src/client/app/radioAudioFilter.ts").is_file())
+            self.assertTrue((source / "src/client/vendor/web-noise-suppressor/LICENSE").is_file())
+            self.assertTrue((source / "src/client/vendor/web-noise-suppressor/NOTICE.md").is_file())
+            # A BrowSDR file of the same name is never replaced.
+            with self.assertRaisesRegex(RuntimeError, "would replace"):
+                builder._apply_console_shared_files(source)
 
     def test_records_archive_root_matches_the_overlay_client(self) -> None:
         client = (

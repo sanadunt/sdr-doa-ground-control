@@ -2,6 +2,8 @@ import { makeDefaultVfo, BOOKMARK_CATEGORIES } from './constants';
 import { receiverLanguage } from './i18n';
 import type { ReceiverMarker, ReceiverMarkerSet } from './receiver-records-api';
 import type { SweepCandidate, SweepProgress, SweepSource, SweepSpectrumView } from '../worker/sweep-types';
+import { DEFAULT_FILTER_SETTINGS } from './radioAudioFilter';
+import type { FilterErrorCode, FilterSettings, FilterState } from './radioAudioFilter';
 
 export function createAppData() {
 	return {
@@ -205,6 +207,10 @@ export function createAppData() {
 		sidebarOpen: false,
 
 		collapsedPanels: {} as Record<string, boolean>,
+		/** The voice filter on what the speaker plays (audio-filter.ts); saved in SDRSetting. */
+		audioFilter: { ...DEFAULT_FILTER_SETTINGS } as FilterSettings,
+		audioFilterState: 'on' as FilterState,
+		audioFilterError: null as { code: FilterErrorCode; detail: string } | null,
 		vfoConflictDialog: {
 			show: false,
 			vfoIndex: -1,

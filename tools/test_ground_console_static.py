@@ -504,6 +504,9 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         )
         for directive in script_directives:
             self.assertNotIn("'unsafe-inline'", directive)
+            # The voice filter's AudioWorklet compiles WASM; string eval stays refused.
+            self.assertNotIn("'unsafe-eval'", directive)
+        self.assertTrue(any("'wasm-unsafe-eval'" in directive for directive in script_directives))
 
     def test_referenced_assets_have_expected_mime_and_bytes(self) -> None:
         index = self._require_static_build()
@@ -1322,7 +1325,7 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         self.assertEqual(ground.body, ground_html)
         self.assertEqual(
             ground.headers.get("content-security-policy"),
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: blob:; "
             "connect-src 'self'; "
             "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
@@ -1411,7 +1414,7 @@ class GroundConsoleStaticRegressionTests(unittest.TestCase):
         for result in (ico, svg):
             self.assertEqual(
                 result.headers.get("content-security-policy"),
-                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; "
                 "img-src 'self' data: blob:; "
                 "connect-src 'self'; "
                 "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",

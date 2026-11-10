@@ -17,7 +17,10 @@ import {
   floatToPcm16,
   scheduleChunk,
 } from './receiverMirrorAudio';
-import type { AudioContextLike, AudioPostAnswer, MirrorAudioPlayerEnvironment, StreamAnswer } from './receiverMirrorAudio';
+import type { AudioContextLike, AudioPostAnswer, FilterInsertLike, MirrorAudioPlayerEnvironment, StreamAnswer } from './receiverMirrorAudio';
+import { FILTER_LATENCY_MS } from './receiverMirrorAudio';
+import { DEFAULT_FILTER_SETTINGS, filterState, presetSettings } from './radioAudioFilter';
+import type { FilterSettings, FilterState } from './radioAudioFilter';
 import type { ReceiverBridge, SubscriptionOwner } from './receiverBridge';
 import type { ReceiverAudio } from './receiverBridgeProtocol';
 
@@ -224,6 +227,8 @@ describe('player scheduling', () => {
 
 function fakeContext(state = 'running') {
   const started: number[] = [];
+  const targets: unknown[] = [];
+  const monitor = { connect: () => undefined, disconnect: () => undefined };
   const context = {
     state,
     currentTime: 0,
@@ -235,12 +240,27 @@ function fakeContext(state = 'running') {
       const data = new Float32Array(length);
       return { getChannelData: () => data, duration: length / sampleRate };
     },
-    createBufferSource: () => ({ buffer: null, onended: null, connect: () => undefined, disconnect: () => undefined, start: (when: number) => { started.push(when); } }),
+    createBufferSource: () => ({ buffer: null, onended: null, connect: (node: unknown) => { targets.push(node); }, disconnect: () => undefined, start: (when: number) => { started.push(when); } }),
+    createGain: () => monitor,
   };
-  return { context, started };
+  return { context, started, targets, monitor };
 }
 
-function playerHarness(options: { context?: AudioContextLike | null } = {}) {
+/** A FilterInsert stand-in: records the settings it got; bypassed (Off) joins the source directly. */
+function fakeInsert(settings: FilterSettings) {
+  const applied: FilterSettings[] = [settings];
+  const insert = {
+    current: settings,
+    destroyed: false,
+    onStatus: null as FilterInsertLike['onStatus'],
+    apply(next: FilterSettings) { this.current = next; applied.push(next); },
+    state(): FilterState { return filterState(this.current, { denoise: 'on', gate: 'on', error: null }); },
+    destroy() { this.destroyed = true; },
+  };
+  return { insert, applied };
+}
+
+function playerHarness(options: { context?: AudioContextLike | null; filter?: FilterSettings } = {}) {
   let now = 0;
   let nextHandle = 1;
   const timers = new Map<number, { due: number; callback: () => void }>();
@@ -249,8 +269,17 @@ function playerHarness(options: { context?: AudioContextLike | null } = {}) {
   const answers: Array<StreamAnswer | Error> = [];
   const opened: AbortSignal[] = [];
   let controllerRef: ReadableStreamDefaultController<Uint8Array> | null = null;
+  const inserts: Array<ReturnType<typeof fakeInsert>> = [];
+  const saved: FilterSettings[] = [];
   const env: MirrorAudioPlayerEnvironment = {
     createContext: () => context,
+    createFilter: (_source, _destination, settings) => {
+      const made = fakeInsert(settings);
+      inserts.push(made);
+      return made.insert;
+    },
+    loadFilterSettings: () => options.filter ?? presetSettings('off'),
+    saveFilterSettings: (settings) => { saved.push(settings); },
     openStream: (signal) => {
       opened.push(signal);
       const next = answers.shift();
@@ -284,7 +313,7 @@ function playerHarness(options: { context?: AudioContextLike | null } = {}) {
   };
   const push = async (bytes: Uint8Array) => { controllerRef?.enqueue(bytes); await settle(); };
   const end = async () => { controllerRef?.close(); await settle(); };
-  return { env, fake, answers, opened, advance, push, end, setNow: (value: number) => { now = value; } };
+  return { env, fake, answers, opened, advance, push, end, inserts, saved, setNow: (value: number) => { now = value; } };
 }
 
 const audioChunk = (seq: number) => encodeAudioChunk(seq, 0, new Int16Array(CHUNK_SAMPLES).fill(1000));
@@ -368,5 +397,64 @@ describe('audio player (LAN view)', () => {
     const none = createMirrorAudioPlayer(playerHarness({ context: null }).env);
     none.start();
     expect(none.getState().status).toBe('unsupported');
+  });
+});
+
+describe('audio player voice filter (LAN view)', () => {
+  it('starts with the saved setting, Standard by default, and puts every chunk through the filter\'s input', async () => {
+    const h = playerHarness({ filter: { ...DEFAULT_FILTER_SETTINGS } });
+    const player = createMirrorAudioPlayer(h.env);
+    expect(player.getFilter()).toEqual({ settings: DEFAULT_FILTER_SETTINGS, state: null, error: null });
+    expect(h.inserts).toHaveLength(0);
+    player.start();
+    expect(h.inserts).toHaveLength(1);
+    expect(h.inserts[0].insert.current).toEqual(DEFAULT_FILTER_SETTINGS);
+    expect(player.getFilter().state).toBe('ai');
+    await settle();
+    await h.push(audioChunk(1));
+    // The chunk goes to the player's gain, which the filter joins to the speaker; never to the speaker directly.
+    expect(h.fake.targets).toEqual([h.fake.monitor]);
+    // The running filter's delay is in the estimate.
+    expect(player.getState().latencyMs).toBe(450 + 20 + FILTER_LATENCY_MS);
+  });
+
+  it('applies a change to the one filter while playing, keeps it in this browser, and Off leaves its delay out', async () => {
+    const h = playerHarness({ filter: { ...DEFAULT_FILTER_SETTINGS } });
+    const player = createMirrorAudioPlayer(h.env);
+    player.start();
+    await settle();
+    player.setFilter(presetSettings('off'));
+    player.setFilter(presetSettings('strong'));
+    player.setFilter(presetSettings('off'));
+    expect(h.inserts).toHaveLength(1);
+    expect(h.inserts[0].applied.map((settings) => settings.preset)).toEqual(['standard', 'off', 'strong', 'off']);
+    expect(h.saved.map((settings) => settings.preset)).toEqual(['off', 'strong', 'off']);
+    expect(player.getFilter().state).toBe('off');
+    await h.push(audioChunk(1));
+    expect(player.getState().latencyMs).toBe(450 + 20);
+    // A stop and a new Listen keep the same context and filter: no second path to the speaker.
+    player.stop();
+    player.start();
+    expect(h.inserts).toHaveLength(1);
+  });
+
+  it('reports the filter\'s state and load error as the filter tells it', () => {
+    const h = playerHarness({ filter: presetSettings('standard') });
+    const player = createMirrorAudioPlayer(h.env);
+    let notified = 0;
+    player.subscribe(() => { notified += 1; });
+    player.start();
+    h.inserts[0].insert.onStatus?.('error', { denoise: 'error', gate: 'off', error: { code: 'SAMPLE_RATE', detail: '44100' } });
+    expect(player.getFilter()).toEqual({ settings: presetSettings('standard'), state: 'error', error: { code: 'SAMPLE_RATE', detail: '44100' } });
+    expect(notified).toBeGreaterThan(0);
+  });
+
+  it('changes the setting before the first Listen without an AudioContext', () => {
+    const h = playerHarness();
+    const player = createMirrorAudioPlayer(h.env);
+    player.setFilter(presetSettings('light'));
+    expect(player.getFilter()).toEqual({ settings: presetSettings('light'), state: null, error: null });
+    player.start();
+    expect(h.inserts[0].insert.current).toEqual(presetSettings('light'));
   });
 });

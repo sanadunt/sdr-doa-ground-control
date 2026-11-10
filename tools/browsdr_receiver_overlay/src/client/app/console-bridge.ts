@@ -56,7 +56,10 @@ import type { AppInstance } from './types';
 import { lookupDevice } from '../device-catalog';
 import { RADIO_LOST_PREFIX, RX_STREAM_FAILED_PREFIX, WEBUSB_UNAVAILABLE_MESSAGE } from './connection';
 import { LISTENER_DB_DEFAULT } from './listener-display';
+import { idleFilterState, restoreAudioFilter } from './audio-filter';
 import {
+	AUDIO_FILTER_ERROR_CODES,
+	AUDIO_FILTER_STATES,
 	BRIDGE_CHANNEL,
 	BRIDGE_VERSION,
 	STATUS_DEBOUNCE_MS,
@@ -379,6 +382,19 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 		return { auto: display.auto !== false, minDb: range.minDb, maxDb: range.maxDb };
 	}
 
+	/** The voice filter on what the Receiver plays (audio-filter.ts). */
+	function audioFilterView(): ReceiverStatus['audioFilter'] {
+		const settings = restoreAudioFilter(app.audioFilter);
+		const state = (AUDIO_FILTER_STATES as readonly unknown[]).includes(app.audioFilterState)
+			? app.audioFilterState as ReceiverStatus['audioFilter']['state']
+			: idleFilterState(settings);
+		const raw = app.audioFilterError as { code?: unknown; detail?: unknown } | null | undefined;
+		const error = raw && (AUDIO_FILTER_ERROR_CODES as readonly unknown[]).includes(raw.code)
+			? { code: raw.code as NonNullable<ReceiverStatus['audioFilter']['error']>['code'], detail: String(raw.detail ?? '').slice(0, 200) }
+			: null;
+		return { settings, state, error };
+	}
+
 	function frequencyShiftHz(): number {
 		return mhzToHz(app.radio?.frequencyShift) ?? 0;
 	}
@@ -470,6 +486,7 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 			display: displayState(),
 			sampleRatesHz: deviceSampleRates(),
 			sweep: sweepState(),
+			audioFilter: audioFilterView(),
 		};
 	}
 
@@ -1382,6 +1399,17 @@ export function installConsoleBridge(app: AppInstance, environment: ConsoleBridg
 				return;
 			case 'console:marker-remove':
 				enqueueMarker(command.id, () => markerRemove(command));
+				return;
+			case 'console:audio-filter':
+				// Only what the speaker plays changes, so it is never refused because of a scan; the
+				// Receiver's audioFilter watcher applies and saves it (main.ts).
+				if (!app.audioFilter || typeof app.audioFilter !== 'object') {
+					reply(command.id, 'NOT_READY');
+					return;
+				}
+				app.audioFilter = { ...command.settings };
+				if (app.audioCtx?.state === 'suspended') app.audioCtx.resume().catch(() => {});
+				reply(command.id, 'OK');
 				return;
 		}
 	}

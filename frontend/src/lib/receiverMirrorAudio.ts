@@ -27,6 +27,9 @@ import type { ReceiverAudio } from './receiverBridgeProtocol';
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
+import { FilterInsert, filterBypassed, readFilterSettings, serializeFilterSettings } from './radioAudioFilter';
+import type { FilterError, FilterSettings, FilterState, FilterStatus } from './radioAudioFilter';
+
 export const MIRROR_AUDIO_ROUTE = '/api/mirror/receiver/audio';
 export const MIRROR_AUDIO_MAGIC = 'SDRA';
 /** The server's numbers (tools/test_receiver_audio_mirror.py compares them). */
@@ -366,6 +369,30 @@ export interface MirrorAudioState {
   code: string | null;
 }
 
+/** The tablet's voice filter (radioAudioFilter.ts): its settings, state and last load error. */
+export interface MirrorFilterView {
+  settings: FilterSettings;
+  /** off while bypassed; null before the first Listen (no AudioContext yet). */
+  state: FilterState | null;
+  error: FilterError | null;
+}
+
+/** The tablet's own filter settings; never sent to the console (the LAN view writes no preferences). */
+export const MIRROR_FILTER_STORAGE_KEY = 'sdr-console-mirror-audio-filter';
+/**
+ * What the filter adds to the latency estimate while it runs, measured with the Chrome check in
+ * tools/test_radio_audio_filter.mjs (impulse through the Standard chain, GTCRN included).
+ */
+export const FILTER_LATENCY_MS = 40;
+
+/** The player's part of a FilterInsert (radioAudioFilter.ts); tests pass their own. */
+export interface FilterInsertLike {
+  apply(settings: FilterSettings): void;
+  state(): FilterState;
+  destroy(): void;
+  onStatus: ((state: FilterState, status: FilterStatus) => void) | null;
+}
+
 export interface AudioContextLike {
   readonly state: string;
   readonly currentTime: number;
@@ -375,6 +402,7 @@ export interface AudioContextLike {
   resume(): Promise<void>;
   createBuffer(channels: number, length: number, sampleRate: number): { getChannelData(channel: number): Float32Array; readonly duration: number };
   createBufferSource(): { buffer: unknown; connect(node: unknown): void; start(when: number): void; onended: (() => void) | null; disconnect(): void };
+  createGain(): { connect(node: unknown): void; disconnect(): void };
 }
 
 export interface StreamAnswer {
@@ -385,6 +413,10 @@ export interface StreamAnswer {
 
 export interface MirrorAudioPlayerEnvironment {
   createContext(): AudioContextLike | null;
+  /** The voice filter between the player's gain and the speaker (Off: joined directly). */
+  createFilter(source: unknown, destination: unknown, settings: FilterSettings): FilterInsertLike;
+  loadFilterSettings(): FilterSettings;
+  saveFilterSettings(settings: FilterSettings): void;
   openStream(signal: AbortSignal): Promise<StreamAnswer>;
   now(): number;
   setTimeout(callback: () => void, ms: number): TimerHandle;
@@ -411,7 +443,29 @@ export function browserPlayerEnvironment(): MirrorAudioPlayerEnvironment {
         ? undefined
         : (window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext);
       if (!Context || typeof fetch !== 'function' || typeof ReadableStream === 'undefined') return null;
-      return new Context({ latencyHint: 'interactive' }) as unknown as AudioContextLike;
+      // 48 kHz: the voice filter's AI noise suppressor runs only at that rate. The 16 kHz chunks are
+      // resampled by their AudioBufferSourceNode. A browser that refuses the rate gets its own, and the
+      // filter then says the AI cannot run.
+      try {
+        return new Context({ sampleRate: 48000, latencyHint: 'interactive' }) as unknown as AudioContextLike;
+      } catch {
+        return new Context({ latencyHint: 'interactive' }) as unknown as AudioContextLike;
+      }
+    },
+    createFilter: (source, destination, settings) => new FilterInsert(source as AudioNode, destination as AudioNode, settings),
+    loadFilterSettings: () => {
+      try {
+        return readFilterSettings(window.localStorage.getItem(MIRROR_FILTER_STORAGE_KEY));
+      } catch {
+        return readFilterSettings(null);
+      }
+    },
+    saveFilterSettings: (settings) => {
+      try {
+        window.localStorage.setItem(MIRROR_FILTER_STORAGE_KEY, serializeFilterSettings(settings));
+      } catch {
+        // Storage can be unavailable; the setting then lasts for this page.
+      }
     },
     openStream: openStreamWithFetch,
     now: () => Date.now(),
@@ -455,6 +509,9 @@ export interface MirrorAudioPlayer {
   stop(): void;
   getState(): MirrorAudioState;
   subscribe(listener: () => void): () => void;
+  /** The voice filter; a change applies at once to what plays and is kept in this browser. */
+  getFilter(): MirrorFilterView;
+  setFilter(settings: FilterSettings): void;
 }
 
 export function createMirrorAudioPlayer(env: MirrorAudioPlayerEnvironment = browserPlayerEnvironment()): MirrorAudioPlayer {
@@ -470,12 +527,41 @@ export function createMirrorAudioPlayer(env: MirrorAudioPlayerEnvironment = brow
   let catchingUp = false;
   let lastAudioAt = -Infinity;
   let connectedAt = 0;
+  // Every chunk goes to `monitor`, and the filter joins it to the speaker.
+  let monitor: unknown = null;
+  let insert: FilterInsertLike | null = null;
+  let filter: MirrorFilterView = { settings: env.loadFilterSettings(), state: null, error: null };
+
+  function notify(): void {
+    for (const listener of [...listeners]) listener();
+  }
+
+  function setFilterView(next: MirrorFilterView): void {
+    filter = next;
+    notify();
+  }
+
+  function attachFilter(audio: AudioContextLike): void {
+    const gain = audio.createGain();
+    monitor = gain;
+    const created = env.createFilter(gain, audio.destination, filter.settings);
+    insert = created;
+    created.onStatus = (filterState, status) => {
+      if (insert !== created) return;
+      setFilterView({ ...filter, state: filterState, error: status.error });
+    };
+    setFilterView({ ...filter, state: created.state(), error: null });
+  }
+
+  function filterDelayS(): number {
+    return insert && !filterBypassed(filter.settings) ? FILTER_LATENCY_MS / 1000 : 0;
+  }
 
   function set(next: Partial<MirrorAudioState>): void {
     const merged = { ...state, ...next };
     if (merged.status === state.status && merged.latencyMs === state.latencyMs && merged.code === state.code) return;
     state = merged;
-    for (const listener of [...listeners]) listener();
+    notify();
   }
 
   function clearTimers(): void {
@@ -522,11 +608,11 @@ export function createMirrorAudioPlayer(env: MirrorAudioPlayerEnvironment = brow
       buffer.getChannelData(0).set(chunk.samples);
       const source = context.createBufferSource();
       source.buffer = buffer;
-      source.connect(context.destination);
+      source.connect(monitor ?? context.destination);
       source.onended = () => source.disconnect();
       source.start(slot.startAt);
     }
-    set({ status: blocked() ? 'blocked' : 'playing', latencyMs: estimateLatencyMs(nextTime, now, outputLatency()), code: null });
+    set({ status: blocked() ? 'blocked' : 'playing', latencyMs: estimateLatencyMs(nextTime, now, outputLatency() + filterDelayS()), code: null });
   }
 
   function received(chunks: AudioChunk[]): void {
@@ -595,7 +681,10 @@ export function createMirrorAudioPlayer(env: MirrorAudioPlayerEnvironment = brow
 
   return {
     start() {
-      if (!context) context = env.createContext();
+      if (!context) {
+        context = env.createContext();
+        if (context) attachFilter(context);
+      }
       if (!context) {
         set({ status: 'unsupported', latencyMs: null });
         return;
@@ -622,6 +711,20 @@ export function createMirrorAudioPlayer(env: MirrorAudioPlayerEnvironment = brow
     },
     getState() {
       return state;
+    },
+    getFilter() {
+      return filter;
+    },
+    setFilter(settings) {
+      env.saveFilterSettings(settings);
+      if (insert) {
+        insert.apply(settings);
+        setFilterView({ settings, state: insert.state(), error: filterBypassed(settings) ? null : filter.error });
+      } else {
+        setFilterView({ settings, state: null, error: null });
+      }
+      // Inside the click that changed it, so a context the browser held can play.
+      if (context && blocked()) void context.resume().catch(() => undefined);
     },
     subscribe(listener) {
       listeners.add(listener);

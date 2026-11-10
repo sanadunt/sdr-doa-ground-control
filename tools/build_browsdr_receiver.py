@@ -39,6 +39,16 @@ self.addEventListener('activate', (event) => {
 \t})());
 });
 """
+# Console files the Receiver uses unchanged, copied into the BrowSDR source after the overlay
+# (path in this repository -> path in the BrowSDR source). The voice filter on what the
+# Receiver plays (overlay audio-filter.ts) is the console's own radioAudioFilter.ts with its
+# vendored noise suppressor, so the frame and the LAN view's audio mirror never drift apart.
+# tools/receiver_overlay_hooks.mjs resolves the same paths for the node tests.
+CONSOLE_SHARED_FILES = (
+    ("frontend/src/lib/radioAudioFilter.ts", "src/client/app/radioAudioFilter.ts"),
+    ("frontend/src/lib/radioAudioFilterAssets.ts", "src/client/app/radioAudioFilterAssets.ts"),
+    ("frontend/src/vendor/web-noise-suppressor", "src/client/vendor/web-noise-suppressor"),
+)
 _COPY_IGNORES = {
     ".git",
     ".wrangler",
@@ -91,6 +101,21 @@ def _remove_block(path: Path, start: str, end: str, label: str) -> None:
         raise RuntimeError(f"expected an end marker after the start marker for {label} in {path}")
     end_index += len(end)
     path.write_text(content[:start_index] + content[end_index:], encoding="utf-8")
+
+
+def _apply_console_shared_files(source: Path) -> None:
+    for relative, target in CONSOLE_SHARED_FILES:
+        origin = PROJECT_ROOT / relative
+        destination = source / target
+        if destination.exists():
+            raise RuntimeError(f"console shared file would replace a BrowSDR file: {target}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if origin.is_dir():
+            shutil.copytree(origin, destination)
+        elif origin.is_file():
+            shutil.copy2(origin, destination)
+        else:
+            raise RuntimeError(f"console shared file is missing: {relative}")
 
 
 def _apply_embedded_changes(source: Path) -> None:
@@ -822,6 +847,14 @@ def _apply_embedded_changes(source: Path) -> None:
         "remote URL auto-connect",
     )
 
+    # The voice filter (overlay audio-filter.ts) sits between the Receiver's volume and the speaker.
+    _replace_once(
+        source / "src/client/app/ui-helpers.ts",
+        "\t\t\tthis.gainNode.connect(this.audioCtx.destination);\n",
+        "\t\t\tthis.attachAudioFilter();\n",
+        "voice filter between the Receiver's gain and the speaker",
+    )
+
     _replace_once(
         source / "src/client/app/ui-helpers.ts",
         "fetch('/30-seconds-of-silence.mp3')",
@@ -1276,6 +1309,10 @@ def _verify_embedded_build(build_dir: Path) -> None:
         raise RuntimeError("the embedded Receiver bundle is missing the console dashboard bridge")
     if RECORDS_ARCHIVE_API_ROOT not in bundle_text:
         raise RuntimeError("the embedded Receiver bundle is missing the Records archive client")
+    assets = build_dir / "assets"
+    for pattern in ("gtcrn*.wasm", "speex*.wasm", "workletProcessor*.js"):
+        if not list(assets.glob(pattern)):
+            raise RuntimeError(f"the embedded Receiver build is missing the voice filter's {pattern}")
 
 
 def _install_built_receiver(build_dir: Path, output: Path) -> None:
@@ -1384,6 +1421,7 @@ def build_receiver(source: Path) -> Path:
         work_source = temporary_root / "source"
         shutil.copytree(source, work_source, ignore=_copy_ignore)
         _apply_receiver_source_overlay(work_source, PROJECT_ROOT / "tools/browsdr_receiver_overlay")
+        _apply_console_shared_files(work_source)
         _apply_embedded_changes(work_source)
         _write_source_instructions(work_source)
 

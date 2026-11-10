@@ -282,6 +282,59 @@
 					</div>
 				</div>
 
+				<!-- Voice filter on what the speaker plays (audio-filter.ts); the console's Spektrum dock mirrors it. -->
+				<div class="panel">
+					<div class="panel-header panel-header-collapsible" role="button" tabindex="0" :aria-expanded="String(!collapsedPanels['voiceFilter'])" @click="togglePanel('voiceFilter')" @keydown.enter.self.prevent="togglePanel('voiceFilter')" @keydown.space.self.prevent="togglePanel('voiceFilter')">
+						<span>{{ t('Voice filter') }}</span>
+						<span class="audio-filter-state" :data-state="audioFilterState">{{ audioFilterStateLabel() }}</span>
+						<svg class="panel-chevron" :class="{ 'panel-chevron-collapsed': collapsedPanels['voiceFilter'] }" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
+					</div>
+					<div class="panel-body" v-show="!collapsedPanels['voiceFilter']">
+						<div class="form-row">
+							<div class="listener-db-mode audio-filter-presets" role="group" :aria-label="t('Voice filter')">
+								<button v-for="name in ['off', 'light', 'standard', 'strong']" :key="name" type="button" :aria-pressed="audioFilter.preset === name" @click="setAudioFilterPreset(name)">{{ t(audioFilterPresetLabel(name)) }}</button>
+							</div>
+						</div>
+						<div class="form-row" v-if="audioFilter.preset === 'custom'"><span class="audio-filter-custom">{{ t('Custom') }}</span></div>
+						<div class="form-row">
+							<label class="checkbox" style="flex:1">
+								<input type="checkbox" :checked="audioFilter.bandpass" @change="setAudioFilterControl({ bandpass: $event.target.checked })"> {{ t('Voice band') }} {{ audioFilter.lowHz }}–{{ audioFilter.highHz }} Hz
+							</label>
+						</div>
+						<div class="form-row">
+							<label for="audio-filter-denoise">{{ t('Noise suppressor') }}</label>
+							<select id="audio-filter-denoise" :value="audioFilter.denoise" @change="setAudioFilterControl({ denoise: $event.target.value })">
+								<option value="gtcrn">GTCRN</option>
+								<option value="speex">Speex</option>
+								<option value="off">{{ t('Off') }}</option>
+							</select>
+						</div>
+						<div class="form-row">
+							<label class="checkbox" style="flex:1">
+								<input type="checkbox" :checked="audioFilter.clarity" @change="setAudioFilterControl({ clarity: $event.target.checked })"> {{ t('Clarity (+5 dB at 2 kHz)') }}
+							</label>
+						</div>
+						<div class="form-row">
+							<label class="checkbox" style="flex:1">
+								<input type="checkbox" :checked="audioFilter.agc" @change="setAudioFilterControl({ agc: $event.target.checked })"> AGC
+							</label>
+						</div>
+						<div class="form-row">
+							<label for="audio-filter-boost">{{ t('Boost') }}</label>
+							<div class="input-group">
+								<input id="audio-filter-boost" type="range" min="0" max="18" step="1" :value="audioFilter.boostDb" :disabled="!audioFilter.agc" @change="setAudioFilterControl({ boostDb: Number($event.target.value) })">
+								<span>{{ audioFilter.boostDb }} dB</span>
+							</div>
+						</div>
+						<div class="form-row">
+							<label class="checkbox" style="flex:1">
+								<input type="checkbox" :checked="audioFilter.gate" @change="setAudioFilterControl({ gate: $event.target.checked })"> {{ t('Noise gate') }}
+							</label>
+						</div>
+						<p class="audio-filter-error" v-if="audioFilterError" role="status">{{ audioFilterErrorText() }}</p>
+					</div>
+				</div>
+
 				<div class="panel" v-for="(vfo, i) in vfos" :key="'vfo-panel-' + i" :class="{ disabled: !connected, 'panel-oob': !isFreqInBandwidth(vfo.freq) }">
 					<div class="panel-header panel-header-collapsible" style="display: flex; justify-content: space-between; align-items: center;" @click="togglePanel('vfo-' + i)">
 						<div class="panel-header-toggle" style="display: flex; align-items: center; gap: 6px;" role="button" tabindex="0" :aria-expanded="String(!collapsedPanels['vfo-' + i])" @keydown.enter.prevent="togglePanel('vfo-' + i)" @keydown.space.prevent="togglePanel('vfo-' + i)">

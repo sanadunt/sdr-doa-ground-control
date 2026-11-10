@@ -6,7 +6,7 @@ function status(overrides: Partial<ReceiverStatus> = {}): ReceiverStatus {
   return {
     seq: 1, tMs: 0, webusb: true, mockAvailable: false, pairedCount: 1, connected: true, mock: false, deviceName: null, running: false,
     busy: 'none', workspace: 'spectrum', centerHz: 433_920_000, sampleRateHz: 20_000_000, frequencyShiftHz: 0, gains: { lnaDb: 40, vgaDb: 20, amp: false },
-    vfo: null, squelchOpen: false, audio: 'none', recording: false, error: null, notice: null, tune: null, display: null, sampleRatesHz: [], sweep: null,
+    vfo: null, squelchOpen: false, audio: 'none', recording: false, error: null, notice: null, tune: null, display: null, audioFilter: null, sampleRatesHz: [], sweep: null,
     ...overrides,
   };
 }
