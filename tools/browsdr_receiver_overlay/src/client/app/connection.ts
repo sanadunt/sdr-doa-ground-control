@@ -340,6 +340,8 @@ export const connectionMethods = {
 				this._mediaAudioEl = null;
 			}
 			if (this.audioCtx) {
+				// The voice filter's worklets go with the context (audio-filter.ts).
+				this.detachAudioFilter();
 				try { await this.audioCtx.close(); } catch (_: any) { }
 				this.audioCtx = null;
 				this.gainNode = null;

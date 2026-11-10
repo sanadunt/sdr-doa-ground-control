@@ -3233,6 +3233,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             ".ico": "image/x-icon",
             # Glyph ranges of the Offline basemap (frontend/public/assets/map-fonts).
             ".pbf": "application/x-protobuf",
+            # The voice filter's noise suppressor (src/vendor/web-noise-suppressor, emitted under assets/).
+            ".wasm": "application/wasm",
         }
         receiver_mime = {
             ".html": "text/html; charset=utf-8",
@@ -3315,7 +3317,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Disposition", f'attachment; filename="{BROWSDR_SOURCE_ARCHIVE}"')
         else:
             content_security_policy = (
-                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                # 'wasm-unsafe-eval' lets the voice filter's noise suppressor (an AudioWorklet,
+                # which inherits this policy) compile its WASM from assets/; no eval of strings.
+                "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; "
                 # blob: lets Plotly's "Download plot as a PNG" rasterize the
                 # plot it just serialized in this page. Basemap tiles come
                 # from this console (/api/tiles), so no tile host is listed.

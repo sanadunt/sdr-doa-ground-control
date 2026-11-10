@@ -9,7 +9,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const toolsUrl = new URL('./', import.meta.url);
 const overlayRoot = fileURLToPath(new URL('browsdr_receiver_overlay/', toolsUrl));
 const vendorRoot = fileURLToPath(new URL('../vendor/BrowSDR/', toolsUrl));
+const frontendRoot = fileURLToPath(new URL('../frontend/src/', toolsUrl));
 const wasmModuleUrl = new URL('../vendor/BrowSDR/hackrf-web/pkg/hackrf_web.js', toolsUrl).href;
+
+// Console files the builder copies into the Receiver source (tools/build_browsdr_receiver.py, CONSOLE_SHARED_FILES).
+const consoleShared = new Map([
+	['src/client/app/radioAudioFilter', fileURLToPath(new URL('../frontend/src/lib/radioAudioFilter.ts', toolsUrl))],
+]);
 
 function sourceFile(basePath) {
 	for (const candidate of [basePath, `${basePath}.ts`, `${basePath}/index.ts`]) {
@@ -28,7 +34,13 @@ export async function resolve(specifier, context, nextResolve) {
 		const relativeParent = parent.startsWith(overlayRoot) ? parent.slice(overlayRoot.length) : parent.slice(vendorRoot.length);
 		const parentDir = relativeParent.split('/').slice(0, -1).join('/');
 		const target = new URL(specifier, `file:///${parentDir}/`).pathname.slice(1);
-		const resolved = sourceFile(`${overlayRoot}${target}`) ?? sourceFile(`${vendorRoot}${target}`);
+		const shared = consoleShared.get(target.replace(/\.ts$/, ''));
+		const resolved = sourceFile(`${overlayRoot}${target}`) ?? sourceFile(`${vendorRoot}${target}`) ?? (shared && sourceFile(shared));
+		if (resolved) return { url: pathToFileURL(resolved).href, shortCircuit: true };
+	}
+	// The console's own TypeScript (frontend/src) also imports without extensions, as Vite resolves them.
+	if (parent && parent.startsWith(frontendRoot) && (specifier.startsWith('./') || specifier.startsWith('../'))) {
+		const resolved = sourceFile(fileURLToPath(new URL(specifier, pathToFileURL(parent))));
 		if (resolved) return { url: pathToFileURL(resolved).href, shortCircuit: true };
 	}
 	return nextResolve(specifier, context);

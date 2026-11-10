@@ -58,7 +58,7 @@ function receiverStatus(overrides: Partial<ReceiverStatus> = {}): ReceiverStatus
     notice: null,
     tune: null,
     display: null,
-    sampleRatesHz: [],
+    audioFilter: null, sampleRatesHz: [],
     sweep: {
       phase: 'idle', source: 'native', startHz: 400_000_000, stopHz: 500_000_000, fftSize: 4096, resolutionHz: 4882.8125,
       lnaDb: 24, vgaDb: 30, amp: true, displayMinDb: -110, displayMaxDb: -20, view: 'max',

@@ -13,6 +13,7 @@ import type { ConsoleCapabilities } from '../../api';
 import { DOCK_MAP_KEEP_PX, SpectrumDock, SpectrumMarkRow, dockNeedWithinStage, spectrumNeedFromParts } from './SpectrumDock';
 import type { SpectrumMarkRowProps } from './SpectrumDock';
 import { SpectrumSettings } from './SpectrumSettings';
+import { presetSettings } from '../../lib/radioAudioFilter';
 import type { RadioRows, SpectrumSettingsProps, SweepRows } from './SpectrumSettings';
 
 const ORIGIN = 'http://127.0.0.1:8787';
@@ -487,6 +488,8 @@ function settings(overrides: Partial<SpectrumSettingsProps> = {}, lang: Lang = '
     onSweepFft: () => undefined,
     onSweepGain: () => undefined,
     onSweepAmp: () => undefined,
+    filter: { settings: null, state: null, error: null, disabled: true },
+    onFilter: () => undefined,
     ...overrides,
   };
   return renderToStaticMarkup(
@@ -753,5 +756,28 @@ describe('Spectrum dock markers', () => {
     const body = dashboardCss.slice(start, dashboardCss.indexOf('}', dashboardCss.indexOf('{', dashboardCss.indexOf('.ov-spec-mark-label', start))) + 1);
     expect(body).toMatch(/\.ov-spec-mark-label \{[^}]*clip-path:\s*inset\(50%\)/);
     expect(body).not.toMatch(/display:\s*none/);
+  });
+});
+
+describe('Spectrum dock Atur column: the Receiver voice filter', () => {
+  it('shows the frame\'s filter in RX mode with its state, and nothing in Spektrum mode', () => {
+    const markup = settings({ filter: { settings: presetSettings('strong'), state: 'ai', error: null, disabled: false } });
+    expect(markup).toContain('Filter suara');
+    expect(markup).toContain('AI aktif');
+    expect(markup).toMatch(/<button type="button" aria-pressed="true">Kuat<\/button>/);
+    expect(markup).toContain('350–2800 Hz');
+    expect(markup).toContain('+9 dB');
+    expect(markup).not.toMatch(/ov-filter[^"]*"[^>]*disabled/);
+    const sweep = settings({ dockMode: 'sweep', filter: { settings: presetSettings('strong'), state: 'ai', error: null, disabled: false } });
+    expect(sweep).not.toContain('Filter suara');
+  });
+
+  it('is disabled until the frame answers, and names a load failure in the operator\'s language', () => {
+    const waiting = settings({ filter: { settings: presetSettings('standard'), state: null, error: null, disabled: true } }, 'en');
+    expect(waiting).toContain('Voice filter');
+    expect((waiting.match(/class="ov-button ov-filter-toggle"[^>]*disabled=""/g) ?? []).length).toBe(4);
+    const failed = settings({ filter: { settings: presetSettings('standard'), state: 'error', error: { code: 'SAMPLE_RATE', detail: '44100' }, disabled: false } });
+    expect(failed).toContain('AI gagal');
+    expect(failed).toContain('Peredam noise AI butuh audio 48 kHz (browser memakai 44100 Hz).');
   });
 });

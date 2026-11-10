@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { ReactElement } from 'react';
+import { presetSettings } from './radioAudioFilter';
 import { describe, expect, it } from 'vitest';
 import { normalizeCapabilities, normalizeLanAccessBrief, normalizeLanAccessStatus, normalizeLanAccessView } from '../api';
 import type { LanAccessView } from '../api';
@@ -205,12 +206,15 @@ describe('LAN view UI', () => {
     expect(markup).toContain(translate('en', 'mirror.connecting'));
     const dock = markup.slice(markup.indexOf('<section id="panel-spectrum"'));
     const dockButtons = dock.slice(0, dock.indexOf('</section>')).match(/<button[^>]*>/g) ?? [];
-    expect(dockButtons).toHaveLength(5);
-    const enabled = dockButtons.filter((tag) => !tag.includes('disabled'));
+    expect(dockButtons).toHaveLength(6);
+    // The tablet's Filter (its own voice filter, 2026-11-10) works too; its rows render only while open.
+    const enabled = dockButtons.filter((tag) => !tag.includes('disabled')).map((tag) => tag.replace(/ aria-controls="[^"]*"/, ''));
     expect(enabled).toEqual([
       `<button class="ov-button ov-spec-mark" type="button" aria-pressed="false" title="${translate('en', 'mirror.markNoSource')}">`,
       '<button class="ov-button ov-spec-listen" type="button" aria-pressed="false">',
+      `<button class="ov-button ov-spec-filter" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="${translate('en', 'filter.buttonAria')}" title="${translate('en', 'filter.buttonAria')}">`,
     ]);
+    expect(markup).not.toContain('ov-filter-toggle');
     // Marking is off at every mount: the trace is a picture until it is turned on.
     expect(markup).toContain('role="img"');
     expect(markup).not.toContain('role="slider"');
@@ -295,9 +299,10 @@ describe('LAN view UI', () => {
         expect(markup).toContain('ov-spec-trace is-marking is-read-only');
         // The toggle is pressed and counts the groundstation's list; Mulai and the mode switch stay disabled, Dengar is this tablet's own.
         const buttons = head(markup).match(/<button[^>]*>/g) ?? [];
-        expect(buttons.filter((tag) => !tag.includes('disabled'))).toEqual([
+        expect(buttons.filter((tag) => !tag.includes('disabled')).map((tag) => tag.replace(/ aria-controls="[^"]*"/, ''))).toEqual([
           '<button class="ov-button ov-spec-mark" type="button" aria-pressed="true">',
           '<button class="ov-button ov-spec-listen" type="button" aria-pressed="false">',
+          `<button class="ov-button ov-spec-filter" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="${translate(lang, 'filter.buttonAria')}" title="${translate(lang, 'filter.buttonAria')}">`,
         ]);
         expect(head(markup)).toContain('<span class="ov-spec-mark-count">2</span>');
         expect(markup).not.toContain(translate(lang, 'mirror.markNoSource'));
@@ -412,7 +417,8 @@ describe('LAN view UI', () => {
     };
     const playerIn = (status: MirrorAudioState['status'], latencyMs: number | null = null): MirrorAudioPlayer => {
       const state: MirrorAudioState = { status, latencyMs, code: null };
-      return { start: () => undefined, stop: () => undefined, getState: () => state, subscribe: () => () => undefined };
+      const filter = { settings: presetSettings('standard'), state: null, error: null };
+      return { start: () => undefined, stop: () => undefined, getState: () => state, subscribe: () => () => undefined, getFilter: () => filter, setFilter: () => undefined };
     };
     const viewOf = (state: Record<string, unknown>, ageMs = 0) => mirrorView({ ...feedAt(answerWith(state), ageMs).getState(), nowMs: Date.now() });
 

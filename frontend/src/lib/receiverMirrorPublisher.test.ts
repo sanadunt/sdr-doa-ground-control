@@ -12,7 +12,7 @@ function status(overrides: Partial<ReceiverStatus> = {}): ReceiverStatus {
     running: true, busy: 'none', workspace: 'listener', centerHz: 433_920_000, sampleRateHz: 10_000_000, frequencyShiftHz: 0,
     gains: { lnaDb: 16, vgaDb: 20, amp: false },
     vfo: { index: 0, enabled: true, mode: 'nfm', frequencyHz: 433_925_000, bandwidthHz: 12_500, squelchEnabled: false, squelchDb: null, volume: 50 },
-    squelchOpen: true, audio: 'running', recording: false, error: null, notice: null, tune: null, display: null, sampleRatesHz: [], sweep: null,
+    squelchOpen: true, audio: 'running', recording: false, error: null, notice: null, tune: null, display: null, audioFilter: null, sampleRatesHz: [], sweep: null,
     ...overrides,
   };
 }

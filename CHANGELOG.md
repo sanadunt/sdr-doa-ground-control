@@ -2,6 +2,16 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.20.0
+
+Filter suara radio untuk yang didengar operator, di groundstation dan di tablet. Tidak ada yang dihapus.
+
+- **Filter suara.** Rantai Web Audio dari radio-translate-papua v1.4.1, dengan urutan dan nilai yang sama: pita suara (high-pass dan low-pass ganda), peredam noise AI (GTCRN atau Speex, AudioWorklet + WASM dari `@sapphi-red/web-noise-suppressor` 0.4.1, disertakan dengan `LICENSE` dan `NOTICE.md`), perjelas suara (+5 dB di 2 kHz), gerbang noise, AGC dengan penguat 0–18 dB, dan limiter. Preset Mati, Ringan, Standar (bawaan) dan Kuat; mengubah satu kontrol membuat preset Kustom. Judul panel menulis statusnya: mati, memuat AI…, AI aktif, AI gagal (dengan alasannya), aktif.
+- **Groundstation.** Filter dipasang di dalam Receiver, antara volume dan speaker, jadi hanya yang terdengar yang lewat filter. Rekaman, Whisper dan audio yang dikirim ke tablet tetap asli. Diatur di panel "Filter suara" tab Dengar halaman Receiver dan di kolom Atur dock Spektrum (mode RX); keduanya saling mengikuti, dan setelannya disimpan bersama setelan Receiver di groundstation.
+- **Tablet (LAN view).** Tombol Filter di samping Dengar (dock MIRROR dan kartu Spectrum halaman Receiver) membuka panel yang sama. Setelan disimpan di browser tablet itu saja; tidak ada yang dikirim ke groundstation. Pemutar audio mirror kini memakai audio 48 kHz, yang dibutuhkan peredam AI.
+- **Delay.** Preset Standar menambah sekitar 36 ms (GTCRN), Ringan sekitar 4 ms; perkiraan latensi di samping Dengar di tablet ikut menghitungnya. Saat dinyalakan, GTCRN butuh sekitar 1 detik untuk menyesuaikan diri, jadi detik pertama terdengar lebih pelan.
+- **CSP.** Halaman konsol kini mengizinkan `'wasm-unsafe-eval'` (hanya kompilasi WASM, bukan eval teks) dan menyajikan `.wasm` dari `assets/`, untuk peredam noise.
+
 ## 3.19.1
 
 Menggambar tanda peta tidak lagi tersendat. Tidak ada yang dihapus.

@@ -1,6 +1,7 @@
 import type { AppInstance } from './types';
 import { makeDefaultVfo } from './constants';
 import { normalizeListenerDisplay } from './listener-display';
+import { idleFilterState, restoreAudioFilter } from './audio-filter';
 
 const SWEEP_SETTINGS_KEY = 'ReceiverSweepSettings';
 const LNA_GAINS = [0, 8, 16, 24, 32, 40];
@@ -77,6 +78,7 @@ export const settingsMethods = {
 			view: this.view,
 			collapsedPanels: this.collapsedPanels,
 			recentRemoteIds: this.recentRemoteIds,
+			audioFilter: this.audioFilter,
 		};
 		try {
 			localStorage.setItem("SDRSetting", JSON.stringify(obj));
@@ -120,6 +122,9 @@ export const settingsMethods = {
 				if (setting.view) Object.assign(this.view, setting.view);
 				if (setting.collapsedPanels && typeof setting.collapsedPanels === 'object') Object.assign(this.collapsedPanels, setting.collapsedPanels);
 				if (setting.recentRemoteIds && Array.isArray(setting.recentRemoteIds)) this.recentRemoteIds = setting.recentRemoteIds;
+				// Older saves have none: the voice filter starts at Standard (audio-filter.ts).
+				this.audioFilter = restoreAudioFilter(setting.audioFilter);
+				this.audioFilterState = idleFilterState(this.audioFilter);
 			}
 		} catch (e) { }
 	},

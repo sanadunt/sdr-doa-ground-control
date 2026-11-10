@@ -5,6 +5,8 @@
  * spectrum dock before the frame is mounted; it never writes it, because the
  * frame overwrites the entry at its next save.
  */
+import { DEFAULT_FILTER_SETTINGS, validFilterSettings } from './radioAudioFilter';
+import type { FilterSettings } from './radioAudioFilter';
 import { inTuneRange } from './receiverBridgeProtocol';
 
 export const RECEIVER_SETTING_KEY = 'SDRSetting';
@@ -73,4 +75,10 @@ export function savedReceiverTuning(storage: StorageLike | null = defaultStorage
     && setting.activeVfoIndex >= 0 && setting.activeVfoIndex < vfos.length ? setting.activeVfoIndex : 0;
   const vfo: unknown = vfos[index];
   return { centerHz, vfoHz: isRecord(vfo) ? mhzToTuneHz(vfo.freq) : null };
+}
+
+/** The Receiver's saved voice filter (SDRSetting audioFilter); Standard when the entry has none, as the frame starts. */
+export function savedAudioFilter(storage: StorageLike | null = defaultStorage()): FilterSettings {
+  const setting = savedSetting(storage);
+  return (setting && validFilterSettings(setting.audioFilter)) || { ...DEFAULT_FILTER_SETTINGS };
 }

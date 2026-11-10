@@ -125,7 +125,7 @@ describe('receiver bridge protocol', () => {
     expect([...CONSOLE_MESSAGE_TYPES]).toEqual([
       'console:hello', 'console:subscribe', 'console:start', 'console:stop', 'console:tune', 'console:vfo', 'console:listen', 'console:display',
       'console:gains', 'console:radio', 'console:sweep-start', 'console:sweep-stop', 'console:sweep-config', 'console:sweep-display',
-      'console:marker-add', 'console:marker-remove',
+      'console:marker-add', 'console:marker-remove', 'console:audio-filter',
     ]);
     expect([...LISTEN_MODES]).toEqual(['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw']);
     expect([...RESULT_CODES]).toEqual([

@@ -14,6 +14,8 @@ import { parseTypedNumber } from '../../lib/polarViewSettings';
 import { useI18n } from '../../lib/i18n';
 import { Icon } from '../ui';
 import { useSyncedDraft } from './useSyncedDraft';
+import { AudioFilterControls } from '../AudioFilterControls';
+import type { FilterError, FilterSettings, FilterState } from '../../lib/radioAudioFilter';
 
 function dbText(value: number): string {
   return String(Number(value.toFixed(1)));
@@ -72,6 +74,9 @@ export interface SpectrumSettingsProps {
   onSweepFft: (fftSize: SweepFftSize) => void;
   onSweepGain: (kind: GainKind, db: number) => void;
   onSweepAmp: (enabled: boolean) => void;
+  /** The Receiver's voice filter (RX mode); disabled until the frame reports it. */
+  filter: { settings: FilterSettings | null; state: FilterState | null; error: FilterError | null; disabled: boolean };
+  onFilter: (settings: FilterSettings) => void;
 }
 
 interface DbScaleRowProps {
@@ -268,6 +273,8 @@ export function SpectrumSettings({
   onSweepFft,
   onSweepGain,
   onSweepAmp,
+  filter,
+  onFilter,
 }: SpectrumSettingsProps): JSX.Element {
   const { t } = useI18n();
   const rateValue = radio.ready && radio.sampleRateHz !== null ? String(radio.sampleRateHz) : '';
@@ -326,6 +333,7 @@ export function SpectrumSettings({
               </button>
             </div>
           </div>
+          <AudioFilterControls settings={filter.settings} state={filter.state} error={filter.error} disabled={filter.disabled} onChange={onFilter} />
         </>
       ) : (
         <>

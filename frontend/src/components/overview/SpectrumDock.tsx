@@ -32,6 +32,8 @@ import { Icon } from '../ui';
 import { SpectrumCanvas } from './SpectrumCanvas';
 import type { SpectrumCanvasHandle } from './SpectrumCanvas';
 import { SpectrumSettings } from './SpectrumSettings';
+import { savedAudioFilter } from '../../lib/receiverSavedTuning';
+import type { FilterSettings } from '../../lib/radioAudioFilter';
 
 // The Receiver page's shortcut key follows its place in the page menu.
 const RECEIVER_KEY = routeShortcut('receiver');
@@ -284,6 +286,8 @@ export function SpectrumDock({
   const [sweepVgaPick, setSweepVgaPick] = useState<HeldPick<number> | null>(null);
   const [sweepAmpPick, setSweepAmpPick] = useState<HeldPick<boolean> | null>(null);
   const [sweepDbPick, setSweepDbPick] = useState<HeldPick<{ minDb: number; maxDb: number }> | null>(null);
+  // The Receiver's voice filter (overlay audio-filter.ts), held the same way.
+  const [filterPick, setFilterPick] = useState<HeldPick<FilterSettings> | null>(null);
   const [radioPending, setRadioPending] = useState<RadioPending>(null);
   // A dock tune shown until the frame reports it (lib/receiverSync.ts displayedTuning).
   const [localTune, setLocalTune] = useState<LocalTune | null>(null);
@@ -659,6 +663,19 @@ export function SpectrumDock({
   };
   const changeAmp = (enabled: boolean) => {
     sendHeld(setAmpPick, enabled, { type: 'console:gains', amp: enabled });
+  };
+  // The voice filter on what the Receiver plays; the frame applies and saves it.
+  const changeFilter = (settings: FilterSettings) => {
+    sendHeld(setFilterPick, settings, { type: 'console:audio-filter', settings });
+  };
+  const liveFilter = live?.audioFilter ?? null;
+  const savedFilter = useMemo(() => savedAudioFilter(), []);
+  const filterView = {
+    // Before the frame answers: what the Receiver saved, shown without controls.
+    settings: heldValue(filterPick, bridgeState.status) ?? liveFilter?.settings ?? savedFilter,
+    state: liveFilter?.state ?? null,
+    error: liveFilter?.error ?? null,
+    disabled: liveFilter === null,
   };
 
   // Click-to-tune sets the RX centre and the listen VFO and stops following the node. On a scan
@@ -1052,6 +1069,8 @@ export function SpectrumDock({
             onSweepFft={changeSweepFft}
             onSweepGain={changeSweepGain}
             onSweepAmp={changeSweepAmp}
+            filter={filterView}
+            onFilter={changeFilter}
           />
         ) : null}
       </div>

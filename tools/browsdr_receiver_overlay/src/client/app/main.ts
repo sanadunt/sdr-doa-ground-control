@@ -10,6 +10,8 @@ import { vfoMethods } from './vfo';
 import { serializeSweepSettings, settingsMethods } from './settings';
 import { listenerDisplayMethods } from './listener-display';
 import { listenerMarkerMethods } from './listener-markers';
+import { audioFilterMethods } from './audio-filter';
+import { serializeFilterSettings } from './radioAudioFilter';
 import { bookmarkMethods } from './bookmarks';
 import { whisperMethods } from './whisper';
 import { pocsagMethods } from './pocsag';
@@ -70,6 +72,7 @@ const app = createApp({
 		...i18nMethods,
 		...listenerDisplayMethods,
 		...listenerMarkerMethods,
+		...audioFilterMethods,
 	},
 	created: async function () {
 		this.loadSetting();
@@ -273,6 +276,12 @@ const app = createApp({
 		// The dB scale, set on the Dengar tab or by the console's Spektrum dock.
 		this.$watch(() => [this.display.auto, this.display.minDB, this.display.maxDB], () => {
 			this.applyListenerDisplay();
+			this.saveSetting();
+		});
+
+		// The voice filter, set on the Dengar tab or by the console's Spektrum dock (audio-filter.ts).
+		this.$watch(() => serializeFilterSettings(this.audioFilter), () => {
+			this.applyAudioFilter();
 			this.saveSetting();
 		});
 

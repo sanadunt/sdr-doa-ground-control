@@ -1,6 +1,6 @@
 # Filter suara radio untuk audio yang didengar operator
 
-Tanggal: 2026-11-10. Permintaan pemilik: spesifikasi "FILTER SUARA RADIO" (ditulis untuk radio-translate-papua v1.4.1), dipetakan ke Ground Console ini. Status: **draf, menunggu persetujuan pemilik** untuk tiga pilihan di bagian "Yang ditanyakan ke pemilik".
+Tanggal: 2026-11-10. Permintaan pemilik: spesifikasi "FILTER SUARA RADIO" (ditulis untuk radio-translate-papua v1.4.1), dipetakan ke Ground Console ini. Status: disetujui 2026-11-10. Pemilik memilih panel di tab Dengar **dan** di dock Dashboard. Dua pilihan lain tidak dijawab dan diambil sebagai panggilan pembangun: tombol Filter di samping Dengar di tablet (usulan), dan bawaan Standar (sesuai spesifikasi).
 
 ## Tujuan dan alasan
 
@@ -81,8 +81,8 @@ Padanan "host:output-mute" kit di sini: filter dipasang **di dalam frame**, di a
 
 Yang belum bisa diuji di sini: suara radio sungguhan dari HackRF, dan tablet Samsung yang sebenarnya (WebView). Itu dilaporkan sebagai belum diuji.
 
-## Yang ditanyakan ke pemilik
+## Keputusan
 
-1. **UI di groundstation.** (a) Panel "Filter suara" di tab Dengar halaman Receiver saja, atau (b) juga di kolom Atur dock Spektrum Dashboard (perlu perintah bridge baru `console:audio-filter` dan status filter di `receiver:status`, kedua salinan protokol).
-2. **UI di tablet.** Usulan: tombol kecil "Filter" di samping Dengar (dock MIRROR dan kartu Spectrum rute Receiver) yang membuka panel yang sama. Di layout ringkas dock tidak punya Atur, jadi panelnya popover.
-3. **Bawaan untuk pemasangan yang sudah ada.** Spesifikasi menulis Standar sebagai bawaan, artinya setelah update semua operator langsung mendengar suara terfilter (dengan delay GTCRN). Ikuti spesifikasi (Standar), atau mulai dari Mati sampai operator menyalakannya?
+1. **UI di groundstation (pemilik):** panel "Filter suara" di tab Dengar halaman Receiver **dan** di kolom Atur dock Spektrum (mode RX). Dock mengatur filter frame lewat perintah bridge baru `console:audio-filter {settings}` (antrean perintah biasa, 8 s, tidak pernah ditolak karena pindai), dan `receiver:status` membawa `audioFilter {settings, state, error}`; kedua salinan protokol berubah. Dock tidak menyimpan setelan sendiri: frame pemiliknya, seperti skala dB.
+2. **UI di tablet (panggilan pembangun):** tombol "Filter" di samping Dengar (dock MIRROR dan kartu Spectrum rute Receiver) membuka panel yang sama sebagai popover.
+3. **Bawaan (panggilan pembangun, sesuai spesifikasi):** Standar, di frame dan di tablet.

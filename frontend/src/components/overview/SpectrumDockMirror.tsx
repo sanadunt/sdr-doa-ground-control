@@ -1,5 +1,6 @@
-import type { JSX, ReactNode } from 'react';
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import type { CSSProperties, JSX, ReactNode } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { AudioFilterControls } from '../AudioFilterControls';
 import { useI18n } from '../../lib/i18n';
 import type { Lang, MessageKey, Translate } from '../../lib/i18n';
 import { formatDuration } from '../../lib/healthView';
@@ -193,6 +194,103 @@ export function MirrorListenButton({ view, player: given = null }: { view: Mirro
   );
 }
 
+type PopoverElement = HTMLDivElement & { showPopover?: () => void; hidePopover?: () => void };
+
+/** Where the filter popover goes: under the button, or above it when the viewport ends first, inside a 16 px gutter. */
+export function filterPopoverPosition(button: { left: number; top: number; bottom: number; right: number }, size: { width: number; height: number }, viewport: { width: number; height: number }): CSSProperties {
+  const gutter = 16;
+  const width = Math.min(size.width, viewport.width - 2 * gutter);
+  const left = Math.max(gutter, Math.min(button.right - width, viewport.width - gutter - width));
+  const below = viewport.height - button.bottom - gutter;
+  const above = button.top - gutter;
+  const top = size.height <= below || below >= above ? button.bottom + 4 : Math.max(gutter, button.top - 4 - size.height);
+  return { left, top, width, maxHeight: Math.max(160, Math.max(below, above) - 4) };
+}
+
+/**
+ * The tablet's voice filter: a Filter button beside Dengar opens the filter's rows in a popover in the top
+ * layer (the dock and panels never cover it). The settings stay in this browser; Escape, a tap outside
+ * or the button close it.
+ */
+export function MirrorFilterButton({ player: given = null }: { player?: MirrorAudioPlayer | null }): JSX.Element {
+  const { t } = useI18n();
+  const player = given ?? mirrorAudioPlayer();
+  useSyncExternalStore(player.subscribe, player.getState, player.getState);
+  const filter = player.getFilter();
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<CSSProperties>({});
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<PopoverElement>(null);
+  const popId = useId();
+
+  const place = useCallback(() => {
+    const button = buttonRef.current;
+    const pop = popRef.current;
+    if (!button || !pop) return;
+    setPosition(filterPopoverPosition(button.getBoundingClientRect(), { width: 360, height: pop.scrollHeight }, { width: window.innerWidth, height: window.innerHeight }));
+  }, []);
+
+  useLayoutEffect(() => {
+    const pop = popRef.current;
+    if (!pop || !open) return undefined;
+    try {
+      pop.showPopover?.();
+    } catch {
+      // Already showing, or no popover support: the fixed panel still opens.
+    }
+    place();
+    return () => {
+      try {
+        pop.hidePopover?.();
+      } catch {
+        // Already hidden.
+      }
+    };
+  }, [open, place]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      buttonRef.current?.focus();
+      setOpen(false);
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node) || popRef.current?.contains(target) || buttonRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    document.addEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('resize', place);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      window.removeEventListener('resize', place);
+    };
+  }, [open, place]);
+
+  const label = t('filter.buttonAria');
+  const state = filter.state;
+  return (
+    <>
+      <button ref={buttonRef} className="ov-button ov-spec-filter" type="button" aria-haspopup="dialog" aria-expanded={open} aria-controls={popId}
+        aria-label={label} title={label} onClick={() => setOpen(!open)}>
+        <Icon name="sliders" /><span className="ov-spec-filter-label">{t('filter.button')}</span>
+        {state === 'error' ? <span className="ov-spec-filter-dot is-error" aria-hidden="true" /> : null}
+      </button>
+      <div ref={popRef} id={popId} className="ov-filter-pop" popover="manual" role="dialog" aria-label={t('filter.title')}
+        data-no-page-shortcuts="" hidden={!open} style={position}>
+        {open ? (
+          <AudioFilterControls settings={filter.settings} state={state ?? (filter.settings.preset === 'off' ? 'off' : null)} error={filter.error}
+            onChange={(settings) => player.setFilter(settings)} />
+        ) : null}
+      </div>
+    </>
+  );
+}
+
 /** The Markers/Penanda toggle with the list's count; it stays usable so a blocked reason shows when it is turned on. */
 export function MirrorMarkToggle({ marking }: { marking: MirrorMarking }): JSX.Element {
   const { t } = useI18n();
@@ -330,6 +428,7 @@ export function SpectrumDockMirror({ feed: given = null, markController = null, 
         <MirrorMarkToggle marking={marking} />
         <span className="ov-spacer" />
         <MirrorListenButton view={view} player={audioPlayer} />
+        <MirrorFilterButton player={audioPlayer} />
         <div className="ov-spec-group">
           <button className="ov-button ov-spec-run" type="button" disabled>
             <Icon name={stoppable ? 'stop' : 'play'} /><span>{stoppable ? t('spectrum.stop') : t('spectrum.start')}</span>

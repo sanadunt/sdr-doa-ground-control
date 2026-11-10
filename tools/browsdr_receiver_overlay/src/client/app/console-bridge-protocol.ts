@@ -13,6 +13,9 @@
 export const BRIDGE_CHANNEL = 'sdr-console-receiver';
 export const BRIDGE_VERSION = 1;
 
+import { FILTER_ERROR_CODES, FILTER_STATES, validFilterSettings } from './radioAudioFilter';
+import type { FilterErrorCode, FilterSettings, FilterState } from './radioAudioFilter';
+
 /** Frame to console. */
 export const FRAME_MESSAGE_TYPES = ['receiver:hello', 'receiver:status', 'receiver:spectrum', 'receiver:result', 'receiver:sweep', 'receiver:markers', 'receiver:audio'] as const;
 /** Console to frame. */
@@ -33,7 +36,11 @@ export const CONSOLE_MESSAGE_TYPES = [
 	'console:sweep-display',
 	'console:marker-add',
 	'console:marker-remove',
+	'console:audio-filter',
 ] as const;
+/** The voice filter's states (radioAudioFilter.ts, copied from the console by the builder), as receiver:status reports them. */
+export const AUDIO_FILTER_STATES = FILTER_STATES;
+export const AUDIO_FILTER_ERROR_CODES = FILTER_ERROR_CODES;
 /** Demodulator modes in UI order; the keys of MODE_DEFAULTS in constants.ts. */
 export const LISTEN_MODES = ['nfm', 'wfm', 'am', 'usb', 'lsb', 'dsb', 'cw', 'raw'] as const;
 /** receiver:result codes. TIMEOUT is produced by the console only. */
@@ -186,6 +193,8 @@ export type ConsoleCommand =
 	/** Displayed Hz. The frame measures the power on a running scan. */
 	| { type: 'console:marker-add'; id: string; frequencyHz: number }
 	| { type: 'console:marker-remove'; id: string; markerId: string }
+	/** The voice filter's settings, whole; the frame applies and saves them. */
+	| { type: 'console:audio-filter'; id: string; settings: FilterSettings }
 	/** A console command with a usable id whose payload is wrong; answered with INVALID_COMMAND. */
 	| { type: 'invalid'; id: string };
 
@@ -276,6 +285,14 @@ export interface ReceiverStatus {
 	/** Sample rates of the connected device, in its order; [] while none is connected. */
 	sampleRatesHz: number[];
 	sweep: StatusSweep;
+	audioFilter: StatusAudioFilter;
+}
+
+/** The voice filter on what the Receiver plays (audio-filter.ts). */
+export interface StatusAudioFilter {
+	settings: FilterSettings;
+	state: FilterState;
+	error: { code: FilterErrorCode; detail: string } | null;
 }
 
 /** One of the Receiver's markers in receiver:markers. */
@@ -570,6 +587,10 @@ export function parseConsoleMessage(data: unknown): ConsoleCommand | null {
 		}
 		case 'console:marker-remove':
 			return isCommandId(data.markerId) ? { type, id, markerId: data.markerId } : invalid;
+		case 'console:audio-filter': {
+			const settings = validFilterSettings(data.settings);
+			return settings ? { type, id, settings } : invalid;
+		}
 		default:
 			return null;
 	}

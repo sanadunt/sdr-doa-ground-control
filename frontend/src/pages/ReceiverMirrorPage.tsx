@@ -9,7 +9,7 @@ import { formatMsps } from '../lib/radioSettings';
 import { formatMhz, formatMhzTrim } from '../lib/spectrumView';
 import { Card, KeyValueGrid, Page, PageGrid, PageHeader, PageNotice, Segmented, StatusChip, Tag } from '../components/page';
 import type { KeyValueItem } from '../components/page';
-import { MirrorListenButton, MirrorMarkToggle, MirrorSpectrum, mirrorAge, mirrorChipText, mirrorMessage, useMirrorMarking, useMirrorView } from '../components/overview/SpectrumDockMirror';
+import { MirrorFilterButton, MirrorListenButton, MirrorMarkToggle, MirrorSpectrum, mirrorAge, mirrorChipText, mirrorMessage, useMirrorMarking, useMirrorView } from '../components/overview/SpectrumDockMirror';
 import type { MirrorMarkController } from '../lib/receiverMirrorMarks';
 import type { MirrorAudioPlayer } from '../lib/receiverMirrorAudio';
 import { RecordsTab } from '../components/records/RecordsTab';
@@ -95,7 +95,7 @@ function MirrorTab({ feed, tabs, markController, audioPlayer }: {
           title={t('spectrum.title')}
           span={12}
           bodyClassName="rx-mirror-spectrum-body"
-          actions={<><MirrorListenButton view={view} player={audioPlayer} /><MirrorMarkToggle marking={marking} /></>}
+          actions={<><MirrorListenButton view={view} player={audioPlayer} /><MirrorFilterButton player={audioPlayer} /><MirrorMarkToggle marking={marking} /></>}
         >
           <div className="ov-spectrum is-view-only is-mirror rx-mirror-spectrum">
             <div className="ov-spec-main">
