@@ -2,6 +2,12 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.21.0
+
+Kurva Angular 180 titik dari RDF Node 1.12 ("Seimbang") diterima dan digambar halus 360°. Tidak ada yang dihapus.
+
+- **Kurva 180 titik.** RDF Node 1.12 mengirim kurva Angular sebagai 180 titik, tiap titik rata-rata dua derajat (`step_deg: 2`), supaya di LoRa cukup 1–2 frame, bukan 5. Konsol menyusun kembali 360 nilai halus begitu kurva diterima (PCHIP periodik: titik di 0,5°, 2,5°, …; 359° bersambung mulus ke 0°; tidak ada puncak palsu), jadi lobe di peta, plot polar, dan pencocokan dengan DoA tetap memakai 360 nilai. Kurva 360 nilai dari Edge lama tetap diterima seperti biasa; kurva 180 tanpa `step_deg: 2` ditolak dengan `EXPECTED_360_SAMPLES`. Node view menandai kurva hasil susun ulang dengan `upsampled_from: 180`.
+
 ## 3.20.0
 
 Filter suara radio untuk yang didengar operator, di groundstation dan di tablet. Tidak ada yang dihapus.
