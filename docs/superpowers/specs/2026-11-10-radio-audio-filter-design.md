@@ -86,3 +86,10 @@ Yang belum bisa diuji di sini: suara radio sungguhan dari HackRF, dan tablet Sam
 1. **UI di groundstation (pemilik):** panel "Filter suara" di tab Dengar halaman Receiver **dan** di kolom Atur dock Spektrum (mode RX). Dock mengatur filter frame lewat perintah bridge baru `console:audio-filter {settings}` (antrean perintah biasa, 8 s, tidak pernah ditolak karena pindai), dan `receiver:status` membawa `audioFilter {settings, state, error}`; kedua salinan protokol berubah. Dock tidak menyimpan setelan sendiri: frame pemiliknya, seperti skala dB.
 2. **UI di tablet (panggilan pembangun):** tombol "Filter" di samping Dengar (dock MIRROR dan kartu Spectrum rute Receiver) membuka panel yang sama sebagai popover.
 3. **Bawaan (panggilan pembangun, sesuai spesifikasi):** Standar, di frame dan di tablet.
+
+## Hasil (3.20.0)
+
+- Chrome headless, `OfflineAudioContext` 48 kHz (`tools/test_receiver_audio_filter.mjs`): Standar menurunkan noise acak 0,06 selama 2 detik sekitar 29 dB dibanding Mati (acuan ~29 dB), dengan GTCRN di rantai. Delay: Standar sekitar 36 ms, Ringan sekitar 4 ms (lookahead compressor). Sinyal berpita suara (nada 400–2600 Hz dengan selubung 4 Hz) keluar ~10 dB lebih keras dari Standar (AGC dan penguat). Mati → Standar → Mati → Standar dalam satu render: segmen Mati sama dengan masukan (tidak dobel).
+- GTCRN butuh sekitar 1 detik untuk menyesuaikan diri setelah dinyalakan; detik pertama lebih pelan. Nada tetap (misalnya 1 kHz murni) dianggap noise dan diredam.
+- Browser (Mock SDR, port loopback): frame memuat GTCRN di bawah CSP `/receiver/` (status AI aktif), dock mengikuti dan mengubah filter frame, tablet LAN view memuat GTCRN di bawah CSP konsol setelah Dengar.
+- Belum diuji: suara radio sungguhan dari RadioSpectrum, dan WebView tablet Samsung. Mock SDR tidak menghasilkan audio VFO di Chromium, jadi yang terdengar belum dinilai telinga.
