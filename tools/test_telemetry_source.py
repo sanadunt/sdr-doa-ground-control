@@ -793,6 +793,23 @@ class MqttSnapshotTests(unittest.TestCase):
         self.clock = ManualMs()
         self.edge = Edge(self.clock)
 
+    def test_180_point_angular_pairs_with_its_doa(self) -> None:
+        # Edge 1.12 sends 180 pair-averaged points; the console rebuilds 360 and still pairs it with the DoA.
+        self.edge.hello()
+        self.edge.health()
+        self.edge.doa(THETA)
+        values = peaked(THETA)
+        half = [round((values[2 * k] + values[2 * k + 1]) / 2, 2) for k in range(180)]
+        payload = dict(fixture("telemetry-angular.live.json"))
+        payload.update(sid=self.edge.state["sid"], timestamp_ms=self.clock(), q=self.edge.q["frame"],
+                       frequency_hz=FREQUENCY_HZ, revision=self.edge.state["cfg"],
+                       raw_doa_deg=(360.0 - THETA) % 360.0, step_deg=2, values=half)
+        self.edge.send("telemetry/angular", payload)
+        view = build(self.edge)["doa_candidates"]["mqtt"]
+        self.assertEqual(len(view["angular_power_db"]), 360)
+        self.assertLessEqual(abs(view["angular_peak_index"] - 160), 1)
+        self.assertEqual(view["angular_pairing"], "SAME_FRAME")
+
     def test_live_doa_and_angular_fill_the_snapshot_shape(self) -> None:
         snapshot = build(self.edge.live())
         self.assertEqual(snapshot["source"]["kind"], "mqtt")

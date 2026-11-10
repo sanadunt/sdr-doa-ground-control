@@ -1268,6 +1268,23 @@ class AngularTests(unittest.TestCase):
         self.assertEqual(topic(store, "telemetry/diagnostic/angular", NOW + 30_000)["status"], "UNVERIFIED")
         self.assertEqual(topic(store, "telemetry/diagnostic/angular", NOW + 40_001)["status"], "STALE")
 
+    def test_angular_180_is_upsampled_to_360(self) -> None:
+        store = session_store()
+        values = self.frame()["values"]
+        half = [round((values[2 * k] + values[2 * k + 1]) / 2, 2) for k in range(180)]
+        entry = put(store, "telemetry/angular", self.frame(values=half, step_deg=2))
+        self.assertEqual(entry["status"], "LIVE")
+        angular = node(store)["angular"]
+        self.assertEqual((len(angular["values"]), angular["upsampled_from"]), (360, 180))
+        self.assertEqual(angular["peak_index"], max(range(360), key=angular["values"].__getitem__))
+
+    def test_angular_180_without_step_is_rejected(self) -> None:
+        store = session_store()
+        half = self.frame()["values"][:180]
+        self.assertEqual(put(store, "telemetry/angular", self.frame(values=half))["error"], "EXPECTED_360_SAMPLES")
+        self.assertEqual(put(store, "telemetry/angular", self.frame(values=half, step_deg=1))["error"],
+                         "EXPECTED_360_SAMPLES")
+
     def test_json_frame_shape(self) -> None:
         store = session_store()
         values = self.frame()["values"]

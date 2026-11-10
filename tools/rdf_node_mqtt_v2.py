@@ -741,6 +741,33 @@ def _validate_diagnostic_doa(data: Dict[str, Any]) -> Dict[str, Any]:
     return value
 
 
+# Edge 1.12 ("Seimbang") sends 180 Angular points: point k is the mean of degrees 2k and 2k+1, at 2k+0.5.
+# upsample_pairs rebuilds 360 values with a periodic monotone cubic (PCHIP): smooth, 359 joins 0, and no
+# overshoot, so it never invents a peak the points do not have. rdf-node's rdf_node.angular.upsample_pairs
+# is the same algorithm; tools/test_angular_resample.py pins both to the same numbers.
+def upsample_pairs(values: List[float]) -> List[float]:
+    n = len(values)
+    secant = [values[(k + 1) % n] - values[k] for k in range(n)]
+    slope = []
+    for k in range(n):
+        a, b = secant[k - 1], secant[k]
+        # Fritsch-Carlson: flat at a local extremum, else the harmonic mean of the two secants.
+        slope.append(0.0 if a * b <= 0 else 2 * a * b / (a + b))
+    out = []
+    for degree in range(360):
+        x = (degree - 0.5) / 2.0
+        k = int(x // 1)
+        t = x - k
+        k %= n
+        j = (k + 1) % n
+        h00 = 2 * t ** 3 - 3 * t ** 2 + 1
+        h10 = t ** 3 - 2 * t ** 2 + t
+        h01 = -2 * t ** 3 + 3 * t ** 2
+        h11 = t ** 3 - t ** 2
+        out.append(h00 * values[k] + h10 * slope[k] + h01 * values[j] + h11 * slope[j])
+    return out
+
+
 def _validate_angular_frame(data: Dict[str, Any]) -> Dict[str, Any]:
     """One Angular JSON frame; the edge sends no other encoding (RDF2 is retired)."""
     encoding = data.get("encoding", "json")
@@ -773,10 +800,16 @@ def _validate_angular_frame(data: Dict[str, Any]) -> Dict[str, Any]:
         if present:
             value[key] = item
     samples = data.get("values")
-    if not isinstance(samples, list) or len(samples) != 360:
+    # Edge 1.12 ("Seimbang"): 180 points two degrees apart, step_deg 2. They are rebuilt into 360 smooth
+    # values here, so the map, the polar plot and pairing keep working on 360.
+    half = isinstance(samples, list) and len(samples) == 180 and data.get("step_deg") == 2
+    if not isinstance(samples, list) or (len(samples) != 360 and not half):
         raise _Invalid("EXPECTED_360_SAMPLES", "values")
     if not all(_finite_in(sample, -1e8, 1e8) for sample in samples):
         raise _Invalid("INVALID_FIELD", "values")
+    if half:
+        samples = upsample_pairs(samples)
+        value["upsampled_from"] = 180
     value["values"] = list(samples)
     value["peak_index"] = max(range(360), key=samples.__getitem__)
     return value
