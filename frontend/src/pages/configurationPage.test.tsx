@@ -51,7 +51,7 @@ describe('Configuration page', () => {
 
   it('lays the cards out in the section index order', () => {
     const markup = render();
-    const ids = ['connection-settings', 'mqtt-settings', 'drone-settings', 'lan-settings', 'navigation-settings', 'branding-settings', 'dry-run-settings'];
+    const ids = ['connection-settings', 'mqtt-settings', 'drone-settings', 'lan-settings', 'update-settings', 'navigation-settings', 'branding-settings', 'dry-run-settings'];
     const cardOrder = ids.map((id) => markup.indexOf(`<section id="${id}"`));
     expect(cardOrder.every((index) => index > 0)).toBe(true);
     expect([...cardOrder].sort((a, b) => a - b)).toEqual(cardOrder);

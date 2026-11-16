@@ -115,3 +115,15 @@
 /* Data Out settings while Telemetry LoRa carries the node (no IP path): kept, folded away. */
 .cfg-dataout-unused { display: grid; gap: 14px; }
 .cfg-dataout-unused > summary { min-height: 44px; display: flex; align-items: center; color: var(--muted); cursor: pointer; }
+
+/* Console update card (ConsoleUpdateCard): progress line, confirm box. */
+.cfg-update-progress { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--text); font-size: 13px; line-height: 1.4; }
+.cfg-update-spinner { flex: 0 0 auto; width: 14px; height: 14px; border: 2px solid var(--line-soft); border-top-color: var(--accent); border-radius: 50%; animation: cfg-update-spin 900ms linear infinite; }
+@keyframes cfg-update-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .cfg-update-spinner { animation: none; border-top-color: var(--accent); } }
+.cfg-update-reason { color: var(--muted); overflow-wrap: anywhere; }
+.cfg-update-confirm { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); }
+.cfg-update-confirm h3 { margin: 0; font-size: 14px; }
+.cfg-update-confirm p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.cfg-update-confirm .cfg-update-warning { color: var(--amber); font-weight: 600; }
+.cfg-update-note { margin: 0; color: var(--subtle); font-size: 12px; }

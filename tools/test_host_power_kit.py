@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Tests for packaging/host-power: the sdr-doa-host-power helper, its units,
-the installer and the uninstaller.
+"""Tests for packaging/host-power: the sdr-doa-host-power helper (Restart,
+Shutdown and the console's Update), its units, the installer and the uninstaller.
 
 The scripts run with sh against fake commands (systemctl, logger, id,
 systemd-tmpfiles) that read one scenario JSON file and log every call, a
@@ -43,7 +43,9 @@ NEXT_BOOT = "0b1c2d3e-4f50-4a61-8b72-93a4b5c6d7e8"
 REAL_TOOLS = (
     "sh", "dash", "bash", "cat", "sed", "awk", "grep", "tr", "tail", "head", "date", "mv", "rm", "mkdir", "chmod",
     "cp", "ls", "ln", "dd", "wc", "mktemp", "dirname", "basename", "rmdir", "env", "touch", "find", "sort", "cut",
+    "sleep",
 )
+UPDATE_UNIT = "sdr-doa-host-power-update.service"
 FAKE_TOOLS = ("systemctl", "logger", "id", "systemd-tmpfiles")
 
 FAKE = r'''
@@ -72,8 +74,13 @@ if NAME == "systemctl":
         if code:
             print("Failed to %s system via logind: Access denied" % verb, file=sys.stderr)
     elif verb == "is-active":
-        print(state["path_active"])
-        code = 0 if state["path_active"] == "active" else 3
+        active = state["update_active"] if ARGS[1:2] == ["sdr-doa-host-power-update.service"] else state["path_active"]
+        print(active)
+        code = 0 if active == "active" else 3
+    elif verb == "start":
+        code = state["start_rc"]
+        if code:
+            print("Failed to start %s: Unit %s not found." % (ARGS[-1], ARGS[-1]), file=sys.stderr)
 elif NAME == "logger":
     tag = ARGS[ARGS.index("-t") + 1]
     priority = ARGS[ARGS.index("-p") + 1]
@@ -121,7 +128,7 @@ class Harness:
             if found:
                 (self.realbin / name).symlink_to(found)
         self.scenario: Dict[str, object] = {
-            "uid": os.geteuid(), "power_rc": 0, "path_active": "active",
+            "uid": os.geteuid(), "power_rc": 0, "path_active": "active", "update_active": "inactive", "start_rc": 0,
             "users": {"rdf": [1000, 1000], "root": [0, 0]},
         }
         self.save()
@@ -236,7 +243,7 @@ class HelperTests(HarnessCase):
 
     def test_anything_but_the_two_words_is_deleted_and_refused(self):
         for content in (b"halt", b"reboot\n", b"REBOOT", b"", b" reboot", b"reboot poweroff", b"poweroffx",
-                        b"reboot\x00", b"r" * 4096, b"systemctl reboot"):
+                        b"reboot\x00", b"r" * 4096, b"systemctl reboot", b"update\n", b"UPDATE", b"updates", b"update reboot"):
             with self.subTest(content=content[:20]):
                 self.h.clear()
                 self.h.request(content)
@@ -244,7 +251,8 @@ class HelperTests(HarnessCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(self.h.power_calls(), [])
                 self.assertFalse((self.h.request_dir / "request").exists())
-                self.assert_logged("refused a request: it does not hold exactly reboot or poweroff")
+                self.assert_logged("refused a request: it does not hold exactly reboot, poweroff or update")
+                self.assertNotIn(["systemctl", "start", "--no-block", UPDATE_UNIT], self.h.calls())
                 # The content is never logged.
                 for message in self.h.messages():
                     self.assertNotIn("halt", message)
@@ -636,8 +644,12 @@ class InstallerTests(HarnessCase):
             self.assertIn("packaging/host-power", text)
         info = self.read("usr/local/share/sdr-doa-host-power/install-info")
         for line in ("CONSOLE_UID=10001\n", "CONSOLE_GID=10001\n", "HELPER_DRY_RUN=0\n", "REQUEST_DIR=/run/sdr-doa-host-power\n",
-                     "TAKEN_DIR=/run/sdr-doa-host-power.taken\n"):
+                     "TAKEN_DIR=/run/sdr-doa-host-power.taken\n", "UPDATE=0\n"):
             self.assertIn(line, info)
+        # No sdr-doa-docker install here: no Update button.
+        self.assertNotIn("update-helper", tmpfiles)
+        self.assertIn("Update:  off: no sdr-doa-docker install in /opt/sdr-doa-ground-console", result.stdout)
+        self.assertIn("skipped (--root): rm -f /run/sdr-doa-host-power/update-helper", result.stdout)
         self.assertIn("skipped (--root): systemd-tmpfiles --create /etc/tmpfiles.d/sdr-doa-host-power.conf", result.stdout)
         self.assertIn("skipped (--root): systemctl daemon-reload", result.stdout)
         self.assertIn("skipped (--root): systemctl enable --now sdr-doa-host-power.path", result.stdout)
@@ -652,9 +664,14 @@ class InstallerTests(HarnessCase):
                               "nft ", "firewall-cmd", "chmod 0777", "chmod 777", "setcap", "0777 ", "0666 "):
                 self.assertNotIn(forbidden, text, f"{path.name} names {forbidden}")
         # The helper calls systemctl only inside $(...): with the request's word
-        # (reboot or poweroff, checked above it) and for a status read.
+        # (reboot or poweroff, checked above it), to start its own update unit
+        # and for status reads.
         helper = HELPER.read_text(encoding="utf-8")
-        self.assertEqual(set(re.findall(r"\$\(systemctl ([^\s)]+)", helper)), {'"$word"', "is-active"})
+        self.assertEqual(set(re.findall(r"\$\(systemctl ([^\s)]+)", helper)), {'"$word"', "is-active", "start"})
+        self.assertEqual(re.findall(r"\$\(systemctl start ([^)]*)\)", helper), ['--no-block "$UPDATE_UNIT" 2>&1'])
+        self.assertIn("UPDATE_UNIT=sdr-doa-host-power-update.service\n", helper)
+        # The one other program it runs is the installed sdr-doa-docker, with fixed arguments.
+        self.assertEqual(re.findall(r'^\s*"\$script" ([^<\n]*)', helper, re.M), ['update --dir "$dir" --yes '])
         self.assertEqual([line for line in helper.splitlines() if re.match(r"\s*(?:if !?\s*)?systemctl\b", line)], [])
 
     def test_a_docker_install_without_the_mount_is_named(self):
@@ -822,7 +839,8 @@ class InstallerTests(HarnessCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("would run: systemctl disable --now sdr-doa-host-power.path", result.stdout)
         self.assertIn("would remove /etc/tmpfiles.d/sdr-doa-host-power.conf", result.stdout)
-        self.assertIn("would remove /run/sdr-doa-host-power/helper, a waiting request and /run/sdr-doa-host-power.taken", result.stdout)
+        self.assertIn("would remove /run/sdr-doa-host-power/helper, /run/sdr-doa-host-power/update-helper, the update state,"
+                      " a waiting request and /run/sdr-doa-host-power.taken", result.stdout)
         self.assertEqual(self.files(), before)
 
     def test_the_installed_helper_takes_a_request(self):
@@ -840,6 +858,359 @@ class InstallerTests(HarnessCase):
 # ---------------------------------------------------------------------------
 
 
+FAKE_DOCKER = r"""#!/bin/sh
+# A fake sdr-doa-docker: records its arguments, prints the scenario's lines
+# (one may wait until the console's update-status shows a phase) and exits.
+printf '%s\n' "$*" >>"$FAKE_DOCKER_CALLS"
+while IFS= read -r line; do
+  case $line in
+    "WAIT "*)
+      want=${line#WAIT }
+      i=0
+      while ! grep -q "^$want\$" "$FAKE_STATUS" 2>/dev/null && [ $i -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+      grep -q "^$want\$" "$FAKE_STATUS" 2>/dev/null && printf '%s\n' "$want" >>"$FAKE_DOCKER_SEEN"
+      ;;
+    "ERR "*) printf '%s\n' "${line#ERR }" >&2 ;;
+    *) printf '%s\n' "$line" ;;
+  esac
+done <"$FAKE_DOCKER_OUT"
+exit "$(cat "$FAKE_DOCKER_RC")"
+"""
+
+T = "2026-11-16T03:00:00Z update:"
+NEW = "3.23.0 (abc123def456)"
+OLD = "3.22.0 (0123456789ab)"
+
+
+class UpdateTests(HarnessCase):
+    def setUp(self) -> None:
+        super().setUp()
+        (self.h.request_dir / "update-helper").write_text("sdr-doa-docker", encoding="utf-8")
+        bindir = self.h.base / "bin"
+        bindir.mkdir(mode=0o755)
+        self.script = bindir / "sdr-doa-docker"
+        self.script.write_text(FAKE_DOCKER, encoding="utf-8")
+        self.script.chmod(0o755)
+        self.dir = "/opt/sdr-doa-ground-console"
+        self.out = self.h.base / "docker-out.txt"
+        self.rc = self.h.base / "docker-rc.txt"
+        self.docker_calls = self.h.base / "docker-calls.txt"
+        self.seen = self.h.base / "docker-seen.txt"
+
+    def status_path(self) -> Path:
+        return self.h.request_dir / "update-status"
+
+    def status(self) -> Dict[str, str]:
+        text = self.status_path().read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("# sdr-doa-host-power: "), text)
+        return dict(line.split("=", 1) for line in text.splitlines()[1:])
+
+    def run_update(self, lines: List[str], rc: int = 0, *options: str, now: int = 1_700_000_100) -> subprocess.CompletedProcess:
+        self.out.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+        self.rc.write_text(f"{rc}\n", encoding="utf-8")
+        return self.h.run(HELPER, *options, "run-update", str(self.script), self.dir, now=now,
+                          FAKE_DOCKER_OUT=str(self.out), FAKE_DOCKER_RC=str(self.rc), FAKE_DOCKER_CALLS=str(self.docker_calls),
+                          FAKE_DOCKER_SEEN=str(self.seen), FAKE_STATUS=str(self.status_path()))
+
+    def docker_runs(self) -> List[str]:
+        return self.docker_calls.read_text(encoding="utf-8").splitlines() if self.docker_calls.exists() else []
+
+    # --- handle: the console's request ------------------------------------
+
+    def test_update_starts_its_unit_and_tells_the_console(self):
+        self.h.request(b"update")
+        result = self.h.handle(now=1_700_000_000)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(["systemctl", "start", "--no-block", UPDATE_UNIT], self.h.calls())
+        self.assertEqual(self.h.power_calls(), [])
+        self.assertFalse((self.h.request_dir / "request").exists())
+        self.assert_logged(f"starting {UPDATE_UNIT} (requested by the console)")
+        status = self.status()
+        self.assertEqual((status["STATE"], status["QUEUED"], status["STARTED"]), ("queued", "1700000000", ""))
+        info = self.status_path().lstat()
+        self.assertTrue(stat.S_ISREG(info.st_mode))
+        self.assertEqual(stat.S_IMODE(info.st_mode), 0o644)
+        self.assertEqual(info.st_nlink, 1, "root's temporary name is gone")
+        self.assertEqual(list(self.h.taken_dir.iterdir()), [])
+        # An update is no power action: no repeat window, no state of its own.
+        self.assertFalse((self.h.state_dir / "last").exists())
+        self.h.request(b"reboot")
+        self.assertEqual(self.h.handle(now=1_700_000_001).returncode, 0)
+        self.assertEqual(self.h.power_calls(), [["systemctl", "reboot"]])
+
+    def test_update_without_the_marker_or_while_one_runs_is_refused(self):
+        (self.h.request_dir / "update-helper").unlink()
+        self.h.request(b"update")
+        self.assertEqual(self.h.handle().returncode, 0)
+        self.assert_logged("refused update: the update is not set up here")
+        self.assertFalse(self.status_path().exists())
+        (self.h.request_dir / "update-helper").write_text("sdr-doa-docker", encoding="utf-8")
+        for active in ("active", "activating"):
+            with self.subTest(active=active):
+                self.h.clear()
+                self.h.set(update_active=active)
+                self.h.request(b"update")
+                self.assertEqual(self.h.handle().returncode, 0)
+                self.assert_logged("refused update: an update is running")
+                self.assertFalse((self.h.request_dir / "request").exists())
+        self.assertNotIn("start", [call[1] for call in self.h.calls() if call[0] == "systemctl"])
+        self.assertFalse(self.status_path().exists(), "the running update's state is left alone")
+
+    def test_a_unit_that_cannot_start_is_a_failed_update(self):
+        self.h.set(start_rc=5)
+        self.h.request(b"update")
+        result = self.h.handle(now=1_700_000_000)
+        self.assertEqual(result.returncode, 1)
+        status = self.status()
+        self.assertEqual(status["STATE"], "failed")
+        self.assertEqual(status["MESSAGE"], f"cannot start {UPDATE_UNIT}: Failed to start {UPDATE_UNIT}: Unit {UPDATE_UNIT} not found.")
+        self.assertFalse((self.h.request_dir / "request").exists())
+
+    def test_the_state_never_follows_what_the_console_put_at_its_name(self):
+        """The console's user owns the directory; root's write lands only in root's file."""
+        target = self.h.base / "precious"
+        target.write_text("keep", encoding="utf-8")
+        self.status_path().symlink_to(target)
+        self.h.request(b"update")
+        self.assertEqual(self.h.handle().returncode, 0)
+        self.assertEqual(target.read_text(encoding="utf-8"), "keep")
+        self.assertFalse(self.status_path().is_symlink())
+        self.assertEqual(self.status()["STATE"], "queued")
+        # A directory there is left as it is, and nothing is written inside it.
+        self.status_path().unlink()
+        self.status_path().mkdir()
+        self.h.request(b"update")
+        self.assertEqual(self.h.handle().returncode, 0)
+        self.assertEqual(list(self.status_path().iterdir()), [])
+        self.assert_logged("update-status is a directory; the console sees no update state")
+        self.assertIn(["systemctl", "start", "--no-block", UPDATE_UNIT], self.h.calls())
+
+    # --- run-update: the update unit ---------------------------------------
+
+    def test_a_successful_update(self):
+        result = self.run_update([
+            f"{T} pulling ghcr.io/sanadunt/sdr-doa-ground-console:3",
+            f"{T} new image: {NEW}, running {OLD}",
+            f"{T} starting {NEW}",
+            f"{T} OK: console runs {NEW} and is healthy",
+            f"{T} removed the image before the previous one (fedcba987654)",
+        ])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.docker_runs(), [f"update --dir {self.dir} --yes"])
+        status = self.status()
+        self.assertEqual({key: status[key] for key in ("STATE", "PHASE", "TO", "MESSAGE", "STARTED", "FINISHED")}, {
+            "STATE": "ok", "PHASE": "", "TO": "3.23.0", "MESSAGE": "", "STARTED": "1700000100", "FINISHED": "1700000100",
+        })
+        self.assert_logged(f"running: {self.script} update --dir {self.dir} --yes (requested by the console)")
+        self.assert_logged(f"sdr-doa-docker: {T} pulling ghcr.io/sanadunt/sdr-doa-ground-console:3")
+        self.assert_logged("update finished: ok (3.23.0)")
+
+    def test_each_phase_reaches_the_console_while_the_update_runs(self):
+        result = self.run_update([
+            f"{T} pulling ghcr.io/sanadunt/sdr-doa-ground-console:3",
+            "WAIT PHASE=pulling",
+            f"{T} new image: {NEW}, running {OLD}",
+            "WAIT PHASE=starting",
+            f"{T} FAILED: {NEW}: unhealthy",
+            f"{T} rolling back to {OLD}; auto-update skips abc123def456 until a different image is published",
+            "WAIT PHASE=rolling_back",
+            f"{T} rolled back: console runs {OLD} again",
+        ], rc=1)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.seen.read_text(encoding="utf-8").splitlines(), ["PHASE=pulling", "PHASE=starting", "PHASE=rolling_back"])
+        status = self.status()
+        self.assertEqual((status["STATE"], status["TO"], status["MESSAGE"]), ("rolled_back", "3.23.0", f"FAILED: {NEW}: unhealthy"))
+
+    def test_outcomes(self):
+        cases = (
+            ([f"{T} pulling x:3", f"{T} up to date: console runs {OLD}"], 0, "up_to_date", ""),
+            ([f"{T} pulling x:3", f"{T} FAILED: pull of x:3: dial tcp: lookup ghcr.io: no such host"], 1, "failed",
+             "FAILED: pull of x:3: dial tcp: lookup ghcr.io: no such host"),
+            (["ERR sdr-doa-docker: error: another sdr-doa-docker run holds /opt/x/.lock"], 1, "failed",
+             "error: another sdr-doa-docker run holds /opt/x/.lock"),
+            ([f"{T} pulling x:3", f"{T} new image: {NEW}, running {OLD}", f"{T} FAILED: {NEW}: exited",
+              f"{T} rolling back to {OLD}", f"{T} rollback FAILED: unhealthy; see logs"], 1, "failed", f"FAILED: {NEW}: exited"),
+            ([f"{T} pulling x:3", f"{T} skipped: 3.21.0 (aaa) is older than {OLD}"], 0, "not_updated",
+             f"skipped: 3.21.0 (aaa) is older than {OLD}"),
+            ([], 3, "failed", "sdr-doa-docker exited with 3"),
+            ([f"{T} pulling x:3", "bell\x07 and " + "x" * 400], 2, "failed", "bell and " + "x" * 291),
+        )
+        for lines, rc, state, message in cases:
+            with self.subTest(state=state, message=message[:30]):
+                self.run_update(lines, rc)
+                status = self.status()
+                self.assertEqual((status["STATE"], status["MESSAGE"]), (state, message))
+
+    def test_a_script_root_does_not_own_alone_is_never_run(self):
+        for mode in (0o775, 0o757):
+            with self.subTest(mode=oct(mode)):
+                self.script.chmod(mode)
+                result = self.run_update([f"{T} OK: console runs {NEW} and is healthy"])
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(self.docker_runs(), [])
+                status = self.status()
+                self.assertEqual(status["STATE"], "failed")
+                self.assertIn("not owned by root or writable by another user; nothing was run", status["MESSAGE"])
+        self.script.chmod(0o755)
+        self.script.parent.chmod(0o777)
+        self.addCleanup(self.script.parent.chmod, 0o755)
+        self.assertEqual(self.run_update([]).returncode, 1)
+        self.assertEqual(self.docker_runs(), [])
+        self.script.parent.chmod(0o755)
+        missing = self.h.run(HELPER, "run-update", str(self.h.base / "bin/none"), self.dir)
+        self.assertEqual(missing.returncode, 1)
+        for args in (("sdr-doa-docker", self.dir), (str(self.script), "relative")):
+            result = self.h.run(HELPER, "run-update", *args)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("absolute paths", result.stderr)
+
+    def test_dry_run_runs_nothing(self):
+        result = self.run_update([f"{T} OK: console runs {NEW} and is healthy"], 0, "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.docker_runs(), [])
+        self.assertEqual(self.status()["STATE"], "dry_run")
+        self.assert_logged(f"dry-run: would run: {self.script} update --dir {self.dir} --yes")
+
+    def test_run_update_needs_root_and_its_arguments(self):
+        self.h.set(uid=os.geteuid() + 1)
+        result = self.h.run(HELPER, "run-update", str(self.script), self.dir)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("run as root", result.stderr)
+        self.h.set(uid=os.geteuid())
+        for args in (("run-update",), ("run-update", str(self.script)), ("run-update", "a", "b", "c"), ("handle", "x")):
+            self.assertEqual(self.h.run(HELPER, *args).returncode, 64, args)
+
+    def test_status_names_the_update(self):
+        self.run_update([f"{T} FAILED: pull of x:3: timeout"], 1)
+        result = self.h.run(HELPER, "status")
+        self.assertIn("update: set up (the console shows Update in Configuration)\n", result.stdout)
+        self.assertIn("last update: failed (FAILED: pull of x:3: timeout)\n", result.stdout)
+
+
+class UpdateInstallerTests(HarnessCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.root = self.h.base / "root"
+        self.root.mkdir()
+        self.root.chmod(0o755)
+        compose = self.root / "opt/sdr-doa-ground-console/compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text((ROOT / "docker-compose.ghcr.yml").read_text(encoding="utf-8"), encoding="utf-8")
+        self.script = self.root / "usr/local/bin/sdr-doa-docker"
+        self.script.parent.mkdir(parents=True)
+        for directory in (self.root / "usr", self.root / "usr/local", self.script.parent):
+            directory.chmod(0o755)
+        self.script.write_text(FAKE_DOCKER, encoding="utf-8")
+        self.script.chmod(0o755)
+
+    def install(self, *args: str) -> subprocess.CompletedProcess:
+        return self.h.run(INSTALL, "--root", str(self.root), *args)
+
+    def read(self, name: str) -> str:
+        return (self.root / name).read_text(encoding="utf-8")
+
+    def test_the_update_unit_and_marker_where_the_docker_install_is(self):
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        unit = self.read(f"etc/systemd/system/{UPDATE_UNIT}")
+        self.assertIn("ExecStart=/usr/local/sbin/sdr-doa-host-power run-update /usr/local/bin/sdr-doa-docker"
+                      " /opt/sdr-doa-ground-console\n", unit)
+        for line in ("Type=oneshot\n", "TimeoutStartSec=45min\n", "SyslogIdentifier=sdr-doa-host-power\n", "NoNewPrivileges=yes\n"):
+            self.assertIn(line, unit)
+        self.assertNotIn("[Install]", unit, "started by the helper only")
+        self.assertNotRegex(unit, r"@[A-Z_]+@")
+        self.assertEqual(stat.S_IMODE((self.root / f"etc/systemd/system/{UPDATE_UNIT}").stat().st_mode), 0o644)
+        tmpfiles = self.read("etc/tmpfiles.d/sdr-doa-host-power.conf")
+        self.assertIn("\nf /run/sdr-doa-host-power/update-helper 0644 root root - sdr-doa-docker\n", tmpfiles)
+        info = self.read("usr/local/share/sdr-doa-host-power/install-info")
+        for line in ("UPDATE=1\n", "UPDATE_SCRIPT=/usr/local/bin/sdr-doa-docker\n", "DOCKER_DIR=/opt/sdr-doa-ground-console\n"):
+            self.assertIn(line, info)
+        self.assertIn("Update:  on: /usr/local/bin/sdr-doa-docker update --dir /opt/sdr-doa-ground-console", result.stdout)
+        self.assertIn("Update in Configuration", result.stdout)
+        self.assertNotIn("update-helper", result.stdout)
+        # A helper in dry-run mode: the update unit only logs too.
+        self.assertEqual(self.install("--helper-dry-run").returncode, 0)
+        self.assertIn("sdr-doa-host-power --dry-run run-update ", self.read(f"etc/systemd/system/{UPDATE_UNIT}"))
+
+    def test_the_update_stays_off_without_a_script_root_alone_may_run(self):
+        self.script.chmod(0o777)
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("the Update button stays off", result.stderr)
+        self.assertFalse((self.root / f"etc/systemd/system/{UPDATE_UNIT}").exists())
+        self.assertNotIn("update-helper", self.read("etc/tmpfiles.d/sdr-doa-host-power.conf"))
+        self.script.chmod(0o755)
+        self.script.parent.chmod(0o777)
+        self.addCleanup(self.script.parent.chmod, 0o755)
+        self.assertIn("the Update button stays off", self.install().stderr)
+        self.script.parent.chmod(0o755)
+        self.script.unlink()
+        result = self.install()
+        self.assertIn("/usr/local/bin/sdr-doa-docker is missing", result.stderr)
+        self.assertIn("Update:  off: /usr/local/bin/sdr-doa-docker is missing", result.stdout)
+        other = self.root / "srv/bin/docker-update"
+        other.parent.mkdir(parents=True)
+        for directory in (self.root / "srv", other.parent):
+            directory.chmod(0o755)
+        other.write_text(FAKE_DOCKER, encoding="utf-8")
+        other.chmod(0o755)
+        self.assertEqual(self.install("--update-script", "/srv/bin/docker-update").returncode, 0)
+        self.assertIn(" run-update /srv/bin/docker-update /opt/sdr-doa-ground-console\n", self.read(f"etc/systemd/system/{UPDATE_UNIT}"))
+        self.assertIn("must be an absolute path", self.install("--update-script", "sdr-doa-docker").stderr)
+
+    def test_no_update_removes_an_earlier_unit_and_marker(self):
+        self.assertEqual(self.install().returncode, 0)
+        self.assertTrue((self.root / f"etc/systemd/system/{UPDATE_UNIT}").exists())
+        result = self.install("--no-update")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / f"etc/systemd/system/{UPDATE_UNIT}").exists())
+        self.assertIn("Update:  off (--no-update)", result.stdout)
+        self.assertIn("skipped (--root): rm -f /run/sdr-doa-host-power/update-helper", result.stdout)
+        self.assertIn("UPDATE=0\n", self.read("usr/local/share/sdr-doa-host-power/install-info"))
+
+    def test_a_foreign_update_unit_is_never_replaced(self):
+        unit = self.root / f"etc/systemd/system/{UPDATE_UNIT}"
+        unit.parent.mkdir(parents=True)
+        unit.write_text("[Service]\nExecStart=/bin/true\n", encoding="utf-8")
+        result = self.install()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"{UPDATE_UNIT} exists and was not written by this installer", result.stderr)
+
+    def test_the_installed_unit_runs_the_installed_script(self):
+        self.assertEqual(self.install().returncode, 0)
+        unit = self.read(f"etc/systemd/system/{UPDATE_UNIT}")
+        command = next(line for line in unit.splitlines() if line.startswith("ExecStart=")).split("=", 1)[1].split()
+        self.assertEqual(command[:2], ["/usr/local/sbin/sdr-doa-host-power", "run-update"])
+        out = self.h.base / "out.txt"
+        out.write_text(f"{T} up to date: console runs {OLD}\n", encoding="utf-8")
+        rc = self.h.base / "rc.txt"
+        rc.write_text("0\n", encoding="utf-8")
+        calls = self.h.base / "calls.txt"
+        # The unit's paths are the host's; here they are below the test root.
+        result = self.h.run(self.root / command[0].lstrip("/"), "run-update", str(self.root / command[2].lstrip("/")), command[3],
+                            FAKE_DOCKER_OUT=str(out), FAKE_DOCKER_RC=str(rc), FAKE_DOCKER_CALLS=str(calls),
+                            FAKE_DOCKER_SEEN=str(self.h.base / "seen"), FAKE_STATUS=str(self.h.request_dir / "update-status"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls.read_text(encoding="utf-8"), "update --dir /opt/sdr-doa-ground-console --yes\n")
+        self.assertIn("STATE=up_to_date\n", (self.h.request_dir / "update-status").read_text(encoding="utf-8"))
+
+    def test_uninstall_removes_the_update_too(self):
+        self.assertEqual(self.install().returncode, 0)
+        request_dir = self.root / "run/sdr-doa-host-power"
+        request_dir.mkdir(parents=True)
+        for name in ("helper", "update-helper", "update-status"):
+            (request_dir / name).write_text("x", encoding="utf-8")
+        script = self.root / "usr/local/share/sdr-doa-host-power/uninstall.sh"
+        result = self.h.run(script, "--root", str(self.root))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / f"etc/systemd/system/{UPDATE_UNIT}").exists())
+        self.assertEqual(list(request_dir.iterdir()), [])
+        self.assertTrue(self.script.exists(), "sdr-doa-docker is not the kit's")
+
+
+# ---------------------------------------------------------------------------
+
+
 class ScriptLintTests(unittest.TestCase):
     def test_shell_syntax_and_modes(self):
         shells = [shell for shell in ("sh", "bash", "dash") if shutil.which(shell)]
@@ -850,7 +1221,8 @@ class ScriptLintTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, f"{shell} -n {script.name}: {result.stderr}")
             self.assertTrue(os.access(script, os.X_OK), f"{script.name} is not executable")
             self.assertTrue(script.read_text(encoding="utf-8").startswith("#!/bin/sh\n"), script.name)
-        for name in ("sdr-doa-host-power.path.in", "sdr-doa-host-power.service.in", "sdr-doa-host-power.tmpfiles.in", "README.md"):
+        for name in ("sdr-doa-host-power.path.in", "sdr-doa-host-power.service.in", "sdr-doa-host-power.tmpfiles.in",
+                     "sdr-doa-host-power-update.service.in", "README.md"):
             self.assertFalse(os.access(KIT / name, os.X_OK), name)
 
     def test_shellcheck(self):

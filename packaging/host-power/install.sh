@@ -1,9 +1,11 @@
 #!/bin/sh
 # Installs the host side of the SDR-DoA Ground Console's Restart and Shutdown
-# buttons (packaging/host-power) on the groundstation, outside Docker: the
-# request directory /run/sdr-doa-host-power for the console's user (a
-# tmpfiles.d rule), sdr-doa-host-power.path and the root oneshot
-# sdr-doa-host-power.service that runs systemctl reboot or poweroff.
+# buttons and its Update button (packaging/host-power) on the groundstation,
+# outside Docker: the request directory /run/sdr-doa-host-power for the
+# console's user (a tmpfiles.d rule), sdr-doa-host-power.path, the root
+# oneshot sdr-doa-host-power.service that runs systemctl reboot or poweroff,
+# and, where it finds the console's sdr-doa-docker install,
+# sdr-doa-host-power-update.service that runs sdr-doa-docker update.
 #
 #   sudo sh install.sh                        # console in Docker (uid 10001)
 #   sudo sh install.sh --console-user rdf     # native console of the user rdf
@@ -11,7 +13,8 @@
 #   sudo sh install.sh --helper-dry-run       # the helper only logs what it would run
 #
 # It opens no port and gives the console no socket, D-Bus, polkit or sudo
-# rule: the console can only write one word into one directory. Re-running it
+# rule: the console can only write one word into one directory and read the
+# update state the helper links there. Re-running it
 # upgrades in place. Run it from packaging/host-power in the repository or in
 # the console release.
 set -eu
@@ -24,6 +27,7 @@ CONSOLE_USER=10001
 UNIT_DIR=/etc/systemd/system
 TMPFILES_DIR=/etc/tmpfiles.d
 TMPFILES_NAME=sdr-doa-host-power.conf
+UPDATE_UNIT=sdr-doa-host-power-update.service
 # Fixed: the console's --host-power-dir default and the Docker bind mount.
 REQUEST_DIR=/run/sdr-doa-host-power
 # Root's own: the helper takes a request here with a hard link before it checks or reads it.
@@ -31,6 +35,12 @@ TAKEN_DIR=/run/sdr-doa-host-power.taken
 STATE_DIR=/var/lib/sdr-doa-host-power
 # The sdr-doa-docker install whose compose.yml must mount REQUEST_DIR.
 DOCKER_DIR=/opt/sdr-doa-ground-console
+# The sdr-doa-docker the Update button runs (root-only, as installed by its install).
+UPDATE_SCRIPT=/usr/local/bin/sdr-doa-docker
+# on: set up the update where the Docker install is found; off: --no-update.
+UPDATE_OPT=on
+UPDATE=0
+UPDATE_NOTE=
 ROOT=
 REAL_ROOT=
 DRY_RUN=0
@@ -52,8 +62,15 @@ Usage: sudo sh install.sh [options]
   --helper-dry-run     the helper logs the action without running it
   --helper-live        the helper runs systemctl reboot or poweroff (the default)
   --docker-dir DIR     the sdr-doa-docker install whose compose.yml must mount
-                       /run/sdr-doa-host-power (default /opt/sdr-doa-ground-console;
-                       checked only when DIR/compose.yml exists)
+                       /run/sdr-doa-host-power and which the Update button
+                       updates (default /opt/sdr-doa-ground-console; used only
+                       when DIR/compose.yml exists)
+  --update-script PATH the sdr-doa-docker the Update button runs as root
+                       (default /usr/local/bin/sdr-doa-docker; it and its
+                       directories must be owned by root and writable by no
+                       one else)
+  --no-update          no Update button (it is also off without DIR/compose.yml,
+                       as for a native console: sdr-doa-console update)
   --root DIR           install below DIR (test staging): no systemctl
   --dry-run            show the files and commands, change nothing; exits 1
                        when the install would stop
@@ -130,6 +147,8 @@ parse_args() {
       --helper-dry-run) HELPER_MODE=1 ;;
       --helper-live) HELPER_MODE=0 ;;
       --docker-dir) need_value "$@"; DOCKER_DIR=$2; shift ;;
+      --update-script) need_value "$@"; UPDATE_SCRIPT=$2; shift ;;
+      --no-update) UPDATE_OPT=off ;;
       --root) need_value "$@"; ROOT=$2; shift ;;
       --dry-run) DRY_RUN=1 ;;
       -h | --help) usage; exit 0 ;;
@@ -143,6 +162,7 @@ parse_args() {
   check_path --prefix "$PREFIX"
   [ "$PREFIX" != / ] || die "--prefix must not be /"
   check_path --docker-dir "$DOCKER_DIR"
+  check_path --update-script "$UPDATE_SCRIPT"
   if [ -n "$ROOT" ]; then
     check_path --root "$ROOT"
   fi
@@ -151,7 +171,7 @@ parse_args() {
 locate_source() {
   HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
   for file in sdr-doa-host-power uninstall.sh README.md sdr-doa-host-power.service.in sdr-doa-host-power.path.in \
-    sdr-doa-host-power.tmpfiles.in; do
+    sdr-doa-host-power.tmpfiles.in sdr-doa-host-power-update.service.in; do
     [ -f "$HERE/$file" ] || die "$HERE/$file is missing; run install.sh from packaging/host-power"
   done
   VERSION=unknown
@@ -222,7 +242,7 @@ root_only_chain() {
 # replace or run as root.
 check_targets() {
   for target in "$1$PREFIX/sbin/sdr-doa-host-power" "$1$UNIT_DIR/sdr-doa-host-power.service" \
-    "$1$UNIT_DIR/sdr-doa-host-power.path" "$1$TMPFILES_DIR/$TMPFILES_NAME"; do
+    "$1$UNIT_DIR/sdr-doa-host-power.path" "$1$UNIT_DIR/$UPDATE_UNIT" "$1$TMPFILES_DIR/$TMPFILES_NAME"; do
     check_ours "$target"
   done
   if [ -e "$1$SHARE_DIR" ] && [ ! -f "$1$SHARE_DIR/install-info" ] && [ -n "$(ls -A "$1$SHARE_DIR")" ]; then
@@ -240,7 +260,8 @@ check_targets() {
 # render TEMPLATE TARGET: replace the @NAME@ placeholders.
 render() {
   sed -e "s|@SBIN_DIR@|$PREFIX/sbin|g" -e "s|@SHARE_DIR@|$SHARE_DIR|g" -e "s|@REQUEST_DIR@|$REQUEST_DIR|g" \
-    -e "s|@CONSOLE_UID@|$CONSOLE_UID|g" -e "s|@CONSOLE_GID@|$CONSOLE_GID|g" -e "s|@HANDLE@|$HANDLE|g" "$1" >"$2.new"
+    -e "s|@CONSOLE_UID@|$CONSOLE_UID|g" -e "s|@CONSOLE_GID@|$CONSOLE_GID|g" -e "s|@HANDLE@|$HANDLE|g" \
+    -e "s|@RUN_UPDATE@|$RUN_UPDATE|g" -e "s|@UPDATE_SCRIPT@|$UPDATE_SCRIPT|g" -e "s|@DOCKER_DIR@|$DOCKER_DIR|g" "$1" >"$2.new"
   if grep -q '@[A-Z_]*@' "$2.new"; then
     rm -f "$2.new"
     die "unreplaced placeholders in $1"
@@ -280,6 +301,34 @@ check_docker_mount() {
   warn "$DOCKER_DIR/compose.yml does not mount $REQUEST_DIR, so the console shows \"Request directory not mounted\": sdr-doa-docker update rewrites neither compose.yml nor the installed script. Install the script of this release first, then run its install once, while no recording runs: sudo install -m 0755 $script /usr/local/bin/sdr-doa-docker && sudo /usr/local/bin/sdr-doa-docker install --dir $DOCKER_DIR (it keeps .env, the channel, the sdr-doa-data volume and the update timer, and recreates the container)"
 }
 
+# decide_update TREE: the Update button is set up where the console's
+# sdr-doa-docker install is (DOCKER_DIR/compose.yml) and root may run its
+# script: owned by root and writable by no one else, with every directory
+# above it.
+decide_update() {
+  UPDATE=0
+  if [ "$UPDATE_OPT" = off ]; then
+    UPDATE_NOTE="off (--no-update)"
+    return 0
+  fi
+  if [ ! -f "$1$DOCKER_DIR/compose.yml" ]; then
+    UPDATE_NOTE="off: no sdr-doa-docker install in $DOCKER_DIR (a native console updates with sdr-doa-console update)"
+    return 0
+  fi
+  if [ ! -f "$1$UPDATE_SCRIPT" ]; then
+    UPDATE_NOTE="off: $UPDATE_SCRIPT is missing (install it with sdr-doa-docker install, or give --update-script)"
+    warn "the Update button stays off: $UPDATE_SCRIPT is missing"
+    return 0
+  fi
+  if ! root_only "$1$UPDATE_SCRIPT" || ! root_only_chain "$(dirname -- "$1$UPDATE_SCRIPT")"; then
+    UPDATE_NOTE="off: $UPDATE_SCRIPT is not root's alone"
+    warn "the Update button stays off: $UPDATE_SCRIPT or a directory above it is not owned by root or is writable by another user, so root must not run it"
+    return 0
+  fi
+  UPDATE=1
+  UPDATE_NOTE="on: $UPDATE_SCRIPT update --dir $DOCKER_DIR"
+}
+
 # Read-only checks of the running system; --root (test staging) skips them.
 preflight() {
   if [ -n "$ROOT" ] && [ "$DRY_RUN" = 0 ]; then
@@ -310,6 +359,16 @@ install_files() {
   render "$HERE/sdr-doa-host-power.service.in" "$units/sdr-doa-host-power.service"
   render "$HERE/sdr-doa-host-power.path.in" "$units/sdr-doa-host-power.path"
   render "$HERE/sdr-doa-host-power.tmpfiles.in" "$tmpfiles/$TMPFILES_NAME"
+  if [ "$UPDATE" = 1 ]; then
+    render "$HERE/sdr-doa-host-power-update.service.in" "$units/$UPDATE_UNIT"
+    # The marker that shows the console's Update button.
+    {
+      printf '# The Update button: sdr-doa-docker install found in %s\n' "$DOCKER_DIR"
+      printf 'f %s/update-helper 0644 root root - sdr-doa-docker\n' "$REQUEST_DIR"
+    } >>"$tmpfiles/$TMPFILES_NAME"
+  elif [ -f "$units/$UPDATE_UNIT" ]; then
+    rm -f "$units/$UPDATE_UNIT"
+  fi
 
   cat >"$share/install-info" <<EOF
 # sdr-doa-host-power install record (packaging/host-power), read by uninstall.sh and install.sh
@@ -323,6 +382,9 @@ CONSOLE_USER=$CONSOLE_USER
 CONSOLE_UID=$CONSOLE_UID
 CONSOLE_GID=$CONSOLE_GID
 HELPER_DRY_RUN=$HELPER_DRY_RUN
+UPDATE=$UPDATE
+UPDATE_SCRIPT=$UPDATE_SCRIPT
+DOCKER_DIR=$DOCKER_DIR
 VERSION=$VERSION
 EOF
   chmod 0644 "$share/install-info"
@@ -336,12 +398,18 @@ enable_units() {
   # Creates the request directory now, or gives a directory Docker created
   # for the bind mount (root-owned) to the console's user, with the marker.
   act systemd-tmpfiles --create "$TMPFILES_DIR/$TMPFILES_NAME"
+  if [ "$UPDATE" = 0 ]; then
+    # tmpfiles never removes a marker an earlier install created.
+    act rm -f "$REQUEST_DIR/update-helper"
+  fi
   act systemctl daemon-reload
   act systemctl enable --now sdr-doa-host-power.path
 }
 
 show_dry_run() {
-  for file in "$TMPFILES_DIR/$TMPFILES_NAME" "$UNIT_DIR/sdr-doa-host-power.path" "$UNIT_DIR/sdr-doa-host-power.service"; do
+  for file in "$TMPFILES_DIR/$TMPFILES_NAME" "$UNIT_DIR/sdr-doa-host-power.path" "$UNIT_DIR/sdr-doa-host-power.service" \
+    "$UNIT_DIR/$UPDATE_UNIT"; do
+    [ -f "$ROOT$file" ] || continue
     say "--- $file"
     cat "$ROOT$file"
   done
@@ -370,10 +438,13 @@ main() {
   HELPER_DRY_RUN=${HELPER_DRY_RUN:-0}
   if [ "$HELPER_DRY_RUN" = 1 ]; then
     HANDLE="--dry-run handle"
+    RUN_UPDATE="--dry-run run-update"
   else
     HANDLE=handle
+    RUN_UPDATE=run-update
   fi
   preflight
+  decide_update "$info_root"
 
   if [ "$DRY_RUN" = 1 ]; then
     say "Dry run of the sdr-doa-host-power install into $PREFIX (console user $CONSOLE_USER, uid $CONSOLE_UID)"
@@ -399,8 +470,13 @@ main() {
     mode="live: it runs systemctl reboot or poweroff"
   fi
   say "Helper: $mode"
+  say "Update:  $UPDATE_NOTE"
   say "Requests: $REQUEST_DIR/request, written by the console (uid $CONSOLE_UID)"
-  say "Console: reload the console page; Restart and Shutdown are in its top bar"
+  if [ "$UPDATE" = 1 ]; then
+    say "Console: reload the console page; Restart and Shutdown are in its top bar, Update in Configuration"
+  else
+    say "Console: reload the console page; Restart and Shutdown are in its top bar"
+  fi
   say "Status:  sudo sdr-doa-host-power status    Journal: journalctl -t sdr-doa-host-power"
   say "Remove:  sudo sh $SHARE_DIR/uninstall.sh [--purge]"
 }

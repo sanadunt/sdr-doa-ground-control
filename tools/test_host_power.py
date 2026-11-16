@@ -356,13 +356,14 @@ class FrontendContractTests(unittest.TestCase):
     def test_the_frontend_copies_match(self) -> None:
         self.assertEqual(tuple(_ts_list("HOST_POWER_ACTIONS")), hp.ACTIONS)
         self.assertEqual(tuple(_ts_list("HOST_POWER_REASONS")), hp.REASONS)
-        self.assertEqual(set(_ts_list("HOST_POWER_ERROR_CODES")), set(hp.ERROR_CODES_HTTP))
+        self.assertEqual(set(_ts_list("HOST_POWER_ERROR_CODES")), set(hp.POWER_ERROR_CODES))
+        self.assertEqual(set(hp.POWER_ERROR_CODES) | set(hp.UPDATE_ERROR_CODES), set(hp.ERROR_CODES_HTTP))
         self.assertIn(f"HOST_POWER_ROUTE = '{hp.ROUTE}'", HOST_POWER_TS)
 
     def test_every_code_and_reason_has_en_and_id_text(self) -> None:
         for lang_marker in ("en", "id"):
             keys = _dictionary_keys(lang_marker)
-            for code in hp.ERROR_CODES_HTTP:
+            for code in hp.POWER_ERROR_CODES:
                 self.assertIn(f"power.error.{code}", keys, lang_marker)
             for reason in hp.REASONS:
                 self.assertIn(f"power.reason.{reason}", keys, lang_marker)
