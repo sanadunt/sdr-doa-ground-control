@@ -37,8 +37,8 @@ describe('scan rows', () => {
     expect(recentredRange({ startHz: 100e6, stopHz: 200e6 }, 0, -125e6, 8192)).toEqual({ startHz: -50e6, stopHz: 50e6 });
     expect(recentredRange({ startHz: 100e6, stopHz: 200e6 }, -100e6, -125e6, 8192)).toEqual({ startHz: -124e6, stopHz: -24e6 });
     // A span too wide for the resolution has no valid range.
-    expect(recentredRange({ startHz: 100e6, stopHz: 2_000e6 }, 433e6, 0, 8192)).toBeNull();
+    expect(recentredRange({ startHz: 100e6, stopHz: 2_200e6 }, 1_200e6, 0, 8192)).toBeNull();
     expect(recentredRange({ startHz: 100e6, stopHz: 200e6 }, Number.NaN, 0, 8192)).toBeNull();
-    expect(sweepRangeLimits(-125e6, 4096)).toEqual({ minHz: -124e6, maxHz: 7_125e6, maxSpanHz: 2_441_406_250 });
+    expect(sweepRangeLimits(-125e6, 4096)).toEqual({ minHz: -124e6, maxHz: 7_125e6, maxSpanHz: 4_000_000_000 });
   });
 });

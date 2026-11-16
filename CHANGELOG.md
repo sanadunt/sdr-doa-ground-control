@@ -2,6 +2,14 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.24.0
+
+Pindai lebar Receiver kini menutup seluruh pita RDF-SDR sekali jalan (permintaan pemilik 2026-11-16). Tidak ada yang dihapus.
+
+- **Rentang bawaan 30–1700 MHz.** Pindaian baru (tab Spektrum Receiver dan mode Spektrum di dock Dashboard) mulai di 30 MHz dan berakhir di 1700 MHz, bukan lagi 100–1000 MHz. 30 MHz dipilih karena KrakenSDR RDF-SDR bekerja mulai 24 MHz dan menetapkan jarak antena VHF-nya sendiri mulai 30 MHz; 50 MHz akan melewatkan pita 30–50 MHz. Rentang yang sudah disimpan di Receiver tetap dipakai: ketik Awal 30 dan Akhir 1700 sekali bila rentang lama (misalnya 100–1000) masih tersimpan.
+- **Lebar rentang sampai 2000 MHz di resolusi halus.** Batas lebar pindai naik dari 1220 MHz menjadi 2000 MHz di 2,44 kHz (FFT 8192), dan dari 2441 MHz menjadi 4000 MHz di 4,88 kHz (FFT 4096). Batas itu hanya menjaga memori worker pemindai (sekitar 28 byte per bin, kini paling banyak 819 200 bin, sekitar 23 MB); grafik, waterfall, sesi tersimpan dan jejak di Rekaman tetap 2048 titik, jadi ukurannya tidak berubah. Batas frekuensi RadioSpectrum (1–7250 MHz) tidak berubah.
+- Pesan Receiver untuk rentang yang terlalu lebar kini menyebut batasnya dalam MHz.
+
 ## 3.23.1
 
 Halaman selain Dashboard dirapikan (audit UI 008, permintaan pemilik 2026-11-16: "pada berantakan semua"). Tidak ada fungsi yang berubah atau dihapus.

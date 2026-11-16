@@ -7,7 +7,7 @@ function storage(values: Record<string, string>) {
 }
 
 const DEFAULTS = {
-  startHz: 100_000_000, stopHz: 1_000_000_000, fftSize: 8192, resolutionHz: 20_000_000 / 8192, lnaDb: 40, vgaDb: 20, amp: false,
+  startHz: 30_000_000, stopHz: 1_700_000_000, fftSize: 8192, resolutionHz: 20_000_000 / 8192, lnaDb: 40, vgaDb: 20, amp: false,
   displayMinDb: -60, displayMaxDb: 0, shiftHz: 0,
 };
 

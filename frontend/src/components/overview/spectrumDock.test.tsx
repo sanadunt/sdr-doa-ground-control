@@ -656,7 +656,7 @@ describe('Spectrum dock Atur scan rows', () => {
   });
 
   it('does not offer a resolution the range does not fit', () => {
-    const wide = settings({ dockMode: 'sweep', sweep: { ...ready, startHz: 100_000_000, stopHz: 2_000_000_000, fftSize: 4096 } });
+    const wide = settings({ dockMode: 'sweep', sweep: { ...ready, startHz: 100_000_000, stopHz: 2_200_000_000, fftSize: 4096 } });
     expect(wide).toMatch(/<button type="button" aria-pressed="true">4\.88 kHz<\/button><button type="button" aria-pressed="false" disabled="">2\.44 kHz<\/button>/);
   });
 
