@@ -50,7 +50,12 @@ The console keeps a narrow boundary:
   the page) writes a request file holding ``reboot`` or ``poweroff`` into
   ``--host-power-dir`` (``host_power.py``) for a host helper
   (``packaging/host-power``) to act on. It needs the same-origin loopback
-  Origin; the console itself runs nothing on the host.
+  Origin; the console itself runs nothing on the host;
+* ``POST /api/host/update`` (Configuration's Update, confirmed in the page)
+  writes ``update`` into the same directory; the host helper runs the host's
+  ``sdr-doa-docker update`` and keeps a state file there that ``GET
+  /api/host/update`` reads back, with the newest release on GitHub
+  (``console_release.py``).
 
 The console listens on loopback only. The one exception is the opt-in LAN
 view (``lan_access`` in ``--config-path``, changed by an admin through
@@ -148,6 +153,7 @@ from sdr_doa_collector import (
     normalize_data_out_hosts,
     not_over_lora_fetcher,
 )
+import console_release as cr
 import host_power as hp
 import receiver_archive as ra
 import receiver_audio_mirror as ram
@@ -3579,6 +3585,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(self.console_server.lan_access_view())
             return
+        if parsed.path == hp.UPDATE_ROUTE:
+            self._get_host_update(parsed)
+            return
         if parsed.path == rm.ROUTE:
             self._get_mirror()
             return
@@ -4114,6 +4123,67 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.log_message("host power: %s requested", action)
         self._send_json({"ok": True, **result}, HTTPStatus.ACCEPTED)
 
+    def _get_host_update(self, parsed: Any) -> None:
+        """GET /api/host/update: the installed and newest versions, the helper and the last update.
+
+        This console's own pages only (the Receiver's read rule). ``refresh=1``
+        reads GitHub again when the last read is 15 s old.
+        """
+        if not self._local_read_is_allowed():
+            self._send_host_power_error(hp.ORIGIN_REJECTED, f"{hp.UPDATE_ROUTE} is read from this console's own pages only")
+            return
+        refresh = parse_qs(parsed.query).get("refresh", [""])[0] == "1"
+        server = self.console_server
+        installed = server.version
+        latest = cr.latest_view(server.release_checker, installed, refresh)
+        helper = server.host_power.update_status()
+        self._send_json({
+            "ok": True,
+            "installed": installed,
+            "latest": latest,
+            "update_available": latest["state"] == "ok" and cr.newer(str(latest["version"]), installed),
+            "helper": {"available": helper["available"], "reason": helper["reason"]},
+            "status": helper["status"],
+            "now_ms": int(time.time() * 1000),
+        })
+
+    def _post_host_update(self) -> None:
+        """POST /api/host/update: update this console's Docker install, confirmed in the page.
+
+        In order: the same-origin loopback Origin (403, before the body is
+        read), the length (413), the body (400), the request directory and
+        the update helper (503), an update on its way (409), a request the
+        host has not taken (409), the write (500). The LAN view never gets
+        here (lan.write_allowed).
+        """
+        if not self._same_origin_loopback_request():
+            self._discard_body(hp.UPDATE_MAX_BODY_BYTES)
+            self._send_host_power_error(hp.ORIGIN_REJECTED, f"{hp.UPDATE_ROUTE} requires a same-origin loopback request")
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            length = -1
+        if length > hp.UPDATE_MAX_BODY_BYTES:
+            self.close_connection = True
+            self._discard_body(lan.MAX_DISCARDED_BODY_BYTES)
+            self._send_host_power_error(hp.HOST_UPDATE_TOO_LARGE, f"the body must be at most {hp.UPDATE_MAX_BODY_BYTES} bytes")
+            return
+        if length < 1:
+            self._send_host_power_error(hp.HOST_UPDATE_INVALID, "the body must be JSON with a Content-Length")
+            return
+        raw = self.rfile.read(length)
+        try:
+            if len(raw) != length:
+                raise hp.HostPowerRejected(hp.HOST_UPDATE_INVALID, "the body is incomplete")
+            hp.decode_update_request(raw)
+            result = self.console_server.host_power.request_update()
+        except hp.HostPowerRejected as exc:
+            self._send_host_power_error(exc.code, exc.message, **exc.extra)
+            return
+        self.log_message("host update: requested (installed %s)", self.console_server.version)
+        self._send_json({"ok": True, **result}, HTTPStatus.ACCEPTED)
+
     def _post_lan_access(self) -> None:
         """POST /api/lan-access: change the LAN view and open, move or close it at once.
 
@@ -4163,6 +4233,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == hp.ROUTE:
             self._post_host_power()
+            return
+        if parsed.path == hp.UPDATE_ROUTE:
+            self._post_host_update()
             return
         if parsed.path == dv.WHEP_ROUTE:
             self._post_drone_whep()
@@ -5145,6 +5218,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
         host_power_dir: Optional[Path] = None,
         drone_service_factory: Optional[Callable[..., Any]] = None,
         drone_video: Optional[dv.VideoService] = None,
+        release_checker: Optional[cr.ReleaseChecker] = None,
     ):
         self.frontend_dir = Path(frontend_dir).resolve() if frontend_dir is not None else None
         if not _is_loopback_bind(address[0]):
@@ -5271,6 +5345,9 @@ class GroundConsoleServer(ThreadingHTTPServer):
         # Restart and Shutdown of this host (host_power.py): request files for
         # the host helper; None (the default here, and in tests) turns them off.
         self.host_power = hp.HostPower(host_power_dir)
+        # The newest release on GitHub for Configuration's Update card; None
+        # (the default here, and in tests) never reads the network; main() passes one.
+        self.release_checker = release_checker
         # The SIYI drone: a subscribe-only link to its remote's broker
         # (drone_discovery.DroneService) and the host video service
         # (drone_video.py). Without a factory (the default here, and in
@@ -6175,6 +6252,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         host_power_dir=Path(args.host_power_dir).expanduser() if args.host_power_dir else None,
         drone_service_factory=DroneService,
         drone_video=dv.VideoService(dv.DEFAULT_API, dv.DEFAULT_WHEP_UPSTREAM),
+        release_checker=cr.ReleaseChecker(CONSOLE_VERSION),
     )
     print(f"Ground Console: http://{args.bind}:{args.port}/", flush=True)
     print(f"Version: {server.version}", flush=True)
@@ -6184,6 +6262,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"Offline map: {server.map_files.maps_dir} ({'installed, %d MB' % round(offline_map.size / 1048576) if offline_map else 'not installed'})", flush=True)
     power = server.host_power.status()
     print(f"Host power: {args.host_power_dir or 'off'} ({'ready' if power['available'] else power['reason']})", flush=True)
+    update = server.host_power.update_status()
+    print(f"Update button: {'ready' if update['available'] else update['reason']}", flush=True)
     drone = server.get_config()["drone"]
     print(
         f"Drone: {'off' if not drone['enabled'] else drone['host'] + ':' + str(drone['port'])} "

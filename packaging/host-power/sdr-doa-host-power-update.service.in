@@ -1,0 +1,25 @@
+# Written by the sdr-doa-host-power installer (packaging/host-power/install.sh).
+# Runs one update of the SDR-DoA Ground Console's Docker install when the
+# console's Configuration page asks; sdr-doa-host-power handle starts it.
+# It runs apart from the console's container, which the update restarts.
+# Journal: journalctl -t sdr-doa-host-power
+[Unit]
+Description=SDR-DoA Ground Console update (requested from Configuration)
+Documentation=file://@SHARE_DIR@/README.md
+After=docker.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+# Root: sdr-doa-docker update pulls the channel image, starts it, waits for its
+# health check and puts the previous image back when it fails.
+ExecStart=@SBIN_DIR@/sdr-doa-host-power @RUN_UPDATE@ @UPDATE_SCRIPT@ @DOCKER_DIR@
+SyslogIdentifier=sdr-doa-host-power
+# A pull over a slow Wi-Fi took 15 minutes; the health wait adds up to 3.
+TimeoutStartSec=45min
+NoNewPrivileges=yes
+PrivateTmp=yes
+# Do not add ProtectSystem=, ReadWritePaths= or other options that bind-mount
+# /run/sdr-doa-host-power or /run/sdr-doa-host-power.taken: the update state
+# is hard-linked from one to the other, which fails across mounts.

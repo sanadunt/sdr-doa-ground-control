@@ -1,15 +1,18 @@
 #!/bin/sh
 # sdr-doa-host-power: restarts or shuts down the groundstation host when the
-# SDR-DoA Ground Console asks (its top bar's Restart and Shutdown buttons).
+# SDR-DoA Ground Console asks (its top bar's Restart and Shutdown buttons),
+# and updates the console's Docker install (its Configuration page's Update).
 # Part of packaging/host-power.
 #
 #   sdr-doa-host-power handle            take the request (sdr-doa-host-power.service)
+#   sdr-doa-host-power run-update SCRIPT DIR
+#                                        run SCRIPT update --dir DIR --yes (sdr-doa-host-power-update.service)
 #   sdr-doa-host-power status            the request directory, a waiting request, the last action
 #   sdr-doa-host-power --dry-run handle  log what it would run, run nothing
 #
 # The console, in Docker as uid 10001 or natively as the operator, writes
-# REQUEST_DIR/request holding exactly reboot or poweroff; sdr-doa-host-power.path
-# starts sdr-doa-host-power.service when it appears. The console's user owns
+# REQUEST_DIR/request holding exactly reboot, poweroff or update;
+# sdr-doa-host-power.path starts sdr-doa-host-power.service when it appears. The console's user owns
 # REQUEST_DIR and can replace the request at any moment, so handle never opens
 # it there: a hard link takes it into TAKEN_DIR, which is root's alone, and
 # the checks, the read (at most 9 bytes of a regular file, without waiting)
@@ -17,6 +20,13 @@
 # request outlives the boot it was made in. A request within REPEAT_WINDOW seconds of the last
 # action of the same boot is refused. It runs systemctl reboot or systemctl
 # poweroff and nothing else.
+# update is taken the same way, only where the installer found the
+# console's sdr-doa-docker install (the update-helper marker): handle starts
+# sdr-doa-host-power-update.service, which runs the installed sdr-doa-docker
+# update apart from the console's container (it restarts that container) and
+# keeps REQUEST_DIR/update-status current for the console's page. That file is
+# root's: written in TAKEN_DIR and hard-linked into place, so the console's
+# user can delete it but never change it or point root's write elsewhere.
 # Every message goes to the journal with the tag sdr-doa-host-power.
 set -u
 umask 022
@@ -33,14 +43,26 @@ ROOT_UID=${HOST_POWER_ROOT_UID:-0}
 # Seconds after an action in which another request of the same boot is refused.
 REPEAT_WINDOW=60
 DRY_RUN=0
+# The update: its unit, the marker the installer puts next to helper, and the
+# state the console reads.
+UPDATE_UNIT=sdr-doa-host-power-update.service
+UPDATE_MARKER=update-helper
+STATUS_NAME=update-status
+# The line run-update adds after the update's own output, with its exit code.
+EXIT_MARK='sdr-doa-host-power: exit '
 
 usage() {
   cat <<'EOF'
 Usage: sdr-doa-host-power [--dry-run] COMMAND
 
   handle   take the console's request: delete it, then run systemctl reboot
-           or systemctl poweroff (root; sdr-doa-host-power.service runs it)
-  status   the request directory, a waiting request and the last action
+           or systemctl poweroff, or start the update (root;
+           sdr-doa-host-power.service runs it)
+  run-update SCRIPT DIR
+           run SCRIPT update --dir DIR --yes and keep the console's
+           update-status current (root; sdr-doa-host-power-update.service)
+  status   the request directory, a waiting request, the last action and
+           the last update
 
   --dry-run  log the action instead of running it
 EOF
@@ -135,10 +157,9 @@ need_root() {
   fi
 }
 
-# take_dir: TAKEN_DIR exists (made 0700 here when missing), is a directory
-# owned by root that no one else can write, and holds no request of a run
-# that was killed in between.
-take_dir() {
+# own_dir: TAKEN_DIR exists (made 0700 here when missing) and is a directory
+# owned by root that no one else can write.
+own_dir() {
   if [ ! -e "$TAKEN_DIR" ] && [ ! -L "$TAKEN_DIR" ]; then
     mkdir -m 0700 -- "$TAKEN_DIR" 2>/dev/null || return 1
   fi
@@ -146,7 +167,12 @@ take_dir() {
   # shellcheck disable=SC2012 # ls -n is the portable way to read owner and mode
   ls -nd -- "$TAKEN_DIR" | awk -v root="$ROOT_UID" '
     NR == 1 { ok = $3 == root && substr($1, 6, 1) != "w" && substr($1, 9, 1) != "w" }
-    END { exit ok ? 0 : 1 }' || return 1
+    END { exit ok ? 0 : 1 }'
+}
+
+# take_dir: own_dir, holding no request of a run that was killed in between.
+take_dir() {
+  own_dir || return 1
   rm -rf -- "$TAKEN_DIR/request" 2>/dev/null
   [ ! -e "$TAKEN_DIR/request" ] && [ ! -L "$TAKEN_DIR/request" ]
 }
@@ -162,6 +188,247 @@ read_taken() {
 # discard: remove the request in the console's directory, whatever it is.
 discard() {
   rm -rf -- "$request" 2>/dev/null
+}
+
+# clean TEXT: one line of printable ASCII, at most 300 characters.
+clean() {
+  printf '%s' "$1" | LC_ALL=C tr -cd '[:print:]' | cut -c1-300
+}
+
+# save_status: the update's state for the console's page, from the ST_*
+# variables. Written in root's TAKEN_DIR and hard-linked over
+# REQUEST_DIR/update-status: link(2) never follows a symlink the console's
+# user put at that name, and the file stays root's (0644), so the console
+# can read or delete it but not change it.
+save_status() {
+  if ! own_dir; then
+    log err "cannot prepare $TAKEN_DIR; the console sees no update state"
+    return 1
+  fi
+  ss_tmp=$TAKEN_DIR/$STATUS_NAME.$$
+  ss_target=$REQUEST_DIR/$STATUS_NAME
+  rm -f -- "$ss_tmp"
+  if ! {
+    printf '# sdr-doa-host-power: the console update it ran (packaging/host-power)\n'
+    printf 'STATE=%s\nPHASE=%s\nQUEUED=%s\nSTARTED=%s\nFINISHED=%s\nTO=%s\nMESSAGE=%s\n' \
+      "$ST_STATE" "$ST_PHASE" "$ST_QUEUED" "$ST_STARTED" "$ST_FINISHED" "$ST_TO" "$ST_MESSAGE"
+  } >"$ss_tmp" 2>/dev/null; then
+    rm -f -- "$ss_tmp"
+    log err "cannot write $ss_tmp; the console sees no update state"
+    return 1
+  fi
+  chmod 0644 "$ss_tmp" 2>/dev/null
+  if [ -d "$ss_target" ] && [ ! -L "$ss_target" ]; then
+    rm -f -- "$ss_tmp"
+    log warning "$ss_target is a directory; the console sees no update state"
+    return 1
+  fi
+  if ! ln -f -- "$ss_tmp" "$ss_target" 2>/dev/null; then
+    rm -f -- "$ss_tmp"
+    log warning "cannot link $ss_target; the console sees no update state"
+    return 1
+  fi
+  rm -f -- "$ss_tmp"
+  return 0
+}
+
+status_reset() {
+  ST_STATE=$1
+  ST_PHASE=
+  ST_QUEUED=
+  ST_STARTED=
+  ST_FINISHED=
+  ST_TO=
+  ST_MESSAGE=
+}
+
+# start_update: the update runs in its own unit, apart from this one's 30 s
+# and from the console's container, which it restarts.
+start_update() {
+  if [ ! -f "$REQUEST_DIR/$UPDATE_MARKER" ]; then
+    log warning "refused update: the update is not set up here (install.sh found no sdr-doa-docker install)"
+    return 0
+  fi
+  su_state=$(systemctl is-active "$UPDATE_UNIT" 2>/dev/null || true)
+  case $su_state in
+    active | activating | reloading | deactivating)
+      log warning "refused update: an update is running"
+      return 0
+      ;;
+  esac
+  status_reset queued
+  ST_QUEUED=$(now)
+  save_status || true
+  log notice "starting $UPDATE_UNIT (requested by the console)"
+  if ! su_out=$(systemctl start --no-block "$UPDATE_UNIT" 2>&1); then
+    su_why=$(clean "$(printf '%s' "$su_out" | tail -n 1)")
+    status_reset failed
+    ST_FINISHED=$(now)
+    ST_MESSAGE="cannot start $UPDATE_UNIT: $su_why"
+    save_status || true
+    log err "$ST_MESSAGE"
+    return 1
+  fi
+  return 0
+}
+
+# root_only PATH: owned by root and writable by no one else (a sticky
+# directory such as /tmp aside); the installer applies the same rule.
+root_only() {
+  # shellcheck disable=SC2012 # ls -n is the portable way to read owner and mode
+  ls -nd -- "$1" 2>/dev/null | awk -v root="$ROOT_UID" '
+    NR == 1 {
+      mode = $1
+      if ($3 != 0 && $3 != root) exit 1
+      if (substr(mode, 1, 1) == "l") exit 1
+      writable = substr(mode, 6, 1) == "w" || substr(mode, 9, 1) == "w"
+      if (writable && !(substr(mode, 1, 1) == "d" && substr(mode, 10, 1) ~ /[tT]/)) exit 1
+      ok = 1
+    }
+    END { exit ok ? 0 : 1 }'
+}
+
+# root_only_file PATH: the program root runs, and every directory above it.
+root_only_file() {
+  rf_path=$1
+  if [ ! -f "$rf_path" ] || ! root_only "$rf_path"; then
+    return 1
+  fi
+  rf_dir=$(cd -P -- "$(dirname -- "$rf_path")" 2>/dev/null && pwd -P) || return 1
+  while :; do
+    root_only "$rf_dir" || return 1
+    [ "$rf_dir" != / ] || return 0
+    rf_dir=$(dirname -- "$rf_dir")
+  done
+}
+
+# version_of "3.23.0 (abc123), running ...": the version, or nothing.
+version_of() {
+  vo=${1%% *}
+  case $vo in
+    [0-9]*.[0-9]*.[0-9]*)
+      case $vo in *[!0-9A-Za-z.-]*) vo= ;; esac
+      ;;
+    *) vo= ;;
+  esac
+  printf '%s' "$vo"
+}
+
+# follow_update: reads the update's output line by line (and the exit line
+# run-update adds), logs it and turns it into the console's update-status.
+follow_update() {
+  fu_ok=0
+  fu_current=0
+  fu_rolled=0
+  fu_rc=1
+  fu_last=
+  while IFS= read -r fu_line; do
+    case $fu_line in
+      "$EXIT_MARK"*)
+        fu_rc=${fu_line#"$EXIT_MARK"}
+        is_uint "$fu_rc" || fu_rc=1
+        continue
+        ;;
+    esac
+    fu_text=$(clean "$fu_line")
+    [ -n "$fu_text" ] || continue
+    log info "sdr-doa-docker: $fu_text"
+    # Its log lines read "<time> update: <step>"; its errors "sdr-doa-docker: <text>".
+    case $fu_text in
+      *" update: "*) fu_msg=${fu_text#*" update: "} ;;
+      "sdr-doa-docker: "*) fu_msg=${fu_text#sdr-doa-docker: } ;;
+      *) fu_msg=$fu_text ;;
+    esac
+    fu_last=$fu_msg
+    case $fu_msg in
+      "pulling "*) fu_phase=pulling ;;
+      "new image: "*)
+        ST_TO=$(version_of "${fu_msg#new image: }")
+        fu_phase=starting
+        ;;
+      "starting "*) fu_phase=starting ;;
+      "rolling back"* | "going back to the previous image"*) fu_phase=rolling_back ;;
+      *) fu_phase=$ST_PHASE ;;
+    esac
+    case $fu_msg in
+      "OK: "*) fu_ok=1 ;;
+      "up to date"*) fu_current=1 ;;
+      "rolled back: "*) fu_rolled=1 ;;
+    esac
+    case $fu_msg in
+      *FAILED*) [ -n "$ST_MESSAGE" ] || ST_MESSAGE=$fu_msg ;;
+      "not updated: "* | "skipped: "* | "deferred: "*) ST_MESSAGE=$fu_msg ;;
+    esac
+    if [ "$fu_phase" != "$ST_PHASE" ]; then
+      ST_PHASE=$fu_phase
+      save_status || true
+    fi
+  done
+  ST_PHASE=
+  ST_FINISHED=$(now)
+  if [ "$fu_rc" = 0 ]; then
+    if [ "$fu_ok" = 1 ]; then
+      ST_STATE=ok
+      ST_MESSAGE=
+    elif [ "$fu_current" = 1 ]; then
+      ST_STATE=up_to_date
+      ST_MESSAGE=
+    else
+      ST_STATE=not_updated
+      ST_MESSAGE=${ST_MESSAGE:-$fu_last}
+    fi
+  else
+    if [ "$fu_rolled" = 1 ]; then ST_STATE=rolled_back; else ST_STATE=failed; fi
+    ST_MESSAGE=${ST_MESSAGE:-${fu_last:-sdr-doa-docker exited with $fu_rc}}
+  fi
+  save_status || true
+  log notice "update finished: $ST_STATE${ST_TO:+ ($ST_TO)}${ST_MESSAGE:+: $ST_MESSAGE}"
+  [ "$fu_rc" = 0 ]
+}
+
+# cmd_run_update SCRIPT DIR: sdr-doa-host-power-update.service.
+cmd_run_update() {
+  script=$1
+  dir=$2
+  status_reset running
+  ST_PHASE=preparing
+  ST_STARTED=$(now)
+  case $script in /*) ;; *) script= ;; esac
+  case $dir in /*) ;; *) dir= ;; esac
+  if [ -z "$script" ] || [ -z "$dir" ]; then
+    status_reset failed
+    ST_FINISHED=$(now)
+    ST_MESSAGE="run-update needs the absolute paths of sdr-doa-docker and its install directory"
+    save_status || true
+    die "$ST_MESSAGE"
+  fi
+  save_status || true
+  # Root runs it: a script someone else can change could run anything as root.
+  if ! root_only_file "$script"; then
+    ST_STATE=failed
+    ST_PHASE=
+    ST_FINISHED=$(now)
+    ST_MESSAGE="$script is missing, not owned by root or writable by another user; nothing was run"
+    save_status || true
+    log err "$ST_MESSAGE"
+    return 1
+  fi
+  if [ "$DRY_RUN" = 1 ]; then
+    ST_STATE=dry_run
+    ST_PHASE=
+    ST_FINISHED=$(now)
+    save_status || true
+    log notice "dry-run: would run: $script update --dir $dir --yes (requested by the console)"
+    return 0
+  fi
+  log notice "running: $script update --dir $dir --yes (requested by the console)"
+  # --yes: the operator confirmed in the page, which warned about a running
+  # Receiver recording or scan. The output goes to follow_update with the
+  # exit code as its last line.
+  {
+    "$script" update --dir "$dir" --yes </dev/null 2>&1
+    printf '%s%s\n' "$EXIT_MARK" "$?"
+  } | follow_update
 }
 
 cmd_handle() {
@@ -218,16 +485,20 @@ cmd_handle() {
   fi
   if [ -z "$refused" ]; then
     case $word in
-      reboot | poweroff)
-        [ "$size" = "${#word}" ] || refused="it does not hold exactly reboot or poweroff"
+      reboot | poweroff | update)
+        [ "$size" = "${#word}" ] || refused="it does not hold exactly reboot, poweroff or update"
         ;;
-      *) refused="it does not hold exactly reboot or poweroff" ;;
+      *) refused="it does not hold exactly reboot, poweroff or update" ;;
     esac
   fi
   if [ -n "$refused" ]; then
-    # The content is not logged: only the two words are ever acted on.
+    # The content is not logged: only the three words are ever acted on.
     log warning "refused a request: $refused"
     return 0
+  fi
+  if [ "$word" = update ]; then
+    start_update
+    return
   fi
 
   at=$(now)
@@ -285,6 +556,16 @@ cmd_status() {
   else
     printf 'last action: none\n'
   fi
+  if [ -x "$REQUEST_DIR" ] && [ -f "$REQUEST_DIR/$UPDATE_MARKER" ]; then
+    printf 'update: set up (the console shows Update in Configuration)\n'
+  elif [ -x "$REQUEST_DIR" ]; then
+    printf 'update: not set up (install.sh found no sdr-doa-docker install)\n'
+  fi
+  if [ -x "$REQUEST_DIR" ] && [ -f "$REQUEST_DIR/$STATUS_NAME" ]; then
+    su_line=$(sed -n 's/^STATE=\([a-z_]*\)$/\1/p' "$REQUEST_DIR/$STATUS_NAME" | head -n 1)
+    su_msg=$(sed -n 's/^MESSAGE=//p' "$REQUEST_DIR/$STATUS_NAME" | head -n 1)
+    printf 'last update: %s%s\n' "${su_line:-unknown}" "${su_msg:+ ($su_msg)}"
+  fi
   if command -v systemctl >/dev/null 2>&1; then
     printf 'sdr-doa-host-power.path: %s\n' "$(systemctl is-active sdr-doa-host-power.path 2>/dev/null || true)"
   fi
@@ -305,10 +586,11 @@ main() {
     esac
     shift
   done
-  [ $# -eq 1 ] || { usage >&2; exit 64; }
+  [ $# -ge 1 ] || { usage >&2; exit 64; }
   case $1 in
-    handle) need_root handle; cmd_handle ;;
-    status) cmd_status ;;
+    handle) [ $# -eq 1 ] || { usage >&2; exit 64; }; need_root handle; cmd_handle ;;
+    run-update) [ $# -eq 3 ] || { usage >&2; exit 64; }; need_root run-update; cmd_run_update "$2" "$3" ;;
+    status) [ $# -eq 1 ] || { usage >&2; exit 64; }; cmd_status ;;
     *) die "unknown command $1 (see --help)" ;;
   esac
 }

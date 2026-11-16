@@ -105,6 +105,7 @@ HOST_POWER_FILES = tuple(
         ("sdr-doa-host-power.path.in", False),
         ("sdr-doa-host-power.service.in", False),
         ("sdr-doa-host-power.tmpfiles.in", False),
+        ("sdr-doa-host-power-update.service.in", False),
     )
 )
 # The groundstation's own GPS: a publisher that reads the USB receiver and

@@ -560,6 +560,9 @@ describe('Configuration in the LAN view', () => {
     expect(markup).not.toContain('type="password"');
     expect(markup).not.toContain('id="lan-settings"');
     expect(markup).not.toContain('id="dry-run-settings"');
+    // The groundstation's own page updates the console; a tablet never sees it.
+    expect(markup).not.toContain('id="update-settings"');
+    expect(markup).not.toContain(`>${translate('en', 'update.button')}</button>`);
     expect(markup).not.toContain(`>${translate('en', 'config.reconnect')}</button>`);
     expect(markup).not.toContain('NO TLS');
     // Connection and MQTT fields are locked; the values still show.
@@ -576,7 +579,8 @@ describe('Configuration in the LAN view', () => {
   it('puts the LAN access card under MQTT on the console itself', () => {
     const markup = configuration(false);
     expect(markup.indexOf('id="mqtt-settings"')).toBeLessThan(markup.indexOf('id="lan-settings"'));
-    expect(markup.indexOf('id="lan-settings"')).toBeLessThan(markup.indexOf('id="navigation-settings"'));
+    expect(markup.indexOf('id="lan-settings"')).toBeLessThan(markup.indexOf('id="update-settings"'));
+    expect(markup.indexOf('id="update-settings"')).toBeLessThan(markup.indexOf('id="navigation-settings"'));
     expect(markup).not.toContain('view-only');
     expect(configuration(false, 'id')).toContain(`>${translate('id', 'config.lanTitle')}</h2>`);
   });

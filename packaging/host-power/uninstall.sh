@@ -4,8 +4,8 @@
 #   sudo sh /usr/local/share/sdr-doa-host-power/uninstall.sh            # keep the state
 #   sudo sh /usr/local/share/sdr-doa-host-power/uninstall.sh --purge    # remove it too
 #
-# It removes only the files the installer wrote and the helper marker, so the
-# console's Restart and Shutdown buttons show "not installed" at once. The
+# It removes only the files the installer wrote and the helper markers, so the
+# console's Restart, Shutdown and Update buttons show "not installed" at once. The
 # request directory under /run goes with the next boot.
 set -eu
 
@@ -20,7 +20,7 @@ usage() {
 Usage: sudo sh uninstall.sh [--prefix DIR] [--purge] [--dry-run] [--root DIR]
 
 Stops and disables sdr-doa-host-power.path, then removes the units, the
-tmpfiles.d rule, the helper marker and the program files. The state in
+tmpfiles.d rule, the helper markers, the update state and the program files. The state in
 /var/lib/sdr-doa-host-power stays unless --purge is given.
 EOF
 }
@@ -101,7 +101,7 @@ SHARE_DIR=$PREFIX/share/sdr-doa-host-power
 
 # No request is taken from here on.
 act systemctl disable --now sdr-doa-host-power.path
-for unit in sdr-doa-host-power.path sdr-doa-host-power.service; do
+for unit in sdr-doa-host-power.path sdr-doa-host-power.service sdr-doa-host-power-update.service; do
   remove "$UNIT_DIR/$unit"
 done
 act systemctl daemon-reload
@@ -109,9 +109,9 @@ remove "$TMPFILES_DIR/sdr-doa-host-power.conf"
 # Without the marker the console disables its buttons. The directory may be
 # a running container's bind mount, so it stays until the next boot empties /run.
 if [ "$DRY_RUN" = 1 ]; then
-  printf 'would remove %s/helper, a waiting request and %s\n' "$REQUEST_DIR" "$TAKEN_DIR"
+  printf 'would remove %s/helper, %s/update-helper, the update state, a waiting request and %s\n' "$REQUEST_DIR" "$REQUEST_DIR" "$TAKEN_DIR"
 else
-  rm -f "$ROOT$REQUEST_DIR/helper" "$ROOT$REQUEST_DIR/request"
+  rm -f "$ROOT$REQUEST_DIR/helper" "$ROOT$REQUEST_DIR/update-helper" "$ROOT$REQUEST_DIR/update-status" "$ROOT$REQUEST_DIR/request"
   rm -rf "$ROOT$TAKEN_DIR"
 fi
 remove "$PREFIX/sbin/sdr-doa-host-power"

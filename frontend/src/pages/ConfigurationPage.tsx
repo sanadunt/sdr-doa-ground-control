@@ -37,6 +37,7 @@ import { useI18n } from '../lib/i18n';
 import type { MessageKey } from '../lib/i18n';
 import { Icon } from '../components/ui';
 import { DroneSettingsCard } from '../components/DroneSettingsCard';
+import { ConsoleUpdateCard } from '../components/ConsoleUpdateCard';
 import { Card, FileButton, FormField, KeyValueGrid, Page, PageGrid, PageHeader, PageNotice, PageStack, Segmented, StatusChip, Switch, Tag } from '../components/page';
 import type { KeyValueItem, PageTone } from '../components/page';
 // Styled by pages/configuration.css, which main.tsx loads with the entry (no CSS in lazy chunks).
@@ -65,13 +66,14 @@ const SECTIONS = [
   { id: 'mqtt-settings', label: 'config.nav.mqtt' },
   { id: 'drone-settings', label: 'config.nav.drone' },
   { id: 'lan-settings', label: 'config.nav.lan' },
+  { id: 'update-settings', label: 'config.nav.update' },
   { id: 'navigation-settings', label: 'config.nav.navigation' },
   { id: 'branding-settings', label: 'config.nav.branding' },
   { id: 'dry-run-settings', label: 'config.nav.dryRun' },
 ] as const satisfies ReadonlyArray<{ id: string; label: MessageKey }>;
 type SectionId = typeof SECTIONS[number]['id'];
 // The LAN view shows the settings without its write-only sections.
-const LOCAL_ONLY_SECTIONS: ReadonlySet<SectionId> = new Set(['lan-settings', 'dry-run-settings']);
+const LOCAL_ONLY_SECTIONS: ReadonlySet<SectionId> = new Set(['lan-settings', 'update-settings', 'dry-run-settings']);
 const NAVIGATION_KEYS = new Set(['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown', ' ']);
 
 type Tone = 'good' | 'warn' | 'bad' | 'neutral';
@@ -1101,6 +1103,9 @@ export function ConfigurationPage({
               onAdminLost={() => setAdmin('locked')}
             />
           )}
+
+          {/* The groundstation's own page only: the LAN view never updates the console. */}
+          {readOnly ? null : <ConsoleUpdateCard />}
         </PageStack>
 
         <PageStack span={6}>

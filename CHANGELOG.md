@@ -2,6 +2,15 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.23.0
+
+Tombol **Update** di halaman Konfigurasi: console di groundstation diperbarui tanpa Terminal (permintaan pemilik 2026-11-16). Tidak ada yang dihapus.
+
+- **Kartu Pembaruan console.** Konfigurasi punya kartu baru (bagian "Pembaruan"), hanya di halaman console groundstation sendiri; tablet di LAN view tidak mendapatkannya. Kartu menunjukkan versi terpasang, rilis terbaru di GitHub (stabil, major yang sama dengan kanal `sdr-doa-docker`), kesiapan helper host, dan update terakhir. Groundstation tanpa internet ditulis jelas ("Tanpa internet: GitHub tidak terjangkau").
+- **Update.** Tombol membuka konfirmasi (fokus di Batal, Escape membatalkan) yang memperingatkan bila Receiver sedang merekam atau memindai. Setelah dikirim, kartu mengikuti langkahnya: menunggu helper, menarik versi baru, menjalankan versi baru, menunggu console dimulai ulang, lalu memuat ulang halaman ke versi baru. Bila versi baru gagal health check, versi lama dipasang kembali dan kartu menulis alasannya dari `update.log`.
+- **Cara kerjanya.** Console hanya menulis kata `update` ke direktori permintaan yang sama dengan Mulai ulang dan Matikan (`POST /api/host/update`, hanya dari halaman console sendiri); helper host (`packaging/host-power`) menjalankan `sdr-doa-docker update --yes` di unit root miliknya sendiri, di luar container console, dan menulis statusnya kembali (`GET /api/host/update`). Console tidak mendapat socket Docker atau hak baru apa pun.
+- **Pasang sekali di groundstation.** Tombol aktif setelah `packaging/host-power/install.sh` dari tarball 3.23.0 dijalankan sekali dengan sudo (langkahnya di `packaging/host-power/README.md`, "Update console"). Sebelum itu kartu menulis "Helper host belum punya Update". Console native (`sdr-doa-console`) belum didukung; update tetap dengan `sdr-doa-console update`.
+
 ## 3.22.0
 
 Estimasi posisi lebih cepat tampil dan makin menyempit, dengan riwayat garis sudut di peta, rekaman yang bisa diputar ulang atau diunduh untuk Google Earth, dan simulasi terbang. Tidak ada yang dihapus.

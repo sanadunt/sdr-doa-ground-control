@@ -39,7 +39,7 @@ Konvensi:
 10. Memberi `--base-url` atau `--mqtt-*` ke service, unit, atau entrypoint. Flag itu menimpa pengaturan tersimpan setiap start.
 11. Mengisi `SDR_DOA_UPDATE_API`, `SDR_DOA_UPDATE_REPO`, `SDR_DOA_ROOT_UID` (khusus test), atau mematikan verifikasi TLS.
 12. Mematikan proses dengan `pkill`/`killall`. Hentikan service lewat perintahnya (`sdr-doa-console stop`, `docker compose stop`, `systemctl stop`).
-13. Menekan **Mulai ulang** atau **Matikan** di console, menulis `/run/sdr-doa-host-power/request`, atau menjalankan `sdr-doa-host-power handle` tanpa `--dry-run`: itu memulai ulang atau mematikan groundstation. Uji hanya dengan `--helper-dry-run` (5.5); klik sungguhan hanya oleh manusia.
+13. Menekan **Mulai ulang** atau **Matikan** di console, menulis `/run/sdr-doa-host-power/request`, atau menjalankan `sdr-doa-host-power handle` tanpa `--dry-run`: itu memulai ulang atau mematikan groundstation. Uji hanya dengan `--helper-dry-run` (5.5); klik sungguhan hanya oleh manusia. **Update** di Konfigurasi (5.5, P6) memulai ulang console: tekan hanya dengan izin manusia, sama seperti `sdr-doa-docker update`.
 
 ### 1.2 Berhenti dan tanya manusia bila
 
@@ -725,6 +725,15 @@ sudo sh packaging/host-power/install.sh --helper-live
 
 **Periksa**: `Helper: live: it runs systemctl reboot or poweroff`. Install ulang tanpa `--helper-*` mempertahankan mode terakhir. Klik sungguhan hanya oleh manusia (aturan 1.1.13); setelah PC menyala lagi, `journalctl -t sdr-doa-host-power -b -1 -n 5 --no-pager` menampilkan `running: systemctl reboot (requested by the console)`.
 
+**P6. Tombol Update di Konfigurasi (Jalur A, sejak `v3.23.0`).** Keputusan pemilik 2026-11-16: console Docker diperbarui dari kartu **Pembaruan console** di halaman Konfigurasi, tanpa Terminal. `install.sh` 3.23.0 atau lebih baru memasangnya sendiri bila `/opt/sdr-doa-ground-console/compose.yml` (`--docker-dir`) ada dan `/usr/local/bin/sdr-doa-docker` (`--update-script`) serta setiap direktori di atasnya milik root dan tidak bisa ditulis user lain. Console native (Jalur B) tidak mendapatkannya; kartunya menulis "Bukan instalasi Docker" dan update tetap lewat 7.2. Setelah P2 atau P5 dengan tarball 3.23.0:
+
+```sh
+curl -s --noproxy '*' http://127.0.0.1:8787/api/host/update | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["installed"], d["helper"], d["latest"]["state"], d["latest"]["version"], d["latest"]["code"])'
+ls -l /etc/systemd/system/sdr-doa-host-power-update.service
+```
+
+**Periksa**: keluaran `install.sh` berisi `Update:  on: /usr/local/bin/sdr-doa-docker update --dir /opt/sdr-doa-ground-console`; `helper` `{'available': True, 'reason': None}`; `latest` `ok` dengan versi, atau `error` dengan `OFFLINE` bila groundstation tanpa internet (tombol tetap bisa dipakai, tetapi update gagal saat menarik image dan versi lama tetap jalan). `UPDATE_HELPER_MISSING`: baca baris `Update:` keluaran `install.sh` (tanpa `compose.yml`, script tidak ada, atau script tidak aman). Dengan `--helper-dry-run`, Update hanya mencatat `dry-run: would run: /usr/local/bin/sdr-doa-docker update --dir /opt/sdr-doa-ground-console --yes` di `journalctl -t sdr-doa-host-power` dan kartu menulis "Helper host dalam mode dry-run". Klik sungguhan (live) hanya oleh manusia: halaman menunggu console dimulai ulang lalu memuat ulang dirinya; hasilnya juga di `/opt/sdr-doa-ground-console/update.log`.
+
 ---
 
 ## 6. Membuka UI dari komputer lain
@@ -834,6 +843,8 @@ curl -s --noproxy '*' --max-time 3 -o /dev/null "http://$H:8787/api/health"; ech
 ### 7.1 Console Docker (`sdr-doa-docker`)
 
 Semua perintah untuk instalasi di `/opt` pakai `sudo` (`.env` milik root, 0600). Tambahkan `--dir /opt/sdr-doa-ground-console` agar direktorinya jelas.
+
+Sejak `v3.23.0`, dengan sisi host 5.5 P6, manusia bisa memperbarui dari kartu **Pembaruan console** di halaman Konfigurasi (tombol **Update**); itu menjalankan `sdr-doa-docker update --yes` yang sama di host. Agent memakai langkah di bawah.
 
 **Langkah update manual yang aman untuk agent (tanpa TTY):**
 
@@ -1257,6 +1268,8 @@ Satu blok singkat berisi:
 | UI lama setelah update | Halaman lama masih di browser | Muat ulang halaman. |
 | Mulai ulang dan Matikan nonaktif, "Direktori permintaan belum di-mount" | `host_power.reason` `DIR_NOT_MOUNTED`: console Docker dengan `compose.yml` dari sebelum 3.3.0; `update` tidak menulis ulang file itu dan tidak mengganti script `sdr-doa-docker` yang terpasang | 5.5 P0: pasang script 3.3.0 ke `/usr/local/bin/sdr-doa-docker`, lalu `sudo /usr/local/bin/sdr-doa-docker install --dir /opt/sdr-doa-ground-console` sekali (`.env` dan volume tetap); muat ulang halaman console sesudahnya. |
 | Mulai ulang dan Matikan nonaktif, "Helper host belum dipasang" | `host_power.reason` di `/api/capabilities`: `DIR_MISSING` (native: sisi host belum dipasang), `DIR_NOT_WRITABLE` (sisi host belum dipasang, atau dipasang untuk `--console-user` lain) atau `HELPER_MISSING` (penanda `helper` hilang) | 5.5; `sudo sdr-doa-host-power status`; muat ulang halaman console sesudahnya. |
+| Kartu Pembaruan console: helper "Helper host belum punya Update" (`UPDATE_HELPER_MISSING`) | Sisi host lebih tua dari 3.23.0, atau `install.sh` tidak menemukan `compose.yml`/script yang aman (baris `Update:` keluarannya) | 5.5 P6 dengan tarball 3.23.0 atau lebih baru; muat ulang halaman. |
+| Update di Konfigurasi berakhir "Update gagal" atau "Gagal, versi lama kembali" | Tarik image gagal (tanpa internet) atau image baru tidak sehat; `sdr-doa-docker` mengembalikan versi lama | `journalctl -t sdr-doa-host-power -n 40 --no-pager`, `/opt/sdr-doa-ground-console/update.log`; laporkan ke manusia. |
 | "Mulai ulang diminta" tetapi PC tetap menyala, atau `HOST_POWER_PENDING` | Helper menolak (dalam 60 detik setelah tindakan sebelumnya, mode `--helper-dry-run`, bukan file biasa), `systemctl` gagal, atau unit `.path` tidak jalan | `journalctl -t sdr-doa-host-power -n 20 --no-pager`, `systemctl status sdr-doa-host-power.path`; laporkan ke manusia. |
 
 ---
