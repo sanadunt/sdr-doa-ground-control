@@ -117,6 +117,7 @@ def http_fetch(url: str, user_agent: str) -> bytes:
             data = response.read(MAX_BYTES + 1)
     except urllib.error.HTTPError as exc:
         remaining = exc.headers.get("X-RateLimit-Remaining") if exc.headers is not None else None
+        exc.close()
         if exc.code == 429 or (exc.code == 403 and remaining == "0"):
             raise ReleaseCheckError(RATE_LIMITED, "GitHub's rate limit for this address is used up; try again later") from None
         raise ReleaseCheckError(HTTP_ERROR, f"GitHub answered HTTP {exc.code}") from None
