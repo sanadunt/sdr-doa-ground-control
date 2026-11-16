@@ -1793,8 +1793,8 @@ test('scan constants are the Receiver scan limits', () => {
 	assert.deepEqual([...SWEEP_SOURCES], ['native', 'manual', 'simulated']);
 	assert.deepEqual([...SWEEP_PHASES], ['idle', 'starting', 'active', 'stopping']);
 	assert.deepEqual({ ...SWEEP_SPAN_LIMITS }, { minSpanHz: 1_000_000, sampleRateHz: SWEEP_SAMPLE_RATE_HZ, maxBins: SWEEP_MAX_BINS });
-	assert.equal(sweepMaxSpanHz(8192), 2_000_000_000);
-	assert.equal(sweepMaxSpanHz(4096), 4_000_000_000);
+	assert.equal(sweepMaxSpanHz(8192), 7_250_000_000);
+	assert.equal(sweepMaxSpanHz(4096), 14_500_000_000);
 });
 
 test('inSweepRange accepts exactly the ranges the Receiver can scan', () => {
@@ -1811,15 +1811,15 @@ test('inSweepRange accepts exactly the ranges the Receiver can scan', () => {
 	};
 	for (const [start, stop, fft] of [
 		[100e6, 1000e6, 8192], [1e6, 2e6, 8192], [1e6, 1_220_000_000, 8192], [1e6, 1_230_000_000, 8192], [1e6, 1_230_000_000, 4096],
-		[30e6, 1700e6, 8192], [30e6, 1700e6, 4096], [24e6, 2024e6, 8192], [24e6, 2025e6, 8192], [24e6, 4024e6, 4096], [24e6, 4025e6, 4096],
+		[30e6, 1700e6, 8192], [30e6, 1700e6, 4096], [300e6, 6000e6, 8192], [300e6, 6000e6, 4096], [1e6, 7250e6, 8192], [1e6, 7250e6, 4096],
 		[7_249_000_000, 7_250_000_000, 8192], [7_249_000_000, 7_251_000_000, 8192], [500_000, 2e6, 4096], [2e9, 4.5e9, 4096], [2e9, 6.5e9, 4096],
 	]) {
 		assert.equal(inSweepRange(start, stop, fft), scans(start, stop, fft), `${start}-${stop} @${fft}`);
 	}
 	assert.equal(inSweepRange(30e6, 1700e6, 8192), true, "the RDF-SDR's band in one scan at 2.44 kHz");
-	assert.equal(inSweepRange(24e6, 2024e6, 8192), true, '2000 MHz at 2.44 kHz');
-	assert.equal(inSweepRange(24e6, 2025e6, 8192), false, 'beyond 2000 MHz at 2.44 kHz');
-	assert.equal(inSweepRange(24e6, 4024e6, 4096), true, '4000 MHz at 4.88 kHz');
+	assert.equal(inSweepRange(300e6, 6000e6, 8192), true, '300–6000 MHz at 2.44 kHz');
+	assert.equal(inSweepRange(1e6, 7250e6, 8192), true, 'the whole RadioSpectrum range at 2.44 kHz');
+	assert.ok(SWEEP_MAX_BINS >= Math.ceil((SWEEP_MAX_FREQUENCY_HZ - SWEEP_MIN_FREQUENCY_HZ) / (SWEEP_SAMPLE_RATE_HZ / 8192)), 'covers 1–7250 MHz at 8192');
 	assert.equal(inSweepRange(100e6, 100.5e6, 8192), false, 'narrower than 1 MHz');
 	assert.equal(inSweepRange(200e6, 100e6, 8192), false);
 	assert.equal(inSweepRange(100e6, 1000e6, 2048), false);
@@ -2242,7 +2242,7 @@ test('sweep-config sets the scan settings while no scan runs, in displayed Hz, a
 		['sc2', { startHz: 7_200_000_000 - 125_000_000, stopHz: 7_260_000_000 - 125_000_000 }],
 		['sc3', { stopHz: 300_500_000 }],
 		['sc4', { startHz: -124_500_000 }],
-		['sc5', { startHz: -100_000_000, stopHz: 4_100_000_000 }],
+		['sc5', { startHz: 3_000_000_000, stopHz: 2_000_000_000 }],
 		['sc6', { lnaDb: 20, amp: false }],
 		['sc7', { vgaDb: 63 }],
 	]) {
@@ -2250,18 +2250,15 @@ test('sweep-config sets the scan settings while no scan runs, in displayed Hz, a
 		assert.equal(result(id).code, 'OUT_OF_RANGE', JSON.stringify(payload));
 	}
 	assert.equal(JSON.stringify(app.sweep), before, 'a refused command writes nothing');
-	// 2.44 kHz bins allow at most 2 GHz: the current 200 MHz range fits, a 2.1 GHz one does not.
-	frame.send('console:sweep-config', { id: 'sc8', startHz: 100_000_000, stopHz: 2_200_000_000 });
-	assert.equal(result('sc8').code, 'OK');
-	frame.send('console:sweep-config', { id: 'sc9', fftSize: 8192 });
-	assert.equal(result('sc9').code, 'OUT_OF_RANGE');
-	assert.equal(app.sweep.fftSize, 4096);
-	// The RDF-SDR's whole band in one scan: 30–1700 MHz fits at 2.44 kHz, and so does exactly 2000 MHz.
+	// The RDF-SDR's band and 300–6000 MHz in one scan, at either resolution.
 	frame.send('console:sweep-config', { id: 'sc11', startHz: 30_000_000 - 125_000_000, stopHz: 1_700_000_000 - 125_000_000, fftSize: 8192 });
 	assert.equal(result('sc11').code, 'OK');
-	frame.send('console:sweep-config', { id: 'sc12', startHz: 100_000_000, stopHz: 2_100_000_000 });
-	assert.equal(result('sc12').code, 'OK');
-	assert.deepEqual([app.sweep.startMHz, app.sweep.endMHz, app.sweep.fftSize], [225, 2225, 8192]);
+	frame.send('console:sweep-config', { id: 'sc8', startHz: 300_000_000 - 125_000_000, stopHz: 6_000_000_000 - 125_000_000 });
+	assert.equal(result('sc8').code, 'OK');
+	assert.deepEqual([app.sweep.startMHz, app.sweep.endMHz, app.sweep.fftSize], [300, 6000, 8192]);
+	frame.send('console:sweep-config', { id: 'sc9', fftSize: 4096 });
+	assert.equal(result('sc9').code, 'OK');
+	assert.equal(app.sweep.fftSize, 4096);
 	frame.send('console:sweep-config', { id: 'sc10', fftSize: 'x' });
 	assert.equal(result('sc10').code, 'INVALID_COMMAND');
 });

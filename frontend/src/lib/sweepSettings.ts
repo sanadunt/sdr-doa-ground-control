@@ -61,9 +61,13 @@ export function sweepRows({ live, shown, saved, starting }: SweepRowsInput): Swe
   };
 }
 
-/** The displayed limits of a scan range: the device range moved by the shift, and the widest span at this FFT size. */
+/**
+ * The displayed limits of a scan range: the device range moved by the shift, and the widest span at this FFT size
+ * (since 3.25.0 the whole device range at either size).
+ */
 export function sweepRangeLimits(shiftHz: number, fftSize: SweepFftSize): { minHz: number; maxHz: number; maxSpanHz: number } {
-  return { minHz: SWEEP_LIMITS.minHz + shiftHz, maxHz: SWEEP_LIMITS.maxHz + shiftHz, maxSpanHz: sweepMaxSpanHz(fftSize) };
+  const maxSpanHz = Math.min(sweepMaxSpanHz(fftSize), SWEEP_LIMITS.maxHz - SWEEP_LIMITS.minHz);
+  return { minHz: SWEEP_LIMITS.minHz + shiftHz, maxHz: SWEEP_LIMITS.maxHz + shiftHz, maxSpanHz };
 }
 
 /**

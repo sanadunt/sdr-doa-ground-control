@@ -103,9 +103,9 @@ export const TUNE_LIMITS = { minHz: 1_000_000, maxHz: 6_000_000_000 } as const;
 export const SWEEP_LIMITS = { minHz: 1_000_000, maxHz: 7_250_000_000 } as const;
 /**
  * A scan range the console may set: at least minSpanHz wide, at most maxBins bins of sampleRateHz / fftSize
- * (2000 MHz at 8192, 4000 MHz at 4096).
+ * (7250 MHz at 8192, so any range inside SWEEP_LIMITS at either FFT size).
  */
-export const SWEEP_SPAN_LIMITS = { minSpanHz: 1_000_000, sampleRateHz: 20_000_000, maxBins: 819_200 } as const;
+export const SWEEP_SPAN_LIMITS = { minSpanHz: 1_000_000, sampleRateHz: 20_000_000, maxBins: 2_969_600 } as const;
 /**
  * The Receiver's spectrum markers. On the wire a marker frequency is displayed
  * Hz; minHz..maxHz bound the device frequency (the shift removed), the sweep
