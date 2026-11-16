@@ -2,6 +2,14 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.25.0
+
+Satu pindai lebar kini bisa menutup seluruh jangkauan RadioSpectrum, misalnya 300–6000 MHz (permintaan pemilik 2026-11-16: "Bikin bisa sampai 6000 yaaa, harusnya bisa"). Tidak ada yang dihapus.
+
+- **Tanpa batas lebar rentang.** Pindai lebar (tab Spektrum Receiver dan mode Spektrum di dock) menerima rentang apa pun di dalam 1–7250 MHz, di kedua resolusi (2,44 kHz dan 4,88 kHz). Di 3.24.0 batasnya 2000 MHz di 2,44 kHz dan 4000 MHz di 4,88 kHz. Kedua tombol Resolusi di kolom Atur dock kini selalu bisa dipilih.
+- **Alasan batas lama hanya memori.** Batas itu menjaga memori worker pemindai, sekitar 28 byte per bin. Rentang penuh 1–7250 MHz di 2,44 kHz memakai sekitar 83 MB dan sekitar 100 ms pengolahan per putaran (HackRF sendiri butuh sekitar 1 detik untuk satu putaran selebar itu). HackRF menyapu rentang itu sebagai satu range lewat sweep bawaannya. Grafik, waterfall, mirror tablet, sesi tersimpan dan jejak di Rekaman tetap 2048 titik, jadi ukuran ZIP Rekaman tidak berubah.
+- Rentang bawaan tetap 30–1700 MHz.
+
 ## 3.24.0
 
 Pindai lebar Receiver kini menutup seluruh pita RDF-SDR sekali jalan (permintaan pemilik 2026-11-16). Tidak ada yang dihapus.

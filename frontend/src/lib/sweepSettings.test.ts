@@ -36,9 +36,11 @@ describe('scan rows', () => {
     // Displayed Hz with an upconverter: the device range moves by the shift.
     expect(recentredRange({ startHz: 100e6, stopHz: 200e6 }, 0, -125e6, 8192)).toEqual({ startHz: -50e6, stopHz: 50e6 });
     expect(recentredRange({ startHz: 100e6, stopHz: 200e6 }, -100e6, -125e6, 8192)).toEqual({ startHz: -124e6, stopHz: -24e6 });
-    // A span too wide for the resolution has no valid range.
-    expect(recentredRange({ startHz: 100e6, stopHz: 2_200e6 }, 1_200e6, 0, 8192)).toBeNull();
+    // The whole device range at the finest resolution stays the whole range.
+    expect(recentredRange({ startHz: 1e6, stopHz: 7_250e6 }, 433e6, 0, 8192)).toEqual({ startHz: 1e6, stopHz: 7_250e6 });
+    // A span wider than the device range has no valid range.
+    expect(recentredRange({ startHz: 0, stopHz: 7_250e6 }, 433e6, 0, 8192)).toBeNull();
     expect(recentredRange({ startHz: 100e6, stopHz: 200e6 }, Number.NaN, 0, 8192)).toBeNull();
-    expect(sweepRangeLimits(-125e6, 4096)).toEqual({ minHz: -124e6, maxHz: 7_125e6, maxSpanHz: 4_000_000_000 });
+    expect(sweepRangeLimits(-125e6, 4096)).toEqual({ minHz: -124e6, maxHz: 7_125e6, maxSpanHz: 7_249_000_000 });
   });
 });

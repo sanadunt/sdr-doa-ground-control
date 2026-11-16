@@ -655,9 +655,9 @@ describe('Spectrum dock Atur scan rows', () => {
     expect(markup).not.toContain('Terkunci');
   });
 
-  it('does not offer a resolution the range does not fit', () => {
-    const wide = settings({ dockMode: 'sweep', sweep: { ...ready, startHz: 100_000_000, stopHz: 2_200_000_000, fftSize: 4096 } });
-    expect(wide).toMatch(/<button type="button" aria-pressed="true">4\.88 kHz<\/button><button type="button" aria-pressed="false" disabled="">2\.44 kHz<\/button>/);
+  it('offers both resolutions for the whole device range', () => {
+    const wide = settings({ dockMode: 'sweep', sweep: { ...ready, startHz: 300_000_000, stopHz: 6_000_000_000, fftSize: 4096 } });
+    expect(wide).toMatch(/<button type="button" aria-pressed="true">4\.88 kHz<\/button><button type="button" aria-pressed="false">2\.44 kHz<\/button>/);
   });
 
   it('shows the range in displayed MHz and the limits of an upconverter', () => {

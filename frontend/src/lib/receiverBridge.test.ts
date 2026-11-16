@@ -148,20 +148,21 @@ describe('receiver bridge protocol', () => {
     expect([...SWEEP_VIEWS]).toEqual(['current', 'average', 'max']);
     expect([...SWEEP_SOURCES]).toEqual(['native', 'manual', 'simulated']);
     expect([...SWEEP_PHASES]).toEqual(['idle', 'starting', 'active', 'stopping']);
-    expect(SWEEP_SPAN_LIMITS).toEqual({ minSpanHz: 1_000_000, sampleRateHz: 20_000_000, maxBins: 819_200 });
+    expect(SWEEP_SPAN_LIMITS).toEqual({ minSpanHz: 1_000_000, sampleRateHz: 20_000_000, maxBins: 2_969_600 });
   });
 
   it('checks a scan range in displayed Hz like the frame', () => {
-    expect(sweepMaxSpanHz(8192)).toBe(2_000_000_000);
-    expect(sweepMaxSpanHz(4096)).toBe(4_000_000_000);
+    expect(sweepMaxSpanHz(8192)).toBe(7_250_000_000);
+    expect(sweepMaxSpanHz(4096)).toBe(14_500_000_000);
     expect(inSweepRange(100e6, 1000e6, 8192)).toBe(true);
     // The RDF-SDR's whole band (24–1766 MHz) in one scan at either resolution.
     expect(inSweepRange(24e6, 1766e6, 8192)).toBe(true);
     expect(inSweepRange(30e6, 1700e6, 4096)).toBe(true);
-    expect(inSweepRange(1e6, 2_001_000_000, 8192)).toBe(true);
-    expect(inSweepRange(1e6, 2_002_000_000, 8192)).toBe(false);
-    expect(inSweepRange(1e6, 2_002_000_000, 4096)).toBe(true);
-    expect(inSweepRange(1e6, 4_002_000_000, 4096)).toBe(false);
+    // 300–6000 MHz, and the whole RadioSpectrum range, in one scan at either resolution.
+    expect(inSweepRange(300e6, 6000e6, 8192)).toBe(true);
+    expect(inSweepRange(300e6, 6000e6, 4096)).toBe(true);
+    expect(inSweepRange(1e6, 7_250e6, 8192)).toBe(true);
+    expect(inSweepRange(1e6, 7_251e6, 4096)).toBe(false);
     expect(inSweepRange(100e6, 100.9e6, 8192)).toBe(false);
     expect(inSweepRange(7_249e6, 7_251e6, 8192)).toBe(false);
     expect(inSweepRange(7_124e6, 7_125e6, 8192, -125e6)).toBe(true);
