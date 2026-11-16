@@ -46,6 +46,10 @@
 /* Δt and Δθ keep their case (an uppercase θ reads as Θ). */
 .hd-delta { color: var(--subtle); font-family: var(--mono); font-size: 11.5px; }
 
+/* A key/value block at the top of a flush card (the MQTT DoA source and angle mode) keeps the card's padding. */
+.hd-flush-kv { padding: 0 var(--pg-pad); border-bottom: 1px solid var(--line-soft); }
+.hd-flush-kv .pg-kv-row { border-bottom: 0; }
+
 /* Other VFO rows (multi-VFO CSV) under the relation strip. */
 .hd-vfo { border-top: 1px solid var(--line-soft); }
 .hd-vfo-title { display: block; padding: 10px 12px 2px; }

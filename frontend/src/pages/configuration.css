@@ -20,8 +20,8 @@
   .cfg-index { width: 100%; }
 }
 
-/* Each column (pages/ConfigurationPage.tsx: Connection and MQTT, GPS & Compass
-   and Branding) stacks its cards at their own height, so no card stretches to
+/* Each column (pages/ConfigurationPage.tsx: Connection, MQTT and Drone; GPS &
+   Compass, Branding, LAN access and Update) stacks its cards at their own height, so no card stretches to
    a taller neighbour and leaves an empty band above its actions. */
 /* 1024–1279 px: a half-width GPS & Compass card stacks its fields and outgrows
    the left column, so the columns dissolve into the grid: Connection beside
@@ -87,7 +87,11 @@
 .cfg-pair { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 10px 12px; }
 /* 280 px keeps latitude and longitude, axis and offset side by side in a half-width card from 1280 px. */
 @container (min-width: 280px) {
-  .cfg-pair { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cfg-pair:not(.is-long-labels) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+/* Longer labels (Remote IP, Array turn from the drone nose) pair up only where both fit on one line. */
+@container (min-width: 420px) {
+  .cfg-pair.is-long-labels { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .cfg-sub .pg-kv-row { min-height: 32px; }
 

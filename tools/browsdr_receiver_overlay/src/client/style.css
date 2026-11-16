@@ -4591,7 +4591,9 @@ input[type='range'] {
 
 .sweep-controls {
 	flex: none;
-	grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+	/* At most ten columns: the form's twenty column units (five fields take two)
+	   fill two whole rows on a wide screen instead of leaving one field alone on a third. */
+	grid-template-columns: repeat(auto-fill, minmax(max(112px, calc((100% - 90px) / 10)), 1fr));
 	align-items: end;
 	gap: 10px;
 	padding: 12px;
@@ -4649,6 +4651,8 @@ input[type='range'] {
 }
 
 .sweep-controls .sweep-amp-control {
+	/* On the fields' line, not halfway up their labels. */
+	align-self: end;
 	gap: 8px;
 	min-height: 44px;
 	padding-top: 0;
@@ -4720,7 +4724,7 @@ input[type='range'] {
 }
 
 .sweep-visualization-status {
-	padding: 0 2px;
+	padding: 0 12px;
 	color: var(--text-muted);
 	font: 11.5px var(--mono);
 }
@@ -4756,7 +4760,8 @@ input[type='range'] {
 .sweep-status {
 	gap: 4px 16px;
 	margin-bottom: -4px;
-	padding: 0 2px;
+	/* In line with the text inside the cards above and below it. */
+	padding: 0 12px;
 	color: var(--text-muted);
 	font: 11.5px var(--mono);
 	font-variant-numeric: tabular-nums;
@@ -4962,6 +4967,16 @@ input[type='range'] {
 .sweep-candidates td.is-time {
 	color: var(--text-soft);
 	font-weight: 400;
+}
+
+/* The times start clear of the right-aligned SNR before them. */
+.sweep-candidates .is-time {
+	padding-left: 18px;
+}
+
+/* No rows yet: no empty sticky Listen column at the right edge. */
+.sweep-candidates table:has(tbody:empty) th:last-child {
+	box-shadow: none;
 }
 
 .sweep-candidates tbody tr:hover td {
@@ -5737,6 +5752,13 @@ input[type='range'] {
 	margin-top: 10px;
 }
 
+/* Day | Range | All dates: each button as wide as its label, so "Semua tanggal" stays on one line. */
+.archive-mode-switch button {
+	flex: 1 1 auto;
+	padding: 0 8px;
+	white-space: nowrap;
+}
+
 .archive-calendar-grid {
 	display: flex;
 	flex-direction: column;
@@ -6205,11 +6227,12 @@ input[type='range'] {
 	box-shadow: inset 3px 0 0 var(--signal);
 }
 
-.archive-table .col-start,
-.archive-table .col-end,
-.archive-table .col-frequency,
-.archive-table .col-duration,
-.archive-table .col-size {
+/* Number cells only: the header cells keep the header's 10.5 px mono labels. */
+.archive-table td.col-start,
+.archive-table td.col-end,
+.archive-table td.col-frequency,
+.archive-table td.col-duration,
+.archive-table td.col-size {
 	font: 12.5px var(--mono);
 	font-variant-numeric: tabular-nums;
 }
@@ -6759,4 +6782,20 @@ input[type='range'] {
 		transition: none;
 		animation: none;
 	}
+}
+
+/* The Listener before a radio is connected: a line over the empty waterfall. */
+.listener-idle {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	padding: 12px;
+	color: var(--text-muted);
+	font-size: 13px;
+	text-align: center;
+	pointer-events: none;
 }

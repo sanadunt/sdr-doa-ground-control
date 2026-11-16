@@ -32,12 +32,16 @@ export function KeyValueGrid({ items, columns = 2, labels = 'text', className, l
   const rows = items.filter((item): item is KeyValueItem => Boolean(item));
   return (
     <dl className={joinClasses('pg-kv', `pg-kv-${columns}`, labels === 'mono' && 'has-mono-labels', className)} aria-label={label}>
-      {rows.map((item, index) => (
-        <div className="pg-kv-row" key={item.id ?? (typeof item.label === 'string' ? item.label : index)} title={item.title}>
-          <dt>{item.label}</dt>
-          <dd className={joinClasses(item.mono !== false && 'is-mono', item.tone && `is-${item.tone}`) || undefined}>{item.value}</dd>
-        </div>
-      ))}
+      {rows.map((item, index) => {
+        // The "—" placeholder looks the same in every row: mono, never in a tone colour.
+        const empty = item.value === '—';
+        return (
+          <div className="pg-kv-row" key={item.id ?? (typeof item.label === 'string' ? item.label : index)} title={item.title}>
+            <dt>{item.label}</dt>
+            <dd className={joinClasses((item.mono !== false || empty) && 'is-mono', !empty && item.tone && `is-${item.tone}`) || undefined}>{item.value}</dd>
+          </div>
+        );
+      })}
     </dl>
   );
 }

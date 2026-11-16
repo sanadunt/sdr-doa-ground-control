@@ -231,8 +231,9 @@ describe('LAN view UI', () => {
       const markup = withI18n(<ReceiverMirrorPage feed={createMirrorFeed()} initialTab="mirror" />, lang);
       expect(markup).toContain('>MIRROR</span>');
       expect(markup).toContain(translate(lang, 'mirror.stateTitle'));
-      expect(markup).toContain(translate(lang, 'mirror.connecting'));
-      expect(markup).toContain('class="ov-spectrum is-view-only is-mirror rx-mirror-spectrum"');
+      // Before the first answer the card says it is reading, with no empty trace or waterfall under it.
+      expect(markup).toContain(`<div class="pg-empty" role="status"><span>${translate(lang, 'mirror.connecting')}</span></div>`);
+      expect(markup).not.toContain('class="ov-spectrum is-view-only is-mirror rx-mirror-spectrum"');
       // The Mirror | Records switch sits in the page bar.
       expect(markup).toContain(`aria-label="${translate(lang, 'records.tabs')}"`);
       expect(markup).toContain(`<button type="button" aria-pressed="true">${translate(lang, 'records.tabMirror')}</button>`);
@@ -576,11 +577,11 @@ describe('Configuration in the LAN view', () => {
     expect([...index.matchAll(/aria-controls="([^"]+)"/g)].map((match) => match[1])).toEqual(['connection-settings', 'mqtt-settings', 'drone-settings', 'navigation-settings', 'branding-settings']);
   });
 
-  it('puts the LAN access card under MQTT on the console itself', () => {
+  it('puts the LAN access card under Branding & admin on the console itself', () => {
     const markup = configuration(false);
-    expect(markup.indexOf('id="mqtt-settings"')).toBeLessThan(markup.indexOf('id="lan-settings"'));
+    expect(markup.indexOf('id="branding-settings"')).toBeLessThan(markup.indexOf('id="lan-settings"'));
     expect(markup.indexOf('id="lan-settings"')).toBeLessThan(markup.indexOf('id="update-settings"'));
-    expect(markup.indexOf('id="update-settings"')).toBeLessThan(markup.indexOf('id="navigation-settings"'));
+    expect(markup.indexOf('id="update-settings"')).toBeLessThan(markup.indexOf('id="dry-run-settings"'));
     expect(markup).not.toContain('view-only');
     expect(configuration(false, 'id')).toContain(`>${translate('id', 'config.lanTitle')}</h2>`);
   });

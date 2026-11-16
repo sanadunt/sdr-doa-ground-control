@@ -35,6 +35,7 @@ export const RECEIVER_INDONESIAN: Readonly<Record<string, string>> = {
 	'Last seen': 'Terakhir terlihat',
 	'Use active VFO mode': 'Pakai mode VFO aktif',
 	'Connect Device': 'Sambungkan Perangkat',
+	'Connect a device to see the spectrum.': 'Sambungkan perangkat untuk melihat spektrum.',
 	'Connect Mock SDR': 'Sambungkan Mock SDR',
 	'Disconnect': 'Putuskan',
 	'Start scan': 'Mulai pindai',

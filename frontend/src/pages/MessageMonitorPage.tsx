@@ -76,7 +76,8 @@ function rdfColumns(t: Translate, count: (value: number | null | undefined) => s
     { key: 'count', label: t('monitor.col.count'), numeric: true, render: (row) => count(row.count) },
     { key: 'status', label: t('monitor.col.status'), render: (row) => <StatusChip code={row.status} tone={rdfStatusTone(row.status)} /> },
     { key: 'age', label: t('monitor.col.age'), numeric: true, render: (row) => (row.ageMs === null ? 'N/A' : formatDuration(t, row.ageMs)) },
-    { key: 'retained', label: t('monitor.col.retained'), render: (row) => (row.retained === null ? EMPTY_CELL : <Tag>{row.retained ? 'RETAINED' : 'LIVE'}</Tag>) },
+    // Only a retained message is tagged; a plain one shows no tag, so LIVE stays the status column's word.
+    { key: 'retained', label: t('monitor.col.retained'), render: (row) => (row.retained ? <Tag>RETAINED</Tag> : EMPTY_CELL) },
     {
       key: 'detail',
       label: t('monitor.col.detail'),

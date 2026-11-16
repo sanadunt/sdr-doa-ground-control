@@ -7,7 +7,7 @@ import type { MirrorState, MirrorView } from '../lib/receiverMirror';
 import type { ReceiverMirrorFeed } from '../lib/receiverMirrorFeed';
 import { formatMsps } from '../lib/radioSettings';
 import { formatMhz, formatMhzTrim } from '../lib/spectrumView';
-import { Card, KeyValueGrid, Page, PageGrid, PageHeader, PageNotice, Segmented, StatusChip, Tag } from '../components/page';
+import { Card, EmptyState, KeyValueGrid, Page, PageGrid, PageHeader, PageNotice, Segmented, StatusChip, Tag } from '../components/page';
 import type { KeyValueItem } from '../components/page';
 import { MirrorFilterButton, MirrorListenButton, MirrorMarkToggle, MirrorSpectrum, mirrorAge, mirrorChipText, mirrorMessage, useMirrorMarking, useMirrorView } from '../components/overview/SpectrumDockMirror';
 import type { MirrorMarkController } from '../lib/receiverMirrorMarks';
@@ -97,11 +97,14 @@ function MirrorTab({ feed, tabs, markController, audioPlayer }: {
           bodyClassName="rx-mirror-spectrum-body"
           actions={<><MirrorListenButton view={view} player={audioPlayer} /><MirrorFilterButton player={audioPlayer} /><MirrorMarkToggle marking={marking} /></>}
         >
-          <div className="ov-spectrum is-view-only is-mirror rx-mirror-spectrum">
-            <div className="ov-spec-main">
-              <MirrorSpectrum feed={feed} view={view} marking={marking} />
+          {/* Nothing posted yet: the notice above names why, so the card shows no empty trace and waterfall. */}
+          {view.state === null ? <EmptyState label={message ? t('mirror.noFrame') : mirrorMessage(t, view) ?? t('mirror.noFrame')} code={null} /> : (
+            <div className="ov-spectrum is-view-only is-mirror rx-mirror-spectrum">
+              <div className="ov-spec-main">
+                <MirrorSpectrum feed={feed} view={view} marking={marking} />
+              </div>
             </div>
-          </div>
+          )}
         </Card>
         <Card title={t('mirror.stateTitle')} span={12}>
           <KeyValueGrid items={mirrorStateItems(t, view)} columns={3} label={t('mirror.stateTitle')} />

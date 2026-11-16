@@ -273,8 +273,8 @@ function CollectorCard({ snapshot, localSnapshotFresh }: { snapshot: TelemetrySn
     ...(lora ? [] : [{ id: 'omitted', label: <code>raw_settings_omitted</code>, value: rawOmitted === false ? 'false' : 'true' }]),
   ];
   return (
-    <Card title="Collector">
-      <KeyValueGrid items={items} label="Collector" className="hd-collector" />
+    <Card title={t('diag.collectorTitle')}>
+      <KeyValueGrid items={items} label={t('diag.collectorTitle')} className="hd-collector" />
     </Card>
   );
 }
@@ -337,7 +337,7 @@ function MqttDoaCard({ snapshot }: { snapshot: TelemetrySnapshot | null }): JSX.
       span={7}
       flush
     >
-      <KeyValueGrid items={[
+      <KeyValueGrid className="hd-flush-kv" items={[
         { id: 'source', label: t('diag.mqtt.source'), value: t(overLora(snapshot) ? 'diag.mqtt.sourceValueLora' : 'diag.mqtt.sourceValue') },
         { id: 'angle', label: t('diag.mqtt.angleMode'), value: mode ?? 'N/A', tone: mode ? undefined : 'warn' },
       ]} />
@@ -372,13 +372,17 @@ export function DoADiagnosticsPage({ snapshot, localSnapshotFresh }: { snapshot:
       />
       {evidenceExpired(snapshot, localSnapshotFresh) ? <Notice tone="warn" title={t('common.staleEvidence')}>{t('diag.stale')}</Notice> : null}
       <PageGrid>
+        {/* The Collector card goes under the shorter of the two: the gate beside the CSV/XML ledger, the MQTT views beside the gate. */}
         <PageStack span={5}>
           <GateCard snapshot={snapshot} />
-          <CollectorCard snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} />
+          {mqtt || lora ? null : <CollectorCard snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} />}
         </PageStack>
-        {mqtt ? <MqttDoaCard snapshot={snapshot} />
-          : lora ? <Card title={t('diag.mqtt.title')} span={7}><EmptyState label={t('polar.loraNoTelemetry')} code="N/A" /></Card>
-            : <NativeRecordsCard snapshot={snapshot} />}
+        {mqtt || lora ? (
+          <PageStack span={7}>
+            {mqtt ? <MqttDoaCard snapshot={snapshot} /> : <Card title={t('diag.mqtt.title')}><EmptyState label={t('polar.loraNoTelemetry')} code="N/A" /></Card>}
+            <CollectorCard snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} />
+          </PageStack>
+        ) : <NativeRecordsCard snapshot={snapshot} />}
         <EffectiveConfigCard snapshot={snapshot} />
       </PageGrid>
     </Page>

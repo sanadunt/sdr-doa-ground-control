@@ -165,7 +165,7 @@ export function DroneSettingsCard({ readOnly = false, initial = null, initialVie
           value={hostMode}
           onChange={(mode) => { setDraft({ ...draft, host: mode === 'auto' ? 'auto' : (saved.last_host ?? '') }); setResult(null); }}
         />
-        <div className="cfg-pair">
+        <div className="cfg-pair is-long-labels">
           <FormField mono label={t('drone.cfg.host')} error={hostOk ? undefined : t('drone.cfg.hostInvalid')}>
             <input type="text" inputMode="decimal" value={hostMode === 'auto' ? '' : draft.host} placeholder={hostMode === 'auto' ? t('drone.cfg.auto') : '192.168.1.162'} disabled={readOnly || hostMode === 'auto'} onChange={(event) => { setDraft({ ...draft, host: event.target.value }); setResult(null); }} />
           </FormField>

@@ -4,6 +4,8 @@
    needs a height here. Colours come from the console tokens. */
 .rx-mirror-spectrum-body { padding: 0; }
 .rx-mirror-spectrum { height: clamp(320px, 52vh, 560px); border-left: 0; }
+/* The card is the frame: no second border from the Dashboard's stacked dock rules (1023 px and below). */
+.ov-spectrum.rx-mirror-spectrum { border: 0; border-radius: 0; background: transparent; }
 @media (max-width: 600px) {
   .rx-mirror-spectrum { height: 360px; }
 }
@@ -62,7 +64,7 @@
 }
 
 .rec-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 12px; min-width: 0; }
-.rec-results { align-items: flex-end; }
+.rec-results { align-items: center; }
 .rec-pages { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
 .ov-button.rec-step { justify-content: center; min-width: 44px; }
 
