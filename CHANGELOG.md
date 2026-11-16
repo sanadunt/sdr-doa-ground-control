@@ -2,6 +2,13 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.22.1
+
+Daftar pilihan (dropdown) kini dibuka di dalam halaman, tidak lagi di jendela terpisah.
+
+- **Kotak putih di atas peta pada kiosk groundstation.** Chrome menggambar daftar `<select>` biasa di jendela sistem sendiri. Di kiosk groundstation (Chrome Linux/X11 dengan `--force-device-scale-factor=0.8`) jendela itu muncul bergeser, dengan kotak putih besar yang menutupi peta, misalnya saat Peta dasar di Lapisan dibuka. Semua daftar pilihan konsol (Lapisan, interval refresh, Atur spektrum, Kontrol, Konfigurasi, Rekaman) kini memakai `appearance: base-select`: daftarnya digambar di dalam halaman dengan warna konsol, pilihan setinggi 44 px, dan tidak ada jendela lain yang dibuka. Browser tanpa fitur itu tetap memakai daftarnya sendiri.
+- Saat daftar terbuka, angka dan huruf memilih isi daftar (tidak lagi pindah halaman atau refresh), dan Escape hanya menutup daftar, tidak menutup menu halaman.
+
 ## 3.22.0
 
 Estimasi posisi lebih cepat tampil dan makin menyempit, dengan riwayat garis sudut di peta, rekaman yang bisa diputar ulang atau diunduh untuk Google Earth, dan simulasi terbang. Tidak ada yang dihapus.

@@ -5,7 +5,7 @@ import { REFRESH_INTERVALS_S, candidateErrors, deriveDataState, toneFor } from '
 import { actionableGateReasons, doaStatusTextKey, overviewDoaStatus } from '../lib/doaStatus';
 import { loraLink as answerOverLora, sourceBadge, sourceReasonKey } from '../lib/telemetrySource';
 import { dataOutUnused, loraChip } from '../lib/loraLink';
-import { shortcutAction } from '../lib/shortcuts';
+import { isTextEntryTarget, shortcutAction } from '../lib/shortcuts';
 import { THEME_STORAGE_KEY, readPreference, writePreference } from '../lib/preferenceStore';
 import { LANGS, gateReasonLabel, useI18n } from '../lib/i18n';
 import type { Lang } from '../lib/i18n';
@@ -238,7 +238,8 @@ export function ConsoleShell({
   useEffect(() => {
     if (!statusOpen) return undefined;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
+      // Escape in an open drop-down list closes only that list.
+      if (event.key !== 'Escape' || isTextEntryTarget(event.target)) return;
       setStatusOpen(false);
       window.requestAnimationFrame(() => statusToggleRef.current?.focus());
     };
@@ -251,7 +252,7 @@ export function ConsoleShell({
   useEffect(() => {
     if (!menuOpen) return undefined;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
+      if (event.key !== 'Escape' || isTextEntryTarget(event.target)) return;
       setMenuOpen(false);
       window.requestAnimationFrame(() => menuToggleRef.current?.focus());
     };
