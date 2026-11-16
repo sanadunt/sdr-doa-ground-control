@@ -11,6 +11,13 @@ Tombol **Update** di halaman Konfigurasi: console di groundstation diperbarui ta
 - **Cara kerjanya.** Console hanya menulis kata `update` ke direktori permintaan yang sama dengan Mulai ulang dan Matikan (`POST /api/host/update`, hanya dari halaman console sendiri); helper host (`packaging/host-power`) menjalankan `sdr-doa-docker update --yes` di unit root miliknya sendiri, di luar container console, dan menulis statusnya kembali (`GET /api/host/update`). Console tidak mendapat socket Docker atau hak baru apa pun.
 - **Pasang sekali di groundstation.** Tombol aktif setelah `packaging/host-power/install.sh` dari tarball 3.23.0 dijalankan sekali dengan sudo (langkahnya di `packaging/host-power/README.md`, "Update console"). Sebelum itu kartu menulis "Helper host belum punya Update". Console native (`sdr-doa-console`) belum didukung; update tetap dengan `sdr-doa-console update`.
 
+## 3.22.1
+
+Daftar pilihan (dropdown) kini dibuka di dalam halaman, tidak lagi di jendela terpisah.
+
+- **Kotak putih di atas peta pada kiosk groundstation.** Chrome menggambar daftar `<select>` biasa di jendela sistem sendiri. Di kiosk groundstation (Chrome Linux/X11 dengan `--force-device-scale-factor=0.8`) jendela itu muncul bergeser, dengan kotak putih besar yang menutupi peta, misalnya saat Peta dasar di Lapisan dibuka. Semua daftar pilihan konsol (Lapisan, interval refresh, Atur spektrum, Kontrol, Konfigurasi, Rekaman) kini memakai `appearance: base-select`: daftarnya digambar di dalam halaman dengan warna konsol, pilihan setinggi 44 px, dan tidak ada jendela lain yang dibuka. Browser tanpa fitur itu tetap memakai daftarnya sendiri.
+- Saat daftar terbuka, angka dan huruf memilih isi daftar (tidak lagi pindah halaman atau refresh), dan Escape hanya menutup daftar, tidak menutup menu halaman.
+
 ## 3.22.0
 
 Estimasi posisi lebih cepat tampil dan makin menyempit, dengan riwayat garis sudut di peta, rekaman yang bisa diputar ulang atau diunduh untuk Google Earth, dan simulasi terbang. Tidak ada yang dihapus.

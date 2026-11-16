@@ -661,6 +661,24 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 .dry-run-panel > .form-contents > .form-field { max-width: 360px; margin-left: 20px; }
 .admin-login-form .form-field input:disabled { cursor: not-allowed; opacity: .6; }
 
+/* Drop-down lists ------------------------------------------------------------ */
+/* Chrome draws the list of a plain <select> in a window of its own. On the
+   groundstation kiosk (Chrome on Linux/X11 with --force-device-scale-factor=0.8)
+   that window opened shifted, with a large white box over the map
+   (2026-11-16). base-select draws the list inside the page, in the top layer,
+   so no other window opens; a browser without it keeps its own list. */
+@supports (appearance: base-select) {
+  select, ::picker(select) { appearance: base-select; }
+  select { align-items: center; cursor: pointer; }
+  select::picker-icon { color: var(--muted); }
+  ::picker(select) { box-sizing: border-box; max-height: min(420px, 70vh); padding: 4px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); box-shadow: 0 8px 22px rgba(0, 0, 0, .35); overscroll-behavior: contain; }
+  select option { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 10px; border-radius: 6px; background: transparent; color: var(--text); white-space: nowrap; cursor: pointer; }
+  select option:hover, select option:focus-visible { outline: none; background: var(--surface-2); }
+  select option:checked { background: var(--accent-soft); }
+  select option::checkmark { color: var(--accent); }
+  select option:disabled { color: var(--subtle); cursor: default; }
+}
+
 /* Compact touch layout ------------------------------------------------------ */
 /* Phones and tablets without a mouse (lib/compactLayout.ts sets data-layout on the
    shell root): one top-bar row of 44 px controls. The status strip opens from one

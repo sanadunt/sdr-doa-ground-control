@@ -40,6 +40,9 @@ describe('console shortcuts', () => {
     }
     expect(shortcutAction(key('r', element('TEXTAREA')), 7)).toBeNull();
     expect(shortcutAction(key('1', element('SELECT')), 7)).toBeNull();
+    // An open base-select list has focus on its option and takes typed letters and digits.
+    expect(shortcutAction(key('1', element('OPTION')), 7)).toBeNull();
+    expect(shortcutAction(key('r', element('OPTION')), 7)).toBeNull();
     expect(shortcutAction(key('1', element('DIV', {}, { isContentEditable: true })), 7)).toBeNull();
     expect(shortcutAction(key('1', element('DIV', { role: 'textbox' })), 7)).toBeNull();
   });

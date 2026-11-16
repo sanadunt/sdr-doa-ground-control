@@ -112,3 +112,21 @@ describe('basemap styles', () => {
     }
   });
 });
+
+describe('drop-down lists', () => {
+  const css = readStylesheet('../../console-design.css');
+  const block = css.match(/@supports \(appearance: base-select\) \{([\s\S]*?)\n\}/)?.[1] ?? '';
+
+  it('draw the list inside the page, so the kiosk opens no popup window over the map', () => {
+    // A plain <select> list is a window of its own in Chrome; on the groundstation
+    // kiosk (Linux/X11, --force-device-scale-factor=0.8) it opened with a white box.
+    expect(block).toMatch(/select, ::picker\(select\) \{ appearance: base-select; \}/);
+    expect(block).toMatch(/::picker\(select\) \{[^}]*overflow-y: auto;[^}]*background: var\(--surface\);/);
+  });
+
+  it('keep every option a 44 px target in the console colours', () => {
+    expect(block).toMatch(/select option \{[^}]*min-height: 44px;[^}]*color: var\(--text\);/);
+    expect(block).toMatch(/select option:checked \{ background: var\(--accent-soft\); \}/);
+    expect(block).not.toMatch(/#[0-9a-f]{3,6}\b/i);
+  });
+});
