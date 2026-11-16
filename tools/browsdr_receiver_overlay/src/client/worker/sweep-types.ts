@@ -6,7 +6,10 @@ export const SWEEP_TUNE_STEP_HZ = 20_000_000;
 export const SWEEP_OFFSET_HZ = 7_500_000;
 export const SWEEP_BLOCK_BYTES = 16_384;
 export const SWEEP_HEADER_BYTES = 10;
-export const SWEEP_MAX_BINS = 500_000;
+// 2000 MHz at the finest resolution (2.44 kHz, FFT 8192), 4000 MHz at 4.88 kHz.
+// It bounds only the worker's accumulator (about 28 bytes a bin, 23 MB here);
+// frames, the waterfall, saved sessions and stored traces are SWEEP_DISPLAY_BINS wide.
+export const SWEEP_MAX_BINS = 819_200;
 export const SWEEP_MAX_CANDIDATES = 1_000;
 export const SWEEP_CANDIDATE_PEAK_TOLERANCE_HZ = 50_000;
 export const SWEEP_DISPLAY_BINS = 2_048;
@@ -107,6 +110,7 @@ export function validateSweepConfig(config: SweepConfig): void {
 	}
 	const resolutionHz = SWEEP_SAMPLE_RATE_HZ / config.fftSize;
 	if (Math.ceil((config.endHz - config.startHz) / resolutionHz) > SWEEP_MAX_BINS) {
-		throw new RangeError(`Sweep range exceeds the ${SWEEP_MAX_BINS.toLocaleString()}-bin memory limit; use 4.9 kHz resolution or a narrower span`);
+		const maxSpanMHz = Math.floor(SWEEP_MAX_BINS * resolutionHz / 1e6);
+		throw new RangeError(`Sweep range is wider than ${maxSpanMHz} MHz at this resolution; use 4.88 kHz resolution or a narrower span`);
 	}
 }

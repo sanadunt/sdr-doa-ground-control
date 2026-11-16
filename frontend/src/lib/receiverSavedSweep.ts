@@ -31,7 +31,7 @@ export interface SavedReceiverSweep {
 }
 
 /** The Receiver's scan defaults (state.ts). */
-const DEFAULTS = { startMHz: 100, endMHz: 1000, fftSize: 8192 as SweepFftSize, lnaDb: 40, vgaDb: 20, amp: false, displayMinDb: -60, displayMaxDb: 0 } as const;
+const DEFAULTS = { startMHz: 30, endMHz: 1700, fftSize: 8192 as SweepFftSize, lnaDb: 40, vgaDb: 20, amp: false, displayMinDb: -60, displayMaxDb: 0 } as const;
 const LNA_STEPS = [0, 8, 16, 24, 32, 40];
 const MIN_MHZ = SWEEP_LIMITS.minHz / 1e6;
 const MAX_MHZ = SWEEP_LIMITS.maxHz / 1e6;
