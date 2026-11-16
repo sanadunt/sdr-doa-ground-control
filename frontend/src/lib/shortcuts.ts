@@ -46,7 +46,8 @@ export function isTextEntryTarget(target: EventTarget | null): boolean {
   if (!element || element.nodeType !== 1 || typeof element.tagName !== 'string') return false;
   if (element.isContentEditable === true) return true;
   const tag = element.tagName.toUpperCase();
-  if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  // OPTION: a list drawn in the page (base-select) takes typed letters and digits.
+  if (tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'OPTION') return true;
   const attribute = (name: string): string => (typeof element.getAttribute === 'function' ? element.getAttribute(name) ?? '' : '');
   if (tag === 'INPUT') return TEXT_INPUT_TYPES.has((typeof element.type === 'string' ? element.type : attribute('type')).trim().toLowerCase());
   return TEXT_ROLES.has(attribute('role').trim().toLowerCase());
