@@ -19,6 +19,8 @@ export interface DoaOverlaySettings {
   headingVisible: boolean;
   /** The transmitter position estimate: hot cells, the estimate, its radius and the line to it (lib/positionEstimate.ts). */
   estimateVisible: boolean;
+  /** The estimate's rays as history lines from where each was taken, faded by age (lib/positionEstimate.ts estimateRayFeatures). */
+  estimateRaysVisible: boolean;
   /** The operators' areas and markers (lib/mapAnnotations.ts). */
   annotationsVisible: boolean;
   /** How the estimate card writes its position for a land map (lib/gridCoordinates.ts). */
@@ -56,6 +58,7 @@ export const DEFAULT_DOA_OVERLAY_SETTINGS: DoaOverlaySettings = {
   labelsVisible: true,
   headingVisible: true,
   estimateVisible: true,
+  estimateRaysVisible: true,
   annotationsVisible: true,
   coordinateFormat: 'latlon',
   mapGrid: 'off',

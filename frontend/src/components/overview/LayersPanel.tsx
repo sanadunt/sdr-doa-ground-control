@@ -10,7 +10,7 @@ import { Icon } from '../ui';
 import { BasemapSelect } from './BasemapPicker';
 import { MAP_GRID_KINDS, isMapGridKind } from '../../lib/mapGrid';
 
-type LayerKey = 'heatmapVisible' | 'lobeVisible' | 'bearingVisible' | 'edgesVisible' | 'ringsVisible' | 'guidesVisible' | 'labelsVisible' | 'headingVisible' | 'estimateVisible' | 'annotationsVisible';
+type LayerKey = 'heatmapVisible' | 'lobeVisible' | 'bearingVisible' | 'edgesVisible' | 'ringsVisible' | 'guidesVisible' | 'labelsVisible' | 'headingVisible' | 'estimateVisible' | 'estimateRaysVisible' | 'annotationsVisible';
 
 const LAYERS: ReadonlyArray<[LayerKey, MessageKey]> = [
   ['heatmapVisible', 'layers.beam'],
@@ -22,10 +22,11 @@ const LAYERS: ReadonlyArray<[LayerKey, MessageKey]> = [
   ['labelsVisible', 'layers.labels'],
   ['headingVisible', 'layers.heading'],
   ['estimateVisible', 'layers.estimate'],
+  ['estimateRaysVisible', 'layers.estimateRays'],
   ['annotationsVisible', 'layers.annotations'],
 ];
 
-/** Map layers panel: the basemap, the nine layer switches, overlay opacity and the advanced overlay settings. */
+/** Map layers panel: the basemap, the layer switches, overlay opacity and the advanced overlay settings. */
 export function LayersPanel({
   settings,
   scale,

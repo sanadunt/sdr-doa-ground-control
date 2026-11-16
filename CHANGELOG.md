@@ -2,6 +2,18 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.22.0
+
+Estimasi posisi lebih cepat tampil dan makin menyempit, dengan riwayat garis sudut di peta, rekaman yang bisa diputar ulang atau diunduh untuk Google Earth, dan simulasi terbang. Tidak ada yang dihapus.
+
+- **Estimasi kasar.** Begitu sinar datang dari dua titik atau lebih yang terlihat terpisah 3° atau lebih dari titik panas, estimasi sudah tampil sebagai **KASAR** (titik dan radius lebar, garis lebih pudar). **ESTIMASI** kini butuh 3 titik dengan sebaran 10° (dulu 15°). Satu titik saja tetap **PERLU BERGERAK**, karena tidak memberi jarak.
+- **Radius yang mengecil.** Radius estimasi kini radius ketidakpastian (2σ pada sumbu terlebarnya): sebaran sudut nyata di sekitar estimasi (minimal 2°), dibawa ke posisi lewat arah dan jarak setiap sinar. Sedikit sinar atau sinar dari satu arah membuatnya lebar; makin banyak titik dari arah berbeda, makin kecil, sampai 100 m.
+- **Sudut belum valid ikut dihitung.** DoA `ok=0` yang hanya menunggu verifikasi edge (`SOURCE_UNVERIFIED`, `ANGLE_UNVERIFIED`) kini jadi sinar dengan bobot 0,35; alasan lain (retune, jam, DAQ) tidak dipakai. Kartu menyebut jumlahnya ("n belum valid"). DoA itu sendiri tetap BELUM VALID di HUD seperti sebelumnya.
+- **Riwayat garis sudut di peta.** 200 sinar terakhir digambar dari tempat masing-masing diambil, melewati estimasi; yang lama makin pudar, yang belum valid abu-abu putus-putus, dengan jalur pengambilannya (oranye). Bisa dimatikan di Lapisan ("Riwayat garis sudut").
+- **Rekaman sesi.** Setiap sinar yang dipakai estimasi direkam di groundstation (`estimates.sqlite3` di direktori data), satu sesi per mulai (Mulai ulang, frekuensi baru, atau monitor MQTT baru), sampai 500.000 sinar (sesi tertua dihapus duluan). Kartu Estimasi posisi punya **Riwayat**: daftar sesi dengan **Putar ulang** di peta (putar, jeda, geser, ×1–×60), **Google Earth** (KML: jalur drone, setiap sinar dengan waktunya untuk slider waktu Google Earth, dan estimasi akhir dengan radiusnya) dan **CSV**. Tablet (LAN view) bisa melihat, memutar ulang dan mengunduh; tidak ada yang bisa dihapus dari sana. Rute baru, hanya GET: `/api/position-estimate/sessions`, `/<id>`, `/<id>/export.kml`, `/<id>/export.csv`.
+- **Simulasi terbang.** Halaman Simulasi punya "Simulasi terbang dengan estimasi posisi": drone terbang memotong arah pemancar tiruan, mengambil sudut tiap 3 detik dengan derau yang bisa diatur, dan Dashboard menampilkan estimasi yang menyempit beserta jarak sebenarnya dan seberapa jauh estimasi meleset. Data live tidak tersentuh.
+- Perhitungan estimasi di browser (putar ulang dan simulasi) memakai rumus yang sama dengan groundstation dan dicek terhadap perjalanan yang sama (`tools/fixtures/position-estimate/drive.json`).
+
 ## 3.21.0
 
 Kurva Angular 180 titik dari RDF Node 1.12 ("Seimbang") diterima dan digambar halus 360°. Tidak ada yang dihapus.

@@ -129,6 +129,7 @@ from ground_gps import with_ground_gps
 import drone_video as dv
 from drone_discovery import AUTO as DRONE_AUTO, DroneService, drone_settings, is_drone_host
 from drone_link import with_drone
+import estimate_record_store as ers
 import last_live_doa
 import map_annotations as man
 from mdns_resolver import MdnsResolver
@@ -460,6 +461,13 @@ def _attach_drone_reference(monitor: Any, reference: Callable[[int], Optional[Di
     setter = getattr(monitor, "set_drone_reference", None)
     if callable(setter):
         setter(reference)
+
+
+def _attach_estimate_recorder(monitor: Any, recorder: Any) -> None:
+    """Give a monitor's position estimate the session recorder (estimate_record_store.py); a stand-in has none."""
+    setter = getattr(monitor, "set_estimate_recorder", None)
+    if callable(setter):
+        setter(recorder)
 
 
 class _UnavailableMqttMonitor:
@@ -2521,6 +2529,37 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _get_estimate_sessions(self, path: str) -> None:
+        """The recorded position-estimate sessions (estimate_record_store.py): the list, one session's rays, or its export."""
+        records = self.console_server.estimate_records
+        if path == ers.ROUTE:
+            self._send_json(records.sessions())
+            return
+        route = ers.session_route(path)
+        session = records.session(route["id"]) if route is not None else None
+        if session is None:
+            self._send_estimate_error(HTTPStatus.NOT_FOUND, "ESTIMATE_SESSION_NOT_FOUND", "no such estimate session")
+            return
+        if route["kind"] == "session":
+            self._send_json(session)
+            return
+        csv_export = route["kind"] == "export.csv"
+        body = ers.session_csv(session) if csv_export else ers.session_kml(session)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/csv; charset=utf-8" if csv_export else "application/vnd.google-earth.kml+xml")
+        self.send_header("Content-Disposition",
+                         f'attachment; filename="{ers.export_name(session, "csv" if csv_export else "kml")}"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_estimate_error(self, status: int, code: str, message: str) -> None:
+        # Estimate session codes go through this helper, never the Kontrol error
+        # helper, so the config-patch code contract does not count them.
+        self._send_json({"ok": False, "code": code, "error": message}, status)
+
     def _send_html(self, body: str) -> None:
         raw = body.encode("utf-8")
         self.send_response(HTTPStatus.OK)
@@ -3551,6 +3590,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == last_live_doa.ROUTE:
             self._send_json(self.console_server.last_live_doa.view())
+            return
+        if parsed.path == ers.ROUTE or parsed.path.startswith(ers.ROUTE + "/"):
+            self._get_estimate_sessions(parsed.path)
             return
         if parsed.path == "/api/drone/video":
             settings = self.console_server.get_config()["drone"]
@@ -5239,6 +5281,12 @@ class GroundConsoleServer(ThreadingHTTPServer):
         self.drone_video = drone_video if drone_video is not None else dv.VideoService()
         # The last answer with a live DoA graph, for pages that open later (GET /api/doa/last-live).
         self.last_live_doa = last_live_doa.LastLiveDoa()
+        # Every ray the position estimate took, by session, for replay and the
+        # KML/CSV reports (GET /api/position-estimate/sessions on both listeners).
+        self.estimate_records = ers.EstimateRecordStore(
+            receiver_data_dir if receiver_data_dir is not None else DEFAULT_DATA_DIR,
+            log=lambda message: print(message, flush=True),
+        )
         # The opt-in LAN view: a second listener of this process
         # (lan_access.py). It opens below, once this loopback socket is bound.
         self.lan = LanAccessManager(self)
@@ -5261,6 +5309,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
         self.lan.apply(self._config["lan_access"])
         self._start_drone_service()
         _attach_drone_reference(self.mqtt_monitor, self.drone_reference_at)
+        _attach_estimate_recorder(self.mqtt_monitor, self.estimate_records)
 
     def run_retention(self) -> Optional[Dict[str, Any]]:
         """One background retention pass (no time budget beyond the per-pass item bound)."""
@@ -5296,6 +5345,9 @@ class GroundConsoleServer(ThreadingHTTPServer):
             store = getattr(self, "receiver_store", None)
             if store is not None:
                 store.close()
+            records = getattr(self, "estimate_records", None)
+            if records is not None:
+                records.close()
         finally:
             super().server_close()
 
@@ -5576,6 +5628,7 @@ class GroundConsoleServer(ThreadingHTTPServer):
                 if monitor_changed and new_host:
                     replacement = _new_mqtt_monitor(*new_connection)
                     _attach_drone_reference(replacement, self.drone_reference_at)
+                    _attach_estimate_recorder(replacement, self.estimate_records)
                     # Before start(), so no ACK or settings report of a
                     # pending command reaches the new client unasked.
                     self.config_commands.hand_over(self.mqtt_monitor, replacement)

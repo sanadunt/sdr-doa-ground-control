@@ -34,6 +34,7 @@ import type { ReceiverMirrorFeed } from './lib/receiverMirrorFeed';
 import { startMirrorPublisher, watchLanViewOpen } from './lib/receiverMirrorPublisher';
 import { consoleAccess, pageHostname } from './lib/access';
 import { DEFAULT_SIMULATION, simulationSnapshot, randomizeSimulationSettings } from './lib/simulation';
+import { FLIGHT_NOISE_DEG } from './lib/estimateSimulation';
 import { snapshotCollectionId, snapshotConsoleBaseUrl, snapshotConsoleRefreshSeconds, snapshotReadAtMonotonic, snapshotServedAgeMs } from './lib/snapshotRead';
 import { groundGpsCurrent } from './lib/groundGps';
 import { droneCurrent } from './lib/droneLink';
@@ -456,6 +457,9 @@ export default function App({ layout: forcedLayout }: { layout?: CompactLayout |
   const [simulationEnabled, setSimulationEnabled] = useState(false);
   const [simulationAutomatic, setSimulationAutomatic] = useState(false);
   const [simulationSettings, setSimulationSettings] = useState(DEFAULT_SIMULATION);
+  // The simulated flight with the position estimate (lib/estimateSimulation.ts); off at every load.
+  const [simulationFlight, setSimulationFlight] = useState<{ enabled: boolean; noiseDeg: number }>({ enabled: false, noiseDeg: FLIGHT_NOISE_DEG.default });
+  const overviewFlight = useMemo(() => (simulationFlight.enabled ? { noiseDeg: simulationFlight.noiseDeg } : null), [simulationFlight]);
   const syntheticSnapshot = useMemo(() => simulationSnapshot(simulationSettings), [simulationSettings]);
   const randomizeSimulation = useCallback(() => {
     setSimulationSettings(randomizeSimulationSettings);
@@ -988,8 +992,8 @@ export default function App({ layout: forcedLayout }: { layout?: CompactLayout |
             <LoadErrorBoundary>
               <Suspense fallback={routeLoading}>
                 {route === 'receiver' ? <ReceiverMirrorPage feed={mirrorFeed} />
-                  : route === 'simulation' ? <SimulationPage enabled={simulationEnabled} automatic={simulationAutomatic} settings={simulationSettings} onEnabled={enabled => { setSimulationEnabled(enabled); if (!enabled) setSimulationAutomatic(false); }} onAutomatic={setSimulationAutomatic} onSettings={setSimulationSettings} onRandomize={randomizeSimulation} onOverview={() => navigate('overview')} />
-                  : route === 'overview' && simulationEnabled ? <OverviewPage snapshot={syntheticSnapshot} localSnapshotFresh={true} gpsConfig={gpsConfig} compassConfig={compassConfig} simulation={simulationSettings} {...overviewWiring} />
+                  : route === 'simulation' ? <SimulationPage enabled={simulationEnabled} automatic={simulationAutomatic} settings={simulationSettings} flight={simulationFlight} onFlight={(next) => { setSimulationFlight(next); if (next.enabled) setSimulationAutomatic(false); }} onEnabled={enabled => { setSimulationEnabled(enabled); if (!enabled) setSimulationAutomatic(false); }} onAutomatic={setSimulationAutomatic} onSettings={setSimulationSettings} onRandomize={randomizeSimulation} onOverview={() => navigate('overview')} />
+                  : route === 'overview' && simulationEnabled ? <OverviewPage snapshot={syntheticSnapshot} localSnapshotFresh={true} gpsConfig={gpsConfig} compassConfig={compassConfig} simulation={simulationSettings} simulationFlight={overviewFlight} {...overviewWiring} />
                   : <PageForRoute route={route} snapshot={snapshot} localFresh={currentLocalFresh} groundFresh={groundFresh} droneFresh={droneFresh} mqtt={mqtt} mqttError={mqttErrorText} config={config} configLoaded={configLoaded} configError={configErrorText} branding={branding} gpsConfig={gpsConfig} compassConfig={compassConfig} onGpsConfigChanged={setGpsConfig} onCompassConfigChanged={onCompassConfigChanged} onConfigSaved={onConfigSaved} onBrandingChanged={onBrandingChanged} onMqttChanged={applyMqtt} onRefreshMqtt={refreshMqtt} onReconnectMqtt={reconnectMqtt} overview={overviewWiring} />}
               </Suspense>
             </LoadErrorBoundary>

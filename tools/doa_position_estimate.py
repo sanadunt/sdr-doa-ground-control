@@ -9,11 +9,22 @@ cell raised by how close it lies to each ray (a Gaussian of the angle,
 ``BEARING_SIGMA_DEG``), the hottest cell the estimate. Bad bearings (multipath,
 blocked paths) spread thin; good ones pile up where they cross.
 
-A single place cannot give a distance: all of its rays start at one point. The
-estimate counts as one only when rays from at least ``MIN_STATIONS`` places
-``STATION_M`` apart cross it from directions ``MIN_SPREAD_DEG`` or more apart
-(``NEED_MOVEMENT`` until then). A parked node does not outvote the drive: the
-n-th sample of one place weighs 1/n.
+A single place cannot give a distance: all of its rays start at one point
+(``NEED_MOVEMENT``). From ``ROUGH_MIN_STATIONS`` places ``STATION_M`` apart
+whose rays cross it ``ROUGH_SPREAD_DEG`` or more apart it is a ``ROUGH``
+estimate: a point with a wide radius, so the operator sees early where to fly;
+from ``MIN_STATIONS`` places ``MIN_SPREAD_DEG`` apart an ``ESTIMATE``. The
+radius is the uncertainty's: the bearings' own scatter around the estimate
+(at least ``MIN_BEARING_NOISE_DEG``) carried to a position through every ray's
+direction and distance, two standard deviations along its widest axis. Few
+rays or rays from nearly one direction leave it wide; more places seen from
+more directions shrink it, down to ``MIN_RADIUS_M``. A parked node does not outvote the drive: the n-th sample
+of one place weighs 1/n. A bearing the edge has not verified (DoA ``ok=0``,
+``verified`` false) is a ray too, weighing ``UNVERIFIED_WEIGHT`` of a LIVE one.
+
+The view carries the last ``RAYS_SENT`` rays for the map's history lines, and
+a ``recorder`` (estimate_record_store.py) gets every scored sample with the
+estimate after it, for replay and reports.
 
 The grid moves with the node: a sample in the outer quarter re-centres it on
 that sample and replays the kept samples (``HISTORY``). Work runs on one worker
@@ -36,6 +47,7 @@ import math
 import queue
 import threading
 import time
+import uuid
 from array import array
 from collections import deque
 from typing import Any, Deque, Dict, List, Mapping, Optional, Tuple
@@ -47,7 +59,14 @@ BEARING_SIGMA_DEG = 6.0
 BEARING_CUTOFF_DEG = 3 * BEARING_SIGMA_DEG
 STATION_M = 50.0
 MIN_STATIONS = 3
-MIN_SPREAD_DEG = 15.0
+MIN_SPREAD_DEG = 10.0
+ROUGH_MIN_STATIONS = 2
+ROUGH_SPREAD_DEG = 3.0
+UNVERIFIED_WEIGHT = 0.35
+MIN_BEARING_NOISE_DEG = 2.0
+MIN_RADIUS_M = GRID_SIZE_M / GRID_CELLS
+MAX_RADIUS_M = GRID_SIZE_M
+RAYS_SENT = 200
 # Another target: a sample this far off the estimate's frequency starts over.
 FREQUENCY_TOLERANCE_HZ = 25_000
 HISTORY = 1500
@@ -58,6 +77,7 @@ EARTH_R = 6_371_000.0
 
 STATE_NO_DATA = "NO_DATA"
 STATE_NEED_MOVEMENT = "NEED_MOVEMENT"
+STATE_ROUGH = "ROUGH"
 STATE_ESTIMATE = "ESTIMATE"
 # Why the latest LIVE sample was no ray (``waiting_for``).
 WAITING_NO_BEARING = "NO_BEARING"
@@ -130,8 +150,11 @@ class _Grid:
 class PositionEstimator:
     """Bearings in (``add``), one estimate out (``view``); safe to call from any thread."""
 
-    def __init__(self, *, threaded: bool = True) -> None:
+    def __init__(self, *, threaded: bool = True, recorder: Optional[Any] = None) -> None:
         self._lock = threading.Lock()
+        # record(key, sample, estimate) of estimate_record_store; one key per start of this estimator.
+        self._recorder = recorder
+        self._instance = uuid.uuid4().hex[:8]
         self._queue: "queue.Queue[Optional[Dict[str, Any]]]" = queue.Queue(maxsize=600)
         self._threaded = threaded
         self._worker: Optional[threading.Thread] = None
@@ -146,9 +169,10 @@ class PositionEstimator:
 
     def add(self, *, q: int, t_ms: int, frequency_hz: int, bearing_deg: float, latitude: float, longitude: float,
             confidence_db: Optional[float] = None, heading_source: Optional[str] = None,
-            bearing_source: str = SOURCE_RDF, position_source: str = SOURCE_RDF) -> None:
-        """Queue one LIVE sample; the worker scores it."""
+            bearing_source: str = SOURCE_RDF, position_source: str = SOURCE_RDF, verified: bool = True) -> None:
+        """Queue one sample (LIVE, or ``verified`` false for the edge's ok=0); the worker scores it."""
         sample = {"q": q, "t_ms": t_ms, "frequency_hz": frequency_hz, "bearing_deg": bearing_deg % 360.0,
+                  "verified": bool(verified),
                   "latitude": latitude, "longitude": longitude, "confidence_db": confidence_db,
                   "heading_source": heading_source, "bearing_source": bearing_source,
                   "position_source": position_source, "generation": self._generation}
@@ -163,6 +187,10 @@ class PositionEstimator:
         except queue.Full:
             with self._lock:
                 self._dropped += 1
+
+    def set_recorder(self, recorder: Optional[Any]) -> None:
+        with self._lock:
+            self._recorder = recorder
 
     def skip(self, reason: str) -> None:
         """A LIVE sample that is no ray: ``WAITING_NO_BEARING`` or ``WAITING_NO_POSITION``."""
@@ -217,30 +245,33 @@ class PositionEstimator:
         self._samples: Deque[Dict[str, Any]] = deque(maxlen=HISTORY)
         self._stations: Dict[Tuple[int, int], int] = {}
         self._frequency: Optional[int] = None
-        self._last_q: Optional[int] = None
+        # The last q of each kind (ok=1 and ok=0 count apart at the edge), as {verified: q}.
+        self._last_q: Dict[bool, int] = {}
         self._result: Dict[str, Any] = {
             "state": STATE_NO_DATA, "reset_reason": reason, "reset_at_ms": int(time.time() * 1000),
             "frequency_hz": None, "samples": 0, "stations": 0, "spread_deg": None,
             "latitude": None, "longitude": None, "radius_m": None, "peak_share": None,
             "node_latitude": None, "node_longitude": None, "distance_m": None, "bearing_deg": None,
             "bearing_source": None, "position_source": None, "drone_samples": 0,
-            "grid": None, "updated_at_ms": None, "error": None,
+            "grid": None, "updated_at_ms": None, "error": None, "rays": [], "unverified_samples": 0,
             "method": {"grid_size_m": GRID_SIZE_M, "grid_cells": GRID_CELLS, "bearing_sigma_deg": BEARING_SIGMA_DEG,
-                       "min_stations": MIN_STATIONS, "min_spread_deg": MIN_SPREAD_DEG, "station_m": STATION_M},
+                       "min_stations": MIN_STATIONS, "min_spread_deg": MIN_SPREAD_DEG, "station_m": STATION_M,
+                       "rough_min_stations": ROUGH_MIN_STATIONS, "rough_spread_deg": ROUGH_SPREAD_DEG,
+                       "unverified_weight": UNVERIFIED_WEIGHT},
         }
 
     def _process(self, sample: Dict[str, Any]) -> None:
         with self._lock:
             if sample["generation"] != self._generation:
                 return  # queued before a reset
-            if self._last_q is not None and sample["q"] == self._last_q:
+            if self._last_q.get(sample["verified"]) == sample["q"]:
                 return
             if (self._frequency is not None and
                     abs(sample["frequency_hz"] - self._frequency) > FREQUENCY_TOLERANCE_HZ):
                 self._generation += 1
                 self._clear("FREQUENCY_CHANGED")
                 sample["generation"] = self._generation
-            self._last_q = sample["q"]
+            self._last_q[sample["verified"]] = sample["q"]
             if self._frequency is None:
                 self._frequency = sample["frequency_hz"]
             grid = self._grid
@@ -268,6 +299,14 @@ class PositionEstimator:
                 # scored on it by the worker after this one, in order.
                 self._grid = grid
             self._result = self._summarize(grid, sample)
+            recorder = self._recorder
+            result = self._result
+            key = f"{self._instance}:{self._generation}"
+        if recorder is not None:
+            try:
+                recorder.record(key, sample, result)
+            except Exception:  # a record that fails never stops the estimate
+                pass
 
     def _weight(self, sample: Dict[str, Any]) -> float:
         # Stations on a fixed lattice (STATION_M), independent of where the grid sits.
@@ -277,7 +316,7 @@ class PositionEstimator:
         key = (key_lat, key_lon)
         count = self._stations.get(key, 0) + 1
         self._stations[key] = count
-        return 1.0 / count
+        return (1.0 if sample.get("verified", True) else UNVERIFIED_WEIGHT) / count
 
     def _summarize(self, grid: _Grid, latest: Dict[str, Any]) -> Dict[str, Any]:
         values = grid.values
@@ -286,6 +325,10 @@ class PositionEstimator:
                       node_latitude=latest["latitude"], node_longitude=latest["longitude"],
                       bearing_source=latest.get("bearing_source"), position_source=latest.get("position_source"),
                       drone_samples=sum(1 for s in self._samples if s.get("bearing_source") == SOURCE_DRONE),
+                      unverified_samples=sum(1 for s in self._samples if not s.get("verified", True)),
+                      # [t_ms, latitude, longitude, bearing_deg, verified 1/0], oldest first: the map's history lines.
+                      rays=[[s["t_ms"], round(s["latitude"], 6), round(s["longitude"], 6), round(s["bearing_deg"], 1),
+                             1 if s.get("verified", True) else 0] for s in list(self._samples)[-RAYS_SENT:]],
                       updated_at_ms=int(time.time() * 1000), error=None, reset_reason=None)
         peak_index = max(range(len(values)), key=values.__getitem__)
         peak = values[peak_index]
@@ -320,18 +363,21 @@ class PositionEstimator:
             directions.append(_bearing(ox - ex, oy - ey))
         spread = _circular_span(directions)
         nx, ny = _east_north(grid.lat0, grid.lon0, latest["latitude"], latest["longitude"])
+        radius = self._uncertainty_m(grid, ex, ey)
         ready = len(seen) >= MIN_STATIONS and spread >= MIN_SPREAD_DEG
+        rough = not ready and len(seen) >= ROUGH_MIN_STATIONS and spread >= ROUGH_SPREAD_DEG
         cells = sorted(((value, index) for index, value in enumerate(values) if value >= MAP_FLOOR * peak),
                        reverse=True)[:MAP_CELLS]
         half = GRID_SIZE_M / 2.0
         south_west = _lat_lon(grid.lat0, grid.lon0, -half, -half)
         north_east = _lat_lon(grid.lat0, grid.lon0, half, half)
         result.update(
-            state=STATE_ESTIMATE if ready else STATE_NEED_MOVEMENT,
+            state=STATE_ESTIMATE if ready else STATE_ROUGH if rough else STATE_NEED_MOVEMENT,
             stations=len(seen),
             spread_deg=round(spread, 1),
             latitude=round(lat, 6), longitude=round(lon, 6),
-            radius_m=round(math.sqrt(hot * grid.cell * grid.cell / math.pi)),
+            radius_m=round(radius),
+            area_radius_m=round(math.sqrt(hot * grid.cell * grid.cell / math.pi)),
             peak_share=round(peak / max(1e-9, sum(s["weight"] for s in self._samples)), 3),
             distance_m=round(math.hypot(ex - nx, ey - ny)),
             bearing_deg=round(_bearing(ex - nx, ey - ny), 1),
@@ -344,6 +390,45 @@ class PositionEstimator:
             },
         )
         return result
+
+
+    def _uncertainty_m(self, grid: _Grid, ex: float, ey: float) -> float:
+        """Two standard deviations of the estimate along its widest axis, metres.
+
+        Every ray that points at the estimate within the score's cutoff pins it
+        across the ray to its bearing noise times its distance; the noise is
+        the rays' weighted scatter around the estimate. Rays from one direction
+        pin nothing along it, so the radius stays wide until they cross.
+        """
+        sxx = sxy = syy = 0.0
+        residual = total = 0.0
+        for sample in self._samples:
+            ox, oy = _east_north(grid.lat0, grid.lon0, sample["latitude"], sample["longitude"])
+            dx, dy = ex - ox, ey - oy
+            distance = math.hypot(dx, dy)
+            if distance < grid.cell:
+                continue
+            miss = (sample["bearing_deg"] - _bearing(dx, dy) + 180.0) % 360.0 - 180.0
+            if abs(miss) > BEARING_CUTOFF_DEG:
+                continue
+            weight = sample["weight"]
+            residual += weight * miss * miss
+            total += weight
+            # The ray's normal: the direction it pins the estimate in.
+            nx, ny = -dy / distance, dx / distance
+            info = weight / (distance * distance)
+            sxx += info * nx * nx
+            sxy += info * nx * ny
+            syy += info * ny * ny
+        if total <= 0.0:
+            return MAX_RADIUS_M
+        noise = math.radians(max(MIN_BEARING_NOISE_DEG, math.sqrt(residual / total)))
+        trace, det = sxx + syy, sxx * syy - sxy * sxy
+        # The smallest eigenvalue of the information is the widest axis of the uncertainty.
+        smallest = trace / 2.0 - math.sqrt(max(0.0, trace * trace / 4.0 - det))
+        if smallest <= 1e-18:
+            return MAX_RADIUS_M
+        return min(MAX_RADIUS_M, max(MIN_RADIUS_M, 2.0 * noise / math.sqrt(smallest)))
 
 
 def with_ground(estimate: Dict[str, Any], ground: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -372,6 +457,6 @@ def _circular_span(directions: List[float]) -> float:
 
 
 __all__ = [
-    "PositionEstimator", "SOURCE_DRONE", "SOURCE_RDF", "STATE_ESTIMATE", "STATE_NEED_MOVEMENT", "STATE_NO_DATA",
+    "PositionEstimator", "SOURCE_DRONE", "SOURCE_RDF", "STATE_ESTIMATE", "STATE_NEED_MOVEMENT", "STATE_NO_DATA", "STATE_ROUGH",
     "WAITING_NO_BEARING", "WAITING_NO_POSITION", "with_ground",
 ]
