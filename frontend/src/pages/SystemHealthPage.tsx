@@ -427,11 +427,12 @@ export function SystemHealthPage({ snapshot, mqtt, mqttError = null, localSnapsh
             <KeyValueGrid items={nodeItems} label={t('node.title')} />
           </Card>
           <DoaViewsCard snapshot={snapshot} />
-        </PageStack>
-        <PageStack span={6}>
           {/* Over Telemetry LoRa there is no Data Out to show (no IP path to the node). */}
           {lora ? null : <DataOutCard snapshot={snapshot} />}
           <MqttCard mqtt={mqtt} mqttError={mqttError} capabilities={capabilities} />
+        </PageStack>
+        {/* The RDF-SDR and its links on the left, the groundstation's own links and the drone on the right, so the two columns end near each other. */}
+        <PageStack span={6}>
           <LoraCard mqtt={mqtt} />
           <GroundGpsCard snapshot={snapshot} localSnapshotFresh={groundGpsFresh ?? localSnapshotFresh} />
           <DroneLinkCard snapshot={snapshot} />

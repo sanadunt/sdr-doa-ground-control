@@ -113,6 +113,10 @@
 /* Chips, tags, buttons and switches keep their own width in the body column. */
 .pg-card-body > :is(.ov-chip, .ov-tag, .pg-chip, .ov-button, .ov-icon-button, .pg-switch, .pg-file) { align-self: flex-start; }
 
+/* A link in a card (the release on GitHub) in the console's link colour, not the browser's visited purple. */
+.pg-card-body a:not([class]) { color: var(--blue); text-underline-offset: 2px; }
+.pg-card-body a:not([class]):hover { color: var(--text); }
+
 /* Stat tiles ----------------------------------------------------------------------- */
 /* Separators are inset shadows on each tile; the row clips the ones on its outer edges. */
 .pg-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); min-width: 0; overflow: hidden; }
@@ -217,6 +221,8 @@
 .pg-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 13px; line-height: 1.4; }
 .pg-notice-title { flex: none; font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: .02em; }
 .pg-notice-text { flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
+/* The raw cause under the operator sentence (an exception text), on its own line. */
+.pg-notice-detail { display: block; margin-top: 2px; color: var(--muted); font-family: var(--mono); font-size: 11.5px; overflow-wrap: anywhere; }
 .pg-notice-action { display: flex; flex: none; gap: 8px; margin-left: auto; }
 .pg-notice.tone-warn { border-color: var(--amber); background: color-mix(in srgb, var(--amber) 8%, var(--surface)); }
 .pg-notice.tone-warn .pg-notice-title { color: var(--amber); }

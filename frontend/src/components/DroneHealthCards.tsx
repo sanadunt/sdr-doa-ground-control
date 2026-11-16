@@ -75,7 +75,7 @@ export function DroneVideoCard({ initial = null }: { initial?: DroneVideoHealth 
   ];
   return (
     <Card title={t('health.video.title')} chip={<StatusChip code={state} tone={tone} />}>
-      {cause ? <Notice tone={tone === 'bad' ? 'bad' : 'info'} title={state}>{cause}{health?.error ? ` (${health.error})` : ''}</Notice> : null}
+      {cause ? <Notice tone={tone === 'bad' ? 'bad' : 'info'} title={state}>{cause}{health?.error ? <span className="pg-notice-detail">{health.error}</span> : null}</Notice> : null}
       <KeyValueGrid items={items} label={t('health.video.title')} />
     </Card>
   );

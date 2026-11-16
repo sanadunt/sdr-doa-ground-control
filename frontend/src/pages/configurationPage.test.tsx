@@ -51,7 +51,7 @@ describe('Configuration page', () => {
 
   it('lays the cards out in the section index order', () => {
     const markup = render();
-    const ids = ['connection-settings', 'mqtt-settings', 'drone-settings', 'lan-settings', 'update-settings', 'navigation-settings', 'branding-settings', 'dry-run-settings'];
+    const ids = ['connection-settings', 'mqtt-settings', 'drone-settings', 'navigation-settings', 'branding-settings', 'lan-settings', 'update-settings', 'dry-run-settings'];
     const cardOrder = ids.map((id) => markup.indexOf(`<section id="${id}"`));
     expect(cardOrder.every((index) => index > 0)).toBe(true);
     expect([...cardOrder].sort((a, b) => a - b)).toEqual(cardOrder);
@@ -67,11 +67,12 @@ describe('Configuration page', () => {
     const columns = [...markup.slice(grid).matchAll(/<div class="pg-stack pg-span-6">/g)].map((match) => grid + (match.index ?? 0));
     expect(columns).toHaveLength(2);
     const at = (id: string) => markup.indexOf(`<section id="${id}"`);
-    // Data Out and MQTT on the left, GPS & Compass and Branding on the right, the dry-run on a full row below.
+    // Data Out, MQTT and Drone on the left; GPS & Compass, Branding, LAN access and Update on the right; the dry-run on a full row below.
     expect(columns[0]).toBeLessThan(at('connection-settings'));
-    expect(at('mqtt-settings')).toBeLessThan(columns[1]);
+    expect(at('drone-settings')).toBeLessThan(columns[1]);
     expect(columns[1]).toBeLessThan(at('navigation-settings'));
-    expect(at('branding-settings')).toBeLessThan(at('dry-run-settings'));
+    expect(at('branding-settings')).toBeLessThan(at('lan-settings'));
+    expect(at('update-settings')).toBeLessThan(at('dry-run-settings'));
     expect(markup).toMatch(/<\/div><section id="dry-run-settings" class="pg-card pg-span-12/);
     const css = readSource('./configuration.css');
     expect(css).not.toMatch(/align-items:\s*stretch/);

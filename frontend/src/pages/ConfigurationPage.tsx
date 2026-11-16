@@ -65,10 +65,10 @@ const SECTIONS = [
   { id: 'connection-settings', label: 'config.nav.connection' },
   { id: 'mqtt-settings', label: 'config.nav.mqtt' },
   { id: 'drone-settings', label: 'config.nav.drone' },
-  { id: 'lan-settings', label: 'config.nav.lan' },
-  { id: 'update-settings', label: 'config.nav.update' },
   { id: 'navigation-settings', label: 'config.nav.navigation' },
   { id: 'branding-settings', label: 'config.nav.branding' },
+  { id: 'lan-settings', label: 'config.nav.lan' },
+  { id: 'update-settings', label: 'config.nav.update' },
   { id: 'dry-run-settings', label: 'config.nav.dryRun' },
 ] as const satisfies ReadonlyArray<{ id: string; label: MessageKey }>;
 type SectionId = typeof SECTIONS[number]['id'];
@@ -925,7 +925,7 @@ export function ConfigurationPage({
         )}
       />
       <PageGrid className="cfg-grid">
-        {/* Two columns of content-height cards (Data Out and MQTT; GPS & Compass and Branding), so no card stretches to its neighbour's height. */}
+        {/* Two columns of content-height cards (Data Out, MQTT and Drone; GPS & Compass, Branding, LAN access and Update), so no card stretches to its neighbour's height and the columns end near each other. */}
         <PageStack span={6}>
           <Card id="connection-settings" span={6} className="cfg-section" bodyClassName="cfg-conn-body" title={t('config.connectionTitle')}>
             <form className="cfg-form cfg-conn-form" noValidate onSubmit={submitWith(() => { if (!busy && !readOnly) void saveConnection(); })}>
@@ -1096,16 +1096,6 @@ export function ConfigurationPage({
 
           <DroneSettingsCard readOnly={readOnly} />
 
-          {readOnly ? null : (
-            <LanAccessCard
-              adminAuthenticated={adminAuthenticated}
-              defaultPassword={capabilities?.adminDefaultPassword === true}
-              onAdminLost={() => setAdmin('locked')}
-            />
-          )}
-
-          {/* The groundstation's own page only: the LAN view never updates the console. */}
-          {readOnly ? null : <ConsoleUpdateCard />}
         </PageStack>
 
         <PageStack span={6}>
@@ -1220,6 +1210,18 @@ export function ConfigurationPage({
               </form>
             )}
           </Card>
+
+          {/* LAN access sits under Branding & admin, whose unlock it needs. */}
+          {readOnly ? null : (
+            <LanAccessCard
+              adminAuthenticated={adminAuthenticated}
+              defaultPassword={capabilities?.adminDefaultPassword === true}
+              onAdminLost={() => setAdmin('locked')}
+            />
+          )}
+
+          {/* The groundstation's own page only: the LAN view never updates the console. */}
+          {readOnly ? null : <ConsoleUpdateCard />}
         </PageStack>
 
         {readOnly ? null : (

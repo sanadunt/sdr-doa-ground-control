@@ -20,8 +20,8 @@
   .cfg-index { width: 100%; }
 }
 
-/* Each column (pages/ConfigurationPage.tsx: Connection and MQTT, GPS & Compass
-   and Branding) stacks its cards at their own height, so no card stretches to
+/* Each column (pages/ConfigurationPage.tsx: Connection, MQTT and Drone; GPS &
+   Compass, Branding, LAN access and Update) stacks its cards at their own height, so no card stretches to
    a taller neighbour and leaves an empty band above its actions. */
 /* 1024–1279 px: a half-width GPS & Compass card stacks its fields and outgrows
    the left column, so the columns dissolve into the grid: Connection beside

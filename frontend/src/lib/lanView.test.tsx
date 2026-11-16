@@ -576,11 +576,11 @@ describe('Configuration in the LAN view', () => {
     expect([...index.matchAll(/aria-controls="([^"]+)"/g)].map((match) => match[1])).toEqual(['connection-settings', 'mqtt-settings', 'drone-settings', 'navigation-settings', 'branding-settings']);
   });
 
-  it('puts the LAN access card under MQTT on the console itself', () => {
+  it('puts the LAN access card under Branding & admin on the console itself', () => {
     const markup = configuration(false);
-    expect(markup.indexOf('id="mqtt-settings"')).toBeLessThan(markup.indexOf('id="lan-settings"'));
+    expect(markup.indexOf('id="branding-settings"')).toBeLessThan(markup.indexOf('id="lan-settings"'));
     expect(markup.indexOf('id="lan-settings"')).toBeLessThan(markup.indexOf('id="update-settings"'));
-    expect(markup.indexOf('id="update-settings"')).toBeLessThan(markup.indexOf('id="navigation-settings"'));
+    expect(markup.indexOf('id="update-settings"')).toBeLessThan(markup.indexOf('id="dry-run-settings"'));
     expect(markup).not.toContain('view-only');
     expect(configuration(false, 'id')).toContain(`>${translate('id', 'config.lanTitle')}</h2>`);
   });

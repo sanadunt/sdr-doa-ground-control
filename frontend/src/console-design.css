@@ -738,3 +738,6 @@ td { padding: 16px 10px; border-color: var(--line-soft); }
 .console-shell[data-layout^='compact'] .map-chip-toggle { display: flex; flex: 1 1 auto; align-items: center; min-width: 0; min-height: 44px; padding: 0 6px; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; text-align: left; }
 .console-shell[data-layout^='compact'] .map-data-chip.is-compact .map-chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .console-shell[data-layout^='compact'] .map-data-chip.is-compact .map-chip-action { margin: 0 4px 6px auto; }
+
+/* A link in a page card (the release on GitHub) is a 44 px target on touch. */
+.console-shell[data-layout^='compact'] .pg-card-body a:not([class]) { display: inline-flex; align-items: center; min-height: 44px; }
