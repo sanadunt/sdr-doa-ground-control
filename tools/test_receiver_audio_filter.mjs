@@ -206,10 +206,10 @@ test('voice filter in Chrome: Standard lowers broadband noise, one path when tog
 	const server = await startServer();
 	const port = server.address().port;
 	const profile = mkdtempSync(join(tmpdir(), 'audio-filter-chrome-'));
-	const debugPort = 9300 + Math.floor(Math.random() * 500);
 	const browser = spawn(chrome, [
 		'--headless=new', '--mute-audio', '--no-first-run', '--no-default-browser-check', '--disable-gpu',
-		`--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`,
+		// Port 0: Chrome picks a free port and writes it to DevToolsActivePort in the profile.
+		'--remote-debugging-port=0', `--user-data-dir=${profile}`,
 		// CI runners may refuse Chrome's sandbox (user namespaces); the page is this test's own.
 		...(process.env.CI ? ['--no-sandbox'] : []),
 		'about:blank',
@@ -217,9 +217,17 @@ test('voice filter in Chrome: Standard lowers broadband noise, one path when tog
 	let stderr = '';
 	browser.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-2000); });
 	try {
+		// A busy CI runner can take well over 10 s to start Chrome (a release run did, twice).
 		let up = false;
-		for (let i = 0; i < 100 && !up; i++) {
-			try { up = (await fetch(`http://127.0.0.1:${debugPort}/json/version`)).ok; } catch { await sleep(100); }
+		let debugPort = 0;
+		for (let i = 0; i < 600 && !up; i++) {
+			if (!debugPort) {
+				try { debugPort = Number(readFileSync(join(profile, 'DevToolsActivePort'), 'utf8').split('\n')[0]) || 0; } catch { /* not written yet */ }
+			}
+			if (debugPort) {
+				try { up = (await fetch(`http://127.0.0.1:${debugPort}/json/version`)).ok; } catch { /* not listening yet */ }
+			}
+			if (!up) await sleep(100);
 		}
 		assert.ok(up, `Chrome headless did not answer over CDP\n${stderr}`);
 		const page = await openPage(debugPort, `http://127.0.0.1:${port}/`);
