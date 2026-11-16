@@ -3,6 +3,7 @@ import type { FormEvent, ReactElement } from 'react';
 import type { SimulationSettings } from '../lib/simulation';
 import { SIMULATION_TARGET_KM, simulationHalfPowerWidth, simulationSnapshot, validateSimulation } from '../lib/simulation';
 import { halfPowerWidth } from '../lib/doaGeometry';
+import { FLIGHT_NOISE_DEG } from '../lib/estimateSimulation';
 import { geographicBearingForBin } from '../lib/polar';
 import { useI18n } from '../lib/i18n';
 import type { MessageKey } from '../lib/i18n';
@@ -114,8 +115,11 @@ export function appliedMessage(automatic: boolean): MessageKey {
   return automatic ? 'sim.appliedAutoStopped' : 'sim.applied';
 }
 
-export function SimulationPage({ enabled, automatic, settings, onEnabled, onAutomatic, onSettings, onRandomize, onOverview }: {
+export function SimulationPage({ enabled, automatic, settings, flight = { enabled: false, noiseDeg: FLIGHT_NOISE_DEG.default }, onFlight, onEnabled, onAutomatic, onSettings, onRandomize, onOverview }: {
   enabled: boolean; automatic: boolean; settings: SimulationSettings;
+  /** The simulated flight with the position estimate, and its bearing noise. */
+  flight?: { enabled: boolean; noiseDeg: number };
+  onFlight?: (value: { enabled: boolean; noiseDeg: number }) => void;
   onEnabled: (value: boolean) => void; onAutomatic: (value: boolean) => void;
   onSettings: (value: SimulationSettings) => void; onRandomize: () => void; onOverview: () => void;
 }): ReactElement {
@@ -150,8 +154,23 @@ export function SimulationPage({ enabled, automatic, settings, onEnabled, onAuto
         <Card span={4} title={t('sim.controlTitle')}>
           <div className="ms-switches">
             <Switch checked={enabled} onChange={onEnabled} label={t('sim.enable')} />
-            <Switch checked={automatic} disabled={!enabled} onChange={onAutomatic} label={t('sim.auto')} />
+            <Switch checked={automatic} disabled={!enabled || flight.enabled} onChange={onAutomatic} label={t('sim.auto')} />
+            {onFlight ? <Switch checked={flight.enabled} disabled={!enabled} onChange={(value) => onFlight({ ...flight, enabled: value })} label={t('sim.flight')} /> : null}
           </div>
+          {onFlight && flight.enabled ? (
+            <FormField label={t('sim.flightNoise')} unit="°">
+              <input
+                type="range"
+                min={FLIGHT_NOISE_DEG.min}
+                max={FLIGHT_NOISE_DEG.max}
+                step={1}
+                value={flight.noiseDeg}
+                onChange={(event) => onFlight({ ...flight, noiseDeg: Number(event.target.value) })}
+                aria-valuetext={`${flight.noiseDeg}°`}
+              />
+              <span className="pg-card-meta">{`${flight.noiseDeg}°`}</span>
+            </FormField>
+          ) : null}
           <button type="button" className="ov-button" disabled={!enabled} onClick={onRandomize}><Icon name="reset" />{t('sim.randomize')}</button>
           <KeyValueGrid
             columns={1}

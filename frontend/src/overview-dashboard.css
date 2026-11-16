@@ -350,6 +350,19 @@
 .ov-spec-trace.is-read-only:not(.is-marking), .ov-spec-waterfall.is-read-only:not(.is-marking) { cursor: default; }
 .ov-spec-mark-row { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
 .ov-spec-mark-readout { color: var(--text); font-family: var(--mono); font-size: 12px; }
+/* Replay of a recorded estimate session, or the simulated flight: the controls at the top of the estimate card. */
+.ov-playback { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 2px 0 4px; padding-bottom: 6px; border-bottom: 1px solid var(--line-soft); }
+.ov-playback .ov-button { min-width: 36px; height: 36px; padding: 0 8px; }
+.ov-playback-slider { flex: 1 1 120px; min-width: 100px; height: 36px; margin: 0; accent-color: var(--accent); }
+.ov-playback-time, .ov-playback-status { color: var(--muted); font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ov-playback-speed select { height: 36px; padding: 0 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 12px; }
+/* The recorded sessions under the estimate card. */
+.ov-estimate-history { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 0; padding: 0; list-style: none; }
+.ov-estimate-history li { display: flex; flex-direction: column; gap: 2px; padding-top: 6px; border-top: 1px solid var(--line); }
+.ov-estimate-history-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--text); font-size: 11.5px; }
+.ov-estimate-history-head b { font-weight: 600; }
+.ov-estimate-actions a.ov-button { display: inline-flex; align-items: center; text-decoration: none; }
+
 /* Between a phone and a full-width dock the label gives way to the icon and the count (still the button's name),
    so the header keeps one row with Polar open. */
 @container ov-spec (min-width: 761px) and (max-width: 1099px) {
@@ -743,3 +756,5 @@
 .console-shell[data-layout^='compact'] .topbar-toolbar .ov-panel-toggles { width: auto; }
 .console-shell[data-layout^='compact'] .topbar-toolbar .ov-panel-toggles button { flex: none; width: 44px; min-width: 44px; padding: 0; }
 .console-shell[data-layout^='compact'] .ov-toggle-label { display: none; }
+.console-shell[data-layout^='compact'] .ov-estimate-actions .ov-button { min-height: 44px; }
+.console-shell[data-layout^='compact'] .ov-playback .ov-button, .console-shell[data-layout^='compact'] .ov-playback-speed select, .console-shell[data-layout^='compact'] .ov-playback-slider { min-height: 44px; height: 44px; }

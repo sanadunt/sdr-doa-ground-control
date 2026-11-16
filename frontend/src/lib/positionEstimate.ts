@@ -9,11 +9,22 @@ import type { MessageKey, Translate } from './i18n';
  * The transmitter position estimate the console builds from the moving
  * RDF-SDR's bearings (tools/doa_position_estimate.py): the drone's GPS and yaw
  * at each sample first, the edge's own b, lat and lon (contract 1.10) where the
- * drone has none. ESTIMATE: rays from enough places cross; NEED_MOVEMENT: there is a
- * hot area but the rays do not cross from far enough apart yet, so it is not a
- * position; NO_DATA: no bearing with a position has come.
+ * drone has none. ESTIMATE: rays from enough places cross; ROUGH: rays from two
+ * or more places cross a few degrees apart, a point with a wide radius that
+ * shrinks as more directions come; NEED_MOVEMENT: rays from one place only, so
+ * there is a direction but no distance; NO_DATA: no bearing with a position has come.
+ * Bearings the edge has not verified (DoA ok=0) count as weaker rays.
  */
-export type PositionEstimateState = 'NO_DATA' | 'NEED_MOVEMENT' | 'ESTIMATE';
+export type PositionEstimateState = 'NO_DATA' | 'NEED_MOVEMENT' | 'ROUGH' | 'ESTIMATE';
+
+/** One ray of the estimate: where and when it was taken, where it pointed, and whether the edge verified it. */
+export interface EstimateRay {
+  tMs: number;
+  latitude: number;
+  longitude: number;
+  bearingDeg: number;
+  verified: boolean;
+}
 
 export interface PositionEstimateGrid {
   south: number;
@@ -43,13 +54,21 @@ export interface PositionEstimate {
   bearingSource: EstimateSource | null;
   positionSource: EstimateSource | null;
   samples: number;
+  /** Rays from bearings the edge has not verified (DoA ok=0), counted at UNVERIFIED_WEIGHT. */
+  unverifiedSamples: number;
   stations: number;
   spreadDeg: number | null;
   frequencyHz: number | null;
   minStations: number;
   minSpreadDeg: number;
+  roughMinStations: number;
+  roughSpreadDeg: number;
   resetReason: string | null;
   grid: PositionEstimateGrid | null;
+  /** The latest rays, oldest first: the map's history lines. */
+  rays: EstimateRay[];
+  /** The peak's share of every ray's weight; null before a ray. */
+  peakShare: number | null;
   /**
    * What the last skipped LIVE DoA lacked (tools/doa_position_estimate.py):
    * NO_BEARING (no b: no heading on the node), NO_POSITION (no lat/lon); null
@@ -114,7 +133,7 @@ export function positionEstimate(snapshot: TelemetrySnapshot | null | undefined)
   if (!snapshot || snapshot.simulation === true) return null;
   const value = record(snapshot.position_estimate);
   if (!value) return null;
-  const state = value.state === 'ESTIMATE' || value.state === 'NEED_MOVEMENT' ? value.state : 'NO_DATA';
+  const state = value.state === 'ESTIMATE' || value.state === 'ROUGH' || value.state === 'NEED_MOVEMENT' ? value.state : 'NO_DATA';
   const latitude = finite(value.latitude, -90, 90);
   const longitude = finite(value.longitude, -180, 180);
   const method = record(value.method) ?? {};
@@ -136,18 +155,48 @@ export function positionEstimate(snapshot: TelemetrySnapshot | null | undefined)
     bearingSource: source(value.bearing_source),
     positionSource: source(value.position_source),
     samples: count(value.samples),
+    unverifiedSamples: count(value.unverified_samples),
     stations: count(value.stations),
     spreadDeg: finite(value.spread_deg, 0, 360),
     frequencyHz: finite(value.frequency_hz, 1),
     minStations: count(method.min_stations) || 3,
-    minSpreadDeg: finite(method.min_spread_deg, 0, 180) ?? 15,
+    minSpreadDeg: finite(method.min_spread_deg, 0, 180) ?? 10,
+    roughMinStations: count(method.rough_min_stations) || 2,
+    roughSpreadDeg: finite(method.rough_spread_deg, 0, 180) ?? 3,
     resetReason: typeof value.reset_reason === 'string' && /^[A-Z_]{1,32}$/u.test(value.reset_reason) ? value.reset_reason : null,
     grid: parseGrid(value.grid),
+    rays: parseRays(value.rays),
+    peakShare: finite(value.peak_share, 0, 1),
     waitingFor: skipCurrent && (value.waiting_for === 'NO_BEARING' || value.waiting_for === 'NO_POSITION') ? value.waiting_for : null,
     skipped: skipCurrent ? count(value.skipped) : 0,
     positionWithheld: positionWithheld(snapshot),
     nodeGpsFix: nodeGpsFix(snapshot),
   };
+}
+
+/** At most this many rays are read from an answer (the console sends 200). */
+export const MAX_RAYS = 500;
+
+/** [t_ms, latitude, longitude, bearing_deg, verified 1/0] rows; a bad row is left out. */
+function parseRays(value: unknown): EstimateRay[] {
+  if (!Array.isArray(value)) return [];
+  const rays: EstimateRay[] = [];
+  for (const row of value.slice(-MAX_RAYS)) {
+    if (!Array.isArray(row) || row.length < 5) continue;
+    const tMs = finite(row[0], 0);
+    const latitude = finite(row[1], -90, 90);
+    const longitude = finite(row[2], -180, 180);
+    const bearingDeg = finite(row[3], 0, 360);
+    if (tMs === null || latitude === null || longitude === null || bearingDeg === null || (row[4] !== 0 && row[4] !== 1)) continue;
+    rays.push({ tMs, latitude, longitude, bearingDeg, verified: row[4] === 1 });
+  }
+  return rays;
+}
+
+/** A point on the map: a rough estimate or an estimate with its position. */
+export function estimateLocated(estimate: PositionEstimate | null): estimate is PositionEstimate & { latitude: number; longitude: number } {
+  return estimate !== null && (estimate.state === 'ESTIMATE' || estimate.state === 'ROUGH')
+    && estimate.latitude !== null && estimate.longitude !== null;
 }
 
 /** nav.gps_state of the node (telemetry/health): FIX or another state; null without one. */
@@ -215,34 +264,79 @@ export function positionEstimateFeatures(estimate: PositionEstimate | null, stat
       });
     }
   }
-  if (estimate.state !== 'ESTIMATE' || estimate.latitude === null || estimate.longitude === null) {
+  if (!estimateLocated(estimate)) {
     return { heat: { type: 'FeatureCollection', features: heat }, lines: EMPTY_LINES, point: EMPTY_POINTS };
   }
   const centre: GeoOrigin = { latitude: estimate.latitude, longitude: estimate.longitude };
+  const rough = estimate.state === 'ROUGH';
   const lines: Array<Feature<LineString>> = [];
   if (estimate.radiusM !== null && estimate.radiusM > 0) {
     const ring: Array<[number, number]> = [];
     for (let k = 0; k <= 64; k += 1) ring.push(destination(centre, (k * 360) / 64, estimate.radiusM));
-    lines.push({ type: 'Feature', properties: { kind: 'radius' }, geometry: { type: 'LineString', coordinates: ring } });
+    lines.push({ type: 'Feature', properties: { kind: 'radius', rough }, geometry: { type: 'LineString', coordinates: ring } });
   }
   if (station) {
     lines.push({
       type: 'Feature',
-      properties: { kind: 'link' },
+      properties: { kind: 'link', rough },
       geometry: { type: 'LineString', coordinates: [[station.longitude, station.latitude], [centre.longitude, centre.latitude]] },
     });
   }
   if (estimate.groundLatitude !== null && estimate.groundLongitude !== null) {
     lines.push({
       type: 'Feature',
-      properties: { kind: 'ground' },
+      properties: { kind: 'ground', rough },
       geometry: { type: 'LineString', coordinates: [[estimate.groundLongitude, estimate.groundLatitude], [centre.longitude, centre.latitude]] },
     });
   }
   return {
     heat: { type: 'FeatureCollection', features: heat },
     lines: { type: 'FeatureCollection', features: lines },
-    point: { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [centre.longitude, centre.latitude] } }] },
+    point: { type: 'FeatureCollection', features: [{ type: 'Feature', properties: { rough }, geometry: { type: 'Point', coordinates: [centre.longitude, centre.latitude] } }] },
+  };
+}
+
+/** A ray without an estimate to reach for is drawn this long; with one it reaches past it. */
+export const RAY_DEFAULT_M = 3000;
+const RAY_MIN_M = 1000;
+const RAY_MAX_M = 10_000;
+
+/**
+ * The history lines: every ray from where it was taken along its bearing,
+ * reaching 30% past a located estimate (1 to 10 km) or RAY_DEFAULT_M without
+ * one. `age` is 0 for the newest ray and 1 for the oldest, so the map fades
+ * old rays; `verified` false for the edge's unverified bearings. `path` is
+ * the line through the places the rays were taken, oldest first.
+ */
+export function estimateRayFeatures(estimate: PositionEstimate | null): { rays: FeatureCollection<LineString>; path: FeatureCollection<LineString> } {
+  const rays = estimate?.rays ?? [];
+  if (!rays.length) return { rays: EMPTY_LINES, path: EMPTY_LINES };
+  const located = estimateLocated(estimate);
+  const last = rays.length - 1;
+  const features: Array<Feature<LineString>> = rays.map((ray, index) => {
+    const origin: GeoOrigin = { latitude: ray.latitude, longitude: ray.longitude };
+    let length = RAY_DEFAULT_M;
+    if (located) {
+      const { distanceM } = bearingAndDistance(origin, estimate.longitude, estimate.latitude);
+      length = Math.min(RAY_MAX_M, Math.max(RAY_MIN_M, distanceM * 1.3));
+    }
+    return {
+      type: 'Feature',
+      properties: { age: last === 0 ? 0 : (last - index) / last, verified: ray.verified },
+      geometry: { type: 'LineString', coordinates: [[ray.longitude, ray.latitude], destination(origin, ray.bearingDeg, length)] },
+    };
+  });
+  const path: Array<[number, number]> = [];
+  for (const ray of rays) {
+    const point: [number, number] = [ray.longitude, ray.latitude];
+    const previous = path[path.length - 1];
+    if (!previous || previous[0] !== point[0] || previous[1] !== point[1]) path.push(point);
+  }
+  return {
+    rays: { type: 'FeatureCollection', features },
+    path: path.length > 1
+      ? { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: path } }] }
+      : EMPTY_LINES,
   };
 }
 
@@ -263,7 +357,7 @@ export function estimatePositionText(estimate: PositionEstimate, format: Coordin
  * the map without opening the card.
  */
 export function estimateMapLabel(estimate: PositionEstimate, format: CoordinateFormat, t: Translate): { above: string; text: string } {
-  const above = `${t('estimate.mapLabel')} · ±${formatEstimateDistance(estimate.radiusM)}`;
+  const above = `${t(estimate.state === 'ROUGH' ? 'estimate.mapLabelRough' : 'estimate.mapLabel')} · ±${formatEstimateDistance(estimate.radiusM)}`;
   return { above, text: estimateCoordinates(estimate, format, t)?.text ?? t('estimate.mapLabel') };
 }
 
@@ -308,7 +402,7 @@ export interface EstimateLineLabel {
  * from the station drawn now (the drone), "GS 5.2 km · 48°" from the groundstation while it has a fix.
  */
 export function positionEstimateLineLabels(estimate: PositionEstimate | null, station: GeoOrigin | null, t: Translate): EstimateLineLabel[] {
-  if (!estimate || estimate.state !== 'ESTIMATE' || estimate.latitude === null || estimate.longitude === null) return [];
+  if (!estimateLocated(estimate)) return [];
   const labels: EstimateLineLabel[] = [];
   const along = (origin: GeoOrigin, key: 'estimate.mapNode' | 'estimate.mapGround') => {
     const { bearingDeg, distanceM } = bearingAndDistance(origin, estimate.longitude as number, estimate.latitude as number);

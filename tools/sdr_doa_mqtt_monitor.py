@@ -81,6 +81,10 @@ def _subscription_failed(reason_code: Any) -> bool:
     return bool(failure) if failure is not None else _reason_value(reason_code) >= 128
 
 
+# The ok=0 reasons that leave the angle usable: only the edge's own verification is missing.
+_UNVERIFIED_RAY_REASONS = frozenset({"SOURCE_UNVERIFIED", "ANGLE_UNVERIFIED"})
+
+
 class MqttMonitor:
     """The console's one MQTT client, for the RDF Node topics (docs/MQTT_KONTRAK.md).
 
@@ -115,6 +119,7 @@ class MqttMonitor:
         # The drone that carries the RDF-SDR, by time (set_drone_reference()).
         self._drone_reference: Optional[Callable[[int], Optional[Dict[str, Any]]]] = None
         self._rdf_node.on_live_doa = self._on_live_doa
+        self._rdf_node.on_unverified_doa = self._on_unverified_doa
         # The RDF Node topics first, then the LoRa serial bridge's status
         # (lora_link.py) and the groundstation's own GNSS position
         # (ground_gps.py), which only a groundstation publishes.
@@ -817,6 +822,10 @@ class MqttMonitor:
             })
             return result
 
+    def set_estimate_recorder(self, recorder: Optional[Any]) -> None:
+        """Where every scored estimate sample is recorded (estimate_record_store.py), or None."""
+        self._estimate.set_recorder(recorder)
+
     def set_drone_reference(self, reference: Optional[Callable[[int], Optional[Dict[str, Any]]]]) -> None:
         """Where the drone was and where its array pointed at a time (ms): ``{lat, lon, heading_deg}``, each or None.
 
@@ -855,32 +864,58 @@ class MqttMonitor:
         return None
 
     def _on_live_doa(self, doa: Dict[str, Any]) -> None:
+        self._estimate_sample(doa, self._array_bearing(doa), verified=True)
+
+    def _on_unverified_doa(self, doa: Dict[str, Any]) -> None:
+        """An ok=0 DoA as a weaker ray (doa_position_estimate.UNVERIFIED_WEIGHT).
+
+        Only when the edge withholds it for its own verification
+        (SOURCE_UNVERIFIED, ANGLE_UNVERIFIED): any other reason (a retune in
+        progress, an untrusted clock, the DAQ) says the angle itself is not to
+        be used. Its ``a`` is the RAW angle, 360 - theta_0, so the direction
+        from the array reference is ``a`` (docs/MQTT_KONTRAK.md 7e).
+        """
+        reasons = doa.get("validation_reasons")
+        if not isinstance(reasons, list):
+            reason = doa.get("reason")
+            reasons = reason if isinstance(reason, list) else [reason] if isinstance(reason, str) else []
+        if not reasons or any(r not in _UNVERIFIED_RAY_REASONS for r in reasons):
+            return
+        a = doa.get("a")
+        relative = a % 360.0 if isinstance(a, (int, float)) and not isinstance(a, bool) else None
+        h = doa.get("h")
+        # The edge's b waits for a LIVE sample; h - theta_0 is the bearing it would have.
+        own = (h + a) % 360.0 if relative is not None and isinstance(h, (int, float)) and not isinstance(h, bool) else None
+        self._estimate_sample(dict(doa, b=own), relative, verified=False)
+
+    def _estimate_sample(self, doa: Dict[str, Any], relative: Optional[float], *, verified: bool) -> None:
         # The RDF-SDR flies inside the drone: its RTK position and its yaw (plus
         # the array's turn against the nose) at the sample's time come first,
         # the edge's own b and lat/lon only where the drone has none. A sample
         # with neither is no ray; the estimate says what it lacks.
         drone = self._drone_at(doa.get("t"))
         bearing, bearing_source = None, None
-        relative = self._array_bearing(doa)
         heading = drone.get("heading_deg")
         if isinstance(heading, (int, float)) and relative is not None:
             bearing, bearing_source = (heading + relative) % 360.0, SOURCE_DRONE
         elif doa.get("b") is not None:
             bearing, bearing_source = doa["b"], SOURCE_RDF
         if bearing is None:
-            self._estimate.skip(WAITING_NO_BEARING)
+            if verified:
+                self._estimate.skip(WAITING_NO_BEARING)
             return
         if isinstance(drone.get("lat"), (int, float)) and isinstance(drone.get("lon"), (int, float)):
             lat, lon, position_source = drone["lat"], drone["lon"], SOURCE_DRONE
         elif doa.get("lat") is not None and doa.get("lon") is not None:
             lat, lon, position_source = doa["lat"], doa["lon"], SOURCE_RDF
         else:
-            self._estimate.skip(WAITING_NO_POSITION)
+            if verified:
+                self._estimate.skip(WAITING_NO_POSITION)
             return
         self._estimate.add(q=doa["q"], t_ms=doa["t"], frequency_hz=doa["f"], bearing_deg=bearing,
                            latitude=lat, longitude=lon, confidence_db=doa.get("c"),
                            heading_source=doa.get("hsrc"), bearing_source=bearing_source,
-                           position_source=position_source)
+                           position_source=position_source, verified=verified)
 
     def reset_position_estimate(self) -> Dict[str, Any]:
         """Start the position estimate over (operator: another target, or the node was moved by hand)."""

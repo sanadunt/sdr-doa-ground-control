@@ -29,7 +29,7 @@ import type { MapInsets } from '../lib/mapInsets';
 import { primaryCandidate } from '../lib/telemetry';
 import { fetchLastLiveDoa, heldSeedFrom } from '../lib/lastLiveDoa';
 import type { LastLiveDoa } from '../lib/lastLiveDoa';
-import { positionEstimate, type PositionEstimate } from '../lib/positionEstimate';
+import { estimateLocated, positionEstimate, type PositionEstimate } from '../lib/positionEstimate';
 import { overLora } from '../lib/telemetrySource';
 import { useI18n } from '../lib/i18n';
 import { DoaReadout } from '../components/DoaReadout';
@@ -45,6 +45,10 @@ import type { DroneMapView } from '../components/TacticalMap';
 import { DRONE_SAME_PLACE_M, droneArrayHeadingNow, droneLineHeading, droneStation, positionGap, rememberDroneTrack, snapshotDrone } from '../lib/droneLink';
 import { LayersPanel } from '../components/overview/LayersPanel';
 import { EstimatePanel } from '../components/overview/EstimatePanel';
+import { EstimatePlaybackBar } from '../components/overview/EstimatePlaybackBar';
+import { usePlayback, type PlaybackSource } from '../lib/estimatePlayback';
+import { fetchEstimateSession } from '../lib/estimateSessions';
+import { simulatedFlight } from '../lib/estimateSimulation';
 import { AnnotationPanel } from '../components/overview/AnnotationPanel';
 import { createAnnotationDraftStore, geofenceHits, useMapAnnotations, type AnnotationTool, type LonLat } from '../lib/mapAnnotations';
 import { PolarDock } from '../components/overview/PolarDock';
@@ -127,6 +131,7 @@ function OverviewPageView({
   gpsConfig,
   compassConfig,
   simulation,
+  simulationFlight = null,
   panels = DEFAULT_OVERVIEW_PANELS,
   onPanelsChange = noop,
   onCompassConfigChanged,
@@ -151,6 +156,8 @@ function OverviewPageView({
   gpsConfig: GpsConfig;
   compassConfig: CompassConfig;
   simulation?: SimulationSettings;
+  /** The simulated flight (Simulation page): the drone flies, its rays build the position estimate. */
+  simulationFlight?: { noiseDeg: number } | null;
 } & OverviewDashboardProps): JSX.Element {
   const { t } = useI18n();
   const evidence = localSnapshotFresh ? snapshot : null;
@@ -231,7 +238,35 @@ function OverviewPageView({
   } : null),
   // Rebuilt only when what the map draws changes.
   [droneMapKey]);
-  const droneMap = useMemo<DroneMapView | null>(() => (scene ? { ...scene.drone, rdfOwn: null } : liveDroneMap), [scene, liveDroneMap]);
+  // A recorded session (Riwayat > Putar ulang) or the simulated flight plays its
+  // rays through the browser's copy of the estimate; while it plays, the map's
+  // estimate, history lines and drone are the playback's.
+  const [replay, setReplay] = useState<{ id: string; source: PlaybackSource | null; error: string | null } | null>(null);
+  const onReplay = useCallback((id: string) => setReplay({ id, source: null, error: null }), []);
+  const onReplayClose = useCallback(() => setReplay(null), []);
+  const replayId = replay?.id ?? null;
+  useEffect(() => {
+    if (replayId === null) return undefined;
+    const controller = new AbortController();
+    fetchEstimateSession(replayId, controller.signal).then(
+      (session) => setReplay((current) => (current?.id === replayId ? { id: replayId, source: { kind: 'replay', key: replayId, rays: session.rays, transmitter: null }, error: null } : current)),
+      (error: unknown) => { if (!controller.signal.aborted) setReplay((current) => (current?.id === replayId ? { ...current, error: error instanceof Error ? error.message : 'ERROR' } : current)); },
+    );
+    return () => controller.abort();
+  }, [replayId]);
+  const flightNoise = simulation && simulationFlight ? simulationFlight.noiseDeg : null;
+  const flight = useMemo(() => (simulation && flightNoise !== null ? simulatedFlight(simulation, flightNoise) : null), [simulation, flightNoise]);
+  const flightSource = useMemo<PlaybackSource | null>(
+    () => (flight && simulation ? { kind: 'simulation', key: JSON.stringify([simulation, flightNoise]), rays: flight.rays, transmitter: flight.transmitter } : null),
+    [flight, simulation, flightNoise],
+  );
+  const playbackSource = flightSource ?? (simulation ? null : replay?.source ?? null);
+  const playback = usePlayback(playbackSource, groundCoordinate, flightSource ? 5 : 20);
+  const playbackDrone = useMemo<DroneMapView | null>(() => (playback.drone ? { ...playback.drone, rdfOwn: null } : null), [playback.drone]);
+  const droneMap = useMemo<DroneMapView | null>(
+    () => (playback.active ? playbackDrone : scene ? { ...scene.drone, rdfOwn: null } : liveDroneMap),
+    [playback.active, playbackDrone, scene, liveDroneMap],
+  );
   // Where the moving RDF-SDR's bearings cross. It is built on the console from
   // every bearing so far, so it outlives a stale answer; kept stable across
   // equal answers so the map only redraws it when it changes.
@@ -267,7 +302,7 @@ function OverviewPageView({
   const geofenceAlertIds = useMemo(() => new Set(geofenceKey ? geofenceKey.split(',') : []), [geofenceKey]);
   const geofenceNotice = fenceHits.length ? t('annot.geofence', { names: fenceHits.map((item) => item.name).join(', ') }) : null;
   const liveEstimate = useMemo<PositionEstimate | null>(() => (estimateKey ? JSON.parse(estimateKey) as PositionEstimate : null), [estimateKey]);
-  const estimate = scene ? scene.estimate : liveEstimate;
+  const estimate = playback.active ? playback.estimate : scene ? scene.estimate : liveEstimate;
   // One readiness decision for the map overlay, the bearing HUD and the polar curve.
   const doa = overviewDoaStatus(snapshot, localSnapshotFresh);
   // A held DoA is drawn with the heading of the very sample it comes from; a manual offset stays above it, as for a LIVE one.
@@ -378,6 +413,14 @@ function OverviewPageView({
     return () => { window.cancelAnimationFrame(frame); observer.disconnect(); };
   }, [panels.layers, controlShown, polarShown, panels.spectrum, panels.drone, panels.nodeCollapsed, nodeShown, compactLayout]);
 
+  const playbackBar = playback.active || (replay !== null && !simulation) ? (
+    <EstimatePlaybackBar
+      playback={playback}
+      loading={replay !== null && replay.source === null && replay.error === null && !flightSource}
+      error={flightSource ? null : replay?.error ?? null}
+      onClose={flightSource ? undefined : onReplayClose}
+    />
+  ) : null;
   const mapView = (
     <div className="ov-map" ref={mapRef}>
         <LoadErrorBoundary variant="map">
@@ -463,13 +506,16 @@ function OverviewPageView({
     />
   );
   const readout = <DoaReadout snapshot={snapshot} localSnapshotFresh={localSnapshotFresh} settings={plotSettings} curveOffset={curveOffset} offsetSource={offsetSource} offsetVerified={offsetVerified} offsetManual={offsetManual} />;
-  const estimateCard = estimate && overlaySettings.estimateVisible && (!compact || estimate.state === 'ESTIMATE') ? (
+  const estimateCard = estimate && overlaySettings.estimateVisible && (!compact || playbackBar !== null || estimateLocated(estimate)) ? (
     <EstimatePanel
       estimate={estimate}
-      viewOnly={viewOnly || scene !== null}
-      compact={compact || panels.layers}
+      viewOnly={viewOnly || scene !== null || playback.active}
+      compact={compact || (panels.layers && playbackBar === null)}
+      playback={playbackBar}
       coordinateFormat={overlaySettings.coordinateFormat}
       onCoordinateFormatChange={onCoordinateFormatChange}
+      onReplay={onReplay}
+      history={scene === null && !playback.active}
     />
   ) : null;
   const annotationPanel = annotationTool !== 'none' || selectedAnnotation ? (

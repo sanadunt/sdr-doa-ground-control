@@ -1035,6 +1035,7 @@ class RdfNodeV2Telemetry:
         # Called with the payload of every LIVE DoA accepted without a receipt
         # problem; the monitor feeds the position estimate from it.
         self.on_live_doa: Optional[Callable[[Dict[str, Any]], None]] = None
+        self.on_unverified_doa: Optional[Callable[[Dict[str, Any]], None]] = None
         # How the node reaches the broker (set_link): "lora" widens the Angular and detail windows.
         self._link: Optional[str] = None
         self._reset_session()
@@ -1396,6 +1397,10 @@ class RdfNodeV2Telemetry:
             self._mark(suffix, entry, "LIVE" if live else "UNVERIFIED", value)
             if live and self.on_live_doa is not None:
                 self.on_live_doa(copy.deepcopy(value))
+            elif not live and self.on_unverified_doa is not None:
+                # An ok=0 sample with fresh, healthy health and inside its
+                # window: a weaker ray for the position estimate, never a DoA.
+                self.on_unverified_doa(copy.deepcopy(value))
 
     def _on_diagnostic_doa(self, suffix: str, value: Dict[str, Any], entry: Dict[str, Any], at: int) -> None:
         if not self._bound(suffix, value, entry) or not self._advanced("diagnostic_doa", suffix, value, entry):

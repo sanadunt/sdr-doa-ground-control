@@ -173,6 +173,11 @@ ROUTE_TILE = "tile"
 ROUTE_MAP = "map"
 ROUTE_RECORDS = "records"
 ROUTE_MIRROR_MARKER = "mirror-marker"
+ROUTE_ESTIMATE_SESSION = "estimate-session"
+# The recorded position-estimate sessions (estimate_record_store.py), read only:
+# the list, one session's rays, and its CSV and KML exports.
+ESTIMATE_SESSIONS_ROUTE = "/api/position-estimate/sessions"
+_ESTIMATE_SESSION_RE = re.compile(r"[0-9a-f]{32}(/export\.(csv|kml))?")
 READ_METHODS = ("GET", "HEAD")
 
 # The LAN view's one write: a marker command to the groundstation Receiver's
@@ -451,6 +456,10 @@ def lan_route(path: str) -> Optional[str]:
         return path
     if records_route(path) is not None:
         return ROUTE_RECORDS
+    if path == ESTIMATE_SESSIONS_ROUTE or (
+            path.startswith(ESTIMATE_SESSIONS_ROUTE + "/")
+            and _ESTIMATE_SESSION_RE.fullmatch(path[len(ESTIMATE_SESSIONS_ROUTE) + 1:]) is not None):
+        return ROUTE_ESTIMATE_SESSION
     if mirror_marker_route(path):
         return ROUTE_MIRROR_MARKER
     return None
