@@ -87,7 +87,11 @@
 .cfg-pair { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 10px 12px; }
 /* 280 px keeps latitude and longitude, axis and offset side by side in a half-width card from 1280 px. */
 @container (min-width: 280px) {
-  .cfg-pair { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cfg-pair:not(.is-long-labels) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+/* Longer labels (Remote IP, Array turn from the drone nose) pair up only where both fit on one line. */
+@container (min-width: 420px) {
+  .cfg-pair.is-long-labels { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .cfg-sub .pg-kv-row { min-height: 32px; }
 

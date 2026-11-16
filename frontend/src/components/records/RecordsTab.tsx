@@ -508,9 +508,6 @@ export function RecordsTab({ client: givenClient, now = Date.now }: { client?: R
             onChange={(event) => setText({ ...text, q: event.target.value })} onKeyDown={onSearchKey}
           />
         </FormField>
-      </div>
-      <Toolbar className="rec-results">
-        <span className="pg-value">{t('records.results', { count: total })}</span>
         <FormField label={t('records.sort')} size="sm">
           <select value={sort} onChange={(event) => changeSort(event.target.value as ArchiveSortKey)}>
             {RECORDS_SORT_KEYS.map((key) => (
@@ -523,6 +520,10 @@ export function RecordsTab({ client: givenClient, now = Date.now }: { client?: R
         <button type="button" className="ov-button" onClick={() => { setOrder(order === 'asc' ? 'desc' : 'asc'); setPage(0); }}>
           {order === 'asc' ? `↑ ${t('records.orderAsc')}` : `↓ ${t('records.orderDesc')}`}
         </button>
+      </div>
+      {/* The count and the pager on one line under the filters and the sort, which shape the list. */}
+      <Toolbar className="rec-results">
+        <span className="pg-value">{t('records.results', { count: total })}</span>
         <span className="rec-pages">
           <button type="button" className="ov-button rec-step" aria-label={t('records.prevPage')} disabled={page === 0} onClick={() => setPage(page - 1)}>‹</button>
           <span className="pg-value">{t('records.page', { range: pageRangeLabel(page, RECORDS_PAGE_SIZE, rows.length), total })}</span>

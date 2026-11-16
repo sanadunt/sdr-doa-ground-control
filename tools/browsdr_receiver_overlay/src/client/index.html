@@ -591,6 +591,8 @@
 				</div>
 				<div class="waterfall-container">
 					<canvas id="waterfall" ref="waterfall"></canvas>
+					<!-- Before a radio is connected the trace and waterfall are empty: say why instead of a black area. -->
+					<div class="listener-idle" v-if="!connected" role="status"><span class="sweep-device-state">NO DEVICE</span><span>{{ t('Connect a device to see the spectrum.') }}</span></div>
 				</div>
 			</div>
 		</div>
@@ -806,7 +808,7 @@
 				</div>
 				<div class="sweep-candidates">
 					<table>
-						<thead><tr><th class="is-num">{{ t('Peak center') }}</th><th class="is-num">{{ t('Peak frequency range') }}</th><th class="is-num">{{ t('Occupied bandwidth') }}</th><th class="is-num">{{ t('Best peak') }}</th><th class="is-num">{{ t('Noise') }}</th><th class="is-num">SNR</th><th>{{ t('First seen') }}</th><th>{{ t('Last seen') }}</th><th class="is-num">{{ t('Hits') }}</th><th><span class="visually-hidden">{{ t('Listen') }}</span></th></tr></thead>
+						<thead><tr><th class="is-num">{{ t('Peak center') }}</th><th class="is-num">{{ t('Peak frequency range') }}</th><th class="is-num">{{ t('Occupied bandwidth') }}</th><th class="is-num">{{ t('Best peak') }}</th><th class="is-num">{{ t('Noise') }}</th><th class="is-num">SNR</th><th class="is-time">{{ t('First seen') }}</th><th class="is-time">{{ t('Last seen') }}</th><th class="is-num">{{ t('Hits') }}</th><th><span class="visually-hidden">{{ t('Listen') }}</span></th></tr></thead>
 						<tbody>
 							<tr v-for="candidate in sortedSweepCandidates" :key="candidate.id"
 								:class="{ selected: sweep.selectedCandidate && sweep.selectedCandidate.id === candidate.id }"

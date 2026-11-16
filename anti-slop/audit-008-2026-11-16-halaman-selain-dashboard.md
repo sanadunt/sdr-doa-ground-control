@@ -26,7 +26,10 @@
 | 9 | Konfigurasi (Pembaruan) | Tautan rilis memakai warna bawaan browser (ungu visited), dan targetnya 19 px di tablet. Kini warna token `--blue`, 44 px di layout compact. | R-29, R-03 |
 | 10 | Semua kartu key/value | Placeholder "—" tampil lebih panjang di baris non-mono (Penerima, Sumber) dan merah di "Data terakhir" mirror. Kini selalu mono, tanpa warna nada. | R-20 |
 
-## Menunggu persetujuan
+## Disetujui pemilik ("Kerjakan semua") dan dikerjakan di 3.23.1
+
+Hasil per nomor: 11, 12, 13, 14, 15, 18, 19 dan 20 ("Semua tanggal") diperbaiki. 16 dibiarkan: Mulai ulang dan Matikan sengaja turun ke baris kedua di bawah 600 px (keputusan yang tertulis di `console-design.css`), dan HP serta tablet memakai layout compact. 17 dibiarkan: field angka memakai format desimal locale perangkat (koma di perangkat berbahasa Indonesia) dan menerima koma saat diketik; mengganti jadi field teks berisiko membuat input koordinat salah. Bagian kedua 20 dibiarkan: tombol utama yang nonaktif tampil pudar dengan warna utamanya di seluruh konsol (Buka kunci, Validasi), jadi "Unduh ZIP" mengikuti aturan yang sama.
+
 
 | No | Prioritas | Halaman | Masalah | Aturan |
 |---|---|---|---|---|

@@ -2,6 +2,17 @@
 
 Versi mengikuti `VERSION`. Rilis dibuat oleh CI dari tag `v<VERSION>` (lihat `QUICKSTART.md`, "Rilis di GitHub").
 
+## 3.23.1
+
+Halaman selain Dashboard dirapikan (audit UI 008, permintaan pemilik 2026-11-16: "pada berantakan semua"). Tidak ada fungsi yang berubah atau dihapus.
+
+- **Kolom seimbang.** Kesehatan Sistem dan Konfigurasi tidak lagi menyisakan separuh layar kosong: Kesehatan Sistem menaruh RDF-SDR, Tampilan DoA, Data Out dan MQTT di kiri, lalu LoRa, GPS groundstation dan drone di kanan; Konfigurasi memindahkan Akses LAN dan Pembaruan ke kanan, di bawah Branding & admin (indeks seksi mengikuti). Di Diagnostik DoA dengan sumber MQTT, kartu Kolektor pindah ke bawah DoA MQTT. Kartu Simulasi sama tingginya di layar lebar.
+- **Rapi di dalam kartu.** Baris Sumber dan Mode sudut di kartu DoA MQTT kini berpadding. Error mentah layanan video drone (`urlopen error …`) tampil di baris sendiri di bawah kalimat operator. Nama bagian di tabel Node (Monitor Pesan) tidak lagi terpotong di tengah kata. Tanda "—" sama di setiap baris dan tidak pernah merah. Kolom Retained hanya menandai pesan retained, jadi "LIVE" hanya berarti status.
+- **Bahasa.** "Update" menjadi "Perbarui", "Subscription" menjadi "Langganan", "Collector" menjadi "Kolektor" di tampilan Indonesia.
+- **Receiver.** Tab Spektrum: formulir pindai mengisi dua baris penuh di layar lebar (tidak ada satu field sendirian), kotak centang Penguat RF dan Koreksi IQ sejajar dengan field, baris status sejajar dengan isi kartu, kolom waktu tabel riwayat puncak tidak menempel ke SNR. Tab Dengar menulis "Sambungkan perangkat untuk melihat spektrum." sebelum radio tersambung. Rekaman: header tabel satu ukuran huruf, dan "Semua tanggal" satu baris.
+- **LAN view (tablet).** Mirror Receiver tanpa data menulis satu baris di kartu Spektrum, tanpa grafik dan waterfall hitam kosong; bingkai grafiknya tidak lagi bertumpuk dengan bingkai kartu di potret. Rekaman: Urutkan masuk ke baris filter, Hasil dan halaman di satu baris.
+- **Lainnya.** Tautan rilis di Pembaruan memakai warna konsol dan target 44 px di tablet; label drone di Konfigurasi tidak terpotong di HP.
+
 ## 3.23.0
 
 Tombol **Update** di halaman Konfigurasi: console di groundstation diperbarui tanpa Terminal (permintaan pemilik 2026-11-16). Tidak ada yang dihapus.

@@ -24,6 +24,11 @@
 @media (max-width: 1279px) {
   .ms-sim-grid > .ms-sim-preview { grid-column: 1 / -1; }
 }
+/* Three cards side by side end on one line; the preview centres its lobe in the extra height. */
+@media (min-width: 1280px) {
+  .ms-sim-grid { align-items: stretch; }
+  .ms-sim-preview .pg-card-body { flex: 1 1 auto; justify-content: center; }
+}
 
 /* Lobe preview: Compass view, north up, clockwise; the lobe in the signal colour like the Dashboard's polar dock. */
 .ms-sim-preview .pg-card-body { align-items: center; }
